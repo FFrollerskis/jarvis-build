@@ -1,0 +1,22 @@
+{
+  "name": "@jarvis/tasks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Task Service og in-process worker bak WorkflowAdapter (pg-boss-klasse koe over Postgres, D-13)",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6"
+  }
+}
