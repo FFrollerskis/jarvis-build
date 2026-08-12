@@ -1,9 +1,11 @@
 # Norsk tale-benchmark (D-10-porten)
 
 **Status:** Harness levert i fase 5 (`apps/voice-gateway/src/benchmark.ts`, WER-funksjonen er
-testet). **Selve benchmarken er IKKE kjørt** – den krever ≥100 norske lydprøver og
-leverandørnøkler/lokale modeller som ikke finnes i miljøet. Stop/go-beslutningen (fase 5-akseptanse
-5) er derfor UNVERIFIED til dette er gjort.
+testet). **Selve benchmarken er IKKE kjørt** – utsatt via bindende beslutning **D-30**
+(se DECISIONS_AND_ASSUMPTIONS.md): den kjøres når ekte STT/TTS-kandidater og ≥100 representative
+norske lydprøver finnes, og SENEST før bred utrulling (mobil/Watch/satellitter/bil). Inntil da er
+Voice Gateway prototype/utviklingsklar – ikke produksjonsverifisert. Råmålinger og sammendrag skal
+dokumenteres i denne filen når porten kjøres.
 
 ## Slik kjøres den (når forutsetningene er på plass)
 

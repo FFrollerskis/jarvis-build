@@ -4,11 +4,25 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 5 – Voice Gateway vertikal prototype: implementert; akseptanse 1/3/4 PASS (reelt målt),
-akseptanse 2 delvis (pipeline målt; providerlatens UNVERIFIED), akseptanse 5 UNVERIFIED
-(ekte norsk benchmark krever prøver + nøkler). Venter på ekstern arkitektkontroll.**
+**Fase 5 – Voice Gateway vertikal prototype: FULLFØRT** (arkitektkontroll + Tobias 2026-08-13).
+Akseptansekriterier: (1) barge-in ≤250 ms **PASS** · (2) pipeline median/P95 **PASS** for
+kontrollerte adaptere; ekte-provider-delen **PASS BY EXPLICIT D-30 DEFERMENT** · (3) talekommando
+uten stor LLM **PASS** · (4) failover uten doble handlinger **PASS** · (5) norsk benchmark +
+stop/go **PASS BY EXPLICIT D-30 DEFERMENT**.
+
+> **Produksjonsbegrensning:** Inntil D-30 er lukket er Voice Gateway en **vertikal prototype /
+> utviklings- og testklar** – IKKE en produksjonsverifisert voice-stack.
+
 Fase 0 (`7e31f4a`) · fase 1 (`9e43531`) · fase 2 (`0c74da0`) · fase 3 (`d5a2583`, D-27) ·
 fase 4 (`d66945d`, D-28) – alle godkjent.
+
+## Åpne fremtidige verifikasjonsporter (bindende, kan ikke stille waives)
+
+| Port | Innhold | Trigges |
+|---|---|---|
+| **D-27** | Langfuse-runtime-verifikasjon (7 steg: trace synlig m/korrelasjon+kostnad, kryssjekk mot cost_events) | Første Docker-miljø, før miljøet godkjennes |
+| **D-28** | pgvector/HNSW-migrasjon + eval-/RLS-/bitemporal regresjon + ytelsesmåling | Første Docker-miljø, sammen med D-27 |
+| **D-30** | Norsk providerbenchmark (≥100 prøver, alle kategorier) + ekte latens/barge-in-retest + eksplisitt STOP/GO | Når STT/TTS-kandidater + lydprøver finnes; senest før bred utrulling (mobil/Watch/satellitter/bil) |
 
 ## Fase 5 – implementerte komponenter
 
@@ -40,12 +54,10 @@ fase 4 (`d66945d`, D-28) – alle godkjent.
   i databasen: PASS. Lyd før sesjonsstart avvises kontrollert.
 - **81/81 tester grønne** (9 filer; fase 1–4-regresjon uendret grønn), også under Node 22.14.0.
 
-## Fase 5 – avvik og UNVERIFIED
+## Fase 5 – avvik
 
-- **Akseptanse 5 (stop/go på benchmark-data): UNVERIFIED.** Krever ≥100 norske lydprøver +
-  leverandørnøkler/lokale modeller. Harness + instruks levert. Stop/go-beslutningen tas av Tobias
-  når benchmarken er kjørt – transportvalg (WebRTC/LiveKit vs. WS) inngår (D-29).
-- **Reelle STT/TTS-leverandører UNVERIFIED** (ingen nøkler, med vilje); adaptere skrevet/typesjekket.
+- **Ekte provider-verifikasjon er utsatt via D-30** (bindende port, se tabellen over) – harness +
+  instruks levert; ingen mål er senket. Reelle STT/TTS-adaptere er skrevet/typesjekket men ukjørte.
 - **HA Assist-reservevei:** dokumentert i VOICE_ARCHITECTURE §8; kan ikke testes uten HA-instans –
   testes i fase 9.
 - Core-kallet er JSON (ikke SSE-token-streaming inn i TTS) i piloten; TTS-strømmen og STT-partials
@@ -62,8 +74,7 @@ ytelsesmåling (D-28).
 ## Blokkeringer
 
 1. CI-resultat kan ikke verifiseres herfra (`gh` mangler).
-2. Fase 6 krever eksplisitt godkjenning etter arkitektkontroll av fase 5.
-3. Stop/go-porten (akseptanse 5) venter på lydprøver + nøkler fra Tobias.
+2. Fase 6 krever eksplisitt godkjenning fra Tobias.
 
 ## Neste fase
 
