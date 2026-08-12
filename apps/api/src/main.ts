@@ -1,8 +1,74 @@
-// .ts-utvidelse kreves: filen kjøres direkte med Nodes type-stripping (ingen build-steg i fase 1)
-import { createApiServer } from "./server.ts";
+// .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
+import {
+  ContextBuilder,
+  IdentityService,
+  MessageStore,
+  PgApprovalStore,
+  SessionService,
+  configFromEnv,
+  createPool,
+  runMigrations
+} from "@jarvis/core";
+import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
+import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
+import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
+import { ConversationEngine } from "./conversation.ts";
+import { createApiServer, type ApiDeps } from "./server.ts";
 
 const port = Number(process.env["JARVIS_API_PORT"] ?? 3010);
-const server = createApiServer();
+
+async function buildDeps(): Promise<ApiDeps | undefined> {
+  if (!process.env["JARVIS_DB_PASSWORD"] && !process.env["JARVIS_DB_HOST"]) {
+    console.log(JSON.stringify({ msg: "ingen databasekonfig - starter i helse-modus" }));
+    return undefined;
+  }
+  const pool = createPool(configFromEnv());
+  // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
+  if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
+    await runMigrations(pool);
+  }
+  const trace = new JsonlTraceSink(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
+  const killSwitch = new KillSwitch();
+  const policy = new PolicyGateway({
+    devices: new InMemoryDeviceRegistry(), // enhetsregister fra devices-tabellen kobles i senere fase
+    nonces: new PgApprovalStore(pool),
+    killSwitch
+  });
+  const queue = new PgTaskQueue(pool);
+  const worker = new InProcessWorker(queue);
+  worker.register("executive", async (task) => ({ echo: task.contract.goal, done_at: new Date().toISOString() }));
+  const gateway = new ModelGateway({
+    pool,
+    trace,
+    providers: [new AnthropicAdapter(), new OpenAiAdapter(), new OllamaAdapter(), new ScriptedAdapter()],
+    budget: {
+      warn_ore: 100_000,
+      approval_ore: 200_000,
+      hard_limit_ore: 300_000,
+      spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
+    }
+  });
+  const deps: ApiDeps = {
+    identity: new IdentityService(pool),
+    sessions: new SessionService(pool),
+    policy,
+    worker,
+    conversation: new ConversationEngine({
+      messages: new MessageStore(pool),
+      context: new ContextBuilder(pool),
+      gateway,
+      tasks: new TaskService(pool, queue, policy),
+      worker,
+      trace
+    })
+  };
+  setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
+  return deps;
+}
+
+const deps = await buildDeps();
+const server = createApiServer(deps);
 server.listen(port, () => {
-  console.log(JSON.stringify({ msg: "jarvis-api listening", port }));
+  console.log(JSON.stringify({ msg: "jarvis-api listening", port, db: Boolean(deps) }));
 });

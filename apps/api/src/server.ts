@@ -1,13 +1,28 @@
-import { createServer, type Server } from "node:http";
+import { readFile } from "node:fs/promises";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { fileURLToPath } from "node:url";
+import type { IdentityService, SessionService } from "@jarvis/core";
+import type { PolicyGateway } from "@jarvis/policy";
+import type { InProcessWorker } from "@jarvis/tasks";
+import type { ConversationEngine } from "./conversation.ts";
+import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
 
 /**
- * Fase 1: minimalt kjørbart API-fundament uten rammeverk.
- * Rammeverksvalg utsettes til fase 3 når webchat/streaming stiller faktiske krav
- * (leverandøruavhengighet: ingen avhengighet å bytte ut senere).
+ * Fase 3: minimalt API uten rammeverk (rammeverksvalg utsatt til behovet
+ * krever det). Ruter: /health, / (webchat), /chat (SSE/JSON),
+ * /tools/critical-demo (klasse D-stub for policybevis i kjørende app).
  *
- * Struktur for senere Core-moduler: hver modul får en route-registrering her;
- * Policy Gateway kobles foran alle verktøyruter fra fase 3.
+ * Merk: API-et binder localhost i dev og har ingen egen HTTP-autentisering
+ * ennå - enhetsautentisering kommer med kanalene i senere faser (dokumentert).
  */
+export interface ApiDeps {
+  identity: IdentityService;
+  sessions: SessionService;
+  conversation: ConversationEngine;
+  policy: PolicyGateway;
+  worker: InProcessWorker;
+}
+
 export interface HealthStatus {
   status: "ok";
   service: "jarvis-api";
@@ -16,22 +31,142 @@ export interface HealthStatus {
 }
 
 export function healthStatus(): HealthStatus {
-  return {
-    status: "ok",
-    service: "jarvis-api",
-    version: "0.1.0",
-    time: new Date().toISOString()
-  };
+  return { status: "ok", service: "jarvis-api", version: "0.1.0", time: new Date().toISOString() };
 }
 
-export function createApiServer(): Server {
+interface ChatBody {
+  person_id: string;
+  tenant_id: string;
+  device_id: string;
+  memory_space: MemorySpace;
+  channel: Channel;
+  auth_strength?: AuthStrength;
+  message: string;
+}
+
+const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
+
+async function readBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(chunk as Buffer);
+  }
+  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+}
+
+function json(res: ServerResponse, status: number, body: unknown): void {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+}
+
+export function createApiServer(deps?: ApiDeps): Server {
   return createServer((req, res) => {
-    if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(healthStatus()));
+    void route(req, res, deps).catch((err: Error) => {
+      if (!res.headersSent) {
+        json(res, 500, { error: "internal_error", message: err.message });
+      } else {
+        res.end();
+      }
+    });
+  });
+}
+
+async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+
+  if (req.method === "GET" && url.pathname === "/health") {
+    return json(res, 200, healthStatus());
+  }
+
+  if (req.method === "GET" && url.pathname === "/") {
+    const html = await readFile(WEB_INDEX, "utf8");
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  const depRoutes = ["/chat", "/worker/tick", "/tools/critical-demo"];
+  if (!deps) {
+    if (depRoutes.includes(url.pathname)) {
+      return json(res, 503, { error: "not_configured", message: "API kjører uten database-avhengigheter" });
+    }
+    return json(res, 404, { error: "not_found" });
+  }
+
+  if (req.method === "POST" && url.pathname === "/chat") {
+    const body = (await readBody(req)) as ChatBody;
+    const session = await deps.sessions.resumeOrCreate(
+      { tenant_id: body.tenant_id, person_id: body.person_id, device_id: body.device_id },
+      body.channel
+    );
+    const resolved = await deps.identity.resolveIdentity({
+      person_id: body.person_id,
+      tenant_id: body.tenant_id,
+      memory_space: body.memory_space,
+      session_id: session.session_id,
+      device_id: body.device_id,
+      channel: body.channel,
+      auth_strength: body.auth_strength ?? "active"
+    });
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+
+    const wantsStream = (req.headers.accept ?? "").includes("text/event-stream");
+    if (wantsStream) {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive"
+      });
+      const send = (event: string, data: unknown) => {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      };
+      const result = await deps.conversation.handle(resolved.identity, body.message, (token) =>
+        send("token", { token })
+      );
+      send("done", { ...result, session_id: session.session_id });
+      res.end();
       return;
     }
-    res.writeHead(404, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: "not_found" }));
-  });
+
+    const result = await deps.conversation.handle(resolved.identity, body.message);
+    return json(res, 200, { ...result, session_id: session.session_id });
+  }
+
+  if (req.method === "POST" && url.pathname === "/worker/tick") {
+    // Dev-hjelper: kjør køen én runde (produksjonsworker kjører på intervall i main).
+    const ran = await deps.worker.drain();
+    return json(res, 200, { ran });
+  }
+
+  if (req.method === "POST" && url.pathname === "/tools/critical-demo") {
+    // Klasse D-stub (fase 3-avgrensning): beviser at kritiske verktøy
+    // blokkeres uten gyldig signert godkjenning i den KJØRENDE appen.
+    const body = (await readBody(req)) as {
+      identity: Parameters<IdentityService["resolveIdentity"]>[0] & { session_id: string };
+      parameters: Record<string, never>;
+      approval?: unknown;
+    };
+    const resolved = await deps.identity.resolveIdentity(body.identity);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const decision = await deps.policy.authorize({
+      identity: resolved.identity,
+      toolCall: {
+        tool_id: "demo",
+        action: "critical_demo",
+        capability_class: "D",
+        parameters: body.parameters ?? {}
+      },
+      ...(body.approval !== undefined ? { approval: body.approval } : {})
+    });
+    if (decision.decision !== "ALLOW") {
+      return json(res, 403, { decision: decision.decision, reason: decision.reason });
+    }
+    return json(res, 200, { decision: "ALLOW", executed: "critical_demo_stub" });
+  }
+
+  json(res, 404, { error: "not_found" });
 }

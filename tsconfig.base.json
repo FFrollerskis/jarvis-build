@@ -9,6 +9,7 @@
     "exactOptionalPropertyTypes": true,
     "noImplicitOverride": true,
     "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,

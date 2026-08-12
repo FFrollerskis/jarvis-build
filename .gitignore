@@ -9,3 +9,5 @@ coverage/
 # age-/SOPS-private nøkler skal aldri inn i repoet
 key.txt
 *.agekey
+# lokale traces/kjøredata
+var/

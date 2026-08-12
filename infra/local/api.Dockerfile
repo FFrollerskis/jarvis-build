@@ -11,4 +11,4 @@ COPY modules/policy ./modules/policy
 RUN pnpm install --frozen-lockfile
 
 EXPOSE 3010
-CMD ["node", "--experimental-strip-types", "apps/api/src/main.ts"]
+CMD ["node", "--experimental-transform-types", "apps/api/src/main.ts"]

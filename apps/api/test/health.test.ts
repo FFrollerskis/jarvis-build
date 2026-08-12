@@ -1,6 +1,6 @@
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createApiServer } from "../src/server.js";
+import { createApiServer } from "../src/server.ts";
 
 const server = createApiServer();
 let baseUrl: string;

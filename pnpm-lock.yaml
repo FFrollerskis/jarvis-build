@@ -32,15 +32,21 @@ importers:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../../modules/core
+      '@jarvis/model-gateway':
+        specifier: workspace:*
+        version: link:../../modules/model-gateway
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../../modules/policy
-
-  modules/core:
-    dependencies:
-      '@jarvis/contracts':
+      '@jarvis/provider-adapters':
         specifier: workspace:*
-        version: link:../../packages/contracts
+        version: link:../../packages/provider-adapters
+      '@jarvis/tasks':
+        specifier: workspace:*
+        version: link:../../modules/tasks
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -52,17 +58,73 @@ importers:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
 
+  modules/core:
+    dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  modules/model-gateway:
+    dependencies:
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/provider-adapters':
+        specifier: workspace:*
+        version: link:../../packages/provider-adapters
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+
   modules/policy:
     dependencies:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
 
+  modules/tasks:
+    dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+
   packages/contracts:
     dependencies:
       zod:
         specifier: ^3.25.76
         version: 3.25.76
+
+  packages/provider-adapters: {}
 
 packages:
 
