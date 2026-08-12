@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { Channel } from "@jarvis/contracts";
-import { withTenantTransaction } from "../db/pool.js";
-import { writeAudit } from "./audit-writer.js";
+import { withTenantTransaction } from "../db/pool.ts";
+import { writeAudit } from "./audit-writer.ts";
 
 export interface SessionRef {
   session_id: string;

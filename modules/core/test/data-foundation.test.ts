@@ -14,7 +14,7 @@ import {
   runMigrations,
   withTenantTransaction
 } from "@jarvis/core";
-import type { EventEnvelope, SignedApproval } from "@jarvis/contracts";
+import type { EventEnvelope } from "@jarvis/contracts";
 
 // Ekte PostgreSQL 16 (embedded) - ingen mocks. Datamappe utenfor repoet.
 const PORT = 30000 + Math.floor(Math.random() * 20000);
@@ -278,28 +278,26 @@ describe("Akseptanse 4: audit med full identitetskontekst", () => {
 });
 
 describe("Persistent godkjenningslager (replay-vern i database)", () => {
-  function approval(nonce: string): SignedApproval {
+  function context(nonce: string) {
     return {
+      nonce,
+      tenant_id: "tenant-a",
       action: "unlock_front_door",
       parameters: { door: "front" },
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
-      nonce,
       approving_device_id: "dev-phone",
-      signature: "dGVzdA=="
+      expires_at: new Date(Date.now() + 60_000).toISOString()
     };
   }
 
   it("nonce kan bare forbrukes én gang", async () => {
-    const a = approval(`nonce-${randomUUID()}`);
-    expect(await approvalStore.consume("tenant-a", a)).toBe(true);
-    expect(await approvalStore.consume("tenant-a", a)).toBe(false);
+    const ctx = context(`nonce-${randomUUID()}`);
+    expect(await approvalStore.consume(ctx)).toBe(true);
+    expect(await approvalStore.consume(ctx)).toBe(false);
   });
 
   it("samtidige forsøk: nøyaktig ett vinner", async () => {
-    const a = approval(`nonce-${randomUUID()}`);
-    const results = await Promise.all(
-      Array.from({ length: 5 }, () => approvalStore.consume("tenant-a", a))
-    );
+    const ctx = context(`nonce-${randomUUID()}`);
+    const results = await Promise.all(Array.from({ length: 5 }, () => approvalStore.consume(ctx)));
     expect(results.filter(Boolean)).toHaveLength(1);
   });
 });

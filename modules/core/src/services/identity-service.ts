@@ -6,8 +6,8 @@ import {
   type IdentityContext,
   type MemorySpace
 } from "@jarvis/contracts";
-import { withTenantTransaction } from "../db/pool.js";
-import { writeAudit } from "./audit-writer.js";
+import { withTenantTransaction } from "../db/pool.ts";
+import { writeAudit } from "./audit-writer.ts";
 
 export interface ResolveIdentityInput {
   person_id: string;

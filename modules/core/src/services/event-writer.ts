@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { EventEnvelopeSchema, type EventEnvelope } from "@jarvis/contracts";
-import { withTenantTransaction } from "../db/pool.js";
-import { writeAudit } from "./audit-writer.js";
+import { withTenantTransaction } from "../db/pool.ts";
+import { writeAudit } from "./audit-writer.ts";
 
 export interface AppendResult {
   inserted: boolean;

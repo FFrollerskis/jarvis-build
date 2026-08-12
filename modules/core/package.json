@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@jarvis/contracts": "workspace:*",
+    "@jarvis/policy": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {
