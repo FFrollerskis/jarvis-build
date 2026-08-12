@@ -1,89 +1,68 @@
 # Jarvis – prosjektstatus
 
-**Oppdatert:** 2026-08-12 · **Branch:** `claude/fase-3-core-text-mvp`
+**Oppdatert:** 2026-08-13 · **Branch:** `claude/fase-4-hybrid-memory`
 
 ## Aktiv fase og oppgave
 
-**Fase 3 – Jarvis Core og tekst-MVP: FULLFØRT** (besluttet av Tobias/ekstern arkitekt 2026-08-13).
-Akseptanse 1/3/4/5: PASS. Akseptanse 2: **PASS BY EXPLICIT D-27 DEFERMENT** – funksjonaliteten
-(kostnad i `cost_events`, trace-korrelasjon, Langfuse-sink) er implementert og testet;
-runtime-verifikasjonen av visning i kjørende Langfuse er flyttet til første Docker-miljø som en
-**bindende port i D-27** (må utføres før det miljøet godkjennes – skal ikke glemmes/waives).
-Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`).
+**Fase 4 – Hybridminne v1: implementert, venter på ekstern arkitektkontroll og Tobias sin godkjenning.**
+Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`);
+fase 3 FULLFØRT/godkjent (`d5a2583`, akseptanse 2 via D-27-deferment).
 
-## Fase 3 – implementerte komponenter
+## Fase 4 – implementerte komponenter
 
-- **Conversation Engine** (`apps/api`): rask bane først, deretter modellbane; SSE-streaming;
-  alle svar persisteres i sesjonshistorikk.
-- **Fast Router v1** (`modules/core`): deterministisk intentmatch (status, opprett/avbryt jobb,
-  jobbstatus, hjelp) – kjente kommandoer bruker aldri LLM, sporet i trace.
-- **Model Gateway** (`modules/model-gateway`) + **provider-adaptere** (`packages/provider-adapters`):
-  Anthropic, OpenAI, Ollama (lokal) og skriptet testadapter bak felles grensesnitt; ordnet fallback;
-  rate limit; kostnad per kall → `cost_events` med `session_id`/`task_id`; **håndhevede
-  budsjettgrenser 1 000/2 000/3 000 kr/mnd** (varsel / krever godkjenning / hardgrense) i kode.
-- **Task Service + WorkflowAdapter** (`modules/tasks`): Postgres-kø (pg-boss-klasse) med claiming via
-  SECURITY DEFINER-funksjon (D-26, aldri RLS-bypass i app-rollen); in-process worker; policykontroll
-  (klasse A/B) på alle jobb-operasjoner; audit.
-- **Context Builder v1** (`modules/core`): sesjonshistorikk + åpne jobber under tenant-RLS.
-- **Policy Gateway async + persistent replay-vern:** `PgApprovalStore` (approvals-tabellen) er nå
-  koblet inn; fail-closed ved lagerfeil; feilede kontroller brenner ikke nonce; samtidighet bevist.
-- **Webchat** (`apps/web`): statisk side med SSE-streaming, rute-/jobbvisning (D-24).
-- **Observability:** `TraceSink`-adapter med JSONL-sink (lokal) og Langfuse-sink (klar, se avvik);
-  alle modellkall og fast-ruter spores med kostnad og `session_id`/`task_id`.
-- Migrasjoner 006 (kø-felter) og 007 (claim-funksjon).
+- **Migrasjon 008:** `memory_sources`, `memory_items` (bitemporal: observed/valid_from/valid_to,
+  sensitivitet, tillit, konfidens, versjon, status, konfliktflagg, FTS-kolonne norsk + GIN),
+  `memory_versions` (append-only m/trigger), `entities`, `relations`, `memory_item_entities`,
+  `summaries`, `embeddings` (portabel `real[]`, D-28), `decisions`, `commitments`, `deadlines`.
+- **RLS på tenant OG space i databasen:** space-policy er `AS RESTRICTIVE` (AND-es med
+  tenant-policyen); kontekst via `jarvis.memory_spaces`; default deny uten kontekst.
+- **`modules/memory`:** MemoryWriter (ADD/UPDATE/INVALIDATE/NOOP, dedup på subjekt,
+  konfliktversjonering, karantene for untrusted, promotering KUN via Policy Gateway, audit i samme
+  transaksjon); MemoryRetriever/Context Builder v2 (FTS + vektor m/relevansterskel + 1-hopps
+  relasjonsutvidelse + tidsfilter m/versjonssøk + reranking + kildeangivelse); SummaryService
+  (dagssammendrag); MemoryExporter (menneskelesbar mappeeksport per MEMORY_ARCHITECTURE §8);
+  adaptere: `EmbeddingProvider` (LocalHash deterministisk + OpenAI-klar), `ExtractionAdapter`
+  (regelbasert nå, LLM-uttrekk kobles på samme grensesnitt).
+- **Samtaleintegrasjon:** Conversation Engine beriker systemprompten med minne + kilde fra KUN
+  gjeldende space; health kombineres aldri med andre spaces (håndhevet i kode og test).
 
-## Fase 3 – testresultater (2026-08-12)
+## Fase 4 – testresultater (2026-08-13)
 
-- **54/54 tester grønne**: kontrakter 9, policy 18 (inkl. ny fail-closed), datafundament 13 (fase
-  2-regresjon), fast-router 2, health 2, **fase 3 e2e 10** (ekte HTTP-server mot ekte embedded
-  PostgreSQL 16.14 – ingen mocks).
-- `pnpm lint` og `pnpm typecheck` (7/7 pakker) grønne.
-- **API kjørt reelt:** `/health` 200, webchat-side 200, `/chat` ærlig 503 uten DB-konfig.
-- PgApprovalStore-kontrollpunktet: alle 8 krav bevist (gyldig→ALLOW, første nonce→ALLOW,
-  replay→DENY, samtidighet→nøyaktig én ALLOW, DB-feil→DENY, rollback åpner ikke replay,
-  feil action/parameter/signatur/utløp/enhet brenner ikke nonce, atomisk forbruk før handling).
+- **72/72 tester grønne** (18 nye minnetester + full fase 1–3-regresjon), mot ekte embedded
+  PostgreSQL 16.14. Også grønt under Node 22.14.0.
+- **Eval-sett: 60 spørringer** – 30 fakta m/kildeangivelse, 5 tidsspørsmål (valid_from/valid_to +
+  versjonssøk), 5 motstrid (begge versjoner synlige), 20 tilgangsspørsmål (health/guest/kryss-tenant
+  = null lekkasje). Kjørbar i CI som del av testsuiten.
+- **Ytelse:** hybridsøk P95 < 300 ms målt lokalt (20 søk over 250+ items).
+- **Sikkerhetsfunn fikset under testing (med regresjonstest):** delt kilde-ID på tvers av tenants
+  gjorde at RLS skjulte kilderaden og JOIN mistet items → kilde-ID-er er nå tenant-skopet.
 
-## Fase 3 – akseptansekriterium 2: PASS BY EXPLICIT D-27 DEFERMENT
+## Fase 4 – avvik
 
-Planens eksakte tekst (IMPLEMENTATION_PLAN.md, akseptansekriterium 2, fase 3):
-«Hvert modellkall har kostnad knyttet til `task_id`/`session_id`, synlig i Langfuse.»
-Lukket ved beslutning D-27 (2026-08-13): Langfuse-visningen er utsatt til første Docker-miljø som
-bindende port (sju konkrete verifikasjonssteg i D-27). Faktagrunnlag:
+- **D-28:** embeddings som `real[]` + SQL-cosine (pgvector mangler i embedded test-PG); bindende
+  pgvector/HNSW-port ved første Docker-miljø, sammen med D-27 (Langfuse).
+- LLM-assistert uttrekk er bak adapter men kjører regelbasert i denne fasen (billig-modell-uttrekk
+  kobles på når modellnøkler er i bruk); ingen arkitekturendring kreves.
+- Docker fortsatt fraværende; `docker compose config` uverifisert (uendret).
 
-- **Verifisert:** kostnad per modellkall persisteres i Postgres (`cost_events` med
-  `session_id`/`task_id`, bevist med SQL i e2e-test); hvert kall produserer trace-span med samme
-  korrelasjon og kostnad (bevist mot `TraceSink` i e2e-test).
-- **Implementert, ikke verifisert:** `LangfuseTraceSink` (ingestion-API, basic auth fra miljø) er
-  skrevet og typesjekket, men har aldri sendt til en kjørende Langfuse.
-- **Mangler for fullt bevis:** en kjørende selvhostet Langfuse-instans (krever Docker – finnes ikke
-  på dev-PC-en) + visuell/API-kontroll av at spans med kostnad vises der.
-- **Konsekvens:** Lukket via D-27. Ved første Docker-miljø (NAS-oppsett eller Docker på PC) SKAL
-  Langfuse-porten i D-27 kjøres før miljøet godkjennes: start Langfuse, kjør modellkall gjennom
-  ModelGateway, verifiser synlig trace med korrekt korrelasjon/kostnad, kryssjekk mot `cost_events`,
-  dokumenter her. Feil i integrasjonen behandles da som feil som må rettes.
+## D-27-status
 
-## Fase 3 – øvrige avvik
-- **Reelle Anthropic/OpenAI-kall uverifisert:** ingen API-nøkler i miljøet (med vilje). Adaptere er
-  skrevet og typesjekket; e2e bruker skriptet adapter. Verifiseres når Tobias legger nøkler i `.env`.
-- **Docker fortsatt fraværende:** `docker compose config` uverifisert (uendret fra fase 2).
-- Runtime byttet til Node `--experimental-transform-types` med `.ts`-relative imports (D-25) etter at
-  reell kjøring avdekket to feil vitest skjulte. Ingen build-steg ennå.
-- API-et har ingen egen HTTP-autentisering (localhost dev): enhetsautentisering kommer med kanalene
-  (fase 8-ambisjon); dokumentert i server-koden.
+Åpen og bindende. Docker ble ikke etablert i fase 4 (ikke påkrevd av fasen); Langfuse-porten +
+pgvector-porten (D-28) kjøres ved første Docker-miljø før det godkjennes.
 
 ## Blokkeringer
 
 1. **CI-resultat kan ikke verifiseres herfra** (`gh` mangler).
-2. **Fase 4 krever eksplisitt godkjenning** etter ekstern arkitektkontroll av fase 3.
+2. **Fase 5 krever eksplisitt godkjenning** etter ekstern arkitektkontroll av fase 4.
 
 ## Neste fase
 
-**Fase 4 – Hybridminne v1** (rå eventlogg→strukturert→fulltekst→pgvector→relasjoner→sammendrag→
-karantene→eksport→eval). Planlagt branch: `claude/fase-4-hybrid-memory`. Starter kun etter godkjenning.
+**Fase 5 – Voice Gateway vertikal prototype** (timebox 2×2 uker, norsk benchmark ≥100 prøver,
+tale-DPIA, stop/go-port). Planlagt branch: `claude/fase-5-voice-prototype`. Starter kun etter godkjenning.
 
 ---
 
 ## Arkiv
 
-- **Fase 1** godkjent på `9e43531` (kjørbart sikkerhetsfundament; 28 tester; gitleaks clean).
-- **Fase 2** godkjent på `0c74da0` (datafundament med RLS; 41 tester; PgApprovalStore levert).
+- **Fase 1** godkjent `9e43531` · **Fase 2** godkjent `0c74da0` · **Fase 3** FULLFØRT `d5a2583`
+  (akseptanse 2 = PASS by D-27-deferment; 54 tester, gitleaks clean, Node 22 verifisert).
