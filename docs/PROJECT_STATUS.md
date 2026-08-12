@@ -17,13 +17,14 @@ Fase 1 (kjørbart sikkerhets-/prosjektfundament) er **ikke startet** – venter 
 
 ## Blokkeringer
 
-1. **GitHub-push 403:** lagret Windows-credential er kontoen `post-ops` uten tilgang til repoet.
-   Fiks: gi `post-ops` tilgang, bytt credential i Windows Credential Manager, eller `gh auth login`.
-2. **`main`-push:** krever eksplisitt godkjenning fra Tobias (repoet på GitHub er tomt til da).
-3. **Privat repo ikke verifisert** (`gh` CLI mangler).
-4. **Q-01/Q-02** i [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) ubesvart (kildedokumenter + antakelser).
+1. **Privat repo ikke verifisert** (`gh` CLI mangler) – Tobias bekrefter i GitHub-innstillingene.
+2. **Q-01/Q-02** i [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) ubesvart (kildedokumenter + antakelser).
+3. **Fase 1 ikke godkjent** av Tobias ennå.
+
+GitHub-tilgang er løst: SSH deploy-nøkkel (ed25519) registrert; `main` (baseline, godkjent av Tobias)
+og arbeidsbranchen er pushet.
 
 ## Neste oppgave
 
-Tobias: fiks GitHub-tilgang, godkjenn main-push, svar Q-01/Q-02, godkjenn fase 1.
+Tobias: svar Q-01/Q-02, godkjenn PR-en for fase 0 og godkjenn fase 1.
 Deretter: fase 1 på `claude/fase-1-security-foundation` per [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
