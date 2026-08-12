@@ -32,6 +32,51 @@ Beslutningslogg: [docs/DECISIONS_AND_ASSUMPTIONS.md](docs/DECISIONS_AND_ASSUMPTI
 9. **Lokal først:** alt skal kjøre i Docker på Tobias sin PC og flytte uten omskriving. Ren Postgres – ingen Supabase-spesifikke API-er i kjernen.
 10. **Faseporten gjelder:** bygg kun det aktiv fase definerer; «Bygges IKKE»-listene i IMPLEMENTATION_PLAN er bindende.
 
+## Samarbeids- og GitHub-protokoll
+
+En ekstern AI-arkitekt kontrollerer arkitektur, kodeendringer og testresultater via GitHub.
+**GitHub er prosjektets felles sannhetskilde:** `https://github.com/tsworkflow/jarvisbuild.git`
+(HTTPS; SSH `git@github.com:tsworkflow/jarvisbuild.git` kan brukes når nøkkel er konfigurert).
+
+**Ved oppstart av hver økt:** bekreft mappe, `git status`, branch og `git remote -v`; les CLAUDE.md,
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md), [docs/SESSION_LOG.md](docs/SESSION_LOG.md),
+[docs/HANDOFF_REPORT.md](docs/HANDOFF_REPORT.md) og relevante plandokumenter; oppsummer status,
+øktens mål, gjeldende akseptansekriterier og branch i chatten **før** implementering starter.
+
+**Git-regler (absolutte):** aldri force push; aldri `git reset --hard`; aldri overskrive publisert
+historikk; aldri slette branches/tags uten godkjenning; aldri pushe direkte til `main` uten uttrykkelig
+godkjenning; aldri committe hemmeligheter. Peker `origin` et annet sted enn adressen over: stopp og
+spør Tobias. Hent siste versjon fra GitHub før ny branch når nettverk/auth fungerer; ukjente lokale
+endringer beskrives og avklares før de røres.
+
+**Branch-standard:** alt implementeringsarbeid på egen branch: `claude/fase-<nummer>-<kort-oppgavenavn>`
+(f.eks. `claude/fase-1-security-foundation`). Små commits etter fullførte milepæler, med tydelige
+meldinger (`docs:`/`feat:`/`test:`-prefiks). PR opprettes når mulig; merges aldri uten Tobias.
+
+**Statusfiler (obligatoriske, må være forståelige uten chat-tilgang):**
+- `docs/PROJECT_STATUS.md` – fase, deloppgave, realistisk fremdrift mot akseptansekriterier,
+  leveranser, blokkeringer, feil, gjeld, åpne beslutninger, neste oppgave, branch, siste commit, dato
+- `docs/SESSION_LOG.md` – append-only kronologisk logg per milepæl (aldri slette historikk, aldri hemmeligheter)
+- `docs/HANDOFF_REPORT.md` – overskrives med komplett overleveringsrapport per økt (mal: se filen);
+  inkluderes i øktens siste commit og vises også i sin helhet i chatten
+
+**Avslutning av økt:** kjør relevante tester/typecheck/lint/build, kontroller `git diff` og at ingen
+hemmeligheter er med, oppdater alle tre statusfilene, commit, push arbeidsbranchen hvis auth fungerer.
+Fungerer ikke push/PR: si det nøyaktig som det er – aldri late som noe er gjennomført.
+
+**Progresjon i chat:** korte meldinger etter hver meningsfull milepæl (ferdig nå / jobber med / kommer
+etterpå / testresultater / blokkeringer / beslutninger som trenger Tobias) – ikke etter hver fil, og
+aldri innholdsløst «jobber med det».
+
+**Kontekstgrense:** nærmer konteksten seg full: stopp på trygt punkt, ikke start ny deloppgave, kjør
+mulige tester, oppdater alle statusfiler, skriv full HANDOFF_REPORT, commit/push trygt arbeid, og oppgi
+nøyaktig hvor neste økt fortsetter.
+
+**Ærlighet og sporbarhet:** skill alltid mellom ferdig implementert / delvis / planlagt / simulert /
+testet / ikke testet / blokkert. Ordene «ferdig», «fungerer» og «produksjonsklart» krever dokumentert
+bevis (test/kommando-output). Aldri skjul mislykkede tester. Kan en test ikke kjøres: oppgi hvilken,
+hvorfor, risikoen og hvordan den skal kjøres senere.
+
 ## Arbeidsform
 
 - Git: små, forståelige commits med beskrivende meldinger. Branch + PR for alt når CI finnes.
