@@ -53,24 +53,22 @@ endringer beskrives og avklares før de røres.
 (f.eks. `claude/fase-1-security-foundation`). Små commits etter fullførte milepæler, med tydelige
 meldinger (`docs:`/`feat:`/`test:`-prefiks). PR opprettes når mulig; merges aldri uten Tobias.
 
-**Statusfiler (obligatoriske, må være forståelige uten chat-tilgang):**
-- `docs/PROJECT_STATUS.md` – fase, deloppgave, realistisk fremdrift mot akseptansekriterier,
-  leveranser, blokkeringer, feil, gjeld, åpne beslutninger, neste oppgave, branch, siste commit, dato
-- `docs/SESSION_LOG.md` – append-only kronologisk logg per milepæl (aldri slette historikk, aldri hemmeligheter)
-- `docs/HANDOFF_REPORT.md` – overskrives med komplett overleveringsrapport per økt (mal: se filen);
-  inkluderes i øktens siste commit og vises også i sin helhet i chatten
+**Statusfil (kun én):** `docs/PROJECT_STATUS.md` – kort, overskrives: aktiv fase/oppgave, ferdig
+arbeid, blokkeringer, neste oppgave. **Ikke** opprett SESSION_LOG eller HANDOFF_REPORT; Git-commits og
+diff er primærdokumentasjonen som den eksterne AI-arkitekten kontrollerer direkte på GitHub.
 
 **Avslutning av økt:** kjør relevante tester/typecheck/lint/build, kontroller `git diff` og at ingen
-hemmeligheter er med, oppdater alle tre statusfilene, commit, push arbeidsbranchen hvis auth fungerer.
-Fungerer ikke push/PR: si det nøyaktig som det er – aldri late som noe er gjennomført.
+hemmeligheter er med, oppdater PROJECT_STATUS.md, commit, push arbeidsbranchen hvis auth fungerer.
+Avslutt i chatten med kort STATUS-rapport (maks 15 linjer): fase/oppgave, resultat, branch, commit,
+viktigste endringer, tester og resultater, blokkeringer, neste anbefalte oppgave. Fungerer ikke
+push/PR: si det nøyaktig som det er – aldri late som noe er gjennomført.
 
-**Progresjon i chat:** korte meldinger etter hver meningsfull milepæl (ferdig nå / jobber med / kommer
-etterpå / testresultater / blokkeringer / beslutninger som trenger Tobias) – ikke etter hver fil, og
-aldri innholdsløst «jobber med det».
+**Progresjon i chat:** kun når en større del er ferdig, ved blokkering, eller når en beslutning fra
+Tobias trengs – maks fem korte linjer, med konkret og kontrollerbar informasjon.
 
 **Kontekstgrense:** nærmer konteksten seg full: stopp på trygt punkt, ikke start ny deloppgave, kjør
-mulige tester, oppdater alle statusfiler, skriv full HANDOFF_REPORT, commit/push trygt arbeid, og oppgi
-nøyaktig hvor neste økt fortsetter.
+mulige tester, oppdater PROJECT_STATUS.md, commit/push trygt arbeid, og oppgi nøyaktig hvor neste økt
+fortsetter.
 
 **Ærlighet og sporbarhet:** skill alltid mellom ferdig implementert / delvis / planlagt / simulert /
 testet / ikke testet / blokkert. Ordene «ferdig», «fungerer» og «produksjonsklart» krever dokumentert
