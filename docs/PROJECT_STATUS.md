@@ -1,68 +1,78 @@
 # Jarvis – prosjektstatus
 
-**Oppdatert:** 2026-08-13 · **Branch:** `claude/fase-4-hybrid-memory`
+**Oppdatert:** 2026-08-13 · **Branch:** `claude/fase-5-voice-prototype`
 
 ## Aktiv fase og oppgave
 
-**Fase 4 – Hybridminne v1: implementert, venter på ekstern arkitektkontroll og Tobias sin godkjenning.**
-Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`);
-fase 3 FULLFØRT/godkjent (`d5a2583`, akseptanse 2 via D-27-deferment).
+**Fase 5 – Voice Gateway vertikal prototype: implementert; akseptanse 1/3/4 PASS (reelt målt),
+akseptanse 2 delvis (pipeline målt; providerlatens UNVERIFIED), akseptanse 5 UNVERIFIED
+(ekte norsk benchmark krever prøver + nøkler). Venter på ekstern arkitektkontroll.**
+Fase 0 (`7e31f4a`) · fase 1 (`9e43531`) · fase 2 (`0c74da0`) · fase 3 (`d5a2583`, D-27) ·
+fase 4 (`d66945d`, D-28) – alle godkjent.
 
-## Fase 4 – implementerte komponenter
+## Fase 5 – implementerte komponenter
 
-- **Migrasjon 008:** `memory_sources`, `memory_items` (bitemporal: observed/valid_from/valid_to,
-  sensitivitet, tillit, konfidens, versjon, status, konfliktflagg, FTS-kolonne norsk + GIN),
-  `memory_versions` (append-only m/trigger), `entities`, `relations`, `memory_item_entities`,
-  `summaries`, `embeddings` (portabel `real[]`, D-28), `decisions`, `commitments`, `deadlines`.
-- **RLS på tenant OG space i databasen:** space-policy er `AS RESTRICTIVE` (AND-es med
-  tenant-policyen); kontekst via `jarvis.memory_spaces`; default deny uten kontekst.
-- **`modules/memory`:** MemoryWriter (ADD/UPDATE/INVALIDATE/NOOP, dedup på subjekt,
-  konfliktversjonering, karantene for untrusted, promotering KUN via Policy Gateway, audit i samme
-  transaksjon); MemoryRetriever/Context Builder v2 (FTS + vektor m/relevansterskel + 1-hopps
-  relasjonsutvidelse + tidsfilter m/versjonssøk + reranking + kildeangivelse); SummaryService
-  (dagssammendrag); MemoryExporter (menneskelesbar mappeeksport per MEMORY_ARCHITECTURE §8);
-  adaptere: `EmbeddingProvider` (LocalHash deterministisk + OpenAI-klar), `ExtractionAdapter`
-  (regelbasert nå, LLM-uttrekk kobles på samme grensesnitt).
-- **Samtaleintegrasjon:** Conversation Engine beriker systemprompten med minne + kilde fra KUN
-  gjeldende space; health kombineres aldri med andre spaces (håndhevet i kode og test).
+- **`apps/voice-gateway` (egen prosess, D-29 WS-transport):** full-duplex sesjonsmotor
+  (lytter/tenker/snakker), streaming lydrammer, deterministisk energi-VAD med end-of-turn,
+  **ekte barge-in** (tale under avspilling kansellerer TTS umiddelbart), latenstidsstempler per
+  delstrekning, utterance-journal (idempotente turer ved failover), AEC/støy-hooks (passthrough i
+  pilot). Gateway snakker KUN med Core via `/chat` – ingen samtale/minne/policy i gatewayen.
+- **SpeechAdapter-kontrakter:** STT (MarkerStt-test, OpenAI, lokal whisper-skall) og TTS
+  (FakeTts-test m/sanntidstakt, OpenAI, lokal piper-skall). Leverandørvalg låses IKKE – det hører
+  til stop/go-porten.
+- **Benchmark-harness** (`benchmark.ts`): WER (testet) + latens-P50/P95 per kategori; håndhever
+  ≥100-prøver-kravet. Instruks: [VOICE_BENCHMARK.md](VOICE_BENCHMARK.md).
+- **Tale-DPIA** fullført for pilotens omfang: [security/DPIA_VOICE.md](security/DPIA_VOICE.md)
+  (ingen lyd forlater maskinen i pilot; leverandør-gate dokumentert).
+- Ingen databaseendringer; ingen HA; ingen ny minnestack.
 
-## Fase 4 – testresultater (2026-08-13)
+## Fase 5 – målte resultater (2026-08-13, testadaptere)
 
-- **72/72 tester grønne** (18 nye minnetester + full fase 1–3-regresjon), mot ekte embedded
-  PostgreSQL 16.14. Også grønt under Node 22.14.0.
-- **Eval-sett: 60 spørringer** – 30 fakta m/kildeangivelse, 5 tidsspørsmål (valid_from/valid_to +
-  versjonssøk), 5 motstrid (begge versjoner synlige), 20 tilgangsspørsmål (health/guest/kryss-tenant
-  = null lekkasje). Kjørbar i CI som del av testsuiten.
-- **Ytelse:** hybridsøk P95 < 300 ms målt lokalt (20 søk over 250+ items).
-- **Sikkerhetsfunn fikset under testing (med regresjonstest):** delt kilde-ID på tvers av tenants
-  gjorde at RLS skjulte kilderaden og JOIN mistet items → kilde-ID-er er nå tenant-skopet.
+- **Barge-in:** TTS kansellert ≤250 ms etter ren tale – målt i sanntid gjennom reell WS-kjede: PASS.
+- **Latens (8 turer, hele kjeden lyd→VAD→STT→Core→TTS-første-ramme→ferdig):**
+  **median 667 ms, P95 694 ms**; alle delmålinger (første partial, end-of-turn, Core-svar, første
+  TTS-ramme) registrert per tur. Providerlatens er IKKE inkludert (testadaptere) – ærlig UNVERIFIED
+  til benchmark kjøres.
+- **Sesjonskontinuitet:** tekstsesjon gjenopptatt av talekanal med samme `session_id` (og motsatt vei
+  via samme mekanisme): PASS.
+- **Fast bane via tale:** «status» rutes deterministisk, `routed=fast`, ingen modellkall: PASS.
+- **Failover:** fullført utterance replayet etter «restart» (delt journal) → avvist, nøyaktig 1 jobb
+  i databasen: PASS. Lyd før sesjonsstart avvises kontrollert.
+- **81/81 tester grønne** (9 filer; fase 1–4-regresjon uendret grønn), også under Node 22.14.0.
 
-## Fase 4 – avvik
+## Fase 5 – avvik og UNVERIFIED
 
-- **D-28:** embeddings som `real[]` + SQL-cosine (pgvector mangler i embedded test-PG); bindende
-  pgvector/HNSW-port ved første Docker-miljø, sammen med D-27 (Langfuse).
-- LLM-assistert uttrekk er bak adapter men kjører regelbasert i denne fasen (billig-modell-uttrekk
-  kobles på når modellnøkler er i bruk); ingen arkitekturendring kreves.
-- Docker fortsatt fraværende; `docker compose config` uverifisert (uendret).
+- **Akseptanse 5 (stop/go på benchmark-data): UNVERIFIED.** Krever ≥100 norske lydprøver +
+  leverandørnøkler/lokale modeller. Harness + instruks levert. Stop/go-beslutningen tas av Tobias
+  når benchmarken er kjørt – transportvalg (WebRTC/LiveKit vs. WS) inngår (D-29).
+- **Reelle STT/TTS-leverandører UNVERIFIED** (ingen nøkler, med vilje); adaptere skrevet/typesjekket.
+- **HA Assist-reservevei:** dokumentert i VOICE_ARCHITECTURE §8; kan ikke testes uten HA-instans –
+  testes i fase 9.
+- Core-kallet er JSON (ikke SSE-token-streaming inn i TTS) i piloten; TTS-strømmen og STT-partials
+  er reelle strømmer. Token→TTS-streaming er en kjent forbedring før produksjonstale.
+- Utterance-journal er in-memory bak injiserbart grensesnitt; persistent lager når gatewayen får
+  delt tilstand.
 
-## D-27-status
+## D-27 / D-28
 
-Åpen og bindende. Docker ble ikke etablert i fase 4 (ikke påkrevd av fasen); Langfuse-porten +
-pgvector-porten (D-28) kjøres ved første Docker-miljø før det godkjennes.
+Begge åpne og bindende (Docker ble ikke etablert i fase 5 – ikke påkrevd). Kjøres ved første
+Docker-miljø: Langfuse-verifikasjon (D-27, 7 steg) + pgvector/HNSW-migrasjon med eval-regresjon og
+ytelsesmåling (D-28).
 
 ## Blokkeringer
 
-1. **CI-resultat kan ikke verifiseres herfra** (`gh` mangler).
-2. **Fase 5 krever eksplisitt godkjenning** etter ekstern arkitektkontroll av fase 4.
+1. CI-resultat kan ikke verifiseres herfra (`gh` mangler).
+2. Fase 6 krever eksplisitt godkjenning etter arkitektkontroll av fase 5.
+3. Stop/go-porten (akseptanse 5) venter på lydprøver + nøkler fra Tobias.
 
 ## Neste fase
 
-**Fase 5 – Voice Gateway vertikal prototype** (timebox 2×2 uker, norsk benchmark ≥100 prøver,
-tale-DPIA, stop/go-port). Planlagt branch: `claude/fase-5-voice-prototype`. Starter kun etter godkjenning.
+**Fase 6 – Oppgaver og isolerte workers** (durable workflow-evaluering, sandbox per jobb,
+agentprofiler, PR-flyt). Planlagt branch: `claude/fase-6-isolated-workers`. Kun etter godkjenning.
 
 ---
 
 ## Arkiv
 
-- **Fase 1** godkjent `9e43531` · **Fase 2** godkjent `0c74da0` · **Fase 3** FULLFØRT `d5a2583`
-  (akseptanse 2 = PASS by D-27-deferment; 54 tester, gitleaks clean, Node 22 verifisert).
+Fase 1 `9e43531` · Fase 2 `0c74da0` · Fase 3 `d5a2583` (D-27-deferment) · Fase 4 `d66945d`
+(72 tester, D-28, RLS tenant+space, eval 60 spørringer).
