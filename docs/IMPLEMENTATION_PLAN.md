@@ -313,7 +313,8 @@ datadrevet beslutning om flytting til egen node/server/sky.
 
 **Komponenter:** Watchdog komplett (alle sjekker fra masterplan §11.2, ekstern + lokal), restore-øvelser
 med tidtaking, 30–90 dagers målerapport (kostnad, oppetid, latens, lokal modell-økonomi),
-migrasjonsplan til alltid-på node hvis tallene tilsier det, runbooks for alle Tier 1-tjenester.
+beslutningsgrunnlag for dedikert AI-server (RTX 5080-klasse) hvis tallene tilsier det (D-20),
+runbooks for alle Tier 1-tjenester.
 
 **Avhengigheter:** Fase 1–7 i produksjon (8–9 kan pågå parallelt).
 
@@ -355,6 +356,6 @@ F10: kontinuerlig etter F3, fullføres etter F7
 | Tale | Egen gateway-prosess; WebRTC (LiveKit selvhostet som kandidat); STT/TTS bak `SpeechAdapter`, valg via norsk benchmark | Full-duplex-krav; leverandøruavhengighet; måling før låsing (D-10) |
 | Observability | Langfuse selvhostet + OpenTelemetry + strukturert JSON-logg | Masterplanens valg; selvhostet = lokal-først |
 | Secrets | SOPS + age (fase 1, ingen kjørende vault) → sentral vault senest fase 7 (valg per Q-05) | Gradvis: aldri secrets i kode fra dag én, vault når flere prosesser deler (D-16) |
-| Sandbox | Docker på WSL2; kastbar container per jobb | Kravet i masterplanen; kjører på eksisterende PC (K-06 følges opp) |
+| Sandbox | Docker på WSL2; kastbar container per jobb | Kravet i masterplanen; kjører på PC-en (RTX 4070) som utviklings-/GPU-worker (D-20; K-06 følges opp) |
 | CI | GitHub Actions: lint, typecheck, test, gitleaks, policytester, minne-eval | Alle porter automatiseres |
 | Mobil | Swift/SwiftUI + watchOS (fase 8) | Apple-økosystem er kravet (A-05) |

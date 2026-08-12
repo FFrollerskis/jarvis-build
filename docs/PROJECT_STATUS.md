@@ -4,34 +4,34 @@
 
 ## Aktiv fase og oppgave
 
-Fase 0 – spesifikasjon og prosjektetablering. Deloppgave: forenklet rapporteringsprotokoll + GitHub-etablering.
-Fase 1 (kjørbart sikkerhets-/prosjektfundament) er **ikke startet** – venter på Tobias sin godkjenning.
+**Fase 0 – FULLFØRT.**
+Ingen aktiv deloppgave. Ingen applikasjonskode er skrevet (som planlagt).
+
+Ferdig-definisjonen for fase 0 er oppfylt: konsistent dokumenthierarki, privat repo (bekreftet av
+Tobias), konsistent vault/secrets-plan (D-16), Q-01 besluttet (D-18), Q-02/A-01–A-06 besluttet
+(D-18–D-23), ingen secrets i repoet, ingen applikasjonskode, neste fase tydelig definert.
 
 ## Ferdig arbeid
 
-- Masterplan v2.1 konvertert til `docs/input/`; 11 styringsdokumenter i `docs/` (CANONICAL_SPEC er autoritativ)
-- Kritisk gjennomgang: funn K-01–K-12, beslutninger D-01–D-17, antakelser A-01–A-06
+- Masterplan v2.1 konvertert til `docs/input/`; 11 styringsdokumenter i `docs/` (CANONICAL_SPEC autoritativ)
+- Kritisk gjennomgang (K-01–K-12); beslutningslogg D-01–D-23; alle antakelser avklart
 - Ti-fase implementeringsplan med akseptansekriterier og «Bygges IKKE»-lister
-- Git-repo med remote `https://github.com/tsworkflow/jarvisbuild.git`; alt committet lokalt
-- Rapporteringsprotokoll forenklet (kun denne statusfilen; SESSION_LOG/HANDOFF_REPORT fjernet)
+- GitHub etablert: privat repo, SSH deploy-nøkkel, `main`-baseline + arbeidsbranch pushet
+- Konsistensopprydding etter ekstern arkitektkontroll (statusfiler, vault-plan, LiteLLM-referanse)
+- Ny maskinvareplan innarbeidet (D-20): UGREEN DXP4800 Plus som 24/7-base, PC (RTX 4070) til
+  utvikling/GPU, dedikert AI-server senere ved dokumentert behov
 
 ## Blokkeringer
 
-1. **Q-01/Q-02** i [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) ubesvart (kildedokumenter + antakelser
-   A-01–A-06) – spørsmålene er stilt til Tobias; fase 0 kan ikke markeres fullført før de er besluttet.
-2. **Fase 1 ikke godkjent** av Tobias ennå.
+1. **Fase 1 er ikke godkjent** – Tobias må eksplisitt skrive at fase 1 er godkjent før implementering starter.
 
-**Løst:** Repo-synlighet – Tobias har eksplisitt bekreftet (2026-08-12) at repoet er satt til
-**privat**; visibility-blokkeringen er lukket. (Innstillingen er endret av Tobias, ikke herfra.)
-
-**PR-status:** Ingen fase 0-PR eksisterer. Kan ikke opprettes herfra (`gh` mangler; deploy-nøkkel
-uten API-tilgang). Opprettes manuelt ved behov:
+**PR-status:** Ingen fase 0-PR (kan ikke opprettes herfra: `gh` mangler, deploy-nøkkel uten
+API-tilgang). Opprettes manuelt ved behov:
 https://github.com/tsworkflow/jarvisbuild/pull/new/claude/fase-0-github-og-statusfiler
-
-GitHub-tilgang er løst: SSH deploy-nøkkel (ed25519) registrert; `main` (baseline, godkjent av Tobias)
-og arbeidsbranchen er pushet.
 
 ## Neste oppgave
 
-Tobias: avklar repo-synlighet (punkt 1), opprett/godkjenn fase 0-PR, svar Q-01/Q-02, godkjenn fase 1.
-Deretter: fase 1 på `claude/fase-1-security-foundation` per [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+**Fase 1 – Kjørbart sikkerhets- og prosjektfundament**
+Planlagt branch: `claude/fase-1-security-foundation`
+Innhold og akseptansekriterier: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) → Fase 1.
+Starter først når Tobias eksplisitt godkjenner fase 1.

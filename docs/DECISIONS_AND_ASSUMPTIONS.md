@@ -30,6 +30,12 @@
 | D-15 | **`apps/mobile`/`apps/desktop` opprettes først i fase 8** | Tomme mapper gir falsk fremdrift; monorepo-strukturen tåler tillegg senere |
 | D-16 | **Secrets i fase 1: SOPS + age for kryptert konfig, `.env` kun lokalt og git-ignorert, `.env.example` uten secrets, gitleaks i CI, dokumentert secrets-strategi – ingen kjørende vault. Sentral vault (Infisical/OpenBao) innføres når flere tjenester/prosesser faktisk trenger delte secrets, og senest før eksterne integrasjoner gjør det nødvendig (fase 7). Valget Infisical vs. OpenBao står åpent (Q-05)** | Full vault fra dag én er tung for én maskin; SOPS-kravet finnes allerede i masterplanen. Prinsippet «aldri secrets i kode» gjelder fra første commit |
 | D-17 | Dokumenthierarki: CANONICAL_SPEC > øvrige docs > masterplan-PDF > eldre notater | Én autoritativ kilde ved motstrid |
+| D-18 | **Masterplan v2.1 er eneste tilgjengelige kildedokument nå.** Sluttrapport/serverplattform-/livsintegrasjonsdokumentene finnes ikke i repoet. Nye eksplisitte beslutninger fra Tobias kan oppdatere/overstyre tidligere antakelser når de dokumenteres i CANONICAL_SPEC/DECISIONS (lukker Q-01 og bekrefter A-01, Tobias 2026-08-12) | Unngår spesifikasjonsstopp på manglende dokumenter; endringsvei er definert |
+| D-19 | **Norsk er primærspråk** for Jarvis (tale/tekst/dokumentasjon); kode, scripts og tekniske navn kan være engelsk (bekrefter A-02, Tobias 2026-08-12) | Styrer benchmark-design og promptstrategi |
+| D-20 | **Maskinvareplan (erstatter A-03):** UGREEN DXP4800 Plus (NAS) er 24/7-basen for Jarvis-data, databaser, Home Assistant, Docker-tjenester, nettsider, filer og backup. Eksisterende PC (RTX 4070) brukes til utvikling og tyngre AI/GPU-arbeid i startfasen. Kraftigere dedikert AI-server (f.eks. RTX 5080-klasse) bygges først når behovet er dokumentert. Mac mini/NUC er ikke del av startplanen (Tobias 2026-08-12) | Lokal-først beholdes; 24/7-drift flyttes fra ustabil PC til NAS uten arkitekturendring (alt er containerisert og flyttbart) |
+| D-21 | **Kundeoppfølging AS er eneste bedrifts-tenant i v1**; arkitekturen skal fortsatt støtte flere tenants uten større redesign (bekrefter A-04, Tobias 2026-08-12) | Tenant-modellen i fase 2 dimensjoneres deretter |
+| D-22 | **iPhone + Apple Watch er mobilplattformen i v1**; Android er ikke krav (bekrefter A-05, Tobias 2026-08-12) | Fase 8 bygger kun Apple-økosystemet |
+| D-23 | **Skybaserte frontier-modeller kan brukes for ikke-sensitive data.** Sensitive spaces/data følger sikkerhets- og personvernreglene og kan kreve lokal behandling eller sterk dataminimering (bekrefter A-06, Tobias 2026-08-12) | Model Gateway-ruting per space fra fase 3 |
 
 ## C. Funn fra kritisk gjennomgang av masterplan v2.1
 
@@ -48,15 +54,13 @@
 | K-11 | «Kostnadsvarsel … i startfasen» er datert (beløp i NOK, august 2026); priser og produktversjoner må sjekkes på nytt ved implementering – planen sier dette selv | Påminnelse | Videreført som stående regel i CANONICAL_SPEC §7 |
 | K-12 | pgmq (Supabase Queues) nevnes i referansene, men workflow-kapittelet peker på Trigger.dev/Hatchet – planen er tvetydig om kø vs. workflow | Tvetydighet | Avklart: pgmq/pg-boss-klasse er kø-/jobbfundament (D-13); «durable workflow» med checkpoints er laget over; full motor vurderes i fase 6 |
 
-## D. Antakelser som må bekreftes av Tobias
+## D. Antakelser (alle avklart av Tobias 2026-08-12 – Q-02 lukket)
 
-| ID | Antakelse | Konsekvens hvis feil |
+| ID | Antakelse | Utfall |
 |---|---|---|
-| A-01 | Masterplan v2.1 er eneste og siste autoritative inputdokument | Spesifikasjonen må revideres mot manglende dokumenter (K-08) |
-| A-02 | Primærspråk norsk i tale og tekst; engelsk sekundært | Benchmark-design og prompt-strategi endres |
-| A-03 | PC-en (Lenovo, Windows 11 Home) har nok RAM/disk til dev-stacken (Postgres, Langfuse, containere) | Trinn 0 må slankes eller maskin oppgraderes |
-| A-04 | Kundeoppfølging AS er eneste bedrifts-tenant i første versjon | Tenant-modellen i fase 2 må utvides tidligere |
-| A-05 | iPhone/Apple Watch er mobilplattformen (ingen Android-krav) | Fase 8 endres |
-| A-06 | Tobias godtar skybaserte frontier-modeller for ikke-sensitive spaces fra start | Mer aggressiv lokal modell-strategi kreves tidligere |
-
-Bekreftede/avkreftede antakelser flyttes til seksjon B som beslutninger.
+| A-01 | Masterplan v2.1 eneste hovedkilde | **Bekreftet** → D-18 |
+| A-02 | Norsk primærspråk | **Bekreftet** → D-19 |
+| A-03 | Jarvis starter kun på eksisterende PC | **Avkreftet/erstattet** → D-20 (UGREEN DXP4800 Plus som 24/7-base; PC til utvikling/GPU; AI-server senere ved dokumentert behov) |
+| A-04 | Kundeoppfølging AS eneste bedrifts-tenant i v1 | **Bekreftet** → D-21 |
+| A-05 | iPhone/Apple Watch som mobilplattform | **Bekreftet** → D-22 |
+| A-06 | Sky-frontier-modeller OK for ikke-sensitive data | **Bekreftet** → D-23 |
