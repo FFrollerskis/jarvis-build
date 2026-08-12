@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { JsonValueSchema } from "./capability.js";
-import { TrustLevelSchema } from "./job.js";
+import { JsonValueSchema } from "./capability.ts";
+import { TrustLevelSchema } from "./job.ts";
 
 /**
  * Felles hendelseskonvolutt for Core, Worker og audit (append-only i fase 2+).

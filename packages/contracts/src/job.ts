@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { JsonValueSchema } from "./capability.js";
+import { JsonValueSchema } from "./capability.ts";
 
 /** Tillitsnivå for inngangsdata (proveniens følger dataene hele veien). */
 export const TrustLevelSchema = z.enum(["trusted", "internal", "untrusted"]);

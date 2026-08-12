@@ -4,10 +4,10 @@ import {
   type IdentityContext,
   type ToolCall
 } from "@jarvis/contracts";
-import { verifyApproval } from "./approval-verifier.js";
-import type { DeviceRegistry } from "./device-registry.js";
-import { KillSwitch } from "./kill-switch.js";
-import type { NonceStore } from "./nonce-store.js";
+import { verifyApproval } from "./approval-verifier.ts";
+import type { DeviceRegistry } from "./device-registry.ts";
+import { KillSwitch } from "./kill-switch.ts";
+import type { NonceStore } from "./nonce-store.ts";
 
 export type Decision = "ALLOW" | "DENY";
 
@@ -70,7 +70,7 @@ export class PolicyGateway {
     this.auditSink = options.auditSink ?? ((event) => this.auditLog.push(event));
   }
 
-  authorize(request: AuthorizationRequest): AuthorizationResult {
+  async authorize(request: AuthorizationRequest): Promise<AuthorizationResult> {
     // Kontraktvalidering først: ugyldig input er alltid DENY, aldri unntak videre opp.
     const identity = IdentityContextSchema.safeParse(request.identity);
     if (!identity.success) {
@@ -106,7 +106,10 @@ export class PolicyGateway {
     }
   }
 
-  private authorizeClassD(request: AuthorizationRequest, toolCall: ToolCall): AuthorizationResult {
+  private async authorizeClassD(
+    request: AuthorizationRequest,
+    toolCall: ToolCall
+  ): Promise<AuthorizationResult> {
     if (request.approval === undefined) {
       return this.finish(request, "DENY", "class_d_missing_approval");
     }
@@ -120,8 +123,28 @@ export class PolicyGateway {
       return this.finish(request, "DENY", `class_d_${check.reason}`);
     }
     // Alle kontroller OK - forbruk engangs-ID-en som aller siste steg (replay-vern).
-    const nonce = (request.approval as { nonce: string }).nonce;
-    if (!this.nonces.consume(nonce)) {
+    // Feil i lageret er DENY (fail-closed): usikkerhet gir aldri ALLOW.
+    const approval = request.approval as {
+      nonce: string;
+      action: string;
+      parameters: Record<string, never>;
+      approving_device_id: string;
+      expires_at: string;
+    };
+    let firstUse: boolean;
+    try {
+      firstUse = await this.nonces.consume({
+        nonce: approval.nonce,
+        tenant_id: request.identity.tenant_id,
+        action: approval.action,
+        parameters: approval.parameters,
+        approving_device_id: approval.approving_device_id,
+        expires_at: approval.expires_at
+      });
+    } catch {
+      return this.finish(request, "DENY", "class_d_nonce_store_error");
+    }
+    if (!firstUse) {
       return this.finish(request, "DENY", "class_d_nonce_already_used");
     }
     return this.finish(request, "ALLOW", "class_d_valid_signed_approval");

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { JsonValueSchema, type JsonValue } from "./capability.js";
-import { canonicalStringify } from "./canonical.js";
+import { JsonValueSchema, type JsonValue } from "./capability.ts";
+import { canonicalStringify } from "./canonical.ts";
 
 /**
  * Signert godkjenningsobjekt for klasse D-handlinger (SECURITY_MODEL §3).

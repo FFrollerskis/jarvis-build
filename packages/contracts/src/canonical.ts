@@ -1,4 +1,4 @@
-import type { JsonValue } from "./capability.js";
+import type { JsonValue } from "./capability.ts";
 
 /**
  * Deterministisk JSON-serialisering: objektnøkler sorteres rekursivt.

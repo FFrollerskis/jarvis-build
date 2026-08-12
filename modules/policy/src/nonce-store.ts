@@ -1,21 +1,36 @@
+import type { JsonValue } from "@jarvis/contracts";
+
 /**
- * Engangs-ID-lager for replay-vern på signerte godkjenninger.
- * Fase 1: in-memory (bevises i tester). Persistent lager kommer med
- * databasen i fase 2 - grensesnittet er stabilt.
+ * Kontekst for forbruk av en engangs-godkjenning. Full kontekst (ikke bare
+ * nonce) slik at persistente lagre kan lagre og revidere hva som ble forbrukt.
+ */
+export interface NonceConsumeContext {
+  nonce: string;
+  tenant_id: string;
+  action: string;
+  parameters: Record<string, JsonValue>;
+  approving_device_id: string;
+  expires_at: string;
+}
+
+/**
+ * Engangs-lager for replay-vern. Kan være synkront (in-memory) eller
+ * asynkront (PostgreSQL, fase 2-tabellen approvals). Policy Gateway behandler
+ * feil fra lageret som DENY (fail-closed) - aldri ALLOW ved usikkerhet.
  */
 export interface NonceStore {
-  /** Forsøker å forbruke nonce. true = første bruk (OK), false = allerede brukt. */
-  consume(nonce: string): boolean;
+  /** true = første bruk (OK), false = allerede brukt (replay). */
+  consume(context: NonceConsumeContext): boolean | Promise<boolean>;
 }
 
 export class InMemoryNonceStore implements NonceStore {
   private readonly used = new Set<string>();
 
-  consume(nonce: string): boolean {
-    if (this.used.has(nonce)) {
+  consume(context: NonceConsumeContext): boolean {
+    if (this.used.has(context.nonce)) {
       return false;
     }
-    this.used.add(nonce);
+    this.used.add(context.nonce);
     return true;
   }
 }

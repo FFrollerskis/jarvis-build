@@ -6,7 +6,7 @@ import {
   type JsonValue,
   type SignedApproval
 } from "@jarvis/contracts";
-import type { DeviceRegistry } from "./device-registry.js";
+import type { DeviceRegistry } from "./device-registry.ts";
 
 export type ApprovalCheck =
   | { valid: true }
