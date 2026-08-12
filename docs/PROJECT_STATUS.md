@@ -1,10 +1,45 @@
 # Jarvis – prosjektstatus
 
-**Oppdatert:** 2026-08-13 · **Branch:** `claude/fase-5-voice-prototype`
+**Oppdatert:** 2026-08-13 · **Branch:** `claude/fase-6-isolated-workers`
 
 ## Aktiv fase og oppgave
 
-**Fase 5 – Voice Gateway vertikal prototype: FULLFØRT** (arkitektkontroll + Tobias 2026-08-13).
+**Fase 6 – Oppgaver og isolerte workers: implementert, venter på ekstern arkitektkontroll.**
+Fase 5 godkjent (`ae276df`).
+
+## Fase 6 – implementert (2026-08-13)
+
+- **Durable worker:** lease/reclaim via ny `claim_next_task(worker, lease)` (smal SECURITY DEFINER,
+  migrasjon 009), checkpoints + resume, retries (requeue til max_attempts), worker-guard mot stale
+  overskriving, kontrollert kansellering (pending/running/ferdig/dobbel), `artifacts`-tabell m/RLS.
+- **Delegeringskontrakt håndhevet:** `TaskService.submit` validerer full JobContract; avviser
+  ugyldig kontrakt, tenant-mismatch og **strukturelt: untrusted jobb med privat minne + utgående
+  nettverk** (prompt-injection-eksfiltrasjonsvern). `JobMemoryAccessor` begrenser jobber til
+  kontraktens spaces.
+- **Sandbox bak adapter:** `ProcessSandboxRunner` (kastbar arbeidskatalog, REN env uten arvede
+  secrets) verifisert; `DockerSandboxRunner`-skall — **containerisolasjon UNVERIFIED uten Docker**
+  (fasekrav; verifiseres med Docker-miljøet).
+- **Kodejobb:** clone → jobb-branch → agentendring (`CodingAgentAdapter`: skriptet verifisert;
+  Claude Code-headless-skall UNVERIFIED) → tester → commit → push av KUN jobb-branch (beskyttede
+  brancher nektes i runner + klasse C-mandat kreves) → artefakter (patch/testlogg/PR-forslag).
+  Bevist mot ekte lokalt bare-git-repo; **GitHub-PR/branch-protection UNVERIFIED** (ingen API).
+- **Sikkerhet bevist i tester:** kill switch stopper delegerte verktøykall; klasse D via worker
+  krever fortsatt godkjenning; delegert modellbruk går via Model Gateway (kost på `task_id`,
+  hardgrense håndhevet i jobb); retry dobler aldri ekstern handling (idempotens).
+- **D-31:** Postgres-køen beholdes; Trigger.dev/Hatchet ikke innført (evaluering dokumentert).
+- **96/96 tester grønne** (15 nye fase 6-tester; full fase 1–5-regresjon inkl. voice).
+
+### Fase 6-akseptanse
+
+1. Jobb overlever frakobling, stoppes og gjenopptas: **PASS** (tilstand i PG; checkpoint-resume;
+   lease-reclaim; kanselleringsmatrise) · 2. Kodejobb isolert m/branch+tester+artefakter: **PASS**
+   (lokal git; PR-forslag som artefakt — ekte GitHub-PR **UNVERIFIED**) · 3. Ingen produksjonsmerge
+   uten menneskelig gate: **PASS lokalt** (main urørt, runner+policy nekter; GitHub branch
+   protection må slås på av Tobias og er **UNVERIFIED** herfra) · 4. Ugyldig kontrakt avvises: **PASS**.
+
+---
+
+## Arkiv: Fase 5 – Voice Gateway vertikal prototype: FULLFØRT (arkitektkontroll + Tobias 2026-08-13).
 Akseptansekriterier: (1) barge-in ≤250 ms **PASS** · (2) pipeline median/P95 **PASS** for
 kontrollerte adaptere; ekte-provider-delen **PASS BY EXPLICIT D-30 DEFERMENT** · (3) talekommando
 uten stor LLM **PASS** · (4) failover uten doble handlinger **PASS** · (5) norsk benchmark +
