@@ -11,6 +11,8 @@ export interface ConversationDeps {
   tasks: TaskService;
   worker: InProcessWorker;
   trace: TraceSink;
+  /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
+  memory?: { contextFor(identity: IdentityContext, userText: string): Promise<string> };
 }
 
 export interface ChatReply {
@@ -59,10 +61,12 @@ export class ConversationEngine {
         role: (m.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
         content: m.content
       }));
+      const memoryContext = this.deps.memory ? await this.deps.memory.contextFor(identity, text) : "";
+      const system = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
       const result = await this.deps.gateway.complete({
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
-        request: { system: SYSTEM_PROMPT, messages: history, max_tokens: 1024 },
+        request: { system, messages: history, max_tokens: 1024 },
         ...(onToken ? { onToken } : {})
       });
       await this.deps.messages.save(identity, "assistant", result.text);

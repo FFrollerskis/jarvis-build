@@ -13,6 +13,7 @@ import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/polic
 import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
+import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import { ConversationEngine } from "./conversation.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
@@ -60,7 +61,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       gateway,
       tasks: new TaskService(pool, queue, policy),
       worker,
-      trace
+      trace,
+      memory: new MemoryRetriever(pool, new LocalHashEmbedding())
     })
   };
   setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
