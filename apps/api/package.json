@@ -1,0 +1,15 @@
+{
+  "name": "@jarvis/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis Core API - fase 1: minimalt kjørbart fundament med health-endepunkt",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "node --experimental-strip-types src/main.ts"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/policy": "workspace:*"
+  }
+}

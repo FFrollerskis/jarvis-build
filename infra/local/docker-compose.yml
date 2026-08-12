@@ -1,0 +1,18 @@
+# Jarvis lokal infrastruktur - fase 1-stub.
+# Fase 1 trenger ingen kjørende tjenester (ingen Postgres før fase 2, D-13/IMPLEMENTATION_PLAN).
+# Filen etablerer kun det portable mønsteret: alt konfigureres via miljøvariabler,
+# ingen hardkodede maskinstier, flyttbart mellom dev-PC (RTX 4070) og UGREEN-NAS (D-20).
+#
+# Fase 2 legger til: postgres (pgvector, pgmq). Fase 3: langfuse. Se DEPLOYMENT_STRATEGY.md.
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/local/api.Dockerfile
+    environment:
+      JARVIS_API_PORT: "${JARVIS_API_PORT:-3010}"
+      JARVIS_ENV: "${JARVIS_ENV:-dev}"
+    ports:
+      - "${JARVIS_API_PORT:-3010}:${JARVIS_API_PORT:-3010}"
+    restart: unless-stopped
