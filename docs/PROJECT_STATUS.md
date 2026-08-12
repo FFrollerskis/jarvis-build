@@ -4,8 +4,9 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 3 – Jarvis Core og tekst-MVP: implementert, venter på ekstern arkitektkontroll og Tobias sin
-godkjenning.** Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`).
+**Fase 3 – Jarvis Core og tekst-MVP: implementert; akseptanse 1/3/4/5 PASS, akseptanse 2 UNVERIFIED
+(Langfuse-visning, se egen seksjon). Venter på Tobias sin beslutning om lukking/utsettelse.**
+Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`).
 
 ## Fase 3 – implementerte komponenter
 
@@ -39,12 +40,25 @@ godkjenning.** Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2
   replay→DENY, samtidighet→nøyaktig én ALLOW, DB-feil→DENY, rollback åpner ikke replay,
   feil action/parameter/signatur/utløp/enhet brenner ikke nonce, atomisk forbruk før handling).
 
-## Fase 3 – avvik
+## Fase 3 – akseptansekriterium 2: UNVERIFIED (Langfuse-delen)
 
-- **Langfuse er ikke kjørende verifisert:** selvhostet Langfuse krever Docker, som ikke finnes på
-  dev-PC-en. Observability er bygget bak `TraceSink`-adapter: JSONL-sink verifisert; Langfuse-sink
-  implementert men uverifisert. Akseptanse 2 er bevist på kostnads-/trace-data («synlig i Langfuse»
-  gjenstår til Docker-/NAS-miljøet finnes – lukkes i fase 10-driftssporet eller når NAS settes opp).
+Planens eksakte tekst (IMPLEMENTATION_PLAN.md, akseptansekriterium 2, fase 3):
+«Hvert modellkall har kostnad knyttet til `task_id`/`session_id`, synlig i Langfuse.»
+«Synlig i Langfuse» er dermed en obligatorisk del av kriteriet. Status:
+
+- **Verifisert:** kostnad per modellkall persisteres i Postgres (`cost_events` med
+  `session_id`/`task_id`, bevist med SQL i e2e-test); hvert kall produserer trace-span med samme
+  korrelasjon og kostnad (bevist mot `TraceSink` i e2e-test).
+- **Implementert, ikke verifisert:** `LangfuseTraceSink` (ingestion-API, basic auth fra miljø) er
+  skrevet og typesjekket, men har aldri sendt til en kjørende Langfuse.
+- **Mangler for fullt bevis:** en kjørende selvhostet Langfuse-instans (krever Docker – finnes ikke
+  på dev-PC-en) + visuell/API-kontroll av at spans med kostnad vises der.
+- **Konsekvens:** Akseptansekriterium 2 er **UNVERIFIED** (ikke PASS) og fase 3 kan ikke lukkes
+  ubetinget. Planen gir ingen eksplisitt hjemmel for utsettelse; flytting av Langfuse-visningen til
+  driftsverifikasjon i første Docker-miljø (NAS-oppsett eller Docker-installasjon) krever eksplisitt
+  beslutning fra Tobias, som i så fall logges som D-27 i beslutningsloggen.
+
+## Fase 3 – øvrige avvik
 - **Reelle Anthropic/OpenAI-kall uverifisert:** ingen API-nøkler i miljøet (med vilje). Adaptere er
   skrevet og typesjekket; e2e bruker skriptet adapter. Verifiseres når Tobias legger nøkler i `.env`.
 - **Docker fortsatt fraværende:** `docker compose config` uverifisert (uendret fra fase 2).
