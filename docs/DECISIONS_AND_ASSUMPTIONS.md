@@ -36,6 +36,9 @@
 | D-21 | **Kundeoppfølging AS er eneste bedrifts-tenant i v1**; arkitekturen skal fortsatt støtte flere tenants uten større redesign (bekrefter A-04, Tobias 2026-08-12) | Tenant-modellen i fase 2 dimensjoneres deretter |
 | D-22 | **iPhone + Apple Watch er mobilplattformen i v1**; Android er ikke krav (bekrefter A-05, Tobias 2026-08-12) | Fase 8 bygger kun Apple-økosystemet |
 | D-23 | **Skybaserte frontier-modeller kan brukes for ikke-sensitive data.** Sensitive spaces/data følger sikkerhets- og personvernreglene og kan kreve lokal behandling eller sterk dataminimering (bekrefter A-06, Tobias 2026-08-12) | Model Gateway-ruting per space fra fase 3 |
+| D-24 | **Webchat i fase 3 er en lettvekts statisk side i `apps/web` servert av API-et – ikke Next.js.** Next.js-klasse rammeverk vurderes når web-appen får reelle behov (auth-flyt, flere sider) | Én HTML-side trenger ikke et rammeverk; unngår stor avhengighetsflate og CI-tid; SSE-streaming fungerer med ren fetch (fase 3, 2026-08-12) |
+| D-25 | **Runtime uten build-steg: Node `--experimental-transform-types` + relative imports med `.ts`-utvidelse** i hele monorepoet | Reell kjøring avdekket at strip-types ikke støtter parameter properties og at `.js`-imports ikke resolves; transform-types kjører full TS-syntaks direkte. Build-steg innføres når produksjonskrav (fase 6+) tilsier det |
+| D-26 | **Kø-claiming på tvers av tenants skjer via én smal SECURITY DEFINER-funksjon (`claim_next_task`, migrasjon 007)** – app-rollen får aldri generell RLS-bypass | Workeren er systemintern og må claime uansett tenant; en funksjon eid av migrasjonsbruker gir minst mulig privilegium i stedet for privilegert app-rolle (fase 3, 2026-08-12) |
 
 ## C. Funn fra kritisk gjennomgang av masterplan v2.1
 
