@@ -1,0 +1,62 @@
+# Jarvis – beslutninger, antakelser og kritisk gjennomgang
+
+**Status:** Utkast v1.0. Dette dokumentet er logg over (a) beslutninger arvet fra masterplan v2.1,
+(b) beslutninger tatt i spesifikasjonsarbeidet, (c) funn fra kritisk gjennomgang av kildedokumentene, og
+(d) antakelser som må bekreftes av Tobias.
+
+## A. Arvede beslutninger (fra masterplan v2.1 – bekreftet videreført)
+
+| ID | Beslutning |
+|---|---|
+| D-01 | Én Jarvis-identitet med segmenterte memory spaces |
+| D-02 | Modulær monolitt; 3–5 produksjonsprosesser |
+| D-03 | Hybridminne: Postgres + fulltekst + pgvector + relasjonstabeller + sammendrag + reranking |
+| D-04 | Full-duplex Voice Gateway som egen prosess fra første talepilot |
+| D-05 | Home Assistant som verktøy/enhetsbuss; HA Assist kun som reservevei |
+| D-06 | Deterministisk Policy Gateway + signerte godkjenninger for klasse D |
+| D-07 | Workflow-motor bak `WorkflowAdapter`; Temporal kun ved målt behov |
+| D-08 | Sandboxede workers + menneskelig merge-gate |
+| D-09 | Hybrid sky/lokal med måling før kjøp; startgrenser 1 000/2 000/3 000 kr/mnd |
+| D-10 | Norsk tale-benchmark (≥100 prøver) + tale-DPIA før leverandørvalg låses; 4 ukers stop/go |
+
+## B. Nye beslutninger i spesifikasjonsarbeidet
+
+| ID | Beslutning | Begrunnelse |
+|---|---|---|
+| D-11 | **Fase 1 omdefinert til «kjørbart fundament»:** masterplanens Del 1 (sikkerhetsdokumenter) + repo-skjelett, kontrakter, policy-skjelett med kjørende tester | Brukerkravet sier at fase 1 skal være et lite, *fungerende* fundament. Masterplanens Del 1 er ren dokumentleveranse; uten kjørende policytester kan ikke Del 1s eget akseptansekriterium («policytester avviser uautorisert klasse D») oppfylles |
+| D-12 | **Ren PostgreSQL er kravet; Supabase er en distribusjon av det.** Lokal Postgres-container i trinn 0–1; Supabase (sky eller selvhostet) er valgfritt senere | Lokal-først-prinsippet (regel 12). Alt som brukes (RLS, pgvector, tsvector, pgmq) er ren Postgres og flytter uendret |
+| D-13 | **Workflow starter Postgres-basert (pg-boss-klasse) bak `WorkflowAdapter`** i fase 3; Trigger.dev/Hatchet evalueres i fase 6 når reelle jobbmønstre finnes | Masterplanen foreslår administrert Trigger.dev først – det strider mot lokal-først og gir skyavhengighet i kjernen før det trengs. Adapteren gjør bytte billig |
+| D-14 | **TypeScript (Node 22) som primærspråk for Core/Worker/web; Python tillatt kun i Voice Gateway hvis taleøkosystemet krever det** | Ett språk i kjernen gir delte typede kontrakter (`packages/contracts`), enklere vedlikehold for én utvikler + AI-agenter. Se teknologistack i IMPLEMENTATION_PLAN |
+| D-15 | **`apps/mobile`/`apps/desktop` opprettes først i fase 8** | Tomme mapper gir falsk fremdrift; monorepo-strukturen tåler tillegg senere |
+| D-16 | **Secrets i trinn 0: SOPS + age for kryptert konfig, .env kun lokalt og git-ignorert; vault (Infisical/OpenBao) innføres når mer enn én prosess trenger delte secrets** (senest fase 6) | Full vault fra dag én er tung for én maskin; SOPS-kravet finnes allerede i masterplanen. Prinsippet «aldri secrets i kode» gjelder fra første commit |
+| D-17 | Dokumenthierarki: CANONICAL_SPEC > øvrige docs > masterplan-PDF > eldre notater | Én autoritativ kilde ved motstrid |
+
+## C. Funn fra kritisk gjennomgang av masterplan v2.1
+
+| ID | Funn | Type | Håndtering |
+|---|---|---|---|
+| K-01 | Masterplanens Del 1–2 leverer ingen kjørende programvare, mens brukerkravet krever et «lite, fungerende fundament» i fase 1 | Motstrid | Løst ved D-11: fase 1 = Del 1 + kjørbart skjelett |
+| K-02 | «Lokal drift først» vs. første bølge-integrasjoner som er skytjenester (Vercel, Google Cloud, Supabase-sky) og administrert Trigger.dev | Spenning | Løst ved D-12/D-13: skytjenester er valgfrie/utsatt; kjernen kjører lokalt |
+| K-03 | Masterplanen sier både «Supabase/Postgres» som datalag og «flyttes mellom sky, lokal og egen server uten omskriving» – Supabase-spesifikke API-er (auth, storage, edge functions) ville låst oss | Risiko | D-12: bruk kun Postgres-kompatible funksjoner; Supabase-APIer unngås i kjernen |
+| K-04 | LiteLLM (Python-proxy) anbefales, men resten av stacken peker mot TypeScript (Trigger.dev, Vercel, Supabase) – språkmiks er ikke adressert i planen | Svakhet | D-14 + Q-04: LiteLLM kjøres ev. som egen container (ikke bibliotek), eller erstattes av TS-adapter; avgjøres i fase 3 |
+| K-05 | Kostnadsgrenser (1 000/2 000/3 000 kr) skal «håndheves av Model Gateway/Policy Gateway» – men skykostnader (Vercel, Google Cloud) går utenom disse gateways og kan ikke håndheves der, kun overvåkes | Unøyaktighet | Presisert i DEPLOYMENT §6: API-kost håndheves; infrakost overvåkes av watchdog |
+| K-06 | Worker-sikkerhet krever «Linux/WSL2 eller VM-basert container per jobb» – planen nevner ikke at Docker Desktop/WSL2 på Windows 11 Home har begrensninger (ingen Hyper-V isolasjon) | Hull | Notert i OPEN_QUESTIONS Q-06; WSL2-backend er akseptabel start, VM-isolasjon vurderes ved behov |
+| K-07 | Barge-in ≤250 ms og talerespons <1,5 s median er ambisiøse mål med sky-STT/TTS fra Norge; planen har riktignok benchmark-port, men ingen definert fallback hvis ingen leverandør når målet | Risiko | Q-03: stop/go-porten i fase 5 skal også kunne konkludere «lokal STT/TTS» eller «justerte mål» |
+| K-08 | Masterplanen refererer «sluttrapportens seks operative forbedringer» og egne dokumenter for «serverplattform og livsintegrasjon» – disse finnes ikke i docs/input | Manglende kilde | Q-01: be Tobias om dokumentene eller bekrefte at masterplanen er eneste kilde |
+| K-09 | Eval-settet (50–100 spørsmål) krever «Tobias sin faktiske historikk» – som ikke finnes i systemet før fase 4+; kaldstartproblem | Svakhet | Fase 4 starter med syntetisk + manuelt kuratert sett; utvides løpende med reell historikk |
+| K-10 | Identitetsmodellen har `delegation_id`, men planen definerer ikke hvordan delegasjonskjeder revideres (agent A delegerer til agent B) | Hull | Tas inn i fase 2-kontraktene: delegasjoner er en kjede med maks dybde, alle ledd i audit |
+| K-11 | «Kostnadsvarsel … i startfasen» er datert (beløp i NOK, august 2026); priser og produktversjoner må sjekkes på nytt ved implementering – planen sier dette selv | Påminnelse | Videreført som stående regel i CANONICAL_SPEC §7 |
+| K-12 | pgmq (Supabase Queues) nevnes i referansene, men workflow-kapittelet peker på Trigger.dev/Hatchet – planen er tvetydig om kø vs. workflow | Tvetydighet | Avklart: pgmq/pg-boss-klasse er kø-/jobbfundament (D-13); «durable workflow» med checkpoints er laget over; full motor vurderes i fase 6 |
+
+## D. Antakelser som må bekreftes av Tobias
+
+| ID | Antakelse | Konsekvens hvis feil |
+|---|---|---|
+| A-01 | Masterplan v2.1 er eneste og siste autoritative inputdokument | Spesifikasjonen må revideres mot manglende dokumenter (K-08) |
+| A-02 | Primærspråk norsk i tale og tekst; engelsk sekundært | Benchmark-design og prompt-strategi endres |
+| A-03 | PC-en (Lenovo, Windows 11 Home) har nok RAM/disk til dev-stacken (Postgres, Langfuse, containere) | Trinn 0 må slankes eller maskin oppgraderes |
+| A-04 | Kundeoppfølging AS er eneste bedrifts-tenant i første versjon | Tenant-modellen i fase 2 må utvides tidligere |
+| A-05 | iPhone/Apple Watch er mobilplattformen (ingen Android-krav) | Fase 8 endres |
+| A-06 | Tobias godtar skybaserte frontier-modeller for ikke-sensitive spaces fra start | Mer aggressiv lokal modell-strategi kreves tidligere |
+
+Bekreftede/avkreftede antakelser flyttes til seksjon B som beslutninger.
