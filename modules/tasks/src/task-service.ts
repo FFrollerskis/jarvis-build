@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
-import type { IdentityContext, JobContract } from "@jarvis/contracts";
+import { JobContractSchema, type IdentityContext, type JobContract, type MemorySpace } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import type { TaskView, WorkflowAdapter } from "./workflow-adapter.ts";
@@ -69,10 +69,76 @@ export class TaskService {
     if (decision.decision !== "ALLOW") {
       return { ok: false, reason: decision.reason };
     }
-    const cancelled = await this.queue.cancel(identity.tenant_id, taskId);
+    const outcome = await this.queue.requestCancel(identity.tenant_id, taskId);
     await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
-      writeAudit(client, identity, { type: "task.cancelled", payload: { task_id: taskId, cancelled } })
+      writeAudit(client, identity, { type: "task.cancelled", payload: { task_id: taskId, outcome } })
     );
-    return { ok: true, value: { cancelled } };
+    return { ok: true, value: { cancelled: outcome !== "not_cancellable" } };
+  }
+
+  /**
+   * Delegeringskontrakt (fase 6): ekstern/full kontrakt valideres og håndheves
+   * FØR kø. Strukturell sikkerhetsregel (SECURITY_MODEL §2-invarianten):
+   * en untrusted jobb får ALDRI både private minneområder og utgående nettverk.
+   */
+  async submit(identity: IdentityContext, contractInput: unknown): Promise<TaskServiceResult<{ task_id: string }>> {
+    const parsed = JobContractSchema.safeParse(contractInput);
+    if (!parsed.success) {
+      await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+        writeAudit(client, identity, { type: "task.rejected", reason: "invalid_contract" })
+      );
+      return { ok: false, reason: "invalid_contract" };
+    }
+    const contract = parsed.data;
+    if (contract.tenant_id !== identity.tenant_id) {
+      return { ok: false, reason: "tenant_mismatch" };
+    }
+    const privateSpaces = ["personal", "health", "business", "project", "home"];
+    if (
+      contract.input.trust_level === "untrusted" &&
+      contract.allowed_network_targets.length > 0 &&
+      contract.allowed_memory_spaces.some((space) => privateSpaces.includes(space))
+    ) {
+      await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+        writeAudit(client, identity, {
+          type: "task.rejected",
+          reason: "untrusted_with_private_memory_and_network",
+          payload: { task_id: contract.task_id }
+        })
+      );
+      return { ok: false, reason: "untrusted_with_private_memory_and_network" };
+    }
+    const decision = await this.policy.authorize({
+      identity,
+      toolCall: { tool_id: "tasks", action: "submit_task", capability_class: "B", parameters: { task_id: contract.task_id } }
+    });
+    if (decision.decision !== "ALLOW") {
+      return { ok: false, reason: decision.reason };
+    }
+    await this.queue.enqueue(identity.tenant_id, contract);
+    await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+      writeAudit(client, identity, { type: "task.submitted", payload: { task_id: contract.task_id } })
+    );
+    return { ok: true, value: { task_id: contract.task_id } };
+  }
+}
+
+/**
+ * Minnetilgang for delegerte jobber: KUN kontraktens tillatte spaces.
+ * Ingen agent får «hele Jarvis» - forespørsel utenfor mandatet avvises.
+ */
+export class JobMemoryAccessor {
+  constructor(
+    private readonly retriever: { search(identity: IdentityContext, opts: { spaces: MemorySpace[]; query: string }): Promise<unknown[]> },
+    private readonly allowedSpaces: readonly string[]
+  ) {}
+
+  async search(identity: IdentityContext, spaces: MemorySpace[], query: string): Promise<unknown[]> {
+    for (const space of spaces) {
+      if (!this.allowedSpaces.includes(space)) {
+        throw new Error(`memory_space_not_in_contract:${space}`);
+      }
+    }
+    return this.retriever.search(identity, { spaces, query });
   }
 }
