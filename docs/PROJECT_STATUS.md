@@ -17,14 +17,16 @@ Fase 1 (kjørbart sikkerhets-/prosjektfundament) er **ikke startet** – venter 
 
 ## Blokkeringer
 
-1. **Repoet er verifisert OFFENTLIG (`visibility: public`), bekreftet via GitHub API av ekstern
-   arkitekt.** Tobias må gjøre repoet privat (eller eksplisitt beslutte noe annet) **før** sensitiv
-   Jarvis-kode, secrets-konfigurasjon eller privat data legges inn. Krever Tobias.
-2. **Ingen fase 0-PR eksisterer.** PR kan ikke opprettes herfra: `gh` CLI mangler og SSH-nøkkelen er
-   en repo-deploy-nøkkel uten API-tilgang. Opprettes manuelt:
-   https://github.com/tsworkflow/jarvisbuild/pull/new/claude/fase-0-github-og-statusfiler
-3. **Q-01/Q-02** i [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) ubesvart (kildedokumenter + antakelser).
-4. **Fase 1 ikke godkjent** av Tobias ennå.
+1. **Q-01/Q-02** i [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) ubesvart (kildedokumenter + antakelser
+   A-01–A-06) – spørsmålene er stilt til Tobias; fase 0 kan ikke markeres fullført før de er besluttet.
+2. **Fase 1 ikke godkjent** av Tobias ennå.
+
+**Løst:** Repo-synlighet – Tobias har eksplisitt bekreftet (2026-08-12) at repoet er satt til
+**privat**; visibility-blokkeringen er lukket. (Innstillingen er endret av Tobias, ikke herfra.)
+
+**PR-status:** Ingen fase 0-PR eksisterer. Kan ikke opprettes herfra (`gh` mangler; deploy-nøkkel
+uten API-tilgang). Opprettes manuelt ved behov:
+https://github.com/tsworkflow/jarvisbuild/pull/new/claude/fase-0-github-og-statusfiler
 
 GitHub-tilgang er løst: SSH deploy-nøkkel (ed25519) registrert; `main` (baseline, godkjent av Tobias)
 og arbeidsbranchen er pushet.
