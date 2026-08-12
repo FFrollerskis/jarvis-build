@@ -1,0 +1,7 @@
+# SOPS-konfigurasjon (fase 1-strategi, D-16).
+# Krypterte konfigfiler legges under config/secrets/ og krypteres med age.
+# PLACEHOLDER: erstatt med reell age-mottaker (public key) før første krypterte fil.
+# Generer nøkkelpar med: age-keygen -o key.txt  (privat nøkkel lagres UTENFOR repoet)
+creation_rules:
+  - path_regex: config/secrets/.*\.(yaml|json|env)$
+    age: "AGE-PUBLIC-KEY-PLACEHOLDER-REPLACE-BEFORE-FIRST-USE"
