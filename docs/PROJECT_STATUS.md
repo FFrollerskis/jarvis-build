@@ -4,8 +4,11 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 3 – Jarvis Core og tekst-MVP: implementert; akseptanse 1/3/4/5 PASS, akseptanse 2 UNVERIFIED
-(Langfuse-visning, se egen seksjon). Venter på Tobias sin beslutning om lukking/utsettelse.**
+**Fase 3 – Jarvis Core og tekst-MVP: FULLFØRT** (besluttet av Tobias/ekstern arkitekt 2026-08-13).
+Akseptanse 1/3/4/5: PASS. Akseptanse 2: **PASS BY EXPLICIT D-27 DEFERMENT** – funksjonaliteten
+(kostnad i `cost_events`, trace-korrelasjon, Langfuse-sink) er implementert og testet;
+runtime-verifikasjonen av visning i kjørende Langfuse er flyttet til første Docker-miljø som en
+**bindende port i D-27** (må utføres før det miljøet godkjennes – skal ikke glemmes/waives).
 Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c74da0`).
 
 ## Fase 3 – implementerte komponenter
@@ -40,11 +43,12 @@ Fase 0 fullført (`7e31f4a`); fase 1 godkjent (`9e43531`); fase 2 godkjent (`0c7
   replay→DENY, samtidighet→nøyaktig én ALLOW, DB-feil→DENY, rollback åpner ikke replay,
   feil action/parameter/signatur/utløp/enhet brenner ikke nonce, atomisk forbruk før handling).
 
-## Fase 3 – akseptansekriterium 2: UNVERIFIED (Langfuse-delen)
+## Fase 3 – akseptansekriterium 2: PASS BY EXPLICIT D-27 DEFERMENT
 
 Planens eksakte tekst (IMPLEMENTATION_PLAN.md, akseptansekriterium 2, fase 3):
 «Hvert modellkall har kostnad knyttet til `task_id`/`session_id`, synlig i Langfuse.»
-«Synlig i Langfuse» er dermed en obligatorisk del av kriteriet. Status:
+Lukket ved beslutning D-27 (2026-08-13): Langfuse-visningen er utsatt til første Docker-miljø som
+bindende port (sju konkrete verifikasjonssteg i D-27). Faktagrunnlag:
 
 - **Verifisert:** kostnad per modellkall persisteres i Postgres (`cost_events` med
   `session_id`/`task_id`, bevist med SQL i e2e-test); hvert kall produserer trace-span med samme
@@ -53,10 +57,10 @@ Planens eksakte tekst (IMPLEMENTATION_PLAN.md, akseptansekriterium 2, fase 3):
   skrevet og typesjekket, men har aldri sendt til en kjørende Langfuse.
 - **Mangler for fullt bevis:** en kjørende selvhostet Langfuse-instans (krever Docker – finnes ikke
   på dev-PC-en) + visuell/API-kontroll av at spans med kostnad vises der.
-- **Konsekvens:** Akseptansekriterium 2 er **UNVERIFIED** (ikke PASS) og fase 3 kan ikke lukkes
-  ubetinget. Planen gir ingen eksplisitt hjemmel for utsettelse; flytting av Langfuse-visningen til
-  driftsverifikasjon i første Docker-miljø (NAS-oppsett eller Docker-installasjon) krever eksplisitt
-  beslutning fra Tobias, som i så fall logges som D-27 i beslutningsloggen.
+- **Konsekvens:** Lukket via D-27. Ved første Docker-miljø (NAS-oppsett eller Docker på PC) SKAL
+  Langfuse-porten i D-27 kjøres før miljøet godkjennes: start Langfuse, kjør modellkall gjennom
+  ModelGateway, verifiser synlig trace med korrekt korrelasjon/kostnad, kryssjekk mot `cost_events`,
+  dokumenter her. Feil i integrasjonen behandles da som feil som må rettes.
 
 ## Fase 3 – øvrige avvik
 - **Reelle Anthropic/OpenAI-kall uverifisert:** ingen API-nøkler i miljøet (med vilje). Adaptere er
