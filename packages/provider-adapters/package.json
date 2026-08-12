@@ -1,0 +1,13 @@
+{
+  "name": "@jarvis/provider-adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Modell-leverandoerer bak felles adapter: Anthropic, OpenAI, Ollama (lokal) og skriptet testadapter",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
