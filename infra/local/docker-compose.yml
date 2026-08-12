@@ -6,6 +6,21 @@
 # Fase 2 legger til: postgres (pgvector, pgmq). Fase 3: langfuse. Se DEPLOYMENT_STRATEGY.md.
 
 services:
+  postgres:
+    # pgvector-image gir Postgres 16 + vector-extension (aktiveres først i fase 4).
+    # pgmq er bevisst utelatt: kø-valget er pg-boss-klasse over vanlige tabeller (D-13).
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: "${JARVIS_DB_NAME:-jarvis}"
+      POSTGRES_USER: "${JARVIS_DB_ADMIN_USER:-postgres}"
+      # Ingen default-passord: settes i lokal .env (git-ignorert).
+      POSTGRES_PASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?sett JARVIS_DB_ADMIN_PASSWORD i .env}"
+    ports:
+      - "${JARVIS_DB_PORT:-5432}:5432"
+    volumes:
+      - jarvis-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
   api:
     build:
       context: ../..
@@ -16,3 +31,6 @@ services:
     ports:
       - "${JARVIS_API_PORT:-3010}:${JARVIS_API_PORT:-3010}"
     restart: unless-stopped
+
+volumes:
+  jarvis-pgdata:
