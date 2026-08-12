@@ -52,6 +52,10 @@ Fremdrift regnes mot leveransene og akseptansekriteriene i
 
 ## Aktive blokkeringer
 
+- **Push til GitHub blokkert (403):** lagret Windows-credential tilhører GitHub-kontoen `post-ops`,
+  som ikke har tilgang til `tsworkflow/jarvisbuild`. Tobias må enten gi `post-ops` tilgang, bytte
+  credential i Windows Credential Manager, eller installere `gh` og logge inn med riktig konto.
+  Alt arbeid er committet lokalt.
 - **Push til `main`:** krever uttrykkelig godkjenning fra Tobias (regel i samarbeidsprotokollen);
   repoet på GitHub er tomt inntil da.
 - **SSH til GitHub:** «Permission denied (publickey)» – ingen SSH-nøkkel er konfigurert for

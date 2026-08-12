@@ -16,8 +16,9 @@ CLAUDE.md, og push av arbeidsbranch. Ingen applikasjonskode (fase 1 er ikke godk
 - **Resultat:** Delvis fullført – alt lokalt arbeid ferdig; `main`-push og PR blokkert (se Blokkeringer)
 - **Aktiv branch:** `claude/fase-0-github-og-statusfiler`
 - **Nyeste commit:** `cba7c6b` (+ denne rapportens commit, se `git log --oneline -1`)
-- **Push-status:** arbeidsbranch pushet via HTTPS (verifiser med `git ls-remote origin`); `main` er
-  IKKE pushet – krever Tobias sin godkjenning
+- **Push-status:** **PUSH FEILET (403).** GitHub-credentialen som er lagret på PC-en tilhører brukeren
+  `post-ops`, som ikke har skrivetilgang til `tsworkflow/jarvisbuild`. Alt arbeid ligger trygt lokalt.
+  `main` er uansett ikke forsøkt pushet – krever Tobias sin godkjenning
 - **Pull Request:** ikke opprettet – `gh` CLI er ikke installert, og PR er uansett umulig før `main`
   finnes på GitHub som base-branch
 
@@ -66,7 +67,7 @@ kjernen), D-15 (mobile/desktop-mapper først i fase 8), D-16 (SOPS før vault) �
 | `git ls-remote origin` (HTTPS) | Kontakt med repo | OK, tomt repo (exit 0, ingen refs) | ✅ |
 | `gh --version` | CLI tilgjengelig | «command not found» | ❌ (blokkering rapportert) |
 | `git diff` før commit | Kun dokumentasjon, ingen hemmeligheter | Kun .md-filer, ingen hemmeligheter | ✅ |
-| `git push -u origin claude/fase-0-github-og-statusfiler` | Branch på GitHub | Se GitHub-status nederst | – |
+| `git push -u origin claude/fase-0-github-og-statusfiler` | Branch på GitHub | `403: Permission to tsworkflow/jarvisbuild.git denied to post-ops` | ❌ Blokkert |
 
 Tester/typecheck/lint/build: **ikke relevant** – prosjektet inneholder ingen kode ennå.
 
@@ -78,7 +79,7 @@ Tester/typecheck/lint/build: **ikke relevant** – prosjektet inneholder ingen k
 | Statusfiler finnes og er komplette | Oppfylt | Filene i `docs/`; commit `cba7c6b` |
 | CLAUDE.md dekker samarbeidsprotokollen | Oppfylt | Diff i commit `cba7c6b` |
 | Ingen hemmeligheter i diff | Oppfylt | Manuell diff-kontroll; kun dokumentasjon |
-| Arbeidsbranch pushet | Se GitHub-status | `git ls-remote origin` |
+| Arbeidsbranch pushet | **Ikke oppfylt** | Push ga 403 (feil GitHub-konto `post-ops`); se Blokkeringer |
 | Repo verifisert privat | **Ikke oppfylt** | Kan ikke kontrolleres uten `gh`/GitHub-tilgang – Tobias må verifisere i GitHub-innstillingene |
 
 ## Uferdig arbeid
@@ -88,6 +89,11 @@ Tester/typecheck/lint/build: **ikke relevant** – prosjektet inneholder ingen k
 
 ## Blokkeringer og spørsmål
 
+0. **Push blokkert av feil GitHub-konto.** `git push` (HTTPS) ga
+   `Permission to tsworkflow/jarvisbuild.git denied to post-ops` (403). Windows sin lagrede
+   Git-credential tilhører kontoen `post-ops`. Løsninger (Tobias velger): (a) gi `post-ops`
+   skrivetilgang til repoet, (b) bytt lagret credential til riktig konto i Windows Credential Manager
+   («git:https://github.com»), eller (c) installer GitHub CLI og kjør `gh auth login` med riktig konto.
 1. **Godkjenning: push av `main`.** Repoet på GitHub er tomt. For at GitHub skal bli sannhetskilde og
    PR-flyt skal fungere, må `main` (2 commits, kun dokumentasjon) pushes én gang som baseline.
    Protokollen forbyr main-push uten uttrykkelig godkjenning → **Tobias må godkjenne.**
@@ -132,7 +138,8 @@ Ingen (ingen kode eksisterer).
 - **Commit-hash:** `cba7c6b` + rapport-commit (se `git log --oneline -1`)
 - **Pull Request:** ingen (blokkert: tom `main` på remote + manglende `gh`)
 - **Git-status:** rent arbeidstre etter commit
-- **Er alle endringer pushet:** arbeidsbranch ja (etter push-steget); `main` nei (venter på godkjenning)
+- **Er alle endringer pushet:** **nei** – push blokkert (403, feil konto `post-ops`); alt arbeid er
+  committet lokalt og pushes så snart tilgangen er ordnet
 
 ## Anbefalt neste oppgave
 

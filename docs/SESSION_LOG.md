@@ -69,6 +69,12 @@ branch-strategi, obligatoriske statusfiler, oppdatert CLAUDE.md, push av arbeids
 **Feil/problemer:** `gh` ikke installert → repoets private-status kan ikke verifiseres herfra, og PR kan
 ikke opprettes automatisk. Rapportert til Tobias som blokkering.
 
-**Commit:** se `HANDOFF_REPORT.md` / `git log` (hash settes ved commit etter denne loggoppdateringen)
+**Commits:** `cba7c6b` (statusfiler + CLAUDE.md), `632926f` (handoff-rapport), + sluttcommit med
+korrigert push-status (se `git log`).
 
-**Videre:** Tobias godkjenner main-push (bootstrap) og fase 1; deretter `claude/fase-1-security-foundation`.
+**Feil/problemer (tillegg):** `git push` feilet med 403 – lagret credential tilhører GitHub-kontoen
+`post-ops` uten tilgang til `tsworkflow/jarvisbuild`. Arbeid beholdt lokalt; løsningsalternativer
+dokumentert i HANDOFF_REPORT (Blokkeringer pkt. 0).
+
+**Videre:** Tobias ordner GitHub-tilgang, godkjenner main-push (bootstrap) og fase 1; deretter
+`claude/fase-1-security-foundation`.
