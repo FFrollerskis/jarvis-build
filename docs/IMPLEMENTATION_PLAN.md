@@ -226,7 +226,7 @@ Vercel – hver med scopes, audit, rate limit, rollback og injection-test.
 - Integrasjonene: GitHub (utvidet), Google Calendar, Gmail, Drive/Docs, Telegram (varsling + godkjenningskanal), Vercel
 - Ingestion-pipeline: e-post/dokumenter → Ingestion Zone → karantene → strukturert uttrekk → minne
 - Prompt injection-testsuite (automatisert, per verktøy)
-- Vault innført (Infisical/OpenBao) – secrets flyttes fra SOPS-filer til vault med rotasjon
+- Vault innført (Infisical/OpenBao – valg per Q-05 tas her, senest nå per D-16) – secrets flyttes fra SOPS-filer til vault med rotasjon
 
 **Avhengigheter:** Fase 4 (minne for ingest), fase 6 (jobber som bruker verktøy).
 
@@ -354,7 +354,7 @@ F10: kontinuerlig etter F3, fullføres etter F7
 | Model Gateway | Egne TS-adaptere (Anthropic/OpenAI/OpenRouter/Ollama); LiteLLM-proxy som container vurderes i fase 3 hvis egenkoden vokser | Unngår Python-avhengighet i kjernen; Jarvis-spesifikk ruting er uansett egen kode (K-04) |
 | Tale | Egen gateway-prosess; WebRTC (LiveKit selvhostet som kandidat); STT/TTS bak `SpeechAdapter`, valg via norsk benchmark | Full-duplex-krav; leverandøruavhengighet; måling før låsing (D-10) |
 | Observability | Langfuse selvhostet + OpenTelemetry + strukturert JSON-logg | Masterplanens valg; selvhostet = lokal-først |
-| Secrets | SOPS + age (trinn 0) → Infisical/OpenBao (fase 7) | Gradvis: aldri secrets i kode fra dag én, vault når flere prosesser deler (D-16) |
+| Secrets | SOPS + age (fase 1, ingen kjørende vault) → sentral vault senest fase 7 (valg per Q-05) | Gradvis: aldri secrets i kode fra dag én, vault når flere prosesser deler (D-16) |
 | Sandbox | Docker på WSL2; kastbar container per jobb | Kravet i masterplanen; kjører på eksisterende PC (K-06 følges opp) |
 | CI | GitHub Actions: lint, typecheck, test, gitleaks, policytester, minne-eval | Alle porter automatiseres |
 | Mobil | Swift/SwiftUI + watchOS (fase 8) | Apple-økosystem er kravet (A-05) |

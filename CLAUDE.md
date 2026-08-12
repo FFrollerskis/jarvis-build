@@ -39,9 +39,10 @@ En ekstern AI-arkitekt kontrollerer arkitektur, kodeendringer og testresultater 
 (HTTPS; SSH `git@github.com:tsworkflow/jarvisbuild.git` kan brukes når nøkkel er konfigurert).
 
 **Ved oppstart av hver økt:** bekreft mappe, `git status`, branch og `git remote -v`; les CLAUDE.md,
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md), [docs/SESSION_LOG.md](docs/SESSION_LOG.md),
-[docs/HANDOFF_REPORT.md](docs/HANDOFF_REPORT.md) og relevante plandokumenter; oppsummer status,
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) og relevante plandokumenter; oppsummer status,
 øktens mål, gjeldende akseptansekriterier og branch i chatten **før** implementering starter.
+`PROJECT_STATUS.md` er eneste status-/handoff-fil; `SESSION_LOG.md` og `HANDOFF_REPORT.md` skal
+verken brukes eller opprettes. Git-commits + diff + `PROJECT_STATUS.md` er prosjektets sporbarhet.
 
 **Git-regler (absolutte):** aldri force push; aldri `git reset --hard`; aldri overskrive publisert
 historikk; aldri slette branches/tags uten godkjenning; aldri pushe direkte til `main` uten uttrykkelig

@@ -16,7 +16,9 @@ det** («mål før kjøp»). Alt bygges derfor:
 
 ### Trinn 0 – Utvikling (fase 1–4)
 
-- Alt på PC-en: Core, Postgres (pgvector, tsvector, pgmq), Langfuse, vault – i docker-compose.
+- Alt på PC-en: Core, Postgres (pgvector, tsvector, pgmq), Langfuse – i docker-compose.
+- Secrets: SOPS + age og lokal git-ignorert `.env`; ingen kjørende vault før flere tjenester trenger
+  delte secrets (D-16, senest fase 7).
 - Webchat nås lokalt (localhost/LAN). Ingen inngående porter fra internett.
 - Kjente begrensninger aksepteres: PC-en er ikke alltid på; nedetid er OK i denne fasen.
 
@@ -58,7 +60,8 @@ Prod-data brukes aldri i dev/test uten anonymisering. Migrasjoner er versjonerte
 | 2 | Oppgaver, aktive prosjekter, artefakter | ≤4 t | samme arbeidsdag | Periodisk synk til objektlagring |
 | 3 | Arkiv, media, eksporter | daglig/ukentlig | dager | Ukentlig kopi |
 
-- Backup er kryptert før den forlater huset; nøkler i vault + offline kopi.
+- Backup er kryptert før den forlater huset; nøkler i sikker nøkkellagring (age-nøkler i fase 1,
+  vault når den er innført per D-16) + offline kopi.
 - **Restore testes med faktisk tidtaking** (øvelse i fase 10, deretter periodisk). En backup som aldri er
   gjenopprettet regnes ikke som verifisert.
 - Menneskelesbar minneeksport (se MEMORY_ARCHITECTURE §8) inngår som ekstra sikkerhetsnett.

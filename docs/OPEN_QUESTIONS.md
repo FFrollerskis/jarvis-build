@@ -9,7 +9,7 @@
 |---|---|---|---|
 | Q-01 | Finnes «sluttrapporten», «serverplattform»- og «livsintegrasjon»-dokumentene som masterplanen refererer til – og skal de inn i `docs/input`? | Masterplanen viser til dokumenter som ikke ligger i docs/input (K-08). Spesifikasjonen er bygget på masterplanen alene | Før fase 1 |
 | Q-02 | Er antakelsene A-01 til A-06 riktige? (eneste inputdokument, norsk primærspråk, PC-kapasitet, én bedrifts-tenant, iPhone/Watch, sky-modeller OK for ikke-sensitivt) | Se DECISIONS seksjon D | Før fase 1 |
-| Q-05 | Vault-preferanse: Infisical (enklere, har sky-opsjon) eller OpenBao (helt åpen, mer drift)? | Innføres senest fase 7 (D-16); valget påvirker ikke fase 1–3 | Innen fase 6 |
+| Q-05 | Vault-preferanse: Infisical (enklere, har sky-opsjon) eller OpenBao (helt åpen, mer drift)? | Vault innføres når flere tjenester trenger delte secrets, senest fase 7 (D-16); valget påvirker ikke fase 1–3 | Før vault innføres (senest fase 7) |
 | Q-07 | Hvilken e-post/kalender er primær: Gmail eller Outlook? (tobias@ffskis.com – hvilken plattform ligger den på?) | Styrer fase 7-integrasjonene; begge støttes via adapter, men én bygges først | Innen fase 7 |
 | Q-08 | Skal Jarvis ha egen Telegram-bot fra fase 3 (tidlig varslingskanal) eller vente til fase 7? | Telegram er billig å koble tidlig og nyttig for jobbvarsler | Innen fase 3 |
 

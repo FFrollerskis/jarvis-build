@@ -137,7 +137,8 @@ Fem tillitszoner: Ingestion, Reasoning, Memory, Execution, Secret. Capability-kl
 intern), C (ekstern innen mandat), D (betaling/kontrakt/sletting/publisering/lås/alarm/tilgang).
 Klasse D krever signert godkjenningsobjekt (handling, parametere, utløpstid, engangs-ID, godkjennende
 enhet) verifisert i deterministisk kode. Workers kjører i kastbare containere med nettverksallowlist og
-jobbspesifikke tokens. Sentral vault; append-only audit utenfor agentprosessen; kill switch.
+jobbspesifikke tokens. Secrets: SOPS + age i fase 1, sentral vault senest ved eksterne integrasjoner
+(D-16); append-only audit utenfor agentprosessen; kill switch.
 
 ## 10. Personvern
 
