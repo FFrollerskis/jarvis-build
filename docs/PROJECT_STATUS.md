@@ -4,7 +4,13 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 7 – Første integrasjoner: implementert, venter på ekstern arkitektkontroll.**
+**Fase 8 – Mobil, Watch og kontinuitet: under arbeid (backend-fundament).**
+**Fase 7 – FULLFØRT** (arkitektkontroll + Tobias 2026-08-13). Endelig akseptanse: (1)
+scopes/audit/rate limit/rollback/injection **PASS**, live providerdel **PASS BY D-35 DEFERMENT** ·
+(2) e-post sender aldri uten approval **PASS** · (3) full sporing/proveniens **PASS** · (4) vault:
+arkitektur/valg (D-33 Infisical) **PASS**, faktisk runtime **PASS BY D-35 DEFERMENT**.
+Q-05 lukket (D-33: Infisical) · Q-07 lukket (D-34: Gmail først, konto som konfig).
+Inntil D-35: integrasjonene er arkitektur-/utviklingsverifiserte, ikke produksjonsverifiserte.
 
 ## Fase 7 – resultater (2026-08-13)
 
@@ -45,6 +51,7 @@ DEFERMENT** · øvrige kriterier **PASS**.
 | **D-28** | pgvector/HNSW + eval-/RLS-regresjon + ytelse | Første Docker-miljø |
 | **D-30** | Norsk voice-providerbenchmark (≥100 prøver) + STOP/GO | Ekte voice-kandidater + prøver; før bred utrulling |
 | **D-32** | Worker-container (21 punkter) + ekte GitHub-gate | Første miljø med Docker + autentisert GitHub |
+| **D-35** | Infisical-runtime (10 steg) + live OAuth/Gmail/Calendar/GitHub/Drive/Telegram/Vercel per integrasjon | Docker + credentials; Infisical-delen trigges av første Docker-miljø |
 
 ## Fase 6 – implementert (2026-08-13)
 
