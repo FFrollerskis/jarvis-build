@@ -4,7 +4,32 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 7 – Første integrasjoner: under implementering.** Fase 6 – **FULLFØRT** (arkitektkontroll +
+**Fase 7 – Første integrasjoner: implementert, venter på ekstern arkitektkontroll.**
+
+## Fase 7 – resultater (2026-08-13)
+
+- **Tool Gateway** (`modules/tool-gateway`): maskinlesbart register (skjema, klasse, scopes,
+  reversibilitet/rollback, idempotens, timeout, rate limit, credential-ref, output-tillit);
+  pipeline Identity → Policy → rate limit → idempotensdedupe → adapter → audit; migrasjon 010
+  (`tool_executions` m/RLS). 9 førstebølge-verktøy registrert (GitHub les/PR, kalender les/opprett,
+  e-post les/**send=klasse D**, Drive, Telegram, Vercel).
+- **Ingestion:** ekstern kilde → karantene via fase 4-MemoryWriter (untrusted; aldri autoritativt
+  uten policy-promotering); injection-e-post kan ikke nå retrieval eller utløse utsending.
+- **Secrets:** `SecretProvider`-adapter (env/SOPS-impl nå; Infisical-skall). **Akseptanse 4
+  (vault) UNVERIFIED/blokkert: Q-05 (Infisical vs. OpenBao) er ÅPEN og begge krever Docker.**
+  Q-07 (Gmail vs. Outlook) ÅPEN — adaptere er leverandørnøytrale.
+- **10 nye tester (106/106 totalt):** metadata-komplett register; audit med credential-REF (aldri
+  verdi — verifisert i alle audit-rader); email.send DENY uten godkjenning / ALLOW med / replay-DENY;
+  injection-karantene; idempotent retry (samme external_id, ingen ny ekstern handling);
+  cross-tenant RLS på tool_executions; jobb-scoping (`allowed_tools`); revoked credential →
+  kontrollert feil; kill switch; rate limit; mandatløs klasse C → DENY.
+- **UNVERIFIED (miljø):** reelle API-kall mot GitHub/Google/Telegram/Vercel (ingen
+  OAuth-/API-credentials — transportskall klare); vault-utrulling (Docker + Q-05).
+- **Akseptanse:** (1) scopes/audit/rate limit/rollback/injection-test per verktøy: **PASS**
+  (mot kontrollerte transporter; live API UNVERIFIED) · (2) e-post utløser aldri utgående handling
+  uten godkjenningssteg: **PASS** · (3) sporing til person/jobb/policy/credential: **PASS** ·
+  (4) secrets i vault: **UNVERIFIED — krever Q-05-beslutning + Docker-miljø** (D-16-strategien med
+  SOPS/env og null nøkler i repo er fulgt). Fase 6 – **FULLFØRT** (arkitektkontroll +
 Tobias 2026-08-13, HEAD `fc20cb6` + D-32-lukkecommit). Fase 6-akseptanse endelig: lokalt isolert
 worker-system **PASS** · Docker-containerisolasjon **PASS BY EXPLICIT D-32 DEFERMENT** · lokal
 kodejobb/branch/test/commit **PASS** · ekte GitHub PR-flyt **PASS BY EXPLICIT D-32 DEFERMENT** ·
