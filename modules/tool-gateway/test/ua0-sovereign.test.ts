@@ -36,6 +36,8 @@ beforeAll(async () => {
   epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
   await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
+  // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
+  adminPool.on("error", () => undefined);
   await runMigrations(adminPool);
   await adminPool.query("CREATE ROLE jarvis_test LOGIN PASSWORD 'pw2'; GRANT jarvis_app TO jarvis_test;");
   await adminPool.query(`

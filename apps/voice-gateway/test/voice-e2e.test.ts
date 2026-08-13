@@ -109,6 +109,8 @@ beforeAll(async () => {
   adminPool = new pg.Pool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "test-superuser-pw"
   });
+  // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
+  adminPool.on("error", () => undefined);
   await runMigrations(adminPool);
   await adminPool.query("CREATE ROLE jarvis_test LOGIN PASSWORD 'test-app-pw'");
   await adminPool.query("GRANT jarvis_app TO jarvis_test");

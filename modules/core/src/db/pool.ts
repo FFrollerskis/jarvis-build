@@ -23,7 +23,14 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): DbConfig {
 }
 
 export function createPool(config: DbConfig): pg.Pool {
-  return new pg.Pool({ ...config, max: 10 });
+  const pool = new pg.Pool({ ...config, max: 10 });
+  // pg-beste-praksis (BO-11.1): en idle klient som termineres av serveren
+  // (restart/failover/nedkobling, FATAL 57P01) emitterer 'error' på poolen -
+  // uhåndtert kræsjer det hele prosessen. Neste query får uansett frisk klient.
+  pool.on("error", (err) => {
+    console.error(JSON.stringify({ msg: "pg_pool_idle_client_error", error: err.message.slice(0, 120) }));
+  });
+  return pool;
 }
 
 /**

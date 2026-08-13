@@ -47,6 +47,8 @@ beforeAll(async () => {
     user: "postgres",
     password: "test-superuser-pw"
   });
+  // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
+  adminPool.on("error", () => undefined);
 
   await runMigrations(adminPool);
 
