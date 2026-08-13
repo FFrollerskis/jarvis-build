@@ -60,15 +60,40 @@ export class ProcessSandboxRunner implements SandboxRunner {
 }
 
 /**
- * Docker-sandbox (kastbar container per jobb, nettverksallowlist på
- * containernivå). UVERIFISERT til Docker finnes i miljøet - da skal denne
- * verifiseres som del av Docker-miljøets godkjenning (sammen med D-27/D-28).
+ * Docker-sandbox (D-32): kastbar container per exec med delt jobb-workspace.
+ * Default-sikkerhet: non-root (node), --network none, minne-/PID-grenser,
+ * ephemeral workspace (host-tmpdir montert KUN på /work), ingen Docker-socket,
+ * ingen arvede Jarvis-secrets (env sendes aldri inn). Nettverk/secrets krever
+ * eksplisitt konfig - default åpnes ikke.
  */
 export class DockerSandboxRunner implements SandboxRunner {
   readonly name = "docker-sandbox";
-  constructor(private readonly image = "node:22-alpine") {}
+  constructor(
+    private readonly image = process.env["JARVIS_SANDBOX_IMAGE"] ?? "node:22-alpine",
+    private readonly dockerBin = process.env["JARVIS_DOCKER_BIN"] ?? "docker"
+  ) {}
 
-  async create(): Promise<Sandbox> {
-    throw new Error(`docker_sandbox_unverified: krever Docker (image ${this.image})`);
+  async create(_jobEnv: Record<string, string> = {}): Promise<Sandbox> {
+    const workdir = await mkdtemp(join(tmpdir(), "jarvis-dockerjob-"));
+    const { image, dockerBin } = this;
+    return {
+      workdir,
+      exec(command: string, args: string[], timeoutMs = 60_000): ExecResult {
+        const result = spawnSync(dockerBin, [
+          "run", "--rm",
+          "--network", "none",
+          "--memory", "256m",
+          "--pids-limit", "128",
+          "-u", "node",
+          "-v", `${workdir}:/work`,
+          "-w", "/work",
+          image, command, ...args
+        ], { timeout: timeoutMs, encoding: "utf8", shell: false });
+        return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+      },
+      async dispose(): Promise<void> {
+        await rm(workdir, { recursive: true, force: true });
+      }
+    };
   }
 }

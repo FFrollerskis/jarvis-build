@@ -89,3 +89,15 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
   container; D-27 Langfuse-runtime + trace; D-35 Infisical-runtime; API-autostart-container;
   full-stack compose (langfuse/infisical/api) + failure-injection. Alt er ren byggetid, ingen
   eksterne blockere.
+
+## BO-07 LIVE-EVIDENS (2026-08-13)
+- **D-27 Langfuse: VERIFIED.** langfuse/langfuse:2 i compose (headless init via .env, restart:unless-stopped,
+  Postgres-avhengig, health OK v2.95.11). Ekte OpenAI-kall → trace i Langfuse (navn openai:gpt-4o-mini,
+  userId=tenant, sessionId, metadata.task_id/cost_ore), korrelert med cost_events (2 øre). Redaction:
+  sentinel + credential-mønstre = IKKE i trace (sentinel_leak=false, key_leak=false). Outage: Langfuse
+  stoppet → core model-call lykkes fortsatt (DEGRADED, ikke krasj) → restart → health OK.
+- **D-32 DockerSandboxRunner: VERIFIED.** Koblet i ekte durable-kø (enqueue→lease→worker→
+  DockerSandboxRunner→container→resultat). Isolasjon: non-root node, --network none, --memory 256m,
+  --pids-limit 128, /work-mount, INGEN Jarvis/OpenAI/token-env (0 treff). Acceptance=completed;
+  crash/reclaim=completed (A leaset+krasjet, B reclaimet, attempts=2, resultat én gang); timeout=failed;
+  cancellation=cancelled; failed-command(exit3)=failed; result-persistens PASS over Postgres-restart.
