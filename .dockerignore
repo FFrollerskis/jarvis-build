@@ -1,0 +1,9 @@
+# Aldri inn i image: secrets, git-historikk, avhengigheter (installeres i image), kjøredata.
+.env
+.env.*
+.git
+**/node_modules
+var
+docs
+*.md
+infra/local/*.md
