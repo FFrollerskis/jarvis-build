@@ -1,0 +1,32 @@
+# XcodeGen-prosjekt (kjør `xcodegen generate` på Mac, eller opprett targets manuelt i Xcode).
+# Se docs/APPLE_PHASE8_CHECKLIST.md for morgendagens steg.
+name: Jarvis
+options:
+  bundleIdPrefix: com.tsworkflow.jarvis
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+targets:
+  JarvisiOS:
+    type: application
+    platform: iOS
+    sources: [Sources/JarvisKit, Sources/JarvisiOS]
+    info:
+      path: Sources/JarvisiOS/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSAppTransportSecurity:
+          # Dev mot lokal Jarvis (http://<lan-ip>:3010). Fjernes/strammes i prod (TLS).
+          NSAllowsLocalNetworking: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.tsworkflow.jarvis.ios
+  JarvisWatch:
+    type: application
+    platform: watchOS
+    sources: [Sources/JarvisKit, Sources/JarvisWatch]
+    info:
+      path: Sources/JarvisWatch/Info.plist
+      properties:
+        WKApplication: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.tsworkflow.jarvis.watch

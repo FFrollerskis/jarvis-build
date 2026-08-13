@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
-import type { IdentityService, SessionService } from "@jarvis/core";
+import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker } from "@jarvis/tasks";
 import type { ConversationEngine } from "./conversation.ts";
@@ -21,6 +21,8 @@ export interface ApiDeps {
   conversation: ConversationEngine;
   policy: PolicyGateway;
   worker: InProcessWorker;
+  /** Fase 8: enhetsregistrering/challenge-auth for mobil/Watch. */
+  devices?: DeviceService;
 }
 
 export interface HealthStatus {
@@ -132,6 +134,32 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
 
     const result = await deps.conversation.handle(resolved.identity, body.message);
     return json(res, 200, { ...result, session_id: session.session_id });
+  }
+
+  if (deps.devices && req.method === "POST" && url.pathname === "/devices/register") {
+    const body = (await readBody(req)) as {
+      identity: Parameters<IdentityService["resolveIdentity"]>[0];
+      device: { device_id: string; kind: string; public_key_pem: string };
+    };
+    const resolved = await deps.identity.resolveIdentity(body.identity);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    await deps.devices.registerDevice(resolved.identity, body.device);
+    return json(res, 200, { registered: body.device.device_id });
+  }
+
+  if (deps.devices && req.method === "POST" && url.pathname === "/devices/challenge") {
+    const body = (await readBody(req)) as { device_id: string };
+    return json(res, 200, { challenge: deps.devices.issueChallenge(body.device_id) });
+  }
+
+  if (deps.devices && req.method === "POST" && url.pathname === "/devices/challenge/verify") {
+    const body = (await readBody(req)) as {
+      tenant_id: string; device_id: string; challenge: string; signature: string;
+    };
+    const ok = await deps.devices.verifyChallenge(body.tenant_id, body.device_id, body.challenge, body.signature);
+    return json(res, ok ? 200 : 403, { verified: ok, auth_strength: ok ? "signed" : "passive" });
   }
 
   if (req.method === "POST" && url.pathname === "/worker/tick") {

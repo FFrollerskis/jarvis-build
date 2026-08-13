@@ -1,6 +1,7 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import {
   ContextBuilder,
+  DeviceService,
   IdentityService,
   MessageStore,
   PgApprovalStore,
@@ -57,6 +58,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   const deps: ApiDeps = {
     identity: new IdentityService(pool),
+    devices: new DeviceService(pool),
     sessions: new SessionService(pool),
     policy,
     worker,
