@@ -1,0 +1,26 @@
+{
+  "name": "@jarvis/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis Core API - fase 1: minimalt kjørbart fundament med health-endepunkt",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "node --experimental-transform-types src/main.ts"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "@jarvis/model-gateway": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/provider-adapters": "workspace:*",
+    "@jarvis/tasks": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

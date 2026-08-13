@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/model-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Model Gateway: providerruting, fallback, kostnadssporing og haandhevede budsjettgrenser",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/core": "workspace:*",
+    "@jarvis/provider-adapters": "workspace:*",
+    "pg": "^8.16.3",
+    "@jarvis/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

@@ -1,0 +1,147 @@
+# Jarvis lokal infrastruktur - fase 1-stub.
+# Fase 1 trenger ingen kjørende tjenester (ingen Postgres før fase 2, D-13/IMPLEMENTATION_PLAN).
+# Filen etablerer kun det portable mønsteret: alt konfigureres via miljøvariabler,
+# ingen hardkodede maskinstier, flyttbart mellom dev-PC (RTX 4070) og UGREEN-NAS (D-20).
+#
+# Fase 2 legger til: postgres (pgvector, pgmq). Fase 3: langfuse. Se DEPLOYMENT_STRATEGY.md.
+
+services:
+  postgres:
+    # pgvector-image gir Postgres 16 + vector-extension (aktiveres først i fase 4).
+    # pgmq er bevisst utelatt: kø-valget er pg-boss-klasse over vanlige tabeller (D-13).
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: "${JARVIS_DB_NAME:-jarvis}"
+      POSTGRES_USER: "${JARVIS_DB_ADMIN_USER:-postgres}"
+      # Ingen default-passord: settes i lokal .env (git-ignorert).
+      POSTGRES_PASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?sett JARVIS_DB_ADMIN_PASSWORD i .env}"
+    ports:
+      - "${JARVIS_DB_PORT:-5432}:5432"
+    volumes:
+      - jarvis-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${JARVIS_DB_ADMIN_USER:-postgres} -d ${JARVIS_DB_NAME:-jarvis}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  langfuse:
+    # D-27: self-hosted Langfuse v2 (kun Postgres-avhengighet). Init-noekler
+    # kommer fra .env (lokale dev-verdier) - aldri hardkodet her.
+    image: langfuse/langfuse:2
+    environment:
+      DATABASE_URL: "postgresql://${JARVIS_DB_ADMIN_USER:-postgres}:${JARVIS_DB_ADMIN_PASSWORD}@postgres:5432/langfuse"
+      NEXTAUTH_URL: "http://127.0.0.1:3050"
+      NEXTAUTH_SECRET: "${NEXTAUTH_SECRET}"
+      SALT: "${SALT}"
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_INIT_ORG_ID: "${LANGFUSE_INIT_ORG_ID}"
+      LANGFUSE_INIT_PROJECT_ID: "${LANGFUSE_INIT_PROJECT_ID}"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}"
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_INIT_PROJECT_SECRET_KEY}"
+      LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_INIT_USER_EMAIL}"
+      LANGFUSE_INIT_USER_NAME: "${LANGFUSE_INIT_USER_NAME}"
+      LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_INIT_USER_PASSWORD}"
+    ports:
+      - "3050:3000"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  infisical-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 10s
+      retries: 5
+
+  infisical:
+    # D-35: self-hosted Infisical (deler Docker-Postgres via egen db 'infisical').
+    image: infisical/infisical:latest-postgres
+    environment:
+      ENCRYPTION_KEY: "${INFISICAL_ENCRYPTION_KEY}"
+      AUTH_SECRET: "${INFISICAL_AUTH_SECRET}"
+      DB_CONNECTION_URI: "postgresql://${JARVIS_DB_ADMIN_USER:-postgres}:${JARVIS_DB_ADMIN_PASSWORD}@postgres:5432/infisical"
+      REDIS_URL: "redis://infisical-redis:6379"
+      SITE_URL: "http://127.0.0.1:3060"
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "3060:8080"
+    depends_on:
+      - postgres
+      - infisical-redis
+    restart: unless-stopped
+
+  # One-shot migrasjoner (BO-07): kjører alle migrasjoner nøyaktig én gang før
+  # api/worker starter. restart:no - avsluttet=suksess er startbetingelsen deres.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/local/api.Dockerfile
+    command: ["node", "--experimental-transform-types", "apps/api/src/migrate-main.ts"]
+    env_file: ["../../.env"]
+    environment:
+      JARVIS_DB_HOST: postgres
+      JARVIS_DB_PORT: "5432"
+      JARVIS_DB_NAME: "${JARVIS_DB_NAME:-jarvis}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/local/api.Dockerfile
+    env_file: ["../../.env"]
+    environment:
+      JARVIS_API_PORT: "${JARVIS_API_PORT:-3010}"
+      JARVIS_ENV: "${JARVIS_ENV:-dev}"
+      JARVIS_DB_HOST: postgres
+      JARVIS_DB_PORT: "5432"
+      JARVIS_DB_NAME: "${JARVIS_DB_NAME:-jarvis}"
+      # Container-interne adresser (host-.env peker på 127.0.0.1-portmappinger):
+      INFISICAL_URL: "http://infisical:8080"
+      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      # Fra host-miljø (aldri lagret i fil her):
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    ports:
+      - "${JARVIS_API_PORT:-3010}:${JARVIS_API_PORT:-3010}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_API_PORT:-3010}/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/local/api.Dockerfile
+    command: ["node", "--experimental-transform-types", "apps/api/src/worker-main.ts"]
+    env_file: ["../../.env"]
+    environment:
+      JARVIS_DB_HOST: postgres
+      JARVIS_DB_PORT: "5432"
+      JARVIS_DB_NAME: "${JARVIS_DB_NAME:-jarvis}"
+      # I container er prosess-sandbox default (containeren er isolasjonsgrensen;
+      # ingen Docker-socket monteres). Docker-sandbox (D-32) gjelder host-runtime.
+      JARVIS_SANDBOX: "process"
+      # BO-09: worker bruker AI Mesh + Langfuse/Infisical - container-interne adresser
+      # (host-.env peker på 127.0.0.1-portmappinger) og nøkkel fra host-miljø:
+      INFISICAL_URL: "http://infisical:8080"
+      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  jarvis-pgdata:

@@ -1,0 +1,26 @@
+{
+  "name": "@jarvis/voice-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Jarvis Voice Gateway - egen sanntidsprosess: full-duplex tale, VAD, barge-in, sesjonskobling mot Core",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "dev": "node --experimental-transform-types src/main.ts"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@jarvis/core": "workspace:*",
+    "@jarvis/model-gateway": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/provider-adapters": "workspace:*",
+    "@jarvis/tasks": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "@types/ws": "^8.18.1",
+    "embedded-postgres": "16.14.0-beta.17",
+    "pg": "^8.16.3"
+  }
+}

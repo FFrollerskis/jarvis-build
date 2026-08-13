@@ -70,9 +70,12 @@ ytterdør» kan ikke gjenbrukes for noe annet.
 
 ## 6. Secrets
 
-- Sentral vault (Infisical/OpenBao – valg tas i fase 1, se OPEN_QUESTIONS Q-05) som eneste kilde.
+- **Fase 1 (ingen kjørende vault):** `.env` kun lokalt og git-ignorert, `.env.example` uten secrets,
+  SOPS + age for kryptert konfigurasjon i Git, gitleaks i CI, dokumentert secrets-strategi (D-16).
+- **Senere:** sentral vault (Infisical/OpenBao – valget står åpent, se OPEN_QUESTIONS Q-05) innføres
+  når flere tjenester/prosesser faktisk trenger delte secrets, og senest før eksterne integrasjoner
+  gjør det nødvendig (fase 7). Vault blir da eneste kilde.
 - Kortlivede identiteter og planlagt rotasjon.
-- SOPS kun for krypterte konfigurasjonsfiler i Git.
 - Aldri secrets i kildekode, prompt, LLM-kontekst, logger eller feilmeldinger (logg-scrubbing).
 - Tjenester får secrets injisert ved oppstart/behov med minst mulig scope.
 

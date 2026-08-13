@@ -1,0 +1,16 @@
+{
+  "name": "@jarvis/policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministisk Policy Gateway: capability-kontroll, signerte klasse D-godkjenninger, replay-vern og kill switch",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*"
+  }
+}

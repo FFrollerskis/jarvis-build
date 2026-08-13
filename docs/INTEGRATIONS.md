@@ -61,8 +61,8 @@ Apple Health (kun via kontrollert mobilintegrasjon, `health`-space-regler gjelde
 
 ## 6. Modell-leverandører (via Model Gateway, ikke Tool Gateway)
 
-- OpenAI, Anthropic, OpenRouter og lokale modeller bak felles adapter (LiteLLM-kandidat, se
-  DECISIONS D-06).
+- OpenAI, Anthropic, OpenRouter og lokale modeller bak felles adapter: egne TS-adaptere først,
+  LiteLLM-proxy som mulig sidecar senere (se DECISIONS D-14 og OPEN_QUESTIONS Q-04).
 - Per leverandør dokumenteres: region, databehandleravtale, trenings-/retensjonsvilkår, og hvilke
   memory spaces som er tillatt å sende dit (f.eks. `health` → kun lokal modell eller sterkt minimert).
 - STT/TTS-leverandører følger samme regime og velges via benchmark i fase 5.

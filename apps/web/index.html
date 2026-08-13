@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0;
+         display:flex; flex-direction:column; height:100vh; }
+  header { padding:10px 16px; background:#161b22; font-weight:600; }
+  header small { color:#8b949e; font-weight:400; margin-left:8px; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:70%; padding:8px 12px; border-radius:10px; white-space:pre-wrap; }
+  .user { align-self:flex-end; background:#1f6feb; }
+  .jarvis { align-self:flex-start; background:#21262d; }
+  .meta { align-self:flex-start; color:#8b949e; font-size:12px; }
+  form { display:flex; gap:8px; padding:12px 16px; background:#161b22; }
+  input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
+          border-radius:8px; padding:10px; font-size:15px; }
+  button { background:#238636; color:#fff; border:0; border-radius:8px; padding:0 18px; cursor:pointer; }
+</style>
+</head>
+<body>
+<header>Jarvis <small>fase 3 tekst-MVP · «hjelp» for kommandoer</small></header>
+<div id="log"></div>
+<form id="form">
+  <input id="input" placeholder="Snakk med Jarvis …" autocomplete="off" autofocus>
+  <button>Send</button>
+</form>
+<script>
+  const log = document.getElementById("log");
+  const form = document.getElementById("form");
+  const input = document.getElementById("input");
+
+  // Dev-identitet (fase 3): enhetsautentisering kommer med kanalene i senere faser.
+  const identity = {
+    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
+    memory_space: "personal", channel: "web"
+  };
+
+  function add(cls, text) {
+    const el = document.createElement("div");
+    el.className = "msg " + cls;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message) return;
+    input.value = "";
+    add("user", message);
+    const reply = add("jarvis", "…");
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "text/event-stream" },
+        body: JSON.stringify({ ...identity, message })
+      });
+      if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); return; }
+      reply.textContent = "";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop();
+        for (const frame of frames) {
+          const event = (frame.match(/^event: (.+)$/m) || [])[1];
+          const data = JSON.parse((frame.match(/^data: (.+)$/m) || [])[1] || "{}");
+          if (event === "token") reply.textContent += data.token;
+          if (event === "done") {
+            if (!reply.textContent) reply.textContent = data.reply;
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.textContent = "rute: " + data.routed + " · sesjon: " + data.session_id +
+              (data.task_id ? " · jobb: " + data.task_id : "");
+            log.appendChild(meta);
+          }
+        }
+      }
+    } catch (err) {
+      reply.textContent = "Nettverksfeil: " + err.message;
+    }
+  });
+</script>
+</body>
+</html>

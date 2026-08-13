@@ -27,7 +27,8 @@ underagenter og verktøy, og med deterministisk håndhevet sikkerhet.
 9. Ubetrodd innhold får aldri samtidig tilgang til privat minne og utgående handlinger.
 10. Kritiske handlinger håndheves av deterministisk kode og signerte godkjenninger – aldri kun promptregler.
 11. Full sporbarhet: beslutning, handling, kilde, kostnad og resultat.
-12. Start billig på eksisterende PC; flytt til server/sky uten omskriving.
+12. Start billig på eksisterende maskinvare (UGREEN-NAS som 24/7-base + PC til utvikling/GPU, D-20);
+    flytt mellom noder, server og sky uten omskriving.
 13. Hemmeligheter finnes aldri i kildekode eller i LLM-kontekst.
 
 ### 1.2 Eksplisitte ikke-mål i første versjon
@@ -137,7 +138,8 @@ Fem tillitszoner: Ingestion, Reasoning, Memory, Execution, Secret. Capability-kl
 intern), C (ekstern innen mandat), D (betaling/kontrakt/sletting/publisering/lås/alarm/tilgang).
 Klasse D krever signert godkjenningsobjekt (handling, parametere, utløpstid, engangs-ID, godkjennende
 enhet) verifisert i deterministisk kode. Workers kjører i kastbare containere med nettverksallowlist og
-jobbspesifikke tokens. Sentral vault; append-only audit utenfor agentprosessen; kill switch.
+jobbspesifikke tokens. Secrets: SOPS + age i fase 1, sentral vault senest ved eksterne integrasjoner
+(D-16); append-only audit utenfor agentprosessen; kill switch.
 
 ## 10. Personvern
 
@@ -148,8 +150,9 @@ av rå romlyd. Gjestemodus, fysisk mute, synlig lytteindikator.
 
 ## 11. Drift (sammendrag – autoritativ detalj i DEPLOYMENT_STRATEGY.md)
 
-Lokal drift først (Tobias sin Windows-PC med Docker/WSL2), deretter alltid-på node/server/sky når måling
-forsvarer det. Langfuse-basert observability koblet til `task_id`. Deterministisk watchdog med
+Lokal drift først (D-20): UGREEN DXP4800 Plus (NAS) er 24/7-basen for data og tjenester; PC-en
+(RTX 4070, Docker/WSL2) brukes til utvikling og tunge AI/GPU-jobber; dedikert AI-server (f.eks.
+RTX 5080-klasse) eller sky først når måling dokumenterer behovet. Langfuse-basert observability koblet til `task_id`. Deterministisk watchdog med
 Telegram-varsling. RTO/RPO-tiers: Tier 1 (identitet/DB) RPO ≤2 t, RTO ≤4 t; Tier 2 (oppgaver) RPO ≤4 t,
 RTO samme dag; Tier 3 (arkiv) daglig/ukentlig. Restore testes med tidtaking.
 

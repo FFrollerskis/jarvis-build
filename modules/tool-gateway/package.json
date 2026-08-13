@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/tool-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tool Gateway: verktoyregister med capability-metadata, policykontrollert utfoerelse, idempotens, rate limit, audit og foerste-boelge-adaptere",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/model-gateway": "workspace:*",
+    "@jarvis/provider-adapters": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}
