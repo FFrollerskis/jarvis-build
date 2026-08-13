@@ -8,3 +8,4 @@ export * from "./services/approval-store.ts";
 export * from "./services/message-store.ts";
 export * from "./services/context-builder.ts";
 export * from "./services/fast-router.ts";
+export * from "./services/device-service.ts";

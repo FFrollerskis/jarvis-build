@@ -4,12 +4,13 @@ import {
   IdentityService,
   MessageStore,
   PgApprovalStore,
+  PgDeviceRegistry,
   SessionService,
   configFromEnv,
   createPool,
   runMigrations
 } from "@jarvis/core";
-import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
@@ -31,8 +32,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   }
   const trace = new JsonlTraceSink(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
   const killSwitch = new KillSwitch();
+  // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
+  const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
+  await deviceRegistry.refresh().catch(() => undefined);
+  setInterval(() => void deviceRegistry.refresh().catch(() => undefined), 30_000).unref();
   const policy = new PolicyGateway({
-    devices: new InMemoryDeviceRegistry(), // enhetsregister fra devices-tabellen kobles i senere fase
+    devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
     killSwitch
   });

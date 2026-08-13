@@ -4,7 +4,24 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 8 – Mobil, Watch og kontinuitet: under arbeid (backend-fundament).**
+**Fase 8 – Mobil, Watch og kontinuitet: backend-fundament implementert; native klientlag BLOKKERT
+på Apple-verktøykjede.**
+
+## Fase 8 – resultater (2026-08-13)
+
+- **Bygget og bevist (5 nye tester, 111/111 totalt):** DeviceService (server-side registrering av
+  enhetsnøkler — klient-ID alene stoles aldri på); `PgDeviceRegistry` koblet inn i Policy Gateway i
+  kjørende app (klasse D verifiseres mot REGISTRERT nøkkel i databasen: registrert Watch → ALLOW,
+  uregistrert → DENY, feil nøkkel → DENY, tenant-RLS på nøkler); challenge-respons enhetsauth
+  (engangs, replay avvist); mobil-kanal gjenopptar samme sesjon som web; push bak adapter
+  (FakePush verifisert; APNs-skall feiler ærlig som uverifisert).
+- **BLOKKERT/UNVERIFIED — krever beslutning/ressurser fra Tobias:** native iPhone-/watchOS-appene
+  (Swift/SwiftUI, App Intents, Live Activity, Secure Enclave-nøkler, TestFlight, push innen
+  sekunder, samtale på låst telefon) kan ikke bygges i dette Windows-miljøet: **krever Mac med
+  Xcode + Apple Developer-konto.** Plan-akseptanse 1–3 for fysiske enheter er dermed UNVERIFIED;
+  backend-kontraktene de trenger er klare og testet.
+- Fase 8 kan ikke lukkes før klientlaget er bygget i Apple-miljø (eller Tobias eksplisitt
+  omdefinerer/utsetter fasen).
 **Fase 7 – FULLFØRT** (arkitektkontroll + Tobias 2026-08-13). Endelig akseptanse: (1)
 scopes/audit/rate limit/rollback/injection **PASS**, live providerdel **PASS BY D-35 DEFERMENT** ·
 (2) e-post sender aldri uten approval **PASS** · (3) full sporing/proveniens **PASS** · (4) vault:
