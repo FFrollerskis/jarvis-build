@@ -13,7 +13,7 @@ import {
 } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
-import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
+import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
@@ -54,7 +54,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const gateway = new ModelGateway({
     pool,
     trace,
-    providers: [new AnthropicAdapter(), new OpenAiAdapter(), new OllamaAdapter(), new ScriptedAdapter()],
+    providers: [
+      new OpenAiAdapter(),
+      new AnthropicAdapter(),
+      new GeminiAdapter(),
+      new KimiAdapter(),
+      new OllamaAdapter(),
+      new ScriptedAdapter()
+    ],
     budget: {
       warn_ore: 100_000,
       approval_ore: 200_000,
@@ -106,18 +113,30 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         parameters: { message: text.slice(i, i + 3900) } });
     }
   };
+  const aiMeshText = async () => {
+    const mesh = gateway.meshStatus();
+    const lines = mesh.providers
+      .filter((p) => p.provider !== "scripted")
+      .map((p) => `${p.provider.padEnd(10)} ${p.state}${p.avg_latency_ms ? ` ~${p.avg_latency_ms}ms` : ""}`);
+    return `AI MESH
+${lines.join("\n")}
+Router     ${mesh.router}
+Fallback   ${mesh.fallback}
+Critic     ${mesh.critic}`;
+  };
   const statusText = async () => {
     const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
     return `JARVIS STATUS
-fase: v4.0 BO-03
+fase: v4.0 UA-1 P0 (AI Mesh)
 connectors: ${gates || "ingen kall enda"}
-porter: se docs/RUNTIME_GATES.md
-neste: runtime-porter (Docker/credentials)`;
+${await aiMeshText()}
+porter: se docs/RUNTIME_GATES.md`;
   };
   if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
     new TelegramCommandPoller(process.env["JARVIS_TELEGRAM_TOKEN"], process.env["JARVIS_TELEGRAM_CHAT_ID"], {
       brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
-      status: statusText
+      status: statusText,
+      ai: aiMeshText
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     new DailyScheduler(pool).start(async () => {

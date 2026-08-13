@@ -77,6 +77,7 @@ export class LangfuseTraceSink implements TraceSink {
           type: "span-create",
           timestamp: span.at,
           body: {
+            id: `${span.trace_id}-span`,
             traceId: span.trace_id,
             name: span.name,
             startTime: span.at,

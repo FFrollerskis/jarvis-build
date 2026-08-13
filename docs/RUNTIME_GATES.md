@@ -112,6 +112,39 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-08 UA-1 P0 — UNIVERSAL AI MESH (2026-08-13)
+
+**Arkitektur:** ModelGateway → AiRouter (deterministisk/scoret, aldri LLM-for-å-velge-LLM) →
+ProviderAdapter → normalisert respons → cost_events + Langfuse. Modellvalg skjer KUN i trusted
+gateway-lag (§35). Kontrakter i `@jarvis/contracts` (purpose/mode/reason), registry/health/pricing/
+router i `modules/model-gateway`, adaptere i `packages/provider-adapters`.
+
+- **Providere:** OpenAI **LIVE (baseline)**; Anthropic/Claude, Gemini, Kimi (Moonshot,
+  OpenAI-kompatibelt API), Ollama = **IMPLEMENTED_NOT_LIVE** (adapter + conformance-tester;
+  mangler kun credential/endepunkt: ANTHROPIC_API_KEY, GEMINI_API_KEY, KIMI_API_KEY/MOONSHOT_API_KEY,
+  JARVIS_OLLAMA_URL). Ingen fake LIVE-status: health = CONFIGURED til første faktiske suksess.
+- **Routing-modes:** AUTO/FAST/QUALITY/CHEAP/LOCAL/SPECIFIC_PROVIDER/CRITIC. Owner-override (§10):
+  eksakt provider, ingen stille fallback. LOCAL uten lokal modell → tydelig feil, aldri sky (§26).
+- **Fallback (§12):** klassifiserte feil (auth/rate_limit/timeout/server/network/invalid_response/
+  bad_request); auth = aldri retry-spam; transient = maks én retry samme provider; deretter neste
+  kandidat. Feilforsøk logges som egne cost_events-rader (amount 0, kind model:failed:<kind>).
+  Ingen doble tool-side-effects: AI-generering og tool-execution er fortsatt separert (Tool/Policy).
+- **Cost (§14):** migrasjon 015 (purpose/success/fallback/critic/latency_ms på cost_events);
+  versjonert pricing-tabell (2026-08.1) med cached-token-rabatt; critic har egen kostrad.
+- **Critic (§18):** opt-in only (critic:true / mode CRITIC), foretrekker annen provider, feil i critic
+  velter aldri primærsvar, ikke koblet til D-class.
+- **LIVE-akseptanse i container-runtime (§45):** `mesh-live.ts` i jarvis-api-containeren →
+  routed openai:gpt-4o-mini, cost_event {purpose:QUICK_CLASSIFICATION, success:true, fallback:false,
+  latency_ms:851, 1 øre}, Langfuse-observasjon med metadata {router_mode:AUTO, routing_reason:LOW_COST,
+  purpose} (secret-scan RENT). Fix underveis: span-create manglet body.id - observasjoner ble aldri
+  opprettet før BO-08; nå verifisert.
+- **LIVE multi-provider fallback/benchmark: NOT YET VERIFIED** (kun én cloud-provider har credential;
+  logikken er verifisert via kontrollerte fake-adaptere i suiten, §29).
+- **Tester:** 203/203 (Node 22) - 73 nye (router-eval §27, adapter-conformance §28 med full feilmatrise,
+  fallback/critic/kost/health/registry/pricing). /status + /ai viser mesh-status (ingen secrets).
+- **Regresjon:** brief 200 (0 source_errors, live-kilder), full stack healthy, D-class/OwnerControls/
+  kill switch dekket i suiten, gitleaks rent.
+
 ## BO-07 LIVE-EVIDENS (2026-08-13)
 - **D-27 Langfuse: VERIFIED.** langfuse/langfuse:2 i compose (headless init via .env, restart:unless-stopped,
   Postgres-avhengig, health OK v2.95.11). Ekte OpenAI-kall → trace i Langfuse (navn openai:gpt-4o-mini,

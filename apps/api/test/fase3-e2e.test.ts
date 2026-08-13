@@ -173,7 +173,8 @@ describe("Akseptanse 2: modellkall har kostnad knyttet til session/task", () => 
     const sessionId = result.body["session_id"] as string;
 
     const cost = await withTenantTransaction(appPool, "tenant-personal", (c) =>
-      c.query("SELECT kind, amount_ore, session_id FROM cost_events WHERE session_id = $1", [sessionId])
+      // UA-1: også feilforsøk (failing-provider) logges som egne rader - filtrer på suksessraden.
+      c.query("SELECT kind, amount_ore, session_id FROM cost_events WHERE session_id = $1 AND kind = 'model:scripted'", [sessionId])
     );
     expect(cost.rows.length).toBeGreaterThan(0);
     expect(cost.rows[0].kind).toBe("model:scripted");

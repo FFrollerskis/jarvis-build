@@ -153,6 +153,9 @@ importers:
 
   modules/model-gateway:
     dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core

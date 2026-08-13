@@ -109,7 +109,7 @@ export class TelegramCommandPoller {
   constructor(
     private readonly token: string,
     private readonly ownerChatId: string,
-    private readonly handlers: { brief(): Promise<string>; status(): Promise<string> },
+    private readonly handlers: { brief(): Promise<string>; status(): Promise<string>; ai?(): Promise<string> },
     private readonly send: (text: string) => Promise<void>
   ) {}
 
@@ -132,6 +132,7 @@ export class TelegramCommandPoller {
       const text = update.message?.text ?? "";
       if (text.startsWith("/brief")) await this.send(await this.handlers.brief());
       else if (text.startsWith("/status")) await this.send(await this.handlers.status());
+      else if (text.startsWith("/ai") && this.handlers.ai) await this.send(await this.handlers.ai());
     }
   }
 }

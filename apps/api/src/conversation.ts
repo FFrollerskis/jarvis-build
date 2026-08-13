@@ -66,6 +66,8 @@ export class ConversationEngine {
       const result = await this.deps.gateway.complete({
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
+        // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
+        purpose: "CHAT",
         request: { system, messages: history, max_tokens: 1024 },
         ...(onToken ? { onToken } : {})
       });
