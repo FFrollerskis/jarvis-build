@@ -10,6 +10,7 @@ export default defineConfig({
       "@jarvis/tasks": fileURLToPath(new URL("./modules/tasks/src/index.ts", import.meta.url)),
       "@jarvis/model-gateway": fileURLToPath(new URL("./modules/model-gateway/src/index.ts", import.meta.url)),
       "@jarvis/provider-adapters": fileURLToPath(new URL("./packages/provider-adapters/src/index.ts", import.meta.url)),
+      "@jarvis/tool-gateway": fileURLToPath(new URL("./modules/tool-gateway/src/index.ts", import.meta.url)),
       "@jarvis/memory": fileURLToPath(new URL("./modules/memory/src/index.ts", import.meta.url))
     }
   },
