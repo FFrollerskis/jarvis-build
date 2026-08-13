@@ -36,6 +36,11 @@ jobs:
 
   gitleaks:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # gitleaks-action lister PR-commits via API i pull_request-kontekst;
+      # uten denne får jobben 403 (feilet på repoets første PR - ikke en lekkasje).
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
