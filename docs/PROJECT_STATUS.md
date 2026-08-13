@@ -14,6 +14,7 @@ OwnerControls (pause/freeze/revoke) i execution path, run-rate m/provider/model/
 og GitHub-adaptere via Tool Gateway + build-/gate-status; deterministisk prioritering, dedupe,
 provenance, graceful degradation). 128/128 tester. Gate-status m/evidens: docs/RUNTIME_GATES.md.
 Live kilder venter kun paa credentials (BLOCKED_EXTERNAL).
+**BO-06 (2026-08-13):** D-28 VERIFIED (ekte embeddings→pgvector/HNSW + retrieval + RLS + regresjon mot Docker-PG); run-rate + backup/restore VERIFIED mot Docker-PG; reboot-durabel scheduler (migrasjon 013). Gjenstår: D-32-wiring, D-27 Langfuse, D-35 Infisical, API-autostart. 130/130 tester.
 **BO-03 (2026-08-13):** Ekte Google/GitHub/Telegram-transporter + /brief- og /status-kommandoer + connector-health + konfigurerbar morgenlevering implementert; alt aktiveres av .env-credentials (BLOCKED_EXTERNAL: Docker + tokens). 129/129 tester.
 **BO-02 (2026-08-13):** Node22=128/128; LIVE OpenAI-kall verifisert m/reell kost (se RUNTIME_GATES); POST /brief; Telegram-levering klar; seen/stale-suppression persistert (migrasjon 012); cost_per_daily_brief-datafangst aktiv. 129/129 tester.
 

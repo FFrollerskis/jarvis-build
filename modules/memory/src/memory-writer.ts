@@ -243,7 +243,19 @@ export class MemoryWriter {
        ON CONFLICT (memory_item_id) DO UPDATE SET model = $4, dim = $5, embedding = $6`,
       [itemId, tenantId, space, this.embeddings.model, this.embeddings.dim, vector]
     );
+    // D-28: speil til pgvector-kolonnen når den finnes (Docker-PG). Ufarlig no-op ellers.
+    if (this.pgVectorCache === undefined) {
+      const r = await client.query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='embeddings' AND column_name='vec') AS has"
+      );
+      this.pgVectorCache = (r.rows[0] as { has: boolean }).has;
+    }
+    if (this.pgVectorCache) {
+      await client.query("UPDATE embeddings SET vec = ($2::text)::vector WHERE memory_item_id = $1",
+        [itemId, JSON.stringify(vector)]);
+    }
   }
+  private pgVectorCache: boolean | undefined;
 
   private async linkEntities(
     client: pg.PoolClient,

@@ -40,6 +40,19 @@ export interface SearchOptions {
  * invaliderte items er aldri med i konteksten.
  */
 export class MemoryRetriever {
+  private pgVectorCache: boolean | undefined;
+
+  /** Runtime-probe: er `embeddings.vec` (pgvector) tilgjengelig? Caches. */
+  private async usesPgVector(client: pg.PoolClient): Promise<boolean> {
+    if (this.pgVectorCache === undefined) {
+      const r = await client.query(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='embeddings' AND column_name='vec') AS has"
+      );
+      this.pgVectorCache = (r.rows[0] as { has: boolean }).has;
+    }
+    return this.pgVectorCache;
+  }
+
   constructor(
     private readonly pool: pg.Pool,
     private readonly embeddings: EmbeddingProvider
@@ -64,19 +77,24 @@ export class MemoryRetriever {
         [options.query, timeref]
       );
 
+      // D-28: bruk pgvector (HNSW, <=> cosine) når kolonnen `vec` finnes i
+      // Docker-PG; ellers real[]+cosine_sim (embedded test-PG). Samme ordering.
+      const pgv = await this.usesPgVector(client);
+      const simExpr = pgv ? "1 - (e.vec <=> ($1::text)::vector)" : "cosine_sim(e.embedding, $1::real[])";
+      const vecArg = pgv ? JSON.stringify(queryVector) : queryVector;
       const vec = await client.query(
         `SELECT m.memory_item_id, m.subject, m.content, m.type, m.space, m.valid_from, m.valid_to,
                 m.has_conflict, m.observed_at, s.kind AS source_kind, s.ref AS source_ref,
                 m.trust_level,
-                cosine_sim(e.embedding, $1::real[]) AS sim
+                ${simExpr} AS sim
          FROM embeddings e
          JOIN memory_items m ON m.memory_item_id = e.memory_item_id
          JOIN memory_sources s ON s.source_id = m.source_id
-         WHERE m.status = 'active'
+         WHERE m.status = 'active'${pgv ? " AND e.vec IS NOT NULL" : ""}
            AND ($2::timestamptz IS NULL OR (m.valid_from <= $2 AND (m.valid_to IS NULL OR m.valid_to > $2)))
-           AND cosine_sim(e.embedding, $1::real[]) >= 0.6
+           AND ${simExpr} >= 0.6
          ORDER BY sim DESC LIMIT 60`,
-        [queryVector, timeref]
+        [vecArg, timeref]
       );
 
       // Reranking: kombiner tekst-, vektor- og ferskhetssignal.
