@@ -197,3 +197,22 @@ describe("DAILY EXECUTIVE BRIEF", () => {
     expect(brief.top_priorities.length).toBeGreaterThan(0); // tasks-kilden leverer fortsatt
   });
 });
+
+describe("BO-05: reboot-durabel scheduler med multi-instans-laas", () => {
+  it("to instanser: nøyaktig én vinner dagens claim; restart gir aldri duplikat", async () => {
+    const { DailyScheduler } = await import("../src/scheduler.ts");
+    const a = new DailyScheduler(adminPool, "test-brief", 0); // hour 0 => alltid etter planlagt tid
+    const b = new DailyScheduler(adminPool, "test-brief", 0);
+    const [ra, rb] = await Promise.all([a.claimToday(), b.claimToday()]);
+    expect([ra, rb].filter(Boolean)).toHaveLength(1); // multi-instans: én vinner
+    // "Restart": ny instans samme dag => claim avvises (persistent tilstand i DB)
+    const restarted = new DailyScheduler(adminPool, "test-brief", 0);
+    expect(await restarted.claimToday()).toBe(false);
+    await (ra ? a : b).markCompleted();
+    const state = await adminPool.query("SELECT completed_at FROM scheduler_state WHERE job_name='test-brief'");
+    expect(state.rows[0].completed_at).not.toBeNull();
+    // Før planlagt time claimes ikke (hour 25 kan aldri nås)
+    const early = new DailyScheduler(adminPool, "test-brief-2", 25);
+    expect(await early.claimToday()).toBe(false);
+  });
+});

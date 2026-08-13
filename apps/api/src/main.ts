@@ -19,7 +19,7 @@ import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
   TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource,
-  emailSource, firstWaveTools, tasksSource
+  emailSource, firstWaveTools, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
@@ -119,17 +119,10 @@ neste: runtime-porter (Docker/credentials)`;
       brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
       status: statusText
     }, sendTelegram).start();
-    // Morgenlevering: konfigurerbar time (default 07); sjekk hvert minutt, lever én gang per dag.
-    let lastDelivered = "";
-    const hour = Number(process.env["JARVIS_BRIEF_HOUR"] ?? 7);
-    setInterval(() => void (async () => {
-      const now = new Date();
-      const day = now.toISOString().slice(0, 10);
-      if (now.getHours() === hour && lastDelivered !== day) {
-        lastDelivered = day;
-        await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
-      }
-    })().catch(() => undefined), 60_000).unref();
+    // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
+    new DailyScheduler(pool).start(async () => {
+      await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
+    });
   }
   return deps;
 }
