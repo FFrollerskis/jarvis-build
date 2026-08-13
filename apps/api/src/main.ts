@@ -16,6 +16,7 @@ import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
+import { DailyBrief, buildStatusSource, tasksSource } from "@jarvis/tool-gateway";
 import { ConversationEngine } from "./conversation.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
@@ -59,6 +60,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const deps: ApiDeps = {
     identity: new IdentityService(pool),
     devices: new DeviceService(pool),
+    brief: {
+      generate: (identity) =>
+        new DailyBrief([tasksSource(pool), buildStatusSource(null)], pool).generate(identity as never),
+      render: (artifact) => DailyBrief.render(artifact as never)
+    },
     sessions: new SessionService(pool),
     policy,
     worker,

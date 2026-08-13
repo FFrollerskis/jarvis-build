@@ -14,6 +14,7 @@ OwnerControls (pause/freeze/revoke) i execution path, run-rate m/provider/model/
 og GitHub-adaptere via Tool Gateway + build-/gate-status; deterministisk prioritering, dedupe,
 provenance, graceful degradation). 128/128 tester. Gate-status m/evidens: docs/RUNTIME_GATES.md.
 Live kilder venter kun paa credentials (BLOCKED_EXTERNAL).
+**BO-02 (2026-08-13):** Node22=128/128; LIVE OpenAI-kall verifisert m/reell kost (se RUNTIME_GATES); POST /brief; Telegram-levering klar; seen/stale-suppression persistert (migrasjon 012); cost_per_daily_brief-datafangst aktiv. 129/129 tester.
 
 **ALLE 10 BYGGEFASER GODKJENT av ekstern arkitekt + Tobias (2026-08-13). Neste okt: produksjons-/runtime-klargjoring (Mac/Xcode, Docker, credentials, live-verifikasjon av portene D-27/D-28/D-30/D-32/D-35/D-36). Ingen merge til main enna.**
 

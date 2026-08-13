@@ -150,9 +150,14 @@ export function buildStatusSource(gateway: ToolGateway | null, statusFile = "doc
 }
 
 export class DailyBrief {
-  constructor(private readonly sources: BriefSource[]) {}
+  constructor(
+    private readonly sources: BriefSource[],
+    /** Med pool aktiveres persistent seen/stale-suppression + run-rate-rad per brief. */
+    private readonly pool?: pg.Pool
+  ) {}
 
   async generate(identity: IdentityContext): Promise<BriefArtifact> {
+    const started = performance.now();
     const items: BriefItem[] = [];
     const errors: Array<{ source: string; error: string }> = [];
     for (const source of this.sources) {
@@ -165,12 +170,44 @@ export class DailyBrief {
     }
     // Dedupe på (source, ref) - samme hendelse presenteres aldri dobbelt.
     const seen = new Set<string>();
-    const unique = items.filter((i) => {
+    let unique = items.filter((i) => {
       const key = `${i.source}:${i.ref}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     }).sort((a, b) => b.score - a.score || a.ref.localeCompare(b.ref));
+
+    // Persistent stale-suppression: lavverdipunkter (score<60) som allerede er
+    // presentert en tidligere dag, gjentas ikke som nye. Høyverdi/overdue består.
+    if (this.pool) {
+      unique = await withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
+        const kept: BriefItem[] = [];
+        for (const item of unique) {
+          const key = `${item.source}:${item.ref}`;
+          const prior = await client.query(
+            `INSERT INTO brief_seen (tenant_id, item_key) VALUES ($1, $2)
+             ON CONFLICT (tenant_id, item_key) DO UPDATE SET last_seen = now()
+             RETURNING dismissed, (last_presented IS NOT NULL AND last_presented < date_trunc('day', now())) AS stale`,
+            [identity.tenant_id, key]
+          );
+          const row = prior.rows[0] as { dismissed: boolean; stale: boolean };
+          if (row.dismissed || (row.stale && item.score < 60)) continue;
+          kept.push(item);
+        }
+        await client.query(
+          `UPDATE brief_seen SET last_presented = now() WHERE tenant_id = $1 AND item_key = ANY($2)`,
+          [identity.tenant_id, kept.map((i) => `${i.source}:${i.ref}`)]
+        );
+        // Run-rate: én rad per generert brief → cost_per_daily_brief kan beregnes reelt.
+        await client.query(
+          `INSERT INTO cost_events (tenant_id, session_id, kind, amount_ore, provider, model)
+           VALUES ($1, $2, 'brief:generation', 0, 'jarvis', 'daily-brief')`,
+          [identity.tenant_id, identity.session_id]
+        );
+        return kept;
+      });
+    }
+    void started;
 
     return {
       generated_at: new Date().toISOString(),
@@ -188,6 +225,20 @@ export class DailyBrief {
       fyi: unique.filter((i) => i.score < 40),
       source_errors: errors
     };
+  }
+
+  /** Telegram-levering: kompakt mobilformat, chunket ≤3900 tegn, via Tool Gateway (policy/audit). */
+  static async deliverViaTelegram(gateway: ToolGateway, identity: IdentityContext, brief: BriefArtifact): Promise<boolean> {
+    const text = DailyBrief.render(brief);
+    for (let i = 0; i < text.length; i += 3900) {
+      const result = await gateway.execute({
+        identity, tool_id: "telegram", action: "notify",
+        parameters: { message: text.slice(i, i + 3900) },
+        idempotency_key: `brief-${brief.generated_at}-${i}`
+      });
+      if (!result.ok) return false;
+    }
+    return true;
   }
 
   static render(brief: BriefArtifact): string {

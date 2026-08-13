@@ -23,6 +23,8 @@ export interface ApiDeps {
   worker: InProcessWorker;
   /** Fase 8: enhetsregistrering/challenge-auth for mobil/Watch. */
   devices?: DeviceService;
+  /** v4.0 BO-02: Daily Executive Brief on demand. */
+  brief?: { generate(identity: unknown): Promise<unknown>; render(artifact: unknown): string };
 }
 
 export interface HealthStatus {
@@ -134,6 +136,23 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
 
     const result = await deps.conversation.handle(resolved.identity, body.message);
     return json(res, 200, { ...result, session_id: session.session_id });
+  }
+
+  if (deps.brief && req.method === "POST" && url.pathname === "/brief") {
+    const body = (await readBody(req)) as ChatBody;
+    const session = await deps.sessions.resumeOrCreate(
+      { tenant_id: body.tenant_id, person_id: body.person_id, device_id: body.device_id }, body.channel ?? "api"
+    );
+    const resolved = await deps.identity.resolveIdentity({
+      person_id: body.person_id, tenant_id: body.tenant_id, memory_space: body.memory_space,
+      session_id: session.session_id, device_id: body.device_id,
+      channel: body.channel ?? "api", auth_strength: body.auth_strength ?? "active"
+    });
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const artifact = await deps.brief.generate(resolved.identity);
+    return json(res, 200, { brief: artifact, rendered: deps.brief.render(artifact), session_id: session.session_id });
   }
 
   if (deps.devices && req.method === "POST" && url.pathname === "/devices/register") {

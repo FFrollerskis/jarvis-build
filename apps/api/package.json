@@ -12,6 +12,7 @@
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",

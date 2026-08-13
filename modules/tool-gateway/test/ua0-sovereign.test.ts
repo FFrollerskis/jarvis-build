@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { IdentityContext } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
@@ -59,7 +59,7 @@ beforeAll(async () => {
   let locked = true;
   ha = {
     calls: [],
-    async invoke(action, parameters) {
+    async invoke(action: string, parameters: Record<string, JsonValue>) {
       (this as FakeTransport).calls.push({ action, parameters });
       if (action === "read_state") return { data: { locked } };
       if (action === "lock_set") { locked = Boolean(parameters["locked"]); }
@@ -171,6 +171,21 @@ describe("DAILY EXECUTIVE BRIEF", () => {
     expect(brief.needs_attention.filter((i) => i.ref === "m1")).toHaveLength(1);
     // ingen kryss-tenant-lekkasje: tenant-b-oppgave er usynlig
     expect(text).not.toContain("B-hemmelig");
+  });
+
+  it("seen-suppression (persistent) + run-rate: gammel lavverdisak gjentas ikke; brief-rad i cost_events", async () => {
+    const brief = new DailyBrief([tasksSource(appPool), emailSource(gateway)], appPool);
+    const first = await brief.generate(owner);
+    expect(first.fyi.some((i) => i.ref === "m2")).toBe(true); // lavverdipunkt vises første gang
+    // Simuler at forrige presentasjon var i går:
+    await adminPool.query(
+      "UPDATE brief_seen SET last_presented = now() - interval '1 day' WHERE item_key = 'gmail:m2'");
+    const second = await brief.generate(owner);
+    expect(second.fyi.some((i) => i.ref === "m2")).toBe(false); // stale lavverdi undertrykkes
+    expect(second.top_priorities.length).toBeGreaterThan(0);    // høyverdi består
+    const cost = await adminPool.query(
+      "SELECT count(*)::int AS n FROM cost_events WHERE kind = 'brief:generation' AND tenant_id = 'tenant-a'");
+    expect(cost.rows[0].n).toBeGreaterThanOrEqual(2); // cost_per_daily_brief kan beregnes
   });
 
   it("manglende connector velter ikke briefen (graceful degradation)", async () => {
