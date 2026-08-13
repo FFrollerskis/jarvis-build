@@ -12,7 +12,7 @@ import {
   runMigrations
 } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
+import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
@@ -37,7 +37,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
     await runMigrations(pool);
   }
-  const trace = new JsonlTraceSink(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
+  // BO-09: Langfuse-sink når konfigurert (D-27), ellers JSONL - samme mesh-observability overalt.
+  const trace = traceSinkFromEnv(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
   const killSwitch = new KillSwitch();
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");

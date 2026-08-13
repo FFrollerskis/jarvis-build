@@ -11,6 +11,15 @@ D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GA
 Owner-seed nå automatisk/idempotent i one-shot migrate. Åpne, ikke-blokkerende porter:
 D-30 Voice, D-36 Apple, HA-RUNTIME.
 
+## UA-1 LIVE-status (BO-09)
+- **UA-1 MULTI-PROVIDER LIVE = BLOCKED_BY_CREDENTIALS**: alle nye provider-nøkler MISSING i
+  .env/host/vault (kun presence sjekket). Arkitekturen er live-validert så langt én provider rekker:
+  AUTO-routing (5 purposes m/reasons), owner override, structured output, critic (single-provider),
+  ekte 401→auth og timeout-klassifisering, worker-mesh-jobb (gpt-5 "42"), live chat ("Oslo"),
+  korrelasjonsgrunnlag i cost_events. Fix: OpenAI max_tokens→max_completion_tokens (gpt-5-kompatibel).
+- For å låse opp: legg ANTHROPIC_API_KEY / GEMINI_API_KEY / KIMI_API_KEY (evt. MOONSHOT_API_KEY) /
+  JARVIS_OLLAMA_URL i .env eller Infisical-vaulten - deretter kjøres live fallback + benchmark (BO-09 §11/§17).
+
 ## UA-1 P0 (BO-08)
 - AI Router (deterministisk), CapabilityRegistry, ProviderHealth, versjonert pricing, normaliserte
   request/response-kontrakter, klassifisert fallback, critic (opt-in), purpose-taksonomi.

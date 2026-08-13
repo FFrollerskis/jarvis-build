@@ -73,8 +73,9 @@ export interface MeshProviderStatus {
 export interface MeshStatus {
   providers: MeshProviderStatus[];
   router: "HEALTHY";
-  fallback: "READY";
-  critic: "READY_SELECTIVE";
+  /** VERIFIED = cross-provider fallback har faktisk skjedd i denne runtime (§25). */
+  fallback: "VERIFIED" | "READY" | "LOGIC_ONLY";
+  critic: "VERIFIED" | "READY_SELECTIVE";
 }
 
 const CRITIC_SYSTEM =
@@ -94,6 +95,9 @@ export class ModelGateway {
   readonly health = new ProviderHealthTracker();
   private readonly router: AiRouter;
   private readonly byName = new Map<string, ModelProviderAdapter>();
+  /** Runtime-evidens for /status (§25): satt først når hendelsen faktisk har skjedd. */
+  private crossProviderFallbackSeen = false;
+  private criticRunSeen = false;
 
   constructor(private readonly opts: GatewayOptions) {
     this.guard = new BudgetGuard(opts.pool, opts.budget ?? DEFAULT_BUDGET);
@@ -182,6 +186,17 @@ export class ModelGateway {
           const result = await adapter.complete(request, isCritic ? undefined : input.onToken);
           const latency = result.latency_ms ?? Date.now() - attemptStart;
           this.health.recordSuccess(adapter.name, latency);
+          if (failedProviders.some((p) => p !== adapter.name)) {
+            this.crossProviderFallbackSeen = true;
+          }
+          result.metadata = {
+            ...result.metadata,
+            router: {
+              mode: plan.mode,
+              reason: plan.reason,
+              ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
+            }
+          };
           const cost =
             this.legacyCostOverride(result) ??
             computeCostOre(this.pricing, result.provider, result.model, result.usage);
@@ -260,6 +275,7 @@ export class ModelGateway {
         true,
         criticRequest
       );
+      this.criticRunSeen = true;
       primary.metadata = {
         ...primary.metadata,
         critic: {
@@ -291,8 +307,12 @@ export class ModelGateway {
         };
       }),
       router: "HEALTHY",
-      fallback: "READY",
-      critic: "READY_SELECTIVE"
+      fallback: this.crossProviderFallbackSeen
+        ? "VERIFIED"
+        : [...runtimes].filter(([name, r]) => r.configured && name !== "scripted").length >= 2
+          ? "READY"
+          : "LOGIC_ONLY",
+      critic: this.criticRunSeen ? "VERIFIED" : "READY_SELECTIVE"
     };
   }
 

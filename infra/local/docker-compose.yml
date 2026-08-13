@@ -133,6 +133,11 @@ services:
       # I container er prosess-sandbox default (containeren er isolasjonsgrensen;
       # ingen Docker-socket monteres). Docker-sandbox (D-32) gjelder host-runtime.
       JARVIS_SANDBOX: "process"
+      # BO-09: worker bruker AI Mesh + Langfuse/Infisical - container-interne adresser
+      # (host-.env peker på 127.0.0.1-portmappinger) og nøkkel fra host-miljø:
+      INFISICAL_URL: "http://infisical:8080"
+      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     depends_on:
       migrate:
         condition: service_completed_successfully

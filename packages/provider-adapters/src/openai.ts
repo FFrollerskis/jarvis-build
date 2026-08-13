@@ -40,7 +40,8 @@ export class OpenAiAdapter implements ModelProviderAdapter {
         body: JSON.stringify({
           model: this.model,
           messages,
-          max_tokens: request.max_tokens ?? 1024,
+          // gpt-5/o-serien avviser legacy max_tokens; max_completion_tokens gjelder alle chat-modeller.
+          max_completion_tokens: request.max_tokens ?? 1024,
           ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
           ...(request.structured_schema
             ? {

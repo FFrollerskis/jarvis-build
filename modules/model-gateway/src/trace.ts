@@ -28,6 +28,20 @@ export class MemoryTraceSink implements TraceSink {
   }
 }
 
+/**
+ * BO-09: velg trace-sink fra miljø - Langfuse når konfigurert (D-27-runtime),
+ * ellers lokal JSONL. Samme valg for api og worker; ingen secrets i kode.
+ */
+export function traceSinkFromEnv(jsonlPath = "var/traces.jsonl"): TraceSink {
+  const base = process.env["LANGFUSE_BASE_URL"];
+  const pub = process.env["LANGFUSE_PUBLIC_KEY"];
+  const secret = process.env["LANGFUSE_SECRET_KEY"];
+  if (base && pub && secret) {
+    return new LangfuseTraceSink(base, pub, secret);
+  }
+  return new JsonlTraceSink(jsonlPath);
+}
+
 /** Lokal JSONL-fil (git-ignorert var/-katalog). Enkel, grep-bar, portabel. */
 export class JsonlTraceSink implements TraceSink {
   private dirReady = false;

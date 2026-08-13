@@ -383,3 +383,33 @@ describe("UA-1 gateway fallback + cost + critic (§12-§19)", () => {
     expect(JSON.stringify(mesh)).not.toMatch(/key|token|secret/i);
   });
 });
+
+describe("BO-09 runtime-evidensbasert mesh-status (§25)", () => {
+  it("fallback=LOGIC_ONLY med kun én reell provider, VERIFIED etter faktisk cross-provider fallback", async () => {
+    const { pool } = fakePool();
+    const gateway = new ModelGateway({
+      pool,
+      trace: new MemoryTraceSink(),
+      providers: [new ErrorAdapter("openai", "server"), new ScriptedAdapter(() => "x")]
+    });
+    expect(gateway.meshStatus().fallback).toBe("LOGIC_ONLY"); // scripted teller ikke som reell
+    const result = await gateway.complete({ tenant_id: "tenant-a", request: REQUEST });
+    expect(result.provider).toBe("scripted");
+    expect(gateway.meshStatus().fallback).toBe("VERIFIED"); // openai→scripted faktisk skjedd
+    const router = result.metadata?.["router"] as { mode: string; reason: string; fallback_from?: string[] };
+    expect(router.mode).toBe("AUTO");
+    expect(router.fallback_from).toEqual(["openai"]);
+  });
+
+  it("critic=READY_SELECTIVE før kjøring, VERIFIED etter faktisk critic-run", async () => {
+    const { pool } = fakePool();
+    const gateway = new ModelGateway({
+      pool,
+      trace: new MemoryTraceSink(),
+      providers: [new ScriptedAdapter(() => "svar")]
+    });
+    expect(gateway.meshStatus().critic).toBe("READY_SELECTIVE");
+    await gateway.complete({ tenant_id: "tenant-a", critic: true, request: REQUEST });
+    expect(gateway.meshStatus().critic).toBe("VERIFIED");
+  });
+});

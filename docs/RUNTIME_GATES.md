@@ -112,6 +112,41 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-09 AI MESH LIVE-VALIDERING (2026-08-13)
+
+**Secret discovery (kun presence):** OPENAI_API_KEY=SET (host). ANTHROPIC_API_KEY/GEMINI_API_KEY/
+KIMI_API_KEY/MOONSHOT_API_KEY/JARVIS_OLLAMA_URL = **MISSING** i både .env, host-env og Infisical-vault
+(sjekket via InfisicalSecretProvider, vault healthy). Ollama ikke installert (port 11434 død).
+→ **UA-1 MULTI-PROVIDER LIVE = BLOCKED_BY_CREDENTIALS** (ærlig per §30; arkitektur forblir READY).
+
+**Live-verifisert i container-runtime (bo9-live.ts i jarvis-api):**
+- **AUTO-routing (§9):** 5 purposes → openai (eneste live) med korrekte reasons:
+  QUICK_CLASSIFICATION→LOW_COST, SUMMARIZE→ONLY_AVAILABLE, CODE/REASON/PLAN→REASONING_REQUIRED;
+  latency 1.0-2.5 s, kost 1 øre/kall i cost_events.
+- **Owner override (§8):** SPECIFIC_PROVIDER/OWNER_OVERRIDE PASS.
+- **Structured output live (§7C):** json_schema → parsed {"verdict":"ja"} PASS.
+- **Critic/second opinion (§15-16):** live critic-run (single-provider: openai kritiserer openai -
+  multi-provider critic venter på credential), critique 644 tegn, egen kostrad, status critic=VERIFIED.
+- **Auth (§12):** ugyldig nøkkel mot ekte endepunkt → 401 → ProviderError(auth), ingen retry-spam.
+- **Timeout (§14):** 1 ms-timeout mot ekte endepunkt → ProviderError(timeout).
+- **429 (§13):** IKKE fremprovosert live (bevisst); RATE_LIMITED/backoff/fallback dekket i suiten.
+- **Kvalitetssignal-korrelasjon (§19):** cost_events grupperer purpose×provider×model med
+  calls/avg_ms/sum_ore/failures/critic_calls - grunnlag for senere quality-routing, ingen læring aktivert.
+- **Worker-mesh (§22):** executive-jobb m/prompt gjennom durable kø i worker-container →
+  ModelGateway purpose-routing → svar "42" (openai:gpt-5) med provider/tokens i result. Worker er
+  ikke bundet til én provider.
+- **Conversation (§21):** live /chat i container → "Oslo", routed=model, Langfuse-observasjon
+  CHAT:DEFAULT_BALANCED. Ingen direkte provider-avhengighet i Conversation Engine.
+- **Brief (§20):** 200, 6839 tegn, 0 source_errors, ingen Telegram-spam.
+- **Fix underveis:** OpenAI-adapteren sendte legacy `max_tokens` → 400 på gpt-5; byttet til
+  `max_completion_tokens` (gjelder alle chat-modeller). Verifisert live med gpt-5 og gpt-4o-mini.
+- **Trace-sink:** api+worker bruker nå `traceSinkFromEnv` (Langfuse når konfigurert, ellers JSONL).
+- **/status (§25):** evidensbasert: fallback=LOGIC_ONLY (<2 reelle providere), critic=VERIFIED
+  etter faktisk run; VERIFIED for fallback settes først ved ekte cross-provider fallback.
+- **Sikkerhet (§26):** audit_events/cost_events/Langfuse credential-scans = 0 treff; image uten .env;
+  gitleaks rent. **Benchmark (§17): N/A** (krever ≥2 live cloud-providere).
+- **Kvalitet:** 205/205 (Node 22; +2 evidensstatus-tester), lint/typecheck rene.
+
 ## BO-08 UA-1 P0 — UNIVERSAL AI MESH (2026-08-13)
 
 **Arkitektur:** ModelGateway → AiRouter (deterministisk/scoret, aldri LLM-for-å-velge-LLM) →
