@@ -68,6 +68,7 @@ DEFERMENT** · øvrige kriterier **PASS**.
 | **D-28** | pgvector/HNSW + eval-/RLS-regresjon + ytelse | Første Docker-miljø |
 | **D-30** | Norsk voice-providerbenchmark (≥100 prøver) + STOP/GO | Ekte voice-kandidater + prøver; før bred utrulling |
 | **D-32** | Worker-container (21 punkter) + ekte GitHub-gate | Første miljø med Docker + autentisert GitHub |
+| **D-36** | Apple-runtime (Xcode-build, fysisk iPhone/Watch, kontinuitet, klasse D fra klokke, APNs) | Mac mini + Apple-credentials (2026-08-14) |
 | **D-35** | Infisical-runtime (10 steg) + live OAuth/Gmail/Calendar/GitHub/Drive/Telegram/Vercel per integrasjon | Docker + credentials; Infisical-delen trigges av første Docker-miljø |
 
 ## Fase 6 – implementert (2026-08-13)
