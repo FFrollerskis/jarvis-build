@@ -2,7 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
-import type { PolicyGateway } from "@jarvis/policy";
+import type { OwnerControls, PolicyGateway } from "@jarvis/policy";
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
 export interface SecretProvider {
@@ -44,6 +44,8 @@ export interface ToolDefinition {
   credential_ref: string;
   output_trust: TrustLevel;
   transport: ToolTransport;
+  /** v4.0 D-pipeline: handling som leser nå-tilstand for preflight + readback (før/etter-evidens). */
+  preflight_action?: string;
 }
 
 export type ToolResult =
@@ -63,7 +65,8 @@ export class ToolGateway {
   constructor(
     private readonly pool: pg.Pool,
     private readonly policy: PolicyGateway,
-    private readonly secrets: SecretProvider
+    private readonly secrets: SecretProvider,
+    private readonly controls?: OwnerControls
   ) {}
 
   register(definition: ToolDefinition): void {
@@ -111,9 +114,32 @@ export class ToolGateway {
     if (!this.withinRateLimit(definition, request.identity.tenant_id)) {
       return this.deny(request, "rate_limited");
     }
+    if (this.controls?.isFrozen(request.tool_id)) {
+      return this.deny(request, "connector_frozen");
+    }
+    if (this.controls?.isRevoked(definition.credential_ref)) {
+      return this.deny(request, "credential_revoked");
+    }
     const credential = await this.secrets.get(definition.credential_ref);
     if (!credential) {
       return this.deny(request, "credential_unavailable");
+    }
+
+    // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses
+    // nå-tilstanden FØR handlingen (deterministisk preflight + recovery-
+    // grunnlag) og PÅ NYTT etterpå (readback/before-after-evidens).
+    // Preflight-feil på klasse D er fail-closed.
+    let beforeState: JsonValue | null = null;
+    const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
+    if (needsEvidence) {
+      try {
+        const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential);
+        beforeState = pre.data ?? null;
+      } catch (err) {
+        if (definition.capability_class === "D") {
+          return this.deny(request, `preflight_failed:${(err as Error).message.slice(0, 60)}`);
+        }
+      }
     }
 
     return withTenantTransaction(this.pool, request.identity.tenant_id, async (client) => {
@@ -152,11 +178,21 @@ export class ToolGateway {
         });
         return { ok: false, reason: `tool_failed:${(err as Error).message.slice(0, 80)}` } as const;
       }
+      let afterState: JsonValue | null = null;
+      if (needsEvidence) {
+        try {
+          const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential);
+          afterState = post.data ?? null;
+        } catch {
+          afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under
+        }
+      }
       if (request.idempotency_key) {
         await client.query(
-          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status)
-           VALUES ($1, $2, $3, $4, $5, 'succeeded') ON CONFLICT DO NOTHING`,
-          [request.identity.tenant_id, request.idempotency_key, request.tool_id, request.action, external.external_id ?? null]
+          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state)
+           VALUES ($1, $2, $3, $4, $5, 'succeeded', $6, $7) ON CONFLICT DO NOTHING`,
+          [request.identity.tenant_id, request.idempotency_key, request.tool_id, request.action,
+           external.external_id ?? null, JSON.stringify(beforeState), JSON.stringify(afterState)]
         );
       }
       await writeAudit(client, request.identity, {
@@ -167,7 +203,8 @@ export class ToolGateway {
           credential_ref: definition.credential_ref, // referanse - aldri verdien
           external_id: external.external_id ?? null,
           scopes: definition.scopes,
-          rollback: definition.rollback_procedure
+          rollback: definition.rollback_procedure,
+          ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
         }
       });
       return {

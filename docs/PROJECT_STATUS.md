@@ -4,6 +4,17 @@
 
 ## Aktiv fase og oppgave
 
+## v4.0 UA-0A (2026-08-13, branch claude/v4-sovereign-autonomy)
+
+**Styrende plan: docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md.** Implementert:
+Execution Authority Engine (SOVEREIGN owner-modus; A-D = risikoklasser, ikke permission-gates for
+owner-tenant), D-pipeline (preflight/state-readback/before-after-evidens/recovery-snapshot/audit),
+OwnerControls (pause/freeze/revoke) i execution path, run-rate m/provider/model/tokens (migrasjon
+011), og forste Daily Value Loop: **Daily Executive Brief** (kilder: Jarvis-tasks, Gmail-, kalender-
+og GitHub-adaptere via Tool Gateway + build-/gate-status; deterministisk prioritering, dedupe,
+provenance, graceful degradation). 128/128 tester. Gate-status m/evidens: docs/RUNTIME_GATES.md.
+Live kilder venter kun paa credentials (BLOCKED_EXTERNAL).
+
 **ALLE 10 BYGGEFASER GODKJENT av ekstern arkitekt + Tobias (2026-08-13). Neste okt: produksjons-/runtime-klargjoring (Mac/Xcode, Docker, credentials, live-verifikasjon av portene D-27/D-28/D-30/D-32/D-35/D-36). Ingen merge til main enna.**
 
 **Fase 10 – Drift: implementert og GODKJENT (watchdog, backup/restore malt, kostnadsrapport, Tier 1-runbooks; 121/121 tester). UNVERIFIED: ekstern uptime, off-site backup, 30-90-dagers maling, NAS-migrasjon (krever driftstid/runtime).**

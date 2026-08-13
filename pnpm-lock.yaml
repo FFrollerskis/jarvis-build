@@ -209,9 +209,15 @@ importers:
       '@jarvis/memory':
         specifier: workspace:*
         version: link:../memory
+      '@jarvis/model-gateway':
+        specifier: workspace:*
+        version: link:../model-gateway
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
+      '@jarvis/provider-adapters':
+        specifier: workspace:*
+        version: link:../../packages/provider-adapters
       pg:
         specifier: ^8.16.3
         version: 8.23.0

@@ -85,7 +85,7 @@ export class ModelGateway {
       try {
         const result = await provider.complete(input.request, input.onToken);
         const costOre = this.costOre(provider.name, result);
-        await this.recordCost(input, provider.name, costOre);
+        await this.recordCost(input, provider.name, costOre, result);
         await this.opts.trace.record({
           trace_id: traceId,
           kind: "model_call",
@@ -114,12 +114,13 @@ export class ModelGateway {
     );
   }
 
-  private async recordCost(input: CompleteInput, provider: string, costOre: number): Promise<void> {
+  private async recordCost(input: CompleteInput, provider: string, costOre: number, result: ModelResult): Promise<void> {
     await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
       client.query(
-        `INSERT INTO cost_events (tenant_id, task_id, session_id, kind, amount_ore)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [input.tenant_id, input.task_id ?? null, input.session_id ?? null, `model:${provider}`, costOre]
+        `INSERT INTO cost_events (tenant_id, task_id, session_id, kind, amount_ore, provider, model, input_tokens, output_tokens)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [input.tenant_id, input.task_id ?? null, input.session_id ?? null, `model:${provider}`, costOre,
+         provider, result.model, result.usage.input_tokens, result.usage.output_tokens]
       )
     );
   }

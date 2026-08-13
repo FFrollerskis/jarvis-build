@@ -41,13 +41,13 @@ export function homeAssistantTools(transport: ToolTransport = new UnconfiguredHt
     },
     {
       ...base, action: "lock_set", description: "Lås/lås opp dør (KRITISK)",
-      input_schema: record({ ...room, entity: z.string(), locked: z.boolean() }), capability_class: "D",
+      input_schema: record({ ...room, entity: z.string(), locked: z.boolean() }), capability_class: "D", preflight_action: "read_state",
       scopes: ["lock:call"], reversible: true, rollback_procedure: "sett motsatt låstilstand + varsle",
       idempotent_external: true, rate_limit_per_minute: 10, output_trust: "internal"
     },
     {
       ...base, action: "alarm_set", description: "Alarm av/på (KRITISK)",
-      input_schema: record({ ...room, armed: z.boolean() }), capability_class: "D",
+      input_schema: record({ ...room, armed: z.boolean() }), capability_class: "D", preflight_action: "read_state",
       scopes: ["alarm:call"], reversible: true, rollback_procedure: "sett forrige alarmtilstand + varsle",
       idempotent_external: true, rate_limit_per_minute: 10, output_trust: "internal"
     }
