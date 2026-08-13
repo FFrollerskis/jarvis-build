@@ -16,10 +16,70 @@ export class EnvSecretProvider implements SecretProvider {
     return process.env[ref] ?? null;
   }
 }
+/**
+ * Infisical-secret-provider (D-35): maskinidentitet (universal auth) → hent
+ * secret via API. Rå verdi returneres KUN til transport-laget; aldri logget,
+ * aldri til modell/Langfuse. Helse eksponeres for /status.
+ */
 export class InfisicalSecretProvider implements SecretProvider {
   readonly name = "infisical";
-  async get(): Promise<string | null> {
-    throw new Error("vault_unverified: Infisical krever Docker-miljø (Q-05/D-16)");
+  private token: string | null = null;
+  health: "healthy" | "unavailable" | "unconfigured" = "unconfigured";
+
+  constructor(
+    private readonly baseUrl = process.env["INFISICAL_URL"],
+    private readonly clientId = process.env["INFISICAL_CLIENT_ID"],
+    private readonly clientSecret = process.env["INFISICAL_CLIENT_SECRET"],
+    private readonly projectId = process.env["INFISICAL_PROJECT_ID"],
+    private readonly env = process.env["INFISICAL_ENV"] ?? "dev"
+  ) {}
+
+  available(): boolean {
+    return Boolean(this.baseUrl && this.clientId && this.clientSecret && this.projectId);
+  }
+
+  private async login(): Promise<string> {
+    const response = await fetch(`${this.baseUrl}/api/v1/auth/universal-auth/login`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clientId: this.clientId, clientSecret: this.clientSecret })
+    });
+    if (!response.ok) throw new Error(`infisical_login_${response.status}`);
+    return ((await response.json()) as { accessToken: string }).accessToken;
+  }
+
+  async get(ref: string): Promise<string | null> {
+    if (!this.available()) {
+      this.health = "unconfigured";
+      return null;
+    }
+    try {
+      this.token ??= await this.login();
+      const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}?workspaceId=${this.projectId}&environment=${this.env}`;
+      const response = await fetch(url, { headers: { authorization: `Bearer ${this.token}` } });
+      if (response.status === 401) { this.token = null; throw new Error("infisical_auth_expired"); }
+      if (response.status === 404) { this.health = "healthy"; return null; }
+      if (!response.ok) throw new Error(`infisical_${response.status}`);
+      this.health = "healthy";
+      return ((await response.json()) as { secret: { secretValue: string } }).secret.secretValue;
+    } catch {
+      this.health = "unavailable";
+      return null; // fail-closed her; FallbackSecretProvider håndterer rollback
+    }
+  }
+}
+
+/**
+ * Staged migration (D-35): prøv primær (vault) først, fall tilbake til .env
+ * hvis vault mangler verdien eller er nede. Gir trygg rollback i overgangen.
+ */
+export class FallbackSecretProvider implements SecretProvider {
+  readonly name = "fallback";
+  constructor(
+    private readonly primary: SecretProvider,
+    private readonly fallback: SecretProvider
+  ) {}
+  async get(ref: string): Promise<string | null> {
+    return (await this.primary.get(ref)) ?? this.fallback.get(ref);
   }
 }
 

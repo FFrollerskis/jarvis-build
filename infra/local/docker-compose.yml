@@ -44,6 +44,31 @@ services:
       - postgres
     restart: unless-stopped
 
+  infisical-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 10s
+      retries: 5
+
+  infisical:
+    # D-35: self-hosted Infisical (deler Docker-Postgres via egen db 'infisical').
+    image: infisical/infisical:latest-postgres
+    environment:
+      ENCRYPTION_KEY: "${INFISICAL_ENCRYPTION_KEY}"
+      AUTH_SECRET: "${INFISICAL_AUTH_SECRET}"
+      DB_CONNECTION_URI: "postgresql://${JARVIS_DB_ADMIN_USER:-postgres}:${JARVIS_DB_ADMIN_PASSWORD}@postgres:5432/infisical"
+      REDIS_URL: "redis://infisical-redis:6379"
+      SITE_URL: "http://127.0.0.1:3060"
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "3060:8080"
+    depends_on:
+      - postgres
+      - infisical-redis
+    restart: unless-stopped
+
   api:
     build:
       context: ../..
