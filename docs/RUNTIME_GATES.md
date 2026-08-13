@@ -90,6 +90,28 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
   full-stack compose (langfuse/infisical/api) + failure-injection. Alt er ren byggetid, ingen
   eksterne blockere.
 
+## UA-0 FORMELL LUKKING (BO-08, 2026-08-13)
+
+**UA-0 CORE RUNTIME = CLOSED.** Reality-check ved lukking: HEAD `fc1dd27`, full compose-stack healthy
+(postgres/langfuse/infisical(+redis)/api/worker), 130/130 tester, lint/typecheck/gitleaks rene.
+
+| Gate | Sluttstatus | Evidens |
+|---|---|---|
+| D-27 Langfuse | **VERIFIED** | BO-07-seksjonen under |
+| D-28 pgvector/HNSW/retrieval | **VERIFIED** | BO-06-seksjonen |
+| D-32 Docker-sandbox/durable worker | **VERIFIED** | BO-07-seksjonen |
+| D-35 Infisical/SecretProvider/pilot | **VERIFIED** | BO-07-seksjonen |
+| OPS-RUNTIME (full stack/restart/failure-injection) | **VERIFIED** | BO-07-seksjonen |
+| UA0-RUNRATE | **VERIFIED** | BO-06/BO-07-seksjonene |
+
+**Egne åpne porter (blokkerer IKKE UA-0 core):** D-30 Voice = OPEN (krever ≥100 norske prøver +
+STT/TTS-nøkler) · D-36 Apple = OPEN (krever Mac/Xcode/Developer-konto) · HA-RUNTIME = OPEN (krever
+HA-instans + token).
+
+**Owner-seed:** fra BO-08 automatisk og idempotent i `apps/api/src/migrate-main.ts` (one-shot
+migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
+JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
+
 ## BO-07 LIVE-EVIDENS (2026-08-13)
 - **D-27 Langfuse: VERIFIED.** langfuse/langfuse:2 i compose (headless init via .env, restart:unless-stopped,
   Postgres-avhengig, health OK v2.95.11). Ekte OpenAI-kall → trace i Langfuse (navn openai:gpt-4o-mini,
