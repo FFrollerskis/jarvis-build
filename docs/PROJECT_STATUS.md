@@ -4,7 +4,9 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 10 – Drift: implementert (watchdog, backup/restore malt, kostnadsrapport, Tier 1-runbooks; 121/121 tester). UNVERIFIED: ekstern uptime, off-site backup, 30-90-dagers maling, NAS-migrasjon (krever driftstid/runtime).**
+**ALLE 10 BYGGEFASER GODKJENT av ekstern arkitekt + Tobias (2026-08-13). Neste okt: produksjons-/runtime-klargjoring (Mac/Xcode, Docker, credentials, live-verifikasjon av portene D-27/D-28/D-30/D-32/D-35/D-36). Ingen merge til main enna.**
+
+**Fase 10 – Drift: implementert og GODKJENT (watchdog, backup/restore malt, kostnadsrapport, Tier 1-runbooks; 121/121 tester). UNVERIFIED: ekstern uptime, off-site backup, 30-90-dagers maling, NAS-migrasjon (krever driftstid/runtime).**
 **Fase 9 – Home Assistant, hus og steder: implementert (uten live HA - UNVERIFIED); fase 8 funksjonelt implementert med D-36-runtime-port aapen.**
 
 ## Fase 9 - resultater (2026-08-13)
