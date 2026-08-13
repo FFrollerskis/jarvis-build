@@ -4,6 +4,7 @@
 
 ## Aktiv fase og oppgave
 
+**Fase 10 – Drift: implementert (watchdog, backup/restore malt, kostnadsrapport, Tier 1-runbooks; 121/121 tester). UNVERIFIED: ekstern uptime, off-site backup, 30-90-dagers maling, NAS-migrasjon (krever driftstid/runtime).**
 **Fase 9 – Home Assistant, hus og steder: implementert (uten live HA - UNVERIFIED); fase 8 funksjonelt implementert med D-36-runtime-port aapen.**
 
 ## Fase 9 - resultater (2026-08-13)

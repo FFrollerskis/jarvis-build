@@ -226,6 +226,25 @@ importers:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
 
+  modules/watchdog:
+    dependencies:
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
   packages/contracts:
     dependencies:
       zod:
