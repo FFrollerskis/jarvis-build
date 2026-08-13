@@ -56,3 +56,20 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
   for Gmail/Calendar/GitHub/Telegram**; Infisical-delen fortsatt BLOCKED_EXTERNAL (Docker mangler - reprobet).
 - Kjente gap: scheduler er prosess-lokal (ikke reboot-durabel); inbound /brief-/status-kommandoer
   krever kjoerende API-prosess (poller starter med main).
+
+## BO-05 LIVE-EVIDENS (2026-08-13, Docker server 29.7.2 / Desktop 4.86)
+- **D-28: LIVE+VERIFIED (runtime):** PostgreSQL 16.14 i Docker (compose, persistent volum),
+  pgvector **0.8.6**, HNSW-indeks opprettet, `<=>`-similarity korrekt, RLS aktivert,
+  **data overlevde container-restart** (count uendret). Alle 13 migrasjoner kjørt mot Docker-PG
+  (34 tabeller). GJENSTÅR: konvertere embeddings-kolonnen real[]→vector + retrieval-bytte +
+  eval-regresjon (D-28-portens migreringssteg).
+- **D-32 (delvis):** kastbar worker-container bevist: node:22-alpine, non-root (node),
+  --network none, --memory 256m, --pids-limit 64, INGEN JARVIS-env (0 treff), workspace i
+  container, testkommando OK. GJENSTÅR: DockerSandboxRunner-wiring i worker + reclaim-test i
+  container + ekte GitHub-PR-flyt.
+- **Scheduler: VERIFIED reboot-durabel** (migrasjon 013 + DailyScheduler: DB-lås, Europe/Oslo,
+  catch-up, multi-instans → nøyaktig én vinner, testet; main bruker den).
+- **D-27 Langfuse / Infisical-D-35: IKKE startet i denne økten** (bevisst prioritering) —
+  neste økt: legg langfuse:2 + infisical i compose med LANGFUSE_INIT_*-nøkler, ekte trace + secret-flyt.
+- Docker-CLI-merknad: binærer ligger på per-bruker-sti
+  C:\Users\Tobia\AppData\Local\Programs\DockerDesktop\resources\bin (ikke i systemets PATH for shells).
