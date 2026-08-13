@@ -4,12 +4,18 @@
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
-**UA-1 UNIVERSAL AI MESH = P0 FERDIG, MULTI-PROVIDER LIVE VERIFIED. Klar for P1 ved eierordre.**
+**UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
 Owner-seed nå automatisk/idempotent i one-shot migrate. Åpne, ikke-blokkerende porter:
 D-30 Voice, D-36 Apple, HA-RUNTIME.
+
+## UA-1 P1A (BO-11)
+- Normalisert streaming (OpenAI+Claude live, ttft, cancel/barge-in-fundament, pre-output-fallback,
+  konservativ post-output-policy), provider-uavhengig tool-calling via trusted mesh-bridge→ToolGateway
+  (kun A/B-read i P1A), idempotent utførelse, cross-provider recovery etter utført verktøy (aldri
+  dobbel side-effekt), SSE-chat + worker-tool-mesh live. 225/225 tester. Evidens: RUNTIME_GATES BO-11.
 
 ## UA-1 LIVE-status (BO-10)
 - **UA-1 MULTI-PROVIDER LIVE = VERIFIED (BO-10).** OpenAI + Anthropic/Claude begge LIVE i container-runtime.

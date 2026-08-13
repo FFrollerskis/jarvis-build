@@ -211,3 +211,118 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("hemmelig-key");
   });
 });
+
+/** SSE-mock: Response med data-linjer som ReadableStream. */
+function sseResponse(events: unknown[], done = true): Response {
+  const lines = events.map((e) => `data: ${typeof e === "string" ? e : JSON.stringify(e)}\n\n`).join("") + (done ? "data: [DONE]\n\n" : "");
+  return new Response(new Blob([lines]).stream(), { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+describe("P1A adapter-streaming conformance (§5-§6, §24)", () => {
+  it("openai: SSE-deltas → normaliserte events + rekonstruert resultat med ttft/usage", async () => {
+    mockFetch(() =>
+      sseResponse([
+        { choices: [{ delta: { content: "hei " } }] },
+        { choices: [{ delta: { content: "verden" } }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+        { choices: [], usage: { prompt_tokens: 7, completion_tokens: 3 } }
+      ])
+    );
+    const events: string[] = [];
+    const result = await new OpenAiAdapter("k", "m", "http://mock").stream(REQUEST, (e) => events.push(e.type));
+    expect(result.text).toBe("hei verden");
+    expect(result.usage).toEqual({ input_tokens: 7, output_tokens: 3 });
+    expect(result.ttft_ms).toBeGreaterThanOrEqual(0);
+    expect(events[0]).toBe("start");
+    expect(events.at(-1)).toBe("finish");
+  });
+
+  it("openai: tool-call-deltas reassembles og valideres først ved komplett payload", async () => {
+    mockFetch(() =>
+      sseResponse([
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "read_x", arguments: "" } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "{\"a\":" } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: "1}" } }] } }] },
+        { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        { choices: [], usage: { prompt_tokens: 5, completion_tokens: 2 } }
+      ])
+    );
+    const order: string[] = [];
+    const result = await new OpenAiAdapter("k", "m", "http://mock").stream(REQUEST, (e) => order.push(e.type));
+    expect(result.tool_calls?.[0]).toMatchObject({ tool_call_id: "call_1", tool_name: "read_x", arguments: { a: 1 } });
+    expect(order.indexOf("tool_call_complete")).toBeGreaterThan(order.lastIndexOf("tool_call_delta"));
+  });
+
+  it("anthropic: native events → samme normaliserte kontrakt", async () => {
+    mockFetch(() =>
+      sseResponse(
+        [
+          { type: "message_start", message: { usage: { input_tokens: 9 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "text" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hei " } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "claude" } },
+          { type: "content_block_stop", index: 0 },
+          { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 4 } },
+          { type: "message_stop" }
+        ],
+        false
+      )
+    );
+    const events: string[] = [];
+    const result = await new AnthropicAdapter("k", "m", "http://mock").stream(REQUEST, (e) => events.push(e.type));
+    expect(result.text).toBe("hei claude");
+    expect(result.usage).toEqual({ input_tokens: 9, output_tokens: 4 });
+    expect(result.finish_reason).toBe("end_turn");
+    expect(events[0]).toBe("start");
+  });
+
+  it("anthropic: tool_use-blokk via input_json_delta → normalisert tool call", async () => {
+    mockFetch(() =>
+      sseResponse(
+        [
+          { type: "message_start", message: { usage: { input_tokens: 3 } } },
+          { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "read_x" } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"a\":" } },
+          { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "2}" } },
+          { type: "content_block_stop", index: 0 },
+          { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 6 } }
+        ],
+        false
+      )
+    );
+    const result = await new AnthropicAdapter("k", "m", "http://mock").stream(REQUEST, () => undefined);
+    expect(result.tool_calls?.[0]).toMatchObject({ tool_call_id: "toolu_1", tool_name: "read_x", arguments: { a: 2 } });
+    expect(result.finish_reason).toBe("tool_use");
+  });
+
+  it("tool-exchange oversettes provider-riktig i begge adaptere (cross-provider resume)", async () => {
+    const exchange = {
+      tool_exchanges: [{
+        calls: [{ tool_call_id: "c1", tool_name: "read_x", arguments: { a: 1 }, provider: "openai", model: "m" }],
+        results: [{ tool_call_id: "c1", tool_name: "read_x", execution_id: "e1", success: true, output: { ok: 1 }, at: "2026-08-14T00:00:00Z" }]
+      }]
+    };
+    let capturedBody: Record<string, unknown> = {};
+    const capture = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", capture);
+    await new OpenAiAdapter("k", "m", "http://mock").complete({ ...REQUEST, ...exchange });
+    const oaMessages = capturedBody["messages"] as Array<Record<string, unknown>>;
+    expect(oaMessages.some((m) => m["role"] === "assistant" && Array.isArray(m["tool_calls"]))).toBe(true);
+    expect(oaMessages.some((m) => m["role"] === "tool" && m["tool_call_id"] === "c1")).toBe(true);
+
+    const capture2 = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", capture2);
+    await new AnthropicAdapter("k", "m", "http://mock").complete({ ...REQUEST, ...exchange });
+    const antMessages = capturedBody["messages"] as Array<Record<string, unknown>>;
+    const toolUse = antMessages.find((m) => Array.isArray(m["content"]) && (m["content"] as Array<{ type: string }>)[0]?.type === "tool_use");
+    const toolResult = antMessages.find((m) => Array.isArray(m["content"]) && (m["content"] as Array<{ type: string }>)[0]?.type === "tool_result");
+    expect(toolUse).toBeDefined();
+    expect(toolResult).toBeDefined();
+  });
+});

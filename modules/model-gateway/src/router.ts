@@ -61,11 +61,21 @@ export class AiRouter {
     const mode: RouterMode = input.provider ? "SPECIFIC_PROVIDER" : (input.mode ?? "AUTO");
 
     // Owner override: eksakt provider, ingen stille fallback (forutsigbarhet > resiliens her).
+    // §38 (P1A): manglende påkrevd capability gir tydelig feil - aldri stille ignorering.
     if (mode === "SPECIFIC_PROVIDER") {
       const name = input.provider as string;
       const rt = providers.get(name);
       if (!rt?.configured) {
         throw new NoEligibleProviderError(`override-provider '${name}' er ikke konfigurert`);
+      }
+      const requiredForOverride = new Set<ModelCapability>(input.required_capabilities ?? []);
+      if (input.needs_structured) requiredForOverride.add("structured_output");
+      const profile = this.registry.profileOrGeneric(name, rt.model);
+      const missing = [...requiredForOverride].filter((c) => !profile.capabilities.includes(c));
+      if (missing.length > 0) {
+        throw new NoEligibleProviderError(
+          `override_capability_missing: '${name}' mangler [${missing.join(",")}]`
+        );
       }
       return { mode, reason: "OWNER_OVERRIDE", candidates: [{ provider: name, model: rt.model }] };
     }

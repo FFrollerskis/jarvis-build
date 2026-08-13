@@ -78,10 +78,11 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   },
   {
     // Deterministisk testprovider - generisk tekstprofil så eksisterende
-    // oppsett uten registry-endringer fortsetter å fungere.
+    // oppsett uten registry-endringer fortsetter å fungere. P1A: streamer og
+    // skripter tool calls deterministisk (matcher ScriptedAdapter).
     provider: "scripted",
     model: "scripted-1",
-    capabilities: ["text", "structured_output", "reasoning"],
+    capabilities: ["text", "structured_output", "reasoning", "streaming", "tool_calling"],
     context_tokens: 32_000,
     locality: "local",
     cost_class: 1,

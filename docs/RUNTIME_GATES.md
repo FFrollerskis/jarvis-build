@@ -112,6 +112,44 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-11 — UA-1 P1A STREAMING + TOOL-CALLING = VERIFIED (2026-08-14)
+
+**Arkitektur:** normalisert StreamEvent-kontrakt + provider-nøytral tool-løkke i ModelGateway.
+Adaptere (OpenAI/Anthropic) oversetter native SSE/tool-formater; resten av Jarvis ser aldri
+provider-format. Tool-utførelse går KUN via trusted mesh-bridge → ToolGateway → Policy/Authority
+(§17); P1A eksponerer kun A/B-read-verktøy (read_recent_email/read_calendar_today/read_github_issues).
+
+**Live-evidens (bo11-live.ts i jarvis-api-containeren, ekte OpenAI+Claude):**
+- **Streaming (§5-§7):** openai 19 deltas, ttft 1477 ms, rekonstruksjon=MATCH; anthropic ttft 2758 ms,
+  MATCH. TTFT spores i result/trace (§8).
+- **Cancellation (§9/§46):** begge providere - abort midt i stream → `cancelled`, ingen health-straff,
+  ingen zombie-state, neste request OK. (Barge-in-fundamentet for D-30, §28.)
+- **Pre-output stream-fallback (§10):** kontrollert timeout på openai → fallback-event
+  openai→anthropic(timeout) → Claude fullførte streamen. (Frasering avvek fra ordrett sentinel -
+  funksjonelt PASS.) **Post-output (§11):** konservativ policy - stream markeres `stream_interrupted`,
+  aldri stille provider-bytte (enhetstestet).
+- **Tool calling live (§14-§16):** BEGGE providere → read_github_issues via samme trusted gateway:
+  tool_rounds=2, nøyaktig 1 utførelse, korrekt svar. **Multi-tool (§23):** calendar+github i samme
+  oppgave: 2 utførelser, syntese 320 tegn (loop-vern: siste runde uten tools tvinger syntese).
+- **Cross-provider recovery (§45/§21):** openai døde ETTER utført verktøy → Claude gjenopptok fra
+  persistert tool-resultat (tool_exchanges) og svarte - utførelser=1, ALDRI dobbel side-effekt.
+- **Idempotens (§19):** sha256-nøkkel per (tenant,task,tool,args); cache + ToolGateway-idempotens.
+- **Ukjent verktøy (§26):** TOOL_NOT_FOUND uten utførelse (live). **Ugyldige args (§25):** schema-feil
+  → normalisert feil, ingen utførelse, én reparasjonsrunde (enhetstestet).
+- **Conversation (§27):** live SSE-chat streamer ekte deltas gjennom normalisert kontrakt
+  (`en`/`to`/`tre` + done). **Worker (§29):** durable jobb m/tools=true → mesh-verktøy via samme
+  ToolGateway i worker-containeren (tool_rounds=3, resultat persistert).
+- **Critic (§30):** får aldri tools (enhetstestet). **Owner override (§38):** manglende capability →
+  tydelig `override_capability_missing`-feil (enhetstestet).
+- **Kost/trace (§31-§32):** provider-fordelt kost m/failures i cost_events (sess-bo11: anthropic
+  21 kall/58 øre, openai 34 kall/20 øre inkl. simulerte feilforsøk med amount 0); ttft/tool_calls i
+  Langfuse-metadata. Brief 200-regresjon.
+- **Kvalitet:** 225/225 (Node 22; +20 nye: stream-normalisering/-cancel/-feil, tool-normalisering,
+  idempotens, fallback-etter-tool, multi-tool, critic-restriksjon, capability-routing, adapter-SSE-
+  conformance begge providere, cross-provider tool_exchange-oversetting), lint/typecheck rene.
+- **Merknad:** Gemini/Kimi/Ollama-adaptere uendret på complete-path (streaming/tools kan legges til
+  senere uten kontraktsendring, §39).
+
 ## BO-10 — UA-1 MULTI-PROVIDER LIVE = VERIFIED (2026-08-13)
 
 **Credential:** ANTHROPIC_API_KEY=SET (eier-levert; .env + speilet til Infisical-vault via

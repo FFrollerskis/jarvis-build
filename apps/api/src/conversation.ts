@@ -63,14 +63,19 @@ export class ConversationEngine {
       }));
       const memoryContext = this.deps.memory ? await this.deps.memory.contextFor(identity, text) : "";
       const system = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
-      const result = await this.deps.gateway.complete({
+      // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
+      // P1A (§27): SSE-klienter får normalisert stream; klienten ser aldri provider-format.
+      const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
-        // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
-        purpose: "CHAT",
-        request: { system, messages: history, max_tokens: 1024 },
-        ...(onToken ? { onToken } : {})
-      });
+        purpose: "CHAT" as const,
+        request: { system, messages: history, max_tokens: 1024 }
+      };
+      const result = onToken
+        ? await this.deps.gateway.stream(input, (event) => {
+            if (event.type === "text_delta") onToken(event.text);
+          })
+        : await this.deps.gateway.complete(input);
       await this.deps.messages.save(identity, "assistant", result.text);
       return { reply: result.text, routed: "model" };
     } catch (err) {

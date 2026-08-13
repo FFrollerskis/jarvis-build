@@ -2,11 +2,17 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
 import type { ModelPurpose, RouterMode } from "@jarvis/contracts";
+import { createHash } from "node:crypto";
 import {
   ProviderError,
   type ModelProviderAdapter,
   type ModelRequest,
-  type ModelResult
+  type ModelResult,
+  type StreamHandler,
+  type ToolCallRequest,
+  type ToolDefinition,
+  type ToolExchange,
+  type ToolResultMessage
 } from "@jarvis/provider-adapters";
 import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
@@ -59,6 +65,47 @@ export interface GatewayOptions {
   rates?: Record<string, { input_per_1k_ore: number; output_per_1k_ore: number }>;
   /** Enkel rate limit: maks kall per minutt per tenant. */
   maxCallsPerMinute?: number;
+}
+
+/**
+ * UA-1 P1A: trusted executor-grensesnitt. Gateway/modell har ALDRI direkte
+ * verktøytilgang - all utførelse går via denne broen til Tool Gateway,
+ * som håndhever Policy/Execution Authority/D-pipeline som før (§17).
+ */
+export interface ToolExecutor {
+  execute(
+    call: ToolCallRequest,
+    ctx: { tenant_id: string; session_id?: string; task_id?: string; idempotency_key: string }
+  ): Promise<ToolResultMessage>;
+}
+
+export interface ToolLoopOptions {
+  tools: ToolDefinition[];
+  executor: ToolExecutor;
+  /** Streaming-events for hver runde (valgfritt). */
+  onEvent?: StreamHandler;
+  signal?: AbortSignal;
+  /** Maks modellrunder (default 4) - aldri uendelig tool-loop. */
+  maxRounds?: number;
+}
+
+/** Minimal, deterministisk JSON-Schema-validering (§25): required + ukjente felter. */
+export function validateToolArgs(schema: Record<string, unknown>, args: Record<string, unknown>): string | null {
+  const required = (schema["required"] as string[] | undefined) ?? [];
+  for (const field of required) {
+    if (!(field in args)) {
+      return `missing_required:${field}`;
+    }
+  }
+  if (schema["additionalProperties"] === false) {
+    const allowed = new Set(Object.keys((schema["properties"] as Record<string, unknown> | undefined) ?? {}));
+    for (const key of Object.keys(args)) {
+      if (!allowed.has(key)) {
+        return `unknown_field:${key}`;
+      }
+    }
+  }
+  return null;
 }
 
 export interface MeshProviderStatus {
@@ -160,7 +207,11 @@ export class ModelGateway {
     return result;
   }
 
-  /** Deterministisk fallback (§12): klassifiserte feil, aldri blind retry-spam. */
+  /**
+   * Deterministisk fallback (§12): klassifiserte feil, aldri blind retry-spam.
+   * Streaming (§10-§11): fallback KUN før første output; etter output-start er
+   * policyen konservativ - stream markeres interrupted, aldri skjult provider-bytte.
+   */
   private async executePlan(
     input: CompleteInput,
     plan: RoutePlan,
@@ -168,7 +219,8 @@ export class ModelGateway {
     started: number,
     budgetLevel: string,
     isCritic: boolean,
-    requestOverride?: ModelRequest
+    requestOverride?: ModelRequest,
+    streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal }
   ): Promise<ModelResult> {
     const request = requestOverride ?? input.request;
     const failedProviders: string[] = [];
@@ -179,11 +231,39 @@ export class ModelGateway {
       if (!adapter || !adapter.available()) {
         continue;
       }
+      if (failedProviders.length > 0 && streamOpts) {
+        streamOpts.onEvent({
+          type: "fallback",
+          from: failedProviders[failedProviders.length - 1] as string,
+          to: adapter.name,
+          reason: (lastError as ProviderError | null)?.kind ?? "unknown"
+        });
+      }
       const maxTries = 2; // 1 + maks én retry for transient/invalid_response på samme provider
       for (let attempt = 1; attempt <= maxTries; attempt++) {
         const attemptStart = Date.now();
+        let outputStarted = false;
         try {
-          const result = await adapter.complete(request, isCritic ? undefined : input.onToken);
+          let result: ModelResult;
+          if (streamOpts) {
+            const guardedOnEvent: StreamHandler = (event) => {
+              if (event.type === "text_delta" || event.type === "tool_call_start") {
+                outputStarted = true;
+              }
+              streamOpts.onEvent(event);
+            };
+            if (adapter.stream) {
+              result = await adapter.stream(request, guardedOnEvent, streamOpts.signal);
+            } else {
+              // Adapter uten native streaming: normalisert enkelt-delta (capability-routing
+              // skal normalt hindre dette; brukes kun når streaming ikke er påkrevd cap).
+              result = await adapter.complete(request, (token) => guardedOnEvent({ type: "text_delta", text: token }));
+              streamOpts.onEvent({ type: "usage", usage: result.usage });
+              streamOpts.onEvent({ type: "finish", finish_reason: result.finish_reason ?? "stop" });
+            }
+          } else {
+            result = await adapter.complete(request, isCritic ? undefined : input.onToken);
+          }
           const latency = result.latency_ms ?? Date.now() - attemptStart;
           this.health.recordSuccess(adapter.name, latency);
           if (failedProviders.some((p) => p !== adapter.name)) {
@@ -224,6 +304,8 @@ export class ModelGateway {
               ...(input.purpose ? { purpose: input.purpose } : {}),
               ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {}),
               latency_ms: latency,
+              ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+              ...(result.tool_calls?.length ? { tool_calls_requested: result.tool_calls.length } : {}),
               critic: isCritic
             }
           });
@@ -234,8 +316,18 @@ export class ModelGateway {
               ? err
               : new ProviderError(adapter.name, "server", (err as Error).message);
           lastError = pe;
+          // Bruker-cancellation er ikke provider-feil (§35): ingen health-straff, ingen fallback.
+          if (pe.kind === "cancelled") {
+            await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+            throw pe;
+          }
           this.health.recordFailure(adapter.name, pe.kind, pe.message);
           await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+          // §11: etter output-start byttes ALDRI provider stille i samme stream.
+          if (streamOpts && outputStarted) {
+            streamOpts.onEvent({ type: "error", category: "stream_interrupted", message: pe.message.slice(0, 120) });
+            throw new ProviderError(adapter.name, "stream_interrupted", pe.message);
+          }
           // auth/bad_request/not_configured: aldri retry-spam på samme provider (§12).
           if (!(pe.retryableSameProvider && attempt < maxTries)) {
             break;
@@ -247,6 +339,136 @@ export class ModelGateway {
     throw lastError ?? new ProviderError("router", "not_configured", "no_provider_available");
   }
 
+  /**
+   * UA-1 P1A: normalisert streaming (§3-§10). Fallback kun før første output;
+   * cancel via signal gir ren avslutning uten zombie-generation (§9/§28).
+   */
+  async stream(input: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+    const started = Date.now();
+    const traceId = `trace-${randomUUID()}`;
+    this.enforceRateLimit(input.tenant_id);
+    const budget = await this.guard.evaluate(input.tenant_id);
+    if (budget.level === "hard_blocked" || budget.level === "needs_approval") {
+      throw new BudgetExceededError(budget.level, budget.spent_ore);
+    }
+    const plan = this.router.plan(
+      {
+        ...(input.purpose !== undefined ? { purpose: input.purpose } : {}),
+        ...(input.mode !== undefined ? { mode: input.mode } : {}),
+        ...(input.provider !== undefined ? { provider: input.provider } : {}),
+        required_capabilities: [...(input.required_capabilities ?? []), "streaming"],
+        needs_structured: Boolean(input.request.structured_schema)
+      },
+      this.providerRuntimes()
+    );
+    return this.executePlan(input, plan, traceId, started, budget.level, false, undefined, { onEvent, ...(signal ? { signal } : {}) });
+  }
+
+  /**
+   * UA-1 P1A tool-løkke (§16, §19-§26): modell ber om verktøy → trusted executor
+   * (Tool Gateway/Authority) → normalisert resultat → modellen fortsetter. Runder er
+   * provider-nøytrale (tool_exchanges), så fallback etter utført verktøy fortsetter
+   * med persistert resultat - aldri dobbel utførelse (§21).
+   */
+  async completeWithTools(input: CompleteInput, opts: ToolLoopOptions): Promise<ModelResult> {
+    const maxRounds = opts.maxRounds ?? 4;
+    const known = new Map(opts.tools.map((t) => [t.name, t]));
+    const executed = new Map<string, ToolResultMessage>(); // idempotency: samme kall → samme resultat
+    const exchanges: ToolExchange[] = [];
+    let repairUsed = false;
+    let forceFinal = false;
+    let result: ModelResult | null = null;
+
+    for (let round = 1; round <= maxRounds; round++) {
+      // Siste runde / loop-vern: uten tools MÅ modellen syntetisere tekstsvar av
+      // resultatene den alt har - aldri tom respons pga. runde-taket.
+      const withTools = !forceFinal && round < maxRounds;
+      const request: ModelRequest = {
+        ...input.request,
+        ...(withTools ? { tools: opts.tools } : {}),
+        ...(exchanges.length > 0 ? { tool_exchanges: exchanges } : {})
+      };
+      const roundInput: CompleteInput = {
+        ...input,
+        required_capabilities: [...(input.required_capabilities ?? []), "tool_calling"],
+        request
+      };
+      result = opts.onEvent
+        ? await this.stream(roundInput, opts.onEvent, opts.signal)
+        : await this.complete(roundInput);
+      const calls = result.tool_calls ?? [];
+      if (calls.length === 0) {
+        break;
+      }
+      const sizeBefore = executed.size;
+      const results: ToolResultMessage[] = [];
+      for (const call of calls) {
+        results.push(await this.executeToolCall(call, input, known, executed, () => {
+          if (repairUsed) {
+            return false;
+          }
+          repairUsed = true;
+          return true;
+        }, opts.executor));
+      }
+      exchanges.push({ calls, results });
+      // Kun cache-treff i runden = modellen looper på samme kall → tving syntese (§19).
+      if (executed.size === sizeBefore && results.every((r) => r.success)) {
+        forceFinal = true;
+      }
+    }
+    if (!result) {
+      throw new ProviderError("router", "not_configured", "no_provider_available");
+    }
+    result.metadata = { ...result.metadata, tool_rounds: exchanges.length };
+    return result;
+  }
+
+  /** Ett verktøykall: ukjent tool → DENY uten utførelse (§26); schema-feil → normalisert feil (§25). */
+  private async executeToolCall(
+    call: ToolCallRequest,
+    input: CompleteInput,
+    known: Map<string, ToolDefinition>,
+    executed: Map<string, ToolResultMessage>,
+    allowRepair: () => boolean,
+    executor: ToolExecutor
+  ): Promise<ToolResultMessage> {
+    const at = new Date().toISOString();
+    const def = known.get(call.tool_name);
+    if (!def) {
+      return {
+        tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+        success: false, output: null, error_category: "TOOL_NOT_FOUND", at
+      };
+    }
+    const validationError = validateToolArgs(def.input_schema, call.arguments);
+    if (validationError) {
+      // Modellen får normalisert feil og kan reparere ÉN gang (§25); aldri delvis utførelse.
+      allowRepair();
+      return {
+        tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",
+        success: false, output: null, error_category: `INVALID_ARGUMENTS:${validationError}`, at
+      };
+    }
+    const idempotencyKey = createHash("sha256")
+      .update(`${input.tenant_id}:${input.task_id ?? input.session_id ?? "adhoc"}:${call.tool_name}:${JSON.stringify(call.arguments, Object.keys(call.arguments).sort())}`)
+      .digest("hex")
+      .slice(0, 32);
+    const cached = executed.get(idempotencyKey);
+    if (cached) {
+      // Retry/fallback/reconnect: samme utførelse returneres - aldri dobbel side-effekt (§19).
+      return { ...cached, tool_call_id: call.tool_call_id };
+    }
+    const result = await executor.execute(call, {
+      tenant_id: input.tenant_id,
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
+      idempotency_key: idempotencyKey
+    });
+    executed.set(idempotencyKey, result);
+    return result;
+  }
+
   /** Critic (§18-§19): separat modellkjøring, egen kostrad, aldri koblet til D-godkjenning. */
   private async runCritic(input: CompleteInput, primary: ModelResult, traceId: string): Promise<void> {
     try {
@@ -256,6 +478,7 @@ export class ModelGateway {
       const pool = others.size > 0 ? others : runtimes;
       const criticPlan = this.router.plan({ mode: "QUALITY", purpose: "CRITIQUE" }, pool);
       const lastUser = [...input.request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+      // §30: critic er review-rolle - får ALDRI tools, kan aldri utføre side-effekter.
       const criticRequest: ModelRequest = {
         system: CRITIC_SYSTEM,
         messages: [
