@@ -4,6 +4,12 @@
 
 ## Aktiv fase og oppgave
 
+**Fase 9 – Home Assistant, hus og steder: implementert (uten live HA - UNVERIFIED); fase 8 funksjonelt implementert med D-36-runtime-port aapen.**
+
+## Fase 9 - resultater (2026-08-13)
+
+- HA-verktoy i Tool Gateway (tilstand=A, lys/klima=B, laas/alarm=D m/rollback/scopes/rate limit); stedsbevisst fast-router («skru paa lyset her» - rom fra identitetskonteksten); klasse D via talekanal bevist (DENY uten godkjenning / ALLOW / replay-DENY); 5 nye tester (116/116). UNVERIFIED: live HA-instans, fysisk skybrudd-/romfeiltest, HA Assist-fallback (krever HA-miljoe).
+
 **Fase 8 – Mobil, Watch og kontinuitet: backend-fundament implementert; native klientlag BLOKKERT
 på Apple-verktøykjede.**
 
