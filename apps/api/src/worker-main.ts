@@ -52,7 +52,7 @@ worker.register("executive", async (task, ctx) => {
       tenant_id: task.tenant_id,
       task_id: task.task_id,
       purpose: purpose.success ? purpose.data : "BACKGROUND",
-      request: { messages: [{ role: "user", content: input.prompt }], max_tokens: 256 }
+      request: { messages: [{ role: "user", content: input.prompt }], max_tokens: 1024 }
     });
     return {
       text: result.text.slice(0, 4000),

@@ -13,6 +13,7 @@ import {
 } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { ModelPurposeSchema } from "@jarvis/contracts";
 import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
@@ -51,7 +52,27 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
-  worker.register("executive", async (task) => ({ echo: task.contract.goal, done_at: new Date().toISOString() }));
+  // Samme kontrakt som worker-containeren (BO-10): prompt → AI Mesh med purpose;
+  // ellers echo. Begge workerne konkurrerer om samme kø og må oppføre seg likt.
+  worker.register("executive", async (task) => {
+    const input = task.contract.input.data as { prompt?: string; purpose?: string };
+    if (input.prompt) {
+      const purpose = ModelPurposeSchema.safeParse(input.purpose);
+      const result = await gateway.complete({
+        tenant_id: task.tenant_id,
+        task_id: task.task_id,
+        purpose: purpose.success ? purpose.data : "BACKGROUND",
+        request: { messages: [{ role: "user", content: input.prompt }], max_tokens: 1024 }
+      });
+      return {
+        text: result.text.slice(0, 4000),
+        provider: result.provider,
+        model: result.model,
+        tokens: { in: result.usage.input_tokens, out: result.usage.output_tokens }
+      };
+    }
+    return { echo: task.contract.goal, done_at: new Date().toISOString() };
+  });
   const gateway = new ModelGateway({
     pool,
     trace,

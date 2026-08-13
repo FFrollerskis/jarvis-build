@@ -4,21 +4,18 @@
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
-**UA-1 UNIVERSAL AI MESH = P0 FERDIG / IN PROGRESS mot P1.**
+**UA-1 UNIVERSAL AI MESH = P0 FERDIG, MULTI-PROVIDER LIVE VERIFIED. Klar for P1 ved eierordre.**
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
 Owner-seed nå automatisk/idempotent i one-shot migrate. Åpne, ikke-blokkerende porter:
 D-30 Voice, D-36 Apple, HA-RUNTIME.
 
-## UA-1 LIVE-status (BO-09)
-- **UA-1 MULTI-PROVIDER LIVE = BLOCKED_BY_CREDENTIALS**: alle nye provider-nøkler MISSING i
-  .env/host/vault (kun presence sjekket). Arkitekturen er live-validert så langt én provider rekker:
-  AUTO-routing (5 purposes m/reasons), owner override, structured output, critic (single-provider),
-  ekte 401→auth og timeout-klassifisering, worker-mesh-jobb (gpt-5 "42"), live chat ("Oslo"),
-  korrelasjonsgrunnlag i cost_events. Fix: OpenAI max_tokens→max_completion_tokens (gpt-5-kompatibel).
-- For å låse opp: legg ANTHROPIC_API_KEY / GEMINI_API_KEY / KIMI_API_KEY (evt. MOONSHOT_API_KEY) /
-  JARVIS_OLLAMA_URL i .env eller Infisical-vaulten - deretter kjøres live fallback + benchmark (BO-09 §11/§17).
+## UA-1 LIVE-status (BO-10)
+- **UA-1 MULTI-PROVIDER LIVE = VERIFIED (BO-10).** OpenAI + Anthropic/Claude begge LIVE i container-runtime.
+  Cross-provider fallback PASS begge retninger; multi-provider critic PASS begge veier; owner override,
+  health, 401/429/timeout, benchmark (10/10), Langfuse- og cost_events-korrelasjon verifisert.
+  Gemini/Kimi/Ollama fortsatt IMPLEMENTED_NOT_LIVE (nøkler mangler - ikke-blokkerende).
 
 ## UA-1 P0 (BO-08)
 - AI Router (deterministisk), CapabilityRegistry, ProviderHealth, versjonert pricing, normaliserte

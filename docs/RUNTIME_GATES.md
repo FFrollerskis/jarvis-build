@@ -112,6 +112,42 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-10 — UA-1 MULTI-PROVIDER LIVE = VERIFIED (2026-08-13)
+
+**Credential:** ANTHROPIC_API_KEY=SET (eier-levert; .env + speilet til Infisical-vault via
+universal-auth; injisert i api+worker via env_file; aldri i repo/logg/trace). OPENAI uendret.
+
+**Live-evidens (bo10-live.ts i jarvis-api-containeren, alle kall mot ekte API-er):**
+- **Anthropic LIVE:** claude-sonnet-5, tokens 21/20, 1576 ms, finish_reason + provider request id.
+- **Owner override (§3):** SPECIFIC_PROVIDER/OWNER_OVERRIDE PASS for både openai og anthropic.
+- **AUTO (§4):** 5 purposes; router valgte openai etter policy (LOW_COST/DEFAULT_BALANCED/
+  REASONING_REQUIRED) - ingen kunstig trafikkfordeling.
+- **Cross-provider fallback (§5): PASS BEGGE RETNINGER.** OpenAI→Claude: kontrollert timeout x2
+  (wrapper, ekte nøkler urørt) → anthropic ekte suksess, fallback_from=[openai], mesh.fallback=VERIFIED.
+  Claude→OpenAI: tilsvarende med registry-konfigurert kandidatrekkefølge → openai suksess,
+  fallback_from=[anthropic]. Feilforsøk + suksess persistert i cost_events; ingen tool-side-effects.
+- **Auth (§6):** ugyldig Anthropic-nøkkel → ekte 401 → auth, ingen retry-spam.
+- **429 (§7):** simulert på openai → health=RATE_LIMITED m/backoff → anthropic tok kallet.
+- **Timeout (§8):** ekte 1 ms-timeout mot Anthropic → timeout-klassifisering; retry-policy (maks 1) + fallback.
+- **Multi-provider critic (§9-10): PASS BEGGE VEIER.** openai-primær → anthropic-critic (1064 tegn);
+  anthropic-primær → openai-critic (576 tegn). Egen kostrad/trace per critic; critic≠primary bevist.
+- **Benchmark (§11):** 5 oppgaver × 2 providere = 10/10 suksess. openai/gpt-4o-mini avg ~1.1 s;
+  anthropic/claude-sonnet-5 avg ~3.1 s (høyere kvalitetsklasse, høyere kost: 27 øre vs 14 øre totalt
+  i sesjonen). Structured (prompt-JSON): anthropic compliant, openai ikke i denne kjøringen - men
+  openai består schema-håndhevet structured output (BO-09-evidens). Ingen «best modell»-konklusjon.
+- **Health (§12):** begge LIVE (openai ~1.3 s, anthropic ~4.0 s snitt); DEGRADED/RATE_LIMITED/
+  UNAVAILABLE-transisjoner dekket (429-sim live + suiten).
+- **Langfuse (§13):** 10 anthropic-observasjoner, 2 critic-traces (critic:openai/critic:anthropic),
+  3 fallback-observasjoner m/fallback_from + reason. Secret-scan RENT.
+- **cost_events (§14):** per provider: anthropic 13 kall/2 fallbacks/1 critic/2 feilforsøk/27 øre;
+  openai 17 kall/1 fallback/1 critic/3 feilforsøk/14 øre. Feilforsøk = amount 0.
+- **Regresjon:** brief 200; chat «fire» routed=model; worker-mesh-jobb «Grønn» (gpt-5) - api-workerens
+  executive-handler harmonisert med worker-containeren (samme kø, samme kontrakt); max_tokens 1024
+  for gpt-5-reasoning. Full stack healthy; D-class/OwnerControls/kill switch PASS i suiten.
+- **Kvalitet:** 205/205 (Node 22), lint/typecheck/gitleaks rene.
+
+**UA-1 MULTI-PROVIDER LIVE = VERIFIED.**
+
 ## BO-09 AI MESH LIVE-VALIDERING (2026-08-13)
 
 **Secret discovery (kun presence):** OPENAI_API_KEY=SET (host). ANTHROPIC_API_KEY/GEMINI_API_KEY/
