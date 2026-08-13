@@ -56,16 +56,31 @@ export class LangfuseTraceSink implements TraceSink {
 
   async record(span: TraceSpan): Promise<void> {
     const auth = Buffer.from(`${this.publicKey}:${this.secretKey}`).toString("base64");
+    // v2-ingestion: trace-create foerst, saa observation - korrelert på traceId.
+    // KUN kontrollerte felt sendes (tenant/session/task/kost/usage) - aldri env/credentials.
     const event = {
       batch: [
         {
-          id: `${span.trace_id}-${span.at}`,
+          id: `${span.trace_id}-t`,
+          type: "trace-create",
+          timestamp: span.at,
+          body: {
+            id: span.trace_id,
+            name: span.name,
+            userId: span.tenant_id,
+            sessionId: span.session_id ?? null,
+            metadata: { tenant_id: span.tenant_id, task_id: span.task_id ?? null, cost_ore: span.cost_ore ?? null }
+          }
+        },
+        {
+          id: `${span.trace_id}-s`,
           type: "span-create",
           timestamp: span.at,
           body: {
             traceId: span.trace_id,
             name: span.name,
             startTime: span.at,
+            endTime: new Date(new Date(span.at).getTime() + span.duration_ms).toISOString(),
             metadata: { ...span.metadata, tenant_id: span.tenant_id, task_id: span.task_id, cost_ore: span.cost_ore }
           }
         }
