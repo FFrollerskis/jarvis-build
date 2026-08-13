@@ -4,8 +4,22 @@
 
 ## Aktiv fase og oppgave
 
-**Fase 6 – Oppgaver og isolerte workers: implementert, venter på ekstern arkitektkontroll.**
-Fase 5 godkjent (`ae276df`).
+**Fase 7 – Første integrasjoner: under implementering.** Fase 6 – **FULLFØRT** (arkitektkontroll +
+Tobias 2026-08-13, HEAD `fc20cb6` + D-32-lukkecommit). Fase 6-akseptanse endelig: lokalt isolert
+worker-system **PASS** · Docker-containerisolasjon **PASS BY EXPLICIT D-32 DEFERMENT** · lokal
+kodejobb/branch/test/commit **PASS** · ekte GitHub PR-flyt **PASS BY EXPLICIT D-32 DEFERMENT** ·
+human merge-gate i arkitektur **PASS** · faktisk GitHub branch protection **PASS BY EXPLICIT D-32
+DEFERMENT** · øvrige kriterier **PASS**.
+**Inntil D-32 er lukket: workers er utviklings-/testklare, ikke produksjonsverifiserte autonome workers.**
+
+## Åpne bindende porter (ingen kan stilltiende waives)
+
+| Port | Innhold | Trigges |
+|---|---|---|
+| **D-27** | Langfuse-runtime (7 steg) | Første Docker-miljø |
+| **D-28** | pgvector/HNSW + eval-/RLS-regresjon + ytelse | Første Docker-miljø |
+| **D-30** | Norsk voice-providerbenchmark (≥100 prøver) + STOP/GO | Ekte voice-kandidater + prøver; før bred utrulling |
+| **D-32** | Worker-container (21 punkter) + ekte GitHub-gate | Første miljø med Docker + autentisert GitHub |
 
 ## Fase 6 – implementert (2026-08-13)
 
