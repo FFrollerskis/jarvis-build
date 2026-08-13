@@ -60,6 +60,11 @@ export type ToolResult =
  */
 export class ToolGateway {
   private readonly tools = new Map<string, ToolDefinition>();
+  /** BO-03: connector-health per tool_id (healthy/degraded/auth_failed/rate_limited/unavailable). */
+  readonly health = new Map<string, { state: string; at: string; detail?: string }>();
+  private setHealth(toolId: string, state: string, detail?: string): void {
+    this.health.set(toolId, { state, at: new Date().toISOString(), ...(detail ? { detail } : {}) });
+  }
   private readonly callTimes = new Map<string, number[]>();
 
   constructor(
@@ -169,6 +174,10 @@ export class ToolGateway {
           definition.timeout_ms
         );
       } catch (err) {
+        const message = (err as Error).message;
+        this.setHealth(request.tool_id,
+          /401|403|auth/.test(message) ? "auth_failed" : /429|rate/.test(message) ? "rate_limited" : "unavailable",
+          message.slice(0, 60));
         // Kontrollert feil: revoked credential/timeout/providerfeil åpner ingenting.
         await writeAudit(client, request.identity, {
           type: "tool.failed", decision: "DENY", reason: (err as Error).message.slice(0, 120),
@@ -207,6 +216,7 @@ export class ToolGateway {
           ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
         }
       });
+      this.setHealth(request.tool_id, "healthy");
       return {
         ok: true,
         ...(external.external_id !== undefined ? { external_id: external.external_id } : {}),

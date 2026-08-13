@@ -25,3 +25,22 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 - **Model-provider live:** OpenAI PRODUCTION-kall verifisert (evidens over). Anthropic/Ollama: nøkkel/endepunkt mangler.
 - **Nytt:** POST /brief (JSON+rendert+session), Telegram-levering (chunket, idempotent, via Tool Gateway - venter bot-token), persistent seen/stale-suppression (migrasjon 012, testet), brief-cost-rad per generering.
 - **Docker fortsatt fraværende** → D-27/D-28/D-32/Infisical-D-35 uendret BLOCKED_EXTERNAL.
+
+## BO-03-tillegg (2026-08-13)
+- **Docker/credentials re-probet: fortsatt fraværende** (ingen docker-binaer, ingen .env) -
+  D-27/D-28/D-32/D-35 og alle live-connector-maal forblir BLOCKED_EXTERNAL.
+- **Produksjonstransporter implementert og typesjekket (live-kall venter kun paa .env):**
+  GmailTransport (OAuth refresh->access, metadata, unread/important, konto-merket),
+  GoogleCalendarTransport (dagens/kommende events m/attendees/prep), GithubTransport (issues/PR),
+  TelegramTransport (sendMessage til owner-chat) + TelegramCommandPoller (/brief, /status,
+  kun owner-chat, svar via Tool Gateway/audit).
+- **Konto-/tenant-opploesning:** transport-instans er bundet til eksplisitt konto
+  (JARVIS_GOOGLE_ACCOUNT, default post@tsworkflow.com per D-34, som konfig - aldri hardkodet i
+  domenelogikk); ingen implisitt cross-account fallback.
+- **Connector-health:** healthy/auth_failed/rate_limited/unavailable per tool_id oppdateres av
+  hvert kall i Tool Gateway; eksponeres i /status.
+- **Morgenlevering:** konfigurerbar (JARVIS_BRIEF_HOUR, default 07), en gang per dag, degraderer
+  pent (brief-kilder feiler enkeltvis; Telegram-feil stopper ikke prosessen).
+- .env-noekler som aktiverer alt: JARVIS_GOOGLE_CLIENT_ID/SECRET, JARVIS_EMAIL_TOKEN +
+  JARVIS_GOOGLE_TOKEN (refresh tokens), JARVIS_GITHUB_TOKEN, JARVIS_TELEGRAM_TOKEN +
+  JARVIS_TELEGRAM_CHAT_ID.

@@ -16,7 +16,12 @@ import { JsonlTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { AnthropicAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
-import { DailyBrief, buildStatusSource, tasksSource } from "@jarvis/tool-gateway";
+import {
+  DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
+  TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource,
+  emailSource, firstWaveTools, tasksSource
+} from "@jarvis/tool-gateway";
+import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
@@ -61,8 +66,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     identity: new IdentityService(pool),
     devices: new DeviceService(pool),
     brief: {
-      generate: (identity) =>
-        new DailyBrief([tasksSource(pool), buildStatusSource(null)], pool).generate(identity as never),
+      generate: (identity) => dailyBrief.generate(identity as never),
       render: (artifact) => DailyBrief.render(artifact as never)
     },
     sessions: new SessionService(pool),
@@ -79,6 +83,54 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     })
   };
   setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
+
+  // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
+  // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
+  const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
+  for (const tool of firstWaveTools({
+    email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
+    github: new GithubTransport(), telegram: new TelegramTransport()
+  })) toolGateway.register(tool);
+  const dailyBrief = new DailyBrief([
+    tasksSource(pool), buildStatusSource(toolGateway),
+    emailSource(toolGateway), calendarSource(toolGateway)
+  ], pool);
+  const ownerIdentity = {
+    person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
+    channel: "api", auth_strength: "active"
+  } as const;
+  const sendTelegram = async (text: string) => {
+    for (let i = 0; i < text.length; i += 3900) {
+      await toolGateway.execute({ identity: ownerIdentity as never, tool_id: "telegram", action: "notify",
+        parameters: { message: text.slice(i, i + 3900) } });
+    }
+  };
+  const statusText = async () => {
+    const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
+    return `JARVIS STATUS
+fase: v4.0 BO-03
+connectors: ${gates || "ingen kall enda"}
+porter: se docs/RUNTIME_GATES.md
+neste: runtime-porter (Docker/credentials)`;
+  };
+  if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
+    new TelegramCommandPoller(process.env["JARVIS_TELEGRAM_TOKEN"], process.env["JARVIS_TELEGRAM_CHAT_ID"], {
+      brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
+      status: statusText
+    }, sendTelegram).start();
+    // Morgenlevering: konfigurerbar time (default 07); sjekk hvert minutt, lever én gang per dag.
+    let lastDelivered = "";
+    const hour = Number(process.env["JARVIS_BRIEF_HOUR"] ?? 7);
+    setInterval(() => void (async () => {
+      const now = new Date();
+      const day = now.toISOString().slice(0, 10);
+      if (now.getHours() === hour && lastDelivered !== day) {
+        lastDelivered = day;
+        await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
+      }
+    })().catch(() => undefined), 60_000).unref();
+  }
   return deps;
 }
 
