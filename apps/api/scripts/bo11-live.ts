@@ -28,7 +28,16 @@ const OPENAI_MODEL = process.env["JARVIS_OPENAI_MODEL"] ?? "gpt-4o-mini";
 const killSwitch = new KillSwitch();
 const deviceRegistry = new PgDeviceRegistry(pool, "tenant-personal");
 await deviceRegistry.refresh().catch(() => undefined);
-const policy = new PolicyGateway({ devices: deviceRegistry, nonces: new PgApprovalStore(pool), killSwitch });
+const policy = new PolicyGateway({
+  devices: deviceRegistry,
+  nonces: new PgApprovalStore(pool),
+  killSwitch,
+  // Samme sovereign-owner-wiring som api/worker (BO-11.1 §2).
+  authority: {
+    owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
+    owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
+  }
+});
 const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),

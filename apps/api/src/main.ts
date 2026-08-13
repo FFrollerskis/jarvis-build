@@ -48,7 +48,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
-    killSwitch
+    killSwitch,
+    // v4.0 sovereign-owner (BO-11.1 §2-funn): uten denne kjørte runtime i legacy
+    // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
+    // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
+    // (preflight/readback/evidens/recovery) + owner-kontrollene, ikke approval.
+    authority: {
+      owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
+      owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
+    }
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);

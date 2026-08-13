@@ -20,7 +20,10 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
   klient-disconnect → upstream cancellation (barge-in-fundament bevist på HTTP-nivå),
   executive-handler-paritet api↔worker (delt handler), eksplisitt D-class-mesh- og
   SSE-fixture-regresjon (+ fix: Anthropic stream-error-events klassifiseres, aldri stille suksess).
-  247/247 tester. Delta-live på host gjenstår: `apps/api/scripts/bo11-1-delta-live.ts`.
+- **Sovereign-fix (pre-merge):** api/worker-wiringen manglet authority-config → owners D-kall
+  krevde feilaktig approval (legacy SCOPED). Fikset i main/worker/bo11-live; begge semantikker
+  testbevist (owner sovereign → full D-pipeline uten approval; delegat → approval-gate + replay-vern).
+  249/249 tester. Delta-live på host gjenstår: `apps/api/scripts/bo11-1-delta-live.ts`.
 
 ## UA-1 LIVE-status (BO-10)
 - **UA-1 MULTI-PROVIDER LIVE = VERIFIED (BO-10).** OpenAI + Anthropic/Claude begge LIVE i container-runtime.

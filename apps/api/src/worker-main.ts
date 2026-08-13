@@ -39,7 +39,17 @@ const gateway = new ModelGateway({
 const killSwitch = new KillSwitch();
 const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
 await deviceRegistry.refresh().catch(() => undefined);
-const policy = new PolicyGateway({ devices: deviceRegistry, nonces: new PgApprovalStore(pool), killSwitch });
+// v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
+// uten denne kjørte workeren i legacy SCOPED-modus for owners D-kall.
+const policy = new PolicyGateway({
+  devices: deviceRegistry,
+  nonces: new PgApprovalStore(pool),
+  killSwitch,
+  authority: {
+    owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
+    owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
+  }
+});
 const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),

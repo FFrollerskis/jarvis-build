@@ -130,10 +130,16 @@ JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
   BÅDE api-workeren (main.ts - hadde fortsatt gammel provider-direkte handler uten tools) og
   worker-containeren. Paritetstest: samme durable jobb → semantisk likt resultat, samme
   idempotensnøkkel, mesh (aldri echo) for prompt-jobber, sandbox kun der den finnes.
-- **D-class-mesh-regresjon (§11):** full kjede mot ekte PG: completeWithTools → normalized call →
-  MeshToolExecutor → ToolGateway → Policy: uten godkjenning → deterministisk DENY, NULL
-  transport-kall (heller ikke preflight), audit-rad; med signert godkjenning (direkte på samme
-  trusted gateway) → preflight+readback+audit; replay av brukt nonce → DENY. Klassifisering D bevart.
+- **D-class-mesh-regresjon (§11) + SOVEREIGN-FUNN (pre-merge-akseptansen):** D er risikoklasse,
+  ikke permission-gate. Funn: `resolveAuthorityMode`/policy-motoren hadde korrekt sovereign-semantikk
+  (UA0-AUTHORITY), men **api/worker-wiringen sendte ikke authority-config** → runtime kjørte legacy
+  SCOPED og krevde approval for owners D-kall. Fikset: main.ts, worker-main.ts og bo11-live.ts wirer
+  nå `authority: {owner_person_id, owner_tenants}` fra env (defaults person-tobias/tenant-personal).
+  Begge semantikker bevist mot ekte PG i full mesh-kjede: **OWNER SOVEREIGN** (ingen delegation):
+  D-kall uten approval → authority PASS → preflight → execute → readback → before/after-evidens →
+  audit. **DELEGERT/SCOPED** (delegation_id - arver aldri owner authority): uten approval →
+  deterministisk DENY m/null transport-kall + audit; med gyldig signert approval → ALLOW
+  m/preflight+readback; nonce-replay → DENY. Klassifisering D bevart.
 - **SSE-fixtures (§12):** provider-uavhengige fixtures - samme logiske utveksling gir IDENTISK
   normalisert event-sekvens fra OpenAI- og Anthropic-SSE; terminal-invarianter (nøyaktig én
   terminal, aldri events etter, complete etter siste delta). **Funn fikset:** Anthropic-adapteren
