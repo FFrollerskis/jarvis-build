@@ -35,6 +35,7 @@ let server: ReturnType<typeof createApiServer>;
 let scripted: ScriptedAdapter;
 let trace: MemoryTraceSink;
 let worker: InProcessWorker;
+let gateway: ModelGateway;
 
 const webIdentity = {
   person_id: "person-tobias",
@@ -112,9 +113,15 @@ beforeAll(async () => {
     nonces: new PgApprovalStore(appPool),
     killSwitch: new KillSwitch()
   });
-  scripted = new ScriptedAdapter(() => "Hei Tobias, dette er et modellsvar.");
+  scripted = new ScriptedAdapter((req) =>
+    // BO-11.1 §7: "langsom" gir mange tokens (~1 ms hver i stream) slik at
+    // klient-frakobling deterministisk treffer midt i genereringen.
+    req.messages.at(-1)?.content.includes("langsom")
+      ? Array.from({ length: 150 }, (_, i) => `ord${i} `).join("")
+      : "Hei Tobias, dette er et modellsvar."
+  );
   trace = new MemoryTraceSink();
-  const gateway = new ModelGateway({
+  gateway = new ModelGateway({
     pool: appPool,
     trace,
     providers: [new FailingAdapter(), scripted] // beviser også fallback: failing → scripted
@@ -287,5 +294,51 @@ describe("SSE-streaming", () => {
     const text = await response.text();
     expect(text).toContain("event: token");
     expect(text).toContain("event: done");
+  });
+});
+
+describe("BO-11.1 §6-§7: SSE klient-disconnect → upstream abort (barge-in-fundament §8)", () => {
+  it("A/C/E: frakobling midt i stream kansellerer generasjonen upstream - ingen health-straff, ingen zombie", async () => {
+    const controller = new AbortController();
+    const response = await fetch(`${baseUrl}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie" }),
+      signal: controller.signal
+    });
+    // Les til første token-event er mottatt, koble så fra midt i genereringen:
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value);
+      if (buffer.includes("event: token")) {
+        controller.abort();
+        break;
+      }
+    }
+    // Gi serveren tid til å registrere close og kansellere upstream:
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    // A: generasjonen ble faktisk kansellert i Conversation Engine (ikke bare
+    // stoppet socket-skriving) - delvis svar persistert med eksplisitt markør:
+    const saved = await adminPool.query(
+      `SELECT content FROM messages WHERE content LIKE '%[avbrutt av bruker]%' LIMIT 1`
+    );
+    expect(saved.rowCount).toBe(1);
+    // C (§35): bruker-kansellering er ALDRI provider-feil:
+    expect(gateway.meshStatus().providers.find((p) => p.provider === "scripted")?.failures).toBe(0);
+  });
+
+  it("B/D: ny request rett etterpå fungerer normalt med nøyaktig ett done-event", async () => {
+    const response = await fetch(`${baseUrl}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ ...webIdentity, message: "hva er planen for dagen?" })
+    });
+    const text = await response.text();
+    expect(text).toContain("Hei Tobias, dette er et modellsvar.".split(" ")[0] as string);
+    expect(text.match(/event: done/g)?.length).toBe(1); // aldri duplisert final
   });
 });

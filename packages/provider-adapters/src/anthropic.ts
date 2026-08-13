@@ -156,6 +156,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
           content_block?: { type: string; id?: string; name?: string };
           delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
           usage?: { output_tokens?: number };
+          error?: { type?: string; message?: string };
         };
         try {
           event = JSON.parse(data) as typeof event;
@@ -209,12 +210,23 @@ export class AnthropicAdapter implements ModelProviderAdapter {
             if (event.delta?.stop_reason) finish = event.delta.stop_reason;
             if (event.usage?.output_tokens !== undefined) outputTokens = event.usage.output_tokens;
             break;
+          case "error": {
+            // BO-11.1 §12-funn: error-events i streamen skal ALDRI bli stille
+            // suksess - de klassifiseres som normaliserte provider-feil (§33).
+            const errType = event.error?.type ?? "unknown";
+            if (errType === "rate_limit_error") {
+              throw new ProviderError(this.name, "rate_limit", `${this.name}_rate_limited_in_stream`);
+            }
+            throw new ProviderError(this.name, "server", `${this.name}_stream_error:${errType}`);
+          }
           default:
             break;
         }
       }
     } catch (err) {
-      if (err instanceof ProviderError && err.kind === "invalid_tool_call") throw err;
+      // Allerede klassifiserte feil (invalid_tool_call, error-events → server/rate_limit)
+      // beholder klassifiseringen - den styrer router/health/fallback deterministisk.
+      if (err instanceof ProviderError) throw err;
       if (signal?.aborted) {
         onEvent({ type: "cancelled" });
         throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);

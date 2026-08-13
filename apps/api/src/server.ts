@@ -124,10 +124,27 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         connection: "keep-alive"
       });
       const send = (event: string, data: unknown) => {
-        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        // Frakoblet socket får aldri flere events - og aldri duplisert 'done'.
+        if (!res.writableEnded && !res.destroyed) {
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        }
       };
-      const result = await deps.conversation.handle(resolved.identity, body.message, (token) =>
-        send("token", { token })
+      // BO-11.1 §6/§8 (barge-in-fundament for D-30): klient-disconnect propagerer
+      // hele veien - HTTP close → AbortSignal → ModelGateway → provider-upstream.
+      // Ikke bare slutte å skrive til socketen mens provideren fortsetter.
+      const abort = new AbortController();
+      // 'close' på RESPONSEN fyrer når forbindelsen termineres for tidlig
+      // (req-'close' fyrer ved fullført request-body i moderne Node - feil signal).
+      res.on("close", () => {
+        if (!res.writableEnded) {
+          abort.abort();
+        }
+      });
+      const result = await deps.conversation.handle(
+        resolved.identity,
+        body.message,
+        (token) => send("token", { token }),
+        abort.signal
       );
       send("done", { ...result, session_id: session.session_id });
       res.end();

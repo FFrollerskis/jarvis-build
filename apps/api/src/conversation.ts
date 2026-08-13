@@ -1,6 +1,7 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
 import { BudgetExceededError, type ModelGateway, type TraceSink } from "@jarvis/model-gateway";
+import { ProviderError } from "@jarvis/provider-adapters";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { randomUUID } from "node:crypto";
 
@@ -19,6 +20,10 @@ export interface ChatReply {
   reply: string;
   routed: "fast" | "model" | "blocked";
   task_id?: string;
+  /** BO-11.1 §6: klienten koblet fra/avbrøt - generasjonen ble kansellert upstream. */
+  cancelled?: boolean;
+  /** §11: streamen ble avbrutt av provider-feil ETTER output-start - aldri skjult. */
+  interrupted?: boolean;
 }
 
 const SYSTEM_PROMPT =
@@ -33,7 +38,13 @@ const SYSTEM_PROMPT =
 export class ConversationEngine {
   constructor(private readonly deps: ConversationDeps) {}
 
-  async handle(identity: IdentityContext, text: string, onToken?: (t: string) => void): Promise<ChatReply> {
+  async handle(
+    identity: IdentityContext,
+    text: string,
+    onToken?: (t: string) => void,
+    /** BO-11.1 §6: klient-disconnect propagerer helt til provider-upstream. */
+    signal?: AbortSignal
+  ): Promise<ChatReply> {
     await this.deps.messages.save(identity, "user", text);
 
     const intent = fastRoute(text);
@@ -55,6 +66,7 @@ export class ConversationEngine {
       return result;
     }
 
+    let partial = "";
     try {
       const context = await this.deps.context.build(identity);
       const history = context.history.slice(-20).map((m) => ({
@@ -72,9 +84,16 @@ export class ConversationEngine {
         request: { system, messages: history, max_tokens: 1024 }
       };
       const result = onToken
-        ? await this.deps.gateway.stream(input, (event) => {
-            if (event.type === "text_delta") onToken(event.text);
-          })
+        ? await this.deps.gateway.stream(
+            input,
+            (event) => {
+              if (event.type === "text_delta") {
+                partial += event.text;
+                onToken(event.text);
+              }
+            },
+            signal
+          )
         : await this.deps.gateway.complete(input);
       await this.deps.messages.save(identity, "assistant", result.text);
       return { reply: result.text, routed: "model" };
@@ -84,6 +103,17 @@ export class ConversationEngine {
         await this.deps.messages.save(identity, "assistant", reply);
         onToken?.(reply);
         return { reply, routed: "blocked" };
+      }
+      if (err instanceof ProviderError && err.kind === "cancelled") {
+        // §6: rent avbrudd - delvis tekst persisteres med eksplisitt markør,
+        // ingen zombie-generation, neste tur er upåvirket.
+        await this.deps.messages.save(identity, "assistant", `${partial} [avbrutt av bruker]`.trim());
+        return { reply: partial, routed: "model", cancelled: true };
+      }
+      if (err instanceof ProviderError && err.kind === "stream_interrupted") {
+        // §11: avbruddet er eksplisitt - aldri stille provider-bytte i samme tekst.
+        await this.deps.messages.save(identity, "assistant", `${partial} [stream avbrutt]`.trim());
+        return { reply: partial, routed: "model", interrupted: true };
       }
       throw err;
     }

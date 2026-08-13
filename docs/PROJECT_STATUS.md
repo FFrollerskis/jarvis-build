@@ -15,7 +15,12 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
 - Normalisert streaming (OpenAI+Claude live, ttft, cancel/barge-in-fundament, pre-output-fallback,
   konservativ post-output-policy), provider-uavhengig tool-calling via trusted mesh-bridge→ToolGateway
   (kun A/B-read i P1A), idempotent utførelse, cross-provider recovery etter utført verktøy (aldri
-  dobbel side-effekt), SSE-chat + worker-tool-mesh live. 225/225 tester. Evidens: RUNTIME_GATES BO-11.
+  dobbel side-effekt), SSE-chat + worker-tool-mesh live. Evidens: RUNTIME_GATES BO-11.
+- **P1A delta (BO-11.1):** SQL streaming-metrics i cost_events (migrasjon 016), SSE
+  klient-disconnect → upstream cancellation (barge-in-fundament bevist på HTTP-nivå),
+  executive-handler-paritet api↔worker (delt handler), eksplisitt D-class-mesh- og
+  SSE-fixture-regresjon (+ fix: Anthropic stream-error-events klassifiseres, aldri stille suksess).
+  247/247 tester. Delta-live på host gjenstår: `apps/api/scripts/bo11-1-delta-live.ts`.
 
 ## UA-1 LIVE-status (BO-10)
 - **UA-1 MULTI-PROVIDER LIVE = VERIFIED (BO-10).** OpenAI + Anthropic/Claude begge LIVE i container-runtime.

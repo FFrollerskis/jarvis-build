@@ -17,6 +17,7 @@
     "@jarvis/contracts": "workspace:*"
   },
   "devDependencies": {
-    "@types/pg": "^8.15.6"
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
   }
 }

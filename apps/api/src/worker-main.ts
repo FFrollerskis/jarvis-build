@@ -3,11 +3,11 @@
 import { configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
-import { ModelPurposeSchema } from "@jarvis/contracts";
 import {
   EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
   MeshToolExecutor, meshToolDefinitions, ToolGateway, firstWaveTools
 } from "@jarvis/tool-gateway";
+import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
   GeminiAdapter,
@@ -58,55 +58,16 @@ const workerIdentity = {
 const runner =
   process.env["JARVIS_SANDBOX"] === "docker" ? new DockerSandboxRunner() : new ProcessSandboxRunner();
 
-// Executive-jobber: eksplisitt kommando → sandbox (D-32-mønsteret);
-// prompt → AI Mesh via ModelGateway (purpose fra jobben, default BACKGROUND);
-// ellers kvitteres målet (styringsjobb uten sideeffekter).
-worker.register("executive", async (task, ctx) => {
-  const input = task.contract.input.data as {
-    command?: string[];
-    timeout_ms?: number;
-    prompt?: string;
-    purpose?: string;
-  };
-  if (input.prompt) {
-    await ctx.assertNotCancelled();
-    const purpose = ModelPurposeSchema.safeParse(input.purpose);
-    const meshInput = {
-      tenant_id: task.tenant_id,
-      task_id: task.task_id,
-      purpose: purpose.success ? purpose.data : ("BACKGROUND" as const),
-      request: { messages: [{ role: "user" as const, content: input.prompt }], max_tokens: 1024 }
-    };
-    // BO-11 (§29): tools=true gir modellen mesh-verktøy via trusted executor.
-    const result = (input as { tools?: boolean }).tools
-      ? await gateway.completeWithTools(meshInput, {
-          tools: meshToolDefinitions(),
-          executor: new MeshToolExecutor(toolGateway, workerIdentity)
-        })
-      : await gateway.complete(meshInput);
-    return {
-      text: result.text.slice(0, 4000),
-      provider: result.provider,
-      model: result.model,
-      tool_rounds: (result.metadata?.["tool_rounds"] as number | undefined) ?? 0,
-      tokens: { in: result.usage.input_tokens, out: result.usage.output_tokens }
-    };
-  }
-  if (!input.command || input.command.length === 0) {
-    return { echo: task.contract.goal, done_at: new Date().toISOString() };
-  }
-  const sb = await runner.create();
-  try {
-    await ctx.assertNotCancelled();
-    const res = sb.exec(input.command[0] as string, input.command.slice(1), input.timeout_ms ?? 60_000);
-    if (res.code !== 0) {
-      throw new Error(`sandbox_exit_${res.code}: ${res.stderr.slice(0, 200)}`);
-    }
-    return { stdout: res.stdout.slice(0, 4000), code: res.code, sandbox: runner.name };
-  } finally {
-    await sb.dispose();
-  }
-});
+// BO-11.1 §9: delt executive-handler (samme fil som api-workeren) - identisk
+// kontrakt for samme kø: prompt → mesh, tools=true → tool-løkke, command → sandbox.
+worker.register(
+  "executive",
+  executiveHandler({
+    gateway,
+    tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, workerIdentity) },
+    sandbox: runner
+  })
+);
 
 console.log(JSON.stringify({ msg: "jarvis-worker started", worker_id: worker.workerId, sandbox: runner.name }));
 setInterval(

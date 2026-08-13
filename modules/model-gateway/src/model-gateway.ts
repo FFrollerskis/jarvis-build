@@ -284,7 +284,11 @@ export class ModelGateway {
             success: true,
             fallback: failedProviders.length > 0,
             critic: isCritic,
-            latency_ms: latency
+            latency_ms: latency,
+            // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
+            stream: Boolean(streamOpts),
+            ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+            tool_calls: result.tool_calls?.length ?? 0
           });
           await this.opts.trace.record({
             trace_id: traceId,
@@ -543,13 +547,23 @@ export class ModelGateway {
     input: CompleteInput,
     result: ModelResult,
     costOre: number,
-    flags: { success: boolean; fallback: boolean; critic: boolean; latency_ms: number }
+    flags: {
+      success: boolean;
+      fallback: boolean;
+      critic: boolean;
+      latency_ms: number;
+      /** BO-11.1 §4: kun satt for streaming-executions (migrasjon 016). */
+      stream?: boolean;
+      ttft_ms?: number;
+      tool_calls?: number;
+    }
   ): Promise<void> {
     await withTenantTransaction(this.opts.pool, input.tenant_id, (client) =>
       client.query(
         `INSERT INTO cost_events (tenant_id, task_id, session_id, kind, amount_ore, provider, model,
-                                  input_tokens, output_tokens, purpose, success, fallback, critic, latency_ms)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+                                  input_tokens, output_tokens, purpose, success, fallback, critic, latency_ms,
+                                  ttft_ms, stream, tool_calls)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
         [
           input.tenant_id,
           input.task_id ?? null,
@@ -564,7 +578,10 @@ export class ModelGateway {
           flags.success,
           flags.fallback,
           flags.critic,
-          flags.latency_ms
+          flags.latency_ms,
+          flags.ttft_ms ?? null,
+          flags.stream ?? false,
+          flags.tool_calls ?? 0
         ]
       )
     );

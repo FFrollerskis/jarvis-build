@@ -112,6 +112,41 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
+
+**UA-1 P1A forblir VERIFIED.** Kontrollert delta-port oppå BO-11 (ingen redesign):
+- **SQL streaming-metrics (§3-§5):** migrasjon `016_cost_events_stream_metrics` (ttft_ms int,
+  stream bool default false, tool_calls int default 0) + write-path i ModelGateway (én kostrad per
+  modellkall som før). Verifisert mot ekte embedded-PG: gamle inserts overlever m/defaults; ekte
+  streaming-kall → SQL-rad m/provider/model/purpose/ttft_ms/stream/tool_calls/kost; P1B-aggregering
+  (avg ttft per provider/purpose) SQL-spørrbar. Kompletterer Langfuse - erstatter ikke (§14).
+- **SSE-disconnect → upstream abort (§6-§8):** HTTP-klient kobler fra → res-'close' (req-'close'
+  fyrer ved fullført body i moderne Node - feil signal) → AbortSignal → ModelGateway.stream →
+  provider-abort → normalisert cancelled → delvis svar persistert m/`[avbrutt av bruker]`-markør.
+  E2E-bevist mot kjørende http-server + embedded-PG: kansellering skjer upstream (ikke bare
+  socket-stopp), ingen health-straff, ingen zombie, neste request OK, nøyaktig ett done-event.
+  Barge-in-fundamentet for D-30 er dermed bevist på HTTP-nivå (§8).
+- **Executive-handler-paritet (§9-§10):** delt handler (`apps/api/src/executive.ts`) registrert i
+  BÅDE api-workeren (main.ts - hadde fortsatt gammel provider-direkte handler uten tools) og
+  worker-containeren. Paritetstest: samme durable jobb → semantisk likt resultat, samme
+  idempotensnøkkel, mesh (aldri echo) for prompt-jobber, sandbox kun der den finnes.
+- **D-class-mesh-regresjon (§11):** full kjede mot ekte PG: completeWithTools → normalized call →
+  MeshToolExecutor → ToolGateway → Policy: uten godkjenning → deterministisk DENY, NULL
+  transport-kall (heller ikke preflight), audit-rad; med signert godkjenning (direkte på samme
+  trusted gateway) → preflight+readback+audit; replay av brukt nonce → DENY. Klassifisering D bevart.
+- **SSE-fixtures (§12):** provider-uavhengige fixtures - samme logiske utveksling gir IDENTISK
+  normalisert event-sekvens fra OpenAI- og Anthropic-SSE; terminal-invarianter (nøyaktig én
+  terminal, aldri events etter, complete etter siste delta). **Funn fikset:** Anthropic-adapteren
+  ignorerte `error`-events i stream (ble stille suksess) → nå klassifisert server/rate_limit;
+  allerede klassifiserte feil beholder klassifisering gjennom stream-catch.
+- **Kvalitet:** 247/247 (225 baseline + 22 nye; disconnect-e2e stabil 3×), lint/typecheck/gitleaks
+  rene. Kritisk recovery-regresjon (§13/§45: tool utført → provider-død → resume uten dobbel
+  utførelse) PASS i suiten.
+- **Gjenstår på host (utenfor denne byggerundens miljø - ingen Docker/nøkler):** delta-live-porten
+  `node --experimental-strip-types apps/api/scripts/bo11-1-delta-live.ts` (Docker-PG-SQL §5 + live
+  SSE-disconnect §7) + live provider-regresjon §13 (re-kjør bo11-live.ts) + §16 runtime-helse.
+  BO-11s live-evidens er uendret gyldig; deltaet endrer ikke provider-kontraktene.
+
 ## BO-11 — UA-1 P1A STREAMING + TOOL-CALLING = VERIFIED (2026-08-14)
 
 **Arkitektur:** normalisert StreamEvent-kontrakt + provider-nøytral tool-løkke i ModelGateway.

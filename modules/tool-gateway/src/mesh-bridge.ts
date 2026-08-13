@@ -8,7 +8,14 @@ import type { ToolGateway } from "./gateway.ts";
  * Policy/Execution Authority/idempotens/audit, uansett provider.
  * P1A eksponerer kun ufarlige A/B-klasse READ-verktøy (§14).
  */
-const MESH_TOOLS: Array<{ def: MeshToolDefinition; tool_id: string; action: string }> = [
+/** Kobling mesh-verktøynavn → registrert Tool Gateway-handling. */
+export interface MeshToolMapping {
+  def: MeshToolDefinition;
+  tool_id: string;
+  action: string;
+}
+
+const MESH_TOOLS: MeshToolMapping[] = [
   {
     def: {
       name: "read_recent_email",
@@ -38,8 +45,8 @@ const MESH_TOOLS: Array<{ def: MeshToolDefinition; tool_id: string; action: stri
   }
 ];
 
-export function meshToolDefinitions(): MeshToolDefinition[] {
-  return MESH_TOOLS.map((t) => t.def);
+export function meshToolDefinitions(tools: MeshToolMapping[] = MESH_TOOLS): MeshToolDefinition[] {
+  return tools.map((t) => t.def);
 }
 
 /**
@@ -50,7 +57,13 @@ export class MeshToolExecutor {
   constructor(
     private readonly toolGateway: ToolGateway,
     private readonly identity: unknown,
-    private readonly maxOutputChars = 4000
+    private readonly maxOutputChars = 4000,
+    /**
+     * Default: kun A/B-read-verktøyene over. Tester/senere faser kan eksponere
+     * flere mappinger - autorisasjon (inkl. D-pipeline) håndheves UANSETT i
+     * Tool Gateway/Policy per kall, aldri av denne listen (§17).
+     */
+    private readonly tools: MeshToolMapping[] = MESH_TOOLS
   ) {}
 
   async execute(
@@ -58,7 +71,7 @@ export class MeshToolExecutor {
     ctx: { tenant_id: string; session_id?: string; task_id?: string; idempotency_key: string }
   ): Promise<ToolResultMessage> {
     const at = new Date().toISOString();
-    const mapped = MESH_TOOLS.find((t) => t.def.name === call.tool_name);
+    const mapped = this.tools.find((t) => t.def.name === call.tool_name);
     if (!mapped) {
       return {
         tool_call_id: call.tool_call_id, tool_name: call.tool_name, execution_id: "none",

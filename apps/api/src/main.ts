@@ -13,17 +13,17 @@ import {
 } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
-import { ModelPurposeSchema } from "@jarvis/contracts";
 import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
-  TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource,
-  emailSource, firstWaveTools, tasksSource, DailyScheduler
+  MeshToolExecutor, meshToolDefinitions, TelegramCommandPoller, TelegramTransport, ToolGateway,
+  buildStatusSource, calendarSource, emailSource, firstWaveTools, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
+import { executiveHandler } from "./executive.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
 const port = Number(process.env["JARVIS_API_PORT"] ?? 3010);
@@ -52,27 +52,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   const queue = new PgTaskQueue(pool);
   const worker = new InProcessWorker(queue);
-  // Samme kontrakt som worker-containeren (BO-10): prompt → AI Mesh med purpose;
-  // ellers echo. Begge workerne konkurrerer om samme kø og må oppføre seg likt.
-  worker.register("executive", async (task) => {
-    const input = task.contract.input.data as { prompt?: string; purpose?: string };
-    if (input.prompt) {
-      const purpose = ModelPurposeSchema.safeParse(input.purpose);
-      const result = await gateway.complete({
-        tenant_id: task.tenant_id,
-        task_id: task.task_id,
-        purpose: purpose.success ? purpose.data : "BACKGROUND",
-        request: { messages: [{ role: "user", content: input.prompt }], max_tokens: 1024 }
-      });
-      return {
-        text: result.text.slice(0, 4000),
-        provider: result.provider,
-        model: result.model,
-        tokens: { in: result.usage.input_tokens, out: result.usage.output_tokens }
-      };
-    }
-    return { echo: task.contract.goal, done_at: new Date().toISOString() };
-  });
   const gateway = new ModelGateway({
     pool,
     trace,
@@ -91,6 +70,28 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
     }
   });
+  // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
+  // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
+  const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
+  for (const tool of firstWaveTools({
+    email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
+    github: new GithubTransport(), telegram: new TelegramTransport()
+  })) toolGateway.register(tool);
+  const ownerIdentity = {
+    person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
+    channel: "api", auth_strength: "active"
+  } as const;
+  // BO-11.1 §9: SAMME executive-handler som worker-containeren (delt fil) - api-workeren
+  // som vinner queue-racet skal håndtere tools=true-jobber identisk (uten sandbox).
+  worker.register(
+    "executive",
+    executiveHandler({
+      gateway,
+      tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, ownerIdentity) }
+    })
+  );
+
   const deps: ApiDeps = {
     identity: new IdentityService(pool),
     devices: new DeviceService(pool),
@@ -113,22 +114,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
 
-  // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
-  // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
-  const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
-  for (const tool of firstWaveTools({
-    email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-    github: new GithubTransport(), telegram: new TelegramTransport()
-  })) toolGateway.register(tool);
   const dailyBrief = new DailyBrief([
     tasksSource(pool), buildStatusSource(toolGateway),
     emailSource(toolGateway), calendarSource(toolGateway)
   ], pool);
-  const ownerIdentity = {
-    person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
-    memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
-    channel: "api", auth_strength: "active"
-  } as const;
   const sendTelegram = async (text: string) => {
     for (let i = 0; i < text.length; i += 3900) {
       await toolGateway.execute({ identity: ownerIdentity as never, tool_id: "telegram", action: "notify",
