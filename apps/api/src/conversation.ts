@@ -109,6 +109,17 @@ export class ConversationEngine {
         const res = result.value.result ? ` Resultat: ${JSON.stringify(result.value.result)}` : "";
         return { reply: `Jobb ${result.value.task_id}: ${result.value.status}.${res}`, routed: "fast" };
       }
+      case "home_light": {
+        // Stedsbevisst hjemstyring: rommet hentes fra identity.site_id/room_id.
+        // Kjørende HA-integrasjon kobles til via Tool Gateway (fase 9-runtime).
+        if (!identity.site_id || !identity.room_id) {
+          return { reply: "Jeg vet ikke hvilket rom du er i (mangler sted i konteksten).", routed: "fast" };
+        }
+        return {
+          reply: `Hjemstyring (${intent.on ? "på" : "av"}, ${identity.room_id}) krever tilkoblet Home Assistant-instans.`,
+          routed: "fast"
+        };
+      }
       case "cancel_task": {
         const result = await this.deps.tasks.cancel(identity, intent.task_id);
         if (!result.ok) {
