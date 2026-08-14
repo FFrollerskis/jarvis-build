@@ -42,6 +42,19 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
   logikk verifisert med fake-adaptere.
 - Kvalitet: 203/203 tester (Node 22), lint, typecheck, gitleaks rene. Full stack healthy.
 
+## D-30 Voice (BO-12)
+- **Status: PARTIAL — IMPLEMENTED + SUITE-VERIFIED (264/264); LIVE STT/TTS gjenstår på host.**
+  Branch `claude/d30-voice`. Voice er transportlag over eksisterende Jarvis (samme mesh/
+  tools/authority/minne): streaming Core-klient (P1A-SSE) → setningschunking → TTS-kø,
+  full barge-in (stopp lyd + tøm kø + abort generering upstream, epoch-vern mot stale
+  audio), eksplisitt tilstandsmaskin m/personvern (ingen skjult opptak, rå lyd
+  persisteres aldri), STT-/TTS-feilbaner, full latenskjede-metrics, voice-helse i
+  /status, cross-provider-override. OpenAI STT/TTS er P0-baseline (nøkkel alt live).
+- **Lukk live-porten på hosten:** `node --experimental-strip-types
+  apps/voice-gateway/scripts/bo12-voice-live.ts` (norsk TTS→STT-rundtur, kalender-
+  voice-tool-flyt, barge-in-abort, cross-provider; mikrofon trengs ikke).
+  Evidens: docs/RUNTIME_GATES.md (BO-12).
+
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
 

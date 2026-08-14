@@ -1,6 +1,51 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { TurnMetrics } from "./session.ts";
 import type { SttAdapter } from "./stt.ts";
+
+/**
+ * BO-12 §19/§38-§39: aggregering av hele latenskjeden over voice-turer.
+ * Hovedmålet er end_of_speech_to_first_audio_ms (P50 + P95 når nok samples).
+ * Tall rapporteres som målt - aldri som mål vi "tror" vi når.
+ */
+export interface LatencySummary {
+  turns: number;
+  end_of_speech_to_first_audio_p50_ms?: number;
+  end_of_speech_to_first_audio_p95_ms?: number;
+  model_first_token_p50_ms?: number;
+  tts_first_frame_p50_ms?: number;
+}
+
+export function summarizeLatency(turns: TurnMetrics[]): LatencySummary {
+  const pct = (values: number[], q: number): number | undefined => {
+    if (values.length === 0) {
+      return undefined;
+    }
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))];
+  };
+  const e2e = turns
+    .map((t) => t.end_of_speech_to_first_audio_ms)
+    .filter((v): v is number => v !== undefined);
+  const model = turns
+    .filter((t) => t.t_model_first_token !== undefined && t.t_end_of_turn !== undefined)
+    .map((t) => (t.t_model_first_token as number) - (t.t_end_of_turn as number));
+  const tts = turns
+    .filter((t) => t.t_tts_first_frame !== undefined && t.t_first_tts_request !== undefined)
+    .map((t) => (t.t_tts_first_frame as number) - (t.t_first_tts_request as number));
+  const e2eP50 = pct(e2e, 0.5);
+  const e2eP95 = pct(e2e, 0.95);
+  const modelP50 = pct(model, 0.5);
+  const ttsP50 = pct(tts, 0.5);
+  return {
+    turns: turns.length,
+    ...(e2eP50 !== undefined ? { end_of_speech_to_first_audio_p50_ms: e2eP50 } : {}),
+    // P95 rapporteres kun med nok samples (≥20) - aldri fake presisjon (§39).
+    ...(e2e.length >= 20 && e2eP95 !== undefined ? { end_of_speech_to_first_audio_p95_ms: e2eP95 } : {}),
+    ...(modelP50 !== undefined ? { model_first_token_p50_ms: modelP50 } : {}),
+    ...(ttsP50 !== undefined ? { tts_first_frame_p50_ms: ttsP50 } : {})
+  };
+}
 
 /**
  * Norsk STT-benchmark-harness (D-10-porten): kjøres når ≥100 norske lydprøver

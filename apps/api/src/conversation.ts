@@ -43,7 +43,9 @@ export class ConversationEngine {
     text: string,
     onToken?: (t: string) => void,
     /** BO-11.1 §6: klient-disconnect propagerer helt til provider-upstream. */
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** BO-12 §33: valgfri owner-override av provider (router håndhever §38). */
+    provider?: string
   ): Promise<ChatReply> {
     await this.deps.messages.save(identity, "user", text);
 
@@ -81,6 +83,7 @@ export class ConversationEngine {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
+        ...(provider !== undefined ? { provider } : {}),
         request: { system, messages: history, max_tokens: 1024 }
       };
       const result = onToken

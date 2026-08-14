@@ -112,6 +112,55 @@ HA-instans + token).
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## BO-12 — D-30 VOICE FOUNDATION (2026-08-14)
+
+**Status: D-30 P0 = PARTIAL (IMPLEMENTED + SUITE-VERIFIED; LIVE STT/TTS = BLOCKED_BY_ENVIRONMENT).**
+Bygget i sky-container uten nøkler/Docker; live-porten lukkes på hosten med
+`node --experimental-strip-types apps/voice-gateway/scripts/bo12-voice-live.ts`
+(krever OPENAI_API_KEY + kjørende jarvis-api; mikrofon trengs ikke - norsk testlyd
+genereres via TTS→STT-rundtur; dekker §30-§33 inkl. barge-in-abort og cross-provider).
+
+**Voice er transportlag over Jarvis (§50):** samme Conversation/AI Mesh/Tool Gateway/
+authority/minne som tekst - tale gir ingen ekstra authority (§43). Bygget som DELTA på
+fase 5-fundamentet (VoiceSession/VAD/STT-TTS-adaptere/WS-transport/WER-benchmark):
+- **Streaming Core-klient (§12-§13):** HttpCoreClient.chatStream mot eksisterende
+  /chat-SSE (P1A) - tokens → SentenceChunker (aldri halvferdige ord; splitter ikke
+  "18.30") → sekvensiell TTS-kø. TTS starter på første setning FØR generering er
+  ferdig (testbevist). Tool-events → korte norske statuser ("Sjekker kalenderen …",
+  §26) - aldri intern JSON/payload i tale (§14/§27).
+- **Barge-in (§15-§17):** tale under speaking/thinking → stopp avspilling + tøm
+  TTS-kø + forkast chunker-buffer + ABORT modellgenerering upstream (P1A-kjeden) +
+  interrupted-state + ny tur. Epoch-vern: gammel lyd kan aldri spilles etter ny tur
+  (§16, testbevist med taggede rammer). Utført verktøy rulles aldri tilbake (§17 -
+  journal + ToolGateway-idempotens).
+- **Tilstandsmaskin (§23):** idle/listening/thinking/speaking/interrupted eksplisitt;
+  start-melding = eksplisitt mikrofonaktivering; ingen skjult opptak.
+- **Feilbaner:** STT-feil → normalisert `stt_error`, ALDRI modellkjøring på tom/
+  ugyldig transkript (§35); TTS-feil → tekstsvaret leveres uansett, `tts_error`
+  normalisert uten detaljer, helse DEGRADED (§36/§27). Fixtures (§28): kort/lang,
+  pause midt i setning (bryter ikke turen), støy, ingen tale, avbrutt tale.
+- **Metrics (§19-§20):** full latenskjede per tur (t_final_transcript,
+  t_model_first_token, t_first_tts_request, t_tts_first_frame, hovedmål
+  end_of_speech_to_first_audio_ms) + stt_audio_ms/tts_chars som kost-grunnlag
+  (STT/LLM/TTS holdes adskilt). summarizeLatency gir P50; P95 kun ved ≥20 samples
+  (§39 - aldri fake presisjon). Faktiske måltall settes av host-live/benchmark.
+- **Helse (§36-§37):** VoiceHealth (stt/tts LIVE/DEGRADED/UNAVAILABLE fra faktiske
+  kall), gateway /status (transport/stt/tts/barge_in/audio_persistence=none);
+  api-/status viser voice-helse når JARVIS_VOICE_URL er satt.
+- **Cross-provider (§33):** valgfri provider-override i /chat (router §38-semantikk)
+  - voice-pipelinen er identisk uansett LLM (testbevist openai vs anthropic).
+- **Personvern (§22):** rå lyd persisteres aldri (strukturelt testbevist: ingen
+  filskriving i lydkjedens moduler); transcript følger eksisterende
+  conversation-semantikk. STT/TTS-baseline: OpenAI (nøkkel alt live i runtime, §5-§7);
+  andre providere bak samme adapterlag etter D-10-benchmark.
+- **Kvalitet:** 264/264 (248 baseline + 16 nye), lint/typecheck/gitleaks rene.
+  Eksisterende fase 5-akseptanser (barge-in ≤250 ms, median <1500 ms med test-
+  adaptere, failover-idempotens, sesjonskontinuitet tekst↔tale) fortsatt PASS -
+  e2e kjører nå den nye streaming-banen mot ekte api-SSE.
+
+**Gjenstår for D-30 P0 = VERIFIED:** host-live (§30-§33 via scriptet over) + reelle
+latens-/kostmålinger (§38-§39) + D-10-benchmark (≥100 norske prøver) for providervalg.
+
 ## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
 
 **UA-1 P1A forblir VERIFIED.** Kontrollert delta-port oppå BO-11 (ingen redesign):

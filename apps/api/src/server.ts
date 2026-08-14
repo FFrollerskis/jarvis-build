@@ -46,6 +46,8 @@ interface ChatBody {
   channel: Channel;
   auth_strength?: AuthStrength;
   message: string;
+  /** BO-12 §33: valgfri owner-override av LLM-provider (router §38-semantikk). */
+  provider?: string;
 }
 
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
@@ -144,14 +146,15 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         resolved.identity,
         body.message,
         (token) => send("token", { token }),
-        abort.signal
+        abort.signal,
+        body.provider
       );
       send("done", { ...result, session_id: session.session_id });
       res.end();
       return;
     }
 
-    const result = await deps.conversation.handle(resolved.identity, body.message);
+    const result = await deps.conversation.handle(resolved.identity, body.message, undefined, undefined, body.provider);
     return json(res, 200, { ...result, session_id: session.session_id });
   }
 

@@ -143,12 +143,35 @@ Router     ${mesh.router}
 Fallback   ${mesh.fallback}
 Critic     ${mesh.critic}`;
   };
+  // BO-12 §37: voice-helse fra gatewayens /status når den kjører (egen prosess).
+  const voiceText = async (): Promise<string> => {
+    const voiceUrl = process.env["JARVIS_VOICE_URL"];
+    if (!voiceUrl) {
+      return "Voice      ikke konfigurert (JARVIS_VOICE_URL)";
+    }
+    try {
+      const status = (await (await fetch(`${voiceUrl}/status`, { signal: AbortSignal.timeout(2_000) })).json()) as {
+        stt: { name: string; state: string };
+        tts: { name: string; state: string };
+        transport: string;
+        barge_in: string;
+      };
+      return `Voice
+  STT      ${status.stt.name} ${status.stt.state}
+  TTS      ${status.tts.name} ${status.tts.state}
+  Transport ${status.transport}
+  Barge-in ${status.barge_in}`;
+    } catch {
+      return "Voice      UNAVAILABLE (gateway svarer ikke)";
+    }
+  };
   const statusText = async () => {
     const gates = [...toolGateway.health.entries()].map(([k, v]) => `${k}:${v.state}`).join(" ");
     return `JARVIS STATUS
-fase: v4.0 UA-1 P0 (AI Mesh)
+fase: v4.0 UA-1 P1A + D-30 voice foundation
 connectors: ${gates || "ingen kall enda"}
 ${await aiMeshText()}
+${await voiceText()}
 porter: se docs/RUNTIME_GATES.md`;
   };
   if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
