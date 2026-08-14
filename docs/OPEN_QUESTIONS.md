@@ -29,6 +29,7 @@
 | Q-10 | Trenger relasjonslaget egen grafdatabase? | Etter fase 4-eval | Flerhopp-spørsmål i minne-evalen; bytt kun ved målt svikt |
 | Q-11 | Lokal LLM-økonomi: lønner GPU-server seg? | Fase 10 | 30–90 dagers kostnads-/bruksmåling |
 | Q-12 | Satellitt-maskinvare for rom (HA Voice PE, egen build, annet)? | Fase 5/9 | Prototype + benchmark |
+| Q-18 | ToolGateway-idempotensdedupe gjelder også A-klasse READ-verktøy (idempotent_external=true): gjentatt likt lesekall i samme sesjon returnerer `deduplicated` UTEN data → modellen får tomt resultat ved andre gangs "hva står på kalenderen" samme dag/sesjon. Skal reads unntas dedupe, eller skal dedupe returnere lagret data? (Observert under D-30 live-funn-fix; IKKE endret der - utenfor ordren.) | Neste hardening-runde | Målrettet test + beslutning D-xx; dedupe-semantikk for C/D må ikke røres |
 
 ## Parkert (bevisst utsatt)
 

@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-13 · **Branch:** `claude/v4-sovereign-autonomy`
+**Oppdatert:** 2026-08-14 · **Branch:** `claude/d30-voice` (PR #2, ikke merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -50,10 +50,16 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
   audio), eksplisitt tilstandsmaskin m/personvern (ingen skjult opptak, rå lyd
   persisteres aldri), STT-/TTS-feilbaner, full latenskjede-metrics, voice-helse i
   /status, cross-provider-override. OpenAI STT/TTS er P0-baseline (nøkkel alt live).
-- **Lukk live-porten på hosten:** `node --experimental-strip-types
-  apps/voice-gateway/scripts/bo12-voice-live.ts` (norsk TTS→STT-rundtur, kalender-
-  voice-tool-flyt, barge-in-abort, cross-provider; mikrofon trengs ikke).
-  Evidens: docs/RUNTIME_GATES.md (BO-12).
+- **Live-findings-fix (etter første ekte host-kjøring):** TTS/STT/no-tool/cross-provider/
+  barge-in PASS live, men kalender-voice feilet: ConversationEngine manglet BO-11-tool-broen.
+  Fikset: samtalebanen (tekst+voice) bruker nå `completeWithTools` m/mesh-verktøy og executor
+  bundet til samtalens resolved identity (aldri global owner); SSE sender trusted `tool_call`
+  (kun tool_name); foreldet "ingen verktøy"-prompt fjernet; voice-device seedes idempotent
+  (`jarvis-voice-live`); STT-akseptanse semantisk robust ("atten ganger sju" ≙ "18 x 7").
+- **Lukk live-porten på hosten (etter pull + rebuild):** `node --env-file=.env
+  --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
+  (strip-types feiler på Node 24-host; norsk TTS→STT-rundtur, kalender-voice-tool-flyt,
+  barge-in-abort, cross-provider; mikrofon trengs ikke). Evidens: docs/RUNTIME_GATES.md (BO-12).
 
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.

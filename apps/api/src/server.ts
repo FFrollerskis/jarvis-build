@@ -147,7 +147,10 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         body.message,
         (token) => send("token", { token }),
         abort.signal,
-        body.provider
+        body.provider,
+        // D-30: trusted verktøy-aktivitet - kun tool_name, aldri args/resultat-JSON.
+        // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
+        (toolName) => send("tool_call", { tool_name: toolName })
       );
       send("done", { ...result, session_id: session.session_id });
       res.end();

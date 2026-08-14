@@ -117,7 +117,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       tasks: new TaskService(pool, queue, policy),
       worker,
       trace,
-      memory: new MemoryRetriever(pool, new LocalHashEmbedding())
+      memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
+      // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
+      // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
+      // slik at tenant/delegation/authority følger den som faktisk snakker.
+      tools: {
+        definitions: meshToolDefinitions(),
+        executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
+      }
     })
   };
   setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();

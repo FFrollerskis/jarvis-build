@@ -1,12 +1,15 @@
 // BO-12 D-30 live-akseptanse på runtime-hosten (§30-§33). Kjøres der
 // OPENAI_API_KEY finnes og jarvis-api kjører:
-//   node --experimental-strip-types apps/voice-gateway/scripts/bo12-voice-live.ts
+//   node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts
+// (transform-types, IKKE strip-types: kodebasen bruker TS parameter properties,
+// som ga ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX med strip-types på Node 24-host.)
 // Mikrofon trengs ikke: norsk testlyd genereres via TTS og verifiseres via STT
 // (rundtur). Printer aldri secrets - kun statuser, transkript og latenser.
 import { OpenAiStt } from "../src/stt.ts";
 import { OpenAiTts } from "../src/tts.ts";
 import { HttpCoreClient } from "../src/server.ts";
 import { SentenceChunker } from "../src/chunker.ts";
+import { transcriptMatches } from "../src/acceptance.ts";
 import type { CoreStreamEvent, VoiceIdentity } from "../src/session.ts";
 
 const API_URL = process.env["JARVIS_CORE_URL"] ?? "http://localhost:3010";
@@ -53,9 +56,9 @@ for (const phrase of PHRASES) {
   console.log(
     `  "${phrase}" → tts=${ttsMs}ms audio=${Math.round(audio.length / 32)}ms stt=${sttMs}ms → "${text}"`
   );
-  const norm = (s: string) => s.toLowerCase().replace(/[^a-zæøå0-9 ]/g, "");
-  const overlap = norm(phrase).split(" ").filter((w) => norm(text).includes(w)).length;
-  if (overlap < 3) {
+  // §10 (live-funn): semantisk ekvivalens godtas ("atten ganger sju" ≙ "18 x 7") -
+  // vilkårlig dårlige transkript feiler fortsatt (samme overlappsterskel).
+  if (!transcriptMatches(phrase, text)) {
     throw new Error(`FEIL §30: transkript for ulikt originalen ("${text}")`);
   }
 }

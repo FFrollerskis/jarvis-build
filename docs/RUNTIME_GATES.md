@@ -116,8 +116,10 @@ JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
 **Status: D-30 P0 = PARTIAL (IMPLEMENTED + SUITE-VERIFIED; LIVE STT/TTS = BLOCKED_BY_ENVIRONMENT).**
 Bygget i sky-container uten nøkler/Docker; live-porten lukkes på hosten med
-`node --experimental-strip-types apps/voice-gateway/scripts/bo12-voice-live.ts`
-(krever OPENAI_API_KEY + kjørende jarvis-api; mikrofon trengs ikke - norsk testlyd
+`node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
+(host-bevist kommando: `--experimental-strip-types` feilet på Node 24-host med
+ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX pga. TS parameter properties; transform-types kreves.
+Krever OPENAI_API_KEY + kjørende jarvis-api; mikrofon trengs ikke - norsk testlyd
 genereres via TTS→STT-rundtur; dekker §30-§33 inkl. barge-in-abort og cross-provider).
 
 **Voice er transportlag over Jarvis (§50):** samme Conversation/AI Mesh/Tool Gateway/
@@ -161,6 +163,35 @@ fase 5-fundamentet (VoiceSession/VAD/STT-TTS-adaptere/WS-transport/WER-benchmark
 **Gjenstår for D-30 P0 = VERIFIED:** host-live (§30-§33 via scriptet over) + reelle
 latens-/kostmålinger (§38-§39) + D-10-benchmark (≥100 norske prøver) for providervalg.
 
+### D-30 LIVE FINDINGS FIX — Conversation tool bridge (2026-08-14)
+
+Første EKTE host-live-kjøring (Windows-host m/Docker+credentials) beviste: runtime healthy,
+ekte OpenAI TTS/STT (norsk) PASS, no-tool voice-rundtur PASS ("18 ganger 7" → "126"),
+OpenAI- og Anthropic-LLM-voice-path PASS, barge-in/abort upstream PASS, next-turn recovery
+PASS — men **kalender-voice FEILET funksjonelt** (`tools=[]`, "har ikke tilgang til
+kalenderen"). Root cause + fix (denne runden, suite-verifisert i sky - IKKE nye live-claims):
+- **ConversationEngine hadde aldri tool-broen fra BO-11:** fase-3-wiring brukte
+  `gateway.stream/complete` uten tools, og system-prompten sa eksplisitt "ikke tilgang til
+  verktøy". Fikset: `ConversationDeps.tools {definitions, executorFor(identity)}` →
+  `gateway.completeWithTools` for BÅDE streaming- og JSON-banen (samme normaliserte
+  tool-løkke som executive; ingen voice-spesifikk sidevei). Prompt oppdatert (ingen
+  permissions i prompt - Policy/Authority forblir trusted runtime).
+- **Identity-binding:** executor bindes til samtalens RESOLVED identity per kall
+  (`executorFor(identity)` → `MeshToolExecutor(toolGateway, identity)`) - aldri global
+  ownerIdentity - tenant/delegation/authority følger den som snakker (testbevist m/2 tenants).
+- **SSE `tool_call`-event:** `tool_call_complete` → `event: tool_call` m/KUN `tool_name`
+  (aldri raw args/tool-result; testbevist). Voice-HttpCoreClient forsto allerede eventet.
+- **Voice-device-seed:** host-live ga 403 unknown_device for `jarvis-voice-live` (kun
+  jarvis-core var seedet). Seed er nå delt idempotent funksjon (`apps/api/src/seed.ts`,
+  brukt av one-shot migrate) og inkluderer voice-device (JARVIS_VOICE_DEVICE_ID ??
+  jarvis-voice-live, kind=voice, samme konfigurerte owner tenant/person).
+- **Host-kommando korrigert** (strip→transform-types, se over) og **STT-akseptansen gjort
+  semantisk robust** (`apps/voice-gateway/src/acceptance.ts`: "atten ganger sju" ≙
+  "18 x 7"/"18 × 7"; terskel uendret - norsk kalender-setning er ikke svekket).
+
+**Neste:** pull ny HEAD på hosten, rebuild api-runtime, re-kjør bo12-voice-live.ts
+(kalender-flyten skal nå gi `tools=[read_calendar_today]`), og lukk D-30 P0 på evidensen.
+
 ## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
 
 **UA-1 P1A forblir VERIFIED.** Kontrollert delta-port oppå BO-11 (ingen redesign):
@@ -198,7 +229,8 @@ latens-/kostmålinger (§38-§39) + D-10-benchmark (≥100 norske prøver) for p
   rene. Kritisk recovery-regresjon (§13/§45: tool utført → provider-død → resume uten dobbel
   utførelse) PASS i suiten.
 - **Gjenstår på host (utenfor denne byggerundens miljø - ingen Docker/nøkler):** delta-live-porten
-  `node --experimental-strip-types apps/api/scripts/bo11-1-delta-live.ts` (Docker-PG-SQL §5 + live
+  `node --env-file=.env --experimental-transform-types apps/api/scripts/bo11-1-delta-live.ts`
+  (samme Node 24-host-funn som bo12: strip-types feiler på parameter properties; Docker-PG-SQL §5 + live
   SSE-disconnect §7) + live provider-regresjon §13 (re-kjør bo11-live.ts) + §16 runtime-helse.
   BO-11s live-evidens er uendret gyldig; deltaet endrer ikke provider-kontraktene.
 
