@@ -30,6 +30,7 @@
 | Q-10 | Trenger relasjonslaget egen grafdatabase? | Etter fase 4-eval | Flerhopp-spørsmål i minne-evalen; bytt kun ved målt svikt |
 | Q-11 | Lokal LLM-økonomi: lønner GPU-server seg? | Fase 10 | 30–90 dagers kostnads-/bruksmåling |
 | Q-12 | Satellitt-maskinvare for rom (HA Voice PE, egen build, annet)? | Fase 5/9 | Prototype + benchmark |
+| Q-19 | **Ytelsesgjeld, D-30 voice (registrert ved VERIFIED-lukking 2026-08-14, IKKE en korrekthets-blokker).** Host-akseptanse bekreftet D-30 funksjonelt korrekt, men latensen er treg for ønsket realtime-opplevelse: `end_of_speech_to_first_audio_ms` vanligvis ~3,5-6,2s, enkelte turer ~9-12s, streaming-smoke første token ~12,7s. Bevisst IKKE optimalisert i D-30-lukkingen (egen scope). Kandidatårsaker å undersøke: modellvalg/reasoning-overhead, TTS-round-trip per setningschunk (sekvensiell, ikke forhåndsberegnet), nettverk Windows↔Docker↔cloud-provider. Relatert til, men adskilt fra, Q-03 (endelig STT/TTS-leverandørvalg via D-10-benchmark). | Egen hardening/optimaliseringsrunde etter D-30 | Reelle host-latensmålinger over flere turer/providere; profiler hvert ledd (STT/model_ttft/tool/TTS_ttfa) separat før noe endres |
 
 ## Parkert (bevisst utsatt)
 

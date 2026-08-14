@@ -104,9 +104,11 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | OPS-RUNTIME (full stack/restart/failure-injection) | **VERIFIED** | BO-07-seksjonen |
 | UA0-RUNRATE | **VERIFIED** | BO-06/BO-07-seksjonene |
 
-**Egne åpne porter (blokkerer IKKE UA-0 core):** D-30 Voice = OPEN (krever ≥100 norske prøver +
-STT/TTS-nøkler) · D-36 Apple = OPEN (krever Mac/Xcode/Developer-konto) · HA-RUNTIME = OPEN (krever
-HA-instans + token).
+**Egne åpne porter (blokkerer IKKE UA-0 core, status ved UA-0-lukking):** D-30 Voice = OPEN (krever
+≥100 norske prøver + STT/TTS-nøkler) · D-36 Apple = OPEN (krever Mac/Xcode/Developer-konto) ·
+HA-RUNTIME = OPEN (krever HA-instans + token). **Oppdatering:** D-30 P0 (funksjonell korrekthet) er
+nå VERIFIED (BO-12-seksjonen, host-runde 6) - kun det formelle D-10-STT-benchmarken (≥100 norske
+prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice benchmark-raden over).
 
 **Owner-seed:** fra BO-08 automatisk og idempotent i `apps/api/src/migrate-main.ts` (one-shot
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
@@ -114,7 +116,10 @@ JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
 ## BO-12 — D-30 VOICE FOUNDATION (2026-08-14)
 
-**Status: D-30 P0 = PARTIAL (IMPLEMENTED + SUITE-VERIFIED; LIVE STT/TTS = BLOCKED_BY_ENVIRONMENT).**
+**Status: D-30 P0 = VERIFIED (host-runde 6, se "D-30 FINAL CLOSURE — HOST VERIFIED" under for
+fullstendig evidens-tabell).** Historikken under er bevart som byggerekkefølgen (sky-container →
+suite-verifisert → host-live funn/fiks-runder → verifisert lukking) - kun DENNE statuslinjen er
+kanonisk gjeldende.
 Bygget i sky-container uten nøkler/Docker; live-porten lukkes på hosten med
 `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
 (host-bevist kommando: `--experimental-strip-types` feilet på Node 24-host med
@@ -459,14 +464,44 @@ IKKE gjettet. I stedet:
   cross-provider-fallback/tool-resume/unknown-tool-DENY - alle eksisterende
   suiter uendret grønne.
 
-**D-30-anbefaling denne runden: READY_FOR_HOST_RETEST (fortsatt ikke
-VERIFIED, fortsatt ikke BLOCKED).** Egen kode er nå bevist korrekt (suite +
-sandbox-probe) for streaming/kansellering NÅR en adapter faktisk streamer;
-det gjenstår å avgjøre PÅ HOSTEN (med `JARVIS_STREAM_DEBUG=true`) om §32s
-opprinnelige host-funn var en engangs-nettverksanomali eller et vedvarende
-mønster for ekte OpenAI/Anthropic-kall i dette miljøet. Scriptene er
-redesignet til å rapportere ærlig i begge tilfeller (PASS/IKKE KJØRT/FEIL)
-i stedet for å tvinge frem en påstått grønn status.
+**D-30-anbefaling denne runden (før host-runde 6): READY_FOR_HOST_RETEST
+(fortsatt ikke VERIFIED, fortsatt ikke BLOCKED).** Egen kode er nå bevist
+korrekt (suite + sandbox-probe) for streaming/kansellering NÅR en adapter
+faktisk streamer; det gjenstår å avgjøre PÅ HOSTEN (med
+`JARVIS_STREAM_DEBUG=true`) om §32s opprinnelige host-funn var en
+engangs-nettverksanomali eller et vedvarende mønster for ekte
+OpenAI/Anthropic-kall i dette miljøet. Scriptene er redesignet til å
+rapportere ærlig i begge tilfeller (PASS/IKKE KJØRT/FEIL) i stedet for å
+tvinge frem en påstått grønn status. **Denne anbefalingen er SUPERSEDERT av
+host-runde 6 under - D-30 er nå VERIFIED.**
+
+### D-30 FINAL CLOSURE — HOST VERIFIED (2026-08-14, runde 6)
+
+Windows-host kjørte de redesignede scriptene fra runde 5 (`JARVIS_STREAM_DEBUG`-
+klare `bo12-voice-live.ts`/`bo12-voice-soak.ts`) og bekreftet ALLE gjenstående
+gater PASS. §32s runde 5-anomali (0 tokens/35,5s) reproduserte IKKE denne
+runden - vurdert som en engangs-nettverksanomali, ikke et vedvarende mønster
+(egen kode var allerede bevist korrekt via sandbox-probe + suite i runde 5).
+
+| Gate | Host-resultat |
+|---|---|
+| §3B Real-provider streaming smoke | PASS - `token_count=142`, `first_token_ms=12675`, `last_token_ms=17432`, `spread_ms=4757` (ekte inkrementell levering bekreftet) |
+| §32 Generation cancellation | PASS - aktiv stream observert, abort etter 3 tokens, upstream kansellert, ren neste tur ("Klar igjen.") |
+| §1/§2 Real audio barge-in | PASS - 8 rammer mottatt før barge-in, `barge_in_audio_stop_ms=0` (≤250ms-gate), 0 stale rammer i 500ms-settle-vindu, `cancelled=true` på avbrutt tur, ren neste tur |
+| 10-tur soak - kjøring #1 | PASS - 10/10, én session_id, `duplicate_tool_executions=0`, `session_corrupted=false`, turn 8 cancelled, turn 9+10 normale |
+| 10-tur soak - kjøring #2 (uavhengig gjentak) | PASS - identisk resultat: 10/10, én session_id, `duplicate_tool_executions=0`, `session_corrupted=false`, turn 8 cancelled, turn 9+10 normale |
+| Q-18 (repetert kalenderlesing i samme sesjon) | FIXED bekreftet live - ferske svar på gjentatt spørring, `duplicate_tool_executions=0`, same-turn-dedupe og write-dedupe uendret |
+
+**Ytelsesgjeld registrert (IKKE en korrekthets-blokker - se OPEN_QUESTIONS.md
+Q-19):** host-observert latens er treg for ønsket realtime-opplevelse
+(`e2e_first_audio` vanligvis ~3,5-6,2s, enkelte turer ~9-12s, streaming-smoke
+første token ~12,7s). D-30s funksjonelle korrekthet er verifisert UAVHENGIG av
+dette tallet - realtime-latensoptimalisering er en bevisst utsatt, egen runde
+(ingen optimalisering forsøkt i denne lukkingen, som beordret).
+
+**D-30 P0 STATUS: VERIFIED.** Merget til `main` (se PROJECT_STATUS.md for
+commit-referanse). D-30 er ikke lenger en åpen, ikke-blokkerende port -
+voice-laget er nå en verifisert del av v4.0-runtimen.
 
 ## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
 

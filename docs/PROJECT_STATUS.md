@@ -8,8 +8,9 @@ Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (forme
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
-Owner-seed nå automatisk/idempotent i one-shot migrate. Åpne, ikke-blokkerende porter:
-D-30 Voice, D-36 Apple, HA-RUNTIME.
+Owner-seed nå automatisk/idempotent i one-shot migrate. **D-30 Voice = VERIFIED** (BO-12,
+host-runde 6 - merget til main). Gjenværende åpne, ikke-blokkerende porter: D-36 Apple,
+HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QUESTIONS Q-03).
 
 ## UA-1 P1A (BO-11)
 - Normalisert streaming (OpenAI+Claude live, ttft, cancel/barge-in-fundament, pre-output-fallback,
@@ -42,8 +43,16 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
   logikk verifisert med fake-adaptere.
 - Kvalitet: 203/203 tester (Node 22), lint, typecheck, gitleaks rene. Full stack healthy.
 
-## D-30 Voice (BO-12)
-- **Status: READY_FOR_HOST_RETEST — IMPLEMENTED + SUITE-VERIFIED (281/281); host-runde 4s tre feil fikset+bekreftet, runde 5s §32-anomali undersøkt (ikke løst - avhenger av host-diagnostikk).**
+## D-30 Voice (BO-12) — VERIFIED
+
+- **Status: VERIFIED (2026-08-14, host-runde 6).** Host-live-akseptanse fullført og
+  bestått: real-provider streaming smoke PASS (inkrementell levering bekreftet),
+  §32 generation cancellation PASS (aktiv stream observert, abort etter 3 tokens,
+  ren neste tur), §1/§2 real audio barge-in PASS (`barge_in_audio_stop_ms=0` ≤
+  250ms-gate, 0 stale frames, ren neste tur), 10-tur soak PASS **to uavhengige
+  kjøringer** (10/10, én session_id, `duplicate_tool_executions=0`, turn 8
+  cancelled/turn 9+10 normale, begge ganger), Q-18 FIXED bekreftet live
+  (kalender-repetisjon gir ferske svar). Merget til `main` (se commit under).
   Branch `claude/d30-voice`. Voice er transportlag over eksisterende Jarvis (samme mesh/
   tools/authority/minne): streaming Core-klient (P1A-SSE) → setningschunking → TTS-kø,
   full barge-in (stopp lyd + tøm kø + abort generering upstream, epoch-vern mot stale
@@ -110,16 +119,26 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
     til 60s, tekst kortet ned, timeout merkes ikke lenger stille som
     "corrupted" uten forklaring.
   - 281/281 tester, lint/typecheck/gitleaks rene. Ingen regresjon.
-- **Lukk gjenstående live-porter på hosten (etter pull + rebuild, ev. med
-  `JARVIS_STREAM_DEBUG=true` for §32-diagnose):**
-  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
-  og
-  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts`.
-  Evidens/detaljer: docs/RUNTIME_GATES.md (BO-12 + begge hardening-seksjonene).
+- **FINAL CLOSURE (host-runde 6, denne):** full host-evidens mottatt og bekreftet
+  (se detaljert tabell i docs/RUNTIME_GATES.md). D-30 satt VERIFIED; PR #2 merget
+  til `main`. §32s tidligere anomali (runde 5: 0 tokens/35.5s) reproduserte IKKE
+  denne runden - real-provider streaming var inkrementell (`token_count=142`,
+  `spread_ms=4757`) og cancellation fungerte korrekt (abort etter 3 tokens).
+  Vurdert som en engangs-nettverksanomali (runde 5), ikke et vedvarende mønster.
+- **Ytelsesgjeld (IKKE en D-30-blokker - egen åpen post, se OPEN_QUESTIONS.md
+  Q-19):** host-observert latens er funksjonelt korrekt men treg for ønsket
+  realtime-opplevelse: `e2e_first_audio` vanligvis ~3.5-6.2s, enkelte turer
+  ~9-12s, streaming-smoke første token ~12.7s. D-30-korrekthet er verifisert
+  UAVHENGIG av dette - realtime-latensoptimalisering er bevisst utsatt til egen
+  runde (ingen optimalisering gjort i denne lukkingen).
 
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
 
 ## Neste oppgave
-Avvent eierordre: provider-nøkler for live fallback/benchmark, UA-1 P1 (streaming/tool-calling
-gjennom mesh, quality metrics-læring), eller D-30/D-36/HA-porter.
+D-30 Voice VERIFIED og merget - avvent eierordre for neste port. Kandidater i tur etter
+v4.0-planen/gjenværende åpne, ikke-blokkerende gater: D-30 ytelsesgjeld (Q-19: realtime-latens
+mot <1,5s median/P95, D-10 norsk STT-benchmark ≥100 prøver - fullfører formell Fase 5-akseptanse),
+D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, eller UA-1 P1
+videre (quality metrics-læring).
