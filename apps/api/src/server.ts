@@ -125,9 +125,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         "cache-control": "no-cache",
         connection: "keep-alive"
       });
+      // D-30 HOST BLOCKER §1/§2 (spørsmål D): valgfri diagnostikk - kun event-navn/
+      // timing, ALDRI dataInnhold (aldri token-tekst/secrets), kun når eksplisitt på.
+      const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
+      const tSseStart = Date.now();
       const send = (event: string, data: unknown) => {
         // Frakoblet socket får aldri flere events - og aldri duplisert 'done'.
         if (!res.writableEnded && !res.destroyed) {
+          if (streamDebug) {
+            console.error(JSON.stringify({ msg: "stream_debug_sse_write", event, at_ms: Date.now() - tSseStart }));
+          }
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         }
       };

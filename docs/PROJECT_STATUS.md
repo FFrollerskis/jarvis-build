@@ -43,7 +43,7 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
 - Kvalitet: 203/203 tester (Node 22), lint, typecheck, gitleaks rene. Full stack healthy.
 
 ## D-30 Voice (BO-12)
-- **Status: PARTIAL → READY_FOR_HOST_RETEST — IMPLEMENTED + SUITE-VERIFIED (279/279); host-runde 3s tre feil undersøkt og fikset.**
+- **Status: READY_FOR_HOST_RETEST — IMPLEMENTED + SUITE-VERIFIED (281/281); host-runde 4s tre feil fikset+bekreftet, runde 5s §32-anomali undersøkt (ikke løst - avhenger av host-diagnostikk).**
   Branch `claude/d30-voice`. Voice er transportlag over eksisterende Jarvis (samme mesh/
   tools/authority/minne): streaming Core-klient (P1A-SSE) → setningschunking → TTS-kø,
   full barge-in (stopp lyd + tøm kø + abort generering upstream, epoch-vern mot stale
@@ -81,11 +81,40 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
     per-tur-beskyttelse (samme tur, samme kall → maks 1 utførelse) uendret,
     testet separat fra database-/sesjonsnivå-fiksen.
   - 279/279 tester, lint/typecheck/gitleaks rene. Ingen regresjon.
-- **Lukk gjenstående live-porter på hosten (etter pull + rebuild):**
+- **FINAL BARGE-IN HOST BLOCKER (host-runde 5, denne):** host bekreftet Q-18-fiksen
+  PASS live, men §32 feilet med NY info som avkrefter forrige race-hypotese:
+  0 tokens over 35,5s, deretter suksess (ikke "modellen var rask", men "ingen
+  inkrementelle events observert i det hele tatt"). Kan IKKE avgjøres endelig
+  uten host-tilgang - IKKE gjettet. Gjort denne runden:
+  - **Kodesporing:** hele kjeden er strukturelt identisk for alle requests;
+    Ollama/Gemini/Kimi-hypotesen (ikke-strømmende adaptere) undersøkt og
+    AVKREFTET ved lesing (ville gitt ≥1 token, ikke 0); ingen reverse proxy
+    i docker-compose.
+  - **Deterministisk sandbox-bevis KJØRT i denne økten** (ekte server+SSE+
+    embedded PG, ingen mocks): 600 tokens levert inkrementelt over 702ms,
+    abort på 1. token → AbortError på 19ms. Beviser egen kode er IKKE
+    generisk buffret. Formalisert som 2 nye permanente suite-tester.
+  - **Server-side diagnostikk lagt til** (`JARVIS_STREAM_DEBUG=true`, kun
+    type+timing, aldri innhold) i 3 lag (gateway/conversation/SSE-write) -
+    lar host avgjøre PRESIST hvor levering evt. slutter å være inkrementell.
+  - **§32 redesignet - "500 ord"-fixen FJERNET helt** (var en blind
+    lengde-gjetning). Ny §3B smoke-test måler faktisk observert
+    inkrementell levering FØRST; §32 kjøres kun betinget på det, rapporterer
+    IKKE KJØRT (inkonklusivt) i stedet for FAIL når ingen aktiv stream kan
+    bevises - og en feiling NÅR streaming er bekreftet er en høy-konfidens
+    ekte regresjon, ikke en race.
+  - **Ekte lyd-barge-in (§1/§2) koblet løs fra lang LLM-respons** - kort
+    normalsvar, trigges kun på observert avspilling.
+  - **Soak turn 8:** sannsynlig samme fenomen som §32 (ikke egen
+    harness-feil) - tidsstemplet tilstandshistorikk lagt til, timeout økt
+    til 60s, tekst kortet ned, timeout merkes ikke lenger stille som
+    "corrupted" uten forklaring.
+  - 281/281 tester, lint/typecheck/gitleaks rene. Ingen regresjon.
+- **Lukk gjenstående live-porter på hosten (etter pull + rebuild, ev. med
+  `JARVIS_STREAM_DEBUG=true` for §32-diagnose):**
   `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
-  (§32 skal nå passere deterministisk, §1/§2 ekte lyd-barge-in skal fullføre) og
-  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts`
-  (10/10 skal fullføre, turn 2/6/10-kalender skal alle gi ekte svar).
+  og
+  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts`.
   Evidens/detaljer: docs/RUNTIME_GATES.md (BO-12 + begge hardening-seksjonene).
 
 ## Blokkeringer

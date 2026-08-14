@@ -109,8 +109,17 @@ export class ConversationEngine {
       // D-30 live-funn: med tools konfigurert går BÅDE streaming- og JSON-banen
       // gjennom completeWithTools (samme normaliserte tool-løkke som executive/
       // BO-11) - aldri en voice-spesifikk sidevei. Uten tools: som før.
+      // D-30 HOST BLOCKER §1/§2 (spørsmål C): valgfri diagnostikk - kun type/timing,
+      // ALDRI event-innhold (aldri prompt/svar-tekst/secrets), kun når eksplisitt på.
+      const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
+      const tHandleStart = Date.now();
       const onEvent = onToken
         ? (event: StreamEvent) => {
+            if (streamDebug) {
+              console.error(JSON.stringify({
+                msg: "stream_debug_conversation", event_type: event.type, at_ms: Date.now() - tHandleStart
+              }));
+            }
             if (event.type === "text_delta") {
               partial += event.text;
               onToken(event.text);

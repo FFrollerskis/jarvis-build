@@ -405,6 +405,71 @@ describe("BO-11.1 §6-§7: SSE klient-disconnect → upstream abort (barge-in-fu
   });
 });
 
+describe("D-30 HOST BLOCKER §1-§3/§8: stream-levering + kansellering mot EKTE HTTP/SSE (ikke mocks)", () => {
+  it("§8.D: mange distinkte SSE token-events spredt over tid - ekte inkrementell levering, ikke ett bufret burst", async () => {
+    const response = await fetch(`${baseUrl}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie" })
+    });
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    const tokenTimestamps: number[] = [];
+    let buffer = "";
+    const tStart = Date.now();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("event: token")) {
+        tokenTimestamps.push(Date.now() - tStart);
+        buffer = "";
+      }
+    }
+    // "langsom historie" scripter 150 tokens á ~1ms - dette beviser at HELE
+    // HTTP/SSE-kjeden (server.ts→HttpCoreClient-ekvivalent fetch-parsing)
+    // leverer inkrementelt for et LANGT svar, ikke i ett bufret burst ved slutt:
+    expect(tokenTimestamps.length).toBeGreaterThanOrEqual(50);
+    expect((tokenTimestamps.at(-1) ?? 0) - (tokenTimestamps[0] ?? 0)).toBeGreaterThan(20);
+  });
+
+  it("§8.D: AbortSignal etter observert AKTIV stream (2+ tokens) gir deterministic AbortError, uansett svarlengde", async () => {
+    const controller = new AbortController();
+    let tokens = 0;
+    const tStart = Date.now();
+    let errName: string | undefined;
+    try {
+      const response = await fetch(`${baseUrl}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "text/event-stream" },
+        body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie to" }),
+        signal: controller.signal
+      });
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes("event: token")) {
+          tokens += 1;
+          if (tokens === 2) controller.abort();
+          buffer = "";
+        }
+      }
+    } catch (err) {
+      errName = (err as Error).name;
+    }
+    const elapsed = Date.now() - tStart;
+    // Deterministisk (ikke en race): en 150-tokens/~150ms-generering avbrutt
+    // etter kun 2 tokens skal ALLTID gi AbortError, uansett total svarlengde:
+    expect(errName).toBe("AbortError");
+    expect(tokens).toBeGreaterThanOrEqual(2);
+    expect(elapsed).toBeLessThan(500); // avbrutt tidlig - IKKE etter naesten hele generasjonen
+  });
+});
+
 describe("D-30 live-funn-fix: ConversationEngine → mesh tool bridge (§1-§6)", () => {
   it("A/B: kalender-intent → completeWithTools → ToolGateway (ekte skjema) → syntese-svar", async () => {
     const before = calendarTransport.calls.length;

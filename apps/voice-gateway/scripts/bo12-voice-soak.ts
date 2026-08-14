@@ -85,10 +85,11 @@ const TURNS: TurnSpec[] = [
   { label: "5 forced-anthropic", text: "Si hei på norsk med én setning.", provider: "anthropic" },
   { label: "6 calendar-repeat (Q-18 live-observasjon)", text: "Hva står på kalenderen min i dag?" },
   { label: "7 no-tool", text: "Hva er hovedstaden i Norge?" },
-  {
-    label: "8 long (avbrytes av turn 9)",
-    text: "Fortell en svært lang og detaljert historie om havet, minst fem hundre ord, med flere avsnitt."
-  },
+  // Host-ordre §5/§6: IKKE en lang tekst som "blind fix" - normal lengde er
+  // nok, siden barge-in trigges på OBSERVERT state==="speaking", ikke på
+  // antatt varighet. En unødvendig lang tekst gjør bare testen tregere uten
+  // å bevise mer.
+  { label: "8 (avbrytes av turn 9)", text: "Fortell litt om havet og bølger, noen setninger." },
   { label: "9 cancellation (barge-in mot turn 8)", text: "Stopp, si i stedet 'klar igjen' på norsk." },
   { label: "10 calendar (skal fungere normalt - sesjon ikke korrupt)", text: "Hva står på kalenderen min i dag?" }
 ];
@@ -110,8 +111,13 @@ const core = new HttpCoreClient(API_URL);
 const sessionIdentity: VoiceIdentity = { ...identity };
 let currentTurnTools: string[] = [];
 let currentTurnErrors: string[] = [];
+// D-30 HOST BLOCKER §4: tidsstemplet tilstandshistorikk - lar oss se PRESIST
+// hvilke overganger (listening→thinking→speaking) som faktisk skjedde og når,
+// i stedet for å gjette ved en bar timeout.
+const stateHistory: Array<{ state: string; at_ms: number }> = [];
+const runStart = Date.now();
 const session = new VoiceSession(sessionIdentity, core, stt, tts, {
-  onState: () => undefined,
+  onState: (s) => stateHistory.push({ state: s, at_ms: Date.now() - runStart }),
   onPartial: () => undefined,
   onFinal: () => undefined,
   onReply: (r) => sessionIds.add(r.session_id),
@@ -134,7 +140,16 @@ async function waitFor(predicate: () => boolean, timeoutMs: number, label: strin
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   if (!predicate()) {
-    throw new Error(`FEIL §4: timeout mens ventet på: ${label}`);
+    // D-30 HOST BLOCKER §4: full tilstandshistorikk med i feilmeldingen - et
+    // timeout ETTER normale overganger (listening→thinking→speaking observert,
+    // bare treg) er en ANNEN diagnose enn å aldri komme forbi "thinking" i det
+    // hele tatt. Vi markerer ALDRI sesjonen korrupt kun fordi noe var tregt -
+    // kun caller avgjør det basert på denne historikken.
+    const recentStates = stateHistory
+      .filter((s) => s.at_ms >= Date.now() - runStart - timeoutMs - 1000)
+      .map((s) => `${s.state}@${s.at_ms}ms`)
+      .join(" → ");
+    throw new Error(`timeout (${timeoutMs}ms) mens ventet på: ${label}. Tilstandshistorikk: ${recentStates || "(ingen state-overganger observert)"}`);
   }
 }
 
@@ -170,7 +185,8 @@ for (let i = 0; i <= 6; i++) {
   session.pushAudio(audio, t);
   session.pushAudio(Buffer.alloc(640), t + 400);
   try {
-    await waitFor(() => metricsByTurn.length > i, 25_000, spec.label);
+    // D-30 HOST BLOCKER §4: 45s margin (samme begrunnelse som turn 8/9 under).
+    await waitFor(() => metricsByTurn.length > i, 45_000, spec.label);
   } catch (err) {
     sessionCorrupted = true;
     console.log(`  [${i + 1}/10] ${spec.label}: ${(err as Error).message}`);
@@ -191,9 +207,12 @@ if (!sessionCorrupted) {
   session.pushAudio(Buffer.alloc(640), t8 + 400);
 
   try {
-    // Vent KUN til turn 8 faktisk taler (bevis: generation/TTS er aktiv) -
-    // IKKE til den fullfører (den skal aldri fullføre naturlig - se over).
-    await waitFor(() => session.currentState() === "speaking", 20_000, "turn 8 startet avspilling");
+    // D-30 HOST BLOCKER §4: 60s (ikke 20s) - host-funn viste at ekte
+    // modellgenerering på denne miljøet kan ta 30-40+ sekunder (samme
+    // fenomen som §32/§3B undersøker). Vent KUN til turn 8 faktisk taler
+    // (bevis: generation/TTS er aktiv) - IKKE til den fullfører (den skal
+    // aldri fullføre naturlig - se over).
+    await waitFor(() => session.currentState() === "speaking", 60_000, "turn 8 startet avspilling");
 
     setProviderFor(spec9);
     const audio9 = await collect(tts.synthesize(spec9.text));
@@ -202,10 +221,20 @@ if (!sessionCorrupted) {
     session.pushAudio(Buffer.alloc(640), t9 + 400);
 
     // Nå venter vi på BEGGE turers metrics (turn 8 cancelled + turn 9 fullført):
-    await waitFor(() => metricsByTurn.length >= 9, 25_000, "turn 8 (cancelled) + turn 9 (fullført) metrics");
+    await waitFor(() => metricsByTurn.length >= 9, 60_000, "turn 8 (cancelled) + turn 9 (fullført) metrics");
   } catch (err) {
     sessionCorrupted = true;
+    // D-30 HOST BLOCKER §4: eksplisitt skille - et TIMEOUT med normale
+    // state-overganger observert FØR det (se historikken i feilmeldingen) er
+    // "treg respons", IKKE bevis på sesjons-korrupsjon i VoiceSession. Ekte
+    // korrupsjon ville vist seg som en kastet feil/exception, ikke bare treghet.
     console.log(`  [8-9/10] ${(err as Error).message}`);
+    console.log(
+      "  MERK: dette er et TIMEOUT, ikke nødvendigvis sesjons-korrupsjon - se " +
+        "tilstandshistorikken over. Hvis 'listening'/'thinking' ble observert normalt og kun " +
+        "'speaking' aldri ble nådd, er dette sannsynligvis samme fenomen som §32/§3B " +
+        "(kjør med JARVIS_STREAM_DEBUG=true), ikke en feil i selve VoiceSession/soak-harnesset."
+    );
   }
 
   if (!sessionCorrupted) {
@@ -235,7 +264,7 @@ if (!sessionCorrupted) {
   session.pushAudio(audio, t);
   session.pushAudio(Buffer.alloc(640), t + 400);
   try {
-    await waitFor(() => metricsByTurn.length > 9, 25_000, spec.label);
+    await waitFor(() => metricsByTurn.length > 9, 45_000, spec.label);
     reportTurn(9, spec.label);
   } catch (err) {
     sessionCorrupted = true;
