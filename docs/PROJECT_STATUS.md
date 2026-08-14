@@ -158,14 +158,28 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   - 294/294 tester (281+13 nye), lint/typecheck/gitleaks rene. Full evidens: docs/RUNTIME_GATES.md.
 - **Gjenstår for host/live-verifikasjon (§13 i BO-en, IKKE gjort her):** ekte NAS-mount, ekte
   GitHub-repo-sync med reell PAT, full ende-til-ende-demo kjørt på Tobias sin host.
+- **FINAL HOST ACCEPTANCE HARNESS (denne økten, IKKE kjørt live her - kun bygget):** ett
+  host-script, `modules/knowledge/scripts/ua2-p0-live.ts`, bygget for å bevise HELE P0-akseptansen
+  mot Tobias sin faktiske lokale Postgres/pgvector og ekte filsystem - kjøres:
+  `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`.
+  Gjenbruker eksisterende arkitektur (ingen alternativ testimplementasjon). Dekker: filesystem
+  full livssyklus (ingest→uendret resync→endring→tombstone→reaktivering, ingen duplikat),
+  provenance, ekte FTS/vector/hybrid, tenant- og memory-space-isolasjon (egne kast-tenants,
+  ryddes opp automatisk), filsystem-allowlist/traversal/symlink-escape-DENY (symlink rapporterer
+  SKIPPED_HOST_PERMISSION uten admin-rettigheter, ikke fake PASS), GitHub live sync + resync-dedupe
+  (rapporterer SKIPPED_NO_CREDENTIAL uten token). Avslutter med maskinlesbar
+  `felt=PASS/FAIL/SKIPPED*`-oppsummering. Selvopprydding + selvhelbredelse (unike run-IDer,
+  trygt å kjøre flere ganger). **IKKE kjørt av Claude mot ekte host** - kun bygget/suite-
+  typecheck/lint/gitleaks-verifisert i denne økten; venter på Tobias sin faktiske kjøring.
 
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
 Ytelsesgjeld for voice-latens (Q-19) og UA-2 P0 host/live-verifikasjon er åpne, ikke-blokkerende.
 
 ## Neste oppgave
-UA-2 P0 er bygget og suite-verifisert - avventer Tobias sin gjennomgang av PR #3 (ev. host/live-
-verifikasjon av GitHub/NAS-kildene, eller godkjenning av neste skive: repo-filinnhold, flere kilder,
-eller UA-2 P1 Knowledge Graph). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+UA-2 P0 er bygget, suite-verifisert, og host-akseptanseharnesset (`ua2-p0-live.ts`) er klart -
+avventer Tobias sin faktiske kjøring av scriptet mot sin lokale Postgres/pgvector+filsystem, og
+gjennomgang av PR #3 (ev. godkjenning av neste skive: repo-filinnhold, flere kilder, eller UA-2 P1
+Knowledge Graph). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
 D-10 STT-benchmark (Q-03), D-36
 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
