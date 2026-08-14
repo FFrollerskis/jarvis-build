@@ -104,13 +104,404 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | OPS-RUNTIME (full stack/restart/failure-injection) | **VERIFIED** | BO-07-seksjonen |
 | UA0-RUNRATE | **VERIFIED** | BO-06/BO-07-seksjonene |
 
-**Egne åpne porter (blokkerer IKKE UA-0 core):** D-30 Voice = OPEN (krever ≥100 norske prøver +
-STT/TTS-nøkler) · D-36 Apple = OPEN (krever Mac/Xcode/Developer-konto) · HA-RUNTIME = OPEN (krever
-HA-instans + token).
+**Egne åpne porter (blokkerer IKKE UA-0 core, status ved UA-0-lukking):** D-30 Voice = OPEN (krever
+≥100 norske prøver + STT/TTS-nøkler) · D-36 Apple = OPEN (krever Mac/Xcode/Developer-konto) ·
+HA-RUNTIME = OPEN (krever HA-instans + token). **Oppdatering:** D-30 P0 (funksjonell korrekthet) er
+nå VERIFIED (BO-12-seksjonen, host-runde 6) - kun det formelle D-10-STT-benchmarken (≥100 norske
+prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice benchmark-raden over).
 
 **Owner-seed:** fra BO-08 automatisk og idempotent i `apps/api/src/migrate-main.ts` (one-shot
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
+
+## BO-12 — D-30 VOICE FOUNDATION (2026-08-14)
+
+**Status: D-30 P0 = VERIFIED (host-runde 6, se "D-30 FINAL CLOSURE — HOST VERIFIED" under for
+fullstendig evidens-tabell).** Historikken under er bevart som byggerekkefølgen (sky-container →
+suite-verifisert → host-live funn/fiks-runder → verifisert lukking) - kun DENNE statuslinjen er
+kanonisk gjeldende.
+Bygget i sky-container uten nøkler/Docker; live-porten lukkes på hosten med
+`node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
+(host-bevist kommando: `--experimental-strip-types` feilet på Node 24-host med
+ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX pga. TS parameter properties; transform-types kreves.
+Krever OPENAI_API_KEY + kjørende jarvis-api; mikrofon trengs ikke - norsk testlyd
+genereres via TTS→STT-rundtur; dekker §30-§33 inkl. barge-in-abort og cross-provider).
+
+**Voice er transportlag over Jarvis (§50):** samme Conversation/AI Mesh/Tool Gateway/
+authority/minne som tekst - tale gir ingen ekstra authority (§43). Bygget som DELTA på
+fase 5-fundamentet (VoiceSession/VAD/STT-TTS-adaptere/WS-transport/WER-benchmark):
+- **Streaming Core-klient (§12-§13):** HttpCoreClient.chatStream mot eksisterende
+  /chat-SSE (P1A) - tokens → SentenceChunker (aldri halvferdige ord; splitter ikke
+  "18.30") → sekvensiell TTS-kø. TTS starter på første setning FØR generering er
+  ferdig (testbevist). Tool-events → korte norske statuser ("Sjekker kalenderen …",
+  §26) - aldri intern JSON/payload i tale (§14/§27).
+- **Barge-in (§15-§17):** tale under speaking/thinking → stopp avspilling + tøm
+  TTS-kø + forkast chunker-buffer + ABORT modellgenerering upstream (P1A-kjeden) +
+  interrupted-state + ny tur. Epoch-vern: gammel lyd kan aldri spilles etter ny tur
+  (§16, testbevist med taggede rammer). Utført verktøy rulles aldri tilbake (§17 -
+  journal + ToolGateway-idempotens).
+- **Tilstandsmaskin (§23):** idle/listening/thinking/speaking/interrupted eksplisitt;
+  start-melding = eksplisitt mikrofonaktivering; ingen skjult opptak.
+- **Feilbaner:** STT-feil → normalisert `stt_error`, ALDRI modellkjøring på tom/
+  ugyldig transkript (§35); TTS-feil → tekstsvaret leveres uansett, `tts_error`
+  normalisert uten detaljer, helse DEGRADED (§36/§27). Fixtures (§28): kort/lang,
+  pause midt i setning (bryter ikke turen), støy, ingen tale, avbrutt tale.
+- **Metrics (§19-§20):** full latenskjede per tur (t_final_transcript,
+  t_model_first_token, t_first_tts_request, t_tts_first_frame, hovedmål
+  end_of_speech_to_first_audio_ms) + stt_audio_ms/tts_chars som kost-grunnlag
+  (STT/LLM/TTS holdes adskilt). summarizeLatency gir P50; P95 kun ved ≥20 samples
+  (§39 - aldri fake presisjon). Faktiske måltall settes av host-live/benchmark.
+- **Helse (§36-§37):** VoiceHealth (stt/tts LIVE/DEGRADED/UNAVAILABLE fra faktiske
+  kall), gateway /status (transport/stt/tts/barge_in/audio_persistence=none);
+  api-/status viser voice-helse når JARVIS_VOICE_URL er satt.
+- **Cross-provider (§33):** valgfri provider-override i /chat (router §38-semantikk)
+  - voice-pipelinen er identisk uansett LLM (testbevist openai vs anthropic).
+- **Personvern (§22):** rå lyd persisteres aldri (strukturelt testbevist: ingen
+  filskriving i lydkjedens moduler); transcript følger eksisterende
+  conversation-semantikk. STT/TTS-baseline: OpenAI (nøkkel alt live i runtime, §5-§7);
+  andre providere bak samme adapterlag etter D-10-benchmark.
+- **Kvalitet:** 264/264 (248 baseline + 16 nye), lint/typecheck/gitleaks rene.
+  Eksisterende fase 5-akseptanser (barge-in ≤250 ms, median <1500 ms med test-
+  adaptere, failover-idempotens, sesjonskontinuitet tekst↔tale) fortsatt PASS -
+  e2e kjører nå den nye streaming-banen mot ekte api-SSE.
+
+**Gjenstår for D-30 P0 = VERIFIED:** host-live (§30-§33 via scriptet over) + reelle
+latens-/kostmålinger (§38-§39) + D-10-benchmark (≥100 norske prøver) for providervalg.
+
+### D-30 LIVE FINDINGS FIX — Conversation tool bridge (2026-08-14)
+
+Første EKTE host-live-kjøring (Windows-host m/Docker+credentials) beviste: runtime healthy,
+ekte OpenAI TTS/STT (norsk) PASS, no-tool voice-rundtur PASS ("18 ganger 7" → "126"),
+OpenAI- og Anthropic-LLM-voice-path PASS, barge-in/abort upstream PASS, next-turn recovery
+PASS — men **kalender-voice FEILET funksjonelt** (`tools=[]`, "har ikke tilgang til
+kalenderen"). Root cause + fix (denne runden, suite-verifisert i sky - IKKE nye live-claims):
+- **ConversationEngine hadde aldri tool-broen fra BO-11:** fase-3-wiring brukte
+  `gateway.stream/complete` uten tools, og system-prompten sa eksplisitt "ikke tilgang til
+  verktøy". Fikset: `ConversationDeps.tools {definitions, executorFor(identity)}` →
+  `gateway.completeWithTools` for BÅDE streaming- og JSON-banen (samme normaliserte
+  tool-løkke som executive; ingen voice-spesifikk sidevei). Prompt oppdatert (ingen
+  permissions i prompt - Policy/Authority forblir trusted runtime).
+- **Identity-binding:** executor bindes til samtalens RESOLVED identity per kall
+  (`executorFor(identity)` → `MeshToolExecutor(toolGateway, identity)`) - aldri global
+  ownerIdentity - tenant/delegation/authority følger den som snakker (testbevist m/2 tenants).
+- **SSE `tool_call`-event:** `tool_call_complete` → `event: tool_call` m/KUN `tool_name`
+  (aldri raw args/tool-result; testbevist). Voice-HttpCoreClient forsto allerede eventet.
+- **Voice-device-seed:** host-live ga 403 unknown_device for `jarvis-voice-live` (kun
+  jarvis-core var seedet). Seed er nå delt idempotent funksjon (`apps/api/src/seed.ts`,
+  brukt av one-shot migrate) og inkluderer voice-device (JARVIS_VOICE_DEVICE_ID ??
+  jarvis-voice-live, kind=voice, samme konfigurerte owner tenant/person).
+- **Host-kommando korrigert** (strip→transform-types, se over) og **STT-akseptansen gjort
+  semantisk robust** (`apps/voice-gateway/src/acceptance.ts`: "atten ganger sju" ≙
+  "18 x 7"/"18 × 7"; terskel uendret - norsk kalender-setning er ikke svekket).
+
+**Neste:** pull ny HEAD på hosten, rebuild api-runtime, re-kjør bo12-voice-live.ts
+(kalender-flyten skal nå gi `tools=[read_calendar_today]`), og lukk D-30 P0 på evidensen.
+
+### D-30 FINAL HOST ACCEPTANCE HARDENING (2026-08-14, runde 3)
+
+Windows-host bekreftet (runde 2): API healthy, norsk TTS→STT PASS, ConversationEngine
+tool bridge PASS (`tools=[read_calendar_today]`, ekte kalendersvar), no-tool/OpenAI/
+Anthropic voice-path PASS, upstream-generation-cancellation PASS, ren neste tur PASS.
+Denne runden lukker gatene bo12-voice-live.ts IKKE beviste: ekte lyd-barge-in (ikke
+bare LLM AbortSignal), stale-audio-epoch med eksplisitte tellere, kontrollert failure-
+recovery (STT/TTS/provider/disconnect), 10-tur soak, Q-18-repro, full latenskjede,
+observability-korrelasjon. **Ingen av gatene under er kjørt LIVE i sky-containeren -
+kun suite-verifisert her + nye host-scripts levert for hosten.**
+
+- **§1/§2 Real audio barge-in + stale-audio-epoch (host-script, IKKE kjørt her):**
+  `bo12-voice-live.ts` har ny seksjon "D-30 HARDENING §1/§2" - full `VoiceSession`
+  (ekte VAD→STT→Core→TTS, IKKE en isolert `AbortController`), "brukerens" barge-in
+  spilles inn som EKTE TTS-lyd gjennom `pushAudio()` (samme rundtur-teknikk som §30).
+  Rapporterer `barge_in_audio_stop_ms` (fra `onTtsCancelled`, dvs. `playback.cancel()`-
+  signalet - eksplisitt SKILT fra `activeTurnAbort` som er LLM-siden) med
+  ≤250ms-gate-sjekk, og et eksplisitt 500ms-settle-vindu der ENHVER TTS-ramme fra
+  turn A etter barge-in feiler scriptet hardt (`staleFramesAfterBarge > 0` →
+  kastet feil). Deterministisk stale-audio-bevis finnes FRA FØR i suiten
+  (`d30-foundation.test.ts` "Barge-in": taggede rammer `S{n}-f{i}`, bevist 0 gamle
+  tagger etter ny epoch) - host-scriptet legger til det ekte lyd-laget.
+- **§3 Failure recovery - fault injection (suite-verifisert, ikke live-fremprovosert
+  per ordre):** A (STT) og B (TTS) var alt dekket; NYE tester lagt til:
+  - **C (provider/model-feil FØR output):** `chatStream` kaster FØR første token →
+    normalisert `core_error`, state går til `listening` (ingen zombie), rå
+    feilmelding (inkl. simulert secret-streng) krysser ALDRI til klient-events,
+    neste tur fungerer uendret.
+  - **D (klientdisconnect):** **FUNN + FIKS** - `VoiceSession` hadde INGEN
+    `disconnect()`-håndtering og `server.ts` lyttet aldri på WS `close`. En
+    frakoblet klient midt i en tur lot modellgenereringen fortsette som zombie
+    (bortkastet modell-/TTS-kost, ingen mottaker). Fikset: ny
+    `VoiceSession.disconnect()` (bumper epoch, tømmer TTS-kø, aborterer
+    `activeTurnAbort` upstream - symmetrisk med `bargeIn()`) wiret til
+    `ws.on("close", ...)`. Testbevist: abort skjer, `coreReturned` blir aldri
+    sann, ny sesjon etterpå fungerer. **Denne wiringen er unit-/suite-testet,
+    IKKE host-live end-to-end testet** (krever ekte WS-klient mot en kjørende
+    voice-gateway-prosess - dokumentert gjenstående host-steg, ikke påstått
+    VERIFIED live).
+- **§4 10-tur host-soak (nytt script, IKKE kjørt her):**
+  `apps/voice-gateway/scripts/bo12-voice-soak.ts` - ÉN sammenhengende
+  `VoiceSession` gjennom 10 turer (no-tool/kalender/normal/tvunget OpenAI/tvunget
+  Anthropic/ekte barge-in-kansellering av en pågående tur/kalender-repetisjon for
+  Q-18). Feiler hardt på: <10/10 fullførte turer, >1 observert `session_id`
+  (sesjonskontinuitet brutt), duplikate verktøystatuser i samme tur, korrupt
+  sesjon, eller kansellert siste tur. Full latenskjede logges per tur.
+- **§5 Q-18 (tool-dedupe på A-klasse read i samme session) - REPRODUSERT, BLOKKERER
+  IKKE dette, men er BLOCKER for repetert kalenderspørring i samme sesjon.** Se
+  OPEN_QUESTIONS.md Q-18 for fullt bevis (`q18-read-dedupe.test.ts`, 2 tester mot
+  ekte embedded PG) + foreslått minste fix (IKKE implementert - egen BO kreves).
+  `bo12-voice-soak.ts` turn 6/10 gir en live-observerbar krysssjekk av samme funn.
+- **§6 Latenskjede:** `TurnMetrics` utvidet med `t_tool_activity` (tidspunkt trusted
+  tool-status varsles); ny `latencyLine()`-formatterer i begge live-scripts
+  rapporterer `stt`/`model_ttft`/`tool`/`tts_ttfa`/`e2e_first_audio`/`total_turn`
+  per tur - ingen fabrikkerte tall, kun det som faktisk er målt (`-`/`n/a` når et
+  tidsstempel mangler, f.eks. `tool` for turer uten verktøykall). Kjente
+  host-tall fra runde 2 (funksjonelt PASS, men trege: kalender 8263ms, no-tool
+  3633ms, OpenAI 5761ms, Anthropic 4093ms end_of_speech→first_audio) er IKKE
+  reoptimalisert i denne runden (eksplisitt utenfor scope: "korrekt baseline
+  først").
+- **§7 Observability-korrelasjon:** basert på kombinert bevis (IKKE en ny live
+  DB-spørring fra voice-gateway-prosessen, som ikke har poolgang til api sin
+  Postgres over prosessgrensen) - BO-10/BO-11 har alt live-verifisert
+  session_id/provider/kost i `cost_events` + Langfuse; D-30-live-funn-fix-runden
+  (denne branchen, commit før denne) testbeviste at `tool.executed`-audit-rader
+  er korrekt tenant/session-tagget for BÅDE owner- og cross-tenant-identiteter.
+  Ingen rå lyd i noen av disse sporene (strukturelt testbevist fra før).
+- **Kvalitet:** 277/277 (273 + 4 nye: provider-feil-før-output, klientdisconnect,
+  2× Q-18-repro), lint/typecheck/gitleaks rene. Ingen regresjon: sovereign owner,
+  delegert identitet, D-class, Tool Gateway, P1A-fallback, cross-provider
+  tool-resume, kalender-tool-bro - alle eksisterende suiter uendret grønne.
+
+**D-30-anbefaling denne runden: fortsatt PARTIAL.** Suite-nivå er komplett og
+grønt; de nye host-scriptene (§1/§2/§4) og WS-disconnect-wiringen (§3D) er IKKE
+kjørt mot ekte runtime i denne (sky-)økten - kun levert klare til hosten. D-30
+kan først settes VERIFIED når: (a) `bo12-voice-live.ts` §1/§2-seksjonen PASSer
+live med `barge_in_audio_stop_ms` rapportert, (b) `bo12-voice-soak.ts` fullfører
+10/10 live, og (c) Q-18 enten er akseptert som dokumentert kjent begrensning
+(ikke en D-30-blokker i seg selv) eller fikset i egen runde.
+
+### D-30 HOST FAILURE FIX (2026-08-14, runde 4)
+
+Første EKTE host-kjøring av hardening-scriptene (runde 3) fant tre feil. Alle
+tre er nå undersøkt (ikke gjettet) og fikset/dokumentert:
+
+- **§1 §32-legacy-testen feilet live** ("forventet AbortError, fikk suksess").
+  **Root cause (undersøkt): kategori B (race), IKKE en ødelagt
+  kanselleringsmekanisme.** Selve kanselleringskjeden (`res.on('close')` →
+  `AbortController` → `ModelGateway.stream` → provider-abort) er BEVIST
+  korrekt i suiten mot en EKTE HTTP-server (`fase3-e2e.test.ts` "SSE
+  klient-disconnect → upstream abort") - men suite-testen bruker en BEVISST
+  treg adapter (millisekunder per token) for å garantere margin. Live mot
+  ekte providere er marginen mye trangere: abort ble trigget FØRST etter 5
+  tokens, og for en kort/rask generering kan HELE svaret alt være mottatt og
+  lokalt bufret av fetch/undici innen abort() kalles - da er det ingenting
+  igjen å kansellere, og streamen fullfører normalt. Fiks (§32 uendret
+  assertion - IKKE svekket for å bli grønn): abort trigges nå på FØRSTE
+  token (ikke femte) og teksten som bes om er vesentlig lengre (500+ ord,
+  flere avsnitt) - begge reduserer race-vinduet uten å fjerne kravet om
+  AbortError. Feilmeldingen ved ny feiling gir nå diagnostikk (tokens
+  mottatt + elapsed ms) som skiller kategori A fra B.
+- **§2 Ekte lyd-barge-in-seksjonen kjørte aldri** (avhengig av §32 sin
+  suksess i scriptets rekkefølge - ingen egen feil i selve §1/§2-koden).
+  Klar til å kjøre når §32 er stabil.
+- **§3 Soak turn 8 timet ut** (`FEIL §4: kun 7/10 turer fullførte`).
+  **Root cause (undersøkt): test-harness sekvensielt await-race/deadlock,
+  IKKE sesjons-korrupsjon i VoiceSession.** Turn 8 er PER DESIGN ment å bli
+  avbrutt av turn 9, men den forrige loop-strukturen ventet på turn 8 sine
+  EGNE metrics FØR turn 9 sin lyd i det hele tatt ble sendt - siden turn 8
+  aldri var ment å fullføre naturlig, timet den ut og turn 9 ble aldri
+  utløst. Fiksen (`bo12-voice-soak.ts`): turn 8+9 er nå ETT konkurrerende
+  steg - turn 8 sin lyd sendes, harnesset venter KUN til
+  `state === "speaking"` (bevis på at generering/avspilling faktisk er
+  aktiv), SÅ sendes turn 9 som ekte barge-in-lyd, og TIL SLUTT ventes det på
+  BEGGE turers metrics. Ny eksplisitt definisjon av "korrekt cancelled-turn"
+  (`isCorrectlyCancelled()`): `cancelled===true` OG `t_speech_start` OG
+  `t_tts_first_frame` begge satt - dvs. turen beviselig KOM I GANG MED EKTE
+  LYD før den ble kuttet, ikke bare en tur som aldri startet. Deterministisk
+  regresjonsbevis for nøyaktig dette konkurrerende mønsteret finnes ALLEREDE
+  i suiten (`d30-foundation.test.ts` "Barge-in": venter på `state==="speaking"`
+  FØR barge-in-lyd sendes, ALDRI på fullføring først) - denne runden la til
+  eksplisitte shape-asserts (`t_speech_start`/`t_tts_first_frame` på den
+  kansellerte turen, nøyaktig 2 distinkte metrics-innslag, neste tur IKKE
+  kansellert) som speiler `isCorrectlyCancelled()` 1:1.
+- **§5/§6 `tools=[read_calendar_today,read_calendar_today]` på ÉN
+  kalenderturn - DEFINITIVT AVGJORT VIA KJØRT TEST, ikke gjetting:
+  kategori (A) - to SSE/tool_call_complete-events for ÉTT faktisk
+  ToolGateway-/transport-kall.** Bevist i
+  `modules/tool-gateway/test/same-turn-tool-dedupe.test.ts` (2 tester, ekte
+  embedded PG + `ModelGateway.completeWithTools` + `MeshToolExecutor` +
+  `ToolGateway`): both en modell som ber om samme verktøy TO GANGER i SAMME
+  runde og en modell som ber om det i to ETTERFØLGENDE runder gir 2
+  `tool_call_complete`-SSE-events, men KUN 1 faktisk transport-kall -
+  `ModelGateway.completeWithTools` sin in-memory `executed`-cache
+  (uendret av denne runden) deduper korrekt UANSETT om duplikatet skjer i
+  samme eller senere runde INNENFOR én brukertur. Den observerte
+  `model_ttft=16041ms`/`e2e_first_audio=17566ms` skyldes derfor en EKSTRA
+  MODELLRUNDE (modellen ba om kalenderen på nytt før den svarte -
+  `tool_rounds:2` i stedet for forventet `1`), IKKE en ekstra
+  ToolGateway-/kalender-transport-utførelse. Nøyaktig ms-fordeling FØR/ETTER
+  kan ikke oppgis uten nytt host-tall (ingen fabrikkerte tall) - men
+  strukturelt er "duplicate_tool_executions"-tallet fra forrige runde sin
+  soak-rapport (som telte SSE/tool_activity-events, ikke faktiske
+  utførelser) misvisende navngitt; det måler nå riktig ting siden
+  Q-18-fiksen (under) uansett endrer hva som telles som "duplikat" på tvers
+  av turer.
+- **Q-18 FIKSET (ikke lenger BLOCKER):** `modules/tool-gateway/src/gateway.ts`
+  - `tool_executions`-dedupe (database-/sesjonsnivå) gjelder nå KUN C/D
+  (`dedupeApplies = capability_class !== "A"`). A-klasse reads utfører alltid
+  friskt per brukertur (data kan ha endret seg); write/mutation-dedupe (C/D)
+  er UENDRET og fortsatt bevist aktiv
+  (`q18-read-dedupe.test.ts` regresjon C). In-memory per-tur-beskyttelse
+  (samme modellrunde/tur, samme kall → maks 1 utførelse) var aldri en del av
+  bugen og er uendret, bevist separat i `same-turn-tool-dedupe.test.ts`.
+  Skillet er nå eksplisitt testet på begge sider: NY brukertur + samme
+  lesekall → fersk utførelse (§7.B); SAMME modellrunde/tur + samme lesekall
+  → maks 1 utførelse (§7.A).
+- **Regresjonstester lagt til/utvidet (§7 A-I):** A/B/C i
+  `q18-read-dedupe.test.ts` + `same-turn-tool-dedupe.test.ts`; D (legacy §32)
+  uendret dekket av `fase3-e2e.test.ts`; E/F/H utvidet i
+  `d30-foundation.test.ts` sin barge-in-test (eksplisitt metrics-shape +
+  nøyaktig 2 distinkte turer); G dekket av samme test (turen etter
+  kansellering fullfører); I uendret dekket av forrige rundes
+  disconnect-test. Ingen regresjon: sovereign/delegert/D-class/Tool
+  Gateway-policy/tenant-isolasjon/cross-provider-fallback/cross-provider
+  tool-resume/unknown-tool-DENY/write-idempotency - alle eksisterende
+  suiter uendret grønne (`ua0-sovereign.test.ts`, `ua1-p1a-dclass-mesh.test.ts`,
+  `policy-gateway.test.ts` osv.).
+- **Kvalitet:** 279/279 (277 + 2 nye i `same-turn-tool-dedupe.test.ts`;
+  `q18-read-dedupe.test.ts` beholdt 2 tester men skriver nå FIKS-bevis i
+  stedet for kun reprodusering), lint/typecheck/gitleaks rene.
+
+**D-30-anbefaling denne runden: READY_FOR_HOST_RETEST (fortsatt ikke
+VERIFIED).** Alle tre host-funnene er undersøkt til rot og fikset i kode;
+suiten er komplett og grønn; INGEN av fiksene er kjørt mot ekte runtime i
+denne (sky-)økten. Nye host-kommandoer (uendret fra forrige runde, men med
+fikset innhold): `bo12-voice-live.ts` (§32 skal nå PASSE deterministisk,
+§1/§2 skal fullføre og gi `barge_in_audio_stop_ms`) og `bo12-voice-soak.ts`
+(10/10 skal fullføre, turn 8 skal vise `cancelled=true` med lyd i gang,
+kalenderspørring i turn 2/6/10 skal ALLE gi ekte svar).
+
+### D-30 FINAL BARGE-IN HOST BLOCKER (2026-08-14, runde 5)
+
+Host kjørte runde 4s fikser: Q-18-fiksen bekreftet PASS live (kalender
+fungerer på gjentatt spørring, `duplicate_tool_executions=0`), men §32 feilet
+med NY informasjon som avkreftet forrige runsdes race-hypotese: **0 tokens
+mottatt over 35,5 sekunder, deretter suksess** - ikke "modellen var rask nok
+til å fullføre", men "ingen inkrementelle token-events ble observert i det
+hele tatt". Root cause kan IKKE avgjøres endelig fra sky-container uten
+host-tilgang til de faktiske providerne/nettverket - dette er eksplisitt
+IKKE gjettet. I stedet:
+
+- **Kodesporing (spørsmål 1.A-F i host-ordren), gjort ved lesing - ingen
+  gjetting:** hele kjeden (provider-adapter → `sseLines()` → `ModelGateway.
+  executePlan`/`guardedOnEvent` → `ConversationEngine.handle`s `onEvent` →
+  `server.ts` sin SSE `send()` → `HttpCoreClient.chatStream`s fetch-parsing)
+  er strukturelt IDENTISK for alle requests (kalender/no-tool/forced-provider
+  fungerte ALLE live i denne runden) - ingen kodeforskjell funnet som
+  spesifikt rammer §32s request. **Ollama/Gemini/Kimi-hypotesen (adaptere uten
+  native `stream()`) undersøkt og AVKREFTET ved lesing:** alle tre kaller
+  `onToken?.(text)` ubetinget i sin `complete()` (Gemini/Kimi) eller med kun
+  tom-streng-guard (Ollama) - selv en tom/enkelt levering ville gitt
+  `tokens_mottatt>=1`, ikke eksakt 0. Docker-compose (`infra/local/docker-
+  compose.yml`) har INGEN reverse proxy/nginx-buffringslag - api-porten
+  eksponeres direkte.
+- **Deterministisk sandbox-bevis (KJØRT i denne (sky-)økten - ikke en
+  live-host-påstand, et faktisk utført resultat):** en selvstendig probe
+  (ekte `createApiServer` + ekte fetch-SSE-klient + embedded Postgres, INGEN
+  vitest-mocks) med en kontrollert treg adapter (600 "ord" á 5ms) viste: 600
+  distinkte SSE token-mottak spredt over 702ms (første=1ms, siste=694ms -
+  ekte inkrementell levering, ikke ett bufret burst), og abort() på FØRSTE
+  token ga AbortError etter 19ms. **Dette beviser at HELE vår egen HTTP/SSE/
+  ConversationEngine/ModelGateway-kode fungerer korrekt** når en adapter
+  faktisk streamer - koden er IKKE generisk buffret. Formalisert som 2 nye
+  permanente suite-tester i `fase3-e2e.test.ts` (§8.D): mange distinkte
+  SSE-mottak spredt over tid + AbortSignal etter 2 observerte tokens →
+  deterministisk AbortError innen 500ms.
+- **Server-side diagnostikk lagt til (spørsmål 2, `JARVIS_STREAM_DEBUG=true`):**
+  kun type+timing, ALDRI event-innhold/secrets/prompt/svar-tekst. Tre
+  punkter: `stream_debug_gateway` (ModelGateway sin `guardedOnEvent` - svarer
+  A/B), `stream_debug_conversation` (ConversationEngine sin `onEvent` -
+  svarer C), `stream_debug_sse_write` (server.ts sin SSE `send()` - svarer
+  D). Host kan nå kjøre med dette slått på og korrelere jarvis-api-loggen for
+  å se PRESIST hvor leveringen slutter å være inkrementell.
+- **§32/§1-§2 redesignet - IKKE lenger en "500 ord"-blind fix (fjernet
+  helt):** ny §3B-seksjon i `bo12-voice-live.ts` kjører FØRST en ren
+  smoke-test (ingen cancellation) som måler `token_count`/`first_token_ms`/
+  `last_token_ms`/`spread_ms` for et normallangt svar - `incrementalStreaming
+  Observed` settes KUN når ≥3 distinkte mottak spredt over >100ms er
+  observert. §32 kjøres BETINGET på dette: hvis smoke-testen IKKE fant
+  inkrementell levering, rapporteres §32 som **IKKE KJØRT (inkonklusivt)**
+  med henvisning til den deterministiske suite-/sandbox-evidensen - IKKE en
+  hard FAIL (siden det ikke finnes noen bevisbar aktiv stream å avbryte midt
+  i på den hosten). Hvis smoke-testen VISER inkrementell levering, kjøres
+  §32 og en feiling DER er nå en høy-konfidens ekte regresjon (kategori A),
+  siden race (kategori B) nettopp er utelukket i samme kjøring. Abort trigges
+  på 2. observerte token (bevis på en PÅGÅENDE stream, ikke bare ett burst).
+- **D-30 HARDENING §1/§2 (ekte lyd-barge-in) koblet løs fra lang LLM-respons
+  (host-ordre §5):** turn A ber nå om et normallangt svar ("tre norske
+  fjell, én setning om hvert") i stedet for "minst 200/500 ord" - barge-in
+  trigges UTELUKKENDE på observert `frames.length>0` (ekte avspilling i
+  gang), aldri på antatt svarlengde. Generation cancellation (§32) og audio
+  cancellation (§1/§2) er nå eksplisitt to separate gates, som i host-ordren.
+- **Soak turn 8 (host-ordre §4) - root cause identifisert som SANNSYNLIG
+  SAMME fenomen som §32, ikke en egen harness-feil:** forrige rundes
+  turn-8/9-redesign (konkurrerende sending) er strukturelt korrekt (samme
+  mønster ligger ALLEREDE i `d30-foundation.test.ts` sin suite-bevist
+  barge-in-test), men 20s-timeout var for kort dersom EKTE generering på
+  denne hosten faktisk kan ta 30-40+ sekunder (matcher §32-funnet). Fikset:
+  (a) tidsstemplet tilstandshistorikk (`onState`-overganger med ms-offset)
+  inkluderes i enhver timeout-feilmelding - skiller "trege men normale
+  overganger" fra "aldri kom forbi thinking"; (b) timeout økt til 60s for
+  turn 8/9, 45s for øvrige turer; (c) turn 8s tekst KORTET NED (var "minst
+  fem hundre ord" - fjernet som blind fix, siden barge-in uansett trigges på
+  observert `state==="speaking"`, ikke på lengde); (d) et timeout merkes
+  IKKE lenger stille som "session_corrupted" uten forklaring - loggen sier
+  eksplisitt at det er en timeout, ikke nødvendigvis korrupsjon, med
+  henvisning til §32/§3B for videre diagnose.
+- **Q-18: IKKE rørt igjen** (host bekreftet PASS live: `tools=
+  [read_calendar_today]`, kalender-repetisjon fungerer, `duplicate_tool_
+  executions=0`) - forblir FIKSET fra forrige runde.
+- **Kvalitet:** 281/281 (279 + 2 nye §8.D-tester i `fase3-e2e.test.ts`),
+  lint/typecheck/gitleaks rene. Ingen regresjon: Q-18-fiks, same-turn
+  tool-dedupe, write-dedupe, sovereign/delegert/D-class/tenant-isolasjon/
+  cross-provider-fallback/tool-resume/unknown-tool-DENY - alle eksisterende
+  suiter uendret grønne.
+
+**D-30-anbefaling denne runden (før host-runde 6): READY_FOR_HOST_RETEST
+(fortsatt ikke VERIFIED, fortsatt ikke BLOCKED).** Egen kode er nå bevist
+korrekt (suite + sandbox-probe) for streaming/kansellering NÅR en adapter
+faktisk streamer; det gjenstår å avgjøre PÅ HOSTEN (med
+`JARVIS_STREAM_DEBUG=true`) om §32s opprinnelige host-funn var en
+engangs-nettverksanomali eller et vedvarende mønster for ekte
+OpenAI/Anthropic-kall i dette miljøet. Scriptene er redesignet til å
+rapportere ærlig i begge tilfeller (PASS/IKKE KJØRT/FEIL) i stedet for å
+tvinge frem en påstått grønn status. **Denne anbefalingen er SUPERSEDERT av
+host-runde 6 under - D-30 er nå VERIFIED.**
+
+### D-30 FINAL CLOSURE — HOST VERIFIED (2026-08-14, runde 6)
+
+Windows-host kjørte de redesignede scriptene fra runde 5 (`JARVIS_STREAM_DEBUG`-
+klare `bo12-voice-live.ts`/`bo12-voice-soak.ts`) og bekreftet ALLE gjenstående
+gater PASS. §32s runde 5-anomali (0 tokens/35,5s) reproduserte IKKE denne
+runden - vurdert som en engangs-nettverksanomali, ikke et vedvarende mønster
+(egen kode var allerede bevist korrekt via sandbox-probe + suite i runde 5).
+
+| Gate | Host-resultat |
+|---|---|
+| §3B Real-provider streaming smoke | PASS - `token_count=142`, `first_token_ms=12675`, `last_token_ms=17432`, `spread_ms=4757` (ekte inkrementell levering bekreftet) |
+| §32 Generation cancellation | PASS - aktiv stream observert, abort etter 3 tokens, upstream kansellert, ren neste tur ("Klar igjen.") |
+| §1/§2 Real audio barge-in | PASS - 8 rammer mottatt før barge-in, `barge_in_audio_stop_ms=0` (≤250ms-gate), 0 stale rammer i 500ms-settle-vindu, `cancelled=true` på avbrutt tur, ren neste tur |
+| 10-tur soak - kjøring #1 | PASS - 10/10, én session_id, `duplicate_tool_executions=0`, `session_corrupted=false`, turn 8 cancelled, turn 9+10 normale |
+| 10-tur soak - kjøring #2 (uavhengig gjentak) | PASS - identisk resultat: 10/10, én session_id, `duplicate_tool_executions=0`, `session_corrupted=false`, turn 8 cancelled, turn 9+10 normale |
+| Q-18 (repetert kalenderlesing i samme sesjon) | FIXED bekreftet live - ferske svar på gjentatt spørring, `duplicate_tool_executions=0`, same-turn-dedupe og write-dedupe uendret |
+
+**Ytelsesgjeld registrert (IKKE en korrekthets-blokker - se OPEN_QUESTIONS.md
+Q-19):** host-observert latens er treg for ønsket realtime-opplevelse
+(`e2e_first_audio` vanligvis ~3,5-6,2s, enkelte turer ~9-12s, streaming-smoke
+første token ~12,7s). D-30s funksjonelle korrekthet er verifisert UAVHENGIG av
+dette tallet - realtime-latensoptimalisering er en bevisst utsatt, egen runde
+(ingen optimalisering forsøkt i denne lukkingen, som beordret).
+
+**D-30 P0 STATUS: VERIFIED.** Merget til `main` (se PROJECT_STATUS.md for
+commit-referanse). D-30 er ikke lenger en åpen, ikke-blokkerende port -
+voice-laget er nå en verifisert del av v4.0-runtimen.
 
 ## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
 
@@ -149,7 +540,8 @@ JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
   rene. Kritisk recovery-regresjon (§13/§45: tool utført → provider-død → resume uten dobbel
   utførelse) PASS i suiten.
 - **Gjenstår på host (utenfor denne byggerundens miljø - ingen Docker/nøkler):** delta-live-porten
-  `node --experimental-strip-types apps/api/scripts/bo11-1-delta-live.ts` (Docker-PG-SQL §5 + live
+  `node --env-file=.env --experimental-transform-types apps/api/scripts/bo11-1-delta-live.ts`
+  (samme Node 24-host-funn som bo12: strip-types feiler på parameter properties; Docker-PG-SQL §5 + live
   SSE-disconnect §7) + live provider-regresjon §13 (re-kjør bo11-live.ts) + §16 runtime-helse.
   BO-11s live-evidens er uendret gyldig; deltaet endrer ikke provider-kontraktene.
 

@@ -13,6 +13,14 @@ export interface MeshToolMapping {
   def: MeshToolDefinition;
   tool_id: string;
   action: string;
+  /**
+   * D-30 live-funn: gateway-verktøyenes skjema krever felter (from/to, max, repo)
+   * som mesh-definisjonene bevisst IKKE eksponerer for modellen. Parametrene
+   * bygges derfor HER i trusted lag (samme presedens som daily-brief) - modellen
+   * bestemmer aldri gateway-parametre. Uten dette ga tomme model-args
+   * `invalid_parameters`-DENY i ToolGateway for alle tre read-verktøyene.
+   */
+  parameters?: (modelArgs: Record<string, unknown>) => Record<string, unknown>;
 }
 
 const MESH_TOOLS: MeshToolMapping[] = [
@@ -23,7 +31,8 @@ const MESH_TOOLS: MeshToolMapping[] = [
       input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
     },
     tool_id: "email",
-    action: "read_inbox"
+    action: "read_inbox",
+    parameters: () => ({ max: 10 })
   },
   {
     def: {
@@ -32,7 +41,12 @@ const MESH_TOOLS: MeshToolMapping[] = [
       input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
     },
     tool_id: "calendar",
-    action: "read_events"
+    action: "read_events",
+    parameters: () => {
+      const start = new Date();
+      start.setHours(0, 0, 0, 0);
+      return { from: start.toISOString(), to: new Date(start.getTime() + 86_400_000).toISOString() };
+    }
   },
   {
     def: {
@@ -41,7 +55,8 @@ const MESH_TOOLS: MeshToolMapping[] = [
       input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
     },
     tool_id: "github",
-    action: "read_issues"
+    action: "read_issues",
+    parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" })
   }
 ];
 
@@ -82,7 +97,8 @@ export class MeshToolExecutor {
       identity: this.identity as never,
       tool_id: mapped.tool_id,
       action: mapped.action,
-      parameters: call.arguments as never,
+      // Trusted parameterbygging når mappingen definerer den - ellers model-args.
+      parameters: (mapped.parameters ? mapped.parameters(call.arguments) : call.arguments) as never,
       idempotency_key: ctx.idempotency_key
     });
     if (!result.ok) {

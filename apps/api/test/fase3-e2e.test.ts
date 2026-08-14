@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { approvalSigningBytes, type ApprovalPayload, type SignedApproval } from "@jarvis/contracts";
+import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
 import {
   ContextBuilder,
   IdentityService,
@@ -20,8 +20,17 @@ import {
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FailingAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
+import {
+  FakeTransport,
+  MeshToolExecutor,
+  ToolGateway,
+  firstWaveTools,
+  meshToolDefinitions,
+  type SecretProvider
+} from "@jarvis/tool-gateway";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { ConversationEngine } from "../src/conversation.ts";
+import { seedOwner } from "../src/seed.ts";
 import { createApiServer } from "../src/server.ts";
 
 const PORT = 30000 + Math.floor(Math.random() * 20000);
@@ -36,6 +45,12 @@ let scripted: ScriptedAdapter;
 let trace: MemoryTraceSink;
 let worker: InProcessWorker;
 let gateway: ModelGateway;
+// D-30 live-funn-fix: samtalebanens tool-bro testes mot EKTE firstWave-skjemaer.
+let calendarTransport: FakeTransport;
+const executorIdentities: IdentityContext[] = [];
+let toolCallSeq = 0;
+// Marker i tool-resultatet: skal ALDRI dukke opp i SSE-events (kun tool_name gjør det).
+const TOOL_PAYLOAD_MARKER = "INTERN-TOOL-PAYLOAD-9f3a";
 
 const webIdentity = {
   person_id: "person-tobias",
@@ -90,16 +105,21 @@ beforeAll(async () => {
   await adminPool.query(`
     INSERT INTO tenants (tenant_id, name, kind) VALUES
       ('tenant-personal', 'Tobias personlig', 'person'),
-      ('tenant-budget', 'Budsjett-test', 'person');
+      ('tenant-budget', 'Budsjett-test', 'person'),
+      ('tenant-second', 'Tenant-isolasjon-test', 'person');
     INSERT INTO people (person_id, display_name) VALUES ('person-tobias', 'Tobias');
     INSERT INTO person_tenants (person_id, tenant_id) VALUES
-      ('person-tobias', 'tenant-personal'), ('person-tobias', 'tenant-budget');
+      ('person-tobias', 'tenant-personal'), ('person-tobias', 'tenant-budget'),
+      ('person-tobias', 'tenant-second');
     INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES
       ('dev-web', 'tenant-personal', 'person-tobias', 'web'),
-      ('dev-web-b', 'tenant-budget', 'person-tobias', 'web');
+      ('dev-web-b', 'tenant-budget', 'person-tobias', 'web'),
+      ('dev-voice', 'tenant-personal', 'person-tobias', 'voice'),
+      ('dev-web-c', 'tenant-second', 'person-tobias', 'web');
     INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES
       ('sp-personal', 'tenant-personal', 'personal'),
-      ('sp-budget', 'tenant-budget', 'personal');
+      ('sp-budget', 'tenant-budget', 'personal'),
+      ('sp-second', 'tenant-second', 'personal');
     -- Simulert forbruk over hardgrensen (3 000 kr = 300 000 øre) for tenant-budget:
     INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ('tenant-budget', 'model:test', 310000);
   `);
@@ -115,12 +135,31 @@ beforeAll(async () => {
     nonces: new PgApprovalStore(appPool),
     killSwitch: new KillSwitch()
   });
-  scripted = new ScriptedAdapter((req) =>
-    // BO-11.1 §7: "langsom" gir mange tokens (~1 ms hver i stream) slik at
-    // klient-frakobling deterministisk treffer midt i genereringen.
-    req.messages.at(-1)?.content.includes("langsom")
-      ? Array.from({ length: 150 }, (_, i) => `ord${i} `).join("")
-      : "Hei Tobias, dette er et modellsvar."
+  scripted = new ScriptedAdapter(
+    (req) =>
+      // D-30: syntese-runden ETTER verktøyresultat - fast tekst (aldri payload-lekkasje her).
+      req.tool_exchanges?.length
+        ? "Kalenderen din i dag: standup 09:00."
+        : // BO-11.1 §7: "langsom" gir mange tokens (~1 ms hver i stream) slik at
+          // klient-frakobling deterministisk treffer midt i genereringen.
+          req.messages.at(-1)?.content.includes("langsom")
+          ? Array.from({ length: 150 }, (_, i) => `ord${i} `).join("")
+          : "Hei Tobias, dette er et modellsvar.",
+    // D-30 live-funn-fix: kalender-intent → normalized tool call (runde 1); etter
+    // utført verktøy (tool_exchanges) → ferdig syntese. Unik call-id per request.
+    (req) => {
+      if (req.tool_exchanges?.length) {
+        return [];
+      }
+      if (!(req.messages.at(-1)?.content ?? "").includes("kalenderen")) {
+        return [];
+      }
+      toolCallSeq += 1;
+      return [{
+        tool_call_id: `call-cal-${toolCallSeq}`, tool_name: "read_calendar_today",
+        arguments: {}, provider: "scripted", model: "scripted-1"
+      }];
+    }
   );
   trace = new MemoryTraceSink();
   gateway = new ModelGateway({
@@ -131,6 +170,18 @@ beforeAll(async () => {
   const queue = new PgTaskQueue(appPool);
   worker = new InProcessWorker(queue);
   worker.register("executive", async (task) => ({ echo: task.contract.goal }));
+  // D-30 live-funn-fix: EKTE firstWave-verktøydefinisjoner (ekte input-skjemaer,
+  // {from,to}/{max}/{repo}) med fake transporter - beviser at mesh-broens trusted
+  // parameterbygging validerer mot produksjonsskjemaene (live-funnet var nettopp
+  // at samtalebanen aldri nådde hit).
+  calendarTransport = new FakeTransport(() => ({
+    data: { events: [{ id: "ev-1", title: `standup ${TOOL_PAYLOAD_MARKER}`, start: "09:00" }] }
+  }));
+  const testSecrets: SecretProvider = { name: "test", get: async () => "test-credential-never-leaks" };
+  const toolGateway = new ToolGateway(appPool, policy, testSecrets);
+  for (const tool of firstWaveTools({
+    calendar: calendarTransport, email: new FakeTransport(), github: new FakeTransport(), telegram: new FakeTransport()
+  })) toolGateway.register(tool);
   server = createApiServer({
     identity: new IdentityService(appPool),
     sessions: new SessionService(appPool),
@@ -142,7 +193,16 @@ beforeAll(async () => {
       gateway,
       tasks: new TaskService(appPool, queue, policy),
       worker,
-      trace
+      trace,
+      // §3 (live-funn-fix): executor bindes til samtalens RESOLVED identity per
+      // kall - fabrikken registrerer hver binding så feil (global owner) avsløres.
+      tools: {
+        definitions: meshToolDefinitions(),
+        executorFor: (identity) => {
+          executorIdentities.push(identity);
+          return new MeshToolExecutor(toolGateway, identity);
+        }
+      }
     })
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -342,5 +402,141 @@ describe("BO-11.1 §6-§7: SSE klient-disconnect → upstream abort (barge-in-fu
     const text = await response.text();
     expect(text).toContain("Hei Tobias, dette er et modellsvar.".split(" ")[0] as string);
     expect(text.match(/event: done/g)?.length).toBe(1); // aldri duplisert final
+  });
+});
+
+describe("D-30 HOST BLOCKER §1-§3/§8: stream-levering + kansellering mot EKTE HTTP/SSE (ikke mocks)", () => {
+  it("§8.D: mange distinkte SSE token-events spredt over tid - ekte inkrementell levering, ikke ett bufret burst", async () => {
+    const response = await fetch(`${baseUrl}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie" })
+    });
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    const tokenTimestamps: number[] = [];
+    let buffer = "";
+    const tStart = Date.now();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      if (buffer.includes("event: token")) {
+        tokenTimestamps.push(Date.now() - tStart);
+        buffer = "";
+      }
+    }
+    // "langsom historie" scripter 150 tokens á ~1ms - dette beviser at HELE
+    // HTTP/SSE-kjeden (server.ts→HttpCoreClient-ekvivalent fetch-parsing)
+    // leverer inkrementelt for et LANGT svar, ikke i ett bufret burst ved slutt:
+    expect(tokenTimestamps.length).toBeGreaterThanOrEqual(50);
+    expect((tokenTimestamps.at(-1) ?? 0) - (tokenTimestamps[0] ?? 0)).toBeGreaterThan(20);
+  });
+
+  it("§8.D: AbortSignal etter observert AKTIV stream (2+ tokens) gir deterministic AbortError, uansett svarlengde", async () => {
+    const controller = new AbortController();
+    let tokens = 0;
+    const tStart = Date.now();
+    let errName: string | undefined;
+    try {
+      const response = await fetch(`${baseUrl}/chat`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "text/event-stream" },
+        body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie to" }),
+        signal: controller.signal
+      });
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes("event: token")) {
+          tokens += 1;
+          if (tokens === 2) controller.abort();
+          buffer = "";
+        }
+      }
+    } catch (err) {
+      errName = (err as Error).name;
+    }
+    const elapsed = Date.now() - tStart;
+    // Deterministisk (ikke en race): en 150-tokens/~150ms-generering avbrutt
+    // etter kun 2 tokens skal ALLTID gi AbortError, uansett total svarlengde:
+    expect(errName).toBe("AbortError");
+    expect(tokens).toBeGreaterThanOrEqual(2);
+    expect(elapsed).toBeLessThan(500); // avbrutt tidlig - IKKE etter naesten hele generasjonen
+  });
+});
+
+describe("D-30 live-funn-fix: ConversationEngine → mesh tool bridge (§1-§6)", () => {
+  it("A/B: kalender-intent → completeWithTools → ToolGateway (ekte skjema) → syntese-svar", async () => {
+    const before = calendarTransport.calls.length;
+    const result = await chat("Hva står på kalenderen min i dag?", { ...webIdentity, device_id: "dev-voice" });
+    expect(result.status).toBe(200);
+    expect(result.body["routed"]).toBe("model");
+    expect(result.body["reply"]).toContain("standup 09:00");
+    // Verktøyet ble FAKTISK utført gjennom Tool Gateway mot ekte input-skjema:
+    expect(calendarTransport.calls.length).toBe(before + 1);
+    const params = calendarTransport.calls.at(-1)?.parameters as { from: string; to: string };
+    // Trusted parameterbygging (live-funn: tomme model-args ga invalid_parameters):
+    expect(typeof params.from).toBe("string");
+    expect(typeof params.to).toBe("string");
+    expect(new Date(params.to).getTime() - new Date(params.from).getTime()).toBe(86_400_000);
+    // B: banen var completeWithTools - modellen fikk tool-definisjoner i requesten:
+    expect(scripted.calls.some((c) => (c.tools?.length ?? 0) > 0)).toBe(true);
+  });
+
+  it("D: SSE sender trusted tool_call-event med KUN tool_name - aldri args/tool-result", async () => {
+    const response = await fetch(`${baseUrl}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ ...webIdentity, message: "Hva står på kalenderen min i dag?" })
+    });
+    const text = await response.text();
+    expect(text).toContain("event: tool_call");
+    const dataLine = text.split("\n").find((l, i, all) => all[i - 1] === "event: tool_call");
+    const payload = JSON.parse((dataLine as string).replace("data: ", "")) as Record<string, unknown>;
+    // Eksakt kontrakt: kun tool_name krysser trust-grensen til klienten.
+    expect(payload).toEqual({ tool_name: "read_calendar_today" });
+    // Tool-RESULTATET (markert payload) finnes i transporten, men ALDRI i SSE-stremmen:
+    expect(text).not.toContain(TOOL_PAYLOAD_MARKER);
+    expect(text.match(/event: done/g)?.length).toBe(1);
+  });
+
+  it("C: executor bindes til samtalens resolved identity - tenant følger tool-utførelsen", async () => {
+    const before = calendarTransport.calls.length;
+    const result = await chat("Hva står på kalenderen min i dag?", {
+      person_id: "person-tobias",
+      tenant_id: "tenant-second",
+      device_id: "dev-web-c",
+      memory_space: "personal",
+      channel: "web"
+    });
+    expect(result.body["routed"]).toBe("model");
+    expect(calendarTransport.calls.length).toBe(before + 1);
+    // Fabrikken fikk tenant-second-identiteten (IKKE en global ownerIdentity):
+    const bound = executorIdentities.find((i) => i.tenant_id === "tenant-second");
+    expect(bound).toBeDefined();
+    expect(bound?.device_id).toBe("dev-web-c");
+    // Og utførelsen ble auditert i RIKTIG tenant - begge tenants har egne spor:
+    const audit = await adminPool.query(
+      "SELECT DISTINCT tenant_id FROM audit_events WHERE type = 'tool.executed' AND tool_id = 'calendar'"
+    );
+    const tenants = audit.rows.map((r: { tenant_id: string }) => r.tenant_id).sort();
+    expect(tenants).toEqual(["tenant-personal", "tenant-second"]);
+  });
+
+  it("H: owner-seed (inkl. voice-device) er idempotent - to kjøringer, én rad per device", async () => {
+    await seedOwner(adminPool);
+    await seedOwner(adminPool); // idempotens: andre kjøring endrer ingenting
+    const devices = await adminPool.query(
+      "SELECT device_id, kind, COUNT(*)::int AS n FROM devices WHERE device_id IN ('jarvis-core','jarvis-voice-live') GROUP BY device_id, kind ORDER BY device_id"
+    );
+    expect(devices.rows).toEqual([
+      { device_id: "jarvis-core", kind: "service", n: 1 },
+      { device_id: "jarvis-voice-live", kind: "voice", n: 1 }
+    ]);
   });
 });

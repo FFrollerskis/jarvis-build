@@ -46,6 +46,8 @@ interface ChatBody {
   channel: Channel;
   auth_strength?: AuthStrength;
   message: string;
+  /** BO-12 §33: valgfri owner-override av LLM-provider (router §38-semantikk). */
+  provider?: string;
 }
 
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
@@ -123,9 +125,16 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         "cache-control": "no-cache",
         connection: "keep-alive"
       });
+      // D-30 HOST BLOCKER §1/§2 (spørsmål D): valgfri diagnostikk - kun event-navn/
+      // timing, ALDRI dataInnhold (aldri token-tekst/secrets), kun når eksplisitt på.
+      const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
+      const tSseStart = Date.now();
       const send = (event: string, data: unknown) => {
         // Frakoblet socket får aldri flere events - og aldri duplisert 'done'.
         if (!res.writableEnded && !res.destroyed) {
+          if (streamDebug) {
+            console.error(JSON.stringify({ msg: "stream_debug_sse_write", event, at_ms: Date.now() - tSseStart }));
+          }
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         }
       };
@@ -144,14 +153,18 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         resolved.identity,
         body.message,
         (token) => send("token", { token }),
-        abort.signal
+        abort.signal,
+        body.provider,
+        // D-30: trusted verktøy-aktivitet - kun tool_name, aldri args/resultat-JSON.
+        // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
+        (toolName) => send("tool_call", { tool_name: toolName })
       );
       send("done", { ...result, session_id: session.session_id });
       res.end();
       return;
     }
 
-    const result = await deps.conversation.handle(resolved.identity, body.message);
+    const result = await deps.conversation.handle(resolved.identity, body.message, undefined, undefined, body.provider);
     return json(res, 200, { ...result, session_id: session.session_id });
   }
 

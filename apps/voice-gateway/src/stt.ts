@@ -66,7 +66,9 @@ export class OpenAiStt implements SttAdapter {
   readonly name = "openai-stt";
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
-    private readonly model: string = "whisper-1"
+    private readonly model: string = "whisper-1",
+    /** PCM-samplerate for wav-innpakking (mikrofon 16k; OpenAI TTS-rundtur 24k). */
+    private readonly sampleRate: number = 16000
   ) {}
 
   available(): boolean {
@@ -78,13 +80,13 @@ export class OpenAiStt implements SttAdapter {
       throw new Error("openai_stt_not_configured");
     }
     const chunks: Buffer[] = [];
-    const { apiKey, model } = this;
+    const { apiKey, model, sampleRate } = this;
     return {
       pushAudio(frame: Buffer): void {
         chunks.push(frame);
       },
       async end(): Promise<string> {
-        const wav = pcm16ToWav(Buffer.concat(chunks), 16000);
+        const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
         const form = new FormData();
         form.set("model", model);
         form.set("language", "no");

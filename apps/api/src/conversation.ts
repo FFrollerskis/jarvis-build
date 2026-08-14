@@ -1,7 +1,7 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
-import { BudgetExceededError, type ModelGateway, type TraceSink } from "@jarvis/model-gateway";
-import { ProviderError } from "@jarvis/provider-adapters";
+import { BudgetExceededError, type ModelGateway, type ToolExecutor, type TraceSink } from "@jarvis/model-gateway";
+import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { randomUUID } from "node:crypto";
 
@@ -14,6 +14,17 @@ export interface ConversationDeps {
   trace: TraceSink;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
   memory?: { contextFor(identity: IdentityContext, userText: string): Promise<string> };
+  /**
+   * D-30 live-funn: mesh-verktøy for samtalebanen (tekst OG voice går via /chat).
+   * Executor bindes til samtalens FAKTISKE resolved identity per kall - aldri en
+   * fast global owner-identity - slik at tenant-isolasjon, delegation og
+   * authority følger den som snakker. Utførelse går UANSETT via Tool Gateway →
+   * Policy/Execution Authority; definisjonene kommer fra trusted lag.
+   */
+  tools?: {
+    definitions: ToolDefinition[];
+    executorFor(identity: IdentityContext): ToolExecutor;
+  };
 }
 
 export interface ChatReply {
@@ -26,9 +37,13 @@ export interface ChatReply {
   interrupted?: boolean;
 }
 
+// Permissions ligger ALDRI i prompten - Policy/Execution Authority er trusted
+// runtime og håndhever tilgang deterministisk uansett hva modellen "tror".
 const SYSTEM_PROMPT =
   "Du er Jarvis, Tobias sin personlige assistent. Svar kort og presist på norsk. " +
-  "Du har ikke tilgang til verktøy eller eksterne data i denne fasen.";
+  "Du kan bruke de verktøyene runtime eksplisitt gjør tilgjengelige i denne samtalen. " +
+  "Bruk relevante tilgjengelige read-verktøy når spørsmålet krever ekstern informasjon " +
+  "(f.eks. kalender, e-post), og ikke påstå at du mangler tilgang før tilgjengelige verktøy er vurdert.";
 
 /**
  * Conversation Engine (fase 3): rask bane først (deterministisk, uten LLM),
@@ -43,7 +58,14 @@ export class ConversationEngine {
     text: string,
     onToken?: (t: string) => void,
     /** BO-11.1 §6: klient-disconnect propagerer helt til provider-upstream. */
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    /** BO-12 §33: valgfri owner-override av provider (router håndhever §38). */
+    provider?: string,
+    /**
+     * D-30: trusted verktøy-aktivitet for klienten (SSE `tool_call`/voice-status).
+     * Får KUN tool_name - aldri raw arguments eller tool-result-JSON.
+     */
+    onToolCall?: (toolName: string) => void
   ): Promise<ChatReply> {
     await this.deps.messages.save(identity, "user", text);
 
@@ -81,20 +103,42 @@ export class ConversationEngine {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
+        ...(provider !== undefined ? { provider } : {}),
         request: { system, messages: history, max_tokens: 1024 }
       };
-      const result = onToken
-        ? await this.deps.gateway.stream(
-            input,
-            (event) => {
-              if (event.type === "text_delta") {
-                partial += event.text;
-                onToken(event.text);
-              }
-            },
-            signal
-          )
-        : await this.deps.gateway.complete(input);
+      // D-30 live-funn: med tools konfigurert går BÅDE streaming- og JSON-banen
+      // gjennom completeWithTools (samme normaliserte tool-løkke som executive/
+      // BO-11) - aldri en voice-spesifikk sidevei. Uten tools: som før.
+      // D-30 HOST BLOCKER §1/§2 (spørsmål C): valgfri diagnostikk - kun type/timing,
+      // ALDRI event-innhold (aldri prompt/svar-tekst/secrets), kun når eksplisitt på.
+      const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
+      const tHandleStart = Date.now();
+      const onEvent = onToken
+        ? (event: StreamEvent) => {
+            if (streamDebug) {
+              console.error(JSON.stringify({
+                msg: "stream_debug_conversation", event_type: event.type, at_ms: Date.now() - tHandleStart
+              }));
+            }
+            if (event.type === "text_delta") {
+              partial += event.text;
+              onToken(event.text);
+            } else if (event.type === "tool_call_complete") {
+              // Kun navnet krysser trust-grensen til klienten (§5) - aldri args.
+              onToolCall?.(event.call.tool_name);
+            }
+          }
+        : undefined;
+      const result = this.deps.tools
+        ? await this.deps.gateway.completeWithTools(input, {
+            tools: this.deps.tools.definitions,
+            executor: this.deps.tools.executorFor(identity),
+            ...(onEvent ? { onEvent } : {}),
+            ...(signal ? { signal } : {})
+          })
+        : onEvent
+          ? await this.deps.gateway.stream(input, onEvent, signal)
+          : await this.deps.gateway.complete(input);
       await this.deps.messages.save(identity, "assistant", result.text);
       return { reply: result.text, routed: "model" };
     } catch (err) {

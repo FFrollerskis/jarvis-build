@@ -1,6 +1,7 @@
 // BO-11.1 delta-live-akseptanse på runtime-hosten (Docker-PG + kjørende stack).
 // Kjøres i jarvis-api-containeren:
-//   node --experimental-strip-types apps/api/scripts/bo11-1-delta-live.ts
+//   node --env-file=.env --experimental-transform-types apps/api/scripts/bo11-1-delta-live.ts
+//   (transform-types kreves på Node 24-host: strip-types feiler på TS parameter properties)
 // Dekker: §5 (migrasjon 016 + streaming-metrics via SQL på Docker-PG) og
 // §7 (SSE klient-disconnect → upstream abort mot kjørende jarvis-api).
 // Printer aldri secrets; modellkall er ett billig streaming-kall.

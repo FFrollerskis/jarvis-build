@@ -9,6 +9,7 @@
 |---|---|
 | Q-01 | **Lukket 2026-08-12** → D-18: Masterplan v2.1 behandles som eneste tilgjengelige kildedokument; nye eksplisitte Tobias-beslutninger kan overstyre når de dokumenteres i CANONICAL_SPEC/DECISIONS |
 | Q-02 | **Lukket 2026-08-12** → D-18–D-23: A-01/A-02/A-04/A-05/A-06 bekreftet; A-03 erstattet av ny maskinvareplan (D-20) |
+| Q-18 | **Lukket 2026-08-14 (D-30 host failure fix)** → ToolGateway sin `tool_executions`-dedupe rammet A-klasse READs på tvers av brukerturer i samme session (§21/§19-formålet var kun C/D-mutasjoner). Fikset i `modules/tool-gateway/src/gateway.ts` (`dedupeApplies = capability_class !== "A"`): A-klasse reads utfører nå alltid friskt per brukertur; C/D database-dedupe uendret. In-memory beskyttelse mot at MODELLEN ber om samme kall flere ganger i ÉN samtaletur (ModelGateway.completeWithTools sin `executed`-cache) var ALDRI berørt av bugen og er uendret. Bevist: `modules/tool-gateway/test/q18-read-dedupe.test.ts` (fersk utførelse tur 2 + write-dedupe uendret) og `modules/tool-gateway/test/same-turn-tool-dedupe.test.ts` (maks 1 faktisk utførelse per tur, uansett om modellen ber om samme kall i samme eller påfølgende runde). |
 
 ## Trenger svar fra Tobias
 
@@ -29,6 +30,7 @@
 | Q-10 | Trenger relasjonslaget egen grafdatabase? | Etter fase 4-eval | Flerhopp-spørsmål i minne-evalen; bytt kun ved målt svikt |
 | Q-11 | Lokal LLM-økonomi: lønner GPU-server seg? | Fase 10 | 30–90 dagers kostnads-/bruksmåling |
 | Q-12 | Satellitt-maskinvare for rom (HA Voice PE, egen build, annet)? | Fase 5/9 | Prototype + benchmark |
+| Q-19 | **Ytelsesgjeld, D-30 voice (registrert ved VERIFIED-lukking 2026-08-14, IKKE en korrekthets-blokker).** Host-akseptanse bekreftet D-30 funksjonelt korrekt, men latensen er treg for ønsket realtime-opplevelse: `end_of_speech_to_first_audio_ms` vanligvis ~3,5-6,2s, enkelte turer ~9-12s, streaming-smoke første token ~12,7s. Bevisst IKKE optimalisert i D-30-lukkingen (egen scope). Kandidatårsaker å undersøke: modellvalg/reasoning-overhead, TTS-round-trip per setningschunk (sekvensiell, ikke forhåndsberegnet), nettverk Windows↔Docker↔cloud-provider. Relatert til, men adskilt fra, Q-03 (endelig STT/TTS-leverandørvalg via D-10-benchmark). | Egen hardening/optimaliseringsrunde etter D-30 | Reelle host-latensmålinger over flere turer/providere; profiler hvert ledd (STT/model_ttft/tool/TTS_ttfa) separat før noe endres |
 
 ## Parkert (bevisst utsatt)
 

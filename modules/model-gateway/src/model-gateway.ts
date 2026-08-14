@@ -246,9 +246,20 @@ export class ModelGateway {
         try {
           let result: ModelResult;
           if (streamOpts) {
+            // D-30 HOST BLOCKER §1/§2: valgfri, kostnadsfri diagnostikk for å avgjøre
+            // OM/NÅR provider-adapteren faktisk emitterer text_delta live (spørsmål A/B
+            // i host-ordren). Kun type/provider/timing - ALDRI event-innhold (aldri
+            // secrets/prompt/svar-tekst) - og kun aktiv når eksplisitt slått på.
+            const streamDebug = process.env["JARVIS_STREAM_DEBUG"] === "true";
             const guardedOnEvent: StreamHandler = (event) => {
               if (event.type === "text_delta" || event.type === "tool_call_start") {
                 outputStarted = true;
+              }
+              if (streamDebug) {
+                console.error(JSON.stringify({
+                  msg: "stream_debug_gateway", provider: adapter.name, event_type: event.type,
+                  at_ms: Date.now() - attemptStart
+                }));
               }
               streamOpts.onEvent(event);
             };
