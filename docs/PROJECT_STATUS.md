@@ -1,10 +1,13 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-14 · **Branch:** `claude/d30-voice` (PR #2, ikke merget)
+**Oppdatert:** 2026-08-14 · **Branch:** `claude/ua2-knowledge-spec` (spec/plan, PR opprettes; ingen kode)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
+**D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: SPEC UTARBEIDET (denne økten), venter på eiers godkjenning av
+P0-skive før applikasjonskode** (se docs/IMPLEMENTATION_PLAN.md).
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -137,8 +140,11 @@ Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider
 Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
 
 ## Neste oppgave
-D-30 Voice VERIFIED og merget - avvent eierordre for neste port. Kandidater i tur etter
-v4.0-planen/gjenværende åpne, ikke-blokkerende gater: D-30 ytelsesgjeld (Q-19: realtime-latens
-mot <1,5s median/P95, D-10 norsk STT-benchmark ≥100 prøver - fullfører formell Fase 5-akseptanse),
-D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, eller UA-1 P1
-videre (quality metrics-læring).
+Tobias valgte UA-2 Universal Knowledge Layer som neste kanoniske fase. Ingen kanonisk spec fantes
+(kun rå masterplan-tekst) - utarbeidet denne økten i docs/IMPLEMENTATION_PLAN.md: full UA-2-seksjon
+(masterplan-scope) + et konkret **UA-2 P0-forslag** (GitHub + lokale filer/NAS som første to kilder,
+FTS+vector-retrieval på eksisterende pgvector-fundament, tombstone-sletting, RLS-isolasjon, DPIA-notat
+- Knowledge Graph/Obsidian/Pieces/Drive/møtetranskripsjon utsatt til P1). **Avventer Tobias sin
+godkjenning av P0-scopet (eller justering) før noen applikasjonskode skrives**, per fase-portregelen.
+Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
+Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
