@@ -401,6 +401,88 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     expect(ev.replies).toHaveLength(1);
   });
 
+  it("D-30 hardening §3C: provider/model-feil FØR output → normalisert 'core_error', ingen crash, neste tur fungerer, ingen secrets", async () => {
+    let call = 0;
+    const core: CoreClient = {
+      chat: async () => {
+        throw new Error("skal ikke brukes");
+      },
+      chatStream: async () => {
+        call += 1;
+        if (call === 1) {
+          // Fault injection: provider dør FØR noe token er sendt (aldri live-fremprovosert).
+          throw new Error("provider_unavailable secret-token-abc123-should-never-leak");
+        }
+        return { reply: "Fungerer igjen.", routed: "model", session_id: "s1" };
+      }
+    };
+    const ev = events();
+    const session = new VoiceSession(identity, core, fixedStt("hva skjer"), taggedTts().adapter, ev.handlers);
+    await runVoiceTurn(session);
+    await waitUntil(() => ev.errors.length > 0, 3000, "core_error mottatt");
+    expect(ev.errors).toContain("core_error");
+    // §27: rå feilmelding/secrets krysser ALDRI trust-grensen til klienten:
+    expect(ev.errors.every((e) => !e.includes("secret-token"))).toBe(true);
+    expect(session.currentState()).toBe("listening"); // ingen zombie - state kom seg videre til klar-for-ny-tur
+
+    // Neste tur fungerer normalt (ingen crash av sesjonen):
+    await runVoiceTurn(session);
+    await waitUntil(() => ev.replies.some((r) => r.reply === "Fungerer igjen."), 3000, "neste tur ferdig");
+    await settle(session);
+    expect(ev.replies.at(-1)?.reply).toBe("Fungerer igjen.");
+  });
+
+  it("D-30 hardening §3D: klientdisconnect midt i tur aborterer upstream - ingen zombie-generering", async () => {
+    let aborted = false;
+    let coreReturned = false;
+    const core: CoreClient = {
+      chat: async () => {
+        throw new Error("skal ikke brukes");
+      },
+      chatStream: async (_id, _msg, onEvent, signal) => {
+        onEvent({ type: "token", text: "Begynner på svaret. " });
+        for (let i = 0; i < 200; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          if (signal?.aborted) {
+            aborted = true;
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            throw err;
+          }
+        }
+        coreReturned = true;
+        return { reply: "skal aldri nås", routed: "model", session_id: "s1" };
+      }
+    };
+    const ev = events();
+    const session = new VoiceSession(identity, core, fixedStt("fortell noe langt"), taggedTts(8, 40).adapter, ev.handlers);
+    await runVoiceTurn(session);
+    // Vent til turen faktisk er i gang (thinking/speaking) FØR frakobling:
+    await waitUntil(() => session.currentState() !== "listening", 3000, "tur startet");
+
+    session.disconnect(); // simulerer WS 'close' midt i turen
+    await waitUntil(() => aborted, 3000, "upstream abortert");
+
+    expect(aborted).toBe(true);
+    expect(coreReturned).toBe(false); // aldri fullført - ingen zombie-svar produsert
+    // Ny tur etter disconnect fungerer fortsatt (sesjonen er ikke ødelagt):
+    let call2 = 0;
+    const core2: CoreClient = {
+      chat: async () => {
+        throw new Error("skal ikke brukes");
+      },
+      chatStream: async (_id, _msg, onEvent) => {
+        call2 += 1;
+        onEvent({ type: "token", text: "Ny tur OK." });
+        return { reply: "Ny tur OK.", routed: "model", session_id: "s1" };
+      }
+    };
+    const session2 = new VoiceSession(identity, core2, fixedStt("hei igjen"), taggedTts().adapter, ev.handlers);
+    await runVoiceTurn(session2);
+    await waitUntil(() => call2 === 1, 3000, "ny sesjon fungerer");
+    await settle(session2);
+  });
+
   it("TTS-feil forkaster ALDRI svaret: reply leveres, 'tts_error' normalisert, helse DEGRADED (§36)", async () => {
     const failingTts: TtsAdapter = {
       name: "failing-tts",

@@ -210,6 +210,13 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           send({ type: "error", error: "unknown_message_type" });
       }
     });
+
+    // D-30 hardening §3D: klientfrakobling midt i en tur skal aldri gi zombie-
+    // generering. Aborterer upstream modellgenerering og tømmer TTS-kø - ingen
+    // lyd/tekst er igjen produsert for en socket som ikke lenger lytter.
+    ws.on("close", () => {
+      session?.disconnect();
+    });
   });
 
   return server;

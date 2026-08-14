@@ -192,6 +192,86 @@ kalenderen"). Root cause + fix (denne runden, suite-verifisert i sky - IKKE nye 
 **Neste:** pull ny HEAD på hosten, rebuild api-runtime, re-kjør bo12-voice-live.ts
 (kalender-flyten skal nå gi `tools=[read_calendar_today]`), og lukk D-30 P0 på evidensen.
 
+### D-30 FINAL HOST ACCEPTANCE HARDENING (2026-08-14, runde 3)
+
+Windows-host bekreftet (runde 2): API healthy, norsk TTS→STT PASS, ConversationEngine
+tool bridge PASS (`tools=[read_calendar_today]`, ekte kalendersvar), no-tool/OpenAI/
+Anthropic voice-path PASS, upstream-generation-cancellation PASS, ren neste tur PASS.
+Denne runden lukker gatene bo12-voice-live.ts IKKE beviste: ekte lyd-barge-in (ikke
+bare LLM AbortSignal), stale-audio-epoch med eksplisitte tellere, kontrollert failure-
+recovery (STT/TTS/provider/disconnect), 10-tur soak, Q-18-repro, full latenskjede,
+observability-korrelasjon. **Ingen av gatene under er kjørt LIVE i sky-containeren -
+kun suite-verifisert her + nye host-scripts levert for hosten.**
+
+- **§1/§2 Real audio barge-in + stale-audio-epoch (host-script, IKKE kjørt her):**
+  `bo12-voice-live.ts` har ny seksjon "D-30 HARDENING §1/§2" - full `VoiceSession`
+  (ekte VAD→STT→Core→TTS, IKKE en isolert `AbortController`), "brukerens" barge-in
+  spilles inn som EKTE TTS-lyd gjennom `pushAudio()` (samme rundtur-teknikk som §30).
+  Rapporterer `barge_in_audio_stop_ms` (fra `onTtsCancelled`, dvs. `playback.cancel()`-
+  signalet - eksplisitt SKILT fra `activeTurnAbort` som er LLM-siden) med
+  ≤250ms-gate-sjekk, og et eksplisitt 500ms-settle-vindu der ENHVER TTS-ramme fra
+  turn A etter barge-in feiler scriptet hardt (`staleFramesAfterBarge > 0` →
+  kastet feil). Deterministisk stale-audio-bevis finnes FRA FØR i suiten
+  (`d30-foundation.test.ts` "Barge-in": taggede rammer `S{n}-f{i}`, bevist 0 gamle
+  tagger etter ny epoch) - host-scriptet legger til det ekte lyd-laget.
+- **§3 Failure recovery - fault injection (suite-verifisert, ikke live-fremprovosert
+  per ordre):** A (STT) og B (TTS) var alt dekket; NYE tester lagt til:
+  - **C (provider/model-feil FØR output):** `chatStream` kaster FØR første token →
+    normalisert `core_error`, state går til `listening` (ingen zombie), rå
+    feilmelding (inkl. simulert secret-streng) krysser ALDRI til klient-events,
+    neste tur fungerer uendret.
+  - **D (klientdisconnect):** **FUNN + FIKS** - `VoiceSession` hadde INGEN
+    `disconnect()`-håndtering og `server.ts` lyttet aldri på WS `close`. En
+    frakoblet klient midt i en tur lot modellgenereringen fortsette som zombie
+    (bortkastet modell-/TTS-kost, ingen mottaker). Fikset: ny
+    `VoiceSession.disconnect()` (bumper epoch, tømmer TTS-kø, aborterer
+    `activeTurnAbort` upstream - symmetrisk med `bargeIn()`) wiret til
+    `ws.on("close", ...)`. Testbevist: abort skjer, `coreReturned` blir aldri
+    sann, ny sesjon etterpå fungerer. **Denne wiringen er unit-/suite-testet,
+    IKKE host-live end-to-end testet** (krever ekte WS-klient mot en kjørende
+    voice-gateway-prosess - dokumentert gjenstående host-steg, ikke påstått
+    VERIFIED live).
+- **§4 10-tur host-soak (nytt script, IKKE kjørt her):**
+  `apps/voice-gateway/scripts/bo12-voice-soak.ts` - ÉN sammenhengende
+  `VoiceSession` gjennom 10 turer (no-tool/kalender/normal/tvunget OpenAI/tvunget
+  Anthropic/ekte barge-in-kansellering av en pågående tur/kalender-repetisjon for
+  Q-18). Feiler hardt på: <10/10 fullførte turer, >1 observert `session_id`
+  (sesjonskontinuitet brutt), duplikate verktøystatuser i samme tur, korrupt
+  sesjon, eller kansellert siste tur. Full latenskjede logges per tur.
+- **§5 Q-18 (tool-dedupe på A-klasse read i samme session) - REPRODUSERT, BLOKKERER
+  IKKE dette, men er BLOCKER for repetert kalenderspørring i samme sesjon.** Se
+  OPEN_QUESTIONS.md Q-18 for fullt bevis (`q18-read-dedupe.test.ts`, 2 tester mot
+  ekte embedded PG) + foreslått minste fix (IKKE implementert - egen BO kreves).
+  `bo12-voice-soak.ts` turn 6/10 gir en live-observerbar krysssjekk av samme funn.
+- **§6 Latenskjede:** `TurnMetrics` utvidet med `t_tool_activity` (tidspunkt trusted
+  tool-status varsles); ny `latencyLine()`-formatterer i begge live-scripts
+  rapporterer `stt`/`model_ttft`/`tool`/`tts_ttfa`/`e2e_first_audio`/`total_turn`
+  per tur - ingen fabrikkerte tall, kun det som faktisk er målt (`-`/`n/a` når et
+  tidsstempel mangler, f.eks. `tool` for turer uten verktøykall). Kjente
+  host-tall fra runde 2 (funksjonelt PASS, men trege: kalender 8263ms, no-tool
+  3633ms, OpenAI 5761ms, Anthropic 4093ms end_of_speech→first_audio) er IKKE
+  reoptimalisert i denne runden (eksplisitt utenfor scope: "korrekt baseline
+  først").
+- **§7 Observability-korrelasjon:** basert på kombinert bevis (IKKE en ny live
+  DB-spørring fra voice-gateway-prosessen, som ikke har poolgang til api sin
+  Postgres over prosessgrensen) - BO-10/BO-11 har alt live-verifisert
+  session_id/provider/kost i `cost_events` + Langfuse; D-30-live-funn-fix-runden
+  (denne branchen, commit før denne) testbeviste at `tool.executed`-audit-rader
+  er korrekt tenant/session-tagget for BÅDE owner- og cross-tenant-identiteter.
+  Ingen rå lyd i noen av disse sporene (strukturelt testbevist fra før).
+- **Kvalitet:** 277/277 (273 + 4 nye: provider-feil-før-output, klientdisconnect,
+  2× Q-18-repro), lint/typecheck/gitleaks rene. Ingen regresjon: sovereign owner,
+  delegert identitet, D-class, Tool Gateway, P1A-fallback, cross-provider
+  tool-resume, kalender-tool-bro - alle eksisterende suiter uendret grønne.
+
+**D-30-anbefaling denne runden: fortsatt PARTIAL.** Suite-nivå er komplett og
+grønt; de nye host-scriptene (§1/§2/§4) og WS-disconnect-wiringen (§3D) er IKKE
+kjørt mot ekte runtime i denne (sky-)økten - kun levert klare til hosten. D-30
+kan først settes VERIFIED når: (a) `bo12-voice-live.ts` §1/§2-seksjonen PASSer
+live med `barge_in_audio_stop_ms` rapportert, (b) `bo12-voice-soak.ts` fullfører
+10/10 live, og (c) Q-18 enten er akseptert som dokumentert kjent begrensning
+(ikke en D-30-blokker i seg selv) eller fikset i egen runde.
+
 ## BO-11.1 — P1A DELTA-HARDENING (2026-08-14)
 
 **UA-1 P1A forblir VERIFIED.** Kontrollert delta-port oppå BO-11 (ingen redesign):

@@ -43,23 +43,31 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
 - Kvalitet: 203/203 tester (Node 22), lint, typecheck, gitleaks rene. Full stack healthy.
 
 ## D-30 Voice (BO-12)
-- **Status: PARTIAL — IMPLEMENTED + SUITE-VERIFIED (264/264); LIVE STT/TTS gjenstår på host.**
+- **Status: PARTIAL — IMPLEMENTED + SUITE-VERIFIED (277/277); LIVE hardening-gater gjenstår på host.**
   Branch `claude/d30-voice`. Voice er transportlag over eksisterende Jarvis (samme mesh/
   tools/authority/minne): streaming Core-klient (P1A-SSE) → setningschunking → TTS-kø,
   full barge-in (stopp lyd + tøm kø + abort generering upstream, epoch-vern mot stale
   audio), eksplisitt tilstandsmaskin m/personvern (ingen skjult opptak, rå lyd
   persisteres aldri), STT-/TTS-feilbaner, full latenskjede-metrics, voice-helse i
   /status, cross-provider-override. OpenAI STT/TTS er P0-baseline (nøkkel alt live).
-- **Live-findings-fix (etter første ekte host-kjøring):** TTS/STT/no-tool/cross-provider/
-  barge-in PASS live, men kalender-voice feilet: ConversationEngine manglet BO-11-tool-broen.
-  Fikset: samtalebanen (tekst+voice) bruker nå `completeWithTools` m/mesh-verktøy og executor
-  bundet til samtalens resolved identity (aldri global owner); SSE sender trusted `tool_call`
-  (kun tool_name); foreldet "ingen verktøy"-prompt fjernet; voice-device seedes idempotent
-  (`jarvis-voice-live`); STT-akseptanse semantisk robust ("atten ganger sju" ≙ "18 x 7").
-- **Lukk live-porten på hosten (etter pull + rebuild):** `node --env-file=.env
-  --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
-  (strip-types feiler på Node 24-host; norsk TTS→STT-rundtur, kalender-voice-tool-flyt,
-  barge-in-abort, cross-provider; mikrofon trengs ikke). Evidens: docs/RUNTIME_GATES.md (BO-12).
+- **Live-findings-fix (host-runde 2):** TTS/STT/no-tool/cross-provider/barge-in PASS live,
+  kalender-voice feilet, fikset (ConversationEngine→completeWithTools-bro, per-identity
+  executor, trusted SSE tool_call, voice-device-seed, semantisk STT-akseptanse). Runde 2
+  bekreftet: kalender-voice PASS live (`tools=[read_calendar_today]`).
+- **FINAL HOST ACCEPTANCE HARDENING (host-runde 3, denne):** funn+fiks: `VoiceSession`
+  hadde INGEN klientdisconnect-håndtering → zombie-generering ved WS-frakobling midt i
+  tur; ny `disconnect()` wiret til `ws.on("close")`. NYTT: ekte lyd-barge-in-akseptanse
+  (`barge_in_audio_stop_ms`, ≤250ms-gate) + stale-audio-settlingsjekk i bo12-voice-live.ts;
+  10-tur host-soak (`bo12-voice-soak.ts`); full latenskjede-rapportering (stt/model_ttft/
+  tool/tts_ttfa/e2e/total) per tur. **Q-18 REPRODUSERT (BLOCKER, se OPEN_QUESTIONS.md):**
+  ToolGateway-dedupe rammer også A-klasse read - andre identisk kalenderspørsmål i samme
+  voice-sesjon gir `output:null`. Foreslått minste fix dokumentert, IKKE implementert
+  (egen BO kreves - utenfor denne rundens "ikke redesign ToolGateway"-grense).
+- **Lukk gjenstående live-porter på hosten (etter pull + rebuild):**
+  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
+  (nå inkl. ekte lyd-barge-in-seksjonen) og
+  `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts`
+  (10-tur soak). Evidens/detaljer: docs/RUNTIME_GATES.md (BO-12 + hardening-seksjonen).
 
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.

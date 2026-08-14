@@ -67,6 +67,8 @@ export interface TurnMetrics {
   t_tts_first_frame?: number;
   t_core_reply?: number;
   t_done?: number;
+  /** D-30 hardening §6: tidspunkt trusted tool-status ble varslet (tool_call_complete). */
+  t_tool_activity?: number;
   barge_in_ms?: number;
   /** §19 hovedmål: end-of-user-speech → første Jarvis-lyd. */
   end_of_speech_to_first_audio_ms?: number;
@@ -304,6 +306,9 @@ export class VoiceSession {
           chunker.push(event.text);
         } else if (event.type === "tool") {
           // §26: kun kort trusted status - aldri tool-payload/intern JSON i tale.
+          if (metrics.t_tool_activity === undefined) {
+            metrics.t_tool_activity = Date.now();
+          }
           this.events.onToolActivity?.(TOOL_ACTIVITY_TEXT[event.tool_name] ?? "Jobber med saken …");
         }
       },
@@ -413,6 +418,25 @@ export class VoiceSession {
     this.activeTurnAbort = null;
     this.setState("interrupted");
     this.setState("listening");
+  }
+
+  /**
+   * D-30 hardening §3D: klienten (WebSocket) koblet fra. Uten dette fortsetter
+   * en aktiv tur å generere/tale for en tilkobling som ikke lenger lytter -
+   * zombie-generering og bortkastet modell-/TTS-kost. Bumper epoch (all
+   * gjenværende lyd/eventer fra denne turen forkastes deterministisk, samme
+   * vern som barge-in) og aborterer modellgenereringen helt til provider-
+   * upstream (P1A-kjeden) - symmetrisk med bargeIn(), men uten ny tur/state.
+   */
+  disconnect(): void {
+    this.epoch += 1;
+    this.ttsQueue = [];
+    if (this.playback) {
+      this.playback.cancel();
+      this.playback = null;
+    }
+    this.activeTurnAbort?.abort();
+    this.activeTurnAbort = null;
   }
 
   private setState(state: VoiceState): void {
