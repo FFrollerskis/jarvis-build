@@ -9,6 +9,7 @@
 |---|---|
 | Q-01 | **Lukket 2026-08-12** → D-18: Masterplan v2.1 behandles som eneste tilgjengelige kildedokument; nye eksplisitte Tobias-beslutninger kan overstyre når de dokumenteres i CANONICAL_SPEC/DECISIONS |
 | Q-02 | **Lukket 2026-08-12** → D-18–D-23: A-01/A-02/A-04/A-05/A-06 bekreftet; A-03 erstattet av ny maskinvareplan (D-20) |
+| Q-18 | **Lukket 2026-08-14 (D-30 host failure fix)** → ToolGateway sin `tool_executions`-dedupe rammet A-klasse READs på tvers av brukerturer i samme session (§21/§19-formålet var kun C/D-mutasjoner). Fikset i `modules/tool-gateway/src/gateway.ts` (`dedupeApplies = capability_class !== "A"`): A-klasse reads utfører nå alltid friskt per brukertur; C/D database-dedupe uendret. In-memory beskyttelse mot at MODELLEN ber om samme kall flere ganger i ÉN samtaletur (ModelGateway.completeWithTools sin `executed`-cache) var ALDRI berørt av bugen og er uendret. Bevist: `modules/tool-gateway/test/q18-read-dedupe.test.ts` (fersk utførelse tur 2 + write-dedupe uendret) og `modules/tool-gateway/test/same-turn-tool-dedupe.test.ts` (maks 1 faktisk utførelse per tur, uansett om modellen ber om samme kall i samme eller påfølgende runde). |
 
 ## Trenger svar fra Tobias
 
@@ -29,7 +30,6 @@
 | Q-10 | Trenger relasjonslaget egen grafdatabase? | Etter fase 4-eval | Flerhopp-spørsmål i minne-evalen; bytt kun ved målt svikt |
 | Q-11 | Lokal LLM-økonomi: lønner GPU-server seg? | Fase 10 | 30–90 dagers kostnads-/bruksmåling |
 | Q-12 | Satellitt-maskinvare for rom (HA Voice PE, egen build, annet)? | Fase 5/9 | Prototype + benchmark |
-| Q-18 | **BLOCKER (reprodusert deterministisk, D-30 hardening-runde 3).** ToolGateway-idempotensdedupe gjelder også A-klasse READ-verktøy (idempotent_external=true, ingen preflight_action): gjentatt identisk lesekall i SAMME session_id (voice-sesjoner gjenopptas på tvers av taleturer via `SessionService.resumeOrCreate`) returnerer `deduplicated:true` med `output:null` - modellen får en stille tom "suksess" i stedet for ekte data ved andre gangs "hva står på kalenderen" i samme sesjon. Bevis: `modules/tool-gateway/test/q18-read-dedupe.test.ts` (2 tester, embedded PG). **Foreslått minste fix (IKKE implementert - krever egen godkjent BO, "ikke redesign ToolGateway" var eksplisitt grense for hardening-runden):** hopp over `tool_executions`-dedupe-oppslaget når `capability_class === "A"` i `ToolGateway.execute()` (modules/tool-gateway/src/gateway.ts, rundt linje 209) - rene lesninger har intet side-effekt å beskytte mot duplisering; dedupe-formålet (§21/§19 i BO-11) gjelder eksplisitt C/D-mutasjoner og skal IKKE røres. | Neste hardening-runde (egen BO) | Målrettet fix + regresjonstest som viser C/D-dedupe uendret; live-observerbar sjekk i `bo12-voice-soak.ts` turn 2 vs. 6/10 (samme kalenderspørsmål) |
 
 ## Parkert (bevisst utsatt)
 

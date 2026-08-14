@@ -43,7 +43,7 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
 - Kvalitet: 203/203 tester (Node 22), lint, typecheck, gitleaks rene. Full stack healthy.
 
 ## D-30 Voice (BO-12)
-- **Status: PARTIAL — IMPLEMENTED + SUITE-VERIFIED (277/277); LIVE hardening-gater gjenstår på host.**
+- **Status: PARTIAL → READY_FOR_HOST_RETEST — IMPLEMENTED + SUITE-VERIFIED (279/279); host-runde 3s tre feil undersøkt og fikset.**
   Branch `claude/d30-voice`. Voice er transportlag over eksisterende Jarvis (samme mesh/
   tools/authority/minne): streaming Core-klient (P1A-SSE) → setningschunking → TTS-kø,
   full barge-in (stopp lyd + tøm kø + abort generering upstream, epoch-vern mot stale
@@ -54,20 +54,39 @@ D-30 Voice, D-36 Apple, HA-RUNTIME.
   kalender-voice feilet, fikset (ConversationEngine→completeWithTools-bro, per-identity
   executor, trusted SSE tool_call, voice-device-seed, semantisk STT-akseptanse). Runde 2
   bekreftet: kalender-voice PASS live (`tools=[read_calendar_today]`).
-- **FINAL HOST ACCEPTANCE HARDENING (host-runde 3, denne):** funn+fiks: `VoiceSession`
+- **FINAL HOST ACCEPTANCE HARDENING (host-runde 3):** funn+fiks: `VoiceSession`
   hadde INGEN klientdisconnect-håndtering → zombie-generering ved WS-frakobling midt i
-  tur; ny `disconnect()` wiret til `ws.on("close")`. NYTT: ekte lyd-barge-in-akseptanse
+  tur; ny `disconnect()` wiret til `ws.on("close")`. Ekte lyd-barge-in-akseptanse
   (`barge_in_audio_stop_ms`, ≤250ms-gate) + stale-audio-settlingsjekk i bo12-voice-live.ts;
-  10-tur host-soak (`bo12-voice-soak.ts`); full latenskjede-rapportering (stt/model_ttft/
-  tool/tts_ttfa/e2e/total) per tur. **Q-18 REPRODUSERT (BLOCKER, se OPEN_QUESTIONS.md):**
-  ToolGateway-dedupe rammer også A-klasse read - andre identisk kalenderspørsmål i samme
-  voice-sesjon gir `output:null`. Foreslått minste fix dokumentert, IKKE implementert
-  (egen BO kreves - utenfor denne rundens "ikke redesign ToolGateway"-grense).
+  10-tur host-soak (`bo12-voice-soak.ts`); full latenskjede-rapportering per tur.
+  Q-18 reprodusert (BLOCKER).
+- **HOST FAILURE FIX (host-runde 4, denne):** host kjørte de nye scriptene - tre feil
+  funnet, alle undersøkt til rot (ikke gjettet) og fikset:
+  - **§32 (legacy LLM-abort-test) feilet** ("forventet AbortError, fikk suksess") -
+    root cause = race (kategori B: modellen rakk fullføre før 5. token+abort);
+    mekanismen selv er uendret bevist korrekt (suite, treg adapter). Fiks: abort
+    trigges nå på FØRSTE token + lengre (500+ ord) tekst - assertion uendret.
+  - **Soak turn 8 timet ut** - root cause = harness-deadlock (ventet på turn 8s
+    EGNE metrics FØR turn 9s barge-in-lyd ble sendt), IKKE sesjonskorrupsjon.
+    Fikset: turn 8+9 kjøres nå konkurrerende (vent kun til "speaking", så send
+    barge-in). Ny eksplisitt "korrekt cancelled-turn"-definisjon (cancelled +
+    t_speech_start + t_tts_first_frame), speilet i suite-regresjon.
+  - **`tools=[read_calendar_today,read_calendar_today]` avgjort via kjørt test:**
+    kategori (A) - 2 SSE-events, KUN 1 faktisk ToolGateway-kall (in-memory
+    per-tur-cache i ModelGateway.completeWithTools fungerte allerede korrekt).
+    16s-TTFT skyldes en EKSTRA MODELLRUNDE, ikke dobbel verktøyutførelse.
+  - **Q-18 FIKSET:** `tool_executions`-dedupe gjelder nå kun C/D
+    (`capability_class !== "A"` i gateway.ts). A-class reads utfører friskt per
+    brukertur; write/mutation-dedupe uendret (regresjonstestet). In-memory
+    per-tur-beskyttelse (samme tur, samme kall → maks 1 utførelse) uendret,
+    testet separat fra database-/sesjonsnivå-fiksen.
+  - 279/279 tester, lint/typecheck/gitleaks rene. Ingen regresjon.
 - **Lukk gjenstående live-porter på hosten (etter pull + rebuild):**
   `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-live.ts`
-  (nå inkl. ekte lyd-barge-in-seksjonen) og
+  (§32 skal nå passere deterministisk, §1/§2 ekte lyd-barge-in skal fullføre) og
   `node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts`
-  (10-tur soak). Evidens/detaljer: docs/RUNTIME_GATES.md (BO-12 + hardening-seksjonen).
+  (10/10 skal fullføre, turn 2/6/10-kalender skal alle gi ekte svar).
+  Evidens/detaljer: docs/RUNTIME_GATES.md (BO-12 + begge hardening-seksjonene).
 
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.

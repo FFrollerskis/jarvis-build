@@ -310,6 +310,21 @@ describe("Barge-in (§15-§17): stopp lyd, tøm kø, abort generering, aldri sta
     expect(ev.metrics.some((m) => m.cancelled)).toBe(true);
     // Ny tur ga svar:
     expect(ev.replies.at(-1)?.reply).toBe("Nytt kort svar.");
+
+    // D-30 HOST FAILURE FIX §3/§7.F: eksplisitt definisjon av "korrekt
+    // cancelled-turn metrics" (brukt av bo12-voice-soak.ts sin
+    // isCorrectlyCancelled()) - IKKE bare cancelled=true, men bevis for at
+    // turen faktisk STARTET (t_speech_start) OG hadde EKTE lyd i gang
+    // (t_tts_first_frame) FØR den ble kuttet - ellers er det ikke et bevis på
+    // "avbrutt midt i aktiv avspilling".
+    expect(ev.metrics).toHaveLength(2); // §7.E: nøyaktig to distinkte turer, ingen deadlock/duplisering
+    const cancelledTurn = ev.metrics[0] as TurnMetrics;
+    expect(cancelledTurn.cancelled).toBe(true);
+    expect(cancelledTurn.t_speech_start).toBeGreaterThan(0);
+    expect(cancelledTurn.t_tts_first_frame).toBeGreaterThan(0);
+    // §7.G: turen ETTER kansellering (den nye, "Nytt kort svar") er IKKE selv kansellert:
+    const nextTurn = ev.metrics[1] as TurnMetrics;
+    expect(nextTurn.cancelled).toBeFalsy();
   });
 });
 

@@ -1,13 +1,23 @@
-// D-30 FINAL HOST ACCEPTANCE HARDENING §4/§6: 10-turn soak over ÉN
-// sammenhengende VoiceSession/runtime-sesjon (samme forutsetninger som
-// bo12-voice-live.ts). Kjøres på hosten:
+// D-30 FINAL HOST ACCEPTANCE HARDENING §4/§6 (+ D-30 HOST FAILURE FIX §3/§4):
+// 10-turn soak over ÉN sammenhengende VoiceSession/runtime-sesjon (samme
+// forutsetninger som bo12-voice-live.ts). Kjøres på hosten:
 //   node --env-file=.env --experimental-transform-types apps/voice-gateway/scripts/bo12-voice-soak.ts
 // Blander no-tool/kalender-verktøy/normal samtale/tvunget OpenAI/tvunget
 // Anthropic/kansellering (ekte barge-in). Turn 6 og 10 gjentar turn 2s
 // kalenderspørsmål med VILJE - dette er den live-observerbare Q-18-sjekken
-// (§5): samme spørsmål i samme sesjon kan gi tomt/dedupert svar (se
-// OPEN_QUESTIONS.md Q-18 for det deterministiske beviset). Printer aldri
-// secrets - kun statuser, transkript og latenser.
+// (§5, fikset i modules/tool-gateway/src/gateway.ts - se
+// q18-read-dedupe.test.ts). Printer aldri secrets - kun statuser, transkript
+// og latenser.
+//
+// HOST-FUNN (forrige runde) + FIKS: turn 8 timet ut fordi harnesset AWAITET
+// turn 8 sine metrics FØR turn 9 (barge-in-lyden) i det hele tatt ble sendt -
+// et sekvensielt await-harness-race/deadlock, IKKE sesjons-korrupsjon i
+// VoiceSession selv (turn 8 er per design MENT å bli avbrutt av turn 9, så
+// den skal ALDRI fullføre naturlig). Turn 8+9 er derfor nå ETT konkurrerende
+// steg: turn 8 sin lyd sendes, vi venter KUN til avspilling faktisk har
+// startet (state==="speaking" - bevis på at generation er aktiv), SÅ sendes
+// turn 9 som ekte barge-in-lyd, og TIL SLUTT ventes det på BEGGE turers
+// metrics (turn 8 cancelled + turn 9 fullført).
 import { OpenAiStt } from "../src/stt.ts";
 import { OpenAiTts } from "../src/tts.ts";
 import { HttpCoreClient } from "../src/server.ts";
@@ -49,6 +59,18 @@ function latencyLine(m: TurnMetrics): string {
   );
 }
 
+/**
+ * D-30 HOST FAILURE FIX §3: eksplisitt definisjon av "korrekt cancelled-turn
+ * metrics" - en tur avbrutt av ekte barge-in skal IKKE bare ha cancelled=true,
+ * men også bevise at den faktisk KOM I GANG (t_speech_start) og at EKTE lyd
+ * FAKTISK begynte å spille FØR den ble kuttet (t_tts_first_frame) - ellers er
+ * det ikke et bevis på "avbrutt midt i aktiv avspilling", bare en tur som
+ * aldri rakk å starte.
+ */
+function isCorrectlyCancelled(m: TurnMetrics): boolean {
+  return m.cancelled === true && m.t_speech_start !== undefined && m.t_tts_first_frame !== undefined;
+}
+
 interface TurnSpec {
   label: string;
   text: string;
@@ -63,12 +85,15 @@ const TURNS: TurnSpec[] = [
   { label: "5 forced-anthropic", text: "Si hei på norsk med én setning.", provider: "anthropic" },
   { label: "6 calendar-repeat (Q-18 live-observasjon)", text: "Hva står på kalenderen min i dag?" },
   { label: "7 no-tool", text: "Hva er hovedstaden i Norge?" },
-  { label: "8 long (avbrytes av turn 9)", text: "Fortell en lang og detaljert historie om havet, minst to hundre ord." },
+  {
+    label: "8 long (avbrytes av turn 9)",
+    text: "Fortell en svært lang og detaljert historie om havet, minst fem hundre ord, med flere avsnitt."
+  },
   { label: "9 cancellation (barge-in mot turn 8)", text: "Stopp, si i stedet 'klar igjen' på norsk." },
   { label: "10 calendar (skal fungere normalt - sesjon ikke korrupt)", text: "Hva står på kalenderen min i dag?" }
 ];
 
-const metricsByTurn: Array<TurnMetrics | undefined> = [];
+const metricsByTurn: TurnMetrics[] = [];
 const toolsByTurn: string[][] = [];
 const errorsByTurn: string[][] = [];
 const sessionIds = new Set<string>();
@@ -103,55 +128,125 @@ const session = new VoiceSession(sessionIdentity, core, stt, tts, {
   onToolActivity: (activity) => currentTurnTools.push(activity)
 });
 
-console.log(`== D-30 §4 10-TURN SOAK (ÉN sesjon, ${TURNS.length} turer) ==`);
-for (let i = 0; i < TURNS.length; i++) {
-  const spec = TURNS[i] as TurnSpec;
-  const before = metricsByTurn.length;
+async function waitFor(predicate: () => boolean, timeoutMs: number, label: string): Promise<void> {
+  const started = Date.now();
+  while (!predicate() && Date.now() - started < timeoutMs) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (!predicate()) {
+    throw new Error(`FEIL §4: timeout mens ventet på: ${label}`);
+  }
+}
+
+function setProviderFor(spec: TurnSpec): void {
   if (spec.provider !== undefined) {
     sessionIdentity.provider = spec.provider;
   } else {
     delete sessionIdentity.provider;
   }
-  const audio = await collect(tts.synthesize(spec.text));
-  const t = Date.now();
-  session.pushAudio(audio, t);
-  session.pushAudio(Buffer.alloc(640), t + 400);
+}
 
-  // Turn 9 er ment å avbryte turn 8 mens den fortsatt taler - vent til turn 8
-  // faktisk er i gang med avspilling FØR turn 9 sitt "brukertale" sendes inn.
-  if (i === 8) {
-    const waitStart = Date.now();
-    while (session.currentState() !== "speaking" && Date.now() - waitStart < 10_000) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-  }
-
-  const started = Date.now();
-  while (metricsByTurn.length <= before && Date.now() - started < 25_000) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  if (metricsByTurn.length <= before) {
-    sessionCorrupted = true;
-    console.log(`  [${i + 1}/10] ${spec.label}: TIMEOUT - ingen metrics mottatt (mulig sesjons-korrupsjon)`);
-    break;
-  }
-  const m = metricsByTurn[metricsByTurn.length - 1] as TurnMetrics;
-  const tools = toolsByTurn[toolsByTurn.length - 1] ?? [];
-  const errs = errorsByTurn[errorsByTurn.length - 1] ?? [];
-  // Duplicate-tool-i-samme-tur-sjekk (aldri to identiske verktøystatuser i én tur):
+function reportTurn(index: number, label: string): void {
+  const m = metricsByTurn[index] as TurnMetrics;
+  const tools = toolsByTurn[index] ?? [];
+  const errs = errorsByTurn[index] ?? [];
   if (new Set(tools).size < tools.length) {
     duplicateToolExecutions += tools.length - new Set(tools).size;
   }
   console.log(
-    `  [${i + 1}/10] ${spec.label}: cancelled=${m.cancelled ?? false} tool_activity=[${tools.join(",")}] ` +
+    `  [${index + 1}/10] ${label}: cancelled=${m.cancelled ?? false} tool_activity=[${tools.join(",")}] ` +
       `errors=[${errs.join(",")}] ${latencyLine(m)}`
   );
+}
+
+console.log(`== D-30 §4 10-TURN SOAK (ÉN sesjon, ${TURNS.length} turer) ==`);
+
+// Turer 1-7 (indeks 0-6): uavhengige, kjøres sekvensielt som før.
+for (let i = 0; i <= 6; i++) {
+  const spec = TURNS[i] as TurnSpec;
+  setProviderFor(spec);
+  const audio = await collect(tts.synthesize(spec.text));
+  const t = Date.now();
+  session.pushAudio(audio, t);
+  session.pushAudio(Buffer.alloc(640), t + 400);
+  try {
+    await waitFor(() => metricsByTurn.length > i, 25_000, spec.label);
+  } catch (err) {
+    sessionCorrupted = true;
+    console.log(`  [${i + 1}/10] ${spec.label}: ${(err as Error).message}`);
+    break;
+  }
+  reportTurn(i, spec.label);
+}
+
+// Turer 8+9 (indeks 7+8): KOBLET PAR - turn 9 er turn 8 sin barge-in. Sendes
+// konkurrerende, ikke sekvensielt (§3-fiksen).
+if (!sessionCorrupted) {
+  const spec8 = TURNS[7] as TurnSpec;
+  const spec9 = TURNS[8] as TurnSpec;
+  setProviderFor(spec8);
+  const audio8 = await collect(tts.synthesize(spec8.text));
+  const t8 = Date.now();
+  session.pushAudio(audio8, t8);
+  session.pushAudio(Buffer.alloc(640), t8 + 400);
+
+  try {
+    // Vent KUN til turn 8 faktisk taler (bevis: generation/TTS er aktiv) -
+    // IKKE til den fullfører (den skal aldri fullføre naturlig - se over).
+    await waitFor(() => session.currentState() === "speaking", 20_000, "turn 8 startet avspilling");
+
+    setProviderFor(spec9);
+    const audio9 = await collect(tts.synthesize(spec9.text));
+    const t9 = Date.now();
+    session.pushAudio(audio9, t9); // EKTE barge-in-lyd mens turn 8 fortsatt spiller
+    session.pushAudio(Buffer.alloc(640), t9 + 400);
+
+    // Nå venter vi på BEGGE turers metrics (turn 8 cancelled + turn 9 fullført):
+    await waitFor(() => metricsByTurn.length >= 9, 25_000, "turn 8 (cancelled) + turn 9 (fullført) metrics");
+  } catch (err) {
+    sessionCorrupted = true;
+    console.log(`  [8-9/10] ${(err as Error).message}`);
+  }
+
+  if (!sessionCorrupted) {
+    const m8 = metricsByTurn[7] as TurnMetrics;
+    reportTurn(7, spec8.label);
+    reportTurn(8, spec9.label);
+    if (!isCorrectlyCancelled(m8)) {
+      throw new Error(
+        `FEIL §3: turn 8 ble IKKE korrekt kansellert (cancelled=${m8.cancelled}, ` +
+          `t_speech_start=${m8.t_speech_start}, t_tts_first_frame=${m8.t_tts_first_frame}) - ` +
+          "forventet: startet OG hadde lyd i gang FØR barge-in kuttet den"
+      );
+    }
+    const m9 = metricsByTurn[8] as TurnMetrics;
+    if (m9.cancelled) {
+      throw new Error("FEIL §3: turn 9 (barge-in-turen selv) skal fullføre normalt, ikke være kansellert");
+    }
+  }
+}
+
+// Turn 10 (indeks 9): siste tur, skal fungere normalt (bevis: sesjonen er ikke korrupt).
+if (!sessionCorrupted) {
+  const spec = TURNS[9] as TurnSpec;
+  setProviderFor(spec);
+  const audio = await collect(tts.synthesize(spec.text));
+  const t = Date.now();
+  session.pushAudio(audio, t);
+  session.pushAudio(Buffer.alloc(640), t + 400);
+  try {
+    await waitFor(() => metricsByTurn.length > 9, 25_000, spec.label);
+    reportTurn(9, spec.label);
+  } catch (err) {
+    sessionCorrupted = true;
+    console.log(`  [10/10] ${spec.label}: ${(err as Error).message}`);
+  }
 }
 
 console.log(`\n== SOAK-OPPSUMMERING ==`);
 console.log(`turer_fullført=${metricsByTurn.length}/${TURNS.length}`);
 console.log(`session_ids_observert=${[...sessionIds].join(",")} (skal være NØYAKTIG 1 - sesjonskontinuitet)`);
-console.log(`duplicate_tool_executions=${duplicateToolExecutions} (skal være 0)`);
+console.log(`duplicate_tool_executions=${duplicateToolExecutions} (skal være 0 - se q18-fix/same-turn-dedupe-testene for hva tallet betyr)`);
 console.log(`session_corrupted=${sessionCorrupted}`);
 
 if (metricsByTurn.length < TURNS.length) {
@@ -161,18 +256,24 @@ if (sessionIds.size !== 1) {
   throw new Error(`FEIL §4: forventet nøyaktig 1 session_id (sesjonskontinuitet), fikk ${sessionIds.size}`);
 }
 if (duplicateToolExecutions > 0) {
-  throw new Error(`FEIL §4: ${duplicateToolExecutions} duplikate verktøyutførelser observert i én tur`);
+  throw new Error(`FEIL §4: ${duplicateToolExecutions} duplikate verktøystatuser observert i én tur`);
 }
 if (sessionCorrupted) {
-  throw new Error("FEIL §4: sesjonen ble korrupt underveis");
+  throw new Error("FEIL §4: sesjonen ble korrupt underveis (se logg over for hvilket steg)");
+}
+if (!isCorrectlyCancelled(metricsByTurn[7] as TurnMetrics)) {
+  throw new Error("FEIL §3: turn 8 sin cancelled-status validerte ikke ved sluttsjekk");
 }
 const last = metricsByTurn[9] as TurnMetrics;
 if (last.cancelled) {
   throw new Error("FEIL §4: turn 10 (siste) skal IKKE være kansellert - sesjonen skal fungere normalt til slutt");
 }
-console.log("§4 PASS: 10/10 turer fullført, én sesjon, ingen duplikate verktøyutførelser, turn 10 normal.");
 console.log(
-  "MERK Q-18 (§5): sammenlign svarteksten fra turn 2, 6 og 10 manuelt over - identisk kalenderspørsmål i " +
-    "samme sesjon. Hvis turn 6/10 svarer generisk/tomt der turn 2 ga et faktisk kalendersvar, er dette den " +
-    "LIVE-observerbare siden av Q-18 (deterministisk bevist i modules/tool-gateway/test/q18-read-dedupe.test.ts)."
+  "§4 PASS: 10/10 turer fullført, én sesjon, ingen duplikate verktøystatuser, turn 8 korrekt kansellert " +
+    "(startet+hadde lyd i gang), turn 9 fullførte normalt, turn 10 normal."
+);
+console.log(
+  "MERK Q-18 (§5, FIKSET): sammenlign svarteksten fra turn 2, 6 og 10 manuelt over - identisk kalenderspørsmål i " +
+    "samme sesjon skal nå ALLE gi et ekte kalendersvar (ikke tomt/generisk) - se " +
+    "modules/tool-gateway/test/q18-read-dedupe.test.ts for det deterministiske beviset på fiksen."
 );

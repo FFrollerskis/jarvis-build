@@ -207,8 +207,18 @@ export class ToolGateway {
       }
     }
 
+    // Q-18 (D-30 host-akseptanse): tool_executions-dedupe finnes for å hindre
+    // dobbel SIDE-EFFEKT på C/D-mutasjoner (§21/§19 i BO-11) - A-klasse READs
+    // har ingen side-effekt å beskytte mot duplisering, og data kan ha endret
+    // seg mellom to spørringer (f.eks. to "hva står på kalenderen"-spørsmål i
+    // samme langtlevende voice-session). Dedupe på database-/session-nivå
+    // gjelder derfor KUN C/D. Beskyttelse mot at MODELLEN utfører samme
+    // semantiske kall flere ganger i ÉN modellrunde/samtaletur er uendret og
+    // håndheves separat (in-memory `executed`-cache i
+    // ModelGateway.completeWithTools, modules/model-gateway/src/model-gateway.ts).
+    const dedupeApplies = definition.capability_class !== "A";
     return withTenantTransaction(this.pool, request.identity.tenant_id, async (client) => {
-      if (request.idempotency_key) {
+      if (dedupeApplies && request.idempotency_key) {
         const prior = await client.query(
           "SELECT external_id, status FROM tool_executions WHERE idempotency_key = $1",
           [request.idempotency_key]
@@ -256,7 +266,7 @@ export class ToolGateway {
           afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under
         }
       }
-      if (request.idempotency_key) {
+      if (dedupeApplies && request.idempotency_key) {
         await client.query(
           `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state)
            VALUES ($1, $2, $3, $4, $5, 'succeeded', $6, $7) ON CONFLICT DO NOTHING`,

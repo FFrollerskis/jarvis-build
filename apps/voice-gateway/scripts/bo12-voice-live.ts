@@ -109,26 +109,59 @@ await voiceTurn("Si hei på norsk med én setning.", "openai");
 await voiceTurn("Si hei på norsk med én setning.", "anthropic");
 
 // ===== §32: barge-in - abort mot Core midt i langt streamet svar =====
+// D-30 HOST FAILURE FIX §1: host-funn "FEIL §32: forventet AbortError, fikk
+// suksess". Root cause (undersøkt, ikke gjettet): mekanismen selv er BEVIST
+// korrekt i suiten (fase3-e2e.test.ts "SSE klient-disconnect → upstream
+// abort" - ekte HTTP-server, samme res.on('close')→AbortController-kjede -
+// og d30-foundation.test.ts sitt barge-in-scenario), begge med en BEVISST
+// treg adapter (ms-forsinkelse per token) som gir god margin FØR abort()
+// kalles. Live mot EKTE providere er margin-vinduet mye trangere: abort ble
+// trigget FØRST etter 5 tokens, og for en kort/rask modellgenerering kan
+// hele svaret alt være ferdig sendt (og bufret lokalt av fetch/undici) innen
+// den femte token-hendelsen er prosessert og abort() faktisk rekker å kutte
+// en lesning som fortsatt står og venter - da er det ingenting å kansellere,
+// og streamen fullfører normalt (suksess). Dette er kategori B (race), ikke
+// en ødelagt kanselleringsmekanisme - IKKE fjernet assertion, KUN redusert
+// race-vinduet: abort trigges på FØRSTE token (ikke femte) og svaret som bes
+// om er vesentlig lengre (mer albuerom FØR modellen kan rekke å fullføre).
 console.log("== §32 BARGE-IN (abort under generering) ==");
 {
   const core = new HttpCoreClient(API_URL);
   const controller = new AbortController();
   let tokens = 0;
+  const tStart = Date.now();
   const err = await core
-    .chatStream(identity, "Fortell en lang historie om fjell, minst 200 ord.", (e) => {
-      if (e.type === "token") {
-        tokens += 1;
-        if (tokens >= 5) {
-          controller.abort(); // bruker "begynner å snakke"
+    .chatStream(
+      identity,
+      "Fortell en svært lang og detaljert historie om fjell i Norge, minst fem hundre ord, " +
+        "med flere avsnitt, mange navngitte steder og mye beskrivelse av vær og landskap.",
+      (e) => {
+        if (e.type === "token") {
+          tokens += 1;
+          if (tokens === 1) {
+            controller.abort(); // bruker "begynner å snakke" - trigges umiddelbart ved første tegn på liv
+          }
         }
-      }
-    }, controller.signal)
+      },
+      controller.signal
+    )
     .then(() => null)
     .catch((e: unknown) => e);
+  const elapsedMs = Date.now() - tStart;
   if ((err as Error | null)?.name !== "AbortError") {
-    throw new Error(`FEIL §32: forventet AbortError, fikk ${(err as Error | null)?.name ?? "suksess"}`);
+    // Diagnostikk for å skille kategori A (ekte brudd) fra B (race): mange
+    // tokens/lang elapsed antyder at HELE svaret rakk å fullføre før abort()
+    // fikk noe å kansellere - det er IKKE et bevis på ødelagt kansellering.
+    throw new Error(
+      `FEIL §32: forventet AbortError, fikk ${(err as Error | null)?.name ?? "suksess"} ` +
+        `(tokens_mottatt=${tokens}, elapsed=${elapsedMs}ms - hvis dette er lite/raskt: mistenk race ` +
+        `(kategori B, se kommentar over), IKKE en ødelagt kanselleringsmekanisme (kategori A))`
+    );
   }
-  console.log(`  abortert etter ${tokens} tokens - generering kansellert upstream (P1A-kjeden).`);
+  if (tokens < 1) {
+    throw new Error("FEIL §32: abort ble trigget FØR generering faktisk hadde startet (0 tokens mottatt) - ugyldig test");
+  }
+  console.log(`  abortert etter ${tokens} token(er), ${elapsedMs}ms - generering kansellert upstream (P1A-kjeden).`);
   // Neste tur virker (ingen zombie):
   await voiceTurn("Si 'klar igjen' på norsk.");
   console.log("§32 PASS: barge-in-abort + ren neste tur.");
