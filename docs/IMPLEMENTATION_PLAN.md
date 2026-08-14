@@ -408,35 +408,52 @@ meeting-transcription, ikke bygget ennå — P1+); ≥5-kilde-akseptansekriterie
 med 1–2 kilder, skalering til fem er en egen, senere port). **UA-2 P0 er derfor et forslag til
 FØRSTE byggbare skive, ikke hele UA-2** — se under.
 
-### UA-2 P0 — forslag til første byggbare skive (venter på eiers BYGGEORDRE/godkjenning)
+### UA-2 P0 — Knowledge Ingestion Foundation = SUITE-VERIFIED (2026-08-14)
 
-**Formål:** Bevise `KnowledgeSourceAdapter`-kontrakten og retrieval-fundamentet (FTS+vector, kilde/
-ferskhet/tillit-metadata, tombstone-sletting, tenant/memory-space-isolasjon) med kilder som faktisk kan
-verifiseres i nåværende dev-/host-miljø — uten å vente på nye OAuth-scopes eller lokal
-Obsidian/Pieces-installasjon.
+**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container uten
+Docker/GitHub-credentials - se RUNTIME_GATES.md for full evidens/gap-liste). Godkjent av Tobias som
+første byggbare UA-2-skive; bygget i `modules/knowledge` (`@jarvis/knowledge`).
 
-**Foreslåtte P0-kilder:**
-1. **GitHub** (utvider eksisterende `GithubTransport`/`read_issues` i `modules/tool-gateway`) — issues +
-   README/dokumentfiler i konfigurert repo, allerede autentisert og live-testbar.
-2. **Lokale filer/NAS** (les-only i P0) — mappe(r) konfigurert via env (samme mønster som
-   `JARVIS_WHISPER_BIN` o.l.), ingen ny credential-type.
+**Bygget:**
+1. **Kilde-uavhengig `KnowledgeSource`-kontrakt** (`source.ts`): `KnowledgeRecord` med
+   source_type/source_instance_id/external_id/canonical_uri/title/content/content_type/content_hash/
+   modified_at/metadata - ingen credentials i kontrakten. Fremtidige kilder (Obsidian/Pieces/Drive/
+   e-post/møter) kan implementeres uten redesign.
+2. **`FilesystemKnowledgeSource`** - generell (IKKE NAS-spesifikk domenelogikk), allowlistet root,
+   symlink-escape og path-traversal strukturelt umulig (realpath-verifisering før hver fil leses),
+   tekstformater (.md/.txt/.json/.yaml/.ts/.js/.py/.sql/.html/.css).
+3. **`GithubKnowledgeSource`** - repo-metadata (ny `read_repo_meta`-action, samme PAT/scope som
+   `read_issues`) + issues, via EKSISTERENDE `ToolGateway` (samme policy/audit/credential-vei som
+   `daily-brief.ts`). Repo-FIL-innhold er IKKE bygget (dokumentert P1-utvidelse - transporten støtter
+   det ikke uten en større connector-endring).
+4. **`KnowledgeSyncService`** - idempotent sync (scanned/created/updated/unchanged/tombstoned/
+   reactivated/failed-rapport), canonical identity + content_hash-dedupe, tombstone ved forsvunnet
+   kilde (myk sletting - aldri hard-delete), deterministisk reaktivering ved gjenoppdukking, INGEN
+   re-embedding ved uendret innhold.
+5. **`KnowledgeRetriever`** - FTS + vector hybrid (samme pgvector/`cosine_sim`-fundament som
+   `MemoryRetriever`, D-28), tombstonede dokumenter alltid filtrert bort, full provenance på hvert
+   resultat.
+6. **Storage:** migrasjon `017_knowledge.sql` - `knowledge_documents`/`knowledge_embeddings`, SAMME
+   RLS-mønster som `memory_items` (tenant_id OG memory_space_id håndhevet i databasen), betinget
+   pgvector-konvertering (samme mønster som D-28).
+7. **DPIA/data-governance-notat:** `docs/UA2_KNOWLEDGE_DPIA.md`.
 
-**Foreslåtte P0-akseptansekriterier (mindre, konkret utsnitt av full-scope-listen over):**
-1. Begge P0-kilder søkbare i samme retrieval-spørring (FTS+vector), med kilde-pointer/ferskhet/tillit
-   på hvert treff.
-2. Slettet/endret fil eller lukket/slettet issue → gammel indeksert versjon tombstones/oppdateres ved
-   neste sync, aldri stille foreldet.
-3. Cross-tenant/cross-memory-space-isolasjon bevist med samme RLS-mønster og suite-disiplin som UA-0
-   (embedded PG, ekte migrasjoner, testbevist lekkasje=0).
-4. DPIA/processing-inventory-notat for de to nye datakategoriene (GitHub-innhold, lokale filer) —
-   oppdateres FØR P0 regnes ferdig, ikke etterpå.
-5. Ingen regresjon i eksisterende suite (UA-0/UA-1/D-30).
+**Suite-verifisert (294/294 - se kvalitetsrapport i RUNTIME_GATES.md):** hele
+livssyklusen (ingest→uendret resync→endring→sletting→reaktivering) mot ekte embedded Postgres + ekte
+filsystem-I/O; tenant-isolasjon; memory-space-isolasjon; filsystem-allowlist/traversal/symlink-escape;
+GitHub-kilde (fake transport - ingen live GitHub-credential i byggemiljøet); FTS-treff; vektor-likhet;
+hybrid-rangering med provenance; ingen re-embedding ved uendret innhold.
 
-**Bygges IKKE i P0:** skriving tilbake til kildene (read-only i P0), Knowledge Graph, Obsidian/Pieces/
-Drive/møtetranskripsjon (se over), UI for kunnskapssøk utover eksisterende `/chat`-grensesnitt.
+**IKKE host/live-verifisert (§13 - krever Docker/ekte GitHub-PAT/ekte NAS-mount på Tobias sin host):**
+faktisk NAS-mount som root, ekte GitHub-repo-sync med reell PAT, ende-til-ende-demo på hosten
+(ingest→query→endre→resync→se ny versjon→slett→resync→se borte).
 
-*Dette er et FORSLAG til førsteskive — endelig scope/rekkefølge/BO-nummer besluttes av Tobias før
-applikasjonskode skrives, per fase-portregelen i CLAUDE.md.*
+**Bygges IKKE i P0 (uendret fra forslaget):** skriving tilbake til kildene (read-only), Knowledge
+Graph, Obsidian/Pieces/Drive/møtetranskripsjon, OCR/vision, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesarbeid, UI for kunnskapssøk utover eksisterende `/chat`.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-20 (kun myk sletting, ingen GDPR-
+purge-vei ennå).
 
 ---
 

@@ -1,13 +1,14 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-14 · **Branch:** `claude/ua2-knowledge-spec` (spec/plan, PR opprettes; ingen kode)
+**Oppdatert:** 2026-08-14 · **Branch:** `claude/ua2-knowledge-spec` (PR #3, ikke merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
 **D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
-**UA-2 UNIVERSAL KNOWLEDGE LAYER: SPEC UTARBEIDET (denne økten), venter på eiers godkjenning av
-P0-skive før applikasjonskode** (se docs/IMPLEMENTATION_PLAN.md).
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = SUITE-VERIFIED (denne økten,
+IKKE host/live-verifisert)** - GitHub + filesystem/NAS-kilder, sync/dedupe/tombstones/provenance,
+FTS+vector-retrieval, tenant/space-isolasjon. Se docs/RUNTIME_GATES.md for full evidens.
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -135,16 +136,36 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   UAVHENGIG av dette - realtime-latensoptimalisering er bevisst utsatt til egen
   runde (ingen optimalisering gjort i denne lukkingen).
 
+## UA-2 P0 — Knowledge Ingestion Foundation (BYGGET denne økten)
+- **Status: SUITE-VERIFIED. IKKE host/live-verifisert** (sky-container: ingen Docker, ingen ekte
+  GitHub-PAT, ingen ekte NAS-mount). Godkjent P0-scope fra spec-runden bygget i ny pakke
+  `modules/knowledge` (`@jarvis/knowledge`):
+  - `KnowledgeSource`-kontrakt (kilde-uavhengig, ingen credentials i kontrakten).
+  - `FilesystemKnowledgeSource`: allowlistet root, `realpath()`-verifisert FØR lesing - traversal/
+    symlink-escape strukturelt umulig (ikke bare filtrert).
+  - `GithubKnowledgeSource`: via eksisterende ToolGateway/policy/audit (ny `read_repo_meta`-action,
+    samme PAT/scope som `read_issues` - ingen scope-utvidelse); repo-fil-innhold dokumentert som
+    neste skive (transporten støtter det ikke i dag).
+  - `KnowledgeSyncService`: idempotent sync-rapport, canonical identity + content_hash-dedupe,
+    tombstone ved forsvunnet kilde (myk sletting), deterministisk reaktivering.
+  - `KnowledgeRetriever`: FTS+vector hybrid på eksisterende pgvector-fundament (D-28), full
+    provenance, tombstonede dokumenter alltid ekskludert.
+  - Migrasjon `017_knowledge.sql`: samme RLS-mønster som `memory_items` (tenant+space i databasen).
+  - DPIA-notat: `docs/UA2_KNOWLEDGE_DPIA.md`. Åpent gap Q-20 (kun myk sletting, ingen GDPR-purge-vei
+    ennå) - dokumentert, ikke skjult.
+  - **Regresjon funnet+fikset:** `read_repo_meta` midt i `firstWaveTools()`-arrayet forskjøv
+    posisjonsindekser to eksisterende tester brukte - flyttet til slutten av arrayet.
+  - 294/294 tester (281+13 nye), lint/typecheck/gitleaks rene. Full evidens: docs/RUNTIME_GATES.md.
+- **Gjenstår for host/live-verifikasjon (§13 i BO-en, IKKE gjort her):** ekte NAS-mount, ekte
+  GitHub-repo-sync med reell PAT, full ende-til-ende-demo kjørt på Tobias sin host.
+
 ## Blokkeringer
 Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
+Ytelsesgjeld for voice-latens (Q-19) og UA-2 P0 host/live-verifikasjon er åpne, ikke-blokkerende.
 
 ## Neste oppgave
-Tobias valgte UA-2 Universal Knowledge Layer som neste kanoniske fase. Ingen kanonisk spec fantes
-(kun rå masterplan-tekst) - utarbeidet denne økten i docs/IMPLEMENTATION_PLAN.md: full UA-2-seksjon
-(masterplan-scope) + et konkret **UA-2 P0-forslag** (GitHub + lokale filer/NAS som første to kilder,
-FTS+vector-retrieval på eksisterende pgvector-fundament, tombstone-sletting, RLS-isolasjon, DPIA-notat
-- Knowledge Graph/Obsidian/Pieces/Drive/møtetranskripsjon utsatt til P1). **Avventer Tobias sin
-godkjenning av P0-scopet (eller justering) før noen applikasjonskode skrives**, per fase-portregelen.
-Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
+UA-2 P0 er bygget og suite-verifisert - avventer Tobias sin gjennomgang av PR #3 (ev. host/live-
+verifikasjon av GitHub/NAS-kildene, eller godkjenning av neste skive: repo-filinnhold, flere kilder,
+eller UA-2 P1 Knowledge Graph). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+D-10 STT-benchmark (Q-03), D-36
 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.

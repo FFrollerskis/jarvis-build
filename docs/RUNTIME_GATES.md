@@ -114,6 +114,82 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## UA-2 P0 — KNOWLEDGE INGESTION FOUNDATION (2026-08-14)
+
+**Status: SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container - ingen Docker, ingen
+ekte GitHub-PAT, ingen ekte NAS-mount tilgjengelig i byggemiljøet). Første byggbare UA-2-skive,
+godkjent av Tobias etter spec-runden (PR #3). Full arkitektur/rasjonale i
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) (UA-2 P0-seksjonen) og
+[UA2_KNOWLEDGE_DPIA.md](UA2_KNOWLEDGE_DPIA.md).
+
+**Arkitektur (`modules/knowledge`, ny pakke `@jarvis/knowledge`):**
+- `KnowledgeSource`-kontrakt (provider-uavhengig: source_type/source_instance_id/external_id/
+  canonical_uri/title/content/content_type/content_hash/modified_at/metadata - ingen credentials i
+  kontrakten).
+- `FilesystemKnowledgeSource`: allowlistet root, `realpath()`-verifisering FØR hver fil leses (§10) -
+  path-traversal og symlink-escape til utenfor roten er strukturelt umulig, ikke bare filtrert i
+  ettertid. Tekstformater (.md/.txt/.json/.yaml/.ts/.js/.py/.sql/.html/.css); binær/OCR/PDF eksplisitt
+  utenfor P0.
+- `GithubKnowledgeSource`: går via EKSISTERENDE `ToolGateway` (samme policy/audit/credential-vei som
+  `daily-brief.ts`) - ny `read_repo_meta`-action lagt til `GithubTransport` (samme PAT/scope som
+  `read_issues`, ingen scope-utvidelse). Repo-fil-innhold IKKE bygget (transporten støtter det ikke
+  uten en større connector-endring - dokumentert som neste skive, ikke stille utelatt).
+- `KnowledgeSyncService`: idempotent sync-rapport (scanned/created/updated/unchanged/tombstoned/
+  reactivated/failed). Canonical identity = `(tenant_id, source_type, source_instance_id, external_id)`
+  UNIQUE-constraint (migrasjon `017_knowledge.sql`); `content_hash` avgjør re-embedding (aldri ved
+  uendret innhold - bevist ved å telle faktiske `embed()`-kall i test). En FEILET listing (nettverk/
+  credential) tombstoner ALDRI eksisterende dokumenter - kun en vellykket listing kan tombstone det som
+  manglet i den.
+- `KnowledgeRetriever`: FTS + vector hybrid, samme `pgvector`/`cosine_sim`-fundament som
+  `MemoryRetriever` (D-28) - INGEN ny retrieval-stack. Tombstonede dokumenter alltid ekskludert.
+  Fullstendig provenance (kilde/instans/ekstern-id/URI/hash/versjon/sist-synket/endret) på hvert
+  resultat - aldri modellgenerert.
+- Storage: `knowledge_documents`/`knowledge_embeddings`, SAMME RLS-mønster som `memory_items`
+  (tenant_id OG memory_space_id håndhevet i databasen via RESTRICTIVE policies) - ingen ny database.
+
+**Suite-verifisert (embedded Postgres + ekte filsystem-I/O, `modules/knowledge/test/`):**
+- Hele livssyklusen i én sammenhengende test: ingest → uendret resync (no-op, ingen duplikat, ingen
+  re-embedding) → endret fil (samme canonical document, ny versjon/hash) → slettet fil (tombstone, IKKE
+  hard-delete) → tombstonet dokument usynlig i retrieval → gjenopprettet fil MED samme innhold
+  (deterministisk reaktivering).
+- En feilende kilde rapporteres `failed`, tombstoner ALDRI eksisterende data ved siden av.
+- Tenant-isolasjon: tenant A finner aldri tenant B sitt innhold (og omvendt), egen kunnskap fungerer
+  normalt.
+- Memory-space-isolasjon: søk i `personal` finner aldri `business`-space-innhold.
+- Filsystem-sikkerhet: allowlistede tekstformater; symlink UT av roten hoppes over (scanningen
+  fortsetter, stopper ikke på én ondsinnet lenke); symlink INNENFOR roten fungerer normalt; `../`
+  i konfigurert path er strukturelt ufarlig (`resolve()`-basert rot).
+- GitHub-kilde: repo-metadata + issues mappes korrekt til `KnowledgeRecord`; går gjennom ekte
+  `ToolGateway`-policy/audit; manglende registrert transport gir `unknown_tool`-DENY (håndtert som
+  "ingen record", ikke krasj); full sync + idempotent resync mot embedded PG.
+- Vektor-mekanisme: `cosine_sim`-verdier for nesten-identisk innhold ligger godt over retrieverens
+  0,4-terskel, godt over urelatert innholds similarity.
+- Hybrid ranking: relevant treff rangeres øverst med korrekt provenance; urelatert innhold dominerer
+  ikke toppen.
+- **Regresjon funnet og fikset underveis:** å sette inn `read_repo_meta` MIDT i `firstWaveTools()`-
+  arrayet forskjøv posisjonsindekser to eksisterende tester i `fase7-tools.test.ts` brukte
+  (`firstWaveTools({...})[4]`/`[7]`) - flyttet til SLUTTEN av arrayet i stedet; ingen testfil endret.
+
+**IKKE host/live-verifisert (§13 i BO - krever Tobias sin host):**
+- Ekte NAS-mount som allowlistet root (kun lokale tmp-mapper i byggemiljøet).
+- Ekte GitHub-repo-sync med reell `JARVIS_GITHUB_TOKEN` (kun `FakeTransport` i suiten).
+- Ende-til-ende-demoen fra §13 kjørt PÅ HOSTEN: ingest allowlistet mappe → spør om et konkret faktum →
+  få svar med korrekt provenance → endre filen → resync → se ny versjon → slett filen → resync → se at
+  slettet dokument IKKE returneres. (Denne sekvensen ER suite-verifisert i sky-containeren mot ekte
+  lokalt filsystem + ekte embedded Postgres - se testen over - men det er IKKE det samme som å kjøre
+  det på Tobias sin faktiske host/NAS/GitHub-repo.)
+
+**Bygges IKKE i P0 (uendret fra godkjent forslag):** Knowledge Graph/GraphRAG, Obsidian/Pieces/Google
+Drive/e-post/møtetranskripsjon-ingest, OCR/vision-ingest, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesoptimalisering, skriving tilbake til kildene.
+
+**Kjent åpent gap (Q-20, ikke skjult):** kun myk sletting (tombstone) - ingen hard-delete/GDPR-
+purge-vei ennå. Dokumentert i DPIA-notatet, ikke løst her (utenfor P0-scope).
+
+**Kvalitet:** 294/294 tester (281 baseline fra D-30-lukkingen + 13 nye: filsystem-source×5,
+github-source×2, knowledge-fundament×6), lint/typecheck/gitleaks rene. Ingen regresjon i UA-0/UA-1/D-30
+(identitet, sovereign authority, Tool Gateway, minne, RLS - alle eksisterende suiter uendret grønne).
+
 ## BO-12 — D-30 VOICE FOUNDATION (2026-08-14)
 
 **Status: D-30 P0 = VERIFIED (host-runde 6, se "D-30 FINAL CLOSURE — HOST VERIFIED" under for
