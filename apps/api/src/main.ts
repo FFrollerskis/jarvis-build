@@ -7,6 +7,8 @@ import {
   PgApprovalStore,
   PgDeviceRegistry,
   SessionService,
+  assertRuntimeCredentialsConfigured,
+  assertRuntimeRoleSafe,
   configFromEnv,
   createPool,
   runMigrations
@@ -33,11 +35,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     console.log(JSON.stringify({ msg: "ingen databasekonfig - starter i helse-modus" }));
     return undefined;
   }
+  // Q-21 (2026-08-15): fail-closed FØR tilkobling forsøkes - en manglende/feilkonfigurert
+  // JARVIS_DB_USER skal ALDRI stille falle tilbake til admin-tilkoblingen (root cause for
+  // host-blockeren var nettopp dette - api kjørte som Postgres-superbruker).
+  assertRuntimeCredentialsConfigured();
   const pool = createPool(configFromEnv());
   // Migrasjoner kjøres av admin-bruker i drift; her antas app-bruker å ha skjema fra før.
   if (process.env["JARVIS_DB_RUN_MIGRATIONS"] === "true") {
     await runMigrations(pool);
   }
+  // Q-21: appen skal ALDRI starte normalt med en superuser/BYPASSRLS-tilkobling - RLS
+  // er strukturelt umulig å håndheve for en slik rolle, uansett hvor korrekte policyene er.
+  await assertRuntimeRoleSafe(pool);
   // BO-09: Langfuse-sink når konfigurert (D-27), ellers JSONL - samme mesh-observability overalt.
   const trace = traceSinkFromEnv(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
   const killSwitch = new KillSwitch();
@@ -195,7 +204,12 @@ porter: se docs/RUNTIME_GATES.md`;
   return deps;
 }
 
-const deps = await buildDeps();
+const deps = await buildDeps().catch((err: unknown) => {
+  // Q-21: fail-closed - en usikker DB-rolle skal stoppe oppstart tydelig, aldri
+  // starte videre "på lavere tillit" med en stille degradert sikkerhetsmodell.
+  console.error(JSON.stringify({ msg: "jarvis-api startup_failed", error: (err as Error).message }));
+  process.exit(1);
+});
 const server = createApiServer(deps);
 server.listen(port, () => {
   console.log(JSON.stringify({ msg: "jarvis-api listening", port, db: Boolean(deps) }));

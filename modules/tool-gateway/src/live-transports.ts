@@ -95,6 +95,21 @@ export class GithubTransport implements ToolTransport {
       const items = (await response.json()) as Array<{ number: number; title: string; updated_at: string; pull_request?: unknown }>;
       return { data: { issues: items.map((i) => ({ id: String(i.number), title: i.title, at: i.updated_at, is_pr: String(Boolean(i.pull_request)), ci_failing: "false" })) } };
     }
+    // UA-2 P0 §3: repo-metadata for kunnskaps-ingestion - samme PAT/scope som
+    // read_issues (ingen ny credential-type), ett ekstra read-only GET-kall.
+    if (action === "read_repo_meta") {
+      const response = await fetch(`https://api.github.com/repos/${String(parameters["repo"])}`, { headers: auth });
+      if (!response.ok) throw new Error(`github_error_${response.status}`);
+      const repo = (await response.json()) as { full_name: string; description: string | null; updated_at: string; default_branch: string };
+      return {
+        data: {
+          full_name: repo.full_name,
+          description: repo.description ?? "",
+          updated_at: repo.updated_at,
+          default_branch: repo.default_branch
+        }
+      };
+    }
     throw new Error(`github_unsupported_action_${action}`);
   }
 }

@@ -334,6 +334,129 @@ kill switch-øvelse; kostnadsgrense-øvelse.
 
 ---
 
+## Overgang til masterplan v4.0 «Sovereign Autonomy» (UA-N)
+
+Fase 1–10 over følger masterplan v2.1s ti-delte byggeplan og er historisk korrekte for det de dekker.
+Byggingen har siden UA-0 (≈ fase 1–3s kjerne) fulgt masterplan v4.0
+([docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md](input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md)),
+som erstatter den lineære fase-rekkefølgen med «Universal»-lag (UA-0…UA-7+). Dette dokumentet fikk
+aldri en tilsvarende UA-N-omskrivning før nå (logget som D-37 i DECISIONS_AND_ASSUMPTIONS.md) — status
+og evidens for UA-0/UA-1/D-30 finnes i [PROJECT_STATUS.md](PROJECT_STATUS.md) og
+[RUNTIME_GATES.md](RUNTIME_GATES.md), ikke som egne seksjoner her, siden de allerede er lukket:
+
+- **UA-0 – Core Runtime** (identitet, policy/D-class, minne-fundament, Model Gateway P0, Tool Gateway,
+  worker/sandbox, owner-kontroller) = **VERIFIED** (BO-08, dekker mesteparten av fase 1–4/6).
+- **UA-1 – Universal AI Mesh** (provider-agnostisk ruting, streaming, tool-calling, fallback) =
+  **P0/LIVE/P1A VERIFIED** (BO-08/BO-10/BO-11, dekker fase 3s modellstrategi videre enn v2.1 planla).
+- **D-30 Voice** (≈ fase 5s vertikale talepilot) = **VERIFIED** (BO-12, host-runde 6, 2026-08-14) —
+  funksjonell korrekthet bevist; formell providerbenchmark (D-10) og realtime-latensmål (Q-19) er egne,
+  ikke-blokkerende porter, ikke en del av D-30s korrekthetsscope.
+
+Nye faser fra og med UA-2 spesifiseres under i samme format som fase-seksjonene over (Formål/
+Avgrensning/Komponenter/Avhengigheter/Leveranser/Tester/Akseptansekriterier/Bygges IKKE), men med
+UA-N-navn. Fase 6/7/8/9/10 sine ubygde deler (workers utover D-32-porten, øvrige integrasjoner utover
+første bølge, mobil/Watch utover D-36-porten, HA, drift) videreføres uendret som egne porter og
+kolliderer ikke med UA-2+ - de kan bygges i den rekkefølgen eier bestemmer.
+
+---
+
+## UA-2 – Universal Knowledge Layer (5–8 uker, masterplan v4.0)
+
+**Mål:** Gjøre relevant kunnskap søkbar gjennom ETT Jarvis-grensesnitt, med kildeangivelse (provenance),
+ferskhet (freshness) og tillit (trust) på alt som hentes ut — aldri en «sannhet» uten sporbar kilde.
+
+**Avgrensning:** Retrieval og indeksering av eksisterende kunnskap i kildesystemer Tobias allerede
+bruker — IKKE en ny generell dokumentdatabase, IKKE eierskap til systems-of-record-data (kalender/
+e-post/CRM forblir live-referert, ikke kopiert som "sannhet" i Jarvis Memory).
+
+**Komponenter (full masterplan-scope — se "Bygges IKKE" for hva som er UA-2 P0 vs. senere):**
+- Kildeadaptere bak felles `KnowledgeSourceAdapter`-grense (speiler `ToolGateway`-mønsteret — ingen
+  kildespesifikk logikk i Core): Obsidian (read/write/sync), Pieces (context bridge), Google
+  Drive/Docs/Sheets/Slides (read/write/sync), NAS/lokale filer (read/write/watch), GitHub (utvider
+  eksisterende `read_issues`), e-postvedlegg, møtetranskripsjoner.
+- Inkrementell sync, dedupe, versjonering, sletting/tombstones (kilde slettes → Jarvis-kopi slettes/
+  markeres tombstone, aldri stille foreldet data).
+- Entity extraction + Knowledge Graph (utsettes til UA-2 P1 — se Q-10 i OPEN_QUESTIONS.md: «Trenger
+  relasjonslaget egen grafdatabase?» avgjøres først etter målt behov, ikke antatt).
+- FTS + vector retrieval (utvider eksisterende `pgvector`/`MemoryRetriever`-fundament fra fase 4/D-28 —
+  IKKE en ny retrieval-stack).
+- Live references for system-of-record-data (kalender/e-post hentes fersk via eksisterende Tool
+  Gateway-adaptere ved spørring); permanent Jarvis Memory kun når varig verdi finnes (samme prinsipp
+  som MEMORY_ARCHITECTURE.md allerede definerer for tekst/tale).
+
+**Avhengigheter:** UA-0 (identitet/tenancy/policy/minne-fundament, VERIFIED), UA-1 (Model Gateway for
+embeddings/ekstraksjon, VERIFIED), Tool Gateway (adaptergrense og Policy/Execution Authority, VERIFIED).
+
+**Leveranser (full scope):** Kunnskap fra minst fem kildesystemer søkbar i samme retrieval-flyt med
+kilde/ferskhet/tillit synlig; oppdatert DPIA/processing-inventory for hver nye datakategori.
+
+**Tester:** Ingestion→retrieval ende-til-ende per kilde; sletting i kilde propagerer til tombstone i
+Jarvis; cross-tenant/cross-memory-space-lekkasje = 0 (RLS-bevis, samme mønster som UA-0); freshness/
+provenance-felt til stede på alle retrieval-resultater; dedupe hindrer duplikat-innhold ved re-sync.
+
+**Akseptansekriterier (masterplan, full scope):**
+1. Minst fem kildesystemer i samme retrieval-flyt.
+2. All hentet kunnskap har kilde-pointer/ferskhet/tillit.
+3. Cross-tenant-lekkasje = 0; sletting/tilbakekalling propagerer.
+4. DPIA/processing-inventory oppdatert for nye datakategorier.
+
+**Bygges IKKE (denne runden / UA-2 P0):** Knowledge Graph/entity-graf (P1, avhenger av Q-10);
+Obsidian/Pieces-adaptere (krever lokal Obsidian-vault/Pieces-installasjon på host — utsettes til P1
+sammen med graf); Drive/Docs/Sheets/Slides (krever Google OAuth-utvidelse utover eksisterende
+Calendar/Gmail-scopes — P1); møtetranskripsjon (avhenger av UA-7 Communications Hub sin
+meeting-transcription, ikke bygget ennå — P1+); ≥5-kilde-akseptansekriteriet (P0 beviser KONTRAKTEN
+med 1–2 kilder, skalering til fem er en egen, senere port). **UA-2 P0 er derfor et forslag til
+FØRSTE byggbare skive, ikke hele UA-2** — se under.
+
+### UA-2 P0 — Knowledge Ingestion Foundation = SUITE-VERIFIED (2026-08-14)
+
+**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container uten
+Docker/GitHub-credentials - se RUNTIME_GATES.md for full evidens/gap-liste). Godkjent av Tobias som
+første byggbare UA-2-skive; bygget i `modules/knowledge` (`@jarvis/knowledge`).
+
+**Bygget:**
+1. **Kilde-uavhengig `KnowledgeSource`-kontrakt** (`source.ts`): `KnowledgeRecord` med
+   source_type/source_instance_id/external_id/canonical_uri/title/content/content_type/content_hash/
+   modified_at/metadata - ingen credentials i kontrakten. Fremtidige kilder (Obsidian/Pieces/Drive/
+   e-post/møter) kan implementeres uten redesign.
+2. **`FilesystemKnowledgeSource`** - generell (IKKE NAS-spesifikk domenelogikk), allowlistet root,
+   symlink-escape og path-traversal strukturelt umulig (realpath-verifisering før hver fil leses),
+   tekstformater (.md/.txt/.json/.yaml/.ts/.js/.py/.sql/.html/.css).
+3. **`GithubKnowledgeSource`** - repo-metadata (ny `read_repo_meta`-action, samme PAT/scope som
+   `read_issues`) + issues, via EKSISTERENDE `ToolGateway` (samme policy/audit/credential-vei som
+   `daily-brief.ts`). Repo-FIL-innhold er IKKE bygget (dokumentert P1-utvidelse - transporten støtter
+   det ikke uten en større connector-endring).
+4. **`KnowledgeSyncService`** - idempotent sync (scanned/created/updated/unchanged/tombstoned/
+   reactivated/failed-rapport), canonical identity + content_hash-dedupe, tombstone ved forsvunnet
+   kilde (myk sletting - aldri hard-delete), deterministisk reaktivering ved gjenoppdukking, INGEN
+   re-embedding ved uendret innhold.
+5. **`KnowledgeRetriever`** - FTS + vector hybrid (samme pgvector/`cosine_sim`-fundament som
+   `MemoryRetriever`, D-28), tombstonede dokumenter alltid filtrert bort, full provenance på hvert
+   resultat.
+6. **Storage:** migrasjon `017_knowledge.sql` - `knowledge_documents`/`knowledge_embeddings`, SAMME
+   RLS-mønster som `memory_items` (tenant_id OG memory_space_id håndhevet i databasen), betinget
+   pgvector-konvertering (samme mønster som D-28).
+7. **DPIA/data-governance-notat:** `docs/UA2_KNOWLEDGE_DPIA.md`.
+
+**Suite-verifisert (294/294 - se kvalitetsrapport i RUNTIME_GATES.md):** hele
+livssyklusen (ingest→uendret resync→endring→sletting→reaktivering) mot ekte embedded Postgres + ekte
+filsystem-I/O; tenant-isolasjon; memory-space-isolasjon; filsystem-allowlist/traversal/symlink-escape;
+GitHub-kilde (fake transport - ingen live GitHub-credential i byggemiljøet); FTS-treff; vektor-likhet;
+hybrid-rangering med provenance; ingen re-embedding ved uendret innhold.
+
+**IKKE host/live-verifisert (§13 - krever Docker/ekte GitHub-PAT/ekte NAS-mount på Tobias sin host):**
+faktisk NAS-mount som root, ekte GitHub-repo-sync med reell PAT, ende-til-ende-demo på hosten
+(ingest→query→endre→resync→se ny versjon→slett→resync→se borte).
+
+**Bygges IKKE i P0 (uendret fra forslaget):** skriving tilbake til kildene (read-only), Knowledge
+Graph, Obsidian/Pieces/Drive/møtetranskripsjon, OCR/vision, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesarbeid, UI for kunnskapssøk utover eksisterende `/chat`.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-20 (kun myk sletting, ingen GDPR-
+purge-vei ennå).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

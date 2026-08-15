@@ -1,10 +1,30 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-14 · **Branch:** `claude/d30-voice` (PR #2, ikke merget)
+**Oppdatert:** 2026-08-15 · **Branch:** `claude/ua2-knowledge-spec` (PR #3, merges til `main`)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
+**D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
+**Q-21 (systembredt DB admin/runtime-rolle-gap): VERIFIED/CLOSED (2026-08-15, host-bevist,
+run_id `778bb87d`)** → D-38. Host bekreftet at api/worker/migrate opprinnelig kjørte som
+Postgres-superbruker (RLS aldri håndhevet til tross for korrekte policyer); fikset permanent med
+admin/runtime-DB-config-splitt + idempotent `jarvis_runtime`-rolle-bootstrap + fail-closed
+startup-vakter + ett automatisert host-fiks-script (tre host-recovery-runder samme dag - se
+RUNTIME_GATES.md for full feilsøkingslogg; faktisk root cause var et stale Docker-image som ble
+gjenbrukt av `docker compose run` i stedet for å bygges på nytt). **Host-bevis:**
+`migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`,
+`runtime_role_superuser=false`, `runtime_role_bypassrls=false`, `runtime_role_canlogin=true`,
+`runtime_role_member_jarvis_app=true`, `q21_runtime_role_safe=PASS`, `tenant_isolation=PASS`,
+`memory_space_isolation=PASS`.
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = VERIFIED/COMPLETE
+(2026-08-15, samme host-kjøring)** → D-39. Alle P0-akseptansekriterier host-bevist mot ekte
+Postgres/pgvector, ekte filsystem, ekte GitHub-repo: filesystem full livssyklus, ekte FTS/vector/
+hybrid, filsystem-sikkerhet (allowlist/traversal), GitHub live sync+dedupe, tenant/memory-space-
+isolasjon - alle PASS, `duplicate_documents=0`, `hard_fail=false`. `symlink_escape=
+SKIPPED_HOST_PERMISSION` (Windows-hosten tillot ikke symlink uten admin-rettigheter denne
+kjøringen) - eksplisitt IKKE et live-PASS, mekanismen forblir suite-bevist
+(`filesystem-source.test.ts`). Full evidens: docs/RUNTIME_GATES.md.
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -132,13 +152,98 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   UAVHENGIG av dette - realtime-latensoptimalisering er bevisst utsatt til egen
   runde (ingen optimalisering gjort i denne lukkingen).
 
+## UA-2 P0 — Knowledge Ingestion Foundation (BYGGET denne økten)
+- **Status: SUITE-VERIFIED. IKKE host/live-verifisert** (sky-container: ingen Docker, ingen ekte
+  GitHub-PAT, ingen ekte NAS-mount). Godkjent P0-scope fra spec-runden bygget i ny pakke
+  `modules/knowledge` (`@jarvis/knowledge`):
+  - `KnowledgeSource`-kontrakt (kilde-uavhengig, ingen credentials i kontrakten).
+  - `FilesystemKnowledgeSource`: allowlistet root, `realpath()`-verifisert FØR lesing - traversal/
+    symlink-escape strukturelt umulig (ikke bare filtrert).
+  - `GithubKnowledgeSource`: via eksisterende ToolGateway/policy/audit (ny `read_repo_meta`-action,
+    samme PAT/scope som `read_issues` - ingen scope-utvidelse); repo-fil-innhold dokumentert som
+    neste skive (transporten støtter det ikke i dag).
+  - `KnowledgeSyncService`: idempotent sync-rapport, canonical identity + content_hash-dedupe,
+    tombstone ved forsvunnet kilde (myk sletting), deterministisk reaktivering.
+  - `KnowledgeRetriever`: FTS+vector hybrid på eksisterende pgvector-fundament (D-28), full
+    provenance, tombstonede dokumenter alltid ekskludert.
+  - Migrasjon `017_knowledge.sql`: samme RLS-mønster som `memory_items` (tenant+space i databasen).
+  - DPIA-notat: `docs/UA2_KNOWLEDGE_DPIA.md`. Åpent gap Q-20 (kun myk sletting, ingen GDPR-purge-vei
+    ennå) - dokumentert, ikke skjult.
+  - **Regresjon funnet+fikset:** `read_repo_meta` midt i `firstWaveTools()`-arrayet forskjøv
+    posisjonsindekser to eksisterende tester brukte - flyttet til slutten av arrayet.
+  - 294/294 tester (281+13 nye), lint/typecheck/gitleaks rene. Full evidens: docs/RUNTIME_GATES.md.
+- **Gjenstår for host/live-verifikasjon (§13 i BO-en, IKKE gjort her):** ekte NAS-mount, ekte
+  GitHub-repo-sync med reell PAT, full ende-til-ende-demo kjørt på Tobias sin host.
+- **FINAL HOST ACCEPTANCE HARNESS (forrige runde, bygget):** `modules/knowledge/scripts/ua2-p0-live.ts` -
+  kjøres `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`.
+- **HOST-BLOCKER-RUNDE (denne økten, 2026-08-15):** Tobias kjørte harnesset live. 13/15 felt PASS
+  (filesystem livssyklus, provenance, FTS/vector/hybrid, filsystem-sikkerhet, GitHub live sync+dedupe
+  `created=2`→`unchanged=2`). **`tenant_isolation`/`memory_space_isolation` FEILET.** Root cause
+  funnet (ikke gjettet): harnesset beviste isolasjon via `pool` (samme rolle api/worker/migrate
+  faktisk bruker) UTEN å verifisere bypass-status - `jarvis_app` er en `NOLOGIN`-gruppe-rolle, og
+  INGEN sted i den faktiske driftsveien oppretter en ekte login-rolle bundet til den (kun suitens
+  test-oppsett gjør det). Dette avdekket samtidig et **systembredt (ikke UA-2-spesifikt)
+  deployment-gap** - se **Q-21 i OPEN_QUESTIONS.md** (trenger Tobias sin beslutning; docker-compose/
+  migrate-main.ts bevisst urørt, utenfor denne BO-ens scope). **Fikset:** harnesset bootstrapper nå
+  en fersk, garantert non-bypass rolle (kun for isolasjons-BEVISET) + ny §6-diagnostikk
+  (`rls_test_role`/`_superuser`/`_bypassrls`, `knowledge_rls_enabled`/`_force_rls`,
+  `configured_app_role`/`_superuser`/`_bypassrls`) som fail-closed skiller HARNESS FEIL fra RUNTIME
+  FEIL. Presisjonsfunn underveis: rå listelengde er ikke et presist lekkasje-mål (vektor-selvtreff-
+  støy fra `LocalHashEmbedding`) - assertions sjekker nå faktisk innhold. Nye regresjonstester:
+  `modules/knowledge/test/rls-role-isolation.test.ts` (6 tester, inkl. et eksplisitt kontrast-bevis
+  §K: samme spørring lekker via superbruker, ikke via non-bypass-rolle). Full detaljer:
+  docs/RUNTIME_GATES.md.
+- **Q-21 AUTOMATISK DIAGNOSE (samme dag):** `ua2-p0-live.ts` diagnostiserer nå selv, i ÉN kommando,
+  om den faktiske runtime-rollen er trygg (`q21_runtime_role_safe`) og kjører isolasjons-acceptance
+  via `pool` direkte når den er det - ellers `BLOCKED_BY_RUNTIME_ROLE` (aldri fake PASS).
+- **Q-21 HOST-BEVIS (samme dag):** Tobias kjørte diagnosen live - `current_user=postgres`,
+  `runtime_role_superuser=true`, `runtime_role_bypassrls=true`, `q21_runtime_role_safe=FAIL`. Bekreftet:
+  RLS-policyene finnes og FORCE RLS er aktivt (`knowledge_documents_force_rls=true`), men
+  api/worker/migrate kjørte alle som Postgres-superbruker - en ekte systembred
+  runtime-konfigurasjonsfeil, ikke en UA-2-kode-bug.
+- **Q-21 SYSTEMBRED FIKS (denne runden):** permanent split innført i `@jarvis/core`:
+  `configFromEnv()` (RUNTIME, default `jarvis_runtime`) vs. ny `adminConfigFromEnv()` (ADMIN, leser
+  `JARVIS_DB_ADMIN_USER/PASSWORD`) - to distinkte lesere, ingen fallback mellom dem. Ny
+  `ensureRuntimeRole()` (idempotent, admin-kjørbar) bootstrapper `jarvis_runtime`
+  (LOGIN/NOSUPERUSER/NOBYPASSRLS/NOCREATEDB/NOCREATEROLE, medlem av `jarvis_app`) fra
+  `migrate-main.ts` (nå på `adminConfigFromEnv()`). `main.ts`/`worker-main.ts` fail-closed ved
+  oppstart (`assertRuntimeCredentialsConfigured`/`assertRuntimeRoleSafe`) - nekter å starte normalt
+  uten gyldige, distinkte, non-bypass runtime-credentials. `.env.example`/`docker-compose.yml`
+  oppdatert med forklarende kommentarer (ingen ny parallell config-modell - samme grants/RLS som
+  `jarvis_app` alt hadde, 005_rls.sql). **Automatisert host-fiks:**
+  `modules/core/scripts/fix-q21-runtime-role.ts` - ÉN kommando som backup-er `.env`, genererer
+  runtime-credentials, kjører migrate (bootstrapper rollen), restarter api/worker, verifiserer
+  FAKTISK trygg tilkobling direkte mot Postgres, og kjører `ua2-p0-live.ts` til slutt. Ingen
+  volumes/data røres. 24 nye tester (`modules/core/test/runtime-role.test.ts`,
+  `db-config-split.test.ts`, `apps/api/test/db-role-wiring.test.ts`) - 324/324 totalt,
+  lint/typecheck/gitleaks rene (inkl. `scripts/`-mapper nå faktisk typecheck-dekket, tidligere
+  stille utelatt).
+- **HOST RECOVERY-RUNDER (samme dag, tre runder til faktisk grønt):** første host-kjøring av
+  fiks-scriptet feilet delvis (`.env`-interpolasjonsbug i Docker Compose - fikset med eksplisitt
+  `--env-file`), deretter feilet migrate-containeren fortsatt med `password authentication failed for
+  user "jarvis_runtime"` selv om admin-precheck viste `postgres` (runde 2 - grundig kildesporet, ingen
+  kodebug funnet i selve wiringen). Faktisk root cause (runde 3, Tobias sin egen hypotese, bekreftet):
+  `docker compose run --rm migrate` bygger ALDRI om et image automatisk - containeren kjørte et
+  utdatert, pre-Q21-image. Fikset ved å alltid kjøre `docker compose build migrate api worker` før
+  migrate/restart i hvert scriptkall. Full feilsøkingslogg: docs/RUNTIME_GATES.md.
+- **STATUS: VERIFIED/COMPLETE (2026-08-15, host-bevist, run_id `778bb87d`) → D-38/D-39.** Full
+  host-kjøring bekreftet grønt: `q21_runtime_role_safe=PASS`, `tenant_isolation=PASS`,
+  `memory_space_isolation=PASS`, alle øvrige UA-2 P0-felt PASS unntatt `symlink_escape=
+  SKIPPED_HOST_PERMISSION` (eksplisitt IKKE et live-PASS, forblir suite-bevist). Se
+  header-seksjonen øverst i denne filen og docs/RUNTIME_GATES.md for full evidens.
+
 ## Blokkeringer
-Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
+Ingen blokkering for UA-2 P0 eller Q-21 lenger - begge VERIFIED/CLOSED (host-bevist,
+run_id `778bb87d`), PR #3 merges til `main`. Manglende provider-nøkler er eneste gap for LIVE
+multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
+ikke-blokkerende. Q-20 (kun myk sletting i knowledge-ingestion, ingen GDPR-purge-vei) er åpen,
+ikke-blokkerende for P0, vurderes før UA-2 P1.
 
 ## Neste oppgave
-D-30 Voice VERIFIED og merget - avvent eierordre for neste port. Kandidater i tur etter
-v4.0-planen/gjenværende åpne, ikke-blokkerende gater: D-30 ytelsesgjeld (Q-19: realtime-latens
-mot <1,5s median/P95, D-10 norsk STT-benchmark ≥100 prøver - fullfører formell Fase 5-akseptanse),
-D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, eller UA-1 P1
-videre (quality metrics-læring).
+UA-2 P0 er VERIFIED/COMPLETE og merget. Anbefalt neste UA-2-del: **UA-2 P1** (flere
+kunnskapskilder - Obsidian, Pieces, Google Drive, e-post, møtetranskripsjon, OCR - se
+IMPLEMENTATION_PLAN for eksakt P1-scope) og/eller Q-20 (GDPR hard-delete/purge-vei) som en
+forutsetning før P1 øker persondata-eksponeringen. Venter på Tobias sin eksplisitte
+fase-godkjenning før implementering starter (faseporten gjelder, CLAUDE.md-regel 10). Øvrige
+kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple,
+HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.

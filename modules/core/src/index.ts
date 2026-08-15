@@ -9,3 +9,4 @@ export * from "./services/message-store.ts";
 export * from "./services/context-builder.ts";
 export * from "./services/fast-router.ts";
 export * from "./services/device-service.ts";
+export * from "./services/runtime-role.ts";

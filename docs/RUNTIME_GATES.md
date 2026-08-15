@@ -15,6 +15,8 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-AUTHORITY | PARTIAL_RUNTIME | **Implementert 2026-08-13:** `resolveAuthorityMode` (SOVEREIGN for owner-tenant, delegat arver aldri), sovereign klasse C/D uten approval, D-pipeline (preflight→state readback→before/after→recovery-snapshot→audit), OwnerControls (pause/freeze/revoke) håndhevet i policy+gateway. Evidens: `modules/tool-gateway/test/ua0-sovereign.test.ts` (pnpm test → 128/128). Live-verifikasjon mot ekte connectors gjenstår |
 | UA0-PRIVACY | PARTIAL_RUNTIME | Tenant+space-RLS, karantene, injection-vern bevist i suiten; live-datastrøm gjenstår |
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
+| Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
+| UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
@@ -113,6 +115,547 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 **Owner-seed:** fra BO-08 automatisk og idempotent i `apps/api/src/migrate-main.ts` (one-shot
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
+
+## Q-21 CLOSURE + UA-2 P0 CLOSURE: HOST VERIFIED (2026-08-15, run_id `778bb87d`)
+
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/fix-q21-runtime-role.ts`
+på sin faktiske Windows-host - GRØNT resultat, hele kjeden i én kommando.**
+
+### Q-21 (D-38): DB admin/runtime-rolle-splitt - VERIFIED
+
+```
+migrate_effective_db_user=postgres
+
+runtime_connection=PASS
+runtime_current_user=jarvis_runtime
+runtime_role_superuser=false
+runtime_role_bypassrls=false
+runtime_role_canlogin=true
+runtime_role_member_jarvis_app=true
+
+q21_runtime_role_safe=PASS
+```
+
+Bevist LIVE, ikke bare i kode/suite:
+- **Migrate/admin-tilkoblingen** bruker `postgres` (admin-rollen) - ALDRI runtime-rollen.
+- **API/worker/runtime**-tilkoblingen bruker `jarvis_runtime` - ALDRI admin-rollen.
+- `jarvis_runtime` er faktisk `NOSUPERUSER` (`runtime_role_superuser=false`).
+- `jarvis_runtime` er faktisk `NOBYPASSRLS` (`runtime_role_bypassrls=false`).
+- `jarvis_runtime` er en ekte `LOGIN`-rolle (`runtime_role_canlogin=true`).
+- `jarvis_runtime` er bevist medlem av `jarvis_app` (`runtime_role_member_jarvis_app=true`) - arver
+  samme grants for identity/sessions/messages/tasks/memory/approvals/devices/tool-audit/cost-events/
+  knowledge som resten av systemet alltid har forutsatt (005_rls.sql), ingen ny permission-modell.
+
+### RLS - tenant + memory-space isolasjon - VERIFIED LIVE
+
+```
+tenant_a_sees_tenant_b=0
+tenant_b_sees_tenant_a=0
+tenant_a_sees_own=1
+
+personal_sees_business=0
+business_sees_personal=0
+
+tenant_isolation=PASS
+memory_space_isolation=PASS
+```
+
+Dette er den FAKTISKE RLS-DENY-veien - forrige host-runde (2026-08-15, tidligere samme dag) beviste at
+denne EKSAKT samme sjekken feilet (`BLOCKED_BY_RUNTIME_ROLE`) mens systemet kjørte som superbruker.
+Nå bevist PASS gjennom den korrekte, non-bypass `jarvis_runtime`-rollen.
+
+### UA-2 P0 (D-39): Knowledge Ingestion Foundation - VERIFIED/COMPLETE
+
+```
+filesystem_ingest=PASS          unchanged_resync=PASS       update_same_canonical=PASS
+tombstone=PASS                  reactivation=PASS            provenance=PASS
+fts=PASS                        vector=PASS                  hybrid=PASS
+filesystem_allowlist=PASS       traversal_deny=PASS          symlink_escape=SKIPPED_HOST_PERMISSION
+github_live=PASS                duplicate_documents=0
+
+hard_fail=false
+```
+
+Alle P0-akseptansekriteriene fra BO-en (§13 i opprinnelig byggeordre) er nå host-verifisert mot
+Tobias sin FAKTISKE lokale Postgres/pgvector, ekte filsystem, og et ekte GitHub-repo (`github_live=PASS`,
+`duplicate_documents=0` - ingen duplikater ved resync):
+- Filesystem full livssyklus: ingest → uendret resync (no-op) → endring (samme canonical document, ny
+  versjon) → sletting (tombstone) → gjenoppdukking (deterministisk reaktivering) - alle PASS.
+- Ekte FTS + vektor + hybrid retrieval mot ekte pgvector (ikke embedded-test-Postgres) - alle PASS.
+- Filsystem-sikkerhet: allowlistet root + `../`-traversal-nøytralisering - begge PASS.
+- GitHub live-kilde: repo-metadata/issues faktisk hentet og synkronisert via ekte credentials.
+- Tenant- og memory-space-isolasjon: se Q-21-seksjonen over (samme host-kjøring, samme bevis).
+
+**`symlink_escape=SKIPPED_HOST_PERMISSION` - eksplisitt IKKE et live-PASS.** Windows-hosten tillot ikke
+symlink-opprettelse uten administratorrettigheter i denne kjøringen, så harnesset rapporterte ærlig
+SKIPPED i stedet for å late som en test kjørte. Symlink-escape-DENY-mekanismen (samme
+`realpath()`-baserte sjekk som allowlist/traversal) er FORTSATT fullt suite-bevist
+(`modules/knowledge/test/filesystem-source.test.ts`, embedded Postgres + ekte filsystem-I/O) - dette er
+en dokumentert host-begrensning, ikke en udekket sikkerhetssjekk.
+
+**Fortsatt bevisst utenfor P0-scope (uendret):** kun myk sletting/tombstone (Q-20 - ingen GDPR
+hard-delete-vei bygget ennå), Knowledge Graph/GraphRAG, Obsidian/Pieces/Drive/e-post/
+møtetranskripsjon-ingest, OCR/vision, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesoptimalisering, skriving tilbake til kildene.
+
+### Reisen til dette punktet (tre host-recovery-runder, samme dag)
+
+1. **Runde 1:** `docker compose up -d postgres` feilet - Compose sin egen `.env`-interpolasjon fant
+   ikke `JARVIS_DB_ADMIN_PASSWORD` selv om verdien var korrekt i filen. Fikset med eksplisitt
+   `--env-file`.
+2. **Runde 2:** migrate autentiserte likevel som `jarvis_runtime` - prøvd fikset med eksplisitt
+   `-e VARNAME`-overstyring av miljøvariabler til migrate-kallet.
+3. **Runde 3 (faktisk root cause):** `-e`-fiksen løste det ikke - migrate-containeren kjørte et
+   EKSISTERENDE, UTDATERT Docker-image (Compose bygger aldri automatisk på nytt ved kildekodeendring).
+   Fikset ved å ALLTID bygge migrate/api/worker fra aktuell checkout FØR de kjøres/restartes, hver
+   eneste gang scriptet kjører.
+
+Denne runden (4.) bekrefter at runde 3 sin fiks faktisk var den avgjørende: `migrate_effective_db_user`
+viser nå korrekt `postgres`, og hele kjeden - Q-21 OG UA-2 P0 - er grønn i én sammenhengende
+host-kjøring.
+
+**Status: Q-21 = VERIFIED/CLOSED. UA-2 P0 = VERIFIED/COMPLETE.** PR #3 klargjøres for merge til `main`.
+
+## Q-21 HOST FIX RECOVERY #3: STALE MIGRATE DOCKER-IMAGE (2026-08-15, samme dag - faktisk root cause)
+
+**Host-feil:** Tobias kjørte scriptet på nytt etter runde #2-fiksen (eksplisitt `-e VARNAME`-
+overstyring til migrate). `admin_connection=PASS admin_current_user=postgres` (scriptets egen direkte
+tilkobling fungerte), men `docker compose ... run --rm migrate` feilet FORTSATT med
+`password authentication failed for user "jarvis_runtime"`.
+
+**Root cause (bekreftet fra kodeflyt, ikke gjettet):** scriptet gjorde aldri noen `docker compose
+build` FØR `run --rm migrate` - kun `up -d postgres` etterfulgt direkte av `run --rm migrate`. Docker
+Compose bygger ALDRI et image på nytt automatisk bare fordi kildekoden på disk har endret seg - kun en
+eksplisitt `build`/`--build` gjør det. Migrate-containeren kjørte dermed et EKSISTERENDE, UTDATERT
+lokalt image - fra FØR `adminConfigFromEnv()`-splitten (og trolig fra før `-e VARNAME`-fiksen) i det
+hele tatt eksisterte i kildekoden. Dette forklarer PERFEKT alle tre rundenes symptomer samtidig:
+scriptets EGEN pg-tilkobling (kjører direkte via Node, alltid fersk kildekode) beviste konsekvent at
+admin-credentials var korrekte, mens SELVE MIGRATE-CONTAINEREN kjørte en helt annen, eldre versjon av
+`migrate-main.ts` - uavhengig av hva `.env` eller `-e`-flagg noensinne inneholdt. Runde #2 sin
+`-e VARNAME`-fiks var derfor irrelevant fra start: den utdaterte containerens gamle kode leste
+sannsynligvis aldri `JARVIS_DB_ADMIN_USER` i det hele tatt.
+
+**Fiks:**
+- Ny `buildImageBuildArgs(composeArgs)` (`lib/q21-env-recovery.ts`): `docker compose --env-file <env>
+  -f <compose> build migrate api worker`. Kjøres UBETINGET (ingen sjekk som kunne hoppe over den) RETT
+  ETTER admin-precheck og FØR migrate kjøres - "always rebuild" er den minste robuste løsningen
+  (BO-ens eget ord), ingen SHA-labels eller annen overengineering.
+- `-e VARNAME`-overstyringen fra runde #2 er FJERNET igjen (§3 i BO-en - unødvendig ambiguitet når
+  imaget garantert er ferskt bygget): `buildMigrateRunArgs` er tilbake til den enkle formen
+  (`run --rm migrate`, kun service+`--env-file`, ingen egne miljøoverstyringer). `run()`-funksjonen i
+  hovedscriptet mistet dermed sin `extraEnv`-parameter helt.
+- Ny operasjonsrekkefølge: postgres opp → admin-precheck → **bygg migrate/api/worker** → kjør migrate
+  → restart api/worker (fra de FERSKT bygde imagene) → runtime-verifikasjon → `ua2-p0-live.ts`.
+- `migrate_effective_db_user`-diagnostikken fra runde #2 beholdes uendret - den er nå den DEFINITIVE
+  testen: viser den fortsatt IKKE `postgres` på neste host-kjøring til tross for et garantert ferskt
+  image, er det sterkt bevis for en helt annen årsak (f.eks. en Postgres-side `pg_hba.conf`-anomali).
+
+**Nye tester** (`modules/core/test/q21-migrate-role-wiring.test.ts`, utvidet til 19 tester): §10.A/B
+(rebuild skjer FØR migrate OG FØR api/worker restartes), §10.C (rebuild-steget er ubetinget, ingen
+vei rundt det), §10.D/E (migrate-kommandoen er tilbake til den enkle formen, ingen `-e`-ambiguitet),
+§10.F (uendret grunnsannhets-diagnostikk), §10.G (ingen credential-verdier logges noe sted, `run()`
+tar ikke lenger imot en verdi-parameter i det hele tatt), §10.H (full operasjonsrekkefølge inkl. det
+nye build-steget, idempotent rerun).
+
+**Regresjon fanget og fikset underveis:** fjerning av `buildMigrateRunArgs` sin gamle `-e`-variant og
+`MIGRATE_ADMIN_ENV_KEYS`-eksporten krevde oppdatering av eksisterende tester fra forrige runde som
+fortsatt refererte til dem.
+
+**Kvalitet:** 358/358 tester (352 baseline + 6 netto nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring.
+
+## Q-21 HOST FIX RECOVERY #2: MIGRATE BRUKER FEIL DB-ROLLE (2026-08-15, samme dag)
+
+**Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` på nytt. Scriptet rapporterte korrekt
+`admin-rolle: postgres`, skrev `.env` med BÅDE ADMIN- og RUNTIME-settet, og Postgres startet
+korrekt via det eksplisitte `--env-file`-flagget (forrige rundes fiks holdt). Deretter feilet
+`docker compose ... run --rm migrate` inni migrasjonsprosessen: `runMigrations()` kastet
+`password authentication failed for user "jarvis_runtime"` (Postgres-kode `28P01`) - til tross
+for at scriptet mente admin-brukeren var `postgres`.
+
+**Sporing gjennom hele kjeden (§1 i BO-en, ingen gjetning):** `.env` (bekreftet korrekt av
+scriptets egen log RETT FØR feilen) → `docker-compose.yml` sin `migrate:`-tjeneste (kun
+`env_file: ["../../.env"]` + statiske `JARVIS_DB_HOST/PORT/NAME` - INGEN `${JARVIS_DB_ADMIN_USER}`-
+interpolasjon involvert for admin-nøklene der) → `migrate-main.ts` sin `adminConfigFromEnv()` → `pg.Pool`.
+Ingen kodefeil funnet i noe av dette - `api.Dockerfile` (delt image for migrate/api/worker) bekrefter
+også ingen bakt-inn `ENV`-verdier. Konklusjon: den mest sannsynlige gjenværende årsaken er en
+Docker Compose-spesifikk miljøvariabel-presedens-mekanisme for `docker compose run` (shell-arv vs.
+`env_file`-oppløsning) som IKKE kan bekreftes 100% uten faktisk host-tilgang til å inspisere
+effektiv container-config.
+
+**Fiks - fjerner hele tvetydighetsklassen i stedet for å gjette videre:**
+- `modules/core/scripts/lib/q21-env-recovery.ts`: ny `buildMigrateRunArgs(composeArgs)` - bygger
+  `docker compose run --rm -e JARVIS_DB_ADMIN_USER -e JARVIS_DB_ADMIN_PASSWORD migrate` (BAR
+  `-e VARNAME`-form, ALDRI `-e VARNAME=verdi`). Ren funksjon - returnerer kun nøkkelNAVN, aldri en
+  verdi, trygt å logge hele resultatet.
+- `fix-q21-runtime-role.ts`: `run()` fikk en `extraEnv`-parameter som injiserer verdiene KUN i
+  `execFileSync` sin `env`-opsjon (barneprosessens - docker-CLI-ets - eget miljø) - ALDRI som del av
+  det loggede `args`-arrayet. Docker Compose sin `-e VARNAME` (bar form) leser da fra NETTOPP denne
+  kontrollerte prosessens miljø, med Compose sin høyeste presedens for `run` - garantert uavhengig av
+  `.env`/`env_file`/prosjektmappe-tvetydighet.
+- Ny **admin-tilkoblings-precheck** (§6 i BO-en) RETT FØR migrate kjøres: en direkte `pg.Pool`-
+  tilkobling fra SCRIPTET selv (ikke via Docker) med de beregnede admin-credentials, logger
+  `admin_connection=PASS`/`admin_current_user=<navn>`. Fanger en feilkonfigurasjon FØR et
+  migrate-forsøk kastes bort på den.
+- Ny **grunnsannhets-diagnostikk** i `migrate-main.ts` selv: `migrate_effective_db_user=<navn>`
+  skrevet FØR `runMigrations()` kjøres - viser PRESIST hvilken rolle migrate-PROSESSEN faktisk
+  forsøker å koble til med, uavhengig av hva host-scriptet antok. Forventet verdi: `postgres`.
+- Runtime-verifikasjonen (etter migrate+restart) fikk utvidede, eksplisitt navngitte felt:
+  `runtime_connection`, `runtime_current_user`, `runtime_role_exists`, `runtime_role_superuser`,
+  `runtime_role_bypassrls`, `runtime_role_canlogin`, `runtime_role_member_jarvis_app`.
+
+**Nye tester** (`modules/core/test/q21-migrate-role-wiring.test.ts`, 13 tester): §9.A
+(`migrate_effective_db_user` skrevet FØR `runMigrations`, fra `adminConfigFromEnv()`), §9.B/§9.C
+(api/worker fortsatt kun `configFromEnv`), §9.D/§9.E (admin/runtime-config kan fortsatt ikke lese
+hverandres variabler), §9.F (compose sin `migrate:`-blokk setter aldri `JARVIS_DB_USER/PASSWORD`
+eksplisitt - ville skygget for `env_file`), §9.G (partial-rerun idempotent), §9.H/§9.J (kildekode-
+rekkefølge: admin-precheck → migrate → api/worker-restart → runtime-verifikasjon → `ua2-p0-live.ts`),
+§9.I (`buildMigrateRunArgs` inneholder aldri en verdi, kun nøkkelnavn - trygt å logge; scriptet logger
+aldri en passordvariabel direkte).
+
+**Regresjon fanget og fikset underveis:** endringen i `migrate-main.ts` (caching av
+`adminConfigFromEnv()`-resultatet i en variabel for å kunne logge diagnostikken FØR `createPool`)
+brøt en eksisterende tekstbasert wiring-test fra forrige runde (`db-role-wiring.test.ts` forventet
+det eksakte inline-mønsteret `createPool(adminConfigFromEnv())`) - oppdatert til å sjekke selve
+INVARIANTEN (adminConfigFromEnv brukes, resultatet kobles til createPool) i stedet for eksakt syntaks.
+
+**Kvalitet:** 352/352 tester (339 baseline + 13 nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring. Skulle `migrate_effective_db_user` fortsatt IKKE vise `postgres`
+på neste host-kjøring til tross for disse eksplisitte `-e`-overstyringene, er det sterkt bevis for at
+årsaken ligger et sted `-e`-mekanismen selv ikke kan overstyre (f.eks. en Postgres-side `pg_hba.conf`/
+autentiseringsregel-anomali) - noe kun host-loggen kan avgjøre videre.
+
+## Q-21 HOST FIX RECOVERY: ADMIN ENV BOOTSTRAP BUG (2026-08-15, samme dag)
+
+**Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` - scriptet leste `.env` (admin-credentials fantes
+og ble lest korrekt, backup skrevet, `.env` oppdatert med nye runtime-credentials), men
+`docker compose ... up -d postgres` feilet: `required variable JARVIS_DB_ADMIN_PASSWORD is missing a
+value`, til tross for at verdien FAKTISK sto riktig i `.env`.
+
+**Root cause (funnet, ikke gjettet):** `docker compose`s EGEN `${VAR}`-interpolasjon inne i selve
+compose-YAML-filen (f.eks. `POSTGRES_PASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?...}"`) bruker et ANNET
+`.env`-oppslag enn tjenestenes `env_file:`-direktiv (som eksplisitt peker på `../../.env` og alltid har
+fungert). Uten et eksplisitt `--env-file`-flagg avgjør Compose selv hvilken mappe den leter i for denne
+interpolasjonen - scriptets `execFileSync("docker", [...], {cwd: repoRoot})` med en RELATIV `-f
+infra/local/docker-compose.yml`-sti ga tvetydig/feil oppslagssted. **Fiks:** alle `docker compose`-kall
+i scriptet gir nå eksplisitt `--env-file <absolutt sti til repoRoot/.env>` - garanterer samme fil brukes
+for BÅDE `env_file:`-direktivet og compose-filens egen interpolasjon, uansett Compose-versjon eller
+"prosjektmappe"-antakelser.
+
+**Sekundær herding (BO-ens eksplisitte ønske, defense-in-depth uavhengig av root cause over):** ny
+`modules/core/scripts/lib/q21-env-recovery.ts` - rene, testbare funksjoner:
+- `resolveAdminCredentials(current, backupsNewestFirst)`: FRESH CASE (§3) - gjenkjenner
+  `JARVIS_DB_USER=postgres` i NÅVÆRENDE `.env` som admin-kandidat når ADMIN-vars mangler, ingen backup
+  nødvendig. PARTIAL-MIGRATION CASE (§2, det faktiske host-scenariet) - skanner `.env.bak.*` nyest-først,
+  først for egne ADMIN-vars, deretter for en `JARVIS_DB_USER=postgres`-verdi fra FØR en tidligere
+  (ufullstendig) kjøring byttet den. Kaster fail-closed (`q21_admin_credentials_unrecoverable`, ingen
+  gjetning) hvis INGEN kilde gir gjenopprettbare credentials.
+- `resolveRuntimeCredentials`: gjenbruker eksisterende runtime-credentials uendret på idempotent
+  re-kjøring - regenererer ALDRI passord uten grunn.
+- `validateRequiredEnv`: alle fire (`JARVIS_DB_ADMIN_USER/PASSWORD`, `JARVIS_DB_USER/PASSWORD`) MÅ
+  finnes og være ikke-tomme FØR noe skrives - kalt FØR backup/write, ikke etter.
+- `buildUpdatedEnvLines`: setter/legger til nøyaktig de fire nøklene, rører aldri andre linjer/kommentarer.
+- Hovedscriptet: backup skrives FØRST, deretter atomisk skriv (tmp-fil + `renameSync` - aldri en delvis
+  skrevet `.env` synlig for noen annen prosess), og et no-op-hurtigspor (ingen skriving i det hele tatt)
+  når `.env` allerede er komplett korrekt.
+
+**Nye tester** (`modules/core/test/q21-env-recovery.test.ts`, 15 tester, ren logikk - ingen fs/Docker/DB):
+§8.A (fresh legacy migration via nåværende `.env`), §8.B (partial-migration recovery fra nyeste/riktige
+backup, inkl. prioritet egne-ADMIN-vars > postgres-gjetning), §8.C (nekter en ikke-postgres-lik
+backup-bruker), §8.D (ingen gyldig kilde → fail-closed, eksplisitt "IKKE endret"-melding), §8.E (rene
+returverdier, ingen skjult logging-bivirkning), §8.F/§8.I (idempotent - passord uendret på gjentatt
+kjøring), §8.G (validering av komplett sett), §8.H (admin-passord bevart eksakt gjennom
+resolve+build-runden), §8.J (admin/runtime forblir distinkte verdier i sluttresultatet).
+
+**Sikkerhet (§9):** ingen `.env`/`.env.bak.*`/volumes/data slettes eller bes slettet noe sted -
+eksisterende backup er fortsatt eneste recovery-kilde, urørt av denne fiksen.
+
+**Kvalitet:** 339/339 tester (324 baseline + 15 nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring.
+
+## Q-21 SYSTEMBRED FIKS: DB ADMIN/RUNTIME-ROLLE-SPLITT (2026-08-15)
+
+**Host-bevis (Tobias, samme dag som Q-21-diagnosen ble automatisert):**
+```
+current_user=postgres              session_user=postgres
+runtime_db_role=postgres           runtime_role_superuser=true    runtime_role_bypassrls=true    runtime_role_canlogin=true
+knowledge_documents_rls=true       knowledge_documents_force_rls=true
+knowledge_embeddings_rls=true      knowledge_embeddings_force_rls=true
+q21_runtime_role_safe=FAIL
+tenant_isolation=BLOCKED_BY_RUNTIME_ROLE     memory_space_isolation=BLOCKED_BY_RUNTIME_ROLE
+```
+**Konklusjon bekreftet:** RLS-policyene fantes og var FORCE-et - api/worker/migrate kjørte likevel som
+Postgres-superbruker (`JARVIS_DB_USER` var satt til samme verdi som `JARVIS_DB_ADMIN_USER` i den
+faktiske `.env`). Dette er en ekte systembred runtime-konfigurasjonsfeil, IKKE en UA-2-kode-bug -
+RLS er strukturelt umulig å håndheve for en superbruker/BYPASSRLS-tilkobling uansett policy-korrekthet.
+
+**Root cause (uendret fra forrige runde, nå fikset permanent):** `jarvis_app` (005_rls.sql) er en
+`NOLOGIN`-gruppe-rolle - ingen sted i den faktiske driftsveien (`migrate-main.ts`,
+`docker-compose.yml`) opprettet en ekte `LOGIN`-rolle bundet til den; kun suitens test-oppsett gjorde
+det.
+
+**Fiks - permanent admin/runtime-config-splitt (§1-§4 i BO-en):**
+- `modules/core/src/db/pool.ts`: `configFromEnv()` er RUNTIME-config (leser `JARVIS_DB_USER`/
+  `PASSWORD`, default-bruker endret fra `jarvis_app` - som aldri kunne logges inn med - til
+  `jarvis_runtime`, en ekte bootstrappbar rolle). Ny `adminConfigFromEnv()` er ADMIN-config (leser
+  `JARVIS_DB_ADMIN_USER`/`PASSWORD`) - to DISTINKTE lesere av to distinkte variabelsett, ingen
+  fallback mellom dem noe sted.
+- `modules/core/src/services/runtime-role.ts` (ny): `ensureRuntimeRole(adminPool, {user,password})` -
+  idempotent, admin-kjørbar bootstrap som sikrer `jarvis_runtime` finnes som LOGIN-rolle, eksplisitt
+  `NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`, `GRANT`et inn i `jarvis_app` (samme grants/RLS
+  som gruppe-rollen allerede har - ingen ny parallell permission-modell). Nekter eksplisitt å
+  bootstrappe `jarvis_app` selv som runtime-bruker. `checkRuntimeRoleStatus()`/`assertRuntimeRoleSafe()`
+  (ren lesing) og `assertRuntimeCredentialsConfigured()` (fail-closed FØR tilkobling forsøkes -
+  kaster hvis `JARVIS_DB_USER` mangler, er tom, er identisk med admin-brukeren, eller er `jarvis_app`).
+- `apps/api/src/migrate-main.ts`: kjører nå på `adminConfigFromEnv()` (CREATE ROLE/ALTER TABLE...
+  ENABLE RLS/CREATE EXTENSION krever admin-privilegier) og kaller `ensureRuntimeRole()` i samme
+  kjøring - bootstrapper runtime-rollen automatisk hver gang migrasjoner kjøres, idempotent.
+- `apps/api/src/main.ts`/`worker-main.ts`: uendret på `configFromEnv()` (RUNTIME) for sin egen pool,
+  men nå med fail-closed startup-vakter (`assertRuntimeCredentialsConfigured()` FØR tilkobling,
+  `assertRuntimeRoleSafe(pool)` RETT ETTER) - prosessen logger en tydelig JSON-feil og avslutter
+  (`process.exit(1)`) i stedet for å starte videre med en usikker/manglende DB-rolle.
+- `.env.example`: `JARVIS_DB_USER` default endret til `jarvis_runtime` (var `jarvis_app` - alltid
+  ubrukelig som bokstavelig login-verdi), utvidet forklarende kommentarer om admin- vs. runtime-splitten.
+- `infra/local/docker-compose.yml`: forklarende kommentarer lagt til migrate/api/worker-tjenestene
+  (ingen funksjonell endring nødvendig - separasjonen skjer i KODEN, ikke i hvilke env-variabler hver
+  container ser, siden `configFromEnv()`/`adminConfigFromEnv()` leser disjunkte variabelsett).
+
+**Automatisert host-fiks (§5 i BO-en):** `modules/core/scripts/fix-q21-runtime-role.ts` - ÉN
+host-kommando (`node --experimental-transform-types modules/core/scripts/fix-q21-runtime-role.ts`,
+kjøres fra repo-roten PÅ HOSTEN):
+1. Leser `.env`, beholder admin-credentials uendret.
+2. Genererer trygge runtime-credentials (`jarvis_runtime` + tilfeldig passord) hvis dagens
+   `JARVIS_DB_USER` er tom, lik admin-brukeren, eller `jarvis_app`.
+3. Sikkerhetskopierer `.env` FØR endring (`*.bak.<timestamp>`).
+4. Skriver oppdatert `.env` (aldri logger passordverdien).
+5. `docker compose up -d postgres` (rører ALDRI volumes).
+6. `docker compose run --rm migrate` (bootstrapper `jarvis_runtime` idempotent via `ensureRuntimeRole`).
+7. `docker compose up -d --force-recreate api worker` (tvinger re-lesing av ny `.env`).
+8. Verifiserer FAKTISK direkte mot Postgres (egen tilkobling som runtime-rollen): `rolsuper=false`,
+   `rolbypassrls=false`, `rolcanlogin=true`, medlemskap i `jarvis_app` via `pg_auth_members` - kaster
+   hvis fortsatt usikker, ingen fake PASS.
+9. Kjører `ua2-p0-live.ts` automatisk til slutt (samme eksisterende script, urørt).
+
+Idempotent (trygt å kjøre flere ganger), ingen factory reset, ingen volume-sletting, ingen tap av
+eksisterende data.
+
+**Nye tester (§10 A-L i BO-en):**
+- `modules/core/test/runtime-role.test.ts` (6 tester, embedded Postgres): A-D (LOGIN/NOSUPERUSER/
+  NOBYPASSRLS/medlem av jarvis_app), idempotens (kjør 2x, passord oppdateres, ingen duplikat-rolle),
+  nekter jarvis_app som runtime-bruker, `assertRuntimeRoleSafe` kaster for superbruker-tilkobling,
+  §J (tenant-RLS) og §K (memory-space-RLS på `knowledge_documents`) med den bootstrappede rollen.
+- `modules/core/test/db-config-split.test.ts` (10 tester): §E/H (`configFromEnv`/`adminConfigFromEnv`
+  leser disjunkte variabelsett, aldri hverandres), §I (`assertRuntimeCredentialsConfigured` fail-closed
+  for manglende/identisk-med-admin/jarvis_app-runtime-bruker).
+- `apps/api/test/db-role-wiring.test.ts` (8 tester): §F/G/H - tekstbaserte regresjonsvakter som
+  beviser `main.ts`/`worker-main.ts` bruker `configFromEnv` (aldri `adminConfigFromEnv`) og har
+  fail-closed-kallene, `migrate-main.ts` bruker `adminConfigFromEnv` + `ensureRuntimeRole`
+  (`main.ts`/`worker-main.ts` er side-effekt-skript som kobler til DB idet de importeres - kan ikke
+  trygt importeres direkte i en test, derfor tekstbasert wiring-vakt i stedet).
+- **§L (eksisterende UA-0/UA-1/D-30-baner beholder DB-tilgang):** bevist ved at HELE den eksisterende
+  suiten (300 tester på tvers av core/memory/tool-gateway/tasks/watchdog/voice/api) fortsatt er
+  100% grønn - disse har ALLTID koblet til via en `jarvis_app`-medlem LOGIN-rolle i sitt eget
+  test-oppsett (samme mønster `ensureRuntimeRole` nå formaliserer), så uendrede grants der er allerede
+  det sterkeste beviset ingen eksisterende tilgang ble fjernet.
+
+**Sidefunn:** `modules/core`/`modules/knowledge` sine `scripts/`-mapper var ALDRI inkludert i
+`tsconfig.json` sin `include`-liste - `pnpm typecheck` har derfor stille aldri faktisk kompilert
+`ua2-p0-live.ts` eller det nye `fix-q21-runtime-role.ts` frem til nå. Lagt til `"scripts"` i begge
+sine `include`-lister (kun disse to pakkene - urelaterte pakkers `scripts/`-mapper er utenfor scope
+her og ikke rørt).
+
+**Kvalitet:** 324/324 tester (300 baseline + 24 nye), lint/typecheck/gitleaks rene.
+
+**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY - IKKE VERIFIED.** Venter på Tobias sin faktiske kjøring
+av `fix-q21-runtime-role.ts` på hosten og bekreftelse av `q21_runtime_role_safe=PASS`/
+`tenant_isolation=PASS`/`memory_space_isolation=PASS` live.
+
+## Q-21 AUTOMATISK HOST-DIAGNOSE (2026-08-15, samme dag som RLS-host-blockeren)
+
+**Bestilling:** ikke be Tobias kjøre separate SQL-/Docker-/`.env`-diagnosekommandoer - ÉN
+host-kommando (samme som før) skal automatisk avgjøre Q-21 og kjøre isolasjons-acceptance deretter.
+
+**Endring i `ua2-p0-live.ts`:** forrige rundes fiks (bootstrappet en DEDIKERT non-bypass rolle KUN
+for isolasjons-testen, uavhengig av hva `JARVIS_DB_USER` faktisk er) erstattet med en direkte
+diagnose av den FAKTISKE runtime-rollen:
+- Ny `diagnoseQ21()`-seksjon (kjøres FØRST, rett etter pgvector-sjekken) leser via `pool` selv
+  (aldri adminPool - vi diagnostiserer nettopp DENNE tilkoblingen): `current_user`/`session_user`,
+  `runtime_db_role`/`_superuser`/`_bypassrls`/`_canlogin` (fra `pg_roles`), og
+  `knowledge_documents_rls`/`_force_rls` + `knowledge_embeddings_rls`/`_force_rls` separat (fra
+  `pg_class`) - ingen produksjonsrolle endres, kun lest.
+- `q21_runtime_role_safe = PASS` krever `superuser=false OG bypassrls=false`.
+- **Trygg:** §2 (tenant/memory-space-isolasjon) kjøres nå via `sync`/`retriever` DIREKTE (samme
+  `pool` som nettopp ble bevist trygg) - ingen lenger separat testrolle. Rapporterer
+  `tenant_a_sees_tenant_b`/`tenant_b_sees_tenant_a`/`tenant_a_sees_own` og
+  `personal_sees_business`/`business_sees_personal` (innholdsbaserte, ikke rå listelengde - samme
+  presisjonsfiks som forrige runde).
+- **Ikke trygg:** isolasjons-acceptance kjøres IKKE i det hele tatt - `tenant_isolation` og
+  `memory_space_isolation` settes eksplisitt til `BLOCKED_BY_RUNTIME_ROLE` (ny `Verdict`-variant,
+  ALDRI fake PASS), med presis logget forklaring på nøyaktig hva som må fikses
+  (`JARVIS_DB_USER` → en `NOSUPERUSER NOBYPASSRLS`-rolle, medlem av `jarvis_app`).
+- `adminPool` (JARVIS_DB_ADMIN_USER/PASSWORD) brukes fortsatt, men KUN til orkestrering (kast-tenant-
+  provisjonering/opprydding) - aldri som bevis for RLS, og aldri til å endre `JARVIS_DB_USER` sin
+  rolle automatisk.
+
+**Kvalitet:** 300/300 tester (uendret - ingen ny gjenbrukbar logikk introdusert, kun harness-
+omskriving), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før: `node --env-file=.env --experimental-transform-types
+modules/knowledge/scripts/ua2-p0-live.ts`. Venter fortsatt på Tobias sin kjøring - denne runden gir
+ham nå BÅDE Q-21-svaret OG (hvis trygt) et faktisk `tenant_isolation`/`memory_space_isolation`-PASS/
+FAIL i samme output.
+
+## UA-2 P0 HOST ACCEPTANCE HARNESS + RLS HOST-BLOCKER (2026-08-15)
+
+**Harness bygget (forrige runde):** ett host-script, `modules/knowledge/scripts/ua2-p0-live.ts`
+(kjøres `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`),
+beviser hele UA-2 P0-akseptansen mot ekte lokal Postgres/pgvector + ekte filsystem på Tobias sin
+Windows-host. Gjenbruker eksisterende arkitektur (ingen alternativ testimplementasjon).
+
+**HOST-RESULTAT (Tobias, 2026-08-15):** 13/15 felt PASS live (filesystem full livssyklus, provenance,
+FTS/vector/hybrid, filsystem-allowlist/traversal-deny, GitHub live sync+resync-dedupe `created=2`→
+`unchanged=2`, `duplicate_documents=0`). `symlink_escape=SKIPPED_HOST_PERMISSION` (akseptabelt - suite
+dekker escape-DENY deterministisk). **BLOCKER:** `tenant_isolation=FAIL` (a_ser_b=2, b_ser_a=2,
+a_finner_egen=2) og `memory_space_isolation=FAIL` (personal_ser_business=3, business_finner=3).
+
+**Root cause (undersøkt, ikke gjettet):** harnesset kjørte isolasjons-ASSERTIONS via `pool`
+(`configFromEnv()`/`JARVIS_DB_USER` - SAMME tilkobling api/worker/migrate faktisk bruker) UTEN
+noensinne å verifisere rollens bypass-status. `jarvis_app` (005_rls.sql) er en `NOLOGIN`-gruppe-rolle -
+INGEN sted i den faktiske driftsveien (`migrate-main.ts`, `docker-compose.yml`) oppretter en ekte
+`LOGIN`-rolle `GRANT`et inn i den; kun suitens `beforeAll`-oppsett gjør det. Dette betyr Tobias sin
+reelle `.env` mest sannsynlig peker `JARVIS_DB_USER` på en superbruker (samme som
+`JARVIS_DB_ADMIN_USER`) for at systemet i det hele tatt skal koble til - en superbruker bypasser RLS
+UANSETT policy-korrekthet. Se **Q-21 i OPEN_QUESTIONS.md** - dette er et systembredt
+deployment-/konfigurasjonsgap (ikke UA-2-spesifikt; docker-compose/migrate-main.ts er BEVISST urørt,
+utenfor denne BO-ens scope), rapportert til Tobias for egen beslutning.
+
+**Fiks (isolasjons-seksjonen i harnesset omskrevet, resten av harnesset urørt):**
+- Bootstrapper nå en FERSK, garantert non-bypass rolle (`NOSUPERUSER NOBYPASSRLS`, `GRANT jarvis_app
+  TO ...`, samme mønster som ALLE suite-tester alltid har brukt) via en separat admin-tilkobling
+  (`JARVIS_DB_ADMIN_USER`/`_PASSWORD`, allerede i `.env.example`/docker-compose). Isolasjons-BEVISET
+  kjøres UTELUKKENDE gjennom denne rollen - aldri gjennom en tilkobling med uverifisert privilegiestatus.
+- Ny §6-diagnostikk skrevet til output FØR assertions: `rls_test_role`, `rls_role_superuser`,
+  `rls_role_bypassrls`, `knowledge_rls_enabled`, `knowledge_force_rls` - fail-closed (rapporterer
+  `FAIL` med forklaring) hvis test-rollen mot formodning skulle rapportere bypass, ELLER hvis skjemaet
+  mangler ENABLE/FORCE ROW LEVEL SECURITY (skiller eksplisitt HARNESS FEIL fra RUNTIME FEIL - RLS ble
+  ALDRI svekket for å gjøre testen grønn).
+- Ny transparens-diagnostikk for `pool` (den faktiske app-konfigurerte tilkoblingen): `configured_app_role`/
+  `_superuser`/`_bypassrls`, med eksplisitt advarsel i loggen hvis JARVIS_DB_USER selv er en
+  superbruker - direkte relevant for å tolke §1/§4/§5 sine tidligere PASS-resultater riktig (de øvde
+  aldri en cross-tenant/cross-space DENY-vei, så de er IKKE bevis på RLS-håndhevelse alene).
+- Opprydding (tenant-provisjonering/sletting av kast-tenants, sletting av synteststed-dokumenter)
+  flyttet fra `pool` til admin-tilkoblingen - `jarvis_app` har bevisst INGEN `DELETE`-grant noe sted
+  (append-only-prinsipp), så disse operasjonene var uansett aldri korrekte via app-rollen.
+- **Presisjonsfunn under regresjonstest-skrivingen:** rå listelengde (`results.length === 0`) er IKKE
+  et presist mål for "ingen lekkasje" - `LocalHashEmbedding` (enkel trigram-hash) kan legitimt gi en
+  tenants EGET nesten-like dokument som svak vektor-treffkandidat på en trigram-lik spørring om en
+  ANNEN tenants fakta, uten at RLS er brutt. Assertions i BÅDE harnesset og de nye suite-testene sjekker
+  nå om det FAKTISKE innholdet fra den andre tenanten/spacet dukker opp (`content.includes(...)`), ikke
+  bare om listen er tom - samme presiseringsmønster som allerede fantes i
+  `knowledge-fundament.test.ts` §7.G/§7.H.
+
+**Nye regresjonstester** (`modules/knowledge/test/rls-role-isolation.test.ts`, embedded Postgres, 6
+tester, dekker BO-ens §5.A-K): tenant-isolasjon via non-bypass rolle + `KnowledgeRetriever` (A-D),
+memory-space-isolasjon innen samme tenant (E-F/I), FTS-spørringen ALENE respekterer space (G),
+vektor-spørringen ALENE respekterer space (H), tombstone+isolasjon samtidig (J), og **§K: eksplisitt
+kontrast-bevis** - samme spørringstekst gir cross-tenant-data via en superbruker-tilkobling (ingen
+tenant-filter i SQL-teksten - stoler utelukkende på RLS, akkurat som `retriever.ts` er skrevet) men
+korrekt 0-treff via den non-bypass-rollen - dokumenterer eksakt bug-klassen som forårsaket
+host-blockeren, som permanent suite-bevis.
+
+**Kvalitet:** 300/300 tester (294 baseline + 6 nye), lint/typecheck/gitleaks rene. Ingen regresjon.
+
+**Status: BLOCKED - venter på Tobias sin re-kjøring** av oppdatert `ua2-p0-live.ts` på hosten.
+UA-2 P0 kan IKKE settes VERIFIED/merges før `tenant_isolation=PASS` og `memory_space_isolation=PASS`
+er bekreftet live gjennom den non-bypass-rollen.
+
+## UA-2 P0 — KNOWLEDGE INGESTION FOUNDATION (2026-08-14)
+
+**Status ved bygging: SUITE-VERIFIED, IKKE host/live-verifisert** (bygget i sky-container - ingen
+Docker, ingen ekte GitHub-PAT, ingen ekte NAS-mount tilgjengelig i byggemiljøet). **OPPDATERT
+2026-08-15: nå PRODUCTION_VERIFIED (host-bevist, run_id `778bb87d`) - se D-39 og "Q-21 CLOSURE +
+UA-2 P0 CLOSURE"-seksjonen øverst i dette dokumentet for full host-evidens.** Historisk
+suite-bygge-logg beholdt uendret under. Første byggbare UA-2-skive,
+godkjent av Tobias etter spec-runden (PR #3). Full arkitektur/rasjonale i
+[IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) (UA-2 P0-seksjonen) og
+[UA2_KNOWLEDGE_DPIA.md](UA2_KNOWLEDGE_DPIA.md).
+
+**Arkitektur (`modules/knowledge`, ny pakke `@jarvis/knowledge`):**
+- `KnowledgeSource`-kontrakt (provider-uavhengig: source_type/source_instance_id/external_id/
+  canonical_uri/title/content/content_type/content_hash/modified_at/metadata - ingen credentials i
+  kontrakten).
+- `FilesystemKnowledgeSource`: allowlistet root, `realpath()`-verifisering FØR hver fil leses (§10) -
+  path-traversal og symlink-escape til utenfor roten er strukturelt umulig, ikke bare filtrert i
+  ettertid. Tekstformater (.md/.txt/.json/.yaml/.ts/.js/.py/.sql/.html/.css); binær/OCR/PDF eksplisitt
+  utenfor P0.
+- `GithubKnowledgeSource`: går via EKSISTERENDE `ToolGateway` (samme policy/audit/credential-vei som
+  `daily-brief.ts`) - ny `read_repo_meta`-action lagt til `GithubTransport` (samme PAT/scope som
+  `read_issues`, ingen scope-utvidelse). Repo-fil-innhold IKKE bygget (transporten støtter det ikke
+  uten en større connector-endring - dokumentert som neste skive, ikke stille utelatt).
+- `KnowledgeSyncService`: idempotent sync-rapport (scanned/created/updated/unchanged/tombstoned/
+  reactivated/failed). Canonical identity = `(tenant_id, source_type, source_instance_id, external_id)`
+  UNIQUE-constraint (migrasjon `017_knowledge.sql`); `content_hash` avgjør re-embedding (aldri ved
+  uendret innhold - bevist ved å telle faktiske `embed()`-kall i test). En FEILET listing (nettverk/
+  credential) tombstoner ALDRI eksisterende dokumenter - kun en vellykket listing kan tombstone det som
+  manglet i den.
+- `KnowledgeRetriever`: FTS + vector hybrid, samme `pgvector`/`cosine_sim`-fundament som
+  `MemoryRetriever` (D-28) - INGEN ny retrieval-stack. Tombstonede dokumenter alltid ekskludert.
+  Fullstendig provenance (kilde/instans/ekstern-id/URI/hash/versjon/sist-synket/endret) på hvert
+  resultat - aldri modellgenerert.
+- Storage: `knowledge_documents`/`knowledge_embeddings`, SAMME RLS-mønster som `memory_items`
+  (tenant_id OG memory_space_id håndhevet i databasen via RESTRICTIVE policies) - ingen ny database.
+
+**Suite-verifisert (embedded Postgres + ekte filsystem-I/O, `modules/knowledge/test/`):**
+- Hele livssyklusen i én sammenhengende test: ingest → uendret resync (no-op, ingen duplikat, ingen
+  re-embedding) → endret fil (samme canonical document, ny versjon/hash) → slettet fil (tombstone, IKKE
+  hard-delete) → tombstonet dokument usynlig i retrieval → gjenopprettet fil MED samme innhold
+  (deterministisk reaktivering).
+- En feilende kilde rapporteres `failed`, tombstoner ALDRI eksisterende data ved siden av.
+- Tenant-isolasjon: tenant A finner aldri tenant B sitt innhold (og omvendt), egen kunnskap fungerer
+  normalt.
+- Memory-space-isolasjon: søk i `personal` finner aldri `business`-space-innhold.
+- Filsystem-sikkerhet: allowlistede tekstformater; symlink UT av roten hoppes over (scanningen
+  fortsetter, stopper ikke på én ondsinnet lenke); symlink INNENFOR roten fungerer normalt; `../`
+  i konfigurert path er strukturelt ufarlig (`resolve()`-basert rot).
+- GitHub-kilde: repo-metadata + issues mappes korrekt til `KnowledgeRecord`; går gjennom ekte
+  `ToolGateway`-policy/audit; manglende registrert transport gir `unknown_tool`-DENY (håndtert som
+  "ingen record", ikke krasj); full sync + idempotent resync mot embedded PG.
+- Vektor-mekanisme: `cosine_sim`-verdier for nesten-identisk innhold ligger godt over retrieverens
+  0,4-terskel, godt over urelatert innholds similarity.
+- Hybrid ranking: relevant treff rangeres øverst med korrekt provenance; urelatert innhold dominerer
+  ikke toppen.
+- **Regresjon funnet og fikset underveis:** å sette inn `read_repo_meta` MIDT i `firstWaveTools()`-
+  arrayet forskjøv posisjonsindekser to eksisterende tester i `fase7-tools.test.ts` brukte
+  (`firstWaveTools({...})[4]`/`[7]`) - flyttet til SLUTTEN av arrayet i stedet; ingen testfil endret.
+
+**IKKE host/live-verifisert (§13 i BO - krever Tobias sin host):**
+- Ekte NAS-mount som allowlistet root (kun lokale tmp-mapper i byggemiljøet).
+- Ekte GitHub-repo-sync med reell `JARVIS_GITHUB_TOKEN` (kun `FakeTransport` i suiten).
+- Ende-til-ende-demoen fra §13 kjørt PÅ HOSTEN: ingest allowlistet mappe → spør om et konkret faktum →
+  få svar med korrekt provenance → endre filen → resync → se ny versjon → slett filen → resync → se at
+  slettet dokument IKKE returneres. (Denne sekvensen ER suite-verifisert i sky-containeren mot ekte
+  lokalt filsystem + ekte embedded Postgres - se testen over - men det er IKKE det samme som å kjøre
+  det på Tobias sin faktiske host/NAS/GitHub-repo.)
+
+**Bygges IKKE i P0 (uendret fra godkjent forslag):** Knowledge Graph/GraphRAG, Obsidian/Pieces/Google
+Drive/e-post/møtetranskripsjon-ingest, OCR/vision-ingest, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesoptimalisering, skriving tilbake til kildene.
+
+**Kjent åpent gap (Q-20, ikke skjult):** kun myk sletting (tombstone) - ingen hard-delete/GDPR-
+purge-vei ennå. Dokumentert i DPIA-notatet, ikke løst her (utenfor P0-scope).
+
+**Kvalitet:** 294/294 tester (281 baseline fra D-30-lukkingen + 13 nye: filsystem-source×5,
+github-source×2, knowledge-fundament×6), lint/typecheck/gitleaks rene. Ingen regresjon i UA-0/UA-1/D-30
+(identitet, sovereign authority, Tool Gateway, minne, RLS - alle eksisterende suiter uendret grønne).
 
 ## BO-12 — D-30 VOICE FOUNDATION (2026-08-14)
 

@@ -1,0 +1,25 @@
+{
+  "name": "@jarvis/knowledge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-2 P0: Universal Knowledge Layer-fundament - kilde-uavhengig ingestion, sync/dedupe/tombstones, provenance, FTS+vector-retrieval",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

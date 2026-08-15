@@ -106,6 +106,18 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_VERCEL_TOKEN",
       output_trust: "untrusted", transport: transport("vercel")
+    },
+    {
+      // UA-2 P0: repo-metadata for kunnskaps-ingestion (samme scope som read_issues).
+      // Lagt til på SLUTTEN av arrayet med hensikt - eksisterende tester bruker
+      // posisjonsindeks (f.eks. firstWaveTools({...})[4]) inn i dette arrayet,
+      // og en innsetting midt i listen ville forskjøvet dem (regresjon funnet
+      // og fikset under denne BO-en).
+      tool_id: "github", action: "read_repo_meta", description: "Les repo-metadata (untrusted ingestion)",
+      input_schema: record({ repo: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     }
   ];
 }
