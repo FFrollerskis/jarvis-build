@@ -114,6 +114,57 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## Q-21 HOST FIX RECOVERY: ADMIN ENV BOOTSTRAP BUG (2026-08-15, samme dag)
+
+**Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` - scriptet leste `.env` (admin-credentials fantes
+og ble lest korrekt, backup skrevet, `.env` oppdatert med nye runtime-credentials), men
+`docker compose ... up -d postgres` feilet: `required variable JARVIS_DB_ADMIN_PASSWORD is missing a
+value`, til tross for at verdien FAKTISK sto riktig i `.env`.
+
+**Root cause (funnet, ikke gjettet):** `docker compose`s EGEN `${VAR}`-interpolasjon inne i selve
+compose-YAML-filen (f.eks. `POSTGRES_PASSWORD: "${JARVIS_DB_ADMIN_PASSWORD:?...}"`) bruker et ANNET
+`.env`-oppslag enn tjenestenes `env_file:`-direktiv (som eksplisitt peker på `../../.env` og alltid har
+fungert). Uten et eksplisitt `--env-file`-flagg avgjør Compose selv hvilken mappe den leter i for denne
+interpolasjonen - scriptets `execFileSync("docker", [...], {cwd: repoRoot})` med en RELATIV `-f
+infra/local/docker-compose.yml`-sti ga tvetydig/feil oppslagssted. **Fiks:** alle `docker compose`-kall
+i scriptet gir nå eksplisitt `--env-file <absolutt sti til repoRoot/.env>` - garanterer samme fil brukes
+for BÅDE `env_file:`-direktivet og compose-filens egen interpolasjon, uansett Compose-versjon eller
+"prosjektmappe"-antakelser.
+
+**Sekundær herding (BO-ens eksplisitte ønske, defense-in-depth uavhengig av root cause over):** ny
+`modules/core/scripts/lib/q21-env-recovery.ts` - rene, testbare funksjoner:
+- `resolveAdminCredentials(current, backupsNewestFirst)`: FRESH CASE (§3) - gjenkjenner
+  `JARVIS_DB_USER=postgres` i NÅVÆRENDE `.env` som admin-kandidat når ADMIN-vars mangler, ingen backup
+  nødvendig. PARTIAL-MIGRATION CASE (§2, det faktiske host-scenariet) - skanner `.env.bak.*` nyest-først,
+  først for egne ADMIN-vars, deretter for en `JARVIS_DB_USER=postgres`-verdi fra FØR en tidligere
+  (ufullstendig) kjøring byttet den. Kaster fail-closed (`q21_admin_credentials_unrecoverable`, ingen
+  gjetning) hvis INGEN kilde gir gjenopprettbare credentials.
+- `resolveRuntimeCredentials`: gjenbruker eksisterende runtime-credentials uendret på idempotent
+  re-kjøring - regenererer ALDRI passord uten grunn.
+- `validateRequiredEnv`: alle fire (`JARVIS_DB_ADMIN_USER/PASSWORD`, `JARVIS_DB_USER/PASSWORD`) MÅ
+  finnes og være ikke-tomme FØR noe skrives - kalt FØR backup/write, ikke etter.
+- `buildUpdatedEnvLines`: setter/legger til nøyaktig de fire nøklene, rører aldri andre linjer/kommentarer.
+- Hovedscriptet: backup skrives FØRST, deretter atomisk skriv (tmp-fil + `renameSync` - aldri en delvis
+  skrevet `.env` synlig for noen annen prosess), og et no-op-hurtigspor (ingen skriving i det hele tatt)
+  når `.env` allerede er komplett korrekt.
+
+**Nye tester** (`modules/core/test/q21-env-recovery.test.ts`, 15 tester, ren logikk - ingen fs/Docker/DB):
+§8.A (fresh legacy migration via nåværende `.env`), §8.B (partial-migration recovery fra nyeste/riktige
+backup, inkl. prioritet egne-ADMIN-vars > postgres-gjetning), §8.C (nekter en ikke-postgres-lik
+backup-bruker), §8.D (ingen gyldig kilde → fail-closed, eksplisitt "IKKE endret"-melding), §8.E (rene
+returverdier, ingen skjult logging-bivirkning), §8.F/§8.I (idempotent - passord uendret på gjentatt
+kjøring), §8.G (validering av komplett sett), §8.H (admin-passord bevart eksakt gjennom
+resolve+build-runden), §8.J (admin/runtime forblir distinkte verdier i sluttresultatet).
+
+**Sikkerhet (§9):** ingen `.env`/`.env.bak.*`/volumes/data slettes eller bes slettet noe sted -
+eksisterende backup er fortsatt eneste recovery-kilde, urørt av denne fiksen.
+
+**Kvalitet:** 339/339 tester (324 baseline + 15 nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring.
+
 ## Q-21 SYSTEMBRED FIKS: DB ADMIN/RUNTIME-ROLLE-SPLITT (2026-08-15)
 
 **Host-bevis (Tobias, samme dag som Q-21-diagnosen ble automatisert):**

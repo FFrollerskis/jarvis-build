@@ -9,7 +9,11 @@ Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (forme
 **Q-21 (systembredt DB admin/runtime-rolle-gap): FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-15) -
 IKKE VERIFIED ennå.** Host bekreftet at api/worker/migrate kjørte som Postgres-superbruker; fikset med
 en permanent admin/runtime-config-splitt + idempotent rolle-bootstrap + fail-closed startup-vakter +
-ett automatisert host-fiks-script. Se Q-21 i OPEN_QUESTIONS.md for full detalj.
+ett automatisert host-fiks-script. **Host-recovery-runde (samme dag):** scriptet feilet første gang
+(`docker compose` sin egen `.env`-interpolasjon fant ikke `JARVIS_DB_ADMIN_PASSWORD` selv om verdien
+faktisk sto riktig i filen) - fikset med eksplisitt `--env-file`, pluss ny fail-closed admin-credential-
+recovery fra siste `.env.bak.*` for delvis migrerte hosts. Se Q-21 i OPEN_QUESTIONS.md og
+RUNTIME_GATES.md for full detalj.
 **UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (venter på Q-21
 host-verifikasjon)**
 - 13/15 host-akseptansefelt PASS live (filesystem livssyklus, provenance, FTS/vector/hybrid,
