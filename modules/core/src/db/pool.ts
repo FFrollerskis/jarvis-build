@@ -12,13 +12,37 @@ export interface DbConfig {
   password?: string;
 }
 
+/**
+ * Q-21 (UA-2 P0 host-blocker, 2026-08-15): dette er RUNTIME-config - den appen
+ * (api/worker og andre normale prosesser) faktisk kobler til databasen med.
+ * MÅ ALDRI være en superbruker/BYPASSRLS-rolle - default-navnet er derfor en
+ * ekte bootstrappbar LOGIN-rolle (`jarvis_runtime`, se services/runtime-role.ts),
+ * IKKE `jarvis_app` (som er en NOLOGIN gruppe-rolle, 005_rls.sql - kan aldri
+ * logges inn med direkte).
+ */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): DbConfig {
   return {
     host: env["JARVIS_DB_HOST"] ?? "127.0.0.1",
     port: Number(env["JARVIS_DB_PORT"] ?? 5432),
     database: env["JARVIS_DB_NAME"] ?? "jarvis",
-    user: env["JARVIS_DB_USER"] ?? "jarvis_app",
+    user: env["JARVIS_DB_USER"] ?? "jarvis_runtime",
     ...(env["JARVIS_DB_PASSWORD"] !== undefined ? { password: env["JARVIS_DB_PASSWORD"] } : {})
+  };
+}
+
+/**
+ * Q-21: ADMIN-config - KUN for migrasjoner/bootstrap (`migrate-main.ts`), ALDRI
+ * for løpende app-runtime. Samme credential-par docker-compose sin Postgres-
+ * container selv bootstrapper med (POSTGRES_USER/PASSWORD), allerede i
+ * `.env.example`.
+ */
+export function adminConfigFromEnv(env: NodeJS.ProcessEnv = process.env): DbConfig {
+  return {
+    host: env["JARVIS_DB_HOST"] ?? "127.0.0.1",
+    port: Number(env["JARVIS_DB_PORT"] ?? 5432),
+    database: env["JARVIS_DB_NAME"] ?? "jarvis",
+    user: env["JARVIS_DB_ADMIN_USER"] ?? "postgres",
+    ...(env["JARVIS_DB_ADMIN_PASSWORD"] !== undefined ? { password: env["JARVIS_DB_ADMIN_PASSWORD"] } : {})
   };
 }
 

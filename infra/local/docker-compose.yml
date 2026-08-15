@@ -76,6 +76,13 @@ services:
 
   # One-shot migrasjoner (BO-07): kjører alle migrasjoner nøyaktig én gang før
   # api/worker starter. restart:no - avsluttet=suksess er startbetingelsen deres.
+  # Q-21 (2026-08-15): bruker ADMIN-credentials (JARVIS_DB_ADMIN_USER/PASSWORD via
+  # migrate-main.ts sin adminConfigFromEnv()) - CREATE ROLE/ALTER TABLE...ENABLE RLS/
+  # CREATE EXTENSION krever admin-privilegier. Bootstrapper SAMTIDIG den ekte
+  # jarvis_runtime-LOGIN-rollen api/worker skal bruke (ensureRuntimeRole) - se
+  # docs/OPEN_QUESTIONS.md Q-21. .env sin JARVIS_DB_USER/PASSWORD (RUNTIME, IKKE admin)
+  # flyter uendret gjennom via env_file under - koden, ikke compose, velger admin vs.
+  # runtime per tjeneste.
   migrate:
     build:
       context: ../..
@@ -92,6 +99,9 @@ services:
     restart: "no"
 
   api:
+    # Q-21: bruker RUNTIME-credentials (JARVIS_DB_USER/PASSWORD via configFromEnv()) -
+    # ALDRI JARVIS_DB_ADMIN_USER/PASSWORD. main.ts fail-closer ved oppstart hvis
+    # tilkoblingen skulle vise seg å være superuser/BYPASSRLS (assertRuntimeRoleSafe).
     build:
       context: ../..
       dockerfile: infra/local/api.Dockerfile
@@ -121,6 +131,8 @@ services:
     restart: unless-stopped
 
   worker:
+    # Q-21: samme RUNTIME-credentials som api (aldri admin) - worker-main.ts fail-closer
+    # identisk ved oppstart hvis tilkoblingen skulle vise seg å være superuser/BYPASSRLS.
     build:
       context: ../..
       dockerfile: infra/local/api.Dockerfile

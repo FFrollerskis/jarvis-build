@@ -1,6 +1,6 @@
 // Jarvis worker-prosess (BO-07): egen container/prosess som drenerer durable-køen.
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
-import { configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
+import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
@@ -22,7 +22,23 @@ import {
   ProcessSandboxRunner
 } from "@jarvis/tasks";
 
+// Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
+// en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
+function failStartup(err: unknown): never {
+  console.error(JSON.stringify({ msg: "jarvis-worker startup_failed", error: (err as Error).message }));
+  process.exit(1);
+}
+try {
+  assertRuntimeCredentialsConfigured();
+} catch (err) {
+  failStartup(err);
+}
 const pool = createPool(configFromEnv());
+try {
+  await assertRuntimeRoleSafe(pool);
+} catch (err) {
+  failStartup(err);
+}
 const queue = new PgTaskQueue(pool);
 const worker = new InProcessWorker(queue);
 

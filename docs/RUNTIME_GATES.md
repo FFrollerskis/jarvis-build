@@ -114,6 +114,103 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## Q-21 SYSTEMBRED FIKS: DB ADMIN/RUNTIME-ROLLE-SPLITT (2026-08-15)
+
+**Host-bevis (Tobias, samme dag som Q-21-diagnosen ble automatisert):**
+```
+current_user=postgres              session_user=postgres
+runtime_db_role=postgres           runtime_role_superuser=true    runtime_role_bypassrls=true    runtime_role_canlogin=true
+knowledge_documents_rls=true       knowledge_documents_force_rls=true
+knowledge_embeddings_rls=true      knowledge_embeddings_force_rls=true
+q21_runtime_role_safe=FAIL
+tenant_isolation=BLOCKED_BY_RUNTIME_ROLE     memory_space_isolation=BLOCKED_BY_RUNTIME_ROLE
+```
+**Konklusjon bekreftet:** RLS-policyene fantes og var FORCE-et - api/worker/migrate kjørte likevel som
+Postgres-superbruker (`JARVIS_DB_USER` var satt til samme verdi som `JARVIS_DB_ADMIN_USER` i den
+faktiske `.env`). Dette er en ekte systembred runtime-konfigurasjonsfeil, IKKE en UA-2-kode-bug -
+RLS er strukturelt umulig å håndheve for en superbruker/BYPASSRLS-tilkobling uansett policy-korrekthet.
+
+**Root cause (uendret fra forrige runde, nå fikset permanent):** `jarvis_app` (005_rls.sql) er en
+`NOLOGIN`-gruppe-rolle - ingen sted i den faktiske driftsveien (`migrate-main.ts`,
+`docker-compose.yml`) opprettet en ekte `LOGIN`-rolle bundet til den; kun suitens test-oppsett gjorde
+det.
+
+**Fiks - permanent admin/runtime-config-splitt (§1-§4 i BO-en):**
+- `modules/core/src/db/pool.ts`: `configFromEnv()` er RUNTIME-config (leser `JARVIS_DB_USER`/
+  `PASSWORD`, default-bruker endret fra `jarvis_app` - som aldri kunne logges inn med - til
+  `jarvis_runtime`, en ekte bootstrappbar rolle). Ny `adminConfigFromEnv()` er ADMIN-config (leser
+  `JARVIS_DB_ADMIN_USER`/`PASSWORD`) - to DISTINKTE lesere av to distinkte variabelsett, ingen
+  fallback mellom dem noe sted.
+- `modules/core/src/services/runtime-role.ts` (ny): `ensureRuntimeRole(adminPool, {user,password})` -
+  idempotent, admin-kjørbar bootstrap som sikrer `jarvis_runtime` finnes som LOGIN-rolle, eksplisitt
+  `NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE`, `GRANT`et inn i `jarvis_app` (samme grants/RLS
+  som gruppe-rollen allerede har - ingen ny parallell permission-modell). Nekter eksplisitt å
+  bootstrappe `jarvis_app` selv som runtime-bruker. `checkRuntimeRoleStatus()`/`assertRuntimeRoleSafe()`
+  (ren lesing) og `assertRuntimeCredentialsConfigured()` (fail-closed FØR tilkobling forsøkes -
+  kaster hvis `JARVIS_DB_USER` mangler, er tom, er identisk med admin-brukeren, eller er `jarvis_app`).
+- `apps/api/src/migrate-main.ts`: kjører nå på `adminConfigFromEnv()` (CREATE ROLE/ALTER TABLE...
+  ENABLE RLS/CREATE EXTENSION krever admin-privilegier) og kaller `ensureRuntimeRole()` i samme
+  kjøring - bootstrapper runtime-rollen automatisk hver gang migrasjoner kjøres, idempotent.
+- `apps/api/src/main.ts`/`worker-main.ts`: uendret på `configFromEnv()` (RUNTIME) for sin egen pool,
+  men nå med fail-closed startup-vakter (`assertRuntimeCredentialsConfigured()` FØR tilkobling,
+  `assertRuntimeRoleSafe(pool)` RETT ETTER) - prosessen logger en tydelig JSON-feil og avslutter
+  (`process.exit(1)`) i stedet for å starte videre med en usikker/manglende DB-rolle.
+- `.env.example`: `JARVIS_DB_USER` default endret til `jarvis_runtime` (var `jarvis_app` - alltid
+  ubrukelig som bokstavelig login-verdi), utvidet forklarende kommentarer om admin- vs. runtime-splitten.
+- `infra/local/docker-compose.yml`: forklarende kommentarer lagt til migrate/api/worker-tjenestene
+  (ingen funksjonell endring nødvendig - separasjonen skjer i KODEN, ikke i hvilke env-variabler hver
+  container ser, siden `configFromEnv()`/`adminConfigFromEnv()` leser disjunkte variabelsett).
+
+**Automatisert host-fiks (§5 i BO-en):** `modules/core/scripts/fix-q21-runtime-role.ts` - ÉN
+host-kommando (`node --experimental-transform-types modules/core/scripts/fix-q21-runtime-role.ts`,
+kjøres fra repo-roten PÅ HOSTEN):
+1. Leser `.env`, beholder admin-credentials uendret.
+2. Genererer trygge runtime-credentials (`jarvis_runtime` + tilfeldig passord) hvis dagens
+   `JARVIS_DB_USER` er tom, lik admin-brukeren, eller `jarvis_app`.
+3. Sikkerhetskopierer `.env` FØR endring (`*.bak.<timestamp>`).
+4. Skriver oppdatert `.env` (aldri logger passordverdien).
+5. `docker compose up -d postgres` (rører ALDRI volumes).
+6. `docker compose run --rm migrate` (bootstrapper `jarvis_runtime` idempotent via `ensureRuntimeRole`).
+7. `docker compose up -d --force-recreate api worker` (tvinger re-lesing av ny `.env`).
+8. Verifiserer FAKTISK direkte mot Postgres (egen tilkobling som runtime-rollen): `rolsuper=false`,
+   `rolbypassrls=false`, `rolcanlogin=true`, medlemskap i `jarvis_app` via `pg_auth_members` - kaster
+   hvis fortsatt usikker, ingen fake PASS.
+9. Kjører `ua2-p0-live.ts` automatisk til slutt (samme eksisterende script, urørt).
+
+Idempotent (trygt å kjøre flere ganger), ingen factory reset, ingen volume-sletting, ingen tap av
+eksisterende data.
+
+**Nye tester (§10 A-L i BO-en):**
+- `modules/core/test/runtime-role.test.ts` (6 tester, embedded Postgres): A-D (LOGIN/NOSUPERUSER/
+  NOBYPASSRLS/medlem av jarvis_app), idempotens (kjør 2x, passord oppdateres, ingen duplikat-rolle),
+  nekter jarvis_app som runtime-bruker, `assertRuntimeRoleSafe` kaster for superbruker-tilkobling,
+  §J (tenant-RLS) og §K (memory-space-RLS på `knowledge_documents`) med den bootstrappede rollen.
+- `modules/core/test/db-config-split.test.ts` (10 tester): §E/H (`configFromEnv`/`adminConfigFromEnv`
+  leser disjunkte variabelsett, aldri hverandres), §I (`assertRuntimeCredentialsConfigured` fail-closed
+  for manglende/identisk-med-admin/jarvis_app-runtime-bruker).
+- `apps/api/test/db-role-wiring.test.ts` (8 tester): §F/G/H - tekstbaserte regresjonsvakter som
+  beviser `main.ts`/`worker-main.ts` bruker `configFromEnv` (aldri `adminConfigFromEnv`) og har
+  fail-closed-kallene, `migrate-main.ts` bruker `adminConfigFromEnv` + `ensureRuntimeRole`
+  (`main.ts`/`worker-main.ts` er side-effekt-skript som kobler til DB idet de importeres - kan ikke
+  trygt importeres direkte i en test, derfor tekstbasert wiring-vakt i stedet).
+- **§L (eksisterende UA-0/UA-1/D-30-baner beholder DB-tilgang):** bevist ved at HELE den eksisterende
+  suiten (300 tester på tvers av core/memory/tool-gateway/tasks/watchdog/voice/api) fortsatt er
+  100% grønn - disse har ALLTID koblet til via en `jarvis_app`-medlem LOGIN-rolle i sitt eget
+  test-oppsett (samme mønster `ensureRuntimeRole` nå formaliserer), så uendrede grants der er allerede
+  det sterkeste beviset ingen eksisterende tilgang ble fjernet.
+
+**Sidefunn:** `modules/core`/`modules/knowledge` sine `scripts/`-mapper var ALDRI inkludert i
+`tsconfig.json` sin `include`-liste - `pnpm typecheck` har derfor stille aldri faktisk kompilert
+`ua2-p0-live.ts` eller det nye `fix-q21-runtime-role.ts` frem til nå. Lagt til `"scripts"` i begge
+sine `include`-lister (kun disse to pakkene - urelaterte pakkers `scripts/`-mapper er utenfor scope
+her og ikke rørt).
+
+**Kvalitet:** 324/324 tester (300 baseline + 24 nye), lint/typecheck/gitleaks rene.
+
+**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY - IKKE VERIFIED.** Venter på Tobias sin faktiske kjøring
+av `fix-q21-runtime-role.ts` på hosten og bekreftelse av `q21_runtime_role_safe=PASS`/
+`tenant_isolation=PASS`/`memory_space_isolation=PASS` live.
+
 ## Q-21 AUTOMATISK HOST-DIAGNOSE (2026-08-15, samme dag som RLS-host-blockeren)
 
 **Bestilling:** ikke be Tobias kjøre separate SQL-/Docker-/`.env`-diagnosekommandoer - ÉN

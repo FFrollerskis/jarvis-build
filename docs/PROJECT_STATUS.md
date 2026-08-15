@@ -6,19 +6,19 @@
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
 **D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
-**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (host-runde 2026-08-15,
-Q-21-diagnose automatisert samme dag)**
+**Q-21 (systembredt DB admin/runtime-rolle-gap): FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-15) -
+IKKE VERIFIED ennå.** Host bekreftet at api/worker/migrate kjørte som Postgres-superbruker; fikset med
+en permanent admin/runtime-config-splitt + idempotent rolle-bootstrap + fail-closed startup-vakter +
+ett automatisert host-fiks-script. Se Q-21 i OPEN_QUESTIONS.md for full detalj.
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (venter på Q-21
+host-verifikasjon)**
 - 13/15 host-akseptansefelt PASS live (filesystem livssyklus, provenance, FTS/vector/hybrid,
   filsystem-sikkerhet, GitHub live sync+dedupe). `tenant_isolation`/`memory_space_isolation` FEILET
-  live - root cause: harnesset testet isolasjon via en tilkobling med uverifisert bypass-status.
-  **Harnesset diagnostiserer nå automatisk, i ÉN kommando, om den FAKTISKE runtime-DB-rollen
-  (`JARVIS_DB_USER`) er trygg** (`q21_runtime_role_safe`) - trygg → kjører isolasjons-acceptance
-  gjennom den samme rollen; ikke trygg → rapporterer `BLOCKED_BY_RUNTIME_ROLE` eksplisitt (aldri fake
-  PASS, aldri automatisk rolleendring). **Samtidig avdekket: et systembredt (ikke UA-2-spesifikt)
-  deployment-gap** - se Q-21 i OPEN_QUESTIONS.md - som krever Tobias sin beslutning. Full evidens/fiks-detaljer:
-  docs/RUNTIME_GATES.md.
-- **Neste steg:** Tobias kjører oppdatert `ua2-p0-live.ts` på nytt. UA-2 P0 kan først settes
-  VERIFIED/merges når `tenant_isolation=PASS` og `memory_space_isolation=PASS` bekreftes live.
+  live pga. Q-21 (se over) - IKKE en UA-2-kode-bug.
+- **Neste steg:** Tobias kjører `node --experimental-transform-types
+  modules/core/scripts/fix-q21-runtime-role.ts` PÅ HOSTEN (automatiserer hele Q-21-fiksen OG kjører
+  `ua2-p0-live.ts` til slutt). UA-2 P0 kan først settes VERIFIED/merges når `q21_runtime_role_safe=PASS`
+  og `tenant_isolation=PASS`/`memory_space_isolation=PASS` bekreftes live. Full evidens: docs/RUNTIME_GATES.md.
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -187,16 +187,43 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   `modules/knowledge/test/rls-role-isolation.test.ts` (6 tester, inkl. et eksplisitt kontrast-bevis
   §K: samme spørring lekker via superbruker, ikke via non-bypass-rolle). Full detaljer:
   docs/RUNTIME_GATES.md.
+- **Q-21 AUTOMATISK DIAGNOSE (samme dag):** `ua2-p0-live.ts` diagnostiserer nå selv, i ÉN kommando,
+  om den faktiske runtime-rollen er trygg (`q21_runtime_role_safe`) og kjører isolasjons-acceptance
+  via `pool` direkte når den er det - ellers `BLOCKED_BY_RUNTIME_ROLE` (aldri fake PASS).
+- **Q-21 HOST-BEVIS (samme dag):** Tobias kjørte diagnosen live - `current_user=postgres`,
+  `runtime_role_superuser=true`, `runtime_role_bypassrls=true`, `q21_runtime_role_safe=FAIL`. Bekreftet:
+  RLS-policyene finnes og FORCE RLS er aktivt (`knowledge_documents_force_rls=true`), men
+  api/worker/migrate kjørte alle som Postgres-superbruker - en ekte systembred
+  runtime-konfigurasjonsfeil, ikke en UA-2-kode-bug.
+- **Q-21 SYSTEMBRED FIKS (denne runden):** permanent split innført i `@jarvis/core`:
+  `configFromEnv()` (RUNTIME, default `jarvis_runtime`) vs. ny `adminConfigFromEnv()` (ADMIN, leser
+  `JARVIS_DB_ADMIN_USER/PASSWORD`) - to distinkte lesere, ingen fallback mellom dem. Ny
+  `ensureRuntimeRole()` (idempotent, admin-kjørbar) bootstrapper `jarvis_runtime`
+  (LOGIN/NOSUPERUSER/NOBYPASSRLS/NOCREATEDB/NOCREATEROLE, medlem av `jarvis_app`) fra
+  `migrate-main.ts` (nå på `adminConfigFromEnv()`). `main.ts`/`worker-main.ts` fail-closed ved
+  oppstart (`assertRuntimeCredentialsConfigured`/`assertRuntimeRoleSafe`) - nekter å starte normalt
+  uten gyldige, distinkte, non-bypass runtime-credentials. `.env.example`/`docker-compose.yml`
+  oppdatert med forklarende kommentarer (ingen ny parallell config-modell - samme grants/RLS som
+  `jarvis_app` alt hadde, 005_rls.sql). **Automatisert host-fiks:**
+  `modules/core/scripts/fix-q21-runtime-role.ts` - ÉN kommando som backup-er `.env`, genererer
+  runtime-credentials, kjører migrate (bootstrapper rollen), restarter api/worker, verifiserer
+  FAKTISK trygg tilkobling direkte mot Postgres, og kjører `ua2-p0-live.ts` til slutt. Ingen
+  volumes/data røres. 24 nye tester (`modules/core/test/runtime-role.test.ts`,
+  `db-config-split.test.ts`, `apps/api/test/db-role-wiring.test.ts`) - 324/324 totalt,
+  lint/typecheck/gitleaks rene (inkl. `scripts/`-mapper nå faktisk typecheck-dekket, tidligere
+  stille utelatt). **STATUS: FIXED_SUITE / READY_FOR_HOST_VERIFY - ikke satt VERIFIED før Tobias sin
+  faktiske host-kjøring bekrefter det.**
 
 ## Blokkeringer
-**UA-2 P0 er BLOCKED** - venter på Tobias sin re-kjøring av oppdatert `ua2-p0-live.ts` på hosten
-(`tenant_isolation=PASS`/`memory_space_isolation=PASS` må bekreftes live før VERIFIED/merge), samt en
-beslutning på Q-21 (systembredt DB-rolle-gap, se OPEN_QUESTIONS.md). Manglende provider-nøkler er
-eneste gap for LIVE multi-provider-evidens. Ytelsesgjeld for voice-latens (Q-19) er åpen,
-ikke-blokkerende.
+**UA-2 P0 er BLOCKED** - Q-21 er FIXED_SUITE men IKKE host-verifisert ennå. Venter på Tobias sin
+kjøring av `modules/core/scripts/fix-q21-runtime-role.ts` på hosten (automatiserer hele fiksen +
+kjører `ua2-p0-live.ts` til slutt) - `q21_runtime_role_safe=PASS` og
+`tenant_isolation=PASS`/`memory_space_isolation=PASS` må bekreftes live før VERIFIED/merge. Manglende
+provider-nøkler er eneste gap for LIVE multi-provider-evidens. Ytelsesgjeld for voice-latens (Q-19) er
+åpen, ikke-blokkerende.
 
 ## Neste oppgave
-Avventer Tobias: (1) kjør oppdatert `ua2-p0-live.ts` på nytt og rapporter resultatet, (2) beslutning
-på Q-21 (skal en ekte non-bypass login-rolle bootstrappes i selve driftspipelinen - egen, systembred
-oppgave). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03),
-D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
+Avventer Tobias: kjør `node --experimental-transform-types modules/core/scripts/fix-q21-runtime-role.ts`
+PÅ HOSTEN (fra repo-roten) og rapporter resultatet - denne ene kommandoen fikser Q-21 OG kjører UA-2
+P0-akseptansen automatisk. Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
