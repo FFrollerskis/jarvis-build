@@ -114,6 +114,57 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## Q-21 HOST FIX RECOVERY #3: STALE MIGRATE DOCKER-IMAGE (2026-08-15, samme dag - faktisk root cause)
+
+**Host-feil:** Tobias kjørte scriptet på nytt etter runde #2-fiksen (eksplisitt `-e VARNAME`-
+overstyring til migrate). `admin_connection=PASS admin_current_user=postgres` (scriptets egen direkte
+tilkobling fungerte), men `docker compose ... run --rm migrate` feilet FORTSATT med
+`password authentication failed for user "jarvis_runtime"`.
+
+**Root cause (bekreftet fra kodeflyt, ikke gjettet):** scriptet gjorde aldri noen `docker compose
+build` FØR `run --rm migrate` - kun `up -d postgres` etterfulgt direkte av `run --rm migrate`. Docker
+Compose bygger ALDRI et image på nytt automatisk bare fordi kildekoden på disk har endret seg - kun en
+eksplisitt `build`/`--build` gjør det. Migrate-containeren kjørte dermed et EKSISTERENDE, UTDATERT
+lokalt image - fra FØR `adminConfigFromEnv()`-splitten (og trolig fra før `-e VARNAME`-fiksen) i det
+hele tatt eksisterte i kildekoden. Dette forklarer PERFEKT alle tre rundenes symptomer samtidig:
+scriptets EGEN pg-tilkobling (kjører direkte via Node, alltid fersk kildekode) beviste konsekvent at
+admin-credentials var korrekte, mens SELVE MIGRATE-CONTAINEREN kjørte en helt annen, eldre versjon av
+`migrate-main.ts` - uavhengig av hva `.env` eller `-e`-flagg noensinne inneholdt. Runde #2 sin
+`-e VARNAME`-fiks var derfor irrelevant fra start: den utdaterte containerens gamle kode leste
+sannsynligvis aldri `JARVIS_DB_ADMIN_USER` i det hele tatt.
+
+**Fiks:**
+- Ny `buildImageBuildArgs(composeArgs)` (`lib/q21-env-recovery.ts`): `docker compose --env-file <env>
+  -f <compose> build migrate api worker`. Kjøres UBETINGET (ingen sjekk som kunne hoppe over den) RETT
+  ETTER admin-precheck og FØR migrate kjøres - "always rebuild" er den minste robuste løsningen
+  (BO-ens eget ord), ingen SHA-labels eller annen overengineering.
+- `-e VARNAME`-overstyringen fra runde #2 er FJERNET igjen (§3 i BO-en - unødvendig ambiguitet når
+  imaget garantert er ferskt bygget): `buildMigrateRunArgs` er tilbake til den enkle formen
+  (`run --rm migrate`, kun service+`--env-file`, ingen egne miljøoverstyringer). `run()`-funksjonen i
+  hovedscriptet mistet dermed sin `extraEnv`-parameter helt.
+- Ny operasjonsrekkefølge: postgres opp → admin-precheck → **bygg migrate/api/worker** → kjør migrate
+  → restart api/worker (fra de FERSKT bygde imagene) → runtime-verifikasjon → `ua2-p0-live.ts`.
+- `migrate_effective_db_user`-diagnostikken fra runde #2 beholdes uendret - den er nå den DEFINITIVE
+  testen: viser den fortsatt IKKE `postgres` på neste host-kjøring til tross for et garantert ferskt
+  image, er det sterkt bevis for en helt annen årsak (f.eks. en Postgres-side `pg_hba.conf`-anomali).
+
+**Nye tester** (`modules/core/test/q21-migrate-role-wiring.test.ts`, utvidet til 19 tester): §10.A/B
+(rebuild skjer FØR migrate OG FØR api/worker restartes), §10.C (rebuild-steget er ubetinget, ingen
+vei rundt det), §10.D/E (migrate-kommandoen er tilbake til den enkle formen, ingen `-e`-ambiguitet),
+§10.F (uendret grunnsannhets-diagnostikk), §10.G (ingen credential-verdier logges noe sted, `run()`
+tar ikke lenger imot en verdi-parameter i det hele tatt), §10.H (full operasjonsrekkefølge inkl. det
+nye build-steget, idempotent rerun).
+
+**Regresjon fanget og fikset underveis:** fjerning av `buildMigrateRunArgs` sin gamle `-e`-variant og
+`MIGRATE_ADMIN_ENV_KEYS`-eksporten krevde oppdatering av eksisterende tester fra forrige runde som
+fortsatt refererte til dem.
+
+**Kvalitet:** 358/358 tester (352 baseline + 6 netto nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring.
+
 ## Q-21 HOST FIX RECOVERY #2: MIGRATE BRUKER FEIL DB-ROLLE (2026-08-15, samme dag)
 
 **Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` på nytt. Scriptet rapporterte korrekt

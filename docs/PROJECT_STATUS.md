@@ -18,8 +18,15 @@ for korrekt `.env` - ukjent Docker Compose-presedens-tvetydighet for `docker com
 100% bekreftbar uten host-tilgang). Fikset ved å fjerne HELE tvetydighetsklassen: admin-credentials
 sendes nå eksplisitt via `-e VARNAME` til migrate-kallet (aldri via `.env`/`env_file`-oppløsning for
 det kallet), pluss en admin-tilkoblings-precheck FØR migrate kjøres og en `migrate_effective_db_user`-
-grunnsannhetsdiagnostikk skrevet av migrate-prosessen selv. Se Q-21 i OPEN_QUESTIONS.md og
-RUNTIME_GATES.md for full detalj.
+grunnsannhetsdiagnostikk skrevet av migrate-prosessen selv. **Host-recovery-runde 3 (samme dag,
+faktisk root cause):** `-e VARNAME`-fiksen løste IKKE problemet - migrate autentiserte fortsatt som
+`jarvis_runtime`. Faktisk årsak: `docker compose run --rm migrate` gjenbrukte et EKSISTERENDE,
+UTDATERT lokalt Docker-image (Compose bygger aldri automatisk på nytt bare fordi kildekoden har
+endret seg) - containeren kjørte en eldre `migrate-main.ts` fra FØR admin/runtime-splitten. Fikset
+ved å ALLTID bygge migrate/api/worker fra aktuell checkout (`docker compose build`) FØR de
+kjøres/restartes, hver eneste gang scriptet kjører - fjernet samtidig `-e VARNAME`-ambiguiteten
+igjen (unødvendig når imaget garantert er ferskt). Se Q-21 i OPEN_QUESTIONS.md og RUNTIME_GATES.md
+for full detalj.
 **UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (venter på Q-21
 host-verifikasjon)**
 - 13/15 host-akseptansefelt PASS live (filesystem livssyklus, provenance, FTS/vector/hybrid,

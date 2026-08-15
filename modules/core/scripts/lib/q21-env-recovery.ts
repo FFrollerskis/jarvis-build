@@ -153,20 +153,29 @@ export function sortBackupFilenamesNewestFirst(filenames: string[]): string[] {
 }
 
 /**
- * Q-21 HOST RECOVERY #2 (2026-08-15): migrate autentiserte som `jarvis_runtime`
- * til tross for at `.env` (bekreftet av scriptets egen log) hadde
- * `JARVIS_DB_ADMIN_USER=postgres` korrekt satt - en `docker compose run`-spesifikk
- * miljøvariabel-presedens-tvetydighet mellom `env_file:` og shell-arv kunne ikke
- * bekreftes med sikkerhet uten host-tilgang. Fjerner HELE tvetydighetsklassen:
- * disse to nøklene sendes ALLTID eksplisitt via `-e VARNAME` (BAR form - Compose
- * leser da fra DEN KALLENDE PROSESSENS (docker-CLI-ets) eget miljø, som scriptet
- * selv kontrollerer via `execFileSync` sin `env`-opsjon) - ALDRI via `.env`/
- * `env_file:`-oppløsning for akkurat dette ene kallet. Selve passordVERDIEN
- * finnes ALDRI i denne pure funksjonens returverdi (kun nøkkelNAVN) - trygt å
- * logge hele args-arrayet uten fare for lekkasje.
+ * Q-21 HOST RECOVERY #3 (2026-08-15): host-runde #2 sin `-e VARNAME`-fiks
+ * (bar form, leser fra kallende prosess sitt miljø) løste IKKE problemet -
+ * `migrate` autentiserte fortsatt som `jarvis_runtime`. Sterkeste gjenværende
+ * forklaring: `docker compose run --rm migrate` gjenbrukte et EKSISTERENDE,
+ * UTDATERT lokalt image (Docker Compose bygger ALDRI automatisk på nytt bare
+ * fordi kildekoden på disk har endret seg - kun `--build`/`build`-kommandoen
+ * gjør det) - containeren kjørte dermed en ELDRE `migrate-main.ts` som aldri
+ * hadde `adminConfigFromEnv()`-splitten i det hele tatt. Dette forklarer alt:
+ * scriptets EGEN direkte pg-tilkobling (kjører rett fra Node, alltid fersk
+ * kildekode) beviste `admin_connection=PASS`, mens SELVE CONTAINEREN kjørte
+ * helt annen, utdatert logikk.
+ *
+ * Fiksen fjerner `-e VARNAME`-ambiguiteten (§3 i BO-en - unødvendig når
+ * imaget garantert er ferskt) og garanterer i stedet et FERSKT bygg av
+ * migrate/api/worker fra AKTUELL checkout FØR noen av dem kjøres, hver eneste
+ * gang scriptet kjører - "always rebuild" er den minste robuste løsningen
+ * (BO-ens eget ord), ingen SHA-labels/overengineering.
  */
-export const MIGRATE_ADMIN_ENV_KEYS = ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD"] as const;
+export function buildImageBuildArgs(composeArgs: string[]): string[] {
+  return [...composeArgs, "build", "migrate", "api", "worker"];
+}
 
+/** Ingen `-e`-overstyring lenger - service+`--env-file` er tilstrekkelig når imaget garantert er ferskt bygget. */
 export function buildMigrateRunArgs(composeArgs: string[]): string[] {
-  return [...composeArgs, "run", "--rm", ...MIGRATE_ADMIN_ENV_KEYS.flatMap((key) => ["-e", key]), "migrate"];
+  return [...composeArgs, "run", "--rm", "migrate"];
 }

@@ -3,8 +3,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { adminConfigFromEnv, configFromEnv } from "../src/db/pool.ts";
 import {
+  buildImageBuildArgs,
   buildMigrateRunArgs,
-  MIGRATE_ADMIN_ENV_KEYS,
   resolveAdminCredentials,
   resolveRuntimeCredentials
 } from "../scripts/lib/q21-env-recovery.ts";
@@ -99,28 +99,93 @@ describe("§9.G: partial host rerun (host-feilens eksakte scenario) er idempoten
   });
 });
 
-describe("§9.H/§9.J: full operasjonsrekkefølge i fix-q21-runtime-role.ts er korrekt", () => {
+describe("§10.A/§10.B/§10.C: migrate/api/worker bygges fra AKTUELL checkout FØR de kjøres (stale-image-fiks)", () => {
+  it("buildImageBuildArgs bygger nøyaktig migrate+api+worker, ingen andre tjenester", () => {
+    const args = buildImageBuildArgs(["compose", "--env-file", "/repo/.env", "-f", "/repo/compose.yml"]);
+    expect(args).toEqual(["compose", "--env-file", "/repo/.env", "-f", "/repo/compose.yml", "build", "migrate", "api", "worker"]);
+  });
+
+  it("§10.A/§10.B: buildImageBuildArgs (rebuild) kalles FØR buildMigrateRunArgs (migrate) og FØR api/worker restartes", () => {
+    const source = readSource("../scripts/fix-q21-runtime-role.ts");
+    const buildIdx = source.indexOf("buildImageBuildArgs(composeArgs)");
+    const migrateRunIdx = source.indexOf("buildMigrateRunArgs(composeArgs)");
+    const apiWorkerRestartIdx = source.indexOf('"--force-recreate", "api", "worker"');
+    expect(buildIdx).toBeGreaterThan(-1);
+    expect(migrateRunIdx).toBeGreaterThan(-1);
+    expect(apiWorkerRestartIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeLessThan(migrateRunIdx); // §10.A: rebygget FØR migrate kjøres
+    expect(buildIdx).toBeLessThan(apiWorkerRestartIdx); // §10.B: rebygget FØR api/worker restartes
+  });
+
+  it("§10.C: build-steget kjøres UBETINGET hver kjøring - ingen sjekk som kunne hoppe over det og gjenbruke et eksisterende image", () => {
+    const source = readSource("../scripts/fix-q21-runtime-role.ts");
+    // run(buildImageBuildArgs(...)) skal stå som et direkte, ubetinget kall - ikke inni en
+    // if/condition som kunne latt et stale image slippe gjennom (nøyaktig forrige host-bug).
+    expect(source).toMatch(/^\s*run\(buildImageBuildArgs\(composeArgs\)\);\s*$/m);
+  });
+});
+
+describe("§10.D/§10.E: migrate-kommandoen bruker korrekt env-wiring, ingen '-e NAME'-ambiguitet", () => {
+  it("buildMigrateRunArgs er nå den enkle formen - kun service+--env-file, ingen -e-overstyring", () => {
+    const args = buildMigrateRunArgs(["compose", "--env-file", "/repo/.env", "-f", "/repo/compose.yml"]);
+    expect(args).toEqual(["compose", "--env-file", "/repo/.env", "-f", "/repo/compose.yml", "run", "--rm", "migrate"]);
+    expect(args).not.toContain("-e"); // §10.E: bar '-e NAME'-ambiguiteten er fjernet
+  });
+
+  it("fix-q21-runtime-role.ts kaller run() uten noen ekstra miljøparameter til migrate-kallet", () => {
+    const source = readSource("../scripts/fix-q21-runtime-role.ts");
+    expect(source).toMatch(/run\(buildMigrateRunArgs\(composeArgs\)\);/);
+  });
+});
+
+describe("§10.F: migrate_effective_db_user grunnsannhets-diagnostikk (uendret fra forrige runde)", () => {
+  it("skrives av migrate-main.ts FØR runMigrations, kun brukernavn - aldri passord", () => {
+    const source = readSource("../../../apps/api/src/migrate-main.ts");
+    expect(source).toMatch(/console\.log\(`migrate_effective_db_user=\$\{resolvedAdminConfig\.user\}`\)/);
+    expect(source).not.toMatch(/migrate_effective_db_user.*password/i);
+  });
+});
+
+describe("§10.G: passord logges aldri noe sted i host-scriptet", () => {
+  it("run() logger KUN args - aldri en credential-verdi", () => {
+    const source = readSource("../scripts/fix-q21-runtime-role.ts");
+    expect(source).toMatch(/log\(`\$ docker \$\{args\.join\(" "\)\}`\)/);
+    expect(source).not.toMatch(/log\([^)]*adminPassword[^)]*\)/);
+    expect(source).not.toMatch(/log\([^)]*runtimePassword[^)]*\)/);
+  });
+
+  it("run() tar ikke lenger imot en ekstra miljø-/verdi-parameter i det hele tatt (fjernet sammen med -e-ambiguiteten)", () => {
+    const source = readSource("../scripts/fix-q21-runtime-role.ts");
+    expect(source).toMatch(/function run\(args: string\[\]\): void \{/);
+  });
+});
+
+describe("§10.H/§9.H/§9.J: full operasjonsrekkefølge i fix-q21-runtime-role.ts er korrekt", () => {
   const source = readSource("../scripts/fix-q21-runtime-role.ts");
 
-  it("admin-tilkoblings-precheck skjer FØR migrate kjøres, som skjer FØR runtime-verifikasjon", () => {
+  it("admin-precheck → rebuild → migrate → api/worker restart → runtime-verifikasjon, i rekkefølge", () => {
     const adminPrecheckIdx = source.indexOf("admin_connection=PASS");
+    const buildIdx = source.indexOf("buildImageBuildArgs(composeArgs)");
     const migrateRunIdx = source.indexOf("buildMigrateRunArgs(composeArgs)");
     const runtimeCheckIdx = source.indexOf("runtime_connection=");
     expect(adminPrecheckIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeGreaterThan(-1);
     expect(migrateRunIdx).toBeGreaterThan(-1);
     expect(runtimeCheckIdx).toBeGreaterThan(-1);
-    expect(adminPrecheckIdx).toBeLessThan(migrateRunIdx); // §9.H: admin bevist FØR migrate (som setter runtime-passordet)
-    expect(migrateRunIdx).toBeLessThan(runtimeCheckIdx); // runtime-passordet er satt (migrate kjørt) FØR vi prøver å autentisere som det
+    expect(adminPrecheckIdx).toBeLessThan(buildIdx);
+    expect(buildIdx).toBeLessThan(migrateRunIdx);
+    expect(migrateRunIdx).toBeLessThan(runtimeCheckIdx);
   });
 
-  it("full rekkefølge: .env-resolve → validering → postgres opp → admin-precheck → migrate → api/worker restart → runtime-verifikasjon → ua2-p0-live.ts", () => {
+  it("full rekkefølge: .env-resolve → validering → postgres opp → admin-precheck → rebuild → migrate → api/worker restart → runtime-verifikasjon → ua2-p0-live.ts", () => {
     const idx = (needle: string) => source.indexOf(needle);
     const order = [
       idx("resolveAdminCredentials("),
       idx("resolveRuntimeCredentials("),
       idx("validateRequiredEnv("),
       idx('"up", "-d", "postgres"'),
-      idx("admin_connection=PASS"),
+      idx("log(`admin_connection=PASS"),
+      idx("buildImageBuildArgs(composeArgs)"),
       idx("buildMigrateRunArgs(composeArgs)"),
       idx('"--force-recreate", "api", "worker"'),
       idx("runtime_connection="),
@@ -131,39 +196,20 @@ describe("§9.H/§9.J: full operasjonsrekkefølge i fix-q21-runtime-role.ts er k
       expect(order[i]!).toBeGreaterThan(order[i - 1]!);
     }
   });
-});
 
-describe("§9.I: safe diagnostics - migrate-credential-passing eksponerer aldri passordverdier", () => {
-  it("buildMigrateRunArgs returnerer KUN nøkkelnavn (bar '-e VARNAME'-form), aldri en verdi", () => {
-    const args = buildMigrateRunArgs(["compose", "--env-file", "/repo/.env", "-f", "/repo/compose.yml"]);
-    expect(args).toEqual([
-      "compose",
-      "--env-file",
-      "/repo/.env",
-      "-f",
-      "/repo/compose.yml",
-      "run",
-      "--rm",
-      "-e",
-      "JARVIS_DB_ADMIN_USER",
-      "-e",
-      "JARVIS_DB_ADMIN_PASSWORD",
-      "migrate"
-    ]);
-    // Ingen del av args-arrayet inneholder et "=" (som ville indikert en KEY=VALUE-form
-    // der en verdi kunne lekket) - kun bare nøkkelnavn.
-    expect(args.some((a) => a.includes("="))).toBe(false);
-  });
-
-  it("MIGRATE_ADMIN_ENV_KEYS er nøyaktig de to admin-nøklene, ingen andre/uventede felt", () => {
-    expect(MIGRATE_ADMIN_ENV_KEYS).toEqual(["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD"]);
-  });
-
-  it("fix-q21-runtime-role.ts logger aldri en passordverdi direkte - kun via extraEnv, aldri i loggede args", () => {
-    const source = readSource("../scripts/fix-q21-runtime-role.ts");
-    // run()-funksjonen logger KUN args, aldri extraEnv - passordene når aldri log()/console.
-    expect(source).toMatch(/log\(`\$ docker \$\{args\.join\(" "\)\}`\)/);
-    expect(source).not.toMatch(/log\([^)]*adminPassword[^)]*\)/);
-    expect(source).not.toMatch(/log\([^)]*runtimePassword[^)]*\)/);
+  it("§9.G/idempotent rerun: gjentatt kjøring med allerede-korrekt .env gir samme admin/runtime-resultat (ingen re-generering)", () => {
+    const current = {
+      JARVIS_DB_ADMIN_USER: "postgres",
+      JARVIS_DB_ADMIN_PASSWORD: "pw-admin-stable",
+      JARVIS_DB_USER: "jarvis_runtime",
+      JARVIS_DB_PASSWORD: "pw-runtime-stable"
+    };
+    const admin1 = resolveAdminCredentials(current, []);
+    const runtime1 = resolveRuntimeCredentials(current, admin1.adminUser, () => "SKAL-ALDRI-BRUKES");
+    const admin2 = resolveAdminCredentials(current, []);
+    const runtime2 = resolveRuntimeCredentials(current, admin2.adminUser, () => "SKAL-ALDRI-BRUKES");
+    expect(admin1).toEqual(admin2);
+    expect(runtime1).toEqual(runtime2);
+    expect(runtime1.changed).toBe(false);
   });
 });
