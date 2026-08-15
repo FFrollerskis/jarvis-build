@@ -114,6 +114,41 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## Q-21 AUTOMATISK HOST-DIAGNOSE (2026-08-15, samme dag som RLS-host-blockeren)
+
+**Bestilling:** ikke be Tobias kjøre separate SQL-/Docker-/`.env`-diagnosekommandoer - ÉN
+host-kommando (samme som før) skal automatisk avgjøre Q-21 og kjøre isolasjons-acceptance deretter.
+
+**Endring i `ua2-p0-live.ts`:** forrige rundes fiks (bootstrappet en DEDIKERT non-bypass rolle KUN
+for isolasjons-testen, uavhengig av hva `JARVIS_DB_USER` faktisk er) erstattet med en direkte
+diagnose av den FAKTISKE runtime-rollen:
+- Ny `diagnoseQ21()`-seksjon (kjøres FØRST, rett etter pgvector-sjekken) leser via `pool` selv
+  (aldri adminPool - vi diagnostiserer nettopp DENNE tilkoblingen): `current_user`/`session_user`,
+  `runtime_db_role`/`_superuser`/`_bypassrls`/`_canlogin` (fra `pg_roles`), og
+  `knowledge_documents_rls`/`_force_rls` + `knowledge_embeddings_rls`/`_force_rls` separat (fra
+  `pg_class`) - ingen produksjonsrolle endres, kun lest.
+- `q21_runtime_role_safe = PASS` krever `superuser=false OG bypassrls=false`.
+- **Trygg:** §2 (tenant/memory-space-isolasjon) kjøres nå via `sync`/`retriever` DIREKTE (samme
+  `pool` som nettopp ble bevist trygg) - ingen lenger separat testrolle. Rapporterer
+  `tenant_a_sees_tenant_b`/`tenant_b_sees_tenant_a`/`tenant_a_sees_own` og
+  `personal_sees_business`/`business_sees_personal` (innholdsbaserte, ikke rå listelengde - samme
+  presisjonsfiks som forrige runde).
+- **Ikke trygg:** isolasjons-acceptance kjøres IKKE i det hele tatt - `tenant_isolation` og
+  `memory_space_isolation` settes eksplisitt til `BLOCKED_BY_RUNTIME_ROLE` (ny `Verdict`-variant,
+  ALDRI fake PASS), med presis logget forklaring på nøyaktig hva som må fikses
+  (`JARVIS_DB_USER` → en `NOSUPERUSER NOBYPASSRLS`-rolle, medlem av `jarvis_app`).
+- `adminPool` (JARVIS_DB_ADMIN_USER/PASSWORD) brukes fortsatt, men KUN til orkestrering (kast-tenant-
+  provisjonering/opprydding) - aldri som bevis for RLS, og aldri til å endre `JARVIS_DB_USER` sin
+  rolle automatisk.
+
+**Kvalitet:** 300/300 tester (uendret - ingen ny gjenbrukbar logikk introdusert, kun harness-
+omskriving), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før: `node --env-file=.env --experimental-transform-types
+modules/knowledge/scripts/ua2-p0-live.ts`. Venter fortsatt på Tobias sin kjøring - denne runden gir
+ham nå BÅDE Q-21-svaret OG (hvis trygt) et faktisk `tenant_isolation`/`memory_space_isolation`-PASS/
+FAIL i samme output.
+
 ## UA-2 P0 HOST ACCEPTANCE HARNESS + RLS HOST-BLOCKER (2026-08-15)
 
 **Harness bygget (forrige runde):** ett host-script, `modules/knowledge/scripts/ua2-p0-live.ts`

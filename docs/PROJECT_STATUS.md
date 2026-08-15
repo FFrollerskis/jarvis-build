@@ -6,13 +6,16 @@
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
 **D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
-**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (host-runde 2026-08-15)**
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (host-runde 2026-08-15,
+Q-21-diagnose automatisert samme dag)**
 - 13/15 host-akseptansefelt PASS live (filesystem livssyklus, provenance, FTS/vector/hybrid,
   filsystem-sikkerhet, GitHub live sync+dedupe). `tenant_isolation`/`memory_space_isolation` FEILET
-  live - root cause funnet og fikset (harnesset testet isolasjon via en tilkobling med uverifisert
-  bypass-status; fikset til å bruke en garantert non-bypass rolle). **Samtidig avdekket: et
-  systembredt (ikke UA-2-spesifikt) deployment-gap** - se Q-21 i OPEN_QUESTIONS.md - som krever
-  Tobias sin beslutning før neste host-kjøring regnes som endelig bevis. Full evidens/fiks-detaljer:
+  live - root cause: harnesset testet isolasjon via en tilkobling med uverifisert bypass-status.
+  **Harnesset diagnostiserer nå automatisk, i ÉN kommando, om den FAKTISKE runtime-DB-rollen
+  (`JARVIS_DB_USER`) er trygg** (`q21_runtime_role_safe`) - trygg → kjører isolasjons-acceptance
+  gjennom den samme rollen; ikke trygg → rapporterer `BLOCKED_BY_RUNTIME_ROLE` eksplisitt (aldri fake
+  PASS, aldri automatisk rolleendring). **Samtidig avdekket: et systembredt (ikke UA-2-spesifikt)
+  deployment-gap** - se Q-21 i OPEN_QUESTIONS.md - som krever Tobias sin beslutning. Full evidens/fiks-detaljer:
   docs/RUNTIME_GATES.md.
 - **Neste steg:** Tobias kjører oppdatert `ua2-p0-live.ts` på nytt. UA-2 P0 kan først settes
   VERIFIED/merges når `tenant_isolation=PASS` og `memory_space_isolation=PASS` bekreftes live.
