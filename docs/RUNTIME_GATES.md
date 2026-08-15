@@ -15,6 +15,8 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-AUTHORITY | PARTIAL_RUNTIME | **Implementert 2026-08-13:** `resolveAuthorityMode` (SOVEREIGN for owner-tenant, delegat arver aldri), sovereign klasse C/D uten approval, D-pipeline (preflight→state readback→before/after→recovery-snapshot→audit), OwnerControls (pause/freeze/revoke) håndhevet i policy+gateway. Evidens: `modules/tool-gateway/test/ua0-sovereign.test.ts` (pnpm test → 128/128). Live-verifikasjon mot ekte connectors gjenstår |
 | UA0-PRIVACY | PARTIAL_RUNTIME | Tenant+space-RLS, karantene, injection-vern bevist i suiten; live-datastrøm gjenstår |
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
+| Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
+| UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
@@ -113,6 +115,106 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 **Owner-seed:** fra BO-08 automatisk og idempotent i `apps/api/src/migrate-main.ts` (one-shot
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
+
+## Q-21 CLOSURE + UA-2 P0 CLOSURE: HOST VERIFIED (2026-08-15, run_id `778bb87d`)
+
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/fix-q21-runtime-role.ts`
+på sin faktiske Windows-host - GRØNT resultat, hele kjeden i én kommando.**
+
+### Q-21 (D-38): DB admin/runtime-rolle-splitt - VERIFIED
+
+```
+migrate_effective_db_user=postgres
+
+runtime_connection=PASS
+runtime_current_user=jarvis_runtime
+runtime_role_superuser=false
+runtime_role_bypassrls=false
+runtime_role_canlogin=true
+runtime_role_member_jarvis_app=true
+
+q21_runtime_role_safe=PASS
+```
+
+Bevist LIVE, ikke bare i kode/suite:
+- **Migrate/admin-tilkoblingen** bruker `postgres` (admin-rollen) - ALDRI runtime-rollen.
+- **API/worker/runtime**-tilkoblingen bruker `jarvis_runtime` - ALDRI admin-rollen.
+- `jarvis_runtime` er faktisk `NOSUPERUSER` (`runtime_role_superuser=false`).
+- `jarvis_runtime` er faktisk `NOBYPASSRLS` (`runtime_role_bypassrls=false`).
+- `jarvis_runtime` er en ekte `LOGIN`-rolle (`runtime_role_canlogin=true`).
+- `jarvis_runtime` er bevist medlem av `jarvis_app` (`runtime_role_member_jarvis_app=true`) - arver
+  samme grants for identity/sessions/messages/tasks/memory/approvals/devices/tool-audit/cost-events/
+  knowledge som resten av systemet alltid har forutsatt (005_rls.sql), ingen ny permission-modell.
+
+### RLS - tenant + memory-space isolasjon - VERIFIED LIVE
+
+```
+tenant_a_sees_tenant_b=0
+tenant_b_sees_tenant_a=0
+tenant_a_sees_own=1
+
+personal_sees_business=0
+business_sees_personal=0
+
+tenant_isolation=PASS
+memory_space_isolation=PASS
+```
+
+Dette er den FAKTISKE RLS-DENY-veien - forrige host-runde (2026-08-15, tidligere samme dag) beviste at
+denne EKSAKT samme sjekken feilet (`BLOCKED_BY_RUNTIME_ROLE`) mens systemet kjørte som superbruker.
+Nå bevist PASS gjennom den korrekte, non-bypass `jarvis_runtime`-rollen.
+
+### UA-2 P0 (D-39): Knowledge Ingestion Foundation - VERIFIED/COMPLETE
+
+```
+filesystem_ingest=PASS          unchanged_resync=PASS       update_same_canonical=PASS
+tombstone=PASS                  reactivation=PASS            provenance=PASS
+fts=PASS                        vector=PASS                  hybrid=PASS
+filesystem_allowlist=PASS       traversal_deny=PASS          symlink_escape=SKIPPED_HOST_PERMISSION
+github_live=PASS                duplicate_documents=0
+
+hard_fail=false
+```
+
+Alle P0-akseptansekriteriene fra BO-en (§13 i opprinnelig byggeordre) er nå host-verifisert mot
+Tobias sin FAKTISKE lokale Postgres/pgvector, ekte filsystem, og et ekte GitHub-repo (`github_live=PASS`,
+`duplicate_documents=0` - ingen duplikater ved resync):
+- Filesystem full livssyklus: ingest → uendret resync (no-op) → endring (samme canonical document, ny
+  versjon) → sletting (tombstone) → gjenoppdukking (deterministisk reaktivering) - alle PASS.
+- Ekte FTS + vektor + hybrid retrieval mot ekte pgvector (ikke embedded-test-Postgres) - alle PASS.
+- Filsystem-sikkerhet: allowlistet root + `../`-traversal-nøytralisering - begge PASS.
+- GitHub live-kilde: repo-metadata/issues faktisk hentet og synkronisert via ekte credentials.
+- Tenant- og memory-space-isolasjon: se Q-21-seksjonen over (samme host-kjøring, samme bevis).
+
+**`symlink_escape=SKIPPED_HOST_PERMISSION` - eksplisitt IKKE et live-PASS.** Windows-hosten tillot ikke
+symlink-opprettelse uten administratorrettigheter i denne kjøringen, så harnesset rapporterte ærlig
+SKIPPED i stedet for å late som en test kjørte. Symlink-escape-DENY-mekanismen (samme
+`realpath()`-baserte sjekk som allowlist/traversal) er FORTSATT fullt suite-bevist
+(`modules/knowledge/test/filesystem-source.test.ts`, embedded Postgres + ekte filsystem-I/O) - dette er
+en dokumentert host-begrensning, ikke en udekket sikkerhetssjekk.
+
+**Fortsatt bevisst utenfor P0-scope (uendret):** kun myk sletting/tombstone (Q-20 - ingen GDPR
+hard-delete-vei bygget ennå), Knowledge Graph/GraphRAG, Obsidian/Pieces/Drive/e-post/
+møtetranskripsjon-ingest, OCR/vision, autonom web-crawling, UA-3-forretningslogikk,
+voice-ytelsesoptimalisering, skriving tilbake til kildene.
+
+### Reisen til dette punktet (tre host-recovery-runder, samme dag)
+
+1. **Runde 1:** `docker compose up -d postgres` feilet - Compose sin egen `.env`-interpolasjon fant
+   ikke `JARVIS_DB_ADMIN_PASSWORD` selv om verdien var korrekt i filen. Fikset med eksplisitt
+   `--env-file`.
+2. **Runde 2:** migrate autentiserte likevel som `jarvis_runtime` - prøvd fikset med eksplisitt
+   `-e VARNAME`-overstyring av miljøvariabler til migrate-kallet.
+3. **Runde 3 (faktisk root cause):** `-e`-fiksen løste det ikke - migrate-containeren kjørte et
+   EKSISTERENDE, UTDATERT Docker-image (Compose bygger aldri automatisk på nytt ved kildekodeendring).
+   Fikset ved å ALLTID bygge migrate/api/worker fra aktuell checkout FØR de kjøres/restartes, hver
+   eneste gang scriptet kjører.
+
+Denne runden (4.) bekrefter at runde 3 sin fiks faktisk var den avgjørende: `migrate_effective_db_user`
+viser nå korrekt `postgres`, og hele kjeden - Q-21 OG UA-2 P0 - er grønn i én sammenhengende
+host-kjøring.
+
+**Status: Q-21 = VERIFIED/CLOSED. UA-2 P0 = VERIFIED/COMPLETE.** PR #3 klargjøres for merge til `main`.
 
 ## Q-21 HOST FIX RECOVERY #3: STALE MIGRATE DOCKER-IMAGE (2026-08-15, samme dag - faktisk root cause)
 
@@ -478,8 +580,11 @@ er bekreftet live gjennom den non-bypass-rollen.
 
 ## UA-2 P0 — KNOWLEDGE INGESTION FOUNDATION (2026-08-14)
 
-**Status: SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container - ingen Docker, ingen
-ekte GitHub-PAT, ingen ekte NAS-mount tilgjengelig i byggemiljøet). Første byggbare UA-2-skive,
+**Status ved bygging: SUITE-VERIFIED, IKKE host/live-verifisert** (bygget i sky-container - ingen
+Docker, ingen ekte GitHub-PAT, ingen ekte NAS-mount tilgjengelig i byggemiljøet). **OPPDATERT
+2026-08-15: nå PRODUCTION_VERIFIED (host-bevist, run_id `778bb87d`) - se D-39 og "Q-21 CLOSURE +
+UA-2 P0 CLOSURE"-seksjonen øverst i dette dokumentet for full host-evidens.** Historisk
+suite-bygge-logg beholdt uendret under. Første byggbare UA-2-skive,
 godkjent av Tobias etter spec-runden (PR #3). Full arkitektur/rasjonale i
 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) (UA-2 P0-seksjonen) og
 [UA2_KNOWLEDGE_DPIA.md](UA2_KNOWLEDGE_DPIA.md).
