@@ -24,6 +24,25 @@
 // til hvert `docker compose`-kall - garanterer samme fil brukes for BEGGE
 // mekanismene, uansett hvilken mappe compose ellers ville sett som
 // "prosjektmappe".
+//
+// HOST-FUNN #2 (denne runden): migrate-containeren autentiserte som
+// `jarvis_runtime` mot Postgres til tross for at `.env` (bekreftet av
+// scriptets egen log RETT FØR feilen) hadde `JARVIS_DB_ADMIN_USER=postgres`
+// korrekt satt. Sporet gjennom hele kjeden (.env → compose-interpolasjon →
+// migrate sitt env_file/environment-oppsett → migrate-main.ts sin
+// adminConfigFromEnv() → pg.Pool): ingen kodefeil funnet i noen av disse
+// leddene - `migrate:`-tjenesten setter aldri `JARVIS_DB_ADMIN_USER` via
+// `environment:`, kun via `env_file: ["../../.env"]` (ren fil-passthrough,
+// ingen `${...}`-interpolasjon involvert for akkurat de nøklene). Uten
+// sikker host-tilgang kan den eksakte Compose-presedens-mekanismen for
+// `docker compose run` (shell-arv vs. env_file for akkurat dette
+// underkommandoen) ikke bekreftes 100% herfra. I stedet for å gjette,
+// FJERNES hele tvetydighetsklassen: migrate-kallet sender nå disse to
+// nøklene EKSPLISITT via `-e VARNAME` (bar form - Compose leser da fra DEN
+// KALLENDE PROSESSENS eget miljø, som scriptet selv kontrollerer via
+// `execFileSync` sin `env`-opsjon), pluss en admin-tilkoblings-precheck FØR
+// migrate kjøres, og en ny `migrate_effective_db_user`-diagnostikk skrevet
+// av migrate-main.ts SELV (grunnsannhet, ikke en antakelse fra host-scriptet).
 
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -31,6 +50,7 @@ import { copyFileSync, existsSync, readFileSync, readdirSync, renameSync, writeF
 import { join } from "node:path";
 import pg from "pg";
 import {
+  buildMigrateRunArgs,
   buildUpdatedEnvLines,
   parseEnvValues,
   resolveAdminCredentials,
@@ -44,16 +64,25 @@ const repoRoot = process.cwd();
 const envPath = join(repoRoot, ".env");
 const composeFile = join(repoRoot, "infra/local/docker-compose.yml");
 // --env-file eksplisitt satt (se HOST-FUNN over) - IKKE fjern denne, den er
-// den faktiske fiksen for host-feilen som utløste denne runden.
+// den faktiske fiksen for host-feilen som utløste forrige runde.
 const composeArgs = ["compose", "--env-file", envPath, "-f", composeFile];
 
 function log(msg: string): void {
   console.log(`[q21-fix] ${msg}`);
 }
 
-function run(args: string[]): void {
+/**
+ * `extraEnv` injiseres KUN i barneprosessens (docker-CLI-ets) eget miljø via
+ * `execFileSync` sin `env`-opsjon - ALDRI som en del av `args` (som logges
+ * her, og ellers ville vært synlig via `ps`/prosesslisten på maskinen).
+ */
+function run(args: string[], extraEnv?: NodeJS.ProcessEnv): void {
   log(`$ docker ${args.join(" ")}`);
-  execFileSync("docker", args, { stdio: "inherit", cwd: repoRoot });
+  execFileSync("docker", args, {
+    stdio: "inherit",
+    cwd: repoRoot,
+    ...(extraEnv ? { env: { ...process.env, ...extraEnv } } : {})
+  });
 }
 
 function randomPassword(): string {
@@ -86,6 +115,25 @@ async function waitFor<T>(fn: () => Promise<T>, timeoutMs: number, description: 
     }
   }
   throw new Error(`timeout venter på ${description}: ${(lastErr as Error)?.message ?? "ukjent feil"}`);
+}
+
+interface DbConnectionOptions {
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
+}
+
+/** Ren, direkte pg-tilkobling FRA SCRIPTET - uavhengig av hvordan Docker Compose ellers løser miljøvariabler. */
+async function connectDirectly(opts: DbConnectionOptions): Promise<{ user: string }> {
+  const pool = new pg.Pool({ ...opts, max: 1 });
+  try {
+    const r = await pool.query("SELECT current_user AS u");
+    return { user: (r.rows[0] as { u: string }).u };
+  } finally {
+    await pool.end();
+  }
 }
 
 async function main(): Promise<void> {
@@ -127,23 +175,47 @@ async function main(): Promise<void> {
     log(".env oppdatert (JARVIS_DB_ADMIN_USER/PASSWORD + JARVIS_DB_USER/PASSWORD)");
   }
 
-  // 4. Postgres må kjøre (rører ALDRI volumes - kun sikrer containeren er oppe).
-  run([...composeArgs, "up", "-d", "postgres"]);
-
-  // 5. Kjør migrate på nytt - migrate-main.ts bootstrapper jarvis_runtime idempotent
-  //    (ensureRuntimeRole) via ADMIN-tilkoblingen. `run` venter selv på
-  //    postgres sin depends_on/service_healthy-betingelse.
-  run([...composeArgs, "run", "--rm", "migrate"]);
-
-  // 6. Restart api/worker med tvungen re-lesing av .env (de skal nå plukke opp de
-  //    NYE runtime-credentials i stedet for en evt. tidligere cachet admin-tilkobling).
-  run([...composeArgs, "up", "-d", "--force-recreate", "api", "worker"]);
-
-  // 7. Verifiser FAKTISK - koble direkte som runtime-rollen og les dens egne
-  //    pg_roles-attributter. Ingen fake PASS: kaster hvis fortsatt usikker.
   const dbHost = current["JARVIS_DB_HOST"] || "127.0.0.1";
   const dbPort = Number(current["JARVIS_DB_PORT"] || 5432);
   const dbName = current["JARVIS_DB_NAME"] || "jarvis";
+
+  // 4. Postgres må kjøre (rører ALDRI volumes - kun sikrer containeren er oppe).
+  run([...composeArgs, "up", "-d", "postgres"]);
+
+  // 5. §6 i BO-en: ADMIN-PRECHECK FØR migrate kjøres i det hele tatt - bevis at DE
+  // BEREGNEDE admin-credentials faktisk fungerer mot den ekte Postgres-instansen,
+  // uavhengig av hvordan Docker Compose ellers ville løst miljøvariabler. Fanger
+  // en feilkonfigurasjon her, FØR et migrate-forsøk kastes bort på den.
+  await waitFor(
+    async () => {
+      const { user } = await connectDirectly({ host: dbHost, port: dbPort, database: dbName, user: admin.adminUser, password: admin.adminPassword });
+      log(`admin_connection=PASS admin_current_user=${user}`);
+      if (user !== admin.adminUser) {
+        throw new Error(`admin_current_user (${user}) samsvarer ikke med forventet admin-bruker (${admin.adminUser})`);
+      }
+    },
+    60_000,
+    "admin-tilkobling mot Postgres"
+  );
+
+  // 6. Kjør migrate på nytt - migrate-main.ts bootstrapper/reparerer jarvis_runtime
+  // idempotent (ensureRuntimeRole: setter/reparerer passord, NOSUPERUSER,
+  // NOBYPASSRLS, LOGIN, jarvis_app-medlemskap - i DEN rekkefølgen, atomisk i én
+  // CREATE/ALTER ROLE) via ADMIN-tilkoblingen. HOST-FUNN #2-fiks: admin-credentials
+  // sendes EKSPLISITT via `-e VARNAME` (bar form, verdien injiseres KUN i
+  // barneprosessens miljø via `run()` sin `extraEnv` - aldri i loggede args, aldri
+  // via .env/env_file-oppløsning for akkurat dette kallet).
+  run(buildMigrateRunArgs(composeArgs), {
+    JARVIS_DB_ADMIN_USER: admin.adminUser,
+    JARVIS_DB_ADMIN_PASSWORD: admin.adminPassword
+  });
+
+  // 7. Restart api/worker med tvungen re-lesing av .env (de skal nå plukke opp de
+  //    NYE runtime-credentials i stedet for en evt. tidligere cachet admin-tilkobling).
+  run([...composeArgs, "up", "-d", "--force-recreate", "api", "worker"]);
+
+  // 8. Verifiser FAKTISK - koble direkte som runtime-rollen og les dens egne
+  //    pg_roles-attributter. Ingen fake PASS: kaster hvis fortsatt usikker.
   await waitFor(
     async () => {
       const verifyPool = new pg.Pool({
@@ -158,10 +230,14 @@ async function main(): Promise<void> {
         const r = await verifyPool.query(
           "SELECT current_user AS u, rolsuper AS su, rolbypassrls AS br, rolcanlogin AS cl FROM pg_roles WHERE rolname = current_user"
         );
-        const row = r.rows[0] as { u: string; su: boolean; br: boolean; cl: boolean };
-        log(`verifisert tilkobling: current_user=${row.u} superuser=${row.su} bypassrls=${row.br} canlogin=${row.cl}`);
-        if (row.su || row.br || !row.cl) {
-          throw new Error(`runtime-rollen er FORTSATT usikker (superuser=${row.su} bypassrls=${row.br} canlogin=${row.cl})`);
+        const row = r.rows[0] as { u: string; su: boolean; br: boolean; cl: boolean } | undefined;
+        log(`runtime_connection=${row ? "PASS" : "FAIL"} runtime_current_user=${row?.u ?? "ukjent"}`);
+        log(`runtime_role_exists=${!!row}`);
+        log(`runtime_role_superuser=${row?.su ?? "ukjent"}`);
+        log(`runtime_role_bypassrls=${row?.br ?? "ukjent"}`);
+        log(`runtime_role_canlogin=${row?.cl ?? "ukjent"}`);
+        if (!row || row.su || row.br || !row.cl) {
+          throw new Error(`runtime-rollen er FORTSATT usikker (finnes=${!!row} superuser=${row?.su} bypassrls=${row?.br} canlogin=${row?.cl})`);
         }
         const membership = await verifyPool.query(
           `SELECT EXISTS (
@@ -172,7 +248,7 @@ async function main(): Promise<void> {
            ) AS is_member`
         );
         const isMember = (membership.rows[0] as { is_member: boolean }).is_member;
-        log(`medlemskap jarvis_app: ${isMember}`);
+        log(`runtime_role_member_jarvis_app=${isMember}`);
         if (!isMember) {
           throw new Error("runtime-rollen er IKKE medlem av jarvis_app - grants for identity/sessions/memory/knowledge osv. mangler");
         }
@@ -186,7 +262,7 @@ async function main(): Promise<void> {
 
   log("Q-21 FIX fullført - kjører UA-2 P0-akseptanse (ua2-p0-live.ts) til slutt...");
 
-  // 8. Kjør UA-2 P0-akseptansen automatisk - samme kommando Tobias ellers kjører selv.
+  // 9. Kjør UA-2 P0-akseptansen automatisk - samme kommando Tobias ellers kjører selv.
   execFileSync(
     "node",
     ["--env-file=.env", "--experimental-transform-types", "modules/knowledge/scripts/ua2-p0-live.ts"],

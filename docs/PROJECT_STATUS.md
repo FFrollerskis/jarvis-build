@@ -9,10 +9,16 @@ Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (forme
 **Q-21 (systembredt DB admin/runtime-rolle-gap): FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-15) -
 IKKE VERIFIED ennå.** Host bekreftet at api/worker/migrate kjørte som Postgres-superbruker; fikset med
 en permanent admin/runtime-config-splitt + idempotent rolle-bootstrap + fail-closed startup-vakter +
-ett automatisert host-fiks-script. **Host-recovery-runde (samme dag):** scriptet feilet første gang
+ett automatisert host-fiks-script. **Host-recovery-runde 1 (samme dag):** scriptet feilet første gang
 (`docker compose` sin egen `.env`-interpolasjon fant ikke `JARVIS_DB_ADMIN_PASSWORD` selv om verdien
 faktisk sto riktig i filen) - fikset med eksplisitt `--env-file`, pluss ny fail-closed admin-credential-
-recovery fra siste `.env.bak.*` for delvis migrerte hosts. Se Q-21 i OPEN_QUESTIONS.md og
+recovery fra siste `.env.bak.*` for delvis migrerte hosts. **Host-recovery-runde 2 (samme dag):**
+migrate-containeren autentiserte likevel som `jarvis_runtime` i stedet for admin-brukeren, til tross
+for korrekt `.env` - ukjent Docker Compose-presedens-tvetydighet for `docker compose run` (ikke
+100% bekreftbar uten host-tilgang). Fikset ved å fjerne HELE tvetydighetsklassen: admin-credentials
+sendes nå eksplisitt via `-e VARNAME` til migrate-kallet (aldri via `.env`/`env_file`-oppløsning for
+det kallet), pluss en admin-tilkoblings-precheck FØR migrate kjøres og en `migrate_effective_db_user`-
+grunnsannhetsdiagnostikk skrevet av migrate-prosessen selv. Se Q-21 i OPEN_QUESTIONS.md og
 RUNTIME_GATES.md for full detalj.
 **UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (venter på Q-21
 host-verifikasjon)**

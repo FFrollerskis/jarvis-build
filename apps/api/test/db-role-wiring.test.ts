@@ -54,7 +54,13 @@ describe("§10.H: apps/api/src/migrate-main.ts bruker ADMIN-config, aldri stille
   const source = readSource("../src/migrate-main.ts");
 
   it("bruker adminConfigFromEnv for sin egen pool (migrasjoner/bootstrap krever admin-privilegier)", () => {
-    expect(source).toMatch(/createPool\(adminConfigFromEnv\(\)\)/);
+    // Q-21 host-recovery #2: adminConfigFromEnv() sitt resultat caches nå i en
+    // variabel (resolvedAdminConfig) FØR createPool - trengs for å kunne logge
+    // migrate_effective_db_user FØR runMigrations, uten å kalle adminConfigFromEnv()
+    // to ganger. Sjekker derfor at BEGGE fortsatt kobles direkte til hverandre,
+    // ikke den eksakte inline-syntaksen.
+    expect(source).toMatch(/adminConfigFromEnv\(\)/);
+    expect(source).toMatch(/createPool\(resolvedAdminConfig\)/);
   });
 
   it("bootstrapper runtime-rollen via ensureRuntimeRole (samme admin-tilkobling)", () => {

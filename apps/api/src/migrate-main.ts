@@ -10,7 +10,15 @@
 import { adminConfigFromEnv, configFromEnv, createPool, ensureRuntimeRole, runMigrations } from "@jarvis/core";
 import { seedOwner } from "./seed.ts";
 
-const adminPool = createPool(adminConfigFromEnv());
+const resolvedAdminConfig = adminConfigFromEnv();
+// Q-21 HOST RECOVERY #2 (2026-08-15): grunnsannhets-diagnostikk - hvilken rolle
+// prosessen FAKTISK forsøker å koble til med, FØR migrasjoner kjøres. Skrives av
+// migrate-PROSESSEN selv (ikke antatt av host-scriptet som starter containeren) -
+// eneste pålitelige måte å avgjøre om en Docker/Compose-miljøvariabel-tvetydighet
+// ga migrate en annen bruker enn den host-scriptet beregnet. Aldri passordet.
+console.log(`migrate_effective_db_user=${resolvedAdminConfig.user}`);
+
+const adminPool = createPool(resolvedAdminConfig);
 try {
   await runMigrations(adminPool);
   // Owner-seed (BO-08 + D-30 voice-device): idempotent, delt funksjon (testes

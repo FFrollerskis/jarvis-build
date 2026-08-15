@@ -151,3 +151,22 @@ export function sortBackupFilenamesNewestFirst(filenames: string[]): string[] {
     return tb - ta;
   });
 }
+
+/**
+ * Q-21 HOST RECOVERY #2 (2026-08-15): migrate autentiserte som `jarvis_runtime`
+ * til tross for at `.env` (bekreftet av scriptets egen log) hadde
+ * `JARVIS_DB_ADMIN_USER=postgres` korrekt satt - en `docker compose run`-spesifikk
+ * miljøvariabel-presedens-tvetydighet mellom `env_file:` og shell-arv kunne ikke
+ * bekreftes med sikkerhet uten host-tilgang. Fjerner HELE tvetydighetsklassen:
+ * disse to nøklene sendes ALLTID eksplisitt via `-e VARNAME` (BAR form - Compose
+ * leser da fra DEN KALLENDE PROSESSENS (docker-CLI-ets) eget miljø, som scriptet
+ * selv kontrollerer via `execFileSync` sin `env`-opsjon) - ALDRI via `.env`/
+ * `env_file:`-oppløsning for akkurat dette ene kallet. Selve passordVERDIEN
+ * finnes ALDRI i denne pure funksjonens returverdi (kun nøkkelNAVN) - trygt å
+ * logge hele args-arrayet uten fare for lekkasje.
+ */
+export const MIGRATE_ADMIN_ENV_KEYS = ["JARVIS_DB_ADMIN_USER", "JARVIS_DB_ADMIN_PASSWORD"] as const;
+
+export function buildMigrateRunArgs(composeArgs: string[]): string[] {
+  return [...composeArgs, "run", "--rm", ...MIGRATE_ADMIN_ENV_KEYS.flatMap((key) => ["-e", key]), "migrate"];
+}

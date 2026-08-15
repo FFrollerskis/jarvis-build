@@ -114,6 +114,70 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## Q-21 HOST FIX RECOVERY #2: MIGRATE BRUKER FEIL DB-ROLLE (2026-08-15, samme dag)
+
+**Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` på nytt. Scriptet rapporterte korrekt
+`admin-rolle: postgres`, skrev `.env` med BÅDE ADMIN- og RUNTIME-settet, og Postgres startet
+korrekt via det eksplisitte `--env-file`-flagget (forrige rundes fiks holdt). Deretter feilet
+`docker compose ... run --rm migrate` inni migrasjonsprosessen: `runMigrations()` kastet
+`password authentication failed for user "jarvis_runtime"` (Postgres-kode `28P01`) - til tross
+for at scriptet mente admin-brukeren var `postgres`.
+
+**Sporing gjennom hele kjeden (§1 i BO-en, ingen gjetning):** `.env` (bekreftet korrekt av
+scriptets egen log RETT FØR feilen) → `docker-compose.yml` sin `migrate:`-tjeneste (kun
+`env_file: ["../../.env"]` + statiske `JARVIS_DB_HOST/PORT/NAME` - INGEN `${JARVIS_DB_ADMIN_USER}`-
+interpolasjon involvert for admin-nøklene der) → `migrate-main.ts` sin `adminConfigFromEnv()` → `pg.Pool`.
+Ingen kodefeil funnet i noe av dette - `api.Dockerfile` (delt image for migrate/api/worker) bekrefter
+også ingen bakt-inn `ENV`-verdier. Konklusjon: den mest sannsynlige gjenværende årsaken er en
+Docker Compose-spesifikk miljøvariabel-presedens-mekanisme for `docker compose run` (shell-arv vs.
+`env_file`-oppløsning) som IKKE kan bekreftes 100% uten faktisk host-tilgang til å inspisere
+effektiv container-config.
+
+**Fiks - fjerner hele tvetydighetsklassen i stedet for å gjette videre:**
+- `modules/core/scripts/lib/q21-env-recovery.ts`: ny `buildMigrateRunArgs(composeArgs)` - bygger
+  `docker compose run --rm -e JARVIS_DB_ADMIN_USER -e JARVIS_DB_ADMIN_PASSWORD migrate` (BAR
+  `-e VARNAME`-form, ALDRI `-e VARNAME=verdi`). Ren funksjon - returnerer kun nøkkelNAVN, aldri en
+  verdi, trygt å logge hele resultatet.
+- `fix-q21-runtime-role.ts`: `run()` fikk en `extraEnv`-parameter som injiserer verdiene KUN i
+  `execFileSync` sin `env`-opsjon (barneprosessens - docker-CLI-ets - eget miljø) - ALDRI som del av
+  det loggede `args`-arrayet. Docker Compose sin `-e VARNAME` (bar form) leser da fra NETTOPP denne
+  kontrollerte prosessens miljø, med Compose sin høyeste presedens for `run` - garantert uavhengig av
+  `.env`/`env_file`/prosjektmappe-tvetydighet.
+- Ny **admin-tilkoblings-precheck** (§6 i BO-en) RETT FØR migrate kjøres: en direkte `pg.Pool`-
+  tilkobling fra SCRIPTET selv (ikke via Docker) med de beregnede admin-credentials, logger
+  `admin_connection=PASS`/`admin_current_user=<navn>`. Fanger en feilkonfigurasjon FØR et
+  migrate-forsøk kastes bort på den.
+- Ny **grunnsannhets-diagnostikk** i `migrate-main.ts` selv: `migrate_effective_db_user=<navn>`
+  skrevet FØR `runMigrations()` kjøres - viser PRESIST hvilken rolle migrate-PROSESSEN faktisk
+  forsøker å koble til med, uavhengig av hva host-scriptet antok. Forventet verdi: `postgres`.
+- Runtime-verifikasjonen (etter migrate+restart) fikk utvidede, eksplisitt navngitte felt:
+  `runtime_connection`, `runtime_current_user`, `runtime_role_exists`, `runtime_role_superuser`,
+  `runtime_role_bypassrls`, `runtime_role_canlogin`, `runtime_role_member_jarvis_app`.
+
+**Nye tester** (`modules/core/test/q21-migrate-role-wiring.test.ts`, 13 tester): §9.A
+(`migrate_effective_db_user` skrevet FØR `runMigrations`, fra `adminConfigFromEnv()`), §9.B/§9.C
+(api/worker fortsatt kun `configFromEnv`), §9.D/§9.E (admin/runtime-config kan fortsatt ikke lese
+hverandres variabler), §9.F (compose sin `migrate:`-blokk setter aldri `JARVIS_DB_USER/PASSWORD`
+eksplisitt - ville skygget for `env_file`), §9.G (partial-rerun idempotent), §9.H/§9.J (kildekode-
+rekkefølge: admin-precheck → migrate → api/worker-restart → runtime-verifikasjon → `ua2-p0-live.ts`),
+§9.I (`buildMigrateRunArgs` inneholder aldri en verdi, kun nøkkelnavn - trygt å logge; scriptet logger
+aldri en passordvariabel direkte).
+
+**Regresjon fanget og fikset underveis:** endringen i `migrate-main.ts` (caching av
+`adminConfigFromEnv()`-resultatet i en variabel for å kunne logge diagnostikken FØR `createPool`)
+brøt en eksisterende tekstbasert wiring-test fra forrige runde (`db-role-wiring.test.ts` forventet
+det eksakte inline-mønsteret `createPool(adminConfigFromEnv())`) - oppdatert til å sjekke selve
+INVARIANTEN (adminConfigFromEnv brukes, resultatet kobles til createPool) i stedet for eksakt syntaks.
+
+**Kvalitet:** 352/352 tester (339 baseline + 13 nye), lint/typecheck/gitleaks rene.
+
+**Status:** samme ÉN kommando som før (`node --experimental-transform-types
+modules/core/scripts/fix-q21-runtime-role.ts`) - fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, venter
+på Tobias sin faktiske re-kjøring. Skulle `migrate_effective_db_user` fortsatt IKKE vise `postgres`
+på neste host-kjøring til tross for disse eksplisitte `-e`-overstyringene, er det sterkt bevis for at
+årsaken ligger et sted `-e`-mekanismen selv ikke kan overstyre (f.eks. en Postgres-side `pg_hba.conf`/
+autentiseringsregel-anomali) - noe kun host-loggen kan avgjøre videre.
+
 ## Q-21 HOST FIX RECOVERY: ADMIN ENV BOOTSTRAP BUG (2026-08-15, samme dag)
 
 **Host-feil:** Tobias kjørte `fix-q21-runtime-role.ts` - scriptet leste `.env` (admin-credentials fantes
