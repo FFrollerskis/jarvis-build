@@ -114,6 +114,70 @@ prøver, providervalg) forblir separat åpen, ikke-blokkerende (se D-30 Voice be
 migrate-tjenesten); det manuelle SQL-steget fra BO-07 er fjernet. ID-er konfigurerbare via
 JARVIS_TENANT_ID/JARVIS_OWNER_PERSON_ID/JARVIS_OWNER_NAME.
 
+## UA-2 P0 HOST ACCEPTANCE HARNESS + RLS HOST-BLOCKER (2026-08-15)
+
+**Harness bygget (forrige runde):** ett host-script, `modules/knowledge/scripts/ua2-p0-live.ts`
+(kjøres `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`),
+beviser hele UA-2 P0-akseptansen mot ekte lokal Postgres/pgvector + ekte filsystem på Tobias sin
+Windows-host. Gjenbruker eksisterende arkitektur (ingen alternativ testimplementasjon).
+
+**HOST-RESULTAT (Tobias, 2026-08-15):** 13/15 felt PASS live (filesystem full livssyklus, provenance,
+FTS/vector/hybrid, filsystem-allowlist/traversal-deny, GitHub live sync+resync-dedupe `created=2`→
+`unchanged=2`, `duplicate_documents=0`). `symlink_escape=SKIPPED_HOST_PERMISSION` (akseptabelt - suite
+dekker escape-DENY deterministisk). **BLOCKER:** `tenant_isolation=FAIL` (a_ser_b=2, b_ser_a=2,
+a_finner_egen=2) og `memory_space_isolation=FAIL` (personal_ser_business=3, business_finner=3).
+
+**Root cause (undersøkt, ikke gjettet):** harnesset kjørte isolasjons-ASSERTIONS via `pool`
+(`configFromEnv()`/`JARVIS_DB_USER` - SAMME tilkobling api/worker/migrate faktisk bruker) UTEN
+noensinne å verifisere rollens bypass-status. `jarvis_app` (005_rls.sql) er en `NOLOGIN`-gruppe-rolle -
+INGEN sted i den faktiske driftsveien (`migrate-main.ts`, `docker-compose.yml`) oppretter en ekte
+`LOGIN`-rolle `GRANT`et inn i den; kun suitens `beforeAll`-oppsett gjør det. Dette betyr Tobias sin
+reelle `.env` mest sannsynlig peker `JARVIS_DB_USER` på en superbruker (samme som
+`JARVIS_DB_ADMIN_USER`) for at systemet i det hele tatt skal koble til - en superbruker bypasser RLS
+UANSETT policy-korrekthet. Se **Q-21 i OPEN_QUESTIONS.md** - dette er et systembredt
+deployment-/konfigurasjonsgap (ikke UA-2-spesifikt; docker-compose/migrate-main.ts er BEVISST urørt,
+utenfor denne BO-ens scope), rapportert til Tobias for egen beslutning.
+
+**Fiks (isolasjons-seksjonen i harnesset omskrevet, resten av harnesset urørt):**
+- Bootstrapper nå en FERSK, garantert non-bypass rolle (`NOSUPERUSER NOBYPASSRLS`, `GRANT jarvis_app
+  TO ...`, samme mønster som ALLE suite-tester alltid har brukt) via en separat admin-tilkobling
+  (`JARVIS_DB_ADMIN_USER`/`_PASSWORD`, allerede i `.env.example`/docker-compose). Isolasjons-BEVISET
+  kjøres UTELUKKENDE gjennom denne rollen - aldri gjennom en tilkobling med uverifisert privilegiestatus.
+- Ny §6-diagnostikk skrevet til output FØR assertions: `rls_test_role`, `rls_role_superuser`,
+  `rls_role_bypassrls`, `knowledge_rls_enabled`, `knowledge_force_rls` - fail-closed (rapporterer
+  `FAIL` med forklaring) hvis test-rollen mot formodning skulle rapportere bypass, ELLER hvis skjemaet
+  mangler ENABLE/FORCE ROW LEVEL SECURITY (skiller eksplisitt HARNESS FEIL fra RUNTIME FEIL - RLS ble
+  ALDRI svekket for å gjøre testen grønn).
+- Ny transparens-diagnostikk for `pool` (den faktiske app-konfigurerte tilkoblingen): `configured_app_role`/
+  `_superuser`/`_bypassrls`, med eksplisitt advarsel i loggen hvis JARVIS_DB_USER selv er en
+  superbruker - direkte relevant for å tolke §1/§4/§5 sine tidligere PASS-resultater riktig (de øvde
+  aldri en cross-tenant/cross-space DENY-vei, så de er IKKE bevis på RLS-håndhevelse alene).
+- Opprydding (tenant-provisjonering/sletting av kast-tenants, sletting av synteststed-dokumenter)
+  flyttet fra `pool` til admin-tilkoblingen - `jarvis_app` har bevisst INGEN `DELETE`-grant noe sted
+  (append-only-prinsipp), så disse operasjonene var uansett aldri korrekte via app-rollen.
+- **Presisjonsfunn under regresjonstest-skrivingen:** rå listelengde (`results.length === 0`) er IKKE
+  et presist mål for "ingen lekkasje" - `LocalHashEmbedding` (enkel trigram-hash) kan legitimt gi en
+  tenants EGET nesten-like dokument som svak vektor-treffkandidat på en trigram-lik spørring om en
+  ANNEN tenants fakta, uten at RLS er brutt. Assertions i BÅDE harnesset og de nye suite-testene sjekker
+  nå om det FAKTISKE innholdet fra den andre tenanten/spacet dukker opp (`content.includes(...)`), ikke
+  bare om listen er tom - samme presiseringsmønster som allerede fantes i
+  `knowledge-fundament.test.ts` §7.G/§7.H.
+
+**Nye regresjonstester** (`modules/knowledge/test/rls-role-isolation.test.ts`, embedded Postgres, 6
+tester, dekker BO-ens §5.A-K): tenant-isolasjon via non-bypass rolle + `KnowledgeRetriever` (A-D),
+memory-space-isolasjon innen samme tenant (E-F/I), FTS-spørringen ALENE respekterer space (G),
+vektor-spørringen ALENE respekterer space (H), tombstone+isolasjon samtidig (J), og **§K: eksplisitt
+kontrast-bevis** - samme spørringstekst gir cross-tenant-data via en superbruker-tilkobling (ingen
+tenant-filter i SQL-teksten - stoler utelukkende på RLS, akkurat som `retriever.ts` er skrevet) men
+korrekt 0-treff via den non-bypass-rollen - dokumenterer eksakt bug-klassen som forårsaket
+host-blockeren, som permanent suite-bevis.
+
+**Kvalitet:** 300/300 tester (294 baseline + 6 nye), lint/typecheck/gitleaks rene. Ingen regresjon.
+
+**Status: BLOCKED - venter på Tobias sin re-kjøring** av oppdatert `ua2-p0-live.ts` på hosten.
+UA-2 P0 kan IKKE settes VERIFIED/merges før `tenant_isolation=PASS` og `memory_space_isolation=PASS`
+er bekreftet live gjennom den non-bypass-rollen.
+
 ## UA-2 P0 — KNOWLEDGE INGESTION FOUNDATION (2026-08-14)
 
 **Status: SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container - ingen Docker, ingen

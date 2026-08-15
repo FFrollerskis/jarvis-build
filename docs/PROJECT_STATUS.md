@@ -1,14 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-14 · **Branch:** `claude/ua2-knowledge-spec` (PR #3, ikke merget)
+**Oppdatert:** 2026-08-15 · **Branch:** `claude/ua2-knowledge-spec` (PR #3, ikke merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
 **UA-1 UNIVERSAL AI MESH: P0 VERIFIED · MULTI-PROVIDER LIVE VERIFIED · P1A (streaming+tool-calling) VERIFIED (BO-11).**
 **D-30 VOICE = VERIFIED** (BO-12, merget til main 2026-08-14, commit `8f28862`).
-**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = SUITE-VERIFIED (denne økten,
-IKKE host/live-verifisert)** - GitHub + filesystem/NAS-kilder, sync/dedupe/tombstones/provenance,
-FTS+vector-retrieval, tenant/space-isolasjon. Se docs/RUNTIME_GATES.md for full evidens.
+**UA-2 UNIVERSAL KNOWLEDGE LAYER: P0 (Knowledge Ingestion Foundation) = BLOCKED (host-runde 2026-08-15)**
+- 13/15 host-akseptansefelt PASS live (filesystem livssyklus, provenance, FTS/vector/hybrid,
+  filsystem-sikkerhet, GitHub live sync+dedupe). `tenant_isolation`/`memory_space_isolation` FEILET
+  live - root cause funnet og fikset (harnesset testet isolasjon via en tilkobling med uverifisert
+  bypass-status; fikset til å bruke en garantert non-bypass rolle). **Samtidig avdekket: et
+  systembredt (ikke UA-2-spesifikt) deployment-gap** - se Q-21 i OPEN_QUESTIONS.md - som krever
+  Tobias sin beslutning før neste host-kjøring regnes som endelig bevis. Full evidens/fiks-detaljer:
+  docs/RUNTIME_GATES.md.
+- **Neste steg:** Tobias kjører oppdatert `ua2-p0-live.ts` på nytt. UA-2 P0 kan først settes
+  VERIFIED/merges når `tenant_isolation=PASS` og `memory_space_isolation=PASS` bekreftes live.
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -158,28 +165,35 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   - 294/294 tester (281+13 nye), lint/typecheck/gitleaks rene. Full evidens: docs/RUNTIME_GATES.md.
 - **Gjenstår for host/live-verifikasjon (§13 i BO-en, IKKE gjort her):** ekte NAS-mount, ekte
   GitHub-repo-sync med reell PAT, full ende-til-ende-demo kjørt på Tobias sin host.
-- **FINAL HOST ACCEPTANCE HARNESS (denne økten, IKKE kjørt live her - kun bygget):** ett
-  host-script, `modules/knowledge/scripts/ua2-p0-live.ts`, bygget for å bevise HELE P0-akseptansen
-  mot Tobias sin faktiske lokale Postgres/pgvector og ekte filsystem - kjøres:
-  `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`.
-  Gjenbruker eksisterende arkitektur (ingen alternativ testimplementasjon). Dekker: filesystem
-  full livssyklus (ingest→uendret resync→endring→tombstone→reaktivering, ingen duplikat),
-  provenance, ekte FTS/vector/hybrid, tenant- og memory-space-isolasjon (egne kast-tenants,
-  ryddes opp automatisk), filsystem-allowlist/traversal/symlink-escape-DENY (symlink rapporterer
-  SKIPPED_HOST_PERMISSION uten admin-rettigheter, ikke fake PASS), GitHub live sync + resync-dedupe
-  (rapporterer SKIPPED_NO_CREDENTIAL uten token). Avslutter med maskinlesbar
-  `felt=PASS/FAIL/SKIPPED*`-oppsummering. Selvopprydding + selvhelbredelse (unike run-IDer,
-  trygt å kjøre flere ganger). **IKKE kjørt av Claude mot ekte host** - kun bygget/suite-
-  typecheck/lint/gitleaks-verifisert i denne økten; venter på Tobias sin faktiske kjøring.
+- **FINAL HOST ACCEPTANCE HARNESS (forrige runde, bygget):** `modules/knowledge/scripts/ua2-p0-live.ts` -
+  kjøres `node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p0-live.ts`.
+- **HOST-BLOCKER-RUNDE (denne økten, 2026-08-15):** Tobias kjørte harnesset live. 13/15 felt PASS
+  (filesystem livssyklus, provenance, FTS/vector/hybrid, filsystem-sikkerhet, GitHub live sync+dedupe
+  `created=2`→`unchanged=2`). **`tenant_isolation`/`memory_space_isolation` FEILET.** Root cause
+  funnet (ikke gjettet): harnesset beviste isolasjon via `pool` (samme rolle api/worker/migrate
+  faktisk bruker) UTEN å verifisere bypass-status - `jarvis_app` er en `NOLOGIN`-gruppe-rolle, og
+  INGEN sted i den faktiske driftsveien oppretter en ekte login-rolle bundet til den (kun suitens
+  test-oppsett gjør det). Dette avdekket samtidig et **systembredt (ikke UA-2-spesifikt)
+  deployment-gap** - se **Q-21 i OPEN_QUESTIONS.md** (trenger Tobias sin beslutning; docker-compose/
+  migrate-main.ts bevisst urørt, utenfor denne BO-ens scope). **Fikset:** harnesset bootstrapper nå
+  en fersk, garantert non-bypass rolle (kun for isolasjons-BEVISET) + ny §6-diagnostikk
+  (`rls_test_role`/`_superuser`/`_bypassrls`, `knowledge_rls_enabled`/`_force_rls`,
+  `configured_app_role`/`_superuser`/`_bypassrls`) som fail-closed skiller HARNESS FEIL fra RUNTIME
+  FEIL. Presisjonsfunn underveis: rå listelengde er ikke et presist lekkasje-mål (vektor-selvtreff-
+  støy fra `LocalHashEmbedding`) - assertions sjekker nå faktisk innhold. Nye regresjonstester:
+  `modules/knowledge/test/rls-role-isolation.test.ts` (6 tester, inkl. et eksplisitt kontrast-bevis
+  §K: samme spørring lekker via superbruker, ikke via non-bypass-rolle). Full detaljer:
+  docs/RUNTIME_GATES.md.
 
 ## Blokkeringer
-Ingen tekniske. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens.
-Ytelsesgjeld for voice-latens (Q-19) og UA-2 P0 host/live-verifikasjon er åpne, ikke-blokkerende.
+**UA-2 P0 er BLOCKED** - venter på Tobias sin re-kjøring av oppdatert `ua2-p0-live.ts` på hosten
+(`tenant_isolation=PASS`/`memory_space_isolation=PASS` må bekreftes live før VERIFIED/merge), samt en
+beslutning på Q-21 (systembredt DB-rolle-gap, se OPEN_QUESTIONS.md). Manglende provider-nøkler er
+eneste gap for LIVE multi-provider-evidens. Ytelsesgjeld for voice-latens (Q-19) er åpen,
+ikke-blokkerende.
 
 ## Neste oppgave
-UA-2 P0 er bygget, suite-verifisert, og host-akseptanseharnesset (`ua2-p0-live.ts`) er klart -
-avventer Tobias sin faktiske kjøring av scriptet mot sin lokale Postgres/pgvector+filsystem, og
-gjennomgang av PR #3 (ev. godkjenning av neste skive: repo-filinnhold, flere kilder, eller UA-2 P1
-Knowledge Graph). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
-D-10 STT-benchmark (Q-03), D-36
-Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
+Avventer Tobias: (1) kjør oppdatert `ua2-p0-live.ts` på nytt og rapporter resultatet, (2) beslutning
+på Q-21 (skal en ekte non-bypass login-rolle bootstrappes i selve driftspipelinen - egen, systembred
+oppgave). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03),
+D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
