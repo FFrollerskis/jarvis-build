@@ -9,6 +9,7 @@ import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import { GithubKnowledgeSource } from "../src/github-source.ts";
+import { KnowledgeSourceError } from "../src/source.ts";
 import { KnowledgeSyncService } from "../src/sync.ts";
 import { LocalHashEmbedding } from "@jarvis/memory";
 
@@ -75,8 +76,9 @@ describe("GithubKnowledgeSource + KnowledgeSyncService (§7.N)", () => {
     for (const tool of firstWaveTools({ github: githubTransport })) toolGateway.register(tool);
 
     const source = new GithubKnowledgeSource(toolGateway, identity, "tsworkflow/jarvisbuild");
-    const records = await source.list();
+    const { records, skipped } = await source.list();
 
+    expect(skipped).toHaveLength(0);
     expect(repoMetaCalls).toBe(1);
     expect(issuesCalls).toBe(1);
     expect(records).toHaveLength(2);
@@ -97,14 +99,21 @@ describe("GithubKnowledgeSource + KnowledgeSyncService (§7.N)", () => {
     expect(resync).toMatchObject({ scanned: 2, created: 0, unchanged: 2, failed: 0 }); // §9: no-op ved uendret kilde
   }, 30_000);
 
-  it("ukjent verktøy/policy-avslag rapporteres som 'failed' i sync, ikke en krasjet hel kjøring", async () => {
+  it("ukjent verktøy/policy-avslag kaster KnowledgeSourceError (§15: ALDRI stille delvis resultat -> ALDRI feiltolkes som masse-tombstoning)", async () => {
     const devices = new InMemoryDeviceRegistry();
     const policy = new PolicyGateway({ devices, nonces: new PgApprovalStore(appPool), killSwitch: new KillSwitch() });
     // Ingen github-transport registrert -> ToolGateway.execute() gir unknown_tool/DENY, ikke throw:
     const toolGateway = new ToolGateway(appPool, policy, { name: "test", async get() { return "x"; } });
     const source = new GithubKnowledgeSource(toolGateway, identity, "tsworkflow/jarvisbuild");
-    const records = await source.list();
-    // GithubKnowledgeSource behandler ok:false som "ingen record fra denne handlingen" - ikke en kastet feil:
-    expect(records).toHaveLength(0);
+    // §15 (fix av latent bug): en feilet action skal ALDRI resultere i et stille
+    // delvis/tomt resultat - `KnowledgeSyncService.sync()` ville tolket det som
+    // "alt slettet". Nå kaster kilden i stedet, og sync() rapporterer failed=1.
+    await expect(source.list()).rejects.toThrow(KnowledgeSourceError);
+
+    const embedding = new LocalHashEmbedding();
+    const sync = new KnowledgeSyncService(appPool, embedding);
+    const report = await sync.sync(identity, "project", source);
+    expect(report.failed).toBe(1);
+    expect(report.tombstoned).toBe(0);
   });
 });

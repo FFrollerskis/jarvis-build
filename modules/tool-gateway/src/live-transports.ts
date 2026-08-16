@@ -71,6 +71,352 @@ export class GoogleCalendarTransport implements ToolTransport {
   }
 }
 
+/**
+ * UA-2 P1A §18/§24 (utvidet - Drive full read/write, se OWNER CONNECTOR
+ * CAPABILITY INVARIANT i CLAUDE.md): Google Drive med FULL funksjonell
+ * tilgang - les, skriv, omdøp, flytt, papirkurv, permanent slett, dele/
+ * tilgangsstyring. OAuth-scope for produksjon MÅ være
+ * `https://www.googleapis.com/auth/drive` (bekreftet mot Google sitt
+ * offisielle discovery-dokument for Drive API v3 - `drive.file` dekker KUN
+ * filer appen selv har opprettet, ikke "alle filer", og er derfor
+ * UTILSTREKKELIG for faktisk full tilgang). Samme kontomønster som Gmail/
+ * Calendar (én eksplisitt konto, ingen implisitt cross-account fallback),
+ * samme `googleAccessToken()` OAuth-vei (ingen ny credential-type).
+ *
+ * Innhold er fortsatt begrenset til TEKST (samme P1A-scope-grense som
+ * ingestion-siden - §14 "Bygges IKKE": ingen binær/OCR-oppretting/-oppdatering).
+ * `create_file`/`update_content` skriver derfor kun tekstlig innhold.
+ *
+ * Handlinger (les):
+ * - `list_files`: én SIDE av en listing (§`folder_id` styrer scope, ALDRI en
+ *   default). `trashed=false` alltid med - en slettet fil forsvinner naturlig
+ *   fra neste vellykkede listing (tombstone-mekanismen i `KnowledgeSyncService`).
+ * - `read_document`: Google Docs → text/plain-eksport; tekstlige MIME-typer
+ *   leses rått; alt annet kaster `drive_unsupported_content_<mime>`.
+ * - `get_metadata`: id/name/parents/trashed/headRevisionId/modifiedTime -
+ *   brukes som preflight/konflikt-sjekk FØR mutasjon (se under).
+ * - `read_permissions`: lister delinger på en fil.
+ *
+ * Handlinger (skriv, kapabilitetsklasse C - reversible): `create_file`,
+ * `create_folder`, `update_content`, `rename`, `move`, `trash`.
+ * `update_content`/`rename`/`move`/`trash` godtar en VALGFRI
+ * `expected_head_revision_id` - hvis oppgitt, leses filens FAKTISKE
+ * `headRevisionId` FØRST og sammenlignes; ved mismatch kastes en typet
+ * `drive_conflict_stale_version`-feil FØR noen mutasjon forsøkes (§7 i
+ * scope-endringen: rapporter konflikt som typet feil, ALDRI som stille
+ * suksess som overskriver en nyere endring).
+ *
+ * Handlinger (destruktive/sikkerhetskritiske, kapabilitetsklasse D):
+ * `delete_permanent` (Drive sin `files.delete` er PERMANENT - flytter IKKE
+ * til papirkurv, bekreftet mot API-dokumentasjonen), `create_permission`/
+ * `update_permission`/`delete_permission` (deling/tilgangsstyring).
+ */
+const GOOGLE_DOC_EXPORT_MIME = "application/vnd.google-apps.document";
+const GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder";
+const GOOGLE_NATIVE_MIME_PREFIX = "application/vnd.google-apps.";
+const DRIVE_SUPPORTED_RAW_MIME = new Set([
+  "text/plain", "text/markdown", "text/x-markdown", "text/csv",
+  "application/json", "text/html", "text/css", "application/x-yaml", "text/yaml"
+]);
+
+function isDriveSupportedRawMime(mimeType: string): boolean {
+  return DRIVE_SUPPORTED_RAW_MIME.has(mimeType) || mimeType.startsWith("text/");
+}
+
+interface DriveMetadata {
+  id: string;
+  name: string;
+  mimeType: string;
+  trashed: boolean;
+  parents: string[];
+  headRevisionId: string | null;
+  modifiedTime: string | null;
+}
+
+export class GoogleDriveTransport implements ToolTransport {
+  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
+
+  /** Felles status→typet-feil-mapping - IDENTISK klassifisering på tvers av alle Drive-endepunkt. */
+  private async assertOk(response: Response, notFoundId?: string): Promise<void> {
+    if (response.status === 404) throw new Error(`drive_not_found_${notFoundId ?? "unknown"}`);
+    if (response.status === 401 || response.status === 403) throw new Error(`drive_auth_error_${response.status}`);
+    if (response.status === 429) throw new Error("drive_rate_limited");
+    if (!response.ok) throw new Error(`drive_error_${response.status}`);
+  }
+
+  private async getMetadata(fileId: string, auth: Record<string, string>): Promise<DriveMetadata> {
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}`);
+    url.searchParams.set("fields", "id,name,mimeType,trashed,parents,headRevisionId,modifiedTime");
+    const response = await fetch(url, { headers: auth });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as Partial<DriveMetadata>;
+    return {
+      id: body.id ?? fileId, name: body.name ?? "", mimeType: body.mimeType ?? "",
+      trashed: body.trashed ?? false, parents: body.parents ?? [],
+      headRevisionId: body.headRevisionId ?? null, modifiedTime: body.modifiedTime ?? null
+    };
+  }
+
+  /** §7 (scope-endring): FØR en mutasjon som godtar `expected_head_revision_id` - fail-closed konfliktsjekk, ALDRI en stille overskriving. */
+  private async assertNotStale(fileId: string, parameters: Record<string, JsonValue>, auth: Record<string, string>): Promise<void> {
+    const expected = parameters["expected_head_revision_id"];
+    if (expected === undefined) return; // ingen precondition oppgitt - kalleren har bevisst ikke bedt om en
+    const current = await this.getMetadata(fileId, auth);
+    if (current.headRevisionId !== String(expected)) {
+      throw new Error(`drive_conflict_stale_version_${fileId}`);
+    }
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
+    const token = await googleAccessToken(credential);
+    const auth = { authorization: `Bearer ${token}` };
+
+    switch (action) {
+      case "list_files":
+        return this.listFiles(parameters, auth);
+      case "read_document":
+        return this.readDocument(parameters, auth);
+      case "get_metadata": {
+        const meta = await this.getMetadata(String(parameters["file_id"]), auth);
+        return { data: { ...meta, parents: meta.parents } as unknown as Record<string, JsonValue> };
+      }
+      case "read_permissions":
+        return this.readPermissions(parameters, auth);
+      case "create_file":
+        return this.createFile(parameters, auth, false);
+      case "create_folder":
+        return this.createFile(parameters, auth, true);
+      case "update_content":
+        return this.updateContent(parameters, auth);
+      case "rename":
+        return this.rename(parameters, auth);
+      case "move":
+        return this.move(parameters, auth);
+      case "trash":
+        return this.setTrashed(parameters, auth, true);
+      case "delete_permanent":
+        return this.deletePermanent(parameters, auth);
+      case "create_permission":
+        return this.createPermission(parameters, auth);
+      case "update_permission":
+        return this.updatePermission(parameters, auth);
+      case "delete_permission":
+        return this.deletePermission(parameters, auth);
+      default:
+        throw new Error(`drive_unsupported_action_${action}`);
+    }
+  }
+
+  private async listFiles(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const folderId = parameters["folder_id"] ? String(parameters["folder_id"]) : undefined;
+    const pageToken = parameters["page_token"] ? String(parameters["page_token"]) : undefined;
+    const q = folderId ? `'${folderId}' in parents and trashed=false` : "trashed=false";
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    url.searchParams.set("q", q);
+    url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size)");
+    url.searchParams.set("pageSize", "100");
+    url.searchParams.set("spaces", "drive");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const response = await fetch(url, { headers: auth });
+    await this.assertOk(response);
+    const body = (await response.json()) as {
+      nextPageToken?: string;
+      files?: Array<{ id: string; name: string; mimeType: string; modifiedTime?: string; size?: string }>;
+    };
+    return {
+      data: {
+        files: (body.files ?? []).map((f) => ({
+          id: f.id, name: f.name, mime_type: f.mimeType,
+          modified_at: f.modifiedTime ?? null, size_bytes: f.size ?? null
+        })),
+        next_page_token: body.nextPageToken ?? null
+      }
+    };
+  }
+
+  private async readDocument(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const documentId = String(parameters["document_id"]);
+    const mimeType = String(parameters["mime_type"] ?? "");
+    if (mimeType === GOOGLE_DOC_EXPORT_MIME) {
+      const response = await fetch(
+        `https://www.googleapis.com/drive/v3/files/${documentId}/export?mimeType=text%2Fplain`,
+        { headers: auth }
+      );
+      await this.assertOk(response, documentId);
+      return { data: { content: await response.text(), content_type: "text/plain" } };
+    }
+    if (mimeType.startsWith(GOOGLE_NATIVE_MIME_PREFIX) || !isDriveSupportedRawMime(mimeType)) {
+      // Sheets/Slides/Forms/binærformater/bilder/PDF - eksplisitt utenfor P1A-scope (§14).
+      throw new Error(`drive_unsupported_content_${mimeType || "unknown"}`);
+    }
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}?alt=media`, { headers: auth });
+    await this.assertOk(response, documentId);
+    return { data: { content: await response.text(), content_type: mimeType } };
+  }
+
+  private async readPermissions(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions`);
+    url.searchParams.set("fields", "permissions(id,type,role,emailAddress,domain)");
+    const response = await fetch(url, { headers: auth });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as { permissions?: Array<{ id: string; type: string; role: string; emailAddress?: string; domain?: string }> };
+    return { data: { permissions: (body.permissions ?? []) as unknown as JsonValue } };
+  }
+
+  /**
+   * Enkel multipart-opplasting (metadata + tekstlig innhold i én request) -
+   * SAMME mønster Google sin egen "simple/multipart upload"-dokumentasjon
+   * beskriver for tekstbasert innhold. Ingen binær-/resumable-opplasting
+   * (utenfor P1A-scope).
+   */
+  private async createFile(parameters: Record<string, JsonValue>, auth: Record<string, string>, isFolder: boolean) {
+    const name = String(parameters["name"]);
+    const parentFolderId = parameters["parent_folder_id"] ? String(parameters["parent_folder_id"]) : undefined;
+    const content = isFolder ? undefined : (parameters["content"] !== undefined ? String(parameters["content"]) : "");
+    const mimeType = isFolder ? GOOGLE_FOLDER_MIME : String(parameters["mime_type"] ?? "text/plain");
+    const metadata: Record<string, JsonValue> = { name, mimeType, ...(parentFolderId ? { parents: [parentFolderId] } : {}) };
+
+    if (isFolder) {
+      const response = await fetch("https://www.googleapis.com/drive/v3/files?fields=id,name,mimeType,parents", {
+        method: "POST",
+        headers: { ...auth, "content-type": "application/json" },
+        body: JSON.stringify(metadata)
+      });
+      await this.assertOk(response);
+      const body = (await response.json()) as { id: string; name: string };
+      return { external_id: body.id, data: { id: body.id, name: body.name } };
+    }
+
+    const boundary = `jarvis-drive-boundary-${Date.now()}`;
+    const multipartBody =
+      `--${boundary}\r\ncontent-type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\ncontent-type: ${mimeType}\r\n\r\n${content}\r\n` +
+      `--${boundary}--`;
+    const response = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,mimeType,headRevisionId", {
+      method: "POST",
+      headers: { ...auth, "content-type": `multipart/related; boundary=${boundary}` },
+      body: multipartBody
+    });
+    await this.assertOk(response);
+    const body = (await response.json()) as { id: string; name: string; headRevisionId?: string };
+    return { external_id: body.id, data: { id: body.id, name: body.name, head_revision_id: body.headRevisionId ?? null } };
+  }
+
+  private async updateContent(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    await this.assertNotStale(fileId, parameters, auth);
+    const content = String(parameters["content"] ?? "");
+    const mimeType = String(parameters["mime_type"] ?? "text/plain");
+    const response = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media&fields=id,name,headRevisionId`, {
+      method: "PATCH",
+      headers: { ...auth, "content-type": mimeType },
+      body: content
+    });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as { id: string; name: string; headRevisionId?: string };
+    return { external_id: body.id, data: { id: body.id, name: body.name, head_revision_id: body.headRevisionId ?? null } };
+  }
+
+  private async rename(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    await this.assertNotStale(fileId, parameters, auth);
+    const newName = String(parameters["new_name"]);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name`, {
+      method: "PATCH",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ name: newName })
+    });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as { id: string; name: string };
+    return { external_id: body.id, data: { id: body.id, name: body.name } };
+  }
+
+  private async move(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    await this.assertNotStale(fileId, parameters, auth);
+    const newParentId = String(parameters["new_parent_folder_id"]);
+    const meta = await this.getMetadata(fileId, auth);
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}`);
+    url.searchParams.set("addParents", newParentId);
+    if (meta.parents.length > 0) url.searchParams.set("removeParents", meta.parents.join(","));
+    url.searchParams.set("fields", "id,name,parents");
+    const response = await fetch(url, { method: "PATCH", headers: auth });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as { id: string; name: string; parents?: string[] };
+    return { external_id: body.id, data: { id: body.id, name: body.name, parents: (body.parents ?? []) as unknown as JsonValue } };
+  }
+
+  private async setTrashed(parameters: Record<string, JsonValue>, auth: Record<string, string>, trashed: boolean) {
+    const fileId = String(parameters["file_id"]);
+    await this.assertNotStale(fileId, parameters, auth);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,trashed`, {
+      method: "PATCH",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ trashed })
+    });
+    await this.assertOk(response, fileId);
+    const body = (await response.json()) as { id: string; name: string; trashed: boolean };
+    return { external_id: body.id, data: { id: body.id, name: body.name, trashed: String(body.trashed) } };
+  }
+
+  /** `files.delete` er PERMANENT (bekreftet mot Drive API v3-dokumentasjonen) - flytter IKKE til papirkurv. */
+  private async deletePermanent(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: "DELETE", headers: auth });
+    if (response.status === 404) {
+      // Allerede borte - idempotent utfall for en retry, ikke en feil.
+      return { external_id: fileId, data: { id: fileId, already_deleted: "true" } };
+    }
+    await this.assertOk(response, fileId);
+    return { external_id: fileId, data: { id: fileId, already_deleted: "false" } };
+  }
+
+  private async createPermission(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    const role = String(parameters["role"]);
+    const type = String(parameters["type"]);
+    const body: Record<string, JsonValue> = { role, type };
+    if (parameters["email_address"] !== undefined) body["emailAddress"] = String(parameters["email_address"]);
+    if (parameters["domain"] !== undefined) body["domain"] = String(parameters["domain"]);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions?fields=id,type,role`, {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    await this.assertOk(response, fileId);
+    const created = (await response.json()) as { id: string; type: string; role: string };
+    return { external_id: created.id, data: { id: created.id, type: created.type, role: created.role } };
+  }
+
+  private async updatePermission(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    const permissionId = String(parameters["permission_id"]);
+    const role = String(parameters["role"]);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${permissionId}?fields=id,role`, {
+      method: "PATCH",
+      headers: { ...auth, "content-type": "application/json" },
+      body: JSON.stringify({ role })
+    });
+    await this.assertOk(response, `${fileId}:${permissionId}`);
+    const body = (await response.json()) as { id: string; role: string };
+    return { external_id: body.id, data: { id: body.id, role: body.role } };
+  }
+
+  private async deletePermission(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const fileId = String(parameters["file_id"]);
+    const permissionId = String(parameters["permission_id"]);
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}/permissions/${permissionId}`, {
+      method: "DELETE", headers: auth
+    });
+    if (response.status === 404) {
+      return { external_id: permissionId, data: { id: permissionId, already_deleted: "true" } };
+    }
+    await this.assertOk(response, `${fileId}:${permissionId}`);
+    return { external_id: permissionId, data: { id: permissionId, already_deleted: "false" } };
+  }
+}
+
 export class TelegramTransport implements ToolTransport {
   constructor(private readonly chatId: string | undefined = process.env["JARVIS_TELEGRAM_CHAT_ID"]) {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {

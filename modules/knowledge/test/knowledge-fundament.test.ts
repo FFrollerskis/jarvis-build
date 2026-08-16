@@ -10,7 +10,7 @@ import { LocalHashEmbedding, type EmbeddingProvider } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { KnowledgeRetriever } from "../src/retriever.ts";
 import { KnowledgeSyncService } from "../src/sync.ts";
-import type { KnowledgeRecord, KnowledgeSource } from "../src/source.ts";
+import type { KnowledgeListResult, KnowledgeSource } from "../src/source.ts";
 
 /**
  * UA-2 P0 §12: obligatoriske tester A-M, O-R (N dekkes i eget testfilen for
@@ -157,7 +157,7 @@ describe("UA-2 P0: sync/dedupe/tombstone/reactivation (§4-§5/§7.A-D/F/K/O) vi
     class FailingSource implements KnowledgeSource {
       readonly source_type = "fake-fail";
       readonly source_instance_id = "fake:always-fails";
-      async list(): Promise<KnowledgeRecord[]> {
+      async list(): Promise<KnowledgeListResult> {
         throw new Error("kilde-nettverksfeil");
       }
     }

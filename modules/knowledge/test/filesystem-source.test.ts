@@ -23,9 +23,10 @@ describe("FilesystemKnowledgeSource", () => {
     await writeFile(join(root, "binaer.png"), Buffer.from([0, 1, 2, 3])); // IKKE tekstformat - skal hoppes over
 
     const source = new FilesystemKnowledgeSource(root);
-    const records = await source.list();
+    const { records, skipped } = await source.list();
 
     expect(records).toHaveLength(2); // .png filtrert bort
+    expect(skipped).toHaveLength(0);
     const md = records.find((r) => r.external_id === "notat.md");
     expect(md).toBeDefined();
     expect(md?.content).toContain("Tittel");
@@ -41,7 +42,7 @@ describe("FilesystemKnowledgeSource", () => {
     await mkdir(join(root, "sub"), { recursive: true });
     await writeFile(join(root, "sub", "fil.txt"), "innhold");
     const source = new FilesystemKnowledgeSource(join(root, "sub", "..", "sub")); // urenset sti inn
-    const records = await source.list();
+    const { records } = await source.list();
     expect(records).toHaveLength(1);
     expect(records[0]?.external_id).toBe("fil.txt");
   });
@@ -57,7 +58,7 @@ describe("FilesystemKnowledgeSource", () => {
     }
 
     const source = new FilesystemKnowledgeSource(root);
-    const records = await source.list();
+    const { records } = await source.list();
 
     // Den lovlige filen listes; symlink-en til utenfor roten er ALDRI med:
     expect(records.some((r) => r.external_id === "vanlig.md")).toBe(true);
@@ -74,7 +75,7 @@ describe("FilesystemKnowledgeSource", () => {
       return;
     }
     const source = new FilesystemKnowledgeSource(root);
-    const records = await source.list();
+    const { records } = await source.list();
     // Filen nås via begge stier (ekte/fil.md og lenke-innenfor/fil.md) - begge er innenfor roten, begge lovlige:
     expect(records.filter((r) => r.content === "innenfor roten").length).toBeGreaterThanOrEqual(1);
   });
@@ -83,7 +84,7 @@ describe("FilesystemKnowledgeSource", () => {
     await writeFile(join(root, "kode.ts"), "export const x = 1;");
     await writeFile(join(root, "ikke.rb"), "puts 'hei'"); // ikke i default-listen
     const source = new FilesystemKnowledgeSource(root);
-    const records = await source.list();
+    const { records } = await source.list();
     expect(records.map((r) => r.external_id)).toEqual(["kode.ts"]);
   });
 });

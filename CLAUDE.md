@@ -31,6 +31,19 @@ Beslutningslogg: [docs/DECISIONS_AND_ASSUMPTIONS.md](docs/DECISIONS_AND_ASSUMPTI
 8. **Ingen destruktive handlinger** uten eksplisitt bekreftelse.
 9. **Lokal først:** alt skal kjøre i Docker på Tobias sin PC og flytte uten omskriving. Ren Postgres – ingen Supabase-spesifikke API-er i kjernen.
 10. **Faseporten gjelder:** bygg kun det aktiv fase definerer; «Bygges IKKE»-listene i IMPLEMENTATION_PLAN er bindende.
+11. **OWNER CONNECTOR CAPABILITY INVARIANT (D-41):** eier-tilkoblede integrasjoner bygges for MAKSIMAL nyttig
+    leverandørkapabilitet (les/skriv/slett/tilgangsstyring - ikke bare lesing fordi det er enklere), ikke
+    read-only som standard. A–D er risikoklasser som styrer HVORDAN en handling utføres (preflight/readback/
+    audit/godkjenning), aldri OM eieren har kapabiliteten - sovereign owner-modus for klasse D er uendret
+    (ingen kunstig godkjenningssperre for eier). Read-only er kun akseptabelt når leverandøren faktisk ikke
+    tilbyr mer, et scope mangler og er dokumentert som gap, lov/plattform krever eksplisitt bekreftelse,
+    Tobias har konfigurert connectoren som begrenset, eller full kapabilitet ville bryte eksisterende
+    sikkerhetsisolasjon. Test-/akseptanseløp begrenses likevel til sandbox/test-ressurser (blast radius) -
+    dette sier ingenting om produksjonens tilgangsnivå. Enhver ny connector-byggeordre vurderer eksplisitt
+    les/skriv/slett/tilgangsstyring, nødvendige scopes for full tilgang (verifisert mot offisiell
+    dokumentasjon, aldri gjettet), risikoklasse per handling, eier- og delegert-oppførsel, idempotens og en
+    trygg test-sandbox; ikke-implementert kapabilitet merkes DEFERRED/PARTIAL eksplisitt, aldri stille utelatt.
+    Full begrunnelse og gjeldende connector-audit: D-41 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ## Samarbeids- og GitHub-protokoll
 

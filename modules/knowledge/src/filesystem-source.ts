@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
-import type { KnowledgeRecord, KnowledgeSource } from "./source.ts";
+import type { KnowledgeListResult, KnowledgeRecord, KnowledgeSource } from "./source.ts";
 
 /**
  * UA-2 P0 §2: tekstbaserte filtyper vi faktisk kan parse deterministisk.
@@ -67,10 +67,16 @@ export class FilesystemKnowledgeSource implements KnowledgeSource {
     return real;
   }
 
-  async list(): Promise<KnowledgeRecord[]> {
+  /**
+   * UA-2 P1A §22: filsystem-kilden hopper aldri over noe med en klassifisert
+   * feilårsak i dag (ukjente filtyper filtreres stille, som før) - `skipped`
+   * returneres alltid tom. Beholdt i signaturen for kontrakt-konsistens med
+   * `KnowledgeListResult`, ikke fordi denne kilden trenger den ennå.
+   */
+  async list(): Promise<KnowledgeListResult> {
     const records: KnowledgeRecord[] = [];
     await this.walk(this.rootResolved, records);
-    return records;
+    return { records, skipped: [] };
   }
 
   private async walk(dirPath: string, records: KnowledgeRecord[]): Promise<void> {

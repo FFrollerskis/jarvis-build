@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import type { KnowledgeRecord, KnowledgeSource } from "./source.ts";
+import { KnowledgeSourceError, classifyToolFailure, type KnowledgeListResult, type KnowledgeRecord, type KnowledgeSource } from "./source.ts";
 
 /**
  * UA-2 P0 §3: GitHub som kunnskapskilde. Går gjennom EKSISTERENDE ToolGateway
@@ -25,13 +25,25 @@ export class GithubKnowledgeSource implements KnowledgeSource {
     this.source_instance_id = `github:${repo}`;
   }
 
-  async list(): Promise<KnowledgeRecord[]> {
+  /**
+   * UA-2 P1A §15 (fix av latent bug): tidligere ble en feilet
+   * `read_repo_meta`/`read_issues` bare stille hoppet over, slik at
+   * `KnowledgeSyncService.sync()` (som tombstoner alt IKKE sett i en
+   * VELLYKKET listing) kunne feiltolke en forbigående ToolGateway-feil
+   * (rate-limit, auth-blip) som "alle issues slettet". Nå kaster begge et
+   * `KnowledgeSourceError` ved `!ok` - hele listingen feiler synlig og
+   * EKSPLISITT i stedet for å late som den var fullstendig.
+   */
+  async list(): Promise<KnowledgeListResult> {
     const records: KnowledgeRecord[] = [];
 
     const metaResult = await this.toolGateway.execute({
       identity: this.identity, tool_id: "github", action: "read_repo_meta", parameters: { repo: this.repo }
     });
-    if (metaResult.ok && metaResult.data) {
+    if (!metaResult.ok) {
+      throw new KnowledgeSourceError(classifyToolFailure(metaResult.reason), `github_read_repo_meta_failed: ${metaResult.reason}`);
+    }
+    if (metaResult.data) {
       const meta = metaResult.data as { full_name: string; description: string; updated_at: string; default_branch: string };
       const content = `${meta.full_name}\n\n${meta.description}`;
       records.push({
@@ -51,7 +63,10 @@ export class GithubKnowledgeSource implements KnowledgeSource {
     const issuesResult = await this.toolGateway.execute({
       identity: this.identity, tool_id: "github", action: "read_issues", parameters: { repo: this.repo }
     });
-    if (issuesResult.ok && issuesResult.data) {
+    if (!issuesResult.ok) {
+      throw new KnowledgeSourceError(classifyToolFailure(issuesResult.reason), `github_read_issues_failed: ${issuesResult.reason}`);
+    }
+    if (issuesResult.data) {
       const { issues } = issuesResult.data as {
         issues: Array<{ id: string; title: string; at: string; is_pr: string; ci_failing: string }>;
       };
@@ -72,6 +87,6 @@ export class GithubKnowledgeSource implements KnowledgeSource {
       }
     }
 
-    return records;
+    return { records, skipped: [] };
   }
 }

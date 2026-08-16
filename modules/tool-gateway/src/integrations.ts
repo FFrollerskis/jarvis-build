@@ -13,7 +13,7 @@ import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 export class FakeTransport implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
   constructor(
-    private readonly reply: (action: string) => { external_id?: string; data?: JsonValue } = () => ({ external_id: "ext-1" }),
+    private readonly reply: (action: string, parameters: Record<string, JsonValue>) => { external_id?: string; data?: JsonValue } = () => ({ external_id: "ext-1" }),
     private readonly failWith?: string
   ) {}
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -21,7 +21,7 @@ export class FakeTransport implements ToolTransport {
       throw new Error(this.failWith);
     }
     this.calls.push({ action, parameters });
-    return this.reply(action);
+    return this.reply(action, parameters);
   }
 }
 
@@ -88,7 +88,7 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
     },
     {
       tool_id: "drive", action: "read_document", description: "Les dokument (untrusted ingestion)",
-      input_schema: record({ document_id: z.string() }), capability_class: "A",
+      input_schema: record({ document_id: z.string(), mime_type: z.string().optional() }), capability_class: "A",
       scopes: ["drive.readonly"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GOOGLE_TOKEN", output_trust: "untrusted", transport: transport("drive")
@@ -118,6 +118,126 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      // UA-2 P1A §18/§24: én side av en Drive-filliste (mappe-scope ELLER hele
+      // driven - avgjøres av `folder_id`-parameteren fra kilden, aldri en
+      // default her). Lagt til på SLUTTEN av samme grunn som read_repo_meta
+      // over - eksisterende tester indekserer dette arrayet posisjonelt.
+      tool_id: "drive", action: "list_files", description: "List filer i en Drive-mappe eller hele driven (untrusted ingestion)",
+      input_schema: record({ folder_id: z.string().optional(), page_token: z.string().optional() }),
+      capability_class: "A", scopes: ["drive.readonly"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "untrusted", transport: transport("drive")
+    },
+    // UA-2 P1A scope-endring (2026-08-16, se OWNER CONNECTOR CAPABILITY
+    // INVARIANT i CLAUDE.md): Google Drive full read/write/permissions -
+    // produksjons-scope er `https://www.googleapis.com/auth/drive` (bekreftet
+    // mot Google sitt offisielle Drive API v3-discovery-dokument, IKKE gjettet
+    // - `drive.file` dekker kun app-opprettede filer, utilstrekkelig for full
+    // tilgang). Lagt til på SLUTTEN av arrayet av samme grunn som de
+    // eksisterende drive-oppføringene over - eksisterende tester indekserer
+    // posisjonelt.
+    {
+      tool_id: "drive", action: "get_metadata", description: "Les filmetadata (id/navn/foreldre/trashed/revisjon) - brukes også som preflight/konfliktsjekk før mutasjoner",
+      input_schema: record({ file_id: z.string() }), capability_class: "A",
+      scopes: ["drive.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GOOGLE_TOKEN", output_trust: "untrusted", transport: transport("drive")
+    },
+    {
+      tool_id: "drive", action: "read_permissions", description: "Les delinger/tilgangsstyring på en fil",
+      input_schema: record({ file_id: z.string() }), capability_class: "A",
+      scopes: ["drive.permissions.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GOOGLE_TOKEN", output_trust: "untrusted", transport: transport("drive")
+    },
+    {
+      tool_id: "drive", action: "create_file", description: "Opprett en ny tekstfil i Drive (valgfri mappe)",
+      input_schema: record({ name: z.string(), content: z.string().optional(), mime_type: z.string().optional(), parent_folder_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "legg det opprettede dokumentet (external_id) i papirkurven", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive")
+    },
+    {
+      tool_id: "drive", action: "create_folder", description: "Opprett en ny mappe i Drive (valgfri foreldremappe)",
+      input_schema: record({ name: z.string(), parent_folder_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "legg den opprettede mappen (external_id) i papirkurven", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive")
+    },
+    {
+      tool_id: "drive", action: "update_content", description: "Erstatt innholdet i en eksisterende Drive-fil (valgfri expected_head_revision_id-precondition)",
+      input_schema: record({ file_id: z.string(), content: z.string(), mime_type: z.string().optional(), expected_head_revision_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "gjenopprett forrige innhold via Drive sin revisjonshistorikk", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+    },
+    {
+      tool_id: "drive", action: "rename", description: "Gi en Drive-fil/mappe et nytt navn (valgfri expected_head_revision_id-precondition)",
+      input_schema: record({ file_id: z.string(), new_name: z.string(), expected_head_revision_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "gi tilbake det opprinnelige navnet", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+    },
+    {
+      tool_id: "drive", action: "move", description: "Flytt en Drive-fil/mappe til en ny foreldremappe (valgfri expected_head_revision_id-precondition)",
+      input_schema: record({ file_id: z.string(), new_parent_folder_id: z.string(), expected_head_revision_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "flytt tilbake til den opprinnelige foreldremappen", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+    },
+    {
+      tool_id: "drive", action: "trash", description: "Legg en Drive-fil/mappe i papirkurven (reversibelt - IKKE permanent sletting; valgfri expected_head_revision_id-precondition)",
+      input_schema: record({ file_id: z.string(), expected_head_revision_id: z.string().optional() }),
+      capability_class: "C", scopes: ["drive.write"], reversible: true,
+      rollback_procedure: "gjenopprett fra papirkurven (trashed=false)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+    },
+    {
+      // Drive sin `files.delete` er PERMANENT (bekreftet mot API-dokumentasjonen -
+      // flytter IKKE til papirkurv). Klasse D: irreversibel, samme mønster som
+      // email.send.
+      tool_id: "drive", action: "delete_permanent", description: "Slett en Drive-fil/mappe PERMANENT (krever signert godkjenning for delegerte identiteter)",
+      input_schema: record({ file_id: z.string() }), capability_class: "D",
+      scopes: ["drive.delete"], reversible: false,
+      rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+    },
+    {
+      // Deling/tilgangsstyring er sikkerhetskritisk (kan eksponere innhold for
+      // nye parter) - klasse D uavhengig av at selve handlingen teknisk er
+      // reverserbar (fjerne tilgangen igjen).
+      tool_id: "drive", action: "create_permission", description: "Del en Drive-fil/mappe med en bruker/domene/alle (krever signert godkjenning for delegerte identiteter)",
+      input_schema: record({ file_id: z.string(), role: z.string(), type: z.string(), email_address: z.string().optional(), domain: z.string().optional() }),
+      capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
+      rollback_procedure: "fjern den opprettede tilgangen (delete_permission)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+    },
+    {
+      tool_id: "drive", action: "update_permission", description: "Endre rollen på en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
+      input_schema: record({ file_id: z.string(), permission_id: z.string(), role: z.string() }),
+      capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
+      rollback_procedure: "sett rollen tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+    },
+    {
+      tool_id: "drive", action: "delete_permission", description: "Fjern en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
+      input_schema: record({ file_id: z.string(), permission_id: z.string() }),
+      capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
+      rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
     }
   ];
 }

@@ -33,7 +33,7 @@ Prompt injection-test er obligatorisk før et verktøy med klasse C/D aktiveres.
 | GitHub | Kode, PR-er, issues for Coding Worker | B/C | Issues/PR-tekst = ubetrodd innhold |
 | Google Calendar | Lese/foreslå avtaler | A (lese), C (skrive) | Skriving krever mandat |
 | Gmail | Lese, utkast, sende | A (lese), C/D (sende) | Sending alltid med godkjenning i starten |
-| Google Drive/Docs | Dokumenter | A/B | |
+| Google Drive/Docs | Dokumenter - full read/write/permissions (D-41, 2026-08-16) | A (les), C (opprett/oppdater/omdøp/flytt/papirkurv), D (permanent slett, deling/tilgangsstyring) | Ingestion-kilden (`GoogleDriveKnowledgeSource`) er separat og alltid READ ONLY; se DECISIONS_AND_ASSUMPTIONS.md D-41 |
 | Telegram | Varsling + fjern-godkjenning + chat-kanal | B | Første varslingskanal |
 | Supabase/Postgres | Egen datalagring | – | Intern, ikke via Tool Gateway |
 | Vercel | Deploy av web | C | |

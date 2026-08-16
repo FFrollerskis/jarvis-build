@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (Q-20 final closure) · **Branch:** `claude/q20-data-erasure` (PR #4, merges
-til `main`)
+**Oppdatert:** 2026-08-16 (UA-2 P1A VERIFIED/COMPLETE - host-bevist, run_id `2703299e`, PR #5 merget
+til `main`) · **Branch:** `claude/ua2-p1a-knowledge-sources` (merget, se D-42)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -26,6 +26,15 @@ isolasjon - alle PASS, `duplicate_documents=0`, `hard_fail=false`. `symlink_esca
 SKIPPED_HOST_PERMISSION` (Windows-hosten tillot ikke symlink uten admin-rettigheter denne
 kjøringen) - eksplisitt IKKE et live-PASS, mekanismen forblir suite-bevist
 (`filesystem-source.test.ts`). Full evidens: docs/RUNTIME_GATES.md.
+**UA-2 P1A (Knowledge Source Expansion + Google Drive Full Read/Write): VERIFIED/COMPLETE
+(2026-08-16, host-bevist på ekte Windows/Docker-host, run_id `2703299e`, `hard_fail=false`)** → D-42.
+Ni oppfølgingsrunder (hver drevet av et ekte Tobias-host-funn) endte med full grønn host-akseptanse:
+Obsidian-livssyklus, tenant-isolasjon/retrieval for nye kildetyper, Google Drive full read/write
+ende-til-ende (Desktop-OAuth-bootstrap, Drive API aktivert, auth/read/create/update/rename/move/
+trash/permanent_delete/cleanup/sync/no-resurrection/idempotency/policy/live ALLE PASS), Q-21 uendret
+i samme kjøring, ingen token-lekkasje. Eksplisitt, ærlig unntak: `google_drive_permission_live=
+SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL` (live permission-mutasjon IKKE host-testet - se Q-23, IKKE en
+blokkering for lukking). PR #5 merget til `main`. Full evidens under "UA-2 P1A FINAL CLOSURE" nederst i denne filen.
 **Q-20 (teknisk data-erasure-foundation, FØR UA-2 P1): VERIFIED/CLOSED (2026-08-16, host-bevist på
 ekte Windows/Docker-host, run_id `eaabe2b1`)** → D-40. Ny pakke `@jarvis/erasure` - sentral, typed
 `ErasureService` (preview/execute/verify) med scope-modell (`tenant`/`person`/`memory_space`/
@@ -352,16 +361,612 @@ tenant/space-isolasjon urørt, trygg kvittering, sentinel-scan uten funn. **STAT
 VERIFIED/CLOSED → D-40.** Full evidens: docs/RUNTIME_GATES.md, docs/DECISIONS_AND_ASSUMPTIONS.md.
 PR #4 merges til `main`.
 
+## UA-2 P1A — Knowledge Source Expansion (BYGGET denne økten, 2026-08-16, FRA `origin/main` etter Q-20-merge)
+- **Godkjent byggeordre** (etter Q-20 VERIFIED/CLOSED-merge): utvid `@jarvis/knowledge` med Google
+  Drive (READ ONLY) og Obsidian/lokal vault som nye kunnskapskilder, på den EKSISTERENDE
+  `KnowledgeSource`/`KnowledgeSyncService`/FTS+vector-hybrid-arkitekturen - ingen parallell
+  connector-SDK, ingen ny auth-modell, ingen ny DB-migrasjon (gjenbruker `knowledge_documents`/
+  `knowledge_embeddings` uendret). Pieces eksplisitt utsatt (se under). IKKE bygget: e-post-
+  ingestion, møtetranskripsjon, OCR, full Knowledge Graph/GraphRAG, Drive write/delete.
+- **Kontrakt-utvidelse** (`modules/knowledge/src/source.ts`): `KnowledgeSource.list()` returnerer nå
+  `KnowledgeListResult { records, skipped }` i stedet for en bar array - en kilde kan rapportere
+  bevisste per-element-skips (f.eks. ustøttet MIME) uten å forveksle dem med feil. Ny
+  `KnowledgeSourceError`/`SourceErrorClass` (AUTH/PERMISSION/RATE_LIMIT/TRANSIENT_NETWORK/NOT_FOUND/
+  UNSUPPORTED_CONTENT/INVALID_CONFIG/SOURCE_UNAVAILABLE) for TOTAL listing-svikt - `sync()` tombstoner
+  ALDRI noe når `list()` kaster, uansett klasse (kritisk sikkerhetsegenskap, uendret). Fikset en latent
+  bug i `GithubKnowledgeSource` samtidig: en feilet ToolGateway-handling ble tidligere stille utelatt
+  (kunne feiltolkes som "alt slettet" av tombstone-logikken) - kaster nå eksplisitt i stedet.
+- **`KnowledgeSourceRegistry`** (`registry.ts`): typet, FLERE-instans konfigurasjon bundet til
+  (tenant_id, memory_space_id, source_instance_id) - `forTenant()` kan STRUKTURELT aldri returnere en
+  annen tenants config, ingen implisitt/global kilde.
+- **`GoogleDriveTransport`** (`modules/tool-gateway`): READ ONLY, samme OAuth/konto-mønster som
+  Gmail/Calendar (`googleAccessToken()` gjenbrukt, ingen ny credential-type). `list_files` (paginert,
+  eksplisitt `folder_id` fra kilden - ALDRI en default) + `read_document` (Google Docs eksporteres til
+  text/plain, tekstlige MIME-typer leses rått, alt annet - Sheets/Slides/bilder/PDF/binærformater -
+  kaster en typet `drive_unsupported_content_<mime>`-feil).
+- **`GoogleDriveKnowledgeSource`** (`drive-source.ts`): `external_id` = Drive sin stabile `file.id`
+  (rename-safe - en omdøpning endrer `title`, ikke `external_id`). Mappe-scope er REKURSIV men
+  importerer ALDRI hele driven når konfigurert for én mappe. Paginering + rekursjon aggregeres internt
+  i `list()` (komplett resultat eller kast, aldri partielt). Sletting gjenbruker eksisterende
+  "fraværende i vellykket listing = tombstone" (ingen egen Drive Changes-API-integrasjon - bevisst,
+  dokumentert valg). En AUTH/PERMISSION-feil på ÉN fil-lesing eskaleres til TOTAL svikt (systemisk
+  årsak antatt); NOT_FOUND/RATE_LIMIT/TRANSIENT_NETWORK på én fil er en trygg per-fil-skip.
+- **`ObsidianVaultKnowledgeSource`** (`obsidian-source.ts`): KOMPONERER rundt
+  `FilesystemKnowledgeSource` (samme allowlist/traversal/symlink-forsvar som UA-2 P0, ingen duplisert
+  sikkerhetslogikk) - kun `.md`-filer, `.obsidian/` ekskludert som default. Frontmatter parses
+  best-effort (flat, ingen ny YAML-avhengighet) til `metadata.frontmatter`; wiki-lenker
+  (`[[Notat]]`) til `metadata.wiki_links` (flat liste, IKKE en graf - GraphRAG bevisst utenfor P1A).
+  `external_id` = relativ vault-sti (samme presedens som filesystem) - Obsidian-omdøpning er derfor
+  slett+ny, IKKE en oppdatering (dokumentert forskjell fra Drive, som HAR en stabil fil-id).
+- **To korrekthetsfiks i `KnowledgeSyncService.sync()`** (gjelder ALLE kilder, ikke bare de nye):
+  (1) `skipped`-elementer beskyttes nå mot tombstoning sammen med `seen` - én forbigående per-element-
+  feil kunne tidligere tombstonet ETT dokument selv om hele listingen lyktes; (2) "uendret innhold"-
+  grenen oppdaterer nå tittel/uri/metadata (uten re-embedding) - nødvendig for at en Drive-omdøpning
+  faktisk skal synes.
+- **Chunking-safeguard** (bevisst MINIMAL, ingen ekte multi-chunk-skjema): `embed()`-input trunkeres
+  til 24 000 tegn - `content`-kolonnen (og dermed FTS) beholder ALLTID hele, utrunkerte teksten. Ingen
+  embedding-leverandør i kodebasen hadde en input-grense før dette (Drive/Obsidian-dokumenter kan bli
+  langt større enn P0 sine korte GitHub-issues).
+- **Pieces: eksplisitt utsatt.** Repo-søk fant INGEN integrasjon/API/eksportformat/credential-
+  miljøvariabel noe sted - kun navnedropp i planleggingsdokumenter. Ingen konkret, ikke-gjettet
+  integrasjonsflate å bygge mot ennå - egen fremtidig underoppgave når en finnes.
+- **Ett-kommando host-akseptanse:** `modules/core/scripts/ua2-p1a-host-run.ts` (samme
+  pnpm/Windows/Docker-bootstrap-mønster som `q20-host-run.ts`, INGEN ny workspace-pakke denne gangen
+  → ingen egen verify-workspace-steg) kjører til slutt
+  `modules/knowledge/scripts/ua2-p1a-live.ts`: Q-21-rolle-sjekk, registry-sanity, Obsidian full
+  livssyklus i en ISOLERT MIDLERTIDIG vault (ALDRI Tobias sin ekte vault), tenant-isolasjon+retrieval
+  med de nye kildetypene, no-content-i-audit-scan. Google Drive LIVE er BETINGET: krever
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`JARVIS_GOOGLE_TOKEN` OG en NY, dedikert
+  `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` (aldri hele driven) - mangler noen av de fire rapporteres
+  `google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE`, ALDRI en fake PASS.
+- **Kvalitet:** 463/463 tester (406 baseline fra `origin/main` + 57 nye: registry x9, Drive-source x11,
+  Obsidian-source x9, kryssgående tenant/space/retrieval/audit-redaksjon x5, chunking-safeguard x2,
+  host-run-wiring x21), full monorepo-typecheck ren. Lint/gitleaks gjenstår før PR (se §32 i
+  byggeordren).
+- **STATUS: FIXED_SUITE / READY_FOR_HOST_VERIFY. IKKE VERIFIED** - ingen ekte Google Drive-credential,
+  ingen ekte Docker-Postgres i denne sky-sandboxen. Krever Tobias sin host-kjøring
+  (`ua2-p1a-host-run.ts`) før VERIFIED kan settes, akkurat som Q-20/UA-2 P0 krevde det.
+
+## UA-2 P1A scope-endring — Google Drive full read/write + Owner Connector Capability Invariant (D-41, samme økt)
+- **Tobias sin eksplisitte beslutning FØR PR #5 merges:** Jarvis skal IKKE være begrenset til read-only
+  Google Drive - full funksjonell tilgang, styrt av det EKSISTERENDE A-D policy-systemet (ingen ny
+  permission-modell). Samtidig innført som en PERMANENT arkitekturregel for ALLE fremtidige connectors
+  (se D-41 i DECISIONS_AND_ASSUMPTIONS.md, rule 11 i CLAUDE.md).
+- **Google Drive utvidet fra READ ONLY til FULL read/write/permissions:** `GoogleDriveTransport` fikk 10
+  nye handlinger (`get_metadata`/`read_permissions` klasse A; `create_file`/`create_folder`/
+  `update_content`/`rename`/`move`/`trash` klasse C; `delete_permanent`/`create_permission`/
+  `update_permission`/`delete_permission` klasse D). Produksjons-OAuth-scope bekreftet mot Google sitt
+  offisielle Drive API v3-discovery-dokument (IKKE gjettet): `https://www.googleapis.com/auth/drive`
+  (full tilgang - `drive.file` dekker kun app-opprettede filer, utilstrekkelig). `files.delete` er
+  PERMANENT (bekreftet); trashing er en egen, reversibel `files.update`. `update_content`/`rename`/
+  `move`/`trash` godtar en valgfri `expected_head_revision_id`-precondition - ved mismatch kastes en
+  typet `drive_conflict_stale_version`-feil FØR noen mutasjon forsøkes, aldri en stille overskriving.
+  D-klasse-handlinger har `preflight_action` (samme eksisterende ToolGateway-evidensmekanisme som
+  Home Assistant sin `lock_set`/`alarm_set` alt brukte - ingen ny mekanisme). Owner sovereign-modus
+  uendret: klasse D autonomt for eier, delegert identitet krever fortsatt signert godkjenning.
+- **Idempotens:** skriveoperasjoner gjenbruker EKSISTERENDE ToolGateway `idempotency_key`-dedupe (samme
+  mekanisme som resten av systemet) - bevist kritisk for `create_permission` spesielt, siden Drive sin
+  egen `permissions.create` IKKE dedupliserer identiske tilganger selv.
+- **Q-20-distinksjon (§5 i scope-endringen):** eksplisitt bevist arkitektonisk separert - en
+  `drive/trash`-handling rører ALDRI `knowledge_documents`, og en Q-20-hard-delete av et
+  `knowledge_document` kaller ALDRI ut til Drive. Dette er to uavhengige operasjoner, ikke automatisk
+  koblet.
+- **Tester:** 27 nye (`drive-full-access.test.ts` 17 - policy/idempotens/isolasjon/observability via ekte
+  ToolGateway+Postgres+FakeTransport; `google-drive-transport.test.ts` 10 - konflikt-/statuskode-
+  klassifisering internt i transporten, fetch mocket, det ENESTE unntaket fra "raw HTTP-transportere
+  unit-testes aldri"-presedensen fordi byggeordren eksplisitt krevde det). `ua2-p1a-live.ts` §6 utvidet
+  med ekte create/update/rename/move/trash/cleanup/sync/no-resurrection/idempotency mot
+  `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` - `google_drive_live=BLOCKED_REAUTH_REQUIRED` hvis lesing
+  fungerer men skriving feiler på auth (utilstrekkelig scope på eksisterende token). Permission-
+  mutasjon er BEVISST IKKE live-testet (kan ikke gjøres trygt uten å involvere en ekte person/endre ekte
+  eksponering) - policy/klassifisering for det er suite-bevist. 517/517 tester totalt (490 + 27),
+  full monorepo-typecheck ren.
+- **Connector-audit (engangs, IKKE alle utvidet i denne runden - kun Google Drive):**
+
+  | Connector | Klassifisering | Har i dag | Konkrete gap (backlog, IKKE bygget her) |
+  |---|---|---|---|
+  | Google Drive | **FULL** (denne økten) | read/list/create/update/rename/move/trash/delete/permissions | - |
+  | GitHub | PARTIAL | read_issues, read_repo_meta, create_pr | Ingen merge_pr, ingen issue-kommentar/opprettelse/lukking, ingen branch-sletting, ingen repo-admin |
+  | Google Calendar | PARTIAL | read_events, create_event | Ingen update_event, ingen delete_event, ingen svar-på-invitasjon |
+  | Gmail/e-post | PARTIAL | read_inbox, send | Ingen reply/forward, ingen arkivering/sletting/labeling, ingen draft-håndtering |
+  | Telegram | PARTIAL | notify (send), `/brief`/`/status`/`/ai`-kommandoer (poll) | Ingen redigering/sletting av sendte meldinger, ingen rikere Bot API-funksjoner (pin, media) |
+  | Vercel | READ_ONLY | read_deployments | Ingen trigger/rollback/promote-deploy, ingen env-var-håndtering |
+  | Home Assistant | PARTIAL | read_state, light_set, climate_set, lock_set (D), alarm_set (D) | God kjernedekning, men ikke uttømmende (media_player, cover/blinds, scener, automasjon-trigger mangler) |
+
+  Gapene er EKSPLISITT dokumentert som backlog, IKKE lukket her (D-41/§CURRENT CONNECTOR AUDIT sier
+  eksplisitt "IKKE utvid alle nå dersom det blåser scope"). Hver fremtidig connector-byggeordre
+  vurderer full kapabilitet fra D-41-sjekklisten fremover.
+
+## UA-2 P1A HOST RECOVERY — auto-create safe Drive test sandbox (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte `ua2-p1a-host-run.ts` (run_id `8af834dd`, `hard_fail=false`) - ALLE
+  ingestion-felt (Obsidian/registry/tenant-isolasjon/retrieval/audit) PASS, men
+  `google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE` fordi `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` ikke var
+  satt, selv om `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`JARVIS_GOOGLE_TOKEN` alle var konfigurert.
+- **Eksplisitt eierbeslutning:** Tobias skal ALDRI måtte manuelt opprette en Drive-testmappe, finne/
+  kopiere en mappe-ID, eller redigere `.env` for å kjøre denne akseptansen.
+- **Ny, ren, avhengighetsfri modul** `modules/knowledge/scripts/lib/drive-acceptance-sandbox.ts`
+  (`DriveAcceptanceSandbox`, `determineTestRootSource`, `driveAcceptanceFolderName`, `isReauthSignal`) -
+  BEVISST ingen fetch/nettverk der, kun grensekontroll-/cleanup-logikk. `assertInSandbox()` er den ENESTE
+  veien en mutasjon godkjennes - fail-closed, kaster `DriveBoundaryViolationError` for enhver ID denne
+  kjøringen ikke selv sporet som opprettet (aldri "prøv og se").
+- **`ua2-p1a-live.ts` §6 fullstendig omskrevet:** er `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` satt, brukes den
+  (kun LEST, ALDRI slettet av runneren). Er den IKKE satt, oppretter runneren SELV en unikt navngitt,
+  midlertidig mappe (`"Jarvis P1A Acceptance <run_id>"`) - BEVISST INGEN søk-etter-lignende-navn-og-
+  gjenbruk (alltid en fersk `create_folder`, aldri en `list_files`-basert oppslag). Et rent LESE-scope-
+  probe (`get_metadata` på Drive sin reserverte `"root"`-ID) skjer FØR test-roten løses og FØR noen
+  mutasjon forsøkes, slik at total auth-svikt skilles fra manglende skrive-scope
+  (`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`). Full akseptanse A-Q bevist INNENFOR sandkassen:
+  auth-probe, opprett to undermapper + hovedtestfil, les, oppdater, omdøp, flytt mellom undermappene,
+  sync+retrieval (scopet til subfolder-b), Q-20 hard-delete+resync-no-resurrection (PLUSS et nytt
+  Drive-side-uavhengighetsbevis: originalfilen bekreftes FORTSATT å eksistere i Drive etter Jarvis-side
+  purge), trash (reversibelt), idempotent create (samme idempotency_key), permanent sletting KUN på en
+  artefakt DENNE kjøringen selv opprettet (`driveMutate()`-wrapperen grensekontrollerer FØR ethvert
+  mutasjonskall). Permission-mutasjon fortsatt BEVISST IKKE live-testet
+  (`google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL`) - kan ikke gjøres trygt uten å
+  involvere en ekte person/endre ekte eksponering i en ubetjent kjøring.
+- **Opprydding:** alt DENNE kjøringen selv opprettet slettes permanent til slutt via
+  `sandbox.cleanupTargets()` (barn FØR rot) - en eksplisitt KONFIGURERT rot er strukturelt ALDRI et
+  mål (kun inkludert når `autoCreated=true`). Den auto-opprettede mappe-IDen persisteres ALDRI til
+  `.env` - kun til kjøringens `diagnostics`/logg.
+- **`ua2-p1a-host-run.ts`-kommentarblokken oppdatert** til å reflektere at `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID`
+  nå er VALGFRI - selve ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts`.
+- **Tester:** 13 nye rene enhetstester (`drive-acceptance-sandbox.test.ts` - auto-create-beslutning,
+  navneunikhet, grensekontroll, reauth-klassifisering, cleanup-scoping inkl. delvis-oppsatt-kjøring og
+  "konfigurert rot aldri i cleanup-listen"), pluss `ua2-p1a-host-run-wiring.test.ts` utvidet/oppdatert
+  (guard krever nå kun client_id/secret/token, IKKE test_folder_id; nye strukturelle bevis for §D
+  no-reuse-by-search, §J konfigurert-rot-aldri-direkte-slettet, §K ingen `.env`-persistering,
+  driveMutate-grensekontroll-kjeden, §M idempotent-gjentakelse). **512/512 tester totalt** (faktisk målt
+  denne runden), lint/full monorepo-typecheck/gitleaks (`protect --staged` + historikk-scan) alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever en NY host-kjøring fra
+  Tobias for å bevise auto-sandkassen faktisk fungerer mot ekte Drive. PR #5 forblir draft/umerget.
+
+## GOOGLE DRIVE FULL-ACCESS REAUTH (samme dag, 2026-08-16) — ett-kommando nettleser-reauth
+- **Host-funn:** run_id `262ac1bb` viste `google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`
+  (`get_metadata("root")` → `tool_failed:drive_auth_error_403`) - det eksisterende `JARVIS_GOOGLE_TOKEN`
+  mangler full Drive-scope (utstedt før D-41-scope-endringen). Eierkrav: Tobias skal ALDRI måtte lime
+  inn en autorisasjonskode manuelt, redigere `.env`, eller kjøre en egen andre kommando etterpå -
+  produksjons-OAuth-scope forblir FULL `https://www.googleapis.com/auth/drive` (D-41 uendret, ingen
+  fallback til read-only for å "få testen til å passere").
+- **Ny, ren, avhengighetsfri modul** `modules/core/scripts/lib/google-drive-reauth-lib.ts` -
+  URL-bygging/callback-parsing/state-CSRF-sjekk/scope-sammenligning/refresh-token-beslutning/konto-
+  maskering, INGEN nettverk/filsystem der (30 rene enhetstester).
+- **`modules/core/scripts/google-drive-reauth.ts`** - ÉN host-kommando:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`. Offisiell
+  "authorization code" + loopback-IP-redirect-flyt (RFC 8252, `http://127.0.0.1:8942/oauth2callback`
+  default, `JARVIS_GOOGLE_REAUTH_PORT` valgfri override) - ALDRI den avviklede OOB-flyten. Ber om
+  `https://www.googleapis.com/auth/drive` + EKSISTERENDE `https://www.googleapis.com/auth/calendar`
+  (unngår å regressere kalender, som deler samme `JARVIS_GOOGLE_TOKEN`) + et minimalt
+  `https://www.googleapis.com/auth/userinfo.email`-scope (kun for konto-identitetssjekk). `access_type=
+  offline`+`prompt=consent`+`include_granted_scopes=true` (bekreftet mot google-auth-library sin
+  offisielle Node.js-dokumentasjon - garanterer en fersk refresh_token hver kjøring, bevarer andre
+  allerede godkjente scopes). Åpner standardnettleseren automatisk (Windows/macOS/Linux, samme
+  DEP0190-sikre ikke-shell cmd.exe-mønster som `package-manager-resolve.ts` på Windows); fallback til
+  manuell URL hvis åpning feiler.
+- **Verifisering FØR noe skrives (§7):** både token-responsens `scope`-felt OG en FAKTISK
+  `get_metadata("root")`-lesing mot ekte Drive må lykkes - callback-suksess alene er IKKE nok.
+  Innsuffisient scope → `FAIL_INSUFFICIENT_SCOPE`, `.env` urørt. Manglende refresh_token i responsen
+  (uventet siden `prompt=consent` alltid tvinger en) håndteres KUN ved å LIVE re-verifisere den
+  eksisterende token-ens faktiske scope via `tokeninfo`-endepunktet - aldri en antakelse om Google sin
+  interne inkrementell-auth-oppførsel.
+- **Konto-konsistens (§8):** henter KUN e-postadressen (minimalt scope), maskerer den (`t***@domene`)
+  i all logging, sammenligner mot konfigurert `JARVIS_GOOGLE_ACCOUNT` - ved mismatch kreves eksplisitt
+  skrevet "YES" i terminalen FØR noe skrives; "identitet kunne ikke bestemmes" blokkerer IKKE (logges
+  ærlig som ukjent, aldri stille behandlet som match).
+- **Sikkerhet:** aldri client_secret/access_token/refresh_token/authorization_code i logg eller
+  prosessargument (bevist strukturelt, se wiring-tester). `.env` skrives KUN ved full suksess - alle
+  feilbaner returnerer/kaster FØR skriving, slik at den eksisterende (om enn scope-begrensede)
+  credentialen alltid forblir gjenopprettbar. Skriving gjenbruker EKSISTERENDE
+  `buildUpdatedEnvLines`/`parseEnvValues`/backup-mønster fra `lib/q21-env-recovery.ts` (samme
+  `.env.bak.<epoch>` + atomisk tmp+rename som `fix-q21-runtime-role.ts`) - rører KUN
+  `JARVIS_GOOGLE_TOKEN`-linjen.
+- **Kjeder automatisk videre:** ved `google_drive_reauth=PASS` kjøres `ua2-p1a-host-run.ts` (og dermed
+  hele Drive-auto-sandkasse-akseptansen fra forrige runde) AUTOMATISK - ingen andre kommando fra Tobias.
+- **Presisjonsfunn (dokumentert, IKKE fikset i denne runden):** `GmailTransport` (tool_id `"email"`)
+  bruker faktisk en HELT ANNEN, i dag ukonfigurert credential (`JARVIS_EMAIL_TOKEN`) - IKKE
+  `JARVIS_GOOGLE_TOKEN` slik en eldre `.env.example`-kommentar feilaktig antydet (rettet i denne
+  runden). Reauth-scriptet ber derfor bevisst KUN om Drive+Calendar-scope, ikke Gmail.
+- **Åpent, IKKE-blokkerende funn (logget, ikke skjult):** `GoogleDriveTransport` er registrert i
+  `firstWaveTools()`-funksjonen, men er IKKE koblet inn i de faktiske produksjons-entrypointene
+  (`apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall mangler en `drive:`-nøkkel
+  - kun `email`/`calendar`/`github`/`telegram` er wiret der i dag). Drive-verktøyet er dermed reelt
+  reachable KUN fra `ua2-p1a-live.ts`/testene, ikke fra en løpende api/worker-prosess ennå. Dette er
+  UTENFOR denne reauth-ordrens scope (som var credential-anskaffelse, ikke entrypoint-wiring) og
+  krever en egen, eksplisitt godkjent byggeordre - ikke gjort stille her.
+- **Tester:** 30 nye rene enhetstester (`google-drive-reauth-lib.test.ts`) + 24 nye strukturelle
+  wiring-tester (`google-drive-reauth-wiring.test.ts`, kildeteksts-basert - samme presedens som
+  `ua2-p1a-host-run-wiring.test.ts`). Full suite/lint/typecheck/gitleaks kjøres som del av denne
+  rundens kvalitetsport (se rapport).
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sin faktiske
+  nettleser-godkjenning på hosten. PR #5 forblir draft/umerget.
+
+## GOOGLE DRIVE REAUTH HOST FIX (samme dag, 2026-08-16) — response_type manglet + feil konto
+- **Host-funn:** Tobias kjørte `google-drive-reauth.ts`. Nettleseren åpnet Google OAuth med FEIL konto
+  (`henrik@ffskis.com`), og Google avviste med "Required parameter is missing: response_type" (Error
+  400: invalid_request).
+- **Root cause (ÉN, forklarer BEGGE symptomene samtidig):** den genererte autorisasjons-URL-en har
+  ALLTID inneholdt `response_type=code` (bevist av eksisterende enhetstester siden forrige runde) -
+  feilen lå i `openBrowser()` sin daværende Windows-vei, `cmd /c start "" <url>`. URL-en inneholder `&`
+  (gyldig spørrestreng-skilletegn) men verken mellomrom eller anførselstegn, så Node sin Windows-argv-
+  til-kommandolinje-quoting siterte IKKE argumentet automatisk. cmd.exe mottok URL-en USITERT i
+  `/c`-modus og splittet den ved HVERT ubeskyttet `&` som et kommando-skille - Google mottok reelt kun
+  `...auth?client_id=<id>`, nok til å identifisere appen og stille falle tilbake til en allerede
+  innlogget nettleser-konto, men ALDRI `redirect_uri`/`response_type`/`scope`/`state`.
+- **Fiks 1 (transport):** Windows-veien bruker nå `rundll32.exe url.dll,FileProtocolHandler <url>` i
+  stedet for `cmd /c start` - en native .exe, INGEN kommandotolk involvert i det hele tatt (samme
+  "native-exe-trenger-ingen-cmd-wrapper"-presedens som `lib/package-manager-resolve.ts`).
+- **Fiks 2 (kontovalg):** `prompt` er nå `"consent select_account"` (Google sin offisielt dokumenterte
+  mellomrom-delte prompt-liste) - tvinger ALLTID frem kontovelgeren, aldri en stille auto-valgt konto.
+  `login_hint` settes til `JARVIS_GOOGLE_ACCOUNT` (kun et HINT - hindrer aldri kontobytte, offisielt
+  dokumentert Google-oppførsel).
+- **Fiks 3 (pre-flight-sikkerhetsnett):** `validateAuthorizationUrl()` parser den genererte URL-en
+  tilbake og krever eksplisitt `response_type=code`+`client_id`+`redirect_uri`+`state`+full Drive-scope
+  FØR nettleseren i det hele tatt åpnes - fanger enhver FREMTIDIG regresjon i selve URL-byggingen,
+  fail-closed (server startes ikke, nettleser åpnes ikke).
+- **Konto-mismatch-rapportering presisert:** ny `formatAccountMismatchReport()` gir en eksplisitt,
+  grep-bar `expected_account=<maskert> authorized_account=<maskert>`-loggform - samme
+  bekreftelses-gate (typet "YES") som før, kun tydeligere format.
+- **.env-sikkerhet uendret/bekreftet:** alle feilbaner (inkl. den nye pre-flight-valideringen) skjer
+  strukturelt FØR backup/skriving - `.env` forblir urørt ved enhver feil, bevist av wiring-testene.
+- **Tester:** 15 nye rene enhetstester (URL-validering, prompt/login_hint, mismatch-rapportformat) +
+  7 nye strukturelle wiring-tester (rundll32 i bruk / cmd-start borte, pre-flight-rekkefølge,
+  login_hint-wiring, mismatch-rapport-bruk) - 588/588 totalt. Lint/full monorepo-typecheck/gitleaks
+  alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever en NY host-kjøring
+  fra Tobias for å bevise fiksen faktisk fungerer mot en ekte Windows-nettleser. PR #5 forblir
+  draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## GOOGLE OAUTH HOST FIX #2 (samme dag, 2026-08-16) — redirect_uri_mismatch / permanent Desktop-klient-design
+- **Host-funn:** transport-fiksen over løste URL-korrumperingen (Tobias sin nettleser åpnet nå den
+  KOMPLETTE URL-en - riktig client_id/redirect_uri/response_type/scope/state/prompt), men Google svarte
+  deretter med `Error 400: redirect_uri_mismatch`.
+- **Root cause (evidensbasert, ikke gjettet):** Google validerer `redirect_uri` FØR noe annet
+  (sikkerhetskritisk, hindrer open-redirect) - en "Web application"-klient krever en EKSAKT
+  forhåndsregistrert redirect-URI, mens en "Desktop app"-klient godtar EN loopback-IP-redirect på
+  HVILKEN SOM HELST port UTEN forhåndsregistrering (bekreftet Google-dokumentert oppførsel). At
+  Tobias sin eksisterende, allerede eksisterende OAuth-klient (fra FØR denne reauth-byggingen) ga
+  mismatch for en loopback-URI er sterk evidens for at den er "Web application"-type - Jarvis sin
+  lokale, interaktive eier-reauth-flyt er NØYAKTIG scenarioet "Desktop app" er bygget for. Google
+  sender ALDRI noen callback tilbake ved mismatch (feilsiden vises direkte i nettleseren) - dette
+  scriptet kan derfor STRUKTURELT ikke oppdage feilen selv via callback-serveren.
+- **Ingen offentlig Google-API for å opprette en OAuth-klient programmatisk** (kun Cloud Console-UI -
+  bekreftet, ikke antatt) - ETT manuelt Cloud Console-steg er derfor uunngåelig. Redusert til fem
+  eksplisitte steg i loggmeldingen FØR nettleseren åpnes, PLUSS Cloud Console-credentials-siden åpnes
+  AUTOMATISK i en egen fane (prosjektnummeret utledes fra den eksisterende `JARVIS_GOOGLE_CLIENT_ID`
+  sin stabile `<prosjektnummer>-<random>.apps.googleusercontent.com`-form - ingen gjettet URL).
+- **Ny, valgfri `JARVIS_GOOGLE_CLIENT_SECRET_JSON`** (.env-variabel, filsti): peker til den nedlastede
+  client secret-JSON-fila fra en NY "Desktop app"-OAuth-klient. `resolveOAuthClient()` leser/validerer
+  denne FØR noe annet i `main()` - `parseClientSecretJson()` godtar KUN Google sin `installed`
+  (Desktop)-JSON-form, og avviser en `web`-type fil EKSPLISITT (`WrongOAuthClientTypeError`, samme
+  brittleness som klienten Tobias allerede har - stille prøving av samme feilende type unngås).
+- **Koherent credential-sett (§4 i ordren):** brukes en importert Desktop-klient, skrives
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` SAMMEN i ÉN atomisk `.env`-skriving ved suksess - aldri
+  et token alene mot en client_id/_secret som ikke lenger samsvarer. Refresh-tokens er tied til klienten
+  som utstedte dem (bekreftet Google-oppførsel) - en full authorization_code-exchange (ikke bare en
+  refresh_token-gjenbruk) garanterer et FERSKT, korrekt-koblet token for DEN importerte klienten.
+- **Kontovelger uendret:** `prompt=consent select_account` og `login_hint` er identisk uansett
+  klientkilde (ÉN `buildAuthorizationUrl()`-kall, ingen egen "importert klient"-gren som svekker dette).
+  Presisering av §7 i ordren: "browseren viste fortsatt henrik@ffskis.com" er mest sannsynlig Google sin
+  standard feilside-topptekst (viser AKTIV nettleser-økt-identitet) - siden redirect_uri-valideringen
+  skjer FØR kontovelgeren i det hele tatt vises, ble select_account/login_hint aldri nådd i det
+  tilfellet. Ingen svekkelse av den mekanismen er gjort eller nødvendig.
+- **Tester:** 11 nye rene enhetstester (`parseClientSecretJson`/`deriveProjectNumberFromClientId`/
+  `buildCredentialsConsoleUrl`) + 10 nye strukturelle wiring-tester (koherent skriving, ingen
+  parallell/duplisert credential-lesing, .env-drevet gjenopptakelse, ingen secrets i den nye koden) -
+  608/608 totalt. Lint/full monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  manuelle Cloud Console-steg (opprett Desktop-klient, sett `JARVIS_GOOGLE_CLIENT_SECRET_JSON`) etterfulgt
+  av en NY host-kjøring for å bevise dette faktisk fungerer. PR #5 forblir draft/umerget. Ett-kommando-
+  kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## GOOGLE OAUTH HOST FIX #3 "ZERO MANUAL ENV EDITING" (samme dag, 2026-08-16) — automatisk Desktop-klient-oppdagelse
+- **Eierens UX-krav:** etter HOST FIX #2 var det ENE uunngåelige manuelle steget i praksis TO -
+  Cloud Console-handlingen OG å redigere `.env` med filstien til den nedlastede JSON-en. Tobias skal KUN
+  gjøre den ENE, faktisk uunngåelige handlingen (opprette en "Desktop app"-klient og trykke "Download
+  JSON") - ALDRI redigere `.env`, kopiere client_id/secret, eller lime inn en filsti.
+- **Automatisk Nedlastinger-oppdagelse, i SAMME kjørende prosess, uten restart:** `attemptOAuth()` starter
+  nå det opprinnelige OAuth-forsøket OG (parallelt, i bakgrunnen) en `watchForDesktopClientDownload()`-
+  polling av Tobias sin Nedlastinger-mappe (`os.homedir()/Downloads` - den dokumenterte
+  standardplasseringen, ALDRI en hardkodet bruker-sti). `Promise.race()` mellom callback-en og watcheren
+  avgjør veien videre: kommer callback-en FØRST (normalflyt - klienten var allerede riktig type),
+  fortsetter alt UENDRET og Tobias ser ALDRI noen ekstra fane (veiledningen/Cloud Console-siden vises
+  FØRST etter 25 sekunder - god margin for en vanlig kontovalg+samtykke-interaksjon, kort nok til rask
+  hjelp ved en ekte feil). Finner watcheren en NY, gyldig Desktop-klient-JSON FØRST, avbrytes det
+  opprinnelige callback-forsøket EKSPLISITT (frigjør porten - `waitForCallback()` er nå kansellerbar) og
+  et FRISK OAuth-forsøk starter AUTOMATISK med den nye klienten, i SAMME prosess.
+- **KUN filer fra og med kjøringens eget starttidspunkt regnes** (`selectNewCandidateJsonFiles`) - en
+  gammel, urelatert JSON-fil som allerede lå i Nedlastinger plukkes ALDRI opp. Hver kandidat valideres med
+  den EKSISTERENDE `parseClientSecretJson()` (ingen ny/parallell valideringslogikk) - en "web"-type fil
+  eller søppel EKSKLUDERES STILLE fra kandidatlisten (Nedlastinger kan inneholde mange urelaterte
+  JSON-filer), krasjer ALDRI polling-løkka. Flere gyldige kandidater SAMTIDIG avgjøres ALDRI stille - en
+  trygg, KUN-filnavn nummerert liste ber Tobias velge eksplisitt.
+- **Koherent persistering uendret:** `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` skrives SAMMEN, atomisk,
+  til de VANLIGE `.env`-nøklene FØRST etter faktisk OAuth-suksess (scope+Drive-probe+kontosjekk alle
+  bestått). `JARVIS_GOOGLE_CLIENT_SECRET_JSON` (HOST FIX #2) forblir støttet for et avansert/manuelt
+  oppsett, men er IKKE lenger nødvendig for normalflyten og persisteres ALDRI selv - kun et
+  engangs-import-artefakt.
+- **Tester:** 20 nye rene enhetstester (`selectNewCandidateJsonFiles`/`classifyDiscoveryResult`/
+  `formatCandidateSelectionPrompt`/`parseCandidateSelection`) + 15 nye strukturelle wiring-tester
+  (kansellerbar callback-server, race-rekkefølge, koherent skriving KUN etter suksess, ingen restart,
+  fortsatt ingen secrets logget) - 637/637 totalt. Lint/full monorepo-typecheck/gitleaks alle rene.
+- **Ærlighet om verifikasjonsgrense:** selve den KONKURRERENDE race-/polling-/kanselleringslogikken kan
+  IKKE kjøres ende-til-ende i denne sky-sandboxen (krever en ekte Windows-nettleser + en ekte
+  Nedlastinger-mappe + faktisk Google OAuth) - bevist STRUKTURELT (kildeteksts-baserte wiring-tester,
+  samme presedens som resten av denne fila) + den underliggende beslutnings-/filtreringslogikken FULLT
+  enhetstestet. Faktisk host-kjøring er derfor fortsatt nødvendig for VERIFIED.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  Cloud Console-steg (hvis nødvendig) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget.
+  Ett-kommando-kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## GOOGLE OAUTH HOST FIX #4 "SETUP-FØRST, ALDRI AUTH MED KJENT WEB-KLIENT" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte HOST FIX #3-versjonen. Nettleseren åpnet Google OAuth UMIDDELBART og fikk
+  igjen `Error 400: redirect_uri_mismatch` (kontoen vist: `post@tsworkflow.com`) - beviset på at racet
+  (opprinnelig OAuth-forsøk kjørt SAMTIDIG med Nedlastinger-oppdagelsen) startet OAuth med den samme,
+  allerede kjent inkompatible Web-klienten FØR noen Desktop-klient var på plass.
+- **Root cause:** HOST FIX #3 sitt design antok at man MÅTTE prøve eksisterende credentials FØRST for å
+  "oppdage" om de var utilstrekkelige. For et tilfelle der Tobias ALLEREDE (fra HOST FIX #2) har bevist
+  at eksisterende `JARVIS_GOOGLE_CLIENT_ID` er en Web-klient, er dette feil - vi VET allerede at et
+  OAuth-forsøk med den vil feile, og skal derfor ALDRI forsøkes.
+- **Racet er FJERNET.** Ny, strengt sekvensiell tilstandsmaskin: `resolveProvenDesktopClient()` avgjør
+  FØRST om en POSITIVT bevist Desktop-klient finnes - enten en eksplisitt `JARVIS_GOOGLE_CLIENT_SECRET_
+  JSON`-import (HOST FIX #2, avansert/manuelt), ELLER en NY `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop`-
+  metadata-linje persistert av EN TIDLIGERE vellykket kjøring av DENNE flyten. Eksisterende
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` ALENE (uten den metadata-linjen) regnes ALDRI som bevist Desktop -
+  de kan være NØYAKTIG den samme Web-klienten som allerede har feilet TO GANGER, og brukes derfor ALDRI
+  til et OAuth-forsøk.
+- **Finnes ingen bevist klient:** `main()` går INN i SETUP_REQUIRED FØR noe OAuth-forsøk i det hele tatt
+  vurderes. Cloud Console-siden åpnes UMIDDELBART (ingen "vent og se"-graceperiode lenger - setup-behovet
+  er allerede kjent, ikke en gjetning), og `waitForDesktopClientJson()` venter ALENE (ingen samtidig
+  OAuth-forsøk) i inntil 10 minutter på at en gyldig, ny Desktop-klient-JSON dukker opp i Nedlastinger.
+  Først NÅR en slik klient er funnet+validert bygges autorisasjons-URL-en - ALLTID med DEN klientens
+  `client_id`, ALDRI den rå `JARVIS_GOOGLE_CLIENT_ID`-verdien direkte.
+- **`waitForCallback()` forenklet tilbake** til en enkel (ikke-kansellerbar) funksjon - siden det aldri
+  finnes mer enn ÉTT OAuth-forsøk per kjøring lenger, er hele kanselleringsmekanismen fra HOST FIX #3
+  unødvendig og fjernet.
+- **Koherent persistering utvidet:** ved full suksess skrives `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/
+  `_TOKEN` OG den nye `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop`-metadata-linjen SAMMEN i ÉN atomisk
+  skriving - FØR suksess er gamle credentials (om noen) HELT urørt, slik at eksisterende, fungerende
+  Gmail/Calendar-integrasjoner (som deler samme `JARVIS_GOOGLE_TOKEN`) aldri risikerer å miste sin
+  gyldige credential midt i en mislykket reauth-kjøring.
+- **Tester:** wiring-testsuiten omskrevet fra grunnen for den nye sekvensielle flyten (50 tester, dekker
+  ordrens §10 A-L) - 631/631 totalt (færre enn forrige runde ved design, siden race-spesifikke tester er
+  erstattet av færre, mer presise sekvensielle tester). Lint/full monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  Cloud Console-steg (hvis nødvendig, nå UTEN risiko for at scriptet prøver den kjente Web-klienten
+  først) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er
+  UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## GOOGLE DRIVE REAUTH HOST FIX #5 "CLASSIFY REAL DRIVE 403 + AUTO-GUIDE" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte HOST FIX #4-versjonen. Desktop-OAuth-bootstrappen fungerte HELT gjennom
+  (`google_desktop_client_status=SETUP_REQUIRED` → `google_desktop_client_import=PASS` →
+  `google_desktop_client_type=desktop`, token-exchange lyktes med en scope-streng som så korrekt ut) -
+  men flyten feilet DERETTER spesifikt på selve Drive-metadata-probe-kallet: `google_reauth=
+  FAIL_DRIVE_PROBE`. `.env` forble korrekt urørt. Eksplisitt eierkrav: IKKE rør OAuth-redirect-/klient-
+  arkitekturen igjen (host-bevist fungerende) - blokkeringen er en POST-AUTH Google Drive API-403, og
+  den EKSAKTE Google-feilårsaken skulle klassifiseres, ALDRI gjettes.
+- **Ny, trygg feilklassifisering** (`classifyDriveProbeError()` i lib, rent/deterministisk, INGEN
+  nettverk): parser Google sin STABILE feil-JSON-form (`error.status`/`error.errors[].reason`/
+  `error.details[].reason`/`error.message`) til `API_NOT_ENABLED`/`INSUFFICIENT_SCOPE`/
+  `WORKSPACE_ADMIN_POLICY`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`. `API_NOT_ENABLED` og
+  `INSUFFICIENT_SCOPE` gjenkjennes via Google sine EGNE, dokumenterte, høy-presisjon signaler
+  (`SERVICE_DISABLED`/`accessNotConfigured`/"has not been used in project"; `insufficientPermissions`/
+  "insufficient authentication scopes"). `WORKSPACE_ADMIN_POLICY` er EKSPLISITT dokumentert i koden som
+  en BEST-EFFORT-bøtte (generisk `PERMISSION_DENIED` uten et mer presist signal på dette tidspunktet i
+  flyten - Google gir normalt ikke et unikt maskinlesbart signal for Workspace-adminblokk etter
+  token-exchange) - ALDRI fremstilt som en Google-bekreftet unik årsak. `safeMessage` trunkeres
+  (≤300 tegn); resultatobjektet har KUN 7 trygge felt - access_token/refresh_token/client_secret/
+  authorization_code/fulle request-headers går ALDRI inn i klassifiseringen eller noen logglinje.
+- **Automatisk guiding + samme-prosess-retry** (`driveMetadataProbe()`/`retryDriveProbeUntilRecovered()`
+  i orchestratoren): en GJENOPPRETTBAR blokkering (`isRecoverableDriveProbeBlocker()` - KUN
+  `API_NOT_ENABLED`/`WORKSPACE_ADMIN_POLICY`) åpner NØYAKTIG riktig side automatisk (Google sin EGEN
+  innebygde enable-URL fra feilmeldingen foretrukket for API_NOT_ENABLED - `buildDriveApiEnableUrl()`
+  KUN som fallback; Admin Console sin API Controls-side, `GOOGLE_ADMIN_API_CONTROLS_URL`, for
+  WORKSPACE_ADMIN_POLICY - med ÉN instruksjon om å stole eksplisitt på "Jarvis Desktop"-klienten, IKKE en
+  bred org-policy-endring), gir Tobias ÉN eksakt setning, og prøver DERETTER Drive-proben på nytt hvert
+  5. sekund i SAMME kjørende prosess i opptil 10 minutter - ingen restart, ingen andre kommando. Et
+  refresh_token tilgjengelig IN-MEMORY brukes trygt til å fornye access-tokenet underveis hvis det
+  utløper mens Tobias gjør Console-klikket (`refreshAccessToken()`) - `.env` forblir likevel HELT urørt
+  til HELE flyten (inkludert denne retryen) lykkes. En IKKE-gjenopprettbar blokkering (INSUFFICIENT_SCOPE/
+  RATE_LIMIT/AUTH_INVALID/UNKNOWN_PROVIDER_403) kaster UMIDDELBART med den klassifiserte rapporten - retry
+  forsøkes ALDRI for noe scriptet ikke kan løse selv.
+- **Ingen scope-nedgradering, ingen klient-fallback (D-41 uendret):** hele probe-/retry-flyten bruker
+  UTELUKKENDE den allerede bevist-Desktop-klienten (`client.clientId`/`client.clientSecret`) - aldri
+  `values["JARVIS_GOOGLE_CLIENT_..."]` direkte, aldri `drive.file`/`drive.readonly` noe sted i filen.
+  Ingen Drive-MUTASJONER forsøkes noensinne i probe-/retry-koden - kun gjentatte, skrivebeskyttede
+  metadata-lesinger.
+- **Ingen credential persisteres mens blokkeringen er uløst:** `driveMetadataProbe()`-feilen og
+  `retryDriveProbeUntilRecovered()`-kallet skjer STRUKTURELT FØR `updates`-blokken/`.env`-backup-koden -
+  samme fail-closed-plassering som scope-sjekken. Lykkes retryen, oppdateres KUN det in-memory
+  access-tokenet (`driveVerifiedAccessToken`) som brukes videre i resten av `main()` (inkl.
+  `detectAccountEmail()`) - selve `.env`-skrivingen skjer fortsatt KUN i den ene, eksisterende atomiske
+  `updates`-blokken, uendret fra HOST FIX #4.
+- **Tester:** 15 nye rene enhetstester (`classifyDriveProbeError`/`formatDriveProbeReport`/
+  `isRecoverableDriveProbeBlocker`/`buildDriveApiEnableUrl`/`GOOGLE_ADMIN_API_CONTROLS_URL`) + 11 nye
+  strukturelle wiring-tester (riktig-prosjekt enable-URL-preferanse, samme-prosess-retry uten
+  execFileSync-selv-spawn, ingen-persistering-mens-blokkert, vellykket-retry-fortsetter-med-ferskt-token,
+  samme bevist-Desktop-klient gjennom hele flyten, ingen drive.file/drive.readonly noe sted) - **657/657
+  totalt**. Lint/full monorepo-typecheck/gitleaks (`protect --staged` + historikk-scan) alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - selve klassifiserings-/retry-
+  logikken kan IKKE kjøres ende-til-ende mot en ekte Google-403 i denne sky-sandboxen (krever en ekte
+  Workspace-organisasjon/Cloud-prosjekt i en faktisk blokkert tilstand) - bevist STRUKTURELT
+  (kildeteksts-baserte wiring-tester) + den underliggende klassifiseringslogikken fullt enhetstestet mot
+  Google sin dokumenterte, stabile feil-JSON-form. Krever Tobias sin NYE host-kjøring for å bevise
+  klassifiseringen/auto-guidingen faktisk treffer riktig mot den EKTE 403-en han observerte. PR #5
+  forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## GOOGLE DRIVE REAUTH HOST FIX #6 "REUSE EXISTING DESKTOP JSON AFTER FAILED AUTH" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias hadde allerede opprettet ÉN Desktop-OAuth-klient ("Jarvis Desktop") og lastet ned
+  en gyldig `installed`-JSON (HOST FIX #5-kjøringen beviste den helt gjennom token-exchange). Fordi
+  persistering er BEVISST atomisk, ble klient-metadata/credentials IKKE skrevet til `.env` da Drive-proben
+  feilet senere i samme kjøring. NESTE kjøring rapporterte likevel `google_desktop_client_status=
+  SETUP_REQUIRED` igjen og åpnet Cloud Console på nytt - FEIL, siden Tobias ikke skal opprette en ny
+  OAuth-klient han allerede har.
+- **Root cause:** `waitForDesktopClientJson()`/`selectNewCandidateJsonFiles()` sin mtime-filter (§2 i HOST
+  FIX #4-ordren, riktig for SITT formål - unngå å plukke opp en gammel, urelatert fil under FØRSTE gangs
+  oppsett) godtar KUN filer med `mtime >= runStartMs`. En allerede-validert JSON fra en TIDLIGERE kjøring
+  har per definisjon en eldre mtime enn en NY kjørings `runStartMs`, og ble derfor STILLE ignorert - et
+  gjenopprettingsscenario (JSON importert → OAuth forsøkt → senere providervalidering feilet → prosessen
+  avsluttet FØR persistering) som det opprinnelige designet aldri dekket.
+- **Ny gjenopprettings-skanning FØR SETUP_REQUIRED vurderes:** `tryRecoverExistingDesktopClientJson()`
+  (orchestrator) skanner Nedlastinger-mappa med en NY, mtime-fri lib-funksjon
+  (`selectExistingCandidateJsonFiles()` - samme sortering/`.json`-filter som `selectNewCandidateJsonFiles()`,
+  men UTEN `sinceMs`-parameteren) og validerer HVER kandidat med den EKSISTERENDE
+  `tryReadValidDesktopClient()`/`parseClientSecretJson()`-kjeden (ingen parallell valideringslogikk - en
+  "web"-type/ugyldig fil ekskluderes like stille som ved vanlig oppdagelse). Nøyaktig ÉN gyldig kandidat:
+  gjenbrukes AUTOMATISK (`google_desktop_client_status=RECOVERED_EXISTING_JSON`), Cloud Console åpnes
+  ALDRI. `main()` sin `if (!client)`-gjenopprettingsblokk står STRUKTURELT FØR `SETUP_REQUIRED`-blokken som
+  to SEPARATE if-sjekker (ikke if/else) - lykkes gjenopprettingen, er `client` allerede satt og
+  `SETUP_REQUIRED`-blokken sin betingelse er `false` ved runtime.
+- **Flere eksisterende gyldige kandidater samtidig:** samme trygge, KUN-filnavn-nummererte velger som
+  ellers (`promptForCandidateSelection()`, nå med en `variant: "new" | "existing"`-parameter for riktig
+  ledetekst - ALDRI en stille gjetning, ALDRI to parallelle implementasjoner). Et uavklart svar faller
+  TRYGT tilbake til `SETUP_REQUIRED` (ingen uendelig løkke her, i motsetning til den vanlige
+  nedlastings-pollingen - eksisterende filer endrer seg ikke av seg selv mens vi venter).
+- **Non-secret gjenopprettingsmarkør (§3 i ordren): BEVISST IKKE bygget denne runden.** Selve
+  gjenopprettings-skanningen løser det konkrete host-funnet uten behov for ny persistert tilstand (unngår
+  en ekstra `.gitignore`-styrt lokal fil og tilhørende kompleksitet) - dokumentert avveining, ikke et
+  utelatt krav (ordren selv merket punktet "Consider"/valgfritt).
+- **Atomisk `.env`-persistering UENDRET:** gjenopprettingen påvirker KUN hvilken `client` OAuth-forsøket
+  bruker - `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN`/`_OAUTH_CLIENT_TYPE` skrives fortsatt SAMMEN, KUN
+  én gang i hele filen, KUN etter at callback+state+scope+Drive-probe+kontosjekk alle har lyktes.
+- **HOST FIX #5 uendret:** `classifyDriveProbeError()`/`driveMetadataProbe()`/
+  `retryDriveProbeUntilRecovered()` (Drive-403-klassifisering, auto-guide, samme-prosess-retry) er ikke
+  rørt - en gjenopprettet klient fortsetter inn i NØYAKTIG samme OAuth→scope→Drive-probe-flyt som en
+  nyoppdaget/persistert-metadata-klient.
+- **Tester:** 4 nye rene enhetstester (`selectExistingCandidateJsonFiles` - eksisterende gammel fil tas
+  med, ekstremt gammel mtime diskvalifiserer IKKE, `.json`-filter, nyest-først) + 12 nye strukturelle
+  wiring-tester (mtime-fritt gjenopprettingskall, to separate if(!client)-sjekker, gjenbruk av
+  eksisterende valideringskjede, fail-safe flere-kandidater-håndtering uten uendelig løkke, Cloud Console
+  IKKE åpnet ved vellykket gjenoppretting, ingen client_secret logget, ingen tidlig `.env`-persistering,
+  HOST FIX #5 uendret) - **673/673 totalt** (84+4 lib, 61+12+3 justerte wiring). Lint/full
+  monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - selve gjenopprettings-
+  skanningen kan ikke kjøres ende-til-ende mot en ekte tidligere-nedlastet fil i denne sky-sandboxen
+  (krever en ekte Windows Nedlastinger-mappe med en reell, tidligere validert JSON-fil) - bevist
+  STRUKTURELT (kildeteksts-baserte wiring-tester) + den underliggende filter-/valideringslogikken fullt
+  enhetstestet. Krever Tobias sin NYE host-kjøring for å bevise at scriptet nå gjenkjenner den allerede
+  eksisterende "Jarvis Desktop"-JSON-en automatisk og går rett til OAuth-samtykke uten å åpne Cloud
+  Console på nytt. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
+## UA-2 P1A HOST FIX #8 "CLEANUP-ONLY BLOCKERS AFTER FULL DRIVE SUCCESS" (samme dag, 2026-08-16)
+- **Host-funn (run_id `ff16c69d`) - VIKTIG MILEPÆL: Google Drive full read/write er nå HOST-BEVIST.**
+  Reauth-flyten (HOST FIX #4-#6) fullførte helt: `google_drive_api_enabled=PASS`,
+  `google_drive_full_scope=PASS`, kontosjekk PASS, koherent Desktop-credential-sett persistert,
+  `google_drive_reauth=PASS`. Selve Drive-akseptansen (`ua2-p1a-live.ts` §6) beviste DERETTER
+  `google_drive_auth_scope`/`_read`/`_create`/`_update`/`_rename`/`_move`/`_sync`/
+  `_q20_no_resurrection`/`_trash`/`_idempotency`/`_permanent_delete`/`_policy` ALLE PASS, ingen
+  token-lekkasje (`drive_token_leak_audit=false`, `drive_token_leak_metadata=false`),
+  `google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL` (uendret, bevisst). Den samlede
+  P1A-akseptansen ble likevel blokkert av TO RENE opprydding-defekter (IKKE manglende
+  Drive-kapabilitet) - se under.
+- **Blokker A - `google_drive_cleanup=FAIL` (targets=5, root_deleted=true):** root cause funnet ved
+  faktisk kildelesing (ikke gjettet). §P sin allerede-vellykkede `delete_permanent` av hovedtestfila
+  lot fila stå igjen i `sandbox.created` - §5-oppryddingen forsøkte DERFOR å slette den EN GANG TIL.
+  Den EKTE mekanismen: `delete_permanent` er en klasse-D-handling med `preflight_action: "get_metadata"`
+  (ToolGateway sin evidens-/recovery-mekanisme) - for en fil som ALLEREDE er permanent slettet gir
+  DENNE preflight-lesingen en 404, og siden klassen er D fører det til en UMIDDELBAR
+  `preflight_failed:drive_not_found_...`-DENY - `deletePermanent()`-transportens EGEN, allerede
+  idempotente 404-håndtering (`already_deleted: "true"`) nås ALDRI i dette tilfellet.
+- **Fiks A:** `DriveAcceptanceSandbox` fikk en eksplisitt artefakt-livssyklus
+  (`CREATED`/`TRASHED`/`PERMANENTLY_DELETED`/`CLEANED`) - `markPermanentlyDeleted(fileId)` kalles
+  UMIDDELBART etter §P sin vellykkede sletting, og `cleanupTargets()` utelater NÅ strukturelt et hvert
+  artefakt i en terminal tilstand (`PERMANENTLY_DELETED`/`CLEANED`) - INGEN redundant sletteforsøk
+  skjer lenger. Som forsvar-i-dybden: ny `classifyCleanupOutcome()` klassifiserer et EVENTUELT
+  gjenværende NOT_FOUND-svar under selve cleanup-løkka som `already_absent` KUN når mål-IDen er et
+  KJENT sandkasse-artefakt (`sandbox.has()` - samme grensekontroll som `assertInSandbox()`) - ALDRI
+  generalisert til en vilkårlig Drive-fil utenfor sandkassen. `google_drive_cleanup=PASS` avgjøres
+  UTELUKKENDE av `cleanup_failures === 0` - ALDRI av `root_deleted=true` alene. Ny evidenslinje:
+  `created_artifacts=<n> cleaned_artifacts=<n> already_absent=<n> cleanup_failures=<n> root_deleted=<bool>`.
+- **Blokker B - `tenants`-FK-feil:** `"update or delete on table tenants violates foreign key
+  constraint tool_executions_tenant_id_fkey"`. Root cause funnet mot det FAKTISKE skjemaet (ikke
+  gjettet): `tool_executions.tenant_id` REFERENCES `tenants` (010_tool_executions.sql) - §N sin
+  idempotency-test (ToolGateway sin idempotency_key-dedupe) skriver ÉN rad dit for TENANT_A, og
+  `cleanupTenant()` slettet den aldri FØR `DELETE FROM tenants` ble forsøkt.
+- **Fiks B:** `DELETE FROM tool_executions WHERE tenant_id = $1` lagt til FØRST i `cleanupTenant()`
+  (FK-trygg rekkefølge, utledet fra selve migrasjonsgrafen). Verifisert MOT faktisk kildekode (ikke
+  antatt) at INGEN andre tabeller trenger rydding: `audit_events.tenant_id` er en REN TEKSTKOLONNE
+  (INGEN `REFERENCES tenants`, se 004_audit_cost.sql) OG append-only-trigger-beskyttet (samme
+  Q-20-presedens - IKKE rørt, IKKE forsøkt slettet); `sessions`/`messages`/`events`/`devices`/
+  `approvals`/`cost_events`/`brief_seen` opprettes ALDRI av P1A-akseptansen (verifisert - ingen av
+  kallene i `ua2-p1a-live.ts` går via de tilhørende service-modulene). Ingen `DISABLE TRIGGER`, ingen
+  `session_replication_role`, ingen `TRUNCATE`, ingen superbruker-omvei - kun presise,
+  parameteriserte `DELETE ... WHERE tenant_id = $1`-setninger via den EKSISTERENDE `adminPool`
+  (uendret Q-21 admin/runtime-splitt).
+- **Q-21 uendret:** ingen kode rørt utenfor de to presise cleanup-fiksene - `jarvis_runtime` forblir
+  NOSUPERUSER/NOBYPASSRLS, ingen RLS-omvei brukt eller nødvendig (adminPool var allerede den
+  eksisterende, legitime admin-tilkoblingen for nettopp denne typen opprydding).
+- **Google OAuth-arkitekturen er IKKE rørt** denne runden (eksplisitt krav i ordren) - begge fiksene
+  er rene opprydding-/DB-endringer i `ua2-p1a-live.ts`/`drive-acceptance-sandbox.ts`. Tobias sin NESTE
+  host-kjøring bruker de ALLEREDE persisterte Desktop-credentialene - INGEN ny reautorisering, INGEN
+  nytt Cloud Console-steg, INGEN nytt samtykke nødvendig.
+- **Tester:** 14 nye rene enhetstester (`drive-acceptance-sandbox.test.ts` - livssyklustilstand,
+  `isNotFoundFailureReason()`, `classifyCleanupOutcome()`, inkl. eksplisitt "NOT_FOUND utenfor
+  sandkassen aksepteres ALDRI"-kontrastbevis) + 14 nye strukturelle wiring-tester
+  (`ua2-p1a-host-run-wiring.test.ts` - markPermanentlyDeleted-plassering, classifyCleanupOutcome-bruk,
+  PASS-betingelse, FK-rekkefølge, scopet DELETE, ingen FK-omvei, audit_events urørt, alle tidligere
+  host-bevist Drive-kapabilitetsstier uendret) - full suite kjørt, lint/typecheck/gitleaks rene (se
+  rapport for eksakte tall).
+- **STATUS - VIKTIG DISTINKSJON (§11 i ordren):** Google Drive full read/write-kapabilitet er
+  HOST-BEVIST (run_id `ff16c69d`) - dette er IKKE lenger en åpen post. Den SAMLEDE UA-2 P1A-
+  akseptansen forblir likevel FIXED_SUITE / READY_FOR_HOST_VERIFY, **IKKE VERIFIED**, fordi
+  cleanup-defektene (Blokker A/B over) hindret et fullstendig grønt `hard_fail=false`-resultat på
+  DENNE kjøringen. Krever EN NY host-kjøring (ingen ny reautorisering) for å bevise at BEGGE
+  cleanup-fiksene faktisk fungerer mot ekte Drive/Postgres FØR P1A kan settes VERIFIED. PR #5 forblir
+  draft/umerget.
+
+## UA-2 P1A FINAL CLOSURE (2026-08-16, samme dag) — HOST VERIFIED, PR #5 MERGET
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts` på sin
+faktiske Windows/Docker-host - GRØNT resultat, run_id `2703299e`, `hard_fail=false`.** Ingen ny
+Google-reautorisering var nødvendig - de allerede persisterte Desktop-credentialene ble gjenbrukt
+direkte.
+- **Q-21 uendret:** `q21_runtime_role_safe=PASS`, `runtime_current_user=jarvis_runtime`,
+  `runtime_role_superuser=false`, `runtime_role_bypassrls=false`.
+- **Knowledge P1A:** `p1a_registry_tenant_scoping`/`p1a_obsidian_lifecycle`/
+  `p1a_obsidian_obsidian_dir_excluded`/`p1a_obsidian_frontmatter_wikilinks`/
+  `p1a_obsidian_no_resurrection`/`p1a_tenant_isolation_new_sources`/`p1a_retrieval_new_sources`/
+  `p1a_no_content_in_audit` = ALLE PASS.
+- **Google Drive (full read/write, D-41):** `google_drive_auth_scope`/`_read`/`_create`/`_update`/
+  `_rename`/`_move`/`_trash`/`_permanent_delete`/`_cleanup`/`_sync`/`_q20_no_resurrection`/
+  `_idempotency`/`_policy`/`_live` = ALLE PASS. HOST FIX #8-cleanup-fiksene (§forrige seksjon) bevist
+  fungerende: `created_artifacts=4 cleaned_artifacts=4 already_absent=1 cleanup_failures=0
+  root_deleted=true` - ingen `cleanup A/B feilet`-linjer. `drive_token_leak_audit=false`,
+  `drive_token_leak_metadata=false`.
+- **Ærlig unntak, IKKE overklaimet:** `google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL`
+  - live permission-mutasjon (dele/tilgangsstyring) er bevisst IKKE host-testet (ingen trygg ekstern
+  testperson i en ubetjent kjøring). Kapabiliteten er implementasjon-/suite-verifisert
+  (`drive-full-access.test.ts` §I), men IKKE live-host-bevist - registrert som Q-23, et smalt,
+  gjenværende verifikasjonspunkt, IKKE en blokkering for lukking (akseptanseløperen behandlet det
+  eksplisitt som et trygt skip).
+- **STATUS: UA-2 P1A = VERIFIED/COMPLETE → D-42.** PR #5 merget til `main` (normal merge-commit,
+  samme konvensjon som PR #1-#4 - historikk bevart, ikke squashet). Se D-42 i
+  DECISIONS_AND_ASSUMPTIONS.md for full beslutningslogg-entry.
+
 ## Blokkeringer
-Ingen blokkering for Q-20 lenger - VERIFIED/CLOSED (host-bevist, run_id `eaabe2b1`), PR #4 merges til
-`main`. UA-2 P0 og Q-21 har heller ingen egne blokkeringer (begge VERIFIED/CLOSED, allerede merget).
-Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
+Q-20/UA-2 P0/Q-21/UA-2 P1A har INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til
+`main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent
+integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE
+live-host-bevist (Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt, krever en egen,
+eksplisitt godkjent test-runde med en reell avtalt ekstern test-konto. Connector-audit-gapene
+(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
+blokkerende. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er
+IKKE wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
+fremtidig byggeordre.
 
 ## Neste oppgave
-Q-20 er VERIFIED/CLOSED og merget til `main`. Anbefalt neste UA-2-del: **UA-2 P1** (flere
-kunnskapskilder - Obsidian, Pieces, Google Drive, e-post, møtetranskripsjon, OCR - se
-IMPLEMENTATION_PLAN for eksakt P1-scope). Venter på Tobias sin eksplisitte fase-godkjenning før
-implementering starter (faseporten gjelder, CLAUDE.md-regel 10) - **IKKE startet i denne runden.**
-Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03),
-D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
+**UA-2 P1A er VERIFIED/COMPLETE og merget - ingen videre handling påkrevd for P1A.**
+
+Neste kandidat i IMPLEMENTATION_PLAN er **UA-2 P1B** (e-post-vedlegg-ingestion, møtetranskripsjon,
+OCR - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og UA2_KNOWLEDGE_DPIA.md). Presisering: selve
+møtetranskripsjon-delen avhenger eksplisitt av UA-7 Communications Hub sin meeting-transcription
+(IKKE bygget ennå) - e-post-vedlegg-ingestion og OCR/vision-ingest har ingen slik avhengighet og kan
+i prinsippet skiveres separat. **P1B venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe
+implementeres** (faseporten gjelder, CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige
+kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple,
+HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22, egen underoppgave når
+en konkret integrasjonsflate finnes), Google Drive permission-live-verifikasjon (Q-23, egen
+test-runde med reell ekstern test-konto), connector-audit-gapene (D-41-sjekklisten, egne fremtidige
+byggeordre per connector), Drive-entrypoint-wiring (main.ts/worker-main.ts, se funn over).
