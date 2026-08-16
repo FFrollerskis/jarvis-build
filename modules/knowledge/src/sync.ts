@@ -22,6 +22,28 @@ export interface SyncReport {
   error_class?: SourceErrorClass;
 }
 
+/**
+ * UA-2 P1A §27 (chunking-safeguard): Drive/Obsidian-dokumenter kan bli langt
+ * større enn P0 sine korte GitHub-issues/notater. Ekte embedding-leverandører
+ * har et input-tak (OpenAI text-embedding-3-small: 8191 tokens) - uten en
+ * grense her ville en stor kilde-fil kastet en API-feil inne i
+ * `embedAndStore()`, fanget av `upsertOne()` sin try/catch og telt som
+ * `failed` (dokumentet lagres, men uten embedding - kun FTS-søkbart).
+ *
+ * Bevisst MINIMAL løsning (§18/§27 i byggeordren advarer mot avansert
+ * semantisk chunking): trunkerer KUN teksten som sendes til `embed()`.
+ * `content`-kolonnen (og dermed FTS-indeksen, generert fra `content`) lagrer
+ * ALLTID hele, utrunkerte teksten - ingen informasjon går tapt for
+ * fulltekstsøk, kun vektorsøket ser en avkortet representasjon av svært
+ * lange dokumenter. Dette er IKKE ekte multi-chunk-retrieval (ingen ny
+ * chunk-tabell/rader) - en bevisst, dokumentert grense, ikke en forglemmelse.
+ */
+const MAX_EMBEDDING_INPUT_CHARS = 24_000;
+
+function truncateForEmbedding(content: string): string {
+  return content.length > MAX_EMBEDDING_INPUT_CHARS ? content.slice(0, MAX_EMBEDDING_INPUT_CHARS) : content;
+}
+
 const EMPTY_REPORT: SyncReport = {
   scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0, skipped: 0
 };
@@ -189,7 +211,7 @@ export class KnowledgeSyncService {
     space: MemorySpace,
     content: string
   ): Promise<void> {
-    const vector = await this.embeddings.embed(content);
+    const vector = await this.embeddings.embed(truncateForEmbedding(content));
     await client.query(
       `INSERT INTO knowledge_embeddings (knowledge_document_id, tenant_id, memory_space_id, model, dim, embedding)
        VALUES ($1,$2,$3,$4,$5,$6)
