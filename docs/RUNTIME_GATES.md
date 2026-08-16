@@ -17,8 +17,80 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
 | Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
 | UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
+| Q-20 Data erasure foundation | **IMPLEMENTED_NOT_VERIFIED (suite-verifisert, 2026-08-16)** | `@jarvis/erasure` bygget og fullt testet mot embedded Postgres (13+1 nye tester, se docs/DATA_ERASURE.md); live-scriptet er selv kjørt end-to-end mot en ekte (embedded) Postgres i byggeøkten med `hard_fail=false` - men IKKE mot Tobias sin faktiske Docker-host ennå. Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
+
+## Q-20: DATA ERASURE FOUNDATION - SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå)
+
+**Teknisk data-erasure-foundation, IKKE en juridisk GDPR-compliance-sertifisering.** Bygget for å redusere
+persondata-eksponeringsrisikoen FØR UA-2 P1 (flere kunnskapskilder) øker mengden ingestert persondata.
+Full arkitektur/rasjonale: [DATA_ERASURE.md](DATA_ERASURE.md).
+
+**Sentral, typed `ErasureService`** (`modules/erasure/src/erasure-service.ts`) - `previewErasure`/
+`executeErasure`/`verifyErasure`. Scope-uttrykk (`modules/erasure/src/scope.ts`): `tenant`/`person`/
+`memory_space`/`knowledge_source`/`knowledge_document`/`conversation`, `tenant_id` ALLTID eksplisitt -
+ingen cross-tenant purge uttrykkbart. Hard-delete dekker (FK-trygg rekkefølge, én transaksjon,
+fail-closed - hele transaksjonen rulles tilbake ved enhver feil, ALDRI delvis sletting):
+`knowledge_documents`/`knowledge_embeddings`, `memory_items` + alt avledet (`memory_versions`/
+`embeddings`/`entities`/`relations`/`memory_item_entities`/`summaries`/`decisions`/`commitments`/
+`deadlines`), `messages`/`sessions`, `artifacts` (tenant-scope). Migrasjon `018_erasure.sql` ga
+`jarvis_app` et nytt, EKSPLISITT avgrenset `GRANT DELETE` (kun disse tabellene - systemet hadde
+ALDRI hatt en DELETE-rettighet noe sted før dette; `events`/`audit_events` forblir UTEN DELETE-grant
+i tillegg til å være append-only-trigger-blokkert for enhver rolle).
+
+**Resurrection protection (§5):** ny `erasure_fingerprints`-ledger (samme migrasjon) - lagrer KUN en
+irreversibel SHA-256-fingerprint av canonical identity (`tenant_id|source_type|source_instance_id|
+external_id`), ALDRI selve innholdet/external_id i klartekst. `KnowledgeSyncService.sync()`
+(`modules/knowledge/src/sync.ts`) sjekker denne FØR den oppretter et nytt canonical document - en
+matchende fingerprint gir `report.suppressed += 1`, ALDRI re-insert. Bevist LIVE (embedded Postgres,
+denne økten): purge → resync (samme fil fortsatt på disk) → `created=0, suppressed=1` → retriever
+finner ingenting.
+
+**Policy/D-klasse (§7/§8):** `executeErasure()` bygger et `ToolCall`
+(`{tool_id:"data-erasure", action:"purge", capability_class:"D"}`) og kaller EKSISTERENDE
+`PolicyGateway.authorize()` direkte - samme sovereign-/approval-/nonce-replay-mekanikk som alle andre
+D-handlinger, INGEN ny auth-modell. Bevist: owner sovereign kjører uten approval; delegert identitet
+nektes uten signert approval og tillates med en gyldig Ed25519-signert godkjenning (samme
+`approvalSigningBytes`/`verifyApproval` som resten av systemet).
+
+**§9-unntak (dokumentert, bevisst):** går IKKE via `ToolGateway.execute()` sin generiske D-pipeline -
+den ville lagret en KOPI av innholdet som skal slettes i et `before_state`-recovery-snapshot, som ville
+strukturelt UNDERGRAVD selve erasure. `executeErasure()` skriver i stedet sin egen trygge
+`erasure_requests`-ledger-rad (kun identifiers/counts - bevist i test at raden ALDRI inneholder en
+plantet SENTINEL-streng).
+
+**Backup/restore-kontrakt (§10):** `modules/watchdog/src/backup.ts` sin `TIER1_TABLES` utvidet med
+`knowledge_documents`/`knowledge_embeddings` (reell pre-eksisterende gap - manglet helt fra UA-2 P0) +
+`erasure_requests`/`erasure_fingerprints`. Ny `reapplyErasuresAfterRestore(adminPool)` - leser HELE
+fingerprint-ledgeren fra en restorert database og fjerner på nytt ethvert restorert knowledge-dokument
+som matcher, idempotent. Bevist (`modules/watchdog/test/erasure-restore-contract.test.ts`).
+
+**Kjent, dokumentert (ikke skjult) residual-gap** (se DATA_ERASURE.md §2/§10 for full begrunnelse):
+- `events`/`audit_events`-payload: strukturelt BLOKKERT (append-only-trigger gjelder alle roller).
+- `tasks`/`tool_executions`-innhold: ikke pålitelig adresserbart (ingen stabil kobling til en scope-id).
+- Langfuse/lokal trace-fil (`var/traces.jsonl`): ingen purge-integrasjon bygget.
+- `person`-scope dekker ikke knowledge-dokumenter (skjemaet mangler en person-/subject-kolonne der).
+
+**Tester:** `modules/erasure/test/erasure-service.test.ts` (13 tester: A-Q fra byggeordren + D-klasse-
+policy-integrasjon), `modules/watchdog/test/erasure-restore-contract.test.ts` (1 test) - alle grønne mot
+embedded Postgres. Live-scriptet `modules/erasure/scripts/q20-erasure-live.ts` implementerer alle 21
+akseptansetrinnene fra byggeordren og er selv kjørt end-to-end i denne økten mot en ekte (embedded, ikke
+mocket) Postgres-instans:
+
+```
+q20_preview=PASS            q20_hard_delete=PASS        q20_derived_delete=PASS
+q20_fts_erasure=PASS        q20_vector_erasure=PASS     q20_hybrid_erasure=PASS
+q20_memory_erasure=PASS     q20_no_resurrection=PASS    q20_idempotency=PASS
+q20_tenant_isolation=PASS   q20_space_isolation=PASS    q20_receipt_safe=PASS
+q20_sentinel_scan=PASS      q21_runtime_role_safe=PASS  hard_fail=false
+```
+
+**IKKE presentert som live-PASS:** dette var embedded (byggemiljø) Postgres, IKKE Tobias sin faktiske
+Docker/pgvector-host. **Status: FIXED_SUITE / READY_FOR_HOST_VERIFY.** Gjenstår: Tobias kjører
+`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts` PÅ
+HOSTEN (fra repo-roten, docker-compose oppe) og rapporterer resultatet - FØRST DA er Q-20 reelt
+VERIFIED (ikke bare suite-bevist).
 
 ## BO-02-tillegg (2026-08-13)
 - **Node 22-avvik løst:** `pnpm --use-node-version=22.14.0 vitest run` → **128/128 PASS** (re-kjørt);
