@@ -571,6 +571,43 @@ PR #4 merges til `main`.
 - **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sin faktiske
   nettleser-godkjenning på hosten. PR #5 forblir draft/umerget.
 
+## GOOGLE DRIVE REAUTH HOST FIX (samme dag, 2026-08-16) — response_type manglet + feil konto
+- **Host-funn:** Tobias kjørte `google-drive-reauth.ts`. Nettleseren åpnet Google OAuth med FEIL konto
+  (`henrik@ffskis.com`), og Google avviste med "Required parameter is missing: response_type" (Error
+  400: invalid_request).
+- **Root cause (ÉN, forklarer BEGGE symptomene samtidig):** den genererte autorisasjons-URL-en har
+  ALLTID inneholdt `response_type=code` (bevist av eksisterende enhetstester siden forrige runde) -
+  feilen lå i `openBrowser()` sin daværende Windows-vei, `cmd /c start "" <url>`. URL-en inneholder `&`
+  (gyldig spørrestreng-skilletegn) men verken mellomrom eller anførselstegn, så Node sin Windows-argv-
+  til-kommandolinje-quoting siterte IKKE argumentet automatisk. cmd.exe mottok URL-en USITERT i
+  `/c`-modus og splittet den ved HVERT ubeskyttet `&` som et kommando-skille - Google mottok reelt kun
+  `...auth?client_id=<id>`, nok til å identifisere appen og stille falle tilbake til en allerede
+  innlogget nettleser-konto, men ALDRI `redirect_uri`/`response_type`/`scope`/`state`.
+- **Fiks 1 (transport):** Windows-veien bruker nå `rundll32.exe url.dll,FileProtocolHandler <url>` i
+  stedet for `cmd /c start` - en native .exe, INGEN kommandotolk involvert i det hele tatt (samme
+  "native-exe-trenger-ingen-cmd-wrapper"-presedens som `lib/package-manager-resolve.ts`).
+- **Fiks 2 (kontovalg):** `prompt` er nå `"consent select_account"` (Google sin offisielt dokumenterte
+  mellomrom-delte prompt-liste) - tvinger ALLTID frem kontovelgeren, aldri en stille auto-valgt konto.
+  `login_hint` settes til `JARVIS_GOOGLE_ACCOUNT` (kun et HINT - hindrer aldri kontobytte, offisielt
+  dokumentert Google-oppførsel).
+- **Fiks 3 (pre-flight-sikkerhetsnett):** `validateAuthorizationUrl()` parser den genererte URL-en
+  tilbake og krever eksplisitt `response_type=code`+`client_id`+`redirect_uri`+`state`+full Drive-scope
+  FØR nettleseren i det hele tatt åpnes - fanger enhver FREMTIDIG regresjon i selve URL-byggingen,
+  fail-closed (server startes ikke, nettleser åpnes ikke).
+- **Konto-mismatch-rapportering presisert:** ny `formatAccountMismatchReport()` gir en eksplisitt,
+  grep-bar `expected_account=<maskert> authorized_account=<maskert>`-loggform - samme
+  bekreftelses-gate (typet "YES") som før, kun tydeligere format.
+- **.env-sikkerhet uendret/bekreftet:** alle feilbaner (inkl. den nye pre-flight-valideringen) skjer
+  strukturelt FØR backup/skriving - `.env` forblir urørt ved enhver feil, bevist av wiring-testene.
+- **Tester:** 15 nye rene enhetstester (URL-validering, prompt/login_hint, mismatch-rapportformat) +
+  7 nye strukturelle wiring-tester (rundll32 i bruk / cmd-start borte, pre-flight-rekkefølge,
+  login_hint-wiring, mismatch-rapport-bruk) - 588/588 totalt. Lint/full monorepo-typecheck/gitleaks
+  alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever en NY host-kjøring
+  fra Tobias for å bevise fiksen faktisk fungerer mot en ekte Windows-nettleser. PR #5 forblir
+  draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
 reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.

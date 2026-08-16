@@ -22,6 +22,31 @@
 // modules/tool-gateway/src/live-transports.ts (client_id/client_secret som
 // form-POST-felt) - ingen parallell credential-form oppfunnet.
 //
+// HOST-FIX (2026-08-16, Tobias sin faktiske kjøring): Google avviste med
+// "Required parameter is missing: response_type" OG viste feil konto
+// (`henrik@ffskis.com`) - samtidig, fra SAMME root cause. Den genererte
+// autorisasjons-URL-en har ALLTID inneholdt `response_type=code` (bevist av
+// google-drive-reauth-lib.test.ts §B siden forrige runde) - feilen lå i
+// `openBrowser()` sin daværende Windows-vei: `cmd /c start "" <url>`.
+// URL-en inneholder `&` (et gyldig spørrestreng-skilletegn), men verken
+// mellomrom eller anførselstegn - Node sin Windows-argv-til-kommandolinje-
+// quoting SITÉRER derfor IKKE argumentet automatisk. cmd.exe mottok URL-en
+// USITERT i `/c`-modus, og cmd.exe sin EGEN linje-parsing splitter på HVERT
+// ubeskyttet `&` som et kommando-skille - Google mottok dermed reelt KUN
+// `...auth?client_id=<id>` (nok til å identifisere appen og falle stille
+// tilbake til en allerede innlogget nettleser-konto), ALDRI
+// `redirect_uri`/`response_type`/`scope`/`state`. BEGGE host-symptomene
+// forklares dermed av NØYAKTIG denne ene URL-avkuttingen. Fikset ved å
+// ALDRI la cmd.exe se URL-en i det hele tatt: `rundll32.exe
+// url.dll,FileProtocolHandler <url>` er den klassiske, dokumenterte måten å
+// åpne en URL i standardnettleseren på Windows UTEN cmd.exe (native .exe,
+// execFileSync uten shell - samme DEP0190-presedens som
+// lib/package-manager-resolve.ts). I tillegg: `prompt` inkluderer nå
+// `select_account` (tvinger ALLTID Google sin kontovelger, aldri en stille
+// auto-valgt konto) + `validateAuthorizationUrl()` kjøres FØR nettleseren
+// åpnes i det hele tatt (fail-closed sikkerhetsnett mot enhver FREMTIDIG
+// regresjon i selve URL-byggingen).
+//
 // Kjøres PÅ HOSTEN (Windows), fra repo-roten - ÉN kommando:
 //
 //   node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts
@@ -57,11 +82,13 @@ import {
   buildRedirectUri,
   classifyAccountConsistency,
   decideRefreshToken,
+  formatAccountMismatchReport,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
   tokenExchangeFailureReason,
+  validateAuthorizationUrl,
   validateClientCredentials,
   type CallbackResult
 } from "./lib/google-drive-reauth-lib.ts";
@@ -83,15 +110,23 @@ function readEnv(): { lines: string[]; values: EnvValues } {
   return { lines: content.split("\n"), values: parseEnvValues(content) };
 }
 
-/** Best-effort - en URL uten secrets er trygg å vise/åpne; feiler ALDRI hele flyten hvis nettleseren ikke kan åpnes automatisk (headless/SSH-host). */
+/**
+ * Best-effort - en URL uten secrets er trygg å vise/åpne; feiler ALDRI hele
+ * flyten hvis nettleseren ikke kan åpnes automatisk (headless/SSH-host).
+ *
+ * HOST-FIX (2026-08-16): Windows-veien bruker BEVISST `rundll32.exe
+ * url.dll,FileProtocolHandler <url>` - IKKE `cmd /c start "" <url>` (den
+ * forrige, KORRUMPERENDE veien - se toppkommentaren for full forklaring av
+ * hvorfor cmd.exe sin `/c`-linjeparsing splitter en usitert URL med `&` i
+ * spørrestrengen). `rundll32.exe` er en native .exe - INGEN
+ * kommandotolk/shell involvert i det hele tatt, samme
+ * "native-exe-trenger-ingen-wrapper"-presedens som
+ * lib/package-manager-resolve.ts sin `requiresCmdWrapper`-logikk.
+ */
 function openBrowser(url: string): void {
   try {
     if (process.platform === "win32") {
-      const comSpec = process.env["ComSpec"] || process.env["COMSPEC"] || "C:\\Windows\\System32\\cmd.exe";
-      // Samme ikke-shell cmd.exe-mønster som lib/package-manager-resolve.ts (DEP0190) -
-      // "start" er cmd.exe-innebygd, kan ikke kjøres direkte. Den tomme "" er
-      // vindus-tittel-argumentet "start" forventer FØRST når mål-argumentet er sitert.
-      execFileSync(comSpec, ["/d", "/s", "/c", "start", "", url], { stdio: "ignore" });
+      execFileSync("rundll32", ["url.dll,FileProtocolHandler", url], { stdio: "ignore" });
     } else if (process.platform === "darwin") {
       execFileSync("open", [url], { stdio: "ignore" });
     } else {
@@ -192,7 +227,8 @@ async function detectAccountEmail(accessToken: string): Promise<string | undefin
 }
 
 async function confirmAccountMismatch(detectedMasked: string, configuredMasked: string): Promise<boolean> {
-  log(`ADVARSEL: Google-kontoen du nettopp autoriserte (${detectedMasked}) samsvarer IKKE med den konfigurerte JARVIS_GOOGLE_ACCOUNT (${configuredMasked}).`);
+  log(`ADVARSEL: Google-kontoen du nettopp autoriserte samsvarer IKKE med den konfigurerte JARVIS_GOOGLE_ACCOUNT.`);
+  log(formatAccountMismatchReport(configuredMasked, detectedMasked));
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = await rl.question('Skriv nøyaktig "YES" for å fortsette med DENNE kontoen likevel, eller trykk Ctrl+C for å avbryte: ');
@@ -225,7 +261,12 @@ async function main(): Promise<void> {
       `nytt. Er klienten "Desktop app"-type fungerer loopback-porten uten forhåndsregistrering - ingen gjetning gjort ` +
       `her, Google selv viser feilen eksplisitt hvis antakelsen ikke stemmer for din klient.)`
   );
-  const authUrl = buildAuthorizationUrl({ clientId, redirectUri, scopes: REQUIRED_REAUTH_SCOPES, state });
+  const authUrl = buildAuthorizationUrl({ clientId, redirectUri, scopes: REQUIRED_REAUTH_SCOPES, state, loginHint: configuredAccount });
+  // §4 i host-fix-ordren: pre-flight - parse den GENERERTE URL-en tilbake og
+  // krev eksplisitt response_type=code + client_id/redirect_uri/state + full
+  // Drive-scope FØR nettleseren i det hele tatt åpnes. Kaster (server/
+  // nettleser startes ALDRI) hvis noe mangler - fail-closed sikkerhetsnett.
+  validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);
   const callbackPromise = waitForCallback(port, state);
   openBrowser(authUrl);
   log(`venter på autorisasjon i nettleseren (maks 5 minutter)... hvis den ikke åpnet automatisk, gå til:\n${authUrl}`);

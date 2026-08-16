@@ -198,3 +198,68 @@ describe("§12: reauth-scriptet muterer ALDRI Drive utover trygg lese-verifiseri
     expect(source).toContain("GOOGLE_DRIVE_ROOT_METADATA_ENDPOINT");
   });
 });
+
+/**
+ * GOOGLE DRIVE REAUTH HOST FIX (2026-08-16): Tobias sin faktiske kjøring
+ * feilet med "Required parameter is missing: response_type" OG viste feil
+ * konto (henrik@ffskis.com) samtidig - root cause var `openBrowser()` sin
+ * daværende Windows-vei (`cmd /c start "" <url>`) som korrumperte URL-en
+ * (cmd.exe sin `/c`-linjeparsing splitter på et USITERT `&` i
+ * spørrestrengen - Node sin Windows-argv-quoting siterer IKKE et argument
+ * som verken har mellomrom eller anførselstegn). Denne seksjonen beviser
+ * fiksen strukturelt: `cmd`/`start` er HELT BORTE fra Windows-veien, og
+ * pre-flight-validering + tvunget kontovelger er faktisk koblet inn.
+ */
+describe("§1 (host-fix): cmd.exe/'start' er ALDRI lenger involvert i å åpne nettleseren på Windows", () => {
+  it("openBrowser() sin Windows-gren bruker rundll32.exe (native .exe, ingen shell/kommandotolk)", () => {
+    const fnStart = source.indexOf("function openBrowser(url: string): void {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain('execFileSync("rundll32", ["url.dll,FileProtocolHandler", url]');
+  });
+  it("verken 'cmd' (ComSpec) eller cmd.exe sin 'start'-innebygde brukes NOE STED i fila lenger", () => {
+    expect(codeOnly).not.toMatch(/\bComSpec\b/);
+    expect(codeOnly).not.toMatch(/"start"/);
+    expect(codeOnly).not.toMatch(/\/c["'],?\s*$/m);
+  });
+});
+
+describe("§2/§C (host-fix): Google sin kontovelger tvinges ALLTID - aldri en stille auto-valgt allerede-innlogget konto", () => {
+  it("buildAuthorizationUrl() kalles med loginHint - ALDRI en hardkodet/manglende kontohint-verdi", () => {
+    const callIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    const callLine = source.slice(callIdx, source.indexOf("});", callIdx) + 3);
+    expect(callLine).toContain("loginHint: configuredAccount");
+  });
+});
+
+describe("§4/§G (host-fix): pre-flight URL-validering skjer FØR noen server startes eller nettleser åpnes - fail-closed, .env urørt", () => {
+  it("validateAuthorizationUrl() kalles FØR waitForCallback()/openBrowser()", () => {
+    const buildIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    const validateIdx = indexOfAll("validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);");
+    const callbackIdx = indexOfAll("const callbackPromise = waitForCallback(port, state);");
+    const browserIdx = source.indexOf("openBrowser(authUrl);");
+    expect(buildIdx).toBeLessThan(validateIdx);
+    expect(validateIdx).toBeLessThan(callbackIdx);
+    expect(validateIdx).toBeLessThan(browserIdx);
+  });
+  it("en kastet MalformedAuthorizationUrlError skjer strukturelt FØR .env-backup-koden (samme fail-closed-mønster som de andre feilbanene)", () => {
+    const validateIdx = indexOfAll("validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);");
+    const backupIdx = indexOfAll("copyFileSync(envPath, backupPath);");
+    expect(validateIdx).toBeLessThan(backupIdx);
+  });
+});
+
+describe("§D/§3 (host-fix): kontomismatch rapporteres trygt (expected_account=/authorized_account=), aldri stille akseptert", () => {
+  it("confirmAccountMismatch() bruker formatAccountMismatchReport() - ikke en ad-hoc strengsammensetning", () => {
+    const fnStart = source.indexOf("async function confirmAccountMismatch(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("formatAccountMismatchReport(configuredMasked, detectedMasked)");
+  });
+});
+
+describe("§K (host-fix): fortsatt ingen secrets logges etter denne rundens endringer", () => {
+  it("ingen log()-linje interpolerer authUrl FØR den er validert (URL-en selv er ikke hemmelig, men logges kun til info/feilsøking etter pre-flight-sjekken har kjørt)", () => {
+    const validateIdx = indexOfAll("validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);");
+    const firstAuthUrlLogIdx = source.indexOf("log(`venter på autorisasjon");
+    expect(firstAuthUrlLogIdx).toBeGreaterThan(validateIdx);
+  });
+});

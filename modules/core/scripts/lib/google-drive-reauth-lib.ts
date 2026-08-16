@@ -55,21 +55,34 @@ export interface AuthorizationUrlParams {
   redirectUri: string;
   scopes: readonly string[];
   state: string;
+  /** §2/§3 i host-fix-ordren: KUN et hint til Google sin kontovelger - forhindrer ALDRI kontobytte, se `login_hint`-dokumentasjonen. */
+  loginHint?: string | undefined;
 }
+
+/** §2 i host-fix-ordren: BEGGE tvinges samtidig - `select_account` viser ALLTID kontovelgeren (aldri en stille auto-valgt allerede-innlogget konto), `consent` garanterer en fersk refresh_token (se buildAuthorizationUrl sin dokumentasjon under). */
+export const OAUTH_PROMPT = "consent select_account";
 
 /**
  * §3/§4 i ordren: offisiell "authorization code" + loopback-redirect-flyt
  * (RFC 8252) for installerte/CLI-klienter - ALDRI den avviklede OOB-flyten
  * (`urn:ietf:wg:oauth:2.0:oob` finnes IKKE noe sted i denne fila, se
  * regresjonstest i google-drive-reauth-lib.test.ts). `access_type=offline`
- * + `prompt=consent` er PÅKREVD for pålitelig å få en refresh_token tilbake
- * HVER gang (bekreftet mot google-auth-library sin offisielle Node.js-
- * dokumentasjon: "A refresh token is only returned the first time the user
- * consents... setting prompt to 'consent' will force this consent every
- * time, forcing a refresh_token to be returned"). `include_granted_scopes=
- * true` bevarer tidligere godkjente scopes (inkrementell autorisering) i
- * tillegg til de nye - ingen regresjon for andre Google-integrasjoner som
- * deler samme OAuth-klient.
+ * + `prompt` inkluderer `consent` er PÅKREVD for pålitelig å få en
+ * refresh_token tilbake HVER gang (bekreftet mot google-auth-library sin
+ * offisielle Node.js-dokumentasjon: "A refresh token is only returned the
+ * first time the user consents... setting prompt to 'consent' will force
+ * this consent every time, forcing a refresh_token to be returned").
+ * `prompt` inkluderer OGSÅ `select_account` (host-fix, 2026-08-16): Google
+ * sin `prompt`-parameter godtar en mellomrom-delt liste av
+ * `none`/`consent`/`select_account` - uten `select_account` bruker Google
+ * stille en ALLEREDE INNLOGGET nettleser-konto (host-funnet: Tobias fikk
+ * `henrik@ffskis.com` uten å bli spurt). `login_hint` (kun satt hvis
+ * `JARVIS_GOOGLE_ACCOUNT` er konfigurert) er BEVISST kun et HINT - Google
+ * sin egen dokumentasjon er eksplisitt på at det IKKE hindrer brukeren i å
+ * velge en annen konto i kontovelgeren. `include_granted_scopes=true`
+ * bevarer tidligere godkjente scopes (inkrementell autorisering) i tillegg
+ * til de nye - ingen regresjon for andre Google-integrasjoner som deler
+ * samme OAuth-klient.
  */
 export function buildAuthorizationUrl(params: AuthorizationUrlParams): string {
   const url = new URL(GOOGLE_OAUTH_AUTHORIZE_ENDPOINT);
@@ -78,14 +91,49 @@ export function buildAuthorizationUrl(params: AuthorizationUrlParams): string {
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", params.scopes.join(" "));
   url.searchParams.set("access_type", "offline");
-  url.searchParams.set("prompt", "consent");
+  url.searchParams.set("prompt", OAUTH_PROMPT);
   url.searchParams.set("include_granted_scopes", "true");
   url.searchParams.set("state", params.state);
+  if (params.loginHint) url.searchParams.set("login_hint", params.loginHint);
   return url.toString();
 }
 
 export function buildRedirectUri(port: number): string {
   return `http://127.0.0.1:${port}${OAUTH_CALLBACK_PATH}`;
+}
+
+export class MalformedAuthorizationUrlError extends Error {
+  constructor(missing: string[]) {
+    super(`google_reauth_malformed_authorization_url: mangler ${missing.join("; ")} - nettleseren blir IKKE åpnet.`);
+    this.name = "MalformedAuthorizationUrlError";
+  }
+}
+
+/**
+ * §4 i host-fix-ordren: PRE-FLIGHT-validering FØR nettleseren i det hele
+ * tatt åpnes - parser den GENERERTE URL-en tilbake og krever eksplisitt
+ * `response_type=code` + `client_id`/`redirect_uri`/`state` + full
+ * Drive-scope. Dette er et sikkerhetsnett MOT AKKURAT den observerte
+ * host-feilen (URL-en ble korrumpert MELLOM generering og det Google
+ * faktisk mottok - se `openBrowser()` sin Windows-fiks i
+ * google-drive-reauth.ts for selve transport-root cause) - fanger enhver
+ * FREMTIDIG regresjon i selve URL-byggingen, fail-closed.
+ */
+export function validateAuthorizationUrl(authorizationUrl: string, requiredScopes: readonly string[]): void {
+  const parsed = new URL(authorizationUrl);
+  const missing: string[] = [];
+  if (parsed.searchParams.get("response_type") !== "code") missing.push("response_type=code");
+  if (!parsed.searchParams.get("client_id")) missing.push("client_id");
+  if (!parsed.searchParams.get("redirect_uri")) missing.push("redirect_uri");
+  if (!parsed.searchParams.get("state")) missing.push("state");
+  const scope = parsed.searchParams.get("scope") ?? "";
+  if (!hasAllRequiredScopes(scope, requiredScopes)) {
+    const missingScopes = requiredScopes.filter((s) => !new Set(scope.split(/\s+/)).has(s));
+    missing.push(`scope (mangler: ${missingScopes.join(", ")})`);
+  }
+  if (missing.length > 0) {
+    throw new MalformedAuthorizationUrlError(missing);
+  }
 }
 
 export interface CallbackResult {
@@ -188,4 +236,9 @@ export function classifyAccountConsistency(detectedEmail: string | undefined, co
   if (!configuredAccount) return "no_configured_account";
   if (!detectedEmail) return "undetermined";
   return detectedEmail.toLowerCase() === configuredAccount.toLowerCase() ? "match" : "mismatch";
+}
+
+/** §3 i host-fix-ordren: den trygge (maskerte), grep-bare rapportformen orchestratoren viser Tobias FØR den ber om eksplisitt bekreftelse. */
+export function formatAccountMismatchReport(expectedMasked: string, authorizedMasked: string): string {
+  return `expected_account=${expectedMasked} authorized_account=${authorizedMasked}`;
 }

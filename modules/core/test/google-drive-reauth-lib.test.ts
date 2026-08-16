@@ -1,16 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  MalformedAuthorizationUrlError,
   MissingClientCredentialsError,
   REQUIRED_REAUTH_SCOPES,
   buildAuthorizationUrl,
   buildRedirectUri,
   classifyAccountConsistency,
   decideRefreshToken,
+  formatAccountMismatchReport,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
   tokenExchangeFailureReason,
+  validateAuthorizationUrl,
   validateClientCredentials
 } from "../scripts/lib/google-drive-reauth-lib.ts";
 
@@ -46,13 +49,79 @@ describe("§B: autorisasjons-URL ber om FULL Drive-scope (+ eksisterende Calenda
   });
   it("ber om offline access + tvunget consent (påkrevd for pålitelig refresh_token, bekreftet mot google-auth-library sin dokumentasjon)", () => {
     expect(parsed.searchParams.get("access_type")).toBe("offline");
-    expect(parsed.searchParams.get("prompt")).toBe("consent");
+    expect((parsed.searchParams.get("prompt") ?? "").split(" ")).toContain("consent");
+  });
+  it("§C (host-fix): prompt inkluderer OGSÅ select_account - Google skal ALDRI stille bruke en allerede innlogget konto uten å spørre (host-funn: henrik@ffskis.com)", () => {
+    expect((parsed.searchParams.get("prompt") ?? "").split(" ")).toContain("select_account");
   });
   it("bevarer tidligere godkjente scopes (inkrementell autorisering - ingen regresjon for andre integrasjoner)", () => {
     expect(parsed.searchParams.get("include_granted_scopes")).toBe("true");
   });
   it("client_secret opptrer ALDRI i autorisasjons-URL-en (kun client_id, som ikke er hemmelig)", () => {
     expect(url).not.toContain("secret");
+  });
+  it("response_type=code er ALLTID med (host-funn: 'Required parameter is missing: response_type')", () => {
+    expect(parsed.searchParams.get("response_type")).toBe("code");
+  });
+  it("redirect_uri bevares NØYAKTIG som oppgitt (round-trip, ingen mutasjon)", () => {
+    expect(parsed.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:8942/oauth2callback");
+  });
+  it("state bevares NØYAKTIG som oppgitt", () => {
+    expect(parsed.searchParams.get("state")).toBe("state-123");
+  });
+});
+
+describe("§3 (host-fix): login_hint er KUN et hint - satt når konfigurert, men hindrer ALDRI kontovalg", () => {
+  it("login_hint settes når loginHint oppgis", () => {
+    const url = buildAuthorizationUrl({ clientId: "cid", redirectUri: buildRedirectUri(8942), scopes: REQUIRED_REAUTH_SCOPES, state: "s", loginHint: "tobias@ffskis.com" });
+    expect(new URL(url).searchParams.get("login_hint")).toBe("tobias@ffskis.com");
+  });
+  it("login_hint utelates HELT når ingen konto er konfigurert (ingen 'undefined'-streng i URL-en)", () => {
+    const url = buildAuthorizationUrl({ clientId: "cid", redirectUri: buildRedirectUri(8942), scopes: REQUIRED_REAUTH_SCOPES, state: "s" });
+    expect(new URL(url).searchParams.has("login_hint")).toBe(false);
+  });
+  it("select_account er ALLTID med selv når login_hint er satt - hindrer aldri kontobytte", () => {
+    const url = buildAuthorizationUrl({ clientId: "cid", redirectUri: buildRedirectUri(8942), scopes: REQUIRED_REAUTH_SCOPES, state: "s", loginHint: "tobias@ffskis.com" });
+    expect((new URL(url).searchParams.get("prompt") ?? "").split(" ")).toContain("select_account");
+  });
+});
+
+describe("§4/§B (host-fix): pre-flight-validering av den genererte autorisasjons-URL-en FØR nettleseren åpnes", () => {
+  const validUrl = buildAuthorizationUrl({ clientId: "cid", redirectUri: buildRedirectUri(8942), scopes: REQUIRED_REAUTH_SCOPES, state: "state-123" });
+
+  it("en KORREKT URL (fra buildAuthorizationUrl selv) validerer uten å kaste", () => {
+    expect(() => validateAuthorizationUrl(validUrl, REQUIRED_REAUTH_SCOPES)).not.toThrow();
+  });
+  it("B: en URL UTEN response_type kastes EKSPLISITT (nøyaktig host-feilen: 'Required parameter is missing: response_type')", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.delete("response_type");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(MalformedAuthorizationUrlError);
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(/response_type=code/);
+  });
+  it("en URL med feil response_type (ikke 'code') kastes", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.set("response_type", "token");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(MalformedAuthorizationUrlError);
+  });
+  it("en URL uten client_id kastes", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.delete("client_id");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(MalformedAuthorizationUrlError);
+  });
+  it("I: en URL uten redirect_uri kastes", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.delete("redirect_uri");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(MalformedAuthorizationUrlError);
+  });
+  it("J: en URL uten state kastes", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.delete("state");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(MalformedAuthorizationUrlError);
+  });
+  it("H: en URL som mangler full Drive-scope kastes, med de manglende scopene nevnt i feilmeldingen", () => {
+    const broken = new URL(validUrl);
+    broken.searchParams.set("scope", "https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/userinfo.email");
+    expect(() => validateAuthorizationUrl(broken.toString(), REQUIRED_REAUTH_SCOPES)).toThrow(/drive/);
   });
 });
 
@@ -158,5 +227,13 @@ describe("§8 i ordren: konto-konsistens-klassifisering", () => {
   });
   it("ulik konto -> mismatch (krever eksplisitt bekreftelse i orchestratoren)", () => {
     expect(classifyAccountConsistency("annenperson@example.com", "tobias@ffskis.com")).toBe("mismatch");
+  });
+});
+
+describe("§D (host-fix): formatAccountMismatchReport - trygg, grep-bar rapportform, ALDRI hele e-postadresser", () => {
+  it("inneholder BEGGE eksplisitte etiketter (expected_account/authorized_account) med maskerte verdier", () => {
+    expect(formatAccountMismatchReport("t***@ffskis.com", "h***@ffskis.com")).toBe(
+      "expected_account=t***@ffskis.com authorized_account=h***@ffskis.com"
+    );
   });
 });
