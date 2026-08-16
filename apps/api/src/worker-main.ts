@@ -5,7 +5,7 @@ import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
-  MeshToolExecutor, meshToolDefinitions, ToolGateway, firstWaveTools
+  MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
 import { executiveHandler } from "./executive.ts";
 import {
@@ -69,7 +69,8 @@ const policy = new PolicyGateway({
 const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-  github: new GithubTransport(), telegram: new TelegramTransport()
+  github: new GithubTransport(), telegram: new TelegramTransport(),
+  ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {
   person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",

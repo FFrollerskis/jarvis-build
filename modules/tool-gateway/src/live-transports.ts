@@ -417,6 +417,45 @@ export class GoogleDriveTransport implements ToolTransport {
   }
 }
 
+/**
+ * P1A RUNTIME WIRING CLOSEOUT (2026-08-16): de tre env-variablene
+ * `googleAccessToken()` faktisk KREVER for et ekte Drive-kall
+ * (`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` lest direkte der, `JARVIS_GOOGLE_
+ * TOKEN` sendt inn av ToolGateway som `credential` via `SecretProvider`).
+ * `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` er BEVISST IKKE sjekket her - den er en
+ * ren bokføringsmarkør for `google-drive-reauth.ts` sin egen
+ * gjenopptakelseslogikk, aldri lest av selve runtime-transporten. Leser
+ * KUN tilstedeværelse (`Boolean`) - ALDRI selve verdiene; ingen credential
+ * logges/returneres/eksponeres her.
+ */
+export function googleDriveCredentialsConfigured(): boolean {
+  return Boolean(
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] && process.env["JARVIS_GOOGLE_CLIENT_SECRET"] && process.env["JARVIS_GOOGLE_TOKEN"]
+  );
+}
+
+/**
+ * Delt fabrikk-fragment - api/main.ts og worker-main.ts kaller BEGGE denne
+ * SAMME funksjonen (spredd inn i `firstWaveTools({...})`) i stedet for å
+ * duplisere credential-sjekken to steder - garanterer at api og worker
+ * ALDRI kan divergere i om Drive-verktøyene er registrert. I motsetning
+ * til de andre første-bølge-transportene (email/calendar/github/telegram,
+ * som ALLTID konstrueres uansett credential-tilstand og lar selve
+ * HTTP-kallet feile ved manglende credential) holdes Drive sin FULLE
+ * D-klasse-kapabilitet (permanent sletting, deling/tilgangsstyring)
+ * eksplisitt tilbake fra registrering til den koherente credential-
+ * tripletten faktisk finnes - en bevisst strengere, men IKKE en parallell,
+ * registreringsvei (samme `firstWaveTools()`/`ToolGateway.register()` som
+ * alt annet). Mangler credentials: returnerer et tomt objekt - `drive`-
+ * nøkkelen er da fraværende og `firstWaveTools()` sin egen
+ * `UnconfiguredHttpTransport("drive")`-fallback brukes i stedet (samme
+ * eksisterende, allerede idempotente skall-oppførsel som FØR denne
+ * closeout-rundes - INGEN oppstartskrasj, INGEN ny feilbane).
+ */
+export function driveTransportsIfConfigured(): Partial<Record<string, ToolTransport>> {
+  return googleDriveCredentialsConfigured() ? { drive: new GoogleDriveTransport() } : {};
+}
+
 export class TelegramTransport implements ToolTransport {
   constructor(private readonly chatId: string | undefined = process.env["JARVIS_TELEGRAM_CHAT_ID"]) {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
