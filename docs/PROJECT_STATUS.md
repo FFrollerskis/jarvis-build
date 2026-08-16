@@ -512,36 +512,100 @@ PR #4 merges til `main`.
 - **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever en NY host-kjøring fra
   Tobias for å bevise auto-sandkassen faktisk fungerer mot ekte Drive. PR #5 forblir draft/umerget.
 
+## GOOGLE DRIVE FULL-ACCESS REAUTH (samme dag, 2026-08-16) — ett-kommando nettleser-reauth
+- **Host-funn:** run_id `262ac1bb` viste `google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`
+  (`get_metadata("root")` → `tool_failed:drive_auth_error_403`) - det eksisterende `JARVIS_GOOGLE_TOKEN`
+  mangler full Drive-scope (utstedt før D-41-scope-endringen). Eierkrav: Tobias skal ALDRI måtte lime
+  inn en autorisasjonskode manuelt, redigere `.env`, eller kjøre en egen andre kommando etterpå -
+  produksjons-OAuth-scope forblir FULL `https://www.googleapis.com/auth/drive` (D-41 uendret, ingen
+  fallback til read-only for å "få testen til å passere").
+- **Ny, ren, avhengighetsfri modul** `modules/core/scripts/lib/google-drive-reauth-lib.ts` -
+  URL-bygging/callback-parsing/state-CSRF-sjekk/scope-sammenligning/refresh-token-beslutning/konto-
+  maskering, INGEN nettverk/filsystem der (30 rene enhetstester).
+- **`modules/core/scripts/google-drive-reauth.ts`** - ÉN host-kommando:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`. Offisiell
+  "authorization code" + loopback-IP-redirect-flyt (RFC 8252, `http://127.0.0.1:8942/oauth2callback`
+  default, `JARVIS_GOOGLE_REAUTH_PORT` valgfri override) - ALDRI den avviklede OOB-flyten. Ber om
+  `https://www.googleapis.com/auth/drive` + EKSISTERENDE `https://www.googleapis.com/auth/calendar`
+  (unngår å regressere kalender, som deler samme `JARVIS_GOOGLE_TOKEN`) + et minimalt
+  `https://www.googleapis.com/auth/userinfo.email`-scope (kun for konto-identitetssjekk). `access_type=
+  offline`+`prompt=consent`+`include_granted_scopes=true` (bekreftet mot google-auth-library sin
+  offisielle Node.js-dokumentasjon - garanterer en fersk refresh_token hver kjøring, bevarer andre
+  allerede godkjente scopes). Åpner standardnettleseren automatisk (Windows/macOS/Linux, samme
+  DEP0190-sikre ikke-shell cmd.exe-mønster som `package-manager-resolve.ts` på Windows); fallback til
+  manuell URL hvis åpning feiler.
+- **Verifisering FØR noe skrives (§7):** både token-responsens `scope`-felt OG en FAKTISK
+  `get_metadata("root")`-lesing mot ekte Drive må lykkes - callback-suksess alene er IKKE nok.
+  Innsuffisient scope → `FAIL_INSUFFICIENT_SCOPE`, `.env` urørt. Manglende refresh_token i responsen
+  (uventet siden `prompt=consent` alltid tvinger en) håndteres KUN ved å LIVE re-verifisere den
+  eksisterende token-ens faktiske scope via `tokeninfo`-endepunktet - aldri en antakelse om Google sin
+  interne inkrementell-auth-oppførsel.
+- **Konto-konsistens (§8):** henter KUN e-postadressen (minimalt scope), maskerer den (`t***@domene`)
+  i all logging, sammenligner mot konfigurert `JARVIS_GOOGLE_ACCOUNT` - ved mismatch kreves eksplisitt
+  skrevet "YES" i terminalen FØR noe skrives; "identitet kunne ikke bestemmes" blokkerer IKKE (logges
+  ærlig som ukjent, aldri stille behandlet som match).
+- **Sikkerhet:** aldri client_secret/access_token/refresh_token/authorization_code i logg eller
+  prosessargument (bevist strukturelt, se wiring-tester). `.env` skrives KUN ved full suksess - alle
+  feilbaner returnerer/kaster FØR skriving, slik at den eksisterende (om enn scope-begrensede)
+  credentialen alltid forblir gjenopprettbar. Skriving gjenbruker EKSISTERENDE
+  `buildUpdatedEnvLines`/`parseEnvValues`/backup-mønster fra `lib/q21-env-recovery.ts` (samme
+  `.env.bak.<epoch>` + atomisk tmp+rename som `fix-q21-runtime-role.ts`) - rører KUN
+  `JARVIS_GOOGLE_TOKEN`-linjen.
+- **Kjeder automatisk videre:** ved `google_drive_reauth=PASS` kjøres `ua2-p1a-host-run.ts` (og dermed
+  hele Drive-auto-sandkasse-akseptansen fra forrige runde) AUTOMATISK - ingen andre kommando fra Tobias.
+- **Presisjonsfunn (dokumentert, IKKE fikset i denne runden):** `GmailTransport` (tool_id `"email"`)
+  bruker faktisk en HELT ANNEN, i dag ukonfigurert credential (`JARVIS_EMAIL_TOKEN`) - IKKE
+  `JARVIS_GOOGLE_TOKEN` slik en eldre `.env.example`-kommentar feilaktig antydet (rettet i denne
+  runden). Reauth-scriptet ber derfor bevisst KUN om Drive+Calendar-scope, ikke Gmail.
+- **Åpent, IKKE-blokkerende funn (logget, ikke skjult):** `GoogleDriveTransport` er registrert i
+  `firstWaveTools()`-funksjonen, men er IKKE koblet inn i de faktiske produksjons-entrypointene
+  (`apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall mangler en `drive:`-nøkkel
+  - kun `email`/`calendar`/`github`/`telegram` er wiret der i dag). Drive-verktøyet er dermed reelt
+  reachable KUN fra `ua2-p1a-live.ts`/testene, ikke fra en løpende api/worker-prosess ennå. Dette er
+  UTENFOR denne reauth-ordrens scope (som var credential-anskaffelse, ikke entrypoint-wiring) og
+  krever en egen, eksplisitt godkjent byggeordre - ikke gjort stille her.
+- **Tester:** 30 nye rene enhetstester (`google-drive-reauth-lib.test.ts`) + 24 nye strukturelle
+  wiring-tester (`google-drive-reauth-wiring.test.ts`, kildeteksts-basert - samme presedens som
+  `ua2-p1a-host-run-wiring.test.ts`). Full suite/lint/typecheck/gitleaks kjøres som del av denne
+  rundens kvalitetsport (se rapport).
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sin faktiske
+  nettleser-godkjenning på hosten. PR #5 forblir draft/umerget.
+
 ## Blokkeringer
-UA-2 P1A (inkl. Google Drive full read/write-scope-endringen og auto-sandkasse-host-recovery) venter på
-Tobias sin NYE host-kjøring (`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR IKKE merget. Dersom
-Tobias sitt eksisterende `JARVIS_GOOGLE_TOKEN` ble utstedt FØR scope-endringen (kun
-`drive.readonly`/`drive.file`), rapporterer live-akseptansen fortsatt
-`google_drive_live=BLOCKED_REAUTH_REQUIRED` - reautorisering med `https://www.googleapis.com/auth/drive`
-er da nødvendig FØR full Drive-akseptanse kan bevises (ikke en kodefeil, en forventet konsekvens av
-scope-utvidelsen; en egen reautoriseringsflyt er EKSPLISITT IKKE bygget i denne runden - Tobias skal
-ALDRI måtte manuelt redigere token/`.env`, en fremtidig byggeordre dekker selve reauth-flyten). Q-20/
-UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende
-provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for
-voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
-fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/
-Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende for P1A.
+UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
+reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.
+Det eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
+`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`) - `google-drive-reauth.ts` er nå bygget for å løse
+dette i ÉN kommando (nettleser-samtykke → `.env` oppdateres automatisk → `ua2-p1a-host-run.ts` kjøres
+automatisk), men selve nettleser-godkjenningen krever fysisk tilstedeværelse på hosten og kan ikke
+gjøres fra denne sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED,
+merget til `main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens
+(Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen
+kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en blokkering for P1A.
+Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert
+backlog, ikke blokkerende for P1A. **Nytt, ikke-blokkerende funn:** `GoogleDriveTransport` er IKKE
+wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå (kun
+`email`/`calendar`/`github`/`telegram` er det) - Drive-verktøyet er reelt reachable KUN fra
+`ua2-p1a-live.ts`/testene per nå, ikke fra en løpende api/worker-prosess. Egen fremtidig
+byggeordre, ikke gjort stille i denne reauth-runden (scope var credential-anskaffelse).
 
 ## Neste oppgave
-UA-2 P1A (inkl. Drive full read/write + auto-sandkasse-host-recovery) er FIXED_SUITE /
-READY_FOR_HOST_VERIFY - venter på Tobias sin NYE host-kjøring av `ua2-p1a-host-run.ts` (Windows/Docker,
-samme ett-kommando som før - INGEN manuell test-mappe-opprettelse lenger nødvendig) før VERIFIED kan
-settes og draft PR kan vurderes for merge. Forventet fullt-grønt host-sammendrag inkluderer
-`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED` hvis Tobias likevel har satt
-`JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID`), samt PASS på auth_scope/read/create/update/rename/move/trash/
-permanent_delete/cleanup/sync/q20_no_resurrection/idempotency/policy. Hvis kjøringen i stedet
-rapporterer `google_drive_live=BLOCKED_REAUTH_REQUIRED`: Tobias reautoriserer Google-kontoen med full
-`drive`-scope, deretter re-kjøres samme kommando (selve reautoriseringsflyten er IKKE bygget i denne
-runden - egen fremtidig underoppgave). **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten
-host-bevis** før den kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B
-(e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen
-eksplisitt fase-godkjenning fra Tobias (faseporten gjelder, CLAUDE.md-regel 10). Øvrige kandidater
-uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME,
-provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (egen underoppgave når en konkret
-integrasjonsflate finnes), connector-audit-gapene (D-41-sjekklisten, egne fremtidige byggeordre per
-connector).
+Tobias kjører (PÅ HOSTEN, fra repo-roten):
+`node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
+Dette åpner Google sin samtykkeside i standardnettleseren automatisk, ber om full
+`https://www.googleapis.com/auth/drive` + eksisterende `https://www.googleapis.com/auth/calendar`,
+oppdaterer `JARVIS_GOOGLE_TOKEN` i `.env` automatisk ved suksess (sikkerhetskopi tas alltid FØRST), og
+kjeder DERETTER automatisk inn i `ua2-p1a-host-run.ts` - INGEN andre kommando, INGEN manuell
+kode-liming, INGEN manuell `.env`-redigering. Forventet fullt-grønt host-sammendrag inkluderer
+`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED`), samt PASS på
+auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/sync/q20_no_resurrection/
+idempotency/policy. Viser Google "redirect_uri_mismatch" i nettleseren: loggmeldingen FØR åpningen
+forklarer nøyaktig hva som skal sjekkes (Desktop- vs. Web application-klienttype) - ingen gjetning.
+**Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt
+og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste
+kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten
+gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama
+LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-
+gapene (D-41-sjekklisten, egne fremtidige byggeordre per connector), Drive-entrypoint-wiring
+(main.ts/worker-main.ts, se funn over).
