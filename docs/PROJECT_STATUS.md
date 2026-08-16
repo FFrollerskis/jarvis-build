@@ -787,6 +787,61 @@ PR #4 merges til `main`.
   forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
   `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## GOOGLE DRIVE REAUTH HOST FIX #6 "REUSE EXISTING DESKTOP JSON AFTER FAILED AUTH" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias hadde allerede opprettet ÉN Desktop-OAuth-klient ("Jarvis Desktop") og lastet ned
+  en gyldig `installed`-JSON (HOST FIX #5-kjøringen beviste den helt gjennom token-exchange). Fordi
+  persistering er BEVISST atomisk, ble klient-metadata/credentials IKKE skrevet til `.env` da Drive-proben
+  feilet senere i samme kjøring. NESTE kjøring rapporterte likevel `google_desktop_client_status=
+  SETUP_REQUIRED` igjen og åpnet Cloud Console på nytt - FEIL, siden Tobias ikke skal opprette en ny
+  OAuth-klient han allerede har.
+- **Root cause:** `waitForDesktopClientJson()`/`selectNewCandidateJsonFiles()` sin mtime-filter (§2 i HOST
+  FIX #4-ordren, riktig for SITT formål - unngå å plukke opp en gammel, urelatert fil under FØRSTE gangs
+  oppsett) godtar KUN filer med `mtime >= runStartMs`. En allerede-validert JSON fra en TIDLIGERE kjøring
+  har per definisjon en eldre mtime enn en NY kjørings `runStartMs`, og ble derfor STILLE ignorert - et
+  gjenopprettingsscenario (JSON importert → OAuth forsøkt → senere providervalidering feilet → prosessen
+  avsluttet FØR persistering) som det opprinnelige designet aldri dekket.
+- **Ny gjenopprettings-skanning FØR SETUP_REQUIRED vurderes:** `tryRecoverExistingDesktopClientJson()`
+  (orchestrator) skanner Nedlastinger-mappa med en NY, mtime-fri lib-funksjon
+  (`selectExistingCandidateJsonFiles()` - samme sortering/`.json`-filter som `selectNewCandidateJsonFiles()`,
+  men UTEN `sinceMs`-parameteren) og validerer HVER kandidat med den EKSISTERENDE
+  `tryReadValidDesktopClient()`/`parseClientSecretJson()`-kjeden (ingen parallell valideringslogikk - en
+  "web"-type/ugyldig fil ekskluderes like stille som ved vanlig oppdagelse). Nøyaktig ÉN gyldig kandidat:
+  gjenbrukes AUTOMATISK (`google_desktop_client_status=RECOVERED_EXISTING_JSON`), Cloud Console åpnes
+  ALDRI. `main()` sin `if (!client)`-gjenopprettingsblokk står STRUKTURELT FØR `SETUP_REQUIRED`-blokken som
+  to SEPARATE if-sjekker (ikke if/else) - lykkes gjenopprettingen, er `client` allerede satt og
+  `SETUP_REQUIRED`-blokken sin betingelse er `false` ved runtime.
+- **Flere eksisterende gyldige kandidater samtidig:** samme trygge, KUN-filnavn-nummererte velger som
+  ellers (`promptForCandidateSelection()`, nå med en `variant: "new" | "existing"`-parameter for riktig
+  ledetekst - ALDRI en stille gjetning, ALDRI to parallelle implementasjoner). Et uavklart svar faller
+  TRYGT tilbake til `SETUP_REQUIRED` (ingen uendelig løkke her, i motsetning til den vanlige
+  nedlastings-pollingen - eksisterende filer endrer seg ikke av seg selv mens vi venter).
+- **Non-secret gjenopprettingsmarkør (§3 i ordren): BEVISST IKKE bygget denne runden.** Selve
+  gjenopprettings-skanningen løser det konkrete host-funnet uten behov for ny persistert tilstand (unngår
+  en ekstra `.gitignore`-styrt lokal fil og tilhørende kompleksitet) - dokumentert avveining, ikke et
+  utelatt krav (ordren selv merket punktet "Consider"/valgfritt).
+- **Atomisk `.env`-persistering UENDRET:** gjenopprettingen påvirker KUN hvilken `client` OAuth-forsøket
+  bruker - `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN`/`_OAUTH_CLIENT_TYPE` skrives fortsatt SAMMEN, KUN
+  én gang i hele filen, KUN etter at callback+state+scope+Drive-probe+kontosjekk alle har lyktes.
+- **HOST FIX #5 uendret:** `classifyDriveProbeError()`/`driveMetadataProbe()`/
+  `retryDriveProbeUntilRecovered()` (Drive-403-klassifisering, auto-guide, samme-prosess-retry) er ikke
+  rørt - en gjenopprettet klient fortsetter inn i NØYAKTIG samme OAuth→scope→Drive-probe-flyt som en
+  nyoppdaget/persistert-metadata-klient.
+- **Tester:** 4 nye rene enhetstester (`selectExistingCandidateJsonFiles` - eksisterende gammel fil tas
+  med, ekstremt gammel mtime diskvalifiserer IKKE, `.json`-filter, nyest-først) + 12 nye strukturelle
+  wiring-tester (mtime-fritt gjenopprettingskall, to separate if(!client)-sjekker, gjenbruk av
+  eksisterende valideringskjede, fail-safe flere-kandidater-håndtering uten uendelig løkke, Cloud Console
+  IKKE åpnet ved vellykket gjenoppretting, ingen client_secret logget, ingen tidlig `.env`-persistering,
+  HOST FIX #5 uendret) - **673/673 totalt** (84+4 lib, 61+12+3 justerte wiring). Lint/full
+  monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - selve gjenopprettings-
+  skanningen kan ikke kjøres ende-til-ende mot en ekte tidligere-nedlastet fil i denne sky-sandboxen
+  (krever en ekte Windows Nedlastinger-mappe med en reell, tidligere validert JSON-fil) - bevist
+  STRUKTURELT (kildeteksts-baserte wiring-tester) + den underliggende filter-/valideringslogikken fullt
+  enhetstestet. Krever Tobias sin NYE host-kjøring for å bevise at scriptet nå gjenkjenner den allerede
+  eksisterende "Jarvis Desktop"-JSON-en automatisk og går rett til OAuth-samtykke uten å åpne Cloud
+  Console på nytt. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
 reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.

@@ -370,6 +370,26 @@ export function selectNewCandidateJsonFiles(files: readonly DownloadCandidateFil
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
+/**
+ * HOST FIX #6 "REUSE EXISTING DESKTOP JSON AFTER FAILED AUTH" (2026-08-16):
+ * en TIDLIGERE kjøring kan ha lastet ned og BEVIST en gyldig Desktop-klient-
+ * JSON (OAuth-callback lyktes helt gjennom token-exchange), men likevel
+ * avsluttet FØR den atomiske `.env`-skrivingen (f.eks. HOST FIX #5 sin
+ * Drive-probe feilet). Neste kjørings egen `runStartMs`-mtime-filter
+ * (`selectNewCandidateJsonFiles` over) ville da STILLE ignorere DEN samme,
+ * fortsatt gyldige fila - og tvinge Tobias til å opprette en HELT NY,
+ * unødvendig OAuth-klient. Denne funksjonen har BEVISST INGEN mtime-filter
+ * - en Desktop-klient-JSON sin gyldighet avhenger av INNHOLDET
+ * (`installed.client_id`/`client_secret`), ALDRI av hvor lenge siden den ble
+ * lastet ned. Selve gjenkjenningen/valideringen er UENDRET (samme
+ * `parseClientSecretJson()`/`classifyDiscoveryResult()`-kjede i
+ * orchestratoren) - kun mtime-terskelen er fjernet. Nyest FØRST (samme
+ * presedens som `selectNewCandidateJsonFiles`).
+ */
+export function selectExistingCandidateJsonFiles(files: readonly DownloadCandidateFile[]): DownloadCandidateFile[] {
+  return files.filter((f) => f.name.toLowerCase().endsWith(".json")).sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
 export type DesktopClientDiscoveryResult =
   | { kind: "none" }
   | { kind: "single"; candidate: DownloadCandidateFile }

@@ -25,6 +25,7 @@ import {
   parseCallbackQuery,
   parseCandidateSelection,
   parseClientSecretJson,
+  selectExistingCandidateJsonFiles,
   selectNewCandidateJsonFiles,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
@@ -338,6 +339,34 @@ describe("selectNewCandidateJsonFiles (§B/§C i ordren)", () => {
   it("filnavn-matching er case-insensitiv (.JSON godtas også)", () => {
     const files = [{ name: "CLIENT_SECRET.JSON", path: "/dl/CLIENT_SECRET.JSON", mtimeMs: 100 }];
     expect(selectNewCandidateJsonFiles(files, 0)).toHaveLength(1);
+  });
+});
+
+describe("selectExistingCandidateJsonFiles (HOST FIX #6 §1/§B i ordren) - gjenopprettings-skanning, INGEN mtime-filter", () => {
+  it("A: en EKSISTERENDE, gammel JSON-fil (fra en tidligere kjøring) tas MED - i motsetning til selectNewCandidateJsonFiles med en fersk sinceMs", () => {
+    const runStartMs = 5000;
+    const files = [{ name: "jarvis-desktop.json", path: "/dl/jarvis-desktop.json", mtimeMs: 1000 }];
+    expect(selectNewCandidateJsonFiles(files, runStartMs)).toHaveLength(0);
+    expect(selectExistingCandidateJsonFiles(files).map((f) => f.name)).toEqual(["jarvis-desktop.json"]);
+  });
+  it("B: en EKSTREMT gammel mtime (år gammel) diskvalifiserer IKKE en ellers strukturelt gyldig kandidat - gyldighet avhenger av INNHOLD, ikke alder", () => {
+    const oneYearOldMs = 0;
+    const files = [{ name: "jarvis-desktop.json", path: "/dl/jarvis-desktop.json", mtimeMs: oneYearOldMs }];
+    expect(selectExistingCandidateJsonFiles(files).map((f) => f.name)).toEqual(["jarvis-desktop.json"]);
+  });
+  it("filtrerer fortsatt til KUN .json-filer (samme presedens som selectNewCandidateJsonFiles)", () => {
+    const files = [
+      { name: "jarvis-desktop.json", path: "/dl/jarvis-desktop.json", mtimeMs: 100 },
+      { name: "notat.txt", path: "/dl/notat.txt", mtimeMs: 100 }
+    ];
+    expect(selectExistingCandidateJsonFiles(files).map((f) => f.name)).toEqual(["jarvis-desktop.json"]);
+  });
+  it("sorterer nyest FØRST (samme presedens som selectNewCandidateJsonFiles)", () => {
+    const files = [
+      { name: "eldre.json", path: "/dl/eldre.json", mtimeMs: 100 },
+      { name: "nyere.json", path: "/dl/nyere.json", mtimeMs: 200 }
+    ];
+    expect(selectExistingCandidateJsonFiles(files).map((f) => f.name)).toEqual(["nyere.json", "eldre.json"]);
   });
 });
 

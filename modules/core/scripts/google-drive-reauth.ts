@@ -167,6 +167,7 @@ import {
   parseCallbackQuery,
   parseCandidateSelection,
   parseClientSecretJson,
+  selectExistingCandidateJsonFiles,
   selectNewCandidateJsonFiles,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
@@ -312,15 +313,27 @@ function tryReadValidDesktopClient(candidate: DownloadCandidateFile): { clientId
   }
 }
 
-/** §4 i ordren: trygg, KUN-filnavn nummerert velger - vises/spørres KUN når §G-tilfellet (flere gyldige kandidater samtidig) faktisk inntreffer. */
-async function promptForCandidateSelection(candidates: DownloadCandidateFile[]): Promise<string | undefined> {
-  log(
-    `Fant FLERE nye Desktop-OAuth-klient-JSON-filer i Nedlastinger samtidig - velg hvilken som er "Jarvis Desktop":\n` +
-      formatCandidateSelectionPrompt(candidates.map((c) => c.name))
-  );
+/**
+ * §4 i ordren: trygg, KUN-filnavn nummerert velger - vises/spørres KUN når
+ * §G-tilfellet (flere gyldige kandidater samtidig) faktisk inntreffer. HOST
+ * FIX #6 §2: gjenbrukes UENDRET for gjenopprettings-skanningen av
+ * EKSISTERENDE filer (`tryRecoverExistingDesktopClientJson()`) - kun
+ * lednings-/hjelpetekst-varianten (`variant`) og hva "Enter" betyr skiller
+ * de to bruksstedene, ALDRI to parallelle implementasjoner.
+ */
+async function promptForCandidateSelection(candidates: DownloadCandidateFile[], variant: "new" | "existing" = "new"): Promise<string | undefined> {
+  const leadIn =
+    variant === "new"
+      ? `Fant FLERE nye Desktop-OAuth-klient-JSON-filer i Nedlastinger samtidig - velg hvilken som er "Jarvis Desktop":`
+      : `Fant FLERE EKSISTERENDE gyldige Desktop-OAuth-klient-JSON-filer i Nedlastinger (fra en tidligere kjøring) - velg hvilken som er "Jarvis Desktop":`;
+  const enterHint =
+    variant === "new"
+      ? "eller trykk Enter for å fortsette å vente på flere nedlastinger"
+      : "eller trykk Enter for i stedet å opprette en ny Desktop-klient i Cloud Console";
+  log(`${leadIn}\n${formatCandidateSelectionPrompt(candidates.map((c) => c.name))}`);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = await rl.question("Skriv nummeret for riktig fil (eller trykk Enter for å fortsette å vente på flere nedlastinger): ");
+    const answer = await rl.question(`Skriv nummeret for riktig fil (${enterHint}): `);
     const index = parseCandidateSelection(answer, candidates.length);
     return index === undefined ? undefined : candidates[index]?.path;
   } finally {
@@ -370,6 +383,52 @@ async function waitForDesktopClientJson(downloadsDir: string, sinceMs: number): 
       "10 minutter. .env er IKKE endret. Last ned client secret-JSON-fila fra Cloud Console-fanen og kjør samme " +
       "kommando på nytt."
   );
+}
+
+/**
+ * HOST FIX #6 "REUSE EXISTING DESKTOP JSON AFTER FAILED AUTH" (2026-08-16):
+ * root cause - `waitForDesktopClientJson()` sin mtime-filter (§2 i HOST FIX
+ * #4-ordren, riktig for DEN sitt formål: aldri plukke opp en gammel,
+ * urelatert fil under FØRSTE gangs oppsett) betyr at en Desktop-klient-JSON
+ * lastet ned under en TIDLIGERE kjøring - som beviselig ble validert av
+ * DEN kjøringen (kom seg helt gjennom token-exchange), men aldri
+ * persistert fordi noe SENERE i flyten feilet (f.eks. HOST FIX #5 sin
+ * Drive-probe) - blir STILLE ignorert av neste kjøring, og Tobias blir
+ * feilaktig bedt om å opprette en HELT NY, unødvendig OAuth-klient.
+ *
+ * Kalles FØR `SETUP_REQUIRED` vurderes i det hele tatt (§1/§5 i ordren) -
+ * skanner Nedlastinger-mappa UTEN mtime-filter
+ * (`selectExistingCandidateJsonFiles()` i lib), validerer HVER kandidat med
+ * DEN SAMME `tryReadValidDesktopClient()`/`classifyDiscoveryResult()`-kjeden
+ * som den vanlige oppdagelsen (ingen parallell valideringslogikk - en
+ * "web"-type/ugyldig fil ekskluderes like stille her som ellers). Finnes
+ * INGEN gyldig kandidat: returnerer `undefined` (uendret fall-through til
+ * `SETUP_REQUIRED`, ALDRI en feil). Finnes NØYAKTIG ÉN: gjenbrukes den
+ * AUTOMATISK, Cloud Console åpnes ALDRI. Finnes FLERE: §2 i ordren - ALDRI
+ * en stille gjetning, en eksplisitt fil-navn-velger vises (`"existing"`-
+ * varianten av `promptForCandidateSelection()`); et uavklart svar (Enter/
+ * ugyldig) faller TRYGT tilbake til `SETUP_REQUIRED` i stedet for å gjette
+ * eller løkke uendelig - Tobias kan da enten laste ned en fersk, entydig
+ * fil, eller rydde i Nedlastinger og kjøre på nytt.
+ */
+async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {
+  const existing = selectExistingCandidateJsonFiles(listDownloadsJsonCandidates(downloadsDir));
+  const valid: Array<DownloadCandidateFile & { clientId: string; clientSecret: string }> = [];
+  for (const candidate of existing) {
+    const parsed = tryReadValidDesktopClient(candidate);
+    if (parsed) valid.push({ ...candidate, ...parsed });
+  }
+  const classification = classifyDiscoveryResult(valid);
+  if (classification.kind === "single") {
+    const winner = valid.find((v) => v.path === classification.candidate.path);
+    return winner ? { clientId: winner.clientId, clientSecret: winner.clientSecret, sourcePath: winner.path } : undefined;
+  }
+  if (classification.kind === "multiple") {
+    const chosenPath = await promptForCandidateSelection(classification.candidates, "existing");
+    const winner = chosenPath ? valid.find((v) => v.path === chosenPath) : undefined;
+    return winner ? { clientId: winner.clientId, clientSecret: winner.clientSecret, sourcePath: winner.path } : undefined;
+  }
+  return undefined;
 }
 
 interface TokenResponse {
@@ -615,6 +674,22 @@ async function main(): Promise<void> {
   const downloadsDir = join(homedir(), "Downloads");
 
   let client = resolveProvenDesktopClient(values);
+  if (!client) {
+    // HOST FIX #6 §1/§5 i ordren: FØR SETUP_REQUIRED i det hele tatt
+    // vurderes - en TIDLIGERE kjøring kan allerede ha lastet ned en gyldig
+    // Desktop-klient-JSON til Nedlastinger (og bevist den helt gjennom
+    // OAuth-callback+token-exchange) uten at DENNE kjøringens
+    // `runStartMs`-mtime-filter ville sett den. Finnes nøyaktig én gyldig,
+    // eksisterende kandidat: gjenbruk den AUTOMATISK - Tobias skal ALDRI
+    // måtte opprette en ny, unødvendig OAuth-klient bare fordi en SENERE
+    // steg (f.eks. HOST FIX #5 sin Drive-probe) feilet forrige kjøring.
+    const recovered = await tryRecoverExistingDesktopClientJson(downloadsDir);
+    if (recovered) {
+      log(`google_desktop_client_status=RECOVERED_EXISTING_JSON (${recovered.sourcePath})`);
+      log("google_desktop_client_type=desktop");
+      client = { clientId: recovered.clientId, clientSecret: recovered.clientSecret, source: "explicit_json" };
+    }
+  }
   if (!client) {
     // HOST FIX #4 §1/§2/§7/§8 i ordren: INGEN positivt bevist Desktop-klient
     // finnes - `.env` sin eksisterende JARVIS_GOOGLE_CLIENT_ID/_SECRET (om

@@ -20,6 +20,7 @@ const codeOnly = source
   .split("\n")
   .filter((line) => !line.trim().startsWith("//"))
   .join("\n");
+const libSource = readSource("../scripts/lib/google-drive-reauth-lib.ts");
 
 function indexOfAll(needle: string): number {
   const idx = source.indexOf(needle);
@@ -343,7 +344,7 @@ describe("G (host-fix #4): flere gyldige kandidater samtidig -> eksplisitt, tryg
     expect(promptIdx).toBeGreaterThan(multipleIdx);
   });
   it("promptForCandidateSelection() bruker formatCandidateSelectionPrompt()/parseCandidateSelection() fra lib - ingen ad-hoc parsing, og logger KUN filnavn (ingen client_id/secret)", () => {
-    const fnStart = indexOfAll("async function promptForCandidateSelection(candidates: DownloadCandidateFile[]): Promise<string | undefined> {");
+    const fnStart = indexOfAll("async function promptForCandidateSelection(candidates: DownloadCandidateFile[], variant: \"new\" | \"existing\" = \"new\"): Promise<string | undefined> {");
     const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
     expect(fnBody).toContain("formatCandidateSelectionPrompt(candidates.map((c) => c.name))");
     expect(fnBody).toContain("parseCandidateSelection(answer, candidates.length)");
@@ -504,5 +505,142 @@ describe("J (host-fix #5): den allerede BEVISTE Desktop-klienten forblir den ENE
   it("ingen scope-nedgradering finnes NOE STED i fila (drive.file/drive.readonly) - D-41 krever full owner-kapabilitet, aldri en redusert fallback-scope", () => {
     expect(codeOnly).not.toMatch(/drive\.file\b/);
     expect(codeOnly).not.toMatch(/drive\.readonly\b/);
+  });
+});
+
+/**
+ * GOOGLE DRIVE REAUTH HOST FIX #6 "REUSE EXISTING DESKTOP JSON AFTER FAILED
+ * AUTH" (2026-08-16): Tobias sitt faktiske host-funn beviste at en TIDLIGERE
+ * kjøring hadde allerede lastet ned og bevist en gyldig Desktop-klient-JSON
+ * (kom seg helt gjennom token-exchange), men aldri persistert den fordi HOST
+ * FIX #5 sin Drive-probe feilet SENERE i samme kjøring. Neste kjørings
+ * `runStartMs`-mtime-filter (`selectNewCandidateJsonFiles`) ignorerte derfor
+ * stille den samme, fortsatt gyldige fila og ba Tobias om å opprette en HELT
+ * NY, unødvendig OAuth-klient. Denne seksjonen beviser at `main()` nå
+ * FØRST forsøker å GJENOPPRETTE en eksisterende, gyldig kandidat (INGEN
+ * mtime-filter) FØR den noensinne går inn i SETUP_REQUIRED/åpner Cloud
+ * Console - og at HOST FIX #5 sin klassifiserings-/retry-flyt forblir helt
+ * uendret etter en vellykket gjenoppretting.
+ */
+describe("A/B (host-fix #6): tryRecoverExistingDesktopClientJson() bruker selectExistingCandidateJsonFiles() - INGEN mtime/sinceMs-filter", () => {
+  it("tryRecoverExistingDesktopClientJson() kaller selectExistingCandidateJsonFiles(), ALDRI selectNewCandidateJsonFiles() (som ville diskvalifisert en gammel, men gyldig fil)", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("selectExistingCandidateJsonFiles(listDownloadsJsonCandidates(downloadsDir))");
+    expect(fnBody).not.toContain("selectNewCandidateJsonFiles(");
+  });
+  it("selectExistingCandidateJsonFiles() tar KUN files som parameter - ingen sinceMs/runStartMs-argument kan begrense den (strukturelt umulig å reintrodusere mtime-filteret ved et uhell)", () => {
+    expect(libSource).toContain("export function selectExistingCandidateJsonFiles(files: readonly DownloadCandidateFile[]): DownloadCandidateFile[] {");
+  });
+});
+
+describe("C (host-fix #6): nøyaktig ÉN gyldig eksisterende JSON gjenopprettes AUTOMATISK og hopper OVER SETUP_REQUIRED", () => {
+  it("gjenopprettingsforsøket skjer i sin EGEN if(!client)-blokk STRUKTURELT FØR SETUP_REQUIRED-blokken - lykkes den, hopper 'if(!client)'-sjekk nummer to (kjøretidssemantikk for en if-kjede uten else) automatisk over Cloud Console-åpningen", () => {
+    const mainStart = indexOfAll("async function main(): Promise<void> {");
+    const recoverCallIdx = indexOfAll("const recovered = await tryRecoverExistingDesktopClientJson(downloadsDir);");
+    const recoveredLogIdx = indexOfAll('log(`google_desktop_client_status=RECOVERED_EXISTING_JSON (${recovered.sourcePath})`);');
+    const setupRequiredIdx = indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");');
+    expect(mainStart).toBeLessThan(recoverCallIdx);
+    expect(recoverCallIdx).toBeLessThan(recoveredLogIdx);
+    expect(recoveredLogIdx).toBeLessThan(setupRequiredIdx);
+  });
+  it("gjenopprettingsblokken og SETUP_REQUIRED-blokken er to SEPARATE 'if (!client)'-sjekker (ikke en if/else) - `client` satt av den første gjør den andre sin betingelse false ved runtime, ALDRI en dobbel-utførelse", () => {
+    const resolveIdx = indexOfAll("let client = resolveProvenDesktopClient(values);");
+    const between = source.slice(resolveIdx, indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");'));
+    expect([...between.matchAll(/if \(!client\)/g)]).toHaveLength(2);
+  });
+});
+
+describe("D/E (host-fix #6): gjenoppretting validerer FORTSATT med den EKSISTERENDE tryReadValidDesktopClient()/parseClientSecretJson() - ingen parallell valideringslogikk, web/ugyldige filer ekskluderes like stille som ved vanlig oppdagelse", () => {
+  it("tryRecoverExistingDesktopClientJson() gjenbruker tryReadValidDesktopClient() (samme funksjon som waitForDesktopClientJson() bruker) - ingen ny/duplisert JSON-parsing", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("tryReadValidDesktopClient(candidate)");
+  });
+});
+
+describe("F (host-fix #6): FLERE eksisterende gyldige kandidater samtidig -> eksplisitt fil-navn-velger, ALDRI en stille gjetning; uavklart svar faller TRYGT tilbake (ikke en uendelig løkke, ikke en krasj)", () => {
+  it("tryRecoverExistingDesktopClientJson() sin 'multiple'-gren kaller promptForCandidateSelection() med variant 'existing' (egen ledetekst, ikke 'vent på flere nedlastinger')", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain('classification.kind === "multiple"');
+    expect(fnBody).toContain('promptForCandidateSelection(classification.candidates, "existing")');
+  });
+  it("et uavklart valg (chosenPath undefined) returnerer undefined ÉN gang - ingen while/polling-løkke i denne funksjonen (i motsetning til waitForDesktopClientJson()) - faller trygt tilbake til SETUP_REQUIRED i main() i stedet for å henge", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).not.toContain("while (");
+    expect(fnBody).not.toContain("await sleep(");
+  });
+  it("promptForCandidateSelection() sin 'existing'-variant har en EGEN, korrekt ledetekst (skiller seg fra 'new'-varianten sin 'vent på flere nedlastinger'-hint)", () => {
+    const fnStart = indexOfAll('async function promptForCandidateSelection(candidates: DownloadCandidateFile[], variant: "new" | "existing" = "new"): Promise<string | undefined> {');
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("EKSISTERENDE gyldige Desktop-OAuth-klient-JSON-filer");
+    expect(fnBody).toContain("opprette en ny Desktop-klient i Cloud Console");
+  });
+});
+
+describe("G (host-fix #6): en gjenopprettet klient brukes til OAuth NØYAKTIG som en nyoppdaget/eksplisitt-importert klient - samme client.clientId/client.clientSecret-vei inn i buildAuthorizationUrl()/exchangeCode()", () => {
+  it("recovered.clientId/recovered.clientSecret tildeles 'client' med source: 'explicit_json' (samme kodevei/persisteringssemantikk som HOST FIX #2 sin JARVIS_GOOGLE_CLIENT_SECRET_JSON-import)", () => {
+    const recoveredAssignIdx = indexOfAll(
+      'client = { clientId: recovered.clientId, clientSecret: recovered.clientSecret, source: "explicit_json" };'
+    );
+    const authUrlIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    expect(recoveredAssignIdx).toBeLessThan(authUrlIdx);
+  });
+});
+
+describe("H (host-fix #6): Cloud Console åpnes ALDRI når gjenoppretting lykkes - openBrowser(consoleUrl) finnes KUN inni SETUP_REQUIRED-blokken, strukturelt ETTER gjenopprettingsforsøket", () => {
+  it("openBrowser(consoleUrl) er STRUKTURELT plassert etter SETUP_REQUIRED-loggen, ikke inni tryRecoverExistingDesktopClientJson() eller gjenopprettingsblokken i main()", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).not.toContain("openBrowser(");
+    const recoverBlockIdx = indexOfAll("const recovered = await tryRecoverExistingDesktopClientJson(downloadsDir);");
+    const recoverBlockEndIdx = indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");');
+    const recoverBlock = source.slice(recoverBlockIdx, recoverBlockEndIdx);
+    expect(recoverBlock).not.toContain("openBrowser(");
+  });
+});
+
+describe("I (host-fix #6): ingen client_secret logges av gjenopprettingskoden", () => {
+  it("tryRecoverExistingDesktopClientJson() sin funksjonskropp inneholder ingen log()/console.*-linje som interpolerer clientSecret", () => {
+    const fnStart = indexOfAll("async function tryRecoverExistingDesktopClientJson(downloadsDir: string): Promise<DesktopClientDownloadFound | undefined> {");
+    const fnBodyRaw = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    const fnBody = fnBodyRaw
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+    const logLines = fnBody.split("\n").filter((line) => /\blog\(|console\.(error|log)\(/.test(line));
+    for (const line of logLines) {
+      expect(line).not.toContain("clientSecret");
+    }
+  });
+  it("main() sin RECOVERED_EXISTING_JSON-loggmelding interpolerer KUN recovered.sourcePath (filsti) - aldri recovered.clientId/recovered.clientSecret", () => {
+    const line = indexOfAll('log(`google_desktop_client_status=RECOVERED_EXISTING_JSON (${recovered.sourcePath})`);');
+    expect(line).toBeGreaterThan(-1);
+    expect(codeOnly).not.toContain("RECOVERED_EXISTING_JSON (${recovered.clientId}");
+    expect(codeOnly).not.toContain("RECOVERED_EXISTING_JSON (${recovered.clientSecret}");
+  });
+});
+
+describe("J (host-fix #6): den aktive .env-credential-treet persisteres FORTSATT ikke tidlig - gjenopprettingen påvirker KUN client-valget, ikke .env-skrivingen", () => {
+  it("gjenopprettingsblokken i main() (mellom resolveProvenDesktopClient() og SETUP_REQUIRED) inneholder ingen buildUpdatedEnvLines()/writeFileSync()/copyFileSync()-kall", () => {
+    const recoverBlockIdx = indexOfAll("const recovered = await tryRecoverExistingDesktopClientJson(downloadsDir);");
+    const recoverBlockEndIdx = indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");');
+    const recoverBlock = source.slice(recoverBlockIdx, recoverBlockEndIdx);
+    expect(recoverBlock).not.toMatch(/buildUpdatedEnvLines\(|writeFileSync\(|copyFileSync\(/);
+  });
+  it("fortsatt kun ÉN buildUpdatedEnvLines()-kall i hele fila (uendret invariant fra HOST FIX #4/§G/L) - gjenopprettingen la IKKE til en andre skrivevei", () => {
+    expect([...codeOnly.matchAll(/buildUpdatedEnvLines\(/g)]).toHaveLength(1);
+  });
+});
+
+describe("K (host-fix #6): HOST FIX #5 sin Drive-403-klassifisering/auto-guide/retry forblir HELT uendret etter en vellykket gjenoppretting", () => {
+  it("driveMetadataProbe()/retryDriveProbeUntilRecovered()/classifyDriveProbeError() finnes fortsatt, uendret plassert ETTER OAuth-token-exchange (uavhengig av om client kom fra gjenoppretting, ny nedlasting, eller persistert metadata)", () => {
+    const exchangeIdx = indexOfAll("const exchange = await exchangeCode(client.clientId, client.clientSecret, callback.code, redirectUri);");
+    const driveProbeCallIdx = indexOfAll("const driveProbe = await driveMetadataProbe(driveVerifiedAccessToken);");
+    expect(exchangeIdx).toBeLessThan(driveProbeCallIdx);
+    expect(source).toContain("async function retryDriveProbeUntilRecovered(");
+    expect(source).toContain("classifyDriveProbeError(response.status, rawBody)");
   });
 });
