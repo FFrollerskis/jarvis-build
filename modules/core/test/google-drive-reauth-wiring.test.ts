@@ -107,13 +107,18 @@ describe("§J/§K: kun JARVIS_GOOGLE_TOKEN-linjen røres, gjenbruker den EKSISTE
     expect(source).toContain("buildUpdatedEnvLines");
     expect(source).toContain("parseEnvValues");
   });
-  it("updates-objektet setter KUN JARVIS_GOOGLE_TOKEN - ingen andre nøkler røres av dette scriptet", () => {
-    const updatesIdx = source.indexOf("const updates: EnvValues = {");
-    const updatesLine = source.slice(updatesIdx, source.indexOf("};", updatesIdx) + 1);
-    expect(updatesLine).toContain("JARVIS_GOOGLE_TOKEN: decision.refreshToken");
-    expect(updatesLine).not.toContain("JARVIS_GOOGLE_CLIENT_ID");
-    expect(updatesLine).not.toContain("JARVIS_GOOGLE_CLIENT_SECRET");
-    expect(updatesLine).not.toContain("JARVIS_GOOGLE_ACCOUNT");
+  it("updates-objektet setter NORMALT (ikke-importert klient) KUN JARVIS_GOOGLE_TOKEN - ingen andre nøkler røres i den grenen", () => {
+    const updatesIdx = source.indexOf("const updates: EnvValues = usingImportedClient");
+    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_TOKEN: decision.refreshToken");
+    // De to grenene av ternary-uttrykket: KUN importert-grenen inneholder client_id/_secret sammen med token:
+    const importedBranch = updatesBlock.slice(0, updatesBlock.indexOf(": { JARVIS_GOOGLE_TOKEN"));
+    const plainBranch = updatesBlock.slice(updatesBlock.indexOf(": { JARVIS_GOOGLE_TOKEN"));
+    expect(importedBranch).toContain("JARVIS_GOOGLE_CLIENT_ID: clientId");
+    expect(importedBranch).toContain("JARVIS_GOOGLE_CLIENT_SECRET: clientSecret");
+    expect(plainBranch).not.toContain("JARVIS_GOOGLE_CLIENT_ID");
+    expect(plainBranch).not.toContain("JARVIS_GOOGLE_CLIENT_SECRET");
+    expect(updatesBlock).not.toContain("JARVIS_GOOGLE_ACCOUNT");
   });
   it("timestemplet backup skrives med .env.bak.<epoch>-mønsteret", () => {
     expect(source).toContain("`${envPath}.bak.${Date.now()}`");
@@ -261,5 +266,84 @@ describe("§K (host-fix): fortsatt ingen secrets logges etter denne rundens endr
     const validateIdx = indexOfAll("validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);");
     const firstAuthUrlLogIdx = source.indexOf("log(`venter på autorisasjon");
     expect(firstAuthUrlLogIdx).toBeGreaterThan(validateIdx);
+  });
+});
+
+/**
+ * GOOGLE OAUTH HOST FIX #2 (2026-08-16): Tobias sin faktiske klient ga
+ * "Error 400: redirect_uri_mismatch" - Google validerer redirect_uri FØR
+ * noe annet og sender ALDRI noen callback tilbake i det tilfellet, så
+ * denne prosessen kan IKKE oppdage feilen selv via callback-serveren.
+ * Permanent løsning: en dedikert "Desktop app"-OAuth-klient, importert via
+ * en nedlastet client-secret-JSON (JARVIS_GOOGLE_CLIENT_SECRET_JSON i
+ * .env) - se google-drive-reauth-lib.test.ts for selve
+ * JSON-parse-/type-avvisnings-logikken. Denne seksjonen beviser
+ * ORCHESTRATOR-koblingen strukturelt: koherent credential-sett,
+ * ingen blanding av gammel/ny klient, og en trygg gjenoppta-etter-manuell-
+ * handling-flyt.
+ */
+describe("HOST FIX #2: JARVIS_GOOGLE_CLIENT_SECRET_JSON importeres FØR client-credential-validering - ingen blanding av gammel/ny klient", () => {
+  it("resolveOAuthClient() kalles FØRST i main() - client_id/_secret er ALLTID fra ÉN kilde (enten importert JSON eller .env, aldri en blanding)", () => {
+    const mainIdx = indexOfAll("async function main(): Promise<void> {");
+    const resolveIdx = indexOfAll("resolveOAuthClient(values)");
+    const authUrlIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    expect(mainIdx).toBeLessThan(resolveIdx);
+    expect(resolveIdx).toBeLessThan(authUrlIdx);
+  });
+  it("resolveOAuthClient() feiler FØR credential-json-stien noensinne skrives til .env (eksisterer-sjekk FØR parseClientSecretJson)", () => {
+    const fnStart = indexOfAll("function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    const existsIdx = fnBody.indexOf("existsSync(jsonPath)");
+    const parseIdx = fnBody.indexOf("parseClientSecretJson(");
+    expect(existsIdx).toBeGreaterThan(-1);
+    expect(parseIdx).toBeGreaterThan(existsIdx);
+  });
+  it("HELE flyten (autorisasjons-URL, token-exchange, refresh-scope-sjekk) bruker de SAMME clientId/clientSecret-variablene fra resolveOAuthClient() - ingen parallell/duplisert lesing av JARVIS_GOOGLE_CLIENT_ID/_SECRET andre steder i main()", () => {
+    const mainStart = indexOfAll("async function main(): Promise<void> {");
+    const mainBody = source.slice(mainStart, source.indexOf("\nmain().catch", mainStart));
+    const directEnvReads = [...mainBody.matchAll(/values\["JARVIS_GOOGLE_CLIENT_(ID|SECRET)"\]/g)];
+    expect(directEnvReads).toHaveLength(0);
+  });
+});
+
+describe("HOST FIX #2: koherent client_id/client_secret/token-sett - aldri kun token skrevet mot en client_id/_secret som ikke lenger samsvarer", () => {
+  it("en IMPORTERT Desktop-klient skriver client_id+client_secret+token SAMMEN i ÉN buildUpdatedEnvLines()-kall - ikke to separate skrivinger", () => {
+    expect([...source.matchAll(/buildUpdatedEnvLines\(/g)]).toHaveLength(1);
+  });
+  it("den importerte klientens EGNE clientId/clientSecret-variabler skrives tilbake (ikke en hardkodet/annen verdi)", () => {
+    const updatesIdx = indexOfAll("const updates: EnvValues = usingImportedClient");
+    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_ID: clientId");
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_SECRET: clientSecret");
+  });
+});
+
+describe("HOST FIX #2: kontovelger (select_account) er UENDRET/bevart uansett hvilken klientkilde som brukes", () => {
+  it("buildAuthorizationUrl()-kallet bruker SAMME REQUIRED_REAUTH_SCOPES/loginHint-mønster uavhengig av usingImportedClient (ingen egen gren som dropper select_account for importerte klienter)", () => {
+    expect([...source.matchAll(/buildAuthorizationUrl\(\{/g)]).toHaveLength(1);
+  });
+});
+
+describe("HOST FIX #2: gjenoppta-etter-manuell-Cloud-Console-handling er .env-drevet - ingen CLI-flagg/interaktiv prompt Tobias må huske", () => {
+  it("JARVIS_GOOGLE_CLIENT_SECRET_JSON leses fra samme values-objekt som resten av .env-configen (readEnv()), ikke process.argv", () => {
+    expect(source).toContain('values["JARVIS_GOOGLE_CLIENT_SECRET_JSON"]');
+    expect(codeOnly).not.toMatch(/process\.argv/);
+  });
+  it("den anbefalte 5-stegs gjenopptakelsen (opprett Desktop-klient -> last ned JSON -> sett env-variabelen -> kjør SAMME kommando) er dokumentert i loggmeldingen FØR nettleseren åpnes", () => {
+    const guidanceIdx = indexOfAll("HOST FIX #2: denne eksisterende OAuth-klienten");
+    const browserIdx = indexOfAll("if (!usingImportedClient) openBrowser(consoleUrl);");
+    expect(guidanceIdx).toBeLessThan(browserIdx);
+    expect(source).toContain("JARVIS_GOOGLE_CLIENT_SECRET_JSON=<sti til den nedlastede fila>");
+  });
+});
+
+describe("HOST FIX #2: ingen secrets logges av den nye JSON-import-/Console-URL-koden", () => {
+  it("ingen log()-linje interpolerer clientSecret (verken fra .env eller fra en importert JSON)", () => {
+    expect(codeOnly).not.toMatch(/log\(`[^`]*\$\{clientSecret\}/);
+  });
+  it("Cloud Console-URL-en (aldri hemmelig - kun et prosjektnummer) er trygg å logge/åpne, men selve jsonPath-innholdet (client_secret-verdien) leses ALDRI inn i en log()-streng direkte", () => {
+    const readIdx = indexOfAll("readFileSync(jsonPath, \"utf8\")");
+    const lineEnd = source.indexOf("\n", readIdx);
+    expect(source.slice(source.lastIndexOf("\n", readIdx), lineEnd)).not.toMatch(/^\s*log\(/);
   });
 });

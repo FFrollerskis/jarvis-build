@@ -54,8 +54,11 @@
 // Leser/skriver `.env` DIREKTE via filsystemet (samme mønster som
 // fix-q21-runtime-role.ts) - INGEN `--env-file`-flagg nødvendig på selve
 // dette kallet. Sikkerhetskopierer `.env` FØR endring (`.env.bak.<epoch>`),
-// skriver atomisk (tmp-fil + rename), rører KUN `JARVIS_GOOGLE_TOKEN`-
-// linjen - alle andre linjer/kommentarer/variabler er urørt. Skriver ALDRI
+// skriver atomisk (tmp-fil + rename), rører NORMALT KUN `JARVIS_GOOGLE_
+// TOKEN`-linjen - alle andre linjer/kommentarer/variabler er urørt. (Er
+// `JARVIS_GOOGLE_CLIENT_SECRET_JSON` konfigurert - se HOST FIX #2 under -
+// skrives `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` SAMMEN i den ene
+// atomiske skrivingen, aldri et blandet/inkoherent sett.) Skriver ALDRI
 // client_secret/access_token/refresh_token/authorization_code til
 // stdout/stderr eller noe prosessargument (kun i HTTP-body/headers mot
 // Google sine egne endepunkt). `.env` endres KUN ved full suksess - enhver
@@ -63,6 +66,26 @@
 // (fungerende, om enn scope-begrensede) credentialen alltid forblir
 // gjenopprettbar. Ved suksess kjøres `ua2-p1a-host-run.ts` AUTOMATISK til
 // slutt - ingen andre kommando nødvendig fra Tobias.
+//
+// HOST FIX #2 (2026-08-16, Tobias sitt faktiske host-funn): den forrige
+// fiksen løste URL-korrumperingen (§6), men Google svarte deretter med
+// "Error 400: redirect_uri_mismatch" - Tobias sin EKSISTERENDE OAuth-klient
+// er etter alt å dømme registrert som "Web application"-type (som krever en
+// EKSAKT forhåndsregistrert redirect-URI), ikke "Desktop app" (som godtar
+// loopback-porter uten forhåndsregistrering - det Google-anbefalte,
+// PERMANENTE designet for akkurat Jarvis sin lokale, interaktive
+// eier-reauth-flyt). Google validerer redirect_uri FØR noe annet og sender
+// ALDRI noen callback tilbake ved mismatch - denne prosessen kan derfor
+// IKKE oppdage feilen selv (se `resolveOAuthClient()`/loggmeldingen FØR
+// nettleseren åpnes for Ctrl+C-veiledningen). Det finnes INGEN offentlig
+// Google-API for å opprette en OAuth-klient programmatisk (kun Cloud
+// Console-UI) - ETT manuelt steg er derfor uunngåelig. Scriptet reduserer
+// det til: opprett én "Desktop app"-klient i Cloud Console (lenken åpnes
+// automatisk), last ned JSON-en, pek en NY, valgfri `JARVIS_GOOGLE_
+// CLIENT_SECRET_JSON`-variabel i .env til den fila, kjør NØYAKTIG samme
+// kommando på nytt - scriptet leser/validerer/bruker den importerte
+// Desktop-klienten for HELE flyten og lagrer et koherent client_id/
+// _secret/token-sett sammen ved suksess (se `resolveOAuthClient()`).
 
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -79,14 +102,17 @@ import {
   OAUTH_CALLBACK_PATH,
   REQUIRED_REAUTH_SCOPES,
   buildAuthorizationUrl,
+  buildCredentialsConsoleUrl,
   buildRedirectUri,
   classifyAccountConsistency,
   decideRefreshToken,
+  deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
+  parseClientSecretJson,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
   validateClientCredentials,
@@ -243,24 +269,86 @@ function chainToP1aHostRun(): void {
   execFileSync("node", ["--experimental-transform-types", "modules/core/scripts/ua2-p1a-host-run.ts"], { stdio: "inherit", cwd: repoRoot });
 }
 
-async function main(): Promise<void> {
-  const { lines, values } = readEnv();
+interface ResolvedOAuthClient {
+  clientId: string;
+  clientSecret: string;
+  imported: boolean;
+}
+
+/**
+ * HOST FIX #2 (§1/§4/§6 i ordren): er `JARVIS_GOOGLE_CLIENT_SECRET_JSON`
+ * satt i .env, brukes DEN filens "installed" (Desktop app)-credentials for
+ * HELE flyten i stedet for `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` - garanterer
+ * et KOHERENT par (begge fra SAMME nedlastede fil, aldri blandet med en
+ * annen klients verdier - §4 i ordren). En "web"-type fil avvises
+ * EKSPLISITT (`WrongOAuthClientTypeError`, samme brittleness som klienten
+ * Tobias allerede har) FØR noe forsøkes. Er variabelen IKKE satt: uendret
+ * oppførsel (eksisterende `.env`-credentials, som før denne runden).
+ */
+function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {
+  const jsonPath = values["JARVIS_GOOGLE_CLIENT_SECRET_JSON"] || undefined;
+  if (jsonPath) {
+    if (!existsSync(jsonPath)) {
+      throw new Error(
+        `google_reauth=FAIL_CLIENT_SECRET_JSON_NOT_FOUND: JARVIS_GOOGLE_CLIENT_SECRET_JSON peker til "${jsonPath}", men fila finnes ikke. .env er IKKE endret.`
+      );
+    }
+    const parsed = parseClientSecretJson(readFileSync(jsonPath, "utf8"));
+    log(
+      `bruker Desktop-OAuth-klient importert fra JARVIS_GOOGLE_CLIENT_SECRET_JSON (${jsonPath}) - IKKE .env sin ` +
+        `eksisterende JARVIS_GOOGLE_CLIENT_ID/_SECRET (disse to oppdateres til å samsvare med den importerte klienten ved suksess, ` +
+        `sammen med JARVIS_GOOGLE_TOKEN, i ÉN atomisk skriving - aldri et blandet/inkoherent sett).`
+    );
+    return { clientId: parsed.clientId, clientSecret: parsed.clientSecret, imported: true };
+  }
   const clientId = values["JARVIS_GOOGLE_CLIENT_ID"];
   const clientSecret = values["JARVIS_GOOGLE_CLIENT_SECRET"];
   validateClientCredentials(clientId, clientSecret);
+  return { clientId, clientSecret: clientSecret as string, imported: false };
+}
+
+async function main(): Promise<void> {
+  const { lines, values } = readEnv();
+  const { clientId, clientSecret, imported: usingImportedClient } = resolveOAuthClient(values);
   const existingRefreshToken = values["JARVIS_GOOGLE_TOKEN"] || undefined;
   const configuredAccount = values["JARVIS_GOOGLE_ACCOUNT"] || undefined;
   const port = values["JARVIS_GOOGLE_REAUTH_PORT"] ? Number(values["JARVIS_GOOGLE_REAUTH_PORT"]) : DEFAULT_REAUTH_PORT;
   const redirectUri = buildRedirectUri(port);
   const state = randomBytes(24).toString("hex");
+  const consoleUrl = buildCredentialsConsoleUrl(deriveProjectNumberFromClientId(clientId));
 
-  log(
-    `redirect_uri=${redirectUri} (hvis Google viser "redirect_uri_mismatch": denne OAuth-klienten er registrert som ` +
-      `"Web application"-type og krever en EKSAKT forhåndsregistrert redirect-URI - legg til nøyaktig denne URI-en i ` +
-      `Google Cloud Console, eller sett JARVIS_GOOGLE_REAUTH_PORT i .env til en allerede registrert port og kjør på ` +
-      `nytt. Er klienten "Desktop app"-type fungerer loopback-porten uten forhåndsregistrering - ingen gjetning gjort ` +
-      `her, Google selv viser feilen eksplisitt hvis antakelsen ikke stemmer for din klient.)`
-  );
+  if (usingImportedClient) {
+    log(`redirect_uri=${redirectUri} (importert Desktop app-klient - loopback-porter godtas uten forhåndsregistrering).`);
+  } else {
+    // HOST FIX #2 (2026-08-16, Tobias sitt faktiske host-funn): Google
+    // validerer redirect_uri FØR NOE ANNET (sikkerhetskritisk, hindrer
+    // open-redirect) - ved mismatch vises en feilside DIREKTE i
+    // nettleseren, og callback-serveren vår mottar ALDRI noe (INGEN vei å
+    // oppdage dette programmatisk fra denne prosessen - Google sender
+    // rett og slett ingen HTTP-request tilbake i det tilfellet). En
+    // "Desktop app"-klient godtar derimot loopback-redirects på HVILKEN
+    // SOM HELST port UTEN forhåndsregistrering (bekreftet Google-
+    // dokumentert oppførsel) - det ANBEFALTE, permanente designet for
+    // akkurat denne lokale eier-reauth-flyten. Det finnes INGEN offentlig
+    // Google-API for å opprette en OAuth-klient programmatisk (kun Cloud
+    // Console-UI) - dette er derfor den ENE uunngåelige manuelle
+    // handlingen, redusert til fem eksplisitte steg.
+    log(
+      `redirect_uri=${redirectUri}\n` +
+        `HOST FIX #2: denne eksisterende OAuth-klienten (JARVIS_GOOGLE_CLIENT_ID i .env) kan være registrert som ` +
+        `"Web application"-type, som krever en EKSAKT forhåndsregistrert redirect-URI - Google viser da ` +
+        `"Error 400: redirect_uri_mismatch" DIREKTE i nettleseren (dette scriptet kan IKKE oppdage den feilen selv, ` +
+        `siden Google ALDRI sender noen callback tilbake i det tilfellet).\n` +
+        `Ser du en Google-FEILSIDE (ikke en "Jarvis: autorisasjon mottatt"-side): trykk Ctrl+C her i stedet for å ` +
+        `vente 5 minutter, og gjør DETTE (permanent anbefalt løsning - ingen offentlig Google-API finnes for å ` +
+        `opprette en OAuth-klient programmatisk):\n` +
+        `  1. Google Cloud Console-siden er allerede åpnet i en egen fane: ${consoleUrl}\n` +
+        `  2. "Create Credentials" > "OAuth client ID" > velg type "Desktop app", gi den et navn som "Jarvis Desktop"\n` +
+        `  3. Last ned den resulterende client secret-JSON-fila\n` +
+        `  4. Sett JARVIS_GOOGLE_CLIENT_SECRET_JSON=<sti til den nedlastede fila> i .env\n` +
+        `  5. Kjør NØYAKTIG samme kommando på nytt - ingen andre endringer nødvendig.`
+    );
+  }
   const authUrl = buildAuthorizationUrl({ clientId, redirectUri, scopes: REQUIRED_REAUTH_SCOPES, state, loginHint: configuredAccount });
   // §4 i host-fix-ordren: pre-flight - parse den GENERERTE URL-en tilbake og
   // krev eksplisitt response_type=code + client_id/redirect_uri/state + full
@@ -268,6 +356,12 @@ async function main(): Promise<void> {
   // nettleser startes ALDRI) hvis noe mangler - fail-closed sikkerhetsnett.
   validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);
   const callbackPromise = waitForCallback(port, state);
+  // §6.2 i host-fix #2-ordren: åpner Cloud Console-siden AUTOMATISK sammen
+  // med OAuth-URL-en når en eksisterende (ikke-importert) klient brukes -
+  // Tobias trenger den uansett hvis denne klienten er Web-type, og
+  // trenger den IKKE (ingen ekstra fane) når en Desktop-klient allerede
+  // er importert og fungerer.
+  if (!usingImportedClient) openBrowser(consoleUrl);
   openBrowser(authUrl);
   log(`venter på autorisasjon i nettleseren (maks 5 minutter)... hvis den ikke åpnet automatisk, gå til:\n${authUrl}`);
 
@@ -286,7 +380,7 @@ async function main(): Promise<void> {
   }
 
   log("autorisasjonskode mottatt - bytter den mot access/refresh-token...");
-  const exchange = await exchangeCode(clientId as string, clientSecret as string, callback.code, redirectUri);
+  const exchange = await exchangeCode(clientId, clientSecret, callback.code, redirectUri);
 
   const grantedScope = exchange.scope ?? "";
   if (!hasAllRequiredScopes(grantedScope, REQUIRED_REAUTH_SCOPES)) {
@@ -306,7 +400,7 @@ async function main(): Promise<void> {
 
   let verifiedExistingFullScope = false;
   if (!exchange.refresh_token && existingRefreshToken) {
-    verifiedExistingFullScope = await liveVerifyExistingRefreshTokenScope(clientId as string, clientSecret as string, existingRefreshToken);
+    verifiedExistingFullScope = await liveVerifyExistingRefreshTokenScope(clientId, clientSecret, existingRefreshToken);
   }
   const decision = decideRefreshToken({ refreshToken: exchange.refresh_token }, existingRefreshToken, verifiedExistingFullScope);
   if (decision.action === "fail") {
@@ -329,11 +423,19 @@ async function main(): Promise<void> {
     log(`google-konto (ingen JARVIS_GOOGLE_ACCOUNT konfigurert fra før å sammenligne mot): ${detectedEmail ? maskEmail(detectedEmail) : "ukjent"}`);
   }
 
-  const updates: EnvValues = { JARVIS_GOOGLE_TOKEN: decision.refreshToken };
+  // §4 i host-fix #2-ordren: brukes en IMPORTERT Desktop-klient, skrives
+  // client_id/client_secret/token SAMMEN i ÉN atomisk skriving - aldri kun
+  // token alene mot en client_id/_secret som IKKE lenger samsvarer (ville
+  // vært et inkoherent sett, og enhver FREMTIDIG kjøring av dette
+  // scriptet ville da lest en client_id/_secret-kombinasjon Google aldri
+  // faktisk utstedte det nye token-et mot).
+  const updates: EnvValues = usingImportedClient
+    ? { JARVIS_GOOGLE_CLIENT_ID: clientId, JARVIS_GOOGLE_CLIENT_SECRET: clientSecret, JARVIS_GOOGLE_TOKEN: decision.refreshToken }
+    : { JARVIS_GOOGLE_TOKEN: decision.refreshToken };
   const nextLines = buildUpdatedEnvLines(lines, updates);
   const nextContent = nextLines.join("\n");
   if (nextContent === lines.join("\n")) {
-    log("JARVIS_GOOGLE_TOKEN er allerede korrekt (idempotent no-op) - .env ikke endret.");
+    log("JARVIS_GOOGLE_TOKEN (og evt. importert client_id/_secret) er allerede korrekt (idempotent no-op) - .env ikke endret.");
   } else {
     // Sikkerhetskopi FØR endring, deretter atomisk skriv (tmp-fil + rename) -
     // samme mønster som fix-q21-runtime-role.ts (§5/§J/§K/§O i ordren).
@@ -343,7 +445,11 @@ async function main(): Promise<void> {
     const tmpPath = `${envPath}.tmp.${Date.now()}`;
     writeFileSync(tmpPath, nextContent);
     renameSync(tmpPath, envPath);
-    log("JARVIS_GOOGLE_TOKEN oppdatert i .env (kun denne ene linjen endret, alt annet urørt).");
+    log(
+      usingImportedClient
+        ? "JARVIS_GOOGLE_CLIENT_ID/_SECRET/_TOKEN oppdatert sammen i .env (koherent Desktop-klient-sett, alt annet urørt)."
+        : "JARVIS_GOOGLE_TOKEN oppdatert i .env (kun denne ene linjen endret, alt annet urørt)."
+    );
   }
 
   log("google_drive_reauth=PASS");

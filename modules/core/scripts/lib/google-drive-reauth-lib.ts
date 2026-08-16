@@ -242,3 +242,102 @@ export function classifyAccountConsistency(detectedEmail: string | undefined, co
 export function formatAccountMismatchReport(expectedMasked: string, authorizedMasked: string): string {
   return `expected_account=${expectedMasked} authorized_account=${authorizedMasked}`;
 }
+
+/**
+ * HOST FIX #2 (2026-08-16): "redirect_uri_mismatch" fra Google (host-funn -
+ * Tobias sin faktiske kjøring). Google validerer `redirect_uri` FØR noe
+ * annet (sikkerhetskritisk, hindrer open-redirect) - ved mismatch vises en
+ * feilside DIREKTE i nettleseren, og callback-serveren vår mottar ALDRI noe
+ * (ingen HTTP-request kommer tilbake i det hele tatt). Dette er derfor
+ * STRUKTURELT umulig å oppdage programmatisk via callback-serveren - denne
+ * fila kan bevise/teste alt UNNTATT selve deteksjonen av feilen mens den
+ * skjer (se orchestratoren sin loggmelding FØR nettleseren åpnes for den
+ * ærlige Ctrl+C-veiledningen i stedet).
+ *
+ * En "Desktop app"-klient (RFC 8252, native/installert app) godtar EN
+ * loopback-IP-redirect på HVILKEN SOM HELST port UTEN forhåndsregistrering -
+ * bekreftet Google-dokumentert oppførsel. En "Web application"-klient
+ * krever en EKSAKT forhåndsregistrert redirect-URI. At Tobias sin
+ * eksisterende klient ga `redirect_uri_mismatch` for en loopback-URI er
+ * derfor sterk evidens (ikke gjettet) for at den er registrert som "Web
+ * application" - Jarvis sin lokale, interaktive eier-reauth-flyt er
+ * NØYAKTIG scenarioet Google bygde "Desktop app"-klienttypen for.
+ */
+export class WrongOAuthClientTypeError extends Error {
+  constructor(foundType: string) {
+    super(
+      `google_reauth_wrong_oauth_client_type: den valgte JSON-filen er en "${foundType}"-type OAuth-klient. ` +
+        `Jarvis sin lokale nettleser-reauth krever en "Desktop app"-klient (loopback-redirect uten forhåndsregistrert ` +
+        `port). Opprett en NY OAuth-klient av typen "Desktop app" i Google Cloud Console (APIs & Services > ` +
+        `Credentials > Create Credentials > OAuth client ID > Desktop app), last ned JSON-en, og pek ` +
+        `JARVIS_GOOGLE_CLIENT_SECRET_JSON til DEN filen i .env i stedet. .env er IKKE endret.`
+    );
+    this.name = "WrongOAuthClientTypeError";
+  }
+}
+
+export class MalformedClientSecretJsonError extends Error {
+  constructor(reason: string) {
+    super(`google_reauth_malformed_client_secret_json: ${reason} - .env er IKKE endret.`);
+    this.name = "MalformedClientSecretJsonError";
+  }
+}
+
+export interface ParsedInstalledClientSecret {
+  clientId: string;
+  clientSecret: string;
+}
+
+/**
+ * §6 i host-fix #2-ordren: Google sin STABILE, offisielle nedlastede
+ * OAuth-klient-JSON-form (samme skjema alle google-auth-library-
+ * quickstarts har brukt i årevis - ikke gjettet): toppnivånøkkelen er
+ * `installed` for en "Desktop app"-klient, `web` for en "Web
+ * application"-klient. Godtar KUN `installed` - en `web`-fil kastes
+ * EKSPLISITT (samme brittleness som klienten Tobias allerede har, se
+ * WrongOAuthClientTypeError over) i stedet for å stille prøve den og feile
+ * likt igjen.
+ */
+export function parseClientSecretJson(raw: string): ParsedInstalledClientSecret {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new MalformedClientSecretJsonError("ugyldig JSON i JARVIS_GOOGLE_CLIENT_SECRET_JSON-fila");
+  }
+  const body = parsed as Record<string, unknown>;
+  if (body["web"] && typeof body["web"] === "object") {
+    throw new WrongOAuthClientTypeError("web");
+  }
+  const installed = body["installed"];
+  if (!installed || typeof installed !== "object") {
+    throw new MalformedClientSecretJsonError(
+      'mangler "installed"-nøkkelen (verken "installed" eller "web" funnet - er dette en gyldig nedlastet OAuth-klient-JSON fra Google Cloud Console?)'
+    );
+  }
+  const { client_id: clientId, client_secret: clientSecret } = installed as Record<string, unknown>;
+  if (typeof clientId !== "string" || !clientId || typeof clientSecret !== "string" || !clientSecret) {
+    throw new MalformedClientSecretJsonError('"installed".client_id/client_secret mangler eller er tomme i JSON-fila');
+  }
+  return { clientId, clientSecret };
+}
+
+const CLIENT_ID_PROJECT_NUMBER_PATTERN = /^(\d+)-/;
+
+/**
+ * Google OAuth-klient-IDer har den STABILE, offentlig kjente formen
+ * `<prosjektnummer>-<random>.apps.googleusercontent.com` (ikke gjettet -
+ * samme mønster synlig i ethvert Google API-eksempel/nedlastet
+ * credentials.json). Returnerer undefined for en ID som ikke matcher
+ * (fail-safe - ALDRI en gjettet/feil URL).
+ */
+export function deriveProjectNumberFromClientId(clientId: string): string | undefined {
+  const match = CLIENT_ID_PROJECT_NUMBER_PATTERN.exec(clientId);
+  return match ? match[1] : undefined;
+}
+
+/** §6.2 i ordren: direkte lenke til RIKTIG Google Cloud Console-side - Tobias skal ALDRI måtte navigere dit manuelt selv. */
+export function buildCredentialsConsoleUrl(projectNumber: string | undefined): string {
+  const base = "https://console.cloud.google.com/apis/credentials";
+  return projectNumber ? `${base}?project=${projectNumber}` : base;
+}

@@ -608,41 +608,89 @@ PR #4 merges til `main`.
   draft/umerget. Ett-kommando-kontrakten er UENDRET:
   `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## GOOGLE OAUTH HOST FIX #2 (samme dag, 2026-08-16) — redirect_uri_mismatch / permanent Desktop-klient-design
+- **Host-funn:** transport-fiksen over løste URL-korrumperingen (Tobias sin nettleser åpnet nå den
+  KOMPLETTE URL-en - riktig client_id/redirect_uri/response_type/scope/state/prompt), men Google svarte
+  deretter med `Error 400: redirect_uri_mismatch`.
+- **Root cause (evidensbasert, ikke gjettet):** Google validerer `redirect_uri` FØR noe annet
+  (sikkerhetskritisk, hindrer open-redirect) - en "Web application"-klient krever en EKSAKT
+  forhåndsregistrert redirect-URI, mens en "Desktop app"-klient godtar EN loopback-IP-redirect på
+  HVILKEN SOM HELST port UTEN forhåndsregistrering (bekreftet Google-dokumentert oppførsel). At
+  Tobias sin eksisterende, allerede eksisterende OAuth-klient (fra FØR denne reauth-byggingen) ga
+  mismatch for en loopback-URI er sterk evidens for at den er "Web application"-type - Jarvis sin
+  lokale, interaktive eier-reauth-flyt er NØYAKTIG scenarioet "Desktop app" er bygget for. Google
+  sender ALDRI noen callback tilbake ved mismatch (feilsiden vises direkte i nettleseren) - dette
+  scriptet kan derfor STRUKTURELT ikke oppdage feilen selv via callback-serveren.
+- **Ingen offentlig Google-API for å opprette en OAuth-klient programmatisk** (kun Cloud Console-UI -
+  bekreftet, ikke antatt) - ETT manuelt Cloud Console-steg er derfor uunngåelig. Redusert til fem
+  eksplisitte steg i loggmeldingen FØR nettleseren åpnes, PLUSS Cloud Console-credentials-siden åpnes
+  AUTOMATISK i en egen fane (prosjektnummeret utledes fra den eksisterende `JARVIS_GOOGLE_CLIENT_ID`
+  sin stabile `<prosjektnummer>-<random>.apps.googleusercontent.com`-form - ingen gjettet URL).
+- **Ny, valgfri `JARVIS_GOOGLE_CLIENT_SECRET_JSON`** (.env-variabel, filsti): peker til den nedlastede
+  client secret-JSON-fila fra en NY "Desktop app"-OAuth-klient. `resolveOAuthClient()` leser/validerer
+  denne FØR noe annet i `main()` - `parseClientSecretJson()` godtar KUN Google sin `installed`
+  (Desktop)-JSON-form, og avviser en `web`-type fil EKSPLISITT (`WrongOAuthClientTypeError`, samme
+  brittleness som klienten Tobias allerede har - stille prøving av samme feilende type unngås).
+- **Koherent credential-sett (§4 i ordren):** brukes en importert Desktop-klient, skrives
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` SAMMEN i ÉN atomisk `.env`-skriving ved suksess - aldri
+  et token alene mot en client_id/_secret som ikke lenger samsvarer. Refresh-tokens er tied til klienten
+  som utstedte dem (bekreftet Google-oppførsel) - en full authorization_code-exchange (ikke bare en
+  refresh_token-gjenbruk) garanterer et FERSKT, korrekt-koblet token for DEN importerte klienten.
+- **Kontovelger uendret:** `prompt=consent select_account` og `login_hint` er identisk uansett
+  klientkilde (ÉN `buildAuthorizationUrl()`-kall, ingen egen "importert klient"-gren som svekker dette).
+  Presisering av §7 i ordren: "browseren viste fortsatt henrik@ffskis.com" er mest sannsynlig Google sin
+  standard feilside-topptekst (viser AKTIV nettleser-økt-identitet) - siden redirect_uri-valideringen
+  skjer FØR kontovelgeren i det hele tatt vises, ble select_account/login_hint aldri nådd i det
+  tilfellet. Ingen svekkelse av den mekanismen er gjort eller nødvendig.
+- **Tester:** 11 nye rene enhetstester (`parseClientSecretJson`/`deriveProjectNumberFromClientId`/
+  `buildCredentialsConsoleUrl`) + 10 nye strukturelle wiring-tester (koherent skriving, ingen
+  parallell/duplisert credential-lesing, .env-drevet gjenopptakelse, ingen secrets i den nye koden) -
+  608/608 totalt. Lint/full monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  manuelle Cloud Console-steg (opprett Desktop-klient, sett `JARVIS_GOOGLE_CLIENT_SECRET_JSON`) etterfulgt
+  av en NY host-kjøring for å bevise dette faktisk fungerer. PR #5 forblir draft/umerget. Ett-kommando-
+  kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
-reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.
-Det eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
-`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`) - `google-drive-reauth.ts` er nå bygget for å løse
-dette i ÉN kommando (nettleser-samtykke → `.env` oppdateres automatisk → `ua2-p1a-host-run.ts` kjøres
-automatisk), men selve nettleser-godkjenningen krever fysisk tilstedeværelse på hosten og kan ikke
-gjøres fra denne sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED,
-merget til `main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens
-(Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen
-kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en blokkering for P1A.
-Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert
-backlog, ikke blokkerende for P1A. **Nytt, ikke-blokkerende funn:** `GoogleDriveTransport` er IKKE
-wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå (kun
-`email`/`calendar`/`github`/`telegram` er det) - Drive-verktøyet er reelt reachable KUN fra
-`ua2-p1a-live.ts`/testene per nå, ikke fra en løpende api/worker-prosess. Egen fremtidig
-byggeordre, ikke gjort stille i denne reauth-runden (scope var credential-anskaffelse).
+reauth-flyten) venter på Tobias sitt ENE manuelle Cloud Console-steg (opprett en "Desktop app"-OAuth-
+klient - se GOOGLE OAUTH HOST FIX #2 over, ingen offentlig Google-API finnes for å gjøre dette
+programmatisk) etterfulgt av faktisk nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget. Det
+eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
+`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`), og den eksisterende OAuth-klienten er etter alt å
+dømme "Web application"-type (host-bevist, `redirect_uri_mismatch`) - `google-drive-reauth.ts` støtter
+nå import av en ny Desktop-klient via `JARVIS_GOOGLE_CLIENT_SECRET_JSON`, men selve Cloud Console-
+handlingen og nettleser-godkjenningen krever fysisk tilstedeværelse på hosten og kan ikke gjøres fra
+denne sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til
+`main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
+ennå - egen fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene
+(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende
+for P1A. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er IKKE
+wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
+fremtidig byggeordre.
 
 ## Neste oppgave
-Tobias kjører (PÅ HOSTEN, fra repo-roten):
+Tobias sitt neste steg avhenger av hva nettleseren viser når han kjører (PÅ HOSTEN, fra repo-roten):
 `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
-Dette åpner Google sin samtykkeside i standardnettleseren automatisk, ber om full
-`https://www.googleapis.com/auth/drive` + eksisterende `https://www.googleapis.com/auth/calendar`,
-oppdaterer `JARVIS_GOOGLE_TOKEN` i `.env` automatisk ved suksess (sikkerhetskopi tas alltid FØRST), og
-kjeder DERETTER automatisk inn i `ua2-p1a-host-run.ts` - INGEN andre kommando, INGEN manuell
-kode-liming, INGEN manuell `.env`-redigering. Forventet fullt-grønt host-sammendrag inkluderer
-`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED`), samt PASS på
+
+- **Ser Tobias "Jarvis: autorisasjon mottatt"-siden:** alt fungerte - scriptet oppdaterer `.env`
+  automatisk og kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling nødvendig.
+- **Ser Tobias en Google-FEILSIDE ("redirect_uri_mismatch"):** trykk Ctrl+C (scriptet kan IKKE oppdage
+  dette selv). Cloud Console-siden er allerede åpnet automatisk i en egen fane - opprett en NY OAuth-
+  klient av typen "Desktop app" (f.eks. "Jarvis Desktop"), last ned client secret-JSON-fila, sett
+  `JARVIS_GOOGLE_CLIENT_SECRET_JSON=<sti>` i `.env`, og kjør NØYAKTIG samme kommando på nytt - ingen
+  andre endringer nødvendig. Dette er det ENE uunngåelige manuelle steget (ingen offentlig Google-API
+  for å opprette OAuth-klienter programmatisk).
+
+Forventet fullt-grønt host-sammendrag inkluderer `google_drive_test_scope=AUTO_CREATED` (eller
+`CONFIGURED`), samt PASS på
 auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/sync/q20_no_resurrection/
-idempotency/policy. Viser Google "redirect_uri_mismatch" i nettleseren: loggmeldingen FØR åpningen
-forklarer nøyaktig hva som skal sjekkes (Desktop- vs. Web application-klienttype) - ingen gjetning.
-**Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt
-og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste
-kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten
-gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
-D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama
-LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-
-gapene (D-41-sjekklisten, egne fremtidige byggeordre per connector), Drive-entrypoint-wiring
-(main.ts/worker-main.ts, se funn over).
+idempotency/policy. **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den
+kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion,
+møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt
+fase-godkjenning fra Tobias (faseporten gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i
+bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-
+nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (egen underoppgave når en konkret
+integrasjonsflate finnes), connector-audit-gapene (D-41-sjekklisten, egne fremtidige byggeordre per
+connector), Drive-entrypoint-wiring (main.ts/worker-main.ts, se funn over).

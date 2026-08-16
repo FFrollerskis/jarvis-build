@@ -1,17 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   MalformedAuthorizationUrlError,
+  MalformedClientSecretJsonError,
   MissingClientCredentialsError,
   REQUIRED_REAUTH_SCOPES,
+  WrongOAuthClientTypeError,
   buildAuthorizationUrl,
+  buildCredentialsConsoleUrl,
   buildRedirectUri,
   classifyAccountConsistency,
   decideRefreshToken,
+  deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
+  parseClientSecretJson,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
   validateClientCredentials
@@ -235,5 +240,56 @@ describe("§D (host-fix): formatAccountMismatchReport - trygg, grep-bar rapportf
     expect(formatAccountMismatchReport("t***@ffskis.com", "h***@ffskis.com")).toBe(
       "expected_account=t***@ffskis.com authorized_account=h***@ffskis.com"
     );
+  });
+});
+
+/**
+ * HOST FIX #2 (2026-08-16): Tobias sin faktiske klient ga
+ * "redirect_uri_mismatch" - sterk evidens for at den er en "Web
+ * application"-type, ikke "Desktop app". Disse testene dekker den
+ * permanente løsningen: import av en Desktop-klients nedlastede
+ * client-secret-JSON, og avvisning av feil klienttype.
+ */
+describe("parseClientSecretJson - Desktop app ('installed') godtas, Web application ('web') avvises EKSPLISITT", () => {
+  it("en gyldig 'installed' (Desktop app) JSON gir client_id/client_secret", () => {
+    const json = JSON.stringify({ installed: { client_id: "123456789012-abc.apps.googleusercontent.com", client_secret: "desktop-secret", redirect_uris: ["http://localhost"] } });
+    expect(parseClientSecretJson(json)).toEqual({ clientId: "123456789012-abc.apps.googleusercontent.com", clientSecret: "desktop-secret" });
+  });
+  it("web client redirect mismatch classification: en 'web' (Web application)-JSON kastes EKSPLISITT - samme brittleness som klienten Tobias allerede har", () => {
+    const json = JSON.stringify({ web: { client_id: "123-abc.apps.googleusercontent.com", client_secret: "web-secret", redirect_uris: ["https://example.com/callback"] } });
+    expect(() => parseClientSecretJson(json)).toThrow(WrongOAuthClientTypeError);
+  });
+  it("ugyldig JSON kastes tydelig, ikke en kryptisk parse-feil", () => {
+    expect(() => parseClientSecretJson("dette er ikke json")).toThrow(MalformedClientSecretJsonError);
+  });
+  it("verken 'installed' eller 'web'-nøkkel funnet -> kastes tydelig", () => {
+    expect(() => parseClientSecretJson(JSON.stringify({ some: "other-shape" }))).toThrow(MalformedClientSecretJsonError);
+  });
+  it("'installed' finnes men mangler client_id/client_secret -> kastes tydelig", () => {
+    expect(() => parseClientSecretJson(JSON.stringify({ installed: { client_id: "" } }))).toThrow(MalformedClientSecretJsonError);
+  });
+  it("secrets logges/eksponeres ALDRI av selve feilmeldingen (feilmeldingen nevner ALDRI en client_secret-verdi)", () => {
+    const json = JSON.stringify({ web: { client_id: "123-abc.apps.googleusercontent.com", client_secret: "super-hemmelig-verdi-123" } });
+    try {
+      parseClientSecretJson(json);
+      throw new Error("skulle ha kastet");
+    } catch (err) {
+      expect((err as Error).message).not.toContain("super-hemmelig-verdi-123");
+    }
+  });
+});
+
+describe("deriveProjectNumberFromClientId / buildCredentialsConsoleUrl - direkte lenke til RIKTIG Cloud Console-side", () => {
+  it("henter prosjektnummeret fra den stabile client_id-formen (<nummer>-<random>.apps.googleusercontent.com)", () => {
+    expect(deriveProjectNumberFromClientId("123456789012-abcdef.apps.googleusercontent.com")).toBe("123456789012");
+  });
+  it("en client_id som IKKE matcher det kjente mønsteret gir undefined - ALDRI en gjettet verdi", () => {
+    expect(deriveProjectNumberFromClientId("ikke-en-gyldig-client-id")).toBeUndefined();
+  });
+  it("URL-en inkluderer prosjektnummeret som query-parameter når det er kjent", () => {
+    expect(buildCredentialsConsoleUrl("123456789012")).toBe("https://console.cloud.google.com/apis/credentials?project=123456789012");
+  });
+  it("en generisk (uten prosjekt) URL brukes trygt når prosjektnummeret er ukjent - aldri en feilformet lenke", () => {
+    expect(buildCredentialsConsoleUrl(undefined)).toBe("https://console.cloud.google.com/apis/credentials");
   });
 });
