@@ -30,10 +30,15 @@
 // Forutsetter (uendret fra Q-21/Q-20): `.env` allerede korrekt konfigurert
 // med JARVIS_DB_ADMIN_USER/PASSWORD (migrate) og JARVIS_DB_USER/PASSWORD
 // (jarvis_runtime). Google Drive LIVE-akseptansen er BETINGET - se
-// ua2-p1a-live.ts §6 - og krever i tillegg JARVIS_GOOGLE_CLIENT_ID/SECRET,
-// JARVIS_GOOGLE_TOKEN og JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID (en DEDIKERT,
-// trygg test-mappe - IKKE hele driven). Mangler noen av disse, rapporteres
-// google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE - aldri en fake PASS.
+// ua2-p1a-live.ts §6 - og krever JARVIS_GOOGLE_CLIENT_ID/SECRET og
+// JARVIS_GOOGLE_TOKEN. UA-2 P1A HOST RECOVERY (2026-08-16): Tobias skal ALDRI
+// måtte manuelt opprette/oppgi en test-mappe - JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID
+// er nå VALGFRI; er den satt brukes den (kun lest, aldri slettet), er den IKKE
+// satt oppretter ua2-p1a-live.ts SELV en midlertidig, unikt navngitt
+// sandkasse-mappe og rydder den opp igjen automatisk. Mangler client_id/
+// _secret/token, rapporteres google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE;
+// har credentials for lesing men mangler write-scope, rapporteres
+// google_drive_live=BLOCKED_REAUTH_REQUIRED - aldri en fake PASS.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";

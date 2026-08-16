@@ -111,7 +111,7 @@ describe("idempotent ved gjentatt kjøring, ingen destruktive argumenter", () =>
 });
 
 describe("Google Drive LIVE er BETINGET - aldri en fake PASS uten trygt test-scope", () => {
-  it("ua2-p1a-live.ts krever client_id/client_secret/token/test_folder_id ALLE fire, ellers BLOCKED_NO_SAFE_TEST_SCOPE (alle google_drive_*-felt default dit, guarden returnerer FØR noe overskrives)", () => {
+  it("ua2-p1a-live.ts krever client_id/client_secret/token (KUN disse tre), ellers BLOCKED_NO_SAFE_TEST_SCOPE (alle google_drive_*-felt default dit, guarden returnerer FØR noe overskrives)", () => {
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_CLIENT_ID");
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_CLIENT_SECRET");
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_TOKEN");
@@ -123,40 +123,113 @@ describe("Google Drive LIVE er BETINGET - aldri en fake PASS uten trygt test-sco
     for (const line of driveFieldLines) {
       expect(line).toContain("BLOCKED_NO_SAFE_TEST_SCOPE");
     }
-    // Guarden returnerer (ingen overskriving) FØR noe live-kall forsøkes:
-    const guardIdx = liveScriptSource.indexOf("!clientId || !clientSecret || !refreshToken || !testFolderId");
-    const listCallIdx = liveScriptSource.indexOf('drive("list_files"');
+    // UA-2 P1A HOST RECOVERY: test_folder_id er IKKE lenger en del av guarden -
+    // den er valgfri (auto-create dekker det manglende tilfellet):
+    const guardIdx = liveScriptSource.indexOf("!clientId || !clientSecret || !refreshToken");
     expect(guardIdx).toBeGreaterThan(-1);
-    expect(listCallIdx).toBeGreaterThan(-1);
-    expect(guardIdx).toBeLessThan(listCallIdx);
+    const guardLine = liveScriptSource.slice(guardIdx, liveScriptSource.indexOf("\n", guardIdx));
+    expect(guardLine).not.toContain("testFolderId");
+    // Guarden returnerer (ingen overskriving) FØR noe live-kall forsøkes:
+    const rootProbeIdx = liveScriptSource.indexOf('drive("get_metadata", { file_id: "root" })');
+    expect(rootProbeIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(rootProbeIdx);
   });
 
   it("Drive-akseptansen rapporterer BLOCKED_REAUTH_REQUIRED - ikke en fake PASS - når lesing fungerer men skriving feiler på auth (utilstrekkelig scope)", () => {
     expect(liveScriptSource).toContain("BLOCKED_REAUTH_REQUIRED");
     expect(liveScriptSource).toContain("isReauthSignal");
-    expect(liveScriptSource).toMatch(/auth_error_401\|auth_error_403/);
+    expect(liveScriptSource).toContain("determineTestRootSource");
+    expect(liveScriptSource).toContain("driveAcceptanceFolderName");
   });
 
-  it("Drive-akseptansen sletter PERMANENT kun artefakter DEN SELV opprettet (createdFileIds), aldri noe annet i test-mappen", () => {
-    expect(liveScriptSource).toContain("createdFileIds");
-    const cleanupIdx = liveScriptSource.indexOf("§cleanup");
-    const deleteLoopIdx = liveScriptSource.indexOf("for (const fileId of createdFileIds)");
-    expect(cleanupIdx).toBeGreaterThan(-1);
-    expect(deleteLoopIdx).toBeGreaterThan(cleanupIdx);
+  it("Drive-akseptansen sletter PERMANENT kun artefakter DEN SELV sporet via sandbox (sandbox.cleanupTargets()), aldri noe annet i Drive", () => {
+    expect(liveScriptSource).toContain("sandbox.cleanupTargets()");
+    const cleanupCommentIdx = liveScriptSource.indexOf("§5: opprydding");
+    const deleteLoopIdx = liveScriptSource.indexOf("for (const targetId of cleanupTargets)");
+    expect(cleanupCommentIdx).toBeGreaterThan(-1);
+    expect(deleteLoopIdx).toBeGreaterThan(cleanupCommentIdx);
   });
 
   it("permission-mutasjon er BEVISST IKKE live-testet (kan ikke gjøres trygt uten å involvere ekte personer/eksponering)", () => {
     expect(liveScriptSource).toMatch(/Permission-mutasjon.*BEVISST IKKE/s);
+    expect(liveScriptSource).toContain("SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL");
   });
 
-  it("Drive-akseptansen bruker en 'folder'-scope (aldri whole_drive) mot en dedikert test-mappe", () => {
-    expect(liveScriptSource).toMatch(/\{ kind: "folder", folder_id: testFolderId \}/);
+  it("Drive-akseptansen bruker en 'folder'-scope (aldri whole_drive) mot sandkassens subfolder-b (etter §move) for sync/retrieval", () => {
+    expect(liveScriptSource).toMatch(/\{ kind: "folder", folder_id: subfolderBId as string \}/);
   });
 
   it("scanner OAuth-tokenet mot audit_events OG knowledge_documents.metadata etter Drive-sync - beviser at det aldri lekker", () => {
     expect(liveScriptSource).toContain("tokenLeak");
     expect(liveScriptSource).toContain("docLeak");
     expect(liveScriptSource).toMatch(/audit_events WHERE tenant_id=\$1 AND tool_id='drive'/);
+  });
+});
+
+describe("UA-2 P1A HOST RECOVERY - auto-opprettet, sikker Drive-sandkasse (ua2-p1a-live.ts §6)", () => {
+  it("§D: INGEN søk-etter-lignende-navn-og-gjenbruk - auto-create-grenen kaller ALDRI list_files for å finne en eksisterende mappe før create_folder", () => {
+    const branchStart = liveScriptSource.indexOf('} else {', liveScriptSource.indexOf('if (testRootSource === "configured")'));
+    const branchEnd = liveScriptSource.indexOf("sandbox = new DriveAcceptanceSandbox(createRoot.external_id", branchStart);
+    expect(branchStart).toBeGreaterThan(-1);
+    expect(branchEnd).toBeGreaterThan(branchStart);
+    const autoCreateBranch = liveScriptSource.slice(branchStart, branchEnd);
+    const codeOnly = autoCreateBranch
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+    expect(codeOnly).not.toContain("list_files");
+    expect(autoCreateBranch).toContain('drive("create_folder", { name: folderName })');
+  });
+
+  it("§J: en EKSPLISITT KONFIGURERT test-mappe (JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID) leses men slettes ALDRI direkte av runneren - kun sandbox.cleanupTargets() (som strukturelt utelater en konfigurert rot) brukes til sletting", () => {
+    const configuredBranchIdx = liveScriptSource.indexOf('if (testRootSource === "configured")');
+    expect(configuredBranchIdx).toBeGreaterThan(-1);
+    const configuredBranch = liveScriptSource.slice(configuredBranchIdx, liveScriptSource.indexOf("sandbox = new DriveAcceptanceSandbox(configuredId, false)"));
+    expect(configuredBranch).not.toMatch(/delete_permanent/);
+    expect(configuredBranch).toContain('drive("get_metadata", { file_id: configuredId })');
+    // Selve slettingen skjer KUN via cleanupTargets() - aldri en direkte
+    // `drive("delete_permanent", { file_id: sandbox.rootId })` utenfor loopen:
+    expect(liveScriptSource).not.toMatch(/delete_permanent",\s*\{\s*file_id:\s*sandbox\.rootId/);
+  });
+
+  it("§K: den auto-opprettede mappe-IDen persisteres ALDRI til .env eller noen annen fil - kun til `diagnostics`/log()", () => {
+    const codeOnlyLines = liveScriptSource
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n");
+    expect(codeOnlyLines).not.toMatch(/writeFile\([^)]*\.env/);
+    expect(liveScriptSource).toContain('diagnostics["google_drive_test_root_id"] = sandbox.rootId');
+  });
+
+  it("grensekontroll: driveMutate() kaller sandbox.assertInSandbox() FØR ethvert Drive-mutasjonskall, og brukes for update/rename/move/trash/permanent-delete på hovedtestfila", () => {
+    const fnIdx = liveScriptSource.indexOf("async function driveMutate(");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const fnBody = liveScriptSource.slice(fnIdx, liveScriptSource.indexOf("}", liveScriptSource.indexOf("return drive(action", fnIdx)));
+    const assertIdx = fnBody.indexOf("sandbox.assertInSandbox(fileId)");
+    const returnIdx = fnBody.indexOf("return drive(action");
+    expect(assertIdx).toBeGreaterThan(-1);
+    expect(returnIdx).toBeGreaterThan(assertIdx);
+    for (const action of ['"update_content"', '"rename"', '"move"', '"trash"', '"delete_permanent"']) {
+      expect(liveScriptSource).toContain(`driveMutate(${action === '"delete_permanent"' ? '"delete_permanent", fileId' : `${action}, fileId`}`);
+    }
+  });
+
+  it("§M: unik mappenavn per kjøring (driveAcceptanceFolderName(runId)) + ubetinget selv-opprydding gjør gjentatt kjøring trygg (ingen delt tilstand mellom kjøringer)", () => {
+    expect(liveScriptSource).toContain("driveAcceptanceFolderName(runId)");
+    // Cleanup-loopen ligger EFTER alle mutasjonene, ikke bak en betinget skip:
+    const permissionLiveIdx = liveScriptSource.indexOf("results.google_drive_permission_live = ");
+    const cleanupLoopIdx = liveScriptSource.indexOf("for (const targetId of cleanupTargets)");
+    expect(permissionLiveIdx).toBeGreaterThan(-1);
+    expect(cleanupLoopIdx).toBeGreaterThan(permissionLiveIdx);
+  });
+
+  it("auth/scope-probe (Drive sin reserverte 'root'-ID) skjer FØR test-roten løses og FØR noen mutasjon forsøkes - skiller total auth-svikt fra manglende skrive-scope", () => {
+    const probeIdx = liveScriptSource.indexOf('drive("get_metadata", { file_id: "root" })');
+    const rootSourceIdx = liveScriptSource.indexOf("let sandbox: DriveAcceptanceSandbox;");
+    const firstCreateFolderIdx = liveScriptSource.indexOf('drive("create_folder"');
+    expect(probeIdx).toBeGreaterThan(-1);
+    expect(rootSourceIdx).toBeGreaterThan(probeIdx);
+    expect(firstCreateFolderIdx).toBeGreaterThan(rootSourceIdx);
   });
 });
 

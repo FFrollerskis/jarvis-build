@@ -468,28 +468,80 @@ PR #4 merges til `main`.
   eksplisitt "IKKE utvid alle nå dersom det blåser scope"). Hver fremtidig connector-byggeordre
   vurderer full kapabilitet fra D-41-sjekklisten fremover.
 
+## UA-2 P1A HOST RECOVERY — auto-create safe Drive test sandbox (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte `ua2-p1a-host-run.ts` (run_id `8af834dd`, `hard_fail=false`) - ALLE
+  ingestion-felt (Obsidian/registry/tenant-isolasjon/retrieval/audit) PASS, men
+  `google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE` fordi `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` ikke var
+  satt, selv om `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`JARVIS_GOOGLE_TOKEN` alle var konfigurert.
+- **Eksplisitt eierbeslutning:** Tobias skal ALDRI måtte manuelt opprette en Drive-testmappe, finne/
+  kopiere en mappe-ID, eller redigere `.env` for å kjøre denne akseptansen.
+- **Ny, ren, avhengighetsfri modul** `modules/knowledge/scripts/lib/drive-acceptance-sandbox.ts`
+  (`DriveAcceptanceSandbox`, `determineTestRootSource`, `driveAcceptanceFolderName`, `isReauthSignal`) -
+  BEVISST ingen fetch/nettverk der, kun grensekontroll-/cleanup-logikk. `assertInSandbox()` er den ENESTE
+  veien en mutasjon godkjennes - fail-closed, kaster `DriveBoundaryViolationError` for enhver ID denne
+  kjøringen ikke selv sporet som opprettet (aldri "prøv og se").
+- **`ua2-p1a-live.ts` §6 fullstendig omskrevet:** er `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` satt, brukes den
+  (kun LEST, ALDRI slettet av runneren). Er den IKKE satt, oppretter runneren SELV en unikt navngitt,
+  midlertidig mappe (`"Jarvis P1A Acceptance <run_id>"`) - BEVISST INGEN søk-etter-lignende-navn-og-
+  gjenbruk (alltid en fersk `create_folder`, aldri en `list_files`-basert oppslag). Et rent LESE-scope-
+  probe (`get_metadata` på Drive sin reserverte `"root"`-ID) skjer FØR test-roten løses og FØR noen
+  mutasjon forsøkes, slik at total auth-svikt skilles fra manglende skrive-scope
+  (`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`). Full akseptanse A-Q bevist INNENFOR sandkassen:
+  auth-probe, opprett to undermapper + hovedtestfil, les, oppdater, omdøp, flytt mellom undermappene,
+  sync+retrieval (scopet til subfolder-b), Q-20 hard-delete+resync-no-resurrection (PLUSS et nytt
+  Drive-side-uavhengighetsbevis: originalfilen bekreftes FORTSATT å eksistere i Drive etter Jarvis-side
+  purge), trash (reversibelt), idempotent create (samme idempotency_key), permanent sletting KUN på en
+  artefakt DENNE kjøringen selv opprettet (`driveMutate()`-wrapperen grensekontrollerer FØR ethvert
+  mutasjonskall). Permission-mutasjon fortsatt BEVISST IKKE live-testet
+  (`google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL`) - kan ikke gjøres trygt uten å
+  involvere en ekte person/endre ekte eksponering i en ubetjent kjøring.
+- **Opprydding:** alt DENNE kjøringen selv opprettet slettes permanent til slutt via
+  `sandbox.cleanupTargets()` (barn FØR rot) - en eksplisitt KONFIGURERT rot er strukturelt ALDRI et
+  mål (kun inkludert når `autoCreated=true`). Den auto-opprettede mappe-IDen persisteres ALDRI til
+  `.env` - kun til kjøringens `diagnostics`/logg.
+- **`ua2-p1a-host-run.ts`-kommentarblokken oppdatert** til å reflektere at `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID`
+  nå er VALGFRI - selve ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts`.
+- **Tester:** 13 nye rene enhetstester (`drive-acceptance-sandbox.test.ts` - auto-create-beslutning,
+  navneunikhet, grensekontroll, reauth-klassifisering, cleanup-scoping inkl. delvis-oppsatt-kjøring og
+  "konfigurert rot aldri i cleanup-listen"), pluss `ua2-p1a-host-run-wiring.test.ts` utvidet/oppdatert
+  (guard krever nå kun client_id/secret/token, IKKE test_folder_id; nye strukturelle bevis for §D
+  no-reuse-by-search, §J konfigurert-rot-aldri-direkte-slettet, §K ingen `.env`-persistering,
+  driveMutate-grensekontroll-kjeden, §M idempotent-gjentakelse). **512/512 tester totalt** (faktisk målt
+  denne runden), lint/full monorepo-typecheck/gitleaks (`protect --staged` + historikk-scan) alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever en NY host-kjøring fra
+  Tobias for å bevise auto-sandkassen faktisk fungerer mot ekte Drive. PR #5 forblir draft/umerget.
+
 ## Blokkeringer
-UA-2 P1A (inkl. Google Drive full read/write-scope-endringen) venter på Tobias sin host-kjøring
-(`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR IKKE merget. Dersom Tobias sitt eksisterende
-`JARVIS_GOOGLE_TOKEN` ble utstedt FØR denne scope-endringen (kun `drive.readonly`/`drive.file`),
-rapporterer live-akseptansen `google_drive_live=BLOCKED_REAUTH_REQUIRED` - reautorisering med
-`https://www.googleapis.com/auth/drive` er da nødvendig FØR full Drive-akseptanse kan bevises (ikke en
-kodefeil, en forventet konsekvens av scope-utvidelsen). Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer
-(alle VERIFIED/CLOSED, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
-multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
-ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en
-blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
-over) er dokumentert backlog, ikke blokkerende for P1A.
+UA-2 P1A (inkl. Google Drive full read/write-scope-endringen og auto-sandkasse-host-recovery) venter på
+Tobias sin NYE host-kjøring (`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR IKKE merget. Dersom
+Tobias sitt eksisterende `JARVIS_GOOGLE_TOKEN` ble utstedt FØR scope-endringen (kun
+`drive.readonly`/`drive.file`), rapporterer live-akseptansen fortsatt
+`google_drive_live=BLOCKED_REAUTH_REQUIRED` - reautorisering med `https://www.googleapis.com/auth/drive`
+er da nødvendig FØR full Drive-akseptanse kan bevises (ikke en kodefeil, en forventet konsekvens av
+scope-utvidelsen; en egen reautoriseringsflyt er EKSPLISITT IKKE bygget i denne runden - Tobias skal
+ALDRI måtte manuelt redigere token/`.env`, en fremtidig byggeordre dekker selve reauth-flyten). Q-20/
+UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende
+provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for
+voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
+fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/
+Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende for P1A.
 
 ## Neste oppgave
-UA-2 P1A (inkl. Drive full read/write) er FIXED_SUITE / READY_FOR_HOST_VERIFY - venter på Tobias sin
-host-kjøring av `ua2-p1a-host-run.ts` (Windows/Docker) før VERIFIED kan settes og draft PR kan vurderes
-for merge. Hvis kjøringen rapporterer `google_drive_live=BLOCKED_REAUTH_REQUIRED`: Tobias reautoriserer
-Google-kontoen med full `drive`-scope, deretter re-kjøres samme kommando. **Ingen merge, ingen UA-2
-P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt og bekreftet. Etter
-host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i
-IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten gjelder,
-CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
-D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama
-LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-
-gapene (D-41-sjekklisten, egne fremtidige byggeordre per connector).
+UA-2 P1A (inkl. Drive full read/write + auto-sandkasse-host-recovery) er FIXED_SUITE /
+READY_FOR_HOST_VERIFY - venter på Tobias sin NYE host-kjøring av `ua2-p1a-host-run.ts` (Windows/Docker,
+samme ett-kommando som før - INGEN manuell test-mappe-opprettelse lenger nødvendig) før VERIFIED kan
+settes og draft PR kan vurderes for merge. Forventet fullt-grønt host-sammendrag inkluderer
+`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED` hvis Tobias likevel har satt
+`JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID`), samt PASS på auth_scope/read/create/update/rename/move/trash/
+permanent_delete/cleanup/sync/q20_no_resurrection/idempotency/policy. Hvis kjøringen i stedet
+rapporterer `google_drive_live=BLOCKED_REAUTH_REQUIRED`: Tobias reautoriserer Google-kontoen med full
+`drive`-scope, deretter re-kjøres samme kommando (selve reautoriseringsflyten er IKKE bygget i denne
+runden - egen fremtidig underoppgave). **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten
+host-bevis** før den kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B
+(e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen
+eksplisitt fase-godkjenning fra Tobias (faseporten gjelder, CLAUDE.md-regel 10). Øvrige kandidater
+uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME,
+provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (egen underoppgave når en konkret
+integrasjonsflate finnes), connector-audit-gapene (D-41-sjekklisten, egne fremtidige byggeordre per
+connector).
