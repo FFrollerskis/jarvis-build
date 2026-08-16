@@ -426,7 +426,7 @@ async function main(): Promise<void> {
     await writeFile(join(outsideRoot, "hemmelig.md"), "hemmelig innhold utenfor allowlistet rot");
 
     // allowlist: kun filer innenfor roten listes, aldri noe fra en sidestilt mappe.
-    const allowlistRecords = await new FilesystemKnowledgeSource(secRoot).list();
+    const allowlistRecords = (await new FilesystemKnowledgeSource(secRoot).list()).records;
     results.filesystem_allowlist =
       allowlistRecords.some((r) => r.external_id === "lovlig.md") &&
       !allowlistRecords.some((r) => r.content.includes("hemmelig"))
@@ -437,7 +437,7 @@ async function main(): Promise<void> {
     // traversal: en rootPath med bokstavelige '..'-segmenter nøytraliseres av resolve() - ingen ekstern innhold lekker inn.
     await mkdir(join(secRoot, "sub"), { recursive: true });
     await writeFile(join(secRoot, "sub", "fil.txt"), "innhold i undermappe");
-    const traversalRecords = await new FilesystemKnowledgeSource(join(secRoot, "sub", "..", "sub")).list();
+    const traversalRecords = (await new FilesystemKnowledgeSource(join(secRoot, "sub", "..", "sub")).list()).records;
     results.traversal_deny =
       traversalRecords.length === 1 && traversalRecords[0]?.external_id === "fil.txt" ? "PASS" : "FAIL";
     log(`traversal_deny: filer=${traversalRecords.length} -> ${results.traversal_deny}`);
@@ -449,7 +449,7 @@ async function main(): Promise<void> {
       results.symlink_escape = "SKIPPED_HOST_PERMISSION";
     }
     if (results.symlink_escape !== "SKIPPED_HOST_PERMISSION") {
-      const symlinkRecords = await new FilesystemKnowledgeSource(secRoot).list();
+      const symlinkRecords = (await new FilesystemKnowledgeSource(secRoot).list()).records;
       results.symlink_escape =
         symlinkRecords.some((r) => r.external_id === "lovlig.md") &&
         !symlinkRecords.some((r) => r.content.includes("hemmelig")) &&

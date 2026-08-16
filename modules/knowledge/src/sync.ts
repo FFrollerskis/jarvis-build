@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
 import { isFingerprintErased } from "@jarvis/core";
-import type { KnowledgeRecord, KnowledgeSource } from "./source.ts";
+import { KnowledgeSourceError, type KnowledgeRecord, type KnowledgeSource, type SourceErrorClass } from "./source.ts";
 
 /** UA-2 P0 §9: idempotent sync-rapport - en ny kjøring uten kildeendringer skal være nær no-op. */
 export interface SyncReport {
@@ -16,10 +16,14 @@ export interface SyncReport {
   failed: number;
   /** Q-20 §5: dokumenter som IKKE ble opprettet fordi de matcher en erasure-fingerprint (resurrection protection). */
   suppressed: number;
+  /** UA-2 P1A §16: elementer kilden selv bevisst hoppet over (f.eks. ustøttet binærfil) - IKKE en feil. */
+  skipped: number;
+  /** UA-2 P1A §16: satt KUN når `source.list()` kastet et klassifisert `KnowledgeSourceError` - observability, endrer ALDRI tombstone-oppførsel. */
+  error_class?: SourceErrorClass;
 }
 
 const EMPTY_REPORT: SyncReport = {
-  scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0
+  scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0, skipped: 0
 };
 
 /**
@@ -37,16 +41,21 @@ export class KnowledgeSyncService {
 
   async sync(identity: IdentityContext, memorySpace: MemorySpace, source: KnowledgeSource): Promise<SyncReport> {
     let records: KnowledgeRecord[];
+    let skippedCount = 0;
     try {
-      records = await source.list();
-    } catch {
+      const result = await source.list();
+      records = result.records;
+      skippedCount = result.skipped.length;
+    } catch (err) {
       // Hele kilden feilet (f.eks. nettverk/credential) - ingen dokumenter ble
       // sett, derfor INGEN tombstoning (§5: vi skal aldri tombstone pga. en
       // feilet listing - kun pga. et dokument som faktisk mangler i en VELLYKKET listing).
-      return { ...EMPTY_REPORT, failed: 1 };
+      // §16: klassifisert kun for observability - påvirker ALDRI dette utfallet.
+      const error_class = err instanceof KnowledgeSourceError ? err.errorClass : undefined;
+      return { ...EMPTY_REPORT, failed: 1, ...(error_class ? { error_class } : {}) };
     }
 
-    const report: SyncReport = { ...EMPTY_REPORT };
+    const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedCount };
     const seenExternalIds: string[] = [];
 
     await withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
