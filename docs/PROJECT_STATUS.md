@@ -1,6 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-15 · **Branch:** `claude/ua2-knowledge-spec` (PR #3, merges til `main`)
+**Oppdatert:** 2026-08-16 (Q-20 final closure) · **Branch:** `claude/q20-data-erasure` (PR #4, merges
+til `main`)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -25,6 +26,28 @@ isolasjon - alle PASS, `duplicate_documents=0`, `hard_fail=false`. `symlink_esca
 SKIPPED_HOST_PERMISSION` (Windows-hosten tillot ikke symlink uten admin-rettigheter denne
 kjøringen) - eksplisitt IKKE et live-PASS, mekanismen forblir suite-bevist
 (`filesystem-source.test.ts`). Full evidens: docs/RUNTIME_GATES.md.
+**Q-20 (teknisk data-erasure-foundation, FØR UA-2 P1): VERIFIED/CLOSED (2026-08-16, host-bevist på
+ekte Windows/Docker-host, run_id `eaabe2b1`)** → D-40. Ny pakke `@jarvis/erasure` - sentral, typed
+`ErasureService` (preview/execute/verify) med scope-modell (`tenant`/`person`/`memory_space`/
+`knowledge_source`/`knowledge_document`/`conversation`). Hard-delete av knowledge- OG memory-innhold +
+alt avledet (embeddings/versjoner/entiteter/relasjoner/oppsummeringer/beslutninger/forpliktelser/
+frister), FK-trygg/fail-closed/idempotent. `erasure_fingerprints`-suppresjonsledger hindrer at
+`KnowledgeSyncService` gjenoppliver slettet innhold ved neste source-sync (kun SHA-256-fingerprint,
+aldri klartekst) - bevist LIVE. D-klasse policy-integrasjon gjenbruker eksisterende `PolicyGateway`/
+sovereign/approval uendret, bevisst IKKE via `ToolGateway`s D-pipeline (ville lagret en KOPI av
+innholdet i et recovery-snapshot - dokumentert unntak). `jarvis_app` fikk et nytt, avgrenset
+`GRANT DELETE` (kun de faktisk hard-slettede tabellene - `events`/`audit_events` forblir
+append-only-blokkert). **Host-bevis:** `q20_preview`/`q20_hard_delete`/`q20_derived_delete`/
+`q20_fts_erasure`/`q20_vector_erasure`/`q20_hybrid_erasure`/`q20_memory_erasure`/`q20_no_resurrection`/
+`q20_idempotency`/`q20_tenant_isolation`/`q20_space_isolation`/`q20_receipt_safe`/`q20_sentinel_scan` =
+ALLE PASS, `hard_fail=false`; resync-bevis `created=0`/`suppressed=1`; retrieval etter purge
+`fts_hits=0`/`vector_hits=0`/`hybrid_hits=0`/`memory_hits=0`; `q21_runtime_role_safe=PASS` uendret i
+samme kjøring. Tre host-recovery-runder samme dag (workspace-bootstrap → Windows pnpm-
+prosessoppløsning → DEP0190-opprydding, se RUNTIME_GATES.md) løste kun host-/prosess-hygiene, ingen
+erasure-logikk endret. **Teknisk foundation, IKKE juridisk GDPR-sertifisering.** Fortsatt eksplisitt
+dokumenterte, ikke purgede stores: `events`/`audit_events`-payload, `tasks`/`tool_executions`-innhold,
+Langfuse/trace-fil, `person`-scope dekker ikke knowledge-dokumenter. Full evidens:
+docs/DATA_ERASURE.md og docs/RUNTIME_GATES.md.
 
 ## UA-0 (lukket)
 D-27/D-28/D-32/D-35/OPS-RUNTIME/UA0-RUNRATE = VERIFIED (evidens: docs/RUNTIME_GATES.md).
@@ -232,18 +255,113 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
   SKIPPED_HOST_PERMISSION` (eksplisitt IKKE et live-PASS, forblir suite-bevist). Se
   header-seksjonen øverst i denne filen og docs/RUNTIME_GATES.md for full evidens.
 
+## Q-20 — Data Erasure Foundation (BYGGET denne økten, 2026-08-16)
+- **Inventory først** (docs/DATA_ERASURE.md §2): faktisk skjema lest (ikke antatt) - klassifisert
+  A (CONTENT)/B (DERIVED)/C (OPERATIONAL METADATA)/D (SECURITY/AUDIT, append-only-blokkert).
+- **Én sentral, typed erasure-tjeneste** (`modules/erasure`, `@jarvis/erasure`) - IKKE separate
+  tilfeldige delete-funksjoner per modul. `previewErasure`/`executeErasure`/`verifyErasure`.
+  Scope-modell: `tenant`/`person`/`memory_space`/`knowledge_source`/`knowledge_document`/
+  `conversation`, `tenant_id` alltid eksplisitt - ingen cross-tenant purge uttrykkbart (bevist, §H).
+- **Hard delete** (`modules/erasure/src/plan.ts`): FK-trygg rekkefølge, én transaksjon, fail-closed
+  (en injisert midt-i-feil ruller HELE transaksjonen tilbake - bevist, §N). Dekker knowledge
+  (`knowledge_documents`/`knowledge_embeddings`) + memory (`memory_items` + alt avledet) +
+  conversations (`messages`/`sessions`) + `artifacts` (kun tenant-scope).
+- **Ny migrasjon `018_erasure.sql`:** `erasure_requests`/`erasure_fingerprints`-ledger (RLS, samme
+  mønster som resten) + et EKSPLISITT, avgrenset `GRANT DELETE` til `jarvis_app` (kun de tabellene
+  som faktisk hard-slettes fra - systemet hadde ALDRI hatt en DELETE-rettighet noe sted før dette;
+  `events`/`audit_events` forblir uten DELETE-grant, i tillegg til append-only-trigger-blokkert).
+- **Resurrection protection (§5):** `erasure_fingerprints` lagrer KUN en irreversibel SHA-256-
+  fingerprint av canonical identity - ALDRI innhold/external_id i klartekst. `KnowledgeSyncService`
+  sjekker denne før nytt canonical document opprettes (`report.suppressed`, ny felt). Bevist LIVE
+  (embedded Postgres): purge → resync (fil fortsatt på disk) → `created=0, suppressed=1`.
+- **Erasure receipt/ledger (§6):** kun identifiers/counts, ALDRI slettet innhold - bevist (§K/§L,
+  en plantet SENTINEL finnes aldri i `erasure_requests`/`erasure_fingerprints`).
+- **Policy/risk (§7/§8):** gjenbruker EKSISTERENDE `PolicyGateway`/sovereign/approval/nonce-replay
+  uendret - ingen ny auth-modell. Owner sovereign kjører uten approval; delegert identitet nektes
+  uten signert approval, tillates med gyldig Ed25519-signatur (bevist, begge veier).
+- **§9-unntak (dokumentert):** IKKE via `ToolGateway`s generiske D-pipeline (ville lagret en KOPI av
+  innholdet i et `before_state`-recovery-snapshot - undergraver selve erasure). `executeErasure()`
+  kaller `PolicyGateway.authorize()` direkte og skriver sin egen trygge ledger-rad.
+- **Backup/restore-kontrakt (§10):** `TIER1_TABLES` (watchdog) utvidet med knowledge-tabellene (reell
+  pre-eksisterende gap) + erasure-ledgeren. Ny `reapplyErasuresAfterRestore()` - re-fjerner et
+  restorert dokument som matcher ledgeren, idempotent (bevist).
+- **Observability (§11):** events/audit_events (strukturelt blokkert), Langfuse/lokal trace-fil
+  (ingen purge-integrasjon) dokumentert som kjente, IKKE skjulte gap.
+- **Retrieval verification (§12):** FTS/vector/hybrid/memory-retrieval alle bevist 0 treff etter
+  purge (§E/§F/§G, live-script §8-§11).
+- **Q-21 uendret/ikke-regresert (§13):** kjører via `jarvis_runtime` (NOSUPERUSER/NOBYPASSRLS) i
+  ALLE tester og i live-scriptet (§O-testen leser `pg_roles` direkte og bekrefter dette per kjøring).
+- **Live host-akseptanse-script:** `modules/erasure/scripts/q20-erasure-live.ts` - alle 21 trinn fra
+  byggeordren, kjørt AV DENNE ØKTEN mot en ekte (embedded, ikke mocket) Postgres:
+  `hard_fail=false`, alle `q20_*`-felt PASS (ved bygging - senere host-bevist reelt, se under).
+- 14 nye tester (`modules/erasure/test/erasure-service.test.ts` 13 + `modules/watchdog/test/
+  erasure-restore-contract.test.ts` 1), full suite grønn, lint/typecheck/gitleaks rene.
+- **STATUS ved bygging: FIXED_SUITE / READY_FOR_HOST_VERIFY. OPPDATERT: VERIFIED/CLOSED (D-40) -
+  se "Q-20 FINAL CLOSURE" under.** Teknisk erasure-foundation - IKKE en juridisk GDPR-sertifisering.
+
+## Q-20 HOST RECOVERY #1 (samme dag, 2026-08-16) — workspace-bootstrap-feil
+Tobias sin første kjøring feilet FØR noe Q-20-innhold ble testet: `ERR_MODULE_NOT_FOUND:
+Cannot find package '@jarvis/core'`. Root cause: branchen la til en NY pnpm-workspace-pakke
+(`modules/erasure`) - hosten sin `node_modules` var aldri bootstrappet for den (host-bootstrap-feil,
+IKKE et Q-20-funn). Node 24 (host) bekreftet IKKE root cause (`engines: >=22` er oppfylt).
+**Fikset** med ny ett-kommando-orkestrator `modules/core/scripts/q20-host-run.ts` (kun Node-
+innebygde moduler på toppnivå - kan kjøre FØR `pnpm install`): bootstrapper workspacet
+(`pnpm install --frozen-lockfile`), verifiserer resolvering (`modules/erasure/scripts/
+verify-workspace.ts`), sikrer ferske Docker-images, kjører migrasjonene (inkl. `018_erasure.sql`)
+via ADMIN-rollen (uendret Q-21-splitt), restarter api/worker, og kjører til slutt selve
+`q20-erasure-live.ts`. Feilen reprodusert og fiksen bekreftet i byggemiljøet (node_modules fjernet
+→ samme feil → `pnpm install` reparerer). 18 nye wiring-tester
+(`modules/core/test/q20-host-run-wiring.test.ts`). Kommando uendret siden:
+`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`. Full evidens:
+docs/RUNTIME_GATES.md.
+
+## Q-20 HOST RECOVERY #2 (samme dag, 2026-08-16) — Windows pnpm-prosessoppløsning
+Samme runner feilet deretter på selve `pnpm install --frozen-lockfile`-steget:
+`spawnSync pnpm ENOENT` - til tross for at `pnpm` fungerer fint fra Tobias sin egen PowerShell.
+Root cause: Node sin `execFileSync`/`spawnSync` uten shell-involvering gjør ikke Windows sin PATHEXT-
+baserte utvidelsesoppløsning (`pnpm.cmd`). **Fikset (runde 1)** med ny, avhengighetsfri
+`modules/core/scripts/lib/package-manager-resolve.ts` - deterministisk oppløsning: `pnpm`/`pnpm.cmd`
+direkte på PATH → ellers `corepack`/`corepack.cmd` med EKSPLISITT pinnet versjon (`pnpm@9.15.9` fra
+`package.json`, ALDRI `corepack enable`) → ellers fail-closed med tydelig diagnostikk. 11 nye
+enhetstester. **Bekreftet FOR REAL i byggemiljøet** (ikke bare unit-testet): hele bootstrap-kjeden
+kjørt direkte som ekte prosess - `package_manager_resolution=PASS
+package_manager_driver=pnpm package_manager_version=9.15.9`, `install_frozen_lockfile=PASS`,
+`erasure_workspace_dependencies=PASS`. Ett-kommando-kontrakten uendret. Full evidens:
+docs/RUNTIME_GATES.md.
+
+## Q-20 HOST RECOVERY #3 (samme dag, 2026-08-16) — DEP0190-opprydding
+Host-output fra runde 2 sin fiks endte med Node sin `DEP0190`-advarsel (`shell: true` kombinert med
+et args-array er en kjent injeksjonsrisiko - Node må selv gjette hvordan argumentene skal escapes).
+**Fikset PERMANENT FØR merge:** `shell` er nå fjernet som alternativ overalt i
+`q20-host-run.ts`/`package-manager-resolve.ts`. Et Windows `.cmd`-shim kjøres i stedet via en
+eksplisitt, ikke-shell cmd.exe-barneprosess med et internt kontrollert argv (`buildSpawnInvocation()`,
+`/d /s /c <sti> <args>` - samme mønster som `cross-spawn`-biblioteket bruker for nøyaktig dette
+Windows-problemet). Native `.exe`/unix-binærer kjøres fortsatt direkte (ingen unødvendig indirection).
+Ny regresjonstest bekrefter `shell: true` aldri finnes i kildekoden igjen. 16 nye/oppdaterte
+enhetstester (34 totalt i `package-manager-resolve.test.ts`). Ingen erasure-/migrasjons-/DB-rolle-
+/retrieval-/policy-logikk endret - kun prosess-spawning-hygiene.
+
+## Q-20 FINAL CLOSURE (2026-08-16, samme dag) — HOST VERIFIED
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/q20-host-run.ts` på sin
+faktiske Windows/Docker-host - GRØNT resultat, run_id `eaabe2b1`.** Bootstrap
+(`package_manager_resolution=PASS package_manager_driver=pnpm.cmd`), migrasjon 018 anvendt via
+admin-rollen, Q-21 uendret (`q21_runtime_role_safe=PASS`), og ALLE `q20_*`-felt PASS
+(`hard_fail=false`) - hard delete av original+avledet innhold, FTS/vector/hybrid/memory-retrieval=0
+etter purge, resurrection-suppresjon bevist (`created=0`/`suppressed=1`), idempotens bevist,
+tenant/space-isolasjon urørt, trygg kvittering, sentinel-scan uten funn. **STATUS: Q-20 =
+VERIFIED/CLOSED → D-40.** Full evidens: docs/RUNTIME_GATES.md, docs/DECISIONS_AND_ASSUMPTIONS.md.
+PR #4 merges til `main`.
+
 ## Blokkeringer
-Ingen blokkering for UA-2 P0 eller Q-21 lenger - begge VERIFIED/CLOSED (host-bevist,
-run_id `778bb87d`), PR #3 merges til `main`. Manglende provider-nøkler er eneste gap for LIVE
-multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
-ikke-blokkerende. Q-20 (kun myk sletting i knowledge-ingestion, ingen GDPR-purge-vei) er åpen,
-ikke-blokkerende for P0, vurderes før UA-2 P1.
+Ingen blokkering for Q-20 lenger - VERIFIED/CLOSED (host-bevist, run_id `eaabe2b1`), PR #4 merges til
+`main`. UA-2 P0 og Q-21 har heller ingen egne blokkeringer (begge VERIFIED/CLOSED, allerede merget).
+Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
 
 ## Neste oppgave
-UA-2 P0 er VERIFIED/COMPLETE og merget. Anbefalt neste UA-2-del: **UA-2 P1** (flere
+Q-20 er VERIFIED/CLOSED og merget til `main`. Anbefalt neste UA-2-del: **UA-2 P1** (flere
 kunnskapskilder - Obsidian, Pieces, Google Drive, e-post, møtetranskripsjon, OCR - se
-IMPLEMENTATION_PLAN for eksakt P1-scope) og/eller Q-20 (GDPR hard-delete/purge-vei) som en
-forutsetning før P1 øker persondata-eksponeringen. Venter på Tobias sin eksplisitte
-fase-godkjenning før implementering starter (faseporten gjelder, CLAUDE.md-regel 10). Øvrige
-kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple,
-HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
+IMPLEMENTATION_PLAN for eksakt P1-scope). Venter på Tobias sin eksplisitte fase-godkjenning før
+implementering starter (faseporten gjelder, CLAUDE.md-regel 10) - **IKKE startet i denne runden.**
+Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03),
+D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.

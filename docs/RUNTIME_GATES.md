@@ -17,8 +17,255 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
 | Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
 | UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
+| Q-20 Data erasure foundation | **PRODUCTION_VERIFIED (2026-08-16)** | Host-bevist på ekte Windows/Docker-host (run_id `eaabe2b1`): alle `q20_*`-felt PASS, `hard_fail=false`, `q21_runtime_role_safe=PASS`. Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se D-40 og eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
+
+## Q-20 FINAL CLOSURE: HOST VERIFIED (2026-08-16, run_id `eaabe2b1`)
+
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/q20-host-run.ts` på sin
+faktiske Windows/Docker-host - GRØNT resultat, hele kjeden i én kommando.**
+
+### Bootstrap
+
+```
+package_manager_resolution=PASS
+package_manager_driver=pnpm.cmd
+package_manager_version=9.15.9
+
+install_frozen_lockfile=PASS
+workspace_install=PASS
+erasure_workspace_dependencies=PASS
+```
+
+### Ferske images + migrasjon (Q-21 uendret)
+
+`migrate`/`api`/`worker` bygget fra gjeldende checkout. `migrate_effective_db_user=postgres`,
+migrasjonene (inkl. `018_erasure.sql`) anvendt. `q21_runtime_role_safe=PASS`,
+`runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`, `runtime_role_bypassrls=false` -
+Q-21 sin admin/runtime-splitt fortsatt intakt, ikke regresert av Q-20.
+
+### Q-20-akseptanse (alle 21 trinn fra byggeordren)
+
+```
+q20_preview=PASS            q20_hard_delete=PASS        q20_derived_delete=PASS
+q20_fts_erasure=PASS        q20_vector_erasure=PASS     q20_hybrid_erasure=PASS
+q20_memory_erasure=PASS     q20_no_resurrection=PASS    q20_idempotency=PASS
+q20_tenant_isolation=PASS   q20_space_isolation=PASS    q20_receipt_safe=PASS
+q20_sentinel_scan=PASS
+
+run_id=eaabe2b1
+hard_fail=false
+```
+
+Resync-bevis (resurrection protection): `created=0`, `suppressed=1` - det slettede dokumentet kom
+IKKE tilbake ved neste source-sync, selv om kildefilen fortsatt fantes på disk.
+
+Retrieval etter purge (alle fire lag separat bevist 0 treff): `fts_hits=0`, `vector_hits=0`,
+`hybrid_hits=0`, `memory_hits=0`.
+
+Bevist på EKTE (ikke embedded) Postgres/pgvector, ekte Docker, ekte Windows-host - dette er den
+FAKTISKE produksjonsmiljø-verifikasjonen, ikke bare suite-/byggemiljø-bevis.
+
+### Reisen til dette punktet (tre host-recovery-runder, samme dag - se seksjonene under for full detalj)
+
+1. **Runde 1 (workspace-bootstrap):** ny `modules/erasure`-workspace-pakke aldri bootstrappet på
+   hosten (`ERR_MODULE_NOT_FOUND: @jarvis/core`) - fikset med ett-kommando-runner
+   `modules/core/scripts/q20-host-run.ts`.
+2. **Runde 2 (Windows pnpm-prosessoppløsning):** `spawnSync pnpm ENOENT` - Node gjør ikke Windows sin
+   PATHEXT-oppløsning uten shell-involvering - fikset med eksplisitt `pnpm`/`pnpm.cmd`→
+   `corepack`-oppløsning (`lib/package-manager-resolve.ts`).
+3. **Runde 3 (DEP0190-opprydding, FØR merge):** runde 2 sin fiks brukte `shell: true` + args-array,
+   som Node flagger som en kjent injeksjonsrisiko (`DEP0190`). Erstattet PERMANENT med en eksplisitt,
+   ikke-shell cmd.exe-barneprosess (`buildSpawnInvocation()` - `/d /s /c <sti> <args>`, samme mønster
+   som `cross-spawn`-biblioteket bruker for nøyaktig dette Windows-problemet).
+
+**Ingen av de tre rundene endret erasure-, migrasjons-, DB-rolle-, retrieval-, suppresjons- eller
+policy-logikken** - kun host-bootstrap/prosess-spawning-hygiene. Q-20 sin featuresemantikk var allerede
+uendret gjennom alle tre rundene; selve host-akseptansen (over) er det som beviser den reelt.
+
+### Fortsatt eksplisitt dokumenterte, IKKE purgede stores (uendret fra suite-lukkingen)
+
+`events`/`audit_events`-payload (strukturelt append-only-blokkert, gjelder alle roller inkl.
+superbruker); `tasks`/`tool_executions`-innhold (ingen stabil kobling til en scope-id); Langfuse/lokal
+trace-fil (ingen purge-integrasjon bygget); `person`-scope dekker ikke knowledge-dokumenter (mangler
+person-kolonne i skjema). Se docs/DATA_ERASURE.md §2/§10 for full begrunnelse.
+
+**Status: Q-20 = VERIFIED/CLOSED (D-40).** Teknisk data-erasure-foundation - IKKE en juridisk
+GDPR-compliance-sertifisering. PR #4 klargjøres for merge til `main`.
+
+## Q-20 HOST RECOVERY #2: WINDOWS PNPM-PROSESSOPPLØSNING (2026-08-16, samme dag)
+
+**Host-feil:** Tobias kjørte den nye ett-kommando-runneren fra host-runde 1
+(`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`). Runneren startet korrekt
+(`repo_root=PASS`, `host_node_version=v24.11.1`), men feilet umiddelbart på selve
+`pnpm install --frozen-lockfile`-steget med `spawnSync pnpm ENOENT` - til tross for at `pnpm` fungerer
+helt fint fra Tobias sin egen PowerShell.
+
+**Root cause:** Node sin `child_process.execFileSync`/`spawnSync` UTEN `shell: true` gjør IKKE Windows
+sin PATHEXT-baserte utvidelsesoppløsning (`.COM`/`.EXE`/`.BAT`/`.CMD`) - kun en ekte shell (cmd.exe/
+PowerShell) gjør det. `pnpm` er normalt installert som `pnpm.cmd` (eller et Corepack-shim) på Windows -
+et rått `execFileSync("pnpm", ...)`-kall feiler derfor alltid med `ENOENT`, uavhengig av at `pnpm`
+fungerer interaktivt. Dette er en Windows-spesifikk prosess-spawning-detalj, IKKE et Q-20-funn - ingen
+erasure-semantikk endret.
+
+**Fiks:** ny, ren, testbar `modules/core/scripts/lib/package-manager-resolve.ts` - INGEN imports (må
+virke FØR `pnpm install`), deterministisk oppløsningsrekkefølge: (1) finn `pnpm`/`pnpm.cmd` direkte på
+PATH (skanner hver PATHEXT-utvidelse på Windows), (2) ellers finn `corepack`/`corepack.cmd` på PATH og
+påkall med EKSPLISITT pinnet versjon fra `package.json` sitt `packageManager`-felt
+(`corepack pnpm@9.15.9 ...` - ALDRI `corepack enable`, som kan kreve forhøyede rettigheter), (3) ellers
+fail-closed med en tydelig, handlingsrettet feil. Den resolverte, filsystem-bekreftede stien kjøres med
+`shell: true` KUN fordi et `.cmd`-shim selv krever shell-tolkning for å kjøre i det hele tatt (Windows
+CreateProcess kan ikke starte batch-filer direkte) - aldri brukerstyrt/injiserbar input, kun en verifisert
+filsti + statiske argumenter. `pnpm`-versjonen og lockfilen røres IKKE (fortsatt `pnpm@9.15.9`,
+`--frozen-lockfile` uendret).
+
+**Bevist:**
+- 11 nye rene enhetstester (`modules/core/test/package-manager-resolve.test.ts`, §9.A-G i BO-en) -
+  Windows `.cmd`-oppløsning, Corepack-fallback m/pinnet versjon, fail-closed uten kjørbar fil (aldri en
+  instruksjon om `corepack enable`), pinnet versjon lest korrekt fra `package.json`.
+- 18 oppdaterte wiring-tester (`q20-host-run-wiring.test.ts`) - fortsatt grønne, bekrefter riktig
+  rekkefølge/idempotens/ingen secrets med den nye resolver-logikken innbakt.
+- **Kjørt FOR REAL i byggemiljøet** (ikke bare unit-testet): `node --experimental-transform-types
+  modules/core/scripts/q20-host-run.ts` kjørt direkte - `package_manager_resolution=PASS
+  package_manager_driver=pnpm package_manager_version=9.15.9`, `install_frozen_lockfile=PASS`,
+  `erasure_workspace_dependencies=PASS`, deretter korrekt (forventet) fail-closed på manglende `.env` i
+  byggemiljøet (som ikke har Q-21 sin `.env`) - beviser hele bootstrap-kjeden fungerer ende-til-ende
+  FØR Docker-stegene, uten regresjon fra host-runde 1.
+
+**Ett-kommando-kontrakten uendret:**
+```
+node --experimental-transform-types modules/core/scripts/q20-host-run.ts
+```
+Ingen manuell `pnpm install`, ingen PATH-redigering, ingen SQL, ingen Docker-kommandoer for Tobias.
+
+**Status ved denne runden: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY** (denne runden løste kun den
+Windows-spesifikke prosess-spawning-feilen som hindret bootstrap-steget fra å fullføre).
+**OPPDATERT: en påfølgende DEP0190-opprydding (runde 3) + faktisk host-akseptanse fulgte -
+Q-20 er nå VERIFIED/CLOSED (D-40, run_id `eaabe2b1`), se "Q-20 FINAL CLOSURE"-seksjonen øverst i
+dette dokumentet.**
+
+## Q-20 HOST RECOVERY #1: WORKSPACE BOOTSTRAP-FEIL (2026-08-16, samme dag)
+
+**Host-feil:** Tobias kjørte den instruerte kommandoen
+(`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts`)
+og fikk umiddelbart `Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@jarvis/core' imported from
+modules/erasure/scripts/q20-erasure-live.ts` - FØR noe Q-20-innhold i det hele tatt ble testet.
+Host-Node: v24.11.1.
+
+**Root cause (ikke gjettet, bekreftet ved reproduksjon i byggemiljøet):** denne branchen la til en HELT
+NY pnpm-workspace-pakke (`modules/erasure`). Hosten sin `node_modules` ble sist bootstrappet FØR den
+pakken eksisterte - `pnpm-lock.yaml` (fra git) kjenner den korrekt, men de lokale
+`node_modules/@jarvis/*`-symlinkene for `modules/erasure` var aldri opprettet. **Dette er en
+host-bootstrap-feil, IKKE et Q-20-funn** - ingen erasure-semantikk er endret for å "fikse" dette.
+
+**Node 24-vurdering (§6 i BO-en):** IKKE root cause. `package.json` sitt `engines`-felt krever kun
+`>=22`, og `--experimental-transform-types` finnes fortsatt på Node 24 - host-Noden er kompatibel.
+Feilen var utelukkende workspace-bootstrap, ikke Node-versjon.
+
+**Fiks (bevarer ett-kommando-kontrakten):** ny `modules/core/scripts/q20-host-run.ts` - en
+ett-kommando-orkestrator som BEVISST kun bruker Node-innebygde moduler på toppnivå (`node:child_process`/
+`node:fs`/`node:path`) - må kunne kjøre FØR `pnpm install` har bootstrappet workspacet, som er selve
+poenget. Rekkefølge: (1) verifiser repo-rot, (2) `pnpm install --frozen-lockfile` (ALDRI oppdaterer
+pnpm-versjon eller lockfile), (3) `modules/erasure/scripts/verify-workspace.ts` (isolert, tydelig
+PASS/FAIL-diagnostikk - `erasure_workspace_dependencies=PASS`), (4) Postgres oppe, (5) bygg
+migrate/api/worker FERSKT fra gjeldende checkout (samme "always rebuild"-leksjon som Q-21 host-runde 3),
+(6) kjør migrate (anvender `018_erasure.sql` idempotent via ADMIN-rollen, uendret fra Q-21), (7) restart
+api/worker fra de ferske imagene (plukker opp EKSISTERENDE `.env` uendret - Q-21 sin runtime-rolle
+røres IKKE), (8) kjør `q20-erasure-live.ts` (som selv verifiserer Q-21-rollen på nytt, §1, FØR noe
+destruktivt forsøkes - ingen duplisert logikk). `.env` skrives/endres ALDRI av denne runneren.
+
+**Bevist i byggemiljøet:** feilen reprodusert eksakt (fjernet `modules/erasure/node_modules`, samme
+`ERR_MODULE_NOT_FOUND`), deretter bekreftet at `pnpm install` (standard, veletablert pnpm-semantikk for
+et nytt workspace-medlem) reparerer resolveringen - `verify-workspace.ts` går fra
+`erasure_workspace_dependencies=FAIL` til `PASS`. Docker-orkestreringsstegene er IKKE kjørt live i
+byggemiljøet (ingen Docker-daemon tilgjengelig der) - verifisert via 18 nye wiring-tester
+(`modules/core/test/q20-host-run-wiring.test.ts`, §7.A-I i BO-en: bootstrap-rekkefølge, frozen-lockfile,
+migrasjon-018-rekkefølge, ferskt image FØR migrate, Q-21 uendret/`.env` aldri skrevet, idempotens (ingen
+destruktive flagg), ingen secrets logget, tydelig feilmelding FØR bootstrap, og at runneren faktisk når
+frem til `q20-erasure-live.ts`).
+
+**Eksakt ÉN kommando for Tobias (erstatter forrige runde sin kommando):**
+```
+node --experimental-transform-types modules/core/scripts/q20-host-run.ts
+```
+
+**Status ved denne runden: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY** (denne runden løste kun
+bootstrap-blokkeringen som hindret akseptansen fra å starte i det hele tatt).
+**OPPDATERT: Q-20 er nå VERIFIED/CLOSED (D-40, run_id `eaabe2b1`), se "Q-20 FINAL CLOSURE"-seksjonen
+øverst i dette dokumentet.**
+
+## Q-20: DATA ERASURE FOUNDATION - SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå)
+
+**Teknisk data-erasure-foundation, IKKE en juridisk GDPR-compliance-sertifisering.** Bygget for å redusere
+persondata-eksponeringsrisikoen FØR UA-2 P1 (flere kunnskapskilder) øker mengden ingestert persondata.
+Full arkitektur/rasjonale: [DATA_ERASURE.md](DATA_ERASURE.md).
+
+**Sentral, typed `ErasureService`** (`modules/erasure/src/erasure-service.ts`) - `previewErasure`/
+`executeErasure`/`verifyErasure`. Scope-uttrykk (`modules/erasure/src/scope.ts`): `tenant`/`person`/
+`memory_space`/`knowledge_source`/`knowledge_document`/`conversation`, `tenant_id` ALLTID eksplisitt -
+ingen cross-tenant purge uttrykkbart. Hard-delete dekker (FK-trygg rekkefølge, én transaksjon,
+fail-closed - hele transaksjonen rulles tilbake ved enhver feil, ALDRI delvis sletting):
+`knowledge_documents`/`knowledge_embeddings`, `memory_items` + alt avledet (`memory_versions`/
+`embeddings`/`entities`/`relations`/`memory_item_entities`/`summaries`/`decisions`/`commitments`/
+`deadlines`), `messages`/`sessions`, `artifacts` (tenant-scope). Migrasjon `018_erasure.sql` ga
+`jarvis_app` et nytt, EKSPLISITT avgrenset `GRANT DELETE` (kun disse tabellene - systemet hadde
+ALDRI hatt en DELETE-rettighet noe sted før dette; `events`/`audit_events` forblir UTEN DELETE-grant
+i tillegg til å være append-only-trigger-blokkert for enhver rolle).
+
+**Resurrection protection (§5):** ny `erasure_fingerprints`-ledger (samme migrasjon) - lagrer KUN en
+irreversibel SHA-256-fingerprint av canonical identity (`tenant_id|source_type|source_instance_id|
+external_id`), ALDRI selve innholdet/external_id i klartekst. `KnowledgeSyncService.sync()`
+(`modules/knowledge/src/sync.ts`) sjekker denne FØR den oppretter et nytt canonical document - en
+matchende fingerprint gir `report.suppressed += 1`, ALDRI re-insert. Bevist LIVE (embedded Postgres,
+denne økten): purge → resync (samme fil fortsatt på disk) → `created=0, suppressed=1` → retriever
+finner ingenting.
+
+**Policy/D-klasse (§7/§8):** `executeErasure()` bygger et `ToolCall`
+(`{tool_id:"data-erasure", action:"purge", capability_class:"D"}`) og kaller EKSISTERENDE
+`PolicyGateway.authorize()` direkte - samme sovereign-/approval-/nonce-replay-mekanikk som alle andre
+D-handlinger, INGEN ny auth-modell. Bevist: owner sovereign kjører uten approval; delegert identitet
+nektes uten signert approval og tillates med en gyldig Ed25519-signert godkjenning (samme
+`approvalSigningBytes`/`verifyApproval` som resten av systemet).
+
+**§9-unntak (dokumentert, bevisst):** går IKKE via `ToolGateway.execute()` sin generiske D-pipeline -
+den ville lagret en KOPI av innholdet som skal slettes i et `before_state`-recovery-snapshot, som ville
+strukturelt UNDERGRAVD selve erasure. `executeErasure()` skriver i stedet sin egen trygge
+`erasure_requests`-ledger-rad (kun identifiers/counts - bevist i test at raden ALDRI inneholder en
+plantet SENTINEL-streng).
+
+**Backup/restore-kontrakt (§10):** `modules/watchdog/src/backup.ts` sin `TIER1_TABLES` utvidet med
+`knowledge_documents`/`knowledge_embeddings` (reell pre-eksisterende gap - manglet helt fra UA-2 P0) +
+`erasure_requests`/`erasure_fingerprints`. Ny `reapplyErasuresAfterRestore(adminPool)` - leser HELE
+fingerprint-ledgeren fra en restorert database og fjerner på nytt ethvert restorert knowledge-dokument
+som matcher, idempotent. Bevist (`modules/watchdog/test/erasure-restore-contract.test.ts`).
+
+**Kjent, dokumentert (ikke skjult) residual-gap** (se DATA_ERASURE.md §2/§10 for full begrunnelse):
+- `events`/`audit_events`-payload: strukturelt BLOKKERT (append-only-trigger gjelder alle roller).
+- `tasks`/`tool_executions`-innhold: ikke pålitelig adresserbart (ingen stabil kobling til en scope-id).
+- Langfuse/lokal trace-fil (`var/traces.jsonl`): ingen purge-integrasjon bygget.
+- `person`-scope dekker ikke knowledge-dokumenter (skjemaet mangler en person-/subject-kolonne der).
+
+**Tester:** `modules/erasure/test/erasure-service.test.ts` (13 tester: A-Q fra byggeordren + D-klasse-
+policy-integrasjon), `modules/watchdog/test/erasure-restore-contract.test.ts` (1 test) - alle grønne mot
+embedded Postgres. Live-scriptet `modules/erasure/scripts/q20-erasure-live.ts` implementerer alle 21
+akseptansetrinnene fra byggeordren og er selv kjørt end-to-end i denne økten mot en ekte (embedded, ikke
+mocket) Postgres-instans:
+
+```
+q20_preview=PASS            q20_hard_delete=PASS        q20_derived_delete=PASS
+q20_fts_erasure=PASS        q20_vector_erasure=PASS     q20_hybrid_erasure=PASS
+q20_memory_erasure=PASS     q20_no_resurrection=PASS    q20_idempotency=PASS
+q20_tenant_isolation=PASS   q20_space_isolation=PASS    q20_receipt_safe=PASS
+q20_sentinel_scan=PASS      q21_runtime_role_safe=PASS  hard_fail=false
+```
+
+**Dette var (ved bygging) embedded (byggemiljø) Postgres, IKKE Tobias sin faktiske Docker/pgvector-
+host.** Denne suite-kjøringen krevde deretter tre host-recovery-runder (workspace-bootstrap → Windows
+pnpm-prosessoppløsning → DEP0190-opprydding) før selve host-akseptansen kunne kjøres - se
+"Q-20 HOST RECOVERY #1/#2"-seksjonene. **OPPDATERT: Q-20 er nå VERIFIED/CLOSED (D-40, host-bevist,
+run_id `eaabe2b1`) - se "Q-20 FINAL CLOSURE"-seksjonen øverst i dette dokumentet for det faktiske
+host-beviset.**
 
 ## BO-02-tillegg (2026-08-13)
 - **Node 22-avvik løst:** `pnpm --use-node-version=22.14.0 vitest run` → **128/128 PASS** (re-kjørt);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction, type EmbeddingProvider } from "@jarvis/memory";
+import { isFingerprintErased } from "@jarvis/core";
 import type { KnowledgeRecord, KnowledgeSource } from "./source.ts";
 
 /** UA-2 P0 §9: idempotent sync-rapport - en ny kjøring uten kildeendringer skal være nær no-op. */
@@ -13,9 +14,13 @@ export interface SyncReport {
   tombstoned: number;
   reactivated: number;
   failed: number;
+  /** Q-20 §5: dokumenter som IKKE ble opprettet fordi de matcher en erasure-fingerprint (resurrection protection). */
+  suppressed: number;
 }
 
-const EMPTY_REPORT: SyncReport = { scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0 };
+const EMPTY_REPORT: SyncReport = {
+  scanned: 0, created: 0, updated: 0, unchanged: 0, tombstoned: 0, reactivated: 0, failed: 0, suppressed: 0
+};
 
 /**
  * UA-2 P0 §4-§6/§9: kilde-uavhengig sync-orkestrering. Kilden vet kun å liste
@@ -84,6 +89,15 @@ export class KnowledgeSyncService {
     const row = existing.rows[0] as { knowledge_document_id: string; content_hash: string; deleted: boolean } | undefined;
 
     if (!row) {
+      // Q-20 §5: dette external_id-et finnes ikke i knowledge_documents - enten
+      // fordi det er reelt nytt, ELLER fordi det tidligere ble hard-slettet
+      // (executeErasure fjerner selve raden, i motsetning til tombstoning).
+      // En matchende erasure-fingerprint betyr "slettet - skal IKKE gjenoppstå".
+      const erased = await isFingerprintErased(client, tenantId, record.source_type, record.source_instance_id, record.external_id);
+      if (erased) {
+        report.suppressed += 1;
+        return;
+      }
       // §4: ny canonical document.
       const id = `kd-${randomUUID()}`;
       await client.query(
