@@ -400,3 +400,109 @@ export function parseCandidateSelection(input: string, count: number): number | 
   if (!Number.isInteger(n) || n < 1 || n > count) return undefined;
   return n - 1;
 }
+
+/**
+ * HOST FIX #5 "CLASSIFY REAL DRIVE 403 + AUTO-GUIDE" (2026-08-16): Desktop-
+ * OAuth-bootstrappen er nå host-bevist FUNGERENDE (token-exchange lyktes,
+ * scope-strengen så riktig ut) - blokkeringen er en 403 FRA selve Drive
+ * `files/root`-proben. Google sin feilkropp-form (`{error:{code,message,
+ * status,errors[],details[]}}`) er STABIL og IDENTISK på tvers av samtlige
+ * Google Cloud/Workspace-API-er (bekreftet, ikke gjettet) - denne funksjonen
+ * klassifiserer den, uten å noensinne anta MER presisjon enn Google faktisk
+ * gir (se `WORKSPACE_ADMIN_POLICY`-kommentaren under for den ene bevisst
+ * beste-innsats-grenen).
+ */
+export type DriveProbeBlocker = "API_NOT_ENABLED" | "INSUFFICIENT_SCOPE" | "WORKSPACE_ADMIN_POLICY" | "RATE_LIMIT" | "AUTH_INVALID" | "UNKNOWN_PROVIDER_403";
+
+export interface DriveProbeErrorDetails {
+  httpStatus: number;
+  googleStatus: string | undefined;
+  googleReason: string | undefined;
+  serviceId: string | undefined;
+  safeMessage: string;
+  enableUrl: string | undefined;
+  blocker: DriveProbeBlocker;
+}
+
+interface GoogleApiErrorBody {
+  error?: {
+    code?: number;
+    message?: string;
+    status?: string;
+    errors?: Array<{ domain?: string; reason?: string; message?: string }>;
+    details?: Array<{ reason?: string; domain?: string; metadata?: Record<string, string> }>;
+  };
+}
+
+/**
+ * Google sin klassiske "API ikke aktivert"-feilmelding inneholder BOKSTAVELIG
+ * TALT en direkte "Enable"-lenke (`https://console.developers.google.com/
+ * apis/api/<api>.googleapis.com/overview?project=<nummer>`) - ekstremt
+ * velkjent, stabilt mønster på tvers av alle Google Cloud API-klientbiblioteker
+ * (ikke gjettet). Foretrekkes FREMFOR å konstruere URL-en selv, siden Google
+ * sin egen lenke garantert peker til RIKTIG prosjekt.
+ */
+const ENABLE_URL_PATTERN = /https:\/\/console\.developers\.google\.com\/apis\/api\/[^\s")]+/;
+
+/** §1 i ordren: klassifiserer et Drive API-feilsvar - HTTP-status + Google sin egen error.status/error.reason/error.details. Kaster ALDRI (ugyldig/ikke-JSON-kropp -> tomt objekt, fortsatt en trygg klassifisering). Meldingen SANERES (avkortet til 300 tegn) - Google sin feilkropp inneholder ALDRI access/refresh-token/client_secret (de sendes kun i forespørselen, aldri ekko-et tilbake i en feilrespons), men avkortingen er et ekstra sikkerhetsnett for trygg logging uansett. */
+export function classifyDriveProbeError(httpStatus: number, rawBody: string): DriveProbeErrorDetails {
+  let parsed: GoogleApiErrorBody = {};
+  try {
+    parsed = JSON.parse(rawBody) as GoogleApiErrorBody;
+  } catch {
+    // Ikke-JSON-kropp (sjeldent) - fortsett med tomt objekt, ALDRI kast.
+  }
+  const error = parsed.error;
+  const message = error?.message ?? "";
+  const googleStatus = error?.status;
+  const legacyReason = error?.errors?.[0]?.reason;
+  const detail = error?.details?.find((d) => typeof d.reason === "string");
+  const googleReason = detail?.reason ?? legacyReason;
+  const serviceId = detail?.metadata?.["service"];
+  const enableUrlMatch = ENABLE_URL_PATTERN.exec(message);
+  const safeMessage = message.slice(0, 300);
+
+  let blocker: DriveProbeBlocker;
+  if (googleReason === "SERVICE_DISABLED" || googleReason === "accessNotConfigured" || /has not been used in project/i.test(message)) {
+    blocker = "API_NOT_ENABLED";
+  } else if (googleReason === "insufficientPermissions" || /insufficient authentication scopes/i.test(message)) {
+    blocker = "INSUFFICIENT_SCOPE";
+  } else if (httpStatus === 429 || googleReason === "rateLimitExceeded" || googleReason === "userRateLimitExceeded") {
+    blocker = "RATE_LIMIT";
+  } else if (httpStatus === 401 || googleReason === "authError") {
+    blocker = "AUTH_INVALID";
+  } else if (httpStatus === 403 && googleStatus === "PERMISSION_DENIED") {
+    // §4 i ordren: BESTE-INNSATS, IKKE et Google-bekreftet unikt signal -
+    // Google gir INGEN mer presist maskinlesbart tegn for "Workspace-
+    // administrator har ikke tillatt denne appen/scopet" enn en generisk
+    // PERMISSION_DENIED på dette tidspunktet i flyten (selve samtykke-
+    // blokkeringen skjer normalt FØR token-exchange, ikke her) - dette er
+    // likevel den mest sannsynlige forklaringen for AKKURAT dette
+    // tidspunktet (token-exchange OG scope-streng begge allerede bekreftet
+    // riktige), og eksplisitt navngitt sådan i loggen orchestratoren skriver.
+    blocker = "WORKSPACE_ADMIN_POLICY";
+  } else {
+    blocker = "UNKNOWN_PROVIDER_403";
+  }
+
+  return { httpStatus, googleStatus, googleReason, serviceId, safeMessage, enableUrl: enableUrlMatch ? enableUrlMatch[0] : undefined, blocker };
+}
+
+/** Trygg, grep-bar diagnosetekst - ALDRI token/secret, kun de klassifiserte, ikke-sensitive feltene. */
+export function formatDriveProbeReport(details: DriveProbeErrorDetails): string {
+  return `google_drive_blocker=${details.blocker} http_status=${details.httpStatus} google_status=${details.googleStatus ?? "unknown"} google_reason=${details.googleReason ?? "unknown"} service=${details.serviceId ?? "unknown"}`;
+}
+
+/** §2 i ordren: fallback KUN hvis Google sin feilmelding IKKE inneholdt en direkte lenke (`enableUrl` i `DriveProbeErrorDetails`) - samme URL-mønster Google selv bruker, med prosjektnummer utledet fra OAuth-klienten når kjent. */
+export function buildDriveApiEnableUrl(projectNumber: string | undefined): string {
+  const base = "https://console.developers.google.com/apis/api/drive.googleapis.com/overview";
+  return projectNumber ? `${base}?project=${projectNumber}` : base;
+}
+
+/** §4 i ordren: Google Workspace Admin Console sin generelle "Security > API controls"-landingsside - IKKE et forsøk på å dype-lenke til en spesifikk "trust this app"-underside (varierer med Workspace-utgave/UI-versjon - ingen gjetning av en uverifisert dypere sti). */
+export const GOOGLE_ADMIN_API_CONTROLS_URL = "https://admin.google.com/ac/owl";
+
+/** Kun de to blocker-typene et ETT klikk andre steder faktisk kan løse MENS denne prosessen venter - alle andre (feil scope, ugyldig token, rate-limit, ukjent) krever en helt ny flyt/en annen fiks, ikke gjentatt polling av AKKURAT samme kall. */
+export function isRecoverableDriveProbeBlocker(blocker: DriveProbeBlocker): boolean {
+  return blocker === "API_NOT_ENABLED" || blocker === "WORKSPACE_ADMIN_POLICY";
+}

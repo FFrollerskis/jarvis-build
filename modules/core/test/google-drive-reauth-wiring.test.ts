@@ -412,3 +412,97 @@ describe("L (host-fix #4): ett-kommando-kontrakten er UENDRET - ingen restart, i
     expect(chainIdx).toBeGreaterThan(passLogIdx);
   });
 });
+
+/**
+ * GOOGLE DRIVE REAUTH HOST FIX #5 "CLASSIFY REAL DRIVE 403 + AUTO-GUIDE"
+ * (2026-08-16): Tobias sitt faktiske host-funn beviste at Desktop-OAuth-
+ * bootstrappen (HOST FIX #4) nå fungerer HELT gjennom token-exchange, men at
+ * flyten deretter feiler på en EKTE Google Drive-API-403 ved selve
+ * metadata-probe-kallet. Denne seksjonen beviser at feilen klassifiseres
+ * TRYGT (driveMetadataProbe()/classifyDriveProbeError()), at en
+ * GJENOPPRETTBAR blokkering (API_NOT_ENABLED/WORKSPACE_ADMIN_POLICY) fører
+ * til automatisk riktig-side-åpning + samme-prosess-retry (IKKE en
+ * umiddelbar krasj), at INGEN credential persisteres mens blokkeringen
+ * fortsatt er uløst, og at DEN SAMME bevist-Desktop-klienten (aldri en
+ * fallback/nedgradert klient) driver hele probe-/retry-flyten.
+ */
+describe("B (host-fix #5): riktig-prosjekt Drive-API-enable-siden åpnes automatisk - Google sin egen innebygde enable-URL foretrekkes, buildDriveApiEnableUrl() KUN som fallback", () => {
+  it("retryDriveProbeUntilRecovered() sin API_NOT_ENABLED-gren bruker initial.enableUrl FØRST, deriveProjectNumberFromClientId(clientId) KUN som fallback - aldri en gjettet/tom URL", () => {
+    const fnStart = indexOfAll("async function retryDriveProbeUntilRecovered(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("recoveryUrl = initial.enableUrl ?? buildDriveApiEnableUrl(deriveProjectNumberFromClientId(clientId));");
+  });
+  it("openBrowser() kalles med den utledede recoveryUrl-en, ikke en hardkodet/manuelt oppgitt streng", () => {
+    const fnStart = indexOfAll("async function retryDriveProbeUntilRecovered(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("openBrowser(recoveryUrl);");
+  });
+});
+
+describe("C (host-fix #5): samme-prosess automatisk retry etter guiding - ingen restart, ingen andre kommando fra Tobias", () => {
+  it("retryDriveProbeUntilRecovered() venter/prøver på nytt i en while-løkke INNI SAMME funksjonskall - ingen execFileSync av seg selv/en ny prosess", () => {
+    const fnStart = indexOfAll("async function retryDriveProbeUntilRecovered(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("while (Date.now() < deadlineMs) {");
+    expect(fnBody).toContain("await sleep(DRIVE_PROBE_RETRY_INTERVAL_MS);");
+    expect(fnBody).toContain("await driveMetadataProbe(currentAccessToken);");
+    expect(fnBody).not.toMatch(/execFileSync\(/);
+  });
+  it("Tobias informeres eksplisitt om at IKKE noen ny kommando er nødvendig ('SAMME prosessen')", () => {
+    const fnStart = indexOfAll("async function retryDriveProbeUntilRecovered(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).toContain("SAMME prosessen");
+  });
+  it("en ikke-gjenopprettbar blokkering (isRecoverableDriveProbeBlocker() === false) kaster UMIDDELBART - retry forsøkes ALDRI for en blokkeringstype scriptet ikke kan løse", () => {
+    const fnStart = indexOfAll("async function retryDriveProbeUntilRecovered(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart + 1));
+    const guardIdx = fnBody.indexOf("if (!isRecoverableDriveProbeBlocker(initial.blocker)) {");
+    const openBrowserIdx = fnBody.indexOf("openBrowser(recoveryUrl);");
+    expect(guardIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(openBrowserIdx);
+  });
+});
+
+describe("H (host-fix #5): ingen credential persisteres mens Drive-probe-blokkeringen fortsatt er uløst", () => {
+  it("driveMetadataProbe()-feilen og det påfølgende retryDriveProbeUntilRecovered()-kallet skjer STRUKTURELT FØR updates-blokken/backup-koden - samme fail-closed-plassering som scope-sjekken", () => {
+    const driveProbeCallIdx = indexOfAll("const driveProbe = await driveMetadataProbe(driveVerifiedAccessToken);");
+    const retryCallIdx = indexOfAll("const recovered = await retryDriveProbeUntilRecovered(");
+    const updatesIdx = indexOfAll("const updates: EnvValues = {");
+    const backupIdx = indexOfAll("copyFileSync(envPath, backupPath);");
+    expect(driveProbeCallIdx).toBeLessThan(retryCallIdx);
+    expect(retryCallIdx).toBeLessThan(updatesIdx);
+    expect(retryCallIdx).toBeLessThan(backupIdx);
+  });
+  it("retryDriveProbeUntilRecovered() sin timeout-gren kaster (aldri en stille tom-retur) - main() kan derfor ALDRI nå updates-blokken med en fortsatt uløst blokkering", () => {
+    expect(source).toContain("google_reauth=FAIL_DRIVE_PROBE_TIMEOUT");
+  });
+});
+
+describe("I (host-fix #5): en vellykket retry fortsetter automatisk i samme prosess - det ferske access-tokenet brukes videre i resten av main()", () => {
+  it("driveVerifiedAccessToken oppdateres FRA recovered.accessToken ETTER en vellykket retry, ikke det opprinnelige (muligens utløpte) exchange.access_token", () => {
+    const recoveredAssignIdx = indexOfAll("driveVerifiedAccessToken = recovered.accessToken;");
+    const detectEmailIdx = indexOfAll("const detectedEmail = await detectAccountEmail(driveVerifiedAccessToken);");
+    expect(recoveredAssignIdx).toBeLessThan(detectEmailIdx);
+    expect(codeOnly).not.toContain("detectAccountEmail(exchange.access_token)");
+  });
+  it("refreshAccessToken() fornyer KUN in-memory (ingen .env-skriving inni funksjonen) mens retryen venter - .env-skriving skjer utelukkende i main() sin egen atomiske updates-blokk", () => {
+    const fnStart = indexOfAll("async function refreshAccessToken(");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
+    expect(fnBody).not.toContain("writeFileSync");
+    expect(fnBody).not.toContain("envPath");
+  });
+});
+
+describe("J (host-fix #5): den allerede BEVISTE Desktop-klienten forblir den ENESTE brukt gjennom hele Drive-probe-/retry-flyten - ingen fallback/nedgradert scope", () => {
+  it("retryDriveProbeUntilRecovered() kalles med client.clientId/client.clientSecret (den samme bevist-Desktop-klienten) - ikke values[...] direkte", () => {
+    const callIdx = indexOfAll("const recovered = await retryDriveProbeUntilRecovered(");
+    const callBlock = source.slice(callIdx, source.indexOf(");", callIdx) + 2);
+    expect(callBlock).toContain("client.clientId");
+    expect(callBlock).toContain("client.clientSecret");
+    expect(callBlock).not.toMatch(/values\["JARVIS_GOOGLE_CLIENT_(ID|SECRET)"\]/);
+  });
+  it("ingen scope-nedgradering finnes NOE STED i fila (drive.file/drive.readonly) - D-41 krever full owner-kapabilitet, aldri en redusert fallback-scope", () => {
+    expect(codeOnly).not.toMatch(/drive\.file\b/);
+    expect(codeOnly).not.toMatch(/drive\.readonly\b/);
+  });
+});

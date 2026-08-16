@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  GOOGLE_ADMIN_API_CONTROLS_URL,
   MalformedAuthorizationUrlError,
   MalformedClientSecretJsonError,
   MissingClientCredentialsError,
@@ -7,14 +8,18 @@ import {
   WrongOAuthClientTypeError,
   buildAuthorizationUrl,
   buildCredentialsConsoleUrl,
+  buildDriveApiEnableUrl,
   buildRedirectUri,
   classifyAccountConsistency,
   classifyDiscoveryResult,
+  classifyDriveProbeError,
   decideRefreshToken,
   deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
   formatCandidateSelectionPrompt,
+  formatDriveProbeReport,
   hasAllRequiredScopes,
+  isRecoverableDriveProbeBlocker,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
@@ -383,5 +388,107 @@ describe("D/E/F (host-fix #3): en oppdaget kandidatfil valideres FORTSATT med de
   });
   it("F: en søppel/ugyldig JSON blant kandidatene avvises EKSPLISITT (samme MalformedClientSecretJsonError som før)", () => {
     expect(() => parseClientSecretJson("{ ikke gyldig")).toThrow(MalformedClientSecretJsonError);
+  });
+});
+
+/**
+ * GOOGLE DRIVE REAUTH HOST FIX #5 "CLASSIFY REAL DRIVE 403 + AUTO-GUIDE"
+ * (2026-08-16): Desktop-OAuth-bootstrappen er nå host-bevist FUNGERENDE -
+ * token-exchange lyktes, scope-strengen så riktig ut, men selve Drive
+ * `files/root`-proben feilet med en 403. Disse testene dekker den rene
+ * klassifiseringslogikken - eksempel-feilkroppene under er Google sin
+ * FAKTISKE, velkjente, stabile feilform (ikke gjettet).
+ */
+describe("classifyDriveProbeError (§9 A/D/E/F/K i ordren)", () => {
+  it("A: Google sin klassiske 'API ikke aktivert'-feilkropp klassifiseres som API_NOT_ENABLED, og enableUrl trekkes DIREKTE ut av Google sin egen melding", () => {
+    const body = JSON.stringify({
+      error: {
+        code: 403,
+        message:
+          "Google Drive API has not been used in project 123456789012 before or it is disabled. Enable it by visiting " +
+          "https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=123456789012 then retry.",
+        errors: [{ domain: "usageLimits", reason: "accessNotConfigured", message: "Google Drive API has not been used..." }],
+        status: "PERMISSION_DENIED"
+      }
+    });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.blocker).toBe("API_NOT_ENABLED");
+    expect(result.enableUrl).toBe("https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=123456789012");
+    expect(result.googleReason).toBe("accessNotConfigured");
+  });
+  it("A (nyere feilform): SERVICE_DISABLED i error.details[].reason klassifiseres OGSÅ som API_NOT_ENABLED", () => {
+    const body = JSON.stringify({
+      error: { code: 403, message: "Drive API disabled", status: "PERMISSION_DENIED", details: [{ reason: "SERVICE_DISABLED", domain: "googleapis.com", metadata: { service: "drive.googleapis.com" } }] }
+    });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.blocker).toBe("API_NOT_ENABLED");
+    expect(result.serviceId).toBe("drive.googleapis.com");
+  });
+  it("E: 'insufficient authentication scopes' klassifiseres som INSUFFICIENT_SCOPE - IKKE forvekslet med API_NOT_ENABLED", () => {
+    const body = JSON.stringify({ error: { code: 403, message: "Request had insufficient authentication scopes.", status: "PERMISSION_DENIED" } });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.blocker).toBe("INSUFFICIENT_SCOPE");
+  });
+  it("rateLimitExceeded (429) klassifiseres som RATE_LIMIT", () => {
+    const body = JSON.stringify({ error: { code: 429, message: "User Rate Limit Exceeded", errors: [{ reason: "userRateLimitExceeded" }] } });
+    const result = classifyDriveProbeError(429, body);
+    expect(result.blocker).toBe("RATE_LIMIT");
+  });
+  it("401 Invalid Credentials klassifiseres som AUTH_INVALID", () => {
+    const body = JSON.stringify({ error: { code: 401, message: "Invalid Credentials" } });
+    const result = classifyDriveProbeError(401, body);
+    expect(result.blocker).toBe("AUTH_INVALID");
+  });
+  it("D: en generisk 403 PERMISSION_DENIED UTEN et mer spesifikt reason-felt klassifiseres som WORKSPACE_ADMIN_POLICY (§4 sin beste-innsats-gren)", () => {
+    const body = JSON.stringify({ error: { code: 403, message: "The caller does not have permission", status: "PERMISSION_DENIED" } });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.blocker).toBe("WORKSPACE_ADMIN_POLICY");
+  });
+  it("F: en 403 som IKKE matcher NOE kjent mønster (ingen status/reason gjenkjent) klassifiseres som UNKNOWN_PROVIDER_403 - ALDRI feilaktig kalt API_NOT_ENABLED", () => {
+    const body = JSON.stringify({ error: { code: 403, message: "Something else entirely", status: "FAILED_PRECONDITION" } });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.blocker).toBe("UNKNOWN_PROVIDER_403");
+  });
+  it("en tom/ikke-JSON kropp kaster ALDRI - klassifiseres trygt som UNKNOWN_PROVIDER_403", () => {
+    expect(() => classifyDriveProbeError(403, "ikke json i det hele tatt")).not.toThrow();
+    expect(classifyDriveProbeError(403, "ikke json i det hele tatt").blocker).toBe("UNKNOWN_PROVIDER_403");
+  });
+  it("G: safeMessage avkortes til maks 300 tegn - ingen ubegrenset provider-tekst logges videre", () => {
+    const longMessage = "x".repeat(5000);
+    const body = JSON.stringify({ error: { code: 403, message: longMessage, status: "PERMISSION_DENIED" } });
+    const result = classifyDriveProbeError(403, body);
+    expect(result.safeMessage.length).toBeLessThanOrEqual(300);
+  });
+  it("G: klassifiseringen inneholder ALDRI et token/secret-felt i det hele tatt (kun httpStatus/googleStatus/googleReason/serviceId/safeMessage/enableUrl/blocker)", () => {
+    const body = JSON.stringify({ error: { code: 403, message: "irrelevant", status: "PERMISSION_DENIED" } });
+    const result = classifyDriveProbeError(403, body);
+    expect(Object.keys(result).sort()).toEqual(["blocker", "enableUrl", "googleReason", "googleStatus", "httpStatus", "safeMessage", "serviceId"]);
+  });
+});
+
+describe("formatDriveProbeReport / isRecoverableDriveProbeBlocker (§9 K i ordren)", () => {
+  it("formatDriveProbeReport() gir en trygg, grep-bar linje - ALDRI en rå feilmelding fra Google direkte", () => {
+    const report = formatDriveProbeReport({ httpStatus: 403, googleStatus: "PERMISSION_DENIED", googleReason: "accessNotConfigured", serviceId: undefined, safeMessage: "irrelevant", enableUrl: undefined, blocker: "API_NOT_ENABLED" });
+    expect(report).toBe("google_drive_blocker=API_NOT_ENABLED http_status=403 google_status=PERMISSION_DENIED google_reason=accessNotConfigured service=unknown");
+  });
+  it("K: KUN API_NOT_ENABLED og WORKSPACE_ADMIN_POLICY regnes som gjenopprettbare mens prosessen venter - alle andre krever en helt annen fiks, ALDRI en repeterende retry på nøyaktig samme (uendrede) tilstand", () => {
+    expect(isRecoverableDriveProbeBlocker("API_NOT_ENABLED")).toBe(true);
+    expect(isRecoverableDriveProbeBlocker("WORKSPACE_ADMIN_POLICY")).toBe(true);
+    expect(isRecoverableDriveProbeBlocker("INSUFFICIENT_SCOPE")).toBe(false);
+    expect(isRecoverableDriveProbeBlocker("RATE_LIMIT")).toBe(false);
+    expect(isRecoverableDriveProbeBlocker("AUTH_INVALID")).toBe(false);
+    expect(isRecoverableDriveProbeBlocker("UNKNOWN_PROVIDER_403")).toBe(false);
+  });
+});
+
+describe("buildDriveApiEnableUrl / GOOGLE_ADMIN_API_CONTROLS_URL (§2/§4 i ordren) - direkte lenker, aldri en gjettet dypere sti", () => {
+  it("inkluderer prosjektnummeret som query-parameter når kjent (samme URL-mønster Google selv bruker i sin egen feilmelding)", () => {
+    expect(buildDriveApiEnableUrl("123456789012")).toBe("https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=123456789012");
+  });
+  it("en generisk (uten prosjekt) URL brukes trygt når prosjektnummeret er ukjent", () => {
+    expect(buildDriveApiEnableUrl(undefined)).toBe("https://console.developers.google.com/apis/api/drive.googleapis.com/overview");
+  });
+  it("Admin Console-URL-en er den generelle API-controls-landingssiden - ikke en gjettet dypere 'trust this app'-sti", () => {
+    expect(GOOGLE_ADMIN_API_CONTROLS_URL).toBe("https://admin.google.com/ac/owl");
   });
 });

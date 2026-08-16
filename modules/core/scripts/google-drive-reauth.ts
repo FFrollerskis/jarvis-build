@@ -141,6 +141,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
   DEFAULT_REAUTH_PORT,
+  GOOGLE_ADMIN_API_CONTROLS_URL,
   GOOGLE_DRIVE_ROOT_METADATA_ENDPOINT,
   GOOGLE_OAUTH_TOKENINFO_ENDPOINT,
   GOOGLE_OAUTH_TOKEN_ENDPOINT,
@@ -149,14 +150,18 @@ import {
   REQUIRED_REAUTH_SCOPES,
   buildAuthorizationUrl,
   buildCredentialsConsoleUrl,
+  buildDriveApiEnableUrl,
   buildRedirectUri,
   classifyAccountConsistency,
   classifyDiscoveryResult,
+  classifyDriveProbeError,
   decideRefreshToken,
   deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
   formatCandidateSelectionPrompt,
+  formatDriveProbeReport,
   hasAllRequiredScopes,
+  isRecoverableDriveProbeBlocker,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
@@ -166,7 +171,8 @@ import {
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
   type CallbackResult,
-  type DownloadCandidateFile
+  type DownloadCandidateFile,
+  type DriveProbeErrorDetails
 } from "./lib/google-drive-reauth-lib.ts";
 import { buildUpdatedEnvLines, parseEnvValues, type EnvValues } from "./lib/q21-env-recovery.ts";
 
@@ -181,6 +187,14 @@ const DOWNLOADS_POLL_INTERVAL_MS = 2000;
 // første gang (opprette prosjekt/klient/samtykkeskjerm) tar typisk lenger
 // enn et enkelt OAuth-samtykke.
 const DESKTOP_SETUP_TIMEOUT_MS = 10 * 60_000;
+// HOST FIX #5 (2026-08-16): §3/§6 i ordren - hvor lenge/ofte
+// `retryDriveProbeUntilRecovered()` venter i SAMME prosess på at Tobias
+// gjør ÉN manuelt klikk (aktiver Drive API ELLER stol på "Jarvis Desktop"-
+// klienten i Admin Console) FØR det gis opp og en klassifisert feil kastes.
+// Kortere intervall enn Nedlastinger-pollingen over - dette er et rent
+// HTTP-kall (billig), ikke filsystem-polling.
+const DRIVE_PROBE_RETRY_TIMEOUT_MS = 10 * 60_000;
+const DRIVE_PROBE_RETRY_INTERVAL_MS = 5000;
 
 function log(msg: string): void {
   console.log(`[google-drive-reauth] ${msg}`);
@@ -378,10 +392,120 @@ async function exchangeCode(clientId: string, clientSecret: string, code: string
   return (await response.json()) as TokenResponse;
 }
 
-/** §7 i ordren: IKKE nok at exchange lyktes - en FAKTISK Drive-metadata-lesing med den nye access_token-en må også lykkes. */
-async function verifyDriveAccess(accessToken: string): Promise<boolean> {
+type DriveProbeResult = { ok: true } | { ok: false; details: DriveProbeErrorDetails };
+
+/**
+ * §7 i ordren: IKKE nok at exchange lyktes - en FAKTISK Drive-metadata-lesing
+ * med den nye access_token-en må også lykkes. HOST FIX #5 §1: feiler den,
+ * klassifiseres feilkroppen TRYGT (kun HTTP-status + Google sin egen
+ * feil-JSON går inn i `classifyDriveProbeError()` - selve access_token-en
+ * går ALDRI inn i klassifiseringen eller noen logglinje).
+ */
+async function driveMetadataProbe(accessToken: string): Promise<DriveProbeResult> {
   const response = await fetch(GOOGLE_DRIVE_ROOT_METADATA_ENDPOINT, { headers: { authorization: `Bearer ${accessToken}` } });
-  return response.ok;
+  if (response.ok) return { ok: true };
+  const rawBody = await response.text().catch(() => "");
+  return { ok: false, details: classifyDriveProbeError(response.status, rawBody) };
+}
+
+/**
+ * HOST FIX #5 §6 i ordren: trygt refresh AV DEN NYE (Desktop-klient-utstedte)
+ * access_token-en mens vi venter på et manuelt provider-side-fiks (Drive
+ * API-enable/Workspace-policy-klikk) - Tobias skal ALDRI måtte gjennom en ny
+ * samtykke-runde bare for det. `.env` forblir uansett urørt til HELE flyten
+ * lykkes - dette holder KUN et ferskt token IN-MEMORY.
+ */
+async function refreshAccessToken(clientId: string, clientSecret: string, refreshToken: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(GOOGLE_OAUTH_TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token", refresh_token: refreshToken })
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as { access_token?: string };
+    return body.access_token;
+  } catch {
+    return undefined;
+  }
+}
+
+interface DriveProbeRecoveryResult {
+  accessToken: string;
+}
+
+/**
+ * HOST FIX #5 §2/§3/§4/§6 i ordren: kalles KUN når `driveMetadataProbe()`
+ * feiler med en klassifisert, GJENOPPRETTBAR blokkering
+ * (`isRecoverableDriveProbeBlocker()` - API_NOT_ENABLED eller
+ * WORKSPACE_ADMIN_POLICY; alt annet kastes umiddelbart, ALDRI gjettet på).
+ * Åpner NØYAKTIG ÉN riktig side automatisk (Google sin EGEN innebygde
+ * enable-URL foretrukket for API_NOT_ENABLED - se `classifyDriveProbeError()`
+ * i lib - `buildDriveApiEnableUrl()` KUN som fallback hvis Google ikke ga
+ * URL-en denne gangen; Admin Console sin API Controls-side for
+ * WORKSPACE_ADMIN_POLICY - ALDRI en scope-nedgradering, D-41), gir Tobias ÉN
+ * eksakt instruksjon, og prøver DERETTER på nytt i SAMME prosess (ingen
+ * restart, ingen andre kommando) inntil enten suksess eller
+ * `DRIVE_PROBE_RETRY_TIMEOUT_MS` er nådd. Ingen Drive-MUTASJONER forsøkes her
+ * - kun gjentatte, skrivebeskyttede metadata-probe-kall. Utløper
+ * access-tokenet mens vi venter (Tobias kan bruke flere minutter på ett
+ * Console-klikk) og et refresh_token finnes IN-MEMORY: fornyes det trygt
+ * underveis (§6) - `.env` forblir likevel urørt til HELE flyten (inkludert
+ * denne retryen) lykkes.
+ */
+async function retryDriveProbeUntilRecovered(
+  initial: DriveProbeErrorDetails,
+  accessToken: string,
+  clientId: string,
+  clientSecret: string,
+  refreshToken: string | undefined
+): Promise<DriveProbeRecoveryResult> {
+  if (!isRecoverableDriveProbeBlocker(initial.blocker)) {
+    throw new Error(
+      `google_reauth=FAIL_DRIVE_PROBE: ${formatDriveProbeReport(initial)} melding="${initial.safeMessage}". ` +
+        "Denne blokkeringstypen kan IKKE løses automatisk av dette scriptet - .env er IKKE endret."
+    );
+  }
+
+  let recoveryUrl: string;
+  let instruction: string;
+  if (initial.blocker === "API_NOT_ENABLED") {
+    recoveryUrl = initial.enableUrl ?? buildDriveApiEnableUrl(deriveProjectNumberFromClientId(clientId));
+    instruction = "Trykk Enable for Google Drive API, gå deretter tilbake hit.";
+    log("google_drive_api_enabled=FAIL google_drive_blocker=API_NOT_ENABLED - åpner Cloud Console-siden for Google Drive API automatisk.");
+  } else {
+    recoveryUrl = GOOGLE_ADMIN_API_CONTROLS_URL;
+    instruction =
+      'Finn "Jarvis Desktop" i listen over tredjeparts-apper og gi den eksplisitt tillit for de nødvendige scopene (IKKE reduser Jarvis sitt scope - full Drive-tilgang er et bevisst designkrav, D-41), gå deretter tilbake hit.';
+    log("google_drive_blocker=WORKSPACE_ADMIN_POLICY - åpner Google Admin Console sin API Controls-side automatisk.");
+  }
+  openBrowser(recoveryUrl);
+  log(instruction);
+  log(
+    `venter i denne SAMME prosessen (ingen restart, ingen ny kommando nødvendig) - prøver Drive-probe på nytt hvert ` +
+      `${Math.round(DRIVE_PROBE_RETRY_INTERVAL_MS / 1000)}. sekund i opptil ${Math.round(DRIVE_PROBE_RETRY_TIMEOUT_MS / 60_000)} minutter...`
+  );
+
+  let currentAccessToken = accessToken;
+  const deadlineMs = Date.now() + DRIVE_PROBE_RETRY_TIMEOUT_MS;
+  let lastDetails = initial;
+  while (Date.now() < deadlineMs) {
+    await sleep(DRIVE_PROBE_RETRY_INTERVAL_MS);
+    const probe = await driveMetadataProbe(currentAccessToken);
+    if (probe.ok) {
+      log("google_drive_api_enabled=PASS (samme-prosess-retry lyktes)");
+      return { accessToken: currentAccessToken };
+    }
+    lastDetails = probe.details;
+    if (probe.details.blocker === "AUTH_INVALID" && refreshToken) {
+      const refreshed = await refreshAccessToken(clientId, clientSecret, refreshToken);
+      if (refreshed) currentAccessToken = refreshed;
+    }
+  }
+  throw new Error(
+    `google_reauth=FAIL_DRIVE_PROBE_TIMEOUT: fortsatt blokkert (${formatDriveProbeReport(lastDetails)}) etter ` +
+      `${Math.round(DRIVE_PROBE_RETRY_TIMEOUT_MS / 60_000)} minutters automatisk retry i samme prosess. .env er IKKE endret.`
+  );
 }
 
 /** §6-fallback: LIVE re-verifisering av en EKSISTERENDE refresh_token sin FAKTISKE nåværende scope - aldri en antakelse om Google sin interne inkrementell-auth-oppførsel. */
@@ -557,11 +681,25 @@ async function main(): Promise<void> {
       `google_reauth=FAIL_INSUFFICIENT_SCOPE: Google returnerte ikke alle påkrevde scopes (mangler: ${missing.join(", ")}). .env er IKKE endret.`
     );
   }
-  const driveOk = await verifyDriveAccess(exchange.access_token);
-  if (!driveOk) {
-    throw new Error(
-      "google_reauth=FAIL_DRIVE_PROBE: scope-strengen så riktig ut, men en faktisk Drive-metadata-lesing feilet likevel. .env er IKKE endret."
+  // HOST FIX #5 (2026-08-16, Tobias sitt faktiske host-funn): scope-strengen
+  // alene beviste IKKE faktisk Drive-tilgang - en ekte host-kjøring nådde
+  // hit med en tilsynelatende korrekt scope, men fikk likevel en 403 fra
+  // selve Drive-metadata-lesingen. §1/§2/§4 i ordren: feilen klassifiseres
+  // TRYGT (aldri gjettet) og en GJENOPPRETTBAR blokkering (Drive API
+  // deaktivert / Workspace-adminpolicy) fører til automatisk guiding +
+  // samme-prosess-retry - IKKE en umiddelbar krasj.
+  let driveVerifiedAccessToken = exchange.access_token;
+  const driveProbe = await driveMetadataProbe(driveVerifiedAccessToken);
+  if (!driveProbe.ok) {
+    log(`google_reauth=FAIL_DRIVE_PROBE ${formatDriveProbeReport(driveProbe.details)}`);
+    const recovered = await retryDriveProbeUntilRecovered(
+      driveProbe.details,
+      driveVerifiedAccessToken,
+      client.clientId,
+      client.clientSecret,
+      exchange.refresh_token ?? existingRefreshToken
     );
+    driveVerifiedAccessToken = recovered.accessToken;
   }
   log("google_drive_full_scope=PASS (scope-streng + en faktisk Drive-lesing begge bekreftet)");
 
@@ -574,7 +712,7 @@ async function main(): Promise<void> {
     throw new Error(`google_reauth=FAIL: ${decision.reason} .env er IKKE endret.`);
   }
 
-  const detectedEmail = await detectAccountEmail(exchange.access_token);
+  const detectedEmail = await detectAccountEmail(driveVerifiedAccessToken);
   const consistency = classifyAccountConsistency(detectedEmail, configuredAccount);
   if (consistency === "mismatch") {
     const confirmed = await confirmAccountMismatch(maskEmail(detectedEmail as string), maskEmail(configuredAccount as string));

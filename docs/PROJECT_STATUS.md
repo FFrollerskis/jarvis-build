@@ -728,19 +728,77 @@ PR #4 merges til `main`.
   først) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er
   UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## GOOGLE DRIVE REAUTH HOST FIX #5 "CLASSIFY REAL DRIVE 403 + AUTO-GUIDE" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte HOST FIX #4-versjonen. Desktop-OAuth-bootstrappen fungerte HELT gjennom
+  (`google_desktop_client_status=SETUP_REQUIRED` → `google_desktop_client_import=PASS` →
+  `google_desktop_client_type=desktop`, token-exchange lyktes med en scope-streng som så korrekt ut) -
+  men flyten feilet DERETTER spesifikt på selve Drive-metadata-probe-kallet: `google_reauth=
+  FAIL_DRIVE_PROBE`. `.env` forble korrekt urørt. Eksplisitt eierkrav: IKKE rør OAuth-redirect-/klient-
+  arkitekturen igjen (host-bevist fungerende) - blokkeringen er en POST-AUTH Google Drive API-403, og
+  den EKSAKTE Google-feilårsaken skulle klassifiseres, ALDRI gjettes.
+- **Ny, trygg feilklassifisering** (`classifyDriveProbeError()` i lib, rent/deterministisk, INGEN
+  nettverk): parser Google sin STABILE feil-JSON-form (`error.status`/`error.errors[].reason`/
+  `error.details[].reason`/`error.message`) til `API_NOT_ENABLED`/`INSUFFICIENT_SCOPE`/
+  `WORKSPACE_ADMIN_POLICY`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`. `API_NOT_ENABLED` og
+  `INSUFFICIENT_SCOPE` gjenkjennes via Google sine EGNE, dokumenterte, høy-presisjon signaler
+  (`SERVICE_DISABLED`/`accessNotConfigured`/"has not been used in project"; `insufficientPermissions`/
+  "insufficient authentication scopes"). `WORKSPACE_ADMIN_POLICY` er EKSPLISITT dokumentert i koden som
+  en BEST-EFFORT-bøtte (generisk `PERMISSION_DENIED` uten et mer presist signal på dette tidspunktet i
+  flyten - Google gir normalt ikke et unikt maskinlesbart signal for Workspace-adminblokk etter
+  token-exchange) - ALDRI fremstilt som en Google-bekreftet unik årsak. `safeMessage` trunkeres
+  (≤300 tegn); resultatobjektet har KUN 7 trygge felt - access_token/refresh_token/client_secret/
+  authorization_code/fulle request-headers går ALDRI inn i klassifiseringen eller noen logglinje.
+- **Automatisk guiding + samme-prosess-retry** (`driveMetadataProbe()`/`retryDriveProbeUntilRecovered()`
+  i orchestratoren): en GJENOPPRETTBAR blokkering (`isRecoverableDriveProbeBlocker()` - KUN
+  `API_NOT_ENABLED`/`WORKSPACE_ADMIN_POLICY`) åpner NØYAKTIG riktig side automatisk (Google sin EGEN
+  innebygde enable-URL fra feilmeldingen foretrukket for API_NOT_ENABLED - `buildDriveApiEnableUrl()`
+  KUN som fallback; Admin Console sin API Controls-side, `GOOGLE_ADMIN_API_CONTROLS_URL`, for
+  WORKSPACE_ADMIN_POLICY - med ÉN instruksjon om å stole eksplisitt på "Jarvis Desktop"-klienten, IKKE en
+  bred org-policy-endring), gir Tobias ÉN eksakt setning, og prøver DERETTER Drive-proben på nytt hvert
+  5. sekund i SAMME kjørende prosess i opptil 10 minutter - ingen restart, ingen andre kommando. Et
+  refresh_token tilgjengelig IN-MEMORY brukes trygt til å fornye access-tokenet underveis hvis det
+  utløper mens Tobias gjør Console-klikket (`refreshAccessToken()`) - `.env` forblir likevel HELT urørt
+  til HELE flyten (inkludert denne retryen) lykkes. En IKKE-gjenopprettbar blokkering (INSUFFICIENT_SCOPE/
+  RATE_LIMIT/AUTH_INVALID/UNKNOWN_PROVIDER_403) kaster UMIDDELBART med den klassifiserte rapporten - retry
+  forsøkes ALDRI for noe scriptet ikke kan løse selv.
+- **Ingen scope-nedgradering, ingen klient-fallback (D-41 uendret):** hele probe-/retry-flyten bruker
+  UTELUKKENDE den allerede bevist-Desktop-klienten (`client.clientId`/`client.clientSecret`) - aldri
+  `values["JARVIS_GOOGLE_CLIENT_..."]` direkte, aldri `drive.file`/`drive.readonly` noe sted i filen.
+  Ingen Drive-MUTASJONER forsøkes noensinne i probe-/retry-koden - kun gjentatte, skrivebeskyttede
+  metadata-lesinger.
+- **Ingen credential persisteres mens blokkeringen er uløst:** `driveMetadataProbe()`-feilen og
+  `retryDriveProbeUntilRecovered()`-kallet skjer STRUKTURELT FØR `updates`-blokken/`.env`-backup-koden -
+  samme fail-closed-plassering som scope-sjekken. Lykkes retryen, oppdateres KUN det in-memory
+  access-tokenet (`driveVerifiedAccessToken`) som brukes videre i resten av `main()` (inkl.
+  `detectAccountEmail()`) - selve `.env`-skrivingen skjer fortsatt KUN i den ene, eksisterende atomiske
+  `updates`-blokken, uendret fra HOST FIX #4.
+- **Tester:** 15 nye rene enhetstester (`classifyDriveProbeError`/`formatDriveProbeReport`/
+  `isRecoverableDriveProbeBlocker`/`buildDriveApiEnableUrl`/`GOOGLE_ADMIN_API_CONTROLS_URL`) + 11 nye
+  strukturelle wiring-tester (riktig-prosjekt enable-URL-preferanse, samme-prosess-retry uten
+  execFileSync-selv-spawn, ingen-persistering-mens-blokkert, vellykket-retry-fortsetter-med-ferskt-token,
+  samme bevist-Desktop-klient gjennom hele flyten, ingen drive.file/drive.readonly noe sted) - **657/657
+  totalt**. Lint/full monorepo-typecheck/gitleaks (`protect --staged` + historikk-scan) alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - selve klassifiserings-/retry-
+  logikken kan IKKE kjøres ende-til-ende mot en ekte Google-403 i denne sky-sandboxen (krever en ekte
+  Workspace-organisasjon/Cloud-prosjekt i en faktisk blokkert tilstand) - bevist STRUKTURELT
+  (kildeteksts-baserte wiring-tester) + den underliggende klassifiseringslogikken fullt enhetstestet mot
+  Google sin dokumenterte, stabile feil-JSON-form. Krever Tobias sin NYE host-kjøring for å bevise
+  klassifiseringen/auto-guidingen faktisk treffer riktig mot den EKTE 403-en han observerte. PR #5
+  forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
+  `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
-reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget. Det
-eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
-`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`), og den eksisterende OAuth-klienten er BEVIST
-"Web application"-type (host-bevist TO GANGER, `redirect_uri_mismatch`) - `google-drive-reauth.ts`
-forsøker DERFOR ALDRI lenger den klienten (HOST FIX #4): finnes ingen bevist Desktop-klient, går
-scriptet rett i setup-modus - Tobias trenger KUN gjøre selve Cloud Console-handlingen (opprette en
-Desktop-klient + trykke "Download JSON"), ALDRI redigere `.env`. Selve Cloud Console-handlingen og
-nettleser-godkjenningen krever likevel fysisk tilstedeværelse på hosten og kan ikke gjøres fra denne
-sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`).
-Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld
-for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
+reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.
+Desktop-OAuth-bootstrappen er nå HOST-BEVIST fungerende helt gjennom token-exchange (HOST FIX #4/#5) -
+gjenstående blokkering er en EKTE Google Drive API-403 ved selve metadata-probe-kallet
+(`google_reauth=FAIL_DRIVE_PROBE`), nå klassifisert TRYGT (`API_NOT_ENABLED`/`WORKSPACE_ADMIN_POLICY`/
+`INSUFFICIENT_SCOPE`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`) med automatisk riktig-side-
+guiding + samme-prosess-retry for de to gjenopprettbare kategoriene (HOST FIX #5) - selve retry-/
+klassifiseringslogikken kan ikke kjøres ende-til-ende mot en ekte 403 fra denne sky-sandboxen. Q-20/
+UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende
+provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for
+voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
 fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende
 for P1A. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er IKKE
@@ -751,22 +809,24 @@ fremtidig byggeordre.
 Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando:
 `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
 
-- **Har Tobias ALLEREDE en bevist Desktop-klient** (fra en tidligere kjøring, `JARVIS_GOOGLE_OAUTH_
-  CLIENT_TYPE=desktop` i `.env`): scriptet går RETT til OAuth-samtykke, oppdaterer `.env` automatisk og
-  kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling nødvendig.
-- **Ingen bevist Desktop-klient (forventet denne runden - kjent Web-klient):** Cloud Console-siden åpnes
-  UMIDDELBART. Tobias gjør KUN: "Create Credentials" > "OAuth client ID" > type "Desktop app" > naviger
-  "Jarvis Desktop" > trykk "DOWNLOAD JSON". Det er DET - scriptet oppdager fila i Nedlastinger
-  AUTOMATISK (samme kjørende prosess, ingen restart, ingen `.env`-redigering, ingen filsti å lime inn),
-  bygger DERETTER autorisasjons-URL-en med DEN nye klienten, og fortsetter selv helt til slutt.
+- **Bevist Desktop-klient fra forrige kjøring** (`JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop` i `.env`,
+  host-bevist HOST FIX #5): scriptet hopper rett til OAuth-samtykke - INGEN Cloud Console-handling
+  nødvendig igjen.
+- **Drive-metadata-proben feiler igjen med en 403:** scriptet klassifiserer feilen automatisk og
+  logger `google_drive_blocker=<kategori>`. Er den `API_NOT_ENABLED` eller `WORKSPACE_ADMIN_POLICY`,
+  åpnes riktig Google-side AUTOMATISK med ÉN eksakt instruksjon (aktiver Drive API, ELLER stol
+  eksplisitt på "Jarvis Desktop" i Admin Console sin API Controls) - Tobias gjør KUN det ene klikket,
+  scriptet prøver selv på nytt i SAMME prosess (ingen restart) i opptil 10 minutter. Er den noe annet
+  (`INSUFFICIENT_SCOPE`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`), kaster scriptet med den
+  klassifiserte rapporten - videre diagnose/beslutning trengs da fra Tobias/den eksterne AI-arkitekten
+  før neste kjøring.
 
-Forventet fullt-grønt host-sammendrag inkluderer `google_desktop_client_status=WAITING_FOR_DOWNLOAD` →
-`google_desktop_client_import=PASS` → `google_desktop_client_type=desktop`, deretter
-`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED`), samt PASS på
-auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/sync/q20_no_resurrection/
-idempotency/policy. **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den
-kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion,
-møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt
+Forventet fullt-grønt host-sammendrag inkluderer (nytt denne runden) `google_drive_blocker=<PASS uten
+blokkering>` → `google_drive_full_scope=PASS`, deretter `google_drive_test_scope=AUTO_CREATED` (eller
+`CONFIGURED`), samt PASS på auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/
+sync/q20_no_resurrection/idempotency/policy. **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten
+host-bevis** før den kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-
+ingestion, møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt
 fase-godkjenning fra Tobias (faseporten gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i
 bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-
 nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (egen underoppgave når en konkret
