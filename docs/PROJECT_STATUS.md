@@ -1,7 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (UA-2 P1A VERIFIED/COMPLETE - host-bevist, run_id `2703299e`, PR #5 merget
-til `main`) · **Branch:** `claude/ua2-p1a-knowledge-sources` (merget, se D-42)
+**Oppdatert:** 2026-08-16 (P1A Runtime Wiring Closeout - venter på host-smoke-bevis) · **Branch:**
+`claude/p1a-drive-runtime-wiring` (draft, IKKE merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE
+(D-42, host-bevist run_id `2703299e`, PR #5 merget til `main`)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -944,29 +945,62 @@ direkte.
   samme konvensjon som PR #1-#4 - historikk bevart, ikke squashet). Se D-42 i
   DECISIONS_AND_ASSUMPTIONS.md for full beslutningslogg-entry.
 
+## P1A RUNTIME WIRING CLOSEOUT (2026-08-16, egen branch `claude/p1a-drive-runtime-wiring`)
+**IKKE en ny P1A-fullføring - D-42 forblir UENDRET som beslutningen som satte UA-2 P1A VERIFIED/
+COMPLETE.** Dette er en oppfølgende, avgrenset lukking av ETT gjenværende funn fra P1A-lukkingen
+(se "Nytt, ikke-blokkerende funn" i tidligere runder): `GoogleDriveTransport` var host-akseptanse-
+bevist (D-42), men var ALDRI wiret inn i den NORMALE `apps/api/src/main.ts`/`worker-main.ts` sine
+`firstWaveTools({...})`-kall - Drive-verktøyene var derfor reelt uoppnåelige fra en løpende api/
+worker-prosess (kun `ua2-p1a-live.ts` sin egen akseptanse-only ToolGateway nådde dem).
+- **Fiks:** ny delt fabrikk `driveTransportsIfConfigured()` (`live-transports.ts`) - sjekker KUN
+  tilstedeværelse (Boolean) av `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` (de tre
+  `googleAccessToken()` faktisk krever - `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` er bevisst IKKE sjekket,
+  den er kun reauth-scriptets egen bokføringsmarkør). Begge `main.ts` og `worker-main.ts` sprer
+  `...driveTransportsIfConfigured()` inn i sitt EKSISTERENDE `firstWaveTools({...})`-kall - SAMME
+  registreringsvei som email/calendar/github/telegram, ingen parallell mekanisme. Mangler
+  credentials: `drive`-nøkkelen er fraværende, `firstWaveTools()` sin egen (allerede eksisterende)
+  `UnconfiguredHttpTransport("drive")`-fallback brukes - INGEN oppstartskrasj, INGEN ny feilbane.
+- **Full D-41-kapabilitet:** alle 14 implementerte Drive-handlinger (4×A, 6×C, 4×D) registreres
+  samlet - ingen read-only-nedgradering, ingen ny godkjenningsfriksjon utover eksisterende
+  sovereign-owner-policy.
+- **Ny ett-kommando host-smoke:** `apps/api/scripts/p1a-drive-runtime-smoke.ts` - beviser den NORMALE
+  runtime-banen (EKTE ToolGateway/PolicyGateway, samme konstruksjon som main.ts) mot ekte Drive med
+  et rent lese-only `get_metadata("root")`-kall, PLUSS et strukturelt bevis for worker-banens
+  identiske registrering. INGEN ny OAuth-samtykke, INGEN Drive-mutasjon.
+- **Q-23 uendret:** `google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL` forblir åpen -
+  runtime-wiring eksponerer permission-handlingene, men live-verifikasjon krever fortsatt en reell
+  ekstern testperson.
+- **Tester:** 22 nye rene enhetstester (`google-drive-transport.test.ts` §credential-sjekk) + 22 nye
+  strukturelle wiring-tester (`drive-runtime-wiring.test.ts` + `drive-runtime-smoke-wiring.test.ts`).
+  Eksisterende `drive-full-access.test.ts` (owner sovereign/delegert D-klasse-policy) kjørt UENDRET -
+  fortsatt 17/17 PASS, bevis for at policy-banen ikke er regressert.
+- **STATUS: kode+suite ferdig, IKKE host-smoke-verifisert.** Venter på Tobias sin host-kjøring av
+  `p1a-drive-runtime-smoke.ts` FØR denne branchen merges - se "Neste oppgave".
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A har INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til
-`main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent
+`main`). P1A Runtime Wiring Closeout (over) venter på Tobias sin host-smoke-kjøring FØR merge - draft
+PR, IKKE merget ennå. Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/
+Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent
 integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE
 live-host-bevist (Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt, krever en egen,
 eksplisitt godkjent test-runde med en reell avtalt ekstern test-konto. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
-blokkerende. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er
-IKKE wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
-fremtidig byggeordre.
+blokkerende.
 
 ## Neste oppgave
-**UA-2 P1A er VERIFIED/COMPLETE og merget - ingen videre handling påkrevd for P1A.**
+Tobias kjører (PÅ HOSTEN, fra repo-roten, docker-compose Postgres kjørende, de allerede persisterte
+Google-credentialene fortsatt i `.env` - INGEN ny reautorisering) - ÉN kommando:
+`node --experimental-transform-types apps/api/scripts/p1a-drive-runtime-smoke.ts`
 
-Neste kandidat i IMPLEMENTATION_PLAN er **UA-2 P1B** (e-post-vedlegg-ingestion, møtetranskripsjon,
-OCR - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og UA2_KNOWLEDGE_DPIA.md). Presisering: selve
-møtetranskripsjon-delen avhenger eksplisitt av UA-7 Communications Hub sin meeting-transcription
-(IKKE bygget ennå) - e-post-vedlegg-ingestion og OCR/vision-ingest har ingen slik avhengighet og kan
-i prinsippet skiveres separat. **P1B venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe
-implementeres** (faseporten gjelder, CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige
+Forventet fullt-grønt resultat: `drive_runtime_registered=PASS`, `drive_runtime_api_path=PASS`,
+`drive_runtime_worker_path=PASS`, `token_leak=false`, `hard_fail=false`. **Ingen merge av
+`claude/p1a-drive-runtime-wiring` før denne kjøringen er mottatt og bekreftet.** Etter det: UA-2 P1B
+(e-post-vedlegg-ingestion, møtetranskripsjon, OCR - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og
+UA2_KNOWLEDGE_DPIA.md; møtetranskripsjon-delen avhenger eksplisitt av UA-7 Communications Hub, IKKE
+bygget ennå) er neste kandidat - venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe
+implementeres (faseporten gjelder, CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige
 kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple,
-HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22, egen underoppgave når
-en konkret integrasjonsflate finnes), Google Drive permission-live-verifikasjon (Q-23, egen
-test-runde med reell ekstern test-konto), connector-audit-gapene (D-41-sjekklisten, egne fremtidige
-byggeordre per connector), Drive-entrypoint-wiring (main.ts/worker-main.ts, se funn over).
+HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22), Google Drive
+permission-live-verifikasjon (Q-23, egen test-runde med reell ekstern test-konto), connector-audit-
+gapene (D-41-sjekklisten, egne fremtidige byggeordre per connector).

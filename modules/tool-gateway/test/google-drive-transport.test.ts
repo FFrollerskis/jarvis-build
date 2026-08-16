@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GoogleDriveTransport } from "@jarvis/tool-gateway";
+import { GoogleDriveTransport, driveTransportsIfConfigured, googleDriveCredentialsConfigured } from "@jarvis/tool-gateway";
 
 /**
  * UA-2 P1A scope-endring (2026-08-16) §K/§L: `GoogleDriveTransport` sin EGEN
@@ -114,5 +114,73 @@ describe("GoogleDriveTransport - intern logikk (fetch mocket)", () => {
     const transport = new GoogleDriveTransport();
     const result = await transport.invoke("delete_permanent", { file_id: "f1" }, "refresh-token");
     expect(result.data).toMatchObject({ already_deleted: "false" });
+  });
+});
+
+/**
+ * P1A RUNTIME WIRING CLOSEOUT (2026-08-16) §9 C/D/H: ren env-basert
+ * credential-tilstedeværelse-sjekk brukt av api/main.ts og worker-main.ts
+ * for å avgjøre om Drive skal registreres i den normale runtime-en. INGEN
+ * nettverk/fetch her - kun `process.env`-lesing, samme presedens som resten
+ * av denne fila sin "ingen live-credential nødvendig"-tilnærming.
+ */
+describe("googleDriveCredentialsConfigured / driveTransportsIfConfigured (P1A runtime wiring closeout §9 C/D/H)", () => {
+  const KEYS = ["JARVIS_GOOGLE_CLIENT_ID", "JARVIS_GOOGLE_CLIENT_SECRET", "JARVIS_GOOGLE_TOKEN"] as const;
+  const originalValues: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of KEYS) {
+      originalValues[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of KEYS) {
+      if (originalValues[key] === undefined) delete process.env[key];
+      else process.env[key] = originalValues[key];
+    }
+  });
+
+  it("C: alle tre credentials mangler -> false, driveTransportsIfConfigured() returnerer et TOMT objekt (ingen 'drive'-nøkkel)", () => {
+    expect(googleDriveCredentialsConfigured()).toBe(false);
+    expect(driveTransportsIfConfigured()).toEqual({});
+  });
+
+  it("delvis konfigurert (KUN client_id+secret, IKKE token) -> fortsatt false - ALLE tre kreves", () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "secret";
+    expect(googleDriveCredentialsConfigured()).toBe(false);
+    expect(driveTransportsIfConfigured()).toEqual({});
+  });
+
+  it("A/B: alle tre credentials satt -> true, driveTransportsIfConfigured() returnerer { drive: en GoogleDriveTransport-instans }", () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "secret";
+    process.env["JARVIS_GOOGLE_TOKEN"] = "token";
+    expect(googleDriveCredentialsConfigured()).toBe(true);
+    const transports = driveTransportsIfConfigured();
+    expect(transports["drive"]).toBeInstanceOf(GoogleDriveTransport);
+    expect(Object.keys(transports)).toEqual(["drive"]);
+  });
+
+  it("JARVIS_GOOGLE_OAUTH_CLIENT_TYPE (reauth-scriptets egen bokføringsmarkør) påvirker ALDRI dette resultatet - kun de tre runtime-credentialene teller", () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "id";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "secret";
+    process.env["JARVIS_GOOGLE_TOKEN"] = "token";
+    const before = googleDriveCredentialsConfigured();
+    process.env["JARVIS_GOOGLE_OAUTH_CLIENT_TYPE"] = "desktop";
+    expect(googleDriveCredentialsConfigured()).toBe(before);
+    delete process.env["JARVIS_GOOGLE_OAUTH_CLIENT_TYPE"];
+  });
+
+  it("H: ingen credential-VERDI kan noensinne lekke fra disse funksjonene - returtypene er henholdsvis boolean og et objekt av transport-instanser, aldri en streng", () => {
+    process.env["JARVIS_GOOGLE_CLIENT_ID"] = "super-secret-client-id-should-never-appear";
+    process.env["JARVIS_GOOGLE_CLIENT_SECRET"] = "super-secret-client-secret-should-never-appear";
+    process.env["JARVIS_GOOGLE_TOKEN"] = "super-secret-token-should-never-appear";
+    const result = googleDriveCredentialsConfigured();
+    expect(typeof result).toBe("boolean");
+    const transports = driveTransportsIfConfigured();
+    expect(JSON.stringify(Object.keys(transports))).not.toContain("super-secret");
   });
 });

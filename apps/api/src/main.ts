@@ -21,7 +21,8 @@ import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
   MeshToolExecutor, meshToolDefinitions, TelegramCommandPoller, TelegramTransport, ToolGateway,
-  buildStatusSource, calendarSource, emailSource, firstWaveTools, tasksSource, DailyScheduler
+  buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource, firstWaveTools,
+  tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
@@ -92,7 +93,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-    github: new GithubTransport(), telegram: new TelegramTransport()
+    github: new GithubTransport(), telegram: new TelegramTransport(),
+    ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   const ownerIdentity = {
     person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
