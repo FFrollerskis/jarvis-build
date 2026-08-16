@@ -3,6 +3,7 @@ import type { KnowledgeSource } from "./source.ts";
 import { FilesystemKnowledgeSource, DEFAULT_TEXT_EXTENSIONS } from "./filesystem-source.ts";
 import { GithubKnowledgeSource } from "./github-source.ts";
 import { GoogleDriveKnowledgeSource } from "./drive-source.ts";
+import { ObsidianVaultKnowledgeSource } from "./obsidian-source.ts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { IdentityContext } from "@jarvis/contracts";
 
@@ -134,8 +135,7 @@ export class KnowledgeSourceRegistry {
         );
       }
       case "obsidian":
-        // §26 (P1A): ObsidianVaultKnowledgeSource kobles inn her når den bygges.
-        throw new Error("obsidian_source_not_yet_wired");
+        return new ObsidianVaultKnowledgeSource(config.vault_root, config.source_instance_id);
     }
   }
 }

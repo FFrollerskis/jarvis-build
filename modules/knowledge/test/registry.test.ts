@@ -11,6 +11,7 @@ import { FakeTransport, ToolGateway, firstWaveTools, type SecretProvider } from 
 import { KnowledgeSourceRegistry, UnknownSourceInstanceError, type KnowledgeSourceConfig } from "../src/registry.ts";
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { GithubKnowledgeSource } from "../src/github-source.ts";
+import { ObsidianVaultKnowledgeSource } from "../src/obsidian-source.ts";
 
 /**
  * UA-2 P1A §17: registry-modellen - typet, flere-instans, tenant/space-bundet,
@@ -101,11 +102,13 @@ describe("KnowledgeSourceRegistry - config/tenant-binding (ingen DB nødvendig)"
     expect(() => registry.build("t1", "project", "gh1")).toThrow("github_source_requires_tool_gateway_and_identity");
   });
 
-  it("obsidian er typet i konfigurasjonen, men bygging feiler EKSPLISITT inntil kildeklassen kobles inn (§26)", () => {
+  it("build() av obsidian-config gir en fungerende ObsidianVaultKnowledgeSource", () => {
     const registry = new KnowledgeSourceRegistry([
       { source_type: "obsidian", tenant_id: "t1", memory_space_id: "personal", source_instance_id: "vault1", vault_root: "/tmp/vault" }
     ]);
-    expect(() => registry.build("t1", "personal", "vault1")).toThrow("obsidian_source_not_yet_wired");
+    const source = registry.build("t1", "personal", "vault1");
+    expect(source).toBeInstanceOf(ObsidianVaultKnowledgeSource);
+    expect(source.source_instance_id).toBe("vault1");
   });
 
   it("build() av google_drive-config UTEN injisert ToolGateway+identity kaster eksplisitt", () => {
