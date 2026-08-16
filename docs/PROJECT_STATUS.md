@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (UA-2 P1A bygget - FIXED_SUITE, IKKE host-verifisert) · **Branch:**
-`claude/ua2-p1a-knowledge-sources` (draft PR, IKKE merget)
+**Oppdatert:** 2026-08-16 (UA-2 P1A VERIFIED/COMPLETE - host-bevist, run_id `2703299e`, PR #5 merget
+til `main`) · **Branch:** `claude/ua2-p1a-knowledge-sources` (merget, se D-42)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -26,6 +26,15 @@ isolasjon - alle PASS, `duplicate_documents=0`, `hard_fail=false`. `symlink_esca
 SKIPPED_HOST_PERMISSION` (Windows-hosten tillot ikke symlink uten admin-rettigheter denne
 kjøringen) - eksplisitt IKKE et live-PASS, mekanismen forblir suite-bevist
 (`filesystem-source.test.ts`). Full evidens: docs/RUNTIME_GATES.md.
+**UA-2 P1A (Knowledge Source Expansion + Google Drive Full Read/Write): VERIFIED/COMPLETE
+(2026-08-16, host-bevist på ekte Windows/Docker-host, run_id `2703299e`, `hard_fail=false`)** → D-42.
+Ni oppfølgingsrunder (hver drevet av et ekte Tobias-host-funn) endte med full grønn host-akseptanse:
+Obsidian-livssyklus, tenant-isolasjon/retrieval for nye kildetyper, Google Drive full read/write
+ende-til-ende (Desktop-OAuth-bootstrap, Drive API aktivert, auth/read/create/update/rename/move/
+trash/permanent_delete/cleanup/sync/no-resurrection/idempotency/policy/live ALLE PASS), Q-21 uendret
+i samme kjøring, ingen token-lekkasje. Eksplisitt, ærlig unntak: `google_drive_permission_live=
+SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL` (live permission-mutasjon IKKE host-testet - se Q-23, IKKE en
+blokkering for lukking). PR #5 merget til `main`. Full evidens under "UA-2 P1A FINAL CLOSURE" nederst i denne filen.
 **Q-20 (teknisk data-erasure-foundation, FØR UA-2 P1): VERIFIED/CLOSED (2026-08-16, host-bevist på
 ekte Windows/Docker-host, run_id `eaabe2b1`)** → D-40. Ny pakke `@jarvis/erasure` - sentral, typed
 `ErasureService` (preview/execute/verify) med scope-modell (`tenant`/`person`/`memory_space`/
@@ -908,44 +917,56 @@ PR #4 merges til `main`.
   cleanup-fiksene faktisk fungerer mot ekte Drive/Postgres FØR P1A kan settes VERIFIED. PR #5 forblir
   draft/umerget.
 
+## UA-2 P1A FINAL CLOSURE (2026-08-16, samme dag) — HOST VERIFIED, PR #5 MERGET
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts` på sin
+faktiske Windows/Docker-host - GRØNT resultat, run_id `2703299e`, `hard_fail=false`.** Ingen ny
+Google-reautorisering var nødvendig - de allerede persisterte Desktop-credentialene ble gjenbrukt
+direkte.
+- **Q-21 uendret:** `q21_runtime_role_safe=PASS`, `runtime_current_user=jarvis_runtime`,
+  `runtime_role_superuser=false`, `runtime_role_bypassrls=false`.
+- **Knowledge P1A:** `p1a_registry_tenant_scoping`/`p1a_obsidian_lifecycle`/
+  `p1a_obsidian_obsidian_dir_excluded`/`p1a_obsidian_frontmatter_wikilinks`/
+  `p1a_obsidian_no_resurrection`/`p1a_tenant_isolation_new_sources`/`p1a_retrieval_new_sources`/
+  `p1a_no_content_in_audit` = ALLE PASS.
+- **Google Drive (full read/write, D-41):** `google_drive_auth_scope`/`_read`/`_create`/`_update`/
+  `_rename`/`_move`/`_trash`/`_permanent_delete`/`_cleanup`/`_sync`/`_q20_no_resurrection`/
+  `_idempotency`/`_policy`/`_live` = ALLE PASS. HOST FIX #8-cleanup-fiksene (§forrige seksjon) bevist
+  fungerende: `created_artifacts=4 cleaned_artifacts=4 already_absent=1 cleanup_failures=0
+  root_deleted=true` - ingen `cleanup A/B feilet`-linjer. `drive_token_leak_audit=false`,
+  `drive_token_leak_metadata=false`.
+- **Ærlig unntak, IKKE overklaimet:** `google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL`
+  - live permission-mutasjon (dele/tilgangsstyring) er bevisst IKKE host-testet (ingen trygg ekstern
+  testperson i en ubetjent kjøring). Kapabiliteten er implementasjon-/suite-verifisert
+  (`drive-full-access.test.ts` §I), men IKKE live-host-bevist - registrert som Q-23, et smalt,
+  gjenværende verifikasjonspunkt, IKKE en blokkering for lukking (akseptanseløperen behandlet det
+  eksplisitt som et trygt skip).
+- **STATUS: UA-2 P1A = VERIFIED/COMPLETE → D-42.** PR #5 merget til `main` (normal merge-commit,
+  samme konvensjon som PR #1-#4 - historikk bevart, ikke squashet). Se D-42 i
+  DECISIONS_AND_ASSUMPTIONS.md for full beslutningslogg-entry.
+
 ## Blokkeringer
-UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
-reauth-flyten) venter på Tobias sin faktiske host-kjøring - draft PR IKKE merget.
-**Google Drive full read/write-kapabilitet er HOST-BEVIST (run_id `ff16c69d`) - IKKE lenger en åpen
-post.** Reauth-flyten (HOST FIX #4-#6) OG selve Drive-akseptansen (auth/read/create/update/rename/
-move/sync/no-resurrection/trash/idempotency/permanent_delete/policy) er ALLE PASS på ekte Drive.
-Gjenstående blokkering for P1A som HELHET er RENE opprydding-defekter (HOST FIX #8, fikset denne
-runden, IKKE host-bevist ennå): en Drive-cleanup-bug (redundant `delete_permanent` mot et allerede
-slettet artefakt) og en Postgres-FK-feil (`tool_executions` manglet i tenant-cleanup) hindret et
-fullstendig grønt `hard_fail=false`-resultat på run `ff16c69d`. Q-20/UA-2 P0/Q-21 har ingen egne
-blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende provider-nøkler er eneste gap for
-LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
-ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en
-blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
-over) er dokumentert backlog, ikke blokkerende for P1A. **Nytt, ikke-blokkerende funn (uendret fra
-forrige runde):** `GoogleDriveTransport` er IKKE wiret inn i `apps/api/src/main.ts`/`worker-main.ts`
-sine `firstWaveTools({...})`-kall ennå - egen fremtidig byggeordre.
+Q-20/UA-2 P0/Q-21/UA-2 P1A har INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til
+`main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent
+integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE
+live-host-bevist (Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt, krever en egen,
+eksplisitt godkjent test-runde med en reell avtalt ekstern test-konto. Connector-audit-gapene
+(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
+blokkerende. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er
+IKKE wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
+fremtidig byggeordre.
 
 ## Neste oppgave
-Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando:
-`node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts`
+**UA-2 P1A er VERIFIED/COMPLETE og merget - ingen videre handling påkrevd for P1A.**
 
-**INGEN Google-reautorisering nødvendig** - de allerede persisterte Desktop-credentialene
-(`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN`/`_OAUTH_CLIENT_TYPE=desktop`) gjenbrukes direkte av den
-vanlige host-runneren. Denne kjøringen tester KUN de to HOST FIX #8-cleanup-fiksene mot ekte
-Drive/Postgres - all Drive-kapabilitet er allerede host-bevist og skal IKKE regresjonstestes på nytt
-manuelt (kun via den vanlige suiten).
-
-Forventet fullt-grønt host-sammendrag inkluderer (nytt denne runden)
-`google_drive_cleanup=PASS created_artifacts=<n> cleaned_artifacts=<n> already_absent=<n>
-cleanup_failures=0 root_deleted=true`, ingen `cleanup A/B feilet`-linjer i §8 CLEANUP-seksjonen, og
-fortsatt PASS på auth_scope/read/create/update/rename/move/trash/permanent_delete/sync/
-q20_no_resurrection/idempotency/policy (uendret fra `ff16c69d`). **Ingen merge, ingen UA-2 P1B, ingen
-cloud-live-claims uten host-bevis** før DENNE kjøringen er mottatt og bekreftet grønn. Etter
-host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i
-IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten gjelder,
-CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10
-STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark,
-Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-gapene
-(D-41-sjekklisten, egne fremtidige byggeordre per connector), Drive-entrypoint-wiring
-(main.ts/worker-main.ts, se funn over).
+Neste kandidat i IMPLEMENTATION_PLAN er **UA-2 P1B** (e-post-vedlegg-ingestion, møtetranskripsjon,
+OCR - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og UA2_KNOWLEDGE_DPIA.md). Presisering: selve
+møtetranskripsjon-delen avhenger eksplisitt av UA-7 Communications Hub sin meeting-transcription
+(IKKE bygget ennå) - e-post-vedlegg-ingestion og OCR/vision-ingest har ingen slik avhengighet og kan
+i prinsippet skiveres separat. **P1B venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe
+implementeres** (faseporten gjelder, CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige
+kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple,
+HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22, egen underoppgave når
+en konkret integrasjonsflate finnes), Google Drive permission-live-verifikasjon (Q-23, egen
+test-runde med reell ekstern test-konto), connector-audit-gapene (D-41-sjekklisten, egne fremtidige
+byggeordre per connector), Drive-entrypoint-wiring (main.ts/worker-main.ts, se funn over).
