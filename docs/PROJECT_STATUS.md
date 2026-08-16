@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 · **Branch:** `claude/q20-data-erasure` (draft PR, IKKE merget - venter på
-Tobias sin host-verifikasjon av Q-20)
+**Oppdatert:** 2026-08-16 (host recovery #1) · **Branch:** `claude/q20-data-erasure` (draft PR #4,
+IKKE merget - venter på Tobias sin host-verifikasjon av Q-20)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -293,9 +293,25 @@ HA-RUNTIME, D-10 STT-benchmark (≥100 norske prøver, providervalg - se OPEN_QU
 - **STATUS: FIXED_SUITE / READY_FOR_HOST_VERIFY - IKKE VERIFIED før Tobias sin faktiske
   host-kjøring bekrefter det.** Teknisk erasure-foundation - IKKE en juridisk GDPR-sertifisering.
 
+## Q-20 HOST RECOVERY #1 (samme dag, 2026-08-16) — workspace-bootstrap-feil
+Tobias sin første kjøring feilet FØR noe Q-20-innhold ble testet: `ERR_MODULE_NOT_FOUND:
+Cannot find package '@jarvis/core'`. Root cause: branchen la til en NY pnpm-workspace-pakke
+(`modules/erasure`) - hosten sin `node_modules` var aldri bootstrappet for den (host-bootstrap-feil,
+IKKE et Q-20-funn). Node 24 (host) bekreftet IKKE root cause (`engines: >=22` er oppfylt).
+**Fikset** med ny ett-kommando-orkestrator `modules/core/scripts/q20-host-run.ts` (kun Node-
+innebygde moduler på toppnivå - kan kjøre FØR `pnpm install`): bootstrapper workspacet
+(`pnpm install --frozen-lockfile`), verifiserer resolvering (`modules/erasure/scripts/
+verify-workspace.ts`), sikrer ferske Docker-images, kjører migrasjonene (inkl. `018_erasure.sql`)
+via ADMIN-rollen (uendret Q-21-splitt), restarter api/worker, og kjører til slutt selve
+`q20-erasure-live.ts`. Feilen reprodusert og fiksen bekreftet i byggemiljøet (node_modules fjernet
+→ samme feil → `pnpm install` reparerer). 18 nye wiring-tester
+(`modules/core/test/q20-host-run-wiring.test.ts`). **Ny (erstattende) ett-kommando for Tobias:**
+`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`. Full evidens:
+docs/RUNTIME_GATES.md.
+
 ## Blokkeringer
 **Q-20 er FIXED_SUITE men IKKE host-verifisert ennå.** Venter på Tobias sin kjøring av
-`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts`
+`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`
 på hosten - alle `q20_*`-felt + `q21_runtime_role_safe` må bekreftes PASS live før VERIFIED/merge.
 UA-2 P0 og Q-21 har ingen egne blokkeringer (begge VERIFIED/CLOSED, allerede merget til `main`).
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
@@ -303,7 +319,7 @@ Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
 
 ## Neste oppgave
 Avventer Tobias: kjør
-`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts`
+`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`
 PÅ HOSTEN (fra repo-roten, docker-compose oppe) og rapporter resultatet. FØRST DA er Q-20 reelt
 VERIFIED - deretter kan draft PR-en for `claude/q20-data-erasure` klargjøres for merge. Etter Q-20:
 **UA-2 P1** (flere kunnskapskilder - Obsidian, Pieces, Google Drive, e-post, møtetranskripsjon, OCR)

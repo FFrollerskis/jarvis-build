@@ -17,9 +17,58 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
 | Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
 | UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
-| Q-20 Data erasure foundation | **IMPLEMENTED_NOT_VERIFIED (suite-verifisert, 2026-08-16)** | `@jarvis/erasure` bygget og fullt testet mot embedded Postgres (13+1 nye tester, se docs/DATA_ERASURE.md); live-scriptet er selv kjørt end-to-end mot en ekte (embedded) Postgres i byggeøkten med `hard_fail=false` - men IKKE mot Tobias sin faktiske Docker-host ennå. Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se eget avsnitt under |
+| Q-20 Data erasure foundation | **IMPLEMENTED_NOT_VERIFIED (suite-verifisert, 2026-08-16)** | `@jarvis/erasure` bygget og fullt testet mot embedded Postgres (13+1+18 nye tester, se docs/DATA_ERASURE.md); live-scriptet er selv kjørt end-to-end mot en ekte (embedded) Postgres i byggeøkten med `hard_fail=false` - men IKKE mot Tobias sin faktiske Docker-host ennå (host-runde 1: bootstrap-feil fikset, se eget avsnitt under). Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
+
+## Q-20 HOST RECOVERY #1: WORKSPACE BOOTSTRAP-FEIL (2026-08-16, samme dag)
+
+**Host-feil:** Tobias kjørte den instruerte kommandoen
+(`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts`)
+og fikk umiddelbart `Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@jarvis/core' imported from
+modules/erasure/scripts/q20-erasure-live.ts` - FØR noe Q-20-innhold i det hele tatt ble testet.
+Host-Node: v24.11.1.
+
+**Root cause (ikke gjettet, bekreftet ved reproduksjon i byggemiljøet):** denne branchen la til en HELT
+NY pnpm-workspace-pakke (`modules/erasure`). Hosten sin `node_modules` ble sist bootstrappet FØR den
+pakken eksisterte - `pnpm-lock.yaml` (fra git) kjenner den korrekt, men de lokale
+`node_modules/@jarvis/*`-symlinkene for `modules/erasure` var aldri opprettet. **Dette er en
+host-bootstrap-feil, IKKE et Q-20-funn** - ingen erasure-semantikk er endret for å "fikse" dette.
+
+**Node 24-vurdering (§6 i BO-en):** IKKE root cause. `package.json` sitt `engines`-felt krever kun
+`>=22`, og `--experimental-transform-types` finnes fortsatt på Node 24 - host-Noden er kompatibel.
+Feilen var utelukkende workspace-bootstrap, ikke Node-versjon.
+
+**Fiks (bevarer ett-kommando-kontrakten):** ny `modules/core/scripts/q20-host-run.ts` - en
+ett-kommando-orkestrator som BEVISST kun bruker Node-innebygde moduler på toppnivå (`node:child_process`/
+`node:fs`/`node:path`) - må kunne kjøre FØR `pnpm install` har bootstrappet workspacet, som er selve
+poenget. Rekkefølge: (1) verifiser repo-rot, (2) `pnpm install --frozen-lockfile` (ALDRI oppdaterer
+pnpm-versjon eller lockfile), (3) `modules/erasure/scripts/verify-workspace.ts` (isolert, tydelig
+PASS/FAIL-diagnostikk - `erasure_workspace_dependencies=PASS`), (4) Postgres oppe, (5) bygg
+migrate/api/worker FERSKT fra gjeldende checkout (samme "always rebuild"-leksjon som Q-21 host-runde 3),
+(6) kjør migrate (anvender `018_erasure.sql` idempotent via ADMIN-rollen, uendret fra Q-21), (7) restart
+api/worker fra de ferske imagene (plukker opp EKSISTERENDE `.env` uendret - Q-21 sin runtime-rolle
+røres IKKE), (8) kjør `q20-erasure-live.ts` (som selv verifiserer Q-21-rollen på nytt, §1, FØR noe
+destruktivt forsøkes - ingen duplisert logikk). `.env` skrives/endres ALDRI av denne runneren.
+
+**Bevist i byggemiljøet:** feilen reprodusert eksakt (fjernet `modules/erasure/node_modules`, samme
+`ERR_MODULE_NOT_FOUND`), deretter bekreftet at `pnpm install` (standard, veletablert pnpm-semantikk for
+et nytt workspace-medlem) reparerer resolveringen - `verify-workspace.ts` går fra
+`erasure_workspace_dependencies=FAIL` til `PASS`. Docker-orkestreringsstegene er IKKE kjørt live i
+byggemiljøet (ingen Docker-daemon tilgjengelig der) - verifisert via 18 nye wiring-tester
+(`modules/core/test/q20-host-run-wiring.test.ts`, §7.A-I i BO-en: bootstrap-rekkefølge, frozen-lockfile,
+migrasjon-018-rekkefølge, ferskt image FØR migrate, Q-21 uendret/`.env` aldri skrevet, idempotens (ingen
+destruktive flagg), ingen secrets logget, tydelig feilmelding FØR bootstrap, og at runneren faktisk når
+frem til `q20-erasure-live.ts`).
+
+**Eksakt ÉN kommando for Tobias (erstatter forrige runde sin kommando):**
+```
+node --experimental-transform-types modules/core/scripts/q20-host-run.ts
+```
+
+**Status: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY.** Ingen Q-20-akseptanse er ennå kjørt mot
+Tobias sin faktiske host - denne runden løste kun bootstrap-blokkeringen som hindret akseptansen fra å
+starte i det hele tatt.
 
 ## Q-20: DATA ERASURE FOUNDATION - SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå)
 
@@ -87,10 +136,14 @@ q20_sentinel_scan=PASS      q21_runtime_role_safe=PASS  hard_fail=false
 ```
 
 **IKKE presentert som live-PASS:** dette var embedded (byggemiljø) Postgres, IKKE Tobias sin faktiske
-Docker/pgvector-host. **Status: FIXED_SUITE / READY_FOR_HOST_VERIFY.** Gjenstår: Tobias kjører
-`node --env-file=.env --experimental-transform-types modules/erasure/scripts/q20-erasure-live.ts` PÅ
-HOSTEN (fra repo-roten, docker-compose oppe) og rapporterer resultatet - FØRST DA er Q-20 reelt
-VERIFIED (ikke bare suite-bevist).
+Docker/pgvector-host. **Status: FIXED_SUITE / READY_FOR_HOST_VERIFY.** **OPPDATERT (host-runde 1,
+samme dag):** den direkte kommandoen under feilet på hosten med en workspace-bootstrap-feil (ny
+`modules/erasure`-pakke, `node_modules` aldri installert for den) - se "Q-20 HOST RECOVERY #1"-
+seksjonen øverst i dette dokumentet. Bruk i stedet:
+`node --experimental-transform-types modules/core/scripts/q20-host-run.ts` (bootstrapper workspacet
+automatisk, deretter identisk akseptanse). Gjenstår: Tobias kjører DENNE kommandoen PÅ HOSTEN (fra
+repo-roten, docker-compose oppe) og rapporterer resultatet - FØRST DA er Q-20 reelt VERIFIED (ikke
+bare suite-bevist).
 
 ## BO-02-tillegg (2026-08-13)
 - **Node 22-avvik løst:** `pnpm --use-node-version=22.14.0 vitest run` → **128/128 PASS** (re-kjørt);
