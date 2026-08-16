@@ -341,3 +341,62 @@ export function buildCredentialsConsoleUrl(projectNumber: string | undefined): s
   const base = "https://console.cloud.google.com/apis/credentials";
   return projectNumber ? `${base}?project=${projectNumber}` : base;
 }
+
+/**
+ * HOST FIX #3 "ZERO MANUAL ENV EDITING" (2026-08-16): Tobias skal KUN gjøre
+ * ÉN uunngåelig manuell handling (opprette en Desktop-klient i Cloud
+ * Console og trykke "Download JSON") - ALDRI redigere `.env`, kopiere
+ * client_id/client_secret, eller lime inn en filsti. Denne seksjonen er den
+ * rene beslutnings-/filtreringslogikken bak "oppdag den nedlastede JSON-en
+ * automatisk fra Nedlastinger-mappa" - selve filsystem-pollingen,
+ * fil-lesingen og terminal-promptet bor i orchestratoren (samme
+ * "ingen fs/nettverk i denne fila"-presedens som resten av fila).
+ */
+export interface DownloadCandidateFile {
+  name: string;
+  path: string;
+  mtimeMs: number;
+}
+
+/**
+ * §2 i ordren: KUN JSON-filer med mtime FRA OG MED kjøringens eget
+ * starttidspunkt regnes som "nylig lastet ned" - en gammel, urelatert
+ * JSON-fil som allerede lå i Nedlastinger FØR kjøringen startet skal
+ * ALDRI plukkes opp automatisk (§2/§C i ordren). Nyest FØRST.
+ */
+export function selectNewCandidateJsonFiles(files: readonly DownloadCandidateFile[], sinceMs: number): DownloadCandidateFile[] {
+  return files
+    .filter((f) => f.name.toLowerCase().endsWith(".json") && f.mtimeMs >= sinceMs)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
+export type DesktopClientDiscoveryResult =
+  | { kind: "none" }
+  | { kind: "single"; candidate: DownloadCandidateFile }
+  | { kind: "multiple"; candidates: DownloadCandidateFile[] };
+
+/**
+ * §4 i ordren: gitt filene som FAKTISK besto `parseClientSecretJson()`
+ * (gyldig "installed"/Desktop-type - "web"-filer og søppel er allerede
+ * silent utelatt av orchestratoren FØR denne kalles, se
+ * `watchForDesktopClientDownload()`): ALDRI gjett stille ved flere gyldige
+ * kandidater - `"multiple"` krever eksplisitt valg (nummerert
+ * fil-navn-liste) i orchestratoren.
+ */
+export function classifyDiscoveryResult(validCandidates: readonly DownloadCandidateFile[]): DesktopClientDiscoveryResult {
+  if (validCandidates.length === 0) return { kind: "none" };
+  if (validCandidates.length === 1) return { kind: "single", candidate: validCandidates[0]! };
+  return { kind: "multiple", candidates: [...validCandidates] };
+}
+
+/** §4 i ordren: trygg, KUN-filnavn nummerert liste - ALDRI client_id/client_secret eller full filsti (kan inneholde brukernavn). */
+export function formatCandidateSelectionPrompt(names: readonly string[]): string {
+  return names.map((name, i) => `  ${i + 1}) ${name}`).join("\n");
+}
+
+/** Validerer Tobias sitt tallvalg mot antall kandidater - undefined for et ugyldig/tomt svar (orchestratoren spør på nytt, kaster ALDRI en kryptisk NaN-indeksfeil). */
+export function parseCandidateSelection(input: string, count: number): number | undefined {
+  const n = Number(input.trim());
+  if (!Number.isInteger(n) || n < 1 || n > count) return undefined;
+  return n - 1;
+}

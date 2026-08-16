@@ -651,37 +651,76 @@ PR #4 merges til `main`.
   av en NY host-kjøring for å bevise dette faktisk fungerer. PR #5 forblir draft/umerget. Ett-kommando-
   kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## GOOGLE OAUTH HOST FIX #3 "ZERO MANUAL ENV EDITING" (samme dag, 2026-08-16) — automatisk Desktop-klient-oppdagelse
+- **Eierens UX-krav:** etter HOST FIX #2 var det ENE uunngåelige manuelle steget i praksis TO -
+  Cloud Console-handlingen OG å redigere `.env` med filstien til den nedlastede JSON-en. Tobias skal KUN
+  gjøre den ENE, faktisk uunngåelige handlingen (opprette en "Desktop app"-klient og trykke "Download
+  JSON") - ALDRI redigere `.env`, kopiere client_id/secret, eller lime inn en filsti.
+- **Automatisk Nedlastinger-oppdagelse, i SAMME kjørende prosess, uten restart:** `attemptOAuth()` starter
+  nå det opprinnelige OAuth-forsøket OG (parallelt, i bakgrunnen) en `watchForDesktopClientDownload()`-
+  polling av Tobias sin Nedlastinger-mappe (`os.homedir()/Downloads` - den dokumenterte
+  standardplasseringen, ALDRI en hardkodet bruker-sti). `Promise.race()` mellom callback-en og watcheren
+  avgjør veien videre: kommer callback-en FØRST (normalflyt - klienten var allerede riktig type),
+  fortsetter alt UENDRET og Tobias ser ALDRI noen ekstra fane (veiledningen/Cloud Console-siden vises
+  FØRST etter 25 sekunder - god margin for en vanlig kontovalg+samtykke-interaksjon, kort nok til rask
+  hjelp ved en ekte feil). Finner watcheren en NY, gyldig Desktop-klient-JSON FØRST, avbrytes det
+  opprinnelige callback-forsøket EKSPLISITT (frigjør porten - `waitForCallback()` er nå kansellerbar) og
+  et FRISK OAuth-forsøk starter AUTOMATISK med den nye klienten, i SAMME prosess.
+- **KUN filer fra og med kjøringens eget starttidspunkt regnes** (`selectNewCandidateJsonFiles`) - en
+  gammel, urelatert JSON-fil som allerede lå i Nedlastinger plukkes ALDRI opp. Hver kandidat valideres med
+  den EKSISTERENDE `parseClientSecretJson()` (ingen ny/parallell valideringslogikk) - en "web"-type fil
+  eller søppel EKSKLUDERES STILLE fra kandidatlisten (Nedlastinger kan inneholde mange urelaterte
+  JSON-filer), krasjer ALDRI polling-løkka. Flere gyldige kandidater SAMTIDIG avgjøres ALDRI stille - en
+  trygg, KUN-filnavn nummerert liste ber Tobias velge eksplisitt.
+- **Koherent persistering uendret:** `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` skrives SAMMEN, atomisk,
+  til de VANLIGE `.env`-nøklene FØRST etter faktisk OAuth-suksess (scope+Drive-probe+kontosjekk alle
+  bestått). `JARVIS_GOOGLE_CLIENT_SECRET_JSON` (HOST FIX #2) forblir støttet for et avansert/manuelt
+  oppsett, men er IKKE lenger nødvendig for normalflyten og persisteres ALDRI selv - kun et
+  engangs-import-artefakt.
+- **Tester:** 20 nye rene enhetstester (`selectNewCandidateJsonFiles`/`classifyDiscoveryResult`/
+  `formatCandidateSelectionPrompt`/`parseCandidateSelection`) + 15 nye strukturelle wiring-tester
+  (kansellerbar callback-server, race-rekkefølge, koherent skriving KUN etter suksess, ingen restart,
+  fortsatt ingen secrets logget) - 637/637 totalt. Lint/full monorepo-typecheck/gitleaks alle rene.
+- **Ærlighet om verifikasjonsgrense:** selve den KONKURRERENDE race-/polling-/kanselleringslogikken kan
+  IKKE kjøres ende-til-ende i denne sky-sandboxen (krever en ekte Windows-nettleser + en ekte
+  Nedlastinger-mappe + faktisk Google OAuth) - bevist STRUKTURELT (kildeteksts-baserte wiring-tester,
+  samme presedens som resten av denne fila) + den underliggende beslutnings-/filtreringslogikken FULLT
+  enhetstestet. Faktisk host-kjøring er derfor fortsatt nødvendig for VERIFIED.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  Cloud Console-steg (hvis nødvendig) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget.
+  Ett-kommando-kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
-reauth-flyten) venter på Tobias sitt ENE manuelle Cloud Console-steg (opprett en "Desktop app"-OAuth-
-klient - se GOOGLE OAUTH HOST FIX #2 over, ingen offentlig Google-API finnes for å gjøre dette
-programmatisk) etterfulgt av faktisk nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget. Det
+reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget. Det
 eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
 `google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`), og den eksisterende OAuth-klienten er etter alt å
-dømme "Web application"-type (host-bevist, `redirect_uri_mismatch`) - `google-drive-reauth.ts` støtter
-nå import av en ny Desktop-klient via `JARVIS_GOOGLE_CLIENT_SECRET_JSON`, men selve Cloud Console-
-handlingen og nettleser-godkjenningen krever fysisk tilstedeværelse på hosten og kan ikke gjøres fra
-denne sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til
-`main`). Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
-ennå - egen fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene
+dømme "Web application"-type (host-bevist, `redirect_uri_mismatch`) - hvis DET fortsatt inntreffer,
+oppdager `google-drive-reauth.ts` nå AUTOMATISK en nyopprettet Desktop-klients nedlastede JSON fra
+Nedlastinger-mappa (HOST FIX #3, se over) - Tobias trenger KUN gjøre selve Cloud Console-handlingen
+(opprette klienten + trykke "Download JSON"), ALDRI redigere `.env`. Selve Cloud Console-handlingen og
+nettleser-godkjenningen krever likevel fysisk tilstedeværelse på hosten og kan ikke gjøres fra denne
+sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`).
+Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld
+for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
+fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende
 for P1A. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er IKKE
 wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
 fremtidig byggeordre.
 
 ## Neste oppgave
-Tobias sitt neste steg avhenger av hva nettleseren viser når han kjører (PÅ HOSTEN, fra repo-roten):
+Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando, uansett utfall:
 `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
 
-- **Ser Tobias "Jarvis: autorisasjon mottatt"-siden:** alt fungerte - scriptet oppdaterer `.env`
-  automatisk og kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling nødvendig.
-- **Ser Tobias en Google-FEILSIDE ("redirect_uri_mismatch"):** trykk Ctrl+C (scriptet kan IKKE oppdage
-  dette selv). Cloud Console-siden er allerede åpnet automatisk i en egen fane - opprett en NY OAuth-
-  klient av typen "Desktop app" (f.eks. "Jarvis Desktop"), last ned client secret-JSON-fila, sett
-  `JARVIS_GOOGLE_CLIENT_SECRET_JSON=<sti>` i `.env`, og kjør NØYAKTIG samme kommando på nytt - ingen
-  andre endringer nødvendig. Dette er det ENE uunngåelige manuelle steget (ingen offentlig Google-API
-  for å opprette OAuth-klienter programmatisk).
+- **Fungerer den eksisterende klienten allerede (normalflyt):** scriptet fullfører helt av seg selv -
+  oppdaterer `.env` automatisk og kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling
+  nødvendig, og Tobias ser ALDRI noen ekstra fane.
+- **Viser Google en FEILSIDE ("redirect_uri_mismatch") i stedet:** Cloud Console-siden åpnes automatisk
+  etter ca. 25 sekunder. Tobias gjør DA kun: "Create Credentials" > "OAuth client ID" > type "Desktop
+  app" > naviger "Jarvis Desktop" > trykk "DOWNLOAD JSON". Det er DET - scriptet oppdager fila i
+  Nedlastinger AUTOMATISK (samme kjørende prosess, ingen restart, ingen `.env`-redigering, ingen filsti å
+  lime inn) og fortsetter selv helt til slutt.
 
 Forventet fullt-grønt host-sammendrag inkluderer `google_drive_test_scope=AUTO_CREATED` (eller
 `CONFIGURED`), samt PASS på

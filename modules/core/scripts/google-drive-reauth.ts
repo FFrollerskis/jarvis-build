@@ -76,21 +76,41 @@
 // PERMANENTE designet for akkurat Jarvis sin lokale, interaktive
 // eier-reauth-flyt). Google validerer redirect_uri FØR noe annet og sender
 // ALDRI noen callback tilbake ved mismatch - denne prosessen kan derfor
-// IKKE oppdage feilen selv (se `resolveOAuthClient()`/loggmeldingen FØR
-// nettleseren åpnes for Ctrl+C-veiledningen). Det finnes INGEN offentlig
-// Google-API for å opprette en OAuth-klient programmatisk (kun Cloud
-// Console-UI) - ETT manuelt steg er derfor uunngåelig. Scriptet reduserer
-// det til: opprett én "Desktop app"-klient i Cloud Console (lenken åpnes
-// automatisk), last ned JSON-en, pek en NY, valgfri `JARVIS_GOOGLE_
-// CLIENT_SECRET_JSON`-variabel i .env til den fila, kjør NØYAKTIG samme
-// kommando på nytt - scriptet leser/validerer/bruker den importerte
-// Desktop-klienten for HELE flyten og lagrer et koherent client_id/
-// _secret/token-sett sammen ved suksess (se `resolveOAuthClient()`).
+// IKKE oppdage feilen selv. Det finnes INGEN offentlig Google-API for å
+// opprette en OAuth-klient programmatisk (kun Cloud Console-UI) - ETT
+// manuelt steg er derfor uunngåelig: opprett én "Desktop app"-klient i
+// Cloud Console og trykk "Download JSON" (se HOST FIX #3 under for HVORDAN
+// scriptet oppdager DEN nedlastede fila helt av seg selv).
+//
+// HOST FIX #3 "ZERO MANUAL ENV EDITING" (2026-08-16): Tobias skal IKKE
+// måtte gjøre NOE MER enn selve Cloud Console-handlingen over - ALDRI
+// redigere .env, kopiere client_id/client_secret, eller lime inn en
+// filsti. Den SAMME kjørende prosessen `attemptOAuth()` starter det
+// opprinnelige forsøket OG (parallelt, i bakgrunn) en `watchForDesktop
+// ClientDownload()`-polling av Tobias sin Nedlastinger-mappe
+// (`os.homedir()/Downloads` - den dokumenterte standardplasseringen).
+// Racet (`Promise.race`) mellom disse to avgjør veien videre: kommer
+// callback-en FØRST (normalflyt, klienten var allerede riktig type),
+// fortsetter alt som før - Tobias ser ALDRI noen ekstra fane
+// (veiledningen/Cloud Console-siden vises FØRST etter `GUIDANCE_GRACE_MS`,
+// 25s - god margin for en vanlig kontovalg+samtykke-interaksjon). Finner
+// watcheren en NY, gyldig Desktop-klient-JSON FØRST (Tobias fulgte
+// veiledningen), avbrytes det opprinnelige callback-forsøket EKSPLISITT
+// (frigjør porten) og et FRISK OAuth-forsøk starter AUTOMATISK med den nye
+// klienten - i SAMME prosess, INGEN restart. Flere gyldige kandidatfiler
+// samtidig avgjøres ALDRI stille - Tobias velger eksplisitt via en trygg,
+// KUN-filnavn nummerert liste. `JARVIS_GOOGLE_CLIENT_SECRET_JSON` (HOST FIX
+// #2) forblir støttet for et avansert/manuelt oppsett, men er IKKE lenger
+// nødvendig for normalflyten, og persisteres ALDRI selv - kun et
+// engangs-import-artefakt. Ved suksess (uansett hvilket forsøk som vant)
+// skrives et koherent `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN`-sett til
+// de VANLIGE .env-nøklene i ÉN atomisk skriving.
 
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import {
@@ -105,24 +125,38 @@ import {
   buildCredentialsConsoleUrl,
   buildRedirectUri,
   classifyAccountConsistency,
+  classifyDiscoveryResult,
   decideRefreshToken,
   deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
+  formatCandidateSelectionPrompt,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
+  parseCandidateSelection,
   parseClientSecretJson,
+  selectNewCandidateJsonFiles,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
   validateClientCredentials,
-  type CallbackResult
+  type CallbackResult,
+  type DownloadCandidateFile
 } from "./lib/google-drive-reauth-lib.ts";
 import { buildUpdatedEnvLines, parseEnvValues, type EnvValues } from "./lib/q21-env-recovery.ts";
 
 const repoRoot = process.cwd();
 const envPath = join(repoRoot, ".env");
 const CALLBACK_TIMEOUT_MS = 5 * 60_000;
+// HOST FIX #3 "ZERO MANUAL ENV EDITING" (2026-08-16): hvor lenge scriptet
+// venter STILLE (ingen ekstra fane, ingen ekstra logg) FØR det viser
+// gjenopprettings-veiledningen og åpner Cloud Console-siden automatisk. En
+// NORMALT fungerende autorisasjon (riktig klienttype fra før) skal ALDRI
+// se noe ekstra - 25s er god margin for en vanlig menneskelig
+// kontovalg+samtykke-interaksjon (typisk et titalls sekunder), men KORT nok
+// til at Tobias raskt får hjelp hvis Google viste en feilside umiddelbart.
+const GUIDANCE_GRACE_MS = 25_000;
+const DOWNLOADS_POLL_INTERVAL_MS = 2000;
 
 function log(msg: string): void {
   console.log(`[google-drive-reauth] ${msg}`);
@@ -167,32 +201,147 @@ function openBrowser(url: string): void {
 const CALLBACK_HTML_OK = "<html><body><h3>Jarvis: autorisasjon mottatt.</h3><p>Du kan lukke denne fanen og gå tilbake til terminalen.</p></body></html>";
 const CALLBACK_HTML_ERR = "<html><body><h3>Jarvis: autorisasjon feilet.</h3><p>Gå tilbake til terminalen for detaljer.</p></body></html>";
 
-/** §4/§D/§E i ordren: én midlertidig loopback-server, venter på ÉN callback-request på OAUTH_CALLBACK_PATH, lukker seg selv deretter (uansett utfall). */
-async function waitForCallback(port: number, expectedState: string): Promise<CallbackResult> {
-  return new Promise((resolve, reject) => {
+interface CancellableCallback {
+  result: Promise<CallbackResult>;
+  /** HOST FIX #3: lukker den lokale serveren FØR den naturlige timeouten - trengs når et NYTT Desktop-klient-funn (Nedlastinger-watcheren) vinner racet og en FRISK OAuth-forsøk på SAMME port skal starte umiddelbart (porten må frigjøres først, ellers EADDRINUSE). Resolver ALDRI callback-en som en feil ved kanselering - `main()` bruker DENNE signaturen kun for portoppryddingen, aldri for callback-verdien. */
+  cancel: () => void;
+}
+
+/** §4/§D/§E i ordren (uendret): én midlertidig loopback-server, venter på ÉN callback-request på OAUTH_CALLBACK_PATH, lukker seg selv deretter (uansett utfall). HOST FIX #3: nå kansellerbar UTENFRA (se `cancel`) - trengs for å racet mot Nedlastinger-watcheren uten å låse porten. */
+function waitForCallback(port: number, expectedState: string): CancellableCallback {
+  let settled = false;
+  let finish: ((value: CallbackResult) => void) | undefined;
+  const result = new Promise<CallbackResult>((resolve, reject) => {
     const server = createServer((req, res) => {
       const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
       if (url.pathname !== OAUTH_CALLBACK_PATH) {
         res.writeHead(404).end();
         return;
       }
-      const result = parseCallbackQuery(req.url ?? "");
-      const ok = !result.error && isValidCallbackState(result.state, expectedState) && Boolean(result.code);
+      const parsed = parseCallbackQuery(req.url ?? "");
+      const ok = !parsed.error && isValidCallbackState(parsed.state, expectedState) && Boolean(parsed.code);
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(ok ? CALLBACK_HTML_OK : CALLBACK_HTML_ERR);
+      finish?.(parsed);
+    });
+    const timer = setTimeout(() => finish?.({ error: "TIMEOUT" }), CALLBACK_TIMEOUT_MS);
+    finish = (value: CallbackResult) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       server.close();
-      resolve(result);
-    });
-    const timer = setTimeout(() => {
-      server.close();
-      reject(new Error("google_reauth=FAIL_TIMEOUT: ingen callback mottatt innen 5 minutter - autorisasjonen ble ikke fullført i nettleseren."));
-    }, CALLBACK_TIMEOUT_MS);
+      resolve(value);
+    };
     server.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(err);
     });
     server.listen(port, "127.0.0.1");
   });
+  return { result, cancel: () => finish?.({ error: "CANCELLED" }) };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Lister KUN vanlige filer (ingen mapper/symlinker forsøkt fulgt) - en manglende/uleselig Nedlastinger-mappe gir ALDRI en krasj, kun en tom kandidatliste (pollingen fortsetter uansett). */
+function listDownloadsJsonCandidates(downloadsDir: string): DownloadCandidateFile[] {
+  if (!existsSync(downloadsDir)) return [];
+  const files: DownloadCandidateFile[] = [];
+  for (const entry of readdirSync(downloadsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".json")) continue;
+    const fullPath = join(downloadsDir, entry.name);
+    try {
+      files.push({ name: entry.name, path: fullPath, mtimeMs: statSync(fullPath).mtimeMs });
+    } catch {
+      // Fila kan ha blitt slettet/flyttet mellom listing og stat (nettleseren skriver ofte en .crdownload/.tmp FØR den fullfører) - hopp over, ikke krasj hele pollingen.
+    }
+  }
+  return files;
+}
+
+/** §1 i ordren: leser+validerer ÉN kandidatfil - en "web"-type/ugyldig JSON EKSKLUDERES STILLE (Nedlastinger kan inneholde mange urelaterte JSON-filer) - ALDRI en krasj av hele polling-løkka. */
+function tryReadValidDesktopClient(candidate: DownloadCandidateFile): { clientId: string; clientSecret: string } | undefined {
+  try {
+    return parseClientSecretJson(readFileSync(candidate.path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** §4 i ordren: trygg, KUN-filnavn nummerert velger - vises/spørres KUN når §G-tilfellet (flere gyldige kandidater samtidig) faktisk inntreffer. */
+async function promptForCandidateSelection(candidates: DownloadCandidateFile[]): Promise<string | undefined> {
+  log(
+    `Fant FLERE nye Desktop-OAuth-klient-JSON-filer i Nedlastinger samtidig - velg hvilken som er "Jarvis Desktop":\n` +
+      formatCandidateSelectionPrompt(candidates.map((c) => c.name))
+  );
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question("Skriv nummeret for riktig fil (eller trykk Enter for å fortsette å vente på flere nedlastinger): ");
+    const index = parseCandidateSelection(answer, candidates.length);
+    return index === undefined ? undefined : candidates[index]?.path;
+  } finally {
+    rl.close();
+  }
+}
+
+interface DesktopClientDownloadFound {
+  clientId: string;
+  clientSecret: string;
+  sourcePath: string;
+}
+
+interface CancellableWatch {
+  result: Promise<DesktopClientDownloadFound | undefined>;
+  cancel: () => void;
+}
+
+/**
+ * §2/§3/§9 i "ZERO MANUAL ENV EDITING"-ordren: den SAMME kjørende prosessen
+ * fortsetter automatisk - ALDRI en restart. Poller Nedlastinger-mappa for
+ * en NY, gyldig Desktop-OAuth-klient-JSON (§B/§C: KUN filer fra og med
+ * DENNE kjøringens eget starttidspunkt, se `selectNewCandidateJsonFiles()`
+ * i lib). Veiledningen/Cloud Console-fanen vises FØRST etter
+ * `GUIDANCE_GRACE_MS` (§ikke umiddelbart - en normalt fungerende
+ * autorisasjon skal ALDRI se noe ekstra). Flere gyldige kandidater samtidig
+ * (§4/§G) -> eksplisitt, trygg fil-navn-velger - ALDRI en stille gjetning.
+ */
+function watchForDesktopClientDownload(downloadsDir: string, sinceMs: number, onGuidanceDue: () => void): CancellableWatch {
+  let cancelled = false;
+  const guidanceTimer = setTimeout(onGuidanceDue, GUIDANCE_GRACE_MS);
+
+  const result = (async (): Promise<DesktopClientDownloadFound | undefined> => {
+    const deadlineMs = Date.now() + CALLBACK_TIMEOUT_MS;
+    try {
+      while (!cancelled && Date.now() < deadlineMs) {
+        const recent = selectNewCandidateJsonFiles(listDownloadsJsonCandidates(downloadsDir), sinceMs);
+        const valid: Array<DownloadCandidateFile & { clientId: string; clientSecret: string }> = [];
+        for (const candidate of recent) {
+          const parsed = tryReadValidDesktopClient(candidate);
+          if (parsed) valid.push({ ...candidate, ...parsed });
+        }
+        const classification = classifyDiscoveryResult(valid);
+        if (classification.kind === "single") {
+          const winner = valid.find((v) => v.path === classification.candidate.path);
+          if (winner) return { clientId: winner.clientId, clientSecret: winner.clientSecret, sourcePath: winner.path };
+        } else if (classification.kind === "multiple") {
+          clearTimeout(guidanceTimer);
+          onGuidanceDue();
+          const chosenPath = await promptForCandidateSelection(classification.candidates);
+          const winner = chosenPath ? valid.find((v) => v.path === chosenPath) : undefined;
+          if (winner) return { clientId: winner.clientId, clientSecret: winner.clientSecret, sourcePath: winner.path };
+        }
+        if (!cancelled) await sleep(DOWNLOADS_POLL_INTERVAL_MS);
+      }
+      return undefined;
+    } finally {
+      clearTimeout(guidanceTimer);
+    }
+  })();
+
+  return { result, cancel: () => { cancelled = true; } };
 }
 
 interface TokenResponse {
@@ -276,14 +425,18 @@ interface ResolvedOAuthClient {
 }
 
 /**
- * HOST FIX #2 (§1/§4/§6 i ordren): er `JARVIS_GOOGLE_CLIENT_SECRET_JSON`
+ * §7 i "ZERO MANUAL ENV EDITING"-ordren: er `JARVIS_GOOGLE_CLIENT_SECRET_JSON`
  * satt i .env, brukes DEN filens "installed" (Desktop app)-credentials for
- * HELE flyten i stedet for `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` - garanterer
- * et KOHERENT par (begge fra SAMME nedlastede fil, aldri blandet med en
- * annen klients verdier - §4 i ordren). En "web"-type fil avvises
- * EKSPLISITT (`WrongOAuthClientTypeError`, samme brittleness som klienten
- * Tobias allerede har) FØR noe forsøkes. Er variabelen IKKE satt: uendret
- * oppførsel (eksisterende `.env`-credentials, som før denne runden).
+ * HELE flyten (fortsatt støttet for et avansert/manuelt oppsett - se HOST
+ * FIX #2) - garanterer et KOHERENT par (begge fra SAMME nedlastede fil).
+ * En "web"-type fil avvises EKSPLISITT FØR noe forsøkes. Er variabelen IKKE
+ * satt (normalflyten): uendret oppførsel - de eksisterende `.env`-
+ * credentials brukes som FØRSTE forsøk (§7: "allerede importert/konfigurert
+ * -> hopp rett til OAuth"). Er DE ogSå en fungerende Desktop-klient (enten
+ * fra starten, eller fordi en TIDLIGERE kjøring av DENNE auto-discovery-
+ * flyten allerede persisterte en importert Desktop-klient hit), lykkes
+ * OAuth-forsøket normalt uten at Nedlastinger-oppdagelsen noensinne
+ * trengs.
  */
 function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {
   const jsonPath = values["JARVIS_GOOGLE_CLIENT_SECRET_JSON"] || undefined;
@@ -295,7 +448,7 @@ function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {
     }
     const parsed = parseClientSecretJson(readFileSync(jsonPath, "utf8"));
     log(
-      `bruker Desktop-OAuth-klient importert fra JARVIS_GOOGLE_CLIENT_SECRET_JSON (${jsonPath}) - IKKE .env sin ` +
+      `bruker Desktop-OAuth-klient importert fra JARVIS_GOOGLE_CLIENT_SECRET_JSON (${jsonPath}, avansert/manuelt oppsett) - IKKE .env sin ` +
         `eksisterende JARVIS_GOOGLE_CLIENT_ID/_SECRET (disse to oppdateres til å samsvare med den importerte klienten ved suksess, ` +
         `sammen med JARVIS_GOOGLE_TOKEN, i ÉN atomisk skriving - aldri et blandet/inkoherent sett).`
     );
@@ -307,69 +460,157 @@ function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {
   return { clientId, clientSecret: clientSecret as string, imported: false };
 }
 
-async function main(): Promise<void> {
-  const { lines, values } = readEnv();
-  const { clientId, clientSecret, imported: usingImportedClient } = resolveOAuthClient(values);
-  const existingRefreshToken = values["JARVIS_GOOGLE_TOKEN"] || undefined;
-  const configuredAccount = values["JARVIS_GOOGLE_ACCOUNT"] || undefined;
-  const port = values["JARVIS_GOOGLE_REAUTH_PORT"] ? Number(values["JARVIS_GOOGLE_REAUTH_PORT"]) : DEFAULT_REAUTH_PORT;
-  const redirectUri = buildRedirectUri(port);
-  const state = randomBytes(24).toString("hex");
-  const consoleUrl = buildCredentialsConsoleUrl(deriveProjectNumberFromClientId(clientId));
+interface OAuthAttemptCallback {
+  outcome: "callback";
+  callback: CallbackResult;
+  usedState: string;
+}
+interface OAuthAttemptNewClient {
+  outcome: "new_client";
+  found: DesktopClientDownloadFound;
+}
+type OAuthAttempt = OAuthAttemptCallback | OAuthAttemptNewClient;
 
-  if (usingImportedClient) {
-    log(`redirect_uri=${redirectUri} (importert Desktop app-klient - loopback-porter godtas uten forhåndsregistrering).`);
-  } else {
-    // HOST FIX #2 (2026-08-16, Tobias sitt faktiske host-funn): Google
-    // validerer redirect_uri FØR NOE ANNET (sikkerhetskritisk, hindrer
-    // open-redirect) - ved mismatch vises en feilside DIREKTE i
-    // nettleseren, og callback-serveren vår mottar ALDRI noe (INGEN vei å
-    // oppdage dette programmatisk fra denne prosessen - Google sender
-    // rett og slett ingen HTTP-request tilbake i det tilfellet). En
-    // "Desktop app"-klient godtar derimot loopback-redirects på HVILKEN
-    // SOM HELST port UTEN forhåndsregistrering (bekreftet Google-
-    // dokumentert oppførsel) - det ANBEFALTE, permanente designet for
-    // akkurat denne lokale eier-reauth-flyten. Det finnes INGEN offentlig
-    // Google-API for å opprette en OAuth-klient programmatisk (kun Cloud
-    // Console-UI) - dette er derfor den ENE uunngåelige manuelle
-    // handlingen, redusert til fem eksplisitte steg.
-    log(
-      `redirect_uri=${redirectUri}\n` +
-        `HOST FIX #2: denne eksisterende OAuth-klienten (JARVIS_GOOGLE_CLIENT_ID i .env) kan være registrert som ` +
-        `"Web application"-type, som krever en EKSAKT forhåndsregistrert redirect-URI - Google viser da ` +
-        `"Error 400: redirect_uri_mismatch" DIREKTE i nettleseren (dette scriptet kan IKKE oppdage den feilen selv, ` +
-        `siden Google ALDRI sender noen callback tilbake i det tilfellet).\n` +
-        `Ser du en Google-FEILSIDE (ikke en "Jarvis: autorisasjon mottatt"-side): trykk Ctrl+C her i stedet for å ` +
-        `vente 5 minutter, og gjør DETTE (permanent anbefalt løsning - ingen offentlig Google-API finnes for å ` +
-        `opprette en OAuth-klient programmatisk):\n` +
-        `  1. Google Cloud Console-siden er allerede åpnet i en egen fane: ${consoleUrl}\n` +
-        `  2. "Create Credentials" > "OAuth client ID" > velg type "Desktop app", gi den et navn som "Jarvis Desktop"\n` +
-        `  3. Last ned den resulterende client secret-JSON-fila\n` +
-        `  4. Sett JARVIS_GOOGLE_CLIENT_SECRET_JSON=<sti til den nedlastede fila> i .env\n` +
-        `  5. Kjør NØYAKTIG samme kommando på nytt - ingen andre endringer nødvendig.`
-    );
-  }
-  const authUrl = buildAuthorizationUrl({ clientId, redirectUri, scopes: REQUIRED_REAUTH_SCOPES, state, loginHint: configuredAccount });
+/**
+ * §2/§9 i ordren: ÉN autorisasjons-forsøk - bygger/validerer URL-en, åpner
+ * nettleseren, og (kun når `watchForNewClient` er sann - dvs. IKKE for en
+ * allerede importert/kjent Desktop-klient) racer callback-en mot
+ * Nedlastinger-watcheren SAMTIDIG. Vinner Nedlastinger-watcheren (Tobias
+ * opprettet+lastet ned en NY Desktop-klient mens denne ventet), avbrytes
+ * DENNE callback-serveren EKSPLISITT (frigjør porten) FØR funksjonen
+ * returnerer - `main()` kan da starte et FRISK forsøk på SAMME port
+ * umiddelbart, i SAMME prosess, uten restart.
+ */
+async function attemptOAuth(params: {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  port: number;
+  state: string;
+  loginHint: string | undefined;
+  consoleUrl: string;
+  watchForNewClient: boolean;
+  downloadsDir: string;
+  runStartMs: number;
+}): Promise<OAuthAttempt> {
+  const authUrl = buildAuthorizationUrl({
+    clientId: params.clientId,
+    redirectUri: params.redirectUri,
+    scopes: REQUIRED_REAUTH_SCOPES,
+    state: params.state,
+    loginHint: params.loginHint
+  });
   // §4 i host-fix-ordren: pre-flight - parse den GENERERTE URL-en tilbake og
   // krev eksplisitt response_type=code + client_id/redirect_uri/state + full
   // Drive-scope FØR nettleseren i det hele tatt åpnes. Kaster (server/
   // nettleser startes ALDRI) hvis noe mangler - fail-closed sikkerhetsnett.
   validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);
-  const callbackPromise = waitForCallback(port, state);
-  // §6.2 i host-fix #2-ordren: åpner Cloud Console-siden AUTOMATISK sammen
-  // med OAuth-URL-en når en eksisterende (ikke-importert) klient brukes -
-  // Tobias trenger den uansett hvis denne klienten er Web-type, og
-  // trenger den IKKE (ingen ekstra fane) når en Desktop-klient allerede
-  // er importert og fungerer.
-  if (!usingImportedClient) openBrowser(consoleUrl);
+  const callbackAttempt = waitForCallback(params.port, params.state);
   openBrowser(authUrl);
   log(`venter på autorisasjon i nettleseren (maks 5 minutter)... hvis den ikke åpnet automatisk, gå til:\n${authUrl}`);
 
-  const callback = await callbackPromise;
+  if (!params.watchForNewClient) {
+    return { outcome: "callback", callback: await callbackAttempt.result, usedState: params.state };
+  }
+
+  // HOST FIX #3 "ZERO MANUAL ENV EDITING": veiledningen/Cloud Console-fanen
+  // vises FØRST etter GUIDANCE_GRACE_MS - en normalt fungerende
+  // autorisasjon (klienten er allerede Desktop-type) skal ALDRI se en
+  // unødvendig ekstra fane. Pollingen av Nedlastinger starter derimot
+  // UMIDDELBART i bakgrunnen (stille) - en Tobias som allerede VET han
+  // trenger en ny klient og oppretter den proaktivt blir plukket opp med
+  // en gang, ingen venting på graceperioden.
+  const watch = watchForDesktopClientDownload(params.downloadsDir, params.runStartMs, () => {
+    log(
+      `HOST FIX #3: ingen autorisasjon mottatt ennå. Ser du en Google-FEILSIDE ("redirect_uri_mismatch") i stedet for ` +
+        `en "Jarvis: autorisasjon mottatt"-side: den eksisterende OAuth-klienten er trolig "Web application"-type - ` +
+        `Google Cloud Console-siden er allerede åpnet i en egen fane: ${params.consoleUrl}\n` +
+        `  1. "Create Credentials" > "OAuth client ID" > velg type "Desktop app", gi den et navn som "Jarvis Desktop"\n` +
+        `  2. Trykk "DOWNLOAD JSON"\n` +
+        `Det er DET - denne kjørende prosessen oppdager fila i Nedlastinger AUTOMATISK og fortsetter selv, ingen ` +
+        `andre kommando, ingen .env-redigering, ingen fil-sti å lime inn.`
+    );
+    openBrowser(params.consoleUrl);
+  });
+
+  const winner = await Promise.race([
+    callbackAttempt.result.then((callback) => ({ kind: "callback" as const, callback })),
+    watch.result.then((found) => ({ kind: "watch" as const, found }))
+  ]);
+
+  if (winner.kind === "callback") {
+    watch.cancel();
+    return { outcome: "callback", callback: winner.callback, usedState: params.state };
+  }
+  if (winner.found) {
+    // §2/§9 i ordren: EKSPLISITT avbrutt HER, FØR funksjonen returnerer -
+    // porten MÅ være fri før main() kan starte et nytt attemptOAuth()-kall.
+    callbackAttempt.cancel();
+    return { outcome: "new_client", found: winner.found };
+  }
+  // Nedlastinger-watcherens egen (delte) deadline ble nådd UTEN funn - IKKE
+  // avbryt callback-forsøket (det kan fortsatt fullføre et øyeblikk senere
+  // hvis Tobias faktisk var midt i å samtykke) - bare vent videre på DET.
+  return { outcome: "callback", callback: await callbackAttempt.result, usedState: params.state };
+}
+
+async function main(): Promise<void> {
+  const runStartMs = Date.now();
+  const { lines, values } = readEnv();
+  let { clientId, clientSecret, imported: usingImportedClient } = resolveOAuthClient(values);
+  const existingRefreshToken = values["JARVIS_GOOGLE_TOKEN"] || undefined;
+  const configuredAccount = values["JARVIS_GOOGLE_ACCOUNT"] || undefined;
+  const port = values["JARVIS_GOOGLE_REAUTH_PORT"] ? Number(values["JARVIS_GOOGLE_REAUTH_PORT"]) : DEFAULT_REAUTH_PORT;
+  const redirectUri = buildRedirectUri(port);
+  const downloadsDir = join(homedir(), "Downloads");
+
+  let attempt = await attemptOAuth({
+    clientId,
+    clientSecret,
+    redirectUri,
+    port,
+    state: randomBytes(24).toString("hex"),
+    loginHint: configuredAccount,
+    consoleUrl: buildCredentialsConsoleUrl(deriveProjectNumberFromClientId(clientId)),
+    watchForNewClient: !usingImportedClient,
+    downloadsDir,
+    runStartMs
+  });
+
+  if (attempt.outcome === "new_client") {
+    // §2/§9 i ordren: Tobias opprettet+lastet ned en NY Desktop-klient mens
+    // det FØRSTE forsøket ventet - denne SAMME prosessen fortsetter
+    // AUTOMATISK med den, ingen restart. Den forrige callback-serveren er
+    // allerede lukket (attemptOAuth() avbrøt den FØR "new_client" ble
+    // returnert) - porten er fri for et FRISK forsøk (ny state, samme
+    // port). `watchForNewClient: false` denne gangen - vi har ALLEREDE en
+    // Desktop-klient, ingen grunn til å polle Nedlastinger på nytt.
+    log(`Desktop-OAuth-klient oppdaget automatisk fra Nedlastinger (${attempt.found.sourcePath}) - fortsetter AUTOMATISK med DENNE klienten.`);
+    clientId = attempt.found.clientId;
+    clientSecret = attempt.found.clientSecret;
+    usingImportedClient = true;
+    attempt = await attemptOAuth({
+      clientId,
+      clientSecret,
+      redirectUri,
+      port,
+      state: randomBytes(24).toString("hex"),
+      loginHint: configuredAccount,
+      consoleUrl: buildCredentialsConsoleUrl(deriveProjectNumberFromClientId(clientId)),
+      watchForNewClient: false,
+      downloadsDir,
+      runStartMs
+    });
+    if (attempt.outcome === "new_client") {
+      throw new Error("google_reauth=FAIL_UNEXPECTED_STATE: watchForNewClient var deaktivert men fikk likevel 'new_client' tilbake - intern feil, rapporter dette.");
+    }
+  }
+
+  const { callback, usedState } = attempt;
   if (callback.error) {
     throw new Error(`google_reauth=FAIL_${callback.error}: Google-samtykket ble avvist eller feilet i nettleseren.`);
   }
-  if (!isValidCallbackState(callback.state, state)) {
+  if (!isValidCallbackState(callback.state, usedState)) {
     throw new Error(
       "google_reauth=FAIL_STATE_MISMATCH: callback-staten samsvarte ikke med det denne kjøringen selv genererte " +
         "(mulig CSRF/gammel fane) - INGEN token-exchange forsøkt."

@@ -9,14 +9,18 @@ import {
   buildCredentialsConsoleUrl,
   buildRedirectUri,
   classifyAccountConsistency,
+  classifyDiscoveryResult,
   decideRefreshToken,
   deriveProjectNumberFromClientId,
   formatAccountMismatchReport,
+  formatCandidateSelectionPrompt,
   hasAllRequiredScopes,
   isValidCallbackState,
   maskEmail,
   parseCallbackQuery,
+  parseCandidateSelection,
   parseClientSecretJson,
+  selectNewCandidateJsonFiles,
   tokenExchangeFailureReason,
   validateAuthorizationUrl,
   validateClientCredentials
@@ -291,5 +295,93 @@ describe("deriveProjectNumberFromClientId / buildCredentialsConsoleUrl - direkte
   });
   it("en generisk (uten prosjekt) URL brukes trygt når prosjektnummeret er ukjent - aldri en feilformet lenke", () => {
     expect(buildCredentialsConsoleUrl(undefined)).toBe("https://console.cloud.google.com/apis/credentials");
+  });
+});
+
+/**
+ * GOOGLE OAUTH HOST FIX #3 "ZERO MANUAL ENV EDITING" (2026-08-16): Tobias
+ * skal KUN gjøre ÉN uunngåelig manuell handling (opprette Desktop-klienten +
+ * trykke "Download JSON" i Cloud Console) - ALDRI redigere .env, kopiere
+ * client_id/secret, eller lime inn en filsti. Disse testene dekker den rene
+ * beslutnings-/filtreringslogikken bak "oppdag den nedlastede JSON-en
+ * automatisk fra Nedlastinger-mappa".
+ */
+describe("selectNewCandidateJsonFiles (§B/§C i ordren)", () => {
+  it("B: filtrerer til KUN .json-filer (andre filtyper i Nedlastinger ignoreres)", () => {
+    const files = [
+      { name: "client_secret_123.json", path: "/dl/client_secret_123.json", mtimeMs: 2000 },
+      { name: "notat.txt", path: "/dl/notat.txt", mtimeMs: 2000 },
+      { name: "bilde.png", path: "/dl/bilde.png", mtimeMs: 2000 }
+    ];
+    expect(selectNewCandidateJsonFiles(files, 0).map((f) => f.name)).toEqual(["client_secret_123.json"]);
+  });
+  it("C: KUN filer med mtime FRA OG MED kjøringens starttidspunkt regnes som nylig lastet ned - en gammel, urelatert JSON fra FØR kjøringen plukkes ALDRI opp", () => {
+    const runStartMs = 5000;
+    const files = [
+      { name: "gammel-ukjent-fil.json", path: "/dl/gammel-ukjent-fil.json", mtimeMs: 1000 },
+      { name: "client_secret_ny.json", path: "/dl/client_secret_ny.json", mtimeMs: 5500 }
+    ];
+    expect(selectNewCandidateJsonFiles(files, runStartMs).map((f) => f.name)).toEqual(["client_secret_ny.json"]);
+  });
+  it("sorterer nyest FØRST", () => {
+    const files = [
+      { name: "eldre.json", path: "/dl/eldre.json", mtimeMs: 100 },
+      { name: "nyere.json", path: "/dl/nyere.json", mtimeMs: 200 }
+    ];
+    expect(selectNewCandidateJsonFiles(files, 0).map((f) => f.name)).toEqual(["nyere.json", "eldre.json"]);
+  });
+  it("filnavn-matching er case-insensitiv (.JSON godtas også)", () => {
+    const files = [{ name: "CLIENT_SECRET.JSON", path: "/dl/CLIENT_SECRET.JSON", mtimeMs: 100 }];
+    expect(selectNewCandidateJsonFiles(files, 0)).toHaveLength(1);
+  });
+});
+
+describe("classifyDiscoveryResult (§A/§G i ordren) - ALDRI gjett stille ved flere kandidater", () => {
+  it("A: ingen gyldige kandidater -> 'none' (fortsett å vente/poll)", () => {
+    expect(classifyDiscoveryResult([])).toEqual({ kind: "none" });
+  });
+  it("nøyaktig ÉN gyldig kandidat -> 'single', brukes automatisk", () => {
+    const candidate = { name: "jarvis-desktop.json", path: "/dl/jarvis-desktop.json", mtimeMs: 100 };
+    expect(classifyDiscoveryResult([candidate])).toEqual({ kind: "single", candidate });
+  });
+  it("G: FLERE gyldige kandidater -> 'multiple' - krever eksplisitt valg, ALDRI en stille gjetning på hvilken som er riktig", () => {
+    const a = { name: "a.json", path: "/dl/a.json", mtimeMs: 100 };
+    const b = { name: "b.json", path: "/dl/b.json", mtimeMs: 200 };
+    expect(classifyDiscoveryResult([a, b])).toEqual({ kind: "multiple", candidates: [a, b] });
+  });
+});
+
+describe("formatCandidateSelectionPrompt / parseCandidateSelection - trygg, KUN-filnavn nummerert liste", () => {
+  it("nummererer filnavnene 1-indeksert, ett per linje", () => {
+    expect(formatCandidateSelectionPrompt(["a.json", "b.json"])).toBe("  1) a.json\n  2) b.json");
+  });
+  it("H: prompten inneholder ALDRI client_id/client_secret - kun filnavn (testes strukturelt her ved at funksjonen kun tar imot en string[] av navn, ingen credential-verdier kan lekke inn)", () => {
+    const prompt = formatCandidateSelectionPrompt(["client_secret_abc123.json"]);
+    expect(prompt).not.toMatch(/GOCSPX|client_secret":/);
+  });
+  it("gyldig tallvalg innenfor rekkevidde returnerer en 0-indeksert posisjon", () => {
+    expect(parseCandidateSelection("1", 2)).toBe(0);
+    expect(parseCandidateSelection("2", 2)).toBe(1);
+  });
+  it("ugyldig/utenfor-rekkevidde/ikke-numerisk input returnerer undefined (orchestratoren spør på nytt, kaster ALDRI en kryptisk indeksfeil)", () => {
+    expect(parseCandidateSelection("0", 2)).toBeUndefined();
+    expect(parseCandidateSelection("3", 2)).toBeUndefined();
+    expect(parseCandidateSelection("abc", 2)).toBeUndefined();
+    expect(parseCandidateSelection("1.5", 2)).toBeUndefined();
+    expect(parseCandidateSelection("", 2)).toBeUndefined();
+  });
+});
+
+describe("D/E/F (host-fix #3): en oppdaget kandidatfil valideres FORTSATT med den EKSISTERENDE parseClientSecretJson() - ingen ny/parallell valideringslogikk", () => {
+  it("D: en gyldig installed/Desktop-JSON blant kandidatene aksepteres", () => {
+    const json = JSON.stringify({ installed: { client_id: "1-abc.apps.googleusercontent.com", client_secret: "s" } });
+    expect(parseClientSecretJson(json)).toEqual({ clientId: "1-abc.apps.googleusercontent.com", clientSecret: "s" });
+  });
+  it("E: en web-JSON blant kandidatene avvises EKSPLISITT (samme WrongOAuthClientTypeError som før - orchestratoren ekskluderer denne stille fra kandidatlisten i stedet for å krasje hele polling-løkka)", () => {
+    const json = JSON.stringify({ web: { client_id: "1-abc.apps.googleusercontent.com", client_secret: "s" } });
+    expect(() => parseClientSecretJson(json)).toThrow(WrongOAuthClientTypeError);
+  });
+  it("F: en søppel/ugyldig JSON blant kandidatene avvises EKSPLISITT (samme MalformedClientSecretJsonError som før)", () => {
+    expect(() => parseClientSecretJson("{ ikke gyldig")).toThrow(MalformedClientSecretJsonError);
   });
 });
