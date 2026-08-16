@@ -167,7 +167,7 @@ export class GoogleDriveTransport implements ToolTransport {
     }
   }
 
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }> {
     const token = await googleAccessToken(credential);
     const auth = { authorization: `Bearer ${token}` };
 
