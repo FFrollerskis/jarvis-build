@@ -690,15 +690,53 @@ PR #4 merges til `main`.
   Cloud Console-steg (hvis nødvendig) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget.
   Ett-kommando-kontrakten er UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## GOOGLE OAUTH HOST FIX #4 "SETUP-FØRST, ALDRI AUTH MED KJENT WEB-KLIENT" (samme dag, 2026-08-16)
+- **Host-funn:** Tobias kjørte HOST FIX #3-versjonen. Nettleseren åpnet Google OAuth UMIDDELBART og fikk
+  igjen `Error 400: redirect_uri_mismatch` (kontoen vist: `post@tsworkflow.com`) - beviset på at racet
+  (opprinnelig OAuth-forsøk kjørt SAMTIDIG med Nedlastinger-oppdagelsen) startet OAuth med den samme,
+  allerede kjent inkompatible Web-klienten FØR noen Desktop-klient var på plass.
+- **Root cause:** HOST FIX #3 sitt design antok at man MÅTTE prøve eksisterende credentials FØRST for å
+  "oppdage" om de var utilstrekkelige. For et tilfelle der Tobias ALLEREDE (fra HOST FIX #2) har bevist
+  at eksisterende `JARVIS_GOOGLE_CLIENT_ID` er en Web-klient, er dette feil - vi VET allerede at et
+  OAuth-forsøk med den vil feile, og skal derfor ALDRI forsøkes.
+- **Racet er FJERNET.** Ny, strengt sekvensiell tilstandsmaskin: `resolveProvenDesktopClient()` avgjør
+  FØRST om en POSITIVT bevist Desktop-klient finnes - enten en eksplisitt `JARVIS_GOOGLE_CLIENT_SECRET_
+  JSON`-import (HOST FIX #2, avansert/manuelt), ELLER en NY `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop`-
+  metadata-linje persistert av EN TIDLIGERE vellykket kjøring av DENNE flyten. Eksisterende
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` ALENE (uten den metadata-linjen) regnes ALDRI som bevist Desktop -
+  de kan være NØYAKTIG den samme Web-klienten som allerede har feilet TO GANGER, og brukes derfor ALDRI
+  til et OAuth-forsøk.
+- **Finnes ingen bevist klient:** `main()` går INN i SETUP_REQUIRED FØR noe OAuth-forsøk i det hele tatt
+  vurderes. Cloud Console-siden åpnes UMIDDELBART (ingen "vent og se"-graceperiode lenger - setup-behovet
+  er allerede kjent, ikke en gjetning), og `waitForDesktopClientJson()` venter ALENE (ingen samtidig
+  OAuth-forsøk) i inntil 10 minutter på at en gyldig, ny Desktop-klient-JSON dukker opp i Nedlastinger.
+  Først NÅR en slik klient er funnet+validert bygges autorisasjons-URL-en - ALLTID med DEN klientens
+  `client_id`, ALDRI den rå `JARVIS_GOOGLE_CLIENT_ID`-verdien direkte.
+- **`waitForCallback()` forenklet tilbake** til en enkel (ikke-kansellerbar) funksjon - siden det aldri
+  finnes mer enn ÉTT OAuth-forsøk per kjøring lenger, er hele kanselleringsmekanismen fra HOST FIX #3
+  unødvendig og fjernet.
+- **Koherent persistering utvidet:** ved full suksess skrives `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/
+  `_TOKEN` OG den nye `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop`-metadata-linjen SAMMEN i ÉN atomisk
+  skriving - FØR suksess er gamle credentials (om noen) HELT urørt, slik at eksisterende, fungerende
+  Gmail/Calendar-integrasjoner (som deler samme `JARVIS_GOOGLE_TOKEN`) aldri risikerer å miste sin
+  gyldige credential midt i en mislykket reauth-kjøring.
+- **Tester:** wiring-testsuiten omskrevet fra grunnen for den nye sekvensielle flyten (50 tester, dekker
+  ordrens §10 A-L) - 631/631 totalt (færre enn forrige runde ved design, siden race-spesifikke tester er
+  erstattet av færre, mer presise sekvensielle tester). Lint/full monorepo-typecheck/gitleaks alle rene.
+- **STATUS: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY, IKKE VERIFIED** - krever Tobias sitt ENE
+  Cloud Console-steg (hvis nødvendig, nå UTEN risiko for at scriptet prøver den kjente Web-klienten
+  først) etterfulgt av en NY host-kjøring. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er
+  UENDRET: `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
 reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget. Det
 eksisterende `JARVIS_GOOGLE_TOKEN` mangler full Drive-scope (host-bevist, run_id `262ac1bb`,
-`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`), og den eksisterende OAuth-klienten er etter alt å
-dømme "Web application"-type (host-bevist, `redirect_uri_mismatch`) - hvis DET fortsatt inntreffer,
-oppdager `google-drive-reauth.ts` nå AUTOMATISK en nyopprettet Desktop-klients nedlastede JSON fra
-Nedlastinger-mappa (HOST FIX #3, se over) - Tobias trenger KUN gjøre selve Cloud Console-handlingen
-(opprette klienten + trykke "Download JSON"), ALDRI redigere `.env`. Selve Cloud Console-handlingen og
+`google_drive_auth_scope=BLOCKED_REAUTH_REQUIRED`), og den eksisterende OAuth-klienten er BEVIST
+"Web application"-type (host-bevist TO GANGER, `redirect_uri_mismatch`) - `google-drive-reauth.ts`
+forsøker DERFOR ALDRI lenger den klienten (HOST FIX #4): finnes ingen bevist Desktop-klient, går
+scriptet rett i setup-modus - Tobias trenger KUN gjøre selve Cloud Console-handlingen (opprette en
+Desktop-klient + trykke "Download JSON"), ALDRI redigere `.env`. Selve Cloud Console-handlingen og
 nettleser-godkjenningen krever likevel fysisk tilstedeværelse på hosten og kan ikke gjøres fra denne
 sky-sandboxen. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`).
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld
@@ -710,20 +748,21 @@ wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`
 fremtidig byggeordre.
 
 ## Neste oppgave
-Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando, uansett utfall:
+Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando:
 `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
 
-- **Fungerer den eksisterende klienten allerede (normalflyt):** scriptet fullfører helt av seg selv -
-  oppdaterer `.env` automatisk og kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling
-  nødvendig, og Tobias ser ALDRI noen ekstra fane.
-- **Viser Google en FEILSIDE ("redirect_uri_mismatch") i stedet:** Cloud Console-siden åpnes automatisk
-  etter ca. 25 sekunder. Tobias gjør DA kun: "Create Credentials" > "OAuth client ID" > type "Desktop
-  app" > naviger "Jarvis Desktop" > trykk "DOWNLOAD JSON". Det er DET - scriptet oppdager fila i
-  Nedlastinger AUTOMATISK (samme kjørende prosess, ingen restart, ingen `.env`-redigering, ingen filsti å
-  lime inn) og fortsetter selv helt til slutt.
+- **Har Tobias ALLEREDE en bevist Desktop-klient** (fra en tidligere kjøring, `JARVIS_GOOGLE_OAUTH_
+  CLIENT_TYPE=desktop` i `.env`): scriptet går RETT til OAuth-samtykke, oppdaterer `.env` automatisk og
+  kjeder rett videre til `ua2-p1a-host-run.ts`. Ingen videre handling nødvendig.
+- **Ingen bevist Desktop-klient (forventet denne runden - kjent Web-klient):** Cloud Console-siden åpnes
+  UMIDDELBART. Tobias gjør KUN: "Create Credentials" > "OAuth client ID" > type "Desktop app" > naviger
+  "Jarvis Desktop" > trykk "DOWNLOAD JSON". Det er DET - scriptet oppdager fila i Nedlastinger
+  AUTOMATISK (samme kjørende prosess, ingen restart, ingen `.env`-redigering, ingen filsti å lime inn),
+  bygger DERETTER autorisasjons-URL-en med DEN nye klienten, og fortsetter selv helt til slutt.
 
-Forventet fullt-grønt host-sammendrag inkluderer `google_drive_test_scope=AUTO_CREATED` (eller
-`CONFIGURED`), samt PASS på
+Forventet fullt-grønt host-sammendrag inkluderer `google_desktop_client_status=WAITING_FOR_DOWNLOAD` →
+`google_desktop_client_import=PASS` → `google_desktop_client_type=desktop`, deretter
+`google_drive_test_scope=AUTO_CREATED` (eller `CONFIGURED`), samt PASS på
 auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/sync/q20_no_resurrection/
 idempotency/policy. **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den
 kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion,

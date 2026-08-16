@@ -33,16 +33,6 @@ describe("§14: ett-kommando-kontrakten er dokumentert og eksakt", () => {
   });
 });
 
-describe("§A: manglende client credentials -> fail-closed FØR noe startes (ingen server/nettleser)", () => {
-  it("validateClientCredentials() kalles FØR waitForCallback()/openBrowser()", () => {
-    const validateIdx = indexOfAll("validateClientCredentials(clientId, clientSecret);");
-    const callbackIdx = indexOfAll('waitForCallback(params.port, params.state);');
-    const browserIdx = indexOfAll("openBrowser(authUrl);");
-    expect(validateIdx).toBeLessThan(callbackIdx);
-    expect(validateIdx).toBeLessThan(browserIdx);
-  });
-});
-
 describe("§C: den avviklede OOB-flyten brukes ALDRI i orchestratoren", () => {
   it("ingen 'urn:ietf:wg:oauth:2.0:oob' i noen KODE-linje (kommentaren over forklarer bevisst HVORFOR den unngås, og nevner strengen som dokumentasjon - ikke bruk)", () => {
     expect(codeOnly).not.toContain("urn:ietf:wg:oauth:2.0:oob");
@@ -54,7 +44,7 @@ describe("§C: den avviklede OOB-flyten brukes ALDRI i orchestratoren", () => {
 
 describe("§D/§E: state/CSRF sjekkes FØR noen token-exchange forsøkes", () => {
   it("isValidCallbackState() evalueres FØR exchangeCode() kalles", () => {
-    const stateCheckIdx = indexOfAll("if (!isValidCallbackState(callback.state, usedState)) {");
+    const stateCheckIdx = indexOfAll("if (!isValidCallbackState(callback.state, state)) {");
     const exchangeIdx = indexOfAll("await exchangeCode(");
     expect(stateCheckIdx).toBeLessThan(exchangeIdx);
   });
@@ -101,24 +91,11 @@ describe("§I/§O: refresh-token-beslutning + konto-mismatch-avslag stopper FØR
   });
 });
 
-describe("§J/§K: kun JARVIS_GOOGLE_TOKEN-linjen røres, gjenbruker den EKSISTERENDE .env-oppdaterings-/backup-mekanismen (ingen parallell implementasjon)", () => {
+describe("§J/§K: gjenbruker den EKSISTERENDE .env-oppdaterings-/backup-mekanismen (ingen parallell implementasjon)", () => {
   it("importerer buildUpdatedEnvLines/parseEnvValues fra den EKSISTERENDE lib/q21-env-recovery.ts", () => {
     expect(source).toContain('from "./lib/q21-env-recovery.ts"');
     expect(source).toContain("buildUpdatedEnvLines");
     expect(source).toContain("parseEnvValues");
-  });
-  it("updates-objektet setter NORMALT (ikke-importert klient) KUN JARVIS_GOOGLE_TOKEN - ingen andre nøkler røres i den grenen", () => {
-    const updatesIdx = source.indexOf("const updates: EnvValues = usingImportedClient");
-    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
-    expect(updatesBlock).toContain("JARVIS_GOOGLE_TOKEN: decision.refreshToken");
-    // De to grenene av ternary-uttrykket: KUN importert-grenen inneholder client_id/_secret sammen med token:
-    const importedBranch = updatesBlock.slice(0, updatesBlock.indexOf(": { JARVIS_GOOGLE_TOKEN"));
-    const plainBranch = updatesBlock.slice(updatesBlock.indexOf(": { JARVIS_GOOGLE_TOKEN"));
-    expect(importedBranch).toContain("JARVIS_GOOGLE_CLIENT_ID: clientId");
-    expect(importedBranch).toContain("JARVIS_GOOGLE_CLIENT_SECRET: clientSecret");
-    expect(plainBranch).not.toContain("JARVIS_GOOGLE_CLIENT_ID");
-    expect(plainBranch).not.toContain("JARVIS_GOOGLE_CLIENT_SECRET");
-    expect(updatesBlock).not.toContain("JARVIS_GOOGLE_ACCOUNT");
   });
   it("timestemplet backup skrives med .env.bak.<epoch>-mønsteret", () => {
     expect(source).toContain("`${envPath}.bak.${Date.now()}`");
@@ -175,14 +152,11 @@ describe("§N: suksessfull reauth kjeder AUTOMATISK inn i ua2-p1a-host-run.ts - 
   });
 });
 
-describe("§P: en fersk state/nonce genereres FOR HVER kjøring/HVERT forsøk - ingen persistert tilstand mellom kjøringer gjør gjentatt bruk utrygg", () => {
-  it("state genereres via randomBytes(24) INNI main() for HVERT attemptOAuth()-kall, ikke som en modul-nivå konstant (HOST FIX #3: kan kalles TO GANGER - opprinnelig forsøk + evt. ett friskt forsøk med en nyoppdaget Desktop-klient)", () => {
+describe("§P: en fersk state/nonce genereres FOR HVER kjøring - ingen persistert tilstand mellom kjøringer gjør gjentatt bruk utrygg", () => {
+  it("state genereres via randomBytes(24) INNI main(), ikke som en modul-nivå konstant", () => {
     const mainStart = indexOfAll("async function main(): Promise<void> {");
-    const occurrences = [...source.matchAll(/state: randomBytes\(24\)\.toString\("hex"\)/g)];
-    expect(occurrences.length).toBeGreaterThanOrEqual(2);
-    for (const m of occurrences) {
-      expect(m.index as number).toBeGreaterThan(mainStart);
-    }
+    const stateIdx = indexOfAll('const state = randomBytes(24).toString("hex");');
+    expect(stateIdx).toBeGreaterThan(mainStart);
   });
   it("ingen nonce/state-fil skrives til disk - writeFileSync brukes KUN for den atomiske .env-oppdateringen (tmpPath, avledet av envPath)", () => {
     const writeFileSyncCalls = [...source.matchAll(/writeFileSync\(([^,]+),/g)].map((m) => (m[1] ?? "").trim());
@@ -207,17 +181,6 @@ describe("§12: reauth-scriptet muterer ALDRI Drive utover trygg lese-verifiseri
   });
 });
 
-/**
- * GOOGLE DRIVE REAUTH HOST FIX (2026-08-16): Tobias sin faktiske kjøring
- * feilet med "Required parameter is missing: response_type" OG viste feil
- * konto (henrik@ffskis.com) samtidig - root cause var `openBrowser()` sin
- * daværende Windows-vei (`cmd /c start "" <url>`) som korrumperte URL-en
- * (cmd.exe sin `/c`-linjeparsing splitter på et USITERT `&` i
- * spørrestrengen - Node sin Windows-argv-quoting siterer IKKE et argument
- * som verken har mellomrom eller anførselstegn). Denne seksjonen beviser
- * fiksen strukturelt: `cmd`/`start` er HELT BORTE fra Windows-veien, og
- * pre-flight-validering + tvunget kontovelger er faktisk koblet inn.
- */
 describe("§1 (host-fix): cmd.exe/'start' er ALDRI lenger involvert i å åpne nettleseren på Windows", () => {
   it("openBrowser() sin Windows-gren bruker rundll32.exe (native .exe, ingen shell/kommandotolk)", () => {
     const fnStart = source.indexOf("function openBrowser(url: string): void {");
@@ -232,14 +195,10 @@ describe("§1 (host-fix): cmd.exe/'start' er ALDRI lenger involvert i å åpne n
 });
 
 describe("§2/§C (host-fix): Google sin kontovelger tvinges ALLTID - aldri en stille auto-valgt allerede-innlogget konto", () => {
-  it("buildAuthorizationUrl() kalles med loginHint (params.loginHint inni attemptOAuth) - ALDRI en hardkodet/manglende kontohint-verdi", () => {
+  it("buildAuthorizationUrl() kalles med loginHint: configuredAccount - ALDRI en hardkodet/manglende kontohint-verdi", () => {
     const callIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
     const callLine = source.slice(callIdx, source.indexOf("});", callIdx) + 3);
-    expect(callLine).toContain("loginHint: params.loginHint");
-  });
-  it("main() gir loginHint: configuredAccount til BEGGE mulige attemptOAuth()-kall (opprinnelig + evt. retry)", () => {
-    const occurrences = [...source.matchAll(/loginHint: configuredAccount/g)];
-    expect(occurrences.length).toBeGreaterThanOrEqual(2);
+    expect(callLine).toContain("loginHint: configuredAccount");
   });
 });
 
@@ -247,7 +206,7 @@ describe("§4/§G (host-fix): pre-flight URL-validering skjer FØR noen server s
   it("validateAuthorizationUrl() kalles FØR waitForCallback()/openBrowser()", () => {
     const buildIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
     const validateIdx = indexOfAll("validateAuthorizationUrl(authUrl, REQUIRED_REAUTH_SCOPES);");
-    const callbackIdx = indexOfAll('const callbackAttempt = waitForCallback(params.port, params.state);');
+    const callbackIdx = indexOfAll("const callbackPromise = waitForCallback(port, state);");
     const browserIdx = source.indexOf("openBrowser(authUrl);");
     expect(buildIdx).toBeLessThan(validateIdx);
     expect(validateIdx).toBeLessThan(callbackIdx);
@@ -277,131 +236,107 @@ describe("§K (host-fix): fortsatt ingen secrets logges etter denne rundens endr
 });
 
 /**
- * GOOGLE OAUTH HOST FIX #2 (2026-08-16): Tobias sin faktiske klient ga
- * "Error 400: redirect_uri_mismatch" - Google validerer redirect_uri FØR
- * noe annet og sender ALDRI noen callback tilbake i det tilfellet, så
- * denne prosessen kan IKKE oppdage feilen selv via callback-serveren.
- * Permanent løsning: en dedikert "Desktop app"-OAuth-klient, importert via
- * en nedlastet client-secret-JSON (JARVIS_GOOGLE_CLIENT_SECRET_JSON i
- * .env) - se google-drive-reauth-lib.test.ts for selve
- * JSON-parse-/type-avvisnings-logikken. Denne seksjonen beviser
- * ORCHESTRATOR-koblingen strukturelt: koherent credential-sett,
- * ingen blanding av gammel/ny klient, og en trygg gjenoppta-etter-manuell-
- * handling-flyt.
+ * GOOGLE OAUTH HOST FIX #4 "SETUP-FØRST, ALDRI AUTH MED KJENT WEB-KLIENT"
+ * (2026-08-16): Tobias sin FAKTISKE neste host-kjøring beviste at HOST FIX
+ * #3 sitt race var feil design - nettleseren åpnet Google OAuth
+ * UMIDDELBART med den samme, allerede kjent inkompatible Web-klienten
+ * (samme "redirect_uri_mismatch" som HOST FIX #2). Denne seksjonen beviser
+ * at racet er FJERNET og erstattet med en STRENGT sekvensiell
+ * setup-først-flyt: `resolveProvenDesktopClient()` avgjøres FØRST, og et
+ * OAuth-forsøk startes ALDRI før en Desktop-klient er POSITIVT bevist
+ * (enten fra før, eller nyoppdaget via `waitForDesktopClientJson()`, som
+ * venter ALENE - ingen samtidig OAuth-forsøk).
  */
-describe("HOST FIX #2: JARVIS_GOOGLE_CLIENT_SECRET_JSON importeres FØR client-credential-validering - ingen blanding av gammel/ny klient", () => {
-  it("resolveOAuthClient() kalles FØRST i main() - client_id/_secret er ALLTID fra ÉN kilde (enten importert JSON eller .env, aldri en blanding), FØR det FØRSTE attemptOAuth()-kallet", () => {
+describe("A (host-fix #4): resolveProvenDesktopClient() avgjøres FØRST i main() - OAuth-URL-en bygges ALDRI FØR client er avklart", () => {
+  it("client = resolveProvenDesktopClient(values) skjer FØR buildAuthorizationUrl()-kallet", () => {
     const mainStart = indexOfAll("async function main(): Promise<void> {");
-    const mainEnd = source.indexOf("\nmain().catch", mainStart);
-    const mainBody = source.slice(mainStart, mainEnd);
-    const resolveIdx = mainBody.indexOf("resolveOAuthClient(values)");
-    const firstAttemptIdx = mainBody.indexOf("await attemptOAuth({");
-    expect(resolveIdx).toBeGreaterThan(-1);
-    expect(firstAttemptIdx).toBeGreaterThan(-1);
-    expect(resolveIdx).toBeLessThan(firstAttemptIdx);
+    const resolveIdx = indexOfAll("let client = resolveProvenDesktopClient(values);");
+    const authUrlIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    expect(mainStart).toBeLessThan(resolveIdx);
+    expect(resolveIdx).toBeLessThan(authUrlIdx);
   });
-  it("resolveOAuthClient() feiler FØR credential-json-stien noensinne skrives til .env (eksisterer-sjekk FØR parseClientSecretJson)", () => {
-    const fnStart = indexOfAll("function resolveOAuthClient(values: EnvValues): ResolvedOAuthClient {");
-    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
-    const existsIdx = fnBody.indexOf("existsSync(jsonPath)");
-    const parseIdx = fnBody.indexOf("parseClientSecretJson(");
-    expect(existsIdx).toBeGreaterThan(-1);
-    expect(parseIdx).toBeGreaterThan(existsIdx);
+  it("legacy JARVIS_GOOGLE_CLIENT_ID/_SECRET ALENE (uten JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop) gir IKKE en bevist klient - resolveProvenDesktopClient() krever EKSPLISITT enten JSON-import eller den persisterte metadata-linjen", () => {
+    const fnStart = indexOfAll("function resolveProvenDesktopClient(values: EnvValues): ProvenDesktopClient | undefined {");
+    const fnBody = source.slice(fnStart, source.indexOf("\nasync function main", fnStart));
+    expect(fnBody).toContain('clientType === "desktop"');
+    expect(fnBody).toContain("return undefined;");
   });
-  it("HELE flyten (autorisasjons-URL, token-exchange, refresh-scope-sjekk) bruker de SAMME clientId/clientSecret-variablene fra resolveOAuthClient() - ingen parallell/duplisert lesing av JARVIS_GOOGLE_CLIENT_ID/_SECRET andre steder i main()", () => {
+});
+
+describe("B (host-fix #4): INGEN OAuth-URL bygges/åpnes FØR en Desktop-klient er bevist - SETUP_REQUIRED-grenen kjøres FØRST og FERDIG", () => {
+  it("Cloud Console-siden (SETUP_REQUIRED) åpnes STRUKTURELT FØR buildAuthorizationUrl()/openBrowser(authUrl) - if(!client)-blokken avsluttes FØR OAuth-seksjonen starter", () => {
     const mainStart = indexOfAll("async function main(): Promise<void> {");
-    const mainBody = source.slice(mainStart, source.indexOf("\nmain().catch", mainStart));
-    const directEnvReads = [...mainBody.matchAll(/values\["JARVIS_GOOGLE_CLIENT_(ID|SECRET)"\]/g)];
-    expect(directEnvReads).toHaveLength(0);
+    const setupRequiredIdx = indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");');
+    const waitIdx = indexOfAll("const found = await waitForDesktopClientJson(downloadsDir, runStartMs);");
+    const authUrlIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    expect(mainStart).toBeLessThan(setupRequiredIdx);
+    expect(setupRequiredIdx).toBeLessThan(waitIdx);
+    expect(waitIdx).toBeLessThan(authUrlIdx);
+  });
+  it("Cloud Console-siden åpnes UMIDDELBART i SETUP_REQUIRED-grenen - INGEN 25s-graceperiode/setTimeout lenger (den forrige runden sin GUIDANCE_GRACE_MS er fjernet)", () => {
+    expect(codeOnly).not.toContain("GUIDANCE_GRACE_MS");
+    const setupRequiredIdx = indexOfAll('log("google_desktop_client_status=SETUP_REQUIRED");');
+    const openConsoleIdx = source.indexOf("openBrowser(consoleUrl);", setupRequiredIdx);
+    expect(openConsoleIdx).toBeGreaterThan(setupRequiredIdx);
+    expect(openConsoleIdx).toBeLessThan(setupRequiredIdx + 400);
   });
 });
 
-describe("HOST FIX #2: koherent client_id/client_secret/token-sett - aldri kun token skrevet mot en client_id/_secret som ikke lenger samsvarer", () => {
-  it("en IMPORTERT Desktop-klient skriver client_id+client_secret+token SAMMEN i ÉN buildUpdatedEnvLines()-kall - ikke to separate skrivinger", () => {
-    expect([...source.matchAll(/buildUpdatedEnvLines\(/g)]).toHaveLength(1);
+describe("C (host-fix #4): Nedlastinger-watcheren venter ALENE - INGEN samtidig OAuth-forsøk (ingen race)", () => {
+  it("J: ingen Promise.race() finnes NOE STED i fila lenger - det er ALDRI mer enn ett OAuth-forsøk per kjøring", () => {
+    expect(codeOnly).not.toMatch(/Promise\.race/);
+    expect(codeOnly).not.toContain("attemptOAuth");
+    expect(codeOnly).not.toContain("watchForDesktopClientDownload");
   });
-  it("den importerte klientens EGNE clientId/clientSecret-variabler skrives tilbake (ikke en hardkodet/annen verdi)", () => {
-    const updatesIdx = indexOfAll("const updates: EnvValues = usingImportedClient");
-    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
-    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_ID: clientId");
-    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_SECRET: clientSecret");
-  });
-});
-
-describe("HOST FIX #2: kontovelger (select_account) er UENDRET/bevart uansett hvilken klientkilde som brukes", () => {
-  it("buildAuthorizationUrl()-kallet bruker SAMME REQUIRED_REAUTH_SCOPES/loginHint-mønster uavhengig av usingImportedClient (ingen egen gren som dropper select_account for importerte klienter)", () => {
-    expect([...source.matchAll(/buildAuthorizationUrl\(\{/g)]).toHaveLength(1);
-  });
-});
-
-describe("HOST FIX #2: gjenoppta-etter-manuell-Cloud-Console-handling er .env-drevet (avansert/manuelt oppsett) - ingen CLI-flagg/interaktiv prompt Tobias MÅ bruke", () => {
-  it("JARVIS_GOOGLE_CLIENT_SECRET_JSON leses fra samme values-objekt som resten av .env-configen (readEnv()), ikke process.argv", () => {
-    expect(source).toContain('values["JARVIS_GOOGLE_CLIENT_SECRET_JSON"]');
-    expect(codeOnly).not.toMatch(/process\.argv/);
-  });
-});
-
-describe("HOST FIX #2: ingen secrets logges av den nye JSON-import-/Console-URL-koden", () => {
-  it("ingen log()-linje interpolerer clientSecret (verken fra .env eller fra en importert JSON)", () => {
-    expect(codeOnly).not.toMatch(/log\(`[^`]*\$\{clientSecret\}/);
-  });
-  it("Cloud Console-URL-en (aldri hemmelig - kun et prosjektnummer) er trygg å logge/åpne, men selve jsonPath-innholdet (client_secret-verdien) leses ALDRI inn i en log()-streng direkte", () => {
-    const readIdx = indexOfAll("readFileSync(jsonPath, \"utf8\")");
-    const lineEnd = source.indexOf("\n", readIdx);
-    expect(source.slice(source.lastIndexOf("\n", readIdx), lineEnd)).not.toMatch(/^\s*log\(/);
-  });
-});
-
-/**
- * GOOGLE OAUTH HOST FIX #3 "ZERO MANUAL ENV EDITING" (2026-08-16): Tobias
- * skal KUN gjøre ÉN uunngåelig manuell handling - opprette en "Desktop
- * app"-OAuth-klient i Cloud Console og trykke "Download JSON". ALDRI
- * redigere .env, kopiere client_id/client_secret, eller lime inn en
- * filsti. Denne seksjonen beviser at Nedlastinger-mappa overvåkes
- * automatisk, i SAMME kjørende prosess, og at et koherent credential-sett
- * persisteres til de VANLIGE JARVIS_GOOGLE_CLIENT_ID/_SECRET-nøklene (ikke
- * en ny permanent variabel) FØRST etter faktisk OAuth-suksess.
- */
-describe("A/L (host-fix #3): watchForNewClient er PÅ som standard (ingen 'allerede importert' -> alltid et første forsøk), men AV for en EKSPLISITT JARVIS_GOOGLE_CLIENT_SECRET_JSON-import (hopper over oppdagelse helt)", () => {
-  it("A: det FØRSTE attemptOAuth()-kallet i main() setter watchForNewClient: !usingImportedClient - en vanlig (ikke-importert) klient overvåkes ALLTID for en ny Desktop-JSON i bakgrunnen", () => {
-    const mainStart = indexOfAll("async function main(): Promise<void> {");
-    const firstAttemptIdx = indexOfAll("watchForNewClient: !usingImportedClient,");
-    expect(firstAttemptIdx).toBeGreaterThan(mainStart);
-  });
-  it("L: retry-forsøket (etter et 'new_client'-funn) setter watchForNewClient: false - vi har ALLEREDE en Desktop-klient, ingen grunn til å polle Nedlastinger på nytt i samme kjøring", () => {
-    expect(source).toContain("watchForNewClient: false,");
-  });
-  it("en EKSPLISITT konfigurert JARVIS_GOOGLE_CLIENT_SECRET_JSON (avansert/manuelt oppsett) setter imported: true i resolveOAuthClient() - hopper dermed over Nedlastinger-oppdagelsen helt via samme !usingImportedClient-gate", () => {
-    expect(source).toContain("return { clientId: parsed.clientId, clientSecret: parsed.clientSecret, imported: true };");
-  });
-});
-
-describe("B/C (host-fix #3): Nedlastinger-mappa oppdages via os.homedir() (ikke en hardkodet Windows-bruker-sti), KUN filer fra og med run-starttidspunktet regnes", () => {
-  it("B: bruker homedir()+'Downloads' - den offisielle, dokumenterte standardplasseringen på Windows/macOS/Linux, ALDRI en hardkodet C:\\Users\\<navn>-sti", () => {
+  it("waitForDesktopClientJson() bruker homedir()+'Downloads' - den offisielle, dokumenterte standardplasseringen, ALDRI en hardkodet bruker-sti", () => {
     expect(source).toContain('const downloadsDir = join(homedir(), "Downloads");');
     expect(codeOnly).not.toMatch(/C:\\\\Users/);
   });
-  it("C: runStartMs settes FØR readEnv()/resolveOAuthClient() og sendes uendret til BEGGE attemptOAuth()-kall - en gammel, urelatert JSON fra FØR kjøringen startet plukkes ALDRI opp automatisk", () => {
+  it("runStartMs settes FØR readEnv() og sendes til waitForDesktopClientJson() - en gammel, urelatert JSON fra FØR kjøringen startet plukkes ALDRI opp automatisk", () => {
     const runStartIdx = indexOfAll("const runStartMs = Date.now();");
     const readEnvIdx = indexOfAll("const { lines, values } = readEnv();");
+    const waitCallIdx = indexOfAll("waitForDesktopClientJson(downloadsDir, runStartMs)");
     expect(runStartIdx).toBeLessThan(readEnvIdx);
-    expect([...source.matchAll(/runStartMs$/gm)].length + [...source.matchAll(/runStartMs,/g)].length).toBeGreaterThanOrEqual(2);
+    expect(readEnvIdx).toBeLessThan(waitCallIdx);
   });
 });
 
-describe("D/E/F (host-fix #3): watchForDesktopClientDownload() validerer HVER kandidat via den EKSISTERENDE parseClientSecretJson() - web/ugyldige filer ekskluderes STILLE, krasjer ALDRI polling-løkka", () => {
-  it("D/E/F: tryReadValidDesktopClient() kaller parseClientSecretJson() og fanger ENHVER feil (web-type, ugyldig JSON, manglende felt) til undefined - ingen ny/parallell valideringslogikk, ingen ukontrollert kast ut av polling-løkka", () => {
+describe("D/E (host-fix #4): waitForDesktopClientJson() validerer HVER kandidat via den EKSISTERENDE parseClientSecretJson() - web/ugyldige filer ekskluderes STILLE, krasjer ALDRI polling-løkka", () => {
+  it("tryReadValidDesktopClient() kaller parseClientSecretJson() og fanger ENHVER feil (web-type, ugyldig JSON, manglende felt) til undefined", () => {
     const fnStart = indexOfAll("function tryReadValidDesktopClient(candidate: DownloadCandidateFile): { clientId: string; clientSecret: string } | undefined {");
     const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
-    expect(fnBody).toContain("parseClientSecretJson(readFileSync(candidate.path, \"utf8\"))");
+    expect(fnBody).toContain('parseClientSecretJson(readFileSync(candidate.path, "utf8"))');
     expect(fnBody).toMatch(/catch\s*\{\s*return undefined;/);
   });
 });
 
-describe("G (host-fix #3): flere gyldige kandidater samtidig -> eksplisitt, trygg fil-navn-velger - ALDRI en stille gjetning", () => {
-  it("watchForDesktopClientDownload() sin 'multiple'-gren kaller promptForCandidateSelection() FØR den returnerer et funn - stopper ALDRI stille på den første kandidaten", () => {
-    const fnStart = indexOfAll("function watchForDesktopClientDownload(downloadsDir: string, sinceMs: number, onGuidanceDue: () => void): CancellableWatch {");
-    const fnBody = source.slice(fnStart, source.indexOf("\n  return { result, cancel:", fnStart));
+describe("E/F (host-fix #4): valid installed-JSON transisjonerer til OAuth - ALLTID med den nyoppdagede klientens EGEN client_id", () => {
+  it("E: waitForDesktopClientJson()-resultatet ('found') brukes DIREKTE til å sette 'client' - samme objekt driver den påfølgende OAuth-seksjonen", () => {
+    const foundIdx = indexOfAll("const found = await waitForDesktopClientJson(downloadsDir, runStartMs);");
+    const clientAssignIdx = indexOfAll('client = { clientId: found.clientId, clientSecret: found.clientSecret, source: "explicit_json" };');
+    expect(clientAssignIdx).toBeGreaterThan(foundIdx);
+  });
+  it("F: buildAuthorizationUrl() bruker client.clientId (den BEVISTE/nyoppdagede klienten) - ALDRI values[\"JARVIS_GOOGLE_CLIENT_ID\"] direkte", () => {
+    const callIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    const callLine = source.slice(callIdx, source.indexOf("});", callIdx) + 3);
+    expect(callLine).toContain("clientId: client.clientId");
+    expect(callLine).not.toMatch(/clientId:\s*values\[/);
+  });
+});
+
+describe("K (host-fix #4): redirect_uri_mismatch-løkka fra den legacy Web-klienten kan IKKE gjenta seg - client_id/_secret leses ALDRI direkte fra .env inn i OAuth-seksjonen", () => {
+  it("main() sin OAuth-seksjon (FRA buildAuthorizationUrl til exchangeCode) leser ALDRI values[\"JARVIS_GOOGLE_CLIENT_ID\"]/[\"JARVIS_GOOGLE_CLIENT_SECRET\"] direkte - kun via client.clientId/client.clientSecret", () => {
+    const authUrlIdx = indexOfAll("const authUrl = buildAuthorizationUrl({");
+    const exchangeIdx = indexOfAll("const exchange = await exchangeCode(client.clientId, client.clientSecret, callback.code, redirectUri);");
+    const oauthSection = source.slice(authUrlIdx, exchangeIdx);
+    expect(oauthSection).not.toMatch(/values\["JARVIS_GOOGLE_CLIENT_(ID|SECRET)"\]/);
+  });
+});
+
+describe("G (host-fix #4): flere gyldige kandidater samtidig -> eksplisitt, trygg fil-navn-velger - ALDRI en stille gjetning", () => {
+  it("waitForDesktopClientJson() sin 'multiple'-gren kaller promptForCandidateSelection() FØR den returnerer et funn", () => {
+    const fnStart = indexOfAll("async function waitForDesktopClientJson(downloadsDir: string, sinceMs: number): Promise<DesktopClientDownloadFound> {");
+    const fnBody = source.slice(fnStart, source.indexOf("\n}", fnStart));
     expect(fnBody).toContain('classification.kind === "multiple"');
     const multipleIdx = fnBody.indexOf('classification.kind === "multiple"');
     const promptIdx = fnBody.indexOf("promptForCandidateSelection(classification.candidates)");
@@ -413,65 +348,65 @@ describe("G (host-fix #3): flere gyldige kandidater samtidig -> eksplisitt, tryg
     expect(fnBody).toContain("formatCandidateSelectionPrompt(candidates.map((c) => c.name))");
     expect(fnBody).toContain("parseCandidateSelection(answer, candidates.length)");
   });
+  it("en timeout UTEN funn kastes EKSPLISITT - aldri en stille tom-retur som ville latt main() fortsette med en udefinert klient", () => {
+    expect(source).toContain("google_reauth=FAIL_DESKTOP_CLIENT_TIMEOUT");
+  });
 });
 
-describe("H (host-fix #3): ingen secrets logges av Nedlastinger-oppdagelses-/race-koden", () => {
+describe("G/H (host-fix #4): ingen secrets logges av Nedlastinger-oppdagelses-/setup-koden", () => {
   const newCodeStart = indexOfAll("function sleep(ms: number): Promise<void> {");
   const newCodeEnd = source.indexOf("interface TokenResponse {");
   const newCode = source.slice(newCodeStart, newCodeEnd);
-  it("ingen log()-linje i hele Nedlastinger-/race-seksjonen interpolerer clientId/clientSecret direkte (kun trygge verdier: filnavn, stier, URL-er)", () => {
+  it("ingen log()-linje i hele Nedlastinger-/setup-seksjonen interpolerer clientId/clientSecret direkte (kun trygge verdier: filnavn, stier, URL-er)", () => {
     expect(newCode).not.toMatch(/log\(`[^`]*\$\{.*clientSecret/);
-    expect(newCode).not.toMatch(/log\(`[^`]*\$\{.*winner\.found\.clientSecret/);
   });
 });
 
-describe("I/J (host-fix #3): koherent client_id/client_secret/token persisteres KUN etter FAKTISK OAuth-suksess (scope+Drive-probe+kontosjekk alle bestått FØRST)", () => {
-  it("I: 'new_client'-oppdagelsen setter usingImportedClient=true, men SKRIVER INGENTING til .env på det tidspunktet - kun etter en påfølgende, fullt vellykket attemptOAuth()+exchange+scope+Drive-probe lenger nede i main()", () => {
-    const newClientIdx = indexOfAll('if (attempt.outcome === "new_client") {');
-    const updatesIdx = indexOfAll("const updates: EnvValues = usingImportedClient");
+describe("G/L (host-fix #4): gammel credential FORBLIR helt urørt frem til FAKTISK OAuth-suksess", () => {
+  it("verken JARVIS_GOOGLE_CLIENT_ID, JARVIS_GOOGLE_CLIENT_SECRET eller JARVIS_GOOGLE_TOKEN skrives NOE STED FØR den siste updates-blokken (én eneste buildUpdatedEnvLines()-kall i hele fila)", () => {
+    expect([...codeOnly.matchAll(/buildUpdatedEnvLines\(/g)]).toHaveLength(1);
+    const updatesIdx = indexOfAll("const updates: EnvValues = {");
     const scopeCheckIdx = indexOfAll("google_reauth=FAIL_INSUFFICIENT_SCOPE");
     const driveProbeIdx = indexOfAll("google_reauth=FAIL_DRIVE_PROBE");
-    expect(newClientIdx).toBeLessThan(scopeCheckIdx);
     expect(scopeCheckIdx).toBeLessThan(updatesIdx);
     expect(driveProbeIdx).toBeLessThan(updatesIdx);
   });
-  it("J: client_id/client_secret/token skrives fra de SAMME (evt. oppdaterte) clientId/clientSecret-let-bindingene som ble brukt til selve OAuth-utvekslingen - ingen andre/duplikate variabler", () => {
-    const updatesIdx = indexOfAll("const updates: EnvValues = usingImportedClient");
-    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
-    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_ID: clientId");
-    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_SECRET: clientSecret");
-    expect(source).toContain("clientId = attempt.found.clientId;");
-    expect(source).toContain("clientSecret = attempt.found.clientSecret;");
+});
+
+describe("H (host-fix #4): koherent client_id/client_secret/token/client-type-metadata persisteres SAMMEN, atomisk, KUN etter suksess", () => {
+  it("updates-objektet inneholder ALLE FIRE nøklene i ÉN atomisk skriving - ingen delvis skriving", () => {
+    const updatesIdx = indexOfAll("const updates: EnvValues = {");
+    const updatesBlock = source.slice(updatesIdx, source.indexOf("};", updatesIdx) + 2);
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_ID: client.clientId");
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_CLIENT_SECRET: client.clientSecret");
+    expect(updatesBlock).toContain("JARVIS_GOOGLE_TOKEN: decision.refreshToken");
+    expect(updatesBlock).toContain('JARVIS_GOOGLE_OAUTH_CLIENT_TYPE: "desktop"');
   });
 });
 
-describe("K (host-fix #3): JARVIS_GOOGLE_CLIENT_SECRET_JSON persisteres ALDRI selv - kun et engangs import-/bootstrap-artefakt, ikke en permanent runtime-variabel", () => {
-  it("ingen kodested skriver JARVIS_GOOGLE_CLIENT_SECRET_JSON til .env (kun JARVIS_GOOGLE_CLIENT_ID/_SECRET/_TOKEN skrives, alltid til de VANLIGE nøklene)", () => {
+describe("I (host-fix #4): persistert JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop lar FREMTIDIGE kjøringer hoppe trygt over setup", () => {
+  it("resolveProvenDesktopClient() godtar EKSPLISITT clientType === 'desktop' fra .env som bevis - IKKE tilstedeværelse av client_id/_secret alene", () => {
+    const fnStart = indexOfAll("function resolveProvenDesktopClient(values: EnvValues): ProvenDesktopClient | undefined {");
+    const fnBody = source.slice(fnStart, source.indexOf("\nasync function main", fnStart));
+    expect(fnBody).toContain('const clientType = values["JARVIS_GOOGLE_OAUTH_CLIENT_TYPE"];');
+    expect(fnBody).toContain('if (clientId && clientSecret && clientType === "desktop") {');
+  });
+});
+
+describe("K (host-fix #4): JARVIS_GOOGLE_CLIENT_SECRET_JSON persisteres ALDRI selv - kun et engangs import-/bootstrap-artefakt", () => {
+  it("ingen kodested skriver JARVIS_GOOGLE_CLIENT_SECRET_JSON til .env (kun JARVIS_GOOGLE_CLIENT_ID/_SECRET/_TOKEN/_OAUTH_CLIENT_TYPE skrives)", () => {
     expect(codeOnly).not.toMatch(/JARVIS_GOOGLE_CLIENT_SECRET_JSON:/);
-    const updatesIdx = indexOfAll("const updates: EnvValues = usingImportedClient");
-    const updatesBlock = source.slice(updatesIdx, source.indexOf(";", source.indexOf(": { JARVIS_GOOGLE_TOKEN", updatesIdx)) + 1);
+    const updatesIdx = indexOfAll("const updates: EnvValues = {");
+    const updatesBlock = source.slice(updatesIdx, source.indexOf("};", updatesIdx) + 2);
     expect(updatesBlock).not.toContain("JARVIS_GOOGLE_CLIENT_SECRET_JSON");
   });
 });
 
-describe("M (host-fix #3): SAMME kjørende prosess fortsetter automatisk inn i OAuth-forsøket etter et Nedlastinger-funn - ingen restart", () => {
-  it("main() gjenbruker den SAMME clientId/clientSecret/usingImportedClient-let-bindingen for det andre attemptOAuth()-kallet, ikke en ny prosess/spawn", () => {
-    expect(codeOnly).not.toMatch(/spawn\(|execFileSync\("node", \["--experimental-transform-types", "modules\/core\/scripts\/google-drive-reauth\.ts"/);
-    const newClientIdx = indexOfAll('if (attempt.outcome === "new_client") {');
-    const retryAttemptIdx = source.indexOf("attempt = await attemptOAuth({", newClientIdx);
-    expect(retryAttemptIdx).toBeGreaterThan(newClientIdx);
+describe("L (host-fix #4): ett-kommando-kontrakten er UENDRET - ingen restart, ingen .env-redigering, ingen filsti å lime inn", () => {
+  it("waitForDesktopClientJson() kjøres i SAMME prosess som resten av main() - ingen spawn/execFileSync av seg selv", () => {
+    expect(codeOnly).not.toMatch(/execFileSync\("node", \["--experimental-transform-types", "modules\/core\/scripts\/google-drive-reauth\.ts"/);
   });
-  it("callbackAttempt.cancel() kalles FØR 'new_client' returneres fra attemptOAuth() - porten er alltid fri før det andre forsøket starter på SAMME port", () => {
-    const winnerFoundIdx = indexOfAll("if (winner.found) {");
-    const cancelIdx = source.indexOf("callbackAttempt.cancel();", winnerFoundIdx);
-    const returnNewClientIdx = source.indexOf('return { outcome: "new_client", found: winner.found };', winnerFoundIdx);
-    expect(cancelIdx).toBeGreaterThan(winnerFoundIdx);
-    expect(cancelIdx).toBeLessThan(returnNewClientIdx);
-  });
-});
-
-describe("N (host-fix #3): fortsetter inn i UA-2 P1A host-akseptanse etter suksess - uendret fra tidligere runder", () => {
-  it("chainToP1aHostRun() forblir det SISTE steget etter google_drive_reauth=PASS, uansett om det opprinnelige forsøket eller et Nedlastinger-oppdaget retry-forsøk vant", () => {
+  it("chainToP1aHostRun() forblir det SISTE steget etter google_drive_reauth=PASS", () => {
     const passLogIdx = indexOfAll('log("google_drive_reauth=PASS");');
     const chainIdx = indexOfAll("chainToP1aHostRun();");
     expect(chainIdx).toBeGreaterThan(passLogIdx);
