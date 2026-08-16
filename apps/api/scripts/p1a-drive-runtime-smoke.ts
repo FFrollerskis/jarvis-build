@@ -13,7 +13,21 @@
 // kjørende og de ALLEREDE persisterte Google-credentialene i .env (INGEN ny
 // OAuth-samtykke, INGEN nedlastet client-JSON lest her) - ÉN kommando:
 //
-//   node --experimental-transform-types apps/api/scripts/p1a-drive-runtime-smoke.ts
+//   node --env-file=.env --experimental-transform-types apps/api/scripts/p1a-drive-runtime-smoke.ts
+//
+// HOST-FIX (2026-08-16, Tobias sitt faktiske host-funn): den TIDLIGERE
+// dokumenterte kommandoen manglet `--env-file=.env` - dette scriptet leser
+// `process.env` DIREKTE (samme mønster som main.ts/worker-main.ts, som i
+// normal drift får miljøvariablene injisert av docker-compose - IKKE av en
+// `--env-file`-flagg), men når scriptet kjøres FRITTSTÅENDE på hosten (ikke
+// inni en container) må Node eksplisitt bes om å laste `.env` selv. Uten
+// flagget var `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN` alle tomme i
+// prosessen - scriptet rapporterte (korrekt, ikke en bug i selve logikken)
+// `BLOCKED_NO_CREDENTIALS`. `--env-file` er Node sin EGEN, innebygde
+// mekanisme (siden Node 20.6) - BEVISST ingen ny `dotenv`-avhengighet lagt
+// til bare for dette. Samme konvensjon som `ua2-p1a-live.ts` (som allerede
+// dokumenterer `--env-file=.env` i sin egen toppkommentar) - dette scriptet
+// var det inkonsekvente unntaket, nå rettet.
 //
 // Beviser (§11 i ordren):
 //   drive_runtime_registered=PASS   - firstWaveTools({...driveTransportsIfConfigured()})

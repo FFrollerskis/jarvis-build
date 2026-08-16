@@ -75,9 +75,12 @@ describe("ingen secrets logges", () => {
   });
 });
 
-describe("ett-kommando-kontrakten er dokumentert og eksakt", () => {
-  it("toppkommentaren viser NØYAKTIG kommandoen Tobias skal kjøre", () => {
-    expect(source).toContain("node --experimental-transform-types apps/api/scripts/p1a-drive-runtime-smoke.ts");
+describe("ett-kommando-kontrakten er dokumentert og eksakt (HOST-FIX 2026-08-16: --env-file=.env er PÅKREVD)", () => {
+  it("toppkommentaren viser NØYAKTIG kommandoen Tobias skal kjøre, MED --env-file=.env - scriptet leser process.env direkte og laster ALDRI .env selv", () => {
+    expect(source).toContain("node --env-file=.env --experimental-transform-types apps/api/scripts/p1a-drive-runtime-smoke.ts");
+  });
+  it("regresjonsvakt: den TIDLIGERE, ufullstendige kommandoen (uten --env-file) finnes IKKE lenger NOE STED i fila (host-bevist BLOCKED_NO_CREDENTIALS-feil, 2026-08-16)", () => {
+    expect(source).not.toMatch(/node --experimental-transform-types apps\/api\/scripts\/p1a-drive-runtime-smoke\.ts/);
   });
   it("krever INGEN ny OAuth-samtykke - leser KUN allerede persisterte JARVIS_GOOGLE_*-verdier fra .env, aldri en client-secret-JSON-fil", () => {
     expect(codeOnly).not.toMatch(/JARVIS_GOOGLE_CLIENT_SECRET_JSON|readFileSync/);
