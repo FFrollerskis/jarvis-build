@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import type { IdentityContext } from "@jarvis/contracts";
 import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
