@@ -43,3 +43,4 @@
 | Q-15 | Flere personer/familie som egne `person_id` med egne spaces | Etter første produksjonsversjon |
 | Q-16 | Andre bølge-integrasjoner (CRM/Dennis, Fiken/Folio, telefoni, Slack/Teams) | Etter fase 7 |
 | Q-17 | Autonom selvreparasjon via signerte runbooks | Etter fase 10-måling |
+| Q-22 | Pieces som kunnskapskilde (UA-2 P1A vurderte, bevisst utsatt 2026-08-16): repo-søk fant INGEN integrasjon/API/eksportformat/credential-miljøvariabel for Pieces noe sted i kodebasen - kun navnedropp i planleggingsdokumenter. Ingen konkret, ikke-gjettet integrasjonsflate å bygge mot. | Egen underoppgave når en konkret Pieces-API/eksportformat er identifisert og valgt |

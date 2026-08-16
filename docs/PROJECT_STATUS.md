@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (Q-20 final closure) · **Branch:** `claude/q20-data-erasure` (PR #4, merges
-til `main`)
+**Oppdatert:** 2026-08-16 (UA-2 P1A bygget - FIXED_SUITE, IKKE host-verifisert) · **Branch:**
+`claude/ua2-p1a-knowledge-sources` (draft PR, IKKE merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -352,16 +352,85 @@ tenant/space-isolasjon urørt, trygg kvittering, sentinel-scan uten funn. **STAT
 VERIFIED/CLOSED → D-40.** Full evidens: docs/RUNTIME_GATES.md, docs/DECISIONS_AND_ASSUMPTIONS.md.
 PR #4 merges til `main`.
 
+## UA-2 P1A — Knowledge Source Expansion (BYGGET denne økten, 2026-08-16, FRA `origin/main` etter Q-20-merge)
+- **Godkjent byggeordre** (etter Q-20 VERIFIED/CLOSED-merge): utvid `@jarvis/knowledge` med Google
+  Drive (READ ONLY) og Obsidian/lokal vault som nye kunnskapskilder, på den EKSISTERENDE
+  `KnowledgeSource`/`KnowledgeSyncService`/FTS+vector-hybrid-arkitekturen - ingen parallell
+  connector-SDK, ingen ny auth-modell, ingen ny DB-migrasjon (gjenbruker `knowledge_documents`/
+  `knowledge_embeddings` uendret). Pieces eksplisitt utsatt (se under). IKKE bygget: e-post-
+  ingestion, møtetranskripsjon, OCR, full Knowledge Graph/GraphRAG, Drive write/delete.
+- **Kontrakt-utvidelse** (`modules/knowledge/src/source.ts`): `KnowledgeSource.list()` returnerer nå
+  `KnowledgeListResult { records, skipped }` i stedet for en bar array - en kilde kan rapportere
+  bevisste per-element-skips (f.eks. ustøttet MIME) uten å forveksle dem med feil. Ny
+  `KnowledgeSourceError`/`SourceErrorClass` (AUTH/PERMISSION/RATE_LIMIT/TRANSIENT_NETWORK/NOT_FOUND/
+  UNSUPPORTED_CONTENT/INVALID_CONFIG/SOURCE_UNAVAILABLE) for TOTAL listing-svikt - `sync()` tombstoner
+  ALDRI noe når `list()` kaster, uansett klasse (kritisk sikkerhetsegenskap, uendret). Fikset en latent
+  bug i `GithubKnowledgeSource` samtidig: en feilet ToolGateway-handling ble tidligere stille utelatt
+  (kunne feiltolkes som "alt slettet" av tombstone-logikken) - kaster nå eksplisitt i stedet.
+- **`KnowledgeSourceRegistry`** (`registry.ts`): typet, FLERE-instans konfigurasjon bundet til
+  (tenant_id, memory_space_id, source_instance_id) - `forTenant()` kan STRUKTURELT aldri returnere en
+  annen tenants config, ingen implisitt/global kilde.
+- **`GoogleDriveTransport`** (`modules/tool-gateway`): READ ONLY, samme OAuth/konto-mønster som
+  Gmail/Calendar (`googleAccessToken()` gjenbrukt, ingen ny credential-type). `list_files` (paginert,
+  eksplisitt `folder_id` fra kilden - ALDRI en default) + `read_document` (Google Docs eksporteres til
+  text/plain, tekstlige MIME-typer leses rått, alt annet - Sheets/Slides/bilder/PDF/binærformater -
+  kaster en typet `drive_unsupported_content_<mime>`-feil).
+- **`GoogleDriveKnowledgeSource`** (`drive-source.ts`): `external_id` = Drive sin stabile `file.id`
+  (rename-safe - en omdøpning endrer `title`, ikke `external_id`). Mappe-scope er REKURSIV men
+  importerer ALDRI hele driven når konfigurert for én mappe. Paginering + rekursjon aggregeres internt
+  i `list()` (komplett resultat eller kast, aldri partielt). Sletting gjenbruker eksisterende
+  "fraværende i vellykket listing = tombstone" (ingen egen Drive Changes-API-integrasjon - bevisst,
+  dokumentert valg). En AUTH/PERMISSION-feil på ÉN fil-lesing eskaleres til TOTAL svikt (systemisk
+  årsak antatt); NOT_FOUND/RATE_LIMIT/TRANSIENT_NETWORK på én fil er en trygg per-fil-skip.
+- **`ObsidianVaultKnowledgeSource`** (`obsidian-source.ts`): KOMPONERER rundt
+  `FilesystemKnowledgeSource` (samme allowlist/traversal/symlink-forsvar som UA-2 P0, ingen duplisert
+  sikkerhetslogikk) - kun `.md`-filer, `.obsidian/` ekskludert som default. Frontmatter parses
+  best-effort (flat, ingen ny YAML-avhengighet) til `metadata.frontmatter`; wiki-lenker
+  (`[[Notat]]`) til `metadata.wiki_links` (flat liste, IKKE en graf - GraphRAG bevisst utenfor P1A).
+  `external_id` = relativ vault-sti (samme presedens som filesystem) - Obsidian-omdøpning er derfor
+  slett+ny, IKKE en oppdatering (dokumentert forskjell fra Drive, som HAR en stabil fil-id).
+- **To korrekthetsfiks i `KnowledgeSyncService.sync()`** (gjelder ALLE kilder, ikke bare de nye):
+  (1) `skipped`-elementer beskyttes nå mot tombstoning sammen med `seen` - én forbigående per-element-
+  feil kunne tidligere tombstonet ETT dokument selv om hele listingen lyktes; (2) "uendret innhold"-
+  grenen oppdaterer nå tittel/uri/metadata (uten re-embedding) - nødvendig for at en Drive-omdøpning
+  faktisk skal synes.
+- **Chunking-safeguard** (bevisst MINIMAL, ingen ekte multi-chunk-skjema): `embed()`-input trunkeres
+  til 24 000 tegn - `content`-kolonnen (og dermed FTS) beholder ALLTID hele, utrunkerte teksten. Ingen
+  embedding-leverandør i kodebasen hadde en input-grense før dette (Drive/Obsidian-dokumenter kan bli
+  langt større enn P0 sine korte GitHub-issues).
+- **Pieces: eksplisitt utsatt.** Repo-søk fant INGEN integrasjon/API/eksportformat/credential-
+  miljøvariabel noe sted - kun navnedropp i planleggingsdokumenter. Ingen konkret, ikke-gjettet
+  integrasjonsflate å bygge mot ennå - egen fremtidig underoppgave når en finnes.
+- **Ett-kommando host-akseptanse:** `modules/core/scripts/ua2-p1a-host-run.ts` (samme
+  pnpm/Windows/Docker-bootstrap-mønster som `q20-host-run.ts`, INGEN ny workspace-pakke denne gangen
+  → ingen egen verify-workspace-steg) kjører til slutt
+  `modules/knowledge/scripts/ua2-p1a-live.ts`: Q-21-rolle-sjekk, registry-sanity, Obsidian full
+  livssyklus i en ISOLERT MIDLERTIDIG vault (ALDRI Tobias sin ekte vault), tenant-isolasjon+retrieval
+  med de nye kildetypene, no-content-i-audit-scan. Google Drive LIVE er BETINGET: krever
+  `JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`JARVIS_GOOGLE_TOKEN` OG en NY, dedikert
+  `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` (aldri hele driven) - mangler noen av de fire rapporteres
+  `google_drive_live=BLOCKED_NO_SAFE_TEST_SCOPE`, ALDRI en fake PASS.
+- **Kvalitet:** 463/463 tester (406 baseline fra `origin/main` + 57 nye: registry x9, Drive-source x11,
+  Obsidian-source x9, kryssgående tenant/space/retrieval/audit-redaksjon x5, chunking-safeguard x2,
+  host-run-wiring x21), full monorepo-typecheck ren. Lint/gitleaks gjenstår før PR (se §32 i
+  byggeordren).
+- **STATUS: FIXED_SUITE / READY_FOR_HOST_VERIFY. IKKE VERIFIED** - ingen ekte Google Drive-credential,
+  ingen ekte Docker-Postgres i denne sky-sandboxen. Krever Tobias sin host-kjøring
+  (`ua2-p1a-host-run.ts`) før VERIFIED kan settes, akkurat som Q-20/UA-2 P0 krevde det.
+
 ## Blokkeringer
-Ingen blokkering for Q-20 lenger - VERIFIED/CLOSED (host-bevist, run_id `eaabe2b1`), PR #4 merges til
-`main`. UA-2 P0 og Q-21 har heller ingen egne blokkeringer (begge VERIFIED/CLOSED, allerede merget).
+UA-2 P1A venter på Tobias sin host-kjøring (`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR
+IKKE merget. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`).
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende.
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
+ennå - egen fremtidig underoppgave, ikke en blokkering for P1A.
 
 ## Neste oppgave
-Q-20 er VERIFIED/CLOSED og merget til `main`. Anbefalt neste UA-2-del: **UA-2 P1** (flere
-kunnskapskilder - Obsidian, Pieces, Google Drive, e-post, møtetranskripsjon, OCR - se
-IMPLEMENTATION_PLAN for eksakt P1-scope). Venter på Tobias sin eksplisitte fase-godkjenning før
-implementering starter (faseporten gjelder, CLAUDE.md-regel 10) - **IKKE startet i denne runden.**
-Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03),
-D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark.
+UA-2 P1A er FIXED_SUITE / READY_FOR_HOST_VERIFY - venter på Tobias sin host-kjøring av
+`ua2-p1a-host-run.ts` (Windows/Docker) før VERIFIED kan settes og draft PR kan vurderes for merge.
+**Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt
+og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste
+kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten
+gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama
+LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes).
