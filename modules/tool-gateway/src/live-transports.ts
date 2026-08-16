@@ -71,6 +71,104 @@ export class GoogleCalendarTransport implements ToolTransport {
   }
 }
 
+/**
+ * UA-2 P1A §18/§24: Google Drive - READ ONLY (ingen write/delete/trash-
+ * handling er implementert her i det hele tatt). Samme kontomønster som
+ * Gmail/Calendar (én eksplisitt konto, ingen implisitt cross-account
+ * fallback), samme `googleAccessToken()` OAuth-vei (ingen ny credential-type).
+ *
+ * To handlinger:
+ * - `list_files`: én SIDE av en listing (§`folder_id` styrer scope - satt av
+ *   `GoogleDriveKnowledgeSource` ut fra dens konfigurerte scope, ALDRI en
+ *   default her; paginering er `page_token` inn/ut, aggregering skjer i
+ *   kilden). `trashed=false` er alltid med i spørringen - en slettet/
+ *   papirkurv-fil forsvinner dermed naturlig fra neste vellykkede listing,
+ *   som er nøyaktig mekanismen `KnowledgeSyncService` bruker for tombstoning.
+ * - `read_document`: eksporterer Google Docs til text/plain (den ENESTE
+ *   Google-native filtypen P1A eksporterer - IKKE Sheets/Slides/Forms, se
+ *   §14 "Bygges IKKE"), eller leser rå innhold for tekstlige MIME-typer.
+ *   Alt annet (bilder, PDF, binærformater, andre Google-native typer) kaster
+ *   en typet `drive_unsupported_content_<mime>`-feil - ALDRI lest som
+ *   søppel-tekst, ALDRI stille utelatt (kilden mapper dette til et
+ *   `SkippedRecord`, ikke en feilet listing).
+ */
+const GOOGLE_DOC_EXPORT_MIME = "application/vnd.google-apps.document";
+const GOOGLE_NATIVE_MIME_PREFIX = "application/vnd.google-apps.";
+const DRIVE_SUPPORTED_RAW_MIME = new Set([
+  "text/plain", "text/markdown", "text/x-markdown", "text/csv",
+  "application/json", "text/html", "text/css", "application/x-yaml", "text/yaml"
+]);
+
+function isDriveSupportedRawMime(mimeType: string): boolean {
+  return DRIVE_SUPPORTED_RAW_MIME.has(mimeType) || mimeType.startsWith("text/");
+}
+
+export class GoogleDriveTransport implements ToolTransport {
+  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await googleAccessToken(credential);
+    const auth = { authorization: `Bearer ${token}` };
+
+    if (action === "list_files") {
+      const folderId = parameters["folder_id"] ? String(parameters["folder_id"]) : undefined;
+      const pageToken = parameters["page_token"] ? String(parameters["page_token"]) : undefined;
+      const q = folderId ? `'${folderId}' in parents and trashed=false` : "trashed=false";
+      const url = new URL("https://www.googleapis.com/drive/v3/files");
+      url.searchParams.set("q", q);
+      url.searchParams.set("fields", "nextPageToken,files(id,name,mimeType,modifiedTime,size)");
+      url.searchParams.set("pageSize", "100");
+      url.searchParams.set("spaces", "drive");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const response = await fetch(url, { headers: auth });
+      if (response.status === 401 || response.status === 403) throw new Error(`drive_auth_error_${response.status}`);
+      if (response.status === 429) throw new Error("drive_rate_limited");
+      if (!response.ok) throw new Error(`drive_list_error_${response.status}`);
+      const body = (await response.json()) as {
+        nextPageToken?: string;
+        files?: Array<{ id: string; name: string; mimeType: string; modifiedTime?: string; size?: string }>;
+      };
+      return {
+        data: {
+          files: (body.files ?? []).map((f) => ({
+            id: f.id, name: f.name, mime_type: f.mimeType,
+            modified_at: f.modifiedTime ?? null, size_bytes: f.size ?? null
+          })),
+          next_page_token: body.nextPageToken ?? null
+        }
+      };
+    }
+
+    if (action === "read_document") {
+      const documentId = String(parameters["document_id"]);
+      const mimeType = String(parameters["mime_type"] ?? "");
+      if (mimeType === GOOGLE_DOC_EXPORT_MIME) {
+        const response = await fetch(
+          `https://www.googleapis.com/drive/v3/files/${documentId}/export?mimeType=text%2Fplain`,
+          { headers: auth }
+        );
+        if (response.status === 404) throw new Error(`drive_not_found_${documentId}`);
+        if (response.status === 401 || response.status === 403) throw new Error(`drive_auth_error_${response.status}`);
+        if (response.status === 429) throw new Error("drive_rate_limited");
+        if (!response.ok) throw new Error(`drive_export_error_${response.status}`);
+        return { data: { content: await response.text(), content_type: "text/plain" } };
+      }
+      if (mimeType.startsWith(GOOGLE_NATIVE_MIME_PREFIX) || !isDriveSupportedRawMime(mimeType)) {
+        // Sheets/Slides/Forms/binærformater/bilder/PDF - eksplisitt utenfor P1A-scope (§14).
+        throw new Error(`drive_unsupported_content_${mimeType || "unknown"}`);
+      }
+      const response = await fetch(`https://www.googleapis.com/drive/v3/files/${documentId}?alt=media`, { headers: auth });
+      if (response.status === 404) throw new Error(`drive_not_found_${documentId}`);
+      if (response.status === 401 || response.status === 403) throw new Error(`drive_auth_error_${response.status}`);
+      if (response.status === 429) throw new Error("drive_rate_limited");
+      if (!response.ok) throw new Error(`drive_read_error_${response.status}`);
+      return { data: { content: await response.text(), content_type: mimeType } };
+    }
+
+    throw new Error(`drive_unsupported_action_${action}`);
+  }
+}
+
 export class TelegramTransport implements ToolTransport {
   constructor(private readonly chatId: string | undefined = process.env["JARVIS_TELEGRAM_CHAT_ID"]) {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {

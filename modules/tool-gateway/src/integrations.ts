@@ -88,7 +88,7 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
     },
     {
       tool_id: "drive", action: "read_document", description: "Les dokument (untrusted ingestion)",
-      input_schema: record({ document_id: z.string() }), capability_class: "A",
+      input_schema: record({ document_id: z.string(), mime_type: z.string().optional() }), capability_class: "A",
       scopes: ["drive.readonly"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GOOGLE_TOKEN", output_trust: "untrusted", transport: transport("drive")
@@ -118,6 +118,18 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      // UA-2 P1A §18/§24: én side av en Drive-filliste (mappe-scope ELLER hele
+      // driven - avgjøres av `folder_id`-parameteren fra kilden, aldri en
+      // default her). Lagt til på SLUTTEN av samme grunn som read_repo_meta
+      // over - eksisterende tester indekserer dette arrayet posisjonelt.
+      tool_id: "drive", action: "list_files", description: "List filer i en Drive-mappe eller hele driven (untrusted ingestion)",
+      input_schema: record({ folder_id: z.string().optional(), page_token: z.string().optional() }),
+      capability_class: "A", scopes: ["drive.readonly"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "untrusted", transport: transport("drive")
     }
   ];
 }
