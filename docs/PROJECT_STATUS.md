@@ -1,7 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (UA-2 P1B-A e-post-vedlegg + OCR/vision-ingestion-fundament -
-FIXED_SUITE/READY_FOR_HOST_VERIFY, 813/813 tester, IKKE host-verifisert ennå) · **Branch:**
+**Oppdatert:** 2026-08-16 (UA-2 P1B-A HOST FIX #1 - Gmail 401-klassifisering + reauth-flyt +
+cost_events-cleanup-fiks etter ekte host-funn `run_id 3af67dab` - FIXED_SUITE/HOST_VERIFY_BLOCKED,
+856/856 tester, IKKE host-verifisert ennå, PR #7 IKKE merget) · **Branch:**
 `claude/ua2-p1b-a-email-ocr-vision` · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE
 (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret,
 host-bevist run_id `2703299e`, PR #5 merget)
@@ -1056,6 +1057,64 @@ Q-24 (samlet gap-liste), IMPLEMENTATION_PLAN.md (ny P1B-A-seksjon + P1A-referans
 `ua2-p1b-a-host-run.ts` (krever `JARVIS_EMAIL_TOKEN` + `ANTHROPIC_API_KEY` i `.env`) før VERIFIED kan
 erklæres, i tråd med samme host-bevis-disiplin som D-38/D-39/D-40/D-42.
 
+## UA-2 P1B-A HOST FIX #1 "GMAIL 401 CLIENT/TOKEN COHERENCE + COST_EVENTS CLEANUP" (samme dag, 2026-08-16, ekte host-funn `run_id 3af67dab`)
+
+**Tobias sin faktiske Windows/Docker-host-kjøring** (`run_id 3af67dab`) ga PASS for
+`p1b_pdf_native_extraction`/`p1b_pdf_page_render`/`p1b_extraction_routing_decision`/
+`p1b_vision_ocr_live`/`q21_runtime_role_safe`/token-leak-audit, men **FAIL** for
+`p1b_gmail_list_messages_live` (`reason=tool_failed:google_auth_failed_401`) - som kaskaderte til
+`p1b_sync_email_source_live`-feil (`error_class:"AUTH"`) og en hoppet-over Q-20-e-post-live-sjekk,
+pluss en separat `cost_events_tenant_id_fkey`-FK-brudd som blokkerte tenant-cleanup. `hard_fail=true`.
+
+**Root cause IKKE konkludert med sikkerhet fra dette funnet alene** - `googleAccessToken()` kastet
+opprinnelig vekk Google sin faktiske token-endpoint-responskropp ved feil, så kun `401` var synlig,
+ingen `error`/`error_description`. Full begrunnelse/full fiks: **D-45** i
+`docs/DECISIONS_AND_ASSUMPTIONS.md`. Kort sammendrag av det som ER bygget denne runden:
+
+1. **Klassifisering** - `classifyGoogleTokenEndpointError()` (ny, `live-transports.ts`) parser
+   Google sitt RFC 6749 §5.2-token-endpoint-feilformat til `EMAIL_TOKEN_CLIENT_MISMATCH`/
+   `EMAIL_REFRESH_TOKEN_REVOKED`/`EMAIL_INSUFFICIENT_SCOPE`/`GOOGLE_INVALID_GRANT`/
+   `GOOGLE_INVALID_CLIENT`/`UNKNOWN_GOOGLE_AUTH` - kun trygge felt eksponert (HTTP-status, Google
+   sin `error`-kode, sanert `error_description`), ALDRI token/secret/Authorization-header i logg.
+2. **Gmail-reauth-flyt** - `modules/core/scripts/google-email-reauth.ts` (nytt orkestreringsskript)
+   gjenbruker den ALLEREDE persisterte Desktop-OAuth-klienten (`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/
+   `_OAUTH_CLIENT_TYPE=desktop`, samme klient som Drive/D-42) - ingen ny Google Cloud-klient, ingen ny
+   JSON-import, Drive-auth HELT urørt. Scopes: `gmail.readonly` + `gmail.send` (bevarer eksisterende
+   send-kapabilitet, D-41) + `userinfo.email` (kontoverifisering). `prompt=consent select_account`,
+   autorisert konto sammenlignet mot `JARVIS_GOOGLE_ACCOUNT` FØR persistering - ulik konto avbryter
+   eksplisitt. Persisterer KUN `JARVIS_EMAIL_TOKEN` (atomisk, `.bak.<epoch>`-sikkerhetskopi), først
+   etter state-PASS + exchange-PASS + scope-PASS + konto-PASS + live Gmail-leseprobe-PASS.
+3. **Automatisk gjenoppretting samme kjøring** - `ua2-p1b-a-host-run.ts` forsøker reauth-skriptet
+   AUTOMATISK ÉN gang (`reauthAttempted`-vakt) når feilen klassifiseres som gjenopprettbar, leser
+   `.env` på nytt fra disk, og fortsetter SAMME prosess - ingen ny Windows-kommando kreves.
+4. **`cost_events`-FK-fiks** - verifisert mot faktisk skjema (`004_audit_cost.sql`, ingen
+   append-only-trigger i motsetning til `audit_events`/`events`) - `DELETE FROM cost_events WHERE
+   tenant_id = $1` lagt til FØRST i `cleanupTenant()`, ingen `TRUNCATE`/`DISABLE TRIGGER`/bred sletting.
+5. **Live e-post-vedleggsfikstur** - `GmailTransport` mangler fortsatt `send`/`create`-kapabilitet,
+   så ingen trygg fikstur kunne opprettes denne runden. Ny `Verdict`-medlem `SKIPPED_SAFE_FIXTURE`
+   (ærlig, ALDRI en stille antatt PASS) brukes i stedet for å late som et vedlegg ble bevist.
+6. **Fersk-workspace-bootstrap** - `ua2-p1b-a-host-run.ts` konverterte alle topp-nivå `@jarvis/*`-
+   importer til dynamiske `await import()` etter en ny, synkron `ensureWorkspaceInstalled()`
+   (`pnpm install --frozen-lockfile`, samme mønster som P1A sin runner) - ETT skript, ETT
+   kommando løser fersk-checkout uten et separat installasjonssteg.
+
+**Regresjonstester lagt til (A-S i byggeordren, alle PASS):** 18 nye tester for
+token-endpoint-klassifisering (`google-auth-error-classification.test.ts`), 14 nye strukturelle
+tester for reauth-orkestreringsskriptet (`google-email-reauth-wiring.test.ts`), full omskriving av
+`ua2-p1b-a-host-run-wiring.test.ts` (21 tester: selv-bootstrap-rekkefølge, auto-reauth-vakt/-gjenopptak,
+FK-trygg cleanup-rekkefølge, SKIPPED_SAFE_FIXTURE, §6-skip). **Ingen regresjon:** Drive-auth/-scopes/
+-klient HELT urørt (verifisert strukturelt), Q-21 uendret, P0/P1A-tester alle fortsatt grønne.
+
+**Kvalitetsgates:** `pnpm -r run typecheck` (13/13 grønt), `eslint .` (0 feil), `pnpm test`
+(**856/856**, 64 testfiler - opp fra 813/813), gitleaks (protect --staged + detect mot
+origin/main..HEAD, begge rene).
+
+**STATUS UENDRET: FIXED_SUITE / HOST_VERIFY_BLOCKED.** IKKE VERIFIED - krever en NY host-kjøring av
+`node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p1b-a-host-run.ts`
+for faktisk å bevise den fiksede klassifiseringen/reauth-flyten og live Gmail-sync mot en ekte
+innboks. `docs/OPEN_QUESTIONS.md` Q-24 oppdatert med denne rundens funn (nye punkter 7/8). PR #7
+IKKE merget - `IKKE merge, IKKE ny fase`-instruksen i byggeordren er fulgt.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). **UA-2 P1B-A er FIXED_SUITE/READY_FOR_HOST_VERIFY -
@@ -1072,10 +1131,13 @@ branches rørt. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA
 er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-2 P1B-A venter på Tobias sin host-verifikasjon** (kjør
-`node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p1b-a-host-run.ts`
-med `JARVIS_EMAIL_TOKEN`+`ANTHROPIC_API_KEY` satt) - deretter draft-PR opprettes/oppdateres og merges
-KUN etter eksplisitt Tobias-godkjenning, samme disiplin som P0/P1A/Q-20.
+**UA-2 P1B-A venter fortsatt på Tobias sin host-verifikasjon** - kjør SAMME ene kommando som før
+(`node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p1b-a-host-run.ts`,
+`JARVIS_EMAIL_TOKEN`+`ANTHROPIC_API_KEY` satt) - denne runden (HOST FIX #1) fikset Gmail
+401-klassifisering + automatisk reauth + cost_events-cleanup, så scriptet bør nå enten fullføre Gmail-
+delen selv (auto-reauth), eller gi en presis, klassifisert feilmelding hvis noe fortsatt blokkerer.
+PR #7 oppdateres deretter med det nye funnet - merges KUN etter eksplisitt Tobias-godkjenning, samme
+disiplin som P0/P1A/Q-20.
 
 Øvrige kandidater uendret i bakgrunnen: møtetranskripsjon (UA-7 Communications Hub-avhengighet ikke
 bygget ennå), D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME,

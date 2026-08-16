@@ -2,6 +2,113 @@ import type { JsonValue } from "@jarvis/contracts";
 import type { ToolTransport } from "./gateway.ts";
 
 /**
+ * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
+ * TIDLIGERE `googleAccessToken()` samlet ALLE token-endepunkt-feil til
+ * `google_auth_failed_<status>` - selve Google-feilkroppen (`error`/
+ * `error_description`, RFC 6749 §5.2 sitt FLATE skjema - IKKE den nøstede
+ * `{error:{code,message,status,...}}`-formen `classifyDriveProbeError()`
+ * under klassifiserer, som er en ANNEN Google-API-feilform) ble ALDRI lest.
+ * Host-kjøringen fikk derfor kun `tool_failed:google_auth_failed_401` - IKKE
+ * nok til å avgjøre om `JARVIS_EMAIL_TOKEN` var utstedt til en ANNEN
+ * OAuth-klient (§3 i host-fix-ordren), tilbakekalt, eller noe helt annet.
+ * `classifyGoogleTokenEndpointError()` er BEVISST tekst-basert-beste-innsats
+ * på `error_description` (samme presedens som `classifyDriveProbeError()`
+ * sin `WORKSPACE_ADMIN_POLICY`-gren) - Google gir INGEN mer presist
+ * maskinlesbart signal for "token utstedt til en annen klient" enn en
+ * `invalid_grant`-feilbeskrivelse som nevner det eksplisitt.
+ */
+export type GoogleAuthErrorClass =
+  | "EMAIL_TOKEN_CLIENT_MISMATCH"
+  | "EMAIL_REFRESH_TOKEN_REVOKED"
+  | "EMAIL_INSUFFICIENT_SCOPE"
+  | "GOOGLE_INVALID_GRANT"
+  | "GOOGLE_INVALID_CLIENT"
+  | "UNKNOWN_GOOGLE_AUTH";
+
+export interface GoogleAuthErrorDetails {
+  httpStatus: number;
+  /** Google sin RFC 6749 §5.2 `error`-kode, f.eks. "invalid_grant" - `undefined` hvis kroppen ikke var gyldig JSON eller manglet feltet. */
+  googleError: string | undefined;
+  /** Google sin `error_description` - ALDRI en secret (Google ekko-er aldri tilbake selve tokenet/client_secret i en feilrespons), men avkortet (300 tegn) som et ekstra sikkerhetsnett. */
+  googleErrorDescription: string | undefined;
+  errorClass: GoogleAuthErrorClass;
+}
+
+interface TokenEndpointErrorBody {
+  error?: string;
+  error_description?: string;
+}
+
+/**
+ * KUN for selve TOKEN-ENDEPUNKTET (`https://oauth2.googleapis.com/token`) -
+ * IKKE for et Google API-kall som allerede har et access-token (se
+ * `classifyDriveProbeError()` for DEN, nøstede feilformen). ALDRI kaster -
+ * en ikke-JSON eller uventet kropp gir fortsatt en trygg (UNKNOWN_GOOGLE_AUTH)
+ * klassifisering fremfor å knekke selve feilrapporteringen.
+ */
+export function classifyGoogleTokenEndpointError(httpStatus: number, rawBody: string): GoogleAuthErrorDetails {
+  let parsed: TokenEndpointErrorBody = {};
+  try {
+    parsed = JSON.parse(rawBody) as TokenEndpointErrorBody;
+  } catch {
+    // Ikke-JSON-kropp (sjeldent for Google sitt token-endepunkt) - fortsett med tomt objekt.
+  }
+  const googleError = parsed.error;
+  const googleErrorDescription = parsed.error_description?.slice(0, 300);
+  const desc = googleErrorDescription ?? "";
+
+  let errorClass: GoogleAuthErrorClass;
+  if (googleError === "invalid_grant") {
+    if (/not match|different client|another client|client.?id/i.test(desc)) {
+      errorClass = "EMAIL_TOKEN_CLIENT_MISMATCH";
+    } else if (/expired|revoked/i.test(desc)) {
+      errorClass = "EMAIL_REFRESH_TOKEN_REVOKED";
+    } else {
+      errorClass = "GOOGLE_INVALID_GRANT";
+    }
+  } else if (googleError === "invalid_client" || googleError === "unauthorized_client") {
+    errorClass = "GOOGLE_INVALID_CLIENT";
+  } else if (googleError === "insufficient_scope" || /insufficient/i.test(desc)) {
+    errorClass = "EMAIL_INSUFFICIENT_SCOPE";
+  } else {
+    errorClass = "UNKNOWN_GOOGLE_AUTH";
+  }
+  return { httpStatus, googleError, googleErrorDescription, errorClass };
+}
+
+/** Trygg, grep-bar én-linjes diagnosetekst - ALDRI token/secret, kun de klassifiserte, ikke-sensitive feltene (samme presedens som `formatDriveProbeReport()`). */
+export function formatGoogleAuthErrorReport(details: GoogleAuthErrorDetails): string {
+  return `google_auth_error_class=${details.errorClass} http_status=${details.httpStatus} google_error=${details.googleError ?? "unknown"}`;
+}
+
+/** Klassene som er trygge å AUTOMATISK forsøke reautorisert via `google-email-reauth.ts` - de resterende (GOOGLE_INVALID_CLIENT/UNKNOWN_GOOGLE_AUTH) krever manuell undersøkelse, ALDRI en gjentatt automatisk reauth-løkke mot en sannsynligvis feil grunnleggende årsak. */
+export function isRecoverableGoogleAuthErrorClass(errorClass: GoogleAuthErrorClass): boolean {
+  return errorClass === "EMAIL_TOKEN_CLIENT_MISMATCH" || errorClass === "EMAIL_REFRESH_TOKEN_REVOKED" ||
+    errorClass === "GOOGLE_INVALID_GRANT" || errorClass === "EMAIL_INSUFFICIENT_SCOPE";
+}
+
+const GOOGLE_AUTH_FAILED_MESSAGE_PATTERN = /google_auth_failed_(\d+):(\w+)(?::(.+))?$/;
+
+/**
+ * Parser den klassifiserte meldingen `googleAccessToken()` kaster tilbake ut
+ * av en `ToolResult` sin `reason`-streng (`tool_failed:google_auth_failed_
+ * <status>:<class>[:<google_error>]` - se `ToolGateway.execute()` sin
+ * "tool_failed:<message>"-innpakning). `undefined` for ALT annet (en
+ * uklassifisert/annen type feil) - kalleren skal ALDRI anta Google-auth uten
+ * dette mønsteret faktisk til stede.
+ */
+export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorClass | undefined {
+  const match = GOOGLE_AUTH_FAILED_MESSAGE_PATTERN.exec(reason);
+  const errorClass = match?.[2];
+  if (!errorClass) return undefined;
+  const known: readonly GoogleAuthErrorClass[] = [
+    "EMAIL_TOKEN_CLIENT_MISMATCH", "EMAIL_REFRESH_TOKEN_REVOKED", "EMAIL_INSUFFICIENT_SCOPE",
+    "GOOGLE_INVALID_GRANT", "GOOGLE_INVALID_CLIENT", "UNKNOWN_GOOGLE_AUTH"
+  ];
+  return (known as readonly string[]).includes(errorClass) ? (errorClass as GoogleAuthErrorClass) : undefined;
+}
+
+/**
  * PRODUKSJONSTRANSPORTER (BO-03). Live-verifisering krever credentials i .env
  * (BLOCKED_EXTERNAL til de finnes) - koden er komplett og typesjekket.
  * Credential-argumentet kommer fra SecretProvider via Tool Gateway; for Google
@@ -18,7 +125,11 @@ async function googleAccessToken(refreshToken: string): Promise<string> {
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token", refresh_token: refreshToken })
   });
-  if (!response.ok) throw new Error(`google_auth_failed_${response.status}`);
+  if (!response.ok) {
+    const rawBody = await response.text().catch(() => "");
+    const details = classifyGoogleTokenEndpointError(response.status, rawBody);
+    throw new Error(`google_auth_failed_${response.status}:${details.errorClass}${details.googleError ? `:${details.googleError}` : ""}`);
+  }
   return ((await response.json()) as { access_token: string }).access_token;
 }
 
