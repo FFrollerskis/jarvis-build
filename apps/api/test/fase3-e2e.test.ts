@@ -19,7 +19,7 @@ import {
 } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { FailingAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
+import { FailingAdapter, ScriptedAdapter, textOnly } from "@jarvis/provider-adapters";
 import {
   FakeTransport,
   MeshToolExecutor,
@@ -142,7 +142,7 @@ beforeAll(async () => {
         ? "Kalenderen din i dag: standup 09:00."
         : // BO-11.1 §7: "langsom" gir mange tokens (~1 ms hver i stream) slik at
           // klient-frakobling deterministisk treffer midt i genereringen.
-          req.messages.at(-1)?.content.includes("langsom")
+          textOnly(req.messages.at(-1)?.content ?? "").includes("langsom")
           ? Array.from({ length: 150 }, (_, i) => `ord${i} `).join("")
           : "Hei Tobias, dette er et modellsvar.",
     // D-30 live-funn-fix: kalender-intent → normalized tool call (runde 1); etter
@@ -151,7 +151,7 @@ beforeAll(async () => {
       if (req.tool_exchanges?.length) {
         return [];
       }
-      if (!(req.messages.at(-1)?.content ?? "").includes("kalenderen")) {
+      if (!textOnly(req.messages.at(-1)?.content ?? "").includes("kalenderen")) {
         return [];
       }
       toolCallSeq += 1;

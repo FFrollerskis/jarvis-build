@@ -2,6 +2,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   ProviderError,
+  textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult
@@ -31,7 +32,7 @@ export class GeminiAdapter implements ModelProviderAdapter {
     }
     const contents = request.messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }]
+      parts: [{ text: textOnly(m.content) }]
     }));
     const started = Date.now();
     let response: Response;

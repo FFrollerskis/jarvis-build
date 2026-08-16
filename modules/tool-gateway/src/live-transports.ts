@@ -22,12 +22,79 @@ async function googleAccessToken(refreshToken: string): Promise<string> {
   return ((await response.json()) as { access_token: string }).access_token;
 }
 
+/** Gmail sin `attachmentId`/vedleggs-metadata, funnet ved å gå gjennom MIME-treet (`payload.parts`, kan være nøstet). */
+interface GmailAttachmentPart {
+  attachment_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
+interface GmailMimePart {
+  filename?: string;
+  mimeType?: string;
+  body?: { attachmentId?: string; size?: number; data?: string };
+  parts?: unknown[];
+}
+
+/** Rekursivt - Gmail sitt MIME-tre kan nøste `parts` (f.eks. multipart/mixed → multipart/alternative → vedlegg). */
+function collectAttachmentParts(part: GmailMimePart | undefined): GmailAttachmentPart[] {
+  if (!part) return [];
+  const found: GmailAttachmentPart[] = [];
+  if (part.filename && part.body?.attachmentId) {
+    found.push({
+      attachment_id: part.body.attachmentId, filename: part.filename,
+      mime_type: part.mimeType ?? "application/octet-stream", size_bytes: part.body.size ?? 0
+    });
+  }
+  for (const child of part.parts ?? []) {
+    found.push(...collectAttachmentParts(child as GmailMimePart));
+  }
+  return found;
+}
+
+/**
+ * Rekursivt - finner FØRSTE `text/plain`-del uten `attachmentId` (skiller
+ * body-tekst fra en `.txt`-VEDLEGG, som skal gå gjennom `attachments`, ikke
+ * `body_text`). Samme MIME-tre-nøsting som `collectAttachmentParts()`.
+ */
+function findBodyTextPart(part: GmailMimePart | undefined): string | undefined {
+  if (!part) return undefined;
+  if (part.mimeType === "text/plain" && part.body?.data && !part.body.attachmentId) {
+    return part.body.data;
+  }
+  for (const child of part.parts ?? []) {
+    const found = findBodyTextPart(child as GmailMimePart);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Gmail returnerer vedleggsdata som URL-safe base64 (RFC 4648 §5) - konverter til standard base64 FØR det når resten av Jarvis (data-URIer, Model Gateway vision-innhold forventer standard base64). */
+function base64UrlToStandard(data: string): string {
+  const standard = data.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = standard.length % 4 === 0 ? "" : "=".repeat(4 - (standard.length % 4));
+  return standard + padding;
+}
+
 export class GmailTransport implements ToolTransport {
   constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
-    if (action !== "read_inbox") throw new Error(`gmail_unsupported_action_${action}`);
     const token = await googleAccessToken(credential);
     const auth = { authorization: `Bearer ${token}` };
+    switch (action) {
+      case "read_inbox":
+        return this.readInbox(parameters, auth);
+      case "list_messages":
+        return this.listMessages(parameters, auth);
+      case "read_attachment":
+        return this.readAttachment(parameters, auth);
+      default:
+        throw new Error(`gmail_unsupported_action_${action}`);
+    }
+  }
+
+  private async readInbox(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
     const max = Number(parameters["max"] ?? 15);
     const list = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${max}&q=newer_than:2d`, { headers: auth });
     if (!list.ok) throw new Error(`gmail_error_${list.status}`);
@@ -47,6 +114,71 @@ export class GmailTransport implements ToolTransport {
       });
     }
     return { data: { messages } };
+  }
+
+  /**
+   * UA-2 P1B-A §2: FULL meldingslisting (i motsetning til `read_inbox` sin
+   * `format=metadata` - kun headere) - henter `format=full` PER melding for å
+   * finne MIME-vedleggsdelene (`attachmentId`/filnavn/mime/størrelse), i
+   * tillegg til body-tekst (`text/plain`-delen, når tilstede). Paginering
+   * skjer INNENFOR denne ene handlingen (samme mønster som Drive sin
+   * `list_files` → `KnowledgeSource.list()`-aggregering) - kalleren (
+   * `EmailAttachmentKnowledgeSource`) MÅ selv styre `max`/tidsvindu, ingen
+   * ubegrenset full-postkasse-skann her.
+   */
+  private async listMessages(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const max = Number(parameters["max"] ?? 15);
+    const query = parameters["query"] ? String(parameters["query"]) : "newer_than:14d";
+    const list = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=${max}&q=${encodeURIComponent(query)}`,
+      { headers: auth }
+    );
+    if (!list.ok) throw new Error(`gmail_error_${list.status}`);
+    const ids = (((await list.json()) as { messages?: Array<{ id: string }> }).messages ?? []).slice(0, max);
+    const messages: JsonValue[] = [];
+    for (const { id } of ids) {
+      const m = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`, { headers: auth });
+      if (!m.ok) continue;
+      const msg = (await m.json()) as {
+        id: string; threadId: string; internalDate?: string;
+        payload?: {
+          headers?: Array<{ name: string; value: string }>;
+          mimeType?: string; body?: { data?: string };
+          parts?: Array<{ mimeType?: string; body?: { data?: string; attachmentId?: string; size?: number }; filename?: string; parts?: unknown[] }>;
+        };
+      };
+      const h = (name: string) => msg.payload?.headers?.find((x) => x.name === name)?.value ?? "";
+      const bodyData = findBodyTextPart(msg.payload as GmailMimePart | undefined);
+      const bodyText = bodyData ? Buffer.from(base64UrlToStandard(bodyData), "base64").toString("utf8") : "";
+      const attachments = collectAttachmentParts(msg.payload as GmailMimePart | undefined);
+      messages.push({
+        id: msg.id, thread: msg.threadId, from: h("From"), subject: h("Subject"),
+        at: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : h("Date"),
+        body_text: bodyText,
+        attachments: attachments as unknown as JsonValue,
+        account: this.accountEmail
+      });
+    }
+    return { data: { messages } };
+  }
+
+  /** UA-2 P1B-A §2: last ned RÅ vedleggsbytes (standard base64) for ETT vedlegg - aldri hele meldingen på nytt. */
+  private async readAttachment(parameters: Record<string, JsonValue>, auth: Record<string, string>) {
+    const messageId = String(parameters["message_id"]);
+    const attachmentId = String(parameters["attachment_id"]);
+    const response = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`,
+      { headers: auth }
+    );
+    if (response.status === 404) throw new Error(`gmail_attachment_not_found_${attachmentId}`);
+    if (!response.ok) throw new Error(`gmail_error_${response.status}`);
+    const body = (await response.json()) as { size?: number; data?: string };
+    return {
+      data: {
+        content_base64: body.data ? base64UrlToStandard(body.data) : "",
+        size_bytes: body.size ?? 0
+      }
+    };
   }
 }
 

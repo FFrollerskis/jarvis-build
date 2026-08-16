@@ -21,6 +21,8 @@ import {
   PgTaskQueue,
   ProcessSandboxRunner
 } from "@jarvis/tasks";
+import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
+import { LocalHashEmbedding } from "@jarvis/memory";
 
 // Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
 // en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
@@ -93,6 +95,28 @@ worker.register(
     gateway,
     tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, workerIdentity) },
     sandbox: runner
+  })
+);
+
+// UA-2 P1B-A (D-43 §5): e-post-vedlegg-ingestion som en durable jobb - SAMME
+// worker/kø-infrastruktur som "executive" over, ingen parallell mekanisme.
+// Statisk, env-drevet ÉN-instans-registry (samme "eksplisitt, ingen implisitt
+// default"-prinsipp som ua2-p1a-live.ts sin egen registry-bruk) - owner sin
+// egen postkasse, personal memory space. gateway (ModelGateway) tilfredsstiller
+// VisionCompleter strukturelt (complete()-metoden), ingen ny AI Mesh-vei.
+const knowledgeRegistry = new KnowledgeSourceRegistry([
+  {
+    source_type: "email_attachment",
+    tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    memory_space_id: "personal",
+    source_instance_id: "email:inbox",
+    account: process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com"
+  }
+]);
+worker.register(
+  "knowledge-ingest-email",
+  emailIngestHandler({
+    pool, toolGateway, embeddings: new LocalHashEmbedding(), visionGateway: gateway, registry: knowledgeRegistry
   })
 );
 

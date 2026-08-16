@@ -4,6 +4,7 @@ import {
   classifyHttpStatus,
   ProviderError,
   sseLines,
+  textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
@@ -30,7 +31,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
   private buildBody(request: ModelRequest, stream: boolean): Record<string, unknown> {
     const messages: Array<Record<string, unknown>> = [
       ...(request.system ? [{ role: "system", content: request.system }] : []),
-      ...request.messages.map((m) => ({ role: m.role, content: m.content }))
+      ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
     ];
     for (const ex of request.tool_exchanges ?? []) {
       messages.push({

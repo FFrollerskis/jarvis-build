@@ -4,6 +4,8 @@ import { FilesystemKnowledgeSource, DEFAULT_TEXT_EXTENSIONS } from "./filesystem
 import { GithubKnowledgeSource } from "./github-source.ts";
 import { GoogleDriveKnowledgeSource } from "./drive-source.ts";
 import { ObsidianVaultKnowledgeSource } from "./obsidian-source.ts";
+import { EmailAttachmentKnowledgeSource } from "./email-attachment-source.ts";
+import type { OcrProvider, VisionDescriptionProvider } from "./ocr-provider.ts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { IdentityContext } from "@jarvis/contracts";
 
@@ -50,6 +52,18 @@ export type KnowledgeSourceConfig =
       memory_space_id: MemorySpace;
       source_instance_id: string;
       vault_root: string;
+    }
+  | {
+      source_type: "email_attachment";
+      tenant_id: string;
+      memory_space_id: MemorySpace;
+      source_instance_id: string;
+      /** Gmail-kontoen denne instansen henter fra (samme mønster som google_drive sin `account` - kun dokumenterende, selve autentiseringen skjer via `JARVIS_EMAIL_TOKEN`). */
+      account: string;
+      /** Valgfritt: maks antall meldinger per sync-runde (default håndteres av kilden selv). */
+      max?: number;
+      /** Valgfritt: Gmail-søkespørring (default håndteres av kilden selv). */
+      query?: string;
     };
 
 export class UnknownSourceInstanceError extends Error {
@@ -59,10 +73,11 @@ export class UnknownSourceInstanceError extends Error {
   }
 }
 
-/** Injiserte avhengigheter for kilder som selv trenger dem (ToolGateway-baserte kilder). Filesystem/Obsidian trenger ingen. */
+/** Injiserte avhengigheter for kilder som selv trenger dem (ToolGateway-baserte kilder). Filesystem/Obsidian trenger ingen. `ocr` kreves KUN av `email_attachment` (UA-2 P1B-A). */
 export interface KnowledgeSourceBuildDeps {
   toolGateway?: ToolGateway;
   identity?: IdentityContext;
+  ocr?: OcrProvider & VisionDescriptionProvider;
 }
 
 /**
@@ -136,6 +151,15 @@ export class KnowledgeSourceRegistry {
       }
       case "obsidian":
         return new ObsidianVaultKnowledgeSource(config.vault_root, config.source_instance_id);
+      case "email_attachment": {
+        if (!deps.toolGateway || !deps.identity || !deps.ocr) {
+          throw new Error("email_attachment_source_requires_tool_gateway_identity_and_ocr");
+        }
+        return new EmailAttachmentKnowledgeSource(
+          deps.toolGateway, deps.identity, deps.ocr, config.source_instance_id,
+          { ...(config.max !== undefined ? { max: config.max } : {}), ...(config.query !== undefined ? { query: config.query } : {}) }
+        );
+      }
     }
   }
 }

@@ -1,8 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (P1A Runtime Wiring Closeout - VERIFIED/COMPLETE, host-smoke-bevist, PR #6
-merget) · **Branch:** `main` · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret, host-bevist
-run_id `2703299e`, PR #5 merget)
+**Oppdatert:** 2026-08-16 (UA-2 P1B-A e-post-vedlegg + OCR/vision-ingestion-fundament -
+FIXED_SUITE/READY_FOR_HOST_VERIFY, 813/813 tester, IKKE host-verifisert ennå) · **Branch:**
+`claude/ua2-p1b-a-email-ocr-vision` · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE
+(host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret,
+host-bevist run_id `2703299e`, PR #5 merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -997,9 +999,68 @@ worker-prosess (kun `ua2-p1a-live.ts` sin egen akseptanse-only ToolGateway nådd
   IKKE D-42, den lukker kun det ETT gjenværende post-merge-integrasjonsfunnet. PR #6 merget til
   `main` (normal merge-commit, samme konvensjon som PR #1-#5).
 
+## UA-2 P1B-A — E-post-vedlegg + OCR/vision-ingestion-fundament (BYGGET denne økten, 2026-08-16, branch `claude/ua2-p1b-a-email-ocr-vision` fra `origin/main` `35ac208`)
+
+**Fase-port avklart FØRST:** `docs/PROJECT_STATUS.md` hadde tidligere logget at P1B-A venter på "egen,
+eksplisitt fase-godkjenning fra Tobias" (CLAUDE.md-regel 10). Ved mottak av byggeordren for P1B-A ble
+denne motstriden eksplisitt flagget og avklart via spørsmål til brukeren FØR noe kode ble skrevet -
+brukeren bekreftet "Proceed with implementation". Loggført her for sporbarhet, ikke stille omgått.
+
+**Status: IMPLEMENTED + SUITE-VERIFIED (813/813 tester, 62 testfiler). IKKE host-verifisert ennå.**
+Bygget PÅ det VERIFIED P0/P1A-fundamentet - ingen parallell ingestion-pipeline, ingen ny
+autentiseringsvei. Full arkitektur-/scope-begrunnelse: D-43 (opprinnelig scope-beslutning) og D-44
+(oppdaget under selve byggingen - `pdf-parse` v2 dekker BÅDE native tekst-ekstraksjon OG
+side-rasterisering i ett bibliotek, ingen tung systemavhengighet).
+
+**Bygget (se IMPLEMENTATION_PLAN.md sin P1B-A-seksjon for full detaljliste):**
+1. Multimodalt `ChatMessage.content` (`string | ContentPart[]`) i `packages/provider-adapters` - EKTE
+   bildestøtte KUN i Anthropic-adapteren denne runden; `capability-registry.ts` sitt `vision`-flagg
+   korrigert til å reflektere dette faktisk (ikke aspirasjonelt lenger på openai/gemini).
+2. `GmailTransport.list_messages`/`read_attachment` (nye handlinger, SAMME `JARVIS_EMAIL_TOKEN`-vei).
+3. `extraction-safety.ts` - fil-type-klassifisering (arkiver/docx/xlsx/pptx eksplisitt avvist), fail-
+   closed størrelses-/side-/tidsgrenser, native→bilde-terskel, path-traversal-sikker filnavn-sanering.
+4. `ocr-provider.ts` - `ModelGatewayVisionExtractor` (OCR + vision-beskrivelse, BEGGE via EKSISTERENDE
+   `ModelGateway`, `purpose:"VISION"`, aldri direkte leverandør-SDK).
+5. `pdf-extraction.ts` (ny avhengighet `pdf-parse` v2 / `@napi-rs/canvas`, D-44) - EKTE per-side native
+   tekst OG side-rasterisering, verifisert funksjonelt i dev-sandkasse mot en håndlaget test-PDF.
+6. `EmailAttachmentKnowledgeSource` - side-granulær `external_id`-"chunking" UTEN ny tabell
+   (`msg:<id>`/`att:<msgId>:<attId>[:page:<n>]`), gjenbruker 100% av eksisterende
+   dedupe/tombstone/Q-20/RLS. Per-vedlegg/per-side feilisolasjon, AUTH/PERMISSION-eskalering.
+7. `email_attachment`-kildetype i `KnowledgeSourceRegistry` + ny `knowledge-ingest-email`-agent-profil
+   i `apps/api/src/worker-main.ts` (SAMME `InProcessWorker`/`PgTaskQueue` som `executive`).
+8. Host-akseptansescript `modules/knowledge/scripts/ua2-p1b-a-host-run.ts` (`p1b_*`-markører,
+   `--env-file=.env`-konvensjon, BLOCKED_NO_EMAIL_CREDENTIALS/BLOCKED_NO_VISION_PROVIDER fail-closed
+   defaults - ALDRI en antatt PASS uten faktiske credentials).
+
+**Suite-verifisert:** 813/813 - multimodal content-mapping (10 tester), Gmail-transport-logikk (8+6
+tester, inkl. rekursiv MIME-tre-vedleggsgjenfinning), fail-closed sikkerhetsgrenser (18 tester),
+EmailAttachmentKnowledgeSource end-to-end (13 tester, inkl. EKTE PDF native/OCR/vision-routing mot
+håndlagde test-PDF-er, ikke mocket), full dedupe/tombstone/Q-20-resurrection-suppresjon mot ekte
+embedded Postgres (2 tester), registry-/worker-wiring (5+5+10 strukturelle tester).
+
+**IKKE host/live-verifisert (se Q-24 for full gap-liste):** ekte Gmail-listing/vedleggsnedlasting
+(krever `JARVIS_EMAIL_TOKEN` - EGEN credential fra Drive/Calendar, se D-35), ekte vision-modellkall
+(krever `ANTHROPIC_API_KEY`), full sync mot en ekte innboks, `@napi-rs/canvas` sin native binær
+bevist å laste korrekt på Tobias sin faktiske Windows/Docker-host (kun dev-sandkasse-verifisert).
+
+**Kvalitetsgates kjørt:** `pnpm -r run typecheck` (13/13 workspace-prosjekter grønt), `eslint .`
+(0 feil/advarsler på alle nye/endrede filer), `pnpm test` (813/813, 62 testfiler), gitleaks
+(protect --staged + detect mot origin/main..HEAD, begge rene).
+
+**Docs oppdatert:** D-43 (opprinnelig scope-beslutning), D-44 (pdf-parse-oppdagelse),
+Q-24 (samlet gap-liste), IMPLEMENTATION_PLAN.md (ny P1B-A-seksjon + P1A-referanse), RUNTIME_GATES.md
+(ny gate-rad), UA2_KNOWLEDGE_DPIA.md (ny `email_attachment`-datakategori-rad + egen
+"OCR/vision-dataflyt"-seksjon - materiell dataflyt-endring: bilde-bytes til ekstern leverandør).
+
+**STATUS: FIXED_SUITE/READY_FOR_HOST_VERIFY.** IKKE merget - venter på Tobias sin host-kjøring av
+`ua2-p1b-a-host-run.ts` (krever `JARVIS_EMAIL_TOKEN` + `ANTHROPIC_API_KEY` i `.env`) før VERIFIED kan
+erklæres, i tråd med samme host-bevis-disiplin som D-38/D-39/D-40/D-42.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout har INGEN egne blokkeringer (alle
-VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
+VERIFIED/CLOSED/COMPLETE, merget til `main`). **UA-2 P1B-A er FIXED_SUITE/READY_FOR_HOST_VERIFY -
+IKKE merget, venter på Tobias sin host-kjøring** (se Q-24 for full gap-liste: Gmail/vision-
+credentials, `@napi-rs/canvas` host-lasting). Manglende provider-nøkler er eneste gap for LIVE
 multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
 ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave.
 Google Drive permission-mutasjon er IKKE live-host-bevist (Q-23) - smalt, ikke-blokkerende
@@ -1011,17 +1072,15 @@ branches rørt. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA
 er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-2 P1A (inkl. Runtime Wiring Closeout) er VERIFIED/COMPLETE og merget - ingen videre handling
-påkrevd for P1A.**
+**UA-2 P1B-A venter på Tobias sin host-verifikasjon** (kjør
+`node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p1b-a-host-run.ts`
+med `JARVIS_EMAIL_TOKEN`+`ANTHROPIC_API_KEY` satt) - deretter draft-PR opprettes/oppdateres og merges
+KUN etter eksplisitt Tobias-godkjenning, samme disiplin som P0/P1A/Q-20.
 
-Neste kandidat i IMPLEMENTATION_PLAN er **UA-2 P1B-A** (e-post-vedlegg-ingestion + OCR/vision-
-ingestion - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og UA2_KNOWLEDGE_DPIA.md). Møtetranskripsjon
-forblir UTSATT til UA-7 Communications Hub sin avhengighet finnes (IKKE bygget ennå) - derfor
-skiveres P1B som P1B-A (e-post-vedlegg + OCR, ingen avhengighet) FØR møtetranskripsjon. **P1B-A
-venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe implementeres** (faseporten gjelder,
-CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige kandidater uendret i bakgrunnen: D-30
-ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for
-Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22), Google Drive permission-live-verifikasjon (Q-23,
-egen test-runde med reell ekstern test-konto), connector-audit-gapene (D-41-sjekklisten, egne
+Øvrige kandidater uendret i bakgrunnen: møtetranskripsjon (UA-7 Communications Hub-avhengighet ikke
+bygget ennå), D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME,
+provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22), Google Drive
+permission-live-verifikasjon (Q-23, egen test-runde med reell ekstern test-konto), connector-audit-
+gapene (D-41-sjekklisten, egne
 fremtidige byggeordre per connector), `claude/hva-skjer-hvordan-ligger-0z3ztp`-branch-opprydding
 (krever noen med slette-rettighet på repoet).

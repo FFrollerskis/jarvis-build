@@ -4,12 +4,30 @@ import {
   classifyHttpStatus,
   ProviderError,
   sseLines,
+  type ChatMessage,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
   type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
+
+/**
+ * UA-2 P1B-A (D-43 §3): eneste adapter med EKTE bildestøtte i denne runden
+ * (`capability-registry.ts` sitt `vision`-flagg reflekterer dette - router
+ * sender derfor ALDRI et vision-krevd kall hit til andre adaptere). Anthropic
+ * sitt Messages API tar imot `{type:"image", source:{type:"base64",
+ * media_type, data}}`-blokker i samme `content`-array som tekstblokker -
+ * bekreftet mot Anthropic sin offisielle Messages API-dokumentasjon.
+ */
+function toAnthropicContent(content: ChatMessage["content"]): string | Array<Record<string, unknown>> {
+  if (typeof content === "string") return content;
+  return content.map((part) =>
+    part.type === "text"
+      ? { type: "text", text: part.text }
+      : { type: "image", source: { type: "base64", media_type: part.media_type, data: part.data } }
+  );
+}
 
 /**
  * Anthropic Messages API-adapter (UA-1 P1A: tekst, tool use og streaming gjennom
@@ -31,7 +49,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
 
   /** Provider-nøytral request → Anthropic-format (tool_use/tool_result-blokker). */
   private buildBody(request: ModelRequest, stream: boolean): Record<string, unknown> {
-    const messages: Array<Record<string, unknown>> = request.messages.map((m) => ({ role: m.role, content: m.content }));
+    const messages: Array<Record<string, unknown>> = request.messages.map((m) => ({ role: m.role, content: toAnthropicContent(m.content) }));
     for (const ex of request.tool_exchanges ?? []) {
       messages.push({
         role: "assistant",
