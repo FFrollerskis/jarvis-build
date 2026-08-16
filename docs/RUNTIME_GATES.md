@@ -18,14 +18,74 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
 | UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
 | Q-20 Data erasure foundation | **PRODUCTION_VERIFIED (2026-08-16)** | Host-bevist på ekte Windows/Docker-host (run_id `eaabe2b1`): alle `q20_*`-felt PASS, `hard_fail=false`, `q21_runtime_role_safe=PASS`. Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se D-40 og eget avsnitt under |
-| UA-2 P1A Knowledge Source Expansion (Drive/Obsidian) | **IMPLEMENTED_NOT_VERIFIED** | Bygget 2026-08-16 fra `origin/main` etter Q-20-merge. 57 nye tester (463/463 totalt), full monorepo-typecheck. Ingen ekte Google Drive-credential, ingen ekte Docker-Postgres i denne sky-sandboxen - krever Tobias sin host-kjøring (`ua2-p1a-host-run.ts`). Se eget avsnitt under |
+| UA-2 P1A Knowledge Source Expansion (Drive/Obsidian) | **IMPLEMENTED_NOT_VERIFIED** | Bygget 2026-08-16 fra `origin/main` etter Q-20-merge. 517/517 tester totalt (406 baseline + 57 ingestion + 27 Drive full read/write scope-endring), full monorepo-typecheck. Ingen ekte Google Drive-credential, ingen ekte Docker-Postgres i denne sky-sandboxen - krever Tobias sin host-kjøring (`ua2-p1a-host-run.ts`). Google Drive-VERKTØYET (separat fra ingestion) har full read/write/permissions siden D-41 (samme dag) - se eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
+## D-41 — GOOGLE DRIVE FULL READ/WRITE SCOPE-ENDRING: SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå, samme dag som P1A-bygget under)
+
+**Eier-beslutning FØR PR #5 merges** (se D-41 i DECISIONS_AND_ASSUMPTIONS.md, rule 11 i CLAUDE.md):
+Jarvis skal IKKE være begrenset til read-only Google Drive - produksjon skal ha FULL funksjonell
+tilgang, styrt av det EKSISTERENDE A-D policy-risikoklassesystemet (ingen ny permission-modell).
+Permanent arkitekturregel innført samtidig for ALLE fremtidige connectors.
+
+- **`GoogleDriveTransport`** (`modules/tool-gateway/src/live-transports.ts`) utvidet fra 2
+  (`list_files`/`read_document`) til 12 handlinger: `get_metadata`/`read_permissions` (klasse A),
+  `create_file`/`create_folder`/`update_content`/`rename`/`move`/`trash` (klasse C - reversible),
+  `delete_permanent`/`create_permission`/`update_permission`/`delete_permission` (klasse D -
+  irreversible/sikkerhetskritiske).
+- **OAuth-scope for produksjon bekreftet mot Google sitt offisielle Drive API v3-discovery-dokument
+  (IKKE gjettet):** `https://www.googleapis.com/auth/drive` (full read/write) - `drive.file` dekker
+  KUN app-opprettede filer, utilstrekkelig for faktisk full tilgang. `files.delete` bekreftet PERMANENT
+  (flytter ikke til papirkurv); trashing er en separat, reversibel `files.update` med `trashed: true`.
+  `headRevisionId`/`modifiedTime` finnes på File-ressursen for optimistic concurrency (Drive har INGEN
+  native If-Match-precondition-header).
+- **Konflikthåndtering:** `update_content`/`rename`/`move`/`trash` godtar en valgfri
+  `expected_head_revision_id` - ved mismatch kastes `drive_conflict_stale_version` FØR noen mutasjon
+  forsøkes, aldri en stille overskriving av en nyere endring.
+- **Policy uendret, kun anvendt på nye handlinger:** D-klasse-handlinger fikk `preflight_action` (samme
+  eksisterende ToolGateway-evidensmekanisme Home Assistant sin `lock_set`/`alarm_set` alt brukte).
+  Owner sovereign-modus autonomt for klasse D (ingen ny approval-friksjon for eier); delegert identitet
+  krever fortsatt signert Ed25519-godkjenning (uendret `PolicyGateway`-logikk, bevist for Drive spesifikt
+  i `drive-full-access.test.ts` §G/§I).
+- **Idempotens:** skriveoperasjoner bruker EKSISTERENDE ToolGateway `idempotency_key`-dedupe. Bevist
+  kritisk for `create_permission` spesielt - Drive sin egen `permissions.create` dedupliserer IKKE
+  identiske tilganger selv, så ToolGateway-nivået er den faktiske håndhevingsmekanismen.
+- **Q-20-distinksjon (§5):** `drive/trash` rører ALDRI `knowledge_documents`; en Q-20-hard-delete av et
+  `knowledge_document` kaller ALDRI ut til Drive. Arkitektonisk uavhengige operasjoner, bevist begge veier.
+- **Ingestion-siden uendret:** `GoogleDriveKnowledgeSource` (sync-kilden) er og forblir READ ONLY mot
+  Drive by design (en sync-kilde skal aldri mutere det den leser fra) - dette er en egenskap ved
+  ingestion-arkitekturen, ikke en begrensning på Drive-VERKTØYET.
+- **Tester:** 27 nye - `drive-full-access.test.ts` (17, ekte ToolGateway+embedded Postgres+FakeTransport:
+  create/update/rename/move/trash, sovereign/delegert D-klasse-bevis, idempotens, Q-20-distinksjon,
+  Q-21 tenant-isolasjon av dedupe, ingen token/innhold i audit) + `google-drive-transport.test.ts` (10,
+  DET ENESTE stedet i repoet `fetch` mockes - bevisst, avgrenset unntak fra "raw HTTP-transportere
+  unit-testes aldri, kun live-verifisert"-presedensen, fordi byggeordren eksplisitt krevde deterministisk
+  bevis for konflikt-/statuskode-håndtering: `drive_conflict_stale_version`, 401/403/429/404/500-
+  klassifisering, idempotent 404-håndtering på permanent sletting).
+- **Live-akseptanse utvidet** (`modules/knowledge/scripts/ua2-p1a-live.ts` §6): ekte
+  create/read/update/rename/move/trash/cleanup/sync/no-resurrection/idempotency mot
+  `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` (dedikert, trygg test-mappe - ALDRI hele driven). Rapporterer
+  `google_drive_live=BLOCKED_REAUTH_REQUIRED` (IKKE en fake PASS) hvis eksisterende
+  `JARVIS_GOOGLE_TOKEN` mangler write-scope (lesing fungerer, skriving feiler på auth). Permission-
+  mutasjon BEVISST IKKE live-testet - kan ikke gjøres trygt uten å involvere en ekte person/endre ekte
+  eksponering; policy for det er suite-bevist.
+- **Engangs connector-capability-audit** (D-41 krever dette, IKKE en utvidelse av alle nå):
+  GitHub/Google Calendar/Gmail/Telegram/Vercel/Home Assistant klassifisert PARTIAL eller READ_ONLY med
+  konkrete gap dokumentert som backlog - se tabellen i docs/PROJECT_STATUS.md. Google Drive er nå
+  eneste **FULL**-klassifiserte connector.
+- **STATUS: FIXED_SUITE / READY_FOR_HOST_VERIFY. IKKE VERIFIED** - samme host-kjøring
+  (`ua2-p1a-host-run.ts`) som resten av P1A beviser dette; ingen egen host-kommando.
+
 ## UA-2 P1A — KNOWLEDGE SOURCE EXPANSION: SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå)
 
+*(Historisk byggeordre, som opprinnelig utstedt. Se D-41-seksjonen OVER for scope-endringen som fulgte
+samme dag - Drive-VERKTØYET har siden full read/write; INGESTION-kilden `GoogleDriveKnowledgeSource`
+beskrevet under er fortsatt READ ONLY, uendret, by design.)*
+
 **Byggeordre** (etter Q-20 VERIFIED/CLOSED-merge til `main`, commit `2dbc3a5`): utvid
-`@jarvis/knowledge` med Google Drive (READ ONLY) og Obsidian/lokal vault som nye kunnskapskilder på
+`@jarvis/knowledge` med Google Drive (opprinnelig READ ONLY, senere samme dag utvidet - se over) og
+Obsidian/lokal vault som nye kunnskapskilder på
 den EKSISTERENDE `KnowledgeSource`/`KnowledgeSyncService`/FTS+vector-hybrid-arkitekturen fra UA-2 P0 -
 ingen parallell connector-SDK, ingen ny auth-modell, ingen ny DB-migrasjon. Pieces eksplisitt utsatt
 (se Q-22 i OPEN_QUESTIONS.md - ingen konkret integrasjonsflate funnet i repoet). IKKE bygget:

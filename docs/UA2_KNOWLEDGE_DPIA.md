@@ -1,6 +1,6 @@
 # UA-2 P0/P1A — DPIA / data-governance-notat (kunnskaps-ingestion)
 
-**Status:** UA-2 P0 (GitHub + filesystem/NAS) + P1A (Google Drive READ ONLY + Obsidian/lokal vault),
+**Status:** UA-2 P0 (GitHub + filesystem/NAS) + P1A (Google Drive + Obsidian/lokal vault),
 FIXED_SUITE/READY_FOR_HOST_VERIFY (2026-08-16, IKKE host-verifisert ennå). Kort og teknisk, ikke
 juridisk teater — oppdateres ved hver ny kildetype (P1B: e-post/møtetranskripsjon/OCR; Pieces utsatt,
 se Q-22 i OPEN_QUESTIONS.md — ingen konkret integrasjonsflate funnet).
@@ -11,11 +11,18 @@ se Q-22 i OPEN_QUESTIONS.md — ingen konkret integrasjonsflate funnet).
 |---|---|---|
 | GitHub (`GithubKnowledgeSource`) | Repo-metadata (navn, beskrivelse, standard-branch) + åpne issues (tittel, tidsstempel) | Prosjektdokumentasjon, oppgavetekst — **untrusted ingestion** (samme klassifisering som `read_issues` alt hadde i Tool Gateway) |
 | Filesystem/NAS (`FilesystemKnowledgeSource`) | Tekstbaserte filer i eksplisitt allowlistede roots (`.md`, `.txt`, `.json`, `.yaml/yml`, `.ts/js/tsx/jsx`, `.py`, `.sql`, `.html`, `.css`) | Notater, kode, konfigurasjon — kan inneholde persondata Tobias selv har lagret i disse filene |
-| Google Drive (`GoogleDriveKnowledgeSource`, P1A, **READ ONLY**) | Google Docs (eksportert til text/plain) + tekstlige MIME-typer i en EKSPLISITT konfigurert mappe (rekursivt) eller hele driven (bevisst valgt scope, aldri default) | Dokumenter, notater — **untrusted ingestion**. Sheets/Slides/Forms/bilder/PDF/binærformater IKKE lest (§14 P1A — bevisst utsatt, hoppes trygt over) |
+| Google Drive (`GoogleDriveKnowledgeSource`, P1A) | Google Docs (eksportert til text/plain) + tekstlige MIME-typer i en EKSPLISITT konfigurert mappe (rekursivt) eller hele driven (bevisst valgt scope, aldri default) | Dokumenter, notater — **untrusted ingestion**. Sheets/Slides/Forms/bilder/PDF/binærformater IKKE lest (§14 P1A — bevisst utsatt, hoppes trygt over). **Ingestion-KILDEN er READ ONLY by design** (sync skal aldri mutere kilden den leser fra) - dette er separat fra Drive-VERKTØYET (`GoogleDriveTransport`), som siden 2026-08-16 (D-41 scope-endring) har full read/write/permissions for generell verktøybruk utenfor ingestion-pipelinen |
 | Obsidian/lokal vault (`ObsidianVaultKnowledgeSource`, P1A) | `.md`-notater i en eksplisitt vault-rot (samme allowlist/traversal-forsvar som filesystem-kilden), inkl. frontmatter (flat parset til metadata) og wiki-lenke-navn | Personlige notater — kan inneholde persondata Tobias selv har skrevet. `.obsidian/`-katalogen (verktøykonfig, ikke notat-innhold) er EKSKLUDERT som default |
 
-**Ingen** binærdata/OCR/bilder/PDF ingestes i P0/P1A (§14 i begge BO-er — bevisst utsatt). Drive er
-**READ ONLY** i P1A — ingen skriving/sletting mot ekte Drive-data noe sted i koden.
+**Ingen** binærdata/OCR/bilder/PDF ingestes i P0/P1A (§14 i begge BO-er — bevisst utsatt).
+**Ingestion-siden** (`GoogleDriveKnowledgeSource`, `ObsidianVaultKnowledgeSource`) er og forblir READ
+ONLY mot kilden by design uansett Drive-verktøyets kapabilitet - en sync-kilde skal aldri mutere det den
+leser fra. **Drive-VERKTØYET** (`GoogleDriveTransport`, brukt av Jarvis generelt via ToolGateway,
+UAVHENGIG av ingestion-pipelinen) har siden 2026-08-16 (Owner Connector Capability Invariant, D-41) full
+read/write/permissions - se DECISIONS_AND_ASSUMPTIONS.md D-41 og RUNTIME_GATES.md for full
+persondata-/policy-vurdering av det. Skriveoperasjoner mot Drive er ALDRI koblet til
+knowledge-ingestion-syncen (§5 i D-41-scope-endringen: `drive/trash` rører aldri `knowledge_documents`,
+og en Q-20-erasure kaller aldri ut til Drive - bevist i `drive-full-access.test.ts`).
 
 ## Hvor de lagres
 

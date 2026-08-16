@@ -418,19 +418,78 @@ PR #4 merges til `main`.
   ingen ekte Docker-Postgres i denne sky-sandboxen. Krever Tobias sin host-kjøring
   (`ua2-p1a-host-run.ts`) før VERIFIED kan settes, akkurat som Q-20/UA-2 P0 krevde det.
 
+## UA-2 P1A scope-endring — Google Drive full read/write + Owner Connector Capability Invariant (D-41, samme økt)
+- **Tobias sin eksplisitte beslutning FØR PR #5 merges:** Jarvis skal IKKE være begrenset til read-only
+  Google Drive - full funksjonell tilgang, styrt av det EKSISTERENDE A-D policy-systemet (ingen ny
+  permission-modell). Samtidig innført som en PERMANENT arkitekturregel for ALLE fremtidige connectors
+  (se D-41 i DECISIONS_AND_ASSUMPTIONS.md, rule 11 i CLAUDE.md).
+- **Google Drive utvidet fra READ ONLY til FULL read/write/permissions:** `GoogleDriveTransport` fikk 10
+  nye handlinger (`get_metadata`/`read_permissions` klasse A; `create_file`/`create_folder`/
+  `update_content`/`rename`/`move`/`trash` klasse C; `delete_permanent`/`create_permission`/
+  `update_permission`/`delete_permission` klasse D). Produksjons-OAuth-scope bekreftet mot Google sitt
+  offisielle Drive API v3-discovery-dokument (IKKE gjettet): `https://www.googleapis.com/auth/drive`
+  (full tilgang - `drive.file` dekker kun app-opprettede filer, utilstrekkelig). `files.delete` er
+  PERMANENT (bekreftet); trashing er en egen, reversibel `files.update`. `update_content`/`rename`/
+  `move`/`trash` godtar en valgfri `expected_head_revision_id`-precondition - ved mismatch kastes en
+  typet `drive_conflict_stale_version`-feil FØR noen mutasjon forsøkes, aldri en stille overskriving.
+  D-klasse-handlinger har `preflight_action` (samme eksisterende ToolGateway-evidensmekanisme som
+  Home Assistant sin `lock_set`/`alarm_set` alt brukte - ingen ny mekanisme). Owner sovereign-modus
+  uendret: klasse D autonomt for eier, delegert identitet krever fortsatt signert godkjenning.
+- **Idempotens:** skriveoperasjoner gjenbruker EKSISTERENDE ToolGateway `idempotency_key`-dedupe (samme
+  mekanisme som resten av systemet) - bevist kritisk for `create_permission` spesielt, siden Drive sin
+  egen `permissions.create` IKKE dedupliserer identiske tilganger selv.
+- **Q-20-distinksjon (§5 i scope-endringen):** eksplisitt bevist arkitektonisk separert - en
+  `drive/trash`-handling rører ALDRI `knowledge_documents`, og en Q-20-hard-delete av et
+  `knowledge_document` kaller ALDRI ut til Drive. Dette er to uavhengige operasjoner, ikke automatisk
+  koblet.
+- **Tester:** 27 nye (`drive-full-access.test.ts` 17 - policy/idempotens/isolasjon/observability via ekte
+  ToolGateway+Postgres+FakeTransport; `google-drive-transport.test.ts` 10 - konflikt-/statuskode-
+  klassifisering internt i transporten, fetch mocket, det ENESTE unntaket fra "raw HTTP-transportere
+  unit-testes aldri"-presedensen fordi byggeordren eksplisitt krevde det). `ua2-p1a-live.ts` §6 utvidet
+  med ekte create/update/rename/move/trash/cleanup/sync/no-resurrection/idempotency mot
+  `JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID` - `google_drive_live=BLOCKED_REAUTH_REQUIRED` hvis lesing
+  fungerer men skriving feiler på auth (utilstrekkelig scope på eksisterende token). Permission-
+  mutasjon er BEVISST IKKE live-testet (kan ikke gjøres trygt uten å involvere en ekte person/endre ekte
+  eksponering) - policy/klassifisering for det er suite-bevist. 517/517 tester totalt (490 + 27),
+  full monorepo-typecheck ren.
+- **Connector-audit (engangs, IKKE alle utvidet i denne runden - kun Google Drive):**
+
+  | Connector | Klassifisering | Har i dag | Konkrete gap (backlog, IKKE bygget her) |
+  |---|---|---|---|
+  | Google Drive | **FULL** (denne økten) | read/list/create/update/rename/move/trash/delete/permissions | - |
+  | GitHub | PARTIAL | read_issues, read_repo_meta, create_pr | Ingen merge_pr, ingen issue-kommentar/opprettelse/lukking, ingen branch-sletting, ingen repo-admin |
+  | Google Calendar | PARTIAL | read_events, create_event | Ingen update_event, ingen delete_event, ingen svar-på-invitasjon |
+  | Gmail/e-post | PARTIAL | read_inbox, send | Ingen reply/forward, ingen arkivering/sletting/labeling, ingen draft-håndtering |
+  | Telegram | PARTIAL | notify (send), `/brief`/`/status`/`/ai`-kommandoer (poll) | Ingen redigering/sletting av sendte meldinger, ingen rikere Bot API-funksjoner (pin, media) |
+  | Vercel | READ_ONLY | read_deployments | Ingen trigger/rollback/promote-deploy, ingen env-var-håndtering |
+  | Home Assistant | PARTIAL | read_state, light_set, climate_set, lock_set (D), alarm_set (D) | God kjernedekning, men ikke uttømmende (media_player, cover/blinds, scener, automasjon-trigger mangler) |
+
+  Gapene er EKSPLISITT dokumentert som backlog, IKKE lukket her (D-41/§CURRENT CONNECTOR AUDIT sier
+  eksplisitt "IKKE utvid alle nå dersom det blåser scope"). Hver fremtidig connector-byggeordre
+  vurderer full kapabilitet fra D-41-sjekklisten fremover.
+
 ## Blokkeringer
-UA-2 P1A venter på Tobias sin host-kjøring (`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR
-IKKE merget. Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`).
-Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
-Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
-ennå - egen fremtidig underoppgave, ikke en blokkering for P1A.
+UA-2 P1A (inkl. Google Drive full read/write-scope-endringen) venter på Tobias sin host-kjøring
+(`ua2-p1a-host-run.ts`) for host-verifikasjon - draft PR IKKE merget. Dersom Tobias sitt eksisterende
+`JARVIS_GOOGLE_TOKEN` ble utstedt FØR denne scope-endringen (kun `drive.readonly`/`drive.file`),
+rapporterer live-akseptansen `google_drive_live=BLOCKED_REAUTH_REQUIRED` - reautorisering med
+`https://www.googleapis.com/auth/drive` er da nødvendig FØR full Drive-akseptanse kan bevises (ikke en
+kodefeil, en forventet konsekvens av scope-utvidelsen). Q-20/UA-2 P0/Q-21 har ingen egne blokkeringer
+(alle VERIFIED/CLOSED, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
+multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
+ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en
+blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
+over) er dokumentert backlog, ikke blokkerende for P1A.
 
 ## Neste oppgave
-UA-2 P1A er FIXED_SUITE / READY_FOR_HOST_VERIFY - venter på Tobias sin host-kjøring av
-`ua2-p1a-host-run.ts` (Windows/Docker) før VERIFIED kan settes og draft PR kan vurderes for merge.
-**Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt
-og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste
-kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten
-gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
+UA-2 P1A (inkl. Drive full read/write) er FIXED_SUITE / READY_FOR_HOST_VERIFY - venter på Tobias sin
+host-kjøring av `ua2-p1a-host-run.ts` (Windows/Docker) før VERIFIED kan settes og draft PR kan vurderes
+for merge. Hvis kjøringen rapporterer `google_drive_live=BLOCKED_REAUTH_REQUIRED`: Tobias reautoriserer
+Google-kontoen med full `drive`-scope, deretter re-kjøres samme kommando. **Ingen merge, ingen UA-2
+P1B, ingen cloud-live-claims uten host-bevis** før den kjøringen er mottatt og bekreftet. Etter
+host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i
+IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten gjelder,
+CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19),
 D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama
-LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes).
+LIVE-benchmark, Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-
+gapene (D-41-sjekklisten, egne fremtidige byggeordre per connector).
