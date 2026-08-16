@@ -21,6 +21,55 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
+## Q-20 HOST RECOVERY #2: WINDOWS PNPM-PROSESSOPPLØSNING (2026-08-16, samme dag)
+
+**Host-feil:** Tobias kjørte den nye ett-kommando-runneren fra host-runde 1
+(`node --experimental-transform-types modules/core/scripts/q20-host-run.ts`). Runneren startet korrekt
+(`repo_root=PASS`, `host_node_version=v24.11.1`), men feilet umiddelbart på selve
+`pnpm install --frozen-lockfile`-steget med `spawnSync pnpm ENOENT` - til tross for at `pnpm` fungerer
+helt fint fra Tobias sin egen PowerShell.
+
+**Root cause:** Node sin `child_process.execFileSync`/`spawnSync` UTEN `shell: true` gjør IKKE Windows
+sin PATHEXT-baserte utvidelsesoppløsning (`.COM`/`.EXE`/`.BAT`/`.CMD`) - kun en ekte shell (cmd.exe/
+PowerShell) gjør det. `pnpm` er normalt installert som `pnpm.cmd` (eller et Corepack-shim) på Windows -
+et rått `execFileSync("pnpm", ...)`-kall feiler derfor alltid med `ENOENT`, uavhengig av at `pnpm`
+fungerer interaktivt. Dette er en Windows-spesifikk prosess-spawning-detalj, IKKE et Q-20-funn - ingen
+erasure-semantikk endret.
+
+**Fiks:** ny, ren, testbar `modules/core/scripts/lib/package-manager-resolve.ts` - INGEN imports (må
+virke FØR `pnpm install`), deterministisk oppløsningsrekkefølge: (1) finn `pnpm`/`pnpm.cmd` direkte på
+PATH (skanner hver PATHEXT-utvidelse på Windows), (2) ellers finn `corepack`/`corepack.cmd` på PATH og
+påkall med EKSPLISITT pinnet versjon fra `package.json` sitt `packageManager`-felt
+(`corepack pnpm@9.15.9 ...` - ALDRI `corepack enable`, som kan kreve forhøyede rettigheter), (3) ellers
+fail-closed med en tydelig, handlingsrettet feil. Den resolverte, filsystem-bekreftede stien kjøres med
+`shell: true` KUN fordi et `.cmd`-shim selv krever shell-tolkning for å kjøre i det hele tatt (Windows
+CreateProcess kan ikke starte batch-filer direkte) - aldri brukerstyrt/injiserbar input, kun en verifisert
+filsti + statiske argumenter. `pnpm`-versjonen og lockfilen røres IKKE (fortsatt `pnpm@9.15.9`,
+`--frozen-lockfile` uendret).
+
+**Bevist:**
+- 11 nye rene enhetstester (`modules/core/test/package-manager-resolve.test.ts`, §9.A-G i BO-en) -
+  Windows `.cmd`-oppløsning, Corepack-fallback m/pinnet versjon, fail-closed uten kjørbar fil (aldri en
+  instruksjon om `corepack enable`), pinnet versjon lest korrekt fra `package.json`.
+- 18 oppdaterte wiring-tester (`q20-host-run-wiring.test.ts`) - fortsatt grønne, bekrefter riktig
+  rekkefølge/idempotens/ingen secrets med den nye resolver-logikken innbakt.
+- **Kjørt FOR REAL i byggemiljøet** (ikke bare unit-testet): `node --experimental-transform-types
+  modules/core/scripts/q20-host-run.ts` kjørt direkte - `package_manager_resolution=PASS
+  package_manager_driver=pnpm package_manager_version=9.15.9`, `install_frozen_lockfile=PASS`,
+  `erasure_workspace_dependencies=PASS`, deretter korrekt (forventet) fail-closed på manglende `.env` i
+  byggemiljøet (som ikke har Q-21 sin `.env`) - beviser hele bootstrap-kjeden fungerer ende-til-ende
+  FØR Docker-stegene, uten regresjon fra host-runde 1.
+
+**Ett-kommando-kontrakten uendret:**
+```
+node --experimental-transform-types modules/core/scripts/q20-host-run.ts
+```
+Ingen manuell `pnpm install`, ingen PATH-redigering, ingen SQL, ingen Docker-kommandoer for Tobias.
+
+**Status: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY.** Denne runden løste den Windows-spesifikke
+prosess-spawning-feilen som hindret bootstrap-steget fra å fullføre - Q-20-akseptansen selv er
+fortsatt ikke kjørt mot Tobias sin faktiske host.
+
 ## Q-20 HOST RECOVERY #1: WORKSPACE BOOTSTRAP-FEIL (2026-08-16, samme dag)
 
 **Host-feil:** Tobias kjørte den instruerte kommandoen

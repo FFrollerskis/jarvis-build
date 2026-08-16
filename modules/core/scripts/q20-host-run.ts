@@ -1,4 +1,4 @@
-// Q-20 HOST RECOVERY #1 (2026-08-16): ÉN host-kommando som bootstrapper
+// Q-20 HOST RECOVERY #1+#2 (2026-08-16): ÉN host-kommando som bootstrapper
 // workspacet (denne branchen la til en NY pnpm-workspace-pakke,
 // `modules/erasure` - en host som installerte avhengigheter FØR den pakken
 // eksisterte har aldri fått `node_modules`/symlinks for den, og
@@ -8,12 +8,24 @@
 // (inkl. `018_erasure.sql`) via admin-rollen, og kjører til slutt selve
 // Q-20-akseptansen (`modules/erasure/scripts/q20-erasure-live.ts`).
 //
+// HOST RECOVERY #2: `spawnSync("pnpm", ...)` UTEN `shell: true` feiler med
+// `ENOENT` på Windows sjøl om `pnpm` fungerer fint fra Tobias sin egen
+// PowerShell - Node gjør IKKE Windows sin PATHEXT-baserte utvidelsesoppløsning
+// (`.CMD`/`.EXE`/`.BAT`) med mindre en shell faktisk er involvert. Løst med
+// en eksplisitt, testbar oppløsningsrekkefølge (`lib/package-manager-resolve.ts`):
+// finn `pnpm`/`pnpm.cmd` på PATH → ellers `corepack`/`corepack.cmd` på PATH
+// (påkalt med EKSPLISITT pinnet versjon, ALDRI `corepack enable`) → ellers
+// fail-closed med en tydelig feilmelding. `shell: true` brukes KUN for å
+// kjøre den RESOLVEDE, filsystem-bekreftede stien (aldri brukerstyrt input -
+// ingen injeksjonsrisiko).
+//
 // BEVISST kun Node-innebygde moduler på TOPPNIVÅ (`node:child_process`,
-// `node:fs`, `node:path`, `node:process`) - INGEN `@jarvis/*`- eller
-// npm-pakke-import her. Dette scriptet MÅ kunne kjøre FØR `pnpm install` har
-// bootstrappet workspacet (det er selve poenget - det er `pnpm install` som
-// mangler). Alt som trenger workspace-avhengigheter (pg, @jarvis/core osv.)
-// kjøres som EGNE subprosesser ETTER at install er bekreftet fullført.
+// `node:fs`, `node:path`, `node:process`) + rene, avhengighetsfrie lokale
+// relative imports (`./lib/*.ts` - ALDRI `@jarvis/*`/npm-pakke-import).
+// Dette scriptet MÅ kunne kjøre FØR `pnpm install` har bootstrappet
+// workspacet (det er selve poenget - det er `pnpm install` som mangler).
+// Alt som trenger workspace-avhengigheter (pg, @jarvis/core osv.) kjøres som
+// EGNE subprosesser ETTER at install er bekreftet fullført.
 //
 // Kjøres PÅ HOSTEN (Windows), fra repo-roten:
 //
@@ -23,7 +35,7 @@
 // er alltid trygt å re-kjøre, migrasjoner spores i `schema_migrations` (kjører
 // aldri om igjen), Docker-images bygges alltid ferske, `q20-erasure-live.ts`
 // er selv idempotent (egen SENTINEL + selvopprydding per kjøring). Sletter
-// ALDRI Docker-volumes, databasedata, eller `.env`.
+// ALDRI Docker-volumes, databasedata, `.env`, eller `.env.bak.*`.
 //
 // Forutsetter (uendret fra Q-21): `.env` allerede korrekt konfigurert med
 // JARVIS_DB_ADMIN_USER/PASSWORD (migrate) og JARVIS_DB_USER/PASSWORD
@@ -31,8 +43,9 @@
 // ingen ny credential-gjenoppretting her. Dette scriptet endrer ALDRI `.env`.
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readPinnedPackageManager, resolvePackageManager } from "./lib/package-manager-resolve.ts";
 
 const repoRoot = process.cwd();
 
@@ -40,9 +53,9 @@ function log(msg: string): void {
   console.log(`[q20-host-run] ${msg}`);
 }
 
-function run(command: string, args: string[], cwd: string = repoRoot): void {
+function run(command: string, args: string[], options: { cwd?: string; shell?: boolean } = {}): void {
   log(`$ ${command} ${args.join(" ")}`);
-  execFileSync(command, args, { stdio: "inherit", cwd });
+  execFileSync(command, args, { stdio: "inherit", cwd: options.cwd ?? repoRoot, shell: options.shell ?? false });
 }
 
 function assertRepoRoot(): void {
@@ -69,11 +82,32 @@ function nodeVersionInfo(): void {
 }
 
 function ensureWorkspaceInstalled(): void {
-  // §2/§5: ETT sted avhengigheter installeres - frozen lockfile (ALDRI
-  // oppdater pnpm-versjon eller lockfile her), trygt å re-kjøre uansett
-  // tilstand (no-op hvis alt alt er installert).
-  run("pnpm", ["install", "--frozen-lockfile"]);
-  log("workspace_install=PASS");
+  // §2 i BO-en: bruk det REPO-PINNEDE pnpm-verktøyet (package.json sitt
+  // `packageManager`-felt) - aldri en annen/nyere versjon.
+  const packageJson = readFileSync(join(repoRoot, "package.json"), "utf8");
+  const pinned = readPinnedPackageManager(packageJson);
+  if (!pinned || pinned.name !== "pnpm") {
+    throw new Error(`package.json sitt "packageManager"-felt mangler eller er ikke pnpm-basert: ${JSON.stringify(pinned)}`);
+  }
+
+  // §3 i BO-en: Windows-bevisst oppløsning - IKKE anta at "pnpm" er direkte
+  // spawnbart uten shell (se HOST RECOVERY #2-kommentaren øverst i fila).
+  const resolved = resolvePackageManager(
+    {
+      platform: process.platform,
+      pathEnv: process.env["PATH"] ?? process.env["Path"] ?? "",
+      pathExt: process.env["PATHEXT"] ?? process.env["Pathext"] ?? "",
+      exists: existsSync
+    },
+    pinned
+  );
+  log(`package_manager_resolution=PASS package_manager_driver=${resolved.driver} package_manager_version=${pinned.version}`);
+
+  // §5: ETT sted avhengigheter installeres - frozen lockfile (ALDRI oppdater
+  // pnpm-versjon eller lockfile her), trygt å re-kjøre uansett tilstand
+  // (no-op hvis alt allerede er installert - §8 idempotens).
+  run(resolved.command, [...resolved.argsPrefix, "install", "--frozen-lockfile"], { shell: resolved.useShell });
+  log("install_frozen_lockfile=PASS workspace_install=PASS");
 }
 
 function verifyErasureWorkspaceResolution(): void {

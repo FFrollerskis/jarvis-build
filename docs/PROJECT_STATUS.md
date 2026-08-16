@@ -305,9 +305,24 @@ verify-workspace.ts`), sikrer ferske Docker-images, kjører migrasjonene (inkl. 
 via ADMIN-rollen (uendret Q-21-splitt), restarter api/worker, og kjører til slutt selve
 `q20-erasure-live.ts`. Feilen reprodusert og fiksen bekreftet i byggemiljøet (node_modules fjernet
 → samme feil → `pnpm install` reparerer). 18 nye wiring-tester
-(`modules/core/test/q20-host-run-wiring.test.ts`). **Ny (erstattende) ett-kommando for Tobias:**
+(`modules/core/test/q20-host-run-wiring.test.ts`). Kommando uendret siden:
 `node --experimental-transform-types modules/core/scripts/q20-host-run.ts`. Full evidens:
 docs/RUNTIME_GATES.md.
+
+## Q-20 HOST RECOVERY #2 (samme dag, 2026-08-16) — Windows pnpm-prosessoppløsning
+Samme runner feilet deretter på selve `pnpm install --frozen-lockfile`-steget:
+`spawnSync pnpm ENOENT` - til tross for at `pnpm` fungerer fint fra Tobias sin egen PowerShell.
+Root cause: Node sin `execFileSync`/`spawnSync` uten `shell: true` gjør ikke Windows sin PATHEXT-
+baserte utvidelsesoppløsning (`pnpm.cmd`). **Fikset** med ny, avhengighetsfri
+`modules/core/scripts/lib/package-manager-resolve.ts` - deterministisk oppløsning: `pnpm`/`pnpm.cmd`
+direkte på PATH → ellers `corepack`/`corepack.cmd` med EKSPLISITT pinnet versjon (`pnpm@9.15.9` fra
+`package.json`, ALDRI `corepack enable`) → ellers fail-closed med tydelig diagnostikk. `shell: true`
+brukes kun for den resolverte, filsystem-bekreftede stien (ingen injeksjonsrisiko - ingen
+brukerstyrt input). 11 nye enhetstester. **Bekreftet FOR REAL i byggemiljøet** (ikke bare
+unit-testet): hele bootstrap-kjeden kjørt direkte som ekte prosess -
+`package_manager_resolution=PASS package_manager_driver=pnpm package_manager_version=9.15.9`,
+`install_frozen_lockfile=PASS`, `erasure_workspace_dependencies=PASS`. Ett-kommando-kontrakten
+uendret. Full evidens: docs/RUNTIME_GATES.md.
 
 ## Blokkeringer
 **Q-20 er FIXED_SUITE men IKKE host-verifisert ennå.** Venter på Tobias sin kjøring av

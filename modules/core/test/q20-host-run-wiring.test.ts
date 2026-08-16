@@ -25,8 +25,8 @@ const hostRunSource = readSource("../scripts/q20-host-run.ts");
 const verifyWorkspaceSource = readSource("../../erasure/scripts/verify-workspace.ts");
 
 describe("§7.A/§7.B: workspace bootstrap - ny pakke uten lokal node_modules repareres", () => {
-  it("kjører `pnpm install --frozen-lockfile` FØR noe som avhenger av modules/erasure sine workspace-deps", () => {
-    const installIdx = hostRunSource.indexOf('run("pnpm", ["install", "--frozen-lockfile"]');
+  it("kjører `install --frozen-lockfile` (via den resolvede package manager-en) FØR noe som avhenger av modules/erasure sine workspace-deps", () => {
+    const installIdx = hostRunSource.indexOf('"install", "--frozen-lockfile"');
     const verifyIdx = hostRunSource.indexOf("verifyErasureWorkspaceResolution()");
     expect(installIdx).toBeGreaterThan(-1);
     expect(verifyIdx).toBeGreaterThan(-1);
@@ -112,8 +112,13 @@ describe("§7.F: idempotent ved gjentatt kjøring", () => {
 });
 
 describe("§7.G: ingen secrets logges", () => {
-  it("q20-host-run.ts leser aldri process.env selv (kun docker/pnpm/node-subprosesser gjør, og de logger allerede aldri passord - Q-21-bevist)", () => {
-    expect(hostRunSource).not.toMatch(/process\.env\[/);
+  it("q20-host-run.ts leser KUN ufarlige PATH/PATHEXT-miljøvariabler direkte - aldri noe som kan inneholde et passord/token/secret", () => {
+    const envReads = [...hostRunSource.matchAll(/process\.env\["([^"]+)"\]/g)].map((m) => m[1]);
+    expect(envReads.length).toBeGreaterThan(0); // PATH/PATHEXT-oppløsningen (Host Recovery #2) leser faktisk noe
+    for (const name of envReads) {
+      expect(name).toMatch(/^Path(ext)?$|^PATH(EXT)?$/i);
+      expect(name).not.toMatch(/PASSWORD|TOKEN|SECRET|KEY/i);
+    }
   });
 
   it("ingen kode-token (kun forklarende prosa-kommentarer nevner variabelnavn) leser eller logger en faktisk passordverdi", () => {
@@ -153,10 +158,12 @@ describe("§7.I: ett-kommando-runneren når faktisk frem til Q-20-akseptansen", 
     expect(runQ20Body).toContain("modules/erasure/scripts/q20-erasure-live.ts");
   });
 
-  it("q20-host-run.ts importerer KUN Node-innebygde moduler på toppnivå (må kunne kjøre FØR pnpm install)", () => {
+  it("q20-host-run.ts importerer KUN Node-innebygde moduler eller rene relative lib-filer på toppnivå (må kunne kjøre FØR pnpm install - aldri @jarvis/*/npm-pakker)", () => {
     const importLines = hostRunSource.split("\n").filter((l) => l.trim().startsWith("import "));
+    expect(importLines.length).toBeGreaterThan(0);
     for (const line of importLines) {
-      expect(line).toMatch(/from "node:/);
+      expect(line).toMatch(/from "(node:|\.\/lib\/)/);
+      expect(line).not.toMatch(/from "@jarvis\//);
     }
   });
 });
