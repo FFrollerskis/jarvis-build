@@ -1,20 +1,7 @@
 import { createHash } from "node:crypto";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
-import { KnowledgeSourceError, type KnowledgeListResult, type KnowledgeRecord, type KnowledgeSource, type SourceErrorClass } from "./source.ts";
-
-/**
- * UA-2 P1A §15: mapper en ToolGateway `reason`-streng til en typet
- * `SourceErrorClass`. Konservativ default (`SOURCE_UNAVAILABLE`, retryable)
- * for ukjente årsaker - en transient feil skal ALDRI klassifiseres som noe
- * som ser mer permanent/skummelt ut enn den er.
- */
-function classifyToolFailure(reason: string): SourceErrorClass {
-  if (reason === "rate_limited") return "RATE_LIMIT";
-  if (/auth_failed|401|403/.test(reason)) return "AUTH";
-  if (/not_found|404/.test(reason)) return "NOT_FOUND";
-  return "SOURCE_UNAVAILABLE";
-}
+import { KnowledgeSourceError, classifyToolFailure, type KnowledgeListResult, type KnowledgeRecord, type KnowledgeSource } from "./source.ts";
 
 /**
  * UA-2 P0 §3: GitHub som kunnskapskilde. Går gjennom EKSISTERENDE ToolGateway

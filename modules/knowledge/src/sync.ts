@@ -41,11 +41,11 @@ export class KnowledgeSyncService {
 
   async sync(identity: IdentityContext, memorySpace: MemorySpace, source: KnowledgeSource): Promise<SyncReport> {
     let records: KnowledgeRecord[];
-    let skippedCount = 0;
+    let skippedExternalIds: string[] = [];
     try {
       const result = await source.list();
       records = result.records;
-      skippedCount = result.skipped.length;
+      skippedExternalIds = result.skipped.map((s) => s.external_id);
     } catch (err) {
       // Hele kilden feilet (f.eks. nettverk/credential) - ingen dokumenter ble
       // sett, derfor INGEN tombstoning (§5: vi skal aldri tombstone pga. en
@@ -55,7 +55,7 @@ export class KnowledgeSyncService {
       return { ...EMPTY_REPORT, failed: 1, ...(error_class ? { error_class } : {}) };
     }
 
-    const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedCount };
+    const report: SyncReport = { ...EMPTY_REPORT, skipped: skippedExternalIds.length };
     const seenExternalIds: string[] = [];
 
     await withMemoryTransaction(this.pool, identity.tenant_id, [memorySpace], async (client) => {
@@ -69,13 +69,18 @@ export class KnowledgeSyncService {
         }
       }
 
-      // §5: tombstone alt som IKKE ble sett i denne VELLYKKEDE listingen -
-      // aldri hard-delete, historikk/provenance blir stående.
+      // §5/§16: tombstone alt som IKKE ble sett OG IKKE ble eksplisitt hoppet
+      // over i denne VELLYKKEDE listingen. Et `skipped`-element (f.eks. en
+      // enkelt fil kilden midlertidig ikke fikk lest pga. rate-limit/nettverk)
+      // er IKKE bekreftet borte - det skal ALDRI tombstones bare fordi ETT
+      // element feilet, kun elementer kilden faktisk så mangle. Aldri
+      // hard-delete her uansett - historikk/provenance blir stående.
+      const protectedExternalIds = [...seenExternalIds, ...skippedExternalIds];
       const tombstoneResult = await client.query(
         `UPDATE knowledge_documents SET deleted = true, deleted_at = now(), updated_at = now()
          WHERE tenant_id = $1 AND source_type = $2 AND source_instance_id = $3 AND deleted = false
            AND NOT (external_id = ANY($4::text[]))`,
-        [identity.tenant_id, source.source_type, source.source_instance_id, seenExternalIds]
+        [identity.tenant_id, source.source_type, source.source_instance_id, protectedExternalIds]
       );
       report.tombstoned = tombstoneResult.rowCount ?? 0;
     });
@@ -126,10 +131,17 @@ export class KnowledgeSyncService {
     }
 
     if (row.content_hash === record.content_hash && !row.deleted) {
-      // §9: uendret - nær no-op, INGEN re-embedding.
-      await client.query("UPDATE knowledge_documents SET last_synced_at = now() WHERE knowledge_document_id = $1", [
-        row.knowledge_document_id
-      ]);
+      // §9: uendret INNHOLD - nær no-op, INGEN re-embedding. Tittel/uri/
+      // metadata oppdateres likevel (billig, ingen embedding involvert) -
+      // UA-2 P1A §25: en Drive-omdøpning endrer `title` men ALDRI
+      // `external_id` (stabil fil-id), og skal derfor synes i neste sync
+      // uten å telle som et innholds-"updated".
+      await client.query(
+        `UPDATE knowledge_documents
+         SET title = $2, canonical_uri = $3, modified_at = $4, metadata = $5, last_synced_at = now()
+         WHERE knowledge_document_id = $1`,
+        [row.knowledge_document_id, record.title, record.canonical_uri, record.modified_at, JSON.stringify(record.metadata)]
+      );
       report.unchanged += 1;
       return;
     }

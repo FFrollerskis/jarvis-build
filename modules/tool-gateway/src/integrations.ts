@@ -13,7 +13,7 @@ import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 export class FakeTransport implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
   constructor(
-    private readonly reply: (action: string) => { external_id?: string; data?: JsonValue } = () => ({ external_id: "ext-1" }),
+    private readonly reply: (action: string, parameters: Record<string, JsonValue>) => { external_id?: string; data?: JsonValue } = () => ({ external_id: "ext-1" }),
     private readonly failWith?: string
   ) {}
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -21,7 +21,7 @@ export class FakeTransport implements ToolTransport {
       throw new Error(this.failWith);
     }
     this.calls.push({ action, parameters });
-    return this.reply(action);
+    return this.reply(action, parameters);
   }
 }
 

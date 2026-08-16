@@ -101,13 +101,18 @@ describe("KnowledgeSourceRegistry - config/tenant-binding (ingen DB nødvendig)"
     expect(() => registry.build("t1", "project", "gh1")).toThrow("github_source_requires_tool_gateway_and_identity");
   });
 
-  it("google_drive/obsidian er typet i konfigurasjonen, men bygging feiler EKSPLISITT inntil kildeklassene kobles inn (§25/§26)", () => {
+  it("obsidian er typet i konfigurasjonen, men bygging feiler EKSPLISITT inntil kildeklassen kobles inn (§26)", () => {
     const registry = new KnowledgeSourceRegistry([
-      { source_type: "google_drive", tenant_id: "t1", memory_space_id: "personal", source_instance_id: "drive1", scope: { kind: "whole_drive" }, account: "acc" },
       { source_type: "obsidian", tenant_id: "t1", memory_space_id: "personal", source_instance_id: "vault1", vault_root: "/tmp/vault" }
     ]);
-    expect(() => registry.build("t1", "personal", "drive1")).toThrow("google_drive_source_not_yet_wired");
     expect(() => registry.build("t1", "personal", "vault1")).toThrow("obsidian_source_not_yet_wired");
+  });
+
+  it("build() av google_drive-config UTEN injisert ToolGateway+identity kaster eksplisitt", () => {
+    const registry = new KnowledgeSourceRegistry([
+      { source_type: "google_drive", tenant_id: "t1", memory_space_id: "personal", source_instance_id: "drive1", scope: { kind: "whole_drive" }, account: "acc" }
+    ]);
+    expect(() => registry.build("t1", "personal", "drive1")).toThrow("google_drive_source_requires_tool_gateway_and_identity");
   });
 });
 

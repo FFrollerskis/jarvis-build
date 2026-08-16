@@ -2,6 +2,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import type { KnowledgeSource } from "./source.ts";
 import { FilesystemKnowledgeSource, DEFAULT_TEXT_EXTENSIONS } from "./filesystem-source.ts";
 import { GithubKnowledgeSource } from "./github-source.ts";
+import { GoogleDriveKnowledgeSource } from "./drive-source.ts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { IdentityContext } from "@jarvis/contracts";
 
@@ -122,9 +123,16 @@ export class KnowledgeSourceRegistry {
         }
         return new GithubKnowledgeSource(deps.toolGateway, deps.identity, config.repo);
       }
-      case "google_drive":
-        // §25 (P1A): GoogleDriveKnowledgeSource kobles inn her når den bygges.
-        throw new Error("google_drive_source_not_yet_wired");
+      case "google_drive": {
+        if (!deps.toolGateway || !deps.identity) {
+          throw new Error("google_drive_source_requires_tool_gateway_and_identity");
+        }
+        return new GoogleDriveKnowledgeSource(
+          deps.toolGateway, deps.identity,
+          config.scope.kind === "folder" ? { kind: "folder", folder_id: config.scope.folder_id } : { kind: "whole_drive" },
+          config.source_instance_id
+        );
+      }
       case "obsidian":
         // §26 (P1A): ObsidianVaultKnowledgeSource kobles inn her når den bygges.
         throw new Error("obsidian_source_not_yet_wired");

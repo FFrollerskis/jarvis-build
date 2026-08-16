@@ -67,6 +67,27 @@ export class KnowledgeSourceError extends Error {
   }
 }
 
+/**
+ * UA-2 P1A §15: mapper en ToolGateway `reason`-streng (fra `ToolResult`
+ * sitt `{ ok: false, reason }`) til en typet `SourceErrorClass`. Delt
+ * mellom alle ToolGateway-baserte kilder (GitHub, Google Drive) - samme
+ * klassifiseringsregel skal ALDRI driftes fra hverandre per kilde.
+ * Konservativ default (`SOURCE_UNAVAILABLE`, retryable) for ukjente
+ * årsaker - en transient feil skal ALDRI klassifiseres som noe som ser
+ * mer permanent/skummelt ut enn den er.
+ */
+export function classifyToolFailure(reason: string): SourceErrorClass {
+  // Dekker BÅDE en direkte policy-deny ("rate_limited" fra ToolGateway sin
+  // egen rate-limiter) OG et transport-kastet feilbudskap pakket i
+  // "tool_failed:<message>" (f.eks. "tool_failed:drive_rate_limited") -
+  // samme substring-tilnærming som ToolGateway sin egen health-klassifisering
+  // (gateway.ts: /401|403|auth/, /429|rate/) for å unngå at de to driver fra hverandre.
+  if (/429|rate.?limit/.test(reason)) return "RATE_LIMIT";
+  if (/auth_failed|401|403/.test(reason)) return "AUTH";
+  if (/not_found|404/.test(reason)) return "NOT_FOUND";
+  return "SOURCE_UNAVAILABLE";
+}
+
 /** Ett enkelt element bevisst IKKE inkludert i denne synkroniseringen - ALDRI en feil som skal stoppe resten av kilden. */
 export interface SkippedRecord {
   external_id: string;
