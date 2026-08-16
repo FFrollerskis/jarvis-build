@@ -293,3 +293,133 @@ describe("ett-kommando-runneren når faktisk frem til P1A-akseptansen", () => {
     expect(existsSync(liveScriptPath)).toBe(true);
   });
 });
+
+/**
+ * UA-2 P1A HOST FIX #8 "CLEANUP-ONLY BLOCKERS AFTER FULL DRIVE SUCCESS"
+ * (2026-08-16, host-funn run_id ff16c69d): Google Drive full read/write var
+ * HOST-BEVIST (auth/read/create/update/rename/move/sync/no-resurrection/
+ * trash/idempotency/permanent_delete/policy alle PASS), men den samlede
+ * P1A-akseptansen ble likevel blokkert av to RENE opprydding-defekter:
+ * `google_drive_cleanup=FAIL` (Drive) og en FK-feil på `tenants` (Postgres).
+ * Denne seksjonen beviser BEGGE fiksene strukturelt - INGEN Google OAuth-
+ * arkitektur, INGEN allerede host-bevist Drive-kapabilitetssti, er rørt.
+ */
+describe("HOST FIX #8 §P/§5: Drive-cleanup - INGEN redundant delete_permanent mot et allerede slettet artefakt", () => {
+  it("sandbox.markPermanentlyDeleted(fileId) kalles UMIDDELBART etter en vellykket §P permanentDeleteResult - FØR §5-oppryddingsløkka noensinne beregner cleanupTargets()", () => {
+    const permanentDeleteIdx = liveScriptSource.indexOf('const permanentDeleteResult = await driveMutate("delete_permanent", fileId);');
+    const markIdx = liveScriptSource.indexOf("sandbox.markPermanentlyDeleted(fileId)", permanentDeleteIdx);
+    const cleanupTargetsIdx = liveScriptSource.indexOf("const cleanupTargets = sandbox.cleanupTargets();");
+    expect(permanentDeleteIdx).toBeGreaterThan(-1);
+    expect(markIdx).toBeGreaterThan(permanentDeleteIdx);
+    expect(cleanupTargetsIdx).toBeGreaterThan(markIdx);
+  });
+
+  it("§5-cleanup-løkka klassifiserer HVERT utfall via classifyCleanupOutcome() - ikke lenger en bar '!deleteResult.ok'-sjekk som ikke skiller en EKTE feil fra et trygt already-absent-funn", () => {
+    const loopIdx = liveScriptSource.indexOf("for (const targetId of cleanupTargets)");
+    const loopEndIdx = liveScriptSource.indexOf("const alreadyAbsentTotal", loopIdx);
+    expect(loopIdx).toBeGreaterThan(-1);
+    const loopBody = liveScriptSource.slice(loopIdx, loopEndIdx);
+    expect(loopBody).toContain("classifyCleanupOutcome(sandbox, targetId, deleteResult)");
+    expect(loopBody).not.toMatch(/if \(!deleteResult\.ok\) cleanupOk = false;/);
+  });
+
+  it("google_drive_cleanup=PASS avgjøres UTELUKKENDE av cleanupFailures === 0 - ALDRI av root_deleted alene (ordrens eksplisitte 'do not fake PASS' krav)", () => {
+    const resultLineIdx = liveScriptSource.indexOf('results.google_drive_cleanup = cleanupFailures === 0 ? "PASS" : "FAIL";');
+    expect(resultLineIdx).toBeGreaterThan(-1);
+  });
+
+  it("cleanup-evidenslinjen rapporterer created_artifacts/cleaned_artifacts/already_absent/cleanup_failures/root_deleted (§4 i ordren)", () => {
+    const logIdx = liveScriptSource.indexOf("google_drive_cleanup=${results.google_drive_cleanup} created_artifacts=");
+    expect(logIdx).toBeGreaterThan(-1);
+    const logLine = liveScriptSource.slice(logIdx, liveScriptSource.indexOf(");", logIdx));
+    expect(logLine).toContain("cleaned_artifacts=");
+    expect(logLine).toContain("already_absent=");
+    expect(logLine).toContain("cleanup_failures=");
+    expect(logLine).toContain("root_deleted=");
+  });
+
+  it("§O trash merkes ALDRI som en terminal/utelatt tilstand - markTrashed() kalles, men et trashet artefakt forblir et normalt cleanup-mål (kun markPermanentlyDeleted/markCleaned ekskluderer)", () => {
+    const trashIdx = liveScriptSource.indexOf('const trashResult = await driveMutate("trash", fileId);');
+    const markTrashedIdx = liveScriptSource.indexOf("sandbox.markTrashed(fileId)", trashIdx);
+    expect(trashIdx).toBeGreaterThan(-1);
+    expect(markTrashedIdx).toBeGreaterThan(trashIdx);
+  });
+
+  it("grensekontrollen fra HOST FIX (auto-sandkasse) er URØRT - assertInSandbox()/driveMutate() finnes fortsatt uendret, ingen svekkelse av fail-closed-mutasjonskontrollen", () => {
+    expect(liveScriptSource).toContain("sandbox.assertInSandbox(fileId)");
+    expect(liveScriptSource).toContain("async function driveMutate(");
+  });
+});
+
+describe("HOST FIX #8 §5/§6/§7: DB/FK-cleanup - tool_executions ryddes FØR tenants, ingen bred/gjettet tabelliste, ingen FK-omvei", () => {
+  it("§I/§J: DELETE FROM tool_executions skjer FØRST i cleanupTenant() - FØR DELETE FROM tenants (FK-trygg rekkefølge, utledet fra det faktiske migrasjonsskjemaet)", () => {
+    const fnStart = liveScriptSource.indexOf("async function cleanupTenant(tenantId: string): Promise<void> {");
+    const fnEnd = liveScriptSource.indexOf("\n}", fnStart);
+    expect(fnStart).toBeGreaterThan(-1);
+    const fnBody = liveScriptSource.slice(fnStart, fnEnd);
+    const toolExecIdx = fnBody.indexOf("DELETE FROM tool_executions WHERE tenant_id = $1");
+    const tenantsIdx = fnBody.indexOf("DELETE FROM tenants WHERE tenant_id = $1");
+    expect(toolExecIdx).toBeGreaterThan(-1);
+    expect(tenantsIdx).toBeGreaterThan(-1);
+    expect(toolExecIdx).toBeLessThan(tenantsIdx);
+  });
+
+  it("§K: cleanupTenant() bruker UTELUKKENDE parameteriserte spørringer scopet til DENNE ene tenant_id-en - ingen bred/ubetinget DELETE mot noen tabell", () => {
+    const fnStart = liveScriptSource.indexOf("async function cleanupTenant(tenantId: string): Promise<void> {");
+    const fnEnd = liveScriptSource.indexOf("\n}", fnStart);
+    const fnBody = liveScriptSource.slice(fnStart, fnEnd);
+    const deleteStatements = [...fnBody.matchAll(/DELETE FROM \w+[^;]*/g)].map((m) => m[0]);
+    expect(deleteStatements.length).toBeGreaterThanOrEqual(6);
+    for (const statement of deleteStatements) {
+      expect(statement).toMatch(/tenant_id\s*(=|IN)/);
+    }
+  });
+
+  it("§K: selfHeal() sin stale-tenant-gjenkjenning er scopet til 'tenant-p1a-live-'-prefikset - aldri en bred SELECT mot ALLE tenants", () => {
+    const selfHealStart = liveScriptSource.indexOf("async function selfHeal(): Promise<void> {");
+    expect(selfHealStart).toBeGreaterThan(-1);
+    const selfHealBody = liveScriptSource.slice(selfHealStart, liveScriptSource.indexOf("\n}", selfHealStart));
+    expect(selfHealBody).toContain("tenant_id LIKE 'tenant-p1a-live-%'");
+  });
+
+  it("§L: ingen FK-omvei/bred sletting i selve cleanup-KODEN (kommentarer som NEVNER de forbudte teknikkene i dokumentasjonsøyemed er greit - dette sjekker kun kjørbar kode) - ingen DISABLE TRIGGER, ingen session_replication_role, ingen TRUNCATE, ingen superbruker-spesifikk hack", () => {
+    const codeOnly = liveScriptSource
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*") && !line.trim().startsWith("/**"))
+      .join("\n");
+    expect(codeOnly).not.toMatch(/DISABLE TRIGGER/i);
+    expect(codeOnly).not.toMatch(/session_replication_role/i);
+    expect(codeOnly).not.toMatch(/TRUNCATE/i);
+  });
+
+  it("audit_events røres ALDRI av cleanupTenant()/selfHeal() - append-only-invarianten (Q-20-presedens) respekteres, ingen forsøkt DELETE mot den", () => {
+    const fnStart = liveScriptSource.indexOf("async function cleanupTenant(tenantId: string): Promise<void> {");
+    const fnEnd = liveScriptSource.indexOf("\n}", fnStart);
+    const fnBody = liveScriptSource.slice(fnStart, fnEnd);
+    expect(fnBody).not.toMatch(/DELETE FROM audit_events/);
+  });
+
+  it("§8: adminPool brukes UENDRET (samme eksisterende Q-21 admin/runtime-splitt) - ingen ny elevated-tilkobling introdusert for cleanup-fiksen", () => {
+    const fnStart = liveScriptSource.indexOf("async function cleanupTenant(tenantId: string): Promise<void> {");
+    const fnEnd = liveScriptSource.indexOf("\n}", fnStart);
+    const fnBody = liveScriptSource.slice(fnStart, fnEnd);
+    expect(fnBody).toMatch(/adminPool\.query/);
+    expect(fnBody).not.toMatch(/createPool\(/);
+  });
+});
+
+describe("HOST FIX #8 §N: alle tidligere host-bevist Drive-kapabilitetsstier er UENDRET", () => {
+  it("auth-probe/read/create/update/rename/move/sync/no-resurrection/idempotency/permission_live-seksjonene er strukturelt uendret (kun §O/§P/§5 berørt av denne fiksen)", () => {
+    expect(liveScriptSource).toContain('drive("get_metadata", { file_id: "root" })');
+    expect(liveScriptSource).toContain('drive("list_files", { folder_id: sandbox.rootId })');
+    expect(liveScriptSource).toContain('await driveMutate("update_content", fileId,');
+    expect(liveScriptSource).toContain('await driveMutate("rename", fileId,');
+    expect(liveScriptSource).toContain('await driveMutate("move", fileId,');
+    expect(liveScriptSource).toContain("new GoogleDriveKnowledgeSource(toolGateway, identity,");
+    expect(liveScriptSource).toContain('results.google_drive_permission_live = "SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL";');
+  });
+
+  it("ingen Google OAuth-relatert kode (client_id/client_secret/redirect/authorize-endepunkt) finnes i ua2-p1a-live.ts - denne fiksen rører ALDRI reauth-flyten (google-drive-reauth.ts er en helt separat fil)", () => {
+    expect(liveScriptSource).not.toMatch(/GOOGLE_OAUTH_AUTHORIZE_ENDPOINT|buildAuthorizationUrl|resolveProvenDesktopClient/);
+  });
+});

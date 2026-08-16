@@ -40,7 +40,7 @@ import { LocalHashEmbedding } from "@jarvis/memory";
 import { GoogleDriveKnowledgeSource, KnowledgeRetriever, KnowledgeSourceRegistry, KnowledgeSyncService, ObsidianVaultKnowledgeSource } from "@jarvis/knowledge";
 import { EnvSecretProvider, GoogleDriveTransport, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { DriveAcceptanceSandbox, determineTestRootSource, driveAcceptanceFolderName, isReauthSignal } from "./lib/drive-acceptance-sandbox.ts";
+import { DriveAcceptanceSandbox, classifyCleanupOutcome, determineTestRootSource, driveAcceptanceFolderName, isReauthSignal } from "./lib/drive-acceptance-sandbox.ts";
 
 type Verdict =
   | "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE" | "BLOCKED_NO_SAFE_TEST_SCOPE"
@@ -107,7 +107,31 @@ function identityFor(tenantId: string): IdentityContext {
   };
 }
 
+/**
+ * HOST FIX #8 (2026-08-16, host-funn run_id ff16c69d): "update or delete on
+ * table tenants violates foreign key constraint tool_executions_tenant_id_
+ * fkey". Root cause funnet mot det FAKTISKE skjemaet (IKKE gjettet) -
+ * `tool_executions.tenant_id` REFERENCES tenants (010_tool_executions.sql);
+ * §N sin idempotency-test (ToolGateway sin idempotency_key-dedupe) skriver
+ * ÉN rad dit for TENANT_A, og denne funksjonen slettet den aldri FØR
+ * `DELETE FROM tenants` ble forsøkt. Rekkefølgen under er FK-trygg (barn FØR
+ * foreldre), utledet fra selve migrasjonsgrafen - ALDRI en gjettet
+ * tabelliste, ALDRI `DISABLE TRIGGER`/`TRUNCATE`/en superbruker-omvei.
+ *
+ * BEVISST IKKE inkludert (verifisert mot faktisk kildekode, ikke antatt):
+ * `audit_events.tenant_id` er en REN TEKSTKOLONNE (INGEN `REFERENCES
+ * tenants` - se 004_audit_cost.sql) OG append-only-trigger-beskyttet
+ * (samme Q-20-presedens: `events`/`audit_events` forblir aldri slettet her)
+ * - blokkerer derfor IKKE denne slettingen og skal ALDRI forsøkes slettet.
+ * `sessions`/`messages`/`events`/`devices`/`approvals`/`cost_events`/
+ * `brief_seen` opprettes ALDRI av P1A-akseptansen (verifisert - ingen av
+ * kallene her går via session-service.ts/message-store.ts/event-writer.ts/
+ * device-service.ts/approval-store.ts/daily-brief.ts) - IKKE rørt, for å
+ * aldri risikere å tømme en ekte operasjonell tabell utover denne
+ * akseptansens egne midlertidige rader.
+ */
 async function cleanupTenant(tenantId: string): Promise<void> {
+  await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query(
     `DELETE FROM knowledge_embeddings WHERE knowledge_document_id IN (SELECT knowledge_document_id FROM knowledge_documents WHERE tenant_id = $1)`,
     [tenantId]
@@ -416,6 +440,7 @@ async function main(): Promise<void> {
     // §O: trash er reversibelt - fila skal FORTSATT eksistere (trashed=true), ikke borte.
     const trashResult = await driveMutate("trash", fileId);
     results.google_drive_trash = trashResult.ok ? "PASS" : "FAIL";
+    if (trashResult.ok) sandbox.markTrashed(fileId);
     log(`google_drive_trash=${results.google_drive_trash}`);
 
     // §N: SAMME idempotency_key to ganger for en NY fil - forventer samme external_id, deduplicated=true andre gang.
@@ -431,6 +456,14 @@ async function main(): Promise<void> {
     // §P: permanent sletting - KUN på fila DENNE kjøringen selv opprettet; sandbox.assertInSandbox() garanterer det strukturelt, ikke bare ved konvensjon.
     const permanentDeleteResult = await driveMutate("delete_permanent", fileId);
     results.google_drive_permanent_delete = permanentDeleteResult.ok ? "PASS" : "FAIL";
+    // HOST FIX #8 (2026-08-16, run_id ff16c69d): fila er NÅ faktisk borte fra
+    // Drive - merkes ØYEBLIKKELIG PERMANENTLY_DELETED slik at §5-oppryddingen
+    // under ALDRI forsøker å slette den på nytt (root cause for den
+    // observerte google_drive_cleanup=FAIL: et redundant delete_permanent-
+    // forsøk mot en allerede slettet fil traff klasse-D sin egen
+    // preflight-sjekk med en 404 FØR transportens idempotente
+    // 404-håndtering noensinne ble nådd - se drive-acceptance-sandbox.ts).
+    if (permanentDeleteResult.ok) sandbox.markPermanentlyDeleted(fileId);
     // §Q: klasse D lyktes AUTONOMT under owner sovereign-policy - ingen approval sendt, ingen DENY (delegert/approval-vei suite-bevist separat).
     results.google_drive_policy = permanentDeleteResult.ok ? "PASS" : "FAIL";
     log(`google_drive_permanent_delete=${results.google_drive_permanent_delete} google_drive_policy=${results.google_drive_policy}`);
@@ -451,14 +484,47 @@ async function main(): Promise<void> {
     // §5: opprydding - permanent sletting av ALT ANNET denne kjøringen selv
     // opprettet (undermapper, idempotency-testfil, evt. auto-opprettet rot),
     // barn FØR roten. En eksplisitt KONFIGURERT rot slettes ALDRI.
-    let cleanupOk = true;
+    //
+    // HOST FIX #8 (2026-08-16, run_id ff16c69d): `sandbox.cleanupTargets()`
+    // utelater NÅ strukturelt hovedtestfila (merket PERMANENTLY_DELETED rett
+    // etter §P over) - det redundante slettingsforsøket som forårsaket den
+    // observerte `google_drive_cleanup=FAIL` (targets=5, root_deleted=true)
+    // skjer derfor ALDRI lenger. `classifyCleanupOutcome()` er likevel et
+    // bevisst forsvar-i-dybden-lag: en EKTE 404 for et SPORT sandkasse-
+    // artefakt (sandbox.has()) telles trygt som "already_absent" (ALDRI
+    // generalisert til vilkårlige Drive-filer utenfor sandkassen) - kun en
+    // ANNEN feilårsak (rate-limit/auth/ukjent) teller som en faktisk
+    // cleanup-svikt.
+    const createdArtifactIds = sandbox.createdArtifactIds();
+    const preCleanupAlreadyGone = createdArtifactIds.filter((id) => sandbox.stateOf(id) === "PERMANENTLY_DELETED").length;
+    let cleanedCount = 0;
+    let alreadyAbsentDuringCleanup = 0;
+    let cleanupFailures = 0;
     const cleanupTargets = sandbox.cleanupTargets();
     for (const targetId of cleanupTargets) {
       const deleteResult = await drive("delete_permanent", { file_id: targetId });
-      if (!deleteResult.ok) cleanupOk = false;
+      const outcome = classifyCleanupOutcome(sandbox, targetId, deleteResult);
+      if (outcome === "cleaned") {
+        cleanedCount++;
+        sandbox.markCleaned(targetId);
+      } else if (outcome === "already_absent") {
+        alreadyAbsentDuringCleanup++;
+        sandbox.markCleaned(targetId);
+      } else {
+        cleanupFailures++;
+        log(`google_drive_cleanup target=${targetId} FEILET: ${deleteResult.ok ? "" : deleteResult.reason}`);
+      }
     }
-    results.google_drive_cleanup = cleanupOk ? "PASS" : "FAIL";
-    log(`google_drive_cleanup=${results.google_drive_cleanup} (targets=${cleanupTargets.length}, root_deleted=${sandbox.autoCreated})`);
+    const alreadyAbsentTotal = preCleanupAlreadyGone + alreadyAbsentDuringCleanup;
+    // §4 i ordren: PASS avgjøres UTELUKKENDE av faktiske cleanup_failures -
+    // ALDRI av at root_deleted=true alene (root kan ha blitt slettet mens et
+    // ANNET mål feilet).
+    results.google_drive_cleanup = cleanupFailures === 0 ? "PASS" : "FAIL";
+    log(
+      `google_drive_cleanup=${results.google_drive_cleanup} created_artifacts=${createdArtifactIds.length} ` +
+        `cleaned_artifacts=${cleanedCount} already_absent=${alreadyAbsentTotal} cleanup_failures=${cleanupFailures} ` +
+        `root_deleted=${sandbox.autoCreated}`
+    );
 
     // §observability: OAuth-tokenet skal ALDRI havne i noe persistert eller loggbart felt.
     const auditRows = await adminPool.query("SELECT payload::text AS p FROM audit_events WHERE tenant_id=$1 AND tool_id='drive'", [TENANT_A]);

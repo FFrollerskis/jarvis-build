@@ -842,48 +842,110 @@ PR #4 merges til `main`.
   Console på nytt. PR #5 forblir draft/umerget. Ett-kommando-kontrakten er UENDRET:
   `node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`.
 
+## UA-2 P1A HOST FIX #8 "CLEANUP-ONLY BLOCKERS AFTER FULL DRIVE SUCCESS" (samme dag, 2026-08-16)
+- **Host-funn (run_id `ff16c69d`) - VIKTIG MILEPÆL: Google Drive full read/write er nå HOST-BEVIST.**
+  Reauth-flyten (HOST FIX #4-#6) fullførte helt: `google_drive_api_enabled=PASS`,
+  `google_drive_full_scope=PASS`, kontosjekk PASS, koherent Desktop-credential-sett persistert,
+  `google_drive_reauth=PASS`. Selve Drive-akseptansen (`ua2-p1a-live.ts` §6) beviste DERETTER
+  `google_drive_auth_scope`/`_read`/`_create`/`_update`/`_rename`/`_move`/`_sync`/
+  `_q20_no_resurrection`/`_trash`/`_idempotency`/`_permanent_delete`/`_policy` ALLE PASS, ingen
+  token-lekkasje (`drive_token_leak_audit=false`, `drive_token_leak_metadata=false`),
+  `google_drive_permission_live=SKIPPED_NO_SAFE_EXTERNAL_PRINCIPAL` (uendret, bevisst). Den samlede
+  P1A-akseptansen ble likevel blokkert av TO RENE opprydding-defekter (IKKE manglende
+  Drive-kapabilitet) - se under.
+- **Blokker A - `google_drive_cleanup=FAIL` (targets=5, root_deleted=true):** root cause funnet ved
+  faktisk kildelesing (ikke gjettet). §P sin allerede-vellykkede `delete_permanent` av hovedtestfila
+  lot fila stå igjen i `sandbox.created` - §5-oppryddingen forsøkte DERFOR å slette den EN GANG TIL.
+  Den EKTE mekanismen: `delete_permanent` er en klasse-D-handling med `preflight_action: "get_metadata"`
+  (ToolGateway sin evidens-/recovery-mekanisme) - for en fil som ALLEREDE er permanent slettet gir
+  DENNE preflight-lesingen en 404, og siden klassen er D fører det til en UMIDDELBAR
+  `preflight_failed:drive_not_found_...`-DENY - `deletePermanent()`-transportens EGEN, allerede
+  idempotente 404-håndtering (`already_deleted: "true"`) nås ALDRI i dette tilfellet.
+- **Fiks A:** `DriveAcceptanceSandbox` fikk en eksplisitt artefakt-livssyklus
+  (`CREATED`/`TRASHED`/`PERMANENTLY_DELETED`/`CLEANED`) - `markPermanentlyDeleted(fileId)` kalles
+  UMIDDELBART etter §P sin vellykkede sletting, og `cleanupTargets()` utelater NÅ strukturelt et hvert
+  artefakt i en terminal tilstand (`PERMANENTLY_DELETED`/`CLEANED`) - INGEN redundant sletteforsøk
+  skjer lenger. Som forsvar-i-dybden: ny `classifyCleanupOutcome()` klassifiserer et EVENTUELT
+  gjenværende NOT_FOUND-svar under selve cleanup-løkka som `already_absent` KUN når mål-IDen er et
+  KJENT sandkasse-artefakt (`sandbox.has()` - samme grensekontroll som `assertInSandbox()`) - ALDRI
+  generalisert til en vilkårlig Drive-fil utenfor sandkassen. `google_drive_cleanup=PASS` avgjøres
+  UTELUKKENDE av `cleanup_failures === 0` - ALDRI av `root_deleted=true` alene. Ny evidenslinje:
+  `created_artifacts=<n> cleaned_artifacts=<n> already_absent=<n> cleanup_failures=<n> root_deleted=<bool>`.
+- **Blokker B - `tenants`-FK-feil:** `"update or delete on table tenants violates foreign key
+  constraint tool_executions_tenant_id_fkey"`. Root cause funnet mot det FAKTISKE skjemaet (ikke
+  gjettet): `tool_executions.tenant_id` REFERENCES `tenants` (010_tool_executions.sql) - §N sin
+  idempotency-test (ToolGateway sin idempotency_key-dedupe) skriver ÉN rad dit for TENANT_A, og
+  `cleanupTenant()` slettet den aldri FØR `DELETE FROM tenants` ble forsøkt.
+- **Fiks B:** `DELETE FROM tool_executions WHERE tenant_id = $1` lagt til FØRST i `cleanupTenant()`
+  (FK-trygg rekkefølge, utledet fra selve migrasjonsgrafen). Verifisert MOT faktisk kildekode (ikke
+  antatt) at INGEN andre tabeller trenger rydding: `audit_events.tenant_id` er en REN TEKSTKOLONNE
+  (INGEN `REFERENCES tenants`, se 004_audit_cost.sql) OG append-only-trigger-beskyttet (samme
+  Q-20-presedens - IKKE rørt, IKKE forsøkt slettet); `sessions`/`messages`/`events`/`devices`/
+  `approvals`/`cost_events`/`brief_seen` opprettes ALDRI av P1A-akseptansen (verifisert - ingen av
+  kallene i `ua2-p1a-live.ts` går via de tilhørende service-modulene). Ingen `DISABLE TRIGGER`, ingen
+  `session_replication_role`, ingen `TRUNCATE`, ingen superbruker-omvei - kun presise,
+  parameteriserte `DELETE ... WHERE tenant_id = $1`-setninger via den EKSISTERENDE `adminPool`
+  (uendret Q-21 admin/runtime-splitt).
+- **Q-21 uendret:** ingen kode rørt utenfor de to presise cleanup-fiksene - `jarvis_runtime` forblir
+  NOSUPERUSER/NOBYPASSRLS, ingen RLS-omvei brukt eller nødvendig (adminPool var allerede den
+  eksisterende, legitime admin-tilkoblingen for nettopp denne typen opprydding).
+- **Google OAuth-arkitekturen er IKKE rørt** denne runden (eksplisitt krav i ordren) - begge fiksene
+  er rene opprydding-/DB-endringer i `ua2-p1a-live.ts`/`drive-acceptance-sandbox.ts`. Tobias sin NESTE
+  host-kjøring bruker de ALLEREDE persisterte Desktop-credentialene - INGEN ny reautorisering, INGEN
+  nytt Cloud Console-steg, INGEN nytt samtykke nødvendig.
+- **Tester:** 14 nye rene enhetstester (`drive-acceptance-sandbox.test.ts` - livssyklustilstand,
+  `isNotFoundFailureReason()`, `classifyCleanupOutcome()`, inkl. eksplisitt "NOT_FOUND utenfor
+  sandkassen aksepteres ALDRI"-kontrastbevis) + 14 nye strukturelle wiring-tester
+  (`ua2-p1a-host-run-wiring.test.ts` - markPermanentlyDeleted-plassering, classifyCleanupOutcome-bruk,
+  PASS-betingelse, FK-rekkefølge, scopet DELETE, ingen FK-omvei, audit_events urørt, alle tidligere
+  host-bevist Drive-kapabilitetsstier uendret) - full suite kjørt, lint/typecheck/gitleaks rene (se
+  rapport for eksakte tall).
+- **STATUS - VIKTIG DISTINKSJON (§11 i ordren):** Google Drive full read/write-kapabilitet er
+  HOST-BEVIST (run_id `ff16c69d`) - dette er IKKE lenger en åpen post. Den SAMLEDE UA-2 P1A-
+  akseptansen forblir likevel FIXED_SUITE / READY_FOR_HOST_VERIFY, **IKKE VERIFIED**, fordi
+  cleanup-defektene (Blokker A/B over) hindret et fullstendig grønt `hard_fail=false`-resultat på
+  DENNE kjøringen. Krever EN NY host-kjøring (ingen ny reautorisering) for å bevise at BEGGE
+  cleanup-fiksene faktisk fungerer mot ekte Drive/Postgres FØR P1A kan settes VERIFIED. PR #5 forblir
+  draft/umerget.
+
 ## Blokkeringer
 UA-2 P1A (inkl. Google Drive full read/write-scope-endringen, auto-sandkasse-host-recovery og
-reauth-flyten) venter på Tobias sin faktiske nettleser-autorisasjon PÅ HOSTEN - draft PR IKKE merget.
-Desktop-OAuth-bootstrappen er nå HOST-BEVIST fungerende helt gjennom token-exchange (HOST FIX #4/#5) -
-gjenstående blokkering er en EKTE Google Drive API-403 ved selve metadata-probe-kallet
-(`google_reauth=FAIL_DRIVE_PROBE`), nå klassifisert TRYGT (`API_NOT_ENABLED`/`WORKSPACE_ADMIN_POLICY`/
-`INSUFFICIENT_SCOPE`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`) med automatisk riktig-side-
-guiding + samme-prosess-retry for de to gjenopprettbare kategoriene (HOST FIX #5) - selve retry-/
-klassifiseringslogikken kan ikke kjøres ende-til-ende mot en ekte 403 fra denne sky-sandboxen. Q-20/
-UA-2 P0/Q-21 har ingen egne blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende
-provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for
-voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen
-fremtidig underoppgave, ikke en blokkering for P1A. Connector-audit-gapene
-(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende
-for P1A. **Nytt, ikke-blokkerende funn (uendret fra forrige runde):** `GoogleDriveTransport` er IKKE
-wiret inn i `apps/api/src/main.ts`/`worker-main.ts` sine `firstWaveTools({...})`-kall ennå - egen
-fremtidig byggeordre.
+reauth-flyten) venter på Tobias sin faktiske host-kjøring - draft PR IKKE merget.
+**Google Drive full read/write-kapabilitet er HOST-BEVIST (run_id `ff16c69d`) - IKKE lenger en åpen
+post.** Reauth-flyten (HOST FIX #4-#6) OG selve Drive-akseptansen (auth/read/create/update/rename/
+move/sync/no-resurrection/trash/idempotency/permanent_delete/policy) er ALLE PASS på ekte Drive.
+Gjenstående blokkering for P1A som HELHET er RENE opprydding-defekter (HOST FIX #8, fikset denne
+runden, IKKE host-bevist ennå): en Drive-cleanup-bug (redundant `delete_permanent` mot et allerede
+slettet artefakt) og en Postgres-FK-feil (`tool_executions` manglet i tenant-cleanup) hindret et
+fullstendig grønt `hard_fail=false`-resultat på run `ff16c69d`. Q-20/UA-2 P0/Q-21 har ingen egne
+blokkeringer (alle VERIFIED/CLOSED, merget til `main`). Manglende provider-nøkler er eneste gap for
+LIVE multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
+ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå - egen fremtidig underoppgave, ikke en
+blokkering for P1A. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
+over) er dokumentert backlog, ikke blokkerende for P1A. **Nytt, ikke-blokkerende funn (uendret fra
+forrige runde):** `GoogleDriveTransport` er IKKE wiret inn i `apps/api/src/main.ts`/`worker-main.ts`
+sine `firstWaveTools({...})`-kall ennå - egen fremtidig byggeordre.
 
 ## Neste oppgave
 Tobias kjører (PÅ HOSTEN, fra repo-roten) - fortsatt bare ÉN kommando:
-`node --experimental-transform-types modules/core/scripts/google-drive-reauth.ts`
+`node --experimental-transform-types modules/core/scripts/ua2-p1a-host-run.ts`
 
-- **Bevist Desktop-klient fra forrige kjøring** (`JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop` i `.env`,
-  host-bevist HOST FIX #5): scriptet hopper rett til OAuth-samtykke - INGEN Cloud Console-handling
-  nødvendig igjen.
-- **Drive-metadata-proben feiler igjen med en 403:** scriptet klassifiserer feilen automatisk og
-  logger `google_drive_blocker=<kategori>`. Er den `API_NOT_ENABLED` eller `WORKSPACE_ADMIN_POLICY`,
-  åpnes riktig Google-side AUTOMATISK med ÉN eksakt instruksjon (aktiver Drive API, ELLER stol
-  eksplisitt på "Jarvis Desktop" i Admin Console sin API Controls) - Tobias gjør KUN det ene klikket,
-  scriptet prøver selv på nytt i SAMME prosess (ingen restart) i opptil 10 minutter. Er den noe annet
-  (`INSUFFICIENT_SCOPE`/`RATE_LIMIT`/`AUTH_INVALID`/`UNKNOWN_PROVIDER_403`), kaster scriptet med den
-  klassifiserte rapporten - videre diagnose/beslutning trengs da fra Tobias/den eksterne AI-arkitekten
-  før neste kjøring.
+**INGEN Google-reautorisering nødvendig** - de allerede persisterte Desktop-credentialene
+(`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/`_TOKEN`/`_OAUTH_CLIENT_TYPE=desktop`) gjenbrukes direkte av den
+vanlige host-runneren. Denne kjøringen tester KUN de to HOST FIX #8-cleanup-fiksene mot ekte
+Drive/Postgres - all Drive-kapabilitet er allerede host-bevist og skal IKKE regresjonstestes på nytt
+manuelt (kun via den vanlige suiten).
 
-Forventet fullt-grønt host-sammendrag inkluderer (nytt denne runden) `google_drive_blocker=<PASS uten
-blokkering>` → `google_drive_full_scope=PASS`, deretter `google_drive_test_scope=AUTO_CREATED` (eller
-`CONFIGURED`), samt PASS på auth_scope/read/create/update/rename/move/trash/permanent_delete/cleanup/
-sync/q20_no_resurrection/idempotency/policy. **Ingen merge, ingen UA-2 P1B, ingen cloud-live-claims uten
-host-bevis** før den kjøringen er mottatt og bekreftet. Etter host-verifikasjon: UA-2 P1B (e-post-
-ingestion, møtetranskripsjon, OCR) er neste kandidat i IMPLEMENTATION_PLAN - venter på egen eksplisitt
-fase-godkjenning fra Tobias (faseporten gjelder, CLAUDE.md-regel 10). Øvrige kandidater uendret i
-bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-
-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, Pieces (egen underoppgave når en konkret
-integrasjonsflate finnes), connector-audit-gapene (D-41-sjekklisten, egne fremtidige byggeordre per
-connector), Drive-entrypoint-wiring (main.ts/worker-main.ts, se funn over).
+Forventet fullt-grønt host-sammendrag inkluderer (nytt denne runden)
+`google_drive_cleanup=PASS created_artifacts=<n> cleaned_artifacts=<n> already_absent=<n>
+cleanup_failures=0 root_deleted=true`, ingen `cleanup A/B feilet`-linjer i §8 CLEANUP-seksjonen, og
+fortsatt PASS på auth_scope/read/create/update/rename/move/trash/permanent_delete/sync/
+q20_no_resurrection/idempotency/policy (uendret fra `ff16c69d`). **Ingen merge, ingen UA-2 P1B, ingen
+cloud-live-claims uten host-bevis** før DENNE kjøringen er mottatt og bekreftet grønn. Etter
+host-verifikasjon: UA-2 P1B (e-post-ingestion, møtetranskripsjon, OCR) er neste kandidat i
+IMPLEMENTATION_PLAN - venter på egen eksplisitt fase-godkjenning fra Tobias (faseporten gjelder,
+CLAUDE.md-regel 10). Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10
+STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark,
+Pieces (egen underoppgave når en konkret integrasjonsflate finnes), connector-audit-gapene
+(D-41-sjekklisten, egne fremtidige byggeordre per connector), Drive-entrypoint-wiring
+(main.ts/worker-main.ts, se funn over).
