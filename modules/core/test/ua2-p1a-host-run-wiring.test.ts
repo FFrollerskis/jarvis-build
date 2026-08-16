@@ -111,17 +111,42 @@ describe("idempotent ved gjentatt kjøring, ingen destruktive argumenter", () =>
 });
 
 describe("Google Drive LIVE er BETINGET - aldri en fake PASS uten trygt test-scope", () => {
-  it("ua2-p1a-live.ts krever client_id/client_secret/token/test_folder_id ALLE fire, ellers BLOCKED_NO_SAFE_TEST_SCOPE", () => {
+  it("ua2-p1a-live.ts krever client_id/client_secret/token/test_folder_id ALLE fire, ellers BLOCKED_NO_SAFE_TEST_SCOPE (alle google_drive_*-felt default dit, guarden returnerer FØR noe overskrives)", () => {
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_CLIENT_ID");
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_CLIENT_SECRET");
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_TOKEN");
     expect(liveScriptSource).toContain("JARVIS_GOOGLE_DRIVE_TEST_FOLDER_ID");
-    expect(liveScriptSource).toContain("BLOCKED_NO_SAFE_TEST_SCOPE");
+    // Alle google_drive_*-felt i `results` defaulter til BLOCKED_NO_SAFE_TEST_SCOPE:
+    const defaultsBlock = liveScriptSource.slice(liveScriptSource.indexOf("const results: Record"), liveScriptSource.indexOf("};", liveScriptSource.indexOf("const results: Record")));
+    const driveFieldLines = defaultsBlock.split("\n").filter((l) => l.includes("google_drive_"));
+    expect(driveFieldLines.length).toBeGreaterThan(5);
+    for (const line of driveFieldLines) {
+      expect(line).toContain("BLOCKED_NO_SAFE_TEST_SCOPE");
+    }
+    // Guarden returnerer (ingen overskriving) FØR noe live-kall forsøkes:
     const guardIdx = liveScriptSource.indexOf("!clientId || !clientSecret || !refreshToken || !testFolderId");
-    const blockedIdx = liveScriptSource.indexOf('results.google_drive_live = "BLOCKED_NO_SAFE_TEST_SCOPE"');
+    const listCallIdx = liveScriptSource.indexOf('drive("list_files"');
     expect(guardIdx).toBeGreaterThan(-1);
-    expect(blockedIdx).toBeGreaterThan(-1);
-    expect(guardIdx).toBeLessThan(blockedIdx);
+    expect(listCallIdx).toBeGreaterThan(-1);
+    expect(guardIdx).toBeLessThan(listCallIdx);
+  });
+
+  it("Drive-akseptansen rapporterer BLOCKED_REAUTH_REQUIRED - ikke en fake PASS - når lesing fungerer men skriving feiler på auth (utilstrekkelig scope)", () => {
+    expect(liveScriptSource).toContain("BLOCKED_REAUTH_REQUIRED");
+    expect(liveScriptSource).toContain("isReauthSignal");
+    expect(liveScriptSource).toMatch(/auth_error_401\|auth_error_403/);
+  });
+
+  it("Drive-akseptansen sletter PERMANENT kun artefakter DEN SELV opprettet (createdFileIds), aldri noe annet i test-mappen", () => {
+    expect(liveScriptSource).toContain("createdFileIds");
+    const cleanupIdx = liveScriptSource.indexOf("§cleanup");
+    const deleteLoopIdx = liveScriptSource.indexOf("for (const fileId of createdFileIds)");
+    expect(cleanupIdx).toBeGreaterThan(-1);
+    expect(deleteLoopIdx).toBeGreaterThan(cleanupIdx);
+  });
+
+  it("permission-mutasjon er BEVISST IKKE live-testet (kan ikke gjøres trygt uten å involvere ekte personer/eksponering)", () => {
+    expect(liveScriptSource).toMatch(/Permission-mutasjon.*BEVISST IKKE/s);
   });
 
   it("Drive-akseptansen bruker en 'folder'-scope (aldri whole_drive) mot en dedikert test-mappe", () => {
