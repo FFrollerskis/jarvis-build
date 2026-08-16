@@ -73,8 +73,8 @@ export interface ResolvedPackageManager {
   command: string;
   /** Argumenter som må stå FØR de faktiske pnpm-kommandoargumentene (f.eks. `pnpm@9.15.9` for Corepack). */
   argsPrefix: string[];
-  /** `true` KUN når den resolvede filen er et Windows-batch-shim (`.cmd`/`.bat`) som selv krever shell-tolkning for å kjøres i det hele tatt. */
-  useShell: boolean;
+  /** `true` KUN når `command` er et Windows batch-shim (`.cmd`/`.bat`) som MÅ tolkes av cmd.exe for å kjøres i det hele tatt (native `.exe`/`.com` trenger det ALDRI). */
+  requiresCmdWrapper: boolean;
 }
 
 /**
@@ -85,23 +85,23 @@ export interface ResolvedPackageManager {
  *     ALDRI `corepack enable` (som kan trenge forhøyede rettigheter).
  *  3. Ellers: fail-closed med en tydelig, handlingsrettet feilmelding.
  *
- * `command` er ALLTID en sti funnet på filsystemet (aldri brukerstyrt input) -
- * trygg å senere kjøre med `shell: true` uten injeksjonsrisiko (§4).
+ * `command` er ALLTID en sti funnet på filsystemet (aldri brukerstyrt input).
  */
 export function resolvePackageManager(env: PathLookupEnv, pinned: PinnedPackageManager): ResolvedPackageManager {
   const pnpmPath = findExecutableOnPath("pnpm", env);
   if (pnpmPath) {
-    const isWindowsShim = env.platform === "win32";
-    return { driver: isWindowsShim ? "pnpm.cmd" : "pnpm", command: pnpmPath, argsPrefix: [], useShell: isWindowsShim };
+    const isWindows = env.platform === "win32";
+    return { driver: isWindows ? "pnpm.cmd" : "pnpm", command: pnpmPath, argsPrefix: [], requiresCmdWrapper: isWindows && isBatchShim(pnpmPath) };
   }
 
   const corepackPath = findExecutableOnPath("corepack", env);
   if (corepackPath) {
+    const isWindows = env.platform === "win32";
     return {
       driver: "corepack",
       command: corepackPath,
       argsPrefix: [`${pinned.name}@${pinned.version}`],
-      useShell: env.platform === "win32"
+      requiresCmdWrapper: isWindows && isBatchShim(corepackPath)
     };
   }
 
@@ -110,4 +110,45 @@ export function resolvePackageManager(env: PathLookupEnv, pinned: PinnedPackageM
       "Installer pnpm (https://pnpm.io/installation/) - IKKE nødvendig å kjøre 'corepack enable' " +
       "eller endre PATH manuelt utover det en normal Node/pnpm-installasjon allerede gjør."
   );
+}
+
+function isBatchShim(resolvedPath: string): boolean {
+  return /\.(cmd|bat)$/i.test(resolvedPath);
+}
+
+export interface SpawnInvocation {
+  command: string;
+  args: string[];
+}
+
+const DEFAULT_COMSPEC = "C:\\Windows\\System32\\cmd.exe";
+
+/**
+ * DEP0190-sikker invokasjon (Q-20 HOST RECOVERY #3): Node advarer/vil
+ * fjerne støtte for å kombinere `shell: true` med et args-array (nettopp
+ * fordi Node da selv må gjette hvordan de skal escapes - en reell
+ * injeksjonsrisiko for VARIABEL input). Løsningen her bruker ALDRI
+ * `shell: true`: et Windows `.cmd`/`.bat`-shim kan strukturelt ikke
+ * kjøres direkte av `CreateProcess` (kun cmd.exe kan tolke batch-filer),
+ * så vi kaller cmd.exe SELV som en helt vanlig, ikke-shell barneprosess med
+ * et EKSPLISITT, internt kontrollert argv-array (`/d /s /c <sti> <args>`)
+ * - identisk mønster til det etablerte `cross-spawn`-biblioteket bruker for
+ * nøyaktig dette problemet. `command`/`args` her stammer UTELUKKENDE fra
+ * filsystem-oppløsning (`resolvePackageManager`) og statiske, repo-egne
+ * argumenter - ALDRI fra ubetrodd/brukerstyrt input.
+ */
+export function buildSpawnInvocation(
+  resolved: ResolvedPackageManager,
+  args: string[],
+  comSpec: string = process.env["ComSpec"] || process.env["COMSPEC"] || DEFAULT_COMSPEC
+): SpawnInvocation {
+  const fullArgs = [...resolved.argsPrefix, ...args];
+  if (!resolved.requiresCmdWrapper) {
+    return { command: resolved.command, args: fullArgs };
+  }
+  // /d: hopp over AutoRun-registeret (ingen uventet, brukerkonfigurert kode
+  // kjøres). /s: korrigerer cmd.exe sin sitat-parsing slik at STIEN til
+  // .cmd-filen (som kan inneholde mellomrom, f.eks. "C:\Program Files\...")
+  // tolkes som ETT argument, ikke delt opp.
+  return { command: comSpec, args: ["/d", "/s", "/c", resolved.command, ...fullArgs] };
 }

@@ -1,8 +1,8 @@
 # Q-20 — Data Erasure Foundation
 
-**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-16).** Suite-bevist mot embedded Postgres.
-**IKKE VERIFIED** — venter på Tobias sin host-kjøring av
-`modules/core/scripts/q20-erasure-live.ts` mot ekte lokal Postgres/pgvector.
+**Status: VERIFIED/CLOSED (2026-08-16) → D-40.** Host-bevist av Tobias på ekte Windows/Docker-host,
+run_id `eaabe2b1` — alle `q20_*`-felt PASS, `hard_fail=false`, `q21_runtime_role_safe=PASS` uendret.
+Full evidens: docs/RUNTIME_GATES.md ("Q-20 FINAL CLOSURE"), docs/DECISIONS_AND_ASSUMPTIONS.md (D-40).
 
 **Dette er en teknisk data-erasure-foundation — IKKE en juridisk GDPR-compliance-sertifisering.**
 Bygget for å redusere persondata-eksponeringsrisikoen FØR UA-2 P1 (flere kunnskapskilder: Drive,

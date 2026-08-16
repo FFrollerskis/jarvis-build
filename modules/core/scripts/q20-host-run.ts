@@ -1,4 +1,4 @@
-// Q-20 HOST RECOVERY #1+#2 (2026-08-16): ÉN host-kommando som bootstrapper
+// Q-20 HOST RECOVERY #1+#2+#3 (2026-08-16): ÉN host-kommando som bootstrapper
 // workspacet (denne branchen la til en NY pnpm-workspace-pakke,
 // `modules/erasure` - en host som installerte avhengigheter FØR den pakken
 // eksisterte har aldri fått `node_modules`/symlinks for den, og
@@ -8,16 +8,25 @@
 // (inkl. `018_erasure.sql`) via admin-rollen, og kjører til slutt selve
 // Q-20-akseptansen (`modules/erasure/scripts/q20-erasure-live.ts`).
 //
-// HOST RECOVERY #2: `spawnSync("pnpm", ...)` UTEN `shell: true` feiler med
+// HOST RECOVERY #2: `spawnSync("pnpm", ...)` UTEN shell-involvering feiler med
 // `ENOENT` på Windows sjøl om `pnpm` fungerer fint fra Tobias sin egen
 // PowerShell - Node gjør IKKE Windows sin PATHEXT-baserte utvidelsesoppløsning
-// (`.CMD`/`.EXE`/`.BAT`) med mindre en shell faktisk er involvert. Løst med
-// en eksplisitt, testbar oppløsningsrekkefølge (`lib/package-manager-resolve.ts`):
-// finn `pnpm`/`pnpm.cmd` på PATH → ellers `corepack`/`corepack.cmd` på PATH
-// (påkalt med EKSPLISITT pinnet versjon, ALDRI `corepack enable`) → ellers
-// fail-closed med en tydelig feilmelding. `shell: true` brukes KUN for å
-// kjøre den RESOLVEDE, filsystem-bekreftede stien (aldri brukerstyrt input -
-// ingen injeksjonsrisiko).
+// (`.CMD`/`.EXE`/`.BAT`) uten en shell. Løst med en eksplisitt, testbar
+// oppløsningsrekkefølge (`lib/package-manager-resolve.ts`): finn
+// `pnpm`/`pnpm.cmd` på PATH → ellers `corepack`/`corepack.cmd` på PATH (påkalt
+// med EKSPLISITT pinnet versjon, ALDRI `corepack enable`) → ellers fail-closed.
+//
+// HOST RECOVERY #3: den første fiksen (runde #2) brukte `shell: true` for å
+// kjøre `.cmd`-shims, som utløste Node sin `DEP0190`-advarsel (kombinasjonen
+// `shell: true` + et args-array er en kjent injeksjonsrisiko - Node må da selv
+// gjette hvordan argumentene skal escapes). Løst PERMANENT: `shell` er nå
+// IKKE et alternativ noe sted i denne fila. Et `.cmd`-shim MÅ tolkes av
+// cmd.exe for å kjøres i det hele tatt (Windows CreateProcess kan ikke starte
+// batch-filer direkte) - løsningen er å kalle cmd.exe SELV som en helt
+// vanlig, ikke-shell barneprosess med et eksplisitt argv (`/d /s /c <sti>
+// <args>`, se `buildSpawnInvocation()`), ALDRI via `shell: true`. `command`/
+// `args` stammer utelukkende fra filsystem-oppløsning + statiske, repo-egne
+// argumenter - aldri fra ubetrodd input.
 //
 // BEVISST kun Node-innebygde moduler på TOPPNIVÅ (`node:child_process`,
 // `node:fs`, `node:path`, `node:process`) + rene, avhengighetsfrie lokale
@@ -45,7 +54,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readPinnedPackageManager, resolvePackageManager } from "./lib/package-manager-resolve.ts";
+import { buildSpawnInvocation, readPinnedPackageManager, resolvePackageManager } from "./lib/package-manager-resolve.ts";
 
 const repoRoot = process.cwd();
 
@@ -53,9 +62,14 @@ function log(msg: string): void {
   console.log(`[q20-host-run] ${msg}`);
 }
 
-function run(command: string, args: string[], options: { cwd?: string; shell?: boolean } = {}): void {
+// DEP0190 (Q-20 HOST RECOVERY #3): `shell` er BEVISST IKKE et alternativ her -
+// `execFileSync` kjøres ALLTID med et rent argv-array, ALDRI `shell: true`.
+// Windows `.cmd`-shims håndteres av `buildSpawnInvocation()` (en eksplisitt
+// cmd.exe-child-prosess med sitt eget kontrollerte argv), ikke av denne
+// generiske hjelperen - se `lib/package-manager-resolve.ts`.
+function run(command: string, args: string[], cwd: string = repoRoot): void {
   log(`$ ${command} ${args.join(" ")}`);
-  execFileSync(command, args, { stdio: "inherit", cwd: options.cwd ?? repoRoot, shell: options.shell ?? false });
+  execFileSync(command, args, { stdio: "inherit", cwd });
 }
 
 function assertRepoRoot(): void {
@@ -106,7 +120,8 @@ function ensureWorkspaceInstalled(): void {
   // §5: ETT sted avhengigheter installeres - frozen lockfile (ALDRI oppdater
   // pnpm-versjon eller lockfile her), trygt å re-kjøre uansett tilstand
   // (no-op hvis alt allerede er installert - §8 idempotens).
-  run(resolved.command, [...resolved.argsPrefix, "install", "--frozen-lockfile"], { shell: resolved.useShell });
+  const invocation = buildSpawnInvocation(resolved, ["install", "--frozen-lockfile"]);
+  run(invocation.command, invocation.args);
   log("install_frozen_lockfile=PASS workspace_install=PASS");
 }
 

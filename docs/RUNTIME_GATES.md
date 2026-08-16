@@ -17,9 +17,82 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 | UA0-RUNRATE | **PARTIAL_RUNTIME m/LIVE PROVIDER-EVIDENS** | 2026-08-13: ekte OpenAI-kall (gpt-4o-mini) gjennom ModelGateway mot ekte Postgres: cost_events={provider:openai, model:gpt-4o-mini, in:30, out:9, 3 øre, task-live-runrate/sess-live-1}, trace-span 2067 ms. Kommando: `node --experimental-transform-types modules/tool-gateway/scripts/live-runrate.ts`. Brief-generering skriver egen cost-rad (kind=brief:generation) → cost_per_daily_brief beregnes reelt. Sky-/connector-kost mangler live kilder |
 | Q-21 DB admin/runtime-splitt | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`): `migrate_effective_db_user=postgres`, `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`/`bypassrls=false`/`canlogin=true`/`member_jarvis_app=true`, `q21_runtime_role_safe=PASS`. Se D-38 og eget avsnitt under |
 | UA-2 P0 Knowledge Ingestion | **PRODUCTION_VERIFIED (2026-08-15)** | Host-bevist (run_id `778bb87d`), ekte Postgres/pgvector+filsystem+GitHub, via `jarvis_runtime` (non-bypass). `symlink_escape=SKIPPED_HOST_PERMISSION` (suite-bevist, ikke live) - eksplisitt IKKE presentert som live-PASS. Se D-39 og eget avsnitt under |
-| Q-20 Data erasure foundation | **IMPLEMENTED_NOT_VERIFIED (suite-verifisert, 2026-08-16)** | `@jarvis/erasure` bygget og fullt testet mot embedded Postgres (13+1+18 nye tester, se docs/DATA_ERASURE.md); live-scriptet er selv kjørt end-to-end mot en ekte (embedded) Postgres i byggeøkten med `hard_fail=false` - men IKKE mot Tobias sin faktiske Docker-host ennå (host-runde 1: bootstrap-feil fikset, se eget avsnitt under). Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se eget avsnitt under |
+| Q-20 Data erasure foundation | **PRODUCTION_VERIFIED (2026-08-16)** | Host-bevist på ekte Windows/Docker-host (run_id `eaabe2b1`): alle `q20_*`-felt PASS, `hard_fail=false`, `q21_runtime_role_safe=PASS`. Teknisk foundation, IKKE juridisk GDPR-sertifisering. Se D-40 og eget avsnitt under |
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
+
+## Q-20 FINAL CLOSURE: HOST VERIFIED (2026-08-16, run_id `eaabe2b1`)
+
+**Tobias kjørte `node --experimental-transform-types modules/core/scripts/q20-host-run.ts` på sin
+faktiske Windows/Docker-host - GRØNT resultat, hele kjeden i én kommando.**
+
+### Bootstrap
+
+```
+package_manager_resolution=PASS
+package_manager_driver=pnpm.cmd
+package_manager_version=9.15.9
+
+install_frozen_lockfile=PASS
+workspace_install=PASS
+erasure_workspace_dependencies=PASS
+```
+
+### Ferske images + migrasjon (Q-21 uendret)
+
+`migrate`/`api`/`worker` bygget fra gjeldende checkout. `migrate_effective_db_user=postgres`,
+migrasjonene (inkl. `018_erasure.sql`) anvendt. `q21_runtime_role_safe=PASS`,
+`runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`, `runtime_role_bypassrls=false` -
+Q-21 sin admin/runtime-splitt fortsatt intakt, ikke regresert av Q-20.
+
+### Q-20-akseptanse (alle 21 trinn fra byggeordren)
+
+```
+q20_preview=PASS            q20_hard_delete=PASS        q20_derived_delete=PASS
+q20_fts_erasure=PASS        q20_vector_erasure=PASS     q20_hybrid_erasure=PASS
+q20_memory_erasure=PASS     q20_no_resurrection=PASS    q20_idempotency=PASS
+q20_tenant_isolation=PASS   q20_space_isolation=PASS    q20_receipt_safe=PASS
+q20_sentinel_scan=PASS
+
+run_id=eaabe2b1
+hard_fail=false
+```
+
+Resync-bevis (resurrection protection): `created=0`, `suppressed=1` - det slettede dokumentet kom
+IKKE tilbake ved neste source-sync, selv om kildefilen fortsatt fantes på disk.
+
+Retrieval etter purge (alle fire lag separat bevist 0 treff): `fts_hits=0`, `vector_hits=0`,
+`hybrid_hits=0`, `memory_hits=0`.
+
+Bevist på EKTE (ikke embedded) Postgres/pgvector, ekte Docker, ekte Windows-host - dette er den
+FAKTISKE produksjonsmiljø-verifikasjonen, ikke bare suite-/byggemiljø-bevis.
+
+### Reisen til dette punktet (tre host-recovery-runder, samme dag - se seksjonene under for full detalj)
+
+1. **Runde 1 (workspace-bootstrap):** ny `modules/erasure`-workspace-pakke aldri bootstrappet på
+   hosten (`ERR_MODULE_NOT_FOUND: @jarvis/core`) - fikset med ett-kommando-runner
+   `modules/core/scripts/q20-host-run.ts`.
+2. **Runde 2 (Windows pnpm-prosessoppløsning):** `spawnSync pnpm ENOENT` - Node gjør ikke Windows sin
+   PATHEXT-oppløsning uten shell-involvering - fikset med eksplisitt `pnpm`/`pnpm.cmd`→
+   `corepack`-oppløsning (`lib/package-manager-resolve.ts`).
+3. **Runde 3 (DEP0190-opprydding, FØR merge):** runde 2 sin fiks brukte `shell: true` + args-array,
+   som Node flagger som en kjent injeksjonsrisiko (`DEP0190`). Erstattet PERMANENT med en eksplisitt,
+   ikke-shell cmd.exe-barneprosess (`buildSpawnInvocation()` - `/d /s /c <sti> <args>`, samme mønster
+   som `cross-spawn`-biblioteket bruker for nøyaktig dette Windows-problemet).
+
+**Ingen av de tre rundene endret erasure-, migrasjons-, DB-rolle-, retrieval-, suppresjons- eller
+policy-logikken** - kun host-bootstrap/prosess-spawning-hygiene. Q-20 sin featuresemantikk var allerede
+uendret gjennom alle tre rundene; selve host-akseptansen (over) er det som beviser den reelt.
+
+### Fortsatt eksplisitt dokumenterte, IKKE purgede stores (uendret fra suite-lukkingen)
+
+`events`/`audit_events`-payload (strukturelt append-only-blokkert, gjelder alle roller inkl.
+superbruker); `tasks`/`tool_executions`-innhold (ingen stabil kobling til en scope-id); Langfuse/lokal
+trace-fil (ingen purge-integrasjon bygget); `person`-scope dekker ikke knowledge-dokumenter (mangler
+person-kolonne i skjema). Se docs/DATA_ERASURE.md §2/§10 for full begrunnelse.
+
+**Status: Q-20 = VERIFIED/CLOSED (D-40).** Teknisk data-erasure-foundation - IKKE en juridisk
+GDPR-compliance-sertifisering. PR #4 klargjøres for merge til `main`.
 
 ## Q-20 HOST RECOVERY #2: WINDOWS PNPM-PROSESSOPPLØSNING (2026-08-16, samme dag)
 
@@ -66,9 +139,11 @@ node --experimental-transform-types modules/core/scripts/q20-host-run.ts
 ```
 Ingen manuell `pnpm install`, ingen PATH-redigering, ingen SQL, ingen Docker-kommandoer for Tobias.
 
-**Status: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY.** Denne runden løste den Windows-spesifikke
-prosess-spawning-feilen som hindret bootstrap-steget fra å fullføre - Q-20-akseptansen selv er
-fortsatt ikke kjørt mot Tobias sin faktiske host.
+**Status ved denne runden: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY** (denne runden løste kun den
+Windows-spesifikke prosess-spawning-feilen som hindret bootstrap-steget fra å fullføre).
+**OPPDATERT: en påfølgende DEP0190-opprydding (runde 3) + faktisk host-akseptanse fulgte -
+Q-20 er nå VERIFIED/CLOSED (D-40, run_id `eaabe2b1`), se "Q-20 FINAL CLOSURE"-seksjonen øverst i
+dette dokumentet.**
 
 ## Q-20 HOST RECOVERY #1: WORKSPACE BOOTSTRAP-FEIL (2026-08-16, samme dag)
 
@@ -115,9 +190,10 @@ frem til `q20-erasure-live.ts`).
 node --experimental-transform-types modules/core/scripts/q20-host-run.ts
 ```
 
-**Status: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY.** Ingen Q-20-akseptanse er ennå kjørt mot
-Tobias sin faktiske host - denne runden løste kun bootstrap-blokkeringen som hindret akseptansen fra å
-starte i det hele tatt.
+**Status ved denne runden: fortsatt FIXED_SUITE / READY_FOR_HOST_VERIFY** (denne runden løste kun
+bootstrap-blokkeringen som hindret akseptansen fra å starte i det hele tatt).
+**OPPDATERT: Q-20 er nå VERIFIED/CLOSED (D-40, run_id `eaabe2b1`), se "Q-20 FINAL CLOSURE"-seksjonen
+øverst i dette dokumentet.**
 
 ## Q-20: DATA ERASURE FOUNDATION - SUITE-VERIFIED (2026-08-16, IKKE host-verifisert ennå)
 
@@ -184,15 +260,12 @@ q20_tenant_isolation=PASS   q20_space_isolation=PASS    q20_receipt_safe=PASS
 q20_sentinel_scan=PASS      q21_runtime_role_safe=PASS  hard_fail=false
 ```
 
-**IKKE presentert som live-PASS:** dette var embedded (byggemiljø) Postgres, IKKE Tobias sin faktiske
-Docker/pgvector-host. **Status: FIXED_SUITE / READY_FOR_HOST_VERIFY.** **OPPDATERT (host-runde 1,
-samme dag):** den direkte kommandoen under feilet på hosten med en workspace-bootstrap-feil (ny
-`modules/erasure`-pakke, `node_modules` aldri installert for den) - se "Q-20 HOST RECOVERY #1"-
-seksjonen øverst i dette dokumentet. Bruk i stedet:
-`node --experimental-transform-types modules/core/scripts/q20-host-run.ts` (bootstrapper workspacet
-automatisk, deretter identisk akseptanse). Gjenstår: Tobias kjører DENNE kommandoen PÅ HOSTEN (fra
-repo-roten, docker-compose oppe) og rapporterer resultatet - FØRST DA er Q-20 reelt VERIFIED (ikke
-bare suite-bevist).
+**Dette var (ved bygging) embedded (byggemiljø) Postgres, IKKE Tobias sin faktiske Docker/pgvector-
+host.** Denne suite-kjøringen krevde deretter tre host-recovery-runder (workspace-bootstrap → Windows
+pnpm-prosessoppløsning → DEP0190-opprydding) før selve host-akseptansen kunne kjøres - se
+"Q-20 HOST RECOVERY #1/#2"-seksjonene. **OPPDATERT: Q-20 er nå VERIFIED/CLOSED (D-40, host-bevist,
+run_id `eaabe2b1`) - se "Q-20 FINAL CLOSURE"-seksjonen øverst i dette dokumentet for det faktiske
+host-beviset.**
 
 ## BO-02-tillegg (2026-08-13)
 - **Node 22-avvik løst:** `pnpm --use-node-version=22.14.0 vitest run` → **128/128 PASS** (re-kjørt);
