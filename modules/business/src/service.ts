@@ -288,19 +288,25 @@ export class BusinessService {
   /** §19: grunnleggende drifts-metrikker avledet fra autoritativ state - ikke et eget BI-lag. */
   async metrics(tenantId: string, memorySpace: MemorySpace): Promise<BusinessMetrics> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const [leads, opportunities, followups, won] = await Promise.all([
-        client.query(`SELECT count(*)::int AS n FROM business_leads WHERE tenant_id = $1 AND status IN ('new','contacted','qualified')`, [tenantId]),
-        client.query(
-          `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::int AS value FROM business_opportunities
-           WHERE tenant_id = $1 AND stage NOT IN ('won','lost')`,
-          [tenantId]
-        ),
-        client.query(`SELECT count(*)::int AS n FROM business_followups WHERE tenant_id = $1 AND status = 'open' AND due_at < now()`, [tenantId]),
-        client.query(
-          `SELECT count(*)::int AS n FROM business_opportunities WHERE tenant_id = $1 AND stage = 'won' AND updated_at > now() - interval '30 days'`,
-          [tenantId]
-        )
-      ]);
+      // Sekvensielle spørringer, IKKE Promise.all() - en enkelt pg.PoolClient betjener ÉN
+      // forespørsel om gangen over samme tilkobling; samtidige .query()-kall på SAMME client er
+      // deprecated i node-postgres (fjernes i pg@9) og skal aldri brukes, selv om det tilfeldigvis
+      // fungerer i dag (host-funn, HOST FIX #2).
+      const leads = await client.query(
+        `SELECT count(*)::int AS n FROM business_leads WHERE tenant_id = $1 AND status IN ('new','contacted','qualified')`, [tenantId]
+      );
+      const opportunities = await client.query(
+        `SELECT count(*)::int AS n, COALESCE(sum(value_ore), 0)::int AS value FROM business_opportunities
+         WHERE tenant_id = $1 AND stage NOT IN ('won','lost')`,
+        [tenantId]
+      );
+      const followups = await client.query(
+        `SELECT count(*)::int AS n FROM business_followups WHERE tenant_id = $1 AND status = 'open' AND due_at < now()`, [tenantId]
+      );
+      const won = await client.query(
+        `SELECT count(*)::int AS n FROM business_opportunities WHERE tenant_id = $1 AND stage = 'won' AND updated_at > now() - interval '30 days'`,
+        [tenantId]
+      );
       return {
         open_leads: leads.rows[0].n,
         active_opportunities: opportunities.rows[0].n,

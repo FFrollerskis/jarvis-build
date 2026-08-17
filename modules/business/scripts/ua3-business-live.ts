@@ -34,6 +34,10 @@ const results: Record<string, Verdict> = {
   ua3_space_isolation: "FAIL",
   ua3_toolgateway_wiring: "FAIL",
   ua3_audit_no_sensitive_content: "FAIL",
+  ua3_cleanup_mutable_rows: "FAIL",
+  ua3_cleanup_person_links: "FAIL",
+  ua3_cleanup_tenants: "FAIL",
+  ua3_cleanup_audit_retained: "FAIL",
   ua3_cleanup: "FAIL"
 };
 const diagnostics: Record<string, string> = {};
@@ -84,6 +88,16 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
 // (tenant_id kommer alltid fra TENANT_A/TENANT_B/selfHeal() sitt 'tenant-ua3-live-%'-prefiks-søk,
 // aldri en fast/gjettet verdi). DELETE er iboende idempotent - en allerede slettet rad gir 0 rader
 // truffet, ikke en feil - trygt å kjøre flere ganger.
+//
+// HOST FIX #2 (ekte host-funn run_id ad45603d): `audit_events` er BEVISST FRAVÆRENDE fra denne
+// listen - `audit_events_append_only`-triggeren (004_audit_cost.sql) forbyr UPDATE/DELETE
+// ubetinget, og et forsøk kastet en feil som stoppet RESTEN av denne funksjonen (tool_executions/
+// memory_spaces/person_tenants/tenants ble ALDRI slettet - derfor `leftover_tenants=1` i host-
+// funnet). `audit_events.tenant_id` har heller INGEN fremmednøkkel mot `tenants` (kun
+// `cost_events.tenant_id` har det) - append-only-revisjonsrader for en slettet syntetisk
+// akseptanse-tenant er derfor VERKEN et FK-problem for tenant-sletting NOCH noe denne funksjonen
+// noensinne skal prøve å slette. Retained by design, ikke en cleanup-feil - se ua3_cleanup_audit_
+// retained under.
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
@@ -91,9 +105,11 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_leads WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_contacts WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_companies WHERE tenant_id = $1", [tenantId]);
-  await adminPool.query("DELETE FROM audit_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);
+  // person_tenants MÅ slettes FØR tenants (FK) OG før people slettes lenger nede i CLEANUP-
+  // seksjonen (samme FK - person_tenants_person_id_fkey - var host-funnets andre feilmelding,
+  // en direkte følgevirkning av at denne funksjonen aldri kom hit i forrige runde).
   await adminPool.query("DELETE FROM person_tenants WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tenants WHERE tenant_id = $1", [tenantId]);
 }
@@ -272,14 +288,48 @@ async function main(): Promise<void> {
   // Opprydding via `adminPool` - EKSAKT samme scoped tenant_id-er som ble opprettet over, ingen
   // TRUNCATE/bred sletting - kun de to run_id-suffiksede test-tenantsene over, aldri eier-tenanten.
   await section("CLEANUP", async () => {
-    let ok = true;
-    await cleanupTenant(TENANT_A).catch((err: unknown) => { ok = false; log(`cleanup A feilet: ${(err as Error).message}`); });
-    await cleanupTenant(TENANT_B).catch((err: unknown) => { ok = false; log(`cleanup B feilet: ${(err as Error).message}`); });
-    await adminPool.query("DELETE FROM people WHERE person_id = $1", [OWNER_PERSON]).catch((err: unknown) => { ok = false; log(`cleanup person feilet: ${(err as Error).message}`); });
-    const remaining = await adminPool.query("SELECT count(*)::int AS n FROM tenants WHERE tenant_id = ANY($1)", [[TENANT_A, TENANT_B]]);
-    const leftover = (remaining.rows[0] as { n: number }).n;
-    results.ua3_cleanup = ok && leftover === 0 ? "PASS" : "FAIL";
-    log(`cleanup_ok=${ok} leftover_tenants=${leftover} -> ua3_cleanup: ${results.ua3_cleanup}`);
+    let mutableRowsOk = true;
+    await cleanupTenant(TENANT_A).catch((err: unknown) => { mutableRowsOk = false; log(`cleanup A feilet: ${(err as Error).message}`); });
+    await cleanupTenant(TENANT_B).catch((err: unknown) => { mutableRowsOk = false; log(`cleanup B feilet: ${(err as Error).message}`); });
+    results.ua3_cleanup_mutable_rows = mutableRowsOk ? "PASS" : "FAIL";
+    log(`cleanup_mutable_rows_ok=${mutableRowsOk} -> ua3_cleanup_mutable_rows: ${results.ua3_cleanup_mutable_rows}`);
+
+    // person_tenants for BÅDE TENANT_A og TENANT_B slettes av cleanupTenant() over - denne
+    // spørringen beviser at INGEN person_tenants-rad for denne kjøringens person/tenants står igjen
+    // (§C/§D i ordren), FØR selve people-raden forsøkes slettet.
+    const remainingLinks = await adminPool.query(
+      "SELECT count(*)::int AS n FROM person_tenants WHERE tenant_id = ANY($1) OR person_id = $2",
+      [[TENANT_A, TENANT_B], OWNER_PERSON]
+    );
+    const leftoverLinks = (remainingLinks.rows[0] as { n: number }).n;
+    results.ua3_cleanup_person_links = leftoverLinks === 0 ? "PASS" : "FAIL";
+    log(`leftover_person_tenants=${leftoverLinks} -> ua3_cleanup_person_links: ${results.ua3_cleanup_person_links}`);
+
+    let personOk = true;
+    await adminPool.query("DELETE FROM people WHERE person_id = $1", [OWNER_PERSON]).catch((err: unknown) => { personOk = false; log(`cleanup person feilet: ${(err as Error).message}`); });
+
+    const remainingTenants = await adminPool.query("SELECT count(*)::int AS n FROM tenants WHERE tenant_id = ANY($1)", [[TENANT_A, TENANT_B]]);
+    const leftoverTenants = (remainingTenants.rows[0] as { n: number }).n;
+    results.ua3_cleanup_tenants = personOk && leftoverTenants === 0 ? "PASS" : "FAIL";
+    log(`cleanup_person_ok=${personOk} leftover_tenants=${leftoverTenants} -> ua3_cleanup_tenants: ${results.ua3_cleanup_tenants}`);
+
+    // §2/§5 i ordren: audit_events er BEVISST append-only - denne kjøringens revisjonsrader (bl.a.
+    // fra TOOLGATEWAY-WIRING-seksjonen over) forblir INTAKT som lovlig revisjonshistorikk. PASS
+    // betyr her "riktig oppførsel oppnådd" (retained, ALDRI forsøkt slettet), IKKE et krav om at
+    // audit_events=0 for denne tenanten - se ua3_audit_no_sensitive_content for at INNHOLDET i de
+    // beholdte radene fortsatt er trygt.
+    const retainedAudit = await adminPool.query("SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1", [TENANT_A]);
+    const retainedCount = (retainedAudit.rows[0] as { n: number }).n;
+    results.ua3_cleanup_audit_retained = retainedCount >= 1 ? "PASS" : "FAIL";
+    log(`retained_audit_rows_tenant_a=${retainedCount} (append-only - ALDRI forsøkt slettet) -> ua3_cleanup_audit_retained: ${results.ua3_cleanup_audit_retained}`);
+
+    results.ua3_cleanup =
+      results.ua3_cleanup_mutable_rows === "PASS" &&
+      results.ua3_cleanup_person_links === "PASS" &&
+      results.ua3_cleanup_tenants === "PASS" &&
+      results.ua3_cleanup_audit_retained === "PASS"
+        ? "PASS" : "FAIL";
+    log(`-> ua3_cleanup: ${results.ua3_cleanup}`);
   });
 
   return finish();

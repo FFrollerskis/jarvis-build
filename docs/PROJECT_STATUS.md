@@ -1,11 +1,13 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-08-17 (**UA-3 «Business Operating System» STARTET - P0 «Business Domain
-Foundation» = FIXED_SUITE / HOST_VERIFY_BLOCKED → D-49/D-50**, se egen seksjon under. Ekte host-
-kjøring av Tobias (`run_id b95dd25f`) kom gjennom bootstrap/migrasjoner/Q-21, men avdekket en
-scaffold-vs-runtime-pool-feil i akseptansescriptet (42501 RLS-avslag mot `tenants`) - fikset (D-50),
-IKKE re-host-kjørt ennå. IKKE VERIFIED/COMPLETE. UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
-uendret, 922/922 tester) · **Branch:** `claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
+Foundation» = FIXED_SUITE / HOST_VERIFY_BLOCKED → D-49/D-50/D-51**, se egen seksjon under. To ekte
+host-kjøringer av Tobias: (1) `run_id b95dd25f` stoppet på en scaffold-vs-runtime-pool-feil (42501
+RLS-avslag mot `tenants`, fikset D-50); (2) `run_id ad45603d` kom HELE VEIEN gjennom OG **alle 13
+faktiske Business OS-kapabilitetstester PASSET** - kun akseptanse-CLEANUP feilet på append-only-audit
++ FK-rekkefølge (fikset D-51). IKKE re-host-kjørt etter D-51 ennå. IKKE VERIFIED/COMPLETE. UA-2
+forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret, 930/930 tester) · **Branch:**
+`claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
 Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
 VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
 `main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8)
@@ -1277,6 +1279,26 @@ FØR de faktiske skrivingene, ikke bare ved Q-21-sjekken i toppen. 12 nye tester
 reproduksjon av selve `42501`-feilklassen mot en ekte NOSUPERUSER/NOBYPASSRLS-rolle) - ingen svekkelse
 av RLS/Q-21 noe sted.
 
+**HOST FIX #2 (samme dag, ekte host-funn av Tobias, `run_id ad45603d`) → D-51:** ANDRE host-kjøring
+(etter HOST FIX #1) kom HELE VEIEN gjennom bootstrap/migrasjoner/Q-21 OG **ALLE 13 faktiske Business
+OS-kapabilitetstester PASSET** (`ua3_company_contact`/`ua3_lead_idempotent`/`ua3_opportunity_pipeline`/
+`ua3_activity_timeline`/`ua3_activity_idempotent`/`ua3_followup_lifecycle`/`ua3_followup_overdue`/
+`ua3_metrics`/`ua3_tenant_isolation`/`ua3_space_isolation`/`ua3_toolgateway_wiring`/
+`ua3_audit_no_sensitive_content` osv.) - KUN akseptanse-CLEANUP feilet: `DELETE FROM audit_events`
+kastet (append-only-triggeren forbyr det ubetinget) og stoppet RESTEN av `cleanupTenant()`
+(`leftover_tenants=1`), som DERETTER fikk `DELETE FROM people` til å feile med
+`person_tenants_person_id_fkey` (en direkte følge). **Root cause:** `audit_events.tenant_id` har
+INGEN fremmednøkkel mot `tenants` (i motsetning til `cost_events`) - append-only-revisjonsrader er
+derfor VERKEN et FK-hinder for tenant-sletting NOCH noe cleanup-koden skal forsøke å slette. Fikset
+ved å fjerne `DELETE FROM audit_events`-linjen HELT fra `cleanupTenant()` - resten av den allerede
+FK-korrekte rekkefølgen (business_*→tool_executions→memory_spaces→person_tenants→tenants) fullfører nå
+uhindret. CLEANUP splittet i fire granulære markører (`ua3_cleanup_mutable_rows`/
+`ua3_cleanup_person_links`/`ua3_cleanup_tenants`/`ua3_cleanup_audit_retained`) + samlet `ua3_cleanup`.
+Sekundært, ikke-blokkerende funn fikset samtidig: en `pg`-deprecation-advarsel fra
+`BusinessService.metrics()` sin `Promise.all([client.query(...), ...])` på samme `pg.PoolClient` -
+byttet til sekvensielle `await`-kall. 20 nye tester (inkl. direkte reproduksjon av BEGGE
+host-feilmeldingene mot ekte embedded Postgres).
+
 **Bygget:**
 - Ny pakke `@jarvis/business` (mal: `@jarvis/erasure`).
 - Migrasjon `019_business.sql`: 6 tenant-scoped FORCE RLS-tabeller (business_companies/contacts/
@@ -1291,24 +1313,26 @@ av RLS/Q-21 noe sted.
 - ETT Windows host-akseptanseskript: `modules/business/scripts/ua3-host-run.ts` →
   `ua3-business-live.ts` (speiler `q20-host-run.ts`/`q20-erasure-live.ts`).
 
-**Suite-verifisert (922/922 - 36 nye tester totalt, se RUNTIME_GATES.md):** tenant-isolert
+**Suite-verifisert (930/930 - 44 nye tester totalt, se RUNTIME_GATES.md):** tenant-isolert
 entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
 aktivitetstidslinje, oppfoelging-livssyklus + forfalt-spørring, kilde-peker-lenking (ingen FK til
 knowledge_documents - Q-20-trygt strukturelt), cross-tenant/memory-space-isolasjon (RLS mot ekte
 embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring (owner sovereign +
 delegert policy via EKSISTERENDE PolicyGateway, ingen ny logikk), audit uten sensitivt kundeinnhold,
-scaffold-/runtime-pool-separasjon (HOST FIX #1 - inkl. live-reproduksjon av `42501`-RLS-avslaget).
+scaffold-/runtime-pool-separasjon (HOST FIX #1), append-only-audit-trygg + FK-korrekt CLEANUP
+(HOST FIX #2 - inkl. live-reproduksjon av BÅDE `42501`-RLS-avslaget og
+`person_tenants_person_id_fkey`-bruddet).
 
-**IKKE host/live-verifisert ennå:** ingen Docker-tilgjengelig i denne sky-container-økten - HOST FIX #1
-er skrevet og suite-/strukturelt regresjonstestet, men selve fiksen er IKKE kjørt av Tobias ennå.
-Neste steg er en NY host-kjøring for å bevise at `ua3-business-live.ts` nå kommer forbi
-scaffold-steget og faktisk evaluerer alle Business OS-kapabilitetene.
+**Host-evidens (2 ekte kjøringer av Tobias):** (1) `run_id b95dd25f` - stoppet på scaffold-bug
+(HOST FIX #1); (2) `run_id ad45603d` - **alle 13 faktiske Business OS-kapabilitetstester PASSET**,
+kun CLEANUP feilet (HOST FIX #2, fikset). **Ingen TREDJE host-kjøring utført ennå** - selve
+HOST FIX #2 er suite-/strukturelt regresjonstestet, men ikke re-kjørt av Tobias.
 
 **Eksplisitt utsatt (Q-25, ingenting av dette bygget denne runden):** Gmail/Calendar-hendelseslenking,
 AI Mesh-basert klassifisering/scoring, worker/jobbkø-integrasjon, kontrakt/faktura/inntekt-sporing,
 numerisk lead/deal-scoring, D-klasse/hard-delete, attention-queue-automasjon, UI/dashboard.
 
-**Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (922/922 - 68
+**Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (930/930 - 69
 filer), gitleaks (detect, ren). Branch pushet, draft PR #9 oppdatert, IKKE merget - venter på Tobias
 host-verifikasjon.
 
@@ -1327,12 +1351,15 @@ omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gape
 Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / HOST_VERIFY_BLOCKED (D-49/D-50) - IKKE
-VERIFIED/COMPLETE.** Tobias sin FØRSTE host-kjøring (`run_id b95dd25f`) kom gjennom bootstrap/
-migrasjoner/Q-21, men feilet på en scaffold-vs-runtime-pool-bug (42501 RLS-avslag mot `tenants`) -
-fikset (D-50, 12 nye tester, 922/922). Neste steg er en NY host-kjøring: kjør
+**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / HOST_VERIFY_BLOCKED (D-49/D-50/D-51) - IKKE
+VERIFIED/COMPLETE.** To ekte host-kjøringer av Tobias til nå: (1) `run_id b95dd25f` - stoppet på en
+scaffold-vs-runtime-pool-bug, fikset D-50; (2) `run_id ad45603d` - **alle 13 faktiske Business
+OS-kapabilitetstester PASSET**, kun akseptanse-CLEANUP feilet (append-only-audit-trigger-kast +
+etterfølgende `person_tenants`-FK-brudd), fikset D-51 (20 nye tester, 930/930 totalt). Neste steg er
+en TREDJE host-kjøring for å bevise CLEANUP nå fullfører: kjør
 `node --experimental-transform-types modules/business/scripts/ua3-host-run.ts` fra repo-roten på
-Windows-hosten, se PASS-markørene (`ua3_*`, inkl. ny `ua3_business_runtime_role` og `ua3_cleanup`),
+Windows-hosten, se PASS-markørene (`ua3_*`, inkl. `ua3_cleanup_mutable_rows`/
+`ua3_cleanup_person_links`/`ua3_cleanup_tenants`/`ua3_cleanup_audit_retained`/`ua3_cleanup`),
 rapporter `hard_fail`-verdien tilbake. Etter host-verifikasjon: oppdater denne filen +
 DECISIONS_AND_ASSUMPTIONS.md med host-run_id og merg draft-PR-en (kun etter eksplisitt
 Tobias-godkjenning, aldri automatisk). **IKKE startet ennå:** UA-3 P1/P2 (Gmail/Calendar-

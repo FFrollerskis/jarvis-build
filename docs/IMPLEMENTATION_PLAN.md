@@ -580,6 +580,11 @@ ingen oppfunnet struktur, se D-49 for full begrunnelse. Bygget i `modules/busine
 `ua3-business-live.ts` feilaktig brukte runtime-poolen til å opprette akseptanse-scaffolding (`42501`
 RLS-avslag mot `tenants` - RLS fungerte som tiltenkt, ikke en feil å svekke) - fikset med en egen
 `adminPool` for scaffold/cleanup, se D-50 for full detalj.
+**HOST FIX #2 (samme dag, D-51):** ANDRE host-kjøring (`run_id ad45603d`) kom HELE VEIEN gjennom OG
+**alle 13 faktiske Business OS-kapabilitetstester PASSET** - kun akseptanse-CLEANUP feilet
+(append-only `audit_events`-trigger-kast stoppet resten av `cleanupTenant()`, som deretter fikk
+`DELETE FROM people` til å feile med `person_tenants_person_id_fkey`) - fikset ved å fjerne
+`DELETE FROM audit_events` helt fra cleanup (append-only er tiltenkt, ikke en feil), se D-51.
 
 **Bygget:**
 1. **Business Graph-domenemodell** (`019_business.sql`) - 6 nye, tenant-scoped FORCE RLS-tabeller
@@ -599,20 +604,22 @@ RLS-avslag mot `tenants` - RLS fungerte som tiltenkt, ikke en feil å svekke) - 
    transport i `firstWaveTools({...})` i `main.ts`/`worker-main.ts`, samme mønster som
    email/calendar/github/telegram.
 
-**Suite-verifisert (922/922 - 36 nye tester totalt, se kvalitetsrapport i RUNTIME_GATES.md):**
+**Suite-verifisert (930/930 - 44 nye tester totalt, se kvalitetsrapport i RUNTIME_GATES.md):**
 tenant-isolert entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
 aktivitetstidslinje, oppfoelging-livssyklus (create/complete/cancel/overdue), kilde-peker-lenking
 (canonical_uri, ingen FK til knowledge_documents - strukturelt Q-20-trygt), cross-tenant/memory-space-
 isolasjon (RLS mot ekte embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring
 (owner sovereign + delegert policy, EKSISTERENDE PolicyGateway-mekanikk, ingen ny logikk), audit-
-metadata uten sensitivt kundeinnhold, scaffold-/runtime-pool-separasjon (inkl. en LIVE reproduksjon av
-selve `42501`-RLS-feilklassen host-kjøringen traff, mot en ekte NOSUPERUSER/NOBYPASSRLS-rolle).
+metadata uten sensitivt kundeinnhold, scaffold-/runtime-pool-separasjon + append-only-audit-trygg
+FK-korrekt CLEANUP (inkl. LIVE reproduksjon av BÅDE `42501`-RLS-avslaget og
+`person_tenants_person_id_fkey`-bruddet host-kjøringene traff, mot ekte embedded Postgres).
 
-**IKKE host/live-verifisert ennå (krever en NY host-kjøring på Tobias sin host):** ETT Windows
+**IKKE host/live-verifisert ennå (krever en TREDJE host-kjøring på Tobias sin host):** ETT Windows
 host-akseptanseskript (`modules/business/scripts/ua3-host-run.ts` → `ua3-business-live.ts`, speiler
-`q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) er kjørt ÉN gang av Tobias (`run_id b95dd25f`) og
-kom gjennom bootstrap/migrasjoner/Q-21, men feilet på scaffold-bug-en over FØR Business OS-
-kapabilitetene selv ble evaluert. Fiksen (D-50) er IKKE re-host-kjørt ennå.
+`q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) er kjørt TO ganger av Tobias: (1) `run_id
+b95dd25f` - feilet på scaffold-bug FØR Business OS-kapabilitetene ble evaluert (D-50); (2) `run_id
+ad45603d` - kom gjennom bootstrap/migrasjoner/Q-21 OG alle 13 Business OS-kapabilitetstester PASSET,
+kun CLEANUP feilet (D-51). Fiksen (D-51) er IKKE re-host-kjørt ennå.
 
 **Bygges IKKE i P0 (uendret fra "Bygges IKKE" over):** se Q-25 for full liste.
 
