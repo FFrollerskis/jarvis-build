@@ -1,8 +1,8 @@
 # UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection)
 
 **Status:** UA-3 P0 «Business Domain Foundation» = VERIFIED/COMPLETE (D-52, host-bevist run_id
-`ca2d9248`). UA-3 NEXT SLICE «Open-Loop Detection + Daily/Weekly Business Brief» = FIXED_SUITE /
-READY_FOR_HOST_VERIFY (2026-08-17, se D-53 i DECISIONS_AND_ASSUMPTIONS.md) - IKKE ennå host-bevist.
+`ca2d9248`). UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» = VERIFIED/COMPLETE (2026-08-17,
+host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTIONS.md).
 Dette notatet dekker den strukturerte tredjeparts-persondata-kategorien UA-3 introduserer (kunde-/
 kontakt-/selskapsdata i `business_*`-tabellene, inkl. NÅ `business_open_loops`) - utfyller, erstatter
 ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-rad.

@@ -1,19 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief =
-FIXED_SUITE / READY_FOR_HOST_VERIFY → D-53**, se egen seksjon under. Bygget PÅ det VERIFIED/COMPLETE
-UA-3 P0-fundamentet (D-49/D-50/D-51/D-52, PR #9 merget). Automatisk deteksjon av forfalte
-oppfoelginger + stagnerte opportunities (deterministisk, ingen AI Mesh i dette sliceet), daglig brief
-(gjenbruker eksisterende `DailyBrief`) + ukentlig brief (ny, liten, kilde-forankret aggregering), 8 nye
-ToolGateway-handlinger, periodisk sveip via eksisterende `DailyScheduler`. 52 nye tester (930→982).
-**KUN UA-3 P0 + denne sliceen er VERIFIED/host-klare - HELE UA-3 er IKKE komplett** (se Q-25), og
-masterplan v4.0 som helhet er IKKE komplett. **IKKE MERGET** - venter på Tobias sin host-verifikasjon.
-**Branch:** `claude/ua3-open-loops-business-brief` (fra `origin/main` `b306a480`, EGEN, korrekt navngitt
-branch - IKKE en gjenbruk av `claude/hva-skjer-hvordan-ligger-0z3ztp`, som avsluttet sin rolle med
-UA-3 P0/PR #9) · UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring
-Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
-VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
-`main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9)
+**Oppdatert:** 2026-08-17 (**UA-3 — Open-Loop Detection + Daily/Weekly Business Brief =
+VERIFIED/COMPLETE → D-56**, se egen seksjon under. Bygget PÅ det VERIFIED/COMPLETE UA-3
+P0-fundamentet (D-49/D-50/D-51/D-52, PR #9 merget). Automatisk deteksjon av forfalte oppfoelginger +
+stagnerte opportunities (deterministisk, ingen AI Mesh i dette sliceet), daglig brief (gjenbruker
+eksisterende `DailyBrief`) + ukentlig brief (ny, liten, kilde-forankret aggregering), 8 nye
+ToolGateway-handlinger, periodisk sveip via eksisterende `DailyScheduler`. Host-bevist av Tobias etter
+tre host-runder (D-54/D-55/D-56, run_id-er `19a7f3a4`→`c7fe8206`→`de01ca07`, siste `hard_fail=false`).
+1010/1010 tester (930→1010, 80 nye totalt over hele sliceen + begge host-fixene). **KUN UA-3 P0 +
+denne sliceen er VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (se Q-25), og masterplan v4.0 som
+helhet er IKKE komplett. **PR #10 merget til `main`.** **Branch:** `claude/ua3-open-loops-business-brief`
+(fra `origin/main` `b306a480`) har fullført sin rolle - IKKE gjenbrukes for neste UA-3-slice · UA-2
+forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring Closeout forblir
+VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42,
+uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7) · UA-2
+masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9) · UA-3 Open-Loop
+Detection + Business Brief merget til `main` (PR #10)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -1346,10 +1348,11 @@ numerisk lead/deal-scoring, D-klasse/hard-delete, UI/dashboard - INGEN av disse 
 **Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (930/930 - 69
 filer), gitleaks (detect, ren). PR #9 merget til `main` (normal merge-commit).
 
-## UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53/D-54/D-55
+## UA-3 — Open-Loop Detection + Daily/Weekly Business Brief = VERIFIED/COMPLETE (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53/D-54/D-55/D-56
 
-**Status: FIXED_SUITE / HOST_VERIFY_BLOCKED. IKKE VERIFIED, IKKE merget.** Bygget på det
-VERIFIED/COMPLETE UA-3 P0-fundamentet (D-52) - additiv migrasjon, ingen eksisterende P0-tabell endret.
+**Status: VERIFIED/COMPLETE (host-bevist av Tobias på ekte Windows/Docker-host, run_id `de01ca07`,
+`hard_fail=false`) → D-56. PR #10 merget til `main`.** Bygget på det VERIFIED/COMPLETE UA-3
+P0-fundamentet (D-52) - additiv migrasjon, ingen eksisterende P0-tabell endret.
 **Ekte host-kjøring #1 av Tobias (`run_id 19a7f3a4`):** 12 av 14 open-loop/brief-kapabilitetsmarkører
 PASSET live; kun idempotens-akseptansen (harness-bug, IKKE produksjonsfeil) og akseptanse-CLEANUP
 (nytt `cost_events`-FK-funn) feilet - begge fikset i **HOST FIX #1 (D-54)**. **Ekte host-kjøring #2
@@ -1532,6 +1535,42 @@ akseptanse-harness-cleanup-koden utvidet med en genuint ny, robust selvdiagnosti
 på Tobias sin neste kjøring av:
 `node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-open-loops-host-run.ts`
 
+## UA-3 FINAL CLOSURE — Open-Loop Detection + Business Brief (2026-08-17, samme dag) — HOST VERIFIED
+
+**Tobias kjørte `node --env-file=.env --experimental-transform-types
+modules/business/scripts/ua3-open-loops-host-run.ts` på sin faktiske Windows/Docker-host - GRØNT
+resultat, run_id `de01ca07`.** TREDJE host-kjøring, etter HOST FIX #1 (D-54) og HOST FIX #2 (D-55) -
+denne runden kom HELE VEIEN gjennom UTEN nye funn. Alle 16 forventede markører PASS:
+`q21_runtime_role_safe`, `ua3_open_loop_runtime_role`, `ua3_open_loop_overdue_detection`,
+`ua3_open_loop_stalled_detection`, `ua3_open_loop_idempotency` (`duplicate_rows_for_same_key=1` -
+korrekt), `ua3_open_loop_resolution`, `ua3_open_loop_priority`, `ua3_open_loop_source_evidence`,
+`ua3_open_loop_tenant_isolation`, `ua3_open_loop_space_isolation`, `ua3_open_loop_toolgateway`,
+`ua3_business_daily_brief`, `ua3_business_weekly_brief`, `ua3_brief_missing_domains_honest`,
+`ua3_open_loop_audit_safe`, `ua3_open_loop_cleanup` (`cleanup_ok=true leftover_open_loops=0
+leftover_tenants=0`). Runtime uendret gjennom hele kjøringen: `runtime_current_user=jarvis_runtime`,
+`runtime_role_superuser=false`, `runtime_role_bypassrls=false`, `open_loop_runtime_role=jarvis_runtime`.
+`hard_fail=false`.
+
+**Idempotens-arkitekturlærdom (bevart fra D-54, bekreftet her):** den opprinnelige idempotens-
+host-feilen var ALDRI en produksjonsfeil - `OpenLoopService` brukte `withMemoryTransaction` korrekt
+gjennom hele denne sliceen. Den opprinnelige feilen skyldtes en akseptanse-verifikasjonsspørring mot en
+FORCE-RLS-tabell (`business_open_loops`) uten `jarvis.tenant_id`/`jarvis.memory_spaces`-session-GUC-er
+- den korrigerte spørringen (`withMemoryTransaction`) beviser nå korrekt `duplicate_rows_for_same_key=1`
+live.
+
+**Business-brief-ærlighet bekreftet host-bevist:** `sales` tilgjengelig via eksisterende Business
+Graph/CRM; `product`/`finance`/`marketing`/`operations` forblir eksplisitt `not_integrated` i BEGGE
+briefer (`ua3_brief_missing_domains_honest=PASS`) - masterplanens akseptansekriterium 2 ("Hvordan går
+bedriften?") er FORTSATT IKKE fullt oppfylt av denne sliceen alene.
+
+**STATUS: VERIFIED/COMPLETE → D-56.** Full evidens (D-53/D-54/D-55/D-56) og oppsummering i
+header-seksjonen øverst i denne filen. **KUN denne UA-3-sliceen + UA-3 P0 er VERIFIED/COMPLETE - HELE
+UA-3 er IKKE komplett** (se oppdatert Q-25) - Support/tickets, Contracts/e-sign, Gmail/Calendar-
+hendelseslenking, tverr-domene driftsoversikt utover sales, profiling/scoring med juridiske kontroller
+er alle IKKE bygget/startet. **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.** PR #10
+merget til `main` (normal merge-commit, samme konvensjon som PR #1-#9 - historikk bevart, ikke
+squashet).
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
@@ -1544,28 +1583,28 @@ Q-24-gjenstand, se over) - samme mønster, egen fremtidig test-runde. `claude/hv
 0z3ztp` var opprinnelig en aksidentell, tom pre-UA-0-branch (kun én spec-commit, allerede en
 forfader av `main`) - denne økten gjenbrukte NAVNET som sitt tildelte arbeidsbranch-navn og
 omstartet det fra `origin/main` (ingen unik historikk gikk tapt), og branchen bar UA-3 P0-arbeidet,
-merget til `main` via PR #9. **Denne branchen har nå fullført sin rolle** - UA-3 NEXT SLICE (open-loop-
-deteksjon + business brief) er bygget på en NY, korrekt navngitt branch
-(`claude/ua3-open-loops-business-brief`, fra `origin/main` `b306a480`), IKKE en gjenbruk. Ingen andre
-branches rørt. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
-over) er dokumentert backlog, ikke blokkerende.
+merget til `main` via PR #9. Deretter bar branchen UA-3 open-loop-deteksjon + business brief-arbeidet
+(D-53/D-54/D-55/D-56), merget til `main` via PR #10. **Denne branchen har nå fullført sin rolle
+TO GANGER** - IKKE gjenbrukes for neste UA-3-slice. Neste slice starter fra en NY, korrekt navngitt
+branch fra `main` når den godkjennes. Ingen andre branches rørt. Connector-audit-gapene
+(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 NEXT SLICE (Open-Loop Detection + Daily/Weekly Business Brief) er FIXED_SUITE /
-READY_FOR_HOST_VERIFY → D-53** - branch `claude/ua3-open-loops-business-brief` pushet, draft PR
-opprettes som umiddelbart neste steg. **Venter på Tobias sin host-verifikasjon** (ETT Windows-kommando:
-`node --env-file=.env --experimental-transform-types
-modules/business/scripts/ua3-open-loops-host-run.ts`) - IKKE merget før den er kjørt og PASS, samme
-mønster som UA-3 P0 krevde tre host-runder for. **HELE UA-3 er FORTSATT IKKE komplett** etter denne
-sliceen heller - masterplanens fire akseptansekriterier (kunde-tidslinje/bedriftshelse-på-tvers-av-
-domener/automatisk open-loop-deteksjon/profiling-scoring-med-juridiske-kontroller) er nå DELVIS dekket
-(kriterium 3 - "open loops detected automatically" - er den denne sliceen retter seg direkte mot), men
-IKKE alle fire (se Q-25 for full gjenstående-liste). **Eksplisitt IKKE bygget denne sliceen:**
-Support/tickets- og Contracts/e-sign-connectorer (forblir UA-3 P1-kandidater), Gmail/Calendar-
-hendelseslenking, full tverr-domene bedriftshelse, numerisk scoring, D-klasse/hard-delete, UI. **IKKE
-startet:** UA-3 P1/P2 i noen form, UA-4, noen annen UA-fase. Faseporten gjelder fortsatt strengt
-(CLAUDE.md-regel 10) - venter på en egen, eksplisitt byggeordre fra Tobias/arkitekten før UA-3
-P1-kodearbeid (eller noe av det ovennevnte) begynner.
+**UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» er FORMELT VERIFIED/COMPLETE → D-56**
+(host-bevist, run_id `de01ca07`, `hard_fail=false`, PR #10 merget til `main`). **HELE UA-3 er FORTSATT
+IKKE komplett** - masterplanens fire akseptansekriterier (kunde-tidslinje/bedriftshelse-på-tvers-av-
+domener/automatisk open-loop-deteksjon/profiling-scoring-med-juridiske-kontroller) har nå kriterium 3
+("open loops detected automatically") FULLT dekket av denne sliceen, men de tre andre er KUN delvis
+eller ikke dekket (se oppdatert Q-25 for full gjenstående-liste). **Eksplisitt IKKE bygget i denne
+sliceen:** Support/tickets- og Contracts/e-sign-connectorer (forblir UA-3 P1-kandidater), Gmail/
+Calendar-hendelseslenking, full tverr-domene bedriftshelse, numerisk scoring, D-klasse/hard-delete,
+UI. **Neste canonical UA-3-slice er IKKE valgt eller godkjent ennå** - kandidater identifisert fra
+masterplan-teksten (Support/tickets og Contracts/e-sign er de eksplisitt navngitte UA-3 P1-
+connector-radene; Gmail/Calendar-hendelseslenking ville låse opp akseptansekriterium 1) må
+re-verifiseres mot canonical tekst FØR noe bygges, samme disiplin som §0 i denne sliceens byggeordre
+krevde. **IKKE startet:** UA-3 P1/P2 i noen form, UA-4, noen annen UA-fase. Faseporten gjelder
+fortsatt strengt (CLAUDE.md-regel 10) - venter på en egen, eksplisitt byggeordre fra Tobias/
+arkitekten før noe av det ovennevnte begynner.
 
 Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full
 klassifisering - ingen av disse hindrer UA-2-lukkingen eller krever noe FØR UA-3 kan startes, men

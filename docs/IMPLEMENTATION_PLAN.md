@@ -569,9 +569,9 @@ kontrakt/faktura/inntekt-sporing (naturlig hjemme i en fremtidig UA-6, Q-25); nu
 (Q-25); D-klasse/hard-delete for business-entiteter (Q-25); proaktiv attention-queue/automatisk handling
 (Q-25); UI/dashboard (separat, senere plan); full telefoni; møtetranskripsjon (avhenger av UA-7, ikke
 bygget). **UA-3 P0 er derfor et forslag til FØRSTE byggbare skive, ikke hele UA-3** - se under.
-**Automatisk open-loop-deteksjon + daglig/ukentlig business brief er NÅ bygget som UA-3 NEXT SLICE
-(D-53, se under) - FJERNET fra "Bygges IKKE"-listen, men FORTSATT KUN FIXED_SUITE/READY_FOR_HOST_VERIFY,
-IKKE VERIFIED, før Tobias sin host-kjøring.**
+**Automatisk open-loop-deteksjon + daglig/ukentlig business brief er NÅ bygget OG VERIFIED/COMPLETE
+(D-53/D-54/D-55/D-56, se under) - FJERNET fra "Bygges IKKE"-listen, host-bevist på ekte Windows/Docker-
+host (run_id `de01ca07`, `hard_fail=false`).**
 
 ### UA-3 P0 — Business Domain Foundation = VERIFIED/COMPLETE (2026-08-17, host-bevist run_id `ca2d9248`)
 
@@ -630,14 +630,28 @@ OG alle 5 CLEANUP-markører PASS, `hard_fail=false`, ingen nye funn.
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (samlet deferred-liste for UA-3 P0).
 
-### UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17) → D-53
+### UA-3 — Open-Loop Detection + Daily/Weekly Business Brief = VERIFIED/COMPLETE (2026-08-17, host-bevist run_id `de01ca07`) → D-53/D-54/D-55/D-56
 
-**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY. IKKE VERIFIED, IKKE host-kjørt, IKKE merget.** Bygget PÅ
-det VERIFIED/COMPLETE P0-fundamentet, additiv migrasjon. Retter seg direkte mot masterplanens
-akseptansekriterium 3 ("Open loops detected automatically") og den navngitte "Bygges"-listen ("Daily/
-weekly business brief og open-loop detection", linje 543/463-467) - VERIFISERT mot canonical tekst FØR
-bygging (§0 canonical scope-audit, ingen konflikt med UA-3 P1-connector-radene, se D-53 for full
-begrunnelse).
+**Status: VERIFIED/COMPLETE → D-56** (host-bevist av Tobias på ekte Windows/Docker-host etter tre
+host-runder - se RUNTIME_GATES.md for full evidens). Bygget PÅ det VERIFIED/COMPLETE P0-fundamentet,
+additiv migrasjon. Retter seg direkte mot masterplanens akseptansekriterium 3 ("Open loops detected
+automatically") og den navngitte "Bygges"-listen ("Daily/weekly business brief og open-loop
+detection", linje 543/463-467) - VERIFISERT mot canonical tekst FØR bygging (§0 canonical
+scope-audit, ingen konflikt med UA-3 P1-connector-radene, se D-53 for full begrunnelse). **Kun denne
+sliceen + P0 er VERIFIED - resten av UA-3 er IKKE komplett** (se Q-25), og masterplan v4.0 som helhet
+er IKKE komplett. PR #10 merget til `main`.
+
+**HOST FIX #1 (samme dag, D-54):** Tobias sin første host-kjøring (`run_id 19a7f3a4`) viste 12/14
+kapabilitetsmarkører PASS - idempotens-akseptansen feilet på en RLS-blind harness-spørring (raw
+`pool.query()` uten `withMemoryTransaction` mot en FORCE-RLS-tabell - IKKE en produksjonsfeil), og
+CLEANUP feilet på et nytt `cost_events`-FK-funn (`get_business_brief` sin `DailyBrief`-bruk skriver
+en cost_events-rad P0 aldri traff). Begge fikset uten å røre produksjonslogikk.
+
+**HOST FIX #2 (samme dag, D-55):** ANDRE host-kjøring (`run_id c7fe8206`) bekreftet begge D-54-fikser
+PASS live, men CLEANUP feilet PÅ NYTT med et uavhengig `brief_seen`-FK-funn (samme
+`DailyBrief.generate({pool})`-kodeblokk som cost_events, en annen INSERT). Fikset med en dynamisk,
+skjema-drevet selvdiagnostisk FK-sperre (`findBlockingTenantDependencies()`) som fanger fremtidige
+ukjente avhengigheter automatisk FØR `DELETE FROM tenants` forsøkes.
 
 **Bygget:**
 1. **`business_open_loops`** (`020_business_open_loops.sql`, additiv) - SAMME FORCE RLS-mønster som
@@ -657,12 +671,20 @@ begrunnelse).
    bevist-korrekte admin-/runtime-pool-separasjon (HOST FIX #1) og append-only-audit-trygge CLEANUP-
    rekkefølge (HOST FIX #2).
 
-**Suite-verifisert (52 nye tester, se D-53/RUNTIME_GATES.md):** forfalt-oppfoelging/stagnert-
-opportunity-deteksjon, idempotens, resolusjon (manuell + auto), gjenåpning, prioritet, kilde-forankret
-begrunnelse, tenant-/space-isolasjon, attention-queue-bucketing, defer/assign/set-next-action,
-Q-20-interaksjon (ingen FK til knowledge_documents), FORCE RLS bekreftet i databasen, ingen direkte AI
-Mesh/provider-import, brief-innhold + domenedeknings-ærlighet, ToolGateway-wiring gjennom EKSISTERENDE
-Policy Gateway, sveip-hjelperens tenant-scoping/bounded-LIMIT/feilisolasjon.
+**Suite-verifisert (1010/1010 tester totalt, 80 nye over hele sliceen inkl. begge host-fixene - se
+RUNTIME_GATES.md):** forfalt-oppfoelging/stagnert-opportunity-deteksjon, idempotens, resolusjon
+(manuell + auto), gjenåpning, prioritet, kilde-forankret begrunnelse, tenant-/space-isolasjon,
+attention-queue-bucketing, defer/assign/set-next-action, Q-20-interaksjon (ingen FK til
+knowledge_documents), FORCE RLS bekreftet i databasen, ingen direkte AI Mesh/provider-import,
+brief-innhold + domenedeknings-ærlighet, ToolGateway-wiring gjennom EKSISTERENDE Policy Gateway,
+sveip-hjelperens tenant-scoping/bounded-LIMIT/feilisolasjon, `cost_events`/`brief_seen`-FK-sikker
+cleanup, dynamisk skjema-drevet FK-blokkerings-diagnostikk.
+
+**Host/live-verifisert (2026-08-17, run_id `de01ca07`, se D-56):** ETT Windows host-akseptanseskript
+(`ua3-open-loops-host-run.ts` → `ua3-open-loops-live.ts`) kjørt TRE ganger av Tobias: (1) `run_id
+19a7f3a4` - 12/14 kapabilitetsmarkører PASS, idempotens-harness + CLEANUP feilet (D-54); (2) `run_id
+c7fe8206` - begge D-54-fikser bekreftet, CLEANUP feilet på nytt (D-55); (3) `run_id de01ca07` - HELE
+VEIEN gjennom, alle 16 markører PASS, `hard_fail=false`, ingen nye funn.
 
 **Bygges IKKE i denne sliceen:** Support/tickets- og Contracts/e-sign-connectorer (forblir UA-3
 P1-connector-kandidater); Gmail/Calendar-hendelseslenking; full tverr-domene bedriftshelse; numerisk
