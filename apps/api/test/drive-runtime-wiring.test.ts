@@ -38,7 +38,8 @@ describe("A: apps/api/src/main.ts sprer driveTransportsIfConfigured() inn i firs
     expect(callBlock).toContain("telegram: new TelegramTransport()");
     // UA-3 P0 (D-49): femte ubetingede transport - Business OS har ingen ekstern credential
     // aa vaere "konfigurert" av, saa den registreres alltid, samme mønster som de fire over.
-    expect(callBlock).toContain("business: new BusinessTransport(businessService)");
+    // UA-3 next slice (D-53): BusinessTransport tar naa ogsaa OpenLoopService + pool.
+    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool)");
   });
 });
 
@@ -55,7 +56,7 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport()");
     expect(callBlock).toContain("telegram: new TelegramTransport()");
-    expect(callBlock).toContain("business: new BusinessTransport(businessService)");
+    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool)");
   });
 });
 

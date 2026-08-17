@@ -7,7 +7,7 @@ import {
   EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
   MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "@jarvis/business";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "@jarvis/business";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -75,10 +75,13 @@ const toolGateway = new ToolGateway(
   new OwnerControls(killSwitch)
 );
 const businessService = new BusinessService(pool);
+// UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
+// mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
+const openLoopService = new OpenLoopService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
-  business: new BusinessTransport(businessService),
+  business: new BusinessTransport(businessService, openLoopService, pool),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

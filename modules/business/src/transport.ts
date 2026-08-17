@@ -1,6 +1,10 @@
-import type { JsonValue, MemorySpace } from "@jarvis/contracts";
+import type pg from "pg";
+import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { DailyBrief } from "@jarvis/tool-gateway";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
+import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
+import type { OpenLoopService } from "./open-loop-service.ts";
 
 /**
  * D-49: `ToolTransport.invoke(action, parameters, credential)` gir - som for
@@ -16,7 +20,11 @@ import type { BusinessService } from "./service.ts";
  * utelatt fra dette sliceet (for stor endring for smallest-coherent-unit).
  */
 export class BusinessTransport implements ToolTransport {
-  constructor(private readonly service: BusinessService) {}
+  constructor(
+    private readonly service: BusinessService,
+    private readonly openLoops?: OpenLoopService,
+    private readonly pool?: pg.Pool
+  ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
@@ -141,9 +149,70 @@ export class BusinessTransport implements ToolTransport {
         const metrics = await this.service.metrics(tenantId, memorySpace);
         return { data: metrics as unknown as JsonValue };
       }
+      case "list_open_loops": {
+        const status = (parameters["status"] !== undefined ? String(parameters["status"]) : "open") as "open" | "resolved" | "all";
+        const rows = await this.requireOpenLoops().listOpenLoops(tenantId, memorySpace, status);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "read_open_loop": {
+        const row = await this.requireOpenLoops().readOpenLoop(tenantId, memorySpace, requireString(parameters, "open_loop_id"));
+        return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "get_attention_queue": {
+        const rows = await this.requireOpenLoops().attentionQueue(tenantId, memorySpace);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "get_business_brief": {
+        const period = (parameters["period"] !== undefined ? String(parameters["period"]) : "daily") as "daily" | "weekly";
+        if (period === "weekly") {
+          const brief = await generateWeeklyBrief(this.requirePool(), tenantId, memorySpace);
+          return { data: { ...brief, rendered: renderWeeklyBrief(brief) } as unknown as JsonValue };
+        }
+        const identity: IdentityContext = {
+          person_id: "system", tenant_id: tenantId, memory_space_id: memorySpace,
+          session_id: `business-brief-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+        };
+        const dailyBrief = new DailyBrief([businessOpenLoopsSource(this.requireOpenLoops())], this.pool);
+        const brief = await dailyBrief.generate(identity);
+        return { data: { ...brief, rendered: DailyBrief.render(brief) } as unknown as JsonValue };
+      }
+      case "resolve_open_loop": {
+        const row = await this.requireOpenLoops().resolveOpenLoop(
+          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "resolution_reason")
+        );
+        return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "defer_open_loop": {
+        const row = await this.requireOpenLoops().deferOpenLoop(
+          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "due_at")
+        );
+        return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "assign_open_loop": {
+        const row = await this.requireOpenLoops().assignOpenLoop(
+          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "owner_person_id")
+        );
+        return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "set_open_loop_next_action": {
+        const row = await this.requireOpenLoops().setNextAction(
+          tenantId, memorySpace, requireString(parameters, "open_loop_id"), requireString(parameters, "next_action")
+        );
+        return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
+      }
       default:
         throw new Error(`business_action_not_implemented:${action}`);
     }
+  }
+
+  private requireOpenLoops(): OpenLoopService {
+    if (!this.openLoops) throw new Error("business_open_loops_not_configured");
+    return this.openLoops;
+  }
+
+  private requirePool(): pg.Pool {
+    if (!this.pool) throw new Error("business_pool_not_configured");
+    return this.pool;
   }
 }
 

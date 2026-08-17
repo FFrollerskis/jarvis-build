@@ -371,6 +371,73 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
+    },
+    // UA-3 neste slice (D-53): automatisk open-loop-deteksjon + daglig/ukentlig
+    // business-brief. Samme "business"-transport/credential-sentinel som P0 -
+    // lagt til på SLUTTEN av arrayet, samme grunn som øvrige senere tilføyelser.
+    {
+      tool_id: "business", action: "list_open_loops", description: "List open loops (uloeste forretningsforhold) for tenanten",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "read_open_loop", description: "Les ett open loop med full begrunnelse/kilde-referanse",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_attention_queue", description: "Les prioritert oppmerksomhets-kø (critical/overdue/due_soon/informational) over aapne open loops",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_business_brief", description: "Generer daglig eller ukentlig business-brief (period: 'daily'|'weekly')",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), period: z.string().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "resolve_open_loop", description: "Marker et open loop som loest (manuell resolusjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), resolution_reason: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar tilstandsovergang - deteksjon gjenaapner automatisk hvis vilkaaret fortsatt er sant", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "defer_open_loop", description: "Utsett (snooze) et open loop til en ny forfallsdato",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), due_at: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett due_at tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "assign_open_loop", description: "Tildel et open loop til en eier/ansvarlig person",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), owner_person_id: z.string() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "tildel tilbake til forrige eier", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "set_open_loop_next_action", description: "Oppdater anbefalt neste handling for et open loop",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), open_loop_id: z.string(), next_action: z.string() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett next_action tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
     }
   ];
 }
