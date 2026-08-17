@@ -1,8 +1,11 @@
 # UA-2 P0/P1A/P1B-A — DPIA / data-governance-notat (kunnskaps-ingestion)
 
-**Status:** UA-2 P0 (GitHub + filesystem/NAS) + P1A (Google Drive + Obsidian/lokal vault) + P1B-A
-(e-post-vedlegg + OCR/vision-ingestion) ALLE VERIFIED/COMPLETE (host-bevist, se D-39/D-42/D-47).
-**UA-2 P1B-A (2026-08-17, host-bevist run_id `0f43f39d`)** - MATERIELT NY dataflyt
+**Status:** UA-2 «Universal Knowledge Layer» HELE FASEN = VERIFIED/COMPLETE (2026-08-17,
+masterplan-closeout-audit → D-48) - P0 (GitHub + filesystem/NAS) + P1A (Google Drive + Obsidian/lokal
+vault) + P1B-A (e-post-vedlegg + OCR/vision-ingestion) alle egne, uendrede delfase-lukkinger
+(D-39/D-42/D-47). Denne DPIA-en dekker det fjerde av masterplanens fire akseptansekriterier
+("DPIA/processing inventory oppdatert for nye datakategorier") - se tabellen under for alle fem
+kildetyper. **UA-2 P1B-A (2026-08-17, host-bevist run_id `0f43f39d`)** - MATERIELT NY dataflyt
 lagt til denne runden: e-post-KROPP og -VEDLEGG (inkl. bilde-BYTES for sider uten native tekst-lag)
 sendes til en EKSTERN modell-leverandør (kun Anthropic denne runden, via `ModelGateway`,
 `purpose:"VISION"`) for OCR/beskrivelse - se ny seksjon "OCR/vision-dataflyt (P1B-A)" under. Kort og
