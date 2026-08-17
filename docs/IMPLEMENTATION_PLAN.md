@@ -570,10 +570,11 @@ kontrakt/faktura/inntekt-sporing (naturlig hjemme i en fremtidig UA-6, Q-25); nu
 (Q-25); UI/dashboard (separat, senere plan); full telefoni; møtetranskripsjon (avhenger av UA-7, ikke
 bygget). **UA-3 P0 er derfor et forslag til FØRSTE byggbare skive, ikke hele UA-3** - se under.
 
-### UA-3 P0 — Business Domain Foundation = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17)
+### UA-3 P0 — Business Domain Foundation = VERIFIED/COMPLETE (2026-08-17, host-bevist run_id `ca2d9248`)
 
-**Status: IMPLEMENTED + SUITE-VERIFIED. HOST_VERIFY_BLOCKED** (bygget i sky-container uten Docker - se
-RUNTIME_GATES.md for full evidens/gap-liste). Navngitt/prioritert fra masterplanens egen
+**Status: VERIFIED/COMPLETE → D-52** (host-bevist av Tobias på ekte Windows/Docker-host - se
+RUNTIME_GATES.md for full evidens). **Kun P0 er VERIFIED - resten av UA-3 er IKKE komplett** (se
+Q-25), og masterplan v4.0 som helhet er IKKE komplett. Navngitt/prioritert fra masterplanens egen
 integrasjons-prioritetstabell ("Internal CRM / Sales pipeline full internal UA-3 P0", linje ~1069) -
 ingen oppfunnet struktur, se D-49 for full begrunnelse. Bygget i `modules/business` (`@jarvis/business`).
 **HOST FIX #1 (samme dag, D-50):** Tobias sin første host-kjøring (`run_id b95dd25f`) avdekket at
@@ -614,12 +615,13 @@ metadata uten sensitivt kundeinnhold, scaffold-/runtime-pool-separasjon + append
 FK-korrekt CLEANUP (inkl. LIVE reproduksjon av BÅDE `42501`-RLS-avslaget og
 `person_tenants_person_id_fkey`-bruddet host-kjøringene traff, mot ekte embedded Postgres).
 
-**IKKE host/live-verifisert ennå (krever en TREDJE host-kjøring på Tobias sin host):** ETT Windows
-host-akseptanseskript (`modules/business/scripts/ua3-host-run.ts` → `ua3-business-live.ts`, speiler
-`q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) er kjørt TO ganger av Tobias: (1) `run_id
+**Host/live-verifisert (2026-08-17, run_id `ca2d9248`, se D-52):** ETT Windows host-akseptanseskript
+(`modules/business/scripts/ua3-host-run.ts` → `ua3-business-live.ts`, speiler
+`q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) kjørt TRE ganger av Tobias: (1) `run_id
 b95dd25f` - feilet på scaffold-bug FØR Business OS-kapabilitetene ble evaluert (D-50); (2) `run_id
 ad45603d` - kom gjennom bootstrap/migrasjoner/Q-21 OG alle 13 Business OS-kapabilitetstester PASSET,
-kun CLEANUP feilet (D-51). Fiksen (D-51) er IKKE re-host-kjørt ennå.
+kun CLEANUP feilet (D-51); (3) `run_id ca2d9248` - HELE VEIEN gjennom, alle 13 kapabilitetsmarkører
+OG alle 5 CLEANUP-markører PASS, `hard_fail=false`, ingen nye funn.
 
 **Bygges IKKE i P0 (uendret fra "Bygges IKKE" over):** se Q-25 for full liste.
 

@@ -1,13 +1,13 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-08-17 (**UA-3 «Business Operating System» STARTET - P0 «Business Domain
-Foundation» = FIXED_SUITE / HOST_VERIFY_BLOCKED → D-49/D-50/D-51**, se egen seksjon under. To ekte
-host-kjøringer av Tobias: (1) `run_id b95dd25f` stoppet på en scaffold-vs-runtime-pool-feil (42501
-RLS-avslag mot `tenants`, fikset D-50); (2) `run_id ad45603d` kom HELE VEIEN gjennom OG **alle 13
-faktiske Business OS-kapabilitetstester PASSET** - kun akseptanse-CLEANUP feilet på append-only-audit
-+ FK-rekkefølge (fikset D-51). IKKE re-host-kjørt etter D-51 ennå. IKKE VERIFIED/COMPLETE. UA-2
-forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret, 930/930 tester) · **Branch:**
-`claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
+Foundation» = VERIFIED/COMPLETE → D-49/D-50/D-51/D-52**, se egen seksjon under. Tre ekte
+host-kjøringer av Tobias: (1) `run_id b95dd25f` stoppet på en scaffold-vs-runtime-pool-feil (fikset
+D-50); (2) `run_id ad45603d` - alle 13 Business OS-kapabilitetstester PASSET, kun CLEANUP feilet
+(fikset D-51); (3) **`run_id ca2d9248` - HELE VEIEN gjennom, `hard_fail=false`, ingen nye funn.**
+**KUN UA-3 P0 er VERIFIED - HELE UA-3 er IKKE komplett** (se Q-25), og masterplan v4.0 som helhet er
+IKKE komplett. PR #9 merget til `main`. UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret,
+930/930 tester) · **Branch:** `claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
 Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
 VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
 `main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8)
@@ -1259,9 +1259,14 @@ D-42 (P1A) eller D-47 (P1B-A) - begge forblir gyldige, uendrede fase-lukkinger. 
 per masterplan v4.0: UA-3 «Business Operating System»** (`docs/input/02_Jarvis_Masterplan_Sovereign_
 Autonomy_v4.0.md` linje 460) - IKKE startet, IKKE godkjent, IKKE implementert i denne audit-runden.
 
-## UA-3 P0 — Business Domain Foundation (BYGGET denne økten, 2026-08-17, branch `claude/hva-skjer-hvordan-ligger-0z3ztp` fra `origin/main` `593a69c`)
+## UA-3 P0 — Business Domain Foundation = VERIFIED/COMPLETE (2026-08-17, branch `claude/hva-skjer-hvordan-ligger-0z3ztp` fra `origin/main` `593a69c`)
 
-**Status: FIXED_SUITE / HOST_VERIFY_BLOCKED.** Første UA-3-slice, navngitt/prioritert fra masterplanens
+**Status: VERIFIED/COMPLETE (host-bevist av Tobias på ekte Windows/Docker-host, run_id `ca2d9248`,
+`hard_fail=false`) → D-52.** TREDJE host-kjøring, etter HOST FIX #1 (D-50)/HOST FIX #2 (D-51), kom
+HELE VEIEN gjennom UTEN nye funn - alle 13 Business OS-kapabilitetsmarkører OG alle 5
+CLEANUP-markører PASS. **Kun UA-3 P0 er VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (se Q-25 for
+gjenstående arbeid mot masterplanens fire akseptansekriterier), og HELE masterplan v4.0 «Sovereign
+Autonomy» er IKKE komplett. Første UA-3-slice, navngitt/prioritert fra masterplanens
 egen integrasjons-prioritetstabell ("Internal CRM / Sales pipeline full internal UA-3 P0") - full
 begrunnelse: **D-49**.
 
@@ -1323,18 +1328,20 @@ scaffold-/runtime-pool-separasjon (HOST FIX #1), append-only-audit-trygg + FK-ko
 (HOST FIX #2 - inkl. live-reproduksjon av BÅDE `42501`-RLS-avslaget og
 `person_tenants_person_id_fkey`-bruddet).
 
-**Host-evidens (2 ekte kjøringer av Tobias):** (1) `run_id b95dd25f` - stoppet på scaffold-bug
-(HOST FIX #1); (2) `run_id ad45603d` - **alle 13 faktiske Business OS-kapabilitetstester PASSET**,
-kun CLEANUP feilet (HOST FIX #2, fikset). **Ingen TREDJE host-kjøring utført ennå** - selve
-HOST FIX #2 er suite-/strukturelt regresjonstestet, men ikke re-kjørt av Tobias.
+**Host-evidens (3 ekte kjøringer av Tobias):** (1) `run_id b95dd25f` - stoppet på scaffold-bug
+(HOST FIX #1); (2) `run_id ad45603d` - alle 13 faktiske Business OS-kapabilitetstester PASSET, kun
+CLEANUP feilet (HOST FIX #2); (3) **`run_id ca2d9248` - HELE VEIEN gjennom, INGEN nye funn, alle
+13 kapabilitetsmarkører OG alle 5 CLEANUP-markører PASS, `hard_fail=false`.** Runtime bekreftet
+uendret gjennom hele kjøringen (`runtime_current_user=jarvis_runtime`,
+`runtime_role_superuser=false`, `runtime_role_bypassrls=false`, `business_runtime_role=jarvis_runtime`).
 
-**Eksplisitt utsatt (Q-25, ingenting av dette bygget denne runden):** Gmail/Calendar-hendelseslenking,
-AI Mesh-basert klassifisering/scoring, worker/jobbkø-integrasjon, kontrakt/faktura/inntekt-sporing,
-numerisk lead/deal-scoring, D-klasse/hard-delete, attention-queue-automasjon, UI/dashboard.
+**Eksplisitt utsatt til senere UA-3-slice (Q-25, ingenting av dette bygget denne runden):**
+Gmail/Calendar-hendelseslenking, AI Mesh-basert forretningsresonnering, worker/jobbkø-integrasjon,
+automatisk open-loop-deteksjon, tverr-domene driftsoversikt, kontrakt/faktura/inntekt-sporing,
+numerisk lead/deal-scoring, D-klasse/hard-delete, UI/dashboard - INGEN av disse er startet.
 
 **Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (930/930 - 69
-filer), gitleaks (detect, ren). Branch pushet, draft PR #9 oppdatert, IKKE merget - venter på Tobias
-host-verifikasjon.
+filer), gitleaks (detect, ren). PR #9 merget til `main` (normal merge-commit).
 
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
@@ -1345,26 +1352,27 @@ Google Drive permission-mutasjon er IKKE live-host-bevist (Q-23) - smalt, ikke-b
 gjenværende verifikasjonspunkt, krever en egen, eksplisitt godkjent test-runde med en reell avtalt
 ekstern test-konto. P1B-A sin worker-JOBB-live-kjøring er tilsvarende IKKE live-host-bevist (ny, smal
 Q-24-gjenstand, se over) - samme mønster, egen fremtidig test-runde. `claude/hva-skjer-hvordan-ligger-
-0z3ztp` (aksidentell remote-branch fra en tidligere runde) forblir IKKE slettet - eksisterende
-git-credentials mangler slette-rettighet (`HTTP 403`) - dokumentert vedlikeholdsgjeld, IKKE forsøkt
-omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gapene (GitHub/Calendar/
-Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
+0z3ztp` var opprinnelig en aksidentell, tom pre-UA-0-branch (kun én spec-commit, allerede en
+forfader av `main`) - denne økten gjenbrukte NAVNET som sitt tildelte arbeidsbranch-navn og
+omstartet det fra `origin/main` (ingen unik historikk gikk tapt), og branchen bærer nå faktisk
+UA-3 P0-arbeid, merget til `main` via PR #9. **UA-3 P1 skal IKKE bygges videre på denne branchen** -
+en ny, korrekt navngitt branch opprettes fra `main` for neste UA-3-slice når den godkjennes. Ingen
+andre branches rørt. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen
+over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / HOST_VERIFY_BLOCKED (D-49/D-50/D-51) - IKKE
-VERIFIED/COMPLETE.** To ekte host-kjøringer av Tobias til nå: (1) `run_id b95dd25f` - stoppet på en
-scaffold-vs-runtime-pool-bug, fikset D-50; (2) `run_id ad45603d` - **alle 13 faktiske Business
-OS-kapabilitetstester PASSET**, kun akseptanse-CLEANUP feilet (append-only-audit-trigger-kast +
-etterfølgende `person_tenants`-FK-brudd), fikset D-51 (20 nye tester, 930/930 totalt). Neste steg er
-en TREDJE host-kjøring for å bevise CLEANUP nå fullfører: kjør
-`node --experimental-transform-types modules/business/scripts/ua3-host-run.ts` fra repo-roten på
-Windows-hosten, se PASS-markørene (`ua3_*`, inkl. `ua3_cleanup_mutable_rows`/
-`ua3_cleanup_person_links`/`ua3_cleanup_tenants`/`ua3_cleanup_audit_retained`/`ua3_cleanup`),
-rapporter `hard_fail`-verdien tilbake. Etter host-verifikasjon: oppdater denne filen +
-DECISIONS_AND_ASSUMPTIONS.md med host-run_id og merg draft-PR-en (kun etter eksplisitt
-Tobias-godkjenning, aldri automatisk). **IKKE startet ennå:** UA-3 P1/P2 (Gmail/Calendar-
-hendelseslenking, AI Mesh-bruk, worker-integrasjon - se Q-25), UA-4, noen annen UA-fase. Faseporten
-gjelder fortsatt strengt (CLAUDE.md-regel 10).
+**UA-3 P0 «Business Domain Foundation» er FORMELT VERIFIED/COMPLETE → D-52** (host-bevist, run_id
+`ca2d9248`, `hard_fail=false`, PR #9 merget til `main`). **HELE UA-3 er IKKE komplett** - masterplanens
+fire akseptansekriterier (kunde-tidslinje/bedriftshelse-på-tvers-av-domener/automatisk
+open-loop-deteksjon/profiling-scoring-med-juridiske-kontroller) er KUN delvis forutsatt av P0, ikke
+oppfylt av den alene (se Q-25 for full gjenstående-liste). **Sannsynlig, IKKE ennå godkjent eller
+startet, neste UA-3-slice:** Gmail/Calendar-hendelseslenking (den mest direkte veien til å oppfylle
+akseptansekriterium 1 - "complete source-backed timeline" - ved å gjenbruke allerede host-bevist
+Gmail/Calendar-connectorer fra UA-2 i stedet for å kreve manuelle ToolGateway-kall for hver
+kunde-hendelse) - MEN dette skal verifiseres mot canonical masterplan-tekst på nytt før noe bygges,
+ikke antas fra denne oppsummeringen alene. **IKKE startet:** UA-3 P1/P2 i noen form, UA-4, noen annen
+UA-fase. Faseporten gjelder fortsatt strengt (CLAUDE.md-regel 10) - venter på en egen, eksplisitt
+byggeordre fra Tobias/arkitekten før UA-3 P1-kodearbeid begynner.
 
 Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full
 klassifisering - ingen av disse hindrer UA-2-lukkingen eller krever noe FØR UA-3 kan startes, men
