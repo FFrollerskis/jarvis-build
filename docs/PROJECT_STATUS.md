@@ -1,8 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-16 (P1A Runtime Wiring Closeout - VERIFIED/COMPLETE, host-smoke-bevist, PR #6
-merget) · **Branch:** `main` · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret, host-bevist
-run_id `2703299e`, PR #5 merget)
+**Oppdatert:** 2026-08-17 (UA-2 P1B-A = VERIFIED/COMPLETE → D-47, host-bevist på ekte Windows/Docker-
+host, run_id `0f43f39d`, `hard_fail=false`, 873/873 tester, PR #7 merget til `main`) · **Branch:**
+`claude/ua2-p1b-a-email-ocr-vision` (mergekilde for PR #7) · P1A Runtime Wiring Closeout forblir
+VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42,
+uendret, host-bevist run_id `2703299e`, PR #5 merget)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -997,31 +999,257 @@ worker-prosess (kun `ua2-p1a-live.ts` sin egen akseptanse-only ToolGateway nådd
   IKKE D-42, den lukker kun det ETT gjenværende post-merge-integrasjonsfunnet. PR #6 merget til
   `main` (normal merge-commit, samme konvensjon som PR #1-#5).
 
+## UA-2 P1B-A — E-post-vedlegg + OCR/vision-ingestion-fundament (BYGGET denne økten, 2026-08-16, branch `claude/ua2-p1b-a-email-ocr-vision` fra `origin/main` `35ac208`)
+
+**Fase-port avklart FØRST:** `docs/PROJECT_STATUS.md` hadde tidligere logget at P1B-A venter på "egen,
+eksplisitt fase-godkjenning fra Tobias" (CLAUDE.md-regel 10). Ved mottak av byggeordren for P1B-A ble
+denne motstriden eksplisitt flagget og avklart via spørsmål til brukeren FØR noe kode ble skrevet -
+brukeren bekreftet "Proceed with implementation". Loggført her for sporbarhet, ikke stille omgått.
+
+**Status: IMPLEMENTED + SUITE-VERIFIED (813/813 tester, 62 testfiler). IKKE host-verifisert ennå.**
+Bygget PÅ det VERIFIED P0/P1A-fundamentet - ingen parallell ingestion-pipeline, ingen ny
+autentiseringsvei. Full arkitektur-/scope-begrunnelse: D-43 (opprinnelig scope-beslutning) og D-44
+(oppdaget under selve byggingen - `pdf-parse` v2 dekker BÅDE native tekst-ekstraksjon OG
+side-rasterisering i ett bibliotek, ingen tung systemavhengighet).
+
+**Bygget (se IMPLEMENTATION_PLAN.md sin P1B-A-seksjon for full detaljliste):**
+1. Multimodalt `ChatMessage.content` (`string | ContentPart[]`) i `packages/provider-adapters` - EKTE
+   bildestøtte KUN i Anthropic-adapteren denne runden; `capability-registry.ts` sitt `vision`-flagg
+   korrigert til å reflektere dette faktisk (ikke aspirasjonelt lenger på openai/gemini).
+2. `GmailTransport.list_messages`/`read_attachment` (nye handlinger, SAMME `JARVIS_EMAIL_TOKEN`-vei).
+3. `extraction-safety.ts` - fil-type-klassifisering (arkiver/docx/xlsx/pptx eksplisitt avvist), fail-
+   closed størrelses-/side-/tidsgrenser, native→bilde-terskel, path-traversal-sikker filnavn-sanering.
+4. `ocr-provider.ts` - `ModelGatewayVisionExtractor` (OCR + vision-beskrivelse, BEGGE via EKSISTERENDE
+   `ModelGateway`, `purpose:"VISION"`, aldri direkte leverandør-SDK).
+5. `pdf-extraction.ts` (ny avhengighet `pdf-parse` v2 / `@napi-rs/canvas`, D-44) - EKTE per-side native
+   tekst OG side-rasterisering, verifisert funksjonelt i dev-sandkasse mot en håndlaget test-PDF.
+6. `EmailAttachmentKnowledgeSource` - side-granulær `external_id`-"chunking" UTEN ny tabell
+   (`msg:<id>`/`att:<msgId>:<attId>[:page:<n>]`), gjenbruker 100% av eksisterende
+   dedupe/tombstone/Q-20/RLS. Per-vedlegg/per-side feilisolasjon, AUTH/PERMISSION-eskalering.
+7. `email_attachment`-kildetype i `KnowledgeSourceRegistry` + ny `knowledge-ingest-email`-agent-profil
+   i `apps/api/src/worker-main.ts` (SAMME `InProcessWorker`/`PgTaskQueue` som `executive`).
+8. Host-akseptansescript `modules/knowledge/scripts/ua2-p1b-a-host-run.ts` (`p1b_*`-markører,
+   `--env-file=.env`-konvensjon, BLOCKED_NO_EMAIL_CREDENTIALS/BLOCKED_NO_VISION_PROVIDER fail-closed
+   defaults - ALDRI en antatt PASS uten faktiske credentials).
+
+**Suite-verifisert:** 813/813 - multimodal content-mapping (10 tester), Gmail-transport-logikk (8+6
+tester, inkl. rekursiv MIME-tre-vedleggsgjenfinning), fail-closed sikkerhetsgrenser (18 tester),
+EmailAttachmentKnowledgeSource end-to-end (13 tester, inkl. EKTE PDF native/OCR/vision-routing mot
+håndlagde test-PDF-er, ikke mocket), full dedupe/tombstone/Q-20-resurrection-suppresjon mot ekte
+embedded Postgres (2 tester), registry-/worker-wiring (5+5+10 strukturelle tester).
+
+**IKKE host/live-verifisert (se Q-24 for full gap-liste):** ekte Gmail-listing/vedleggsnedlasting
+(krever `JARVIS_EMAIL_TOKEN` - EGEN credential fra Drive/Calendar, se D-35), ekte vision-modellkall
+(krever `ANTHROPIC_API_KEY`), full sync mot en ekte innboks, `@napi-rs/canvas` sin native binær
+bevist å laste korrekt på Tobias sin faktiske Windows/Docker-host (kun dev-sandkasse-verifisert).
+
+**Kvalitetsgates kjørt:** `pnpm -r run typecheck` (13/13 workspace-prosjekter grønt), `eslint .`
+(0 feil/advarsler på alle nye/endrede filer), `pnpm test` (813/813, 62 testfiler), gitleaks
+(protect --staged + detect mot origin/main..HEAD, begge rene).
+
+**Docs oppdatert:** D-43 (opprinnelig scope-beslutning), D-44 (pdf-parse-oppdagelse),
+Q-24 (samlet gap-liste), IMPLEMENTATION_PLAN.md (ny P1B-A-seksjon + P1A-referanse), RUNTIME_GATES.md
+(ny gate-rad), UA2_KNOWLEDGE_DPIA.md (ny `email_attachment`-datakategori-rad + egen
+"OCR/vision-dataflyt"-seksjon - materiell dataflyt-endring: bilde-bytes til ekstern leverandør).
+
+**STATUS: FIXED_SUITE/READY_FOR_HOST_VERIFY.** IKKE merget - venter på Tobias sin host-kjøring av
+`ua2-p1b-a-host-run.ts` (krever `JARVIS_EMAIL_TOKEN` + `ANTHROPIC_API_KEY` i `.env`) før VERIFIED kan
+erklæres, i tråd med samme host-bevis-disiplin som D-38/D-39/D-40/D-42.
+
+## UA-2 P1B-A HOST FIX #1 "GMAIL 401 CLIENT/TOKEN COHERENCE + COST_EVENTS CLEANUP" (samme dag, 2026-08-16, ekte host-funn `run_id 3af67dab`)
+
+**Tobias sin faktiske Windows/Docker-host-kjøring** (`run_id 3af67dab`) ga PASS for
+`p1b_pdf_native_extraction`/`p1b_pdf_page_render`/`p1b_extraction_routing_decision`/
+`p1b_vision_ocr_live`/`q21_runtime_role_safe`/token-leak-audit, men **FAIL** for
+`p1b_gmail_list_messages_live` (`reason=tool_failed:google_auth_failed_401`) - som kaskaderte til
+`p1b_sync_email_source_live`-feil (`error_class:"AUTH"`) og en hoppet-over Q-20-e-post-live-sjekk,
+pluss en separat `cost_events_tenant_id_fkey`-FK-brudd som blokkerte tenant-cleanup. `hard_fail=true`.
+
+**Root cause IKKE konkludert med sikkerhet fra dette funnet alene** - `googleAccessToken()` kastet
+opprinnelig vekk Google sin faktiske token-endpoint-responskropp ved feil, så kun `401` var synlig,
+ingen `error`/`error_description`. Full begrunnelse/full fiks: **D-45** i
+`docs/DECISIONS_AND_ASSUMPTIONS.md`. Kort sammendrag av det som ER bygget denne runden:
+
+1. **Klassifisering** - `classifyGoogleTokenEndpointError()` (ny, `live-transports.ts`) parser
+   Google sitt RFC 6749 §5.2-token-endpoint-feilformat til `EMAIL_TOKEN_CLIENT_MISMATCH`/
+   `EMAIL_REFRESH_TOKEN_REVOKED`/`EMAIL_INSUFFICIENT_SCOPE`/`GOOGLE_INVALID_GRANT`/
+   `GOOGLE_INVALID_CLIENT`/`UNKNOWN_GOOGLE_AUTH` - kun trygge felt eksponert (HTTP-status, Google
+   sin `error`-kode, sanert `error_description`), ALDRI token/secret/Authorization-header i logg.
+2. **Gmail-reauth-flyt** - `modules/core/scripts/google-email-reauth.ts` (nytt orkestreringsskript)
+   gjenbruker den ALLEREDE persisterte Desktop-OAuth-klienten (`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET`/
+   `_OAUTH_CLIENT_TYPE=desktop`, samme klient som Drive/D-42) - ingen ny Google Cloud-klient, ingen ny
+   JSON-import, Drive-auth HELT urørt. Scopes: `gmail.readonly` + `gmail.send` (bevarer eksisterende
+   send-kapabilitet, D-41) + `userinfo.email` (kontoverifisering). `prompt=consent select_account`,
+   autorisert konto sammenlignet mot `JARVIS_GOOGLE_ACCOUNT` FØR persistering - ulik konto avbryter
+   eksplisitt. Persisterer KUN `JARVIS_EMAIL_TOKEN` (atomisk, `.bak.<epoch>`-sikkerhetskopi), først
+   etter state-PASS + exchange-PASS + scope-PASS + konto-PASS + live Gmail-leseprobe-PASS.
+3. **Automatisk gjenoppretting samme kjøring** - `ua2-p1b-a-host-run.ts` forsøker reauth-skriptet
+   AUTOMATISK ÉN gang (`reauthAttempted`-vakt) når feilen klassifiseres som gjenopprettbar, leser
+   `.env` på nytt fra disk, og fortsetter SAMME prosess - ingen ny Windows-kommando kreves.
+4. **`cost_events`-FK-fiks** - verifisert mot faktisk skjema (`004_audit_cost.sql`, ingen
+   append-only-trigger i motsetning til `audit_events`/`events`) - `DELETE FROM cost_events WHERE
+   tenant_id = $1` lagt til FØRST i `cleanupTenant()`, ingen `TRUNCATE`/`DISABLE TRIGGER`/bred sletting.
+5. **Live e-post-vedleggsfikstur** - `GmailTransport` mangler fortsatt `send`/`create`-kapabilitet,
+   så ingen trygg fikstur kunne opprettes denne runden. Ny `Verdict`-medlem `SKIPPED_SAFE_FIXTURE`
+   (ærlig, ALDRI en stille antatt PASS) brukes i stedet for å late som et vedlegg ble bevist.
+6. **Fersk-workspace-bootstrap** - `ua2-p1b-a-host-run.ts` konverterte alle topp-nivå `@jarvis/*`-
+   importer til dynamiske `await import()` etter en ny, synkron `ensureWorkspaceInstalled()`
+   (`pnpm install --frozen-lockfile`, samme mønster som P1A sin runner) - ETT skript, ETT
+   kommando løser fersk-checkout uten et separat installasjonssteg.
+
+**Regresjonstester lagt til (A-S i byggeordren, alle PASS):** 18 nye tester for
+token-endpoint-klassifisering (`google-auth-error-classification.test.ts`), 14 nye strukturelle
+tester for reauth-orkestreringsskriptet (`google-email-reauth-wiring.test.ts`), full omskriving av
+`ua2-p1b-a-host-run-wiring.test.ts` (21 tester: selv-bootstrap-rekkefølge, auto-reauth-vakt/-gjenopptak,
+FK-trygg cleanup-rekkefølge, SKIPPED_SAFE_FIXTURE, §6-skip). **Ingen regresjon:** Drive-auth/-scopes/
+-klient HELT urørt (verifisert strukturelt), Q-21 uendret, P0/P1A-tester alle fortsatt grønne.
+
+**Kvalitetsgates:** `pnpm -r run typecheck` (13/13 grønt), `eslint .` (0 feil), `pnpm test`
+(**856/856**, 64 testfiler - opp fra 813/813), gitleaks (protect --staged + detect mot
+origin/main..HEAD, begge rene).
+
+**STATUS UENDRET: FIXED_SUITE / HOST_VERIFY_BLOCKED.** IKKE VERIFIED - krever en NY host-kjøring av
+`node --env-file=.env --experimental-transform-types modules/knowledge/scripts/ua2-p1b-a-host-run.ts`
+for faktisk å bevise den fiksede klassifiseringen/reauth-flyten og live Gmail-sync mot en ekte
+innboks. `docs/OPEN_QUESTIONS.md` Q-24 oppdatert med denne rundens funn (nye punkter 7/8). PR #7
+IKKE merget - `IKKE merge, IKKE ny fase`-instruksen i byggeordren er fulgt.
+
+## UA-2 P1B-A HOST FIX #2 "UNAUTHORIZED_CLIENT MUST TRIGGER SAFE GMAIL REAUTH" (samme dag, 2026-08-16, ekte host-funn `run_id ab43fb1f`)
+
+**HOST FIX #1 sin nye klassifisering FUNGERTE og avdekket et mer presist funn.** Tobias sin neste
+faktiske host-kjøring (`run_id ab43fb1f`) ga PASS for alle de samme lokale/vision-punktene som forrige
+runde, men Gmail-refresh feilet nå med et EKSAKT klassifisert
+`tool_failed:google_auth_failed_401:GOOGLE_INVALID_CLIENT:unauthorized_client` mot den ALLEREDE
+host-bevist FUNGERENDE Desktop-OAuth-klienten (samme klient Drive bruker, D-42). Fordi
+`isRecoverableGoogleAuthErrorClass("GOOGLE_INVALID_CLIENT")` (korrekt, for den GENERELLE klassen) er
+`false`, ble auto-reauth-forsøket fra HOST FIX #1 aldri utløst - `gmail_auth_recoverable=false` og
+kjøringen stoppet der. Full begrunnelse/full fiks: **D-46** i `docs/DECISIONS_AND_ASSUMPTIONS.md`.
+
+**Root cause fortsatt IKKE kryptografisk bevisbart** (ærlig, per ordrens eget krav) - vi kan ikke bevise
+fra selve refresh-tokenet HVILKEN gammel OAuth-klient som opprinnelig utstedte det. Dokumentert som
+`LEGACY_TOKEN_OR_CLIENT_BINDING`: en begrunnet sannsynlighet (en gjenstående Gmail-tildeling fra FØR
+Desktop-klient-migreringen), IKKE et bevist faktum.
+
+**Løsning - kontekst-bevisst klassifisering, IKKE en global oppmykning av `invalid_client`:**
+
+1. `classifyGoogleTokenEndpointError()` (`live-transports.ts`) tar nå en eksplisitt
+   `GoogleAuthClientContext { provenDesktopClient: boolean }`. `invalid_client`/`unauthorized_client`
+   klassifiseres til en NY klasse `EMAIL_REAUTH_REQUIRED` (gjenopprettbar,
+   `recoveryReason=LEGACY_TOKEN_OR_CLIENT_BINDING`) KUN når `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE ===
+   "desktop"` allerede er persistert (samme markør `google-drive-reauth.ts` skriver KUN etter en
+   fullstendig host-bevist suksess). UTEN den markøren forblir klassifiseringen `GOOGLE_INVALID_CLIENT`,
+   FORTSATT fail-closed - manglende secret/uprøvd/feilkonfigurert klient skal ALDRI automatisk
+   reauth-forsøkes (§3 i ordren, eksplisitt testet).
+2. `googleAccessToken()` leser `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` KUN til dette formålet (aldri
+   skrevet/eksponert noe sted).
+3. `ua2-p1b-a-host-run.ts` sin eksisterende auto-reauth-trigger (HOST FIX #1, INGEN logikkendring)
+   håndterer den nye klassen AUTOMATISK via SAMME `isRecoverableGoogleAuthErrorClass()`-kall - ingen
+   egen, parallell spesialgren. Ny `p1b_gmail_reauth`-markør
+   (`SKIPPED_NOT_NEEDED`/`SKIPPED_NOT_RECOVERABLE`/`PASS`/`FAIL`) gjør selve reauth-forsøkets EGET
+   utfall eksplisitt synlig i host-sammendraget.
+4. **Workspace-policy/Gmail-API-blokkeringer forblir separat klassifisert** (§6/§7 i ordren) - dette
+   var ALLEREDE arkitektonisk garantert: `classifyDriveProbeError()` (Gmail-API-nivå, ETTER en
+   vellykket token-exchange) og `classifyGoogleTokenEndpointError()` (token-endepunkt-nivå, FØR Gmail-
+   API-tilgang) er to strukturelt separate klassifiseringsfunksjoner mot to ulike Google-feilformer -
+   ingen kodeendring var nødvendig for dette punktet.
+5. **Sikker akseptanse-fikstur-forbedring** (§11 i ordren, en bevisst enklere, men fungerende variant
+   av ordrens run_id-baserte eksempel) - en STABIL `ACCEPTANCE_FIXTURE_SUBJECT = "Jarvis P1B
+   Acceptance"`-konstant + ETT ekstra, SMALT `subject:"..."`-scoped `list_messages`-søk (samme
+   handling/scope-begrensning, ALDRI en bredere postkasse-skann) forsøkes FØR fallback til
+   `SKIPPED_SAFE_FIXTURE`. Tobias kan sende ÉN testmelding med dette EKSAKTE emnefeltet FØR en
+   fremtidig kjøring uten å måtte forutsi et fremtidig run_id. Ingen `send`-kapabilitet lagt til
+   `GmailTransport` - Tobias sender fortsatt selv, manuelt. Bundet flerminutters polling (ordrens
+   eget eksempel) er EKSPLISITT UTSATT som dokumentert oppfølgingspunkt (Q-24, ikke stille utelatt).
+
+**Regresjonstester lagt til (alle PASS):** nye tester i `google-auth-error-classification.test.ts`
+(kontekst-bevisst `EMAIL_REAUTH_REQUIRED` vs. `GOOGLE_INVALID_CLIENT`, `recoveryReason`-felt,
+`GmailTransport`-integrasjon med `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` satt/usatt), nye tester i
+`ua2-p1b-a-host-run-wiring.test.ts` (`p1b_gmail_reauth`-markør-tilstander, ingen egen
+EMAIL_REAUTH_REQUIRED-spesialgren, smalt subject-søk). **Ingen regresjon:** Drive-auth/-scopes/-klient
+HELT urørt, Q-21 uendret, cost_events-cleanup fra HOST FIX #1 bevart, alle P0/P1A/HOST FIX #1-tester
+fortsatt grønne.
+
+**Kvalitetsgates:** `pnpm -r run typecheck` (13/13 grønt), `eslint .` (0 feil), `pnpm test` (se
+kommandoresultat under), gitleaks (protect --staged + detect mot origin/main..HEAD, begge rene).
+
+**STATUS UENDRET: FIXED_SUITE / HOST_VERIFY_BLOCKED.** IKKE VERIFIED - krever en NY host-kjøring av
+SAMME ene kommando for faktisk å bevise at reauth nå fullfører for dette spesifikke
+`unauthorized_client`-funnet og at live Gmail-sync fungerer. `docs/OPEN_QUESTIONS.md` Q-24 oppdatert
+med denne rundens funn (nye punkter 9/10). PR #7 IKKE merget - `IKKE merge, IKKE ny fase`-instruksen i
+byggeordren er fulgt.
+
+## UA-2 P1B-A FINAL CLOSURE (2026-08-17) — HOST VERIFIED, PR #7 MERGET
+
+**Tobias kjørte `node --env-file=.env --experimental-transform-types
+modules/knowledge/scripts/ua2-p1b-a-host-run.ts` på sin faktiske Windows/Docker-host - GRØNT
+resultat, run_id `0f43f39d`, `hard_fail=false`.** Begge host-fix-rundene (HOST FIX #1/D-45, HOST
+FIX #2/D-46) beviste seg selv i praksis: første Gmail-autentiseringsforsøk klassifisert KORREKT som
+`EMAIL_REAUTH_REQUIRED`/`reason=LEGACY_TOKEN_OR_CLIENT_BINDING`, automatisk samme-prosess-reauth
+fullførte helt (`google_email_reauth=PASS`), retry lyktes.
+
+- **Q-21 uendret:** `q21_runtime_role_safe=PASS`.
+- **Lokal PDF-ekstraksjon (ingen credentials):** `p1b_pdf_native_extraction`/`p1b_pdf_page_render`/
+  `p1b_extraction_routing_decision` = ALLE PASS. `p1b_pdf_page_render=PASS` beviser SAMTIDIG at
+  `@napi-rs/canvas` sin native binær laster korrekt på den faktiske Windows/Docker-hosten (tidligere
+  kun dev-sandkasse-verifisert, D-44) - dette gapet er nå lukket.
+- **Gmail auto-reauth + LIVE:** `p1b_gmail_reauth=PASS`, `p1b_gmail_list_messages_live=PASS`,
+  `p1b_gmail_attachment_download_live=PASS` (et EKTE vedlegg funnet/lastet ned LIVE -
+  `SKIPPED_SAFE_FIXTURE`-fallbacken fra HOST FIX #1/#2 var IKKE nødvendig denne kjøringen).
+- **Vision OCR LIVE:** `p1b_vision_ocr_live=PASS` (ekte Anthropic-vision-kall via `ModelGateway`).
+- **Full sync + Q-20 LIVE:** `EmailAttachmentKnowledgeSource`-sync `scanned=5 created=5 failed=0`,
+  `p1b_sync_email_source_live=PASS`, `p1b_q20_no_resurrection_live=PASS` (Q-20-suppresjonsmekanismen
+  nå LIVE-bevist for e-post-kilden, ikke bare Drive/filsystem fra tidligere).
+- **Ingen token-lekkasje:** `p1b_token_leak_audit=PASS`, `token_leak=false`.
+- **Credential-sikkerhet bekreftet:** KUN `JARVIS_EMAIL_TOKEN` endret av reauth-flyten -
+  `JARVIS_GOOGLE_CLIENT_ID`/`_CLIENT_SECRET`/`_TOKEN`/`_OAUTH_CLIENT_TYPE` (Drive/Calendar) HELT
+  urørt, INGEN ny Google Cloud OAuth-klient opprettet.
+- **Ærlig unntak, IKKE overklaimet:** `p1b_worker_registration=SUITE_VERIFIED` - selve
+  `knowledge-ingest-email`-worker-JOBB-kjøringen (via `InProcessWorker`/`PgTaskQueue`) er IKKE
+  live-host-kjørt i denne akseptanserunden (host-scriptet kaller `KnowledgeSyncService.sync()`
+  direkte, samme mønster som resten av scriptet) - kun implementasjon-/strukturelt suite-verifisert.
+  Registrert som et smalt, gjenværende verifikasjonspunkt i Q-24, IKKE en blokkering for lukking
+  (samme prinsipp som Q-23 sitt Drive-permission-unntak i D-42).
+- **STATUS: UA-2 P1B-A = VERIFIED/COMPLETE → D-47.** PR #7 merget til `main` (normal merge-commit,
+  samme konvensjon som PR #1-#6 - historikk bevart, ikke squashet). Se D-47 i
+  DECISIONS_AND_ASSUMPTIONS.md for full beslutningslogg-entry, Q-24 for oppdatert gap-status.
+
 ## Blokkeringer
-Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout har INGEN egne blokkeringer (alle
+Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
 multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
 ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave.
 Google Drive permission-mutasjon er IKKE live-host-bevist (Q-23) - smalt, ikke-blokkerende
 gjenværende verifikasjonspunkt, krever en egen, eksplisitt godkjent test-runde med en reell avtalt
-ekstern test-konto. `claude/hva-skjer-hvordan-ligger-0z3ztp` (aksidentell remote-branch fra en
-tidligere runde) forblir IKKE slettet - eksisterende git-credentials mangler slette-rettighet
-(`HTTP 403`) - dokumentert vedlikeholdsgjeld, IKKE forsøkt omgått med usikre workarounds. Ingen andre
-branches rørt. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over)
-er dokumentert backlog, ikke blokkerende.
+ekstern test-konto. P1B-A sin worker-JOBB-live-kjøring er tilsvarende IKKE live-host-bevist (ny, smal
+Q-24-gjenstand, se over) - samme mønster, egen fremtidig test-runde. `claude/hva-skjer-hvordan-ligger-
+0z3ztp` (aksidentell remote-branch fra en tidligere runde) forblir IKKE slettet - eksisterende
+git-credentials mangler slette-rettighet (`HTTP 403`) - dokumentert vedlikeholdsgjeld, IKKE forsøkt
+omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gapene (GitHub/Calendar/
+Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-2 P1A (inkl. Runtime Wiring Closeout) er VERIFIED/COMPLETE og merget - ingen videre handling
-påkrevd for P1A.**
+**Ingen ny UA-2-fase er formelt godkjent/igangsatt ennå** - `docs/IMPLEMENTATION_PLAN.md` har INGEN
+eksplisitt navngitt "P1B-B"/"P2"-seksjon utover P1B-A. Konkrete, allerede dokumenterte
+kandidater (fra P1B-A sin egen "Bygges IKKE"-liste + eksisterende gap-logg), INGEN av dem
+igangsatt uten en egen, eksplisitt byggeordre fra Tobias/arkitekten (CLAUDE.md-regel 10 -
+faseporten):
+- Møtetranskripsjon - avhenger av UA-7 Communications Hub sin meeting-transcription, som selv IKKE
+  er bygget ennå (uendret blokkering, ikke P1B-A sin gjenstand).
+- Pieces som kunnskapskilde (Q-22) - ingen kjent, ikke-gjettet integrasjonsflate identifisert ennå.
+- Dedikert lokal OCR-motor (Tesseract e.l.), ekte bildestøtte i providere utover Anthropic,
+  docx/xlsx/pptx-ekstraksjon, finere per-vedlegg-checkpointing (alle fra D-43/Q-24) - ingen konkret
+  behov identifisert som gjør disse presserende.
+- Google Drive permission-live-verifikasjon (Q-23) og P1B-A worker-JOBB-live-verifikasjon (Q-24,
+  ny) - begge egne, smale, eksplisitt godkjente test-runder (ikke byggearbeid).
+- **Merk:** UA-2 sitt masterplan-akseptansekriterium "minst fem kildesystemer i samme retrieval-flyt"
+  ser ut til å FAKTISK være teknisk oppfylt nå (`filesystem`/`github`/`obsidian`/`google_drive`/
+  `email_attachment` = 5 registrerte `source_type`-verdier i `KnowledgeSourceRegistry`), men dette er
+  ALDRI eksplisitt verifisert/erklært som en egen lukkende oppgave - flagges her som en mulig
+  kandidat for Tobias å eksplisitt godkjenne som neste (lukkende, ikke byggende) oppgave, IKKE antatt
+  eller igangsatt av denne økten.
 
-Neste kandidat i IMPLEMENTATION_PLAN er **UA-2 P1B-A** (e-post-vedlegg-ingestion + OCR/vision-
-ingestion - se IMPLEMENTATION_PLAN.md sin UA-2-seksjon og UA2_KNOWLEDGE_DPIA.md). Møtetranskripsjon
-forblir UTSATT til UA-7 Communications Hub sin avhengighet finnes (IKKE bygget ennå) - derfor
-skiveres P1B som P1B-A (e-post-vedlegg + OCR, ingen avhengighet) FØR møtetranskripsjon. **P1B-A
-venter på egen, eksplisitt fase-godkjenning fra Tobias FØR noe implementeres** (faseporten gjelder,
-CLAUDE.md-regel 10) - IKKE startet i denne runden. Øvrige kandidater uendret i bakgrunnen: D-30
-ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36 Apple, HA-RUNTIME, provider-nøkler for
-Gemini/Kimi/Ollama LIVE-benchmark, Pieces (Q-22), Google Drive permission-live-verifikasjon (Q-23,
-egen test-runde med reell ekstern test-konto), connector-audit-gapene (D-41-sjekklisten, egne
-fremtidige byggeordre per connector), `claude/hva-skjer-hvordan-ligger-0z3ztp`-branch-opprydding
-(krever noen med slette-rettighet på repoet).
+Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
+Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, connector-audit-gapene
+(D-41-sjekklisten, egne fremtidige byggeordre per connector),
+`claude/hva-skjer-hvordan-ligger-0z3ztp`-branch-opprydding (krever noen med slette-rettighet på
+repoet).

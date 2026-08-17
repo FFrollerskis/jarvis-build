@@ -12,6 +12,8 @@ import { KnowledgeSourceRegistry, UnknownSourceInstanceError, type KnowledgeSour
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { GithubKnowledgeSource } from "../src/github-source.ts";
 import { ObsidianVaultKnowledgeSource } from "../src/obsidian-source.ts";
+import { EmailAttachmentKnowledgeSource } from "../src/email-attachment-source.ts";
+import type { ImageInput, OcrProvider, VisionDescriptionProvider } from "../src/ocr-provider.ts";
 
 /**
  * UA-2 P1A §17: registry-modellen - typet, flere-instans, tenant/space-bundet,
@@ -117,6 +119,13 @@ describe("KnowledgeSourceRegistry - config/tenant-binding (ingen DB nødvendig)"
     ]);
     expect(() => registry.build("t1", "personal", "drive1")).toThrow("google_drive_source_requires_tool_gateway_and_identity");
   });
+
+  it("build() av email_attachment-config UTEN injisert ToolGateway/identity/ocr kaster eksplisitt (UA-2 P1B-A - 'ocr' er et TREDJE påkrevd avhengighet, ikke bare to som Drive/GitHub)", () => {
+    const registry = new KnowledgeSourceRegistry([
+      { source_type: "email_attachment", tenant_id: "t1", memory_space_id: "personal", source_instance_id: "email1", account: "post@tsworkflow.com" }
+    ]);
+    expect(() => registry.build("t1", "personal", "email1")).toThrow("email_attachment_source_requires_tool_gateway_identity_and_ocr");
+  });
 });
 
 describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgres nødvendig)", () => {
@@ -178,5 +187,35 @@ describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgre
     const { records } = await source.list();
     expect(records).toHaveLength(1);
     expect(records[0]?.external_id).toBe("repo:org/repo");
+  }, 30_000);
+
+  it("build() av email_attachment-config MED injiserte avhengigheter (inkl. ocr) gir en fungerende EmailAttachmentKnowledgeSource, max/query fra config sendes videre", async () => {
+    const devices = new InMemoryDeviceRegistry();
+    const policy = new PolicyGateway({ devices, nonces: new PgApprovalStore(appPool), killSwitch: new KillSwitch() });
+    const secrets: SecretProvider = { name: "test", async get() { return "fake-email-token"; } };
+    const toolGateway = new ToolGateway(appPool, policy, secrets);
+    let capturedMax: unknown;
+    const emailTransport = new FakeTransport((action, parameters) => {
+      if (action === "list_messages") {
+        capturedMax = parameters["max"];
+        return { data: { messages: [{ id: "m1", thread: "t1", from: "a@b.no", subject: "Hei", at: "2026-08-16T00:00:00Z", body_text: "innhold", attachments: [], account: "post@tsworkflow.com" }] } };
+      }
+      throw new Error(`uventet action: ${action}`);
+    });
+    for (const tool of firstWaveTools({ email: emailTransport })) toolGateway.register(tool);
+    const noopOcr: OcrProvider & VisionDescriptionProvider = {
+      async transcribeText(_image: ImageInput) { return ""; },
+      async describeImage(_image: ImageInput) { return ""; }
+    };
+
+    const registry = new KnowledgeSourceRegistry([
+      { source_type: "email_attachment", tenant_id: "tenant-reg-gh", memory_space_id: "project", source_instance_id: "email1", account: "post@tsworkflow.com", max: 7 }
+    ]);
+    const source = registry.build("tenant-reg-gh", "project", "email1", { toolGateway, identity, ocr: noopOcr });
+    expect(source).toBeInstanceOf(EmailAttachmentKnowledgeSource);
+    expect(source.source_instance_id).toBe("email1");
+    const { records } = await source.list();
+    expect(records).toHaveLength(1);
+    expect(capturedMax).toBe(7);
   }, 30_000);
 });

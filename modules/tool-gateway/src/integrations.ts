@@ -238,6 +238,26 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
       output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+    },
+    // UA-2 P1B-A §2: e-post-vedlegg-ingestion - full meldingslisting (body-tekst
+    // + vedleggs-MIME-metadata) og separat vedleggsnedlasting. Lagt til på
+    // SLUTTEN av arrayet av samme grunn som alle tidligere tillegg over -
+    // eksisterende tester indekserer dette arrayet posisjonelt.
+    {
+      tool_id: "email", action: "list_messages", description: "List e-post FULLT (body-tekst + vedleggs-MIME-metadata) for ingestion",
+      input_schema: record({ max: z.number().int().min(1).max(50), query: z.string().optional() }),
+      capability_class: "A", scopes: ["mail.readonly"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_EMAIL_TOKEN",
+      output_trust: "untrusted", transport: transport("email")
+    },
+    {
+      tool_id: "email", action: "read_attachment", description: "Last ned RÅ bytes for ETT e-postvedlegg (standard base64, untrusted ingestion)",
+      input_schema: record({ message_id: z.string(), attachment_id: z.string() }),
+      capability_class: "A", scopes: ["mail.readonly"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_EMAIL_TOKEN",
+      output_trust: "untrusted", transport: transport("email")
     }
   ];
 }

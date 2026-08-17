@@ -2,6 +2,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   ProviderError,
+  textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult
@@ -34,7 +35,7 @@ export class KimiAdapter implements ModelProviderAdapter {
     }
     const messages = [
       ...(request.system ? [{ role: "system", content: request.system }] : []),
-      ...request.messages
+      ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
     ];
     const started = Date.now();
     let response: Response;

@@ -7,11 +7,13 @@ import { GoogleDriveTransport, driveTransportsIfConfigured, googleDriveCredentia
  * klassifisering, idempotent 404-håndtering på sletting) kan IKKE bevises via
  * `FakeTransport` (den substituerer HELE transporten - se
  * `drive-full-access.test.ts` for policy/idempotency/isolasjon-bevis der).
- * Dette er den ENESTE fetch-mockede transport-testen i repoet (Gmail/
- * Calendar/GitHub sine rå HTTP-transportere er dokumentert som "typesjekket,
- * IKKE unit-testet - kun live-verifisert" - se toppen av live-transports.ts) -
- * en bevisst, avgrenset unntak fordi byggeordren eksplisitt krever et
- * deterministisk bevis for konflikt-/statuskode-håndtering uten live-credential.
+ * UA-2 P1B-A (2026-08-16): IKKE lenger den eneste fetch-mockede transport-
+ * testen - `gmail-attachment-transport.test.ts` fikk samme unntak da
+ * `GmailTransport` fikk reell intern logikk (rekursiv MIME-tre-vedlegg-
+ * gjenfinning, base64url-konvertering). Calendar/GitHub sine rå HTTP-
+ * transportere forblir "typesjekket, IKKE unit-testet - kun live-verifisert"
+ * (se toppen av live-transports.ts) - de har fortsatt ingen egen intern
+ * logikk utover rett fetch→JSON-mapping som krever et deterministisk bevis.
  */
 const originalFetch = global.fetch;
 

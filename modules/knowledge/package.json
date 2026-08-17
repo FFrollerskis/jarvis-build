@@ -14,11 +14,15 @@
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/memory": "workspace:*",
+    "@jarvis/model-gateway": "workspace:*",
+    "@jarvis/tasks": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",
+    "pdf-parse": "^2.4.5",
     "pg": "^8.16.3"
   },
   "devDependencies": {
     "@jarvis/policy": "workspace:*",
+    "@jarvis/provider-adapters": "workspace:*",
     "@types/pg": "^8.15.6",
     "embedded-postgres": "16.14.0-beta.17"
   }

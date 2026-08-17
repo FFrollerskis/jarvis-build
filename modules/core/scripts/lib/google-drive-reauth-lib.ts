@@ -30,7 +30,32 @@ export const REQUIRED_REAUTH_SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email"
 ] as const;
 
+/**
+ * UA-2 P1B-A HOST FIX #1 (2026-08-16): Gmail (`JARVIS_EMAIL_TOKEN`) sitt EGET
+ * scope-sett - separat fra `REQUIRED_REAUTH_SCOPES` (Drive/Calendar) over,
+ * SELV OM begge reautoriseres via den SAMME persisterte Desktop-OAuth-klient
+ * (`JARVIS_GOOGLE_CLIENT_ID`/`_SECRET` - se `google-email-reauth.ts`, som
+ * BEVISST IKKE oppretter/importerer noen ny klient). Verifisert mot Google
+ * sitt offisielle Gmail API-discovery-dokument (ikke gjettet, samme presedens
+ * som D-41-scope-endringen for Drive): `gmail.readonly` dekker
+ * `list_messages`/`read_attachment` (P1B-A sitt faktiske ingestion-behov -
+ * §5 i host-fix-ordren); `gmail.send` bevarer scopet den EKSISTERENDE
+ * `email`/`send`-`ToolDefinition` (klasse D, `integrations.ts`) allerede
+ * lover, selv om selve `GmailTransport` sin `send`-handling ikke er
+ * implementert ennå (kjent, egen, allerede sporet gap - D-41 krever at scope
+ * IKKE nedgraderes bare fordi implementasjonen ikke er ferdig). `userinfo.
+ * email` er identisk gjenbruk av samme minimale identity-scope Drive-reauth
+ * allerede bruker til §6-kontosjekken.
+ */
+export const REQUIRED_EMAIL_REAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
+  "https://www.googleapis.com/auth/userinfo.email"
+] as const;
+
 export const DEFAULT_REAUTH_PORT = 8942;
+/** UA-2 P1B-A HOST FIX #1: EGEN standardport for Gmail-reauth-loopback-serveren - unngår enhver tvetydighet hvis Drive- og Gmail-reauth av en eller annen grunn kjøres tett etter hverandre (samme port ville uansett fungere fint sekvensielt, men en distinkt port gjør intensjonen eksplisitt). */
+export const DEFAULT_EMAIL_REAUTH_PORT = 8943;
 export const OAUTH_CALLBACK_PATH = "/oauth2callback";
 
 export class MissingClientCredentialsError extends Error {

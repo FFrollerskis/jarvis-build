@@ -1,6 +1,16 @@
 /**
  * UA-1 capability registry (BO-08 §7): konfigurerbart og testbart - routing
  * skjer mot registry-data, aldri som if/else-blokker per provider i koden.
+ *
+ * UA-2 P1B-A (D-43 §3): `vision`-flagget må reflektere FAKTISK wiret
+ * bildestøtte i den tilhørende adapteren (`packages/provider-adapters`),
+ * ALDRI et informativt/aspirasjonelt leverandør-fakta. Kun `anthropic` har
+ * ekte bilde-mapping i denne runden (se `anthropic.ts` sin
+ * `toAnthropicContent()`) - `openai`/`gemini` støtter i praksis vision hos
+ * leverandøren, men adapteren her bruker fortsatt `textOnly()` og ville
+ * stille droppet bildedata; å beholde `vision` i profilen ville latt routeren
+ * sende et vision-krevd kall til en adapter som degraderer det til ren tekst.
+ * Rettes når disse adapterne faktisk får bilde-mapping (egen fremtidig runde).
  */
 export type ModelCapability =
   | "text"
@@ -29,7 +39,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   {
     provider: "openai",
     model: "gpt-5",
-    capabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
+    capabilities: ["text", "reasoning", "tool_calling", "structured_output", "streaming"],
     context_tokens: 272_000,
     locality: "cloud",
     cost_class: 3,
@@ -49,7 +59,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   {
     provider: "gemini",
     model: "gemini-2.5-flash",
-    capabilities: ["text", "reasoning", "vision", "structured_output", "streaming"],
+    capabilities: ["text", "reasoning", "structured_output", "streaming"],
     context_tokens: 1_000_000,
     locality: "cloud",
     cost_class: 2,

@@ -1,6 +1,32 @@
+/**
+ * UA-2 P1B-A (D-43 §3): multimodalt innholdselement - normalisert, provider-
+ * nøytralt format. `data` er RÅ base64 (ALDRI en `data:`-URI-prefiks, ALDRI
+ * en fil-sti) - adaptere som faktisk støtter bilder oversetter selv til sitt
+ * eget leverandørformat (se `anthropic.ts`). `media_type` er en MIME-type,
+ * f.eks. "image/png" - aldri gjettet, alltid satt av kalleren som vet hva
+ * bytes faktisk er.
+ */
+export type ContentPart = { type: "text"; text: string } | { type: "image"; media_type: string; data: string };
+
 export interface ChatMessage {
   role: "user" | "assistant";
-  content: string;
+  /**
+   * UA-2 P1B-A: `string` (uendret, dekker ALLE eksisterende kall) ELLER
+   * `ContentPart[]` for multimodalt (vision) innhold. Adaptere UTEN reell
+   * bildestøtte (se capability-registry.ts sitt `vision`-flagg) bruker
+   * `textOnly()` og degraderer trygt til KUN tekstdelene - kaster ALDRI på
+   * et array, sender ALDRI et rått array som streng til en leverandør-API.
+   */
+  content: string | ContentPart[];
+}
+
+/** Trekker ut kun tekstdelen av et meldingsinnhold - for adaptere/kode uten multimodal støtte. */
+export function textOnly(content: string | ContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
 }
 
 /** UA-1 P1A: normalisert verktøydefinisjon - kommer alltid fra trusted Tool Gateway-lag. */

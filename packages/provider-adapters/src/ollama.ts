@@ -2,6 +2,7 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   ProviderError,
+  textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult
@@ -42,7 +43,7 @@ export class OllamaAdapter implements ModelProviderAdapter {
           },
           messages: [
             ...(request.system ? [{ role: "system", content: request.system }] : []),
-            ...request.messages
+            ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
           ]
         })
       });

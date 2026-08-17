@@ -70,6 +70,15 @@ describe("UA-1 capability registry (§7)", () => {
     expect(profile.capabilities).toContain("text");
     expect(profile.model).toBe("m1");
   });
+
+  it("D-43 §3: 'vision' står KUN på anthropic - eneste adapter med ekte bilde-mapping denne runden (se capability-registry.ts sin begrunnelse)", () => {
+    const registry = new CapabilityRegistry();
+    expect(registry.get("anthropic")?.capabilities).toContain("vision");
+    expect(registry.get("openai")?.capabilities).not.toContain("vision");
+    expect(registry.get("gemini")?.capabilities).not.toContain("vision");
+    expect(registry.get("kimi")?.capabilities).not.toContain("vision");
+    expect(registry.get("ollama")?.capabilities).not.toContain("vision");
+  });
 });
 
 describe("UA-1 pricing (§14)", () => {

@@ -5,6 +5,7 @@ import type { ModelPurpose, RouterMode } from "@jarvis/contracts";
 import { createHash } from "node:crypto";
 import {
   ProviderError,
+  textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
@@ -492,7 +493,8 @@ export class ModelGateway {
       const others = new Map([...runtimes].filter(([name, rt]) => rt.configured && name !== primary.provider));
       const pool = others.size > 0 ? others : runtimes;
       const criticPlan = this.router.plan({ mode: "QUALITY", purpose: "CRITIQUE" }, pool);
-      const lastUser = [...input.request.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+      const lastUserMessage = [...input.request.messages].reverse().find((m) => m.role === "user");
+      const lastUser = lastUserMessage ? textOnly(lastUserMessage.content) : "";
       // §30: critic er review-rolle - får ALDRI tools, kan aldri utføre side-effekter.
       const criticRequest: ModelRequest = {
         system: CRITIC_SYSTEM,

@@ -1,9 +1,14 @@
-# UA-2 P0/P1A — DPIA / data-governance-notat (kunnskaps-ingestion)
+# UA-2 P0/P1A/P1B-A — DPIA / data-governance-notat (kunnskaps-ingestion)
 
-**Status:** UA-2 P0 (GitHub + filesystem/NAS) + P1A (Google Drive + Obsidian/lokal vault),
-FIXED_SUITE/READY_FOR_HOST_VERIFY (2026-08-16, IKKE host-verifisert ennå). Kort og teknisk, ikke
-juridisk teater — oppdateres ved hver ny kildetype (P1B: e-post/møtetranskripsjon/OCR; Pieces utsatt,
-se Q-22 i OPEN_QUESTIONS.md — ingen konkret integrasjonsflate funnet).
+**Status:** UA-2 P0 (GitHub + filesystem/NAS) + P1A (Google Drive + Obsidian/lokal vault) + P1B-A
+(e-post-vedlegg + OCR/vision-ingestion) ALLE VERIFIED/COMPLETE (host-bevist, se D-39/D-42/D-47).
+**UA-2 P1B-A (2026-08-17, host-bevist run_id `0f43f39d`)** - MATERIELT NY dataflyt
+lagt til denne runden: e-post-KROPP og -VEDLEGG (inkl. bilde-BYTES for sider uten native tekst-lag)
+sendes til en EKSTERN modell-leverandør (kun Anthropic denne runden, via `ModelGateway`,
+`purpose:"VISION"`) for OCR/beskrivelse - se ny seksjon "OCR/vision-dataflyt (P1B-A)" under. Kort og
+teknisk, ikke juridisk teater — oppdateres ved hver ny kildetype (møtetranskripsjon: utsatt til UA-7
+Communications Hub finnes; Pieces utsatt, se Q-22 i OPEN_QUESTIONS.md — ingen konkret
+integrasjonsflate funnet).
 
 ## Hvilke data ingestes
 
@@ -13,8 +18,10 @@ se Q-22 i OPEN_QUESTIONS.md — ingen konkret integrasjonsflate funnet).
 | Filesystem/NAS (`FilesystemKnowledgeSource`) | Tekstbaserte filer i eksplisitt allowlistede roots (`.md`, `.txt`, `.json`, `.yaml/yml`, `.ts/js/tsx/jsx`, `.py`, `.sql`, `.html`, `.css`) | Notater, kode, konfigurasjon — kan inneholde persondata Tobias selv har lagret i disse filene |
 | Google Drive (`GoogleDriveKnowledgeSource`, P1A) | Google Docs (eksportert til text/plain) + tekstlige MIME-typer i en EKSPLISITT konfigurert mappe (rekursivt) eller hele driven (bevisst valgt scope, aldri default) | Dokumenter, notater — **untrusted ingestion**. Sheets/Slides/Forms/bilder/PDF/binærformater IKKE lest (§14 P1A — bevisst utsatt, hoppes trygt over). **Ingestion-KILDEN er READ ONLY by design** (sync skal aldri mutere kilden den leser fra) - dette er separat fra Drive-VERKTØYET (`GoogleDriveTransport`), som siden 2026-08-16 (D-41 scope-endring) har full read/write/permissions for generell verktøybruk utenfor ingestion-pipelinen |
 | Obsidian/lokal vault (`ObsidianVaultKnowledgeSource`, P1A) | `.md`-notater i en eksplisitt vault-rot (samme allowlist/traversal-forsvar som filesystem-kilden), inkl. frontmatter (flat parset til metadata) og wiki-lenke-navn | Personlige notater — kan inneholde persondata Tobias selv har skrevet. `.obsidian/`-katalogen (verktøykonfig, ikke notat-innhold) er EKSKLUDERT som default |
+| E-post-vedlegg (`EmailAttachmentKnowledgeSource`, P1B-A, NY) | Gmail-innboks (via `JARVIS_EMAIL_TOKEN`, EGEN credential fra Drive/Calendar sin `JARVIS_GOOGLE_TOKEN` - se D-35): e-postkropp (`text/plain`) + vedlegg (tekst/native-PDF/bilder/skannet-PDF). Arkiver (zip/rar/7z/gzip/tar) og docx/xlsx/pptx hoppes EKSPLISITT over (UNSUPPORTED_CONTENT), ALDRI åpnet/utpakket | E-postinnhold og VEDLEGGSINNHOLD (fakturaer, skjermbilder, skannede dokumenter) — **untrusted ingestion**, kan inneholde tredjeparts persondata (avsender/mottaker-navn, kontonummer på fakturaer, osv.) avhengig av hva som faktisk mottas på kontoen. Fail-closed grenser: maks 25 MB/vedlegg, maks 50 sider/PDF, 60s ekstraksjons-timeout (`extraction-safety.ts`) |
 
-**Ingen** binærdata/OCR/bilder/PDF ingestes i P0/P1A (§14 i begge BO-er — bevisst utsatt).
+**P0/P1A:** ingen binærdata/OCR/bilder/PDF ingestes (§14 i begge BO-er — bevisst utsatt der).
+**P1B-A endrer dette EKSPLISITT** for e-post-vedlegg — se OCR/vision-dataflyt-seksjonen under.
 **Ingestion-siden** (`GoogleDriveKnowledgeSource`, `ObsidianVaultKnowledgeSource`) er og forblir READ
 ONLY mot kilden by design uansett Drive-verktøyets kapabilitet - en sync-kilde skal aldri mutere det den
 leser fra. **Drive-VERKTØYET** (`GoogleDriveTransport`, brukt av Jarvis generelt via ToolGateway,
@@ -74,6 +81,24 @@ credential-verdier. Ingen secrets logges (verifisert: GithubTransport/GoogleDriv
 aldri `credential`-parameteret; `ua2-p1a-live.ts` §6/§7 scanner eksplisitt `audit_events` og
 `knowledge_documents.metadata` etter en live Drive-sync og beviser at OAuth-tokenet aldri lekker inn
 i noen av dem).
+
+## OCR/vision-dataflyt (P1B-A, NY)
+
+For e-postvedlegg uten tilstrekkelig native tekst-lag (skannede PDF-sider, bilder) sendes
+side-/bilde-BYTES (base64, som en `image`-`ContentPart` i `ModelRequest`) til en modell-leverandør via
+`ModelGateway.complete({purpose:"VISION", ...})` - se `ModelGatewayVisionExtractor` i
+`modules/knowledge/src/ocr-provider.ts`. Dette er den ENESTE veien (D-43 §1/§3 — adaptergrense-regelen
+i CLAUDE.md, ingen modul kaller en vision-leverandør direkte). Praktisk konsekvens: **innholdet i en
+skannet faktura/skjermbilde/dokument sendes til Anthropic** (eneste adapter med ekte bildestøtte denne
+runden) for transkribering/beskrivelse — samme databehandler-eksponering som ALLEREDE eksisterer for
+all annen tekst Jarvis sender til Anthropic/OpenAI/etc. via `ModelGateway` (D-23: skybaserte
+frontrunner-modeller er akseptert for ikke-sensitive data), men denne runden er FØRSTE gang BINÆRT
+bildeinnhold (ikke bare tekst) forlater Jarvis sin egen infrastruktur som del av selve
+ingestion-pipelinen. Budsjett-/kostkontroll gjelder automatisk (samme `BudgetGuard`/`cost_events` som
+ethvert modellkall, `purpose="VISION"` synlig i kostlogget) - ingen ny kostmekanisme. Bildebytes lagres
+ALDRI selv (verken i `knowledge_documents.content` - kun den TRANSKRIBERTE TEKSTEN lagres der - eller
+noe annet sted); `metadata.extraction_method` (`native`/`ocr`/`vision`) er den eneste sporen av at et
+modellkall fant sted.
 
 ## Hvordan en kilde kan kobles fra
 
