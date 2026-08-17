@@ -258,6 +258,119 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_EMAIL_TOKEN",
       output_trust: "untrusted", transport: transport("email")
+    },
+    // UA-3 P0 (Business Domain Foundation, D-49): rent internt Business Graph-
+    // verktøy - INGEN ekstern leverandør, `credential_ref` er en ikke-hemmelig
+    // sentinel (se @jarvis/business sin BusinessInternalSecretProvider) kun
+    // for å tilfredsstille ToolGateway sin ubetingede credential-sjekk.
+    // `tenant_id`/`memory_space` MÅ bygges av TRUSTED kallerlag (identity),
+    // ALDRI av modell-output - samme presedens som calendar/email/github sin
+    // trusted parameterbygging i mesh-bridge.ts (ToolTransport.invoke() får
+    // ikke IdentityContext - kjent, delt arkitekturbegrensning, ikke ny her).
+    // Lagt til på SLUTTEN av arrayet - eksisterende tester indekserer posisjonelt.
+    {
+      tool_id: "business", action: "create_company", description: "Opprett et forretningsselskap (kunde/prospect)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), name: z.string(), domain: z.string().optional(), status: z.string().optional(), source: z.string().optional(), owner_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett status til 'inactive'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "create_contact", description: "Opprett en forretningskontakt (person hos et selskap)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), name: z.string(), company_id: z.string().optional(), email: z.string().optional(), phone: z.string().optional(), title: z.string().optional(), source: z.string().optional(), owner_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ingen automatisk angring - korriger via ny create_contact/oppdatering", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "create_lead", description: "Opprett/idempotent-oppdater en lead (idempotent naar source_type+source_instance_id+external_id oppgis)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), status: z.string().optional(), source: z.string().optional(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), owner_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett status til 'disqualified'", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "update_lead_status", description: "Endre status-stadiet til en lead",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string(), status: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett status tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "create_opportunity", description: "Opprett en salgsmulighet/deal",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), lead_id: z.string().optional(), stage: z.string().optional(), value_ore: z.number().optional(), currency: z.string().optional(), expected_close_date: z.string().optional(), owner_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett stage til 'lost'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "update_opportunity_stage", description: "Flytt en salgsmulighet til et nytt pipeline-stadium",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), stage: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "sett stage tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "record_activity", description: "Registrer en forretningsaktivitet i tidslinjen (idempotent naar source_type+source_instance_id+external_id oppgis)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), activity_type: z.string(), summary: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), opportunity_id: z.string().optional(), lead_id: z.string().optional(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), canonical_uri: z.string().optional(), owner_person_id: z.string().optional(), occurred_at: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ingen automatisk angring - append-only tidslinje", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "read_company_timeline", description: "Les komplett aktivitetstidslinje for ett selskap ('hva skjer med kunde X?')",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "create_followup", description: "Opprett en oppfoelging/TODO knyttet til kunde/selskap/deal (idempotent naar idempotency_key oppgis)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), due_at: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), opportunity_id: z.string().optional(), lead_id: z.string().optional(), activity_id: z.string().optional(), reason: z.string().optional(), next_action: z.string().optional(), priority: z.string().optional(), owner_person_id: z.string().optional(), idempotency_key: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "avbryt oppfoelgingen (cancel_followup)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "complete_followup", description: "Marker en oppfoelging som fullført",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), followup_id: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar tilstandsovergang - opprett ny oppfoelging ved behov", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "cancel_followup", description: "Avbryt en åpen oppfoelging",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), followup_id: z.string() }),
+      capability_class: "C", scopes: ["business.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar tilstandsovergang - opprett ny oppfoelging ved behov", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "list_overdue_followups", description: "List forfalte, åpne oppfoelginger (hvem trenger oppfoelging nå)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), as_of: z.string().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "read_metrics", description: "Les grunnleggende drifts-metrikker (åpne leads, aktive muligheter, pipeline-verdi, forfalte oppfoelginger)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
     }
   ];
 }

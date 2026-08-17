@@ -4,9 +4,10 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
+  EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
   MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "@jarvis/business";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -68,10 +69,16 @@ const policy = new PolicyGateway({
     owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
   }
 });
-const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
+const toolGateway = new ToolGateway(
+  pool, policy,
+  new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
+  new OwnerControls(killSwitch)
+);
+const businessService = new BusinessService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
+  business: new BusinessTransport(businessService),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

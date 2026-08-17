@@ -19,11 +19,12 @@ import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdap
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
-  DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
+  DailyBrief, EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
   MeshToolExecutor, meshToolDefinitions, TelegramCommandPoller, TelegramTransport, ToolGateway,
   buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource, firstWaveTools,
   tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "@jarvis/business";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -90,10 +91,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
-  const toolGateway = new ToolGateway(pool, policy, new EnvSecretProvider(), new OwnerControls(killSwitch));
+  const toolGateway = new ToolGateway(
+    pool, policy,
+    new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
+    new OwnerControls(killSwitch)
+  );
+  const businessService = new BusinessService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
+    business: new BusinessTransport(businessService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   const ownerIdentity = {

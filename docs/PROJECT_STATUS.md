@@ -1,11 +1,12 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-2 «Universal Knowledge Layer» HELE FASEN = VERIFIED/COMPLETE → D-48**,
-masterplan-closeout-audit mot masterplanens fire ordrette akseptansekriterier - se egen seksjon under.
-UA-2 P1B-A selv forblir VERIFIED/COMPLETE → D-47, host-bevist run_id `0f43f39d`, 873/873 tester) ·
-**Branch:** `claude/ua2-masterplan-closeout` · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE
-(host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret,
-host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7)
+**Oppdatert:** 2026-08-17 (**UA-3 «Business Operating System» STARTET - P0 «Business Domain
+Foundation» = FIXED_SUITE / READY_FOR_HOST_VERIFY → D-49**, se egen seksjon under. IKKE VERIFIED/
+COMPLETE ennå - venter på Tobias host-verifikasjon. UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
+uendret, 897/897 tester) · **Branch:** `claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
+Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
+VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
+`main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -1254,6 +1255,44 @@ D-42 (P1A) eller D-47 (P1B-A) - begge forblir gyldige, uendrede fase-lukkinger. 
 per masterplan v4.0: UA-3 «Business Operating System»** (`docs/input/02_Jarvis_Masterplan_Sovereign_
 Autonomy_v4.0.md` linje 460) - IKKE startet, IKKE godkjent, IKKE implementert i denne audit-runden.
 
+## UA-3 P0 — Business Domain Foundation (BYGGET denne økten, 2026-08-17, branch `claude/hva-skjer-hvordan-ligger-0z3ztp` fra `origin/main` `593a69c`)
+
+**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert (FIXED_SUITE / READY_FOR_HOST_VERIFY).**
+Første UA-3-slice, navngitt/prioritert fra masterplanens egen integrasjons-prioritetstabell
+("Internal CRM / Sales pipeline full internal UA-3 P0") - full begrunnelse: **D-49**.
+
+**Bygget:**
+- Ny pakke `@jarvis/business` (mal: `@jarvis/erasure`).
+- Migrasjon `019_business.sql`: 6 tenant-scoped FORCE RLS-tabeller (business_companies/contacts/
+  leads/opportunities/activities/followups), samme RLS-mønster som `017_knowledge.sql`. Idempotent
+  kilde-ingestion (UNIQUE-constraint på leads/aktiviteter, idempotency_key på followups).
+- `BusinessService` - gjenbruker `withMemoryTransaction` uendret; CRUD/livssyklus for alle 6
+  entiteter, kunde-tidslinje ("hva skjer med kunde X?"), forfalt-oppfoelging-spørring, drifts-metrikker.
+- `BusinessTransport implements ToolTransport` - 13 nye ToolGateway-handlinger, A/B/C-klassifisert,
+  INGEN D-klasse. `BusinessInternalSecretProvider` (ikke-hemmelig sentinel) løser credential-kravet
+  for et rent internt verktøy, wiret via eksisterende `FallbackSecretProvider`.
+- Registrert som femte, ubetinget transport i `firstWaveTools({...})` i `main.ts`/`worker-main.ts`.
+- ETT Windows host-akseptanseskript: `modules/business/scripts/ua3-host-run.ts` →
+  `ua3-business-live.ts` (speiler `q20-host-run.ts`/`q20-erasure-live.ts`).
+
+**Suite-verifisert (897/897 - 24 nye tester, se RUNTIME_GATES.md):** tenant-isolert
+entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
+aktivitetstidslinje, oppfoelging-livssyklus + forfalt-spørring, kilde-peker-lenking (ingen FK til
+knowledge_documents - Q-20-trygt strukturelt), cross-tenant/memory-space-isolasjon (RLS mot ekte
+embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring (owner sovereign +
+delegert policy via EKSISTERENDE PolicyGateway, ingen ny logikk), audit uten sensitivt kundeinnhold.
+
+**IKKE host/live-verifisert:** ingen Docker-tilgjengelig i denne sky-container-økten - host-scriptet
+er skrevet og strukturelt regresjonstestet, men IKKE faktisk kjørt mot ekte lokal Postgres.
+
+**Eksplisitt utsatt (Q-25, ingenting av dette bygget denne runden):** Gmail/Calendar-hendelseslenking,
+AI Mesh-basert klassifisering/scoring, worker/jobbkø-integrasjon, kontrakt/faktura/inntekt-sporing,
+numerisk lead/deal-scoring, D-klasse/hard-delete, attention-queue-automasjon, UI/dashboard.
+
+**Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (897/897 - 66
+filer), gitleaks (detect, ren). Branch pushet, draft PR opprettet, IKKE merget - venter på Tobias
+host-verifikasjon.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
@@ -1269,13 +1308,14 @@ omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gape
 Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-2 «Universal Knowledge Layer» er nå FORMELT VERIFIED/COMPLETE i sin helhet → D-48** (denne
-audit-runden). **Neste kanoniske fase per masterplan v4.0 er UA-3 «Business Operating System»**
-(`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje 460) - Business Graph (person/
-company/lead/conversation/meeting/offer/contract/invoice/revenue), CRM/pipeline, daily/weekly business
-brief, open-loop-deteksjon. **IKKE startet, IKKE godkjent, IKKE implementert** - venter på en egen,
-eksplisitt byggeordre fra Tobias/arkitekten før noe kodearbeid begynner (CLAUDE.md-regel 10 -
-faseporten gjelder like strengt for UA-3 som den gjorde for hver UA-2-delfase).
+**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / READY_FOR_HOST_VERIFY (D-49) - IKKE
+VERIFIED/COMPLETE.** Neste steg er Tobias sin host-verifikasjon: kjør
+`node --experimental-transform-types modules/business/scripts/ua3-host-run.ts` fra repo-roten på
+Windows-hosten, se PASS-markørene (`ua3_*`), rapporter `hard_fail`-verdien tilbake. Etter host-
+verifikasjon: oppdater denne filen + DECISIONS_AND_ASSUMPTIONS.md med host-run_id og merg draft-PR-en
+(kun etter eksplisitt Tobias-godkjenning, aldri automatisk). **IKKE startet ennå:** UA-3 P1/P2
+(Gmail/Calendar-hendelseslenking, AI Mesh-bruk, worker-integrasjon - se Q-25), UA-4, noen annen
+UA-fase. Faseporten gjelder fortsatt strengt (CLAUDE.md-regel 10).
 
 Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full
 klassifisering - ingen av disse hindrer UA-2-lukkingen eller krever noe FØR UA-3 kan startes, men

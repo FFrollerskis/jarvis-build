@@ -525,6 +525,93 @@ Anthropic, docx/xlsx/pptx, per-vedlegg-checkpointing internt i én sync-kjøring
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-24 (samlet gap-liste for P1B-A).
 
+## UA-3 – Business Operating System (masterplan v4.0)
+
+**Kanonisk kilde:** `docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje 460-472 (ordrett).
+
+**Mål:** Jarvis blir en OPERASJONELL LAG for forretningsdrift - ikke en frittstående CRM-silo. Gjenbruker
+identitet/tenant-modell/minne/Knowledge/ToolGateway/Model Gateway/durable workers/Policy Gateway/audit/
+events/tasks/integrasjoner/eier-sovereign-policy/D-41-connector-invariant uendret.
+
+**Avgrensning:** Strukturert forretnings-state (selskap/kontakt/lead/opportunity/aktivitet/oppfoelging)
+og spørringer over den - IKKE en generell ERP, IKKE full telefoni, IKKE Jarvis-dashboardet/control-
+center (separat, senere plan), IKKE møtetranskripsjon.
+
+**Komponenter (full masterplan-scope - se "Bygges IKKE" for P0 vs. senere):**
+- Business Graph: person, selskap, lead, samtale, møte, tilbud, kontrakt, faktura, inntekt.
+- CRM/pipeline, kundelivssyklus, kommunikasjonslenking, produktbruk, churn, support, oppgaver, vendors.
+- Daglig/ukentlig business brief og automatisk open-loop-deteksjon.
+- Identitet/tenant-modell støtter flere selskaper uten å blande kontoer/credentials/finansiell state
+  (ALLEREDE arkitektonisk løst, se D-21/`docs/security/TENANT_MODEL.md` §3 - ingen skjemaendring krevd).
+
+**Avhengigheter:** UA-0 (identitet/tenancy/policy/minne, VERIFIED), UA-1 (Model Gateway, VERIFIED), UA-2
+(Knowledge, VERIFIED/COMPLETE - Business OS bruker Knowledge via referanse, kopierer aldri innhold),
+Tool Gateway (adaptergrense, VERIFIED).
+
+**Leveranser (full scope):** "Hva skjer med kunde X?" gir komplett, kilde-forankret tidslinje; "Hvordan
+går bedriften?" kombinerer sales/product/finance/marketing/operations; open loops oppdages automatisk;
+profiling/scoring med dokumenterte juridiske/menneskelige kontroller der påkrevd.
+
+**Tester:** Tenant-isolert entitets-opprettelse; lead/opportunity-livssyklus; idempotent
+hendelse-ingestion; aktivitetstidslinje; oppfoelging-livssyklus; forfalt-spørring; kilde-peker-lenking;
+cross-tenant-tilgang nektet; memory-space-isolasjon; audit uten sensitivt innhold; owner sovereign
+policy; delegert policy trygg.
+
+**Akseptansekriterier (masterplan, full scope, linje 468-472 ordrett):**
+1. "Hva skjer med kunde X?" gir complete source-backed timeline.
+2. "Hvordan går bedriften?" kombinerer sales, product, finance, marketing, operations.
+3. Open loops detected automatically.
+4. Profiling/scoring used with documented legal/human controls where required.
+
+**Bygges IKKE (denne runden / UA-3 P0):** Gmail/Calendar-hendelseslenking (Q-25); AI Mesh-basert
+klassifisering/scoring/attention-queue (Q-25); worker/jobbkø-integrasjon for business-hendelser (Q-25);
+kontrakt/faktura/inntekt-sporing (naturlig hjemme i en fremtidig UA-6, Q-25); numerisk lead/deal-scoring
+(Q-25); D-klasse/hard-delete for business-entiteter (Q-25); proaktiv attention-queue/automatisk handling
+(Q-25); UI/dashboard (separat, senere plan); full telefoni; møtetranskripsjon (avhenger av UA-7, ikke
+bygget). **UA-3 P0 er derfor et forslag til FØRSTE byggbare skive, ikke hele UA-3** - se under.
+
+### UA-3 P0 — Business Domain Foundation = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17)
+
+**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container uten
+Docker - se RUNTIME_GATES.md for full evidens/gap-liste). Navngitt/prioritert fra masterplanens egen
+integrasjons-prioritetstabell ("Internal CRM / Sales pipeline full internal UA-3 P0", linje ~1069) -
+ingen oppfunnet struktur, se D-49 for full begrunnelse. Bygget i `modules/business` (`@jarvis/business`).
+
+**Bygget:**
+1. **Business Graph-domenemodell** (`019_business.sql`) - 6 nye, tenant-scoped FORCE RLS-tabeller
+   (`business_companies`/`business_contacts`/`business_leads`/`business_opportunities`/
+   `business_activities`/`business_followups`), SAMME RLS-mønster som `knowledge_documents`
+   (017_knowledge.sql). Idempotent kilde-ingestion via `UNIQUE(tenant_id, source_type,
+   source_instance_id, external_id)` (leads/aktiviteter) og `idempotency_key` (followups).
+2. **`BusinessService`** (`service.ts`) - gjenbruker `withMemoryTransaction` fra `@jarvis/memory`
+   uendret; CRUD/livssyklus for alle 6 entiteter, kunde-tidslinje, forfalt-oppfoelging-spørring,
+   grunnleggende drifts-metrikker. Follow-ups er en VANLIG relasjonstabell, IKKE rutet via
+   `PgTaskQueue`/`tasks`-jobbkøen (den er for agent-jobbkjøring, ikke menneske-vendte TODO-er).
+3. **`BusinessTransport implements ToolTransport`** - ruter 13 ToolGateway-handlinger til
+   `BusinessService`, klassifisert A (5 reads)/B (5 enkle reversible writes)/C (3 tilstandsoverganger),
+   INGEN D-klasse. `BusinessInternalSecretProvider` løser credential-kravet for et rent internt verktøy
+   (ikke-hemmelig sentinel, wiret via EKSISTERENDE `FallbackSecretProvider`-primitiv).
+4. **ToolGateway-registrering** - `business`-nøkkelen lagt til som femte, ubetinget konstruert
+   transport i `firstWaveTools({...})` i `main.ts`/`worker-main.ts`, samme mønster som
+   email/calendar/github/telegram.
+
+**Suite-verifisert (897/897 - 24 nye tester denne runden, se kvalitetsrapport i RUNTIME_GATES.md):**
+tenant-isolert entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
+aktivitetstidslinje, oppfoelging-livssyklus (create/complete/cancel/overdue), kilde-peker-lenking
+(canonical_uri, ingen FK til knowledge_documents - strukturelt Q-20-trygt), cross-tenant/memory-space-
+isolasjon (RLS mot ekte embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring
+(owner sovereign + delegert policy, EKSISTERENDE PolicyGateway-mekanikk, ingen ny logikk), audit-
+metadata uten sensitivt kundeinnhold.
+
+**IKKE host/live-verifisert (krever Docker/ekte lokal Postgres på Tobias sin host):** ETT Windows
+host-akseptanseskript er skrevet (`modules/business/scripts/ua3-host-run.ts` →
+`ua3-business-live.ts`, speiler `q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) men IKKE kjørt av
+meg denne runden.
+
+**Bygges IKKE i P0 (uendret fra "Bygges IKKE" over):** se Q-25 for full liste.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (samlet deferred-liste for UA-3 P0).
+
 ---
 
 ## Fase-avhengigheter (oversikt)
