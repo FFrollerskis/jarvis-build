@@ -1346,11 +1346,14 @@ numerisk lead/deal-scoring, D-klasse/hard-delete, UI/dashboard - INGEN av disse 
 **Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (930/930 - 69
 filer), gitleaks (detect, ren). PR #9 merget til `main` (normal merge-commit).
 
-## UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53
+## UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53/D-54
 
-**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY. IKKE VERIFIED, IKKE host-bevist, IKKE merget.**
-Bygget på det VERIFIED/COMPLETE UA-3 P0-fundamentet (D-52) - additiv migrasjon, ingen eksisterende
-P0-tabell endret.
+**Status: FIXED_SUITE / HOST_VERIFY_BLOCKED. IKKE VERIFIED, IKKE merget.** Bygget på det
+VERIFIED/COMPLETE UA-3 P0-fundamentet (D-52) - additiv migrasjon, ingen eksisterende P0-tabell endret.
+**Ekte host-kjøring #1 av Tobias (`run_id 19a7f3a4`):** 12 av 14 open-loop/brief-kapabilitetsmarkører
+PASSET live; kun idempotens-akseptansen (harness-bug, IKKE produksjonsfeil) og akseptanse-CLEANUP
+(nytt `cost_events`-FK-funn) feilet - begge fikset i **HOST FIX #1 (D-54)**, se egen underseksjon
+under. Venter på host-kjøring #2 for endelig VERIFIED-status.
 
 **§0 canonical scope-audit (FØR implementering):** masterplanens "Integrasjonskatalog"
 (`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md`, linje 1049-1082) navngir "Support/
@@ -1434,13 +1437,56 @@ dekket, ærlig markert i begge briefer), numerisk lead/deal-scoring, D-klasse/ha
 business-data, UI/dashboard, AI Mesh-basert semantisk tolkning av loops (ingen ambiguitet krevde det i
 dette sliceet).
 
-**Kvalitetsgates:** `pnpm -r typecheck` (14/14 grønt), `eslint .` (0 feil), `pnpm test` (982/982 - 73
-filer, 52 nye), gitleaks (detect, 125 commits scannet, ingen funn).
+**Kvalitetsgates (ved bygging):** `pnpm -r typecheck` (14/14 grønt), `eslint .` (0 feil), `pnpm test`
+(982/982 - 73 filer, 52 nye), gitleaks (detect, 125 commits scannet, ingen funn).
 
-**PR-status:** IKKE opprettet ennå i dette segmentet - branch pushet, draft PR opprettes som neste
-steg. **IKKE merget** - venter eksplisitt på Tobias sin host-verifikasjon (`node --env-file=.env
---experimental-transform-types modules/business/scripts/ua3-open-loops-host-run.ts`), samme mønster som
-UA-3 P0 krevde tre host-runder for.
+**PR-status:** [PR #10](https://github.com/tsworkflow/jarvisbuild/pull/10) opprettet som draft,
+CI grønt (build-test + gitleaks - se egen CI-fiks under). **IKKE merget** - venter eksplisitt på
+Tobias sin neste host-verifikasjon.
+
+## UA-3 NEXT SLICE HOST FIX #1 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id 19a7f3a4`) → D-54
+
+**To distinkte funn, begge undersøkt til rot FØR noe ble fikset - ingen gjettet root cause.**
+
+**(1) `ua3_open_loop_idempotency=FAIL` selv om host-loggen viste `open_loops_before=2
+open_loops_after=2 duplicate_rows_for_same_key=0`** - en akseptanse-HARNESS-bug, IKKE en
+produksjonsfeil. Root cause: IDEMPOTENS-seksjonens verifikasjonsspørring i `ua3-open-loops-live.ts`
+kalte `pool.query(...)` DIREKTE mot `business_open_loops` (FORCE ROW LEVEL SECURITY) UTEN
+`withMemoryTransaction` - under den ekte NOSUPERUSER/NOBYPASSRLS `jarvis_runtime`-rollen (Q-21) ble
+`jarvis.tenant_id`/`jarvis.memory_spaces`-session-GUC-ene ALDRI satt, RLS-predikatet evaluerte til
+NULL, og spørringen så derfor STRUKTURELT 0 rader uansett faktisk databasetilstand. Reprodusert
+direkte mot ekte embedded Postgres (`ua3-open-loops-cost-cleanup.test.ts` §A: samme raw spørring
+finner 0, samme spørring wrappet i `withMemoryTransaction` finner den korrekte 1-raden).
+`OpenLoopService` sine egne metoder (bevist i `open-loop-service.test.ts` §B) bruker
+`withMemoryTransaction` KORREKT overalt - idempotens var aldri broken i produksjon. **Fiks:**
+spørringen wrappet i `withMemoryTransaction`, ingen produksjonskode endret.
+
+**(2) Akseptanse-CLEANUP feilet: `update or delete on table "tenants" violates foreign key constraint
+"cost_events_tenant_id_fkey"`.** Root cause verifisert mot faktisk skjema (IKKE gjenbrukt blindt fra
+P0 sin `audit_events`-fiks, som byggeordren eksplisitt advarte mot): `get_business_brief`(daily)
+konstruerer `new DailyBrief([...], pool)`, og `DailyBrief.generate()` skriver en `cost_events`-rad per
+generert brief (eksisterende run-rate-oppførsel) - en genuint NY avhengighet dette sliceet introduserer
+(P0 hadde ingen brief-handling). `cost_events.tenant_id REFERENCES tenants` (ekte FK, ingen CASCADE)
+OG INGEN append-only-trigger (i motsetning til `audit_events`, som forblir uendret utelatt fra
+cleanup) - samme FK-klasse og fiks-presedens som `ua2-p1b-a-host-run.ts` sin D-45. **Fiks:**
+`DELETE FROM cost_events WHERE tenant_id = $1` lagt til FØRST i `cleanupTenant()`, scoped eksakt til
+den ene synthetic-tenanten.
+
+**Regresjon:** 12 nye tester (`ua3-open-loops-cost-cleanup.test.ts`, inkl. direkte reproduksjon av
+BEGGE feilklassene mot ekte embedded Postgres under en ekte non-bypass rolle) + 2 nye strukturelle
+regresjonsvakter i `ua3-open-loops-host-run-wiring.test.ts`. 982→994 tester totalt.
+**Kvalitetsgates:** `pnpm -r typecheck` (14/14 grønt), `eslint .` (0 feil), `pnpm test` (994/994 - 74
+filer), gitleaks (127 commits scannet, ingen funn).
+
+**CI-fiks (samme PR, før dette HOST FIX-funnet):** `gitleaks/gitleaks-action@v2` 403-et mot
+`/repos/.../pulls/10/commits` (samme "Resource not accessible by integration"-klasse som tidligere
+GitHub MCP-tilgangsproblemer i denne økten) til tross for korrekt `pull-requests: read`-tildeling -
+erstattet med direkte gitleaks-CLI-kjøring mot hele historikken (ingen GitHub API-avhengighet).
+
+**Status: FORTSATT FIXED_SUITE / HOST_VERIFY_BLOCKED.** Q-21/RLS/`OpenLoopService`/`BusinessService`/
+`DailyBrief`/ToolGateway/skjema UENDRET - ingen produksjonslogikk rørt, kun akseptanse-harness-koden
+(verifikasjonsspørring + cleanup-rekkefølge). Venter på Tobias sin neste kjøring av:
+`node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-open-loops-host-run.ts`
 
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle

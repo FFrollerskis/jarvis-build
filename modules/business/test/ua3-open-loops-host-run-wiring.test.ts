@@ -114,6 +114,22 @@ describe("live-scriptet bruker UTELUKKENDE syntetiske, kjøre-unike tenants - al
     const cleanupFnBody = liveScriptSource.slice(cleanupTenantFnIdx, liveScriptSource.indexOf("async function selfHeal"));
     expect(cleanupFnBody).not.toMatch(/DELETE FROM audit_events/);
   });
+  it("HOST FIX #1 (D-54, run_id 19a7f3a4): cost_events slettes FØRST i cleanupTenant() - get_business_brief(daily) skriver en cost_events-rad via DailyBrief, som ellers blokkerer DELETE FROM tenants (FK)", () => {
+    const cleanupTenantFnIdx = liveScriptSource.indexOf("async function cleanupTenant");
+    const cleanupFnBody = liveScriptSource.slice(cleanupTenantFnIdx, liveScriptSource.indexOf("async function selfHeal"));
+    const costEventsIdx = cleanupFnBody.indexOf("DELETE FROM cost_events");
+    const openLoopIdx = cleanupFnBody.indexOf("DELETE FROM business_open_loops");
+    const tenantsIdx = cleanupFnBody.indexOf("DELETE FROM tenants");
+    expect(costEventsIdx).toBeGreaterThan(-1);
+    expect(costEventsIdx).toBeLessThan(openLoopIdx);
+    expect(costEventsIdx).toBeLessThan(tenantsIdx);
+  });
+  it("HOST FIX #1 (D-54): IDEMPOTENS-seksjonens verifikasjonsspørring bruker withMemoryTransaction mot business_open_loops, ikke en raw pool.query som RLS strukturelt filtrerer bort under en non-bypass rolle", () => {
+    const sectionIdx = liveScriptSource.indexOf('section("IDEMPOTENS');
+    const sectionBody = liveScriptSource.slice(sectionIdx, liveScriptSource.indexOf("});", sectionIdx));
+    expect(sectionBody).toContain("withMemoryTransaction(pool, TENANT_A");
+    expect(sectionBody).not.toMatch(/await pool\.query\(\s*"SELECT count/);
+  });
 });
 
 describe("PASS-markører og hard_fail beregnes fra faktiske resultater - aldri hardkodet false", () => {

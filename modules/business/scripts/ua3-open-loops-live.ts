@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
+import { withMemoryTransaction } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "@jarvis/business";
@@ -86,7 +87,18 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
 // sletting. business_open_loops slettes FØR business_followups/business_opportunities (FK uten
 // ON DELETE CASCADE - se 020_business_open_loops.sql). audit_events er BEVISST FRAVÆRENDE her
 // (append-only trigger - se HOST FIX #2 i ua3-business-live.ts for full begrunnelse).
+//
+// HOST FIX #1 (D-54, run_id 19a7f3a4): denne sliceens `get_business_brief` (period=daily)
+// konstruerer `new DailyBrief([...], pool)` med en pool - DailyBrief.generate() skriver DA en
+// `cost_events`-rad per genererte brief ("Run-rate: én rad per generert brief", se daily-brief.ts).
+// P0 hadde INGEN brief-handling og traff derfor aldri dette - en genuint NY avhengighet i dette
+// sliceet. Bekreftet mot faktisk skjema (004_audit_cost.sql): `cost_events.tenant_id REFERENCES
+// tenants` (FK, ingen CASCADE) OG INGEN append-only-trigger (i motsetning til `audit_events`) -
+// derfor trygt slettbar operasjonell test-metadata for KUN denne midlertidige akseptanse-tenanten.
+// SAMME presedens/rekkefølge (FØRST i cleanupTenant()) som `modules/knowledge/scripts/
+// ua2-p1b-a-host-run.ts` sin D-45 HOST FIX for identisk FK-klasse.
 async function cleanupTenant(tenantId: string): Promise<void> {
+  await adminPool.query("DELETE FROM cost_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
@@ -198,9 +210,20 @@ async function main(): Promise<void> {
     const before = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).length;
     await openLoops.runSweep(TENANT_A, "business");
     const after = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).length;
-    const { rows } = await pool.query("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND detection_key = $2", [
-      TENANT_A, `overdue_followup:${diagnostics["overdue_followup_id"]}`
-    ]);
+    // HOST FIX #1 (D-54, run_id 19a7f3a4): denne spoerringen brukte tidligere raw `pool.query()`
+    // UTEN aa gaa via `withMemoryTransaction` - `business_open_loops` har FORCE ROW LEVEL SECURITY
+    // (samme moenster som alle andre business_*-tabeller), saa en raa spoerring under den ekte
+    // NOSUPERUSER/NOBYPASSRLS runtime-rollen (Q-21) faar ALDRI satt `jarvis.tenant_id`/
+    // `jarvis.memory_spaces` session-GUC-ene RLS-policyen krever - `current_setting(..., true)`
+    // returnerer NULL, USING-predikatet blir NULL (ikke true), og spoerringen ser derfor 0 rader
+    // UANSETT faktisk databasetilstand. Dette var en akseptanse-HARNESS-bug (feil spoerre-mønster),
+    // IKKE en produksjonsfeil - `OpenLoopService` sine egne metoder (som `listOpenLoops()` over,
+    // som KORREKT rapporterte before=2/after=2) bruker `withMemoryTransaction` konsekvent overalt.
+    const { rows } = await withMemoryTransaction(pool, TENANT_A, ["business"], (client) =>
+      client.query("SELECT count(*)::int AS n FROM business_open_loops WHERE tenant_id = $1 AND detection_key = $2", [
+        TENANT_A, `overdue_followup:${diagnostics["overdue_followup_id"]}`
+      ])
+    );
     const duplicateCount = (rows[0] as { n: number }).n;
     results.ua3_open_loop_idempotency = before === after && duplicateCount === 1 ? "PASS" : "FAIL";
     log(`open_loops_before=${before} open_loops_after=${after} duplicate_rows_for_same_key=${duplicateCount} -> ua3_open_loop_idempotency: ${results.ua3_open_loop_idempotency}`);
