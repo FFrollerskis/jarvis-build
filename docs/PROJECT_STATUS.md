@@ -1,21 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-3 — Open-Loop Detection + Daily/Weekly Business Brief =
-VERIFIED/COMPLETE → D-56**, se egen seksjon under. Bygget PÅ det VERIFIED/COMPLETE UA-3
-P0-fundamentet (D-49/D-50/D-51/D-52, PR #9 merget). Automatisk deteksjon av forfalte oppfoelginger +
-stagnerte opportunities (deterministisk, ingen AI Mesh i dette sliceet), daglig brief (gjenbruker
-eksisterende `DailyBrief`) + ukentlig brief (ny, liten, kilde-forankret aggregering), 8 nye
-ToolGateway-handlinger, periodisk sveip via eksisterende `DailyScheduler`. Host-bevist av Tobias etter
-tre host-runder (D-54/D-55/D-56, run_id-er `19a7f3a4`→`c7fe8206`→`de01ca07`, siste `hard_fail=false`).
-1010/1010 tester (930→1010, 80 nye totalt over hele sliceen + begge host-fixene). **KUN UA-3 P0 +
-denne sliceen er VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (se Q-25), og masterplan v4.0 som
-helhet er IKKE komplett. **PR #10 merget til `main`.** **Branch:** `claude/ua3-open-loops-business-brief`
-(fra `origin/main` `b306a480`) har fullført sin rolle - IKKE gjenbrukes for neste UA-3-slice · UA-2
-forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring Closeout forblir
-VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42,
-uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7) · UA-2
-masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9) · UA-3 Open-Loop
-Detection + Business Brief merget til `main` (PR #10)
+**Oppdatert:** 2026-08-17 (**UA-3 — Business-Event-Linkage VERIFIED/COMPLETE → D-60**, se egen
+"UA-3 FINAL CLOSURE"-seksjon under. Tobias sin TREDJE host-kjøring (`run_id 6c6a4948`,
+`hard_fail=false`) kom HELE VEIEN gjennom UTEN nye funn - alle markører PASS inkl.
+`ua3_events_audit_safe=PASS` (`audit_event_found=true`), etter HOST FIX #1 (D-58, credential-provider-
+bug) og HOST FIX #2 (D-59, RLS-blind audit-spørring). Canonical-audit (D-57) bekreftet at UA-3 sine
+gjenværende P1-connector-kandidater (Support/tickets, Contracts/e-sign) krever en uavklart
+leverandørbeslutning og derfor IKKE kunne velges - Gmail/Calendar-linkage var den eneste
+ikke-tvetydige sliceen (gjenbruker allerede provider-besluttede UA-0/UA-7-P0-connectorer, låser opp
+UA-3 sitt FØRSTE akseptansekriterium). Bygget PÅ det VERIFIED/COMPLETE open-loop-fundamentet
+(D-53/D-54/D-55/D-56, PR #10 merget). Deterministisk kontakt-/selskaps-gjenkjenning fra Gmail/Calendar
+(e-postadresse-match, ALDRI AI-gjettet), idempotent `business_activities`-registrering (gjenbruker
+EKSISTERENDE mekanisme), open-loop-reevaluering (gjenbruker `OpenLoopService.runSweep()` uendret),
+periodisk synk via EKSISTERENDE `DailyScheduler`. 1082/1082 tester. **Akseptansekriterium 1
+("Hva skjer med kunde X?") er re-evaluert til PARTIAL** - kjernemekanisme VERIFIED/COMPLETE, men full
+katalogbredde (Support/tickets + Contracts/e-sign) gjenstår. **Fire-kriterie UA-3-matrise (D-60):**
+kriterium 1 PARTIAL, kriterium 2 PARTIAL (uendret, kun sales), kriterium 3 COMPLETE/VERIFIED (uendret
+fra D-56), kriterium 4 NOT STARTED (uendret). **KUN UA-3 P0 + open-loop-sliceen + denne sliceen er
+VERIFIED/COMPLETE - HELE UA-3 er FORTSATT IKKE komplett** (se Q-25), og masterplan v4.0 som helhet er
+IKKE komplett. Neste UA-3-slice krever `NEEDS_TOBIAS_DECISION` (tre kandidater, alle blokkert på en
+uavklart beslutning - se "Neste oppgave"). **Branch:** `claude/ua3-business-events-linkage` (fra
+`origin/main` `017172c`) · UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime
+Wiring Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
+VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
+`main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9)
+· UA-3 Open-Loop Detection + Business Brief merget til `main` (PR #10) · UA-3 Business-Event-Linkage
+merget til `main` (PR #11)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -1571,39 +1581,216 @@ er alle IKKE bygget/startet. **Masterplan v4.0 «Sovereign Autonomy» forblir IK
 merget til `main` (normal merge-commit, samme konvensjon som PR #1-#9 - historikk bevart, ikke
 squashet).
 
+## UA-3 — Business-Event-Linkage (Gmail/Calendar → Business OS) = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17, branch `claude/ua3-business-events-linkage` fra `origin/main` `017172c`) → D-57
+
+**Canonical-audit FØR kode (§1-§5 i byggeordren):** full lesing av masterplanens UA-3-seksjon (linje
+460-472) OG Integrasjonskatalogen (linje 1049-1082, IKKE bare den korte fase-headeren) bekreftet at
+UA-3 sine to gjenværende P1-connector-rader ("Support/tickets", "Contracts/e-sign") IKKE har en
+navngitt leverandør noe sted i masterplanen eller øvrige docs - et målrettet søk (Zendesk/Freshdesk/
+Intercom/DocuSign/Dropbox Sign/tilsvarende) ga null treff. Å velge én av dem ville brutt byggeordrens
+eksplisitte §5-provider-beslutnings-gate ("Do NOT choose one merely from popularity" / "Do not burn a
+development round implementing a provider that was never chosen"). Gmail/Calendar er derimot allerede
+navngitte, provider-besluttede UA-0/UA-7-P0-connectorer (linje 1101-1102) - den ENESTE måten å faktisk
+levere UA-3 sitt FØRSTE akseptansekriterium ("Hva skjer med kunde X?", linje 469) uten å oppfinne en ny
+leverandørbeslutning. Q-25 sitt eget item 1 og IMPLEMENTATION_PLAN.md sin "Bygges IKKE"-liste navnga
+dette gjennomgående som det FØRSTE utsatte punktet siden P0 - ingen konkurrerende, like moden kandidat
+fantes. **Konklusjon: unik, ikke-tvetydig neste slice, IKKE en `NEEDS_TOBIAS_DECISION`-situasjon.**
+Se D-57 for full begrunnelse.
+
+**Bygget:**
+1. `GmailTransport.listMessages()` utvidet med `to`/`cc`-headere (additivt felt).
+2. `GoogleCalendarTransport` fikk en ny `list_events`-handling (deltaker-e-poster + `html_link`,
+   `read_events` uendret).
+3. `BusinessEventSyncService` (`modules/business/src/business-event-sync.ts`) - deterministisk
+   entitetsgjenkjenning (e-postadresse, ALDRI AI-gjettet), idempotent aktivitets-registrering via
+   EKSISTERENDE `recordActivity()`, open-loop-reevaluering via EKSISTERENDE `OpenLoopService.
+   runSweep()`.
+4. `BusinessService.findContactsByEmail()` + additiv indeks `021_business_contact_email_lookup.sql`.
+5. ToolGateway: `calendar.list_events` (klasse A) + `business.sync_business_events` (klasse B, INGEN
+   D). `BusinessTransport` fikk en fjerde, valgfri `toolGateway`-parameter.
+6. Periodisk synk via EKSISTERENDE `DailyScheduler` (`job_name="business-events-sync"`, default kl.
+   05), wiret inn i `main.ts`/`worker-main.ts`.
+7. Host-akseptanseskript `ua3-business-events-host-run.ts` → `ua3-business-events-live.ts` - to-delt
+   strategi (ekte connector-reachability + deterministisk FakeTransport-basert entitetsgjenkjenning),
+   gjenbruker UENDRET D-55 sin selvdiagnostiske FK-blokkerings-sperre.
+
+**Suite-verifisert (1053/1053 tester, 43 nye - 19 i `business-event-sync.test.ts`, 12 nye/oppdaterte i
+`business-transport-wiring.test.ts`, 21 i `ua3-business-events-host-run-wiring.test.ts`, minus
+allerede-eksisterende oppdaterte assertions):** e-post-adresse-parsing, motpart-utledning,
+matchet/umatchet/tvetydig entitetsgjenkjenning (Gmail OG Calendar), idempotens, ingen body-/
+beskrivelses-innhold lagret, tenant-/memory-space-isolasjon, open-loop-reevaluering, ToolGateway-
+wiring (owner sovereign + delegert policy), audit-metadata-sikkerhet, ingen AI Mesh/provider-SDK-
+bypass. Lint/typecheck rene.
+
+**STATUS (før HOST FIX #1): FIXED_SUITE / READY_FOR_HOST_VERIFY → D-57.**
+
+## UA-3 Business-Event-Linkage HOST FIX #1 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id 7c5a5289`) → D-58
+
+**Tobias kjørte `node --env-file=.env --experimental-transform-types
+modules/business/scripts/ua3-business-events-host-run.ts` på sin faktiske Windows/Docker-host.**
+Bootstrap/Docker/migrasjoner PASS. `q21_runtime_role_safe=PASS role=jarvis_runtime`,
+`ua3_events_runtime_role=PASS`, CLEANUP PASS (`cleanup_ok=true leftover_activities=0
+leftover_tenants=0`). **PRIMÆR FEIL:** REAL CONNECTOR REACHABILITY feilet med
+`tool_failed:credential_unavailable` (`sync_ok=false`) - nesten alle andre funksjonelle markører
+feilet deretter som en KASKADE av samme rotårsak, ikke uavhengige produksjonsfeil.
+
+**Root cause verifisert presist (kildekode-sporet fra `credential_unavailable` i `gateway.ts` linje
+190, via `BusinessTransport.invoke()` sin `sync_business_events`-gren, til
+`BusinessEventSyncService.syncGmailActivities()`/`syncCalendarActivities()` sine
+`gateway.execute({tool_id:"email"/"calendar",...})`-kall, til selve REACHABILITY-seksjonens
+`realGateway`-konstruksjon):** `ua3-business-events-live.ts` sin REACHABILITY-seksjon (DEL 1)
+konstruerte `realGateway` med `new FallbackSecretProvider({name:"env-empty", get: async()=>null}, new
+BusinessInternalSecretProvider())` - en ALLTID-null stub-secret-provider FEILAKTIG kopiert fra
+vitest-enhetstestenes mønster (der Gmail/Calendar-credentials BEVISST aldri skal resolve) - i stedet
+for den EKTE `new FallbackSecretProvider(new EnvSecretProvider(), new
+BusinessInternalSecretProvider())` som `apps/api/src/main.ts`/`worker-main.ts` allerede bruker
+korrekt (bekreftet ved kildekode-inspeksjon av begge filer - PRODUKSJON VAR ALDRI PÅVIRKET).
+`JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN` ble derfor ALDRI lest fra `.env`, uansett om de faktisk var
+konfigurert riktig hos Tobias. **Dette var en REN akseptanse-harness-bug, ikke en produksjonsfeil eller
+en tenant-credential-isolasjonsfeil** - verifisert eksplisitt (§5 i HOST FIX-ordren) at
+`credential_ref` for Gmail/Calendar er en FAST, per-verktøy-konstant (aldri tenant-avledet) - denne
+arkitekturen har INGEN tenant-scoped credential-binding å bryte, samme globale eierkonto-mønster som
+personlig daily brief allerede brukte uendret siden UA-0/UA-7.
+
+**Fiks:** (1) DEL 1 (REACHABILITY) byttet til ekte `EnvSecretProvider()`; (2) DEL 2 (deterministisk
+`FakeTransport`-basert entitetsgjenkjenning) beholdt BEVISST credential-uavhengighet - en eksplisitt
+dummy-verdi kun for Gmail/Calendar-referansene (samme "test-google-static"-mønster som
+`business-transport-wiring.test.ts`), IKKE `EnvSecretProvider()`. (3) `BusinessEventSyncService.
+syncTenant()` isolerer nå Gmail/Calendar-feil UAVHENGIG (`Promise.all()` + per-provider `.catch()`,
+sanert `error`-felt, `.slice(0,120)`, aldri et rått credential/token) - en ekte
+produksjonsrobusthetsforbedring, ikke bare en akseptanse-fiks. **Urelatert, ekte CI-funn fikset
+samtidig:** en genuin TOCTOU-race i `BusinessService.createFollowup()` (P0/D-49, urørt av D-57) -
+ikke-atomisk SELECT-så-INSERT for `idempotency_key` kunne la to samtidige kall begge INSERT-e,
+reprodusert av en CI-rerun (`business-service.test.ts` test U) - fikset til samme atomiske
+`ON CONFLICT ... DO UPDATE ... RETURNING *`-mønster som `createLead()`/`recordActivity()`.
+
+18 nye tester (1053→1071): 8 i ny `business-event-sync-credential-wiring.test.ts` (EnvSecretProvider
+løser ekte konfigurerte credentials, manglende credential gir sanert `credential_unavailable`, ingen
+credential-lekkasje, BusinessTransport bruker injisert gateway - ikke en nestet/uavhengig en, fast
+credential_ref uavhengig av tenant), 3 nye i `business-event-sync.test.ts` sin "O"-seksjon (Gmail/
+Calendar-feil isolert uavhengig), 7 nye/oppdaterte strukturelle regresjonsvakter i
+`ua3-business-events-host-run-wiring.test.ts`. 1071/1071 tester, lint/typecheck rene.
+
+**STATUS (før HOST FIX #2): FIXED_SUITE / HOST_VERIFY_BLOCKED → D-58.**
+
+## UA-3 Business-Event-Linkage HOST FIX #2 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id b969e9e7`) → D-59
+
+**Tobias kjørte host-akseptansen PÅ NYTT etter HOST FIX #1 - ALLE funksjonelle Business-Event-
+kapabiliteter PASSET LIVE:** `q21_runtime_role_safe=PASS`, `ua3_events_runtime_role=PASS`, EKTE Gmail
+(`gmail_reachable=true gmail_scanned=25`) OG Calendar (`calendar_reachable=true calendar_scanned=0` -
+et tomt resultat er en gyldig PASS, ikke en feil) reachability UAVHENGIG PASS,
+`ua3_events_gmail_matched/_unmatched/_ambiguous=PASS`, `ua3_events_calendar_matched=PASS`,
+`ua3_events_idempotency=PASS`, `ua3_events_no_body_content_stored=PASS`,
+`ua3_events_tenant_isolation/_space_isolation=PASS`, `ua3_events_toolgateway_wiring=PASS`,
+`ua3_events_open_loop_reevaluation=PASS`, `ua3_events_cleanup=PASS` (`leftover_activities=0
+leftover_tenants=0`). **ENESTE feil:** `ua3_events_audit_safe=FAIL` (`audit_payload_excerpt={}`) -
+`hard_fail=true` KUN pga. denne ene markøren.
+
+**Root cause verifisert presist (eksplisitt IKKE rørt noen av de fungerende kapabilitetene over, per
+ordrens §1):** OPEN-LOOP-REEVALUERING-seksjonens audit-verifikasjon brukte en RAW `pool.query()` mot
+`audit_events` - **NØYAKTIG SAMME FEILKLASSE SOM D-54.** `audit_events` har `FORCE ROW LEVEL SECURITY`
+(`005_rls.sql`) med policyen `USING (tenant_id = current_setting('jarvis.tenant_id', true))` - en raw
+spørring under den ekte NOSUPERUSER/NOBYPASSRLS `jarvis_runtime`-rollen setter ALDRI denne
+session-GUC-en, og spørringen ser derfor STRUKTURELT 0 rader uansett faktisk databasetilstand. Selve
+audit-SKRIVINGEN var korrekt hele tiden - `ToolGateway.execute()` kaller `writeAudit()` INNI SAMME
+`withTenantTransaction`-blokk som selve verktøykjøringen, og `ua3_events_toolgateway_wiring=PASS` (fra
+SAMME host-kjøring) beviser at handlingen fullførte. Mekanismen er direkte reprodusert i en ny test
+(`business-event-sync-audit-rls.test.ts` test A): en ekte audit-rad bekreftet å FINNES via `adminPool`,
+mens EKSAKT samme spørring via den non-bypass rollen (`appPool`) returnerer 0 rader.
+
+**Fiks (kun akseptanse-harnesset - ingen produksjonskode rørt):** spørringen wrappet i
+`withTenantTransaction(pool, TENANT_A, ...)` (samme presedens som D-54). Eksistens og
+innholds-sikkerhet gjort til to eksplisitt distinkte krav - `auditFound` inngår nå direkte i selve
+PASS-betingelsen (en manglende/tom spørring kan aldri lenger tolkes som "trygt"). Nøstede
+`email`/`calendar`-audit-rader (fra `BusinessEventSyncService` sine egne `ToolGateway.execute()`-kall)
+bekreftet å ALDRI forveksles med den ytre `business`/`sync_business_events`-spørringen.
+
+12 nye tester (7 i ny `business-event-sync-audit-rls.test.ts` + 5 nye strukturelle regresjonsvakter i
+`ua3-business-events-host-run-wiring.test.ts`, 1071→1082). Lint/typecheck rene.
+
+**STATUS: FIXED_SUITE / HOST_VERIFY_BLOCKED → D-59. IKKE VERIFIED** - venter på Tobias sin TREDJE
+kjøring av:
+`node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-business-events-host-run.ts`
+**KUN UA-3 P0 + open-loop-sliceen er VERIFIED/COMPLETE - denne sliceen er FIXED_SUITE, funksjonelt
+LIVE-bevist, men IKKE ferdig host-bevist (kun audit-verifikasjonsbugen gjenstår) - HELE UA-3 er
+FORTSATT IKKE komplett** (se oppdatert Q-25). Support/tickets, Contracts/e-sign (krever fortsatt en
+Tobias-provider-beslutning), tverr-domene driftsoversikt utover sales, profiling/scoring med juridiske
+kontroller er alle IKKE bygget/startet. **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.**
+
+## UA-3 FINAL CLOSURE — Business-Event-Linkage (2026-08-17, samme dag) — HOST VERIFIED → D-60
+
+**Tobias kjørte `node --env-file=.env --experimental-transform-types
+modules/business/scripts/ua3-business-events-host-run.ts` på sin faktiske Windows/Docker-host - GRØNT
+resultat, run_id `6c6a4948`.** TREDJE host-kjøring, etter HOST FIX #1 (D-58) og HOST FIX #2 (D-59) -
+denne runden kom HELE VEIEN gjennom UTEN nye funn. Alle markører PASS: `q21_runtime_role_safe`,
+`ua3_events_runtime_role`, `ua3_events_gmail_real_connector_reachable` (`gmail_scanned=25`),
+`ua3_events_calendar_real_connector_reachable` (`calendar_scanned=0`, tomt vindu er gyldig PASS),
+`ua3_events_gmail_matched`/`_unmatched`/`_ambiguous`, `ua3_events_calendar_matched`,
+`ua3_events_idempotency`, `ua3_events_no_body_content_stored`, `ua3_events_tenant_isolation`/
+`_space_isolation`, `ua3_events_open_loop_reevaluation`, `ua3_events_toolgateway_wiring`,
+`ua3_events_audit_safe` (`audit_event_found=true`, `audit_action=business.sync_business_events`),
+`ua3_events_cleanup` (`leftover_activities=0 leftover_tenants=0`). Runtime uendret gjennom hele
+kjøringen: `runtime_current_user=jarvis_runtime`, `runtime_role_superuser=false`,
+`runtime_role_bypassrls=false`, `events_runtime_role=jarvis_runtime`. `hard_fail=false`.
+
+**Real vs. synthetic acceptance bekreftet, ikke overklaimet:** ekte Gmail/Calendar API-autentisering/
+reachability mot den faktiske eierkontoen (REAL HOST); matchet/umatchet/tvetydig entitetslenking,
+idempotens, isolasjon, open-loop-reevaluering via `FakeTransport`-gjennom-ekte-`ToolGateway.execute()`
+(CONTROLLED SYNTHETIC RUNTIME). Ingen ekte mailboks-/kalenderdata ble mutert - kun lesing.
+
+**Akseptansekriterium 1-re-evaluering ("Hva skjer med kunde X?"): PARTIAL, IKKE automatisk markert
+COMPLETE.** Kjernemekanismen (Internal CRM/Sales pipeline UA-3 P0 + Gmail/Calendar UA-0/UA-7 P0) er NÅ
+VERIFIED/COMPLETE og host-bevist ende-til-ende - men masterplanens Integrasjonskatalog (linje
+1069-1071) navngir Support/tickets og Contracts/e-sign som EGNE UA-3 P1-kundekontaktsystemer som
+fortsatt IKKE er tilkoblet (ingen leverandør navngitt noe sted, uavklart Tobias-beslutning). Full
+firekriterie-matrise (se D-60 for detaljert evidens per kriterium):
+1. "Hva skjer med kunde X?" = **PARTIAL** (kjernemekanisme COMPLETE, full katalogbredde IKKE).
+2. "Hvordan går bedriften?" = **PARTIAL, uendret fra D-56** (kun `sales` tilkoblet; `product`/
+   `finance`/`marketing`/`operations` avhenger av UA-4/UA-5/UA-6, som IKKE er startet).
+3. "Open loops detected automatically" = **COMPLETE/VERIFIED, uendret fra D-56**.
+4. "Profiling/scoring med dokumenterte juridiske/menneskelige kontroller" = **NOT STARTED, uendret**
+   (krever Tobias produkt-/juridisk-beslutning om scoringens omfang - IKKE et kodbart standardvalg).
+
+**STATUS: VERIFIED/COMPLETE → D-60.** Full evidens (D-57/D-58/D-59/D-60) og oppsummering i
+header-seksjonen øverst i denne filen. **KUN denne UA-3-sliceen + UA-3 P0 + open-loop-sliceen er
+VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (2 av 4 kriterier PARTIAL, 1 av 4 NOT STARTED - se
+oppdatert Q-25). **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.** PR #11 merget til
+`main` (normal merge-commit, samme konvensjon som PR #1-#10 - historikk bevart, ikke squashet).
+
 ## Blokkeringer
-Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
-VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
-multi-provider-evidens (Gemini/Kimi/Ollama). Ytelsesgjeld for voice-latens (Q-19) er åpen,
-ikke-blokkerende. Pieces har ingen kjent integrasjonsflate ennå (Q-22) - egen fremtidig underoppgave.
-Google Drive permission-mutasjon er IKKE live-host-bevist (Q-23) - smalt, ikke-blokkerende
-gjenværende verifikasjonspunkt, krever en egen, eksplisitt godkjent test-runde med en reell avtalt
-ekstern test-konto. P1B-A sin worker-JOBB-live-kjøring er tilsvarende IKKE live-host-bevist (ny, smal
-Q-24-gjenstand, se over) - samme mønster, egen fremtidig test-runde. `claude/hva-skjer-hvordan-ligger-
-0z3ztp` var opprinnelig en aksidentell, tom pre-UA-0-branch (kun én spec-commit, allerede en
-forfader av `main`) - denne økten gjenbrukte NAVNET som sitt tildelte arbeidsbranch-navn og
-omstartet det fra `origin/main` (ingen unik historikk gikk tapt), og branchen bar UA-3 P0-arbeidet,
-merget til `main` via PR #9. Deretter bar branchen UA-3 open-loop-deteksjon + business brief-arbeidet
-(D-53/D-54/D-55/D-56), merget til `main` via PR #10. **Denne branchen har nå fullført sin rolle
-TO GANGER** - IKKE gjenbrukes for neste UA-3-slice. Neste slice starter fra en NY, korrekt navngitt
-branch fra `main` når den godkjennes. Ingen andre branches rørt. Connector-audit-gapene
-(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
+Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
+UA-3 Business-Event-Linkage har INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til
+`main`).
+Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
+Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
+ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE live-host-bevist
+(Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt. P1B-A sin worker-JOBB-live-kjøring er
+tilsvarende IKKE live-host-bevist (Q-24) - samme mønster, egen fremtidig test-runde. **Alle tre
+gjenværende kandidater for neste UA-3-slice (Support/tickets-connector, Contracts/e-sign-connector,
+profiling/scoring-design) er blokkert på en EKSPLISITT Tobias-beslutning** (leverandørvalg for de to
+første; produkt-/juridisk scope for scoring) - IKKE kodbare før den foreligger, se D-60/Q-25 item 8.
+Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert
+backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» er FORMELT VERIFIED/COMPLETE → D-56**
-(host-bevist, run_id `de01ca07`, `hard_fail=false`, PR #10 merget til `main`). **HELE UA-3 er FORTSATT
-IKKE komplett** - masterplanens fire akseptansekriterier (kunde-tidslinje/bedriftshelse-på-tvers-av-
-domener/automatisk open-loop-deteksjon/profiling-scoring-med-juridiske-kontroller) har nå kriterium 3
-("open loops detected automatically") FULLT dekket av denne sliceen, men de tre andre er KUN delvis
-eller ikke dekket (se oppdatert Q-25 for full gjenstående-liste). **Eksplisitt IKKE bygget i denne
-sliceen:** Support/tickets- og Contracts/e-sign-connectorer (forblir UA-3 P1-kandidater), Gmail/
-Calendar-hendelseslenking, full tverr-domene bedriftshelse, numerisk scoring, D-klasse/hard-delete,
-UI. **Neste canonical UA-3-slice er IKKE valgt eller godkjent ennå** - kandidater identifisert fra
-masterplan-teksten (Support/tickets og Contracts/e-sign er de eksplisitt navngitte UA-3 P1-
-connector-radene; Gmail/Calendar-hendelseslenking ville låse opp akseptansekriterium 1) må
-re-verifiseres mot canonical tekst FØR noe bygges, samme disiplin som §0 i denne sliceens byggeordre
-krevde. **IKKE startet:** UA-3 P1/P2 i noen form, UA-4, noen annen UA-fase. Faseporten gjelder
-fortsatt strengt (CLAUDE.md-regel 10) - venter på en egen, eksplisitt byggeordre fra Tobias/
+**UA-3 «Business-Event-Linkage» er VERIFIED/COMPLETE → D-60.** PR #11 merget. **HELE UA-3 er FORTSATT
+IKKE komplett** - masterplanens fire akseptansekriterier: kriterium 3 COMPLETE/VERIFIED (uendret fra
+D-56); kriterium 1 nå PARTIAL (kjernemekanisme VERIFIED, full katalogbredde gjenstår); kriterium 2
+PARTIAL (kun sales); kriterium 4 NOT STARTED (se oppdatert Q-25).
+**`NEEDS_TOBIAS_DECISION` for neste canonical UA-3-slice** - tre kandidater identifisert, ALLE krever
+en uavklart Tobias-beslutning FØR noen kan bygges:
+1. **Support/tickets-connector** (UA-3 P1, masterplan linje 1070) - krever leverandørvalg (f.eks.
+   Zendesk/Freshdesk/Intercom - kun eksempler, IKKE forhåndsvalgt).
+2. **Contracts/e-sign-connector** (UA-3 P1, masterplan linje 1071) - krever leverandørvalg (f.eks.
+   DocuSign/Dropbox Sign - kun eksempler, IKKE forhåndsvalgt).
+3. **Profiling/scoring med juridiske/menneskelige kontroller** (akseptansekriterium 4) - krever et
+   produkt-/juridisk scope-valg (hva skal scores, hvilken terskel utløser menneskelig kontroll,
+   rettslig grunnlag) - IKKE et arkitektur-detalj som kan velges autonomt.
+**IKKE valgt eller startet i denne runden.** Tverr-domene driftsoversikt (kriterium 2) avhenger
+arkitektonisk av UA-4/UA-5/UA-6-connectorer (product/finance/marketing/operations), som selv IKKE er
+startet - ligger derfor utenfor "neste UA-3-slice"-scopet inntil de fasene begynner. **IKKE startet:**
+UA-3 P1/P2 utover de tre kandidatene over, UA-4, noen annen UA-fase. Faseporten gjelder fortsatt
+strengt (CLAUDE.md-regel 10) - venter på en egen, eksplisitt byggeordre/-beslutning fra Tobias/
 arkitekten før noe av det ovennevnte begynner.
 
 Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full

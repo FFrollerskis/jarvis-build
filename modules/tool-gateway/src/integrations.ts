@@ -259,6 +259,19 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_EMAIL_TOKEN",
       output_trust: "untrusted", transport: transport("email")
     },
+    // UA-3 business-event-linkage (D-57): struktur-fokusert kalenderlisting med
+    // faktiske deltaker-e-poster + html_link - brukes til deterministisk
+    // kontakt-/selskaps-gjenkjenning (§9 i byggeordren), IKKE av personlig
+    // daily brief (som fortsatt bruker read_events uendret). Lagt til på
+    // SLUTTEN av arrayet - eksisterende tester indekserer posisjonelt.
+    {
+      tool_id: "calendar", action: "list_events", description: "List kalenderhendelser MED deltaker-e-poster + kilde-lenke (untrusted ingestion, for forretnings-entitetsgjenkjenning)",
+      input_schema: record({ from: z.string(), to: z.string(), max: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["calendar.readonly"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_TOKEN",
+      output_trust: "untrusted", transport: transport("calendar")
+    },
     // UA-3 P0 (Business Domain Foundation, D-49): rent internt Business Graph-
     // verktøy - INGEN ekstern leverandør, `credential_ref` er en ikke-hemmelig
     // sentinel (se @jarvis/business sin BusinessInternalSecretProvider) kun
@@ -437,6 +450,23 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       capability_class: "B", scopes: ["business.write"], reversible: true,
       rollback_procedure: "sett next_action tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    // UA-3 business-event-linkage (D-57): synkroniser Gmail/Calendar via de
+    // EKSISTERENDE UA-0/UA-7-P0-connectorene inn i Business OS-tidslinjen -
+    // deterministisk kontakt-/selskaps-gjenkjenning, ALDRI kildeinnhold kopiert
+    // (§15). Skriver KUN via `BusinessService.recordActivity()` sin allerede
+    // idempotente `ON CONFLICT (tenant_id, source_type, source_instance_id,
+    // external_id)` - ingen ny idempotens-mekanisme. Klasse B (interne
+    // forretnings-tilstandsskrivinger avledet fra allerede-autoriserte
+    // lese-handlinger - samme klasse som `record_activity` selv). Lagt til på
+    // SLUTTEN av arrayet - eksisterende tester indekserer posisjonelt.
+    {
+      tool_id: "business", action: "sync_business_events", description: "Synkroniser nylige Gmail/Calendar-hendelser inn i forretningstidslinjen (deterministisk kontakt-/selskaps-gjenkjenning, aldri gjettet)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ingen automatisk angring - append-only tidslinje, re-sync er trygt (idempotent)", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
     }
   ];

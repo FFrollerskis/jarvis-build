@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
+import { FakeTransport, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "../src/index.ts";
 
 /**
@@ -22,6 +22,8 @@ let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
 let toolGateway: ToolGateway;
+let emailFake: FakeTransport;
+let calendarFake: FakeTransport;
 
 const TENANT = "tenant-biz-wiring";
 const ownerIdentity: IdentityContext = {
@@ -62,13 +64,23 @@ beforeAll(async () => {
   toolGateway = new ToolGateway(
     appPool, policy,
     new FallbackSecretProvider(
-      { name: "env-empty", get: async () => null },
+      // UA-3 business-event-linkage (D-57): returnerer et dummy-credential KUN
+      // for Gmail/Calendar-referansene (behøvd av sync_business_events sin
+      // interne bruk av email/calendar-verktøyene) - business.* sin egen
+      // credential_ref faller fortsatt gjennom til den EKTE
+      // BusinessInternalSecretProvider under, uendret fra før.
+      { name: "test-google-static", get: async (ref) => (ref === "JARVIS_EMAIL_TOKEN" || ref === "JARVIS_GOOGLE_TOKEN") ? "dummy-google-cred" : null },
       new BusinessInternalSecretProvider()
     )
   );
   const service = new BusinessService(appPool);
   const openLoops = new OpenLoopService(appPool);
-  for (const tool of firstWaveTools({ business: new BusinessTransport(service, openLoops, appPool) })) toolGateway.register(tool);
+  emailFake = new FakeTransport(() => ({ data: { messages: [] } }));
+  calendarFake = new FakeTransport(() => ({ data: { events: [] } }));
+  for (const tool of firstWaveTools({
+    business: new BusinessTransport(service, openLoops, appPool, toolGateway),
+    email: emailFake, calendar: calendarFake
+  })) toolGateway.register(tool);
 }, 240_000);
 
 afterAll(async () => {
@@ -81,7 +93,7 @@ describe("registrering: alle 21 business-handlinger er registrert med riktig ris
   it("A-klasse for lesing, B for enkle reversible skrivinger, C for tilstandsoverganger - ingen D i dette sliceet", () => {
     const defs = firstWaveTools({});
     const business = new Map(defs.filter((d) => d.tool_id === "business").map((d) => [d.action, d.capability_class]));
-    expect(business.size).toBe(21);
+    expect(business.size).toBe(22);
     expect(business.get("create_company")).toBe("B");
     expect(business.get("create_contact")).toBe("B");
     expect(business.get("create_lead")).toBe("B");
@@ -105,6 +117,9 @@ describe("registrering: alle 21 business-handlinger er registrert med riktig ris
     expect(business.get("defer_open_loop")).toBe("C");
     expect(business.get("assign_open_loop")).toBe("B");
     expect(business.get("set_open_loop_next_action")).toBe("B");
+    // UA-3 business-event-linkage (D-57): synk avledet fra allerede-autoriserte
+    // lese-handlinger - samme klasse som record_activity selv.
+    expect(business.get("sync_business_events")).toBe("B");
     expect([...business.values()]).not.toContain("D");
   });
 });
@@ -234,5 +249,38 @@ describe("UA-3 next slice (D-53): open-loop-handlinger kjoerer gjennom SAMME Too
     );
     const payload = JSON.stringify((rows[0] as { payload: unknown }).payload);
     expect(payload).not.toContain(sensitiveReason);
+  });
+});
+
+describe("UA-3 business-event-linkage (D-57): sync_business_events kjoerer gjennom SAMME ToolGateway-pipeline", () => {
+  it("owner sin sync_business_events (klasse B) kjoerer uten approval og gaar via de registrerte email/calendar-verktoeyene", async () => {
+    emailFake.calls.length = 0;
+    calendarFake.calls.length = 0;
+    const result = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "sync_business_events",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(result.ok).toBe(true);
+    expect(emailFake.calls.some((c) => c.action === "list_messages")).toBe(true);
+    expect(calendarFake.calls.some((c) => c.action === "list_events")).toBe(true);
+  });
+
+  it("en delegat MED aktiv auth faar klasse-B sync_business_events (samme EKSISTERENDE class_b_reversible_internal-regel som resten av business.*)", async () => {
+    const result = await toolGateway.execute({
+      identity: delegateIdentity, tool_id: "business", action: "sync_business_events",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("audit-metadata for sync_business_events inneholder aldri Gmail/Calendar-innhold", async () => {
+    const { rows } = await adminPool.query(
+      "SELECT payload FROM audit_events WHERE tenant_id = $1 AND tool_id = 'business' AND action = 'sync_business_events' ORDER BY at DESC LIMIT 1",
+      [TENANT]
+    );
+    expect(rows).toHaveLength(1);
+    const payload = JSON.stringify((rows[0] as { payload: unknown }).payload);
+    expect(payload).toContain("credential_ref");
+    expect(payload).not.toMatch(/subject|body_text|attendees/i);
   });
 });

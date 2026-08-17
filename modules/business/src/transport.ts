@@ -1,10 +1,11 @@
 import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { DailyBrief } from "@jarvis/tool-gateway";
-import type { ToolTransport } from "@jarvis/tool-gateway";
+import type { ToolGateway, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
+import { BusinessEventSyncService } from "./business-event-sync.ts";
 
 /**
  * D-49: `ToolTransport.invoke(action, parameters, credential)` gir - som for
@@ -20,10 +21,13 @@ import type { OpenLoopService } from "./open-loop-service.ts";
  * utelatt fra dette sliceet (for stor endring for smallest-coherent-unit).
  */
 export class BusinessTransport implements ToolTransport {
+  private eventSync?: BusinessEventSyncService;
+
   constructor(
     private readonly service: BusinessService,
     private readonly openLoops?: OpenLoopService,
-    private readonly pool?: pg.Pool
+    private readonly pool?: pg.Pool,
+    private readonly gateway?: ToolGateway
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -200,6 +204,15 @@ export class BusinessTransport implements ToolTransport {
         );
         return { ...(row ? { external_id: row.open_loop_id } : {}), data: row as unknown as JsonValue };
       }
+      case "sync_business_events": {
+        const identity: IdentityContext = {
+          person_id: "system", tenant_id: tenantId, memory_space_id: memorySpace,
+          session_id: `business-events-sync-${tenantId}`, device_id: "jarvis-core",
+          channel: "api", auth_strength: "active"
+        };
+        const result = await this.requireEventSync().syncTenant(tenantId, memorySpace, identity);
+        return { data: result as unknown as JsonValue };
+      }
       default:
         throw new Error(`business_action_not_implemented:${action}`);
     }
@@ -213,6 +226,12 @@ export class BusinessTransport implements ToolTransport {
   private requirePool(): pg.Pool {
     if (!this.pool) throw new Error("business_pool_not_configured");
     return this.pool;
+  }
+
+  private requireEventSync(): BusinessEventSyncService {
+    if (!this.gateway) throw new Error("business_event_sync_gateway_not_configured");
+    this.eventSync ??= new BusinessEventSyncService(this.gateway, this.service, this.requireOpenLoops());
+    return this.eventSync;
   }
 }
 

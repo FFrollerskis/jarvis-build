@@ -572,6 +572,9 @@ bygget). **UA-3 P0 er derfor et forslag til FØRSTE byggbare skive, ikke hele UA
 **Automatisk open-loop-deteksjon + daglig/ukentlig business brief er NÅ bygget OG VERIFIED/COMPLETE
 (D-53/D-54/D-55/D-56, se under) - FJERNET fra "Bygges IKKE"-listen, host-bevist på ekte Windows/Docker-
 host (run_id `de01ca07`, `hard_fail=false`).**
+**Gmail/Calendar-hendelseslenking er NÅ BYGGET, men IKKE ennå host-verifisert (D-57, se under)** -
+status FIXED_SUITE / READY_FOR_HOST_VERIFY, FJERNET fra den gjenværende deferred-listen i Q-25 sitt
+tidligere item 1.
 
 ### UA-3 P0 — Business Domain Foundation = VERIFIED/COMPLETE (2026-08-17, host-bevist run_id `ca2d9248`)
 
@@ -690,6 +693,84 @@ VEIEN gjennom, alle 16 markører PASS, `hard_fail=false`, ingen nye funn.
 P1-connector-kandidater); Gmail/Calendar-hendelseslenking; full tverr-domene bedriftshelse; numerisk
 lead/deal-scoring; D-klasse/hard-delete; UI/dashboard; AI Mesh-basert semantisk tolkning (ingen
 ambiguitet krevde det).
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3,
+inkl. det som fortsatt gjenstår etter denne sliceen).
+
+### UA-3 — Business-Event-Linkage (Gmail/Calendar → Business OS) = VERIFIED/COMPLETE (2026-08-17) → D-57/D-58/D-59/D-60
+
+**Status: VERIFIED/COMPLETE → D-60**, host-bevist av Tobias på ekte Windows/Docker-host (run_id
+`6c6a4948`, `hard_fail=false`). HOST FIX #1 (D-58) rettet en credential-provider-bug (første
+host-forsøk, `run_id 7c5a5289`). HOST FIX #2 (D-59) rettet en RLS-blind audit-verifikasjonsspørring
+(andre host-forsøk, `run_id b969e9e7` - ALL funksjonell kapabilitet allerede LIVE-bevist da). TREDJE
+host-forsøk (`run_id 6c6a4948`) kom HELE VEIEN gjennom, alle markører PASS, ingen nye funn. Bygget PÅ
+det VERIFIED/COMPLETE open-loop-fundamentet (D-56), additiv migrasjon. **KUN denne sliceen er
+VERIFIED - HELE UA-3 er FORTSATT IKKE komplett**, se D-60 sin firekriterie-akseptansematrise og
+oppdatert Q-25.
+Canonical-audit (§1-§5 i byggeordren) bekreftet at UA-3 sine gjenværende P1-connector-kandidater
+("Support/tickets", "Contracts/e-sign", masterplan linje 1070-1071) IKKE har en navngitt leverandør noe
+sted i canonical dokumenter - å velge én ville brutt ordrens eksplisitte provider-beslutnings-gate.
+Gmail/Calendar er derimot allerede provider-besluttede UA-0/UA-7-P0-connectorer (linje 1101-1102) - den
+ENESTE måten å levere UA-3 sitt FØRSTE akseptansekriterium ("Hva skjer med kunde X?", linje 469) uten å
+oppfinne en leverandørbeslutning. Se D-57 for full canonical-audit-begrunnelse.
+
+**Bygget:**
+1. **`GmailTransport.listMessages()`** utvidet med `to`/`cc`-headere (additivt felt, ingen breaking
+   endring for eksisterende `EmailAttachmentKnowledgeSource`-forbruker).
+2. **`GoogleCalendarTransport`** fikk en NY `list_events`-handling (deltaker-e-poster + `html_link`) -
+   `read_events` (personlig daily brief) er UENDRET, samme separasjons-mønster som Gmail sin
+   `read_inbox`/`list_messages`-splitt (D-43).
+3. **`BusinessEventSyncService`** (`business-event-sync.ts`) - deterministisk entitetsgjenkjenning
+   (`extractCounterpartEmails`/`findContactsByEmail`, INGEN AI Mesh), idempotent aktivitets-registrering
+   via EKSISTERENDE `recordActivity()`-mekanisme, `syncTenant()` kaller `OpenLoopService.runSweep()`
+   uendret etter hver synk.
+4. **`BusinessService.findContactsByEmail()`** - ny metode, case-insensitiv, additiv indeks
+   (`021_business_contact_email_lookup.sql`).
+5. **ToolGateway** - ny `calendar.list_events` (klasse A) og `business.sync_business_events` (klasse B,
+   INGEN D). `BusinessTransport` fikk en fjerde, valgfri `toolGateway`-konstruktørparameter.
+6. **Periodisk synk** via EKSISTERENDE `DailyScheduler` (`job_name="business-events-sync"`,
+   `JARVIS_BUSINESS_EVENTS_SYNC_HOUR`, default kl. 05), wiret inn i `main.ts` (uendret i
+   `worker-main.ts` utover selve `BusinessTransport`-konstruksjonen).
+7. **Host-akseptanseskript** `ua3-business-events-host-run.ts` → `ua3-business-events-live.ts` - to-delt
+   strategi (ekte connector-reachability + deterministisk FakeTransport-basert entitetsgjenkjenning),
+   gjenbruker UENDRET D-55 sin selvdiagnostiske FK-blokkerings-sperre.
+
+**Suite-verifisert (1071/1071 tester totalt, 61 nye over hele sliceen inkl. HOST FIX #1 - se
+RUNTIME_GATES.md):** e-post-adresse-parsing, motpart-utledning (From/To/Cc), matchet/umatchet/tvetydig
+entitetsgjenkjenning (Gmail OG Calendar), idempotens (re-synk gir ingen duplikat), ingen body-/
+beskrivelses-innhold lagret (kun kilde-peker), tenant-/memory-space-isolasjon, open-loop-reevaluering,
+ToolGateway-wiring (owner sovereign + delegert policy), audit-metadata uten sensitivt innhold, ingen
+direkte fetch/provider-SDK/AI Mesh-bruk, EnvSecretProvider-credential-oppløsning, uavhengig
+Gmail/Calendar-feilhåndtering, ingen credential-lekkasje.
+
+**HOST FIX #1 (samme dag, D-58):** Tobias sin FØRSTE host-kjøring (`run_id 7c5a5289`) traff
+`tool_failed:credential_unavailable` på REACHABILITY - rotårsak: akseptanseskriptets REACHABILITY-
+seksjon brukte en alltid-null stub-secret-provider i stedet for den ekte `EnvSecretProvider()`
+produksjonen selv bruker (ren harness-bug, produksjon uendret). Fikset + Gmail/Calendar rapporteres nå
+uavhengig av hverandre (§9) + en urelatert, ekte race i `createFollowup()` (P0/D-49) funnet via CI
+fikset samtidig. Se D-58 for full detalj.
+
+**HOST FIX #2 (samme dag, D-59):** Tobias sin ANDRE host-kjøring (`run_id b969e9e7`) beviste ALLE
+funksjonelle Business-Event-kapabiliteter LIVE (ekte Gmail `scanned=25`/Calendar-reachability,
+matched/unmatched/ambiguous, idempotens, tenant-/space-isolasjon, open-loop-reevaluering, cleanup) -
+KUN `ua3_events_audit_safe=FAIL` blokkerte. Rotårsak: SAMME feilklasse som D-54 - en RLS-blind raw
+`pool.query()` mot `audit_events` (FORCE ROW LEVEL SECURITY), IKKE en produksjonsfeil (audit-skrivingen
+skjer inni SAMME `withTenantTransaction` som selve verktøykjøringen). Fikset til `withTenantTransaction()`
+(ren akseptanse-harness-fiks). Se D-59 for full detalj.
+
+**HOST VERIFICATION (samme dag, D-60):** Tobias sin TREDJE host-kjøring (`run_id 6c6a4948`,
+`hard_fail=false`) kom HELE VEIEN gjennom - alle markører PASS inkl. `ua3_events_audit_safe=PASS`
+(`audit_event_found=true`), ingen nye funn. Slice-status oppgradert til VERIFIED/COMPLETE. Se D-60 for
+full evidens, host-proven-kapabilitetsliste og re-evaluering av UA-3 sine fire akseptansekriterier
+(kriterium 1 "Hva skjer med kunde X?" er KUN PARTIAL på full katalogbredde - Support/tickets og
+Contracts/e-sign gjenstår, uavklart Tobias-provider-beslutning). PR #11 merget til `main`.
+
+**Bygges IKKE i denne sliceen:** Support/tickets- og Contracts/e-sign-connectorer (krever fortsatt en
+Tobias-provider-beslutning); AI Mesh-basert semantisk aktivitets-sammendrag (deterministisk emne-/
+tittel-basert summary er tilstrekkelig for dette sliceet); event-/webhook-drevet synk (periodisk
+`DailyScheduler`, ikke sanntid); sammenslått multi-tenant Gmail/Calendar-henting (per-tenant kall mot
+samme konto - se Q-25 item 10); full tverr-domene bedriftshelse; numerisk lead/deal-scoring;
+D-klasse/hard-delete; UI/dashboard.
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3,
 inkl. det som fortsatt gjenstår etter denne sliceen).

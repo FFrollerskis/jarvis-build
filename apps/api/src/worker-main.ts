@@ -81,7 +81,10 @@ const openLoopService = new OpenLoopService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
-  business: new BusinessTransport(businessService, openLoopService, pool),
+  // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
+  // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
+  // - identisk wiring-mønster som apps/api/src/main.ts.
+  business: new BusinessTransport(businessService, openLoopService, pool, toolGateway),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

@@ -313,7 +313,7 @@ export class GmailTransport implements ToolTransport {
       const bodyText = bodyData ? Buffer.from(base64UrlToStandard(bodyData), "base64").toString("utf8") : "";
       const attachments = collectAttachmentParts(msg.payload as GmailMimePart | undefined);
       messages.push({
-        id: msg.id, thread: msg.threadId, from: h("From"), subject: h("Subject"),
+        id: msg.id, thread: msg.threadId, from: h("From"), to: h("To"), cc: h("Cc"), subject: h("Subject"),
         at: msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : h("Date"),
         body_text: bodyText,
         attachments: attachments as unknown as JsonValue,
@@ -346,7 +346,17 @@ export class GmailTransport implements ToolTransport {
 export class GoogleCalendarTransport implements ToolTransport {
   constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
-    if (action !== "read_events") throw new Error(`calendar_unsupported_action_${action}`);
+    switch (action) {
+      case "read_events":
+        return this.readEvents(parameters, credential);
+      case "list_events":
+        return this.listEvents(parameters, credential);
+      default:
+        throw new Error(`calendar_unsupported_action_${action}`);
+    }
+  }
+
+  private async readEvents(parameters: Record<string, JsonValue>, credential: string) {
     const token = await googleAccessToken(credential);
     const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}&maxResults=25`;
     const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
@@ -358,6 +368,40 @@ export class GoogleCalendarTransport implements ToolTransport {
       location: e.location ?? e.hangoutLink ?? "",
       attendees: String((e.attendees ?? []).length),
       needs_prep: String(Boolean(e.description && e.description.length > 40)),
+      account: this.accountEmail
+    }));
+    return { data: { events } };
+  }
+
+  /**
+   * UA-3 business-event-linkage: struktur-fokusert listing (i motsetning til
+   * `read_events` sin persondagsbrief-egnede form - kun antall deltakere) -
+   * eksponerer FAKTISKE deltaker-e-poster + en stabil `html_link` (Google sin
+   * egen kalenderlenke) slik at Business OS kan gjøre deterministisk kontakt-
+   * gjenkjenning (§9 i byggeordren) og peke tidslinjen til KILDEN, aldri en
+   * kopi. Bevisst INGEN `description` her (§15/DPIA: aldri kopier fullt
+   * møteinnhold inn i en egen tabell) - kun strukturelle felt samme klasse
+   * som `read_events` allerede eksponerer (tittel/tid/sted), pluss identitet.
+   */
+  private async listEvents(parameters: Record<string, JsonValue>, credential: string) {
+    const token = await googleAccessToken(credential);
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&timeMin=${encodeURIComponent(String(parameters["from"]))}&timeMax=${encodeURIComponent(String(parameters["to"]))}&maxResults=${Number(parameters["max"] ?? 25)}`;
+    const response = await fetch(url, { headers: { authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error(`calendar_error_${response.status}`);
+    const body = (await response.json()) as {
+      items?: Array<{
+        id: string; summary?: string; location?: string; htmlLink?: string;
+        organizer?: { email?: string }; attendees?: Array<{ email?: string; resource?: boolean }>;
+        start?: { dateTime?: string; date?: string }; end?: { dateTime?: string; date?: string };
+      }>;
+    };
+    const events: JsonValue[] = (body.items ?? []).map((e) => ({
+      id: e.id, title: e.summary ?? "(uten tittel)",
+      start: e.start?.dateTime ?? e.start?.date ?? "", end: e.end?.dateTime ?? e.end?.date ?? "",
+      location: e.location ?? "",
+      html_link: e.htmlLink ?? "",
+      organizer: e.organizer?.email ?? "",
+      attendees: (e.attendees ?? []).filter((a) => !a.resource && a.email).map((a) => String(a.email)) as unknown as JsonValue,
       account: this.accountEmail
     }));
     return { data: { events } };
