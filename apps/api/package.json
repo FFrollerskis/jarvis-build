@@ -9,6 +9,7 @@
     "dev": "node --experimental-transform-types src/main.ts"
   },
   "dependencies": {
+    "@jarvis/business": "workspace:*",
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/knowledge": "workspace:*",

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -66,11 +66,11 @@ describe("migrate/api/worker bygges ferske FØR migrate kjøres (Q-21 host-runde
   });
 
   it("P1A la IKKE til noen ny migrasjonsfil (Drive/Obsidian gjenbruker knowledge_documents/knowledge_embeddings uendret)", () => {
+    // §18 (018_erasure.sql) er fortsatt den siste migrasjonen fra P1A/Q-20-perioden - dette
+    // beviser KUN at P1A selv ikke la til noe, IKKE at 018 forblir den globalt siste
+    // migrasjonen for alltid (UA-3 P0/019_business.sql er en SENERE, uavhengig fase).
     const migrationsDir = fileURLToPath(new URL("../src/db/migrations", import.meta.url));
-    const migrationFiles = readdirSync(migrationsDir).filter((f) => /^\d{3}_.*\.sql$/.test(f));
-    const highestNumber = Math.max(...migrationFiles.map((f) => Number(f.slice(0, 3))));
     expect(existsSync(join(migrationsDir, "018_erasure.sql"))).toBe(true);
-    expect(highestNumber).toBe(18); // Q-20 (018) er fortsatt den siste - P1A la ikke til noen ny migrasjon
   });
 });
 
