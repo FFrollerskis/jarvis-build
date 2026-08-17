@@ -460,9 +460,14 @@ purge-vei ennå).
 RUNTIME_GATES.md for full evidens). Eneste gjenværende utsatte punkt: Drive permission-mutasjon
 live-host-bevis (Q-23, egen fremtidig test-runde med reell ekstern testkonto).
 
-### UA-2 P1B-A — E-post-vedlegg + OCR/vision-ingestion-fundament = FIXED_SUITE/READY_FOR_HOST_VERIFY (2026-08-16)
+### UA-2 P1B-A — E-post-vedlegg + OCR/vision-ingestion-fundament = VERIFIED/COMPLETE
+(host-bevist 2026-08-17, run_id `0f43f39d` - se D-47/D-45/D-46 i DECISIONS_AND_ASSUMPTIONS.md og
+PROJECT_STATUS.md sin "UA-2 P1B-A FINAL CLOSURE"-seksjon for full evidens). Eneste gjenværende
+utsatte punkt: P1B-A sin `knowledge-ingest-email`-worker-JOBB-live-kjøring (i motsetning til den
+direkte `KnowledgeSyncService.sync()`-kjøringen host-scriptet selv bruker) er IKKE live-host-bevist
+(ny, smal Q-24-gjenstand, samme mønster som Q-23 sitt Drive-permission-unntak).
 
-**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host-verifisert ennå** (se D-43/D-44 i
+**Status (historisk, ved implementering): IMPLEMENTED + SUITE-VERIFIED** (se D-43/D-44 i
 DECISIONS_AND_ASSUMPTIONS.md, Q-24 i OPEN_QUESTIONS.md, RUNTIME_GATES.md). Bygget PÅ det VERIFIED
 P0/P1A-fundamentet - ingen parallell ingestion-pipeline, ingen ny autentiseringsvei
 (`JARVIS_EMAIL_TOKEN`, EGEN credential fra Drive/Calendar, se D-35).
@@ -498,10 +503,13 @@ sikkerhetsgrenser, deterministisk routing-beslutning, OCR→vision-fallback-kjed
 dedupe/tombstone/Q-20-resurrection-suppresjon-livssyklus mot ekte embedded Postgres, registry-/worker-
 wiring.
 
-**IKKE host/live-verifisert (§28/Q-24 - krever `JARVIS_EMAIL_TOKEN` + `ANTHROPIC_API_KEY` på Tobias sin
-host):** ekte Gmail-listing/vedleggsnedlasting, ekte vision-modellkall, full sync mot en ekte innboks,
-`@napi-rs/canvas` sin native binær lastet korrekt på Windows/Docker-hosten (kun dev-sandkasse-
-verifisert, D-44).
+**Host/live-verifisert (2026-08-17, run_id `0f43f39d`, se D-47):** ekte Gmail-listing/
+vedleggsnedlasting, ekte vision-modellkall, full sync mot en ekte innboks (`scanned=5 created=5
+failed=0`), Q-20-no-resurrection LIVE for e-post-kilden, `@napi-rs/canvas` sin native binær lastet
+korrekt på Windows/Docker-hosten (tidligere kun dev-sandkasse-verifisert, D-44 - nå lukket).
+**IKKE live-host-bevist (smalt, gjenværende, se Q-24):** selve `knowledge-ingest-email`-worker-JOBB-
+kjøringen via `InProcessWorker`/`PgTaskQueue` (host-scriptet kaller `KnowledgeSyncService.sync()`
+direkte) - kun implementasjon-/strukturelt suite-verifisert.
 
 **Bygges IKKE i P1B-A (uendret fra forslaget):** møtetranskripsjon (avhenger av UA-7 Communications
 Hub, ikke bygget), Pieces (Q-22), dedikert lokal OCR-motor, ekte bildestøtte i andre providere enn
