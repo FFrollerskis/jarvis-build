@@ -86,19 +86,84 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
 // Cleanup via `adminPool` - EKSAKT samme scoped tenant_id-er som opprettes under, aldri en bred
 // sletting. business_open_loops slettes FØR business_followups/business_opportunities (FK uten
 // ON DELETE CASCADE - se 020_business_open_loops.sql). audit_events er BEVISST FRAVÆRENDE her
-// (append-only trigger - se HOST FIX #2 i ua3-business-live.ts for full begrunnelse).
+// (append-only trigger, OG har strukturelt INGEN FK mot tenants - se HOST FIX #2 i
+// ua3-business-live.ts for full begrunnelse).
 //
 // HOST FIX #1 (D-54, run_id 19a7f3a4): denne sliceens `get_business_brief` (period=daily)
 // konstruerer `new DailyBrief([...], pool)` med en pool - DailyBrief.generate() skriver DA en
 // `cost_events`-rad per genererte brief ("Run-rate: én rad per generert brief", se daily-brief.ts).
-// P0 hadde INGEN brief-handling og traff derfor aldri dette - en genuint NY avhengighet i dette
-// sliceet. Bekreftet mot faktisk skjema (004_audit_cost.sql): `cost_events.tenant_id REFERENCES
-// tenants` (FK, ingen CASCADE) OG INGEN append-only-trigger (i motsetning til `audit_events`) -
-// derfor trygt slettbar operasjonell test-metadata for KUN denne midlertidige akseptanse-tenanten.
-// SAMME presedens/rekkefølge (FØRST i cleanupTenant()) som `modules/knowledge/scripts/
-// ua2-p1b-a-host-run.ts` sin D-45 HOST FIX for identisk FK-klasse.
+// P0 hadde INGEN brief-handling og traff derfor aldri dette. Bekreftet mot faktisk skjema
+// (004_audit_cost.sql): `cost_events.tenant_id REFERENCES tenants` (FK, ingen CASCADE) OG INGEN
+// append-only-trigger - derfor trygt slettbar operasjonell test-metadata. Samme
+// presedens/rekkefølge (tidlig i cleanupTenant()) som ua2-p1b-a-host-run.ts sin D-45 HOST FIX.
+//
+// HOST FIX #2 (D-55, run_id c7fe8206): SAMME `DailyBrief.generate({pool})`-kall skriver OGSÅ en
+// `brief_seen`-rad PER unikt brief-punkt (stale-suppression-mekanismen, `daily-brief.ts` linje
+// ~188) - en ANNEN, uavhengig avhengighet fra SAMME kilde (ikke oppdaget i HOST FIX #1 fordi kun
+// EN av de to INSERT-ene i den samme kodeblokken ble sporet). Bekreftet mot faktisk skjema
+// (012_brief_seen.sql): `brief_seen.tenant_id REFERENCES tenants` (FK, ingen CASCADE), INGEN
+// append-only-trigger - `jarvis_app` har KUN SELECT/INSERT/UPDATE (ingen DELETE-grant i det hele
+// tatt, selv for produksjonsrollen) - `adminPool` (superuser, omgår grants) er derfor den ENESTE
+// veien til å rydde den, akkurat som for `business_open_loops` (som har samme grant-mønster).
+// SAMME governance-klasse A (mutabel akseptanse-telemetri) som cost_events.
+//
+// §3 i HOST FIX #2-ordren: en FULL, skjema-drevet FK-revisjon (ikke grep-basert gjetting) mot
+// `information_schema` bekreftet 44 fremmednøkler mot `tenants(tenant_id)` totalt. Kildekode-sporing
+// av HVER faktiske INSERT nåbar fra denne akseptanseskriptets kodebane (BusinessService/
+// OpenLoopService/ToolGateway.execute/DailyBrief.generate - grep "INSERT INTO" over de fire
+// modulene) bekrefter at KUN cost_events og brief_seen er nye, tidligere urryddede avhengigheter -
+// de resterende ~30 FK-refererende tabellene (approvals/commitments/deadlines/decisions/devices/
+// entities/erasure_*/events/knowledge_documents/memory_items/memory_sources/messages/
+// organizations/projects/relations/rooms/sessions/sites/summaries/tasks) har INGEN kodebane i
+// dette scriptet som skriver til dem - inkludert dem i cleanup uten en faktisk skrivevei ville vært
+// en blind, ubegrunnet utvidelse (§4 klasse D i ordren: "unexpected dependency -> fail closed and
+// report", ikke "slett forebyggende"). I stedet: `findBlockingTenantDependencies()` under sjekker
+// dette DYNAMISK mot selve databaseskjemaet ved HVER kjøring (ikke en hardkodet liste) - hvis en
+// FRAMTIDIG kodeendring noensinne skriver til en av disse tabellene (kjent eller ikke), blir den
+// automatisk fanget FØR `DELETE FROM tenants` forsøkes, med en presis diagnostikk - ikke en ny
+// blind host-runde. Sjekken kjøres bevisst UFILTRERT (ingen "kjent trygg"-allowliste) - dersom en
+// av de EKSPLISITTE DELETE-linjene over av en eller annen grunn ikke fjernet alt (f.eks. en
+// fremtidig kodefeil), skal DET også fanges her, ikke stille ignoreres.
+/** Kun trygt fordi kilden er `information_schema` (databasens eget kataloginnhold via `adminPool`),
+ * ALDRI brukerinput - identifier-parameterisering finnes ikke i `pg`, saa et strengt allowlist-
+ * regex-filter brukes som ekstra forsvar i dybden FØR interpolering i SQL. */
+function assertSafeIdentifier(name: string): void {
+  if (!/^[a-z_][a-z0-9_]*$/.test(name)) {
+    throw new Error(`ua3_ol_cleanup_unsafe_identifier: "${name}"`);
+  }
+}
+
+interface TenantFkBlocker {
+  table: string;
+  constraint: string;
+  rows: number;
+}
+
+/** §7/§8 i HOST FIX #2-ordren: proaktiv, SKJEMA-DREVET (ikke hardkodet) sjekk FØR
+ * `DELETE FROM tenants` forsøkes - finner ALLE tabeller med en fremmednøkkel mot
+ * `tenants(tenant_id)` som fortsatt har rader for DENNE tenanten, uavhengig av om cleanup-koden
+ * over kjenner til dem fra før. Rapporterer KUN tabell/constraint/antall - aldri radinnhold. */
+async function findBlockingTenantDependencies(tenantId: string): Promise<TenantFkBlocker[]> {
+  const { rows: fkRows } = await adminPool.query(`
+    SELECT tc.table_name, tc.constraint_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND ccu.table_name = 'tenants' AND kcu.column_name = 'tenant_id'
+  `);
+  const blockers: TenantFkBlocker[] = [];
+  for (const row of fkRows as Array<{ table_name: string; constraint_name: string }>) {
+    assertSafeIdentifier(row.table_name);
+    const { rows } = await adminPool.query(`SELECT count(*)::int AS n FROM "${row.table_name}" WHERE tenant_id = $1`, [tenantId]);
+    const n = (rows[0] as { n: number }).n;
+    if (n > 0) blockers.push({ table: row.table_name, constraint: row.constraint_name, rows: n });
+  }
+  return blockers;
+}
+
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM cost_events WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM brief_seen WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
@@ -109,6 +174,17 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM person_tenants WHERE tenant_id = $1", [tenantId]);
+
+  // Selvdiagnostisk sperre: fanger EN HVILKEN SOM HELST gjenværende FK-blokkering (kjent eller ny)
+  // FØR selve DELETE FROM tenants forsøkes - presis diagnostikk i stedet for en ny blind host-runde.
+  const blockers = await findBlockingTenantDependencies(tenantId);
+  if (blockers.length > 0) {
+    for (const b of blockers) {
+      log(`blocking_fk_table=${b.table} blocking_fk_name=${b.constraint} rows_for_test_tenant=${b.rows}`);
+    }
+    throw new Error(`ua3_ol_cleanup_blocked: ${blockers.length} uventet(e) FK-refererende tabell(er) har fortsatt rader for ${tenantId} - se blocking_fk_table-diagnostikk over`);
+  }
+
   await adminPool.query("DELETE FROM tenants WHERE tenant_id = $1", [tenantId]);
 }
 

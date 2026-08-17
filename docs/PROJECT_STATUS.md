@@ -1346,14 +1346,17 @@ numerisk lead/deal-scoring, D-klasse/hard-delete, UI/dashboard - INGEN av disse 
 **Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (930/930 - 69
 filer), gitleaks (detect, ren). PR #9 merget til `main` (normal merge-commit).
 
-## UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53/D-54
+## UA-3 NEXT SLICE — Open-Loop Detection + Daily/Weekly Business Brief = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17, branch `claude/ua3-open-loops-business-brief` fra `origin/main` `b306a480`) → D-53/D-54/D-55
 
 **Status: FIXED_SUITE / HOST_VERIFY_BLOCKED. IKKE VERIFIED, IKKE merget.** Bygget på det
 VERIFIED/COMPLETE UA-3 P0-fundamentet (D-52) - additiv migrasjon, ingen eksisterende P0-tabell endret.
 **Ekte host-kjøring #1 av Tobias (`run_id 19a7f3a4`):** 12 av 14 open-loop/brief-kapabilitetsmarkører
 PASSET live; kun idempotens-akseptansen (harness-bug, IKKE produksjonsfeil) og akseptanse-CLEANUP
-(nytt `cost_events`-FK-funn) feilet - begge fikset i **HOST FIX #1 (D-54)**, se egen underseksjon
-under. Venter på host-kjøring #2 for endelig VERIFIED-status.
+(nytt `cost_events`-FK-funn) feilet - begge fikset i **HOST FIX #1 (D-54)**. **Ekte host-kjøring #2
+(`run_id c7fe8206`):** begge D-54-fikser bekreftet PASS live (idempotens nå PASS); KUN cleanup
+feilet PÅ NYTT med et ANNET, uavhengig `brief_seen`-FK-funn - fikset i **HOST FIX #2 (D-55)**, som
+også la til en selvdiagnostisk, skjema-drevet FK-sjekk for å fange fremtidige avhengigheter
+automatisk. Se egne underseksjoner under. Venter på host-kjøring #3 for endelig VERIFIED-status.
 
 **§0 canonical scope-audit (FØR implementering):** masterplanens "Integrasjonskatalog"
 (`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md`, linje 1049-1082) navngir "Support/
@@ -1486,6 +1489,47 @@ erstattet med direkte gitleaks-CLI-kjøring mot hele historikken (ingen GitHub A
 **Status: FORTSATT FIXED_SUITE / HOST_VERIFY_BLOCKED.** Q-21/RLS/`OpenLoopService`/`BusinessService`/
 `DailyBrief`/ToolGateway/skjema UENDRET - ingen produksjonslogikk rørt, kun akseptanse-harness-koden
 (verifikasjonsspørring + cleanup-rekkefølge). Venter på Tobias sin neste kjøring av:
+`node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-open-loops-host-run.ts`
+
+## UA-3 NEXT SLICE HOST FIX #2 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id c7fe8206`) → D-55
+
+**HOST FIX #1 sine to fikser bekreftet PASS LIVE:** `ua3_open_loop_idempotency=PASS`
+(`open_loops_before=2 open_loops_after=2 duplicate_rows_for_same_key=1` - korrekt, ikke 0 lenger), og
+alle 12 av 14 kapabilitetsmarkører PASSET på nytt (deteksjon/resolusjon/prioritet/kilde-bevis/tenant-
+og space-isolasjon/ToolGateway/daglig+ukentlig brief/domenedeknings-ærlighet/audit). **KUN
+akseptanse-CLEANUP feilet PÅ NYTT** - et ANNET, uavhengig FK-brudd: `brief_seen_tenant_id_fkey`.
+
+**Root cause:** SAMME `DailyBrief.generate({pool})`-kodeblokk som skriver `cost_events` (fikset i
+D-54) skriver OGSÅ en `brief_seen`-rad per unikt brief-punkt (stale-suppression) - to uavhengige
+INSERT-er i samme blokk, D-54 sporet kun én av dem. Bekreftet mot skjema (`012_brief_seen.sql`):
+ekte FK til `tenants`, ingen append-only-trigger, og `jarvis_app` har INGEN DELETE-grant i det hele
+tatt (kun `adminPool` kan rydde den).
+
+**Full, skjema-drevet FK-revisjon (§3 i ordren, ikke gjentatt gjetting):** en `information_schema`-
+spørring mot en ekte migrert database bekreftet 44 fremmednøkler mot `tenants(tenant_id)` totalt.
+Kildekode-sporing av HVER faktiske `INSERT INTO` nåbar fra dette akseptanseskriptets kodebane
+(`BusinessService`/`OpenLoopService`/`ToolGateway.execute`/`DailyBrief.generate`) bekreftet at KUN
+`cost_events` og `brief_seen` er nye avhengigheter - de øvrige ~30 FK-refererende tabellene har
+INGEN skrivevei fra dette scriptet og er bevisst IKKE inkludert i cleanup.
+
+**Selvdiagnostisk sperre lagt til** (`findBlockingTenantDependencies()`): en dynamisk, skjema-drevet
+sjekk (ikke en hardkodet tabelliste) som spør `information_schema` for ALLE FK-er mot
+`tenants(tenant_id)` og teller rader for den ene test-tenanten RETT FØR `DELETE FROM tenants`
+forsøkes i hver `cleanupTenant()`-kjøring - fanger automatisk en FRAMTIDIG, ennå ukjent avhengighet
+med presis diagnostikk (`blocking_fk_table`/`blocking_fk_name`/`rows_for_test_tenant`, aldri
+radinnhold) FØR selve slette-forsøket, i stedet for en tredje blind host-runde for neste
+uoppdagede avhengighet.
+
+**Regresjon:** 16 nye tester (13 i `ua3-open-loops-cost-cleanup.test.ts` inkl. direkte reproduksjon
+av `brief_seen`-FK-bruddet og selvdiagnostikk-mekanismen mot ekte embedded Postgres, + 3 nye
+strukturelle regresjonsvakter). 994→1010 tester totalt. **Kvalitetsgates:** `pnpm -r typecheck`
+(14/14 grønt), `eslint .` (0 feil), `pnpm test` (1010/1010 - 74 filer), gitleaks (128 commits
+scannet, ingen funn).
+
+**Status: FORTSATT FIXED_SUITE / HOST_VERIFY_BLOCKED.** Q-21/RLS/`OpenLoopService`/`BusinessService`/
+`DailyBrief`/ToolGateway/idempotens-fiksen fra D-54 UENDRET - ingen produksjonslogikk rørt igjen, kun
+akseptanse-harness-cleanup-koden utvidet med en genuint ny, robust selvdiagnostisk mekanisme. Venter
+på Tobias sin neste kjøring av:
 `node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-open-loops-host-run.ts`
 
 ## Blokkeringer

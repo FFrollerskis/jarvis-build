@@ -130,6 +130,29 @@ describe("live-scriptet bruker UTELUKKENDE syntetiske, kjøre-unike tenants - al
     expect(sectionBody).toContain("withMemoryTransaction(pool, TENANT_A");
     expect(sectionBody).not.toMatch(/await pool\.query\(\s*"SELECT count/);
   });
+  it("HOST FIX #2 (D-55, run_id c7fe8206): brief_seen slettes i cleanupTenant() - get_business_brief(daily) skriver ogsaa en brief_seen-rad via DailyBrief sin stale-suppression, en ANNEN uavhengig INSERT i SAMME kodeblokk som cost_events (oversett i HOST FIX #1)", () => {
+    const cleanupTenantFnIdx = liveScriptSource.indexOf("async function cleanupTenant");
+    const cleanupFnBody = liveScriptSource.slice(cleanupTenantFnIdx, liveScriptSource.indexOf("async function selfHeal"));
+    const briefSeenIdx = cleanupFnBody.indexOf("DELETE FROM brief_seen");
+    const openLoopIdx = cleanupFnBody.indexOf("DELETE FROM business_open_loops");
+    const tenantsDeleteIdx = cleanupFnBody.lastIndexOf("DELETE FROM tenants");
+    expect(briefSeenIdx).toBeGreaterThan(-1);
+    expect(briefSeenIdx).toBeLessThan(openLoopIdx);
+    expect(briefSeenIdx).toBeLessThan(tenantsDeleteIdx);
+  });
+  it("HOST FIX #2 (D-55): cleanupTenant() kjører en skjema-drevet selvdiagnostikk (findBlockingTenantDependencies) FØR DELETE FROM tenants forsøkes - fanger fremtidige, ennå ukjente FK-avhengigheter uten en ny blind host-runde", () => {
+    const cleanupTenantFnIdx = liveScriptSource.indexOf("async function cleanupTenant");
+    const cleanupFnBody = liveScriptSource.slice(cleanupTenantFnIdx, liveScriptSource.indexOf("async function selfHeal"));
+    const blockerCheckIdx = cleanupFnBody.indexOf("findBlockingTenantDependencies(tenantId)");
+    const tenantsDeleteIdx = cleanupFnBody.lastIndexOf("DELETE FROM tenants");
+    expect(blockerCheckIdx).toBeGreaterThan(-1);
+    expect(blockerCheckIdx).toBeLessThan(tenantsDeleteIdx);
+  });
+  it("HOST FIX #2 (D-55): findBlockingTenantDependencies() spør information_schema DYNAMISK (ingen hardkodet tabelliste) og bruker et strengt identifier-allowlist FØR tabellnavn interpoleres i SQL", () => {
+    expect(liveScriptSource).toContain("information_schema.table_constraints");
+    expect(liveScriptSource).toContain("assertSafeIdentifier(row.table_name)");
+    expect(liveScriptSource).toMatch(/\^\[a-z_\]\[a-z0-9_\]\*\$/);
+  });
 });
 
 describe("PASS-markører og hard_fail beregnes fra faktiske resultater - aldri hardkodet false", () => {
