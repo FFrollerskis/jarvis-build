@@ -1,23 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-3 — Profiling/Scoring (akseptansekriterium 4) → D-61, FIXED_SUITE /
-READY_FOR_HOST_VERIFY**, se egen seksjon under. Svarer på `NEEDS_TOBIAS_DECISION` fra D-60-lukkingen:
-av de tre gjenværende UA-3-kandidatene (Support/tickets-connector, Contracts/e-sign-connector,
-profiling/scoring-design) var profiling/scoring den ENESTE som IKKE krevde en uavklart leverandør-
-beslutning - Tobias sin byggeordre valgte denne. Transparent, 100% deterministisk BUSINESS-
-OPERASJONELL prioritering (`lead_priority_v1`)/risiko-scoring (`opportunity_risk_v1`) over
-`business_leads`/`business_opportunities` - ALDRI generalisert personprofilering (entitetsscope
-strukturelt begrenset via DB-CHECK, aldri kontakt/person). Full forklarbarhet, versjonert regelmotor,
-manuell eier-overstyring (auditert via EKSISTERENDE ToolGateway-audit-vei, rører aldri underliggende
-faktorer), beskyttet-trekk-forbud håndhevet strukturelt (`assertNoProhibitedFactorCodes()`), hoy-
-konsekvens-personbeslutning strukturelt umulig (ingen ekstern handling fra `ScoringService`). Ny
-migrasjon `022_business_scoring.sql` (samme FORCE RLS-mønster som `business_open_loops`). 65 nye
-tester (1082→1147). Bygget PÅ det VERIFIED/COMPLETE Business-Event-Linkage-fundamentet (D-57/D-58/
-D-59/D-60, PR #11 merget). **Status forblir FIXED_SUITE / READY_FOR_HOST_VERIFY - IKKE VERIFIED**,
-venter på Tobias sin FØRSTE `ua3-profiling-scoring-host-run.ts`-kjøring. **HELE UA-3 er FORTSATT IKKE
-komplett** (se Q-25) - Support/tickets, Contracts/e-sign og tverr-domene driftsoversikt utover sales er
-fortsatt ikke bygget/startet, uavklart Tobias-provider-/produktbeslutning for de to første. Masterplan
-v4.0 som helhet er IKKE komplett. **Branch:** `claude/ua3-profiling-scoring-controls` (fra `origin/main`
+**Oppdatert:** 2026-08-17 (**UA-3 Profiling/Scoring HOST FIX #1 → D-62**, se egen seksjon under.
+Tobias sin FØRSTE host-kjøring (`run_id 22226237`) beviste ALLE funksjonelle scoring-kapabiliteter LIVE
+(lead-score=60, opportunity-score=50, faktor-forklaring, kilde-referanser, versjonering, manuell
+overstyring + audit, tenant-/space-isolasjon, audit-personvern, cleanup) - KUN
+`ua3_scoring_idempotent=FAIL` (`duplicate_rows_for_same_lead=0`) blokkerte `hard_fail=false`. Rotårsak:
+SAMME feilklasse som D-54/D-59 - IDEMPOTENS-spørringen i `ua3-profiling-scoring-live.ts` brukte
+`withTenantTransaction()` (kun `jarvis.tenant_id`) mot `business_scores`, som - i motsetning til
+`audit_events` - har en EKSTRA RESTRICTIVE memory-space-policy `withTenantTransaction` aldri setter,
+IKKE en produksjonsfeil (`ScoringService` bruker `withMemoryTransaction()` konsekvent overalt, og
+host-loggens egne `ua3_scoring_lead=PASS`/`ua3_scoring_manual_override=PASS` beviser raden ble lest
+korrekt like før). Fikset D-62 (`withMemoryTransaction()`, ren akseptanse-harness-fiks). Status forblir
+FIXED_SUITE / HOST_VERIFY_BLOCKED - IKKE VERIFIED, venter på Tobias sin ANDRE host-kjøring. Bygget PÅ
+D-61 (transparent, 100% deterministisk BUSINESS-OPERASJONELL prioritering/risiko-scoring, entitetsscope
+strukturelt begrenset til lead/opportunity, aldri kontakt/person). 1160/1160 tester (1147→1160, 13 nye
+i HOST FIX #1). **KUN UA-3 P0 + open-loop-sliceen + Business-Event-Linkage er VERIFIED/COMPLETE - denne
+nyeste sliceen er FIXED_SUITE (suite-bevist + funksjonelt LIVE-bevist, IKKE ferdig host-bevist pga.
+idempotens-verifikasjonsbugen) - HELE UA-3 er FORTSATT IKKE komplett** (se Q-25), og masterplan v4.0
+som helhet er IKKE komplett. **Branch:** `claude/ua3-profiling-scoring-controls` (fra `origin/main`
 `4a19396`) · UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring Closeout
 forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE
 (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7) ·
@@ -1785,12 +1785,67 @@ Support/tickets, Contracts/e-sign (uavklart Tobias-provider-beslutning) og tverr
 utover sales (avhenger av UA-4/UA-5/UA-6, ikke startet) gjenstår. HELE masterplan v4.0 «Sovereign
 Autonomy» forblir IKKE komplett - se D-60/D-61 og oppdatert Q-25.
 
+## UA-3 Profiling/Scoring HOST FIX #1 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id 22226237`) → D-62
+
+**Tobias sin FØRSTE host-kjøring** (`node --env-file=.env --experimental-transform-types
+modules/business/scripts/ua3-profiling-scoring-host-run.ts`) traff `hard_fail=true`, men ALLE
+funksjonelle markører PASSET LIVE:
+
+`q21_runtime_role_safe`, `ua3_scoring_runtime_role`, `ua3_scoring_toolgateway`, `ua3_scoring_lead`
+(`lead_score=60`, faktorer `status_qualified`/`has_active_opportunity`/`recent_activity_7d`),
+`ua3_scoring_explainable`, `ua3_scoring_versioned`, `ua3_scoring_source_backed`,
+`ua3_scoring_protected_traits_blocked`, `ua3_scoring_opportunity` (`opportunity_score=50`, faktorer
+`stage_proposal`/`overdue_followup`), `ua3_scoring_high_impact_blocked`, `ua3_scoring_manual_override`
+(`override_score=88`, `underlying_score_unchanged=true`), `ua3_scoring_override_audit`,
+`ua3_scoring_tenant_isolation`, `ua3_scoring_space_isolation`, `ua3_scoring_audit_safe`,
+`ua3_scoring_cleanup` (`leftover_scores=0 leftover_tenants=0`). **KUN**
+`ua3_scoring_idempotent=FAIL` (`duplicate_rows_for_same_lead=0`) blokkerte.
+
+**Root cause verifisert presist (kildekode-sporet, IKKE gjettet):** IDEMPOTENS-seksjonen i
+`ua3-profiling-scoring-live.ts` verifiserte `business_scores` med `withTenantTransaction()` - denne
+hjelperen setter KUN `jarvis.tenant_id`. `business_scores` (`022_business_scoring.sql`) har - i
+MOTSETNING til `audit_events` (som D-59 korrekt fikset MED `withTenantTransaction`, siden
+`audit_events` KUN har en tenant-policy) - BÅDE en tenant-policy OG en RESTRICTIVE
+memory-space-policy (samme mønster som `business_open_loops`). Uten `jarvis.memory_spaces` satt
+evaluerer memory-space-predikatet til NULL, og RESTRICTIVE-policyen blokkerer STRUKTURELT alle rader -
+**SAMME feilklasse som D-54/D-59, en NY konkret forekomst** (feil hjelpefunksjon valgt for en tabell
+med et EKSTRA policy-lag). Selve SKRIVINGEN var korrekt hele tiden - `ScoringService` bruker
+`withMemoryTransaction()` konsekvent, og host-loggens egne `ua3_scoring_lead=PASS`/
+`ua3_scoring_manual_override=PASS` beviser raden ble lest korrekt like før idempotens-seksjonen kjørte.
+
+**Bevist reprodusert mekanisk** (ny `scoring-idempotency-rls.test.ts`, 9 tester): en ekte
+`recalculate_score` gjennom ToolGateway, `adminPool` bekrefter 1 rad finnes, raw/
+`withTenantTransaction`-spørring under en ekte non-bypass rolle finner FORTSATT 0 rader (identisk
+mekanisme som host-loggen), `withMemoryTransaction()` finner raden korrekt.
+
+**Idempotens-identitet klargjort:** `UNIQUE (tenant_id, entity_type, entity_id, score_type)` er den
+fullstendige identiteten - `rule_version` deltar BEVISST IKKE (kun ÉN gjeldende score per
+entitet/type, ikke en versjonshistorikk-tabell; `audit_events` er den faktiske historikken). Schema
+var allerede korrekt - INGEN endring gjort der.
+
+**Fiks (kun akseptanse-harnesset, ingen produksjonskode rørt):** spørringen wrappet i
+`withMemoryTransaction(pool, TENANT_A, ["business"], ...)`. Diagnostikk omdøpt fra det misvisende
+`duplicate_rows_for_same_lead` til `score_rows_for_same_identity` + eksplisitt
+`idempotency_identity`-felt, slik at fremtidige feilsøkinger kan skille rad-mangel fra RLS-skjult rad
+fra ekte duplikat. 13 nye tester (9 i `scoring-idempotency-rls.test.ts` + 4 nye strukturelle
+regresjonsvakter i `ua3-profiling-scoring-host-run-wiring.test.ts`, 1147→1160). Lint/typecheck rene.
+
+**STATUS: FIXED_SUITE / HOST_VERIFY_BLOCKED → D-62. IKKE VERIFIED** - venter på Tobias sin ANDRE
+kjøring av:
+`node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-profiling-scoring-host-run.ts`
+**KUN UA-3 P0 + open-loop-sliceen + Business-Event-Linkage er VERIFIED/COMPLETE - denne sliceen er
+FIXED_SUITE, funksjonelt LIVE-bevist, men IKKE ferdig host-bevist (kun idempotens-verifikasjonsbugen
+gjenstår) - HELE UA-3 er FORTSATT IKKE komplett** (se oppdatert Q-25). Support/tickets, Contracts/
+e-sign (krever fortsatt en Tobias-provider-beslutning), tverr-domene driftsoversikt utover sales er
+alle IKKE bygget/startet. **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.**
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
 UA-3 Business-Event-Linkage har INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til
-`main`). **UA-3 Profiling/Scoring (D-61) er FIXED_SUITE / READY_FOR_HOST_VERIFY - blokkert på Tobias
-sin FØRSTE host-kjøring** (se egen seksjon over), samme mønster som alle tidligere UA-3-slicer FØR sin
-FØRSTE host-runde.
+`main`). **UA-3 Profiling/Scoring (D-61/D-62) er FIXED_SUITE / HOST_VERIFY_BLOCKED - blokkert på
+Tobias sin ANDRE host-kjøring** (se egen seksjon over - første kjøring `run_id 22226237` traff en
+RLS-blind idempotens-verifikasjonsspørring, nå fikset), samme mønster som alle tidligere
+UA-3-slicer FØR sin endelige grønne host-runde.
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
 Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
 ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE live-host-bevist
@@ -1801,11 +1856,13 @@ kodbare før den foreligger, se D-57/Q-25 item 8. Connector-audit-gapene (GitHub
 Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 «Profiling/Scoring» er FIXED_SUITE / READY_FOR_HOST_VERIFY → D-61 - IKKE VERIFIED.** Umiddelbar
-neste oppgave: Tobias kjører `node --env-file=.env --experimental-transform-types
-modules/business/scripts/ua3-profiling-scoring-host-run.ts` på sin faktiske Windows/Docker-host. Ved
-nye host-funn: samme "ett konkret, ekte host-funn per runde, aldri gjett root cause"-disiplin som
-D-50/D-51/D-54/D-55/D-58/D-59.
+**UA-3 «Profiling/Scoring» er FIXED_SUITE / HOST_VERIFY_BLOCKED → D-62 - IKKE VERIFIED.** Umiddelbar
+neste oppgave: Tobias kjører host-akseptansen PÅ NYTT (se kommando over) - HOST FIX #1 (D-62) rettet
+den siste kjente akseptanse-harness-bugen (RLS-blind idempotens-spørring). ALL funksjonell kapabilitet
+er allerede LIVE-bevist (`run_id 22226237`) - en ANDRE host-kjøring bør derfor gi `hard_fail=false`
+uten nye funn, men skal likevel kjøres for faktisk å bekrefte det. Ved nye host-funn: samme "ett
+konkret, ekte host-funn per runde, aldri gjett root cause"-disiplin som
+D-50/D-51/D-54/D-55/D-58/D-59/D-62.
 **HELE UA-3 er FORTSATT IKKE komplett** - masterplanens fire akseptansekriterier: kriterium 3
 COMPLETE/VERIFIED (uendret fra D-56); kriterium 1 PARTIAL (uendret fra D-60); kriterium 2 PARTIAL
 (uendret, kun sales); kriterium 4 nå IMPLEMENTERT/FIXED_SUITE (D-61), IKKE ennå VERIFIED (se oppdatert

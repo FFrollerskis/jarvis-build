@@ -27,6 +27,7 @@
 import { randomUUID } from "node:crypto";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, withTenantTransaction } from "@jarvis/core";
+import { withMemoryTransaction } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import {
@@ -320,12 +321,25 @@ async function main(): Promise<void> {
       identity: ownerIdentityFor(TENANT_A), tool_id: "business", action: "recalculate_score",
       parameters: { tenant_id: TENANT_A, memory_space: "business", entity_type: "lead", entity_id: leadId }
     });
-    const { rows } = await withTenantTransaction(pool, TENANT_A, (client) =>
+    // HOST FIX #1 (D-62, ekte host-funn run_id `22226237`): TIDLIGERE brukte denne spørringen
+    // `withTenantTransaction()` (kun `jarvis.tenant_id`) - SAMME feilklasse som D-54/D-59, men en
+    // NY konkret forekomst: `business_scores` har (i motsetning til `audit_events`, som D-59
+    // fikset MED `withTenantTransaction`) en EKSTRA RESTRICTIVE memory-space-policy
+    // (`022_business_scoring.sql`, samme mønster som `business_open_loops`) - uten
+    // `jarvis.memory_spaces` satt evaluerer den til NULL og blokkerer strukturelt ALLE rader,
+    // uansett faktisk databasetilstand. Fikset til `withMemoryTransaction()` - SAMME hjelper
+    // `ScoringService` selv bruker for all lesing/skriving mot `business_scores`.
+    const { rows } = await withMemoryTransaction(pool, TENANT_A, ["business"], (client) =>
       client.query("SELECT count(*)::int AS n FROM business_scores WHERE tenant_id = $1 AND entity_id = $2 AND score_type = 'lead_priority'", [TENANT_A, leadId])
     );
-    const duplicateCount = (rows[0] as { n: number }).n;
-    results.ua3_scoring_idempotent = duplicateCount === 1 ? "PASS" : "FAIL";
-    log(`duplicate_rows_for_same_lead=${duplicateCount} -> ua3_scoring_idempotent: ${results.ua3_scoring_idempotent}`);
+    // §7 i HOST FIX-ordren: eksplisitt navngitt som "score_rows_for_same_identity" - antall
+    // rader for den fullstendige idempotens-identiteten (tenant_id, entity_type, entity_id,
+    // score_type), IKKE et duplikat-tall - se test B i scoring-idempotency-rls.test.ts for hvorfor
+    // rule_version bevisst IKKE er en del av denne identiteten (kun ÉN gjeldende score per
+    // entitet, ikke en versjonshistorikk-tabell).
+    const scoreRowsForSameIdentity = (rows[0] as { n: number }).n;
+    results.ua3_scoring_idempotent = scoreRowsForSameIdentity === 1 ? "PASS" : "FAIL";
+    log(`score_rows_for_same_identity=${scoreRowsForSameIdentity} idempotency_identity=tenant_id+entity_type=lead+entity_id+score_type=lead_priority -> ua3_scoring_idempotent: ${results.ua3_scoring_idempotent}`);
   });
 
   await section("MANUELL OVERSTYRING (eier-autorisert, endrer ALDRI underliggende faktorer)", async () => {

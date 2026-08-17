@@ -106,6 +106,34 @@ describe("Q-21/RLS - live-scriptet bruker withTenantTransaction, aldri en RLS-bl
   });
 });
 
+describe("HOST FIX #1 (D-62, ekte host-funn run_id 22226237): IDEMPOTENS-spørringen mot business_scores bruker withMemoryTransaction, aldri withTenantTransaction (business_scores har - i motsetning til audit_events - en EKSTRA memory-space-policy)", () => {
+  it("importerer withMemoryTransaction fra @jarvis/memory", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*withMemoryTransaction[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+  });
+  it("IDEMPOTENS-seksjonen bruker withMemoryTransaction(pool, TENANT_A, [\"business\"], ...) mot business_scores, aldri en RLS-blind withTenantTransaction/raw pool.query()", () => {
+    const idempotensIdx = liveScriptSource.indexOf("IDEMPOTENS");
+    expect(idempotensIdx).toBeGreaterThan(-1);
+    const nextSectionIdx = liveScriptSource.indexOf("await section(", idempotensIdx + 20);
+    const idempotensSection = liveScriptSource.slice(idempotensIdx, nextSectionIdx > -1 ? nextSectionIdx : undefined);
+    expect(idempotensSection).toContain('withMemoryTransaction(pool, TENANT_A, ["business"]');
+    expect(idempotensSection).not.toMatch(/withTenantTransaction\(pool, TENANT_A/);
+    expect(idempotensSection).not.toMatch(/await pool\.query\(\s*"SELECT count/);
+  });
+  it("diagnostikken logger score_rows_for_same_identity (ikke lenger det misvisende duplicate_rows_for_same_lead-navnet)", () => {
+    const idempotensIdx = liveScriptSource.indexOf("IDEMPOTENS");
+    const nextSectionIdx = liveScriptSource.indexOf("await section(", idempotensIdx + 20);
+    const idempotensSection = liveScriptSource.slice(idempotensIdx, nextSectionIdx > -1 ? nextSectionIdx : undefined);
+    expect(idempotensSection).toContain("score_rows_for_same_identity=");
+    expect(idempotensSection).toContain("idempotency_identity=");
+  });
+  it("audit-spørringen (override_audit) forblir UENDRET på withTenantTransaction - audit_events har INGEN memory-space-policy, denne fiksen rører den ALDRI", () => {
+    const overrideAuditIdx = liveScriptSource.indexOf("SELECT payload FROM audit_events");
+    expect(overrideAuditIdx).toBeGreaterThan(-1);
+    const before = liveScriptSource.slice(Math.max(0, overrideAuditIdx - 200), overrideAuditIdx);
+    expect(before).toMatch(/withTenantTransaction\(pool, TENANT_A/);
+  });
+});
+
 describe("høy-konsekvens-forbud (§10) og beskyttet-trekk-forbud (§4) verifiseres LIVE, ikke bare i enhetstester", () => {
   it("sjekker at faktor-kodene er en delmengde av whitelisten OG kaller assertNoProhibitedFactorCodes eksplisitt", () => {
     expect(liveScriptSource).toMatch(/ALLOWED_LEAD_FACTOR_CODES as readonly string\[\]\)\.includes/);
