@@ -1,23 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-3 — Business-Event-Linkage HOST FIX #1 → D-58**, se egen seksjon
-under. Tobias sin FØRSTE host-kjøring (`run_id 7c5a5289`) traff `tool_failed:credential_unavailable`
-på REACHABILITY - rotårsak sporet presist til en akseptanse-harness-bug (feil secret-provider i
-`ua3-business-events-live.ts` sin REACHABILITY-seksjon, IKKE en produksjonsfeil - `main.ts`/
-`worker-main.ts` brukte allerede korrekt `EnvSecretProvider()`). Fikset + Gmail/Calendar rapporteres nå
-UAVHENGIG av hverandre (§9) + en urelatert, ekte race i `createFollowup()` (P0/D-49) funnet via CI også
-fikset. Status forblir FIXED_SUITE / HOST_VERIFY_BLOCKED - IKKE VERIFIED, venter på Tobias sin NESTE
-host-kjøring. Canonical-audit (D-57) bekreftet at UA-3 sine gjenværende P1-connector-kandidater
-(Support/tickets, Contracts/e-sign) krever en uavklart leverandørbeslutning og derfor IKKE kunne velges
-- Gmail/Calendar-linkage var den eneste ikke-tvetydige neste sliceen (gjenbruker allerede
-provider-besluttede UA-0/UA-7-P0-connectorer, låser opp UA-3 sitt FØRSTE akseptansekriterium). Bygget
-PÅ det VERIFIED/COMPLETE open-loop-fundamentet (D-53/D-54/D-55/D-56, PR #10 merget). Deterministisk
-kontakt-/selskaps-gjenkjenning fra Gmail/Calendar (e-postadresse-match, ALDRI AI-gjettet), idempotent
-`business_activities`-registrering (gjenbruker EKSISTERENDE mekanisme), open-loop-reevaluering
-(gjenbruker `OpenLoopService.runSweep()` uendret), periodisk synk via EKSISTERENDE `DailyScheduler`.
-1071/1071 tester (1053→1071, 18 nye i HOST FIX #1). **KUN UA-3 P0 + open-loop-sliceen er
-VERIFIED/COMPLETE - denne nyeste sliceen er FIXED_SUITE (suite-bevist, IKKE host-bevist) - HELE UA-3
-er IKKE komplett** (se
+**Oppdatert:** 2026-08-17 (**UA-3 — Business-Event-Linkage HOST FIX #2 → D-59**, se egen seksjon
+under. Tobias sin ANDRE host-kjøring (`run_id b969e9e7`) beviste ALLE funksjonelle Business-Event-
+kapabiliteter LIVE (ekte Gmail `scanned=25`, ekte Calendar-reachability, matched/unmatched/ambiguous,
+idempotens, tenant-/space-isolasjon, open-loop-reevaluering, cleanup) - KUN `ua3_events_audit_safe=FAIL`
+blokkerte `hard_fail=false`. Rotårsak: SAMME feilklasse som D-54 - en RLS-blind raw `pool.query()` mot
+`audit_events` (som har FORCE ROW LEVEL SECURITY) i akseptanseskriptets verifikasjonsspørring, IKKE en
+produksjonsfeil (selve audit-skrivingen skjer inni SAMME `withTenantTransaction` som verktøykjøringen).
+Fikset D-59 (`withTenantTransaction()`, ren akseptanse-harness-fiks). Status forblir FIXED_SUITE /
+HOST_VERIFY_BLOCKED - IKKE VERIFIED, venter på Tobias sin TREDJE host-kjøring. Canonical-audit (D-57)
+bekreftet at UA-3 sine gjenværende P1-connector-kandidater (Support/tickets, Contracts/e-sign) krever en
+uavklart leverandørbeslutning og derfor IKKE kunne velges - Gmail/Calendar-linkage var den eneste
+ikke-tvetydige neste sliceen (gjenbruker allerede provider-besluttede UA-0/UA-7-P0-connectorer, låser
+opp UA-3 sitt FØRSTE akseptansekriterium). Bygget PÅ det VERIFIED/COMPLETE open-loop-fundamentet
+(D-53/D-54/D-55/D-56, PR #10 merget). Deterministisk kontakt-/selskaps-gjenkjenning fra Gmail/Calendar
+(e-postadresse-match, ALDRI AI-gjettet), idempotent `business_activities`-registrering (gjenbruker
+EKSISTERENDE mekanisme), open-loop-reevaluering (gjenbruker `OpenLoopService.runSweep()` uendret),
+periodisk synk via EKSISTERENDE `DailyScheduler`. 1082/1082 tester (1071→1082, 12 nye i HOST FIX #2).
+**KUN UA-3 P0 + open-loop-sliceen er VERIFIED/COMPLETE - denne nyeste sliceen er FIXED_SUITE
+(suite-bevist + funksjonelt LIVE-bevist, IKKE ferdig host-bevist pga. audit-verifikasjonsbugen - HELE
+UA-3 er IKKE komplett** (se
 Q-25), og masterplan v4.0 som helhet er IKKE komplett. **Branch:**
 `claude/ua3-business-events-linkage` (fra `origin/main` `017172c`, EGEN branch - IKKE gjenbruk av
 `claude/ua3-open-loops-business-brief`, som fullførte sin rolle med PR #10) · UA-2 forblir
@@ -1672,22 +1674,60 @@ credential_ref uavhengig av tenant), 3 nye i `business-event-sync.test.ts` sin "
 Calendar-feil isolert uavhengig), 7 nye/oppdaterte strukturelle regresjonsvakter i
 `ua3-business-events-host-run-wiring.test.ts`. 1071/1071 tester, lint/typecheck rene.
 
-**STATUS: FIXED_SUITE / HOST_VERIFY_BLOCKED → D-58. IKKE VERIFIED** - venter på Tobias sin NESTE
+**STATUS (før HOST FIX #2): FIXED_SUITE / HOST_VERIFY_BLOCKED → D-58.**
+
+## UA-3 Business-Event-Linkage HOST FIX #2 (2026-08-17, samme dag, ekte host-funn av Tobias, `run_id b969e9e7`) → D-59
+
+**Tobias kjørte host-akseptansen PÅ NYTT etter HOST FIX #1 - ALLE funksjonelle Business-Event-
+kapabiliteter PASSET LIVE:** `q21_runtime_role_safe=PASS`, `ua3_events_runtime_role=PASS`, EKTE Gmail
+(`gmail_reachable=true gmail_scanned=25`) OG Calendar (`calendar_reachable=true calendar_scanned=0` -
+et tomt resultat er en gyldig PASS, ikke en feil) reachability UAVHENGIG PASS,
+`ua3_events_gmail_matched/_unmatched/_ambiguous=PASS`, `ua3_events_calendar_matched=PASS`,
+`ua3_events_idempotency=PASS`, `ua3_events_no_body_content_stored=PASS`,
+`ua3_events_tenant_isolation/_space_isolation=PASS`, `ua3_events_toolgateway_wiring=PASS`,
+`ua3_events_open_loop_reevaluation=PASS`, `ua3_events_cleanup=PASS` (`leftover_activities=0
+leftover_tenants=0`). **ENESTE feil:** `ua3_events_audit_safe=FAIL` (`audit_payload_excerpt={}`) -
+`hard_fail=true` KUN pga. denne ene markøren.
+
+**Root cause verifisert presist (eksplisitt IKKE rørt noen av de fungerende kapabilitetene over, per
+ordrens §1):** OPEN-LOOP-REEVALUERING-seksjonens audit-verifikasjon brukte en RAW `pool.query()` mot
+`audit_events` - **NØYAKTIG SAMME FEILKLASSE SOM D-54.** `audit_events` har `FORCE ROW LEVEL SECURITY`
+(`005_rls.sql`) med policyen `USING (tenant_id = current_setting('jarvis.tenant_id', true))` - en raw
+spørring under den ekte NOSUPERUSER/NOBYPASSRLS `jarvis_runtime`-rollen setter ALDRI denne
+session-GUC-en, og spørringen ser derfor STRUKTURELT 0 rader uansett faktisk databasetilstand. Selve
+audit-SKRIVINGEN var korrekt hele tiden - `ToolGateway.execute()` kaller `writeAudit()` INNI SAMME
+`withTenantTransaction`-blokk som selve verktøykjøringen, og `ua3_events_toolgateway_wiring=PASS` (fra
+SAMME host-kjøring) beviser at handlingen fullførte. Mekanismen er direkte reprodusert i en ny test
+(`business-event-sync-audit-rls.test.ts` test A): en ekte audit-rad bekreftet å FINNES via `adminPool`,
+mens EKSAKT samme spørring via den non-bypass rollen (`appPool`) returnerer 0 rader.
+
+**Fiks (kun akseptanse-harnesset - ingen produksjonskode rørt):** spørringen wrappet i
+`withTenantTransaction(pool, TENANT_A, ...)` (samme presedens som D-54). Eksistens og
+innholds-sikkerhet gjort til to eksplisitt distinkte krav - `auditFound` inngår nå direkte i selve
+PASS-betingelsen (en manglende/tom spørring kan aldri lenger tolkes som "trygt"). Nøstede
+`email`/`calendar`-audit-rader (fra `BusinessEventSyncService` sine egne `ToolGateway.execute()`-kall)
+bekreftet å ALDRI forveksles med den ytre `business`/`sync_business_events`-spørringen.
+
+12 nye tester (7 i ny `business-event-sync-audit-rls.test.ts` + 5 nye strukturelle regresjonsvakter i
+`ua3-business-events-host-run-wiring.test.ts`, 1071→1082). Lint/typecheck rene.
+
+**STATUS: FIXED_SUITE / HOST_VERIFY_BLOCKED → D-59. IKKE VERIFIED** - venter på Tobias sin TREDJE
 kjøring av:
 `node --env-file=.env --experimental-transform-types modules/business/scripts/ua3-business-events-host-run.ts`
-(krever ekte `.env` med `JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN` konfigurert for REACHABILITY-
-seksjonen - NÅ faktisk lest korrekt). **KUN UA-3 P0 + open-loop-sliceen er VERIFIED/COMPLETE - denne
-sliceen er FIXED_SUITE, IKKE host-bevist ennå - HELE UA-3 er FORTSATT IKKE komplett** (se oppdatert
-Q-25). Support/tickets, Contracts/e-sign (krever fortsatt en Tobias-provider-beslutning), tverr-domene
-driftsoversikt utover sales, profiling/scoring med juridiske kontroller er alle IKKE bygget/startet.
-**Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.**
+**KUN UA-3 P0 + open-loop-sliceen er VERIFIED/COMPLETE - denne sliceen er FIXED_SUITE, funksjonelt
+LIVE-bevist, men IKKE ferdig host-bevist (kun audit-verifikasjonsbugen gjenstår) - HELE UA-3 er
+FORTSATT IKKE komplett** (se oppdatert Q-25). Support/tickets, Contracts/e-sign (krever fortsatt en
+Tobias-provider-beslutning), tverr-domene driftsoversikt utover sales, profiling/scoring med juridiske
+kontroller er alle IKKE bygget/startet. **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.**
 
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection har
 INGEN egne blokkeringer (alle VERIFIED/CLOSED/COMPLETE, merget til `main`). **UA-3 Business-Event-
-Linkage (D-57/D-58) er FIXED_SUITE / HOST_VERIFY_BLOCKED - blokkert på Tobias sin NESTE host-kjøring**
-(se egen seksjon over - første kjøring, `run_id 7c5a5289`, traff en akseptanse-harness-bug, nå fikset),
-samme mønster som alle tidligere UA-3-slicer FØR sin endelige grønne host-runde.
+Linkage (D-57/D-58/D-59) er FIXED_SUITE / HOST_VERIFY_BLOCKED - blokkert på Tobias sin TREDJE
+host-kjøring** (se egen seksjon over - første kjøring `run_id 7c5a5289` traff en credential-provider-
+bug (D-58), ANDRE kjøring `run_id b969e9e7` beviste ALL funksjonell kapabilitet LIVE og traff KUN en
+RLS-blind audit-verifikasjonsspørring (D-59) - begge nå fikset), samme mønster som alle tidligere
+UA-3-slicer FØR sin endelige grønne host-runde.
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
 Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
 ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE live-host-bevist
@@ -1701,10 +1741,13 @@ gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokument
 blokkerende.
 
 ## Neste oppgave
-**UA-3 «Business-Event-Linkage» er FIXED_SUITE / HOST_VERIFY_BLOCKED → D-58 - IKKE VERIFIED.**
-Umiddelbar neste oppgave: Tobias kjører host-akseptansen PÅ NYTT (se kommando over) - HOST FIX #1
-(D-58) rettet akseptanse-harnessets secret-provider-bug. Ved nye host-funn: samme "ett konkret, ekte
-host-funn per runde, aldri gjett root cause"-disiplin som D-50/D-51/D-54/D-55/D-58.
+**UA-3 «Business-Event-Linkage» er FIXED_SUITE / HOST_VERIFY_BLOCKED → D-59 - IKKE VERIFIED.**
+Umiddelbar neste oppgave: Tobias kjører host-akseptansen PÅ NYTT (se kommando over) - HOST FIX #2
+(D-59) rettet den siste kjente akseptanse-harness-bugen (RLS-blind audit-spørring). ALL funksjonell
+kapabilitet er allerede LIVE-bevist (`run_id b969e9e7`) - en TREDJE host-kjøring bør derfor gi
+`hard_fail=false` uten nye funn, men skal likevel kjøres for faktisk å bekrefte det. Ved nye host-funn:
+samme "ett konkret, ekte host-funn per runde, aldri gjett root cause"-disiplin som D-50/D-51/D-54/D-55/
+D-58/D-59.
 **HELE UA-3 er FORTSATT IKKE komplett** - masterplanens fire akseptansekriterier har nå kriterium 3
 FULLT dekket (open-loop-sliceen) og kriterium 1 IMPLEMENTERT MEN IKKE host-bevist (denne sliceen); de
 to andre (tverr-domene driftsoversikt, profiling/scoring) er fortsatt ikke dekket (se oppdatert Q-25).

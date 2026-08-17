@@ -37,7 +37,9 @@
 
 import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
-import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
+import {
+  adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, withTenantTransaction
+} from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
@@ -423,13 +425,31 @@ async function main(): Promise<void> {
     results.ua3_events_open_loop_reevaluation = loops.some((l) => l.loop_type === "overdue_followup" && l.company_id === companyId) ? "PASS" : "FAIL";
     log(`open_loops_after_sync=${loops.length} -> ua3_events_open_loop_reevaluation: ${results.ua3_events_open_loop_reevaluation}`);
 
-    const { rows: auditRows } = await pool.query(
-      "SELECT payload FROM audit_events WHERE tenant_id = $1 AND tool_id = 'business' AND action = 'sync_business_events' ORDER BY at DESC LIMIT 1",
-      [TENANT_A]
+    // HOST FIX #2 (D-59, ekte host-funn run_id `b969e9e7`): TIDLIGERE en RLS-BLIND raw
+    // `pool.query()` mot `audit_events` - SAMME feilklasse som D-54. `audit_events` har
+    // `FORCE ROW LEVEL SECURITY` med policyen `USING (tenant_id = current_setting(
+    // 'jarvis.tenant_id', true))` (`005_rls.sql`) - en raw spørring under den ekte
+    // NOSUPERUSER/NOBYPASSRLS `jarvis_runtime`-rollen (Q-21) får ALDRI satt denne
+    // session-GUC-en, `current_setting(..., true)` returnerer NULL, USING-predikatet blir
+    // NULL (ikke true), og spørringen ser derfor STRUKTURELT 0 rader UANSETT faktisk
+    // databasetilstand - selve audit-SKRIVINGEN er korrekt (samme `withTenantTransaction`
+    // som selve verktøykjøringen bruker, se `gateway.ts`) - kun VERIFIKASJONS-spørringen var
+    // RLS-blind. Fikset til `withTenantTransaction()`, samme presedens som D-54.
+    const auditRows = await withTenantTransaction(pool, TENANT_A, (client) =>
+      client.query(
+        "SELECT payload FROM audit_events WHERE tenant_id = $1 AND tool_id = 'business' AND action = 'sync_business_events' ORDER BY at DESC LIMIT 1",
+        [TENANT_A]
+      )
     );
-    const auditPayload = JSON.stringify((auditRows[0] as { payload: unknown } | undefined)?.payload ?? {});
-    results.ua3_events_audit_safe = auditPayload.includes("credential_ref") && !/subject|body_text|attendees|kontakt1|kontakt2/i.test(auditPayload) ? "PASS" : "FAIL";
-    log(`audit_payload_excerpt=${auditPayload.slice(0, 160)} -> ua3_events_audit_safe: ${results.ua3_events_audit_safe}`);
+    const auditRow = auditRows.rows[0] as { payload: unknown } | undefined;
+    const auditFound = auditRow !== undefined;
+    const auditPayload = JSON.stringify(auditRow?.payload ?? {});
+    // Eksistens og innholds-sikkerhet er TO DISTINKTE krav (§3/§9 i byggeordren) - en tom
+    // spørring (auditFound=false) skal ALDRI kunne tolkes som "trygt" fravær av sensitivt
+    // innhold.
+    const auditSafeContent = !/subject|body_text|attendees|kontakt1|kontakt2|authorization|access_token|refresh_token|client_secret/i.test(auditPayload);
+    results.ua3_events_audit_safe = auditFound && auditPayload.includes("credential_ref") && auditSafeContent ? "PASS" : "FAIL";
+    log(`audit_event_found=${auditFound} audit_action=business.sync_business_events audit_payload_excerpt=${auditPayload.slice(0, 160)} -> ua3_events_audit_safe: ${results.ua3_events_audit_safe}`);
   });
 
   await section("CLEANUP", async () => {

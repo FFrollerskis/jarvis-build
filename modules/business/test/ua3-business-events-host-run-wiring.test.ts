@@ -201,8 +201,13 @@ describe("HOST FIX #1 (D-58, ekte host-funn run_id 7c5a5289): REACHABILITY-seksj
     expect(sectionBody).toContain("gmailReachable");
     expect(sectionBody).toContain("calendarReachable");
   });
-  it("aldri logger et rått credential/token-felt (kun sanerte reason-/failure_class-strenger)", () => {
-    expect(liveScriptSource).not.toMatch(/authorization|access_token|refresh_token|client_secret/i);
+  it("aldri logger et rått credential/token-felt (kun sanerte reason-/failure_class-strenger) - disse ordene forekommer KUN som del av HOST FIX #2 sitt eget saneringsfilter (regex-alternasjon), aldri som en faktisk interpolert verdi i en log()-linje", () => {
+    // §9/§17: ordene selv er forventet å forekomme som DEL AV et regex-saneringsfilter
+    // (`/subject|body_text|...|authorization|access_token|.../i`, lagt til i HOST FIX #2) -
+    // det som faktisk ville vært en lekkasje er om et av dem ble INTERPOLERT i en
+    // template-literal sendt til log() (f.eks. `${authorization}`/`${accessToken}`), IKKE at
+    // ordet nevnes i en beskyttende filter-regex.
+    expect(liveScriptSource).not.toMatch(/log\(`[^`]*\$\{[^}]*(authorization|access_token|refresh_token|client_secret)[^}]*\}[^`]*`\)/i);
   });
 });
 
@@ -216,5 +221,29 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     const workerSource = readSource("../../../apps/api/src/worker-main.ts");
     expect(workerSource).toMatch(/new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
     expect(workerSource).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway)");
+  });
+});
+
+describe("HOST FIX #2 (D-59, ekte host-funn run_id b969e9e7): audit-verifikasjonsspørringen bruker withTenantTransaction, aldri en RLS-blind raw pool.query() (samme feilklasse som D-54)", () => {
+  it("importerer withTenantTransaction fra @jarvis/core", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*withTenantTransaction[^}]*\}\s*from\s*"@jarvis\/core"/s);
+  });
+  it("OPEN-LOOP-REEVALUERING-seksjonens audit-spørring er wrappet i withTenantTransaction(pool, TENANT_A, ...), ikke en raw pool.query()", () => {
+    const sectionIdx = liveScriptSource.indexOf("OPEN-LOOP-REEVALUERING");
+    const sectionBody = liveScriptSource.slice(sectionIdx);
+    expect(sectionBody).toContain("withTenantTransaction(pool, TENANT_A");
+    expect(sectionBody).not.toMatch(/await pool\.query\(\s*"SELECT payload FROM audit_events/);
+  });
+  it("audit-eksistens (auditFound) inngår eksplisitt i PASS-betingelsen for ua3_events_audit_safe - en manglende rad kan aldri stille passere", () => {
+    const sectionIdx = liveScriptSource.indexOf("OPEN-LOOP-REEVALUERING");
+    const sectionBody = liveScriptSource.slice(sectionIdx, liveScriptSource.indexOf('section("CLEANUP"'));
+    expect(sectionBody).toContain("auditFound");
+    expect(sectionBody).toMatch(/results\.ua3_events_audit_safe\s*=\s*auditFound\s*&&/);
+  });
+  it("diagnostikken logger et avkuttet (160-tegn) payload-excerpt, ikke en ubegrenset dump av rå audit-payload", () => {
+    const sectionIdx = liveScriptSource.indexOf("OPEN-LOOP-REEVALUERING");
+    const sectionBody = liveScriptSource.slice(sectionIdx, liveScriptSource.indexOf('section("CLEANUP"'));
+    expect(sectionBody).toContain("audit_event_found=");
+    expect(sectionBody).toContain("auditPayload.slice(0, 160)");
   });
 });
