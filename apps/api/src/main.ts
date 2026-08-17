@@ -25,7 +25,8 @@ import {
   tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import {
-  BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, runOpenLoopSweepForAllTenants
+  BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
+  runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants
 } from "@jarvis/business";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
@@ -105,9 +106,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
-    business: new BusinessTransport(businessService, openLoopService, pool),
+    business: new BusinessTransport(businessService, openLoopService, pool, toolGateway),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
+  // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
+  // registrert med Gmail/Calendar over) - ingen ny transport-vei.
+  const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
   const ownerIdentity = {
     person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
     memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
@@ -221,6 +225,15 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-open-loop-sweep", Number(process.env["JARVIS_BUSINESS_SWEEP_HOUR"] ?? 6)
   ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
+  // UA-3 business-event-linkage (D-57) §19/§20/§21: periodisk Gmail/Calendar->
+  // Business-OS-synkronisering - SAMME reboot-durable DailyScheduler-mekanisme
+  // (eget job_name, egen klokkeslett-env), uavhengig av Telegram-konfig.
+  // Kjøres FØR open-loop-sveipet i klokkeslett (default 05) slik at nylig
+  // synkroniserte aktiviteter er tilgjengelige naar sveipet (default 06) og
+  // morgenbriefen kjører.
+  new DailyScheduler(
+    pool, "business-events-sync", Number(process.env["JARVIS_BUSINESS_EVENTS_SYNC_HOUR"] ?? 5)
+  ).start(() => runBusinessEventSyncForAllTenants(pool, businessEventSyncService).then(() => undefined));
   return deps;
 }
 

@@ -39,7 +39,9 @@ describe("A: apps/api/src/main.ts sprer driveTransportsIfConfigured() inn i firs
     // UA-3 P0 (D-49): femte ubetingede transport - Business OS har ingen ekstern credential
     // aa vaere "konfigurert" av, saa den registreres alltid, samme mønster som de fire over.
     // UA-3 next slice (D-53): BusinessTransport tar naa ogsaa OpenLoopService + pool.
-    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool)");
+    // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
+    // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
+    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway)");
   });
 });
 
@@ -56,7 +58,9 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport()");
     expect(callBlock).toContain("telegram: new TelegramTransport()");
-    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool)");
+    // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
+    // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
+    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway)");
   });
 });
 

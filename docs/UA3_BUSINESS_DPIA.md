@@ -1,11 +1,39 @@
-# UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection)
+# UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection + Business-Event-Linkage)
 
 **Status:** UA-3 P0 «Business Domain Foundation» = VERIFIED/COMPLETE (D-52, host-bevist run_id
 `ca2d9248`). UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» = VERIFIED/COMPLETE (2026-08-17,
-host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTIONS.md).
+host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTIONS.md). UA-3
+«Business-Event-Linkage (Gmail/Calendar → Business OS)» = FIXED_SUITE / READY_FOR_HOST_VERIFY
+(2026-08-17, IKKE host-verifisert ennå, se D-57).
 Dette notatet dekker den strukturerte tredjeparts-persondata-kategorien UA-3 introduserer (kunde-/
 kontakt-/selskapsdata i `business_*`-tabellene, inkl. NÅ `business_open_loops`) - utfyller, erstatter
 ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-rad.
+
+## Business-Event-Linkage (NY, UA-3 D-57)
+
+Gmail/Calendar-hendelser (allerede eier-autoriserte UA-0/UA-7-P0-connectorer - INGEN ny leverandør-
+tilgang gitt i dette sliceet) leses forbigående via `BusinessEventSyncService` for å utlede EN kort,
+strukturert `business_activities`-rad PER matchet melding/møte. **Kritisk arkitekturprinsipp uendret
+fra P0/§15:** selve e-post-body-teksten/møtebeskrivelsen flyter ALDRI inn i `business_activities` -
+kun emne/tittel (allerede korte, strukturerte felt fra Gmail/Calendar sine egne metadata) lagres som
+`summary`, og `canonical_uri` er en peker TILBAKE til kilden (Gmail sin egen weblenke, Calendar sin
+egen `html_link`) - ALDRI en kopi. Strukturelt bevist i `business-event-sync.test.ts` (test C/K: en
+syntetisk "HEMMELIG-KROPP"-body-tekst i test-fixturen verifiseres ALDRI å havne i noen lagret rad).
+
+**Entitetsgjenkjenning er deterministisk, ikke AI-basert profiling:** en Gmail-melding/Calendar-
+deltaker kobles til en `business_contact` KUN ved eksakt e-postadresse-match (case-insensitiv) - aldri
+et LLM-avgjort gjettet navn/identitet-treff. Ved 0 treff (ukjent avsender/deltaker) opprettes INGEN
+aktivitet (aldri støy fra ukjente tredjeparter i innboksen); ved >1 distinkt selskaps-treff (tvetydig)
+opprettes INGEN aktivitet (aldri en gjettet feilkobling til feil kunde/selskap). Dette er samme
+"deterministisk-først, fail-safe-ved-tvetydighet"-prinsipp som `OpenLoopService` sin egen deteksjon
+(D-53) - INGEN sensitive kategorier (helse/etnisitet/religion/politikk osv.) utledes noensinne.
+
+**Kildekonto-omfang (kjent, dokumentert forenkling):** alle bedrifts-tenants synkroniseres i dag mot
+SAMME ene tilkoblede Google-konto (`JARVIS_GOOGLE_ACCOUNT`) - deterministisk kontakt-e-post-matching
+sikrer likevel at en aktivitet KUN registreres for tenanten hvis kontakt faktisk matcher, aldri på
+tvers. Ingen ny persondata-kategori utover det P0 allerede etablerte (`business_contacts`) - Gmail/
+Calendar-hendelser produserer KUN `business_activities`-rader (samme OPERATIONAL METADATA-kategori
+som øvrige aktiviteter, se tabellen under), aldri nye kontakt-/personopplysningsfelt.
 
 ## business_open_loops (NY, UA-3 NEXT SLICE / D-53)
 

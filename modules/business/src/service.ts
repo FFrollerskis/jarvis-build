@@ -210,6 +210,24 @@ export class BusinessService {
     });
   }
 
+  /**
+   * §9 i UA-3 business-event-linkage-byggeordren: deterministisk kontakt-
+   * gjenkjenning via e-postadresse - PRIMÆR nøkkel for Gmail/Calendar-
+   * hendelseslenking (aldri en LLM-gjetning). Case-insensitiv (samme
+   * `lower(email)`-indeks som `021_business_contact_email_lookup.sql`).
+   * Returnerer ALLE treff - kalleren avgjør selv om >1 betyr tvetydig
+   * (§9: "never silently link the wrong company" - fail safe, ikke gjett).
+   */
+  async findContactsByEmail(tenantId: string, memorySpace: MemorySpace, email: string): Promise<BusinessContact[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM business_contacts WHERE tenant_id = $1 AND lower(email) = lower($2)`,
+        [tenantId, email]
+      );
+      return rows as BusinessContact[];
+    });
+  }
+
   /** "Hva skjer med kunde X?" (akseptansekriterium 1): komplett, kilde-forankret tidslinje for ett selskap. */
   async companyTimeline(tenantId: string, memorySpace: MemorySpace, companyId: string): Promise<CustomerTimelineEntry[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
