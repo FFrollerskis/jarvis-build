@@ -697,10 +697,11 @@ ambiguitet krevde det).
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3,
 inkl. det som fortsatt gjenstår etter denne sliceen).
 
-### UA-3 — Business-Event-Linkage (Gmail/Calendar → Business OS) = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17) → D-57
+### UA-3 — Business-Event-Linkage (Gmail/Calendar → Business OS) = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17) → D-57/D-58
 
-**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY → D-57 - IKKE VERIFIED**, venter på Tobias sin faktiske
-host-kjøring. Bygget PÅ det VERIFIED/COMPLETE open-loop-fundamentet (D-56), additiv migrasjon.
+**Status: FIXED_SUITE / HOST_VERIFY_BLOCKED → D-57/D-58 - IKKE VERIFIED**, venter på Tobias sin NESTE
+host-kjøring (HOST FIX #1/D-58 rettet en akseptanse-harness-bug etter Tobias sitt første host-forsøk,
+`run_id 7c5a5289` - se under). Bygget PÅ det VERIFIED/COMPLETE open-loop-fundamentet (D-56), additiv migrasjon.
 Canonical-audit (§1-§5 i byggeordren) bekreftet at UA-3 sine gjenværende P1-connector-kandidater
 ("Support/tickets", "Contracts/e-sign", masterplan linje 1070-1071) IKKE har en navngitt leverandør noe
 sted i canonical dokumenter - å velge én ville brutt ordrens eksplisitte provider-beslutnings-gate.
@@ -729,15 +730,22 @@ oppfinne en leverandørbeslutning. Se D-57 for full canonical-audit-begrunnelse.
    strategi (ekte connector-reachability + deterministisk FakeTransport-basert entitetsgjenkjenning),
    gjenbruker UENDRET D-55 sin selvdiagnostiske FK-blokkerings-sperre.
 
-**Suite-verifisert (1053/1053 tester totalt, 43 nye - se RUNTIME_GATES.md):** e-post-adresse-parsing,
-motpart-utledning (From/To/Cc), matchet/umatchet/tvetydig entitetsgjenkjenning (Gmail OG Calendar),
-idempotens (re-synk gir ingen duplikat), ingen body-/beskrivelses-innhold lagret (kun kilde-peker),
-tenant-/memory-space-isolasjon, open-loop-reevaluering, ToolGateway-wiring (owner sovereign + delegert
-policy), audit-metadata uten sensitivt innhold, ingen direkte fetch/provider-SDK/AI Mesh-bruk.
+**Suite-verifisert (1071/1071 tester totalt, 61 nye over hele sliceen inkl. HOST FIX #1 - se
+RUNTIME_GATES.md):** e-post-adresse-parsing, motpart-utledning (From/To/Cc), matchet/umatchet/tvetydig
+entitetsgjenkjenning (Gmail OG Calendar), idempotens (re-synk gir ingen duplikat), ingen body-/
+beskrivelses-innhold lagret (kun kilde-peker), tenant-/memory-space-isolasjon, open-loop-reevaluering,
+ToolGateway-wiring (owner sovereign + delegert policy), audit-metadata uten sensitivt innhold, ingen
+direkte fetch/provider-SDK/AI Mesh-bruk, EnvSecretProvider-credential-oppløsning, uavhengig
+Gmail/Calendar-feilhåndtering, ingen credential-lekkasje.
 
-**IKKE host-kjørt ennå** - `ua3-business-events-host-run.ts` er skrevet og strukturelt regresjonstestet,
-men selve Windows/Docker-host-kjøringen (inkl. REACHABILITY-seksjonen mot ekte Gmail/Calendar-API) er
-IKKE utført av Tobias i denne runden.
+**HOST FIX #1 (samme dag, D-58):** Tobias sin FØRSTE host-kjøring (`run_id 7c5a5289`) traff
+`tool_failed:credential_unavailable` på REACHABILITY - rotårsak: akseptanseskriptets REACHABILITY-
+seksjon brukte en alltid-null stub-secret-provider i stedet for den ekte `EnvSecretProvider()`
+produksjonen selv bruker (ren harness-bug, produksjon uendret). Fikset + Gmail/Calendar rapporteres nå
+uavhengig av hverandre (§9) + en urelatert, ekte race i `createFollowup()` (P0/D-49) funnet via CI
+fikset samtidig. Se D-58 for full detalj. **Venter på Tobias sin NESTE host-kjøring** -
+`ua3-business-events-host-run.ts` er klart, men selve Windows/Docker-host-kjøringen (inkl. den nå
+fiksede REACHABILITY-seksjonen mot ekte Gmail/Calendar-API) er IKKE utført på nytt ennå.
 
 **Bygges IKKE i denne sliceen:** Support/tickets- og Contracts/e-sign-connectorer (krever fortsatt en
 Tobias-provider-beslutning); AI Mesh-basert semantisk aktivitets-sammendrag (deterministisk emne-/

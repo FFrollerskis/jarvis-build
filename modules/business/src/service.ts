@@ -241,21 +241,28 @@ export class BusinessService {
     });
   }
 
+  /**
+   * HOST FIX #1 (D-58): TIDLIGERE en ikke-atomisk SELECT-så-INSERT (SELECT
+   * finner ingenting -> INSERT) - to samtidige kall med SAMME
+   * `idempotency_key` kunne begge passere SELECT-sjekken FØR noen av dem
+   * hadde committet sin INSERT (klassisk TOCTOU-race), og den andre INSERT-en
+   * feilet da med `business_followups_tenant_id_idempotency_key_key`
+   * unique-constraint-brudd i stedet for å returnere den EKSISTERENDE raden
+   * (funnet av en genuin CI-race, ikke host-relatert - se D-58). Fikset til
+   * SAMME atomiske `ON CONFLICT ... DO UPDATE ... RETURNING *`-mønster som
+   * `createLead()`/`recordActivity()` allerede bruker for sine egne
+   * nullable idempotens-nøkler - Postgres behandler NULL <> NULL i unique
+   * constraints, så fravær av `idempotency_key` fortsatt ALDRI trigger en
+   * konflikt (hver kall uten nøkkel forblir en ny rad, uendret oppførsel).
+   */
   async createFollowup(tenantId: string, memorySpace: MemorySpace, input: CreateFollowupInput): Promise<BusinessFollowup> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      if (input.idempotency_key) {
-        const existing = await client.query(
-          `SELECT * FROM business_followups WHERE tenant_id = $1 AND idempotency_key = $2`,
-          [tenantId, input.idempotency_key]
-        );
-        if (existing.rows[0]) {
-          return existing.rows[0] as BusinessFollowup;
-        }
-      }
       const followup_id = `biz-fu-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO business_followups (followup_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, activity_id, title, reason, next_action, due_at, priority, owner_person_id, idempotency_key)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET title = business_followups.title
+         RETURNING *`,
         [
           followup_id, tenantId, memorySpace, input.company_id ?? null, input.contact_id ?? null,
           input.opportunity_id ?? null, input.lead_id ?? null, input.activity_id ?? null,

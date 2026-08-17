@@ -361,3 +361,62 @@ describe("N: ingen AI Mesh-bruk i entitetsgjenkjenning (deterministisk-først, �
     expect(source).not.toMatch(/@jarvis\/model-gateway|@jarvis\/provider-adapters|openai|anthropic/i);
   });
 });
+
+describe("O: HOST FIX #1 (D-58, run_id 7c5a5289) - Gmail-feil blokkerer ALDRI Calendar (og omvendt), uavhengig feilhaandtering", () => {
+  it("Gmail feiler (simulert credential/nettverksfeil) - Calendar synker likevel normalt via SAMME syncTenant()-kall, feilen rapporteres KUN paa gmail-feltet", async () => {
+    const company = await service.createCompany(TENANT_A, "business", { name: "Isolasjon Gmail-feil AS" });
+    await service.createContact(TENANT_A, "business", { name: "Isolasjon Kontakt", email: "isolasjon-gmail-feil@syntetisk.no", company_id: company.company_id });
+    const failingEmail = new FakeTransport(undefined, "credential_unavailable");
+    const workingCalendar = new FakeTransport(() => ({
+      data: { events: [{ id: "evt-isolasjon-1", title: "Isolasjonsmøte", start: new Date().toISOString(), html_link: "https://calendar.google.com/event?eid=isolasjon", attendees: ["isolasjon-gmail-feil@syntetisk.no", ACCOUNT] }] }
+    }));
+    const localGateway = new ToolGateway(appPool, new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+      authority: { owner_person_id: "person-tobias", owner_tenants: [TENANT_A] }
+    }), { name: "test-static", get: async () => "dummy-credential" });
+    for (const tool of firstWaveTools({ email: failingEmail, calendar: workingCalendar })) localGateway.register(tool);
+    const localSync = new BusinessEventSyncService(localGateway, service, openLoops, ACCOUNT);
+
+    const result = await localSync.syncTenant(TENANT_A, "business", identity(TENANT_A));
+    expect(result.gmail.error).toBeTruthy();
+    expect(result.gmail.recorded).toBe(0);
+    expect(result.calendar.error).toBeUndefined();
+    expect(result.calendar.recorded).toBe(1);
+    expect(result.open_loops_reevaluated).toBe(true);
+  });
+
+  it("Calendar feiler (simulert credential/nettverksfeil) - Gmail synker likevel normalt, feilen rapporteres KUN paa calendar-feltet", async () => {
+    const company = await service.createCompany(TENANT_A, "business", { name: "Isolasjon Calendar-feil AS" });
+    await service.createContact(TENANT_A, "business", { name: "Isolasjon Kontakt To", email: "isolasjon-calendar-feil@syntetisk.no", company_id: company.company_id });
+    const workingEmail = new FakeTransport(() => ({
+      data: { messages: [{ id: "msg-isolasjon-1", from: "isolasjon-calendar-feil@syntetisk.no", to: ACCOUNT, subject: "Isolasjonsmelding", at: new Date().toISOString() }] }
+    }));
+    const failingCalendar = new FakeTransport(undefined, "credential_unavailable");
+    const localGateway = new ToolGateway(appPool, new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+      authority: { owner_person_id: "person-tobias", owner_tenants: [TENANT_A] }
+    }), { name: "test-static", get: async () => "dummy-credential" });
+    for (const tool of firstWaveTools({ email: workingEmail, calendar: failingCalendar })) localGateway.register(tool);
+    const localSync = new BusinessEventSyncService(localGateway, service, openLoops, ACCOUNT);
+
+    const result = await localSync.syncTenant(TENANT_A, "business", identity(TENANT_A));
+    expect(result.calendar.error).toBeTruthy();
+    expect(result.calendar.recorded).toBe(0);
+    expect(result.gmail.error).toBeUndefined();
+    expect(result.gmail.recorded).toBe(1);
+    expect(result.open_loops_reevaluated).toBe(true);
+  });
+
+  it("feilmeldingen i error-feltet inneholder aldri credential-verdien selv (kun ToolGateway sin egen saniterte reason-streng)", async () => {
+    const failingEmail = new FakeTransport(undefined, "credential_unavailable");
+    const localGateway = new ToolGateway(appPool, new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+      authority: { owner_person_id: "person-tobias", owner_tenants: [TENANT_A] }
+    }), { name: "test-static", get: async () => "SUPER-HEMMELIG-CREDENTIAL-SKAL-ALDRI-LEKKE" });
+    for (const tool of firstWaveTools({ email: failingEmail, calendar: new FakeTransport(() => ({ data: { events: [] } })) })) localGateway.register(tool);
+    const localSync = new BusinessEventSyncService(localGateway, service, openLoops, ACCOUNT);
+    const result = await localSync.syncTenant(TENANT_A, "business", identity(TENANT_A));
+    expect(result.gmail.error).toContain("credential_unavailable");
+    expect(JSON.stringify(result)).not.toContain("SUPER-HEMMELIG-CREDENTIAL-SKAL-ALDRI-LEKKE");
+  });
+});

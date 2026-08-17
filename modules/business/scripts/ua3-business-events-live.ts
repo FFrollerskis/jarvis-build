@@ -41,7 +41,7 @@ import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRo
 import { withMemoryTransaction } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
-  FakeTransport, FallbackSecretProvider, GmailTransport, GoogleCalendarTransport, ToolGateway, firstWaveTools
+  EnvSecretProvider, FakeTransport, FallbackSecretProvider, GmailTransport, GoogleCalendarTransport, ToolGateway, firstWaveTools
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "@jarvis/business";
 
@@ -226,10 +226,20 @@ async function main(): Promise<void> {
   await section("REAL CONNECTOR REACHABILITY (ekte Gmail/Calendar-API, syntetisk tenant uten kontakter)", async () => {
     const realGateway = new ToolGateway(
       pool, ownerPolicy([TENANT_A]),
-      new FallbackSecretProvider(
-        { name: "env-empty", get: async () => null },
-        new BusinessInternalSecretProvider()
-      )
+      // HOST FIX #1 (D-58, ekte host-funn run_id `7c5a5289`): ROTÅRSAK - denne seksjonen
+      // brukte TIDLIGERE en ALLTID-null "env-empty"-stub-secret-provider (feilaktig kopiert
+      // fra vitest-enhetstestenes mønster, der email/calendar-credentials BEVISST aldri skal
+      // resolve) i stedet for den EKTE `EnvSecretProvider()` som produksjonen selv bruker
+      // (`main.ts`/`worker-main.ts`) - `JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN` ble derfor
+      // ALDRI lest fra `.env` her, uansett om de faktisk var konfigurert, og
+      // `ToolGateway.execute()` sin ubetingede `credential = await secrets.get(ref); if
+      // (!credential) return deny("credential_unavailable")`-sjekk (gateway.ts) feilet
+      // følgelig for BEGGE `email`/`calendar`-kallene. Dette var en REN
+      // akseptanse-harness-bug i DENNE seksjonen - `main.ts`/`worker-main.ts` har brukt
+      // `new FallbackSecretProvider(new EnvSecretProvider(), new
+      // BusinessInternalSecretProvider())` korrekt hele tiden (bekreftet ved
+      // kildekode-inspeksjon), så produksjons-runtime var ALDRI påvirket.
+      new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
     );
     for (const tool of firstWaveTools({
       email: new GmailTransport(ACCOUNT), calendar: new GoogleCalendarTransport(ACCOUNT),
@@ -240,21 +250,47 @@ async function main(): Promise<void> {
       identity: ownerIdentityFor(TENANT_A), tool_id: "business", action: "sync_business_events",
       parameters: { tenant_id: TENANT_A, memory_space: "business" }
     });
-    const data = result.ok ? (result.data as { gmail?: { scanned: number }; calendar?: { scanned: number } }) : undefined;
-    diagnostics["real_gmail_scanned"] = String(data?.gmail?.scanned ?? "n/a");
-    diagnostics["real_calendar_scanned"] = String(data?.calendar?.scanned ?? "n/a");
+    if (!result.ok) {
+      // Selve sync_business_events-HANDLINGEN feilet helt (f.eks. open-loop-reevalueringen
+      // kastet) - IKKE et per-provider-funn. Begge markører FAIL, sanert årsak (§9/§17: aldri
+      // et rått credential/token - `result.reason` er allerede ToolGateway sin egen korte,
+      // kontrollerte klassifiseringsstreng).
+      results.ua3_events_gmail_real_connector_reachable = "FAIL";
+      results.ua3_events_calendar_real_connector_reachable = "FAIL";
+      log(`sync_ok=false reason=${(result as { reason: string }).reason} -> begge reachability-markører FAIL (hele handlingen feilet, ikke bare én provider)`);
+      return;
+    }
+    // §9 i HOST FIX #1-ordren: Gmail og Calendar rapporteres UAVHENGIG - `syncTenant()`
+    // fanger nå hver providers feil separat (se business-event-sync.ts), så ett providerutfall
+    // skjuler ALDRI det andre.
+    const data = result.data as { gmail?: { scanned: number; error?: string }; calendar?: { scanned: number; error?: string } };
+    const gmailReachable = data.gmail !== undefined && data.gmail.error === undefined;
+    const calendarReachable = data.calendar !== undefined && data.calendar.error === undefined;
+    diagnostics["real_gmail_scanned"] = String(data.gmail?.scanned ?? "n/a");
+    diagnostics["real_calendar_scanned"] = String(data.calendar?.scanned ?? "n/a");
     // "Reachable" = handlingen faktisk fullførte MOT ekte Gmail/Calendar (ingen credential/nettverks-
     // feil) - IKKE et krav om at en tilfeldig ekte e-post/hendelse matcher en syntetisk kontakt.
-    results.ua3_events_gmail_real_connector_reachable = result.ok ? "PASS" : "FAIL";
-    results.ua3_events_calendar_real_connector_reachable = result.ok ? "PASS" : "FAIL";
-    log(`sync_ok=${result.ok} gmail_scanned=${diagnostics["real_gmail_scanned"]} calendar_scanned=${diagnostics["real_calendar_scanned"]} -> reachable: ${results.ua3_events_gmail_real_connector_reachable}`);
-    if (!result.ok) log(`reachability_failure_reason=${(result as { reason: string }).reason}`);
+    results.ua3_events_gmail_real_connector_reachable = gmailReachable ? "PASS" : "FAIL";
+    results.ua3_events_calendar_real_connector_reachable = calendarReachable ? "PASS" : "FAIL";
+    log(`gmail_reachable=${gmailReachable} gmail_scanned=${diagnostics["real_gmail_scanned"]} gmail_failure_class=${data.gmail?.error ?? "none"} -> ua3_events_gmail_real_connector_reachable: ${results.ua3_events_gmail_real_connector_reachable}`);
+    log(`calendar_reachable=${calendarReachable} calendar_scanned=${diagnostics["real_calendar_scanned"]} calendar_failure_class=${data.calendar?.error ?? "none"} -> ua3_events_calendar_real_connector_reachable: ${results.ua3_events_calendar_real_connector_reachable}`);
   });
 
   // ===== DEL 2: DETERMINISTISK ENTITETSGJENKJENNING - FakeTransport via SAMME ToolGateway.execute()-vei =====
+  // §6 Layer B i byggeordren: denne seksjonen er BEVISST credential-UAVHENGIG -
+  // `FakeTransport.invoke()` bruker aldri selve credential-verdien, men
+  // `ToolGateway.execute()` krever likevel ubetinget en ikke-null verdi FØR
+  // `transport.invoke()` kalles (samme sjekk som rammet DEL 1). En eksplisitt,
+  // ikke-hemmelig dummy-verdi KUN for Gmail/Calendar-referansene (SAMME mønster
+  // som `business-transport-wiring.test.ts` sin "test-google-static"-provider)
+  // gjør denne seksjonen uavhengig av om ekte `.env`-credentials er konfigurert -
+  // i motsetning til DEL 1 (som MÅ ha ekte credentials for faktisk å bevise noe).
   const fakeGateway = new ToolGateway(
     pool, ownerPolicy([TENANT_A, TENANT_B]),
-    new FallbackSecretProvider({ name: "env-empty", get: async () => null }, new BusinessInternalSecretProvider())
+    new FallbackSecretProvider(
+      { name: "test-google-static", get: async (ref) => (ref === "JARVIS_EMAIL_TOKEN" || ref === "JARVIS_GOOGLE_TOKEN") ? "dummy-google-cred-del2" : null },
+      new BusinessInternalSecretProvider()
+    )
   );
   let emailFake = new FakeTransport(() => ({ data: { messages: [] } }));
   let calendarFake = new FakeTransport(() => ({ data: { events: [] } }));

@@ -36,6 +36,11 @@ export interface GmailSyncStats {
   recorded: number;
   unmatched: number;
   ambiguous: number;
+  /** Satt KUN ved en providerfeil (§9 i HOST FIX #1-ordren) - en sanitert, kort
+   *  feilklasse (samme `result.reason`-tekst ToolGateway allerede gir, ALDRI
+   *  et rått credential/token). Fravær betyr vellykket synk (kan fortsatt ha
+   *  scanned=0 hvis ingen nye meldinger fantes). */
+  error?: string;
 }
 
 export interface CalendarSyncStats {
@@ -43,6 +48,8 @@ export interface CalendarSyncStats {
   recorded: number;
   unmatched: number;
   ambiguous: number;
+  /** Samme som `GmailSyncStats.error` - uavhengig av Gmail sin status. */
+  error?: string;
 }
 
 export interface BusinessEventSyncResult {
@@ -100,6 +107,21 @@ export function extractCounterpartEmails(
     }
   }
   return [...addresses];
+}
+
+/**
+ * Bounded, kort feilklasse for `syncTenant()` sin per-provider `error`-felt
+ * (§9/§17 i HOST FIX #1-ordren) - ALDRI credential/token/authorization-
+ * header-innhold. `err.message` her kommer UTELUKKENDE fra
+ * `ToolGateway.execute()` sin egen `result.reason` (en kort, allerede
+ * kontrollert klassifiseringsstreng som ToolGateway selv aldri fyller med
+ * rå secret-verdier - se `gateway.ts` sin `deny()`/catch-håndtering), men
+ * lengden begrenses likevel her som ekstra forsvar i dybden (samme
+ * `.slice(0, N)`-presedens som ToolGateway selv bruker på tool-feilmeldinger).
+ */
+function sanitizeSyncError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, 120);
 }
 
 export class BusinessEventSyncService {
@@ -193,12 +215,28 @@ export class BusinessEventSyncService {
    * målrettet open-loop-reevaluering (§11 - gjenbruker `OpenLoopService`
    * UENDRET, ingen ny mekanisme). Trygt å kalle gjentatte ganger
    * (idempotent via `recordActivity`s eksisterende `ON CONFLICT`).
+   *
+   * HOST FIX #1 (§9 i byggeordren, ekte host-funn run_id `7c5a5289`): Gmail
+   * OG Calendar synkroniseres UAVHENGIG av hverandre - en feil i den ene
+   * (f.eks. et midlertidig credential-/rate-limit-problem hos KUN én
+   * provider) skal ALDRI skjule eller blokkere den andre. Feilen fanges her
+   * (IKKE i selve `syncGmailActivities()`/`syncCalendarActivities()`, som
+   * fortsatt kaster for direkte kallere som ønsker fail-fast) og
+   * rapporteres som en sanitert `error`-streng PÅ DEN AKTUELLE providerens
+   * stats-objekt - `result.reason` fra `ToolGateway.execute()` er allerede
+   * en kort, kontrollert klassifiseringsstreng (f.eks.
+   * "credential_unavailable"), ALDRI et rått credential/token (ToolGateway
+   * logger/returnerer aldri selve secret-verdien).
    */
   async syncTenant(tenantId: string, memorySpace: MemorySpace, identity: IdentityContext): Promise<BusinessEventSyncResult> {
-    const [gmail, calendar] = [
-      await this.syncGmailActivities(tenantId, memorySpace, identity),
-      await this.syncCalendarActivities(tenantId, memorySpace, identity)
-    ];
+    const [gmail, calendar] = await Promise.all([
+      this.syncGmailActivities(tenantId, memorySpace, identity).catch(
+        (err: unknown): GmailSyncStats => ({ scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0, error: sanitizeSyncError(err) })
+      ),
+      this.syncCalendarActivities(tenantId, memorySpace, identity).catch(
+        (err: unknown): CalendarSyncStats => ({ scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0, error: sanitizeSyncError(err) })
+      )
+    ]);
     await this.openLoops.runSweep(tenantId, memorySpace);
     return { gmail, calendar, open_loops_reevaluated: true };
   }

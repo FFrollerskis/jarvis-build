@@ -175,3 +175,46 @@ describe("§9/§11/§12 i byggeordren: deterministisk entitetsgjenkjenning, gjen
     expect(hostRunSource).not.toMatch(/@jarvis\/model-gateway|@jarvis\/provider-adapters|openai|anthropic/i);
   });
 });
+
+describe("HOST FIX #1 (D-58, ekte host-funn run_id 7c5a5289): REACHABILITY-seksjonen bruker EKTE EnvSecretProvider, ikke en alltid-null stub", () => {
+  it("importerer EnvSecretProvider fra @jarvis/tool-gateway", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*EnvSecretProvider[^}]*\}\s*from\s*"@jarvis\/tool-gateway"/s);
+  });
+  it("REAL CONNECTOR REACHABILITY-seksjonen konstruerer realGateway med new EnvSecretProvider() (ikke en env-empty-stub)", () => {
+    const sectionIdx = liveScriptSource.indexOf('section("REAL CONNECTOR REACHABILITY');
+    const nextSectionIdx = liveScriptSource.indexOf("// ===== DEL 2", sectionIdx);
+    const sectionBody = liveScriptSource.slice(sectionIdx, nextSectionIdx > -1 ? nextSectionIdx : undefined);
+    expect(sectionBody).toContain("new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())");
+    expect(sectionBody).not.toMatch(/get:\s*async\s*\(\)\s*=>\s*null/);
+  });
+  it("DEL 2 (deterministisk entitetsgjenkjenning) forblir credential-UAVHENGIG - bruker en eksplisitt dummy-verdi for Gmail/Calendar-referansene, ALDRI EnvSecretProvider", () => {
+    const del2Idx = liveScriptSource.indexOf("// ===== DEL 2");
+    const del2Body = liveScriptSource.slice(del2Idx, liveScriptSource.indexOf("let companyId"));
+    expect(del2Body).toContain('"test-google-static"');
+    expect(del2Body).not.toContain("new EnvSecretProvider()");
+  });
+  it("REACHABILITY rapporterer Gmail/Calendar UAVHENGIG (§9) - leser gmail.error/calendar.error separat, ikke kun ett samlet sync_ok", () => {
+    const sectionIdx = liveScriptSource.indexOf('section("REAL CONNECTOR REACHABILITY');
+    const sectionBody = liveScriptSource.slice(sectionIdx, liveScriptSource.indexOf("// ===== DEL 2", sectionIdx));
+    expect(sectionBody).toContain("data.gmail?.error");
+    expect(sectionBody).toContain("data.calendar?.error");
+    expect(sectionBody).toContain("gmailReachable");
+    expect(sectionBody).toContain("calendarReachable");
+  });
+  it("aldri logger et rått credential/token-felt (kun sanerte reason-/failure_class-strenger)", () => {
+    expect(liveScriptSource).not.toMatch(/authorization|access_token|refresh_token|client_secret/i);
+  });
+});
+
+describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i SAMME toolGateway som BusinessTransport mottar (§17/§20 F/G)", () => {
+  it("apps/api/src/main.ts konstruerer toolGateway med EnvSecretProvider OG gir SAMME toolGateway-variabel til BusinessTransport", () => {
+    const mainSource = readSource("../../../apps/api/src/main.ts");
+    expect(mainSource).toMatch(/const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
+    expect(mainSource).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway)");
+  });
+  it("apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring", () => {
+    const workerSource = readSource("../../../apps/api/src/worker-main.ts");
+    expect(workerSource).toMatch(/new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
+    expect(workerSource).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway)");
+  });
+});
