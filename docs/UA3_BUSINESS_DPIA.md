@@ -3,8 +3,11 @@
 **Status:** UA-3 P0 «Business Domain Foundation» = VERIFIED/COMPLETE (D-52, host-bevist run_id
 `ca2d9248`). UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» = VERIFIED/COMPLETE (2026-08-17,
 host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTIONS.md). UA-3
-«Business-Event-Linkage (Gmail/Calendar → Business OS)» = FIXED_SUITE / READY_FOR_HOST_VERIFY
-(2026-08-17, IKKE host-verifisert ennå, se D-57).
+«Business-Event-Linkage (Gmail/Calendar → Business OS)» = VERIFIED/COMPLETE (2026-08-17, host-bevist
+run_id `6c6a4948`, `hard_fail=false`, se D-57/D-58/D-59/D-60). Personvernsgarantiene under (ingen
+Gmail-body/emne/deltakerinnhold i `business_activities`, kun kilde-peker) er nå bekreftet LIVE via
+`ua3_events_no_body_content_stored=PASS` og `ua3_events_audit_safe=PASS` på ekte host, ikke kun
+suite-bevist.
 Dette notatet dekker den strukturerte tredjeparts-persondata-kategorien UA-3 introduserer (kunde-/
 kontakt-/selskapsdata i `business_*`-tabellene, inkl. NÅ `business_open_loops`) - utfyller, erstatter
 ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-rad.
