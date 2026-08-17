@@ -468,6 +468,78 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ingen automatisk angring - append-only tidslinje, re-sync er trygt (idempotent)", idempotent_external: true,
       timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
+    },
+    // UA-3 profiling/scoring-slice (D-61): transparent, deterministisk
+    // BUSINESS-OPERASJONELL prioritering/risiko-scoring over lead/opportunity
+    // (akseptansekriterium 4) - ALDRI generalisert personprofilering (§4/§11 i
+    // byggeordren). Scoren er ALLTID forklarbar (faktorer+kilde-referanser er
+    // en del av selve svaret på hver lesing) og utleder ALDRI en autonom
+    // hoy-konsekvens personbeslutning - kun intern prioriteringstilstand.
+    // Klasse A for alle lesinger (samme som read_metrics/list_open_loops).
+    // Lagt til på SLUTTEN av arrayet - eksisterende tester indekserer posisjonelt.
+    {
+      tool_id: "business", action: "get_lead_score", description: "Les gjeldende prioritets-score for en lead, med full faktor-/kilde-forklaring",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), lead_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "get_opportunity_score", description: "Les gjeldende risiko-score for en opportunity, med full faktor-/kilde-forklaring",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "explain_score", description: "Les gjeldende score for en vilkaarlig entitet (entity_type: 'lead'|'opportunity') med full begrunnelse",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.string(), entity_id: z.string() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "rank_leads", description: "Ranger leads etter gjeldende prioritets-score (hoyest foerst)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "rank_opportunities", description: "Ranger opportunities etter gjeldende risiko-score (hoyest foerst)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["business.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "recalculate_score", description: "Tving rekalkulering av scoren for én lead/opportunity (idempotent - samme regelsett, ny beregning)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.string(), entity_id: z.string() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "ingen automatisk angring - rekalkulering er idempotent og overskriver kun tidligere beregnet score, aldri manuell overstyring", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "set_manual_override", description: "Sett en eier-autorisert manuell overstyring av en scores prioriteringsverdi (endrer ALDRI de underliggende faktorene/kildedataene)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.string(), entity_id: z.string(), override_score: z.number(), reason: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["business.write"], reversible: true,
+      rollback_procedure: "clear_manual_override (tilbake til beregnet score)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
+    },
+    {
+      tool_id: "business", action: "clear_manual_override", description: "Fjern en manuell overstyring - gaar tilbake til den sist beregnede scoren",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.string(), entity_id: z.string() }),
+      capability_class: "B", scopes: ["business.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar - sett en ny manuell overstyring ved behov (set_manual_override)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("business")
     }
   ];
 }

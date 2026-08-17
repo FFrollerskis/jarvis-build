@@ -26,7 +26,7 @@ import {
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
-  runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants
+  ScoringService, runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
@@ -103,10 +103,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§4/§19/§20 i byggeordren).
   const openLoopService = new OpenLoopService(pool);
+  // UA-3 profiling/scoring-slice (D-61): egen tjeneste over samme runtime-pool,
+  // ingen ny kø/motor (§14/§23 i byggeordren) - gjenbruker Business Graph uendret.
+  const scoringService = new ScoringService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
-    business: new BusinessTransport(businessService, openLoopService, pool, toolGateway),
+    business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
@@ -234,6 +237,14 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-events-sync", Number(process.env["JARVIS_BUSINESS_EVENTS_SYNC_HOUR"] ?? 5)
   ).start(() => runBusinessEventSyncForAllTenants(pool, businessEventSyncService).then(() => undefined));
+  // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
+  // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
+  // job_name, egen klokkeslett-env). Kjøres ETTER events-sync (05) og
+  // open-loop-sveipet (06) slik at rekalkuleringen ser den ferskeste
+  // aktivitets-/open-loop-tilstanden (default kl. 07).
+  new DailyScheduler(
+    pool, "business-scoring-recalc", Number(process.env["JARVIS_BUSINESS_SCORING_HOUR"] ?? 7)
+  ).start(() => runScoringSweepForAllTenants(pool, scoringService).then(() => undefined));
   return deps;
 }
 

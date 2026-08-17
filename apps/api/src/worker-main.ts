@@ -7,7 +7,7 @@ import {
   EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
   MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "@jarvis/business";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -78,13 +78,16 @@ const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
 const openLoopService = new OpenLoopService(pool);
+// UA-3 profiling/scoring-slice (D-61): samme ScoringService-wiring som api -
+// workeren sin mesh-tool-executor maa kunne kalle score-handlingene identisk.
+const scoringService = new ScoringService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
-  business: new BusinessTransport(businessService, openLoopService, pool, toolGateway),
+  business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

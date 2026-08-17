@@ -775,6 +775,53 @@ D-klasse/hard-delete; UI/dashboard.
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3,
 inkl. det som fortsatt gjenstår etter denne sliceen).
 
+### UA-3 — Profiling/Scoring (akseptansekriterium 4) = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17) → D-61
+
+**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY → D-61 - IKKE VERIFIED**, venter på Tobias sin FØRSTE
+host-kjøring. Bygget PÅ det VERIFIED/COMPLETE Business-Event-Linkage-fundamentet (D-60). Canonical-audit
+(§1 i byggeordren) bekreftet at akseptansekriterium 4 ("Profiling/scoring used with documented legal/
+human controls where required", linje 472) var det eneste av UA-3 sine fire kriterier som IKKE krever en
+uavklart leverandørbeslutning - Support/tickets og Contracts/e-sign forblir eksplisitt IKKE bygget denne
+runden (krever fortsatt Tobias-provider-beslutning, se D-57/Q-25 item 8).
+
+**Bygget:**
+1. **Migrasjon `022_business_scoring.sql`** - ny `business_scores`-tabell, samme FORCE RLS
+   tenant+memory_space-RESTRICTIVE-mønster som `business_open_loops` (020). `entity_type` er
+   DB-CHECK-begrenset til `'lead'`/`'opportunity'` - kontakt-/person-scoring er strukturelt umulig.
+2. **`scoring-rules.ts`** - REN, DB-uavhengig, 100% deterministisk regelmotor
+   (`calculateLeadPriorityV1`/`calculateOpportunityRiskV1`), whitelist av tillatte faktor-koder
+   (`ALLOWED_LEAD_FACTOR_CODES`/`ALLOWED_OPPORTUNITY_FACTOR_CODES`) + `assertNoProhibitedFactorCodes()`
+   som strukturelt blokkerer enhver beskyttet-trekk-kode.
+3. **`scoring-service.ts`** - signal-innsamling (KUN `business_leads`/`business_opportunities`/
+   `business_activities`/`business_followups`/`business_open_loops` - ALDRI kontakt-/person-felter),
+   idempotent UPSERT-persistering, `explainScore`/`rankLeads`/`rankOpportunities`,
+   `setManualOverride`/`clearManualOverride` (rører aldri de underliggende beregnede faktorene).
+4. **ToolGateway** - 8 nye `business.*`-handlinger (`get_lead_score`/`get_opportunity_score`/
+   `explain_score`/`rank_leads`/`rank_opportunities` = klasse A; `recalculate_score`/
+   `set_manual_override`/`clear_manual_override` = klasse B, INGEN klasse D). `BusinessTransport`
+   fikk en femte, valgfri `ScoringService`-konstruktørparameter - fail-closed når ikke wiret inn.
+5. **Periodisk rekalkulering** via EKSISTERENDE `DailyScheduler` (`job_name="business-scoring-recalc"`,
+   `JARVIS_BUSINESS_SCORING_HOUR`, default kl. 07 - ETTER events-sync (05) og open-loop-sveipet (06)).
+6. **Host-akseptanseskript** `ua3-profiling-scoring-host-run.ts` → `ua3-profiling-scoring-live.ts` -
+   ETT-delt strategi (business-scoring har INGEN ekstern leverandør-credential, i motsetning til
+   Gmail/Calendar-linkage sin to-delte REACHABILITY/FakeTransport-strategi), gjenbruker UENDRET D-55
+   sin selvdiagnostiske FK-blokkerings-sperre.
+
+**Suite-verifisert (1147/1147 tester totalt, 65 nye over hele sliceen - se RUNTIME_GATES.md):**
+lead-/opportunity-score-beregning, faktor-forklaring, evidence/kilde-referanser, score-versjonering,
+beskyttet-trekk-forbud (strukturelt OG funksjonelt bevist), ingen skjult personlighets-/trekk-inferens,
+manuell overstyring + audit, idempotent rekalkulering, tenant-/memory-space-isolasjon, Q-21-rollesikkerhet,
+ToolGateway-lesing/-skriving, audit-personvern, ingen AI Mesh-/ModelGateway-bruk, Q-20-kildefjerning-
+resiliens, hoy-konsekvens-personbeslutning strukturelt umulig, fail-closed når ikke konfigurert.
+
+**Bygges IKKE i denne sliceen:** kontakt-/person-nivå-scoring (arkitektonisk umulig, ikke bare utsatt);
+AI Mesh-basert semantisk scoring (v1 er 100% deterministisk); finere per-tenant/policy-nivå av/på-bryter
+utover konstruktør-wiring; event-drevet (ikke periodisk) rekalkulering; kontrakt-/faktura-verdi-baserte
+faktorer (unngår arbitrære terskler); Support/tickets- og Contracts/e-sign-connectorer (krever fortsatt
+en Tobias-provider-beslutning).
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3).
+
 ---
 
 ## Fase-avhengigheter (oversikt)

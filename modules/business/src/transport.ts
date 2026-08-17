@@ -6,6 +6,8 @@ import type { BusinessService } from "./service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import { BusinessEventSyncService } from "./business-event-sync.ts";
+import type { ScoringService } from "./scoring-service.ts";
+import type { ScoreEntityType } from "./scoring-types.ts";
 
 /**
  * D-49: `ToolTransport.invoke(action, parameters, credential)` gir - som for
@@ -27,7 +29,8 @@ export class BusinessTransport implements ToolTransport {
     private readonly service: BusinessService,
     private readonly openLoops?: OpenLoopService,
     private readonly pool?: pg.Pool,
-    private readonly gateway?: ToolGateway
+    private readonly gateway?: ToolGateway,
+    private readonly scoring?: ScoringService
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -213,6 +216,53 @@ export class BusinessTransport implements ToolTransport {
         const result = await this.requireEventSync().syncTenant(tenantId, memorySpace, identity);
         return { data: result as unknown as JsonValue };
       }
+      case "get_lead_score": {
+        const row = await this.requireScoring().explainScore(tenantId, memorySpace, "lead", requireString(parameters, "lead_id"));
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "get_opportunity_score": {
+        const row = await this.requireScoring().explainScore(tenantId, memorySpace, "opportunity", requireString(parameters, "opportunity_id"));
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "explain_score": {
+        const entityType = requireString(parameters, "entity_type") as ScoreEntityType;
+        const row = await this.requireScoring().explainScore(tenantId, memorySpace, entityType, requireString(parameters, "entity_id"));
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "rank_leads": {
+        const limit = parameters["limit"] !== undefined ? Number(parameters["limit"]) : undefined;
+        const rows = await this.requireScoring().rankLeads(tenantId, memorySpace, limit);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "rank_opportunities": {
+        const limit = parameters["limit"] !== undefined ? Number(parameters["limit"]) : undefined;
+        const rows = await this.requireScoring().rankOpportunities(tenantId, memorySpace, limit);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "recalculate_score": {
+        const entityType = requireString(parameters, "entity_type") as ScoreEntityType;
+        const entityId = requireString(parameters, "entity_id");
+        const row = entityType === "lead"
+          ? await this.requireScoring().recalculateLeadScore(tenantId, memorySpace, entityId)
+          : await this.requireScoring().recalculateOpportunityScore(tenantId, memorySpace, entityId);
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "set_manual_override": {
+        const entityType = requireString(parameters, "entity_type") as ScoreEntityType;
+        const entityId = requireString(parameters, "entity_id");
+        const row = await this.requireScoring().setManualOverride(tenantId, memorySpace, entityType, entityId, {
+          override_score: requireNumber(parameters, "override_score"),
+          reason: requireString(parameters, "reason"),
+          ...(parameters["actor_person_id"] !== undefined ? { actor_person_id: String(parameters["actor_person_id"]) } : {})
+        });
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "clear_manual_override": {
+        const entityType = requireString(parameters, "entity_type") as ScoreEntityType;
+        const entityId = requireString(parameters, "entity_id");
+        const row = await this.requireScoring().clearManualOverride(tenantId, memorySpace, entityType, entityId);
+        return { ...(row ? { external_id: row.score_id } : {}), data: row as unknown as JsonValue };
+      }
       default:
         throw new Error(`business_action_not_implemented:${action}`);
     }
@@ -233,11 +283,24 @@ export class BusinessTransport implements ToolTransport {
     this.eventSync ??= new BusinessEventSyncService(this.gateway, this.service, this.requireOpenLoops());
     return this.eventSync;
   }
+
+  private requireScoring(): ScoringService {
+    if (!this.scoring) throw new Error("business_scoring_not_configured");
+    return this.scoring;
+  }
 }
 
 function requireString(parameters: Record<string, JsonValue>, key: string): string {
   const value = parameters[key];
   if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`business_missing_parameter:${key}`);
+  }
+  return value;
+}
+
+function requireNumber(parameters: Record<string, JsonValue>, key: string): number {
+  const value = parameters[key];
+  if (typeof value !== "number" || Number.isNaN(value)) {
     throw new Error(`business_missing_parameter:${key}`);
   }
   return value;

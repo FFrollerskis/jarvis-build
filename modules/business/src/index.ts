@@ -7,3 +7,7 @@ export * from "./open-loop-service.ts";
 export * from "./business-brief.ts";
 export * from "./open-loop-sweep.ts";
 export * from "./business-event-sync.ts";
+export * from "./scoring-types.ts";
+export * from "./scoring-rules.ts";
+export * from "./scoring-service.ts";
+export * from "./scoring-sweep.ts";
