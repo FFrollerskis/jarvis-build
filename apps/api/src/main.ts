@@ -24,7 +24,9 @@ import {
   buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource, firstWaveTools,
   tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "@jarvis/business";
+import {
+  BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, runOpenLoopSweepForAllTenants
+} from "@jarvis/business";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -97,10 +99,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     new OwnerControls(killSwitch)
   );
   const businessService = new BusinessService(pool);
+  // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
+  // ingen ny kø/motor (§4/§19/§20 i byggeordren).
+  const openLoopService = new OpenLoopService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
-    business: new BusinessTransport(businessService),
+    business: new BusinessTransport(businessService, openLoopService, pool),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   const ownerIdentity = {
@@ -210,6 +215,12 @@ porter: se docs/RUNTIME_GATES.md`;
       await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
     });
   }
+  // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
+  // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
+  // uavhengig av om Telegram er konfigurert (deteksjon != levering).
+  new DailyScheduler(
+    pool, "business-open-loop-sweep", Number(process.env["JARVIS_BUSINESS_SWEEP_HOUR"] ?? 6)
+  ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
   return deps;
 }
 

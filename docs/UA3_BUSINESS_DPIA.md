@@ -1,10 +1,24 @@
-# UA-3 P0 — DPIA / data-governance-notat (Business Domain Foundation)
+# UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection)
 
-**Status:** UA-3 P0 «Business Domain Foundation» = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17, se
-D-49 i DECISIONS_AND_ASSUMPTIONS.md). Dette notatet dekker den NYE, strukturerte tredjeparts-
-persondata-kategorien UA-3 P0 introduserer (kunde-/kontakt-/selskapsdata i `business_*`-tabellene) -
-utfyller, erstatter ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-
-rad (som forble ufullstendig detaljert siden ingen strukturert forretningsmodell fantes før nå).
+**Status:** UA-3 P0 «Business Domain Foundation» = VERIFIED/COMPLETE (D-52, host-bevist run_id
+`ca2d9248`). UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» = VERIFIED/COMPLETE (2026-08-17,
+host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTIONS.md).
+Dette notatet dekker den strukturerte tredjeparts-persondata-kategorien UA-3 introduserer (kunde-/
+kontakt-/selskapsdata i `business_*`-tabellene, inkl. NÅ `business_open_loops`) - utfyller, erstatter
+ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-rad.
+
+## business_open_loops (NY, UA-3 NEXT SLICE / D-53)
+
+`business_open_loops` er en AUTOMATISK DERIVERT tabell - hver rad er et system-generert resultat av en
+deterministisk regel kjørt over EKSISTERENDE `business_followups`/`business_opportunities`-data, ikke en
+ny persondata-INNTAKSVEI. Ingen nytt personopplysningsfelt introduseres: `reason`/`next_action` er
+korte, systemgenererte setninger som refererer et EKSISTERENDE followup/opportunity-tittelfelt (samme
+tekst som allerede ligger i P0-tabellene) - klassifisert som **OPERATIONAL METADATA**, samme kategori
+som `business_followups`/`business_opportunities`/`business_activities` selv (se tabellen under).
+`owner_person_id` refererer en EKSISTERENDE `people`-rad (samme mønster som resten av Business OS).
+Ingen AI Mesh-basert profiling/scoring brukt til å utlede `priority` (deterministisk fra forfalt-
+/stagnert-varighet) - se D-53 §11/§12 for full begrunnelse. RLS/tenant-/memory-space-isolasjon: SAMME
+FORCE RLS-mønster som alle andre business-tabeller (`020_business_open_loops.sql`).
 
 ## Hvilke data lagres
 
@@ -16,6 +30,7 @@ rad (som forble ufullstendig detaljert siden ingen strukturert forretningsmodell
 | `business_opportunities` | Deal-tittel, pipeline-stadium, beløp (øre), valuta, forventet lukkedato | "Acme - tjeneste X", "qualified", 500000 |
 | `business_activities` | Aktivitetstype, KORT strukturert sammendrag, kilde-peker (`canonical_uri` - ALDRI kopi av fullt innhold) | "E-post mottatt", peker til Knowledge-dokument/ekstern kilde |
 | `business_followups` | Oppgave-tittel, frist, prioritet, status, eier, årsak, neste handling | "Send tilbud", forfallsdato, "open" |
+| `business_open_loops` (NY, D-53) | **AUTOMATISK DERIVERT** - deteksjonstype, kort systemgenerert begrunnelse (refererer eksisterende followup-/opportunity-tittel), deterministisk prioritet, status, eier | "overdue_followup", "Oppfoelging 'Send tilbud' er forfalt", "high", "open" |
 
 **Kritisk arkitekturprinsipp (§15 i byggeordren):** `business_activities.canonical_uri` er en LØS PEKER
 til Knowledge/eksterne kilder - UA-3 P0 kopierer ALDRI fulle e-post-kropper, dokumentinnhold eller
@@ -27,7 +42,7 @@ eksterne kilden; Business OS lagrer kun strukturert state + en peker.
 | Kategori | Tabeller | Retensjon/sletting |
 |---|---|---|
 | **CONTENT** (tredjeparts persondata Tobias/selskapet er behandlingsansvarlig for) | `business_contacts` (navn/e-post/telefon) | Slettes ved eksplisitt forespørsel (fremtidig D-klasse-operasjon, IKKE bygget i P0 - se Q-25). Ingen automatisk retensjonsgrense satt i P0 - operasjonell forretningsdata, ikke midlertidig cache |
-| **OPERATIONAL METADATA** (relasjonens tilstand, ikke selve kildeinnholdet) | `business_companies`/`business_leads`/`business_opportunities`/`business_activities`/`business_followups` | Retained ved Q-20-sletting av et REFERERT Knowledge-dokument (ingen FK - se under). Slettes/anonymiseres KUN sammen med hele tenanten (samme mønster som øvrige tenant-scopede tabeller) |
+| **OPERATIONAL METADATA** (relasjonens tilstand, ikke selve kildeinnholdet) | `business_companies`/`business_leads`/`business_opportunities`/`business_activities`/`business_followups`/`business_open_loops` (NY, D-53 - automatisk derivert, ikke en ny inntaksvei) | Retained ved Q-20-sletting av et REFERERT Knowledge-dokument (ingen FK - se under). Slettes/anonymiseres KUN sammen med hele tenanten (samme mønster som øvrige tenant-scopede tabeller) |
 | **AUDIT-EVENT** | `audit_events`-rader for `tool_id='business'` | Append-only (uendret fra eksisterende audit-arkitektur), inneholder ALDRI navn/e-post/telefon (kun `credential_ref`/`external_id`/`scopes`/`rollback` - verifisert i `business-transport-wiring.test.ts` §N) |
 
 ## Q-20-interaksjon (§26 i byggeordren)
@@ -39,6 +54,8 @@ oppløsbar - ALDRI en cascade-feil, ALDRI en database-konstraint-krasj, og ALDRI
 "gjenopplive" det slettede innholdet (aktiviteten selv inneholder kun det korte, allerede lagrede
 sammendraget - ikke kildens fulle tekst). Ingen kompleks cascade-slette-logikk er bygget, siden ingen
 FK-relasjon finnes å cascade fra - dette er en BEVISST designbeslutning (D-49), ikke et overset gap.
+`business_open_loops` (D-53) har SAMME egenskap - `canonical_uri`-feltet er også en løs peker uten FK
+til `knowledge_documents`, strukturelt bevist i `open-loop-service.test.ts` §M.
 
 ## Tenant-/RLS-isolasjon
 
@@ -58,9 +75,12 @@ prinsippet nå faktisk gjelder for. Databehandleravtaler/region-/retensjonsmatri
 tredjeparter (f.eks. et fremtidig CRM-eksport-mål) er IKKE vurdert i P0, siden ingen ekstern
 tredjepartsoverføring er bygget denne runden.
 
-## Ikke i scope for P0 (se Q-25 for full liste)
+## Ikke i scope for P0 eller NEXT SLICE (se Q-25 for full liste)
 
-Ingen AI Mesh-basert profiling/scoring er bygget i P0 - masterplanens fjerde UA-3-akseptansekriterium
-("Profiling/scoring used with documented legal/human controls where required") er derfor IKKE
-relevant for denne DPIA-en ennå; når scoring faktisk bygges (fremtidig UA-3-slice) må denne seksjonen
-oppdateres med de juridiske/menneskelige kontrollene kriteriet krever.
+Ingen AI Mesh-basert profiling/scoring er bygget i P0 ELLER i UA-3 NEXT SLICE (D-53) -
+masterplanens fjerde UA-3-akseptansekriterium ("Profiling/scoring used with documented legal/human
+controls where required") er derfor FORTSATT IKKE relevant for denne DPIA-en; D-53s `priority`-felt
+(low/normal/high på open loops) er en enkel, deterministisk, dokumentert regel basert på forfalt-/
+stagnert-varighet - IKKE kunde-/persontrekk-scoring, og utleder ALDRI sensitive kategorier
+(helse/etnisitet/religion/politikk osv.) om noen person. Når faktisk scoring bygges (fremtidig
+UA-3-slice) må denne seksjonen oppdateres med de juridiske/menneskelige kontrollene kriteriet krever.

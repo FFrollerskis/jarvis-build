@@ -8,7 +8,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "../src/index.ts";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "../src/index.ts";
 
 /**
  * UA-3 P0: bevis at Business Graph-verktøyene er korrekt registrert og
@@ -67,7 +67,8 @@ beforeAll(async () => {
     )
   );
   const service = new BusinessService(appPool);
-  for (const tool of firstWaveTools({ business: new BusinessTransport(service) })) toolGateway.register(tool);
+  const openLoops = new OpenLoopService(appPool);
+  for (const tool of firstWaveTools({ business: new BusinessTransport(service, openLoops, appPool) })) toolGateway.register(tool);
 }, 240_000);
 
 afterAll(async () => {
@@ -76,11 +77,11 @@ afterAll(async () => {
   await epg?.stop();
 }, 120_000);
 
-describe("registrering: alle 13 business-handlinger er registrert med riktig risikoklasse", () => {
+describe("registrering: alle 21 business-handlinger er registrert med riktig risikoklasse", () => {
   it("A-klasse for lesing, B for enkle reversible skrivinger, C for tilstandsoverganger - ingen D i dette sliceet", () => {
     const defs = firstWaveTools({});
     const business = new Map(defs.filter((d) => d.tool_id === "business").map((d) => [d.action, d.capability_class]));
-    expect(business.size).toBe(13);
+    expect(business.size).toBe(21);
     expect(business.get("create_company")).toBe("B");
     expect(business.get("create_contact")).toBe("B");
     expect(business.get("create_lead")).toBe("B");
@@ -94,6 +95,16 @@ describe("registrering: alle 13 business-handlinger er registrert med riktig ris
     expect(business.get("cancel_followup")).toBe("C");
     expect(business.get("list_overdue_followups")).toBe("A");
     expect(business.get("read_metrics")).toBe("A");
+    // UA-3 next slice (D-53): 8 nye open-loop/brief-handlinger - A for lesing,
+    // B for enkle reversible felt-oppdateringer, C for resolusjon/utsettelse.
+    expect(business.get("list_open_loops")).toBe("A");
+    expect(business.get("read_open_loop")).toBe("A");
+    expect(business.get("get_attention_queue")).toBe("A");
+    expect(business.get("get_business_brief")).toBe("A");
+    expect(business.get("resolve_open_loop")).toBe("C");
+    expect(business.get("defer_open_loop")).toBe("C");
+    expect(business.get("assign_open_loop")).toBe("B");
+    expect(business.get("set_open_loop_next_action")).toBe("B");
     expect([...business.values()]).not.toContain("D");
   });
 });
@@ -150,5 +161,78 @@ describe("N: audit-metadata inneholder aldri sensitivt kundeinnhold", () => {
     expect(payload).not.toContain("Sensitiv Person");
     expect(payload).not.toContain("sensitiv@eksempel.no");
     expect(payload).not.toContain("+4712345678");
+  });
+});
+
+describe("UA-3 next slice (D-53): open-loop-handlinger kjoerer gjennom SAMME ToolGateway/PolicyGateway-pipeline", () => {
+  it("owner sin capability_class C-handling (resolve_open_loop) kjoerer uten approval under SOVEREIGN authority", async () => {
+    const followup = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_followup",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Sovereign open-loop-test", due_at: "2020-01-01T00:00:00Z" }
+    });
+    expect(followup.ok).toBe(true);
+    // Kjoer deteksjonen direkte (ToolGateway eksponerer ikke selve sveipet - det er en scheduler-jobb, ikke en agent-handling).
+    const openLoops = new OpenLoopService(appPool);
+    await openLoops.detectOverdueFollowups(TENANT, "business");
+    const listResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "list_open_loops",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(listResult.ok).toBe(true);
+    const loopId = listResult.ok ? (listResult.data as Array<{ open_loop_id: string }>)[0]?.open_loop_id : undefined;
+    expect(loopId).toBeTruthy();
+    const resolveResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "resolve_open_loop",
+      parameters: { tenant_id: TENANT, memory_space: "business", open_loop_id: loopId as string, resolution_reason: "sovereign-test" }
+    });
+    expect(resolveResult.ok).toBe(true);
+  });
+
+  it("en delegat faar IKKE resolve_open_loop (class C) autonomt uten mandat - samme EKSISTERENDE PolicyGateway-regel", async () => {
+    const result = await toolGateway.execute({
+      identity: delegateIdentity, tool_id: "business", action: "resolve_open_loop",
+      parameters: { tenant_id: TENANT, memory_space: "business", open_loop_id: "biz-ol-nonexistent", resolution_reason: "forsoek" }
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toContain("class_c_no_mandate");
+    }
+  });
+
+  it("en delegat FAAR likevel get_attention_queue (class A-lesing)", async () => {
+    const result = await toolGateway.execute({
+      identity: delegateIdentity, tool_id: "business", action: "get_attention_queue",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("audit-metadata for resolve_open_loop inneholder aldri fritekst-begrunnelsen (resolution_reason) - kun credential_ref/external_id/scopes/rollback", async () => {
+    const followup = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_followup",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Audit-sensitiv oppfoelging", due_at: "2020-01-02T00:00:00Z" }
+    });
+    expect(followup.ok).toBe(true);
+    const followupId = followup.ok ? followup.external_id : undefined;
+    const openLoops = new OpenLoopService(appPool);
+    await openLoops.detectOverdueFollowups(TENANT, "business");
+    const listResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "list_open_loops",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    const loops = listResult.ok ? (listResult.data as Array<{ open_loop_id: string; followup_id: string | null }>) : [];
+    const targetLoop = loops.find((l) => l.followup_id === followupId);
+    expect(targetLoop).toBeTruthy();
+    const sensitiveReason = "HEMMELIG-INTERN-BEGRUNNELSE-42";
+    await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "resolve_open_loop",
+      parameters: { tenant_id: TENANT, memory_space: "business", open_loop_id: targetLoop!.open_loop_id, resolution_reason: sensitiveReason }
+    });
+    const { rows } = await adminPool.query(
+      "SELECT payload FROM audit_events WHERE tenant_id = $1 AND tool_id = 'business' AND action = 'resolve_open_loop' ORDER BY at DESC LIMIT 1",
+      [TENANT]
+    );
+    const payload = JSON.stringify((rows[0] as { payload: unknown }).payload);
+    expect(payload).not.toContain(sensitiveReason);
   });
 });
