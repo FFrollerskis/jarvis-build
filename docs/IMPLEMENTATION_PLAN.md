@@ -570,12 +570,16 @@ kontrakt/faktura/inntekt-sporing (naturlig hjemme i en fremtidig UA-6, Q-25); nu
 (Q-25); UI/dashboard (separat, senere plan); full telefoni; møtetranskripsjon (avhenger av UA-7, ikke
 bygget). **UA-3 P0 er derfor et forslag til FØRSTE byggbare skive, ikke hele UA-3** - se under.
 
-### UA-3 P0 — Business Domain Foundation = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17)
+### UA-3 P0 — Business Domain Foundation = FIXED_SUITE / HOST_VERIFY_BLOCKED (2026-08-17)
 
-**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert** (bygget i sky-container uten
-Docker - se RUNTIME_GATES.md for full evidens/gap-liste). Navngitt/prioritert fra masterplanens egen
+**Status: IMPLEMENTED + SUITE-VERIFIED. HOST_VERIFY_BLOCKED** (bygget i sky-container uten Docker - se
+RUNTIME_GATES.md for full evidens/gap-liste). Navngitt/prioritert fra masterplanens egen
 integrasjons-prioritetstabell ("Internal CRM / Sales pipeline full internal UA-3 P0", linje ~1069) -
 ingen oppfunnet struktur, se D-49 for full begrunnelse. Bygget i `modules/business` (`@jarvis/business`).
+**HOST FIX #1 (samme dag, D-50):** Tobias sin første host-kjøring (`run_id b95dd25f`) avdekket at
+`ua3-business-live.ts` feilaktig brukte runtime-poolen til å opprette akseptanse-scaffolding (`42501`
+RLS-avslag mot `tenants` - RLS fungerte som tiltenkt, ikke en feil å svekke) - fikset med en egen
+`adminPool` for scaffold/cleanup, se D-50 for full detalj.
 
 **Bygget:**
 1. **Business Graph-domenemodell** (`019_business.sql`) - 6 nye, tenant-scoped FORCE RLS-tabeller
@@ -595,18 +599,20 @@ ingen oppfunnet struktur, se D-49 for full begrunnelse. Bygget i `modules/busine
    transport i `firstWaveTools({...})` i `main.ts`/`worker-main.ts`, samme mønster som
    email/calendar/github/telegram.
 
-**Suite-verifisert (897/897 - 24 nye tester denne runden, se kvalitetsrapport i RUNTIME_GATES.md):**
+**Suite-verifisert (922/922 - 36 nye tester totalt, se kvalitetsrapport i RUNTIME_GATES.md):**
 tenant-isolert entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
 aktivitetstidslinje, oppfoelging-livssyklus (create/complete/cancel/overdue), kilde-peker-lenking
 (canonical_uri, ingen FK til knowledge_documents - strukturelt Q-20-trygt), cross-tenant/memory-space-
 isolasjon (RLS mot ekte embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring
 (owner sovereign + delegert policy, EKSISTERENDE PolicyGateway-mekanikk, ingen ny logikk), audit-
-metadata uten sensitivt kundeinnhold.
+metadata uten sensitivt kundeinnhold, scaffold-/runtime-pool-separasjon (inkl. en LIVE reproduksjon av
+selve `42501`-RLS-feilklassen host-kjøringen traff, mot en ekte NOSUPERUSER/NOBYPASSRLS-rolle).
 
-**IKKE host/live-verifisert (krever Docker/ekte lokal Postgres på Tobias sin host):** ETT Windows
-host-akseptanseskript er skrevet (`modules/business/scripts/ua3-host-run.ts` →
-`ua3-business-live.ts`, speiler `q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) men IKKE kjørt av
-meg denne runden.
+**IKKE host/live-verifisert ennå (krever en NY host-kjøring på Tobias sin host):** ETT Windows
+host-akseptanseskript (`modules/business/scripts/ua3-host-run.ts` → `ua3-business-live.ts`, speiler
+`q20-host-run.ts`/`q20-erasure-live.ts`-mønsteret) er kjørt ÉN gang av Tobias (`run_id b95dd25f`) og
+kom gjennom bootstrap/migrasjoner/Q-21, men feilet på scaffold-bug-en over FØR Business OS-
+kapabilitetene selv ble evaluert. Fiksen (D-50) er IKKE re-host-kjørt ennå.
 
 **Bygges IKKE i P0 (uendret fra "Bygges IKKE" over):** se Q-25 for full liste.
 

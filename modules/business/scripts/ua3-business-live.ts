@@ -13,7 +13,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
-import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
+import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } from "@jarvis/business";
@@ -21,6 +21,7 @@ import { BusinessInternalSecretProvider, BusinessService, BusinessTransport } fr
 type Verdict = "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE";
 
 const results: Record<string, Verdict> = {
+  ua3_business_runtime_role: "FAIL",
   ua3_company_contact: "FAIL",
   ua3_lead_idempotent: "FAIL",
   ua3_opportunity_pipeline: "FAIL",
@@ -32,7 +33,8 @@ const results: Record<string, Verdict> = {
   ua3_tenant_isolation: "FAIL",
   ua3_space_isolation: "FAIL",
   ua3_toolgateway_wiring: "FAIL",
-  ua3_audit_no_sensitive_content: "FAIL"
+  ua3_audit_no_sensitive_content: "FAIL",
+  ua3_cleanup: "FAIL"
 };
 const diagnostics: Record<string, string> = {};
 
@@ -54,7 +56,16 @@ const runId = randomUUID().slice(0, 8);
 log(`UA-3 P0 LIVE ACCEPTANCE - run_id=${runId}`);
 
 assertRuntimeCredentialsConfigured();
+// `pool` (RUNTIME - `jarvis_runtime`, NOSUPERUSER/NOBYPASSRLS) er den ENESTE tilkoblingen som noensinne
+// utfører Business OS-operasjoner under test (BusinessService/ToolGateway) - EKSAKT samme pool en
+// ekte api/worker-prosess ville brukt. `adminPool` (samme adminConfigFromEnv() som migrate/q20-erasure-
+// live.ts bruker - se HOST FIX #1) brukes UTELUKKENDE til å provisjonere/rydde midlertidig
+// akseptanse-scaffolding (tenant/person/person_tenants/memory_spaces) - ALDRI til å bevise en
+// Business OS-kapabilitet. Root cause for host-funnet (run_id b95dd25f, 42501 mot "tenants"): scaffold-
+// opprettelsen brukte tidligere FEILAKTIG `pool` (runtime) - RLS nekter (korrekt) `jarvis_runtime`
+// å INSERT INTO tenants, akkurat som Q-21 skal. Se D-49 HOST FIX #1.
 const pool = createPool(configFromEnv());
+const adminPool = createPool(adminConfigFromEnv());
 
 const TENANT_A = `tenant-ua3-live-${runId}-a`;
 const TENANT_B = `tenant-ua3-live-${runId}-b`; // §tenant-isolation: annen tenant, skal forbli urørt
@@ -67,27 +78,33 @@ function ownerIdentityFor(tenantId: string): IdentityContext {
   };
 }
 
+// Test-scaffold-opprydding: gjennomfores UTELUKKENDE via `adminPool` (samme rolle som migrate/
+// q20-erasure-live.ts sin cleanupTenant()) - ALDRI `pool` (runtime). Kun parameteriserte spørringer
+// scopet til DENNE ene tenant_id-en - ingen TRUNCATE, ingen bred DELETE, aldri eier-tenanten
+// (tenant_id kommer alltid fra TENANT_A/TENANT_B/selfHeal() sitt 'tenant-ua3-live-%'-prefiks-søk,
+// aldri en fast/gjettet verdi). DELETE er iboende idempotent - en allerede slettet rad gir 0 rader
+// truffet, ikke en feil - trygt å kjøre flere ganger.
 async function cleanupTenant(tenantId: string): Promise<void> {
-  await pool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM business_opportunities WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM business_leads WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM business_contacts WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM business_companies WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM audit_events WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM person_tenants WHERE tenant_id = $1", [tenantId]);
-  await pool.query("DELETE FROM tenants WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_opportunities WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_leads WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_contacts WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM business_companies WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM audit_events WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM person_tenants WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM tenants WHERE tenant_id = $1", [tenantId]);
 }
 
 async function selfHeal(): Promise<void> {
   try {
-    const stale = await pool.query("SELECT tenant_id FROM tenants WHERE tenant_id LIKE 'tenant-ua3-live-%'");
+    const stale = await adminPool.query("SELECT tenant_id FROM tenants WHERE tenant_id LIKE 'tenant-ua3-live-%'");
     for (const row of stale.rows as Array<{ tenant_id: string }>) {
       await cleanupTenant(row.tenant_id).catch(() => undefined);
     }
-    await pool.query("DELETE FROM people WHERE person_id LIKE 'person-ua3-live-%'").catch(() => undefined);
+    await adminPool.query("DELETE FROM people WHERE person_id LIKE 'person-ua3-live-%'").catch(() => undefined);
   } catch {
     // best-effort
   }
@@ -110,17 +127,32 @@ async function main(): Promise<void> {
     return finish();
   }
 
+  // §HOST FIX #1: ALL midlertidig akseptanse-scaffolding provisjoneres via `adminPool` - `jarvis_runtime`
+  // (pool) har BEVISST ingen INSERT-rettighet på `tenants` (RLS/grant-nivå), akkurat som i produksjon.
   await selfHeal();
-  await pool.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ($1,$2,'business'), ($3,$4,'business')", [
+  await adminPool.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ($1,$2,'business'), ($3,$4,'business')", [
     TENANT_A, `UA-3 Live A ${runId}`, TENANT_B, `UA-3 Live B ${runId}`
   ]);
-  await pool.query("INSERT INTO people (person_id, display_name) VALUES ($1,$2)", [OWNER_PERSON, "UA-3 Live Owner"]);
-  await pool.query("INSERT INTO person_tenants (person_id, tenant_id) VALUES ($1,$2), ($1,$3)", [OWNER_PERSON, TENANT_A, TENANT_B]);
-  await pool.query(
+  await adminPool.query("INSERT INTO people (person_id, display_name) VALUES ($1,$2)", [OWNER_PERSON, "UA-3 Live Owner"]);
+  await adminPool.query("INSERT INTO person_tenants (person_id, tenant_id) VALUES ($1,$2), ($1,$3)", [OWNER_PERSON, TENANT_A, TENANT_B]);
+  await adminPool.query(
     "INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES ($1,$2,'business'), ($3,$4,'personal'), ($5,$6,'business')",
     [`ms-ua3-a-business-${runId}`, TENANT_A, `ms-ua3-a-personal-${runId}`, TENANT_A, `ms-ua3-b-business-${runId}`, TENANT_B]
   );
 
+  // §5 i HOST FIX #1-ordren: eksplisitt bevis at Business OS-operasjonene under kjører gjennom RUNTIME-
+  // rollen, ikke bare Q-21-sjekken FØR scaffold - samme `pool`, spurt RETT FØR den faktiske
+  // forretnings-skrivingen starter (ikke bare én gang helt i toppen).
+  await section("BUSINESS OS RUNTIME-ROLLE (rett før faktiske Business OS-operasjoner)", async () => {
+    const { rows } = await pool.query("SELECT current_user AS role");
+    const role = (rows[0] as { role: string }).role;
+    diagnostics["business_runtime_role"] = role;
+    results.ua3_business_runtime_role = role === diagnostics["runtime_current_user"] ? "PASS" : "FAIL";
+    log(`business_runtime_role=${role} (forventet samme som q21_runtime_role_safe sin rolle: ${diagnostics["runtime_current_user"]}) -> ua3_business_runtime_role: ${results.ua3_business_runtime_role}`);
+  });
+
+  // BusinessService/ToolGateway bruker UTELUKKENDE `pool` (runtime) - ALDRI `adminPool` - for enhver
+  // faktisk Business OS-operasjon under test. `adminPool` forblir isolert til scaffold/cleanup over.
   const service = new BusinessService(pool);
   let companyId = "";
   let opportunityId = "";
@@ -237,10 +269,17 @@ async function main(): Promise<void> {
     log(`audit_payload_excerpt=${payload.slice(0, 120)} -> ua3_audit_no_sensitive_content: ${results.ua3_audit_no_sensitive_content}`);
   });
 
+  // Opprydding via `adminPool` - EKSAKT samme scoped tenant_id-er som ble opprettet over, ingen
+  // TRUNCATE/bred sletting - kun de to run_id-suffiksede test-tenantsene over, aldri eier-tenanten.
   await section("CLEANUP", async () => {
-    await cleanupTenant(TENANT_A).catch((err: unknown) => log(`cleanup A feilet: ${(err as Error).message}`));
-    await cleanupTenant(TENANT_B).catch((err: unknown) => log(`cleanup B feilet: ${(err as Error).message}`));
-    await pool.query("DELETE FROM people WHERE person_id = $1", [OWNER_PERSON]).catch(() => undefined);
+    let ok = true;
+    await cleanupTenant(TENANT_A).catch((err: unknown) => { ok = false; log(`cleanup A feilet: ${(err as Error).message}`); });
+    await cleanupTenant(TENANT_B).catch((err: unknown) => { ok = false; log(`cleanup B feilet: ${(err as Error).message}`); });
+    await adminPool.query("DELETE FROM people WHERE person_id = $1", [OWNER_PERSON]).catch((err: unknown) => { ok = false; log(`cleanup person feilet: ${(err as Error).message}`); });
+    const remaining = await adminPool.query("SELECT count(*)::int AS n FROM tenants WHERE tenant_id = ANY($1)", [[TENANT_A, TENANT_B]]);
+    const leftover = (remaining.rows[0] as { n: number }).n;
+    results.ua3_cleanup = ok && leftover === 0 ? "PASS" : "FAIL";
+    log(`cleanup_ok=${ok} leftover_tenants=${leftover} -> ua3_cleanup: ${results.ua3_cleanup}`);
   });
 
   return finish();
@@ -262,4 +301,5 @@ try {
   await main();
 } finally {
   await pool.end();
+  await adminPool.end();
 }

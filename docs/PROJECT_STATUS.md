@@ -1,9 +1,11 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-08-17 (**UA-3 «Business Operating System» STARTET - P0 «Business Domain
-Foundation» = FIXED_SUITE / READY_FOR_HOST_VERIFY → D-49**, se egen seksjon under. IKKE VERIFIED/
-COMPLETE ennå - venter på Tobias host-verifikasjon. UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
-uendret, 897/897 tester) · **Branch:** `claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
+Foundation» = FIXED_SUITE / HOST_VERIFY_BLOCKED → D-49/D-50**, se egen seksjon under. Ekte host-
+kjøring av Tobias (`run_id b95dd25f`) kom gjennom bootstrap/migrasjoner/Q-21, men avdekket en
+scaffold-vs-runtime-pool-feil i akseptansescriptet (42501 RLS-avslag mot `tenants`) - fikset (D-50),
+IKKE re-host-kjørt ennå. IKKE VERIFIED/COMPLETE. UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
+uendret, 922/922 tester) · **Branch:** `claude/hva-skjer-hvordan-ligger-0z3ztp` · P1A Runtime Wiring
 Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir
 VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til
 `main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8)
@@ -1257,9 +1259,23 @@ Autonomy_v4.0.md` linje 460) - IKKE startet, IKKE godkjent, IKKE implementert i 
 
 ## UA-3 P0 — Business Domain Foundation (BYGGET denne økten, 2026-08-17, branch `claude/hva-skjer-hvordan-ligger-0z3ztp` fra `origin/main` `593a69c`)
 
-**Status: IMPLEMENTED + SUITE-VERIFIED. IKKE host/live-verifisert (FIXED_SUITE / READY_FOR_HOST_VERIFY).**
-Første UA-3-slice, navngitt/prioritert fra masterplanens egen integrasjons-prioritetstabell
-("Internal CRM / Sales pipeline full internal UA-3 P0") - full begrunnelse: **D-49**.
+**Status: FIXED_SUITE / HOST_VERIFY_BLOCKED.** Første UA-3-slice, navngitt/prioritert fra masterplanens
+egen integrasjons-prioritetstabell ("Internal CRM / Sales pipeline full internal UA-3 P0") - full
+begrunnelse: **D-49**.
+
+**HOST FIX #1 (samme dag, ekte host-funn av Tobias, `run_id b95dd25f`) → D-50:** første host-kjøring
+kom gjennom bootstrap/migrasjoner/`q21_runtime_role_safe=PASS`, men feilet DERETTER med
+`error: new row violates row-level security policy for table "tenants" (code=42501)` - `ua3-business-
+live.ts` brukte FEILAKTIG runtime-poolen (`jarvis_runtime`) til å opprette den midlertidige
+akseptanse-tenanten. **Dette var IKKE et RLS-brudd å fikse - RLS fungerte som tiltenkt** (`tenants`
+sin `WITH CHECK (tenant_id = current_setting('jarvis.tenant_id'))`-policy kan strukturelt aldri
+oppfylles for en helt ny tenant). Fikset ved å innføre en egen `adminPool` (samme
+`adminConfigFromEnv()`-mønster som `q20-erasure-live.ts`) for ALL scaffold-opprettelse/opprydding -
+`pool` (runtime) forblir den ENESTE tilkoblingen Business OS-operasjonene (`BusinessService`/
+`ToolGateway`) noensinne bruker. Ny `ua3_business_runtime_role`-marker verifiserer `current_user` RETT
+FØR de faktiske skrivingene, ikke bare ved Q-21-sjekken i toppen. 12 nye tester (inkl. en LIVE
+reproduksjon av selve `42501`-feilklassen mot en ekte NOSUPERUSER/NOBYPASSRLS-rolle) - ingen svekkelse
+av RLS/Q-21 noe sted.
 
 **Bygget:**
 - Ny pakke `@jarvis/business` (mal: `@jarvis/erasure`).
@@ -1275,22 +1291,25 @@ Første UA-3-slice, navngitt/prioritert fra masterplanens egen integrasjons-prio
 - ETT Windows host-akseptanseskript: `modules/business/scripts/ua3-host-run.ts` →
   `ua3-business-live.ts` (speiler `q20-host-run.ts`/`q20-erasure-live.ts`).
 
-**Suite-verifisert (897/897 - 24 nye tester, se RUNTIME_GATES.md):** tenant-isolert
+**Suite-verifisert (922/922 - 36 nye tester totalt, se RUNTIME_GATES.md):** tenant-isolert
 entitets-opprettelse, lead/opportunity-livssyklus, idempotent lead/aktivitet-ingestion,
 aktivitetstidslinje, oppfoelging-livssyklus + forfalt-spørring, kilde-peker-lenking (ingen FK til
 knowledge_documents - Q-20-trygt strukturelt), cross-tenant/memory-space-isolasjon (RLS mot ekte
 embedded Postgres), samtidig idempotency_key-sikkerhet, ToolGateway-wiring (owner sovereign +
-delegert policy via EKSISTERENDE PolicyGateway, ingen ny logikk), audit uten sensitivt kundeinnhold.
+delegert policy via EKSISTERENDE PolicyGateway, ingen ny logikk), audit uten sensitivt kundeinnhold,
+scaffold-/runtime-pool-separasjon (HOST FIX #1 - inkl. live-reproduksjon av `42501`-RLS-avslaget).
 
-**IKKE host/live-verifisert:** ingen Docker-tilgjengelig i denne sky-container-økten - host-scriptet
-er skrevet og strukturelt regresjonstestet, men IKKE faktisk kjørt mot ekte lokal Postgres.
+**IKKE host/live-verifisert ennå:** ingen Docker-tilgjengelig i denne sky-container-økten - HOST FIX #1
+er skrevet og suite-/strukturelt regresjonstestet, men selve fiksen er IKKE kjørt av Tobias ennå.
+Neste steg er en NY host-kjøring for å bevise at `ua3-business-live.ts` nå kommer forbi
+scaffold-steget og faktisk evaluerer alle Business OS-kapabilitetene.
 
 **Eksplisitt utsatt (Q-25, ingenting av dette bygget denne runden):** Gmail/Calendar-hendelseslenking,
 AI Mesh-basert klassifisering/scoring, worker/jobbkø-integrasjon, kontrakt/faktura/inntekt-sporing,
 numerisk lead/deal-scoring, D-klasse/hard-delete, attention-queue-automasjon, UI/dashboard.
 
-**Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (897/897 - 66
-filer), gitleaks (detect, ren). Branch pushet, draft PR opprettet, IKKE merget - venter på Tobias
+**Kvalitetsgates:** `pnpm -r typecheck` (15/15 grønt), `eslint .` (0 feil), `pnpm test` (922/922 - 68
+filer), gitleaks (detect, ren). Branch pushet, draft PR #9 oppdatert, IKKE merget - venter på Tobias
 host-verifikasjon.
 
 ## Blokkeringer
@@ -1308,14 +1327,17 @@ omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gape
 Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / READY_FOR_HOST_VERIFY (D-49) - IKKE
-VERIFIED/COMPLETE.** Neste steg er Tobias sin host-verifikasjon: kjør
+**UA-3 P0 «Business Domain Foundation» er FIXED_SUITE / HOST_VERIFY_BLOCKED (D-49/D-50) - IKKE
+VERIFIED/COMPLETE.** Tobias sin FØRSTE host-kjøring (`run_id b95dd25f`) kom gjennom bootstrap/
+migrasjoner/Q-21, men feilet på en scaffold-vs-runtime-pool-bug (42501 RLS-avslag mot `tenants`) -
+fikset (D-50, 12 nye tester, 922/922). Neste steg er en NY host-kjøring: kjør
 `node --experimental-transform-types modules/business/scripts/ua3-host-run.ts` fra repo-roten på
-Windows-hosten, se PASS-markørene (`ua3_*`), rapporter `hard_fail`-verdien tilbake. Etter host-
-verifikasjon: oppdater denne filen + DECISIONS_AND_ASSUMPTIONS.md med host-run_id og merg draft-PR-en
-(kun etter eksplisitt Tobias-godkjenning, aldri automatisk). **IKKE startet ennå:** UA-3 P1/P2
-(Gmail/Calendar-hendelseslenking, AI Mesh-bruk, worker-integrasjon - se Q-25), UA-4, noen annen
-UA-fase. Faseporten gjelder fortsatt strengt (CLAUDE.md-regel 10).
+Windows-hosten, se PASS-markørene (`ua3_*`, inkl. ny `ua3_business_runtime_role` og `ua3_cleanup`),
+rapporter `hard_fail`-verdien tilbake. Etter host-verifikasjon: oppdater denne filen +
+DECISIONS_AND_ASSUMPTIONS.md med host-run_id og merg draft-PR-en (kun etter eksplisitt
+Tobias-godkjenning, aldri automatisk). **IKKE startet ennå:** UA-3 P1/P2 (Gmail/Calendar-
+hendelseslenking, AI Mesh-bruk, worker-integrasjon - se Q-25), UA-4, noen annen UA-fase. Faseporten
+gjelder fortsatt strengt (CLAUDE.md-regel 10).
 
 Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full
 klassifisering - ingen av disse hindrer UA-2-lukkingen eller krever noe FØR UA-3 kan startes, men
