@@ -30,6 +30,22 @@
 // (§8 i ordren). Reauth forsøkes KUN ÉN gang per kjøring (unngår en løkke
 // mot en grunnleggende, ikke-reauth-løsbar årsak).
 //
+// HOST FIX #2 (2026-08-16, host-funn run_id `ab43fb1f`): et ekte host-funn
+// viste `tool_failed:google_auth_failed_401:GOOGLE_INVALID_CLIENT:
+// unauthorized_client` mot den ALLEREDE host-bevist Desktop-klienten -
+// `isRecoverableGoogleAuthErrorClass("GOOGLE_INVALID_CLIENT")` var (korrekt,
+// for den GENERELLE klassen) `false`, så auto-reauth ble ALDRI forsøkt.
+// `classifyGoogleTokenEndpointError()` skiller nå dette kontekst-beviste
+// tilfellet ut som en EGEN klasse (`EMAIL_REAUTH_REQUIRED`,
+// `recoveryReason=LEGACY_TOKEN_OR_CLIENT_BINDING`) - SELVE dette scriptet
+// endret INGENTING i sin egen logikk (samme
+// `parseGoogleAuthFailureReason()`/`isRecoverableGoogleAuthErrorClass()`-kall
+// som før): den nye klassen er ganske enkelt en av de gjenopprettbare nå, og
+// samme eksisterende reauth-forsøks-/retry-vei under håndterer den identisk.
+// Ny `p1b_gmail_reauth`-markør legges til for å gjøre reauth-forsøkets EGET
+// utfall (i motsetning til KUN sluttresultatet av selve `list_messages`)
+// eksplisitt synlig i sammendraget.
+//
 // LIVE vs IMPLEMENTATION-VERIFIED (§ordren, aldri overklaimet):
 // - p1b_pdf_native_extraction/p1b_pdf_page_render: LOKALE, KREVER INGEN
 //   credentials (pdf-parse er en ren lokal avhengighet) - kjører ALLTID ekte,
@@ -63,15 +79,31 @@ import { buildSpawnInvocation, readPinnedPackageManager, resolvePackageManager }
 const repoRoot = process.cwd();
 const envPath = join(repoRoot, ".env");
 
+/**
+ * HOST FIX #2 §11: en STABIL (IKKE run_id-avhengig - Tobias skal kunne sende
+ * ÉN testmelding FØR en fremtidig kjøring, ikke måtte forutsi et fremtidig
+ * run_id) emnetekst for en deterministisk, MENNESKE-sendt akseptanse-
+ * testmelding. `list_messages` sitt EKSISTERENDE `query`-parameter (allerede
+ * bygget, se `listMessages()` i `GmailTransport`) brukes til et SMALT
+ * `subject:"..."`-søk - ALDRI en generell postkasse-skann. Bevisst en mindre
+ * ambisiøs, men trygg og faktisk-fungerende variant av ordrens eksempel (som
+ * foreslo en run_id-avhengig emnetekst + bundet polling) - se D-46 for full
+ * begrunnelse. Ingen `send`-kapabilitet legges til Gmail-connectoren for
+ * dette - Tobias sender selv, manuelt, fra en annen konto.
+ */
+const ACCEPTANCE_FIXTURE_SUBJECT = "Jarvis P1B Acceptance";
+
 type Verdict =
   | "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE" | "BLOCKED_NO_EMAIL_CREDENTIALS"
-  | "BLOCKED_NO_VISION_PROVIDER" | "SUITE_VERIFIED" | "SKIPPED_SAFE_FIXTURE";
+  | "BLOCKED_NO_VISION_PROVIDER" | "SUITE_VERIFIED" | "SKIPPED_SAFE_FIXTURE"
+  | "SKIPPED_NOT_NEEDED" | "SKIPPED_NOT_RECOVERABLE";
 
 const results: Record<string, Verdict> = {
   p1b_pdf_native_extraction: "FAIL",
   p1b_pdf_page_render: "FAIL",
   p1b_extraction_routing_decision: "FAIL",
   p1b_gmail_list_messages_live: "BLOCKED_NO_EMAIL_CREDENTIALS",
+  p1b_gmail_reauth: "BLOCKED_NO_EMAIL_CREDENTIALS",
   p1b_gmail_attachment_download_live: "BLOCKED_NO_EMAIL_CREDENTIALS",
   p1b_vision_ocr_live: "BLOCKED_NO_VISION_PROVIDER",
   p1b_sync_email_source_live: "BLOCKED_NO_EMAIL_CREDENTIALS",
@@ -320,50 +352,94 @@ async function main(): Promise<void> {
 
     await section("§3 GMAIL list_messages (LIVE, med automatisk reauth-forsøk ved gjenopprettbar autentiseringsfeil)", async () => {
       const firstAttemptOk = await attemptListMessages();
-      if (firstAttemptOk) return;
+      if (firstAttemptOk) {
+        results.p1b_gmail_reauth = "SKIPPED_NOT_NEEDED";
+        log("p1b_gmail_reauth=SKIPPED_NOT_NEEDED (list_messages lyktes allerede ved første forsøk - ingen reauth nødvendig)");
+        return;
+      }
 
       const errorClass = parseGoogleAuthFailureReason(diagnostics["gmail_list_messages_reason"] ?? "");
       if (!errorClass) {
         log("gmail_auth_recoverable=UNKNOWN (feilen var ikke en klassifisert Google-auth-feil i det hele tatt - INGEN automatisk reauth forsøkt)");
+        results.p1b_gmail_reauth = "SKIPPED_NOT_RECOVERABLE";
         return;
       }
       diagnostics["gmail_auth_error_class"] = errorClass;
       if (!isRecoverableGoogleAuthErrorClass(errorClass)) {
+        // HOST FIX #2: GOOGLE_INVALID_CLIENT her betyr at klienten IKKE var
+        // bevist Desktop-type på klassifiseringstidspunktet (manglende
+        // secret/uprøvd/feilkonfigurert klient, se `classifyGoogleTokenEndpointError()`
+        // sin `GoogleAuthClientContext`-gren) - fortsatt korrekt fail-closed.
         log(`gmail_auth_recoverable=false (klasse=${errorClass}) - krever manuell undersøkelse, INGEN automatisk reauth forsøkt (unngår en løkke mot feil grunnleggende årsak).`);
+        results.p1b_gmail_reauth = "SKIPPED_NOT_RECOVERABLE";
         return;
       }
       if (reauthAttempted) {
         log("gmail_auth_recoverable=true, MEN reauth er allerede forsøkt ÉN gang denne kjøringen - stopper (unngår en uendelig løkke).");
+        results.p1b_gmail_reauth = "FAIL";
         return;
       }
       reauthAttempted = true;
-      log(`gmail_auth_recoverable=true (klasse=${errorClass}) - forsøker automatisk Gmail-reauth (google-email-reauth.ts, samme allerede persisterte Desktop-klient, INGEN ny klient/JSON)...`);
+      // HOST FIX #2: `EMAIL_REAUTH_REQUIRED` (host-funn run_id `ab43fb1f`,
+      // klassifisert som en gjenopprettbar klasse fra og med HOST FIX #2) tar
+      // NØYAKTIG samme vei som de øvrige gjenopprettbare klassene fra HOST
+      // FIX #1 - ingen egen gren nødvendig, kun en tydeligere loggmelding.
+      const recoveryNote = errorClass === "EMAIL_REAUTH_REQUIRED" ? " (reason=LEGACY_TOKEN_OR_CLIENT_BINDING - se D-46)" : "";
+      log(`gmail_auth_recoverable=true (klasse=${errorClass}${recoveryNote}) - forsøker automatisk Gmail-reauth (google-email-reauth.ts, samme allerede persisterte Desktop-klient, INGEN ny klient/JSON)...`);
       try {
         execFileSync("node", ["--experimental-transform-types", "modules/core/scripts/google-email-reauth.ts"], { stdio: "inherit", cwd: repoRoot });
       } catch (err) {
         log(`gmail_reauth_subprocess=FAIL (${(err as Error).message.slice(0, 200)}) - fortsetter med det opprinnelige (fortsatt ugyldige) JARVIS_EMAIL_TOKEN.`);
+        results.p1b_gmail_reauth = "FAIL";
         return;
       }
       log("gmail_reauth_subprocess=PASS - leser oppdatert JARVIS_EMAIL_TOKEN fra .env og prøver §3 på nytt i SAMME kjøring (ingen ny kommando nødvendig)...");
       const freshToken = readFreshEmailTokenFromEnvFile();
       if (!freshToken) {
         log("gmail_reauth_resume=FAIL (fant ikke et oppdatert JARVIS_EMAIL_TOKEN i .env etter reauth) - fortsetter uten retry.");
+        results.p1b_gmail_reauth = "FAIL";
         return;
       }
       process.env["JARVIS_EMAIL_TOKEN"] = freshToken;
       emailToken = freshToken;
       const retryOk = await attemptListMessages();
-      log(`gmail_reauth_resume=${retryOk ? "PASS" : "FAIL"} (retry etter automatisk reauth)`);
+      results.p1b_gmail_reauth = retryOk ? "PASS" : "FAIL";
+      log(`gmail_reauth_resume=${retryOk ? "PASS" : "FAIL"} (retry etter automatisk reauth) p1b_gmail_reauth=${results.p1b_gmail_reauth}`);
     });
 
     await section("§4 GMAIL read_attachment (LIVE, kun hvis et reelt vedlegg finnes i innboksen)", async () => {
       if (!realAttachment || !realMessageId) {
+        // HOST FIX #2 §11: ETT smalt, subject-scoped ekstra-søk etter en
+        // TIDLIGERE, MENNESKE-sendt deterministisk akseptanse-testmelding -
+        // FØR fallback til SKIPPED_SAFE_FIXTURE. `subject:"..."`-filteret
+        // gjør dette til NØYAKTIG det samme som den allerede planlagte
+        // listingen (samme `list_messages`-handling, samme scope-begrensning)
+        // - IKKE en bredere/generell postkasse-skann.
+        const acceptanceSearch = await toolGateway.execute({
+          identity: identity(), tool_id: "email", action: "list_messages",
+          parameters: { max: 5, query: `subject:"${ACCEPTANCE_FIXTURE_SUBJECT}" has:attachment` }
+        });
+        if (acceptanceSearch.ok) {
+          const body = acceptanceSearch.data as { messages: Array<{ id: string; attachments: Array<{ attachment_id: string; mime_type: string }> }> };
+          const withAttachment = body.messages.find((m) => m.attachments.length > 0);
+          if (withAttachment) {
+            realMessageId = withAttachment.id;
+            realAttachment = withAttachment.attachments[0];
+            diagnostics["gmail_attachment_fixture_source"] = "acceptance_subject_search";
+            log(`p1b_gmail_attachment_download_live: fant en deterministisk akseptanse-testmelding via smalt subject-søk ("${ACCEPTANCE_FIXTURE_SUBJECT}") - fortsetter med LIVE nedlasting.`);
+          }
+        }
+      }
+      if (!realAttachment || !realMessageId) {
         diagnostics["gmail_attachment_download_skip_reason"] = "no_attachment_in_recent_inbox_no_safe_fixture";
         results.p1b_gmail_attachment_download_live = "SKIPPED_SAFE_FIXTURE";
         log(
-          "p1b_gmail_attachment_download_live=SKIPPED_SAFE_FIXTURE (ingen vedlegg i de siste meldingene - " +
-            "Gmail-connectoren har INGEN implementert send-handling ennå, så INGEN trygg måte å konstruere et " +
-            "kontrollert test-vedlegg denne runden; postkassen skannes ALDRI utover den allerede planlagte listingen)"
+          "p1b_gmail_attachment_download_live=SKIPPED_SAFE_FIXTURE (ingen vedlegg i de siste meldingene, og ingen " +
+            `deterministisk akseptanse-testmelding funnet - Gmail-connectoren har INGEN implementert send-handling ennå, ` +
+            "så INGEN trygg måte å konstruere et kontrollert test-vedlegg denne runden; postkassen skannes ALDRI utover " +
+            `den allerede planlagte listingen + ETT smalt subject-søk. For neste kjøring: send ÉN liten test-e-post fra ` +
+            `en ANNEN konto til ${process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "den konfigurerte Jarvis-kontoen"} med EKSAKT ` +
+            `emnefelt "${ACCEPTANCE_FIXTURE_SUBJECT}" og ETT vedlegg for å bevise denne veien LIVE - se D-46 §11.)`
         );
         return;
       }

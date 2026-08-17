@@ -16,6 +16,27 @@ import type { ToolTransport } from "./gateway.ts";
  * sin `WORKSPACE_ADMIN_POLICY`-gren) - Google gir INGEN mer presist
  * maskinlesbart signal for "token utstedt til en annen klient" enn en
  * `invalid_grant`-feilbeskrivelse som nevner det eksplisitt.
+ *
+ * UA-2 P1B-A HOST FIX #2 (2026-08-16, host-funn run_id `ab43fb1f`): et ekte
+ * host-funn viste `invalid_client`/`unauthorized_client` (HTTP 401) mot den
+ * ALLEREDE host-bevist FUNGERENDE Desktop-OAuth-klienten (samme klient som
+ * bevist av Drive/D-42) - den forrige, blindt-ikke-gjenopprettbare
+ * `GOOGLE_INVALID_CLIENT`-klassifiseringen stoppet derfor auto-reauth-forsøket
+ * feilaktig. Vi kan IKKE kryptografisk bevise fra selve refresh-tokenet HVILKEN
+ * gammel klient som opprinnelig utstedte det (§2 i ordren - IKKE påstå at
+ * Google eksponerer det) - men NÅR den GJELDENDE Desktop-klienten allerede er
+ * host-bevist (`JARVIS_GOOGLE_OAUTH_CLIENT_TYPE=desktop`, persistert KUN etter
+ * en tidligere `google-drive-reauth.ts`-suksess) og BEGGE client_id/_secret
+ * faktisk er satt (ellers kastes `google_oauth_client_not_configured` FØR
+ * dette punktet i det hele tatt), er en `invalid_client`/`unauthorized_client`
+ * på DENNE ene credential-en (`JARVIS_EMAIL_TOKEN`) mest sannsynlig en
+ * gjenstående gammel Gmail-tildeling fra FØR Desktop-klient-migreringen - IKKE
+ * et bevis på at selve klienten er ødelagt/uprøvd. `EMAIL_REAUTH_REQUIRED`
+ * skiller EKSPLISITT dette "kontekst-bevist trygt å reautorisere"-tilfellet
+ * fra det generelle `GOOGLE_INVALID_CLIENT` (manglende secret, ikke-Desktop/
+ * uprøvd klient, feilkonfigurert klient) - som FORTSATT fail-closed stopper
+ * uten automatisk reauth-forsøk (§3 i ordren: "Do not globally make every
+ * invalid_client error recoverable").
  */
 export type GoogleAuthErrorClass =
   | "EMAIL_TOKEN_CLIENT_MISMATCH"
@@ -23,7 +44,11 @@ export type GoogleAuthErrorClass =
   | "EMAIL_INSUFFICIENT_SCOPE"
   | "GOOGLE_INVALID_GRANT"
   | "GOOGLE_INVALID_CLIENT"
+  | "EMAIL_REAUTH_REQUIRED"
   | "UNKNOWN_GOOGLE_AUTH";
+
+/** HOST FIX #2: KUN satt (til `"LEGACY_TOKEN_OR_CLIENT_BINDING"`) når `errorClass === "EMAIL_REAUTH_REQUIRED"` - en trygg, menneskelesbar/grep-bar begrunnelse, ALDRI en påstand om at Google faktisk eksponerte den gamle klient-IDen. */
+export type GoogleAuthRecoveryReason = "LEGACY_TOKEN_OR_CLIENT_BINDING";
 
 export interface GoogleAuthErrorDetails {
   httpStatus: number;
@@ -32,11 +57,19 @@ export interface GoogleAuthErrorDetails {
   /** Google sin `error_description` - ALDRI en secret (Google ekko-er aldri tilbake selve tokenet/client_secret i en feilrespons), men avkortet (300 tegn) som et ekstra sikkerhetsnett. */
   googleErrorDescription: string | undefined;
   errorClass: GoogleAuthErrorClass;
+  /** HOST FIX #2: kun til stede for `EMAIL_REAUTH_REQUIRED` - se `GoogleAuthRecoveryReason`. */
+  recoveryReason: GoogleAuthRecoveryReason | undefined;
 }
 
 interface TokenEndpointErrorBody {
   error?: string;
   error_description?: string;
+}
+
+/** HOST FIX #2: konteksten `classifyGoogleTokenEndpointError()` trenger for å skille et kontekst-bevist gjenopprettbart `invalid_client` (gjenbrukt, allerede host-bevist Desktop-klient) fra et FORTSATT fail-closed `invalid_client` (uprøvd/ikke-Desktop/feilkonfigurert klient). */
+export interface GoogleAuthClientContext {
+  /** `true` KUN når `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE === "desktop"` - persistert AV `google-drive-reauth.ts` KUN etter en fullstendig host-bevist Desktop-OAuth-suksess (se D-42). ALDRI antatt sann uten denne eksplisitte markøren. */
+  provenDesktopClient: boolean;
 }
 
 /**
@@ -46,7 +79,7 @@ interface TokenEndpointErrorBody {
  * en ikke-JSON eller uventet kropp gir fortsatt en trygg (UNKNOWN_GOOGLE_AUTH)
  * klassifisering fremfor å knekke selve feilrapporteringen.
  */
-export function classifyGoogleTokenEndpointError(httpStatus: number, rawBody: string): GoogleAuthErrorDetails {
+export function classifyGoogleTokenEndpointError(httpStatus: number, rawBody: string, context: GoogleAuthClientContext): GoogleAuthErrorDetails {
   let parsed: TokenEndpointErrorBody = {};
   try {
     parsed = JSON.parse(rawBody) as TokenEndpointErrorBody;
@@ -58,6 +91,7 @@ export function classifyGoogleTokenEndpointError(httpStatus: number, rawBody: st
   const desc = googleErrorDescription ?? "";
 
   let errorClass: GoogleAuthErrorClass;
+  let recoveryReason: GoogleAuthRecoveryReason | undefined;
   if (googleError === "invalid_grant") {
     if (/not match|different client|another client|client.?id/i.test(desc)) {
       errorClass = "EMAIL_TOKEN_CLIENT_MISMATCH";
@@ -67,24 +101,34 @@ export function classifyGoogleTokenEndpointError(httpStatus: number, rawBody: st
       errorClass = "GOOGLE_INVALID_GRANT";
     }
   } else if (googleError === "invalid_client" || googleError === "unauthorized_client") {
-    errorClass = "GOOGLE_INVALID_CLIENT";
+    // HOST FIX #2 §3: KUN gjenopprettbar når den GJELDENDE klienten selv
+    // allerede er host-bevist (Desktop-type) - ALDRI globalt for enhver
+    // invalid_client (manglende secret/uprøvd/feilkonfigurert klient forblir
+    // GOOGLE_INVALID_CLIENT, fail-closed, under).
+    if (context.provenDesktopClient) {
+      errorClass = "EMAIL_REAUTH_REQUIRED";
+      recoveryReason = "LEGACY_TOKEN_OR_CLIENT_BINDING";
+    } else {
+      errorClass = "GOOGLE_INVALID_CLIENT";
+    }
   } else if (googleError === "insufficient_scope" || /insufficient/i.test(desc)) {
     errorClass = "EMAIL_INSUFFICIENT_SCOPE";
   } else {
     errorClass = "UNKNOWN_GOOGLE_AUTH";
   }
-  return { httpStatus, googleError, googleErrorDescription, errorClass };
+  return { httpStatus, googleError, googleErrorDescription, errorClass, recoveryReason };
 }
 
 /** Trygg, grep-bar én-linjes diagnosetekst - ALDRI token/secret, kun de klassifiserte, ikke-sensitive feltene (samme presedens som `formatDriveProbeReport()`). */
 export function formatGoogleAuthErrorReport(details: GoogleAuthErrorDetails): string {
-  return `google_auth_error_class=${details.errorClass} http_status=${details.httpStatus} google_error=${details.googleError ?? "unknown"}`;
+  const reason = details.recoveryReason ? ` recovery_reason=${details.recoveryReason}` : "";
+  return `google_auth_error_class=${details.errorClass} http_status=${details.httpStatus} google_error=${details.googleError ?? "unknown"}${reason}`;
 }
 
-/** Klassene som er trygge å AUTOMATISK forsøke reautorisert via `google-email-reauth.ts` - de resterende (GOOGLE_INVALID_CLIENT/UNKNOWN_GOOGLE_AUTH) krever manuell undersøkelse, ALDRI en gjentatt automatisk reauth-løkke mot en sannsynligvis feil grunnleggende årsak. */
+/** Klassene som er trygge å AUTOMATISK forsøke reautorisert via `google-email-reauth.ts` - de resterende (GOOGLE_INVALID_CLIENT/UNKNOWN_GOOGLE_AUTH) krever manuell undersøkelse, ALDRI en gjentatt automatisk reauth-løkke mot en sannsynligvis feil grunnleggende årsak. HOST FIX #2: `EMAIL_REAUTH_REQUIRED` er BEVIST kontekst-trygg av `classifyGoogleTokenEndpointError()` selv (kun satt når `provenDesktopClient` var sann) - INGEN ekstra kontekst trengs her, unngår en duplisert/divergerende sjekk. */
 export function isRecoverableGoogleAuthErrorClass(errorClass: GoogleAuthErrorClass): boolean {
   return errorClass === "EMAIL_TOKEN_CLIENT_MISMATCH" || errorClass === "EMAIL_REFRESH_TOKEN_REVOKED" ||
-    errorClass === "GOOGLE_INVALID_GRANT" || errorClass === "EMAIL_INSUFFICIENT_SCOPE";
+    errorClass === "GOOGLE_INVALID_GRANT" || errorClass === "EMAIL_INSUFFICIENT_SCOPE" || errorClass === "EMAIL_REAUTH_REQUIRED";
 }
 
 const GOOGLE_AUTH_FAILED_MESSAGE_PATTERN = /google_auth_failed_(\d+):(\w+)(?::(.+))?$/;
@@ -103,7 +147,7 @@ export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorCla
   if (!errorClass) return undefined;
   const known: readonly GoogleAuthErrorClass[] = [
     "EMAIL_TOKEN_CLIENT_MISMATCH", "EMAIL_REFRESH_TOKEN_REVOKED", "EMAIL_INSUFFICIENT_SCOPE",
-    "GOOGLE_INVALID_GRANT", "GOOGLE_INVALID_CLIENT", "UNKNOWN_GOOGLE_AUTH"
+    "GOOGLE_INVALID_GRANT", "GOOGLE_INVALID_CLIENT", "EMAIL_REAUTH_REQUIRED", "UNKNOWN_GOOGLE_AUTH"
   ];
   return (known as readonly string[]).includes(errorClass) ? (errorClass as GoogleAuthErrorClass) : undefined;
 }
@@ -120,6 +164,12 @@ async function googleAccessToken(refreshToken: string): Promise<string> {
   const clientId = process.env["JARVIS_GOOGLE_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_GOOGLE_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");
+  // HOST FIX #2: KUN LEST (aldri skrevet/eksponert) for å avgjøre om DENNE
+  // klienten allerede er host-bevist Desktop-type - samme markør
+  // `google-drive-reauth.ts` persisterer, brukt her UTELUKKENDE til
+  // `classifyGoogleTokenEndpointError()` sin kontekst-bevisste
+  // EMAIL_REAUTH_REQUIRED-gren (se dens toppkommentar).
+  const provenDesktopClient = process.env["JARVIS_GOOGLE_OAUTH_CLIENT_TYPE"] === "desktop";
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -127,7 +177,7 @@ async function googleAccessToken(refreshToken: string): Promise<string> {
   });
   if (!response.ok) {
     const rawBody = await response.text().catch(() => "");
-    const details = classifyGoogleTokenEndpointError(response.status, rawBody);
+    const details = classifyGoogleTokenEndpointError(response.status, rawBody, { provenDesktopClient });
     throw new Error(`google_auth_failed_${response.status}:${details.errorClass}${details.googleError ? `:${details.googleError}` : ""}`);
   }
   return ((await response.json()) as { access_token: string }).access_token;

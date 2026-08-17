@@ -1115,6 +1115,70 @@ for faktisk å bevise den fiksede klassifiseringen/reauth-flyten og live Gmail-s
 innboks. `docs/OPEN_QUESTIONS.md` Q-24 oppdatert med denne rundens funn (nye punkter 7/8). PR #7
 IKKE merget - `IKKE merge, IKKE ny fase`-instruksen i byggeordren er fulgt.
 
+## UA-2 P1B-A HOST FIX #2 "UNAUTHORIZED_CLIENT MUST TRIGGER SAFE GMAIL REAUTH" (samme dag, 2026-08-16, ekte host-funn `run_id ab43fb1f`)
+
+**HOST FIX #1 sin nye klassifisering FUNGERTE og avdekket et mer presist funn.** Tobias sin neste
+faktiske host-kjøring (`run_id ab43fb1f`) ga PASS for alle de samme lokale/vision-punktene som forrige
+runde, men Gmail-refresh feilet nå med et EKSAKT klassifisert
+`tool_failed:google_auth_failed_401:GOOGLE_INVALID_CLIENT:unauthorized_client` mot den ALLEREDE
+host-bevist FUNGERENDE Desktop-OAuth-klienten (samme klient Drive bruker, D-42). Fordi
+`isRecoverableGoogleAuthErrorClass("GOOGLE_INVALID_CLIENT")` (korrekt, for den GENERELLE klassen) er
+`false`, ble auto-reauth-forsøket fra HOST FIX #1 aldri utløst - `gmail_auth_recoverable=false` og
+kjøringen stoppet der. Full begrunnelse/full fiks: **D-46** i `docs/DECISIONS_AND_ASSUMPTIONS.md`.
+
+**Root cause fortsatt IKKE kryptografisk bevisbart** (ærlig, per ordrens eget krav) - vi kan ikke bevise
+fra selve refresh-tokenet HVILKEN gammel OAuth-klient som opprinnelig utstedte det. Dokumentert som
+`LEGACY_TOKEN_OR_CLIENT_BINDING`: en begrunnet sannsynlighet (en gjenstående Gmail-tildeling fra FØR
+Desktop-klient-migreringen), IKKE et bevist faktum.
+
+**Løsning - kontekst-bevisst klassifisering, IKKE en global oppmykning av `invalid_client`:**
+
+1. `classifyGoogleTokenEndpointError()` (`live-transports.ts`) tar nå en eksplisitt
+   `GoogleAuthClientContext { provenDesktopClient: boolean }`. `invalid_client`/`unauthorized_client`
+   klassifiseres til en NY klasse `EMAIL_REAUTH_REQUIRED` (gjenopprettbar,
+   `recoveryReason=LEGACY_TOKEN_OR_CLIENT_BINDING`) KUN når `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE ===
+   "desktop"` allerede er persistert (samme markør `google-drive-reauth.ts` skriver KUN etter en
+   fullstendig host-bevist suksess). UTEN den markøren forblir klassifiseringen `GOOGLE_INVALID_CLIENT`,
+   FORTSATT fail-closed - manglende secret/uprøvd/feilkonfigurert klient skal ALDRI automatisk
+   reauth-forsøkes (§3 i ordren, eksplisitt testet).
+2. `googleAccessToken()` leser `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` KUN til dette formålet (aldri
+   skrevet/eksponert noe sted).
+3. `ua2-p1b-a-host-run.ts` sin eksisterende auto-reauth-trigger (HOST FIX #1, INGEN logikkendring)
+   håndterer den nye klassen AUTOMATISK via SAMME `isRecoverableGoogleAuthErrorClass()`-kall - ingen
+   egen, parallell spesialgren. Ny `p1b_gmail_reauth`-markør
+   (`SKIPPED_NOT_NEEDED`/`SKIPPED_NOT_RECOVERABLE`/`PASS`/`FAIL`) gjør selve reauth-forsøkets EGET
+   utfall eksplisitt synlig i host-sammendraget.
+4. **Workspace-policy/Gmail-API-blokkeringer forblir separat klassifisert** (§6/§7 i ordren) - dette
+   var ALLEREDE arkitektonisk garantert: `classifyDriveProbeError()` (Gmail-API-nivå, ETTER en
+   vellykket token-exchange) og `classifyGoogleTokenEndpointError()` (token-endepunkt-nivå, FØR Gmail-
+   API-tilgang) er to strukturelt separate klassifiseringsfunksjoner mot to ulike Google-feilformer -
+   ingen kodeendring var nødvendig for dette punktet.
+5. **Sikker akseptanse-fikstur-forbedring** (§11 i ordren, en bevisst enklere, men fungerende variant
+   av ordrens run_id-baserte eksempel) - en STABIL `ACCEPTANCE_FIXTURE_SUBJECT = "Jarvis P1B
+   Acceptance"`-konstant + ETT ekstra, SMALT `subject:"..."`-scoped `list_messages`-søk (samme
+   handling/scope-begrensning, ALDRI en bredere postkasse-skann) forsøkes FØR fallback til
+   `SKIPPED_SAFE_FIXTURE`. Tobias kan sende ÉN testmelding med dette EKSAKTE emnefeltet FØR en
+   fremtidig kjøring uten å måtte forutsi et fremtidig run_id. Ingen `send`-kapabilitet lagt til
+   `GmailTransport` - Tobias sender fortsatt selv, manuelt. Bundet flerminutters polling (ordrens
+   eget eksempel) er EKSPLISITT UTSATT som dokumentert oppfølgingspunkt (Q-24, ikke stille utelatt).
+
+**Regresjonstester lagt til (alle PASS):** nye tester i `google-auth-error-classification.test.ts`
+(kontekst-bevisst `EMAIL_REAUTH_REQUIRED` vs. `GOOGLE_INVALID_CLIENT`, `recoveryReason`-felt,
+`GmailTransport`-integrasjon med `JARVIS_GOOGLE_OAUTH_CLIENT_TYPE` satt/usatt), nye tester i
+`ua2-p1b-a-host-run-wiring.test.ts` (`p1b_gmail_reauth`-markør-tilstander, ingen egen
+EMAIL_REAUTH_REQUIRED-spesialgren, smalt subject-søk). **Ingen regresjon:** Drive-auth/-scopes/-klient
+HELT urørt, Q-21 uendret, cost_events-cleanup fra HOST FIX #1 bevart, alle P0/P1A/HOST FIX #1-tester
+fortsatt grønne.
+
+**Kvalitetsgates:** `pnpm -r run typecheck` (13/13 grønt), `eslint .` (0 feil), `pnpm test` (se
+kommandoresultat under), gitleaks (protect --staged + detect mot origin/main..HEAD, begge rene).
+
+**STATUS UENDRET: FIXED_SUITE / HOST_VERIFY_BLOCKED.** IKKE VERIFIED - krever en NY host-kjøring av
+SAMME ene kommando for faktisk å bevise at reauth nå fullfører for dette spesifikke
+`unauthorized_client`-funnet og at live Gmail-sync fungerer. `docs/OPEN_QUESTIONS.md` Q-24 oppdatert
+med denne rundens funn (nye punkter 9/10). PR #7 IKKE merget - `IKKE merge, IKKE ny fase`-instruksen i
+byggeordren er fulgt.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). **UA-2 P1B-A er FIXED_SUITE/READY_FOR_HOST_VERIFY -

@@ -160,6 +160,46 @@ describe("FK-trygg cleanup - HOST FIX #1 (2026-08-16, host-funn run_id 3af67dab)
   });
 });
 
+describe("HOST FIX #2 (2026-08-16, host-funn run_id ab43fb1f): p1b_gmail_reauth-markør + EMAIL_REAUTH_REQUIRED tar SAMME automatiske reauth-vei", () => {
+  it("p1b_gmail_reauth starter som BLOCKED_NO_EMAIL_CREDENTIALS (samme fail-closed-mønster som de andre Gmail-markørene)", () => {
+    expect(source).toMatch(/p1b_gmail_reauth:\s*"BLOCKED_NO_EMAIL_CREDENTIALS"/);
+  });
+
+  it("markerer SKIPPED_NOT_NEEDED når list_messages lykkes ved FØRSTE forsøk (ingen reauth ble nødvendig)", () => {
+    expect(source).toContain('results.p1b_gmail_reauth = "SKIPPED_NOT_NEEDED";');
+  });
+
+  it("markerer SKIPPED_NOT_RECOVERABLE (IKKE FAIL) når feilklassen ikke er gjenopprettbar - unngår å telle en fail-closed-beslutning som samme type feil som en MISLYKKET reauth", () => {
+    expect(source).toContain('results.p1b_gmail_reauth = "SKIPPED_NOT_RECOVERABLE";');
+  });
+
+  it("markerer PASS/FAIL basert på FAKTISK retry-utfall etter reauth-underprosessen - ingen hardkodet antatt PASS", () => {
+    expect(source).toContain('results.p1b_gmail_reauth = retryOk ? "PASS" : "FAIL";');
+  });
+
+  it("INGEN egen spesialgren for EMAIL_REAUTH_REQUIRED i selve reauth-triggeren - samme isRecoverableGoogleAuthErrorClass()/parseGoogleAuthFailureReason()-kall som HOST FIX #1 dekker den nye klassen automatisk (klassifiseringen selv, IKKE denne filen, er der kontekst-bevisstheten skjer)", () => {
+    expect(codeOnly).not.toMatch(/errorClass\s*===\s*"EMAIL_REAUTH_REQUIRED"\s*\?\s*await attemptListMessages/);
+    expect(source).toContain("if (!isRecoverableGoogleAuthErrorClass(errorClass)) {");
+  });
+});
+
+describe("HOST FIX #2 §11: smalt subject-scoped ekstra-søk etter en deterministisk akseptanse-testmelding - ALDRI en generell postkasse-skann", () => {
+  it("ACCEPTANCE_FIXTURE_SUBJECT er en STABIL (ikke run_id-avhengig) konstant Tobias kan sende FØR en fremtidig kjøring", () => {
+    expect(source).toContain('const ACCEPTANCE_FIXTURE_SUBJECT = "Jarvis P1B Acceptance";');
+  });
+
+  it("søket bruker et subject-filter (query-parameteren) - ALDRI et ubegrenset list_messages-kall uten query", () => {
+    const idx = source.indexOf("acceptanceSearch");
+    expect(idx).toBeGreaterThan(-1);
+    const nearby = source.slice(idx, idx + 400);
+    expect(nearby).toContain("query: `subject:\"${ACCEPTANCE_FIXTURE_SUBJECT}\"");
+  });
+
+  it("fallback til SKIPPED_SAFE_FIXTURE forblir ærlig og forklarer HVORDAN Tobias kan sende en akseptansemelding for neste kjøring", () => {
+    expect(source).toContain("For neste kjøring: send ÉN liten test-e-post");
+  });
+});
+
 describe("token_leak-revisjon og Q-20-mekanisme gjenbruker EKSISTERENDE, delte funksjoner - ingen egen parallell implementasjon", () => {
   it("bruker computeErasureFingerprint via dynamisk import fra @jarvis/core (SAMME funksjon KnowledgeSyncService selv bruker) - ikke en egen hash-rutine", () => {
     const importIdx = source.indexOf('await import("@jarvis/core")');
