@@ -1,10 +1,11 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (UA-2 P1B-A = VERIFIED/COMPLETE → D-47, host-bevist på ekte Windows/Docker-
-host, run_id `0f43f39d`, `hard_fail=false`, 873/873 tester, PR #7 merget til `main`) · **Branch:**
-`claude/ua2-p1b-a-email-ocr-vision` (mergekilde for PR #7) · P1A Runtime Wiring Closeout forblir
-VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42,
-uendret, host-bevist run_id `2703299e`, PR #5 merget)
+**Oppdatert:** 2026-08-17 (**UA-2 «Universal Knowledge Layer» HELE FASEN = VERIFIED/COMPLETE → D-48**,
+masterplan-closeout-audit mot masterplanens fire ordrette akseptansekriterier - se egen seksjon under.
+UA-2 P1B-A selv forblir VERIFIED/COMPLETE → D-47, host-bevist run_id `0f43f39d`, 873/873 tester) ·
+**Branch:** `claude/ua2-masterplan-closeout` · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE
+(host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret,
+host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7)
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -1213,6 +1214,46 @@ fullførte helt (`google_email_reauth=PASS`), retry lyktes.
   samme konvensjon som PR #1-#6 - historikk bevart, ikke squashet). Se D-47 i
   DECISIONS_AND_ASSUMPTIONS.md for full beslutningslogg-entry, Q-24 for oppdatert gap-status.
 
+## UA-2 MASTERPLAN CLOSEOUT (2026-08-17, branch `claude/ua2-masterplan-closeout`) — HELE FASEN VERIFIED/COMPLETE → D-48
+
+**Fullstendig lukkings-audit av UA-2 «Universal Knowledge Layer» som HELHET** (ikke en ny feature-fase)
+mot masterplanens EGNE fire ordrette akseptansekriterier (`docs/input/02_Jarvis_Masterplan_Sovereign_
+Autonomy_v4.0.md`, linje 455-459 - kanonisk kilde for UA-2, `IMPLEMENTATION_PLAN.md` sin UA-2-seksjon
+verifisert å gjengi disse ORDRETT, ingen avvik funnet). Full begrunnelse: **D-48** i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Akseptansematrise (alle fire PASS, evidens i D-48):**
+
+| # | Kriterium (masterplanens ordlyd) | Resultat | Kort evidens |
+|---|---|---|---|
+| 1 | Minst fem source systems i samme retrieval flow | **PASS** | 5 distinkte `source_type` i `KnowledgeSourceRegistry`: `filesystem`/`github`/`google_drive`/`obsidian`/`email_attachment` - alle via SAMME `KnowledgeSource`/`KnowledgeSyncService`/`KnowledgeRetriever`, ingen parallell vei |
+| 2 | All hentet kunnskap har source pointer/freshness/trust | **PASS** | `KnowledgeProvenance` (`retriever.ts`) returnerer kilde-pointer+ferskhet på HVERT resultat, strukturelt umulig å hoppe over. "Trust" implisitt via `source_type` + DPIA sin "untrusted ingestion"-klassifisering (ingen eget felt bygget - se D-48 for ærlig presisering) |
+| 3 | Cross-tenant leakage = 0; delete/revoke propagated | **PASS** | `FORCE ROW LEVEL SECURITY` (tenant+space) i `017_knowledge.sql`; Q-20/tombstone LIVE-bevist på tvers av P0 (`778bb87d`)/P1A (`2703299e`)/P1B-A (`0f43f39d`); Q-21 uendret i alle tre |
+| 4 | DPIA/processing inventory oppdatert for nye datakategorier | **PASS** | `UA2_KNOWLEDGE_DPIA.md` har egen, oppdatert rad for alle fem kilder + egen OCR/vision-dataflyt-seksjon |
+
+**Worker-krav eksplisitt vurdert (§12 i audit-ordren):** verken "durable worker" eller "live worker-jobb-
+kjøring" er nevnt i masterplanens fire akseptansekriterier - Q-24 sin `p1b_worker_registration=
+SUITE_VERIFIED`-status er derfor en implementasjonsdetalj-verifikasjon, IKKE en UA-2-blokkering.
+
+**Klassifisert IKKE-BLOKKERENDE for UA-2-lukking (oppdatert i OPEN_QUESTIONS.md, ingenting bygget):**
+Q-22 (Pieces - "5 kildesystemer" er allerede oppfylt UTEN Pieces), Q-23 (Drive permission-live-
+verifikasjon - D-41-connector-kapabilitet, ikke et UA-2-kriterium), Q-24 (P1B-A worker-jobb-live-
+kjøring + øvrige kjente kapabilitetsgap - ingen av dem et UA-2-kriterium), møtetranskripsjon
+(masterplanens "Bygges"-liste for UA-2 nevner det, men det avhenger strukturelt av UA-7 Communications
+Hub som IKKE er bygget - IKKE et av de fire akseptansekriteriene, derfor ikke-blokkerende for DENNE
+lukkingen; konflikten mellom "Bygges"-listens fulle ambisjon og faktisk byggbarhet er allerede løst i
+IMPLEMENTATION_PLAN.md sine "Bygges IKKE"-seksjoner). Entity extraction/Knowledge Graph (Q-10) forblir
+utsatt til reelt behov er målt - heller ikke et akseptansekriterium.
+
+**Kvalitetsgates:** `pnpm -r run typecheck` (13/13 grønt), `eslint .` (0 feil), `pnpm test` (873/873,
+64 filer - INGEN endring, denne runden er ren verifikasjon+dokumentasjon, ingen kodeendring), gitleaks
+(protect --staged + detect mot origin/main..HEAD, begge rene). CI: se PR-status.
+
+**STATUS: UA-2 «UNIVERSAL KNOWLEDGE LAYER» = VERIFIED/COMPLETE → D-48.** Erstatter/overstyrer IKKE
+D-42 (P1A) eller D-47 (P1B-A) - begge forblir gyldige, uendrede fase-lukkinger. **Neste kanoniske fase
+per masterplan v4.0: UA-3 «Business Operating System»** (`docs/input/02_Jarvis_Masterplan_Sovereign_
+Autonomy_v4.0.md` linje 460) - IKKE startet, IKKE godkjent, IKKE implementert i denne audit-runden.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A har INGEN egne blokkeringer (alle
 VERIFIED/CLOSED/COMPLETE, merget til `main`). Manglende provider-nøkler er eneste gap for LIVE
@@ -1228,25 +1269,24 @@ omgått med usikre workarounds. Ingen andre branches rørt. Connector-audit-gape
 Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke blokkerende.
 
 ## Neste oppgave
-**Ingen ny UA-2-fase er formelt godkjent/igangsatt ennå** - `docs/IMPLEMENTATION_PLAN.md` har INGEN
-eksplisitt navngitt "P1B-B"/"P2"-seksjon utover P1B-A. Konkrete, allerede dokumenterte
-kandidater (fra P1B-A sin egen "Bygges IKKE"-liste + eksisterende gap-logg), INGEN av dem
-igangsatt uten en egen, eksplisitt byggeordre fra Tobias/arkitekten (CLAUDE.md-regel 10 -
-faseporten):
-- Møtetranskripsjon - avhenger av UA-7 Communications Hub sin meeting-transcription, som selv IKKE
-  er bygget ennå (uendret blokkering, ikke P1B-A sin gjenstand).
-- Pieces som kunnskapskilde (Q-22) - ingen kjent, ikke-gjettet integrasjonsflate identifisert ennå.
-- Dedikert lokal OCR-motor (Tesseract e.l.), ekte bildestøtte i providere utover Anthropic,
-  docx/xlsx/pptx-ekstraksjon, finere per-vedlegg-checkpointing (alle fra D-43/Q-24) - ingen konkret
-  behov identifisert som gjør disse presserende.
-- Google Drive permission-live-verifikasjon (Q-23) og P1B-A worker-JOBB-live-verifikasjon (Q-24,
-  ny) - begge egne, smale, eksplisitt godkjente test-runder (ikke byggearbeid).
-- **Merk:** UA-2 sitt masterplan-akseptansekriterium "minst fem kildesystemer i samme retrieval-flyt"
-  ser ut til å FAKTISK være teknisk oppfylt nå (`filesystem`/`github`/`obsidian`/`google_drive`/
-  `email_attachment` = 5 registrerte `source_type`-verdier i `KnowledgeSourceRegistry`), men dette er
-  ALDRI eksplisitt verifisert/erklært som en egen lukkende oppgave - flagges her som en mulig
-  kandidat for Tobias å eksplisitt godkjenne som neste (lukkende, ikke byggende) oppgave, IKKE antatt
-  eller igangsatt av denne økten.
+**UA-2 «Universal Knowledge Layer» er nå FORMELT VERIFIED/COMPLETE i sin helhet → D-48** (denne
+audit-runden). **Neste kanoniske fase per masterplan v4.0 er UA-3 «Business Operating System»**
+(`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje 460) - Business Graph (person/
+company/lead/conversation/meeting/offer/contract/invoice/revenue), CRM/pipeline, daily/weekly business
+brief, open-loop-deteksjon. **IKKE startet, IKKE godkjent, IKKE implementert** - venter på en egen,
+eksplisitt byggeordre fra Tobias/arkitekten før noe kodearbeid begynner (CLAUDE.md-regel 10 -
+faseporten gjelder like strengt for UA-3 som den gjorde for hver UA-2-delfase).
+
+Gjenstående, eksplisitt IKKE-blokkerende UA-2-relatert backlog (se D-48/OPEN_QUESTIONS.md for full
+klassifisering - ingen av disse hindrer UA-2-lukkingen eller krever noe FØR UA-3 kan startes, men
+ingen av dem er heller igangsatt uten egen godkjenning):
+- Møtetranskripsjon - avhenger av UA-7 Communications Hub, som selv IKKE er bygget ennå.
+- Pieces som kunnskapskilde (Q-22) - ingen kjent integrasjonsflate identifisert; uansett ikke
+  nødvendig for UA-2 sitt "minst fem kilder"-krav, som er oppfylt uten Pieces.
+- Dedikert lokal OCR-motor, ekte bildestøtte i providere utover Anthropic, docx/xlsx/pptx-ekstraksjon,
+  finere per-vedlegg-checkpointing (D-43/Q-24) - ingen konkret behov identifisert.
+- Google Drive permission-live-verifikasjon (Q-23) og P1B-A worker-JOBB-live-verifikasjon (Q-24) -
+  begge egne, smale, eksplisitt godkjente test-runder (ikke byggearbeid).
 
 Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, connector-audit-gapene
