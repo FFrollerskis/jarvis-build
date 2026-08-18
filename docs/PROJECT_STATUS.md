@@ -1,17 +1,18 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**Q-27 - RLS-blind business-tenant-enumering FIKSET, FIXED_SUITE / IKKE
-VERIFIED → D-65**, se egen "Q-27 - RLS-BLIND BUSINESS TENANT ENUMERATION FIX"-seksjon under. Fikser
-den ekte produksjonsbugen D-64/Q-27 oppdaget: tre eksisterende `DailyScheduler`-funksjoner
+**Oppdatert:** 2026-08-18 (**Q-27 - RLS-blind business-tenant-enumering: VERIFIED / CLOSED → D-65**,
+se egen "Q-27 - RLS-BLIND BUSINESS TENANT ENUMERATION FIX"-seksjon under. Fikset den ekte
+produksjonsbugen D-64/Q-27 oppdaget: tre eksisterende `DailyScheduler`-funksjoner
 (`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
 brukte en RLS-blind, uskopet spørring mot `tenants` og hadde sannsynligvis ALDRI oppdaget en tenant i
 produksjon. Ny `SECURITY DEFINER`-katalogfunksjon `jarvis_list_business_tenant_ids()`
 (`023_business_tenant_catalog.sql`) + delt TS-hjelper `listBusinessTenantIds()` (`@jarvis/core`)
 brukes nå av ALLE TRE (ingen tre separate fikser). `jarvis_runtime` UENDRET NOSUPERUSER/NOBYPASSRLS
 (Q-21). 16 nye tester (ekte embedded Postgres, IKKE `fakePool()`) beviser bug OG fiks mekanisk -
-1160→1176, full suite grønn. Host-akseptanseskript `q27-tenant-enumeration-host-run.ts`/`-live.ts`
-klar. **INGEN Tobias-host-kjøring utført ennå** - draft-PR, Q-27 forblir EKSPLISITT OPEN i
-OPEN_QUESTIONS.md inntil host-verifisert. **Branch:** `claude/q27-safe-tenant-enumeration` (fra
+1160→1176, full suite grønn. **Tobias har nå kjørt den ekte Windows/Docker-host-akseptansen** -
+run_id `8549d23f`, `hard_fail=false`, ALLE 15 `q21_*`/`q27_*`-markører PASS. Q-27 er FORMELT LUKKET
+i OPEN_QUESTIONS.md. PR #16 flyttet fra draft til klar-for-review. **MERGES IKKE uten Tobias'
+eksplisitte godkjenning** (CLAUDE.md). **Branch:** `claude/q27-safe-tenant-enumeration` (fra
 `origin/main` `0566b7a` DIREKTE).
 
 **Forrige runde (samme dag, MERGET):** CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (D-64) - PR #15
@@ -1987,11 +1988,28 @@ uansett faktisk tenant-antall.
 
 **Suite-verifisert:** 1176/1176 tester totalt (1160→1176, 16 nye), typecheck 14/14, lint rene.
 
-**IKKE VERIFIED:** draft-PR opprettet, INGEN Tobias-host-kjøring utført ennå. Q-27 forblir
-EKSPLISITT OPEN i OPEN_QUESTIONS.md - suite-bevis alene lukker den ALDRI.
+**VERIFIED / CLOSED (2026-08-18):** Tobias har kjørt den ekte Windows/Docker-host-akseptansen
+(`q27-tenant-enumeration-host-run.ts`), run_id `8549d23f`, `hard_fail=false`. ALLE 15 markører PASS:
+`q21_runtime_role_safe`, `q27_direct_runtime_global_query_restricted`, `q27_catalog_business_tenants`,
+`q27_catalog_excludes_nonbusiness`, `q27_catalog_minimal_surface`, `q27_catalog_public_execute_denied`,
+`q27_catalog_runtime_execute_allowed`, `q27_open_loop_scheduler`, `q27_business_event_scheduler`,
+`q27_scoring_scheduler`, `q27_multiple_business_tenants`, `q27_tenant_isolation`,
+`q27_runtime_no_superuser`, `q27_runtime_no_bypassrls`, `q27_cleanup`. Runtime bekreftet
+`jarvis_runtime`/`superuser=false`/`bypassrls=false` - Q-21 IKKE svekket. Markørnavnene i den
+rapporterte kjøringen er verifisert direkte mot `results`-kartet i `q27-tenant-enumeration-live.ts`
+på denne branchen (kildelest i denne runden) - evidensen samsvarer strukturelt med implementasjonen
+som faktisk ligger her. Re-audit av migrasjonen fant INGEN ytterligere sårbarhet (eier =
+migrasjons-admin-rollen, eksplisitt `search_path`, ingen dynamisk SQL, `REVOKE`/smal `GRANT`, ingen
+bredere dataflate enn `tenant_id`). Q-27 formelt lukket i OPEN_QUESTIONS.md. PR #16 flyttet fra
+draft til klar-for-review. **MERGES IKKE uten Tobias' eksplisitte godkjenning** (CLAUDE.md).
 
-**Kjente åpne gap (ikke skjult):** Q-27 selv (venter host-verifisering). D-64/Native Support Core/
-Q-28 Contracts-forebygging/Q-26 Knowledge Verification alle UENDRET av denne rene bug-fiks-runden.
+**Kjente åpne gap (ikke skjult):** D-64/Native Support Core/Q-28 Contracts-forebygging/Q-26 Knowledge
+Verification alle UENDRET av denne rene bug-fiks-runden. Utenfor Q-27 sitt eget scope: en pre-
+eksisterende, ikke-relatert CI-flake i `modules/watchdog/test/erasure-restore-contract.test.ts`
+(tilfeldig portvalg, `30000 + random(20000)`, ingen kollisjons-retry) har feilet 2 av 3 ganger på
+denne branchens SHA i CI - bekreftet IKKE relatert til Q-27-diffen (full lokal `pnpm -w test`-kjøring
+1176/1176 grønn, inkl. denne filen). Flagget i PR #16, IKKE fikset i denne sliceen (annen modul,
+utenfor scope).
 
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
@@ -2007,28 +2025,21 @@ leverandørvalg, MEN heller ikke startet ennå** - egen, fremtidig, eksplisitt g
 **Contracts/e-sign-connectoren forblir blokkert på en EKSPLISITT Tobias-provider-beslutning FOR
 SELVE SIGNATUR-UTFØRELSEN, NÅ OGSÅ på Core-vs-Adapter-porten i §11.2** (D-64/Q-28 legger til krav om
 at kontraktskjernen designes Jarvis-native FØR noen signaturleverandør velges) - IKKE kodbar før
-dette foreligger, se D-57/Q-25 item 8 + Q-28. **Q-27 er NÅ FIXED_SUITE (D-65), blokkert KUN på en
-Tobias-host-kjøring** (`q27-tenant-enumeration-host-run.ts`, draft-PR, se egen seksjon over) - IKKE
-lenger et uløst designspørsmål, fiksen er ferdig implementert og suite-bevist, forblir EKSPLISITT
-OPEN i OPEN_QUESTIONS.md inntil host-verifisert. **Kriterium 2 sin gjenstående
+dette foreligger, se D-57/Q-25 item 8 + Q-28. **Q-27 er NÅ VERIFIED/CLOSED (D-65, host-bevist run_id
+`8549d23f`)** - INGEN gjenstående blokkering på selve fiksen; PR #16 klar for review, blokkert KUN på
+Tobias' eksplisitte merge-godkjenning (CLAUDE.md - "merges aldri uten Tobias"). **Kriterium 2 sin gjenstående
 bredde (product/finance/marketing/operations) er en FASE-AVHENGIGHET av UA-4/UA-5/UA-6, ikke et
 internt UA-3-kodbart gap** - disse fasene er selv IKKE startet. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
 blokkerende.
 
 ## Neste oppgave
-**Umiddelbar neste oppgave: Tobias kjører
-`node --env-file=.env --experimental-transform-types
-modules/business/scripts/q27-tenant-enumeration-host-run.ts`** på sin faktiske Windows/Docker-host
-for å host-verifisere Q-27-fiksen (D-65, draft-PR, branch `claude/q27-safe-tenant-enumeration`) -
-krever `023_business_tenant_catalog.sql` anvendt (skjer automatisk via host-run-scriptets
-migrasjonssteg). Forventede markører: `q21_runtime_role_safe`,
-`q27_direct_runtime_global_query_restricted`, `q27_catalog_business_tenants`,
-`q27_catalog_excludes_nonbusiness`, `q27_catalog_minimal_surface`,
-`q27_catalog_public_execute_denied`, `q27_catalog_runtime_execute_allowed`,
-`q27_open_loop_scheduler`, `q27_business_event_scheduler`, `q27_scoring_scheduler`,
-`q27_multiple_business_tenants`, `q27_tenant_isolation`, `q27_runtime_no_superuser`,
-`q27_runtime_no_bypassrls`, `q27_cleanup`, alle PASS, `hard_fail=false`.
+**Q-27/D-65 er ferdig host-verifisert (run_id `8549d23f`, `hard_fail=false`, alle 15 markører PASS)
+og PR #16 er klar for review.** Umiddelbar neste oppgave: **Tobias' eksplisitte
+merge-godkjenning for PR #16** - ingen videre Claude-handling gjenstår på selve Q-27-sliceen før den
+foreligger (CLAUDE.md - "merges aldri uten Tobias"). Etter merge er neste planlagte slice (IKKE
+startet, krever egen eksplisitt godkjent byggeordre): **Native Jarvis Support Core**
+(`JARVIS_CANONICAL`, D-64) - Contracts/e-sign og UA-4 forblir også IKKE startet.
 
 **UA-3 «Support/Tickets» sitt neste konkrete steg er (uendret fra D-64): igangsette en Native Jarvis Support Core-
 slice** (ticket-entitet/livssyklus/motpart-kobling som `JARVIS_CANONICAL`, med rom for en fremtidig
