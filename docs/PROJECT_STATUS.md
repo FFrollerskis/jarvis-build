@@ -1,18 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE SUPPORT CORE HOST FIX #1: HOST_VERIFY_FAILED / FIX_REQUIRED
-→ D-67**, se egen "UA-3 NATIVE SUPPORT CORE HOST FIX #1"-seksjon nederst i dokumentet. Tobias sin
-FØRSTE host-kjøring (`ua3-native-support-host-run.ts`, to run_id-er `60f0d682`/`5457c59a`,
-`hard_fail=true`, 18/26 markører PASS) fant TO rapporterte rotårsaker (credential_unavailable-
-kaskade + Q-20 FK-brudd `business_open_loops_ticket_id_fkey`) - BEGGE fikset, PLUSS en TREDJE,
-tidligere maskert rotårsak (`class_d_missing_approval` paa det nøstede `email.send`-kallet i
-`support.reply`, funnet under skriving av regresjonstestene for de to første) - OGSÅ fikset. 10 nye
-regresjonstester (1240→1250, full suite grønn), typecheck/lint rene. **STATUS FORBLIR
-HOST_VERIFY_FAILED/FIX_REQUIRED, IKKE VERIFIED** - draft-PR #17 oppdatert, INGEN NY Tobias-host-
-kjøring utført ennå etter fiksene. K1 forblir EKSPLISITT PARTIAL. **Branch:**
-`claude/ua3-native-support-core` (uendret, fra `origin/main` `65cafc5`).
+**Oppdatert:** 2026-08-18 (**UA-3 NATIVE SUPPORT CORE — ENDELIG LUKKING: VERIFIED/COMPLETE →
+D-66/D-67/D-68/D-69/D-70**, se egen "UA-3 NATIVE SUPPORT CORE — ENDELIG LUKKING"-seksjon nederst i
+dokumentet. Tobias sin FJERDE, RENE host-kjøring (`ua3-native-support-host-run.ts`, run_id
+`da7e0c1b`, `hard_fail=false`) ga ALLE 26 markører PASS - de tre foregående rundene (D-67: to
+rotårsaker; D-68: en reell rettighetseskalering funnet og fikset under regresjonstest-skriving;
+D-69: syntetisk teardown-gap) er nå alle bekreftet fikset på ekte host. 98 nye tester totalt over
+hele slicen (1176→1268, full suite grønn), typecheck/lint rene, GitHub CI (`gitleaks`+`build-test`)
+grønn. **Draft-PR #17 klar for review - MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+Support/tickets K1-delkriterium VERIFIED; K1 SOM HELHET forblir PARTIAL (Contracts/e-sign, Q-28,
+fortsatt ikke bygget). **Branch:** `claude/ua3-native-support-core` (uendret, fra `origin/main`
+`65cafc5`).
 
-**Forrige runde (samme dag, FIXED_SUITE FØR host-funnet over):** UA-3 NATIVE JARVIS SUPPORT CORE
+**Forrige runder (samme dag):** HOST FIX #1 (D-67, run_id `60f0d682`/`5457c59a`) → SECURITY FIX #2
+(D-68, ekstern sikkerhetsaudit) → HOST FIX #3 (D-69, run_id `1e821a86`, kun teardown) → D-70
+(endelig ren kjøring). Se egne seksjoner nederst for full detalj per runde.
+
+**Runden før det (samme dag, FIXED_SUITE FØR host-funnet over):** UA-3 NATIVE JARVIS SUPPORT CORE
 (D-66) - ny pakke `@jarvis/support`, migrasjon `024_support.sql`, 62 nye tester (1176→1240). Se egen
 seksjon lenger ned for full byggedetalj.
 
@@ -2062,50 +2066,39 @@ support-klassifisering ikke bygget (routing er bevisst deterministisk).
 
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
-UA-3 Business-Event-Linkage/UA-3 Profiling/Scoring/Q-27 har INGEN egne blokkeringer (alle
-VERIFIED/CLOSED/COMPLETE, merget til `main`).
+UA-3 Business-Event-Linkage/UA-3 Profiling/Scoring/Q-27/**UA-3 Native Jarvis Support Core (D-66/
+D-67/D-68/D-69/D-70, host-bevist run_id `da7e0c1b`, `hard_fail=false`)** har INGEN egne
+blokkeringer lenger (alle VERIFIED/CLOSED/COMPLETE - Native Support Core er merge-klar, `main`-merge
+avventer KUN Tobias' eksplisitte godkjenning, ikke ytterligere byggearbeid).
 Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini/Kimi/Ollama).
 Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
 ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE live-host-bevist
 (Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt. P1B-A sin worker-JOBB-live-kjøring er
-tilsvarende IKKE live-host-bevist (Q-24) - samme mønster, egen fremtidig test-runde. **UA-3 Native
-Jarvis Support Core (D-66) er NÅ FIXED_SUITE, blokkert KUN på Tobias' host-kjøring**
-(`ua3-native-support-host-run.ts`, draft-PR, se egen seksjon over) - IKKE et uløst designspørsmål
-lenger. **Contracts/e-sign-connectoren forblir blokkert på en EKSPLISITT Tobias-provider-beslutning
-FOR SELVE SIGNATUR-UTFØRELSEN, OGSÅ på Core-vs-Adapter-porten i §11.2** (D-64/Q-28) - IKKE kodbar før
-dette foreligger, se D-57/Q-25 item 8 + Q-28. **Kriterium 2 sin gjenstående bredde
+tilsvarende IKKE live-host-bevist (Q-24) - samme mønster, egen fremtidig test-runde. **Contracts/
+e-sign-connectoren forblir blokkert på en EKSPLISITT Tobias-provider-beslutning FOR SELVE
+SIGNATUR-UTFØRELSEN, OGSÅ på Core-vs-Adapter-porten i §11.2** (D-64/Q-28) - IKKE kodbar før dette
+foreligger, se D-57/Q-25 item 8 + Q-28. **Kriterium 2 sin gjenstående bredde
 (product/finance/marketing/operations) er en FASE-AVHENGIGHET av UA-4/UA-5/UA-6, ikke et internt
 UA-3-kodbart gap** - disse fasene er selv IKKE startet. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
 blokkerende.
 
 ## Neste oppgave
-**Umiddelbar neste oppgave: Tobias kjører EN NY host-kjøring** (SAMME kommando som før,
-`node --env-file=.env --experimental-transform-types
-modules/business/scripts/ua3-native-support-host-run.ts`, på sin faktiske Windows/Docker-host) for å
-verifisere at HOST FIX #1 (D-67) faktisk løser de to rapporterte run_id-ene sine funn (`60f0d682`/
-`5457c59a`) - DENNE runden er den ANDRE forsøket, IKKE første. Forventede markører (uendret liste fra
-D-66): `q21_runtime_role_safe`, `ua3_support_runtime_role`, `ua3_support_no_zendesk_dependency`,
-`ua3_support_create_ticket`, `ua3_support_thread_idempotency`, `ua3_support_message_idempotency`,
-`ua3_support_contact_match`, `ua3_support_unmatched`, `ua3_support_ambiguous`,
-`ua3_support_company_link`, `ua3_support_timeline`, `ua3_support_source_pointer`,
-`ua3_support_no_body_copied`, `ua3_support_state_machine`, `ua3_support_priority`,
-`ua3_support_assignment`, `ua3_support_internal_note`, `ua3_support_reply_path`,
-`ua3_support_open_loop_created`, `ua3_support_open_loop_resolved`, `ua3_support_tenant_isolation`,
-`ua3_support_space_isolation`, `ua3_support_toolgateway`, `ua3_support_audit_safe`,
-`ua3_support_q20`, `ua3_support_cleanup`, alle PASS, `hard_fail=false`. Se
-"UA-3 NATIVE SUPPORT CORE HOST FIX #1"-seksjonen nederst for de tre rotårsakene som ble fikset denne
-runden og hvorfor status FORTSATT er HOST_VERIFY_FAILED/FIX_REQUIRED, ikke VERIFIED.
+**UA-3 Native Jarvis Support Core (D-66→D-70) er NÅ VERIFIED/COMPLETE - INGEN videre byggearbeid
+eller host-kjøring gjenstår for denne sliceen.** Draft-PR #17 er klar for review (all CI grønn, full
+lokal regresjon grønn, ekte host-bevis `da7e0c1b`/`hard_fail=false`/alle 26 markører PASS foreligger)
+- **venter KUN på Tobias sin eksplisitte merge-godkjenning** (CLAUDE.md-regel, ingen økt merger uten
+den). Se "UA-3 NATIVE SUPPORT CORE — ENDELIG LUKKING"-seksjonen nederst for full detalj.
 
 **HELE UA-3 er FORTSATT IKKE komplett** - masterplanens fire akseptansekriterier: kriterium 3
 COMPLETE/VERIFIED (uendret fra D-56); kriterium 4 COMPLETE/VERIFIED (uendret fra D-63); kriterium 1
-FORTSATT PARTIAL (Native Support Core NÅ HOST_VERIFY_FAILED/FIX_REQUIRED etter HOST FIX #1, IKKE
-host-verifisert; Contracts/e-sign fortsatt IKKE bygget); kriterium 2 PARTIAL (uendret, kun sales,
-avhenger av UA-4/UA-5/UA-6).
+FORTSATT PARTIAL (Support/tickets-delkriteriet NÅ VERIFIED/COMPLETE, MEN Contracts/e-sign fortsatt
+IKKE bygget - kriterium 1 som helhet derfor fortsatt PARTIAL); kriterium 2 PARTIAL (uendret, kun
+sales, avhenger av UA-4/UA-5/UA-6).
 
 **Gjenstående for kriterium 1:**
-1. **Native Jarvis Support Core host-verifikasjon** - Tobias sin host-kjøring, se over. Etter
-   VERIFIED: kriterium 1 fortsatt PARTIAL inntil Contracts/e-sign også bygges.
+1. ~~Native Jarvis Support Core host-verifikasjon~~ - **FERDIG** (D-70, run_id `da7e0c1b`,
+   `hard_fail=false`). Kriterium 1 forblir likevel PARTIAL inntil Contracts/e-sign også bygges.
 2. **Contracts/e-sign-connector** (UA-3 P1, masterplan linje 1071) - krever leverandørvalg for selve
    signatur-utførelsen (f.eks. DocuSign/Dropbox Sign - kun eksempler, IKKE forhåndsvalgt), OGSÅ
    krav om at kontraktskjernen designes `JARVIS_CANONICAL` FØRST (D-64/Q-28). IKKE startet.
@@ -2177,10 +2170,111 @@ konstrueres.
 
 **Full regresjon:** 92 testfiler, 1250/1250 grønne. Typecheck 15/15 pakker, lint rene.
 
-**Status: HOST_VERIFY_FAILED / FIX_REQUIRED - IKKE VERIFIED.** Draft-PR #17 oppdatert med begge
-run_id-ene, rotårsakene og fiksene, FORTSATT ikke merget. K1 forblir EKSPLISITT PARTIAL. Native
-Support Core markeres IKKE VERIFIED før Tobias utfører en NY, ekte host-kjøring som viser
-`hard_fail=false` og alle 26 markører PASS. **STOP. Ingen merge. Ingen Contracts. Ingen UA-4.**
+**Status ved denne runden (D-67, historisk - se D-70 under for endelig status): HOST_VERIFY_FAILED /
+FIX_REQUIRED - IKKE VERIFIED.** Draft-PR #17 oppdatert med begge run_id-ene, rotårsakene og
+fiksene, FORTSATT ikke merget. K1 forblir EKSPLISITT PARTIAL.
+
+## UA-3 NATIVE SUPPORT CORE SECURITY FIX #2 (2026-08-18, samme branch) → D-68
+
+**Ekstern sikkerhetsaudit** av D-67 sin rotårsak-3-fiks (`SupportTransport` bygde en
+`person_id: JARVIS_OWNER_PERSON_ID`-identitet lokalt for det nøstede `email.send`-kallet), FØR noen
+ny host-kjøring. Funnet: en REELL rettighetseskalering - `ToolTransport.invoke(action, parameters,
+credential)` fikk ALDRI den opprinnelige kalleren sin `IdentityContext` i det hele tatt, saa ENHVER
+kaller autorisert til å kalle `support.reply` overhodet (eier ELLER en delegat med et gyldig
+`support:reply`-mandat) fikk sitt nøstede `email.send` (klasse D) utført med UBETINGET
+eier-/sovereign-authority - en delegat kunne dermed sende e-post uten noensinne å levere en signert
+godkjenning.
+
+**Fiks:** `ToolInvocationContext` (`{identity, approval}` fra DET OPPRINNELIGE
+`ToolGateway.execute()`-kallet) lagt til som en 4. parameter på `ToolTransport.invoke()` -
+gatewayen gir nå transporter DEN EKTE kalleren sin kontekst i stedet for at transporter
+fabrikkerer sin egen. Bakoverkompatibelt (alle andre transportere uendret, TypeScript strukturell
+typing tillater færre deklarerte parametre). `SupportTransport` sin `reply`-case videreformidler
+`context.identity`/`context.approval` UENDRET til det nøstede kallet - INGEN ny autoritetsmodell.
+D-67 sin `JARVIS_OWNER_PERSON_ID`-omgåelse i akseptanse-scriptet fjernet (unødvendig).
+
+**Invariant bevist:** `effective_authority(nested email.send) <= effective_authority(original
+caller)`, ALDRI eskalert - 10 nye tester (`support-reply-authority-propagation.test.ts`, EKTE
+`ToolGateway`/`PolicyGateway`/embedded Postgres/Ed25519-signerte godkjenninger): eier sender fortsatt
+uten per-kall-godkjenning (sovereign, uendret); delegat UTEN godkjenning nektes
+(`class_d_missing_approval`); delegat MED gyldig godkjenning tillates; feil action/parametre
+avvises; gjenbrukt nonce avvises; `person_id: "system"` blir ALDRI stille eier; nøstet audit-rad
+arver kallerens FULLE identitet; en delegat fra tenant B kan ALDRI faa sovereign-authority for
+tenant A via `parameters.tenant_id`. **Full regresjon:** 93 testfiler, 1260/1260 grønne
+(1250→1260). **Status forblir HOST_VERIFY_FAILED/FIX_REQUIRED.**
+
+## UA-3 NATIVE SUPPORT CORE HOST FIX #3 (2026-08-18, samme branch) → D-69 "SYNTHETIC FIXTURE CLEANUP ONLY"
+
+**Ekte host-funn, run_id `1e821a86`, `hard_fail=true`.** ALLE 25 funksjonelle/sikkerhets-/
+Q-20-markører PASSET (D-66/D-67/D-68 sine fikser bekreftet på ekte host) - KUN
+`ua3_support_cleanup=FAIL`, blokkert av to leftover-rader for den syntetiske akseptanse-tenanten:
+`business_followups` (bevisst Q-20-fixture, aldri ryddet) og `erasure_requests` (den EKTE Q-20-
+revisjonsraden fra samme seksjons `ErasureService.executeErasure()`-kall). Ingen av dem var en
+produksjonsfeil - `jarvis_app` har bevisst INGEN DELETE-rettighet på verken tabell.
+
+**Fiks:** `cleanupTenant()` i `ua3-native-support-live.ts` utvidet med `DELETE FROM
+business_followups`/`erasure_fingerprints`/`erasure_requests` (riktig FK-rekkefølge) via
+`adminPool` - EKSAKT samme, allerede etablerte mønster som `q20-erasure-live.ts` sin egen
+`cleanupTenant()`. INGEN ny runtime-rettighet, produksjonens erasure-retensjon UENDRET.
+8 nye regresjonstester (`ua3-native-support-cleanup.test.ts`, EKTE embedded Postgres): fixture-
+scenarioet er reproduserbart; opprydding fjerner begge rader korrekt og tenanten kan deretter
+slettes; urelatert tenant upåvirket; `jarvis_app` kan FORTSATT ikke slette fra noen av tabellene
+direkte (Q-21 uendret); opprydding på en tenant som ikke finnes, og kjørt to ganger paa rad, begge
+trygt idempotente. **Full regresjon:** 94 testfiler, 1268/1268 grønne (1260→1268). **Status:
+funksjonelt host-bevist, MEN fortsatt IKKE VERIFIED/CLOSED** - venter på én ren host-kjøring til.
+
+## UA-3 NATIVE SUPPORT CORE — ENDELIG LUKKING (2026-08-18, samme branch) → D-70
+
+**Fjerde, REN host-kjøring: run_id `da7e0c1b`, `hard_fail=false`, ALLE 26 markører PASS.** Ingen
+nye funn. **D-66/D-67/D-68/D-69 markeres alle VERIFIED/CLOSED/COMPLETE.**
+
+**Repo-sannhet verifisert FØR lukking (ikke antatt):** lokal og `origin/claude/ua3-native-support-
+core` HEAD identisk (`2e90d5f`), arbeidstreet rent, INGEN kjørbar kode endret etter den host-
+testede SHA-en - host-beviset er derfor fortsatt gyldig for nøyaktig denne koden. Migrasjon
+`024_support.sql`/`025_business_open_loops_ticket_grant.sql`, `ToolInvocationContext`-
+autoritetspropagering (D-68) og `cleanupTenant()`-opprydding (D-69) alle bekreftet til stede.
+
+**Alle 26 markører PASS:** `q21_runtime_role_safe`, `ua3_support_runtime_role`,
+`ua3_support_no_zendesk_dependency`, `ua3_support_create_ticket`, `ua3_support_thread_idempotency`,
+`ua3_support_message_idempotency`, `ua3_support_contact_match`, `ua3_support_unmatched`,
+`ua3_support_ambiguous`, `ua3_support_company_link`, `ua3_support_timeline`,
+`ua3_support_source_pointer`, `ua3_support_no_body_copied`, `ua3_support_state_machine`,
+`ua3_support_priority`, `ua3_support_assignment`, `ua3_support_internal_note`,
+`ua3_support_reply_path`, `ua3_support_open_loop_created`, `ua3_support_open_loop_resolved`,
+`ua3_support_tenant_isolation`, `ua3_support_space_isolation`, `ua3_support_toolgateway`,
+`ua3_support_audit_safe`, `ua3_support_q20`, `ua3_support_cleanup`. Runtime bekreftet uendret:
+`jarvis_runtime`, `superuser=false`, `bypassrls=false` - Q-21 IKKE svekket gjennom noen av de fire
+rundene.
+
+**Q-20 (host-bevist denne runden):** `ErasureService` fullførte reelt - ticket fjernet, events
+fjernet, den support-linkede open-loopen fjernet, en URELATERT open-loop forble upåvirket, ingen
+resurrection ved re-ingest. Produksjonens erasure-retensjonssemantikk UENDRET.
+
+**Q-27:** Native Support gjenbruker DEN SAMME `listBusinessTenantIds()`-katalogmekanismen der
+scheduler-fan-out trengs - INGEN duplisert tenant-enumereringsmekanisme. Q-27 forblir
+VERIFIED/CLOSED (D-65), uendret.
+
+**Zendesk:** `ua3_support_no_zendesk_dependency=PASS` bekrefter ZERO kjøretids-avhengighet av
+`JARVIS_ZENDESK_*`. PR #13 (Zendesk-connectoren) forblir SUPERSEDED/UNMERGED, branch/historikk
+bevart, foreslås formelt lukket (ikke merget) med et avsluttende notat.
+
+**K1 ("Hva skjer med kunde X?"):** Support/tickets-delkriteriet er NÅ VERIFIED/COMPLETE - men K1
+SOM HELHET forblir EKSPLISITT PARTIAL, siden Contracts/e-sign (Q-28) FORTSATT ikke er bygget og
+fortsatt krever en eksplisitt Tobias-leverandørbeslutning FØR noe kan kodes (D-64-splitten CONTRACT
+CORE vs. SIGNATURE EXECUTION PROVIDER uendret, INGEN leverandør valgt her). Q-26 (Knowledge
+Verification/Truth Promotion) forblir sporet/ubygget - support-innhold forblir KILDEDATA, blir IKKE
+automatisk "VERIFISERT KUNNSKAP" av denne lukkingen.
+
+**HELE UA-3 forblir IKKE komplett** (kriterium 2 fortsatt PARTIAL, avhenger av UA-4/UA-5/UA-6 - ingen
+startet). **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.**
+
+**Full regresjon på lukkingstidspunktet:** 94 testfiler, 1268/1268 grønne, `pnpm -w lint` rent,
+`pnpm -w typecheck` 15/15 rent, GitHub CI (`gitleaks`+`build-test`) grønn på `2e90d5f`.
+
+**PR #17 status: klar for review** (alle påkrevde CI-sjekker grønne, full lokal regresjon grønn,
+ekte host-bevis foreligger) - `MERGE_READY=true`, men **MERGES IKKE uten Tobias sin eksplisitte
+godkjenning** (CLAUDE.md-regel, uendret). **STOP etter denne lukkingen. Ingen merge utført. Ingen
+Contracts. Ingen signaturleverandør. Ingen UA-4.**
 
 Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, connector-audit-gapene

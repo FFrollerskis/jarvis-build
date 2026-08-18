@@ -186,7 +186,7 @@ lav-konsekvens bruken - Appendiks D-gaten er dermed oppfylt både i bokstav (kon
 basert scoring-forbedring; finere per-tenant/policy-nivå av/på-bryter utover deployment-wiring;
 kontrakt-/faktura-verdi-baserte faktorer.
 
-## Native Jarvis Support Core (NY, UA-3 D-66, FIXED_SUITE / IKKE VERIFIED)
+## Native Jarvis Support Core (UA-3 D-66/D-67/D-68/D-69, VERIFIED/COMPLETE - host-bevist run_id `da7e0c1b`, `hard_fail=false`)
 
 **Formål:** gi Jarvis et eget, kanonisk (`JARVIS_CANONICAL`, D-64) support/ticket-domene - løser
 "Hva skjer med kunde X?"-akseptansekriterium 1 sitt Support/tickets-gap UTEN å gjøre en ekstern

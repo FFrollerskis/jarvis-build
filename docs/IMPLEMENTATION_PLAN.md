@@ -842,16 +842,14 @@ likevel til stede og host-bevist. Se D-63 for full evidens og oppdatert firekrit
 
 ---
 
-### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = HOST_VERIFY_FAILED / FIX_REQUIRED (2026-08-18) → D-66/D-67
+### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = VERIFIED/COMPLETE (2026-08-18) → D-66/D-67/D-68/D-69/D-70
 
-**Status: HOST_VERIFY_FAILED / FIX_REQUIRED → D-67 (HOST FIX #1), IKKE VERIFIED.** Opprinnelig bygget
-FIXED_SUITE under D-66 (se resten av denne seksjonen for full byggedetalj). Tobias sin FØRSTE
-host-kjøring (run_id `60f0d682`/`5457c59a`, `hard_fail=true`) fant to rotårsaker (akseptanse-
-scriptets secret-provider + en Q-20 FK-brudd i erasure-ordering) pluss en tredje, tidligere maskert
-rotårsak (en `person_id: "system"`-identitet som aldri fikk sovereign klasse-D-authority for det
-nøstede `email.send`-kallet i `support.reply`) - alle tre fikset, se egen "HOST FIX #1"-underseksjon
-nederst. 10 nye regresjonstester (1240→1250). Draft-PR #17 oppdatert. **INGEN NY Tobias-host-kjøring
-utført ennå etter fiksene.**
+**Status: VERIFIED/COMPLETE → D-70 (endelig lukking), host-bevist run_id `da7e0c1b`,
+`hard_fail=false`, ALLE 26 markører PASS.** Opprinnelig bygget FIXED_SUITE under D-66 (se resten av
+denne seksjonen for full byggedetalj), deretter tre host-funn-drevne fiks-runder (D-67 HOST FIX #1,
+D-68 SECURITY FIX #2, D-69 HOST FIX #3 - se egne underseksjoner nederst) FØR den fjerde, rene
+kjøringen som ga `hard_fail=false`. 98 nye tester totalt over hele slicen (1176→1268). Draft-PR #17
+klar for review - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
 Implementerer D-64 sitt permanente Core Ownership-vedtak: Support/tickets-domenet skal være
 `JARVIS_CANONICAL` (Jarvis eier selv ticket-lifecycle/domenemodellen), IKKE en ekstern SaaS-leverandør
 (Zendesk/Intercom/Freshdesk) - den tidligere, ALDRI merget Zendesk-connectoren (draft-PR #13) forblir
@@ -905,9 +903,9 @@ support-vs-ikke-support-klassifisering (routing er BEVISST deterministisk); fler
 (portal/chat/SMS - domenemodellen støtter det, men ingen ekstra kanal koblet inn nå).
 
 **Akseptansekriterium 1-re-evaluering:** forblir EKSPLISITT PARTIAL - kjernemekanismen (CRM/Sales +
-Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ HOST_VERIFY_FAILED/
-FIX_REQUIRED (ikke host-verifisert - se HOST FIX #1 under), Contracts/e-sign FORTSATT ikke bygget.
-**HELE UA-3/masterplan v4.0 forblir IKKE komplett.**
+Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ OGSÅ VERIFIED/COMPLETE
+(D-70, host-bevist), MEN Contracts/e-sign FORTSATT ikke bygget - kriterium 1 SOM HELHET derfor
+FORTSATT PARTIAL. **HELE UA-3/masterplan v4.0 forblir IKKE komplett.**
 
 #### HOST FIX #1 (2026-08-18, samme branch) → D-67
 
@@ -923,9 +921,38 @@ disse to ble en TREDJE, tidligere maskert rotårsak funnet: `SupportTransport` s
 konfigurert sovereign eier, saa `support.reply` ville ha FEILET med `class_d_missing_approval`
 uansett credential-status - fikset ved å gjenbruke `JARVIS_OWNER_PERSON_ID`-konvensjonen fra
 `main.ts`/`worker-main.ts`. 10 nye regresjonstester mot EKTE `ToolGateway`/`PolicyGateway`/
-`ErasureService`/embedded Postgres (1240→1250, full suite grønn), typecheck/lint rene. **Status
-forblir HOST_VERIFY_FAILED/FIX_REQUIRED - IKKE VERIFIED** inntil Tobias utfører en NY host-kjøring.
-Se D-67.
+`ErasureService`/embedded Postgres (1240→1250, full suite grønn), typecheck/lint rene. Se D-67.
+Fiksen for rotårsak 3 (`JARVIS_OWNER_PERSON_ID`-gjenbruk) viste seg selv å ha et sikkerhetsproblem -
+se D-68 under.
+
+#### SECURITY FIX #2 (2026-08-18, samme branch) → D-68
+
+Ekstern sikkerhetsaudit av D-67 sin rotårsak-3-fiks fant en REELL rettighetseskalering:
+`ToolTransport.invoke()` fikk aldri den opprinnelige kalleren sin `IdentityContext`, saa ENHVER
+kaller autorisert til `support.reply` (eier ELLER en mandat-delegat) fikk sitt nøstede
+`email.send` (klasse D) utført med UBETINGET eier-authority. Fikset ved å legge
+`ToolInvocationContext` (`{identity, approval}`) til som 4. parameter på `ToolTransport.invoke()` -
+`SupportTransport` videreformidler nå den EKTE kallerens identitet/godkjenning UENDRET, ingen
+fabrikkert identitet noe sted. Invariant bevist: `effective_authority(nested) <=
+effective_authority(caller)`, ALDRI eskalert - 10 nye tester (EKTE `ToolGateway`/`PolicyGateway`/
+Ed25519-signerte godkjenninger). 1250→1260 tester. Se D-68.
+
+#### HOST FIX #3 (2026-08-18, samme branch) → D-69 "SYNTHETIC FIXTURE CLEANUP ONLY"
+
+Ekte host-funn, run_id `1e821a86`, `hard_fail=true` - ALLE 25 funksjonelle/sikkerhets-/
+Q-20-markører PASSET, KUN `ua3_support_cleanup=FAIL` (to leftover-rader for den syntetiske
+akseptanse-tenanten: en bevisst Q-20-fixture i `business_followups`, og den EKTE Q-20-
+revisjonsraden i `erasure_requests`). Ingen produksjonsfeil - `cleanupTenant()` utvidet med begge
+tabellene via `adminPool` (samme mønster som `q20-erasure-live.ts`), INGEN ny runtime-rettighet,
+produksjonens erasure-retensjon UENDRET. 8 nye tester. 1260→1268 tester. Se D-69.
+
+#### ENDELIG LUKKING (2026-08-18, samme branch) → D-70
+
+Fjerde, REN host-kjøring: run_id `da7e0c1b`, `hard_fail=false`, ALLE 26 markører PASS. Repo-sannhet
+verifisert FØR lukking (HEAD `2e90d5f`, arbeidstre rent, ingen kjørbar kode endret siden host-
+testet SHA). D-66/D-67/D-68/D-69 markeres alle VERIFIED/CLOSED/COMPLETE. Full regresjon: 94
+testfiler, 1268/1268 grønne, lint/typecheck rene, GitHub CI grønn. PR #17 klar for review -
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning.** Se D-70.
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 punkt 8 (oppdatert), Q-28 (Contracts,
 uendret).
