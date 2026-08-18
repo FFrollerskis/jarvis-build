@@ -775,10 +775,11 @@ D-klasse/hard-delete; UI/dashboard.
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3,
 inkl. det som fortsatt gjenstår etter denne sliceen).
 
-### UA-3 — Profiling/Scoring (akseptansekriterium 4) = FIXED_SUITE / READY_FOR_HOST_VERIFY (2026-08-17) → D-61
+### UA-3 — Profiling/Scoring (akseptansekriterium 4) = VERIFIED/COMPLETE (2026-08-17) → D-61/D-62/D-63
 
-**Status: FIXED_SUITE / READY_FOR_HOST_VERIFY → D-61 - IKKE VERIFIED**, venter på Tobias sin FØRSTE
-host-kjøring. Bygget PÅ det VERIFIED/COMPLETE Business-Event-Linkage-fundamentet (D-60). Canonical-audit
+**Status: VERIFIED/COMPLETE → D-63**, host-bevist av Tobias på ekte Windows/Docker-host (run_id
+`61b5cf63`, `hard_fail=false`). Bygget PÅ det VERIFIED/COMPLETE Business-Event-Linkage-fundamentet
+(D-60). Canonical-audit
 (§1 i byggeordren) bekreftet at akseptansekriterium 4 ("Profiling/scoring used with documented legal/
 human controls where required", linje 472) var det eneste av UA-3 sine fire kriterier som IKKE krever en
 uavklart leverandørbeslutning - Support/tickets og Contracts/e-sign forblir eksplisitt IKKE bygget denne
@@ -819,6 +820,23 @@ AI Mesh-basert semantisk scoring (v1 er 100% deterministisk); finere per-tenant/
 utover konstruktør-wiring; event-drevet (ikke periodisk) rekalkulering; kontrakt-/faktura-verdi-baserte
 faktorer (unngår arbitrære terskler); Support/tickets- og Contracts/e-sign-connectorer (krever fortsatt
 en Tobias-provider-beslutning).
+
+**HOST FIX #1 (samme dag, D-62):** Tobias sin FØRSTE host-kjøring (`run_id 22226237`) beviste ALLE
+funksjonelle scoring-kapabiliteter LIVE - KUN `ua3_scoring_idempotent=FAIL` blokkerte. Rotårsak: SAMME
+feilklasse som D-54/D-59 - IDEMPOTENS-spørringen brukte `withTenantTransaction()` (kun
+`jarvis.tenant_id`) mot `business_scores`, som - i motsetning til `audit_events` - har en EKSTRA
+RESTRICTIVE memory-space-policy. Fikset til `withMemoryTransaction()`, ren akseptanse-harness-fiks,
+ingen produksjonskode rørt. Se D-62 for full detalj.
+
+**HOST VERIFICATION (samme dag, D-63):** Tobias sin ANDRE host-kjøring (`run_id 61b5cf63`,
+`hard_fail=false`) kom HELE VEIEN gjennom - alle 17 markører PASS inkl. `ua3_scoring_idempotent=PASS`
+(`score_rows_for_same_identity=1`), ingen nye funn. Slice-status oppgradert til VERIFIED/COMPLETE.
+**Akseptansekriterium 4 re-evaluert til COMPLETE/VERIFIED** - rettslig grunnlag (GDPR art. 6(1)(f))
+lagt til `UA3_BUSINESS_DPIA.md`, GDPR art. 22 (automatiserte enkeltavgjørelser) eksplisitt vurdert og
+funnet ikke relevant (en score verken produserer rettslige effekter eller tilsvarende betydelig
+påvirker en person), menneskelig/juridisk kontroll (manuell overstyring + audit + full forklarbarhet)
+likevel til stede og host-bevist. Se D-63 for full evidens og oppdatert firekriterie-akseptansematrise
+(kriterium 3 og 4 nå COMPLETE/VERIFIED, kriterium 1 og 2 fortsatt PARTIAL). PR #12 merget til `main`.
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 (oppdatert deferred-liste for HELE UA-3).
 

@@ -166,6 +166,22 @@ tenanten (ingen separat retensjonsgrense denne runden), og en Q-20-sletting av e
 (f.eks. en aktivitet) etterlater KUN en løs, ikke-oppløsbar `evidence`-referanse - aldri en cascade-feil
 eller en vei til å "gjenopplive" slettet innhold (bevist i test V i `scoring-service.test.ts`).
 
+**Rettslig grunnlag (legal basis, Appendiks D-gate "Legal basis/processing inventory; human/legal
+control where automated decisions have regulated effect"):** behandlingsgrunnlaget for
+`business_scores` er berettiget interesse (GDPR art. 6(1)(f)) - intern forretningsprioritering av
+allerede lovlig innsamlet CRM-/aktivitetsdata, ingen ny persondata-kategori innhentet for scoring-
+formålet. **GDPR art. 22 (automatiserte enkeltavgjørelser) er IKKE relevant for denne sliceen** - en
+score verken "produces legal effects" eller "similarly significantly affects" en person: den avviser
+aldri en person, nekter aldri en tjeneste, og avgjør aldri kreditt/ansettelse/forsikring (§10 over) -
+den er UTELUKKENDE et internt prioriterings-/rangeringssignal for Tobias/teamet, alltid med eier-
+tilgjengelig manuell overstyring og full forklarbarhet selv om art. 22 sitt strengere krav ikke
+utløses. Databehandleravtaler/tredjelandsoverføring er IKKE relevant - `business_scores` beregnes og
+lagres utelukkende i egen Postgres, ingen ekstern prosessor mottar scoringsdata denne runden.
+**Menneskelig/juridisk kontroll er derfor dokumentert TILSTEDE (manuell overstyring + audit + full
+forklarbarhet) SELV OM den strengt tatt ikke var juridisk påkrevd** for denne uregulerte,
+lav-konsekvens bruken - Appendiks D-gaten er dermed oppfylt både i bokstav (kontroll finnes) og ånd
+(ingen regulert-effekt-beslutning å kontrollere for).
+
 **Ikke i scope denne runden (se Q-25):** kontakt-/person-nivå-scoring (arkitektonisk umulig); AI Mesh-
 basert scoring-forbedring; finere per-tenant/policy-nivå av/på-bryter utover deployment-wiring;
 kontrakt-/faktura-verdi-baserte faktorer.
