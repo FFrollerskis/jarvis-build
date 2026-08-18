@@ -1,29 +1,53 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-17 (**UA-3 — Profiling/Scoring VERIFIED/COMPLETE → D-63**, se egen
-"UA-3 FINAL CLOSURE"-seksjon under. Tobias sin ANDRE host-kjøring (`run_id 61b5cf63`, `hard_fail=false`)
-kom HELE VEIEN gjennom UTEN nye funn - alle 17 markører PASS inkl. `ua3_scoring_idempotent=PASS`
-(`score_rows_for_same_identity=1`), etter HOST FIX #1 (D-62, RLS-blind idempotens-spørring). Transparent,
-100% deterministisk BUSINESS-OPERASJONELL prioritering (`lead_priority_v1`)/risiko-scoring
-(`opportunity_risk_v1`) - ALDRI generalisert personprofilering (entitetsscope strukturelt begrenset til
-lead/opportunity). **Akseptansekriterium 4 ("Profiling/scoring used with documented legal/human controls
-where required") er re-evaluert til COMPLETE/VERIFIED** - rettslig grunnlag (GDPR art. 6(1)(f)) lagt til
-`UA3_BUSINESS_DPIA.md`, GDPR art. 22 eksplisitt vurdert og funnet ikke relevant, menneskelig/juridisk
-kontroll likevel til stede og host-bevist. **Fire-kriterie UA-3-matrise (D-63):** kriterium 1 PARTIAL
-(uendret fra D-60), kriterium 2 PARTIAL (uendret, kun sales), kriterium 3 COMPLETE/VERIFIED (uendret fra
-D-56), kriterium 4 NÅ COMPLETE/VERIFIED (D-63, ny). 1160/1160 tester. **UA-3 P0 + open-loop-sliceen +
-Business-Event-Linkage + denne sliceen er VERIFIED/COMPLETE - HELE UA-3 er FORTSATT IKKE komplett**
-(2 av 4 kriterier fortsatt PARTIAL, se Q-25), og masterplan v4.0 som helhet er IKKE komplett. Neste
-UA-3-steg krever `NEEDS_TOBIAS_DECISION` for Support/tickets+Contracts/e-sign; kriterium 2 sin
-gjenstående bredde avhenger av UA-4/UA-5/UA-6-fasene (ikke startet), IKKE et internt UA-3-gap. Ny Q-26
-logget: fremtidig Knowledge Verification/Truth Promotion-invariant, EKSPLISITT sporet som fremtidig
-egen slice - IKKE bygget her. **Branch:** `claude/ua3-profiling-scoring-controls` (fra `origin/main`
-`4a19396`) · UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring Closeout
-forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE
-(D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7) ·
-UA-2 masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9) · UA-3 Open-Loop
-Detection + Business Brief merget til `main` (PR #10) · UA-3 Business-Event-Linkage merget til `main`
-(PR #11) · UA-3 Profiling/Scoring merget til `main` (PR #12)
+**Oppdatert:** 2026-08-18 (**CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (D-64) - permanent
+styringsregel logget, ren transplantasjon fra `origin/main`**, se egen "CORE OWNERSHIP / ADAPTER
+BOUNDARY INVARIANT"-seksjon under. Ny ufravikelig regel 12 i CLAUDE.md + nytt §11 i ARCHITECTURE.md:
+et masterplan-kapabilitetsnavn antyder ALDRI automatisk en tredjeparts-leverandør - utløst av en
+tidligere, ALDRI merget utforskende Zendesk-connector (draft-PR #13) som ble bygget som om
+"Support/tickets" betydde "velg Zendesk og la den eie ticket-domenet". **Tobias har eksplisitt
+overstyrt den arkitekturen: Support/tickets skal være `JARVIS_CANONICAL` (Native Jarvis Support
+Core), Zendesk kan senere bli en valgfri utførelsesadapter - PR #13 er SUPERSEDED, merges IKKE.**
+Full masterplan-avhengighetsaudit utført PÅ CANONICAL `origin/main` (ARCHITECTURE.md §11.9) - de
+fleste eksisterende connectors (Gmail/Calendar/Drive/GitHub/Telegram/Vercel/HA/AI-modeller/
+observability/secrets) er allerede korrekt klassifisert, INGEN endring nødvendig der. Et ekte,
+uavhengig produksjonsfunn fra samme (forkastede) kildebranch RE-VERIFISERT direkte mot faktisk
+`origin/main`-kildekode (ikke tatt for gitt): tre eksisterende `DailyScheduler`-funksjoner
+(`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
+bruker en RLS-blind, uskopet tenants-katalog-spørring og har sannsynligvis ALDRI oppdaget en tenant i
+produksjon - registrert som ny Q-27, OPEN, IKKE fikset i denne runden. Contracts/e-sign forebyggende
+grenseanalyse (Contract Core vs. Signature Execution Provider) logget som Q-28, INGEN leverandør
+valgt. INGEN kode endret - kun CLAUDE.md/ARCHITECTURE.md/DECISIONS_AND_ASSUMPTIONS.md/
+OPEN_QUESTIONS.md. **VIKTIG NUMMERERINGS-KORREKSJON denne runden:** en tidligere versjon av dette
+arbeidet (nå SUPERSEDED, PR #14, closed) stablet seg feilaktig på den umergede Zendesk-branchen og
+lånte dens IKKE-canonical D-64/Q-27/Q-28/Q-29-numre. Denne runden er en REN transplantasjon fra
+faktisk `origin/main` (SHA `4bc33b8`) - korrekt neste canonical D-ID er D-64 (D-63 var siste på
+`main`), korrekte neste canonical Q-IDer er Q-27/Q-28 (Q-26 var siste på `main`). **Branch:**
+`claude/core-ownership-adapter-invariant-clean` (fra `origin/main` `4bc33b8` DIREKTE - INGEN Zendesk-
+kode/migrasjon/runtime i diffen, verifisert). UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
+uendret · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) ·
+UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget)
+· UA-2 P1B-A merget til `main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8) · UA-3 P0
+merget til `main` (PR #9) · UA-3 Open-Loop Detection + Business Brief merget til `main` (PR #10) ·
+UA-3 Business-Event-Linkage merget til `main` (PR #11) · UA-3 Profiling/Scoring merget til `main`
+(PR #12) · **UA-3 Support/Tickets (Zendesk, PR #13): SUPERSEDED BY NATIVE JARVIS SUPPORT CORE, IKKE
+merget, branch bevart for mulig fremtidig adapter-referanse** · **Governance-invariant, forrige
+stablede versjon (PR #14): SUPERSEDED, closed** · **Governance-invariant, denne rene versjonen
+(PR #15): draft, IKKE merget ennå**
+
+---
+
+**Tidligere oppdatering, 2026-08-17** (UA-3 — Profiling/Scoring VERIFIED/COMPLETE → D-63, uendret av
+denne governance-runden): Tobias sin ANDRE host-kjøring (`run_id 61b5cf63`, `hard_fail=false`) kom
+HELE VEIEN gjennom UTEN nye funn - alle 17 markører PASS inkl. `ua3_scoring_idempotent=PASS`
+(`score_rows_for_same_identity=1`), etter HOST FIX #1 (D-62, RLS-blind idempotens-spørring).
+Transparent, 100% deterministisk BUSINESS-OPERASJONELL prioritering (`lead_priority_v1`)/risiko-
+scoring (`opportunity_risk_v1`) - ALDRI generalisert personprofilering. **Akseptansekriterium 4 er
+re-evaluert til COMPLETE/VERIFIED** - rettslig grunnlag (GDPR art. 6(1)(f)) lagt til
+`UA3_BUSINESS_DPIA.md`, GDPR art. 22 eksplisitt vurdert og funnet ikke relevant. **Fire-kriterie
+UA-3-matrise (D-63):** kriterium 1 PARTIAL, kriterium 2 PARTIAL, kriterium 3 COMPLETE/VERIFIED,
+kriterium 4 COMPLETE/VERIFIED. 1160/1160 tester. **HELE UA-3 er FORTSATT IKKE komplett.** Branch
+`claude/ua3-profiling-scoring-controls` (fra `origin/main` `4a19396`) merget til `main` (PR #12).
 
 ## Aktiv fase
 Masterplan v4.0 «Sovereign Autonomy» — **UA-0 CORE RUNTIME = CLOSED** (formelt, BO-08).
@@ -1870,6 +1894,67 @@ denne sliceen er VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (kriterium 1/2
 oppdatert Q-25). **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.** PR #12 merget til
 `main` (normal merge-commit, samme konvensjon som PR #1-#11 - historikk bevart, ikke squashet).
 
+## CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (2026-08-18, branch `claude/core-ownership-adapter-invariant-clean`, REN transplantasjon fra `origin/main`) → D-64
+
+**Permanent styringsregel, IKKE en implementasjonsoppgave.** Tobias identifiserte et tilbakevendende
+feilmønster: et masterplan-kapabilitetsnavn ("Support/tickets") ble tolket som "velg en ekstern
+SaaS-leverandør og la den eie domenet" - konkret demonstrert av en tidligere, ALDRI merget
+utforskende Zendesk-connector (draft-PR #13). Denne runden gjør lærdommen permanent OG korrigerer en
+prosessfeil fra en tidligere versjon av dette arbeidet (se "Nummererings-korreksjon" under).
+
+**Bygget (dokumentasjon/styring, INGEN kode endret):**
+1. **CLAUDE.md regel 12** - CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT: et kapabilitetsnavn antyder
+   ALDRI automatisk en leverandør. Jarvis eier kanonisk domenemodell/tilstand for intrinsic
+   kapabiliteter (`JARVIS_CANONICAL`); eksterne tjenester er normalt kilder/sluk/transporter/
+   adaptere/utførelsesleverandører (`EXTERNAL_CANONICAL`). IKKE "bygg alt selv".
+2. **ARCHITECTURE.md §11** (ny seksjon, 11 underpunkter) - Core-vs-Adapter-beslutningsport (11
+   spørsmål A-K), `CORE_DEPENDENCY_DECISION_REQUIRED=true`-eskaleringsmekanisme, forhold til D-41
+   klargjort, system-of-record-klassifisering (`JARVIS_CANONICAL`/`EXTERNAL_CANONICAL`/
+   `HYBRID_WITH_CLEAR_AUTHORITY`), portabilitets-/utfalls-/dataeierskapstest, gjenbrukbar
+   leverandørbeslutningsmal, full masterplan-avhengighetsaudit (§11.9, PÅ CANONICAL `origin/main`),
+   Zendesk-historikk + RLS-produksjonsfunn (§11.10), Contracts/e-sign forebyggende grenseanalyse
+   (§11.11).
+3. **D-64** i DECISIONS_AND_ASSUMPTIONS.md - full beslutningstekst, inkl. Native Support Core-
+   beslutningen og nummererings-korreksjonen.
+4. **Q-27** - RLS-blind tenants-katalog-spørring i TRE eksisterende produksjonsfunksjoner
+   (`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
+   - RE-VERIFISERT direkte mot faktisk `origin/main`-kildekode i denne runden (ikke tatt for gitt fra
+   den forkastede branchen sin tekst). Status: OPEN, IKKE fikset (dokumentasjons-/re-verifiserings-
+   runde, ikke en kodefiks-runde).
+5. **Q-28** - Contracts/e-sign forebyggende grenseanalyse (Contract Core vs. Signature Execution
+   Provider), INGEN leverandør valgt, INGEN kode bygget.
+
+**Support/tickets-domenet er NÅ EKSPLISITT besluttet `JARVIS_CANONICAL`** (Native Jarvis Support
+Core - IKKE bygget i denne runden, egen fremtidig, eksplisitt godkjent slice). Den tidligere Zendesk-
+connectoren (draft-PR #13) er **SUPERSEDED / UNMERGED EXPERIMENTAL IMPLEMENTATION** - merges IKKE,
+branch/historikk bevares (ikke slettet) som mulig fremtidig adapter-referanse.
+
+**Nummererings-korreksjon (viktig prosessfunn denne runden):** en tidligere versjon av dette
+governance-arbeidet (PR #14, branch `claude/architecture-core-adapter-invariant`) ble feilaktig
+stablet PÅ den umergede Zendesk-branchen (`claude/ua3-zendesk-support-connector`, PR #13) og lånte
+dens IKKE-canonical `D-64`/`Q-27`/`Q-28`/`Q-29`-numre - numre som KUN eksisterte på en branch som
+aldri ble merget til `main`, og derfor ALDRI reserverte canonical IDer. Denne runden startet en HELT
+NY branch DIREKTE fra `origin/main` (SHA `4bc33b8`, bekreftet siste canonical D-ID = D-63, siste
+canonical Q-ID = Q-26), og bruker derfor korrekt D-64/Q-27/Q-28. PR #14 er markert SUPERSEDED og
+closed. **Lærdom lagt til selve D-64-teksten:** IDer fra en forkastet/umerget branch reserverer
+ALDRI canonical numre - neste ID skal ALLTID verifiseres mot faktisk `origin/main`.
+
+**Masterplan-avhengighetsaudit - hovedfunn (re-kjørt PÅ canonical `origin/main`):** de fleste
+eksisterende connectors (Gmail/Calendar/Drive/GitHub/Telegram/Vercel/Home Assistant/AI-modell-
+leverandører/observability/secret-håndtering/Business OS-CRM) er ALLEREDE korrekt klassifisert som
+adaptere bak eksisterende abstraksjoner - INGEN endring nødvendig. INGEN CRITICAL-grenser funnet.
+
+**Q-26 (Knowledge Verification/Truth Promotion) UENDRET og bevart** - denne runden overlapper eller
+fortrenger ikke den.
+
+**Kvalitetsgater:** kun dokumentasjonsendring (CLAUDE.md/ARCHITECTURE.md/
+DECISIONS_AND_ASSUMPTIONS.md/OPEN_QUESTIONS.md/PROJECT_STATUS.md) - ingen kode rørt. Rent-diff
+eksplisitt verifisert mot `origin/main`: KUN disse fem dokumentasjonsfilene endret, ZERO
+Zendesk-implementasjonsfiler (transport/migrasjon/ToolGateway-definisjoner/webhook/host-scripts) i
+diffen. `pnpm -w typecheck` 14/14 pakker fortsatt clean (uendret, ingen kode rørt).
+
+**HELE UA-3 forblir uendret av denne runden** - ingen fase-fullførelsesstatus endret.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
 UA-3 Business-Event-Linkage/UA-3 Profiling/Scoring har INGEN egne blokkeringer (alle
@@ -1878,30 +1963,52 @@ Manglende provider-nøkler er eneste gap for LIVE multi-provider-evidens (Gemini
 Ytelsesgjeld for voice-latens (Q-19) er åpen, ikke-blokkerende. Pieces har ingen kjent integrasjonsflate
 ennå (Q-22) - egen fremtidig underoppgave. Google Drive permission-mutasjon er IKKE live-host-bevist
 (Q-23) - smalt, ikke-blokkerende gjenværende verifikasjonspunkt. P1B-A sin worker-JOBB-live-kjøring er
-tilsvarende IKKE live-host-bevist (Q-24) - samme mønster, egen fremtidig test-runde. **Support/tickets-
-og Contracts/e-sign-connectorene forblir blokkert på en EKSPLISITT Tobias-provider-beslutning** - IKKE
-kodbare før den foreligger, se D-57/Q-25 item 8. **Kriterium 2 sin gjenstående bredde (product/finance/
-marketing/operations) er en FASE-AVHENGIGHET av UA-4/UA-5/UA-6, ikke et internt UA-3-kodbart gap** -
-disse fasene er selv IKKE startet. Connector-audit-gapene (GitHub/Calendar/Gmail/Telegram/Vercel/HA -
-se tabellen over) er dokumentert backlog, ikke blokkerende.
+tilsvarende IKKE live-host-bevist (Q-24) - samme mønster, egen fremtidig test-runde. **Support/tickets
+er NÅ EKSPLISITT `JARVIS_CANONICAL` (Native Support Core, D-64) - IKKE lenger blokkert på et
+leverandørvalg, MEN heller ikke startet ennå** - egen, fremtidig, eksplisitt godkjent slice.
+**Contracts/e-sign-connectoren forblir blokkert på en EKSPLISITT Tobias-provider-beslutning FOR
+SELVE SIGNATUR-UTFØRELSEN, NÅ OGSÅ på Core-vs-Adapter-porten i §11.2** (D-64/Q-28 legger til krav om
+at kontraktskjernen designes Jarvis-native FØR noen signaturleverandør velges) - IKKE kodbar før
+dette foreligger, se D-57/Q-25 item 8 + Q-28. **Q-27 (NY, OPEN): tre eksisterende
+produksjonsfunksjoner
+(`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
+bruker en RLS-blind tenants-katalog-spørring og har sannsynligvis ALDRI oppdaget en tenant i
+produksjon** - egen liten fremtidig BO, fiksmønsteret allerede kjent. **Kriterium 2 sin gjenstående
+bredde (product/finance/marketing/operations) er en FASE-AVHENGIGHET av UA-4/UA-5/UA-6, ikke et
+internt UA-3-kodbart gap** - disse fasene er selv IKKE startet. Connector-audit-gapene
+(GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
+blokkerende.
 
 ## Neste oppgave
-**UA-3 «Profiling/Scoring» er VERIFIED/COMPLETE → D-63.** PR #12 merget. **HELE UA-3 er FORTSATT IKKE
-komplett** - masterplanens fire akseptansekriterier: kriterium 3 COMPLETE/VERIFIED (uendret fra D-56);
-kriterium 4 NÅ COMPLETE/VERIFIED (D-63, ny); kriterium 1 PARTIAL (uendret fra D-60); kriterium 2
-PARTIAL (uendret, kun sales, avhenger av UA-4/UA-5/UA-6) (se oppdatert Q-25).
-**`NEEDS_TOBIAS_DECISION` for neste canonical UA-3-slice** - to gjenværende kandidater, BEGGE krever
-en uavklart Tobias-beslutning FØR de kan bygges:
-1. **Support/tickets-connector** (UA-3 P1, masterplan linje 1070) - krever leverandørvalg (f.eks.
-   Zendesk/Freshdesk/Intercom - kun eksempler, IKKE forhåndsvalgt).
-2. **Contracts/e-sign-connector** (UA-3 P1, masterplan linje 1071) - krever leverandørvalg (f.eks.
-   DocuSign/Dropbox Sign - kun eksempler, IKKE forhåndsvalgt).
+**Umiddelbar neste oppgave: review av den rene governance-PR-en** (branch
+`claude/core-ownership-adapter-invariant-clean`) - bekreft at diffen KUN inneholder
+dokumentasjon/styring (ZERO Zendesk-kode), deretter Tobias sin vurdering av om den skal merges.
+**UA-3 «Support/Tickets» sitt neste konkrete steg er nå: igangsette en Native Jarvis Support Core-
+slice** (ticket-entitet/livssyklus/motpart-kobling som `JARVIS_CANONICAL`, med rom for en fremtidig
+valgfri ekstern kanal-/utførelsesadapter) - EGEN, fremtidig, eksplisitt godkjent byggeordre, IKKE
+startet i denne runden. Den tidligere Zendesk-connector-koden (draft-PR #13, branch
+`claude/ua3-zendesk-support-connector`) forblir tilgjengelig som mulig fremtidig adapter-referanse
+DEN DAGEN en ekstern kanal faktisk kobles inn - branchen slettes IKKE, men merges IKKE.
+
+**HELE UA-3 er FORTSATT IKKE komplett** - masterplanens fire akseptansekriterier: kriterium 3
+COMPLETE/VERIFIED (uendret fra D-56); kriterium 4 COMPLETE/VERIFIED (uendret fra D-63); kriterium 1
+FORTSATT PARTIAL (Support/tickets nå klassifisert `JARVIS_CANONICAL` men Native Support Core IKKE
+bygget ennå; Contracts/e-sign fortsatt IKKE bygget); kriterium 2 PARTIAL (uendret, kun sales,
+avhenger av UA-4/UA-5/UA-6) (se oppdatert Q-25).
+
+**Gjenstående for kriterium 1:**
+1. **Native Jarvis Support Core** (UA-3 P1, masterplan linje 1070, NÅ `JARVIS_CANONICAL` per D-64) -
+   krever en egen, fremtidig, eksplisitt godkjent byggeordre. IKKE et leverandørvalg-spørsmål lenger.
+2. **Contracts/e-sign-connector** (UA-3 P1, masterplan linje 1071) - krever leverandørvalg for selve
+   signatur-utførelsen (f.eks. DocuSign/Dropbox Sign - kun eksempler, IKKE forhåndsvalgt), NÅ OGSÅ
+   krav om at kontraktskjernen designes `JARVIS_CANONICAL` FØRST (D-64/Q-28).
 **Kriterium 2 sin gjenstående bredde ligger UTENFOR "neste UA-3-slice"-scopet** inntil UA-4/UA-5/UA-6
 faktisk starter - ingen duplisert domenesystem skal bygges internt i UA-3 bare for å lukke kriterium 2
-tidlig. **IKKE valgt eller startet i denne runden.** Ny Q-26 logget (Knowledge Verification/Truth
-Promotion-invariant) - EKSPLISITT sporet som en fremtidig, egen slice for CLAUDE.md/kanonisk arkitektur,
-IKKE bygget/blandet inn her. **IKKE startet:** UA-3 P1/P2 utover de to kandidatene over, UA-4, noen
-annen UA-fase. Faseporten gjelder fortsatt strengt (CLAUDE.md-regel 10) - venter på en egen, eksplisitt
+tidlig. **IKKE valgt eller startet i denne runden.** Q-26 (Knowledge Verification/Truth
+Promotion-invariant, uendret fra D-63) forblir sporet som en fremtidig, egen slice for CLAUDE.md/
+kanonisk arkitektur, IKKE bygget/blandet inn her. **IKKE startet:** UA-3 P1/P2 utover de to
+kandidatene over, UA-4, noen annen UA-fase. Faseporten gjelder fortsatt strengt (CLAUDE.md-regel 10)
+- venter på en egen, eksplisitt
 byggeordre/-beslutning fra Tobias/arkitekten før noe av det ovennevnte begynner.
 **Eksplisitt IKKE bygget i denne sliceen:** kontakt-/person-nivå-scoring (arkitektonisk umulig);
 AI Mesh-basert scoring; finere per-tenant/policy-nivå av/på-bryter; event-drevet rekalkulering;
