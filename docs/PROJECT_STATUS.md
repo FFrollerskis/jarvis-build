@@ -1,18 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE CONTRACTS CORE HOST FIX #1 (D-72) — SYNTHETIC CLEANUP ONLY:
-FUNKSJONELT HOST-BEVIST, MEN IKKE VERIFIED/CLOSED**, se egen "UA-3 NATIVE CONTRACTS CORE HOST FIX
-#1"-seksjon nederst i dokumentet. To ekte Windows/Docker-host-kjøringer (run_id `1e9ae3a8`/
-`53d294b8`) ga BEGGE `hard_fail=true`, men ALLE 25 funksjonelle/sikkerhets-/Q-20-markører PASSET -
-KUN `ua3_contracts_cleanup=FAIL` (`business_followups`-fixture fra Q-20-seksjonen ikke ryddet av
-`cleanupTenant()` - EKSAKT samme feilklasse som Native Support Core sin egen D-69). Fikset ved å
-utvide `cleanupTenant()` i `ua3-native-contracts-live.ts` med `DELETE FROM business_followups`, 8
-nye regresjonstester. `pnpm -w typecheck` 16/16 rent, `pnpm -w lint` rent, full lokal suite
-1346/1346 grønn. **D-71 markeres IKKE komplett før én REN host-kjøring ender `hard_fail=false`.**
-**Branch:** `claude/ua3-native-contracts-core` (uendret). Draft-PR #18 oppdatert -  **MERGES IKKE
-uten Tobias sin eksplisitte godkjenning.** Contracts-delkriteriet av K1 forblir FIXED_SUITE; K1 SOM
-HELHET forblir PARTIAL (Q-28 SIGNATURE EXECUTION PROVIDER-halvparten fortsatt ikke besluttet/
-bygget).
+**Oppdatert:** 2026-08-18 (**UA-3 NATIVE CONTRACTS CORE — ENDELIG LUKKING: VERIFIED/COMPLETE**
+→ D-71/D-72/D-73. Tobias sin TREDJE, RENE host-kjøring (`ua3-native-contracts-host-run.ts`,
+run_id `5ca4765b`, `hard_fail=false`) ga ALLE 26 markører PASS, inkludert `ua3_contracts_cleanup`
+(FAIL i de to foregående rundene, D-72). Repo-sannhet bekreftet FØR lukking: lokal og
+`origin/claude/ua3-native-contracts-core` HEAD identisk (`8d530e6`), arbeidstreet rent, INGEN
+kjørbar kode endret etter den host-testede SHA-en. Migrasjon `026_contracts.sql`, pakke
+`@jarvis/agreements`, D-71-implementasjonen og D-72 sin `cleanupTenant()`-fiks alle bekreftet til
+stede i kildekoden. **D-71 markeres NÅ VERIFIED/COMPLETE.** Native Contracts Core er `JARVIS_CANONICAL`.
+**K1 ("Hva skjer med kunde X?"):** re-evaluert mot det ordrette masterplan-kriteriet (`docs/input/
+02_..._v4.0.md` linje 469: *"'Hva skjer med kunde X?' gir complete source-backed timeline"* - INGEN
+nevning av juridisk e-sign/signaturutførelse der) - CRM/Sales (P0), Support/tickets (D-70) OG NÅ
+Contracts Core (D-71/D-73) er ALLE host-verifisert og bidrar til Business OS-tidslinjen. **K1
+markeres derfor NÅ VERIFIED/COMPLETE** - Q-28 sin SIGNATURE EXECUTION PROVIDER-halvpart (juridisk
+bindende e-signaturutførelse) er et SEPARAT Integrasjonskatalog-kapabilitetspunkt, IKKE en del av
+det ordrette K1-akseptansekriteriet, og forblir egen, ÅPEN (Tobias-leverandørbeslutning kreves).
+**HELE UA-3 forblir IKKE komplett** (akseptansekriterium 2 - tverr-domene sales/product/finance/
+marketing/operations - fortsatt PARTIAL, avhenger av UA-4/UA-5/UA-6, ingen startet). **HELE
+Sovereign Autonomy-masterplanen forblir IKKE komplett.** Full lokal suite grønn, `pnpm -w lint`
+rent, `pnpm -w typecheck` rent, GitHub CI (`gitleaks`+`build-test`) grønn på `8d530e6`. **PR #18
+status: klar for review** (alle påkrevde CI-sjekker grønne, full lokal regresjon grønn, ekte
+host-bevis foreligger) - `MERGE_READY=true`, men **MERGES IKKE uten Tobias sin eksplisitte
+godkjenning** (CLAUDE.md-regel, uendret - dette er IKKE en godkjenning). **STOP etter denne
+lukkingen. Ingen merge utført. Ingen signaturleverandør. Ingen UA-4.**
+
+**Runden før det (samme dag, FUNKSJONELT HOST-BEVIST, IKKE VERIFIED/CLOSED):** UA-3 NATIVE CONTRACTS
+CORE HOST FIX #1 (D-72) - SYNTHETIC CLEANUP ONLY. To ekte Windows/Docker-host-kjøringer (run_id
+`1e9ae3a8`/`53d294b8`) ga BEGGE `hard_fail=true`, men ALLE 25 funksjonelle/sikkerhets-/Q-20-markører
+PASSET - KUN `ua3_contracts_cleanup=FAIL` (`business_followups`-fixture fra Q-20-seksjonen ikke
+ryddet av `cleanupTenant()` - EKSAKT samme feilklasse som Native Support Core sin egen D-69). Fikset
+ved å utvide `cleanupTenant()` i `ua3-native-contracts-live.ts` med `DELETE FROM
+business_followups`, 8 nye regresjonstester. Se egen seksjon lenger ned for full detalj.
 
 **Runden før det (samme dag, FIXED_SUITE FØR host-funnet over):** UA-3 NATIVE JARVIS CONTRACTS CORE
 (D-71) - ny pakke `@jarvis/agreements`, migrasjon `026_contracts.sql`, 96 nye tester. Se egen

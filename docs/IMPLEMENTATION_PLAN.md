@@ -959,14 +959,14 @@ uendret).
 
 ---
 
-### UA-3 — Native Jarvis Contracts Core (Contracts/e-sign, CONTRACT CORE-halvpart, K1) = FIXED_SUITE / IKKE HOST VERIFIED (2026-08-18) → D-71
+### UA-3 — Native Jarvis Contracts Core (Contracts/e-sign, CONTRACT CORE-halvpart, K1) = VERIFIED/COMPLETE (2026-08-18) → D-71/D-72/D-73
 
-**Status: FIXED_SUITE / IKKE HOST VERIFIED.** Kode + 96 nye tester ferdig og lokalt bevist (embedded
-Postgres, IKKE en ekte host-kjøring - dette miljøet har ikke Docker/Tobias sin Windows-host
-tilgjengelig). `ua3-native-contracts-host-run.ts` er skrevet og klar til å kjøres av Tobias, men
-status forblir ærlig FIXED_SUITE til den faktisk er kjørt - **ALDRI hevdet VERIFIED/COMPLETE uten det
-beviset** (samme disiplin som D-66 krevde før D-67-D-70). Draft-PR opprettes - **MERGES IKKE uten
-Tobias sin eksplisitte godkjenning.**
+**Status: VERIFIED/COMPLETE (2026-08-18, D-73).** Kode + 104 tester ferdig og lokalt bevist, OG NÅ
+ekte host-bevist på Tobias sin Windows/Docker-host: `ua3-native-contracts-host-run.ts`, run_id
+`5ca4765b`, `hard_fail=false`, ALLE 26 markører PASS. To tidligere host-runder (D-72, run_id
+`1e9ae3a8`/`53d294b8`) fant og fikset en synthetic-cleanup-gap FØR denne rene kjøringen - se
+HOST FIX #1-underseksjonen og D-73-avslutningsseksjonen nedenfor for full detalj. Draft-PR #18 er
+klar for review - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
 
 Implementerer D-64/Q-28 sitt Core-vs-Adapter-vedtak for kontraktdomenet: Contracts skal være
 `JARVIS_CANONICAL` (Jarvis eier selv kontrakt-lifecycle/domenemodellen), IKKE en ekstern
@@ -1047,6 +1047,31 @@ VERIFIED/CLOSED** til én ren host-kjøring ender `hard_fail=false`.
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-28 (SIGNATURE EXECUTION PROVIDER-halvpart,
 fortsatt ikke besluttet - denne raden lukkes IKKE av dette bygget alene); ekte host-verifisering
 (Tobias må kjøre `ua3-native-contracts-host-run.ts` før VERIFIED/COMPLETE kan hevdes).
+
+#### ENDELIG LUKKING (2026-08-18, samme branch) → D-73 "REN HOST-KJØRING"
+
+Tobias sin TREDJE host-kjøring (`ua3-native-contracts-host-run.ts`, run_id `5ca4765b`) ga
+`hard_fail=false`, ALLE 26 markører PASS, inkludert `ua3_contracts_cleanup` (FAIL i D-72 sine to
+runder). Repo-sannhet bekreftet FØR lukking: lokal og `origin/claude/ua3-native-contracts-core`
+HEAD identisk (`8d530e6`), arbeidstreet rent, INGEN kjørbar kode endret etter den host-testede
+SHA-en - D-72 sin `cleanupTenant()`-fiks er den eksakte koden som ble host-testet. **D-71/D-72
+markeres begge VERIFIED/COMPLETE.** Runtime bekreftet `jarvis_runtime`/`superuser=false`/
+`bypassrls=false` - Q-21 uendret. Q-27 gjenbruker `listBusinessTenantIds()` uendret. Q-20:
+`ErasureService` host-bevist reelt (kontrakt/versjoner/forpliktelser/events/kontrakt-linket
+open-loop fjernet, urelatert open-loop upåvirket, ingen resurrection). Q-26 uendret (kontrakter
+forblir kildedata). **Q-28 splittes formelt i to halvdeler:** CONTRACT CORE = VERIFIED/COMPLETE
+(denne raden, FERDIG); SIGNATURE EXECUTION ADAPTER = fortsatt ÅPEN/DECISION REQUIRED (ingen
+leverandør valgt, krever egen fremtidig D-64-port + eksplisitt Tobias-beslutning). **K1 ("Hva
+skjer med kunde X?") re-evaluert mot det ordrette masterplan-kriteriet** (kun "complete
+source-backed timeline", ingen nevning av juridisk e-signatur) - CRM/Sales, Support/tickets (D-70)
+og Contracts Core (D-73) er ALLE nå host-verifisert og bidrar til Business OS-tidslinjen. **K1
+markeres derfor NÅ VERIFIED/COMPLETE** (se D-73 i DECISIONS_AND_ASSUMPTIONS.md for full
+begrunnelse). **HELE UA-3 forblir IKKE komplett** (akseptansekriterium 2, tverr-domene
+sales/product/finance/marketing/operations, avhenger av UA-4/UA-5/UA-6 - ingen startet). **HELE
+Sovereign Autonomy-masterplanen forblir IKKE komplett.** Full lokal suite grønn, typecheck/lint
+rene, GitHub CI (`gitleaks`+`build-test`) grønn på `8d530e6`. PR #18 klar for review -
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning. STOP etter denne lukkingen. Ingen
+signaturleverandør. Ingen UA-4.**
 
 ---
 

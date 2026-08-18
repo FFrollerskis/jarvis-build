@@ -262,7 +262,7 @@ basert klassifisering av support-vs-ikke-support-e-post (routing er BEVISST dete
 innboks-adresse ELLER kjent tråd-id, § 7 i byggeordren); flerkanal utover e-post (portal/chat/SMS -
 domenemodellen er designet for det, men ingen ekstra kanal er koblet inn denne runden).
 
-## Native Jarvis Contracts Core (UA-3 D-71, FIXED_SUITE / IKKE HOST VERIFIED)
+## Native Jarvis Contracts Core (UA-3 D-71/D-72/D-73, VERIFIED/COMPLETE - host-bevist run_id `5ca4765b`, `hard_fail=false`)
 
 **Formål:** gi Jarvis et eget, kanonisk (`JARVIS_CANONICAL`, D-64/Q-28) kontraktdomene - CONTRACT
 CORE-halvparten av "Hva skjer med kunde X?"-akseptansekriterium 1 sitt Contracts/e-sign-gap, UTEN å
@@ -313,8 +313,9 @@ punkt 9), uendret av denne sliceen.
 KILDEDATA, IKKE automatisk "verifisert kunnskap" - ingen inferert kontraktsmening utover eksplisitt
 lagrede/utpekte data, ingen juridisk rådgivning gitt av systemet noe sted.
 
-**Ikke i scope denne sliceen:** signaturleverandøren selv (Q-28 SIGNATURE EXECUTION PROVIDER-
+**Ikke i scope denne sliceen:** signaturleverandøren selv (Q-28 SIGNATURE EXECUTION ADAPTER-
 halvparten - identitetsverifisering, juridisk-anerkjent signatur, signaturbevis, signaturlevering -
-krever en eksplisitt Tobias-leverandørbeslutning FØR noe kan bygges der); ekte host-verifisering
-(dette miljøet har ikke Docker/en ekte Tobias-host tilgjengelig - status forblir FIXED_SUITE til
-`ua3-native-contracts-host-run.ts` faktisk er kjørt); UA-4.
+krever en eksplisitt Tobias-leverandørbeslutning FØR noe kan bygges der, forblir ÅPEN); UA-4.
+**Ekte host-verifisering FULLFØRT (D-73, 2026-08-18):** Tobias sin tredje, rene host-kjøring
+(`ua3-native-contracts-host-run.ts`, run_id `5ca4765b`) ga `hard_fail=false`, ALLE 26 markører PASS
+- status er nå VERIFIED/COMPLETE, ikke lenger FIXED_SUITE.
