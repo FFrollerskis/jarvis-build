@@ -43,14 +43,22 @@ describe("B: feilisolasjon - én tenant sin sveip-feil velter ALDRI resten", () 
   });
 });
 
-describe("C: bounded - spoerringen etter tenants begrenses (LIMIT 200), ingen ubegrenset skann", () => {
-  it("SQL-spoerringen mot tenants inneholder en LIMIT-klausul", async () => {
+describe("C: bounded - kaller den kanoniske RLS-trygge katalogfunksjonen med en bounded limit (Q-27, D-65)", () => {
+  it("kaller jarvis_list_business_tenant_ids($1) med limit=200 - ALDRI en rå spoerring mot tenants", async () => {
     let capturedSql = "";
-    const pool = { query: async (sql: string) => { capturedSql = sql; return { rows: [] }; } } as unknown as pg.Pool;
+    let capturedParams: unknown[] = [];
+    const pool = {
+      query: async (sql: string, params: unknown[]) => {
+        capturedSql = sql;
+        capturedParams = params;
+        return { rows: [] };
+      }
+    } as unknown as pg.Pool;
     const openLoops = { runSweep: async () => ({ detected: 0, updated: 0, auto_resolved: 0 }) } as unknown as OpenLoopService;
     await runOpenLoopSweepForAllTenants(pool, openLoops);
-    expect(capturedSql).toMatch(/LIMIT 200/i);
-    expect(capturedSql).toMatch(/kind = 'business'/);
+    expect(capturedSql).toMatch(/jarvis_list_business_tenant_ids/);
+    expect(capturedSql).not.toMatch(/FROM\s+tenants\b/i);
+    expect(capturedParams).toEqual([200]);
   });
 });
 

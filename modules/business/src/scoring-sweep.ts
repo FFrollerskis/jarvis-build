@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { listBusinessTenantIds } from "@jarvis/core";
 import type { ScoringService } from "./scoring-service.ts";
 
 /**
@@ -10,21 +11,23 @@ import type { ScoringService } from "./scoring-service.ts";
  * bedrifts-tenants og rekalkulerer for hver, bounded (LIMIT 200 tenants),
  * tenant-scoped, trygg aa kjoere flere ganger (rekalkulering er idempotent -
  * se ScoringService.recalculateTenant()).
+ *
+ * Q-27 (2026-08-18, D-65): tenant-katalogen leses via den DELTE, RLS-trygge
+ * `listBusinessTenantIds()` (@jarvis/core) - ALDRI en rå `pool.query`
+ * direkte mot `tenants` (som var strukturelt RLS-blind, se D-65).
  */
 export async function runScoringSweepForAllTenants(
   pool: pg.Pool,
   scoring: ScoringService
 ): Promise<Record<string, { leads: number; opportunities: number }>> {
-  const { rows } = await pool.query(
-    `SELECT tenant_id FROM tenants WHERE kind = 'business' ORDER BY tenant_id LIMIT 200`
-  );
+  const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, { leads: number; opportunities: number }> = {};
-  for (const row of rows as Array<{ tenant_id: string }>) {
+  for (const tenantId of tenantIds) {
     try {
-      results[row.tenant_id] = await scoring.recalculateTenant(row.tenant_id, "business");
+      results[tenantId] = await scoring.recalculateTenant(tenantId, "business");
     } catch {
       // Én tenant sin rekalkulering skal aldri velte hele sveipet for andre tenants.
-      results[row.tenant_id] = { leads: 0, opportunities: 0 };
+      results[tenantId] = { leads: 0, opportunities: 0 };
     }
   }
   return results;
