@@ -1,4 +1,4 @@
-# UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection + Business-Event-Linkage)
+# UA-3 — DPIA / data-governance-notat (Business Domain Foundation + Open-Loop Detection + Business-Event-Linkage + Profiling/Scoring)
 
 **Status:** UA-3 P0 «Business Domain Foundation» = VERIFIED/COMPLETE (D-52, host-bevist run_id
 `ca2d9248`). UA-3 «Open-Loop Detection + Daily/Weekly Business Brief» = VERIFIED/COMPLETE (2026-08-17,
@@ -7,7 +7,8 @@ host-bevist run_id `de01ca07`, se D-53/D-54/D-55/D-56 i DECISIONS_AND_ASSUMPTION
 run_id `6c6a4948`, `hard_fail=false`, se D-57/D-58/D-59/D-60). Personvernsgarantiene under (ingen
 Gmail-body/emne/deltakerinnhold i `business_activities`, kun kilde-peker) er nå bekreftet LIVE via
 `ua3_events_no_body_content_stored=PASS` og `ua3_events_audit_safe=PASS` på ekte host, ikke kun
-suite-bevist.
+suite-bevist. UA-3 «Profiling/Scoring» (akseptansekriterium 4) = FIXED_SUITE / READY_FOR_HOST_VERIFY
+(2026-08-17, IKKE host-verifisert ennå, se D-61).
 Dette notatet dekker den strukturerte tredjeparts-persondata-kategorien UA-3 introduserer (kunde-/
 kontakt-/selskapsdata i `business_*`-tabellene, inkl. NÅ `business_open_loops`) - utfyller, erstatter
 ikke, `docs/security/DPIA_DRAFT.md` sin generelle "Bedriftsdata (kunder, e-post)"-rad.
@@ -62,6 +63,7 @@ FORCE RLS-mønster som alle andre business-tabeller (`020_business_open_loops.sq
 | `business_activities` | Aktivitetstype, KORT strukturert sammendrag, kilde-peker (`canonical_uri` - ALDRI kopi av fullt innhold) | "E-post mottatt", peker til Knowledge-dokument/ekstern kilde |
 | `business_followups` | Oppgave-tittel, frist, prioritet, status, eier, årsak, neste handling | "Send tilbud", forfallsdato, "open" |
 | `business_open_loops` (NY, D-53) | **AUTOMATISK DERIVERT** - deteksjonstype, kort systemgenerert begrunnelse (refererer eksisterende followup-/opportunity-tittel), deterministisk prioritet, status, eier | "overdue_followup", "Oppfoelging 'Send tilbud' er forfalt", "high", "open" |
+| `business_scores` (NY, D-61) | **AUTOMATISK DERIVERT** - score-type, tall (0-100), versjonert faktor-forklaring (kode+label+vekt), kilde-ID-referanser, valgfri eier-overstyring | "lead_priority", 45, `[{"code":"status_qualified","label":"Lead-status: qualified","weight":30,"contribution":30}]` |
 
 **Kritisk arkitekturprinsipp (§15 i byggeordren):** `business_activities.canonical_uri` er en LØS PEKER
 til Knowledge/eksterne kilder - UA-3 P0 kopierer ALDRI fulle e-post-kropper, dokumentinnhold eller
@@ -74,6 +76,7 @@ eksterne kilden; Business OS lagrer kun strukturert state + en peker.
 |---|---|---|
 | **CONTENT** (tredjeparts persondata Tobias/selskapet er behandlingsansvarlig for) | `business_contacts` (navn/e-post/telefon) | Slettes ved eksplisitt forespørsel (fremtidig D-klasse-operasjon, IKKE bygget i P0 - se Q-25). Ingen automatisk retensjonsgrense satt i P0 - operasjonell forretningsdata, ikke midlertidig cache |
 | **OPERATIONAL METADATA** (relasjonens tilstand, ikke selve kildeinnholdet) | `business_companies`/`business_leads`/`business_opportunities`/`business_activities`/`business_followups`/`business_open_loops` (NY, D-53 - automatisk derivert, ikke en ny inntaksvei) | Retained ved Q-20-sletting av et REFERERT Knowledge-dokument (ingen FK - se under). Slettes/anonymiseres KUN sammen med hele tenanten (samme mønster som øvrige tenant-scopede tabeller) |
+| **DERIVED / OPERATIONAL METADATA** (systemberegnet prioriteringsverdi, ikke en ny persondata-kilde) | `business_scores` (NY, D-61 - automatisk derivert fra EKSISTERENDE lead-/opportunity-/aktivitets-/oppfoelgings-/open-loop-data) | Samme retensjon som `business_open_loops`. `evidence`-feltet er en løs referanse (ingen FK) - overlever en referert kildes fjerning uten cascade-feil |
 | **AUDIT-EVENT** | `audit_events`-rader for `tool_id='business'` | Append-only (uendret fra eksisterende audit-arkitektur), inneholder ALDRI navn/e-post/telefon (kun `credential_ref`/`external_id`/`scopes`/`rollback` - verifisert i `business-transport-wiring.test.ts` §N) |
 
 ## Q-20-interaksjon (§26 i byggeordren)
@@ -106,12 +109,79 @@ prinsippet nå faktisk gjelder for. Databehandleravtaler/region-/retensjonsmatri
 tredjeparter (f.eks. et fremtidig CRM-eksport-mål) er IKKE vurdert i P0, siden ingen ekstern
 tredjepartsoverføring er bygget denne runden.
 
-## Ikke i scope for P0 eller NEXT SLICE (se Q-25 for full liste)
+## Profiling/Scoring (NY, UA-3 D-61) - akseptansekriterium 4
 
-Ingen AI Mesh-basert profiling/scoring er bygget i P0 ELLER i UA-3 NEXT SLICE (D-53) -
-masterplanens fjerde UA-3-akseptansekriterium ("Profiling/scoring used with documented legal/human
-controls where required") er derfor FORTSATT IKKE relevant for denne DPIA-en; D-53s `priority`-felt
-(low/normal/high på open loops) er en enkel, deterministisk, dokumentert regel basert på forfalt-/
-stagnert-varighet - IKKE kunde-/persontrekk-scoring, og utleder ALDRI sensitive kategorier
-(helse/etnisitet/religion/politikk osv.) om noen person. Når faktisk scoring bygges (fremtidig
-UA-3-slice) må denne seksjonen oppdateres med de juridiske/menneskelige kontrollene kriteriet krever.
+`business_scores` (`022_business_scoring.sql`) er en AUTOMATISK DERIVERT tabell - hver rad er et
+system-beregnet resultat av en deterministisk regel kjørt over EKSISTERENDE
+`business_leads`/`business_opportunities`/`business_activities`/`business_followups`/
+`business_open_loops`-data, ikke en ny persondata-INNTAKSVEI. Klassifisert som **DERIVED /
+OPERATIONAL METADATA** (samme kategori som `business_open_loops`) - se oppdatert tabell under.
+
+**Formålsbegrensning (purpose limitation):** scoren brukes UTELUKKENDE til intern forretnings-
+prioritering (hvilke leads/opportunities trenger oppmerksomhet først) - ALDRI til å avgjøre noe om en
+person (kreditt, ansettelse, forsikring eller lignende regulert automatisert beslutning). Se §10 under.
+
+**Tillatte faktorer (allowed factors):** KUN forretnings-tilstandssignaler fra data Business OS allerede
+eier - lead-status, opportunity-pipeline-stadium, aktivitets-nylighet, oppfoelgings-status (aapen/
+forfalt), EKSISTERENDE `OpenLoopService`-stagnert-flagg. Den fullstendige whitelisten er kodifisert
+(`ALLOWED_LEAD_FACTOR_CODES`/`ALLOWED_OPPORTUNITY_FACTOR_CODES` i `scoring-rules.ts`), ikke bare
+dokumentert i prosa.
+
+**Forbudte faktorer (prohibited factors):** rase/etnisitet, religion, politisk oppfatning, seksuell
+orientering, helsestatus, funksjonsnedsettelse, genetiske/biometriske trekk, fagforeningsmedlemskap,
+personlighet/psykologisk profil, formue/inntekt/sosioøkonomisk status, kjønn, sivilstatus - HÅNDHEVET
+strukturelt (`assertNoProhibitedFactorCodes()` kaster for enhver kode som matcher, kjørt ved modul-load
+OG på hver faktisk beregnet faktor-liste), ikke bare som en policy-tekst. Scoring-motoren leser ALDRI
+`business_contacts`/`people`-tabellene utover en eksisterende `owner_person_id`-identitetsreferanse -
+kontakt-/person-nivå-scoring er derfor arkitektonisk umulig, ikke bare en utsatt funksjon.
+
+**Kilde-proveniens (source provenance):** hver score har `evidence` (strukturerte `{type,id}`-
+referanser til aktivitet-/oppfoelgings-/open-loop-ID-er) - ALDRI kopiert kildeinnhold, samme
+løs-peker-prinsipp som `business_activities.canonical_uri`.
+
+**Forklarbarhet (explainability):** hver score returneres ALLTID sammen med `factor_summary` (kode +
+menneskelesbar label + vekt + bidrag per faktor) og `rule_version` - aldri et opakt tall alene. Jarvis
+kan alltid svare "hvorfor er denne leaden scoret X" med en deterministisk, kilde-forankret begrunnelse.
+
+**Menneskelig/juridisk kontroll:** `set_manual_override`/`clear_manual_override` gir eieren en
+eksplisitt, auditert mulighet til å overstyre en beregnet score (uten å forfalske selve de underliggende
+faktorene/kildedataene) - auditert via den EKSISTERENDE `ToolGateway`-audit-veien (`audit_events`,
+`tool_id='business'`, ALDRI overstyrings-begrunnelsen i klartekst utover det som allerede er tillatt i
+audit-payloaden).
+
+**AI-bruksgrenser:** v1 (`lead_priority_v1`/`opportunity_risk_v1`) er 100% deterministisk - INGEN
+AI Mesh-/ModelGateway-kall brukes til å beregne scoren (strukturelt bevist: `scoring-rules.ts` importerer
+aldri `@jarvis/model-gateway`). En fremtidig versjon som bruker AI Mesh til semantisk tolkning (der ekte
+tvetydighet krever det) MÅ fortsatt aldri utlede beskyttede trekk, og MÅ gå gjennom Model Gateway som
+resten av kjernen - ingen direkte provider-SDK-bruk.
+
+**Forbud mot autonom hoy-konsekvens-personbeslutning (§10):** en score kan ALDRI autonomt avvise en
+person, nekte en tjeneste, avslutte et forhold, eller avgjøre kreditt/ansettelse/forsikring - ingen
+slik kobling finnes strukturelt (`business_scores`-skjemaet har ingen slik kolonne, `ScoringService`
+kaller aldri en ekstern handling/ToolGateway-transport). Forretnings-PRIORITERING (rangering for
+intern oppmerksomhet) er eksplisitt tillatt og er alt denne sliceen gjør.
+
+**Retensjon:** samme mønster som `business_open_loops` - scoren slettes/anonymiseres sammen med hele
+tenanten (ingen separat retensjonsgrense denne runden), og en Q-20-sletting av en referert kilde
+(f.eks. en aktivitet) etterlater KUN en løs, ikke-oppløsbar `evidence`-referanse - aldri en cascade-feil
+eller en vei til å "gjenopplive" slettet innhold (bevist i test V i `scoring-service.test.ts`).
+
+**Rettslig grunnlag (legal basis, Appendiks D-gate "Legal basis/processing inventory; human/legal
+control where automated decisions have regulated effect"):** behandlingsgrunnlaget for
+`business_scores` er berettiget interesse (GDPR art. 6(1)(f)) - intern forretningsprioritering av
+allerede lovlig innsamlet CRM-/aktivitetsdata, ingen ny persondata-kategori innhentet for scoring-
+formålet. **GDPR art. 22 (automatiserte enkeltavgjørelser) er IKKE relevant for denne sliceen** - en
+score verken "produces legal effects" eller "similarly significantly affects" en person: den avviser
+aldri en person, nekter aldri en tjeneste, og avgjør aldri kreditt/ansettelse/forsikring (§10 over) -
+den er UTELUKKENDE et internt prioriterings-/rangeringssignal for Tobias/teamet, alltid med eier-
+tilgjengelig manuell overstyring og full forklarbarhet selv om art. 22 sitt strengere krav ikke
+utløses. Databehandleravtaler/tredjelandsoverføring er IKKE relevant - `business_scores` beregnes og
+lagres utelukkende i egen Postgres, ingen ekstern prosessor mottar scoringsdata denne runden.
+**Menneskelig/juridisk kontroll er derfor dokumentert TILSTEDE (manuell overstyring + audit + full
+forklarbarhet) SELV OM den strengt tatt ikke var juridisk påkrevd** for denne uregulerte,
+lav-konsekvens bruken - Appendiks D-gaten er dermed oppfylt både i bokstav (kontroll finnes) og ånd
+(ingen regulert-effekt-beslutning å kontrollere for).
+
+**Ikke i scope denne runden (se Q-25):** kontakt-/person-nivå-scoring (arkitektonisk umulig); AI Mesh-
+basert scoring-forbedring; finere per-tenant/policy-nivå av/på-bryter utover deployment-wiring;
+kontrakt-/faktura-verdi-baserte faktorer.

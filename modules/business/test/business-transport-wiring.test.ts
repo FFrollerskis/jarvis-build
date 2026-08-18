@@ -8,7 +8,7 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
-import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService } from "../src/index.ts";
+import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "../src/index.ts";
 
 /**
  * UA-3 P0: bevis at Business Graph-verktøyene er korrekt registrert og
@@ -75,10 +75,11 @@ beforeAll(async () => {
   );
   const service = new BusinessService(appPool);
   const openLoops = new OpenLoopService(appPool);
+  const scoring = new ScoringService(appPool);
   emailFake = new FakeTransport(() => ({ data: { messages: [] } }));
   calendarFake = new FakeTransport(() => ({ data: { events: [] } }));
   for (const tool of firstWaveTools({
-    business: new BusinessTransport(service, openLoops, appPool, toolGateway),
+    business: new BusinessTransport(service, openLoops, appPool, toolGateway, scoring),
     email: emailFake, calendar: calendarFake
   })) toolGateway.register(tool);
 }, 240_000);
@@ -89,11 +90,12 @@ afterAll(async () => {
   await epg?.stop();
 }, 120_000);
 
-describe("registrering: alle 21 business-handlinger er registrert med riktig risikoklasse", () => {
+describe("registrering: alle business-handlinger er registrert med riktig risikoklasse", () => {
   it("A-klasse for lesing, B for enkle reversible skrivinger, C for tilstandsoverganger - ingen D i dette sliceet", () => {
     const defs = firstWaveTools({});
     const business = new Map(defs.filter((d) => d.tool_id === "business").map((d) => [d.action, d.capability_class]));
-    expect(business.size).toBe(22);
+    // UA-3 profiling/scoring-slice (D-61): 8 nye score-handlinger lagt til på SLUTTEN (22 -> 30).
+    expect(business.size).toBe(30);
     expect(business.get("create_company")).toBe("B");
     expect(business.get("create_contact")).toBe("B");
     expect(business.get("create_lead")).toBe("B");
@@ -120,7 +122,122 @@ describe("registrering: alle 21 business-handlinger er registrert med riktig ris
     // UA-3 business-event-linkage (D-57): synk avledet fra allerede-autoriserte
     // lese-handlinger - samme klasse som record_activity selv.
     expect(business.get("sync_business_events")).toBe("B");
+    // UA-3 profiling/scoring-slice (D-61): A for lesing (inkl. rangering), B for
+    // rekalkulering/overstyring (enkle, reversible interne tilstandsskrivinger).
+    expect(business.get("get_lead_score")).toBe("A");
+    expect(business.get("get_opportunity_score")).toBe("A");
+    expect(business.get("explain_score")).toBe("A");
+    expect(business.get("rank_leads")).toBe("A");
+    expect(business.get("rank_opportunities")).toBe("A");
+    expect(business.get("recalculate_score")).toBe("B");
+    expect(business.get("set_manual_override")).toBe("B");
+    expect(business.get("clear_manual_override")).toBe("B");
     expect([...business.values()]).not.toContain("D");
+  });
+});
+
+describe("UA-3 profiling/scoring-slice (D-61): score-handlinger kjoerer gjennom SAMME ToolGateway/PolicyGateway-pipeline", () => {
+  it("Q: owner sin get_lead_score/rank_leads (klasse A-lesing) kjoerer og returnerer full faktor-forklaring", async () => {
+    const lead = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_lead",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Score-wiring-lead", status: "qualified" }
+    });
+    expect(lead.ok).toBe(true);
+    const leadId = lead.ok ? lead.external_id : undefined;
+    const recalc = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "recalculate_score",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "lead", entity_id: leadId as string }
+    });
+    expect(recalc.ok).toBe(true);
+    const scoreResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "get_lead_score",
+      parameters: { tenant_id: TENANT, memory_space: "business", lead_id: leadId as string }
+    });
+    expect(scoreResult.ok).toBe(true);
+    const data = scoreResult.ok ? (scoreResult.data as { factor_summary: unknown[]; rule_version: string }) : undefined;
+    expect(Array.isArray(data?.factor_summary)).toBe(true);
+    expect(data?.rule_version).toBe("lead_priority_v1");
+    const rankResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "rank_leads",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(rankResult.ok).toBe(true);
+    expect(Array.isArray(rankResult.ok ? rankResult.data : undefined)).toBe(true);
+  });
+
+  it("R: owner sin set_manual_override/clear_manual_override (klasse B) kjoerer uten approval under SOVEREIGN authority", async () => {
+    const opp = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_opportunity",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Override-wiring-opp", stage: "proposal" }
+    });
+    expect(opp.ok).toBe(true);
+    const oppId = opp.ok ? opp.external_id : undefined;
+    await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "recalculate_score",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "opportunity", entity_id: oppId as string }
+    });
+    const overrideResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "set_manual_override",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "opportunity", entity_id: oppId as string, override_score: 12, reason: "Kunde utsatt intern beslutning" }
+    });
+    expect(overrideResult.ok).toBe(true);
+    const clearResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "clear_manual_override",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "opportunity", entity_id: oppId as string }
+    });
+    expect(clearResult.ok).toBe(true);
+  });
+
+  it("en delegat MED aktiv auth faar klasse-B set_manual_override (samme EKSISTERENDE class_b_reversible_internal-regel som sync_business_events - IKKE mandatkrav, det gjelder kun klasse C)", async () => {
+    const opp = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_opportunity",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Delegat-override-opp", stage: "new" }
+    });
+    const oppId = opp.ok ? opp.external_id : undefined;
+    await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "recalculate_score",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "opportunity", entity_id: oppId as string }
+    });
+    const result = await toolGateway.execute({
+      identity: delegateIdentity, tool_id: "business", action: "set_manual_override",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "opportunity", entity_id: oppId as string, override_score: 1, reason: "delegat-forsoek" }
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("en delegat FAAR rank_opportunities (class A-lesing)", async () => {
+    const result = await toolGateway.execute({
+      identity: delegateIdentity, tool_id: "business", action: "rank_opportunities",
+      parameters: { tenant_id: TENANT, memory_space: "business" }
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("K/S/Z: audit-metadata for set_manual_override inneholder aldri overstyrings-begrunnelsen eller noe kreditt-/tokenverdi - kun credential_ref/external_id/scopes/rollback", async () => {
+    const lead = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "create_lead",
+      parameters: { tenant_id: TENANT, memory_space: "business", title: "Audit-override-lead", status: "contacted" }
+    });
+    const leadId = lead.ok ? lead.external_id : undefined;
+    await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "recalculate_score",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "lead", entity_id: leadId as string }
+    });
+    const sensitiveReason = "HEMMELIG-OVERSTYRINGS-BEGRUNNELSE-99";
+    const overrideResult = await toolGateway.execute({
+      identity: ownerIdentity, tool_id: "business", action: "set_manual_override",
+      parameters: { tenant_id: TENANT, memory_space: "business", entity_type: "lead", entity_id: leadId as string, override_score: 77, reason: sensitiveReason }
+    });
+    expect(overrideResult.ok).toBe(true);
+    const { rows } = await adminPool.query(
+      "SELECT payload FROM audit_events WHERE tenant_id = $1 AND tool_id = 'business' AND action = 'set_manual_override' ORDER BY at DESC LIMIT 1",
+      [TENANT]
+    );
+    expect(rows).toHaveLength(1);
+    const payload = JSON.stringify((rows[0] as { payload: unknown }).payload);
+    expect(payload).toContain("credential_ref");
+    expect(payload).not.toContain(sensitiveReason);
+    expect(payload).not.toMatch(/access_token|refresh_token|client_secret/i);
   });
 });
 
