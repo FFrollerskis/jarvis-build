@@ -29,6 +29,7 @@ import {
   ScoringService, runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
+import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -111,6 +112,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // runtime-pool, ingen ny motor - gjenbruker Business Graph (kontakt-/
   // selskap-kobling) og OpenLoopService (§17 i byggeordren) uendret.
   const supportService = new SupportService(pool);
+  // UA-3 Native Jarvis Contracts Core (D-71): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - motpart gjenbruker Business Graph
+  // (company_id/contact_id) og OpenLoopService (renewal/deadline/obligation/
+  // review-reglene) uendret. Ingen e-sign-avhengighet - `AgreementsTransport`
+  // trenger derfor IKKE `toolGateway`/`ToolInvocationContext`, i motsetning
+  // til `SupportTransport`.
+  const agreementsService = new AgreementsService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -120,6 +128,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // finnes allerede, selv om selve register()-loopen ikke er ferdig ennå) -
     // bygger `SupportEmailService` lat ved første `reply`/`ingest`-kall.
     support: new SupportTransport(supportService, businessService, toolGateway),
+    contract: new AgreementsTransport(agreementsService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede

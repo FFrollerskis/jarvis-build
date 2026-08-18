@@ -89,6 +89,22 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `support_ticket_events` FØR `support_tickets` (FK -> support_tickets).
   add(result, "support_ticket_events", await run(client, mode, "support_ticket_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "support_tickets", await run(client, mode, "support_tickets", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-3 Native Jarvis Contracts Core (D-71, 026_contracts.sql): registrer
+  // kontrakt-tabellene i erasure-planen (SAMME mønster/begrunnelse som
+  // support_* over - Q-28). En kontrakt-tilknyttet open-loop (samme
+  // FK-lærdom som HOST FIX #1/D-67 for `ticket_id`) slettes FØRST, SNEVERT
+  // avgrenset til `contract_id IS NOT NULL` (rører aldri andre loop_type-er).
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND contract_id IS NOT NULL", tv)
+  );
+  // `contract_events`/`contract_obligations`/`contract_versions` FØR
+  // `contracts` (alle tre har en direkte FK -> contracts, ingen FK seg imellom).
+  add(result, "contract_events", await run(client, mode, "contract_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "contract_obligations", await run(client, mode, "contract_obligations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "contract_versions", await run(client, mode, "contract_versions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "contracts", await run(client, mode, "contracts", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

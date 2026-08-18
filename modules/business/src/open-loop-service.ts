@@ -48,7 +48,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null, ticket_id: null,
+          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null, ticket_id: null, contract_id: null,
           loop_type: "overdue_followup", detection_key: detectionKey,
           reason: `Oppfoelging "${row.title}" er forfalt`, next_action: `Fullfoer eller avbryt oppfoelging ${row.followup_id}`,
           priority, owner_person_id: row.owner_person_id, due_at: row.due_at
@@ -88,7 +88,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: null, followup_id: null, activity_id: null, ticket_id: null,
+          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: null,
           loop_type: "stalled_opportunity", detection_key: detectionKey,
           reason: `Opportunity "${row.title}" har ingen aapen oppfoelging og ingen oppdatering siste ${staleDays} dager`,
           next_action: `Sett neste handling/oppfoelging for opportunity ${row.opportunity_id}`,
@@ -206,9 +206,128 @@ export class OpenLoopService {
       const result = await upsertOpenLoop(client, {
         open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
         company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
-        lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id, contract_id: null,
         loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
         priority: built.priority, owner_person_id: row.assignee_person_id, due_at: null
+      });
+      if (result === "inserted") detected++; else updated++;
+    }
+    const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+    return { detected, updated, auto_resolved: autoResolved };
+  }
+
+  /**
+   * UA-3 Native Jarvis Contracts Core (D-71): "Reuse OpenLoopService...
+   * No second task/reminder engine" - fornyelsesfrist innen 30 dager for
+   * kontrakter som fortsatt er i kraft (`active`/`expiring`). Ren
+   * deterministisk dato-sammenligning, INGEN AI-tolkning.
+   */
+  async detectContractRenewalsDue(tenantId: string, memorySpace: MemorySpace, withinDays = 30): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT contract_id, company_id, contact_id, title, owner_person_id, renewal_date
+         FROM contracts WHERE tenant_id = $1 AND status IN ('active','expiring')
+           AND renewal_date IS NOT NULL AND renewal_date < now() + ($2 || ' days')::interval`,
+        [tenantId, withinDays]
+      );
+      return this.upsertContractLoop(client, tenantId, memorySpace, rows.rows as ContractRow[], "contract_renewal_due", (row) => ({
+        reason: `Kontrakt "${row.title}" fornyes snart`, next_action: `Vurder fornyelse av kontrakt ${row.contract_id}`,
+        priority: "normal", due_at: row.renewal_date ?? row.termination_deadline ?? null
+      }));
+    });
+  }
+
+  /** §"termination/cancellation deadlines" i byggeordren: oppsigelsesfrist innen 30 dager, kontrakten fortsatt i kraft. */
+  async detectContractTerminationDeadlines(tenantId: string, memorySpace: MemorySpace, withinDays = 30): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT contract_id, company_id, contact_id, title, owner_person_id, termination_deadline
+         FROM contracts WHERE tenant_id = $1 AND status IN ('active','expiring')
+           AND termination_deadline IS NOT NULL AND termination_deadline < now() + ($2 || ' days')::interval`,
+        [tenantId, withinDays]
+      );
+      return this.upsertContractLoop(client, tenantId, memorySpace, rows.rows as ContractRow[], "contract_termination_deadline", (row) => ({
+        reason: `Oppsigelsesfrist for kontrakt "${row.title}" nærmer seg`, next_action: `Beslutt oppsigelse/fornyelse av kontrakt ${row.contract_id}`,
+        priority: "high", due_at: row.termination_deadline ?? row.renewal_date ?? null
+      }));
+    });
+  }
+
+  /** Åpen forpliktelse med frist innen 14 dager (eller allerede forfalt) - ett open loop per forpliktelse. */
+  async detectContractObligationsDue(tenantId: string, memorySpace: MemorySpace, withinDays = 14): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT o.obligation_id, o.contract_id, o.description, o.due_at, o.owner_person_id, c.company_id, c.contact_id, c.title
+         FROM contract_obligations o JOIN contracts c ON c.tenant_id = o.tenant_id AND c.contract_id = o.contract_id
+         WHERE o.tenant_id = $1 AND o.status = 'open'
+           AND o.due_at IS NOT NULL AND o.due_at < now() + ($2 || ' days')::interval`,
+        [tenantId, withinDays]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows.rows as ContractObligationRow[]) {
+        const detectionKey = `contract_obligation_due:${row.obligation_id}`;
+        currentKeys.push(detectionKey);
+        const overdue = row.due_at !== null && new Date(row.due_at).getTime() < Date.now();
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
+          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id,
+          loop_type: "contract_obligation_due", detection_key: detectionKey,
+          reason: `Forpliktelse "${row.description}" under kontrakt "${row.title}" ${overdue ? "er forfalt" : "forfaller snart"}`,
+          next_action: `Fullfør forpliktelse ${row.obligation_id}`, priority: overdue ? "high" : "normal",
+          owner_person_id: row.owner_person_id, due_at: row.due_at
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "contract_obligation_due", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  /**
+   * Periodisk gjennomgang: en `active`/`expiring`-kontrakt som ikke har
+   * blitt oppdatert (ny versjon/statusendring/frist-endring) på
+   * `staleDays` dager - deterministisk stagnasjons-heuristikk, SAMME
+   * prinsipp som `detectStalledOpportunities()`.
+   */
+  async detectContractsNeedingReview(tenantId: string, memorySpace: MemorySpace, staleDays = 180): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT contract_id, company_id, contact_id, title, owner_person_id, updated_at
+         FROM contracts WHERE tenant_id = $1 AND status IN ('active','expiring')
+           AND updated_at < now() - ($2 || ' days')::interval`,
+        [tenantId, staleDays]
+      );
+      return this.upsertContractLoop(
+        client, tenantId, memorySpace, rows.rows as ContractRow[], "contract_review_required",
+        (row) => ({ reason: `Kontrakt "${row.title}" har ikke blitt gjennomgått på ${staleDays} dager`, next_action: `Gjennomgå kontrakt ${row.contract_id}`, priority: "normal", due_at: null })
+      );
+    });
+  }
+
+  private async upsertContractLoop(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    rows: ContractRow[],
+    loopType: OpenLoopType,
+    build: (row: ContractRow) => { reason: string; next_action: string; priority: OpenLoopPriority; due_at: string | null }
+  ): Promise<SweepResult> {
+    let detected = 0;
+    let updated = 0;
+    const currentKeys: string[] = [];
+    for (const row of rows) {
+      const detectionKey = `${loopType}:${row.contract_id}`;
+      currentKeys.push(detectionKey);
+      const built = build(row);
+      const result = await upsertOpenLoop(client, {
+        open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+        company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id,
+        loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
+        priority: built.priority, owner_person_id: row.owner_person_id, due_at: built.due_at
       });
       if (result === "inserted") detected++; else updated++;
     }
@@ -229,7 +348,14 @@ export class OpenLoopService {
       await this.detectSupportTicketsNeedingReply(tenantId, memorySpace),
       await this.detectOverdueSupportTickets(tenantId, memorySpace),
       await this.detectUnassignedSupportTickets(tenantId, memorySpace),
-      await this.detectSupportTicketsWaitingInternal(tenantId, memorySpace)
+      await this.detectSupportTicketsWaitingInternal(tenantId, memorySpace),
+      // UA-3 Native Jarvis Contracts Core (D-71): samme prinsipp - reglene
+      // kjøres i DENNE sveipen, krever `contracts`/`contract_obligations`
+      // (026_contracts.sql).
+      await this.detectContractRenewalsDue(tenantId, memorySpace),
+      await this.detectContractTerminationDeadlines(tenantId, memorySpace),
+      await this.detectContractObligationsDue(tenantId, memorySpace),
+      await this.detectContractsNeedingReview(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
@@ -323,6 +449,28 @@ interface SupportTicketRow {
   assignee_person_id: string | null;
 }
 
+interface ContractRow {
+  contract_id: string;
+  company_id: string | null;
+  contact_id: string | null;
+  title: string;
+  owner_person_id: string | null;
+  renewal_date?: string | null;
+  termination_deadline?: string | null;
+  updated_at?: string;
+}
+
+interface ContractObligationRow {
+  obligation_id: string;
+  contract_id: string;
+  description: string;
+  due_at: string | null;
+  owner_person_id: string | null;
+  company_id: string | null;
+  contact_id: string | null;
+  title: string;
+}
+
 interface UpsertOpenLoopInput {
   open_loop_id: string;
   tenant_id: string;
@@ -334,6 +482,7 @@ interface UpsertOpenLoopInput {
   followup_id: string | null;
   activity_id: string | null;
   ticket_id: string | null;
+  contract_id: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -347,8 +496,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
   const { rows } = await client.query(
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
-        ticket_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        ticket_id, contract_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -360,8 +509,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
      RETURNING (xmax = 0) AS inserted`,
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
-      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.loop_type,
-      input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
+      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id,
+      input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );
   return (rows[0] as { inserted: boolean }).inserted ? "inserted" : "updated";

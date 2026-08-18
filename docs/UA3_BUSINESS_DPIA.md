@@ -261,3 +261,60 @@ avledning er bygget i denne sliceen (kun manuell setting).
 basert klassifisering av support-vs-ikke-support-e-post (routing er BEVISST deterministisk: konfigurert
 innboks-adresse ELLER kjent tråd-id, § 7 i byggeordren); flerkanal utover e-post (portal/chat/SMS -
 domenemodellen er designet for det, men ingen ekstra kanal er koblet inn denne runden).
+
+## Native Jarvis Contracts Core (UA-3 D-71, FIXED_SUITE / IKKE HOST VERIFIED)
+
+**Formål:** gi Jarvis et eget, kanonisk (`JARVIS_CANONICAL`, D-64/Q-28) kontraktdomene - CONTRACT
+CORE-halvparten av "Hva skjer med kunde X?"-akseptansekriterium 1 sitt Contracts/e-sign-gap, UTEN å
+gjøre en ekstern e-sign-leverandør (DocuSign/PandaDoc/Signicat/Adobe Sign) til domeneeier. ZERO
+ekstern e-sign-leverandør-avhengighet i denne sliceen (bevist mekanisk - ingen provider-credential-
+parameter finnes i `AgreementsService`/`AgreementsTransport`, ingen provider-env-variabel leses noe
+sted i `modules/agreements`).
+
+**Kontrakt-metadata som lagres (`contracts`):** kontraktnummer, tenant/memory-space, valgfri
+selskap-/kontaktkobling (FK til `business_companies`/`business_contacts` - samme motpart-entiteter
+som Support, ingen ny motpart-tabell), tittel, type (fritekst, ikke juridisk klassifisert), status
+(deterministisk lifecycle - se `state-machine.ts`), effektiv-/start-/sluttdato, oppsigelsesfrist,
+fornyelsesdato, auto-fornyelse-flagg, eier (`owner_person_id`, FK til `people`), generiske
+kilde-pekere (`source_type`/`source_instance_id`/`source_thread_id`/`source_message_id`/
+`canonical_uri`), tidsstempler.
+
+**Kontraktversjoner (`contract_versions`):** EKSPLISITTE og IMMUTABLE - hver versjon er en ny,
+append-only rad (aldri en `UPDATE` av en eksisterende versjon), med et kort strukturert
+`summary`-felt av HVA som endret seg + en `canonical_uri`-peker til det faktiske dokumentet (Drive/
+Gmail/annen kilde). ALDRI en kopi av selve dokumentinnholdet - strukturelt umulig å lagre feil, siden
+skjemaet ikke har noen `body`/`content`/`document_text`-kolonne i det hele tatt.
+
+**Forpliktelser (`contract_obligations`):** beskrivelse, eier, frist, status (`open`/`completed`/
+`waived`) - besvarer "hva må vi gjøre under denne kontrakten"/"hva forfaller neste" deterministisk,
+ingen AI-tolkning av forpliktelsesinnhold.
+
+**Kontrakt-tidslinje (`contract_events`):** FØRSTEKLASSES og SEPARAT fra `audit_events` (systemets
+egen operasjonelle revisjonslogg) - dette ER kontrakt-historikken (opprettelse/versjon lagt til/
+statusendring/forpliktelse lagt til-fullført-frafalt/fornyelses-/oppsigelsesfrist endret/motpart
+koblet/eier endret), ikke en duplisert audit-mekanisme. Samme prinsipp som
+`support_ticket_events`.
+
+**Retensjon/Q-20-erasure:** `contracts`/`contract_versions`/`contract_obligations`/`contract_events`
+er registrert i `modules/erasure/src/plan.ts` sin `planMemorySpaceInContext()` - KLASSIFISERT SOM
+KUNDEDATA (samme klasse som `support_tickets`/`memory_items`/`knowledge_documents`), IKKE append-only
+systemrevisjon som `audit_events` - `jarvis_app` har fått en eksplisitt, begrenset `GRANT DELETE` for
+alle fire tabeller (`026_contracts.sql`, samme presedens/begrunnelse som `024_support.sql`/
+`018_erasure.sql`). Kontrakt-tilknyttede `business_open_loops`-rader slettes FØRST (samme FK-lærdom
+som HOST FIX #1/D-67 for Support - denne gangen løst FØR noen host-runde, ikke reaktivt). Bevist
+mekanisk (unit-test, `modules/erasure/test/contracts-erasure.test.ts`): en slettet kontrakt kan
+ALDRI "gjenoppstå" - en ny kontrakt opprettet etter erasure får en HELT NY `contract_id`, aldri en
+gjenoppvekket kopi av den slettede raden. **Kjent, dokumentert begrensning (ikke stille utelatt):**
+samme pre-eksisterende `business_*`-tabell-gap som Support-seksjonen over (companies/contacts/leads/
+opportunities/activities/followups/open_loops fortsatt ikke registrert i erasure-planen - se Q-25
+punkt 9), uendret av denne sliceen.
+
+**Q-26-grense:** kontraktdokumenter (det peker-refererte innholdet bak `canonical_uri`) er
+KILDEDATA, IKKE automatisk "verifisert kunnskap" - ingen inferert kontraktsmening utover eksplisitt
+lagrede/utpekte data, ingen juridisk rådgivning gitt av systemet noe sted.
+
+**Ikke i scope denne sliceen:** signaturleverandøren selv (Q-28 SIGNATURE EXECUTION PROVIDER-
+halvparten - identitetsverifisering, juridisk-anerkjent signatur, signaturbevis, signaturlevering -
+krever en eksplisitt Tobias-leverandørbeslutning FØR noe kan bygges der); ekte host-verifisering
+(dette miljøet har ikke Docker/en ekte Tobias-host tilgjengelig - status forblir FIXED_SUITE til
+`ua3-native-contracts-host-run.ts` faktisk er kjørt); UA-4.

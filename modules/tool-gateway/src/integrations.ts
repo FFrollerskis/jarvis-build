@@ -654,6 +654,215 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "sett ticket-status til 'closed'", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "untrusted", transport: transport("support")
+    },
+    // UA-3 Native Jarvis Contracts Core (D-71): provider-nøytralt
+    // `contract.*`-namespace - JARVIS_CANONICAL, ZERO ekstern e-sign-
+    // leverandør-avhengighet (D-71/D-64). Lagt til på SLUTTEN av samme
+    // grunn som support.* over - eksisterende tester indekserer dette
+    // arrayet posisjonelt. Ingen handling her er klasse D (ingen nøstet
+    // e-sign-/utsendelseshandling i denne sliceen - juridisk
+    // signeringsutførelse er en FREMTIDIG, valgfri adapter).
+    {
+      tool_id: "contract", action: "create_contract", description: "Opprett en kontrakt (motpart via eksisterende Business OS company/contact)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), contract_type: z.string().optional(),
+        company_id: z.string().optional(), contact_id: z.string().optional(), effective_date: z.string().optional(),
+        start_date: z.string().optional(), end_date: z.string().optional(), termination_deadline: z.string().optional(),
+        renewal_date: z.string().optional(), auto_renew: z.boolean().optional(), owner_person_id: z.string().optional(),
+        canonical_uri: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "sett status til 'cancelled'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "get_contract", description: "Les én kontrakt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "list_contracts", description: "List kontrakter etter status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "search_contracts", description: "Deterministisk filter-/fritekstsøk i kontrakter (kontraktnummer/selskap/kontakt/status/eier/tittel)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional(),
+        company_id: z.string().optional(), contact_id: z.string().optional(), owner_person_id: z.string().optional(),
+        title_contains: z.string().optional(), contract_number: z.number().optional(), limit: z.number().optional()
+      }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "list_by_company", description: "Hva har selskap X aktivt med oss? - deterministisk motparts-oppslag",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "upcoming_renewals", description: "Hvilke kontrakter fornyes snart?",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), within_days: z.number().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "upcoming_termination_deadlines", description: "Hvilke avtaler utløper/har nærstående oppsigelsesfrist?",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), within_days: z.number().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "cancellable_now", description: "Hvilke kontrakter kan vi si opp nå? (fortsatt innenfor oppsigelsesvinduet)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "due_obligations", description: "Hva forfaller snart på tvers av kontrakter? (\"What is due next?\")",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), within_days: z.number().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "overdue_obligations", description: "Hvilke forpliktelser er forfalt?",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      // Deterministisk lifecycle-overgang (state-machine.ts) - klasse C: en
+      // kontrakts juridiske/forretningsmessige status har et reelt effekt-
+      // nivå utover en vanlig feltoppdatering (§"risk classes A-D based on
+      // effect" i byggeordren), selv uten noen nøstet ekstern handling.
+      tool_id: "contract", action: "set_status", description: "Deterministisk lifecycle-overgang (draft/review/approved/active/expiring/expired/terminated/cancelled)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt set_status-kall tilbake til forrige status (unntatt korreksjonsveien fra terminated/cancelled, som kun går til draft)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "set_owner", description: "Sett/fjern kontrakteier (gjenbruker eksisterende person-/identitetsarkitektur)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), owner_person_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "sett eier tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "link_counterparty", description: "Oppdater motpart (selskap/kontakt) - gjenbruker eksisterende Business OS-entiteter",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "sett motpart tilbake via nytt link_counterparty-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "set_renewal_date", description: "Sett/fjern fornyelsesdato",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), renewal_date: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "sett dato tilbake via nytt kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "set_termination_deadline", description: "Sett/fjern oppsigelses-/kanselleringsfrist",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), termination_deadline: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "sett frist tilbake via nytt kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      // Kontraktversjoner er EKSPLISITTE og IMMUTABLE (byggeordren) - kun
+      // append-only, aldri en oppdatering av en eksisterende versjon.
+      tool_id: "contract", action: "add_version", description: "Legg til en ny, immutable kontraktversjon (pointer-not-payload - peker til dokumentet, kopierer aldri innholdet)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), summary: z.string(),
+        source_type: z.string().optional(), source_instance_id: z.string().optional(), source_message_id: z.string().optional(),
+        canonical_uri: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["contract.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar - versjoner er append-only historikk", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "list_versions", description: "List alle versjoner av en kontrakt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "get_current_version", description: "Les gjeldende (nyeste) versjon av en kontrakt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "add_obligation", description: "Legg til en forpliktelse (\"What must we do under this contract?\")",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), description: z.string(),
+        owner_person_id: z.string().optional(), due_at: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "waive_obligation (marker som frafalt)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "list_obligations", description: "List forpliktelser for en kontrakt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "complete_obligation", description: "Marker en forpliktelse som fullført",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), obligation_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "reopen_obligation", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "waive_obligation", description: "Marker en forpliktelse som frafalt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), obligation_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "reopen_obligation", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "reopen_obligation", description: "Gjenåpne en fullført/frafalt forpliktelse (administrativ korreksjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), obligation_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["contract.write"], reversible: true,
+      rollback_procedure: "complete_obligation/waive_obligation", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
+    },
+    {
+      tool_id: "contract", action: "list_events", description: "List hele hendelseshistorikken for én kontrakt (kontrakt-tidslinje, ikke audit_events)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contract_id: z.string() }),
+      capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("contract")
     }
   ];
 }
