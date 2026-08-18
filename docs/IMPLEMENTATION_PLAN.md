@@ -842,9 +842,16 @@ likevel til stede og host-bevist. Se D-63 for full evidens og oppdatert firekrit
 
 ---
 
-### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = FIXED_SUITE / IKKE VERIFIED (2026-08-18) → D-66
+### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = HOST_VERIFY_FAILED / FIX_REQUIRED (2026-08-18) → D-66/D-67
 
-**Status: FIXED_SUITE / IKKE VERIFIED → D-66**, draft-PR, INGEN Tobias-host-kjøring utført ennå.
+**Status: HOST_VERIFY_FAILED / FIX_REQUIRED → D-67 (HOST FIX #1), IKKE VERIFIED.** Opprinnelig bygget
+FIXED_SUITE under D-66 (se resten av denne seksjonen for full byggedetalj). Tobias sin FØRSTE
+host-kjøring (run_id `60f0d682`/`5457c59a`, `hard_fail=true`) fant to rotårsaker (akseptanse-
+scriptets secret-provider + en Q-20 FK-brudd i erasure-ordering) pluss en tredje, tidligere maskert
+rotårsak (en `person_id: "system"`-identitet som aldri fikk sovereign klasse-D-authority for det
+nøstede `email.send`-kallet i `support.reply`) - alle tre fikset, se egen "HOST FIX #1"-underseksjon
+nederst. 10 nye regresjonstester (1240→1250). Draft-PR #17 oppdatert. **INGEN NY Tobias-host-kjøring
+utført ennå etter fiksene.**
 Implementerer D-64 sitt permanente Core Ownership-vedtak: Support/tickets-domenet skal være
 `JARVIS_CANONICAL` (Jarvis eier selv ticket-lifecycle/domenemodellen), IKKE en ekstern SaaS-leverandør
 (Zendesk/Intercom/Freshdesk) - den tidligere, ALDRI merget Zendesk-connectoren (draft-PR #13) forblir
@@ -898,9 +905,27 @@ support-vs-ikke-support-klassifisering (routing er BEVISST deterministisk); fler
 (portal/chat/SMS - domenemodellen støtter det, men ingen ekstra kanal koblet inn nå).
 
 **Akseptansekriterium 1-re-evaluering:** forblir EKSPLISITT PARTIAL - kjernemekanismen (CRM/Sales +
-Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ FIXED_SUITE (ikke host-
-verifisert), Contracts/e-sign FORTSATT ikke bygget. **HELE UA-3/masterplan v4.0 forblir IKKE
-komplett.**
+Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ HOST_VERIFY_FAILED/
+FIX_REQUIRED (ikke host-verifisert - se HOST FIX #1 under), Contracts/e-sign FORTSATT ikke bygget.
+**HELE UA-3/masterplan v4.0 forblir IKKE komplett.**
+
+#### HOST FIX #1 (2026-08-18, samme branch) → D-67
+
+Tobias sin FØRSTE host-kjøring (`ua3-native-support-host-run.ts`, run_id `60f0d682`/`5457c59a`,
+`hard_fail=true`, 18/26 markører PASS) fant to rotårsaker: (1) akseptanse-scriptets egen alltid-null
+secret-provider ga en `credential_unavailable`-kaskade (7 avledede FAIL) - fikset ved å gjenbruke
+D-57 sitt dummy-credential-mønster (`ua3-business-events-live.ts`); (2) Q-20-erasure av en
+support-ticket krasjet mot `business_open_loops_ticket_id_fkey` - fikset via ny migrasjon
+`025_business_open_loops_ticket_grant.sql` + en snever, ordnet sletting av support-linkede
+open-loops FØR ticketen i `modules/erasure/src/plan.ts`. Under skriving av regresjonstestene for
+disse to ble en TREDJE, tidligere maskert rotårsak funnet: `SupportTransport` sin interne
+`person_id: "system"`-identitet for det nøstede `email.send`-kallet (klasse D) matchet ALDRI en
+konfigurert sovereign eier, saa `support.reply` ville ha FEILET med `class_d_missing_approval`
+uansett credential-status - fikset ved å gjenbruke `JARVIS_OWNER_PERSON_ID`-konvensjonen fra
+`main.ts`/`worker-main.ts`. 10 nye regresjonstester mot EKTE `ToolGateway`/`PolicyGateway`/
+`ErasureService`/embedded Postgres (1240→1250, full suite grønn), typecheck/lint rene. **Status
+forblir HOST_VERIFY_FAILED/FIX_REQUIRED - IKKE VERIFIED** inntil Tobias utfører en NY host-kjøring.
+Se D-67.
 
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 punkt 8 (oppdatert), Q-28 (Contracts,
 uendret).

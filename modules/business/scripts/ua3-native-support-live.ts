@@ -23,10 +23,11 @@
 import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
-import { withMemoryTransaction } from "@jarvis/memory";
+import { LocalHashEmbedding } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, OpenLoopService } from "@jarvis/business";
+import { ErasureService } from "../../erasure/src/erasure-service.ts";
 import { SupportEmailService } from "../../support/src/email-ingress.ts";
 import { SupportService } from "../../support/src/service.ts";
 import { SupportTransport } from "../../support/src/transport.ts";
@@ -89,6 +90,17 @@ const TENANT_B = `tenant-ua3-sup-live-${runId}-b`; // tenant-isolasjon: annen te
 const OWNER_PERSON = `person-ua3-sup-live-${runId}`;
 const AGENT_PERSON = `person-ua3-sup-agent-${runId}`;
 const ACCOUNT_EMAIL = "post@tsworkflow.com";
+// HOST FIX #1 (D-67): `SupportTransport`.reply() bygger internt en SYSTEM-
+// identitet (`ToolTransport.invoke()` gir ikke tilgang til den opprinnelige
+// kalleren sin IdentityContext - se transport.ts) som person_id-matcher
+// `process.env.JARVIS_OWNER_PERSON_ID` (EKSAKT samme konvensjon som
+// apps/api/src/main.ts/worker-main.ts) for å oppnaa SOVEREIGN authority paa
+// det nøstede `email.send`-kallet (klasse D). Uten dette matcher IKKE denne
+// scriptets kjøre-unike `OWNER_PERSON` den interne identiteten, og
+// `email.send` ville feilet med "class_d_missing_approval" for HVER reply -
+// uavhengig av credential-fiksen under. Satt FØR noen ToolGateway/PolicyGateway
+// konstrueres i dette scriptet.
+process.env["JARVIS_OWNER_PERSON_ID"] = OWNER_PERSON;
 
 function ownerIdentityFor(tenantId: string): IdentityContext {
   return {
@@ -245,7 +257,19 @@ async function main(): Promise<void> {
       devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
       authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
     });
-    const secrets = new FallbackSecretProvider({ name: "env-empty", get: async () => null }, new BusinessInternalSecretProvider());
+    // HOST FIX #1 (D-67): `ToolGateway.execute()` (`gateway.ts` linje 188-190) resolver
+    // ALLTID `credential = await secrets.get(definition.credential_ref)` og avviser
+    // ubetinget med `credential_unavailable` FØR `transport.invoke()` i det hele tatt
+    // kalles - `FakeTransport` bruker aldri selve credential-verdien, men den nulle
+    // verdien fra en "alt-tomt"-provider stopper kallet allerede i selve gatewayen.
+    // EKSAKT samme provider-mønster som `ua3-business-events-live.ts` DEL 2 (D-57,
+    // "test-google-static") - en eksplisitt, IKKE-hemmelig dummy-verdi KUN for
+    // `JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN`, som ALDRI berører produksjonens egen
+    // `EnvSecretProvider()`-wiring i `main.ts`/`worker-main.ts`.
+    const secrets = new FallbackSecretProvider(
+      { name: "test-google-static", get: async (ref) => (ref === "JARVIS_EMAIL_TOKEN" || ref === "JARVIS_GOOGLE_TOKEN") ? "dummy-google-cred-native-support" : null },
+      new BusinessInternalSecretProvider()
+    );
     const toolGateway = new ToolGateway(pool, policy, secrets);
     const supportTransport = new SupportTransport(support, business, toolGateway);
     for (const tool of firstWaveTools({
@@ -308,13 +332,24 @@ async function main(): Promise<void> {
     log(`note_event_type=${note.event_type} -> ua3_support_internal_note: ${results.ua3_support_internal_note}`);
   });
 
-  let replyTicketId = "";
   await section("KUNDE-SVAR - RUTER GJENNOM email.send (FakeTransport, INGEN reell utsending)", async () => {
     const policy = new PolicyGateway({
       devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
       authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
     });
-    const secrets = new FallbackSecretProvider({ name: "env-empty", get: async () => null }, new BusinessInternalSecretProvider());
+    // HOST FIX #1 (D-67): `ToolGateway.execute()` (`gateway.ts` linje 188-190) resolver
+    // ALLTID `credential = await secrets.get(definition.credential_ref)` og avviser
+    // ubetinget med `credential_unavailable` FØR `transport.invoke()` i det hele tatt
+    // kalles - `FakeTransport` bruker aldri selve credential-verdien, men den nulle
+    // verdien fra en "alt-tomt"-provider stopper kallet allerede i selve gatewayen.
+    // EKSAKT samme provider-mønster som `ua3-business-events-live.ts` DEL 2 (D-57,
+    // "test-google-static") - en eksplisitt, IKKE-hemmelig dummy-verdi KUN for
+    // `JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN`, som ALDRI berører produksjonens egen
+    // `EnvSecretProvider()`-wiring i `main.ts`/`worker-main.ts`.
+    const secrets = new FallbackSecretProvider(
+      { name: "test-google-static", get: async (ref) => (ref === "JARVIS_EMAIL_TOKEN" || ref === "JARVIS_GOOGLE_TOKEN") ? "dummy-google-cred-native-support" : null },
+      new BusinessInternalSecretProvider()
+    );
     const toolGateway = new ToolGateway(pool, policy, secrets);
     let sendCalled = false;
     const emailFake = new FakeTransport((action, parameters) => {
@@ -326,7 +361,6 @@ async function main(): Promise<void> {
     for (const tool of firstWaveTools({ email: emailFake, support: supportTransport })) toolGateway.register(tool);
 
     const ticket = await support.createTicket(TENANT_A, "business", { subject: "Reply ticket", company_id: companyId, contact_id: matchedContactId });
-    replyTicketId = ticket.ticket_id;
     const identity = ownerIdentityFor(TENANT_A);
     const sensitiveBody = "UA3-SUP-LIVE-HEMMELIG-SVARTEKST";
     const replyResult = await toolGateway.execute({
@@ -397,23 +431,85 @@ async function main(): Promise<void> {
     log(`personal_space_cross_read_hits=${crossSpace.length} -> ua3_support_space_isolation: ${results.ua3_support_space_isolation}`);
   });
 
-  await section("Q-20 ERASURE-INTEGRASJON", async () => {
-    const { rows } = await adminPool.query(
+  await section("Q-20 ERASURE-INTEGRASJON (ekte ErasureService, memory_space-scope)", async () => {
+    // HOST FIX #1 (D-67, ekte host-funn run_id 60f0d682/5457c59a): den
+    // opprinnelige versjonen av denne seksjonen gjorde rå ad-hoc-DELETE-er
+    // direkte - IKKE den faktiske Q-20-produksjonsveien. Bruker nå den EKTE
+    // `ErasureService.executeErasure()` (samme klasse/API som
+    // `q20-erasure-live.ts`), som beviser BÅDE selve FK-ordenen (§8/§9 i
+    // byggeordren) OG den ekte klasse-D/policy-veien i én operasjon.
+    const grantRows = await adminPool.query(
       `SELECT table_name FROM information_schema.role_table_grants
-       WHERE grantee = 'jarvis_app' AND table_name IN ('support_tickets', 'support_ticket_events') AND privilege_type = 'DELETE'`
+       WHERE grantee = 'jarvis_app' AND table_name IN ('support_tickets', 'support_ticket_events', 'business_open_loops') AND privilege_type = 'DELETE'`
     );
-    const hasDeleteGrant = rows.length === 2;
-    if (replyTicketId) {
-      await withMemoryTransaction(pool, TENANT_A, ["business"], (client) =>
-        client.query("DELETE FROM support_ticket_events WHERE tenant_id = $1 AND ticket_id = $2", [TENANT_A, replyTicketId])
-      );
-      await withMemoryTransaction(pool, TENANT_A, ["business"], (client) =>
-        client.query("DELETE FROM support_tickets WHERE tenant_id = $1 AND ticket_id = $2", [TENANT_A, replyTicketId])
-      );
-    }
-    const erased = replyTicketId ? await support.getTicket(TENANT_A, "business", replyTicketId) : null;
-    results.ua3_support_q20 = hasDeleteGrant && erased === null ? "PASS" : "FAIL";
-    log(`jarvis_app_delete_grant=${hasDeleteGrant} erased_ticket_gone=${erased === null} -> ua3_support_q20: ${results.ua3_support_q20}`);
+    const hasDeleteGrant = grantRows.rows.length === 3;
+    log(`jarvis_app_delete_grants (support_tickets/support_ticket_events/business_open_loops)=${grantRows.rows.length}/3`);
+
+    // §9 FK-audit: bekreft at DETTE er den ENESTE kjente FK mot support_tickets
+    // fra en tabell utenfor support-domenet selv - en fremtidig ny FK mot
+    // support_tickets som IKKE er håndtert her skal fanges her, ikke i en ny
+    // host-runde.
+    const fkRows = await adminPool.query(`
+      SELECT tc.table_name, tc.constraint_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+      WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND ccu.table_name IN ('support_tickets', 'support_ticket_events')
+    `);
+    const externalFks = (fkRows.rows as Array<{ table_name: string; constraint_name: string }>).filter((r) => r.table_name !== "support_ticket_events");
+    log(`fk_audit_external_to_support_tickets=${JSON.stringify(externalFks)}`);
+    const fkAuditKnown = externalFks.length === 1 && externalFks[0]!.table_name === "business_open_loops";
+
+    // Dedikert Q-20-ticket + en support-tilknyttet open-loop (DELETE_FIRST,
+    // §9-klassifisering) - reproduserer EKSAKT host-funnet.
+    const erasureTicket = await support.createTicket(TENANT_A, "business", { subject: "Q20 erasure ticket", company_id: companyId });
+    await support.setNextResponseDue(TENANT_A, "business", erasureTicket.ticket_id, new Date(Date.now() - 3_600_000).toISOString());
+    await openLoops.runSweep(TENANT_A, "business");
+    const linkedLoopBefore = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).find(
+      (l) => l.ticket_id === erasureTicket.ticket_id && l.loop_type === "support_ticket_overdue"
+    );
+    log(`erasure_ticket_id=${erasureTicket.ticket_id} linked_open_loop_before=${linkedLoopBefore?.open_loop_id ?? "MANGLER"}`);
+
+    // Urelatert, IKKE-support-tilknyttet open-loop (RETAIN_SAFE_REFERENCE) -
+    // beviser at erasure-scopet KUN treffer support-tilknyttede rader
+    // (ticket_id IS NOT NULL), aldri en generell business_open_loops-tømming.
+    const unrelatedFollowup = await business.createFollowup(TENANT_A, "business", { title: "Q20 unrelated followup", due_at: "2020-01-01T00:00:00Z" });
+    await openLoops.detectOverdueFollowups(TENANT_A, "business");
+    const unrelatedLoopBefore = (await openLoops.listOpenLoops(TENANT_A, "business", "open")).find((l) => l.followup_id === unrelatedFollowup.followup_id);
+
+    const identity = ownerIdentityFor(TENANT_A);
+    const erasure = new ErasureService(pool, new PolicyGateway({
+      devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
+      authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
+    }), new LocalHashEmbedding());
+    const scope = { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" } as const;
+    const result = await erasure.executeErasure({ scope, requestId: `req-ua3-sup-live-${runId}`, identity });
+    log(`erasure_result=${JSON.stringify(result)}`);
+
+    const erasedTicket = await support.getTicket(TENANT_A, "business", erasureTicket.ticket_id);
+    const erasedEvents = await support.listEvents(TENANT_A, "business", erasureTicket.ticket_id).catch(() => []);
+    const loopsAfter = await openLoops.listOpenLoops(TENANT_A, "business", "all");
+    const linkedLoopGone = !loopsAfter.some((l) => l.ticket_id === erasureTicket.ticket_id);
+    const unrelatedLoopStillThere = loopsAfter.some((l) => l.open_loop_id === unrelatedLoopBefore?.open_loop_id);
+
+    // Ingen resurrection (§E i byggeordren): re-ingestion av en HELT NY tråd/
+    // melding etter erasure oppretter en NY ticket, aldri en "gjenoppstandelse".
+    const reingested = await support.ingestMessage(TENANT_A, "business", {
+      channel: "email", source_type: "gmail", source_instance_id: ACCOUNT_EMAIL, source_thread_id: `thread-q20-post-${runId}`,
+      source_message_id: `msg-q20-post-${runId}-1`, subject: "Q20 erasure ticket", summary: "Ny melding etter erasure",
+      is_from_customer: true, entity_resolution: "unmatched"
+    });
+    const noResurrection = reingested.ticket.ticket_id !== erasureTicket.ticket_id && reingested.ticket_created;
+
+    results.ua3_support_q20 =
+      hasDeleteGrant && fkAuditKnown && result.status === "completed" &&
+      erasedTicket === null && erasedEvents.length === 0 && linkedLoopGone && unrelatedLoopStillThere && noResurrection
+        ? "PASS" : "FAIL";
+    log(
+      `erasure_completed=${result.status === "completed"} ticket_gone=${erasedTicket === null} events_gone=${erasedEvents.length === 0} ` +
+        `linked_loop_gone=${linkedLoopGone} unrelated_loop_preserved=${unrelatedLoopStillThere} no_resurrection=${noResurrection} ` +
+        `-> ua3_support_q20: ${results.ua3_support_q20}`
+    );
   });
 
   await section("CLEANUP", async () => {

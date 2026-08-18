@@ -101,8 +101,22 @@ export class SupportTransport implements ToolTransport {
         return { data: rows as unknown as JsonValue };
       }
       case "reply": {
+        // HOST FIX #1 (D-67, ekte host-funn): `email.send` er klasse D (krever
+        // signert godkjenning MED MINDRE kalleren har SOVEREIGN authority -
+        // `resolveAuthorityMode()` i @jarvis/policy krever `identity.person_id
+        // === authority.owner_person_id`). En generisk `person_id: "system"`
+        // matcher ALDRI en konfigurert eier og ga derfor UBETINGET
+        // "class_d_missing_approval" for HVER reply, uansett credential-status
+        // - oppdaget under gjeninnføring av reply-kaskaden i denne runden.
+        // Gjenbruker EKSAKT samme konvensjon som `apps/api/src/main.ts`/
+        // `worker-main.ts` (JARVIS_OWNER_PERSON_ID, samme fallback
+        // "person-tobias") - ALDRI en ny autoritetsmodell. `ToolTransport.
+        // invoke()` gir fortsatt ikke den opprinnelige kalleren sin
+        // IdentityContext (se klassekommentaren over) - dette er identiteten
+        // som FAKTISK utfører selve e-post-utsendingen på vegne av eieren.
         const identity: IdentityContext = {
-          person_id: "system", tenant_id: tenantId, memory_space_id: memorySpace,
+          person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
+          tenant_id: tenantId, memory_space_id: memorySpace,
           session_id: `support-reply-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
         };
         const result = await this.requireEmailService().reply(tenantId, memorySpace, identity, requireString(parameters, "ticket_id"), {

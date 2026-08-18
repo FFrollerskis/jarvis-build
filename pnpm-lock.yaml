@@ -184,6 +184,9 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
       '@types/pg':
         specifier: ^8.15.6
         version: 8.21.0

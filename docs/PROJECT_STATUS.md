@@ -1,19 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE JARVIS SUPPORT CORE: FIXED_SUITE / IKKE VERIFIED → D-66**, se
-egen "UA-3 NATIVE JARVIS SUPPORT CORE"-seksjon under. Implementerer D-64 sitt `JARVIS_CANONICAL`-
-vedtak for Support/tickets: ny pakke `@jarvis/support`, migrasjon `024_support.sql`
-(`support_tickets`/`support_ticket_events`), deterministisk ticket-lifecycle, Gmail-ingress via
-EKSISTERENDE `GmailTransport`, entitetsresolusjon via `BusinessService.findContactsByEmail()`,
-kunde-svar GJENNOM eksisterende `email.send` (klasse D uendret), open-loop-integrasjon gjenbruker
-`OpenLoopService.runSweep()` UENDRET, tenant-katalog gjenbruker Q-27 sin `listBusinessTenantIds()`.
-ZERO Zendesk-avhengighet (bevist mekanisk). 62 nye tester (1176→1240, full suite grønn), typecheck/
-lint rene. Host-akseptanseskript `ua3-native-support-host-run.ts`/`-live.ts` klar (FakeTransport
-gjennom ekte ToolGateway - ALDRI reell e-postutsendelse). **INGEN Tobias-host-kjøring utført ennå** -
-draft-PR, K1 forblir EKSPLISITT PARTIAL. **Branch:** `claude/ua3-native-support-core` (fra
-`origin/main` `65cafc5` DIREKTE).
+**Oppdatert:** 2026-08-18 (**UA-3 NATIVE SUPPORT CORE HOST FIX #1: HOST_VERIFY_FAILED / FIX_REQUIRED
+→ D-67**, se egen "UA-3 NATIVE SUPPORT CORE HOST FIX #1"-seksjon nederst i dokumentet. Tobias sin
+FØRSTE host-kjøring (`ua3-native-support-host-run.ts`, to run_id-er `60f0d682`/`5457c59a`,
+`hard_fail=true`, 18/26 markører PASS) fant TO rapporterte rotårsaker (credential_unavailable-
+kaskade + Q-20 FK-brudd `business_open_loops_ticket_id_fkey`) - BEGGE fikset, PLUSS en TREDJE,
+tidligere maskert rotårsak (`class_d_missing_approval` paa det nøstede `email.send`-kallet i
+`support.reply`, funnet under skriving av regresjonstestene for de to første) - OGSÅ fikset. 10 nye
+regresjonstester (1240→1250, full suite grønn), typecheck/lint rene. **STATUS FORBLIR
+HOST_VERIFY_FAILED/FIX_REQUIRED, IKKE VERIFIED** - draft-PR #17 oppdatert, INGEN NY Tobias-host-
+kjøring utført ennå etter fiksene. K1 forblir EKSPLISITT PARTIAL. **Branch:**
+`claude/ua3-native-support-core` (uendret, fra `origin/main` `65cafc5`).
 
-**Forrige runde (samme dag, MERGET):** Q-27 - RLS-blind business-tenant-enumering: VERIFIED/CLOSED
+**Forrige runde (samme dag, FIXED_SUITE FØR host-funnet over):** UA-3 NATIVE JARVIS SUPPORT CORE
+(D-66) - ny pakke `@jarvis/support`, migrasjon `024_support.sql`, 62 nye tester (1176→1240). Se egen
+seksjon lenger ned for full byggedetalj.
+
+**Runden før det (samme dag, MERGET):** Q-27 - RLS-blind business-tenant-enumering: VERIFIED/CLOSED
 (D-65) - PR #16 merget til `main` (merge-commit `65cafc5`, host-bevist run_id `8549d23f`,
 `hard_fail=false`, alle 15 markører PASS).
 
@@ -2077,24 +2080,28 @@ UA-3-kodbart gap** - disse fasene er selv IKKE startet. Connector-audit-gapene
 blokkerende.
 
 ## Neste oppgave
-**Umiddelbar neste oppgave: Tobias kjører
+**Umiddelbar neste oppgave: Tobias kjører EN NY host-kjøring** (SAMME kommando som før,
 `node --env-file=.env --experimental-transform-types
-modules/business/scripts/ua3-native-support-host-run.ts`** på sin faktiske Windows/Docker-host for
-å host-verifisere Native Support Core (D-66, draft-PR, branch `claude/ua3-native-support-core`).
-Forventede markører: `q21_runtime_role_safe`, `ua3_support_runtime_role`,
-`ua3_support_no_zendesk_dependency`, `ua3_support_create_ticket`, `ua3_support_thread_idempotency`,
-`ua3_support_message_idempotency`, `ua3_support_contact_match`, `ua3_support_unmatched`,
-`ua3_support_ambiguous`, `ua3_support_company_link`, `ua3_support_timeline`,
-`ua3_support_source_pointer`, `ua3_support_no_body_copied`, `ua3_support_state_machine`,
-`ua3_support_priority`, `ua3_support_assignment`, `ua3_support_internal_note`,
-`ua3_support_reply_path`, `ua3_support_open_loop_created`, `ua3_support_open_loop_resolved`,
-`ua3_support_tenant_isolation`, `ua3_support_space_isolation`, `ua3_support_toolgateway`,
-`ua3_support_audit_safe`, `ua3_support_q20`, `ua3_support_cleanup`, alle PASS, `hard_fail=false`.
+modules/business/scripts/ua3-native-support-host-run.ts`, på sin faktiske Windows/Docker-host) for å
+verifisere at HOST FIX #1 (D-67) faktisk løser de to rapporterte run_id-ene sine funn (`60f0d682`/
+`5457c59a`) - DENNE runden er den ANDRE forsøket, IKKE første. Forventede markører (uendret liste fra
+D-66): `q21_runtime_role_safe`, `ua3_support_runtime_role`, `ua3_support_no_zendesk_dependency`,
+`ua3_support_create_ticket`, `ua3_support_thread_idempotency`, `ua3_support_message_idempotency`,
+`ua3_support_contact_match`, `ua3_support_unmatched`, `ua3_support_ambiguous`,
+`ua3_support_company_link`, `ua3_support_timeline`, `ua3_support_source_pointer`,
+`ua3_support_no_body_copied`, `ua3_support_state_machine`, `ua3_support_priority`,
+`ua3_support_assignment`, `ua3_support_internal_note`, `ua3_support_reply_path`,
+`ua3_support_open_loop_created`, `ua3_support_open_loop_resolved`, `ua3_support_tenant_isolation`,
+`ua3_support_space_isolation`, `ua3_support_toolgateway`, `ua3_support_audit_safe`,
+`ua3_support_q20`, `ua3_support_cleanup`, alle PASS, `hard_fail=false`. Se
+"UA-3 NATIVE SUPPORT CORE HOST FIX #1"-seksjonen nederst for de tre rotårsakene som ble fikset denne
+runden og hvorfor status FORTSATT er HOST_VERIFY_FAILED/FIX_REQUIRED, ikke VERIFIED.
 
 **HELE UA-3 er FORTSATT IKKE komplett** - masterplanens fire akseptansekriterier: kriterium 3
 COMPLETE/VERIFIED (uendret fra D-56); kriterium 4 COMPLETE/VERIFIED (uendret fra D-63); kriterium 1
-FORTSATT PARTIAL (Native Support Core NÅ FIXED_SUITE men ikke host-verifisert; Contracts/e-sign
-fortsatt IKKE bygget); kriterium 2 PARTIAL (uendret, kun sales, avhenger av UA-4/UA-5/UA-6).
+FORTSATT PARTIAL (Native Support Core NÅ HOST_VERIFY_FAILED/FIX_REQUIRED etter HOST FIX #1, IKKE
+host-verifisert; Contracts/e-sign fortsatt IKKE bygget); kriterium 2 PARTIAL (uendret, kun sales,
+avhenger av UA-4/UA-5/UA-6).
 
 **Gjenstående for kriterium 1:**
 1. **Native Jarvis Support Core host-verifikasjon** - Tobias sin host-kjøring, se over. Etter
@@ -2118,6 +2125,62 @@ ingen av dem er heller igangsatt uten egen godkjenning):
   finere per-vedlegg-checkpointing (D-43/Q-24) - ingen konkret behov identifisert.
 - Google Drive permission-live-verifikasjon (Q-23) og P1B-A worker-JOBB-live-verifikasjon (Q-24) -
   begge egne, smale, eksplisitt godkjente test-runder (ikke byggearbeid).
+
+## UA-3 NATIVE SUPPORT CORE HOST FIX #1 (2026-08-18, samme branch `claude/ua3-native-support-core`) → D-67
+
+**Ekte host-funn (Tobias, Windows/Docker), TO run_id-er:** `60f0d682` og `5457c59a`, begge
+`hard_fail=true`, 18 av 26 markører PASS. TO rapporterte rotårsaker + ÉN TREDJE, tidligere maskert
+rotårsak funnet under gjenoppbygging av regresjonstestene for de to første (ikke i selve
+host-funnet).
+
+**Rotårsak 1 - `credential_unavailable`-kaskade (7 avledede FAIL: create_ticket/thread_idempotency/
+message_idempotency/source_pointer/no_body_copied/reply_path/toolgateway):** akseptanse-scriptets
+egen `FallbackSecretProvider` returnerte ALLTID null for `JARVIS_EMAIL_TOKEN`/`JARVIS_GOOGLE_TOKEN` -
+`ToolGateway.execute()` avviser UBETINGET med `credential_unavailable` FØR `transport.invoke()` kalles
+(bekreftet mot `gateway.ts` linje 185-190), ogsaa for `FakeTransport`. SAMME klasse akseptanse-
+harness-bug som D-58. **Fiks:** gjenbrukte EKSAKT samme "test-google-static"-dummy-credential-mønster
+som `ua3-business-events-live.ts` (D-57) - rører ALDRI produksjonens `EnvSecretProvider()`-wiring.
+
+**Rotårsak 2 - Q-20 FK-brudd (`business_open_loops_ticket_id_fkey`):** en support-tilknyttet
+open-loop-rad blokkerte faktisk sletting av ticketen. To delårsaker: (a) erasure-PLANEN
+(`modules/erasure/src/plan.ts`) registrerte ALDRI `business_open_loops`; (b) `jarvis_app` hadde ALDRI
+`GRANT DELETE` på `business_open_loops` (kun SELECT/INSERT/UPDATE fra `020_business_open_loops.sql`).
+Schema-drevet FK-audit bekreftet `business_open_loops` er DET ENESTE eksterne avhengighetspunktet.
+**Fiks:** ny, EGEN migrasjon `025_business_open_loops_ticket_grant.sql` (IKKE en redigering av
+allerede kjørte 020/024 - migrasjons-immutabilitet) + ny, SNEVERT avgrenset (`ticket_id IS NOT NULL`)
+sletting av support-linkede open-loops FØR ticketen i `plan.ts` - ALDRI en generell
+`business_open_loops`-erasure-utvidelse (forblir samme pre-eksisterende gap, Q-25 punkt 9).
+
+**Rotårsak 3 - NY, funnet under skriving av §14-regresjonstestene (maskert av rotårsak 1 i det
+opprinnelige host-funnet):** `SupportTransport.invoke("reply", ...)` bygde internt en
+`person_id: "system"`-identitet for det nøstede `email.send`-kallet (klasse D).
+`resolveAuthorityMode()` krever `identity.person_id === authority.owner_person_id` for SOVEREIGN-
+authority - "system" matcher ALDRI en konfigurert eier, saa `email.send` fikk UBETINGET
+`class_d_missing_approval` for HVER reply, uavhengig av credential-status. Ville reprodusert
+reply_path-FAIL på NESTE host-kjøring selv med rotårsak 1 fikset. **Fiks:** gjenbrukte EKSAKT samme
+`JARVIS_OWNER_PERSON_ID`-konvensjon (fallback `"person-tobias"`) som `main.ts`/`worker-main.ts`
+allerede bruker for sine egne system-utførte klasse D-identiteter; akseptanse-scriptet selv oppdatert
+til å sette `process.env.JARVIS_OWNER_PERSON_ID = OWNER_PERSON` FØR noen ToolGateway/PolicyGateway
+konstrueres.
+
+**Ny regresjonsdekning (10 tester, 1240→1250):**
+- `modules/support/test/support-transport-credential-wiring.test.ts` (4 tester, EKTE
+  `ToolGateway`/`PolicyGateway`/embedded Postgres): konfigurert `EnvSecretProvider`-credential
+  lykkes gjennom `support.reply`; manglende credential gir FORTSATT `credential_unavailable`
+  (produksjonens håndhevelse UENDRET); credential-verdier lekker aldri; den eksakte
+  dummy-provider-konstruksjonen fungerer isolert fra `process.env`.
+- `modules/erasure/test/support-open-loop-erasure.test.ts` (6 tester, EKTE
+  `ErasureService.executeErasure()`, byggeordrens §11 A-I): linket-loop-erasure lykkes, loopen
+  slettes (ikke nulles/orphanes), events slettes, schema-drevet FK-audit bekrefter ingen andre
+  avhengige tabeller og ingen dinglende referanse gjenstår, ingen resurrection ved ny ingress,
+  urelaterte loops/business-data forblir uendret, idempotent replay uendret.
+
+**Full regresjon:** 92 testfiler, 1250/1250 grønne. Typecheck 15/15 pakker, lint rene.
+
+**Status: HOST_VERIFY_FAILED / FIX_REQUIRED - IKKE VERIFIED.** Draft-PR #17 oppdatert med begge
+run_id-ene, rotårsakene og fiksene, FORTSATT ikke merget. K1 forblir EKSPLISITT PARTIAL. Native
+Support Core markeres IKKE VERIFIED før Tobias utfører en NY, ekte host-kjøring som viser
+`hard_fail=false` og alle 26 markører PASS. **STOP. Ingen merge. Ingen Contracts. Ingen UA-4.**
 
 Øvrige kandidater uendret i bakgrunnen: D-30 ytelsesgjeld (Q-19), D-10 STT-benchmark (Q-03), D-36
 Apple, HA-RUNTIME, provider-nøkler for Gemini/Kimi/Ollama LIVE-benchmark, connector-audit-gapene
