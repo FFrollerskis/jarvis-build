@@ -140,6 +140,27 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM support_ticket_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM support_tickets WHERE tenant_id = $1", [tenantId]);
+  // HOST FIX #3 (D-69, ekte host-funn run_id 1e821a86): §Q-20-seksjonen under
+  // oppretter BEVISST en `business_followups`-rad (`unrelatedFollowup`) for å
+  // bevise at erasure-scopet KUN treffer support-tilknyttede open-loops - en
+  // AKSEPTANSE-FIXTURE, IKKE produksjonsdata som skal overleve testen.
+  // `jarvis_app` har (bevisst, uendret) INGEN DELETE-rettighet på
+  // `business_followups` (kun SELECT/INSERT/UPDATE, 019_business.sql) - dette
+  // er FORTSATT en pre-eksisterende, udokumentert-utvidet Q-20-produksjonsgap
+  // (Q-25 punkt 9), IKKE noe denne fiksen endrer. Slettes derfor via
+  // `adminPool` (migrasjons-/admin-rollen), ALDRI en ny runtime-rettighet.
+  await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
+  // HOST FIX #3: `ErasureService.executeErasure()` skriver en EKTE
+  // `erasure_requests`/`erasure_fingerprints`-revisjonsrad (samme produksjons-
+  // ledger som Q-20 for øvrig) - denne skal ALDRI slettes av selve
+  // produksjons-runtimen (append-only-lignende revisjonsspor, `jarvis_app` har
+  // bevisst INGEN DELETE-rettighet der heller, kun SELECT/INSERT/UPDATE,
+  // 018_erasure.sql). For den SYNTETISKE akseptanse-tenanten er dette ren
+  // test-fixture-opprydding - EKSAKT samme, allerede etablerte mønster som
+  // `modules/erasure/scripts/q20-erasure-live.ts` sin egen `cleanupTenant()`
+  // (admin-pool, aldri en produksjons-retention-endring).
+  await adminPool.query("DELETE FROM erasure_fingerprints WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM erasure_requests WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_activities WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_contacts WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM business_companies WHERE tenant_id = $1", [tenantId]);
