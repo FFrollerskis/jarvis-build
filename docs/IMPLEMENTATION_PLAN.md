@@ -959,6 +959,122 @@ uendret).
 
 ---
 
+### UA-3 — Native Jarvis Contracts Core (Contracts/e-sign, CONTRACT CORE-halvpart, K1) = VERIFIED/COMPLETE (2026-08-18) → D-71/D-72/D-73
+
+**Status: VERIFIED/COMPLETE (2026-08-18, D-73).** Kode + 104 tester ferdig og lokalt bevist, OG NÅ
+ekte host-bevist på Tobias sin Windows/Docker-host: `ua3-native-contracts-host-run.ts`, run_id
+`5ca4765b`, `hard_fail=false`, ALLE 26 markører PASS. To tidligere host-runder (D-72, run_id
+`1e9ae3a8`/`53d294b8`) fant og fikset en synthetic-cleanup-gap FØR denne rene kjøringen - se
+HOST FIX #1-underseksjonen og D-73-avslutningsseksjonen nedenfor for full detalj. Draft-PR #18 er
+klar for review - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+Implementerer D-64/Q-28 sitt Core-vs-Adapter-vedtak for kontraktdomenet: Contracts skal være
+`JARVIS_CANONICAL` (Jarvis eier selv kontrakt-lifecycle/domenemodellen), IKKE en ekstern
+e-sign-leverandør. **ZERO DocuSign/PandaDoc/Signicat/Adobe Sign valgt eller integrert** - juridisk
+signeringsutførelse forblir en FREMTIDIG, valgfri utførelsesadapter, aldri domeneeier.
+
+**D-64 Core-vs-Adapter-gate kjørt FØR kode (denne gangen PROAKTIVT, ikke reaktivt som for Support):**
+CAPABILITY=Contract management; JARVIS_CORE=kontrakt-lifecycle/motparter/versjoner/forpliktelser/
+frister/fornyelser/godkjenninger/Business-OS-kobling/open-loops/kanonisk status;
+EXTERNAL_ROLE=fremtidig juridisk signeringsutførelse/identitetsverifisering/bevis-levering (KUN
+dette); SYSTEM_OF_RECORD=`JARVIS_CANONICAL`; CAN_RUN_WITHOUT_PROVIDER=true (ZERO e-sign-avhengighet,
+bevist mekanisk); REPLACEMENT_PATH=signaturleverandøren kan byttes ut uten omskriving av Contracts
+Core.
+
+**Bygget:**
+1. **Ny pakke `@jarvis/agreements`** (`modules/agreements/`, IKKE `@jarvis/contracts` - det navnet er
+   allerede den delte type-kontrakt-pakken `packages/contracts`) + migrasjon `026_contracts.sql` -
+   `contracts` (kontraktnummer/tenant/memory-space/motpart-kobling/type/status/effektiv-/start-/
+   sluttdato/oppsigelsesfrist/fornyelsesdato/eier/generiske `source_*`/`canonical_uri`-pekere) +
+   `contract_versions` (eksplisitt, immutable, append-only) + `contract_obligations`
+   (`open/completed/waived`) + `contract_events` (10 hendelsestyper, egen kontrakt-tidslinje,
+   EKSPLISITT separat fra `audit_events`).
+2. **Deterministisk lifecycle** (`state-machine.ts`) -
+   `draft→review→approved→active→expiring→expired→terminated→cancelled`, INGEN LLM avgjør gyldighet;
+   `terminated`/`cancelled` praktisk talt terminale (ENESTE vei videre: eksplisitt administrativ
+   korreksjon tilbake til `draft`, ALDRI direkte til `active`).
+3. **Eksplisitte, immutable versjoner** - kun nye append-only rader (ingen `updated_at`), atomisk
+   `version_number`-beregning under radlås - pointer-not-payload (`canonical_uri` peker til det
+   faktiske dokumentet, kopierer ALDRI innhold; strukturelt bevist: ingen `body`/`content`/
+   `document_text`-kolonne finnes).
+4. **Motparter gjenbruker EKSISTERENDE `business_companies`/`business_contacts`** - INGEN ny
+   motpart-tabell (byggeordrens eksplisitte krav).
+5. **Forpliktelser** (`contract_obligations`) besvarer "hva må vi gjøre"/"hva forfaller
+   neste"/overdue-spørsmål deterministisk - eier/frist/status, komplett/frafalt/gjenåpnet-overganger.
+6. **Open-loop-integrasjon** GJENBRUKER `OpenLoopService`/`business_open_loops` UENDRET mekanisme -
+   additiv `contract_id`-kolonne + fire nye `loop_type`-verdier (`contract_renewal_due`/
+   `contract_termination_deadline`/`contract_obligation_due`/`contract_review_required`), dekket av
+   DEN EKSISTERENDE `runOpenLoopSweepForAllTenants`-schedulerjobben - INGEN ny jobb/motor.
+7. **ToolGateway** - nytt `contract.*`-namespace, 24 handlinger (A=lesing, B=interne skrivinger,
+   C=`set_status` - lifecycle-overgang har reelt effektnivå utover en vanlig feltoppdatering) - INGEN
+   klasse D i denne sliceen (ingen nøstet ekstern/uigjenkallelig handling finnes ennå).
+8. **Q-21/RLS** - `FORCE ROW LEVEL SECURITY` + tenant+memory-space-RESTRICTIVE på alle fire tabeller,
+   samme mønster som `support_tickets` - `jarvis_runtime` uendret NOSUPERUSER/NOBYPASSRLS.
+9. **Q-27-gjenbruk** - ingen ny tenant-katalogmekanisme, sveipen kjører som del av EKSISTERENDE
+   `runOpenLoopSweepForAllTenants()`.
+10. **Q-20-erasure** - alle fire tabeller + kontrakt-tilknyttede `business_open_loops`-rader
+    registrert i `modules/erasure/src/plan.ts` FØR noen host-runde (samme FK-lærdom som HOST FIX
+    #1/D-67 for Support, anvendt forebyggende denne gangen - ingen host-runde skulle trenges for å
+    finne dette).
+11. **Q-26-grense uendret** - kontraktdokumenter er KILDEDATA, blir IKKE automatisk "verifisert
+    kunnskap" av denne sliceen.
+12. **Host-akseptanseskript** `ua3-native-contracts-host-run.ts` → `ua3-native-contracts-live.ts` -
+    INGEN e-sign-leverandør-oppsett, INGEN signaturleverandør-credential, INGEN manuell SQL kreves.
+
+**Testdekning:** 96 nye tester (typecheck 16/16 rent, lint rent, full lokal suite 1347/1347 grønn
+utenom én kjent, urelatert ressurs-flaky embedded-postgres-`afterAll`-timeout i
+`modules/knowledge/test/registry.test.ts`, PASS 11/11 i isolasjon).
+
+**Bygges IKKE i denne sliceen:** juridisk signeringsutførelse/e-sign-leverandør av noe slag (Q-28
+SIGNATURE EXECUTION PROVIDER-halvparten, krever en eksplisitt Tobias-leverandørbeslutning FØRST);
+UA-4; AI Mesh-basert kontraktstolkning (INGEN inferert kontraktsmening utover eksplisitt lagrede/
+utpekte data, ingen juridisk rådgivning).
+
+#### HOST FIX #1 (2026-08-18, samme branch) → D-72 "SYNTHETIC CLEANUP ONLY"
+
+To ekte Windows/Docker-host-kjøringer (run_id `1e9ae3a8`/`53d294b8`) ga BEGGE `hard_fail=true`, men
+ALLE 25 funksjonelle/sikkerhets-/Q-20-markører PASSET - KUN `ua3_contracts_cleanup=FAIL`
+(`business_followups_tenant_id_fkey`, 1 rad). Rotårsak: Q-20-seksjonen i
+`ua3-native-contracts-live.ts` oppretter bevisst en `business_followups`-akseptansefixture (for å
+bevise erasure-scope-presisjon) som `cleanupTenant()` aldri ryddet - EKSAKT samme feilklasse som
+Native Support Core sin HOST FIX #3 (D-69), IKKE en Contracts-domenebug. Skjema-/FK-audit bekreftet
+INGEN andre skjulte tilleggsfunn. Fikset: `cleanupTenant()` utvidet med
+`DELETE FROM business_followups`, `selfHeal()` bruker samme funksjon uendret. 8 nye
+regresjonstester (`ua3-native-contracts-cleanup.test.ts`). Produksjonens
+`business_followups`-retensjon uendret. **Status forblir FUNKSJONELT HOST-BEVIST, IKKE
+VERIFIED/CLOSED** til én ren host-kjøring ender `hard_fail=false`.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-28 (SIGNATURE EXECUTION PROVIDER-halvpart,
+fortsatt ikke besluttet - denne raden lukkes IKKE av dette bygget alene); ekte host-verifisering
+(Tobias må kjøre `ua3-native-contracts-host-run.ts` før VERIFIED/COMPLETE kan hevdes).
+
+#### ENDELIG LUKKING (2026-08-18, samme branch) → D-73 "REN HOST-KJØRING"
+
+Tobias sin TREDJE host-kjøring (`ua3-native-contracts-host-run.ts`, run_id `5ca4765b`) ga
+`hard_fail=false`, ALLE 26 markører PASS, inkludert `ua3_contracts_cleanup` (FAIL i D-72 sine to
+runder). Repo-sannhet bekreftet FØR lukking: lokal og `origin/claude/ua3-native-contracts-core`
+HEAD identisk (`8d530e6`), arbeidstreet rent, INGEN kjørbar kode endret etter den host-testede
+SHA-en - D-72 sin `cleanupTenant()`-fiks er den eksakte koden som ble host-testet. **D-71/D-72
+markeres begge VERIFIED/COMPLETE.** Runtime bekreftet `jarvis_runtime`/`superuser=false`/
+`bypassrls=false` - Q-21 uendret. Q-27 gjenbruker `listBusinessTenantIds()` uendret. Q-20:
+`ErasureService` host-bevist reelt (kontrakt/versjoner/forpliktelser/events/kontrakt-linket
+open-loop fjernet, urelatert open-loop upåvirket, ingen resurrection). Q-26 uendret (kontrakter
+forblir kildedata). **Q-28 splittes formelt i to halvdeler:** CONTRACT CORE = VERIFIED/COMPLETE
+(denne raden, FERDIG); SIGNATURE EXECUTION ADAPTER = fortsatt ÅPEN/DECISION REQUIRED (ingen
+leverandør valgt, krever egen fremtidig D-64-port + eksplisitt Tobias-beslutning). **K1 ("Hva
+skjer med kunde X?") re-evaluert mot det ordrette masterplan-kriteriet** (kun "complete
+source-backed timeline", ingen nevning av juridisk e-signatur) - CRM/Sales, Support/tickets (D-70)
+og Contracts Core (D-73) er ALLE nå host-verifisert og bidrar til Business OS-tidslinjen. **K1
+markeres derfor NÅ VERIFIED/COMPLETE** (se D-73 i DECISIONS_AND_ASSUMPTIONS.md for full
+begrunnelse). **HELE UA-3 forblir IKKE komplett** (akseptansekriterium 2, tverr-domene
+sales/product/finance/marketing/operations, avhenger av UA-4/UA-5/UA-6 - ingen startet). **HELE
+Sovereign Autonomy-masterplanen forblir IKKE komplett.** Full lokal suite grønn, typecheck/lint
+rene, GitHub CI (`gitleaks`+`build-test`) grønn på `8d530e6`. PR #18 klar for review -
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning. STOP etter denne lukkingen. Ingen
+signaturleverandør. Ingen UA-4.**
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

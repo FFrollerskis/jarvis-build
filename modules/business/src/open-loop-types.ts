@@ -11,7 +11,11 @@ export type OpenLoopType =
   | "support_ticket_needs_reply"
   | "support_ticket_overdue"
   | "support_ticket_unassigned"
-  | "support_ticket_waiting_internal";
+  | "support_ticket_waiting_internal"
+  | "contract_renewal_due"
+  | "contract_termination_deadline"
+  | "contract_obligation_due"
+  | "contract_review_required";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -28,6 +32,8 @@ export interface BusinessOpenLoop {
   activity_id: string | null;
   /** UA-3 Native Support Core (D-66): peker til `support_tickets`, null for ikke-support-loops. */
   ticket_id: string | null;
+  /** UA-3 Native Contracts Core (D-71): peker til `contracts`, null for ikke-kontrakt-loops. */
+  contract_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
