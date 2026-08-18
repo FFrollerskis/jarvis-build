@@ -1030,6 +1030,20 @@ SIGNATURE EXECUTION PROVIDER-halvparten, krever en eksplisitt Tobias-leverandør
 UA-4; AI Mesh-basert kontraktstolkning (INGEN inferert kontraktsmening utover eksplisitt lagrede/
 utpekte data, ingen juridisk rådgivning).
 
+#### HOST FIX #1 (2026-08-18, samme branch) → D-72 "SYNTHETIC CLEANUP ONLY"
+
+To ekte Windows/Docker-host-kjøringer (run_id `1e9ae3a8`/`53d294b8`) ga BEGGE `hard_fail=true`, men
+ALLE 25 funksjonelle/sikkerhets-/Q-20-markører PASSET - KUN `ua3_contracts_cleanup=FAIL`
+(`business_followups_tenant_id_fkey`, 1 rad). Rotårsak: Q-20-seksjonen i
+`ua3-native-contracts-live.ts` oppretter bevisst en `business_followups`-akseptansefixture (for å
+bevise erasure-scope-presisjon) som `cleanupTenant()` aldri ryddet - EKSAKT samme feilklasse som
+Native Support Core sin HOST FIX #3 (D-69), IKKE en Contracts-domenebug. Skjema-/FK-audit bekreftet
+INGEN andre skjulte tilleggsfunn. Fikset: `cleanupTenant()` utvidet med
+`DELETE FROM business_followups`, `selfHeal()` bruker samme funksjon uendret. 8 nye
+regresjonstester (`ua3-native-contracts-cleanup.test.ts`). Produksjonens
+`business_followups`-retensjon uendret. **Status forblir FUNKSJONELT HOST-BEVIST, IKKE
+VERIFIED/CLOSED** til én ren host-kjøring ender `hard_fail=false`.
+
 **Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-28 (SIGNATURE EXECUTION PROVIDER-halvpart,
 fortsatt ikke besluttet - denne raden lukkes IKKE av dette bygget alene); ekte host-verifisering
 (Tobias må kjøre `ua3-native-contracts-host-run.ts` før VERIFIED/COMPLETE kan hevdes).

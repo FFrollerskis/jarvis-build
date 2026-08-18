@@ -130,6 +130,20 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM contract_obligations WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM contract_versions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM contracts WHERE tenant_id = $1", [tenantId]);
+  // HOST FIX #1 (D-72, ekte host-funn run_id 1e9ae3a8/53d294b8): §"Q-20
+  // ERASURE-INTEGRASJON"-seksjonen under oppretter BEVISST en
+  // `business_followups`-rad (`business.createFollowup(...)`, kalt "Q20
+  // unrelated followup agr") for å bevise at erasure-scopet KUN treffer
+  // kontrakt-tilknyttede open-loops - EKSAKT samme, allerede etablerte
+  // ACCEPTANCE_FIXTURE-mønster som `ua3-native-support-live.ts` sin egen
+  // HOST FIX #3 (D-69) fant og fikset for support_followups. En ren
+  // akseptanse-fixture, ALDRI produksjonsdata - `jarvis_app` har bevisst
+  // INGEN DELETE-rettighet på `business_followups` (kun SELECT/INSERT/
+  // UPDATE, uendret fra `019_business.sql`), så produksjonens
+  // business-followup-retensjon er UPÅVIRKET av denne fiksen. Slettes derfor
+  // via `adminPool` (migrasjons-/admin-rollen), ALDRI en ny runtime-
+  // rettighet - INGEN CASCADE, INGEN FK-svekkelse.
+  await adminPool.query("DELETE FROM business_followups WHERE tenant_id = $1", [tenantId]);
   // Q-20 (samme etablerte mønster som ua3-native-support-live.ts sin egen
   // cleanupTenant()): ErasureService.executeErasure() skriver en EKTE
   // erasure_requests/erasure_fingerprints-revisjonsrad. `jarvis_app` har

@@ -1,17 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE JARVIS CONTRACTS CORE: FIXED_SUITE / IKKE HOST VERIFIED →
-D-71**, se egen "UA-3 NATIVE JARVIS CONTRACTS CORE"-seksjon nederst i dokumentet. Ny pakke
-`@jarvis/agreements` (`modules/agreements/`, migrasjon `026_contracts.sql`) implementerer D-64/Q-28
-sitt `JARVIS_CANONICAL` CONTRACT CORE-vedtak - ZERO e-sign-leverandør valgt/integrert i denne
-sliceen. 96 nye tester (typecheck 16/16 rent, lint rent, full lokal suite 1347/1347 grønn utenom én
-kjent, urelatert ressurs-flaky i `modules/knowledge/test/registry.test.ts`, PASS 11/11 isolert).
-**INGEN ekte host-kjøring i denne byggeøkten** (Docker/Windows-host ikke tilgjengelig her) -
-`ua3-native-contracts-host-run.ts` er skrevet og klar for Tobias, status forblir ærlig FIXED_SUITE
-til den faktisk kjøres. **Branch:** `claude/ua3-native-contracts-core` (fra `origin/main` sin
-`7149ac6`, PR #17 sitt merge-commit). Draft-PR opprettes - **MERGES IKKE uten Tobias sin eksplisitte
-godkjenning.** Contracts-delkriteriet av K1 er NÅ FIXED_SUITE; K1 SOM HELHET forblir PARTIAL (Q-28
-SIGNATURE EXECUTION PROVIDER-halvparten fortsatt ikke besluttet/bygget).
+**Oppdatert:** 2026-08-18 (**UA-3 NATIVE CONTRACTS CORE HOST FIX #1 (D-72) — SYNTHETIC CLEANUP ONLY:
+FUNKSJONELT HOST-BEVIST, MEN IKKE VERIFIED/CLOSED**, se egen "UA-3 NATIVE CONTRACTS CORE HOST FIX
+#1"-seksjon nederst i dokumentet. To ekte Windows/Docker-host-kjøringer (run_id `1e9ae3a8`/
+`53d294b8`) ga BEGGE `hard_fail=true`, men ALLE 25 funksjonelle/sikkerhets-/Q-20-markører PASSET -
+KUN `ua3_contracts_cleanup=FAIL` (`business_followups`-fixture fra Q-20-seksjonen ikke ryddet av
+`cleanupTenant()` - EKSAKT samme feilklasse som Native Support Core sin egen D-69). Fikset ved å
+utvide `cleanupTenant()` i `ua3-native-contracts-live.ts` med `DELETE FROM business_followups`, 8
+nye regresjonstester. `pnpm -w typecheck` 16/16 rent, `pnpm -w lint` rent, full lokal suite
+1346/1346 grønn. **D-71 markeres IKKE komplett før én REN host-kjøring ender `hard_fail=false`.**
+**Branch:** `claude/ua3-native-contracts-core` (uendret). Draft-PR #18 oppdatert -  **MERGES IKKE
+uten Tobias sin eksplisitte godkjenning.** Contracts-delkriteriet av K1 forblir FIXED_SUITE; K1 SOM
+HELHET forblir PARTIAL (Q-28 SIGNATURE EXECUTION PROVIDER-halvparten fortsatt ikke besluttet/
+bygget).
+
+**Runden før det (samme dag, FIXED_SUITE FØR host-funnet over):** UA-3 NATIVE JARVIS CONTRACTS CORE
+(D-71) - ny pakke `@jarvis/agreements`, migrasjon `026_contracts.sql`, 96 nye tester. Se egen
+seksjon lenger ned for full byggedetalj.
 
 **Runden før det (samme dag, MERGET):** UA-3 NATIVE SUPPORT CORE — ENDELIG LUKKING: VERIFIED/COMPLETE
 → D-66/D-67/D-68/D-69/D-70. Tobias sin FJERDE, RENE host-kjøring (`ua3-native-support-host-run.ts`,
@@ -2367,3 +2372,46 @@ fulgte før D-67-D-70.
 
 **Draft-PR opprettes for branch `claude/ua3-native-contracts-core` - MERGES IKKE uten Tobias sin
 eksplisitte godkjenning.** Ingen Contracts-signaturleverandør valgt. Ingen UA-4 startet.
+
+---
+
+## UA-3 NATIVE CONTRACTS CORE HOST FIX #1 (samme dag, 2026-08-18) — SYNTHETIC CLEANUP ONLY → D-72
+
+**To ekte Windows/Docker-host-kjøringer** (`run_id 1e9ae3a8`, `run_id 53d294b8`) ga BEGGE
+`hard_fail=true` - men ALLE 25 funksjonelle/sikkerhets-/Q-20-markører PASSET (D-71 sin bygging
+bekreftet på ekte host begge ganger). **KUN `ua3_contracts_cleanup=FAIL`:** `business_followups`
+(`business_followups_tenant_id_fkey`, 1 rad).
+
+**Rotårsak, sporet ikke gjettet:** §"Q-20 ERASURE-INTEGRASJON"-seksjonen i
+`ua3-native-contracts-live.ts` oppretter BEVISST en `business_followups`-rad
+(`business.createFollowup(TENANT_A, "business", { title: "Q20 unrelated followup agr", ... })`) for
+å bevise at erasure-scopet KUN treffer kontrakt-tilknyttede open-loops, ALDRI en generell
+`business_open_loops`-tømming - en ren ACCEPTANCE_FIXTURE, ALDRI produksjonsdata. `cleanupTenant()`
+ryddet den aldri. **EKSAKT samme feilklasse som Native Support Core sin egen HOST FIX #3 (D-69)** -
+IKKE en Contracts-domenebug (ingen av de øvrige markørene, inkl. `ua3_contracts_q20`, ble påvirket).
+
+**Skjema-/FK-audit (denne runden, før fiks - ikke etter):** gjennomgang av alle FK-er mot
+`tenants(tenant_id)` som denne akseptansen faktisk populerer bekrefter `business_followups` er DET
+ENESTE utelatte punktet - `audit_events` har bevisst INGEN FK mot `tenants` (kun `text NOT NULL`,
+append-only-trigger-blokkert uansett), `cost_events`/leads/opportunities/scores/support-/knowledge-
+tabellene/`messages`/`sessions` får aldri en rad fra dette scriptet. Ingen skjulte tilleggsfunn.
+
+**Fiks:** `cleanupTenant()` utvidet med `DELETE FROM business_followups WHERE tenant_id = $1` (rett
+etter `contracts`, før `erasure_fingerprints`/`erasure_requests` - samme relative rekkefølge D-69
+brukte for Support). `selfHeal()` kaller SAMME funksjon uendret - stale-run-gjenoppretting bruker
+derfor automatisk den korrigerte veien. **Produksjonens `business_followups`-retensjon UENDRET:**
+`jarvis_app` har fortsatt bevisst INGEN `DELETE`-rettighet der (kun SELECT/INSERT/UPDATE) - bevist
+eksplisitt med et `permission denied`-regresjonstest.
+
+**8 nye regresjonstester** (`modules/business/test/ua3-native-contracts-cleanup.test.ts`, §A-H):
+reproduserer begge fixture-typene (business_followups + ekte `erasure_requests`-rad via ekte
+`ErasureService`), beviser korrekt FK-rekkefølge, urelatert-tenant-isolasjon, uendrede
+runtime-rettigheter, Q-21 uendret, idempotent opprydding (tom/allerede-ryddet/dobbel kjøring). Q-20
+contracts-erasure-suiten re-kjørt uendret grønn. 104 tester totalt for Contracts-sliceen nå (96+8).
+`pnpm -w typecheck` 16/16 rent, `pnpm -w lint` rent, full lokal suite **1346/1346 grønn**.
+
+**STATUS: FUNKSJONELT HOST-BEVIST, MEN IKKE VERIFIED/CLOSED** - full akseptanse endte fortsatt
+`hard_fail=true` begge ganger denne runden. **D-71 markeres IKKE komplett før én REN host-kjøring
+ender `hard_fail=false`.** Q-28 forblir ÅPEN. K1 forblir PARTIAL. PR #18 oppdatert med begge
+run_id-er/rotårsak/fiks/testdekning - forblir draft, IKKE merget. **Ingen e-sign-leverandør. Ingen
+UA-4.**
