@@ -8,6 +8,7 @@ import {
   MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
+import { SupportService, SupportTransport } from "@jarvis/support";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -81,6 +82,9 @@ const openLoopService = new OpenLoopService(pool);
 // UA-3 profiling/scoring-slice (D-61): samme ScoringService-wiring som api -
 // workeren sin mesh-tool-executor maa kunne kalle score-handlingene identisk.
 const scoringService = new ScoringService(pool);
+// UA-3 Native Jarvis Support Core (D-66): samme SupportService-wiring som api -
+// workeren sin mesh-tool-executor maa kunne kalle support.*-handlingene identisk.
+const supportService = new SupportService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -88,6 +92,8 @@ for (const tool of firstWaveTools({
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
   business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
+  // Identisk wiring-mønster som apps/api/src/main.ts - lazy SupportEmailService.
+  support: new SupportTransport(supportService, businessService, toolGateway),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

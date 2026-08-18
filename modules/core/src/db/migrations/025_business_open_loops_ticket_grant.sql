@@ -1,0 +1,23 @@
+-- UA-3 Native Support Core HOST FIX #1 (D-67): Q-20 erasure av en support-
+-- ticket krashet mot "update or delete on table support_tickets violates
+-- foreign key constraint business_open_loops_ticket_id_fkey" - en ekte
+-- host-funn (run_id 60f0d682/5457c59a). `business_open_loops` fikk sin
+-- `ticket_id`-kolonne i 024_support.sql, men jarvis_app hadde ALDRI en
+-- DELETE-rettighet på `business_open_loops` selv (kun SELECT/INSERT/UPDATE
+-- fra 020_business_open_loops.sql). Q-20-erasure MÅ nå kunne fjerne
+-- support-tilknyttede open-loops FØR selve ticketen slettes (§8 i
+-- byggeordren: "a support open loop is derived operational state... Jarvis
+-- must not retain a dangling derived record"). SEPARAT migrasjon (ikke en
+-- redigering av 024/020) - begge migrasjonene har allerede kjørt mot en
+-- ekte host-database (Tobias sine to host-runder), og `schema_migrations`
+-- kjører ALDRI en allerede-anvendt fil om igjen selv om innholdet endres -
+-- en redigering av en allerede kjørt migrasjon ville stille latt Tobias sin
+-- eksisterende database mangle denne GRANTen permanent.
+--
+-- Snever: KUN DELETE, KUN denne ene tabellen - generell business_open_loops-
+-- erasure er FORTSATT ikke registrert i Q-20-planen (pre-eksisterende gap,
+-- se OPEN_QUESTIONS.md Q-25 punkt 9, UENDRET av denne fiksen). Denne GRANTen
+-- eksisterer KUN for å løse FK-konflikten når en support_ticket faktisk
+-- erases - modules/erasure/src/plan.ts avgrenser selve WHERE-klausulen til
+-- KUN support-tilknyttede rader (ticket_id IS NOT NULL).
+GRANT DELETE ON business_open_loops TO jarvis_app;

@@ -83,9 +83,29 @@ export class FallbackSecretProvider implements SecretProvider {
   }
 }
 
+/**
+ * SECURITY FIX #2 (D-68): kontekst fra DEN OPPRINNELIGE kalleren - IdentityContext
+ * og en evt. medfulgt signert godkjenning - som en transport kan trenge for å gjøre
+ * et NØSTET, autoritetsbevisst `ToolGateway.execute()`-kall (i dag: `SupportTransport`
+ * sin `reply`, som ruter GJENNOM `email.send`, klasse D). ALDRI en fabrikkert/eskalert
+ * identitet - `resolveAuthorityMode()` skal EVALUERE den ekte kalleren, aldri stoles
+ * blindt på. De aller fleste transporter trenger den ikke og kan la parameteren stå
+ * ureferert (strukturell typing tillater færre deklarerte parametre - allerede
+ * etablert praksis, se f.eks. `FakeTransport`/`UnconfiguredHttpTransport`).
+ */
+export interface ToolInvocationContext {
+  identity: IdentityContext;
+  approval?: unknown;
+}
+
 /** Transport per integrasjon: ekte HTTP i drift, kontrollert fake i test. */
 export interface ToolTransport {
-  invoke(action: string, parameters: Record<string, JsonValue>, credential: string): Promise<{ external_id?: string; data?: JsonValue }>;
+  invoke(
+    action: string,
+    parameters: Record<string, JsonValue>,
+    credential: string,
+    context: ToolInvocationContext
+  ): Promise<{ external_id?: string; data?: JsonValue }>;
 }
 
 /** Maskinlesbar verktøydefinisjon (INTEGRATIONS.md §2). */
@@ -190,6 +210,14 @@ export class ToolGateway {
       return this.deny(request, "credential_unavailable");
     }
 
+    // SECURITY FIX #2 (D-68): DEN OPPRINNELIGE kalleren sin identitet/godkjenning -
+    // gitt uendret videre til transporten for ethvert nøstet gateway-kall den evt.
+    // selv gjør. ALDRI fabrikkert/eskalert her - kun videreformidlet.
+    const invocationContext: ToolInvocationContext = {
+      identity: request.identity,
+      ...(request.approval !== undefined ? { approval: request.approval } : {})
+    };
+
     // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses
     // nå-tilstanden FØR handlingen (deterministisk preflight + recovery-
     // grunnlag) og PÅ NYTT etterpå (readback/before-after-evidens).
@@ -198,7 +226,7 @@ export class ToolGateway {
     const needsEvidence = (definition.capability_class === "C" || definition.capability_class === "D") && definition.preflight_action;
     if (needsEvidence) {
       try {
-        const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential);
+        const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
         beforeState = pre.data ?? null;
       } catch (err) {
         if (definition.capability_class === "D") {
@@ -240,7 +268,7 @@ export class ToolGateway {
       let external: { external_id?: string; data?: JsonValue };
       try {
         external = await withTimeout(
-          definition.transport.invoke(request.action, request.parameters, credential),
+          definition.transport.invoke(request.action, request.parameters, credential, invocationContext),
           definition.timeout_ms
         );
       } catch (err) {
@@ -260,7 +288,7 @@ export class ToolGateway {
       let afterState: JsonValue | null = null;
       if (needsEvidence) {
         try {
-          const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential);
+          const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
           afterState = post.data ?? null;
         } catch {
           afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under

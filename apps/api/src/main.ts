@@ -28,6 +28,7 @@ import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
   ScoringService, runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
+import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -106,15 +107,29 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // UA-3 profiling/scoring-slice (D-61): egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§14/§23 i byggeordren) - gjenbruker Business Graph uendret.
   const scoringService = new ScoringService(pool);
+  // UA-3 Native Jarvis Support Core (D-66): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - gjenbruker Business Graph (kontakt-/
+  // selskap-kobling) og OpenLoopService (§17 i byggeordren) uendret.
+  const supportService = new SupportService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
     business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
+    // SAMME lazy-init-mønster som BusinessTransport sin `requireEventSync()`
+    // (D-49): `SupportTransport` får `toolGateway` DIREKTE (objektreferansen
+    // finnes allerede, selv om selve register()-loopen ikke er ferdig ennå) -
+    // bygger `SupportEmailService` lat ved første `reply`/`ingest`-kall.
+    support: new SupportTransport(supportService, businessService, toolGateway),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
+  // UA-3 Native Jarvis Support Core (D-66) §7/§24: egen instans for den
+  // periodiske innboks-sveipen (SAMME mønster som `businessEventSyncService`
+  // over - en direkte, parallell instans, IKKE den lazy interne i
+  // SupportTransport) - SAMME toolGateway/businessService, ingen ny transport-vei.
+  const supportEmailService = new SupportEmailService(toolGateway, businessService, supportService);
   const ownerIdentity = {
     person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
     memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
@@ -245,6 +260,19 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-scoring-recalc", Number(process.env["JARVIS_BUSINESS_SCORING_HOUR"] ?? 7)
   ).start(() => runScoringSweepForAllTenants(pool, scoringService).then(() => undefined));
+  // UA-3 Native Jarvis Support Core (D-66) §7/§24: periodisk Gmail-innboks-
+  // reconciliation - SAMME reboot-durable DailyScheduler-mekanisme, eget
+  // job_name/klokkeslett-env. Kjøres ETTER de øvrige business-jobbene
+  // (default kl. 08) - support-open-loop-reglene (§17, kjørt AV den
+  // EKSISTERENDE business-open-loop-sweep kl. 06 over) ser dermed IKKE
+  // nødvendigvis samme dags nye tickets før neste sveip - akseptabelt
+  // forsinkelse (samme "periodisk, ikke event-drevet"-modell som resten av
+  // UA-3, se Q-25 punkt 2). Trygt å kjøre uten `JARVIS_SUPPORT_INBOX_EMAILS`
+  // konfigurert - routing blir da deterministisk tomt (ingen meldinger
+  // klassifiseres som support, se `email-ingress.ts`).
+  new DailyScheduler(
+    pool, "support-inbox-sync", Number(process.env["JARVIS_SUPPORT_INBOX_SYNC_HOUR"] ?? 8)
+  ).start(() => runSupportInboxSyncForAllTenants(pool, supportEmailService).then(() => undefined));
   return deps;
 }
 

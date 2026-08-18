@@ -20,6 +20,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@jarvis/business": "workspace:*",
     "@types/pg": "^8.15.6",
     "embedded-postgres": "16.14.0-beta.17"
   }

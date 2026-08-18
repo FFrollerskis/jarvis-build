@@ -842,6 +842,123 @@ likevel til stede og host-bevist. Se D-63 for full evidens og oppdatert firekrit
 
 ---
 
+### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = VERIFIED/COMPLETE (2026-08-18) → D-66/D-67/D-68/D-69/D-70
+
+**Status: VERIFIED/COMPLETE → D-70 (endelig lukking), host-bevist run_id `da7e0c1b`,
+`hard_fail=false`, ALLE 26 markører PASS.** Opprinnelig bygget FIXED_SUITE under D-66 (se resten av
+denne seksjonen for full byggedetalj), deretter tre host-funn-drevne fiks-runder (D-67 HOST FIX #1,
+D-68 SECURITY FIX #2, D-69 HOST FIX #3 - se egne underseksjoner nederst) FØR den fjerde, rene
+kjøringen som ga `hard_fail=false`. 98 nye tester totalt over hele slicen (1176→1268). Draft-PR #17
+klar for review - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+Implementerer D-64 sitt permanente Core Ownership-vedtak: Support/tickets-domenet skal være
+`JARVIS_CANONICAL` (Jarvis eier selv ticket-lifecycle/domenemodellen), IKKE en ekstern SaaS-leverandør
+(Zendesk/Intercom/Freshdesk) - den tidligere, ALDRI merget Zendesk-connectoren (draft-PR #13) forblir
+SUPERSEDED/UNMERGED EXPERIMENTAL, en mulig fremtidig VALGFRI kanal-adapter, ALDRI domeneeier.
+
+**D-64 Core-vs-Adapter-gate kjørt FØR kode:** CAPABILITY=kundesupport/ticket-håndtering;
+JARVIS_CORE=lifecycle/operasjonell state/selskap-kontakt-kobling/events/tildeling/prioritet/SLA/
+Business-OS-kobling/open-loops; EXTERNAL_ROLE=Gmail som kommunikasjonstransport (fremtidige eksterne
+support-systemer KUN som valgfrie adaptere); SYSTEM_OF_RECORD=`JARVIS_CANONICAL`;
+CAN_RUN_WITHOUT_PROVIDER=true (ZERO Zendesk-avhengighet, bevist mekanisk); D41_SCOPE=gjelder kun en
+fremtidig ekstern adapter.
+
+**Bygget:**
+1. **Ny pakke `@jarvis/support`** + migrasjon `024_support.sql` - `support_tickets`
+   (ticket-nummer/tenant/memory-space/selskap-kontakt-kobling/status/prioritet/ansvarlig/kanal/
+   generiske `source_*`/`canonical_uri`-pekere/entitetsresolusjon/frister) + `support_ticket_events`
+   (12 hendelsestyper, egen kunde-tidslinje, EKSPLISITT separat fra `audit_events`).
+2. **Deterministisk lifecycle** (`state-machine.ts`) - explicit overgangskart, gjenåpning
+   `resolved/closed → open` eksplisitt tillatt, ugyldig overgang kaster og endrer INGENTING.
+3. **Kanal-nøytral domenemodell** (§6) - INGEN Gmail-spesifikke kolonner, kun generiske
+   kilde-pekere - fremtidige kanaler krever ingen skjemaendring.
+4. **Gmail-ingress** (`email-ingress.ts`) gjenbruker EKSISTERENDE `GmailTransport` - INGEN egen
+   e-postklient. Deterministisk routing (konfigurert innboks ELLER kjent tråd-id) - AI er ALDRI
+   eneste port.
+5. **Idempotens** - samme provider-tråd → samme ticket, samme provider-melding → ETT event, SAMME
+   `ON CONFLICT`-mønster som `business_activities`/`business_leads`.
+6. **Entitetsresolusjon** gjenbruker `BusinessService.findContactsByEmail()` DIREKTE - samme MATCHED/
+   UNMATCHED/AMBIGUOUS-mønster som D-57 (D-57/`business-event-sync.ts`), aldri en gjettet kobling.
+7. **Open-loop-integrasjon** (§17) GJENBRUKER `OpenLoopService`/`business_open_loops` UENDRET
+   mekanisme - additiv `ticket_id`-kolonne + fire nye `loop_type`-verdier, dekket av DEN EKSISTERENDE
+   `business-open-loop-sweep`-schedulerjobben - INGEN ny jobb.
+8. **Kunde-svar** (`support.reply`) ruter GJENNOM eksisterende `email.send` (klasse D, uendret
+   signert godkjenning) - INGEN SMTP bygget, idempotent via `idempotency_key`.
+9. **ToolGateway** - nytt `support.*`-namespace, 12 handlinger (A=lesing, B=interne skrivinger,
+   C=`reply`) - INGEN support-handling er klasse D.
+10. **Q-21/RLS** - `FORCE ROW LEVEL SECURITY` + tenant+memory-space-RESTRICTIVE, samme mønster som
+    `business_open_loops` - `jarvis_runtime` uendret NOSUPERUSER/NOBYPASSRLS.
+11. **Q-27-gjenbruk** - periodisk innboks-reconciliation bruker DEN SAMME `listBusinessTenantIds()` -
+    ingen ny tenant-katalogmekanisme.
+12. **Q-20-erasure** - `support_tickets`/`support_ticket_events` registrert i
+    `modules/erasure/src/plan.ts`, ny begrunnet `GRANT DELETE` (fant og fikset en reell regresjon:
+    uten denne grantet ville hele `erasure-service.test.ts`-suiten feilet).
+13. **Host-akseptanseskript** `ua3-native-support-host-run.ts` → `ua3-native-support-live.ts` -
+    `FakeTransport` gjennom EKTE ToolGateway/Policy Gateway (ALDRI reell e-postutsendelse).
+
+**Testdekning:** 62 nye tester (1176→1240, full suite grønn), typecheck/lint rene.
+
+**Bygges IKKE i denne sliceen:** Contracts/e-sign (Q-28, uendret); en ekstern support-leverandør-
+adapter (Zendesk/Intercom/Freshdesk som valgfri fremtidig kanal, ALDRI domeneeier); AI Mesh-basert
+support-vs-ikke-support-klassifisering (routing er BEVISST deterministisk); flerkanal utover e-post
+(portal/chat/SMS - domenemodellen støtter det, men ingen ekstra kanal koblet inn nå).
+
+**Akseptansekriterium 1-re-evaluering:** forblir EKSPLISITT PARTIAL - kjernemekanismen (CRM/Sales +
+Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ OGSÅ VERIFIED/COMPLETE
+(D-70, host-bevist), MEN Contracts/e-sign FORTSATT ikke bygget - kriterium 1 SOM HELHET derfor
+FORTSATT PARTIAL. **HELE UA-3/masterplan v4.0 forblir IKKE komplett.**
+
+#### HOST FIX #1 (2026-08-18, samme branch) → D-67
+
+Tobias sin FØRSTE host-kjøring (`ua3-native-support-host-run.ts`, run_id `60f0d682`/`5457c59a`,
+`hard_fail=true`, 18/26 markører PASS) fant to rotårsaker: (1) akseptanse-scriptets egen alltid-null
+secret-provider ga en `credential_unavailable`-kaskade (7 avledede FAIL) - fikset ved å gjenbruke
+D-57 sitt dummy-credential-mønster (`ua3-business-events-live.ts`); (2) Q-20-erasure av en
+support-ticket krasjet mot `business_open_loops_ticket_id_fkey` - fikset via ny migrasjon
+`025_business_open_loops_ticket_grant.sql` + en snever, ordnet sletting av support-linkede
+open-loops FØR ticketen i `modules/erasure/src/plan.ts`. Under skriving av regresjonstestene for
+disse to ble en TREDJE, tidligere maskert rotårsak funnet: `SupportTransport` sin interne
+`person_id: "system"`-identitet for det nøstede `email.send`-kallet (klasse D) matchet ALDRI en
+konfigurert sovereign eier, saa `support.reply` ville ha FEILET med `class_d_missing_approval`
+uansett credential-status - fikset ved å gjenbruke `JARVIS_OWNER_PERSON_ID`-konvensjonen fra
+`main.ts`/`worker-main.ts`. 10 nye regresjonstester mot EKTE `ToolGateway`/`PolicyGateway`/
+`ErasureService`/embedded Postgres (1240→1250, full suite grønn), typecheck/lint rene. Se D-67.
+Fiksen for rotårsak 3 (`JARVIS_OWNER_PERSON_ID`-gjenbruk) viste seg selv å ha et sikkerhetsproblem -
+se D-68 under.
+
+#### SECURITY FIX #2 (2026-08-18, samme branch) → D-68
+
+Ekstern sikkerhetsaudit av D-67 sin rotårsak-3-fiks fant en REELL rettighetseskalering:
+`ToolTransport.invoke()` fikk aldri den opprinnelige kalleren sin `IdentityContext`, saa ENHVER
+kaller autorisert til `support.reply` (eier ELLER en mandat-delegat) fikk sitt nøstede
+`email.send` (klasse D) utført med UBETINGET eier-authority. Fikset ved å legge
+`ToolInvocationContext` (`{identity, approval}`) til som 4. parameter på `ToolTransport.invoke()` -
+`SupportTransport` videreformidler nå den EKTE kallerens identitet/godkjenning UENDRET, ingen
+fabrikkert identitet noe sted. Invariant bevist: `effective_authority(nested) <=
+effective_authority(caller)`, ALDRI eskalert - 10 nye tester (EKTE `ToolGateway`/`PolicyGateway`/
+Ed25519-signerte godkjenninger). 1250→1260 tester. Se D-68.
+
+#### HOST FIX #3 (2026-08-18, samme branch) → D-69 "SYNTHETIC FIXTURE CLEANUP ONLY"
+
+Ekte host-funn, run_id `1e821a86`, `hard_fail=true` - ALLE 25 funksjonelle/sikkerhets-/
+Q-20-markører PASSET, KUN `ua3_support_cleanup=FAIL` (to leftover-rader for den syntetiske
+akseptanse-tenanten: en bevisst Q-20-fixture i `business_followups`, og den EKTE Q-20-
+revisjonsraden i `erasure_requests`). Ingen produksjonsfeil - `cleanupTenant()` utvidet med begge
+tabellene via `adminPool` (samme mønster som `q20-erasure-live.ts`), INGEN ny runtime-rettighet,
+produksjonens erasure-retensjon UENDRET. 8 nye tester. 1260→1268 tester. Se D-69.
+
+#### ENDELIG LUKKING (2026-08-18, samme branch) → D-70
+
+Fjerde, REN host-kjøring: run_id `da7e0c1b`, `hard_fail=false`, ALLE 26 markører PASS. Repo-sannhet
+verifisert FØR lukking (HEAD `2e90d5f`, arbeidstre rent, ingen kjørbar kode endret siden host-
+testet SHA). D-66/D-67/D-68/D-69 markeres alle VERIFIED/CLOSED/COMPLETE. Full regresjon: 94
+testfiler, 1268/1268 grønne, lint/typecheck rene, GitHub CI grønn. PR #17 klar for review -
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning.** Se D-70.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 punkt 8 (oppdatert), Q-28 (Contracts,
+uendret).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

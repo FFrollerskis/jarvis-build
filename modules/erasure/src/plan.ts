@@ -53,6 +53,42 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   }
   add(result, "knowledge_embeddings", await run(client, mode, "knowledge_embeddings", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "knowledge_documents", await run(client, mode, "knowledge_documents", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-3 Native Jarvis Support Core (D-66) §21 i byggeordren: registrer
+  // support-tabellene i erasure-planen (samme mønster som knowledge_*
+  // over). Kjent, dokumentert begrensning (ikke stille utelatt - se
+  // OPEN_QUESTIONS.md Q-25 punkt 9/D-66): øvrige `business_*`-tabeller
+  // (companies/contacts/leads/opportunities/activities/followups) er
+  // FORTSATT ikke registrert i erasure-planen i det hele tatt - dette er en
+  // PRE-EKSISTERENDE gap fra P0 (uendret av denne sliceen), IKKE noe denne
+  // ordren introduserer eller utvider.
+  //
+  // HOST FIX #1 (D-67, ekte host-funn run_id 60f0d682/5457c59a):
+  // `business_open_loops.ticket_id` (024_support.sql) peker til
+  // `support_tickets` - en support-tilknyttet open-loop-rad blokkerte
+  // FAKTISK sletting av ticketen med
+  // "business_open_loops_ticket_id_fkey"-FK-brudd. Løsning (§8 i
+  // byggeordren): en support-tilknyttet open-loop er REN DERIVERT
+  // operasjonell state (auto-gjenkjennes/auto-resolves hver sveip, se
+  // OpenLoopService.runSweep()) - Jarvis skal ALDRI beholde en
+  // "hengende" derivert rad som peker til en ticket som ikke lenger
+  // finnes. Slettes derfor FØRST, SNEVERT avgrenset til
+  // `ticket_id IS NOT NULL` (rører ALDRI andre loop_type-er som
+  // `overdue_followup`/`stalled_opportunity` - generell
+  // business_open_loops-erasure er FORTSATT IKKE registrert her, samme
+  // pre-eksisterende gap som over). Ny, snever `GRANT DELETE ON
+  // business_open_loops` lagt til i `025_business_open_loops_ticket_grant.sql`
+  // (egen migrasjon - IKKE en redigering av allerede kjørte 020/024, som
+  // ville latt Tobias sin eksisterende host-database mangle GRANTen
+  // permanent siden `schema_migrations` aldri kjører en anvendt fil om
+  // igjen).
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND ticket_id IS NOT NULL", tv)
+  );
+  // `support_ticket_events` FØR `support_tickets` (FK -> support_tickets).
+  add(result, "support_ticket_events", await run(client, mode, "support_ticket_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "support_tickets", await run(client, mode, "support_tickets", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 
