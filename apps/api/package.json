@@ -18,6 +18,7 @@
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",
+    "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",
     "pg": "^8.16.3"
   },

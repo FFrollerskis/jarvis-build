@@ -842,6 +842,71 @@ likevel til stede og host-bevist. Se D-63 for full evidens og oppdatert firekrit
 
 ---
 
+### UA-3 — Native Jarvis Support Core (akseptansekriterium 1, Support/tickets) = FIXED_SUITE / IKKE VERIFIED (2026-08-18) → D-66
+
+**Status: FIXED_SUITE / IKKE VERIFIED → D-66**, draft-PR, INGEN Tobias-host-kjøring utført ennå.
+Implementerer D-64 sitt permanente Core Ownership-vedtak: Support/tickets-domenet skal være
+`JARVIS_CANONICAL` (Jarvis eier selv ticket-lifecycle/domenemodellen), IKKE en ekstern SaaS-leverandør
+(Zendesk/Intercom/Freshdesk) - den tidligere, ALDRI merget Zendesk-connectoren (draft-PR #13) forblir
+SUPERSEDED/UNMERGED EXPERIMENTAL, en mulig fremtidig VALGFRI kanal-adapter, ALDRI domeneeier.
+
+**D-64 Core-vs-Adapter-gate kjørt FØR kode:** CAPABILITY=kundesupport/ticket-håndtering;
+JARVIS_CORE=lifecycle/operasjonell state/selskap-kontakt-kobling/events/tildeling/prioritet/SLA/
+Business-OS-kobling/open-loops; EXTERNAL_ROLE=Gmail som kommunikasjonstransport (fremtidige eksterne
+support-systemer KUN som valgfrie adaptere); SYSTEM_OF_RECORD=`JARVIS_CANONICAL`;
+CAN_RUN_WITHOUT_PROVIDER=true (ZERO Zendesk-avhengighet, bevist mekanisk); D41_SCOPE=gjelder kun en
+fremtidig ekstern adapter.
+
+**Bygget:**
+1. **Ny pakke `@jarvis/support`** + migrasjon `024_support.sql` - `support_tickets`
+   (ticket-nummer/tenant/memory-space/selskap-kontakt-kobling/status/prioritet/ansvarlig/kanal/
+   generiske `source_*`/`canonical_uri`-pekere/entitetsresolusjon/frister) + `support_ticket_events`
+   (12 hendelsestyper, egen kunde-tidslinje, EKSPLISITT separat fra `audit_events`).
+2. **Deterministisk lifecycle** (`state-machine.ts`) - explicit overgangskart, gjenåpning
+   `resolved/closed → open` eksplisitt tillatt, ugyldig overgang kaster og endrer INGENTING.
+3. **Kanal-nøytral domenemodell** (§6) - INGEN Gmail-spesifikke kolonner, kun generiske
+   kilde-pekere - fremtidige kanaler krever ingen skjemaendring.
+4. **Gmail-ingress** (`email-ingress.ts`) gjenbruker EKSISTERENDE `GmailTransport` - INGEN egen
+   e-postklient. Deterministisk routing (konfigurert innboks ELLER kjent tråd-id) - AI er ALDRI
+   eneste port.
+5. **Idempotens** - samme provider-tråd → samme ticket, samme provider-melding → ETT event, SAMME
+   `ON CONFLICT`-mønster som `business_activities`/`business_leads`.
+6. **Entitetsresolusjon** gjenbruker `BusinessService.findContactsByEmail()` DIREKTE - samme MATCHED/
+   UNMATCHED/AMBIGUOUS-mønster som D-57 (D-57/`business-event-sync.ts`), aldri en gjettet kobling.
+7. **Open-loop-integrasjon** (§17) GJENBRUKER `OpenLoopService`/`business_open_loops` UENDRET
+   mekanisme - additiv `ticket_id`-kolonne + fire nye `loop_type`-verdier, dekket av DEN EKSISTERENDE
+   `business-open-loop-sweep`-schedulerjobben - INGEN ny jobb.
+8. **Kunde-svar** (`support.reply`) ruter GJENNOM eksisterende `email.send` (klasse D, uendret
+   signert godkjenning) - INGEN SMTP bygget, idempotent via `idempotency_key`.
+9. **ToolGateway** - nytt `support.*`-namespace, 12 handlinger (A=lesing, B=interne skrivinger,
+   C=`reply`) - INGEN support-handling er klasse D.
+10. **Q-21/RLS** - `FORCE ROW LEVEL SECURITY` + tenant+memory-space-RESTRICTIVE, samme mønster som
+    `business_open_loops` - `jarvis_runtime` uendret NOSUPERUSER/NOBYPASSRLS.
+11. **Q-27-gjenbruk** - periodisk innboks-reconciliation bruker DEN SAMME `listBusinessTenantIds()` -
+    ingen ny tenant-katalogmekanisme.
+12. **Q-20-erasure** - `support_tickets`/`support_ticket_events` registrert i
+    `modules/erasure/src/plan.ts`, ny begrunnet `GRANT DELETE` (fant og fikset en reell regresjon:
+    uten denne grantet ville hele `erasure-service.test.ts`-suiten feilet).
+13. **Host-akseptanseskript** `ua3-native-support-host-run.ts` → `ua3-native-support-live.ts` -
+    `FakeTransport` gjennom EKTE ToolGateway/Policy Gateway (ALDRI reell e-postutsendelse).
+
+**Testdekning:** 62 nye tester (1176→1240, full suite grønn), typecheck/lint rene.
+
+**Bygges IKKE i denne sliceen:** Contracts/e-sign (Q-28, uendret); en ekstern support-leverandør-
+adapter (Zendesk/Intercom/Freshdesk som valgfri fremtidig kanal, ALDRI domeneeier); AI Mesh-basert
+support-vs-ikke-support-klassifisering (routing er BEVISST deterministisk); flerkanal utover e-post
+(portal/chat/SMS - domenemodellen støtter det, men ingen ekstra kanal koblet inn nå).
+
+**Akseptansekriterium 1-re-evaluering:** forblir EKSPLISITT PARTIAL - kjernemekanismen (CRM/Sales +
+Gmail/Calendar, D-60) er VERIFIED/COMPLETE, Native Support Core er NÅ FIXED_SUITE (ikke host-
+verifisert), Contracts/e-sign FORTSATT ikke bygget. **HELE UA-3/masterplan v4.0 forblir IKKE
+komplett.**
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md):** Q-25 punkt 8 (oppdatert), Q-28 (Contracts,
+uendret).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

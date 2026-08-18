@@ -540,6 +540,120 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ikke reverserbar - sett en ny manuell overstyring ved behov (set_manual_override)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
+    },
+    // UA-3 Native Jarvis Support Core (D-66) §19/§20: provider-nøytralt
+    // support.*-namespace - JARVIS_CANONICAL, ZERO ekstern support-
+    // leverandør-avhengighet (D-64). Lagt til på SLUTTEN av samme grunn som
+    // read_repo_meta/list_files over - eksisterende tester indekserer dette
+    // arrayet posisjonelt.
+    {
+      tool_id: "support", action: "create_ticket", description: "Opprett en support-ticket",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), subject: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), priority: z.string().optional(), assignee_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "sett status til 'closed'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "get_ticket", description: "Les én support-ticket",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string() }),
+      capability_class: "A", scopes: ["support.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "list_tickets", description: "List support-tickets etter status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["support.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "search_tickets", description: "Deterministisk filter-/fritekstsøk i support-tickets (ticket-nummer/selskap/kontakt/status/prioritet/ansvarlig/emne)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional(), priority: z.string().optional(),
+        assignee_person_id: z.string().optional(), company_id: z.string().optional(), contact_id: z.string().optional(),
+        subject_contains: z.string().optional(), ticket_number: z.number().optional(), limit: z.number().optional()
+      }),
+      capability_class: "A", scopes: ["support.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "update_ticket", description: "Oppdater status og/eller prioritet på en ticket i ett kall",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), status: z.string().optional(), priority: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "sett status/prioritet tilbake via nytt update_ticket-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "set_status", description: "Deterministisk statusovergang (state-machine.ts - ugyldig overgang feiler trygt)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "sett status tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "set_priority", description: "Sett prioritet (low/normal/high/urgent) - ALDRI avledet fra beskyttede/sensitive kjennetegn",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), priority: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "sett prioritet tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "assign_ticket", description: "Tildel/fjern tildeling av en ticket (gjenbruker eksisterende person-/identitetsarkitektur)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), assignee_person_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "tildel tilbake til forrige ansvarlig", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "add_internal_note", description: "Legg til et internt notat (ALDRI kunde-synlig, sender ALDRI e-post)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), note: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["support.write"], reversible: false,
+      rollback_procedure: "ikke reverserbar - notater er append-only historikk", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      tool_id: "support", action: "list_events", description: "List hele hendelseshistorikken for én ticket (kunde-tidslinje, ikke audit_events)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string() }),
+      capability_class: "A", scopes: ["support.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      // §16/§20 i byggeordren: kunde-synlig utgående kommunikasjon - klasse C.
+      // Delegerer INTERNT til den EKSISTERENDE `email.send` (klasse D, krever
+      // signert godkjenning) via ToolGateway/Policy Gateway igjen - denne
+      // klassifiseringen svekker ALDRI den underliggende D-håndhevingen for
+      // selve e-postutsendelsen.
+      tool_id: "support", action: "reply", description: "Svar en kunde på en ticket (ruter GJENNOM eksisterende email.send, klasse D der)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ticket_id: z.string(), to: z.string(), subject: z.string(), body: z.string(), idempotency_key: z.string() }),
+      capability_class: "C", scopes: ["support.write", "mail.send"], reversible: false,
+      rollback_procedure: "send en oppfølgende korreksjon - selve e-posten kan ikke kalles tilbake", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_EMAIL_TOKEN",
+      output_trust: "internal", transport: transport("support")
+    },
+    {
+      // Untrusted ingestion-vei (Gmail-normalisert melding) - se
+      // `email-ingress.ts`. `ingest_message` selv skriver kun strukturerte
+      // pekere (§11 pointer-not-payload), aldri rått eksternt innhold.
+      tool_id: "support", action: "ingest_message", description: "Ingest en normalisert kanal-melding (kalles av email-ingress.ts, aldri direkte fra rå ekstern payload)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), channel: z.string().optional(),
+        source_type: z.string(), source_instance_id: z.string(), source_thread_id: z.string(), source_message_id: z.string(),
+        canonical_uri: z.string().optional(), subject: z.string(), summary: z.string(), is_from_customer: z.boolean(),
+        entity_resolution: z.string().optional(), company_id: z.string().optional(), contact_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["support.write"], reversible: true,
+      rollback_procedure: "sett ticket-status til 'closed'", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "untrusted", transport: transport("support")
     }
   ];
 }

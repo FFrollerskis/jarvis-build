@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
-import type { AttentionBucket, AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, SweepResult } from "./open-loop-types.ts";
+import type { AttentionBucket, AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53): automatisk open-loop-deteksjon. Gjenbruker
@@ -48,7 +48,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null,
+          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null, ticket_id: null,
           loop_type: "overdue_followup", detection_key: detectionKey,
           reason: `Oppfoelging "${row.title}" er forfalt`, next_action: `Fullfoer eller avbryt oppfoelging ${row.followup_id}`,
           priority, owner_person_id: row.owner_person_id, due_at: row.due_at
@@ -88,7 +88,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: null, followup_id: null, activity_id: null,
+          lead_id: null, followup_id: null, activity_id: null, ticket_id: null,
           loop_type: "stalled_opportunity", detection_key: detectionKey,
           reason: `Opportunity "${row.title}" har ingen aapen oppfoelging og ingen oppdatering siste ${staleDays} dager`,
           next_action: `Sett neste handling/oppfoelging for opportunity ${row.opportunity_id}`,
@@ -101,17 +101,140 @@ export class OpenLoopService {
     });
   }
 
-  /** Full sweep: begge deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
+  /**
+   * UA-3 Native Support Core (D-66) §17: en support-ticket "trenger svar" naar
+   * siste hendelse er en kunde-melding (ingen agent-svar/intern-notat etter)
+   * OG status IKKE er resolved/closed. Rent deterministisk - INGEN AI-tolkning
+   * av om et svar faktisk "besvarer" meldingen (§13 i byggeordren: kun status/
+   * hendelsesrekkefoelge, aldri semantisk innholdstolkning).
+   */
+  async detectSupportTicketsNeedingReply(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT t.ticket_id, t.company_id, t.contact_id, t.subject, t.priority, t.assignee_person_id
+         FROM support_tickets t
+         WHERE t.tenant_id = $1 AND t.status NOT IN ('resolved', 'closed')
+           AND EXISTS (
+             SELECT 1 FROM support_ticket_events e
+             WHERE e.tenant_id = t.tenant_id AND e.ticket_id = t.ticket_id AND e.event_type = 'customer_message'
+             ORDER BY e.occurred_at DESC LIMIT 1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM support_ticket_events e
+             WHERE e.tenant_id = t.tenant_id AND e.ticket_id = t.ticket_id AND e.event_type IN ('agent_reply', 'internal_note')
+               AND e.occurred_at > COALESCE((
+                 SELECT max(e2.occurred_at) FROM support_ticket_events e2
+                 WHERE e2.tenant_id = t.tenant_id AND e2.ticket_id = t.ticket_id AND e2.event_type = 'customer_message'
+               ), 'epoch'::timestamptz)
+           )`,
+        [tenantId]
+      );
+      return this.upsertSupportLoop(client, tenantId, memorySpace, rows.rows as SupportTicketRow[], "support_ticket_needs_reply", (row) => ({
+        reason: `Ticket "${row.subject}" venter fortsatt paa svar til kunden`,
+        next_action: `Svar ticket ${row.ticket_id}`,
+        priority: row.priority === "urgent" || row.priority === "high" ? "high" : "normal"
+      }));
+    });
+  }
+
+  /** §18: forfalt naar `next_response_due_at`/`next_action_due_at` har passert og ticket ikke er resolved/closed. */
+  async detectOverdueSupportTickets(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT ticket_id, company_id, contact_id, subject, priority, assignee_person_id,
+                LEAST(COALESCE(next_response_due_at, next_action_due_at), COALESCE(next_action_due_at, next_response_due_at)) AS due_at
+         FROM support_tickets
+         WHERE tenant_id = $1 AND status NOT IN ('resolved', 'closed')
+           AND (
+             (next_response_due_at IS NOT NULL AND next_response_due_at < now())
+             OR (next_action_due_at IS NOT NULL AND next_action_due_at < now())
+           )`,
+        [tenantId]
+      );
+      return this.upsertSupportLoop(
+        client, tenantId, memorySpace, rows.rows as SupportTicketRow[], "support_ticket_overdue",
+        (row) => ({ reason: `Ticket "${row.subject}" er forfalt`, next_action: `Foelg opp forfalt ticket ${row.ticket_id}`, priority: "high" })
+      );
+    });
+  }
+
+  /** §14: uassignert - ingen `assignee_person_id` satt, ticket fortsatt aktiv. */
+  async detectUnassignedSupportTickets(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT ticket_id, company_id, contact_id, subject, priority, assignee_person_id
+         FROM support_tickets WHERE tenant_id = $1 AND status NOT IN ('resolved', 'closed') AND assignee_person_id IS NULL`,
+        [tenantId]
+      );
+      return this.upsertSupportLoop(
+        client, tenantId, memorySpace, rows.rows as SupportTicketRow[], "support_ticket_unassigned",
+        (row) => ({ reason: `Ticket "${row.subject}" har ingen ansvarlig`, next_action: `Tildel ticket ${row.ticket_id}`, priority: "normal" })
+      );
+    });
+  }
+
+  /** §5: `waiting_internal`-status er i seg selv en operasjonell "attention needed"-tilstand. */
+  async detectSupportTicketsWaitingInternal(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT ticket_id, company_id, contact_id, subject, priority, assignee_person_id
+         FROM support_tickets WHERE tenant_id = $1 AND status = 'waiting_internal'`,
+        [tenantId]
+      );
+      return this.upsertSupportLoop(
+        client, tenantId, memorySpace, rows.rows as SupportTicketRow[], "support_ticket_waiting_internal",
+        (row) => ({ reason: `Ticket "${row.subject}" venter paa intern avklaring`, next_action: `Avklar ticket ${row.ticket_id} internt`, priority: "normal" })
+      );
+    });
+  }
+
+  private async upsertSupportLoop(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    rows: SupportTicketRow[],
+    loopType: OpenLoopType,
+    build: (row: SupportTicketRow) => { reason: string; next_action: string; priority: OpenLoopPriority }
+  ): Promise<SweepResult> {
+    let detected = 0;
+    let updated = 0;
+    const currentKeys: string[] = [];
+    for (const row of rows) {
+      const detectionKey = `${loopType}:${row.ticket_id}`;
+      currentKeys.push(detectionKey);
+      const built = build(row);
+      const result = await upsertOpenLoop(client, {
+        open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+        company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id,
+        loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
+        priority: built.priority, owner_person_id: row.assignee_person_id, due_at: null
+      });
+      if (result === "inserted") detected++; else updated++;
+    }
+    const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+    return { detected, updated, auto_resolved: autoResolved };
+  }
+
+  /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
   async runSweep(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
-    const [followups, opportunities] = [
+    const results = [
       await this.detectOverdueFollowups(tenantId, memorySpace),
-      await this.detectStalledOpportunities(tenantId, memorySpace)
+      await this.detectStalledOpportunities(tenantId, memorySpace),
+      // UA-3 Native Support Core (D-66) §17: "Reuse existing OpenLoopService" -
+      // support-reglene kjoeres som en del av DENNE samme sveipen, ingen ny
+      // scheduler/kø. Krever `support_tickets`/`support_ticket_events`
+      // (024_support.sql) - fravaer av tabellene ville feile hardt, IKKE stille
+      // hoppes over, siden migrasjonen alltid kjoeres foer runtime starter.
+      await this.detectSupportTicketsNeedingReply(tenantId, memorySpace),
+      await this.detectOverdueSupportTickets(tenantId, memorySpace),
+      await this.detectUnassignedSupportTickets(tenantId, memorySpace),
+      await this.detectSupportTicketsWaitingInternal(tenantId, memorySpace)
     ];
-    return {
-      detected: followups.detected + opportunities.detected,
-      updated: followups.updated + opportunities.updated,
-      auto_resolved: followups.auto_resolved + opportunities.auto_resolved
-    };
+    return results.reduce(
+      (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
+      { detected: 0, updated: 0, auto_resolved: 0 }
+    );
   }
 
   async listOpenLoops(tenantId: string, memorySpace: MemorySpace, status: "open" | "resolved" | "all" = "open"): Promise<BusinessOpenLoop[]> {
@@ -191,6 +314,15 @@ export class OpenLoopService {
   }
 }
 
+interface SupportTicketRow {
+  ticket_id: string;
+  company_id: string | null;
+  contact_id: string | null;
+  subject: string;
+  priority: "low" | "normal" | "high" | "urgent";
+  assignee_person_id: string | null;
+}
+
 interface UpsertOpenLoopInput {
   open_loop_id: string;
   tenant_id: string;
@@ -201,6 +333,7 @@ interface UpsertOpenLoopInput {
   lead_id: string | null;
   followup_id: string | null;
   activity_id: string | null;
+  ticket_id: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -214,8 +347,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
   const { rows } = await client.query(
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
-        loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ticket_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -227,7 +360,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
      RETURNING (xmax = 0) AS inserted`,
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
-      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.loop_type,
+      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.loop_type,
       input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );

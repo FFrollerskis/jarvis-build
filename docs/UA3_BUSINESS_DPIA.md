@@ -185,3 +185,79 @@ lav-konsekvens bruken - Appendiks D-gaten er dermed oppfylt både i bokstav (kon
 **Ikke i scope denne runden (se Q-25):** kontakt-/person-nivå-scoring (arkitektonisk umulig); AI Mesh-
 basert scoring-forbedring; finere per-tenant/policy-nivå av/på-bryter utover deployment-wiring;
 kontrakt-/faktura-verdi-baserte faktorer.
+
+## Native Jarvis Support Core (NY, UA-3 D-66, FIXED_SUITE / IKKE VERIFIED)
+
+**Formål:** gi Jarvis et eget, kanonisk (`JARVIS_CANONICAL`, D-64) support/ticket-domene - løser
+"Hva skjer med kunde X?"-akseptansekriterium 1 sitt Support/tickets-gap UTEN å gjøre en ekstern
+leverandør (Zendesk/Intercom/Freshdesk) til domeneeier. ZERO ekstern support-leverandør-avhengighet
+(bevist mekanisk i tester og host-akseptanse - `JARVIS_ZENDESK_*` kan stå helt uten verdi).
+
+**Ticket-metadata som lagres (`support_tickets`):** ticket-nummer, tenant/memory-space, valgfri
+selskap-/kontaktkobling (FK til `business_companies`/`business_contacts`), emne, status (deterministisk
+lifecycle - se state-machine.ts), prioritet, ansvarlig (`assignee_person_id`, FK til `people`), kanal,
+generiske kilde-pekere (`source_type`/`source_instance_id`/`source_thread_id`/`source_message_id`/
+`canonical_uri`), entitetsresolusjons-tilstand (matched/unmatched/ambiguous), neste-svar-/neste-
+handling-frist, tidsstempler.
+
+**Kundekommunikasjon (`support_ticket_events`):** hver kunde-melding/agent-svar lagres KUN som et kort,
+strukturert `summary`-felt + kilde-pekere (§11 pointer-not-payload) - ALDRI en kopi av det fulle
+e-postinnholdet. Full meldingstekst forblir i den autoritative Gmail-kilden/Knowledge-laget, aldri
+duplisert inn i operasjonelle support-tabeller.
+
+**Interne notater:** `internal_note`-events er ALDRI kunde-synlige, sender ALDRI e-post, er tenant-/
+memory-space-isolert på SAMME måte som resten av ticket-historikken, og er auditerbare via den normale
+`support_ticket_events`-tidslinjen (IKKE `audit_events` - kundehistorikk og systemrevisjon er
+eksplisitt to separate konsepter, se §12 i byggeordren).
+
+**Kildepekere:** identisk prinsipp som `business_activities.canonical_uri` - en peker til Gmail-
+meldingen (dyplenke), aldri en kopi. Full e-postinnhold forblir i Knowledge/kilde-laget.
+
+**Retensjon/Q-20-erasure:** `support_tickets`/`support_ticket_events` er registrert i
+`modules/erasure/src/plan.ts` sin `planMemorySpaceInContext()` (§21 i byggeordren) - KLASSIFISERT SOM
+KUNDEDATA (samme klasse som `memory_items`/`knowledge_documents`), IKKE append-only systemrevisjon som
+`audit_events` - `jarvis_app` har derfor fått en eksplisitt, begrenset `GRANT DELETE` KUN for disse to
+tabellene (`024_support.sql`, samme presedens/begrunnelse som `018_erasure.sql` sin allerede
+eksisterende DELETE-allowliste). Bevist mekanisk (unit- og host-test): en slettet ticket kan ALDRI
+"gjenoppstå" av re-ingestion av samme kilde-melding - re-ingestion etter sletting oppretter en HELT NY
+ticket, aldri en gjenoppvekket kopi av den slettede raden. **Kjent, dokumentert begrensning (ikke
+stille utelatt):** de øvrige `business_*`-tabellene (companies/contacts/leads/opportunities/
+activities/followups/open_loops) er FORTSATT ikke registrert i erasure-planen i det hele tatt - dette
+er en PRE-EKSISTERENDE gap fra P0 (uendret av denne sliceen, se Q-25 punkt 9), IKKE noe Native Support
+Core introduserer eller utvider.
+
+**Ansvarlig-data (assignee):** `assignee_person_id` er en FK til den EKSISTERENDE `people`-tabellen -
+ingen ny bruker-/identitetsmodell bygges. Tildeling er operasjonell state, auditert som et
+`assigned`/`unassigned`-event på ticket-tidslinjen.
+
+**E-post-transport:** Gmail-ingress/kunde-svar gjenbruker den EKSISTERENDE `GmailTransport`
+(ToolGateway) - INGEN egen SMTP/Gmail-klient. Kunde-svar (`support.reply`) ruter GJENNOM den
+allerede-eksisterende `email.send`-handlingen (klasse D, krever signert godkjenning, uendret av denne
+sliceen) - ingen ny, svakere utsendelsesvei innføres.
+
+**Open-loop-integrasjon:** gjenbruker `OpenLoopService`/`business_open_loops` UENDRET mekanisme (§17) -
+fire nye `loop_type`-verdier + en nullable `ticket_id`-pekerkolonne, ingen ny motor, ingen ny
+datakategori utover det `business_open_loops` allerede dekker.
+
+**Auditering:** `support.reply` sin sensitive svartekst (`body`) sendes ALDRI inn i selve
+`ToolGateway`-audit-payloaden for `support.reply`-handlingen - kun status/idempotency-nøkkel - bevist
+mekanisk i tester og host-akseptanse (`ua3_support_audit_safe`).
+
+**Rettslig grunnlag:** samme berettiget-interesse-vurdering (GDPR art. 6(1)(f)) som resten av Business
+OS - support-ticket-håndtering er en ordinær, forventet del av et kundeforhold, ingen ny
+persondata-kategori utover det som allerede samles via Gmail/CRM. **GDPR art. 22 er IKKE relevant** -
+en ticket avgjør aldri autonomt noe med rettslig/tilsvarende betydelig effekt for en person; status/
+prioritet/tildeling er ordinær operasjonell saksbehandling, alltid med eier-/agent-tilgjengelig manuell
+kontroll (state-machine + manuelle handlinger), aldri en algoritmisk "avgjørelse om" kunden selv.
+
+**Data-minimering:** prioritet er BEVISST begrenset til `low`/`normal`/`high`/`urgent` og kan settes
+manuelt eller senere avledes fra deterministiske operasjonelle signaler (samme `assertNoProhibitedFactorCodes()`-
+prinsipp som D-61-scoring) - ALDRI fra beskyttede/sensitive kjennetegn (helse/rase/religion/politikk/
+seksuell orientering/kjønn/sivilstatus/funksjonsnedsettelse/formue/sosioøkonomisk status). Ingen slik
+avledning er bygget i denne sliceen (kun manuell setting).
+
+**Ikke i scope denne runden:** Contracts/e-sign (Q-28, uendret); en ekstern support-leverandør-adapter
+(Zendesk/Intercom/Freshdesk som VALGFRI fremtidig kanal-adapter, ALDRI domeneeier - D-64); AI Mesh-
+basert klassifisering av support-vs-ikke-support-e-post (routing er BEVISST deterministisk: konfigurert
+innboks-adresse ELLER kjent tråd-id, § 7 i byggeordren); flerkanal utover e-post (portal/chat/SMS -
+domenemodellen er designet for det, men ingen ekstra kanal er koblet inn denne runden).

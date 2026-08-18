@@ -53,6 +53,19 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   }
   add(result, "knowledge_embeddings", await run(client, mode, "knowledge_embeddings", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "knowledge_documents", await run(client, mode, "knowledge_documents", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-3 Native Jarvis Support Core (D-66) §21 i byggeordren: registrer
+  // support-tabellene i erasure-planen (samme mønster som knowledge_*
+  // over). `support_ticket_events` FØRST (FK -> `support_tickets`).
+  // Kjent, dokumentert begrensning (ikke stille utelatt - se OPEN_QUESTIONS.md
+  // Q-25 punkt 9/D-66): øvrige `business_*`-tabeller (companies/contacts/
+  // leads/opportunities/activities/followups/open_loops) er FORTSATT ikke
+  // registrert i erasure-planen i det hele tatt - dette er en PRE-
+  // EKSISTERENDE gap fra P0 (uendret av denne sliceen), IKKE noe denne
+  // ordren introduserer eller utvider. `business_open_loops.ticket_id`
+  // peker til `support_tickets`, men siden `business_open_loops` selv ikke
+  // slettes her, oppstår ingen FK-konflikt via DENNE stien i dag.
+  add(result, "support_ticket_events", await run(client, mode, "support_ticket_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "support_tickets", await run(client, mode, "support_tickets", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

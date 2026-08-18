@@ -5,7 +5,13 @@
  * types.ts - ingen eksisterende entitet endret.
  */
 
-export type OpenLoopType = "overdue_followup" | "stalled_opportunity";
+export type OpenLoopType =
+  | "overdue_followup"
+  | "stalled_opportunity"
+  | "support_ticket_needs_reply"
+  | "support_ticket_overdue"
+  | "support_ticket_unassigned"
+  | "support_ticket_waiting_internal";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -20,6 +26,8 @@ export interface BusinessOpenLoop {
   lead_id: string | null;
   followup_id: string | null;
   activity_id: string | null;
+  /** UA-3 Native Support Core (D-66): peker til `support_tickets`, null for ikke-support-loops. */
+  ticket_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;

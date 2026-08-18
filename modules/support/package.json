@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/support",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-3 Native Jarvis Support Core (D-66): JARVIS_CANONICAL support/ticket-domene - ZERO ekstern support-leverandor-avhengighet",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}
