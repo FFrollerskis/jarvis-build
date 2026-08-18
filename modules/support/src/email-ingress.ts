@@ -150,16 +150,24 @@ export class SupportEmailService {
     memorySpace: MemorySpace,
     identity: IdentityContext,
     ticketId: string,
-    input: { to: string; subject: string; body: string; idempotency_key: string }
+    input: { to: string; subject: string; body: string; idempotency_key: string },
+    approval?: unknown
   ): Promise<{ sent: boolean; error?: string; ticket: SupportTicket | null; event: SupportTicketEvent }> {
     const ticket = await this.support.getTicket(tenantId, memorySpace, ticketId);
     if (!ticket) throw new Error("support_ticket_not_found");
     let sent = false;
     let error: string | undefined;
     try {
+      // SECURITY FIX #2 (D-68): `identity` er nå DEN OPPRINNELIGE kalleren sin
+      // EKTE identitet (aldri fabrikkert) - `email.send` (klasse D) evaluerer
+      // derfor den REELLE authority-modusen. En eier forblir sovereign uendret;
+      // en delegat forblir delegat og MÅ ha en gyldig `approval` for NETTOPP
+      // denne `send`-handlingen (samme godkjenning som ev. fulgte med selve
+      // `support.reply`-kallet - IKKE en ny/parallell godkjenningsmekanisme).
       const result = await this.gateway.execute({
         identity, tool_id: "email", action: "send",
-        parameters: { to: input.to, subject: input.subject, body: input.body }
+        parameters: { to: input.to, subject: input.subject, body: input.body },
+        ...(approval !== undefined ? { approval } : {})
       });
       sent = result.ok;
       if (!result.ok) error = result.reason;

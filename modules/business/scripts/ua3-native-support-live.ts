@@ -90,17 +90,13 @@ const TENANT_B = `tenant-ua3-sup-live-${runId}-b`; // tenant-isolasjon: annen te
 const OWNER_PERSON = `person-ua3-sup-live-${runId}`;
 const AGENT_PERSON = `person-ua3-sup-agent-${runId}`;
 const ACCOUNT_EMAIL = "post@tsworkflow.com";
-// HOST FIX #1 (D-67): `SupportTransport`.reply() bygger internt en SYSTEM-
-// identitet (`ToolTransport.invoke()` gir ikke tilgang til den opprinnelige
-// kalleren sin IdentityContext - se transport.ts) som person_id-matcher
-// `process.env.JARVIS_OWNER_PERSON_ID` (EKSAKT samme konvensjon som
-// apps/api/src/main.ts/worker-main.ts) for å oppnaa SOVEREIGN authority paa
-// det nøstede `email.send`-kallet (klasse D). Uten dette matcher IKKE denne
-// scriptets kjøre-unike `OWNER_PERSON` den interne identiteten, og
-// `email.send` ville feilet med "class_d_missing_approval" for HVER reply -
-// uavhengig av credential-fiksen under. Satt FØR noen ToolGateway/PolicyGateway
-// konstrueres i dette scriptet.
-process.env["JARVIS_OWNER_PERSON_ID"] = OWNER_PERSON;
+// SECURITY FIX #2 (D-68): HOST FIX #1 sin `process.env.JARVIS_OWNER_PERSON_ID`-
+// konstruksjon her er FJERNET - den var et symptom på at `SupportTransport`
+// selv fabrikkerte en eier-identitet internt (en reell rettighetseskalering,
+// se transport.ts). Nå videreformidler `ToolGateway.execute()` DEN EKTE
+// kalleren sin `IdentityContext` (`ownerIdentityFor(TENANT_A)` under, som
+// allerede har `person_id: OWNER_PERSON`) UENDRET til det nøstede
+// `email.send`-kallet - ingen egen env-var-manipulasjon trengs lenger.
 
 function ownerIdentityFor(tenantId: string): IdentityContext {
   return {

@@ -1,5 +1,5 @@
-import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
-import type { ToolGateway, ToolTransport } from "@jarvis/tool-gateway";
+import type { JsonValue, MemorySpace } from "@jarvis/contracts";
+import type { ToolGateway, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "@jarvis/business";
 import type { SupportService } from "./service.ts";
 import { SupportEmailService } from "./email-ingress.ts";
@@ -7,13 +7,19 @@ import type { TicketPriority, TicketStatus } from "./types.ts";
 
 /**
  * UA-3 Native Support Core (D-66) §19: provider-nøytralt `support.*`-
- * namespace. Samme arkitektur-begrensning som `BusinessTransport` (D-49):
- * `ToolTransport.invoke()` gir IKKE `IdentityContext` - `tenant_id`/
- * `memory_space` MÅ komme via de zod-validerte `parameters`, bygget av
- * TRUSTED kallerlag. `reply` er unntaket som TRENGER identity (for å kalle
- * `email.send` via `ToolGateway`/Policy Gateway igjen) - løst ved å bygge en
- * SYSTEM-identity lokalt (samme mønster som `sync_business_events`), ALDRI
- * modell-styrt. `emailService` bygges LAT (samme mønster som
+ * namespace. Samme arkitektur-begrensning som `BusinessTransport` (D-49) for
+ * de fleste handlinger: `tenant_id`/`memory_space` MÅ komme via de zod-
+ * validerte `parameters`, bygget av TRUSTED kallerlag. `reply` er unntaket
+ * som TRENGER en ekte `IdentityContext` (for å kalle `email.send` via
+ * `ToolGateway`/Policy Gateway igjen) - SECURITY FIX #2 (D-68): løst ved å
+ * VIDEREFORMIDLE `ToolInvocationContext.identity` (DEN OPPRINNELIGE kalleren
+ * sin EKTE identitet, gitt av `ToolGateway.execute()` selv) UENDRET til det
+ * nøstede kallet - ALDRI ved å fabrikkere/eskalere en "system"- eller
+ * eier-identitet lokalt (HOST FIX #1 sin `JARVIS_OWNER_PERSON_ID`-
+ * konstruksjon var en reell rettighetseskalering: enhver kaller med et
+ * gyldig `support.reply`-mandat ville fått `email.send` UBETINGET utført
+ * MED eier-authority, uansett hvem den faktiske kalleren var - fjernet).
+ * `emailService` bygges LAT (samme mønster som
  * `BusinessTransport.requireEventSync()`) - `business`/`gateway` er
  * valgfrie kun for tester som ikke trenger `reply`/`ingest_message`.
  */
@@ -26,7 +32,12 @@ export class SupportTransport implements ToolTransport {
     private readonly gateway?: ToolGateway
   ) {}
 
-  async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+  async invoke(
+    action: string,
+    parameters: Record<string, JsonValue>,
+    _credential: string,
+    context: ToolInvocationContext
+  ): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
     const memorySpace = (parameters["memory_space"] !== undefined ? String(parameters["memory_space"]) : "business") as MemorySpace;
 
@@ -101,28 +112,25 @@ export class SupportTransport implements ToolTransport {
         return { data: rows as unknown as JsonValue };
       }
       case "reply": {
-        // HOST FIX #1 (D-67, ekte host-funn): `email.send` er klasse D (krever
-        // signert godkjenning MED MINDRE kalleren har SOVEREIGN authority -
-        // `resolveAuthorityMode()` i @jarvis/policy krever `identity.person_id
-        // === authority.owner_person_id`). En generisk `person_id: "system"`
-        // matcher ALDRI en konfigurert eier og ga derfor UBETINGET
-        // "class_d_missing_approval" for HVER reply, uansett credential-status
-        // - oppdaget under gjeninnføring av reply-kaskaden i denne runden.
-        // Gjenbruker EKSAKT samme konvensjon som `apps/api/src/main.ts`/
-        // `worker-main.ts` (JARVIS_OWNER_PERSON_ID, samme fallback
-        // "person-tobias") - ALDRI en ny autoritetsmodell. `ToolTransport.
-        // invoke()` gir fortsatt ikke den opprinnelige kalleren sin
-        // IdentityContext (se klassekommentaren over) - dette er identiteten
-        // som FAKTISK utfører selve e-post-utsendingen på vegne av eieren.
-        const identity: IdentityContext = {
-          person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
-          tenant_id: tenantId, memory_space_id: memorySpace,
-          session_id: `support-reply-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
-        };
-        const result = await this.requireEmailService().reply(tenantId, memorySpace, identity, requireString(parameters, "ticket_id"), {
-          to: requireString(parameters, "to"), subject: requireString(parameters, "subject"), body: requireString(parameters, "body"),
-          idempotency_key: requireString(parameters, "idempotency_key")
-        });
+        // SECURITY FIX #2 (D-68): `context.identity` er DEN OPPRINNELIGE
+        // kalleren sin EKTE identitet, gitt av `ToolGateway.execute()` selv
+        // (§ security fix #2 i byggeordren) - ALDRI en fabrikkert "system"-
+        // eller eier-identitet (HOST FIX #1 sin `JARVIS_OWNER_PERSON_ID`-
+        // konstruksjon ga UBETINGET eier-authority til `email.send` for
+        // ENHVER kaller med et gyldig `support.reply`-mandat - en reell
+        // rettighetseskalering, fjernet). `resolveAuthorityMode()` evaluerer
+        // nå den REELLE identiteten: en eier forblir sovereign uendret; en
+        // delegat forblir delegat og MÅ selv levere en gyldig signert
+        // godkjenning for `email.send` (klasse D) - `context.approval`
+        // videreformidles UENDRET, ALDRI en ny/parallell godkjenningsvei.
+        const result = await this.requireEmailService().reply(
+          tenantId, memorySpace, context.identity, requireString(parameters, "ticket_id"),
+          {
+            to: requireString(parameters, "to"), subject: requireString(parameters, "subject"), body: requireString(parameters, "body"),
+            idempotency_key: requireString(parameters, "idempotency_key")
+          },
+          context.approval
+        );
         return { external_id: result.event.event_id, data: result as unknown as JsonValue };
       }
       case "ingest_message": {
