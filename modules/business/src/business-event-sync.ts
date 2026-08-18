@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
+import { listBusinessTenantIds } from "@jarvis/core";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
@@ -277,6 +278,10 @@ export class BusinessEventSyncService {
  * ganger (selve synkroniseringen er idempotent). Én tenant sin feil (f.eks.
  * midlertidig Gmail-rate-limit) velter ALDRI resten.
  *
+ * Q-27 (2026-08-18, D-65): tenant-katalogen leses via den DELTE, RLS-trygge
+ * `listBusinessTenantIds()` (@jarvis/core) - ALDRI en rå `pool.query`
+ * direkte mot `tenants` (som var strukturelt RLS-blind, se D-65).
+ *
  * Kjent, dokumentert forenkling (ikke stille utelatt): alle bedrifts-
  * tenants deler i dag SAMME ene tilkoblede Google-konto
  * (`JARVIS_GOOGLE_ACCOUNT`) - deterministisk kontakt-e-post-gjenkjenning
@@ -289,21 +294,19 @@ export async function runBusinessEventSyncForAllTenants(
   pool: pg.Pool,
   syncService: BusinessEventSyncService
 ): Promise<Record<string, BusinessEventSyncResult>> {
-  const { rows } = await pool.query(
-    `SELECT tenant_id FROM tenants WHERE kind = 'business' ORDER BY tenant_id LIMIT 200`
-  );
+  const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, BusinessEventSyncResult> = {};
-  for (const row of rows as Array<{ tenant_id: string }>) {
+  for (const tenantId of tenantIds) {
     const identity: IdentityContext = {
-      person_id: "system", tenant_id: row.tenant_id, memory_space_id: "business",
-      session_id: `business-events-sync-${row.tenant_id}`, device_id: "jarvis-core",
+      person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+      session_id: `business-events-sync-${tenantId}`, device_id: "jarvis-core",
       channel: "api", auth_strength: "active"
     };
     try {
-      results[row.tenant_id] = await syncService.syncTenant(row.tenant_id, "business", identity);
+      results[tenantId] = await syncService.syncTenant(tenantId, "business", identity);
     } catch {
       // Én tenant sin synk-feil skal aldri velte hele sveipet for andre tenants.
-      results[row.tenant_id] = {
+      results[tenantId] = {
         gmail: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },
         calendar: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },
         open_loops_reevaluated: false

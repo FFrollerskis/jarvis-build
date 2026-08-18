@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { listBusinessTenantIds } from "@jarvis/core";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import type { SweepResult } from "./open-loop-types.ts";
 
@@ -11,21 +12,23 @@ import type { SweepResult } from "./open-loop-types.ts";
  * itererer alle bedrifts-tenants og kjoerer en full sweep for hver, bounded
  * (LIMIT 200 tenants), tenant-scoped, trygg aa kjoere flere ganger (sweep
  * selv er idempotent - se OpenLoopService.runSweep()).
+ *
+ * Q-27 (2026-08-18, D-65): tenant-katalogen leses via den DELTE, RLS-trygge
+ * `listBusinessTenantIds()` (@jarvis/core) - ALDRI en rå `pool.query`
+ * direkte mot `tenants` (som var strukturelt RLS-blind, se D-65).
  */
 export async function runOpenLoopSweepForAllTenants(
   pool: pg.Pool,
   openLoops: OpenLoopService
 ): Promise<Record<string, SweepResult>> {
-  const { rows } = await pool.query(
-    `SELECT tenant_id FROM tenants WHERE kind = 'business' ORDER BY tenant_id LIMIT 200`
-  );
+  const tenantIds = await listBusinessTenantIds(pool, 200);
   const results: Record<string, SweepResult> = {};
-  for (const row of rows as Array<{ tenant_id: string }>) {
+  for (const tenantId of tenantIds) {
     try {
-      results[row.tenant_id] = await openLoops.runSweep(row.tenant_id, "business");
+      results[tenantId] = await openLoops.runSweep(tenantId, "business");
     } catch {
       // Én tenant sin sweep-feil skal aldri velte hele sveipet for andre tenants.
-      results[row.tenant_id] = { detected: 0, updated: 0, auto_resolved: 0 };
+      results[tenantId] = { detected: 0, updated: 0, auto_resolved: 0 };
     }
   }
   return results;

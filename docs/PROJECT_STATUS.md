@@ -1,39 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (D-64) - permanent
-styringsregel logget, ren transplantasjon fra `origin/main`**, se egen "CORE OWNERSHIP / ADAPTER
-BOUNDARY INVARIANT"-seksjon under. Ny ufravikelig regel 12 i CLAUDE.md + nytt §11 i ARCHITECTURE.md:
-et masterplan-kapabilitetsnavn antyder ALDRI automatisk en tredjeparts-leverandør - utløst av en
-tidligere, ALDRI merget utforskende Zendesk-connector (draft-PR #13) som ble bygget som om
-"Support/tickets" betydde "velg Zendesk og la den eie ticket-domenet". **Tobias har eksplisitt
-overstyrt den arkitekturen: Support/tickets skal være `JARVIS_CANONICAL` (Native Jarvis Support
-Core), Zendesk kan senere bli en valgfri utførelsesadapter - PR #13 er SUPERSEDED, merges IKKE.**
-Full masterplan-avhengighetsaudit utført PÅ CANONICAL `origin/main` (ARCHITECTURE.md §11.9) - de
-fleste eksisterende connectors (Gmail/Calendar/Drive/GitHub/Telegram/Vercel/HA/AI-modeller/
-observability/secrets) er allerede korrekt klassifisert, INGEN endring nødvendig der. Et ekte,
-uavhengig produksjonsfunn fra samme (forkastede) kildebranch RE-VERIFISERT direkte mot faktisk
-`origin/main`-kildekode (ikke tatt for gitt): tre eksisterende `DailyScheduler`-funksjoner
+**Oppdatert:** 2026-08-18 (**Q-27 - RLS-blind business-tenant-enumering FIKSET, FIXED_SUITE / IKKE
+VERIFIED → D-65**, se egen "Q-27 - RLS-BLIND BUSINESS TENANT ENUMERATION FIX"-seksjon under. Fikser
+den ekte produksjonsbugen D-64/Q-27 oppdaget: tre eksisterende `DailyScheduler`-funksjoner
 (`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
-bruker en RLS-blind, uskopet tenants-katalog-spørring og har sannsynligvis ALDRI oppdaget en tenant i
-produksjon - registrert som ny Q-27, OPEN, IKKE fikset i denne runden. Contracts/e-sign forebyggende
-grenseanalyse (Contract Core vs. Signature Execution Provider) logget som Q-28, INGEN leverandør
-valgt. INGEN kode endret - kun CLAUDE.md/ARCHITECTURE.md/DECISIONS_AND_ASSUMPTIONS.md/
-OPEN_QUESTIONS.md. **VIKTIG NUMMERERINGS-KORREKSJON denne runden:** en tidligere versjon av dette
-arbeidet (nå SUPERSEDED, PR #14, closed) stablet seg feilaktig på den umergede Zendesk-branchen og
-lånte dens IKKE-canonical D-64/Q-27/Q-28/Q-29-numre. Denne runden er en REN transplantasjon fra
-faktisk `origin/main` (SHA `4bc33b8`) - korrekt neste canonical D-ID er D-64 (D-63 var siste på
-`main`), korrekte neste canonical Q-IDer er Q-27/Q-28 (Q-26 var siste på `main`). **Branch:**
-`claude/core-ownership-adapter-invariant-clean` (fra `origin/main` `4bc33b8` DIREKTE - INGEN Zendesk-
-kode/migrasjon/runtime i diffen, verifisert). UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48,
-uendret · P1A Runtime Wiring Closeout forblir VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) ·
-UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42, uendret, host-bevist run_id `2703299e`, PR #5 merget)
-· UA-2 P1B-A merget til `main` (PR #7) · UA-2 masterplan-closeout merget til `main` (PR #8) · UA-3 P0
-merget til `main` (PR #9) · UA-3 Open-Loop Detection + Business Brief merget til `main` (PR #10) ·
-UA-3 Business-Event-Linkage merget til `main` (PR #11) · UA-3 Profiling/Scoring merget til `main`
-(PR #12) · **UA-3 Support/Tickets (Zendesk, PR #13): SUPERSEDED BY NATIVE JARVIS SUPPORT CORE, IKKE
-merget, branch bevart for mulig fremtidig adapter-referanse** · **Governance-invariant, forrige
-stablede versjon (PR #14): SUPERSEDED, closed** · **Governance-invariant, denne rene versjonen
-(PR #15): draft, IKKE merget ennå**
+brukte en RLS-blind, uskopet spørring mot `tenants` og hadde sannsynligvis ALDRI oppdaget en tenant i
+produksjon. Ny `SECURITY DEFINER`-katalogfunksjon `jarvis_list_business_tenant_ids()`
+(`023_business_tenant_catalog.sql`) + delt TS-hjelper `listBusinessTenantIds()` (`@jarvis/core`)
+brukes nå av ALLE TRE (ingen tre separate fikser). `jarvis_runtime` UENDRET NOSUPERUSER/NOBYPASSRLS
+(Q-21). 16 nye tester (ekte embedded Postgres, IKKE `fakePool()`) beviser bug OG fiks mekanisk -
+1160→1176, full suite grønn. Host-akseptanseskript `q27-tenant-enumeration-host-run.ts`/`-live.ts`
+klar. **INGEN Tobias-host-kjøring utført ennå** - draft-PR, Q-27 forblir EKSPLISITT OPEN i
+OPEN_QUESTIONS.md inntil host-verifisert. **Branch:** `claude/q27-safe-tenant-enumeration` (fra
+`origin/main` `0566b7a` DIREKTE).
+
+**Forrige runde (samme dag, MERGET):** CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (D-64) - PR #15
+merget til `main` (merge-commit `0566b7a`), ny regel 12 i CLAUDE.md + §11 i ARCHITECTURE.md.
+Support/tickets nå eksplisitt `JARVIS_CANONICAL` (Native Jarvis Support Core-retning, Tobias-
+besluttet), tidligere Zendesk-connector (draft-PR #13) SUPERSEDED, IKKE merget, branch bevart. Den
+tidligere, feilaktig Zendesk-branch-stablede governance-versjonen (PR #14) er SUPERSEDED/closed.
+UA-2 forblir VERIFIED/COMPLETE i sin helhet → D-48, uendret · P1A Runtime Wiring Closeout forblir
+VERIFIED/COMPLETE (host-smoke-bevist, PR #6 merget) · UA-2 P1A selv forblir VERIFIED/COMPLETE (D-42,
+uendret, host-bevist run_id `2703299e`, PR #5 merget) · UA-2 P1B-A merget til `main` (PR #7) · UA-2
+masterplan-closeout merget til `main` (PR #8) · UA-3 P0 merget til `main` (PR #9) · UA-3 Open-Loop
+Detection + Business Brief merget til `main` (PR #10) · UA-3 Business-Event-Linkage merget til `main`
+(PR #11) · UA-3 Profiling/Scoring merget til `main` (PR #12) · UA-3 Support/Tickets (Zendesk, PR #13):
+SUPERSEDED, IKKE merget · Core Ownership/Adapter Boundary (PR #15): MERGET til `main`
 
 ---
 
@@ -1894,7 +1886,7 @@ denne sliceen er VERIFIED/COMPLETE - HELE UA-3 er IKKE komplett** (kriterium 1/2
 oppdatert Q-25). **Masterplan v4.0 «Sovereign Autonomy» forblir IKKE komplett.** PR #12 merget til
 `main` (normal merge-commit, samme konvensjon som PR #1-#11 - historikk bevart, ikke squashet).
 
-## CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (2026-08-18, branch `claude/core-ownership-adapter-invariant-clean`, REN transplantasjon fra `origin/main`) → D-64
+## CORE OWNERSHIP / ADAPTER BOUNDARY INVARIANT (2026-08-18, branch `claude/core-ownership-adapter-invariant-clean`, REN transplantasjon fra `origin/main`) → D-64 - MERGET (PR #15, merge-commit `0566b7a`)
 
 **Permanent styringsregel, IKKE en implementasjonsoppgave.** Tobias identifiserte et tilbakevendende
 feilmønster: et masterplan-kapabilitetsnavn ("Support/tickets") ble tolket som "velg en ekstern
@@ -1955,6 +1947,52 @@ diffen. `pnpm -w typecheck` 14/14 pakker fortsatt clean (uendret, ingen kode rø
 
 **HELE UA-3 forblir uendret av denne runden** - ingen fase-fullførelsesstatus endret.
 
+## Q-27 - RLS-BLIND BUSINESS TENANT ENUMERATION FIX (2026-08-18, branch `claude/q27-safe-tenant-enumeration`, fra `origin/main` `0566b7a`) → D-65
+
+**Dedikert produksjonsbug-slice - fikser den ekte D-64/Q-27-oppdagelsen, IKKE en governance-/
+dokumentasjonsrunde.** Tre eksisterende, allerede-i-produksjon `DailyScheduler`-funksjoner
+(`runOpenLoopSweepForAllTenants` D-53, `runBusinessEventSyncForAllTenants` D-57,
+`runScoringSweepForAllTenants` D-61) kjørte en rå, uskopet `SELECT tenant_id FROM tenants
+WHERE kind='business'...` mot den delte `jarvis_runtime`-poolen FØR noen `jarvis.tenant_id`-kontekst
+var satt - `tenants` har `FORCE ROW LEVEL SECURITY`, så spørringen returnerte STRUKTURELT 0 rader
+uansett faktisk tenant-antall.
+
+**Bygget:**
+1. **Migrasjon `023_business_tenant_catalog.sql`** - ny `jarvis_list_business_tenant_ids(p_limit
+   integer DEFAULT 200)`, en smal `SECURITY DEFINER`-funksjon (samme mønster som `claim_next_task()`,
+   `007_claim_function.sql`/`009_worker.sql`), eid av migrasjons-admin-rollen, `SET search_path =
+   public`, `REVOKE ALL FROM PUBLIC` + `GRANT EXECUTE` KUN til `jarvis_app`. `kind='business'`
+   HARDKODET i funksjonskroppen (ingen caller-styrt parameter) - snevrere enn den forkastede
+   Zendesk-branchens opprinnelige prototype.
+2. **`listBusinessTenantIds()`** (`@jarvis/core`, `modules/core/src/services/tenant-catalog.ts`) - ny
+   delt TS-hjelper, kaster en typet `BusinessTenantEnumerationError` ved faktisk spørringsfeil
+   (ALDRI stille "0 tenants"), logger KUN et antall (`business_tenants_enumerated`), aldri
+   tenant-IDer.
+3. **Alle tre sveip-funksjoner omskrevet** til å kalle DENNE ene hjelperen - ingen duplisert SQL,
+   ingen tre separate fikser.
+4. **Repo-bred audit** (grep etter alle `FROM tenants`-mønstre) bekrefter INGEN andre
+   produksjonsforekomster av samme feilklasse.
+5. **Testdekning (16 nye tester, ekte embedded Postgres, IKKE `fakePool()`):**
+   `modules/core/test/business-tenant-catalog-rls.test.ts` (8) beviser katalogfunksjonen isolert -
+   bug-reproduksjon, riktige/kun bedrifts-tenants, minimal kolonneoverflate, PUBLIC/utenforstående-
+   rolle nektet, search_path-sikkerhet (decoy-skjema), Q-21 uendret, tom mengde ≠ feil, bounded
+   limit. `modules/business/test/q27-scheduler-tenant-enumeration-rls.test.ts` (8) beviser alle TRE
+   sveip-funksjonene oppdager syntetiske bedrifts-tenants via den ekte RLS-rollen, ekskluderer
+   person-tenant, bevarer feilisolasjon, repeterbar. Eksisterende `fakePool()`-enhetstester
+   (`open-loop-sweep.test.ts`) BEHOLDT UENDRET i sin orkestrerings-/feilisolasjonsrolle - kun test C
+   sin SQL-tekstform-assertion oppdatert til det nye kallmønsteret.
+6. **Host-akseptanseskript** `q27-tenant-enumeration-host-run.ts` → `q27-tenant-enumeration-live.ts`
+   (samme admin/runtime-pool-separasjon/selvdiagnostisk-FK-sperre-mønster som alle tidligere
+   UA-3-live-scripts) - beviser BÅDE bug-reproduksjon (RLS fortsatt håndhevet) OG fiksen i ÉN kjøring.
+
+**Suite-verifisert:** 1176/1176 tester totalt (1160→1176, 16 nye), typecheck 14/14, lint rene.
+
+**IKKE VERIFIED:** draft-PR opprettet, INGEN Tobias-host-kjøring utført ennå. Q-27 forblir
+EKSPLISITT OPEN i OPEN_QUESTIONS.md - suite-bevis alene lukker den ALDRI.
+
+**Kjente åpne gap (ikke skjult):** Q-27 selv (venter host-verifisering). D-64/Native Support Core/
+Q-28 Contracts-forebygging/Q-26 Knowledge Verification alle UENDRET av denne rene bug-fiks-runden.
+
 ## Blokkeringer
 Q-20/UA-2 P0/Q-21/UA-2 P1A/P1A Runtime Wiring Closeout/UA-2 P1B-A/UA-3 P0/UA-3 Open-Loop Detection/
 UA-3 Business-Event-Linkage/UA-3 Profiling/Scoring har INGEN egne blokkeringer (alle
@@ -1969,21 +2007,30 @@ leverandørvalg, MEN heller ikke startet ennå** - egen, fremtidig, eksplisitt g
 **Contracts/e-sign-connectoren forblir blokkert på en EKSPLISITT Tobias-provider-beslutning FOR
 SELVE SIGNATUR-UTFØRELSEN, NÅ OGSÅ på Core-vs-Adapter-porten i §11.2** (D-64/Q-28 legger til krav om
 at kontraktskjernen designes Jarvis-native FØR noen signaturleverandør velges) - IKKE kodbar før
-dette foreligger, se D-57/Q-25 item 8 + Q-28. **Q-27 (NY, OPEN): tre eksisterende
-produksjonsfunksjoner
-(`runOpenLoopSweepForAllTenants`/`runBusinessEventSyncForAllTenants`/`runScoringSweepForAllTenants`)
-bruker en RLS-blind tenants-katalog-spørring og har sannsynligvis ALDRI oppdaget en tenant i
-produksjon** - egen liten fremtidig BO, fiksmønsteret allerede kjent. **Kriterium 2 sin gjenstående
+dette foreligger, se D-57/Q-25 item 8 + Q-28. **Q-27 er NÅ FIXED_SUITE (D-65), blokkert KUN på en
+Tobias-host-kjøring** (`q27-tenant-enumeration-host-run.ts`, draft-PR, se egen seksjon over) - IKKE
+lenger et uløst designspørsmål, fiksen er ferdig implementert og suite-bevist, forblir EKSPLISITT
+OPEN i OPEN_QUESTIONS.md inntil host-verifisert. **Kriterium 2 sin gjenstående
 bredde (product/finance/marketing/operations) er en FASE-AVHENGIGHET av UA-4/UA-5/UA-6, ikke et
 internt UA-3-kodbart gap** - disse fasene er selv IKKE startet. Connector-audit-gapene
 (GitHub/Calendar/Gmail/Telegram/Vercel/HA - se tabellen over) er dokumentert backlog, ikke
 blokkerende.
 
 ## Neste oppgave
-**Umiddelbar neste oppgave: review av den rene governance-PR-en** (branch
-`claude/core-ownership-adapter-invariant-clean`) - bekreft at diffen KUN inneholder
-dokumentasjon/styring (ZERO Zendesk-kode), deretter Tobias sin vurdering av om den skal merges.
-**UA-3 «Support/Tickets» sitt neste konkrete steg er nå: igangsette en Native Jarvis Support Core-
+**Umiddelbar neste oppgave: Tobias kjører
+`node --env-file=.env --experimental-transform-types
+modules/business/scripts/q27-tenant-enumeration-host-run.ts`** på sin faktiske Windows/Docker-host
+for å host-verifisere Q-27-fiksen (D-65, draft-PR, branch `claude/q27-safe-tenant-enumeration`) -
+krever `023_business_tenant_catalog.sql` anvendt (skjer automatisk via host-run-scriptets
+migrasjonssteg). Forventede markører: `q21_runtime_role_safe`,
+`q27_direct_runtime_global_query_restricted`, `q27_catalog_business_tenants`,
+`q27_catalog_excludes_nonbusiness`, `q27_catalog_minimal_surface`,
+`q27_catalog_public_execute_denied`, `q27_catalog_runtime_execute_allowed`,
+`q27_open_loop_scheduler`, `q27_business_event_scheduler`, `q27_scoring_scheduler`,
+`q27_multiple_business_tenants`, `q27_tenant_isolation`, `q27_runtime_no_superuser`,
+`q27_runtime_no_bypassrls`, `q27_cleanup`, alle PASS, `hard_fail=false`.
+
+**UA-3 «Support/Tickets» sitt neste konkrete steg er (uendret fra D-64): igangsette en Native Jarvis Support Core-
 slice** (ticket-entitet/livssyklus/motpart-kobling som `JARVIS_CANONICAL`, med rom for en fremtidig
 valgfri ekstern kanal-/utførelsesadapter) - EGEN, fremtidig, eksplisitt godkjent byggeordre, IKKE
 startet i denne runden. Den tidligere Zendesk-connector-koden (draft-PR #13, branch
