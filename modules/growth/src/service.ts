@@ -357,6 +357,14 @@ export class GrowthService {
    * ALDRI fabrikkert). `cac_ore`/`roas` er `null` (ikke `0`/en gjettet
    * verdi) når nevneren er `0` - ratio er udefinert, ALDRI stille avrundet
    * (Q-26-grensen: ingen fabrikkert tall når data mangler).
+   *
+   * D-88: `attributed_meetings` beregnes med en EGEN, andre spørring (ikke
+   * en ekstra JOIN i spørringen over) - en JOIN mot `business_activities`
+   * i SAMME aggregat ville gitt et rad-fan-out per møte og dermed DOBBELT-
+   * telt `attributed_revenue_ore`/`won_opportunities` for enhver kontakt
+   * med mer enn ett møte. Møte-spørringen selv teller `DISTINCT
+   * activity_id` og krever `occurred_at >= attributed_at` (fail-closed
+   * tidsrekkefølge - se types.ts).
    */
   async campaignPerformance(tenantId: string, memorySpace: MemorySpace, campaignId: string): Promise<CampaignPerformance | null> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -377,6 +385,20 @@ export class GrowthService {
       const row = rows[0] as {
         total_spend_ore: string; attributed_leads: string; attributed_opportunities: string; won_opportunities: string; attributed_revenue_ore: string;
       };
+      const meetingRows = await client.query(
+        `SELECT COUNT(DISTINCT act.activity_id) AS attributed_meetings
+         FROM business_activities act
+         JOIN (
+           SELECT DISTINCT COALESCE(l.contact_id, o2.contact_id) AS contact_id, a.attributed_at
+           FROM marketing_attributions a
+           LEFT JOIN business_leads l ON l.tenant_id = a.tenant_id AND l.lead_id = a.entity_id AND a.entity_type = 'lead'
+           LEFT JOIN business_opportunities o2 ON o2.tenant_id = a.tenant_id AND o2.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
+           WHERE a.tenant_id = $1 AND a.campaign_id = $2
+         ) ac ON ac.contact_id = act.contact_id AND act.occurred_at >= ac.attributed_at
+         WHERE act.tenant_id = $1 AND act.activity_type = 'meeting'`,
+        [tenantId, campaignId]
+      );
+      const attributedMeetings = Number((meetingRows.rows[0] as { attributed_meetings: string }).attributed_meetings);
       const totalSpend = Number(row.total_spend_ore);
       const wonOpportunities = Number(row.won_opportunities);
       const attributedRevenue = Number(row.attributed_revenue_ore);
@@ -385,6 +407,7 @@ export class GrowthService {
         total_spend_ore: row.total_spend_ore,
         attributed_leads: Number(row.attributed_leads),
         attributed_opportunities: Number(row.attributed_opportunities),
+        attributed_meetings: attributedMeetings,
         won_opportunities: wonOpportunities,
         attributed_revenue_ore: row.attributed_revenue_ore,
         cac_ore: wonOpportunities > 0 ? totalSpend / wonOpportunities : null,

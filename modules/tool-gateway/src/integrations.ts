@@ -960,7 +960,7 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       output_trust: "internal", transport: transport("growth")
     },
     {
-      tool_id: "growth", action: "campaign_performance", description: "Deterministisk CAC/ROAS for en kampanje, knyttet til ekte CRM-data (business_opportunities.value_ore/stage='won')",
+      tool_id: "growth", action: "campaign_performance", description: "Deterministisk kampanje-funnel (leads/møter/opportunities/won/CAC/ROAS) knyttet til ekte CRM-data (business_activities.activity_type='meeting'/business_opportunities.value_ore/stage='won')",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
       capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",

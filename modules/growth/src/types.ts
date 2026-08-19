@@ -231,12 +231,36 @@ export interface CampaignEvent {
  * data, ALDRI fabrikkert). `cac_ore`/`roas` er `null` (ikke `0` eller en
  * gjettet verdi) når nevneren er `0` - en udefinert ratio er ærlig
  * rapportert som udefinert, aldri stille avrundet.
+ *
+ * D-88: `attributed_meetings` lukker det litterale funnel-gapet mellom
+ * LEAD/OPPORTUNITY-attribusjon og WON/REVENUE - CAMPAIGN -> SPEND ->
+ * TRACKING -> LEAD -> KONTAKT -> **MØTE** -> OPPORTUNITY -> WON -> REVENUE.
+ * Deterministisk, ZERO ny tabell/migrasjon - utledet UTELUKKENDE fra
+ * EKSISTERENDE FK-kjeder (`marketing_attributions` -> `business_leads`/
+ * `business_opportunities.contact_id` -> `business_activities` der
+ * `activity_type='meeting'`), ALDRI en gjettet/AI-utledet kobling
+ * (Q-26-grensen). Et møte telles KUN når det inntraff PÅ ELLER ETTER
+ * attribusjonstidspunktet (`occurred_at >= attributed_at`) - et møte FØR
+ * kampanjen noensinne ble tilskrevet kontakten kan umulig være et resultat
+ * av DENNE kampanjen, og telles derfor aldri med (fail-closed, ikke gjettet).
+ *
+ * PRESISERING (semantisk grense, ikke bare en implementasjonsdetalj):
+ * `attributed_meetings` betyr "et kanonisk møte KOBLET til en forretnings-
+ * entitet som ALLEREDE bærer kampanje-attribusjon, inntruffet ETTER
+ * attribusjonstidspunktet" - EN DERIVERT ATTRIBUSJONSKJEDE (deterministisk
+ * lineage), IKKE en eksperimentelt bevist kausal påstand om at KAMPANJEN
+ * "forårsaket"/"genererte" møtet. Samme kontakt kan ha egne, uavhengige
+ * grunner til å bli møtt; feltet sier KUN at lineage-kjeden (attribusjon ->
+ * kontakt -> møte, i riktig tidsrekkefølge) eksisterer, aldri at kjeden er
+ * den ENESTE eller SANNE årsaken (Q-26-grensen: ingen "sannhets"-forfremmelse
+ * utover det de underliggende, allerede-lagrede faktaene faktisk beviser).
  */
 export interface CampaignPerformance {
   campaign_id: string;
   total_spend_ore: string;
   attributed_leads: number;
   attributed_opportunities: number;
+  attributed_meetings: number;
   won_opportunities: number;
   attributed_revenue_ore: string;
   cac_ore: number | null;

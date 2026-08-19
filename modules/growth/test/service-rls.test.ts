@@ -932,6 +932,146 @@ describe("P (D-87): provider-nøytral UTFØRELSES-KOMMANDO-modell - generate/can
   });
 });
 
+/** D-88 fixtures: kontakt + møte-aktivitet direkte mot Business Graph, via appPool (RLS-trygg rolle). */
+async function insertContact(tenantId: string, id: string): Promise<void> {
+  await withMemoryTransaction(appPool, tenantId, ["business"], (client) =>
+    client.query(`INSERT INTO business_contacts (contact_id, tenant_id, memory_space_id, name) VALUES ($1, $2, 'business', 'Kontakt')`, [id, tenantId])
+  );
+}
+
+async function insertLeadWithContact(tenantId: string, id: string, contactId: string): Promise<void> {
+  await withMemoryTransaction(appPool, tenantId, ["business"], (client) =>
+    client.query(
+      `INSERT INTO business_leads (lead_id, tenant_id, memory_space_id, contact_id, title) VALUES ($1, $2, 'business', $3, 'Lead')`,
+      [id, tenantId, contactId]
+    )
+  );
+}
+
+async function insertOpportunityWithContact(tenantId: string, id: string, contactId: string, stage: string, valueOre: number | null): Promise<void> {
+  await withMemoryTransaction(appPool, tenantId, ["business"], (client) =>
+    client.query(
+      `INSERT INTO business_opportunities (opportunity_id, tenant_id, memory_space_id, contact_id, title, stage, value_ore) VALUES ($1, $2, 'business', $3, 'Opp', $4, $5)`,
+      [id, tenantId, contactId, stage, valueOre]
+    )
+  );
+}
+
+async function insertMeetingActivity(tenantId: string, id: string, contactId: string, occurredAtIso: string): Promise<void> {
+  await withMemoryTransaction(appPool, tenantId, ["business"], (client) =>
+    client.query(
+      `INSERT INTO business_activities (activity_id, tenant_id, memory_space_id, contact_id, activity_type, summary, occurred_at)
+       VALUES ($1, $2, 'business', $3, 'meeting', 'Møte', $4)`,
+      [id, tenantId, contactId, occurredAtIso]
+    )
+  );
+}
+
+describe("Q (D-88): deterministisk møte-stadium funnel-kobling i campaignPerformance() - ALDRI gjettet", () => {
+  it("møte SOM inntreffer ETTER attribusjonstidspunktet telles i attributed_meetings", async () => {
+    await insertContact(TENANT_A, "ct-grw-q1");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q1", "ct-grw-q1");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q1" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q1" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q1", "ct-grw-q1", "2030-01-01T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(1);
+  });
+
+  it("møte SOM inntraff FØR attribusjonstidspunktet telles ALDRI - kan umulig være forårsaket av kampanjen (no-guess, fail-closed)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q2");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q2", "ct-grw-q2");
+    await insertMeetingActivity(TENANT_A, "act-grw-q2", "ct-grw-q2", "2020-01-01T10:00:00Z");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q2" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q2" });
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(0);
+  });
+
+  it("møte med en kontakt som IKKE er knyttet til noen attribuert lead/opportunity for kampanjen telles ALDRI", async () => {
+    await insertContact(TENANT_A, "ct-grw-q3");
+    await insertMeetingActivity(TENANT_A, "act-grw-q3", "ct-grw-q3", "2030-01-01T10:00:00Z");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q3 unrelated" });
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(0);
+  });
+
+  it("møte knyttet via en OPPORTUNITY-attribusjon (ikke bare lead) telles også", async () => {
+    await insertContact(TENANT_A, "ct-grw-q4");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-q4", "ct-grw-q4", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q4 opportunity path" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-q4" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q4", "ct-grw-q4", "2030-01-01T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(1);
+  });
+
+  it("samme møte nådd via BÅDE en lead- OG en opportunity-attribusjon til SAMME kampanje telles KUN ÉN gang (DISTINCT activity_id på tvers av flere attribusjonsveier)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q4b");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q4b", "ct-grw-q4b");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-q4b", "ct-grw-q4b", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q4b dual attribution path" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q4b" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-q4b" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q4b", "ct-grw-q4b", "2030-01-01T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(1);
+  });
+
+  it("flere møter for samme attribuerte kontakt telles korrekt (DISTINCT activity_id) UTEN å doble attributed_revenue_ore/won_opportunities (rad-fan-out-regresjon)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q5");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-q5", "ct-grw-q5", "won", 500_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q5 multi-meeting" });
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, { event_date: "2026-08-01", spend_amount_ore: 50_000 });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-q5" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q5a", "ct-grw-q5", "2030-01-01T10:00:00Z");
+    await insertMeetingActivity(TENANT_A, "act-grw-q5b", "ct-grw-q5", "2030-01-02T10:00:00Z");
+    await insertMeetingActivity(TENANT_A, "act-grw-q5c", "ct-grw-q5", "2030-01-03T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(3);
+    expect(perf?.won_opportunities).toBe(1);
+    expect(perf?.attributed_revenue_ore).toBe("500000");
+    expect(perf?.cac_ore).toBe(50_000 / 1);
+  });
+
+  it("en lead/opportunity UTEN contact_id gir 0 attribuerte møter (aldri krasj, aldri gjettet kobling)", async () => {
+    await insertLead(TENANT_A, "lead-grw-q6");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q6 no contact" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q6" });
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(0);
+  });
+
+  it("en kampanje uten noen attribusjon i det hele tatt gir attributed_meetings=0, ikke null/krasj", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q7 no attribution" });
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(0);
+  });
+
+  it("TENANT_B sitt møte telles ALDRI mot TENANT_A sin kampanje (tenant-isolasjon)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q8a");
+    await insertContact(TENANT_B, "ct-grw-q8b");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q8", "ct-grw-q8a");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q8 tenant isolation" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q8" });
+    await insertMeetingActivity(TENANT_B, "act-grw-q8", "ct-grw-q8b", "2030-01-01T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(0);
+  });
+
+  it("gjentatt kall gir samme, stabile resultat (ren lesing, idempotent per definisjon)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q9");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q9", "ct-grw-q9");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q9 stable repeat" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q9" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q9", "ct-grw-q9", "2030-01-01T10:00:00Z");
+    const first = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    const second = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(first?.attributed_meetings).toBe(1);
+    expect(second?.attributed_meetings).toBe(first?.attributed_meetings);
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });
