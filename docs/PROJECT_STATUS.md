@@ -1,8 +1,38 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 NATIVE GROWTH CORE HOST FIX #2 — "TIDSSONE-BUG I HOST FIX #1 SIN
-EGEN DATO-FIKS, ZERO PRODUKSJONSFEIL"** → D-76. Tredje host-kjøring (run_id `5c54b656`,
-`hard_fail=true`) - CAC/ROAS OG open-loop-resolusjon nå BEGGE bekreftet PASS live (D-75 sine fikser
+**Oppdatert:** 2026-08-19 (**UA-4 NATIVE JARVIS GROWTH CORE — ENDELIG LUKKING: VERIFIED/COMPLETE**
+→ D-74/D-75/D-76/D-77. Tobias sin FJERDE, RENE host-kjøring (`ua4-growth-core-host-run.ts`, run_id
+`8f2b89e1`, `hard_fail=false`) ga ALLE 23 markører PASS, inkludert de tre som feilet i de tre
+foregående rundene (`ua4_growth_spend_idempotent`, `ua4_growth_cac_roas`,
+`ua4_growth_open_loop_resolved`). Repo-sannhet bekreftet FØR lukking: lokal og
+`origin/claude/ua4-growth-core` HEAD identisk (`598f4547e7632413c5dde3806f0d1da8638545a7`),
+arbeidstreet rent, INGEN kjørbar kode endret etter den host-testede SHA-en, GitHub CI
+(`gitleaks`+`build-test`) begge grønne på nøyaktig denne SHA-en. **D-74/D-75/D-76 markeres NÅ
+VERIFIED/COMPLETE.** Native Growth Core er `JARVIS_CANONICAL`/`HYBRID_WITH_CLEAR_AUTHORITY`, ZERO
+annonseplattform-connector-avhengighet. **Live-bevist:** spend-idempotens (identisk retry OG
+avvikende korreksjon, begge auditert), CAC/ROAS mot ekte CRM (`total_spend_ore=25000
+won_opportunities=1 attributed_revenue_ore=500000 cac_ore=25000 roas=20`), OpenLoop-anomali
+opprettes OG resolves (`open_loops_after_create=1 open_loops_after_normal_day=0`), Q-20-erasure,
+Q-21, tenant-/space-isolasjon, ToolGateway, audit-sikkerhet, cleanup. **UA-3 kriterium 2 re-evaluert
+mot det ordrette "kombinerer sales, product, finance, marketing, operations"-kriteriet** (et
+INTEGRASJONS-kriterium, i motsetning til K1 sitt RESULTAT-kriterium) - kildekoden
+(`business-brief.ts`) lest direkte, IKKE antatt: `BUSINESS_DOMAIN_COVERAGE` har FORTSATT
+`marketing: "not_integrated"` hardkodet, INGEN kabling til `growth.*` finnes. **Kriterium 2 markeres
+derfor FORTSATT IKKE oppfylt** - en ekte datakilde eksisterer nå (nødvendig, ikke tilstrekkelig),
+selve kombineringen er ugjort, allerede registrert i Q-29 punkt 7. `sales="available"`,
+`marketing`/`product`/`finance`/`operations="not_integrated"` (uendret utover at marketing nå har en
+klar-til-kabling datakilde). **.gitleaksignore re-auditert, uendret** (ett snevert fingeravtrykk).
+Full lokal suite 106/106 filer, 1422/1422 tester grønn, lint/typecheck rene. **PR #19 klar for
+review** (`MERGE_READY=true`) - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.** **UA-4 SOM
+HELHET forblir IKKE komplett** (kun første av flere planlagte slices). **UA-3 forblir IKKE
+komplett.** **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.** Neste UA-4-slice
+velges FØRST i en egen fremtidig økt via D-64-porten. Full detalj: D-77 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FUNKSJONELT HOST-BEVIST, IKKE VERIFIED):** UA-4 NATIVE GROWTH CORE HOST
+FIX #2 — "TIDSSONE-BUG I HOST FIX #1 SIN EGEN DATO-FIKS, ZERO PRODUKSJONSFEIL" → D-76. Tredje
+host-kjøring (run_id `5c54b656`, `hard_fail=true`) - CAC/ROAS OG open-loop-resolusjon nå BEGGE
+bekreftet PASS live (D-75 sine fikser
 virket), KUN `ua4_growth_spend_idempotent=FAIL` gjensto, til tross for at loggen selv viste
 `spend_event_ids_equal=true final_amount=25000`. **Rotårsak: D-75 sin EGEN dato-fiks
 (`new Date(e.event_date).toISOString().slice(0,10)`) har en skjult tidssone-bug** - pg-types

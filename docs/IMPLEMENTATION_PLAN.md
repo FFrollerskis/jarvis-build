@@ -1156,6 +1156,38 @@ UTM-auto-attribusjon, `BUSINESS_DOMAIN_COVERAGE`-kabling for `marketing` i dagli
 ekte host-verifisering (Tobias må kjøre `ua4-growth-core-host-run.ts` før VERIFIED/COMPLETE kan
 hevdes).
 
+#### ENDELIG LUKKING (2026-08-19, samme branch) → D-74 "REN HOST-KJØRING"
+
+Tobias sin FJERDE host-kjøring (`ua4-growth-core-host-run.ts`, run_id `8f2b89e1`) ga `hard_fail=
+false`, ALLE 23 markører PASS (19 opprinnelige + 4 spend-delmarkører introdusert i D-76), inkludert
+`ua4_growth_spend_idempotent`/`ua4_growth_cac_roas`/`ua4_growth_open_loop_resolved` (FAIL i de tre
+foregående rundene, D-75/D-76). Repo-sannhet bekreftet FØR lukking: lokal og
+`origin/claude/ua4-growth-core` HEAD identisk (`598f454`), arbeidstreet rent, INGEN kjørbar kode
+endret etter den host-testede SHA-en - D-76 sin `pgDateToIsoDate()`-fiks er den eksakte koden som
+ble host-testet, ingen re-kjøring nødvendig. **D-74/D-75/D-76 markeres alle VERIFIED/COMPLETE.**
+Runtime bekreftet `jarvis_runtime`/`superuser=false`/`bypassrls=false` - Q-21 uendret gjennom alle
+fire runder. Q-27 gjenbruker `listBusinessTenantIds()` uendret. Q-20: `ErasureService` host-bevist
+reelt (kampanje/utgiftshendelser/attribusjoner/eksperimenter/kampanje-events/kampanje-linket
+open-loop fjernet, urelatert open-loop upåvirket, ingen resurrection). Q-26 uendret (attribusjon/
+eksperimentresultater forblir deterministisk beregnet/menneske-registrert). **UA-3 akseptanse-
+kriterium 2 re-evaluert mot det ordrette masterplan-kriteriet** (`docs/input/02_..._v4.0.md` linje
+470: *"'Hvordan går bedriften?' kombinerer sales, product, finance, marketing, operations"*) - i
+motsetning til K1 (D-73), som er et RESULTAT-kriterium ("gir en komplett tidslinje"), er dette et
+eksplisitt INTEGRASJONS-kriterium ("kombinerer") - Growth Core gir NÅ en ekte, kanonisk,
+host-verifisert markedsførings-datakilde i Business OS, MEN `BUSINESS_DOMAIN_COVERAGE`
+(`modules/business/src/business-brief.ts`) er BEVISST IKKE endret i denne sliceen -
+`marketing: "not_integrated"` er FORTSATT en hardkodet literal i den faktiske kjørende koden, ingen
+spørring mot `growth.*` finnes der. **Kriterium 2 er derfor FORTSATT IKKE oppfylt** - en ekte
+datakilde å kombinere finnes nå, men selve kombineringen (kablingen inn i brief-aggregeringen) er
+ugjort arbeid, eksplisitt registrert i Q-29 punkt 7, IKKE stille utelatt. `sales="available"`
+(uendret), `marketing`="not_integrated" i kode (men datakilde nå EKSISTERER, klar for fremtidig
+kabling), `product`/`finance`/`operations`="not_integrated" (helt ubygget, uendret). **HELE UA-3
+forblir IKKE komplett.** **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.** Full lokal
+suite grønn (106/106 filer, 1422/1422 tester), typecheck/lint rene, GitHub CI
+(`gitleaks`+`build-test`) grønn på `598f454`. PR #19 klar for review - **MERGES IKKE uten Tobias sin
+eksplisitte godkjenning. STOP etter denne lukkingen. Ingen annonseplattform-connector. Ingen ny
+UA-4-slice startet i denne lukkingen.**
+
 ---
 
 ## Fase-avhengigheter (oversikt)
