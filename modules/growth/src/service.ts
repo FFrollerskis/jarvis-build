@@ -8,6 +8,7 @@ import type {
   AttributeFromTrackingInput,
   AttributeToCampaignInput,
   Campaign,
+  CampaignActionRecommendation,
   CampaignChannel,
   CampaignEvent,
   CampaignEventType,
@@ -18,6 +19,8 @@ import type {
   CreateExperimentInput,
   Experiment,
   ExperimentStatus,
+  RecommendationStatus,
+  RecommendationType,
   RecordSpendEventInput,
   RegisterCampaignTrackingTagInput,
   SpendEvent,
@@ -567,6 +570,207 @@ export class GrowthService {
     });
   }
 
+  /**
+   * D-85: anomaly -> recommended-action control-plane-fundament. Kalt av
+   * `detectAndRecommendSpendAnomalies()` (denne filen) med den SAMME
+   * `detection_key`-formen `OpenLoopService.detectSpendAnomalies()`
+   * (modules/business) bruker for sin egen open-loop - idempotent, EN
+   * aktiv anbefaling per kampanje+regel samtidig (SAMME "gjenåpning ved
+   * samme vilkår"-mønster som `upsertOpenLoop()`). `source` er ALLTID
+   * `'deterministic_rule'` (databasens CHECK-constraint håndhever dette) -
+   * ZERO AI-inferens, ZERO ModelGateway-kall (Q-26-grensen). BESLUTNINGS-
+   * lag ALENE: oppretter/oppdaterer KUN Jarvis sin egen interne
+   * anbefaling-rad, rører ALDRI noe utenfor egen database - ekte
+   * provider-utførelse (pause/reduser budsjett HOS Google Ads) krever en
+   * separat, fremtidig kapabilitet (provider-mutate + UA-6 Finance
+   * Integrity Gateway), INGEN av delene bygget her.
+   */
+  async upsertActionRecommendation(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    input: {
+      campaign_id: string;
+      open_loop_id: string | null;
+      recommendation_type: RecommendationType;
+      rationale: string;
+      evidence: Record<string, unknown>;
+      detection_key: string;
+    }
+  ): Promise<CampaignActionRecommendation> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { recommendation } = await upsertActionRecommendationRow(client, tenantId, memorySpace, input);
+      return recommendation;
+    });
+  }
+
+  async listActionRecommendations(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    filter: { campaign_id?: string; status?: RecommendationStatus | "all" } = {}
+  ): Promise<CampaignActionRecommendation[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const conditions = ["tenant_id = $1"];
+      const params: Array<string> = [tenantId];
+      if (filter.campaign_id) {
+        params.push(filter.campaign_id);
+        conditions.push(`campaign_id = $${params.length}`);
+      }
+      if (filter.status && filter.status !== "all") {
+        params.push(filter.status);
+        conditions.push(`status = $${params.length}`);
+      }
+      const { rows } = await client.query(
+        `SELECT * FROM marketing_campaign_action_recommendations WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC`,
+        params
+      );
+      return rows as CampaignActionRecommendation[];
+    });
+  }
+
+  /**
+   * Eier-disposisjon: markerer en anbefaling som 'accepted'/'dismissed'.
+   * Utfører INGENTING mot en ekte annonseplattform - dette er REN,
+   * Jarvis-intern sporing av at eieren har sett/tatt stilling til
+   * anbefalingen (`accepted` betyr IKKE "Jarvis endret budsjettet hos
+   * Google" - se toppkommentaren over `upsertActionRecommendation()`).
+   * Kaster ved forsøk på å løse en anbefaling som IKKE er `proposed`
+   * (fail-closed - en allerede løst/supersedert anbefaling skal ALDRI
+   * kunne overskrives stille).
+   */
+  async resolveActionRecommendation(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    recommendationId: string,
+    status: "accepted" | "dismissed",
+    actorPersonId?: string
+  ): Promise<CampaignActionRecommendation | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: currentRows } = await client.query(
+        `SELECT * FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND recommendation_id = $2 FOR UPDATE`,
+        [tenantId, recommendationId]
+      );
+      const current = currentRows[0] as CampaignActionRecommendation | undefined;
+      if (!current) return null;
+      if (current.status !== "proposed") throw new Error(`recommendation_not_proposed:${current.status}`);
+      const { rows } = await client.query(
+        `UPDATE marketing_campaign_action_recommendations
+         SET status = $3, resolved_at = now(), resolved_by_person_id = $4, updated_at = now()
+         WHERE tenant_id = $1 AND recommendation_id = $2 RETURNING *`,
+        [tenantId, recommendationId, status, actorPersonId ?? null]
+      );
+      const recommendation = rows[0] as CampaignActionRecommendation;
+      await insertEvent(client, tenantId, memorySpace, {
+        campaign_id: recommendation.campaign_id, event_type: "action_recommendation_resolved",
+        summary: `Anbefaling ${status === "accepted" ? "godkjent" : "avvist"}: ${recommendation.recommendation_type}`,
+        actor_person_id: actorPersonId ?? null,
+        metadata: { recommendation_type: recommendation.recommendation_type, status }
+      });
+      return recommendation;
+    });
+  }
+
+  /**
+   * D-85: supersedes fortsatt `proposed`/`accepted` anbefalinger for en GITT
+   * regel (`detectionKeyPrefix`, f.eks. `marketing_spend_anomaly:`) hvis
+   * vilkår ikke lenger detekteres - kalt av `detectAndRecommendSpendAnomalies()`
+   * SAMMEN med dens egen deteksjon, SAMME prinsipp som
+   * `OpenLoopService` sin egen `autoResolveStale()`. Prefiks-scopet SAMME
+   * prinsipp som `autoResolveStale()` sin `loop_type`-scoping - hindrer at
+   * en FREMTIDIG, ANNEN anbefalingsregel utilsiktet blir supersedert av
+   * denne regelens sveip. `dismissed`/`superseded` fra FØR røres ALDRI
+   * (allerede en avsluttet tilstand).
+   */
+  async supersedeStaleActionRecommendations(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    detectionKeyPrefix: string,
+    currentDetectionKeys: string[]
+  ): Promise<number> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
+      supersedeStaleRecommendationRows(client, tenantId, detectionKeyPrefix, currentDetectionKeys)
+    );
+  }
+
+  /**
+   * D-85 kjerne-vertikal: uavhengig, growth-egen deteksjon av SAMME
+   * kampanje-utgiftsavvik som `OpenLoopService.detectSpendAnomalies()`
+   * (modules/business) allerede overvåker - BEVISST duplisert SQL (IKKE en
+   * delt hjelpefunksjon) fordi `modules/business` ALDRI kan avhenge av
+   * `modules/growth` (`modules/growth` avhenger allerede av
+   * `modules/business` - en motsatt avhengighet ville vært sirkulær) OG
+   * fordi OpenLoopService sitt eget arkitektoniske prinsipp er at den
+   * ALDRI skriver utenfor sin egen `business_open_loops`-tabell (denne
+   * metoden skriver til `marketing_campaign_action_recommendations`, som
+   * growth EIER). De to reglene deler KUN `detection_key`-strengformen
+   * (`marketing_spend_anomaly:${campaign_id}`) som en løs, dokumentert
+   * kontrakt - IKKE et delt kodested. `deviationFactor`/`minBaselineOre`
+   * default-verdiene er BEVISST identiske med OpenLoopService sine egne
+   * (samme avviks-definisjon for BEGGE reglene) - endres den ene, MÅ den
+   * andre endres tilsvarende (dokumentert her og der).
+   *
+   * Kobler til SØSTER-open-loopen (les-ONLY spørring mot
+   * `business_open_loops`, SAMME "growth leser business sine tabeller
+   * direkte"-mønster som `campaignPerformance()` sin lesing av
+   * `business_opportunities`) via SAMME `detection_key` - `open_loop_id`
+   * er `null` hvis open-loopen (ennå) ikke finnes (f.eks. sveip-rekkefølge),
+   * ALDRI en feil.
+   */
+  async detectAndRecommendSpendAnomalies(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    deviationFactor = 1.5,
+    minBaselineOre = 100
+  ): Promise<{ detected: number; updated: number; superseded: number }> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `WITH ranked AS (
+           SELECT campaign_id, event_date, spend_amount_ore,
+                  AVG(spend_amount_ore) OVER (
+                    PARTITION BY campaign_id ORDER BY event_date
+                    ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+                  ) AS trailing_avg_ore,
+                  ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY event_date DESC) AS rn
+           FROM marketing_spend_events WHERE tenant_id = $1
+         )
+         SELECT r.campaign_id, r.event_date, r.spend_amount_ore, r.trailing_avg_ore, c.name
+         FROM ranked r
+         JOIN marketing_campaigns c ON c.tenant_id = $1 AND c.campaign_id = r.campaign_id
+         WHERE r.rn = 1 AND c.status = 'active'
+           AND r.trailing_avg_ore IS NOT NULL AND r.trailing_avg_ore >= $2
+           AND (r.spend_amount_ore > r.trailing_avg_ore * $3 OR r.spend_amount_ore < r.trailing_avg_ore / $3)`,
+        [tenantId, minBaselineOre, deviationFactor]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      const detectionKeyPrefix = "marketing_spend_anomaly:";
+      for (const row of rows as Array<{ campaign_id: string; event_date: string; spend_amount_ore: string; trailing_avg_ore: string; name: string }>) {
+        const detectionKey = `${detectionKeyPrefix}${row.campaign_id}`;
+        currentKeys.push(detectionKey);
+        const over = Number(row.spend_amount_ore) > Number(row.trailing_avg_ore);
+        const { rows: loopRows } = await client.query(
+          `SELECT open_loop_id FROM business_open_loops WHERE tenant_id = $1 AND detection_key = $2`,
+          [tenantId, detectionKey]
+        );
+        const openLoopId = (loopRows[0] as { open_loop_id: string } | undefined)?.open_loop_id ?? null;
+        const { wasCreated } = await upsertActionRecommendationRow(client, tenantId, memorySpace, {
+          campaign_id: row.campaign_id, open_loop_id: openLoopId,
+          recommendation_type: over ? "reduce_budget" : "investigate",
+          rationale: over
+            ? `Kampanje "${row.name}" sin utgift for ${row.event_date} (${row.spend_amount_ore} øre) er vesentlig over det glidende 7-dagers-snittet (${Math.round(Number(row.trailing_avg_ore))} øre) - vurder å redusere budsjett eller undersøke årsak`
+            : `Kampanje "${row.name}" sin utgift for ${row.event_date} (${row.spend_amount_ore} øre) er vesentlig under det glidende 7-dagers-snittet (${Math.round(Number(row.trailing_avg_ore))} øre) - undersøk om leveransen er hindret`,
+          evidence: {
+            event_date: row.event_date, spend_amount_ore: row.spend_amount_ore, trailing_avg_ore: row.trailing_avg_ore, deviation_factor: deviationFactor
+          },
+          detection_key: detectionKey
+        });
+        if (wasCreated) detected++; else updated++;
+      }
+      const superseded = await supersedeStaleRecommendationRows(client, tenantId, detectionKeyPrefix, currentKeys);
+      return { detected, updated, superseded };
+    });
+  }
+
   private async readForUpdate(client: pg.PoolClient, tenantId: string, campaignId: string, lock: boolean): Promise<Campaign | null> {
     const { rows } = await client.query(
       `SELECT * FROM marketing_campaigns WHERE tenant_id = $1 AND campaign_id = $2${lock ? " FOR UPDATE" : ""}`,
@@ -607,4 +811,77 @@ async function insertEvent(client: pg.PoolClient, tenantId: string, memorySpace:
     [event_id, tenantId, memorySpace, input.campaign_id, input.event_type, input.summary, input.actor_person_id, JSON.stringify(input.metadata)]
   );
   return rows[0] as CampaignEvent;
+}
+
+interface UpsertActionRecommendationInput {
+  campaign_id: string;
+  open_loop_id: string | null;
+  recommendation_type: RecommendationType;
+  rationale: string;
+  evidence: Record<string, unknown>;
+  detection_key: string;
+}
+
+/**
+ * Klient-scopet, IKKE-transaksjonell hjelpefunksjon (samme mønster som
+ * `insertEvent()` over) - tar et allerede-åpent `client` direkte i stedet
+ * for å åpne sin egen `withMemoryTransaction`. Dette lar BÅDE den
+ * offentlige `upsertActionRecommendation()`-metoden OG
+ * `detectAndRecommendSpendAnomalies()` dele SAMME transaksjon/tilkobling i
+ * stedet for å neste to uavhengige `withMemoryTransaction`-kall (som ville
+ * gitt to separate, ikke-atomiske transaksjoner på separate pool-
+ * tilkoblinger - deadlock-/pool-uttømmings-risiko).
+ */
+async function upsertActionRecommendationRow(
+  client: pg.PoolClient,
+  tenantId: string,
+  memorySpace: MemorySpace,
+  input: UpsertActionRecommendationInput
+): Promise<{ recommendation: CampaignActionRecommendation; wasCreated: boolean }> {
+  const { rows: existingRows } = await client.query(
+    `SELECT * FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND detection_key = $2 FOR UPDATE`,
+    [tenantId, input.detection_key]
+  );
+  const existing = existingRows[0] as CampaignActionRecommendation | undefined;
+  const { rows } = await client.query(
+    `INSERT INTO marketing_campaign_action_recommendations
+       (recommendation_id, tenant_id, memory_space_id, campaign_id, open_loop_id, recommendation_type, rationale, evidence, detection_key)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
+       rationale = EXCLUDED.rationale, evidence = EXCLUDED.evidence, open_loop_id = EXCLUDED.open_loop_id, updated_at = now(),
+       status = CASE WHEN marketing_campaign_action_recommendations.status IN ('dismissed', 'superseded') THEN 'proposed' ELSE marketing_campaign_action_recommendations.status END,
+       resolved_at = CASE WHEN marketing_campaign_action_recommendations.status IN ('dismissed', 'superseded') THEN NULL ELSE marketing_campaign_action_recommendations.resolved_at END,
+       resolved_by_person_id = CASE WHEN marketing_campaign_action_recommendations.status IN ('dismissed', 'superseded') THEN NULL ELSE marketing_campaign_action_recommendations.resolved_by_person_id END
+     RETURNING *`,
+    [
+      `grw-rec-${randomUUID()}`, tenantId, memorySpace, input.campaign_id, input.open_loop_id,
+      input.recommendation_type, input.rationale, JSON.stringify(input.evidence), input.detection_key
+    ]
+  );
+  const recommendation = rows[0] as CampaignActionRecommendation;
+  if (!existing) {
+    await insertEvent(client, tenantId, memorySpace, {
+      campaign_id: input.campaign_id, event_type: "action_recommendation_created",
+      summary: `Anbefaling generert: ${input.recommendation_type} - ${input.rationale}`,
+      actor_person_id: null,
+      metadata: { recommendation_type: input.recommendation_type, source: "deterministic_rule", detection_key: input.detection_key }
+    });
+  }
+  return { recommendation, wasCreated: !existing };
+}
+
+/** Klient-scopet motstykke til `upsertActionRecommendationRow()` over - samme begrunnelse. */
+async function supersedeStaleRecommendationRows(
+  client: pg.PoolClient,
+  tenantId: string,
+  detectionKeyPrefix: string,
+  currentDetectionKeys: string[]
+): Promise<number> {
+  const { rowCount } = await client.query(
+    `UPDATE marketing_campaign_action_recommendations
+     SET status = 'superseded', resolved_at = now(), updated_at = now()
+     WHERE tenant_id = $1 AND status IN ('proposed', 'accepted') AND detection_key LIKE $2 AND NOT (detection_key = ANY($3))`,
+    [tenantId, `${detectionKeyPrefix}%`, currentDetectionKeys]
+  );
+  return rowCount ?? 0;
 }

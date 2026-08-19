@@ -8,6 +8,7 @@ import type {
   CampaignStatus,
   ClickIdParam,
   ExperimentStatus,
+  RecommendationStatus,
   RegisterCampaignTrackingTagInput,
   TrackingLookup
 } from "./types.ts";
@@ -165,6 +166,21 @@ export class GrowthTransport implements ToolTransport {
       case "list_events": {
         const rows = await this.service.listEvents(tenantId, memorySpace, requireString(parameters, "campaign_id"));
         return { data: rows as unknown as JsonValue };
+      }
+      case "list_action_recommendations": {
+        const rows = await this.service.listActionRecommendations(tenantId, memorySpace, {
+          ...(parameters["campaign_id"] !== undefined ? { campaign_id: String(parameters["campaign_id"]) } : {}),
+          ...(parameters["status"] !== undefined ? { status: parameters["status"] as RecommendationStatus | "all" } : {})
+        });
+        return { data: rows as unknown as JsonValue };
+      }
+      case "resolve_action_recommendation": {
+        const status = requireString(parameters, "status");
+        if (status !== "accepted" && status !== "dismissed") throw new Error("growth_invalid_parameter:status_must_be_accepted_or_dismissed");
+        const row = await this.service.resolveActionRecommendation(
+          tenantId, memorySpace, requireString(parameters, "recommendation_id"), status, actorId(parameters)
+        );
+        return { ...(row ? { external_id: row.recommendation_id } : {}), data: row as unknown as JsonValue };
       }
       default:
         throw new Error(`growth_action_not_implemented:${action}`);

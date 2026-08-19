@@ -1556,9 +1556,56 @@ STRUKTURELT bevis mot `google-ads-live.ts` sin egen kildetekst (kun kjente handl
 
 **D-84 = FIXED_SUITE_COMPLETE=true, LIVE_RUNNER_READY=true, LIVE_PROVIDER_VERIFIED=false** (INGEN
 ekte Google Ads-kall denne økten heller - runneren er nå KLAR, kjøres FØRST av Tobias etter
-oppsettsekvensen, uendret fra D-83 §11). PR #23 oppdatert, IKKE merget, adapterens EGEN suite/atferd
-UENDRET av denne runden. INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner,
-INGEN UA-6. Full detalj: D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+oppsettsekvensen, uendret fra D-83 §11). PR #23 oppdatert, IKKE merget i DENNE runden (SIDEN
+eksplisitt godkjent og merget av Tobias samme dag, merge-commit
+`465421bd9de2922b5ff600176e2dcf1040fa8506`), adapterens EGEN suite/atferd UENDRET av denne runden.
+INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner, INGEN UA-6. Full detalj:
+D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+
+#### GOOGLE ADS LIVE-VERIFISERING — DEFERRED_TO_FINAL_INTEGRATION_PHASE (2026-08-19) → D-86
+
+PR #23 (D-83+D-84) MERGET til `main` (merge-commit `465421bd9de2922b5ff600176e2dcf1040fa8506`) etter
+Tobias sin eksplisitte godkjenning. Tobias besluttet DERETTER at ekte Google Ads-credential-oppsett
+(Developer Token, Basic Access, `adwords`-OAuth-refresh-token, Customer ID) håndteres i en SENERE,
+dedikert FINAL INTEGRATION/DEPLOYMENT-fase, IKKE nå. `GOOGLE_ADS_LIVE_VERIFICATION = DEFERRED_TO_
+FINAL_INTEGRATION_PHASE` - SEKVENSERING, IKKE kansellering: `LIVE_PROVIDER_VERIFIED` forblir `false`,
+live-runneren (`google-ads-live-host-run.ts`/`-live.ts`/`-lib.ts`) og credential-kravene i
+`.env.example` UENDRET/BEVART. **Final-integration-backlog (syv steg, registrert, IKKE utført):**
+(1) Developer Token-søknad, (2) Basic Access-godkjenning verifisert, (3) `adwords`-scope
+refresh-token generert, (4) Customer ID hentet, (5) valgfri Login Customer ID hentet, (6)
+`JARVIS_GOOGLE_ADS_*`-variabler satt i lokal `.env`, (7) `google-ads-live-host-run.ts` kjørt én gang
+rent FØR `LIVE_PROVIDER_VERIFIED` noensinne settes `true`. Kanonisk fremtidig kommando (uendret):
+`node --env-file=.env --experimental-transform-types modules/growth/scripts/google-ads-live-host-run.ts`.
+Full detalj: D-86 i DECISIONS_AND_ASSUMPTIONS.md.
+
+#### UA-4 SLICE 4 — ANOMALY → RECOMMENDED-ACTION CONTROL-PLANE-FUNDAMENT (2026-08-19) → D-85
+
+Base `main`@`465421b` (PR #23 merget), branch `claude/ua4-marketing-action-recommendations`, draft
+PR, IKKE merget. Valgt av 9 kandidater (Creative Intelligence, Marketing Memory, samtykke-/cookie-
+governance, anomaly→handling-fundament, provider-nøytral mutasjons-kommandomodell [ikke-utførende],
+GA4-adapter, Meta Ads-adapter, gjenstående attribusjons-/inntektskoblingsgap, UA-3 kriterium 2-
+forutsetning) - se D-85 i DECISIONS_AND_ASSUMPTIONS.md for full `SELECTED_SLICE`/`WHY_NOW`/
+`WHY_NOT_OTHERS`-begrunnelse. **BESLUTNINGS-lag STRENGT atskilt fra UTFØRELSES-lag:** ny
+`marketing_campaign_action_recommendations`-tabell (migrasjon `029_growth_action_recommendations.sql`,
+additiv) lagrer deterministisk genererte anbefalinger (`reduce_budget`/`investigate`) fra
+`GrowthService.detectAndRecommendSpendAnomalies()` - en UAVHENGIG re-deteksjon av SAMME
+utgiftsavviksformel som `OpenLoopService.detectSpendAnomalies()` allerede overvåker (BEVISST duplisert
+SQL, IKKE en pakkeavhengighet - `modules/business` kan ALDRI avhenge av `modules/growth`).
+`resolveActionRecommendation()` sin `'accepted'`-status er REN Jarvis-intern disposisjon-sporing -
+utfører INGENTING mot en ekte annonseplattform (ekte utførelse krever en fremtidig
+provider-mutate-kapabilitet + UA-6 Finance Integrity Gateway, INGEN av delene bygget). `source`
+CHECK-fastlåst til `'deterministic_rule'` (Q-26-grensen, ZERO AI-inferens denne runden). Ny
+`growth.list_action_recommendations` (klasse A)/`growth.resolve_action_recommendation` (klasse B,
+IKKE C/D). Ny uavhengig `DailyScheduler`-sveip (`growth-action-recommendation-sweep`,
+`apps/api/src/main.ts`). Erasure-plan (Q-20) oppdatert - en EKTE FK-brudd-regresjon fanget og fikset
+FØR commit (anbefaling-tabellen må slettes FØR `business_open_loops`, motsatt av den vanlige
+child-tabell-rekkefølgen, fordi `open_loop_id` her peker TIL `business_open_loops`). 20 nye tester.
+Testregnskap: `main` FØR = 1583/111 → ETTER = **1603 (+20), 112 filer (+1)**, 112/112 grønn.
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **D-85 = FIXED_SUITE_COMPLETE=true,
+HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert, ingen host-kjøring relevant). UA-4 SOM
+HELHET forblir IKKE komplett. UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. INGEN
+Google Ads live-oppsett, INGEN provider-mutasjon, INGEN andre slice, INGEN merge. Full detalj: D-85 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
