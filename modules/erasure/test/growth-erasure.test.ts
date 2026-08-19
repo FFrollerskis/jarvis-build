@@ -94,7 +94,7 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
     `);
     const known = new Set([
       "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
-      "marketing_campaign_events", "marketing_campaign_tracking_tags"
+      "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations"
     ]);
     const unexpected = (rows as Array<{ dependent_table: string }>).filter((r) => !known.has(r.dependent_table));
     expect(unexpected).toHaveLength(0);
@@ -124,12 +124,19 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
     });
     await growth.setStatus(TENANT_A, "business", campaign.campaign_id, "active");
     await openLoops.runSweep(TENANT_A, "business");
+    // D-85: sammen med den syster-open-loopen sveiper vi også growth sin egen
+    // uavhengige anomali-deteksjon - anbefalingsraden må ALDRI overleve en
+    // growth-scoped erasure (SAMME campaign_id-eierskap som spend/events).
+    await growth.detectAndRecommendSpendAnomalies(TENANT_A, "business");
 
     const linkedBefore = (await openLoops.listOpenLoops(TENANT_A, "business", "all")).find(
       (l: BusinessOpenLoop) => l.campaign_id === campaign.campaign_id
     );
     expect(linkedBefore).toBeDefined();
     const linkedOpenLoopId = linkedBefore!.open_loop_id;
+
+    const recommendationsBefore = await growth.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    expect(recommendationsBefore.length).toBeGreaterThan(0);
 
     const service = new ErasureService(appPool, sovereignPolicy, embedding);
     const result = await service.executeErasure({
@@ -158,6 +165,10 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
     expect(eventsGone.rowCount).toBe(0);
     const trackingTagGone = await adminPool.query("SELECT 1 FROM marketing_campaign_tracking_tags WHERE campaign_id = $1", [campaign.campaign_id]);
     expect(trackingTagGone.rowCount).toBe(0);
+    const recommendationGone = await adminPool.query(
+      "SELECT 1 FROM marketing_campaign_action_recommendations WHERE campaign_id = $1", [campaign.campaign_id]
+    );
+    expect(recommendationGone.rowCount).toBe(0);
   });
 });
 

@@ -1,7 +1,50 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**PR #23 PRE-MERGE HARDENING — GOOGLE ADS LIVE-VERIFISERINGSVEI + D-41-RE-AUDIT**
-→ D-84, D-83-oppfølging, samme branch, IKKE merget). D-83 sin egen rapport erkjente
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 4 — ANOMALY → RECOMMENDED-ACTION CONTROL-PLANE-FUNDAMENT** →
+D-85, base `main`@`465421b` (PR #23/D-83/D-84 MERGET), branch
+`claude/ua4-marketing-action-recommendations`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY
+v4.0-oppfølging etter Google Ads-merge:** Tobias besluttet at ekte Google Ads live-credential-oppsett
+utsettes til en fremtidig FINAL INTEGRATION-fase - registrert eksplisitt som `GOOGLE_ADS_LIVE_
+VERIFICATION = DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86, SEKVENSERING IKKE kansellering -
+`LIVE_PROVIDER_VERIFIED` forblir `false`, live-runneren/credential-kravene UENDRET, backlog på syv
+konkrete steg registrert i D-86). **UA-4-matrise rekonstruert fra repo-sannhet:** kampanje-/utgifts-/
+attribusjon-/CAC-ROAS-fundament + BUSINESS_DOMAIN_COVERAGE-kabling + UTM-auto-attribusjon + Google
+Ads LES/SYNK-adapter = alle COMPLETE (D-74/76/77/78/79/82/83/84, ALLE på `main`); Google Ads LIVE-
+verifisering = DEFERRED_TO_FINAL_INTEGRATION_PHASE (D-86, ny); Meta Ads/GA4/andre providere = NOT_
+STARTED; autonome budsjett-/bud-/nøkkelord-/kreativ-mutasjoner = BLOCKED (Finance Integrity-grense,
+UA-6 ikke bygget); Creative Intelligence/Marketing Memory/samtykke-cookie-governance/anomaly→handling-
+fundament = alle NOT_STARTED FØR denne runden. **Valgt ÉN slice: anomaly → recommended-action control-
+plane-fundament** (av 9 kandidater - se D-85 for full WHY_NOW/WHY_NOT_OTHERS-begrunnelse) - 100%
+testbar UTEN leverandør-credential, INGEN D-64-kjerneavhengighet, forbereder BESLUTNINGS-laget FØR
+noe UTFØRELSES-lag ("gjør det MOT en leverandør") noensinne kan bygges. **Implementasjon:** ny
+migrasjon `029_growth_action_recommendations.sql` (`marketing_campaign_action_recommendations`,
+additiv, `source` CHECK-fastlåst til `'deterministic_rule'` - Q-26-grensen, ZERO AI-inferens), ny
+`GrowthService.detectAndRecommendSpendAnomalies()` (UAVHENGIG re-deteksjon av SAMME avviksformel som
+`OpenLoopService.detectSpendAnomalies()`, BEVISST duplisert SQL - IKKE en pakkeavhengighet, se D-85
+§3 for full begrunnelse), pluss `upsertActionRecommendation`/`listActionRecommendations`/
+`resolveActionRecommendation`/`supersedeStaleActionRecommendations`. **Arkitektur-lærdom fanget FØR
+commit:** et første utkast nestet `withMemoryTransaction`-kall (to ikke-atomiske transaksjoner på
+separate pool-tilkoblinger) - rettet ved å trekke ut klient-scopede private hjelpefunksjoner (SAMME
+mønster som eksisterende `insertEvent(client, ...)`), regelen selv logget i D-85 §4 for fremtidige
+slices. Ny `growth.list_action_recommendations` (klasse A)/`growth.resolve_action_recommendation`
+(klasse B, IKKE C/D - REN Jarvis-intern disposisjon-sporing, utfører INGENTING mot en ekte
+annonseplattform). Ny uavhengig `DailyScheduler`-sveip (`growth-action-recommendation-sweep`, default
+kl. 09) i `apps/api/src/main.ts`. Erasure-plan oppdatert (Q-20) - EN EKTE FK-brudd-regresjon fanget og
+fikset FØR commit (`marketing_campaign_action_recommendations` må slettes FØR `business_open_loops`,
+IKKE etter - motsatt rekkefølge av den vanlige child-tabell-lærdommen, fordi `open_loop_id` her peker
+TIL `business_open_loops`). **20 nye tester** (13 `service-rls.test.ts` §O, 3 `transport-wiring.test.ts`
+§C3, 4 ny `action-recommendation-sweep.test.ts`). Testregnskap: `main` FØR = 1583/111 → ETTER =
+**1603 (+20), 112 filer (+1)**, 112/112 grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+**Status:** D-85 = **FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør
+involvert - ingen host-kjøring relevant for denne sliceen). UA-4 SOM HELHET forblir IKKE komplett.
+UA-3 kriterium 2 UENDRET (2/5 domener - `sales`/`marketing="available"`,
+`product`/`finance`/`operations="not_integrated"`). Draft-PR opprettes, IKKE merget. **STOP: INGEN
+Google Ads live-oppsett, INGEN ekte provider-mutasjon, INGEN andre slice denne runden, INGEN merge.**
+Full detalj: D-85/D-86 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** PR #23 PRE-MERGE HARDENING — GOOGLE ADS LIVE-VERIFISERINGSVEI
++ D-41-RE-AUDIT → D-84, D-83-oppfølging, samme branch, SIDEN eksplisitt godkjent og merget av Tobias
+samme dag (merge-commit `465421bd9de2922b5ff600176e2dcf1040fa8506`). D-83 sin egen rapport erkjente
 `HOST_ACTION_REQUIRED=true` UTEN at noen deterministisk live-kjøringsvei fantes ennå - lukket FØR
 review/merge, UTEN å endre den allerede-grønne adapterens produksjonsatferd (kun kommentaroppdatering
 i `google-ads-transport.ts`, ZERO logikkendring). **Nye scripts** (samme "host-run bootstrapper +
@@ -31,7 +74,9 @@ mutate-handlinger og unscoped cleanup-DELETE). Testregnskap: `main` FØR = 1552/
 (+31), 111 filer (+1)**, 111/111 grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
 **Status:** D-84 = **FIXED_SUITE_COMPLETE=true, LIVE_RUNNER_READY=true, LIVE_PROVIDER_VERIFIED=false**
 (runneren er nå KLAR, kjøres FØRST av Tobias etter oppsettsekvensen - uendret fra D-83 §11). PR #23
-oppdatert, IKKE merget. Full detalj: D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+oppdatert, IKKE merget i DENNE runden (SIDEN eksplisitt godkjent og merget av Tobias samme dag,
+merge-commit `465421bd9de2922b5ff600176e2dcf1040fa8506` - se toppoppføringen). Full detalj: D-84 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **Runden før det (samme dag, IKKE merget):** UA-4 — FØRSTE LIVE MARKEDSFØRINGSPROVIDER: GOOGLE
 ADS-ADAPTER, LES/SYNK → D-83, IKKE merget. Tobias bekreftet Google Ads som `FIRST_MARKETING_PROVIDER` (forrige, rene

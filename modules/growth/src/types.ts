@@ -35,7 +35,22 @@ export type CampaignEventType =
   | "attribution_created"
   | "experiment_created"
   | "experiment_status_changed"
-  | "tracking_tag_registered";
+  | "tracking_tag_registered"
+  | "action_recommendation_created"
+  | "action_recommendation_resolved";
+
+/**
+ * D-85: anomaly -> recommended-action control-plane-fundament.
+ * BESLUTNINGS-laget ("hva BØR gjøres"), ALDRI utførelses-laget ("gjør det
+ * MOT en leverandør") - `accepted` sporer KUN Jarvis sin egen interne
+ * disposisjon, utfører INGENTING mot en ekte annonseplattform (krever en
+ * separat, fremtidig provider-mutate-kapabilitet + UA-6 Finance Integrity
+ * Gateway, ingen av delene bygget). `source` er BEVISST alltid
+ * `'deterministic_rule'` i denne runden - ZERO AI-inferens (Q-26-grensen).
+ */
+export type RecommendationType = "reduce_budget" | "investigate";
+export type RecommendationStatus = "proposed" | "accepted" | "dismissed" | "superseded";
+export type RecommendationSource = "deterministic_rule";
 
 /**
  * D-82: deterministisk UTM-/klikk-ID-basert auto-attribusjon. `click_id`
@@ -59,6 +74,24 @@ export interface CampaignTrackingTag {
   utm_medium: string | null;
   utm_campaign: string | null;
   created_at: string;
+}
+
+export interface CampaignActionRecommendation {
+  recommendation_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  campaign_id: string;
+  open_loop_id: string | null;
+  recommendation_type: RecommendationType;
+  status: RecommendationStatus;
+  rationale: string;
+  evidence: Record<string, unknown>;
+  source: RecommendationSource;
+  detection_key: string;
+  resolved_at: string | null;
+  resolved_by_person_id: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Nøyaktig ÉN av de to formene - håndhevet av TypeScript her OG av databasens CHECK-constraint. */

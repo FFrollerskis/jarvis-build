@@ -39,7 +39,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { GoogleAdsTransport, GrowthService, GrowthTransport } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport, runActionRecommendationSweepForAllTenants } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -310,6 +310,16 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "support-inbox-sync", Number(process.env["JARVIS_SUPPORT_INBOX_SYNC_HOUR"] ?? 8)
   ).start(() => runSupportInboxSyncForAllTenants(pool, supportEmailService).then(() => undefined));
+  // D-85: periodisk anomaly->anbefaling-sveip (growth-eid BESLUTNINGS-lag,
+  // ALDRI utførelse) - SAMME reboot-durable DailyScheduler-mekanisme, eget
+  // job_name/klokkeslett-env. Kjøres ETTER business-open-loop-sweep (default
+  // kl. 06) slik at den kan lese den ferskeste søster-open-loopen via
+  // `detection_key` (default kl. 09) - rekkefølgen er BEVISST, ikke
+  // strengt nødvendig (åpen-loop-koblingen er `null`-trygg uansett rekkefølge,
+  // se `detectAndRecommendSpendAnomalies()`-kommentaren i modules/growth).
+  new DailyScheduler(
+    pool, "growth-action-recommendation-sweep", Number(process.env["JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR"] ?? 9)
+  ).start(() => runActionRecommendationSweepForAllTenants(pool, growthService).then(() => undefined));
   return deps;
 }
 

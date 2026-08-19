@@ -107,9 +107,22 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "contracts", await run(client, mode, "contracts", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
-  // support_*/contract_* over). En kampanje-tilknyttet open-loop (samme
-  // FK-lærdom som HOST FIX #1/D-67 for `ticket_id`) slettes FØRST, SNEVERT
-  // avgrenset til `campaign_id IS NOT NULL` (rører aldri andre loop_type-er).
+  // support_*/contract_* over).
+  // D-85 (029_growth_action_recommendations.sql): anbefaling-tabellen har en
+  // FK -> business_open_loops.open_loop_id (nullable, men HÅNDHEVET når
+  // satt) - MÅ derfor slettes FØR business_open_loops-raden under (motsatt
+  // rekkefølge av HOST FIX #1/D-67 sitt "open-loop FØR eier"-mønster, fordi
+  // her er retningen omvendt: business_open_loops er FK-MÅLET, ikke kilden).
+  // Verifisert av en ekte FK-brudd-regresjon i growth-erasure.test.ts FØR
+  // denne rekkefølgen ble rettet.
+  add(
+    result,
+    "marketing_campaign_action_recommendations",
+    await run(client, mode, "marketing_campaign_action_recommendations", "tenant_id = $1 AND memory_space_id = $2", tv)
+  );
+  // En kampanje-tilknyttet open-loop (samme FK-lærdom som HOST FIX #1/D-67
+  // for `ticket_id`) slettes FØRST, SNEVERT avgrenset til `campaign_id IS
+  // NOT NULL` (rører aldri andre loop_type-er).
   add(
     result,
     "business_open_loops",

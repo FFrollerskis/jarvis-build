@@ -19,14 +19,15 @@ describe("A: growth.*-handlinger er registrert i firstWaveTools() med korrekt tr
     const growthTransport = new GrowthTransport({} as unknown as GrowthService);
     const tools = firstWaveTools({ growth: growthTransport });
     const growthTools = tools.filter((t) => t.tool_id === "growth");
-    expect(growthTools.length).toBeGreaterThanOrEqual(21);
+    expect(growthTools.length).toBeGreaterThanOrEqual(23);
     expect(growthTools.map((t) => t.action)).toEqual(
       expect.arrayContaining([
         "create_campaign", "get_campaign", "list_campaigns", "search_campaigns", "list_by_company",
         "set_campaign_status", "set_budget", "record_spend_event", "list_spend_events", "campaign_performance",
         "attribute_to_campaign", "list_attributions", "create_experiment", "get_experiment", "list_experiments",
         "set_experiment_status", "list_events",
-        "register_campaign_tracking_tag", "list_campaign_tracking_tags", "resolve_campaign_from_tracking", "attribute_from_tracking"
+        "register_campaign_tracking_tag", "list_campaign_tracking_tags", "resolve_campaign_from_tracking", "attribute_from_tracking",
+        "list_action_recommendations", "resolve_action_recommendation"
       ])
     );
     for (const tool of growthTools) expect(tool.transport).toBe(growthTransport);
@@ -50,6 +51,11 @@ describe("B: risikoklasser er effekt-baserte, ingen growth.*-handling er klasse 
     expect(byAction["resolve_campaign_from_tracking"]).toBe("A");
     expect(byAction["register_campaign_tracking_tag"]).toBe("B");
     expect(byAction["attribute_from_tracking"]).toBe("B");
+    // D-85: BESLUTNINGS-lag ALENE - `resolve_action_recommendation` er klasse
+    // B (REN Jarvis-intern disposisjon-sporing), ALDRI C/D (ingen ekte
+    // provider-utførelse i denne sliceen).
+    expect(byAction["list_action_recommendations"]).toBe("A");
+    expect(byAction["resolve_action_recommendation"]).toBe("B");
     expect(tools.every((t) => t.capability_class !== "D")).toBe(true);
   });
 });
@@ -157,10 +163,46 @@ describe("C2 (D-82): sporingstagg-dispatch - gjensidig utelukkende click_id/utm-
   });
 });
 
+describe("C3 (D-85): anbefaling-dispatch - list/resolve ruter til riktig service-metode", () => {
+  function fakeRecommendationService() {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    return {
+      listActionRecommendations: async (...args: unknown[]) => { calls.push({ method: "listActionRecommendations", args }); return []; },
+      resolveActionRecommendation: async (...args: unknown[]) => { calls.push({ method: "resolveActionRecommendation", args }); return { recommendation_id: "grw-rec-1", status: args[3] }; },
+      _calls: calls
+    } as unknown as GrowthService & { _calls: Array<{ method: string; args: unknown[] }> };
+  }
+  it("list_action_recommendations kaller service.listActionRecommendations med valgfritt campaign_id/status-filter", async () => {
+    const service = fakeRecommendationService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("list_action_recommendations", { tenant_id: "t1", campaign_id: "grw-cm-1", status: "proposed" });
+    expect(service._calls[0]!.method).toBe("listActionRecommendations");
+    expect(service._calls[0]!.args[2]).toEqual({ campaign_id: "grw-cm-1", status: "proposed" });
+  });
+  it("resolve_action_recommendation kaller service.resolveActionRecommendation med recommendation_id/status/actor", async () => {
+    const service = fakeRecommendationService();
+    const transport = new GrowthTransport(service);
+    const result = await transport.invoke("resolve_action_recommendation", {
+      tenant_id: "t1", recommendation_id: "grw-rec-1", status: "accepted", actor_person_id: "person-owner"
+    });
+    expect(service._calls[0]!.method).toBe("resolveActionRecommendation");
+    expect(service._calls[0]!.args[2]).toBe("grw-rec-1");
+    expect(service._calls[0]!.args[3]).toBe("accepted");
+    expect(service._calls[0]!.args[4]).toBe("person-owner");
+    expect(result.external_id).toBe("grw-rec-1");
+  });
+  it("resolve_action_recommendation med en annen status enn accepted/dismissed kaster (ALDRI en gjettet status videresendt)", async () => {
+    const transport = new GrowthTransport(fakeRecommendationService());
+    await expect(
+      transport.invoke("resolve_action_recommendation", { tenant_id: "t1", recommendation_id: "grw-rec-1", status: "proposed" })
+    ).rejects.toThrow("growth_invalid_parameter:status_must_be_accepted_or_dismissed");
+  });
+});
+
 describe("D: ZERO annonseplattform-leverandør-avhengighet (no-provider-proof)", () => {
   const FORBIDDEN = /google\s*ads\s*api|meta\s*marketing\s*api|googleapis\.com\/ads|graph\.facebook\.com|linkedin\.com\/rest|tiktokads/i;
   it("ingen kildefil i modules/growth refererer noen annonseplattform-API-endepunkt", async () => {
-    const files = ["types.ts", "state-machine.ts", "service.ts", "transport.ts", "index.ts"];
+    const files = ["types.ts", "state-machine.ts", "service.ts", "transport.ts", "index.ts", "action-recommendation-sweep.ts"];
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const file of files) {
       const content = await readFile(`${dir}${file}`, "utf8");
@@ -168,7 +210,7 @@ describe("D: ZERO annonseplattform-leverandør-avhengighet (no-provider-proof)",
     }
   });
   it("ingen JARVIS_*_ADS*/JARVIS_*_GA4*-miljøvariabel eller annen leverandør-credential leses noe sted i modules/growth", async () => {
-    const files = ["types.ts", "state-machine.ts", "service.ts", "transport.ts", "index.ts"];
+    const files = ["types.ts", "state-machine.ts", "service.ts", "transport.ts", "index.ts", "action-recommendation-sweep.ts"];
     const dir = fileURLToPath(new URL("../src/", import.meta.url));
     for (const file of files) {
       const content = await readFile(`${dir}${file}`, "utf8");

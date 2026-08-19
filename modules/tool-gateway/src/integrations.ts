@@ -1088,6 +1088,28 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("growth")
     },
+    // D-85: anomaly -> recommended-action control-plane-fundament.
+    // BESLUTNINGS-lag ALENE - `resolve_action_recommendation` er klasse B
+    // (REN Jarvis-intern disposisjon-sporing), ALDRI klasse C/D, siden
+    // handlingen ALDRI utfører noe mot en ekte annonseplattform (ingen
+    // provider-mutate-kapabilitet finnes for noen leverandør i denne
+    // kodebasen ennå - Finance Integrity-grensen, D-83/UA-6).
+    {
+      tool_id: "growth", action: "list_action_recommendations", description: "List deterministiske kampanje-handlingsanbefalinger (generert av anomali-deteksjon), valgfritt filtrert på kampanje/status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "resolve_action_recommendation",
+      description: "Marker en anbefaling som godkjent/avvist av eieren - REN Jarvis-intern disposisjon-sporing, utfører ALDRI noe mot en ekte annonseplattform",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), recommendation_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "kall på nytt med motsatt status (ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
     // UA-4 Google Ads-slice (D-83): FØRSTE ekte leverandøradapter for
     // Growth Core - Google Ads er en ADAPTER (D-64), ALDRI domeneeier.
     // `list_campaigns` er en ren speilings-lesing (INGEN Jarvis-DB-skriving)

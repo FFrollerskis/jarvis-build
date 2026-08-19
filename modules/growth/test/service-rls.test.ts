@@ -515,6 +515,239 @@ describe("N (D-83): upsertCampaignFromProvider/findCampaignByExternalId - levera
   });
 });
 
+describe("O (D-85): anomaly -> recommended-action BESLUTNINGS-lag - upsert/list/resolve/supersede/detect", () => {
+  it("upsertActionRecommendation oppretter en ny anbefaling med status='proposed' og et 'action_recommendation_created'-event", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec upsert" });
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "Test rationale", evidence: { x: 1 }, detection_key: `test-rec:${campaign.campaign_id}`
+    });
+    expect(rec.status).toBe("proposed");
+    expect(rec.source).toBe("deterministic_rule");
+    expect(rec.recommendation_type).toBe("reduce_budget");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.some((e) => e.event_type === "action_recommendation_created")).toBe(true);
+  });
+
+  it("samme detection_key opprettet på nytt oppdaterer SAMME rad (idempotent), oppretter INGEN duplikat-event", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec idempotent" });
+    const key = `test-rec-idem:${campaign.campaign_id}`;
+    const first = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Første", evidence: { n: 1 }, detection_key: key
+    });
+    const second = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Oppdatert", evidence: { n: 2 }, detection_key: key
+    });
+    expect(second.recommendation_id).toBe(first.recommendation_id);
+    expect(second.rationale).toBe("Oppdatert");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.filter((e) => e.event_type === "action_recommendation_created")).toHaveLength(1);
+  });
+
+  it("re-deteksjon av en tidligere 'dismissed' anbefaling gjenåpner den til 'proposed' (resolved_at/resolved_by_person_id nullstilles)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec reopen" });
+    const key = `test-rec-reopen:${campaign.campaign_id}`;
+    const created = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Første", evidence: {}, detection_key: key
+    });
+    await service.resolveActionRecommendation(TENANT_A, "business", created.recommendation_id, "dismissed");
+    const reopened = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Igjen", evidence: {}, detection_key: key
+    });
+    expect(reopened.recommendation_id).toBe(created.recommendation_id);
+    expect(reopened.status).toBe("proposed");
+    expect(reopened.resolved_at).toBeNull();
+    expect(reopened.resolved_by_person_id).toBeNull();
+  });
+
+  it("re-deteksjon av en fortsatt 'accepted'/'proposed' anbefaling RØRER IKKE status (unngår å prompte eieren på nytt for en allerede erkjent tilstand)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec no-reopen" });
+    const key = `test-rec-noreopen:${campaign.campaign_id}`;
+    const created = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Første", evidence: {}, detection_key: key
+    });
+    await service.resolveActionRecommendation(TENANT_A, "business", created.recommendation_id, "accepted", "person-grw-owner");
+    const untouched = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Ny deteksjon", evidence: {}, detection_key: key
+    });
+    expect(untouched.status).toBe("accepted");
+    expect(untouched.resolved_by_person_id).toBe("person-grw-owner");
+  });
+
+  it("listActionRecommendations filtrerer på campaign_id og status", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec list" });
+    const other = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec list other" });
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "R1", evidence: {}, detection_key: `test-rec-list:${campaign.campaign_id}`
+    });
+    await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: other.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "R2", evidence: {}, detection_key: `test-rec-list:${other.campaign_id}`
+    });
+    const forCampaign = await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    expect(forCampaign).toHaveLength(1);
+    expect(forCampaign[0]!.recommendation_id).toBe(rec.recommendation_id);
+    const proposedOnly = await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "proposed" });
+    expect(proposedOnly).toHaveLength(1);
+    const dismissedOnly = await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "dismissed" });
+    expect(dismissedOnly).toHaveLength(0);
+  });
+
+  it("resolveActionRecommendation('accepted') setter status/resolved_at/resolved_by_person_id og logger 'action_recommendation_resolved' - REN Jarvis-intern disposisjon, ingen provider-utførelse", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec resolve accept" });
+    const created = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "R", evidence: {}, detection_key: `test-rec-resolve-a:${campaign.campaign_id}`
+    });
+    const resolved = await service.resolveActionRecommendation(TENANT_A, "business", created.recommendation_id, "accepted", "person-grw-owner");
+    expect(resolved?.status).toBe("accepted");
+    expect(resolved?.resolved_at).not.toBeNull();
+    expect(resolved?.resolved_by_person_id).toBe("person-grw-owner");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.some((e) => e.event_type === "action_recommendation_resolved")).toBe(true);
+  });
+
+  it("resolveActionRecommendation kaster recommendation_not_proposed ved forsøk på å løse en allerede løst anbefaling", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec resolve twice" });
+    const created = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "R", evidence: {}, detection_key: `test-rec-resolve-twice:${campaign.campaign_id}`
+    });
+    await service.resolveActionRecommendation(TENANT_A, "business", created.recommendation_id, "dismissed");
+    await expect(service.resolveActionRecommendation(TENANT_A, "business", created.recommendation_id, "accepted")).rejects.toThrow(
+      "recommendation_not_proposed:dismissed"
+    );
+  });
+
+  it("resolveActionRecommendation returnerer null for en ikke-eksisterende recommendation_id", async () => {
+    const result = await service.resolveActionRecommendation(TENANT_A, "business", "nonexistent-rec", "accepted");
+    expect(result).toBeNull();
+  });
+
+  it("supersedeStaleActionRecommendations markerer 'proposed'/'accepted' anbefalinger utenfor gjeldende nøkkelsett som 'superseded', rører aldri 'dismissed'/andre prefiks", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec supersede" });
+    const stale = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Stale", evidence: {}, detection_key: `test-rec-supersede:${campaign.campaign_id}`
+    });
+    const alreadyDismissed = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Dismissed", evidence: {}, detection_key: `test-rec-supersede-dismissed:${campaign.campaign_id}`
+    });
+    await service.resolveActionRecommendation(TENANT_A, "business", alreadyDismissed.recommendation_id, "dismissed");
+    const otherPrefix = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Annen regel", evidence: {}, detection_key: `unrelated-prefix:${campaign.campaign_id}`
+    });
+
+    const supersededCount = await service.supersedeStaleActionRecommendations(TENANT_A, "business", "test-rec-supersede", []);
+    expect(supersededCount).toBe(1);
+
+    const staleAfter = await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    const staleFound = staleAfter.find((r) => r.recommendation_id === stale.recommendation_id);
+    expect(staleFound?.status).toBe("superseded");
+    expect(staleFound?.resolved_at).not.toBeNull();
+    const dismissedFound = staleAfter.find((r) => r.recommendation_id === alreadyDismissed.recommendation_id);
+    expect(dismissedFound?.status).toBe("dismissed"); // urørt - allerede en avsluttet tilstand
+    const otherPrefixFound = staleAfter.find((r) => r.recommendation_id === otherPrefix.recommendation_id);
+    expect(otherPrefixFound?.status).toBe("proposed"); // urørt - utenfor prefiks-scopet
+  });
+
+  it("detectAndRecommendSpendAnomalies genererer 'reduce_budget' for et utgifts-avvik OVER snittet, kobler til søster-open-loopen via detection_key", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Detect over" });
+    for (let d = 8; d >= 1; d--) {
+      await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+        event_date: new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 1_000
+      });
+    }
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 20_000
+    });
+    await service.setStatus(TENANT_A, "business", campaign.campaign_id, "active");
+
+    const openLoop = await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(
+        `INSERT INTO business_open_loops (open_loop_id, tenant_id, memory_space_id, loop_type, detection_key, reason, campaign_id)
+         VALUES ('grw-ol-detect-1', $1, 'business', 'marketing_spend_anomaly', $2, 'Sister loop', $3) RETURNING open_loop_id`,
+        [TENANT_A, `marketing_spend_anomaly:${campaign.campaign_id}`, campaign.campaign_id]
+      )
+    );
+    expect(openLoop.rows).toHaveLength(1);
+
+    const result = await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    expect(result.detected).toBeGreaterThanOrEqual(1);
+
+    const recs = await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    const rec = recs.find((r) => r.detection_key === `marketing_spend_anomaly:${campaign.campaign_id}`);
+    expect(rec?.recommendation_type).toBe("reduce_budget");
+    expect(rec?.open_loop_id).toBe("grw-ol-detect-1");
+    expect(rec?.source).toBe("deterministic_rule");
+  });
+
+  it("detectAndRecommendSpendAnomalies kjørt på nytt (uendret vilkår) oppdaterer SAMME rad ('updated', ikke 'detected')", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Detect updated" });
+    for (let d = 8; d >= 1; d--) {
+      await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+        event_date: new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 1_000
+      });
+    }
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 20_000
+    });
+    await service.setStatus(TENANT_A, "business", campaign.campaign_id, "active");
+
+    const first = await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    expect(first.detected).toBeGreaterThanOrEqual(1);
+    const second = await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    expect(second.updated).toBeGreaterThanOrEqual(1);
+  });
+
+  it("detectAndRecommendSpendAnomalies supersederer en tidligere anbefaling naar avviket ikke lenger detekteres", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Detect resolved" });
+    for (let d = 8; d >= 1; d--) {
+      await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+        event_date: new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 1_000
+      });
+    }
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 20_000
+    });
+    await service.setStatus(TENANT_A, "business", campaign.campaign_id, "active");
+    await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    const key = `marketing_spend_anomaly:${campaign.campaign_id}`;
+    const before = (await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id })).find((r) => r.detection_key === key);
+    expect(before?.status).toBe("proposed");
+
+    // Korriger utgiften for i dag tilbake til normalt niva - vilkaaret forsvinner.
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 1_000
+    });
+    const result = await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    expect(result.superseded).toBeGreaterThanOrEqual(1);
+    const after = (await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id })).find((r) => r.detection_key === key);
+    expect(after?.status).toBe("superseded");
+  });
+
+  it("TENANT_B kan ALDRI se eller løse en anbefaling opprettet av TENANT_A (RLS)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Rec isolation" });
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "Isolert", evidence: {}, detection_key: `test-rec-iso:${campaign.campaign_id}`
+    });
+    const fromB = await service.listActionRecommendations(TENANT_B, "business", { campaign_id: campaign.campaign_id });
+    expect(fromB).toHaveLength(0);
+    const resolvedFromB = await service.resolveActionRecommendation(TENANT_B, "business", rec.recommendation_id, "accepted");
+    expect(resolvedFromB).toBeNull();
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });
