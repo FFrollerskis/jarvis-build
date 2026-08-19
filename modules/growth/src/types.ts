@@ -37,7 +37,9 @@ export type CampaignEventType =
   | "experiment_status_changed"
   | "tracking_tag_registered"
   | "action_recommendation_created"
-  | "action_recommendation_resolved";
+  | "action_recommendation_resolved"
+  | "execution_command_generated"
+  | "execution_command_cancelled";
 
 /**
  * D-85: anomaly -> recommended-action control-plane-fundament.
@@ -90,6 +92,40 @@ export interface CampaignActionRecommendation {
   detection_key: string;
   resolved_at: string | null;
   resolved_by_person_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * D-87: provider-nøytral UTFØRELSES-KOMMANDO-modell - det strukturelle
+ * bindeleddet mellom BESLUTNINGS-laget (D-85, `CampaignActionRecommendation`)
+ * og en FREMTIDIG utførelses-kapabilitet ("gjør det MOT en leverandør"),
+ * INGEN av delene bygget her. Et command er en deterministisk OVERSETTELSE
+ * av en ALLEREDE eier-godkjent (`status='accepted'`) anbefaling til de
+ * EKSAKTE parametrene en fremtidig utfører ville trengt - beregnet og
+ * lagret NÅ, ALDRI utført. `status` inneholder BEVISST INGEN 'executed'-
+ * verdi (håndhevet av databasens CHECK-constraint, `030_growth_execution_
+ * commands.sql`) - dette er en STRUKTURELL, ikke bare en kode-konvensjonell,
+ * Finance Integrity-grense.
+ */
+export type ExecutionCommandType = "reduce_budget";
+export type ExecutionCommandStatus = "pending_execution" | "cancelled" | "superseded";
+
+export interface CampaignExecutionCommand {
+  command_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  campaign_id: string;
+  recommendation_id: string;
+  command_type: ExecutionCommandType;
+  current_budget_ore: string;
+  proposed_budget_ore: string;
+  reduction_fraction: string;
+  currency: string;
+  status: ExecutionCommandStatus;
+  cancelled_at: string | null;
+  cancelled_by_person_id: string | null;
+  cancellation_reason: string | null;
   created_at: string;
   updated_at: string;
 }

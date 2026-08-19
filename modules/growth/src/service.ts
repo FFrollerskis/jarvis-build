@@ -12,11 +12,13 @@ import type {
   CampaignChannel,
   CampaignEvent,
   CampaignEventType,
+  CampaignExecutionCommand,
   CampaignPerformance,
   CampaignStatus,
   CampaignTrackingTag,
   CreateCampaignInput,
   CreateExperimentInput,
+  ExecutionCommandStatus,
   Experiment,
   ExperimentStatus,
   RecommendationStatus,
@@ -771,6 +773,139 @@ export class GrowthService {
     });
   }
 
+  /**
+   * D-87: provider-nøytral kommando-modell - oversetter en ALLEREDE eier-
+   * godkjent (`status='accepted'`) anbefaling til de EKSAKTE
+   * budsjettparametrene en fremtidig utfører ville trengt. Utfører
+   * INGENTING mot en ekte annonseplattform - se toppkommentaren i
+   * `030_growth_execution_commands.sql` for den STRUKTURELLE (database-
+   * håndhevede, ikke bare kode-konvensjonelle) Finance Integrity-grensen
+   * (`status`-CHECK-constrainten inneholder INGEN 'executed'-verdi).
+   * `reductionFraction` er en BEVISST, dokumentert, deterministisk default
+   * (20%) - ALDRI en AI-gjettet verdi (Q-26-grensen).
+   */
+  async generateExecutionCommand(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    recommendationId: string,
+    actorPersonId?: string,
+    reductionFraction = 0.2
+  ): Promise<CampaignExecutionCommand> {
+    if (!(reductionFraction > 0 && reductionFraction < 1)) throw new Error("growth_invalid_reduction_fraction");
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: recRows } = await client.query(
+        `SELECT * FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND recommendation_id = $2 FOR UPDATE`,
+        [tenantId, recommendationId]
+      );
+      const recommendation = recRows[0] as CampaignActionRecommendation | undefined;
+      if (!recommendation) throw new Error("recommendation_not_found");
+      if (recommendation.status !== "accepted") throw new Error(`recommendation_not_accepted:${recommendation.status}`);
+      if (recommendation.recommendation_type !== "reduce_budget") {
+        throw new Error(`no_command_for_recommendation_type:${recommendation.recommendation_type}`);
+      }
+      const campaign = await this.readForUpdate(client, tenantId, recommendation.campaign_id, true);
+      if (!campaign) throw new Error("campaign_not_found");
+      const currentBudgetOre = campaign.budget_amount_ore === null ? null : BigInt(campaign.budget_amount_ore);
+      if (currentBudgetOre === null || currentBudgetOre <= 0n) throw new Error("campaign_has_no_budget_to_reduce");
+      const proposedBudgetOre = currentBudgetOre - (currentBudgetOre * BigInt(Math.round(reductionFraction * 1000))) / 1000n;
+
+      const { rows: existingRows } = await client.query(
+        `SELECT * FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND recommendation_id = $2 FOR UPDATE`,
+        [tenantId, recommendationId]
+      );
+      const existing = existingRows[0] as CampaignExecutionCommand | undefined;
+      const { rows } = await client.query(
+        `INSERT INTO marketing_campaign_execution_commands
+           (command_id, tenant_id, memory_space_id, campaign_id, recommendation_id, command_type, current_budget_ore, proposed_budget_ore, reduction_fraction, currency)
+         VALUES ($1, $2, $3, $4, $5, 'reduce_budget', $6, $7, $8, $9)
+         ON CONFLICT (tenant_id, recommendation_id) DO UPDATE SET
+           current_budget_ore = EXCLUDED.current_budget_ore, proposed_budget_ore = EXCLUDED.proposed_budget_ore,
+           reduction_fraction = EXCLUDED.reduction_fraction, currency = EXCLUDED.currency, updated_at = now(),
+           status = CASE WHEN marketing_campaign_execution_commands.status IN ('cancelled', 'superseded') THEN 'pending_execution' ELSE marketing_campaign_execution_commands.status END,
+           cancelled_at = CASE WHEN marketing_campaign_execution_commands.status IN ('cancelled', 'superseded') THEN NULL ELSE marketing_campaign_execution_commands.cancelled_at END,
+           cancelled_by_person_id = CASE WHEN marketing_campaign_execution_commands.status IN ('cancelled', 'superseded') THEN NULL ELSE marketing_campaign_execution_commands.cancelled_by_person_id END,
+           cancellation_reason = CASE WHEN marketing_campaign_execution_commands.status IN ('cancelled', 'superseded') THEN NULL ELSE marketing_campaign_execution_commands.cancellation_reason END
+         RETURNING *`,
+        [
+          `grw-cmd-${randomUUID()}`, tenantId, memorySpace, recommendation.campaign_id, recommendationId,
+          currentBudgetOre.toString(), proposedBudgetOre.toString(), reductionFraction, campaign.currency
+        ]
+      );
+      const command = rows[0] as CampaignExecutionCommand;
+      if (!existing) {
+        await insertEvent(client, tenantId, memorySpace, {
+          campaign_id: recommendation.campaign_id, event_type: "execution_command_generated",
+          summary: `Utførelses-kommando generert: reduser budsjett fra ${currentBudgetOre} til ${proposedBudgetOre} øre (${Math.round(reductionFraction * 100)}%) - IKKE utført`,
+          actor_person_id: actorPersonId ?? null,
+          metadata: { command_type: "reduce_budget", current_budget_ore: currentBudgetOre.toString(), proposed_budget_ore: proposedBudgetOre.toString(), recommendation_id: recommendationId }
+        });
+      }
+      return command;
+    });
+  }
+
+  /**
+   * Eier-/agent-kansellering: markerer et command som 'cancelled' FØR det
+   * (aldri) noensinne kunne vært utført. Kaster ved forsøk på å kansellere
+   * et command som IKKE er 'pending_execution' (fail-closed, samme
+   * prinsipp som `resolveActionRecommendation()`).
+   */
+  async cancelExecutionCommand(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    commandId: string,
+    actorPersonId?: string,
+    reason?: string
+  ): Promise<CampaignExecutionCommand | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: currentRows } = await client.query(
+        `SELECT * FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND command_id = $2 FOR UPDATE`,
+        [tenantId, commandId]
+      );
+      const current = currentRows[0] as CampaignExecutionCommand | undefined;
+      if (!current) return null;
+      if (current.status !== "pending_execution") throw new Error(`command_not_pending:${current.status}`);
+      const { rows } = await client.query(
+        `UPDATE marketing_campaign_execution_commands
+         SET status = 'cancelled', cancelled_at = now(), cancelled_by_person_id = $3, cancellation_reason = $4, updated_at = now()
+         WHERE tenant_id = $1 AND command_id = $2 RETURNING *`,
+        [tenantId, commandId, actorPersonId ?? null, reason ?? null]
+      );
+      const command = rows[0] as CampaignExecutionCommand;
+      await insertEvent(client, tenantId, memorySpace, {
+        campaign_id: command.campaign_id, event_type: "execution_command_cancelled",
+        summary: `Utførelses-kommando kansellert${reason ? `: ${reason}` : ""}`,
+        actor_person_id: actorPersonId ?? null,
+        metadata: { command_type: command.command_type, reason: reason ?? null }
+      });
+      return command;
+    });
+  }
+
+  async listExecutionCommands(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    filter: { campaign_id?: string; status?: ExecutionCommandStatus | "all" } = {}
+  ): Promise<CampaignExecutionCommand[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const conditions = ["tenant_id = $1"];
+      const params: Array<string> = [tenantId];
+      if (filter.campaign_id) {
+        params.push(filter.campaign_id);
+        conditions.push(`campaign_id = $${params.length}`);
+      }
+      if (filter.status && filter.status !== "all") {
+        params.push(filter.status);
+        conditions.push(`status = $${params.length}`);
+      }
+      const { rows } = await client.query(
+        `SELECT * FROM marketing_campaign_execution_commands WHERE ${conditions.join(" AND ")} ORDER BY created_at DESC`,
+        params
+      );
+      return rows as CampaignExecutionCommand[];
+    });
+  }
+
   private async readForUpdate(client: pg.PoolClient, tenantId: string, campaignId: string, lock: boolean): Promise<Campaign | null> {
     const { rows } = await client.query(
       `SELECT * FROM marketing_campaigns WHERE tenant_id = $1 AND campaign_id = $2${lock ? " FOR UPDATE" : ""}`,
@@ -877,11 +1012,28 @@ async function supersedeStaleRecommendationRows(
   detectionKeyPrefix: string,
   currentDetectionKeys: string[]
 ): Promise<number> {
-  const { rowCount } = await client.query(
+  const { rows } = await client.query(
     `UPDATE marketing_campaign_action_recommendations
      SET status = 'superseded', resolved_at = now(), updated_at = now()
-     WHERE tenant_id = $1 AND status IN ('proposed', 'accepted') AND detection_key LIKE $2 AND NOT (detection_key = ANY($3))`,
+     WHERE tenant_id = $1 AND status IN ('proposed', 'accepted') AND detection_key LIKE $2 AND NOT (detection_key = ANY($3))
+     RETURNING recommendation_id`,
     [tenantId, `${detectionKeyPrefix}%`, currentDetectionKeys]
   );
-  return rowCount ?? 0;
+  // D-87 safety invariant: et command kan ALDRI overleve at dets
+  // opprinnelige (`accepted`) anbefaling blir supersedert (vilkåret ikke
+  // lenger detekteres) - et 'pending_execution' command uten et fortsatt
+  // gyldig `accepted`-grunnlag ville vært en STILLE Finance Integrity-
+  // regresjon (et fremtidig utfører-lag kunne plukket opp en kommando hvis
+  // begrunnelse allerede er reversert). Kaskade-kansellerer derfor ALLTID i
+  // SAMME transaksjon som selve supersederingen.
+  const supersededIds = (rows as Array<{ recommendation_id: string }>).map((r) => r.recommendation_id);
+  if (supersededIds.length > 0) {
+    await client.query(
+      `UPDATE marketing_campaign_execution_commands
+       SET status = 'superseded', cancelled_at = now(), updated_at = now()
+       WHERE tenant_id = $1 AND status = 'pending_execution' AND recommendation_id = ANY($2)`,
+      [tenantId, supersededIds]
+    );
+  }
+  return rows.length;
 }

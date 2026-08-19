@@ -7,6 +7,7 @@ import type {
   CampaignChannel,
   CampaignStatus,
   ClickIdParam,
+  ExecutionCommandStatus,
   ExperimentStatus,
   RecommendationStatus,
   RegisterCampaignTrackingTagInput,
@@ -181,6 +182,27 @@ export class GrowthTransport implements ToolTransport {
           tenantId, memorySpace, requireString(parameters, "recommendation_id"), status, actorId(parameters)
         );
         return { ...(row ? { external_id: row.recommendation_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "generate_execution_command": {
+        const row = await this.service.generateExecutionCommand(
+          tenantId, memorySpace, requireString(parameters, "recommendation_id"), actorId(parameters),
+          parameters["reduction_fraction"] !== undefined ? Number(parameters["reduction_fraction"]) : undefined
+        );
+        return { external_id: row.command_id, data: row as unknown as JsonValue };
+      }
+      case "cancel_execution_command": {
+        const row = await this.service.cancelExecutionCommand(
+          tenantId, memorySpace, requireString(parameters, "command_id"), actorId(parameters),
+          parameters["reason"] !== undefined ? String(parameters["reason"]) : undefined
+        );
+        return { ...(row ? { external_id: row.command_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "list_execution_commands": {
+        const rows = await this.service.listExecutionCommands(tenantId, memorySpace, {
+          ...(parameters["campaign_id"] !== undefined ? { campaign_id: String(parameters["campaign_id"]) } : {}),
+          ...(parameters["status"] !== undefined ? { status: parameters["status"] as ExecutionCommandStatus | "all" } : {})
+        });
+        return { data: rows as unknown as JsonValue };
       }
       default:
         throw new Error(`growth_action_not_implemented:${action}`);

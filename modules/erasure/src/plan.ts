@@ -108,6 +108,14 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
   // support_*/contract_* over).
+  // D-87 (030_growth_execution_commands.sql): kommando-tabellen har en FK ->
+  // BÅDE marketing_campaigns OG marketing_campaign_action_recommendations -
+  // MÅ derfor slettes FØRST av HELE denne blokken (før BEGGE FK-målene under).
+  add(
+    result,
+    "marketing_campaign_execution_commands",
+    await run(client, mode, "marketing_campaign_execution_commands", "tenant_id = $1 AND memory_space_id = $2", tv)
+  );
   // D-85 (029_growth_action_recommendations.sql): anbefaling-tabellen har en
   // FK -> business_open_loops.open_loop_id (nullable, men HÅNDHEVET når
   // satt) - MÅ derfor slettes FØR business_open_loops-raden under (motsatt
