@@ -119,21 +119,71 @@ describe("B: ukentlig brief - egen, kilde-forankret aggregering (ikke en andre m
     expect(rendered).toContain("JARVIS BUSINESS WEEKLY BRIEF");
     expect(rendered).toContain("DATA COVERAGE");
   });
+
+  // D-78: den ukentlige brief-artefakten sitt `data_coverage`-felt maa faktisk reflektere den
+  // oppdaterte kartleggingen (ikke en separat, frosset kopi) - OG dekningen er en arkitektonisk
+  // (build-time) fakta, ikke tenant-data, saa den er IDENTISK for begge tenantene (bevisst, ikke
+  // en tenant-isolasjonsfeil - se filkommentaren i business-brief.ts).
+  it("weekly.data_coverage reflekterer marketing=available (Growth Core) for ALLE tenants likt - domenedekning er arkitektur, ikke tenant-data", async () => {
+    const weeklyA = await generateWeeklyBrief(appPool, TENANT_A, "business");
+    const weeklyB = await generateWeeklyBrief(appPool, TENANT_B, "business");
+    expect(weeklyA.data_coverage.marketing.status).toBe("available");
+    expect(weeklyB.data_coverage.marketing.status).toBe("available");
+    expect(weeklyA.data_coverage).toEqual(weeklyB.data_coverage);
+    expect(weeklyA.data_coverage.sales.status).toBe("available");
+    expect(weeklyA.data_coverage.product.status).toBe("not_integrated");
+    expect(weeklyA.data_coverage.finance.status).toBe("not_integrated");
+    expect(weeklyA.data_coverage.operations.status).toBe("not_integrated");
+  });
 });
 
 describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, marketing, operations') er IKKE fullt oppfylt", () => {
-  it("BUSINESS_DOMAIN_COVERAGE markerer KUN sales som tilgjengelig - de fire andre er eksplisitt not_integrated, aldri fabrikkert", () => {
-    expect(BUSINESS_DOMAIN_COVERAGE.sales).toBe("available");
-    expect(BUSINESS_DOMAIN_COVERAGE.product).toBe("not_integrated");
-    expect(BUSINESS_DOMAIN_COVERAGE.finance).toBe("not_integrated");
-    expect(BUSINESS_DOMAIN_COVERAGE.marketing).toBe("not_integrated");
-    expect(BUSINESS_DOMAIN_COVERAGE.operations).toBe("not_integrated");
+  // UA-4 Growth -> Business Domain Coverage-integrasjon (D-78): `marketing` gikk fra
+  // `not_integrated` til `available` FORDI Native Jarvis Growth Core (D-74/D-75/D-76/D-77) nå
+  // faktisk finnes - IKKE en fabrikkert/kosmetisk endring. `product`/`finance`/`operations`
+  // forblir eksplisitt `not_integrated`, uendret.
+  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing som tilgjengelig - de tre andre er eksplisitt not_integrated, aldri fabrikkert", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.sales.status).toBe("available");
+    expect(BUSINESS_DOMAIN_COVERAGE.marketing.status).toBe("available");
+    expect(BUSINESS_DOMAIN_COVERAGE.product.status).toBe("not_integrated");
+    expect(BUSINESS_DOMAIN_COVERAGE.finance.status).toBe("not_integrated");
+    expect(BUSINESS_DOMAIN_COVERAGE.operations.status).toBe("not_integrated");
   });
 
-  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt", () => {
+  it("marketing sin dekning er eksplisitt begrunnet i Native Growth Core, ALDRI en leverandør-tilkobling", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.marketing.source).toMatch(/Growth Core/);
+    // Domenekapabilitet (status) og ekstern leverandør-tilkobling (live_provider_connected) er
+    // BEVISST separate felt - denne sliceen kobler INGEN live annonseplattform til noe.
+    expect(BUSINESS_DOMAIN_COVERAGE.marketing.live_provider_connected).toBe(false);
+  });
+
+  it("sales/product/finance/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.sales).toEqual({ status: "available", source: "Business Graph/CRM", live_provider_connected: false });
+    expect(BUSINESS_DOMAIN_COVERAGE.product).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
+    expect(BUSINESS_DOMAIN_COVERAGE.finance).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
+    expect(BUSINESS_DOMAIN_COVERAGE.operations).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
+  });
+
+  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing som tilgjengelig uten aa hevde en live leverandør", () => {
     const text = renderDomainCoverage();
     expect(text).toContain("IKKE fullt oppfylt");
     expect(text).toContain("IKKE integrert");
+    expect(text).toContain("marketing: tilgjengelig");
+    expect(text).toContain("ingen live ekstern leverandør tilkoblet");
+    // 2/5 domener dekket (sales + marketing) - eksplisitt telling, ikke en gjettet brøk.
+    expect(text).toContain("2/5 domener dekket");
+  });
+
+  it("renderDomainCoverage() er 100% deterministisk (samme resultat ved gjentatte kall, ingen DB/klokke-avhengighet)", () => {
+    expect(renderDomainCoverage()).toBe(renderDomainCoverage());
+  });
+
+  // D-64/Section 9-krav: denne sliceen skal STRUKTURELT bevise at domenekapabiliteten aldri
+  // krever en annonseplattform-credential - ingen leverandør er koblet inn for å faa
+  // `marketing.status = "available"`.
+  it("business-brief.ts krever INGEN annonseplattform-credential/SDK for aa markere marketing tilgjengelig", async () => {
+    const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/GOOGLE_ADS|META_ADS|GA4|SEARCH_CONSOLE|FACEBOOK_ADS|LINKEDIN_ADS|TIKTOK_ADS/i);
   });
 });
 
