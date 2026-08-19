@@ -13,6 +13,7 @@ import type {
   CampaignEvent,
   CampaignEventType,
   CampaignExecutionCommand,
+  CampaignObservation,
   CampaignPerformance,
   CampaignStatus,
   CampaignTrackingTag,
@@ -21,6 +22,8 @@ import type {
   ExecutionCommandStatus,
   Experiment,
   ExperimentStatus,
+  MarketingObservationStatus,
+  MarketingObservationType,
   RecommendationStatus,
   RecommendationType,
   RecordSpendEventInput,
@@ -370,50 +373,77 @@ export class GrowthService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, campaignId, false);
       if (!current) return null;
-      const { rows } = await client.query(
-        `SELECT
-           COALESCE((SELECT SUM(spend_amount_ore) FROM marketing_spend_events WHERE tenant_id = $1 AND campaign_id = $2), 0) AS total_spend_ore,
-           COUNT(DISTINCT CASE WHEN a.entity_type = 'lead' THEN a.entity_id END) AS attributed_leads,
-           COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' THEN a.entity_id END) AS attributed_opportunities,
-           COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN a.entity_id END) AS won_opportunities,
-           COALESCE(SUM(CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN o.value_ore ELSE 0 END), 0) AS attributed_revenue_ore
-         FROM marketing_attributions a
-         LEFT JOIN business_opportunities o ON o.tenant_id = a.tenant_id AND o.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
-         WHERE a.tenant_id = $1 AND a.campaign_id = $2`,
-        [tenantId, campaignId]
-      );
-      const row = rows[0] as {
-        total_spend_ore: string; attributed_leads: string; attributed_opportunities: string; won_opportunities: string; attributed_revenue_ore: string;
-      };
-      const meetingRows = await client.query(
-        `SELECT COUNT(DISTINCT act.activity_id) AS attributed_meetings
-         FROM business_activities act
-         JOIN (
-           SELECT DISTINCT COALESCE(l.contact_id, o2.contact_id) AS contact_id, a.attributed_at
-           FROM marketing_attributions a
-           LEFT JOIN business_leads l ON l.tenant_id = a.tenant_id AND l.lead_id = a.entity_id AND a.entity_type = 'lead'
-           LEFT JOIN business_opportunities o2 ON o2.tenant_id = a.tenant_id AND o2.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
-           WHERE a.tenant_id = $1 AND a.campaign_id = $2
-         ) ac ON ac.contact_id = act.contact_id AND act.occurred_at >= ac.attributed_at
-         WHERE act.tenant_id = $1 AND act.activity_type = 'meeting'`,
-        [tenantId, campaignId]
-      );
-      const attributedMeetings = Number((meetingRows.rows[0] as { attributed_meetings: string }).attributed_meetings);
-      const totalSpend = Number(row.total_spend_ore);
-      const wonOpportunities = Number(row.won_opportunities);
-      const attributedRevenue = Number(row.attributed_revenue_ore);
+      const snapshot = await this.computePerformanceSnapshot(client, tenantId, campaignId);
+      const totalSpend = Number(snapshot.total_spend_ore);
+      const wonOpportunities = snapshot.won_opportunities;
+      const attributedRevenue = Number(snapshot.attributed_revenue_ore);
       return {
         campaign_id: campaignId,
-        total_spend_ore: row.total_spend_ore,
-        attributed_leads: Number(row.attributed_leads),
-        attributed_opportunities: Number(row.attributed_opportunities),
-        attributed_meetings: attributedMeetings,
+        total_spend_ore: snapshot.total_spend_ore,
+        attributed_leads: snapshot.attributed_leads,
+        attributed_opportunities: snapshot.attributed_opportunities,
+        attributed_meetings: snapshot.attributed_meetings,
         won_opportunities: wonOpportunities,
-        attributed_revenue_ore: row.attributed_revenue_ore,
+        attributed_revenue_ore: snapshot.attributed_revenue_ore,
         cac_ore: wonOpportunities > 0 ? totalSpend / wonOpportunities : null,
         roas: totalSpend > 0 ? attributedRevenue / totalSpend : null
       };
     });
+  }
+
+  /**
+   * D-89: den RÅ tallmessige kjernen bak `campaignPerformance()`, trukket ut
+   * som en privat klient-scopet hjelpemetode (SAMME "ta et allerede-åpent
+   * `client` direkte"-mønster som `insertEvent()`/`supersedeStaleRecommendationRows()`)
+   * slik at `generateMarketingObservations()` kan gjenbruke EKSAKT samme
+   * tall UTEN å nøste `withMemoryTransaction`-kall (D-85 sin dokumenterte
+   * arkitektur-lærdom, §4-notatet i PROJECT_STATUS.md). Returnerer de rå
+   * avledede tallene - `campaignPerformance()` selv legger på cac_ore/roas.
+   */
+  private async computePerformanceSnapshot(
+    client: pg.PoolClient,
+    tenantId: string,
+    campaignId: string
+  ): Promise<{
+    total_spend_ore: string; attributed_leads: number; attributed_opportunities: number;
+    attributed_meetings: number; won_opportunities: number; attributed_revenue_ore: string;
+  }> {
+    const { rows } = await client.query(
+      `SELECT
+         COALESCE((SELECT SUM(spend_amount_ore) FROM marketing_spend_events WHERE tenant_id = $1 AND campaign_id = $2), 0) AS total_spend_ore,
+         COUNT(DISTINCT CASE WHEN a.entity_type = 'lead' THEN a.entity_id END) AS attributed_leads,
+         COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' THEN a.entity_id END) AS attributed_opportunities,
+         COUNT(DISTINCT CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN a.entity_id END) AS won_opportunities,
+         COALESCE(SUM(CASE WHEN a.entity_type = 'opportunity' AND o.stage = 'won' THEN o.value_ore ELSE 0 END), 0) AS attributed_revenue_ore
+       FROM marketing_attributions a
+       LEFT JOIN business_opportunities o ON o.tenant_id = a.tenant_id AND o.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
+       WHERE a.tenant_id = $1 AND a.campaign_id = $2`,
+      [tenantId, campaignId]
+    );
+    const row = rows[0] as {
+      total_spend_ore: string; attributed_leads: string; attributed_opportunities: string; won_opportunities: string; attributed_revenue_ore: string;
+    };
+    const meetingRows = await client.query(
+      `SELECT COUNT(DISTINCT act.activity_id) AS attributed_meetings
+       FROM business_activities act
+       JOIN (
+         SELECT DISTINCT COALESCE(l.contact_id, o2.contact_id) AS contact_id, a.attributed_at
+         FROM marketing_attributions a
+         LEFT JOIN business_leads l ON l.tenant_id = a.tenant_id AND l.lead_id = a.entity_id AND a.entity_type = 'lead'
+         LEFT JOIN business_opportunities o2 ON o2.tenant_id = a.tenant_id AND o2.opportunity_id = a.entity_id AND a.entity_type = 'opportunity'
+         WHERE a.tenant_id = $1 AND a.campaign_id = $2
+       ) ac ON ac.contact_id = act.contact_id AND act.occurred_at >= ac.attributed_at
+       WHERE act.tenant_id = $1 AND act.activity_type = 'meeting'`,
+      [tenantId, campaignId]
+    );
+    return {
+      total_spend_ore: row.total_spend_ore,
+      attributed_leads: Number(row.attributed_leads),
+      attributed_opportunities: Number(row.attributed_opportunities),
+      attributed_meetings: Number((meetingRows.rows[0] as { attributed_meetings: string }).attributed_meetings),
+      won_opportunities: Number(row.won_opportunities),
+      attributed_revenue_ore: row.attributed_revenue_ore
+    };
   }
 
   async createExperiment(tenantId: string, memorySpace: MemorySpace, input: CreateExperimentInput): Promise<Experiment> {
@@ -926,6 +956,163 @@ export class GrowthService {
         params
       );
       return rows as CampaignExecutionCommand[];
+    });
+  }
+
+  /**
+   * D-89 MARKETING MEMORY v1: deterministisk avleder BEGGE observasjonstypene
+   * for ÉN kampanje og upserter dem - EKSPLISITT agent-/eier-kalt, ALDRI en
+   * periodisk sveip (byggeordrens uttrykte preferanse for on-demand
+   * beregning fremfor unødvendig bakgrunnskompleksitet i v1, INGEN ny
+   * scheduler). Idempotent (SAMME `ON CONFLICT`-mønster som `business_scores`/
+   * `marketing_campaign_action_recommendations`) - re-kjøring for SAMME
+   * kampanje oppdaterer SAMME to rader, oppretter aldri en duplikat.
+   *
+   * `meetings_without_conversion`: et resolve-ALDRI-slett-mønster (SAMME
+   * prinsipp som D-85 sin `supersedeStaleActionRecommendations()`) - når
+   * vilkåret (≥1 attribuert møte, 0 vunne opportunities) ikke lenger
+   * gjelder, markeres raden `status='resolved'` med et siste evidens-
+   * øyeblikksbilde, ALDRI slettet (historikken bevares - Q-26-prinsippet
+   * "aldri stille overskriv/slett en tidligere konklusjon"). Ingen rad
+   * opprettes i det hele tatt når det ikke finnes møter ennå (fravær AV en
+   * observasjon ER det ærlige "ingen data å observere ennå"-signalet,
+   * ALDRI en oppfunnet konklusjon).
+   *
+   * `recommendation_disposition_summary`: en alltid-oppdatert opptelling
+   * (aldri `'resolved'` - en løpende rapport, ikke en tilstand som
+   * "opphører"), alltid upsertet selv ved 0 anbefalinger/kommandoer (ærlig
+   * "0 generert ennå", ikke fraværende rad).
+   */
+  async generateMarketingObservations(tenantId: string, memorySpace: MemorySpace, campaignId: string): Promise<CampaignObservation[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const campaign = await this.readForUpdate(client, tenantId, campaignId, false);
+      if (!campaign) throw new Error("campaign_not_found");
+
+      const results: CampaignObservation[] = [];
+      const snapshot = await this.computePerformanceSnapshot(client, tenantId, campaignId);
+
+      const meetingsGapCondition = snapshot.attributed_meetings > 0 && snapshot.won_opportunities === 0;
+      const { rows: existingGapRows } = await client.query(
+        `SELECT * FROM marketing_campaign_observations
+         WHERE tenant_id = $1 AND campaign_id = $2 AND observation_type = 'meetings_without_conversion' FOR UPDATE`,
+        [tenantId, campaignId]
+      );
+      const existingGap = existingGapRows[0] as CampaignObservation | undefined;
+      if (meetingsGapCondition) {
+        const evidence = {
+          campaign_id: campaignId,
+          attributed_meetings: snapshot.attributed_meetings,
+          attributed_opportunities: snapshot.attributed_opportunities,
+          won_opportunities: snapshot.won_opportunities,
+          computed_from: "campaignPerformance_lifetime_snapshot"
+        };
+        const summary = `Kampanjen har ${snapshot.attributed_meetings} attribuert${snapshot.attributed_meetings === 1 ? "" : "e"} møte${snapshot.attributed_meetings === 1 ? "" : "r"}, men 0 vunne opportunities (livstids-snapshot).`;
+        const { rows } = await client.query(
+          `INSERT INTO marketing_campaign_observations
+             (observation_id, tenant_id, memory_space_id, campaign_id, observation_type, status, summary, evidence, observed_at)
+           VALUES ($1, $2, $3, $4, 'meetings_without_conversion', 'open', $5, $6, now())
+           ON CONFLICT (tenant_id, campaign_id, observation_type) DO UPDATE SET
+             status = 'open', resolved_at = NULL, summary = EXCLUDED.summary, evidence = EXCLUDED.evidence,
+             observed_at = now(), updated_at = now()
+           RETURNING *`,
+          [`grw-ob-${randomUUID()}`, tenantId, memorySpace, campaignId, summary, JSON.stringify(evidence)]
+        );
+        results.push(rows[0] as CampaignObservation);
+      } else if (existingGap && existingGap.status === "open") {
+        const evidence = {
+          campaign_id: campaignId,
+          attributed_meetings: snapshot.attributed_meetings,
+          attributed_opportunities: snapshot.attributed_opportunities,
+          won_opportunities: snapshot.won_opportunities,
+          computed_from: "campaignPerformance_lifetime_snapshot"
+        };
+        const { rows } = await client.query(
+          `UPDATE marketing_campaign_observations
+           SET status = 'resolved', resolved_at = now(), evidence = $3, observed_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND observation_id = $2 RETURNING *`,
+          [tenantId, existingGap.observation_id, JSON.stringify(evidence)]
+        );
+        results.push(rows[0] as CampaignObservation);
+      }
+
+      const { rows: recRows } = await client.query(
+        `SELECT status, recommendation_id FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND campaign_id = $2`,
+        [tenantId, campaignId]
+      );
+      const { rows: cmdRows } = await client.query(
+        `SELECT status, command_id FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND campaign_id = $2`,
+        [tenantId, campaignId]
+      );
+      const recommendationCounts = { proposed: 0, accepted: 0, dismissed: 0, superseded: 0 };
+      const recommendationIds: string[] = [];
+      for (const r of recRows as Array<{ status: keyof typeof recommendationCounts; recommendation_id: string }>) {
+        recommendationCounts[r.status]++;
+        recommendationIds.push(r.recommendation_id);
+      }
+      const commandCounts = { pending_execution: 0, cancelled: 0, superseded: 0 };
+      const commandIds: string[] = [];
+      for (const c of cmdRows as Array<{ status: keyof typeof commandCounts; command_id: string }>) {
+        commandCounts[c.status]++;
+        commandIds.push(c.command_id);
+      }
+      const totalRecommendations = recommendationIds.length;
+      const totalCommands = commandIds.length;
+      const summaryEvidence = {
+        recommendations: { ...recommendationCounts, recommendation_ids: recommendationIds },
+        commands: { ...commandCounts, command_ids: commandIds }
+      };
+      const summaryText =
+        `${totalRecommendations} anbefaling${totalRecommendations === 1 ? "" : "er"} generert ` +
+        `(${recommendationCounts.proposed} foreslått, ${recommendationCounts.accepted} godkjent, ${recommendationCounts.dismissed} avvist, ${recommendationCounts.superseded} supersedert); ` +
+        `${totalCommands} kommando${totalCommands === 1 ? "" : "er"} generert ` +
+        `(${commandCounts.pending_execution} avventer, ${commandCounts.cancelled} kansellert, ${commandCounts.superseded} supersedert).`;
+      const { rows: summaryRows } = await client.query(
+        `INSERT INTO marketing_campaign_observations
+           (observation_id, tenant_id, memory_space_id, campaign_id, observation_type, status, summary, evidence, observed_at)
+         VALUES ($1, $2, $3, $4, 'recommendation_disposition_summary', 'open', $5, $6, now())
+         ON CONFLICT (tenant_id, campaign_id, observation_type) DO UPDATE SET
+           summary = EXCLUDED.summary, evidence = EXCLUDED.evidence, observed_at = now(), updated_at = now()
+         RETURNING *`,
+        [`grw-ob-${randomUUID()}`, tenantId, memorySpace, campaignId, summaryText, JSON.stringify(summaryEvidence)]
+      );
+      results.push(summaryRows[0] as CampaignObservation);
+
+      await insertEvent(client, tenantId, memorySpace, {
+        campaign_id: campaignId, event_type: "marketing_observation_generated",
+        summary: `Markedsførings-observasjoner regenerert (${results.length} oppdatert)`,
+        actor_person_id: null,
+        metadata: { observation_types: results.map((r) => r.observation_type) }
+      });
+
+      return results;
+    });
+  }
+
+  async listMarketingObservations(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    filter: { campaign_id?: string; observation_type?: MarketingObservationType; status?: MarketingObservationStatus | "all" } = {}
+  ): Promise<CampaignObservation[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const conditions = ["tenant_id = $1"];
+      const params: Array<string> = [tenantId];
+      if (filter.campaign_id) {
+        params.push(filter.campaign_id);
+        conditions.push(`campaign_id = $${params.length}`);
+      }
+      if (filter.observation_type) {
+        params.push(filter.observation_type);
+        conditions.push(`observation_type = $${params.length}`);
+      }
+      if (filter.status && filter.status !== "all") {
+        params.push(filter.status);
+        conditions.push(`status = $${params.length}`);
+      }
+      const { rows } = await client.query(
+        `SELECT * FROM marketing_campaign_observations WHERE ${conditions.join(" AND ")} ORDER BY observed_at DESC`,
+        params
+      );
+      return rows as CampaignObservation[];
     });
   }
 

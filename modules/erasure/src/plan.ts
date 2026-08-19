@@ -146,6 +146,12 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "marketing_spend_events", await run(client, mode, "marketing_spend_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaign_events", await run(client, mode, "marketing_campaign_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaign_tracking_tags", await run(client, mode, "marketing_campaign_tracking_tags", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-89 (031_growth_marketing_observations.sql): observasjon-tabellen har
+  // KUN en FK -> marketing_campaigns (INGEN FK mot anbefalinger/kommandoer -
+  // evidence.recommendation_ids/command_ids er LØSE jsonb-pekere, ALDRI en
+  // hard FK) - samme barnetabell-tier som marketing_attributions/
+  // marketing_spend_events over, slettes FØR marketing_campaigns.
+  add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;

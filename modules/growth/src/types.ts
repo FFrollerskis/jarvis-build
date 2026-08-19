@@ -39,7 +39,8 @@ export type CampaignEventType =
   | "action_recommendation_created"
   | "action_recommendation_resolved"
   | "execution_command_generated"
-  | "execution_command_cancelled";
+  | "execution_command_cancelled"
+  | "marketing_observation_generated";
 
 /**
  * D-85: anomaly -> recommended-action control-plane-fundament.
@@ -126,6 +127,68 @@ export interface CampaignExecutionCommand {
   cancelled_at: string | null;
   cancelled_by_person_id: string | null;
   cancellation_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * D-89: MARKETING MEMORY v1 - et NARROW, deterministisk OBSERVASJON-lag
+ * over ALLEREDE eksisterende kanonisk data (kampanje/utgift/attribusjon/
+ * møte/anbefaling/kommando). Lukker masterplanens EGEN literale nevning
+ * ("Experiment registry, anomaly detection, creative intelligence og
+ * marketing memory", input/02_..._v4.0.md linje 479) - IKKE et generalisert
+ * "AI lærer alt"-system.
+ *
+ * Begrepsskillet (BEVISST, ALDRI forvekslet):
+ * - MARKETING FACT = kanonisk leverandør-/forretningsfakta (`marketing_
+ *   campaigns`/`marketing_spend_events`/`marketing_attributions`/
+ *   `business_activities` - ALLEREDE finnes, INGEN ny fact-tabell her).
+ * - MARKETING OBSERVATION = deterministisk AVLEDET resultat FRA fakta
+ *   (`CampaignObservation` under - DETTE laget).
+ * - MARKETING HYPOTHESIS/LEARNING = en mulig forklaring/en gjenbrukbar
+ *   generalisert konklusjon på tvers av kampanjer - EKSPLISITT IKKE bygget
+ *   i v1 (ville krevd inferens/generalisering utover det eksplisitt
+ *   lagrede - Q-26-risiko, se D-89 for full begrunnelse).
+ * - MARKETING POLICY = eier-/systemdefinert regel (f.eks. D-85 sin
+ *   `reduction_fraction`-default) - urørt av denne sliceen.
+ *
+ * `detection_method` er BEVISST LÅST til KUN `'deterministic'` (databasens
+ * CHECK-constraint, `031_growth_marketing_observations.sql`) - ZERO
+ * ModelGateway/AI-inferens er strukturelt umulig i v1, ikke bare en
+ * kode-konvensjon. `status` inneholder BEVISST INGEN `'verified'`-verdi -
+ * en observasjon er ALDRI "bekreftet sannhet" (Truth Promotion/Q-26
+ * forblir eksplisitt ubygget), kun tilstede (`'open'`) eller ikke lenger
+ * gjeldende (`'resolved'` - satt når det underliggende vilkåret opphører,
+ * ALDRI slettet - historikken bevares, se `generateMarketingObservations()`
+ * i service.ts).
+ *
+ * To observasjonstyper, BEGGE trygt avledbare UTEN noe tidsvindu (unngår
+ * "sammenlign livstids-kampanje A mot 7-dagers-kampanje B"-fellen, siden
+ * `campaignPerformance()` er livstids-only - en FREMTIDIG tidsvindu-/
+ * trend-observasjonstype er eksplisitt IKKE bygget her):
+ * - `meetings_without_conversion`: kampanjen har ≥1 attribuert møte
+ *   (D-88) MEN 0 vunne opportunities (livstids-snapshot) - en ærlig
+ *   funnel-GAP, ALDRI en kausal påstand om HVORFOR.
+ * - `recommendation_disposition_summary`: en alltid-oppdatert opptelling
+ *   av D-85-anbefalingers/D-87-kommandoers status for kampanjen (aldri
+ *   `'resolved'`, kun en løpende rapport).
+ */
+export type MarketingObservationType = "meetings_without_conversion" | "recommendation_disposition_summary";
+export type MarketingObservationStatus = "open" | "resolved";
+export type MarketingObservationDetectionMethod = "deterministic";
+
+export interface CampaignObservation {
+  observation_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  campaign_id: string;
+  observation_type: MarketingObservationType;
+  detection_method: MarketingObservationDetectionMethod;
+  status: MarketingObservationStatus;
+  summary: string;
+  evidence: Record<string, unknown>;
+  observed_at: string;
+  resolved_at: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -1072,6 +1072,133 @@ describe("Q (D-88): deterministisk møte-stadium funnel-kobling i campaignPerfor
   });
 });
 
+describe("R (D-89): MARKETING MEMORY v1 - deterministisk observasjon-lag, ALDRI kausal påstand/AI-inferens", () => {
+  it("ingen møter ennå: INGEN meetings_without_conversion-rad opprettes (fravær = ærlig 'ingen data ennå', ikke gjettet)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R1 no data" });
+    const observations = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    expect(observations.some((o) => o.observation_type === "meetings_without_conversion")).toBe(false);
+    // recommendation_disposition_summary opprettes UANSETT, med ærlige 0-tall.
+    const summary = observations.find((o) => o.observation_type === "recommendation_disposition_summary");
+    expect(summary).toBeDefined();
+    expect((summary!.evidence as { recommendations: { proposed: number } }).recommendations.proposed).toBe(0);
+  });
+
+  it("møter uten konvertering: oppretter en 'open' meetings_without_conversion-observasjon med korrekt evidens", async () => {
+    await insertContact(TENANT_A, "ct-grw-r2");
+    await insertLeadWithContact(TENANT_A, "lead-grw-r2", "ct-grw-r2");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R2 gap" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-r2" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r2", "ct-grw-r2", "2030-01-01T10:00:00Z");
+    const observations = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const gap = observations.find((o) => o.observation_type === "meetings_without_conversion");
+    expect(gap?.status).toBe("open");
+    expect(gap?.detection_method).toBe("deterministic");
+    expect((gap!.evidence as { attributed_meetings: number }).attributed_meetings).toBe(1);
+    expect((gap!.evidence as { won_opportunities: number }).won_opportunities).toBe(0);
+    expect(gap?.summary).not.toMatch(/forårsak|genererte av kampanjen/i);
+  });
+
+  it("når vilkåret opphører (opportunity vinnes): observasjonen markeres 'resolved', ALDRI slettet - historikken bevares", async () => {
+    await insertContact(TENANT_A, "ct-grw-r3");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-r3", "ct-grw-r3", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R3 resolve" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-r3" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r3", "ct-grw-r3", "2030-01-01T10:00:00Z");
+    const first = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const openGap = first.find((o) => o.observation_type === "meetings_without_conversion");
+    expect(openGap?.status).toBe("open");
+
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(`UPDATE business_opportunities SET stage = 'won', value_ore = 100000 WHERE opportunity_id = 'opp-grw-r3'`)
+    );
+    const second = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const resolvedGap = second.find((o) => o.observation_type === "meetings_without_conversion");
+    expect(resolvedGap?.observation_id).toBe(openGap?.observation_id); // SAMME rad, aldri en ny/duplikat.
+    expect(resolvedGap?.status).toBe("resolved");
+    expect(resolvedGap?.resolved_at).not.toBeNull();
+    const all = await service.listMarketingObservations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "all" });
+    expect(all.filter((o) => o.observation_type === "meetings_without_conversion")).toHaveLength(1); // fortsatt KUN én rad totalt.
+  });
+
+  it("idempotent regenerering: uendret tilstand oppdaterer SAMME to rader, oppretter ALDRI duplikater", async () => {
+    await insertContact(TENANT_A, "ct-grw-r4");
+    await insertLeadWithContact(TENANT_A, "lead-grw-r4", "ct-grw-r4");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R4 idempotent" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-r4" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r4", "ct-grw-r4", "2030-01-01T10:00:00Z");
+    const first = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const second = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    expect(second.map((o) => o.observation_id).sort()).toEqual(first.map((o) => o.observation_id).sort());
+    const all = await service.listMarketingObservations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "all" });
+    expect(all).toHaveLength(2); // KUN de to observasjonstypene, uansett hvor mange ganger regenerert.
+  });
+
+  it("recommendation_disposition_summary teller anbefalings-/kommando-status korrekt med reelle evidens-ID-er (provenance, ikke fritekst alene)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R5 disposition" });
+    await service.setBudget(TENANT_A, "business", campaign.campaign_id, 100_000);
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "test", evidence: {}, detection_key: `test-r5:${campaign.campaign_id}`
+    });
+    await service.resolveActionRecommendation(TENANT_A, "business", rec.recommendation_id, "accepted");
+    const command = await service.generateExecutionCommand(TENANT_A, "business", rec.recommendation_id);
+
+    const observations = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const summary = observations.find((o) => o.observation_type === "recommendation_disposition_summary")!;
+    const evidence = summary.evidence as {
+      recommendations: { accepted: number; recommendation_ids: string[] };
+      commands: { pending_execution: number; command_ids: string[] };
+    };
+    expect(evidence.recommendations.accepted).toBe(1);
+    expect(evidence.recommendations.recommendation_ids).toContain(rec.recommendation_id);
+    expect(evidence.commands.pending_execution).toBe(1);
+    expect(evidence.commands.command_ids).toContain(command.command_id);
+  });
+
+  it("detection_method er ALLTID 'deterministic' - databasens CHECK-constraint gjør enhver annen verdi UMULIG (Q-26/D-81: ZERO ModelGateway-vei finnes)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R6 deterministic only" });
+    const observations = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    expect(observations.every((o) => o.detection_method === "deterministic")).toBe(true);
+    await expect(
+      withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+        client.query(
+          `UPDATE marketing_campaign_observations SET detection_method = 'ai_assisted' WHERE observation_id = $1`,
+          [observations[0]!.observation_id]
+        )
+      )
+    ).rejects.toThrow();
+  });
+
+  it("generateMarketingObservations mot en ikke-eksisterende kampanje kaster campaign_not_found", async () => {
+    await expect(service.generateMarketingObservations(TENANT_A, "business", "nonexistent-campaign")).rejects.toThrow("campaign_not_found");
+  });
+
+  it("listMarketingObservations filtrerer på campaign_id/observation_type/status", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R8 filter" });
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const byType = await service.listMarketingObservations(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, observation_type: "recommendation_disposition_summary"
+    });
+    expect(byType).toHaveLength(1);
+    expect(byType[0]!.observation_type).toBe("recommendation_disposition_summary");
+    const byStatusOpen = await service.listMarketingObservations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "open" });
+    expect(byStatusOpen.every((o) => o.status === "open")).toBe(true);
+  });
+
+  it("TENANT_B kan ALDRI se eller generere observasjoner for en kampanje opprettet av TENANT_A (RLS)", async () => {
+    await insertContact(TENANT_A, "ct-grw-r9");
+    await insertLeadWithContact(TENANT_A, "lead-grw-r9", "ct-grw-r9");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R9 isolation" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-r9" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r9", "ct-grw-r9", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    await expect(service.generateMarketingObservations(TENANT_B, "business", campaign.campaign_id)).rejects.toThrow("campaign_not_found");
+    const fromB = await service.listMarketingObservations(TENANT_B, "business", { campaign_id: campaign.campaign_id, status: "all" });
+    expect(fromB).toHaveLength(0);
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });

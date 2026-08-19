@@ -1658,6 +1658,35 @@ HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forbl
 handlingskapabilitet). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE merget. Full detalj: D-88 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 SLICE 7 — MARKETING MEMORY v1 (2026-08-19) → D-89
+
+Base `main`@`c8a5ea46d9af6fed90f3d179c0eb01ac2dffc031` (PR #26/D-88 merget), branch
+`claude/ua4-marketing-memory-v1`, draft PR, IKKE merget. Valgt av 9 kandidater - lukker masterplanens
+egen literale nevning ("Experiment registry, anomaly detection, creative intelligence og marketing
+memory") sin siste NOT_STARTED kapabilitet med en reelt mulig data-forutsetning etter D-88. Creative
+Intelligence/eksperiment-intelligens AVVIST IGJEN (samme datamangel som D-87/D-88). **Ny migrasjon
+`031_growth_marketing_observations.sql`** (`marketing_campaign_observations`, additiv, FK KUN mot
+`marketing_campaigns`). **Begrepsskille:** MARKETING FACT (eksisterende) → MARKETING OBSERVATION
+(`CampaignObservation`, DETTE laget) → MARKETING HYPOTHESIS/LEARNING (EKSPLISITT IKKE bygget - Q-26-
+risiko) → MARKETING POLICY (urørt). **Q-26-grensen:** `detection_method` LÅST til KUN
+`'deterministic'` i databasens CHECK-constraint (bevist strukturelt umulig å sette annet), `status`
+har INGEN `'verified'`-verdi, ZERO ModelGateway. **Persistens:** AVVISTE UA-2 sin generelle
+`memory_items`-motor (feil form), gjenbrukte `business_scores` (D-61) sitt entity/evidence/UNIQUE-
+per-type-mønster. **To observasjonstyper** (begge tidsvindu-frie): `meetings_without_conversion`
+(≥1 attribuert møte MEN 0 vunne opportunities, ærlig funnel-gap) og `recommendation_disposition_
+summary` (alltid-oppdatert opptelling av D-85/D-87-status). **Resolve-ALDRI-slett-livssyklus:** når
+vilkåret opphører, raden markeres `'resolved'`, ALDRI slettet - historikken bevart. **Ingen rad-fan-
+out-regresjon:** gjenbrukte `computePerformanceSnapshot()` (trukket ut fra D-88) i stedet for å
+nøste transaksjoner. Ny `growth.generate_marketing_observations` (klasse B)/`list_marketing_
+observations` (klasse A) - INGEN klasse C/D, INGEN scheduler. **D-85/D-87-grense bevart:** OBSERVERER
+kun anbefaling-/kommando-historikk, INGEN kobling til provider-mutasjon. Q-20 erasure-plan oppdatert.
+11 nye tester. Testregnskap: `main` FØR = 1630/112 → ETTER = **1641 (+11), 112 filer**, 112/112
+grønn (INGEN flake). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **D-89 =
+FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET
+forblir IKKE komplett (analyse-/lærings-lag ALENE, INGEN OpenLoop-/Business-OS-brief-integrasjon i
+denne sliceen). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE merget. Full detalj: D-89 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

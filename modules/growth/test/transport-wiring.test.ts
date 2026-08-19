@@ -28,7 +28,8 @@ describe("A: growth.*-handlinger er registrert i firstWaveTools() med korrekt tr
         "set_experiment_status", "list_events",
         "register_campaign_tracking_tag", "list_campaign_tracking_tags", "resolve_campaign_from_tracking", "attribute_from_tracking",
         "list_action_recommendations", "resolve_action_recommendation",
-        "generate_execution_command", "cancel_execution_command", "list_execution_commands"
+        "generate_execution_command", "cancel_execution_command", "list_execution_commands",
+        "generate_marketing_observations", "list_marketing_observations"
       ])
     );
     for (const tool of growthTools) expect(tool.transport).toBe(growthTransport);
@@ -64,6 +65,12 @@ describe("B: risikoklasser er effekt-baserte, ingen growth.*-handling er klasse 
     expect(byAction["generate_execution_command"]).toBe("B");
     expect(byAction["cancel_execution_command"]).toBe("B");
     expect(byAction["list_execution_commands"]).toBe("A");
+    // D-89: MARKETING MEMORY v1 er REN Jarvis-intern deterministisk
+    // avledning/persistens av en observasjon - klasse B for generering
+    // (skriver en rad), klasse A for lesing, ALDRI C/D (ingen provider-
+    // handling, ingen lifecycle-overgang med ekstern effekt).
+    expect(byAction["generate_marketing_observations"]).toBe("B");
+    expect(byAction["list_marketing_observations"]).toBe("A");
     expect(tools.every((t) => t.capability_class !== "D")).toBe(true);
   });
 });
@@ -244,6 +251,35 @@ describe("C4 (D-87): kommando-dispatch - generate/cancel/list ruter til riktig s
     await transport.invoke("list_execution_commands", { tenant_id: "t1", campaign_id: "grw-cm-1", status: "pending_execution" });
     expect(service._calls[0]!.method).toBe("listExecutionCommands");
     expect(service._calls[0]!.args[2]).toEqual({ campaign_id: "grw-cm-1", status: "pending_execution" });
+  });
+});
+
+describe("C5 (D-89): markedsførings-observasjon-dispatch - generate/list ruter til riktig service-metode", () => {
+  function fakeObservationService() {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    return {
+      generateMarketingObservations: async (...args: unknown[]) => { calls.push({ method: "generateMarketingObservations", args }); return [{ observation_id: "grw-ob-1" }]; },
+      listMarketingObservations: async (...args: unknown[]) => { calls.push({ method: "listMarketingObservations", args }); return []; },
+      _calls: calls
+    } as unknown as GrowthService & { _calls: Array<{ method: string; args: unknown[] }> };
+  }
+  it("generate_marketing_observations kaller service.generateMarketingObservations med campaign_id", async () => {
+    const service = fakeObservationService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("generate_marketing_observations", { tenant_id: "t1", campaign_id: "grw-cm-1" });
+    expect(service._calls[0]!.method).toBe("generateMarketingObservations");
+    expect(service._calls[0]!.args[2]).toBe("grw-cm-1");
+  });
+  it("list_marketing_observations kaller service.listMarketingObservations med valgfritt campaign_id/observation_type/status-filter", async () => {
+    const service = fakeObservationService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("list_marketing_observations", {
+      tenant_id: "t1", campaign_id: "grw-cm-1", observation_type: "meetings_without_conversion", status: "open"
+    });
+    expect(service._calls[0]!.method).toBe("listMarketingObservations");
+    expect(service._calls[0]!.args[2]).toEqual({
+      campaign_id: "grw-cm-1", observation_type: "meetings_without_conversion", status: "open"
+    });
   });
 });
 

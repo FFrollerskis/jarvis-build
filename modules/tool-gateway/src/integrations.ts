@@ -1142,6 +1142,31 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("growth")
     },
+    // D-89 MARKETING MEMORY v1: et NARROW, deterministisk OBSERVASJON-lag
+    // (`meetings_without_conversion`/`recommendation_disposition_summary`)
+    // over ALLEREDE eksisterende kanonisk data - ALDRI en "sannhet"
+    // (`status` har INGEN 'verified'-verdi), ALDRI et automatisk
+    // handlingstriggerpunkt (kun lesing/deterministisk avledning, ZERO
+    // kobling til D-85-anbefalinger/D-87-kommandoer utover å LESE deres
+    // status som evidens). `generate_marketing_observations` er klasse B
+    // (REN Jarvis-intern beregning/persistens av en observasjon, ALDRI en
+    // provider-handling) - ALDRI klasse C/D.
+    {
+      tool_id: "growth", action: "generate_marketing_observations",
+      description: "Avled deterministiske markedsførings-observasjoner for en kampanje (møter-uten-konvertering-gap, anbefaling/kommando-disposisjonsoppsummering) - ALDRI en kausal påstand, ALDRI AI-inferens",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "ingen provider-side-effekt å rulle tilbake (ren intern observasjons-persistens)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_marketing_observations", description: "List markedsførings-observasjoner, valgfritt filtrert på kampanje/type/status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string().optional(), observation_type: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
     // UA-4 Google Ads-slice (D-83): FØRSTE ekte leverandøradapter for
     // Growth Core - Google Ads er en ADAPTER (D-64), ALDRI domeneeier.
     // `list_campaigns` er en ren speilings-lesing (INGEN Jarvis-DB-skriving)
