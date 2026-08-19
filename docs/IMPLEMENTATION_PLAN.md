@@ -1495,6 +1495,73 @@ INGEN UA-6. Full detalj: D-83 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### PR #23 PRE-MERGE HARDENING — GOOGLE ADS LIVE-VERIFISERINGSVEI + D-41-RE-AUDIT (2026-08-19) → D-84
+
+D-83 sin egen rapport erkjente `HOST_ACTION_REQUIRED=true` UTEN at noen deterministisk
+live-kjøringsvei fantes ennå - dette lukker det gapet FØR review/merge, UTEN å endre den
+allerede-grønne adapterens produksjonsatferd (`google-ads-transport.ts` fikk KUN en kommentar-
+oppdatering, ZERO logikkendring).
+
+**Live-runner:** `modules/growth/scripts/google-ads-live-host-run.ts` (bootstrap: workspace/Docker/
+migrasjoner, INGEN ny migrasjon) + `google-ads-live.ts` (selve akseptansen) - samme
+"host-run+`-live.ts`"-todeling som alle øvrige UA-3/UA-4-scripts. Rene beslutningsfunksjoner i
+`scripts/lib/google-ads-live-lib.ts` (enhetstestbare, samme mønster som `google-drive-reauth-lib.ts`
+- `-live.ts`/`-host-run.ts` selv KUN kjørbare mot en ekte host). ÉN Windows-kommando, uendret
+FØR/ETTER Tobias' oppsett:
+
+```
+node --env-file=.env --experimental-transform-types modules/growth/scripts/google-ads-live-host-run.ts
+```
+
+**Env-preksjekk** (kun tilstedeværelse, ALDRI verdi) navngir eksakt manglende variabel.
+`BLOCKED_NO_CREDENTIALS` er en FORVENTET, IKKE-krasjende tilstand (`hard_fail=false`) FØR Tobias'
+oppsett - `computeHardFail()` skiller Q-21-regresjon (ALLTID hard_fail) fra manglende credentials
+(ALDRI alene).
+
+**Live-markører:** ÉTT `list_campaigns`-kall beviser auth+customer-access+provider-read SAMTIDIG,
+eksplisitt skilt fra "kampanjer finnes" (tom, men strukturelt gyldig liste = PASS, ALDRI feil).
+Kampanje-/utgiftssynk kjøres to ganger via `ToolGateway.execute()` (samme applikasjonssti som
+produksjon) for idempotens-bevis (Growth Core-radantall uendret etter andre kjøring). Utgiftsvindu:
+siste 30 fullførte dager. `classifyScanStats()` returnerer NO_DATA (IKKE feil) når `scanned=0` -
+DISTINKT fra en eksplisitt FAIL, skjuler aldri en reell feil. gclid/D-82-sporing: ÉN dag (i går), NO-
+GUESS-bevis strukturelt (`registered_tracking_tags <= raw_gclid_rows_from_provider`, kan ALDRI
+overstige). Tenant-isolasjon (TENANT_B forblir 100% urørt). Cleanup: UTELUKKENDE denne kjøringens
+EGEN syntetiske tenant slettes (FK-rekkefølge-lærdom anvendt proaktivt: `marketing_campaign_tracking_
+tags` FØR `marketing_campaigns`) - Google Ads-kontoen ALDRI rørt (kun lesing i HELE scriptet).
+Secret-safety: `evaluateSecretSafety()` er et ETTERPRØVBART bevis (skanner HELE loggbufferet, evaluert
+SIST etter cleanup-loggingen).
+
+**Markørsett (eksplisitt hard-required vs. NO_DATA-kvalifisert):** `HARD_REQUIRED_MARKERS` (10, MÅ
+være PASS når credentials er konfigurert) vs. `NO_DATA_ELIGIBLE_MARKERS` (4: spend_sync/
+spend_idempotent/tracking_sync/provenance - kan SANNFERDIG være NO_DATA, men ALDRI skjule en
+eksplisitt FAIL). `q21_runtime_role_safe` obligatorisk, uavhengig av Google Ads-credentials.
+
+**D-41 re-audit:** en NY, dedikert research-agent re-verifiserte HVER faktisk IMPLEMENTERT (ikke
+utsatt) D-83-påstand via uavhengig flerkilde-WebSearch (WebFetch mot `developers.google.com` fortsatt
+bekreftet BLOKKERT). Alle 8 undersøkte punkter (REST-endepunktmønster, GAQL-parameterisering
+[bekreftet: KUN meta-parametre, INGEN verdi-binding for WHERE-predikater - streng-interpolasjon+regex
+er derfor korrekt nødvendig forsvar, ikke en snarvei], header-plassering, `campaign.status`-enum,
+`cost_micros`-enhet, click_view enkelt-dags-krav, click_view ~90-dagers oppbevaring [bekreftet som et
+ekte spesifikt tall], offisiell klientbibliotek-språkliste) STYRKET fra `VERIFIED_SEARCH_SNIPPET` til
+`VERIFIED_OFFICIAL_SEARCH_SNIPPET`. ÉN presisering: 401/403-aldri-retries er utledet, IKKE direkte
+sitert - nedgradert til `UNVERIFIED_INFERRED` i kildekommentaren, INGEN kodeendring nødvendig (koden
+var allerede konservativ). INGEN kapabilitet utvidet, INGEN mutate-forskning utført.
+
+**31 nye tester** (`google-ads-live-lib.test.ts` §A-H): env-preksjekk, secret-safety, zero-campaign-
+håndtering, auth- vs. customer-access-feilklassifisering, NO_DATA vs. FAIL, hard_fail-beregning, OG et
+STRUKTURELT bevis mot `google-ads-live.ts` sin egen kildetekst (kun kjente handlinger kalles, INGEN av
+14 kjente fremtidige mutate-handlingsnavn finnes, `cleanupTenant()` sine DELETE-setninger er ALLE
+`tenant_id`-parameterisert). Testregnskap: `main` FØR = 1552/110 → ETTER = **1583 (+31), 111 filer
+(+1)**, 111/111 grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+
+**D-84 = FIXED_SUITE_COMPLETE=true, LIVE_RUNNER_READY=true, LIVE_PROVIDER_VERIFIED=false** (INGEN
+ekte Google Ads-kall denne økten heller - runneren er nå KLAR, kjøres FØRST av Tobias etter
+oppsettsekvensen, uendret fra D-83 §11). PR #23 oppdatert, IKKE merget, adapterens EGEN suite/atferd
+UENDRET av denne runden. INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner,
+INGEN UA-6. Full detalj: D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

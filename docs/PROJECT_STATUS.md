@@ -1,7 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 — FØRSTE LIVE MARKEDSFØRINGSPROVIDER: GOOGLE ADS-ADAPTER, LES/SYNK**
-→ D-83, IKKE merget). Tobias bekreftet Google Ads som `FIRST_MARKETING_PROVIDER` (forrige, rene
+**Oppdatert:** 2026-08-19 (**PR #23 PRE-MERGE HARDENING — GOOGLE ADS LIVE-VERIFISERINGSVEI + D-41-RE-AUDIT**
+→ D-84, D-83-oppfølging, samme branch, IKKE merget). D-83 sin egen rapport erkjente
+`HOST_ACTION_REQUIRED=true` UTEN at noen deterministisk live-kjøringsvei fantes ennå - lukket FØR
+review/merge, UTEN å endre den allerede-grønne adapterens produksjonsatferd (kun kommentaroppdatering
+i `google-ads-transport.ts`, ZERO logikkendring). **Nye scripts** (samme "host-run bootstrapper +
+-live.ts akseptanse"-todeling som alle øvrige UA-3/UA-4-scripts): `modules/growth/scripts/
+google-ads-live-host-run.ts` + `google-ads-live.ts`, med rene beslutningsfunksjoner i `scripts/lib/
+google-ads-live-lib.ts` (enhetstestbare, samme mønster som `google-drive-reauth-lib.ts`). ÉN
+Windows-kommando, uendret FØR/ETTER Tobias' oppsett: `node --env-file=.env
+--experimental-transform-types modules/growth/scripts/google-ads-live-host-run.ts`. **Env-preksjekk**
+(kun tilstedeværelse, ALDRI verdi) navngir eksakt manglende variabel; `BLOCKED_NO_CREDENTIALS` er en
+FORVENTET, IKKE-krasjende tilstand (`hard_fail=false`) FØR Tobias' oppsett - `computeHardFail()`
+skiller Q-21-regresjon (ALLTID hard_fail) fra manglende credentials (ALDRI alene). **Live-markører:**
+ÉTT `list_campaigns`-kall beviser auth+customer-access+provider-read SAMTIDIG, eksplisitt skilt fra
+"kampanjer finnes" (tom, men gyldig liste = PASS, ALDRI feil). Kampanje-/utgiftssynk kjørt to ganger
+via `ToolGateway.execute()` (samme applikasjonssti som produksjon) for idempotens-bevis. NO_DATA
+(scanned=0) er DISTINKT fra FAIL - skjuler aldri en reell feil. gclid-sporing: NO-GUESS-bevis
+strukturelt (`registered <= raw_rows`, kan aldri overstige). Tenant-isolasjon og cleanup (KUN denne
+kjøringens egen syntetiske tenant, Google Ads-kontoen ALDRI rørt - kun lesing i HELE scriptet).
+Secret-safety: `evaluateSecretSafety()` er et etterprøvbart bevis (skanner HELE loggbufferet),
+evaluert SIST. **D-41-re-audit:** en NY research-agent re-verifiserte hver faktisk IMPLEMENTERT
+D-83-påstand via uavhengig flerkilde-søk (WebFetch fortsatt bekreftet blokkert) - alle 8 punkter
+STYRKET fra `VERIFIED_SEARCH_SNIPPET` til `VERIFIED_OFFICIAL_SEARCH_SNIPPET`, ÉN presisering (401/403
+aldri retries er utledet, ikke direkte sitert - nedgradert til `UNVERIFIED_INFERRED`, INGEN
+kodeendring nødvendig, koden var allerede konservativ). INGEN kapabilitet utvidet, INGEN
+mutate-forskning. **31 nye tester** (`google-ads-live-lib.test.ts` §A-H: env/secret-safety/
+zero-campaign/auth-vs-customer-access/NO_DATA-vs-FAIL/hard_fail + strukturelt kildetekst-bevis mot
+mutate-handlinger og unscoped cleanup-DELETE). Testregnskap: `main` FØR = 1552/110 → ETTER = **1583
+(+31), 111 filer (+1)**, 111/111 grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+**Status:** D-84 = **FIXED_SUITE_COMPLETE=true, LIVE_RUNNER_READY=true, LIVE_PROVIDER_VERIFIED=false**
+(runneren er nå KLAR, kjøres FØRST av Tobias etter oppsettsekvensen - uendret fra D-83 §11). PR #23
+oppdatert, IKKE merget. Full detalj: D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, IKKE merget):** UA-4 — FØRSTE LIVE MARKEDSFØRINGSPROVIDER: GOOGLE
+ADS-ADAPTER, LES/SYNK → D-83, IKKE merget. Tobias bekreftet Google Ads som `FIRST_MARKETING_PROVIDER` (forrige, rene
 research-runde, ingen kode/D-ID). Base `main`@`6ddbbeb` (D-82, merget), branch
 `claude/ua4-google-ads-adapter`. **§0 kildeverifisering:** WebFetch mot `developers.google.com`
 BLOKKERT i dette miljøet (uendret) - en dedikert research-agent verifiserte Google Ads REST/GAQL-

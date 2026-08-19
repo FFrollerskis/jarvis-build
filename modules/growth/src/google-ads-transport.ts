@@ -12,12 +12,22 @@ import type { CampaignStatus } from "./types.ts";
  * rå utgift/klikk/visning er `EXTERNAL_CANONICAL` FAKTA denne adapteren
  * henter og videresender - ALDRI Jarvis sin egen mening om dem.
  *
- * D-41-verifiseringsstatus (viktig - se D-83 i DECISIONS_AND_ASSUMPTIONS.md
- * for full begrunnelse): WebFetch mot `developers.google.com` var BLOKKERT i
- * denne økten (samme egress-begrensning som D-81/D-82-forskningen) - ALLE
- * fakta under er derfor `VERIFIED_SEARCH_SNIPPET`, IKKE
- * `VERIFIED_PRIMARY_SOURCE`. Kapabiliteter som IKKE kunne bekreftes i det
- * hele tatt er BEVISST STOPPET (ikke bygget), fremfor gjettet:
+ * D-41-verifiseringsstatus (viktig - se D-83/D-84 i
+ * DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse): WebFetch mot
+ * `developers.google.com` var BLOKKERT i BÅDE D-83-runden og D-84
+ * PRE-MERGE-re-audit-runden (samme egress-begrensning som D-81/D-82-
+ * forskningen) - ALLE fakta under er derfor `VERIFIED_OFFICIAL_SEARCH_
+ * SNIPPET` (D-84 sin re-audit fant FLERE uavhengige, innbyrdes konsistente
+ * søkekilder for hvert punkt - en styrking fra D-83 sin opprinnelige,
+ * enklere `VERIFIED_SEARCH_SNIPPET`-klassifisering), IKKE
+ * `VERIFIED_PRIMARY_SOURCE`. ÉN presisering fra D-84: at 401/403 ALDRI skal
+ * retries er en RIMELIG, men IKKE direkte sitert regel (utledet fra Googles
+ * generelle autentiserings- vs. retry-bar-feil-kategorisering, ikke en
+ * eksplisitt "401/403 skal aldri retries"-setning funnet i dokumentasjonen)
+ * - klassifisert `UNVERIFIED_INFERRED` i D-84, IKKE handlet på ved å bygge
+ * NOE nytt (koden var ALLEREDE konservativ - retry KUN på 429/5xx var
+ * allerede riktig valg uansett). Kapabiliteter som IKKE kunne bekreftes i
+ * det hele tatt er BEVISST STOPPET (ikke bygget), fremfor gjettet:
  *   - Mutate/skriving (kampanje-/budsjett-/bud-endring): IKKE implementert
  *     her - dette er BÅDE utenfor Finance Integrity-grensen for denne
  *     sliceen (ingen autonome forbruks-mutasjoner FØR UA-6) OG en reell
