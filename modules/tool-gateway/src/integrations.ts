@@ -1087,6 +1087,53 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ingen direkte fjerning i denne sliceen - historisk attribusjonsrad (samme som attribute_to_campaign)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("growth")
+    },
+    // UA-4 Google Ads-slice (D-83): FØRSTE ekte leverandøradapter for
+    // Growth Core - Google Ads er en ADAPTER (D-64), ALDRI domeneeier.
+    // `list_campaigns` er en ren speilings-lesing (INGEN Jarvis-DB-skriving)
+    // - klasse A. `sync_*` skriver INN i den EKSISTERENDE, kanoniske
+    // Growth-modellen (via `GrowthService.upsertCampaignFromProvider()`/
+    // `recordSpendEvent()`/`registerCampaignTrackingTag()`, ALDRI en ny
+    // modell) - klasse B, SAMME nivå som `growth.record_spend_event`/
+    // `growth.register_campaign_tracking_tag`. INGEN klasse D her - denne
+    // sliceen implementerer BEVISST INGEN mutate-/budsjett-/bud-/
+    // kampanje-skriving MOT Google (Finance Integrity-grensen, D-83 -
+    // se DECISIONS_AND_ASSUMPTIONS.md for D-41-STOPP-begrunnelsen).
+    {
+      tool_id: "googleads", action: "list_campaigns", description: "Les kampanjeliste direkte fra Google Ads (GAQL, ingen Jarvis-DB-skriving - ren leverandør-speiling)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), customer_id: z.string().optional() }),
+      capability_class: "A", scopes: ["googleads.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("googleads")
+    },
+    {
+      tool_id: "googleads", action: "sync_campaigns", description: "Synk kampanjeliste fra Google Ads inn i Growth Core (idempotent upsert via external_campaign_id, ingen ny domenemodell)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), customer_id: z.string().optional() }),
+      capability_class: "B", scopes: ["googleads.read", "growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning - kampanjerader er historiske Growth Core-fakta, samme som growth.create_campaign", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("googleads")
+    },
+    {
+      tool_id: "googleads", action: "sync_spend", description: "Synk daglig utgift/klikk/visning per kampanje fra Google Ads inn i marketing_spend_events (source_type=provider_sync, idempotent per kampanje+dato)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), customer_id: z.string().optional(), start_date: z.string(), end_date: z.string() }),
+      capability_class: "B", scopes: ["googleads.read", "growth.write"], reversible: true,
+      rollback_procedure: "nytt sync_spend-kall overskriver SAMME (kampanje, dato, provider_sync)-rad ved korrigert kilde-tall", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("googleads")
+    },
+    {
+      // D-82-integrasjon: gclid fra Google Ads sin click_view-ressurs
+      // registrert som EKSAKT samme click_id_param-verdi D-82 sitt skjema
+      // allerede anser gyldig - ingen skjemaendring, ingen gjettet
+      // attribusjon (kalleren MÅ ha kjørt sync_campaigns FØRST for at en
+      // kampanje skal finnes å knytte gclid-en til).
+      tool_id: "googleads", action: "sync_tracking_tags", description: "Synk gclid fra Google Ads sin click_view-ressurs inn i marketing_campaign_tracking_tags for ÉN dato (D-82 deterministisk auto-attribusjon)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), customer_id: z.string().optional(), date: z.string() }),
+      capability_class: "B", scopes: ["googleads.read", "growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning i denne sliceen - historisk sporingstagg (samme som growth.register_campaign_tracking_tag)", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("googleads")
     }
   ];
 }

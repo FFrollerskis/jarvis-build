@@ -470,6 +470,103 @@ export class GrowthService {
     });
   }
 
+  /**
+   * D-83: leser en kampanje via `(channel, external_campaign_id)` i stedet
+   * for Jarvis sin egen `campaign_id` - den nøkkelen en ekstern
+   * leverandør-synk (f.eks. `GoogleAdsTransport`) faktisk kjenner. Ren
+   * lesing - INGEN mutasjon.
+   */
+  async findCampaignByExternalId(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    channel: CampaignChannel,
+    externalCampaignId: string
+  ): Promise<Campaign | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM marketing_campaigns WHERE tenant_id = $1 AND channel = $2 AND external_campaign_id = $3`,
+        [tenantId, channel, externalCampaignId]
+      );
+      return (rows[0] as Campaign) ?? null;
+    });
+  }
+
+  /**
+   * D-83 (UA-4 Google Ads-slice): idempotent upsert av en kampanje sporet
+   * FRA en ekstern leverandør (`ON CONFLICT (tenant_id, channel,
+   * external_campaign_id)` - SAMME unike indeks `027_growth.sql` allerede
+   * definerte for akkurat dette formålet). BEVISST forskjellig fra
+   * `setStatus()`: et leverandør-rapportert statusfelt er et EKSTERNT FAKTUM
+   * (EXTERNAL_CANONICAL, D-64) - IKKE en Jarvis-initiert
+   * lifecycle-handling - og skal derfor ALDRI tvinges gjennom
+   * `assertValidCampaignTransition()` sin interne, Jarvis-initierte
+   * tilstandsmaskin (en leverandør kan rapportere en overgang - f.eks.
+   * PAUSED direkte fra en kampanje Jarvis fortsatt tror er 'draft' - som den
+   * interne FSM-en aldri ville tillatt som en EGEN handling, men som er en
+   * fullstendig gyldig SANNHET om ekstern tilstand). `status` mappes av
+   * kalleren FØR denne metoden (se `mapGoogleAdsCampaignStatus()` i
+   * `google-ads-transport.ts`) - denne metoden selv gjør INGEN
+   * leverandør-spesifikk tolkning. Logger `campaign_created` KUN ved faktisk
+   * ny rad, `status_changed` KUN ved en FAKTISK statusendring (aldri en
+   * hendelse ved uendret synk - unngår tidslinje-spam ved daglig re-synk).
+   */
+  async upsertCampaignFromProvider(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    input: {
+      channel: CampaignChannel;
+      external_campaign_id: string;
+      name: string;
+      status?: CampaignStatus;
+      currency?: string;
+      actor_person_id?: string;
+    }
+  ): Promise<Campaign> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: existingRows } = await client.query(
+        `SELECT * FROM marketing_campaigns WHERE tenant_id = $1 AND channel = $2 AND external_campaign_id = $3 FOR UPDATE`,
+        [tenantId, input.channel, input.external_campaign_id]
+      );
+      const existing = existingRows[0] as Campaign | undefined;
+      const nextStatus = input.status ?? existing?.status ?? "draft";
+      // `started_at`/`ended_at` beregnes med SQL `now()` (aldri JS-klokken -
+      // unngår klokke-skew, samme presedens som resten av filen) og settes
+      // KUN én gang (COALESCE beholder en eksisterende verdi UENDRET) - både
+      // ved FØRSTE INSERT (INGEN eksisterende rad, `ON CONFLICT`-grenen
+      // kjører ALDRI da) OG ved en SENERE overgang på en allerede
+      // eksisterende rad (`ON CONFLICT DO UPDATE`-grenen).
+      const { rows } = await client.query(
+        `INSERT INTO marketing_campaigns (campaign_id, tenant_id, memory_space_id, channel, name, status, currency, external_campaign_id, started_at, ended_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                 CASE WHEN $6 = 'active' THEN now() ELSE NULL END,
+                 CASE WHEN $6 = 'ended' THEN now() ELSE NULL END)
+         ON CONFLICT (tenant_id, channel, external_campaign_id) DO UPDATE SET
+           name = EXCLUDED.name, status = EXCLUDED.status, updated_at = now(),
+           started_at = COALESCE(marketing_campaigns.started_at, CASE WHEN EXCLUDED.status = 'active' THEN now() ELSE NULL END),
+           ended_at = COALESCE(marketing_campaigns.ended_at, CASE WHEN EXCLUDED.status = 'ended' THEN now() ELSE NULL END)
+         RETURNING *`,
+        [`grw-cm-${randomUUID()}`, tenantId, memorySpace, input.channel, input.name, nextStatus, input.currency ?? "NOK", input.external_campaign_id]
+      );
+      const campaign = rows[0] as Campaign;
+      if (!existing) {
+        await insertEvent(client, tenantId, memorySpace, {
+          campaign_id: campaign.campaign_id, event_type: "campaign_created",
+          summary: `Kampanje synkronisert fra leverandør: ${input.name} (${input.channel})`,
+          actor_person_id: input.actor_person_id ?? null,
+          metadata: { source: "provider_sync", channel: input.channel, external_campaign_id: input.external_campaign_id }
+        });
+      } else if (existing.status !== nextStatus) {
+        await insertEvent(client, tenantId, memorySpace, {
+          campaign_id: campaign.campaign_id, event_type: "status_changed",
+          summary: `Status synkronisert fra leverandør: ${existing.status} -> ${nextStatus}`,
+          actor_person_id: input.actor_person_id ?? null,
+          metadata: { source: "provider_sync", channel: input.channel, from: existing.status, to: nextStatus }
+        });
+      }
+      return campaign;
+    });
+  }
+
   private async readForUpdate(client: pg.PoolClient, tenantId: string, campaignId: string, lock: boolean): Promise<Campaign | null> {
     const { rows } = await client.query(
       `SELECT * FROM marketing_campaigns WHERE tenant_id = $1 AND campaign_id = $2${lock ? " FOR UPDATE" : ""}`,

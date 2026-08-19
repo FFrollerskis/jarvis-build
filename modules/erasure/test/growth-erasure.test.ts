@@ -173,6 +173,27 @@ describe("D (utvidet): ingen dinglende FK-referanse noe sted i tenanten etter er
   });
 });
 
+describe("D-83: en leverandør-synket kampanje (upsertCampaignFromProvider) erases via SAMME eksisterende plan - INGEN ny tabell, INGEN ny erasure-registrering nødvendig", () => {
+  it("en kampanje opprettet via upsertCampaignFromProvider (Google Ads-sliceens synk-vei) forsvinner FULLSTENDIG ved en growth-scoped erasure", async () => {
+    const sentinel = `SentinelProviderSyncErase${randomUUID().replace(/-/g, "")}`;
+    const campaign = await growth.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: `ext-${sentinel}`, name: sentinel, status: "active" });
+    expect(campaign.campaign_id).toBeTruthy();
+
+    const service = new ErasureService(appPool, sovereignPolicy, embedding);
+    const result = await service.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" },
+      requestId: `req-grw-erase-provider-sync-${randomUUID()}`,
+      identity: identityFor(TENANT_A)
+    });
+    expect(result.status).toBe("completed");
+
+    const gone = await growth.getCampaign(TENANT_A, "business", campaign.campaign_id);
+    expect(gone).toBeNull();
+    const foundByExternalId = await growth.findCampaignByExternalId(TENANT_A, "business", "google_ads", `ext-${sentinel}`);
+    expect(foundByExternalId).toBeNull();
+  });
+});
+
 describe("E: en erasert kampanje kan ikke gjenoppstaa - en ny kampanje faar en HELT NY campaign_id", () => {
   it("en ny kampanje opprettet etter erasure faar en ny id, aldri en gjenbruk av den slettede", async () => {
     const sentinel = `SentinelNoResurrectGrw${randomUUID().replace(/-/g, "")}`;

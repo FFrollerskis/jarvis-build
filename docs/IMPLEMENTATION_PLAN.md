@@ -1399,6 +1399,169 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### UA-4 — FØRSTE LIVE MARKEDSFØRINGSPROVIDER: GOOGLE ADS-ADAPTER, LES/SYNK (2026-08-19) → D-83
+
+Tobias bekreftet Google Ads som `FIRST_MARKETING_PROVIDER` (forrige, rene research-runde - INGEN kode,
+INGEN D-ID logget da). Base `main`@`6ddbbeb` (D-82, merget), branch `claude/ua4-google-ads-adapter`.
+
+**§0 kildeverifisering:** WebFetch mot `developers.google.com` BLOKKERT i dette miljøet (uendret fra
+D-81/D-82). En dedikert research-agent verifiserte Google Ads REST/GAQL-fakta og merket hver påstand
+`VERIFIED_SEARCH_SNIPPET` (søkeindekserte utdrag fra offisiell dokumentasjon, IKKE en direkte
+primærkilde-hentning) vs `UNVERIFIED` (mutate-idempotens-mekanisme; conversion-upload). `UNVERIFIED`-
+kapabiliteter STOPPES eksplisitt denne runden fremfor å gjette virkemåte - byggeordrens eksplisitte
+krav.
+
+**D-64-gate:** `CAPABILITY=`ekstern annonseplattform-tilstand (kampanjer/annonsegrupper/forbruk/
+klikk/visninger/gclid); `CANONICAL_STATE=`kampanjeregister/utgiftsledger/attribusjonsgraf/CAC-ROAS =
+`JARVIS_CANONICAL` (uendret siden D-74); `EXTERNAL_CANONICAL=`Googles egen kampanje-
+serveringstilstand/rå forbruk-klikk-visninger/Google-konverteringsfakta/kontotilstand;
+`SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_AUTHORITY`; `CORE_DEPENDENCY_DECISION_REQUIRED=false` - Growth
+Core fungerer UENDRET UTEN Google Ads (bevist: `google-ads-wiring.test.ts` krever ingen Google
+Ads-avhengighet). Google Ads forblir en ADAPTER (`modules/growth/src/google-ads-transport.ts`),
+ALDRI der Jarvis sin domenearkitektur bor.
+
+**D-41-kapabilitetsmatrise:** LESING (kampanjer/annonsegrupper/annonser/budsjett/status via GAQL
+`googleAds:search`) = **IMPLEMENTERT** (klasse A); RAPPORTERING (kostnad/klikk/visninger per dag) =
+**IMPLEMENTERT** (klasse B); `click_view`-ressurs (gclid, ~90 dagers oppbevaring, ett-dags-filtrert) =
+**IMPLEMENTERT** (klasse B, kobles til D-82 sin sporing); OPPRETT/OPPDATER/FJERN/PAUSE/RESUME/
+BUDSJETT/BUD/NØKKELORD/MÅLGRUPPE/KREATIV = **EKSPLISITT UTSATT** (Finance Integrity-
+sekvenseringsgrense, IKKE permanent read-only, IKKE stille utelatt); KONVERTERING-OPPLASTING =
+**UTSATT** (mutate-idempotens `UNVERIFIED` - STOPPET, ikke bare sekvensert); ENDRINGSSPORING
+(`change_event`-alternativ til webhook) = IKKE implementert denne runden (polling er tilstrekkelig
+for førsteslice); RATE LIMITS/KVOTER = HÅNDTERT (bounded retry). Ingen kapabilitet stille utelatt.
+
+**Finance Integrity-grense:** denne sliceen øker ALDRI budsjett, endrer ALDRI bud, oppretter ALDRI en
+ekte forbrukende kampanje, INGEN autonom forbruksøkende handling - kun LESING/RAPPORTERING/SYNK.
+Sekvenseringsgrense (UA-6 ikke bygget ennå), IKKE permanent.
+
+**D-82-integrasjon:** `click_view.gclid` mappes til EKSISTERENDE `marketing_campaign_tracking_tags`
+(`click_id_param='gclid'`) via EKSISTERENDE `GrowthService.registerCampaignTrackingTag()` - INGEN ny
+attribusjonsmekanisme, INGEN LLM-gjetting, `resolveCampaignFromTracking()`/`attributeFromTracking()`
+UENDRET og gjenbrukt direkte. Ingen eksakt match => `null` (Q-26-grensen).
+
+**Arkitektur:** `GoogleAdsTransport implements ToolTransport` i `modules/growth` (unngår sirkulær
+pakkeavhengighet growth↔tool-gateway). Delt OAuth-tokenfornyelse gjenbrukt fra EKSISTERENDE
+`googleAccessToken()` (`modules/tool-gateway/src/live-transports.ts`, kun synlighet endret til
+`export`, ZERO atferdsendring) - EGET `adwords`-scope og EGEN `JARVIS_GOOGLE_ADS_REFRESH_TOKEN`,
+atskilt fra Gmail/Calendar/Drive sin `JARVIS_GOOGLE_TOKEN`. To nye `GrowthService`-metoder
+(`findCampaignByExternalId()`, `upsertCampaignFromProvider()`) - idempotent upsert via EKSISTERENDE
+`UNIQUE (tenant_id, channel, external_campaign_id)`-constraint (INGEN ny migrasjon), bevisst BYPASS
+av `assertValidCampaignTransition()` for leverandør-rapportert status (et `EXTERNAL_CANONICAL`-
+faktum, ikke en Jarvis-initiert FSM-overgang).
+
+**Robusthet:** streng `YYYY-MM-DD`-datovalidering FØR GAQL-strenginterpolasjon (ingen parameterisert
+spørring tilgjengelig per verifisert kildesnutt, bevist med injeksjonsforsøk-test); bounded retry
+(3 forsøk, eksponentiell backoff, KUN 429/5xx, ALDRI 401/403); per-rad try/catch (delvis-synk-
+sikkerhet, `{scanned, synced, failed, errors}`); et 24t Google-utfall tar Growth Core NED for NY
+synk, men eksisterende synket tilstand forblir fullt brukbar.
+
+**`googleads.*`-ToolGateway (4 handlinger):** `list_campaigns` (klasse A), `sync_campaigns`/
+`sync_spend`/`sync_tracking_tags` (klasse B). INGEN klasse D.
+
+**Sikkerhet/personvern:** ZERO ModelGateway-kall (D-81 `hosted_free_tier`-grensen uberørt); Google
+Ads-data klassifisert `BUSINESS_CONFIDENTIAL`; ingen kunde-/personnivå-data i denne sliceen;
+utviklertoken/tokens sendes UTELUKKENDE i HTTP-headere (bevist eksplisitt), ALDRI i URL/query-streng;
+feilmeldinger trunkert <250 tegn og bevist fri for hemmeligheter.
+
+**Q-20/21/26/27:** uendret prinsipp - `upsertCampaignFromProvider()` slettes via SAMME eksisterende
+erasure-plan (bevist med ny test), Q-21 NOSUPERUSER/NOBYPASSRLS uendret, Q-26 uendret (leverandørfakta
+er proveniens-merkede operasjonelle fakta, IKKE automatisk generell VERIFISERT kunnskap), Q-27
+uendret (INGEN ny tenant-enumereringsmekanisme).
+
+**Reell bug funnet+fikset:** `upsertCampaignFromProvider()` satte `started_at` KUN i
+`ON CONFLICT DO UPDATE`-grenen, ALDRI ved FØRSTE insert - fanget av en dedikert test. Fikset med
+`CASE WHEN` direkte i INSERT VALUES (dekker første-innsetting) + `COALESCE(...)` i
+`ON CONFLICT DO UPDATE` (dekker senere overgang, settes kun én gang).
+
+**38 nye tester** (25 `google-ads-transport.test.ts` mot mocket `fetch` + 3 `google-ads-wiring.test.ts`
++ 9 `service-rls.test.ts` §N mot ekte embedded Postgres/RLS) + 1 utvidet `growth-erasure.test.ts`.
+Testregnskap: `main` FØR=1514/108 → ETTER=**1552 (+38), 110 filer (+2)**, 110/110 grønn. `pnpm -w
+typecheck` 17/17 rent (én reell `TS2352`-kompileringsfeil funnet+fikset), `pnpm -w lint` rent.
+
+**FIXED_SUITE_COMPLETE=true, LIVE_PROVIDER_VERIFIED=false** (INGEN ekte Google Ads API-kall denne
+økten - byggeordren forbød å be om credentials under initial implementering). **HOST_ACTION_REQUIRED=
+true** for live-verifisering: Tobias må (1) aktivere Google Ads API i eksisterende Google Cloud-
+prosjekt, (2) legge `https://www.googleapis.com/auth/adwords`-scope til eksisterende OAuth-
+samtykkeskjerm, (3) generere en NY, ADSKILT refresh-token for dette scopet, (4) søke om Google Ads
+API Developer Token, (5) hente Google Ads Customer ID (+ evt. Manager/Login-Customer-ID), (6) sette
+`JARVIS_GOOGLE_ADS_REFRESH_TOKEN`/`_DEVELOPER_TOKEN`/`_CUSTOMER_ID`/`_LOGIN_CUSTOMER_ID` i `.env`.
+
+**D-83 = FIXED_SUITE_COMPLETE / IKKE LIVE_PROVIDER_VERIFIED.** Draft-PR, IKKE merget. UA-4 SOM HELHET
+forblir IKKE komplett (mutate-kapabilitet/kreativ intelligens/Finance Integrity Gateway/samtykke-
+dokumentasjon fortsatt UTSATT/BLOCKED/DEFERRED). UA-3 kriterium 2 forblir IKKE oppfylt (2/5 domener,
+uendret - `live_provider_connected` flyttes til `true` for marketing FØRST etter
+LIVE_PROVIDER_VERIFIED). INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner,
+INGEN UA-6. Full detalj: D-83 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
+#### PR #23 PRE-MERGE HARDENING — GOOGLE ADS LIVE-VERIFISERINGSVEI + D-41-RE-AUDIT (2026-08-19) → D-84
+
+D-83 sin egen rapport erkjente `HOST_ACTION_REQUIRED=true` UTEN at noen deterministisk
+live-kjøringsvei fantes ennå - dette lukker det gapet FØR review/merge, UTEN å endre den
+allerede-grønne adapterens produksjonsatferd (`google-ads-transport.ts` fikk KUN en kommentar-
+oppdatering, ZERO logikkendring).
+
+**Live-runner:** `modules/growth/scripts/google-ads-live-host-run.ts` (bootstrap: workspace/Docker/
+migrasjoner, INGEN ny migrasjon) + `google-ads-live.ts` (selve akseptansen) - samme
+"host-run+`-live.ts`"-todeling som alle øvrige UA-3/UA-4-scripts. Rene beslutningsfunksjoner i
+`scripts/lib/google-ads-live-lib.ts` (enhetstestbare, samme mønster som `google-drive-reauth-lib.ts`
+- `-live.ts`/`-host-run.ts` selv KUN kjørbare mot en ekte host). ÉN Windows-kommando, uendret
+FØR/ETTER Tobias' oppsett:
+
+```
+node --env-file=.env --experimental-transform-types modules/growth/scripts/google-ads-live-host-run.ts
+```
+
+**Env-preksjekk** (kun tilstedeværelse, ALDRI verdi) navngir eksakt manglende variabel.
+`BLOCKED_NO_CREDENTIALS` er en FORVENTET, IKKE-krasjende tilstand (`hard_fail=false`) FØR Tobias'
+oppsett - `computeHardFail()` skiller Q-21-regresjon (ALLTID hard_fail) fra manglende credentials
+(ALDRI alene).
+
+**Live-markører:** ÉTT `list_campaigns`-kall beviser auth+customer-access+provider-read SAMTIDIG,
+eksplisitt skilt fra "kampanjer finnes" (tom, men strukturelt gyldig liste = PASS, ALDRI feil).
+Kampanje-/utgiftssynk kjøres to ganger via `ToolGateway.execute()` (samme applikasjonssti som
+produksjon) for idempotens-bevis (Growth Core-radantall uendret etter andre kjøring). Utgiftsvindu:
+siste 30 fullførte dager. `classifyScanStats()` returnerer NO_DATA (IKKE feil) når `scanned=0` -
+DISTINKT fra en eksplisitt FAIL, skjuler aldri en reell feil. gclid/D-82-sporing: ÉN dag (i går), NO-
+GUESS-bevis strukturelt (`registered_tracking_tags <= raw_gclid_rows_from_provider`, kan ALDRI
+overstige). Tenant-isolasjon (TENANT_B forblir 100% urørt). Cleanup: UTELUKKENDE denne kjøringens
+EGEN syntetiske tenant slettes (FK-rekkefølge-lærdom anvendt proaktivt: `marketing_campaign_tracking_
+tags` FØR `marketing_campaigns`) - Google Ads-kontoen ALDRI rørt (kun lesing i HELE scriptet).
+Secret-safety: `evaluateSecretSafety()` er et ETTERPRØVBART bevis (skanner HELE loggbufferet, evaluert
+SIST etter cleanup-loggingen).
+
+**Markørsett (eksplisitt hard-required vs. NO_DATA-kvalifisert):** `HARD_REQUIRED_MARKERS` (10, MÅ
+være PASS når credentials er konfigurert) vs. `NO_DATA_ELIGIBLE_MARKERS` (4: spend_sync/
+spend_idempotent/tracking_sync/provenance - kan SANNFERDIG være NO_DATA, men ALDRI skjule en
+eksplisitt FAIL). `q21_runtime_role_safe` obligatorisk, uavhengig av Google Ads-credentials.
+
+**D-41 re-audit:** en NY, dedikert research-agent re-verifiserte HVER faktisk IMPLEMENTERT (ikke
+utsatt) D-83-påstand via uavhengig flerkilde-WebSearch (WebFetch mot `developers.google.com` fortsatt
+bekreftet BLOKKERT). Alle 8 undersøkte punkter (REST-endepunktmønster, GAQL-parameterisering
+[bekreftet: KUN meta-parametre, INGEN verdi-binding for WHERE-predikater - streng-interpolasjon+regex
+er derfor korrekt nødvendig forsvar, ikke en snarvei], header-plassering, `campaign.status`-enum,
+`cost_micros`-enhet, click_view enkelt-dags-krav, click_view ~90-dagers oppbevaring [bekreftet som et
+ekte spesifikt tall], offisiell klientbibliotek-språkliste) STYRKET fra `VERIFIED_SEARCH_SNIPPET` til
+`VERIFIED_OFFICIAL_SEARCH_SNIPPET`. ÉN presisering: 401/403-aldri-retries er utledet, IKKE direkte
+sitert - nedgradert til `UNVERIFIED_INFERRED` i kildekommentaren, INGEN kodeendring nødvendig (koden
+var allerede konservativ). INGEN kapabilitet utvidet, INGEN mutate-forskning utført.
+
+**31 nye tester** (`google-ads-live-lib.test.ts` §A-H): env-preksjekk, secret-safety, zero-campaign-
+håndtering, auth- vs. customer-access-feilklassifisering, NO_DATA vs. FAIL, hard_fail-beregning, OG et
+STRUKTURELT bevis mot `google-ads-live.ts` sin egen kildetekst (kun kjente handlinger kalles, INGEN av
+14 kjente fremtidige mutate-handlingsnavn finnes, `cleanupTenant()` sine DELETE-setninger er ALLE
+`tenant_id`-parameterisert). Testregnskap: `main` FØR = 1552/110 → ETTER = **1583 (+31), 111 filer
+(+1)**, 111/111 grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+
+**D-84 = FIXED_SUITE_COMPLETE=true, LIVE_RUNNER_READY=true, LIVE_PROVIDER_VERIFIED=false** (INGEN
+ekte Google Ads-kall denne økten heller - runneren er nå KLAR, kjøres FØRST av Tobias etter
+oppsettsekvensen, uendret fra D-83 §11). PR #23 oppdatert, IKKE merget, adapterens EGEN suite/atferd
+UENDRET av denne runden. INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner,
+INGEN UA-6. Full detalj: D-84 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
