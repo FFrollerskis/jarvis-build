@@ -34,7 +34,50 @@ export type CampaignEventType =
   | "budget_changed"
   | "attribution_created"
   | "experiment_created"
-  | "experiment_status_changed";
+  | "experiment_status_changed"
+  | "tracking_tag_registered";
+
+/**
+ * D-82: deterministisk UTM-/klikk-ID-basert auto-attribusjon. `click_id`
+ * (gclid/fbclid/msclkid) er det sterkeste, mest entydige signalet; `utm`
+ * krever ALLTID hele (source, medium, campaign)-tripletten sammen - ALDRI
+ * et delvis felt alene (for grovt, falske positiver). Gjensidig
+ * utelukkende med databasen selv (CHECK-constraint i migrasjonen).
+ */
+export type TrackingTagType = "click_id" | "utm";
+export type ClickIdParam = "gclid" | "fbclid" | "msclkid";
+
+export interface CampaignTrackingTag {
+  tag_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  campaign_id: string;
+  tag_type: TrackingTagType;
+  click_id_param: ClickIdParam | null;
+  click_id_value: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  created_at: string;
+}
+
+/** Nøyaktig ÉN av de to formene - håndhevet av TypeScript her OG av databasens CHECK-constraint. */
+export type RegisterCampaignTrackingTagInput =
+  | { click_id_param: ClickIdParam; click_id_value: string; actor_person_id?: string }
+  | { utm_source: string; utm_medium: string; utm_campaign: string; actor_person_id?: string };
+
+/** Samme unionsform som registrering - matching bruker EKSAKT de samme feltene, aldri en løsere variant. */
+export type TrackingLookup =
+  | { click_id_param: ClickIdParam; click_id_value: string }
+  | { utm_source: string; utm_medium: string; utm_campaign: string };
+
+export interface AttributeFromTrackingInput {
+  entity_type: AttributionEntityType;
+  entity_id: string;
+  tracking: TrackingLookup;
+  attribution_model?: AttributionModel;
+  actor_person_id?: string;
+}
 
 export interface Campaign {
   campaign_id: string;

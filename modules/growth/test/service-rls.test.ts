@@ -339,6 +339,105 @@ describe("J: vekst-tidslinje er separat fra audit_events", () => {
   });
 });
 
+describe("M (D-82): deterministisk UTM-/klikk-ID-basert auto-attribusjon", () => {
+  it("registerCampaignTrackingTag med click_id oppretter en tagg og et tracking_tag_registered-event", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Tracking click_id" });
+    const tag = await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { click_id_param: "gclid", click_id_value: `gclid-${campaign.campaign_id}` });
+    expect(tag.tag_type).toBe("click_id");
+    expect(tag.click_id_param).toBe("gclid");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.some((e) => e.event_type === "tracking_tag_registered")).toBe(true);
+  });
+  it("registerCampaignTrackingTag med utm-triplett oppretter en 'utm'-tagg", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Tracking utm" });
+    const tag = await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, {
+      utm_source: "google", utm_medium: "cpc", utm_campaign: `spring-${campaign.campaign_id}`
+    });
+    expect(tag.tag_type).toBe("utm");
+    expect(tag.utm_source).toBe("google");
+  });
+  it("registrering av SAMME tagg på nytt er idempotent - oppdaterer samme rad, oppretter INGEN duplikat", async () => {
+    const campaignFirst = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Idempotent tag 1" });
+    const campaignSecond = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Idempotent tag 2" });
+    const clickIdValue = `idem-${campaignFirst.campaign_id}`;
+    const first = await service.registerCampaignTrackingTag(TENANT_A, "business", campaignFirst.campaign_id, { click_id_param: "fbclid", click_id_value: clickIdValue });
+    const second = await service.registerCampaignTrackingTag(TENANT_A, "business", campaignSecond.campaign_id, { click_id_param: "fbclid", click_id_value: clickIdValue });
+    expect(second.tag_id).toBe(first.tag_id); // samme rad, aldri en ny
+    expect(second.campaign_id).toBe(campaignSecond.campaign_id); // men peker nå til den nye kampanjen (siste registrering vinner - forventet re-tagging-atferd)
+    const all = await service.listCampaignTrackingTags(TENANT_A, "business", campaignSecond.campaign_id);
+    expect(all).toHaveLength(1);
+  });
+  it("registerCampaignTrackingTag mot en ikke-eksisterende kampanje kaster campaign_not_found", async () => {
+    await expect(
+      service.registerCampaignTrackingTag(TENANT_A, "business", "nonexistent-campaign", { click_id_param: "gclid", click_id_value: "x" })
+    ).rejects.toThrow("campaign_not_found");
+  });
+  it("resolveCampaignFromTracking finner riktig kampanje for en EKSAKT click_id-match", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Resolve click_id" });
+    const value = `resolve-${campaign.campaign_id}`;
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { click_id_param: "msclkid", click_id_value: value });
+    const resolved = await service.resolveCampaignFromTracking(TENANT_A, "business", { click_id_param: "msclkid", click_id_value: value });
+    expect(resolved).toBe(campaign.campaign_id);
+  });
+  it("resolveCampaignFromTracking finner riktig kampanje for en EKSAKT utm-triplett-match", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "meta_ads", name: "Resolve utm" });
+    const campaignMarker = campaign.campaign_id;
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { utm_source: "meta", utm_medium: "social", utm_campaign: campaignMarker });
+    const resolved = await service.resolveCampaignFromTracking(TENANT_A, "business", { utm_source: "meta", utm_medium: "social", utm_campaign: campaignMarker });
+    expect(resolved).toBe(campaign.campaign_id);
+  });
+  it("resolveCampaignFromTracking returnerer null (ALDRI en gjettet kampanje) ved ingen match, inkl. delvis utm-overlapp", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "No partial match" });
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { utm_source: "google", utm_medium: "cpc", utm_campaign: "exact-only" });
+    const noMatch = await service.resolveCampaignFromTracking(TENANT_A, "business", { click_id_param: "gclid", click_id_value: "never-registered" });
+    expect(noMatch).toBeNull();
+    // Delvis match (samme source/medium, ANNEN campaign) - IKKE en match, aldri en fuzzy fallback.
+    const partial = await service.resolveCampaignFromTracking(TENANT_A, "business", { utm_source: "google", utm_medium: "cpc", utm_campaign: "different" });
+    expect(partial).toBeNull();
+  });
+  it("én click_id-verdi kan ALDRI registreres mot to forskjellige kampanjer samtidig (databasen selv håndhever, ikke bare applikasjonskoden)", async () => {
+    // Verifiserer at ON CONFLICT-oppdatering FLYTTER taggen (siste vinner) i stedet for å opprette en tvetydig andre rad.
+    const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Ambiguity A" });
+    const campaignB = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Ambiguity B" });
+    const sharedValue = `ambiguous-${campaignA.campaign_id}`;
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaignA.campaign_id, { click_id_param: "gclid", click_id_value: sharedValue });
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaignB.campaign_id, { click_id_param: "gclid", click_id_value: sharedValue });
+    const resolved = await service.resolveCampaignFromTracking(TENANT_A, "business", { click_id_param: "gclid", click_id_value: sharedValue });
+    expect(resolved).toBe(campaignB.campaign_id); // siste registrering vinner - ALDRI to samtidige rader for samme verdi
+    const tagsA = await service.listCampaignTrackingTags(TENANT_A, "business", campaignA.campaign_id);
+    expect(tagsA).toHaveLength(0); // taggen flyttet VEKK fra A, ikke duplisert
+  });
+  it("attributeFromTracking løser kampanje deterministisk og kaller den EKSISTERENDE attributeToCampaign uendret", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Attribute from tracking" });
+    const value = `attr-${campaign.campaign_id}`;
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { click_id_param: "gclid", click_id_value: value });
+    const attribution = await service.attributeFromTracking(TENANT_A, "business", {
+      entity_type: "lead", entity_id: `lead-attr-${campaign.campaign_id}`, tracking: { click_id_param: "gclid", click_id_value: value }
+    });
+    expect(attribution.campaign_id).toBe(campaign.campaign_id);
+    expect(attribution.source_pointer).toBe(`tracking:gclid=${value}`);
+    const attributions = await service.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(attributions.some((a) => a.attribution_id === attribution.attribution_id)).toBe(true);
+  });
+  it("attributeFromTracking kaster no_matching_campaign_for_tracking (ALDRI en gjettet kampanje) når ingen tagg matcher", async () => {
+    await expect(
+      service.attributeFromTracking(TENANT_A, "business", {
+        entity_type: "lead", entity_id: "lead-no-match", tracking: { click_id_param: "fbclid", click_id_value: "never-registered-anywhere" }
+      })
+    ).rejects.toThrow("no_matching_campaign_for_tracking");
+  });
+  it("TENANT_B kan ALDRI resolve/attribuere via en sporingstagg registrert av TENANT_A (RLS)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Tracking isolation" });
+    const value = `iso-${campaign.campaign_id}`;
+    await service.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, { click_id_param: "gclid", click_id_value: value });
+    const resolvedFromB = await service.resolveCampaignFromTracking(TENANT_B, "business", { click_id_param: "gclid", click_id_value: value });
+    expect(resolvedFromB).toBeNull();
+    await expect(
+      service.attributeFromTracking(TENANT_B, "business", { entity_type: "lead", entity_id: "lead-iso", tracking: { click_id_param: "gclid", click_id_value: value } })
+    ).rejects.toThrow("no_matching_campaign_for_tracking");
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });

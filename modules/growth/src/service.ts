@@ -5,6 +5,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import { assertValidCampaignTransition, assertValidExperimentTransition } from "./state-machine.ts";
 import type {
   Attribution,
+  AttributeFromTrackingInput,
   AttributeToCampaignInput,
   Campaign,
   CampaignChannel,
@@ -12,12 +13,15 @@ import type {
   CampaignEventType,
   CampaignPerformance,
   CampaignStatus,
+  CampaignTrackingTag,
   CreateCampaignInput,
   CreateExperimentInput,
   Experiment,
   ExperimentStatus,
   RecordSpendEventInput,
-  SpendEvent
+  RegisterCampaignTrackingTagInput,
+  SpendEvent,
+  TrackingLookup
 } from "./types.ts";
 
 export interface SearchCampaignsFilter {
@@ -236,6 +240,108 @@ export class GrowthService {
         [tenantId, campaignId]
       );
       return rows as Attribution[];
+    });
+  }
+
+  /**
+   * D-82: deterministisk auto-attribusjon-fundament. Registrerer én
+   * sporingstagg (klikk-ID ELLER full utm-triplett, ALDRI begge) på en
+   * kampanje - idempotent via ON CONFLICT (samme tagg registrert på nytt
+   * oppdaterer samme rad), databasens partial UNIQUE-indekser garanterer at
+   * en tagg-verdi ALDRI kan tilhøre to kampanjer samtidig (ambiguity umulig).
+   */
+  async registerCampaignTrackingTag(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    campaignId: string,
+    input: RegisterCampaignTrackingTagInput
+  ): Promise<CampaignTrackingTag> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const current = await this.readForUpdate(client, tenantId, campaignId, true);
+      if (!current) throw new Error("campaign_not_found");
+      const tag_id = `grw-tt-${randomUUID()}`;
+      const isClickId = "click_id_param" in input;
+      const conflictTarget = isClickId
+        ? "(tenant_id, click_id_param, click_id_value) WHERE tag_type = 'click_id'"
+        : "(tenant_id, utm_source, utm_medium, utm_campaign) WHERE tag_type = 'utm'";
+      const { rows } = await client.query(
+        `INSERT INTO marketing_campaign_tracking_tags
+           (tag_id, tenant_id, memory_space_id, campaign_id, tag_type, click_id_param, click_id_value, utm_source, utm_medium, utm_campaign)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT ${conflictTarget} DO UPDATE SET campaign_id = EXCLUDED.campaign_id
+         RETURNING *`,
+        [
+          tag_id, tenantId, memorySpace, campaignId, isClickId ? "click_id" : "utm",
+          isClickId ? input.click_id_param : null, isClickId ? input.click_id_value : null,
+          isClickId ? null : input.utm_source, isClickId ? null : input.utm_medium, isClickId ? null : input.utm_campaign
+        ]
+      );
+      const tag = rows[0] as CampaignTrackingTag;
+      await insertEvent(client, tenantId, memorySpace, {
+        campaign_id: campaignId, event_type: "tracking_tag_registered",
+        summary: isClickId ? `Sporingstagg registrert: ${input.click_id_param}` : `Sporingstagg registrert: utm ${input.utm_source}/${input.utm_medium}/${input.utm_campaign}`,
+        actor_person_id: input.actor_person_id ?? null,
+        metadata: isClickId
+          ? { tag_type: "click_id", click_id_param: input.click_id_param }
+          : { tag_type: "utm", utm_source: input.utm_source, utm_medium: input.utm_medium, utm_campaign: input.utm_campaign }
+      });
+      return tag;
+    });
+  }
+
+  async listCampaignTrackingTags(tenantId: string, memorySpace: MemorySpace, campaignId: string): Promise<CampaignTrackingTag[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM marketing_campaign_tracking_tags WHERE tenant_id = $1 AND campaign_id = $2 ORDER BY created_at DESC`,
+        [tenantId, campaignId]
+      );
+      return rows as CampaignTrackingTag[];
+    });
+  }
+
+  /**
+   * Deterministisk oppslag - ALDRI fuzzy/sannsynlighetsbasert. Returnerer
+   * `null` (ikke en gjettet kampanje) når ingen EKSAKT match finnes -
+   * samme "udefinert forblir udefinert"-prinsipp som `campaignPerformance()`
+   * sin `cac_ore`/`roas` (Q-26-grensen).
+   */
+  async resolveCampaignFromTracking(tenantId: string, memorySpace: MemorySpace, tracking: TrackingLookup): Promise<string | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } =
+        "click_id_param" in tracking
+          ? await client.query(
+              `SELECT campaign_id FROM marketing_campaign_tracking_tags WHERE tenant_id = $1 AND tag_type = 'click_id' AND click_id_param = $2 AND click_id_value = $3`,
+              [tenantId, tracking.click_id_param, tracking.click_id_value]
+            )
+          : await client.query(
+              `SELECT campaign_id FROM marketing_campaign_tracking_tags WHERE tenant_id = $1 AND tag_type = 'utm' AND utm_source = $2 AND utm_medium = $3 AND utm_campaign = $4`,
+              [tenantId, tracking.utm_source, tracking.utm_medium, tracking.utm_campaign]
+            );
+      return (rows[0] as { campaign_id: string } | undefined)?.campaign_id ?? null;
+    });
+  }
+
+  /**
+   * D-82 kjerne-vertikal: løser kampanje deterministisk fra sporingsparametre,
+   * kaller SÅ den EKSISTERENDE `attributeToCampaign()` uendret (ingen ny
+   * attribusjonsmekanisme - kun en ny, deterministisk vei INN til den
+   * samme). Kaster `no_matching_campaign_for_tracking` (aldri en gjettet
+   * kampanje) når ingen registrert tagg matcher - fail-closed, samme
+   * prinsipp som `attributeToCampaign()` sin `campaign_not_found`.
+   */
+  async attributeFromTracking(tenantId: string, memorySpace: MemorySpace, input: AttributeFromTrackingInput): Promise<Attribution> {
+    const campaignId = await this.resolveCampaignFromTracking(tenantId, memorySpace, input.tracking);
+    if (!campaignId) throw new Error("no_matching_campaign_for_tracking");
+    const sourcePointer =
+      "click_id_param" in input.tracking
+        ? `tracking:${input.tracking.click_id_param}=${input.tracking.click_id_value}`
+        : `tracking:utm_source=${input.tracking.utm_source};utm_medium=${input.tracking.utm_medium};utm_campaign=${input.tracking.utm_campaign}`;
+    return this.attributeToCampaign(tenantId, memorySpace, campaignId, {
+      entity_type: input.entity_type,
+      entity_id: input.entity_id,
+      ...(input.attribution_model !== undefined ? { attribution_model: input.attribution_model } : {}),
+      source_pointer: sourcePointer,
+      ...(input.actor_person_id !== undefined ? { actor_person_id: input.actor_person_id } : {})
     });
   }
 

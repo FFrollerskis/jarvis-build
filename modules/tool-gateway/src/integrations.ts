@@ -1031,6 +1031,62 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("growth")
+    },
+    // D-82: deterministisk UTM-/klikk-ID-basert auto-attribusjon (lukker
+    // Q-29 punkt 6). Lagt til på SLUTTEN av samme grunn som resten av
+    // growth.*-namespacet - eksisterende tester indekserer arrayet
+    // posisjonelt. ZERO ekstern leverandør - ren Jarvis-intern
+    // oppslagslogikk mot EGNE registrerte tagger (027/028_growth*.sql).
+    {
+      tool_id: "growth", action: "register_campaign_tracking_tag",
+      description: "Registrer en sporingstagg (klikk-ID ELLER full utm_source/utm_medium/utm_campaign-triplett) på en kampanje - idempotent, EKSAKT matching",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string(),
+        click_id_param: z.string().optional(), click_id_value: z.string().optional(),
+        utm_source: z.string().optional(), utm_medium: z.string().optional(), utm_campaign: z.string().optional(),
+        actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "registrer en ny tagg med korrigerte verdier for SAMME kampanje (ingen direkte fjerning i denne sliceen - historisk sporingskonfigurasjon)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_campaign_tracking_tags", description: "List alle registrerte sporingstagger for en kampanje",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "resolve_campaign_from_tracking",
+      description: "Deterministisk oppslag: hvilken kampanje (om noen) matcher disse sporingsparametrene EKSAKT? Returnerer null (aldri en gjettet kampanje) ved ingen match",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(),
+        click_id_param: z.string().optional(), click_id_value: z.string().optional(),
+        utm_source: z.string().optional(), utm_medium: z.string().optional(), utm_campaign: z.string().optional()
+      }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      // Klasse B, SAMME risikonivå som attribute_to_campaign (§9 i
+      // byggeordren: denne handlingen ER attribute_to_campaign, bare nådd
+      // via en deterministisk sporingsoppslag i stedet for en direkte
+      // campaign_id - ingen AI-gjettet tilskrivning innføres.
+      tool_id: "growth", action: "attribute_from_tracking",
+      description: "Koble en eksisterende lead/opportunity til en kampanje via deterministisk sporingsoppslag (klikk-ID/utm) - kaster ved ingen EKSAKT match, gjetter aldri",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), entity_type: z.string(), entity_id: z.string(),
+        click_id_param: z.string().optional(), click_id_value: z.string().optional(),
+        utm_source: z.string().optional(), utm_medium: z.string().optional(), utm_campaign: z.string().optional(),
+        attribution_model: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning i denne sliceen - historisk attribusjonsrad (samme som attribute_to_campaign)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
     }
   ];
 }

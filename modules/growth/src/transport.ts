@@ -1,7 +1,16 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import type { GrowthService } from "./service.ts";
-import type { AttributionEntityType, AttributionModel, CampaignChannel, CampaignStatus, ExperimentStatus } from "./types.ts";
+import type {
+  AttributionEntityType,
+  AttributionModel,
+  CampaignChannel,
+  CampaignStatus,
+  ClickIdParam,
+  ExperimentStatus,
+  RegisterCampaignTrackingTagInput,
+  TrackingLookup
+} from "./types.ts";
 
 /**
  * UA-4 Native Jarvis Growth Core (D-74): provider-nøytralt `growth.*`-
@@ -103,6 +112,30 @@ export class GrowthTransport implements ToolTransport {
         const rows = await this.service.listAttributions(tenantId, memorySpace, requireString(parameters, "campaign_id"));
         return { data: rows as unknown as JsonValue };
       }
+      case "register_campaign_tracking_tag": {
+        const row = await this.service.registerCampaignTrackingTag(
+          tenantId, memorySpace, requireString(parameters, "campaign_id"), trackingTagInput(parameters)
+        );
+        return { external_id: row.tag_id, data: row as unknown as JsonValue };
+      }
+      case "list_campaign_tracking_tags": {
+        const rows = await this.service.listCampaignTrackingTags(tenantId, memorySpace, requireString(parameters, "campaign_id"));
+        return { data: rows as unknown as JsonValue };
+      }
+      case "resolve_campaign_from_tracking": {
+        const campaignId = await this.service.resolveCampaignFromTracking(tenantId, memorySpace, trackingLookup(parameters));
+        return { ...(campaignId ? { external_id: campaignId } : {}), data: { campaign_id: campaignId } as unknown as JsonValue };
+      }
+      case "attribute_from_tracking": {
+        const row = await this.service.attributeFromTracking(tenantId, memorySpace, {
+          entity_type: requireString(parameters, "entity_type") as AttributionEntityType,
+          entity_id: requireString(parameters, "entity_id"),
+          tracking: trackingLookup(parameters),
+          ...(parameters["attribution_model"] !== undefined ? { attribution_model: parameters["attribution_model"] as AttributionModel } : {}),
+          ...(parameters["actor_person_id"] !== undefined ? { actor_person_id: String(parameters["actor_person_id"]) } : {})
+        });
+        return { external_id: row.attribution_id, data: row as unknown as JsonValue };
+      }
       case "create_experiment": {
         const row = await this.service.createExperiment(tenantId, memorySpace, {
           name: requireString(parameters, "name"),
@@ -157,4 +190,32 @@ function requireNumberish(parameters: Record<string, JsonValue>, key: string): n
 
 function actorId(parameters: Record<string, JsonValue>): string | undefined {
   return parameters["actor_person_id"] !== undefined ? String(parameters["actor_person_id"]) : undefined;
+}
+
+/**
+ * D-82: gjensidig utelukkende input - EKSAKT ett av (click_id_param+
+ * click_id_value) ELLER (utm_source+utm_medium+utm_campaign) må være tilstede
+ * i `parameters`, ALDRI begge/verken. Kaster tydelig i stedet for å gjette
+ * hvilken form kalleren mente (samme fail-closed-prinsipp som resten av denne
+ * transporten - se `growth_missing_parameter`).
+ */
+function trackingLookup(parameters: Record<string, JsonValue>): TrackingLookup {
+  const hasClickId = parameters["click_id_param"] !== undefined || parameters["click_id_value"] !== undefined;
+  const hasUtm = parameters["utm_source"] !== undefined || parameters["utm_medium"] !== undefined || parameters["utm_campaign"] !== undefined;
+  if (hasClickId === hasUtm) {
+    throw new Error("growth_missing_parameter:exactly_one_of_click_id_or_utm_required");
+  }
+  if (hasClickId) {
+    return { click_id_param: requireString(parameters, "click_id_param") as ClickIdParam, click_id_value: requireString(parameters, "click_id_value") };
+  }
+  return {
+    utm_source: requireString(parameters, "utm_source"),
+    utm_medium: requireString(parameters, "utm_medium"),
+    utm_campaign: requireString(parameters, "utm_campaign")
+  };
+}
+
+function trackingTagInput(parameters: Record<string, JsonValue>): RegisterCampaignTrackingTagInput {
+  const lookup = trackingLookup(parameters);
+  return { ...lookup, ...(parameters["actor_person_id"] !== undefined ? { actor_person_id: String(parameters["actor_person_id"]) } : {}) };
 }
