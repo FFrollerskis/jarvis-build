@@ -160,7 +160,7 @@ export function parseGoogleAuthFailureReason(reason: string): GoogleAuthErrorCla
  * aldri). Konto-/tenant-oppløsning: hver transport-instans er bundet til én
  * eksplisitt konto (accountEmail) - ingen implisitt cross-account fallback.
  */
-async function googleAccessToken(refreshToken: string): Promise<string> {
+export async function googleAccessToken(refreshToken: string): Promise<string> {
   const clientId = process.env["JARVIS_GOOGLE_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_GOOGLE_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("google_oauth_client_not_configured");

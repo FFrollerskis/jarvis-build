@@ -1,7 +1,59 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 3 — DETERMINISTISK UTM-/KLIKK-ID-BASERT AUTO-ATTRIBUSJON**
-→ D-82, IKKE merget). Neste UA-4-slice etter PR #21 (D-80/D-81, MERGET, merge-SHA `7b9789d`) - valgt
+**Oppdatert:** 2026-08-19 (**UA-4 — FØRSTE LIVE MARKEDSFØRINGSPROVIDER: GOOGLE ADS-ADAPTER, LES/SYNK**
+→ D-83, IKKE merget). Tobias bekreftet Google Ads som `FIRST_MARKETING_PROVIDER` (forrige, rene
+research-runde, ingen kode/D-ID). Base `main`@`6ddbbeb` (D-82, merget), branch
+`claude/ua4-google-ads-adapter`. **§0 kildeverifisering:** WebFetch mot `developers.google.com`
+BLOKKERT i dette miljøet (uendret) - en dedikert research-agent verifiserte Google Ads REST/GAQL-
+fakta og merket hver påstand `VERIFIED_SEARCH_SNIPPET` (flertallet) vs `UNVERIFIED` (mutate-
+idempotens, conversion-upload) - `UNVERIFIED`-kapabiliteter STOPPES eksplisitt denne runden fremfor
+å gjette virkemåte. **D-64-gate:** `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_AUTHORITY` (Jarvis =
+kanonisk kampanje-/attribusjonsmodell, uendret siden D-74; Google = autoritativ kilde for RÅ
+leverandørfakta som synkes inn med proveniens), `CORE_DEPENDENCY_DECISION_REQUIRED=false` - Growth
+Core fungerer UENDRET UTEN Google Ads. Google Ads forblir en ADAPTER (`modules/growth/src/
+google-ads-transport.ts`), ALDRI der Jarvis sin domenearkitektur bor. **D-41-matrise:** LESING
+(kampanjer/annonsegrupper/annonser/budsjett/status via GAQL) + RAPPORTERING (kostnad/klikk/
+visninger per dag) + `click_view` (gclid) = **IMPLEMENTERT** (klasse A/B); OPPRETT/OPPDATER/FJERN/
+PAUSE/RESUME/BUDSJETT/BUD/NØKKELORD/MÅLGRUPPE/KREATIV/KONVERTERING-OPPLASTING = **EKSPLISITT UTSATT**
+(Finance Integrity-sekvenseringsgrense - IKKE beskrevet som permanent read-only, IKKE stille
+utelatt). Mutate-idempotens var `UNVERIFIED` → INGEN mutate-handling kodet i det hele tatt denne
+runden. **Finance-grense:** denne sliceen øker ALDRI budsjett/bud, oppretter ALDRI ekte forbruk,
+INGEN autonom forbruksøkende handling - kun LESING/RAPPORTERING/SYNK. **D-82-integrasjon:**
+`click_view.gclid` mappes til EKSISTERENDE `marketing_campaign_tracking_tags`
+(`click_id_param='gclid'`) via EKSISTERENDE `GrowthService.registerCampaignTrackingTag()` - INGEN ny
+attribusjonsmekanisme, INGEN LLM-gjetting. **Arkitektur:** `GoogleAdsTransport implements
+ToolTransport` i `modules/growth` (unngår sirkulær pakkeavhengighet), delt OAuth-tokenfornyelse
+gjenbrukt fra `googleAccessToken()` (`modules/tool-gateway/src/live-transports.ts`, kun `export`
+lagt til) med EGET `JARVIS_GOOGLE_ADS_REFRESH_TOKEN`/`adwords`-scope, atskilt fra Gmail/Calendar/
+Drive. To nye `GrowthService`-metoder (`findCampaignByExternalId`/`upsertCampaignFromProvider`,
+idempotent via EKSISTERENDE `UNIQUE (tenant_id, channel, external_campaign_id)`, INGEN ny
+migrasjon). **Robusthet:** streng `YYYY-MM-DD`-datovalidering FØR GAQL-strenginterpolasjon (ingen
+parameterisert spørring tilgjengelig), bounded retry (3 forsøk, kun 429/5xx), per-rad try/catch
+(delvis-synk-sikkerhet), et 24t Google-utfall tar Growth Core NED for NY synk men eksisterende
+synket tilstand forblir brukbar. **ToolGateway:** `googleads.list_campaigns` (A), `sync_campaigns`/
+`sync_spend`/`sync_tracking_tags` (B) - INGEN klasse D. **Sikkerhet:** ZERO ModelGateway-kall (D-81
+uberørt), utviklertoken/tokens KUN i HTTP-headere (bevist), feilmeldinger <250 tegn og bevist fri
+for hemmeligheter. Q-20/21/26/27 uendret prinsipp (ny provider-synket kampanje erasert via SAMME
+eksisterende plan, bevist med test). **Reell bug funnet+fikset:** `upsertCampaignFromProvider()`
+satte `started_at` KUN i `ON CONFLICT`-grenen, ikke ved FØRSTE insert - fikset med `CASE WHEN`
+direkte i INSERT VALUES + `COALESCE` i `ON CONFLICT DO UPDATE`. 38 nye tester. Testregnskap: `main`
+FØR = 1514/108 → ETTER = **1552 (+38), 110 filer (+2)**, 110/110 grønn. `pnpm -w typecheck` 17/17
+rent (én reell `TS2352`-feil funnet+fikset i ny test), `pnpm -w lint` rent. **FIXED_SUITE_COMPLETE=
+true, LIVE_PROVIDER_VERIFIED=false** (INGEN ekte Google Ads-kall denne økten - byggeordren forbød å
+be om credentials under implementering). **HOST_ACTION_REQUIRED=true**: Tobias må (1) aktivere
+Google Ads API i eksisterende Google Cloud-prosjekt, (2) legge `adwords`-scope til eksisterende
+OAuth-samtykkeskjerm, (3) generere NY, adskilt refresh-token for dette scopet, (4) søke om Google
+Ads Developer Token, (5) hente Customer ID (+ evt. Manager/Login-Customer-ID), (6) sette de fire nye
+`JARVIS_GOOGLE_ADS_*`-variablene i `.env`. **INGEN Tobias-handling krevd for denne kode-lukkingen
+selv** (kun for LIVE-verifisering). D-83 = **FIXED_SUITE_COMPLETE / IKKE LIVE_PROVIDER_VERIFIED**.
+UA-4 SOM HELHET forblir IKKE komplett (mutate/kreativ intelligens/Finance Integrity Gateway/samtykke
+fortsatt UTSATT/BLOCKED/DEFERRED). UA-3 kriterium 2 forblir IKKE oppfylt (2/5 domener, uendret -
+`live_provider_connected` flyttes til `true` FØRST etter LIVE_PROVIDER_VERIFIED). Draft-PR
+opprettes, IKKE merget, INGEN Meta Ads, INGEN GA4-slice, INGEN autonome forbruksøkende mutasjoner,
+INGEN UA-6. Full detalj: D-83 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, IKKE merget):** UA-4 SLICE 3 — DETERMINISTISK UTM-/KLIKK-ID-BASERT
+AUTO-ATTRIBUSJON → D-82, IKKE merget. Neste UA-4-slice etter PR #21 (D-80/D-81, MERGET, merge-SHA `7b9789d`) - valgt
 via repo-sannhet-audit (`origin/main` verifisert eksakt `7b9789d`), IKKE Google Ads-default. **UA-4-
 matrise rekonstruert fra Q-29:** kampanje-/utgifts-/attribusjon-/CAC-ROAS-fundament = COMPLETE
 (D-74-78); live annonseplattform-connectorer/autonome budsjett-endringer/kreativ intelligens/Finance

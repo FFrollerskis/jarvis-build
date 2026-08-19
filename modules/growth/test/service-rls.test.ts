@@ -438,6 +438,83 @@ describe("M (D-82): deterministisk UTM-/klikk-ID-basert auto-attribusjon", () =>
   });
 });
 
+describe("N (D-83): upsertCampaignFromProvider/findCampaignByExternalId - leverandør-synk-fundamentet", () => {
+  it("oppretter en NY kampanje ved første synk og logger campaign_created med source=provider_sync", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n1", name: "Google Ads N1" });
+    expect(campaign.name).toBe("Google Ads N1");
+    expect(campaign.channel).toBe("google_ads");
+    expect(campaign.external_campaign_id).toBe("ext-n1");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.event_type).toBe("campaign_created");
+    expect(events[0]!.metadata["source"]).toBe("provider_sync");
+  });
+
+  it("er idempotent: samme (channel, external_campaign_id) synket på nytt oppdaterer SAMME rad, oppretter INGEN duplikat", async () => {
+    const first = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n2", name: "Original navn" });
+    const second = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n2", name: "Oppdatert navn" });
+    expect(second.campaign_id).toBe(first.campaign_id);
+    expect(second.name).toBe("Oppdatert navn");
+    const all = await service.searchCampaigns(TENANT_A, "business", { name_contains: "navn" });
+    expect(all.filter((c) => c.campaign_id === first.campaign_id)).toHaveLength(1);
+  });
+
+  it("re-synk UTEN faktisk statusendring logger INGEN nytt event (unngår tidslinje-spam ved daglig synk)", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n3", name: "Stabil", status: "active" });
+    await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n3", name: "Stabil", status: "active" });
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events).toHaveLength(1); // KUN campaign_created - ingen status_changed for en uendret re-synk
+  });
+
+  it("en FAKTISK provider-statusendring logger status_changed, med before/after i metadata", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n4", name: "Skifter status", status: "draft" });
+    await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n4", name: "Skifter status", status: "paused" });
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.filter((e) => e.event_type === "status_changed")).toHaveLength(1);
+    const statusEvent = events.find((e) => e.event_type === "status_changed")!;
+    expect(statusEvent.metadata["from"]).toBe("draft");
+    expect(statusEvent.metadata["to"]).toBe("paused");
+  });
+
+  it("en provider-status-overgang som den INTERNE FSM-en aldri ville tillatt som en EGEN handling (draft->paused) settes likevel direkte - eksternt fakta, ikke en Jarvis-initiert handling", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n5", name: "FSM-bypass", status: "draft" });
+    expect(campaign.status).toBe("draft");
+    const updated = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n5", name: "FSM-bypass", status: "paused" });
+    expect(updated.status).toBe("paused"); // setStatus() ville kastet InvalidCampaignTransitionError her - upsertCampaignFromProvider gjør det bevisst IKKE
+  });
+
+  it("status='active' setter started_at automatisk (samme atferd som setStatus()), KUN ved første gang", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n6", name: "Aktiv", status: "active" });
+    expect(campaign.started_at).not.toBeNull();
+  });
+
+  it("findCampaignByExternalId finner en synket kampanje via (channel, external_campaign_id), returnerer null for en ukjent kombinasjon", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n7", name: "Finn meg" });
+    const found = await service.findCampaignByExternalId(TENANT_A, "business", "google_ads", "ext-n7");
+    expect(found?.campaign_id).toBe(campaign.campaign_id);
+    const notFound = await service.findCampaignByExternalId(TENANT_A, "business", "google_ads", "ext-does-not-exist");
+    expect(notFound).toBeNull();
+    // Samme external_campaign_id på en ANNEN channel er en ANNEN kampanje, aldri en falsk match.
+    const wrongChannel = await service.findCampaignByExternalId(TENANT_A, "business", "meta_ads", "ext-n7");
+    expect(wrongChannel).toBeNull();
+  });
+
+  it("Q-21-regresjon: upsertCampaignFromProvider/findCampaignByExternalId fungerer UENDRET under en NOSUPERUSER/NOBYPASSRLS-rolle (SAMME rolle alle andre tester i denne filen allerede kjører under - ingen ny grant/rettighetsutvidelse nødvendig)", async () => {
+    // Ingen egen rolle-oppsett her med hensikt - `service` er allerede konstruert med `appPool` (jarvis_grw_svc_test, NOSUPERUSER/NOBYPASSRLS satt i beforeAll). At testene over i det hele tatt lykkes ER selve Q-21-beviset for denne sliceen - denne testen gjør det eksplisitt/navngitt for lesbarhet.
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n8-q21", name: "Q21" });
+    expect(campaign.campaign_id).toBeTruthy();
+  });
+
+  it("TENANT_B kan ALDRI finne eller påvirke en kampanje TENANT_A synket (RLS)", async () => {
+    const campaign = await service.upsertCampaignFromProvider(TENANT_A, "business", { channel: "google_ads", external_campaign_id: "ext-n9-iso", name: "Isolert" });
+    const foundFromB = await service.findCampaignByExternalId(TENANT_B, "business", "google_ads", "ext-n9-iso");
+    expect(foundFromB).toBeNull();
+    // TENANT_B sin egen upsert med SAMME external_campaign_id oppretter en HELT ANNEN rad (egen tenant_id-partisjon), aldri en kollisjon mot TENANT_A sin.
+    const bOwn = await service.upsertCampaignFromProvider(TENANT_B, "business", { channel: "google_ads", external_campaign_id: "ext-n9-iso", name: "TENANT_B sin egen" });
+    expect(bOwn.campaign_id).not.toBe(campaign.campaign_id);
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });

@@ -10,7 +10,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { GrowthService, GrowthTransport } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -116,6 +116,8 @@ for (const tool of firstWaveTools({
   support: new SupportTransport(supportService, businessService, toolGateway),
   contract: new AgreementsTransport(agreementsService),
   growth: new GrowthTransport(growthService),
+  // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
+  googleads: new GoogleAdsTransport(growthService),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

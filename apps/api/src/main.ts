@@ -39,7 +39,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { GrowthService, GrowthTransport } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -153,6 +153,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     support: new SupportTransport(supportService, businessService, toolGateway),
     contract: new AgreementsTransport(agreementsService),
     growth: new GrowthTransport(growthService),
+    // UA-4 Google Ads-slice (D-83): SAMME lat/enkel-avhengighet-mønster som
+    // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
+    // nøstet klasse D-handling i denne sliceen).
+    googleads: new GoogleAdsTransport(growthService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
