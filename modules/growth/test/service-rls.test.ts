@@ -748,6 +748,190 @@ describe("O (D-85): anomaly -> recommended-action BESLUTNINGS-lag - upsert/list/
   });
 });
 
+describe("P (D-87): provider-nøytral UTFØRELSES-KOMMANDO-modell - generate/cancel/list, INGEN utførelse noensinne", () => {
+  async function acceptedReduceBudgetRecommendation(campaignId: string, budgetOre: number, key: string) {
+    await service.setBudget(TENANT_A, "business", campaignId, budgetOre);
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaignId, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "R", evidence: {}, detection_key: key
+    });
+    return service.resolveActionRecommendation(TENANT_A, "business", rec.recommendation_id, "accepted", "person-grw-owner");
+  }
+
+  it("generateExecutionCommand beregner et deterministisk redusert budsjett (default 20%) fra en ALLEREDE godkjent anbefaling, og logger 'execution_command_generated'", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd generate" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-gen:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, "person-grw-owner");
+    expect(command.command_type).toBe("reduce_budget");
+    expect(command.current_budget_ore).toBe("100000");
+    expect(command.proposed_budget_ore).toBe("80000");
+    expect(command.status).toBe("pending_execution");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.some((e) => e.event_type === "execution_command_generated")).toBe(true);
+  });
+
+  it("generateExecutionCommand aksepterer en eksplisitt reduction_fraction", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd fraction" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-fraction:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, "person-grw-owner", 0.5);
+    expect(command.proposed_budget_ore).toBe("50000");
+    expect(command.reduction_fraction).toBe("0.5");
+  });
+
+  it("generateExecutionCommand kaster ved ugyldig reduction_fraction (utenfor (0,1))", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd bad fraction" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-badfrac:${campaign.campaign_id}`);
+    await expect(service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, undefined, 0)).rejects.toThrow(
+      "growth_invalid_reduction_fraction"
+    );
+    await expect(service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, undefined, 1)).rejects.toThrow(
+      "growth_invalid_reduction_fraction"
+    );
+  });
+
+  it("generateExecutionCommand kaster recommendation_not_accepted for en fortsatt 'proposed' anbefaling", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd not accepted" });
+    await service.setBudget(TENANT_A, "business", campaign.campaign_id, 100_000);
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "R", evidence: {}, detection_key: `test-cmd-notaccepted:${campaign.campaign_id}`
+    });
+    await expect(service.generateExecutionCommand(TENANT_A, "business", rec.recommendation_id)).rejects.toThrow(
+      "recommendation_not_accepted:proposed"
+    );
+  });
+
+  it("generateExecutionCommand kaster no_command_for_recommendation_type for en akseptert 'investigate'-anbefaling", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd investigate" });
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "investigate",
+      rationale: "R", evidence: {}, detection_key: `test-cmd-investigate:${campaign.campaign_id}`
+    });
+    const accepted = await service.resolveActionRecommendation(TENANT_A, "business", rec.recommendation_id, "accepted");
+    await expect(service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id)).rejects.toThrow(
+      "no_command_for_recommendation_type:investigate"
+    );
+  });
+
+  it("generateExecutionCommand kaster campaign_has_no_budget_to_reduce naar kampanjen mangler budsjett", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd no budget" });
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: campaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "R", evidence: {}, detection_key: `test-cmd-nobudget:${campaign.campaign_id}`
+    });
+    const accepted = await service.resolveActionRecommendation(TENANT_A, "business", rec.recommendation_id, "accepted");
+    await expect(service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id)).rejects.toThrow(
+      "campaign_has_no_budget_to_reduce"
+    );
+  });
+
+  it("generateExecutionCommand for SAMME recommendation_id på nytt oppdaterer SAMME rad (idempotent), oppretter INGEN duplikat-event", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd idempotent" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-idem:${campaign.campaign_id}`);
+    const first = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, undefined, 0.2);
+    const second = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id, undefined, 0.3);
+    expect(second.command_id).toBe(first.command_id);
+    expect(second.proposed_budget_ore).toBe("70000");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.filter((e) => e.event_type === "execution_command_generated")).toHaveLength(1);
+  });
+
+  it("cancelExecutionCommand markerer 'cancelled' og logger 'execution_command_cancelled' - kansellering FØR kommandoen (aldri) kunne vaert utført", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd cancel" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-cancel:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id);
+    const cancelled = await service.cancelExecutionCommand(TENANT_A, "business", command.command_id, "person-grw-owner", "for høyt risiko akkurat nå");
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.cancelled_at).not.toBeNull();
+    expect(cancelled?.cancelled_by_person_id).toBe("person-grw-owner");
+    expect(cancelled?.cancellation_reason).toBe("for høyt risiko akkurat nå");
+    const events = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(events.some((e) => e.event_type === "execution_command_cancelled")).toBe(true);
+  });
+
+  it("cancelExecutionCommand kaster command_not_pending ved forsøk på å kansellere et allerede kansellert command", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd cancel twice" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-canceltwice:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id);
+    await service.cancelExecutionCommand(TENANT_A, "business", command.command_id);
+    await expect(service.cancelExecutionCommand(TENANT_A, "business", command.command_id)).rejects.toThrow("command_not_pending:cancelled");
+  });
+
+  it("cancelExecutionCommand returnerer null for en ikke-eksisterende command_id", async () => {
+    const result = await service.cancelExecutionCommand(TENANT_A, "business", "nonexistent-command");
+    expect(result).toBeNull();
+  });
+
+  it("listExecutionCommands filtrerer på campaign_id og status", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd list" });
+    const other = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd list other" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-list:${campaign.campaign_id}`);
+    const acceptedOther = await acceptedReduceBudgetRecommendation(other.campaign_id, 50_000, `test-cmd-list:${other.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id);
+    await service.generateExecutionCommand(TENANT_A, "business", acceptedOther!.recommendation_id);
+    const forCampaign = await service.listExecutionCommands(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    expect(forCampaign).toHaveLength(1);
+    expect(forCampaign[0]!.command_id).toBe(command.command_id);
+    const pendingOnly = await service.listExecutionCommands(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "pending_execution" });
+    expect(pendingOnly).toHaveLength(1);
+    const cancelledOnly = await service.listExecutionCommands(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "cancelled" });
+    expect(cancelledOnly).toHaveLength(0);
+  });
+
+  it("KRITISK SIKKERHETSINVARIANT: naar den underliggende anbefalingen supersederes (vilkaaret forsvinner), kaskade-kanselleres et 'pending_execution' command AUTOMATISK i SAMME sveip - et command kan ALDRI overleve at sin egen begrunnelse reverseres", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd cascade supersede" });
+    for (let d = 8; d >= 1; d--) {
+      await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+        event_date: new Date(Date.now() - d * 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 1_000
+      });
+    }
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 20_000
+    });
+    await service.setBudget(TENANT_A, "business", campaign.campaign_id, 500_000);
+    await service.setStatus(TENANT_A, "business", campaign.campaign_id, "active");
+    await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    const detectionKey = `marketing_spend_anomaly:${campaign.campaign_id}`;
+    const recBefore = (await service.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id })).find((r) => r.detection_key === detectionKey)!;
+    await service.resolveActionRecommendation(TENANT_A, "business", recBefore.recommendation_id, "accepted", "person-grw-owner");
+    const command = await service.generateExecutionCommand(TENANT_A, "business", recBefore.recommendation_id);
+    expect(command.status).toBe("pending_execution");
+
+    // Korriger utgiften for i dag tilbake til normalt niva - vilkaaret forsvinner, neste sveip supersederer anbefalingen.
+    await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, {
+      event_date: new Date().toISOString().slice(0, 10), spend_amount_ore: 1_000
+    });
+    const result = await service.detectAndRecommendSpendAnomalies(TENANT_A, "business");
+    expect(result.superseded).toBeGreaterThanOrEqual(1);
+
+    const commandsAfter = await service.listExecutionCommands(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+    const commandAfter = commandsAfter.find((c) => c.command_id === command.command_id)!;
+    expect(commandAfter.status).toBe("superseded");
+  });
+
+  it("TENANT_B kan ALDRI se, generere eller kansellere et command opprettet av TENANT_A (RLS)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd isolation" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-iso:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id);
+    const fromB = await service.listExecutionCommands(TENANT_B, "business", { campaign_id: campaign.campaign_id });
+    expect(fromB).toHaveLength(0);
+    const cancelledFromB = await service.cancelExecutionCommand(TENANT_B, "business", command.command_id);
+    expect(cancelledFromB).toBeNull();
+    await expect(service.generateExecutionCommand(TENANT_B, "business", accepted!.recommendation_id)).rejects.toThrow("recommendation_not_found");
+  });
+
+  it("STRUKTURELL Finance Integrity-grense: databasens CHECK-constraint gjør 'executed' UMULIG å sette, selv med et direkte UPDATE-forsøk mot kolonnen", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Cmd structural boundary" });
+    const accepted = await acceptedReduceBudgetRecommendation(campaign.campaign_id, 100_000, `test-cmd-structural:${campaign.campaign_id}`);
+    const command = await service.generateExecutionCommand(TENANT_A, "business", accepted!.recommendation_id);
+    await expect(
+      withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+        client.query(`UPDATE marketing_campaign_execution_commands SET status = 'executed' WHERE command_id = $1`, [command.command_id])
+      )
+    ).rejects.toThrow();
+  });
+});
+
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
   it("K: TENANT_B ser ALDRI TENANT_A sine kampanjer", async () => {
     const campaignA = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Isolation A" });

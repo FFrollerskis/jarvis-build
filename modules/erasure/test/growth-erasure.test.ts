@@ -94,7 +94,8 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
     `);
     const known = new Set([
       "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
-      "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations"
+      "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations",
+      "marketing_campaign_execution_commands"
     ]);
     const unexpected = (rows as Array<{ dependent_table: string }>).filter((r) => !known.has(r.dependent_table));
     expect(unexpected).toHaveLength(0);
@@ -138,6 +139,18 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
     const recommendationsBefore = await growth.listActionRecommendations(TENANT_A, "business", { campaign_id: campaign.campaign_id });
     expect(recommendationsBefore.length).toBeGreaterThan(0);
 
+    // D-87: aksepter anbefalingen og generer en utførelses-kommando -
+    // kommandoraden må ALDRI overleve en growth-scoped erasure (samme
+    // campaign_id-eierskap, dessuten FK -> den erasede anbefalingen).
+    const reduceBudgetRec = recommendationsBefore.find((r) => r.recommendation_type === "reduce_budget");
+    if (reduceBudgetRec) {
+      await growth.setBudget(TENANT_A, "business", campaign.campaign_id, 100_000);
+      await growth.resolveActionRecommendation(TENANT_A, "business", reduceBudgetRec.recommendation_id, "accepted");
+      await growth.generateExecutionCommand(TENANT_A, "business", reduceBudgetRec.recommendation_id);
+      const commandsBefore = await growth.listExecutionCommands(TENANT_A, "business", { campaign_id: campaign.campaign_id });
+      expect(commandsBefore.length).toBeGreaterThan(0);
+    }
+
     const service = new ErasureService(appPool, sovereignPolicy, embedding);
     const result = await service.executeErasure({
       scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" },
@@ -169,6 +182,10 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
       "SELECT 1 FROM marketing_campaign_action_recommendations WHERE campaign_id = $1", [campaign.campaign_id]
     );
     expect(recommendationGone.rowCount).toBe(0);
+    const commandGone = await adminPool.query(
+      "SELECT 1 FROM marketing_campaign_execution_commands WHERE campaign_id = $1", [campaign.campaign_id]
+    );
+    expect(commandGone.rowCount).toBe(0);
   });
 });
 

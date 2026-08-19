@@ -1607,6 +1607,32 @@ HELHET forblir IKKE komplett. UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, 
 Google Ads live-oppsett, INGEN provider-mutasjon, INGEN andre slice, INGEN merge. Full detalj: D-85 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 SLICE 5 — PROVIDER-NØYTRAL KAMPANJE-UTFØRELSES-KOMMANDO-MODELL (2026-08-19) → D-87
+
+Base `main`@`7ebc31b` (PR #24/D-85/D-86 merget), branch `claude/ua4-execution-command-model`, draft
+PR, IKKE merget. Valgt av 8 kandidater - **eksplisitt AVVIST byggeordrens "sterke default" (Creative
+Intelligence Core)**: repo-sannhet viser INGEN kreativ-nivå-data noe sted (Google Ads-adapteren
+synker UTELUKKENDE kampanje-nivå-fakta) - å bygge det nå ville enten fabrikkert kreativ-ytelse fra
+kampanje-data (Q-26-risiko) eller levert et tomt, inert skjema. **Valgt i stedet: en provider-nøytral
+UTFØRELSES-KOMMANDO-modell** - det strukturelle bindeleddet mellom D-85 sitt BESLUTNINGS-lag og en
+FREMTIDIG UTFØRELSES-lag, INGEN av delene bygget. **STRUKTURELL Finance Integrity-håndhevelse:** ny
+`marketing_campaign_execution_commands`-tabell (`030_growth_execution_commands.sql`) sin `status`-
+CHECK-constraint inneholder BEVISST INGEN `'executed'`-verdi - databasen SELV, ikke bare kode-
+disiplin, gjør det umulig å markere et command utført (bevist med en dedikert test mot ekte Postgres).
+`generateExecutionCommand()` oversetter en godkjent `reduce_budget`-anbefaling til et deterministisk
+nytt budsjett (default 20% reduksjon); `investigate` genererer INGEN command. **KRITISK
+sikkerhetsinvariant:** supersedering av den underliggende anbefalingen kaskade-kansellerer ETHVERT
+`pending_execution`-command AUTOMATISK i SAMME transaksjon. `cancelExecutionCommand()` for eier-/
+agent-kansellering FØR utførelse (som aldri bygges her). Ny `growth.generate_execution_command`/
+`cancel_execution_command` (klasse B)/`list_execution_commands` (klasse A) - INGEN klasse C/D. INGEN
+ny scheduler (eksplisitt genererte kommandoer, ikke periodisk sveipet). Q-20 erasure-plan oppdatert
+(kommando-tabellen slettes FØRST av HELE marketing_*-blokken). 17 nye tester. Testregnskap: `main`
+FØR = 1603/112 → ETTER = **1620 (+17), 112 filer**, 112/112 grønn (én urelatert, kjent embedded-
+Postgres-flake bevist ved isolasjonskjøring). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+**D-87 = FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false**. UA-4 SOM HELHET forblir IKKE
+komplett (utførelses-kapabiliteten selv fortsatt IKKE bygget). UA-3 kriterium 2 UENDRET. Draft-PR,
+IKKE merget. Full detalj: D-87 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

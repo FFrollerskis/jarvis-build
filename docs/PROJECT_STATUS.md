@@ -1,8 +1,41 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 4 — ANOMALY → RECOMMENDED-ACTION CONTROL-PLANE-FUNDAMENT** →
-D-85, base `main`@`465421b` (PR #23/D-83/D-84 MERGET), branch
-`claude/ua4-marketing-action-recommendations`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 5 — PROVIDER-NØYTRAL KAMPANJE-UTFØRELSES-KOMMANDO-MODELL** →
+D-87, base `main`@`7ebc31b` (PR #24/D-85/D-86 MERGET), branch `claude/ua4-execution-command-model`,
+draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT AV 8 KANDIDATER, EKSPLISITT AVVIST
+byggeordrens "sterke default" (Creative Intelligence Core):** repo-sannhet viser at INGEN kreativ-
+nivå-data eksisterer noe sted i kodebasen (Google Ads-adapteren synker UTELUKKENDE kampanje-nivå-
+fakta, INGEN `CreativeAsset`-skjema finnes) - å bygge Creative Intelligence nå ville enten fabrikkert
+kreativ-ytelse fra kampanje-data (Q-26-risiko) eller levert et tomt skjema uten reelle input. **Valgt
+i stedet: en provider-nøytral UTFØRELSES-KOMMANDO-modell** - det strukturelle bindeleddet mellom D-85
+sitt BESLUTNINGS-lag og en FREMTIDIG UTFØRELSES-lag. **STRUKTURELL (ikke bare kode-konvensjonell)
+Finance Integrity-håndhevelse:** ny `marketing_campaign_execution_commands`-tabell (`030_growth_
+execution_commands.sql`) sin `status`-CHECK-constraint inneholder BEVISST INGEN `'executed'`-verdi -
+databasen SELV gjør det umulig for noen kode å markere et command utført, bevist eksplisitt med en
+test som forsøker et direkte `UPDATE` og bekrefter Postgres avviser det. `generateExecutionCommand()`
+oversetter en ALLEREDE eier-godkjent `reduce_budget`-anbefaling til et deterministisk nytt budsjett
+(default 20% reduksjon, ALDRI AI-gjettet); `investigate`-anbefalinger genererer INGEN command. **KRITISK
+sikkerhetsinvariant:** når den underliggende anbefalingen senere supersederes, kaskade-kanselleres et
+`pending_execution`-command AUTOMATISK i SAMME transaksjon - et command kan ALDRI overleve at sin
+egen begrunnelse reverseres. `cancelExecutionCommand()` for eier-/agent-kansellering FØR utførelse
+(aldri bygget). Ny `growth.generate_execution_command`/`cancel_execution_command` (klasse B)/`list_
+execution_commands` (klasse A) - INGEN klasse C/D. INGEN ny scheduler (kommandoer genereres eksplisitt,
+ikke periodisk sveipet - unngår enhver antydning av automatisk kommando→utførelse-kobling). Q-20
+erasure-plan oppdatert (kommando-tabellen slettes FØRST av HELE marketing_*-blokken, FK mot BÅDE
+kampanjer OG anbefalinger). **17 nye tester** (14 `service-rls.test.ts` §P, 3 `transport-wiring.test.ts`
+§C4, `growth-erasure.test.ts` utvidet). Testregnskap: `main` FØR = 1603/112 → ETTER = **1620 (+17),
+112 filer**, 112/112 grønn (én urelatert, kjent embedded-Postgres-`afterAll`-ressursflake i
+`ua1-p1a-dclass-mesh.test.ts` under full parallell kjøring, bevist ved endret-fil-uavhengighet og en
+ren 5/5-isolasjonskjøring). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **Status:** D-87 =
+**FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM
+HELHET forblir IKKE komplett (mutate-/utførelses-kapabilitet fortsatt IKKE bygget - denne sliceen
+legger KUN til kommando-OVERSETTELSEN, aldri utførelsen). UA-3 kriterium 2 UENDRET (2/5 domener).
+Draft-PR opprettes, IKKE merget. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon,
+INGEN andre slice denne runden, INGEN merge.** Full detalj: D-87 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, IKKE merget):** UA-4 SLICE 4 — ANOMALY → RECOMMENDED-ACTION CONTROL-
+PLANE-FUNDAMENT → D-85, base `main`@`465421b` (PR #23/D-83/D-84 MERGET), branch
+`claude/ua4-marketing-action-recommendations`, draft PR, IKKE merget. **RESUME SOVEREIGN AUTONOMY
 v4.0-oppfølging etter Google Ads-merge:** Tobias besluttet at ekte Google Ads live-credential-oppsett
 utsettes til en fremtidig FINAL INTEGRATION-fase - registrert eksplisitt som `GOOGLE_ADS_LIVE_
 VERIFICATION = DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86, SEKVENSERING IKKE kansellering -

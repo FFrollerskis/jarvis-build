@@ -1110,6 +1110,38 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("growth")
     },
+    // D-87: provider-nøytral UTFØRELSES-KOMMANDO-modell - det strukturelle
+    // bindeleddet mellom D-85 sitt BESLUTNINGS-lag og en FREMTIDIG
+    // utførelses-kapabilitet. `generate_execution_command`/
+    // `cancel_execution_command` er klasse B (REN Jarvis-intern beregning/
+    // kansellering) - ALDRI klasse C/D, siden INGEN kode noensinne kan
+    // markere et command 'executed' (databasens CHECK-constraint inneholder
+    // ikke den verdien i det hele tatt, se 030_growth_execution_commands.sql).
+    {
+      tool_id: "growth", action: "generate_execution_command",
+      description: "Oversett en ALLEREDE eier-godkjent anbefaling til en presis, provider-nøytral budsjett-kommando - beregner KUN, utfører ALDRI noe mot en ekte annonseplattform",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), recommendation_id: z.string(), actor_person_id: z.string().optional(), reduction_fraction: z.number().optional() }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "kanseller kommandoen (cancel_execution_command) - ingen provider-side-effekt å rulle tilbake", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "cancel_execution_command",
+      description: "Kanseller en ventende utførelses-kommando FØR den (aldri) noensinne kunne vært utført",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), command_id: z.string(), actor_person_id: z.string().optional(), reason: z.string().optional() }),
+      capability_class: "B", scopes: ["growth.write"], reversible: false,
+      rollback_procedure: "ingen (kansellering er en endelig disposisjon, samme prinsipp som avvist anbefaling)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_execution_commands", description: "List provider-nøytrale utførelses-kommandoer, valgfritt filtrert på kampanje/status - ALDRI utført av noen kode i denne sliceen",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
     // UA-4 Google Ads-slice (D-83): FØRSTE ekte leverandøradapter for
     // Growth Core - Google Ads er en ADAPTER (D-64), ALDRI domeneeier.
     // `list_campaigns` er en ren speilings-lesing (INGEN Jarvis-DB-skriving)

@@ -27,7 +27,8 @@ describe("A: growth.*-handlinger er registrert i firstWaveTools() med korrekt tr
         "attribute_to_campaign", "list_attributions", "create_experiment", "get_experiment", "list_experiments",
         "set_experiment_status", "list_events",
         "register_campaign_tracking_tag", "list_campaign_tracking_tags", "resolve_campaign_from_tracking", "attribute_from_tracking",
-        "list_action_recommendations", "resolve_action_recommendation"
+        "list_action_recommendations", "resolve_action_recommendation",
+        "generate_execution_command", "cancel_execution_command", "list_execution_commands"
       ])
     );
     for (const tool of growthTools) expect(tool.transport).toBe(growthTransport);
@@ -56,6 +57,13 @@ describe("B: risikoklasser er effekt-baserte, ingen growth.*-handling er klasse 
     // provider-utførelse i denne sliceen).
     expect(byAction["list_action_recommendations"]).toBe("A");
     expect(byAction["resolve_action_recommendation"]).toBe("B");
+    // D-87: kommando-modellen er REN Jarvis-intern beregning/kansellering -
+    // klasse B, ALDRI C/D (INGEN kode kan noensinne markere et command
+    // 'executed', se den strukturelle CHECK-constrainten i
+    // 030_growth_execution_commands.sql).
+    expect(byAction["generate_execution_command"]).toBe("B");
+    expect(byAction["cancel_execution_command"]).toBe("B");
+    expect(byAction["list_execution_commands"]).toBe("A");
     expect(tools.every((t) => t.capability_class !== "D")).toBe(true);
   });
 });
@@ -196,6 +204,46 @@ describe("C3 (D-85): anbefaling-dispatch - list/resolve ruter til riktig service
     await expect(
       transport.invoke("resolve_action_recommendation", { tenant_id: "t1", recommendation_id: "grw-rec-1", status: "proposed" })
     ).rejects.toThrow("growth_invalid_parameter:status_must_be_accepted_or_dismissed");
+  });
+});
+
+describe("C4 (D-87): kommando-dispatch - generate/cancel/list ruter til riktig service-metode", () => {
+  function fakeCommandService() {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    return {
+      generateExecutionCommand: async (...args: unknown[]) => { calls.push({ method: "generateExecutionCommand", args }); return { command_id: "grw-cmd-1", status: "pending_execution" }; },
+      cancelExecutionCommand: async (...args: unknown[]) => { calls.push({ method: "cancelExecutionCommand", args }); return { command_id: "grw-cmd-1", status: "cancelled" }; },
+      listExecutionCommands: async (...args: unknown[]) => { calls.push({ method: "listExecutionCommands", args }); return []; },
+      _calls: calls
+    } as unknown as GrowthService & { _calls: Array<{ method: string; args: unknown[] }> };
+  }
+  it("generate_execution_command kaller service.generateExecutionCommand med recommendation_id/actor/valgfri reduction_fraction", async () => {
+    const service = fakeCommandService();
+    const transport = new GrowthTransport(service);
+    const result = await transport.invoke("generate_execution_command", {
+      tenant_id: "t1", recommendation_id: "grw-rec-1", actor_person_id: "person-owner", reduction_fraction: 0.3
+    });
+    expect(service._calls[0]!.method).toBe("generateExecutionCommand");
+    expect(service._calls[0]!.args[2]).toBe("grw-rec-1");
+    expect(service._calls[0]!.args[3]).toBe("person-owner");
+    expect(service._calls[0]!.args[4]).toBe(0.3);
+    expect(result.external_id).toBe("grw-cmd-1");
+  });
+  it("cancel_execution_command kaller service.cancelExecutionCommand med command_id/actor/reason", async () => {
+    const service = fakeCommandService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("cancel_execution_command", { tenant_id: "t1", command_id: "grw-cmd-1", actor_person_id: "person-owner", reason: "for risikabelt" });
+    expect(service._calls[0]!.method).toBe("cancelExecutionCommand");
+    expect(service._calls[0]!.args[2]).toBe("grw-cmd-1");
+    expect(service._calls[0]!.args[3]).toBe("person-owner");
+    expect(service._calls[0]!.args[4]).toBe("for risikabelt");
+  });
+  it("list_execution_commands kaller service.listExecutionCommands med valgfritt campaign_id/status-filter", async () => {
+    const service = fakeCommandService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("list_execution_commands", { tenant_id: "t1", campaign_id: "grw-cm-1", status: "pending_execution" });
+    expect(service._calls[0]!.method).toBe("listExecutionCommands");
+    expect(service._calls[0]!.args[2]).toEqual({ campaign_id: "grw-cm-1", status: "pending_execution" });
   });
 });
 
