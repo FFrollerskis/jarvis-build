@@ -70,6 +70,7 @@ export interface SweepResult {
 }
 
 /** §15: bedriftshelse-akseptansekriteriet krever sales+product+finance+marketing+operations -
- * denne sliceen dekker KUN sales/CRM (Business Graph). Andre domener MÅ rapporteres som
- * ikke-integrert, aldri fabrikkert - se BusinessDomainCoverage i business-brief.ts. */
+ * `sales` (Business Graph/CRM) og `marketing` (Native Jarvis Growth Core, D-74/D-78) er dekket;
+ * `product`/`finance`/`operations` MÅ fortsatt rapporteres som ikke-integrert, aldri fabrikkert -
+ * se `BUSINESS_DOMAIN_COVERAGE` i business-brief.ts. */
 export type BusinessDomain = "sales" | "product" | "finance" | "marketing" | "operations";

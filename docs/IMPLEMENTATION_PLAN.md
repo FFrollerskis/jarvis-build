@@ -1188,6 +1188,55 @@ suite grønn (106/106 filer, 1422/1422 tester), typecheck/lint rene, GitHub CI
 eksplisitte godkjenning. STOP etter denne lukkingen. Ingen annonseplattform-connector. Ingen ny
 UA-4-slice startet i denne lukkingen.**
 
+#### UA4_SLICE_2: GROWTH → BUSINESS DOMAIN COVERAGE-INTEGRASJON (2026-08-19) → D-78
+
+Lukker det ovenstående, eksplisitt registrerte Q-29 punkt 7-gapet: `BUSINESS_DOMAIN_COVERAGE`
+hardkodet FORTSATT `marketing: "not_integrated"` etter at Native Growth Core allerede var
+VERIFIED/COMPLETE (D-77) - datakilden fantes, men var ikke koblet inn i selve rapporteringen.
+**D-64-gate kjørt FØRST:** `CAPABILITY=`domenedekning-rapportering for marketing;
+`SYSTEM_OF_RECORD=JARVIS_CANONICAL`; `CAN_RUN_WITHOUT_PROVIDER=true` - ingen leverandør
+introdusert. **Design (bevisst IKKE en blind streng-flipp):** `BUSINESS_DOMAIN_COVERAGE`-verdien
+utvidet fra en bar `"available"|"not_integrated"`-streng til `{status, source,
+live_provider_connected}` - domenekapabilitet (`status`) og ekstern leverandør-tilkobling
+(`live_provider_connected`) er BEVISST separate felt, forveksles ALDRI. `marketing.status =
+"available"` (source: Native Jarvis Growth Core), `marketing.live_provider_connected = false`.
+`sales`/`product`/`finance`/`operations` uendret i sak. `renderDomainCoverage()` viser nå
+eksplisitt leverandør-uavhengighet for tilgjengelige domener og en presis N/5-telling.
+**24 nye/oppdaterte tester** (marketing tilgjengelig+kilde+leverandør-uavhengighet,
+sales/product/finance/operations uendret, render-tekst, determinisme, strukturell
+leverandør-uavhengighet, ukentlig brief sitt `data_coverage`-felt identisk på tvers av tenants,
+host-run-wiring). **Ny host-akseptanse** (`ua4-growth-domain-coverage-host-run.ts`/`-live.ts`,
+samme etablerte mønster) - kjørt lokalt mot ekte embedded Postgres FØR commit (Docker ikke
+tilgjengelig i denne økten), fanget OG fikset en ekte FK-rekkefølge-bug i cleanup
+(`marketing_campaign_events` FØR `marketing_campaigns` - `growth.createCampaign()` logger
+automatisk et event, samme feilklasse som D-67/D-69/D-72). To rene smoke-kjøringer etter fiksen:
+`hard_fail=false`, alle 10 markører PASS (smoke-test, denne økten). Q-20 N/A (ingen ny
+tabell/persistert data). Q-21/Q-27/Q-26 uendret. INGEN ny ToolGateway-handling.
+
+**D-79 (2026-08-19): CI-akseptanse erstatter manuell host-kjøring (slice-spesifikt unntak).**
+Tobias ønsket ingen manuell Windows/Docker-host-kjøring for DENNE sliceen. Kvalifiseringssjekk mot
+faktisk diff bekreftet: ingen DB-migrasjon, ingen ny persistert domenetilstand, ingen credential,
+ingen ekstern leverandør, ingen ny ToolGateway-handling, ingen OS-/Docker-spesifikk atferd, ren
+rapporteringsendring, allerede ekte-Postgres-testdekning. Ny verifiseringsklasse innført:
+`HOST_VERIFIED` (ekte host-kjøring, fortsatt krevd for leverandør-/Docker-/credential-/nettverks-/
+Home Assistant-/tale-/maskinvare-/Windows-spesifikke slices) vs. `CI_VERIFIED` (automatisert,
+CI-eksekvert, ekte Postgres, ingen mocking av komponenten under test - en ANNEN, ikke svakere,
+bevis-kilde). Ny test `business-brief.test.ts` describe "E" beviser Business OS-tidslinjen
+(`companyTimeline()`) upåvirket av en sameksisterende ekte `marketing_campaigns`-rad - kjører mot
+ekte embedded Postgres som del av `pnpm test` i CI (`build-test`-jobben). Alle 10 host-script-
+markører kartlagt til automatisert CI-dekning (ingen fabrikkert PASS der en markør ikke er
+anvendbar). `Q21_REGRESSION=UNCHANGED` - kanonisk `runtime-role.test.ts` uendret, 6/6 grønn.
+Host-scriptet (`ua4-growth-domain-coverage-host-run.ts`/`-live.ts`) beholdt KUN som
+referanse/feilsøking - IKKE lenger release-gate, `TOBIAS_HOST_ACTION_REQUIRED=false`.
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite 107/107 filer, 1439/1439
+tester grønn (+1 §E-test), lokal `gitleaks` "no leaks found". **D-78 status: `CI_VERIFIED /
+COMPLETE`** (aldri `HOST_VERIFIED`). **UA4_SLICE_2 = VERIFIED/COMPLETE.** **UA-3 kriterium 2
+UENDRET:** `sales=AVAILABLE marketing=AVAILABLE product/finance/operations=NOT_INTEGRATED` -
+**fortsatt IKKE komplett** (2/5 domener, krever alle fem). **UA-4 SOM HELHET forblir IKKE
+komplett.** Dette er en SLICE-SPESIFIKK beslutning, IKKE en generell fjerning av host-verifisering
+for fremtidig UA-4-arbeid. Draft-PR #20 oppdatert, IKKE merget. Full detalj: D-78/D-79 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

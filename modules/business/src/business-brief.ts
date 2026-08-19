@@ -19,22 +19,56 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * andre urelatert brief-motor (§13 i byggeordren).
  */
 
-/** §15: akseptansekriterium 2 ("kombinerer sales, product, finance, marketing, operations")
- * krever ALLE fem domener - denne sliceen dekker KUN sales (Business Graph/CRM). Brief-en MÅ
- * si det eksplisitt, ALDRI late som de andre domenene er dekket. */
-export const BUSINESS_DOMAIN_COVERAGE: Record<BusinessDomain, "available" | "not_integrated"> = {
-  sales: "available",
-  product: "not_integrated",
-  finance: "not_integrated",
-  marketing: "not_integrated",
-  operations: "not_integrated"
+/**
+ * §15: akseptansekriterium 2 ("kombinerer sales, product, finance, marketing, operations")
+ * krever ALLE fem domener. Brief-en MÅ si eksplisitt fra hvilke domener som faktisk er dekket,
+ * ALDRI late som et udekket domene er dekket.
+ *
+ * `status` og `live_provider_connected` er BEVISST to separate felt (D-78 - UA-4 Growth →
+ * Business Domain Coverage-integrasjonen), ALDRI slått sammen til én overbelastet boolean:
+ * - `status: "available"` betyr KUN at Jarvis har en kanonisk, intern (JARVIS_CANONICAL)
+ *   kapabilitet for domenet - f.eks. `sales` via Business Graph/CRM, `marketing` via Native
+ *   Jarvis Growth Core (D-74/D-75/D-76/D-77: kampanjeregister/utgiftsledger/attribusjon/
+ *   CAC-ROAS/avviksdeteksjon).
+ * - `live_provider_connected` betyr at en EKSTERN tredjeparts-annonseplattform faktisk er
+ *   tilkoblet og leverer RÅ live-data. Domenekapabilitet og
+ *   leverandør-tilkobling er ALDRI det samme - `marketing.status === "available"` med
+ *   `marketing.live_provider_connected === false` er en gyldig, ærlig, forventet kombinasjon
+ *   (D-74 sin `CAN_RUN_WITHOUT_PROVIDER=true`-beslutning) - IKKE en selvmotsigelse.
+ *
+ * Fortsatt en ren, statisk kartlegging (INGEN DB-spørring/runtime-avledning) - samme
+ * arkitektoniske mønster som `sales` alltid har brukt: dette er en build-time-fakta om HVILKE
+ * domenemoduler som faktisk finnes i kodebasen, ikke en per-tenant datasjekk.
+ */
+export interface DomainCoverage {
+  status: "available" | "not_integrated";
+  /** Hvilken Jarvis-native kapabilitet som faktisk gir denne dekningen - aldri en generisk/kopiert forklaring. */
+  source: string;
+  /** Eksplisitt SEPARAT fra `status` - se filkommentaren over. */
+  live_provider_connected: boolean;
+}
+
+export const BUSINESS_DOMAIN_COVERAGE: Record<BusinessDomain, DomainCoverage> = {
+  sales: { status: "available", source: "Business Graph/CRM", live_provider_connected: false },
+  product: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false },
+  finance: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false },
+  marketing: {
+    status: "available",
+    source: "Native Jarvis Growth Core (kampanjeregister/utgiftsledger/attribusjon/CAC-ROAS/avviksdeteksjon, D-74)",
+    live_provider_connected: false
+  },
+  operations: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false }
 };
 
 export function renderDomainCoverage(): string {
-  const lines = Object.entries(BUSINESS_DOMAIN_COVERAGE).map(
-    ([domain, status]) => `- ${domain}: ${status === "available" ? "tilgjengelig (Business Graph/CRM)" : "IKKE integrert"}`
-  );
-  return `DATA COVERAGE (akseptansekriterium 2 er IKKE fullt oppfylt - kun sales/CRM)\n${lines.join("\n")}`;
+  const availableCount = Object.values(BUSINESS_DOMAIN_COVERAGE).filter((d) => d.status === "available").length;
+  const totalCount = Object.keys(BUSINESS_DOMAIN_COVERAGE).length;
+  const lines = Object.entries(BUSINESS_DOMAIN_COVERAGE).map(([domain, d]) => {
+    if (d.status !== "available") return `- ${domain}: IKKE integrert`;
+    const providerNote = d.live_provider_connected ? "" : " - ingen live ekstern leverandør tilkoblet";
+    return `- ${domain}: tilgjengelig (${d.source}${providerNote})`;
+  });
+  return `DATA COVERAGE (akseptansekriterium 2 er IKKE fullt oppfylt - ${availableCount}/${totalCount} domener dekket)\n${lines.join("\n")}`;
 }
 
 /** Ny BriefSource for eksisterende DailyBrief-motor - aapne loops som brief-punkter. */
