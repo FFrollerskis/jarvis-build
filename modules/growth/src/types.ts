@@ -243,6 +243,17 @@ export interface CampaignEvent {
  * attribusjonstidspunktet (`occurred_at >= attributed_at`) - et møte FØR
  * kampanjen noensinne ble tilskrevet kontakten kan umulig være et resultat
  * av DENNE kampanjen, og telles derfor aldri med (fail-closed, ikke gjettet).
+ *
+ * PRESISERING (semantisk grense, ikke bare en implementasjonsdetalj):
+ * `attributed_meetings` betyr "et kanonisk møte KOBLET til en forretnings-
+ * entitet som ALLEREDE bærer kampanje-attribusjon, inntruffet ETTER
+ * attribusjonstidspunktet" - EN DERIVERT ATTRIBUSJONSKJEDE (deterministisk
+ * lineage), IKKE en eksperimentelt bevist kausal påstand om at KAMPANJEN
+ * "forårsaket"/"genererte" møtet. Samme kontakt kan ha egne, uavhengige
+ * grunner til å bli møtt; feltet sier KUN at lineage-kjeden (attribusjon ->
+ * kontakt -> møte, i riktig tidsrekkefølge) eksisterer, aldri at kjeden er
+ * den ENESTE eller SANNE årsaken (Q-26-grensen: ingen "sannhets"-forfremmelse
+ * utover det de underliggende, allerede-lagrede faktaene faktisk beviser).
  */
 export interface CampaignPerformance {
   campaign_id: string;

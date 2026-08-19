@@ -1006,6 +1006,18 @@ describe("Q (D-88): deterministisk møte-stadium funnel-kobling i campaignPerfor
     expect(perf?.attributed_meetings).toBe(1);
   });
 
+  it("samme møte nådd via BÅDE en lead- OG en opportunity-attribusjon til SAMME kampanje telles KUN ÉN gang (DISTINCT activity_id på tvers av flere attribusjonsveier)", async () => {
+    await insertContact(TENANT_A, "ct-grw-q4b");
+    await insertLeadWithContact(TENANT_A, "lead-grw-q4b", "ct-grw-q4b");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-q4b", "ct-grw-q4b", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Funnel Q4b dual attribution path" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-q4b" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-q4b" });
+    await insertMeetingActivity(TENANT_A, "act-grw-q4b", "ct-grw-q4b", "2030-01-01T10:00:00Z");
+    const perf = await service.campaignPerformance(TENANT_A, "business", campaign.campaign_id);
+    expect(perf?.attributed_meetings).toBe(1);
+  });
+
   it("flere møter for samme attribuerte kontakt telles korrekt (DISTINCT activity_id) UTEN å doble attributed_revenue_ore/won_opportunities (rad-fan-out-regresjon)", async () => {
     await insertContact(TENANT_A, "ct-grw-q5");
     await insertOpportunityWithContact(TENANT_A, "opp-grw-q5", "ct-grw-q5", "won", 500_000);

@@ -1650,7 +1650,8 @@ bevisst:** møte-spørringen kjøres SEPARAT fra revenue-aggregatet (en naiv eks
 spørring ville doble `attributed_revenue_ore`/`won_opportunities` for kontakter med flere møter) -
 verifisert med en dedikert 3-møter-regresjonstest. INGEN ny ToolGateway-handling (EKSISTERENDE
 `growth.campaign_performance`, klasse A, respons utvidet). 9 nye tester (`service-rls.test.ts` §Q).
-Testregnskap: `main` FØR = 1620/112 → ETTER = **1629 (+9), 112 filer**, 112/112 grønn (INGEN flake).
+Testregnskap: `main` FØR = 1620/112 → ETTER = **1630 (+10), 112 filer**, 112/112 grønn (INGEN flake;
++1 til 10 under PR #26-audit: eksplisitt multi-attribusjonsvei-dedup-test).
 `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **D-88 = FIXED_SUITE_COMPLETE=true,
 HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forblir IKKE komplett
 (denne sliceen legger KUN til funnel-SYNLIGHET for et allerede eksisterende stadium, INGEN ny
