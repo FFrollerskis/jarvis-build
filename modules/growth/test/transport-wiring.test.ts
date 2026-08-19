@@ -19,13 +19,14 @@ describe("A: growth.*-handlinger er registrert i firstWaveTools() med korrekt tr
     const growthTransport = new GrowthTransport({} as unknown as GrowthService);
     const tools = firstWaveTools({ growth: growthTransport });
     const growthTools = tools.filter((t) => t.tool_id === "growth");
-    expect(growthTools.length).toBeGreaterThanOrEqual(16);
+    expect(growthTools.length).toBeGreaterThanOrEqual(21);
     expect(growthTools.map((t) => t.action)).toEqual(
       expect.arrayContaining([
         "create_campaign", "get_campaign", "list_campaigns", "search_campaigns", "list_by_company",
         "set_campaign_status", "set_budget", "record_spend_event", "list_spend_events", "campaign_performance",
         "attribute_to_campaign", "list_attributions", "create_experiment", "get_experiment", "list_experiments",
-        "set_experiment_status", "list_events"
+        "set_experiment_status", "list_events",
+        "register_campaign_tracking_tag", "list_campaign_tracking_tags", "resolve_campaign_from_tracking", "attribute_from_tracking"
       ])
     );
     for (const tool of growthTools) expect(tool.transport).toBe(growthTransport);
@@ -45,6 +46,10 @@ describe("B: risikoklasser er effekt-baserte, ingen growth.*-handling er klasse 
     expect(byAction["attribute_to_campaign"]).toBe("B");
     expect(byAction["set_campaign_status"]).toBe("C");
     expect(byAction["set_experiment_status"]).toBe("C");
+    expect(byAction["list_campaign_tracking_tags"]).toBe("A");
+    expect(byAction["resolve_campaign_from_tracking"]).toBe("A");
+    expect(byAction["register_campaign_tracking_tag"]).toBe("B");
+    expect(byAction["attribute_from_tracking"]).toBe("B");
     expect(tools.every((t) => t.capability_class !== "D")).toBe(true);
   });
 });
@@ -88,6 +93,67 @@ describe("C: transport-dispatch ruter til riktig service-metode", () => {
   it("ukjent action kaster growth_action_not_implemented", async () => {
     const transport = new GrowthTransport(fakeService());
     await expect(transport.invoke("delete_forever", { tenant_id: "t1" })).rejects.toThrow("growth_action_not_implemented:delete_forever");
+  });
+});
+
+describe("C2 (D-82): sporingstagg-dispatch - gjensidig utelukkende click_id/utm-input", () => {
+  function fakeTrackingService() {
+    const calls: Array<{ method: string; args: unknown[] }> = [];
+    return {
+      registerCampaignTrackingTag: async (...args: unknown[]) => { calls.push({ method: "registerCampaignTrackingTag", args }); return { tag_id: "grw-tt-1" }; },
+      listCampaignTrackingTags: async (...args: unknown[]) => { calls.push({ method: "listCampaignTrackingTags", args }); return []; },
+      resolveCampaignFromTracking: async (...args: unknown[]) => { calls.push({ method: "resolveCampaignFromTracking", args }); return "grw-cm-1"; },
+      attributeFromTracking: async (...args: unknown[]) => { calls.push({ method: "attributeFromTracking", args }); return { attribution_id: "grw-at-1" }; },
+      _calls: calls
+    } as unknown as GrowthService & { _calls: Array<{ method: string; args: unknown[] }> };
+  }
+  it("register_campaign_tracking_tag med click_id kaller service med riktig union-form", async () => {
+    const service = fakeTrackingService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("register_campaign_tracking_tag", { tenant_id: "t1", campaign_id: "grw-cm-1", click_id_param: "gclid", click_id_value: "abc123" });
+    expect(service._calls[0]!.method).toBe("registerCampaignTrackingTag");
+    expect(service._calls[0]!.args[3]).toEqual({ click_id_param: "gclid", click_id_value: "abc123" });
+  });
+  it("register_campaign_tracking_tag med utm-triplett kaller service med riktig union-form", async () => {
+    const service = fakeTrackingService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("register_campaign_tracking_tag", {
+      tenant_id: "t1", campaign_id: "grw-cm-1", utm_source: "google", utm_medium: "cpc", utm_campaign: "spring-sale"
+    });
+    expect(service._calls[0]!.args[3]).toEqual({ utm_source: "google", utm_medium: "cpc", utm_campaign: "spring-sale" });
+  });
+  it("register_campaign_tracking_tag med BÅDE click_id og utm kaster (tvetydig, ALDRI gjettet hvilken)", async () => {
+    const transport = new GrowthTransport(fakeTrackingService());
+    await expect(
+      transport.invoke("register_campaign_tracking_tag", {
+        tenant_id: "t1", campaign_id: "grw-cm-1", click_id_param: "gclid", click_id_value: "abc123", utm_source: "google", utm_medium: "cpc", utm_campaign: "x"
+      })
+    ).rejects.toThrow("growth_missing_parameter:exactly_one_of_click_id_or_utm_required");
+  });
+  it("register_campaign_tracking_tag uten NOEN sporingsparameter kaster (samme feilmelding, aldri en stille tom tagg)", async () => {
+    const transport = new GrowthTransport(fakeTrackingService());
+    await expect(
+      transport.invoke("register_campaign_tracking_tag", { tenant_id: "t1", campaign_id: "grw-cm-1" })
+    ).rejects.toThrow("growth_missing_parameter:exactly_one_of_click_id_or_utm_required");
+  });
+  it("resolve_campaign_from_tracking returnerer campaign_id fra service, ingen mutasjon", async () => {
+    const service = fakeTrackingService();
+    const transport = new GrowthTransport(service);
+    const result = await transport.invoke("resolve_campaign_from_tracking", { tenant_id: "t1", click_id_param: "fbclid", click_id_value: "xyz" });
+    expect(service._calls[0]!.method).toBe("resolveCampaignFromTracking");
+    expect(result.external_id).toBe("grw-cm-1");
+  });
+  it("attribute_from_tracking sender entity_type/entity_id + tracking-union videre til service.attributeFromTracking", async () => {
+    const service = fakeTrackingService();
+    const transport = new GrowthTransport(service);
+    await transport.invoke("attribute_from_tracking", {
+      tenant_id: "t1", entity_type: "lead", entity_id: "lead-1", utm_source: "google", utm_medium: "cpc", utm_campaign: "spring-sale"
+    });
+    expect(service._calls[0]!.method).toBe("attributeFromTracking");
+    const input = service._calls[0]!.args[2] as { entity_type: string; entity_id: string; tracking: unknown };
+    expect(input.entity_type).toBe("lead");
+    expect(input.entity_id).toBe("lead-1");
+    expect(input.tracking).toEqual({ utm_source: "google", utm_medium: "cpc", utm_campaign: "spring-sale" });
   });
 });
 

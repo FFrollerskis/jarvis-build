@@ -115,14 +115,16 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
     "business_open_loops",
     await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND campaign_id IS NOT NULL", tv)
   );
-  // `marketing_attributions`/`marketing_spend_events`/`marketing_campaign_events`
-  // FØR `marketing_campaigns` (alle tre har en direkte FK -> marketing_campaigns).
+  // `marketing_attributions`/`marketing_spend_events`/`marketing_campaign_events`/
+  // `marketing_campaign_tracking_tags` (D-82) FØR `marketing_campaigns` (alle
+  // fire har en direkte FK -> marketing_campaigns).
   // `marketing_experiments.campaign_id` er NULLABLE (et eksperiment kan stå
   // uten kampanje) - ingen FK-blokkering fra den siden, men slettes likevel
   // FØR marketing_campaigns for konsistens med de andre barnetabellene.
   add(result, "marketing_attributions", await run(client, mode, "marketing_attributions", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_spend_events", await run(client, mode, "marketing_spend_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaign_events", await run(client, mode, "marketing_campaign_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "marketing_campaign_tracking_tags", await run(client, mode, "marketing_campaign_tracking_tags", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;

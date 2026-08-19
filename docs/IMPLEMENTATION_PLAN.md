@@ -1341,6 +1341,64 @@ Full detalj: D-81 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### UA-4 SLICE 3 — DETERMINISTISK UTM-/KLIKK-ID-BASERT AUTO-ATTRIBUSJON (2026-08-19) → D-82
+
+Neste UA-4-slice etter PR #21 (D-80/D-81, MERGET, merge-SHA `7b9789d`) - valgt via repo-sannhet-audit
+(`origin/main` verifisert eksakt `7b9789d`), IKKE Google Ads-default. Lukker Q-29 punkt 6.
+
+**Slice-valg:** 8 kandidater sammenlignet eksplisitt (gjenstående domenedekning-integrasjon - allerede
+lukket av D-78; attribusjon-ingestion-fundament - **VALGT**; analytics-/sporings-kildefundament;
+første live markedsføringsprovider; kreativ intelligens; autonom markedsføringshandling;
+samtykke-/personvern-styring; Finance Integrity Gateway-avhengighet). `027_growth.sql` sin EGEN
+kildekommentar sa ordrett "se OPEN_QUESTIONS.md for fremtidig deterministisk UTM-basert
+auto-matching" - dette ER den forhåndsplanlagte, leverandør-uavhengige neste utvidelsen
+(platform-agnostisk, ZERO ekstern leverandørvalg kreves). De øvrige kandidatene krever enten en
+Tobias-leverandørbeslutning (D-64/D-41-port PER plattform) eller reelle kampanjedata fra en
+live-connector som ikke finnes ennå.
+
+**D-64-gate:** `CAPABILITY=`deterministisk kobling av lead/opportunity til kampanje via
+sporingsparametre; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`; `EXTERNAL_PROVIDER_GENUINELY_REQUIRED=false`
+(ren applikasjonslag-oppslagslogikk mot Jarvis sine EGNE registrerte tagger, ZERO Google Ads/Meta
+Ads/GA4-credential/tabell/endepunkt); `CORE_DEPENDENCY_DECISION_REQUIRED=false`. D-41 IKKE
+anvendelig (ingen provider introdusert).
+
+**Implementasjon ("smallest complete"):** migrasjon `028_growth_attribution_tracking.sql` - ny
+`marketing_campaign_tracking_tags`-tabell, to gjensidig utelukkende taggtyper (`click_id`:
+gclid/fbclid/msclkid + verdi; `utm`: full `(utm_source, utm_medium, utm_campaign)`-triplett sammen,
+ALDRI et delvis felt alene), håndhevet BÅDE av en DB-CHECK-constraint OG TypeScript-unionstyper. To
+partial UNIQUE-indekser sikrer BÅDE idempotent registrering (ON CONFLICT DO UPDATE) OG at ambiguity
+er STRUKTURELT umulig (databasen selv garanterer at én tagg-verdi ALDRI kan peke til to kampanjer
+samtidig). Ny `CampaignEventType`-verdi `tracking_tag_registered`.
+
+**`GrowthService`-utvidelse (4 nye metoder):** `registerCampaignTrackingTag()` (idempotent),
+`listCampaignTrackingTags()`, `resolveCampaignFromTracking()` (rent deterministisk oppslag -
+returnerer `null`, ALDRI en gjettet kampanje, ved ingen EKSAKT match - Q-26-grensen),
+`attributeFromTracking()` (løser kampanje FØRST, kaller SÅ den EKSISTERENDE `attributeToCampaign()`
+UENDRET - ingen ny attribusjonsmekanisme; kaster `no_matching_campaign_for_tracking` ved ingen match).
+
+**`growth.*`-ToolGateway-utvidelse (4 nye handlinger):** `register_campaign_tracking_tag`/
+`list_campaign_tracking_tags` (klasse A/B), `resolve_campaign_from_tracking` (klasse A),
+`attribute_from_tracking` (klasse B, samme risikonivå som `attribute_to_campaign`). INGEN klasse D.
+
+**Q-20/Q-21/Q-27/Q-26:** ny tabell registrert i erasure-planen (slettes FØR `marketing_campaigns`,
+`GRANT DELETE` gitt), bevist erasert i `growth-erasure.test.ts`. INGEN ny tenant-enumereringsmekanisme
+eller runtime-rolle-endring. Attribusjon forblir EKSPLISITT (kalleren oppgir sporingsparametrene) -
+et sporingstagg-match er et deterministisk databaseoppslag, IKKE en AI-inferens, derfor IKKE et
+Q-26-tilfelle.
+
+**17 nye tester** (11 `service-rls.test.ts` §M mot ekte embedded Postgres/RLS + 6
+`transport-wiring.test.ts` §C2 dispatch/validering) + 1 utvidet eksisterende test
+(`growth-erasure.test.ts`). Testregnskap: `main` FØR=1497 → ETTER=**1514 (+17)**, 108/108 filer
+grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+
+**D-82 = CI_VERIFIED/COMPLETE på egen scope.** INGEN Tobias-host-handling krevd. Draft-PR, IKKE
+merget. UA-4 SOM HELHET forblir IKKE komplett (live connectorer/autonome endringer/kreativ
+intelligens/Finance Integrity Gateway/samtykke-dokumentasjon fortsatt NOT_STARTED/BLOCKED/DEFERRED).
+UA-3 kriterium 2 forblir IKKE oppfylt (2/5 domener, uendret). Full detalj: D-82 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

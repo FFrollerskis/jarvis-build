@@ -1,7 +1,38 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**PR #21 PRE-MERGE SECURITY + D-41 HARDENING** → D-81, D-80-oppfølging,
-IKKE merget). **P0-FUNN OG FIKS:** `UNCLASSIFIED_CAN_ROUTE_TO_HOSTED_FREE_TIER=true` FØR denne
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 3 — DETERMINISTISK UTM-/KLIKK-ID-BASERT AUTO-ATTRIBUSJON**
+→ D-82, IKKE merget). Neste UA-4-slice etter PR #21 (D-80/D-81, MERGET, merge-SHA `7b9789d`) - valgt
+via repo-sannhet-audit (`origin/main` verifisert eksakt `7b9789d`), IKKE Google Ads-default. **UA-4-
+matrise rekonstruert fra Q-29:** kampanje-/utgifts-/attribusjon-/CAC-ROAS-fundament = COMPLETE
+(D-74-78); live annonseplattform-connectorer/autonome budsjett-endringer/kreativ intelligens/Finance
+Integrity Gateway-integrasjon/samtykke-dokumentasjon = alle fortsatt NOT_STARTED/BLOCKED/DEFERRED;
+deterministisk UTM-/kilde-basert auto-attribusjon = **NÅ COMPLETE (denne runden)**. **8 kandidat-
+slices sammenlignet eksplisitt** (live connector, analytics-kildefundament, kreativ intelligens,
+autonom handling, samtykke/personvern-styring, Finance Integrity Gateway-avhengighet, gjenstående
+domenedekning-kabling - alle avvist med begrunnelse) - valgte i stedet attribusjon-ingestion-
+fundamentet: `027_growth.sql` sin EGEN kildekommentar sa ordrett "se OPEN_QUESTIONS.md for fremtidig
+deterministisk UTM-basert auto-matching" - dette ER den forhåndsplanlagte, leverandør-uavhengige
+neste utvidelsen (platform-agnostisk, ZERO ekstern leverandørvalg kreves, styrker CAC/ROAS-presisjon
+direkte). **D-64-gate:** `CORE_DEPENDENCY_DECISION_REQUIRED=false` - ren applikasjonslag-oppslags-
+logikk mot Jarvis sine EGNE registrerte sporingstagger, ZERO Google Ads/Meta Ads/GA4-credential/
+tabell/endepunkt. D-41 IKKE anvendelig (ingen provider introdusert). **Implementasjon:** migrasjon
+`028_growth_attribution_tracking.sql` (ny `marketing_campaign_tracking_tags`-tabell, to gjensidig
+utelukkende taggtyper - `click_id` (gclid/fbclid/msclkid) og full `(utm_source, utm_medium,
+utm_campaign)`-triplett, to partial UNIQUE-indekser sikrer BÅDE idempotent registrering OG at
+ambiguity er STRUKTURELT umulig i databasen selv), fire nye `GrowthService`-metoder
+(`registerCampaignTrackingTag`/`listCampaignTrackingTags`/`resolveCampaignFromTracking`/
+`attributeFromTracking` - sistnevnte kaller den EKSISTERENDE `attributeToCampaign()` uendret, ingen
+ny attribusjonsmekanisme), fire nye `growth.*`-ToolGateway-handlinger (klasse A/B, INGEN klasse D).
+Deterministisk oppslag returnerer `null`/kaster `no_matching_campaign_for_tracking` ved ingen EKSAKT
+match - ALDRI en gjettet kampanje (Q-26-grensen). Q-20/erasure/Q-21/Q-27 uendret prinsipp, ny tabell
+registrert i erasure-planen og bevist erasert. 17 nye tester. Testregnskap: `main` FØR = 1497 →
+ETTER = **1514 (+17)**, 108/108 filer grønn. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent.
+**INGEN Tobias-host-handling krevd.** D-82 = CI_VERIFIED/COMPLETE på egen scope (lukker Q-29 punkt
+6). UA-4 SOM HELHET forblir IKKE komplett, UA-3 kriterium 2 forblir IKKE oppfylt (2/5 domener,
+uendret). Full detalj: D-82 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** PR #21 PRE-MERGE SECURITY + D-41 HARDENING** → D-81, D-80-oppfølging,
+MERGET (merge-SHA `7b9789d`) etter Tobias sin eksplisitte godkjenning. **P0-FUNN OG FIKS:** `UNCLASSIFIED_CAN_ROUTE_TO_HOSTED_FREE_TIER=true` FØR denne
 runden - udefinert `sensitivity` ble feilaktig tolket som "ingen filtrering" for ALLE
 providerkategorier, inkl. `hosted_free_tier` (`gemma_hosted`). Kombinert med at BÅDE
 `apps/api/src/executive.ts` OG `apps/api/src/conversation.ts` (HOVED-samtalemotoren, dekker alle

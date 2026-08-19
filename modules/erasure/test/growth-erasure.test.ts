@@ -92,7 +92,10 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
       JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
       WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public' AND ccu.table_name = 'marketing_campaigns'
     `);
-    const known = new Set(["business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments", "marketing_campaign_events"]);
+    const known = new Set([
+      "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
+      "marketing_campaign_events", "marketing_campaign_tracking_tags"
+    ]);
     const unexpected = (rows as Array<{ dependent_table: string }>).filter((r) => !known.has(r.dependent_table));
     expect(unexpected).toHaveLength(0);
     expect((rows as Array<{ dependent_table: string }>).some((r) => r.dependent_table === "business_open_loops")).toBe(true);
@@ -105,6 +108,10 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
     const campaign = await growth.createCampaign(TENANT_A, "business", { channel: "google_ads", name: sentinel });
     await growth.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, { event_date: "2026-08-01", spend_amount_ore: 1_000 });
     const experiment = await growth.createExperiment(TENANT_A, "business", { name: "Erasure experiment", campaign_id: campaign.campaign_id });
+    // D-82: en registrert sporingstagg må ALDRI overleve en growth-scoped erasure.
+    await growth.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, {
+      utm_source: "erasure-test", utm_medium: "email", utm_campaign: sentinel
+    });
 
     // Deterministisk avviks-fixture: 8 dager stabil, siste dag et stort avvik -> marketing_spend_anomaly-loop.
     for (let d = 8; d >= 1; d--) {
@@ -149,6 +156,8 @@ describe("B/C/D/E: erasure av en kampanje med utgift/attribusjon/eksperiment/LIN
     expect(experimentGone.rowCount).toBe(0);
     const eventsGone = await adminPool.query("SELECT 1 FROM marketing_campaign_events WHERE campaign_id = $1", [campaign.campaign_id]);
     expect(eventsGone.rowCount).toBe(0);
+    const trackingTagGone = await adminPool.query("SELECT 1 FROM marketing_campaign_tracking_tags WHERE campaign_id = $1", [campaign.campaign_id]);
+    expect(trackingTagGone.rowCount).toBe(0);
   });
 });
 
