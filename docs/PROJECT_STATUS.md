@@ -1,7 +1,32 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-4 GROWTH & MARKETING CONTROL PLANE — FØRSTE SLICE: Native Jarvis
-Growth Core, FIXED_SUITE / IKKE HOST VERIFIED** → D-74. Startet FØRST etter eksplisitt lesing av
+**Oppdatert:** 2026-08-19 (**UA-4 NATIVE GROWTH CORE HOST FIX #1 — "AKSEPTANSESCRIPT-KUN, ZERO
+PRODUKSJONSFEIL"** → D-75. To uavhengige, ekte Windows/Docker-host-kjøringer (run_id `0a177044`/
+`5a03593a`) ga BEGGE `hard_fail=true`, EKSAKT tre markører FAIL (`ua4_growth_spend_idempotent`,
+`ua4_growth_cac_roas`, `ua4_growth_open_loop_resolved`), alle øvrige 16 av 19 PASS. **Alle tre
+spores til `ua4-growth-core-live.ts` sin EGEN verifikasjons-/fixture-kode, IKKE til
+`GrowthService`/`OpenLoopService`:** (A) spend-idempotens - scriptets `String(dateObject).slice(0,10)`
+matcher aldri en ISO-dato (pg returnerer `date` som JS `Date`); produksjonens `ON CONFLICT DO UPDATE`
++ eksplisitt before/after-audit var HELE tiden korrekt (allerede regresjonstestet FØR denne
+hendelsen). Fiks: `new Date(...).toISOString()` i scriptets egen sjekk. (B) CAC/ROAS - scriptets
+fixture brukte en rå, RLS-kontekstløs `pool.query()` UPDATE mot en FORCE RLS-tabell (traff STILLE 0
+rader) - EKSAKT samme feilklasse som D-54/D-58/D-59/D-62. Avdekket et EKTE produksjonshull
+(`BusinessService.updateOpportunityStage()` kunne ikke sette `value_ore`) - fikset i produksjonskode
+med en valgfri `valueOre`-parameter (RLS-trygg, D-41-samsvarende), scriptet bruker nå den ekte
+kanoniske metoden. (C) Open-loop-resolusjon - scriptets normaliseringsverdi (2 000) var kopiert fra
+en enhetstest med en ANNEN spike-størrelse (10 000, ikke scriptets 20 000) - reberegnet terskel for
+20 000-spiken er `[2476.19, 5571.43]`, 2 000 lå UNDER; `detectSpendAnomalies()` var KORREKT hele
+tiden. Fiks: normaliseringsverdi endret til 3 500 (matte dokumentert i kommentar). **Delt rotårsak:**
+alle tre i SAMME fil, forfattet uten samme iterative ekte-Postgres-validering som
+`modules/growth/test/*.test.ts` fikk. 3 nye regresjonstester, `.gitleaksignore` re-auditert (uendret,
+fortsatt snevert til ett fingeravtrykk). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full
+lokal suite 105/105 filer, 1415/1415 tester grønn. **Status: FUNKSJONELT PARTIAL / HOST-VERIFIKASJON
+FEILET** - D-74 markeres IKKE VERIFIED/COMPLETE ennå, krever ÉN NY REN host-kjøring. PR #19
+oppdatert med begge run_id-er/rotårsaker/fikser - forblir draft, IKKE merget. Full detalj: D-75 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FIXED_SUITE / IKKE HOST VERIFIED):** UA-4 GROWTH & MARKETING CONTROL
+PLANE — FØRSTE SLICE: Native Jarvis Growth Core → D-74. Startet FØRST etter eksplisitt lesing av
 `docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` (INGEN UA-4-detalj fantes fra før i
 CANONICAL_SPEC/ARCHITECTURE/IMPLEMENTATION_PLAN - masterplanen er derfor eneste kanoniske kilde,
 ingen motstrid). D-64 Core-vs-Adapter-porten kjørt FØRST: `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_

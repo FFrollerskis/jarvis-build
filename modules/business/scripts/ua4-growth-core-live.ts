@@ -234,7 +234,12 @@ async function main(): Promise<void> {
     const first = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 10_000 });
     const second = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 25_000 });
     const events = await growth.listSpendEvents(TENANT_A, "business", campaignId);
-    const sameRowSameDay = second.spend_event_id === first.spend_event_id && events.filter((e) => String(e.event_date).slice(0, 10) === "2026-01-10").length === 1;
+    // pg returner `date`-kolonner som JS Date-objekter, ikke ISO-strenger -
+    // `String(dateObject)` gir en lokalt formatert streng ("Sat Jan 10 2026
+    // ..."), ALDRI en "2026-01-10"-prefikset streng. `new Date(v).toISOString()`
+    // er korrekt konvertering (HOST FIX #1, D-75) - dette var en feil i selve
+    // verifikasjons-koden i dette scriptet, ikke i produksjonens idempotens.
+    const sameRowSameDay = second.spend_event_id === first.spend_event_id && events.filter((e) => new Date(e.event_date).toISOString().slice(0, 10) === "2026-01-10").length === 1;
     results.ua4_growth_spend_idempotent = sameRowSameDay && second.spend_amount_ore === "25000" ? "PASS" : "FAIL";
     log(`spend_event_ids_equal=${second.spend_event_id === first.spend_event_id} final_amount=${second.spend_amount_ore} -> ua4_growth_spend_idempotent: ${results.ua4_growth_spend_idempotent}`);
   });
@@ -261,10 +266,12 @@ async function main(): Promise<void> {
     // "CAC/ROAS tied to real CRM/revenue", ikke en gjettet/simulert verdi).
     const opp = await business.createOpportunity(TENANT_A, "business", { title: `Opportunity ${runId}`, company_id: companyId });
     opportunityId = opp.opportunity_id;
-    await pool.query(
-      "UPDATE business_opportunities SET stage = 'won', value_ore = 500000 WHERE tenant_id = $1 AND opportunity_id = $2",
-      [TENANT_A, opportunityId]
-    );
+    // Ekte kanonisk CRM-lifecycle-metode (BusinessService.updateOpportunityStage,
+    // withMemoryTransaction-basert - setter jarvis.tenant_id/jarvis.memory_spaces
+    // FØR skriving), IKKE en rå pool.query() mot en FORCE RLS-tabell uten
+    // RLS-sesjonskontekst (HOST FIX #1, D-75: den rå UPDATE-en traff 0 rader
+    // stille, uten feil - stage/value_ore ble ALDRI faktisk satt til "won"/500000).
+    await business.updateOpportunityStage(TENANT_A, "business", opportunityId, "won", 500_000);
 
     const attribution = await growth.attributeToCampaign(TENANT_A, "business", campaignId, { entity_type: "opportunity", entity_id: opportunityId });
     results.ua4_growth_attribution_created = attribution.entity_id === opportunityId && attribution.attribution_model === "first_touch" ? "PASS" : "FAIL";
@@ -349,9 +356,16 @@ async function main(): Promise<void> {
     results.ua4_growth_open_loop_created = createdLoop ? "PASS" : "FAIL";
     log(`open_loops_after_create=${loopsOpen.length} -> ua4_growth_open_loop_created: ${results.ua4_growth_open_loop_created}`);
 
-    // Stabil ny dag - siste dag (rn=1) sitt glidende snitt normaliseres, avviket forsvinner.
+    // Stabil ny dag - siste dag (rn=1) sitt glidende 7-dagers-snitt inkluderer
+    // NAA avviks-dagen (20 000) i vinduet: trailing_avg for "i morgen" =
+    // (6*1000 + 20000) / 7 ~= 3714.29, terskel-intervall [2476.19, 5571.43]
+    // (deviationFactor=1.5). 3 500 ligger TRYGT innenfor - beviser at REGELEN
+    // (samme deterministiske vindu-algoritme som flagget avviket) avgjør
+    // resolve, ikke en tilfeldig "lav verdi" (HOST FIX #1, D-75: den forrige
+    // verdien 2 000 lå UNDER nedre grense og trigget fortsatt avvik-regelen -
+    // ikke en bug i OpenLoopService, en feil forventning i fixturen).
     await growth.recordSpendEvent(TENANT_A, "business", anomalyCampaign.campaign_id, {
-      event_date: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 2_000
+      event_date: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10), spend_amount_ore: 3_500
     });
     await openLoops.runSweep(TENANT_A, "business");
     const loopsAfter = await openLoops.listOpenLoops(TENANT_A, "business", "open");

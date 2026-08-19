@@ -154,6 +154,32 @@ describe("C: auto-resolve naar vilkaaret ikke lenger er sant", () => {
     loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
     expect(loops.find((l) => l.campaign_id === campaignId)).toBeUndefined();
   });
+
+  // HOST FIX #1 (D-75): den ekte Windows/Docker-host-akseptansen brukte en
+  // ANNEN spike-verdi (20 000, ikke 10 000) enn testen over, MEN samme
+  // hardkodede "normaliserings"-verdi (2 000) - som IKKE lenger ligger
+  // innenfor det korrekt reberegnede terskel-intervallet for DEN spiken
+  // (trailing_avg for nextDay = (6*1000 + 20000) / 7 ~= 3714.29, intervall
+  // [2476.19, 5571.43]; 2 000 < 2476.19). Dette var en feil i akseptanse-
+  // scriptets fixture-forventning, IKKE en regresjon i den deterministiske
+  // regelen - denne testen speiler den EKSAKTE host-scenarien for å hindre
+  // at samme feilklasse (terskel-matte som ikke generaliserer på tvers av
+  // ulike spike-størrelser) gjentas igjen.
+  it("resolves korrekt ogsaa ved en STØRRE spike (20 000) - normaliseringsverdien maa reberegnes for DEN spikens vindu, ikke gjenbrukes fra en annen spike-størrelse", async () => {
+    const campaignId = await insertCampaign(TENANT_A);
+    for (let d = 8; d >= 1; d--) await insertSpendEvent(TENANT_A, campaignId, isoDate(d), 1_000);
+    await insertSpendEvent(TENANT_A, campaignId, isoDate(0), 20_000);
+    await openLoops.detectSpendAnomalies(TENANT_A, "business");
+    let loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    expect(loops.find((l) => l.campaign_id === campaignId)).toBeTruthy();
+
+    const nextDay = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+    await insertSpendEvent(TENANT_A, campaignId, nextDay, 3_500); // innenfor [2476.19, 5571.43]
+    const result = await openLoops.detectSpendAnomalies(TENANT_A, "business");
+    expect(result.auto_resolved).toBeGreaterThanOrEqual(1);
+    loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    expect(loops.find((l) => l.campaign_id === campaignId)).toBeUndefined();
+  });
 });
 
 describe("D: runSweep inkluderer marketing_spend_anomaly (Q-27-trygg full sveip)", () => {

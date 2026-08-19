@@ -322,10 +322,10 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       output_trust: "internal", transport: transport("business")
     },
     {
-      tool_id: "business", action: "update_opportunity_stage", description: "Flytt en salgsmulighet til et nytt pipeline-stadium",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), stage: z.string() }),
+      tool_id: "business", action: "update_opportunity_stage", description: "Flytt en salgsmulighet til et nytt pipeline-stadium (og valgfritt oppdater endelig verdi)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), opportunity_id: z.string(), stage: z.string(), value_ore: z.number().optional() }),
       capability_class: "C", scopes: ["business.write"], reversible: true,
-      rollback_procedure: "sett stage tilbake til forrige verdi", idempotent_external: true,
+      rollback_procedure: "sett stage (og value_ore) tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("business")
     },
