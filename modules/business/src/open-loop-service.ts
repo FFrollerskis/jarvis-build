@@ -48,7 +48,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null, ticket_id: null, contract_id: null,
+          lead_id: row.lead_id, followup_id: row.followup_id, activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "overdue_followup", detection_key: detectionKey,
           reason: `Oppfoelging "${row.title}" er forfalt`, next_action: `Fullfoer eller avbryt oppfoelging ${row.followup_id}`,
           priority, owner_person_id: row.owner_person_id, due_at: row.due_at
@@ -88,7 +88,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: row.opportunity_id,
-          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: null,
+          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
           loop_type: "stalled_opportunity", detection_key: detectionKey,
           reason: `Opportunity "${row.title}" har ingen aapen oppfoelging og ingen oppdatering siste ${staleDays} dager`,
           next_action: `Sett neste handling/oppfoelging for opportunity ${row.opportunity_id}`,
@@ -206,7 +206,7 @@ export class OpenLoopService {
       const result = await upsertOpenLoop(client, {
         open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
         company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
-        lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id, contract_id: null,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: row.ticket_id, contract_id: null, campaign_id: null,
         loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
         priority: built.priority, owner_person_id: row.assignee_person_id, due_at: null
       });
@@ -273,7 +273,7 @@ export class OpenLoopService {
         const result = await upsertOpenLoop(client, {
           open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
           company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
-          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id,
+          lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id, campaign_id: null,
           loop_type: "contract_obligation_due", detection_key: detectionKey,
           reason: `Forpliktelse "${row.description}" under kontrakt "${row.title}" ${overdue ? "er forfalt" : "forfaller snart"}`,
           next_action: `Fullfør forpliktelse ${row.obligation_id}`, priority: overdue ? "high" : "normal",
@@ -325,7 +325,7 @@ export class OpenLoopService {
       const result = await upsertOpenLoop(client, {
         open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
         company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
-        lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: row.contract_id, campaign_id: null,
         loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
         priority: built.priority, owner_person_id: row.owner_person_id, due_at: built.due_at
       });
@@ -333,6 +333,62 @@ export class OpenLoopService {
     }
     const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
     return { detected, updated, auto_resolved: autoResolved };
+  }
+
+  /**
+   * UA-4 Native Jarvis Growth Core (D-74): "Reuse OpenLoopService... No
+   * second task/reminder engine" - deterministisk utgifts-avviksdeteksjon
+   * for aktive kampanjer. En kampanjes SISTE registrerte utgiftsdag
+   * sammenlignes mot det glidende 7-dagers-snittet FOR DEN SAMME kampanjen
+   * (`AVG(...) OVER (... ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING)`) - REN
+   * statistisk SQL, INGEN AI-tolkning av HVORFOR avviket skjedde (Q-26-
+   * grensen: ingen inferert kausal påstand, kun et deterministisk faktum).
+   * Terskel >50%/<50% av snittet, med et lite beløps-gulv (100 øre) for å
+   * unngå støy fra ubetydelige beløp. Nøkkelen er kampanje-ID (ikke dato) -
+   * samme "re-evaluer, oppdater SAMME rad til vilkåret ikke lenger er sant"-
+   * mønster som `detectContractsNeedingReview`, IKKE en ny loop per dag.
+   */
+  async detectSpendAnomalies(tenantId: string, memorySpace: MemorySpace, deviationFactor = 1.5, minBaselineOre = 100): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `WITH ranked AS (
+           SELECT campaign_id, event_date, spend_amount_ore,
+                  AVG(spend_amount_ore) OVER (
+                    PARTITION BY campaign_id ORDER BY event_date
+                    ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+                  ) AS trailing_avg_ore,
+                  ROW_NUMBER() OVER (PARTITION BY campaign_id ORDER BY event_date DESC) AS rn
+           FROM marketing_spend_events WHERE tenant_id = $1
+         )
+         SELECT r.campaign_id, r.event_date, r.spend_amount_ore, r.trailing_avg_ore, c.name, c.owner_person_id
+         FROM ranked r
+         JOIN marketing_campaigns c ON c.tenant_id = $1 AND c.campaign_id = r.campaign_id
+         WHERE r.rn = 1 AND c.status = 'active'
+           AND r.trailing_avg_ore IS NOT NULL AND r.trailing_avg_ore >= $2
+           AND (r.spend_amount_ore > r.trailing_avg_ore * $3 OR r.spend_amount_ore < r.trailing_avg_ore / $3)`,
+        [tenantId, minBaselineOre, deviationFactor]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows.rows as SpendAnomalyRow[]) {
+        const detectionKey = `marketing_spend_anomaly:${row.campaign_id}`;
+        currentKeys.push(detectionKey);
+        const direction = Number(row.spend_amount_ore) > Number(row.trailing_avg_ore) ? "over" : "under";
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: row.campaign_id,
+          loop_type: "marketing_spend_anomaly", detection_key: detectionKey,
+          reason: `Kampanje "${row.name}" sin utgift for ${row.event_date} (${row.spend_amount_ore} øre) er ${direction === "over" ? "vesentlig over" : "vesentlig under"} det glidende 7-dagers-snittet (${Math.round(Number(row.trailing_avg_ore))} øre)`,
+          next_action: `Gjennomgå utgiftsavvik for kampanje ${row.campaign_id}`, priority: direction === "over" ? "high" : "normal",
+          owner_person_id: row.owner_person_id, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "marketing_spend_anomaly", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
   }
 
   /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
@@ -355,7 +411,11 @@ export class OpenLoopService {
       await this.detectContractRenewalsDue(tenantId, memorySpace),
       await this.detectContractTerminationDeadlines(tenantId, memorySpace),
       await this.detectContractObligationsDue(tenantId, memorySpace),
-      await this.detectContractsNeedingReview(tenantId, memorySpace)
+      await this.detectContractsNeedingReview(tenantId, memorySpace),
+      // UA-4 Native Jarvis Growth Core (D-74): samme prinsipp - regelen
+      // kjøres i DENNE sveipen, krever `marketing_campaigns`/
+      // `marketing_spend_events` (027_growth.sql).
+      await this.detectSpendAnomalies(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
@@ -471,6 +531,15 @@ interface ContractObligationRow {
   title: string;
 }
 
+interface SpendAnomalyRow {
+  campaign_id: string;
+  event_date: string;
+  spend_amount_ore: string;
+  trailing_avg_ore: string;
+  name: string;
+  owner_person_id: string | null;
+}
+
 interface UpsertOpenLoopInput {
   open_loop_id: string;
   tenant_id: string;
@@ -483,6 +552,7 @@ interface UpsertOpenLoopInput {
   activity_id: string | null;
   ticket_id: string | null;
   contract_id: string | null;
+  campaign_id: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -496,8 +566,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
   const { rows } = await client.query(
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
-        ticket_id, contract_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        ticket_id, contract_id, campaign_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -509,7 +579,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
      RETURNING (xmax = 0) AS inserted`,
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
-      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id,
+      input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
       input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );

@@ -319,3 +319,61 @@ krever en eksplisitt Tobias-leverandørbeslutning FØR noe kan bygges der, forbl
 **Ekte host-verifisering FULLFØRT (D-73, 2026-08-18):** Tobias sin tredje, rene host-kjøring
 (`ua3-native-contracts-host-run.ts`, run_id `5ca4765b`) ga `hard_fail=false`, ALLE 26 markører PASS
 - status er nå VERIFIED/COMPLETE, ikke lenger FIXED_SUITE.
+
+## Native Jarvis Growth Core (UA-4 D-74, FIXED_SUITE / IKKE HOST VERIFIED)
+
+**Formål:** gi Jarvis et eget, kanonisk (`JARVIS_CANONICAL`/`HYBRID_WITH_CLEAR_AUTHORITY`, D-64)
+vekst-/markedsføringsdomene - kampanjeregister, utgiftsledger, attribusjon mot EKSISTERENDE CRM,
+CAC/ROAS, eksperimentregister, deterministisk utgifts-avviksdeteksjon. ZERO ekstern
+annonseplattform-avhengighet i denne sliceen (ingen provider-credential-parameter finnes i
+`GrowthService`/`GrowthTransport`, ingen provider-env-variabel leses noe sted i `modules/growth`).
+
+**Kampanje-metadata som lagres (`marketing_campaigns`):** kanal (enum), navn, status, budsjett,
+valgfri ekstern kampanje-ID/peker (pointer-not-payload - ALDRI kopiert kampanjeinnhold fra en
+leverandørkonsoll), eier, start-/sluttdato. **BEVISST INGEN selskaps-FK** - en kampanje sikter mot
+fremtidige/ukjente leads, ikke én eksisterende kunde (i motsetning til Support/Contracts).
+
+**Utgiftsdata (`marketing_spend_events`):** kampanje-ID, dato, beløp/valuta, klikk/visninger
+(valgfritt), kildetype (manual/csv_import/provider_sync - ALDRI en gjettet klassifisering). Kun
+aggregerte, deterministiske tall - INGEN personopplysninger om enkeltpersoner som klikket på en
+annonse lagres noe sted i denne sliceen (ingen brukersporing/cookie-ID/IP-adresse - se "Ikke i scope"
+under).
+
+**Attribusjonsdata (`marketing_attributions`):** polymorf kobling (`entity_type`/`entity_id`) til
+EKSISTERENDE `business_leads`/`business_opportunities` - INGEN nye personopplysninger, kun en
+peker mellom to allerede eksisterende, allerede DPIA-vurderte entiteter (se Business-Event-Linkage-
+seksjonen over for den underliggende lead-/opportunity-personopplysningsvurderingen). Attribusjon
+er EKSPLISITT opprettet av kaller (agent/eier) - ALDRI AI-utledet fra fritekst/atferdsdata.
+
+**Eksperimentdata (`marketing_experiments`):** navn/hypotese/status/resultatoppsummering - fritekst
+skrevet av eier/agent, IKKE personopplysninger om sluttbrukere/kunder. `result_summary` er
+strukturert/menneske-registrert, ALDRI en AI-generert kausal påstand (Q-26-grensen).
+
+**Datakategoriklassifisering:** vekst-/markedsføringsdata (kampanje/utgift/attribusjon/eksperiment)
+er FORRETNINGSDATA (samme kategori som `business_open_loops`/`contracts`), IKKE personopplysninger
+om identifiserbare fysiske personer utover de allerede eksisterende `business_leads`/
+`business_opportunities`-radene attribusjonen PEKER til (uendret databehandlingsgrunnlag der).
+
+**Q-20-interaksjon:** `marketing_campaigns`/`marketing_spend_events`/`marketing_attributions`/
+`marketing_experiments`/`marketing_campaign_events` + kampanje-tilknyttede `business_open_loops`-
+rader registrert i `modules/erasure/src/plan.ts` FØR noen host-runde (proaktivt anvendt FK-lærdom
+fra HOST FIX #1/D-67). Ingen resurrection mulig - en ny kampanje etter erasure får en helt ny
+`campaign_id`, strukturelt bevist i `growth-erasure.test.ts`.
+
+**Q-21/RLS:** `FORCE ROW LEVEL SECURITY` + tenant+memory-space-RESTRICTIVE-policy, SAMME mønster som
+`business_open_loops`/`contracts` - `jarvis_runtime` UENDRET NOSUPERUSER/NOBYPASSRLS.
+
+**Q-26-grense:** kampanje-/attribusjon-/eksperimentdata er deterministisk beregnet eller eksplisitt
+menneske-registrert, ALDRI automatisk "verifisert kunnskap" - CAC/ROAS er ren SQL-aggregering mot
+ekte CRM-data, ingen inferert markedsføringsstrategi/kreativ-anbefaling gitt av systemet noe sted i
+denne sliceen.
+
+**Ikke i scope denne sliceen (eksplisitt, ikke stille utelatt - se Q-29):** noen live
+annonseplattform-connector (Google Ads/Meta Ads/GA4/Search Console/GBP/LinkedIn/YouTube/TikTok);
+NOEN form for sluttbruker-/besøkende-sporing (cookies, tracking-piksler, IP-adresser, enhets-ID-er,
+retargeting-lister) - dette er en RENT INTERN kampanje-/utgifts-/attribusjonsledger, IKKE en
+tracking-infrastruktur; samtykke-/cookie-/databehandlingsdokumentasjon for produksjonssporing
+(UA-4 akseptansekriterium 4 - blir relevant FØRST når en faktisk sporingsmekanisme bygges); autonome
+budsjett-/bud-endringer; kreativ intelligens/markedsføringsminne; UA-5/UA-6. **Ekte host-
+verifisering IKKE fullført i denne økten** (Docker/Windows-host ikke tilgjengelig her) - status
+forblir FIXED_SUITE til `ua4-growth-core-host-run.ts` faktisk er kjørt av Tobias.

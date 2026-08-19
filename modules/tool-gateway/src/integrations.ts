@@ -863,6 +863,174 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       capability_class: "A", scopes: ["contract.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("contract")
+    },
+    // UA-4 Native Jarvis Growth Core (D-74): provider-nøytralt `growth.*`-
+    // namespace - JARVIS_CANONICAL/HYBRID_WITH_CLEAR_AUTHORITY, ZERO
+    // annonseplattform-avhengighet (D-74/D-64). Lagt til på SLUTTEN av
+    // samme grunn som contract.* over - eksisterende tester indekserer
+    // dette arrayet posisjonelt. Ingen handling her er klasse D (ingen
+    // nøstet live budsjett-/bud-/kampanjeutførelse mot en ekstern
+    // annonseplattform i denne sliceen - det er en FREMTIDIG, valgfri
+    // adapter, se D-74 REPLACEMENT_PATH).
+    {
+      tool_id: "growth", action: "create_campaign", description: "Opprett en markedsføringskampanje (kanal-nøytral, ingen ekstern leverandør krevd)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), channel: z.string(), name: z.string(),
+        budget_amount_ore: z.number().optional(), currency: z.string().optional(), external_campaign_id: z.string().optional(),
+        canonical_uri: z.string().optional(), owner_person_id: z.string().optional(), started_at: z.string().optional(),
+        actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "sett status til 'ended'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "get_campaign", description: "Les én kampanje",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_campaigns", description: "List kampanjer etter status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "search_campaigns", description: "Deterministisk filter-/fritekstsøk i kampanjer (kanal/status/eier/navn)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional(), channel: z.string().optional(),
+        owner_person_id: z.string().optional(), name_contains: z.string().optional(), limit: z.number().optional()
+      }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_by_company", description: "Hvilke kampanjer har generert leads/opportunities for selskap X? - via attribusjon, ikke en direkte kampanje-selskap-kobling",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      // Deterministisk lifecycle-overgang (state-machine.ts) - klasse C: en
+      // kampanjes operasjonelle status (aktiv/pause/avsluttet) har reell
+      // budsjett-/forretningseffekt utover en vanlig feltoppdatering (§"risk
+      // classes A-D based on effect" i byggeordren), selv uten noen nøstet
+      // ekstern handling i denne sliceen.
+      tool_id: "growth", action: "set_campaign_status", description: "Deterministisk lifecycle-overgang (draft/active/paused/ended)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt set_campaign_status-kall tilbake til forrige status (unntatt korreksjonsveien fra 'ended', som kun går til 'draft')",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "set_budget", description: "Sett/fjern kampanjebudsjett",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string(), budget_amount_ore: z.number().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "sett budsjett tilbake via nytt kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      // Idempotent per (kampanje, dato, kildetype) - re-synk av samme dag
+      // oppdaterer SAMME rad (§"idempotent, auditable, before/after state"
+      // i byggeordren), oppretter aldri en duplikatrad.
+      tool_id: "growth", action: "record_spend_event", description: "Registrer/oppdater utgift for én kampanje-dag (manuelt/CSV-import/fremtidig live-synk)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string(), event_date: z.string(),
+        spend_amount_ore: z.number(), currency: z.string().optional(), clicks: z.number().optional(), impressions: z.number().optional(),
+        source_type: z.string().optional(), source_pointer: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "nytt record_spend_event-kall med korrigert beløp for SAMME (kampanje, dato, kildetype)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_spend_events", description: "List utgiftshistorikk for en kampanje",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "campaign_performance", description: "Deterministisk CAC/ROAS for en kampanje, knyttet til ekte CRM-data (business_opportunities.value_ore/stage='won')",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      // Deterministisk, EKSPLISITT kobling av kaller - ALDRI AI-utledet
+      // (Q-26-grensen: ingen inferert kausal påstand i denne sliceen).
+      tool_id: "growth", action: "attribute_to_campaign", description: "Koble en eksisterende lead/opportunity til en kampanje (deterministisk, eksplisitt - ingen AI-gjettet tilskrivning)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string(), entity_type: z.string(), entity_id: z.string(),
+        attribution_model: z.string().optional(), source_pointer: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning i denne sliceen - historisk attribusjonsrad", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_attributions", description: "List alle lead/opportunity-attribusjoner for en kampanje",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "create_experiment", description: "Opprett et eksperiment i eksperimentregisteret (valgfritt knyttet til en kampanje)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), name: z.string(), hypothesis: z.string().optional(),
+        campaign_id: z.string().optional(), owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "set_experiment_status til 'abandoned'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "get_experiment", description: "Les ett eksperiment",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), experiment_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_experiments", description: "List eksperimenter etter status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      // Klasse C: å konkludere/forlate et eksperiment låser et resultat som
+      // fremtidige beslutninger bygger på - reelt effektnivå utover en
+      // vanlig feltoppdatering.
+      tool_id: "growth", action: "set_experiment_status", description: "Deterministisk lifecycle-overgang (draft/running/concluded/abandoned) + valgfri resultatoppsummering",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), experiment_id: z.string(), status: z.string(),
+        result_summary: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "C", scopes: ["growth.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt set_experiment_status-kall tilbake til forrige status (unntatt korreksjonsveien fra 'concluded'/'abandoned', som kun går til 'draft')",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
+    },
+    {
+      tool_id: "growth", action: "list_events", description: "List hele hendelseshistorikken for én kampanje (vekst-tidslinje, ikke audit_events)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), campaign_id: z.string() }),
+      capability_class: "A", scopes: ["growth.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("growth")
     }
   ];
 }

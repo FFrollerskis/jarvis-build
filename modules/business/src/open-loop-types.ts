@@ -15,7 +15,8 @@ export type OpenLoopType =
   | "contract_renewal_due"
   | "contract_termination_deadline"
   | "contract_obligation_due"
-  | "contract_review_required";
+  | "contract_review_required"
+  | "marketing_spend_anomaly";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -34,6 +35,8 @@ export interface BusinessOpenLoop {
   ticket_id: string | null;
   /** UA-3 Native Contracts Core (D-71): peker til `contracts`, null for ikke-kontrakt-loops. */
   contract_id: string | null;
+  /** UA-4 Native Growth Core (D-74): peker til `marketing_campaigns`, null for ikke-vekst-loops. */
+  campaign_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;

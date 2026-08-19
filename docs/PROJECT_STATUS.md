@@ -1,6 +1,34 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE CONTRACTS CORE — ENDELIG LUKKING: VERIFIED/COMPLETE**
+**Oppdatert:** 2026-08-18 (**UA-4 GROWTH & MARKETING CONTROL PLANE — FØRSTE SLICE: Native Jarvis
+Growth Core, FIXED_SUITE / IKKE HOST VERIFIED** → D-74. Startet FØRST etter eksplisitt lesing av
+`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` (INGEN UA-4-detalj fantes fra før i
+CANONICAL_SPEC/ARCHITECTURE/IMPLEMENTATION_PLAN - masterplanen er derfor eneste kanoniske kilde,
+ingen motstrid). D-64 Core-vs-Adapter-porten kjørt FØRST: `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_
+AUTHORITY` (attribusjon/kampanjesporing/eksperimentregister/avviksdeteksjon er `JARVIS_CANONICAL`;
+RÅ spend-/klikk-/visningstall fra en fremtidig annonseplattform er `EXTERNAL_CANONICAL`).
+**UA4_SLICE_1 valgt: Native Jarvis Growth Core** - kanonisk kampanje-/utgifts-/attribusjon-/
+eksperimentmodell, ZERO annonseplattform-credential (obligatorisk fundament for ALT annet
+UA-4-arbeid, fremmer literale akseptansekriterier direkte, unngår unødvendig leverandørbinding).
+Ny pakke `@jarvis/growth`, migrasjon `027_growth.sql` (`marketing_campaigns`/
+`marketing_spend_events`/`marketing_attributions`/`marketing_experiments`/
+`marketing_campaign_events`). Deterministisk kampanje-/eksperiment-lifecycle, idempotent
+utgifts-ingestion (before/after state), EKSPLISITT deterministisk attribusjon til EKSISTERENDE
+`business_leads`/`business_opportunities`, CAC/ROAS beregnet FRA ekte `business_opportunities.
+value_ore`/`stage='won'` (ALDRI fabrikkert - `null` når nevneren er `0`, aldri en gjettet verdi).
+`OpenLoopService` utvidet med `marketing_spend_anomaly` (glidende 7-dagers-snitt, INGEN ny motor).
+`growth.*`-ToolGateway-namespace (16 handlinger, INGEN klasse D i denne sliceen). 66 nye tester,
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **INGEN ekte host-kjøring i DENNE økten**
+(Docker/Windows-host ikke tilgjengelig her) - `ua4-growth-core-host-run.ts`/`-live.ts` SKREVET og
+lokalt bevist via embedded Postgres, status ærlig **FIXED_SUITE / IKKE HOST VERIFIED**. **UA-4 SOM
+HELHET forblir IKKE komplett** (kun første av flere planlagte slices - se Q-29 for gjenstående:
+live connectorer, autonome budsjett-/bud-endringer, kreativ intelligens, Finance Integrity Gateway,
+samtykke-/cookie-dokumentasjon, UTM-auto-attribusjon, BUSINESS_DOMAIN_COVERAGE-kabling). **UA-3
+forblir IKKE komplett** (kriterium 2 fortsatt PARTIAL - vekst-domenet finnes nå men er IKKE koblet
+inn i brief-domenedekningen ennå). **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.**
+Draft-PR opprettes, IKKE merget, INGEN leverandør-connector valgt, INGEN autonome spend-endringer.
+
+**Runden før det (samme dag, MERGET):** UA-3 NATIVE CONTRACTS CORE — ENDELIG LUKKING: VERIFIED/COMPLETE
 → D-71/D-72/D-73. Tobias sin TREDJE, RENE host-kjøring (`ua3-native-contracts-host-run.ts`,
 run_id `5ca4765b`, `hard_fail=false`) ga ALLE 26 markører PASS, inkludert `ua3_contracts_cleanup`
 (FAIL i de to foregående rundene, D-72). Repo-sannhet bekreftet FØR lukking: lokal og
