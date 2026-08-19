@@ -1,0 +1,11 @@
+# Verified false positives only - each entry MUST be reviewed and justified here.
+# Format: <commit>:<file>:<rule-id>:<start-line>[:<end-line>]
+
+# gitleaks' generic-api-key rule flags the plain Norwegian phrase
+# "kampanjer/utgift" (prose meaning "campaigns/expense", not a secret) because
+# it sits near the word "credential" in the same sentence (D-74 decision
+# entry). Verified manually: no credential, key, token, or password of any
+# kind appears at this location. Reworded in a later commit to remove the
+# trigger pattern going forward, but gitleaks scans full history by default
+# and the original commit remains part of this branch's published history.
+31fe97996a392d126c34f0fc70214275c376c875:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:68
