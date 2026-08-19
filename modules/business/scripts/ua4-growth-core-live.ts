@@ -21,7 +21,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
-import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
+import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, pgDateToIsoDate } from "@jarvis/core";
 import { PolicyGateway, InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, OpenLoopService } from "@jarvis/business";
@@ -38,6 +38,10 @@ const results: Record<string, Verdict> = {
   ua4_growth_runtime_role: "FAIL",
   ua4_growth_no_ad_platform_dependency: "FAIL",
   ua4_growth_create_campaign: "FAIL",
+  ua4_growth_spend_identical_retry: "FAIL",
+  ua4_growth_spend_no_duplicate: "FAIL",
+  ua4_growth_spend_conflict_correction: "FAIL",
+  ua4_growth_spend_correction_audited: "FAIL",
   ua4_growth_spend_idempotent: "FAIL",
   ua4_growth_lifecycle_valid: "FAIL",
   ua4_growth_lifecycle_invalid_rejected: "FAIL",
@@ -230,18 +234,74 @@ async function main(): Promise<void> {
     log(`campaign_id=${campaignId} campaign_status=${a.status} -> ua4_growth_create_campaign: ${results.ua4_growth_create_campaign}`);
   });
 
-  await section("IDEMPOTENT UTGIFTS-INGESTION (before/after state, ingen duplikat)", async () => {
+  await section("SPEND IDEMPOTENS: IDENTISK RETRY vs. AVVIKENDE KORREKSJON (D-75/D-76, to separate invarianter)", async () => {
+    // HOST FIX #2 (D-76): den forrige host-feilen (`ua4_growth_spend_idempotent=
+    // FAIL` selv om `spend_event_ids_equal=true final_amount=25000`) skyldtes
+    // IKKE produksjonskoden, men at `new Date(pgVerdi).toISOString().slice(0,10)`
+    // (HOST FIX #1 sin egen fiks) selv har en skjult tidssone-bug: pg-types
+    // konstruerer `date`-kolonner via `new Date(år, måned, dag)` i LOKAL tid,
+    // og `.toISOString()` konverterer til UTC - paa en host med UTC-offset
+    // ULIK 0 (f.eks. Europe/Oslo) ruller dette datoen TILBAKE én dag (bevist:
+    // `new Date(2026,0,10).toISOString()` i UTC+1 -> "2026-01-09T23:00:00Z").
+    // `pgDateToIsoDate()` (@jarvis/core) er nå den ENE kanoniske, tidssone-
+    // trygge reverseringen - brukt her OG i `modules/growth/test/service-rls.
+    // test.ts` (samme feilklasse fantes der òg, latent, kun usynlig fordi
+    // CI/sandbox kjører i UTC).
+    //
+    // De to D-75-invariantene bevises nå EKSPLISITT SEPARAT (ikke slaatt
+    // sammen i én boolsk sjekk, som skjulte hvilken del som faktisk feilet):
+    const unrelatedCampaign = await growth.createCampaign(TENANT_A, "business", { channel: "meta_ads", name: `Urelatert utgift ${runId}` });
+    await growth.recordSpendEvent(TENANT_A, "business", unrelatedCampaign.campaign_id, { event_date: "2026-01-10", spend_amount_ore: 7_777 });
+
+    // A) IDENTISK RETRY: samme faktum (samme beløp) sendt to ganger - samme
+    // rad, INGEN duplikat, beløpet uendret.
     const first = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 10_000 });
-    const second = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 25_000 });
-    const events = await growth.listSpendEvents(TENANT_A, "business", campaignId);
-    // pg returner `date`-kolonner som JS Date-objekter, ikke ISO-strenger -
-    // `String(dateObject)` gir en lokalt formatert streng ("Sat Jan 10 2026
-    // ..."), ALDRI en "2026-01-10"-prefikset streng. `new Date(v).toISOString()`
-    // er korrekt konvertering (HOST FIX #1, D-75) - dette var en feil i selve
-    // verifikasjons-koden i dette scriptet, ikke i produksjonens idempotens.
-    const sameRowSameDay = second.spend_event_id === first.spend_event_id && events.filter((e) => new Date(e.event_date).toISOString().slice(0, 10) === "2026-01-10").length === 1;
-    results.ua4_growth_spend_idempotent = sameRowSameDay && second.spend_amount_ore === "25000" ? "PASS" : "FAIL";
-    log(`spend_event_ids_equal=${second.spend_event_id === first.spend_event_id} final_amount=${second.spend_amount_ore} -> ua4_growth_spend_idempotent: ${results.ua4_growth_spend_idempotent}`);
+    const retry = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 10_000 });
+    const eventsAfterRetry = await growth.listSpendEvents(TENANT_A, "business", campaignId);
+    const rowsForDayAfterRetry = eventsAfterRetry.filter((e) => pgDateToIsoDate(e.event_date) === "2026-01-10");
+    const identicalRetryOk = retry.spend_event_id === first.spend_event_id && rowsForDayAfterRetry.length === 1 && retry.spend_amount_ore === "10000";
+    results.ua4_growth_spend_identical_retry = identicalRetryOk ? "PASS" : "FAIL";
+    log(
+      `identical_retry_id_equal=${retry.spend_event_id === first.spend_event_id} identical_retry_row_count=${rowsForDayAfterRetry.length} identical_retry_amount=${retry.spend_amount_ore} -> ua4_growth_spend_identical_retry: ${results.ua4_growth_spend_identical_retry}`
+    );
+
+    // B) AVVIKENDE KORREKSJON: SAMME idempotens-identitet (tenant, kampanje,
+    // dato, kildetype), ULIKT beløp - fortsatt samme rad (ingen duplikat),
+    // ny verdi gjelder, korreksjonen er eksplisitt auditert (before/after).
+    const corrected = await growth.recordSpendEvent(TENANT_A, "business", campaignId, { event_date: "2026-01-10", spend_amount_ore: 25_000 });
+    const eventsAfterCorrection = await growth.listSpendEvents(TENANT_A, "business", campaignId);
+    const rowsForDayAfterCorrection = eventsAfterCorrection.filter((e) => pgDateToIsoDate(e.event_date) === "2026-01-10");
+    const noDuplicate = corrected.spend_event_id === first.spend_event_id && rowsForDayAfterCorrection.length === 1;
+    results.ua4_growth_spend_no_duplicate = noDuplicate ? "PASS" : "FAIL";
+    const conflictCorrectionOk = noDuplicate && corrected.spend_amount_ore === "25000";
+    results.ua4_growth_spend_conflict_correction = conflictCorrectionOk ? "PASS" : "FAIL";
+
+    const campaignAuditEvents = await growth.listEvents(TENANT_A, "business", campaignId);
+    const spendAuditEvents = campaignAuditEvents.filter((e) => e.event_type === "spend_recorded");
+    const correctionAudit = spendAuditEvents.find(
+      (e) => e.metadata["before_spend_amount_ore"] === "10000" && String(e.metadata["after_spend_amount_ore"]) === "25000"
+    );
+    results.ua4_growth_spend_correction_audited = correctionAudit ? "PASS" : "FAIL";
+    log(
+      `conflict_correction_row_count=${rowsForDayAfterCorrection.length} conflict_correction_final_amount=${corrected.spend_amount_ore} ` +
+        `correction_audit_found=${Boolean(correctionAudit)} -> ua4_growth_spend_no_duplicate: ${results.ua4_growth_spend_no_duplicate} ` +
+        `ua4_growth_spend_conflict_correction: ${results.ua4_growth_spend_conflict_correction} ua4_growth_spend_correction_audited: ${results.ua4_growth_spend_correction_audited}`
+    );
+
+    // Urelatert utgift/kampanje forblir upåvirket av korreksjonen (ingen
+    // kryss-kampanje-lekkasje av idempotens-nøkkelen).
+    const unrelatedEvents = await growth.listSpendEvents(TENANT_A, "business", unrelatedCampaign.campaign_id);
+    const unrelatedUnaffected = unrelatedEvents.length === 1 && unrelatedEvents[0]?.spend_amount_ore === "7777";
+    log(`unrelated_campaign_unaffected=${unrelatedUnaffected}`);
+
+    results.ua4_growth_spend_idempotent =
+      results.ua4_growth_spend_identical_retry === "PASS" &&
+      results.ua4_growth_spend_no_duplicate === "PASS" &&
+      results.ua4_growth_spend_conflict_correction === "PASS" &&
+      results.ua4_growth_spend_correction_audited === "PASS" &&
+      unrelatedUnaffected
+        ? "PASS" : "FAIL";
+    log(`-> ua4_growth_spend_idempotent (aggregat): ${results.ua4_growth_spend_idempotent}`);
   });
 
   await section("DETERMINISTISK LIFECYCLE (state-machine, ingen LLM-avgjoerelse)", async () => {

@@ -1,9 +1,34 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 NATIVE GROWTH CORE HOST FIX #1 — "AKSEPTANSESCRIPT-KUN, ZERO
-PRODUKSJONSFEIL"** → D-75. To uavhengige, ekte Windows/Docker-host-kjøringer (run_id `0a177044`/
-`5a03593a`) ga BEGGE `hard_fail=true`, EKSAKT tre markører FAIL (`ua4_growth_spend_idempotent`,
-`ua4_growth_cac_roas`, `ua4_growth_open_loop_resolved`), alle øvrige 16 av 19 PASS. **Alle tre
+**Oppdatert:** 2026-08-19 (**UA-4 NATIVE GROWTH CORE HOST FIX #2 — "TIDSSONE-BUG I HOST FIX #1 SIN
+EGEN DATO-FIKS, ZERO PRODUKSJONSFEIL"** → D-76. Tredje host-kjøring (run_id `5c54b656`,
+`hard_fail=true`) - CAC/ROAS OG open-loop-resolusjon nå BEGGE bekreftet PASS live (D-75 sine fikser
+virket), KUN `ua4_growth_spend_idempotent=FAIL` gjensto, til tross for at loggen selv viste
+`spend_event_ids_equal=true final_amount=25000`. **Rotårsak: D-75 sin EGEN dato-fiks
+(`new Date(e.event_date).toISOString().slice(0,10)`) har en skjult tidssone-bug** - pg-types
+konstruerer `date`-kolonner via `new Date(år, måned, dag)` i LOKAL tid, `.toISOString()` konverterer
+til UTC, og paa en host med UTC-offset ULIK 0 (Tobias sin faktiske host, ikke byggemiljøets
+UTC-sandbox) ruller dette datoen TILBAKE én dag - reprodusert eksplisitt:
+`TZ=Europe/Oslo node -e "new Date(2026,0,10).toISOString()"` → `"2026-01-09T23:00:00.000Z"`.
+**Fiks:** ny kanonisk helper `pgDateToIsoDate()` (`@jarvis/core`) som reverserer med de SAMME lokale
+getterne pg-types selv brukte - tidssone-uavhengig. Brukt i host-scriptet OG i
+`modules/growth/test/service-rls.test.ts` (samme latente bug, usynlig i UTC-CI, fikset proaktivt).
+Den sammenslaatte `ua4_growth_spend_idempotent`-sjekken er nå splittet i fire eksplisitte
+delmarkører (identisk retry / ingen duplikat / avvikende korreksjon / auditert korreksjon) pluss et
+urelatert-kampanje-bevis - aggregatmarkøren forblir, men skjuler ikke lenger HVILKEN delkomponent
+som feiler. PRODUCTION_BUG=false, HOST_ASSERTION_BUG=true (i D-75 sin egen fiks). 4 nye
+regresjonstester (inkl. to som spawner en ekte `TZ=Europe/Oslo`-barneprosess og BEVISER at det gamle
+mønsteret feiler mens den nye helperen er immun). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint`
+rent, full lokal suite 106/106 filer, 1422/1422 tester grønn. **Status: FUNKSJONELT PARTIAL /
+HOST-VERIFIKASJON FEILET** (tredje host-runde, alle tre hard_fail=true) - D-74 markeres FORTSATT
+IKKE VERIFIED/COMPLETE, krever ÉN NY REN host-kjøring. PR #19 oppdatert med run_id `5c54b656` -
+forblir draft, IKKE merget. Full detalj: D-76 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FUNKSJONELT HOST-BEVIST, IKKE VERIFIED):** UA-4 NATIVE GROWTH CORE HOST
+FIX #1 — "AKSEPTANSESCRIPT-KUN, ZERO PRODUKSJONSFEIL" → D-75. To uavhengige, ekte
+Windows/Docker-host-kjøringer (run_id `0a177044`/`5a03593a`) ga BEGGE `hard_fail=true`, EKSAKT tre
+markører FAIL (`ua4_growth_spend_idempotent`, `ua4_growth_cac_roas`,
+`ua4_growth_open_loop_resolved`), alle øvrige 16 av 19 PASS. **Alle tre
 spores til `ua4-growth-core-live.ts` sin EGEN verifikasjons-/fixture-kode, IKKE til
 `GrowthService`/`OpenLoopService`:** (A) spend-idempotens - scriptets `String(dateObject).slice(0,10)`
 matcher aldri en ISO-dato (pg returnerer `date` som JS `Date`); produksjonens `ON CONFLICT DO UPDATE`

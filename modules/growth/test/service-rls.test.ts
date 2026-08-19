@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { createPool, pgDateToIsoDate, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { GrowthService } from "../src/service.ts";
 import { InvalidCampaignTransitionError, InvalidExperimentTransitionError } from "../src/state-machine.ts";
@@ -145,7 +145,46 @@ describe("E: idempotent utgifts-ingestion (write actions are idempotent, auditab
     expect(second.spend_event_id).toBe(first.spend_event_id);
     expect(second.spend_amount_ore).toBe("25000");
     const all = await service.listSpendEvents(TENANT_A, "business", campaign.campaign_id);
-    expect(all.filter((e) => new Date(e.event_date).toISOString().startsWith("2026-08-01"))).toHaveLength(1);
+    // HOST FIX #2 (D-76): `new Date(e.event_date).toISOString()` shifts the
+    // calendar date backward on a non-UTC host (pg-types constructs `date`
+    // columns via LOCAL `new Date(y, m, d)`, `.toISOString()` converts to
+    // UTC) - `pgDateToIsoDate()` is the canonical, timezone-safe reversal.
+    expect(all.filter((e) => pgDateToIsoDate(e.event_date) === "2026-08-01")).toHaveLength(1);
+  });
+  // HOST FIX #2 (D-76): speiler EKSAKT host-scriptets sekvens (identisk
+  // retry FØRST, deretter en avvikende korreksjon) mot ekte Postgres/RLS -
+  // separerer de to invariantene som D-75 definerte i stedet for å slaa
+  // dem sammen i én boolsk sjekk, og beviser urelatert utgift/tenant-
+  // isolasjon forblir upåvirket av korreksjonen.
+  it("identisk retry (samme beløp) beholder samme rad/beløp UENDRET, deretter en avvikende korreksjon oppdaterer samme rad auditert, uten duplikat", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Retry then correction" });
+    const unrelatedCampaign = await service.createCampaign(TENANT_A, "business", { channel: "meta_ads", name: "Unrelated" });
+    await service.recordSpendEvent(TENANT_A, "business", unrelatedCampaign.campaign_id, { event_date: "2026-09-01", spend_amount_ore: 7_777 });
+
+    const first = await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, { event_date: "2026-09-01", spend_amount_ore: 10_000 });
+    const identicalRetry = await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, { event_date: "2026-09-01", spend_amount_ore: 10_000 });
+    expect(identicalRetry.spend_event_id).toBe(first.spend_event_id);
+    expect(identicalRetry.spend_amount_ore).toBe("10000");
+    const afterRetry = await service.listSpendEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(afterRetry.filter((e) => pgDateToIsoDate(e.event_date) === "2026-09-01")).toHaveLength(1);
+
+    const corrected = await service.recordSpendEvent(TENANT_A, "business", campaign.campaign_id, { event_date: "2026-09-01", spend_amount_ore: 25_000 });
+    expect(corrected.spend_event_id).toBe(first.spend_event_id);
+    expect(corrected.spend_amount_ore).toBe("25000");
+    const afterCorrection = await service.listSpendEvents(TENANT_A, "business", campaign.campaign_id);
+    expect(afterCorrection.filter((e) => pgDateToIsoDate(e.event_date) === "2026-09-01")).toHaveLength(1);
+
+    const auditEvents = (await service.listEvents(TENANT_A, "business", campaign.campaign_id)).filter((e) => e.event_type === "spend_recorded");
+    expect(auditEvents).toHaveLength(3);
+    expect(auditEvents[2]!.metadata["before_spend_amount_ore"]).toBe("10000");
+    expect(auditEvents[2]!.metadata["after_spend_amount_ore"]).toBe(25_000);
+
+    const unrelated = await service.listSpendEvents(TENANT_A, "business", unrelatedCampaign.campaign_id);
+    expect(unrelated).toHaveLength(1);
+    expect(unrelated[0]!.spend_amount_ore).toBe("7777");
+
+    const tenantBEvents = await service.listSpendEvents(TENANT_B, "business", campaign.campaign_id);
+    expect(tenantBEvents).toHaveLength(0);
   });
   it("re-synk logger before/after-verdier eksplisitt paa 'spend_recorded'-eventet", async () => {
     const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Spend before-after" });
