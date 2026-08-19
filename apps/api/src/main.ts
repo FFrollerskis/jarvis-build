@@ -30,6 +30,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { GrowthService, GrowthTransport } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -119,6 +120,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // trenger derfor IKKE `toolGateway`/`ToolInvocationContext`, i motsetning
   // til `SupportTransport`.
   const agreementsService = new AgreementsService(pool);
+  // UA-4 Native Jarvis Growth Core (D-74): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - attribusjon gjenbruker Business Graph
+  // (business_leads/business_opportunities) og OpenLoopService
+  // (marketing_spend_anomaly-regelen) uendret. Ingen annonseplattform-
+  // avhengighet - `GrowthTransport` trenger derfor IKKE `toolGateway`/
+  // `ToolInvocationContext`, i motsetning til `SupportTransport`.
+  const growthService = new GrowthService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -129,6 +137,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // bygger `SupportEmailService` lat ved første `reply`/`ingest`-kall.
     support: new SupportTransport(supportService, businessService, toolGateway),
     contract: new AgreementsTransport(agreementsService),
+    growth: new GrowthTransport(growthService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede

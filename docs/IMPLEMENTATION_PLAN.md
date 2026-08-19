@@ -1075,6 +1075,121 @@ signaturleverandør. Ingen UA-4.**
 
 ---
 
+### UA-4 — Native Jarvis Growth Core (Growth & Marketing Control Plane, UA4_SLICE_1) = FIXED_SUITE / IKKE HOST VERIFIED (2026-08-19) → D-74
+
+**Status: FIXED_SUITE / IKKE HOST VERIFIED.** Kode + 66 nye tester ferdig og lokalt bevist (embedded
+Postgres, IKKE en ekte host-kjøring - dette miljøet har ikke Docker/Tobias sin Windows-host
+tilgjengelig). `ua4-growth-core-host-run.ts` er skrevet og klar til å kjøres av Tobias, men status
+forblir ærlig FIXED_SUITE til den faktisk er kjørt - **ALDRI hevdet VERIFIED/COMPLETE uten det
+beviset** (samme disiplin som D-66/D-71 krevde før sine host-fix-runder). Draft-PR opprettes -
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+**UA-4 canonical scope (fra `docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` - INGEN
+UA-4-detalj fantes fra før i CANONICAL_SPEC/ARCHITECTURE/IMPLEMENTATION_PLAN, masterplanen er derfor
+eneste kanoniske kilde, ingen motstrid å rapportere):** Google Ads/Meta Ads/GA4/Search Console/GBP/
+LinkedIn/YouTube/TikTok, attribusjon spend→click→lead→meeting→customer→revenue, eksperimentregister,
+avviksdeteksjon, kreativ intelligens, markedsføringsminne, autonome budsjett-/bud-/kampanje-/
+nøkkelord-/kreativ-endringer når plattformtillatelse finnes, Finance Integrity Gateway for audit/
+reconciliation (IKKE spend-cap). **Literale akseptansekriterier:** CAC/ROAS knyttet til ekte
+CRM/revenue; tracking-/kampanje-avvik detektert og handlingsbart; skrivehandlinger idempotente/
+auditerbare/med before-after-state; samtykke/cookie/databehandlingskrav dokumentert for produksjons-
+sporing.
+
+**D-64 Core-vs-Adapter-porten kjørt FØRST:** `CAPABILITY=`vekst-/markedsføringsattribusjon og
+kampanjesporing; `JARVIS_CORE=`kampanjeregister/utgiftsledger/attribusjonsgraf/CAC-ROAS/
+eksperimentregister/avviksdeteksjon/Business OS-kobling; `GENUINE_EXTERNAL_NEED=`RÅ utgifts-/klikk-/
+visningstall og faktisk annonseplattform-utførelse; `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_AUTHORITY`
+(attribusjon/kampanjesporing/eksperimentregister/avviksdeteksjon = `JARVIS_CANONICAL`; RÅ spend-/
+klikk-/visningsfakta fra en fremtidig plattform = `EXTERNAL_CANONICAL`, samme pointer-not-payload-
+prinsipp som kontraktdokumenter); `CAN_RUN_WITHOUT_PROVIDER=true`; `REPLACEMENT_PATH=`enhver
+annonseplattform utskiftbar uten omskriving av kjernemodellen. INGEN `CORE_DEPENDENCY_DECISION_
+REQUIRED` - full begrunnelse i DECISIONS_AND_ASSUMPTIONS.md D-74.
+
+**UA4_SLICE_1 valgt: Native Jarvis Growth Core** (kanonisk kampanje-/utgifts-/attribusjon-/
+eksperimentmodell, ZERO annonseplattform-connector) - obligatorisk fundament for alt annet
+UA-4-arbeid, fremmer literale akseptansekriterier direkte, fremmer UA-3 kriterium 2 sitt
+"marketing"-domene, uavhengig nyttig alene, fullt host-verifiserbart uten noen live-credential,
+unngår unødvendig leverandørbinding - EKSAKT samme "Core FØR Adapter"-mønster som D-71.
+
+**Ny pakke `@jarvis/growth`** (`modules/growth/`) + migrasjon `027_growth.sql`:
+`marketing_campaigns`/`marketing_spend_events`/`marketing_attributions`/`marketing_experiments`/
+`marketing_campaign_events`, FORCE RLS (samme tenant+space RESTRICTIVE-mønster som
+`026_contracts.sql`). **Kampanjer er BEVISST IKKE knyttet til ett selskap** - en kampanje sikter mot
+fremtidige/ukjente leads, i motsetning til Support/Contracts (alltid én kunde); "Hva skjer med kunde
+X?" dekkes via `growth.list_by_company()` GJENNOM en attribuert lead/opportunity. **Deterministisk
+lifecycle**: kampanje `draft→active→paused→ended` (korreksjon kun `ended→draft`), eksperiment
+`draft→running→concluded/abandoned` (korreksjon kun tilbake til `draft`) - INGEN LLM avgjør
+gyldighet. **Idempotent utgifts-ingestion**: `UNIQUE(tenant_id, campaign_id, event_date, source_type)`,
+`ON CONFLICT DO UPDATE`, before/after eksplisitt logget på `spend_recorded`-eventet. **Attribusjon**
+EKSPLISITT/deterministisk (polymorft `entity_type`/`entity_id` mot EKSISTERENDE `business_leads`/
+`business_opportunities`, samme mønster som `business_scores`/D-62) - ALDRI AI-gjettet. **CAC/ROAS**
+(`campaignPerformance()`) ren deterministisk SQL-aggregering mot ekte `business_opportunities.
+value_ore`/`stage='won'` - `cac_ore`/`roas` er `null` (ALDRI `0`/fabrikkert) når nevneren er `0`.
+**Eksperimentregister** - `result_summary` strukturert/menneske-registrert, ALDRI en AI-generert
+kausal påstand (Q-26-grensen). **OpenLoopService** (IKKE en ny motor) utvidet med
+`marketing_spend_anomaly` (siste utgiftsdag vs. glidende 7-dagers-snitt, terskel ×1.5/÷1.5,
+beløps-gulv 100 øre mot støy) + `business_open_loops.campaign_id`-pekerkolonne. **`growth.*`-
+ToolGateway-namespace** (16 handlinger): klasse A lesing, klasse B interne skrivinger, klasse C for
+`set_campaign_status`/`set_experiment_status` (ingen klasse D i denne sliceen - ingen nøstet ekstern
+annonseplattform-handling finnes ennå). **Q-20**: alle fem tabeller + kampanje-tilknyttede
+`business_open_loops`-rader registrert i `modules/erasure/src/plan.ts` FØR noen host-runde (samme
+FK-lærdom som HOST FIX #1/D-67, anvendt proaktivt). **Q-27**: gjenbruker `listBusinessTenantIds()`
+uendret. **Q-26**: uendret - attribusjon/eksperimentresultater er deterministisk beregnet/
+menneske-registrert, ALDRI automatisk "verifisert kunnskap".
+
+**Samtykke/cookie/databehandling for produksjonssporing** (akseptansekriterium 4): IKKE dokumentert
+i denne sliceen - blir relevant FØRST når en faktisk sporings-/annonsekonto-connector kobles inn,
+eksplisitt notert som gjenstående i Q-29 (IKKE stille utelatt).
+
+66 nye tester (`modules/growth/test/`: state-machine 13, service-rls 28, transport-wiring 10;
+`modules/business/test/open-loop-growth.test.ts`: 9; `modules/erasure/test/growth-erasure.test.ts`: 6).
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite 1412/1412 grønn.
+
+**Bygges IKKE i denne sliceen:** noen live annonseplattform-connector (Google Ads/Meta Ads/GA4/
+Search Console/GBP/LinkedIn/YouTube/TikTok - krever egen D-41/D-64-vurdering PER plattform, se
+Q-29); autonome budsjett-/bud-/kampanje-endringer; kreativ intelligens/markedsføringsminne; Finance
+Integrity Gateway-integrasjon (UA-6, ikke startet); UA-5.
+
+**Kjente åpne gap (ikke skjult - se OPEN_QUESTIONS.md Q-29):** live annonseplattform-connectorer,
+autonome spend-endringer, kreativ intelligens, samtykke-/cookie-dokumentasjon, deterministisk
+UTM-auto-attribusjon, `BUSINESS_DOMAIN_COVERAGE`-kabling for `marketing` i daglig/ukentlig brief;
+ekte host-verifisering (Tobias må kjøre `ua4-growth-core-host-run.ts` før VERIFIED/COMPLETE kan
+hevdes).
+
+#### ENDELIG LUKKING (2026-08-19, samme branch) → D-74 "REN HOST-KJØRING"
+
+Tobias sin FJERDE host-kjøring (`ua4-growth-core-host-run.ts`, run_id `8f2b89e1`) ga `hard_fail=
+false`, ALLE 23 markører PASS (19 opprinnelige + 4 spend-delmarkører introdusert i D-76), inkludert
+`ua4_growth_spend_idempotent`/`ua4_growth_cac_roas`/`ua4_growth_open_loop_resolved` (FAIL i de tre
+foregående rundene, D-75/D-76). Repo-sannhet bekreftet FØR lukking: lokal og
+`origin/claude/ua4-growth-core` HEAD identisk (`598f454`), arbeidstreet rent, INGEN kjørbar kode
+endret etter den host-testede SHA-en - D-76 sin `pgDateToIsoDate()`-fiks er den eksakte koden som
+ble host-testet, ingen re-kjøring nødvendig. **D-74/D-75/D-76 markeres alle VERIFIED/COMPLETE.**
+Runtime bekreftet `jarvis_runtime`/`superuser=false`/`bypassrls=false` - Q-21 uendret gjennom alle
+fire runder. Q-27 gjenbruker `listBusinessTenantIds()` uendret. Q-20: `ErasureService` host-bevist
+reelt (kampanje/utgiftshendelser/attribusjoner/eksperimenter/kampanje-events/kampanje-linket
+open-loop fjernet, urelatert open-loop upåvirket, ingen resurrection). Q-26 uendret (attribusjon/
+eksperimentresultater forblir deterministisk beregnet/menneske-registrert). **UA-3 akseptanse-
+kriterium 2 re-evaluert mot det ordrette masterplan-kriteriet** (`docs/input/02_..._v4.0.md` linje
+470: *"'Hvordan går bedriften?' kombinerer sales, product, finance, marketing, operations"*) - i
+motsetning til K1 (D-73), som er et RESULTAT-kriterium ("gir en komplett tidslinje"), er dette et
+eksplisitt INTEGRASJONS-kriterium ("kombinerer") - Growth Core gir NÅ en ekte, kanonisk,
+host-verifisert markedsførings-datakilde i Business OS, MEN `BUSINESS_DOMAIN_COVERAGE`
+(`modules/business/src/business-brief.ts`) er BEVISST IKKE endret i denne sliceen -
+`marketing: "not_integrated"` er FORTSATT en hardkodet literal i den faktiske kjørende koden, ingen
+spørring mot `growth.*` finnes der. **Kriterium 2 er derfor FORTSATT IKKE oppfylt** - en ekte
+datakilde å kombinere finnes nå, men selve kombineringen (kablingen inn i brief-aggregeringen) er
+ugjort arbeid, eksplisitt registrert i Q-29 punkt 7, IKKE stille utelatt. `sales="available"`
+(uendret), `marketing`="not_integrated" i kode (men datakilde nå EKSISTERER, klar for fremtidig
+kabling), `product`/`finance`/`operations`="not_integrated" (helt ubygget, uendret). **HELE UA-3
+forblir IKKE komplett.** **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.** Full lokal
+suite grønn (106/106 filer, 1422/1422 tester), typecheck/lint rene, GitHub CI
+(`gitleaks`+`build-test`) grønn på `598f454`. PR #19 klar for review - **MERGES IKKE uten Tobias sin
+eksplisitte godkjenning. STOP etter denne lukkingen. Ingen annonseplattform-connector. Ingen ny
+UA-4-slice startet i denne lukkingen.**
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

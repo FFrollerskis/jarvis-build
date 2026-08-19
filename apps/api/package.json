@@ -13,6 +13,7 @@
     "@jarvis/business": "workspace:*",
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
+    "@jarvis/growth": "workspace:*",
     "@jarvis/knowledge": "workspace:*",
     "@jarvis/memory": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",

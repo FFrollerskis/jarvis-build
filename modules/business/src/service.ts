@@ -175,16 +175,24 @@ export class BusinessService {
     });
   }
 
+  /**
+   * `valueOre` er valgfri: en deal sin endelige verdi ved lukking (typisk
+   * "won") avviker ofte fra estimatet satt ved opprettelse - uten dette
+   * parameteret fantes det INGEN kanonisk, RLS-trygg vei til å oppdatere
+   * `value_ore` etter opprettelse (HOST FIX #1, D-75).
+   */
   async updateOpportunityStage(
     tenantId: string,
     memorySpace: MemorySpace,
     opportunityId: string,
-    stage: OpportunityStage
+    stage: OpportunityStage,
+    valueOre?: number
   ): Promise<BusinessOpportunity | null> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
-        `UPDATE business_opportunities SET stage = $1, updated_at = now() WHERE tenant_id = $2 AND opportunity_id = $3 RETURNING *`,
-        [stage, tenantId, opportunityId]
+        `UPDATE business_opportunities SET stage = $1, value_ore = COALESCE($4, value_ore), updated_at = now()
+         WHERE tenant_id = $2 AND opportunity_id = $3 RETURNING *`,
+        [stage, tenantId, opportunityId, valueOre ?? null]
       );
       return (rows[0] as BusinessOpportunity) ?? null;
     });

@@ -96,7 +96,8 @@ export class BusinessTransport implements ToolTransport {
       }
       case "update_opportunity_stage": {
         const row = await this.service.updateOpportunityStage(
-          tenantId, memorySpace, requireString(parameters, "opportunity_id"), requireString(parameters, "stage") as never
+          tenantId, memorySpace, requireString(parameters, "opportunity_id"), requireString(parameters, "stage") as never,
+          parameters["value_ore"] !== undefined ? Number(parameters["value_ore"]) : undefined
         );
         return { ...(row ? { external_id: row.opportunity_id } : {}), data: row as unknown as JsonValue };
       }

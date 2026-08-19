@@ -1,6 +1,114 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-18 (**UA-3 NATIVE CONTRACTS CORE — ENDELIG LUKKING: VERIFIED/COMPLETE**
+**Oppdatert:** 2026-08-19 (**UA-4 NATIVE JARVIS GROWTH CORE — ENDELIG LUKKING: VERIFIED/COMPLETE**
+→ D-74/D-75/D-76/D-77. Tobias sin FJERDE, RENE host-kjøring (`ua4-growth-core-host-run.ts`, run_id
+`8f2b89e1`, `hard_fail=false`) ga ALLE 23 markører PASS, inkludert de tre som feilet i de tre
+foregående rundene (`ua4_growth_spend_idempotent`, `ua4_growth_cac_roas`,
+`ua4_growth_open_loop_resolved`). Repo-sannhet bekreftet FØR lukking: lokal og
+`origin/claude/ua4-growth-core` HEAD identisk (`598f4547e7632413c5dde3806f0d1da8638545a7`),
+arbeidstreet rent, INGEN kjørbar kode endret etter den host-testede SHA-en, GitHub CI
+(`gitleaks`+`build-test`) begge grønne på nøyaktig denne SHA-en. **D-74/D-75/D-76 markeres NÅ
+VERIFIED/COMPLETE.** Native Growth Core er `JARVIS_CANONICAL`/`HYBRID_WITH_CLEAR_AUTHORITY`, ZERO
+annonseplattform-connector-avhengighet. **Live-bevist:** spend-idempotens (identisk retry OG
+avvikende korreksjon, begge auditert), CAC/ROAS mot ekte CRM (`total_spend_ore=25000
+won_opportunities=1 attributed_revenue_ore=500000 cac_ore=25000 roas=20`), OpenLoop-anomali
+opprettes OG resolves (`open_loops_after_create=1 open_loops_after_normal_day=0`), Q-20-erasure,
+Q-21, tenant-/space-isolasjon, ToolGateway, audit-sikkerhet, cleanup. **UA-3 kriterium 2 re-evaluert
+mot det ordrette "kombinerer sales, product, finance, marketing, operations"-kriteriet** (et
+INTEGRASJONS-kriterium, i motsetning til K1 sitt RESULTAT-kriterium) - kildekoden
+(`business-brief.ts`) lest direkte, IKKE antatt: `BUSINESS_DOMAIN_COVERAGE` har FORTSATT
+`marketing: "not_integrated"` hardkodet, INGEN kabling til `growth.*` finnes. **Kriterium 2 markeres
+derfor FORTSATT IKKE oppfylt** - en ekte datakilde eksisterer nå (nødvendig, ikke tilstrekkelig),
+selve kombineringen er ugjort, allerede registrert i Q-29 punkt 7. `sales="available"`,
+`marketing`/`product`/`finance`/`operations="not_integrated"` (uendret utover at marketing nå har en
+klar-til-kabling datakilde). **.gitleaksignore re-auditert, uendret** (ett snevert fingeravtrykk).
+Full lokal suite 106/106 filer, 1422/1422 tester grønn, lint/typecheck rene. **PR #19 klar for
+review** (`MERGE_READY=true`) - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.** **UA-4 SOM
+HELHET forblir IKKE komplett** (kun første av flere planlagte slices). **UA-3 forblir IKKE
+komplett.** **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.** Neste UA-4-slice
+velges FØRST i en egen fremtidig økt via D-64-porten. Full detalj: D-77 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FUNKSJONELT HOST-BEVIST, IKKE VERIFIED):** UA-4 NATIVE GROWTH CORE HOST
+FIX #2 — "TIDSSONE-BUG I HOST FIX #1 SIN EGEN DATO-FIKS, ZERO PRODUKSJONSFEIL" → D-76. Tredje
+host-kjøring (run_id `5c54b656`, `hard_fail=true`) - CAC/ROAS OG open-loop-resolusjon nå BEGGE
+bekreftet PASS live (D-75 sine fikser
+virket), KUN `ua4_growth_spend_idempotent=FAIL` gjensto, til tross for at loggen selv viste
+`spend_event_ids_equal=true final_amount=25000`. **Rotårsak: D-75 sin EGEN dato-fiks
+(`new Date(e.event_date).toISOString().slice(0,10)`) har en skjult tidssone-bug** - pg-types
+konstruerer `date`-kolonner via `new Date(år, måned, dag)` i LOKAL tid, `.toISOString()` konverterer
+til UTC, og paa en host med UTC-offset ULIK 0 (Tobias sin faktiske host, ikke byggemiljøets
+UTC-sandbox) ruller dette datoen TILBAKE én dag - reprodusert eksplisitt:
+`TZ=Europe/Oslo node -e "new Date(2026,0,10).toISOString()"` → `"2026-01-09T23:00:00.000Z"`.
+**Fiks:** ny kanonisk helper `pgDateToIsoDate()` (`@jarvis/core`) som reverserer med de SAMME lokale
+getterne pg-types selv brukte - tidssone-uavhengig. Brukt i host-scriptet OG i
+`modules/growth/test/service-rls.test.ts` (samme latente bug, usynlig i UTC-CI, fikset proaktivt).
+Den sammenslaatte `ua4_growth_spend_idempotent`-sjekken er nå splittet i fire eksplisitte
+delmarkører (identisk retry / ingen duplikat / avvikende korreksjon / auditert korreksjon) pluss et
+urelatert-kampanje-bevis - aggregatmarkøren forblir, men skjuler ikke lenger HVILKEN delkomponent
+som feiler. PRODUCTION_BUG=false, HOST_ASSERTION_BUG=true (i D-75 sin egen fiks). 4 nye
+regresjonstester (inkl. to som spawner en ekte `TZ=Europe/Oslo`-barneprosess og BEVISER at det gamle
+mønsteret feiler mens den nye helperen er immun). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint`
+rent, full lokal suite 106/106 filer, 1422/1422 tester grønn. **Status: FUNKSJONELT PARTIAL /
+HOST-VERIFIKASJON FEILET** (tredje host-runde, alle tre hard_fail=true) - D-74 markeres FORTSATT
+IKKE VERIFIED/COMPLETE, krever ÉN NY REN host-kjøring. PR #19 oppdatert med run_id `5c54b656` -
+forblir draft, IKKE merget. Full detalj: D-76 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FUNKSJONELT HOST-BEVIST, IKKE VERIFIED):** UA-4 NATIVE GROWTH CORE HOST
+FIX #1 — "AKSEPTANSESCRIPT-KUN, ZERO PRODUKSJONSFEIL" → D-75. To uavhengige, ekte
+Windows/Docker-host-kjøringer (run_id `0a177044`/`5a03593a`) ga BEGGE `hard_fail=true`, EKSAKT tre
+markører FAIL (`ua4_growth_spend_idempotent`, `ua4_growth_cac_roas`,
+`ua4_growth_open_loop_resolved`), alle øvrige 16 av 19 PASS. **Alle tre
+spores til `ua4-growth-core-live.ts` sin EGEN verifikasjons-/fixture-kode, IKKE til
+`GrowthService`/`OpenLoopService`:** (A) spend-idempotens - scriptets `String(dateObject).slice(0,10)`
+matcher aldri en ISO-dato (pg returnerer `date` som JS `Date`); produksjonens `ON CONFLICT DO UPDATE`
++ eksplisitt before/after-audit var HELE tiden korrekt (allerede regresjonstestet FØR denne
+hendelsen). Fiks: `new Date(...).toISOString()` i scriptets egen sjekk. (B) CAC/ROAS - scriptets
+fixture brukte en rå, RLS-kontekstløs `pool.query()` UPDATE mot en FORCE RLS-tabell (traff STILLE 0
+rader) - EKSAKT samme feilklasse som D-54/D-58/D-59/D-62. Avdekket et EKTE produksjonshull
+(`BusinessService.updateOpportunityStage()` kunne ikke sette `value_ore`) - fikset i produksjonskode
+med en valgfri `valueOre`-parameter (RLS-trygg, D-41-samsvarende), scriptet bruker nå den ekte
+kanoniske metoden. (C) Open-loop-resolusjon - scriptets normaliseringsverdi (2 000) var kopiert fra
+en enhetstest med en ANNEN spike-størrelse (10 000, ikke scriptets 20 000) - reberegnet terskel for
+20 000-spiken er `[2476.19, 5571.43]`, 2 000 lå UNDER; `detectSpendAnomalies()` var KORREKT hele
+tiden. Fiks: normaliseringsverdi endret til 3 500 (matte dokumentert i kommentar). **Delt rotårsak:**
+alle tre i SAMME fil, forfattet uten samme iterative ekte-Postgres-validering som
+`modules/growth/test/*.test.ts` fikk. 3 nye regresjonstester, `.gitleaksignore` re-auditert (uendret,
+fortsatt snevert til ett fingeravtrykk). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full
+lokal suite 105/105 filer, 1415/1415 tester grønn. **Status: FUNKSJONELT PARTIAL / HOST-VERIFIKASJON
+FEILET** - D-74 markeres IKKE VERIFIED/COMPLETE ennå, krever ÉN NY REN host-kjøring. PR #19
+oppdatert med begge run_id-er/rotårsaker/fikser - forblir draft, IKKE merget. Full detalj: D-75 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, FIXED_SUITE / IKKE HOST VERIFIED):** UA-4 GROWTH & MARKETING CONTROL
+PLANE — FØRSTE SLICE: Native Jarvis Growth Core → D-74. Startet FØRST etter eksplisitt lesing av
+`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` (INGEN UA-4-detalj fantes fra før i
+CANONICAL_SPEC/ARCHITECTURE/IMPLEMENTATION_PLAN - masterplanen er derfor eneste kanoniske kilde,
+ingen motstrid). D-64 Core-vs-Adapter-porten kjørt FØRST: `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_
+AUTHORITY` (attribusjon/kampanjesporing/eksperimentregister/avviksdeteksjon er `JARVIS_CANONICAL`;
+RÅ spend-/klikk-/visningstall fra en fremtidig annonseplattform er `EXTERNAL_CANONICAL`).
+**UA4_SLICE_1 valgt: Native Jarvis Growth Core** - kanonisk kampanje-/utgifts-/attribusjon-/
+eksperimentmodell, ZERO annonseplattform-credential (obligatorisk fundament for ALT annet
+UA-4-arbeid, fremmer literale akseptansekriterier direkte, unngår unødvendig leverandørbinding).
+Ny pakke `@jarvis/growth`, migrasjon `027_growth.sql` (`marketing_campaigns`/
+`marketing_spend_events`/`marketing_attributions`/`marketing_experiments`/
+`marketing_campaign_events`). Deterministisk kampanje-/eksperiment-lifecycle, idempotent
+utgifts-ingestion (before/after state), EKSPLISITT deterministisk attribusjon til EKSISTERENDE
+`business_leads`/`business_opportunities`, CAC/ROAS beregnet FRA ekte `business_opportunities.
+value_ore`/`stage='won'` (ALDRI fabrikkert - `null` når nevneren er `0`, aldri en gjettet verdi).
+`OpenLoopService` utvidet med `marketing_spend_anomaly` (glidende 7-dagers-snitt, INGEN ny motor).
+`growth.*`-ToolGateway-namespace (16 handlinger, INGEN klasse D i denne sliceen). 66 nye tester,
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **INGEN ekte host-kjøring i DENNE økten**
+(Docker/Windows-host ikke tilgjengelig her) - `ua4-growth-core-host-run.ts`/`-live.ts` SKREVET og
+lokalt bevist via embedded Postgres, status ærlig **FIXED_SUITE / IKKE HOST VERIFIED**. **UA-4 SOM
+HELHET forblir IKKE komplett** (kun første av flere planlagte slices - se Q-29 for gjenstående:
+live connectorer, autonome budsjett-/bud-endringer, kreativ intelligens, Finance Integrity Gateway,
+samtykke-/cookie-dokumentasjon, UTM-auto-attribusjon, BUSINESS_DOMAIN_COVERAGE-kabling). **UA-3
+forblir IKKE komplett** (kriterium 2 fortsatt PARTIAL - vekst-domenet finnes nå men er IKKE koblet
+inn i brief-domenedekningen ennå). **HELE Sovereign Autonomy-masterplanen forblir IKKE komplett.**
+Draft-PR opprettes, IKKE merget, INGEN leverandør-connector valgt, INGEN autonome spend-endringer.
+
+**Runden før det (samme dag, MERGET):** UA-3 NATIVE CONTRACTS CORE — ENDELIG LUKKING: VERIFIED/COMPLETE
 → D-71/D-72/D-73. Tobias sin TREDJE, RENE host-kjøring (`ua3-native-contracts-host-run.ts`,
 run_id `5ca4765b`, `hard_fail=false`) ga ALLE 26 markører PASS, inkludert `ua3_contracts_cleanup`
 (FAIL i de to foregående rundene, D-72). Repo-sannhet bekreftet FØR lukking: lokal og

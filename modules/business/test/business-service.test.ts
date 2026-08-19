@@ -192,6 +192,23 @@ describe("K: kunde/deal-tilstandsoppdatering", () => {
     expect(first?.opportunity_id).toBe(second?.opportunity_id);
     expect(second?.stage).toBe("proposal");
   });
+  // HOST FIX #1 (D-75): før dette var det INGEN kanonisk, RLS-trygg vei til å
+  // sette value_ore ved lukking - UA-4-akseptansescriptet brukte derfor en rå
+  // pool.query() UPDATE som stille traff 0 rader under FORCE RLS (ingen
+  // jarvis.tenant_id/jarvis.memory_spaces-sesjonskontekst satt). Dette beviser
+  // at den ekte kanoniske lifecycle-metoden nå setter BÅDE stage og value_ore.
+  it("oppdaterer stage OG value_ore sammen naar en deal lukkes som 'won' (RLS-trygg via withMemoryTransaction)", async () => {
+    const opp = await service.createOpportunity(TENANT_A, "business", { title: "Won med endelig verdi", value_ore: 100_000 });
+    const won = await service.updateOpportunityStage(TENANT_A, "business", opp.opportunity_id, "won", 500_000);
+    expect(won?.stage).toBe("won");
+    expect(won?.value_ore).toBe(500_000);
+  });
+  it("value_ore forblir uendret naar valueOre-parameteret utelates (kun stage endres)", async () => {
+    const opp = await service.createOpportunity(TENANT_A, "business", { title: "Stage uten verdiendring", value_ore: 42_000 });
+    const moved = await service.updateOpportunityStage(TENANT_A, "business", opp.opportunity_id, "qualified");
+    expect(moved?.stage).toBe("qualified");
+    expect(moved?.value_ore).toBe(42_000);
+  });
 });
 
 describe("L: cross-tenant-tilgang nektes (RLS)", () => {

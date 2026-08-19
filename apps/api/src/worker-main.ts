@@ -10,6 +10,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { GrowthService, GrowthTransport } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -90,6 +91,10 @@ const supportService = new SupportService(pool);
 // som apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne
 // kalle contract.*-handlingene identisk.
 const agreementsService = new AgreementsService(pool);
+// UA-4 Native Jarvis Growth Core (D-74): samme GrowthService-wiring som
+// apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne kalle
+// growth.*-handlingene identisk.
+const growthService = new GrowthService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -100,6 +105,7 @@ for (const tool of firstWaveTools({
   // Identisk wiring-mønster som apps/api/src/main.ts - lazy SupportEmailService.
   support: new SupportTransport(supportService, businessService, toolGateway),
   contract: new AgreementsTransport(agreementsService),
+  growth: new GrowthTransport(growthService),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {
