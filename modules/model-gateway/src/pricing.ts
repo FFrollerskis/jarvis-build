@@ -9,6 +9,21 @@ export interface TokenRate {
   output_per_1k_ore: number;
   /** Rabattert pris for cache-treff der provider rapporterer det. */
   cached_per_1k_ore?: number;
+  /**
+   * D-81 (§7 pris-sannhet): eksplisitt skiller en BEKREFTET NÅVÆRENDE
+   * leverandørpris fra en PERMANENT modellegenskap - "gratis i dag" er ALDRI
+   * kodet inn som en varig sannhet. `FREE_TIER` = kvotebegrenset gratis-nivå
+   * (kan endres/utløpe uten varsel, se `gemma_hosted` under); `PAID` = en
+   * betalt tarif; `LOCAL` = ALDRI en API-kostnad (infrastrukturkost er en
+   * separat, ikke-modellert kostnadskategori - se §18/`local_llm` under).
+   * En fremtidig "AI Market & Cost Optimizer" kan erstatte disse verdiene
+   * dynamisk (samme `PricingTable`-injeksjonspunkt som allerede finnes i
+   * `GatewayOptions.pricing`) UTEN å skrive om selve rutinglogikken - denne
+   * filen er allerede det eneste stedet priser leses fra.
+   */
+  pricing_mode?: "FREE_TIER" | "PAID" | "LOCAL";
+  /** ISO-dato: når denne raten sist ble bekreftet mot leverandørens offisielle prisside/API-dokumentasjon. */
+  pricing_verified_at?: string;
 }
 
 export interface PricingTable {
@@ -30,14 +45,25 @@ export const DEFAULT_PRICING: PricingTable = {
     anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4 },
     gemini: { input_per_1k_ore: 0.4, output_per_1k_ore: 2.7 },
     kimi: { input_per_1k_ore: 0.7, output_per_1k_ore: 3.2 },
-    ollama: { input_per_1k_ore: 0, output_per_1k_ore: 0 },
-    // D-79: hostet Gemma sin default-modell er gratis-tier (0 øre) - IKKE en
-    // antakelse om at fremtidige betalte Gemma-tiers også er gratis; oppdater
-    // raten hvis/når en betalt kvote/tier faktisk konfigureres.
-    gemma_hosted: { input_per_1k_ore: 0, output_per_1k_ore: 0 },
-    // §18: lokal inferens har ALDRI en API-kostnad (infrastrukturkost spores
-    // separat i en fremtidig runde, ALDRI oppdiktet som modell-øre her).
-    local_llm: { input_per_1k_ore: 0, output_per_1k_ore: 0 }
+    ollama: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" },
+    // D-80/D-81: hostet Gemma sin default-modell er gratis-tier (0 øre) PER
+    // 2026-08-19 (bekreftet via WebSearch mot Google sin offisielle Gemini
+    // API-dokumentasjon, se D-81 i DECISIONS_AND_ASSUMPTIONS.md) - EKSPLISITT
+    // markert `pricing_mode: "FREE_TIER"`, IKKE en antakelse om at fremtidige
+    // betalte Gemma-tiers også er gratis. Kvotebegrenset gratis-nivå kan
+    // endres/utløpe uten varsel - oppdater raten OG `pricing_mode`/
+    // `pricing_verified_at` hvis/når en betalt kvote/tier faktisk konfigureres.
+    gemma_hosted: {
+      input_per_1k_ore: 0,
+      output_per_1k_ore: 0,
+      pricing_mode: "FREE_TIER",
+      pricing_verified_at: "2026-08-19"
+    },
+    // §18/D-81: lokal inferens har ALDRI en API-kostnad (`pricing_mode: "LOCAL"`)
+    // - infrastrukturkost (strøm/maskinvare/drift) er en SEPARAT, ikke-modellert
+    // kostnadskategori, ALDRI oppdiktet som modell-øre her. "API-kostnad 0" er
+    // IKKE det samme som "total driftskostnad 0".
+    local_llm: { input_per_1k_ore: 0, output_per_1k_ore: 0, pricing_mode: "LOCAL" }
   },
   default_rate: { input_per_1k_ore: 30, output_per_1k_ore: 150 }
 };

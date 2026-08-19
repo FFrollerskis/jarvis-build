@@ -1,35 +1,39 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**JARVIS AI MESH — GEMMA-FIRST KOST-/PERSONVERNARKITEKTUR** → D-80.
-Claude er IKKE lenger standardmodell for ordinær 24/7-drift - Jarvis er nå Gemma-først for egnede
-oppgaver, lokal-først for sensitive oppgaver når lokal inferens finnes, Claude er et EKSPLISITT
-eskaleringsmål (IKKE fjernet, IKKE svekket som premium-provider). D-64-gate: `JARVIS_CORE=`
-rutingpolicy/kapabilitetsregister/kost-/helse-/budsjett-sporing; `EXTERNAL_ROLE=`selve
-modell-inferensen; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`; `CAN_RUN_WITHOUT_PROVIDER=true`. D-41-gate
-for hostet Gemma: EKTE tool calling/strukturert output/usage/helse/retry/timeout wiret (IKKE
-kunstig tekst-only), streaming BEVISST utelatt (samme grense som eksisterende `GeminiAdapter`).
-**To nye providere:** `gemma.ts` (`GemmaHostedAdapter`, `gemma_hosted`, Gemini API, nøkkel i header
-ALDRI URL) og `local-llm.ts` (`LocalOpenAiCompatibleAdapter`, `local_llm`, OpenAI-kompatibelt lokalt
-endepunkt, `LOCAL_LLM_BASE_URL`/`LOCAL_LLM_MODEL`, INGEN default-URL/IP). **Ny personvernklassifisering**
-(oppfyller D-23 sitt aldri-implementerte mandat): `DataSensitivity` i `@jarvis/contracts`, VALGFRITT
-`sensitivity`-felt (udefinert = eksakt samme ruting som før, migrasjonssikkert), ny
-`hosted_free_tier`-markør (KUN `gemma_hosted=true`, alle andre uendret). Router: `PRIVATE`/
-`BUSINESS_CONFIDENTIAL` ekskluderer gratis-tier, foretrekker lokal (myk bonus); `SECRET_RESTRICTED`
-= kun lokal, fail-closed uten lokal (også ved eier-override). Standard-ruting: `gemma_hosted` vinner
-AUTO/BACKGROUND matematisk (registry-tall, ingen spesialtilfelle-kode). Eskalering til Claude:
-`mode=QUALITY/CRITIC` (kvalitet slår kost), `VISION` (kun anthropic har bilde-wiring), eksplisitt
-override - alle tre EKSISTERENDE mekanismer. Bakgrunnsjobb-audit: ALLE `DailyScheduler`-jobber er
-100% deterministiske (ingen ModelGateway-kall); executive-worker arver Gemma-standarden automatisk
-men klassifiserer IKKE ennå `sensitivity` (dokumentert gjenstående gap); OCR/vision forblir
-Anthropic-only (ingen Gemma-vision). 26 nye tester (22 routing-matrise + 22 conformance, noen
-delvis overlappende telling). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite
-108/108 filer, 1483/1483 tester grønn (var 1439, ren addisjon). Migrasjonssikkert: `sensitivity` er
-et nytt valgfritt felt, INGEN eksisterende kallested endret faktisk ruting. INGEN ekte
-live-provider-kjøring i denne økten (ingen API-nøkkel konfigurert) - arkitektur-/enhets-/
-integrasjonsverifisering IKKE blokkert av dette, alt bevist mot mocket fetch. Draft-PR opprettes,
-IKKE merget. Full detalj: D-80 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-08-19 (**PR #21 PRE-MERGE SECURITY + D-41 HARDENING** → D-81, D-80-oppfølging,
+IKKE merget). **P0-FUNN OG FIKS:** `UNCLASSIFIED_CAN_ROUTE_TO_HOSTED_FREE_TIER=true` FØR denne
+runden - udefinert `sensitivity` ble feilaktig tolket som "ingen filtrering" for ALLE
+providerkategorier, inkl. `hosted_free_tier` (`gemma_hosted`). Kombinert med at BÅDE
+`apps/api/src/executive.ts` OG `apps/api/src/conversation.ts` (HOVED-samtalemotoren, dekker alle
+memory spaces inkl. "health"/"personal") sender INGEN `sensitivity`, kunne uklassifisert innhold nå
+gratis-tieret. **Fikset:** `isSensitivityEligible()` krever nå EKSPLISITT
+`sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` for `hosted_free_tier`-providere (fail-safe, ikke
+fail-open) - gjelder OGSÅ eksplisitt eier-override. ALLE andre, allerede betrodde providere beholder
+UENDRET ruting for udefinert sensitivitet (§23 uendret for dem). Konsekvens: `gemma_hosted` vinner
+IKKE lenger AUTO/BACKGROUND for udefinert sensitivitet (faller tilbake til openai/gemini, EKSAKT som
+FØR D-80) - "Gemma-først" gjelder KUN når kalleren eksplisitt setter `PUBLIC_OR_LOW_SENSITIVITY`.
+**D-41 korrigert mot faktisk dokumentasjon** (WebSearch mot Google sin offisielle Gemini API-doks,
+WebFetch blokkert av egress-proxy denne økten): Gemma 4 støtter EKTE bildeforståelse via Gemini API
+- **vision NÅ IMPLEMENTERT** (`gemma.ts` sin `toGemmaParts()`, samme mønster som `anthropic.ts`,
+personvern-gaten forblir autoritativ - e-post-OCR forblir 100% Anthropic siden ingen sensitivity
+settes der). Streaming: `PROVIDER_SUPPORT=true` (`streamGenerateContent` er en generisk metode),
+`ADAPTER_SUPPORT=false` (bevisst utsatt, ikke-trivielt, Q-30). Pris-sannhet: `pricing.ts` fikk
+`pricing_mode`/`pricing_verified_at`-metadata (`gemma_hosted=FREE_TIER/2026-08-19`,
+`local_llm`/`ollama`=LOCAL) - arkitekturen støttet allerede dynamisk prisoppdatering. Rate-limit/
+router-økonomi verifisert korrekt, INGEN kodeendring nødvendig der. **Testregnskap korrigert:** D-80
+sin opprinnelige "26 nye tester" var feil - faktisk 44 (22+22). D-81 la til 14 MER (11 routing + 3
+vision). Nytt totalregnskap: `main` FØR D-80=1439 → ETTER D-80=1483 (+44) → ETTER D-81=1497 (+14),
+108/108 filer grønn alle ganger. `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, lokal
+`gitleaks` "no leaks found". **D-80 = CI_VERIFIED/COMPLETE ETTER denne fiksen.** PR #21 forblir
+draft, IKKE merget, INGEN AI Market/Cost Optimizer bygget, INGEN nye providere utover D-80 sine to,
+INGEN Tobias-secret-oppsett. Full detalj: D-81 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Runden før det (samme dag, MERGET):** UA-4 SLICE 2 (D-78) — CI-AKSEPTANSE ERSTATTER MANUELL
+**Runden før det (samme dag):** JARVIS AI MESH — GEMMA-FIRST KOST-/PERSONVERNARKITEKTUR → D-80 (opprinnelig
+implementasjon, senere herdet av D-81 over). Claude ikke lenger standardmodell for ordinær drift,
+to nye providere (`gemma_hosted`/`local_llm`), `DataSensitivity`-klassifisering,
+`hosted_free_tier`-markør, D-64/D-41-gater kjørt. Full detalj: D-80 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det igjen (samme dag, MERGET):** UA-4 SLICE 2 (D-78) — CI-AKSEPTANSE ERSTATTER MANUELL
 HOST-KJØRING → D-79. D-78 = `CI_VERIFIED / COMPLETE`. PR #20 MERGET (merge-SHA `f602040`) etter
 Tobias sin eksplisitte godkjenning - UA4_SLICE_2 = VERIFIED/COMPLETE på `main`. UA-4 SOM HELHET
 forblir IKKE komplett, UA-3 kriterium 2 forblir IKKE oppfylt (`sales=AVAILABLE marketing=AVAILABLE

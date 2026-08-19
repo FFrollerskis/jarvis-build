@@ -4,25 +4,28 @@
  *
  * UA-2 P1B-A (D-43 §3): `vision`-flagget må reflektere FAKTISK wiret
  * bildestøtte i den tilhørende adapteren (`packages/provider-adapters`),
- * ALDRI et informativt/aspirasjonelt leverandør-fakta. Kun `anthropic` har
- * ekte bilde-mapping i denne runden (se `anthropic.ts` sin
- * `toAnthropicContent()`) - `openai`/`gemini`/`gemma_hosted` støtter i praksis
- * vision hos leverandøren, men adapteren her bruker fortsatt `textOnly()` og
- * ville stille droppet bildedata; å beholde `vision` i profilen ville latt
- * routeren sende et vision-krevd kall til en adapter som degraderer det til
- * ren tekst. Rettes når disse adapterne faktisk får bilde-mapping (egen
- * fremtidig runde).
+ * ALDRI et informativt/aspirasjonelt leverandør-fakta. `anthropic` og (D-81)
+ * `gemma_hosted` har ekte bilde-mapping (se `anthropic.ts` sin
+ * `toAnthropicContent()` og `gemma.ts` sin `toGemmaParts()`) - `openai`/
+ * `gemini`/`local_llm` støtter i praksis vision hos leverandøren, men
+ * adapteren her bruker fortsatt `textOnly()` og ville stille droppet
+ * bildedata; å beholde `vision` i profilen ville latt routeren sende et
+ * vision-krevd kall til en adapter som degraderer det til ren tekst. Rettes
+ * når disse adapterne faktisk får bilde-mapping (egen fremtidig runde).
  *
- * D-79 (samme regel, samme rigiditet): `streaming` er FJERNET fra `gemini`
+ * D-80 (samme regel, samme rigiditet): `streaming` er FJERNET fra `gemini`
  * sin profil her - adapteren (`gemini.ts`) har ALDRI hatt en `.stream()`-
  * metode (kun `generateContent`, ikke `streamGenerateContent`), så den
  * tidligere `streaming: true`-påstanden var en registry/adapter-mismatch
- * (fanget under D-79 sin arkitekturgjennomgang - `ModelGateway.executePlan()`
+ * (fanget under D-80 sin arkitekturgjennomgang - `ModelGateway.executePlan()`
  * degraderer allerede trygt til enkelt-delta for adaptere uten `.stream()`,
  * så dette var ALDRI en krasj-bug, kun en unøyaktig capability-påstand som
  * brøt filens egen regel over). Samme grense gjelder de NYE `gemma_hosted`/
- * `local_llm`-profilene - INGEN av dem hevder `streaming` (se deres adaptere
- * for begrunnelse).
+ * `local_llm`-profilene - INGEN av dem hevder `streaming` (D-81: bekreftet
+ * `PROVIDER_SUPPORT=true`/`ADAPTER_SUPPORT=false` for `gemma_hosted` via
+ * offisiell Gemini API-dokumentasjon - `streamGenerateContent` er en generisk
+ * metode leverandøren støtter, men adapteren implementerer den bevisst ikke
+ * ennå, se `gemma.ts`).
  */
 export type ModelCapability =
   | "text"
@@ -45,14 +48,15 @@ export interface ModelProfile {
   quality_class: 1 | 2 | 3 | 4 | 5;
   latency_class: "fast" | "medium" | "slow";
   /**
-   * D-79 (§3 personvern-grense): `true` KUN for hostede sky-providere som
+   * D-80/D-81 (§3 personvern-grense): `true` KUN for hostede sky-providere som
    * kjører på et delt gratis-tier-kvotebasseng (i dag: `gemma_hosted`).
-   * Routeren (`router.ts`) ekskluderer ALDRI denne providertypen når
-   * kalleren eksplisitt oppgir `sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY"`
-   * - se `DataSensitivity` i `@jarvis/contracts`. Default `false` for ALLE
-   * eksisterende betalte/lokale providere (uendret tillit - denne sliceen
-   * innfører INGEN ny begrensning på allerede konfigurerte betalte
-   * leverandører, kun på det NYE gratis-tier-tillegget).
+   * Routeren (`router.ts`) krever et EKSPLISITT
+   * `sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` for at denne providertypen
+   * skal være kvalifisert (D-81 P0-fiks: udefinert/ukjent sensitivitet blir
+   * ALDRI tolket som "public") - se `DataSensitivity` i `@jarvis/contracts`.
+   * Default `false` for ALLE eksisterende betalte/lokale providere (uendret
+   * tillit - denne sliceen innfører INGEN ny begrensning på allerede
+   * konfigurerte betalte leverandører, kun på det NYE gratis-tier-tillegget).
    */
   hosted_free_tier?: boolean;
 }
@@ -82,7 +86,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   {
     provider: "gemini",
     model: "gemini-2.5-flash",
-    // D-79: `streaming` fjernet - adapteren har aldri hatt `.stream()` (se filkommentaren over).
+    // D-80: `streaming` fjernet - adapteren har aldri hatt `.stream()` (se filkommentaren over).
     capabilities: ["text", "reasoning", "structured_output"],
     context_tokens: 1_000_000,
     locality: "cloud",
@@ -91,14 +95,19 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     latency_class: "fast"
   },
   {
-    // D-79 (AI Mesh Gemma-first): hostet Gemma via Gemini API - standard
+    // D-80 (AI Mesh Gemma-first): hostet Gemma via Gemini API - standard
     // rimelig/rask kandidat for ordinære 24/7-oppgaver (§4) NÅR
     // personvernpolicyen tillater det. `hosted_free_tier: true` er den
     // eneste mekanismen som beskytter sensitivt innhold fra gratis-tieret
-    // (§3) - se `router.ts` for hvordan dette faktisk håndheves.
+    // (§3, D-81 P0-fiks: udefinert sensitivitet ekskluderer OGSÅ) - se
+    // `router.ts` for hvordan dette faktisk håndheves. `vision` lagt til i
+    // D-81 - `gemma.ts` sin `toGemmaParts()` har EKTE bilde-mapping
+    // (bekreftet mot Gemini API-dokumentasjon at Gemma 4 støtter
+    // bildeforståelse), samme personvern-gate gjelder UENDRET for
+    // vision-forespørsler til denne provideren.
     provider: "gemma_hosted",
     model: "gemma-4-26b-a4b-it",
-    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    capabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output"],
     context_tokens: 128_000,
     locality: "cloud",
     cost_class: 1,
@@ -107,7 +116,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     hosted_free_tier: true
   },
   {
-    // D-79 §6: provider-nøytral lokal-inferens (OpenAI-kompatibelt
+    // D-80 §6: provider-nøytral lokal-inferens (OpenAI-kompatibelt
     // endepunkt). `quality_class` er en konservativ default inntil en ekte
     // lokal modell er konfigurert og evaluert - IKKE en påstand om en
     // spesifikk modells faktiske kvalitet (kalleren styrer selv hvilken

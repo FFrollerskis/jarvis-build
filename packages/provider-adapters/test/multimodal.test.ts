@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AnthropicAdapter,
+  GemmaHostedAdapter,
   GeminiAdapter,
   KimiAdapter,
+  LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
   OpenAiAdapter,
   textOnly,
@@ -14,10 +16,10 @@ import {
  * UA-2 P1B-A (D-43 §3): `ChatMessage.content` ble utvidet fra `string` til
  * `string | ContentPart[]` for vision/OCR-ingestion. Denne suiten beviser at
  * (a) `textOnly()` degraderer korrekt, og (b) hver adapter enten sender EKTE
- * bildeblokker (Anthropic - eneste adapter med reell støtte denne runden) eller
- * ALDRI sender et rått array som `content` til leverandøren (alle andre -
- * degraderer trygt til tekst via `textOnly()`, se capability-registry.ts sin
- * begrunnelse for hvorfor `vision` kun står på anthropic sin profil).
+ * bildeblokker (Anthropic OG, D-81, `gemma_hosted`) eller ALDRI sender et rått
+ * array som `content` til leverandøren (alle andre - degraderer trygt til
+ * tekst via `textOnly()`, se capability-registry.ts sin begrunnelse for
+ * hvorfor `vision` kun står på disse to profilene).
  */
 const originalFetch = global.fetch;
 
@@ -81,6 +83,41 @@ describe("AnthropicAdapter - EKTE bildestøtte (eneste adapter denne runden, se 
   });
 });
 
+describe("GemmaHostedAdapter - EKTE bildestøtte (D-81, toGemmaParts())", () => {
+  let capturedBody: Record<string, unknown> | undefined;
+
+  beforeEach(() => {
+    global.fetch = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse(200, {
+        candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 }
+      });
+    }) as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("K: en melding med ContentPart[] blir Gemini-API-parts med text- OG inlineData-elementer (rå base64, ingen data:-URI)", async () => {
+    const adapter = new GemmaHostedAdapter("test-key", "test-model", "http://mock");
+    await adapter.complete({ messages: [MULTIMODAL_MESSAGE] });
+    const contents = capturedBody?.["contents"] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+    expect(contents[0]?.parts).toEqual([
+      { text: "beskriv bildet" },
+      { inlineData: { mimeType: "image/png", data: "aGVsbG8=" } }
+    ]);
+  });
+
+  it("L: en vanlig streng-melding blir ett tekst-part (bakoverkompatibel)", async () => {
+    const adapter = new GemmaHostedAdapter("test-key", "test-model", "http://mock");
+    await adapter.complete({ messages: [{ role: "user", content: "hei" }] });
+    const contents = capturedBody?.["contents"] as Array<{ parts: Array<{ text: unknown }> }>;
+    expect(contents[0]?.parts).toEqual([{ text: "hei" }]);
+  });
+});
+
 describe("Ikke-vision-adaptere degraderer ContentPart[] TRYGT til tekst - ALDRI et rått array sendt til leverandøren", () => {
   let capturedBody: Record<string, unknown> | undefined;
 
@@ -134,5 +171,14 @@ describe("Ikke-vision-adaptere degraderer ContentPart[] TRYGT til tekst - ALDRI 
     const messages = capturedBody?.["messages"] as Array<{ role: string; content: unknown }>;
     const userMsg = messages.find((m) => m.role === "user");
     expect(typeof userMsg?.content).toBe("string");
+  });
+
+  it("M: LocalOpenAiCompatibleAdapter sender textOnly() - streng, ikke array (ingen vision-wiring, D-81)", async () => {
+    const adapter = new LocalOpenAiCompatibleAdapter("http://mock", "test-model");
+    await adapter.complete({ messages: [MULTIMODAL_MESSAGE] });
+    const messages = capturedBody?.["messages"] as Array<{ role: string; content: unknown }>;
+    const userMsg = messages.find((m) => m.role === "user");
+    expect(typeof userMsg?.content).toBe("string");
+    expect(userMsg?.content).toBe("beskriv bildet");
   });
 });

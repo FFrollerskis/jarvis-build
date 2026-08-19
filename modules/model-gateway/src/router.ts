@@ -15,19 +15,26 @@ export interface RouteInput {
   provider?: string;
   needs_structured?: boolean;
   /**
-   * D-79 (AI Mesh Gemma-first §3/§23): VALGFRITT - når kalleren IKKE oppgir
-   * dette, gjelder EKSAKT samme ruting som før D-79 (ingen ny filtrering,
-   * ingen stille atferdsendring - migrasjonssikkerhet). Når kalleren
-   * eksplisitt klassifiserer dataen:
-   *  - PUBLIC_OR_LOW_SENSITIVITY: ingen ekstra filtrering (samme som udefinert).
-   *  - PRIVATE / BUSINESS_CONFIDENTIAL: `hosted_free_tier`-providere (i dag
-   *    kun `gemma_hosted`) EKSKLUDERES helt; lokale providere foretrekkes
-   *    (scoring-bonus), men er IKKE et hardt krav - en allerede betrodd
-   *    betalt sky-provider forblir kvalifisert (D-23: "preferably local...
-   *    or an approved paid/private provider configuration").
-   *  - SECRET_RESTRICTED: KUN lokale providere er kvalifisert. Ingen lokal
-   *    tilgjengelig => fail-closed (`NoEligibleProviderError`), ALDRI stille
-   *    fallback til en sky-provider.
+   * D-80/D-81 (AI Mesh Gemma-first §3/§23, P0-sikkerhetsfiks): VALGFRITT.
+   * `hosted_free_tier`-providere (i dag kun `gemma_hosted`) krever et
+   * EKSPLISITT `sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` for å være
+   * kvalifisert - udefinert/ukjent sensitivitet blir ALDRI tolket som
+   * "public" (fail-safe, D-81). For ALLE ANDRE, allerede betrodde providere
+   * (openai/anthropic/gemini/kimi/ollama/local_llm) er ruting UENDRET fra FØR
+   * D-80 når feltet er udefinert (§23 migrasjonssikkerhet - ingen eksisterende
+   * kalleside mister tilgang til en tidligere kvalifisert provider). Når
+   * kalleren eksplisitt klassifiserer dataen:
+   *  - PUBLIC_OR_LOW_SENSITIVITY: `hosted_free_tier`-providere blir kvalifisert;
+   *    ingen ekstra filtrering for øvrige.
+   *  - PRIVATE / BUSINESS_CONFIDENTIAL: `hosted_free_tier`-providere
+   *    EKSKLUDERES helt; lokale providere foretrekkes (scoring-bonus), men er
+   *    IKKE et hardt krav - en allerede betrodd betalt sky-provider forblir
+   *    kvalifisert (D-23: "preferably local... or an approved paid/private
+   *    provider configuration").
+   *  - SECRET_RESTRICTED: KUN lokale providere er kvalifisert (gjelder for
+   *    ALLE providere, inkl. `hosted_free_tier`). Ingen lokal tilgjengelig =>
+   *    fail-closed (`NoEligibleProviderError`), ALDRI stille fallback til en
+   *    sky-provider - gjelder OGSÅ eksplisitt eier-override.
    */
   sensitivity?: DataSensitivity;
 }
@@ -63,17 +70,31 @@ const REASONING_PURPOSES: ModelPurpose[] = ["CODE", "REASON", "PLAN", "RESEARCH"
 const CHEAP_PURPOSES: ModelPurpose[] = ["QUICK_CLASSIFICATION", "BACKGROUND"];
 
 /**
- * D-79 §3/§13: sensitivitetsgate - kjøres FØR capability-filtrering. Udefinert
- * `sensitivity` ELLER `PUBLIC_OR_LOW_SENSITIVITY` = ingen filtrering (§23
- * migrasjonssikkerhet). `SECRET_RESTRICTED` = kun lokale providere kvalifisert
- * (fail-closed, aldri stille sky-fallback). `PRIVATE`/`BUSINESS_CONFIDENTIAL`
- * = `hosted_free_tier`-providere ekskluderes; øvrige (inkl. allerede betrodde
- * betalte sky-providere) forblir kvalifisert.
+ * D-80/D-81: sensitivitetsgate - kjøres FØR capability-filtrering.
+ *
+ * D-81 P0-SIKKERHETSFIKS: `hosted_free_tier`-providere (i dag KUN `gemma_hosted`)
+ * krever et EKSPLISITT `sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` for å være
+ * kvalifisert - udefinert/ukjent sensitivitet blir ALDRI tolket som "public"
+ * (fail-safe, ikke fail-open). Dette er en BEVISST innstramming fra den
+ * opprinnelige D-80-implementasjonen, som feilaktig lot udefinert sensitivitet
+ * forbli kvalifisert for gratis-tier - se D-81 i DECISIONS_AND_ASSUMPTIONS.md
+ * for full begrunnelse og den konkrete risikoen dette lukker.
+ *
+ * For ALLE ANDRE providere (uten `hosted_free_tier`) er migrasjonssikkerheten
+ * fra D-80 uendret: udefinert `sensitivity` ELLER `PUBLIC_OR_LOW_SENSITIVITY`
+ * = ingen ekstra filtrering (samme ruting som FØR D-80 for disse - INGEN
+ * eksisterende kalleside mister tilgang til en tidligere kvalifisert provider).
+ * `SECRET_RESTRICTED` = kun lokale providere kvalifisert (fail-closed, aldri
+ * stille sky-fallback) - gjelder for ALLE providere, inkl. `hosted_free_tier`.
+ * `PRIVATE`/`BUSINESS_CONFIDENTIAL` = `hosted_free_tier`-providere ekskluderes
+ * (dekket av førstesjekken over); øvrige, allerede betrodde betalte
+ * sky-providere forblir kvalifisert, uendret fra D-80.
  */
 function isSensitivityEligible(profile: ModelProfile, sensitivity: DataSensitivity | undefined): boolean {
+  if (profile.hosted_free_tier && sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY") return false;
   if (!sensitivity || sensitivity === "PUBLIC_OR_LOW_SENSITIVITY") return true;
   if (sensitivity === "SECRET_RESTRICTED") return profile.locality === "local";
-  return !profile.hosted_free_tier;
+  return true;
 }
 
 interface ProviderRuntime {
@@ -208,10 +229,11 @@ export class AiRouter {
       (input.sensitivity === "PRIVATE" || input.sensitivity === "BUSINESS_CONFIDENTIAL") &&
       top.profile.locality === "local"
     ) {
-      // D-79 §7: sensitiv + lokal tilgjengelig/frisk => lokal-bonusen avgjorde valget.
+      // D-80 §7: sensitiv + lokal tilgjengelig/frisk => lokal-bonusen avgjorde valget.
       reason = "PRIVACY_PREFERS_LOCAL";
-    } else if (input.sensitivity && input.sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY" && sensitivityExcludedCount > 0) {
-      // D-79 §3: minst én ellers-kvalifisert kandidat (typisk gratis-tier) ble ekskludert.
+    } else if (input.sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY" && sensitivityExcludedCount > 0) {
+      // D-81 P0-fiks: minst én ellers-kvalifisert kandidat (typisk gratis-tier) ble
+      // ekskludert - GJELDER OGSÅ udefinert sensitivitet (fail-safe, se isSensitivityEligible()).
       reason = "PRIVACY_RESTRICTED";
     } else if (mode === "FAST") {
       reason = "LOW_LATENCY";

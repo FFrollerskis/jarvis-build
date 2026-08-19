@@ -1288,7 +1288,7 @@ executive-worker (arver Gemma-standarden automatisk, men sender IKKE ennå `sens
 `modules/knowledge/src/ocr-provider.ts` sin vision-extractor (forblir 100% Anthropic, ingen
 Gemma-vision-wiring i denne sliceen).
 
-**26 nye tester:** `modules/model-gateway/test/gemma-first-routing.test.ts` (22, full
+**44 nye tester (22 + 22 = 44, korrigert - se D-81 §10):** `modules/model-gateway/test/gemma-first-routing.test.ts` (22, full
 routing-matrise) + `packages/provider-adapters/test/conformance.test.ts` utvidet (22 nye saker for
 `gemma_hosted`/`local_llm`). Full monorepo-regresjon: `pnpm -w typecheck` 17/17 rent, `pnpm -w lint`
 rent, full lokal suite 108/108 filer, 1483/1483 tester grønn (var 1439 - ren addisjon, INGEN
@@ -1305,6 +1305,39 @@ API-nøkkel konfigurert) - arkitektur-/enhets-/integrasjonsverifisering IKKE blo
 bevist mot mocket `fetch`. Draft-PR opprettes, IKKE merget. Claude/OpenAI/Anthropic/Gemini/Kimi
 IKKE fjernet - alle forblir registrert og tilgjengelig via samme ruting. Full detalj: D-80 i
 DECISIONS_AND_ASSUMPTIONS.md.
+
+#### PR #21 — PRE-MERGE SECURITY + D-41 HARDENING (2026-08-19) → D-81
+
+Pre-merge sikkerhetsherding av D-80 FØR review. **P0-funn:**
+`UNCLASSIFIED_CAN_ROUTE_TO_HOSTED_FREE_TIER=true` FØR fiksen - `isSensitivityEligible()` tolket
+udefinert `sensitivity` som "ingen filtrering" for ALLE providerkategorier, inkl.
+`hosted_free_tier`. `apps/api/src/executive.ts` OG `apps/api/src/conversation.ts` (hoved-
+samtalemotoren - IKKE tidligere revidert i D-80, funnet i denne runden) sender begge INGEN
+`sensitivity`. **Fikset:** `hosted_free_tier`-providere krever nå eksplisitt
+`sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` (fail-safe) - gjelder også eier-override. Alle andre
+providere beholder uendret ruting for udefinert sensitivitet. Konsekvens: `gemma_hosted` vinner ikke
+lenger AUTO/BACKGROUND for udefinert sensitivitet (faller tilbake til openai/gemini, som FØR D-80).
+
+**D-41 korrigert** (WebSearch mot offisiell Gemini API-/Gemma-dokumentasjon - WebFetch blokkert av
+egress-proxy): Gemma 4 støtter ekte bildeforståelse - **vision nå implementert**
+(`gemma.ts` sin `toGemmaParts()`, `inlineData`-mapping, samme mønster som `anthropic.ts`),
+personvern-gaten forblir autoritativ (e-post-OCR forblir 100% Anthropic). Streaming:
+`PROVIDER_SUPPORT=true`/`ADAPTER_SUPPORT=false` (bevisst utsatt, ikke-trivielt, Q-30) - IKKE lenger
+feilaktig fremstilt som en Gemma-leverandørbegrensning.
+
+**Pris-sannhet:** `pricing.ts` sin `TokenRate` fikk `pricing_mode`/`pricing_verified_at`
+(`gemma_hosted=FREE_TIER/2026-08-19`, `local_llm`/`ollama`=LOCAL) - arkitekturen støttet allerede
+dynamisk prisoppdatering via `GatewayOptions.pricing`. Rate-limit/router-økonomi verifisert korrekt
+matematisk, ingen kodeendring nødvendig.
+
+**Testregnskap korrigert:** D-80 sin opprinnelige rapport sa feilaktig "26 nye tester" - faktisk
+tall var 44 (22+22). D-81 la til 14 flere (11 routing + 3 vision). Nytt totalregnskap: `main` FØR
+D-80=1439 → ETTER D-80=1483 (+44) → ETTER D-81=1497 (+14), 108/108 filer grønn alle ganger.
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, lokal `gitleaks` "no leaks found".
+
+**D-80 = CI_VERIFIED/COMPLETE ETTER denne fiksen.** PR #21 forblir draft, IKKE merget. Ingen AI
+Market/Cost Optimizer bygget, ingen nye providere utover D-80 sine to, ingen Tobias-secret-oppsett.
+Full detalj: D-81 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

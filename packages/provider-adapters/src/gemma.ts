@@ -3,8 +3,8 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   ProviderError,
-  textOnly,
   type ChatMessage,
+  type ContentPart,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
@@ -27,13 +27,34 @@ import {
  * `JARVIS_GEMMA_MODEL` (samme konvensjon som øvrige adaptere - aldri hardkodet
  * utover default-verdien).
  *
- * Streaming: IKKE implementert i denne runden (samme grense som
- * `GeminiAdapter` - `generateContent`, ikke `streamGenerateContent`). Dette
- * er en bevisst, dokumentert avgrensning (D-79 §2), ikke en skjult mangel -
- * `ModelGateway.executePlan()` degraderer allerede trygt til enkelt-delta via
- * `.complete()` for adaptere uten `.stream()` (se `capability-registry.ts`
- * sin `hosted_free_tier`-kommentar for hvorfor `streaming` IKKE er i denne
- * profilen).
+ * Streaming: IKKE implementert i denne runden. D-81-verifisering (WebSearch mot
+ * Googles offisielle Gemini API-dokumentasjon, se D-81 i
+ * DECISIONS_AND_ASSUMPTIONS.md): `streamGenerateContent` (SSE, `alt=sse`) er
+ * en GENERISK metode på SAMME `models/{model}`-ressurs som `generateContent`
+ * for BÅDE Gemini- og Gemma-modeller - dette er altså en LEVERANDØR-STØTTET
+ * kapabilitet (`PROVIDER_SUPPORT=true`), IKKE en Gemma-spesifikk begrensning.
+ * Utelatelsen her er en BEVISST implementasjons-avgrensning
+ * (`ADAPTER_SUPPORT=false`) - å bygge ekte SSE-parsing/tool-call-delta-
+ * rekonstruksjon (samme kompleksitet som `openai.ts`/`anthropic.ts` sine
+ * `.stream()`-metoder) er IKKE trivielt og er derfor bevisst utsatt til en
+ * egen fremtidig runde (Q-30), IKKE implementert her for å unngå scope-økning
+ * i en sikkerhetsherdingsrunde. `ModelGateway.executePlan()` degraderer
+ * allerede trygt til enkelt-delta via `.complete()` for adaptere uten
+ * `.stream()` - ingen krasj, kun tapt ekte token-for-token-latens.
+ *
+ * Vision: EKTE (D-81) - Gemma 4 støtter bildeforståelse via Gemini API sitt
+ * `inlineData`-part-format (samme mekanisme som tekst-multiturn), bekreftet
+ * via offisiell dokumentasjonsgjennomgang. `toGemmaParts()` under mapper
+ * `ContentPart`-bilder til `{inlineData:{mimeType,data}}` - SAMME mønster som
+ * `anthropic.ts` sin `toAnthropicContent()`. `vision`-capability er satt i
+ * `capability-registry.ts` sin `gemma_hosted`-profil (KUN her og `anthropic` -
+ * `openai`/`gemini`/`local_llm` bruker fortsatt `textOnly()`/har ingen
+ * bilde-wiring). Personvern-gaten (`isSensitivityEligible()`) gjelder
+ * UENDRET og FØRST for ALLE forespørsler til denne adapteren, uavhengig av om
+ * de inneholder bilder - vision-innhold til `gemma_hosted` krever DERFOR
+ * fortsatt eksplisitt `sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` for å
+ * kunne rutes hit i det hele tatt (D-81 §1) - dette åpner ALDRI en sidevei
+ * for at private Gmail-vedlegg skal kunne nå gratis-tieret.
  *
  * Tool calling: EKTE (Gemini API sin `functionDeclarations`/`functionCall`-
  * flate) - modellen returnerer normaliserte `ToolCallRequest`-objekter som
@@ -41,11 +62,25 @@ import {
  * `PolicyGateway`-kjede som alle andre providere (§12: aldri direkte
  * verktøyutførelse fra modellen).
  */
-/** Ett Gemini-API-innholdselement - dekker de tre turtypene adapteren faktisk sender. */
+/** Ett Gemini-API-innholdselement - dekker turtypene adapteren faktisk sender. */
 type GemmaPart =
   | { text: string }
+  | { inlineData: { mimeType: string; data: string } }
   | { functionCall: { name: string; args: Record<string, unknown> } }
   | { functionResponse: { name: string; response: { name: string; content: unknown } } };
+
+/**
+ * D-81: provider-nøytralt `ContentPart[]` → Gemini-API-parts. Bilder mappes
+ * til `inlineData` (base64, RÅ - ALDRI en `data:`-URI-prefiks, se
+ * `types.ts` sin `ContentPart`-kommentar). Streng-innhold degraderer til
+ * ett tekst-part (uendret oppførsel for ALLE eksisterende, tekst-only kall).
+ */
+function toGemmaParts(content: ChatMessage["content"]): GemmaPart[] {
+  if (typeof content === "string") return [{ text: content }];
+  return content.map((part: ContentPart) =>
+    part.type === "text" ? { text: part.text } : { inlineData: { mimeType: part.media_type, data: part.data } }
+  );
+}
 interface GemmaContent {
   role: "user" | "model" | "function";
   parts: GemmaPart[];
@@ -68,7 +103,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
   private toGemmaContents(messages: ChatMessage[], toolExchanges: ModelRequest["tool_exchanges"]): GemmaContent[] {
     const contents: GemmaContent[] = messages.map((m) => ({
       role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: textOnly(m.content) }]
+      parts: toGemmaParts(m.content)
     }));
     for (const ex of toolExchanges ?? []) {
       contents.push({
