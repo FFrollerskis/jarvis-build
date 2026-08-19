@@ -4,4 +4,6 @@ export * from "./anthropic.ts";
 export * from "./openai.ts";
 export * from "./ollama.ts";
 export * from "./gemini.ts";
+export * from "./gemma.ts";
+export * from "./local-llm.ts";
 export * from "./kimi.ts";

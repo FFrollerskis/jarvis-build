@@ -14,8 +14,10 @@ import { GrowthService, GrowthTransport } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
+  GemmaHostedAdapter,
   GeminiAdapter,
   KimiAdapter,
+  LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
@@ -53,7 +55,15 @@ const worker = new InProcessWorker(queue);
 const gateway = new ModelGateway({
   pool,
   trace: traceSinkFromEnv("var/worker-traces.jsonl"),
-  providers: [new OpenAiAdapter(), new AnthropicAdapter(), new GeminiAdapter(), new KimiAdapter(), new OllamaAdapter()]
+  providers: [
+    new OpenAiAdapter(),
+    new AnthropicAdapter(),
+    new GeminiAdapter(),
+    new GemmaHostedAdapter(),
+    new LocalOpenAiCompatibleAdapter(),
+    new KimiAdapter(),
+    new OllamaAdapter()
+  ]
 });
 
 // BO-11 (§29): worker-tool-mesh gjennom SAMME trusted Tool Gateway/Policy som api -

@@ -1235,7 +1235,109 @@ UENDRET:** `sales=AVAILABLE marketing=AVAILABLE product/finance/operations=NOT_I
 **fortsatt IKKE komplett** (2/5 domener, krever alle fem). **UA-4 SOM HELHET forblir IKKE
 komplett.** Dette er en SLICE-SPESIFIKK beslutning, IKKE en generell fjerning av host-verifisering
 for fremtidig UA-4-arbeid. Draft-PR #20 oppdatert, IKKE merget. Full detalj: D-78/D-79 i
+DECISIONS_AND_ASSUMPTIONS.md. **PR #20 senere MERGET 2026-08-19 etter Tobias sin eksplisitte
+godkjenning** (merge-SHA `f602040`).
+
+#### JARVIS AI MESH — GEMMA-FIRST KOST-/PERSONVERNARKITEKTUR (2026-08-19) → D-80
+
+Claude er IKKE lenger standardmodell for ordinær 24/7-drift. Jarvis er nå Gemma-først for egnede
+oppgaver, lokal-først for sensitive oppgaver når lokal inferens finnes, og Claude er et EKSPLISITT
+eskaleringsmål - IKKE fjernet, IKKE svekket som premium-provider. **D-64-gate:** `JARVIS_CORE=`
+rutingpolicy/kapabilitetsregister/kost-/helse-/budsjett-sporing (allerede eksplisitt utpekt som
+referanse-eksempelet på korrekt adapter-grense i `ARCHITECTURE.md` §11.1 FØR denne sliceen);
+`EXTERNAL_ROLE=`selve modell-inferensen; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`;
+`CAN_RUN_WITHOUT_PROVIDER=true`. **D-41-gate for hostet Gemma:** full støttet kapabilitetsflate
+wiret (tekst, ekte tool/function calling via Gemini API, strukturert output, usage/helse/retry/
+timeout/kansellering), streaming BEVISST utelatt (samme grense som eksisterende `GeminiAdapter`) -
+ingen oppdiktet API-kapabilitet, modell-ID-ene (`gemma-4-26b-a4b-it` default, `gemma-4-31b-it`
+alternativ) er oppgitt av Tobias.
+
+**To nye providere** (`packages/provider-adapters`): `gemma.ts` (`GemmaHostedAdapter`,
+`name="gemma_hosted"`, samme `generateContent`-REST-mønster/nøkkel-i-header-sikkerhet som
+`gemini.ts`, `GEMMA_API_KEY` faller tilbake til `GEMINI_API_KEY`) og `local-llm.ts`
+(`LocalOpenAiCompatibleAdapter`, `name="local_llm"`, provider-nøytralt OpenAI-kompatibelt lokalt
+endepunkt, `LOCAL_LLM_BASE_URL`/`LOCAL_LLM_MODEL`, INGEN default-URL/IP, INGEN antakelse om samme
+maskin som Jarvis). Begge går gjennom SAMME `ModelGateway.executeToolCall()` → `ToolGateway` →
+`PolicyGateway`-kjede som alle andre providere - INGEN ny sikkerhetsvei, A-D-risikoklassene uendret.
+
+**Personvern-klassifisering** (oppfyller D-23 sitt aldri-implementerte "Model Gateway-ruting per
+space fra fase 3"-mandat): ny `DataSensitivity`-type i `@jarvis/contracts`
+(`PUBLIC_OR_LOW_SENSITIVITY`/`PRIVATE`/`BUSINESS_CONFIDENTIAL`/`SECRET_RESTRICTED`), VALGFRITT
+`sensitivity`-felt på `RouteInput`/`CompleteInput` (udefinert = eksakt samme ruting som før,
+migrasjonssikkert). Ny `hosted_free_tier`-markør på `ModelProfile` (KUN `gemma_hosted=true`, alle
+eksisterende providere uendret `false`). Router (`isSensitivityEligible()`):
+`PRIVATE`/`BUSINESS_CONFIDENTIAL` ekskluderer `hosted_free_tier`-providere helt, foretrekker lokal
+(myk scoring-bonus, IKKE et hardt krav); `SECRET_RESTRICTED` = KUN lokale providere kvalifisert,
+fail-closed (`NoEligibleProviderError`) uten lokal tilgjengelig - gjelder OGSÅ eksplisitt
+eier-override. To nye `RoutingReason`-verdier (`PRIVACY_RESTRICTED`/`PRIVACY_PREFERS_LOCAL`).
+
+**Standard-ruting** (bevist matematisk via eksisterende, uendret scoring-formel + nye registry-tall,
+INGEN spesialtilfelle-kode): `gemma_hosted` (cost_class=1, quality_class=4, latency_class=fast)
+vinner AUTO/BACKGROUND/QUICK_CLASSIFICATION-ruting når ingen sensitivitet blokkerer det. Claude/
+OpenAI eskaleres til via EKSISTERENDE mekanismer: `mode="QUALITY"`/`"CRITIC"` (kvalitet slår kost),
+`purpose="VISION"` (kun `anthropic` har ekte bilde-wiring), eksplisitt `provider`-override.
+
+**Bugfiks fanget under gjennomgangen:** `gemini`-profilen hevdet feilaktig `streaming: true` selv
+om `GeminiAdapter` aldri har hatt en `.stream()`-metode - fjernet (aldri en krasj-bug, kun en
+unøyaktig capability-påstand som brøt filens egen dokumenterte regel).
+
+**Bakgrunnsjobb-audit** (uttømmende): ALLE `DailyScheduler`-jobber (daglig brief, open-loop-sveip,
+business-event-sync, scoring-sveip, support-inbox-sync) er 100% deterministiske - INGEN kaller
+`ModelGateway`. To faktiske modell-berørende stier: `apps/api/src/executive.ts` sin generiske
+executive-worker (arver Gemma-standarden automatisk, men sender IKKE ennå `sensitivity` - Q-30) og
+`modules/knowledge/src/ocr-provider.ts` sin vision-extractor (forblir 100% Anthropic, ingen
+Gemma-vision-wiring i denne sliceen).
+
+**44 nye tester (22 + 22 = 44, korrigert - se D-81 §10):** `modules/model-gateway/test/gemma-first-routing.test.ts` (22, full
+routing-matrise) + `packages/provider-adapters/test/conformance.test.ts` utvidet (22 nye saker for
+`gemma_hosted`/`local_llm`). Full monorepo-regresjon: `pnpm -w typecheck` 17/17 rent, `pnpm -w lint`
+rent, full lokal suite 108/108 filer, 1483/1483 tester grønn (var 1439 - ren addisjon, INGEN
+eksisterende test endret). **Migrasjonssikkert** (§23): `sensitivity` er et nytt valgfritt felt,
+INGEN eksisterende kalleside endret faktisk ruting; trygg rollback = fjerne de to nye adapterne fra
+`providers`-listen i `main.ts`/`worker-main.ts` (samme mekanisme som enhver annen adapter).
+
+**Gjenstående, eksplisitt IKKE bygget** (registrert som Q-30): bakgrunnsjobb-avsender-
+sensitivitetsklassifisering, Gemma vision-wiring, hostet Gemma streaming, dedikert
+eskaleringsorkestrator (eksisterende mode-basert eskalering brukt i stedet), lokal
+Gemma-maskinvare (ikke konfigurert i denne økten), kostmetrikk-dashbord (beregnbart fra eksisterende
+`cost_events`-data, ikke bygget). **INGEN ekte live-provider-kjøring i denne økten** (ingen
+API-nøkkel konfigurert) - arkitektur-/enhets-/integrasjonsverifisering IKKE blokkert av dette, alt
+bevist mot mocket `fetch`. Draft-PR opprettes, IKKE merget. Claude/OpenAI/Anthropic/Gemini/Kimi
+IKKE fjernet - alle forblir registrert og tilgjengelig via samme ruting. Full detalj: D-80 i
 DECISIONS_AND_ASSUMPTIONS.md.
+
+#### PR #21 — PRE-MERGE SECURITY + D-41 HARDENING (2026-08-19) → D-81
+
+Pre-merge sikkerhetsherding av D-80 FØR review. **P0-funn:**
+`UNCLASSIFIED_CAN_ROUTE_TO_HOSTED_FREE_TIER=true` FØR fiksen - `isSensitivityEligible()` tolket
+udefinert `sensitivity` som "ingen filtrering" for ALLE providerkategorier, inkl.
+`hosted_free_tier`. `apps/api/src/executive.ts` OG `apps/api/src/conversation.ts` (hoved-
+samtalemotoren - IKKE tidligere revidert i D-80, funnet i denne runden) sender begge INGEN
+`sensitivity`. **Fikset:** `hosted_free_tier`-providere krever nå eksplisitt
+`sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"` (fail-safe) - gjelder også eier-override. Alle andre
+providere beholder uendret ruting for udefinert sensitivitet. Konsekvens: `gemma_hosted` vinner ikke
+lenger AUTO/BACKGROUND for udefinert sensitivitet (faller tilbake til openai/gemini, som FØR D-80).
+
+**D-41 korrigert** (WebSearch mot offisiell Gemini API-/Gemma-dokumentasjon - WebFetch blokkert av
+egress-proxy): Gemma 4 støtter ekte bildeforståelse - **vision nå implementert**
+(`gemma.ts` sin `toGemmaParts()`, `inlineData`-mapping, samme mønster som `anthropic.ts`),
+personvern-gaten forblir autoritativ (e-post-OCR forblir 100% Anthropic). Streaming:
+`PROVIDER_SUPPORT=true`/`ADAPTER_SUPPORT=false` (bevisst utsatt, ikke-trivielt, Q-30) - IKKE lenger
+feilaktig fremstilt som en Gemma-leverandørbegrensning.
+
+**Pris-sannhet:** `pricing.ts` sin `TokenRate` fikk `pricing_mode`/`pricing_verified_at`
+(`gemma_hosted=FREE_TIER/2026-08-19`, `local_llm`/`ollama`=LOCAL) - arkitekturen støttet allerede
+dynamisk prisoppdatering via `GatewayOptions.pricing`. Rate-limit/router-økonomi verifisert korrekt
+matematisk, ingen kodeendring nødvendig.
+
+**Testregnskap korrigert:** D-80 sin opprinnelige rapport sa feilaktig "26 nye tester" - faktisk
+tall var 44 (22+22). D-81 la til 14 flere (11 routing + 3 vision). Nytt totalregnskap: `main` FØR
+D-80=1439 → ETTER D-80=1483 (+44) → ETTER D-81=1497 (+14), 108/108 filer grønn alle ganger.
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, lokal `gitleaks` "no leaks found".
+
+**D-80 = CI_VERIFIED/COMPLETE ETTER denne fiksen.** PR #21 forblir draft, IKKE merget. Ingen AI
+Market/Cost Optimizer bygget, ingen nye providere utover D-80 sine to, ingen Tobias-secret-oppsett.
+Full detalj: D-81 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

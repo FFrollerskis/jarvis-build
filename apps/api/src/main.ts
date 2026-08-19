@@ -15,7 +15,16 @@ import {
 } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
-import { AnthropicAdapter, GeminiAdapter, KimiAdapter, OllamaAdapter, OpenAiAdapter, ScriptedAdapter } from "@jarvis/provider-adapters";
+import {
+  AnthropicAdapter,
+  GemmaHostedAdapter,
+  GeminiAdapter,
+  KimiAdapter,
+  LocalOpenAiCompatibleAdapter,
+  OllamaAdapter,
+  OpenAiAdapter,
+  ScriptedAdapter
+} from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
@@ -81,9 +90,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     pool,
     trace,
     providers: [
+      // D-79 (AI Mesh Gemma-first): gemma_hosted/local_llm registreres alltid,
+      // som alle andre adaptere - `.available()` (nøkkel/URL satt) avgjør om de
+      // faktisk deltar i ruting, IKKE et eget feature-flag her (§23: samme
+      // konvensjon som alle øvrige providere - ingen ny mekanisme).
       new OpenAiAdapter(),
       new AnthropicAdapter(),
       new GeminiAdapter(),
+      new GemmaHostedAdapter(),
+      new LocalOpenAiCompatibleAdapter(),
       new KimiAdapter(),
       new OllamaAdapter(),
       new ScriptedAdapter()
