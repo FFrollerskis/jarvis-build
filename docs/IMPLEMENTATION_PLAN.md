@@ -1633,6 +1633,30 @@ Postgres-flake bevist ved isolasjonskjøring). `pnpm -w typecheck` 17/17 rent, `
 komplett (utførelses-kapabiliteten selv fortsatt IKKE bygget). UA-3 kriterium 2 UENDRET. Draft-PR,
 IKKE merget. Full detalj: D-87 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 SLICE 6 — MARKETING→MEETING→REVENUE FUNNEL-LINKAGE (2026-08-19) → D-88
+
+Base `main`@`90af34c6aae6968f3592e92028ba1e6f3e92df51` (PR #25/D-87 merget), branch
+`claude/ua4-marketing-funnel-meeting-linkage`, draft PR, IKKE merget. Valgt av 8 kandidater -
+**literal funnel-rekonstruksjon** (CAMPAIGN→SPEND→TRACKING/CLICK→LEAD→KONTAKT→MØTE→OPPORTUNITY→
+WON→REVENUE) bekreftet byggeordrens "sterke default": alle ledd COMPLETE unntatt ETT - MØTE-stadiet
+(`business_activities.activity_type='meeting'`, allerede deterministisk kontakt-koblet av
+`BusinessEventSyncService`) var IKKE koblet TILBAKE til kampanjen. **ZERO ny tabell/migrasjon** - nytt
+felt `CampaignPerformance.attributed_meetings` beregnes med en EGEN, ANDRE spørring i den
+EKSISTERENDE `campaignPerformance()`: `marketing_attributions` → `business_leads`/
+`business_opportunities.contact_id` → `business_activities` der `activity_type='meeting'` OG
+`occurred_at >= attributed_at`. **No-guess-grense:** et møte FØR attribusjonstidspunktet telles
+ALDRI - kan umulig være forårsaket av kampanjen (Q-26 fail-closed). **Fan-out-regresjon unngått
+bevisst:** møte-spørringen kjøres SEPARAT fra revenue-aggregatet (en naiv ekstra JOIN i samme
+spørring ville doble `attributed_revenue_ore`/`won_opportunities` for kontakter med flere møter) -
+verifisert med en dedikert 3-møter-regresjonstest. INGEN ny ToolGateway-handling (EKSISTERENDE
+`growth.campaign_performance`, klasse A, respons utvidet). 9 nye tester (`service-rls.test.ts` §Q).
+Testregnskap: `main` FØR = 1620/112 → ETTER = **1629 (+9), 112 filer**, 112/112 grønn (INGEN flake).
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **D-88 = FIXED_SUITE_COMPLETE=true,
+HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forblir IKKE komplett
+(denne sliceen legger KUN til funnel-SYNLIGHET for et allerede eksisterende stadium, INGEN ny
+handlingskapabilitet). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE merget. Full detalj: D-88 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

@@ -1,6 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 5 — PROVIDER-NØYTRAL KAMPANJE-UTFØRELSES-KOMMANDO-MODELL** →
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 6 — MARKETING→MEETING→REVENUE FUNNEL-LINKAGE** → D-88, base
+`main`@`90af34c6aae6968f3592e92028ba1e6f3e92df51` (PR #25/D-87 MERGET), branch
+`claude/ua4-marketing-funnel-meeting-linkage`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY
+v4.0 — VALGT AV 8 KANDIDATER, BEKREFTET byggeordrens "sterke default":** literal rekonstruksjon av
+funnel-kjeden CAMPAIGN→SPEND→TRACKING/CLICK→LEAD→KONTAKT→**MØTE**→OPPORTUNITY→WON→REVENUE viste at
+ALLE ledd allerede var COMPLETE unntatt ETT: MØTE-stadiet (`business_activities.activity_type=
+'meeting'`, opprettet deterministisk av `BusinessEventSyncService` med `contact_id` satt via
+e-postmatching) var IKKE koblet tilbake til kampanjen som forårsaket kontakten -
+`campaignPerformance()` hoppet direkte fra LEAD/OPPORTUNITY til WON/REVENUE. **ZERO ny tabell/
+migrasjon** (byggeordrens eksplisitte preferanse for "derive fra eksisterende entiteter" var fullt
+oppnåelig): nytt felt `CampaignPerformance.attributed_meetings` beregnes med en EGEN, ANDRE spørring
+i EKSISTERENDE `campaignPerformance()` (`marketing_attributions` → `business_leads`/
+`business_opportunities.contact_id` → `business_activities` der `activity_type='meeting'` OG
+`occurred_at >= attributed_at`). **No-guess-grensen:** et møte FØR attribusjonstidspunktet telles
+ALDRI (kan umulig være forårsaket av kampanjen, Q-26-fail-closed). **Fan-out-regresjon unngått
+bevisst:** møte-spørringen kjøres SEPARAT fra revenue-aggregatet (en naiv ekstra JOIN i samme
+spørring ville doble `attributed_revenue_ore`/`won_opportunities` for kontakter med flere møter) -
+verifisert med en dedikert 3-møter-regresjonstest. INGEN ny ToolGateway-handling (EKSISTERENDE
+`growth.campaign_performance`, klasse A, respons utvidet med ett felt). **9 nye tester**
+(`service-rls.test.ts` §Q). Testregnskap: `main` FØR = 1620/112 → ETTER = **1629 (+9), 112 filer**,
+112/112 grønn (INGEN flake). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **Status:** D-88 =
+**FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM
+HELHET forblir IKKE komplett (mutate-/utførelses-kapabilitet, Creative Intelligence, Marketing
+Memory, Finance Integrity Gateway, samtykke-governance alle fortsatt NOT_STARTED/BLOCKED/DEFERRED -
+denne sliceen legger KUN til funnel-SYNLIGHET for et allerede eksisterende stadium). UA-3 kriterium 2
+UENDRET (2/5 domener). Draft-PR opprettes, IKKE merget. **STOP: INGEN Google Ads live-oppsett, INGEN
+ekte provider-mutasjon, INGEN Marketing Memory-slice, INGEN andre slice denne runden, INGEN merge.**
+Full detalj: D-88 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, IKKE merget):** UA-4 SLICE 5 — PROVIDER-NØYTRAL KAMPANJE-UTFØRELSES-KOMMANDO-MODELL →
 D-87, base `main`@`7ebc31b` (PR #24/D-85/D-86 MERGET), branch `claude/ua4-execution-command-model`,
 draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT AV 8 KANDIDATER, EKSPLISITT AVVIST
 byggeordrens "sterke default" (Creative Intelligence Core):** repo-sannhet viser at INGEN kreativ-
