@@ -1,28 +1,39 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 2: GROWTH → BUSINESS DOMAIN COVERAGE-INTEGRASJON** → D-78,
-FIXED_SUITE / IKKE HOST VERIFIED. Lukker Q-29 punkt 7: `BUSINESS_DOMAIN_COVERAGE`
-(`business-brief.ts`) hardkodet FORTSATT `marketing: "not_integrated"` etter D-77, til tross for at
-Native Growth Core allerede var VERIFIED/COMPLETE - datakilden fantes, men var ikke koblet inn i
-selve rapporteringen. **D-64-gate:** `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CAN_RUN_WITHOUT_
-PROVIDER=true` - ingen leverandør. **Design:** `BUSINESS_DOMAIN_COVERAGE`-verdien utvidet fra en bar
-streng til `{status, source, live_provider_connected}` - `status` (Jarvis-intern kapabilitet) og
-`live_provider_connected` (ekstern leverandør-tilkobling) er BEVISST separate felt, forveksles
-ALDRI. `marketing.status="available"` (source: Native Jarvis Growth Core), `marketing.live_
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 2 (D-78) — CI-AKSEPTANSE ERSTATTER MANUELL HOST-KJØRING**
+→ D-79. D-78 = `CI_VERIFIED / COMPLETE` (aldri `HOST_VERIFIED` - ny, eksplisitt verifiseringsklasse,
+IKKE en svakere garanti). Tobias ønsker ingen manuell Windows/Docker-host-kjøring for DENNE sliceen
+- kvalifiseringssjekk kjørt FØRST mot faktisk diff: ingen migrasjon, ingen ny persistert
+domenetilstand, ingen credential, ingen ekstern leverandør, ingen ny ToolGateway-handling, ingen
+OS-/Docker-spesifikk atferd, ren rapporteringsendring, allerede ekte-Postgres-testdekning - alle
+sanne, ingen stopp. Ny CI-eksekvert test `business-brief.test.ts` §E beviser Business OS-tidslinjen
+(`companyTimeline()`) er upåvirket av en sameksisterende ekte `marketing_campaigns`-rad (ekte
+embedded Postgres, del av `pnpm test` i CI). Alle 10 host-script-markørene kartlagt til automatisert
+dekning (ingen fabrikkert PASS). **Q-21:** `Q21_REGRESSION=UNCHANGED` - kanonisk
+`runtime-role.test.ts` (uendret, 6/6 grønn) + `business-brief.test.ts` sitt egne begrensede
+`jarvis_app`-rollemønster. Host-scriptet (`ua4-growth-domain-coverage-host-run.ts`/`-live.ts`)
+beholdt KUN som referanse/feilsøking - IKKE lenger en release-gate; `TOBIAS_HOST_ACTION_REQUIRED=
+false`. Kvalitetsporter re-kjørt: `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal
+suite 107/107 filer, 1439/1439 tester grønn (+1 ny §E-test), lokal `gitleaks` "no leaks found".
+**UA4_SLICE_2 = VERIFIED/COMPLETE. UA-4 SOM HELHET forblir IKKE komplett.** UA-3 kriterium 2 UENDRET:
+`sales=AVAILABLE`, `marketing=AVAILABLE`, `product`/`finance`/`operations=NOT_INTEGRATED` (2/5).
+**Dette er en SLICE-SPESIFIKK beslutning** - fremtidig arbeid med ekte leverandører/Docker-topologi/
+credentials/nettverk/Home Assistant/tale/maskinvare/Windows-spesifikk atferd kan fortsatt kreve
+host-/live-verifisering. Draft-PR #20 oppdateres, IKKE merget, INGEN annonseplattform-connector,
+INGEN ny UA-4-slice. Full detalj: D-79 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag):** UA-4 SLICE 2: GROWTH → BUSINESS DOMAIN COVERAGE-INTEGRASJON → D-78,
+FIXED_SUITE / IKKE HOST VERIFIED (senere oppgradert til CI_VERIFIED/COMPLETE av D-79 over). Lukker
+Q-29 punkt 7: `BUSINESS_DOMAIN_COVERAGE` (`business-brief.ts`) hardkodet FORTSATT
+`marketing: "not_integrated"` etter D-77, til tross for at Native Growth Core allerede var
+VERIFIED/COMPLETE - datakilden fantes, men var ikke koblet inn i selve rapporteringen. **D-64-gate:**
+`SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CAN_RUN_WITHOUT_PROVIDER=true` - ingen leverandør. **Design:**
+`BUSINESS_DOMAIN_COVERAGE`-verdien utvidet fra en bar streng til `{status, source,
+live_provider_connected}` - `status` (Jarvis-intern kapabilitet) og `live_provider_connected`
+(ekstern leverandør-tilkobling) er BEVISST separate felt, forveksles ALDRI.
+`marketing.status="available"` (source: Native Jarvis Growth Core), `marketing.live_
 provider_connected=false`. `sales`/`product`/`finance`/`operations` uendret i sak. 24 nye/oppdaterte
-tester (marketing-tilgjengelighet + leverandør-uavhengighet + sales/product/finance/operations
-uendret + render-tekst + determinisme + ukentlig brief sitt `data_coverage`-felt + host-run-wiring).
-**Host-akseptanse:** ny `ua4-growth-domain-coverage-host-run.ts`/`-live.ts` (samme etablerte
-bootstrap-/Q-21-/cleanup-mønster) - kjørt lokalt mot ekte embedded Postgres FØR commit (ingen
-Docker/Windows-host tilgjengelig i denne økten), fanget OG fikset en ekte FK-rekkefølge-bug i
-cleanup (`marketing_campaign_events` FØR `marketing_campaigns` - samme feilklasse som D-67/D-69/
-D-72). To rene smoke-kjøringer etter fiksen: `hard_fail=false`, alle 10 markører PASS. **INGEN ekte
-host-kjøring i denne økten** - status ærlig FIXED_SUITE til Tobias faktisk kjører kommandoen.
-`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite 107/107 filer, 1438/1438
-tester grønn. **UA-3 kriterium 2 re-evaluert:** `sales=AVAILABLE`, `marketing=AVAILABLE` (nå
-korrekt), `product`/`finance`/`operations=NOT_INTEGRATED` - **fortsatt IKKE komplett** (2/5
-domener). Q-20 N/A (ingen ny tabell/persistert data). Q-21/Q-27/Q-26 uendret. Ingen ny ToolGateway-
-handling. Draft-PR opprettes, IKKE merget. Full detalj: D-78 i DECISIONS_AND_ASSUMPTIONS.md.
+tester. Full detalj: D-78 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Runden før det (samme dag, MERGET):** UA-4 NATIVE JARVIS GROWTH CORE — ENDELIG LUKKING:
 VERIFIED/COMPLETE → D-74/D-75/D-76/D-77. Tobias sin FJERDE, RENE host-kjøring

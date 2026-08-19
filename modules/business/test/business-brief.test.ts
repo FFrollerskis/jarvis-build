@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import { withMemoryTransaction } from "@jarvis/memory";
 import { DailyBrief } from "@jarvis/tool-gateway";
 import { BusinessService } from "../src/service.ts";
 import { OpenLoopService } from "../src/open-loop-service.ts";
@@ -134,6 +136,42 @@ describe("B: ukentlig brief - egen, kilde-forankret aggregering (ikke en andre m
     expect(weeklyA.data_coverage.product.status).toBe("not_integrated");
     expect(weeklyA.data_coverage.finance.status).toBe("not_integrated");
     expect(weeklyA.data_coverage.operations.status).toBe("not_integrated");
+  });
+});
+
+// D-78 CI-akseptanse (avløser manuell host-kjøring for DENNE sliceen - se
+// docs/DECISIONS_AND_ASSUMPTIONS.md D-78-oppdateringen "CI-AKSEPTANSE
+// ERSTATTER MANUELL HOST-KJØRING"): beviser at Business OS-tidslinjen
+// (`business_activities`, akseptansekriterium 1: "hva skjer med kunde X?")
+// er UPÅVIRKET av at en Native Growth Core-kampanje (`marketing_campaigns`)
+// eksisterer i samme tenant - ingen tabell-krysskontaminering, ingen
+// regresjon i den eksisterende §9-tidslinjefunksjonen fra at marketing nå
+// rapporteres tilgjengelig.
+describe("E: Business OS-tidslinje-regresjon (D-78 - Growth Core sameksistens)", () => {
+  it("selskapstidslinjen returnerer KUN sine egne aktiviteter, uendret av en samtidig marketing-kampanje i samme tenant", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "D-78 Tidslinje AS" });
+    await business.recordActivity(TENANT_A, "business", {
+      activity_type: "note", summary: "D-78 tidslinje-regresjonstest",
+      company_id: company.company_id, occurred_at: "2026-08-15T09:00:00Z"
+    });
+
+    // Samme rå-SQL-mønster som open-loop-growth.test.ts - `@jarvis/business`
+    // importerer bevisst ALDRI `@jarvis/growth` (domenegrense).
+    const campaignId = `grw-cm-${randomUUID()}`;
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(
+        `INSERT INTO marketing_campaigns (campaign_id, tenant_id, memory_space_id, channel, name, status, owner_person_id)
+         VALUES ($1, $2, 'business', 'google_ads', $3, 'active', 'person-tobias')`,
+        [campaignId, TENANT_A, `D-78 kampanje ${campaignId}`]
+      )
+    );
+
+    const timeline = await business.companyTimeline(TENANT_A, "business", company.company_id);
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0]?.summary).toBe("D-78 tidslinje-regresjonstest");
+
+    const weekly = await generateWeeklyBrief(appPool, TENANT_A, "business");
+    expect(weekly.data_coverage.marketing.status).toBe("available");
   });
 });
 

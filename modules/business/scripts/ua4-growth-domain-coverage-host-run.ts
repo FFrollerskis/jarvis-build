@@ -1,4 +1,26 @@
 // UA-4 GROWTH -> BUSINESS DOMAIN COVERAGE INTEGRATION (D-78) - HOST RUN
+//
+// STATUS (D-78, oppdatert "CI-AKSEPTANSE ERSTATTER MANUELL HOST-KJØRING",
+// se docs/DECISIONS_AND_ASSUMPTIONS.md): dette scriptet er IKKE lenger en
+// release-gate for D-78/UA4_SLICE_2. D-78 endrer ingen DB-migrasjon, ingen
+// persistert domenetilstand, ingen credential, ingen ekstern leverandør,
+// ingen ToolGateway-handling, ingen OS-/Docker-spesifikk produksjonsatferd -
+// den er en ren rapporterings-/kartleggingsendring i `business-brief.ts`
+// (BUSINESS_DOMAIN_COVERAGE), og den samme reelle kjøretidsstien
+// (`generateWeeklyBrief()`, `renderDomainCoverage()`, ekte Postgres via
+// embedded-postgres, ekte `companyTimeline()`-sameksistens med en ekte
+// `marketing_campaigns`-rad) kjøres nå DETERMINISTISK i
+// `modules/business/test/business-brief.test.ts` (describe-blokk "E") som
+// en del av `pnpm test` i CI (`.github/workflows/ci.yml` build-test-jobben)
+// - INGEN Docker, INGEN Windows-host, INGEN manuell kommando kreves for
+// denne sliceen. D-78 er derfor `CI_VERIFIED / COMPLETE`, ALDRI
+// `HOST_VERIFIED` (se D-78-oppdateringen for den fulle begrunnelsen og
+// hvorfor dette IKKE er en generell fritakelse fra host-verifisering for
+// fremtidig UA-4-arbeid). Scriptet beholdes KUN for manuell
+// feilsøking/referanse (f.eks. hvis Tobias ønsker å se den fulle
+// Docker/migrate-pipelinen kjøre ende-til-ende) - IKKE som en
+// merge-forutsetning.
+//
 // ÉN host-kommando som bootstrapper workspacet, sikrer et FERSKT
 // migrate/api/worker-image, kjører migrasjonene via admin-rollen (ingen NY
 // migrasjon i denne sliceen - kun kode-/dokumentendring), og kjører til
@@ -11,10 +33,9 @@
 // ALDRI en duplisert kopi). Dette scriptet MÅ kunne kjøre FØR `pnpm install`
 // har bootstrappet workspacet.
 //
-// Kjøres PÅ HOSTEN (Windows), fra repo-roten - DETTE ER DEN ENESTE
-// forventede kommandoen, INGEN Google Ads/Meta Ads/GA4/annen annonse-
-// plattform-oppsett, INGEN annonseplattform-credential, INGEN manuell SQL
-// kreves:
+// Valgfri, ikke-påkrevd referansekommando (fra repo-roten), INGEN Google
+// Ads/Meta Ads/GA4/annen annonseplattform-oppsett, INGEN
+// annonseplattform-credential, INGEN manuell SQL kreves:
 //
 //   node --env-file=.env --experimental-transform-types modules/business/scripts/ua4-growth-domain-coverage-host-run.ts
 //

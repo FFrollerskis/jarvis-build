@@ -1210,14 +1210,32 @@ samme etablerte mønster) - kjørt lokalt mot ekte embedded Postgres FØR commit
 tilgjengelig i denne økten), fanget OG fikset en ekte FK-rekkefølge-bug i cleanup
 (`marketing_campaign_events` FØR `marketing_campaigns` - `growth.createCampaign()` logger
 automatisk et event, samme feilklasse som D-67/D-69/D-72). To rene smoke-kjøringer etter fiksen:
-`hard_fail=false`, alle 10 markører PASS. **INGEN ekte Windows/Docker-host-kjøring i denne
-økten** - status ærlig FIXED_SUITE / IKKE HOST VERIFIED til Tobias faktisk kjører kommandoen.
-Q-20 N/A (ingen ny tabell/persistert data). Q-21/Q-27/Q-26 uendret. INGEN ny ToolGateway-handling.
-`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite 107/107 filer, 1438/1438
-tester grønn. **UA-3 kriterium 2 re-evaluert:** `sales=AVAILABLE marketing=AVAILABLE
-product/finance/operations=NOT_INTEGRATED` - **fortsatt IKKE komplett** (2/5 domener, krever alle
-fem). **UA-4 SOM HELHET forblir IKKE komplett.** Draft-PR opprettes, IKKE merget. Full detalj: D-78
-i DECISIONS_AND_ASSUMPTIONS.md.
+`hard_fail=false`, alle 10 markører PASS (smoke-test, denne økten). Q-20 N/A (ingen ny
+tabell/persistert data). Q-21/Q-27/Q-26 uendret. INGEN ny ToolGateway-handling.
+
+**D-79 (2026-08-19): CI-akseptanse erstatter manuell host-kjøring (slice-spesifikt unntak).**
+Tobias ønsket ingen manuell Windows/Docker-host-kjøring for DENNE sliceen. Kvalifiseringssjekk mot
+faktisk diff bekreftet: ingen DB-migrasjon, ingen ny persistert domenetilstand, ingen credential,
+ingen ekstern leverandør, ingen ny ToolGateway-handling, ingen OS-/Docker-spesifikk atferd, ren
+rapporteringsendring, allerede ekte-Postgres-testdekning. Ny verifiseringsklasse innført:
+`HOST_VERIFIED` (ekte host-kjøring, fortsatt krevd for leverandør-/Docker-/credential-/nettverks-/
+Home Assistant-/tale-/maskinvare-/Windows-spesifikke slices) vs. `CI_VERIFIED` (automatisert,
+CI-eksekvert, ekte Postgres, ingen mocking av komponenten under test - en ANNEN, ikke svakere,
+bevis-kilde). Ny test `business-brief.test.ts` describe "E" beviser Business OS-tidslinjen
+(`companyTimeline()`) upåvirket av en sameksisterende ekte `marketing_campaigns`-rad - kjører mot
+ekte embedded Postgres som del av `pnpm test` i CI (`build-test`-jobben). Alle 10 host-script-
+markører kartlagt til automatisert CI-dekning (ingen fabrikkert PASS der en markør ikke er
+anvendbar). `Q21_REGRESSION=UNCHANGED` - kanonisk `runtime-role.test.ts` uendret, 6/6 grønn.
+Host-scriptet (`ua4-growth-domain-coverage-host-run.ts`/`-live.ts`) beholdt KUN som
+referanse/feilsøking - IKKE lenger release-gate, `TOBIAS_HOST_ACTION_REQUIRED=false`.
+`pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite 107/107 filer, 1439/1439
+tester grønn (+1 §E-test), lokal `gitleaks` "no leaks found". **D-78 status: `CI_VERIFIED /
+COMPLETE`** (aldri `HOST_VERIFIED`). **UA4_SLICE_2 = VERIFIED/COMPLETE.** **UA-3 kriterium 2
+UENDRET:** `sales=AVAILABLE marketing=AVAILABLE product/finance/operations=NOT_INTEGRATED` -
+**fortsatt IKKE komplett** (2/5 domener, krever alle fem). **UA-4 SOM HELHET forblir IKKE
+komplett.** Dette er en SLICE-SPESIFIKK beslutning, IKKE en generell fjerning av host-verifisering
+for fremtidig UA-4-arbeid. Draft-PR #20 oppdatert, IKKE merget. Full detalj: D-78/D-79 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
