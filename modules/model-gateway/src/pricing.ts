@@ -30,7 +30,14 @@ export const DEFAULT_PRICING: PricingTable = {
     anthropic: { input_per_1k_ore: 3.2, output_per_1k_ore: 15.8, cached_per_1k_ore: 0.4 },
     gemini: { input_per_1k_ore: 0.4, output_per_1k_ore: 2.7 },
     kimi: { input_per_1k_ore: 0.7, output_per_1k_ore: 3.2 },
-    ollama: { input_per_1k_ore: 0, output_per_1k_ore: 0 }
+    ollama: { input_per_1k_ore: 0, output_per_1k_ore: 0 },
+    // D-79: hostet Gemma sin default-modell er gratis-tier (0 øre) - IKKE en
+    // antakelse om at fremtidige betalte Gemma-tiers også er gratis; oppdater
+    // raten hvis/når en betalt kvote/tier faktisk konfigureres.
+    gemma_hosted: { input_per_1k_ore: 0, output_per_1k_ore: 0 },
+    // §18: lokal inferens har ALDRI en API-kostnad (infrastrukturkost spores
+    // separat i en fremtidig runde, ALDRI oppdiktet som modell-øre her).
+    local_llm: { input_per_1k_ore: 0, output_per_1k_ore: 0 }
   },
   default_rate: { input_per_1k_ore: 30, output_per_1k_ore: 150 }
 };

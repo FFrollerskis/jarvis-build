@@ -1,28 +1,41 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 2 (D-78) — CI-AKSEPTANSE ERSTATTER MANUELL HOST-KJØRING**
-→ D-79. D-78 = `CI_VERIFIED / COMPLETE` (aldri `HOST_VERIFIED` - ny, eksplisitt verifiseringsklasse,
-IKKE en svakere garanti). Tobias ønsker ingen manuell Windows/Docker-host-kjøring for DENNE sliceen
-- kvalifiseringssjekk kjørt FØRST mot faktisk diff: ingen migrasjon, ingen ny persistert
-domenetilstand, ingen credential, ingen ekstern leverandør, ingen ny ToolGateway-handling, ingen
-OS-/Docker-spesifikk atferd, ren rapporteringsendring, allerede ekte-Postgres-testdekning - alle
-sanne, ingen stopp. Ny CI-eksekvert test `business-brief.test.ts` §E beviser Business OS-tidslinjen
-(`companyTimeline()`) er upåvirket av en sameksisterende ekte `marketing_campaigns`-rad (ekte
-embedded Postgres, del av `pnpm test` i CI). Alle 10 host-script-markørene kartlagt til automatisert
-dekning (ingen fabrikkert PASS). **Q-21:** `Q21_REGRESSION=UNCHANGED` - kanonisk
-`runtime-role.test.ts` (uendret, 6/6 grønn) + `business-brief.test.ts` sitt egne begrensede
-`jarvis_app`-rollemønster. Host-scriptet (`ua4-growth-domain-coverage-host-run.ts`/`-live.ts`)
-beholdt KUN som referanse/feilsøking - IKKE lenger en release-gate; `TOBIAS_HOST_ACTION_REQUIRED=
-false`. Kvalitetsporter re-kjørt: `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal
-suite 107/107 filer, 1439/1439 tester grønn (+1 ny §E-test), lokal `gitleaks` "no leaks found".
-**UA4_SLICE_2 = VERIFIED/COMPLETE. UA-4 SOM HELHET forblir IKKE komplett.** UA-3 kriterium 2 UENDRET:
-`sales=AVAILABLE`, `marketing=AVAILABLE`, `product`/`finance`/`operations=NOT_INTEGRATED` (2/5).
-**Dette er en SLICE-SPESIFIKK beslutning** - fremtidig arbeid med ekte leverandører/Docker-topologi/
-credentials/nettverk/Home Assistant/tale/maskinvare/Windows-spesifikk atferd kan fortsatt kreve
-host-/live-verifisering. Draft-PR #20 oppdateres, IKKE merget, INGEN annonseplattform-connector,
-INGEN ny UA-4-slice. Full detalj: D-79 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-08-19 (**JARVIS AI MESH — GEMMA-FIRST KOST-/PERSONVERNARKITEKTUR** → D-80.
+Claude er IKKE lenger standardmodell for ordinær 24/7-drift - Jarvis er nå Gemma-først for egnede
+oppgaver, lokal-først for sensitive oppgaver når lokal inferens finnes, Claude er et EKSPLISITT
+eskaleringsmål (IKKE fjernet, IKKE svekket som premium-provider). D-64-gate: `JARVIS_CORE=`
+rutingpolicy/kapabilitetsregister/kost-/helse-/budsjett-sporing; `EXTERNAL_ROLE=`selve
+modell-inferensen; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`; `CAN_RUN_WITHOUT_PROVIDER=true`. D-41-gate
+for hostet Gemma: EKTE tool calling/strukturert output/usage/helse/retry/timeout wiret (IKKE
+kunstig tekst-only), streaming BEVISST utelatt (samme grense som eksisterende `GeminiAdapter`).
+**To nye providere:** `gemma.ts` (`GemmaHostedAdapter`, `gemma_hosted`, Gemini API, nøkkel i header
+ALDRI URL) og `local-llm.ts` (`LocalOpenAiCompatibleAdapter`, `local_llm`, OpenAI-kompatibelt lokalt
+endepunkt, `LOCAL_LLM_BASE_URL`/`LOCAL_LLM_MODEL`, INGEN default-URL/IP). **Ny personvernklassifisering**
+(oppfyller D-23 sitt aldri-implementerte mandat): `DataSensitivity` i `@jarvis/contracts`, VALGFRITT
+`sensitivity`-felt (udefinert = eksakt samme ruting som før, migrasjonssikkert), ny
+`hosted_free_tier`-markør (KUN `gemma_hosted=true`, alle andre uendret). Router: `PRIVATE`/
+`BUSINESS_CONFIDENTIAL` ekskluderer gratis-tier, foretrekker lokal (myk bonus); `SECRET_RESTRICTED`
+= kun lokal, fail-closed uten lokal (også ved eier-override). Standard-ruting: `gemma_hosted` vinner
+AUTO/BACKGROUND matematisk (registry-tall, ingen spesialtilfelle-kode). Eskalering til Claude:
+`mode=QUALITY/CRITIC` (kvalitet slår kost), `VISION` (kun anthropic har bilde-wiring), eksplisitt
+override - alle tre EKSISTERENDE mekanismer. Bakgrunnsjobb-audit: ALLE `DailyScheduler`-jobber er
+100% deterministiske (ingen ModelGateway-kall); executive-worker arver Gemma-standarden automatisk
+men klassifiserer IKKE ennå `sensitivity` (dokumentert gjenstående gap); OCR/vision forblir
+Anthropic-only (ingen Gemma-vision). 26 nye tester (22 routing-matrise + 22 conformance, noen
+delvis overlappende telling). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent, full lokal suite
+108/108 filer, 1483/1483 tester grønn (var 1439, ren addisjon). Migrasjonssikkert: `sensitivity` er
+et nytt valgfritt felt, INGEN eksisterende kallested endret faktisk ruting. INGEN ekte
+live-provider-kjøring i denne økten (ingen API-nøkkel konfigurert) - arkitektur-/enhets-/
+integrasjonsverifisering IKKE blokkert av dette, alt bevist mot mocket fetch. Draft-PR opprettes,
+IKKE merget. Full detalj: D-80 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Runden før det (samme dag):** UA-4 SLICE 2: GROWTH → BUSINESS DOMAIN COVERAGE-INTEGRASJON → D-78,
+**Runden før det (samme dag, MERGET):** UA-4 SLICE 2 (D-78) — CI-AKSEPTANSE ERSTATTER MANUELL
+HOST-KJØRING → D-79. D-78 = `CI_VERIFIED / COMPLETE`. PR #20 MERGET (merge-SHA `f602040`) etter
+Tobias sin eksplisitte godkjenning - UA4_SLICE_2 = VERIFIED/COMPLETE på `main`. UA-4 SOM HELHET
+forblir IKKE komplett, UA-3 kriterium 2 forblir IKKE oppfylt (`sales=AVAILABLE marketing=AVAILABLE
+product/finance/operations=NOT_INTEGRATED`, 2/5). Full detalj: D-79 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det igjen (samme dag):** UA-4 SLICE 2: GROWTH → BUSINESS DOMAIN COVERAGE-INTEGRASJON → D-78,
 FIXED_SUITE / IKKE HOST VERIFIED (senere oppgradert til CI_VERIFIED/COMPLETE av D-79 over). Lukker
 Q-29 punkt 7: `BUSINESS_DOMAIN_COVERAGE` (`business-brief.ts`) hardkodet FORTSATT
 `marketing: "not_integrated"` etter D-77, til tross for at Native Growth Core allerede var

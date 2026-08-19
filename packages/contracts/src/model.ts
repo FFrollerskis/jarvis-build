@@ -44,6 +44,29 @@ export const RoutingReasonSchema = z.enum([
   "RATE_LIMIT_FALLBACK",
   "CRITIC_REQUIRED",
   "DEFAULT_BALANCED",
-  "ONLY_AVAILABLE"
+  "ONLY_AVAILABLE",
+  /** D-79 AI Mesh Gemma-first: sensitivitet ekskluderte gratis-tier-hostede kandidater. */
+  "PRIVACY_RESTRICTED",
+  /** D-79: sensitiv + lokal modell tilgjengelig - lokal foretrekkes fremfor sky (D-23). */
+  "PRIVACY_PREFERS_LOCAL"
 ]);
 export type RoutingReason = z.infer<typeof RoutingReasonSchema>;
+
+/**
+ * D-79 (AI Mesh Gemma-first kost-/personvernarkitektur): eksplisitt data-
+ * sensitivitetsklassifisering for modell-ruting - oppfyller D-23 sitt aldri
+ * implementerte "Model Gateway-ruting per space fra fase 3"-mandat. Feltet er
+ * VALGFRITT på `RouteInput`/`CompleteInput` (§23 migrasjonssikkerhet): når
+ * kalleren ikke oppgir sensitivitet, filtreres INGENTING nytt bort (identisk
+ * med ruting FØR denne beslutningen - ingen stille atferdsendring for
+ * eksisterende kall). Kalleren MÅ eksplisitt sette feltet for at
+ * personvernvernet skal tre i kraft - se D-79 §3/§11 for gjenstående
+ * kablings-gap (bakgrunnsjobber klassifiserer ikke automatisk ennå).
+ */
+export const DataSensitivitySchema = z.enum([
+  "PUBLIC_OR_LOW_SENSITIVITY",
+  "PRIVATE",
+  "BUSINESS_CONFIDENTIAL",
+  "SECRET_RESTRICTED"
+]);
+export type DataSensitivity = z.infer<typeof DataSensitivitySchema>;

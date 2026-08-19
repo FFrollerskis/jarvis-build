@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AnthropicAdapter,
+  GemmaHostedAdapter,
   GeminiAdapter,
   KimiAdapter,
+  LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
   OpenAiAdapter,
   ProviderError,
@@ -64,6 +66,25 @@ const CASES: Case[] = [
     name: "ollama",
     make: () => new OllamaAdapter("http://mock", "test-model"),
     successBody: { message: { content: "hei" }, prompt_eval_count: 10, eval_count: 5, done_reason: "stop" }
+  },
+  {
+    // D-79 (AI Mesh Gemma-first): samme generateContent-responsformat som gemini,
+    // egen provider-identitet ("gemma_hosted").
+    name: "gemma_hosted",
+    make: () => new GemmaHostedAdapter("test-key", "test-model", "http://mock"),
+    successBody: {
+      candidates: [{ content: { parts: [{ text: "hei" }] }, finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 }
+    }
+  },
+  {
+    // D-79 §6: OpenAI-kompatibelt lokalt endepunkt.
+    name: "local_llm",
+    make: () => new LocalOpenAiCompatibleAdapter("http://mock", "test-model"),
+    successBody: {
+      choices: [{ message: { content: "hei" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 }
+    }
   }
 ];
 
@@ -145,13 +166,17 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
         const adapter =
           c.name === "ollama"
             ? new OllamaAdapter("", "m")
-            : c.name === "openai"
-              ? new OpenAiAdapter("", "m", "http://mock")
-              : c.name === "anthropic"
-                ? new AnthropicAdapter("", "m", "http://mock")
-                : c.name === "gemini"
-                  ? new GeminiAdapter("", "m", "http://mock")
-                  : new KimiAdapter("", "m", "http://mock");
+            : c.name === "local_llm"
+              ? new LocalOpenAiCompatibleAdapter("", "m")
+              : c.name === "openai"
+                ? new OpenAiAdapter("", "m", "http://mock")
+                : c.name === "anthropic"
+                  ? new AnthropicAdapter("", "m", "http://mock")
+                  : c.name === "gemini"
+                    ? new GeminiAdapter("", "m", "http://mock")
+                    : c.name === "gemma_hosted"
+                      ? new GemmaHostedAdapter("", "m", "http://mock")
+                      : new KimiAdapter("", "m", "http://mock");
         expect(adapter.available()).toBe(false);
         const err = await adapter.complete(REQUEST).then(() => null).catch((e: unknown) => e);
         expect((err as ProviderError).kind).toBe("not_configured");
@@ -209,6 +234,116 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).not.toContain("hemmelig-key");
     expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("hemmelig-key");
+  });
+
+  it("gemma_hosted: nøkkel sendes i header, aldri i URL (samme sikkerhetsinvariant som gemini)", async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: "x" }] } }], usageMetadata: {} }),
+          { status: 200 }
+        )
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    await new GemmaHostedAdapter("hemmelig-key", "m", "http://mock").complete(REQUEST);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).not.toContain("hemmelig-key");
+    expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("hemmelig-key");
+  });
+
+  it("gemma_hosted: GEMMA_API_KEY faller tilbake til GEMINI_API_KEY når GEMMA_API_KEY ikke er satt (samme Google-konto/API)", () => {
+    const prevGemma = process.env["GEMMA_API_KEY"];
+    const prevGemini = process.env["GEMINI_API_KEY"];
+    delete process.env["GEMMA_API_KEY"];
+    process.env["GEMINI_API_KEY"] = "delt-nokkel";
+    try {
+      expect(new GemmaHostedAdapter().available()).toBe(true);
+    } finally {
+      if (prevGemma === undefined) delete process.env["GEMMA_API_KEY"];
+      else process.env["GEMMA_API_KEY"] = prevGemma;
+      if (prevGemini === undefined) delete process.env["GEMINI_API_KEY"];
+      else process.env["GEMINI_API_KEY"] = prevGemini;
+    }
+  });
+
+  it("gemma_hosted: normaliserer et functionCall-svar til en ToolCallRequest (§12: modellen utfører ALDRI selv)", async () => {
+    mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            candidates: [
+              { content: { parts: [{ functionCall: { name: "read_x", args: { a: 1 } } }] }, finishReason: "STOP" }
+            ],
+            usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2 }
+          }),
+          { status: 200 }
+        )
+    );
+    const result = await new GemmaHostedAdapter("k", "m", "http://mock").complete({
+      ...REQUEST,
+      tools: [{ name: "read_x", description: "les x", input_schema: { type: "object" } }]
+    });
+    expect(result.tool_calls?.[0]).toMatchObject({ tool_name: "read_x", arguments: { a: 1 }, provider: "gemma_hosted" });
+  });
+
+  it("gemma_hosted: tool-exchange oversettes til functionCall/functionResponse-turer", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const capture = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: {} }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", capture);
+    await new GemmaHostedAdapter("k", "m", "http://mock").complete({
+      ...REQUEST,
+      tool_exchanges: [
+        {
+          calls: [{ tool_call_id: "c1", tool_name: "read_x", arguments: { a: 1 }, provider: "gemma_hosted", model: "m" }],
+          results: [{ tool_call_id: "c1", tool_name: "read_x", execution_id: "e1", success: true, output: { ok: 1 }, at: "2026-08-19T00:00:00Z" }]
+        }
+      ]
+    });
+    const contents = capturedBody["contents"] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
+    expect(contents.some((c) => c.role === "model" && c.parts[0]?.["functionCall"])).toBe(true);
+    expect(contents.some((c) => c.role === "function" && c.parts[0]?.["functionResponse"])).toBe(true);
+  });
+
+  it("local_llm: tool_calls fra et OpenAI-kompatibelt svar normaliseres til ToolCallRequest", async () => {
+    mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: null,
+                  tool_calls: [{ id: "call_1", function: { name: "read_x", arguments: '{"a":1}' } }]
+                },
+                finish_reason: "tool_calls"
+              }
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 2 }
+          }),
+          { status: 200 }
+        )
+    );
+    const result = await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete({
+      ...REQUEST,
+      tools: [{ name: "read_x", description: "les x", input_schema: { type: "object" } }]
+    });
+    expect(result.tool_calls?.[0]).toMatchObject({ tool_call_id: "call_1", tool_name: "read_x", arguments: { a: 1 }, provider: "local_llm" });
+  });
+
+  it("local_llm: sender ALDRI en Authorization-header (rent lokalt endepunkt, ingen credential å lekke)", async () => {
+    const fetchSpy = vi.fn(
+      async () => new Response(JSON.stringify({ choices: [{ message: { content: "x" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete(REQUEST);
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Record<string, string>)["authorization"]).toBeUndefined();
   });
 });
 

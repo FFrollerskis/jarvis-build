@@ -6,11 +6,23 @@
  * bildestøtte i den tilhørende adapteren (`packages/provider-adapters`),
  * ALDRI et informativt/aspirasjonelt leverandør-fakta. Kun `anthropic` har
  * ekte bilde-mapping i denne runden (se `anthropic.ts` sin
- * `toAnthropicContent()`) - `openai`/`gemini` støtter i praksis vision hos
- * leverandøren, men adapteren her bruker fortsatt `textOnly()` og ville
- * stille droppet bildedata; å beholde `vision` i profilen ville latt routeren
- * sende et vision-krevd kall til en adapter som degraderer det til ren tekst.
- * Rettes når disse adapterne faktisk får bilde-mapping (egen fremtidig runde).
+ * `toAnthropicContent()`) - `openai`/`gemini`/`gemma_hosted` støtter i praksis
+ * vision hos leverandøren, men adapteren her bruker fortsatt `textOnly()` og
+ * ville stille droppet bildedata; å beholde `vision` i profilen ville latt
+ * routeren sende et vision-krevd kall til en adapter som degraderer det til
+ * ren tekst. Rettes når disse adapterne faktisk får bilde-mapping (egen
+ * fremtidig runde).
+ *
+ * D-79 (samme regel, samme rigiditet): `streaming` er FJERNET fra `gemini`
+ * sin profil her - adapteren (`gemini.ts`) har ALDRI hatt en `.stream()`-
+ * metode (kun `generateContent`, ikke `streamGenerateContent`), så den
+ * tidligere `streaming: true`-påstanden var en registry/adapter-mismatch
+ * (fanget under D-79 sin arkitekturgjennomgang - `ModelGateway.executePlan()`
+ * degraderer allerede trygt til enkelt-delta for adaptere uten `.stream()`,
+ * så dette var ALDRI en krasj-bug, kun en unøyaktig capability-påstand som
+ * brøt filens egen regel over). Samme grense gjelder de NYE `gemma_hosted`/
+ * `local_llm`-profilene - INGEN av dem hevder `streaming` (se deres adaptere
+ * for begrunnelse).
  */
 export type ModelCapability =
   | "text"
@@ -32,6 +44,17 @@ export interface ModelProfile {
   /** Relativ kvalitet 1 (svakest) - 5 (best). */
   quality_class: 1 | 2 | 3 | 4 | 5;
   latency_class: "fast" | "medium" | "slow";
+  /**
+   * D-79 (§3 personvern-grense): `true` KUN for hostede sky-providere som
+   * kjører på et delt gratis-tier-kvotebasseng (i dag: `gemma_hosted`).
+   * Routeren (`router.ts`) ekskluderer ALDRI denne providertypen når
+   * kalleren eksplisitt oppgir `sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY"`
+   * - se `DataSensitivity` i `@jarvis/contracts`. Default `false` for ALLE
+   * eksisterende betalte/lokale providere (uendret tillit - denne sliceen
+   * innfører INGEN ny begrensning på allerede konfigurerte betalte
+   * leverandører, kun på det NYE gratis-tier-tillegget).
+   */
+  hosted_free_tier?: boolean;
 }
 
 /** Defaults matcher adapterens env-defaults; overstyres via konstruktør/konfig. */
@@ -59,12 +82,45 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
   {
     provider: "gemini",
     model: "gemini-2.5-flash",
-    capabilities: ["text", "reasoning", "structured_output", "streaming"],
+    // D-79: `streaming` fjernet - adapteren har aldri hatt `.stream()` (se filkommentaren over).
+    capabilities: ["text", "reasoning", "structured_output"],
     context_tokens: 1_000_000,
     locality: "cloud",
     cost_class: 2,
     quality_class: 4,
     latency_class: "fast"
+  },
+  {
+    // D-79 (AI Mesh Gemma-first): hostet Gemma via Gemini API - standard
+    // rimelig/rask kandidat for ordinære 24/7-oppgaver (§4) NÅR
+    // personvernpolicyen tillater det. `hosted_free_tier: true` er den
+    // eneste mekanismen som beskytter sensitivt innhold fra gratis-tieret
+    // (§3) - se `router.ts` for hvordan dette faktisk håndheves.
+    provider: "gemma_hosted",
+    model: "gemma-4-26b-a4b-it",
+    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    context_tokens: 128_000,
+    locality: "cloud",
+    cost_class: 1,
+    quality_class: 4,
+    latency_class: "fast",
+    hosted_free_tier: true
+  },
+  {
+    // D-79 §6: provider-nøytral lokal-inferens (OpenAI-kompatibelt
+    // endepunkt). `quality_class` er en konservativ default inntil en ekte
+    // lokal modell er konfigurert og evaluert - IKKE en påstand om en
+    // spesifikk modells faktiske kvalitet (kalleren styrer selv hvilken
+    // modell som faktisk kjører via `LOCAL_LLM_MODEL`).
+    provider: "local_llm",
+    model: "local-model",
+    capabilities: ["text", "tool_calling", "structured_output"],
+    context_tokens: 32_000,
+    locality: "local",
+    cost_class: 1,
+    quality_class: 3,
+    latency_class: "medium",
+    hosted_free_tier: false
   },
   {
     provider: "kimi",
