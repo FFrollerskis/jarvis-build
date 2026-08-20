@@ -10,6 +10,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
@@ -105,6 +106,8 @@ const agreementsService = new AgreementsService(pool);
 // apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne kalle
 // growth.*-handlingene identisk.
 const growthService = new GrowthService(pool);
+// D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
+const consentService = new ConsentService(pool);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -124,6 +127,8 @@ for (const tool of firstWaveTools({
   growth: new GrowthTransport(growthService),
   // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
   googleads: new GoogleAdsTransport(growthService),
+  // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
+  consent: new ConsentTransport(consentService),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

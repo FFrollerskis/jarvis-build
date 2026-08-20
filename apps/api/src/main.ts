@@ -39,6 +39,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
   GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
@@ -144,6 +145,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // avhengighet - `GrowthTransport` trenger derfor IKKE `toolGateway`/
   // `ToolInvocationContext`, i motsetning til `SupportTransport`.
   const growthService = new GrowthService(pool);
+  // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
+  // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
+  // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
+  // `@jarvis/consent` importerer ALDRI `@jarvis/business` i src/ (kun i
+  // test/ for fixtures) - INGEN ny kjøretids-pakkeavhengighet.
+  const consentService = new ConsentService(pool);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -167,6 +174,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
     // nøstet klasse D-handling i denne sliceen).
     googleads: new GoogleAdsTransport(growthService),
+    // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
+    // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
+    // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
+    // ingen nøstet klasse D-handling).
+    consent: new ConsentTransport(consentService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede

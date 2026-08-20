@@ -154,6 +154,16 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
+  // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
+  // `business_contacts` er FORTSATT IKKE registrert i denne erasure-planen
+  // i det hele tatt (samme PRE-EKSISTERENDE gap som business_open_loops-
+  // kommentaren over dokumenterer, se Q-25 punkt 9). `consent_decisions`
+  // slettes derfor her UAVHENGIG av kontakt-tabellen (INGEN FK-ordrings-
+  // konflikt MED denne planen slik den er i dag) - MEN hvis
+  // `business_contacts` noen gang legges til i denne planen, MÅ
+  // `consent_decisions` slettes FØR den (FK-retningen krever det).
+  add(result, "consent_decisions", await run(client, mode, "consent_decisions", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

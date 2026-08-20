@@ -11,6 +11,7 @@
   "dependencies": {
     "@jarvis/agreements": "workspace:*",
     "@jarvis/business": "workspace:*",
+    "@jarvis/consent": "workspace:*",
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/growth": "workspace:*",

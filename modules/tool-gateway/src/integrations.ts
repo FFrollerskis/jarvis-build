@@ -1213,6 +1213,48 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "ingen direkte fjerning i denne sliceen - historisk sporingstagg (samme som growth.register_campaign_tracking_tag)", idempotent_external: true,
       timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
       output_trust: "internal", transport: transport("googleads")
+    },
+    // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
+    // Core - provider-nøytralt `consent.*`-namespace. `record_decision`
+    // appender EN NY, permanent rad i en append-only-logg (ALDRI en UPDATE)
+    // - klasse B (REN Jarvis-intern tilstandsskriving, ALDRI en provider-
+    // handling/uigjenkallelig ekstern effekt). `get_current_state`/
+    // `list_decisions`/`evaluate_processing_decision` er RENE lesinger -
+    // klasse A. `evaluate_processing_decision` er den DETERMINISTISKE,
+    // fail-closed håndhevings-kjernen (fravær av data -> ALDRI 'ALLOWED') -
+    // ZERO ModelGateway noe sted i dette namespacet.
+    {
+      tool_id: "consent", action: "record_decision", description: "Registrer EN NY samtykke-/rettslig-grunnlag-beslutning for en kontakt+formål (append-only, ALDRI en overskriving av en tidligere beslutning). 'evidence' er KUN en proveniens-peker (kilde/skjema-versjon/kanal) - ALDRI hemmeligheter (tokens/nøkler/passord) eller full rå persondata-payload.",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), contact_id: z.string(), purpose: z.string(),
+        state: z.string(), legal_basis: z.string(), evidence: z.record(z.string(), z.unknown()).optional(),
+        policy_version: z.string(), actor_person_id: z.string().optional(), expires_at: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["consent.write"], reversible: true,
+      rollback_procedure: "ingen sletting av rader - registrer en NY beslutning (f.eks. 'withdrawn') for å endre gjeldende tilstand", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
+    },
+    {
+      tool_id: "consent", action: "get_current_state", description: "Hent den nyeste registrerte samtykke-/rettslig-grunnlag-beslutningen for en kontakt+formål (null hvis ingen finnes)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contact_id: z.string(), purpose: z.string() }),
+      capability_class: "A", scopes: ["consent.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
+    },
+    {
+      tool_id: "consent", action: "list_decisions", description: "List alle registrerte samtykke-beslutninger, valgfritt filtrert på kontakt/formål (fullstendig, append-only historikk)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contact_id: z.string().optional(), purpose: z.string().optional() }),
+      capability_class: "A", scopes: ["consent.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
+    },
+    {
+      tool_id: "consent", action: "evaluate_processing_decision", description: "Deterministisk, fail-closed evaluering: kan denne kontaktens data behandles for dette formålet? (ALLOWED/DENIED/UNKNOWN_NOT_CONFIGURED - ALDRI en bar boolean, ZERO AI-inferens)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), contact_id: z.string(), purpose: z.string() }),
+      capability_class: "A", scopes: ["consent.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
     }
   ];
 }

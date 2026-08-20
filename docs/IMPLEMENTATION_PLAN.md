@@ -1727,6 +1727,73 @@ HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forbl
 verifisering alle fortsatt NOT_STARTED/BLOCKED/DEFERRED). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE
 merget. Full detalj: D-90 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 NESTE SLICE — CONSENT / COOKIE / DATA-PROCESSING GOVERNANCE CORE v1 (2026-08-20) → D-91
+
+Base `main`@`4e8fc1c7d3380e32d00774e24bb2ed43537f1698` (PR #30/D-90-status MERGET), branch
+`claude/ua4-marketing-consent-governance`, draft PR, IKKE merget. Byggeordren krevde full
+rekonstruksjon av UA-4-matrisen fra fersk lesing av docs + kode (ikke chat-historikk) og en
+9-kandidat-sammenligning (A-I) FØR valg. **UA-4-matrise:** attribution/tracking/CAC/ROAS/execution-
+commands/Marketing Memory/Business OS-synlighet alle COMPLETE (D-74/D-76/D-83/D-85/D-87/D-88/D-89/
+D-90); Google Ads-adapter representasjon COMPLETE men D-86 (Developer Token/OAuth/mutasjon)
+DEFERRED_FINAL_INTEGRATION; samtykke/cookie/databehandlingsdokumentasjon (UA-4 akseptansekriterium 4,
+Q-29 punkt 5) NOT_STARTED; GA4/Meta-adapter NOT_STARTED (ingen D-64-port kjørt); Creative/Experiment
+Intelligence BLOCKED_BY_DATA (ingen kanonisk datakilde). `UA4_CRITICAL_PATH=`samtykke-/
+databehandlingsstyring - eneste gjenværende literale UA-4-krav uten kode ELLER dokumentert
+blokkering. **Valgt: kandidat A** av 9 (B allerede COMPLETE via D-90, C/D BLOCKED_BY_DATA, E/F krever
+D-64-port + leverandørvalg uten dokumentert prekondisjon, G ville krysset UA-6, H ingen funnet, I
+ingen funnet utover A). **D-64-port:** `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `EXTERNAL_ROLE=`INGEN
+(ingen leverandør introdusert), `CAN_RUN_WITHOUT_PROVIDER=true`, `CORE_DEPENDENCY_DECISION_
+REQUIRED=false`. D-41=N/A. **Arkitektur:** ny pakke `@jarvis/consent` (`modules/consent/`), NULL
+runtime-avhengighet til `@jarvis/business` (kun opak `contact_id: string`, DB-håndhevet FK - unngår
+enhver sirkularitetsklasse D-90 måtte løse med DI). Ny migrasjon `032_consent_governance.sql`
+(`consent_decisions`: append-only, INGEN `UPDATE`-grant på `jarvis_app`, FORCE RLS, tenant+space-
+policyer, FK mot `tenants`/`business_contacts`/`people`). `ConsentPurpose="attribution"|"tracking"`
+(lukket, bevisst SMALT sett - kun formål med enten eksisterende reell kapabilitet eller eksplisitt
+dokumentert gap i UA3_BUSINESS_DPIA.md, ingen purpose-sprawl). `ConsentLegalBasis="consent"|
+"legitimate_interest"|"contract"|"legal_obligation"` er en OWNER-KONFIGURERT autoritetsreferanse
+Jarvis håndhever, ALDRI en Jarvis-utledet rettslig konklusjon (CHECK-constraint gjør ugyldige verdier
+strukturelt umulig, bevist med direkte INSERT-forsøk i tester). **Append-only uforanderlig
+beslutningslogg** (bevisst avvik fra D-89/D-90 sitt current-state-overskrivningsmønster - consent-/
+rettslig-grunnlag-historikk har egen rettslig betydning, NÅR en beslutning ble tatt er selvstendig
+viktig), håndhevet STRUKTURELT (ingen `UPDATE`-grant, bevist med direkte UPDATE-forsøk, samme mønster
+som D-87 sin CHECK-constraint-håndhevede `'executed'`-umulighet). `evaluateProcessingDecision()`
+returnerer EKSAKT tre utfall: `ALLOWED` (kun uutløpt siste `'granted'`-rad), `DENIED`, `UNKNOWN_
+NOT_CONFIGURED` (ingen rad) - FAIL-CLOSED, fravær av data er ALDRI stille tolket som tillatelse (D-81-
+presedens). **ENFORCED_NOW vs ENFORCEMENT_DEFERRED:** selve policy-motoren er fullt reell og fail-
+closed (ENFORCED_NOW). Automatisk kobling inn i growth sine EKSISTERENDE `attributeToCampaign()`/
+`attributeFromTracking()`-kallsteder er EKSPLISITT IKKE gjort denne sliceen (ENFORCEMENT_DEFERRED) -
+ville stille endret oppførsel for allerede-eksisterende kontakter uten samtykkeregistrering, i strid
+med ordrens krav om ingen retroaktiv blokkering uten kompatibilitetsstrategi - en eksplisitt,
+dokumentert utsettelse, ikke stille scope-krymping. **ToolGateway:** `consent.record_decision`
+(klasse B - reversibel intern tilstandsskriving, INGEN ekstern sideeffekt, ALDRI klasse D til tross
+for rettslig betydning), `consent.get_current_state`/`list_decisions`/`evaluate_processing_decision`
+(klasse A). **D-81-kompatibilitet:** samtykkestatus kan ALDRI nedgradere `BUSINESS_CONFIDENTIAL`/
+`PRIVATE`/`SECRET_RESTRICTED`-modellruting - `@jarvis/consent` har INGEN import av ModelGateway/
+provider-adapters/leverandør-SDK (strukturelt bevist), `MODEL_GATEWAY_USED=false`. **Policy Gateway-
+grense uendret:** `PolicyGateway` har null konsept om "formål"/"samtykke"/"rettslig grunnlag" -
+genuint ortogonal, duplisert INGEN eksisterende mekanisme. **D-87/UA-6/D-86 uberørt:** governance
+kobles IKKE til reell leverandør-utførelse, `ALLOWED` betyr ALDRI at en finansiell/leverandør-handling
+auto-utføres, UA-6 forblir NOT IMPLEMENTED, D-86 UBERØRT. D-89/D-90 UBERØRT - denne sliceen bygger KUN
+fremtidsrettet håndhevingsgrunnlag, INGEN retroaktiv skjuling av eksisterende observasjoner. Q-20: ny
+`consent_decisions` registrert i `planMemorySpaceInContext()`. Q-21: FORCE RLS, tenant+space-
+isolasjon bevist med tester, INGEN superuser/bypass-grant. Q-26: `Q26_FULL_TRUTH_PROMOTION_
+IMPLEMENTED` forblir false - samtykke/policy-tilstand er IKKE lært sannhet, INGEN LLM-inferens. Q-27:
+ingen scheduler, deterministisk request-/ingestion-tids-håndheving. **18 nye tester**
+(`modules/consent/test/service-rls.test.ts` §A-J: happy-path record/current-state/list/evaluate,
+fail-closed UNKNOWN_NOT_CONFIGURED, DENIED-tilstander, purpose-isolasjon, tenant-/space-isolasjon
+RLS, tilbaketrekking-semantikk, idempotente oppdateringer, provenance/policy-versjon, legal_basis/
+purpose CHECK-constraint-umulighet (strukturelt bevis), append-only UPDATE-umulighet (strukturelt
+bevis, database-grant-nivå), no-ModelGateway-import (strukturelt bevis), no-provider-mutation
+(strukturelt bevis), no-UA-6-bypass). Testregnskap: `main` FØR = 1657/112 → ETTER = **1675 (+18), 113
+filer**, alle grønne (bekreftet ved kjøring). `pnpm -w typecheck` 18/18 pakker rent (ny `@jarvis/
+consent`-pakke inkludert). `pnpm -w lint` rent. **D-91 = FIXED_SUITE_VERIFIED_COMPLETE=true,
+HOST_ACTION_REQUIRED=false** (ZERO leverandør, ZERO credentials, fullt CI-testbart). UA-4 SOM HELHET
+forblir IKKE komplett (Creative Intelligence, Experiment Intelligence fortsatt BLOCKED_BY_DATA; D-86/
+UA-6 ekte provider-utførelse fortsatt DEFERRED/NOT_STARTED; denne sliceen bygger håndhevings-
+GRUNNLAG, INGEN automatisk kobling til eksisterende attribusjon ennå - se ENFORCEMENT_DEFERRED over).
+UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full detalj: D-91 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
