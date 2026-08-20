@@ -97,8 +97,16 @@ export class InMemoryGithubRateLimitStore implements GithubRateLimitStore {
 
   async recordViolation(credentialRef: string, state: GithubRateLimitState, cooldownUntil: Date, source: GithubRetryAfterSource, quota: GithubPrimaryQuota | null): Promise<void> {
     const prior = this.rows.get(credentialRef) ?? defaultRow(credentialRef);
+    // §19 (D-97 pre-merge audit): MONOTON cooldown - en kortere, senere-ankommet
+    // brudd (f.eks. Jarvis-fallback) skal ALDRI forkorte en allerede lengre,
+    // provider-oppgitt cooldown fra et konkurrerende forsøk. Den lengste
+    // cooldown_until "vinner", og state/kilde følger DEN vinnende verdien.
+    const priorWins = prior.cooldownUntil !== null && prior.cooldownUntil > cooldownUntil;
     this.rows.set(credentialRef, {
-      ...prior, state, cooldownUntil, retryAfterSource: source,
+      ...prior,
+      state: priorWins ? prior.state : state,
+      cooldownUntil: priorWins ? prior.cooldownUntil : cooldownUntil,
+      retryAfterSource: priorWins ? prior.retryAfterSource : source,
       consecutiveViolations: prior.consecutiveViolations + 1,
       primary: mergeQuota(prior.primary, quota)
     });
@@ -170,11 +178,23 @@ export class PgGithubRateLimitStore implements GithubRateLimitStore {
   }
 
   async recordViolation(credentialRef: string, state: GithubRateLimitState, cooldownUntil: Date, source: GithubRetryAfterSource, quota: GithubPrimaryQuota | null): Promise<void> {
+    // §19 (D-97 pre-merge audit, KRITISK): to samtidige throttlede svar (t.d.
+    // prosess A faar provider-Retry-After=10min, prosess B faar en kortere
+    // jarvis-fallback=1min) skal ALDRI la den korteste "vinne" uansett
+    // skrive-rekkefolge - cooldown_until er derfor MONOTON (GREATEST), og
+    // state/retry_after_source følger UANSETT hvilken av (eksisterende rad,
+    // ny verdi) som faktisk har den lengste cooldown_until - ALDRI bare
+    // "siste skriver vinner". consecutive_violations telles UAVHENGIG av
+    // hvem som "vinner" (bruddet skjedde faktisk, uansett).
     await this.pool.query(
       `INSERT INTO github_rate_limit_state (credential_ref, state, cooldown_until, retry_after_source, consecutive_violations, primary_limit, primary_remaining, primary_used, primary_reset, primary_resource, updated_at)
        VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, now())
        ON CONFLICT (credential_ref) DO UPDATE SET
-         state = EXCLUDED.state, cooldown_until = EXCLUDED.cooldown_until, retry_after_source = EXCLUDED.retry_after_source,
+         state = CASE WHEN COALESCE(github_rate_limit_state.cooldown_until, EXCLUDED.cooldown_until) > EXCLUDED.cooldown_until
+                       THEN github_rate_limit_state.state ELSE EXCLUDED.state END,
+         cooldown_until = GREATEST(COALESCE(github_rate_limit_state.cooldown_until, EXCLUDED.cooldown_until), EXCLUDED.cooldown_until),
+         retry_after_source = CASE WHEN COALESCE(github_rate_limit_state.cooldown_until, EXCLUDED.cooldown_until) > EXCLUDED.cooldown_until
+                                    THEN github_rate_limit_state.retry_after_source ELSE EXCLUDED.retry_after_source END,
          consecutive_violations = github_rate_limit_state.consecutive_violations + 1,
          primary_limit = COALESCE(EXCLUDED.primary_limit, github_rate_limit_state.primary_limit),
          primary_remaining = COALESCE(EXCLUDED.primary_remaining, github_rate_limit_state.primary_remaining),
@@ -217,7 +237,9 @@ export function classifyGithubResponse(status: number, headers: GithubHeaderRead
   }
   const retryAfterHeader = headers.get("retry-after");
   const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : Number.NaN;
-  const hasRetryAfter = Number.isFinite(retryAfterSeconds);
+  // Negativ/NaN/overflow er malformed - ALDRI stol pa en gjettet "retry i fortiden"-verdi
+  // (§6-krav); en negativ verdi faller derfor gjennom til jarvis_fallback under, IKKE en 0-delay-retry.
+  const hasRetryAfter = Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0;
   if (status === 429 || hasRetryAfter || SECONDARY_RATE_LIMIT_BODY_PATTERN.test(rawBody)) {
     return { kind: "SECONDARY_RATE_LIMIT", retryAfterMs: hasRetryAfter ? retryAfterSeconds * 1000 : null };
   }

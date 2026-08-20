@@ -66,6 +66,18 @@ describe("E-G: sekundaer-rate-limit-deteksjon", () => {
     expect(classifyGithubResponse(404, headers({}), "")).toEqual({ kind: "OTHER" });
     expect(classifyGithubResponse(500, headers({}), "")).toEqual({ kind: "OTHER" });
   });
+  it("D-97 pre-merge-audit §6: negativ retry-after er MALFORMED - stoles ALDRI paa (skal ALDRI gi en cooldown i fortiden/0-delay-retry). 403 uten gyldig retry-after og uten sekundaer-fritekst faller derfor til PERMISSION_403", () => {
+    const result = classifyGithubResponse(403, headers({ "retry-after": "-30" }), "");
+    expect(result).toEqual({ kind: "PERMISSION_403" });
+  });
+  it("D-97 pre-merge-audit §6: retry-after=0 er en GYLDIG umiddelbar-retry-verdi, ikke malformed - godtas", () => {
+    const result = classifyGithubResponse(403, headers({ "retry-after": "0" }), "");
+    expect(result).toEqual({ kind: "SECONDARY_RATE_LIMIT", retryAfterMs: 0 });
+  });
+  it("D-97 pre-merge-audit §6: malformed (ikke-numerisk) retry-after paa 429 faller tilbake til SECONDARY_RATE_LIMIT med retryAfterMs=null (429 er uansett aldri en tilgangsfeil - jarvis_fallback tar over)", () => {
+    const result = classifyGithubResponse(429, headers({ "retry-after": "not-a-number" }), "");
+    expect(result).toEqual({ kind: "SECONDARY_RATE_LIMIT", retryAfterMs: null });
+  });
 });
 
 describe("H: primaer-kvote-parsing (EXTERNAL_CANONICAL fakta)", () => {
@@ -148,6 +160,16 @@ describe("K-P: GithubRateLimitController med InMemoryGithubRateLimitStore", () =
     expect((await c.checkEligible(true)).eligible).toBe(true);
   });
 
+  it("D-97 pre-merge-audit §14: eksakt grense now===cooldown_until - konsistent definert (eligible AKKURAT ved cooldown_until, IKKE ett tikk foer)", async () => {
+    let now = new Date("2026-08-20T22:00:00Z");
+    const c = new GithubRateLimitController(new InMemoryGithubRateLimitStore(), REF, undefined, () => now);
+    await c.recordOutcome(true, 429, headers({ "retry-after": "60" }), ""); // cooldown_until = 22:01:00
+    now = new Date("2026-08-20T22:00:59.999Z"); // rett FOeR
+    expect((await c.checkEligible(true)).eligible).toBe(false);
+    now = new Date("2026-08-20T22:01:00.000Z"); // EKSAKT lik
+    expect((await c.checkEligible(true)).eligible).toBe(true);
+  });
+
   it("P: en vellykket MUTASJON rydder MUTATIONS_THROTTLED til NORMAL; en vellykket LESNING gjør IKKE det", async () => {
     const store = new InMemoryGithubRateLimitStore();
     const c = new GithubRateLimitController(store, REF);
@@ -157,6 +179,39 @@ describe("K-P: GithubRateLimitController med InMemoryGithubRateLimitStore", () =
     expect((await c.checkEligible(true)).eligible).toBe(false); // fortsatt kastet - lesing sier ingenting
     await c.recordOutcome(true, 200, headers({}), ""); // vellykket MUTASJON
     expect((await c.checkEligible(true)).eligible).toBe(true);
+  });
+});
+
+describe("D-97 pre-merge-audit §19 (KRITISK): monoton cooldown - en kortere, senere-ankommet brudd forkorter ALDRI en lengre eksisterende cooldown, uansett skrive-rekkefolge", () => {
+  it("InMemoryGithubRateLimitStore: lang cooldown (10 min) skrevet FOeRST, kort fallback (1 min) skrevet ETTERPAA -> lang cooldown VINNER", async () => {
+    const store = new InMemoryGithubRateLimitStore();
+    const now = new Date("2026-08-20T22:00:00Z");
+    const longCooldown = new Date(now.getTime() + 10 * 60_000); // provider Retry-After=10min
+    const shortCooldown = new Date(now.getTime() + 1 * 60_000); // jarvis-fallback=1min, ankommer SENERE
+    await store.recordViolation("TOKEN", "MUTATIONS_THROTTLED", longCooldown, "provider", null);
+    await store.recordViolation("TOKEN", "MUTATIONS_THROTTLED", shortCooldown, "jarvis_fallback", null);
+    const row = await store.get("TOKEN");
+    expect(row?.cooldownUntil?.getTime()).toBe(longCooldown.getTime()); // IKKE forkortet til 1 min
+    expect(row?.retryAfterSource).toBe("provider"); // kilden til den VINNENDE (lengste) cooldown-en
+  });
+  it("InMemoryGithubRateLimitStore: motsatt rekkefoelge (kort FOeRST, lang ETTERPAA) -> lang cooldown tar fortsatt over (forlenger korrekt)", async () => {
+    const store = new InMemoryGithubRateLimitStore();
+    const now = new Date("2026-08-20T22:00:00Z");
+    const shortCooldown = new Date(now.getTime() + 1 * 60_000);
+    const longCooldown = new Date(now.getTime() + 10 * 60_000);
+    await store.recordViolation("TOKEN", "MUTATIONS_THROTTLED", shortCooldown, "jarvis_fallback", null);
+    await store.recordViolation("TOKEN", "PROVIDER_THROTTLED", longCooldown, "provider", null);
+    const row = await store.get("TOKEN");
+    expect(row?.cooldownUntil?.getTime()).toBe(longCooldown.getTime());
+    expect(row?.state).toBe("PROVIDER_THROTTLED");
+  });
+  it("consecutive_violations telles UAVHENGIG av hvilken skriving som faktisk 'vinner' cooldown_until/state", async () => {
+    const store = new InMemoryGithubRateLimitStore();
+    const now = new Date("2026-08-20T22:00:00Z");
+    await store.recordViolation("TOKEN", "MUTATIONS_THROTTLED", new Date(now.getTime() + 10 * 60_000), "provider", null);
+    await store.recordViolation("TOKEN", "MUTATIONS_THROTTLED", new Date(now.getTime() + 1 * 60_000), "jarvis_fallback", null);
+    const row = await store.get("TOKEN");
+    expect(row?.consecutiveViolations).toBe(2); // begge bruddene telles, selv om kun den ene "vant" cooldown_until
   });
 });
 
@@ -393,5 +448,33 @@ describe("Z: PgGithubRateLimitStore mot ekte Postgres (restart-sikkerhet/delt ti
     const row = await store.get("TOKEN_READONLY_TEST");
     expect(row?.state).toBe("MUTATIONS_THROTTLED");
     expect(row?.primary.remaining).toBe(59);
+  });
+
+  it("D-97 pre-merge-audit §19 (KRITISK) mot EKTE Postgres: en lang provider-cooldown (10 min) skrevet av 'prosess A' forkortes ALDRI av en senere, kortere jarvis-fallback-cooldown (1 min) fra 'prosess B' paa SAMME credential", async () => {
+    const storeA = new PgGithubRateLimitStore(appPool);
+    const storeB = new PgGithubRateLimitStore(appPool);
+    const now = Date.now();
+    const longCooldown = new Date(now + 10 * 60_000);
+    const shortCooldown = new Date(now + 1 * 60_000);
+    await storeA.recordViolation("TOKEN_RACE_TEST", "PROVIDER_THROTTLED", longCooldown, "provider", null);
+    await storeB.recordViolation("TOKEN_RACE_TEST", "MUTATIONS_THROTTLED", shortCooldown, "jarvis_fallback", null);
+    const row = await storeA.get("TOKEN_RACE_TEST");
+    expect(row?.cooldownUntil?.getTime()).toBe(longCooldown.getTime());
+    expect(row?.state).toBe("PROVIDER_THROTTLED");
+    expect(row?.retryAfterSource).toBe("provider");
+    expect(row?.consecutiveViolations).toBe(2); // begge bruddene talt, uansett hvilket som "vant"
+  });
+
+  it("D-97 pre-merge-audit §19: motsatt skrive-rekkefoelge (kort FOeRST fra prosess B, lang ETTERPAA fra prosess A) gir samme korrekte sluttresultat - lang cooldown vinner uansett rekkefoelge", async () => {
+    const storeA = new PgGithubRateLimitStore(appPool);
+    const storeB = new PgGithubRateLimitStore(appPool);
+    const now = Date.now();
+    const shortCooldown = new Date(now + 1 * 60_000);
+    const longCooldown = new Date(now + 10 * 60_000);
+    await storeB.recordViolation("TOKEN_RACE_TEST_2", "MUTATIONS_THROTTLED", shortCooldown, "jarvis_fallback", null);
+    await storeA.recordViolation("TOKEN_RACE_TEST_2", "PROVIDER_THROTTLED", longCooldown, "provider", null);
+    const row = await storeA.get("TOKEN_RACE_TEST_2");
+    expect(row?.cooldownUntil?.getTime()).toBe(longCooldown.getTime());
+    expect(row?.state).toBe("PROVIDER_THROTTLED");
   });
 });

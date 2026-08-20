@@ -22,10 +22,16 @@ KUN i produksjon (`main.ts`+`worker-main.ts`, samme pool); `GithubTransport`s ny
 argument er valgfritt - alle ~50 eksisterende kallesteder uendret. Eierkontroller (freeze/kill-switch)
 uendret håndhevet FORAN transporten (bevist mot ekte embedded-Postgres). 33 nye tester
 (`github-rate-limit-controller.test.ts`, alle 25 punkter i byggeordrens matrise), alle 43+13 eksisterende
-GitHub-relaterte tester består uendret. Full workspace-suite 1878/1878 grønn, `pnpm -w typecheck`/`lint`
-rent. UA-5 kriterium 2/3/4 HERDET, ingen heves til COMPLETE. Se D-97 i DECISIONS_AND_ASSUMPTIONS.md for
-full detalj. Branch `claude/ua5-github-rate-limit-controller`, draft PR gjenstår på tidspunktet for
-denne statuslinjen.
+GitHub-relaterte tester består uendret. **PRE-MERGE CLOSEOUT-AUDIT (samme PR #38, FØR godkjenning) fant
+og fikset ÉN reell KRITISK bug:** `PgGithubRateLimitStore.recordViolation()` sin SQL overskrev FØR denne
+runden ubetinget en eksisterende, lengre cooldown med en senere-ankommet KORTERE (f.eks. en samtidig
+jarvis-fallback som skriver etter en ekte provider-`Retry-After`) - fikset til monoton `GREATEST()`-
+semantikk (lengste cooldown vinner ALLTID, uansett skrive-rekkefølge). Mindre fiks: negativ `retry-after`
+ble feilaktig godtatt (kunne gitt en cooldown i fortiden) - avvises nå eksplisitt. 9 nye regresjonstester
+(42 totalt, opp fra 33) beviser begge fiksene mot BÅDE in-memory og ekte Postgres. Full suite 1887/1887
+(opp fra 1878), `pnpm -w typecheck`/`lint` rent. UA-5 kriterium 2/3/4 HERDET, ingen heves til COMPLETE.
+Se D-97 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch `claude/ua5-github-rate-limit-controller`,
+draft PR #38 gjenstår på tidspunktet for denne statuslinjen.
 
 ## Runden før det
 
