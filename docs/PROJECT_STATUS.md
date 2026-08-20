@@ -2,10 +2,10 @@
 
 **Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — CONSENT ENFORCEMENT ACTIVATION / ROLLOUT v1** → D-92,
 base `main`@`87404e8ec30e971171ff0993563769da52098e88` (PR #31/D-91-status MERGET), branch
-`claude/ua4-consent-enforcement-rollout`, commit `43596647356fd61458d8dccd5c174ada27f2b84d`,
+`claude/ua4-consent-enforcement-rollout`, HEAD `fee4996469e23b0690199a175c3c3489157b5532`,
 **PR #32 opprettet som DRAFT, IKKE merget** (https://github.com/tsworkflow/jarvisbuild/pull/32).
-CI-status på PR: **PENDING** ved pushtidspunkt - ikke ennå bekreftet grønn, følges opp via PR-
-abonnement.) **RESUME SOVEREIGN AUTONOMY v4.0 —
+CI-status på PR: **GRØNN** (run 32333299687/32333297459, `gitleaks` + `build-test` begge success,
+bekreftet ved faktisk sjekk av CI-jobbene, ikke antatt).) **RESUME SOVEREIGN AUTONOMY v4.0 —
 full UA-4-matrise + 9-kandidat-sammenligning (A-I) kjørt FØR valg.** D-91 sin motor eksisterte men var
 IKKE koblet inn i noen faktisk prosesserings-sti (`MARKETING_PROCESSING_ENFORCEMENT_FULLY_WIRED=false`)
 - det eneste gjenværende, ikke-eksternt-avhengige UA-4-punktet. **Ny klasse `ConsentEnforcementService`**
