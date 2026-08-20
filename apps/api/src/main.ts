@@ -28,10 +28,10 @@ import {
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
-  DailyBrief, EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport,
-  MeshToolExecutor, meshToolDefinitions, TelegramCommandPoller, TelegramTransport, ToolGateway,
-  buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource, firstWaveTools,
-  tasksSource, DailyScheduler
+  DailyBrief, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
+  GoogleCalendarTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore, TelegramCommandPoller,
+  TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource,
+  firstWaveTools, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -162,9 +162,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // blokkerende når eieren faktisk har aktivert 'enforce' for et gitt
   // tenant/space/formål (se D-92 i DECISIONS_AND_ASSUMPTIONS.md).
   const growthService = new GrowthService(pool, consentEnforcementService);
+  // D-97: sentralisert GitHub rate-limit-kontroller - Postgres-baaret delt
+  // tilstand (SHARED_RUNTIME, deles med worker-main.ts sin egen instans over
+  // SAMME pool/tabell). `onTransition` er en bevisst minimal operativ-
+  // synlighet-krok (§24) - IKKE en full EventWriter/tenant-audit-kobling
+  // (GitHub-credentialen er global, ikke tenant-scoped, se D-97).
+  const githubRateLimitController = new GithubRateLimitController(
+    new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+    (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
+  );
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-    github: new GithubTransport(), telegram: new TelegramTransport(),
+    github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
     // D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon -
     // `marketingMemoryBriefSource(growthService)` injiseres her (app-laget,
     // som allerede har BEGGE tjenestene) i stedet for at `@jarvis/business`

@@ -34,7 +34,8 @@ describe("A: apps/api/src/main.ts sprer driveTransportsIfConfigured() inn i firs
     // De fire eksisterende transportene forblir UBETINGET konstruert - uendret fra før denne fiksen:
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
-    expect(callBlock).toContain("github: new GithubTransport()");
+    // D-97: GithubTransport tar naa en wired GithubRateLimitController - ikke lenger tom konstruktør.
+    expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("telegram: new TelegramTransport()");
     // UA-3 P0 (D-49): femte ubetingede transport - Business OS har ingen ekstern credential
     // aa vaere "konfigurert" av, saa den registreres alltid, samme mønster som de fire over.
@@ -58,7 +59,8 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     expect(callBlock).toContain("...driveTransportsIfConfigured()");
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
-    expect(callBlock).toContain("github: new GithubTransport()");
+    // D-97: GithubTransport tar naa en wired GithubRateLimitController - ikke lenger tom konstruktør.
+    expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("telegram: new TelegramTransport()");
     // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
     // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
@@ -83,17 +85,21 @@ describe("K: api og worker sine firstWaveTools()-kall bruker BOKSTAVELIG TALT sa
 });
 
 describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram) wiring er UENDRET av denne fiksen", () => {
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fire ubetingede transport-konstruksjonene som før", () => {
+  // D-97: GithubTransport tar naa en wired GithubRateLimitController-argument -
+  // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme tre ubetingede tomme-konstruktør-transportene som før", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
-    expect(unconditionalConstructions).toHaveLength(4);
+    expect(unconditionalConstructions).toHaveLength(3);
+    expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fire ubetingede transport-konstruksjonene som før", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme tre ubetingede tomme-konstruktør-transportene som før", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
-    expect(unconditionalConstructions).toHaveLength(4);
+    expect(unconditionalConstructions).toHaveLength(3);
+    expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
   });
 });
 

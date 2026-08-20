@@ -1995,6 +1995,54 @@ IKKE merget. Full detalj: D-96 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — GITHUB RATE-LIMIT CONTROLLER v1 (2026-08-20) → D-97
+
+Skrevet direkte i respons på en ekte hendelse i denne økten: mens PR #37 (D-96) ble merget, feilet
+`update_pull_request(draft:false)` gjentatte ganger (~9 forsøk, 30+ min) med en GitHub secondary-rate-
+limit-feil - lesekall fungerte upåvirket. Fersk rekonstruksjon av D-94-koden (ikke antatt) fant:
+`githubFetch()` hadde bounded retry (3 forsøk, 429/5xx) og leste `Retry-After`, men (1) leste ALDRI
+`x-ratelimit-*`-headerne, (2) hadde intet begrep for sekundær rate-limiting, (3) behandlet ALLE 403 som
+ikke-retrybare (en ekte sekundær-403 var strukturelt umulig å skille fra en tilgangsfeil), (4) sov
+INLINE ved 429 - en flertimimutters cooldown ville blokkert kallende tråd direkte. Offisiell GitHub-
+kontrakt verifisert FØR kode (`raw.githubusercontent.com/github/docs`, `docs.github.com` blokkert av
+utgående proxy): `x-ratelimit-limit/remaining/used/reset(UTC epoch sek)/resource`; primær grense =
+403/429 MED `remaining:0`; sekundær = 403/429 UTEN det, ofte med `retry-after`; offisiell veiledning:
+"serially, ikke concurrent", "≥1s mellom mutasjoner", "≥1 min cooldown + eksponentielt økende" uten
+`retry-after`.
+
+**Bygget:** nytt, sentralisert `GithubRateLimitController` (`github-rate-limit-controller.ts`) - EN
+beslutningsplass alle 23 `github.*`-handlinger allerede funnel gjennom (`githubFetch()`, uendret funnel
+fra D-94). `classifyGithubResponse()` skiller PRIMARY/SECONDARY_RATE_LIMIT/PERMISSION_403 UTELUKKENDE på
+dokumenterte signaler - et 403 uten noen av dem forblir en ekte `PERMISSION_403`. `checkEligible()` er en
+synkron DB-lesning + umiddelbar strukturert avvisning (`GithubRateLimitedError`) FØR nettverkskallet -
+aldri sleep/busy-wait. To-tilstands-modell: `PROVIDER_THROTTLED` (primær - blokkerer lesing+mutasjon) og
+`MUTATIONS_THROTTLED` (sekundær - blokkerer KUN mutasjoner). Fallback-cooldown uten `retry-after`: base
+60s, doblet per brudd, hardt tak 60 min, ±20% bundet jitter. Mutasjons-serialisering: prosess-lokal
+min. 1000ms avstand + maks 1 samtidig (ærlig IKKE tverr-prosess). `RATE_LIMIT_STATE_SCOPE=SHARED_RUNTIME`:
+ny tabell `github_rate_limit_state` (migrasjon 034), ETT PRIMARY KEY på `credential_ref` (aldri raatt
+token), BEVISST ingen `tenant_id`/RLS (global, ikke-tenant-scoped credential, speiler `scheduler_state`-
+presedensen). `GithubTransport`s konstruktør fikk et nytt valgfritt `rateLimitController`-argument -
+udefinert (alle ~50 eksisterende kallesteder) bevarer 100% av tidligere oppførsel inkl. den gamle
+inline-429-sleep-retry-en. Wired med en ekte Postgres-baaret kontroller KUN i produksjon (`main.ts`+
+`worker-main.ts`, samme pool). Eierkontroller (freeze/kill-switch) uendret og fortsatt håndhevet FORAN
+transporten i `gateway.ts` (urørt av denne sliceen) - bevist eksplisitt mot ekte embedded-Postgres.
+
+**Testdekning:** 33 nye tester (`github-rate-limit-controller.test.ts`) dekker alle 25 punkter i
+byggeordrens matrise (klassifisering, sekundær-deteksjon, kvote-parsing, fallback-backoff+jitter+tak,
+kontroller-semantikk inkl. PR37-klasse-regresjon, credential-uavhengighet, ingen-hemmelighet-i-tilstand,
+spam-fri hendelser, ekte `GithubTransport`-wiring med mocket `fetch`, mutasjons-serialisering,
+eier-freeze/pause-komposisjon, `PgGithubRateLimitStore` mot ekte Postgres) - alle 43 eksisterende
+`github-developer-control-plane.test.ts`-tester og alle 13 `drive-runtime-wiring.test.ts`-tester
+(oppdatert til å forvente `GithubTransport(githubRateLimitController)`) består uendret. Full
+workspace-suite 1878/1878 grønn, `pnpm -w typecheck`/`lint` rent.
+
+**UA-5 kriterium-status etter denne sliceen (ikke oppblåst):** kriterium 2/3/4 HERDET (throttling-robust),
+men INGEN kriterium heves til COMPLETE - dette er infrastruktur-herding, ikke ny kapabilitet.
+`LIVE_PROVIDER_VERIFIED=false` uendret. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`.
+Draft-PR, IKKE merget. Full detalj: D-97 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
