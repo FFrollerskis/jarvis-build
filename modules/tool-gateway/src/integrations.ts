@@ -48,10 +48,15 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
     },
     {
-      tool_id: "github", action: "create_pr", description: "Opprett PR fra jobb-branch (aldri merge)",
-      input_schema: record({ repo: z.string(), branch: z.string(), title: z.string() }),
+      // UA-5 D-41-audit (2026-08-20): "aldri merge" var en TIDLIGERE
+      // begrensning fordi ingen merge-handling fantes ennå - IKKE et
+      // permanent forbud. Merge finnes nå separat som `merge_pr` (klasse D,
+      // se SLUTTEN av arrayet) - denne handlingen oppretter/finner PR-en,
+      // den utfører aldri selve mergingen.
+      tool_id: "github", action: "create_pr", description: "Opprett PR fra jobb-branch (idempotent - finner eksisterende åpen PR for samme head/base ved 422)",
+      input_schema: record({ repo: z.string(), branch: z.string(), title: z.string(), base: z.string().optional(), body: z.string().optional() }),
       capability_class: "C", scopes: ["repo:write-pr"], reversible: true,
-      rollback_procedure: "lukk PR", idempotent_external: false, timeout_ms: 15_000,
+      rollback_procedure: "lukk PR (github.update_pr med state=closed)", idempotent_external: true, timeout_ms: 15_000,
       rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
       output_trust: "internal", transport: transport("github")
     },
@@ -1276,6 +1281,185 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       rollback_procedure: "sett modus tilbake til forrige verdi (f.eks. 'disabled') via et nytt set_enforcement_policy-kall", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("consent")
+    },
+    // UA-5 GitHub Developer Control Plane v1 (2026-08-20, D-64: GitHub er
+    // EXTERNAL_CANONICAL for repo/PR/workflow-tilstand - D-41-audit: forrige
+    // to github-oppføringer over (read_issues/create_pr fra UA-2 P0, samt
+    // read_repo_meta) var UTILSIKTET begrenset til lesing + "aldri merge" -
+    // IKKE fordi GitHub mangler kapabilitet. Denne sliceen bygger den
+    // gjenstående nyttige overflaten (branch/PR/issue/workflow-livssyklus)
+    // - IKKE hvert eneste GitHub-endepunkt, kun det som materielt tjener
+    // UA-5 sitt "tested-fix"-akseptansekriterium 2. Lagt til på SLUTTEN av
+    // samme grunn som alle tidligere tillegg - eksisterende tester
+    // indekserer dette arrayet posisjonelt.
+    {
+      tool_id: "github", action: "list_branches", description: "List branches i et repo",
+      input_schema: record({ repo: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "get_branch", description: "Les én branch (navn/sha/protected) - brukes også som preflight/recovery-grunnlag før delete_branch",
+      input_schema: record({ repo: z.string(), branch: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "get_commit", description: "Les én commit (sha/melding/forfatter/dato)",
+      input_schema: record({ repo: z.string(), ref: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "list_pull_requests", description: "List PR-er (valgfri state: open/closed/all)",
+      input_schema: record({ repo: z.string(), state: z.string().optional() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "get_pull_request", description: "Les én PR (inkl. mergeable/mergeable_state) - brukes også som preflight/target-re-read før merge_pr",
+      input_schema: record({ repo: z.string(), pr_number: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "list_workflow_runs", description: "List Actions-workflow-kjøringer (valgfri branch/status-filter)",
+      input_schema: record({ repo: z.string(), branch: z.string().optional(), status: z.string().optional() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "get_workflow_run", description: "Les én Actions-workflow-kjøring (status/conclusion/head_sha)",
+      input_schema: record({ repo: z.string(), run_id: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "list_workflow_jobs", description: "List jobber/steg for én Actions-workflow-kjøring (hvilken jobb/steg feilet)",
+      input_schema: record({ repo: z.string(), run_id: z.string() }), capability_class: "A",
+      scopes: ["repo:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "untrusted", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "create_branch", description: "Opprett en ny branch fra en gitt sha (idempotent - 422 'already exists' behandles som samme sluttilstand)",
+      input_schema: record({ repo: z.string(), branch: z.string(), from_sha: z.string() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "github.delete_branch", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "update_pr", description: "Oppdater PR-metadata (tittel/body/state open|closed - ALDRI merged, se merge_pr)",
+      input_schema: record({ repo: z.string(), pr_number: z.string(), title: z.string().optional(), body: z.string().optional(), state: z.string().optional() }),
+      capability_class: "B", scopes: ["repo:write-pr"], reversible: true,
+      rollback_procedure: "sett feltene tilbake til forrige verdi via et nytt update_pr-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "comment_on_issue", description: "Kommenter på et issue eller en PR (samme endepunkt)",
+      input_schema: record({ repo: z.string(), issue_number: z.string(), body: z.string() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "ingen automatisk sletting av kommentaren bygget - manuell oppfølging", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "set_labels", description: "Sett HELE label-settet på et issue/PR (PUT - erstatter, ikke akkumulerer)",
+      input_schema: record({ repo: z.string(), issue_number: z.string(), labels: z.array(z.string()) }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "sett tilbake til forrige label-sett via et nytt set_labels-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "request_reviewers", description: "Be om reviewers på en PR",
+      input_schema: record({ repo: z.string(), pr_number: z.string(), reviewers: z.array(z.string()) }),
+      capability_class: "B", scopes: ["repo:write-pr"], reversible: true,
+      rollback_procedure: "fjern forespørselen manuelt via GitHub (ingen egen remove-handling bygget denne sliceen)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "create_issue", description: "Opprett et nytt issue",
+      input_schema: record({ repo: z.string(), title: z.string(), body: z.string().optional() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "github.update_issue med state=closed", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "update_issue", description: "Oppdater issue-metadata (tittel/body/state open|closed - dekker close/reopen)",
+      input_schema: record({ repo: z.string(), issue_number: z.string(), title: z.string().optional(), body: z.string().optional(), state: z.string().optional() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "sett feltene tilbake til forrige verdi via et nytt update_issue-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "rerun_workflow_run", description: "Kjør en Actions-workflow-kjøring på nytt (valgfri failed_only for kun feilede jobber)",
+      input_schema: record({ repo: z.string(), run_id: z.string(), failed_only: z.boolean().optional() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "github.cancel_workflow_run", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      tool_id: "github", action: "cancel_workflow_run", description: "Avbryt en pågående Actions-workflow-kjøring",
+      input_schema: record({ repo: z.string(), run_id: z.string() }),
+      capability_class: "B", scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "github.rerun_workflow_run", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      // Trigger av en ny workflow-kjøring (kan utløse deploy/CI-ressursbruk) -
+      // klasse C, samme begrunnelse som create_pr (betydelig, men gjenopprettbar
+      // via cancel_workflow_run av den utløste kjøringen).
+      tool_id: "github", action: "dispatch_workflow", description: "Trigger en workflow_dispatch-kjøring på en gitt ref (valgfrie inputs)",
+      input_schema: record({ repo: z.string(), workflow_id: z.string(), ref: z.string(), inputs: z.record(z.string(), z.string()).optional() }),
+      capability_class: "C", scopes: ["repo:write", "actions:write"], reversible: true,
+      rollback_procedure: "github.cancel_workflow_run på den utløste kjøringen", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GITHUB_TOKEN",
+      output_trust: "internal", transport: transport("github")
+    },
+    {
+      // Merge er UGJENKALLELIG i praksis (kun revert-commit, ikke ekte "unmerge") -
+      // klasse D uavhengig av at branch-push/PR-opprettelse selv er reversible.
+      // Sovereign owner-modus (D-41/UA0-AUTHORITY) utfører autonomt UTEN kunstig
+      // godkjenningssperre - sikkerheten kommer fra preflight/target-re-read
+      // (`get_pull_request` leser mergeable_state RETT FØR merge) + valgfri
+      // `expected_head_sha` (sendes som GitHub sin egen `sha`-precondition på
+      // merge-endepunktet - IKKE en Jarvis-oppfunnet sjekk) + full before/after-
+      // audit (håndteres generisk av ToolGateway.execute() sin D-pipeline).
+      tool_id: "github", action: "merge_pr", description: "Merge en PR (merge_method: merge|squash|rebase; valgfri expected_head_sha-precondition mot stale state)",
+      input_schema: record({ repo: z.string(), pr_number: z.string(), merge_method: z.string().optional(), expected_head_sha: z.string().optional() }),
+      capability_class: "D", scopes: ["repo:write-pr", "repo:merge"], reversible: false,
+      rollback_procedure: "IKKE en ekte 'unmerge' - opprett en revert-PR (github.create_pr fra en revert-commit) og merge den, ELLER github.update_pr for å dokumentere avviket. Ikke reverserbar - derfor klasse D.",
+      idempotent_external: false, timeout_ms: 15_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
+      preflight_action: "get_pull_request"
+    },
+    {
+      // Branch-sletting er PERMANENT hvis sha-en ikke er kjent fra andre steder -
+      // klasse D, samme mønster som drive.delete_permanent. Strukturelt umulig å
+      // slette main/master/production (GITHUB_PROTECTED_BRANCHES i transporten,
+      // samme konvensjon som modules/tasks/src/coding.ts).
+      tool_id: "github", action: "delete_branch", description: "Slett en branch PERMANENT (main/master/production strukturelt nektet)",
+      input_schema: record({ repo: z.string(), branch: z.string() }), capability_class: "D",
+      scopes: ["repo:write"], reversible: true,
+      rollback_procedure: "gjenopprett branchen fra sha-en get_branch (preflight) fanget FØR sletting, via github.create_branch",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
+      preflight_action: "get_branch"
     }
   ];
 }

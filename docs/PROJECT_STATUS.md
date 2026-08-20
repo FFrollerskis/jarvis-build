@@ -1,5 +1,50 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-20 (**PR #35 (D-94) PRE-MERGE CLOSEOUT-AUDIT — tre reelle idempotens-hull
+funnet og fikset FØR godkjenning.** Fersk kodeaudit (ikke stolt på forrige rapport) fant: (1)
+`create_branch` sin 422-"already exists"-håndtering returnerte suksess uansett hvilken sha den
+eksisterende branchen faktisk pekte på - fikset til å kaste en `409`-stale-target-konflikt ved ulik sha.
+(2) `create_pr` sin 422-oppslags-spørring filtrerte kun på `head`, ikke `base` - fikset med GitHub sitt
+eget `base`-spørreparameter. (3) `merge_pr` behandlet ALLE 405-svar som feil uten idempotens-gjenkjenning
+ved retry - fikset til å re-lese PR-en og stole KUN på `merged`-feltet, aldri feilteksten alene, ved 405.
+Fjerde herding: `create_branch` fikk samme `GITHUB_PROTECTED_BRANCHES`-vern som `delete_branch` allerede
+hadde. 12 nye regresjonstester (2 rettet fra å bevise gammel usikker oppførsel, 10 nye). Full regresjon
+re-kjørt på ny HEAD, gitleaks rent. D-41/D-64/credential-isolasjon/freeze-dekning bekreftet uendret -
+KUN idempotens-korrekthet fikset, ingen ny handling/klasse lagt til. UA-5 kriterie-status uendret (denne
+runden er en korrekthetsfiks, ikke en kriterieoppfyllelse). Se D-94-addendum i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch/PR-oppdatering + ny CI gjenstår på tidspunktet for
+denne statuslinjen.
+
+## Runden før det
+
+**Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — STARTET, FØRSTE SLICE: GitHub
+Developer Control Plane v1 → D-94.** RESUME SOVEREIGN AUTONOMY v4.0-ordre: forrige UA-5-rekonstruksjon
+konkluderte `PHASE_CLOSURE_DECISION=C` (blokkert - krever levende leverandørtilkobling). Denne ordren
+instruerte eksplisitt GitHub som første provider. D-64-gate: GitHub er `EXTERNAL_CANONICAL` for repo/
+PR/workflow-tilstand, INGEN `CORE_DEPENDENCY_DECISION_REQUIRED`. D-41-audit: forrige `GithubTransport`
+(UA-2 P0) var utilsiktet begrenset til to lese-handlinger + "create_pr (aldri merge)" - erstattet med en
+23-handlings D-41-matrise (10×A/9×B/2×C/2×D) i `modules/tool-gateway/src/live-transports.ts`+
+`integrations.ts`: branch/PR/issue/workflow-livssyklus, `merge_pr`(D, sovereign autonomt, preflight
+target-re-read via `get_pull_request`, valgfri `expected_head_sha`-precondition) og `delete_branch`(D,
+strukturelt vernet mot main/master/production). Eksisterende kodejobb-worker
+(`modules/tasks/src/coding.ts`) bekreftet FORTSATT eier selve kilde-endringen (clone/branch/commit/push)
+- denne sliceen bygger KUN GitHub-siden (PR/Actions/merge), ingen konkurrerende skrive-arkitektur.
+Idempotens: 422-"already exists" håndtert gracefully for create_branch/create_pr; øvrig via eksisterende
+`tool_executions`-dedupe. INGEN ny Jarvis-DB-tabell (ingen github.*-handling rører noen Jarvis-tabell).
+100 nye tester (37+63), full suite **1808 tester grønne, 117 filer**, exit code 0 (228.52s).
+`pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent. Live-verifisering: `GITHUB_CREDENTIAL_CONFIGURED=
+false` i dette miljøet - `modules/tool-gateway/scripts/ua5-github-live.ts` skrevet og klar
+(`LIVE_RUNNER_READY=true`), IKKE kjørt (`LIVE_PROVIDER_VERIFIED=false`). **UA-5 kriterium-status:**
+1=PARTIAL/NOT_STARTED, 2=PARTIAL (GitHub-siden av tested-fix-livssyklusen finnes, diagnose/fiks-
+generering fortsatt IKKE bygget), 3=PARTIAL (GitHub-mutasjoner har nå audit/recovery, GCP/Cloudflare/
+Docker fortsatt ikke), 4=PARTIAL (GitHub lyder globale pause/freeze, full infra-degradert-modus ikke
+bygget). `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false` - dette er ÉN provider-slice, ikke
+hele fasen. Vercel/GCP/Cloudflare/Docker/Infisical/Langfuse/Sentry EKSPLISITT ikke startet. **Sovereign
+Autonomy v4.0-masterplanen SOM HELHET forblir IKKE komplett.** Branch/draft PR gjenstår på tidspunktet
+for denne statuslinjen - se "neste oppgave".
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**UA-4 «GROWTH & MARKETING CONTROL PLANE» — FASE-LUKKET → D-93.**
 RESUME SOVEREIGN AUTONOMY v4.0-ordre: post-D-92-rekonstruksjon av HELE UA-4 mot masterplanens EGNE
 fire ordrette akseptansekriterier (`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje
