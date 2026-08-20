@@ -1,5 +1,6 @@
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
+import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
 
 /**
  * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
@@ -832,7 +833,9 @@ export class GithubApiError extends Error {
   constructor(
     message: string,
     readonly httpStatus: number,
-    readonly retryable: boolean
+    readonly retryable: boolean,
+    /** D-97: satt naar `GithubRateLimitController` (hvis wired) klassifiserte svaret som et rate-limit-signal - typet resultat-kontrakt (§18), aldri en gjettet 500. */
+    readonly rateLimitClassification?: "PRIMARY_RATE_LIMIT" | "SECONDARY_RATE_LIMIT" | "PERMISSION_403"
   ) {
     super(message);
     this.name = "GithubApiError";
@@ -860,21 +863,50 @@ function classifyGithubErrorBody(rawBody: string): string {
  * Respekterer GitHub sin dokumenterte `Retry-After`-header (sekundær
  * rate-limiting) FREMFOR en gjettet backoff når headeren finnes - samme
  * "les leverandørens eget signal først"-prinsipp som `google-ads-transport.ts`.
+ *
+ * D-97: naar en `GithubRateLimitController` er wired (`controller` !==
+ * undefined - produksjon via `main.ts`/`worker-main.ts`, IKKE i eksisterende
+ * tester som konstruerer `new GithubTransport()` uten argumenter - 100%
+ * uendret oppførsel der), sjekkes eligibilitet FØR nettverkskallet i det hele
+ * tatt gjøres (§12 - aldri sleep/busy-wait for en flertimimutters cooldown),
+ * og et 429/rate-limit-klassifisert 403 sløyfer ALDRI lenger den gamle
+ * inline-sleep-retry-en (den flytter til kontrolleren sin delte
+ * cooldown-tilstand - neste forsøk, når som helst senere, blokkeres i
+ * stedet av eligibilitetssjekken over). Ekte forbigående 5xx beholder
+ * UENDRET kort inline-retry - det er ikke et rate-limit-anliggende.
  */
-async function githubFetch(url: string, init: RequestInit): Promise<Response> {
-  let lastError: GithubApiError | undefined;
-  for (let attempt = 1; attempt <= GITHUB_MAX_ATTEMPTS; attempt++) {
-    const response = await fetch(url, init);
-    if (response.ok) return response;
-    const rawBody = await response.text().catch(() => "");
-    const retryable = GITHUB_RETRYABLE_STATUS.has(response.status);
-    lastError = new GithubApiError(`github_api_error_${response.status}:${classifyGithubErrorBody(rawBody)}`, response.status, retryable);
-    if (!retryable || attempt === GITHUB_MAX_ATTEMPTS) break;
-    const retryAfterHeader = response.headers.get("retry-after");
-    const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : Number.NaN;
-    await githubSleep(Number.isFinite(retryAfterMs) ? retryAfterMs : GITHUB_BASE_BACKOFF_MS * 2 ** (attempt - 1));
+async function githubFetchRaw(url: string, init: RequestInit, controller?: GithubRateLimitController): Promise<Response> {
+  const mutation = (init.method ?? "GET") !== "GET";
+  if (controller) {
+    const eligibility = await controller.checkEligible(mutation);
+    if (!eligibility.eligible) {
+      throw new GithubRateLimitedError(eligibility.reason, eligibility.retryAt, eligibility.retryAfterSource);
+    }
   }
-  throw lastError!;
+  const attemptAll = async (): Promise<Response> => {
+    let lastError: GithubApiError | undefined;
+    for (let attempt = 1; attempt <= GITHUB_MAX_ATTEMPTS; attempt++) {
+      const response = await fetch(url, init);
+      if (response.ok) {
+        if (controller) await controller.recordOutcome(mutation, response.status, response.headers, "");
+        return response;
+      }
+      const rawBody = await response.text().catch(() => "");
+      const outcome = controller ? await controller.recordOutcome(mutation, response.status, response.headers, rawBody) : undefined;
+      const rateLimitClassified = outcome?.kind === "PRIMARY_RATE_LIMIT" || outcome?.kind === "SECONDARY_RATE_LIMIT";
+      const retryable = GITHUB_RETRYABLE_STATUS.has(response.status) && !rateLimitClassified;
+      lastError = new GithubApiError(
+        `github_api_error_${response.status}:${classifyGithubErrorBody(rawBody)}`, response.status, retryable,
+        outcome && outcome.kind !== "OK" && outcome.kind !== "OTHER" ? outcome.kind : undefined
+      );
+      if (!retryable || attempt === GITHUB_MAX_ATTEMPTS) break;
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : Number.NaN;
+      await githubSleep(Number.isFinite(retryAfterMs) ? retryAfterMs : GITHUB_BASE_BACKOFF_MS * 2 ** (attempt - 1));
+    }
+    throw lastError!;
+  };
+  return mutation && controller ? controller.runMutation(attemptAll) : attemptAll();
 }
 
 function githubHeaders(credential: string, extra: Record<string, string> = {}): Record<string, string> {
@@ -936,11 +968,15 @@ function toPullRequestSummary(pr: {
 }
 
 export class GithubTransport implements ToolTransport {
+  /** D-97: `rateLimitController` er valgfri - UDEFINERT bevarer 100% av tidligere oppførsel (alle eksisterende kallesteder/tester som konstruerer `new GithubTransport()` uendret). Wired med en ekte kontroller kun i produksjon (`apps/api/src/main.ts`/`worker-main.ts`). */
+  constructor(private readonly rateLimitController?: GithubRateLimitController) {}
+
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext) {
     const repo = ghRequireString(parameters, "repo");
     const base = `https://api.github.com/repos/${repo}`;
     const headers = githubHeaders(credential);
     const writeHeaders = githubHeaders(credential, { "content-type": "application/json" });
+    const githubFetch = (url: string, init: RequestInit = {}) => githubFetchRaw(url, init, this.rateLimitController);
 
     switch (action) {
       // --- LES (klasse A) -------------------------------------------------

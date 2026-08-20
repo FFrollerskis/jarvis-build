@@ -1,5 +1,34 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-97 GitHub Rate-Limit Controller
+v1 bygget (throttling trygt oppdaget/koordinert/utsatt, IKKE eliminert).** PR #37 (D-96) er MERGET til
+main (merge-commit `65b322c62b289525ae2ac7edba9e14b7fc0aa0ba`, post-merge-CI bekreftet grønn). Ordren
+kom direkte i respons på en EKTE hendelse denne økten: mens PR #37 ble merget, feilet
+`update_pull_request(draft:false)` gjentatte ganger (~9 forsøk, 30+ min) med en GitHub secondary-rate-
+limit-feil - lesekall upåvirket. Fersk rekonstruksjon av D-94-koden fant: `githubFetch()` hadde bounded
+retry (429/5xx) og leste `Retry-After`, men leste ALDRI `x-ratelimit-*`, hadde intet sekundær-rate-limit-
+begrep (ALLE 403 ble behandlet som ikke-retrybare - umulig å skille en ekte throttle-403 fra en
+tilgangsfeil), og sov INLINE ved 429 (ville blokkert kallende tråd direkte i flere timer). Offisiell
+GitHub-kontrakt verifisert FØR kode (`raw.githubusercontent.com/github/docs`, `docs.github.com` blokkert
+av proxy). Bygget ett nytt, sentralisert `GithubRateLimitController` - ALLE 23 `github.*`-handlinger
+funnel allerede gjennom `githubFetch()` (uendret fra D-94). Skiller PRIMARY/SECONDARY_RATE_LIMIT/
+PERMISSION_403 UTELUKKENDE på dokumenterte signaler (`x-ratelimit-remaining`, `retry-after`, kjent
+fritekst) - et 403 uten disse forblir en ekte tilgangsfeil. `checkEligible()` er en synkron DB-lesning +
+umiddelbar avvisning FØR nettverkskallet - ALDRI sleep/busy-wait. Fallback-cooldown uten `retry-after`:
+base 60s, doblet per brudd, hardt tak 60 min, bundet jitter. `RATE_LIMIT_STATE_SCOPE=SHARED_RUNTIME`: ny
+tabell `github_rate_limit_state` (migrasjon 034), keyet på `credential_ref` (aldri raatt token), BEVISST
+ingen `tenant_id`/RLS (global, ikke-tenant credential, speiler `scheduler_state`-presedensen). Wired
+KUN i produksjon (`main.ts`+`worker-main.ts`, samme pool); `GithubTransport`s nye `rateLimitController`-
+argument er valgfritt - alle ~50 eksisterende kallesteder uendret. Eierkontroller (freeze/kill-switch)
+uendret håndhevet FORAN transporten (bevist mot ekte embedded-Postgres). 33 nye tester
+(`github-rate-limit-controller.test.ts`, alle 25 punkter i byggeordrens matrise), alle 43+13 eksisterende
+GitHub-relaterte tester består uendret. Full workspace-suite 1878/1878 grønn, `pnpm -w typecheck`/`lint`
+rent. UA-5 kriterium 2/3/4 HERDET, ingen heves til COMPLETE. Se D-97 i DECISIONS_AND_ASSUMPTIONS.md for
+full detalj. Branch `claude/ua5-github-rate-limit-controller`, draft PR gjenstår på tidspunktet for
+denne statuslinjen.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-96 Real Coding Agent v1 bygget
 (ekte, ikke-interaktiv Claude Code CLI-kjøring, IKKE modellkvalitet).** PR #36 (D-95) er MERGET til main
 (merge-commit `fed28c55753da0e4933e1332fa6f8ef777325e2d`, post-merge-CI bekreftet grønn). RESUME

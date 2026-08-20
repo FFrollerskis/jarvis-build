@@ -4,8 +4,9 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  EnvSecretProvider, FallbackSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport,
-  MeshToolExecutor, meshToolDefinitions, ToolGateway, driveTransportsIfConfigured, firstWaveTools
+  EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
+  GoogleCalendarTransport, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -112,9 +113,15 @@ const consentEnforcementService = new ConsentEnforcementService(pool, consentSer
 // growth.*-handlingene identisk. D-92: consentEnforcementService injisert
 // identisk med apps/api/src/main.ts.
 const growthService = new GrowthService(pool, consentEnforcementService);
+// D-97: identisk wiring-mønster som apps/api/src/main.ts - SAMME pool, altsaa
+// SAMME delte github_rate_limit_state-rad paa tvers av api/worker-prosessene.
+const githubRateLimitController = new GithubRateLimitController(
+  new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
+  (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
+);
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-  github: new GithubTransport(), telegram: new TelegramTransport(),
+  github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
