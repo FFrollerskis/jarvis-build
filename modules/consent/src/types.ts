@@ -146,6 +146,31 @@ export type ConsentEnforcementMode = "disabled" | "audit" | "enforce";
 /** Det faktiske utfallet av ETT konkret håndhevingsforsøk - ALDRI det samme som `ProcessingDecisionOutcome` (se JSDoc over). */
 export type EnforcementExecutionResult = "proceed" | "blocked";
 
+/**
+ * D-92 CLOSEOUT (PR #32 pre-merge audit): hvem/hva ETT konkret
+ * `enforce()`-kall skal styre. Kalleren (f.eks. `GrowthService.
+ * attributeToCampaign()` via `resolveContactIdForEntity()`) MÅ skille
+ * mellom TO strukturelt ulike "ingen kontakt å evaluere"-tilstander -
+ * de har ALDRI samme betydning og må ALDRI kollapses til samme signal:
+ *
+ * - `no_data_subject`: kontakt-oppslaget fant en rad, og dens
+ *   `contact_id`-kolonne er FAKTISK NULL (f.eks. en lead uten lenket
+ *   kontakt ennå - en NULLABLE FK, se `019_business.sql`). Dette ER
+ *   genuint "intet datasubjekt å styre".
+ * - `unresolved`: kontakt-oppslaget fant INGEN rad i det hele tatt (feil
+ *   `entity_id`, feil tenant, slettet entitet, skrivefeil). Dette er IKKE
+ *   det samme som "intet datasubjekt" - det finnes muligens et ekte
+ *   datasubjekt som bare ikke kunne slås opp. Å behandle dette som
+ *   `no_data_subject` ville vært en policy-bypass-risiko (en feil/ukjent
+ *   `entity_id` kunne stille omgå `enforce`-modus). `enforce()` blokkerer
+ *   derfor `unresolved` fail-closed i `enforce`-modus (se `enforce()`-
+ *   JSDoc i `enforcement-service.ts`).
+ */
+export type EnforcementSubject =
+  | { kind: "resolved"; contact_id: string }
+  | { kind: "no_data_subject" }
+  | { kind: "unresolved" };
+
 export interface ConsentEnforcementPolicy {
   tenant_id: string;
   memory_space_id: string;
@@ -163,9 +188,11 @@ export interface SetConsentEnforcementModeInput {
 
 /**
  * Fullstendig forklarbar håndhevings-avgjørelse (§17 i byggeordren) -
- * ALDRI en opak boolean. `processing_decision` er `null` KUN når
- * `enforcement_mode === "disabled"` (ingen evaluering skjedde i det hele
- * tatt - IKKE det samme som en evaluering som returnerte et resultat).
+ * ALDRI en opak boolean. `processing_decision` er `null` når INGEN D-91-
+ * evaluering fant sted i det hele tatt - `enforcement_mode === "disabled"`,
+ * ELLER `subject.kind !== "resolved"` (`no_data_subject`/`unresolved` -
+ * begge mangler en gyldig `contact_id` å evaluere mot) - IKKE det samme
+ * som en evaluering som faktisk kjørte og returnerte et resultat.
  */
 export interface ConsentEnforcementDecision {
   enforcement_mode: ConsentEnforcementMode;

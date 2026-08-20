@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — CONSENT ENFORCEMENT ACTIVATION / ROLLOUT v1** → D-92,
+**Oppdatert:** 2026-08-20 (**D-92 PRE-MERGE CLOSEOUT-AUDIT (PR #32) - IKKE en ny beslutning-ID, samme
+D-92-slice, retter/styrker FØR merge.** En dedikert lukkingsordre reverifiserte hele PR #32 fra faktisk
+repo-tilstand (IKKE stolte på forrige sluttrapport alene) og fant/rettet ÉN reell semantisk risiko:
+`resolveContactIdForEntity()` kollapset opprinnelig "raden finnes, `contact_id` er FAKTISK NULL"
+(`no_data_subject`) og "INGEN rad funnet for `entity_id`" (`unresolved` - `marketing_attributions.
+entity_id` har BEVISST ingen FK) til SAMME `null`-signal - en policy-bypass-risiko. Rettet med ny
+eksplisitt type `EnforcementSubject` (`resolved`/`no_data_subject`/`unresolved`) i `@jarvis/consent`;
+`unresolved` blokkerer FAIL-CLOSED i `enforce`-modus. Et tidligere sluttrapport-utsagn om "ingen
+duplikat-hendelse-spam ved retry" var UBEKREFTET av noen test - `consent_enforcement_events` har
+BEVISST ingen dedup-nøkkel ("forsøk"-logg, ikke "tilstand"-logg) - nå presist dokumentert og testbevist
+(§J) i stedet. Policy-/samtykke-oppslagsfeil bekreftet å PROPAGERE som exception, ALDRI stille tolket
+som `disabled`/`UNKNOWN_NOT_CONFIGURED`. RLS FORCE bekreftet på begge nye tabeller; production-
+komposisjonsrøtter (`apps/api/main.ts`/`worker-main.ts`, de ENESTE to) bekreftet å injisere
+håndhevingstjenesten. 4 nye tester (2 `enforcement-service.test.ts` §E2, 1 §J, 1 `growth/service-
+rls.test.ts` §M) - totalt 30 nye D-92-tester. Full `pnpm -w test` re-kjørt: **1708 tester grønne, 115
+filer**, exit code 0 (216.42s, bekreftet ved faktisk kjøring). `pnpm -w typecheck` (alle 18 pakker -
+avdekket at `erasure/consent-erasure.test.ts` hadde ett kallsted som IKKE fulgte den nye typen, rettet)
+og `pnpm -w lint` begge rene. Branch `claude/ua4-consent-enforcement-rollout`, PR #32 fortsatt DRAFT,
+IKKE merget. Commit/push/CI-reverifisering på NY HEAD gjenstår på tidspunktet for denne statuslinjen -
+se "neste oppgave". Full detalj: D-92-addendum i DECISIONS_AND_ASSUMPTIONS.md.)
+
+**Runden før det (samme dag, samme PR, FØR closeout-audit over):** **UA-4 NESTE SLICE — CONSENT
+ENFORCEMENT ACTIVATION / ROLLOUT v1** → D-92,
 base `main`@`87404e8ec30e971171ff0993563769da52098e88` (PR #31/D-91-status MERGET), branch
 `claude/ua4-consent-enforcement-rollout`, HEAD `fee4996469e23b0690199a175c3c3489157b5532`,
 **PR #32 opprettet som DRAFT, IKKE merget** (https://github.com/tsworkflow/jarvisbuild/pull/32).

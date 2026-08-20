@@ -193,7 +193,7 @@ describe("D: D-92 Consent Enforcement Activation/Rollout v1 - erasure av begge d
       contact_id: contact.contact_id, purpose: "attribution", state: "denied", legal_basis: "consent", evidence: {}, policy_version: "v1"
     });
     await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
-      enforcement.enforce(client, TENANT_A, "business", contact.contact_id, "attribution", "erasure-test.op")
+      enforcement.enforce(client, TENANT_A, "business", { kind: "resolved", contact_id: contact.contact_id }, "attribution", "erasure-test.op")
     );
 
     const policyBefore = await enforcement.getEnforcementPolicy(TENANT_A, "business", "attribution");

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
-import type { ConsentEnforcementService } from "@jarvis/consent";
+import type { ConsentEnforcementService, EnforcementSubject } from "@jarvis/consent";
 import { assertValidCampaignTransition, assertValidExperimentTransition } from "./state-machine.ts";
 import type {
   Attribution,
@@ -244,12 +244,12 @@ export class GrowthService {
       const current = await this.readForUpdate(client, tenantId, campaignId, true);
       if (!current) throw new Error("campaign_not_found");
       if (this.consentEnforcement) {
-        const contactId = await this.resolveContactIdForEntity(client, tenantId, input.entity_type, input.entity_id);
+        const subject = await this.resolveContactIdForEntity(client, tenantId, input.entity_type, input.entity_id);
         const enforcement = await this.consentEnforcement.enforce(
-          client, tenantId, memorySpace, contactId, "attribution", "growth.attribute_to_campaign"
+          client, tenantId, memorySpace, subject, "attribution", "growth.attribute_to_campaign"
         );
         if (enforcement.enforcement_result === "blocked") {
-          throw new Error(`consent_processing_blocked:attribution:${enforcement.processing_decision?.outcome ?? "unknown"}`);
+          throw new Error(`consent_processing_blocked:attribution:${enforcement.processing_decision?.outcome ?? subject.kind}`);
         }
       }
       const attribution_id = `grw-at-${randomUUID()}`;
@@ -1206,20 +1206,33 @@ export class GrowthService {
    * (`COALESCE(l.contact_id, o2.contact_id)`) for å koble en attribusjon
    * til en kontakt, IKKE en ny arkitektonisk avvik. `contact_id` er
    * NULLABLE på BÅDE `business_leads` og `business_opportunities`
-   * (`019_business.sql`) - `null` betyr "intet datasubjekt lenket ennå",
-   * ALDRI en feiltilstand; håndteres eksplisitt i `ConsentEnforcementService.
-   * enforce()` (proceed, IKKE en gjettet ALLOWED/UNKNOWN).
+   * (`019_business.sql`).
+   *
+   * D-92 CLOSEOUT (PR #32 pre-merge audit): returnerer et `EnforcementSubject`
+   * som EKSPLISITT skiller "raden finnes, `contact_id`-kolonnen er FAKTISK
+   * NULL" (`no_data_subject` - intet datasubjekt lenket ennå, ALDRI en
+   * feiltilstand) fra "INGEN rad ble funnet i det hele tatt for denne
+   * `tenant_id`/`entity_id`" (`unresolved` - feil `entity_id`, feil tenant,
+   * slettet entitet). `marketing_attributions.entity_id` har BEVISST ingen
+   * FK (polymorf `entity_type`/`entity_id`-mønster, se `027_growth.sql`),
+   * så en ukjent/feil `entity_id` er en reell, nåbar tilstand - IKKE bare
+   * hypotetisk. De to tilstandene MÅ IKKE kollapses til samme "ingen
+   * håndheving nødvendig"-signal (policy-bypass-risiko) - håndteres
+   * eksplisitt i `ConsentEnforcementService.enforce()` (se dens JSDoc).
    */
   private async resolveContactIdForEntity(
     client: pg.PoolClient, tenantId: string, entityType: AttributionEntityType, entityId: string
-  ): Promise<string | null> {
+  ): Promise<EnforcementSubject> {
     const table = entityType === "lead" ? "business_leads" : "business_opportunities";
     const idColumn = entityType === "lead" ? "lead_id" : "opportunity_id";
     const { rows } = await client.query(
       `SELECT contact_id FROM ${table} WHERE tenant_id = $1 AND ${idColumn} = $2`,
       [tenantId, entityId]
     );
-    return (rows[0] as { contact_id: string | null } | undefined)?.contact_id ?? null;
+    const row = rows[0] as { contact_id: string | null } | undefined;
+    if (!row) return { kind: "unresolved" };
+    if (row.contact_id === null) return { kind: "no_data_subject" };
+    return { kind: "resolved", contact_id: row.contact_id };
   }
 }
 

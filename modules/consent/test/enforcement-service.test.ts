@@ -8,6 +8,7 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { ConsentEnforcementService } from "../src/enforcement-service.ts";
 import { ConsentService } from "../src/service.ts";
+import type { EnforcementSubject } from "../src/types.ts";
 
 /**
  * D-92 (UA-4 NESTE SLICE): ekte Postgres/RLS-integrasjonsbevis for
@@ -63,7 +64,14 @@ afterAll(async () => {
 
 /** Hjelper: kjør enforcement.enforce() inne i en EKTE withMemoryTransaction, akkurat som GrowthService gjør. */
 async function enforceInTx(tenantId: string, memorySpace: "business", contactId: string | null, purpose: "attribution" | "tracking", operation: string) {
-  return withMemoryTransaction(appPool, tenantId, [memorySpace], (client) => enforcement.enforce(client, tenantId, memorySpace, contactId, purpose, operation));
+  const subject: EnforcementSubject = contactId === null ? { kind: "no_data_subject" } : { kind: "resolved", contact_id: contactId };
+  return withMemoryTransaction(appPool, tenantId, [memorySpace], (client) => enforcement.enforce(client, tenantId, memorySpace, subject, purpose, operation));
+}
+
+/** D-92 CLOSEOUT (PR #32 pre-merge audit): egen hjelper for `unresolved`-tilstanden - IKKE det samme som `contactId === null` (se `EnforcementSubject`-JSDoc). */
+async function enforceUnresolvedInTx(tenantId: string, memorySpace: "business", purpose: "attribution" | "tracking", operation: string) {
+  const subject: EnforcementSubject = { kind: "unresolved" };
+  return withMemoryTransaction(appPool, tenantId, [memorySpace], (client) => enforcement.enforce(client, tenantId, memorySpace, subject, purpose, operation));
 }
 
 describe("A: default (ingen rad) => 'disabled', ALDRI stille 'enforce' (§10 i byggeordren)", () => {
@@ -173,6 +181,28 @@ describe("E: ingen lenket kontakt (contact_id === null) => proceed, ALDRI en sp�
   });
 });
 
+describe("E2: subject.kind === 'unresolved' - ALDRI det samme som 'no_data_subject' (D-92 CLOSEOUT, PR #32 pre-merge audit §8)", () => {
+  it("i 'enforce'-modus blokkerer 'unresolved' FAIL-CLOSED - kan IKKE bevise at det ikke finnes et datasubjekt", async () => {
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "enforce" });
+    const result = await enforceUnresolvedInTx(TENANT_A, "business", "attribution", "test.unresolved.enforce");
+    expect(result.enforcement_result).toBe("blocked");
+    expect(result.processing_decision).toBeNull();
+    expect(result.reason).toMatch(/unresolved/);
+  });
+
+  it("i 'audit'-modus blokkerer 'unresolved' ALDRI (audit blokkerer aldri), men logger INGEN hendelse (ingen gyldig contact_id å skrive mot)", async () => {
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "tracking", mode: "audit" });
+    const before = await enforcement.listEnforcementEvents(TENANT_A, "business", {});
+    const result = await enforceUnresolvedInTx(TENANT_A, "business", "tracking", "test.unresolved.audit");
+    expect(result.enforcement_result).toBe("proceed");
+    expect(result.processing_decision).toBeNull();
+    const after = await enforcement.listEnforcementEvents(TENANT_A, "business", {});
+    expect(after.length).toBe(before.length);
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "tracking", mode: "disabled" });
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "disabled" });
+  });
+});
+
 describe("F: observasjonslogg - kun skrevet for audit/enforce, ALDRI for disabled (§35 i byggeordren)", () => {
   it("listEnforcementEvents inneholder rader for de audit/enforce-håndhevingene som allerede kjørte i denne filen, men INGEN for disabled-modus-testene", async () => {
     const events = await enforcement.listEnforcementEvents(TENANT_A, "business", {});
@@ -224,5 +254,24 @@ describe("I: deterministisk hendelse-rekkefølge (§18/D-91-tie-break-lærdom gj
     for (let i = 1; i < events.length; i++) {
       expect(new Date(events[i - 1]!.recorded_at).getTime()).toBeGreaterThanOrEqual(new Date(events[i]!.recorded_at).getTime());
     }
+  });
+});
+
+describe("J: hendelse-loggens 'forsøk'-semantikk - INGEN dedup-nøkkel (D-92 CLOSEOUT, PR #32 pre-merge audit §22)", () => {
+  it("to GENUINT separate enforce()-kall med IDENTISKE parametre (kontakt/formål/operasjon) gir TO separate rader - ALDRI stille kollapset til én (append-only-loggen skal ALDRI miste meningsfull revisjonshistorikk, jf. byggeordrens 'ikke oppnå no-spam ved å miste historikk')", async () => {
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "enforce" });
+    const before = await enforcement.listEnforcementEvents(TENANT_A, "business", { contact_id: "ct-cst-enf-a2", purpose: "attribution" });
+    await enforceInTx(TENANT_A, "business", "ct-cst-enf-a2", "attribution", "test.repeated_attempt");
+    await enforceInTx(TENANT_A, "business", "ct-cst-enf-a2", "attribution", "test.repeated_attempt");
+    const after = await enforcement.listEnforcementEvents(TENANT_A, "business", { contact_id: "ct-cst-enf-a2", purpose: "attribution" });
+    // MERK (ærlighets-presisering, ikke overstat): dette beviser at arkitekturen ALDRI kollapser/dedupliserer -
+    // hvert `enforce()`-kall er en EGEN, permanent hendelse (event_id = tilfeldig UUID, ingen ON CONFLICT).
+    // Dette betyr OGSÅ at en EKTE HTTP-nivå-retry av samme logiske operasjon (f.eks. en klient som prøver på
+    // nytt etter timeout) SKAPER en ny rad hver gang - IKKE "no duplicate event spam" slik et tidligere
+    // sluttrapport-utsagn upresist hevdet uten test-bevis. Dette er en BEVISST design ("forsøk"-logg, ikke
+    // "tilstand"-logg), IKKE en defekt - nedstrøms konsumenter som ønsker per-logisk-operasjon-dedup kan
+    // gruppere klient-side på (contact_id, purpose, operation, decision_id).
+    expect(after.length).toBe(before.length + 2);
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "disabled" });
   });
 });

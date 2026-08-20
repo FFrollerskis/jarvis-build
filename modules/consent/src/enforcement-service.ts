@@ -5,7 +5,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import type { ConsentService } from "./service.ts";
 import type {
   ConsentEnforcementDecision, ConsentEnforcementEvent, ConsentEnforcementMode, ConsentEnforcementPolicy, ConsentPurpose,
-  SetConsentEnforcementModeInput
+  EnforcementSubject, SetConsentEnforcementModeInput
 } from "./types.ts";
 
 /**
@@ -87,29 +87,54 @@ export class ConsentEnforcementService {
    * `enforcement_result === "blocked"` stoppe FØR sin egen INSERT/UPDATE
    * - denne metoden gjør INGEN styrt skriving selv.
    *
-   * `contactId === null` (f.eks. en lead/opportunity uten lenket
-   * kontakt) betyr "intet datasubjekt å styre" - IKKE det samme som
+   * `subject.kind === "no_data_subject"` (f.eks. en lead/opportunity uten
+   * lenket kontakt) betyr "intet datasubjekt å styre" - IKKE det samme som
    * `disabled`/`ALLOWED`/`UNKNOWN_NOT_CONFIGURED`, og forsøker ALDRI å
    * spørre `consent_decisions` (som uansett ville feilet mot dens NOT
    * NULL-FK) - rapporteres som en EGEN, eksplisitt forklart "proceed".
+   *
+   * `subject.kind === "unresolved"` (D-92 CLOSEOUT, PR #32 pre-merge
+   * audit) betyr at kalleren IKKE fant NOEN rad for den oppgitte
+   * entiteten i det hele tatt (feil `entity_id`, feil tenant, slettet
+   * entitet, skrivefeil) - STRUKTURELT ULIKT `no_data_subject` (der en
+   * rad ble funnet og dens kontakt-kolonne FAKTISK er NULL). Å behandle
+   * `unresolved` som `no_data_subject` ville vært en policy-bypass-risiko
+   * (en feil/ukjent `entity_id` kunne da stille omgå `enforce`-modus for
+   * et datasubjekt som kanskje FAKTISK finnes). I `enforce`-modus
+   * blokkeres derfor `unresolved` FAIL-CLOSED (kan IKKE bevise at det
+   * ikke finnes et datasubjekt). I `audit`-modus fortsetter prosessering
+   * (audit blokkerer ALDRI), men INGEN hendelse logges - det finnes ingen
+   * gyldig `contact_id` å skrive den append-only loggens NOT NULL-FK mot.
    */
   async enforce(
-    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, contactId: string | null, purpose: ConsentPurpose, operation: string
+    client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, subject: EnforcementSubject, purpose: ConsentPurpose, operation: string
   ): Promise<ConsentEnforcementDecision> {
     const mode = await this.getEnforcementModeInTransaction(client, tenantId, memorySpace, purpose);
     if (mode === "disabled") {
       return { enforcement_mode: "disabled", enforcement_result: "proceed", processing_decision: null, reason: "enforcement_not_activated_for_this_tenant_space_purpose" };
     }
-    if (contactId === null) {
+    if (subject.kind === "no_data_subject") {
       return {
         enforcement_mode: mode, enforcement_result: "proceed", processing_decision: null,
         reason: "no_linked_contact_no_data_subject_to_govern"
       };
     }
-    const decision = await this.consent.evaluateProcessingDecisionInTransaction(client, tenantId, contactId, purpose);
+    if (subject.kind === "unresolved") {
+      if (mode === "enforce") {
+        return {
+          enforcement_mode: mode, enforcement_result: "blocked", processing_decision: null,
+          reason: "subject_identity_unresolved_failing_closed_cannot_confirm_no_data_subject"
+        };
+      }
+      return {
+        enforcement_mode: mode, enforcement_result: "proceed", processing_decision: null,
+        reason: "subject_identity_unresolved_audit_mode_cannot_evaluate_or_log_proceeding"
+      };
+    }
+    const decision = await this.consent.evaluateProcessingDecisionInTransaction(client, tenantId, subject.contact_id, purpose);
     const wouldBlock = decision.outcome !== "ALLOWED";
     const enforcement_result = mode === "enforce" && wouldBlock ? "blocked" : "proceed";
-    await this.recordEnforcementEvent(client, tenantId, memorySpace, contactId, purpose, operation, mode, decision.outcome, enforcement_result, decision.provenance, decision.policy_version);
+    await this.recordEnforcementEvent(client, tenantId, memorySpace, subject.contact_id, purpose, operation, mode, decision.outcome, enforcement_result, decision.provenance, decision.policy_version);
     return {
       enforcement_mode: mode, enforcement_result, processing_decision: decision,
       reason: enforcement_result === "blocked"

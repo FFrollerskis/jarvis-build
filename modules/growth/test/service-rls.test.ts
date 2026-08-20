@@ -1495,6 +1495,17 @@ describe("M: D-92 Consent Enforcement Activation/Rollout v1 - attributeToCampaig
     expect(attribution.entity_id).toBe("lead-grw-enf-m5");
   });
 
+  it("UKJENT/feil entity_id (INGEN lead/opportunity-rad i det hele tatt) => 'enforce'-modus BLOKKERER fail-closed - IKKE det samme som 'ingen lenket kontakt' (D-92 CLOSEOUT, PR #32 pre-merge audit §8)", async () => {
+    // 'lead-grw-enf-m5b' finnes ALDRI i business_leads (motsatt av M5-testen over, der raden finnes med contact_id=NULL) -
+    // resolveContactIdForEntity() finner INGEN rad => subject.kind='unresolved', ALDRI forvekslet med 'no_data_subject'.
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M5B" });
+    await expect(
+      enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m5b-does-not-exist" })
+    ).rejects.toThrow(/consent_processing_blocked/);
+    const all = await enforcedService.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(all).toHaveLength(0); // INGEN delvis skriving.
+  });
+
   it("attributeFromTracking() respekterer SAMME håndheving (delegerer til attributeToCampaign() uendret, §32 i byggeordren)", async () => {
     await insertContact(TENANT_A, "ct-grw-enf-m6");
     await insertLeadWithContact(TENANT_A, "lead-grw-enf-m6", "ct-grw-enf-m6");
