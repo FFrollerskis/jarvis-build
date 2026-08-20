@@ -17,10 +17,11 @@ wiring i begge) - `@jarvis/business` importerer FORTSATT ALDRI `@jarvis/growth` 
 KUN når faktisk aktivitet finnes (unngår permanent tom støy-rad, siden typen aldri blir `'resolved'`,
 score 30). Kampanjenavn slått opp for lesbarhet. TIME_WINDOW_MODEL=LIFETIME_ONLY, Q-26-grense uendret
 fra D-89 (ingen truth promotion, ingen ModelGateway). **INGEN ny persistens/migrasjon/ToolGateway-action/
-OpenLoop-endring** - ren lese-/presentasjonsintegrasjon. **13 nye tester** (10 `service-rls.test.ts` §S,
-3 `business-brief.test.ts` §F), pluss 4 eksisterende wiring-regresjonstester oppdatert for det nye
-flerlinjede `BusinessTransport(...)`-kallet (kun formaterings-drift, ingen funksjonell regresjon).
-Testregnskap: `main` FØR = 1643/112 → ETTER = **1656 (+13), 112 filer**, alle grønne. `pnpm -w typecheck`
+OpenLoop-endring** - ren lese-/presentasjonsintegrasjon. **14 nye tester** (10 `service-rls.test.ts` §S,
+4 `business-brief.test.ts` §F inkl. et audit-funn: kildefeil-isolasjon bevist eksplisitt), pluss 4
+eksisterende wiring-regresjonstester oppdatert for det nye flerlinjede `BusinessTransport(...)`-kallet
+(kun formaterings-drift, ingen funksjonell regresjon).
+Testregnskap: `main` FØR = 1643/112 → ETTER = **1657 (+14), 112 filer**, alle grønne. `pnpm -w typecheck`
 17/17 rent, `pnpm -w lint` rent. **Status:** D-90 = **FIXED_SUITE_VERIFIED_COMPLETE=true,
 HOST_ACTION_REQUIRED=false** (ZERO leverandør). UA-4 forblir IKKE komplett (Creative Intelligence,
 samtykke-governance, UA-6, ekte provider-utførelse, Google Ads live-verifisering alle fortsatt

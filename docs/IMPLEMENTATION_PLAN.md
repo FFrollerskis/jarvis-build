@@ -1717,10 +1717,10 @@ migrasjon** - konsumerer UTELUKKENDE eksisterende `listMarketingObservations()`/
 (read-only, strukturelt bevist). **INGEN ny ToolGateway-action** - eksisterende `growth.list_
 marketing_observations` (klasse A) er en tilstrekkelig lese-flate for in-process-konsumering.
 **INGEN OpenLoop-endring** - ren presentasjon. Q-20/Q-21/Q-27 uendret (ingen ny tabell/RLS-flate/
-scheduler). **13 nye tester** (10 `service-rls.test.ts` §S, 3 `business-brief.test.ts` §F), pluss
+scheduler). **14 nye tester** (10 `service-rls.test.ts` §S, 4 `business-brief.test.ts` §F), pluss
 4 eksisterende wiring-regresjonstester (2 filer) oppdatert for det nye flerlinjede
 `BusinessTransport(...)`-konstruktørkallet (kun formaterings-drift, ingen funksjonell regresjon).
-Testregnskap: `main` FØR = 1643/112 → ETTER = **1656 (+13), 112 filer**, alle grønne. `pnpm -w
+Testregnskap: `main` FØR = 1643/112 → ETTER = **1657 (+14), 112 filer**, alle grønne. `pnpm -w
 typecheck` 17/17 rent, `pnpm -w lint` rent. **D-90 = FIXED_SUITE_VERIFIED_COMPLETE=true,
 HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forblir IKKE komplett
 (Creative Intelligence, samtykke-governance, UA-6, ekte provider-utførelse, Google Ads live-
