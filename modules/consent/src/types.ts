@@ -117,3 +117,77 @@ export interface ListConsentDecisionsFilter {
   contact_id?: string;
   purpose?: ConsentPurpose;
 }
+
+/**
+ * D-92 (UA-4 NESTE SLICE): Consent Enforcement Activation / Rollout v1.
+ *
+ * BEVISST HOLDT ADSKILT fra D-91 sin `ProcessingDecisionOutcome` (§16 i
+ * byggeordren - "do not collapse engine decision and rollout decision").
+ * `ProcessingDecisionOutcome` er HVA motoren mener om datasubjektets
+ * samtykke-/rettslig-grunnlag-tilstand. `ConsentEnforcementMode` er en
+ * HELT ANNEN, eier-konfigurert avgjørelse: OM den meningen faktisk skal
+ * få lov til å blokkere en eksisterende prosesserings-sti.
+ *
+ * - `disabled` (STANDARD ved fravær av rad - se `032`/`033`s "ingen
+ *   falsk backfill"-prinsipp anvendt her også): D-91-motoren finnes og
+ *   KAN spørres, men er IKKE autoritativ for blokkering. IDENTISK
+ *   oppførsel med FØR D-92 - ingen eksisterende kontakt/tenant rammes
+ *   retroaktivt av at denne migrasjonen kjører.
+ * - `audit`: evaluer + registrer en `ConsentEnforcementEvent`, MEN la
+ *   prosesseringen fortsette uansett utfall - en trygg observasjons-fase
+ *   FØR eieren eventuelt aktiverer `enforce`.
+ * - `enforce`: evaluer; `ALLOWED` fortsetter; `DENIED`/
+ *   `UNKNOWN_NOT_CONFIGURED` blokkerer FØR den styrte skrivingen skjer
+ *   (ALDRI en delvis skriving - se `enforce()`-JSDoc i
+ *   `enforcement-service.ts`).
+ */
+export type ConsentEnforcementMode = "disabled" | "audit" | "enforce";
+
+/** Det faktiske utfallet av ETT konkret håndhevingsforsøk - ALDRI det samme som `ProcessingDecisionOutcome` (se JSDoc over). */
+export type EnforcementExecutionResult = "proceed" | "blocked";
+
+export interface ConsentEnforcementPolicy {
+  tenant_id: string;
+  memory_space_id: string;
+  purpose: ConsentPurpose;
+  mode: ConsentEnforcementMode;
+  actor_person_id: string | null;
+  updated_at: string;
+}
+
+export interface SetConsentEnforcementModeInput {
+  purpose: ConsentPurpose;
+  mode: ConsentEnforcementMode;
+  actor_person_id?: string;
+}
+
+/**
+ * Fullstendig forklarbar håndhevings-avgjørelse (§17 i byggeordren) -
+ * ALDRI en opak boolean. `processing_decision` er `null` KUN når
+ * `enforcement_mode === "disabled"` (ingen evaluering skjedde i det hele
+ * tatt - IKKE det samme som en evaluering som returnerte et resultat).
+ */
+export interface ConsentEnforcementDecision {
+  enforcement_mode: ConsentEnforcementMode;
+  enforcement_result: EnforcementExecutionResult;
+  processing_decision: ProcessingDecisionResult | null;
+  /** Hvorfor enforcement_result ble som det ble (inkl. "disabled"/"ingen lenket kontakt"-forklaringer som IKKE går via evaluateProcessingDecision). */
+  reason: string;
+}
+
+/** Én permanent rad i observasjons-loggen (§14/§35 i byggeordren) - KUN skrevet for `audit`/`enforce`-moduser, ALDRI for `disabled` (ingen evaluering = ingen rad). */
+export interface ConsentEnforcementEvent {
+  event_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  contact_id: string;
+  purpose: ConsentPurpose;
+  operation: string;
+  enforcement_mode: "audit" | "enforce";
+  processing_outcome: ProcessingDecisionOutcome;
+  enforcement_result: EnforcementExecutionResult;
+  decision_id: string | null;
+  policy_version: string | null;
+  actor_person_id: string | null;
+  recorded_at: string;
+}

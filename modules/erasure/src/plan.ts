@@ -164,6 +164,17 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `business_contacts` noen gang legges til i denne planen, MÅ
   // `consent_decisions` slettes FØR den (FK-retningen krever det).
   add(result, "consent_decisions", await run(client, mode, "consent_decisions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-92 (UA-4 NESTE SLICE, 033_consent_enforcement.sql): `consent_
+  // enforcement_events` har SAMME FK-egenskap mot business_contacts som
+  // consent_decisions over (samme pre-eksisterende business_contacts-gap,
+  // ingen ordringskonflikt i dag). `consent_enforcement_policies` har
+  // INGEN kontakt-FK i det hele tatt (ren tenant/space/formål-konfigurasjon,
+  // ikke persondata) - registreres likevel her for konsistens: en HEL
+  // memory-space-erasure fjerner ALT growth-/consent-relatert domene for
+  // den space-en, og en gjenværende rollout-policy-rad for en nå-tom
+  // space ville vært et meningsløst dinglende konfigurasjonsobjekt.
+  add(result, "consent_enforcement_events", await run(client, mode, "consent_enforcement_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "consent_enforcement_policies", await run(client, mode, "consent_enforcement_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

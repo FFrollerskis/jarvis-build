@@ -1255,6 +1255,27 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       capability_class: "A", scopes: ["consent.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("consent")
+    },
+    // D-92 (UA-4 NESTE SLICE): Consent Enforcement Activation / Rollout v1 -
+    // provider-nøytral aktiverings-flate for D-91-motoren. `get_enforcement_
+    // policy` er RENT lesing - klasse A. `set_enforcement_policy` endrer KUN
+    // Jarvis-intern rollout-konfigurasjon (disabled/audit/enforce) - ALDRI en
+    // ekstern/leverandør-handling, ALDRI en samtykke-beslutning i seg selv -
+    // klasse B, SAMME begrunnelse som `consent.record_decision`.
+    {
+      tool_id: "consent", action: "get_enforcement_policy", description: "Hent gjeldende håndhevings-modus (disabled/audit/enforce) for tenant+space+formål (disabled hvis ingen rad finnes - ALDRI stille 'enforce')",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), purpose: z.string() }),
+      capability_class: "A", scopes: ["consent.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
+    },
+    {
+      tool_id: "consent", action: "set_enforcement_policy", description: "Sett håndhevings-modus (disabled/audit/enforce) for tenant+space+formål - eksplisitt eier-aktivering, ALDRI en påstand om at et datasubjekt faktisk har samtykket",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), purpose: z.string(), mode: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["consent.write"], reversible: true,
+      rollback_procedure: "sett modus tilbake til forrige verdi (f.eks. 'disabled') via et nytt set_enforcement_policy-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("consent")
     }
   ];
 }

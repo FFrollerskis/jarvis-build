@@ -1,7 +1,8 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolTransport } from "@jarvis/tool-gateway";
+import type { ConsentEnforcementService } from "./enforcement-service.ts";
 import type { ConsentService } from "./service.ts";
-import type { ConsentDecisionState, ConsentLegalBasis, ConsentPurpose } from "./types.ts";
+import type { ConsentDecisionState, ConsentEnforcementMode, ConsentLegalBasis, ConsentPurpose } from "./types.ts";
 
 /**
  * D-91 (UA-4 NESTE SLICE): provider-nøytralt `consent.*`-namespace.
@@ -12,7 +13,7 @@ import type { ConsentDecisionState, ConsentLegalBasis, ConsentPurpose } from "./
  * `ToolInvocationContext` trengs derfor IKKE.
  */
 export class ConsentTransport implements ToolTransport {
-  constructor(private readonly service: ConsentService) {}
+  constructor(private readonly service: ConsentService, private readonly enforcement?: ConsentEnforcementService) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
     const tenantId = requireString(parameters, "tenant_id");
@@ -51,9 +52,26 @@ export class ConsentTransport implements ToolTransport {
         );
         return { data: result as unknown as JsonValue };
       }
+      case "get_enforcement_policy": {
+        const policy = await this.requireEnforcement().getEnforcementPolicy(tenantId, memorySpace, requireString(parameters, "purpose") as ConsentPurpose);
+        return { ...(policy ? { external_id: `${policy.tenant_id}:${policy.memory_space_id}:${policy.purpose}` } : {}), data: policy as unknown as JsonValue };
+      }
+      case "set_enforcement_policy": {
+        const policy = await this.requireEnforcement().setEnforcementMode(tenantId, memorySpace, {
+          purpose: requireString(parameters, "purpose") as ConsentPurpose,
+          mode: requireString(parameters, "mode") as ConsentEnforcementMode,
+          ...(parameters["actor_person_id"] !== undefined ? { actor_person_id: String(parameters["actor_person_id"]) } : {})
+        });
+        return { external_id: `${policy.tenant_id}:${policy.memory_space_id}:${policy.purpose}`, data: policy as unknown as JsonValue };
+      }
       default:
         throw new Error(`consent_action_not_implemented:${action}`);
     }
+  }
+
+  private requireEnforcement(): ConsentEnforcementService {
+    if (!this.enforcement) throw new Error("consent_enforcement_not_wired");
+    return this.enforcement;
   }
 }
 

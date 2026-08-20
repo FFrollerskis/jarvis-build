@@ -1,10 +1,48 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — CONSENT / COOKIE / DATA-PROCESSING GOVERNANCE CORE v1**
-→ D-91, base `main`@`4e8fc1c7d3380e32d00774e24bb2ed43537f1698` (PR #30/D-90-status MERGET), branch
-`claude/ua4-marketing-consent-governance`, **draft PR, IKKE merget**). **RESUME SOVEREIGN AUTONOMY
-v4.0 — full UA-4-matrise + 9-kandidat-sammenligning (A-I) kjørt FØR valg, ingen rekonstruksjon fra
-chat-historikk.** UA-4-matrisen (fersk lesing av docs + kode) viste samtykke-/databehandlingsstyring
+**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — CONSENT ENFORCEMENT ACTIVATION / ROLLOUT v1** → D-92,
+base `main`@`87404e8ec30e971171ff0993563769da52098e88` (PR #31/D-91-status MERGET). **Implementering +
+full testsuite ferdig og grønn; branch/commit/push/draft PR IKKE utført ennå på tidspunktet for denne
+statuslinjen** - se "neste oppgave" nederst for eksakt gjenstående steg.) **RESUME SOVEREIGN AUTONOMY v4.0 —
+full UA-4-matrise + 9-kandidat-sammenligning (A-I) kjørt FØR valg.** D-91 sin motor eksisterte men var
+IKKE koblet inn i noen faktisk prosesserings-sti (`MARKETING_PROCESSING_ENFORCEMENT_FULLY_WIRED=false`)
+- det eneste gjenværende, ikke-eksternt-avhengige UA-4-punktet. **Ny klasse `ConsentEnforcementService`**
+(`modules/consent/src/enforcement-service.ts`, BEVISST adskilt fra D-91 sin `ConsentService` - "hva
+motoren MENER" vs. "OM det håndheves"). Ny migrasjon `033_consent_enforcement.sql`:
+`consent_enforcement_policies` (mutable, `disabled`/`audit`/`enforce`, standard `disabled` ved fravær -
+IDENTISK oppførsel med FØR D-92) + `consent_enforcement_events` (append-only observasjonslogg, `seq`-
+tie-breaker fra FØRSTE stund). **`GrowthService.attributeToCampaign()` er innsettingspunktet** (dekker
+`attributeFromTracking()` automatisk, siden den delegerer uendret) - `contact_id` løses fra
+`business_leads`/`business_opportunities` (gjenbruker `campaignPerformance()`s eksisterende join-mønster,
+NULLABLE `contact_id` håndtert eksplisitt som "intet datasubjekt", ALDRI gjettet). `consentEnforcement`
+er BEVISST valgfri på konstruktøren - 25+ eksisterende tester + live-host-script forblir UENDRET og
+grønne; kun `apps/api/main.ts`/`worker-main.ts` injiserer den faktiske instansen. `enforce`-modus:
+`ALLOWED`→fortsett, `DENIED`/`UNKNOWN_NOT_CONFIGURED`→blokker FØR skriving (INGEN delvis rad). **Avvik
+fra byggeordrens "reuse audit_events"-preferanse, eksplisitt begrunnet:** `audit_events` krever en EKTE,
+ikke-valgfri `IdentityContext` (bekreftet: ALLE eksisterende `writeAudit()`-kallsteder har en) -
+`GrowthTransport` tråder ikke identitet ned til tjenestemetoder, og å bygge det ville vært en mye større,
+separat wiring-endring. Bygget i stedet en egen, smal observasjonstabell med `actor_person_id` NULLABLE
+(samme mønster som `consent_decisions`), fremfor å fabrikkere identitet. **26 nye tester** (16 nye i
+`enforcement-service.test.ts` (nytt fil), 9 nye i `growth/service-rls.test.ts` §M, 1 ny i
+`erasure/consent-erasure.test.ts` §D). Testregnskap: `main` FØR = 1679/114 → ETTER = **1704 (+25), 115
+filer**, alle grønne (bekreftet ved faktisk full `pnpm -w test`-kjøring, 213.96s, exit code 0 - ikke
+anslag). `pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent. HOST_ACTION_REQUIRED=false. **UA-4
+ETTER denne sliceen:** `CONSENT_GOVERNANCE_CORE_COMPLETE=true`, `PRODUCTION_ENFORCEMENT_PARTIAL=true`
+(motoren KAN håndheve reelt for `attribution` når eieren eksplisitt aktiverer `enforce` - IKKE aktivert
+for noen tenant/space per default; `tracking`-formålet har fortsatt ingen faktisk sporingsmekanisme).
+UA-4 SOM HELHET forblir IKKE komplett. UA-3 kriterium 2 UENDRET (2/5 domener). **DRAFT PR opprettet,
+IKKE merget.** **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon, INGEN andre slice
+denne runden, INGEN merge.** Full detalj: D-92 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** UA-4 NESTE SLICE — CONSENT / COOKIE / DATA-PROCESSING
+GOVERNANCE CORE v1 → D-91, base `main`@`4e8fc1c7d3380e32d00774e24bb2ed43537f1698` (PR #30/D-90-status
+MERGET), branch `claude/ua4-marketing-consent-governance`, **PR #31 MERGET av Tobias sin eksplisitte
+godkjenning → `main`@`87404e8ec30e971171ff0993563769da52098e88`** (merge-commit, `merge_method=merge`).
+Post-merge CI: første kjøring rød på en pre-eksisterende, urelatert flake (`modules/core/test/
+data-foundation.test.ts`, `ECONNREFUSED` mot embedded Postgres under parallell kjøring) - diagnostisert
+og bekreftet som miljø-flake (13/13 grønt isolert, samme commit grønn to ganger lokalt + på PR-CI før
+merge), rerun av de feilede jobbene ga GRØNN. **RESUME SOVEREIGN AUTONOMY v4.0 — full UA-4-matrise +
+9-kandidat-sammenligning (A-I) kjørt FØR valg, ingen rekonstruksjon fra chat-historikk.** UA-4-matrisen (fersk lesing av docs + kode) viste samtykke-/databehandlingsstyring
 (UA-4 akseptansekriterium 4, Q-29 punkt 5) som eneste GJENVÆRENDE literale UA-4-krav uten kode ELLER
 dokumentert blokkering - Creative/Experiment Intelligence forblir BLOCKED_BY_DATA, GA4/Meta-adapter
 NOT_STARTED uten D-64-port kjørt (avvist for å unngå leverandør-utvidelse kun for fremdrift), D-86/

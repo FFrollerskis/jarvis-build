@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import type { ConsentEnforcementService } from "@jarvis/consent";
 import { assertValidCampaignTransition, assertValidExperimentTransition } from "./state-machine.ts";
 import type {
   Attribution,
   AttributeFromTrackingInput,
   AttributeToCampaignInput,
+  AttributionEntityType,
   Campaign,
   CampaignActionRecommendation,
   CampaignChannel,
@@ -50,7 +52,18 @@ export interface SearchCampaignsFilter {
  * entitetene - ingen ny lead-/opportunity-tabell/-tjeneste.
  */
 export class GrowthService {
-  constructor(private readonly pool: pg.Pool) {}
+  /**
+   * D-92 (UA-4 NESTE SLICE): `consentEnforcement` er BEVISST valgfri (§37 i
+   * byggeordren - eksisterende oppførsel MÅ bevares). 25+ eksisterende
+   * `service-rls.test.ts`-kall og `ua4-growth-core-live.ts` konstruerer
+   * `new GrowthService(pool)` med KUN poolen - disse forblir UENDRET og
+   * FORTSATT grønne, siden `attributeToCampaign()` hopper HELT over
+   * håndhevings-sjekken når denne er `undefined` (identisk med
+   * `disabled`-modus, men uten selv en databasespørring - null overhead).
+   * Produksjons-wiring (`apps/api/src/main.ts`/`worker-main.ts`) injiserer
+   * DEN FAKTISKE instansen.
+   */
+  constructor(private readonly pool: pg.Pool, private readonly consentEnforcement?: ConsentEnforcementService) {}
 
   async createCampaign(tenantId: string, memorySpace: MemorySpace, input: CreateCampaignInput): Promise<Campaign> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -216,11 +229,29 @@ export class GrowthService {
   /**
    * Deterministisk kobling til EKSISTERENDE CRM-entitet - EKSPLISITT av
    * kaller, ALDRI AI-utledet (Q-26-grensen: ingen inferert kausal påstand).
+   *
+   * D-92 (UA-4 NESTE SLICE, §31/§33 i byggeordren): dette ER det trygge
+   * håndhevings-innsettingspunktet - `attributeFromTracking()` kaller
+   * denne METODEN UENDRET for sin egen skriving (se `attributeFromTracking()`-
+   * JSDoc), så ÉN sjekk her dekker BEGGE kallveiene, INGEN duplisert
+   * håndheving. Sjekken skjer FØR INSERT-en, I SAMME transaksjon (samme
+   * `client`), og er et rent no-op (`this.consentEnforcement === undefined`)
+   * for ALLE eksisterende kallere som ikke injiserer en
+   * `ConsentEnforcementService` - se konstruktør-JSDoc.
    */
   async attributeToCampaign(tenantId: string, memorySpace: MemorySpace, campaignId: string, input: AttributeToCampaignInput): Promise<Attribution> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, campaignId, true);
       if (!current) throw new Error("campaign_not_found");
+      if (this.consentEnforcement) {
+        const contactId = await this.resolveContactIdForEntity(client, tenantId, input.entity_type, input.entity_id);
+        const enforcement = await this.consentEnforcement.enforce(
+          client, tenantId, memorySpace, contactId, "attribution", "growth.attribute_to_campaign"
+        );
+        if (enforcement.enforcement_result === "blocked") {
+          throw new Error(`consent_processing_blocked:attribution:${enforcement.processing_decision?.outcome ?? "unknown"}`);
+        }
+      }
       const attribution_id = `grw-at-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO marketing_attributions (attribution_id, tenant_id, memory_space_id, campaign_id, entity_type, entity_id, attribution_model, source_pointer)
@@ -336,6 +367,18 @@ export class GrowthService {
    * samme). Kaster `no_matching_campaign_for_tracking` (aldri en gjettet
    * kampanje) når ingen registrert tagg matcher - fail-closed, samme
    * prinsipp som `attributeToCampaign()` sin `campaign_not_found`.
+   *
+   * D-92 (§8/§32 i byggeordren) - purpose-klassifisering: denne metoden
+   * gjør INGEN egen styrt skriving (kun en LESING av `marketing_campaign_
+   * tracking_tags` for å slå opp `campaign_id`, deretter delegering) - det
+   * finnes derfor KUN ÉN reell prosesserings-operasjon her, ikke to. Den
+   * ETTERFØLGENDE `attributeToCampaign()`-kallet er formålet `"attribution"`
+   * (samme som et direkte `attributeToCampaign()`-kall) - IKKE `"tracking"`.
+   * `"tracking"`-formålet forblir det D-91 allerede dokumenterte fremtidige
+   * gapet (faktisk innhenting/bruk av en sporings-ID via en ekte sporings-
+   * mekanisme, som IKKE finnes ennå) - se D-91/Q-29 punkt (5). Håndhevingen
+   * skjer derfor UTELUKKENDE inne i `attributeToCampaign()`, som automatisk
+   * dekker BEGGE kallveiene uten duplisert sjekk/logging.
    */
   async attributeFromTracking(tenantId: string, memorySpace: MemorySpace, input: AttributeFromTrackingInput): Promise<Attribution> {
     const campaignId = await this.resolveCampaignFromTracking(tenantId, memorySpace, input.tracking);
@@ -1154,6 +1197,29 @@ export class GrowthService {
       [tenantId, campaignId]
     );
     return (rows[0] as Campaign) ?? null;
+  }
+
+  /**
+   * D-92 (UA-4 NESTE SLICE): `attributeToCampaign()` tar KUN
+   * `entity_type`/`entity_id` (aldri `contact_id` direkte) - denne
+   * SAMME rå-SQL-join-mønsteret brukes ALLEREDE av `campaignPerformance()`
+   * (`COALESCE(l.contact_id, o2.contact_id)`) for å koble en attribusjon
+   * til en kontakt, IKKE en ny arkitektonisk avvik. `contact_id` er
+   * NULLABLE på BÅDE `business_leads` og `business_opportunities`
+   * (`019_business.sql`) - `null` betyr "intet datasubjekt lenket ennå",
+   * ALDRI en feiltilstand; håndteres eksplisitt i `ConsentEnforcementService.
+   * enforce()` (proceed, IKKE en gjettet ALLOWED/UNKNOWN).
+   */
+  private async resolveContactIdForEntity(
+    client: pg.PoolClient, tenantId: string, entityType: AttributionEntityType, entityId: string
+  ): Promise<string | null> {
+    const table = entityType === "lead" ? "business_leads" : "business_opportunities";
+    const idColumn = entityType === "lead" ? "lead_id" : "opportunity_id";
+    const { rows } = await client.query(
+      `SELECT contact_id FROM ${table} WHERE tenant_id = $1 AND ${idColumn} = $2`,
+      [tenantId, entityId]
+    );
+    return (rows[0] as { contact_id: string | null } | undefined)?.contact_id ?? null;
   }
 }
 

@@ -113,28 +113,60 @@ export class ConsentService {
     tenantId: string, memorySpace: MemorySpace, contactId: string, purpose: ConsentPurpose
   ): Promise<ProcessingDecisionResult> {
     const latest = await this.getCurrentConsentState(tenantId, memorySpace, contactId, purpose);
-    const evaluatedAt = new Date().toISOString();
-    if (!latest) {
-      return {
-        outcome: "UNKNOWN_NOT_CONFIGURED", purpose, contact_id: contactId,
-        reason: "ingen registrert samtykke-/rettslig-grunnlag-beslutning finnes for denne kontakten/formålet - fravær er ALDRI implisitt tillatelse",
-        policy_version: null, provenance: null, evaluated_at: evaluatedAt
-      };
-    }
-    const expired = latest.expires_at !== null && new Date(latest.expires_at).getTime() < Date.now();
-    if (latest.state === "granted" && !expired) {
-      return {
-        outcome: "ALLOWED", purpose, contact_id: contactId,
-        reason: `siste registrerte beslutning er 'granted' (rettslig grunnlag: ${latest.legal_basis}), ikke utløpt`,
-        policy_version: latest.policy_version, provenance: latest.decision_id, evaluated_at: evaluatedAt
-      };
-    }
+    return deriveProcessingDecision(contactId, purpose, latest);
+  }
+
+  /**
+   * D-92 (UA-4 NESTE SLICE): SAMME evaluerings-logikk som
+   * `evaluateProcessingDecision()`, men deltar i en kallers EKSISTERENDE
+   * transaksjon (samme `client`) i stedet for å åpne sin egen via
+   * `withMemoryTransaction`. Kreves for at en fremtidig håndhevende
+   * kaller (se `ConsentEnforcementService.enforce()`) skal kunne
+   * evaluere OG utføre sin styrte skriving i ÉN transaksjon (READ
+   * COMMITTED-konsistens - se `enforce()`-JSDoc for den eksakte,
+   * dokumenterte TOCTOU-grensen). RLS-sesjonskontekst (tenant/space) må
+   * ALLEREDE være satt av kallerens EGEN `withMemoryTransaction`-kall -
+   * denne metoden setter INGEN sesjonskontekst selv.
+   */
+  async evaluateProcessingDecisionInTransaction(
+    client: pg.PoolClient, tenantId: string, contactId: string, purpose: ConsentPurpose
+  ): Promise<ProcessingDecisionResult> {
+    const { rows } = await client.query(
+      `SELECT * FROM consent_decisions
+       WHERE tenant_id = $1 AND contact_id = $2 AND purpose = $3
+       ORDER BY recorded_at DESC, seq DESC LIMIT 1`,
+      [tenantId, contactId, purpose]
+    );
+    const latest = (rows[0] as ConsentDecision | undefined) ?? null;
+    return deriveProcessingDecision(contactId, purpose, latest);
+  }
+}
+
+/** Ren funksjon, delt av BEGGE evaluerings-veiene over - garanterer IDENTISK fail-closed logikk uansett hvilken transaksjonskontekst kallet skjer i. */
+function deriveProcessingDecision(
+  contactId: string, purpose: ConsentPurpose, latest: ConsentDecision | null
+): ProcessingDecisionResult {
+  const evaluatedAt = new Date().toISOString();
+  if (!latest) {
     return {
-      outcome: "DENIED", purpose, contact_id: contactId,
-      reason: expired
-        ? `siste registrerte 'granted'-beslutning er utløpt (${latest.expires_at})`
-        : `siste registrerte beslutning er '${latest.state}'`,
+      outcome: "UNKNOWN_NOT_CONFIGURED", purpose, contact_id: contactId,
+      reason: "ingen registrert samtykke-/rettslig-grunnlag-beslutning finnes for denne kontakten/formålet - fravær er ALDRI implisitt tillatelse",
+      policy_version: null, provenance: null, evaluated_at: evaluatedAt
+    };
+  }
+  const expired = latest.expires_at !== null && new Date(latest.expires_at).getTime() < Date.now();
+  if (latest.state === "granted" && !expired) {
+    return {
+      outcome: "ALLOWED", purpose, contact_id: contactId,
+      reason: `siste registrerte beslutning er 'granted' (rettslig grunnlag: ${latest.legal_basis}), ikke utløpt`,
       policy_version: latest.policy_version, provenance: latest.decision_id, evaluated_at: evaluatedAt
     };
   }
+  return {
+    outcome: "DENIED", purpose, contact_id: contactId,
+    reason: expired
+      ? `siste registrerte 'granted'-beslutning er utløpt (${latest.expires_at})`
+      : `siste registrerte beslutning er '${latest.state}'`,
+    policy_version: latest.policy_version, provenance: latest.decision_id, evaluated_at: evaluatedAt
+  };
 }

@@ -7,13 +7,14 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
-import { LocalHashEmbedding } from "@jarvis/memory";
+import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { BusinessService } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ErasureService } from "../src/erasure-service.ts";
 // Relativ import (IKKE en ny @jarvis/erasure -> @jarvis/consent
 // pakkeavhengighet kun for en testfil) - samme presedens som
 // growth-erasure.test.ts sin import av GrowthService.
+import { ConsentEnforcementService } from "../../consent/src/enforcement-service.ts";
 import { ConsentService } from "../../consent/src/service.ts";
 
 /**
@@ -34,6 +35,7 @@ let appPool: pg.Pool;
 let embedding: LocalHashEmbedding;
 let sovereignPolicy: PolicyGateway;
 let consent: ConsentService;
+let enforcement: ConsentEnforcementService;
 let business: BusinessService;
 
 const TENANT_A = "tenant-cst-erase-a";
@@ -73,6 +75,7 @@ beforeAll(async () => {
     authority: { owner_person_id: "person-tobias", owner_tenants: [TENANT_A] }
   });
   consent = new ConsentService(appPool);
+  enforcement = new ConsentEnforcementService(appPool, consent);
   business = new BusinessService(appPool);
 }, 240_000);
 
@@ -176,5 +179,39 @@ describe("C: idempotens - samme request_id kjørt to ganger på en consent-scope
     expect(second.status).toBe("completed");
     expect(second.idempotent_replay).toBe(true);
     expect(second.record_counts).toEqual(first.record_counts);
+  });
+});
+
+describe("D: D-92 Consent Enforcement Activation/Rollout v1 - erasure av begge de nye tabellene (033_consent_enforcement.sql)", () => {
+  it("en memory-space-scoped erasure fjerner BÅDE consent_enforcement_events (kontakt-lenket) OG consent_enforcement_policies (tenant/space-konfigurasjon, ikke kontakt-lenket)", async () => {
+    const sentinel = `SentinelCstEnfErase${randomUUID().replace(/-/g, "")}`;
+    const contact = await business.createContact(TENANT_A, "business", { name: sentinel });
+
+    // Aktiver 'enforce' og generer minst én observasjons-hendelse.
+    await enforcement.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "enforce" });
+    await consent.recordConsentDecision(TENANT_A, "business", {
+      contact_id: contact.contact_id, purpose: "attribution", state: "denied", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      enforcement.enforce(client, TENANT_A, "business", contact.contact_id, "attribution", "erasure-test.op")
+    );
+
+    const policyBefore = await enforcement.getEnforcementPolicy(TENANT_A, "business", "attribution");
+    expect(policyBefore).not.toBeNull();
+    const eventsBefore = await enforcement.listEnforcementEvents(TENANT_A, "business", { contact_id: contact.contact_id });
+    expect(eventsBefore.length).toBeGreaterThan(0);
+
+    const service = new ErasureService(appPool, sovereignPolicy, embedding);
+    const result = await service.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" },
+      requestId: `req-cst-enf-erase-${randomUUID()}`,
+      identity: identityFor(TENANT_A)
+    });
+    expect(result.status).toBe("completed");
+
+    const policyAfter = await enforcement.getEnforcementPolicy(TENANT_A, "business", "attribution");
+    expect(policyAfter).toBeNull(); // Standard 'disabled'-tolkning gjenopprettes - ARV IKKE en dinglende 'enforce'-rad.
+    const eventsAfter = await enforcement.listEnforcementEvents(TENANT_A, "business", { contact_id: contact.contact_id });
+    expect(eventsAfter).toHaveLength(0);
   });
 });
