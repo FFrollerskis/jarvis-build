@@ -2,7 +2,8 @@
 
 **Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON** → D-90,
 base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch
-`claude/ua4-business-os-marketing-memory`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 —
+`claude/ua4-business-os-marketing-memory`, **PR #29 MERGET av Tobias sin eksplisitte godkjenning →
+`main`@`d5dec17cf3449d865b25a1fd2c6e1a0ea2846e5c`**). **RESUME SOVEREIGN AUTONOMY v4.0 —
 sliceen navngitt direkte av byggeordren.** Verifisert gap FØR bygging: `BUSINESS_OS_MARKETING_MEMORY_
 VISIBLE=false` - D-89 sine observasjoner var kun nåbare via rå ToolGateway-lesing, aldri surfacet i
 Business OS-briefen. **Arkitektonisk kjernefunn:** `@jarvis/growth` avhenger ALLEREDE av `@jarvis/
@@ -25,9 +26,14 @@ Testregnskap: `main` FØR = 1643/112 → ETTER = **1657 (+14), 112 filer**, alle
 17/17 rent, `pnpm -w lint` rent. **Status:** D-90 = **FIXED_SUITE_VERIFIED_COMPLETE=true,
 HOST_ACTION_REQUIRED=false** (ZERO leverandør). UA-4 forblir IKKE komplett (Creative Intelligence,
 samtykke-governance, UA-6, ekte provider-utførelse, Google Ads live-verifisering alle fortsatt
-NOT_STARTED/BLOCKED/DEFERRED). UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR opprettes, IKKE
-merget. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon, INGEN andre slice denne
-runden, INGEN merge.** Full detalj: D-90 i DECISIONS_AND_ASSUMPTIONS.md.
+NOT_STARTED/BLOCKED/DEFERRED). UA-3 kriterium 2 UENDRET (2/5 domener). **PR #29 MERGET
+2026-08-20T02:23:29Z** (merge commit `d5dec17cf3449d865b25a1fd2c6e1a0ea2846e5c`, `merge_method=merge`,
+ingen squash) etter Tobias sin eksplisitte godkjenning og en fullstendig pre-merge closeout-audit
+(60-punkts rapport levert, alle Q-26/D-64/D-41/D-86/D-87/UA-6/modul-avhengighet-grenser bekreftet
+intakte). Post-merge: `origin/main` og lokal `main` verifisert synkronisert på `d5dec17`, kanoniske
+D-90-filer bekreftet til stede (`business-os-integration.ts`, `BusinessTransport`-DI, app-lag-wiring
+i begge `main.ts`/`worker-main.ts`). **STOP: INGEN Google Ads live-oppsett, INGEN ekte
+provider-mutasjon, INGEN andre slice denne runden.** Full detalj: D-90 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Runden før det (samme dag, MERGET):** UA-4 SLICE 7 — MARKETING MEMORY v1 → D-89, base
 `main`@`c8a5ea46d9af6fed90f3d179c0eb01ac2dffc031` (PR #26/D-88 MERGET), branch
