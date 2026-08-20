@@ -276,6 +276,9 @@ importers:
       '@jarvis/business':
         specifier: workspace:*
         version: link:../business
+      '@jarvis/consent':
+        specifier: workspace:*
+        version: link:../consent
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

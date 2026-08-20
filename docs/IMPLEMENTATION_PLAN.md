@@ -1794,6 +1794,47 @@ GRUNNLAG, INGEN automatisk kobling til eksisterende attribusjon ennå - se ENFOR
 UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full detalj: D-91 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 NESTE SLICE — CONSENT ENFORCEMENT ACTIVATION / ROLLOUT v1 (2026-08-20) → D-92
+
+Base `main`@`87404e8ec30e971171ff0993563769da52098e88` (PR #31/D-91-status MERGET). RESUME SOVEREIGN
+AUTONOMY v4.0-ordre: full UA-4-matrise + 9-kandidat-sammenligning (A-I) kjørt FØR valg; **valgt: kandidat
+A** (Consent Enforcement Activation/Rollout v1) - D-91 sin motor eksisterte men var IKKE koblet inn i
+noen faktisk prosesserings-sti (`MARKETING_PROCESSING_ENFORCEMENT_FULLY_WIRED=false`), det eneste
+gjenværende ikke-eksternt-avhengige UA-4-punktet. Ny klasse `ConsentEnforcementService`
+(`modules/consent/src/enforcement-service.ts`), BEVISST adskilt fra D-91 sin `ConsentService` - "hva
+motoren MENER" (`ProcessingDecisionOutcome`, uendret) vs. "OM det håndheves" (rollout-konfigurasjon).
+Ny migrasjon `033_consent_enforcement.sql`: `consent_enforcement_policies` (mutable UPSERT,
+`PRIMARY KEY (tenant_id, memory_space_id, purpose)`, `disabled`/`audit`/`enforce`, standard `disabled`
+ved fravær - IDENTISK oppførsel med FØR D-92) + `consent_enforcement_events` (append-only, `seq
+bigserial` tie-breaker + sekvens-GRANT inkludert fra FØRSTE stund, jf. de to defektene funnet under
+D-91-lukking). Innsettingspunkt: `GrowthService.attributeToCampaign()` (dekker `attributeFromTracking()`
+automatisk siden den delegerer uendret, ingen dobbel sjekk/logging) - `contact_id` løses fra
+`business_leads`/`business_opportunities` via `resolveContactIdForEntity()` (gjenbruker
+`campaignPerformance()`s eksisterende join-mønster; NULLABLE `contact_id` = eksplisitt "intet
+datasubjekt" → `proceed`, aldri gjettet/konflatert med disabled/ALLOWED/UNKNOWN). `consentEnforcement`
+er BEVISST valgfri på `GrowthService`-konstruktøren - null ekstra spørring og byte-identisk oppførsel
+når utelatt; kun `apps/api/main.ts`/`worker-main.ts` injiserer den faktiske instansen, alle 106
+eksisterende `service-rls.test.ts`-tester UENDRET og grønne. `enforce`-modus: `ALLOWED`→fortsett,
+`DENIED`/`UNKNOWN_NOT_CONFIGURED`→blokker FØR skriving, ingen delvis rad (samme transaksjon/klient som
+kalleren, READ COMMITTED - ikke SERIALIZABLE, dokumentert TOCTOU-aksept identisk med `PolicyGateway`s
+eksisterende autoritetssjekk-klasse). `audit`-modus evaluerer og logger uten å blokkere prosessering.
+Avvik fra ordrens "reuse audit_events"-preferanse, eksplisitt begrunnet i D-92-loggoppføringen: `audit_
+events.person_id` er `NOT NULL` og `GrowthTransport` tråder ikke identitet ned til tjenestemetoder - i
+stedet bygget en egen, smal append-only tabell med `actor_person_id` NULLABLE. Formålsspesifikk
+aktivering (`attribution` ≠ `tracking`); tenant/space RLS uendret mønster; Q-20-registrering for begge
+nye tabeller (`consent_enforcement_events` kontakt-lenket, `consent_enforcement_policies` plass-lenket).
+26 nye tester (16 i nytt `modules/consent/test/enforcement-service.test.ts`, 9 i
+`growth/service-rls.test.ts` §M, 1 i `erasure/consent-erasure.test.ts` §D). Testregnskap: full
+`pnpm -w test` ETTER D-92 = **1704 tester grønne, 115 filer** (bekreftet ved faktisk kjøring, 213.96s,
+exit code 0). `pnpm -w typecheck` rent, `pnpm -w lint` rent. HOST_ACTION_REQUIRED=false (ZERO leverandør,
+ZERO credentials). **UA-4 ETTER denne sliceen:** `CONSENT_GOVERNANCE_CORE_COMPLETE=true`,
+`PRODUCTION_ENFORCEMENT_PARTIAL=true` (motoren KAN håndheve reelt for `attribution` når eieren eksplisitt
+aktiverer `enforce` - IKKE aktivert for noen tenant/space per default; `tracking`-formålet har fortsatt
+ingen faktisk sporingsmekanisme å håndheve mot). UA-4 SOM HELHET forblir IKKE komplett (Creative/
+Experiment Intelligence fortsatt BLOCKED_BY_DATA; D-86/UA-6 ekte provider-utførelse fortsatt DEFERRED/
+NOT_STARTED). UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full detalj: D-92 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

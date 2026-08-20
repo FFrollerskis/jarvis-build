@@ -1425,3 +1425,134 @@ describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
     expect(foundInPersonal).toBeNull();
   });
 });
+
+describe("M: D-92 Consent Enforcement Activation/Rollout v1 - attributeToCampaign()-integrasjon", () => {
+  // EGEN GrowthService-instans wired med ConsentEnforcementService - den
+  // globale `service`-variabelen (linje 51) forblir HELT UBERØRT (KUN
+  // `new GrowthService(appPool)`), slik at ALLE eksisterende A-L-tester
+  // over beviser at fraværet av injisert håndheving er en EKTE, uendret
+  // no-op (§37 i byggeordren - eksisterende oppførsel MÅ bevares).
+  let enforcedService: GrowthService;
+  let consentService: InstanceType<typeof import("@jarvis/consent").ConsentService>;
+  let enforcementService: InstanceType<typeof import("@jarvis/consent").ConsentEnforcementService>;
+
+  beforeAll(async () => {
+    const { ConsentService, ConsentEnforcementService } = await import("@jarvis/consent");
+    consentService = new ConsentService(appPool);
+    enforcementService = new ConsentEnforcementService(appPool, consentService);
+    enforcedService = new GrowthService(appPool, enforcementService);
+  });
+
+  it("standard (ingen policy satt) = 'disabled' - attribusjon fungerer IDENTISK selv med en injisert håndhevingstjeneste (kompatibilitets-standard, §37)", async () => {
+    await insertContact(TENANT_A, "ct-grw-enf-m1");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m1", "ct-grw-enf-m1");
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M1" });
+    const attribution = await enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m1" });
+    expect(attribution.entity_id).toBe("lead-grw-enf-m1");
+  });
+
+  it("'enforce'-modus + ALLOWED-samtykke => attribusjon fortsetter, PRESIS ÉN rad opprettes (§39 i byggeordren)", async () => {
+    await enforcementService.setEnforcementMode(TENANT_A, "business", { purpose: "attribution", mode: "enforce" });
+    await insertContact(TENANT_A, "ct-grw-enf-m2");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m2", "ct-grw-enf-m2");
+    await consentService.recordConsentDecision(TENANT_A, "business", {
+      contact_id: "ct-grw-enf-m2", purpose: "attribution", state: "granted", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M2" });
+    const attribution = await enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m2" });
+    expect(attribution.entity_id).toBe("lead-grw-enf-m2");
+    const all = await enforcedService.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(all).toHaveLength(1);
+  });
+
+  it("'enforce'-modus + DENIED-samtykke => attribusjon BLOKKERES FØR skriving, INGEN delvis rad (§13/§23/§28 i byggeordren)", async () => {
+    await insertContact(TENANT_A, "ct-grw-enf-m3");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m3", "ct-grw-enf-m3");
+    await consentService.recordConsentDecision(TENANT_A, "business", {
+      contact_id: "ct-grw-enf-m3", purpose: "attribution", state: "denied", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M3" });
+    await expect(
+      enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m3" })
+    ).rejects.toThrow(/consent_processing_blocked/);
+    const all = await enforcedService.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(all).toHaveLength(0); // INGEN delvis skriving - hele transaksjonen rulles tilbake.
+  });
+
+  it("'enforce'-modus + UNKNOWN_NOT_CONFIGURED (ingen beslutning) => attribusjon BLOKKERES - fail-closed, ALDRI en gjettet tillatelse (§24 i byggeordren)", async () => {
+    await insertContact(TENANT_A, "ct-grw-enf-m4");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m4", "ct-grw-enf-m4");
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M4" });
+    await expect(
+      enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m4" })
+    ).rejects.toThrow(/consent_processing_blocked/);
+  });
+
+  it("ingen lenket kontakt (business_leads.contact_id === null) => attribusjon fortsetter UANSETT enforce-modus - intet datasubjekt å styre", async () => {
+    await insertLead(TENANT_A, "lead-grw-enf-m5"); // insertLead() setter ALDRI contact_id.
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M5" });
+    const attribution = await enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m5" });
+    expect(attribution.entity_id).toBe("lead-grw-enf-m5");
+  });
+
+  it("UKJENT/feil entity_id (INGEN lead/opportunity-rad i det hele tatt) => 'enforce'-modus BLOKKERER fail-closed - IKKE det samme som 'ingen lenket kontakt' (D-92 CLOSEOUT, PR #32 pre-merge audit §8)", async () => {
+    // 'lead-grw-enf-m5b' finnes ALDRI i business_leads (motsatt av M5-testen over, der raden finnes med contact_id=NULL) -
+    // resolveContactIdForEntity() finner INGEN rad => subject.kind='unresolved', ALDRI forvekslet med 'no_data_subject'.
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M5B" });
+    await expect(
+      enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m5b-does-not-exist" })
+    ).rejects.toThrow(/consent_processing_blocked/);
+    const all = await enforcedService.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(all).toHaveLength(0); // INGEN delvis skriving.
+  });
+
+  it("attributeFromTracking() respekterer SAMME håndheving (delegerer til attributeToCampaign() uendret, §32 i byggeordren)", async () => {
+    await insertContact(TENANT_A, "ct-grw-enf-m6");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m6", "ct-grw-enf-m6");
+    await consentService.recordConsentDecision(TENANT_A, "business", {
+      contact_id: "ct-grw-enf-m6", purpose: "attribution", state: "denied", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M6" });
+    await enforcedService.registerCampaignTrackingTag(TENANT_A, "business", campaign.campaign_id, {
+      utm_source: "enf-test", utm_medium: "email", utm_campaign: "m6"
+    });
+    await expect(
+      enforcedService.attributeFromTracking(TENANT_A, "business", {
+        entity_type: "lead", entity_id: "lead-grw-enf-m6", tracking: { utm_source: "enf-test", utm_medium: "email", utm_campaign: "m6" }
+      })
+    ).rejects.toThrow(/consent_processing_blocked/);
+  });
+
+  it("tilbaketrekking ETTER tidligere vellykket attribusjon blokkerer NESTE attribusjonsforsøk, men SLETTER ALDRI den forrige raden (§40 i byggeordren)", async () => {
+    await insertContact(TENANT_A, "ct-grw-enf-m7");
+    await insertLeadWithContact(TENANT_A, "lead-grw-enf-m7", "ct-grw-enf-m7");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-enf-m7", "ct-grw-enf-m7", "new", null);
+    await consentService.recordConsentDecision(TENANT_A, "business", {
+      contact_id: "ct-grw-enf-m7", purpose: "attribution", state: "granted", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    const campaign = await enforcedService.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "M7" });
+    const first = await enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-m7" });
+    expect(first.entity_id).toBe("lead-grw-enf-m7");
+
+    await consentService.recordConsentDecision(TENANT_A, "business", {
+      contact_id: "ct-grw-enf-m7", purpose: "attribution", state: "withdrawn", legal_basis: "consent", evidence: {}, policy_version: "v1"
+    });
+    await expect(
+      enforcedService.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-enf-m7" })
+    ).rejects.toThrow(/consent_processing_blocked/);
+
+    // Den FØRSTE (allerede vellykkede) attribusjonen for lead-grw-enf-m7 finnes FORTSATT - INGEN retroaktiv sletting.
+    const all = await enforcedService.listAttributions(TENANT_A, "business", campaign.campaign_id);
+    expect(all.some((a) => a.entity_id === "lead-grw-enf-m7")).toBe(true);
+  });
+
+  it("purpose-isolasjon: 'enforce' for 'attribution' påvirker ALDRI en tenant/space der KUN 'tracking' er aktivert (§7 i byggeordren)", async () => {
+    await enforcementService.setEnforcementMode(TENANT_B, "business", { purpose: "tracking", mode: "enforce" });
+    await adminPool.query(`INSERT INTO business_contacts (contact_id, tenant_id, memory_space_id, name) VALUES ('ct-grw-enf-mb1', '${TENANT_B}', 'business', 'Kontakt B')`);
+    await insertLeadWithContact(TENANT_B, "lead-grw-enf-mb1", "ct-grw-enf-mb1");
+    const campaign = await enforcedService.createCampaign(TENANT_B, "business", { channel: "google_ads", name: "MB1" });
+    // 'attribution' er FORTSATT 'disabled' for TENANT_B (kun 'tracking' ble aktivert) - attribusjon fortsetter uendret.
+    const attribution = await enforcedService.attributeToCampaign(TENANT_B, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-enf-mb1" });
+    expect(attribution.entity_id).toBe("lead-grw-enf-mb1");
+  });
+});

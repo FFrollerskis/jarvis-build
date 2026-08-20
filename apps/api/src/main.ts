@@ -39,7 +39,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { ConsentService, ConsentTransport } from "@jarvis/consent";
+import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
   GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
@@ -138,19 +138,30 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // trenger derfor IKKE `toolGateway`/`ToolInvocationContext`, i motsetning
   // til `SupportTransport`.
   const agreementsService = new AgreementsService(pool);
-  // UA-4 Native Jarvis Growth Core (D-74): egen tjeneste over SAMME
-  // runtime-pool, ingen ny motor - attribusjon gjenbruker Business Graph
-  // (business_leads/business_opportunities) og OpenLoopService
-  // (marketing_spend_anomaly-regelen) uendret. Ingen annonseplattform-
-  // avhengighet - `GrowthTransport` trenger derfor IKKE `toolGateway`/
-  // `ToolInvocationContext`, i motsetning til `SupportTransport`.
-  const growthService = new GrowthService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
   // `@jarvis/consent` importerer ALDRI `@jarvis/business` i src/ (kun i
   // test/ for fixtures) - INGEN ny kjøretids-pakkeavhengighet.
   const consentService = new ConsentService(pool);
+  // D-92 (UA-4 NESTE SLICE): Consent Enforcement Activation/Rollout v1 -
+  // konstrueres FØR growthService (som injiserer den valgfritt) - standard
+  // rollout-modus er 'disabled' for ALLE tenant/space/formål inntil eieren
+  // eksplisitt aktiverer 'audit'/'enforce' via consent.set_enforcement_policy
+  // - IDENTISK oppførsel med FØR D-92 helt til det gjøres.
+  const consentEnforcementService = new ConsentEnforcementService(pool, consentService);
+  // UA-4 Native Jarvis Growth Core (D-74): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - attribusjon gjenbruker Business Graph
+  // (business_leads/business_opportunities) og OpenLoopService
+  // (marketing_spend_anomaly-regelen) uendret. Ingen annonseplattform-
+  // avhengighet - `GrowthTransport` trenger derfor IKKE `toolGateway`/
+  // `ToolInvocationContext`, i motsetning til `SupportTransport`.
+  // D-92: `consentEnforcementService` injiseres her (valgfritt konstruktør-
+  // parameter, se GrowthService-JSDoc) - `attributeToCampaign()`/
+  // `attributeFromTracking()` konsulterer NÅ D-91/D-92-motoren, men KUN
+  // blokkerende når eieren faktisk har aktivert 'enforce' for et gitt
+  // tenant/space/formål (se D-92 i DECISIONS_AND_ASSUMPTIONS.md).
+  const growthService = new GrowthService(pool, consentEnforcementService);
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
@@ -178,7 +189,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
     // ingen nøstet klasse D-handling).
-    consent: new ConsentTransport(consentService),
+    consent: new ConsentTransport(consentService, consentEnforcementService),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
