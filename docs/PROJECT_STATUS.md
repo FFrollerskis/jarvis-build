@@ -1,8 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 7 — MARKETING MEMORY v1** → D-89, base
+**Oppdatert:** 2026-08-20 (**UA-4 SLICE 7 — MARKETING MEMORY v1** → D-89, base
 `main`@`c8a5ea46d9af6fed90f3d179c0eb01ac2dffc031` (PR #26/D-88 MERGET), branch
-`claude/ua4-marketing-memory-v1`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT
+`claude/ua4-marketing-memory-v1`, **PR #27 MERGET av Tobias sin eksplisitte godkjenning →
+`main`@`72b63418b70090686ad1ef03b3056dacba296de3`**). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT
 AV 9 KANDIDATER, BEKREFTET byggeordrens "sterke default":** UA-4-matrisen rekonstruert fra repo-
 sannhet viste at masterplanens EGEN literale nevning ("Experiment registry, anomaly detection,
 creative intelligence og marketing memory") fortsatt hadde Marketing Memory som eneste NOT_STARTED
@@ -48,8 +49,13 @@ HELHET forblir IKKE komplett (mutate-/utførelses-kapabilitet, Creative Intellig
 Integrity Gateway, samtykke-governance alle fortsatt NOT_STARTED/BLOCKED/DEFERRED - Marketing
 Memory v1 er analyse-/lærings-lag ALENE, INGEN OpenLoop-endring, INGEN Business OS-brief-
 integrasjon i denne sliceen - eksplisitt dokumentert gap). UA-3 kriterium 2 UENDRET (2/5 domener).
-Draft-PR opprettes, IKKE merget. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-
-mutasjon, INGEN andre slice denne runden, INGEN merge.** Full detalj: D-89 i
+**PR #27 MERGET 2026-08-20T00:21:04Z** (merge commit `72b63418b70090686ad1ef03b3056dacba296de3`,
+`merge_method=merge`, ingen squash) etter Tobias sin eksplisitte godkjenning og en fullstendig
+pre-merge closeout-audit (55/41-punkts rapport levert, alle Q-26/D-64/D-41/D-85/D-87/UA-6-grenser
+bekreftet intakte). Post-merge: `origin/main` og lokal `main` verifisert synkronisert på
+`72b6341`, kanoniske D-89-filer bekreftet til stede på `main` (migrasjon 031, `GrowthService`-
+metoder, ToolGateway-actions, erasure-plan). **STOP: INGEN Google Ads live-oppsett, INGEN ekte
+provider-mutasjon, INGEN andre slice denne runden.** Full detalj: D-89 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
 **Runden før det (samme dag, IKKE merget):** UA-4 SLICE 6 — MARKETING→MEETING→REVENUE FUNNEL-LINKAGE
