@@ -989,6 +989,13 @@ export class GrowthService {
       if (!campaign) throw new Error("campaign_not_found");
 
       const results: CampaignObservation[] = [];
+      // D-89 CLOSEOUT (PR #27-audit): kun regenererte typer med et FAKTISK
+      // endret resultat logges som event - SAMME "ingen event ved uendret
+      // no-op-resynk"-prinsipp som `upsertActionRecommendationRow()` (D-85/
+      // D-83) allerede håndhever. Uten dette ville HVER idempotent
+      // regenerering (selv med 100% uendret tilstand) spammet vekst-
+      // tidslinjen med ett event per kall.
+      const changedTypes: string[] = [];
       const snapshot = await this.computePerformanceSnapshot(client, tenantId, campaignId);
 
       const meetingsGapCondition = snapshot.attributed_meetings > 0 && snapshot.won_opportunities === 0;
@@ -1007,6 +1014,14 @@ export class GrowthService {
           computed_from: "campaignPerformance_lifetime_snapshot"
         };
         const summary = `Kampanjen har ${snapshot.attributed_meetings} attribuert${snapshot.attributed_meetings === 1 ? "" : "e"} møte${snapshot.attributed_meetings === 1 ? "" : "r"}, men 0 vunne opportunities (livstids-snapshot).`;
+        // MERK (Q-19-klasse begrensning, se D-89 §5/types.ts): dette er
+        // CURRENT-STATE-minne per (kampanje, observasjonstype) - EN
+        // gjenåpning etter en tidligere 'resolved' OVERSKRIVER den forrige
+        // episodens evidence i SAMME rad (samme observation_id). Bevisst
+        // v1-omfangsgrense, IKKE en full episodisk historikk-ledger -
+        // bevist eksplisitt i en dedikert test.
+        const changed = !existingGap || existingGap.status !== "open" ||
+          canonicalJson(existingGap.evidence) !== canonicalJson(evidence);
         const { rows } = await client.query(
           `INSERT INTO marketing_campaign_observations
              (observation_id, tenant_id, memory_space_id, campaign_id, observation_type, status, summary, evidence, observed_at)
@@ -1018,6 +1033,7 @@ export class GrowthService {
           [`grw-ob-${randomUUID()}`, tenantId, memorySpace, campaignId, summary, JSON.stringify(evidence)]
         );
         results.push(rows[0] as CampaignObservation);
+        if (changed) changedTypes.push("meetings_without_conversion");
       } else if (existingGap && existingGap.status === "open") {
         const evidence = {
           campaign_id: campaignId,
@@ -1033,14 +1049,20 @@ export class GrowthService {
           [tenantId, existingGap.observation_id, JSON.stringify(evidence)]
         );
         results.push(rows[0] as CampaignObservation);
+        changedTypes.push("meetings_without_conversion"); // open -> resolved er ALLTID en reell overgang.
       }
 
+      // ORDER BY gir en STABIL evidens-rekkefølge på tvers av kall (SAMME
+      // datasett skal ALDRI produsere en ulik `recommendation_ids`/
+      // `command_ids`-array-rekkefølge - kritisk for at endrings-
+      // deteksjonen under kan skille en REELL evidens-endring fra en
+      // tilfeldig Postgres-radrekkefølge uten ORDER BY).
       const { rows: recRows } = await client.query(
-        `SELECT status, recommendation_id FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND campaign_id = $2`,
+        `SELECT status, recommendation_id FROM marketing_campaign_action_recommendations WHERE tenant_id = $1 AND campaign_id = $2 ORDER BY recommendation_id`,
         [tenantId, campaignId]
       );
       const { rows: cmdRows } = await client.query(
-        `SELECT status, command_id FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND campaign_id = $2`,
+        `SELECT status, command_id FROM marketing_campaign_execution_commands WHERE tenant_id = $1 AND campaign_id = $2 ORDER BY command_id`,
         [tenantId, campaignId]
       );
       const recommendationCounts = { proposed: 0, accepted: 0, dismissed: 0, superseded: 0 };
@@ -1066,6 +1088,13 @@ export class GrowthService {
         `(${recommendationCounts.proposed} foreslått, ${recommendationCounts.accepted} godkjent, ${recommendationCounts.dismissed} avvist, ${recommendationCounts.superseded} supersedert); ` +
         `${totalCommands} kommando${totalCommands === 1 ? "" : "er"} generert ` +
         `(${commandCounts.pending_execution} avventer, ${commandCounts.cancelled} kansellert, ${commandCounts.superseded} supersedert).`;
+      const { rows: existingSummaryRows } = await client.query(
+        `SELECT * FROM marketing_campaign_observations
+         WHERE tenant_id = $1 AND campaign_id = $2 AND observation_type = 'recommendation_disposition_summary'`,
+        [tenantId, campaignId]
+      );
+      const existingSummary = existingSummaryRows[0] as CampaignObservation | undefined;
+      const summaryChanged = !existingSummary || canonicalJson(existingSummary.evidence) !== canonicalJson(summaryEvidence);
       const { rows: summaryRows } = await client.query(
         `INSERT INTO marketing_campaign_observations
            (observation_id, tenant_id, memory_space_id, campaign_id, observation_type, status, summary, evidence, observed_at)
@@ -1076,13 +1105,16 @@ export class GrowthService {
         [`grw-ob-${randomUUID()}`, tenantId, memorySpace, campaignId, summaryText, JSON.stringify(summaryEvidence)]
       );
       results.push(summaryRows[0] as CampaignObservation);
+      if (summaryChanged) changedTypes.push("recommendation_disposition_summary");
 
-      await insertEvent(client, tenantId, memorySpace, {
-        campaign_id: campaignId, event_type: "marketing_observation_generated",
-        summary: `Markedsførings-observasjoner regenerert (${results.length} oppdatert)`,
-        actor_person_id: null,
-        metadata: { observation_types: results.map((r) => r.observation_type) }
-      });
+      if (changedTypes.length > 0) {
+        await insertEvent(client, tenantId, memorySpace, {
+          campaign_id: campaignId, event_type: "marketing_observation_generated",
+          summary: `Markedsførings-observasjoner oppdatert (${changedTypes.join(", ")})`,
+          actor_person_id: null,
+          metadata: { observation_types: changedTypes }
+        });
+      }
 
       return results;
     });
@@ -1123,6 +1155,26 @@ export class GrowthService {
     );
     return (rows[0] as Campaign) ?? null;
   }
+}
+
+/**
+ * D-89 CLOSEOUT (PR #27-audit): nøkkel-rekkefølge-UAVHENGIG JSON-
+ * serialisering, brukt til å sammenligne `evidence`-objekter FØR/ETTER en
+ * jsonb-DB-rundtur. Postgres sin jsonb-lagring garanterer IKKE at
+ * nøkkelrekkefølgen i en lest-tilbake verdi er identisk med insert-
+ * rekkefølgen til det opprinnelige JS-objektet - et vanlig `JSON.stringify()`-
+ * likhets-sjekk ville derfor FEILAKTIG oppdaget en "endring" der ingen
+ * reell endring skjedde (bevist av en regresjonstest), og dermed spammet
+ * vekst-tidslinjen med unødvendige 'marketing_observation_generated'-
+ * events ved uendret gjentatt kall.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
 async function insertCampaign(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, input: CreateCampaignInput): Promise<Campaign> {

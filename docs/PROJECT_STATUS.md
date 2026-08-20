@@ -34,11 +34,16 @@ nøste `withMemoryTransaction`. Ny `growth.generate_marketing_observations` (kla
 marketing_observations` (klasse A) - INGEN klasse C/D. INGEN scheduler (eksplisitt agent-/eier-kalt
 i v1). **D-85/D-87-grense bevart:** Marketing Memory OBSERVERER kun anbefaling-/kommando-HISTORIKK,
 skriver ALDRI til deres tabeller - INGEN kobling observasjon→anbefaling→kommando→provider-mutasjon.
-Q-20 erasure-plan oppdatert (ny tabell slettes FØR `marketing_campaigns`). **11 nye tester** (9
-`service-rls.test.ts` §R, 2 `transport-wiring.test.ts` §C5, `growth-erasure.test.ts` utvidet).
-Testregnskap: `main` FØR = 1630/112 → ETTER = **1641 (+11), 112 filer**, 112/112 grønn (INGEN
+Q-20 erasure-plan oppdatert (ny tabell slettes FØR `marketing_campaigns`). **PR #27-audit fant og
+fikset TO reelle presisjonsfunn FØR merge:** (a) hendelse-spam på idempotent regenerering (fikset -
+`marketing_observation_generated` logges nå KUN når noe faktisk endret seg, samme prinsipp som D-85);
+(b) `meetings_without_conversion` sin gjenåpnings-vei OVERSKRIVER forrige episodes evidence i SAMME
+rad - PRESIST dokumentert som CURRENT-STATE-minne (IKKE historisk episodisk minne) i `types.ts`/D-89,
+bevist med en dedikert test. **13 nye tester** (11 `service-rls.test.ts` §R, 2
+`transport-wiring.test.ts` §C5, `growth-erasure.test.ts` utvidet).
+Testregnskap: `main` FØR = 1630/112 → ETTER = **1643 (+13), 112 filer**, 112/112 grønn (INGEN
 flake). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **Status:** D-89 =
-**FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM
+**FIXED_SUITE_VERIFIED_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM
 HELHET forblir IKKE komplett (mutate-/utførelses-kapabilitet, Creative Intelligence, Finance
 Integrity Gateway, samtykke-governance alle fortsatt NOT_STARTED/BLOCKED/DEFERRED - Marketing
 Memory v1 er analyse-/lærings-lag ALENE, INGEN OpenLoop-endring, INGEN Business OS-brief-

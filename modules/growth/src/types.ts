@@ -159,8 +159,22 @@ export interface CampaignExecutionCommand {
  * en observasjon er ALDRI "bekreftet sannhet" (Truth Promotion/Q-26
  * forblir eksplisitt ubygget), kun tilstede (`'open'`) eller ikke lenger
  * gjeldende (`'resolved'` - satt når det underliggende vilkåret opphører,
- * ALDRI slettet - historikken bevares, se `generateMarketingObservations()`
- * i service.ts).
+ * ALDRI slettet ved den overgangen).
+ *
+ * PRESIS MINNE-KLASSIFISERING (v1, verifisert eksplisitt mot PR #27-audit):
+ * `marketing_campaign_observations` er CURRENT-STATE-minne PER (kampanje,
+ * observasjonstype) - `UNIQUE (tenant_id, campaign_id, observation_type)`
+ * betyr at raden viser den NYESTE episoden, IKKE en append-only logg over
+ * ALLE tidligere åpne/løste episoder. Konkret: går `meetings_without_
+ * conversion` open -> resolved -> (en senere korreksjon åpner vilkåret
+ * igjen) -> open, OVERSKRIVER den nye episoden BEVISST den forrige
+ * episodens evidence i SAMME rad (SAMME `observation_id`) - den FØRSTE
+ * episodens evidence er DA ikke lenger separat gjenfinnbar i denne
+ * tabellen. Dette er en BEVISST, dokumentert v1-omfangsgrense (garantien
+ * er KUN "en 'resolved' rad slettes aldri FØR den ev. gjenåpnes", ALDRI en
+ * full episodisk historikk-ledger) - IKKE HISTORICAL_EPISODIC_MEMORY. En
+ * fremtidig v2 kunne legge til en separat, append-only episode-/hendelse-
+ * tabell hvis flerepisode-historikk faktisk trengs - IKKE bygget her.
  *
  * To observasjonstyper, BEGGE trygt avledbare UTEN noe tidsvindu (unngår
  * "sammenlign livstids-kampanje A mot 7-dagers-kampanje B"-fellen, siden

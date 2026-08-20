@@ -1680,9 +1680,12 @@ out-regresjon:** gjenbrukte `computePerformanceSnapshot()` (trukket ut fra D-88)
 nøste transaksjoner. Ny `growth.generate_marketing_observations` (klasse B)/`list_marketing_
 observations` (klasse A) - INGEN klasse C/D, INGEN scheduler. **D-85/D-87-grense bevart:** OBSERVERER
 kun anbefaling-/kommando-historikk, INGEN kobling til provider-mutasjon. Q-20 erasure-plan oppdatert.
-11 nye tester. Testregnskap: `main` FØR = 1630/112 → ETTER = **1641 (+11), 112 filer**, 112/112
+13 nye tester (PR #27-audit fant og fikset TO reelle presisjonsfunn FØR merge: hendelse-spam på
+idempotent regenerering, og `meetings_without_conversion` sin gjenåpnings-vei som overskriver forrige
+episodes evidence i SAMME rad - PRESIST dokumentert som CURRENT-STATE-minne, ikke historisk episodisk
+minne). Testregnskap: `main` FØR = 1630/112 → ETTER = **1643 (+13), 112 filer**, 112/112
 grønn (INGEN flake). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **D-89 =
-FIXED_SUITE_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET
+FIXED_SUITE_VERIFIED_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET
 forblir IKKE komplett (analyse-/lærings-lag ALENE, INGEN OpenLoop-/Business-OS-brief-integrasjon i
 denne sliceen). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE merget. Full detalj: D-89 i
 DECISIONS_AND_ASSUMPTIONS.md.

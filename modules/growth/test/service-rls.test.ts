@@ -1197,6 +1197,73 @@ describe("R (D-89): MARKETING MEMORY v1 - deterministisk observasjon-lag, ALDRI 
     const fromB = await service.listMarketingObservations(TENANT_B, "business", { campaign_id: campaign.campaign_id, status: "all" });
     expect(fromB).toHaveLength(0);
   });
+
+  it("idempotent regenerering med UENDRET tilstand logger INGEN nytt 'marketing_observation_generated'-event (unngår tidslinje-spam ved gjentatte kall, SAMME prinsipp som D-83/D-85 sin no-op-resynk)", async () => {
+    await insertContact(TENANT_A, "ct-grw-r10");
+    await insertLeadWithContact(TENANT_A, "lead-grw-r10", "ct-grw-r10");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R10 no event spam" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-r10" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r10", "ct-grw-r10", "2030-01-01T10:00:00Z");
+
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const eventsAfterFirst = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    const generatedCountAfterFirst = eventsAfterFirst.filter((e) => e.event_type === "marketing_observation_generated").length;
+    expect(generatedCountAfterFirst).toBe(1); // FØRSTE generering: begge typer er nye -> ETT event.
+
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const eventsAfterSecond = await service.listEvents(TENANT_A, "business", campaign.campaign_id);
+    const generatedCountAfterSecond = eventsAfterSecond.filter((e) => e.event_type === "marketing_observation_generated").length;
+    expect(generatedCountAfterSecond).toBe(1); // ANDRE, uendrede generering: INGEN nytt event.
+  });
+
+  it("PRESIS minne-klassifisering: open -> resolved -> open IGJEN overskriver den forrige episodens evidence i SAMME rad (CURRENT-STATE-minne, IKKE full episodisk historikk - dokumentert grense, ikke en feil)", async () => {
+    await insertContact(TENANT_A, "ct-grw-r11");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-r11", "ct-grw-r11", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "Memory R11 reopen" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-r11" });
+    await insertMeetingActivity(TENANT_A, "act-grw-r11a", "ct-grw-r11", "2030-01-01T10:00:00Z");
+
+    // Episode 1: åpen.
+    const episode1 = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const gap1 = episode1.find((o) => o.observation_type === "meetings_without_conversion")!;
+    expect(gap1.status).toBe("open");
+    const observationId = gap1.observation_id;
+
+    // Episode 1 løses (opportunity vinnes).
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(`UPDATE business_opportunities SET stage = 'won', value_ore = 100000 WHERE opportunity_id = 'opp-grw-r11'`)
+    );
+    const episode1Resolved = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const resolved = episode1Resolved.find((o) => o.observation_type === "meetings_without_conversion")!;
+    expect(resolved.status).toBe("resolved");
+    expect(resolved.observation_id).toBe(observationId);
+    const resolvedEvidence = resolved.evidence as { won_opportunities: number };
+    expect(resolvedEvidence.won_opportunities).toBe(1);
+
+    // En SENERE korreksjon (f.eks. en feilaktig 'won'-markering rettes) gjør
+    // at vilkåret oppstår IGJEN - en reell, om enn sjelden, korreksjonsvei
+    // siden business_opportunities.stage IKKE er DB-håndhevet ensrettet.
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(`UPDATE business_opportunities SET stage = 'lost' WHERE opportunity_id = 'opp-grw-r11'`)
+    );
+    await insertMeetingActivity(TENANT_A, "act-grw-r11b", "ct-grw-r11", "2030-01-02T10:00:00Z");
+    const episode2 = await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    const reopened = episode2.find((o) => o.observation_type === "meetings_without_conversion")!;
+
+    // KRITISK PRESISJONSBEVIS (PR #27-audit §5/§19): SAMME rad (samme
+    // observation_id) gjenåpnes - resolved_at nullstilles, evidence
+    // OVERSKRIVES med episode 2 sine tall. Episode 1 sin evidence
+    // (won_opportunities=1) er DA IKKE lenger separat gjenfinnbar i denne
+    // tabellen - CURRENT-STATE-minne, IKKE HISTORICAL_EPISODIC_MEMORY.
+    expect(reopened.observation_id).toBe(observationId); // SAMME rad, ikke en ny.
+    expect(reopened.status).toBe("open");
+    expect(reopened.resolved_at).toBeNull();
+    const reopenedEvidence = reopened.evidence as { won_opportunities: number; attributed_meetings: number };
+    expect(reopenedEvidence.won_opportunities).toBe(0); // Episode 2 sitt tall - episode 1 sitt (1) er OVERSKREVET.
+    expect(reopenedEvidence.attributed_meetings).toBe(2);
+    const all = await service.listMarketingObservations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "all" });
+    expect(all.filter((o) => o.observation_type === "meetings_without_conversion")).toHaveLength(1); // FORTSATT kun én rad - episode 1 finnes IKKE separat noe sted i denne tabellen.
+  });
 });
 
 describe("K/L: tenant-/memory-space-isolasjon (RLS)", () => {
