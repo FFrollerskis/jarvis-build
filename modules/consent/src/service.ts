@@ -49,7 +49,16 @@ export class ConsentService {
     });
   }
 
-  /** Nyeste registrerte beslutning for (kontakt, formål) - `null` hvis ingen finnes ennå (ærlig "ikke konfigurert", aldri gjettet). */
+  /**
+   * Nyeste registrerte beslutning for (kontakt, formål) - `null` hvis ingen
+   * finnes ennå (ærlig "ikke konfigurert", aldri gjettet). `ORDER BY
+   * recorded_at DESC, seq DESC` - `seq` er en monotonisk tie-breaker (§11 i
+   * lukkingsordren): to rader KAN dele identisk `recorded_at` under
+   * samtidige innsettinger, og en uspesifisert SQL-rekkefølge blant like
+   * tidsstempler er IKKE akseptabelt for en juridisk betydningsfull
+   * beslutning. `decision_id` (en tilfeldig UUID) kunne IKKE brukt som
+   * tie-breaker - den har ingen meningsfull rekkefølge.
+   */
   async getCurrentConsentState(
     tenantId: string, memorySpace: MemorySpace, contactId: string, purpose: ConsentPurpose
   ): Promise<ConsentDecision | null> {
@@ -57,7 +66,7 @@ export class ConsentService {
       const { rows } = await client.query(
         `SELECT * FROM consent_decisions
          WHERE tenant_id = $1 AND contact_id = $2 AND purpose = $3
-         ORDER BY recorded_at DESC LIMIT 1`,
+         ORDER BY recorded_at DESC, seq DESC LIMIT 1`,
         [tenantId, contactId, purpose]
       );
       return (rows[0] as ConsentDecision | undefined) ?? null;
@@ -79,7 +88,7 @@ export class ConsentService {
         conditions.push(`purpose = $${params.length}`);
       }
       const { rows } = await client.query(
-        `SELECT * FROM consent_decisions WHERE ${conditions.join(" AND ")} ORDER BY recorded_at DESC`,
+        `SELECT * FROM consent_decisions WHERE ${conditions.join(" AND ")} ORDER BY recorded_at DESC, seq DESC`,
         params
       );
       return rows as ConsentDecision[];

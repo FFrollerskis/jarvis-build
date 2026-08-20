@@ -1224,7 +1224,7 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
     // fail-closed håndhevings-kjernen (fravær av data -> ALDRI 'ALLOWED') -
     // ZERO ModelGateway noe sted i dette namespacet.
     {
-      tool_id: "consent", action: "record_decision", description: "Registrer EN NY samtykke-/rettslig-grunnlag-beslutning for en kontakt+formål (append-only, ALDRI en overskriving av en tidligere beslutning)",
+      tool_id: "consent", action: "record_decision", description: "Registrer EN NY samtykke-/rettslig-grunnlag-beslutning for en kontakt+formål (append-only, ALDRI en overskriving av en tidligere beslutning). 'evidence' er KUN en proveniens-peker (kilde/skjema-versjon/kanal) - ALDRI hemmeligheter (tokens/nøkler/passord) eller full rå persondata-payload.",
       input_schema: record({
         tenant_id: z.string(), memory_space: z.string().optional(), contact_id: z.string(), purpose: z.string(),
         state: z.string(), legal_basis: z.string(), evidence: z.record(z.string(), z.unknown()).optional(),

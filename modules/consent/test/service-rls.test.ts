@@ -252,6 +252,38 @@ describe("I: ZERO ModelGateway/AI-inferens noe sted i @jarvis/consent (strukture
   });
 });
 
+describe("K: deterministisk current-state-rekkefølge selv ved IDENTISK recorded_at (§11 i PR #31-lukkingsordren)", () => {
+  it("to rader med EKSAKT samme recorded_at løses deterministisk via 'seq' (monotonisk tie-breaker) - ALDRI uspesifisert SQL-rekkefølge", async () => {
+    const contactId = "ct-cst-a1";
+    // I FREMTIDEN (ikke fortiden) - garanterer at denne raden er NYERE enn
+    // ALLE andre rader denne delte fixture-filen skriver via `DEFAULT now()`
+    // i andre describe-blokker, slik at testen isolert beviser tie-break-
+    // determinismen mellom DISSE to radene, uavhengig av kjørerekkefølge.
+    const sameTimestamp = "2099-06-01T12:00:00.000000Z";
+    // Direkte adminPool-INSERT (bypasser tjenestens `DEFAULT now()`) for å
+    // TVINGE frem en identisk `recorded_at` - noe som i EKTE drift kan skje
+    // under samtidige innsettinger (timestamptz har mikrosekund-presisjon,
+    // men to transaksjoner KAN fortsatt committe innenfor samme mikrosekund).
+    await adminPool.query(
+      `INSERT INTO consent_decisions (decision_id, tenant_id, memory_space_id, contact_id, purpose, state, legal_basis, evidence, policy_version, recorded_at)
+       VALUES ('cst-dec-tie-older', $1, 'business', $2, 'attribution', 'denied', 'consent', '{}'::jsonb, 'tie-test', $3)`,
+      [TENANT_A, contactId, sameTimestamp]
+    );
+    await adminPool.query(
+      `INSERT INTO consent_decisions (decision_id, tenant_id, memory_space_id, contact_id, purpose, state, legal_basis, evidence, policy_version, recorded_at)
+       VALUES ('cst-dec-tie-newer', $1, 'business', $2, 'attribution', 'granted', 'consent', '{}'::jsonb, 'tie-test', $3)`,
+      [TENANT_A, contactId, sameTimestamp]
+    );
+    // 'tie-newer' ble satt inn SIST -> høyere 'seq' -> MÅ vinne selv om
+    // `recorded_at` er byte-for-byte identisk med 'tie-older' sin.
+    for (let i = 0; i < 5; i++) {
+      const state = await service.getCurrentConsentState(TENANT_A, "business", contactId, "attribution");
+      expect(state?.decision_id).toBe("cst-dec-tie-newer");
+      expect(state?.state).toBe("granted");
+    }
+  });
+});
+
 describe("J: listConsentDecisions filtrerer korrekt", () => {
   it("filtrerer på contact_id/purpose uavhengig av hverandre", async () => {
     await service.recordConsentDecision(TENANT_A, "business", {

@@ -40,8 +40,27 @@ bevis). Testregnskap: `main` FØR = 1657/112 → ETTER = **1675 (+18), 113 filer
 IKKE komplett (Creative Intelligence, Experiment Intelligence, D-86/UA-6 ekte provider-utførelse
 fortsatt BLOCKED_BY_DATA/DEFERRED/NOT_STARTED - denne sliceen bygger KUN håndhevingsGRUNNLAG, INGEN
 automatisk kobling til eksisterende attribusjon ennå). UA-3 kriterium 2 UENDRET (2/5 domener). **DRAFT
-PR opprettet, IKKE merget.** **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon,
-INGEN andre slice denne runden, INGEN merge.** Full detalj: D-91 i DECISIONS_AND_ASSUMPTIONS.md.
+PR #31 opprettet, CI GRØNN (gitleaks+build-test), IKKE merget.**
+
+**PR #31 PRE-MERGE CLOSEOUT-AUDIT (samme dag, 2026-08-20):** en 58-punkts ekstern lukkingsordre
+verifiserte PR-sannhet (HEAD uendret, `mergeable_state=clean`, ingen review-tråder) og fant TO reelle
+strukturelle hull, begge fikset: (a) `getCurrentConsentState()`/`listConsentDecisions()` hadde INGEN
+deterministisk tie-breaker for `recorded_at`-likhet - lagt til `seq bigserial UNIQUE` +
+`ORDER BY recorded_at DESC, seq DESC`, bevist med en ny test (§K) som INSERTer to rader med
+byte-for-byte identisk `recorded_at`; (b) den nye `bigserial`s implisitte sekvens manglet
+`jarvis_app`-GRANT (`permission denied for sequence` under den nye testen) - fikset med
+`GRANT USAGE, SELECT ON SEQUENCE consent_decisions_seq_seq TO jarvis_app`. Et tredje hull - INGEN
+dedikert Q-20-ende-til-ende-erasure-test for `consent_decisions` fantes - lukket med ny
+`modules/erasure/test/consent-erasure.test.ts` (3 tester): en memory-space-scoped erasure fjerner
+FAKTISK alle beslutnings-rader (inkludert append-only-historikk), `CONSENT_AUDIT_SURVIVES_Q20_
+ERASURE=false` bekreftet eksplisitt. Evidence-sikkerhet (§18) styrket med eksplisitt
+"ALDRI hemmeligheter"-dokumentasjon i `types.ts`/ToolGateway-beskrivelsen. Alle andre 55 punkter i
+lukkingsordren (legal-claim-audit, cookie-runtime-claim, subject-identity-entydighet, D-89/D-90/D-87/
+UA-6/D-86-grense, Q-21/Q-26/Q-27, D-81, ToolGateway-risikoklasse-begrunnelse) verifisert KORREKTE ved
+inspeksjon - ingen ytterligere kodeendring nødvendig. Testregnskap ETTER closeout: `main` FØR =
+1657/112 → ETTER = **1679 (+22), 114 filer**, alle grønne. `pnpm -w typecheck`/`pnpm -w lint` fortsatt
+rent. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon, INGEN andre slice denne
+runden, INGEN merge.** Full detalj: D-91 §13 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Runden før det (samme dag, MERGET):** UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON
 → D-90, base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch

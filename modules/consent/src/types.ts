@@ -68,7 +68,16 @@ export interface ConsentDecision {
   purpose: ConsentPurpose;
   state: ConsentDecisionState;
   legal_basis: ConsentLegalBasis;
-  /** Proveniens/kontekst for HVORDAN beslutningen ble fanget - en PEKER (kilde/skjema-versjon/kanal), ALDRI full skjema-payload eller rå personopplysninger utover det som allerede er i `contact_id`-referansen. */
+  /**
+   * Proveniens/kontekst for HVORDAN beslutningen ble fanget - en PEKER
+   * (kilde/skjema-versjon/kanal), ALDRI full skjema-payload eller rå
+   * personopplysninger utover det som allerede er i `contact_id`-
+   * referansen. MÅ ALDRI inneholde hemmeligheter (OAuth-tokens, API-nøkler,
+   * passord eller annet credential-materiale) - denne kolonnen er IKKE et
+   * generelt hemmelighet-lager; `ConsentTransport` validerer IKKE
+   * innholdet utover typen (`Record<string, unknown>`), så ALLE kallere
+   * (ToolGateway-brukere inkludert) er ansvarlige for å overholde dette.
+   */
   evidence: Record<string, unknown>;
   /** Hvilken versjon av EIERENS konfigurerte samtykke-/personvernpolicy som gjaldt da beslutningen ble registrert - IKKE en Jarvis-intern kodeversjon. */
   policy_version: string;

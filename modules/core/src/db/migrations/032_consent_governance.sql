@@ -15,7 +15,17 @@
 -- `legal_basis` is an OWNER-CONFIGURED authority reference, never a Jarvis-
 -- inferred legal conclusion - Jarvis enforces the recorded value, it does
 -- not decide what legal basis applies.
+-- `seq` is a monotonic tie-breaker for "latest decision" resolution - two
+-- rows can share an identical `recorded_at` (timestamptz has microsecond
+-- resolution, but concurrent transactions can still commit within the same
+-- microsecond), and unspecified SQL ordering among ties is not acceptable
+-- for a decision with legal significance. `seq` is insertion-order-true
+-- (a `bigserial`, unlike `decision_id`'s random UUID, which cannot serve as
+-- a meaningful tie-breaker), so `ORDER BY recorded_at DESC, seq DESC` is
+-- fully deterministic in all cases. Internal-only - not part of the public
+-- `ConsentDecision` contract in `types.ts`.
 CREATE TABLE consent_decisions (
+  seq               bigserial UNIQUE,
   decision_id       text PRIMARY KEY,
   tenant_id         text NOT NULL REFERENCES tenants (tenant_id),
   memory_space_id   text NOT NULL DEFAULT 'business'
@@ -31,13 +41,19 @@ CREATE TABLE consent_decisions (
   recorded_at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX consent_decisions_lookup_idx
-  ON consent_decisions (tenant_id, memory_space_id, contact_id, purpose, recorded_at DESC);
+  ON consent_decisions (tenant_id, memory_space_id, contact_id, purpose, recorded_at DESC, seq DESC);
 
 -- Deliberately NO UPDATE grant - the ledger is append-only by database
 -- permission, not merely by application convention (same "structural, not
 -- conventional" principle as D-87's missing 'executed' CHECK value).
 GRANT SELECT, INSERT ON consent_decisions TO jarvis_app;
 GRANT DELETE ON consent_decisions TO jarvis_app; -- required for Q-20 erasure
+-- `bigserial` implicitly creates a backing sequence NOT owned by jarvis_app -
+-- an INSERT's implicit `nextval()` fails without explicit USAGE. SELECT is
+-- harmless (a sequence's current value is not itself sensitive) and is
+-- needed for `currval()`/introspection; there is deliberately no ALTER/UPDATE
+-- grant on the sequence itself.
+GRANT USAGE, SELECT ON SEQUENCE consent_decisions_seq_seq TO jarvis_app;
 
 ALTER TABLE consent_decisions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE consent_decisions FORCE ROW LEVEL SECURITY;
