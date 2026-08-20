@@ -1911,6 +1911,45 @@ fasen. Vercel/GCP/Cloudflare/Docker/Infisical/Langfuse/Sentry EKSPLISITT ikke st
 **Sovereign Autonomy v4.0-masterplanen SOM HELHET forblir IKKE komplett.** Draft-PR, IKKE merget. Full
 detalj: D-94 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — TESTED FIX ORCHESTRATOR v1 (2026-08-20) → D-95
+
+D-94 er nå merget til main (`0bf8b2cd2af58e4057c5f293f5b0ee209e280297`). RESUME SOVEREIGN AUTONOMY
+v4.0-ordre krevde en fersk (ikke gjenbrukt) UA-5-rekonstruksjon FØR neste slice velges. Full lesing av
+`modules/tasks/src/coding.ts`/`worker.ts`/`pg-task-queue.ts` fant kodejobb-workeren (ekte, testet
+sandbox/clone/branch/test-gate/commit/push) og D-94s GitHub-transport strukturelt FRAKOBLET - en
+vellykket kodejobb produserte kun et inert `pr-proposal`-JSON-artefakt, ingen ekte PR, og returnerte
+ikke commit-sha. Kapabilitetssjekklisten bekreftet: mekanisk kilde-endring/branch/test/commit/push/
+checkpoint/cancel er ALLE ekte og testet, men `CAN_RETURN_COMMIT_SHA=false` (reell mangel) og selve
+diagnose-laget er UENDRET ikke ekte (`ScriptedCodingAgent`=placeholder, `ClaudeCodeAgent`=stub som
+alltid kaster). Seks-kandidat-sammenligning rangerte "Tested Fix Orchestrator v1" øverst: alle
+byggeklosser var allerede ekte/testet/merget, kun koblingen manglet - de øvrige kandidatene (Incident
+Correlation, Infra Degraded Mode) krevde en ny provider-/canonical-state-beslutning ordren eksplisitt
+forbød å ta stille, og live GitHub-verifisering er en eier-handling, ikke en kode-slice.
+
+**Bygget (bevisst minimalt):** `modules/tasks/src/pr-publisher.ts` - `parseGithubRepoSlug()` (ren
+regex, github.com-URL → `owner/repo`, `null` for alt annet, kaster aldri) og
+`publishPullRequestForCodingJob()` (kaller EKSISTERENDE `github.create_pr`, klasse C, uendret, via et
+strukturelt duck-typed `PrPublishingGateway`-grensesnitt - IKKE en pakkeavhengighet til
+`@jarvis/tool-gateway`, som ville ha lukket en sirkulær workspace-graf via `@jarvis/memory`s
+devDependency på `@jarvis/tasks`, oppdaget via `pnpm install`s eget cyclic-varsel FØR commit).
+Autorisasjon FØR mekanikk: `jobContract.allowed_tools.includes("github")` sjekkes FØRST - ingen ny
+sperre, gjenbruker jobbkontraktens eksisterende `allowed_tools`-mekanisme. `createCodingHandler` fikk
+et nytt valgfritt `github`-felt; uten det er oppførselen 100% uendret (alle 15 eksisterende
+`fase6-worker.test.ts`-tester består urørt). Commit-sha fanges nå alltid og returneres i jobbresultatet.
+Idempotens: deterministisk `idempotency_key: coding-job-pr:<task_id>` gjenbruker den EKSISTERENDE
+`tool_executions`-dedupe (ingen ny mekanisme). GitHub-side-feil (frosset connector m.m.) gjør ALDRI en
+vellykket test+push-jobb til "failed" - feilen er synlig i `pr.status`/`pr.reason` i jobbresultatet OG
+i et persistert `pr-result`-artefakt, aldri skjult. **ALDRI merge:** kun `create_pr` kalles - `merge_pr`
+(klasse D, D-94, uendret) forblir en separat, eier-autorisert handling denne modulen aldri trigger.
+D-64: GitHub forblir `EXTERNAL_CANONICAL`, INGEN ny Jarvis-DB-tabell (feltene lever i det eksisterende
+`tasks.result`-JSON-feltet). D-41: ingen ny risikoklasse. `MODEL_GATEWAY_USED=false`. 16 nye tester
+(`pr-publisher.test.ts`, inkl. en test-only `RepoUrlRedirectingSandboxRunner` som lar PR-opprettelses-
+veien testes ende-til-ende uten noensinne å røre det virkelige github.com). `pnpm -w typecheck`/`lint`
+rent. **UA-5 kriterium-status etter denne sliceen (ikke oppblåst):** kriterium 2 forblir PARTIAL
+(GitHub-siden er nå SAMMENKOBLET med kodejobb-workeren, men diagnostisk fiks-generering er FORTSATT
+IKKE bygget); kriterium 1/3/4 uendret fra D-94. `UA5_IMPLEMENTATION_COMPLETE=false`,
+`UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. Full detalj: D-95 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

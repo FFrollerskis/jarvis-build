@@ -1,5 +1,32 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-95 Tested Fix Orchestrator v1
+bygget (GitHub-livssyklus-glue, IKKE diagnose/fiks-generering).** PR #35 (D-94) er MERGET til main
+(merge-commit `0bf8b2cd2af58e4057c5f293f5b0ee209e280297`, bekreftet post-merge-CI grønn). RESUME
+SOVEREIGN AUTONOMY v4.0-ordre: fersk UA-5-rekonstruksjon (ny lesing av `coding.ts`/`worker.ts`/
+`pg-task-queue.ts`) fant kodejobb-workeren (sandbox/branch/test-gate/commit/push, ekte og testet) og
+D-94s GitHub-transport strukturelt FRAKOBLET — vellykkede kodejobber produserte kun et inert
+`pr-proposal`-artefakt, ingen ekte PR, og returnerte ikke commit-sha. Bygget `modules/tasks/src/
+pr-publisher.ts`: `publishPullRequestForCodingJob()` åpner nå en EKTE GitHub-PR (via EKSISTERENDE
+`github.create_pr`, klasse C, uendret) etter en vellykket kodejobb — KUN når jobbkontrakten selv
+lister `"github"` i `allowed_tools` (ingen ny blanket-godkjenningssperre, gjenbruker eksisterende
+mandat-mekanisme). `createCodingHandler` fikk et NYTT valgfritt `github`-felt — uten det er
+oppførselen 100% uendret (alle 15 eksisterende `fase6-worker.test.ts`-tester består urørt). Commit-sha
+fanges nå alltid og returneres i jobbresultatet. ALDRI merge herfra — `github.merge_pr` (klasse D,
+D-94) forblir en separat, eier-autorisert handling. GitHub-side-feil gjør ALDRI en vellykket test+push-
+jobb til "failed" — feilen er synlig i `pr.status`/`pr.reason`, aldri skjult. Diagnose-laget er UENDRET
+IKKE ekte (`ScriptedCodingAgent` placeholder, `ClaudeCodeAgent` stub) — kriterium 2 forblir PARTIAL, IKKE
+oppblåst til COMPLETE. `@jarvis/tool-gateway` ble BEVISST IKKE lagt til som pakkeavhengighet av
+`@jarvis/tasks` (ville lukket en sirkulær workspace-graf via `@jarvis/memory`s devDependency på
+`@jarvis/tasks` — oppdaget via `pnpm install`s eget cyclic-varsel) — løst med et strukturelt duck-typed
+`PrPublishingGateway`-grensesnitt i stedet. 16 nye tester (`pr-publisher.test.ts`, inkl. en
+`RepoUrlRedirectingSandboxRunner`-testdobbel som lar hele PR-opprettelses-veien testes ende-til-ende
+uten å noensinne røre det virkelige github.com). `pnpm -w typecheck`/`lint` rent. Se D-95 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch `claude/ua5-tested-fix-orchestrator`, draft PR
+gjenstår på tidspunktet for denne statuslinjen.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**PR #35 (D-94) PRE-MERGE CLOSEOUT-AUDIT — tre reelle idempotens-hull
 funnet og fikset FØR godkjenning.** Fersk kodeaudit (ikke stolt på forrige rapport) fant: (1)
 `create_branch` sin 422-"already exists"-håndtering returnerte suksess uansett hvilken sha den
