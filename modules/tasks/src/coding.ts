@@ -7,16 +7,19 @@ import { publishPullRequestForCodingJob, type PrPublishingGateway } from "./pr-p
 import type { SandboxRunner } from "./sandbox.ts";
 import type { TaskHandler } from "./worker.ts";
 
+/** Kodejobb-eksekutør slik sandboxen faktisk eksponerer den (samme signatur som `Sandbox.exec`). */
+export type CodingAgentExec = (cmd: string, args: string[], timeoutMs?: number) => { code: number; stdout: string; stderr: string };
+
 /** Kodeagent bak adapter: skriptet i test; Claude Code headless når binær/nøkkel finnes. */
 export interface CodingAgentAdapter {
   readonly name: string;
   /** Gjør endringen i workdir; returnerer beskrivelse av hva som ble gjort. */
-  modify(workdirExec: (cmd: string, args: string[]) => { code: number }, goal: string): Promise<string>;
+  modify(workdirExec: CodingAgentExec, goal: string): Promise<string>;
 }
 
 export class ScriptedCodingAgent implements CodingAgentAdapter {
   readonly name = "scripted-agent";
-  async modify(exec: (cmd: string, args: string[]) => { code: number }, goal: string): Promise<string> {
+  async modify(exec: CodingAgentExec, goal: string): Promise<string> {
     const content = `# Endring utført av jarvis-worker\n\nMål: ${goal}\n`;
     const escaped = content.replace(/\n/g, "\\n").replace(/"/g, '\\"');
     exec("node", ["-e", `require('fs').writeFileSync('CHANGES.md', "${escaped}")`]);
@@ -24,15 +27,73 @@ export class ScriptedCodingAgent implements CodingAgentAdapter {
   }
 }
 
-/** Claude Code headless (JARVIS_CLAUDE_BIN). UVERIFISERT til binær+nøkkel er konfigurert. */
+/**
+ * D-96 Real Coding Agent v1: ekte, ikke-interaktiv Claude Code CLI-kjøring
+ * (JARVIS_CLAUDE_BIN), INNE i den eksisterende jobb-sandboxen (samme `exec`
+ * som resten av kodejobben - ingen egen/ny sandbox). Verifisert MOT
+ * offisiell dokumentasjon (https://code.claude.com/docs/en/headless,
+ * 2026-08-20), ikke antatt:
+ *
+ * - `-p "<mål>"` = ikke-interaktiv engangs-kjøring (dokumentert oppførsel).
+ * - `--bare` = hopper over hook/plugin/CLAUDE.md-oppdagelse - PÅKREVD her:
+ *   uten `--bare` forventer `-p` interaktiv OAuth/nøkkelring-innlogging, som
+ *   en engangs, tom sandbox strukturelt ALDRI har tilgang til (ingen
+ *   vedvarende `~/.claude`-tilstand følger med en kastbar jobb-sandbox).
+ *   Med `--bare` autentiseres CLI-en KUN via `ANTHROPIC_API_KEY` i prosess-
+ *   env - injisert EKSPLISITT (se `createCodingHandler`s `claudeCodeCredential`),
+ *   ALDRI arvet fra Jarvis-prosessen (samme "ren env"-prinsipp som resten av
+ *   sandboxen).
+ * - `--permission-mode acceptEdits` = filredigering skjer uten et (umulig,
+ *   ubetjent) godkjenningsprompt.
+ * - `--allowedTools "Read,Edit"` - BEVISST IKKE "Bash": agenten skal KUN
+ *   foreslå en diff. Den EKSISTERENDE test-porten i `createCodingHandler`
+ *   kjører den ekte testkommandoen PÅ NYTT etterpå, uendret - agenten kan
+ *   ALDRI selv erklære "testene består" (jf. Q-26).
+ * - `--output-format json` = strukturert `{result: "<tekst>"}`-utgang.
+ * - Suksess/feil avgjøres UTELUKKENDE av prosessens exit-kode (dokumentert
+ *   kontrakt: 0 = suksess, ikke-null = feil) - ALDRI av å tolke fritekst.
+ *
+ * Persisterer KUN en kort, strukturert beskrivelse (CLI-ens `result`-felt) -
+ * ALDRI en skjult resonnerings-logg (Q-26/§13: ingen chain-of-thought lagres).
+ */
 export class ClaudeCodeAgent implements CodingAgentAdapter {
   readonly name = "claude-code";
-  constructor(private readonly bin: string | undefined = process.env["JARVIS_CLAUDE_BIN"]) {}
-  async modify(): Promise<string> {
+  constructor(
+    private readonly bin: string | undefined = process.env["JARVIS_CLAUDE_BIN"],
+    private readonly timeoutMs = 300_000
+  ) {}
+
+  async modify(exec: CodingAgentExec, goal: string): Promise<string> {
     if (!this.bin) {
       throw new Error("claude_code_not_configured");
     }
-    throw new Error("claude_code_unverified_in_phase6: aktiveres med reell noekkel/miljoe");
+    const args = [
+      "-p", goal,
+      "--bare",
+      "--output-format", "json",
+      "--permission-mode", "acceptEdits",
+      "--allowedTools", "Read,Edit"
+    ];
+    const result = exec(this.bin, args, this.timeoutMs);
+    if (result.code !== 0) {
+      throw new Error(`claude_code_cli_failed:${(result.stderr || result.stdout || "").slice(0, 300)}`);
+    }
+    const description = parseClaudeCodeCliResult(result.stdout);
+    if (!description) {
+      throw new Error(`claude_code_cli_invalid_output:${result.stdout.slice(0, 300)}`);
+    }
+    return description;
+  }
+}
+
+/** `--output-format json` sitt `result`-felt; faller tilbake til rå stdout kun hvis JSON-parsing feiler (ALDRI hvis den lykkes men `result` mangler/er tom - det er en reell, rapporterbar feil). */
+function parseClaudeCodeCliResult(stdout: string): string | null {
+  try {
+    const parsed = JSON.parse(stdout) as { result?: unknown };
+    return typeof parsed.result === "string" && parsed.result.length > 0 ? parsed.result : null;
+  } catch {
+    const trimmed = stdout.trim();
+    return trimmed.length > 0 ? trimmed : null;
   }
 }
 
@@ -78,6 +139,16 @@ export function createCodingHandler(deps: {
    * UENDRET (kun det lokale pr-proposal-artefaktet, som før D-95).
    */
   github?: { gateway: PrPublishingGateway; base?: string };
+  /**
+   * D-96 Real Coding Agent v1 (valgfritt): credential som injiseres i
+   * sandboxens prosess-env (aldri arvet fra Jarvis-prosessen) - KUN når
+   * `agent` faktisk trenger en (f.eks. `ClaudeCodeAgent` sin
+   * `ANTHROPIC_API_KEY` for `--bare`-autentisering). Duck-typed mot
+   * `SecretProvider` (samme mønster som `PrPublishingGateway` - ingen
+   * pakkeavhengighet til `@jarvis/tool-gateway`). Uten dette feltet er
+   * sandbox-oppførselen 100% uendret (tom jobEnv, som før D-96).
+   */
+  claudeCodeCredential?: { secretProvider: { get(ref: string): Promise<string | null> }; ref?: string };
 }): TaskHandler {
   return async (task, ctx) => {
     const input = task.contract.input.data as { repo_url?: string; test_command?: string[] };
@@ -103,9 +174,15 @@ export function createCodingHandler(deps: {
       throw new Error(`policy_denied:${decision.reason}`);
     }
 
-    const sandbox = await deps.sandbox.create();
+    const jobEnv: Record<string, string> = {};
+    if (deps.claudeCodeCredential) {
+      const ref = deps.claudeCodeCredential.ref ?? "ANTHROPIC_API_KEY";
+      const value = await deps.claudeCodeCredential.secretProvider.get(ref);
+      if (value) jobEnv[ref] = value;
+    }
+    const sandbox = await deps.sandbox.create(jobEnv);
     try {
-      const run = (cmd: string, args: string[]) => sandbox.exec(cmd, args);
+      const run: CodingAgentExec = (cmd, args, timeoutMs) => sandbox.exec(cmd, args, timeoutMs);
       const must = (label: string, result: { code: number; stderr?: string }) => {
         if (result.code !== 0) {
           throw new Error(`${label}_failed: ${result.stderr ?? ""}`.slice(0, 300));
