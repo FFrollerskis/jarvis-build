@@ -1,6 +1,59 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-19 (**UA-4 SLICE 6 — MARKETING→MEETING→REVENUE FUNNEL-LINKAGE** → D-88, base
+**Oppdatert:** 2026-08-19 (**UA-4 SLICE 7 — MARKETING MEMORY v1** → D-89, base
+`main`@`c8a5ea46d9af6fed90f3d179c0eb01ac2dffc031` (PR #26/D-88 MERGET), branch
+`claude/ua4-marketing-memory-v1`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT
+AV 9 KANDIDATER, BEKREFTET byggeordrens "sterke default":** UA-4-matrisen rekonstruert fra repo-
+sannhet viste at masterplanens EGEN literale nevning ("Experiment registry, anomaly detection,
+creative intelligence og marketing memory") fortsatt hadde Marketing Memory som eneste NOT_STARTED
+kapabilitet med en REELT mulig data-forutsetning etter D-88: kampanje→utgift→attribusjon→møte→
+opportunity→won/revenue PLUSS D-85/D-87 sin anbefaling-/kommando-historikk ga FØRSTE gang nok
+strukturert, evidensbærende data til et NARROW, Q-26-trygt observasjon-lag. Creative Intelligence/
+eksperiment-intelligens AVVIST IGJEN (samme datamangel som D-87/D-88 - ingen kreativ-/per-variant-
+data eksisterer). **Ny migrasjon `031_growth_marketing_observations.sql`** (`marketing_campaign_
+observations`, additiv, FK KUN mot `marketing_campaigns`). **Begrepsskille:** MARKETING FACT
+(eksisterende data) → MARKETING OBSERVATION (`CampaignObservation`, DETTE laget) → MARKETING
+HYPOTHESIS/LEARNING (EKSPLISITT IKKE bygget - ville krevd generalisering på tvers av kampanjer,
+Q-26-risiko) → MARKETING POLICY (urørt). **Q-26 er den primære sikkerhetsporten:**
+`detection_method` LÅST til KUN `'deterministic'` i databasens CHECK-constraint (samme strenge
+mønster som D-85 sin `source`-kolonne), bevist med en test som forsøker `UPDATE ... SET
+detection_method = 'ai_assisted'` og bekrefter Postgres avviser det. `status` har BEVISST INGEN
+`'verified'`-verdi (kun `'open'`/`'resolved'`) - Truth Promotion forblir ubygget. ZERO ModelGateway-
+kall. **Persistens-avgjørelse:** vurderte og AVVISTE UA-2 sin generelle `memory_items`-motor (feil
+form - bygget for fritekst/embedding, ikke strukturerte numeriske observasjoner), gjenbrukte i
+stedet `business_scores` (D-61) sitt entity/evidence/UNIQUE-per-type-mønster. **To
+observasjonstyper** (begge tidsvindu-frie, unngår "livstid A vs 7-dager B"-fellen siden
+`campaignPerformance()` er livstids-only): `meetings_without_conversion` (≥1 attribuert møte MEN 0
+vunne opportunities - ærlig funnel-gap, ALDRI kausal påstand) og `recommendation_disposition_
+summary` (alltid-oppdatert opptelling av D-85/D-87-status). **Resolve-ALDRI-slett-livssyklus**
+(samme prinsipp som D-85): når vilkåret opphører, markeres raden `'resolved'` med siste
+evidens-øyeblikksbilde, ALDRI slettet - SAMME rad, historikken bevart. INGEN rad opprettes når data
+mangler (fravær = ærlig "ingen data ennå"). **Ingen rad-fan-out-regresjon:** gjenbrukte
+`computePerformanceSnapshot()` (trukket ut fra D-88 sin `campaignPerformance()`) i stedet for å
+nøste `withMemoryTransaction`. Ny `growth.generate_marketing_observations` (klasse B)/`list_
+marketing_observations` (klasse A) - INGEN klasse C/D. INGEN scheduler (eksplisitt agent-/eier-kalt
+i v1). **D-85/D-87-grense bevart:** Marketing Memory OBSERVERER kun anbefaling-/kommando-HISTORIKK,
+skriver ALDRI til deres tabeller - INGEN kobling observasjon→anbefaling→kommando→provider-mutasjon.
+Q-20 erasure-plan oppdatert (ny tabell slettes FØR `marketing_campaigns`). **PR #27-audit fant og
+fikset TO reelle presisjonsfunn FØR merge:** (a) hendelse-spam på idempotent regenerering (fikset -
+`marketing_observation_generated` logges nå KUN når noe faktisk endret seg, samme prinsipp som D-85);
+(b) `meetings_without_conversion` sin gjenåpnings-vei OVERSKRIVER forrige episodes evidence i SAMME
+rad - PRESIST dokumentert som CURRENT-STATE-minne (IKKE historisk episodisk minne) i `types.ts`/D-89,
+bevist med en dedikert test. **13 nye tester** (11 `service-rls.test.ts` §R, 2
+`transport-wiring.test.ts` §C5, `growth-erasure.test.ts` utvidet).
+Testregnskap: `main` FØR = 1630/112 → ETTER = **1643 (+13), 112 filer**, 112/112 grønn (INGEN
+flake). `pnpm -w typecheck` 17/17 rent, `pnpm -w lint` rent. **Status:** D-89 =
+**FIXED_SUITE_VERIFIED_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM
+HELHET forblir IKKE komplett (mutate-/utførelses-kapabilitet, Creative Intelligence, Finance
+Integrity Gateway, samtykke-governance alle fortsatt NOT_STARTED/BLOCKED/DEFERRED - Marketing
+Memory v1 er analyse-/lærings-lag ALENE, INGEN OpenLoop-endring, INGEN Business OS-brief-
+integrasjon i denne sliceen - eksplisitt dokumentert gap). UA-3 kriterium 2 UENDRET (2/5 domener).
+Draft-PR opprettes, IKKE merget. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-
+mutasjon, INGEN andre slice denne runden, INGEN merge.** Full detalj: D-89 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, IKKE merget):** UA-4 SLICE 6 — MARKETING→MEETING→REVENUE FUNNEL-LINKAGE
+→ D-88, base
 `main`@`90af34c6aae6968f3592e92028ba1e6f3e92df51` (PR #25/D-87 MERGET), branch
 `claude/ua4-marketing-funnel-meeting-linkage`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY
 v4.0 — VALGT AV 8 KANDIDATER, BEKREFTET byggeordrens "sterke default":** literal rekonstruksjon av

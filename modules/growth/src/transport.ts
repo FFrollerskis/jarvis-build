@@ -9,6 +9,8 @@ import type {
   ClickIdParam,
   ExecutionCommandStatus,
   ExperimentStatus,
+  MarketingObservationStatus,
+  MarketingObservationType,
   RecommendationStatus,
   RegisterCampaignTrackingTagInput,
   TrackingLookup
@@ -201,6 +203,18 @@ export class GrowthTransport implements ToolTransport {
         const rows = await this.service.listExecutionCommands(tenantId, memorySpace, {
           ...(parameters["campaign_id"] !== undefined ? { campaign_id: String(parameters["campaign_id"]) } : {}),
           ...(parameters["status"] !== undefined ? { status: parameters["status"] as ExecutionCommandStatus | "all" } : {})
+        });
+        return { data: rows as unknown as JsonValue };
+      }
+      case "generate_marketing_observations": {
+        const rows = await this.service.generateMarketingObservations(tenantId, memorySpace, requireString(parameters, "campaign_id"));
+        return { data: rows as unknown as JsonValue };
+      }
+      case "list_marketing_observations": {
+        const rows = await this.service.listMarketingObservations(tenantId, memorySpace, {
+          ...(parameters["campaign_id"] !== undefined ? { campaign_id: String(parameters["campaign_id"]) } : {}),
+          ...(parameters["observation_type"] !== undefined ? { observation_type: parameters["observation_type"] as MarketingObservationType } : {}),
+          ...(parameters["status"] !== undefined ? { status: parameters["status"] as MarketingObservationStatus | "all" } : {})
         });
         return { data: rows as unknown as JsonValue };
       }
