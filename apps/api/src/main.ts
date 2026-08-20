@@ -39,7 +39,9 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { GoogleAdsTransport, GrowthService, GrowthTransport, runActionRecommendationSweepForAllTenants } from "@jarvis/growth";
+import {
+  GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
+} from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
@@ -145,7 +147,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(), telegram: new TelegramTransport(),
-    business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
+    // D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon -
+    // `marketingMemoryBriefSource(growthService)` injiseres her (app-laget,
+    // som allerede har BEGGE tjenestene) i stedet for at `@jarvis/business`
+    // importerer `@jarvis/growth` direkte (ville vært sirkulært, se
+    // `business-os-integration.ts`).
+    business: new BusinessTransport(
+      businessService, openLoopService, pool, toolGateway, scoringService,
+      [marketingMemoryBriefSource(growthService)]
+    ),
     // SAMME lazy-init-mønster som BusinessTransport sin `requireEventSync()`
     // (D-49): `SupportTransport` får `toolGateway` DIREKTE (objektreferansen
     // finnes allerede, selv om selve register()-loopen ikke er ferdig ennå) -

@@ -1,6 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**UA-4 SLICE 7 — MARKETING MEMORY v1** → D-89, base
+**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON** → D-90,
+base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch
+`claude/ua4-business-os-marketing-memory`, draft PR, IKKE merget). **RESUME SOVEREIGN AUTONOMY v4.0 —
+sliceen navngitt direkte av byggeordren.** Verifisert gap FØR bygging: `BUSINESS_OS_MARKETING_MEMORY_
+VISIBLE=false` - D-89 sine observasjoner var kun nåbare via rå ToolGateway-lesing, aldri surfacet i
+Business OS-briefen. **Arkitektonisk kjernefunn:** `@jarvis/growth` avhenger ALLEREDE av `@jarvis/
+business` (D-74/D-78) - en ny `@jarvis/business` → `@jarvis/growth`-avhengighet for å konsumere
+observasjonene direkte ville vært SIRKULÆR. Løst med dependency injection: ny `marketingMemoryBrief
+Source(growthService)` bygget i `@jarvis/growth` (`business-os-integration.ts`, samme `BriefSource`-
+kontrakt som `businessOpenLoopsSource`), `BusinessTransport` fikk et nytt valgfritt sjette konstruktør-
+parameter `extraBriefSources`, injisert fra app-laget (`apps/api/src/main.ts`/`worker-main.ts`, identisk
+wiring i begge) - `@jarvis/business` importerer FORTSATT ALDRI `@jarvis/growth` (strukturelt bevist).
+**Presentasjon:** kun `status: 'open'`-observasjoner, `meetings_without_conversion` som ikke-kausalt
+"N attribuerte møter, ingen vunnet opportunity ennå" (score 55), `recommendation_disposition_summary`
+KUN når faktisk aktivitet finnes (unngår permanent tom støy-rad, siden typen aldri blir `'resolved'`,
+score 30). Kampanjenavn slått opp for lesbarhet. TIME_WINDOW_MODEL=LIFETIME_ONLY, Q-26-grense uendret
+fra D-89 (ingen truth promotion, ingen ModelGateway). **INGEN ny persistens/migrasjon/ToolGateway-action/
+OpenLoop-endring** - ren lese-/presentasjonsintegrasjon. **14 nye tester** (10 `service-rls.test.ts` §S,
+4 `business-brief.test.ts` §F inkl. et audit-funn: kildefeil-isolasjon bevist eksplisitt), pluss 4
+eksisterende wiring-regresjonstester oppdatert for det nye flerlinjede `BusinessTransport(...)`-kallet
+(kun formaterings-drift, ingen funksjonell regresjon).
+Testregnskap: `main` FØR = 1643/112 → ETTER = **1657 (+14), 112 filer**, alle grønne. `pnpm -w typecheck`
+17/17 rent, `pnpm -w lint` rent. **Status:** D-90 = **FIXED_SUITE_VERIFIED_COMPLETE=true,
+HOST_ACTION_REQUIRED=false** (ZERO leverandør). UA-4 forblir IKKE komplett (Creative Intelligence,
+samtykke-governance, UA-6, ekte provider-utførelse, Google Ads live-verifisering alle fortsatt
+NOT_STARTED/BLOCKED/DEFERRED). UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR opprettes, IKKE
+merget. **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon, INGEN andre slice denne
+runden, INGEN merge.** Full detalj: D-90 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** UA-4 SLICE 7 — MARKETING MEMORY v1 → D-89, base
 `main`@`c8a5ea46d9af6fed90f3d179c0eb01ac2dffc031` (PR #26/D-88 MERGET), branch
 `claude/ua4-marketing-memory-v1`, **PR #27 MERGET av Tobias sin eksplisitte godkjenning →
 `main`@`72b63418b70090686ad1ef03b3056dacba296de3`**). **RESUME SOVEREIGN AUTONOMY v4.0 — VALGT

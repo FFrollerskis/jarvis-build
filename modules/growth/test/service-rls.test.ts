@@ -1,11 +1,14 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, pgDateToIsoDate, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
+import { marketingMemoryBriefSource } from "../src/business-os-integration.ts";
 import { GrowthService } from "../src/service.ts";
 import { InvalidCampaignTransitionError, InvalidExperimentTransitionError } from "../src/state-machine.ts";
 
@@ -1263,6 +1266,148 @@ describe("R (D-89): MARKETING MEMORY v1 - deterministisk observasjon-lag, ALDRI 
     expect(reopenedEvidence.attributed_meetings).toBe(2);
     const all = await service.listMarketingObservations(TENANT_A, "business", { campaign_id: campaign.campaign_id, status: "all" });
     expect(all.filter((o) => o.observation_type === "meetings_without_conversion")).toHaveLength(1); // FORTSATT kun én rad - episode 1 finnes IKKE separat noe sted i denne tabellen.
+  });
+});
+
+describe("S (D-90): Business OS × Marketing Memory-integrasjon - marketingMemoryBriefSource()", () => {
+  const identity = (tenantId: string, sess: string): IdentityContext => ({
+    person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+    session_id: sess, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+  });
+
+  it("ingen observasjoner for en gitt kampanje: ingen oppdiktet punkt for DEN kampanjen (tenanten kan ha andre, tidligere genererte observasjoner fra andre tester)", async () => {
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S1 no observations unikt navn" });
+    void campaign; // ingen generateMarketingObservations() kalt ennå for DENNE kampanjen - INGEN rad finnes for den.
+    const items = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s1"));
+    expect(items.some((i) => i.title.includes("S1 no observations unikt navn"))).toBe(false);
+  });
+
+  it("en helt fersk, tom tenant uten noen genererte observasjoner i det hele tatt gir en tom liste", async () => {
+    const items = await marketingMemoryBriefSource(service).collect(identity(TENANT_B, "sess-s1b-empty-tenant"));
+    expect(items).toEqual([]);
+  });
+
+  it("open meetings_without_conversion vises som ett ikke-kausalt brief-punkt med kampanjenavn", async () => {
+    await insertContact(TENANT_A, "ct-grw-s2");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s2", "ct-grw-s2");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S2 Kampanjen" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s2" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s2", "ct-grw-s2", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    const items = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s2"));
+    const item = items.find((i) => i.source === "marketing-memory" && i.title.includes("S2 Kampanjen"));
+    expect(item).toBeTruthy();
+    expect(item?.title).toContain("1 attribuert møte");
+    expect(item?.title).toContain("ingen vunnet opportunity");
+    // §15 i byggeordren: ALDRI kausal/kvalitetsdømmende ordlyd.
+    expect(item?.title).not.toMatch(/forårsak|dårlig|feilet|konverterer ikke/i);
+    expect(item?.why).not.toMatch(/forårsak|dårlig|feilet/i);
+    expect(item?.score).toBeLessThan(70); // aldri automatisk "needs_attention" - ingen vilkårlig eskalering (§22).
+  });
+
+  it("resolved meetings_without_conversion vises IKKE (kun 'open' hentes, samme prinsipp som businessOpenLoopsSource)", async () => {
+    await insertContact(TENANT_A, "ct-grw-s3");
+    await insertOpportunityWithContact(TENANT_A, "opp-grw-s3", "ct-grw-s3", "proposal", 100_000);
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S3 Resolved" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "opportunity", entity_id: "opp-grw-s3" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s3", "ct-grw-s3", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(`UPDATE business_opportunities SET stage = 'won', value_ore = 100000 WHERE opportunity_id = 'opp-grw-s3'`)
+    );
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    const items = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s3"));
+    expect(items.some((i) => i.title.includes("S3 Resolved"))).toBe(false);
+  });
+
+  it("recommendation_disposition_summary vises KUN når det faktisk finnes anbefalings-/kommandoaktivitet (tom rapport = ren støy, ekskluderes)", async () => {
+    const emptyCampaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S4 Empty disposition" });
+    await service.generateMarketingObservations(TENANT_A, "business", emptyCampaign.campaign_id);
+    const itemsEmpty = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s4a"));
+    expect(itemsEmpty.some((i) => i.title.includes("S4 Empty disposition"))).toBe(false);
+
+    const activeCampaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S4 Active disposition" });
+    await service.setBudget(TENANT_A, "business", activeCampaign.campaign_id, 100_000);
+    const rec = await service.upsertActionRecommendation(TENANT_A, "business", {
+      campaign_id: activeCampaign.campaign_id, open_loop_id: null, recommendation_type: "reduce_budget",
+      rationale: "test", evidence: {}, detection_key: `test-s4:${activeCampaign.campaign_id}`
+    });
+    await service.generateMarketingObservations(TENANT_A, "business", activeCampaign.campaign_id);
+    void rec;
+    const itemsActive = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s4b"));
+    const dispositionItem = itemsActive.find((i) => i.title.includes("S4 Active disposition"));
+    expect(dispositionItem).toBeTruthy();
+    expect(dispositionItem?.score).toBeLessThan(40); // FYI-nivå, aldri en handlingsanbefaling i seg selv.
+  });
+
+  it("flere kampanjer i samme tenant gir separate, korrekt merkede punkter", async () => {
+    await insertContact(TENANT_A, "ct-grw-s5");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s5a", "ct-grw-s5");
+    const campaignX = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S5 Kampanje X" });
+    await service.attributeToCampaign(TENANT_A, "business", campaignX.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s5a" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s5a", "ct-grw-s5", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaignX.campaign_id);
+
+    await insertContact(TENANT_A, "ct-grw-s5b");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s5b", "ct-grw-s5b");
+    const campaignY = await service.createCampaign(TENANT_A, "business", { channel: "meta_ads", name: "S5 Kampanje Y" });
+    await service.attributeToCampaign(TENANT_A, "business", campaignY.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s5b" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s5b", "ct-grw-s5b", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaignY.campaign_id);
+
+    const items = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s5"));
+    expect(items.some((i) => i.title.includes("S5 Kampanje X"))).toBe(true);
+    expect(items.some((i) => i.title.includes("S5 Kampanje Y"))).toBe(true);
+    // Ulike observation_id -> ulik `ref` (provenance-forankring, aldri samme punkt for to kampanjer).
+    const refs = items.filter((i) => i.title.includes("S5 Kampanje")).map((i) => i.ref);
+    expect(new Set(refs).size).toBe(refs.length);
+  });
+
+  it("TENANT_B ser ALDRI TENANT_A sine markedsføringsobservasjoner (RLS-isolasjon)", async () => {
+    await insertContact(TENANT_A, "ct-grw-s6");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s6", "ct-grw-s6");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S6 Isolation" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s6" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s6", "ct-grw-s6", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    const itemsB = await marketingMemoryBriefSource(service).collect(identity(TENANT_B, "sess-s6-b"));
+    expect(itemsB.some((i) => i.title.includes("S6 Isolation"))).toBe(false);
+  });
+
+  it("memory_space isolasjon: en 'guest'-space ser ikke 'business'-space sine observasjoner for samme tenant", async () => {
+    await insertContact(TENANT_A, "ct-grw-s7");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s7", "ct-grw-s7");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S7 Space isolation" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s7" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s7", "ct-grw-s7", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    const itemsGuestSpace = await marketingMemoryBriefSource(service, "guest").collect(identity(TENANT_A, "sess-s7-guest"));
+    expect(itemsGuestSpace.some((i) => i.title.includes("S7 Space isolation"))).toBe(false);
+  });
+
+  it("deterministisk: gjentatte kall med uendret tilstand gir IDENTISK sett av refs (samme observation_id-er)", async () => {
+    await insertContact(TENANT_A, "ct-grw-s8");
+    await insertLeadWithContact(TENANT_A, "lead-grw-s8", "ct-grw-s8");
+    const campaign = await service.createCampaign(TENANT_A, "business", { channel: "google_ads", name: "S8 Deterministic" });
+    await service.attributeToCampaign(TENANT_A, "business", campaign.campaign_id, { entity_type: "lead", entity_id: "lead-grw-s8" });
+    await insertMeetingActivity(TENANT_A, "act-grw-s8", "ct-grw-s8", "2030-01-01T10:00:00Z");
+    await service.generateMarketingObservations(TENANT_A, "business", campaign.campaign_id);
+
+    const first = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s8-1"));
+    const second = await marketingMemoryBriefSource(service).collect(identity(TENANT_A, "sess-s8-2"));
+    const refsOf = (items: typeof first) => items.filter((i) => i.title.includes("S8 Deterministic")).map((i) => i.ref).sort();
+    expect(refsOf(second)).toEqual(refsOf(first));
+  });
+
+  it("business-os-integration.ts skriver ALDRI til D-85/D-87-tabeller eller kaller ModelGateway - kun listMarketingObservations()/getCampaign() (strukturelt bevis)", async () => {
+    const source = await readFile(fileURLToPath(new URL("../src/business-os-integration.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/upsertActionRecommendation|generateExecutionCommand|resolveActionRecommendation|cancelExecutionCommand/);
+    expect(source).not.toMatch(/@jarvis\/model-gateway|@jarvis\/provider-adapters|openai|anthropic/i);
+    expect(source).not.toMatch(/INSERT INTO|UPDATE |DELETE FROM/i);
   });
 });
 

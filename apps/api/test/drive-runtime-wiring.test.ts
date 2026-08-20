@@ -43,7 +43,7 @@ describe("A: apps/api/src/main.ts sprer driveTransportsIfConfigured() inn i firs
     // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
     // UA-3 profiling/scoring-slice (D-61): BusinessTransport tar naa ogsaa ScoringService
     // (score-handlingene, sjette konstruktørparameter).
-    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService)");
+    expect(callBlock).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });
 
@@ -63,7 +63,7 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
     // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
     // UA-3 profiling/scoring-slice (D-61): BusinessTransport tar naa ogsaa ScoringService.
-    expect(callBlock).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService)");
+    expect(callBlock).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });
 

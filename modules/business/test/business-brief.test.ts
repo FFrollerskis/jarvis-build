@@ -10,8 +10,10 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { DailyBrief } from "@jarvis/tool-gateway";
+import type { BriefItem, BriefSource } from "@jarvis/tool-gateway";
 import { BusinessService } from "../src/service.ts";
 import { OpenLoopService } from "../src/open-loop-service.ts";
+import { BusinessTransport } from "../src/transport.ts";
 import { BUSINESS_DOMAIN_COVERAGE, businessOpenLoopsSource, generateWeeklyBrief, renderDomainCoverage, renderWeeklyBrief } from "../src/business-brief.ts";
 
 /**
@@ -229,5 +231,77 @@ describe("D: ingen direkte modell-leverandør-bypass (strukturelt) - business-br
   it("business-brief.ts importerer aldri en provider-SDK eller ModelGateway direkte", async () => {
     const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
     expect(source).not.toMatch(/@jarvis\/model-gateway|@jarvis\/provider-adapters|openai|anthropic/i);
+  });
+});
+
+/**
+ * D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon.
+ * `BusinessTransport` importerer BEVISST ALDRI `@jarvis/growth` (ville vært
+ * sirkulært - se `business-os-integration.ts` i `@jarvis/growth`). Denne
+ * testblokken beviser DERFOR injeksjonspunktet (`extraBriefSources`) med en
+ * FAKE `BriefSource` - `@jarvis/growth` sin FAKTISKE
+ * `marketingMemoryBriefSource()` er allerede bevist separat, mot ekte
+ * Postgres, i `modules/growth/test/service-rls.test.ts` §S.
+ */
+describe("F (D-90): BusinessTransport.get_business_brief injiserer EKSTRA BriefSource-er fra app-laget - ingen ny @jarvis/growth-avhengighet", () => {
+  function fakeMarketingMemorySource(items: BriefItem[]): BriefSource {
+    return { name: "marketing-memory", async collect() { return items; } };
+  }
+
+  // MERK: bruker TENANT_B, IKKE TENANT_A - TENANT_A akkumulerer flere høyt-skårede
+  // (85) "OVERDUE"-open-loops fra tidligere testblokker (A/B) i denne filen, som ville
+  // fortrenge et informasjonelt 55-skåret punkt fra `top_priorities` (DailyBrief sin
+  // EKSISTERENDE `slice(0,3)`-oppførsel, uendret av D-90) og gjøre testen kjørerekkefølge-
+  // skjør. TENANT_B forblir bevisst loop-fri gjennom hele filen - en ren, deterministisk fixture.
+  it("en injisert ekstra BriefSource sine punkter dukker opp i get_business_brief (daily)", async () => {
+    const extra = fakeMarketingMemorySource([{
+      source: "marketing-memory", ref: "grw-ob-fake-f1", title: "F1 Fake kampanje: 2 attribuerte møter, ingen vunnet opportunity ennå",
+      score: 55, why: "deterministisk markedsførings-observasjon (D-89)"
+    }]);
+    const transport = new BusinessTransport(business, openLoops, appPool, undefined, undefined, [extra]);
+    const result = await transport.invoke("get_business_brief", { tenant_id: TENANT_B, memory_space: "business" });
+    const data = result.data as unknown as { needs_attention: BriefItem[]; fyi: BriefItem[]; top_priorities: BriefItem[]; today: BriefItem[]; follow_ups: BriefItem[]; build_status: BriefItem[] };
+    const allBuckets = [...data.top_priorities, ...data.today, ...data.needs_attention, ...data.follow_ups, ...data.build_status, ...data.fyi];
+    expect(allBuckets.some((i) => i.source === "marketing-memory" && i.ref === "grw-ob-fake-f1")).toBe(true);
+  });
+
+  it("UTEN injiserte ekstra kilder (default `[]`, EKSAKT samme konstruktørkall som FØR D-90) er brief-oppførselen uendret - ingen marketing-memory-punkter", async () => {
+    const transport = new BusinessTransport(business, openLoops, appPool, undefined, undefined);
+    const result = await transport.invoke("get_business_brief", { tenant_id: TENANT_B, memory_space: "business" });
+    const data = result.data as unknown as { needs_attention: BriefItem[]; fyi: BriefItem[]; top_priorities: BriefItem[]; today: BriefItem[]; follow_ups: BriefItem[]; build_status: BriefItem[] };
+    const allBuckets = [...data.top_priorities, ...data.today, ...data.needs_attention, ...data.follow_ups, ...data.build_status, ...data.fyi];
+    expect(allBuckets.some((i) => i.source === "marketing-memory")).toBe(false);
+  });
+
+  // PR #29-audit §9: EKSISTERENDE `DailyBrief.generate()`-arkitektur (uendret av D-90)
+  // isolerer allerede hver kildes feil individuelt (per-kilde try/catch, se
+  // modules/tool-gateway/src/daily-brief.ts) - en kastende `marketingMemoryBriefSource()`
+  // skal derfor ALDRI velte hele Business OS-briefen, kun degradere pent med et
+  // `source_errors`-oppføring, EKSAKT samme mønster som en manglende gmail/calendar-
+  // credential allerede håndteres for de andre kildene.
+  it("en kastende ekstra BriefSource velter ALDRI hele briefen - degraderer pent med en source_errors-oppføring, andre kilder upåvirket", async () => {
+    const throwingSource: BriefSource = {
+      name: "marketing-memory",
+      async collect() { throw new Error("simulert growth-feil (f.eks. DB nede)"); }
+    };
+    const transport = new BusinessTransport(business, openLoops, appPool, undefined, undefined, [throwingSource]);
+    const result = await transport.invoke("get_business_brief", { tenant_id: TENANT_B, memory_space: "business" });
+    const data = result.data as unknown as {
+      needs_attention: BriefItem[]; fyi: BriefItem[]; top_priorities: BriefItem[]; today: BriefItem[];
+      follow_ups: BriefItem[]; build_status: BriefItem[]; source_errors: Array<{ source: string; error: string }>;
+    };
+    expect(data.source_errors.some((e) => e.source === "marketing-memory")).toBe(true);
+    // Business OS-open-loops-kilden (TENANT_B er bevisst loop-fri) svarer fortsatt normalt -
+    // ingen marketing-memory-punkter (kilden feilet), men INGEN unhandled rejection/krasj.
+    const allBuckets = [...data.top_priorities, ...data.today, ...data.needs_attention, ...data.follow_ups, ...data.build_status, ...data.fyi];
+    expect(allBuckets.some((i) => i.source === "marketing-memory")).toBe(false);
+  });
+
+  it("STRUKTURELT: @jarvis/business importerer ALDRI @jarvis/growth noe sted (sirkulær-avhengighet-grensen er bevisst, ikke tilfeldig)", async () => {
+    const files = ["../src/transport.ts", "../src/business-brief.ts", "../src/service.ts", "../src/open-loop-service.ts"];
+    for (const f of files) {
+      const source = await readFile(fileURLToPath(new URL(f, import.meta.url)), "utf8");
+      expect(source).not.toMatch(/from ["']@jarvis\/growth["']/);
+    }
   });
 });

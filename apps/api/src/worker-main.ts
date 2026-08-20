@@ -10,7 +10,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { GoogleAdsTransport, GrowthService, GrowthTransport } from "@jarvis/growth";
+import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
 import {
   AnthropicAdapter,
@@ -111,7 +111,13 @@ for (const tool of firstWaveTools({
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
-  business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService),
+  // D-90 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts -
+  // marketingMemoryBriefSource(growthService) injisert her (app-laget), ikke i
+  // @jarvis/business (ville vært sirkulært, se business-os-integration.ts).
+  business: new BusinessTransport(
+    businessService, openLoopService, pool, toolGateway, scoringService,
+    [marketingMemoryBriefSource(growthService)]
+  ),
   // Identisk wiring-mønster som apps/api/src/main.ts - lazy SupportEmailService.
   support: new SupportTransport(supportService, businessService, toolGateway),
   contract: new AgreementsTransport(agreementsService),
