@@ -1835,6 +1835,35 @@ Experiment Intelligence fortsatt BLOCKED_BY_DATA; D-86/UA-6 ekte provider-utfør
 NOT_STARTED). UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full detalj: D-92 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 «GROWTH & MARKETING CONTROL PLANE» — FASE-LUKKING (2026-08-20) → D-93
+
+RESUME SOVEREIGN AUTONOMY v4.0-ordre: post-D-92-rekonstruksjon av HELE UA-4 mot masterplanens EGNE
+fire ordrette akseptansekriterier (`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje
+482-486), SAMME lukkings-metodikk som D-48 (UA-2). To uavhengige research-agenter kjørt FØR
+beslutningen (kanonisk-dokument-rekonstruksjon + faktisk kode-matrise) - ikke antatt fra chat-hukommelse.
+**ALLE FIRE akseptansekriterier PASS:** (1) CAC/ROAS knyttet til ekte CRM/revenue (`computePerformanceSnapshot()`,
+D-74-D-77/D-88); (2) tracking-/kampanje-avvik detektert og handlingsbart (`detectAndRecommendSpendAnomalies()` +
+anbefalings-oppløsning, D-85); (3) skrivehandlinger idempotente/auditerbare/med før-etter-tilstand for
+ALLE handlinger som FAKTISK eksisterer (`ON CONFLICT`-mønstre + kampanje-/samtykke-hendelseslogger +
+`generateExecutionCommand()`s strukturelle før/etter-representasjon, D-87); (4) samtykke/cookie/
+databehandlingskrav dokumentert for produksjons-sporing - IKKE bare dokumentert, men OVERGÅTT med en
+faktisk håndhevingsmotor (D-91/D-92). **UA4_REQUIRES_UA6_COMPLETION=false** (masterplanens egen
+fasesekvens `UA-4/5 → UA-6` plasserer dem som adskilte faser; UA-6-sekvenseringen gjelder KUN
+«Bygges»-listens autonome-utførelse-ambisjon, ALDRI de fire akseptansekriteriene).
+**D86_BLOCKS_UA4_CLOSURE=false** (Google Ads LIVE-verifisering er en Tobias-initiert
+sekvenserings-beslutning, ikke en manglende kapabilitet - adapteren selv er `FIXED_SUITE_COMPLETE`).
+Eksplisitt klassifisert IKKE-blokkerende (alle «Bygges»-listeambisjoner/implementasjonsdetaljer, INGEN
+av dem et akseptansekriterium): GA4/Meta Ads/øvrige providere (kun enum-plassholdere), Creative
+Intelligence (`BLOCKED_BY_DATA`), Experiment Intelligence (kun register, ingen utfallsanalyse -
+`BLOCKED_BY_DATA`), tracking runtime-håndheving (ingen faktisk innsamlingsmekanisme å håndheve mot),
+cookie-banner/CMP, samtykke-provenance-taksonomi/evidence-secret-validering (D-91s egne herdingsgap),
+Business OS UKENTLIG markedsførings-synlighet (kun daglig levert, D-90), ekte leverandør-mutasjon
+(sekvensert bak UA-6), Q-26 (egen tverrgående invariant). RUNTIME_GATES.md-hygiene rettet (D-85 t.o.m.
+D-92 manglet rader). Ingen kodeendring - kun verifikasjon + dokumentasjonslukking. **UA-4 =
+CANONICAL/VERIFIED/COMPLETE.** Sovereign Autonomy v4.0-masterplanen SOM HELHET forblir IKKE komplett -
+UA-5/UA-6/UA-7/... gjenstår. UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full
+detalj: D-93 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
