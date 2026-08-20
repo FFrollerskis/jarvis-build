@@ -1,7 +1,7 @@
 import type pg from "pg";
 import type { IdentityContext, JsonValue, MemorySpace } from "@jarvis/contracts";
 import { DailyBrief } from "@jarvis/tool-gateway";
-import type { ToolGateway, ToolTransport } from "@jarvis/tool-gateway";
+import type { BriefSource, ToolGateway, ToolTransport } from "@jarvis/tool-gateway";
 import type { BusinessService } from "./service.ts";
 import { businessOpenLoopsSource, generateWeeklyBrief, renderWeeklyBrief } from "./business-brief.ts";
 import type { OpenLoopService } from "./open-loop-service.ts";
@@ -30,7 +30,19 @@ export class BusinessTransport implements ToolTransport {
     private readonly openLoops?: OpenLoopService,
     private readonly pool?: pg.Pool,
     private readonly gateway?: ToolGateway,
-    private readonly scoring?: ScoringService
+    private readonly scoring?: ScoringService,
+    /**
+     * D-90 (UA-4 NESTE SLICE): valgfrie EKSTRA `BriefSource`-er for Business
+     * OS-dagsbriefen, injisert fra app-laget (`apps/api/src/main.ts`) - IKKE
+     * konstruert her. `@jarvis/business` importerer BEVISST ALDRI
+     * `@jarvis/growth` (som allerede avhenger av `@jarvis/business` -
+     * en motsatt avhengighet ville vært sirkulær); i stedet bygger
+     * app-laget f.eks. `marketingMemoryBriefSource(growthService)` og
+     * sender den inn her som en ren `@jarvis/tool-gateway`-kontrakt denne
+     * transporten allerede kjenner. Tom liste som default - EKSAKT samme
+     * brief-oppførsel som FØR denne sliceen når ingen ekstra kilder gis.
+     */
+    private readonly extraBriefSources: BriefSource[] = []
   ) {}
 
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
@@ -180,7 +192,10 @@ export class BusinessTransport implements ToolTransport {
           person_id: "system", tenant_id: tenantId, memory_space_id: memorySpace,
           session_id: `business-brief-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
         };
-        const dailyBrief = new DailyBrief([businessOpenLoopsSource(this.requireOpenLoops())], this.pool);
+        const dailyBrief = new DailyBrief(
+          [businessOpenLoopsSource(this.requireOpenLoops()), ...this.extraBriefSources],
+          this.pool
+        );
         const brief = await dailyBrief.generate(identity);
         return { data: { ...brief, rendered: DailyBrief.render(brief) } as unknown as JsonValue };
       }

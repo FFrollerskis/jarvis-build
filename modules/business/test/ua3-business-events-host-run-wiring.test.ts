@@ -215,12 +215,16 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
   it("apps/api/src/main.ts konstruerer toolGateway med EnvSecretProvider OG gir SAMME toolGateway-variabel til BusinessTransport", () => {
     const mainSource = readSource("../../../apps/api/src/main.ts");
     expect(mainSource).toMatch(/const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
-    expect(mainSource).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService)");
+    // D-90: BusinessTransport-konstruktørkallet ble flerlinjet for å romme den
+    // injiserte `marketingMemoryBriefSource(growthService)`-argumentet - samme
+    // fem første argumenter (businessService/openLoopService/pool/toolGateway/
+    // scoringService) er UENDRET, bare formateringen er annerledes.
+    expect(mainSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
   it("apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring", () => {
     const workerSource = readSource("../../../apps/api/src/worker-main.ts");
     expect(workerSource).toMatch(/new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
-    expect(workerSource).toContain("business: new BusinessTransport(businessService, openLoopService, pool, toolGateway, scoringService)");
+    expect(workerSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });
 

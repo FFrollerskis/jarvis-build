@@ -1690,6 +1690,43 @@ forblir IKKE komplett (analyse-/lærings-lag ALENE, INGEN OpenLoop-/Business-OS-
 denne sliceen). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE merget. Full detalj: D-89 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON (2026-08-20) → D-90
+
+Base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch
+`claude/ua4-business-os-marketing-memory`, draft PR, IKKE merget. Byggeordren navnga sliceen direkte -
+lukker det eksplisitt dokumenterte D-89-gapet: `BUSINESS_OS_MARKETING_MEMORY_VISIBLE=false` FØR denne
+sliceen (observasjonene var kun nåbare via rå `growth.list_marketing_observations`-lesing, aldri
+surfacet i Business OS-briefen). **Arkitektonisk kjernefunn:** `@jarvis/growth` avhenger ALLEREDE av
+`@jarvis/business` (D-74/D-78) - en ny `@jarvis/business` → `@jarvis/growth`-avhengighet ville derfor
+vært SIRKULÆR. Løst med dependency injection: ny `marketingMemoryBriefSource(growthService,
+memorySpace?)` bygget i `@jarvis/growth` (`modules/growth/src/business-os-integration.ts`, eksportert
+fra pakkens `index.ts`) - returnerer en vanlig `@jarvis/tool-gateway` `BriefSource` (SAMME kontrakt
+som `businessOpenLoopsSource`, D-53). `BusinessTransport` (`@jarvis/business/src/transport.ts`) fikk
+et nytt, valgfritt sjette konstruktørparameter `extraBriefSources: BriefSource[] = []`, merget inn i
+`get_business_brief` (daily) sin `DailyBrief`-kildeliste. `@jarvis/business` importerer FORTSATT
+ALDRI `@jarvis/growth` (strukturelt bevist med en dedikert test). App-laget (`apps/api/src/main.ts`
+OG `apps/api/src/worker-main.ts`, identisk wiring) injiserer `[marketingMemoryBriefSource
+(growthService)]` inn i `BusinessTransport`-konstruksjonen - eneste koblingssted. **Presentasjon**
+(epistemisk grense uendret fra D-89): kun `status: 'open'`-observasjoner hentes (samme "kun åpne"-
+prinsipp som `businessOpenLoopsSource`); `meetings_without_conversion` overflates som "N attribuerte
+møter, ingen vunnet opportunity ennå" (score 55, ALDRI kausal/kvalitetsdømmende ordlyd);
+`recommendation_disposition_summary` overflates KUN når faktisk aktivitet finnes (evidence-filter,
+unngår permanent tom støy-rad siden typen aldri blir `'resolved'`, score 30). Kampanjenavn slått opp
+via `getCampaign()` for lesbarhet. TIME_WINDOW_MODEL=LIFETIME_ONLY bevart. **INGEN ny persistens/
+migrasjon** - konsumerer UTELUKKENDE eksisterende `listMarketingObservations()`/`getCampaign()`
+(read-only, strukturelt bevist). **INGEN ny ToolGateway-action** - eksisterende `growth.list_
+marketing_observations` (klasse A) er en tilstrekkelig lese-flate for in-process-konsumering.
+**INGEN OpenLoop-endring** - ren presentasjon. Q-20/Q-21/Q-27 uendret (ingen ny tabell/RLS-flate/
+scheduler). **13 nye tester** (10 `service-rls.test.ts` §S, 3 `business-brief.test.ts` §F), pluss
+4 eksisterende wiring-regresjonstester (2 filer) oppdatert for det nye flerlinjede
+`BusinessTransport(...)`-konstruktørkallet (kun formaterings-drift, ingen funksjonell regresjon).
+Testregnskap: `main` FØR = 1643/112 → ETTER = **1656 (+13), 112 filer**, alle grønne. `pnpm -w
+typecheck` 17/17 rent, `pnpm -w lint` rent. **D-90 = FIXED_SUITE_VERIFIED_COMPLETE=true,
+HOST_ACTION_REQUIRED=false** (ZERO leverandør involvert). UA-4 SOM HELHET forblir IKKE komplett
+(Creative Intelligence, samtykke-governance, UA-6, ekte provider-utførelse, Google Ads live-
+verifisering alle fortsatt NOT_STARTED/BLOCKED/DEFERRED). UA-3 kriterium 2 UENDRET. Draft-PR, IKKE
+merget. Full detalj: D-90 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
