@@ -1950,6 +1950,49 @@ rent. **UA-5 kriterium-status etter denne sliceen (ikke oppblåst):** kriterium 
 IKKE bygget); kriterium 1/3/4 uendret fra D-94. `UA5_IMPLEMENTATION_COMPLETE=false`,
 `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. Full detalj: D-95 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — REAL CODING AGENT v1 (2026-08-20) → D-96
+
+D-95 er nå merget til main (`fed28c55753da0e4933e1332fa6f8ef777325e2d`). Fersk UA-5-rekonstruksjon fant
+at `createCodingHandler` har INGEN produksjons-callere (`apps/api/src/main.ts`/`worker-main.ts`
+registrerer aldri `agent_profile="coding"`) - bevisst utsettelse (en placeholder-agent i produksjon
+ville latt ekte GitHub-PR-er fylles med fabrikkert innhold, et Q-26-brudd), ikke et utilsiktet hull.
+**Avgjørende arkitektonisk funn:** `CANONICAL_SPEC.md`/`ARCHITECTURE.md`/`INTEGRATIONS.md`/begge
+kildemasterplanene spesifiserer EKSPLISITT "Claude Code / Codex (headless)" som kodejobb-agentprofilen
+- `ClaudeCodeAgent` (CLI/prosess-adapter) var derfor allerede kanonisk arkitektur, ikke noe å velge
+mellom mot en ny ModelGateway-rutet agent. Hele det ikke-interaktive CLI-flaggsettet ble verifisert MOT
+fersk offisiell dokumentasjon (`code.claude.com/docs/en/headless`) FØR kode ble skrevet.
+
+**Bygget:** `CodingAgentAdapter.modify()`s `workdirExec`-type utvidet (valgfri `timeoutMs`,
+`stdout`/`stderr` i returtypen - samme form `Sandbox.exec()` allerede hadde, `ScriptedCodingAgent`
+upåvirket). `ClaudeCodeAgent.modify()` kjører nå ekte `claude -p "<mål>" --bare --output-format json
+--permission-mode acceptEdits --allowedTools Read,Edit` via den EKSISTERENDE sandbox-`exec`-en (ingen
+ny sandbox) - `--bare` er PÅKREVD siden en engangs, tom sandbox strukturelt ikke har tilgang til
+vedvarende OAuth/nøkkelring-tilstand; autentiseres derfor KUN via `ANTHROPIC_API_KEY` i prosess-env.
+`--allowedTools "Read,Edit"` er BEVISST IKKE "Bash" - agenten foreslår kun en diff, den EKSISTERENDE
+test-porten kjører den ekte testkommandoen på nytt uendret (Q-26: ingen agent-selverklært suksess).
+Suksess/feil avgjøres UTELUKKENDE av CLI-ens dokumenterte exit-kode-kontrakt. `createCodingHandler`
+fikk et nytt valgfritt `claudeCodeCredential`-felt (duck-typed `SecretProvider`, samme mønster som
+D-95s `PrPublishingGateway` - INGEN pakkeavhengighet til `@jarvis/tool-gateway`) som injiserer
+`ANTHROPIC_API_KEY` (gjenbruk av eksisterende nøkkel) i sandboxens RENE prosess-env - aldri arvet fra
+Jarvis-prosessen. Uten feltet er oppførselen 100% uendret (alle 15 `fase6-worker.test.ts` + alle 16
+`pr-publisher.test.ts`-tester består urørt). Ærlig, notert (ikke fikset) begrensning:
+`DockerSandboxRunner.create()` ignorerer i dag `jobEnv` fullstendig - credential-injeksjon fungerer
+derfor kun med `ProcessSandboxRunner`. D-64: ingen ny leverandør (Claude Code er allerede Jarvis sin
+egen kanoniske kodeagent). D-41: ingen ny risikoklasse, `modules/tool-gateway/` urørt.
+`MODEL_GATEWAY_USED=false` (Claude Code CLI er en egen, kanonisk, dokumentert sidestilt agent-vei -
+IKKE en ModelGateway-omgåelse). 15 nye tester (`claude-code-agent.test.ts`) - ren logikk (flaggsett,
+timeout, JSON-parsing/fallback, feilhåndtering) + kablingstester mot en ekte kjørt fake-`claude`-binær
+(scenario styrt via et `SCENARIO:`-prefiks i mål-teksten, IKKE test-prosess-env - `ProcessSandboxRunner`
+arver med hensikt aldri `process.env` inn i sandbox-barneprosessen). `pnpm -w typecheck`/`lint` rent.
+`.env.example` oppdatert (`JARVIS_CLAUDE_BIN`, gjenbruk av eksisterende `ANTHROPIC_API_KEY` presisert).
+
+**UA-5 kriterium-status etter denne sliceen (ikke oppblåst):** kriterium 2 forblir PARTIAL -
+agent-invokeringen (spawn/auth/parse/feilhåndtering/uendret test-port) er nå ekte og testet, men selve
+MODELLKVALITETEN er strukturelt uverifiserbar uten en ekte, konfigurert `claude`-binær i et ekte miljø
+(`HOST_ACTION_REQUIRED_FOR_LIVE_VERIFICATION=true`, samme mønster som D-83/D-94, ikke fabrikkert her);
+kriterium 1/3/4 uendret fra D-95. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Draft-PR,
+IKKE merget. Full detalj: D-96 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

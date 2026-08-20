@@ -1,5 +1,31 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-96 Real Coding Agent v1 bygget
+(ekte, ikke-interaktiv Claude Code CLI-kjøring, IKKE modellkvalitet).** PR #36 (D-95) er MERGET til main
+(merge-commit `fed28c55753da0e4933e1332fa6f8ef777325e2d`, post-merge-CI bekreftet grønn). RESUME
+SOVEREIGN AUTONOMY v4.0-ordre: fersk UA-5-rekonstruksjon fant at `createCodingHandler` har INGEN
+produksjons-callere (verken `apps/api/src/main.ts` eller `worker-main.ts` registrerer `agent_profile=
+"coding"`) - vurdert som bevisst utsettelse (koble en placeholder-agent inn i produksjon ville latt
+ekte GitHub-PR-er fylles med fabrikkert innhold, et Q-26-brudd), ikke et utilsiktet hull. AVGJØRENDE
+funn: `CANONICAL_SPEC.md`/`ARCHITECTURE.md`/`INTEGRATIONS.md`/begge kildemasterplanene spesifiserer
+EKSPLISITT "Claude Code / Codex (headless)" som kodejobb-agentprofilen - `ClaudeCodeAgent` var derfor
+allerede kanonisk arkitektur (CLI/prosess-adapter), ikke noe å gjette. Hele CLI-flaggsettet ble
+verifisert MOT fersk offisiell dokumentasjon (`code.claude.com/docs/en/headless`) FØR kode ble skrevet
+- INGEN gjettet syntaks. Bygget: `ClaudeCodeAgent.modify()` kjører nå ekte `claude -p "<mål>" --bare
+--output-format json --permission-mode acceptEdits --allowedTools Read,Edit` INNE i den eksisterende
+sandboxen (ingen ny sandbox), autentisert via `ANTHROPIC_API_KEY` injisert i sandboxens rene prosess-env
+(gjenbrukt eksisterende nøkkel, aldri arvet fra Jarvis-prosessen). `createCodingHandler` fikk et nytt
+valgfritt `claudeCodeCredential`-felt - uten det er oppførselen 100% uendret (alle 15 `fase6-worker.
+test.ts` + alle 16 `pr-publisher.test.ts` består urørt). 15 nye tester (`claude-code-agent.test.ts`,
+inkl. en ekte kjørt fake-`claude`-binær for wiring-bevis - `JARVIS_CLAUDE_BIN` er IKKE konfigurert i
+dette miljøet, så EKTE modellkvalitet forblir `LIVE_PROVIDER_VERIFIED=false`, `HOST_ACTION_REQUIRED=
+true`). `pnpm -w typecheck`/`lint` rent. UA-5 kriterium 2 forblir PARTIAL - agent-invokeringen er nå
+ekte og testet, men modellkvalitet er strukturelt uverifiserbar uten en ekte, konfigurert binær. Se
+D-96 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch `claude/ua5-real-coding-agent`, draft PR
+gjenstår på tidspunktet for denne statuslinjen.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-95 Tested Fix Orchestrator v1
 bygget (GitHub-livssyklus-glue, IKKE diagnose/fiks-generering).** PR #35 (D-94) er MERGET til main
 (merge-commit `0bf8b2cd2af58e4057c5f293f5b0ee209e280297`, bekreftet post-merge-CI grønn). RESUME
