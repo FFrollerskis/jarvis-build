@@ -1,7 +1,50 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON** → D-90,
-base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch
+**Oppdatert:** 2026-08-20 (**UA-4 NESTE SLICE — CONSENT / COOKIE / DATA-PROCESSING GOVERNANCE CORE v1**
+→ D-91, base `main`@`4e8fc1c7d3380e32d00774e24bb2ed43537f1698` (PR #30/D-90-status MERGET), branch
+`claude/ua4-marketing-consent-governance`, **draft PR, IKKE merget**). **RESUME SOVEREIGN AUTONOMY
+v4.0 — full UA-4-matrise + 9-kandidat-sammenligning (A-I) kjørt FØR valg, ingen rekonstruksjon fra
+chat-historikk.** UA-4-matrisen (fersk lesing av docs + kode) viste samtykke-/databehandlingsstyring
+(UA-4 akseptansekriterium 4, Q-29 punkt 5) som eneste GJENVÆRENDE literale UA-4-krav uten kode ELLER
+dokumentert blokkering - Creative/Experiment Intelligence forblir BLOCKED_BY_DATA, GA4/Meta-adapter
+NOT_STARTED uten D-64-port kjørt (avvist for å unngå leverandør-utvidelse kun for fremdrift), D-86/
+UA-6 eksplisitt separat sovereign-owner-byggeordre. **Valgt: kandidat A (Consent/Cookie/Data-
+Processing Governance Core)** - eneste kandidat som er et literal UA-4-krav med null eksterne
+avhengigheter og null HOST_ACTION_REQUIRED. **Arkitektur:** ny pakke `@jarvis/consent`
+(`modules/consent/`), NULL runtime-avhengighet til `@jarvis/business` (kun opak `contact_id: string`,
+DB-håndhevet FK). `ConsentPurpose="attribution"|"tracking"` (lukket, bevisst SMALT sett, ingen
+purpose-sprawl). `ConsentLegalBasis` er OWNER-KONFIGURERT autoritetsreferanse Jarvis håndhever, ALDRI
+en Jarvis-utledet rettslig konklusjon (CHECK-constraint gjør ugyldige verdier strukturelt umulig).
+**Append-only uforanderlig beslutningslogg** (bevisst avvik fra D-89/D-90 sitt current-state-mønster
+- consent-historikk har egen rettslig betydning), håndhevet STRUKTURELT (ingen `UPDATE`-grant på
+`jarvis_app` for `consent_decisions`, samme "strukturelt, ikke konvensjon"-presedens som D-87).
+`evaluateProcessingDecision()` returnerer EKSAKT tre utfall: `ALLOWED`/`DENIED`/
+`UNKNOWN_NOT_CONFIGURED` - FAIL-CLOSED, fravær av data er ALDRI stille tolket som tillatelse (D-81-
+presedens). **ENFORCED_NOW vs ENFORCEMENT_DEFERRED:** selve policy-motoren er fullt reell og fail-
+closed (ENFORCED_NOW). Automatisk kobling inn i growth sine eksisterende attribusjons-kallsteder er
+EKSPLISITT IKKE gjort denne sliceen (ENFORCEMENT_DEFERRED) - ville stille endret oppførsel for
+allerede-eksisterende kontakter uten samtykkeregistrering, i strid med ordrens krav om ingen
+retroaktiv blokkering uten kompatibilitetsstrategi. **ToolGateway:** `consent.record_decision`
+(klasse B), `consent.get_current_state`/`list_decisions`/`evaluate_processing_decision` (klasse A).
+**D-81-kompatibilitet:** samtykkestatus kan ALDRI nedgradere `BUSINESS_CONFIDENTIAL`/`PRIVATE`/
+`SECRET_RESTRICTED`-modellruting, `@jarvis/consent` har INGEN import av ModelGateway/provider-SDK
+(strukturelt bevist). Policy Gateway-grense uendret (null konsept om "samtykke", genuint ortogonal).
+D-87/UA-6/D-86 uberørt - governance kobles IKKE til reell leverandør-utførelse. Q-20: ny
+`consent_decisions` registrert i erasure-planen. Q-21: FORCE RLS, tenant+space-isolasjon bevist. Q-26:
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED` forblir false, INGEN LLM-inferens. **18 nye tester**
+(`service-rls.test.ts` §A-J: fail-closed, purpose-/tenant-/space-isolasjon, tilbaketrekking,
+append-only/CHECK-constraint strukturelt bevis, no-ModelGateway/no-provider-mutation strukturelt
+bevis). Testregnskap: `main` FØR = 1657/112 → ETTER = **1675 (+18), 113 filer**, alle grønne.
+`pnpm -w typecheck` 18/18 pakker rent, `pnpm -w lint` rent. **Status:** D-91 =
+**FIXED_SUITE_VERIFIED_COMPLETE=true, HOST_ACTION_REQUIRED=false** (ZERO leverandør). UA-4 forblir
+IKKE komplett (Creative Intelligence, Experiment Intelligence, D-86/UA-6 ekte provider-utførelse
+fortsatt BLOCKED_BY_DATA/DEFERRED/NOT_STARTED - denne sliceen bygger KUN håndhevingsGRUNNLAG, INGEN
+automatisk kobling til eksisterende attribusjon ennå). UA-3 kriterium 2 UENDRET (2/5 domener). **DRAFT
+PR opprettet, IKKE merget.** **STOP: INGEN Google Ads live-oppsett, INGEN ekte provider-mutasjon,
+INGEN andre slice denne runden, INGEN merge.** Full detalj: D-91 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** UA-4 NESTE SLICE — BUSINESS OS × MARKETING MEMORY-INTEGRASJON
+→ D-90, base `main`@`243e64ac1dca17de42a6823176411776f8335c88` (PR #28/D-89-status MERGET), branch
 `claude/ua4-business-os-marketing-memory`, **PR #29 MERGET av Tobias sin eksplisitte godkjenning →
 `main`@`d5dec17cf3449d865b25a1fd2c6e1a0ea2846e5c`**). **RESUME SOVEREIGN AUTONOMY v4.0 —
 sliceen navngitt direkte av byggeordren.** Verifisert gap FØR bygging: `BUSINESS_OS_MARKETING_MEMORY_
