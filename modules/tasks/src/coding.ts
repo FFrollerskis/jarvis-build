@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
+import { publishPullRequestForCodingJob, type PrPublishingGateway } from "./pr-publisher.ts";
 import type { SandboxRunner } from "./sandbox.ts";
 import type { TaskHandler } from "./worker.ts";
 
@@ -69,6 +70,14 @@ export function createCodingHandler(deps: {
   artifacts: ArtifactStore;
   policy: PolicyGateway;
   identityFor: (task: { tenant_id: string; contract: { owner_person_id: string } }) => IdentityContext;
+  /**
+   * UA-5 Tested Fix Orchestrator v1 (D-95, valgfritt): når satt, forsøker
+   * en vellykket kodejobb å åpne en EKTE GitHub-PR for jobb-branchen (via
+   * eksisterende `github.create_pr`, klasse C) - KUN når jobbkontrakten selv
+   * lister "github" i allowed_tools. Uten dette feltet er oppførselen
+   * UENDRET (kun det lokale pr-proposal-artefaktet, som før D-95).
+   */
+  github?: { gateway: PrPublishingGateway; base?: string };
 }): TaskHandler {
   return async (task, ctx) => {
     const input = task.contract.input.data as { repo_url?: string; test_command?: string[] };
@@ -117,13 +126,30 @@ export function createCodingHandler(deps: {
 
       must("add", run("git", ["add", "-A"]));
       must("commit", run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
+      const commitSha = run("git", ["rev-parse", "HEAD"]).stdout.trim();
       const diff = sandbox.exec("git", ["show", "--stat", "HEAD"]);
       await deps.artifacts.save(task.tenant_id, task.task_id, "patch", "change.txt", diff.stdout);
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
       must("push", run("git", ["push", "origin", `${branch}:${branch}`]));
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
-      return { branch, description, tests: "passed" };
+
+      let pr: Awaited<ReturnType<typeof publishPullRequestForCodingJob>> | undefined;
+      if (deps.github) {
+        pr = await publishPullRequestForCodingJob({
+          gateway: deps.github.gateway,
+          identity: deps.identityFor(task),
+          jobContract: task.contract,
+          repoUrl: input.repo_url,
+          branch,
+          base: deps.github.base ?? "main",
+          title: `jarvis: ${task.contract.goal}`,
+          body: description
+        });
+        await deps.artifacts.save(task.tenant_id, task.task_id, "pr-result", "pr-result.json", JSON.stringify(pr));
+      }
+
+      return { branch, description, tests: "passed", commit_sha: commitSha, ...(pr ? { pr } : {}) };
     } finally {
       await sandbox.dispose();
     }
