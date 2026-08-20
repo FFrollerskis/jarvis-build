@@ -1,5 +1,22 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-20 (**PR #35 (D-94) PRE-MERGE CLOSEOUT-AUDIT — tre reelle idempotens-hull
+funnet og fikset FØR godkjenning.** Fersk kodeaudit (ikke stolt på forrige rapport) fant: (1)
+`create_branch` sin 422-"already exists"-håndtering returnerte suksess uansett hvilken sha den
+eksisterende branchen faktisk pekte på - fikset til å kaste en `409`-stale-target-konflikt ved ulik sha.
+(2) `create_pr` sin 422-oppslags-spørring filtrerte kun på `head`, ikke `base` - fikset med GitHub sitt
+eget `base`-spørreparameter. (3) `merge_pr` behandlet ALLE 405-svar som feil uten idempotens-gjenkjenning
+ved retry - fikset til å re-lese PR-en og stole KUN på `merged`-feltet, aldri feilteksten alene, ved 405.
+Fjerde herding: `create_branch` fikk samme `GITHUB_PROTECTED_BRANCHES`-vern som `delete_branch` allerede
+hadde. 12 nye regresjonstester (2 rettet fra å bevise gammel usikker oppførsel, 10 nye). Full regresjon
+re-kjørt på ny HEAD, gitleaks rent. D-41/D-64/credential-isolasjon/freeze-dekning bekreftet uendret -
+KUN idempotens-korrekthet fikset, ingen ny handling/klasse lagt til. UA-5 kriterie-status uendret (denne
+runden er en korrekthetsfiks, ikke en kriterieoppfyllelse). Se D-94-addendum i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch/PR-oppdatering + ny CI gjenstår på tidspunktet for
+denne statuslinjen.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — STARTET, FØRSTE SLICE: GitHub
 Developer Control Plane v1 → D-94.** RESUME SOVEREIGN AUTONOMY v4.0-ordre: forrige UA-5-rekonstruksjon
 konkluderte `PHASE_CLOSURE_DECISION=C` (blokkert - krever levende leverandørtilkobling). Denne ordren

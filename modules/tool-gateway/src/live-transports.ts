@@ -1026,6 +1026,9 @@ export class GithubTransport implements ToolTransport {
       case "create_branch": {
         const branch = ghRequireString(parameters, "branch");
         const fromSha = ghRequireString(parameters, "from_sha");
+        if (GITHUB_PROTECTED_BRANCHES.has(branch)) {
+          throw new Error("github_protected_branch_refused");
+        }
         try {
           const response = await githubFetch(`${base}/git/refs`, {
             method: "POST", headers: writeHeaders,
@@ -1034,10 +1037,16 @@ export class GithubTransport implements ToolTransport {
           const created = (await response.json()) as { object: { sha: string } };
           return { external_id: created.object.sha, data: { branch, sha: created.object.sha, created: true } };
         } catch (err) {
-          // Idempotens: GitHub gir 422 "Reference already exists" - samme mål-tilstand, ikke en feil.
+          // Idempotens KUN når branchen faktisk peker på DEN SAMME sha-en vi
+          // ba om - en generisk 422 "already exists" er ALDRI nok alene
+          // (kunne peke på en helt annen commit). Ulik sha = ekte
+          // stale-target-konflikt, ALDRI stille behandlet som suksess.
           if (err instanceof GithubApiError && err.httpStatus === 422 && /already exists/i.test(err.message)) {
             const existing = await githubFetch(`${base}/git/refs/heads/${encodeURIComponent(branch)}`, { headers });
             const ref = (await existing.json()) as { object: { sha: string } };
+            if (ref.object.sha !== fromSha) {
+              throw new GithubApiError(`github_branch_stale_target:${branch}_exists_at_different_sha`, 409, false);
+            }
             return { external_id: ref.object.sha, data: { branch, sha: ref.object.sha, created: false } };
           }
           throw err;
@@ -1126,9 +1135,13 @@ export class GithubTransport implements ToolTransport {
           const pr = (await response.json()) as { number: number; html_url: string };
           return { external_id: String(pr.number), data: { number: String(pr.number), html_url: pr.html_url, created: true } };
         } catch (err) {
-          // Idempotens: GitHub gir 422 "A pull request already exists" - finn og returner den eksisterende, ikke feil.
+          // Idempotens KUN når den eksisterende PR-en faktisk løser seg til
+          // SAMME repo/head/base - `base` filtreres server-side (GitHub sitt
+          // eget `base`-spørreparameter), IKKE bare det første treffet for
+          // riktig head. En generisk 422 (annen valideringsfeil) rekastes uendret.
           if (err instanceof GithubApiError && err.httpStatus === 422 && /already exists/i.test(err.message)) {
-            const existing = await githubFetch(`${base}/pulls?state=open&head=${encodeURIComponent(repo.split("/")[0] + ":" + branch)}`, { headers });
+            const owner = repo.split("/")[0];
+            const existing = await githubFetch(`${base}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}&base=${encodeURIComponent(prBase)}`, { headers });
             const matches = (await existing.json()) as Array<{ number: number; html_url: string }>;
             const match = matches[0];
             if (match) return { external_id: String(match.number), data: { number: String(match.number), html_url: match.html_url, created: false } };
@@ -1152,12 +1165,28 @@ export class GithubTransport implements ToolTransport {
         const prNumber = ghRequireString(parameters, "pr_number");
         const mergeMethod = ghOptionalString(parameters, "merge_method") ?? "merge"; // merge|squash|rebase
         const expectedHeadSha = ghOptionalString(parameters, "expected_head_sha");
-        const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}/merge`, {
-          method: "PUT", headers: writeHeaders,
-          body: JSON.stringify({ merge_method: mergeMethod, ...(expectedHeadSha !== undefined ? { sha: expectedHeadSha } : {}) })
-        });
-        const result = (await response.json()) as { sha: string; merged: boolean; message: string };
-        return { external_id: result.sha, data: { sha: result.sha, merged: result.merged, message: result.message } };
+        try {
+          const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}/merge`, {
+            method: "PUT", headers: writeHeaders,
+            body: JSON.stringify({ merge_method: mergeMethod, ...(expectedHeadSha !== undefined ? { sha: expectedHeadSha } : {}) })
+          });
+          const result = (await response.json()) as { sha: string; merged: boolean; message: string };
+          return { external_id: result.sha, data: { sha: result.sha, merged: result.merged, message: result.message } };
+        } catch (err) {
+          // Merge-idempotens (§12): GitHub svarer 405 BÅDE for "allerede merget"
+          // OG "ikke mergeable" - IKKE nok alene å tolke feilteksten. Les PR-en
+          // PÅ NYTT og stol KUN på det faktiske `merged`-feltet - samme
+          // "verifiser ekte tilstand, ikke gjett fra feiltekst"-prinsipp som
+          // create_branch/create_pr sin 422-håndtering over.
+          if (err instanceof GithubApiError && err.httpStatus === 405) {
+            const recheck = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}`, { headers });
+            const pr = (await recheck.json()) as { merged?: boolean; merge_commit_sha?: string | null };
+            if (pr.merged === true && pr.merge_commit_sha) {
+              return { external_id: pr.merge_commit_sha, data: { sha: pr.merge_commit_sha, merged: true, message: "already_merged_verified_on_reread" } };
+            }
+          }
+          throw err;
+        }
       }
       case "delete_branch": {
         const branch = ghRequireString(parameters, "branch");

@@ -93,40 +93,68 @@ describe("B: nye les-handlinger (klasse A)", () => {
   });
 });
 
-describe("C: create_branch - idempotent ved 422 already-exists", () => {
+describe("C: create_branch - idempotent ved 422 already-exists, KUN når sha faktisk matcher", () => {
   it("oppretter branch normalt", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(201, { object: { sha: "newsha" } })));
     const transport = new GithubTransport();
     const result = await transport.invoke("create_branch", { repo: REPO, branch: "jarvis/x", from_sha: "basesha" }, "tok", CTX);
     expect(result).toEqual({ external_id: "newsha", data: { branch: "jarvis/x", sha: "newsha", created: true } });
   });
-  it("422 already-exists slår opp eksisterende ref i stedet for å feile", async () => {
+  it("422 already-exists MED SAMME sha slår opp eksisterende ref og returnerer suksess", async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(422, { message: "Reference already exists" }))
-      .mockResolvedValueOnce(jsonResponse(200, { object: { sha: "existingsha" } }));
+      .mockResolvedValueOnce(jsonResponse(200, { object: { sha: "basesha" } }));
     vi.stubGlobal("fetch", fetchMock);
     const transport = new GithubTransport();
     const result = await transport.invoke("create_branch", { repo: REPO, branch: "jarvis/x", from_sha: "basesha" }, "tok", CTX);
-    expect(result).toEqual({ external_id: "existingsha", data: { branch: "jarvis/x", sha: "existingsha", created: false } });
+    expect(result).toEqual({ external_id: "basesha", data: { branch: "jarvis/x", sha: "basesha", created: false } });
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("422 already-exists MED ULIK sha kaster en stale-target-konflikt, ALDRI stille suksess", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(422, { message: "Reference already exists" }))
+      .mockResolvedValueOnce(jsonResponse(200, { object: { sha: "someOTHERsha" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new GithubTransport();
+    await expect(transport.invoke("create_branch", { repo: REPO, branch: "jarvis/x", from_sha: "basesha" }, "tok", CTX))
+      .rejects.toMatchObject({ httpStatus: 409, retryable: false });
+  });
+  it.each(["main", "master", "production"])("nekter å opprette branch NAVNGITT '%s' UTEN noe HTTP-kall (symmetrisk med delete_branch)", async (branch) => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new GithubTransport();
+    await expect(transport.invoke("create_branch", { repo: REPO, branch, from_sha: "s" }, "tok", CTX)).rejects.toThrow("github_protected_branch_refused");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
-describe("D: create_pr - idempotent ved 422 already-exists", () => {
+describe("D: create_pr - idempotent ved 422 already-exists, KUN når base faktisk matcher", () => {
   it("oppretter PR normalt", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(201, { number: 42, html_url: "https://pr/42" })));
     const transport = new GithubTransport();
     const result = await transport.invoke("create_pr", { repo: REPO, branch: "jarvis/x", title: "fix" }, "tok", CTX);
     expect(result).toEqual({ external_id: "42", data: { number: "42", html_url: "https://pr/42", created: true } });
   });
-  it("422 already-exists finner eksisterende åpen PR i stedet for å feile", async () => {
+  it("422 already-exists finner eksisterende åpen PR MED SAMME base (server-side filter, ikke bare første treff)", async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(jsonResponse(422, { message: "A pull request already exists for tsworkflow:jarvis/x." }))
       .mockResolvedValueOnce(jsonResponse(200, [{ number: 42, html_url: "https://pr/42" }]));
     vi.stubGlobal("fetch", fetchMock);
     const transport = new GithubTransport();
-    const result = await transport.invoke("create_pr", { repo: REPO, branch: "jarvis/x", title: "fix" }, "tok", CTX);
+    const result = await transport.invoke("create_pr", { repo: REPO, branch: "jarvis/x", title: "fix", base: "develop" }, "tok", CTX);
     expect(result).toEqual({ external_id: "42", data: { number: "42", html_url: "https://pr/42", created: false } });
+    const lookupUrl = String(fetchMock.mock.calls[1]?.[0]);
+    expect(lookupUrl).toContain("base=develop");
+    expect(lookupUrl).toContain(`head=${encodeURIComponent("tsworkflow:jarvis/x")}`);
+  });
+  it("422 already-exists uten noe treff for angitt base rekaster den opprinnelige feilen (ingen ambiguity-gjetting)", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(422, { message: "A pull request already exists for tsworkflow:jarvis/x." }))
+      .mockResolvedValueOnce(jsonResponse(200, []));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new GithubTransport();
+    await expect(transport.invoke("create_pr", { repo: REPO, branch: "jarvis/x", title: "fix" }, "tok", CTX))
+      .rejects.toMatchObject({ httpStatus: 422 });
   });
 });
 
@@ -222,10 +250,24 @@ describe("H: merge_pr (klasse D)", () => {
     await transport.invoke("merge_pr", { repo: REPO, pr_number: "1" }, "tok", CTX);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ merge_method: "merge" });
   });
-  it("405 not-mergeable gir en klar, ikke-retry-bar GithubApiError", async () => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(405, { message: "Pull Request is not mergeable" })));
+  it("405 GENUIN not-mergeable (re-lest PR viser merged=false) gir fortsatt en klar, ikke-retry-bar GithubApiError - IKKE stille suksess", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(405, { message: "Pull Request is not mergeable" }))
+      .mockResolvedValueOnce(jsonResponse(200, { merged: false, merge_commit_sha: null }));
+    vi.stubGlobal("fetch", fetchMock);
     const transport = new GithubTransport();
     await expect(transport.invoke("merge_pr", { repo: REPO, pr_number: "1" }, "tok", CTX)).rejects.toMatchObject({ httpStatus: 405, retryable: false });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+  it("405 PÅ RETRY av en FAKTISK allerede-merget PR gjenkjennes SOM SUKSESS via re-lesing - IKKE en feilrapportert idempotent operasjon (§12)", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse(405, { message: "Pull Request is already merged" }))
+      .mockResolvedValueOnce(jsonResponse(200, { merged: true, merge_commit_sha: "realmergesha" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const transport = new GithubTransport();
+    const result = await transport.invoke("merge_pr", { repo: REPO, pr_number: "1" }, "tok", CTX);
+    expect(result).toEqual({ external_id: "realmergesha", data: { sha: "realmergesha", merged: true, message: "already_merged_verified_on_reread" } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 
