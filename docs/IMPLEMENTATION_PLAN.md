@@ -1864,6 +1864,53 @@ CANONICAL/VERIFIED/COMPLETE.** Sovereign Autonomy v4.0-masterplanen SOM HELHET f
 UA-5/UA-6/UA-7/... gjenstår. UA-3 kriterium 2 UENDRET (2/5 domener). Draft-PR, IKKE merget. Full
 detalj: D-93 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — FØRSTE SLICE: GITHUB DEVELOPER CONTROL PLANE v1 (2026-08-20) → D-94
+
+Forrige UA-5-rekonstruksjon (samme dag) konkluderte `PHASE_CLOSURE_DECISION=C` - blokkert, krever
+levende leverandørtilkobling for de fire ordrette akseptansekriteriene (`docs/input/02_...v4.0.md` linje
+487-507). Denne ordren instruerte eksplisitt GitHub som første provider. D-64-gate kjørt FØR kode:
+GitHub = `EXTERNAL_CANONICAL` for repo/commit/branch/PR/review/workflow-tilstand, `JARVIS_CANONICAL`
+gjelder KUN normalisert audit/policy-beslutning (dekket av EKSISTERENDE `tool_executions`/
+`audit_events`, ingen ny tabell), `CORE_DEPENDENCY_DECISION_REQUIRED=false`. D-41 full-kapabilitet-
+audit: forrige `GithubTransport` (UA-2 P0) var UTILSIKTET begrenset til to lese-handlinger + "create_pr
+(aldri merge)" - IKKE et bevisst D-41-scope-vedtak. Erstattet med en 23-handlings D-41-matrise
+(`modules/tool-gateway/src/live-transports.ts` + `integrations.ts`): 10×klasse A (repo-meta/issues
+UENDRET + branches/commit/PR-lesing/workflow-run/-jobb-lesing), 9×klasse B (branch/PR-metadata/
+kommentar/labels/reviewers/issue-lifecycle/rerun/cancel), 2×klasse C (create_pr - nå idempotent ved
+422-"already exists"; dispatch_workflow), 2×klasse D (`merge_pr` - NY, sovereign owner-modus autonomt
+uten kunstig godkjenningssperre, `preflight_action: get_pull_request` target-re-leser `mergeable_state`
+RETT FØR merge, valgfri `expected_head_sha` videresendes som GitHub sin EGEN `sha`-precondition;
+`delete_branch` - NY, `preflight_action: get_branch`, `GITHUB_PROTECTED_BRANCHES`
+(main/master/production) strukturelt nektet FØR noe HTTP-kall). §7-audit av eksisterende
+kodejobb-infrastruktur (`modules/tasks/src/coding.ts`) FØR bygging: worker eier ALLEREDE
+clone/branch/agent-endring/tester/commit/push av jobb-branch - denne sliceen bygger derfor BEVISST
+INGEN kilde-skriving via GitHub Contents/Git Data API, kun GitHub-siden av livssyklusen (PR/Actions/
+merge/repo-metadata) - INGEN to konkurrerende skrive-arkitekturer. Bounded retry (429/5xx, respekterer
+`Retry-After`), `GithubApiError` (httpStatus/retryable, avkortet/sanert melding). Idempotens: 422
+"already exists" håndtert gracefully for create_branch/create_pr; øvrig via EKSISTERENDE
+`tool_executions`/`idempotency_key`-dedupe. Before/after-audit for merge_pr/delete_branch via den
+EKSISTERENDE, generiske D-pipelinen i `ToolGateway.execute()` - ingen ny mekanisme. Pause/freeze
+(`OwnerControls.isFrozen("github")`) dekker automatisk alle 23 handlinger. INGEN modell-direkte
+credential-tilgang (uendret arkitektur-invariant). `MODEL_GATEWAY_USED=false`. INGEN ny Jarvis-DB-
+tabell/migrasjon (ingen github.*-handling rører noen Jarvis-tabell) - derfor INGEN Q-20-registrering,
+INGEN Q-21-endring, INGEN ny Q-27-scheduler (alle kall on-demand). 100 nye tester (37 ren
+fetch-mocket wiring/idempotens/retry + 63 D-41-matrise/preflight/credential-konsistens/posisjons-
+indeks-regresjon). Full `pnpm -w test`: **1808 tester grønne, 117 filer**, exit 0. `pnpm -w typecheck`
+18/18 rent, `pnpm -w lint` rent. Live-verifisering: `GITHUB_CREDENTIAL_CONFIGURED=false` i dette
+miljøet - `modules/tool-gateway/scripts/ua5-github-live.ts` skrevet og klar (`LIVE_RUNNER_READY=true`,
+samme mønster som D-83/D-84), IKKE kjørt (`LIVE_PROVIDER_VERIFIED=false`) - IKKE fabrikkert. `.env.
+example` oppdatert med `JARVIS_GITHUB_TOKEN`-dokumentasjon (samme credential som UA-2 P0, ikke en ny
+type). **UA-5 kriterium-status etter denne sliceen (ikke oppblåst):** kriterium 1 (incident traced to
+deploy/log/DB state) PARTIAL/NOT_STARTED; kriterium 2 (tested-fix per owner authority) PARTIAL
+(GitHub-siden av livssyklusen finnes, diagnose/fiks-generering IKKE bygget); kriterium 3 (critical
+infra actions: before/after audit + recovery) PARTIAL (GitHub-mutasjoner har nå ekte audit/recovery,
+GCP/Cloudflare/Docker fortsatt ikke); kriterium 4 (infra pause/degraded mode) PARTIAL (GitHub lyder
+globale pause/freeze-kontroller, full infra-degradert-modus for ekstern skyinfrastruktur ikke bygget).
+`UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false` - dette er ÉN provider-slice, IKKE hele
+fasen. Vercel/GCP/Cloudflare/Docker/Infisical/Langfuse/Sentry EKSPLISITT ikke startet (ordrens forbud).
+**Sovereign Autonomy v4.0-masterplanen SOM HELHET forblir IKKE komplett.** Draft-PR, IKKE merget. Full
+detalj: D-94 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

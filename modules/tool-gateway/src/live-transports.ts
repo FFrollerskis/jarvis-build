@@ -1,5 +1,5 @@
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolTransport } from "./gateway.ts";
+import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 
 /**
  * UA-2 P1B-A HOST FIX #1 (2026-08-16, host-funn run_id `3af67dab`): den
@@ -808,31 +808,369 @@ export class TelegramTransport implements ToolTransport {
   }
 }
 
+/**
+ * UA-5 GitHub Developer Control Plane v1 (D-64: GitHub er EXTERNAL_CANONICAL
+ * for repo/commit/branch/PR/review/workflow-tilstand - Jarvis normaliserer
+ * ALDRI dette til sin egen "sannhet", kun videreformidler det med proveniens,
+ * Q-26). D-41-audit: forrige versjon av denne transporten var UTILSIKTET
+ * begrenset til to lese-handlinger + "create_pr (aldri merge)" - IKKE fordi
+ * GitHub-APIet mangler kapabilitet eller fordi Tobias har begrenset
+ * connectoren, men fordi ingen tidligere slice bygde resten. D-41 krever
+ * MAKSIMAL nyttig kapabilitet som default, IKKE read-only-som-bekvemmelighet
+ * - denne versjonen erstatter derfor "aldri merge" med en autoritetsstyrt
+ * `merge_pr` (klasse D, sovereign owner-modus utfører autonomt uten kunstig
+ * godkjenningssperre, jf. D-41/UA0-AUTHORITY - IKKE et permanent forbud).
+ */
+const GITHUB_API_VERSION = "2022-11-28";
+const GITHUB_RETRYABLE_STATUS: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
+const GITHUB_MAX_ATTEMPTS = 3;
+const GITHUB_BASE_BACKOFF_MS = 500;
+/** Samme konvensjon som `modules/tasks/src/coding.ts` sin `PROTECTED_BRANCHES` - aldri slett/omgå disse, uansett repo. */
+const GITHUB_PROTECTED_BRANCHES: ReadonlySet<string> = new Set(["main", "master", "production"]);
+
+export class GithubApiError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number,
+    readonly retryable: boolean
+  ) {
+    super(message);
+    this.name = "GithubApiError";
+  }
+}
+
+function githubSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** GitHub sin feilkonvolutt (`{message, documentation_url,...}`) - avkortet (200 tegn), aldri rå kropp/headere videre. */
+function classifyGithubErrorBody(rawBody: string): string {
+  try {
+    const parsed = JSON.parse(rawBody) as { message?: string };
+    const message = (parsed.message ?? "").slice(0, 200);
+    return message || "UNKNOWN";
+  } catch {
+    return "UNCLASSIFIED_ERROR_BODY";
+  }
+}
+
+/**
+ * Bounded retry KUN på bekreftede retry-bare statuser (429/5xx) - ALDRI en
+ * retry-storm, ALDRI retry på 4xx (auth-/valideringsfeil er ikke forbigående).
+ * Respekterer GitHub sin dokumenterte `Retry-After`-header (sekundær
+ * rate-limiting) FREMFOR en gjettet backoff når headeren finnes - samme
+ * "les leverandørens eget signal først"-prinsipp som `google-ads-transport.ts`.
+ */
+async function githubFetch(url: string, init: RequestInit): Promise<Response> {
+  let lastError: GithubApiError | undefined;
+  for (let attempt = 1; attempt <= GITHUB_MAX_ATTEMPTS; attempt++) {
+    const response = await fetch(url, init);
+    if (response.ok) return response;
+    const rawBody = await response.text().catch(() => "");
+    const retryable = GITHUB_RETRYABLE_STATUS.has(response.status);
+    lastError = new GithubApiError(`github_api_error_${response.status}:${classifyGithubErrorBody(rawBody)}`, response.status, retryable);
+    if (!retryable || attempt === GITHUB_MAX_ATTEMPTS) break;
+    const retryAfterHeader = response.headers.get("retry-after");
+    const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : Number.NaN;
+    await githubSleep(Number.isFinite(retryAfterMs) ? retryAfterMs : GITHUB_BASE_BACKOFF_MS * 2 ** (attempt - 1));
+  }
+  throw lastError!;
+}
+
+function githubHeaders(credential: string, extra: Record<string, string> = {}): Record<string, string> {
+  return {
+    authorization: `Bearer ${credential}`,
+    accept: "application/vnd.github+json",
+    "user-agent": "jarvis",
+    "x-github-api-version": GITHUB_API_VERSION,
+    ...extra
+  };
+}
+
+function ghRequireString(parameters: Record<string, JsonValue>, key: string): string {
+  const value = parameters[key];
+  if (typeof value !== "string" || value.length === 0) throw new Error(`github_missing_parameter:${key}`);
+  return value;
+}
+function ghOptionalString(parameters: Record<string, JsonValue>, key: string): string | undefined {
+  const value = parameters[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+function ghOptionalStringArray(parameters: Record<string, JsonValue>, key: string): string[] | undefined {
+  const value = parameters[key];
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((v): v is string => typeof v === "string");
+}
+
+interface GithubPullRequestSummary {
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  head_ref: string;
+  head_sha: string;
+  base_ref: string;
+  html_url: string;
+  merged: boolean;
+  mergeable: boolean | null;
+  mergeable_state: string | null;
+}
+
+function toPullRequestSummary(pr: {
+  number: number;
+  title: string;
+  state: string;
+  draft?: boolean;
+  head: { ref: string; sha: string };
+  base: { ref: string };
+  html_url: string;
+  merged?: boolean;
+  mergeable?: boolean | null;
+  mergeable_state?: string | null;
+}): GithubPullRequestSummary {
+  return {
+    number: pr.number, title: pr.title, state: pr.state, draft: Boolean(pr.draft),
+    head_ref: pr.head.ref, head_sha: pr.head.sha, base_ref: pr.base.ref, html_url: pr.html_url,
+    merged: Boolean(pr.merged), mergeable: pr.mergeable ?? null, mergeable_state: pr.mergeable_state ?? null
+  };
+}
+
 export class GithubTransport implements ToolTransport {
-  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
-    const auth = { authorization: `Bearer ${credential}`, accept: "application/vnd.github+json", "user-agent": "jarvis" };
-    if (action === "read_issues") {
-      const response = await fetch(`https://api.github.com/repos/${String(parameters["repo"])}/issues?state=open&per_page=20`, { headers: auth });
-      if (!response.ok) throw new Error(`github_error_${response.status}`);
-      const items = (await response.json()) as Array<{ number: number; title: string; updated_at: string; pull_request?: unknown }>;
-      return { data: { issues: items.map((i) => ({ id: String(i.number), title: i.title, at: i.updated_at, is_pr: String(Boolean(i.pull_request)), ci_failing: "false" })) } };
-    }
-    // UA-2 P0 §3: repo-metadata for kunnskaps-ingestion - samme PAT/scope som
-    // read_issues (ingen ny credential-type), ett ekstra read-only GET-kall.
-    if (action === "read_repo_meta") {
-      const response = await fetch(`https://api.github.com/repos/${String(parameters["repo"])}`, { headers: auth });
-      if (!response.ok) throw new Error(`github_error_${response.status}`);
-      const repo = (await response.json()) as { full_name: string; description: string | null; updated_at: string; default_branch: string };
-      return {
-        data: {
-          full_name: repo.full_name,
-          description: repo.description ?? "",
-          updated_at: repo.updated_at,
-          default_branch: repo.default_branch
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string, _context?: ToolInvocationContext) {
+    const repo = ghRequireString(parameters, "repo");
+    const base = `https://api.github.com/repos/${repo}`;
+    const headers = githubHeaders(credential);
+    const writeHeaders = githubHeaders(credential, { "content-type": "application/json" });
+
+    switch (action) {
+      // --- LES (klasse A) -------------------------------------------------
+      case "read_issues": {
+        // UNCHANGED (UA-2 P0): GithubKnowledgeSource avhenger av nøyaktig denne formen.
+        const response = await githubFetch(`${base}/issues?state=open&per_page=20`, { headers });
+        const items = (await response.json()) as Array<{ number: number; title: string; updated_at: string; pull_request?: unknown }>;
+        return { data: { issues: items.map((i) => ({ id: String(i.number), title: i.title, at: i.updated_at, is_pr: String(Boolean(i.pull_request)), ci_failing: "false" })) } };
+      }
+      case "read_repo_meta": {
+        // UNCHANGED (UA-2 P0): GithubKnowledgeSource avhenger av nøyaktig denne formen.
+        const response = await githubFetch(base, { headers });
+        const meta = (await response.json()) as { full_name: string; description: string | null; updated_at: string; default_branch: string };
+        return { data: { full_name: meta.full_name, description: meta.description ?? "", updated_at: meta.updated_at, default_branch: meta.default_branch } };
+      }
+      case "list_branches": {
+        const response = await githubFetch(`${base}/branches?per_page=100`, { headers });
+        const items = (await response.json()) as Array<{ name: string; commit: { sha: string }; protected: boolean }>;
+        return { data: { branches: items.map((b) => ({ name: b.name, sha: b.commit.sha, protected: b.protected })) } };
+      }
+      case "get_branch": {
+        const branch = ghRequireString(parameters, "branch");
+        const response = await githubFetch(`${base}/branches/${encodeURIComponent(branch)}`, { headers });
+        const b = (await response.json()) as { name: string; commit: { sha: string }; protected: boolean };
+        return { data: { name: b.name, sha: b.commit.sha, protected: b.protected } };
+      }
+      case "get_commit": {
+        const ref = ghRequireString(parameters, "ref");
+        const response = await githubFetch(`${base}/commits/${encodeURIComponent(ref)}`, { headers });
+        const c = (await response.json()) as { sha: string; html_url: string; commit: { message: string; author: { name: string; date: string } } };
+        return { external_id: c.sha, data: { sha: c.sha, message: c.commit.message, author: c.commit.author.name, date: c.commit.author.date, html_url: c.html_url } };
+      }
+      case "list_pull_requests": {
+        const state = ghOptionalString(parameters, "state") ?? "open";
+        const response = await githubFetch(`${base}/pulls?state=${encodeURIComponent(state)}&per_page=50`, { headers });
+        const items = (await response.json()) as Array<Parameters<typeof toPullRequestSummary>[0]>;
+        return { data: { pull_requests: items.map(toPullRequestSummary) as unknown as JsonValue } };
+      }
+      case "get_pull_request": {
+        const prNumber = ghRequireString(parameters, "pr_number");
+        const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}`, { headers });
+        const pr = (await response.json()) as Parameters<typeof toPullRequestSummary>[0];
+        return { external_id: String(pr.number), data: toPullRequestSummary(pr) as unknown as JsonValue };
+      }
+      case "list_workflow_runs": {
+        const branchFilter = ghOptionalString(parameters, "branch");
+        const statusFilter = ghOptionalString(parameters, "status");
+        const query = new URLSearchParams({ per_page: "20" });
+        if (branchFilter) query.set("branch", branchFilter);
+        if (statusFilter) query.set("status", statusFilter);
+        const response = await githubFetch(`${base}/actions/runs?${query.toString()}`, { headers });
+        const body = (await response.json()) as { workflow_runs: Array<{ id: number; name: string; status: string; conclusion: string | null; head_sha: string; head_branch: string; html_url: string; created_at: string }> };
+        return {
+          data: {
+            workflow_runs: body.workflow_runs.map((r) => ({
+              id: String(r.id), name: r.name, status: r.status, conclusion: r.conclusion ?? "", head_sha: r.head_sha, head_branch: r.head_branch, html_url: r.html_url, created_at: r.created_at
+            })) as unknown as JsonValue
+          }
+        };
+      }
+      case "get_workflow_run": {
+        const runId = ghRequireString(parameters, "run_id");
+        const response = await githubFetch(`${base}/actions/runs/${encodeURIComponent(runId)}`, { headers });
+        const r = (await response.json()) as { id: number; name: string; status: string; conclusion: string | null; head_sha: string; head_branch: string; html_url: string };
+        return { external_id: String(r.id), data: { id: String(r.id), name: r.name, status: r.status, conclusion: r.conclusion ?? "", head_sha: r.head_sha, head_branch: r.head_branch, html_url: r.html_url } };
+      }
+      case "list_workflow_jobs": {
+        const runId = ghRequireString(parameters, "run_id");
+        const response = await githubFetch(`${base}/actions/runs/${encodeURIComponent(runId)}/jobs`, { headers });
+        const body = (await response.json()) as { jobs: Array<{ id: number; name: string; status: string; conclusion: string | null; started_at: string | null; completed_at: string | null; steps?: Array<{ name: string; status: string; conclusion: string | null; number: number }> }> };
+        return {
+          data: {
+            jobs: body.jobs.map((j) => ({
+              id: String(j.id), name: j.name, status: j.status, conclusion: j.conclusion ?? "",
+              started_at: j.started_at ?? "", completed_at: j.completed_at ?? "",
+              steps: (j.steps ?? []).map((s) => ({ name: s.name, status: s.status, conclusion: s.conclusion ?? "", number: s.number })) as unknown as JsonValue
+            })) as unknown as JsonValue
+          }
+        };
+      }
+
+      // --- SKRIV, reversibel (klasse B) -----------------------------------
+      case "create_branch": {
+        const branch = ghRequireString(parameters, "branch");
+        const fromSha = ghRequireString(parameters, "from_sha");
+        try {
+          const response = await githubFetch(`${base}/git/refs`, {
+            method: "POST", headers: writeHeaders,
+            body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: fromSha })
+          });
+          const created = (await response.json()) as { object: { sha: string } };
+          return { external_id: created.object.sha, data: { branch, sha: created.object.sha, created: true } };
+        } catch (err) {
+          // Idempotens: GitHub gir 422 "Reference already exists" - samme mål-tilstand, ikke en feil.
+          if (err instanceof GithubApiError && err.httpStatus === 422 && /already exists/i.test(err.message)) {
+            const existing = await githubFetch(`${base}/git/refs/heads/${encodeURIComponent(branch)}`, { headers });
+            const ref = (await existing.json()) as { object: { sha: string } };
+            return { external_id: ref.object.sha, data: { branch, sha: ref.object.sha, created: false } };
+          }
+          throw err;
         }
-      };
+      }
+      case "update_pr": {
+        const prNumber = ghRequireString(parameters, "pr_number");
+        const title = ghOptionalString(parameters, "title");
+        const body = ghOptionalString(parameters, "body");
+        const state = ghOptionalString(parameters, "state"); // "open" | "closed" - ALDRI "merged" her, se merge_pr
+        const patch: Record<string, string> = {};
+        if (title !== undefined) patch["title"] = title;
+        if (body !== undefined) patch["body"] = body;
+        if (state !== undefined) patch["state"] = state;
+        const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}`, { method: "PATCH", headers: writeHeaders, body: JSON.stringify(patch) });
+        const pr = (await response.json()) as Parameters<typeof toPullRequestSummary>[0];
+        return { external_id: String(pr.number), data: toPullRequestSummary(pr) as unknown as JsonValue };
+      }
+      case "comment_on_issue": {
+        // Samme endepunkt for issues OG PR-er (GitHub sin egen konvensjon - en PR ER et issue for kommentar-formål).
+        const issueNumber = ghRequireString(parameters, "issue_number");
+        const body = ghRequireString(parameters, "body");
+        const response = await githubFetch(`${base}/issues/${encodeURIComponent(issueNumber)}/comments`, { method: "POST", headers: writeHeaders, body: JSON.stringify({ body }) });
+        const comment = (await response.json()) as { id: number; html_url: string };
+        return { external_id: String(comment.id), data: { id: String(comment.id), html_url: comment.html_url } };
+      }
+      case "set_labels": {
+        // PUT erstatter HELE label-settet - naturlig idempotent (samme input = samme sluttilstand, ikke akkumulerende POST).
+        const issueNumber = ghRequireString(parameters, "issue_number");
+        const labels = ghOptionalStringArray(parameters, "labels") ?? [];
+        const response = await githubFetch(`${base}/issues/${encodeURIComponent(issueNumber)}/labels`, { method: "PUT", headers: writeHeaders, body: JSON.stringify({ labels }) });
+        const items = (await response.json()) as Array<{ name: string }>;
+        return { data: { labels: items.map((l) => l.name) as unknown as JsonValue } };
+      }
+      case "request_reviewers": {
+        const prNumber = ghRequireString(parameters, "pr_number");
+        const reviewers = ghOptionalStringArray(parameters, "reviewers") ?? [];
+        const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}/requested_reviewers`, { method: "POST", headers: writeHeaders, body: JSON.stringify({ reviewers }) });
+        const pr = (await response.json()) as { requested_reviewers?: Array<{ login: string }> };
+        return { data: { requested_reviewers: (pr.requested_reviewers ?? []).map((r) => r.login) as unknown as JsonValue } };
+      }
+      case "create_issue": {
+        const title = ghRequireString(parameters, "title");
+        const body = ghOptionalString(parameters, "body");
+        const response = await githubFetch(`${base}/issues`, { method: "POST", headers: writeHeaders, body: JSON.stringify({ title, ...(body !== undefined ? { body } : {}) }) });
+        const issue = (await response.json()) as { number: number; html_url: string };
+        return { external_id: String(issue.number), data: { number: String(issue.number), html_url: issue.html_url } };
+      }
+      case "update_issue": {
+        const issueNumber = ghRequireString(parameters, "issue_number");
+        const title = ghOptionalString(parameters, "title");
+        const body = ghOptionalString(parameters, "body");
+        const state = ghOptionalString(parameters, "state"); // "open" | "closed"
+        const patch: Record<string, string> = {};
+        if (title !== undefined) patch["title"] = title;
+        if (body !== undefined) patch["body"] = body;
+        if (state !== undefined) patch["state"] = state;
+        const response = await githubFetch(`${base}/issues/${encodeURIComponent(issueNumber)}`, { method: "PATCH", headers: writeHeaders, body: JSON.stringify(patch) });
+        const issue = (await response.json()) as { number: number; state: string; html_url: string };
+        return { external_id: String(issue.number), data: { number: String(issue.number), state: issue.state, html_url: issue.html_url } };
+      }
+      case "rerun_workflow_run": {
+        const runId = ghRequireString(parameters, "run_id");
+        const failedOnly = parameters["failed_only"] === true;
+        const path = failedOnly ? "rerun-failed-jobs" : "rerun";
+        await githubFetch(`${base}/actions/runs/${encodeURIComponent(runId)}/${path}`, { method: "POST", headers: writeHeaders, body: "" });
+        return { external_id: runId, data: { run_id: runId, action: path } };
+      }
+      case "cancel_workflow_run": {
+        const runId = ghRequireString(parameters, "run_id");
+        await githubFetch(`${base}/actions/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST", headers: writeHeaders, body: "" });
+        return { external_id: runId, data: { run_id: runId, cancelled: true } };
+      }
+
+      // --- SKRIV, betydelig men gjenopprettbar (klasse C) -----------------
+      case "create_pr": {
+        const branch = ghRequireString(parameters, "branch");
+        const title = ghRequireString(parameters, "title");
+        const prBase = ghOptionalString(parameters, "base") ?? "main";
+        const body = ghOptionalString(parameters, "body");
+        try {
+          const response = await githubFetch(`${base}/pulls`, {
+            method: "POST", headers: writeHeaders,
+            body: JSON.stringify({ title, head: branch, base: prBase, ...(body !== undefined ? { body } : {}) })
+          });
+          const pr = (await response.json()) as { number: number; html_url: string };
+          return { external_id: String(pr.number), data: { number: String(pr.number), html_url: pr.html_url, created: true } };
+        } catch (err) {
+          // Idempotens: GitHub gir 422 "A pull request already exists" - finn og returner den eksisterende, ikke feil.
+          if (err instanceof GithubApiError && err.httpStatus === 422 && /already exists/i.test(err.message)) {
+            const existing = await githubFetch(`${base}/pulls?state=open&head=${encodeURIComponent(repo.split("/")[0] + ":" + branch)}`, { headers });
+            const matches = (await existing.json()) as Array<{ number: number; html_url: string }>;
+            const match = matches[0];
+            if (match) return { external_id: String(match.number), data: { number: String(match.number), html_url: match.html_url, created: false } };
+          }
+          throw err;
+        }
+      }
+      case "dispatch_workflow": {
+        const workflowId = ghRequireString(parameters, "workflow_id");
+        const ref = ghRequireString(parameters, "ref");
+        const inputs = parameters["inputs"];
+        await githubFetch(`${base}/actions/workflows/${encodeURIComponent(workflowId)}/dispatches`, {
+          method: "POST", headers: writeHeaders,
+          body: JSON.stringify({ ref, ...(inputs && typeof inputs === "object" ? { inputs } : {}) })
+        });
+        return { data: { workflow_id: workflowId, ref, dispatched: true } };
+      }
+
+      // --- KRITISK / DESTRUKTIV (klasse D) --------------------------------
+      case "merge_pr": {
+        const prNumber = ghRequireString(parameters, "pr_number");
+        const mergeMethod = ghOptionalString(parameters, "merge_method") ?? "merge"; // merge|squash|rebase
+        const expectedHeadSha = ghOptionalString(parameters, "expected_head_sha");
+        const response = await githubFetch(`${base}/pulls/${encodeURIComponent(prNumber)}/merge`, {
+          method: "PUT", headers: writeHeaders,
+          body: JSON.stringify({ merge_method: mergeMethod, ...(expectedHeadSha !== undefined ? { sha: expectedHeadSha } : {}) })
+        });
+        const result = (await response.json()) as { sha: string; merged: boolean; message: string };
+        return { external_id: result.sha, data: { sha: result.sha, merged: result.merged, message: result.message } };
+      }
+      case "delete_branch": {
+        const branch = ghRequireString(parameters, "branch");
+        if (GITHUB_PROTECTED_BRANCHES.has(branch)) {
+          throw new Error("github_protected_branch_refused");
+        }
+        await githubFetch(`${base}/git/refs/heads/${encodeURIComponent(branch)}`, { method: "DELETE", headers });
+        return { data: { branch, deleted: true } };
+      }
+
+      default:
+        throw new Error(`github_unsupported_action_${action}`);
     }
-    throw new Error(`github_unsupported_action_${action}`);
   }
 }
 
