@@ -1,6 +1,26 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**D-92 PRE-MERGE CLOSEOUT-AUDIT (PR #32) - IKKE en ny beslutning-ID, samme
+**Oppdatert:** 2026-08-20 (**D-92 — Consent Enforcement Activation/Rollout v1 — MERGET.** PR #32
+merget til `main` med standard merge-commit (IKKE squash), på eksplisitt godkjenning av Tobias.
+Merge-commit `148d6e03063540e423bbbc90f43842b56425f504` (foreldre: `87404e8` (forrige `main`) +
+`ffb2ab6` (PR-HEAD) - ekte to-forelder-merge, bekreftet via `git log --format=%P`). `origin/main` og
+lokal `main` synkronisert, arbeidstre rent. Alle kanoniske D-92-elementer bekreftet TIL STEDE på
+`main` etter merge (migrasjon 033, `ConsentEnforcementService`, `EnforcementSubject`-typen inkl.
+`unresolved`-fail-closed-fiksen, policy-verktøy, `GrowthService`-håndheving, `main.ts`/`worker-main.
+ts`-injeksjon, Q-20/Q-21-registrering). **D-92 = CANONICAL / FIXED_SUITE_VERIFIED / COMPLETE for
+Consent Enforcement Activation/Rollout v1-sliceen** (IKKE det samme som "full samtykke-håndheving
+komplett" - se grensepunkter under). `CONSENT_GOVERNANCE_CORE_COMPLETE=true`,
+`ATTRIBUTION_ENFORCEMENT_WIRED=true`, `TRACKING_ENFORCEMENT_WIRED=false`,
+`PRODUCTION_ENFORCEMENT_PARTIAL=true`, standard håndhevingsmodus FORTSATT `disabled` for enhver
+tenant/space (ingen automatisk aktivering ved merge). `COOKIE_RUNTIME_ENFORCEMENT=false`,
+`REAL_PROVIDER_ENFORCEMENT=false`, `HOST_ACTION_REQUIRED=false`. UA-4 SOM HELHET forblir IKKE
+komplett (Creative/Experiment Intelligence BLOCKED_BY_DATA, UA-6/D-86 ekte utførelse fortsatt
+DEFERRED/NOT_STARTED). UA-3 kriterium 2 UENDRET (2/5 domener - bekreftet via diff at INGEN
+`modules/business`-fil ble rørt). Post-merge CI (run 32364410988) startet ved rapporttidspunkt,
+ikke ventet på (rapportert som pågående, ikke antatt grønn). **INGEN ny slice startet denne
+runden.** Full detalj: D-92-addendum i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, PRE-MERGE CLOSEOUT-AUDIT av PR #32) - IKKE en ny beslutning-ID, samme
 D-92-slice, retter/styrker FØR merge.** En dedikert lukkingsordre reverifiserte hele PR #32 fra faktisk
 repo-tilstand (IKKE stolte på forrige sluttrapport alene) og fant/rettet ÉN reell semantisk risiko:
 `resolveContactIdForEntity()` kollapset opprinnelig "raden finnes, `contact_id` er FAKTISK NULL"
