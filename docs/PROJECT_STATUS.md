@@ -1,6 +1,26 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-20 (**D-92 — Consent Enforcement Activation/Rollout v1 — MERGET.** PR #32
+**Oppdatert:** 2026-08-20 (**UA-4 «GROWTH & MARKETING CONTROL PLANE» — FASE-LUKKET → D-93.**
+RESUME SOVEREIGN AUTONOMY v4.0-ordre: post-D-92-rekonstruksjon av HELE UA-4 mot masterplanens EGNE
+fire ordrette akseptansekriterier (`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje
+482-486), SAMME lukkings-metodikk som D-48 (UA-2). To uavhengige research-agenter kjørt FØR
+beslutningen. **ALLE FIRE akseptansekriterier PASS** - CAC/ROAS↔ekte CRM/revenue; tracking-/
+kampanje-avvik detektert+handlingsbart; skrivehandlinger idempotente/auditerbare/før-etter-tilstand;
+samtykke/cookie/databehandlingskrav dokumentert (OVERGÅTT med faktisk håndhevingsmotor D-91/D-92).
+`UA4_REQUIRES_UA6_COMPLETION=false`, `D86_BLOCKS_UA4_CLOSURE=false` (begge eksplisitt vurdert mot
+masterplanens fasesekvensdiagram, ikke antatt). Eksplisitt IKKE-blokkerende for DENNE lukkingen (alle
+«Bygges»-listeambisjoner, INGEN akseptansekriterium): GA4/Meta Ads/øvrige providere, Creative/
+Experiment Intelligence (`BLOCKED_BY_DATA`), tracking runtime-håndheving, cookie-banner, samtykke-
+provenance-taksonomi/evidence-secret-validering, Business OS ukentlig markedsførings-synlighet, ekte
+leverandør-mutasjon (sekvensert bak UA-6), Q-26. RUNTIME_GATES.md-hygiene rettet (D-85 t.o.m. D-92
+manglet rader). **INGEN kodeendring - kun verifikasjon + dokumentasjonslukking.** Full `pnpm -w test`
+re-kjørt FERSK: **1708 tester grønne, 115 filer**, exit code 0 (195.47s). `pnpm -w typecheck` 18/18
+pakker rent, `pnpm -w lint` rent. **UA-4 = CANONICAL/VERIFIED/COMPLETE.** Sovereign Autonomy v4.0-
+masterplanen SOM HELHET forblir IKKE komplett - UA-5/UA-6/UA-7/... gjenstår. UA-3 kriterium 2 UENDRET
+(2/5 domener). Branch/draft PR gjenstår på tidspunktet for denne statuslinjen - se "neste oppgave".
+Full detalj: D-93 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det (samme dag, MERGET):** **D-92 — Consent Enforcement Activation/Rollout v1 — MERGET.** PR #32
 merget til `main` med standard merge-commit (IKKE squash), på eksplisitt godkjenning av Tobias.
 Merge-commit `148d6e03063540e423bbbc90f43842b56425f504` (foreldre: `87404e8` (forrige `main`) +
 `ffb2ab6` (PR-HEAD) - ekte to-forelder-merge, bekreftet via `git log --format=%P`). `origin/main` og
