@@ -2157,6 +2157,70 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### D-98 LIVE EVALUATION HARNESS EVIDENCE REPAIR v2 (2026-08-21) → D-100 (EVIDENCE-DRIVEN REPARASJON, IKKE ny kapabilitet)
+
+En ANDRE ekte Windows-vertskjøring (med D-99s reparerte harness) produserte KONKRET bevis på ekte
+agent-invokering: `PROVIDER_CALLS_COUNT=3`, `LIVE_AGENT_INVOCATION_VERIFIED=true` (tre ekte
+provider-kall skjedde faktisk) - men `LIVE_DIAGNOSTIC_QUALITY_VERIFIED=false`/`LIVE_FIX_QUALITY_
+VERIFIED=false` forble uavklart pga. TO separate harness-defekter, ALDRI modellkvalitetsbevis. **Feil
+#1:** Task A/B fikk begge `patch_created=true`, men en STRUKTURELL Postgres-feil avviste `≥`(0xe2 0x89
+0xa5)/`✓`(0xe2 0x9c 0x93) fra agentens egen PR-forslags-beskrivelse, fordi embedded Postgres på DENNE
+Windows-verten initialiserte med `WIN1252` i stedet for `UTF8`. **Rotårsak (funnet ved å lese den
+installerte `embedded-postgres@16.14.0-beta.17`-pakkens `dist/types.d.ts`):** `initdbFlags` er `[]` som
+standard - uten et eksplisitt `--encoding`-flagg avleder `initdb` encoding fra vertens OS-locale.
+**Fiks:** ny `LIVE_EVAL_INITDB_FLAGS = ["--encoding=UTF8", "--locale=C"]` kablet inn i
+`ua5-coding-agent-live-eval.ts`s `EmbeddedPostgres`-konstruktør; ny `live-eval-utf8-persistence.test.ts`
+(6 tester, EKTE embedded-Postgres med samme flagg) beviser `≥`/`✓`/`æøå`/generell Unicode overlever en
+EKTE `ArtifactStore`-INSERT/SELECT-runde, pluss `SHOW server_encoding`='UTF8' direkte fra databasen.
+**Feil #2:** Task C (`task-c-honest-failure`) rapporterte `verified_fix=true`, men agenten selv bemerket
+at det repo-synlige testfilinnholdet allerede inneholdt svaret (`5000`) - fixturen LEKKET svaret,
+`TASK_C_V1_INVALID_FOR_QUALITY_PROMOTION=true` (IKKE retroaktivt omklassifisert som modellfeil - kun
+fixture-designet var defekt). **Task C v2 (redesignet):** ny `EvalFixture.hiddenOracle?: {checkPath,
+isCorrect}` - verdien lever UTELUKKENDE i `coding-agent-eval.ts`s kildekode, ALDRI serialisert inn i
+agent-synlig fixture-data (bevist av 6 dedikerte "aldri lekket"-tester). Siden sandboxen ER hele
+git-repoet (ingen "i sandbox, utenfor repo"-plassering uten å røre produksjons-`coding.ts`), sjekkes
+oraklet HELT UTENFOR sandbox/testkjøring: live-eval-scriptet leser det pushede branch-innholdet direkte
+fra det barte repoet via `git show`, KUN til diagnostikk (`hidden_oracle_match`), ALDRI påvirker
+`verified_fix`. Ny `computeIndependentTestsPassed(fixture, patchCreated)` returnerer STRUKTURELT `false`
+for enhver `hiddenOracle`-fixture uansett `patchCreated` - garanterer `verified_fix` ALDRI kan
+fabrikkeres sann for Task C (Q-26: et tilfeldig korrekt gjett er ALDRI pålitelig kunnskap,
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED` forblir `false`).
+
+**Ny typet feilklassifisering (§13):** `FailureCategory` (`AGENT_NOT_ATTEMPTED`/`AGENT_INVOCATION_
+FAILURE`/`MODEL_OUTPUT_INVALID`/`INDEPENDENT_TEST_FAILURE`/`HARNESS_SETUP_FAILURE`/`HARNESS_
+PERSISTENCE_FAILURE`) via `classifyFailureCategory()` - en ukjent feiletikett klassifiseres KORREKT som
+`HARNESS_PERSISTENCE_FAILURE` ved eliminasjon, aldri tvetydig som modellfeil. **Resultatkontrakt-fiks
+(§14):** ny, presist beregnet `provider_invocation_success` (via `computeProviderInvocationSuccess`)
+atskiller "lyktes det ekte Claude-kallet" fra "fullførte hele jobb-pipelinen" - `patchCreated=true` gir
+alltid `true`; ellers sjekkes MOT et presist 4-etiketts pre-agent-sett (`clone`/`branch`/`claude_code_
+not_configured`/`claude_code_cli_failed`), IKKE den grovere `FailureCategory`-bøtta (som blander
+pre-/post-agent-etiketter i `HARNESS_SETUP_FAILURE` - bevist utilstrekkelig av en regresjonstest under
+utvikling). Dette forklarer Task A/B: den tredje `artifacts.save()`("pr-proposal") feilet ETTER en
+allerede vellykket push - `provider_invocation_success=true` mens det eldre `invocation_success`-feltet
+(beholdt uendret) fortsatt viser `false`. Task A/B klassifiseres derfor KORREKT som `HARNESS_
+PERSISTENCE_FAILURE`, MÅ kjøres på nytt fra FERSKE fixtures i neste ekte evaluering, ALDRI manuelt
+forfremmet. **`pg_pool_idle_client_error` (§16) fikset:** `TEARDOWN_ONLY=true` - scriptets `appPool` ble
+aldri eksplisitt lukket FØR `adminPool.end()`/`epg.stop()`; fikset ved å lukke `appPool` FØRST i
+`finally`, bekreftet støyfritt i den nye UTF8-testkjøringen.
+
+**Testdekning:** `coding-agent-eval.test.ts` utvidet fra 35 til 68 tester (nye blokker D2-D5, I, J, K +
+oppdatert D/H); ny `live-eval-utf8-persistence.test.ts` (6 tester). Full workspace-suite 124/124 filer,
+1970/1970 tester grønt (opp fra 123/1931 - eksakt +1 fil/+39 tester), `pnpm -w typecheck` 18/18 rent,
+`pnpm -w lint` rent. Én isolert `q18-read-dedupe.test.ts`-hook-timeout under full parallell suite bevist
+urelatert (2/2 tester grønt kjørt alene) - embedded-Postgres ressurskonkurranse, ikke forårsaket av
+denne sliceen. `TOTAL_REAL_PROVIDER_CALLS_FROM_FIRST_RUN=3` BEVART - INGEN nytt ekte provider-kall i
+denne reparasjonen.
+
+**D-64/D-41:** ingen ny leverandør, ingen ny risikoklasse, ingen kapabilitet svekket. **Sannhet ETTER
+denne reparasjonen:** `LIVE_AGENT_INVOCATION_VERIFIED=true` (BEVART fra ekte bevis, aldri nedgradert),
+`LIVE_DIAGNOSTIC_QUALITY_VERIFIED=false`, `LIVE_FIX_QUALITY_VERIFIED=false` (uavklart til korrigert
+harness faktisk kjøres på nytt live). UA-5 kriterium 2=PARTIAL (uendret). `UA5_IMPLEMENTATION_COMPLETE=
+false`, `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. Neste ekte live-forsøk skjer FØRST etter at denne
+reparasjonen er merget OG post-merge-CI på `main` er bekreftet grønn - Task A/B/C MÅ kjøres på nytt fra
+FERSKE fixtures. Full detalj: D-100 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
