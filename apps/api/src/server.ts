@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { fileURLToPath } from "node:url";
 import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
-import type { InProcessWorker } from "@jarvis/tasks";
+import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import type { ConversationEngine } from "./conversation.ts";
 import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
 
@@ -25,6 +25,15 @@ export interface ApiDeps {
   devices?: DeviceService;
   /** v4.0 BO-02: Daily Executive Brief on demand. */
   brief?: { generate(identity: unknown): Promise<unknown>; render(artifact: unknown): string };
+  /**
+   * D-102 (UA-5 Production Real Coding Agent / Tested-Fix Pipeline Wiring v1):
+   * SAMME `TaskService`-instans som allerede konstrueres for `ConversationEngine`
+   * (main.ts) - eksponerer den EKSISTERENDE, allerede validerte/policy-håndhevede
+   * `submit()`-metoden (full `JobContract`, klasse B) over HTTP i stedet for å
+   * bygge en ny innsendingsmekanisme. Valgfritt: uten database-avhengigheter
+   * kjører API-et i helse-modus (samme mønster som `worker`/`brief`).
+   */
+  tasks?: TaskService;
 }
 
 export interface HealthStatus {
@@ -91,7 +100,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return;
   }
 
-  const depRoutes = ["/chat", "/worker/tick", "/tools/critical-demo"];
+  const depRoutes = ["/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit"];
   if (!deps) {
     if (depRoutes.includes(url.pathname)) {
       return json(res, 503, { error: "not_configured", message: "API kjører uten database-avhengigheter" });
@@ -209,6 +218,27 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     };
     const ok = await deps.devices.verifyChallenge(body.tenant_id, body.device_id, body.challenge, body.signature);
     return json(res, ok ? 200 : 403, { verified: ok, auth_strength: ok ? "signed" : "passive" });
+  }
+
+  if (deps.tasks && req.method === "POST" && url.pathname === "/tasks/submit") {
+    // D-102: minimal, provider-nøytral ingress for en fullstendig `JobContract`
+    // (inkl. `agent_profile: "coding"`) - gjenbruker `TaskService.submit()`
+    // UENDRET: kontraktvalidering (Zod), tenant-match, untrusted-privat-
+    // minne-og-nettverk-invarianten, klasse B policy-autorisasjon og audit
+    // skjer ALT i den eksisterende metoden. INGEN ny autorisasjonsmekanisme.
+    const body = (await readBody(req)) as {
+      identity: Parameters<IdentityService["resolveIdentity"]>[0] & { session_id: string };
+      contract: unknown;
+    };
+    const resolved = await deps.identity.resolveIdentity(body.identity);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.tasks.submit(resolved.identity, body.contract);
+    if (!result.ok) {
+      return json(res, 400, { error: "task_rejected", reason: result.reason });
+    }
+    return json(res, 200, { task_id: result.value.task_id });
   }
 
   if (req.method === "POST" && url.pathname === "/worker/tick") {

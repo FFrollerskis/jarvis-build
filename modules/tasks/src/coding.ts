@@ -266,3 +266,31 @@ export function createCodingHandler(deps: {
     }
   };
 }
+
+/**
+ * D-102: defense-in-depth for production coding jobs (§7/§23 i byggeordren) -
+ * ALDRI en ny hemmelighet-lagringsmekanisme, KUN en siste sikkerhetsnett rundt
+ * ETHVERT thrown-error-budskap som når `queue.fail()` (og dermed
+ * `tasks.last_error`, lesbar via `TaskService.get()`). `createCodingHandler`
+ * injiserer selv ALDRI en hemmelighet i en feilmelding den bygger - men den
+ * ekte Claude Code-CLI-en (subprosess, utenfor Jarvis sin kontroll) kunne i
+ * prinsippet ekko sin egen `ANTHROPIC_API_KEY`-miljøvariabel tilbake i
+ * stdout/stderr, som `ClaudeCodeAgent.modify()` da ville inkludert (trunkert
+ * til 300 tegn) i en kastet `claude_code_cli_failed:`-feil. Wrapperen fjerner
+ * ethvert kjent hemmelig-formet argument fra `err.message` FØR det noensinne
+ * når køen - identisk teknikk som den allerede eksisterende, testede
+ * `redactSecrets()` i `coding-agent-eval.ts` (D-98), ALDRI en ny mekanisme.
+ */
+export function withSecretRedaction(handler: TaskHandler, secrets: readonly (string | undefined)[]): TaskHandler {
+  return async (task, ctx) => {
+    try {
+      return await handler(task, ctx);
+    } catch (err) {
+      let message = (err as Error).message;
+      for (const secret of secrets) {
+        if (secret && secret.length > 0) message = message.split(secret).join("[REDACTED]");
+      }
+      throw new Error(message);
+    }
+  };
+}

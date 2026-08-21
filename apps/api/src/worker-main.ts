@@ -24,10 +24,14 @@ import {
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
 import {
+  ArtifactStore,
+  ClaudeCodeAgent,
   DockerSandboxRunner,
   InProcessWorker,
   PgTaskQueue,
-  ProcessSandboxRunner
+  ProcessSandboxRunner,
+  createCodingHandler,
+  withSecretRedaction
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { LocalHashEmbedding } from "@jarvis/memory";
@@ -164,6 +168,52 @@ worker.register(
     tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, workerIdentity) },
     sandbox: runner
   })
+);
+
+// D-102 (UA-5 Production Real Coding Agent / Tested-Fix Pipeline Wiring v1):
+// EKTE `ClaudeCodeAgent` (D-96/D-100/D-101, live-kvalitetsverifisert) - ALDRI
+// `ScriptedCodingAgent` (kun test-fixture) i produksjon, ALDRI en ny/parallell
+// CLI-adapter eller kodejobb-pipeline. Uten `JARVIS_CLAUDE_BIN` kaster
+// `ClaudeCodeAgent.modify()` allerede en typet `claude_code_not_configured`-
+// feil FØR noe forsøkes (D-96, uendret her) - kodejobb-kapabiliteten blir da
+// strukturelt utilgjengelig PER JOBB, ALDRI en stille fabrikkert fiks (Q-26).
+// `EnvSecretProvider` (SAMME sekret-arkitektur som resten av appen - ingen ny
+// hemmelighet-lagringsmekanisme) injiserer `ANTHROPIC_API_KEY` KUN i
+// sandboxens egen, rene prosess-env (`jobEnv`) - ALDRI arvet fra denne
+// worker-prosessen, ALDRI i en prompt/logg/artefakt/audit-post.
+// `github: {gateway: toolGateway}` gjenbruker DEN SAMME, allerede D-97-
+// throttling-bevisste ToolGateway-instansen (INGEN direkte GitHub-HTTP-vei) -
+// PR-publisering skjer derfor KUN naar jobbkontraktens EGEN `allowed_tools`
+// eksplisitt lister "github" (D-95, uendret). `identityFor` bruker jobbens
+// EGEN `owner_person_id`/`tenant_id` (ALDRI en fast worker-identitet) - dette
+// er PÅKREVD for at PolicyGateway sin SOVEREIGN-eiermodus (BO-11.1) skal
+// evaluere korrekt for klasse C (push_branch/create_pr): en identitet som
+// ikke matcher `authority.owner_person_id` ville falt tilbake til et
+// mandat-krav som produksjonen aldri konfigurerer. `withSecretRedaction`
+// (D-102, forsvar-i-dybden) fjerner ethvert kjent hemmelig-formet argument
+// fra en kastet feilmelding FØR den noensinne når `tasks.last_error` - dekker
+// det usannsynlige, men ikke strukturelt umulige tilfellet at Claude Code-
+// CLI-en (en ekstern subprosess, utenfor Jarvis sin kontroll) selv ekko'er
+// sin egen miljøvariabel i stdout/stderr.
+worker.register(
+  "coding",
+  withSecretRedaction(
+    createCodingHandler({
+      sandbox: runner,
+      agent: new ClaudeCodeAgent(),
+      artifacts: new ArtifactStore(pool),
+      policy,
+      identityFor: (task) => ({
+        ...workerIdentity,
+        person_id: task.contract.owner_person_id,
+        tenant_id: task.tenant_id,
+        session_id: "sess-coding"
+      }),
+      claudeCodeCredential: { secretProvider: new EnvSecretProvider() },
+      github: { gateway: toolGateway }
+    }),
+    [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"]]
+  )
 );
 
 // UA-2 P1B-A (D-43 §5): e-post-vedlegg-ingestion som en durable jobb - SAMME

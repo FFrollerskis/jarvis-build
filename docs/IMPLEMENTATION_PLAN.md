@@ -2283,6 +2283,58 @@ interne add/commit-mekanikk, aldri callere/wiring). `TOTAL_REAL_PROVIDER_CALLS_F
 gap (produksjons-tilkobling av `createCodingHandler`/`ClaudeCodeAgent`) forblir eksplisitt IKKE startet i
 denne runden, kun identifisert. Full detalj: D-101 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### PRODUCTION REAL CODING AGENT / TESTED-FIX PIPELINE WIRING v1 (2026-08-21) → D-102 (produksjons-wiring, IKKE ny kapabilitet, IKKE live ende-til-ende-verifisert)
+
+FØR denne sliceen (D-101, fersk repo-sannhet): `PRODUCTION_CODING_HANDLER_WIRED=false`,
+`PRODUCTION_CODING_AGENT_WIRED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false` -
+`createCodingHandler` hadde INGEN produksjons-callere. **Wiret nå inn i den EKTE produksjonsworkeren**
+(`apps/api/src/worker-main.ts`): `worker.register("coding", withSecretRedaction(createCodingHandler({...}),
+[ANTHROPIC_API_KEY, JARVIS_GITHUB_TOKEN]))` på SAMME `InProcessWorker`-instans som
+`"executive"`/`"knowledge-ingest-email"` - gjenbruker samme `sandbox: runner` (ProcessSandboxRunner er
+produksjonsdefault; `DockerSandboxRunner` er eksplisitt opt-in og fortsatt IKKE fikset for `jobEnv` denne
+sliceen - ikke-blokkerende siden default-sandboxen støtter `jobEnv`), samme `ArtifactStore(pool)`, og samme
+`toolGateway`-instans for PR-publisering (arver D-97 rate-limiting).
+
+**ABSOLUTT SIKKERHETSREGEL bevart:** `ScriptedCodingAgent` verken importeres eller instansieres i
+`worker-main.ts`; produksjonen bruker den EKTE `ClaudeCodeAgent` (D-96/D-100/D-101). Mangler ekte
+Claude-credential feiler jobben strukturelt lukket via `ClaudeCodeAgent`s EGEN konfigurasjonssjekk
+(`claude_code_not_configured`) - ALDRI et stille fall til `ScriptedCodingAgent`, ALDRI fabrikkert
+kode/patch/PR. `EnvSecretProvider` (eksisterende) gjenbrukt uendret for `ANTHROPIC_API_KEY` - INGEN nytt
+credential-lager. `CLAUDE_BINARY_RESOLUTION_POLICY`: kun eksplisitt `JARVIS_CLAUDE_BIN` denne sliceen,
+PATH-auto-oppløsning bevisst IKKE lagt til.
+
+**Eierautoritet:** `identityFor` bruker jobbens EGEN `task.contract.owner_person_id`/`task.tenant_id`
+(ALDRI en fast worker-identitet) - kodelest nødvendig fordi produksjonens `PolicyGateway` har INGEN
+`mandates`, så klasse C (`create_pr`) auto-ALLOW skjer KUN via SOVEREIGN-identitetsmatch. D-94s
+risikoklasser bekreftet uendret (`create_pr`=C, `merge_pr`=D) - INGEN `merge_pr`-kall denne sliceen (INGEN
+auto-merge). `allowed_tools`-kontrakten (D-95) uendret og bevist ved en EKTE kjøretidstest.
+
+**Minimal, gjenbrukt produksjonsinngang:** `TaskService.submit()` (eksisterte allerede, full validering,
+men hadde null produksjons-callere) eksponert som `POST /tasks/submit` i `server.ts`, gjenbruker SAMME
+`TaskService`-instans som `ConversationEngine`. **Nytt forsvar-i-dybden:** `withSecretRedaction()` (ny
+funksjon i `coding.ts`) redigerer kjente hemmeligheter fra ethvert thrown-feilbudskap FØR `tasks.last_error`
+- ikke en ny lagringsmekanisme. **Genuint pre-eksisterende hull lukket:** `modules/tasks/src/index.ts`
+re-eksporterte aldri `pr-publisher.ts` siden D-95 - fikset rent additivt.
+
+**Testdekning:** 22 nye tester i 3 nye filer - `coding-secret-redaction.test.ts` (6),
+`worker-coding-wiring.test.ts` (11, kildemønster mot faktisk `worker-main.ts`),
+`coding-production-wiring.test.ts` (5, EKTE ende-til-ende med ekte embedded-Postgres + ekte HTTP-server +
+ekte git-bare-repo - Test A beviser `/tasks/submit`→queue→worker→`createCodingHandler`→EKTE
+`ClaudeCodeAgent` er nåbar og feiler korrekt lukket uten credential; Test D beviser hele suksessveien via
+DEN SAMME produksjonsfunksjonen med en lokal test-dobbel som eneste stedfortreder for det utilgjengelige
+Anthropic-kallet). Full suite `TESTS_AFTER=2000`/`TEST_FILES_AFTER=127` (opp fra
+`TESTS_BEFORE=1978`/`TEST_FILES_BEFORE=124`), typecheck 18/18 rent, lint rent, ingen regresjon.
+
+**ÆRLIG LIVE-VERIFISERINGSSTATUS:** dette kjøremiljøet har verifisert INGEN `ANTHROPIC_API_KEY`, INGEN
+`JARVIS_GITHUB_TOKEN` konfigurert - en ekte live ende-til-ende-kjøring var derfor IKKE mulig her.
+`HOST_ACTION_REQUIRED=true` rapportert i stedet for fabrikkert bevis. **Konklusjon:**
+`PRODUCTION_CODING_HANDLER_WIRED=true`, `PRODUCTION_CODING_AGENT_WIRED=true` (begge strukturelt OG
+kjøretids-bevist), men `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE` forblir IKKE live-verifisert
+ende-til-ende. **UA-5 kriterium 2 forblir `PARTIAL`** - gjenstående gap presist avgrenset til ekte
+Anthropic-/GitHub-credential på Tobias sin vert pluss én eierautorisert live-aksept-kjøring. Kriterium
+1/3/4 uendret. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. INGEN ny
+leverandør, INGEN UA-6. Full detalj: D-102 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
