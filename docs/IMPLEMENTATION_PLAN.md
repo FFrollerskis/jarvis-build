@@ -2383,6 +2383,30 @@ bevisst `PARTIAL`. Kriterium 1/3/4 uendret. `UA5_IMPLEMENTATION_COMPLETE=false`,
 Draft-PR, IKKE merget. Revidert, hemmelighet-trygg host-akseptanse-runbook levert, IKKE utført denne
 sliceen. Full detalj: D-103 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### D-103 HOST-FIX (2026-08-21) → "d103-host-git-auth-isolation-repair" (amendment til D-103, ikke ny D-nummer)
+
+Tobias sin FØRSTE ekte Windows host-akseptanse beviste Blokker A live (riktig worker claimet jobben),
+og den ekte kodeagenten nådde helt frem til `git push` - men autentiserte som en ambient, feil identitet
+(`post-ops`) i stedet for det verifiserte `JARVIS_GITHUB_TOKEN`. Root cause: git sin credential-subsystem
+spør ALLTID `credential.helper`-kjeder FØR `GIT_ASKPASS` konsulteres - askpass er en ren prompt-fallback,
+ALDRI en prioritert credential-kilde. TO fiks: (1) `-c credential.helper=` (git sin egen "nullstill
+helper-kjeden for dette kallet"-mekanisme, `GIT_CREDENTIAL_ISOLATION_ARGS`) prependet KUN til clone/push-
+argv. (2) en LATENT bug i selve D-103s opprinnelige `GIT_ASKPASS`-format (`"<node>" "<skript>"`) - viste
+seg EMPIRISK å ikke bli kommandolinje-parset av git på POSIX (aldri fanget FØR, siden alle D-103-tester
+brukte lokale bare-repo-kloner som aldri trigger credential-oppløsning) - fikset med en plattform-betinget
+`buildAskpassEnvValue()` (bar sti på POSIX, `.cmd`-wrapper på Windows).
+
+**Testdekning:** `git-credential-isolation.test.ts` (5, ny - en EKTE selvhostet git smart-HTTP-server via
+`git http-backend`, kjørt i en egen barneprosess - beviser med en ekte ambient credential.helper at fiksen
+faktisk hindrer identitetskapring, både for clone og push). `git-auth.test.ts` +6, `coding-git-auth-
+wiring.test.ts` +3 (inkl. cleanup-på-fortvunget-feil, tidligere flagget testdekning-gap). Full suite
+`TESTS_AFTER=2048`/`TEST_FILES_AFTER=131`, typecheck/lint rent, ingen regresjon.
+
+**Ærlig status:** INGEN system/global git-config mutert, INGEN credential-store rørt. `WORKER_PROFILE_
+ROUTING_LIVE_VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_PUSH=true` (ekte, fra host-kjøringen) - men
+`LIVE_E2E_VERIFIED=false`/`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`/`HOST_ACTION_REQUIRED=true`/
+`UA5_CRITERION_2=PARTIAL` uendret inntil Tobias kjører runboken på nytt. Ny draft-PR, IKKE merget.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
