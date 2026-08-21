@@ -144,6 +144,31 @@ export function generateCredentialHelperScriptContent(): string {
  *
  * Ren/testbar uten filsystem-tilgang: tar node/skript-stier som eksplisitte
  * parametre.
+ *
+ * D-103 HOST-FIX v2 (host-CI-funn, `windows-git-auth`-jobbens FØRSTE reelle
+ * kjøring): `windows-git-auth`-CI-jobben feilet ved sin FØRSTE kjøring, MEN
+ * ved feilsøking (empirisk verifisert direkte mot ekte `git` her, ALDRI
+ * antatt) viste det seg IKKE å være et produksjonskode-funn - kun et
+ * test-rigg-funn (se `git-credential-isolation.test.ts` sin
+ * `writeFakeAmbientSystemConfig()`). PRESIST utledet skille: en FIL-basert
+ * config-VERDI (`[credential]\n\thelper = <sti>` i en config-FIL) ER
+ * backslash-escape-sensitiv (git-config(1): `\`, `"`, `\n`, `\t`, `\b` er de
+ * ENESTE gyldige escape-sekvensene der - en bokstavelig Windows-sti-
+ * backslash foran en vilkårlig bokstav, f.eks. `\U`/`\A`/`\T`/`\L` fra
+ * `C:\Users\...`, er en PARSE-FEIL, "bad config line") - MEN en verdi gitt
+ * via kommandolinjen (`-c key=verdi`, det DENNE funksjonen faktisk brukes
+ * til) er BEVIST å IKKE gjennomgå NOEN escape-prosessering i det hele tatt -
+ * git tar `-c`-verdien 100 % BOKSTAVELIG, inkludert backslash OG
+ * anførselstegn, uendret. (Verifisert direkte: `git -c 'credential.helper=
+ * C:\Users\Tobia\node.exe' config --get credential.helper` returnerer
+ * STRENGEN UENDRET, ingen feil - selv `\n` forblir bokstavelig `\n`, ALDRI
+ * en newline; det samme mønsteret via en FIL feiler derimot umiddelbart med
+ * "bad config line".) Denne funksjonen skal DERFOR ALDRI escape noe -
+ * gjøre det ville PRODUSERT feil verdi (git ville lagt til en ekstra
+ * bokstavelig backslash git selv ALDRI fjerner igjen for `-c`-verdier).
+ * Formen under (bar sammensetning, ingen escaping) er den EMPIRISK
+ * bekreftede korrekte - se `git-auth.test.ts` test L3 for det samme
+ * beviset kjørt som en automatisert regresjonstest.
  */
 export function buildCredentialHelperConfigValue(nodeExecPath: string, scriptPath: string): string {
   return `!"${nodeExecPath}" "${scriptPath}"`;

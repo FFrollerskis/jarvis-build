@@ -3,7 +3,7 @@ import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GIT_CREDENTIAL_ISOLATION_ARGS, GIT_CREDENTIAL_TOKEN_ENV, createGitAuthHandle } from "@jarvis/tasks";
+import { GIT_CREDENTIAL_ISOLATION_ARGS, GIT_CREDENTIAL_TOKEN_ENV, buildCredentialHelperConfigValue, createGitAuthHandle } from "@jarvis/tasks";
 import { type GitSmartHttpServer, startGitSmartHttpServer } from "./support/git-smart-http-server.ts";
 
 /**
@@ -49,6 +49,22 @@ function flushServerLog(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 100));
 }
 
+/**
+ * D-103 HOST-FIX v2 (host-CI-funn, `windows-git-auth`-jobbens FØRSTE reelle
+ * kjøring - IKKE et produksjonskode-funn, men et test-rigg-funn av EKSAKT
+ * samme rotårsaksklasse som `buildCredentialHelperConfigValue()`s egen
+ * escaping-fiks i `git-auth.ts`): git-config-VERDIER (fil-baserte OG
+ * `-c key=verdi`) er backslash-escape-sensitive - en bokstavelig Windows-sti
+ * skrevet UESCAPET inn i en `[credential] helper = <sti>`-linje feiler med
+ * "bad config line" ("\U"/"\A"/"\T"/"\L" fra en ekte `C:\Users\...`-sti er
+ * INGEN gyldige config-escape-sekvenser). Denne test-only-hjelperen speiler
+ * SAMME escaping som produksjonskoden nå bruker, slik at test-riggens EGNE
+ * genererte config-filer/verdier forblir gyldige på ekte Windows.
+ */
+function escapeForGitConfigValue(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
 async function writeFakeAmbientSystemConfig(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-gitauth-hostfix-ambient-"));
   const helperPath = join(dir, "fake-ambient-helper.sh");
@@ -64,7 +80,7 @@ async function writeFakeAmbientSystemConfig(): Promise<string> {
   ].join("\n"), "utf8");
   await chmod(helperPath, 0o700);
   const configPath = join(dir, "fake-system-gitconfig");
-  await writeFile(configPath, `[credential]\n\thelper = ${helperPath}\n`, "utf8");
+  await writeFile(configPath, `[credential]\n\thelper = ${escapeForGitConfigValue(helperPath)}\n`, "utf8");
   return configPath;
 }
 
@@ -79,7 +95,7 @@ async function writeBrokenJarvisHelperConfigValue(): Promise<string> {
     ""
   ].join("\n"), "utf8");
   await chmod(scriptPath, 0o700);
-  return `!"${process.execPath}" "${scriptPath}"`;
+  return buildCredentialHelperConfigValue(process.execPath, scriptPath);
 }
 
 describe("D-103 HOST-FIX v2: ambient credential.helper kan IKKE kapre Jarvis sin eksplisitte git credential.helper", () => {

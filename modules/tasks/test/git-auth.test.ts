@@ -152,12 +152,26 @@ describe("D-103 HOST-FIX v2: git-auth.ts - ephemer git credential.helper-mekanis
     }
   });
 
-  it("L: buildCredentialHelperConfigValue() returnerer en '!'-prefikset, anførselstegnet 'node script'-streng - IDENTISK form uansett plattform (ingen gren)", () => {
+  it("L: buildCredentialHelperConfigValue() returnerer en '!'-prefikset, anførselstegnet 'node script'-streng - IDENTISK form uansett plattform (ingen gren), POSIX-stier uendret siden de aldri inneholder backslash", () => {
     expect(buildCredentialHelperConfigValue("/usr/bin/node", "/tmp/x/credential-helper.cjs"))
       .toBe('!"/usr/bin/node" "/tmp/x/credential-helper.cjs"');
-    expect(buildCredentialHelperConfigValue("C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\Tobias H\\Temp\\x\\credential-helper.cjs"))
-      .toBe('!"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Tobias H\\Temp\\x\\credential-helper.cjs"');
     expect(buildCredentialHelperConfigValue("/usr/bin/node", "/tmp/x/credential-helper.cjs")).not.toMatch(/sk-ant-|ghp_|gho_/);
+  });
+
+  it("L2: buildCredentialHelperConfigValue() ESCAPER ALDRI Windows-sti-backslash - D-103 HOST-FIX v2s Windows-CI-funn viste (empirisk, IKKE antatt) at `-c key=verdi` på kommandolinjen IKKE gjennomgår NOEN escape-prosessering (motsatt av en fil-basert config-linje, som ER backslash-escape-sensitiv - se `git-credential-isolation.test.ts` sin `writeFakeAmbientSystemConfig()` for DEN fiksen)", () => {
+    const value = buildCredentialHelperConfigValue("C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\Tobias H\\Temp\\x\\credential-helper.cjs");
+    expect(value).toBe('!"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Tobias H\\Temp\\x\\credential-helper.cjs"');
+    expect(value).not.toMatch(/sk-ant-|ghp_|gho_/);
+  });
+
+  it("L3: EKTE `git -c credential.helper=<verdi> config --get credential.helper` returnerer verdien BOKSTAVELIG UENDRET (INGEN escape-prosessering for `-c`-verdier) - bevist mot ekte git config-parsing for en simulert Windows-sti", () => {
+    const windowsNodePath = "C:\\Program Files\\nodejs\\node.exe";
+    const windowsScriptPath = "C:\\Users\\Tobias H\\AppData\\Local\\Temp\\jarvis-git-cred-abc123\\credential-helper.cjs";
+    const configValue = buildCredentialHelperConfigValue(windowsNodePath, windowsScriptPath);
+    const result = spawnSync("git", ["-c", `credential.helper=${configValue}`, "config", "--get", "credential.helper"], { encoding: "utf8" });
+    expect(result.status).toBe(0);
+    const expectedShellText = `!"${windowsNodePath}" "${windowsScriptPath}"`;
+    expect(result.stdout.trimEnd()).toBe(expectedShellText);
   });
 
   it("M: GIT_CREDENTIAL_ISOLATION_ARGS er eksakt ['-c', 'credential.helper='] - git sin egen dokumenterte nullstill-helper-kjede-mekanisme, ingen hemmelighet (uendret fra v1)", () => {
