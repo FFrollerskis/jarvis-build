@@ -26,7 +26,14 @@ export interface ClaimedTask {
  */
 export interface WorkflowAdapter {
   enqueue(tenantId: string, contract: JobContract): Promise<void>;
-  claimNext(workerId: string, leaseSeconds: number): Promise<ClaimedTask | null>;
+  /**
+   * D-103 (Blokker A): `agentProfiles` er PÅKREVD, ikke valgfri - claimet MÅ
+   * filtreres atomisk til jobbtyper anropende worker faktisk har en
+   * registrert handler for (aldri agent-profil-blindt claim). En jobb hvis
+   * agent_profile ikke finnes i listen forblir 'created' (aldri feilet) til
+   * en kompatibel worker henter den - se 035_worker_claim_profile_filter.sql.
+   */
+  claimNext(workerId: string, leaseSeconds: number, agentProfiles: string[]): Promise<ClaimedTask | null>;
   saveCheckpoint(tenantId: string, taskId: string, workerId: string, checkpoint: Record<string, JsonValue>): Promise<boolean>;
   complete(tenantId: string, taskId: string, workerId: string, result: Record<string, unknown>): Promise<boolean>;
   /** Requeuer hvis attempts < max_attempts, ellers failed. Returnerer ny status. */

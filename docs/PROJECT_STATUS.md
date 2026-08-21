@@ -1,5 +1,45 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**PRODUCTION CODING REACHABILITY REPAIR v1 (D-103) — reparerer to ekte
+produksjons-nåbarhetsblokkere oppdaget under D-102s egen host-akseptanse-forberedelse, IKKE en ny UA-5-
+kapabilitet, IKKE ennå live ende-til-ende-verifisert.** PR #43 (D-102) er MERGET til main (merge-commit
+`48b33fe`, origin/main HEAD bekreftet `48b33fe6c2a49a09c839d8df1b4fa72c549af536` FØR denne sliceen
+startet, post-merge-CI bekreftet grønn: gitleaks+build-test begge SUCCESS). **Blokker A (worker claim-
+routing):** `apps/api/src/main.ts` sin EGEN `InProcessWorker` (kun `"executive"`) og `worker-main.ts` sin
+(har `"coding"`) polte SAMME `PgTaskQueue` samtidig - agent-profil-blind `claim_next_task()` lot
+`main.ts` claime og TERMINALT feile en coding-jobb (`ingen handler for agentprofil coding`). Fikset: ny
+migrasjon `035_worker_claim_profile_filter.sql` gir `claim_next_task()` et tredje `p_agent_profiles
+text[]`-argument, filtrert ATOMISK i SAMME `FOR UPDATE SKIP LOCKED`-transaksjon - en ustøttet jobb
+forblir `'created'` (ALDRI feilet), ingen starvation. `WorkflowAdapter.claimNext()`/`PgTaskQueue.claimNext()`
+fikk `agentProfiles` som et PÅKREVD tredje argument; `InProcessWorker.tick()` sender automatisk
+`[...this.handlers.keys()]`. Lease/reclaim/retry/tenant-isolasjon/FORCE RLS uendret. **Blokker B (git-
+transport-autentisering):** `ProcessSandboxRunner` ga `git clone`/`git push` en ren env uten HOME/
+SSH_AUTH_SOCK - push mot en ekte GitHub-remote hadde INGEN eksplisitt credential-kanal, ville avhengt av
+ambient, aldri-bevist vertstilstand. Fikset: ny `modules/tasks/src/git-auth.ts` - et ephemert
+`GIT_ASKPASS`-skript per jobb (filen inneholder ALDRI tokenet), `Sandbox.exec()` fikk en valgfri
+`extraEnv`-parameter gitt KUN til de to faktiske clone/push-kallene (ALDRI til `run`, som agent.modify()
+OG alle lokale git-operasjoner bruker - `ClaudeCodeAgent` ser derfor strukturelt ALDRI GitHub-tokenet).
+`createCodingHandler` fikk et nytt valgfritt `gitAuth`-felt (default `JARVIS_GITHUB_TOKEN`, samme
+`EnvSecretProvider`-arkitektur som `claudeCodeCredential`, helt atskilt referanse) - mangler secreten:
+`git_auth_unavailable` FØR clone forsøkes, ALDRI et stille fall til uautentisert git; uten `gitAuth` i det
+hele tatt er sandbox-oppførselen 100% uendret. Cancellation lagt til FØR push og FØR PR-publisering
+(nye, produksjons-nåbare grenser). 34 nye tester i 3 nye filer (`worker-claim-routing.test.ts` 12 ekte
+embedded-Postgres inkl. et D-92-klasse RLS-fallgruve-funn, `git-auth.test.ts` 10 ren logikk,
+`coding-git-auth-wiring.test.ts` 10 ekte embedded-Postgres + ekte lokalt git-bare-repo) + 2 i
+`worker-coding-wiring.test.ts`. Full suite `TESTS_AFTER=2034`/`TEST_FILES_AFTER=130` (opp fra
+`TESTS_BEFORE=2000`/`TEST_FILES_BEFORE=127`), `pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent, ingen
+regresjon i D-95/D-96/D-97/D-100/D-101/D-102-suiter. **ÆRLIG:** ingen ekte Anthropic/GitHub-credential i
+dette kjøremiljøet - `LIVE_E2E_VERIFIED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`,
+`HOST_ACTION_REQUIRED=true` forblir uendret; denne sliceen reparerer reachability-forutsetninger, hevder
+IKKE live-verifisering. **UA-5 kriterium 2 forblir bevisst `PARTIAL`**. Kriterium 1=NOT_STARTED,
+3=PARTIAL, 4=PARTIAL uendret. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Se D-103 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch `claude/ua5-production-coding-reachability-repair`,
+draft PR opprettes ved slutten av denne sliceen - IKKE merget. Revidert, hemmelighet-trygg host-
+akseptanse-runbook levert separat, IKKE utført denne sliceen. Neste faktiske UA-5-gap: ekte live host-
+aksept-kjøring (krever `ANTHROPIC_API_KEY`+`JARVIS_CLAUDE_BIN`+`JARVIS_GITHUB_TOKEN` på Tobias sin vert).
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**PRODUCTION REAL CODING AGENT / TESTED-FIX PIPELINE WIRING v1 (D-102) —
 produksjons-wiring av `createCodingHandler`/EKTE `ClaudeCodeAgent` i `apps/api/src/worker-main.ts`, IKKE
 en ny UA-5-kapabilitet, IKKE live ende-til-ende-verifisert.** PR #42 (D-101) er MERGET til main

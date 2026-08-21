@@ -207,10 +207,10 @@ describe("Akseptanse 1: overlever frakobling, stoppes og gjenopptas", () => {
     await worker.drain(); // sikre tom kø
     const c = contract();
     await queue.enqueue("tenant-a", c);
-    const workerA = await queue.claimNext("worker-A", 1);
+    const workerA = await queue.claimNext("worker-A", 1, ["executive"]);
     expect(workerA?.task_id).toBe(c.task_id);
     await new Promise((resolve) => setTimeout(resolve, 1200));
-    const workerB = await queue.claimNext("worker-B", 60);
+    const workerB = await queue.claimNext("worker-B", 60, ["executive"]);
     expect(workerB?.task_id).toBe(c.task_id);
     expect(await queue.complete("tenant-a", c.task_id, "worker-A", { stale: true })).toBe(false);
     expect(await queue.complete("tenant-a", c.task_id, "worker-B", { ok: true })).toBe(true);

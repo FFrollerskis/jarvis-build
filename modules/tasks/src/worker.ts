@@ -39,7 +39,13 @@ export class InProcessWorker {
   }
 
   async tick(): Promise<string | null> {
-    const task = await this.queue.claimNext(this.workerId, this.leaseSeconds);
+    // D-103 (Blokker A): claimet er nå ATOMISK begrenset til agent_profile-
+    // verdiene DENNE worker-instansen faktisk har en registrert handler for -
+    // en jobb denne prosessen ikke kan utføre claimes ALDRI, forblir 'created'
+    // til en kompatibel worker henter den. Erstatter den tidligere agent-
+    // profil-blinde claim + "ingen handler"-feilen under (bevart KUN som et
+    // forsvar-i-dybden mot programmeringsfeil, aldri forventet i normal drift).
+    const task = await this.queue.claimNext(this.workerId, this.leaseSeconds, [...this.handlers.keys()]);
     if (!task) {
       return null;
     }
