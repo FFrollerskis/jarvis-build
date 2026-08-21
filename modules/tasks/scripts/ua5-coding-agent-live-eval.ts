@@ -33,9 +33,10 @@ import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ArtifactStore, ClaudeCodeAgent, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, createCodingHandler } from "@jarvis/tasks";
 import {
-  EVAL_FIXTURES, QUALITY_THRESHOLD, checkLiveConfiguration, classifyChangedFiles, classifyErrorClass,
-  computeVerifiedFix, evaluateTaskAgainstThreshold, redactSecrets,
-  type EvalFixture, type EvalTaskResult
+  EVAL_FIXTURES, LIVE_EVAL_INITDB_FLAGS, QUALITY_THRESHOLD, checkLiveConfiguration, classifyChangedFiles,
+  classifyErrorClass, computeIndependentTestsPassed, computeProviderInvocationSuccess,
+  computeHarnessPersistenceSuccess, classifyFailureCategory, computeVerifiedFix, evaluateTaskAgainstThreshold,
+  redactSecrets, type EvalFixture, type EvalTaskResult
 } from "../src/coding-agent-eval.ts";
 import { seedFixtureRepo } from "../src/eval-fixture-repo.ts";
 
@@ -44,6 +45,20 @@ function pushedBranchChangedFiles(bareRepo: string, branch: string): string[] | 
   if (check.status !== 0) return null; // aldri pushet - jobben nadde ikke push-steget
   const diff = spawnSync("git", ["diff", "--name-only", "main", branch], { cwd: bareRepo, encoding: "utf8" });
   return diff.stdout.trim().length > 0 ? diff.stdout.trim().split("\n") : [];
+}
+
+/**
+ * D-100 §9/§22: leser `hiddenOracle.checkPath` DIREKTE fra det pushede
+ * innholdet i det barte repoet - ALDRI fra sandboxen agenten selv kjørte i
+ * (som allerede er disponert på dette tidspunktet). KUN til diagnostikk
+ * (`hidden_oracle_match`) - påvirker ALDRI `verified_fix`.
+ */
+function checkHiddenOracle(fixture: EvalFixture, bareRepo: string, branch: string, patchCreated: boolean): boolean | null {
+  if (!fixture.hiddenOracle) return null;
+  if (!patchCreated) return null;
+  const show = spawnSync("git", ["show", `${branch}:${fixture.hiddenOracle.checkPath}`], { cwd: bareRepo, encoding: "utf8" });
+  if (show.status !== 0) return null;
+  return fixture.hiddenOracle.isCorrect(show.stdout);
 }
 
 async function runFixture(
@@ -80,23 +95,36 @@ async function runFixture(
   const view = await queue.get("tenant-a", contract.task_id);
   const invocationSuccess = view?.status === "completed";
   const errorClass = classifyErrorClass(view?.last_error ?? null);
-  const changedFiles = pushedBranchChangedFiles(bareRepo, `jarvis/${contract.task_id}`);
+  const branch = `jarvis/${contract.task_id}`;
+  const changedFiles = pushedBranchChangedFiles(bareRepo, branch);
   const patchCreated = changedFiles !== null;
   const { unauthorizedChanges, oracleTampering } = classifyChangedFiles(
     changedFiles ?? [], fixture.allowedWritablePaths, fixture.oracleFiles
   );
-  // `must("tests", ...)`-porten i createCodingHandler kaster FØR push naar testen feiler -
-  // en pushet branch betyr derfor strukturelt at den UAVHENGIGE testkommandoen faktisk besto.
-  const independentTestsPassed = invocationSuccess && patchCreated;
+  // D-100 §5/§14: `provider_invocation_success` er den KORRIGERTE, presise
+  // "lyktes det ekte Claude Code-kallet"-signalet - ALDRI forvekslet med en
+  // SEN, urelatert `invocation_success`(jobb-status)-feil (Task A/B-hendelsen:
+  // en pr-proposal-artefakt-lagring feilet ETTER en allerede-pushet branch).
+  const providerInvocationSuccess = computeProviderInvocationSuccess(patchCreated, errorClass);
+  const harnessPersistenceSuccess = computeHarnessPersistenceSuccess(errorClass);
+  const failureCategory = classifyFailureCategory(errorClass);
+  // D-100 §7/§8/§21: for Task C v2 (hiddenOracle) kan den agent-synlige
+  // testkommandoen ALDRI strukturelt bevise korrekthet - denne funksjonen
+  // returnerer ALLTID false for slike fixtures, uansett `patchCreated`.
+  const independentTestsPassed = computeIndependentTestsPassed(fixture, patchCreated);
   const timeout = errorClass === "claude_code_cli_failed" && durationMs > 280_000; // naer/over agentens 300s-default - beste-innsats-heuristikk, se D-98-dok
+  const hiddenOracleMatch = checkHiddenOracle(fixture, bareRepo, branch, patchCreated);
   const result: EvalTaskResult = {
     task_id: contract.task_id, fixture_id: fixture.id,
-    invocation_success: invocationSuccess, patch_created: patchCreated,
+    invocation_success: invocationSuccess, provider_invocation_success: providerInvocationSuccess,
+    patch_created: patchCreated,
     independent_tests_passed: independentTestsPassed,
     unauthorized_changes: unauthorizedChanges, changed_files: changedFiles ?? [],
     oracle_tampering: oracleTampering, timeout,
+    harness_persistence_success: harnessPersistenceSuccess, failure_category: failureCategory,
+    hidden_oracle_match: hiddenOracleMatch,
     verified_fix: computeVerifiedFix({
-      invocationSuccess, patchCreated, independentTestsPassed, unauthorizedChanges, oracleTampering, timeout
+      providerInvocationSuccess, patchCreated, independentTestsPassed, unauthorizedChanges, oracleTampering, timeout
     }),
     duration_ms: durationMs, error_class: errorClass,
     agent_description: invocationSuccess ? ((view?.result as { description?: string } | undefined)?.description ?? null) : null
@@ -127,12 +155,25 @@ async function main(): Promise<void> {
 
   const PORT = 30000 + Math.floor(Math.random() * 20000);
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-live-eval-"));
-  const epg = new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false });
+  // D-100 §4: eksplisitt UTF8-encoding+C-locale - uten dette avleder `initdb`
+  // encoding fra vertens OS-locale (WIN1252 pa den affiserte Windows-verten,
+  // UTF8 pa Linux/glibc) - `C`-locale er reservert og garantert tilgjengelig
+  // pa enhver plattform uten et installert sprakspraak.
+  const epg = new EmbeddedPostgres({
+    databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false,
+    initdbFlags: [...LIVE_EVAL_INITDB_FLAGS]
+  });
   await epg.initialise();
   await epg.start();
   await epg.createDatabase("jarvis_test");
   const adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
+  // D-100 §16: deklarert i ytre scope slik at `finally` kan lukke DENNE poolen
+  // FOR `adminPool`/`epg.stop()` - den observerte
+  // `pg_pool_idle_client_error`-stoyen etter siste JSON-utskrift skyldtes at
+  // denne poolen aldri ble eksplisitt lukket, sa Postgres ble stoppet mens den
+  // fortsatt hadde en aktiv/idle-tilkobling.
+  let appPool: pg.Pool | null = null;
   try {
     await runMigrations(adminPool);
     await adminPool.query("CREATE ROLE jarvis_live_eval LOGIN PASSWORD 'pw2'");
@@ -142,7 +183,7 @@ async function main(): Promise<void> {
       INSERT INTO people (person_id, display_name) VALUES ('person-tobias','Tobias');
       INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','tenant-a');
     `);
-    const appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_live_eval", password: "pw2" });
+    appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_live_eval", password: "pw2" });
     const policy = new PolicyGateway({
       devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(),
       killSwitch: new KillSwitch(), mandates: new Set(["git:push_branch"])
@@ -151,7 +192,7 @@ async function main(): Promise<void> {
     const results: EvalTaskResult[] = [];
     // Sekvensiell, avgrenset - EKSAKT ett ekte provider-kall per fixture, ingen retry-storm (§20).
     for (const fixture of EVAL_FIXTURES) {
-      const result = await runFixture(fixture, appPool, policy, bin!, apiKey!);
+      const result = await runFixture(fixture, appPool!, policy, bin!, apiKey!);
       results.push(result);
     }
 
@@ -169,13 +210,18 @@ async function main(): Promise<void> {
       QUALITY_THRESHOLD,
       CLAUDE_BINARY_CONFIGURED: true,
       ANTHROPIC_CREDENTIAL_CONFIGURED: true,
-      LIVE_AGENT_INVOCATION_VERIFIED: results.every((r) => r.invocation_success || r.error_class !== null),
+      LIVE_AGENT_INVOCATION_VERIFIED: results.every((r) => r.provider_invocation_success),
       LIVE_DIAGNOSTIC_QUALITY_VERIFIED: thresholdMetOverall,
       LIVE_FIX_QUALITY_VERIFIED: thresholdMetOverall,
       per_task: perTask
     }, null, 2), [apiKey, bin]);
     console.log(summary);
   } finally {
+    // D-100 §16: lukk appPool FOR adminPool/epg.stop() - riktig
+    // disponeringsrekkefolge eliminerer den observerte
+    // `pg_pool_idle_client_error`-teardown-stoyen (TEARDOWN_ONLY=true; ikke
+    // modell-kvalitetsbevis, se D-100-dok).
+    if (appPool) await appPool.end().catch(() => undefined);
     await adminPool.end().catch(() => undefined);
     await epg.stop().catch(() => undefined);
   }
