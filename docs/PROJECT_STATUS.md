@@ -39,10 +39,11 @@ bare-repo). Full workspace-suite 124/124 filer, 1978/1978 tester grønt (opp fra
 regresjonssuiter eksplisitt re-kjørt og bekreftet grønt uendret. `TOTAL_REAL_PROVIDER_CALLS_FROM_
 FIRST_RUN=3` (den gyldige kjøringen) BEVART - ingen nytt ekte provider-kall i selve reparasjonsrunden.
 Se D-101 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch
-`claude/d101-live-quality-canonicalization`, draft PR opprettes denne runden - eksakt PR-nummer/commit-
-SHA oppdateres i neste statuslinje etter push. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`.
-Neste faktiske UA-5-gap (produksjons-tilkobling av `createCodingHandler`/`ClaudeCodeAgent`) er
-identifisert, IKKE startet i denne runden.
+`claude/d101-live-quality-canonicalization`, draft PR #42 opprettet
+(`d39a2615202356b22802e12acf3ba6159f74df7b`), CI-verifisering gjenstår på tidspunktet for denne
+statuslinjen. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Neste faktiske UA-5-gap
+(produksjons-tilkobling av `createCodingHandler`/`ClaudeCodeAgent`) er identifisert, IKKE startet i
+denne runden.
 
 ## Runden før det
 
