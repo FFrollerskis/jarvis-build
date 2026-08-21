@@ -98,7 +98,11 @@ utfordring, ikke bare argv-tilstedeværelse; nye F/G beviser FAIL CLOSED
 eksplisitt - verken tom helper-kjede eller en bevisst malfunksjonerende
 Jarvis-helper faller noensinne tilbake til ambient). `coding-git-auth-
 wiring.test.ts` (13, omskrevet argv-form). Full suite
-`TESTS_AFTER=2054`/`TEST_FILES_AFTER=132` (opp fra `2048`/`131`),
+`TESTS_AFTER=2054`/`TEST_FILES_AFTER=132` (opp fra `2048`/`131`) på FØRSTE
+commit i denne sliceen; to påfølgende `windows-git-auth`-CI-fiks-commits
+(test-rigg-only) la til to flere tester - PR #46s faktiske merget HEAD
+(`ad96d33`) hadde `2056/2056`, verifisert direkte under D-103-run-3-
+canoniseringen over.
 `pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent, ingen regresjon. **Ny,
 fokusert `windows-git-auth`-CI-jobb** (`windows-latest`, KUN
 `git-auth.test.ts`+`git-credential-isolation.test.ts`, bevisst UTEN
