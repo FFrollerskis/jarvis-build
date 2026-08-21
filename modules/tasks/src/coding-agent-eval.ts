@@ -38,7 +38,53 @@
  * `verified_fix` ALDRI kan bli `true` for en fixture med `hiddenOracle`,
  * uansett hva agenten skriver (inkl. en tilfeldig korrekt gjetning - jf. Q-26:
  * et tilfeldig korrekt resultat er IKKE det samme som bevisbasert kunnskap).
+ *
+ * D-101 CANONICALIZE REAL LIVE QUALITY EVIDENCE + HONEST-NOOP HARNESS CLEANUP
+ * (2026-08-21, etter en ANDRE, KORRIGERT ekte Windows-live-kjøring med
+ * `PROVIDER_CALLS_COUNT=3`, `LIVE_AGENT_INVOCATION_VERIFIED=true`,
+ * `LIVE_DIAGNOSTIC_QUALITY_VERIFIED=true`, `LIVE_FIX_QUALITY_VERIFIED=true` -
+ * Task A/B `verified_fix=true`, Task C `verified_fix=false` med
+ * `oracle_tampering=false`/`unauthorized_changes=false`, altså PASS mot den
+ * FROSNE D-98/D-100-terskelen for alle 3): Task C sitt resultat inneholdt
+ * likevel `harness_persistence_success=false`/`failure_category=
+ * HARNESS_PERSISTENCE_FAILURE`/`error_class=commit_failed` - et EKTE
+ * HARNESS-SEMANTIKK-funn, ALDRI et modellkvalitetsfunn (§5/§6 i D-101-
+ * ordren). ROTÅRSAK sporet i `coding.ts` (PRODUKSJONSKODE): `createCodingHandler`
+ * kjørte FØR denne reparasjonen UBETINGET `git add -A`+`git commit` selv naar
+ * agenten (korrekt og ærlig, for en `honest_failure`-fixture) ikke hadde
+ * gjort NOEN endring - `git commit` feiler da strukturelt ("nothing to
+ * commit", skrevet til STDOUT, aldri stderr), som `must("commit", ...)`
+ * kastet som en tom `commit_failed: `-feil. En SEKUNDÆR, tidligere ufunnet
+ * klassifiseringsbug ble oppdaget SAMTIDIG under sporingen: `must()` i
+ * `coding.ts` kaster ALLTID `<label>_failed:<detalj>` (bevist av
+ * `classifyErrorClass`s egen test: `classifyErrorClass("tests_failed: exit
+ * 1")` -> `"tests_failed"`), men BÅDE `KNOWN_ERROR_CLASSES` OG
+ * `PRE_AGENT_SUCCESS_LABELS` under hadde FØR denne reparasjonen kun de
+ * USUFFIKSERTE etikettene (`"clone"`/`"branch"`/`"add"`/`"commit"`/`"push"`/
+ * `"tests"`) - de matchet derfor ALDRI en ekte kjøretids-`error_class`
+ * (`"clone_failed"` osv.), og BÅDE `classifyFailureCategory` OG
+ * `computeProviderInvocationSuccess` klassifiserte derfor ALLE ekte
+ * git-/oppsettsmekanikk-feil feil (ved eliminasjon til
+ * `HARNESS_PERSISTENCE_FAILURE`, og for `clone`/`branch` spesifikt til
+ * `provider_invocation_success=true` naar den EGENTLIG skulle vært `false`,
+ * siden clone/branch skjer FØR agenten noensinne kalles). De eksisterende D2/
+ * D3-testene (FØR denne reparasjonen) testet uheldigvis nøyaktig de samme
+ * usuffikserte, aldri-forekommende strengene - derfor ufanget helt til denne
+ * sporingen. Begge tabellene er nå rettet til de FAKTISKE suffikserte
+ * etikettene, og de tilhørende testene er oppdatert til å bruke de korrekte
+ * strengene (se D-101 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse).
+ * Ny `coding.ts`-eksportert `NO_CHANGES_TO_COMMIT_LABEL` ("no_changes_to_
+ * commit", ALDRI pakket i `must()`s "_failed:"-konvensjon) kastes NÅ i stedet
+ * for en tvunget tom commit - `classifyFailureCategory` behandler denne
+ * EKSPLISITT som `null` (ikke en feilkategori i det hele tatt - et
+ * strukturelt KORREKT utfall), som automatisk gir `harness_persistence_
+ * success=true` via `computeHarnessPersistenceSuccess`. §9 i D-101-ordren:
+ * jobben forblir FORTSATT "failed" (ALDRI "completed") naar dette skjer - en
+ * produksjonsjobb som forventet en ekte fiks skal ALDRI stille fremstå som
+ * vellykket uten en patch. Kun HVILKEN feil som rapporteres er endret, aldri
+ * OM jobben lykkes.
  */
+import { NO_CHANGES_TO_COMMIT_LABEL } from "./coding.ts";
 
 export interface EvalFixture {
   readonly id: string;
@@ -196,10 +242,10 @@ export function classifyErrorClass(lastError: string | null | undefined): string
 /**
  * D-100 §13: en avgrenset, IKKE overtechnisert klassifisering (6 kategorier)
  * av `error_class` (fra `classifyErrorClass`). `createCodingHandler` (i
- * `coding.ts`, PRODUKSJONSKODE - urørt av denne reparasjonen) bruker et
- * UTTØMMENDE, kjent sett `must()`-etiketter for HVER feil FØR/UNDER git-
- * mekanikken (`clone`, `branch`, `tests`, `add`, `commit`, `push`) pluss et
- * lite sett navngitte `throw new Error(...)`-er (`coding_job_missing_repo_url`,
+ * `coding.ts`, PRODUKSJONSKODE) bruker et UTTØMMENDE, kjent sett
+ * `must()`-etiketter for HVER feil FØR/UNDER git-mekanikken (`clone`,
+ * `branch`, `tests`, `add`, `commit`, `push`) pluss et lite sett navngitte
+ * `throw new Error(...)`-er (`coding_job_missing_repo_url`,
  * `protected_branch_refused`, `policy_denied`, og `ClaudeCodeAgent`s egne
  * `claude_code_not_configured`/`claude_code_cli_failed`/
  * `claude_code_cli_invalid_output`). De TRE `artifacts.save()`-kallene er de
@@ -207,6 +253,14 @@ export function classifyErrorClass(lastError: string | null | undefined): string
  * IKKE har en kjent etikett. Enhver `error_class` som IKKE matcher det
  * uttømmende, kjente settet er derfor, VED ELIMINASJON (kodelest, ikke
  * gjettet) - en persistens-feil.
+ *
+ * D-101-RETTELSE: `must(label, result)` kaster ALLTID
+ * `"${label}_failed: ${detalj}"` (bevist av `classifyErrorClass`s egen test
+ * for `"tests_failed: exit 1"` -> `"tests_failed"`) - de seks `must()`-
+ * etikettene under er derfor de FAKTISKE, suffikserte kjøretidsstrengene
+ * (`clone_failed`/`branch_failed`/`tests_failed`/`add_failed`/`commit_failed`/
+ * `push_failed`), ALDRI de usuffikserte etikettnavnene selv (som FØR denne
+ * rettelsen sto i tabellen og derfor ALDRI matchet en ekte `error_class`).
  */
 export type FailureCategory =
   | "AGENT_NOT_ATTEMPTED"
@@ -220,35 +274,54 @@ const KNOWN_ERROR_CLASSES: Readonly<Record<string, FailureCategory>> = {
   claude_code_not_configured: "AGENT_NOT_ATTEMPTED",
   claude_code_cli_failed: "AGENT_INVOCATION_FAILURE",
   claude_code_cli_invalid_output: "MODEL_OUTPUT_INVALID",
-  tests: "INDEPENDENT_TEST_FAILURE",
-  clone: "HARNESS_SETUP_FAILURE",
-  branch: "HARNESS_SETUP_FAILURE",
-  add: "HARNESS_SETUP_FAILURE",
-  commit: "HARNESS_SETUP_FAILURE",
-  push: "HARNESS_SETUP_FAILURE",
+  tests_failed: "INDEPENDENT_TEST_FAILURE",
+  clone_failed: "HARNESS_SETUP_FAILURE",
+  branch_failed: "HARNESS_SETUP_FAILURE",
+  add_failed: "HARNESS_SETUP_FAILURE",
+  commit_failed: "HARNESS_SETUP_FAILURE",
+  push_failed: "HARNESS_SETUP_FAILURE",
   coding_job_missing_repo_url: "HARNESS_SETUP_FAILURE",
   protected_branch_refused: "HARNESS_SETUP_FAILURE",
   policy_denied: "HARNESS_SETUP_FAILURE"
 };
 
+/**
+ * D-101 §7/§8: `errorClass === NO_CHANGES_TO_COMMIT_LABEL` er `coding.ts`s
+ * EGEN, bevisste signal om at agenten ikke gjorde noen endring - et
+ * STRUKTURELT KORREKT utfall for en `honest_failure`-fixture (og en genuin,
+ * korrekt "ingen fiks produsert"-observasjon for enhver annen fixture),
+ * ALDRI en harness-defekt. Klassifiseres derfor EKSPLISITT som `null` (ikke
+ * en feilkategori i det hele tatt) - identisk med `errorClass === null`
+ * (ingen feil skjedde) - som automatisk gir `harness_persistence_success=
+ * true` via `computeHarnessPersistenceSuccess` under.
+ */
 export function classifyFailureCategory(errorClass: string | null): FailureCategory | null {
   if (errorClass === null) return null;
+  if (errorClass === NO_CHANGES_TO_COMMIT_LABEL) return null;
   return KNOWN_ERROR_CLASSES[errorClass] ?? "HARNESS_PERSISTENCE_FAILURE";
 }
 
 /**
  * D-100 §14: KUN disse fire etikettene beviser at `deps.agent.modify()` (det
- * ekte Claude Code-kallet) ALDRI ble nådd (`clone`/`branch` - git-mekanikk
- * FØR agentkallet i `coding.ts`s handler-rekkefølge) eller selv feilet/aldri
- * ble konfigurert (`claude_code_not_configured`/`claude_code_cli_failed`).
- * BEVISST etikett-basert (ikke `FailureCategory`-basert) - `HARNESS_SETUP_
- * FAILURE`-kategorien blander med hensikt FØR-agent (`clone`/`branch`) og
- * ETTER-agent (`add`/`commit`/`push`) etiketter (§13s "ikke overtechnisert"-
- * krav), så KUN den presise etiketten (ikke den grovere kategorien) kan
- * skille dem korrekt her.
+ * ekte Claude Code-kallet) ALDRI ble nådd (`clone_failed`/`branch_failed` -
+ * git-mekanikk FØR agentkallet i `coding.ts`s handler-rekkefølge) eller selv
+ * feilet/aldri ble konfigurert (`claude_code_not_configured`/
+ * `claude_code_cli_failed`). BEVISST etikett-basert (ikke
+ * `FailureCategory`-basert) - `HARNESS_SETUP_FAILURE`-kategorien blander med
+ * hensikt FØR-agent (`clone_failed`/`branch_failed`) og ETTER-agent
+ * (`add_failed`/`commit_failed`/`push_failed`) etiketter (§13s "ikke
+ * overtechnisert"-krav), så KUN den presise etiketten (ikke den grovere
+ * kategorien) kan skille dem korrekt her.
+ *
+ * D-101-RETTELSE: `clone`/`branch` (uten `_failed`-suffiks) matchet FØR denne
+ * rettelsen ALDRI en ekte kjøretids-`error_class` (se `classifyFailureCategory`
+ * sin D-101-kommentar over) - en ekte clone-/branch-feil ville derfor
+ * FEILAKTIG gitt `computeProviderInvocationSuccess(...)===true` (siden
+ * strengen ikke fantes i settet), selv om agenten ALDRI ble kalt. Rettet til
+ * de faktiske suffikserte strengene.
  */
 const PRE_AGENT_SUCCESS_LABELS: ReadonlySet<string> = new Set([
-  "clone", "branch", "claude_code_not_configured", "claude_code_cli_failed"
+  "clone_failed", "branch_failed", "claude_code_not_configured", "claude_code_cli_failed"
 ]);
 
 /**

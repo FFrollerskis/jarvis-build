@@ -12,9 +12,23 @@ import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway }
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
 import {
-  ArtifactStore, InProcessWorker, JobMemoryAccessor, PgTaskQueue, ProcessSandboxRunner,
-  ScriptedCodingAgent, TaskService, createCodingHandler
+  ArtifactStore, InProcessWorker, JobMemoryAccessor, NO_CHANGES_TO_COMMIT_LABEL, PgTaskQueue, ProcessSandboxRunner,
+  ScriptedCodingAgent, TaskService, createCodingHandler, type CodingAgentAdapter, type CodingAgentExec
 } from "@jarvis/tasks";
+
+/**
+ * D-101: en agent som (korrekt og ærlig) ikke gjør NOEN endring i det hele
+ * tatt - motstykket til `ScriptedCodingAgent` (som ALLTID skriver
+ * `CHANGES.md`). Modellerer nøyaktig hva en ekte Claude Code-kjøring gjør for
+ * Task C sin `honest_failure`-fixture (se `coding-agent-eval.ts`): agenten
+ * kjører, returnerer normalt, men rører ALDRI arbeidstreet.
+ */
+class NoOpCodingAgent implements CodingAgentAdapter {
+  readonly name = "no-op-agent";
+  async modify(_exec: CodingAgentExec, _goal: string): Promise<string> {
+    return "Ærlig avståelse: fant ikke tilstrekkelig grunnlag til å gjøre en endring.";
+  }
+}
 
 const PORT = 30000 + Math.floor(Math.random() * 20000);
 let epg: InstanceType<typeof EmbeddedPostgres>;
@@ -314,6 +328,56 @@ describe("Akseptanse 2+3: kodejobb i sandbox med branch og menneskelig merge-gat
     const view = await queue.get("tenant-a", c.task_id);
     expect(view?.status).toBe("failed");
     expect(view?.last_error).toContain("kill_switch");
+  });
+
+  describe("D-101: agent gjør ingen endring - ærlig no-op, ALDRI en tvunget tom commit eller en ugjennomsiktig git-feil", () => {
+    it("ingen commit, ingen push, kastet feil er NØYAKTIG den nye etiketten (ALDRI 'commit_failed')", async () => {
+      const mainBefore = git(bareRepo, "rev-parse", "main");
+      const isolatedWorker = new InProcessWorker(queue, 60);
+      isolatedWorker.register("coding", createCodingHandler({
+        sandbox: new ProcessSandboxRunner(), agent: new NoOpCodingAgent(), artifacts,
+        policy, identityFor: () => identity
+      }));
+      const c = contract({
+        goal: "ingen endring skal gjøres",
+        input: { data: { repo_url: bareRepo }, trust_level: "internal", provenance: "test" }
+      });
+      (c as { agent_profile: string }).agent_profile = "coding" as never;
+      await queue.enqueue("tenant-a", c);
+      await isolatedWorker.drain();
+
+      const view = await queue.get("tenant-a", c.task_id);
+      expect(view?.status).toBe("failed");
+      expect(view?.last_error).toBe(NO_CHANGES_TO_COMMIT_LABEL);
+      expect(view?.last_error).not.toContain("commit_failed");
+
+      // Ingen jobb-branch ble noensinne pushet til origin - jobben stanset FØR add/commit/push:
+      expect(git(bareRepo, "branch", "--list", `jarvis/${c.task_id}`)).toBe("");
+      expect(git(bareRepo, "rev-parse", "main")).toBe(mainBefore);
+
+      // KUN test-loggen (skrevet FØR add/commit-sjekken) ble persistert - INGEN patch/pr-proposal:
+      const saved = await artifacts.list("tenant-a", c.task_id);
+      expect(saved.map((a) => a.kind).sort()).toEqual(["test-log"]);
+    });
+
+    it("en agent som FAKTISK gjør en endring er 100% uendret (Task A/B-klassen, regresjon)", async () => {
+      const isolatedWorker = new InProcessWorker(queue, 60);
+      isolatedWorker.register("coding", createCodingHandler({
+        sandbox: new ProcessSandboxRunner(), agent: new ScriptedCodingAgent(), artifacts,
+        policy, identityFor: () => identity
+      }));
+      const c = contract({
+        goal: "legg til CHANGES.md igjen",
+        input: { data: { repo_url: bareRepo }, trust_level: "internal", provenance: "test" }
+      });
+      (c as { agent_profile: string }).agent_profile = "coding" as never;
+      await queue.enqueue("tenant-a", c);
+      await isolatedWorker.drain();
+      const view = await queue.get("tenant-a", c.task_id);
+      expect(view?.status).toBe("completed");
+      const saved = await artifacts.list("tenant-a", c.task_id);
+      expect(saved.map((a) => a.kind).sort()).toEqual(["patch", "pr-proposal", "test-log"]);
+    });
   });
 });
 

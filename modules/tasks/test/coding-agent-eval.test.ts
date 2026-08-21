@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NO_CHANGES_TO_COMMIT_LABEL } from "../src/coding.ts";
 import {
   EVAL_FIXTURES, LIVE_EVAL_INITDB_FLAGS, QUALITY_THRESHOLD, checkLiveConfiguration, classifyChangedFiles,
   classifyErrorClass, classifyFailureCategory, computeHarnessPersistenceSuccess, computeIndependentTestsPassed,
@@ -164,13 +165,21 @@ describe("D2: classifyFailureCategory - avgrenset, uttømmende klassifisering (D
   it("agent-kallet lyktes (exit 0) men output var ubrukelig", () => {
     expect(classifyFailureCategory("claude_code_cli_invalid_output")).toBe("MODEL_OUTPUT_INVALID");
   });
-  it("uavhengig testport feilet", () => {
-    expect(classifyFailureCategory("tests")).toBe("INDEPENDENT_TEST_FAILURE");
+  it("uavhengig testport feilet (D-101: den FAKTISKE must()-suffikserte strengen, ALDRI den bare etiketten)", () => {
+    expect(classifyFailureCategory("tests_failed")).toBe("INDEPENDENT_TEST_FAILURE");
   });
-  it("git-/oppsett-mekanikk (FØR og ETTER agent-kallet) klassifiseres samlet som HARNESS_SETUP_FAILURE", () => {
-    for (const label of ["clone", "branch", "add", "commit", "push", "coding_job_missing_repo_url", "protected_branch_refused", "policy_denied"]) {
+  it("git-/oppsett-mekanikk (FØR og ETTER agent-kallet) klassifiseres samlet som HARNESS_SETUP_FAILURE (D-101: de FAKTISKE must()-suffikserte strengene)", () => {
+    for (const label of ["clone_failed", "branch_failed", "add_failed", "commit_failed", "push_failed", "coding_job_missing_repo_url", "protected_branch_refused", "policy_denied"]) {
       expect(classifyFailureCategory(label)).toBe("HARNESS_SETUP_FAILURE");
     }
+  });
+  it("D-101-regresjon: de GAMLE, usuffikserte etikettene ('clone' uten '_failed') forekommer ALDRI i ekte kjøretid og klassifiseres derfor (korrekt, ved eliminasjon) som HARNESS_PERSISTENCE_FAILURE, ikke HARNESS_SETUP_FAILURE - beviser at tabellen faktisk bruker suffikserte nøkler nå", () => {
+    for (const label of ["clone", "branch", "add", "commit", "push", "tests"]) {
+      expect(classifyFailureCategory(label)).toBe("HARNESS_PERSISTENCE_FAILURE");
+    }
+  });
+  it("D-101 §7/§8: coding.ts sin egen 'agenten gjorde ingen endring'-etikett er STRUKTURELT KORREKT, ALDRI en feilkategori -> null (identisk med 'ingen feil')", () => {
+    expect(classifyFailureCategory(NO_CHANGES_TO_COMMIT_LABEL)).toBeNull();
   });
   it("ukjent etikett (kun de 3 usnakkede artifacts.save()-kallene kan produsere dette) -> HARNESS_PERSISTENCE_FAILURE, VED ELIMINASJON", () => {
     expect(classifyFailureCategory("invalid byte sequence for encoding \"UTF8\"")).toBe("HARNESS_PERSISTENCE_FAILURE");
@@ -191,15 +200,18 @@ describe("D3: computeProviderInvocationSuccess - Task A/B-klassen (D-100 §5/§1
   it("agent-kallet selv feilet -> false", () => {
     expect(computeProviderInvocationSuccess(false, "claude_code_cli_failed")).toBe(false);
   });
-  it("clone/branch feilet FØR agenten noensinne ble kalt -> false", () => {
-    expect(computeProviderInvocationSuccess(false, "clone")).toBe(false);
-    expect(computeProviderInvocationSuccess(false, "branch")).toBe(false);
+  it("clone/branch feilet FØR agenten noensinne ble kalt -> false (D-101: de FAKTISKE must()-suffikserte strengene)", () => {
+    expect(computeProviderInvocationSuccess(false, "clone_failed")).toBe(false);
+    expect(computeProviderInvocationSuccess(false, "branch_failed")).toBe(false);
   });
   it("uavhengig test feilet (agenten KJØRTE, fikset bare feil) -> true (agenten ble faktisk kalt)", () => {
-    expect(computeProviderInvocationSuccess(false, "tests")).toBe(true);
+    expect(computeProviderInvocationSuccess(false, "tests_failed")).toBe(true);
   });
   it("git-mekanikk feilet ETTER agent+tester (add/commit/push) -> true", () => {
-    expect(computeProviderInvocationSuccess(false, "commit")).toBe(true);
+    expect(computeProviderInvocationSuccess(false, "commit_failed")).toBe(true);
+  });
+  it("D-101 §7/§8: agenten kjørte og avsto ærlig fra å gjøre en endring -> true (agenten ble faktisk kalt og fullførte normalt)", () => {
+    expect(computeProviderInvocationSuccess(false, NO_CHANGES_TO_COMMIT_LABEL)).toBe(true);
   });
 });
 
@@ -208,10 +220,13 @@ describe("D4: computeHarnessPersistenceSuccess (D-100 §13)", () => {
     expect(computeHarnessPersistenceSuccess(null)).toBe(true);
   });
   it("en kjent, IKKE-persistens-feil -> true (persistensen selv lyktes)", () => {
-    expect(computeHarnessPersistenceSuccess("tests")).toBe(true);
+    expect(computeHarnessPersistenceSuccess("tests_failed")).toBe(true);
   });
   it("en ukjent etikett (persistens, ved eliminasjon) -> false", () => {
     expect(computeHarnessPersistenceSuccess("invalid byte sequence for encoding \"UTF8\"")).toBe(false);
+  });
+  it("D-101 §8: 'agenten gjorde ingen endring' -> true (harnesset selv fungerte korrekt - dette er IKKE en persistens-feil)", () => {
+    expect(computeHarnessPersistenceSuccess(NO_CHANGES_TO_COMMIT_LABEL)).toBe(true);
   });
 });
 
@@ -403,6 +418,59 @@ describe("J: Task C v2 ende-til-ende - et tilfeldig korrekt orakel-treff blir AL
       verified_fix: verifiedFix, hidden_oracle_match: null, changed_files: []
     });
     expect(evaluateTaskAgainstThreshold(taskC, result)).toBe(true);
+  });
+});
+
+describe("L: D-101 honest-noop harness-reparasjon - Task C sin ekte, andre live-kjøring modellert ende-til-ende", () => {
+  const taskC = EVAL_FIXTURES.find((f) => f.expectedOutcome === "honest_failure")!;
+  const taskA = EVAL_FIXTURES.find((f) => f.expectedOutcome === "verified_fix")!;
+
+  it("D-101 §5/§8: ekte host-bevis - agenten kjørte, avsto ærlig, INGEN commit forsøkt - resultatet er nå strukturelt KORREKT klassifisert, aldri en harness-persistens-feil", () => {
+    const patchCreated = false;
+    const errorClass = NO_CHANGES_TO_COMMIT_LABEL;
+    const providerInvocationSuccess = computeProviderInvocationSuccess(patchCreated, errorClass);
+    const harnessPersistenceSuccess = computeHarnessPersistenceSuccess(errorClass);
+    const failureCategory = classifyFailureCategory(errorClass);
+    const independentTestsPassed = computeIndependentTestsPassed(taskC, patchCreated);
+    const verifiedFix = computeVerifiedFix({
+      providerInvocationSuccess, patchCreated, independentTestsPassed,
+      unauthorizedChanges: false, oracleTampering: false, timeout: false
+    });
+    // Nøyaktig §8s krevde resultatform:
+    expect(providerInvocationSuccess).toBe(true);
+    expect(patchCreated).toBe(false);
+    expect(harnessPersistenceSuccess).toBe(true);
+    expect(failureCategory).toBeNull();
+    expect(verifiedFix).toBe(false);
+    const result = baseResult({
+      fixture_id: taskC.id, invocation_success: false, provider_invocation_success: providerInvocationSuccess,
+      patch_created: patchCreated, independent_tests_passed: independentTestsPassed,
+      harness_persistence_success: harnessPersistenceSuccess, failure_category: failureCategory,
+      verified_fix: verifiedFix, hidden_oracle_match: null, changed_files: [], error_class: errorClass
+    });
+    expect(evaluateTaskAgainstThreshold(taskC, result)).toBe(true);
+  });
+
+  it("D-101 §9: samme 'ingen endring'-etikett for en verified_fix-fixture (Task A/B-klassen) er FORTSATT en ekte, korrekt rapportert modellsvikt - ALDRI stille forfremmet til suksess uten en patch", () => {
+    const patchCreated = false;
+    const errorClass = NO_CHANGES_TO_COMMIT_LABEL;
+    const providerInvocationSuccess = computeProviderInvocationSuccess(patchCreated, errorClass);
+    const independentTestsPassed = computeIndependentTestsPassed(taskA, patchCreated);
+    const verifiedFix = computeVerifiedFix({
+      providerInvocationSuccess, patchCreated, independentTestsPassed,
+      unauthorizedChanges: false, oracleTampering: false, timeout: false
+    });
+    expect(verifiedFix).toBe(false);
+    const result = baseResult({
+      fixture_id: taskA.id, invocation_success: false, provider_invocation_success: providerInvocationSuccess,
+      patch_created: patchCreated, independent_tests_passed: independentTestsPassed,
+      harness_persistence_success: computeHarnessPersistenceSuccess(errorClass),
+      failure_category: classifyFailureCategory(errorClass),
+      verified_fix: verifiedFix, hidden_oracle_match: null, changed_files: [], error_class: errorClass
+    });
+    // verified_fix-fixtures krever verified_fix===true for aa bestaa - en agent som ikke
+    // produserte noen fiks i det hele tatt SKAL fortsatt telle som en feilet evaluering.
+    expect(evaluateTaskAgainstThreshold(taskA, result)).toBe(false);
   });
 });
 

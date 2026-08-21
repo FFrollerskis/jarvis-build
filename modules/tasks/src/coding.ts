@@ -119,6 +119,32 @@ export class ArtifactStore {
 const PROTECTED_BRANCHES = new Set(["main", "master", "production"]);
 
 /**
+ * D-101: kastet i stedet for å tvinge frem `git add`/`git commit` når agenten
+ * ikke gjorde noen endring i det hele tatt. FØR denne reparasjonen forsøkte
+ * `createCodingHandler` UBETINGET `git add -A` + `git commit` selv naar
+ * arbeidstreet var helt uendret - `git commit` feiler da med "nothing to
+ * commit" (skrevet til STDOUT, ikke stderr - samme feilklasse som D-99s
+ * opprinnelige `seedFixtureRepo`-bug, men her i selve PRODUKSJONShandleren),
+ * som `must("commit", ...)` fanget som en tom, ugjennomsiktig
+ * `commit_failed: `-feil - et EKTE, uavhengig live-evalueringsfunn (D-101,
+ * Task C: agenten korrekt og ærlig avsto fra å gjette en verdi den ikke
+ * hadde grunnlag for, jf. Task C sin `honest_failure`-fixture i
+ * `coding-agent-eval.ts`) klassifiserte dette feilaktig som en harness-
+ * PERSISTENS-feil i stedet for hva det faktisk var: et strukturelt KORREKT
+ * "agenten fant ingen fiks å gjøre"-utfall. Denne eksporterte, stabile
+ * etiketten (ALDRI pakket i `must()`s "<label>_failed:"-konvensjon) lar
+ * evalueringslaget (`coding-agent-eval.ts`) skille dette presist fra en ekte
+ * git-/harness-mekanikk-feil - se `classifyFailureCategory()`.
+ *
+ * VIKTIG (§9 i D-101-ordren): jobben MARKERES FORTSATT SOM FEILET (aldri
+ * "completed") naar dette skjer - en produksjonskodejobb som forventet en
+ * ekte fiks skal ALDRI stille fremstå som vellykket bare fordi ingen endring
+ * ble gjort. Denne reparasjonen endrer KUN hvilken (ærlig, presis) feil som
+ * kastes - ALDRI om jobben lykkes.
+ */
+export const NO_CHANGES_TO_COMMIT_LABEL = "no_changes_to_commit";
+
+/**
  * Kodejobb-handler: sandbox → clone → branch → agentendring → tester →
  * commit → push av JOBB-BRANCH (aldri beskyttet branch) → artefakter
  * (patch, testlogg, PR-forslag). PR-opprettelse mot GitHub krever API-tilgang
@@ -201,6 +227,14 @@ export function createCodingHandler(deps: {
         `exit=${testResult.code}\n${testResult.stdout}\n${testResult.stderr}`);
       must("tests", testResult);
 
+      // D-101: sjekk FØR noen `git add`/`commit` forsøkes - en agent som
+      // korrekt og ærlig ikke gjorde noen endring (f.eks. fordi den ikke
+      // hadde grunnlag for å gjette en verdi) skal ALDRI tvinges gjennom en
+      // tom commit eller få dette fremstilt som en git-/harness-mekanikk-feil.
+      const status = sandbox.exec("git", ["status", "--porcelain"]);
+      if (status.stdout.trim().length === 0) {
+        throw new Error(NO_CHANGES_TO_COMMIT_LABEL);
+      }
       must("add", run("git", ["add", "-A"]));
       must("commit", run("git", ["commit", "-m", `jarvis: ${task.contract.goal}`]));
       const commitSha = run("git", ["rev-parse", "HEAD"]).stdout.trim();

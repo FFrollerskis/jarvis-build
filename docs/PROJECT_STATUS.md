@@ -1,5 +1,52 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**REAL CODING AGENT LIVE QUALITY VERIFICATION + HONEST-NOOP EVAL REPAIR
+(D-101) — EVIDENSKANONISERING + SMAL harness-korrekthetsreparasjon, IKKE en ny UA-5-kapabilitet, IKKE
+produksjonskobling.** PR #41 (D-100) er MERGET til main (merge-commit `4c02f99`, post-merge-CI bekreftet
+grønn: gitleaks+build-test begge SUCCESS). En ANDRE, KORRIGERT ekte Windows-live-kjøring (med D-100s
+reparerte harness) fullførte VELLYKKET og produserte det FØRSTE genuint gyldige kvalitetsbeviset:
+`PROVIDER_CALLS_COUNT=3`, `LIVE_AGENT_INVOCATION_VERIFIED=true`, `LIVE_DIAGNOSTIC_QUALITY_VERIFIED=true`,
+`LIVE_FIX_QUALITY_VERIFIED=true`. Task A/B nådde begge `verified_fix=true` (ekte patch, uavhengig
+testport bestått, ingen uautoriserte endringer, ingen orakel-manipulasjon, ingen timeout); Task C nådde
+`verified_fix=false` med `oracle_tampering=false`/`unauthorized_changes=false` - en ÆRLIG feiling, PASS
+mot den FROSNE D-98/D-100-terskelen (uendret, verken FØR eller UNDER kjøringen).
+`QUALITY_THRESHOLD_MET=true` for alle 3 fixtures. **Harness-semantikk-funn (ALDRI et modellkvalitetsfunn):**
+Task C sitt resultat inneholdt likevel `harness_persistence_success=false`/`failure_category=
+HARNESS_PERSISTENCE_FAILURE`/`error_class=commit_failed` - fikk IKKE lov til å nedgradere noen av de tre
+`LIVE_*_VERIFIED`-flaggene (alle bevart `true`). **Rotårsak sporet i `coding.ts` (produksjonskode):**
+`createCodingHandler` kjørte FØR denne reparasjonen UBETINGET `git add -A`+`git commit` selv naar
+agenten (korrekt og ærlig, Task C sin `honest_failure`-fixture) ikke gjorde noen endring - `git commit`
+feiler da strukturelt ("nothing to commit", STDOUT ikke stderr), fanget av `must("commit",...)` som en
+tom `commit_failed:`-feil. **Sekundær, tidligere ufunnet klassifiseringsbug oppdaget samtidig:**
+`must()` kaster ALLTID `"<label>_failed:..."`, men `KNOWN_ERROR_CLASSES`/`PRE_AGENT_SUCCESS_LABELS` i
+`coding-agent-eval.ts` hadde kun de usuffikserte etikettene - matchet derfor ALDRI en ekte kjøretids-
+`error_class`, alle seks `must()`-baserte feilklasser ble feilaktig `HARNESS_PERSISTENCE_FAILURE` ved
+eliminasjon. **Fikset:** ny `coding.ts`-eksportert `NO_CHANGES_TO_COMMIT_LABEL` kastes nå (via
+`git status --porcelain` sjekket FØR add/commit) i stedet for en tvunget tom commit - ingen empty
+commit, ingen meningsløs branch-push, ingen fabrikkert patch; `classifyFailureCategory` behandler
+etiketten eksplisitt som `null`; begge klassifiseringstabellene rettet til de faktiske suffikserte
+strengene. §9-invariant bevart: jobben forblir FORTSATT "failed" (aldri "completed") naar agenten ikke
+gjør noen endring - kun HVILKEN feil som rapporteres er endret, ALDRI om jobben lykkes (bevist av en
+dedikert regresjonstest: `ScriptedCodingAgent`-banen 100% uendret). Q-26: kvalitetspromoteringen gyldig
+fordi terskelen ble frosset FØR resultatet ble sett OG begge fixture-typer faktisk oppfylte den;
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` forblir globalt uendret. UA-5 kriterium 2 vurdert på nytt
+(IKKE automatisk hevet): `PRODUCTION_CODING_HANDLER_WIRED=false`/`PRODUCTION_CODING_AGENT_WIRED=false`/
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false` UENDRET - kriterium 2 forblir PARTIAL, gap nå presist
+avgrenset til produksjons-tilkobling, aldri lenger modellkvalitet. Kriterium 1/3/4 uendret fra D-100.
+`coding-agent-eval.test.ts` 68→74 tester, `fase6-worker.test.ts` +2 tester (ekte embedded-Postgres+git-
+bare-repo). Full workspace-suite 124/124 filer, 1978/1978 tester grønt (opp fra 124/1970),
+`pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent. Alle D-96/D-97/D-98/D-99/D-100-relaterte
+regresjonssuiter eksplisitt re-kjørt og bekreftet grønt uendret. `TOTAL_REAL_PROVIDER_CALLS_FROM_
+FIRST_RUN=3` (den gyldige kjøringen) BEVART - ingen nytt ekte provider-kall i selve reparasjonsrunden.
+Se D-101 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch
+`claude/d101-live-quality-canonicalization`, draft PR #42 opprettet
+(`d39a2615202356b22802e12acf3ba6159f74df7b`), CI-verifisering gjenstår på tidspunktet for denne
+statuslinjen. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Neste faktiske UA-5-gap
+(produksjons-tilkobling av `createCodingHandler`/`ClaudeCodeAgent`) er identifisert, IKKE startet i
+denne runden.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**D-98 LIVE EVALUATION HARNESS EVIDENCE REPAIR v2 (D-100) — EVIDENCE-DRIVEN
 REPARASJON, IKKE en ny UA-5-kapabilitet.** PR #40 (D-99) er MERGET til main (merge-commit `f167734`,
 post-merge-CI bekreftet grønn). En ANDRE ekte Windows-vertskjøring (med D-99s reparerte harness)

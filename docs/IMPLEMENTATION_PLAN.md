@@ -2221,6 +2221,70 @@ FERSKE fixtures. Full detalj: D-100 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### REAL CODING AGENT LIVE QUALITY VERIFICATION + HONEST-NOOP EVAL REPAIR (2026-08-21) → D-101 (EVIDENSKANONISERING + SMAL reparasjon, IKKE ny kapabilitet)
+
+En ANDRE, KORRIGERT ekte Windows-live-kjøring (D-100s reparerte harness) fullførte VELLYKKET og
+produserte det FØRSTE genuint gyldige kvalitetsbeviset: `PROVIDER_CALLS_COUNT=3`,
+`LIVE_AGENT_INVOCATION_VERIFIED=true`, `LIVE_DIAGNOSTIC_QUALITY_VERIFIED=true`,
+`LIVE_FIX_QUALITY_VERIFIED=true`. Task A/B nådde begge `verified_fix=true`; Task C nådde
+`verified_fix=false` med `oracle_tampering=false`/`unauthorized_changes=false` - PASS mot den FROSNE
+D-98/D-100-terskelen (uendret, verken FØR eller UNDER kjøringen). `QUALITY_THRESHOLD_MET=true` for alle
+3 fixtures.
+
+**HARNESS-SEMANTIKK-funn (ALDRI et modellkvalitetsfunn):** Task C sitt resultat inneholdt likevel
+`harness_persistence_success=false`/`failure_category=HARNESS_PERSISTENCE_FAILURE`/
+`error_class=commit_failed` - IKKE fikk lov til å nedgradere noen av de tre `LIVE_*_VERIFIED`-flaggene
+(alle bevart `true`). **Rotårsak sporet i `coding.ts` (produksjonskode):** `createCodingHandler` kjørte
+FØR denne reparasjonen UBETINGET `git add -A`+`git commit` uansett om agenten hadde gjort noen endring -
+for Task C (der en korrekt agent bevisst avstår fra å gjette) staget `git add -A` ingenting, og
+`git commit` feilet strukturelt med "nothing to commit" (STDOUT, ikke stderr), fanget av `must("commit",
+...)` som en tom `commit_failed: `-feil. **Sekundær, tidligere ufunnet klassifiseringsbug oppdaget
+samtidig:** `must(label, result)` kaster ALLTID `"${label}_failed: ..."`, men `KNOWN_ERROR_CLASSES`/
+`PRE_AGENT_SUCCESS_LABELS` i `coding-agent-eval.ts` hadde kun de usuffikserte etikettene (`"clone"` osv.)
+- de matchet derfor ALDRI en ekte kjøretids-`error_class`, og ALLE seks `must()`-baserte feilklasser ble
+feilaktig klassifisert som `HARNESS_PERSISTENCE_FAILURE` ved eliminasjon (D-100s egne tester testet
+uheldigvis de samme usuffikserte, aldri-forekommende strengene).
+
+**Fikset (minimal, presis):** ny eksportert `coding.ts`-konstant `NO_CHANGES_TO_COMMIT_LABEL=
+"no_changes_to_commit"` kastes nå (via `git status --porcelain` sjekket FØR add/commit) i stedet for en
+tvunget tom commit - ingen empty commit, ingen meningsløs branch-push, ingen fabrikkert patch.
+`classifyFailureCategory` behandler etiketten eksplisitt som `null` (identisk med "ingen feil" - et
+strukturelt KORREKT utfall). `KNOWN_ERROR_CLASSES`/`PRE_AGENT_SUCCESS_LABELS` rettet til de faktiske
+suffikserte strengene. **§9-invariant bevart:** jobben forblir FORTSATT markert "failed" (aldri
+"completed") naar agenten ikke gjør noen endring - kun HVILKEN feil som rapporteres er endret, aldri om
+jobben lykkes (bevist av en dedikert regresjonstest som viser `ScriptedCodingAgent`-banen er 100%
+uendret).
+
+**Q-26:** kvalitetspromoteringen er gyldig fordi terskelen ble frosset FØR resultatet ble sett OG BEGGE
+Task A/B (ekte provider-kall + faktisk patch + uavhengig testport + ingen manipulasjon) og Task C (ekte
+provider-kall + ingen fabrikkert `verified_fix` + skjult orakel utilgjengelig for agenten + ingen
+manipulasjon) faktisk oppfylte den. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` forblir GLOBALT
+uendret. **UA-5 kriterium 2 vurdert på nytt, IKKE automatisk hevet:** agent-invokering OG modellkvalitet
+er nå begge ekte live-verifisert, men fersk repo-sannhet bekrefter UENDRET
+`PRODUCTION_CODING_HANDLER_WIRED=false`/`PRODUCTION_CODING_AGENT_WIRED=false`/
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false` - kriterium 2 forblir `PARTIAL`, MEN gjenstående gap nå
+presist avgrenset til produksjons-tilkobling/wiring, ALDRI lenger modellkvalitet. Kriterium 1/3/4
+uendret fra D-100.
+
+**Testdekning:** `coding-agent-eval.test.ts` utvidet fra 68 til 74 tester (D2/D3/D4-rettelser +
+regresjonsbevis for de gamle usuffikserte strengene, ny blokk L: Task C sin ekte andre live-kjøring
+modellert ende-til-ende + en verified_fix-fixture med samme etikett beviser fortsatt en ekte
+modellsvikt). `fase6-worker.test.ts` +2 tester (ekte embedded-Postgres + ekte git-bare-repo): en
+`NoOpCodingAgent` beviser jobben feiler med NØYAKTIG `NO_CHANGES_TO_COMMIT_LABEL` (aldri `commit_failed`),
+ingen branch pushet, ingen commit, kun `test-log` persistert; `ScriptedCodingAgent`-banen bekreftet 100%
+uendret. Full suite 124/124 filer, 1978/1978 tester grønt (opp fra 124/1970), `pnpm -w typecheck` 18/18
+rent, `pnpm -w lint` rent. Alle D-96/D-97/D-98/D-99/D-100-relaterte regresjonssuiter eksplisitt re-kjørt
+grønt uendret.
+
+**D-64/D-41:** ingen ny leverandør, ingen ny risikoklasse, ingen produksjonskobling (rører KUN `coding.ts`s
+interne add/commit-mekanikk, aldri callere/wiring). `TOTAL_REAL_PROVIDER_CALLS_FROM_FIRST_RUN=3`
+(den gyldige kjøringen) bevart - INGEN nytt ekte provider-kall i selve reparasjonsrunden.
+`UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. Neste faktiske UA-5-
+gap (produksjons-tilkobling av `createCodingHandler`/`ClaudeCodeAgent`) forblir eksplisitt IKKE startet i
+denne runden, kun identifisert. Full detalj: D-101 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
