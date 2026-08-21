@@ -175,6 +175,19 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // space ville vært et meningsløst dinglende konfigurasjonsobjekt.
   add(result, "consent_enforcement_events", await run(client, mode, "consent_enforcement_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "consent_enforcement_policies", await run(client, mode, "consent_enforcement_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-104 (UA-5 Production Operations Control Plane v1, 036_incidents.sql):
+  // registrer hendelses-tabellene i erasure-planen (SAMME mønster/
+  // begrunnelse som support_*/contract_* over). `incident_evidence` FØR
+  // `incidents` (FK -> incidents). `incident_repair_tasks` er BEVISST IKKE
+  // registrert her - den har `ON DELETE CASCADE` mot `incidents` (den bærer
+  // INGEN eget innhold utover to id-er, se 036_incidents.sql) og har heller
+  // INGEN `memory_space_id`-kolonne å filtrere denne spørringen på i det
+  // hele tatt - sletting av `incidents` under fjerner lenkeraden automatisk.
+  // `deployments`/`infra_recovery_actions` er REN infra-audit (tenant-scoped,
+  // ingen memory_space_id, samme klasse som `tool_executions`/`audit_events`)
+  // - BEVISST utenfor denne memory-space-erasure-planen, samme presedens.
+  add(result, "incident_evidence", await run(client, mode, "incident_evidence", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "incidents", await run(client, mode, "incidents", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

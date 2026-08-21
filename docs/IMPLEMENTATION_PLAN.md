@@ -2429,7 +2429,7 @@ ikke koblet inn i `docker run`) reparert i samme slice via bar `-e <NAVN>`-argv 
 credential-helper-protokollen). `git-credential-isolation.test.ts` (7, omskrevet - C/D beviser nå at git
 FAKTISK invokerer mekanismen mot en ekte HTTP-credential-utfordring; nye F/G beviser fail-closed
 eksplisitt). `coding-git-auth-wiring.test.ts` (13, omskrevet argv-form). Full suite
-`TESTS_AFTER=2054`/`TEST_FILES_AFTER=132`, typecheck/lint rent, ingen regresjon. Ny, fokusert
+`TESTS_AFTER=2056`/`TEST_FILES_AFTER=132` (korrigert 2026-08-21: `2054` var korrekt for den FØRSTE v2-commiten, men to påfølgende `windows-git-auth`-CI-fiks-commits la til `git-auth.test.ts` sine L2/L3-tester - `2056` er det faktiske, verifiserte tallet på PR #46s merget HEAD `ad96d33`), typecheck/lint rent, ingen regresjon. Ny, fokusert
 `windows-git-auth`-CI-jobb (`windows-latest`, kun de to Postgres-frie testfilene) lagt til
 `.github/workflows/ci.yml` - direkte mot klassen "korrekt på Linux, feiler på ekte Windows".
 
@@ -2439,6 +2439,30 @@ eksplisitt). `coding-git-auth-wiring.test.ts` (13, omskrevet argv-form). Full su
 `WINDOWS_LIVE_AUTH_ISOLATION_VERIFIED=false`/`LIVE_E2E_VERIFIED=false`/
 `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`/`HOST_ACTION_REQUIRED=true`/`UA5_CRITERION_2=PARTIAL`
 uendret inntil Tobias kjører runboken på nytt. Ny draft-PR, IKKE merget. Full detalj: D-103 HOST-FIX v2 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+### D-104: UA-5 Production Operations Control Plane v1 (2026-08-21)
+
+Bygget i samme gren/PR som D-103-run-3-kanoniseringen over (UA-5 kriterium 2 er nå `COMPLETE`). Ny
+`@jarvis/incidents`-pakke (JARVIS_CANONICAL, D-64-porten kjørt FØRST - GCP/Cloudflare/Sentry/Vercel-deploy/
+log-spørring eksisterer IKKE i repoet, INGEN av dem bygges her): deterministisk `IncidentService`
+(lifecycle + bevis som ALDRI overskrives, kun lagt til med eksplisitt `contradicts_evidence_id`),
+`DeploymentService`/`correlateIncident()` (deterministisk tidsvindu-korrelasjon, Q-26-stil
+`UNVERIFIED`/`PROVISIONAL`/`VERIFIED`), `proposeRepairTask()` (gjenbruker `TaskService.submit()`/
+`createCodingHandler` 100% uendret - bygger KUN orkestrering rundt den EKSISTERENDE, D-102/D-103-live-
+bevist testet-fiks-pipelinen), `attemptRecovery()` (before/after via den EKSISTERENDE `tool_executions`-
+D-pipelinen, selve recovery-forsøket UTELUKKENDE via `ToolGateway.execute()` - ÉN representativ, EKTE
+case: `github.delete_branch`→`create_branch`). Ny `InfraExecutionGate` (`modules/policy`,
+NORMAL/DEGRADED/PAUSED) - en NY, SNEVRERE bryter enn `KillSwitch` (uendret, forblir strengest), koblet
+inn som et valgfritt felt i `PolicyGatewayOptions` (bakoverkompatibelt uten konfig). Ny migrasjon
+`036_incidents.sql` (RLS/GRANT-mønster identisk `024_support.sql`), erasure-plan-registrering for
+`incidents`/`incident_evidence`. 42 nye tester i 5 nye filer mot EKTE embedded-Postgres/EKTE lokalt
+git-bare-repo/EKTE `ToolGateway`. Full suite `TESTS_AFTER=2098`/`TEST_FILES_AFTER=137` (opp fra
+`2056`/`132`), typecheck/lint rent. **UA-5 kriterium 1/3 forblir `PARTIAL`** (deterministisk fixture-/
+integrasjonsbevis, INGEN ekte GitHub-webhook/provider-rollback utøvd) - **kriterium 4 er `COMPLETE`**
+(gaten fullt koblet inn og test-bevist mot ekte `PolicyGateway`-runtime i begge produksjonsprosesser, én
+dokumentert prosess-lokalitetsbegrensning, samme klasse som eksisterende `KillSwitch`). `UA5_
+IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny draft-PR, IKKE merget. Full detalj: D-104 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
 ---

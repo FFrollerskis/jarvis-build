@@ -7,6 +7,7 @@ import {
 import { verifyApproval } from "./approval-verifier.ts";
 import { resolveAuthorityMode, type AuthorityConfig, type OwnerControls } from "./authority.ts";
 import type { DeviceRegistry } from "./device-registry.ts";
+import type { InfraExecutionGate } from "./infra-execution-gate.ts";
 import { KillSwitch } from "./kill-switch.ts";
 import type { NonceStore } from "./nonce-store.ts";
 
@@ -48,6 +49,16 @@ export interface PolicyGatewayOptions {
   authority?: AuthorityConfig;
   /** v4.0: owner-kontroller (freeze/revoke) håndhevet i execution path. */
   controls?: OwnerControls;
+  /**
+   * D-104 (UA-5 Production Operations Control Plane v1): global infra-
+   * eksekusjonsmodus (NORMAL/DEGRADED/PAUSED) - EN NY, SNEVRERE bryter enn
+   * `killSwitch` (som forblir strengest/uendret, blokkerer ALT). Gjelder
+   * KUN `toolCall.tool_id`-er i `infraToolIds` - alle andre verktøy er
+   * 100% uendret av denne gaten. Uten begge feltene satt er oppførselen
+   * BYTE-IDENTISK fra før D-104.
+   */
+  infraGate?: InfraExecutionGate;
+  infraToolIds?: ReadonlySet<string>;
   auditSink?: (event: PolicyAuditEvent) => void;
   clock?: () => Date;
 }
@@ -93,6 +104,15 @@ export class PolicyGateway {
     }
     if (this.opts?.controls?.isFrozen(toolCall.data.tool_id)) {
       return this.finish(request, "DENY", "connector_frozen");
+    }
+    // D-104: infra-modus-gaten gjelder KUN registrerte infra-tool_id-er -
+    // for alle andre tool_id-er (eller uten infraGate/infraToolIds
+    // konfigurert i det hele tatt) er denne sjekken et strukturelt no-op.
+    if (this.opts?.infraGate && this.opts?.infraToolIds?.has(toolCall.data.tool_id)) {
+      const infraDeny = this.opts.infraGate.check(toolCall.data.capability_class);
+      if (infraDeny) {
+        return this.finish(request, "DENY", infraDeny);
+      }
     }
     // v4.0: A-D er risikoklasser. SOVEREIGN owner-modus gir autonom utførelse;
     // sikkerheten leveres av D-pipelinen (preflight/readback/evidens/recovery)

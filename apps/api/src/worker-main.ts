@@ -1,7 +1,7 @@
 // Jarvis worker-prosess (BO-07): egen container/prosess som drenerer durable-køen.
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, PgDeviceRegistry } from "@jarvis/core";
-import { KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
@@ -75,6 +75,15 @@ const gateway = new ModelGateway({
 // BO-11 (§29): worker-tool-mesh gjennom SAMME trusted Tool Gateway/Policy som api -
 // ingen provider/tool-bypass. Kun ufarlige read-verktøy eksponeres (mesh-bridge).
 const killSwitch = new KillSwitch();
+// D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-
+// wiring-mønster som apps/api/src/main.ts. ÆRLIG begrensning (uendret fra
+// den allerede eksisterende `killSwitch`/`OwnerControls`-arkitekturen):
+// dette er en EGEN, prosess-lokal `InfraExecutionGate`-instans - en pause
+// utløst via api-prosessens `/infra/pause`-HTTP-rute endrer IKKE denne
+// workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
+// bygget denne sliceen - se D-104 i DECISIONS_AND_ASSUMPTIONS.md).
+const infraGate = new InfraExecutionGate();
+const infraToolIds = new Set(["github"]);
 const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
 await deviceRegistry.refresh().catch(() => undefined);
 // v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
@@ -83,6 +92,8 @@ const policy = new PolicyGateway({
   devices: deviceRegistry,
   nonces: new PgApprovalStore(pool),
   killSwitch,
+  infraGate,
+  infraToolIds,
   authority: {
     owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
     owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]

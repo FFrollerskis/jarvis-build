@@ -1,15 +1,28 @@
 # D-103 UA-5 host-akseptanse: produksjonskode-reachability (Blokker A + B)
 
-**Status:** TO GANGER kjørt av Tobias. Kjøring 1 (`d103-host-acceptance-986f37e6`)
-fant en git credential-hijack via ambient `credential.helper` - fikset av
-"d103-host-git-auth-isolation-repair" (v1, merget). Kjøring 2
-(`d103-host-acceptance-d5294343`), ETTER v1 var merget, beviste v1s isolasjon
-FAKTISK virket (ingen ambient identitet lenger), men fant en NY Windows-
-spesifikk feil i selve v1s `GIT_ASKPASS`-invokeringsmekanisme (se "Historisk
-funn" under) - fikset av "d103-git-credential-helper-windows-repair" (v2,
-DENNE reparerte versjonen av runboken, IKKE kjørt ennå). INGEN kommando i
-dette dokumentet er utført av Claude Code. Krever ekte `ANTHROPIC_API_KEY` og
-`JARVIS_GITHUB_TOKEN` som KUN Tobias skal skrive inn.
+**Status: TRE GANGER kjørt av Tobias - TREDJE KJØRING LYKTES FULLSTENDIG.**
+Kjøring 1 (`d103-host-acceptance-986f37e6`) fant en git credential-hijack via
+ambient `credential.helper` - fikset av "d103-host-git-auth-isolation-repair"
+(v1, merget). Kjøring 2 (`d103-host-acceptance-d5294343`), ETTER v1 var
+merget, beviste v1s isolasjon FAKTISK virket (ingen ambient identitet
+lenger), men fant en NY Windows-spesifikk feil i selve v1s `GIT_ASKPASS`-
+invokeringsmekanisme (se "Historisk funn" under) - fikset av
+"d103-git-credential-helper-windows-repair" (v2, merget som PR #46,
+merge-commit `ad96d33`). **Kjøring 3 (`d103-host-final-ea3e6b3f`, worker
+`worker-aa818fcf`), mot DENNE kanoniske `main`-en, MED system-nivå
+`credential.helper=manager` fortsatt bevisst uendret: LYKTES FULLSTENDIG**
+- `status=completed`, `tests=passed`, `branch=jarvis/d103-host-final-ea3e6b3f`,
+`commit_sha=8a9fda6d172193e4abb002dad814411ffb629300`, ekte PR opprettet
+(`tsworkflow/jarvis-d103-acceptance#1`, bevisst IKKE merget - engangs
+aksepttest-repo). Se "Historisk funn: TREDJE ekte kjøring" under for full
+detalj. D-103 (v1+v2) er dermed `CANONICAL / WINDOWS_LIVE_E2E_VERIFIED /
+COMPLETE` - UA-5 kriterium 2 er `COMPLETE`. Denne runboken forblir i repoet
+som dokumentasjon av den fulle historikken og som mal for en EVENTUELL
+fremtidig re-kjøring (f.eks. etter en fremtidig reparasjon som igjen
+berører git-transport-autentisering) - INGEN videre kjøring er påkrevd for
+D-103 selv. INGEN kommando i dette dokumentet er utført av Claude Code.
+Krever ekte `ANTHROPIC_API_KEY` og `JARVIS_GITHUB_TOKEN` som KUN Tobias skal
+skrive inn.
 
 ## Historisk funn: FØRSTE ekte kjøring (2026-08-21, task `d103-host-acceptance-986f37e6`)
 
@@ -92,6 +105,53 @@ endre sin normale Git Credential Manager-tilstand.** Den fortsatt konfliktende
 isolasjon fortsatt holder (ingen ambient identitet lekker inn) MENS v2s nye
 `credential.helper`-mekanisme SELV skal fungere, er en sterkere test enn et
 rent, ambient-fritt miljø.
+
+## Historisk funn: TREDJE ekte kjøring (2026-08-21, task `d103-host-final-ea3e6b3f`, ETTER v2 merget - LYKTES)
+
+Denne runboken (v2s reparerte versjon, "d103-git-credential-helper-windows-
+repair", merget som PR #46) ble kjørt på nytt på Tobias sin Windows-host, mot
+kanonisk `main` (merge-commit `ad96d33466315a5687ec977ce33ff36aa5fda7c7`),
+MED Git for Windows sin system-nivå `credential.helper=manager`
+(`C:/Program Files/Git/etc/gitconfig`) BEVISST bevart uendret (som i de to
+foregående kjøringene):
+
+- Produksjons-`api` OG produksjons-`worker` startet BEGGE korrekt fra
+  kanonisk `main`.
+- En ekte kodejobb ble sendt inn - worker `worker-aa818fcf` claimet jobben
+  korrekt (Blokker A-fiksen fortsatt bevist LIVE, tredje gang på rad).
+- Jobben progresserte `running` → `running` → `running` → `completed`.
+- **v2s `credential.helper`-mekanisme FUNGERTE FULLSTENDIG:** ingen
+  `cannot spawn ...askpass.cmd`-feil (v1s askpass-mekanisme er jo helt
+  fjernet), ingen `post-ops`-identitet eller annen ambient identitet dukket
+  opp noe sted - `AMBIENT_HOST_CREDENTIAL_DID_NOT_OVERRIDE=true` bekreftet
+  MED en ekte konkurrerende ambient helper fortsatt konfigurert.
+- Klone, agent-endring, uavhengig testport (tests=passed), commit
+  (`commit_sha=8a9fda6d172193e4abb002dad814411ffb629300`), autentisert push
+  (branch `jarvis/d103-host-final-ea3e6b3f`) og PR-publisering
+  (`tsworkflow/jarvis-d103-acceptance#1`) fullførte ALLE.
+- Terminalt resultat: `status=completed`, `last_error=<tom>`.
+
+**Én presis nyanse (IKKE overklamet):** `EXPECTED_TOKEN_IDENTITY_MATCH` ble
+IKKE friskt re-bevist via en dedikert `/user`-identitetspreflight i DENNE
+kjøringen - det steget mottok en GitHub 403. INGEN fabrikkert
+identitetsbekreftelse legges til her. Den strukturelle proof-of-work er i
+stedet den fullstendige, isolerte, autentiserte clone→push→PR-kjeden som
+selv lyktes MENS ambient `credential.helper=manager` forble konfigurert,
+kombinert med kjøring 1/2s tidligere direkte bevis på at
+`JARVIS_GITHUB_TOKEN` autentiserer som `tsworkflow` (forventet eier-
+identitet).
+
+**Kjent, IKKE-blokkerende observasjon:** agentens egen frie resultattekst
+inneholdt et stale utsagn ("endringen er ikke committet ennå") SAMTIDIG som
+den strukturerte pipeline-tilstanden allerede bar en ekte `commit_sha` og en
+opprettet PR. Kanonisk sannhet er ALLTID den strukturerte, database-
+persisterte tilstanden (`tasks.result`/`commit_sha`/PR-URL) - ALDRI
+agentens frie prosa-beskrivelse (jf. Q-26, samme prinsipp som D-101s
+harness-persistens-funn).
+
+**`tsworkflow/jarvis-d103-acceptance#1` forblir bevisst UMERGET** - et
+engangs bevisartefakt for denne runboken, IKKE et produksjonsleveranse.
+Ingen videre handling på den PR-en er del av D-103.
 
 ## Hva denne runboken beviser
 
@@ -313,18 +373,20 @@ eksplisitt bevise ALLE disse (ikke bare "jobben fullførte"):
 | `push_failed: ... Permission ... denied to <ukjent-konto>` | Skulle IKKE skje etter v1 ELLER v2 - dette var feilklassen fra kjøring 1 (ambient `credential.helper` kapret auth). Skjer det likevel: samle `git -c credential.helper= credential fill`-output og eksakt `last_error`, IKKE forsøk å fikse ved å slette Git Credential Manager-tilstand selv - meld tilbake i stedet. |
 | `push_failed: ... cannot spawn ...askpass.cmd: Permission denied` / `clone_failed: ... cannot spawn ...` | Skulle IKKE lenger skje etter `d103-git-credential-helper-windows-repair` - dette var AKKURAT feilklassen fra kjøring 2 (GIT_ASKPASS erstattet HELT av `credential.helper` i v2). Skjer det likevel: samle EKSAKT `last_error`-tekst OG utdata fra `git -c credential.helper= -c "credential.helper=!\"<node>\" \"<skript>\"" credential fill` kjørt manuelt, meld tilbake - IKKE forsøk selv å reversere til v1s mekanisme. |
 
-**Live-verifiseringsstatus for DENNE reparasjonen (ærlig, ikke fabrikkert):**
-denne runboken er ENDRET (nye forventede suksessmarkører over, spesielt
-`WINDOWS_CREDENTIAL_TRANSPORT_EXECUTED`) men IKKE kjørt av Claude Code etter
-`d103-git-credential-helper-windows-repair`. `LIVE_E2E_VERIFIED=false`,
-`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true`
-forblir presist slik inntil Tobias kjører DENNE versjonen på nytt og et ekte
-push+PR faktisk fullfører med riktig identitet OG uten en askpass/credential-
-helper-spawn-feil. `WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true`,
-`REAL_CODING_JOB_REACHED_GIT_PUSH=true` og
-`AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false` er derimot ALLEREDE
-bevist ekte (fra de to forrige kjøringene, uendret av denne reparasjonen).
-Alle andre felter i tabellen over er forventet oppførsel BASERT PÅ kildekoden
-(verifisert ved lesing OG mot en ekte lokal git smart-HTTP-server på Linux,
-se D-103 HOST-FIX v2 i `docs/DECISIONS_AND_ASSUMPTIONS.md`), IKKE en observert
-live-kjøring av DENNE reparerte versjonen på ekte Windows.
+**Live-verifiseringsstatus (ærlig, ikke fabrikkert, oppdatert etter kjøring 3):**
+kjøring 3 (`d103-host-final-ea3e6b3f`) BEVISER nå, LIVE, på ekte Windows, mot
+kanonisk `main`: `WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true`,
+`REAL_CODING_JOB_REACHED_GIT_PUSH=true`,
+`AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false`,
+`AMBIENT_HOST_CREDENTIAL_DID_NOT_OVERRIDE=true`,
+`WINDOWS_CREDENTIAL_TRANSPORT_EXECUTED=true`, `CLONE_AUTH_VERIFIED=true`,
+`PUSH_AUTH_VERIFIED=true`, `PR_CREATED=true`, `TASK_COMPLETED=true`,
+`WINDOWS_LIVE_AUTH_ISOLATION_VERIFIED=true`, `LIVE_E2E_VERIFIED=true`,
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=true`, `HOST_ACTION_REQUIRED=false`.
+Den ENE feltet IKKE friskt re-bevist denne runden:
+`EXPECTED_TOKEN_IDENTITY_MATCH` (se "Historisk funn: TREDJE ekte kjøring"
+over for den presise nyansen - INGEN fabrikkert identitetsbekreftelse, kun
+ærlig presisert). **UA-5 kriterium 2 er nå `COMPLETE`.** D-103 (v1+v2)
+status: `CANONICAL / FIXED_SUITE_VERIFIED / WINDOWS_CI_AUTH_TRANSPORT_
+VERIFIED / WINDOWS_LIVE_E2E_VERIFIED / COMPLETE`. Ingen ytterligere
+D-103-host-kjøring er påkrevd.

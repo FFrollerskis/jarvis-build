@@ -13,7 +13,8 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
-import { KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
@@ -70,6 +71,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // BO-09: Langfuse-sink når konfigurert (D-27), ellers JSONL - samme mesh-observability overalt.
   const trace = traceSinkFromEnv(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
   const killSwitch = new KillSwitch();
+  // D-104 (UA-5 Production Operations Control Plane v1): global infra-
+  // eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som
+  // forblir strengest/uendret). Gjelder KUN registrerte infra-tool_id-er
+  // (`infraToolIds` under - i dag kun "github", den ENESTE reelle infra-
+  // mutasjonstransporten i repoet, se D-104-audit). Prosess-lokal tilstand,
+  // SAMME arkitektoniske begrensning som `killSwitch`/`OwnerControls`
+  // allerede har (ikke delt på tvers av api-/worker-prosessene) - se D-104
+  // i DECISIONS_AND_ASSUMPTIONS.md for den ærlige begrunnelsen.
+  const infraGate = new InfraExecutionGate();
+  const infraToolIds = new Set(["github"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
   await deviceRegistry.refresh().catch(() => undefined);
@@ -78,6 +89,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
     killSwitch,
+    infraGate,
+    infraToolIds,
     // v4.0 sovereign-owner (BO-11.1 §2-funn): uten denne kjørte runtime i legacy
     // SCOPED-modus og krevde approval for owners D-kall. A-D er risikoklasser -
     // for owner gir SOVEREIGN autonom utførelse; sikkerheten ligger i D-pipelinen
@@ -115,11 +128,17 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   });
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
+  const ownerControls = new OwnerControls(killSwitch);
   const toolGateway = new ToolGateway(
     pool, policy,
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
-    new OwnerControls(killSwitch)
+    ownerControls
   );
+  // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
+  // DEN SAMME `toolGateway`-instansen (registrert med github under) for
+  // recovery-forsøk, ALDRI et direkte transport-kall (se recovery.ts).
+  const incidentService = new IncidentService(pool);
+  const deploymentService = new DeploymentService(pool);
   const businessService = new BusinessService(pool);
   // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§4/§19/§20 i byggeordren).
@@ -240,6 +259,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     policy,
     worker,
     tasks: taskService,
+    incidents: { service: incidentService, deployments: deploymentService, gateway: toolGateway, controls: ownerControls, infraGate, pool },
     conversation: new ConversationEngine({
       messages: new MessageStore(pool),
       context: new ContextBuilder(pool),
