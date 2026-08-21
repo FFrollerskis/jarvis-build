@@ -38,8 +38,9 @@ false`, `PRODUCTION_CODING_AGENT_WIRED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_R
 uendret fra D-96/D-97, denne sliceen kobler ingenting til produksjon. UA-5 kriterium 2 forblir PARTIAL
 (harness ekte/klart, modellkvalitet fortsatt uverifisert i dette miljøet); kriterium 1/3/4 uendret fra
 D-97. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Se D-98 i DECISIONS_AND_ASSUMPTIONS.md
-for full detalj. Branch `claude/ua5-coding-agent-live-quality`, draft PR gjenstår på tidspunktet for
-denne statuslinjen.
+for full detalj. Branch `claude/ua5-coding-agent-live-quality`, draft PR #39 opprettet
+(`a62cb0193b1d8de78eedf8ec9599201da64e9374`), CI-verifisering gjenstår på tidspunktet for denne
+statuslinjen.
 
 ## Runden før det
 
