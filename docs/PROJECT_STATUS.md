@@ -36,8 +36,9 @@ ende-til-ende. **UA-5 kriterium 2 forblir `PARTIAL`** - gap presist avgrenset ti
 Anthropic-/GitHub-credential på Tobias sin vert pluss én eierautorisert live-aksept-kjøring mot et
 disponibelt sandbox-repo. Kriterium 1=NOT_STARTED, 3=PARTIAL, 4=PARTIAL uendret.
 `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Se D-102 i DECISIONS_AND_ASSUMPTIONS.md for
-full detalj. Branch `claude/ua5-production-coding-wiring`, draft PR opprettes ved slutten av denne
-sliceen - IKKE merget. Neste faktiske UA-5-gap: ekte live host-aksept-kjøring (krever
+full detalj. Branch `claude/ua5-production-coding-wiring`, commit `11c1bfd78b213abba1bac288f5a15e2ed74965a3`,
+draft PR #43 opprettet, CI-verifisering gjenstår på tidspunktet for denne statuslinjen - IKKE merget.
+Neste faktiske UA-5-gap: ekte live host-aksept-kjøring (krever
 `ANTHROPIC_API_KEY`+`JARVIS_CLAUDE_BIN`+`JARVIS_GITHUB_TOKEN` på Tobias sin vert).
 
 ## Runden før det
