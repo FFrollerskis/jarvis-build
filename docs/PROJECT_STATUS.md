@@ -1,5 +1,34 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**D-98 LIVE-EVALUATION HARNESS PORTABILITY REPAIR (D-99) — NARROW REPARASJON,
+IKKE en ny UA-5-kapabilitet.** PR #39 (D-98) er MERGET til main (merge-commit
+`d93fcb06b97e83843d5754da37f27ab142c9fa2a`, post-merge-CI bekreftet grønn). En ekte Windows-vertskjøring
+av D-98s live-evaluator (ekte `claude`-binær + ekte `ANTHROPIC_API_KEY` konfigurert på verten) feilet
+FØR noe Claude-/provider-kall med `{"fatal_error":"git commit -m seed feilet: "}` (tom stderr).
+Rotårsak funnet ved kodeinspeksjon (ikke gjettet): `seedFixtureRepo()` kjørte det POSIX-eksterne
+kommandoet `mkdir -p <sti>` for å lage `src/`-undermappen ALLE 3 D-98-fixtures bruker - `mkdir` finnes
+IKKE som en frittstående kjørbar fil på Windows, kallet feilet ukontrollert med ENOENT, den påfølgende
+filskrivingen feilet derfor også, seed-arbeidstreet endte HELT tomt, og `git commit` feilet med
+"nothing to commit" (skrives til STDOUT, ikke stderr - derfor den tomme feilmeldingen).
+`PROVIDER_CALL_OCCURRED_BEFORE_FAILURE=false`. Fikset i nytt `modules/tasks/src/eval-fixture-repo.ts`
+(typechecket, i `src/`) - bruker UTELUKKENDE `node:fs`s `mkdirSync`/`writeFileSync`, ALDRI en spawnet
+ekstern prosess. Hvert disponibelt repo får nå LOKAL (ALDRI `--global`) `commit.gpgsign=false`/
+`tag.gpgSign=false`+tomt `core.hooksPath` - deterministisk uansett vertens globale signerings-/hook-
+konfigurasjon, Tobias sin globale git-config aldri rørt. Ny `describeGitFailure()` inkluderer
+`exit_code`+sanert `stderr` OG `stdout` (kritisk - "nothing to commit" er kun et stdout-signal);
+`redactSecrets()` nå også på scriptets topp-nivå `fatal_error`-felt. 8 nye tester
+(`eval-fixture-repo.test.ts`, INGEN ekte Claude-/Postgres-/nettverkskall) A-G + en dedikert Windows-
+regresjonsklasse-test. Alle 36 eksisterende D-98-tester består uendret. Full workspace-suite 123/123
+filer, 1931/1931 tester grønt (opp fra 122/1923), `pnpm -w typecheck`/`lint`/`gitleaks` rent. Sannhet
+UENDRET (ingen live-evaluering kjørt denne runden): `LIVE_AGENT_INVOCATION_VERIFIED=false`,
+`LIVE_DIAGNOSTIC_QUALITY_VERIFIED=false`, `LIVE_FIX_QUALITY_VERIFIED=false`,
+`PRODUCTION_CODING_HANDLER_WIRED=false`. UA-5 kriterium 1-4 UENDRET fra D-98
+(NOT_STARTED/PARTIAL/PARTIAL/PARTIAL). Se D-99 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch
+`claude/d98-live-eval-windows-repair`, draft PR gjenstår på tidspunktet for denne statuslinjen. Neste
+ekte live-forsøk skjer FØRST etter at denne reparasjonen er merget OG post-merge-CI er bekreftet grønn.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-98 Real Coding Agent Live Quality
 Evaluation Harness v1 bygget (reproduserbart evalueringsharness for D-96s ekte agent, IKKE modellkvalitet
 verifisert).** PR #38 (D-97) er MERGET til main (merge-commit `d5ebc40c05d68cf1b11ac078eb85c580f0042fb5`,

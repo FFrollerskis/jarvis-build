@@ -37,32 +37,7 @@ import {
   computeVerifiedFix, evaluateTaskAgainstThreshold, redactSecrets,
   type EvalFixture, type EvalTaskResult
 } from "../src/coding-agent-eval.ts";
-
-function git(cwd: string, ...args: string[]): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
-  if (result.status !== 0) throw new Error(`git ${args.join(" ")} feilet: ${result.stderr}`);
-  return result.stdout.trim();
-}
-
-async function seedFixtureRepo(fixture: EvalFixture): Promise<string> {
-  const bareRepo = await mkdtemp(join(tmpdir(), `jarvis-eval-origin-${fixture.id}-`));
-  git(bareRepo, "init", "--bare", "--initial-branch=main", ".");
-  const seed = await mkdtemp(join(tmpdir(), `jarvis-eval-seed-${fixture.id}-`));
-  git(seed, "init", "--initial-branch=main", ".");
-  git(seed, "config", "user.email", "eval-seed@jarvis.local");
-  git(seed, "config", "user.name", "jarvis-eval-seed");
-  for (const [relativePath, content] of Object.entries(fixture.seedFiles)) {
-    const parts = relativePath.split("/");
-    if (parts.length > 1) {
-      spawnSync("mkdir", ["-p", parts.slice(0, -1).join("/")], { cwd: seed });
-    }
-    spawnSync("node", ["-e", `require('fs').writeFileSync(process.argv[1], process.argv[2])`, relativePath, content], { cwd: seed });
-  }
-  git(seed, "add", "-A");
-  git(seed, "commit", "-m", "seed");
-  git(seed, "push", bareRepo, "main");
-  return bareRepo;
-}
+import { seedFixtureRepo } from "../src/eval-fixture-repo.ts";
 
 function pushedBranchChangedFiles(bareRepo: string, branch: string): string[] | null {
   const check = spawnSync("git", ["rev-parse", "--verify", branch], { cwd: bareRepo, encoding: "utf8" });
@@ -207,6 +182,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error(JSON.stringify({ fatal_error: String((err as Error).message ?? err) }));
+  const message = redactSecrets(String((err as Error).message ?? err), [
+    process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_CLAUDE_BIN"]
+  ]);
+  console.error(JSON.stringify({ fatal_error: message }));
   process.exit(1);
 });
