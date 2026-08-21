@@ -5,173 +5,184 @@ import { join } from "node:path";
 /**
  * D-103 (UA-5 Production Coding Reachability Repair v1) - Blokker B: EKSPLISITT
  * git-transport-autentisering for `git clone`/`git push` mot `https://github.com/...`,
- * ALDRI avhengig av ambient vertsmaskin-tilstand (f.eks. en tilfeldigvis
- * konfigurert, aldri tidligere bevist Git Credential Manager). `ProcessSandboxRunner`
- * gir `git clone`/`git push` en REN prosess-env (kun PATH + git-identitet +
- * eksplisitt `jobEnv`) - INGEN `HOME`/`USERPROFILE`/`SSH_AUTH_SOCK` når gjennom,
- * så uten dette ville push STRUKTURELT ALLTID feile mot en ekte GitHub-remote
- * (eller, verre, stille lykkes/feile avhengig av uverifisert vertstilstand).
+ * ALDRI avhengig av ambient vertsmaskin-tilstand. `ProcessSandboxRunner` gir
+ * `git clone`/`git push` en REN prosess-env (kun PATH + git-identitet +
+ * eksplisitt `jobEnv`) - INGEN `HOME`/`USERPROFILE`/`SSH_AUTH_SOCK` når gjennom.
  *
- * Mekanisme: et EPHEMERT `GIT_ASKPASS`-skript. Selve SKRIPTFILEN inneholder
- * ALDRI token-verdien - kun logikk som leser den fra SIN EGEN prosess-env ved
- * kjøretid (`JARVIS_GIT_ASKPASS_TOKEN`, satt KUN som `extraEnv` på selve
- * `git clone`/`git push`-kallet via `Sandbox.exec()`s nye fjerde parameter -
- * ALDRI i sandboxens vedvarende `jobEnv`, ALDRI synlig for `ClaudeCodeAgent`s
- * `exec()`-kall, som fortsatt kun bruker basis-enven fra `sandbox.create()`).
- * `GIT_TERMINAL_PROMPT=0` tvinger git til å bruke askpass eller feile rent -
- * ALDRI en interaktiv/ambient-avhengig fallback-prompt. Skriptet skrives i en
- * EGEN, dedikert temp-katalog - ALDRI inne i `sandbox.workdir` (som
- * `git clone <url> .` krever TOM for å ikke feile). Se `buildAskpassEnvValue()`
- * for HVORDAN `GIT_ASKPASS` faktisk settes sammen - formatet er
- * PLATTFORM-BETINGET (D-103 HOST-FIX, se under), IKKE en enkel felles streng.
+ * D-103 HOST-FIX v1 (2026-08-21, "d103-host-git-auth-isolation-repair", merget):
+ * git sin credential-subsystem spør ALLTID konfigurerte `credential.helper`-
+ * kjeder (system+global+repo, akkumulert) FØR `GIT_ASKPASS` konsulteres.
+ * Fikset med `-c credential.helper=` (git sin egen "nullstill helper-kjeden
+ * for AKKURAT dette kallet"-mekanisme, se `GIT_CREDENTIAL_ISOLATION_ARGS`
+ * under - UENDRET av denne v2-reparasjonen, fortsatt korrekt og påkrevd).
  *
- * D-103 HOST-FIX (2026-08-21, "d103-host-git-auth-isolation-repair"): en ekte
- * Windows-kjøring viste at GIT_ASKPASS ALENE er UTILSTREKKELIG. Root cause,
- * bevist mot git sin egen dokumenterte oppførsel (gitcredentials(7)): git sin
- * credential-subsystem spør FØRST alle konfigurerte `credential.helper`-
- * kjeder (system+global+repo-config, akkumulert i den rekkefølgen) om de kan
- * fylle brukernavn/passord - GIT_ASKPASS/`core.askPass` er en RENT
- * PROMPT-FALLBACK som KUN kalles når INGEN helper allerede har svart. Windows
- * Git for Windows-installasjoner har som oftest Git Credential Manager
- * konfigurert som en slik ambient `credential.helper` (system- eller
- * global-scope) - den svarte FØR askpass i det hele tatt ble konsultert, med
- * et cached, syntaktisk gyldig, men FEIL innlogget credential ("post-ops" i
- * stedet for den tiltenkte JARVIS_GITHUB_TOKEN-identiteten). GIT_ASKPASS
- * hadde derfor ALDRI en reell sjanse til å bli brukt for push - dette er
- * IKKE en bug i selve askpass-skriptet, men en strukturell prioritetsfeil i
- * hvordan git sin credential-oppløsning fungerer.
+ * D-103 HOST-FIX v2 (2026-08-21, "d103-git-credential-helper-windows-repair"):
+ * en ANNEN ekte Windows-kjøring (task d103-host-acceptance-d5294343, ETTER
+ * v1 var merget til main) beviste v1s isolasjonsfiks FAKTISK VIRKET - INGEN
+ * ambient identitet ("post-ops") dukket opp lenger - men selve v1-mekanismen
+ * (et generert `GIT_ASKPASS`-skript, satt til en `.cmd`-batch-wrapper-fil på
+ * Windows) feilet på et HELT NYTT sted: `cannot spawn
+ * "...\jarvis-git-askpass-<x>\askpass.cmd": Permission denied`.
  *
- * Fiks del 1 (ambient helper-prioritet): nullstill `credential.helper`-kjeden
- * PROSESS-LOKALT for AKKURAT clone/push-kallet, via git sin EGEN dokumenterte
- * kommandolinje-mekanisme `-c credential.helper=` (git-config(1): en tom
- * verdi NULLSTILLER hele den akkumulerte helper-listen - `-c`/kommandolinje-
- * config har ALLTID høyest presedens, over system/global/repo-filer, UANSETT
- * hva som står i dem). Dette er PORTABELT (samme git-kommandolinjeflagg på
- * Windows og Linux), MUTERER INGEN fil (verken repo/global/system git-config),
- * og inneholder INGEN hemmelighet (verdien er tom streng - selve NAVNET på
- * konfignøkkelen er ikke sensitivt). Når helper-kjeden er tom og
- * `GIT_TERMINAL_PROMPT=0` hindrer interaktiv terminal-prompting, faller git
- * STRUKTURELT tilbake til `GIT_ASKPASS`.
+ * ROOT CAUSE v2 (mest sannsynlig mekanisme, utledet fra dokumentert git/
+ * Windows-oppførsel - se doc-kommentaren på `buildCredentialHelperConfigValue()`
+ * for hvorfor DENNE reparasjonen strukturelt eliminerer usikkerheten i stedet
+ * for å anta én bestemt forklaring): `GIT_ASKPASS` kalles av git via
+ * `run_command()` med `use_shell=1`, men git sin `cmd_needs_shell()`-heuristikk
+ * hopper over selve shell-innpakningen når kommandostrengen IKKE inneholder
+ * shell-metategn (mellomrom, `|`, `&`, osv.) - en bar, uanførselstegnet
+ * `.cmd`-filsti (slik v1s `buildAskpassEnvValue()` produserte på Windows)
+ * kvalifiserer IKKE som "trenger shell", så git kaller `CreateProcessW()`
+ * DIREKTE på `.cmd`-stien. `.cmd`/`.bat`-filer er IKKE gyldige Win32 PE-
+ * kjørbare avbilder (ingen `MZ`-header) - `CreateProcessW()` kan STRUKTURELT
+ * ikke laste dem direkte (kun `cmd.exe`/`ShellExecute` vet hvordan `.cmd`-
+ * filer skal tolkes). Windows returnerer i dette tilfellet typisk
+ * `ERROR_ACCESS_DENIED`, som MSYS-runtimen (Git for Windows sitt kjørings-
+ * lag) oversetter til POSIX-errno `EACCES` - `strerror(EACCES)` = "Permission
+ * denied", som SAMSVARER EKSAKT med den observerte feilteksten. Dette er en
+ * STRUKTURELL Windows-prosess-oppstart-begrensning, IKKE en fil-tillatelse-
+ * feil i vanlig forstand (ingen ACL/eierskap var faktisk feil).
  *
- * Fiks del 2 (selve askpass-invokeringen var LATENT ØDELAGT): EMPIRISK bevist
- * i denne reparasjonen (mot ekte git 2.43.0 og en ekte lokal smart-HTTP-
- * git-server, se `git-credential-isolation.test.ts`) at git IKKE kommando-
- * linje-parser `GIT_ASKPASS`-verdien på POSIX i det hele tatt - HELE
- * miljøvariabel-strengen sendes UENDRET til `execvp()` som ÉN opaque sti. Den
- * opprinnelige `"<node>" "<skript>"`-anførselstegn-formen var derfor en
- * LATENT BUG helt siden D-103s første merge - git prøvde å `execvp()` den
- * BOKSTAVELIGE anførselstegn-strengen (inkl. selve anførselstegn-tegnene) som
- * ETT filnavn og feilet med ENOENT ("cannot exec '\"...\" \"...\"'"). Dette
- * ble ALDRI fanget av eksisterende tester fordi ALLE brukte lokale bare-repo-
- * kloner (fil-sti-transport) - en transportklasse som ALDRI trigger git sin
- * credential-oppløsning i det hele tatt (ingen autentisering er meningsfull
- * for en lokal filsti), så askpass-skriptet ble ALDRI faktisk INVOKERT AV GIT
- * i noen tidligere test, kun (korrekt) generert og plassert i `extraEnv`.
- * `buildAskpassEnvValue()` fikser dette PLATTFORM-BETINGET: på POSIX er
- * `GIT_ASKPASS` en BAR, UANFØRSELSTEGNET sti til askpass-skriptet selv (kjørt
- * direkte via dets shebang-linje + `chmod 0o700`, se `createGitAuthHandle()`)
- * - INGEN node-binær-prefiks, INGEN anførselstegn (POSIX-`execvp()` trenger
- * ingen shell-lik ord-splitting for én sti, og en bokstavelig anførselstegn-
- * karakter ville selv blitt en del av "filnavnet" den prøver å kjøre). Windows
- * sin `CreateProcess()` forstår derimot IKKE shebang-linjer i det hele tatt,
- * så en `.cjs`-fil kan ALDRI kjøres direkte der - `createGitAuthHandle()`
- * skriver DERFOR en egen `.cmd`-wrapper-fil PÅ WINDOWS (se
- * `generateAskpassWindowsWrapper()`) som eksplisitt kaller node med skriptet
- * som argument, og `GIT_ASKPASS` peker på DENNE `.cmd`-filen i stedet -
- * anførselstegnet (Windows sin kommandolinje-konvensjon STØTTER og TRENGER
- * anførselstegn rundt en sti med mellomrom, i motsetning til POSIX-`execvp()`).
+ * FIKS v2: erstatt `GIT_ASKPASS` HELT med git sin ALTERNATIVE, EKSPLISITT
+ * shell-evaluerte credential-mekanisme: `credential.helper`. Se
+ * `buildCredentialHelperConfigValue()` for hvorfor DENNE mekanismen ikke er
+ * utsatt for samme feilklasse på NOEN plattform (POSIX ELLER Windows) - kort
+ * fortalt: en `!`-prefikset `credential.helper`-verdi TVINGER git til å
+ * evaluere den via en ekte shell (`sh -c`, MSYS sin medfølgende `sh.exe` på
+ * Windows) - som launcher `node.exe` (en ekte, allerede installert Win32 PE-
+ * binær) med skriptstien som ARGUMENT (aldri som selve prosess-avbildet) -
+ * ALDRI en direkte `CreateProcess()` av vår genererte `.cjs`-fil. Denne
+ * mekanismen krever INGEN plattform-betinget `.cmd`-wrapper-generering i det
+ * hele tatt (fjernet - se historikk i git-loggen for v1s
+ * `generateAskpassWindowsWrapper()`/`buildAskpassEnvValue()`), og er derfor
+ * strukturelt enklere OG mer robust enn v1.
  */
-export const GIT_ASKPASS_TOKEN_ENV = "JARVIS_GIT_ASKPASS_TOKEN";
+export const GIT_CREDENTIAL_TOKEN_ENV = "JARVIS_GIT_CREDENTIAL_TOKEN";
 
 /**
- * D-103 HOST-FIX: git-argv-prefiks som må stå FØRST i argv (før subkommandoen
- * `clone`/`push`) på AKKURAT de to nettverks-autentiserte git-kallene, for å
- * hindre en ambient `credential.helper` (Windows Git Credential Manager,
- * eller enhver annen system/global-konfigurert helper) fra å svare FØR
- * `GIT_ASKPASS` i det hele tatt konsulteres. Se doc-kommentaren over for full
- * begrunnelse. `-c credential.helper=` er git sin EGEN, dokumenterte
- * "nullstill helper-kjeden for denne ene prosessen"-mekanisme - IKKE en
- * Jarvis-oppfunnet mekanisme. Eksportert (ikke bare hardkodet i coding.ts)
- * slik at testene kan verifisere AKKURAT denne argv-prefiksen er tilstede,
- * og slik at den kun defineres ÉN plass.
+ * D-103 HOST-FIX v1 (uendret av v2): git-argv-prefiks som må stå FØRST i argv
+ * (før subkommandoen `clone`/`push`) på AKKURAT de to nettverks-autentiserte
+ * git-kallene, for å hindre en ambient `credential.helper` (Windows Git
+ * Credential Manager, eller enhver annen system/global-konfigurert helper)
+ * fra å svare FØR Jarvis sin egen helper (se `GIT_CREDENTIAL_HELPER_ARGS_KEY`
+ * under) i det hele tatt konsulteres. `-c credential.helper=` er git sin
+ * EGEN, dokumenterte "nullstill helper-kjeden for denne ene prosessen"-
+ * mekanisme (git-config(1): en tom verdi nullstiller HELE den akkumulerte
+ * helper-listen for AKKURAT dette kallet - `-c`/kommandolinje-config har
+ * ALLTID høyest presedens, over system/global/repo-filer, uansett hva som
+ * står i dem - muterer INGEN fil, inneholder INGEN hemmelighet).
  */
 export const GIT_CREDENTIAL_ISOLATION_ARGS = ["-c", "credential.helper="] as const;
 
 /**
- * Ren, testbar innholdsgenerator - ALDRI hemmeligheten selv, kun logikken som
- * leser den fra `process.env[GIT_ASKPASS_TOKEN_ENV]` ved kjøretid. Git kaller
- * skriptet med ÉN argv-verdi (prompt-teksten, f.eks. "Username for '...': "
- * eller "Password for '...': ") - token vises ALDRI i argv, KUN i stdout som
- * svar på et password-prompt.
+ * D-103 HOST-FIX v2: ren, testbar innholdsgenerator for Jarvis sin ephemere
+ * `git credential.helper`-implementasjon - ALDRI hemmeligheten selv, kun
+ * logikken som leser den fra `process.env[GIT_CREDENTIAL_TOKEN_ENV]` ved
+ * kjøretid. Implementerer git sin dokumenterte credential-helper-protokoll
+ * (gitcredentials(7)): git kaller skriptet med ÉN argv-verdi (operasjonen -
+ * "get", "store" eller "erase") og, for "get", skriver `protocol=`/`host=`/
+ * ...-linjer på stdin (vi trenger IKKE parse disse - Jarvis sin credential
+ * er den SAMME identiteten uansett protokoll/host, siden `-c credential.
+ * helper=` allerede har nullstilt enhver ambient helper og denne prosessen
+ * kun noensinne kjører git mot den ENE, eksplisitt oppgitte `repo_url`-en).
+ * Stdin MÅ likevel drenes fullstendig (`resume()`) - ellers kan git sin side
+ * av pipen feile med en "broken pipe"-relatert feil før den rekker å lese
+ * stdout. For "store"/"erase" gjøres INGENTING (git forventer eksitkode 0 og
+ * ingen stdout for disse - Jarvis sin credential skal ALDRI persisteres av
+ * git selv, kun leves i denne ene prosessens `extraEnv`).
  */
-export function generateAskpassScriptContent(): string {
+export function generateCredentialHelperScriptContent(): string {
   return [
     "#!/usr/bin/env node",
-    "const prompt = process.argv[2] || \"\";",
-    "if (/username/i.test(prompt)) {",
-    "  process.stdout.write(\"x-access-token\");",
-    "} else {",
-    `  process.stdout.write(process.env[${JSON.stringify(GIT_ASKPASS_TOKEN_ENV)}] || "");`,
+    "const operation = process.argv[2] || \"\";",
+    "if (operation !== \"get\") {",
+    "  process.stdin.resume();",
+    "  process.stdin.on(\"end\", () => process.exit(0));",
+    "  process.exit(0);",
     "}",
+    "process.stdin.resume();",
+    "process.stdin.on(\"end\", () => {",
+    `  const token = process.env[${JSON.stringify(GIT_CREDENTIAL_TOKEN_ENV)}] || "";`,
+    "  process.stdout.write(\"username=x-access-token\\n\");",
+    "  process.stdout.write(\"password=\" + token + \"\\n\");",
+    "});",
     ""
   ].join("\n");
 }
 
 /**
- * D-103 HOST-FIX: Windows kan ikke kjøre `askpass.cjs` direkte (ingen shebang-
- * støtte i `CreateProcess()`) - denne minimale `.cmd`-batch-wrapperen kaller
- * node EKSPLISITT med skriptet som argument. `%*` videresender ALLE argumenter
- * git gir (den ene prompt-tekst-argv-verdien) uendret. INGEN hemmelighet her -
- * kun stier (node-binær + skriptfil), som begge allerede er lokale, ikke-
- * sensitive filsystem-plasseringer.
+ * D-103 HOST-FIX v2: bygger `credential.helper`-config-VERDIEN (uten
+ * `-c`/`credential.helper=`-prefikset - se `GitAuthHandle.credentialHelperArgs`
+ * for den fullstendige argv-tuppelen). IDENTISK på POSIX og Windows - INGEN
+ * plattform-betinget gren (motsatt av v1s `buildAskpassEnvValue()`), fordi
+ * denne mekanismen strukturelt ALDRI ber OS-en om å direkte kjøre en fil git
+ * selv må gjette hvordan skal tolkes:
+ *
+ * `!`-prefikset er git sin EGEN, dokumenterte (gitcredentials(7), samme
+ * konvensjon som `core.pager = !less`/`core.editor = !...`) "resten av
+ * strengen er en shell-kommando"-markør. Git STRIPPER selve `!`-tegnet FØR
+ * strengen når til en shell (bekreftet av at git sitt eget kanoniske
+ * dokumentasjonseksempel, `!f() { ...; }; f`, ikke ville vært gyldig
+ * shell-syntaks om `!` ble sendt bokstavelig sammenklistret med et
+ * funksjonsnavn) - resten (`"<node>" "<script>"`) evalueres av EN EKTE SHELL
+ * (`sh -c`, POSIX `/bin/sh` på Linux/macOS, MSYS-en sin medfølgende `sh.exe`
+ * på Windows - IKKE `cmd.exe`, IKKE PowerShell). Git legger operasjonen
+ * (`get`/`store`/`erase`) til som et EGET, korrekt shell-quotet argv-element
+ * (`"$@"`-idiomet), ALDRI streng-sammenslått inn i selve kommandoteksten.
+ *
+ * Fordi BEGGE de faktisk kjørte programmene (`sh`/`sh.exe` OG `node`/
+ * `node.exe`) er ekte, allerede installerte Win32 PE- (eller ELF-)
+ * kjørbare filer - ALDRI vår genererte `.cjs`-fil, som kun LESES som
+ * JS-KILDEKODE av en allerede kjørende `node`-prosess, aldri selv gjort til
+ * et prosess-avbilde - elimineres BÅDE "CreateProcess kan ikke laste en
+ * ikke-PE-fil direkte"-feilklassen (v2s mest sannsynlige root cause) OG
+ * enhver tenkelig "Windows Defender/AV blokkerer et fersk-skrevet kjørbart
+ * objekt i %TEMP%"-variant strukturelt, uavhengig av hvilken av de to som
+ * faktisk var den eksakte underliggende Win32-mekanismen (se root cause-
+ * doc-kommentaren over toppen av filen - ærlig utledet, ikke live-bevist på
+ * ekte Windows av Claude Code selv).
+ *
+ * Ren/testbar uten filsystem-tilgang: tar node/skript-stier som eksplisitte
+ * parametre.
  */
-export function generateAskpassWindowsWrapper(nodeExecPath: string, scriptPath: string): string {
-  return `@"${nodeExecPath}" "${scriptPath}" %*\r\n`;
-}
-
-/**
- * D-103 HOST-FIX: bygger den FAKTISKE `GIT_ASKPASS`-verdien, PLATTFORM-
- * BETINGET (se doc-kommentaren over `GIT_ASKPASS_TOKEN_ENV` for full
- * empirisk begrunnelse). `askpassPath` er allerede den RIKTIGE artefakten
- * for plattformen (bare `.cjs`-sti på POSIX, `.cmd`-wrapper-sti på Windows) -
- * denne funksjonen avgjør KUN om verdien skal anførselstegnes. Ren/testbar
- * uten filsystem-tilgang: tar plattform som eksplisitt parameter i stedet
- * for å lese `process.platform` selv, slik at begge grener kan testes
- * deterministisk uavhengig av CI-plattformen testen faktisk kjører på.
- */
-export function buildAskpassEnvValue(platform: NodeJS.Platform, askpassPath: string): string {
-  return platform === "win32" ? `"${askpassPath}"` : askpassPath;
+export function buildCredentialHelperConfigValue(nodeExecPath: string, scriptPath: string): string {
+  return `!"${nodeExecPath}" "${scriptPath}"`;
 }
 
 export interface GitAuthHandle {
   /** Ekstra prosess-env KUN for git clone/push - aldri agentens/øvrige git-kall. */
   readonly env: Readonly<Record<string, string>>;
-  /** Fjerner det ephemere askpass-skriptet. MÅ kalles i `finally`, uavhengig av `sandbox.dispose()`. */
+  /**
+   * D-103 HOST-FIX v2: den ANDRE `-c`-flagg-tuppelen (etter
+   * `GIT_CREDENTIAL_ISOLATION_ARGS`) som legger Jarvis sin ephemere
+   * credential-helper til den (nå tomme) helper-kjeden. Eksportert som en
+   * egen argv-tuppel (ikke bakt inn i `env`) fordi git-config-verdier, ikke
+   * miljøvariabler, er den korrekte mekanismen for å REGISTRERE en helper -
+   * `env` bærer KUN dataene (token + terminal-prompt-sperre) helperen selv
+   * leser ved kjøretid.
+   */
+  readonly credentialHelperArgs: readonly [string, string];
+  /** Fjerner det ephemere credential-helper-skriptet. MÅ kalles i `finally`, uavhengig av `sandbox.dispose()`. */
   cleanup(): Promise<void>;
 }
 
 export async function createGitAuthHandle(token: string): Promise<GitAuthHandle> {
-  const dir = await mkdtemp(join(tmpdir(), "jarvis-git-askpass-"));
-  const scriptPath = join(dir, "askpass.cjs");
-  await writeFile(scriptPath, generateAskpassScriptContent(), "utf8");
-  // POSIX: gjør skriptet direkte kjørbart via dets shebang-linje - dette ER
-  // den faktiske invokeringsmekanismen på POSIX nå (se fiks del 2 over), ikke
-  // bare en "hyggelig å ha"-rettighet. No-op (og ufarlig å ignorere) på
-  // Windows, som ikke har et tilsvarende filrettighets-konsept.
+  const dir = await mkdtemp(join(tmpdir(), "jarvis-git-cred-"));
+  const scriptPath = join(dir, "credential-helper.cjs");
+  await writeFile(scriptPath, generateCredentialHelperScriptContent(), "utf8");
+  // Ikke strengt nødvendig lenger (skriptet kjøres ALDRI direkte av OS-en -
+  // kun lest som kildekode av en allerede kjørende `node`), men ufarlig
+  // defense-in-depth på POSIX og en no-op-å-ignorere feil på Windows.
   await chmod(scriptPath, 0o700).catch(() => undefined);
 
-  let askpassPath = scriptPath;
-  if (process.platform === "win32") {
-    askpassPath = join(dir, "askpass.cmd");
-    await writeFile(askpassPath, generateAskpassWindowsWrapper(process.execPath, scriptPath), "utf8");
-  }
+  const configValue = buildCredentialHelperConfigValue(process.execPath, scriptPath);
 
   return {
     env: {
-      GIT_ASKPASS: buildAskpassEnvValue(process.platform, askpassPath),
       GIT_TERMINAL_PROMPT: "0",
-      [GIT_ASKPASS_TOKEN_ENV]: token
+      [GIT_CREDENTIAL_TOKEN_ENV]: token
     },
+    credentialHelperArgs: ["-c", `credential.helper=${configValue}`],
     cleanup: async () => {
       await rm(dir, { recursive: true, force: true });
     }

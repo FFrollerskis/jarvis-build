@@ -10,7 +10,7 @@ import type { IdentityContext, JobContract } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
-  ArtifactStore, GIT_ASKPASS_TOKEN_ENV, GIT_CREDENTIAL_ISOLATION_ARGS, InProcessWorker, PgTaskQueue, ProcessSandboxRunner,
+  ArtifactStore, GIT_CREDENTIAL_ISOLATION_ARGS, GIT_CREDENTIAL_TOKEN_ENV, InProcessWorker, PgTaskQueue, ProcessSandboxRunner,
   createCodingHandler, type CodingAgentAdapter, type CodingAgentExec
 } from "@jarvis/tasks";
 import type { ExecResult, Sandbox, SandboxRunner } from "../src/sandbox.ts";
@@ -166,25 +166,26 @@ function runJob(sandbox: CapturingRedirectingSandboxRunner, gitAuthToken: string
 }
 
 describe("D-103: git-auth wiring i createCodingHandler (Blokker B)", () => {
-  it("A: clone-kallet får extraEnv med GIT_ASKPASS/GIT_TERMINAL_PROMPT/token når gitAuth er konfigurert", async () => {
+  it("A: clone-kallet får extraEnv med GIT_TERMINAL_PROMPT/token (ALDRI GIT_ASKPASS - v2 bruker credential.helper-argv i stedet) når gitAuth er konfigurert", async () => {
     const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
     const { worker, c } = runJob(sandbox, REAL_TOKEN);
     await queue.enqueue("tenant-a", c);
     await worker.drain();
     const clone = sandbox.calls.find((call) => call.args.includes("clone"));
-    expect(clone?.extraEnv?.["GIT_ASKPASS"]).toBeDefined();
     expect(clone?.extraEnv?.["GIT_TERMINAL_PROMPT"]).toBe("0");
-    expect(clone?.extraEnv?.[GIT_ASKPASS_TOKEN_ENV]).toBe(REAL_TOKEN);
+    expect(clone?.extraEnv?.[GIT_CREDENTIAL_TOKEN_ENV]).toBe(REAL_TOKEN);
+    expect("GIT_ASKPASS" in (clone?.extraEnv ?? {})).toBe(false);
   });
 
-  it("B: push-kallet får extraEnv med GIT_ASKPASS/GIT_TERMINAL_PROMPT/token når gitAuth er konfigurert", async () => {
+  it("B: push-kallet får extraEnv med GIT_TERMINAL_PROMPT/token (ALDRI GIT_ASKPASS) når gitAuth er konfigurert", async () => {
     const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
     const { worker, c } = runJob(sandbox, REAL_TOKEN);
     await queue.enqueue("tenant-a", c);
     await worker.drain();
     const push = sandbox.calls.find((call) => call.args.includes("push"));
-    expect(push?.extraEnv?.["GIT_ASKPASS"]).toBeDefined();
-    expect(push?.extraEnv?.[GIT_ASKPASS_TOKEN_ENV]).toBe(REAL_TOKEN);
+    expect(push?.extraEnv?.["GIT_TERMINAL_PROMPT"]).toBe("0");
+    expect(push?.extraEnv?.[GIT_CREDENTIAL_TOKEN_ENV]).toBe(REAL_TOKEN);
+    expect("GIT_ASKPASS" in (push?.extraEnv ?? {})).toBe(false);
     const view = await queue.get("tenant-a", c.task_id);
     expect(view?.status).toBe("completed"); // ekte push mot lokalt bare-repo lyktes
   });
@@ -282,7 +283,7 @@ describe("D-103: git-auth wiring i createCodingHandler (Blokker B)", () => {
     expect(view?.last_error).not.toContain(REAL_TOKEN);
   });
 
-  it("H2: ephemer askpass-fil fjernes OGSÅ ved en FORTVUNGEN clone-feil (ugyldig repo_url) - cleanup er IKKE kun en happy-path-garanti", async () => {
+  it("H2: ephemer credential-helper-fil fjernes OGSÅ ved en FORTVUNGEN clone-feil (ugyldig repo_url) - cleanup er IKKE kun en happy-path-garanti", async () => {
     const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), "unused", "unused");
     const worker = new InProcessWorker(queue, 60);
     worker.register("coding", createCodingHandler({
@@ -298,34 +299,37 @@ describe("D-103: git-auth wiring i createCodingHandler (Blokker B)", () => {
     const view = await queue.get("tenant-a", c.task_id);
     expect(view?.status).toBe("failed"); // clone feilet reelt (jobben nådde IKKE push)
     const clone = sandbox.calls.find((call) => call.args.includes("clone"));
-    const scriptPath = clone?.extraEnv?.["GIT_ASKPASS"] as string;
+    const scriptPath = clone?.args.find((a) => a.includes("credential-helper.cjs"))?.match(/"([^"]+credential-helper\.cjs)"/)?.[1];
     expect(scriptPath).toBeDefined(); // gitAuth ble faktisk konstruert FØR clone-forsøket
     const { stat } = await import("node:fs/promises");
-    await expect(stat(scriptPath)).rejects.toThrow(); // og likevel ryddet - den ytre finally() dekket dette
+    await expect(stat(scriptPath as string)).rejects.toThrow(); // og likevel ryddet - den ytre finally() dekket dette
   });
 
-  it("I: ephemer askpass-fil fjernes etter jobbfullføring (cleanup skjer uavhengig av sandbox.dispose())", async () => {
+  it("I: ephemer credential-helper-fil fjernes etter jobbfullføring (cleanup skjer uavhengig av sandbox.dispose())", async () => {
     const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
     const { worker, c } = runJob(sandbox, REAL_TOKEN);
     await queue.enqueue("tenant-a", c);
     await worker.drain();
     const clone = sandbox.calls.find((call) => call.args.includes("clone"));
-    // På POSIX (denne testplattformen) ER GIT_ASKPASS-verdien allerede den
-    // bare skriptstien direkte - se buildAskpassEnvValue()/D-103 HOST-FIX.
-    const scriptPath = clone?.extraEnv?.["GIT_ASKPASS"] as string;
+    const scriptPath = clone?.args.find((a) => a.includes("credential-helper.cjs"))?.match(/"([^"]+credential-helper\.cjs)"/)?.[1];
     const { stat } = await import("node:fs/promises");
-    await expect(stat(scriptPath)).rejects.toThrow();
+    await expect(stat(scriptPath as string)).rejects.toThrow();
   });
 
-  it("K: BÅDE clone- OG push-argv har '-c credential.helper=' FØRST (D-103 HOST-FIX) - hindrer en ambient credential.helper fra å svare før GIT_ASKPASS", async () => {
+  it("K: BÅDE clone- OG push-argv har '-c credential.helper=' etterfulgt av '-c credential.helper=!\"<node>\" \"<script>\"' (D-103 HOST-FIX v1+v2) - hindrer en ambient credential.helper fra å svare før Jarvis sin egen helper", async () => {
     const sandbox = new CapturingRedirectingSandboxRunner(new ProcessSandboxRunner(), GITHUB_SHAPED_URL, bareRepo);
     const { worker, c } = runJob(sandbox, REAL_TOKEN);
     await queue.enqueue("tenant-a", c);
     await worker.drain();
     const clone = sandbox.calls.find((call) => call.args.includes("clone"));
     const push = sandbox.calls.find((call) => call.args.includes("push"));
-    expect(clone?.args.slice(0, 2)).toEqual([...GIT_CREDENTIAL_ISOLATION_ARGS]);
-    expect(push?.args.slice(0, 2)).toEqual([...GIT_CREDENTIAL_ISOLATION_ARGS]);
+    for (const call of [clone, push]) {
+      expect(call?.args.slice(0, 2)).toEqual([...GIT_CREDENTIAL_ISOLATION_ARGS]);
+      expect(call?.args[2]).toBe("-c");
+      expect(call?.args[3]).toMatch(/^credential\.helper=!"/);
+      expect(call?.args[3]).toContain(process.execPath);
+      expect(call?.args[3]).toMatch(/credential-helper\.cjs"$/);
+    }
     // Lokale git-operasjoner (branch/add/commit/status/rev-parse/show) og agentens
     // eget kall skal ALDRI få denne isolasjons-prefiksen - kun clone/push (nettverk).
     const localOps = sandbox.calls.filter((call) => !call.args.includes("clone") && !call.args.includes("push"));

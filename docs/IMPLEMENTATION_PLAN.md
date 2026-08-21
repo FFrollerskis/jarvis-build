@@ -2407,6 +2407,40 @@ ROUTING_LIVE_VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_PUSH=true` (ekte, fra h
 `LIVE_E2E_VERIFIED=false`/`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`/`HOST_ACTION_REQUIRED=true`/
 `UA5_CRITERION_2=PARTIAL` uendret inntil Tobias kjører runboken på nytt. Ny draft-PR, IKKE merget.
 
+#### D-103 HOST-FIX v2 (2026-08-21) → "d103-git-credential-helper-windows-repair" (amendment til D-103, ikke ny D-nummer)
+
+En ANNEN ekte Windows-kjøring, ETTER v1 var merget til main, beviste at v1s isolasjonsfiks FAKTISK
+virket LIVE (ingen `post-ops`-identitet dukket opp lenger), men selve v1s `GIT_ASKPASS`-mekanisme feilet
+på et NYTT sted: `cannot spawn "...\jarvis-git-askpass-<x>\askpass.cmd": Permission denied`. Root cause
+(utledet, ikke live-bevist mot ekte Windows): git kaller `GIT_ASKPASS` med `use_shell=1`, men hopper over
+selve shell-innpakningen for en bar sti uten shell-metategn - git kaller da `CreateProcessW()` DIREKTE på
+`.cmd`-stien, som IKKE er et gyldig Win32 PE-avbilde og derfor strukturelt ikke kan lastes direkte
+(`ERROR_ACCESS_DENIED` → MSYS-oversatt til "Permission denied").
+
+**Fiks:** GIT_ASKPASS erstattet HELT med git sin `credential.helper`-mekanisme, satt via en ny
+`-c credential.helper=!"<node>" "<skript>"` (etter den uendrede `GIT_CREDENTIAL_ISOLATION_ARGS`-reset-en).
+`!`-prefikset tvinger git til å evaluere verdien via en EKTE shell (`sh -c`, MSYS sin `sh.exe` på Windows)
+som launcher `node.exe` (ekte, allerede installert PE-binær) med skriptet som argument - ALDRI en direkte
+`CreateProcess()` av vår genererte fil. Eliminerer feilklassen STRUKTURELT på begge plattformer, IDENTISK
+form (ingen plattform-gren lenger nødvendig). `DockerSandboxRunner.exec(extraEnv)`-gap (tidligere flagget,
+ikke koblet inn i `docker run`) reparert i samme slice via bar `-e <NAVN>`-argv + CLI-subprosess-env.
+
+**Testdekning:** `sandbox-docker-extra-env.test.ts` (5, ny). `git-auth.test.ts` (15, omskrevet for
+credential-helper-protokollen). `git-credential-isolation.test.ts` (7, omskrevet - C/D beviser nå at git
+FAKTISK invokerer mekanismen mot en ekte HTTP-credential-utfordring; nye F/G beviser fail-closed
+eksplisitt). `coding-git-auth-wiring.test.ts` (13, omskrevet argv-form). Full suite
+`TESTS_AFTER=2054`/`TEST_FILES_AFTER=132`, typecheck/lint rent, ingen regresjon. Ny, fokusert
+`windows-git-auth`-CI-jobb (`windows-latest`, kun de to Postgres-frie testfilene) lagt til
+`.github/workflows/ci.yml` - direkte mot klassen "korrekt på Linux, feiler på ekte Windows".
+
+**Ærlig status:** INGEN system/global git-config mutert, INGEN credential-store rørt.
+`WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_PUSH=true`/
+`AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false` (alle ekte, fra host-kjøringene) - men
+`WINDOWS_LIVE_AUTH_ISOLATION_VERIFIED=false`/`LIVE_E2E_VERIFIED=false`/
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`/`HOST_ACTION_REQUIRED=true`/`UA5_CRITERION_2=PARTIAL`
+uendret inntil Tobias kjører runboken på nytt. Ny draft-PR, IKKE merget. Full detalj: D-103 HOST-FIX v2 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

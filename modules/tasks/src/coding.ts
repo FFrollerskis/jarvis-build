@@ -246,14 +246,18 @@ export function createCodingHandler(deps: {
           throw new Error(`${label}_failed: ${result.stderr ?? ""}`.slice(0, 300));
         }
       };
-      // D-103 HOST-FIX: `-c credential.helper=` (kun når gitAuth er konfigurert)
-      // nullstiller PROSESS-LOKALT en eventuell ambient credential.helper
-      // (f.eks. Windows Git Credential Manager) FØR git i det hele tatt får
-      // sjansen til å svare med en cached, feil-innlogget identitet - uten
-      // dette blir GIT_ASKPASS aldri konsultert i det hele tatt (se
-      // git-auth.ts sin doc-kommentar for full begrunnelse). Uten gitAuth
-      // (default) er argv-et 100% uendret fra før denne fiksen.
-      const netArgs = (args: string[]): string[] => (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...args] : args);
+      // D-103 HOST-FIX v1+v2: `-c credential.helper=` (kun når gitAuth er
+      // konfigurert) nullstiller PROSESS-LOKALT en eventuell ambient
+      // credential.helper (f.eks. Windows Git Credential Manager) FØR git i
+      // det hele tatt får sjansen til å svare med en cached, feil-innlogget
+      // identitet, og den påfølgende `credentialHelperArgs`-tuppelen
+      // registrerer Jarvis sin EGEN ephemere, shell-evaluerte credential-
+      // helper i den (nå tomme) kjeden - se git-auth.ts sin doc-kommentar for
+      // full begrunnelse (v2 erstattet den tidligere GIT_ASKPASS-mekanismen
+      // etter en ekte Windows-spawn-feil). Uten gitAuth (default) er argv-et
+      // 100% uendret fra før denne fiksen.
+      const netArgs = (args: string[]): string[] =>
+        (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...gitAuth.credentialHelperArgs, ...args] : args);
       must("clone", sandbox.exec("git", netArgs(["clone", input.repo_url, "."]), undefined, gitAuth?.env));
       await ctx.assertNotCancelled();
       must("branch", run("git", ["checkout", "-b", branch]));
@@ -313,10 +317,11 @@ export function createCodingHandler(deps: {
         await sandbox.dispose();
       }
     } finally {
-      // D-103 (Blokker B): ephemert askpass-materiale fjernes UAVHENGIG av om
-      // sandboxen selv noensinne ble opprettet (dekker det sjeldne tilfellet
-      // der `deps.sandbox.create()` feiler ETTER at gitAuth allerede ble
-      // generert) - egen temp-katalog, aldri inne i sandbox.workdir.
+      // D-103 (Blokker B): ephemert credential-helper-materiale fjernes
+      // UAVHENGIG av om sandboxen selv noensinne ble opprettet (dekker det
+      // sjeldne tilfellet der `deps.sandbox.create()` feiler ETTER at
+      // gitAuth allerede ble generert) - egen temp-katalog, aldri inne i
+      // sandbox.workdir.
       if (gitAuth) await gitAuth.cleanup();
     }
   };

@@ -1,11 +1,15 @@
 # D-103 UA-5 host-akseptanse: produksjonskode-reachability (Blokker A + B)
 
-**Status:** ÉN gang KJØRT av Tobias (task `d103-host-acceptance-986f37e6`), fant en
-ekte, tidligere ukjent tredje feil (git credential-hijack via ambient
-`credential.helper` - se "Historisk funn" under) - DENNE reparerte versjonen av
-runboken er IKKE kjørt ennå. INGEN kommando i dette dokumentet er utført av
-Claude Code. Krever ekte `ANTHROPIC_API_KEY` og `JARVIS_GITHUB_TOKEN` som KUN
-Tobias skal skrive inn.
+**Status:** TO GANGER kjørt av Tobias. Kjøring 1 (`d103-host-acceptance-986f37e6`)
+fant en git credential-hijack via ambient `credential.helper` - fikset av
+"d103-host-git-auth-isolation-repair" (v1, merget). Kjøring 2
+(`d103-host-acceptance-d5294343`), ETTER v1 var merget, beviste v1s isolasjon
+FAKTISK virket (ingen ambient identitet lenger), men fant en NY Windows-
+spesifikk feil i selve v1s `GIT_ASKPASS`-invokeringsmekanisme (se "Historisk
+funn" under) - fikset av "d103-git-credential-helper-windows-repair" (v2,
+DENNE reparerte versjonen av runboken, IKKE kjørt ennå). INGEN kommando i
+dette dokumentet er utført av Claude Code. Krever ekte `ANTHROPIC_API_KEY` og
+`JARVIS_GITHUB_TOKEN` som KUN Tobias skal skrive inn.
 
 ## Historisk funn: FØRSTE ekte kjøring (2026-08-21, task `d103-host-acceptance-986f37e6`)
 
@@ -44,6 +48,50 @@ rerun fortsatt lykkes (pusher/PR-er som den forventede identiteten) MENS
 `post-ops` fortsatt er cachet på maskinen, er det et direkte bevis på at
 isolasjonsfiksen faktisk virker i nærvær av en reell, konkurrerende ambient
 credential - ikke bare i et rent testmiljø.
+
+## Historisk funn: ANDRE ekte kjøring (2026-08-21, task `d103-host-acceptance-d5294343`, ETTER v1 merget)
+
+Denne runboken (v1s reparerte versjon, "d103-host-git-auth-isolation-repair")
+ble kjørt på nytt på Tobias sin Windows-host, mot kanonisk `main` (merge-commit
+`ad5eb92`), med Git for Windows sin system-nivå `credential.helper=manager`
+BEVISST bevart uendret (som instruert i forrige kjørings historiske funn over):
+
+- Produksjons-`api` OG produksjons-`worker` startet BEGGE korrekt fra
+  kanonisk `main`.
+- En ekte kodejobb ble sendt inn via `/tasks/submit` - worker `worker-782f9ac8`
+  claimet jobben korrekt (Blokker A-fiksen fortsatt bevist LIVE).
+- **v1s isolasjonsfiks FUNGERTE:** INGEN `post-ops`-identitet (eller noen
+  annen ambient identitet) dukket opp noe sted i denne kjøringen -
+  `AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false` bekreftet LIVE,
+  selv MED system-nivå Git Credential Manager fortsatt konfigurert.
+- Push FEILET likevel, på et HELT ANNET sted enn forrige gang:
+  `error: cannot spawn "C:\Users\Tobia\AppData\Local\Temp\jarvis-git-askpass-
+  <x>\askpass.cmd": Permission denied` etterfulgt av `fatal: could not read
+  Username for 'https://github.com': terminal prompts disabled`.
+- Dette er STRUKTURELT forskjellig fra forrige feil: ingen ambient identitet
+  ble noensinne konsultert (isolasjonen virket), OG terminal-fallback-sperren
+  virket korrekt (`GIT_TERMINAL_PROMPT=0` hindret en interaktiv prompt) -
+  KUN selve v1s `GIT_ASKPASS`-skript-invokeringsmekanisme klarte ikke å starte
+  på ekte Windows.
+
+Root cause (utledet fra dokumentert git/Windows-prosessoppstart-mekanikk, se
+`git-auth.ts` og D-103 HOST-FIX v2 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+begrunnelse - IKKE personlig live-bevist av Claude Code mot en ekte
+Windows-boks): git kaller `GIT_ASKPASS` med `use_shell=1`, men hopper over
+selve shell-innpakningen for en bar kommandostreng uten shell-metategn - git
+kaller da `CreateProcessW()` DIREKTE på `.cmd`-stien, som IKKE er et gyldig
+Win32 PE-kjørbart avbilde og derfor strukturelt ikke kan lastes direkte.
+"d103-git-credential-helper-windows-repair" fikser DETTE ved å erstatte
+`GIT_ASKPASS` HELT med git sin `credential.helper`-mekanisme (`-c
+credential.helper=!"<node>" "<skript>"`, alltid shell-evaluert på begge
+plattformer - ALDRI en direkte `CreateProcess()` av en genererte fil).
+
+**Tobias trenger, akkurat som forrige gang, IKKE slette, logge ut av, eller
+endre sin normale Git Credential Manager-tilstand.** Den fortsatt konfliktende
+`credential.helper=manager`-registreringen er igjen nyttig bevis: at v1s
+isolasjon fortsatt holder (ingen ambient identitet lekker inn) MENS v2s nye
+`credential.helper`-mekanisme SELV skal fungere, er en sterkere test enn et
+rent, ambient-fritt miljø.
 
 ## Hva denne runboken beviser
 
@@ -220,28 +268,33 @@ Remove-Item Env:\ANTHROPIC_API_KEY, Env:\JARVIS_GITHUB_TOKEN, Env:\JARVIS_DB_ADM
 
 ## Hva et vellykket resultat ser ut som
 
-Etter `d103-host-git-auth-isolation-repair` skal en rerun eksplisitt bevise
-ALLE disse (ikke bare "jobben fullførte"):
+Etter `d103-git-credential-helper-windows-repair` (v2) skal en rerun
+eksplisitt bevise ALLE disse (ikke bare "jobben fullførte"):
 
 - `WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true` - `tasks.worker_id` er
-  `worker-main.ts` sin prosess, ALDRI `main.ts` sin (samme som forrige kjøring,
-  uendret av denne reparasjonen).
+  `worker-main.ts` sin prosess, ALDRI `main.ts` sin (uendret gjennom alle tre
+  kjøringene).
 - `CLONE_AUTH_VERIFIED=true` - `git clone` fullførte uten
   `git_auth_unavailable` eller en `clone_failed`-feil.
+- `WINDOWS_CREDENTIAL_TRANSPORT_EXECUTED=true` - INGEN `cannot spawn
+  ...askpass.cmd: Permission denied`-feil (eller noen annen prosessoppstart-
+  feil for credential-mekanismen) - dette var AKKURAT det som feilet i
+  kjøring 2, og er det denne v2-reparasjonen spesifikt adresserer.
 - `PUSH_AUTH_VERIFIED=true` - `git push` fullførte UTEN et `403 Permission
-  denied`-avvik (dette var AKKURAT det som feilet i den forrige kjøringen).
+  denied`-avvik (kjøring 1) OG UTEN en askpass-spawn-feil (kjøring 2).
 - `EXPECTED_TOKEN_IDENTITY_MATCH=true` - kontroller manuelt i GitHub UI (PR-en/
   branchens "Created by"/commit-forfatter, eller repo sin Insights → Traffic/
   Audit log hvis tilgjengelig) at handlingen ble utført av DEN FORVENTEDE
   eier-identiteten (samme identitet `JARVIS_GITHUB_TOKEN` autentiserer som via
   GitHub API) - IKKE en ukjent/uventet konto.
 - `AMBIENT_HOST_CREDENTIAL_DID_NOT_OVERRIDE=true` - hvis en ambient
-  Git Credential Manager-konto (som `post-ops` fra forrige kjøring) fortsatt
-  er cachet på maskinen, skal DEN kontoen ALDRI dukke opp noe sted i denne
-  kjøringens PR/branch/commit-forfatterskap.
+  Git Credential Manager-konto (som `post-ops`, eller system-nivå
+  `credential.helper=manager` fra kjøring 2) fortsatt er konfigurert på
+  maskinen, skal DEN kontoen ALDRI dukke opp noe sted i denne kjøringens
+  PR/branch/commit-forfatterskap.
 - `PR_CREATED=true` - `tasks.result` inneholder et `pr`-felt med en ekte GitHub
   PR-URL på `testRepoUrl`, OG en reell, åpen PR er synlig i GitHub UI.
-- `tasks.status = 'completed'` for `$taskId`.
+- `TASK_COMPLETED=true` - `tasks.status = 'completed'` for `$taskId`.
 - Ingen `git_auth_unavailable`-feil (ville bety at `JARVIS_GITHUB_TOKEN`
   ikke ble lest korrekt).
 - Ingen `claude_code_not_configured`-feil (ville bety at `JARVIS_CLAUDE_BIN`
@@ -257,17 +310,21 @@ ALLE disse (ikke bare "jobben fullførte"):
 | `clone_failed: *` | `$testRepoUrl` feil, eller PAT mangler `repo`-scope, eller repoet finnes ikke |
 | `NO_CHANGES_TO_COMMIT` | Agenten (ærlig) fant ikke grunnlag for en endring - prøv et enklere `goal` |
 | (ingen rad i det hele tatt) | `/tasks/submit` feilet FØR jobben ble lagt i køen - sjekk `$submitResult`/api-loggen |
-| `push_failed: ... Permission ... denied to <ukjent-konto>` | Skulle IKKE lenger skje etter `d103-host-git-auth-isolation-repair` - dette er AKKURAT feilklassen fra den forrige kjøringen (ambient `credential.helper` kapret auth). Skjer det likevel: samle `git -c credential.helper= credential fill`-output og eksakt `last_error`, IKKE forsøk å fikse ved å slette Git Credential Manager-tilstand selv - meld tilbake i stedet. |
+| `push_failed: ... Permission ... denied to <ukjent-konto>` | Skulle IKKE skje etter v1 ELLER v2 - dette var feilklassen fra kjøring 1 (ambient `credential.helper` kapret auth). Skjer det likevel: samle `git -c credential.helper= credential fill`-output og eksakt `last_error`, IKKE forsøk å fikse ved å slette Git Credential Manager-tilstand selv - meld tilbake i stedet. |
+| `push_failed: ... cannot spawn ...askpass.cmd: Permission denied` / `clone_failed: ... cannot spawn ...` | Skulle IKKE lenger skje etter `d103-git-credential-helper-windows-repair` - dette var AKKURAT feilklassen fra kjøring 2 (GIT_ASKPASS erstattet HELT av `credential.helper` i v2). Skjer det likevel: samle EKSAKT `last_error`-tekst OG utdata fra `git -c credential.helper= -c "credential.helper=!\"<node>\" \"<skript>\"" credential fill` kjørt manuelt, meld tilbake - IKKE forsøk selv å reversere til v1s mekanisme. |
 
 **Live-verifiseringsstatus for DENNE reparasjonen (ærlig, ikke fabrikkert):**
-denne runboken er ENDRET (nye forventede suksessmarkører over) men IKKE kjørt
-av Claude Code etter `d103-host-git-auth-isolation-repair`. `LIVE_E2E_
-VERIFIED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`,
-`HOST_ACTION_REQUIRED=true` forblir presist slik inntil Tobias kjører DENNE
-versjonen på nytt og et ekte push+PR faktisk fullfører med riktig identitet.
-`WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true` og `REAL_CODING_JOB_REACHED_GIT_
-PUSH=true` er derimot ALLEREDE bevist ekte (fra den forrige kjøringen,
-uendret av denne reparasjonen). Alle andre felter i tabellen over er forventet
-oppførsel BASERT PÅ kildekoden (verifisert ved lesing, se D-103 og D-103
-HOST-FIX i `docs/DECISIONS_AND_ASSUMPTIONS.md`), IKKE en observert live-kjøring
-av DENNE reparerte versjonen.
+denne runboken er ENDRET (nye forventede suksessmarkører over, spesielt
+`WINDOWS_CREDENTIAL_TRANSPORT_EXECUTED`) men IKKE kjørt av Claude Code etter
+`d103-git-credential-helper-windows-repair`. `LIVE_E2E_VERIFIED=false`,
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true`
+forblir presist slik inntil Tobias kjører DENNE versjonen på nytt og et ekte
+push+PR faktisk fullfører med riktig identitet OG uten en askpass/credential-
+helper-spawn-feil. `WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true`,
+`REAL_CODING_JOB_REACHED_GIT_PUSH=true` og
+`AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false` er derimot ALLEREDE
+bevist ekte (fra de to forrige kjøringene, uendret av denne reparasjonen).
+Alle andre felter i tabellen over er forventet oppførsel BASERT PÅ kildekoden
+(verifisert ved lesing OG mot en ekte lokal git smart-HTTP-server på Linux,
+se D-103 HOST-FIX v2 i `docs/DECISIONS_AND_ASSUMPTIONS.md`), IKKE en observert
+live-kjøring av DENNE reparerte versjonen på ekte Windows.

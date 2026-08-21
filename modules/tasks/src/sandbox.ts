@@ -86,12 +86,21 @@ export class DockerSandboxRunner implements SandboxRunner {
     const { image, dockerBin } = this;
     return {
       workdir,
-      // D-103: `extraEnv` (Blokker B git-auth) uendret IKKE koblet inn her -
-      // samme presedens som D-96/D-102s `_jobEnv`: produksjonen bruker
-      // `ProcessSandboxRunner` som default, `JARVIS_SANDBOX=docker` er
-      // eksplisitt opt-in - ingen grunn til å utvide en sti som allerede er
-      // dokumentert ufullstendig for eksplisitt env-injeksjon.
-      exec(command: string, args: string[], timeoutMs = 60_000, _extraEnv?: Record<string, string>): ExecResult {
+      // D-103 HOST-FIX v2: `extraEnv` (Blokker B git-auth) kobles nå INN her -
+      // en tidligere audit fant at denne var stille IKKE koblet inn, som
+      // ville gjort autentiserte kodejobber URØKKELIG (ikke bare "usikre",
+      // men FUNKSJONELT ute av stand til å autentisere) under
+      // `JARVIS_SANDBOX=docker` (eksplisitt opt-in, IKKE produksjonsdefault -
+      // `ProcessSandboxRunner` er fortsatt default). For hver `extraEnv`-
+      // nøkkel legges `-e <NAVN>` (BARE navn, ALDRI `-e NAVN=VERDI`) til
+      // `docker run`-argv - `docker`-CLI-en videresender da verdien fra SIN
+      // EGEN prosess-env (satt eksplisitt under via `spawnSync`s `env`-
+      // opsjon) inn i containeren. Verdien vises DERFOR ALDRI i selve
+      // `docker run`-kommandolinjen/argv/prosesslisten (kun navnet gjør) -
+      // samme "aldri i argv"-invariant som `ProcessSandboxRunner` allerede
+      // overholder.
+      exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): ExecResult {
+        const envArgs = extraEnv ? Object.keys(extraEnv).flatMap((key) => ["-e", key]) : [];
         const result = spawnSync(dockerBin, [
           "run", "--rm",
           "--network", "none",
@@ -100,8 +109,19 @@ export class DockerSandboxRunner implements SandboxRunner {
           "-u", "node",
           "-v", `${workdir}:/work`,
           "-w", "/work",
+          ...envArgs,
           image, command, ...args
-        ], { timeout: timeoutMs, encoding: "utf8", shell: false });
+        ], {
+          timeout: timeoutMs,
+          encoding: "utf8",
+          shell: false,
+          // `docker`-CLI-prosessen selv trenger disse i SIN egen env for at
+          // bare `-e <NAVN>`-formen (over) skal ha noe å videresende - dette
+          // ER selve mekanismen (dokumentert `docker run --help`-oppførsel),
+          // ikke en tilfeldig utvidelse. Fanger opp `process.env` som base
+          // (docker selv trenger PATH osv. for å kjøre) + `extraEnv` over.
+          env: extraEnv ? { ...process.env, ...extraEnv } : process.env
+        });
         return { code: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
       },
       async dispose(): Promise<void> {
