@@ -3,7 +3,7 @@ import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
-import { createGitAuthHandle } from "./git-auth.ts";
+import { createGitAuthHandle, GIT_CREDENTIAL_ISOLATION_ARGS } from "./git-auth.ts";
 import { publishPullRequestForCodingJob, type PrPublishingGateway } from "./pr-publisher.ts";
 import type { SandboxRunner } from "./sandbox.ts";
 import type { TaskHandler } from "./worker.ts";
@@ -246,7 +246,15 @@ export function createCodingHandler(deps: {
           throw new Error(`${label}_failed: ${result.stderr ?? ""}`.slice(0, 300));
         }
       };
-      must("clone", sandbox.exec("git", ["clone", input.repo_url, "."], undefined, gitAuth?.env));
+      // D-103 HOST-FIX: `-c credential.helper=` (kun når gitAuth er konfigurert)
+      // nullstiller PROSESS-LOKALT en eventuell ambient credential.helper
+      // (f.eks. Windows Git Credential Manager) FØR git i det hele tatt får
+      // sjansen til å svare med en cached, feil-innlogget identitet - uten
+      // dette blir GIT_ASKPASS aldri konsultert i det hele tatt (se
+      // git-auth.ts sin doc-kommentar for full begrunnelse). Uten gitAuth
+      // (default) er argv-et 100% uendret fra før denne fiksen.
+      const netArgs = (args: string[]): string[] => (gitAuth ? [...GIT_CREDENTIAL_ISOLATION_ARGS, ...args] : args);
+      must("clone", sandbox.exec("git", netArgs(["clone", input.repo_url, "."]), undefined, gitAuth?.env));
       await ctx.assertNotCancelled();
       must("branch", run("git", ["checkout", "-b", branch]));
       const description = await deps.agent.modify(run, task.contract.goal);
@@ -277,7 +285,7 @@ export function createCodingHandler(deps: {
       // en allerede innkommet kanselleringsforespørsel.
       await ctx.assertNotCancelled();
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
-      must("push", sandbox.exec("git", ["push", "origin", `${branch}:${branch}`], undefined, gitAuth?.env));
+      must("push", sandbox.exec("git", netArgs(["push", "origin", `${branch}:${branch}`]), undefined, gitAuth?.env));
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
 

@@ -1,5 +1,53 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**D-103 HOST-FIX: git credential.helper isolation
+("d103-host-git-auth-isolation-repair") — amendment til D-103, IKKE ny
+D-nummer-beslutning.** D-103 (PR #44) er MERGET til main (merge-commit
+`bc72035`, post-merge-CI grønn). Tobias sin FØRSTE ekte Windows
+host-akseptanse (task `d103-host-acceptance-986f37e6`, worker
+`worker-903f4a30`) beviste Blokker A-fiksen LIVE (riktig coding-worker
+claimet jobben korrekt) og at den ekte kodeagenten nådde helt frem til
+`git push` - men pushet autentiserte som en ambient, cached, FEIL identitet
+(`post-ops`) i stedet for den verifiserte `JARVIS_GITHUB_TOKEN`-identiteten,
+og feilet `403 Permission denied`. **Root cause (empirisk bevist):** git spør
+ALLTID konfigurerte `credential.helper`-kjeder FØR `GIT_ASKPASS` konsulteres
+- askpass er en ren prompt-fallback, ALDRI en prioritert credential-kilde;
+Windows Git for Windows registrerer typisk Git Credential Manager SYSTEM-
+nivå, uavhengig av HOME. **To uavhengige fiks:** (1) `-c credential.helper=`
+(`GIT_CREDENTIAL_ISOLATION_ARGS`, git sin egen nullstill-helper-kjeden-
+mekanisme, INGEN filmutasjon, INGEN hemmelighet) prependet KUN til clone/
+push-argv når `gitAuth` er konfigurert. (2) en LATENT bug i D-103s
+opprinnelige `GIT_ASKPASS`-format (anførselstegnet `"<node>" "<skript>"`) -
+empirisk bevist (mot ekte git 2.43.0 OG en ny, selvhostet git smart-HTTP-
+test-server) å IKKE bli kommandolinje-parset av git på POSIX i det hele tatt
+- ALDRI fanget FØR siden alle D-103s opprinnelige tester brukte lokale
+bare-repo-kloner som strukturelt ALDRI trigger credential-oppløsning. Fikset
+med plattform-betinget `buildAskpassEnvValue()` (bar sti på POSIX, ny
+`.cmd`-wrapper-fil på Windows via `generateAskpassWindowsWrapper()`). **20
+nye tester** (ny fil `git-credential-isolation.test.ts`, 5 tester mot en
+EKTE selvhostet git smart-HTTP-server bygget over `git http-backend`, kjørt
+i en egen barneprosess - beviser med en ekte, syntaktisk gyldig ambient
+credential.helper at hijack er mulig UTEN fiksen og umulig MED; `git-
+auth.test.ts` +6, `coding-git-auth-wiring.test.ts` +3 inkl. et tidligere
+flagget cleanup-på-fortvunget-feil-testdekning-gap). Full suite
+`TESTS_AFTER=2048`/`TEST_FILES_AFTER=131` (opp fra `2034`/`130`),
+`pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent, ingen regresjon. INGEN
+system/global git-config mutert, INGEN credential-store rørt, Tobias sin
+`post-ops`-konto UENDRET (bevisst bevart som nyttig test-bevis).
+`docs/runbooks/D103_HOST_ACCEPTANCE.md` oppdatert med det ekte funnet som
+historisk bevis + reviderte suksesskriterier (`EXPECTED_TOKEN_IDENTITY_
+MATCH`/`AMBIENT_HOST_CREDENTIAL_DID_NOT_OVERRIDE`/`CLONE_AUTH_VERIFIED`/
+`PUSH_AUTH_VERIFIED`/`PR_CREATED`). **ÆRLIG:** `WORKER_PROFILE_ROUTING_LIVE_
+VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_PUSH=true` (ekte, fra
+host-kjøringen) - men `LIVE_E2E_VERIFIED=false`,
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true`,
+`UA5_CRITERION_2=PARTIAL` forblir presist slik inntil Tobias kjører runboken
+på nytt. Branch `d103-host-git-auth-isolation-repair`, ny draft-PR opprettes
+ved slutten av denne sliceen - IKKE merget. Se D-103 (amendment) i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**PRODUCTION CODING REACHABILITY REPAIR v1 (D-103) — reparerer to ekte
 produksjons-nåbarhetsblokkere oppdaget under D-102s egen host-akseptanse-forberedelse, IKKE en ny UA-5-
 kapabilitet, IKKE ennå live ende-til-ende-verifisert.** PR #43 (D-102) er MERGET til main (merge-commit
