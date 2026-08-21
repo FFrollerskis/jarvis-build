@@ -14,6 +14,7 @@
   },
   "devDependencies": {
     "@jarvis/core": "workspace:*",
+    "@jarvis/incidents": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",

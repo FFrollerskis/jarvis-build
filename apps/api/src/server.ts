@@ -1,9 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
+import type pg from "pg";
 import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
-import type { PolicyGateway } from "@jarvis/policy";
+import { attemptRecovery, correlateIncident, proposeRepairTask, type DeploymentService, type IncidentService } from "@jarvis/incidents";
+import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
+import type { ToolGateway } from "@jarvis/tool-gateway";
 import type { ConversationEngine } from "./conversation.ts";
 import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
 
@@ -34,6 +37,23 @@ export interface ApiDeps {
    * kjører API-et i helse-modus (samme mønster som `worker`/`brief`).
    */
   tasks?: TaskService;
+  /**
+   * D-104 (UA-5 Production Operations Control Plane v1): valgfritt - uten
+   * database-avhengigheter kjører API-et i helse-modus (samme mønster som
+   * `tasks`/`worker`/`brief`). `gate`/`infraToolIds` er DEN SAMME
+   * `InfraExecutionGate`-instansen `PolicyGateway` allerede håndhever -
+   * disse rutene MUTERER kun dens tilstand, de omgår ALDRI `policy.
+   * authorize()` (hver rute kaller `policy.authorize()` FØRST, identisk
+   * mønster som `/tools/critical-demo`).
+   */
+  incidents?: {
+    service: IncidentService;
+    deployments: DeploymentService;
+    gateway: ToolGateway;
+    controls?: OwnerControls;
+    infraGate: InfraExecutionGate;
+    pool: pg.Pool;
+  };
 }
 
 export interface HealthStatus {
@@ -100,7 +120,11 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return;
   }
 
-  const depRoutes = ["/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit"];
+  const depRoutes = [
+    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit",
+    "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
+    "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
+  ];
   if (!deps) {
     if (depRoutes.includes(url.pathname)) {
       return json(res, 503, { error: "not_configured", message: "API kjører uten database-avhengigheter" });
@@ -273,6 +297,149 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 403, { decision: decision.decision, reason: decision.reason });
     }
     return json(res, 200, { decision: "ALLOW", executed: "critical_demo_stub" });
+  }
+
+  if (deps.incidents) {
+    const { service, deployments, gateway, controls, infraGate, pool } = deps.incidents;
+
+    if (req.method === "POST" && url.pathname === "/incidents/create") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0];
+        memory_space: MemorySpace; title: string; severity?: "low" | "normal" | "high" | "critical"; owner_person_id?: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const incident = await service.createIncident(resolved.identity.tenant_id, body.memory_space, {
+        title: body.title, ...(body.severity !== undefined ? { severity: body.severity } : {}),
+        ...(body.owner_person_id !== undefined ? { owner_person_id: body.owner_person_id } : {})
+      });
+      return json(res, 200, { incident });
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/get") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const incident = await service.getIncident(resolved.identity.tenant_id, body.memory_space, body.incident_id);
+      if (!incident) return json(res, 404, { error: "incident_not_found" });
+      const evidence = await service.listEvidence(resolved.identity.tenant_id, body.memory_space, body.incident_id);
+      return json(res, 200, { incident, evidence });
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/list") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace;
+        status?: "open" | "diagnosing" | "repair_proposed" | "repair_in_progress" | "resolved" | "wont_fix" | "all";
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const incidents = await service.listIncidents(resolved.identity.tenant_id, body.memory_space, body.status ?? "open");
+      return json(res, 200, { incidents });
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/evidence/add") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string;
+        source_type: string; status?: string; source_ref?: string; summary: string; observed_at: string; contradicts_evidence_id?: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      try {
+        const evidence = await service.addEvidence(resolved.identity.tenant_id, body.memory_space, body.incident_id, {
+          source_type: body.source_type as never, ...(body.status !== undefined ? { status: body.status as never } : {}),
+          ...(body.source_ref !== undefined ? { source_ref: body.source_ref } : {}), summary: body.summary, observed_at: body.observed_at,
+          ...(body.contradicts_evidence_id !== undefined ? { contradicts_evidence_id: body.contradicts_evidence_id } : {})
+        });
+        return json(res, 200, { evidence });
+      } catch (err) {
+        return json(res, 400, { error: "evidence_rejected", message: (err as Error).message });
+      }
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/correlate") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string; repo: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      try {
+        const correlation = await correlateIncident(service, deployments, resolved.identity.tenant_id, body.memory_space, body.incident_id, body.repo);
+        return json(res, 200, { correlation });
+      } catch (err) {
+        return json(res, 404, { error: "correlation_failed", message: (err as Error).message });
+      }
+    }
+
+    if (deps.tasks && req.method === "POST" && url.pathname === "/incidents/repair") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0] & { session_id: string };
+        memory_space: MemorySpace; incident_id: string; repo_url: string; goal: string;
+        test_command?: string[]; publish_pr?: boolean; model_budget_ore?: number;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const incident = await service.getIncident(resolved.identity.tenant_id, body.memory_space, body.incident_id);
+      if (!incident) return json(res, 404, { error: "incident_not_found" });
+      const result = await proposeRepairTask(
+        { taskService: deps.tasks, pool, incidents: service },
+        resolved.identity, body.memory_space, incident,
+        {
+          repo_url: body.repo_url, goal: body.goal, ...(body.test_command !== undefined ? { test_command: body.test_command } : {}),
+          ...(body.publish_pr !== undefined ? { publishPr: body.publish_pr } : {}),
+          ...(body.model_budget_ore !== undefined ? { model_budget_ore: body.model_budget_ore } : {})
+        }
+      );
+      if (!result.ok) return json(res, 400, { error: "repair_task_rejected", reason: result.reason });
+      return json(res, 200, { task_id: result.task_id });
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/recovery/attempt") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; tool_id: string; action: string;
+        idempotency_key: string; parameters: Record<string, never>; incident_id?: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const decision = await deps.policy.authorize({
+        identity: resolved.identity,
+        toolCall: { tool_id: "infra", action: "attempt_recovery", capability_class: "B", parameters: { tool_id: body.tool_id, action: body.action } }
+      });
+      if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
+      const recovery = await attemptRecovery({ pool, gateway }, resolved.identity, {
+        tenant_id: resolved.identity.tenant_id, tool_id: body.tool_id, action: body.action,
+        idempotency_key: body.idempotency_key, parameters: body.parameters, ...(body.incident_id !== undefined ? { incident_id: body.incident_id } : {})
+      });
+      return json(res, 200, { recovery });
+    }
+
+    if (req.method === "POST" && (url.pathname === "/infra/pause" || url.pathname === "/infra/resume" || url.pathname === "/infra/degrade")) {
+      const body = (await readBody(req)) as { identity: Parameters<IdentityService["resolveIdentity"]>[0]; reason?: string };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const action = url.pathname.slice("/infra/".length);
+      const decision = await deps.policy.authorize({
+        identity: resolved.identity,
+        toolCall: { tool_id: "infra", action, capability_class: "B", parameters: {} }
+      });
+      if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
+      if (action === "pause") infraGate.pause(body.reason ?? "owner_requested");
+      else if (action === "degrade") infraGate.degrade(body.reason ?? "owner_requested");
+      else infraGate.resume();
+      return json(res, 200, { state: infraGate.current() });
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/status") {
+      const body = (await readBody(req)) as { identity: Parameters<IdentityService["resolveIdentity"]>[0] };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      return json(res, 200, {
+        infra_mode: infraGate.current(),
+        connector_health: Object.fromEntries(gateway.health),
+        frozen_connectors: controls ? ["github"].filter((id) => controls.isFrozen(id)) : []
+      });
+    }
   }
 
   json(res, 404, { error: "not_found" });

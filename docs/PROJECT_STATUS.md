@@ -1,5 +1,62 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**UA-5 Production Operations Control Plane v1
+(D-104) — pluss D-103 run-3 live host-akseptanse-kanonisering i SAMME PR
+(ingen egen mikro-PR for dokumentasjon, per eksplisitt ordre).** D-103
+HOST-FIX v2 (PR #46) er MERGET til main (merge-commit `ad96d33`, post-merge-
+CI grønn på alle tre jobber). Umiddelbart deretter LYKTES Tobias sin TREDJE
+ekte Windows host-akseptanse (task `d103-host-final-ea3e6b3f`, worker
+`worker-aa818fcf`) FULLSTENDIG mot denne kanoniske `main`-en, MED system-
+nivå `credential.helper=manager` bevisst bevart uendret: `status=completed`,
+`tests=passed`, `commit_sha=8a9fda6d172193e4abb002dad814411ffb629300`, ekte
+PR opprettet (`tsworkflow/jarvis-d103-acceptance#1`, IKKE merget - engangs
+aksepttest-repo). `WINDOWS_LIVE_AUTH_ISOLATION_VERIFIED=true`,
+`LIVE_E2E_VERIFIED=true`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=true`,
+`HOST_ACTION_REQUIRED=false`. **UA-5 kriterium 2 er nå `COMPLETE`** - se
+D-103 HOST-FIX v2 CANONICALIZATION i DECISIONS_AND_ASSUMPTIONS.md for full
+detalj (inkl. den ene presise nyansen: `EXPECTED_TOKEN_IDENTITY_MATCH` ikke
+friskt re-bevist denne runden pga. en `/user`-preflight-403; strukturell
+proof-of-work via selve den fullførte isolerte push+PR-kjeden dekker dette).
+Korrigert samtidig: den stale `2054`-testtallet i D-103 v2-dokumentasjonen
+er rettet til det faktiske, verifiserte `2056` (PR #46s merget HEAD).
+
+**D-104 (UA-5 Production Operations Control Plane v1, NY D-nummer - se
+begrunnelse i DECISIONS_AND_ASSUMPTIONS.md):** ny `modules/incidents`-pakke
+(JARVIS_CANONICAL hendelsesmodell, D-64-porten kjørt FØRST - INGEN ny
+ekstern leverandør: GCP/Cloudflare/Sentry/Vercel-deploy/log-spørring
+eksisterer IKKE i repoet fra før og er BEVISST IKKE bygget denne sliceen,
+se D-104 sin ærlige avgrensning). Ny `InfraExecutionGate`
+(NORMAL/DEGRADED/PAUSED) i `modules/policy`, koblet inn i
+`PolicyGateway.authorize()` som en ny, VALGFRI, snevrere gate enn den
+allerede eksisterende `KillSwitch` (som forblir strengest/uendret) - gjelder
+KUN registrerte "infra"-tool_id-er (github). Hendelse→bevis-korrelasjon
+(deployments/evidence, deterministisk, INGEN LLM-gjetning som etablert
+sannhet, Q-26-stil UNVERIFIED/PROVISIONAL/VERIFIED-status). Hendelse→testet-
+fiks-orkestrering GJENBRUKER `TaskService.submit()`/`createCodingHandler`
+100% uendret (D-103-pipelinen), bygger KUN orkestrering rundt den. Før/
+etter/recovery-konvolutt GJENBRUKER `ToolGateway`s eksisterende preflight/
+`tool_executions.before_state/after_state`-mekanisme (D-pipeline, uendret) -
+ny `infra_recovery_actions`-tabell for eksplisitt recovery-utfall
+(SUCCESS/PARTIAL/FAILED/UNKNOWN, ALDRI fabrikkert). ÉN representativ, EKTE
+recovery-case testet: `github.delete_branch`→`github.create_branch`
+(gjenoppretter fra preflight-fanget sha). UA-5 kriterium 1/3 forblir bevisst
+`PARTIAL` (kun deterministisk fixture-/integrasjonsbevis, INGEN ekte
+provider-rollback/live-diagnose utøvd - ærlig, ikke overklamet). **Kriterium
+4 (pause/degraded-modus) er `COMPLETE`** - gaten er fullstendig koblet inn
+i BEGGE produksjonsprosesser (`main.ts`/`worker-main.ts`) og test-bevist mot
+den faktiske `PolicyGateway`-runtimen (kill-switch-supremati, diagnostikk
+alltid tilgjengelig, connector-freeze-interaksjon, ingen bypass gjennom
+recovery-veien) - ÉN dokumentert, IKKE skjult begrensning: prosess-lokal
+tilstand (samme karakteristikk som eksisterende `KillSwitch`), INGEN
+cross-process-synkronisering bygget denne sliceen. 42 nye tester i 5 nye
+filer, full workspace-suite `TESTS_AFTER=2098`/`TEST_FILES_AFTER=137` (opp
+fra `2056`/`132`), `pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent,
+INGEN regresjon. `UA5_IMPLEMENTATION_COMPLETE=false` (kriterium 1/3 fortsatt
+PARTIAL), `UA5_CAN_CLOSE=false`. Branch
+`claude/ua5-production-ops-control-plane`, ny draft-PR - IKKE merget.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**D-103 HOST-FIX v2: git credential.helper
 erstatter GIT_ASKPASS ("d103-git-credential-helper-windows-repair") —
 amendment til D-103, IKKE ny D-nummer-beslutning.** D-103 HOST-FIX v1
