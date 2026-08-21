@@ -210,6 +210,14 @@ worker.register(
         session_id: "sess-coding"
       }),
       claudeCodeCredential: { secretProvider: new EnvSecretProvider() },
+      // D-103 (Blokker B): SAMME EnvSecretProvider-arkitektur, HELT ATSKILT
+      // secret-referanse (default "JARVIS_GITHUB_TOKEN") fra claudeCodeCredential
+      // over ("ANTHROPIC_API_KEY") - git clone/push får nå eksplisitt,
+      // ephemer transport-autentisering i stedet for å avhenge av ambient
+      // vertsmaskin-tilstand (Git Credential Manager e.l.). Mangler tokenet:
+      // jobben feiler FØR clone forsøkes (`git_auth_unavailable`), ALDRI et
+      // stille fall til uautentisert git.
+      gitAuth: { secretProvider: new EnvSecretProvider() },
       github: { gateway: toolGateway }
     }),
     [process.env["ANTHROPIC_API_KEY"], process.env["JARVIS_GITHUB_TOKEN"]]

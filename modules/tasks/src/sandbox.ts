@@ -22,7 +22,15 @@ export interface SandboxRunner {
 
 export interface Sandbox {
   readonly workdir: string;
-  exec(command: string, args: string[], timeoutMs?: number): ExecResult;
+  /**
+   * D-103 (Blokker B): valgfri `extraEnv` slås KUN sammen inn i DETTE ene
+   * kallets prosess-env, ALDRI inn i sandboxens vedvarende `jobEnv` - lar
+   * `coding.ts` gi `git clone`/`git push` en eksplisitt, kortlevd
+   * transport-credential UTEN at den noensinne blir synlig for
+   * `ClaudeCodeAgent`s egen `exec()`-kall (som fortsatt kun bruker
+   * basis-`env`en fra `create()`).
+   */
+  exec(command: string, args: string[], timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult;
   dispose(): Promise<void>;
 }
 
@@ -42,10 +50,10 @@ export class ProcessSandboxRunner implements SandboxRunner {
     };
     return {
       workdir,
-      exec(command: string, args: string[], timeoutMs = 60_000): ExecResult {
+      exec(command: string, args: string[], timeoutMs = 60_000, extraEnv?: Record<string, string>): ExecResult {
         const result = spawnSync(command, args, {
           cwd: workdir,
-          env, // ren env - ingen arvede secrets
+          env: extraEnv ? { ...env, ...extraEnv } : env, // ren env - ingen arvede secrets
           timeout: timeoutMs,
           encoding: "utf8",
           shell: false
@@ -78,7 +86,12 @@ export class DockerSandboxRunner implements SandboxRunner {
     const { image, dockerBin } = this;
     return {
       workdir,
-      exec(command: string, args: string[], timeoutMs = 60_000): ExecResult {
+      // D-103: `extraEnv` (Blokker B git-auth) uendret IKKE koblet inn her -
+      // samme presedens som D-96/D-102s `_jobEnv`: produksjonen bruker
+      // `ProcessSandboxRunner` som default, `JARVIS_SANDBOX=docker` er
+      // eksplisitt opt-in - ingen grunn til å utvide en sti som allerede er
+      // dokumentert ufullstendig for eksplisitt env-injeksjon.
+      exec(command: string, args: string[], timeoutMs = 60_000, _extraEnv?: Record<string, string>): ExecResult {
         const result = spawnSync(dockerBin, [
           "run", "--rm",
           "--network", "none",

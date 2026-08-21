@@ -3,6 +3,7 @@ import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import { withTenantTransaction } from "@jarvis/core";
 import type { PolicyGateway } from "@jarvis/policy";
+import { createGitAuthHandle } from "./git-auth.ts";
 import { publishPullRequestForCodingJob, type PrPublishingGateway } from "./pr-publisher.ts";
 import type { SandboxRunner } from "./sandbox.ts";
 import type { TaskHandler } from "./worker.ts";
@@ -175,6 +176,17 @@ export function createCodingHandler(deps: {
    * sandbox-oppførselen 100% uendret (tom jobEnv, som før D-96).
    */
   claudeCodeCredential?: { secretProvider: { get(ref: string): Promise<string | null> }; ref?: string };
+  /**
+   * D-103 (Blokker B, valgfritt): eksplisitt git-transport-credential for
+   * `git clone`/`git push` mot en ekte `https://github.com/...`-remote - HELT
+   * ATSKILT fra `claudeCodeCredential` (default-referanse `JARVIS_GITHUB_TOKEN`,
+   * ALDRI `ANTHROPIC_API_KEY`). Når satt: mangler den refererte secreten,
+   * feiler jobben FØR clone forsøkes (`git_auth_unavailable`) - ALDRI et
+   * stille fall til uautentisert/ambient-vert-avhengig git. Uten dette feltet
+   * (default) er sandbox-git-oppførselen 100% uendret fra før D-103 (lokale
+   * bare-repo-tester som ikke trenger nettverksautentisering).
+   */
+  gitAuth?: { secretProvider: { get(ref: string): Promise<string | null> }; ref?: string };
 }): TaskHandler {
   return async (task, ctx) => {
     const input = task.contract.input.data as { repo_url?: string; test_command?: string[] };
@@ -206,15 +218,35 @@ export function createCodingHandler(deps: {
       const value = await deps.claudeCodeCredential.secretProvider.get(ref);
       if (value) jobEnv[ref] = value;
     }
-    const sandbox = await deps.sandbox.create(jobEnv);
+
+    // D-103 (Blokker B): løses FØR sandboxen opprettes - en jobb som ikke kan
+    // autentisere git-transport skal ALDRI komme så langt som å klone noe.
+    let gitAuth: Awaited<ReturnType<typeof createGitAuthHandle>> | undefined;
+    if (deps.gitAuth) {
+      const ref = deps.gitAuth.ref ?? "JARVIS_GITHUB_TOKEN";
+      const token = await deps.gitAuth.secretProvider.get(ref);
+      if (!token) {
+        throw new Error("git_auth_unavailable");
+      }
+      gitAuth = await createGitAuthHandle(token);
+    }
+
     try {
+      const sandbox = await deps.sandbox.create(jobEnv);
+      try {
+      // `run` brukes for agent.modify() OG alle LOKALE git-operasjoner (branch/
+      // add/commit/status/show/rev-parse) - ALDRI gitAuth.env. Kun de to
+      // faktiske nettverkskallene (clone/push, under) kaller sandbox.exec()
+      // direkte med gitAuth?.env som fjerde argument - dette er den ENESTE
+      // veien token-verdien noensinne når et git-underprosess-env, og den når
+      // ALDRI `run` (og dermed ALDRI `ClaudeCodeAgent`s eget exec-kall).
       const run: CodingAgentExec = (cmd, args, timeoutMs) => sandbox.exec(cmd, args, timeoutMs);
       const must = (label: string, result: { code: number; stderr?: string }) => {
         if (result.code !== 0) {
           throw new Error(`${label}_failed: ${result.stderr ?? ""}`.slice(0, 300));
         }
       };
-      must("clone", sandbox.exec("git", ["clone", input.repo_url, "."]));
+      must("clone", sandbox.exec("git", ["clone", input.repo_url, "."], undefined, gitAuth?.env));
       await ctx.assertNotCancelled();
       must("branch", run("git", ["checkout", "-b", branch]));
       const description = await deps.agent.modify(run, task.contract.goal);
@@ -240,13 +272,21 @@ export function createCodingHandler(deps: {
       const commitSha = run("git", ["rev-parse", "HEAD"]).stdout.trim();
       const diff = sandbox.exec("git", ["show", "--stat", "HEAD"]);
       await deps.artifacts.save(task.tenant_id, task.task_id, "patch", "change.txt", diff.stdout);
+      // D-103 §13: kansellering FØR push - den nyeste, første EKSTERNE
+      // sideeffekten (en ekte branch synlig på GitHub) skal ALDRI skje etter
+      // en allerede innkommet kanselleringsforespørsel.
+      await ctx.assertNotCancelled();
       // Guard i runneren: kun jobb-branchen pushes; aldri beskyttede brancher.
-      must("push", run("git", ["push", "origin", `${branch}:${branch}`]));
+      must("push", sandbox.exec("git", ["push", "origin", `${branch}:${branch}`], undefined, gitAuth?.env));
       await deps.artifacts.save(task.tenant_id, task.task_id, "pr-proposal", "pr.json",
         JSON.stringify({ branch, title: `jarvis: ${task.contract.goal}`, body: description, merge: "KREVER MENNESKELIG GODKJENNING" }));
 
       let pr: Awaited<ReturnType<typeof publishPullRequestForCodingJob>> | undefined;
       if (deps.github) {
+        // D-103 §13: kansellering FØR PR-publisering - branchen er allerede
+        // pushet (ufarlig, gjenbrukes idempotent av D-95 ved en senere retry),
+        // men en NY PR skal ALDRI opprettes etter kansellering.
+        await ctx.assertNotCancelled();
         pr = await publishPullRequestForCodingJob({
           gateway: deps.github.gateway,
           identity: deps.identityFor(task),
@@ -261,8 +301,15 @@ export function createCodingHandler(deps: {
       }
 
       return { branch, description, tests: "passed", commit_sha: commitSha, ...(pr ? { pr } : {}) };
+      } finally {
+        await sandbox.dispose();
+      }
     } finally {
-      await sandbox.dispose();
+      // D-103 (Blokker B): ephemert askpass-materiale fjernes UAVHENGIG av om
+      // sandboxen selv noensinne ble opprettet (dekker det sjeldne tilfellet
+      // der `deps.sandbox.create()` feiler ETTER at gitAuth allerede ble
+      // generert) - egen temp-katalog, aldri inne i sandbox.workdir.
+      if (gitAuth) await gitAuth.cleanup();
     }
   };
 }

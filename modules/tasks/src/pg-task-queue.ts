@@ -17,10 +17,10 @@ export class PgTaskQueue implements WorkflowAdapter {
     );
   }
 
-  async claimNext(workerId: string, leaseSeconds: number): Promise<ClaimedTask | null> {
+  async claimNext(workerId: string, leaseSeconds: number, agentProfiles: string[]): Promise<ClaimedTask | null> {
     const result = await this.pool.query(
-      "SELECT task_id, tenant_id, contract, attempts, checkpoint FROM claim_next_task($1, $2)",
-      [workerId, leaseSeconds]
+      "SELECT task_id, tenant_id, contract, attempts, checkpoint FROM claim_next_task($1, $2, $3)",
+      [workerId, leaseSeconds, agentProfiles]
     );
     return (result.rows[0] as ClaimedTask | undefined) ?? null;
   }

@@ -2335,6 +2335,54 @@ Anthropic-/GitHub-credential på Tobias sin vert pluss én eierautorisert live-a
 1/3/4 uendret. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. INGEN ny
 leverandør, INGEN UA-6. Full detalj: D-102 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### PRODUCTION CODING REACHABILITY REPAIR v1 (2026-08-21) → D-103 (to ekte produksjonsblokkere reparert, IKKE ny kapabilitet)
+
+Oppdaget under D-102s egen host-akseptanse-forberedelse (fersk kildekode-revisjon): TO reelle,
+uavhengige produksjons-nåbarhetsblokkere som ingen enkelt-prosess wiring-test kunne fange.
+
+**Blokker A (worker claim-routing):** `main.ts` sin egen `InProcessWorker` (kun `"executive"`) og
+`worker-main.ts` sin (har `"coding"`) polte SAMME `PgTaskQueue` samtidig - `claim_next_task()` var
+agent-profil-blind, så `main.ts` kunne claime en coding-jobb og terminalt feile den med "ingen handler
+for agentprofil coding". **Fikset:** ny migrasjon `035_worker_claim_profile_filter.sql` gir
+`claim_next_task()` et tredje `p_agent_profiles text[]`-argument - filtreringen skjer ATOMISK i samme
+`FOR UPDATE SKIP LOCKED`-transaksjon. En ustøttet jobb forblir `'created'` (aldri feilet) til en
+kompatibel worker henter den, ingen starvation. `WorkflowAdapter.claimNext()`/`PgTaskQueue.claimNext()`
+fikk `agentProfiles` som et påkrevd tredje argument; `InProcessWorker.tick()` sender automatisk
+`[...this.handlers.keys()]`. Lease/reclaim/retry/tenant-isolasjon/FORCE RLS uendret.
+
+**Blokker B (git-transport-autentisering):** `ProcessSandboxRunner` gir `git clone`/`git push` en ren
+prosess-env (kun PATH + git-identitet + eksplisitt jobEnv) - ingen HOME/USERPROFILE/SSH_AUTH_SOCK, så
+push mot en ekte GitHub-remote hadde ingen eksplisitt credential-kanal (ville avhengt av ambient,
+aldri-bevist vertstilstand). **Fikset:** ny `modules/tasks/src/git-auth.ts` - et ephemert
+`GIT_ASKPASS`-skript per jobb (filen inneholder aldri token-verdien, kun logikk som leser den fra sin
+egen prosess-env ved kjøretid), skrevet i en egen temp-katalog (aldri i `sandbox.workdir`), fjernet i
+`finally` uavhengig av `sandbox.dispose()`. `Sandbox.exec()` fikk en valgfri fjerde `extraEnv`-parameter
+(kun `ProcessSandboxRunner` kobler den inn). `createCodingHandler` fikk et nytt valgfritt `gitAuth`-felt
+(default `JARVIS_GITHUB_TOKEN`, samme `EnvSecretProvider`-arkitektur som `claudeCodeCredential` - helt
+atskilt referanse) - `extraEnv` gis KUN til de to faktiske clone/push-kallene, aldri til `run`
+(agent.modify + lokale git-operasjoner) - `ClaudeCodeAgent` ser derfor strukturelt aldri GitHub-tokenet.
+Mangler secreten: `git_auth_unavailable` kastes FØR clone forsøkes - aldri et stille fall til
+uautentisert git. Uten `gitAuth` i det hele tatt (default) er sandbox-oppførselen 100% uendret.
+
+**Cancellation:** `ctx.assertNotCancelled()` lagt til FØR push og FØR PR-publisering - de to nye,
+produksjons-nåbare eksterne grensene. Gjenstående gap (test-bestått→commit, commit→push) uendret fra
+D-95/D-96, klassifisert NON_BLOCKING_FOLLOWUP.
+
+**Testdekning:** `worker-claim-routing.test.ts` (12, ekte embedded-Postgres, inkl. et RLS-fallgruve-funn
+identisk D-92-klassen). `git-auth.test.ts` (10, ren logikk). `coding-git-auth-wiring.test.ts` (10, ekte
+embedded-Postgres + ekte lokalt git-bare-repo - beviser extraEnv-isolasjon, ingen token i argv/config/
+feilmeldinger, fail-closed, ephemer opprydding, D-95 PR-flyt upåvirket). `worker-coding-wiring.test.ts`
++2. Full suite `TESTS_AFTER=2034`/`TEST_FILES_AFTER=130` (opp fra `TESTS_BEFORE=2000`/
+`TEST_FILES_BEFORE=127`), typecheck 18/18 rent, lint rent, ingen regresjon i D-95/D-96/D-97/D-100/D-101/
+D-102-suiter.
+
+**Ærlig status:** ingen ekte Anthropic/GitHub-credential i dette miljøet - `LIVE_E2E_VERIFIED=false`,
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true` forblir uendret; denne
+sliceen reparerer reachability-forutsetninger, hevder IKKE live-verifisering. UA-5 kriterium 2 forblir
+bevisst `PARTIAL`. Kriterium 1/3/4 uendret. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`.
+Draft-PR, IKKE merget. Revidert, hemmelighet-trygg host-akseptanse-runbook levert, IKKE utført denne
+sliceen. Full detalj: D-103 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
