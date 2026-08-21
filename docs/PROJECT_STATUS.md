@@ -1,10 +1,74 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**D-103 HOST-FIX v2: git credential.helper
+erstatter GIT_ASKPASS ("d103-git-credential-helper-windows-repair") —
+amendment til D-103, IKKE ny D-nummer-beslutning.** D-103 HOST-FIX v1
+(PR #45) er MERGET til main (merge-commit `ad5eb92`, post-merge-CI grønn).
+En ANNEN ekte Windows-kjøring, ETTER v1 var merget (task
+`d103-host-acceptance-d5294343`, worker `worker-782f9ac8`), beviste at v1s
+ambient-helper-isolasjon FAKTISK virket LIVE (INGEN `post-ops`-identitet
+lenger - `AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false`
+bekreftet), men v1s `GIT_ASKPASS`-mekanisme feilet på et NYTT sted: `cannot
+spawn "...\jarvis-git-askpass-<x>\askpass.cmd": Permission denied`,
+`terminal prompts disabled` (terminal-fallback korrekt sperret, ambient ALDRI
+konsultert - kun selve askpass-invokeringen feilet). **Root cause (utledet
+fra dokumentert git/Windows-mekanikk, IKKE personlig live-bevist av Claude
+Code mot en ekte Windows-boks):** git kaller `GIT_ASKPASS` med
+`use_shell=1`, men hopper over shell-innpakning når kommandostrengen IKKE
+har shell-metategn - en bar `.cmd`-filsti kvalifiserer IKKE, så git kaller
+`CreateProcessW()` DIREKTE på stien. `.cmd`-filer er IKKE gyldige Win32
+PE-avbilder - `CreateProcessW()` kan STRUKTURELT ikke laste dem direkte,
+typisk `ERROR_ACCESS_DENIED` → MSYS-oversatt til "Permission denied".
+**Fiks (erstatter GIT_ASKPASS HELT, IKKE en justering):** git sin
+`credential.helper`-mekanisme, satt via `-c credential.helper=!"<node>"
+"<skript>"` (etter den UENDREDE `GIT_CREDENTIAL_ISOLATION_ARGS`-reset-en
+fra v1) - `!`-prefikset (git strippet, dokumentert konvensjon) tvinger
+evaluering via en EKTE SHELL (`sh -c`, MSYS `sh.exe` på Windows) som
+launcher `node.exe` (ekte, allerede installert PE-binær) med skriptet som
+ARGUMENT - ALDRI en direkte `CreateProcess()` av vår `.cjs`-fil. Eliminerer
+feilklassen STRUKTURELT på begge plattformer, IDENTISK form (INGEN
+plattform-gren lenger - `buildAskpassEnvValue()`/
+`generateAskpassWindowsWrapper()`/`.cmd`-wrapper-generering FJERNET HELT).
+**DockerSandboxRunner-gap reparert i samme slice:** `extraEnv` var
+tidligere IKKE koblet til selve `docker run`-kallet (flagget i en tidligere
+audit) - fikset med bar `-e <NAVN>`-argv + verdi via docker-CLI-
+underprosessens EGEN env (verdien ALDRI i argv). **26 nye/omskrevne
+tester:** `sandbox-docker-extra-env.test.ts` (5, ny, fake `docker`-kjørbar
+fil). `git-auth.test.ts` (15, omskrevet for credential-helper-protokollen:
+get/store/erase). `git-credential-isolation.test.ts` (7, omskrevet - C/D
+beviser nå at git FAKTISK invokerer mekanismen mot en ekte HTTP-credential-
+utfordring, ikke bare argv-tilstedeværelse; nye F/G beviser FAIL CLOSED
+eksplisitt - verken tom helper-kjede eller en bevisst malfunksjonerende
+Jarvis-helper faller noensinne tilbake til ambient). `coding-git-auth-
+wiring.test.ts` (13, omskrevet argv-form). Full suite
+`TESTS_AFTER=2054`/`TEST_FILES_AFTER=132` (opp fra `2048`/`131`),
+`pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent, ingen regresjon. **Ny,
+fokusert `windows-git-auth`-CI-jobb** (`windows-latest`, KUN
+`git-auth.test.ts`+`git-credential-isolation.test.ts`, bevisst UTEN
+embedded-Postgres for lavest kostnad) lagt til `.github/workflows/ci.yml` -
+direkte mot "korrekt på Linux, feiler på ekte Windows"-klassen som forårsaket
+BÅDE v1s opprinnelige feil OG denne v2-reparasjonens egen foranledning; dens
+FØRSTE reelle kjøring er IKKE observert av Claude Code før denne PR-en åpnes.
+INGEN system/global git-config mutert, INGEN credential-store rørt. **ÆRLIG:**
+`WORKER_PROFILE_ROUTING_LIVE_VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_
+PUSH=true`/`AMBIENT_CREDENTIAL_HELPER_CAN_OVERRIDE_JARVIS_AUTH=false` (alle
+ekte, fra de to host-kjøringene) - men `WINDOWS_LIVE_AUTH_ISOLATION_
+VERIFIED=false`, `LIVE_E2E_VERIFIED=false`,
+`TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true`,
+`UA5_CRITERION_2=PARTIAL` forblir presist slik inntil Tobias kjører runboken
+på nytt. Branch `d103-git-credential-helper-windows-repair`, ny draft-PR
+opprettes ved slutten av denne sliceen - IKKE merget. Se D-103 HOST-FIX v2 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**D-103 HOST-FIX: git credential.helper isolation
 ("d103-host-git-auth-isolation-repair") — amendment til D-103, IKKE ny
 D-nummer-beslutning.** D-103 (PR #44) er MERGET til main (merge-commit
-`bc72035`, post-merge-CI grønn). Tobias sin FØRSTE ekte Windows
-host-akseptanse (task `d103-host-acceptance-986f37e6`, worker
+`bc72035`, post-merge-CI grønn), OG denne sliceens EGEN PR #45 er SIDEN
+MERGET til main (merge-commit `ad5eb92`, post-merge-CI grønn) - se v2-blokken
+over for den PÅFØLGENDE reparasjonen som ble nødvendig. Tobias sin FØRSTE
+ekte Windows host-akseptanse (task `d103-host-acceptance-986f37e6`, worker
 `worker-903f4a30`) beviste Blokker A-fiksen LIVE (riktig coding-worker
 claimet jobben korrekt) og at den ekte kodeagenten nådde helt frem til
 `git push` - men pushet autentiserte som en ambient, cached, FEIL identitet
@@ -23,8 +87,10 @@ test-server) å IKKE bli kommandolinje-parset av git på POSIX i det hele tatt
 - ALDRI fanget FØR siden alle D-103s opprinnelige tester brukte lokale
 bare-repo-kloner som strukturelt ALDRI trigger credential-oppløsning. Fikset
 med plattform-betinget `buildAskpassEnvValue()` (bar sti på POSIX, ny
-`.cmd`-wrapper-fil på Windows via `generateAskpassWindowsWrapper()`). **20
-nye tester** (ny fil `git-credential-isolation.test.ts`, 5 tester mot en
+`.cmd`-wrapper-fil på Windows via `generateAskpassWindowsWrapper()`) - DENNE
+MEKANISMEN VISTE SEG SIDEN Å VÆRE UTILSTREKKELIG PÅ EKTE WINDOWS (se
+v2-blokken over) og er FULLSTENDIG ERSTATTET, ikke lenger i produksjonskoden.
+**20 nye tester** (ny fil `git-credential-isolation.test.ts`, 5 tester mot en
 EKTE selvhostet git smart-HTTP-server bygget over `git http-backend`, kjørt
 i en egen barneprosess - beviser med en ekte, syntaktisk gyldig ambient
 credential.helper at hijack er mulig UTEN fiksen og umulig MED; `git-
@@ -42,9 +108,7 @@ VERIFIED=true`/`REAL_CODING_JOB_REACHED_GIT_PUSH=true` (ekte, fra
 host-kjøringen) - men `LIVE_E2E_VERIFIED=false`,
 `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`, `HOST_ACTION_REQUIRED=true`,
 `UA5_CRITERION_2=PARTIAL` forblir presist slik inntil Tobias kjører runboken
-på nytt. Branch `d103-host-git-auth-isolation-repair`, ny draft-PR opprettes
-ved slutten av denne sliceen - IKKE merget. Se D-103 (amendment) i
-DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+på nytt. Se D-103 (amendment) i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 ## Runden før det
 

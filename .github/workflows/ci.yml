@@ -34,6 +34,41 @@ jobs:
       - name: Test
         run: pnpm test
 
+  windows-git-auth:
+    # D-103 HOST-FIX v2 (2026-08-21, "d103-git-credential-helper-windows-repair"):
+    # v1s GIT_ASKPASS-mekanisme så strukturelt korrekt ut, var fullstendig
+    # testdekket på Linux (131 filer/2048 tester grønne), OG feilet likevel
+    # på ekte Windows ("cannot spawn ...askpass.cmd: Permission denied") -
+    # fordi INGEN test i suiten faktisk kjørte på ekte Windows-prosess-
+    # oppstart-semantikk. Denne jobben lukker AKKURAT det gapet: en liten,
+    # fokusert `windows-latest`-jobb som kjører de to test-filene som faktisk
+    # utøver ekte `git`/OS-prosessoppstart for autentiseringsmekanismen (git
+    # sin egen `git http-backend`-baserte smart-HTTP-server, EKTE credential-
+    # helper-skriptkjøring) - BEVISST UTEN embedded-Postgres/full suite (som
+    # ville gjort jobben treg/skjør uten å teste noe MER av selve Windows-
+    # prosessoppstart-spørsmålet). At `coding.ts` faktisk kobler disse
+    # primitivene riktig inn i argv/env er allerede bevist på Linux i
+    # `build-test` (coding-git-auth-wiring.test.ts, krever Postgres) - denne
+    # jobben beviser i stedet at PRIMITIVENE SELV faktisk fungerer når git
+    # OG node faktisk kjøres av det ekte Windows-OS-et, ikke bare strukturelt
+    # resonnert om.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Windows git credential-helper autentiseringsregresjon (D-103 HOST-FIX v2)
+        run: pnpm exec vitest run modules/tasks/test/git-auth.test.ts modules/tasks/test/git-credential-isolation.test.ts
+
   gitleaks:
     runs-on: ubuntu-24.04
     permissions:
