@@ -80,7 +80,26 @@ async function writeFakeAmbientSystemConfig(): Promise<string> {
   ].join("\n"), "utf8");
   await chmod(helperPath, 0o700);
   const configPath = join(dir, "fake-system-gitconfig");
-  await writeFile(configPath, `[credential]\n\thelper = ${escapeForGitConfigValue(helperPath)}\n`, "utf8");
+  // D-103 HOST-FIX v2 (Windows-CI-funn, ANDRE runde - empirisk feilsøkt lokalt
+  // FØR push, ikke gjettet): et FORSØK på å bare anførselstegne den bare
+  // stien (`"<sti>"`, uten `!`) feilet på en HELT ANNEN, subtil måte - git sin
+  // `is_absolute_path()`-sjekk (som avgjør om en bar credential.helper-verdi
+  // skal kjøres DIREKTE som en sti eller tolkes som et KORTNAVN, git-
+  // credential-<verdi>) ser på FØRSTE tegn i den FERDIG UNESCAPEDE verdien -
+  // en verdi som begynner med et bokstavelig anførselstegn (`"/tmp/...`)
+  // begynner IKKE med `/`, så git falt igjennom til kortnavn-tolkningen
+  // (`git-credential-"/tmp/...` - "is not a git command"). Løsningen er å
+  // bruke SAMME `!`-prefiks-konvensjon som produksjonens
+  // `buildCredentialHelperConfigValue()` allerede bruker (BEVIST korrekt av
+  // tester C-G) - `!` BYPASSER `is_absolute_path()`-sjekken helt og tvinger
+  // ubetinget shell-evaluering, der de INDRE anførselstegnene (som
+  // BESKYTTER stiens backslash-tegn på Windows fra POSIX-shellets "spis
+  // backslash utenfor anførselstegn"-regel) faktisk overlever inn i selve
+  // shell-kildeteksten. `escapeForGitConfigValue()` brukes FORTSATT (dette
+  // ER en fil-basert config-verdi, som ER escape-sensitiv - i motsetning
+  // til produksjonens `-c`-verdier, som ALDRI escapes, se git-auth.ts).
+  const shellHelperValue = `!"${helperPath}"`;
+  await writeFile(configPath, `[credential]\n\thelper = ${escapeForGitConfigValue(shellHelperValue)}\n`, "utf8");
   return configPath;
 }
 
