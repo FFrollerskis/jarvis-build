@@ -5,3 +5,4 @@ export * from "./worker.ts";
 export * from "./sandbox.ts";
 export * from "./coding.ts";
 export * from "./coding-agent-eval.ts";
+export * from "./eval-fixture-repo.ts";

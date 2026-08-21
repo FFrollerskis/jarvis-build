@@ -2105,6 +2105,58 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### D-98 LIVE-EVALUATION HARNESS PORTABILITY REPAIR (2026-08-21) → D-99 (NARROW REPARASJON, IKKE ny kapabilitet)
+
+En ekte Windows-vertskjøring av D-98s live-evaluator (etter D-98 var merget, med ekte binær og ekte
+credential konfigurert) feilet FØR noe Claude-/provider-kall: `{"fatal_error":"git commit -m seed
+feilet: "}` (tom stderr). **Rotårsak funnet ved kodeinspeksjon (ikke gjettet):** den opprinnelige
+`seedFixtureRepo()` (i `ua5-coding-agent-live-eval.ts`) kjørte det POSIX-eksterne kommandoet `mkdir -p
+<sti>` via `spawnSync("mkdir", ...)` for å lage `src/`-undermappen ALLE 3 D-98-fixtures bruker. `mkdir`
+finnes IKKE som en frittstående kjørbar fil på Windows (kun et cmd.exe-innebygd kommando) - kallet
+feilet med ENOENT, UKONTROLLERT (returverdien ble aldri sjekket, verken for `mkdir`- eller den
+påfølgende `node -e writeFileSync(...)`-skrivingen, som derfor også feilet stille). Siden ALLE fixtures
+sine filer ligger under `src/`, endte seed-arbeidstreet opp HELT tomt - `git commit -m seed` feilet med
+"nothing to commit, working tree clean" (git skriver dette til STDOUT, ikke stderr - derfor den tomme
+`stderr`-strengen i den opprinnelige, kun-stderr-baserte feilmeldingen). `PROVIDER_CALL_OCCURRED_
+BEFORE_FAILURE=false`, `REAL_AGENT_CALL_COUNT=0`.
+
+**Fikset:** nytt `modules/tasks/src/eval-fixture-repo.ts` (i `src/`, dermed typechecket) -
+`seedFixtureRepo()` bruker nå UTELUKKENDE `node:fs`s `mkdirSync(dirname(...), {recursive:true})`/
+`writeFileSync()` - ALDRI en spawnet ekstern prosess for mappe-/filoppretting. `ua5-coding-agent-live-
+eval.ts` importerer denne delte, testede funksjonen i stedet for å duplisere den lokalt. Hvert
+disponibelt repo (bart OG arbeidsrepo) får nå LOKAL (ALDRI `--global`) `commit.gpgsign=false`/
+`tag.gpgSign=false` + et tomt, fersk-opprettet `core.hooksPath` - evaluatoren er derfor deterministisk
+UANSETT vertens globale signerings-/hook-konfigurasjon, uten å be Tobias endre noe globalt.
+`GIT_TERMINAL_PROMPT=0` hindrer i tillegg et evt. credential-prompt fra å henge evaluatoren. Ny
+`describeGitFailure()` bygger en sanert melding med `command`+`exit_code`+`spawn_error`+BÅDE `stderr`
+OG `stdout` (kritisk - "nothing to commit" er et STDOUT-signal, aldri fanget av den gamle meldingen).
+`redactSecrets()` appliseres nå også på scriptets topp-nivå `main().catch()`-felt (uendret sanert før
+denne reparasjonen).
+
+**Testdekning:** 8 nye deterministiske tester (`eval-fixture-repo.test.ts`, INGEN ekte Claude-/Postgres-
+/nettverkskall) - A (ingen vertsspesifikk/global git-identitet kreves), B (syntetisk global
+`commit.gpgsign=true`+ikke-eksisterende `gpg.program` kan IKKE ødelegge bootstrap), C (seed-commit
+lykkes for ALLE 3 ekte `EVAL_FIXTURES` inkl. nøstede `src/`-stier), D (feilbanen inkluderer
+`exit_code`+sanert `stderr`+`stdout` for BÅDE "nothing to commit" OG "not a git repository"), E
+(`describeGitFailure()` fjerner ALLTID en kjent hemmelighet), F (orakel-/fixture-beskyttelse uendret),
+G (timeout-mekanikken upåvirket), og en dedikert Windows-regresjonsklasse-test (fersk repo + ingen
+antatt identitet + vertslignende signeringskonfig → vellykket seed-commit med nøstet sti). Alle 36
+eksisterende D-98-tester består uendret (kjørt eksplisitt på nytt). Full workspace-suite 123/123 filer,
+1931/1931 tester grønt (opp fra 122/1923), `pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent,
+`gitleaks detect` rent.
+
+**D-64/D-41:** ingen ny leverandør, ingen ny risikoklasse - ren portabilitetskorreksjon av allerede-
+eksisterende D-98-kode, eksplisitt IKKE en ny funksjonell UA-5-slice. **Sannhet UENDRET** (ingen live-
+evaluering kjørt i denne runden): `LIVE_AGENT_INVOCATION_VERIFIED=false`, `LIVE_DIAGNOSTIC_QUALITY_
+VERIFIED=false`, `LIVE_FIX_QUALITY_VERIFIED=false`, `PRODUCTION_CODING_HANDLER_WIRED=false`,
+`PRODUCTION_CODING_AGENT_WIRED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false`. UA-5
+kriterium 1-4 UENDRET fra D-98 (NOT_STARTED/PARTIAL/PARTIAL/PARTIAL). `UA5_IMPLEMENTATION_COMPLETE=
+false`, `UA5_CAN_CLOSE=false`. Draft-PR, IKKE merget. Neste ekte live-forsøk skjer FØRST etter at denne
+reparasjonen er merget OG post-merge-CI på `main` er bekreftet grønn. Full detalj: D-99 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
