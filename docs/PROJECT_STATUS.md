@@ -24,8 +24,9 @@ UENDRET (ingen live-evaluering kjørt denne runden): `LIVE_AGENT_INVOCATION_VERI
 `LIVE_DIAGNOSTIC_QUALITY_VERIFIED=false`, `LIVE_FIX_QUALITY_VERIFIED=false`,
 `PRODUCTION_CODING_HANDLER_WIRED=false`. UA-5 kriterium 1-4 UENDRET fra D-98
 (NOT_STARTED/PARTIAL/PARTIAL/PARTIAL). Se D-99 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. Branch
-`claude/d98-live-eval-windows-repair`, draft PR gjenstår på tidspunktet for denne statuslinjen. Neste
-ekte live-forsøk skjer FØRST etter at denne reparasjonen er merget OG post-merge-CI er bekreftet grønn.
+`claude/d98-live-eval-windows-repair`, draft PR #40 opprettet (`c3afc134991001ea5bddc0c1a4c1fd08a5d67a97`),
+CI-verifisering gjenstår på tidspunktet for denne statuslinjen. Neste ekte live-forsøk skjer FØRST etter
+at denne reparasjonen er merget OG post-merge-CI er bekreftet grønn.
 
 ## Runden før det
 
