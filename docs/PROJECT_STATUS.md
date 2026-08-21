@@ -1,5 +1,48 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-98 Real Coding Agent Live Quality
+Evaluation Harness v1 bygget (reproduserbart evalueringsharness for D-96s ekte agent, IKKE modellkvalitet
+verifisert).** PR #38 (D-97) er MERGET til main (merge-commit `d5ebc40c05d68cf1b11ac078eb85c580f0042fb5`,
+post-merge-CI bekreftet grønn, run `32430261209`). Fersk rekonstruksjon av de 4 literale UA-5-kriteriene
+(dispatchet som egen research-subagent, ikke gjenbrukt forrige rapport) fant kriterium 1
+(incident-sporing) NOT_STARTED, kriterium 2 (tested fix) PARTIAL, kriterium 3 (infra-audit+recovery)
+PARTIAL, kriterium 4 (pause/degraded mode) PARTIAL. Kriterium 1/3/4 krever strukturelt en ny
+infrastruktur-leverandør (Vercel/GCP/Cloudflare) som ordren eksplisitt forbød å røre - kriterium 2s
+live-kvalitets-undergap (agent-invokering ekte/testet siden D-96/D-97, MEN modellkvalitet fortsatt
+uverifisert) var derfor den eneste gyldige, ordre-kompatible neste sliceen. CLI-kontrakt re-verifisert mot
+fersk offisiell dokumentasjon (`code.claude.com/docs/en/headless`) - ingen kodekorreksjon nødvendig;
+D-96s `--allowedTools "Read,Edit"`-sikkerhetsgrense bekreftet intakt. Bygget ren, testbar
+`coding-agent-eval.ts` (INGEN prosess-/nettverks-/DB-kall) - 3 deterministiske fixtures: lokal
+av-med-en-feil, kryssfil-kontraktsfeil (krever ekte forståelse av to filer sammen), og en BEVISST
+uløselig "ærlig feiling"-case (korrekt verdi finnes ikke i repoet - en ærlig agent MÅ feile/nekte, aldri
+fabrikkere en gjetning). Orakel-/testfiler bevisst ekskludert fra tillatte skrivbare stier i alle 3.
+`QUALITY_THRESHOLD` definert FØR kjøring, aldri flyttet etterpå. `classifyChangedFiles()` gjør den
+uavhengige etterkontrollen (aldri stol på jobbens egen "completed"-status alene). `computeVerifiedFix()`
+beviser eksplisitt at `AGENT_RETURNED_SUCCESS` (jobben fullførte) og `TEST_GATE_PASSED` (den uavhengige
+testkommandoen faktisk besto på nytt) ALDRI er samme begrep. `ua5-coding-agent-live-eval.ts` (kjøres
+aldri i CI) gjenbruker EKSAKT den ekte `createCodingHandler`/`ProcessSandboxRunner`/`ClaudeCodeAgent`-
+koblingen fra D-95/D-96 - ingen parallell agent-/sandbox-arkitektur - men utelater bevisst `github`-
+feltet, slik at harnesset strukturelt IKKE kan åpne en ekte PR eller pushe til et ekte remote selv under
+en ekte kjøring. Kjører 3 fixtures SEKVENSIELT (`PROVIDER_CALLS_COUNT=3`, ingen retry-storm). Miljø-sjekk
+(ærlig, ikke fabrikkert): `claude`-binæren finnes i dette miljøet (`/opt/node22/bin/claude`), men
+`ANTHROPIC_API_KEY` er IKKE satt - `ProcessSandboxRunner` arver aldri forelder-prosessens env, derfor
+konkludert at DETTE miljøet ikke kan ærlig live-verifisere modellkvalitet (`HOST_ACTION_REQUIRED=true`,
+`LIVE_QUALITY_VERIFIED=false`, eksakt host-kommando dokumentert i D-98, ingen hemmelighet ekko'et, kan
+verken pushe eller opprette en ekte PR). Timeout-banen bevist DETERMINISTISK uten et ekte provider-kall
+(fake-binær som aldri avslutter + kort 500ms timeout) - `spawnSync({timeout})` dreper prosessen trygt,
+jobben aldri markeres bestått, ingen branch pushes; ærlig notert at `ClaudeCodeAgent` mangler en egen
+timeout-feilklasse (best-effort heuristikk, ikke fikset). 36 nye tester (`coding-agent-eval.test.ts` 35
++ `coding-agent-eval-timeout.test.ts` 1). Full suite 122/122 filer, 1923/1923 tester grønt (opp fra
+120/1887), `pnpm -w typecheck` 18/18 pakker rent, `pnpm -w lint` rent. `PRODUCTION_CODING_HANDLER_WIRED=
+false`, `PRODUCTION_CODING_AGENT_WIRED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false` -
+uendret fra D-96/D-97, denne sliceen kobler ingenting til produksjon. UA-5 kriterium 2 forblir PARTIAL
+(harness ekte/klart, modellkvalitet fortsatt uverifisert i dette miljøet); kriterium 1/3/4 uendret fra
+D-97. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Se D-98 i DECISIONS_AND_ASSUMPTIONS.md
+for full detalj. Branch `claude/ua5-coding-agent-live-quality`, draft PR gjenstår på tidspunktet for
+denne statuslinjen.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-20 (**UA-5 «DEVELOPER & CLOUD CONTROL PLANE» — D-97 GitHub Rate-Limit Controller
 v1 bygget (throttling trygt oppdaget/koordinert/utsatt, IKKE eliminert).** PR #37 (D-96) er MERGET til
 main (merge-commit `65b322c62b289525ae2ac7edba9e14b7fc0aa0ba`, post-merge-CI bekreftet grønn). Ordren
