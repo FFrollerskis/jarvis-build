@@ -1,5 +1,47 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-21 (**PRODUCTION REAL CODING AGENT / TESTED-FIX PIPELINE WIRING v1 (D-102) —
+produksjons-wiring av `createCodingHandler`/EKTE `ClaudeCodeAgent` i `apps/api/src/worker-main.ts`, IKKE
+en ny UA-5-kapabilitet, IKKE live ende-til-ende-verifisert.** PR #42 (D-101) er MERGET til main
+(merge-commit `147dd84`, origin/main HEAD bekreftet `147dd842d6fff7ab7e18e717662dea361bce9bf2` FØR denne
+sliceen startet). FØR denne sliceen (fersk repo-sannhet fra D-101): `PRODUCTION_CODING_HANDLER_WIRED=false`,
+`PRODUCTION_CODING_AGENT_WIRED=false`, `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE=false` -
+`createCodingHandler` hadde INGEN produksjons-callere. **Wiret nå inn:** `worker.register("coding",
+withSecretRedaction(createCodingHandler({...}), [ANTHROPIC_API_KEY, JARVIS_GITHUB_TOKEN]))` på SAMME
+`InProcessWorker` som `"executive"`/`"knowledge-ingest-email"` i `worker-main.ts` - gjenbruker samme
+sandbox (`ProcessSandboxRunner`, produksjonsdefault), samme `ArtifactStore(pool)`, samme `toolGateway`
+(arver D-97 rate-limiting). ABSOLUTT SIKKERHETSREGEL bevart: `ScriptedCodingAgent` verken importert eller
+instansiert - EKTE `ClaudeCodeAgent` (D-96/D-100/D-101) brukt; mangler credential feiler strukturelt
+lukket (`claude_code_not_configured`), ALDRI stille fall til Scripted, ALDRI fabrikkert kode/PR.
+`EnvSecretProvider` gjenbrukt uendret for `ANTHROPIC_API_KEY` - INGEN nytt credential-lager.
+`identityFor` bruker jobbens EGEN `owner_person_id`/`tenant_id` (kodelest nødvendig: produksjonens
+`PolicyGateway` har INGEN `mandates`, klasse C auto-ALLOW skjer KUN via SOVEREIGN-identitetsmatch).
+D-94-klasser bekreftet uendret (`create_pr`=C, `merge_pr`=D) - INGEN auto-merge. Minimal ny inngang:
+eksisterende `TaskService.submit()` (null produksjons-callere før) eksponert som `POST /tasks/submit` i
+`server.ts`, gjenbruker SAMME `TaskService`-instans som `ConversationEngine`. Nytt forsvar-i-dybden:
+`withSecretRedaction()` i `coding.ts` redigerer kjente hemmeligheter fra thrown-feil FØR
+`tasks.last_error`. Genuint pre-eksisterende hull lukket: `modules/tasks/src/index.ts` manglet
+`pr-publisher.ts`-re-eksport siden D-95 (fikset additivt). 22 nye tester i 3 nye filer, inkl.
+`coding-production-wiring.test.ts` (5, EKTE embedded-Postgres + EKTE HTTP-server + EKTE git-bare-repo -
+Test A beviser `/tasks/submit`→queue→worker→`createCodingHandler`→EKTE `ClaudeCodeAgent` nåbar og feiler
+korrekt lukket uten credential; Test D beviser hele suksessveien via DEN SAMME produksjonsfunksjonen).
+Full suite `TESTS_AFTER=2000`/`TEST_FILES_AFTER=127` (opp fra `TESTS_BEFORE=1978`/`TEST_FILES_BEFORE=124`),
+`pnpm -w typecheck` 18/18 rent, `pnpm -w lint` rent, ingen regresjon. **ÆRLIG:** dette kjøremiljøet har
+INGEN `ANTHROPIC_API_KEY`/`JARVIS_GITHUB_TOKEN`/`JARVIS_CLAUDE_BIN` konfigurert (kun sjekket som boolsk
+tilstedeværelse) - ekte live ende-til-ende-kjøring (ekte Anthropic-kall + ekte GitHub-PR) var derfor IKKE
+mulig her. `HOST_ACTION_REQUIRED=true` rapportert i stedet for fabrikkert bevis.
+`PRODUCTION_CODING_HANDLER_WIRED=true`/`PRODUCTION_CODING_AGENT_WIRED=true` (strukturelt OG
+kjøretids-bevist), men `TESTED_FIX_PIPELINE_PRODUCTION_REACHABLE` forblir IKKE live-verifisert
+ende-til-ende. **UA-5 kriterium 2 forblir `PARTIAL`** - gap presist avgrenset til ekte
+Anthropic-/GitHub-credential på Tobias sin vert pluss én eierautorisert live-aksept-kjøring mot et
+disponibelt sandbox-repo. Kriterium 1=NOT_STARTED, 3=PARTIAL, 4=PARTIAL uendret.
+`UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Se D-102 i DECISIONS_AND_ASSUMPTIONS.md for
+full detalj. Branch `claude/ua5-production-coding-wiring`, draft PR opprettes ved slutten av denne
+sliceen - IKKE merget. Neste faktiske UA-5-gap: ekte live host-aksept-kjøring (krever
+`ANTHROPIC_API_KEY`+`JARVIS_CLAUDE_BIN`+`JARVIS_GITHUB_TOKEN` på Tobias sin vert).
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**REAL CODING AGENT LIVE QUALITY VERIFICATION + HONEST-NOOP EVAL REPAIR
 (D-101) — EVIDENSKANONISERING + SMAL harness-korrekthetsreparasjon, IKKE en ny UA-5-kapabilitet, IKKE
 produksjonskobling.** PR #41 (D-100) er MERGET til main (merge-commit `4c02f99`, post-merge-CI bekreftet

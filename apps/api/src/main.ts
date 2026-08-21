@@ -224,6 +224,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     })
   );
 
+  // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av BÅDE
+  // `ConversationEngine` (eksisterende `tasks.create`-goal-only-vei) OG den
+  // nye `/tasks/submit`-HTTP-ruten (full `JobContract`, inkl. `agent_profile:
+  // "coding"`) - ALDRI to parallelle `TaskService`-konstruksjoner mot samme pool.
+  const taskService = new TaskService(pool, queue, policy);
   const deps: ApiDeps = {
     identity: new IdentityService(pool),
     devices: new DeviceService(pool),
@@ -234,11 +239,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     sessions: new SessionService(pool),
     policy,
     worker,
+    tasks: taskService,
     conversation: new ConversationEngine({
       messages: new MessageStore(pool),
       context: new ContextBuilder(pool),
       gateway,
-      tasks: new TaskService(pool, queue, policy),
+      tasks: taskService,
       worker,
       trace,
       memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
