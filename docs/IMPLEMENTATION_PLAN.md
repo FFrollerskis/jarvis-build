@@ -2556,6 +2556,45 @@ preferanselager), `AiCollaboration` automatisk TaskEngine-trigger (distinkt verk
 spesifikt Council-auto-trigger). `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Samme PR #51, ikke ny
 PR, IKKE merget. INGEN UA-6. Full detalj: D-106 HOST-FIX i DECISIONS_AND_ASSUMPTIONS.md.
 
+**D-106 HOST-FIX 2 (2026-08-22, Council Gemma-familie-mismatch, EGEN reparasjons-PR fra `main` - PR #51 er
+allerede merget - AMENDMENT ikke ny D-nummer):** etter at Tobias fikk sin lokale Gemma-runtime live (RTX
+4070, Ollama, `gemma3:4b`), identifiserte han at `AiCouncil` hardkodet `gemma_hosted` som Gemma-familiens
+Council-medlem (`DEFAULT_COUNCIL_MEMBERS`), mens den faktiske kanoniske lokale runtimen er `gemma_local` -
+et strukturelt mismatch. Reparert: `DEFAULT_COUNCIL_MEMBERS` erstattet med `CANONICAL_COUNCIL_FAMILIES`
+(`"gemma"` er nå en FAMILIE-label, ikke en provider-identitet) + ny privat
+`AiCouncil.resolveGemmaFamilyProvider(paid_models_allowed?, sensitivity?)` som løser familiens KONKRETE
+Council-medlem DYNAMISK per kjøring, 100% deterministisk Jarvis-kode (§35): `gemma_local` FORETRUKKET når
+konfigurert OG helsetilstand ikke `UNAVAILABLE` (samme regel `AiRouter` bruker for Gemma-first-ruting) ->
+ellers `gemma_hosted` SOM FALLBACK - KUN når konfigurert, helse ikke `UNAVAILABLE`,
+`paid_models_allowed!==false`, OG `sensitivity==="PUBLIC_OR_LOW_SENSITIVITY"` (D-81s eksisterende
+`isSensitivityEligible()`-regel gjenbrukt UENDRET, nå eksportert fra `router.ts` - ALDRI duplisert) ->
+ellers Gemma-familien er `unavailable`, seedet EKSPLISITT inn i `unavailable_members` FØR runde 1 i det
+hele tatt forsøkes, slik at `full_council` korrekt blir `false` i stedet for den tidligere falske `true`
+for en aldri-forsøkt familie. Gemma telles ALDRI som to medlemmer - `members`-listen inneholder ENTEN
+`gemma_local` ELLER `gemma_hosted`, aldri begge. Ny `CouncilResult.provenance.gemma_family_provider`-felt
+registrerer AUDITERBART hvilken konkret provider som faktisk representerte familien. Dynamisk oppløsning
+gjelder KUN default-veien (`ConversationEngine` sender ALDRI `members` eksplisitt - urørt av denne
+reparasjonen, BÅDE eksplisitt bruker-trigger OG automatisk høy-innvirkning-trigger går uendret til SAMME
+Council). Eksplisitt `members`-kall (alle 12 opprinnelige D-106-tester) 100% uendret, ingen
+familie-spesialhåndtering. **Testdekning (9 nye tester, `council.test.ts` M-T):** gemma_local
+foretrukket+frisk; helse-basert fallback til gemma_hosted når sensitivitet kvalifisert; udefinert
+sensitivitet -> gemma_hosted IKKE brukt (D-81-fail-safe respektert for Council også); `paid_models_allowed=
+false` blokkerer betalt fallback selv med sensitivitet kvalifisert; verken backend konfigurert -> familie
+unavailable, de fire andre familiene uendret; `requireAllFive=true` + familie unresolved ->
+`IncompleteCouncilError` fail-closed; familien telles nøyaktig én gang selv når begge backends er friske
+samtidig; rundeprotokollen (uavhengig runde 1/kryss-kritikk/revisjon/syntese) 100% uendret i default-veien;
+eksplisitt `members` fortsatt bakoverkompatibel. Alle 12 opprinnelige tester uendret grønne. `pnpm -w
+typecheck` 19/19 rent, `pnpm -w lint` rent. **Ærlig gjenværende nyanse:** `gemma_hosted`-fallback krever
+eksplisitt `sensitivity` satt til `PUBLIC_OR_LOW_SENSITIVITY` i Council-kallet - `ConversationEngine` setter
+i dag ALDRI dette eksplisitt, så i PRAKSIS vil gemma_hosted-fallback sjelden faktisk kvalifisere via denne
+veien per nå. Dette er D-81s BEVISSTE fail-safe-holdning som fortsatt håndheves korrekt (udefinert
+sensitivitet skal ALDRI stille kvalifisere en delt gratis-tier-leverandør), IKKE en ny begrensning innført
+av denne reparasjonen - en fremtidig utvidelse av `ConversationEngine` til å sette `sensitivity` eksplisitt
+for Council-kall er en mulig, IKKE-blokkerende fremtidig forbedring. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=
+false` uendret. Egen, fokusert reparasjons-PR fra `main`, IKKE PR #51 (allerede merget) - INGEN uvedkommende
+endringer blandet inn. PR opprettes som draft, IKKE merget. INGEN UA-6. Full detalj: D-106 HOST-FIX 2 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
 akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha

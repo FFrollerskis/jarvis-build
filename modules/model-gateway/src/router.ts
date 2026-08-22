@@ -120,8 +120,13 @@ const CHEAP_PURPOSES: ModelPurpose[] = ["QUICK_CLASSIFICATION", "BACKGROUND"];
  * `PRIVATE`/`BUSINESS_CONFIDENTIAL` = `hosted_free_tier`-providere ekskluderes
  * (dekket av førstesjekken over); øvrige, allerede betrodde betalte
  * sky-providere forblir kvalifisert, uendret fra D-80.
+ *
+ * D-106 HOST-FIX 2: eksportert (var privat) slik at `AiCouncil` sin
+ * dynamiske Gemma-familie-oppløsning (`council.ts`) kan gjenbruke NØYAKTIG
+ * DENNE regelen for `gemma_hosted`-kvalifisering, i stedet for å duplisere
+ * sensitivitetslogikken en gang til (§"aldri en parallell sikkerhetsvei").
  */
-function isSensitivityEligible(profile: ModelProfile, sensitivity: DataSensitivity | undefined): boolean {
+export function isSensitivityEligible(profile: ModelProfile, sensitivity: DataSensitivity | undefined): boolean {
   if (profile.hosted_free_tier && sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY") return false;
   if (!sensitivity || sensitivity === "PUBLIC_OR_LOW_SENSITIVITY") return true;
   if (sensitivity === "SECRET_RESTRICTED") return profile.locality === "local";

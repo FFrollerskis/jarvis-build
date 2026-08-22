@@ -258,3 +258,133 @@ describe("D-106 AI Council: kryss-kritikk og revisjon (runde 2/3)", () => {
     expect(round2Prompts["openai"]).toContain("svar-anthropic");
   });
 });
+
+/**
+ * D-106 HOST-FIX 2 (§"Council Gemma family mismatch", 2026-08-22): beviser at
+ * Gemma-familien løses DYNAMISK (gemma_local foretrukket, gemma_hosted kun
+ * fallback) NÅR `members` IKKE er eksplisitt oppgitt - den DEFAULT-veien
+ * `ConversationEngine` faktisk bruker for BÅDE eksplisitt OG automatisk
+ * høy-innvirkning-Council-trigger (§"høy-innvirkning-auto-trigger må
+ * fortsette å nå SAMME Council-implementasjon" - conversation.ts sender
+ * ALDRI `members` til `council.run()`, uendret av denne reparasjonen -
+ * strukturelt bevist ved at conversation.ts ikke er rørt i det hele tatt).
+ * ALLE eksisterende tester over (A-L) bruker eksplisitt `members:` og beviser
+ * dermed at rundeprotokollen (uavhengig runde 1/kryss-kritikk/revisjon/
+ * syntese) forblir UENDRET av denne reparasjonen.
+ */
+describe("D-106 HOST-FIX 2: dynamisk Gemma-familie-oppløsning (default fem-familie-vei)", () => {
+  function fiveFamilyGateway(opts: {
+    includeGemmaLocal?: boolean;
+    includeGemmaHosted?: boolean;
+    markGemmaLocalUnavailable?: boolean;
+  }): { gateway: ModelGateway; council: AiCouncil } {
+    const providers: ModelProviderAdapter[] = ["anthropic", "openai", "gemini", "kimi"].map((n) => buildMember(n, `svar-${n}`));
+    if (opts.includeGemmaLocal !== false) providers.push(buildMember("gemma_local", "svar-gemma_local"));
+    if (opts.includeGemmaHosted) providers.push(buildMember("gemma_hosted", "svar-gemma_hosted"));
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+    if (opts.markGemmaLocalUnavailable) {
+      // UNAVAILABLE_THRESHOLD=3 i provider-health.ts - tre påfølgende feil gir UNAVAILABLE.
+      gateway.health.recordFailure("gemma_local", "server", "simulert nedetid");
+      gateway.health.recordFailure("gemma_local", "server", "simulert nedetid");
+      gateway.health.recordFailure("gemma_local", "server", "simulert nedetid");
+    }
+    return { gateway, council: new AiCouncil(gateway) };
+  }
+
+  it("M: gemma_local konfigurert+frisk -> Council bruker gemma_local (foretrukket, aldri gemma_hosted samtidig)", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: true });
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?" });
+    expect(result.provenance.gemma_family_provider).toBe("gemma_local");
+    expect(result.provenance.round1.map((r) => r.provider).sort()).toEqual(["anthropic", "gemini", "gemma_local", "kimi", "openai"]);
+    expect(result.provenance.round1.some((r) => r.provider === "gemma_hosted")).toBe(false);
+  });
+
+  it("N: gemma_local UNAVAILABLE (helse) -> gemma_hosted brukes som fallback når konfigurert/tillatt/sensitivitet-kvalifisert", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: true, markGemmaLocalUnavailable: true });
+    // gemma_hosted er hosted_free_tier (D-81 P0-sikkerhetsfiks, router.ts) - krever EKSPLISITT
+    // sensitivity="PUBLIC_OR_LOW_SENSITIVITY" for å kvalifisere, samme regel gjenbrukt uendret her.
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?", sensitivity: "PUBLIC_OR_LOW_SENSITIVITY" });
+    expect(result.provenance.gemma_family_provider).toBe("gemma_hosted");
+    expect(result.provenance.round1.some((r) => r.provider === "gemma_local")).toBe(false);
+    expect(result.provenance.round1.some((r) => r.provider === "gemma_hosted")).toBe(true);
+  });
+
+  it("N2: gemma_local UNAVAILABLE + udefinert sensitivity -> gemma_hosted IKKE brukt (D-81 fail-safe: udefinert sensitivitet kvalifiserer ALDRI en hosted_free_tier-provider) - familien unavailable", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: true, markGemmaLocalUnavailable: true });
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?" });
+    expect(result.provenance.gemma_family_provider).toBeUndefined();
+    expect(result.provenance.full_council).toBe(false);
+    expect(result.provenance.unavailable_members).toEqual([
+      { provider: "gemma", reason: "gemma_local_unavailable_and_gemma_hosted_not_sensitivity_eligible" }
+    ]);
+  });
+
+  it("O: gemma_local UNAVAILABLE + paid_models_allowed=false (selv med sensitivitet kvalifisert) -> gemma_hosted (betalt) IKKE brukt for Gemma-familien", async () => {
+    // Merk: anthropic/openai/gemini/kimi er ALLE `locality:"cloud"` i den ekte
+    // CapabilityRegistry-en (samme registry testadapterne rutes gjennom via
+    // provider-navn) - `paid_models_allowed=false` avviser derfor OGSÅ dem her
+    // (korrekt, uendret router-oppførsel, IKKE noe denne reparasjonen endrer).
+    // Testen isolerer derfor KUN Gemma-familie-signalet via den kastede
+    // `IncompleteCouncilError` sin `.unavailable`-liste, ikke et fullført resultat.
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: true, markGemmaLocalUnavailable: true });
+    try {
+      await council.run({
+        tenant_id: "t1",
+        decision_context: "Skal vi X?",
+        paid_models_allowed: false,
+        sensitivity: "PUBLIC_OR_LOW_SENSITIVITY"
+      });
+      expect.unreachable("forventet IncompleteCouncilError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(IncompleteCouncilError);
+      const unavailable = (err as InstanceType<typeof IncompleteCouncilError>).unavailable;
+      expect(unavailable).toContainEqual({ provider: "gemma", reason: "gemma_local_unavailable_and_paid_models_disabled" });
+      expect(unavailable.some((u) => u.provider.startsWith("gemma_"))).toBe(false);
+    }
+  });
+
+  it("P: verken gemma_local eller gemma_hosted konfigurert -> Gemma-familien unavailable, FULL_COUNCIL=false, de fire andre familiene uendret", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: false, includeGemmaHosted: false });
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?" });
+    expect(result.provenance.gemma_family_provider).toBeUndefined();
+    expect(result.provenance.full_council).toBe(false);
+    expect(result.provenance.unavailable_members).toEqual([
+      { provider: "gemma", reason: "neither_gemma_local_nor_gemma_hosted_available" }
+    ]);
+    expect(result.provenance.round1.map((r) => r.provider).sort()).toEqual(["anthropic", "gemini", "kimi", "openai"]);
+  });
+
+  it("Q: requireAllFive=true + Gemma-familien unresolved -> IncompleteCouncilError (fail-closed, ALDRI en falsk full Council)", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: false, includeGemmaHosted: false });
+    await expect(council.run({ tenant_id: "t1", decision_context: "Skal vi X?", requireAllFive: true })).rejects.toThrow(
+      IncompleteCouncilError
+    );
+  });
+
+  it("R: Gemma-familien telles NØYAKTIG én gang selv når BÅDE gemma_local OG gemma_hosted er konfigurert+friske samtidig", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: true });
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?" });
+    const gemmaMembers = result.provenance.round1.filter((r) => r.provider.startsWith("gemma"));
+    expect(gemmaMembers).toHaveLength(1);
+    expect(result.provenance.requested_members).toHaveLength(5);
+  });
+
+  it("S: rundeprotokollen (uavhengig runde 1, kryss-kritikk, revisjon, syntese) forblir UENDRET i default-veien - alle fem svarer, konsensus beregnes", async () => {
+    const { council } = fiveFamilyGateway({ includeGemmaLocal: true, includeGemmaHosted: false });
+    const result = await council.run({ tenant_id: "t1", decision_context: "Skal vi X?" });
+    expect(result.provenance.full_council).toBe(true);
+    expect(result.provenance.round1).toHaveLength(5);
+    expect(result.provenance.round2).toHaveLength(5);
+    expect(result.provenance.round3).toHaveLength(5);
+    expect(result.consensus_status).toBe("CONSENSUS");
+  });
+
+  it("T: eksplisitt oppgitte `members` overstyrer FORTSATT dynamisk Gemma-oppløsning helt (bakoverkompatibel, ingen familie-spesialhåndtering)", async () => {
+    const providers = ["anthropic", "gemma_hosted"].map((n) => buildMember(n, `svar-${n}`));
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+    const council = new AiCouncil(gateway);
+    const result = await council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "gemma_hosted"] });
+    expect(result.provenance.gemma_family_provider).toBeUndefined();
+    expect(result.provenance.requested_members).toEqual(["anthropic", "gemma_hosted"]);
+  });
+});

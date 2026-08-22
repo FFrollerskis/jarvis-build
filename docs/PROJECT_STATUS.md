@@ -1,5 +1,49 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**D-106 HOST-FIX 2 — Council Gemma-familie-
+mismatch, EGEN reparasjons-PR fra `main` (PR #51 er allerede merget),
+AMENDMENT ikke nytt D-nummer.** Tobias fikk sin lokale Gemma-runtime live
+(RTX 4070, Ollama, `gemma3:4b`, `GEMMA_RUNTIME_LIVE_VERIFIED=true`) og
+identifiserte at `AiCouncil` hardkodet `gemma_hosted` som Gemma-familiens
+Council-medlem (`DEFAULT_COUNCIL_MEMBERS`), mens den faktiske kanoniske
+lokale runtimen er `gemma_local` - et strukturelt mismatch. **Reparert:**
+`DEFAULT_COUNCIL_MEMBERS` erstattet med `CANONICAL_COUNCIL_FAMILIES`
+(`"gemma"` er nå en FAMILIE-label) + ny privat
+`AiCouncil.resolveGemmaFamilyProvider()` som løser familiens KONKRETE
+medlem DYNAMISK per kjøring: `gemma_local` FORETRUKKET (konfigurert + helse
+ikke `UNAVAILABLE`) -> ellers `gemma_hosted` SOM FALLBACK (konfigurert +
+helse ikke `UNAVAILABLE` + `paid_models_allowed!==false` +
+`sensitivity==="PUBLIC_OR_LOW_SENSITIVITY"` - D-81s eksisterende
+`isSensitivityEligible()`-regel gjenbrukt uendret, nå eksportert fra
+`router.ts`) -> ellers familien er `unavailable` (seedet EKSPLISITT FØR
+runde 1, så `full_council` korrekt blir `false` i stedet for en tidligere
+falsk `true` for en aldri-forsøkt familie). Gemma telles ALDRI som to
+medlemmer. Ny `CouncilResult.provenance.gemma_family_provider`-felt
+registrerer hvilken konkret provider som faktisk representerte familien.
+Dynamisk oppløsning gjelder KUN default-veien (`ConversationEngine` sender
+ALDRI `members` eksplisitt - urørt av denne reparasjonen, BÅDE eksplisitt
+OG automatisk høy-innvirkning-trigger går uendret til SAMME Council).
+Eksplisitt `members`-kall (alle 12 opprinnelige D-106-tester) 100% uendret.
+**Testdekning:** +9 tester (`council.test.ts` M-T) - gemma_local
+foretrukket, helse-basert fallback, D-81-sensitivitet-fail-safe respektert
+for Council også, `paid_models_allowed=false` blokkerer betalt fallback,
+familie unavailable når ingen backend kvalifiserer, `requireAllFive`
+fail-closed, familien telles nøyaktig én gang, rundeprotokoll uendret,
+eksplisitt `members` fortsatt bakoverkompatibel. Alle 12 opprinnelige
+tester uendret grønne. `pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent.
+`COUNCIL_GEMMA_FAMILY_RESOLUTION_IMPLEMENTED=true`,
+`GEMMA_LOCAL_PREFERRED_FOR_COUNCIL=true`, `GEMMA_FAMILY_COUNTED_ONCE=true`,
+`FULL_COUNCIL_FAMILY_SEMANTICS=true`. Se D-106 HOST-FIX 2 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full detalj inkl. den ærlige
+begrensningen at `gemma_hosted`-fallback i praksis sjelden kvalifiserer
+per nå siden `ConversationEngine` aldri setter `sensitivity` eksplisitt
+(D-81s bevisste fail-safe, ikke en ny begrensning).
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Branch
+`claude/d106-council-gemma-family-resolution`, ny draft PR fra `main`,
+IKKE merget. INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-106 HOST-FIX — automatisk høy-innvirkning-
 beslutning-klassifisering for Council, samme PR #51, AMENDMENT ikke nytt
 D-nummer.** Tobias avviste det opprinnelige D-106-closeoutet: spesifikasjonen
