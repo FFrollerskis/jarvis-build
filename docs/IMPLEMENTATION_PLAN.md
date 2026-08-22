@@ -2496,6 +2496,39 @@ D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md` levert for at Tobias selv kan bevise dette
 daemon UTEN å røre produksjonscontainere. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny
 draft-PR, IKKE merget. Full detalj: D-105 i DECISIONS_AND_ASSUMPTIONS.md.
 
+### D-106: AI Mesh Council/Collaboration/lokal-Gemma-utvidelse (2026-08-22)
+
+Første kapabilitetsslice etter UA-5 canonical closeout, IKKE UA-6. "FØR DU KODER"-audit kjørt FØRST: D-79/
+D-80/D-81 ("AI Mesh Gemma-first") var ALLEREDE en moden, FIXED_SUITE_VERIFIED arkitektur (`AiRouter`/
+`CapabilityRegistry`/`ProviderHealthTracker`/budsjett/kost/trace/tool-loop-idempotens/critic-mønster) -
+`EXISTING_AI_MESH_AUDITED=true`, `D80_REUSED=true`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`. Denne
+sliceen UTVIDER, bygger IKKE en parallell AI Mesh. Genuint nytt: (1) `gemma_local` - Gemma kjørt LOKALT
+(RTX 4070-PC eller annen vertsmaskin) via SAMME `LocalOpenAiCompatibleAdapter` som `local_llm` (nå
+navn-konstruktør-injiserbar), distinkt fra hostet `gemma_hosted` (D-80). (2) `paid_models_allowed`-policy
+(`router.ts`/`CompleteInput`) - `false` begrenser til `locality=local`, fail-closed
+(`PaidModelsDisabledError`), gjelder også eksplisitt eier-override. (3) `providerPreference` (ordnet
+preferanseliste, f.eks. "bruk Gemma" -> `[gemma_local,gemma_hosted]`). (4) `override-parser.ts` - 100%
+deterministisk fraseparsing (ALDRI en LLM som tolker instruksjonen) for eksplisitte routing-fraser ("bruk
+bare Claude/OpenAI/Gemini/Kimi/Gemma", "bruk alle AI-ene", "ikke bruk betalte modeller", "bruk bare lokale
+modeller", "velg den beste modellen"), komponert inn i `ConversationEngine.handle()`. (5) `AiCouncil`
+(`council.ts`) - 3-runders protokoll (uavhengig runde 1 = anti-anchoring bevist strukturelt, kryss-kritikk
+runde 2, revisjon runde 3), ETT eksplisitt synteseanrop, `consensus_status` beregnet DETERMINISTISK i kode
+(aldri en selvrapportert modell-enum), degradert Council eksplisitt håndtert (`unavailable_members`/
+`full_council`), `requireAllFive` fail-closed (`IncompleteCouncilError`). (6) `AiCollaboration`
+(`collaboration.ts`) - deterministisk rolletildeling (kode, ikke LLM) -> parallelt arbeid -> kryssgjennomgang
+(aldri selvgjennomgang) -> syntese, opt-in revisjon/verifikasjon. Begge persisterer til de EKSISTERENDE
+`events`(`EventWriter`)/`artifacts`-tabellene - INGEN ny tabell. 65 nye tester i 6 nye filer (router/
+paid-models/providerPreference, override-parser, council, collaboration, ConversationEngine-wiring, mot
+fake `ModelGateway`-providere - ingen ekte nettverk). Full suite `TESTS_AFTER=2261`/`TEST_FILES_AFTER=150`
+(opp fra `≈2196`/`144`), typecheck/lint rent, én kjent embedded-Postgres parallell-CI-hook-timeout i en
+UBERØRT fil bevist som flake ved isolert kjøring (2/2 grønt alene). **Live-status:** OpenAI/Anthropic
+uendret; Gemini/Kimi/gemma_hosted `UNCONFIGURED` i dette miljøet (uendret fra D-80); `gemma_local`
+`HOST_RUNTIME_REQUIRED` - ny runbook `docs/runbooks/D106_LOCAL_GEMMA_HOST_ACCEPTANCE.md` levert for at
+Tobias selv kan verifisere mot RTX 4070-PC-en. Eksplisitt DEFERRED: automatisk høy-innvirkning-beslutning-
+klassifisering for Council (kun eksplisitt bruker-trigger bygget), tekst-override persisterer kun for
+gjeldende samtaletur (ikke sesjonsskopet), `AiCollaboration` ikke automatisk TaskEngine-trigger-
+klassifisert. Ny draft-PR, IKKE merget. INGEN UA-6. Full detalj: D-106 i DECISIONS_AND_ASSUMPTIONS.md.
+
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
 akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha

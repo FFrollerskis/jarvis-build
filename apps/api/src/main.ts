@@ -15,7 +15,7 @@ import {
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
-import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
+import { AiCouncil, ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
   GemmaHostedAdapter,
@@ -115,6 +115,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       new GeminiAdapter(),
       new GemmaHostedAdapter(),
       new LocalOpenAiCompatibleAdapter(),
+      // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): SAMME
+      // `LocalOpenAiCompatibleAdapter`-klasse som `local_llm` over, registrert
+      // EN GANG TIL under en distinkt provider-identitet (`gemma_local`) for
+      // Gemma kjørt lokalt (Tobias sin RTX 4070-PC, eller en annen dedikert
+      // vertsmaskin via et OpenAI-kompatibelt endepunkt) - `.available()`
+      // (URL satt) avgjør deltakelse, samme konvensjon som alle andre
+      // providere. Se `capability-registry.ts` sin `gemma_local`-profil.
+      new LocalOpenAiCompatibleAdapter(
+        process.env["JARVIS_GEMMA_LOCAL_URL"],
+        process.env["JARVIS_GEMMA_LOCAL_MODEL"] ?? "gemma-local",
+        undefined,
+        "gemma_local"
+      ),
       new KimiAdapter(),
       new OllamaAdapter(),
       new ScriptedAdapter()
@@ -126,6 +139,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       spend_approved: process.env["JARVIS_BUDGET_APPROVED"] === "true"
     }
   });
+  // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): egen
+  // orkestrering over SAMME `gateway`/`pool` - ingen ny modellkall-vei, ingen
+  // ny sikkerhetsvei (hvert Council-medlemsanrop går via `gateway.complete()`
+  // med SPECIFIC_PROVIDER-override, samme budsjett/kost/helse/trace/
+  // sensitivitet/paid_models_allowed-håndhevelse som alle andre kall).
+  const aiCouncil = new AiCouncil(gateway, pool);
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
   const ownerControls = new OwnerControls(killSwitch);
@@ -287,6 +306,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       worker,
       trace,
       memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
+      council: aiCouncil,
       // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
       // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
       // slik at tenant/delegation/authority følger den som faktisk snakker.

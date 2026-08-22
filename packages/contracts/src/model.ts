@@ -48,7 +48,11 @@ export const RoutingReasonSchema = z.enum([
   /** D-79 AI Mesh Gemma-first: sensitivitet ekskluderte gratis-tier-hostede kandidater. */
   "PRIVACY_RESTRICTED",
   /** D-79: sensitiv + lokal modell tilgjengelig - lokal foretrekkes fremfor sky (D-23). */
-  "PRIVACY_PREFERS_LOCAL"
+  "PRIVACY_PREFERS_LOCAL",
+  /** D-106: `paid_models_allowed=false` ekskluderte betalte/sky-kandidater fra planen. */
+  "PAID_MODELS_DISABLED",
+  /** D-106: eier-preferanserekkefølge (§"bruk Gemma") - første konfigurerte/kvalifiserte vant. */
+  "PROVIDER_PREFERENCE"
 ]);
 export type RoutingReason = z.infer<typeof RoutingReasonSchema>;
 

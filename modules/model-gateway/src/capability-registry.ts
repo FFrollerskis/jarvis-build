@@ -132,6 +132,32 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     hosted_free_tier: false
   },
   {
+    // D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): Gemma kjørt
+    // LOKALT (Tobias sin RTX 4070-PC, eller en annen dedikert vertsmaskin) via
+    // et OpenAI-kompatibelt endepunkt - SAMME `LocalOpenAiCompatibleAdapter`
+    // som `local_llm`, kun registrert under en distinkt provider-identitet
+    // (`JARVIS_GEMMA_LOCAL_URL`/`JARVIS_GEMMA_LOCAL_MODEL`) for å gi en
+    // nøyaktig capability-/kvalitetsprofil ISTEDENFOR den generiske
+    // `local_llm`-profilen. `quality_class=4` gjenspeiler SAMME
+    // modellfamilie som `gemma_hosted` (Tobias sin egen modellvalg via
+    // `JARVIS_GEMMA_LOCAL_MODEL`, IKKE en oppdiktet leverandørpåstand -
+    // D-41). `hosted_free_tier: false` (ALDRI sky-gratis-tier - dette er en
+    // helt annen personvern-kategori, D-79 §3: lokal inferens). Tool calling
+    // EKTE (samme `LocalOpenAiCompatibleAdapter`-mekanisme som `local_llm`).
+    // `context_tokens` konservativ (32k, samme som `local_llm`) inntil en
+    // faktisk vertskonfigurasjon er verifisert - ALDRI en oppdiktet stor
+    // kontekstpåstand.
+    provider: "gemma_local",
+    model: "gemma-local",
+    capabilities: ["text", "reasoning", "tool_calling", "structured_output"],
+    context_tokens: 32_000,
+    locality: "local",
+    cost_class: 1,
+    quality_class: 4,
+    latency_class: "medium",
+    hosted_free_tier: false
+  },
+  {
     provider: "kimi",
     model: "kimi-latest",
     capabilities: ["text", "reasoning", "tool_calling"],

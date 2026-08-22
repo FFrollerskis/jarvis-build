@@ -37,15 +37,28 @@ import {
  * lokale servere normalt implementerer akkurat dette skjemaet) - modellen
  * utfører ALDRI verktøy selv, samme `ToolGateway`/`PolicyGateway`-kjede som
  * alle andre providere (§12).
+ *
+ * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): `name` er nå
+ * konstruktør-injiserbar (default uendret `"local_llm"`) slik at DENNE SAMME,
+ * allerede testede HTTP-klienten kan registreres en gang til under en
+ * distinkt provider-identitet (`"gemma_local"`) for et Gemma-modell servert
+ * lokalt via et OpenAI-kompatibelt endepunkt (f.eks. Ollamas OpenAI-
+ * kompatible rute, llama.cpp, LM Studio) - se `capability-registry.ts` sin
+ * `gemma_local`-profil. INGEN ny adapterklasse, INGEN duplisert HTTP-logikk -
+ * kun en ny navngitt registrering, samme mønster som `gemma_hosted` gjenbruker
+ * `gemini.ts` sin API-flate under en egen identitet.
  */
 export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
-  readonly name: string = "local_llm";
+  readonly name: string;
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
     readonly model: string = process.env["LOCAL_LLM_MODEL"] ?? "local-model",
-    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 120_000)
-  ) {}
+    private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 120_000),
+    name: string = "local_llm"
+  ) {
+    this.name = name;
+  }
 
   available(): boolean {
     return Boolean(this.baseUrl);

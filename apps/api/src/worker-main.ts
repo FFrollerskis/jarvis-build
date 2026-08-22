@@ -67,6 +67,13 @@ const gateway = new ModelGateway({
     new GeminiAdapter(),
     new GemmaHostedAdapter(),
     new LocalOpenAiCompatibleAdapter(),
+    // D-106: samme lokal-Gemma-registrering som apps/api/src/main.ts - se der for full begrunnelse.
+    new LocalOpenAiCompatibleAdapter(
+      process.env["JARVIS_GEMMA_LOCAL_URL"],
+      process.env["JARVIS_GEMMA_LOCAL_MODEL"] ?? "gemma-local",
+      undefined,
+      "gemma_local"
+    ),
     new KimiAdapter(),
     new OllamaAdapter()
   ]

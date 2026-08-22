@@ -1,5 +1,57 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**D-106 — AI Mesh Council/Collaboration/lokal-
+Gemma-utvidelse. Første kapabilitetsslice etter UA-5 canonical closeout, IKKE
+UA-6.** `EXISTING_AI_MESH_AUDITED=true`, `D80_REUSED=true` (D-79/D-80/D-81 var
+ALLEREDE en moden, testet Gemma-first AI Mesh - deterministisk `AiRouter`,
+`CapabilityRegistry`, `ProviderHealthTracker`, budsjett/kost/trace, tool-loop-
+idempotens, ett-mot-ett critic-mønster; 7 fungerende provider-adaptere fantes
+allerede). `CORE_DEPENDENCY_DECISION_REQUIRED=false` (D-64-porten: ingen
+modell-leverandør ble en ny kjerneavhengighet). Genuint NYTT denne runden:
+(1) **`gemma_local`** - Gemma kjørt LOKALT (Tobias sin RTX 4070-PC eller annen
+dedikert vertsmaskin) via SAMME `LocalOpenAiCompatibleAdapter` som `local_llm`
+(nå navn-konstruktør-injiserbar), registrert under en distinkt profil, DISTINKT
+fra hostet `gemma_hosted` (D-80). (2) **`paid_models_allowed`-policy** i
+`router.ts`/`CompleteInput` - `false` begrenser til `locality=local`, fail-
+closed (`PaidModelsDisabledError`), gjelder også eksplisitt eier-override.
+(3) **`providerPreference`** (ordnet preferanseliste, f.eks. "bruk Gemma" ->
+`[gemma_local, gemma_hosted]`). (4) **`override-parser.ts`** - 100%
+deterministisk fraseparsing (aldri LLM) for "bruk bare Claude/OpenAI/Gemini/
+Kimi/Gemma", "bruk alle AI-ene", "ikke bruk betalte modeller", "bruk bare
+lokale modeller", "velg den beste modellen" - komponert inn i
+`ConversationEngine.handle()`, eksplisitt API-provider vinner alltid over en
+tekst-parset frase. (5) **`AiCouncil`** (`council.ts`) - 3-runders protokoll
+(uavhengig runde 1 = anti-anchoring bevist strukturelt, kryss-kritikk runde 2,
+revisjon runde 3), ETT eksplisitt synteseanrop, `consensus_status` beregnet
+DETERMINISTISK i kode fra modell-rapportert supporting/dissenting (aldri en
+selvrapportert enum), degradert Council håndtert eksplisitt
+(`full_council`/`unavailable_members`), `requireAllFive` fail-closed
+(`IncompleteCouncilError`). (6) **`AiCollaboration`** (`collaboration.ts`) -
+nedbrytning->deterministisk rolletildeling (kode, ikke LLM)->parallelt
+arbeid->kryssgjennomgang (aldri selvgjennomgang)->syntese, opt-in
+revisjon/verifikasjon. Begge persisterer strukturert tilstand til
+EKSISTERENDE `events`/`artifacts`-tabeller (gjenbruker `EventWriter`, INGEN ny
+tabell). Wired i `main.ts`/`worker-main.ts` (`gemma_local`-adapter,
+`AiCouncil` inn i `ConversationEngine`). **Testdekning:** 65 nye tester (13
+router/paid-models/providerPreference, 15 override-parser, 12 council, 12
+collaboration, 8 ConversationEngine-wiring, 5 registry) + full eksisterende
+suite grønn (ingen regresjon i D-79/D-80/D-81-relaterte suiter). **ÆRLIG LIVE-
+STATUS:** OpenAI/Anthropic tidligere live-bevist (uendret); Gemini/Kimi/
+Gemma-local `UNCONFIGURED`/`HOST_RUNTIME_REQUIRED` i dette miljøet (ingen
+nøkler/lokal vert konfigurert her) - se
+`docs/runbooks/D106_LOCAL_GEMMA_HOST_ACCEPTANCE.md` for Tobias sin egen
+verifisering av `gemma_local` mot RTX 4070-PC-en. **Eksplisitt DEFERRED
+(IKKE skjult):** automatisk "høy-innvirkning-beslutning"-klassifisering
+(kun eksplisitt brukertrigger for Council er bygget); tekst-override
+persisterer KUN for gjeldende samtaletur, ikke over fremtidige turer (krever
+et sesjonsskopet preferanselager, ikke bygget); `AiCollaboration` er ikke
+automatisk TaskEngine-trigger-klassifisert for "store oppgaver" - kun
+eksplisitt invokerbar. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret.
+Branch `claude/ai-mesh-council-collaboration`, draft PR, IKKE merget. INGEN
+UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-105 / UA-5 KANONISK CLOSEOUT — alle fire UA-5-
 kriterier nå `COMPLETE`, ingen kodeendring, ren dokumentasjons-/
 kanoniseringsoppdatering basert på Tobias sin EGEN kjøring av runbokens

@@ -1,6 +1,13 @@
 import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
-import { BudgetExceededError, type ModelGateway, type ToolExecutor, type TraceSink } from "@jarvis/model-gateway";
+import {
+  BudgetExceededError,
+  parseRoutingOverride,
+  type AiCouncil,
+  type ModelGateway,
+  type ToolExecutor,
+  type TraceSink
+} from "@jarvis/model-gateway";
 import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { randomUUID } from "node:crypto";
@@ -25,6 +32,16 @@ export interface ConversationDeps {
     definitions: ToolDefinition[];
     executorFor(identity: IdentityContext): ToolExecutor;
   };
+  /**
+   * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
+   * decision"-trigger): VALGFRITT - eksplisitt brukerfrase ("bruk AI-rådet",
+   * "spør alle AI-ene") rutes hit i stedet for normal chat NÅR konfigurert.
+   * Udefinert = IDENTISK oppførsel som før D-106 (frasen ignoreres, normal
+   * chat fortsetter - §23 migrasjonssikkerhet). Automatisk klassifisering av
+   * "høy-innvirkning-beslutning" (utover eksplisitt brukertrigger) er IKKE
+   * bygget i denne runden - se PROJECT_STATUS.md/D-106 for eksplisitt gap.
+   */
+  council?: AiCouncil;
 }
 
 export interface ChatReply {
@@ -88,6 +105,31 @@ export class ConversationEngine {
       return result;
     }
 
+    // D-106 (§"user routing overrides"): 100% deterministisk fraseparsing
+    // (aldri en LLM som tolker instruksjonen) - se override-parser.ts.
+    // Eksplisitt `provider`-parameter (API/voice-nivå-override) vinner
+    // ALLTID over en tekst-parset frase - mer spesifikk kilde vinner.
+    const override = parseRoutingOverride(text);
+    if (override?.triggerCouncil) {
+      if (!this.deps.council) {
+        const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
+        await this.deps.messages.save(identity, "assistant", reply);
+        onToken?.(reply);
+        return { reply, routed: "model" };
+      }
+      const result = await this.deps.council.run({
+        tenant_id: identity.tenant_id,
+        session_id: identity.session_id,
+        decision_context: text
+      });
+      const reply =
+        `${result.decision}\n\n(konsensus: ${result.consensus_status}, tillit: ${result.confidence}%` +
+        `${result.dissenting_models.length > 0 ? `, uenig: ${result.dissenting_models.join(", ")}` : ""})`;
+      await this.deps.messages.save(identity, "assistant", reply);
+      onToken?.(reply);
+      return { reply, routed: "model" };
+    }
+
     let partial = "";
     try {
       const context = await this.deps.context.build(identity);
@@ -103,7 +145,12 @@ export class ConversationEngine {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
-        ...(provider !== undefined ? { provider } : {}),
+        ...(provider !== undefined ? { provider } : override?.provider !== undefined ? { provider: override.provider } : {}),
+        ...(provider === undefined && override?.providerPreference !== undefined
+          ? { providerPreference: override.providerPreference }
+          : {}),
+        ...(provider === undefined && override?.mode !== undefined ? { mode: override.mode } : {}),
+        ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
         request: { system, messages: history, max_tokens: 1024 }
       };
       // D-30 live-funn: med tools konfigurert går BÅDE streaming- og JSON-banen

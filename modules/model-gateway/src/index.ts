@@ -5,3 +5,6 @@ export * from "./capability-registry.ts";
 export * from "./provider-health.ts";
 export * from "./router.ts";
 export * from "./pricing.ts";
+export * from "./override-parser.ts";
+export * from "./council.ts";
+export * from "./collaboration.ts";
