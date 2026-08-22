@@ -3,6 +3,7 @@ import type pg from "pg";
 import { EventWriter, withTenantTransaction } from "@jarvis/core";
 import type { DataSensitivity, JsonValue } from "@jarvis/contracts";
 import { ModelGateway, type CompleteInput } from "./model-gateway.ts";
+import { isSensitivityEligible } from "./router.ts";
 
 /**
  * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"AI Council"):
@@ -97,6 +98,16 @@ export interface CouncilResult {
     synthesis_provider: string;
     /** D-106 HOST-FIX: uendret kopi av `CouncilInput.trigger` - auditerbart hvorfor DENNE kjøringen skjedde. */
     trigger?: CouncilInput["trigger"];
+    /**
+     * D-106 HOST-FIX 2 (§"Council Gemma family mismatch"): satt KUN når `members`
+     * ikke ble eksplisitt oppgitt (den DEFAULT fem-familie-veien - eneste vei
+     * `ConversationEngine` bruker) - hvilken KONKRET provider (`gemma_local`/
+     * `gemma_hosted`) som faktisk representerte Gemma-familien i DENNE
+     * kjøringen. `undefined` når Gemma-familien ikke kunne løses til noen
+     * konkret provider (se `unavailable_members` for `provider: "gemma"`) -
+     * ALDRI en gjettet/antatt verdi.
+     */
+    gemma_family_provider?: string;
   };
 }
 
@@ -116,8 +127,19 @@ export class CouncilSynthesisError extends Error {
   }
 }
 
-/** D-106: de fem kanoniske modellfamiliene fra ordren. `gemma_hosted` default - kalleren kan sende `gemma_local` i `members` når lokal er foretrukket/tilgjengelig. */
-export const DEFAULT_COUNCIL_MEMBERS = ["anthropic", "openai", "gemini", "kimi", "gemma_hosted"];
+/**
+ * D-106 HOST-FIX 2 (§"Council Gemma family mismatch", 2026-08-22): de fem
+ * kanoniske Council-FAMILIENE. Gemma er BEVISST representert som "gemma" her
+ * (en familie-label, IKKE en providernavn/adapter-identitet) - familien har
+ * TO mulige konkrete backends (`gemma_local`/`gemma_hosted`), løst DYNAMISK
+ * per kjøring av `AiCouncil.resolveGemmaFamilyProvider()`, ALDRI en statisk
+ * antakelse. De fire andre familiene ER allerede sine egne konkrete
+ * providernavn (ingen tilsvarende tvetydighet).
+ */
+export const CANONICAL_COUNCIL_FAMILIES = ["anthropic", "openai", "gemini", "kimi", "gemma"] as const;
+
+/** De fire familiene som ALLTID er sine egne konkrete providernavn - Gemma-familiens konkrete medlem løses separat, se `resolveGemmaFamilyProvider()`. */
+const NON_GEMMA_DEFAULT_MEMBERS = ["anthropic", "openai", "gemini", "kimi"];
 
 const ROUND1_SCHEMA_HINT = `{"conclusion": string, "reasoning_summary": string, "assumptions": string[], "evidence_provenance": string[], "risks": string[], "confidence": number (0-100), "unresolved_questions": string[]}`;
 const ROUND2_SCHEMA_HINT = `{"critiques": [{"target_provider": string, "critique": string}]}`;
@@ -176,10 +198,77 @@ export class AiCouncil {
     private readonly pool?: pg.Pool
   ) {}
 
+  /**
+   * D-106 HOST-FIX 2 (§"Council Gemma family mismatch"): Gemma-familien har TO
+   * mulige konkrete backends (`gemma_local` på Tobias sin RTX 4070-vert /
+   * `gemma_hosted` via Googles Gemini API) - NØYAKTIG én av dem representerer
+   * familien for en gitt kjøring, ALDRI begge (§ordre-krav: "Never count
+   * local + hosted Gemma as two Council members"). Valget er 100%
+   * DETERMINISTISK Jarvis-kode (§35 - "en modell kan aldri velge seg selv"):
+   *   1. `gemma_local` FORETRUKKET når konfigurert OG helsetilstand IKKE er
+   *      UNAVAILABLE - SAMME "ikke UNAVAILABLE"-kvalifiseringsregel som
+   *      `AiRouter` selv bruker for ordinær Gemma-first-ruting (router.ts,
+   *      linje ~212) - ALDRI et krav om at helsen allerede må være LIVE (en
+   *      helt fersk prosess har ingen historikk ennå, samme presedens).
+   *   2. Ellers `gemma_hosted` SOM FALLBACK - KUN når konfigurert, helse ikke
+   *      UNAVAILABLE, `paid_models_allowed !== false` (hostet Gemma er en
+   *      BETALT leverandør - samme paid_models_allowed-policy-gate som resten
+   *      av D-106 sitt routing-lag), OG `sensitivity`-kvalifisert via DEN
+   *      EKSISTERENDE `isSensitivityEligible()`-regelen fra `router.ts`
+   *      (D-81 P0-sikkerhetsfiks - `gemma_hosted` er `hosted_free_tier`, som
+   *      KREVER eksplisitt `sensitivity === "PUBLIC_OR_LOW_SENSITIVITY"`;
+   *      udefinert sensitivitet kvalifiserer ALDRI. Gjenbrukt uendret, ALDRI
+   *      duplisert - en Council-beslutning skal ALDRI kunne lekke til en
+   *      delt gratis-tier-leverandør via en parallell, svakere sjekk).
+   *   3. Ellers INGEN konkret provider - familien er `unavailable` (kalleren,
+   *      `run()`, seeder DA en eksplisitt `{provider:"gemma", reason}`-
+   *      oppføring i `unavailable_members` FØR runde 1 i det hele tatt
+   *      forsøkes - ALDRI stille utelatt, ALDRI en falsk `full_council=true`).
+   */
+  private resolveGemmaFamilyProvider(
+    paid_models_allowed?: boolean,
+    sensitivity?: DataSensitivity
+  ): { provider?: "gemma_local" | "gemma_hosted"; reason?: string } {
+    const configured = new Set(this.gateway.listConfiguredProviders());
+    const isHealthy = (name: string): boolean => configured.has(name) && this.gateway.health.state(name, true) !== "UNAVAILABLE";
+    if (isHealthy("gemma_local")) {
+      return { provider: "gemma_local" };
+    }
+    const gemmaHostedProfile = this.gateway.capabilityRegistry.get("gemma_hosted");
+    const gemmaHostedSensitivityOk = gemmaHostedProfile === undefined || isSensitivityEligible(gemmaHostedProfile, sensitivity);
+    if (paid_models_allowed !== false && gemmaHostedSensitivityOk && isHealthy("gemma_hosted")) {
+      return { provider: "gemma_hosted" };
+    }
+    return {
+      reason:
+        paid_models_allowed === false && configured.has("gemma_hosted")
+          ? "gemma_local_unavailable_and_paid_models_disabled"
+          : configured.has("gemma_hosted") && !gemmaHostedSensitivityOk
+            ? "gemma_local_unavailable_and_gemma_hosted_not_sensitivity_eligible"
+            : "neither_gemma_local_nor_gemma_hosted_available"
+    };
+  }
+
   async run(input: CouncilInput): Promise<CouncilResult> {
     const councilId = `council-${randomUUID()}`;
-    const members = input.members ?? DEFAULT_COUNCIL_MEMBERS;
     const unavailable: Array<{ provider: string; reason: string }> = [];
+    let members: string[];
+    let gemmaFamilyProvider: string | undefined;
+    // D-106 HOST-FIX 2: dynamisk familie-oppløsning gjelder KUN den DEFAULT
+    // fem-familie-veien (`input.members` ikke oppgitt - eneste vei
+    // `ConversationEngine` faktisk bruker). En kaller som eksplisitt oppgir
+    // `members` (f.eks. eksisterende tester) beholder UENDRET, bokstavelig
+    // oppførsel - ingen Gemma-spesialhåndtering i det tilfellet.
+    if (input.members !== undefined) {
+      members = input.members;
+    } else {
+      const gemma = this.resolveGemmaFamilyProvider(input.paid_models_allowed, input.sensitivity);
+      gemmaFamilyProvider = gemma.provider;
+      members = gemma.provider ? [...NON_GEMMA_DEFAULT_MEMBERS, gemma.provider] : [...NON_GEMMA_DEFAULT_MEMBERS];
+      if (!gemma.provider) {
+        unavailable.push({ provider: "gemma", reason: gemma.reason ?? "gemma_family_unresolved" });
+      }
+    }
 
     const baseInput = (provider: string): CompleteInput => ({
       tenant_id: input.tenant_id,
@@ -410,7 +499,8 @@ export class AiCouncil {
         round2,
         round3,
         synthesis_provider: synthesisResult.provider,
-        ...(input.trigger !== undefined ? { trigger: input.trigger } : {})
+        ...(input.trigger !== undefined ? { trigger: input.trigger } : {}),
+        ...(gemmaFamilyProvider !== undefined ? { gemma_family_provider: gemmaFamilyProvider } : {})
       }
     };
     await this.persistEvent(input, councilId, "council_result", result as unknown as Record<string, unknown>);

@@ -75,3 +75,33 @@ runboken og reflekterer kun hvilke nøkler som faktisk er satt i ditt miljø.
 Kopier HELE output-blokken (alle seks `*_LIVE_STATUS=`-linjer) tilbake i
 samtalen med Claude Code. INGEN secrets/API-nøkler er en del av denne
 outputen (kun statusmarkører) - trygt å lime inn direkte.
+
+## Steg 5: forventet Council-oppførsel etter D-106 HOST-FIX 2 (Gemma-familie-mismatch)
+
+**Gjelder fra og med D-106 HOST-FIX 2** (`AiCouncil.resolveGemmaFamilyProvider()`,
+se D-106 HOST-FIX 2 i `docs/DECISIONS_AND_ASSUMPTIONS.md`): når
+`GEMMA_LOCAL_LIVE_STATUS=LIVE_VERIFIED` (dvs. `gemma_local` er konfigurert
+OG helsetilstand ikke `UNAVAILABLE` - typisk tilfelle rett etter en
+vellykket kjøring av dette scriptet), skal AI Council sin Gemma-familie-sete
+DETERMINISTISK løses til `gemma_local`, ALDRI `gemma_hosted` (Councilet
+brukte tidligere feilaktig `gemma_hosted` som en hardkodet default - dette
+er nettopp mismatchet D-106 HOST-FIX 2 reparerte).
+
+**På DIN nåværende vert** (etter `GEMMA_RUNTIME_LIVE_VERIFIED=true`), skal
+en FULL AI Mesh host-akseptanse (en separat, større akseptanse - IKKE en del
+av dette snevre Gemma-runtime-scriptet, se `d106-ai-mesh-host-acceptance.ts`
+når den kjøres) derfor eksplisitt forvente:
+
+```
+COUNCIL_GEMMA_PROVIDER=gemma_local
+```
+
+Dette leses av `CouncilResult.provenance.gemma_family_provider` etter en
+faktisk Council-kjøring (enten eksplisitt trigget - "bruk AI-rådet" - eller
+automatisk via høy-innvirkning-klassifisereren) - `gemma_family_provider`
+skal være PRESIST `"gemma_local"`, ALDRI `"gemma_hosted"` og ALDRI
+`undefined`, gitt at `GEMMA_LOCAL_LIVE_STATUS=LIVE_VERIFIED` fortsatt holder
+på kjøretidspunktet. Ser du `gemma_hosted` eller `undefined` i stedet TIL
+TROSS FOR at `gemma_local` var live-verifisert rett før - det er et reelt
+avvik (helsetilstanden kan ha endret seg mellom kjøringene, f.eks. Ollama
+stoppet) og bør rapporteres tilbake, IKKE stille godtas.
