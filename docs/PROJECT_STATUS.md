@@ -1,5 +1,51 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**D-105 / UA-5 KANONISK CLOSEOUT — alle fire UA-5-
+kriterier nå `COMPLETE`, ingen kodeendring, ren dokumentasjons-/
+kanoniseringsoppdatering basert på Tobias sin EGEN kjøring av runbokens
+nye §3.** Provider-sannhet (GitHub): `workflow_run_id=32593753550`,
+`head_sha=63c598ec693a57cf486da801aa4174197de1149e` (PR #49 sin egen
+merge-commit på main), `status=completed`/`conclusion=success`,
+`created_at`/`run_started_at=2026-08-22T19:27:20Z`. Ingestert via
+`POST /deployments/ingest/github`: `deployment_id=dep-8b9724e7-bc15-4631-
+a1b6-d7d64330b35f`, `tenant_id=tenant-personal`, `commit_sha` og
+`workflow_run_id` matcher provider EKSAKT, `deployed_at` matcher GitHub sitt
+`created_at`/`run_started_at` (IKKE `updated_at` - et annet felt, forventet
+avvik). Idempotens bevist live (`created=false` andre gang, samme
+`deployment_id`). Fersk hendelse `incident_id=inc-c37873f3-3a90-40c8-
+b22e-b011f8d65044`: `POST /incidents/correlate` returnerte `active_deployment`
+IKKE-null, eksakt matchende den ingesterte deploy-en; `suspect_deployment=
+null` fordi hendelsen IKKE hadde noe registrert bevis-tidsvindu - dette er
+`findSuspectDeployment()` sin KORREKTE deterministiske oppførsel, IKKE en
+mangel (INGEN kunstig bevis ble konstruert). **THEREFORE:**
+`DEPLOY_OR_VERSION_CORRELATION_LIVE=true`, `UA5_CRITERION_1=COMPLETE`.
+Sammen med allerede live-bevist `UA5_CRITERION_2=COMPLETE` (D-103 run-3),
+`UA5_CRITERION_3=COMPLETE` (§2, ekte sentinel-mutasjon+recovery MED
+uavhengig `docker inspect`-verifisering, produksjon utouched),
+`UA5_CRITERION_4=COMPLETE` (tidligere UA-5-slicer): **`UA5_IMPLEMENTATION_
+COMPLETE=true`, `UA5_CANONICAL_CLOSEOUT_READY=true`** - INGEN kriterium
+forblir `PARTIAL`. **Grenser UENDRET, IKKE overklamet:**
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` (kun den ene eksisterende
+eksakt-match-evidence-forfremmelsesregelen i `correlateIncident()`).
+`PRODUCTION_REDEPLOY_CONTAINER_SAFE=false`/`CURRENT_REDEPLOY_PRODUCTION_
+SAFE=false` UENDRET - `redeploy_container` forblir STRUKTURELT `DEFERRED`
+for produksjon (kun `jarvis-sentinel-*`), nåværende `rm -f`+`run -d`
+bevarer FORTSATT ikke mounts/miljøvariabler/nettverk/porter/restart-
+policy/healthcheck; sentinel-beviset over er et mekanikk-bevis for
+mutasjon+recovery, IKKE et produksjonssikkerhetsbevis for
+`redeploy_container`. `D41_FULL_USEFUL_DOCKER_CAPABILITY=PARTIAL` uendret
+(`stop_container`/`start_container` produksjons-reachable mot
+`JARVIS_DOCKER_MUTATION_TARGETS`, `redeploy_container` fortsatt DEFERRED -
+eksplisitt merket, ikke stille utelatt). Sovereign eier-autoritet (klasse D
+uten kunstig godkjenningssperre for eier) UENDRET. Branch
+`claude/d105-ua5-canonical-closeout`, ingen kodeendring - KUN
+`docs/DECISIONS_AND_ASSUMPTIONS.md`/`docs/PROJECT_STATUS.md`/`docs/
+runbooks/D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md`/`docs/IMPLEMENTATION_PLAN.md`/
+`docs/RUNTIME_GATES.md` oppdatert. INGEN nytt D-nummer. PR opprettes som
+draft, IKKE merget. INGEN UA-6, INGEN AI-Mesh-arbeid startet.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-105 HOST-FIX #2 — GitHub deployment-ingestion
 produksjons-callsite, siste gjenværende UA-5 kriterium 1-live-gap.** Tobias
 kjørte D105-runbokens §1/§2 selv mot ekte Windows + Docker Desktop:

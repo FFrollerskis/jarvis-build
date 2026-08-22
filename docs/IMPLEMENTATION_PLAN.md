@@ -2534,6 +2534,21 @@ forblir `false`/`UA5_CRITERION_1` forblir `PARTIAL` inntil Tobias kjører runbok
 deployment-ingestion-akseptanse) mot et ekte `tsworkflow/jarvisbuild`-workflow-run. Full detalj: D-105-raden
 (HOST-FIX #2-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
 
+**UA-5 KANONISK CLOSEOUT (2026-08-22, Tobias sin egen kjøring av runbokens §3):** ingesterte en ekte
+`tsworkflow/jarvisbuild`-Actions-kjøring (`workflow_run_id=32593753550`, `head_sha=63c598ec...` - PR #49 sin
+egen merge-commit), bekreftet idempotent (`created=false` andre gang), og `/incidents/correlate` returnerte
+en ikke-null `active_deployment` som eksakt matchet den ingesterte deploy-en (`suspect_deployment=null` var
+FORVENTET - ingen bevis-tidsvindu registrert på den ferske hendelsen, ikke en mangel).
+`DEPLOY_OR_VERSION_CORRELATION_LIVE=true`. `UA5_CRITERION_1=COMPLETE`. Sammen med allerede live-bevist
+`UA5_CRITERION_2=COMPLETE` (D-103 run-3), `UA5_CRITERION_3=COMPLETE` (§2 over), `UA5_CRITERION_4=COMPLETE`
+(tidligere UA-5-slicer): **`UA5_IMPLEMENTATION_COMPLETE=true`, `UA5_CANONICAL_CLOSEOUT_READY=true`** - alle
+fire kriterier er nå `COMPLETE`, INGEN forblir `PARTIAL`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET
+(kun den ene eksisterende eksakt-match-forfremmelsesregelen). `PRODUCTION_REDEPLOY_CONTAINER_SAFE=false`
+UENDRET - `redeploy_container` forblir DEFERRED for produksjon; sentinel-bevist mutasjon+recovery er et
+mekanikk-bevis, IKKE et produksjonssikkerhetsbevis for `redeploy_container`. INGEN kodeendring i denne
+closeouten - ren dokumentasjons-/kanoniseringsoppdatering. Full detalj: D-105-raden
+(«UA-5 KANONISK CLOSEOUT»-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
