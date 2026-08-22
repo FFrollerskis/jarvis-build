@@ -1,5 +1,38 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**D-106 HOST-FIX — automatisk høy-innvirkning-
+beslutning-klassifisering for Council, samme PR #51, AMENDMENT ikke nytt
+D-nummer.** Tobias avviste det opprinnelige D-106-closeoutet: spesifikasjonen
+krevde TO obligatoriske Council-trigger-kilder (eksplisitt bruker-trigger OG
+automatisk høy-innvirkning-klassifisering), men kun den første var bygget -
+`AI_COUNCIL_IMPLEMENTED=true` kunne derfor ikke stå med automatisk trigger
+listet som en akseptabel DEFERRED-begrensning. **Reparert:** ny 100%
+deterministisk klassifiserer (`decision-importance.ts`,
+`classifyDecisionImportance()` - INGEN modellkall, regex-mønstre over åtte
+harde + tre svake kategorier, versjonert `CLASSIFIER_VERSION`) klassifiserer
+til `ROUTINE`/`SIGNIFICANT`/`HIGH_IMPACT_DECISION`. Risikoklasse (A-D) og
+beslutnings-viktighet er BEVISST distinkte dimensjoner - klasse-D alene
+trigger IKKE Council. Trigger-presedens i `ConversationEngine.handle()`:
+eksplisitt undertrykkelse ("ikke bruk AI-rådet") > eksplisitt trigger ("bruk
+AI-rådet") > automatisk klassifiserer, alle auditerbare via nytt
+`CouncilInput.trigger`/`CouncilResult.provenance.trigger`-felt persistert til
+SAMME eksisterende `events`/`artifacts`-tabeller. Gjenbruker DEN EKSISTERENDE
+Council-implementasjonen uendret - ingen ny Council-vei. **Testdekning:** +34
+tester (20 nye `decision-importance.test.ts`, +3 `override-parser.test.ts`,
++11 `conversation-d106-overrides.test.ts`) - alle seks HIGH_IMPACT-eksemplene
+fra ordren, ni ROUTINE-negativer, tenant-isolasjon, determinisme, degradert-
+Council-fail-closed, eksisterende overrides/Gemma-first-ruting uendret. Full
+suite `TEST_FILES_AFTER=151`/`TESTS_AFTER=2295` (opp fra `150`/`2261`),
+`pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent, INGEN regresjon.
+`HIGH_IMPACT_CLASSIFIER_IMPLEMENTED=true`, `HIGH_IMPACT_COUNCIL_AUTO_TRIGGER=
+true`, `CLASS_D_NOT_EQUAL_COUNCIL=true`, `COUNCIL_TRIGGER_AUDITABLE=true`.
+Se D-106 HOST-FIX i `DECISIONS_AND_ASSUMPTIONS.md` for full detalj.
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Samme branch
+`claude/ai-mesh-council-collaboration`, samme PR #51, draft, IKKE merget.
+INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-106 — AI Mesh Council/Collaboration/lokal-
 Gemma-utvidelse. Første kapabilitetsslice etter UA-5 canonical closeout, IKKE
 UA-6.** `EXISTING_AI_MESH_AUDITED=true`, `D80_REUSED=true` (D-79/D-80/D-81 var

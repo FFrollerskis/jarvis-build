@@ -55,6 +55,22 @@ describe("D-106: parseRoutingOverride() - deterministisk fraseparsing", () => {
     expect(parseRoutingOverride("hva er klokken?")).toBeNull();
   });
 
+  it("P: 'ikke bruk AI-rådet' -> suppressCouncil=true (D-106 HOST-FIX, sjekket FØR triggerCouncil)", () => {
+    const result = parseRoutingOverride("ikke bruk AI-rådet på dette");
+    expect(result?.suppressCouncil).toBe(true);
+    expect(result?.triggerCouncil).toBeUndefined();
+  });
+
+  it("Q: \"don't use the council\" -> suppressCouncil=true", () => {
+    expect(parseRoutingOverride("don't use the council for this")?.suppressCouncil).toBe(true);
+  });
+
+  it("R: 'ikke bruk alle AI-ene' -> suppressCouncil=true (ikke feiltolket som 'bruk alle AI-ene')", () => {
+    const result = parseRoutingOverride("ikke bruk alle AI-ene her");
+    expect(result?.suppressCouncil).toBe(true);
+    expect(result?.triggerCouncil).toBeUndefined();
+  });
+
   it("M: Council-frasen sjekkes FØR enkelt-provider-frasene (unngår feiltolkning av 'AI-ene' som en provider)", () => {
     const result = parseRoutingOverride("bruk alle AI-ene, ikke bare Claude");
     expect(result?.triggerCouncil).toBe(true);

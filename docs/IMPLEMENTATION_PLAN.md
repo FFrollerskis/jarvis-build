@@ -2524,10 +2524,37 @@ fake `ModelGateway`-providere - ingen ekte nettverk). Full suite `TESTS_AFTER=22
 UBERØRT fil bevist som flake ved isolert kjøring (2/2 grønt alene). **Live-status:** OpenAI/Anthropic
 uendret; Gemini/Kimi/gemma_hosted `UNCONFIGURED` i dette miljøet (uendret fra D-80); `gemma_local`
 `HOST_RUNTIME_REQUIRED` - ny runbook `docs/runbooks/D106_LOCAL_GEMMA_HOST_ACCEPTANCE.md` levert for at
-Tobias selv kan verifisere mot RTX 4070-PC-en. Eksplisitt DEFERRED: automatisk høy-innvirkning-beslutning-
-klassifisering for Council (kun eksplisitt bruker-trigger bygget), tekst-override persisterer kun for
-gjeldende samtaletur (ikke sesjonsskopet), `AiCollaboration` ikke automatisk TaskEngine-trigger-
-klassifisert. Ny draft-PR, IKKE merget. INGEN UA-6. Full detalj: D-106 i DECISIONS_AND_ASSUMPTIONS.md.
+Tobias selv kan verifisere mot RTX 4070-PC-en. Eksplisitt DEFERRED (v1, korrigert av HOST-FIX under):
+automatisk høy-innvirkning-beslutning-klassifisering for Council (kun eksplisitt bruker-trigger bygget),
+tekst-override persisterer kun for gjeldende samtaletur (ikke sesjonsskopet), `AiCollaboration` ikke
+automatisk TaskEngine-trigger-klassifisert. Ny draft-PR, IKKE merget. INGEN UA-6. Full detalj: D-106 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-106 HOST-FIX (2026-08-22, automatisk høy-innvirkning-beslutning-klassifisering for Council, samme PR
+#51, AMENDMENT ikke ny D-nummer):** Tobias avviste v1-closeoutet - den godkjente spesifikasjonen krevde BÅDE
+eksplisitt bruker-trigger OG automatisk høy-innvirkning-klassifisering for Council, kun den første var
+bygget. Reparert med ny, 100% deterministisk klassifiserer (`decision-importance.ts`,
+`classifyDecisionImportance()` - INGEN modellkall, regex-mønstre over åtte harde + tre svake kategorier,
+versjonert `CLASSIFIER_VERSION`), som klassifiserer `ROUTINE`/`SIGNIFICANT`/`HIGH_IMPACT_DECISION`.
+Risikoklasse (A-D, `ToolGateway.capability_class`) og beslutnings-viktighet er BEVISST distinkte dimensjoner
+- klassifiseringsmodulen har INGEN referanse til `capability_class`, klasse-D alene trigger IKKE Council
+(bevist eksplisitt av test). Trigger-presedens i `ConversationEngine.handle()`: eksplisitt undertrykkelse
+("ikke bruk AI-rådet"/"don't use the council", ny `suppressCouncil`-gren i `override-parser.ts`, sjekket
+FØR triggerfrasen) vinner ALLTID - eierens autoritet begrenses ALDRI stille; deretter eksplisitt trigger
+(`trigger_source="explicit_user"`); deretter automatisk klassifiserer-resultat `HIGH_IMPACT_DECISION`
+(`trigger_source="high_impact_classifier"`) - IKKE stille undertrykt av en samtidig tvunget
+enkelt-provider-override. Gjenbruker DEN EKSISTERENDE Council-implementasjonen UENDRET (ingen ny
+Council-vei) - nytt valgfritt `CouncilInput.trigger`/`CouncilResult.provenance.trigger`-felt tredd gjennom
+SAMME eksisterende `events`/`artifacts`-persistens, full auditerbarhet. 34 nye tester (20
+`decision-importance.test.ts` - alle seks HIGH_IMPACT-eksempler fra ordren + ni ROUTINE-negativer + fem
+determinisme-/auditerbarhetstester; +3 `override-parser.test.ts`; +11 `conversation-d106-overrides.test.ts`
+- tenant-isolasjon, `paid_models_allowed`-interaksjon, degradert Council aldri falsk `full_council=true`,
+eksisterende overrides/Gemma-first-ruting uendret). Full suite `TEST_FILES_AFTER=151`/`TESTS_AFTER=2295`
+(opp fra `150`/`2261`), typecheck 19/19 rent, lint rent, INGEN regresjon. Gjenværende DEFERRED
+(ikke-blokkerende): tekst-override-persistens på tvers av samtaleturer (krever sesjonsskopet
+preferanselager), `AiCollaboration` automatisk TaskEngine-trigger (distinkt verktøy, ordren krevde
+spesifikt Council-auto-trigger). `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Samme PR #51, ikke ny
+PR, IKKE merget. INGEN UA-6. Full detalj: D-106 HOST-FIX i DECISIONS_AND_ASSUMPTIONS.md.
 
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en

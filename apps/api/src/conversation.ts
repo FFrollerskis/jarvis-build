@@ -2,9 +2,12 @@ import type { IdentityContext } from "@jarvis/contracts";
 import { ContextBuilder, MessageStore, fastRoute } from "@jarvis/core";
 import {
   BudgetExceededError,
+  classifyDecisionImportance,
   parseRoutingOverride,
   type AiCouncil,
+  type DecisionClassification,
   type ModelGateway,
+  type RoutingOverrideIntent,
   type ToolExecutor,
   type TraceSink
 } from "@jarvis/model-gateway";
@@ -34,12 +37,14 @@ export interface ConversationDeps {
   };
   /**
    * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse §"large
-   * decision"-trigger): VALGFRITT - eksplisitt brukerfrase ("bruk AI-rådet",
-   * "spør alle AI-ene") rutes hit i stedet for normal chat NÅR konfigurert.
-   * Udefinert = IDENTISK oppførsel som før D-106 (frasen ignoreres, normal
-   * chat fortsetter - §23 migrasjonssikkerhet). Automatisk klassifisering av
-   * "høy-innvirkning-beslutning" (utover eksplisitt brukertrigger) er IKKE
-   * bygget i denne runden - se PROJECT_STATUS.md/D-106 for eksplisitt gap.
+   * decision"-trigger, utvidet i HOST-FIX 2026-08-22 med automatisk høy-
+   * innvirkning-klassifisering): VALGFRITT. To distinkte trigger-kilder ruter
+   * hit i stedet for normal chat: (1) eksplisitt brukerfrase ("bruk AI-rådet",
+   * "spør alle AI-ene") - `trigger_source="explicit_user"`; (2) deterministisk
+   * høy-innvirkning-klassifisering (`decision-importance.ts`, INGEN LLM) -
+   * `trigger_source="high_impact_classifier"`. Udefinert = IDENTISK oppførsel
+   * som før D-106 (begge triggerkildene ignoreres, normal chat fortsetter -
+   * §23 migrasjonssikkerhet).
    */
   council?: AiCouncil;
 }
@@ -110,24 +115,48 @@ export class ConversationEngine {
     // Eksplisitt `provider`-parameter (API/voice-nivå-override) vinner
     // ALLTID over en tekst-parset frase - mer spesifikk kilde vinner.
     const override = parseRoutingOverride(text);
-    if (override?.triggerCouncil) {
-      if (!this.deps.council) {
-        const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
-        await this.deps.messages.save(identity, "assistant", reply);
-        onToken?.(reply);
-        return { reply, routed: "model" };
-      }
-      const result = await this.deps.council.run({
+
+    // D-106 HOST-FIX (§"LARGE-DECISION TRIGGER"): deterministisk høy-
+    // innvirkning-klassifisering - INGEN LLM avgjør dette, ren mønster-
+    // gjenkjenning (decision-importance.ts). Kjøres ALLTID (gratis, ingen
+    // modellkall) slik at klassifiseringen er auditerbar selv når den IKKE
+    // trigger Council (f.eks. spores i cost/kvalitetsanalyse senere).
+    const classification = classifyDecisionImportance(text);
+
+    // Trigger-presedens (§"USER OVERRIDES", eksplisitt logget, ALDRI en
+    // skjult begrensning på eierens autoritet):
+    //   1. Eksplisitt "ikke bruk AI-rådet"-undertrykkelse VINNER over ALT
+    //      annet - eieren kan alltid undertrykke, selv en policy-mandatert
+    //      høy-innvirkning-klassifisering (§"Do not invent hidden
+    //      restrictions on Tobias' owner authority").
+    //   2. Eksplisitt "bruk AI-rådet"-trigger.
+    //   3. Automatisk høy-innvirkning-klassifisering - en FORCED single-
+    //      provider-override (`override?.provider`) i SAMME melding
+    //      undertrykker den ALDRI stille (§"forced single-provider override
+    //      should not silently suppress a policy-mandated high-impact
+    //      Council") - Council trigges uansett, provider-override-feltene
+    //      ignoreres KUN for denne ene meldingen (routing til Council, ikke
+    //      til enkelt-provider-chat).
+    if (override?.suppressCouncil) {
+      await this.deps.trace.record({
+        trace_id: `trace-${randomUUID()}`,
+        kind: "council_suppressed",
+        name: "owner_explicit_suppression",
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
-        decision_context: text
+        at: new Date().toISOString(),
+        duration_ms: 0,
+        metadata: { matched_phrase: override.matched_phrase, decision_importance: classification.decision_importance }
       });
-      const reply =
-        `${result.decision}\n\n(konsensus: ${result.consensus_status}, tillit: ${result.confidence}%` +
-        `${result.dissenting_models.length > 0 ? `, uenig: ${result.dissenting_models.join(", ")}` : ""})`;
-      await this.deps.messages.save(identity, "assistant", reply);
-      onToken?.(reply);
-      return { reply, routed: "model" };
+    } else {
+      const triggerSource: "explicit_user" | "high_impact_classifier" | undefined = override?.triggerCouncil
+        ? "explicit_user"
+        : classification.decision_importance === "HIGH_IMPACT_DECISION"
+          ? "high_impact_classifier"
+          : undefined;
+      if (triggerSource) {
+        return this.runCouncil(identity, text, triggerSource, classification, override, onToken);
+      }
     }
 
     let partial = "";
@@ -208,6 +237,49 @@ export class ConversationEngine {
       }
       throw err;
     }
+  }
+
+  /**
+   * D-106 HOST-FIX (§"COUNCIL REQUIREMENT"): SAMME kanoniske `AiCouncil`
+   * (council.ts) for BEGGE trigger-kilder - ingen parallell Council-vei.
+   * `sensitivity`/`paid_models_allowed` fra en eventuell tekst-override
+   * videreføres UENDRET til Council-kjøringen (samme policy-håndhevelse som
+   * normal chat, §11 i order: "paid-model-disabled policy interaction is
+   * explicit and fail-closed/honest").
+   */
+  private async runCouncil(
+    identity: IdentityContext,
+    text: string,
+    triggerSource: "explicit_user" | "high_impact_classifier",
+    classification: DecisionClassification,
+    override: RoutingOverrideIntent | null,
+    onToken?: (t: string) => void
+  ): Promise<ChatReply> {
+    if (!this.deps.council) {
+      const reply = "AI-rådet er ikke konfigurert i denne kjøringen.";
+      await this.deps.messages.save(identity, "assistant", reply);
+      onToken?.(reply);
+      return { reply, routed: "model" };
+    }
+    const result = await this.deps.council.run({
+      tenant_id: identity.tenant_id,
+      session_id: identity.session_id,
+      decision_context: text,
+      ...(override?.paid_models_allowed !== undefined ? { paid_models_allowed: override.paid_models_allowed } : {}),
+      trigger: {
+        trigger_source: triggerSource,
+        decision_importance: classification.decision_importance,
+        trigger_reasons: classification.trigger_reasons,
+        matched_signals: classification.matched_signals,
+        classifier_version: classification.classifier_version
+      }
+    });
+    const reply =
+      `${result.decision}\n\n(konsensus: ${result.consensus_status}, tillit: ${result.confidence}%` +
+      `${result.dissenting_models.length > 0 ? `, uenig: ${result.dissenting_models.join(", ")}` : ""})`;
+    await this.deps.messages.save(identity, "assistant", reply);
+    onToken?.(reply);
+    return { reply, routed: "model" };
   }
 
   private async handleFastIntent(

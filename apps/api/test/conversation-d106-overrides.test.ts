@@ -195,3 +195,116 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     expect(captured?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
   });
 });
+
+/**
+ * D-106 HOST-FIX (§"LARGE-DECISION TRIGGER"): beviser at ConversationEngine
+ * FAKTISK ruter til AiCouncil for automatisk klassifiserte høy-innvirkning-
+ * meldinger, UTEN at brukeren må si "bruk AI-rådet" - jf. ordren "The user
+ * must NOT need to say 'use AI Council' in these cases."
+ */
+describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Council", () => {
+  it("I: arkitektur-beslutning trigger Council automatisk, med trigger_source='high_impact_classifier'", async () => {
+    let captured: unknown;
+    let completeCalled = false;
+    const engine = buildEngine({
+      onCouncilRun: (input) => (captured = input),
+      onComplete: () => (completeCalled = true)
+    });
+    await engine.handle(identity, "Should we replace Jarvis' canonical memory architecture?");
+    expect(completeCalled).toBe(false);
+    const input = captured as { trigger?: { trigger_source?: string; matched_signals?: unknown[] } };
+    expect(input.trigger?.trigger_source).toBe("high_impact_classifier");
+    expect(input.trigger?.matched_signals?.length).toBeGreaterThan(0);
+  });
+
+  it("J: stor finansiell beslutning trigger Council automatisk", async () => {
+    let councilCalled = false;
+    const engine = buildEngine({ onCouncilRun: () => (councilCalled = true) });
+    await engine.handle(identity, "Should we spend 800,000 NOK on this business acquisition?");
+    expect(councilCalled).toBe(true);
+  });
+
+  it("K: produksjon/sikkerhet-beslutning trigger Council automatisk", async () => {
+    let councilCalled = false;
+    const engine = buildEngine({ onCouncilRun: () => (councilCalled = true) });
+    await engine.handle(identity, "Should Jarvis rotate/revoke all production credentials?");
+    expect(councilCalled).toBe(true);
+  });
+
+  it("L: vanlig samtale trigger ALDRI Council automatisk", async () => {
+    let councilCalled = false;
+    let completeCalled = false;
+    const engine = buildEngine({
+      onCouncilRun: () => (councilCalled = true),
+      onComplete: () => (completeCalled = true)
+    });
+    await engine.handle(identity, "Can you brainstorm five taglines for our new product?");
+    expect(councilCalled).toBe(false);
+    expect(completeCalled).toBe(true);
+  });
+
+  it("M: normalt verktøykall-språk trigger ALDRI Council automatisk", async () => {
+    let councilCalled = false;
+    const engine = buildEngine({ onCouncilRun: () => (councilCalled = true) });
+    await engine.handle(identity, "Show me my calendar for tomorrow");
+    expect(councilCalled).toBe(false);
+  });
+
+  it("N: klasse D-flavored tekst UTEN høy-innvirkning-språk trigger ALDRI Council (risikoklasse != beslutnings-viktighet)", async () => {
+    let councilCalled = false;
+    const engine = buildEngine({ onCouncilRun: () => (councilCalled = true) });
+    await engine.handle(identity, "Restart the jarvis-sentinel-test container");
+    expect(councilCalled).toBe(false);
+  });
+
+  it("O: eksplisitt bruker-trigger ('bruk AI-rådet') gir trigger_source='explicit_user' (distinkt fra klassifiseringen)", async () => {
+    let captured: unknown;
+    const engine = buildEngine({ onCouncilRun: (input) => (captured = input) });
+    await engine.handle(identity, "bruk AI-rådet på dette");
+    const input = captured as { trigger?: { trigger_source?: string } };
+    expect(input.trigger?.trigger_source).toBe("explicit_user");
+  });
+
+  it("P: FORCED single-provider-override UNDERTRYKKER IKKE stille et policy-mandatert høy-innvirkning-Council-trigger", async () => {
+    let councilCalled = false;
+    let completeCalled = false;
+    const engine = buildEngine({
+      onCouncilRun: () => (councilCalled = true),
+      onComplete: () => (completeCalled = true)
+    });
+    // "bruk bare Claude" (provider-override) OG et høy-innvirkning-signal i SAMME melding
+    await engine.handle(identity, "bruk bare Claude - should we make this provider a core dependency?");
+    expect(councilCalled).toBe(true);
+    expect(completeCalled).toBe(false);
+  });
+
+  it("Q: eksplisitt 'ikke bruk AI-rådet' UNDERTRYKKER et ellers policy-mandatert høy-innvirkning-trigger, og undertrykkelsen er auditerbar", async () => {
+    let councilCalled = false;
+    let completeCalled = false;
+    const engine = buildEngine({
+      onCouncilRun: () => (councilCalled = true),
+      onComplete: () => (completeCalled = true)
+    });
+    const result = await engine.handle(identity, "ikke bruk AI-rådet - should we make this provider a core dependency?");
+    expect(councilCalled).toBe(false);
+    expect(completeCalled).toBe(true);
+    expect(result.routed).toBe("model");
+  });
+
+  it("R: tenant_id/session_id videreføres UENDRET til AiCouncil.run() ved automatisk trigger (tenant-isolasjon)", async () => {
+    let captured: unknown;
+    const engine = buildEngine({ onCouncilRun: (input) => (captured = input) });
+    await engine.handle(identity, "Should we migrate production from Postgres to another database?");
+    const input = captured as { tenant_id?: string; session_id?: string };
+    expect(input.tenant_id).toBe(identity.tenant_id);
+    expect(input.session_id).toBe(identity.session_id);
+  });
+
+  it("S: paid_models_allowed=false-policy videreføres til Council når den samtidig gjelder (fail-closed/ærlig interaksjon)", async () => {
+    let captured: unknown;
+    const engine = buildEngine({ onCouncilRun: (input) => (captured = input) });
+    await engine.handle(identity, "ikke bruk betalte modeller - should we make this provider a core dependency?");
+    const input = captured as { paid_models_allowed?: boolean };
+    expect(input.paid_models_allowed).toBe(false);
+  });
+});

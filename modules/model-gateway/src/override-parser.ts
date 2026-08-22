@@ -34,6 +34,17 @@ export interface RoutingOverrideIntent {
   providerPreference?: string[];
   paid_models_allowed?: boolean;
   triggerCouncil?: boolean;
+  /**
+   * D-106 HOST-FIX (§"USER OVERRIDES"): eksplisitt eier-frase om å IKKE bruke
+   * AI-rådet ("ikke bruk AI-rådet"/"don't use the council"). Sjekket FØR
+   * `COUNCIL_PATTERNS` (ellers ville "ikke bruk AI-rådet" feilaktig matchet
+   * "bruk AI-rådet" som substring). `ConversationEngine` bruker denne til å
+   * la eieren eksplisitt undertrykke et policy-mandatert høy-innvirkning-
+   * Council-triggeret (se `decision-importance.ts`) - ALDRI en skjult
+   * begrensning på eierens autoritet, kun en eksplisitt, auditerbar
+   * overstyring NÅR eieren faktisk sier det.
+   */
+  suppressCouncil?: boolean;
   /** Auditerbart: hvilken frase som faktisk trigget - aldri en LLM-generert forklaring. */
   matched_phrase: string;
 }
@@ -43,6 +54,14 @@ interface ProviderPhraseEntry {
   provider?: string;
   providerPreference?: string[];
 }
+
+const NO_COUNCIL_PATTERNS: RegExp[] = [
+  /\bikke\s+bruke?\s+ai[- ]?r[åa]det\b/i,
+  /\bikke\s+bruke?\s+alle\s+ai(-ene)?\b/i,
+  /\bikke\s+sp[øo]r\s+alle\s+ai(-ene)?\b/i,
+  /\bdon'?t\s+use\s+the\s+(ai\s+)?council\b/i,
+  /\bdo\s+not\s+use\s+the\s+(ai\s+)?council\b/i
+];
 
 const COUNCIL_PATTERNS: RegExp[] = [
   /\bbruke?\s+ai[- ]?r[åa]det\b/i,
@@ -98,6 +117,13 @@ function firstMatch(text: string, patterns: RegExp[]): string | undefined {
  * motstridende instruksjoner behandles ikke som en kombinasjon).
  */
 export function parseRoutingOverride(text: string): RoutingOverrideIntent | null {
+  // §"USER OVERRIDES": sjekkes FØR COUNCIL_PATTERNS - "ikke bruk AI-rådet"
+  // inneholder "bruk AI-rådet" som substring og ville ellers blitt feiltolket
+  // som en TRIGGER i stedet for en undertrykkelse.
+  const noCouncilMatch = firstMatch(text, NO_COUNCIL_PATTERNS);
+  if (noCouncilMatch) {
+    return { suppressCouncil: true, matched_phrase: noCouncilMatch };
+  }
   const councilMatch = firstMatch(text, COUNCIL_PATTERNS);
   if (councilMatch) {
     return { triggerCouncil: true, matched_phrase: councilMatch };

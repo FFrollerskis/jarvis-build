@@ -56,6 +56,23 @@ export interface CouncilInput {
   requireAllFive?: boolean;
   sensitivity?: DataSensitivity;
   paid_models_allowed?: boolean;
+  /**
+   * D-106 HOST-FIX (§"AUDITABILITY"): hvorfor denne Council-kjøringen faktisk
+   * skjer - `"explicit_user"` (bruker sa "bruk AI-rådet"-frasen) eller
+   * `"high_impact_classifier"` (deterministisk klassifisering,
+   * `decision-importance.ts`, matchet et høy-innvirkning-signal). VALGFRITT -
+   * kalleren (`ConversationEngine`) setter dette; `AiCouncil` selv avgjør
+   * ALDRI om den skal trigges - den kjører bare når `.run()` faktisk kalles.
+   * Persisteres UENDRET i `provenance.trigger` for et fullstendig auditerbart
+   * spor (§"No silent five-model spend").
+   */
+  trigger?: {
+    trigger_source: "explicit_user" | "high_impact_classifier";
+    decision_importance?: string;
+    trigger_reasons?: string[];
+    matched_signals?: Array<{ name: string; matched_text: string }>;
+    classifier_version?: string;
+  };
 }
 
 export interface CouncilResult {
@@ -78,6 +95,8 @@ export interface CouncilResult {
     round2: Array<{ provider: string; critiques: CouncilCritiqueEntry[] }>;
     round3: CouncilRoundAnswer[];
     synthesis_provider: string;
+    /** D-106 HOST-FIX: uendret kopi av `CouncilInput.trigger` - auditerbart hvorfor DENNE kjøringen skjedde. */
+    trigger?: CouncilInput["trigger"];
   };
 }
 
@@ -390,7 +409,8 @@ export class AiCouncil {
         round1,
         round2,
         round3,
-        synthesis_provider: synthesisResult.provider
+        synthesis_provider: synthesisResult.provider,
+        ...(input.trigger !== undefined ? { trigger: input.trigger } : {})
       }
     };
     await this.persistEvent(input, councilId, "council_result", result as unknown as Record<string, unknown>);
