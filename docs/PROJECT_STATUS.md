@@ -37,8 +37,10 @@ men `DEPLOY_OR_VERSION_CORRELATION_LIVE` forblir `false`/`UA5_CRITERION_1`
 forblir `PARTIAL` inntil Tobias kjører runbokens nye §3 mot et ekte
 `tsworkflow/jarvisbuild`-workflow-run. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED`
 uendret `false`. Branch `claude/d105-github-deployment-ingestion`, commit
-`532baf8`, PR opprettes som draft - IKKE merget. Full detalj: D-105-raden
-(HOST-FIX #2-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
+`532baf8` (+ docs-commit `25ab255`), PR #49
+(https://github.com/tsworkflow/jarvisbuild/pull/49) - draft, IKKE merget.
+Full detalj: D-105-raden (HOST-FIX #2-avsnittet) i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 ## Runden før det
 
