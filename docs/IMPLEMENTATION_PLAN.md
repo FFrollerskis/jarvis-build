@@ -2465,6 +2465,51 @@ dokumentert prosess-lokalitetsbegrensning, samme klasse som eksisterende `KillSw
 IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny draft-PR, IKKE merget. Full detalj: D-104 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+### D-105: UA-5 Production Operations Control Plane v2 (2026-08-22)
+
+Lukker D-104s kjente kriterium 1/3-hull. D-64-porten kjørt FØRST (repo-audit): ingen Docker-container-
+styring/Vercel-mutasjon/GCP/Cloudflare eksisterte fra før. Docker Engine valgt som DEN ENE sammenhengende
+overflaten for BÅDE observability OG kritisk infra-mutasjon (`SOR_CLASSIFICATION=HYBRID_WITH_CLEAR_
+AUTHORITY`, `CORE_DEPENDENCY_DECISION_REQUIRED=false` - Jarvis forblir kanonisk for hendelse/diagnose/
+eksekusjonsjournal/policy/recovery-orkestrering). Ny `docker`-transport (`modules/tool-gateway/src/
+docker-transport.ts`): lese-handlinger (`list_containers`/`inspect_container`/`get_logs`, klasse A) virker
+mot ETHVERT containernavn; `redeploy_container` (klasse D, `preflight_action: "inspect_container"` -
+gjenbruker den EKSISTERENDE D-104 tool_executions-D-pipelinen) NEKTES STRUKTURELT mot alt utenfor
+`jarvis-sentinel-*` (forsvar-i-dybden, uavhengig av policy). `acquireContainerLogs()` (redigert to ganger
+FØR persistering, hard `tail`-grense) og `correlateDbState()` (bruker den EKSISTERENDE `schema_migrations`-
+tabellen, INGEN ny leverandør, bevist mot en EKTE uoppnåelig database også). Ny diagnose-modell
+(`incident_diagnoses`/`incident_diagnosis_evidence`, migrasjon `037_infra_ops_v2.sql`) - ATSKILT fra rå
+evidens; en revurdering oppretter en NY rad (`supersedes_diagnosis_id`), den gamle forblir UENDRET/
+spørrbar. Ny APPEND-ONLY `infra_executions`-eksekusjonsjournal (VED SIDEN AV den 100% uendrede
+`tool_executions`) med deterministisk grunn-diff (`computeStateDiff()`, `diff.ts` - ALDRI LLM-sammenligning)
+og eksplisitt firetilstands-utfall (SUCCESS/PARTIAL/FAILED/UNKNOWN - `PARTIAL` når et kall lykkes teknisk
+men lander feil). `docker:redeploy_container` lagt til den eksisterende `RECOVERY_STRATEGIES` (`recovery.ts`)
+- REQUERIER tilstanden etter gjenoppretting for faktisk verifisering, ikke bare "kallet returnerte ok".
+`InfraExecutionGate.infraToolIds` utvidet fra `{"github"}` til `{"github","docker"}` i BEGGE
+produksjonsprosesser - samme gate/semantikk, bevist for docker inkl. KillSwitch-supremati. 47 nye tester i
+6 nye filer (`docker-transport.test.ts` mot en FAKE `docker`-CLI på disk, ALDRI en ekte daemon i CI - samme
+presedens som D-103s `sandbox-docker-extra-env.test.ts`). Full suite `TESTS_AFTER=2145`/`TEST_FILES_AFTER=143`
+(opp fra `2098`/`137`), typecheck/lint rent. **UA-5 kriterium 1/3 forblir `PARTIAL`** - nå strukturelt
+komplette ende-til-ende, men INGEN ekte Docker-daemon i dette kjøremiljøet (`docker ps` feiler mot Unix-
+socketen her) - `LIVE_VERIFIED=false` for alle nye flagg, ny runbook `docs/runbooks/
+D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md` levert for at Tobias selv kan bevise dette mot en ekte, disponibel
+daemon UTEN å røre produksjonscontainere. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny
+draft-PR, IKKE merget. Full detalj: D-105 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
+sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
+akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha
+ekte kapasitet. `assertSentinelTarget()` fjernet fra transporten (transporterer nå kun); ny
+`docker-target-policy.ts` (`authorizeDockerTarget()`) håndheves i stedet av `ToolGateway.execute()` selv
+(ny generisk `ToolDefinition.parameterAuthorizer`-hook - samme håndhevelsespunkt for alle innslagsveier).
+Nye `docker.stop_container`/`docker.start_container` (ren kjøretilstand, bevist trygg) er de
+PRODUKSJONS-autoriserte handlingene mot `JARVIS_DOCKER_MUTATION_TARGETS` (eksakt, eier-konfigurert,
+fail-closed). `redeploy_container` forblir DEFERRED for produksjon (kun sentinel) - sikkerhetsaudit fant at
+nåværende rm-f+run-d-implementasjon ikke bevarer mounts/env/nettverk/porter/restart-policy/healthcheck.
+Sovereign eier-autoritet uendret (target-autorisasjon utvider aldri myndighet). Ny
+`assertValidContainerName()`/`assertValidImageRef()` kommandoinjeksjonsforsvar. Full detalj: D-105-raden
+(HOST-FIX-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

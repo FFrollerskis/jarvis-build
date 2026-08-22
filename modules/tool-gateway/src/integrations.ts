@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { MemoryWriter } from "@jarvis/memory";
+import { authorizeDockerTarget, type DockerMutationAction } from "./docker-target-policy.ts";
 import type { ToolDefinition, ToolTransport } from "./gateway.ts";
 
 /**
@@ -36,9 +37,27 @@ export class UnconfiguredHttpTransport implements ToolTransport {
 const empty = z.object({}).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
-/** Standard førstebølge-register. transportOverride lar tester injisere fakes. */
-export function firstWaveTools(transports: Partial<Record<string, ToolTransport>> = {}): ToolDefinition[] {
+/**
+ * Standard førstebølge-register. transportOverride lar tester injisere fakes.
+ * D-105 host-fix: `config.dockerMutationTargets` er de EIER-KONFIGURERTE,
+ * eksakte produksjons-containernavnene Tobias har autorisert for docker-
+ * mutasjon (parset FØR kallet via `parseDockerMutationTargets(process.env[
+ * "JARVIS_DOCKER_MUTATION_TARGETS"])` i main.ts/worker-main.ts - SAMME
+ * "les env ÉN gang ved oppstart"-mønster som resten av denne funksjonen).
+ * Tomt/utelatt -> INGEN produksjonsmål autorisert (fail-closed - sentinel-
+ * mål er UPÅVIRKET, se docker-target-policy.ts).
+ */
+export function firstWaveTools(
+  transports: Partial<Record<string, ToolTransport>> = {},
+  config: { dockerMutationTargets?: ReadonlySet<string> } = {}
+): ToolDefinition[] {
   const transport = (key: string) => transports[key] ?? new UnconfiguredHttpTransport(key);
+  const dockerMutationTargets = config.dockerMutationTargets ?? new Set<string>();
+  const dockerTargetAuthorizer = (action: DockerMutationAction) => (parameters: Record<string, JsonValue>) => {
+    const name = parameters["name"];
+    if (typeof name !== "string") return { allowed: false, reason: "missing_name_parameter" };
+    return authorizeDockerTarget(action, name, dockerMutationTargets);
+  };
   return [
     {
       tool_id: "github", action: "read_issues", description: "Les issues (untrusted ingestion)",
@@ -1460,6 +1479,74 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
       preflight_action: "get_branch"
+    },
+    {
+      // D-105 (UA-5 kriterium 1): Docker-lesehandlinger - virker mot ETHVERT
+      // containernavn (reell driftsdiagnostikk, ikke kun sentinel-mål).
+      tool_id: "docker", action: "list_containers", description: "List kjørende Docker-containere (valgfritt label-filter)",
+      input_schema: record({ label_filter: z.string().optional() }), capability_class: "A",
+      scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      tool_id: "docker", action: "inspect_container", description: "Les én containers tilstand (id/image/status/health) - null hvis den ikke finnes",
+      input_schema: record({ name: z.string() }), capability_class: "A",
+      scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      tool_id: "docker", action: "get_logs", description: "Les containerlogger (bundet tidsvindu/tail, hemmeligheter redigert FØR retur)",
+      input_schema: record({ name: z.string(), since: z.string().optional(), until: z.string().optional(), tail: z.number().optional() }),
+      capability_class: "A", scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      // D-105 host-fix (D-41-korreksjon): mål-autorisasjon for DENNE
+      // handlingen håndheves nå av `parameterAuthorizer` (docker-target-
+      // policy.ts), IKKE av transporten (som transporterer rent - se
+      // docker-transport.ts). `redeploy_container` sin nåværende
+      // implementasjon (rm -f + run -d, kun navn/image bevart) er IKKE bevist
+      // trygg mot en ekte kjørende produksjonscontainer (mounts/env/nettverk/
+      // porter/restart-policy/healthcheck går tapt) - derfor forblir den
+      // STRUKTURELT DEFERRED for produksjon (kun `jarvis-sentinel-*`, host-
+      // akseptanse) inntil en konfigurasjonsbevarende redeploy er bygget og
+      // bevist. `preflight_action: "inspect_container"` gjenbruker DEN
+      // EKSISTERENDE ToolGateway-D-pipelinen (before/after via tool_executions)
+      // UENDRET - se executeInfraMutation() i modules/incidents.
+      tool_id: "docker", action: "redeploy_container", description: "Gjenskap en container med et gitt image (rm -f + run -d) - DEFERRED for produksjon, kun jarvis-sentinel-* (host-akseptanse) inntil konfigurasjonsbevarende redeploy er bevist",
+      input_schema: record({ name: z.string(), image: z.string() }), capability_class: "D",
+      scopes: ["docker:write"], reversible: true,
+      rollback_procedure: "docker.redeploy_container på nytt med image-verdien fra preflight-inspeksjonen (before_state)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
+      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("redeploy_container")
+    },
+    {
+      // D-105 host-fix (D-41-korreksjon): PRODUKSJONS-autorisert muterende
+      // handling - endrer KUN kjøretilstand (docker stop), INGEN
+      // konfigurasjon går tapt (motsatt av redeploy_container over) - derfor
+      // tillatt mot ethvert EIER-KONFIGURERT mål (JARVIS_DOCKER_MUTATION_
+      // TARGETS), ikke bare sentinel. Genuint reversibel: recovery starter
+      // containeren igjen og reinspiserer for å VERIFISERE (se recovery.ts).
+      tool_id: "docker", action: "stop_container", description: "Stopp en container (docker stop) - eier-konfigurert produksjonsmål ELLER jarvis-sentinel-* (akseptanse)",
+      input_schema: record({ name: z.string() }), capability_class: "D",
+      scopes: ["docker:write"], reversible: true,
+      rollback_procedure: "docker.start_container mot samme mål, reinspisert for å verifisere kjøretilstand",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
+      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("stop_container")
+    },
+    {
+      tool_id: "docker", action: "start_container", description: "Start en container (docker start) - eier-konfigurert produksjonsmål ELLER jarvis-sentinel-* (akseptanse)",
+      input_schema: record({ name: z.string() }), capability_class: "D",
+      scopes: ["docker:write"], reversible: true,
+      rollback_procedure: "docker.stop_container mot samme mål, reinspisert for å verifisere kjøretilstand",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
+      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("start_container")
     }
   ];
 }

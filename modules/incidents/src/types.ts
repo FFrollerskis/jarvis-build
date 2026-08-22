@@ -4,6 +4,7 @@
  * spesifikke felter her (kun generiske `source_type`/`source_ref`-pekere,
  * samme pointer-not-payload-prinsipp som `support`/`business`).
  */
+import type { JsonValue } from "@jarvis/contracts";
 
 export type IncidentStatus = "open" | "diagnosing" | "repair_proposed" | "repair_in_progress" | "resolved" | "wont_fix";
 export type IncidentSeverity = "low" | "normal" | "high" | "critical";
@@ -68,7 +69,8 @@ export interface AddEvidenceInput {
 }
 
 export type DeploymentStatus = "success" | "failure" | "in_progress" | "cancelled";
-export type DeploymentSource = "github_actions" | "manual";
+/** D-105: `docker_redeploy` lagt til - se `executeInfraMutation()`/037-migrasjonen. */
+export type DeploymentSource = "github_actions" | "manual" | "docker_redeploy";
 
 export interface Deployment {
   deployment_id: string;
@@ -121,6 +123,74 @@ export interface InfraRecoveryAction {
   recovery_strategy: string;
   status: RecoveryStatus;
   recovery_result: Record<string, unknown>;
+  /** D-105: peker TILBAKE til den opprinnelige mutasjonen denne raden forsøker å gjenopprette - null for D-104-æra recovery-rader (github.delete_branch har ingen forutgående executeInfraMutation()-rad). */
+  recovery_of_execution_id: string | null;
   attempted_at: string;
+  created_at: string;
+}
+
+/**
+ * D-105 Part G: diagnose er en KONKLUSJON, ATSKILT fra rå `IncidentEvidence`.
+ * `source` skiller MELLOM en deterministisk (kode-utledet), modell-assistert
+ * (LLM-hypotese - status starter ALLTID UNVERIFIED, ALDRI auto-forfremmet),
+ * eller eier-satt konklusjon. `supersedes_diagnosis_id` bevarer en motsagt
+ * diagnose UENDRET (se incident_diagnoses-tabellen i 037-migrasjonen).
+ */
+export type DiagnosisSource = "deterministic" | "model_assisted" | "owner";
+
+export interface IncidentDiagnosis {
+  diagnosis_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  incident_id: string;
+  conclusion: string;
+  status: EvidenceStatus;
+  source: DiagnosisSource;
+  supersedes_diagnosis_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateDiagnosisInput {
+  conclusion: string;
+  status?: EvidenceStatus;
+  source: DiagnosisSource;
+  supersedes_diagnosis_id?: string;
+  supporting_evidence_ids?: string[];
+  contradicting_evidence_ids?: string[];
+}
+
+export type InfraRiskClass = "A" | "B" | "C" | "D";
+export type InfraOperationalOutcome = "SUCCESS" | "PARTIAL" | "FAILED" | "UNKNOWN";
+
+/**
+ * D-105 Part H: sammenhengende kritisk infra-eksekusjonsjournal - APPEND-ONLY
+ * (hele BEFORE->MUTASJON->AFTER->DIFF->UTFALL-sekvensen fullføres FØR
+ * innsetting, se `executeInfraMutation()`). Sitter VED SIDEN AV den
+ * eksisterende, uendrede `tool_executions` (D-104-pipelinen) - IKKE en
+ * erstatning.
+ */
+export interface InfraExecution {
+  execution_id: string;
+  tenant_id: string;
+  person_id: string | null;
+  device_id: string | null;
+  target: string;
+  provider: string;
+  tool_id: string;
+  action: string;
+  risk_class: InfraRiskClass;
+  authority_mode: string | null;
+  incident_id: string | null;
+  idempotency_key: string;
+  requested_operation: string;
+  requested_state: Record<string, unknown>;
+  before_state: JsonValue | null;
+  recovery_plan: string;
+  provider_receipt: JsonValue | null;
+  after_state: JsonValue | null;
+  state_diff: JsonValue | null;
+  verification_outcome: InfraOperationalOutcome;
+  recovery_available: boolean;
   created_at: string;
 }
