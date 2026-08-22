@@ -37,6 +37,29 @@ export interface RouteInput {
    *    sky-provider - gjelder OGSÅ eksplisitt eier-override.
    */
   sensitivity?: DataSensitivity;
+  /**
+   * D-106 (AI Mesh Council/Collaboration/lokal-Gemma-utvidelse): VALGFRITT
+   * policy-felt. `false` = KUN `locality === "local"`-providere er
+   * kvalifisert (uansett mode/override) - "ikke bruk betalte modeller"/
+   * `paid_models_allowed=false`. Udefinert ELLER `true` = UENDRET ruting fra
+   * FØR dette feltet fantes (samme migrasjonssikkerhetsmønster som
+   * `sensitivity`, §23). Gjelder OGSÅ eksplisitt eier-override
+   * (`SPECIFIC_PROVIDER`/`providerPreference`) - en eier kan ikke omgå denne
+   * policyen ved å be om en spesifikk betalt provider; policyen selv endres
+   * kun ved at kalleren eksplisitt setter feltet til `true` igjen.
+   */
+  paid_models_allowed?: boolean;
+  /**
+   * D-106: ordnet preferanseliste av providernavn (f.eks. "bruk Gemma" ->
+   * `["gemma_local","gemma_hosted"]`, siden Gemma kan kjøre lokalt ELLER
+   * hostet og brukeren mente modellFAMILIEN, ikke en spesifikk instans).
+   * Første kandidat som er konfigurert + dekker påkrevde capabilities +
+   * består sensitivitets-/paid-models-gaten vinner - INGEN scoring, INGEN
+   * stille fallback til en provider utenfor listen (samme forutsigbarhets-
+   * prinsipp som `provider`, §10). Ignoreres hvis `provider` (eksakt) også er
+   * satt - `provider` er alltid mer spesifikk og vinner.
+   */
+  providerPreference?: string[];
 }
 
 export interface RouteCandidate {
@@ -63,6 +86,14 @@ export class NoEligibleProviderError extends Error {
   constructor(detail: string) {
     super(`no_eligible_provider: ${detail}`);
     this.name = "NoEligibleProviderError";
+  }
+}
+
+/** D-106: `paid_models_allowed=false` og ingen lokal kandidat kvalifiserer -> fail-closed, aldri stille betalt fallback. */
+export class PaidModelsDisabledError extends Error {
+  constructor(detail: string) {
+    super(`paid_models_disabled: ${detail}`);
+    this.name = "PaidModelsDisabledError";
   }
 }
 
@@ -94,6 +125,19 @@ function isSensitivityEligible(profile: ModelProfile, sensitivity: DataSensitivi
   if (profile.hosted_free_tier && sensitivity !== "PUBLIC_OR_LOW_SENSITIVITY") return false;
   if (!sensitivity || sensitivity === "PUBLIC_OR_LOW_SENSITIVITY") return true;
   if (sensitivity === "SECRET_RESTRICTED") return profile.locality === "local";
+  return true;
+}
+
+/**
+ * D-106: `paid_models_allowed`-policygate. Udefinert/`true` = ingen ekstra
+ * filtrering (§23 migrasjonssikkerhet, samme mønster som `isSensitivityEligible`).
+ * `false` = KUN `locality === "local"` kvalifiserer - gjelder for ALLE
+ * providere uansett `hosted_free_tier` (en gratis-tier-hostet sky-provider er
+ * FORTSATT sky, ikke lokal - D-79 §3 sitt "lokal" er en distinkt kategori fra
+ * "gratis").
+ */
+function isPaidModelsEligible(profile: ModelProfile, paidModelsAllowed: boolean | undefined): boolean {
+  if (paidModelsAllowed === false) return profile.locality === "local";
   return true;
 }
 
@@ -135,7 +179,46 @@ export class AiRouter {
           `override_sensitivity_blocked: '${name}' er ikke godkjent for sensitivitet ${input.sensitivity}`
         );
       }
+      // D-106: samme prinsipp for paid_models_allowed - eksplisitt eier-valg
+      // av en betalt/sky-provider omgår ALDRI en aktiv "ikke bruk betalte
+      // modeller"-policy.
+      if (!isPaidModelsEligible(profile, input.paid_models_allowed)) {
+        throw new PaidModelsDisabledError(
+          `override_paid_models_disabled: '${name}' er en betalt/sky-provider, paid_models_allowed=false`
+        );
+      }
       return { mode, reason: "OWNER_OVERRIDE", candidates: [{ provider: name, model: rt.model }] };
+    }
+
+    // D-106: preferanserekkefølge (f.eks. "bruk Gemma" -> ["gemma_local","gemma_hosted"]).
+    // Ingen scoring - første kandidat i listen som er konfigurert og består
+    // capability-/sensitivitets-/paid-models-gatene vinner, samme
+    // forutsigbarhetsprinsipp som eksakt `provider`-override (§10). Kun aktiv
+    // når `provider` (eksakt) IKKE er satt - eksakt override er alltid mer
+    // spesifikk.
+    if (input.providerPreference && input.providerPreference.length > 0) {
+      const requiredForPref = new Set<ModelCapability>(input.required_capabilities ?? []);
+      if (input.needs_structured) requiredForPref.add("structured_output");
+      const attempted: string[] = [];
+      for (const name of input.providerPreference) {
+        const rt = providers.get(name);
+        attempted.push(name);
+        if (!rt?.configured) continue;
+        const profile = this.registry.profileOrGeneric(name, rt.model);
+        const missing = [...requiredForPref].filter((c) => !profile.capabilities.includes(c));
+        if (missing.length > 0) continue;
+        if (!isSensitivityEligible(profile, input.sensitivity)) continue;
+        if (!isPaidModelsEligible(profile, input.paid_models_allowed)) continue;
+        if (this.health.state(name, true) === "UNAVAILABLE") continue;
+        return {
+          mode: "SPECIFIC_PROVIDER",
+          reason: "PROVIDER_PREFERENCE",
+          candidates: [{ provider: name, model: rt.model }]
+        };
+      }
+      throw new NoEligibleProviderError(
+        `provider_preference_exhausted: ingen av [${attempted.join(",")}] er konfigurert/kvalifisert`
+      );
     }
 
     const required = new Set<ModelCapability>(input.required_capabilities ?? []);
@@ -145,6 +228,7 @@ export class AiRouter {
 
     const eligible: Array<{ profile: ModelProfile; model: string; state: string }> = [];
     let sensitivityExcludedCount = 0;
+    let paidExcludedCount = 0;
     for (const [name, rt] of providers) {
       if (!rt.configured) continue;
       const profile = this.registry.profileOrGeneric(name, rt.model);
@@ -154,10 +238,19 @@ export class AiRouter {
         sensitivityExcludedCount++;
         continue;
       }
+      if (!isPaidModelsEligible(profile, input.paid_models_allowed)) {
+        paidExcludedCount++;
+        continue;
+      }
       eligible.push({ profile, model: rt.model, state: this.health.state(name, true) });
     }
     if (eligible.length === 0) {
       if (mode === "LOCAL") throw new LocalModelUnavailableError();
+      if (input.paid_models_allowed === false && paidExcludedCount > 0) {
+        throw new PaidModelsDisabledError(
+          `ingen konfigurert LOKAL provider dekker [${[...required].join(",")}]`
+        );
+      }
       throw new NoEligibleProviderError(
         `ingen konfigurert provider dekker [${[...required].join(",")}]` +
           (input.sensitivity ? ` (sensitivity=${input.sensitivity})` : "")
@@ -235,6 +328,9 @@ export class AiRouter {
       // D-81 P0-fiks: minst én ellers-kvalifisert kandidat (typisk gratis-tier) ble
       // ekskludert - GJELDER OGSÅ udefinert sensitivitet (fail-safe, se isSensitivityEligible()).
       reason = "PRIVACY_RESTRICTED";
+    } else if (input.paid_models_allowed === false && paidExcludedCount > 0) {
+      // D-106: minst én ellers-kvalifisert betalt/sky-kandidat ble ekskludert av policyen.
+      reason = "PAID_MODELS_DISABLED";
     } else if (mode === "FAST") {
       reason = "LOW_LATENCY";
     } else if (mode === "CHEAP" || (input.purpose && CHEAP_PURPOSES.includes(input.purpose))) {

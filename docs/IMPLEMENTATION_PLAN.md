@@ -2496,6 +2496,66 @@ D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md` levert for at Tobias selv kan bevise dette
 daemon UTEN å røre produksjonscontainere. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny
 draft-PR, IKKE merget. Full detalj: D-105 i DECISIONS_AND_ASSUMPTIONS.md.
 
+### D-106: AI Mesh Council/Collaboration/lokal-Gemma-utvidelse (2026-08-22)
+
+Første kapabilitetsslice etter UA-5 canonical closeout, IKKE UA-6. "FØR DU KODER"-audit kjørt FØRST: D-79/
+D-80/D-81 ("AI Mesh Gemma-first") var ALLEREDE en moden, FIXED_SUITE_VERIFIED arkitektur (`AiRouter`/
+`CapabilityRegistry`/`ProviderHealthTracker`/budsjett/kost/trace/tool-loop-idempotens/critic-mønster) -
+`EXISTING_AI_MESH_AUDITED=true`, `D80_REUSED=true`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`. Denne
+sliceen UTVIDER, bygger IKKE en parallell AI Mesh. Genuint nytt: (1) `gemma_local` - Gemma kjørt LOKALT
+(RTX 4070-PC eller annen vertsmaskin) via SAMME `LocalOpenAiCompatibleAdapter` som `local_llm` (nå
+navn-konstruktør-injiserbar), distinkt fra hostet `gemma_hosted` (D-80). (2) `paid_models_allowed`-policy
+(`router.ts`/`CompleteInput`) - `false` begrenser til `locality=local`, fail-closed
+(`PaidModelsDisabledError`), gjelder også eksplisitt eier-override. (3) `providerPreference` (ordnet
+preferanseliste, f.eks. "bruk Gemma" -> `[gemma_local,gemma_hosted]`). (4) `override-parser.ts` - 100%
+deterministisk fraseparsing (ALDRI en LLM som tolker instruksjonen) for eksplisitte routing-fraser ("bruk
+bare Claude/OpenAI/Gemini/Kimi/Gemma", "bruk alle AI-ene", "ikke bruk betalte modeller", "bruk bare lokale
+modeller", "velg den beste modellen"), komponert inn i `ConversationEngine.handle()`. (5) `AiCouncil`
+(`council.ts`) - 3-runders protokoll (uavhengig runde 1 = anti-anchoring bevist strukturelt, kryss-kritikk
+runde 2, revisjon runde 3), ETT eksplisitt synteseanrop, `consensus_status` beregnet DETERMINISTISK i kode
+(aldri en selvrapportert modell-enum), degradert Council eksplisitt håndtert (`unavailable_members`/
+`full_council`), `requireAllFive` fail-closed (`IncompleteCouncilError`). (6) `AiCollaboration`
+(`collaboration.ts`) - deterministisk rolletildeling (kode, ikke LLM) -> parallelt arbeid -> kryssgjennomgang
+(aldri selvgjennomgang) -> syntese, opt-in revisjon/verifikasjon. Begge persisterer til de EKSISTERENDE
+`events`(`EventWriter`)/`artifacts`-tabellene - INGEN ny tabell. 65 nye tester i 6 nye filer (router/
+paid-models/providerPreference, override-parser, council, collaboration, ConversationEngine-wiring, mot
+fake `ModelGateway`-providere - ingen ekte nettverk). Full suite `TESTS_AFTER=2261`/`TEST_FILES_AFTER=150`
+(opp fra `≈2196`/`144`), typecheck/lint rent, én kjent embedded-Postgres parallell-CI-hook-timeout i en
+UBERØRT fil bevist som flake ved isolert kjøring (2/2 grønt alene). **Live-status:** OpenAI/Anthropic
+uendret; Gemini/Kimi/gemma_hosted `UNCONFIGURED` i dette miljøet (uendret fra D-80); `gemma_local`
+`HOST_RUNTIME_REQUIRED` - ny runbook `docs/runbooks/D106_LOCAL_GEMMA_HOST_ACCEPTANCE.md` levert for at
+Tobias selv kan verifisere mot RTX 4070-PC-en. Eksplisitt DEFERRED (v1, korrigert av HOST-FIX under):
+automatisk høy-innvirkning-beslutning-klassifisering for Council (kun eksplisitt bruker-trigger bygget),
+tekst-override persisterer kun for gjeldende samtaletur (ikke sesjonsskopet), `AiCollaboration` ikke
+automatisk TaskEngine-trigger-klassifisert. Ny draft-PR, IKKE merget. INGEN UA-6. Full detalj: D-106 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-106 HOST-FIX (2026-08-22, automatisk høy-innvirkning-beslutning-klassifisering for Council, samme PR
+#51, AMENDMENT ikke ny D-nummer):** Tobias avviste v1-closeoutet - den godkjente spesifikasjonen krevde BÅDE
+eksplisitt bruker-trigger OG automatisk høy-innvirkning-klassifisering for Council, kun den første var
+bygget. Reparert med ny, 100% deterministisk klassifiserer (`decision-importance.ts`,
+`classifyDecisionImportance()` - INGEN modellkall, regex-mønstre over åtte harde + tre svake kategorier,
+versjonert `CLASSIFIER_VERSION`), som klassifiserer `ROUTINE`/`SIGNIFICANT`/`HIGH_IMPACT_DECISION`.
+Risikoklasse (A-D, `ToolGateway.capability_class`) og beslutnings-viktighet er BEVISST distinkte dimensjoner
+- klassifiseringsmodulen har INGEN referanse til `capability_class`, klasse-D alene trigger IKKE Council
+(bevist eksplisitt av test). Trigger-presedens i `ConversationEngine.handle()`: eksplisitt undertrykkelse
+("ikke bruk AI-rådet"/"don't use the council", ny `suppressCouncil`-gren i `override-parser.ts`, sjekket
+FØR triggerfrasen) vinner ALLTID - eierens autoritet begrenses ALDRI stille; deretter eksplisitt trigger
+(`trigger_source="explicit_user"`); deretter automatisk klassifiserer-resultat `HIGH_IMPACT_DECISION`
+(`trigger_source="high_impact_classifier"`) - IKKE stille undertrykt av en samtidig tvunget
+enkelt-provider-override. Gjenbruker DEN EKSISTERENDE Council-implementasjonen UENDRET (ingen ny
+Council-vei) - nytt valgfritt `CouncilInput.trigger`/`CouncilResult.provenance.trigger`-felt tredd gjennom
+SAMME eksisterende `events`/`artifacts`-persistens, full auditerbarhet. 34 nye tester (20
+`decision-importance.test.ts` - alle seks HIGH_IMPACT-eksempler fra ordren + ni ROUTINE-negativer + fem
+determinisme-/auditerbarhetstester; +3 `override-parser.test.ts`; +11 `conversation-d106-overrides.test.ts`
+- tenant-isolasjon, `paid_models_allowed`-interaksjon, degradert Council aldri falsk `full_council=true`,
+eksisterende overrides/Gemma-first-ruting uendret). Full suite `TEST_FILES_AFTER=151`/`TESTS_AFTER=2295`
+(opp fra `150`/`2261`), typecheck 19/19 rent, lint rent, INGEN regresjon. Gjenværende DEFERRED
+(ikke-blokkerende): tekst-override-persistens på tvers av samtaleturer (krever sesjonsskopet
+preferanselager), `AiCollaboration` automatisk TaskEngine-trigger (distinkt verktøy, ordren krevde
+spesifikt Council-auto-trigger). `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Samme PR #51, ikke ny
+PR, IKKE merget. INGEN UA-6. Full detalj: D-106 HOST-FIX i DECISIONS_AND_ASSUMPTIONS.md.
+
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
 akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha

@@ -4,7 +4,8 @@ import { dirname } from "node:path";
 /** Trace-span for observability. Alle modellkall og fast-ruter skal spores. */
 export interface TraceSpan {
   trace_id: string;
-  kind: "model_call" | "fast_route" | "job" | "budget";
+  /** D-106 HOST-FIX: `council_suppressed` spores når eieren eksplisitt undertrykker et policy-mandatert Council-trigger (§"AUDITABILITY" - aldri en stille undertrykkelse). */
+  kind: "model_call" | "fast_route" | "job" | "budget" | "council_suppressed";
   name: string;
   tenant_id: string;
   session_id?: string;

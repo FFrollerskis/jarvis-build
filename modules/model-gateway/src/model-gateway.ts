@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withTenantTransaction } from "@jarvis/core";
-import type { ModelPurpose, RouterMode } from "@jarvis/contracts";
+import type { DataSensitivity, ModelPurpose, RouterMode } from "@jarvis/contracts";
 import { createHash } from "node:crypto";
 import {
   ProviderError,
@@ -52,6 +52,12 @@ export interface CompleteInput {
   required_capabilities?: ModelCapability[];
   /** UA-1 critic (§18): eksplisitt opt-in; aldri default. */
   critic?: boolean;
+  /** D-106: se `RouteInput.sensitivity`/`isSensitivityEligible` for semantikk - videreført uendret hit. */
+  sensitivity?: DataSensitivity;
+  /** D-106: se `RouteInput.paid_models_allowed`. */
+  paid_models_allowed?: boolean;
+  /** D-106: se `RouteInput.providerPreference`. */
+  providerPreference?: string[];
 }
 
 export interface GatewayOptions {
@@ -157,6 +163,16 @@ export class ModelGateway {
     }
   }
 
+  /** D-106: eksponerer registryet (read-only) for AI Council/Collaboration sin deterministiske rolletildeling (§35 - Jarvis-kode, ikke modell, velger). */
+  get capabilityRegistry(): CapabilityRegistry {
+    return this.registry;
+  }
+
+  /** D-106: providernavn med `available()===true` akkurat nå - AI Council/Collaboration bruker denne til å avgjøre kandidater/`unavailable_members` FØR kall gjøres. */
+  listConfiguredProviders(): string[] {
+    return this.opts.providers.filter((p) => p.available()).map((p) => p.name);
+  }
+
   private providerRuntimes(): Map<string, { configured: boolean; model: string }> {
     const map = new Map<string, { configured: boolean; model: string }>();
     for (const p of this.opts.providers) {
@@ -194,6 +210,13 @@ export class ModelGateway {
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
         ...(input.required_capabilities !== undefined
           ? { required_capabilities: input.required_capabilities }
+          : {}),
+        ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
+        ...(input.paid_models_allowed !== undefined
+          ? { paid_models_allowed: input.paid_models_allowed }
+          : {}),
+        ...(input.providerPreference !== undefined
+          ? { providerPreference: input.providerPreference }
           : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
@@ -373,6 +396,13 @@ export class ModelGateway {
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
         ...(input.provider !== undefined ? { provider: input.provider } : {}),
         required_capabilities: [...(input.required_capabilities ?? []), "streaming"],
+        ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
+        ...(input.paid_models_allowed !== undefined
+          ? { paid_models_allowed: input.paid_models_allowed }
+          : {}),
+        ...(input.providerPreference !== undefined
+          ? { providerPreference: input.providerPreference }
+          : {}),
         needs_structured: Boolean(input.request.structured_schema)
       },
       this.providerRuntimes()
