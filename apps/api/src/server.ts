@@ -9,7 +9,7 @@ import {
 } from "@jarvis/incidents";
 import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
-import type { ToolGateway } from "@jarvis/tool-gateway";
+import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
 import type { ConversationEngine } from "./conversation.ts";
 import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
 
@@ -438,14 +438,19 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (req.method === "POST" && url.pathname === "/infra/execution/mutate") {
       const body = (await readBody(req)) as {
         identity: Parameters<IdentityService["resolveIdentity"]>[0];
-        target: string; target_image: string; idempotency_key: string; incident_id?: string;
+        target: string; action?: DockerMutationAction; target_image?: string; idempotency_key: string; incident_id?: string;
       };
       const resolved = await deps.identity.resolveIdentity(body.identity);
       if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      // D-105 host-fix: `action` er valgfri - default `redeploy_container`
+      // (bakoverkompatibelt med D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md sine
+      // eksisterende eksempler, som ikke sender `action`). Nye kall bruker
+      // `stop_container`/`start_container` for produksjons-autorisert mutasjon.
       const execution = await executeInfraMutation({ pool, gateway }, resolved.identity, {
         tenant_id: resolved.identity.tenant_id, person_id: resolved.identity.person_id,
         device_id: resolved.identity.device_id,
-        target: body.target, target_image: body.target_image, idempotency_key: body.idempotency_key,
+        target: body.target, action: body.action ?? "redeploy_container", idempotency_key: body.idempotency_key,
+        ...(body.target_image !== undefined ? { target_image: body.target_image } : {}),
         ...(body.incident_id !== undefined ? { incident_id: body.incident_id } : {})
       });
       return json(res, 200, { execution });

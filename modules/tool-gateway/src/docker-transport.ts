@@ -10,21 +10,32 @@ import type { ToolTransport } from "./gateway.ts";
  * Jarvis forblir kanonisk for hendelse/diagnose/eksekusjonsjournal/policy
  * (se D-105 i DECISIONS_AND_ASSUMPTIONS.md).
  *
- * Lese-handlinger (`list_containers`/`inspect_container`/`get_logs`) virker
- * mot ETHVERT containernavn - reell driftsverdi for FAKTISK produksjons-
- * diagnostikk (Tobias sin ekte api/worker/postgres-stack, se `infra/local/
- * docker-compose.yml`). Den ENE MUTERENDE handlingen (`redeploy_container`)
- * er derimot HARDT begrenset til `jarvis-sentinel-*`-navn (se
- * `assertSentinelTarget()`) - en strukturell nektelse UAVHENGIG av policy/
- * risikoklasse (forsvar-i-dybden, samme prinsipp som GitHub-transportens
- * `PROTECTED_BRANCHES`-sperre mot main/master). Ingen ekte produksjons-
- * container kan noensinne muteres av denne transporten.
+ * D-105 HOST-FIX (D-41-korreksjon, Tobias sin eksplisitte avgjørelse):
+ * denne transporten TRANSPORTERER KUN - den inneholder INGEN permanent
+ * mål-autorisasjonsregel (verken sentinel-only eller noe annet). Hvilke mål
+ * en muterende handling faktisk får LOV til å nå avgjøres FØR transporten
+ * i det hele tatt nås, av `docker-target-policy.ts` sin `authorizeDockerTarget()`
+ * (håndhevet av `ToolGateway.execute()` via `ToolDefinition.parameter
+ * Authorizer` - se gateway.ts og integrations.ts). Denne filen validerer KUN
+ * at navn/image-parametre er strukturelt trygge argv-verdier (kommando-
+ * injeksjons-/flagg-forveksling-forsvar - se `assertValidContainerName()`/
+ * `assertValidImageRef()`), ALDRI en forretningsregel om HVEM som får mutere.
  */
-const SENTINEL_PREFIX = "jarvis-sentinel-";
 
-function assertSentinelTarget(name: string): void {
-  if (!name.startsWith(SENTINEL_PREFIX)) {
-    throw new Error(`docker_redeploy_refused_unsafe_target:${name}`);
+/** Docker sitt eget navnealfabet. Avviser OGSÅ en ledende "-" (ellers tolkbar som et docker-CLI-flagg av selve docker-binæren, uavhengig av at spawnSync({shell:false}) allerede hindrer SHELL-injeksjon). */
+const VALID_CONTAINER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+/** Bevisst konservativt: registry/repo/tag-tegnsettet Docker faktisk bruker, ingen ledende "-". */
+const VALID_IMAGE_REF = /^[A-Za-z0-9][A-Za-z0-9_./:@-]{0,255}$/;
+
+function assertValidContainerName(name: unknown): asserts name is string {
+  if (typeof name !== "string" || !VALID_CONTAINER_NAME.test(name)) {
+    throw new Error(`docker_invalid_container_name:${JSON.stringify(name).slice(0, 80)}`);
+  }
+}
+
+function assertValidImageRef(image: unknown): asserts image is string {
+  if (typeof image !== "string" || !VALID_IMAGE_REF.test(image)) {
+    throw new Error(`docker_invalid_image_ref:${JSON.stringify(image).slice(0, 80)}`);
   }
 }
 
@@ -101,7 +112,8 @@ export class DockerTransport implements ToolTransport {
     }
 
     if (action === "inspect_container") {
-      const name = parameters["name"] as string;
+      const name = parameters["name"];
+      assertValidContainerName(name);
       const { code, stdout, stderr } = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (code !== 0) {
         if (/No such (container|object)/i.test(stderr)) {
@@ -119,7 +131,8 @@ export class DockerTransport implements ToolTransport {
     }
 
     if (action === "get_logs") {
-      const name = parameters["name"] as string;
+      const name = parameters["name"];
+      assertValidContainerName(name);
       const since = typeof parameters["since"] === "string" ? (parameters["since"] as string) : undefined;
       const until = typeof parameters["until"] === "string" ? (parameters["until"] as string) : undefined;
       const requestedTail = typeof parameters["tail"] === "number" ? (parameters["tail"] as number) : 200;
@@ -144,16 +157,37 @@ export class DockerTransport implements ToolTransport {
     }
 
     if (action === "redeploy_container") {
-      const name = parameters["name"] as string;
-      const image = parameters["image"] as string;
-      assertSentinelTarget(name);
-      run(dockerBin, ["rm", "-f", name], this.timeoutMs); // best-effort - "finnes ikke" er OK (første deploy)
-      const started = run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", image, "sleep", "999999999"], this.timeoutMs);
+      const name = parameters["name"];
+      const image = parameters["image"];
+      assertValidContainerName(name);
+      assertValidImageRef(image);
+      run(dockerBin, ["rm", "-f", "--", name], this.timeoutMs); // best-effort - "finnes ikke" er OK (første deploy)
+      const started = run(dockerBin, ["run", "-d", "--name", name, "--label", "jarvis.sentinel=true", "--label", "jarvis.managed=true", "--", image, "sleep", "999999999"], this.timeoutMs);
       if (started.code !== 0) throw new Error(`docker_run_failed:${started.stderr.slice(0, 160)}`);
       const containerId = started.stdout.trim().slice(0, 12);
       const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
       if (inspected.code !== 0) throw new Error(`docker_post_deploy_inspect_failed:${inspected.stderr.slice(0, 160)}`);
       return { external_id: containerId, data: parseInspect(inspected.stdout) as unknown as JsonValue };
+    }
+
+    if (action === "stop_container") {
+      const name = parameters["name"];
+      assertValidContainerName(name);
+      const stopped = run(dockerBin, ["stop", "--", name], this.timeoutMs);
+      if (stopped.code !== 0) throw new Error(`docker_stop_failed:${stopped.stderr.slice(0, 160)}`);
+      const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      if (inspected.code !== 0) throw new Error(`docker_post_stop_inspect_failed:${inspected.stderr.slice(0, 160)}`);
+      return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
+    }
+
+    if (action === "start_container") {
+      const name = parameters["name"];
+      assertValidContainerName(name);
+      const started = run(dockerBin, ["start", "--", name], this.timeoutMs);
+      if (started.code !== 0) throw new Error(`docker_start_failed:${started.stderr.slice(0, 160)}`);
+      const inspected = run(dockerBin, ["inspect", name, "--format", "{{json .}}"], this.timeoutMs);
+      if (inspected.code !== 0) throw new Error(`docker_post_start_inspect_failed:${inspected.stderr.slice(0, 160)}`);
+      return { data: parseInspect(inspected.stdout) as unknown as JsonValue };
     }
 
     throw new Error(`docker_unknown_action:${action}`);

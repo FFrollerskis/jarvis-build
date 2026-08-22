@@ -1,6 +1,59 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-08-22 (**UA-5 Production Operations Control Plane v2
+(D-105) HOST-FIX — D-41-korreksjon av PR #48-closeout-funn.** Uavhengig
+closeout-audit av PR #48 fant at `assertSentinelTarget()` IKKE var en
+akseptanse-scoping, men en PERMANENT restriksjon på Jarvis sin faktiske
+produksjons-Docker-mutasjonskapasitet - i strid med D-41 (risikoklasse D
+skal styre HVORDAN, aldri OM eieren har kapabiliteten). `MERGE_READY=false`
+ble rapportert; Tobias bekreftet eksplisitt at sentinel skal være
+AKSEPTANSE-ONLY og at produksjonen skal ha ekte, eier-autorisert
+mutasjonskapasitet. **Reparasjon (samme D-105, ingen ny D-ID):**
+`redeploy_container`-sikkerhetsaudit fant at nåværende `rm -f`+`run -d`-
+implementasjon IKKE bevarer mounts/env/nettverk/porter/restart-
+policy/healthcheck (`CURRENT_REDEPLOY_PRODUCTION_SAFE=false`) - forblir
+derfor STRUKTURELT DEFERRED for produksjon (kun sentinel, akseptanse). Nye
+`docker.stop_container`/`docker.start_container` (ren kjøretilstand, INGEN
+konfigurasjon å miste - BEVIST trygg) er de nye PRODUKSJONS-autoriserte
+mutasjonshandlingene. Mål-autorisasjon FLYTTET UT AV transporten (som nå
+kun transporterer) og inn i ny `docker-target-policy.ts`
+(`authorizeDockerTarget()`), håndhevet SENTRALT av `ToolGateway.execute()`
+selv via en ny generisk `ToolDefinition.parameterAuthorizer`-hook - samme
+håndhevelsespunkt for ALLE innslagsveier, ikke noe en direkte
+transport-omgåelse kunne unngå. Ny `JARVIS_DOCKER_MUTATION_TARGETS`
+(`.env.example`) - eksakt, eier-konfigurert produksjonsmål-liste,
+fail-closed på tom/ugyldig. Sentinel forblir ALLTID tillatt for ALLE
+handlinger (akseptanse uendret); `redeploy_container` forblir nektet for
+ethvert ikke-sentinel mål SELV OM konfigurert. Sovereign eier-autoritet
+UENDRET (target-autorisasjon utvider ALDRI hvem som har myndighet - kun
+hvilke mål en allerede-autorisert aktør kan nå; `class_d_missing_approval`
+for en ikke-eier-tenant, uavhengig av mål-konfigurasjon). Ny
+`assertValidContainerName()`/`assertValidImageRef()`
+kommandoinjeksjons-/flagg-forveksling-forsvar i transporten. Recovery for
+begge nye handlinger deler ÉN strategi (`dockerRunningStateRecovery`) -
+gjenopprettingsmål er UTELUKKENDE en funksjon av `before_state.status`,
+går UTELUKKENDE via `ToolGateway.execute()` (re-sjekker autorisasjon/
+InfraExecutionGate/frys/KillSwitch identisk med enhver annen mutasjon),
+REQUERIER for å verifisere. 12 nye enhetstester (`docker-target-policy.
+test.ts`) + `docker-transport.test.ts` 9→23 (9 adversarielle
+navne-injeksjonstester) + `infra-execution.test.ts` 14→26 (konfigurert/
+ukonfigurert produksjonsmål, redeploy forblir deferred selv konfigurert,
+recovery begge retninger, sovereign-uten-godkjenning, DEGRADED/KillSwitch/
+frys mot produksjonsmål, tenant-isolasjon av journalen holder for
+produksjonsmål). `pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent, full
+suite grønn (se commit for eksakte tall), INGEN regresjon. Ærlig grense:
+`JARVIS_DOCKER_MUTATION_TARGETS` er nødvendigvis VERT-nivå (Docker har
+ingen tenant-modell) - eksekusjons-/recovery-JOURNALEN forblir like fullt
+strengt tenant-partisjonert (bevist eksplisitt). `LIVE_VERIFIED` uendret
+`false` for alle D-105-flagg - denne reparasjonen endrer KUN
+kodekapasitet/FIXED_SUITE, ingen live host-akseptanse utført.
+`UA5_CRITERION_1=PARTIAL`, `UA5_CRITERION_3=PARTIAL`,
+`UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Samme branch/PR
+`claude/ua5-production-ops-control-plane-v2` (PR #48) - IKKE merget.
+
+## Runden før det
+
+**Oppdatert:** 2026-08-22 (**UA-5 Production Operations Control Plane v2
 (D-105) — lukker D-104s kjente kriterium 1/3-hull.** D-64-porten kjørt
 FØRST: INGEN Docker-container-styring/Vercel-mutasjon/GCP/Cloudflare
 eksisterte i repoet fra før - Docker Engine valgt som DEN ENE sammenhengende

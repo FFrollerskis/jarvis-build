@@ -126,6 +126,19 @@ export interface ToolDefinition {
   transport: ToolTransport;
   /** v4.0 D-pipeline: handling som leser nå-tilstand for preflight + readback (før/etter-evidens). */
   preflight_action?: string;
+  /**
+   * D-105 host-fix (D-41-korreksjon): valgfri PARAMETER-nivå-autorisasjon,
+   * kjørt av `ToolGateway.execute()` SELV for HVERT kall gjennom denne
+   * SAMME, generiske gatewayen - uansett innslagsvei (dedikert REST-rute
+   * ELLER en fremtidig samtale-drevet verktøykalls-vei). En transport-
+   * spesifikk regel bygget INN I transporten kan omgås av et hvilket som
+   * helst annet kall til `gateway.execute()`; denne hooken kan det ikke,
+   * fordi den er del av selve gateway-pipelinen (etter policy.authorize()
+   * ALLOW, FØR rate-limit/credential/preflight/invoke). I dag brukt KUN av
+   * `docker.*`-mål-autorisasjon (se `docker-target-policy.ts`) - generisk
+   * mekanisme i gatewayen, ingen docker-spesifikk kode her.
+   */
+  parameterAuthorizer?: (parameters: Record<string, JsonValue>, identity: IdentityContext) => { allowed: boolean; reason: string };
 }
 
 export type ToolResult =
@@ -195,6 +208,12 @@ export class ToolGateway {
     });
     if (decision.decision !== "ALLOW") {
       return this.deny(request, decision.reason);
+    }
+    if (definition.parameterAuthorizer) {
+      const paramDecision = definition.parameterAuthorizer(request.parameters, request.identity);
+      if (!paramDecision.allowed) {
+        return this.deny(request, paramDecision.reason);
+      }
     }
     if (!this.withinRateLimit(definition, request.identity.tenant_id)) {
       return this.deny(request, "rate_limited");

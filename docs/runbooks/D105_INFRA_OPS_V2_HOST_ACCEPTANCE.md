@@ -60,9 +60,31 @@ Tobias kjører kommandoene mot.
 
 ## §2 Kritisk infra-mutasjon + tested recovery (kriterium 3)
 
-**ALDRI mot et produksjonsnavn** - `docker.redeploy_container` NEKTER
-strukturelt alt annet enn `jarvis-sentinel-*` (se `assertSentinelTarget()` i
-`docker-transport.ts`, håndhevet I TRANSPORTEN, ikke bare i policy).
+**VIKTIG - host-fix (D-41-korreksjon, 2026-08-22):** mål-autorisasjon sitter
+IKKE lenger i transporten. `docker-target-policy.ts` sin `authorizeDockerTarget()`
+(håndhevet av `ToolGateway.execute()` via `parameterAuthorizer`) skiller
+EKSPLISITT mellom to tier:
+
+- **AKSEPTANSE (denne runboken):** `jarvis-sentinel-*` er ALLTID tillatt for
+  ALLE muterende docker-handlinger (`redeploy_container`/`stop_container`/
+  `start_container`) - uavhengig av `JARVIS_DOCKER_MUTATION_TARGETS`. Denne
+  runboken bruker UTELUKKENDE denne veien, mot et disponibelt engangsmål -
+  ALDRI en ekte tjeneste.
+- **PRODUKSJON (IKKE denne runboken):** et eier-konfigurert ekte mål
+  (`JARVIS_DOCKER_MUTATION_TARGETS=jarvis-api-1,...`) kan KUN nås av
+  `stop_container`/`start_container` (bevist trygge - ren kjøretilstand,
+  INGEN konfigurasjon å miste). `redeploy_container` forblir STRUKTURELT
+  DEFERRED for produksjon (kun sentinel) - nåværende implementasjon bevarer
+  IKKE mounts/miljøvariabler/nettverk/porter/restart-policy/healthcheck ved
+  rekonstruksjon, og er derfor IKKE eksponert mot ekte tjenester før en
+  konfigurasjonsbevarende redeploy er bygget og bevist (se D-105-raden i
+  DECISIONS_AND_ASSUMPTIONS.md).
+
+Denne runboken beviser DEN SAMME produksjonskode-veien (ingen egen
+"akseptanse-modus" i selve `executeInfraMutation()`/`ToolGateway`), men
+pålegger en EKSTRA akseptanse-only mål-restriksjon (sentinel-navn) - denne
+distinksjonen (samme kode, ekstra akseptanse-scoping) er bevisst, ikke en
+svakhet i noen av veiene.
 
 1. Utfør den FØRSTE mutasjonen (oppretter et disponibelt testmål fra bunnen av):
    ```

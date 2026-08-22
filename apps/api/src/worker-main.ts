@@ -6,7 +6,7 @@ import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
-  ToolGateway, driveTransportsIfConfigured, firstWaveTools
+  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -159,6 +159,9 @@ for (const tool of firstWaveTools({
   // D-105: samme wiring-mønster som apps/api/src/main.ts.
   docker: new DockerTransport(),
   ...driveTransportsIfConfigured()
+}, {
+  // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
+  dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
 })) toolGateway.register(tool);
 const workerIdentity = {
   person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",

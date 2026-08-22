@@ -10,6 +10,14 @@ import { DockerTransport } from "../src/docker-transport.ts";
  * env.test.ts`). Fake-scriptet vedlikeholder container-tilstand i en
  * JSON-fil på disk (persisterer mellom hvert subprosesskall, akkurat som en
  * ekte daemon ville gjort mellom `docker`-CLI-invokeringer).
+ *
+ * D-105 host-fix (D-41-korreksjon): denne suiten beviser at TRANSPORTEN selv
+ * IKKE lenger inneholder noen mål-autorisasjonsregel (verken sentinel-only
+ * eller noe annet) - `redeploy_container`/`stop_container`/`start_container`
+ * utføres av transporten mot ETHVERT strukturelt gyldig navn. Selve
+ * autorisasjonen (hvem/hva som FÅR LOV) testes separat i docker-target-
+ * policy.test.ts og integrasjonsmessig i modules/incidents/test/infra-
+ * execution.test.ts (via `parameterAuthorizer`, ToolGateway.execute()).
  */
 async function writeFakeDocker(): Promise<{ dockerBin: string; statePath: string }> {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-fake-docker-transport-"));
@@ -58,6 +66,20 @@ async function writeFakeDocker(): Promise<{ dockerBin: string; statePath: string
     "  process.stdout.write(id + '\\n');",
     "  process.exit(0);",
     "}",
+    "if (cmd === \"stop\") {",
+    "  if (process.env.FAKE_DOCKER_FAIL_STOP === '1') { process.stderr.write('Error: simulated stop failure\\n'); process.exit(1); }",
+    "  const name = args[args.length - 1];",
+    "  const s = load();",
+    "  if (!s[name]) { process.stderr.write(`Error: No such container: ${name}\\n`); process.exit(1); }",
+    "  s[name].Status = 'exited'; save(s); process.exit(0);",
+    "}",
+    "if (cmd === \"start\") {",
+    "  if (process.env.FAKE_DOCKER_FAIL_START === '1') { process.stderr.write('Error: simulated start failure\\n'); process.exit(1); }",
+    "  const name = args[args.length - 1];",
+    "  const s = load();",
+    "  if (!s[name]) { process.stderr.write(`Error: No such container: ${name}\\n`); process.exit(1); }",
+    "  s[name].Status = 'running'; save(s); process.exit(0);",
+    "}",
     "process.stderr.write(`unknown command: ${cmd}\\n`); process.exit(1);"
   ].join("\n"), "utf8");
   await chmod(dockerBin, 0o700);
@@ -72,11 +94,11 @@ describe("D-105: DockerTransport (EKTE subprosess-kall, fake docker-kjørbar fil
     expect(result.data).toBeNull();
   });
 
-  it("B: redeploy_container mot et IKKE-sentinel-navn NEKTES STRUKTURELT - ALDRI utført, uavhengig av policy/risikoklasse", async () => {
+  it("B: TRANSPORTEN inneholder INGEN mål-autorisasjonsregel - redeploy_container mot et VILKÅRLIG, strukturelt gyldig navn (IKKE sentinel) UTFØRES av transporten (autorisasjon skjer nå UTENFOR transporten, se docker-target-policy.ts)", async () => {
     const { dockerBin } = await writeFakeDocker();
     const transport = new DockerTransport();
-    await expect(transport.invoke("redeploy_container", { name: "production-postgres", image: "postgres:16" }, dockerBin))
-      .rejects.toThrow(/docker_redeploy_refused_unsafe_target/);
+    const result = await transport.invoke("redeploy_container", { name: "jarvis-api-1", image: "postgres:16" }, dockerBin);
+    expect((result.data as { image?: string })?.image).toBe("postgres:16");
   });
 
   it("C: redeploy_container mot et GYLDIG sentinel-navn oppretter FAKTISK en ny container og returnerer dens tilstand", async () => {
@@ -142,5 +164,70 @@ describe("D-105: DockerTransport (EKTE subprosess-kall, fake docker-kjørbar fil
     const { dockerBin } = await writeFakeDocker();
     const transport = new DockerTransport();
     await expect(transport.invoke("delete_everything", {}, dockerBin)).rejects.toThrow(/docker_unknown_action/);
+  });
+
+  it("J: stop_container stopper en FAKTISK kjørende container og returnerer den reinspiserte tilstanden (status=exited)", async () => {
+    const { dockerBin } = await writeFakeDocker();
+    const transport = new DockerTransport();
+    await transport.invoke("redeploy_container", { name: "jarvis-sentinel-stop", image: "alpine:3.20" }, dockerBin);
+    const result = await transport.invoke("stop_container", { name: "jarvis-sentinel-stop" }, dockerBin);
+    expect((result.data as { status?: string })?.status).toBe("exited");
+  });
+
+  it("K: start_container starter en FAKTISK stoppet container og returnerer den reinspiserte tilstanden (status=running)", async () => {
+    const { dockerBin } = await writeFakeDocker();
+    const transport = new DockerTransport();
+    await transport.invoke("redeploy_container", { name: "jarvis-sentinel-start", image: "alpine:3.20" }, dockerBin);
+    await transport.invoke("stop_container", { name: "jarvis-sentinel-start" }, dockerBin);
+    const result = await transport.invoke("start_container", { name: "jarvis-sentinel-start" }, dockerBin);
+    expect((result.data as { status?: string })?.status).toBe("running");
+  });
+
+  it("L: stop_container mot en FEILENDE docker-daemon gir EKSPLISITT kastet feil, ALDRI fabrikkert suksess", async () => {
+    const { dockerBin } = await writeFakeDocker();
+    const transport = new DockerTransport();
+    await transport.invoke("redeploy_container", { name: "jarvis-sentinel-stopfail", image: "alpine:3.20" }, dockerBin);
+    process.env["FAKE_DOCKER_FAIL_STOP"] = "1";
+    try {
+      await expect(transport.invoke("stop_container", { name: "jarvis-sentinel-stopfail" }, dockerBin)).rejects.toThrow(/docker_stop_failed/);
+    } finally {
+      delete process.env["FAKE_DOCKER_FAIL_STOP"];
+    }
+  });
+
+  it("M: start_container mot en FEILENDE docker-daemon gir EKSPLISITT kastet feil, ALDRI fabrikkert suksess", async () => {
+    const { dockerBin } = await writeFakeDocker();
+    const transport = new DockerTransport();
+    await transport.invoke("redeploy_container", { name: "jarvis-sentinel-startfail", image: "alpine:3.20" }, dockerBin);
+    await transport.invoke("stop_container", { name: "jarvis-sentinel-startfail" }, dockerBin);
+    process.env["FAKE_DOCKER_FAIL_START"] = "1";
+    try {
+      await expect(transport.invoke("start_container", { name: "jarvis-sentinel-startfail" }, dockerBin)).rejects.toThrow(/docker_start_failed/);
+    } finally {
+      delete process.env["FAKE_DOCKER_FAIL_START"];
+    }
+  });
+
+  describe("N: kommando-injeksjon/flagg-forveksling - ugyldige containernavn kastes FØR noe subprosess-kall gjøres, ALDRI tolket som shell-syntaks eller docker-CLI-flagg", () => {
+    const badNames = [
+      "has space", "semi;colon", "quo\"te", "back`tick", "$(subshell)", "-leadingdash", "line\nbreak", "", "a".repeat(200)
+    ];
+    for (const bad of badNames) {
+      it(`avviser navnet ${JSON.stringify(bad)}`, async () => {
+        const { dockerBin } = await writeFakeDocker();
+        const transport = new DockerTransport();
+        await expect(transport.invoke("inspect_container", { name: bad }, dockerBin)).rejects.toThrow(/docker_invalid_container_name/);
+        await expect(transport.invoke("stop_container", { name: bad }, dockerBin)).rejects.toThrow(/docker_invalid_container_name/);
+        await expect(transport.invoke("start_container", { name: bad }, dockerBin)).rejects.toThrow(/docker_invalid_container_name/);
+        await expect(transport.invoke("redeploy_container", { name: bad, image: "alpine:3.20" }, dockerBin)).rejects.toThrow(/docker_invalid_container_name/);
+      });
+    }
+  });
+
+  it("O: redeploy_container avviser et ugyldig image-uttrykk (kommando-injeksjons-forsvar for image-parameteren)", async () => {
+    const { dockerBin } = await writeFakeDocker();
+    const transport = new DockerTransport();
+    await expect(transport.invoke("redeploy_container", { name: "jarvis-sentinel-badimage", image: "alpine; rm -rf /" }, dockerBin))
+      .rejects.toThrow(/docker_invalid_image_ref/);
   });
 });

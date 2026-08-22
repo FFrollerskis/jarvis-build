@@ -2496,6 +2496,20 @@ D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md` levert for at Tobias selv kan bevise dette
 daemon UTEN å røre produksjonscontainere. `UA5_IMPLEMENTATION_COMPLETE=false`, `UA5_CAN_CLOSE=false`. Ny
 draft-PR, IKKE merget. Full detalj: D-105 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
+sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
+akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha
+ekte kapasitet. `assertSentinelTarget()` fjernet fra transporten (transporterer nå kun); ny
+`docker-target-policy.ts` (`authorizeDockerTarget()`) håndheves i stedet av `ToolGateway.execute()` selv
+(ny generisk `ToolDefinition.parameterAuthorizer`-hook - samme håndhevelsespunkt for alle innslagsveier).
+Nye `docker.stop_container`/`docker.start_container` (ren kjøretilstand, bevist trygg) er de
+PRODUKSJONS-autoriserte handlingene mot `JARVIS_DOCKER_MUTATION_TARGETS` (eksakt, eier-konfigurert,
+fail-closed). `redeploy_container` forblir DEFERRED for produksjon (kun sentinel) - sikkerhetsaudit fant at
+nåværende rm-f+run-d-implementasjon ikke bevarer mounts/env/nettverk/porter/restart-policy/healthcheck.
+Sovereign eier-autoritet uendret (target-autorisasjon utvider aldri myndighet). Ny
+`assertValidContainerName()`/`assertValidImageRef()` kommandoinjeksjonsforsvar. Full detalj: D-105-raden
+(HOST-FIX-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

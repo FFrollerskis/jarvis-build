@@ -32,6 +32,52 @@ interface RecoveryOutcome {
 }
 
 /**
+ * D-105 host-fix (D-41-korreksjon): running-state-recovery for BÅDE
+ * `docker:stop_container` OG `docker:start_container` - SAMME funksjon,
+ * fordi gjenopprettingsmålet UTELUKKENDE avhenger av `beforeState.status`
+ * (den observerte tilstanden FØR mutasjonen), ALDRI av hvilken av de to
+ * handlingene som faktisk ble utført (byggeordrens §9: "before running=true
+ * -> mutation stop -> recovery -> start" / "before running=false -> mutation
+ * start -> recovery -> stop"). Mål-autorisasjon håndheves av `ToolGateway.
+ * execute()` selv (parameterAuthorizer) for BÅDE gjenopprettings-kallet OG
+ * reinspeksjonen - INGEN direkte transport-bypass, INGEN egen sjekk her.
+ * Reinspiserer ETTER for å VERIFISERE (ikke bare stole på at kallet
+ * returnerte ok) - et teknisk vellykket kall som lander i feil kjøretilstand
+ * er EKSPLISITT PARTIAL, aldri fabrikkert SUCCESS.
+ */
+const dockerRunningStateRecovery = async (ctx: RecoveryStrategyContext): Promise<RecoveryOutcome> => {
+  const before = ctx.beforeState as { status?: unknown } | null;
+  if (!before || typeof before.status !== "string") {
+    return { status: "UNKNOWN", result: { reason: "no_before_state_captured" } };
+  }
+  const name = ctx.parameters["name"];
+  if (typeof name !== "string") {
+    return { status: "UNKNOWN", result: { reason: "missing_name_parameter" } };
+  }
+  const wasRunning = before.status === "running";
+  const recoveryAction = wasRunning ? "start_container" : "stop_container";
+  const restore = await ctx.gateway.execute({
+    identity: ctx.identity, tool_id: "docker", action: recoveryAction,
+    parameters: { name }, idempotency_key: `recovery:${ctx.idempotencyKey}`
+  });
+  if (!restore.ok) {
+    return { status: "FAILED", result: { reason: restore.reason } };
+  }
+  const reinspected = await ctx.gateway.execute({
+    identity: ctx.identity, tool_id: "docker", action: "inspect_container", parameters: { name }
+  });
+  if (!reinspected.ok || !reinspected.data) {
+    return { status: "UNKNOWN", result: { reason: "post_recovery_verification_failed", external_id: restore.external_id ?? null } };
+  }
+  const resulting = reinspected.data as unknown as { status?: unknown };
+  const nowRunning = resulting.status === "running";
+  if (nowRunning === wasRunning) {
+    return { status: "SUCCESS", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data } };
+  }
+  return { status: "PARTIAL", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data, expected_running: wasRunning } };
+};
+
+/**
  * D-104 Part D: liten, EKSPLISITT strategiregistrering - KUN registrerte
  * `tool_id:action`-kombinasjoner har en reell recovery-vei. Et ukjent kall
  * returnerer `UNKNOWN` (ALDRI fabrikkert `SUCCESS`) - se `attemptRecovery()`.
@@ -101,7 +147,9 @@ const RECOVERY_STRATEGIES: Readonly<Record<string, (ctx: RecoveryStrategyContext
       return { status: "SUCCESS", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data } };
     }
     return { status: "PARTIAL", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data, expected_image: before.image } };
-  }
+  },
+  "docker:stop_container": dockerRunningStateRecovery,
+  "docker:start_container": dockerRunningStateRecovery
 };
 
 export function supportedRecoveryStrategies(): readonly string[] {

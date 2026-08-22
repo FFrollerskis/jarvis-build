@@ -32,7 +32,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  emailSource, firstWaveTools, tasksSource, DailyScheduler
+  emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -227,6 +227,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // credential_unavailable, ALDRI et stille fall til en ambient binærsti.
     docker: new DockerTransport(),
     ...driveTransportsIfConfigured()
+  }, {
+    // D-105 host-fix (D-41-korreksjon): eier-konfigurert produksjonsmål-
+    // autorisasjon for docker-mutasjon - parset ÉN gang ved oppstart (samme
+    // "les env her, tre inn i konstruktør/config"-mønster som resten av
+    // denne funksjonen). Tom/ukonfigurert -> INGEN produksjonsmål autorisert
+    // (fail-closed, se docker-target-policy.ts) - sentinel-mål (host-
+    // akseptanse) er alltid tilgjengelig uavhengig av denne variabelen.
+    dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
