@@ -11,3 +11,4 @@ export * from "./diagnosis.ts";
 export * from "./db-correlation.ts";
 export * from "./observability.ts";
 export * from "./infra-execution.ts";
+export * from "./deployment-ingestion.ts";

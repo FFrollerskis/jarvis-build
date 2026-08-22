@@ -5,7 +5,7 @@ import type pg from "pg";
 import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
 import {
   acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
-  getInfraExecution, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
+  getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
 } from "@jarvis/incidents";
 import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
@@ -375,6 +375,28 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       } catch (err) {
         return json(res, 404, { error: "correlation_failed", message: (err as Error).message });
       }
+    }
+
+    if (req.method === "POST" && url.pathname === "/deployments/ingest/github") {
+      // D-105 (UA-5 kriterium 1 host-fix): den EKSISTERENDE `DeploymentService.
+      // recordDeployment()` sin FØRSTE produksjons-callsite - lukker gapet
+      // closeout-audit fant ("ingen produksjons-callsite, kun testtreff").
+      // Kaller UTELUKKENDE `ingestGithubDeployment()`, som selv går via
+      // `ToolGateway`/`github.get_workflow_run` - INGEN egen HTTP/Octokit-
+      // klient her, INGEN rå credential i request-body (samme "identity inn,
+      // credential hentes internt via SecretProvider"-mønster som ENHVER
+      // annen rute i denne filen).
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; repo: string; workflow_run_id: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const outcome = await ingestGithubDeployment({ gateway, deployments }, resolved.identity, {
+        repo: body.repo, workflow_run_id: body.workflow_run_id
+      });
+      if (outcome.status === "provider_unavailable") return json(res, 502, { error: "provider_unavailable", reason: outcome.reason });
+      if (outcome.status === "invalid_provider_response") return json(res, 422, { error: "invalid_provider_response", reason: outcome.reason });
+      return json(res, 200, { deployment: outcome.deployment, created: outcome.created, provenance: outcome.provenance });
     }
 
     if (req.method === "POST" && url.pathname === "/incidents/correlate/db") {

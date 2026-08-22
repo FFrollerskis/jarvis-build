@@ -1,5 +1,49 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**D-105 HOST-FIX #2 — GitHub deployment-ingestion
+produksjons-callsite, siste gjenværende UA-5 kriterium 1-live-gap.** Tobias
+kjørte D105-runbokens §1/§2 selv mot ekte Windows + Docker Desktop:
+`OBSERVABILITY_PROVIDER_LIVE=true`, `REAL_LOG_ACQUISITION=true`,
+`DB_STATE_CORRELATION_LIVE=true`, `UA5_CRITERION_3=COMPLETE`. Gjenstående
+gap: `POST /incidents/correlate` fant ingen `active_deployment` fordi
+`DeploymentService.recordDeployment()` hadde INGEN produksjons-callsite (kun
+testbruk). Reparasjon (samme D-105, ingen ny D-ID): ny
+`modules/incidents/src/deployment-ingestion.ts` (`ingestGithubDeployment()`)
+henter ÉN Actions-workflow-kjøring UTELUKKENDE via `ToolGateway.execute()`
+(`github.get_workflow_run`, ALDRI direkte HTTP - D-41: gjenbruker eksisterende
+connector), validerer providerresultatet strukturelt (manglende/ugyldig
+`head_sha`/`status`/`created_at` -> eksplisitt `invalid_provider_response`,
+ALDRI fabrikkert), normaliserer deterministisk (konservativ status-mapping;
+`deployed_at` fra GitHub sitt EKTE `created_at` - ALDRI `Date.now()`).
+`get_workflow_run`-transporten (`live-transports.ts`) utvidet med
+`created_at` (manglet før - provider-repair). Ny `POST /deployments/ingest/
+github`-rute (`apps/api/src/server.ts`, tenant-scopet, feiler lukket).
+`/incidents/correlate` uendret - bruker samme kanoniske `DeploymentService`,
+nå med faktisk data etter ingestion. Q-26 uendret: evidence-forfremmelse KUN
+via eksisterende `correlateIncident()`-matcheregel (bevist eksplisitt: log-
+bevis forblir UNVERIFIED, kun eksakt matchende deployment-bevis forfremmes).
+Runbokens hardkodede `memory_space: "business"` fikset til den faktiske
+seedede eier-verdien `"personal"`; ny §3 lagt til for live GitHub
+deployment-ingestion-akseptanse. **Testdekning:** 14 nye HTTP-
+integrasjonstester (`apps/api/test/deployment-ingestion-api.test.ts` - ekte
+`createApiServer()`+`fetch()`+embedded Postgres+fake GitHub-transport, hånd-
+speilet `githubToolDefinitions()` samme mønster som `infra-execution.test.ts`
+sin `dockerToolDefinitions()`) + 1 transport-test
+(`github-developer-control-plane.test.ts`). Full workspace-suite
+`TESTS_AFTER=2201`/`TEST_FILES_AFTER=145` (opp fra `2145`/`143`), `pnpm -w
+typecheck` 19/19 rent, `pnpm -w lint` rent, INGEN regresjon. **ÆRLIG
+VERIFISERINGSSTATUS:** `FIXED_SUITE_VERIFIED=true` for hele reparasjonen -
+men `DEPLOY_OR_VERSION_CORRELATION_LIVE` forblir `false`/`UA5_CRITERION_1`
+forblir `PARTIAL` inntil Tobias kjører runbokens nye §3 mot et ekte
+`tsworkflow/jarvisbuild`-workflow-run. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED`
+uendret `false`. Branch `claude/d105-github-deployment-ingestion`, commit
+`532baf8` (+ docs-commit `25ab255`), PR #49
+(https://github.com/tsworkflow/jarvisbuild/pull/49) - draft, IKKE merget.
+Full detalj: D-105-raden (HOST-FIX #2-avsnittet) i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**UA-5 Production Operations Control Plane v2
 (D-105) HOST-FIX — D-41-korreksjon av PR #48-closeout-funn.** Uavhengig
 closeout-audit av PR #48 fant at `assertSentinelTarget()` IKKE var en

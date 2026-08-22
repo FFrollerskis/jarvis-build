@@ -1038,10 +1038,15 @@ export class GithubTransport implements ToolTransport {
         };
       }
       case "get_workflow_run": {
+        // D-105 (UA-5 kriterium 1 host-fix): utvidet med `created_at` - DEN
+        // FAKTISKE providertidsstemplet GitHub allerede returnerer på dette
+        // endepunktet (samme felt `list_workflow_runs` allerede har brukt),
+        // som `deployment-ingestion.ts` bruker som `deployed_at` - ALDRI
+        // `Date.now()` kalt "providersannhet".
         const runId = ghRequireString(parameters, "run_id");
         const response = await githubFetch(`${base}/actions/runs/${encodeURIComponent(runId)}`, { headers });
-        const r = (await response.json()) as { id: number; name: string; status: string; conclusion: string | null; head_sha: string; head_branch: string; html_url: string };
-        return { external_id: String(r.id), data: { id: String(r.id), name: r.name, status: r.status, conclusion: r.conclusion ?? "", head_sha: r.head_sha, head_branch: r.head_branch, html_url: r.html_url } };
+        const r = (await response.json()) as { id: number; name: string; status: string; conclusion: string | null; head_sha: string; head_branch: string; html_url: string; created_at: string };
+        return { external_id: String(r.id), data: { id: String(r.id), name: r.name, status: r.status, conclusion: r.conclusion ?? "", head_sha: r.head_sha, head_branch: r.head_branch, html_url: r.html_url, created_at: r.created_at } };
       }
       case "list_workflow_jobs": {
         const runId = ghRequireString(parameters, "run_id");

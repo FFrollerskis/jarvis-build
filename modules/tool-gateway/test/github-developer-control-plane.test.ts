@@ -79,11 +79,17 @@ describe("B: nye les-handlinger (klasse A)", () => {
     expect(result.data).toEqual({ workflow_runs: [{ id: "99", name: "build-test", status: "completed", conclusion: "success", head_sha: "s", head_branch: "main", html_url: "u", created_at: "d" }] });
   });
   it("get_workflow_run", async () => {
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(200, { id: 99, name: "build-test", status: "completed", conclusion: "failure", head_sha: "s", head_branch: "main", html_url: "u" })));
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(200, { id: 99, name: "build-test", status: "completed", conclusion: "failure", head_sha: "s", head_branch: "main", html_url: "u", created_at: "2026-08-22T10:00:00Z" })));
     const transport = new GithubTransport();
     const result = await transport.invoke("get_workflow_run", { repo: REPO, run_id: "99" }, "tok", CTX);
     expect(result.external_id).toBe("99");
     expect((result.data as { conclusion: string }).conclusion).toBe("failure");
+  });
+  it("get_workflow_run returnerer providerens FAKTISKE created_at - D-105 kriterium 1 host-fix: deployment-ingestion.ts bruker DETTE feltet som deployed_at, ALDRI Date.now()", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(200, { id: 100, name: "ci", status: "completed", conclusion: "success", head_sha: "abc123", head_branch: "main", html_url: "u", created_at: "2026-08-22T09:15:00Z" })));
+    const transport = new GithubTransport();
+    const result = await transport.invoke("get_workflow_run", { repo: REPO, run_id: "100" }, "tok", CTX);
+    expect((result.data as { created_at: string }).created_at).toBe("2026-08-22T09:15:00Z");
   });
   it("list_workflow_jobs rapporterer hvilket steg som feilet", async () => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => jsonResponse(200, { jobs: [{ id: 1, name: "test", status: "completed", conclusion: "failure", started_at: "a", completed_at: "b", steps: [{ name: "run tests", status: "completed", conclusion: "failure", number: 3 }] }] })));
