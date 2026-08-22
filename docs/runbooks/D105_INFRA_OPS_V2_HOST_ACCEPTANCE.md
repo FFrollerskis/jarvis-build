@@ -1,18 +1,23 @@
 # D-105 UA-5 host-akseptanse: real-provider observability + kritisk infra-mutasjon/recovery
 
-**Status: IKKE ENNÅ KJØRT. FIXED_SUITE_VERIFIED (embedded-Postgres + reell
-`docker`-CLI-subprosess mot en fake kjørbar fil, se `modules/tool-gateway/
-test/docker-transport.test.ts` og `modules/incidents/test/infra-execution.test.ts`),
-INGEN LIVE_VERIFIED-status krevd/påstått ennå.** Denne runboken lar Tobias
-selv bevise de gjenværende live-kravene for UA-5 kriterium 1 og 3 mot en
-EKTE, disponibel Docker-daemon (Docker Desktop eller UGREEN-NAS), UTEN å
-røre noen produksjonscontainer (`api`/`worker`/`postgres`/`langfuse`/
-`infisical` i `infra/local/docker-compose.yml` forblir utouched - denne
-runboken virker UTELUKKENDE mot et engangs `jarvis-sentinel-*`-navngitt
-testmål, samme "disponibelt engangsmål"-prinsipp som D-103s
+**Status (2026-08-22): §1 (observability) og §2 (kritisk infra-mutasjon +
+recovery) er FAKTISK kjørt av Tobias mot en ekte Windows + Docker Desktop-
+daemon - `OBSERVABILITY_PROVIDER_LIVE=true`, `REAL_LOG_ACQUISITION=true`,
+`DB_STATE_CORRELATION_LIVE=true`, `UA5_CRITERION_3=COMPLETE`. §3 (GitHub
+deployment-ingestion-korrelasjon) er en NY seksjon (host-fix) - kun
+FIXED_SUITE_VERIFIED (embedded-Postgres + fake GitHub-transport, se
+`apps/api/test/deployment-ingestion-api.test.ts`), `DEPLOY_OR_
+VERSION_CORRELATION_LIVE` er FORTSATT `false` inntil Tobias kjører §3
+selv.** Denne runboken lar Tobias selv bevise de gjenværende live-kravene
+mot en EKTE, disponibel Docker-daemon (Docker Desktop eller UGREEN-NAS) og
+en EKTE GitHub-tilkobling, UTEN å røre noen produksjonscontainer
+(`api`/`worker`/`postgres`/`langfuse`/`infisical` i
+`infra/local/docker-compose.yml` forblir utouched - denne runboken virker
+UTELUKKENDE mot et engangs `jarvis-sentinel-*`-navngitt testmål for §2,
+samme "disponibelt engangsmål"-prinsipp som D-103s
 `jarvis-d103-acceptance`-repo). INGEN kommando i dette dokumentet er utført
-av Claude Code. Krever en ekte, lokalt tilgjengelig `docker`-daemon som KUN
-Tobias kjører kommandoene mot.
+av Claude Code. Krever en ekte, lokalt tilgjengelig `docker`-daemon og en
+ekte `JARVIS_GITHUB_TOKEN` som KUN Tobias kjører kommandoene mot.
 
 ## Forutsetning
 
@@ -22,13 +27,24 @@ Tobias kjører kommandoene mot.
   binæren) - uten denne er `docker`-tool_id-et strukturelt
   `credential_unavailable`, IDENTISK gating-oppførsel som `JARVIS_VERCEL_TOKEN`.
 - `api`/`worker` startet normalt (samme oppskrift som D-103-runboken).
+- **Identitet/`memory_space` (host-fix, 2026-08-22):** bruk AKKURAT den
+  eier-identiteten `apps/api/src/migrate-main.ts` sin `seedOwner()` allerede
+  har opprettet på din maskin - `tenant_id="tenant-personal"`,
+  `person_id="person-tobias"`, `memory_space="personal"` (samme identitet
+  som D-103-runboken bruker, se der linje ~271-274). Alle
+  `"memory_space": "..."`-verdier under er DERFOR `"personal"`, IKKE
+  `"business"` - en hardkodet `"business"` finnes ikke på en fersk seed og
+  gir `identity_denied`/`unknown_memory_space`. Har du seedet en annen
+  tenant/memory_space lokalt, bytt ut ALLE forekomster under med DIN
+  faktiske, allerede validerte verdi - ALDRI gjett en verdi runboken selv
+  ikke har bekreftet eksisterer.
 
 ## §1 Real observability-innhenting (kriterium 1)
 
 1. Opprett en hendelse:
    ```
    POST /incidents/create
-   { "identity": {...eier-identitet...}, "memory_space": "business", "title": "D-105 host acceptance" }
+   { "identity": {...eier-identitet, se Forutsetning...}, "memory_space": "personal", "title": "D-105 host acceptance" }
    ```
 2. Kjør ETT reelt docker-kall for å bevise providerens helse:
    ```
@@ -43,7 +59,7 @@ Tobias kjører kommandoene mot.
    sentinel-begrenset, se `docker-transport.ts`):
    ```
    POST /incidents/evidence/acquire_logs
-   { "identity": {...}, "memory_space": "business", "incident_id": "<fra §1>",
+   { "identity": {...}, "memory_space": "personal", "incident_id": "<fra §1>",
      "container": "jarvis-api-1", "tail": 20 }
    ```
    Forventet: `evidence` er en liste med `incident_evidence`-rader,
@@ -126,7 +142,63 @@ svakhet i noen av veiene.
    docker rm -f jarvis-sentinel-host-run-1
    ```
 
-## §3 Etter kjøring
+## §3 Real GitHub deployment-ingestion + korrelasjon (kriterium 1, siste gjenværende gap)
+
+**Status før denne seksjonen: `DEPLOY_OR_VERSION_CORRELATION_LIVE=false`** -
+`POST /incidents/correlate` fant ingen `active_deployment` fordi
+`DeploymentService.recordDeployment()` manglet en produksjons-callsite (kun
+brukt i tester). Host-fixen (2026-08-22) lukker DETTE gapet med en NY,
+produksjonsklar rute: `POST /deployments/ingest/github` - som går GJENNOM
+den eksisterende `ToolGateway.execute()`-veien (`github.get_workflow_run` +
+best-effort `github.get_commit`), ALDRI et direkte GitHub-HTTP-kall og
+ALDRI en seedet/fabrikkert deploy (se `modules/incidents/src/
+deployment-ingestion.ts`).
+
+1. Finn en EKTE, allerede eksisterende Actions-workflow-kjøring for
+   `tsworkflow/jarvisbuild` (f.eks. siste `CI`-kjøring på `main` - hent
+   `run_id`-en fra GitHub sin Actions-fane, eller via
+   `gh run list --repo tsworkflow/jarvisbuild --limit 1`).
+2. Ingest DEN kjøringen gjennom den nye produksjonsruten:
+   ```
+   POST /deployments/ingest/github
+   { "identity": {...eier-identitet, se Forutsetning...},
+     "repo": "tsworkflow/jarvisbuild", "workflow_run_id": "<ekte run_id fra steg 1>" }
+   ```
+   Forventet: `200 OK`, `deployment.commit_sha` er den FAKTISKE `head_sha`-
+   en fra kjøringen, `deployment.status` reflekterer FAKTISK
+   status/conclusion (ALDRI en gjettet `success`), `deployment.deployed_at`
+   er GitHub sitt EKTE `created_at`-tidsstempel for kjøringen (ALDRI
+   tidspunktet du kjørte kommandoen). Bekreft dette manuelt mot GitHub sin
+   UI/`gh run view <run_id>` FØR du går videre.
+3. Kjør SAMME ingestion en gang til med IDENTISK `workflow_run_id`:
+   forventet `created=false` og SAMME `deployment.deployment_id` som steg 2
+   - beviser idempotens (ingen duplikatrad).
+4. Opprett en hendelse og korreler:
+   ```
+   POST /incidents/create
+   { "identity": {...}, "memory_space": "personal", "title": "D-105 GitHub deployment-ingestion host acceptance" }
+   ```
+   ```
+   POST /incidents/correlate
+   { "identity": {...}, "memory_space": "personal", "incident_id": "<fra over>", "repo": "tsworkflow/jarvisbuild" }
+   ```
+   Forventet: `correlation.active_deployment` er IKKE lenger `null` - den
+   peker på deploy-en fra steg 2, med FAKTISK `commit_sha`/`workflow_run_id`.
+   **`DEPLOY_OR_VERSION_CORRELATION_LIVE=true` krever nøyaktig dette svaret
+   - ALDRI markert `true` uten at `active_deployment` faktisk er ikke-null
+   med FAKTISK provenance fra steg 2.**
+5. (Valgfritt, kun hvis du faktisk har relevant bevis å teste tidsvindu-
+   logikken mot) Legg til reelt bevis via
+   `POST /incidents/evidence/add` med en `observed_at` etter deploy-ens
+   `deployed_at`, korreler på nytt, og bekreft at `correlation.
+   suspect_deployment` FAKTISK peker på riktig deploy per den
+   deterministiske `findSuspectDeployment()`-logikken (nyeste deploy FØR
+   `observed_at`, `null` hvis ingen finnes - ALDRI gjettet). Har du ikke et
+   ekte tidsrelevant bevis å teste med: hopp over dette steget og la
+   `suspect_deployment` forbli udokumentert `null` for denne kjøringen -
+   ALDRI konstruer et kunstig bevis kun for å tvinge frem en `suspect_deployment`.
+
+## §4 Etter kjøring
 
 Oppdater `docs/DECISIONS_AND_ASSUMPTIONS.md` (D-105-raden) og
 `docs/PROJECT_STATUS.md` med de FAKTISKE flaggverdiene observert over

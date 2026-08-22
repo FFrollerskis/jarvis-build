@@ -2510,6 +2510,30 @@ Sovereign eier-autoritet uendret (target-autorisasjon utvider aldri myndighet). 
 `assertValidContainerName()`/`assertValidImageRef()` kommandoinjeksjonsforsvar. Full detalj: D-105-raden
 (HOST-FIX-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
 
+**LIVE HOST-AKSEPTANSE §1/§2 (2026-08-22, Tobias sin egen kjøring mot ekte Windows + Docker Desktop):**
+`OBSERVABILITY_PROVIDER_LIVE=true`, `REAL_LOG_ACQUISITION=true`, `DB_STATE_CORRELATION_LIVE=true`,
+`UA5_CRITERION_3=COMPLETE` (full ekte redeploy/before-after/diff/recovery-syklus mot et disponibelt
+sentinel-mål, produksjonscontainere utouched, uavhengig `docker inspect`-verifisering). Gjenstående gap:
+`POST /incidents/correlate` fant ingen `active_deployment` - `DeploymentService.recordDeployment()` hadde
+ingen produksjons-callsite.
+
+**HOST-FIX #2 (2026-08-22, GitHub deployment-ingestion, samme D-105, ingen ny D-ID):** ny
+`modules/incidents/src/deployment-ingestion.ts` (`ingestGithubDeployment()`) er DEN manglende
+produksjons-callsiten - henter én Actions-workflow-kjøring UTELUKKENDE via `ToolGateway.execute()`
+(`github.get_workflow_run`, aldri direkte HTTP - D-41: gjenbruker eksisterende connector), validerer
+strukturelt (manglende/ugyldig `head_sha`/`status`/`created_at` -> `invalid_provider_response`, aldri
+fabrikkert), normaliserer deterministisk (konservativ status-mapping; `deployed_at` fra GitHub sitt EKTE
+`created_at` - aldri `Date.now()`). `get_workflow_run`-transporten (`live-transports.ts`) utvidet med
+`created_at` (manglet før - provider-repair, ikke fabrikkert erstatning). Ny `POST /deployments/ingest/
+github`-rute (tenant-scopet, feiler lukket på identitet/provider-feil). `/incidents/correlate` uendret -
+bruker samme kanoniske `DeploymentService`, nå med faktisk data etter ingestion. Q-26 uendret: evidence-
+forfremmelse skjer KUN via eksisterende `correlateIncident()`-matcheregel. 14 nye HTTP-integrasjonstester
+(`apps/api/test/deployment-ingestion-api.test.ts`, ekte `createApiServer()`+`fetch()`+embedded Postgres+
+fake GitHub-transport) + 1 transport-test. `FIXED_SUITE_VERIFIED=true`. `DEPLOY_OR_VERSION_CORRELATION_LIVE`
+forblir `false`/`UA5_CRITERION_1` forblir `PARTIAL` inntil Tobias kjører runbokens nye §3 (GitHub
+deployment-ingestion-akseptanse) mot et ekte `tsworkflow/jarvisbuild`-workflow-run. Full detalj: D-105-raden
+(HOST-FIX #2-avsnittet) i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
