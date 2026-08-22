@@ -3,6 +3,7 @@ export * from "./integrations.ts";
 export * from "./home-assistant.ts";
 export * from "./daily-brief.ts";
 export * from "./live-transports.ts";
+export * from "./docker-transport.ts";
 export * from "./github-rate-limit-controller.ts";
 export * from "./scheduler.ts";
 export * from "./mesh-bridge.ts";

@@ -186,6 +186,15 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // `deployments`/`infra_recovery_actions` er REN infra-audit (tenant-scoped,
   // ingen memory_space_id, samme klasse som `tool_executions`/`audit_events`)
   // - BEVISST utenfor denne memory-space-erasure-planen, samme presedens.
+  // D-105 (037_infra_ops_v2.sql): `incident_diagnoses` FØR BEGGE
+  // `incident_evidence` OG `incidents` (FK -> incidents; `incident_diagnosis_
+  // evidence` FK -> BÅDE incident_diagnoses OG incident_evidence - uten denne
+  // rekkefølgen ville en gjenværende diagnose-bevis-lenke blokkert
+  // `incident_evidence`-slettingen under med en fremmednøkkel-feil).
+  // `incident_diagnosis_evidence` er BEVISST IKKE registrert selv - `ON
+  // DELETE CASCADE` mot `incident_diagnoses` (samme "bærer intet eget
+  // innhold"-begrunnelse som `incident_repair_tasks`).
+  add(result, "incident_diagnoses", await run(client, mode, "incident_diagnoses", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "incident_evidence", await run(client, mode, "incident_evidence", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "incidents", await run(client, mode, "incidents", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;

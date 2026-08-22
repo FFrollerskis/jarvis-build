@@ -1460,6 +1460,45 @@ export function firstWaveTools(transports: Partial<Record<string, ToolTransport>
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
       preflight_action: "get_branch"
+    },
+    {
+      // D-105 (UA-5 kriterium 1): Docker-lesehandlinger - virker mot ETHVERT
+      // containernavn (reell driftsdiagnostikk, ikke kun sentinel-mål).
+      tool_id: "docker", action: "list_containers", description: "List kjørende Docker-containere (valgfritt label-filter)",
+      input_schema: record({ label_filter: z.string().optional() }), capability_class: "A",
+      scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      tool_id: "docker", action: "inspect_container", description: "Les én containers tilstand (id/image/status/health) - null hvis den ikke finnes",
+      input_schema: record({ name: z.string() }), capability_class: "A",
+      scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 60,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      tool_id: "docker", action: "get_logs", description: "Les containerlogger (bundet tidsvindu/tail, hemmeligheter redigert FØR retur)",
+      input_schema: record({ name: z.string(), since: z.string().optional(), until: z.string().optional(), tail: z.number().optional() }),
+      capability_class: "A", scopes: ["docker:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "untrusted", transport: transport("docker")
+    },
+    {
+      // D-105 (UA-5 kriterium 3): den ENE muterende Docker-handlingen -
+      // transporten NEKTER STRUKTURELT ethvert mål utenfor `jarvis-sentinel-*`
+      // (assertSentinelTarget() i docker-transport.ts, UAVHENGIG av
+      // capability_class/policy - forsvar-i-dybden). `preflight_action:
+      // "inspect_container"` gjenbruker DEN EKSISTERENDE ToolGateway-D-
+      // pipelinen (before/after via tool_executions) UENDRET - se
+      // executeInfraMutation() i modules/incidents.
+      tool_id: "docker", action: "redeploy_container", description: "Gjenskap en jarvis-sentinel-*-container med et gitt image (rm -f + run -d) - KUN sentinel-mål",
+      input_schema: record({ name: z.string(), image: z.string() }), capability_class: "D",
+      scopes: ["docker:write"], reversible: true,
+      rollback_procedure: "docker.redeploy_container på nytt med image-verdien fra preflight-inspeksjonen (before_state)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
+      preflight_action: "inspect_container"
     }
   ];
 }

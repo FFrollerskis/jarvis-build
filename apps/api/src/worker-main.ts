@@ -4,7 +4,7 @@ import { assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEn
 import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
-  EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
+  DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools
 } from "@jarvis/tool-gateway";
@@ -83,7 +83,8 @@ const killSwitch = new KillSwitch();
 // workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
 // bygget denne sliceen - se D-104 i DECISIONS_AND_ASSUMPTIONS.md).
 const infraGate = new InfraExecutionGate();
-const infraToolIds = new Set(["github"]);
+// D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
+const infraToolIds = new Set(["github", "docker"]);
 const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
 await deviceRegistry.refresh().catch(() => undefined);
 // v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
@@ -155,6 +156,8 @@ for (const tool of firstWaveTools({
   googleads: new GoogleAdsTransport(growthService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
+  // D-105: samme wiring-mønster som apps/api/src/main.ts.
+  docker: new DockerTransport(),
   ...driveTransportsIfConfigured()
 })) toolGateway.register(tool);
 const workerIdentity = {

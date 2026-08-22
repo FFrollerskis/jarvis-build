@@ -14,6 +14,8 @@ export interface AttemptRecoveryInput {
   /** Den OPPRINNELIGE handlingens parametre (f.eks. `repo`) - `tool_executions` lagrer KUN before/after-tilstand, ikke selve kall-parametrene, så disse må gis eksplisitt av kalleren. */
   parameters: Record<string, JsonValue>;
   incident_id?: string;
+  /** D-105: peker TILBAKE til `infra_executions`-raden denne recoveryen gjenoppretter (byggeordrens §K: "recovery references original execution") - valgfritt (D-104-æra github-recovery har ingen slik rad). */
+  execution_id?: string;
 }
 
 interface RecoveryStrategyContext {
@@ -60,6 +62,45 @@ const RECOVERY_STRATEGIES: Readonly<Record<string, (ctx: RecoveryStrategyContext
       return { status: "SUCCESS", result: { external_id: restore.external_id ?? null, data: restore.data ?? null } };
     }
     return { status: "FAILED", result: { reason: restore.reason } };
+  },
+  /**
+   * D-105 (UA-5 kriterium 3): docker-redeploy-recovery. `beforeState` er
+   * `infra_executions.before_state` (fanget FØR den opprinnelige mutasjonen,
+   * via preflight_action: "inspect_container") - IKKE `after_state`. Etter
+   * mutasjonskallet REQUERIES tilstanden på nytt (`docker.inspect_container`,
+   * klasse A) og sammenlignes MOT den opprinnelige `before.image` - byggeordrens
+   * §K: "Do not define rollback as successful merely because the provider
+   * call returned HTTP 200. Verify resulting state." Et kall som selv
+   * returnerer ok=true men der re-inspeksjonen viser feil image/ikke-kjørende
+   * status blir EKSPLISITT PARTIAL, ALDRI fabrikkert SUCCESS.
+   */
+  "docker:redeploy_container": async (ctx) => {
+    const before = ctx.beforeState as { image?: unknown } | null;
+    if (!before || typeof before.image !== "string") {
+      return { status: "UNKNOWN", result: { reason: "no_before_state_captured" } };
+    }
+    const name = ctx.parameters["name"];
+    if (typeof name !== "string") {
+      return { status: "UNKNOWN", result: { reason: "missing_name_parameter" } };
+    }
+    const restore = await ctx.gateway.execute({
+      identity: ctx.identity, tool_id: "docker", action: "redeploy_container",
+      parameters: { name, image: before.image }, idempotency_key: `recovery:${ctx.idempotencyKey}`
+    });
+    if (!restore.ok) {
+      return { status: "FAILED", result: { reason: restore.reason } };
+    }
+    const reinspected = await ctx.gateway.execute({
+      identity: ctx.identity, tool_id: "docker", action: "inspect_container", parameters: { name }
+    });
+    if (!reinspected.ok || !reinspected.data) {
+      return { status: "UNKNOWN", result: { reason: "post_recovery_verification_failed", external_id: restore.external_id ?? null } };
+    }
+    const resulting = reinspected.data as unknown as { image?: unknown; status?: unknown };
+    if (resulting.image === before.image && resulting.status === "running") {
+      return { status: "SUCCESS", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data } };
+    }
+    return { status: "PARTIAL", result: { external_id: restore.external_id ?? null, verified_state: reinspected.data, expected_image: before.image } };
   }
 };
 
@@ -115,11 +156,11 @@ export async function attemptRecovery(
     const recovery_id = `inf-rec-${randomUUID()}`;
     const { rows } = await client.query(
       `INSERT INTO infra_recovery_actions
-         (recovery_id, tenant_id, tool_id, action, idempotency_key, incident_id, recovery_strategy, status, recovery_result)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+         (recovery_id, tenant_id, tool_id, action, idempotency_key, incident_id, recovery_strategy, status, recovery_result, recovery_of_execution_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
       [
         recovery_id, input.tenant_id, input.tool_id, input.action, input.idempotency_key,
-        input.incident_id ?? null, strategyKey, outcome.status, JSON.stringify(outcome.result)
+        input.incident_id ?? null, strategyKey, outcome.status, JSON.stringify(outcome.result), input.execution_id ?? null
       ]
     );
     return rows[0] as InfraRecoveryAction;

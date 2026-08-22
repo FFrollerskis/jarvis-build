@@ -14,7 +14,7 @@ import {
   runMigrations
 } from "@jarvis/core";
 import { InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { DeploymentService, IncidentService } from "@jarvis/incidents";
+import { DeploymentService, DiagnosisService, IncidentService } from "@jarvis/incidents";
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   AnthropicAdapter,
@@ -29,10 +29,10 @@ import {
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
-  DailyBrief, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore, TelegramCommandPoller,
-  TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured, emailSource,
-  firstWaveTools, tasksSource, DailyScheduler
+  DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
+  GmailTransport, GoogleCalendarTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  emailSource, firstWaveTools, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -74,13 +74,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // D-104 (UA-5 Production Operations Control Plane v1): global infra-
   // eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som
   // forblir strengest/uendret). Gjelder KUN registrerte infra-tool_id-er
-  // (`infraToolIds` under - i dag kun "github", den ENESTE reelle infra-
-  // mutasjonstransporten i repoet, se D-104-audit). Prosess-lokal tilstand,
-  // SAMME arkitektoniske begrensning som `killSwitch`/`OwnerControls`
-  // allerede har (ikke delt på tvers av api-/worker-prosessene) - se D-104
-  // i DECISIONS_AND_ASSUMPTIONS.md for den ærlige begrunnelsen.
+  // (`infraToolIds` under). Prosess-lokal tilstand, SAMME arkitektoniske
+  // begrensning som `killSwitch`/`OwnerControls` allerede har (ikke delt på
+  // tvers av api-/worker-prosessene) - se D-104 i DECISIONS_AND_ASSUMPTIONS.md
+  // for den ærlige begrunnelsen. D-105: "docker" lagt til - den ANDRE ekte
+  // infra-mutasjonstransporten (`docker.redeploy_container`, klasse D).
   const infraGate = new InfraExecutionGate();
-  const infraToolIds = new Set(["github"]);
+  const infraToolIds = new Set(["github", "docker"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
   await deviceRegistry.refresh().catch(() => undefined);
@@ -139,6 +139,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // recovery-forsøk, ALDRI et direkte transport-kall (se recovery.ts).
   const incidentService = new IncidentService(pool);
   const deploymentService = new DeploymentService(pool);
+  // D-105: samme runtime-pool, ingen ny motor - diagnose er en atskilt
+  // domenetjeneste (evidens vs. konklusjon, se diagnosis.ts).
+  const diagnosisService = new DiagnosisService(pool);
   const businessService = new BusinessService(pool);
   // UA-3 next slice (D-53): open-loop-deteksjon - egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§4/§19/§20 i byggeordren).
@@ -218,6 +221,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
     // ingen nøstet klasse D-handling).
     consent: new ConsentTransport(consentService, consentEnforcementService),
+    // D-105 (UA-5 kriterium 1+3): egen Docker-transport - JARVIS_DOCKER_BIN
+    // gater tilgjengelighet SAMME vei som ethvert annet credential_ref (se
+    // docker-transport.ts) - uten den satt er "docker" strukturelt
+    // credential_unavailable, ALDRI et stille fall til en ambient binærsti.
+    docker: new DockerTransport(),
     ...driveTransportsIfConfigured()
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
@@ -259,7 +267,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     policy,
     worker,
     tasks: taskService,
-    incidents: { service: incidentService, deployments: deploymentService, gateway: toolGateway, controls: ownerControls, infraGate, pool },
+    incidents: {
+      service: incidentService, deployments: deploymentService, diagnosis: diagnosisService,
+      gateway: toolGateway, controls: ownerControls, infraGate, pool
+    },
     conversation: new ConversationEngine({
       messages: new MessageStore(pool),
       context: new ContextBuilder(pool),

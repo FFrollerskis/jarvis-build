@@ -1,5 +1,50 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-22 (**UA-5 Production Operations Control Plane v2
+(D-105) — lukker D-104s kjente kriterium 1/3-hull.** D-64-porten kjørt
+FØRST: INGEN Docker-container-styring/Vercel-mutasjon/GCP/Cloudflare
+eksisterte i repoet fra før - Docker Engine valgt som DEN ENE sammenhengende
+overflaten for BÅDE observability OG kritisk infra-mutasjon
+(`SOR_CLASSIFICATION=HYBRID_WITH_CLEAR_AUTHORITY`,
+`CORE_DEPENDENCY_DECISION_REQUIRED=false` - Jarvis forblir kanonisk for
+hendelse/diagnose/eksekusjonsjournal/korrelasjon/policy/recovery-
+orkestrering, Docker er et rent utførelses-/evidensmål bak `ToolGateway`,
+samme tynne CLI-subprosess-mønster som `DockerSandboxRunner` allerede
+bruker - INGEN nytt SDK). Ny `docker`-transport (list/inspect/logs klasse
+A - virker mot ETHVERT containernavn for reell driftsdiagnostikk;
+`redeploy_container` klasse D - STRUKTURELT nektet mot alt utenfor
+`jarvis-sentinel-*`, forsvar-i-dybden uavhengig av policy). Real log-
+innhenting (`acquireContainerLogs()`, redigert TO ganger FØR persistering,
+hard tail-grense) og ekte DB-tilstand-korrelasjon (`correlateDbState()`,
+bruker den EKSISTERENDE `schema_migrations`-tabellen, INGEN ny leverandør,
+bevist mot en EKTE uoppnåelig database også). Ny diagnose-modell
+(`incident_diagnoses`, ATSKILT fra rå evidens - en revurdering oppretter en
+NY rad, den gamle forblir UENDRET/spørrbar). Ny APPEND-ONLY
+`infra_executions`-eksekusjonsjournal (VED SIDEN AV den uendrede
+`tool_executions`) med deterministisk grunn-diff (`computeStateDiff()`,
+ALDRI LLM) og eksplisitt firetilstands-utfall (SUCCESS/PARTIAL/FAILED/
+UNKNOWN - `PARTIAL` når et kall lykkes teknisk men lander feil, "HTTP 200 er
+ikke suksess"). `docker:redeploy_container` lagt til den eksisterende
+`RECOVERY_STRATEGIES` - recovery REQUERIER tilstanden etter gjenoppretting
+for å faktisk verifisere den, ikke bare stole på et vellykket kall.
+`InfraExecutionGate`s `infraToolIds` utvidet til `{"github","docker"}` -
+SAMME gate/semantikk, bevist for docker i test inkl. KillSwitch-supremati.
+47 nye tester i 6 nye filer (`docker-transport.test.ts` mot en FAKE
+`docker`-CLI, ALDRI en ekte daemon i CI), full workspace-suite
+`TESTS_AFTER=2145`/`TEST_FILES_AFTER=143` (opp fra `2098`/`137`),
+`pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent, INGEN regresjon.
+**UA5_CRITERION_1=PARTIAL, UA5_CRITERION_3=PARTIAL** (BEGGE nå strukturelt
+komplette ende-til-ende, men INGEN ekte Docker-daemon i dette
+kjøremiljøet - `docker ps` feiler mot Unix-socketen her - så
+`LIVE_VERIFIED=false` for alle nye flagg; ny runbook
+`docs/runbooks/D105_INFRA_OPS_V2_HOST_ACCEPTANCE.md` levert for at Tobias
+selv kan bevise dette mot en ekte, disponibel daemon). Kriterium 2/4
+uendret `COMPLETE`. `UA5_IMPLEMENTATION_COMPLETE=false`,
+`UA5_CAN_CLOSE=false`. Branch `claude/ua5-production-ops-control-plane-v2`,
+ny draft-PR - IKKE merget.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-21 (**UA-5 Production Operations Control Plane v1
 (D-104) — pluss D-103 run-3 live host-akseptanse-kanonisering i SAMME PR
 (ingen egen mikro-PR for dokumentasjon, per eksplisitt ordre).** D-103

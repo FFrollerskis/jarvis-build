@@ -3,7 +3,10 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
 import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
-import { attemptRecovery, correlateIncident, proposeRepairTask, type DeploymentService, type IncidentService } from "@jarvis/incidents";
+import {
+  acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
+  getInfraExecution, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
+} from "@jarvis/incidents";
 import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import type { ToolGateway } from "@jarvis/tool-gateway";
@@ -49,6 +52,8 @@ export interface ApiDeps {
   incidents?: {
     service: IncidentService;
     deployments: DeploymentService;
+    /** D-105: valgfritt - diagnose-rutene forblir 404 uten den (samme mønster som `tasks`). */
+    diagnosis?: DiagnosisService;
     gateway: ToolGateway;
     controls?: OwnerControls;
     infraGate: InfraExecutionGate;
@@ -372,6 +377,97 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       }
     }
 
+    if (req.method === "POST" && url.pathname === "/incidents/correlate/db") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; window_start: string; window_end: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const db_state = await correlateDbState(pool, resolved.identity.tenant_id, body.window_start, body.window_end);
+      return json(res, 200, { db_state });
+    }
+
+    if (req.method === "POST" && url.pathname === "/incidents/evidence/acquire_logs") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string;
+        container: string; since?: string; until?: string; tail?: number;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const outcome = await acquireContainerLogs({ gateway, incidents: service }, resolved.identity, body.memory_space, body.incident_id, {
+        container: body.container, ...(body.since !== undefined ? { since: body.since } : {}),
+        ...(body.until !== undefined ? { until: body.until } : {}), ...(body.tail !== undefined ? { tail: body.tail } : {})
+      });
+      if (outcome.status === "unavailable") return json(res, 502, { error: "acquisition_unavailable", reason: outcome.reason });
+      return json(res, 200, { evidence: outcome.evidence });
+    }
+
+    if (deps.incidents.diagnosis && req.method === "POST" && url.pathname === "/incidents/diagnosis/create") {
+      const diagnosisService = deps.incidents.diagnosis;
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string;
+        conclusion: string; status?: string; source: string; supersedes_diagnosis_id?: string;
+        supporting_evidence_ids?: string[]; contradicting_evidence_ids?: string[];
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      try {
+        const diagnosis = await diagnosisService.createDiagnosis(resolved.identity.tenant_id, body.memory_space, body.incident_id, {
+          conclusion: body.conclusion, source: body.source as never, ...(body.status !== undefined ? { status: body.status as never } : {}),
+          ...(body.supersedes_diagnosis_id !== undefined ? { supersedes_diagnosis_id: body.supersedes_diagnosis_id } : {}),
+          ...(body.supporting_evidence_ids !== undefined ? { supporting_evidence_ids: body.supporting_evidence_ids } : {}),
+          ...(body.contradicting_evidence_ids !== undefined ? { contradicting_evidence_ids: body.contradicting_evidence_ids } : {})
+        });
+        return json(res, 200, { diagnosis });
+      } catch (err) {
+        return json(res, 400, { error: "diagnosis_rejected", message: (err as Error).message });
+      }
+    }
+
+    if (deps.incidents.diagnosis && req.method === "POST" && url.pathname === "/incidents/diagnosis/list") {
+      const diagnosisService = deps.incidents.diagnosis;
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0]; memory_space: MemorySpace; incident_id: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const diagnoses = await diagnosisService.listDiagnoses(resolved.identity.tenant_id, body.memory_space, body.incident_id);
+      return json(res, 200, { diagnoses });
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/execution/mutate") {
+      const body = (await readBody(req)) as {
+        identity: Parameters<IdentityService["resolveIdentity"]>[0];
+        target: string; target_image: string; idempotency_key: string; incident_id?: string;
+      };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const execution = await executeInfraMutation({ pool, gateway }, resolved.identity, {
+        tenant_id: resolved.identity.tenant_id, person_id: resolved.identity.person_id,
+        device_id: resolved.identity.device_id,
+        target: body.target, target_image: body.target_image, idempotency_key: body.idempotency_key,
+        ...(body.incident_id !== undefined ? { incident_id: body.incident_id } : {})
+      });
+      return json(res, 200, { execution });
+    }
+
+    if (req.method === "POST" && url.pathname === "/infra/execution/get") {
+      const body = (await readBody(req)) as { identity: Parameters<IdentityService["resolveIdentity"]>[0]; execution_id: string };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const execution = await getInfraExecution(pool, resolved.identity.tenant_id, body.execution_id);
+      if (!execution) return json(res, 404, { error: "execution_not_found" });
+      return json(res, 200, { execution });
+    }
+
+    if (req.method === "POST" && url.pathname === "/observability/docker/status") {
+      const body = (await readBody(req)) as { identity: Parameters<IdentityService["resolveIdentity"]>[0] };
+      const resolved = await deps.identity.resolveIdentity(body.identity);
+      if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+      const status = await dockerProviderStatus(gateway, resolved.identity);
+      return json(res, 200, { status });
+    }
+
     if (deps.tasks && req.method === "POST" && url.pathname === "/incidents/repair") {
       const body = (await readBody(req)) as {
         identity: Parameters<IdentityService["resolveIdentity"]>[0] & { session_id: string };
@@ -398,7 +494,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     if (req.method === "POST" && url.pathname === "/infra/recovery/attempt") {
       const body = (await readBody(req)) as {
         identity: Parameters<IdentityService["resolveIdentity"]>[0]; tool_id: string; action: string;
-        idempotency_key: string; parameters: Record<string, never>; incident_id?: string;
+        idempotency_key: string; parameters: Record<string, never>; incident_id?: string; execution_id?: string;
       };
       const resolved = await deps.identity.resolveIdentity(body.identity);
       if (!resolved.ok) return json(res, 403, { error: "identity_denied", reason: resolved.reason });
@@ -409,7 +505,9 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       if (decision.decision !== "ALLOW") return json(res, 403, { decision: decision.decision, reason: decision.reason });
       const recovery = await attemptRecovery({ pool, gateway }, resolved.identity, {
         tenant_id: resolved.identity.tenant_id, tool_id: body.tool_id, action: body.action,
-        idempotency_key: body.idempotency_key, parameters: body.parameters, ...(body.incident_id !== undefined ? { incident_id: body.incident_id } : {})
+        idempotency_key: body.idempotency_key, parameters: body.parameters,
+        ...(body.incident_id !== undefined ? { incident_id: body.incident_id } : {}),
+        ...(body.execution_id !== undefined ? { execution_id: body.execution_id } : {})
       });
       return json(res, 200, { recovery });
     }
