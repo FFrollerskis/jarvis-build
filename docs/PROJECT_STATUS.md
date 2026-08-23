@@ -1,5 +1,49 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 PR #53 NARROW LIVE KIMI-VERIFISERING —
+functional-success-invarianten er nå BÅDE FIXED_SUITE_VERIFIED OG
+LIVE_VERIFIED. IKKE merget ennå - venter på Tobias sin eksplisitte
+godkjenning.**) Tobias kjørte en ny, smal (Kimi-only, ingen Council/OpenAI/
+Anthropic/Gemini/Gemma re-testet) PowerShell-akseptanse på sin ekte Windows-
+host mot PR #53 sin faktiske kode (`31a329e4b32d8d1a071c666a7130d916445361f7`,
+verifisert eksakt commit-SHA-match før noe kjørte, fail-closed ellers).
+**Resultat: PASS A** (én av to eksplisitt aksepterte utfall) -
+`gateway.complete({provider:"kimi", max_tokens:200})` mot ekte `kimi-k3` ga
+BRUKBAR synlig tekst på selve FØRSTE kanoniske forsøket denne gangen
+(`finish_reason=stop`, `output_tokens=153`, synlig tekst 4 tegn, dvs.
+reasoning-tokens denne kjøringen etterlot nok budsjett til et kort synlig
+svar) - INGEN adaptivt retry ble trigget eller nødvendig. `KIMI_LIVE_VERIFIED=true`.
+
+**Ærlig presisering (Q26):** dette beviser at det kanoniske
+`ModelGateway.complete()`-kallet mot ekte `kimi-k3` produserer et brukbart
+resultat i produksjon, OG at trace-/kostnadssporingen fungerer korrekt for
+ETT forsøk (`KIMI_RETRY_TRACE_PROVENANCE_LIVE=true`,
+`KIMI_RETRY_COST_ACCOUNTING_LIVE=true`, 1 trace-span/1 cost_events-rad,
+begge merket riktig). Det beviser IKKE at selve det adaptive retry-forsøket
+(når det trigges) fungerer live mot ekte Kimi-trafikk - reasoning-token-
+forbruket er ikke-deterministisk per kall, og DENNE spesifikke kjøringen
+tilfeldigvis ikke trengte retry (i motsetning til forrige runde sitt
+`max_tokens=200`-funn, som brukte HELE budsjettet). Retry-mekanismen selv
+er fortsatt kun `FIXED_SUITE_VERIFIED` (23 deterministiske regresjonstester,
+inkl. et scenario der forsøk 1 er tomt/trunkert og forsøk 2 lykkes) - IKKE
+en falsk påstand om at retry-veien er live-observert denne runden. Ordren
+klassifiserer PASS A som fullt akseptabelt på egne premisser (krever ikke
+PASS B), og dette er derfor tilstrekkelig bevis for §9-porten.
+
+`D106_CODE_REPAIR_COMPLETE=true`, `PR53_NARROW_LIVE_ACCEPTANCE_COMPLETE=true`,
+`MERGE_READY=true` - men PR #53 forblir draft, IKKE merget, inntil Tobias
+eksplisitt godkjenner (CLAUDE.md-regel, ordrens egen "STOP for explicit merge
+approval"). `FULL_FIVE_MEMBER_COUNCIL_LIVE=false`,
+`AI_MESH_HOST_ACCEPTANCE_COMPLETE=false` (Gemini forblir det eneste hinderet
+for full 5-medlems Council-live), `GEMINI_EXTERNAL_BLOCKER=true` (uendret,
+ingen Gemini-kode rørt), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`
+uendret. Se D-106 PR #53 NARROW LIVE KIMI-VERIFISERING i
+`DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Branch
+`claude/d106-production-hardening`, PR #53, siste head fortsatt `31a329e`
+(ingen kodeendring denne runden - kun dokumentasjon). INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-23 (**D-106 PR #53 MODELGATEWAY FUNCTIONAL-SUCCESS-
 INVARIANT — kodefiks av defekt G sin dypere arkitekturårsak, SAMME branch/PR
 #53, IKKE nytt D-nummer.**) Forrige runde (under) fant at `kimi-k3` kan bruke
