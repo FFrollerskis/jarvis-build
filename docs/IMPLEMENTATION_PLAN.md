@@ -2670,6 +2670,16 @@ at Tobias kjører en snever akseptanseskript-kjøring PÅ SIN EGEN maskin med si
 som resten av D-106, STRUKTURELT umulig fra denne økten. PR forblir draft, IKKE merget. Full detalj: D-106
 HOST-FIX 3 (inkl. fortsettelse) i DECISIONS_AND_ASSUMPTIONS.md.
 
+**Andre oppfølgingsrunde (samme dag, 2026-08-23):** Tobias kjørte den narrow akseptanseskripten faktisk PÅ
+SIN EGEN maskin (den "strukturelt umulige" live-proben over ER nå mulig, av Tobias, ikke denne økten selv).
+`GEMMA_PRODUCTION_ADAPTER_LIVE=true`/`GEMMA_FIRST_ROUTING_LIVE=true`/`PAID_MODELS_DISABLED_LIVE=true` - EKTE
+live-bevist. Kimi-hypotesen over ER NÅ BEKREFTET (ikke lenger kun ikke-primær-kilde): Tobias sin ekte kontos
+`/v1/models`-liste bekreftet `"kimi-latest"` finnes IKKE, `kimi-k3` er gjeldende flaggskip -
+`KimiAdapter`-default rettet. Council `max_tokens: 1024` bevist for lavt for ekte GPT-5/Anthropic (reasoning-
+token-forbruk hhv. avkutting) - hevet til `4096`. Gemini 404 fortsatt IKKE en kodedefekt (modell bekreftet i
+katalogen, men nøkkel-entitlement på selve `generateContent` mangler - eksternt). Full detalj: D-106 HOST-FIX
+3, fortsettelse 2, i DECISIONS_AND_ASSUMPTIONS.md.
+
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
 akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha

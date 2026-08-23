@@ -146,6 +146,22 @@ const ROUND2_SCHEMA_HINT = `{"critiques": [{"target_provider": string, "critique
 const SYNTHESIS_SCHEMA_HINT = `{"decision": string, "supporting_models": string[], "dissenting_models": string[], "key_evidence": string[], "key_disagreements": string[], "risk_summary": string, "confidence": number (0-100), "recommended_action": string}`;
 
 /**
+ * D-106 PR #53 HOST FIX (live-bevis, 2026-08-23): 1024 var for lavt for ekte
+ * medlemmer. Live-kjøring mot Tobias sin ekte OpenAI (gpt-5, reasoning-modell)
+ * og Anthropic viste BEGGE feile på `max_tokens: 1024` - GPT-5 brukte HELE
+ * budsjettet på interne reasoning-tokens (finish_reason=length,
+ * text.length=0, INGEN synlig tekst i det hele tatt), Anthropic ble kuttet
+ * midt i et ellers korrekt formatert JSON-objekt (finish_reason=max_tokens).
+ * `extractJson()`/`isRoundAnswer()` avviste begge KORREKT (ufullstendig JSON
+ * er IKKE gyldig JSON) - defekten var budsjettet, ikke parseren. Økt til et
+ * nivå med reell margin for reasoning-modeller PLUSS et fullstendig 7-felts
+ * skjema-svar, ikke en gjettet leverandør-detalj (D-41-skillet: dette er et
+ * internt Jarvis-budsjettvalg, ikke en påstand om ekstern API-oppførsel).
+ */
+const COUNCIL_ROUND_MAX_TOKENS = 4096;
+const COUNCIL_SYNTHESIS_MAX_TOKENS = 4096;
+
+/**
  * D-106 HOST-FIX (produksjonsherding, Defekt D): live host-kjøring viste
  * ekte parse-feil (`invalid_json_shape`/`council_synthesis_invalid`) mot
  * FAKTISKE modellsvar - den opprinnelige uthentingen tok naivt den FØRSTE
@@ -390,7 +406,7 @@ export class AiCouncil {
         ci.request = {
           system: round1System,
           messages: [{ role: "user", content: `BESLUTNINGSKONTEKST:\n${input.decision_context}` }],
-          max_tokens: 1024
+          max_tokens: COUNCIL_ROUND_MAX_TOKENS
         };
         const result = await this.gateway.complete(ci);
         const parsed = extractJson(result.text);
@@ -439,7 +455,7 @@ export class AiCouncil {
           messages: [
             { role: "user", content: `BESLUTNINGSKONTEKST:\n${input.decision_context}\n\nANDRE MEDLEMMERS VURDERING:\n${digest}` }
           ],
-          max_tokens: 1024
+          max_tokens: COUNCIL_ROUND_MAX_TOKENS
         };
         const result = await this.gateway.complete(ci);
         const parsed = extractJson(result.text) as { critiques?: unknown } | undefined;
@@ -483,7 +499,7 @@ export class AiCouncil {
               content: `BESLUTNINGSKONTEKST:\n${input.decision_context}\n\nDIN FØRSTE VURDERING:\n${self.conclusion}\n\nKRITIKK MOTTATT:\n${critiquesOfSelf || "(ingen kritikk mottatt)"}`
             }
           ],
-          max_tokens: 1024
+          max_tokens: COUNCIL_ROUND_MAX_TOKENS
         };
         const result = await this.gateway.complete(ci);
         const parsed = extractJson(result.text);
@@ -524,7 +540,7 @@ export class AiCouncil {
             content: `BESLUTNINGSKONTEKST:\n${input.decision_context}\n\nMEDLEMMER SOM SVARTE (${round3.map((r) => r.provider).join(", ")}):\n${round3Digest}`
           }
         ],
-        max_tokens: 1536
+        max_tokens: COUNCIL_SYNTHESIS_MAX_TOKENS
       }
     };
     const synthesisResult = await this.gateway.complete(synthesisInput);

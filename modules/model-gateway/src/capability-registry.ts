@@ -158,10 +158,14 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     hosted_free_tier: false
   },
   {
+    // D-106 PR #53 HOST FIX (live-bevis, 2026-08-23): "kimi-latest" fantes ikke
+    // i Moonshot sin modellkatalog (verifisert mot Tobias sin ekte konto OG
+    // uavhengig mot Moonshot sin dokumentasjon, se kimi.ts). "kimi-k3" er
+    // gjeldende flaggskip med 1M-token kontekst (uendret fra 256k-antakelsen).
     provider: "kimi",
-    model: "kimi-latest",
+    model: "kimi-k3",
     capabilities: ["text", "reasoning", "tool_calling"],
-    context_tokens: 256_000,
+    context_tokens: 1_000_000,
     locality: "cloud",
     cost_class: 2,
     quality_class: 4,

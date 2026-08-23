@@ -1,5 +1,58 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3, fortsettelse 2 — Tobias sin
+FØRSTE OG ANDRE ekte host-live-akseptansekjøring mot PR #53, samme branch/PR,
+IKKE nytt D-nummer.**) Narrow host-akseptanseskript (13 HOST SAFETY-krav,
+A-F) kjørt to ganger på Tobias sin ekte maskin (ekte OpenAI/Anthropic/
+Gemini/Kimi-nøkler + lokal Ollama/gemma3:4b). **Runde 1** avdekket en bug i
+akseptanseskriptet selv (oppdiktet `TENANT`-id uten rad i `tenants`-tabellen
+→ `cost_events_tenant_id_fkey` feilet på ALLE `.complete()`-kall, så ut som
+en `kind="server"`-providerfeil uten status). **Runde 2** (etter script-fiks
+til `tenant-personal`, samme konvensjon som `main.ts`/`bo10-live.ts`):
+`GEMMA_PRODUCTION_ADAPTER_LIVE=true`, `GEMMA_FIRST_ROUTING_LIVE=true`,
+`PAID_MODELS_DISABLED_LIVE=true` - alle tre GENUINT live-verifisert, INGEN
+PR #53-kodedefekt (rot-årsak var kun akseptanseskriptets egen tenant-bug,
+sporet til `model-gateway.ts` sin delte `executePlan()`-catch som pakker en
+rå ikke-`ProviderError`-feil inn i en misvisende `kind="server"`). To EKTE,
+live-beviste PR #53-defekter ble derimot funnet og RETTET i denne runden:
+
+**G (Council runde-`max_tokens` for lavt for ekte reasoning-modeller):**
+live-bevist `invalid_json_shape` for BÅDE OpenAI og Anthropic i runde 1 mot
+`max_tokens: 1024`. Diagnostikk (samme prompt/skjema reprodusert direkte via
+eksportert `extractJson()`) viste GPT-5 (reasoning-modell) brukte HELE
+budsjettet på interne reasoning-tokens (`finish_reason=length`,
+`text.length=0` - INGEN synlig tekst), Anthropic ble kuttet midt i et
+ellers gyldig JSON-objekt (`finish_reason=max_tokens`). `extractJson()`/
+`isRoundAnswer()` avviste begge KORREKT - defekten var budsjettet, ikke
+parseren. `council.ts`: alle fire kallsteder (runde 1/2/3 + syntese) hevet
+til `COUNCIL_ROUND_MAX_TOKENS=4096`/`COUNCIL_SYNTHESIS_MAX_TOKENS=4096` (ikke
+en gjettet leverandør-detalj - et internt Jarvis-budsjettvalg med reell
+margin, se D-41-skillet). Ny regresjonstest Y i `council.test.ts` fanger
+`request.max_tokens` per kall, håndhever >2048 for alle runder.
+
+**H (Kimi default-modell fantes ikke):** live-bevist BEKREFTET (ikke lenger
+kun hypotese fra ikke-primære kilder, se forrige runde) - Tobias sin ekte
+kontos `/v1/models`-liste inneholdt `kimi-k2.6,kimi-k2.7-code,kimi-k2.7-code-
+highspeed,kimi-k3` - `"kimi-latest"` var IKKE blant dem. Uavhengig WebSearch
+bekreftet `kimi-k3` som Moonshot sitt gjeldende flaggskip (1M-token kontekst,
+de "-code"-variantene er spesialiserte). `KimiAdapter` sin default endret
+`"kimi-latest"` → `"kimi-k3"` (`kimi.ts`); `capability-registry.ts` sin
+`kimi`-profil samstemt (`model`/`context_tokens: 1_000_000`). **Gemini 404
+derimot IKKE en kodedefekt:** adapterkoden verifisert korrekt (offisielt
+header-basert `x-goog-api-key`-mønster, riktig URL/metode); diagnostikk-probe
+mot Google sitt EGET `models`-listeendepunkt bekreftet `gemini-2.5-flash`
+FAKTISK finnes i katalogen for denne nøkkelen - likevel 404 på selve
+`generateContent`. Mønsteret (listet ≠ kan påkalles) er en kjent
+Gemini-API-oppførsel (katalogen er global, `generateContent` håndhever
+faktisk nøkkel-/prosjekt-entitlement per modell) - IKKE gjettet som
+kodedefekt, IKKE endret. Tobias må sjekke modell-/faktureringstilgang i
+Google AI Studio/Cloud Console for denne nøkkelen; `GeminiAdapter` selv
+krever ingen endring. Ny commit på SAMME branch/PR #53 (IKKE PR #54), full
+suite + typecheck + lint kjørt på nytt, ny head rapportert i sluttrapport.
+**Do NOT merge. Ingen UA-6 startet.**
+
+## Runden før det
+
 **Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3 — produksjonsherding etter
 FØRSTE ekte host-live-akseptanse, fem defekter A/C/D/B/E, EGEN PR fra
 `origin/main` (SHA `9d0323a5f70c8060befb5d786e9aecfc32bd6234`), AMENDMENT

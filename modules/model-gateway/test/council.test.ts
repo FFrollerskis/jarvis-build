@@ -480,3 +480,50 @@ describe("D-106 HOST-FIX 3: full Council-rundeprotokoll håndterer realistisk me
     }
   });
 });
+
+describe("D-106 PR #53 HOST FIX: runde-`max_tokens` har reell margin for reasoning-modeller (live-bevis 2026-08-23)", () => {
+  /** Fanger `request.max_tokens` for hvert kall, i tillegg til å svare normalt via ScriptedJsonAdapter sin logikk. */
+  class MaxTokensCapturingAdapter implements ModelProviderAdapter {
+    readonly model = "test-model";
+    readonly seenMaxTokens: Array<number | undefined> = [];
+    constructor(
+      readonly name: string,
+      private readonly responder: (request: ModelRequest) => string
+    ) {}
+    available(): boolean {
+      return true;
+    }
+    async complete(request: ModelRequest): Promise<ModelResult> {
+      this.seenMaxTokens.push(request.max_tokens);
+      return { text: this.responder(request), usage: { input_tokens: 10, output_tokens: 10 }, provider: this.name, model: this.model };
+    }
+  }
+
+  it("Y: runde 1/2/3 og syntese ber ALLE om et `max_tokens`-budsjett godt over 1024 (live-bevis: gpt-5 brukte HELE 1024 på reasoning-tokens uten synlig tekst i det hele tatt, Anthropic ble kuttet midt i et ellers gyldig JSON-objekt)", async () => {
+    const anthropic = new MaxTokensCapturingAdapter("anthropic", (req) => {
+      const c = req.messages[0]?.content;
+      const text = typeof c === "string" ? c : "";
+      if (text.includes("MEDLEMMER SOM SVARTE")) return synthesisFor(["anthropic", "openai"], []);
+      if (text.includes("ANDRE MEDLEMMERS VURDERING")) return JSON.stringify({ critiques: [] });
+      return round1Answer("konklusjon-anthropic");
+    });
+    const openai = new MaxTokensCapturingAdapter("openai", (req) => {
+      const c = req.messages[0]?.content;
+      const text = typeof c === "string" ? c : "";
+      if (text.includes("MEDLEMMER SOM SVARTE")) return synthesisFor(["anthropic", "openai"], []);
+      if (text.includes("ANDRE MEDLEMMERS VURDERING")) return JSON.stringify({ critiques: [] });
+      return round1Answer("konklusjon-openai");
+    });
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [anthropic, openai] });
+    const council = new AiCouncil(gateway);
+    await council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "openai"] });
+
+    // Minst runde 1 (og for anthropic/openai her: runde 2, runde 3, og trolig synteseanropet) må ha blitt fanget.
+    expect(anthropic.seenMaxTokens.length).toBeGreaterThanOrEqual(3);
+    expect(openai.seenMaxTokens.length).toBeGreaterThanOrEqual(3);
+    for (const seen of [...anthropic.seenMaxTokens, ...openai.seenMaxTokens]) {
+      expect(seen).toBeDefined();
+      expect(seen as number).toBeGreaterThan(2048);
+    }
+  });
+});

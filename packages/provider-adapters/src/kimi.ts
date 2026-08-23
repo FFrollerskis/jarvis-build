@@ -15,14 +15,23 @@ import {
  * context/reasoning (UA-1 P0-registry); Moonshot eksponerer et OpenAI-
  * kompatibelt chat/completions-API, så adapteren normaliserer det formatet.
  * Base-URL/modell er konfig (JARVIS_KIMI_URL/JARVIS_KIMI_MODEL); nøkkel fra
- * KIMI_API_KEY (fallback MOONSHOT_API_KEY). Uverifisert uten reell nøkkel.
+ * KIMI_API_KEY (fallback MOONSHOT_API_KEY).
+ *
+ * D-106 PR #53 HOST FIX (live-bevis, 2026-08-23): default-modellen var
+ * `"kimi-latest"` - denne finnes IKKE i Moonshot sin modellkatalog (verifisert
+ * BÅDE mot Tobias sitt ekte kontos `/v1/models`-svar OG uavhengig mot
+ * Moonshot sin offentlige modell-dokumentasjon - se D-41: aldri gjettet,
+ * alltid verifisert). Ekte kontoer eksponerer versjonerte modell-IDer
+ * (`kimi-k2.6`, `kimi-k2.7-code`, `kimi-k3`, ...) - INGEN "latest"-alias.
+ * `kimi-k3` er Moonshot sitt gjeldende generelle flaggskip-chat-endepunkt
+ * (de "-code"/"-highspeed"-variantene er spesialiserte, ikke generell chat).
  */
 export class KimiAdapter implements ModelProviderAdapter {
   readonly name: string = "kimi";
 
   constructor(
     private readonly apiKey: string | undefined = process.env["KIMI_API_KEY"] ?? process.env["MOONSHOT_API_KEY"],
-    readonly model: string = process.env["JARVIS_KIMI_MODEL"] ?? "kimi-latest",
+    readonly model: string = process.env["JARVIS_KIMI_MODEL"] ?? "kimi-k3",
     private readonly baseUrl: string = process.env["JARVIS_KIMI_URL"] ?? "https://api.moonshot.ai",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}
