@@ -1,7 +1,9 @@
 import {
   classifyFetchError,
   classifyHttpStatus,
+  extractProviderErrorCode,
   ProviderError,
+  sanitizeEndpointForDiagnostics,
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
@@ -38,9 +40,10 @@ export class KimiAdapter implements ModelProviderAdapter {
       ...request.messages.map((m) => ({ role: m.role, content: textOnly(m.content) }))
     ];
     const started = Date.now();
+    const url = `${this.baseUrl}/v1/chat/completions`;
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
         signal: AbortSignal.timeout(this.timeoutMs),
@@ -55,7 +58,20 @@ export class KimiAdapter implements ModelProviderAdapter {
       throw classifyFetchError(this.name, err);
     }
     if (!response.ok) {
-      throw classifyHttpStatus(this.name, response.status);
+      // D-106 HOST-FIX (Defekt B): trygg, begrenset feilsøkings-metadata - ALDRI
+      // nøkkelen (den sendes i Authorization-header, aldri i URL-en/body over).
+      let providerErrorCode: string | undefined;
+      try {
+        providerErrorCode = extractProviderErrorCode(await response.text());
+      } catch {
+        // Body kunne ikke leses - diagnostikk er beste-innsats, aldri en blokkerende avhengighet.
+      }
+      const sanitizedEndpoint = sanitizeEndpointForDiagnostics(url);
+      throw classifyHttpStatus(this.name, response.status, {
+        ...(providerErrorCode !== undefined ? { provider_error_code: providerErrorCode } : {}),
+        ...(sanitizedEndpoint !== undefined ? { sanitized_endpoint: sanitizedEndpoint } : {}),
+        request_operation: "chat.completions"
+      });
     }
     let body: {
       choices: Array<{ message: { content: string | null }; finish_reason?: string }>;

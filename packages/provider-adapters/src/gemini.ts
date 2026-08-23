@@ -1,7 +1,9 @@
 import {
   classifyFetchError,
   classifyHttpStatus,
+  extractProviderErrorCode,
   ProviderError,
+  sanitizeEndpointForDiagnostics,
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
@@ -35,9 +37,10 @@ export class GeminiAdapter implements ModelProviderAdapter {
       parts: [{ text: textOnly(m.content) }]
     }));
     const started = Date.now();
+    const url = `${this.baseUrl}/v1beta/models/${this.model}:generateContent`;
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1beta/models/${this.model}:generateContent`, {
+      response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
         signal: AbortSignal.timeout(this.timeoutMs),
@@ -57,7 +60,20 @@ export class GeminiAdapter implements ModelProviderAdapter {
       throw classifyFetchError(this.name, err);
     }
     if (!response.ok) {
-      throw classifyHttpStatus(this.name, response.status);
+      // D-106 HOST-FIX (Defekt B): trygg, begrenset feilsøkings-metadata - ALDRI
+      // nøkkelen (den sendes i header, aldri i URL-en over), ALDRI hele body.
+      let providerErrorCode: string | undefined;
+      try {
+        providerErrorCode = extractProviderErrorCode(await response.text());
+      } catch {
+        // Body kunne ikke leses - diagnostikk er beste-innsats, aldri en blokkerende avhengighet.
+      }
+      const sanitizedEndpoint = sanitizeEndpointForDiagnostics(url);
+      throw classifyHttpStatus(this.name, response.status, {
+        ...(providerErrorCode !== undefined ? { provider_error_code: providerErrorCode } : {}),
+        ...(sanitizedEndpoint !== undefined ? { sanitized_endpoint: sanitizedEndpoint } : {}),
+        request_operation: "generateContent"
+      });
     }
     let body: {
       candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;

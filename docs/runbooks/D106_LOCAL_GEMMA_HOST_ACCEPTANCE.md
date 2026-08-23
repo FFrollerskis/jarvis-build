@@ -30,16 +30,27 @@ dekkes av den separate `ollama`-provideren). Enkleste vei på Windows:
 I `.env` (ALDRI i `.env.example`, ALDRI committet):
 
 ```
-JARVIS_GEMMA_LOCAL_URL=http://localhost:11434/v1
+JARVIS_GEMMA_LOCAL_URL=http://localhost:11434
 JARVIS_GEMMA_LOCAL_MODEL=gemma3:27b
 ```
+
+**VIKTIG (D-106 HOST-FIX produksjonsherding, Defekt A):** sett `JARVIS_GEMMA_LOCAL_URL`
+til ROOT-URL-en, UTEN `/v1` på slutten. `gemma_local`-adapteren bygger selv
+`/v1/chat/completions` nøyaktig én gang - en tidligere versjon av denne
+runboken instruerte feilaktig å inkludere `/v1` i verdien, noe som (kombinert
+med adapterens egen `/v1`-suffiks) ga en reell, host-verifisert dobbel
+`/v1/v1`-sti mot Ollama og en `404`-feil. Adapteren normaliserer nå defensivt
+bort et eventuelt overflødig `/v1`-suffiks i eksisterende `.env`-verdier
+(`http://localhost:11434/v1` fungerer fortsatt), men bruk ROOT-formen
+(`http://localhost:11434`) for nytt oppsett - den er den kanoniske, entydige
+formen fremover.
 
 Bytt `JARVIS_GEMMA_LOCAL_MODEL` til nøyaktig navnet du `ollama pull`-et.
 
 Hvis Gemma-serveren kjører på en ANNEN maskin enn Jarvis sin API-prosess
 (f.eks. RTX 4070-PC-en er en egen node fra UGREEN 24/7-basen), pek
 `JARVIS_GEMMA_LOCAL_URL` mot den maskinens nettverksadresse i stedet for
-`localhost` (f.eks. `http://192.168.1.50:11434/v1`) - adapteren er en ren
+`localhost` (f.eks. `http://192.168.1.50:11434`) - adapteren er en ren
 HTTP-klient, ingen antakelse om samme maskin.
 
 ## Steg 2: kjør live-verifiseringsscriptet

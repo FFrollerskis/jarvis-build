@@ -1,5 +1,55 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3 — produksjonsherding etter
+FØRSTE ekte host-live-akseptanse, fem defekter A/C/D/B/E, EGEN PR fra
+`origin/main` (SHA `9d0323a5f70c8060befb5d786e9aecfc32bd6234`), AMENDMENT
+ikke nytt D-nummer.**) Tobias sin FØRSTE ekte host-live-akseptansekjøring
+(etter PR #52 sin Gemma-familie-fiks) avdekket fem PRODUKSJONSKODE-defekter
+- ikke bare dokument-/diagnostikkgap som de to foregående HOST-FIX-rundene.
+**A (Gemma dobbel `/v1`):** live-bevist 404 - runboken instruerte feilaktig
+et `/v1`-suffiks, adapteren appenderte selv `/v1/chat/completions`. Ny
+eksportert `normalizeLocalLlmBaseUrl()` (`local-llm.ts`) strips EN eksakt
+avsluttende `/v1` (aldri delvis match/urelatert mangling) - adapteren bygger
+stien nøyaktig én gang uansett hvilken av de 4 dokumenterte URL-formene.
+`.env.example`/runbok oppdatert til root-formen som kanonisk.
+**C (Gemma-first ikke garantert):** live-bevist eksakt 132=132-scoringsuavgjort
+mellom `gemma_local`/`openai`, avgjort av registrerings-REKKEFØLGE (stabil
+sort), ikke policy. Ny `AUTO_LOCAL_TIE_BREAK_BONUS=0.5` (`router.ts`) -
+bevisst mindre enn minste mulige heltalls-scoringsdifferanse (kan ALDRI
+overstyre en reell forskjell, KUN et eksakt uavgjort), provider-nøytral
+(locality-drevet, IKKE et navnesjekk), registrerings-rekkefølge-uavhengighet
+eksplisitt bevist. **D (Council ugyldig JSON):** live-bevist
+`invalid_json_shape`/`council_synthesis_invalid` mot ekte modellsvar -
+`extractJson()` (`council.ts`) helt omskrevet til en streng, deterministisk
+uthenter (markdown-fence-stripping, streng-bevisst balansert-brace-skanning,
+krever PRESIST én gyldig kandidat - null ELLER flere feiler BEGGE ærlig).
+Provider-native structured-output vurdert, bevisst UTELATT (ikke alle fem
+familier hevder capability-en). **B (Gemini/Kimi 404):** rot-årsak
+undersøkt mot gjeldende offisiell dokumentasjon - INGEN bevist avvik funnet
+(ingen live nøkler tilgjengelig i dette miljøet). Ordren forbød gjetting -
+levert TRYGG feilsøkingsdiagnostikk i stedet (`classifyHttpStatus()` nytt
+`diagnostic`-parameter, ALDRI nøkkel/auth-header/prompts).
+`GEMINI_ADAPTER_FIXED=false`/`KIMI_ADAPTER_FIXED=false` - ærlig uverifisert.
+**E (ScriptedAdapter produksjonslekkasje):** live-bevist
+`PAID_MODELS_DISABLED_PROVIDERS_INVOKED=...,scripted:true` - fjernet HELT
+fra `main.ts` sin produksjons-`ModelGateway` (`worker-main.ts` registrerte
+den aldri). `paid_models_allowed=false` + ingen ekte lokal provider feiler
+nå ÆRLIG med `PaidModelsDisabledError`. **40 nye tester** (2 nye filer:
+`d106-council-json-extraction.test.ts` 14, `d106-scripted-adapter-
+production-wiring.test.ts` 3; 2 utvidede: `conformance.test.ts` +16,
+`d106-router-extensions.test.ts` +7). Full workspace-suite:
+`153/153`filer/`2344/2344`tester, INGEN feil. `pnpm -w typecheck` 19/19
+rent, `pnpm -w lint` rent. `SCRIPTED_ADAPTER_PRODUCTION_ELIGIBLE=false`,
+`LOCAL_ONLY_NO_REAL_PROVIDER_FAILS_HONESTLY=true`,
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Gjenstående, IKKE
+stille utelatt live-blokker: en ny host-live-akseptansekjøring ETTER merge
+for å bevise A/C sin faktiske live-effekt og fortsette B sin rot-årsak-jakt.
+Se D-106 HOST-FIX 3 i `DECISIONS_AND_ASSUMPTIONS.md` for full detalj.
+Branch `claude/d106-production-hardening`, ny draft PR fra `main`, IKKE
+merget. INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-106 HOST-FIX 2 — Council Gemma-familie-
 mismatch, EGEN reparasjons-PR fra `main` (PR #51 er allerede merget),
 AMENDMENT ikke nytt D-nummer.** Tobias fikk sin lokale Gemma-runtime live

@@ -52,7 +52,16 @@ export const RoutingReasonSchema = z.enum([
   /** D-106: `paid_models_allowed=false` ekskluderte betalte/sky-kandidater fra planen. */
   "PAID_MODELS_DISABLED",
   /** D-106: eier-preferanserekkefølge (§"bruk Gemma") - første konfigurerte/kvalifiserte vant. */
-  "PROVIDER_PREFERENCE"
+  "PROVIDER_PREFERENCE",
+  /**
+   * D-106 HOST-FIX (produksjonsherding, Defekt C): AUTO-scoringen endte i et
+   * EKSAKT poengmessig uavgjort mellom en lokal og en betalt/sky-kandidat -
+   * en deterministisk, registrerings-rekkefølge-uavhengig lokal-preferanse-
+   * tiebreak avgjorde til fordel for den lokale kandidaten (se
+   * `AUTO_LOCAL_TIE_BREAK_BONUS` i `router.ts`). ALDRI brukt til å overstyre
+   * en reell kvalitets-/kost-forskjell - kun eksakte uavgjort.
+   */
+  "LOCAL_PREFERRED_ON_TIE"
 ]);
 export type RoutingReason = z.infer<typeof RoutingReasonSchema>;
 

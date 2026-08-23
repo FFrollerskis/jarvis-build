@@ -47,9 +47,23 @@ import {
  * `gemma_local`-profil. INGEN ny adapterklasse, INGEN duplisert HTTP-logikk -
  * kun en ny navngitt registrering, samme mønster som `gemma_hosted` gjenbruker
  * `gemini.ts` sin API-flate under en egen identitet.
+ *
+ * D-106 HOST-FIX (produksjonsherding): den kanoniske semantikken for
+ * `baseUrl` er ALLTID "root-URL uten `/v1`" - adapteren eier å konstruere
+ * `/v1/chat/completions` selv, nøyaktig én gang. Operatør-konfig (env-var)
+ * kan likevel komme inn i 4 dokumenterte former (med/uten avsluttende `/`,
+ * med/uten allerede inkludert `/v1`) - se `normalizeLocalLlmBaseUrl()`, som
+ * KUN strippes en eksakt avsluttende `/v1`-segment (aldri delvis match, f.eks.
+ * `/v1beta`), slik at feilkonfigurerte/uventede stier ALDRI stille mangles
+ * til noe annet enn det operatøren faktisk skrev.
  */
+export function normalizeLocalLlmBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+}
+
 export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   readonly name: string;
+  private readonly chatCompletionsUrl: string | undefined;
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
@@ -58,6 +72,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
     name: string = "local_llm"
   ) {
     this.name = name;
+    this.chatCompletionsUrl = baseUrl ? `${normalizeLocalLlmBaseUrl(baseUrl)}/v1/chat/completions` : undefined;
   }
 
   available(): boolean {
@@ -81,7 +96,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
   }
 
   async complete(request: ModelRequest, onToken?: (token: string) => void): Promise<ModelResult> {
-    if (!this.baseUrl) {
+    if (!this.baseUrl || !this.chatCompletionsUrl) {
       throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
     }
     const messages: Array<Record<string, unknown>> = [
@@ -105,7 +120,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
     const started = Date.now();
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
+      response = await fetch(this.chatCompletionsUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: AbortSignal.timeout(this.timeoutMs),

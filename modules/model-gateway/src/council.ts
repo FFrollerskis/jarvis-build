@@ -146,36 +146,133 @@ const ROUND2_SCHEMA_HINT = `{"critiques": [{"target_provider": string, "critique
 const SYNTHESIS_SCHEMA_HINT = `{"decision": string, "supporting_models": string[], "dissenting_models": string[], "key_evidence": string[], "key_disagreements": string[], "risk_summary": string, "confidence": number (0-100), "recommended_action": string}`;
 
 /**
- * Deterministisk, tolerant JSON-uthenting: direkte parse, ellers første
- * balanserte {...}-blokk. Aldri en gjettet/fabrikert struktur ved feil -
- * returnerer undefined. Delt med `collaboration.ts` (samme mønster for
- * "be en provider om strukturert JSON-i-tekst uten å kreve
- * structured_output-capability" - se council.ts sin filkommentar).
+ * D-106 HOST-FIX (produksjonsherding, Defekt D): live host-kjøring viste
+ * ekte parse-feil (`invalid_json_shape`/`council_synthesis_invalid`) mot
+ * FAKTISKE modellsvar - den opprinnelige uthentingen tok naivt den FØRSTE
+ * balanserte `{...}`-blokken den fant og stoppet der, UTEN å sjekke om det
+ * fantes en ANNEN, konkurrerende kandidat lenger ut i teksten (stille
+ * tvetydighet), og var IKKE streng-bevisst i sin egen dybdetelling (en
+ * bokstavelig `{`/`}` inni et streng-felt kunne forstyrre balanseringen).
+ *
+ * Matcher trimmet innmatnings-teksten mot NØYAKTIG én av disse balanserte
+ * kandidat-brace-blokkene (funnet via `findMatchingBrace()` sin streng-
+ * bevisste skanning, som IKKE lar en `{`/`}` inni et streng-felt telle med
+ * i dybden). Flere kandidater som HVER parser gyldig er tvetydig og feiler
+ * ÆRLIG (returnerer `undefined`), ALDRI en gjettet vinner.
+ */
+function findMatchingBrace(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Alle ikke-overlappende, balanserte topp-nivå `{...}`-kandidater i teksten, i rekkefølge. */
+function findBalancedJsonCandidates(text: string): string[] {
+  const candidates: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "{") {
+      const end = findMatchingBrace(text, i);
+      if (end === -1) break;
+      candidates.push(text.slice(i, end + 1));
+      i = end + 1;
+    } else {
+      i++;
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Prøver direkte parse først (dekker rå JSON, evt. med kun omkringliggende
+ * whitespace). Feiler direkte parse: skanner etter balanserte `{...}`-
+ * kandidater og krever at PRESIST ÉN av dem parser til gyldig JSON - null
+ * gyldige kandidater (malformert/avkuttet JSON) OG flere gyldige kandidater
+ * (tvetydig - "hvilken av disse er svaret?") feiler BEGGE ÆRLIG, ALDRI en
+ * gjettet/fabrikert vinner.
+ */
+function parseUnambiguousJsonObject(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // fall through - skann etter nøyaktig én balansert, gyldig kandidat.
+  }
+  const parsed: unknown[] = [];
+  for (const candidate of findBalancedJsonCandidates(text)) {
+    try {
+      parsed.push(JSON.parse(candidate));
+    } catch {
+      // ikke gyldig JSON - ikke en reell kandidat, ignoreres (IKKE en feil i seg selv).
+    }
+  }
+  return parsed.length === 1 ? parsed[0] : undefined;
+}
+
+/** Matcher ett fenced kodeblokk-par (```json ... ``` ELLER generisk ``` ... ```), språk-tag valgfri. */
+const MARKDOWN_FENCE_RE = /```[ \t]*([a-zA-Z0-9_-]*)[ \t]*\r?\n?([\s\S]*?)```/g;
+
+/**
+ * Deterministisk, streng JSON-uthenting fra en modells fritekstsvar - delt
+ * med `collaboration.ts` (samme mønster for "be en provider om strukturert
+ * JSON-i-tekst uten å kreve structured_output-capability", provider-nøytralt
+ * - se council.ts sin filkommentar). ALDRI en gjettet/fabrikert struktur ved
+ * feil - returnerer `undefined` for ALLE feilklasser (malformert JSON,
+ * avkuttet JSON, tvetydig flere kandidater), ALDRI en delvis/beste-gjett
+ * struktur. Selve SKJEMA-valideringen (er de påkrevde feltene til stede med
+ * riktig type) skjer FORTSATT hos kalleren (`isRoundAnswer()` i denne filen,
+ * tilsvarende i `collaboration.ts`) - denne funksjonen har KUN ansvar for
+ * "fant jeg entydig gyldig JSON i teksten", aldri for skjemaets form.
+ *
+ * Rekkefølge (D-106 HOST-FIX Defekt D):
+ *  1. Nøyaktig ÉN markdown-fenced kodeblokk (```json ... ``` eller generisk
+ *     ``` ... ```) funnet: bruk KUN dens innhold - en bevisst fence er et
+ *     sterkt, utvetydig signal om "svaret er HER", så det INGEN fallback til
+ *     resten av teksten hvis fence-innholdet selv feiler å parse (ÆRLIG feil,
+ *     ikke et gjettet søk andre steder).
+ *  2. FLERE fenced kodeblokker funnet: tvetydig - `undefined` (aldri en
+ *     gjettet "riktig" blokk).
+ *  3. INGEN fence: prøv direkte parse av HELE teksten (dekker rå JSON +
+ *     kun-whitespace-omsluttet JSON), ellers skann etter presist én
+ *     balansert, gyldig `{...}`-kandidat omgitt av fritekst (bounded prose).
  */
 export function extractJson(text: string): unknown | undefined {
   const trimmed = text.trim();
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // fall through
-  }
-  const start = trimmed.indexOf("{");
-  if (start < 0) return undefined;
-  let depth = 0;
-  for (let i = start; i < trimmed.length; i++) {
-    if (trimmed[i] === "{") depth++;
-    else if (trimmed[i] === "}") {
-      depth--;
-      if (depth === 0) {
-        try {
-          return JSON.parse(trimmed.slice(start, i + 1));
-        } catch {
-          return undefined;
-        }
-      }
+  if (!trimmed) return undefined;
+
+  const fenceMatches = [...trimmed.matchAll(MARKDOWN_FENCE_RE)];
+  if (fenceMatches.length === 1) {
+    const content = (fenceMatches[0]?.[2] ?? "").trim();
+    if (!content) return undefined;
+    try {
+      return JSON.parse(content);
+    } catch {
+      return undefined;
     }
   }
-  return undefined;
+  if (fenceMatches.length > 1) {
+    return undefined;
+  }
+
+  return parseUnambiguousJsonObject(trimmed);
 }
 
 function isRoundAnswer(v: unknown): v is Omit<CouncilRoundAnswer, "provider"> {
