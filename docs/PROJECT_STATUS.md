@@ -1,5 +1,62 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 PR #53 MODELGATEWAY FUNCTIONAL-SUCCESS-
+INVARIANT — kodefiks av defekt G sin dypere arkitekturårsak, SAMME branch/PR
+#53, IKKE nytt D-nummer.**) Forrige runde (under) fant at `kimi-k3` kan bruke
+HELE et konfigurert `max_tokens`-budsjett på skjulte resonnement-tokens uten
+å produsere synlig tekst (`finish_reason=length`, `usage.output_tokens=200`
+nøyaktig lik taket, `text.length=0`) - live-bevist av Tobias, IKKE en
+adapterbug (adapteren reflekterer providersvaret ærlig). Ordre: fiks det
+underliggende `ModelGateway`-problemet dette eksponerte - `executePlan()`
+behandlet FØR denne runden ENHVER ikke-kastet providerrespons som ubetinget
+suksess, uansett innhold.
+
+**Implementert:** nytt `modules/model-gateway/src/completion-outcome.ts`
+(`isFunctionalSuccess()`/`classifyCompletionOutcome()`/
+`computeAdaptiveRetryMaxTokens()` - provider-nøytralt, evidensbasert, ALDRI
+en `if (provider === "kimi")`-sjekk). `executePlan()` klassifiserer nå ETHVERT
+transport-vellykket resultat FØR retur: `USABLE_SUCCESS` (ikke-tom tekst
+ELLER gyldig(e) tool_calls ELLER structured_output - tool-call-only og
+structured-output-only forblir bevisst suksess, regresjonstestet) er uendret
+rask-vei; `EMPTY_OUTPUT` (f.eks. `finish_reason=stop`) går ærlig til neste
+kandidat, ALDRI retry; `TRUNCATED_NO_USABLE_OUTPUT` (finish_reason indikerer
+budsjett-uttømming) trigger ETT begrenset adaptivt retry mot SAMME provider
+med evidensbasert økt `max_tokens`, betinget av et FERSKT
+`BudgetGuard.evaluate()`-sjekk (samme guard, ingen ny mekanisme). Provider-
+helse straffes ALDRI av tomt/trunkert innhold (transport lyktes faktisk);
+begge forsøk er ekte kostnadsført/sporet, det første slettes aldri fra
+historikken. **Streaming-kontrakten er bevisst UENDRET** (regresjonsgrense):
+`finish`/`usage` er allerede levert til konsumenten før klassifisering kan
+skje, så retry gjelder KUN `ModelGateway.complete()` - nøyaktig stien defekt
+G ble reprodusert gjennom.
+
+**23 nye regresjonstester** (`d106-functional-success.test.ts`) dekker alle
+19 scenarier ordren krevde + 4 helper-enhetstester. `pnpm -w typecheck`
+19/19 pakker rent, `pnpm -w lint` rent (hele repoet), full fixed-suite
+**154 testfiler/2372 tester grønne** (ingen ECONNREFUSED-flake denne
+kjøringen). Akseptanseskriptet Tobias tidligere kjørte (scratchpad, ikke i
+repoet) oppdatert til å logge de nye evidensfeltene
+(`KIMI_FIRST_ATTEMPT_FUNCTIONAL_SUCCESS`/`KIMI_ADAPTIVE_RETRY_TRIGGERED`/
+`KIMI_SECOND_ATTEMPT_FUNCTIONAL_SUCCESS`) fra DET SAMME eksisterende, allerede
+beskjedne `gateway.complete({provider:"kimi", max_tokens:200})`-kallet -
+INGEN max_tokens-workaround.
+
+**ÆRLIG STATUS:** `FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` - denne
+økten har (bekreftet, uendret fra forrige runde) INGEN av de fem
+leverandørnøklene tilgjengelig. `KIMI_LIVE_VERIFIED` (og en faktisk observert
+`KIMI_ADAPTIVE_RETRY_TRIGGERED=true` mot ekte `kimi-k3`) gjenstår som Tobias
+sin host-kjøring - konkret, handlingsbar neste steg, ikke en blokkering.
+Gemini-koden BEVISST IKKE rørt (uendret ekstern/uverifisert klassifisering).
+Alle tidligere live-beviste funn (`GEMMA_PRODUCTION_ADAPTER_LIVE`/
+`GEMMA_FIRST_ROUTING_LIVE`/`PAID_MODELS_DISABLED_LIVE`/
+`COUNCIL_ROUND_MAX_TOKENS_FIXED`/`KIMI_DEFAULT_MODEL_FIXED`) UBERØRT, verifisert
+via full regresjon. Se D-106 PR #53 MODELGATEWAY FUNCTIONAL-SUCCESS-INVARIANT
+i `DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Ny commit på SAMME
+branch `claude/d106-production-hardening`, PR #53 (draft, IKKE merget).
+INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3, fortsettelse 2 — Tobias sin
 FØRSTE OG ANDRE ekte host-live-akseptansekjøring mot PR #53, samme branch/PR,
 IKKE nytt D-nummer.**) Narrow host-akseptanseskript (13 HOST SAFETY-krav,
