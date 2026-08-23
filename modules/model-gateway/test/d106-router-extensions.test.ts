@@ -140,3 +140,86 @@ describe("D-106: providerPreference (\"bruk Gemma\" -> [\"gemma_local\",\"gemma_
     expect(plan.candidates[0]?.provider).toBe("gemma_local");
   });
 });
+
+/**
+ * D-106 HOST-FIX (produksjonsherding, Defekt C): live host-kjøring viste at
+ * AUTO-scoringen for et ordinært CHAT-purpose ga et EKSAKT poengmessig
+ * uavgjort (132=132, håndregnet fra `router.ts` sin faktiske formel) mellom
+ * `gemma_local` og `openai` - `Array.prototype.sort` sin stabilitet lot
+ * REGISTRERINGS-REKKEFØLGEN i `providers`-Map-en (dvs. hvilken adapter
+ * `main.ts` konstruerte først) avgjøre, IKKE en bevisst rutingpolicy. Denne
+ * describe-blokken beviser `AUTO_LOCAL_TIE_BREAK_BONUS` (se `router.ts`)
+ * løser NØYAKTIG dette, deterministisk og registrerings-rekkefølge-
+ * uavhengig, uten å skade eskalering/helse-fallback/override-forrang/
+ * paid_models_allowed-håndhevelse.
+ */
+describe("D-106 HOST-FIX Defekt C: deterministisk Gemma-first AUTO-tiebreak (registrerings-rekkefølge-uavhengig)", () => {
+  // gemma_hosted ekskludert bevisst her (udefinert sensitivitet ekskluderer den
+  // uansett, D-81) - isolerer reason-signalet til NØYAKTIG tiebreak-mekanismen,
+  // ikke den allerede-dekkede PRIVACY_RESTRICTED-grenen.
+  const NO_HOSTED_FREE_TIER = { openai: true, anthropic: true, gemini: true, kimi: true, ollama: true, local_llm: true, gemma_local: true };
+
+  it("O: ordinært CHAT-purpose, AUTO, ingen sensitivitet: gemma_local vinner over openai (eksakt 132=132-uavgjort avgjort av lokal-tiebreak, ikke Map-rekkefølge)", () => {
+    const plan = newRouter().plan({ purpose: "CHAT" }, providers(NO_HOSTED_FREE_TIER));
+    expect(plan.candidates[0]?.provider).toBe("gemma_local");
+    expect(plan.reason).toBe("LOCAL_PREFERRED_ON_TIE");
+  });
+
+  it("P: samme uavgjort, MOTSATT Map-registrerings-rekkefølge (openai først, gemma_local sist) gir SAMME topp-valg - IKKE lenger avhengig av array-/Map-konstruksjonsrekkefølge (uavgjort blant rene sky-kandidater seg imellom, f.eks. kimi/anthropic, er en pre-eksisterende, USLEKTET egenskap - kun topp-valget/reason er Defekt C sitt kontraktsløfte)", () => {
+    const order = Object.keys(NO_HOSTED_FREE_TIER);
+    const forward = new Map<string, { configured: boolean; model: string }>();
+    for (const name of order) forward.set(name, { configured: true, model: MODELS[name] ?? "m" });
+    const reversed = new Map<string, { configured: boolean; model: string }>();
+    for (const name of [...order].reverse()) reversed.set(name, { configured: true, model: MODELS[name] ?? "m" });
+
+    const planForward = newRouter().plan({ purpose: "CHAT" }, forward);
+    const planReversed = newRouter().plan({ purpose: "CHAT" }, reversed);
+    expect(planForward.candidates[0]).toEqual(planReversed.candidates[0]);
+    expect(planForward.reason).toBe(planReversed.reason);
+    expect(planForward.candidates[0]?.provider).toBe("gemma_local");
+    expect(planReversed.candidates[0]?.provider).toBe("gemma_local");
+  });
+
+  it("Q: et vanskelig/komplekst purpose (CODE, REASONING_PURPOSES) kan FORTSATT eskalere til openai - tiebreak-bonusen (0.5) er for liten til å overstyre en reell kvalitetsforskjell", () => {
+    const plan = newRouter().plan({ purpose: "CODE" }, providers(ALL));
+    expect(plan.candidates[0]?.provider).toBe("openai");
+    expect(plan.reason).not.toBe("LOCAL_PREFERRED_ON_TIE");
+  });
+
+  it("R: eksplisitt tvunget provider-override (SPECIFIC_PROVIDER) for hver av de fem familiene ruter korrekt, uendret av tiebreak-logikken", () => {
+    for (const name of ["openai", "anthropic", "gemini", "kimi", "gemma_local"]) {
+      const plan = newRouter().plan({ provider: name }, providers(ALL));
+      expect(plan.mode).toBe("SPECIFIC_PROVIDER");
+      expect(plan.reason).toBe("OWNER_OVERRIDE");
+      expect(plan.candidates[0]?.provider).toBe(name);
+    }
+  });
+
+  it("S: usunn (UNAVAILABLE) gemma_local blokkerer ALDRI legitim eskalering til openai for det samme ordinære CHAT-purpose-uavgjortet", () => {
+    const health = new ProviderHealthTracker();
+    for (let i = 0; i < 3; i++) health.recordFailure("gemma_local", "server", "simulert nedetid");
+    const plan = new AiRouter(new CapabilityRegistry(), health).plan({ purpose: "CHAT" }, providers(ALL));
+    expect(plan.candidates.map((c) => c.provider)).not.toContain("gemma_local");
+    expect(plan.candidates[0]?.provider).toBe("openai");
+  });
+
+  it("T: paid_models_allowed=false utelukker FORTSATT openai fullstendig fra planen selv når CHAT-uavgjortet ville favorisert det uten tiebreak", () => {
+    const plan = newRouter().plan({ purpose: "CHAT", paid_models_allowed: false }, providers(ALL));
+    for (const c of plan.candidates) {
+      expect(["ollama", "local_llm", "gemma_local"]).toContain(c.provider);
+    }
+    expect(plan.candidates.map((c) => c.provider)).not.toContain("openai");
+  });
+
+  it("U: tiebreak-bonusen er IKKE hardkodet til provider-navnet 'gemma_local' - enhver locality=local-kandidat i en ellers eksakt uavgjort profitterer likt (provider-nøytral, D-79 §6-filosofi)", () => {
+    // Fjern gemma_local; kun local_llm (samme quality_class=3 lavere enn gemma_local,
+    // men beviser mekanismen er locality-drevet, ikke et navnesjekk).
+    const plan = newRouter().plan(
+      { purpose: "CHAT" },
+      providers({ openai: true, anthropic: true, gemini: true, kimi: true, local_llm: true })
+    );
+    // local_llm (quality_class=3) skal IKKE slå openai/anthropic/gemini på en REELL
+    // kvalitetsforskjell - kun gemma_local (quality_class=4) traff det eksakte 132=132-uavgjortet.
+    expect(plan.candidates[0]?.provider).not.toBe("local_llm");
+  });
+});

@@ -2595,6 +2595,91 @@ false` uendret. Egen, fokusert reparasjons-PR fra `main`, IKKE PR #51 (allerede 
 endringer blandet inn. PR opprettes som draft, IKKE merget. INGEN UA-6. Full detalj: D-106 HOST-FIX 2 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+**D-106 HOST-FIX 3 (2026-08-23, produksjonsherding etter FØRSTE ekte host-live-akseptanse, fem defekter
+A/C/D/B/E, AMENDMENT ikke ny D-nummer):** Tobias sin FØRSTE ekte host-live-akseptansekjøring (etter PR #52)
+avdekket fem produksjonskode-defekter, ikke bare dokument-/diagnostikkgap som de to foregående rundene.
+**A (Gemma URL dobbel `/v1`):** `LocalOpenAiCompatibleAdapter` fikk en live-bevist `/v1/v1` (runbok
+instruerte `/v1`-suffiks, adapteren appenderte selv `/v1/chat/completions`) - ny eksportert
+`normalizeLocalLlmBaseUrl()` (`local-llm.ts`) strips EN eksakt avsluttende `/v1` (aldri delvis
+match/urelatert mangling), adapteren bygger stien nøyaktig én gang uansett hvilken av de 4 dokumenterte
+URL-formene operatøren setter. `.env.example`/runbok oppdatert til root-formen som kanonisk.
+**C (Gemma-first ikke garantert):** live-bevist eksakt 132=132-scoringsuavgjort mellom `gemma_local`/`openai`
+for et ordinært CHAT-purpose, avgjort av registrerings-REKKEFØLGE (stabil sort), ikke policy - ny
+`AUTO_LOCAL_TIE_BREAK_BONUS=0.5` (`router.ts`, bevisst mindre enn minste mulige heltalls-scoringsdifferanse
+- kan ALDRI overstyre en reell kvalitets-/kost-forskjell, KUN et eksakt uavgjort), ny `RoutingReason`
+`LOCAL_PREFERRED_ON_TIE`, provider-nøytral (locality-drevet, IKKE et navnesjekk), registrerings-rekkefølge-
+uavhengighet eksplisitt bevist med motsatt Map-konstruksjonsrekkefølge. **D (Council ugyldig JSON):**
+live-bevist `invalid_json_shape`/`council_synthesis_invalid` mot ekte modellsvar - `extractJson()`
+(`council.ts`, delt med `collaboration.ts`) helt omskrevet til en streng, deterministisk uthenter: markdown-
+fences strippes (én fence = bruk KUN den, aldri fallback ved feil; flere fences = tvetydig, feiler ærlig),
+ellers streng-bevisst balansert-brace-skanning som krever PRESIST én gyldig kandidat (null ELLER flere
+gyldige kandidater feiler BEGGE ærlig). Skjemavalidering hos kalleren uendret. Provider-native
+structured-output-modus vurdert, bevisst UTELATT (ikke alle fem familier hevder capability-en, ville tvunget
+en enkelt-leverandør-avhengighet - ordren forbød dette eksplisitt). **B (Gemini/Kimi 404):** rot-årsak
+undersøkt mot gjeldende offisiell dokumentasjon - INGEN bevist avvik funnet i eksisterende endepunkt-/
+modell-/auth-konstruksjon (ingen live nøkler tilgjengelig i dette miljøet for å bekrefte faktisk
+respons-body). Ordren var eksplisitt "ikke gjett" - levert TRYGG, begrenset feilsøkingsdiagnostikk i stedet
+(`classifyHttpStatus()` nytt valgfritt `diagnostic`-parameter: `provider_error_code`/`sanitized_endpoint`/
+`request_operation`, ALDRI nøkkel/auth-header/query-string/prompts - `types.ts`), `GeminiAdapter`/
+`KimiAdapter` fyller det fra faktisk feilrespons-body (`extractProviderErrorCode()`). **E (ScriptedAdapter
+produksjonslekkasje):** live-bevist `scripted:true` i `PAID_MODELS_DISABLED_PROVIDERS_INVOKED` - test-
+dobbelen var registrert i `main.ts` sin PRODUKSJONS-`ModelGateway`, kunne under `paid_models_allowed=false`
+uten ekte lokal provider bli et legitimt rutingvalg og returnere et FAKE svar i produksjon. Fjernet helt fra
+produksjonswiring (`worker-main.ts` registrerte den aldri, bekreftet) - tester konstruerer den eksplisitt
+selv, uendret etablert mønster. `paid_models_allowed=false` + ingen ekte lokal provider feiler nå ÆRLIG med
+den eksisterende `PaidModelsDisabledError` (uendret logikk, kun konsekvensen av en fjernet fake-kandidat).
+**Testdekning (40 nye tester, 2 nye filer + 2 utvidede):** `conformance.test.ts` (+16 - 4 URL-former for A +
+malformert-sti-bevaring + 6 diagnostikk-tester for B inkl. eksplisitt hemmelighet-lekkasje-negativ-bevis og
+modellnavn/URL-UENDRET-bevis). `d106-router-extensions.test.ts` (+7, O-U - tiebreak avgjør uavgjortet,
+registrerings-rekkefølge-uavhengighet, eskalering til betalt for vanskelig purpose FORTSATT fungerer,
+eksplisitt override for alle fem familier, usunn Gemma blokkerer ALDRI eskalering, `paid_models_allowed=
+false` uendret håndhevet). `d106-council-json-extraction.test.ts` (NY, 14 - alle åtte formateringsklassene
+ordren listet eksplisitt). `d106-scripted-adapter-production-wiring.test.ts` (NY, 3 - kildetekst-inspeksjon
+av BÅDE `main.ts`/`worker-main.ts` + et rent routing-bevis for den ærlige feilkonsekvensen). Full
+workspace-suite re-kjørt ÉN gang etter alle fem fikser: `153/153`filer/`2344/2344`tester, INGEN feil, INGEN
+kjent flake denne kjøringen. `pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent. **ÆRLIG STATUS per fiks:**
+`GEMMA_URL_NORMALIZATION_FIXED=true`, `GEMMA_FIRST_DETERMINISTIC=true`,
+`REGISTRATION_ORDER_INDEPENDENT=true` (begge `FIXED_SUITE_VERIFIED`, ingen ny host-live-kjøring utført denne
+runden - se DELIVERY under), `COUNCIL_STRUCTURED_OUTPUT_FIXED=true` (re-audit 2026-08-23: kravet var en
+robust, deterministisk, provider-nøytral parser med streng skjemavalidering - IKKE nødvendigvis
+provider-native modus - og tekst-parseren oppfyller beviselig alle åtte kravklassene + skjema-strenghet +
+ingen fabrikasjon; 4 nye ende-til-ende-tester i `council.test.ts` (U-X) beviser DEN FAKTISKE
+rundeprotokollen, ikke bare `extractJson()` isolert, håndterer messy-fenced/bounded-prose-formatering
+repeterbart - provider-native modus forblir bevisst utelatt), `GEMINI_ADAPTER_FIXED=false`/
+`KIMI_ADAPTER_FIXED=false`/`GEMINI_LIVE_VERIFIED=false`/`KIMI_LIVE_VERIFIED=false` (diagnostikk-forbedring
+levert i stedet for en gjetning - ærlig uverifisert, IKKE stille markert løst). **Oppfølgingsrunde
+(samme dag, 2026-08-23):** en påfølgende ordre krevde en live diagnostisk probe med Tobias sin ekte
+konfigurerte nøkkel "via skjult miljøtilgang" - `env`-variabler og filsystemet ble eksplisitt undersøkt for
+alle fem leverandørnøkler (`GEMINI_API_KEY`/`KIMI_API_KEY`/`MOONSHOT_API_KEY`/`OPENAI_API_KEY`/
+`ANTHROPIC_API_KEY`) og enhver `.env`-fil - INGEN slik tilgang finnes i dette sandbox-miljøet (kun
+`.env.example`, ingen secrets), for NOEN av de fem AI Mesh-familiene. Dette er en strukturell
+miljøbegrensning, bekreftet ikke antatt - den ordrede live-proben er derfor umulig fra denne økten.
+Ytterligere dokumentasjonsforskning bekreftet Kimi/Moonshot sin flaggskipmodell `kimi-k3` som ekte og aktuell
+(tre uavhengige redaksjonelle kilder: Bloomberg/TechCrunch/Fortune), men en sekundær hypotese (default-modell
+`"kimi-latest"` mulig avviklet ~28. januar 2026) er KUN bekreftet av ikke-primære aggregatorer (primær
+Moonshot-dokumentasjon er nettverks-blokkert i dette miljøet) - beviskravet er IKKE oppfylt, så
+`KimiAdapter` sin default-modell er BEVISST IKKE endret. `GEMINI_404_ROOT_CAUSE=
+unverified_no_adapter_defect_found_credential_and_network_blocked`,
+`KIMI_404_ROOT_CAUSE=unverified_hypothesis_kimi_latest_possibly_deprecated_unconfirmed_against_primary_docs`.
+DO NOT REGRESS-listen fra ordren bevist uendret av at hele den eksisterende, uendrede test-suiten forble
+grønn. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. INGEN UA-6 startet. Implementert i ordrens
+eksakte rekkefølge (A->C->D->B->E->regresjon->docs), ÉN sammenhengende PR fra `origin/main`
+(`9d0323a5f70c8060befb5d786e9aecfc32bd6234`) - IKKE splittet i mikro-PR-er. Gjenstående, eksplisitt
+IKKE-stille-utelatt live-blokker: ALL live-verifisering (samtlige fem familier, ikke bare Gemini/Kimi) krever
+at Tobias kjører en snever akseptanseskript-kjøring PÅ SIN EGEN maskin med sine egne nøkler - samme mønster
+som resten av D-106, STRUKTURELT umulig fra denne økten. PR forblir draft, IKKE merget. Full detalj: D-106
+HOST-FIX 3 (inkl. fortsettelse) i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Andre oppfølgingsrunde (samme dag, 2026-08-23):** Tobias kjørte den narrow akseptanseskripten faktisk PÅ
+SIN EGEN maskin (den "strukturelt umulige" live-proben over ER nå mulig, av Tobias, ikke denne økten selv).
+`GEMMA_PRODUCTION_ADAPTER_LIVE=true`/`GEMMA_FIRST_ROUTING_LIVE=true`/`PAID_MODELS_DISABLED_LIVE=true` - EKTE
+live-bevist. Kimi-hypotesen over ER NÅ BEKREFTET (ikke lenger kun ikke-primær-kilde): Tobias sin ekte kontos
+`/v1/models`-liste bekreftet `"kimi-latest"` finnes IKKE, `kimi-k3` er gjeldende flaggskip -
+`KimiAdapter`-default rettet. Council `max_tokens: 1024` bevist for lavt for ekte GPT-5/Anthropic (reasoning-
+token-forbruk hhv. avkutting) - hevet til `4096`. Gemini 404 fortsatt IKKE en kodedefekt (modell bekreftet i
+katalogen, men nøkkel-entitlement på selve `generateContent` mangler - eksternt). Full detalj: D-106 HOST-FIX
+3, fortsettelse 2, i DECISIONS_AND_ASSUMPTIONS.md.
+
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en
 akseptanse-scoping - i strid med D-41. Tobias bekreftet: sentinel er AKSEPTANSE-ONLY, produksjonen skal ha

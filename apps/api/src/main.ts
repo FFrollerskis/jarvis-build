@@ -23,8 +23,7 @@ import {
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
   OllamaAdapter,
-  OpenAiAdapter,
-  ScriptedAdapter
+  OpenAiAdapter
 } from "@jarvis/provider-adapters";
 import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
@@ -129,8 +128,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         "gemma_local"
       ),
       new KimiAdapter(),
-      new OllamaAdapter(),
-      new ScriptedAdapter()
+      new OllamaAdapter()
+      // D-106 HOST-FIX (produksjonsherding, Defekt E): `ScriptedAdapter` er ALDRI
+      // registrert her lenger - live host-kjøring viste at den, som en ordinær
+      // "local"-profilert provider, kunne bli et LEGITIMT AUTO-rutingvalg under
+      // `paid_models_allowed=false` når INGEN ekte lokal provider var frisk/
+      // konfigurert - Jarvis returnerte da et KANONISERT FAKE-svar i produksjon,
+      // ALDRI en ærlig feil. `ScriptedAdapter` er en DETERMINISTISK TEST-DOBLE
+      // (se `packages/provider-adapters/src/scripted.ts`) - tester konstruerer
+      // den EKSPLISITT selv i egne testfiler, den skal ALDRI stille dukke opp
+      // som en ordinær provider i den ekte API-/worker-
+      // prosessens `ModelGateway`. Uten den her feiler `paid_models_allowed=false`
+      // + ingen ekte lokal provider NÅ ærlig med `PaidModelsDisabledError`
+      // (router.ts) - en strukturert, auditerbar feil, ALDRI et falskt svar.
     ],
     budget: {
       warn_ore: 100_000,

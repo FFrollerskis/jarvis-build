@@ -5,6 +5,7 @@ import {
   GeminiAdapter,
   KimiAdapter,
   LocalOpenAiCompatibleAdapter,
+  normalizeLocalLlmBaseUrl,
   OllamaAdapter,
   OpenAiAdapter,
   ProviderError,
@@ -344,6 +345,168 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     await new LocalOpenAiCompatibleAdapter("http://mock", "m").complete(REQUEST);
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect((init.headers as Record<string, string>)["authorization"]).toBeUndefined();
+  });
+
+  // D-106 HOST-FIX (Defekt A): baseUrl-konvensjonen er tvetydig i praksis
+  // (operatør-konfig kan komme inn med/uten `/v1`) - adapteren MÅ konstruere
+  // `/v1/chat/completions` nøyaktig én gang uansett hvilken av de 4 formene
+  // som er satt, og ALDRI produsere `/v1/v1`.
+  describe("local_llm: normalizeLocalLlmBaseUrl (D-106 HOST-FIX Defekt A)", () => {
+    it.each([
+      ["http://127.0.0.1:11434", "http://127.0.0.1:11434"],
+      ["http://127.0.0.1:11434/", "http://127.0.0.1:11434"],
+      ["http://127.0.0.1:11434/v1", "http://127.0.0.1:11434"],
+      ["http://127.0.0.1:11434/v1/", "http://127.0.0.1:11434"]
+    ])("normaliserer %s til root-URL %s", (input, expected) => {
+      expect(normalizeLocalLlmBaseUrl(input)).toBe(expected);
+    });
+
+    it("stripper ALDRI en delvis/urelatert sti som bare ligner /v1 (ingen stille mangling)", () => {
+      // "/v1beta" er IKKE "/v1" - skal bevares uendret, ikke stille kuttes.
+      expect(normalizeLocalLlmBaseUrl("http://host/v1beta")).toBe("http://host/v1beta");
+    });
+
+    for (const [label, envUrl] of [
+      ["root, uten /v1", "http://127.0.0.1:11434"],
+      ["root med avsluttende /", "http://127.0.0.1:11434/"],
+      ["root + /v1 (D-106 runbook sin tidligere anbefalte form)", "http://127.0.0.1:11434/v1"],
+      ["root + /v1/", "http://127.0.0.1:11434/v1/"]
+    ] as const) {
+      it(`local_llm: fetch-URL blir ALDRI /v1/v1 for input-form "${label}"`, async () => {
+        const fetchSpy = vi.fn(
+          async () =>
+            new Response(JSON.stringify({ choices: [{ message: { content: "hei" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), {
+              status: 200
+            })
+        );
+        vi.stubGlobal("fetch", fetchSpy);
+        await new LocalOpenAiCompatibleAdapter(envUrl, "m").complete(REQUEST);
+        const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        expect(url).toBe("http://127.0.0.1:11434/v1/chat/completions");
+        expect(url).not.toContain("/v1/v1");
+      });
+    }
+  });
+});
+
+/**
+ * D-106 HOST-FIX (produksjonsherding, Defekt B): live host-kjøring viste ekte
+ * `gemini_error_404`/`kimi_error_404` - kode+dokumentasjonsforskning fant
+ * INGEN åpenbart avvik i eksisterende endepunkt-/modell-/auth-konstruksjon
+ * (se PR-beskrivelsen), så fiksen her er TRYGG feilsøkings-diagnostikk
+ * (`classifyHttpStatus()` sitt nye `diagnostic`-parameter) - IKKE en gjettet
+ * URL-/modell-endring. Disse testene beviser diagnostikken er ekte nyttig
+ * OG hemmelighets-trygg, uansett om selve 404-årsaken forblir uverifisert
+ * uten en live nøkkel.
+ */
+describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kimi HTTP-feil", () => {
+  it("gemini: 404 klassifiseres til bad_request MED trygg diagnostikk (provider_error_code/sanitized_endpoint/request_operation)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { code: 404, message: "models/gemini-9000 is not found", status: "NOT_FOUND" } }), {
+            status: 404
+          })
+      )
+    );
+    const err = await new GeminiAdapter("hemmelig-key", "gemini-2.5-flash", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.kind).toBe("bad_request");
+    expect(pe.status).toBe(404);
+    expect(pe.diagnostic?.provider_error_code).toBe("NOT_FOUND");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1beta/models/gemini-2.5-flash:generateContent");
+    expect(pe.diagnostic?.request_operation).toBe("generateContent");
+  });
+
+  it("kimi: 404 klassifiseres til bad_request MED trygg diagnostikk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: { message: "model not found", type: "invalid_request_error", code: "model_not_found" } }), {
+            status: 404
+          })
+      )
+    );
+    const err = await new KimiAdapter("hemmelig-key", "kimi-latest", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.kind).toBe("bad_request");
+    expect(pe.status).toBe(404);
+    expect(pe.diagnostic?.provider_error_code).toBe("model_not_found");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1/chat/completions");
+    expect(pe.diagnostic?.request_operation).toBe("chat.completions");
+  });
+
+  it("gemini/kimi: diagnostikk-objektet inneholder ALDRI API-nøkkelen (verken i provider_error_code, sanitized_endpoint eller feilmeldingen)", async () => {
+    const secret = "sk-super-hemmelig-nokkel-12345";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: 404, status: "NOT_FOUND" } }), { status: 404 }))
+    );
+    const geminiErr = (await new GeminiAdapter(secret, "gemini-2.5-flash", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e)) as ProviderError;
+    const dump = JSON.stringify({ message: geminiErr.message, diagnostic: geminiErr.diagnostic, status: geminiErr.status });
+    expect(dump).not.toContain(secret);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: "model_not_found" } }), { status: 404 }))
+    );
+    const kimiErr = (await new KimiAdapter(secret, "kimi-latest", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e)) as ProviderError;
+    const kimiDump = JSON.stringify({ message: kimiErr.message, diagnostic: kimiErr.diagnostic, status: kimiErr.status });
+    expect(kimiDump).not.toContain(secret);
+  });
+
+  it("gemini: 401/403 forblir klassifisert som 'auth' (uendret klassifiseringspolicy), men bærer NÅ også trygg diagnostikk", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: 403, status: "PERMISSION_DENIED" } }), { status: 403 }))
+    );
+    const err = (await new GeminiAdapter("k", "m", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e)) as ProviderError;
+    expect(err.kind).toBe("auth");
+    expect(err.diagnostic?.provider_error_code).toBe("PERMISSION_DENIED");
+  });
+
+  it("kimi: 404 MED ugyldig/ikke-JSON body feiler fortsatt trygt (diagnostikk er beste-innsats, aldri en krasjende avhengighet)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("ikke json", { status: 404 })));
+    const err = (await new KimiAdapter("k", "m", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e)) as ProviderError;
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.kind).toBe("bad_request");
+    expect(err.diagnostic?.provider_error_code).toBeUndefined();
+    expect(err.diagnostic?.sanitized_endpoint).toBe("mock/v1/chat/completions");
+  });
+
+  it("gemini: modellnavnet i endepunktet er UENDRET (gemini-2.5-flash) - Defekt B ble IKKE 'fikset' ved å gjette et modellnavn-bytte uten bevist rot-årsak", () => {
+    expect(new GeminiAdapter("k", undefined, "http://mock").model).toBe("gemini-2.5-flash");
+  });
+
+  it("kimi: base-URL-en er UENDRET (https://api.moonshot.ai, matcher offisiell Moonshot-dokumentasjon) - Defekt B ble IKKE 'fikset' ved å gjette en URL uten bevist rot-årsak", () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: "x" } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    return new KimiAdapter("k", "m").complete(REQUEST).then(() => {
+      const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("https://api.moonshot.ai/v1/chat/completions");
+    });
   });
 });
 

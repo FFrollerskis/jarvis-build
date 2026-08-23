@@ -16,6 +16,7 @@ import {
   type ToolResultMessage
 } from "@jarvis/provider-adapters";
 import { BudgetGuard, type BudgetConfig, DEFAULT_BUDGET } from "./budget-guard.ts";
+import { classifyCompletionOutcome, computeAdaptiveRetryMaxTokens, type CompletionOutcome } from "./completion-outcome.ts";
 import { CapabilityRegistry, type ModelCapability } from "./capability-registry.ts";
 import { ProviderHealthTracker, type ProviderHealthState } from "./provider-health.ts";
 import { AiRouter, type RoutePlan } from "./router.ts";
@@ -300,6 +301,8 @@ export class ModelGateway {
             result = await adapter.complete(request, isCritic ? undefined : input.onToken);
           }
           const latency = result.latency_ms ?? Date.now() - attemptStart;
+          // D-106 PR #53: transport lyktes (ingen kastet feil) - health reflekterer
+          // NÅBARHET, ikke innholdskvalitet (§3/§7 - dette gjelder uansett utfall under).
           this.health.recordSuccess(adapter.name, latency);
           if (failedProviders.some((p) => p !== adapter.name)) {
             this.crossProviderFallbackSeen = true;
@@ -312,43 +315,109 @@ export class ModelGateway {
               ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
             }
           };
-          const cost =
-            this.legacyCostOverride(result) ??
-            computeCostOre(this.pricing, result.provider, result.model, result.usage);
-          await this.recordCost(input, result, cost, {
-            success: true,
-            fallback: failedProviders.length > 0,
-            critic: isCritic,
-            latency_ms: latency,
-            // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
-            stream: Boolean(streamOpts),
-            ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
-            tool_calls: result.tool_calls?.length ?? 0
+          const outcome = classifyCompletionOutcome(result);
+          await this.recordAttemptResult(input, result, outcome, {
+            traceId,
+            started,
+            budgetLevel,
+            isCritic,
+            adapterName: adapter.name,
+            latency,
+            ...(streamOpts !== undefined ? { streamOpts } : {}),
+            failedProviders,
+            plan
           });
-          await this.opts.trace.record({
-            trace_id: traceId,
-            kind: "model_call",
-            name: `${isCritic ? "critic:" : ""}${adapter.name}:${result.model}`,
-            tenant_id: input.tenant_id,
-            ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
-            ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
-            at: new Date().toISOString(),
-            duration_ms: Date.now() - started,
-            cost_ore: cost,
-            metadata: {
-              usage: { ...result.usage },
-              budget_level: budgetLevel,
-              router_mode: plan.mode,
-              routing_reason: plan.reason,
-              ...(input.purpose ? { purpose: input.purpose } : {}),
-              ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {}),
-              latency_ms: latency,
-              ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
-              ...(result.tool_calls?.length ? { tool_calls_requested: result.tool_calls.length } : {}),
-              critic: isCritic
+
+          if (outcome === "USABLE_SUCCESS") {
+            return result;
+          }
+
+          if (streamOpts) {
+            // §7/§17 (regresjonsvern): streaming-kontrakten er BEVISST uendret av
+            // denne fiksen - `finish`/`usage`-eventene er allerede levert til
+            // stream-forbrukeren (enten av adapter.stream() selv, eller av
+            // normaliserings-grenen over) FØR vi når hit, så et nytt forsøk her
+            // ville produsert en forvirrende dobbel start/finish-sekvens for noe
+            // konsumenten allerede oppfatter som ferdig. `.stream()` returnerer derfor
+            // FORTSATT samme resultat som før - kun trace-metadata (over) er ny og
+            // ærlig klassifisert; ingen ny retry, ingen ny kastet feil på denne stien.
+            return result;
+          }
+
+          // D-106 PR #53 functional-success-invariant (§4): ETT begrenset,
+          // evidensbasert retry-forsøk (kun ikke-streaming når vi når hit - se
+          // returnen over). KUN når finish_reason indikerer budsjett-uttømming
+          // (TRUNCATED) - en ordinær tom EMPTY_OUTPUT (finish_reason=stop) er IKKE
+          // et retry-kandidat (§4).
+          if (outcome === "TRUNCATED_NO_USABLE_OUTPUT") {
+            const budgetPermits = await this.adaptiveRetryPermittedByBudget(input.tenant_id);
+            if (budgetPermits) {
+              const retryStart = Date.now();
+              try {
+                const retryRequest: ModelRequest = {
+                  ...request,
+                  max_tokens: computeAdaptiveRetryMaxTokens(result, request)
+                };
+                const retryResult = await adapter.complete(retryRequest, isCritic ? undefined : input.onToken);
+                const retryLatency = retryResult.latency_ms ?? Date.now() - retryStart;
+                this.health.recordSuccess(adapter.name, retryLatency);
+                retryResult.metadata = {
+                  ...retryResult.metadata,
+                  router: {
+                    mode: plan.mode,
+                    reason: plan.reason,
+                    ...(failedProviders.length > 0 ? { fallback_from: failedProviders } : {})
+                  },
+                  adaptive_retry: {
+                    triggered: true,
+                    first_attempt_outcome: outcome,
+                    ...(result.finish_reason !== undefined ? { first_attempt_finish_reason: result.finish_reason } : {}),
+                    first_attempt_output_tokens: result.usage.output_tokens,
+                    retry_max_tokens: retryRequest.max_tokens
+                  }
+                };
+                const retryOutcome = classifyCompletionOutcome(retryResult);
+                await this.recordAttemptResult(input, retryResult, retryOutcome, {
+                  traceId,
+                  started,
+                  budgetLevel,
+                  isCritic,
+                  adapterName: adapter.name,
+                  latency: retryLatency,
+                  failedProviders,
+                  plan,
+                  adaptiveRetryOfOutcome: outcome
+                });
+                if (retryOutcome === "USABLE_SUCCESS") {
+                  return retryResult;
+                }
+                // Retry-forsøket var OGSÅ ubrukelig - ærlig feil, aldri stille suksess (§4).
+                lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output_after_retry`);
+                break;
+              } catch (retryErr) {
+                // Selve retry-kallet feilet på transportnivå (§5: begge forsøk er ekte,
+                // reelle feil skal IKKE skjules) - normal feilhåndtering, ingen ny retry.
+                const pe =
+                  retryErr instanceof ProviderError
+                    ? retryErr
+                    : new ProviderError(adapter.name, "server", (retryErr as Error).message);
+                if (pe.kind === "cancelled") {
+                  // Bruker-cancellation (§35): la den YTRE catch-blokken håndtere dette
+                  // ÉN gang uniformt (recordFailedAttempt + rethrow) - ikke dobbeltregistrer her.
+                  throw pe;
+                }
+                lastError = pe;
+                this.health.recordFailure(adapter.name, pe.kind, pe.message);
+                await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+                break;
+              }
             }
-          });
-          return result;
+          }
+
+          // Ikke brukbart, ingen (eller uttømt) retry: gå videre til neste kandidat
+          // UTEN å straffe provider-helsen (§3/§7 - transporten lyktes faktisk).
+          lastError = new ProviderError(adapter.name, "invalid_response", `${adapter.name}_no_usable_output`);
+          break;
         } catch (err) {
           const pe =
             err instanceof ProviderError
@@ -584,6 +653,94 @@ export class ModelGateway {
           : "LOGIC_ONLY",
       critic: this.criticRunSeen ? "VERIFIED" : "READY_SELECTIVE"
     };
+  }
+
+  /**
+   * D-106 PR #53 (functional-success-invariant, §3/§5): kost + trace for ETT
+   * faktisk providerforsøk - brukes for både det ordinære forsøket OG et evt.
+   * adaptivt retry-forsøk, slik at BEGGE forblir egne, ærlige, kostnadssporede
+   * rader (§5: "Do NOT erase the failed first completion from history").
+   * `outcome`/`finish_reason`/synlig tekstlengde persisteres alltid i
+   * trace-metadata - aldri hemmelig, aldri rå resonnement-tekst.
+   */
+  private async recordAttemptResult(
+    input: CompleteInput,
+    result: ModelResult,
+    outcome: CompletionOutcome,
+    ctx: {
+      traceId: string;
+      started: number;
+      budgetLevel: string;
+      isCritic: boolean;
+      adapterName: string;
+      latency: number;
+      streamOpts?: { onEvent: StreamHandler; signal?: AbortSignal };
+      failedProviders: string[];
+      plan: RoutePlan;
+      /** Satt kun når DETTE forsøket er det adaptive retry-forsøket. */
+      adaptiveRetryOfOutcome?: CompletionOutcome;
+    }
+  ): Promise<void> {
+    const cost =
+      this.legacyCostOverride(result) ?? computeCostOre(this.pricing, result.provider, result.model, result.usage);
+    await this.recordCost(input, result, cost, {
+      success: true,
+      fallback: ctx.failedProviders.length > 0,
+      critic: ctx.isCritic,
+      latency_ms: ctx.latency,
+      // BO-11.1 §4: streaming-/tool-metrics SQL-spørrbare (migrasjon 016).
+      stream: Boolean(ctx.streamOpts),
+      ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+      tool_calls: result.tool_calls?.length ?? 0
+    });
+    await this.opts.trace.record({
+      trace_id: ctx.traceId,
+      kind: "model_call",
+      name: `${ctx.isCritic ? "critic:" : ""}${ctx.adapterName}:${result.model}`,
+      tenant_id: input.tenant_id,
+      ...(input.session_id !== undefined ? { session_id: input.session_id } : {}),
+      ...(input.task_id !== undefined ? { task_id: input.task_id } : {}),
+      at: new Date().toISOString(),
+      duration_ms: Date.now() - ctx.started,
+      cost_ore: cost,
+      metadata: {
+        usage: { ...result.usage },
+        budget_level: ctx.budgetLevel,
+        router_mode: ctx.plan.mode,
+        routing_reason: ctx.plan.reason,
+        ...(input.purpose ? { purpose: input.purpose } : {}),
+        ...(ctx.failedProviders.length > 0 ? { fallback_from: ctx.failedProviders } : {}),
+        latency_ms: ctx.latency,
+        ...(result.ttft_ms !== undefined ? { ttft_ms: result.ttft_ms } : {}),
+        ...(result.tool_calls?.length ? { tool_calls_requested: result.tool_calls.length } : {}),
+        critic: ctx.isCritic,
+        // D-106 PR #53 functional-success-invariant (§3): ærlig utfallsklassifisering,
+        // alltid persistert. Ingen secrets, ingen rå resonnement-tekst - kun metadata.
+        outcome,
+        ...(result.finish_reason !== undefined ? { finish_reason: result.finish_reason } : {}),
+        visible_text_length: result.text.length,
+        has_tool_calls: Boolean(result.tool_calls?.length),
+        has_structured_output: result.structured_output !== undefined,
+        ...(ctx.adaptiveRetryOfOutcome !== undefined
+          ? { adaptive_retry: true, adaptive_retry_of_outcome: ctx.adaptiveRetryOfOutcome }
+          : {})
+      }
+    });
+  }
+
+  /**
+   * D-106 PR #53 (§4): "policy/budget permits retry" - gjenbruker DEN SAMME
+   * `BudgetGuard` som styrer det ordinære kallet (ingen ny budsjett-mekanisme).
+   * Evalueres PÅ NYTT rett før retry-kallet, fordi retry er et EKSTRA, reelt
+   * billable kall utover det som allerede ble godkjent innledningsvis - hvis
+   * budsjettet i mellomtiden har blitt hardt blokkert/krever godkjenning,
+   * nektes retry-forsøket (ærlig fallback/feil, §4/§7), men SELVE det
+   * allerede utførte (og allerede kostnadsførte) første forsøket rulles
+   * aldri tilbake.
+   */
+  private async adaptiveRetryPermittedByBudget(tenantId: string): Promise<boolean> {
+    const budget = await this.guard.evaluate(tenantId);
+    return budget.level !== "hard_blocked" && budget.level !== "needs_approval";
   }
 
   private async recordCost(

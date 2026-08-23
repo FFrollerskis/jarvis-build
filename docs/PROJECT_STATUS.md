@@ -1,5 +1,224 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 PR #53 NARROW LIVE KIMI-VERIFISERING —
+functional-success-invarianten er nå BÅDE FIXED_SUITE_VERIFIED OG
+LIVE_VERIFIED. IKKE merget ennå - venter på Tobias sin eksplisitte
+godkjenning.**) Tobias kjørte en ny, smal (Kimi-only, ingen Council/OpenAI/
+Anthropic/Gemini/Gemma re-testet) PowerShell-akseptanse på sin ekte Windows-
+host mot PR #53 sin faktiske kode (`31a329e4b32d8d1a071c666a7130d916445361f7`,
+verifisert eksakt commit-SHA-match før noe kjørte, fail-closed ellers).
+**Resultat: PASS A** (én av to eksplisitt aksepterte utfall) -
+`gateway.complete({provider:"kimi", max_tokens:200})` mot ekte `kimi-k3` ga
+BRUKBAR synlig tekst på selve FØRSTE kanoniske forsøket denne gangen
+(`finish_reason=stop`, `output_tokens=153`, synlig tekst 4 tegn, dvs.
+reasoning-tokens denne kjøringen etterlot nok budsjett til et kort synlig
+svar) - INGEN adaptivt retry ble trigget eller nødvendig. `KIMI_LIVE_VERIFIED=true`.
+
+**Ærlig presisering (Q26):** dette beviser at det kanoniske
+`ModelGateway.complete()`-kallet mot ekte `kimi-k3` produserer et brukbart
+resultat i produksjon, OG at trace-/kostnadssporingen fungerer korrekt for
+ETT forsøk (`KIMI_RETRY_TRACE_PROVENANCE_LIVE=true`,
+`KIMI_RETRY_COST_ACCOUNTING_LIVE=true`, 1 trace-span/1 cost_events-rad,
+begge merket riktig). Det beviser IKKE at selve det adaptive retry-forsøket
+(når det trigges) fungerer live mot ekte Kimi-trafikk - reasoning-token-
+forbruket er ikke-deterministisk per kall, og DENNE spesifikke kjøringen
+tilfeldigvis ikke trengte retry (i motsetning til forrige runde sitt
+`max_tokens=200`-funn, som brukte HELE budsjettet). Retry-mekanismen selv
+er fortsatt kun `FIXED_SUITE_VERIFIED` (23 deterministiske regresjonstester,
+inkl. et scenario der forsøk 1 er tomt/trunkert og forsøk 2 lykkes) - IKKE
+en falsk påstand om at retry-veien er live-observert denne runden. Ordren
+klassifiserer PASS A som fullt akseptabelt på egne premisser (krever ikke
+PASS B), og dette er derfor tilstrekkelig bevis for §9-porten.
+
+`D106_CODE_REPAIR_COMPLETE=true`, `PR53_NARROW_LIVE_ACCEPTANCE_COMPLETE=true`,
+`MERGE_READY=true` - men PR #53 forblir draft, IKKE merget, inntil Tobias
+eksplisitt godkjenner (CLAUDE.md-regel, ordrens egen "STOP for explicit merge
+approval"). `FULL_FIVE_MEMBER_COUNCIL_LIVE=false`,
+`AI_MESH_HOST_ACCEPTANCE_COMPLETE=false` (Gemini forblir det eneste hinderet
+for full 5-medlems Council-live), `GEMINI_EXTERNAL_BLOCKER=true` (uendret,
+ingen Gemini-kode rørt), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`
+uendret. Se D-106 PR #53 NARROW LIVE KIMI-VERIFISERING i
+`DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Branch
+`claude/d106-production-hardening`, PR #53, siste head fortsatt `31a329e`
+(ingen kodeendring denne runden - kun dokumentasjon). INGEN UA-6.
+
+## Runden før det
+
+**Oppdatert:** 2026-08-23 (**D-106 PR #53 MODELGATEWAY FUNCTIONAL-SUCCESS-
+INVARIANT — kodefiks av defekt G sin dypere arkitekturårsak, SAMME branch/PR
+#53, IKKE nytt D-nummer.**) Forrige runde (under) fant at `kimi-k3` kan bruke
+HELE et konfigurert `max_tokens`-budsjett på skjulte resonnement-tokens uten
+å produsere synlig tekst (`finish_reason=length`, `usage.output_tokens=200`
+nøyaktig lik taket, `text.length=0`) - live-bevist av Tobias, IKKE en
+adapterbug (adapteren reflekterer providersvaret ærlig). Ordre: fiks det
+underliggende `ModelGateway`-problemet dette eksponerte - `executePlan()`
+behandlet FØR denne runden ENHVER ikke-kastet providerrespons som ubetinget
+suksess, uansett innhold.
+
+**Implementert:** nytt `modules/model-gateway/src/completion-outcome.ts`
+(`isFunctionalSuccess()`/`classifyCompletionOutcome()`/
+`computeAdaptiveRetryMaxTokens()` - provider-nøytralt, evidensbasert, ALDRI
+en `if (provider === "kimi")`-sjekk). `executePlan()` klassifiserer nå ETHVERT
+transport-vellykket resultat FØR retur: `USABLE_SUCCESS` (ikke-tom tekst
+ELLER gyldig(e) tool_calls ELLER structured_output - tool-call-only og
+structured-output-only forblir bevisst suksess, regresjonstestet) er uendret
+rask-vei; `EMPTY_OUTPUT` (f.eks. `finish_reason=stop`) går ærlig til neste
+kandidat, ALDRI retry; `TRUNCATED_NO_USABLE_OUTPUT` (finish_reason indikerer
+budsjett-uttømming) trigger ETT begrenset adaptivt retry mot SAMME provider
+med evidensbasert økt `max_tokens`, betinget av et FERSKT
+`BudgetGuard.evaluate()`-sjekk (samme guard, ingen ny mekanisme). Provider-
+helse straffes ALDRI av tomt/trunkert innhold (transport lyktes faktisk);
+begge forsøk er ekte kostnadsført/sporet, det første slettes aldri fra
+historikken. **Streaming-kontrakten er bevisst UENDRET** (regresjonsgrense):
+`finish`/`usage` er allerede levert til konsumenten før klassifisering kan
+skje, så retry gjelder KUN `ModelGateway.complete()` - nøyaktig stien defekt
+G ble reprodusert gjennom.
+
+**23 nye regresjonstester** (`d106-functional-success.test.ts`) dekker alle
+19 scenarier ordren krevde + 4 helper-enhetstester. `pnpm -w typecheck`
+19/19 pakker rent, `pnpm -w lint` rent (hele repoet), full fixed-suite
+**154 testfiler/2372 tester grønne** (ingen ECONNREFUSED-flake denne
+kjøringen). Akseptanseskriptet Tobias tidligere kjørte (scratchpad, ikke i
+repoet) oppdatert til å logge de nye evidensfeltene
+(`KIMI_FIRST_ATTEMPT_FUNCTIONAL_SUCCESS`/`KIMI_ADAPTIVE_RETRY_TRIGGERED`/
+`KIMI_SECOND_ATTEMPT_FUNCTIONAL_SUCCESS`) fra DET SAMME eksisterende, allerede
+beskjedne `gateway.complete({provider:"kimi", max_tokens:200})`-kallet -
+INGEN max_tokens-workaround.
+
+**ÆRLIG STATUS:** `FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` - denne
+økten har (bekreftet, uendret fra forrige runde) INGEN av de fem
+leverandørnøklene tilgjengelig. `KIMI_LIVE_VERIFIED` (og en faktisk observert
+`KIMI_ADAPTIVE_RETRY_TRIGGERED=true` mot ekte `kimi-k3`) gjenstår som Tobias
+sin host-kjøring - konkret, handlingsbar neste steg, ikke en blokkering.
+Gemini-koden BEVISST IKKE rørt (uendret ekstern/uverifisert klassifisering).
+Alle tidligere live-beviste funn (`GEMMA_PRODUCTION_ADAPTER_LIVE`/
+`GEMMA_FIRST_ROUTING_LIVE`/`PAID_MODELS_DISABLED_LIVE`/
+`COUNCIL_ROUND_MAX_TOKENS_FIXED`/`KIMI_DEFAULT_MODEL_FIXED`) UBERØRT, verifisert
+via full regresjon. Se D-106 PR #53 MODELGATEWAY FUNCTIONAL-SUCCESS-INVARIANT
+i `DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Ny commit på SAMME
+branch `claude/d106-production-hardening`, PR #53 (draft, IKKE merget).
+INGEN UA-6.
+
+## Runden før det
+
+**Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3, fortsettelse 2 — Tobias sin
+FØRSTE OG ANDRE ekte host-live-akseptansekjøring mot PR #53, samme branch/PR,
+IKKE nytt D-nummer.**) Narrow host-akseptanseskript (13 HOST SAFETY-krav,
+A-F) kjørt to ganger på Tobias sin ekte maskin (ekte OpenAI/Anthropic/
+Gemini/Kimi-nøkler + lokal Ollama/gemma3:4b). **Runde 1** avdekket en bug i
+akseptanseskriptet selv (oppdiktet `TENANT`-id uten rad i `tenants`-tabellen
+→ `cost_events_tenant_id_fkey` feilet på ALLE `.complete()`-kall, så ut som
+en `kind="server"`-providerfeil uten status). **Runde 2** (etter script-fiks
+til `tenant-personal`, samme konvensjon som `main.ts`/`bo10-live.ts`):
+`GEMMA_PRODUCTION_ADAPTER_LIVE=true`, `GEMMA_FIRST_ROUTING_LIVE=true`,
+`PAID_MODELS_DISABLED_LIVE=true` - alle tre GENUINT live-verifisert, INGEN
+PR #53-kodedefekt (rot-årsak var kun akseptanseskriptets egen tenant-bug,
+sporet til `model-gateway.ts` sin delte `executePlan()`-catch som pakker en
+rå ikke-`ProviderError`-feil inn i en misvisende `kind="server"`). To EKTE,
+live-beviste PR #53-defekter ble derimot funnet og RETTET i denne runden:
+
+**G (Council runde-`max_tokens` for lavt for ekte reasoning-modeller):**
+live-bevist `invalid_json_shape` for BÅDE OpenAI og Anthropic i runde 1 mot
+`max_tokens: 1024`. Diagnostikk (samme prompt/skjema reprodusert direkte via
+eksportert `extractJson()`) viste GPT-5 (reasoning-modell) brukte HELE
+budsjettet på interne reasoning-tokens (`finish_reason=length`,
+`text.length=0` - INGEN synlig tekst), Anthropic ble kuttet midt i et
+ellers gyldig JSON-objekt (`finish_reason=max_tokens`). `extractJson()`/
+`isRoundAnswer()` avviste begge KORREKT - defekten var budsjettet, ikke
+parseren. `council.ts`: alle fire kallsteder (runde 1/2/3 + syntese) hevet
+til `COUNCIL_ROUND_MAX_TOKENS=4096`/`COUNCIL_SYNTHESIS_MAX_TOKENS=4096` (ikke
+en gjettet leverandør-detalj - et internt Jarvis-budsjettvalg med reell
+margin, se D-41-skillet). Ny regresjonstest Y i `council.test.ts` fanger
+`request.max_tokens` per kall, håndhever >2048 for alle runder.
+
+**H (Kimi default-modell fantes ikke):** live-bevist BEKREFTET (ikke lenger
+kun hypotese fra ikke-primære kilder, se forrige runde) - Tobias sin ekte
+kontos `/v1/models`-liste inneholdt `kimi-k2.6,kimi-k2.7-code,kimi-k2.7-code-
+highspeed,kimi-k3` - `"kimi-latest"` var IKKE blant dem. Uavhengig WebSearch
+bekreftet `kimi-k3` som Moonshot sitt gjeldende flaggskip (1M-token kontekst,
+de "-code"-variantene er spesialiserte). `KimiAdapter` sin default endret
+`"kimi-latest"` → `"kimi-k3"` (`kimi.ts`); `capability-registry.ts` sin
+`kimi`-profil samstemt (`model`/`context_tokens: 1_000_000`). **Gemini 404
+derimot IKKE en kodedefekt:** adapterkoden verifisert korrekt (offisielt
+header-basert `x-goog-api-key`-mønster, riktig URL/metode); diagnostikk-probe
+mot Google sitt EGET `models`-listeendepunkt bekreftet `gemini-2.5-flash`
+FAKTISK finnes i katalogen for denne nøkkelen - likevel 404 på selve
+`generateContent`. Mønsteret (listet ≠ kan påkalles) er en kjent
+Gemini-API-oppførsel (katalogen er global, `generateContent` håndhever
+faktisk nøkkel-/prosjekt-entitlement per modell) - IKKE gjettet som
+kodedefekt, IKKE endret. Tobias må sjekke modell-/faktureringstilgang i
+Google AI Studio/Cloud Console for denne nøkkelen; `GeminiAdapter` selv
+krever ingen endring. Ny commit på SAMME branch/PR #53 (IKKE PR #54), full
+suite + typecheck + lint kjørt på nytt, ny head rapportert i sluttrapport.
+**Do NOT merge. Ingen UA-6 startet.**
+
+## Runden før det
+
+**Oppdatert:** 2026-08-23 (**D-106 HOST-FIX 3 — produksjonsherding etter
+FØRSTE ekte host-live-akseptanse, fem defekter A/C/D/B/E, EGEN PR fra
+`origin/main` (SHA `9d0323a5f70c8060befb5d786e9aecfc32bd6234`), AMENDMENT
+ikke nytt D-nummer.**) Tobias sin FØRSTE ekte host-live-akseptansekjøring
+(etter PR #52 sin Gemma-familie-fiks) avdekket fem PRODUKSJONSKODE-defekter
+- ikke bare dokument-/diagnostikkgap som de to foregående HOST-FIX-rundene.
+**A (Gemma dobbel `/v1`):** live-bevist 404 - runboken instruerte feilaktig
+et `/v1`-suffiks, adapteren appenderte selv `/v1/chat/completions`. Ny
+eksportert `normalizeLocalLlmBaseUrl()` (`local-llm.ts`) strips EN eksakt
+avsluttende `/v1` (aldri delvis match/urelatert mangling) - adapteren bygger
+stien nøyaktig én gang uansett hvilken av de 4 dokumenterte URL-formene.
+`.env.example`/runbok oppdatert til root-formen som kanonisk.
+**C (Gemma-first ikke garantert):** live-bevist eksakt 132=132-scoringsuavgjort
+mellom `gemma_local`/`openai`, avgjort av registrerings-REKKEFØLGE (stabil
+sort), ikke policy. Ny `AUTO_LOCAL_TIE_BREAK_BONUS=0.5` (`router.ts`) -
+bevisst mindre enn minste mulige heltalls-scoringsdifferanse (kan ALDRI
+overstyre en reell forskjell, KUN et eksakt uavgjort), provider-nøytral
+(locality-drevet, IKKE et navnesjekk), registrerings-rekkefølge-uavhengighet
+eksplisitt bevist. **D (Council ugyldig JSON):** live-bevist
+`invalid_json_shape`/`council_synthesis_invalid` mot ekte modellsvar -
+`extractJson()` (`council.ts`) helt omskrevet til en streng, deterministisk
+uthenter (markdown-fence-stripping, streng-bevisst balansert-brace-skanning,
+krever PRESIST én gyldig kandidat - null ELLER flere feiler BEGGE ærlig).
+Provider-native structured-output vurdert, bevisst UTELATT (ikke alle fem
+familier hevder capability-en). **B (Gemini/Kimi 404):** rot-årsak
+undersøkt mot gjeldende offisiell dokumentasjon - INGEN bevist avvik funnet
+(ingen live nøkler tilgjengelig i dette miljøet). Ordren forbød gjetting -
+levert TRYGG feilsøkingsdiagnostikk i stedet (`classifyHttpStatus()` nytt
+`diagnostic`-parameter, ALDRI nøkkel/auth-header/prompts).
+`GEMINI_ADAPTER_FIXED=false`/`KIMI_ADAPTER_FIXED=false` - ærlig uverifisert.
+**E (ScriptedAdapter produksjonslekkasje):** live-bevist
+`PAID_MODELS_DISABLED_PROVIDERS_INVOKED=...,scripted:true` - fjernet HELT
+fra `main.ts` sin produksjons-`ModelGateway` (`worker-main.ts` registrerte
+den aldri). `paid_models_allowed=false` + ingen ekte lokal provider feiler
+nå ÆRLIG med `PaidModelsDisabledError`. **44 nye tester** (2 nye filer:
+`d106-council-json-extraction.test.ts` 14, `d106-scripted-adapter-
+production-wiring.test.ts` 3; 3 utvidede: `conformance.test.ts` +16,
+`d106-router-extensions.test.ts` +7, `council.test.ts` +4). Full
+workspace-suite: INGEN feil. `pnpm -w typecheck` 19/19 rent, `pnpm -w lint`
+rent. `SCRIPTED_ADAPTER_PRODUCTION_ELIGIBLE=false`,
+`LOCAL_ONLY_NO_REAL_PROVIDER_FAILS_HONESTLY=true`. **Oppfølging samme dag:**
+en påfølgende ordre ba om re-audit av Council-strukturert-output + en live
+diagnostisk probe med Tobias sin ekte nøkkel. Re-audit: kravet var en robust
+provider-nøytral parser (ikke nødvendigvis provider-native modus) -
+`COUNCIL_STRUCTURED_OUTPUT_FIXED=true` (4 nye ende-til-ende-tester i
+`council.test.ts` U-X beviser DEN FAKTISKE rundeprotokollen håndterer
+messy-fenced/bounded-prose-modellsvar repeterbart). Live probe: `env`/
+filsystem eksplisitt undersøkt - INGEN leverandørnøkler (for NOEN av de fem
+AI Mesh-familiene, ikke bare Gemini/Kimi) finnes i dette sandbox-miljøet -
+en strukturell miljøbegrensning, bekreftet ikke antatt. Videre forskning
+bekreftet Kimi sin `kimi-k3` som ekte/aktuell flaggskipmodell (uavhengige
+kilder), men en hypotese om at default-modellen `"kimi-latest"` kan være
+avviklet er KUN bekreftet av ikke-primære aggregatorer (primær Moonshot-
+dokumentasjon nettverks-blokkert her) - IKKE tilstrekkelig bevis for en
+kodeendring, så `KimiAdapter` sin default er BEVISST IKKE endret.
+`GEMINI_LIVE_VERIFIED=false`/`KIMI_LIVE_VERIFIED=false` uendret - ALL
+live-verifisering (samtlige fem familier) krever at Tobias kjører en snever
+akseptanseskript-kjøring på sin egen maskin med sine egne nøkler, samme
+mønster som resten av D-106. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`
+uendret. Se D-106 HOST-FIX 3 (inkl. fortsettelse) i
+`DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Branch
+`claude/d106-production-hardening`, PR #53 (draft, IKKE merget). INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-22 (**D-106 HOST-FIX 2 — Council Gemma-familie-
 mismatch, EGEN reparasjons-PR fra `main` (PR #51 er allerede merget),
 AMENDMENT ikke nytt D-nummer.** Tobias fikk sin lokale Gemma-runtime live

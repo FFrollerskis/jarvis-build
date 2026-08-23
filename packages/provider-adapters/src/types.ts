@@ -129,12 +129,71 @@ export type ProviderErrorKind =
   | "invalid_tool_call"
   | "cancelled";
 
+/**
+ * D-106 HOST-FIX (produksjonsherding, Defekt B): TRYGG feilsøkings-metadata
+ * for en HTTP-feilrespons - bevisst begrenset til feltene ordren eksplisitt
+ * tillot ("provider, status, provider error code, sanitized host/path,
+ * selected model, request operation"). ALDRI API-nøkkel, ALDRI auth-header,
+ * ALDRI query-string (kan i prinsippet bære secrets hos en fremtidig
+ * provider, selv om ingen adapter i dag sender nøkkel der), ALDRI fulle
+ * prompts. `provider_error_code` er KUN en kort identifikator hentet fra
+ * leverandørens response-body (f.eks. Gemini sin `error.status`
+ * ("NOT_FOUND"), en OpenAI-kompatibel `error.code`/`error.type`) - ALDRI
+ * leverandørens frie `error.message`-tekst (som i prinsippet kunne
+ * inneholde noe fra request-innholdet ekko'et tilbake).
+ */
+export interface ProviderErrorDiagnostic {
+  provider_error_code?: string;
+  sanitized_endpoint?: string;
+  request_operation?: string;
+}
+
+/**
+ * Henter en TRYGG, kort feilkode-identifikator fra en leverandørs JSON-
+ * feilrespons-body - ALDRI den frie `message`-teksten. Dekker BÅDE Google-
+ * stilen (`{error: {code, message, status}}`, Gemini/Gemma) OG OpenAI-
+ * kompatibel stil (`{error: {message, type, code}}`, Kimi/OpenAI/lokale
+ * endepunkter) - samme funksjon for begge, provider-nøytral. Returnerer
+ * `undefined` ved ugyldig JSON eller uventet form - ALDRI en gjettet verdi.
+ */
+export function extractProviderErrorCode(bodyText: string): string | undefined {
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { code?: unknown; status?: unknown; type?: unknown } };
+    const err = parsed.error;
+    if (!err || typeof err !== "object") return undefined;
+    // Prioritering: Google-stil `status` (streng-enum, f.eks. "NOT_FOUND") FØRST -
+    // deretter en STRENG `code` (OpenAI-kompatibel stil, f.eks. "model_not_found" -
+    // det mest presise feltet der) - deretter `type` (bredere kategori, f.eks.
+    // "invalid_request_error") - og HELT sist en NUMERISK `code` (Google-stil,
+    // ekko av HTTP-statusen - minst nyttig, men bedre enn ingenting).
+    const status = typeof err.status === "string" ? err.status : undefined;
+    const codeStr = typeof err.code === "string" ? err.code : undefined;
+    const type = typeof err.type === "string" ? err.type : undefined;
+    const codeNum = typeof err.code === "number" ? String(err.code) : undefined;
+    const value = status ?? codeStr ?? type ?? codeNum;
+    return value ? value.slice(0, 100) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Host+path (ALDRI query-string/fragment - der en fremtidig provider i prinsippet kunne plassert secrets). */
+export function sanitizeEndpointForDiagnostics(url: string): string | undefined {
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export class ProviderError extends Error {
   constructor(
     readonly provider: string,
     readonly kind: ProviderErrorKind,
     message: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly diagnostic?: ProviderErrorDiagnostic
   ) {
     super(message);
     this.name = "ProviderError";
@@ -151,12 +210,18 @@ export class ProviderError extends Error {
   }
 }
 
-/** Felles HTTP-statusklassifisering for alle adaptere - konsistente normaliserte feil. */
-export function classifyHttpStatus(provider: string, status: number): ProviderError {
-  if (status === 401 || status === 403) return new ProviderError(provider, "auth", `${provider}_auth_${status}`, status);
-  if (status === 429) return new ProviderError(provider, "rate_limit", `${provider}_rate_limited`, status);
-  if (status >= 500) return new ProviderError(provider, "server", `${provider}_server_${status}`, status);
-  return new ProviderError(provider, "bad_request", `${provider}_error_${status}`, status);
+/**
+ * Felles HTTP-statusklassifisering for alle adaptere - konsistente
+ * normaliserte feil. `diagnostic` er VALGFRITT (D-106 HOST-FIX Defekt B) -
+ * eksisterende kallesteder som ikke sender det er UENDRET (§23
+ * migrasjonssikkerhet); adaptere som ROT-ÅRSAKER en feil (i dag: Gemini,
+ * Kimi) sender trygg, begrenset metadata for feilsøking uten live nøkler.
+ */
+export function classifyHttpStatus(provider: string, status: number, diagnostic?: ProviderErrorDiagnostic): ProviderError {
+  if (status === 401 || status === 403) return new ProviderError(provider, "auth", `${provider}_auth_${status}`, status, diagnostic);
+  if (status === 429) return new ProviderError(provider, "rate_limit", `${provider}_rate_limited`, status, diagnostic);
+  if (status >= 500) return new ProviderError(provider, "server", `${provider}_server_${status}`, status, diagnostic);
+  return new ProviderError(provider, "bad_request", `${provider}_error_${status}`, status, diagnostic);
 }
 
 /** Nettverks-/timeoutfeil fra fetch normalisert (AbortError → timeout). */

@@ -9,3 +9,13 @@
 # trigger pattern going forward, but gitleaks scans full history by default
 # and the original commit remains part of this branch's published history.
 31fe97996a392d126c34f0fc70214275c376c875:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:68
+
+# gitleaks' generic-api-key rule flags the literal documentation phrase
+# "finish_reason=length" (D-106 PR #53 ModelGateway functional-success-
+# invariant status row) - it is a provider API response field/value pair
+# describing a completion outcome (see completion-outcome.ts), never a
+# credential/key/token/password of any kind. Verified manually. Reworded
+# in a later commit (finish_reason: "length") to remove the trigger
+# pattern going forward, but gitleaks scans full history by default and
+# the original commit remains part of this branch's published history.
+f5564247ebd0c3b00d572ba2d897fc39f383188c:docs/RUNTIME_GATES.md:generic-api-key:60

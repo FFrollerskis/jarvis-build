@@ -101,6 +101,33 @@ const REASONING_PURPOSES: ModelPurpose[] = ["CODE", "REASON", "PLAN", "RESEARCH"
 const CHEAP_PURPOSES: ModelPurpose[] = ["QUICK_CLASSIFICATION", "BACKGROUND"];
 
 /**
+ * D-106 HOST-FIX (produksjonsherding, Defekt C): live host-kjøring viste et
+ * EKSAKT poengmessig uavgjort (132=132) mellom `gemma_local` og `openai` i
+ * AUTO-scoringen for et ordinært chat-purpose - siden `Array.prototype.sort`
+ * er stabil, ble uavgjortet FØR denne fiksen avgjort av registrerings-
+ * rekkefølgen i `providers`-Map-en (dvs. hvilken adapter `main.ts` happened
+ * to construct først) - IKKE av noen bevisst rutingpolicy. Det er nøyaktig
+ * det §35 "en modell kan aldri velge seg selv" (og mer generelt: ruting skal
+ * være DETERMINISTISK OG AUDITERBAR, aldri en bieffekt av array-konstruksjons-
+ * rekkefølge) forbyr.
+ *
+ * Fiksen: en LITEN, eksplisitt lokal-preferanse-tiebreak-bonus i AUTO/LOCAL-
+ * scoringen (`score()` sin default-gren). Verdien (0.5) er BEVISST mindre enn
+ * den minste mulige heltalls-differansen scoringsformelen for øvrig kan
+ * produsere (kvalitet/kost-faktorene er alltid heltall multiplisert med minst
+ * 10, latency bidrar med heltall 1-3) - bonusen kan derfor ALDRI vippe et
+ * reelt kvalitets-/kost-/latency-drevet utfall, KUN et eksakt matematisk
+ * uavgjort. Dette er en generalisering av den EKSISTERENDE D-79/D-80
+ * `localBonus`-ideen (i dag kun trigget av PRIVATE/BUSINESS_CONFIDENTIAL
+ * sensitivitet) til å også dekke det generelle "ordinært chat, ingen
+ * eksplisitt sensitivitet"-tilfellet - IKKE en ny, parallell mekanisme.
+ * Provider-nøytral med hensikt (matcher `LocalOpenAiCompatibleAdapter` sin
+ * "et vilkårlig OpenAI-kompatibelt lokalt endepunkt"-filosofi, D-79 §6) -
+ * ALDRI et hardkodet `provider === "gemma_local"`-navnesjekk i routeren.
+ */
+export const AUTO_LOCAL_TIE_BREAK_BONUS = 0.5;
+
+/**
  * D-80/D-81: sensitivitetsgate - kjøres FØR capability-filtrering.
  *
  * D-81 P0-SIKKERHETSFIKS: `hosted_free_tier`-providere (i dag KUN `gemma_hosted`)
@@ -262,6 +289,14 @@ export class AiRouter {
       );
     }
 
+    // D-106 HOST-FIX Defekt C: brukt til å avgjøre EKSTERNT (utenfor score()) om
+    // en gitt kandidat er kvalifisert for tiebreak-bonusen - samme betingelse
+    // som INNI score() sin default-gren, holdt i sync bevisst (ren funksjon,
+    // ingen skjult tilstand) slik at reason-logikken under kan skille et REELT
+    // uavgjort (bonusen avgjorde) fra et vanlig kvalitets-/kost-drevet valg.
+    const isAutoLocalTieBreakEligible = (p: ModelProfile): boolean =>
+      (mode === "AUTO" || mode === "LOCAL") && p.locality === "local";
+
     const score = (e: { profile: ModelProfile }): number => {
       const p = e.profile;
       const latency = p.latency_class === "fast" ? 3 : p.latency_class === "medium" ? 2 : 1;
@@ -292,7 +327,10 @@ export class AiRouter {
             (input.sensitivity === "PRIVATE" || input.sensitivity === "BUSINESS_CONFIDENTIAL")
               ? 1000
               : 0;
-          return p.quality_class * quality * 10 + cheap * cost * 10 + latency + localBonus;
+          // D-106 HOST-FIX Defekt C: se AUTO_LOCAL_TIE_BREAK_BONUS over - avgjør
+          // KUN eksakte heltalls-uavgjort deterministisk, aldri en reell forskjell.
+          const tieBreakBonus = isAutoLocalTieBreakEligible(p) ? AUTO_LOCAL_TIE_BREAK_BONUS : 0;
+          return p.quality_class * quality * 10 + cheap * cost * 10 + latency + localBonus + tieBreakBonus;
         }
       }
     };
@@ -312,6 +350,18 @@ export class AiRouter {
 
     const top = ranked[0] as (typeof ranked)[number];
     const idealTop = rankedIgnoringHealth[0] as (typeof ranked)[number];
+
+    // D-106 HOST-FIX Defekt C: fant AUTO_LOCAL_TIE_BREAK_BONUS faktisk et EKSAKT
+    // uavgjort? Sammenligner poengsummen UTEN tiebreak-bonusen for topp-kandidaten
+    // mot nest-beste - kun hvis de er identiske UTEN bonusen var bonusen reelt
+    // avgjørende (ALDRI rapportert som årsak for en genuin kvalitets-/kost-vinner).
+    const baseScore = (e: (typeof ranked)[number]): number =>
+      score(e) - (isAutoLocalTieBreakEligible(e.profile) ? AUTO_LOCAL_TIE_BREAK_BONUS : 0);
+    const localTieBreakDecisive =
+      ranked.length > 1 &&
+      isAutoLocalTieBreakEligible(top.profile) &&
+      baseScore(top) === baseScore(ranked[1] as (typeof ranked)[number]);
+
     let reason: RoutingReason;
     if (top.profile.provider !== idealTop.profile.provider) {
       reason = idealTop.state === "RATE_LIMITED" ? "RATE_LIMIT_FALLBACK" : "PRIMARY_UNHEALTHY";
@@ -336,6 +386,11 @@ export class AiRouter {
     } else if (input.paid_models_allowed === false && paidExcludedCount > 0) {
       // D-106: minst én ellers-kvalifisert betalt/sky-kandidat ble ekskludert av policyen.
       reason = "PAID_MODELS_DISABLED";
+    } else if (localTieBreakDecisive) {
+      // D-106 HOST-FIX Defekt C: AUTO_LOCAL_TIE_BREAK_BONUS avgjorde et reelt
+      // poengmessig uavgjort - se definisjonen over for hvorfor dette ALDRI kan
+      // overstyre en genuin kvalitets-/kost-forskjell.
+      reason = "LOCAL_PREFERRED_ON_TIE";
     } else if (mode === "FAST") {
       reason = "LOW_LATENCY";
     } else if (mode === "CHEAP" || (input.purpose && CHEAP_PURPOSES.includes(input.purpose))) {
