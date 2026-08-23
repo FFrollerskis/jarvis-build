@@ -388,3 +388,95 @@ describe("D-106 HOST-FIX 2: dynamisk Gemma-familie-oppløsning (default fem-fami
     expect(result.provenance.requested_members).toEqual(["anthropic", "gemma_hosted"]);
   });
 });
+
+/**
+ * D-106 HOST-FIX 3 (re-audit, 2026-08-23): `extractJson()` sin egen unit-test-
+ * dekning (`d106-council-json-extraction.test.ts`) beviser uthentingskontrakten
+ * isolert. Denne describe-blokken beviser i tillegg at DEN FAKTISKE Council-
+ * rundeprotokollen (runde 1, syntese) fungerer ENDE-TIL-ENDE når et medlems
+ * FULLE `ModelGateway.complete()`-svar er pakket i realistisk "messy"
+ * modell-formatering (markdown-fences, avgrenset fritekst) - nøyaktig den
+ * klassen live-observerte formater (`invalid_json_shape`/
+ * `council_synthesis_invalid`) som utløste Defekt D. Provider-nøytralt bevist
+ * (samme `ScriptedJsonAdapter`-mønster som resten av filen).
+ */
+describe("D-106 HOST-FIX 3: full Council-rundeprotokoll håndterer realistisk messy modell-formatering ende-til-ende", () => {
+  it("U: runde-1-svar pakket i \\`\\`\\`json-fence parses korrekt gjennom HELE pipelinen (medlemmet er IKKE unavailable)", async () => {
+    const providers = ["anthropic", "openai"].map(
+      (name) =>
+        new ScriptedJsonAdapter(name, (req) => {
+          const c = req.messages[0]?.content;
+          const text = typeof c === "string" ? c : "";
+          if (text.includes("MEDLEMMER SOM SVARTE")) return synthesisFor(["anthropic", "openai"], []);
+          return `Her er min vurdering:\n\n\`\`\`json\n${round1Answer(`konklusjon-${name}`)}\n\`\`\`\n\nLa meg vite om du har spørsmål.`;
+        })
+    );
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+    const council = new AiCouncil(gateway);
+    const result = await council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "openai"] });
+    expect(result.provenance.full_council).toBe(true);
+    expect(result.provenance.unavailable_members).toEqual([]);
+    expect(result.provenance.round1.map((r) => r.conclusion).sort()).toEqual(["konklusjon-anthropic", "konklusjon-openai"]);
+  });
+
+  it("V: syntese-svar pakket i generisk \\`\\`\\`-fence (uten 'json'-tag) parses korrekt", async () => {
+    const providers = ["anthropic", "openai"].map(
+      (name) =>
+        new ScriptedJsonAdapter(name, (req) => {
+          const c = req.messages[0]?.content;
+          const text = typeof c === "string" ? c : "";
+          if (text.includes("MEDLEMMER SOM SVARTE")) {
+            return `\`\`\`\n${synthesisFor(["anthropic", "openai"], [])}\n\`\`\``;
+          }
+          return round1Answer(`svar-${name}`);
+        })
+    );
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+    const council = new AiCouncil(gateway);
+    const result = await council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "openai"] });
+    expect(result.decision).toBe("Anbefalt beslutning basert på rådet");
+    expect(result.consensus_status).toBe("CONSENSUS");
+  });
+
+  it("W: runde-1-svar med avgrenset fritekst rundt JSON-objektet ('Her er svaret mitt: {...} Håper det hjelper!') parses korrekt", async () => {
+    const providers = ["anthropic", "openai"].map(
+      (name) =>
+        new ScriptedJsonAdapter(name, (req) => {
+          const c = req.messages[0]?.content;
+          const text = typeof c === "string" ? c : "";
+          if (text.includes("MEDLEMMER SOM SVARTE")) return synthesisFor(["anthropic", "openai"], []);
+          return `Basert på min analyse er konklusjonen: ${round1Answer(`konklusjon-${name}`)} - dette er mitt endelige svar.`;
+        })
+    );
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers });
+    const council = new AiCouncil(gateway);
+    const result = await council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "openai"] });
+    expect(result.provenance.full_council).toBe(true);
+    expect(result.provenance.round1.map((r) => r.conclusion).sort()).toEqual(["konklusjon-anthropic", "konklusjon-openai"]);
+  });
+
+  it("X: samme messy-fence-formaterte respons gir IDENTISK, repeterbart resultat over flere uavhengige kjøringer (determinisme, ikke flaky reproduksjon av Defekt D)", async () => {
+    const makeProviders = (): ModelProviderAdapter[] =>
+      ["anthropic", "openai"].map(
+        (name) =>
+          new ScriptedJsonAdapter(name, (req) => {
+            const c = req.messages[0]?.content;
+            const text = typeof c === "string" ? c : "";
+            if (text.includes("MEDLEMMER SOM SVARTE")) return `\`\`\`json\n${synthesisFor(["anthropic", "openai"], [])}\n\`\`\``;
+            return `\`\`\`json\n${round1Answer(`konklusjon-${name}`)}\n\`\`\``;
+          })
+      );
+    const results = await Promise.all(
+      Array.from({ length: 5 }, async () => {
+        const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: makeProviders() });
+        const council = new AiCouncil(gateway);
+        return council.run({ tenant_id: "t1", decision_context: "X?", members: ["anthropic", "openai"] });
+      })
+    );
+    for (const r of results) {
+      expect(r.provenance.full_council).toBe(true);
+      expect(r.consensus_status).toBe("CONSENSUS");
+      expect(r.provenance.round1.map((x) => x.conclusion).sort()).toEqual(["konklusjon-anthropic", "konklusjon-openai"]);
+    }
+  });
+});

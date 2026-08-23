@@ -2640,18 +2640,35 @@ workspace-suite re-kjørt ÉN gang etter alle fem fikser: `153/153`filer/`2344/2
 kjent flake denne kjøringen. `pnpm -w typecheck` 19/19 rent, `pnpm -w lint` rent. **ÆRLIG STATUS per fiks:**
 `GEMMA_URL_NORMALIZATION_FIXED=true`, `GEMMA_FIRST_DETERMINISTIC=true`,
 `REGISTRATION_ORDER_INDEPENDENT=true` (begge `FIXED_SUITE_VERIFIED`, ingen ny host-live-kjøring utført denne
-runden - se DELIVERY under), `COUNCIL_STRUCTURED_OUTPUT_FIXED=false` (tekst-parser strengt fikset,
-provider-native modus bevisst utelatt), `GEMINI_ADAPTER_FIXED=false`/`KIMI_ADAPTER_FIXED=false`/
-`GEMINI_LIVE_VERIFIED=false`/`KIMI_LIVE_VERIFIED=false` (diagnostikk-forbedring levert i stedet for en
-gjetning - ærlig uverifisert, IKKE stille markert løst), `SCRIPTED_ADAPTER_PRODUCTION_ELIGIBLE=false`,
-`LOCAL_ONLY_NO_REAL_PROVIDER_FAILS_HONESTLY=true`. DO NOT REGRESS-listen fra ordren bevist uendret av at hele
-den eksisterende, uendrede test-suiten (2344-40=2304 pre-eksisterende tester) forble grønn.
-`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. INGEN UA-6 startet. Implementert i ordrens eksakte
-rekkefølge (A->C->D->B->E->regresjon->docs), ÉN sammenhengende PR fra `origin/main`
+runden - se DELIVERY under), `COUNCIL_STRUCTURED_OUTPUT_FIXED=true` (re-audit 2026-08-23: kravet var en
+robust, deterministisk, provider-nøytral parser med streng skjemavalidering - IKKE nødvendigvis
+provider-native modus - og tekst-parseren oppfyller beviselig alle åtte kravklassene + skjema-strenghet +
+ingen fabrikasjon; 4 nye ende-til-ende-tester i `council.test.ts` (U-X) beviser DEN FAKTISKE
+rundeprotokollen, ikke bare `extractJson()` isolert, håndterer messy-fenced/bounded-prose-formatering
+repeterbart - provider-native modus forblir bevisst utelatt), `GEMINI_ADAPTER_FIXED=false`/
+`KIMI_ADAPTER_FIXED=false`/`GEMINI_LIVE_VERIFIED=false`/`KIMI_LIVE_VERIFIED=false` (diagnostikk-forbedring
+levert i stedet for en gjetning - ærlig uverifisert, IKKE stille markert løst). **Oppfølgingsrunde
+(samme dag, 2026-08-23):** en påfølgende ordre krevde en live diagnostisk probe med Tobias sin ekte
+konfigurerte nøkkel "via skjult miljøtilgang" - `env`-variabler og filsystemet ble eksplisitt undersøkt for
+alle fem leverandørnøkler (`GEMINI_API_KEY`/`KIMI_API_KEY`/`MOONSHOT_API_KEY`/`OPENAI_API_KEY`/
+`ANTHROPIC_API_KEY`) og enhver `.env`-fil - INGEN slik tilgang finnes i dette sandbox-miljøet (kun
+`.env.example`, ingen secrets), for NOEN av de fem AI Mesh-familiene. Dette er en strukturell
+miljøbegrensning, bekreftet ikke antatt - den ordrede live-proben er derfor umulig fra denne økten.
+Ytterligere dokumentasjonsforskning bekreftet Kimi/Moonshot sin flaggskipmodell `kimi-k3` som ekte og aktuell
+(tre uavhengige redaksjonelle kilder: Bloomberg/TechCrunch/Fortune), men en sekundær hypotese (default-modell
+`"kimi-latest"` mulig avviklet ~28. januar 2026) er KUN bekreftet av ikke-primære aggregatorer (primær
+Moonshot-dokumentasjon er nettverks-blokkert i dette miljøet) - beviskravet er IKKE oppfylt, så
+`KimiAdapter` sin default-modell er BEVISST IKKE endret. `GEMINI_404_ROOT_CAUSE=
+unverified_no_adapter_defect_found_credential_and_network_blocked`,
+`KIMI_404_ROOT_CAUSE=unverified_hypothesis_kimi_latest_possibly_deprecated_unconfirmed_against_primary_docs`.
+DO NOT REGRESS-listen fra ordren bevist uendret av at hele den eksisterende, uendrede test-suiten forble
+grønn. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. INGEN UA-6 startet. Implementert i ordrens
+eksakte rekkefølge (A->C->D->B->E->regresjon->docs), ÉN sammenhengende PR fra `origin/main`
 (`9d0323a5f70c8060befb5d786e9aecfc32bd6234`) - IKKE splittet i mikro-PR-er. Gjenstående, eksplisitt
-IKKE-stille-utelatt live-blokker: en ny host-live-akseptansekjøring ETTER merge for å bevise A/C sin
-faktiske live-effekt og fortsette B sin rot-årsak-jakt med ferske diagnostikk-markører. PR forblir draft,
-IKKE merget. Full detalj: D-106 HOST-FIX 3 i DECISIONS_AND_ASSUMPTIONS.md.
+IKKE-stille-utelatt live-blokker: ALL live-verifisering (samtlige fem familier, ikke bare Gemini/Kimi) krever
+at Tobias kjører en snever akseptanseskript-kjøring PÅ SIN EGEN maskin med sine egne nøkler - samme mønster
+som resten av D-106, STRUKTURELT umulig fra denne økten. PR forblir draft, IKKE merget. Full detalj: D-106
+HOST-FIX 3 (inkl. fortsettelse) i DECISIONS_AND_ASSUMPTIONS.md.
 
 **HOST-FIX (2026-08-22, D-41-korreksjon):** closeout-audit av PR #48 fant at `redeploy_container` sin
 sentinel-only-nektelse var en PERMANENT restriksjon på ekte produksjons-mutasjonskapasitet, ikke en

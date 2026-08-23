@@ -34,19 +34,34 @@ levert TRYGG feilsøkingsdiagnostikk i stedet (`classifyHttpStatus()` nytt
 `PAID_MODELS_DISABLED_PROVIDERS_INVOKED=...,scripted:true` - fjernet HELT
 fra `main.ts` sin produksjons-`ModelGateway` (`worker-main.ts` registrerte
 den aldri). `paid_models_allowed=false` + ingen ekte lokal provider feiler
-nå ÆRLIG med `PaidModelsDisabledError`. **40 nye tester** (2 nye filer:
+nå ÆRLIG med `PaidModelsDisabledError`. **44 nye tester** (2 nye filer:
 `d106-council-json-extraction.test.ts` 14, `d106-scripted-adapter-
-production-wiring.test.ts` 3; 2 utvidede: `conformance.test.ts` +16,
-`d106-router-extensions.test.ts` +7). Full workspace-suite:
-`153/153`filer/`2344/2344`tester, INGEN feil. `pnpm -w typecheck` 19/19
-rent, `pnpm -w lint` rent. `SCRIPTED_ADAPTER_PRODUCTION_ELIGIBLE=false`,
-`LOCAL_ONLY_NO_REAL_PROVIDER_FAILS_HONESTLY=true`,
-`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Gjenstående, IKKE
-stille utelatt live-blokker: en ny host-live-akseptansekjøring ETTER merge
-for å bevise A/C sin faktiske live-effekt og fortsette B sin rot-årsak-jakt.
-Se D-106 HOST-FIX 3 i `DECISIONS_AND_ASSUMPTIONS.md` for full detalj.
-Branch `claude/d106-production-hardening`, ny draft PR fra `main`, IKKE
-merget. INGEN UA-6.
+production-wiring.test.ts` 3; 3 utvidede: `conformance.test.ts` +16,
+`d106-router-extensions.test.ts` +7, `council.test.ts` +4). Full
+workspace-suite: INGEN feil. `pnpm -w typecheck` 19/19 rent, `pnpm -w lint`
+rent. `SCRIPTED_ADAPTER_PRODUCTION_ELIGIBLE=false`,
+`LOCAL_ONLY_NO_REAL_PROVIDER_FAILS_HONESTLY=true`. **Oppfølging samme dag:**
+en påfølgende ordre ba om re-audit av Council-strukturert-output + en live
+diagnostisk probe med Tobias sin ekte nøkkel. Re-audit: kravet var en robust
+provider-nøytral parser (ikke nødvendigvis provider-native modus) -
+`COUNCIL_STRUCTURED_OUTPUT_FIXED=true` (4 nye ende-til-ende-tester i
+`council.test.ts` U-X beviser DEN FAKTISKE rundeprotokollen håndterer
+messy-fenced/bounded-prose-modellsvar repeterbart). Live probe: `env`/
+filsystem eksplisitt undersøkt - INGEN leverandørnøkler (for NOEN av de fem
+AI Mesh-familiene, ikke bare Gemini/Kimi) finnes i dette sandbox-miljøet -
+en strukturell miljøbegrensning, bekreftet ikke antatt. Videre forskning
+bekreftet Kimi sin `kimi-k3` som ekte/aktuell flaggskipmodell (uavhengige
+kilder), men en hypotese om at default-modellen `"kimi-latest"` kan være
+avviklet er KUN bekreftet av ikke-primære aggregatorer (primær Moonshot-
+dokumentasjon nettverks-blokkert her) - IKKE tilstrekkelig bevis for en
+kodeendring, så `KimiAdapter` sin default er BEVISST IKKE endret.
+`GEMINI_LIVE_VERIFIED=false`/`KIMI_LIVE_VERIFIED=false` uendret - ALL
+live-verifisering (samtlige fem familier) krever at Tobias kjører en snever
+akseptanseskript-kjøring på sin egen maskin med sine egne nøkler, samme
+mønster som resten av D-106. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`
+uendret. Se D-106 HOST-FIX 3 (inkl. fortsettelse) i
+`DECISIONS_AND_ASSUMPTIONS.md` for full detalj. Branch
+`claude/d106-production-hardening`, PR #53 (draft, IKKE merget). INGEN UA-6.
 
 ## Runden før det
 
