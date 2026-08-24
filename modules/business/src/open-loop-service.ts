@@ -391,6 +391,63 @@ export class OpenLoopService {
     });
   }
 
+  /**
+   * UA-6 Finance & Spend Integrity Gateway (D-107) §"Reuse OpenLoopService
+   * - no second task/reminder engine": deterministisk deteksjon direkte
+   * mot `payment_intents` (REN SQL, IKKE en pakkeavhengighet -
+   * `modules/business` kan ALDRI avhenge av `modules/finance`, samme
+   * presedens som `detectSpendAnomalies()` mot `marketing_spend_events`).
+   * To uavhengige, deterministiske betingelser (ALDRI AI-inferens - Q-26-
+   * grensen): (1) en intensjon har ETT ELLER FLERE persisterte
+   * `anomaly_flags` (satt av `FinanceService` ved opprettelse - manglende
+   * vendor-/motkonto-referanse) OG er FORTSATT i en ikke-terminal tilstand
+   * (draft/submitted/provider_acknowledged - en avviks-flagget intensjon
+   * som ALLEREDE er oppgjort/kansellert/feilet trenger ingen ny open-loop);
+   * (2) en intensjon er eksplisitt avstemt som `mismatched`
+   * (`FinanceService.reconcilePaymentIntent(matched=false)`).
+   */
+  async detectPaymentAnomalies(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT payment_intent_id, purpose, vendor_name, amount_ore, currency, state, reconciliation_state, anomaly_flags, owner_person_id
+         FROM payment_intents
+         WHERE tenant_id = $1
+           AND (
+             (jsonb_array_length(anomaly_flags) > 0 AND state IN ('draft','submitted','provider_acknowledged'))
+             OR reconciliation_state = 'mismatched'
+           )`,
+        [tenantId]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as Array<{
+        payment_intent_id: string; purpose: string; vendor_name: string; amount_ore: string; currency: string;
+        state: string; reconciliation_state: string; anomaly_flags: string[]; owner_person_id: string | null;
+      }>) {
+        const isMismatch = row.reconciliation_state === "mismatched";
+        const loopType = isMismatch ? "payment_intent_reconciliation_mismatch" : "payment_intent_anomaly";
+        const detectionKey = `${loopType}:${row.payment_intent_id}`;
+        currentKeys.push(detectionKey);
+        const reason = isMismatch
+          ? `Betalingsintensjon "${row.purpose}" (${row.amount_ore} ${row.currency} til ${row.vendor_name}) er avstemt som IKKE samsvarende med Fiken sin bokførte post`
+          : `Betalingsintensjon "${row.purpose}" (${row.amount_ore} ${row.currency} til ${row.vendor_name}) har uløste avvik: ${row.anomaly_flags.join(", ")}`;
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null, payment_intent_id: row.payment_intent_id,
+          loop_type: loopType, detection_key: detectionKey, reason,
+          next_action: isMismatch ? `Undersøk avstemmingsavvik for betalingsintensjon ${row.payment_intent_id}` : `Løs avvik før innsending for betalingsintensjon ${row.payment_intent_id}`,
+          priority: isMismatch ? "high" : "normal", owner_person_id: row.owner_person_id, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolvedAnomaly = await autoResolveStale(client, tenantId, "payment_intent_anomaly", currentKeys.filter((k) => k.startsWith("payment_intent_anomaly:")));
+      const autoResolvedMismatch = await autoResolveStale(client, tenantId, "payment_intent_reconciliation_mismatch", currentKeys.filter((k) => k.startsWith("payment_intent_reconciliation_mismatch:")));
+      return { detected, updated, auto_resolved: autoResolvedAnomaly + autoResolvedMismatch };
+    });
+  }
+
   /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
   async runSweep(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     const results = [
@@ -415,7 +472,11 @@ export class OpenLoopService {
       // UA-4 Native Jarvis Growth Core (D-74): samme prinsipp - regelen
       // kjøres i DENNE sveipen, krever `marketing_campaigns`/
       // `marketing_spend_events` (027_growth.sql).
-      await this.detectSpendAnomalies(tenantId, memorySpace)
+      await this.detectSpendAnomalies(tenantId, memorySpace),
+      // UA-6 Finance & Spend Integrity Gateway (D-107): samme prinsipp -
+      // regelen kjøres i DENNE sveipen, krever `payment_intents`
+      // (038_finance.sql).
+      await this.detectPaymentAnomalies(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
@@ -553,6 +614,8 @@ interface UpsertOpenLoopInput {
   ticket_id: string | null;
   contract_id: string | null;
   campaign_id: string | null;
+  /** UA-6 Finance & Spend Integrity Gateway (D-107): peker til `payment_intents`, null/utelatt for ikke-finans-loops. Valgfri (default null) for aa unngaa aa roere de 6 eksisterende kallstedene. */
+  payment_intent_id?: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -566,8 +629,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
   const { rows } = await client.query(
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
-        ticket_id, contract_id, campaign_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        ticket_id, contract_id, campaign_id, payment_intent_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -580,7 +643,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
-      input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
+      input.payment_intent_id ?? null, input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );
   return (rows[0] as { inserted: boolean }).inserted ? "inserted" : "updated";

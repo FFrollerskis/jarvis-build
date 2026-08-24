@@ -1,5 +1,53 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-24 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY —
+FØRSTE vertikale slice startet på eksplisitt ordre fra Tobias: Payment/Spend
+Intent-domene + Fiken (regnskap NO) som P0-leverandør — `UA6_STARTED=true`,
+`UA6_COMPLETE=false`.**)
+
+**Utfall:** UA-6 rekonstruert fra repository-sannhet (masterplan-dokumentet,
+ikke samtalehukommelse). D-64-porten kjørt FØRST: `SOR=
+HYBRID_WITH_CLEAR_AUTHORITY` (Jarvis eier Payment/Spend Intent-domenet,
+idempotens, anomalideteksjon, avstemming, nødbryter, audit; Fiken eier det
+lovpålagte bokførte regnskapet), `CORE_DEPENDENCY_DECISION_REQUIRED=false`
+(Fiken masterplan-navngitt P0, ikke et bekvemmelighetsvalg). D-41-audit av
+Fiken sitt API: primærkilden `api.fiken.no` var `EGRESS_BLOCKED`, falt
+eksplisitt tilbake til Fikens egen swagger.json speilet i en GitHub-
+community-klient (lavere tillitsnivå, merket som sådan) — `POST /purchases`
+BEVISST IKKE implementert (intet pålitelig skjema kunne verifiseres, D-41
+nekter gjetting). Bygget: migrasjon `038_finance.sql`, ny pakke
+`@jarvis/finance` (types/state-machine/`FikenTransport`/`FinanceService`/
+`FinanceTransport`), 10 `finance.*` ToolGateway-handlinger (risikoklasse D
+for `submit_payment_intent`/nødbryter), `OpenLoopService.
+detectPaymentAnomalies()`, Q-20 erasure-plan utvidet, `apps/api` wiret.
+**Tre ekte produksjonsbugs funnet og fikset via faktisk testkjøring** (ikke
+kodegjennomgang): RLS-kontekst-brudd på `finance_kill_switch`, `bigint`→
+streng pg-koersjonsbug i Fiken-postering, og en kryss-tilkoblings FK-
+radlås-selvlåsing (nøstet transaksjon ventet på en radlås den ytre,
+JS-suspenderte transaksjonen aldri ville sluppet — fikset ved å skrive
+hendelsen på samme transaksjon og returnere et diskriminert resultat i
+stedet for å kaste inne i transaksjonen). 53 nye finance-domenetester + 9
+nye open-loop-tester. **Full workspace-suite: 160 filer/2456 tester grønt**
+(opp fra 159/2445 ved forrige D-106-closeout, ingen regresjon — én isolert
+kjent ECONNREFUSED-klasse hook-timeout-flake på `business-brief.test.ts`
+under samtidig kjøring ble reprodusert som IKKE finance-relatert og bekreftet
+grønn i isolert kjøring), `pnpm -w typecheck`/`pnpm -w lint` rent.
+Host-akseptanse-infrastruktur bygget (`fiken-live-host-run.ts`→
+`fiken-live.ts`→`lib/fiken-live-lib.ts`, samme tre-lags mønster som
+Google Ads) — beviser HELE JARVIS_CANONICAL-domenet uavhengig av Fiken-
+credentials; Fiken har INGEN dokumentert sandbox, så et ekte Fiken-
+skriveforsøk gjøres ALDRI av scriptet selv med opt-in satt.
+`FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` (avventer Tobias sin
+host-kjøring), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. Egen
+branch fra `origin/main` (`claude/ua6-finance-core-fiken`), draft-PR
+opprettes i denne økten, IKKE merget. **Denne sliceen bygger KUN Fiken/P0**
+— bank/åpen bank, Stripe, Vipps (P1) og programmerbart kort/wallet (P2) er
+IKKE startet; `UA6_COMPLETE` forblir `false` til flere leverandørspor og
+alle fem akseptansekriterier er dekket. Full detalj: D-107 i
+`DECISIONS_AND_ASSUMPTIONS.md`.
+
+---
+
 **Oppdatert:** 2026-08-24 (**D-106 COUNCIL RELIABILITY CLOSEOUT: PR #55
 MERGET, ekte fem-familie host-akseptanse BESTÅTT — `D106_COMPLETE=true`.**)
 

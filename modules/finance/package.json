@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/finance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-6 Finance & Spend Integrity Gateway - forste slice (D-107): JARVIS_CANONICAL Payment/Spend Intent-domene (idempotens, deterministisk avviksdeteksjon, eier-kontrollert kill switch) + Fiken (P0 regnskapsconnector, HYBRID_WITH_CLEAR_AUTHORITY - Fiken forblir bokforing-av-post).",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

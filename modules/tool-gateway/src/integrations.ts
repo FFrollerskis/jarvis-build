@@ -1547,6 +1547,102 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
       preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("start_container")
+    },
+    // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107):
+    // provider-nøytralt `finance.*`-namespace. `submit_payment_intent` er
+    // klasse D (den ENESTE handlingen som faktisk poster en ekte
+    // regnskapspost i Tobias sitt virkelige Fiken-selskap - INGEN bygget
+    // automatisk reversering denne sliceen, samme forsiktighetsnivå som
+    // `mail.send`/`docker.stop_container`). `enable_kill_switch`/
+    // `disable_kill_switch` er ogsa klasse D (eier-sovereign kritisk
+    // kontroll, D-41: INGEN kunstig godkjenningssperre for eieren selv,
+    // men risikoKLASSEN styrer likevel HVORDAN - preflight/audit -
+    // uendret). `create_payment_intent`/`settle_payment_intent`/
+    // `cancel_payment_intent`/`reconcile_payment_intent` er klasse B (REN
+    // Jarvis-intern tilstand/idempotens/avstemming - ALDRI en
+    // leverandørhandling).
+    {
+      tool_id: "finance", action: "create_payment_intent", description: "Opprett en betalingsintensjon (idempotent - samme idempotency_key returnerer ALLTID samme intensjon, aldri en duplikat)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), idempotency_key: z.string(), purpose: z.string(),
+        amount_ore: z.number().int().positive(), currency: z.string().optional(), vendor_name: z.string(),
+        vendor_provider_ref: z.string().optional(), account_code: z.string(), counter_account_code: z.string().optional(),
+        owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true,
+      rollback_procedure: "cancel_payment_intent (kun gyldig fra draft - ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "get_payment_intent", description: "Les én betalingsintensjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "list_payment_intents", description: "List betalingsintensjoner, valgfritt filtrert på state",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), state: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "submit_payment_intent",
+      description: "Send en betalingsintensjon til Fiken (postering av en ekte regnskapspost) - fail-closed mot kill switch/manglende vendor-/motkonto FØR noe providerkall, idempotent no-op ved gjentatt kall på en allerede innsendt intensjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "D", scopes: ["finance.execute"], reversible: false,
+      rollback_procedure: "ingen automatisk reversering bygget denne sliceen - krever en manuell korrigerende journalpost direkte i Fiken",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_FIKEN_REFRESH_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "settle_payment_intent", description: "Marker en innsendt/bekreftet intensjon som endelig oppgjort (f.eks. etter manuell bankavstemming) - ren intern disposisjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false,
+      rollback_procedure: "ingen (oppgjort er en endelig disposisjon som speiler en allerede skjedd ekstern hendelse)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "cancel_payment_intent", description: "Kanseller en betalingsintensjon FØR den er innsendt (kun gyldig fra draft - ingen provider-side-effekt)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false,
+      rollback_procedure: "ingen (kansellering er en endelig disposisjon for en ALDRI innsendt intensjon)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "reconcile_payment_intent", description: "Marker deterministisk avstemmingsresultat (matched/mismatched) mot Fiken sin bokførte post - mismatched plukkes opp av OpenLoopService",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), matched: z.boolean(), actor_person_id: z.string().optional(), note: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true,
+      rollback_procedure: "reconcile_payment_intent på nytt med korrigert matched-verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "enable_kill_switch", description: "Aktiver finans-nødbryteren (akseptansekriterium 5) - stopper ALLE nye submit_payment_intent-forsøk umiddelbart, deterministisk håndhevet i FinanceService",
+      input_schema: record({ tenant_id: z.string(), actor_person_id: z.string(), reason: z.string() }),
+      capability_class: "D", scopes: ["finance.admin"], reversible: true,
+      rollback_procedure: "disable_kill_switch", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "disable_kill_switch", description: "Deaktiver finans-nødbryteren",
+      input_schema: record({ tenant_id: z.string(), actor_person_id: z.string() }),
+      capability_class: "D", scopes: ["finance.admin"], reversible: true,
+      rollback_procedure: "enable_kill_switch", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "get_kill_switch", description: "Les gjeldende finans-nødbryter-tilstand for tenanten",
+      input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
     }
   ];
 }

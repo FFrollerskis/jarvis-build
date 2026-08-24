@@ -154,6 +154,19 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-6 Finance & Spend Integrity Gateway (D-107, 038_finance.sql):
+  // finans-domenet er KUNDEDATA (samme klasse som contracts/marketing_*),
+  // registreres her - SAMME FK-lærdom som growth-blokken over. En
+  // betalings-tilknyttet open-loop slettes FØRST, SNEVERT avgrenset til
+  // `payment_intent_id IS NOT NULL` (rører aldri andre loop_type-er).
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND payment_intent_id IS NOT NULL", tv)
+  );
+  // `payment_intent_events` har en FK -> payment_intents - MÅ slettes FØR.
+  add(result, "payment_intent_events", await run(client, mode, "payment_intent_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "payment_intents", await run(client, mode, "payment_intents", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
   // `business_contacts` er FORTSATT IKKE registrert i denne erasure-planen
@@ -317,6 +330,11 @@ export async function planTenant(client: pg.PoolClient, mode: Mode, tenantId: st
   add(combined, "messages", await run(client, mode, "messages", "tenant_id = $1", [tenantId]));
   add(combined, "sessions", await run(client, mode, "sessions", "tenant_id = $1", [tenantId]));
   add(combined, "artifacts", await run(client, mode, "artifacts", "tenant_id = $1", [tenantId]));
+  // UA-6 Finance & Spend Integrity Gateway (D-107): `finance_kill_switch`
+  // er IKKE space-skopet (ETT rad per tenant, samme prinsipp som
+  // `messages`/`sessions`/`artifacts` over) - registreres derfor her, ikke
+  // i `planMemorySpaceInContext()`.
+  add(combined, "finance_kill_switch", await run(client, mode, "finance_kill_switch", "tenant_id = $1", [tenantId]));
   return combined;
 }
 
