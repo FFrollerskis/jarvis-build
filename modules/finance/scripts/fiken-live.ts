@@ -32,7 +32,7 @@ import { EnvSecretProvider, FallbackSecretProvider, ToolGateway, firstWaveTools 
 import { BusinessInternalSecretProvider } from "@jarvis/business";
 import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "../src/index.ts";
 import { FikenTransport } from "../src/fiken-transport.ts";
-import { checkRequiredEnv, computeHardFail, evaluateSecretSafety, isLiveWriteOptedIn, type Verdict } from "./lib/fiken-live-lib.ts";
+import { checkRequiredEnv, computeCanonicalDomainVerified, computeFikenLiveVerified, computeHardFail, evaluateSecretSafety, isLiveWriteOptedIn, type Verdict } from "./lib/fiken-live-lib.ts";
 
 const results: Record<string, Verdict> = {
   q21_runtime_role_safe: "NOT_RUN",
@@ -284,13 +284,29 @@ function finish(blockedByRuntimeRole: boolean): void {
   for (const [key, value] of Object.entries(results)) log(`${key}=${value}`);
   for (const [key, value] of Object.entries(diagnostics)) log(`${key}=${value}`);
 
-  const hardFail = blockedByRuntimeRole || computeHardFail(results);
+  // D-107 HOST-FIX #2: TO ADSKILTE verifikasjonsdomener (se fiken-live-lib.ts) -
+  // JARVIS_CANONICAL-domenet avledes KUN av de credential-uavhengige
+  // domenegatene; Fiken-leverandørstatus og manglende credentials kan ALDRI
+  // trekke det false. hard_fail er en EKTE produkt-/runner-feil, aldri en
+  // ventetilstand (manglende credentials).
   const fikenCredentialsConfigured = results.finance_live_env_safe === "PASS";
-  const fikenLiveVerified = fikenCredentialsConfigured && results.finance_live_provider_auth === "PASS" && results.finance_live_provider_read === "PASS";
+  const providerLiveBlockedNoCredentials = results.finance_live_env_safe === "BLOCKED_NO_CREDENTIALS";
+  const canonicalDomainVerified = computeCanonicalDomainVerified(results);
+  const fikenLiveVerified = computeFikenLiveVerified({ credentialsConfigured: fikenCredentialsConfigured, results });
+  const hardFail = computeHardFail({ blockedByRuntimeRole, credentialsConfigured: fikenCredentialsConfigured, results });
 
-  log(`\nrun_id=${runId} fiken_credentials_configured=${fikenCredentialsConfigured} FIKEN_LIVE_VERIFIED=${fikenLiveVerified} JARVIS_CANONICAL_DOMAIN_VERIFIED=${!hardFail} hard_fail=${hardFail}`);
-  if (!fikenCredentialsConfigured && !blockedByRuntimeRole) {
-    log("Fiken-credentials er IKKE konfigurert ennå - dette er FORVENTET FØR Tobias fullfører OAuth-oppsettet (se .env.example). Payment/Spend Intent-domenet (JARVIS_CANONICAL) er likevel FULLT ut bevist mot ekte Postgres over.");
+  log(`\nrun_id=${runId}`);
+  log(`JARVIS_CANONICAL_DOMAIN_VERIFIED=${canonicalDomainVerified}`);
+  log(`FIKEN_LIVE_VERIFIED=${fikenLiveVerified}`);
+  log(`PROVIDER_LIVE_BLOCKED_NO_CREDENTIALS=${providerLiveBlockedNoCredentials}`);
+  log(`fiken_credentials_configured=${fikenCredentialsConfigured}`);
+  log(`hard_fail=${hardFail}`);
+  if (providerLiveBlockedNoCredentials && !blockedByRuntimeRole) {
+    log(
+      canonicalDomainVerified
+        ? "Fiken-credentials er IKKE konfigurert ennå - FORVENTET FØR Tobias fullfører OAuth-oppsettet (se .env.example). Payment/Spend Intent-domenet (JARVIS_CANONICAL) ER fullt ut bevist mot ekte Postgres over - kun leverandør-live-verifiseringen gjenstår."
+        : "Fiken-credentials er IKKE konfigurert (forventet), MEN ett eller flere JARVIS_CANONICAL-domenegater besto IKKE - se markørene over. Domenet er IKKE bevist denne kjøringen."
+    );
   }
   if (hardFail) process.exitCode = 1;
 }

@@ -29,19 +29,39 @@ export const REQUIRED_ENV_VARS = [
  */
 export const LIVE_WRITE_OPT_IN_ENV_VAR = "JARVIS_FIKEN_HOST_ACCEPTANCE_ALLOW_LIVE_WRITE";
 
-export const HARD_REQUIRED_MARKERS = [
-  "finance_live_env_safe",
+/**
+ * D-107 HOST-FIX #2 (aggregerings-splitt): TO ADSKILTE verifikasjonsdomener,
+ * ALDRI koblet i én boolean.
+ *
+ * 1. JARVIS_CANONICAL-domenet (Payment/Spend Intent-kjernen Jarvis selv
+ *    eier): NØYAKTIG disse markørene, ALLE credential-UAVHENGIGE. Manglende
+ *    Fiken-credentials kan ALDRI tvinge dette domenet til "ikke bevist".
+ * 2. Fiken-leverandøren (EXTERNAL_CANONICAL): provider-markørene under +
+ *    `finance_live_env_safe`. Uten credentials forblir de ærlig
+ *    NOT_RUN/BLOCKED_NO_CREDENTIALS - det er FORVENTET ventetilstand
+ *    (samme semantikk som google-ads-live-lib sin computeHardFail), IKKE
+ *    en runner-feil.
+ *
+ * Den opprinnelige D-107-runneren la `finance_live_env_safe` og
+ * `finance_live_secret_safety` i ETT felles hard-krav-sett og avledet
+ * JARVIS_CANONICAL_DOMAIN_VERIFIED som `!hard_fail` - dermed tvang manglende
+ * credentials (env_safe=BLOCKED_NO_CREDENTIALS, secret_safety=NO_DATA) hele
+ * kjøringen til hard_fail=true SELV NÅR alle domenegatene besto, i direkte
+ * selvmotsigelse med runnerens egen "domenet er likevel FULLT ut bevist"-
+ * logglinje. Denne splitten retter det.
+ */
+export const CANONICAL_DOMAIN_MARKERS = [
+  "q21_runtime_role_safe",
   "finance_live_db_idempotency",
   "finance_live_db_validation",
   "finance_live_db_kill_switch",
   "finance_live_db_state_machine",
   "finance_live_db_reconciliation",
   "finance_live_db_tenant_isolation",
-  "finance_live_secret_safety",
   "finance_live_cleanup"
 ] as const;
 /** Reachability/skriving mot en EKTE Fiken-konto er BEVISST NO_DATA-kvalifisert - IKKE en implementasjonsfeil dersom credentials/opt-in mangler. */
-export const NO_DATA_ELIGIBLE_MARKERS = ["finance_live_provider_auth", "finance_live_provider_read", "finance_live_provider_write"] as const;
+export const PROVIDER_MARKERS = ["finance_live_provider_auth", "finance_live_provider_read", "finance_live_provider_write"] as const;
 
 /** Ren tilstedeværelses-sjekk - ALDRI leser/returnerer den faktiske verdien, kun navnet på det som mangler. */
 export function checkRequiredEnv(env: Record<string, string | undefined>): { configured: boolean; missing: string[] } {
@@ -65,7 +85,48 @@ export function evaluateSecretSafety(logLines: readonly string[], secretValues: 
   return "PASS";
 }
 
-/** Hard-fail = kjøringen bør avslutte med ikke-null exit code - kun HARD_REQUIRED-markørene teller (MÅ være PASS), NO_DATA-kvalifiserte markører (manglende credentials/opt-in) gjør ALDRI runneren til en feil. */
-export function computeHardFail(results: Record<string, Verdict>): boolean {
-  return HARD_REQUIRED_MARKERS.some((marker) => results[marker] !== "PASS");
+/** JARVIS_CANONICAL-domenet er bevist HVIS OG BARE HVIS samtlige credential-uavhengige domenemarkører er PASS - Fiken-credentials inngår ALDRI i denne beregningen. */
+export function computeCanonicalDomainVerified(results: Record<string, Verdict>): boolean {
+  return CANONICAL_DOMAIN_MARKERS.every((marker) => results[marker] === "PASS");
+}
+
+export interface ProviderVerificationInput {
+  credentialsConfigured: boolean;
+  results: Record<string, Verdict>;
+}
+
+/**
+ * FIKEN_LIVE_VERIFIED = KUN ekte, evidensbasert leverandørsuksess
+ * (credentials konfigurert + ekte auth + ekte lesing mot api.fiken.no).
+ * Skriving er BEVISST utenfor denne sliceens verifisering (ingen sandbox
+ * finnes - se LIVE_WRITE_OPT_IN_ENV_VAR over), så `provider_write` inngår
+ * ikke; den forblir ærlig NO_DATA/NOT_RUN i output uansett.
+ */
+export function computeFikenLiveVerified(input: ProviderVerificationInput): boolean {
+  return input.credentialsConfigured && input.results["finance_live_provider_auth"] === "PASS" && input.results["finance_live_provider_read"] === "PASS";
+}
+
+export interface HardFailInput {
+  blockedByRuntimeRole: boolean;
+  credentialsConfigured: boolean;
+  results: Record<string, Verdict>;
+}
+
+/**
+ * Hard-fail = kjøringen bør avslutte med ikke-null exit code, og betyr en
+ * EKTE produkt-/runner-feil - ALDRI en ventetilstand:
+ * - Q-21-regresjon (utrygg runtime-DB-rolle) er alltid hard_fail.
+ * - Ett eller flere JARVIS_CANONICAL-domenegater ikke PASS er hard_fail.
+ * - En FAKTISK secret-lekkasje i loggene (secret_safety=FAIL) er hard_fail;
+ *   NO_DATA (ingen secrets å sjekke) er det ALDRI.
+ * - Provider-feil teller KUN når credentials faktisk ER konfigurert (samme
+ *   presedens som google-ads-live-lib): manglende credentials er en
+ *   FORVENTET tilstand FØR Tobias' OAuth-oppsett, aldri en feil.
+ */
+export function computeHardFail(input: HardFailInput): boolean {
+  if (input.blockedByRuntimeRole) return true;
+  if (!computeCanonicalDomainVerified(input.results)) return true;
+  if (input.results["finance_live_secret_safety"] === "FAIL") return true;
+  if (input.credentialsConfigured && PROVIDER_MARKERS.some((marker) => input.results[marker] === "FAIL")) return true;
+  return false;
 }
