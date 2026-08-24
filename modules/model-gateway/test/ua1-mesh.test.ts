@@ -79,6 +79,14 @@ describe("UA-1 capability registry (§7)", () => {
     expect(registry.get("kimi")?.capabilities).not.toContain("vision");
     expect(registry.get("ollama")?.capabilities).not.toContain("vision");
   });
+
+  it("D-106 GEMINI MODEL MIGRATION: registry-metadata for gemini oppdatert til gemini-3.6-flash, provider-navn/capabilities UENDRET (routing er navnebasert, ikke modellstreng-basert)", () => {
+    const registry = new CapabilityRegistry();
+    const gemini = registry.get("gemini");
+    expect(gemini?.provider).toBe("gemini");
+    expect(gemini?.model).toBe("gemini-3.6-flash");
+    expect(gemini?.capabilities).toEqual(["text", "reasoning", "structured_output"]);
+  });
 });
 
 describe("UA-1 pricing (§14)", () => {

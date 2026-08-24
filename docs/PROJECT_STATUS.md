@@ -1,5 +1,83 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-23 (**D-106 GEMINI MODEL MIGRATION (gemini-2.5-flash →
+gemini-3.6-flash) — PR #53 er merget (samme dag); DETTE er en NY, egen PR fra
+`origin/main`. IKKE merget ennå.**) PR #53 sin klassifisering
+(`GEMINI_EXTERNAL_BLOCKER=true`, "ingen kodedefekt funnet") er nå
+OPPDATERT av en ny, ekte host-diagnostikk: Tobias sin direkte autentiserte
+probe mot `/v1beta/models/gemini-2.5-flash:generateContent` (samme ekte
+`GEMINI_API_KEY` som allerede var konfigurert) returnerte 404 med Google sin
+EGEN feilmelding om at modellen ikke lenger er tilgjengelig for nye brukere,
+med eksplisitt henvisning til `models/gemini-3.6-flash` - selv om modellen
+FORTSATT var listet i `/v1beta/models`-katalogen for nøkkelen (samme
+tilsynelatende motsigelse som forrige rundes diagnostikk fanget, men nå med
+den manglende brikken: en EKSPLISITT migreringsbeskjed fra Google selv, ikke
+bare en katalog/invoke-uoverensstemmelse). Tobias sin direkte probe mot
+`gemini-3.6-flash` lyktes (`GEMINI_36_FLASH_LIVE=true`). Uavhengig WebSearch
+(direkte `WebFetch` mot `ai.google.dev`/`deepmind.google`/`blog.google` var
+nettverks-blokkert i denne økten - samme strukturelle begrensning som
+tidligere rammet `platform.moonshot.ai` for Kimi-fiksen) bekreftet
+`gemini-3.6-flash` som en ekte Google DeepMind-modell (lansert 21. juli
+2026, 1 048 576 tokens kontekst, 65 536 output-tokens, function
+calling/structured output/thinking/caching), og at `gemini-2.5-flash` faktisk
+er under utfasing. `GEMINI_25_FLASH_404_ROOT_CAUSE_CONFIRMED=true`,
+`GEMINI_CODE_DEFECT_FOUND=true` (defekten var en utdatert default, IKKE en
+URL-/auth-/adapter-defekt), `GEMINI_EXTERNAL_BLOCKER=false`.
+
+**Fiks (samme D-41-disiplin som `kimi-k3`):** `GeminiAdapter` sin default
+(`gemini.ts`) endret til `gemini-3.6-flash`; `JARVIS_GEMINI_MODEL`-
+miljøvariabelen (allerede eksisterende override-mekanisme, nå dokumentert i
+`.env.example`) vinner fortsatt alltid over defaulten. `capability-registry.ts`
+sin `gemini`-profil oppdatert (`model`, `context_tokens: 1_048_576` - eksakt
+verifisert tall) - `capabilities`-listen er BEVISST UENDRET
+(`["text","reasoning","structured_output"]`): `gemini-3.6-flash` støtter
+reelt function calling/vision/thinking hos LEVERANDØREN, men `GeminiAdapter`
+bruker fortsatt `textOnly()` og har ingen tool-calling-håndtering wired -
+samme D-43 §3-regel som resten av registeret (et capability-flagg
+reflekterer alltid faktisk wiret adapter-støtte, aldri et leverandør-faktum
+alene). `pricing.ts` sin `gemini`-rate oppdatert (1,58/7,88 øre per 1k
+input/output, 0,16 øre cache-rabatt, `pricing_mode: "PAID"`,
+`pricing_verified_at: "2026-08-23"`) - den gamle raten (0,4/2,7 øre) var
+kalibrert for 2.5-flash og ville systematisk under-sporet kostnad for
+3.6-flash (~5x input, ~2,9x output dyrere).
+
+**Testdekning:** `conformance.test.ts` sin gamle "modellnavnet er UENDRET"-
+test (som eksplisitt dokumenterte at forrige runde IKKE fant bevist
+rot-årsak) erstattet med en test som bekrefter NY default + 3 nye tester
+(eksplisitt override vinner, `JARVIS_GEMINI_MODEL`-override vinner, kanonisk
+endepunkt/happy-path med default-modellen - ÉN fetch, riktig URL, ikke-tomt
+svar). +1 ny test i `ua1-mesh.test.ts` som bekrefter registry-metadata uten å
+røre capabilities/provider-navn (ruting er navnebasert, ikke
+modellstreng-basert - forced-provider-override og Council sin
+`CANONICAL_COUNCIL_FAMILIES`-oppløsning er derfor UPÅVIRKET, bevist av at
+ALLE eksisterende router-/Council-/gemma-first-tester fortsatt går grønt
+uendret). Full lokal suite **154 filer/2376 tester grønt** (opp fra 2372 -
+4 nye), `pnpm -w typecheck` rent, `pnpm -w lint` rent, ingen
+ECONNREFUSED-flake denne kjøringen.
+
+**Ærlighet om historikk:** `docs/DECISIONS_AND_ASSUMPTIONS.md`/
+`docs/RUNTIME_GATES.md`/`docs/IMPLEMENTATION_PLAN.md` sine eksisterende
+D-106 HOST-FIX 3-rader (den lange narrative om `gemini-2.5-flash` 404-
+undersøkelsen) er BEVISST IKKE endret - de er et historisk bevis-referat av
+hva som faktisk ble testet/funnet DA, og ville blitt en falsk journal om de
+ble redigert i etterkant. Denne rundens funn er lagt til som en NY,
+datert fortsettelse, samme append-only-konvensjon som resten av D-106.
+
+**Live Jarvis-verifisering (§9-ekvivalent for Gemini) gjenstår:** denne
+økten har (uendret fra alle tidligere D-106-runder) INGEN av de fem
+leverandørnøklene tilgjengelig - `GEMINI_MODEL_GATEWAY_LIVE` gjenstår derfor
+som Tobias sin host-kjøring via et smalt, Gemini-only PowerShell-script
+(samme mønster som Kimi sin narrow-live-verifisering) - IKKE talt som endelig
+Jarvis-akseptanse før DEN kjøringen er utført (ordren selv krever dette
+eksplisitt: den allerede fullførte direkte Google HTTP-proben teller ikke som
+Jarvis-akseptanse). `MERGE_READY=false` inntil det beviset foreligger. Ny,
+egen PR fra `origin/main` (merge-commit `4ef8d72cc1da0006fb49eb131e3e658ebd540376`)
+- IKKE PR #53 (den er allerede merget). PR forblir draft/åpen, IKKE merget.
+`FULL_FIVE_MEMBER_COUNCIL_LIVE=false`, `AI_MESH_HOST_ACCEPTANCE_COMPLETE=false`,
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. INGEN UA-6.
+
+## Runden før det
+
 **Oppdatert:** 2026-08-23 (**D-106 PR #53 NARROW LIVE KIMI-VERIFISERING —
 functional-success-invarianten er nå BÅDE FIXED_SUITE_VERIFIED OG
 LIVE_VERIFIED. IKKE merget ennå - venter på Tobias sin eksplisitte

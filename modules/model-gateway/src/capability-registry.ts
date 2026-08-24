@@ -84,11 +84,25 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     latency_class: "medium"
   },
   {
+    // D-106 GEMINI MODEL MIGRATION (2026-08-23): `model`/`context_tokens`
+    // oppdatert til `gemini-3.6-flash` (se `gemini.ts` sin filkommentar for
+    // live-bevis/rot-årsak - `gemini-2.5-flash` under utfasing, IKKE en
+    // gjettet oppgradering). `context_tokens: 1_048_576` er det EKSAKTE,
+    // verifiserte input-token-taket (offisiell spesifikasjon via WebSearch -
+    // direkte `WebFetch` mot Google sine egne dokumentasjonsdomener var
+    // nettverks-blokkert i denne økten, se D-41-disiplinen i `gemini.ts`).
+    // `capabilities` er BEVISST UENDRET: `gemini-3.6-flash` støtter reelt
+    // function calling/vision/thinking/caching hos LEVERANDØREN, men
+    // `GeminiAdapter` (`gemini.ts`) bruker fortsatt `textOnly()` (ingen
+    // bilde-mapping) og har INGEN tool-calling-håndtering wired - samme
+    // D-43 §3-regel som resten av denne filen: et capability-flagg
+    // reflekterer ALLTID faktisk wiret adapter-støtte, ALDRI et
+    // leverandør-faktum alene. `streaming` forblir fjernet (D-80, adapteren
+    // har fortsatt aldri hatt `.stream()`).
     provider: "gemini",
-    model: "gemini-2.5-flash",
-    // D-80: `streaming` fjernet - adapteren har aldri hatt `.stream()` (se filkommentaren over).
+    model: "gemini-3.6-flash",
     capabilities: ["text", "reasoning", "structured_output"],
-    context_tokens: 1_000_000,
+    context_tokens: 1_048_576,
     locality: "cloud",
     cost_class: 2,
     quality_class: 4,
