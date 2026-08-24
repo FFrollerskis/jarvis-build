@@ -73,6 +73,17 @@ export interface ModelRequest {
   tools?: ToolDefinition[];
   /** Gjennomførte tool-runder som skal med i konteksten (provider-nøytralt format). */
   tool_exchanges?: ToolExchange[];
+  /**
+   * D-106 Council reliability (§ARCHITECTURE DECISION): eksplisitt, validert
+   * per-kall timeout-overstyring i millisekunder. ALDRI satt direkte av en
+   * kaller - `ModelGateway` er det ENESTE stedet dette feltet fylles inn
+   * (validert mot `MAX_MODEL_TIMEOUT_MS`), adaptere leser den bare. Udefinert
+   * (normaltilfellet) = adapterens egen konstruksjonstidsdefault
+   * (`JARVIS_MODEL_TIMEOUT_MS`/60000) - UENDRET oppførsel for alle ordinære
+   * kall. Generisk arbeidsmengde-egenskap - ALDRI provider-spesifikk logikk
+   * noe sted i adapterne.
+   */
+  timeoutMs?: number;
 }
 
 /** UA-1 P1A: normalisert streaming-event. Resten av Jarvis ser aldri provider-format. */

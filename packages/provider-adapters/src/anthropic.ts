@@ -84,7 +84,7 @@ export class AnthropicAdapter implements ModelProviderAdapter {
     }
     let response: Response;
     try {
-      const timeout = AbortSignal.timeout(this.timeoutMs);
+      const timeout = AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs);
       response = await fetch(`${this.baseUrl}/v1/messages`, {
         method: "POST",
         headers: {

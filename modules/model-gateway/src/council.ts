@@ -162,6 +162,45 @@ const COUNCIL_ROUND_MAX_TOKENS = 4096;
 const COUNCIL_SYNTHESIS_MAX_TOKENS = 4096;
 
 /**
+ * D-106 Council reliability (§ARCHITECTURE DECISION, evidensbasert 2026-08-24):
+ * en konkurrent, kanonisk-identisk runde-1-diagnostikk (fem medlemmer samtidig
+ * via `Promise.allSettled`, EKTE produksjonsprovidere, ingen kodeendring) viste
+ * Kimi fullføre KUN 135ms under den ordinære `JARVIS_MODEL_TIMEOUT_MS`-grensen
+ * (59865ms av 60000ms) - og tre FORUTGÅENDE reelle Council-forsøk hadde ALLE
+ * feilet nettopp på denne grensen (`kimi_timeout`, ~60s). En ISOLERT
+ * (ikke-konkurrent) kjøring av SAMME arbeidsmengde fullførte derimot komfortabelt
+ * på 41695ms - konsistent med at fem samtidige, tunge, strukturerte
+ * flermodell-kall (`COUNCIL_ROUND_MAX_TOKENS=4096`, JSON-skjema-krav) gir
+ * vesentlig mindre tidsmargin enn ett enkelt ordinært kall, uavhengig av hvilken
+ * spesifikk provider som til slutt viser det tydeligst.
+ *
+ * Dette er BEVISST IKKE en Kimi-spesifikk fiks (§DESIGN REQUIREMENTS: ingen
+ * `if provider === "kimi"`-gren noe sted) - det er en generisk,
+ * ARBEIDSMENGDE-spesifikk timeout for HELE Council-protokollen (runde 1-3 OG
+ * syntese - alle fire behandler samme klasse tunge, strukturerte
+ * flermodell-arbeidsmengde med samme `COUNCIL_ROUND_MAX_TOKENS`/
+ * `COUNCIL_SYNTHESIS_MAX_TOKENS`-tokenbudsjett; syntese er i tillegg det
+ * TYNGSTE enkeltkallet - den digesterer alle fem medlemmers fulle runde-3-
+ * output på én gang). Ordinære `ModelGateway.complete()`-kall UTENFOR Council
+ * (inkludert det eksisterende ett-mot-ett critic-mønsteret) er STRENGT
+ * UENDRET - fortsatt `DEFAULT_MODEL_TIMEOUT_MS`/60000 - dette gjelder KUN
+ * `AiCouncil` sin egen arbeidsmengde.
+ *
+ * `JARVIS_COUNCIL_MODEL_TIMEOUT_MS` er en VALGFRI miljø-overstyring (samme
+ * konvensjon som `JARVIS_MODEL_TIMEOUT_MS` ellers i adapterlaget) - Tobias
+ * trenger ALDRI endre `.env` for normal drift (default 120000ms er allerede
+ * satt). Selve validering (endelig tall, >0, <=`MAX_MODEL_TIMEOUT_MS`=180000)
+ * skjer IKKE her, men i `ModelGateway.applyTimeoutOverride()` - én sentral
+ * valideringsplass, aldri duplisert - en feilkonfigurert verdi feiler derfor
+ * høylytt (`InvalidTimeoutError`) ved første faktiske Council-kall, aldri en
+ * stille fallback til en gjettet verdi.
+ */
+const COUNCIL_MODEL_TIMEOUT_MS =
+  process.env["JARVIS_COUNCIL_MODEL_TIMEOUT_MS"] !== undefined
+    ? Number(process.env["JARVIS_COUNCIL_MODEL_TIMEOUT_MS"])
+    : 120_000;
+
+/**
  * D-106 HOST-FIX (produksjonsherding, Defekt D): live host-kjøring viste
  * ekte parse-feil (`invalid_json_shape`/`council_synthesis_invalid`) mot
  * FAKTISKE modellsvar - den opprinnelige uthentingen tok naivt den FØRSTE
@@ -391,6 +430,8 @@ export class AiCouncil {
       purpose: "REASON" as const,
       ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
       ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {}),
+      // D-106 Council reliability: generisk arbeidsmengde-timeout for runde 1-3 (§ARCHITECTURE DECISION over).
+      timeoutMs: COUNCIL_MODEL_TIMEOUT_MS,
       request: { messages: [{ role: "user" as const, content: "" }] }
     });
 
@@ -532,6 +573,8 @@ export class AiCouncil {
       purpose: "CRITIQUE" as const,
       ...(input.sensitivity !== undefined ? { sensitivity: input.sensitivity } : {}),
       ...(input.paid_models_allowed !== undefined ? { paid_models_allowed: input.paid_models_allowed } : {}),
+      // D-106 Council reliability: syntese er det TYNGSTE enkeltkallet (digesterer alle fem medlemmers fulle runde-3-output) - samme arbeidsmengde-timeout som runde 1-3 (§ARCHITECTURE DECISION over).
+      timeoutMs: COUNCIL_MODEL_TIMEOUT_MS,
       request: {
         system: synthesisSystem,
         messages: [

@@ -58,7 +58,7 @@ export class GeminiAdapter implements ModelProviderAdapter {
       response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
         body: JSON.stringify({
           ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
           contents,

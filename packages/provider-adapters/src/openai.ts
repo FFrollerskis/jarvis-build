@@ -79,7 +79,7 @@ export class OpenAiAdapter implements ModelProviderAdapter {
     }
     let response: Response;
     try {
-      const timeout = AbortSignal.timeout(this.timeoutMs);
+      const timeout = AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs);
       response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
