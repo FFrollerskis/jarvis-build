@@ -1,5 +1,68 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-24 (**D-106 COUNCIL RELIABILITY: generisk
+arbeidsmengde-spesifikk `ModelGateway`-timeout + Council 120s-policy — PR #54
+(Gemini-migrasjon) er merget; DETTE er en NY, egen PR (#55,
+`claude/d106-council-reliability-timeout`) fra `origin/main`. IKKE merget
+ennå.**)
+
+**Bakgrunn (evidenskjede fra tre reelle Council-forsøk + to diagnostikk-
+runder):** tre ekte fem-familie `AiCouncil.run({requireAllFive: true})`-
+forsøk mot samtlige produksjonsprovidere feilet ALLE identisk i runde 1 med
+`kimi_timeout` (~60s, ordinær `JARVIS_MODEL_TIMEOUT_MS`-default). En isolert
+(ikke-samtidig) diagnostikk av nøyaktig samme arbeidsmengde fullførte
+komfortabelt på 41695ms - ingen reproduksjon, klassifisert
+`INTERMITTENT_VARIABLE_LATENCY_NOT_PROVEN_DETERMINISTIC_TIMEOUT_MISMATCH`.
+Den avgjørende, fjerde kjøringen (måle-KUN, ikke enda et Council-forsøk)
+rekonstruerte EKSAKT samme runde-1-arbeidsmengde for alle fem providere og
+kjørte dem SAMTIDIG via `Promise.allSettled` (samme konkurrensmønster som
+`AiCouncil.run()` selv) mot Tobias sin ekte produksjonskonfigurasjon:
+Anthropic 18873ms, OpenAI 18257ms, Gemini 7614ms, Gemma (lokal) 11605ms,
+**Kimi 59865ms** - kun 135ms UNDER den ordinære 60000ms-grensen, alle fem
+funksjonelt vellykket denne spesifikke kjøringen. Isolert sett Case B
+(lyktes, <60s) - men den knappeste marginen observert i hele økten, kombinert
+med tre forutgående reelle feil på nøyaktig denne grensen, ble av ordren selv
+vurdert som tilstrekkelig samlet bevis for et arkitekturvalg.
+
+**Implementasjon (full detalj: `docs/DECISIONS_AND_ASSUMPTIONS.md`, D-106-
+raden datert 2026-08-24):** ny, generisk, sentralt validert per-kall
+timeout-overstyring i `ModelGateway` (`CompleteInput.timeoutMs` →
+`ModelRequest.timeoutMs`, validert mot ny `MAX_MODEL_TIMEOUT_MS=180000` i en
+ny privat `applyTimeoutOverride()` - kaster `InvalidTimeoutError` ved
+ugyldig verdi, ALDRI en stille klemming/gjetning). Ordinære kall UTEN
+eksplisitt overstyring er byte-for-byte UENDRET (`DEFAULT_MODEL_TIMEOUT_MS`
+= 60000, hver adapters egen konstruksjonsdefault). Alle syv provider-
+adaptere endret identisk (`AbortSignal.timeout(request.timeoutMs ??
+this.timeoutMs)`) - INGEN `if provider === "kimi"`-gren noe sted. `AiCouncil`
+bruker eksplisitt ny `COUNCIL_MODEL_TIMEOUT_MS=120000` (valgfri
+`JARVIS_COUNCIL_MODEL_TIMEOUT_MS`-miljøoverstyring) for ALLE fire
+modellkallende stadier (runde 1/2/3 + syntese - syntese BEVISST inkludert
+etter kodeinspeksjon, ikke blindt kopiert, siden den digesterer alle fem
+medlemmers fulle output i ett enkeltkall). `requireAllFive` fail-closed,
+budsjett/kost/spore/redaksjon UENDRET.
+
+**Testdekning:** 18 nye regresjonstester (`d106-council-timeout.test.ts`,
+14 nye + 4 lagt til `council.test.ts` - validering av grenser, override
+overlever adaptivt retry, ingen tilstandslekkasje mellom kall, alle fire
+Council-stadier bruker nøyaktig 120000, et medlem navngitt EKSAKT `"kimi"`
+ser den nøyaktig samme verdien som de fire andre - strukturelt bevis for
+fravær av provider-spesifikk logikk, `requireAllFive` uendret). **Full
+workspace-suite 155 filer/2394 tester grønt** (opp fra 154/2376 - eksakt
++18, ingen regresjon), `pnpm -w typecheck` 19/19 pakker rent, `pnpm -w lint`
+rent, ingen ECONNREFUSED-flake.
+
+**Gjenstående gate:** ETT nytt, ekte fem-familie Council-forsøk på Tobias
+sin host MED den nye 120000ms Council-timeouten faktisk i bruk, som beviser
+`FULL_FIVE_MEMBER_COUNCIL_LIVE=true`. `MERGE_READY=false` inntil det
+foreligger. `FIXED_SUITE_VERIFIED=true`, `AI_MESH_HOST_ACCEPTANCE_COMPLETE=
+false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. Branch
+`claude/d106-council-reliability-timeout`, head-commit
+`7c94ee96b3b57b116ea4c2dfbe2ebe068608cc47`, base
+`d69744ac1a9400ce5b2f15ccd8399fe5c97b4749`, PR #55 (draft, IKKE merget).
+INGEN UA-6 startet.
+
+---
+
 **Oppdatert:** 2026-08-23 (**D-106 GEMINI MODEL MIGRATION (gemini-2.5-flash →
 gemini-3.6-flash) — PR #53 er merget (samme dag); DETTE er en NY, egen PR fra
 `origin/main`. IKKE merget ennå.**) PR #53 sin klassifisering
