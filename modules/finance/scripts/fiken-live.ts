@@ -28,7 +28,8 @@ import { randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
 import { PolicyGateway, InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch } from "@jarvis/policy";
-import { EnvSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
+import { EnvSecretProvider, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
+import { BusinessInternalSecretProvider } from "@jarvis/business";
 import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "../src/index.ts";
 import { FikenTransport } from "../src/fiken-transport.ts";
 import { checkRequiredEnv, computeHardFail, evaluateSecretSafety, isLiveWriteOptedIn, type Verdict } from "./lib/fiken-live-lib.ts";
@@ -56,9 +57,10 @@ function log(msg: string): void {
   console.log(msg);
 }
 
-/** `external_id` finnes kun på `ok:true`-varianten av `ToolResult` - denne hjelperen kaster tydelig i stedet for å anta at et forutgående `create_payment_intent`-kall lyktes. */
+/** `external_id` finnes kun på `ok:true`-varianten av `ToolResult` - denne hjelperen kaster tydelig i stedet for å anta at et forutgående `create_payment_intent`-kall lyktes. Inkluderer ALLTID den faktiske `ToolGateway`-DENY-årsaken (f.eks. `credential_unavailable`) i feilmeldingen - en generisk "did_not_return_external_id" uten årsak skjulte tidligere en reell secret-provider-wiring-defekt i dette scriptet (D-107 host-fix). */
 function mustExternalId(result: Awaited<ReturnType<InstanceType<typeof ToolGateway>["execute"]>>, label: string): string {
-  if (!result.ok || !result.external_id) throw new Error(`${label}_did_not_return_external_id`);
+  if (!result.ok) throw new Error(`${label}_denied:${result.reason}`);
+  if (!result.external_id) throw new Error(`${label}_did_not_return_external_id`);
   return result.external_id;
 }
 
@@ -161,7 +163,16 @@ async function main(): Promise<void> {
     devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
     authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
   });
-  const secrets = new EnvSecretProvider();
+  // D-107 HOST-FIX: 9 av 10 finance.*-handlinger bruker credential_ref
+  // JARVIS_BUSINESS_INTERNAL_TOKEN - en BEVISST ikke-hemmelig sentinel
+  // (D-49, `BusinessInternalSecretProvider`), ALDRI satt i .env. Kun
+  // `submit_payment_intent` bruker en ekte Fiken-secret (via EnvSecretProvider).
+  // MÅ speile EKSAKT samme sammensetning som produksjonens ToolGateway-wiring
+  // (apps/api/src/main.ts / worker-main.ts: `FallbackSecretProvider(env,
+  // BusinessInternalSecretProvider)`) - en bar `EnvSecretProvider` alene
+  // fikk tidligere `credential_unavailable` for HVERT internt finance-kall,
+  // siden JARVIS_BUSINESS_INTERNAL_TOKEN korrekt aldri er en ekte secret.
+  const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
   const toolGateway = new ToolGateway(pool, policy, secrets);
   for (const tool of firstWaveTools({ finance: new FinanceTransport(finance, fikenCredentialsProvider) })) toolGateway.register(tool);
   const identity = ownerIdentityFor(TENANT_A);

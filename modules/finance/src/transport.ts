@@ -30,7 +30,13 @@ export class FinanceTransport implements ToolTransport {
         const input: CreatePaymentIntentInput = {
           idempotency_key: requireString(parameters, "idempotency_key"),
           purpose: requireString(parameters, "purpose"),
-          amount_ore: Number(requireString(parameters, "amount_ore")),
+          // ToolGateway sitt zod-skjema deklarerer `amount_ore` som z.number()
+          // - verdien ANKOMMER som et tall, aldri en streng. `Number(
+          // requireString(...))` her kastet tidligere `finance_missing_
+          // parameter:amount_ore` for HVERT ekte gateway-kall (D-107 host-fix)
+          // - service-rls-testene så det aldri fordi de kaller FinanceService
+          // direkte, uten transporten.
+          amount_ore: requireNumber(parameters, "amount_ore"),
           vendor_name: requireString(parameters, "vendor_name"),
           account_code: requireString(parameters, "account_code"),
           ...(parameters["currency"] !== undefined ? { currency: String(parameters["currency"]) } : {}),
@@ -66,7 +72,10 @@ export class FinanceTransport implements ToolTransport {
         return { external_id: row.payment_intent_id, data: row as unknown as JsonValue };
       }
       case "reconcile_payment_intent": {
-        const matched = String(parameters["matched"]) === "true";
+        // zod-skjemaet deklarerer `matched` som z.boolean() - sammenlign
+        // direkte, aldri via strengkonvertering (samme feilklasse som
+        // amount_ore over).
+        const matched = parameters["matched"] === true;
         const note = parameters["note"] !== undefined ? String(parameters["note"]) : undefined;
         const row = await this.service.reconcilePaymentIntent(tenantId, memorySpace, requireString(parameters, "payment_intent_id"), matched, actorPersonId, note);
         return { external_id: row.payment_intent_id, data: row as unknown as JsonValue };
@@ -92,6 +101,14 @@ export class FinanceTransport implements ToolTransport {
 function requireString(parameters: Record<string, JsonValue>, key: string): string {
   const value = parameters[key];
   if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`finance_missing_parameter:${key}`);
+  }
+  return value;
+}
+
+function requireNumber(parameters: Record<string, JsonValue>, key: string): number {
+  const value = parameters[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`finance_missing_parameter:${key}`);
   }
   return value;

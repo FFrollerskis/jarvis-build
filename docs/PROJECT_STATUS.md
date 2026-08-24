@@ -1,5 +1,23 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-24 (**UA-6 D-107 HOST-FIX #1 på PR #57: to lagvise
+root causes bak `did_not_return_external_id`-host-feilene funnet og rettet —
+én host-script-defekt (bar `EnvSecretProvider` i stedet for produksjonens
+`FallbackSecretProvider(env, BusinessInternalSecretProvider)` →
+`credential_unavailable` for hvert internt finance-kall) og én EKTE
+produksjonsdefekt i `FinanceTransport` (`Number(requireString(...))` for
+z.number()-parameteren `amount_ore` kastet for HVERT ekte ToolGateway-kall;
+samme latente feilklasse i `matched`-håndteringen også rettet). 10 nye
+regresjonstester (`toolgateway-live-wiring.test.ts`) reproduserer den
+eksakte host-feilen og beviser hele finance.*-kontrakten (`{ok:true,
+external_id: payment_intent_id, data}`) gjennom EKTE ToolGateway med
+produksjons-secret-sammensetning. `JARVIS_CANONICAL_DOMAIN_VERIFIED=false`
+til Tobias sin re-kjøring; `FIKEN_LIVE_VERIFIED=false` uendret. Samme PR
+#57, IKKE merget. Full detalj: D-107 HOST-FIX #1 i
+DECISIONS_AND_ASSUMPTIONS.md.**)
+
+---
+
 **Oppdatert:** 2026-08-24 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY —
 FØRSTE vertikale slice startet på eksplisitt ordre fra Tobias: Payment/Spend
 Intent-domene + Fiken (regnskap NO) som P0-leverandør — `UA6_STARTED=true`,

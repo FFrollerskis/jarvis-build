@@ -66,7 +66,17 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
 ## D-107 — UA-6 FINANCE & SPEND INTEGRITY GATEWAY, FØRSTE SLICE: SUITE-VERIFIED (2026-08-24, IKKE host-verifisert ennå)
-- **Kommando (host, IKKE kjørt i denne økten):** `node --env-file=.env --experimental-transform-types modules/finance/scripts/fiken-live-host-run.ts`
+- **HOST-FIX #1 (2026-08-24, etter Tobias sin første ekte host-kjøring mot head `748ecd0`):** fire credential-uavhengige
+  kanonisk-domene-sjekker feilet med `*_did_not_return_external_id`. To lagvise root causes funnet og rettet i samme PR:
+  (1) host-scriptet brukte en bar `EnvSecretProvider` i stedet for produksjonens `FallbackSecretProvider(env,
+  BusinessInternalSecretProvider)` → `credential_unavailable`-DENY for hvert internt finance-kall (D-49-sentinelen
+  `JARVIS_BUSINESS_INTERNAL_TOKEN` er ALDRI i .env); (2) EKTE produksjonsdefekt i `FinanceTransport`:
+  `Number(requireString(parameters, "amount_ore"))` for en `z.number()`-parameter kastet
+  `finance_missing_parameter:amount_ore` for HVERT ekte ToolGateway-kall (+ samme latente feilklasse i `matched`-
+  håndteringen rettet). 10 nye regresjonstester (`toolgateway-live-wiring.test.ts`) reproduserer den eksakte
+  host-feilen og beviser hele finance.*-kontrakten (`{ok:true, external_id: payment_intent_id, data}`) gjennom
+  EKTE ToolGateway med produksjons-secret-sammensetning. Full detalj: D-107 HOST-FIX #1 i DECISIONS_AND_ASSUMPTIONS.md.
+- **Kommando (host, re-kjøres av Tobias etter grønn CI):** `node --env-file=.env --experimental-transform-types modules/finance/scripts/fiken-live-host-run.ts`
 - **Bevist i denne økten (embedded Postgres, ekte ToolGateway-kjede, ingen Fiken-nettverkskall):** idempotent opprettelse (samme `idempotency_key` → nøyaktig én DB-rad, samme `external_id`), deterministisk validering (ugyldig beløp/valuta/kontokode/motkontokode avvist FØR noe forsøk), anomali-flagging ved opprettelse (manglende leverandørreferanse/motkonto flagges, blokkerer ikke draft), fail-closed innsendingsrekkefølge (manglende leverandørreferanse/motkonto/ukjent id/manglende credentials kastes ALLE FØR noe Fiken-kall), finans-nødbryter (aktivert blokkerer innsending, tilstand forblir `draft`, `kill_switch_blocked`-hendelse persisterer, `get_kill_switch` reflekterer tilstand), full innsendingsflyt (poster til Fiken nøyaktig én gang, korrekte kontolinjer verifisert), idempotent gjentatt innsending (null nye Fiken-kall ved allerede innsendt), terminal-tilstand-gjeninnsending kastes, avstemming (matched/mismatched + hendelse), tenant-isolasjon (TENANT_B ser aldri TENANT_A sine intents/kill-switch), open-loop-integrasjon (anomali/avstemmingsavvik → open loop, auto-resolve ved retting).
 - **IKKE bevist i denne økten (avventer host):** ekte Fiken OAuth2-token-utveksling, ekte `listCompanies()`-reachability, faktisk `POST /companies/{slug}/generalJournalEntries` mot Tobias sin virkelige Fiken-konto.
 - **Terminalflagg:** `FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false`, `UA6_STARTED=true`, `UA6_COMPLETE=false`.
