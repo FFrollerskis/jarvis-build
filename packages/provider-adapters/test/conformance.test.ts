@@ -496,8 +496,46 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     expect(err.diagnostic?.sanitized_endpoint).toBe("mock/v1/chat/completions");
   });
 
-  it("gemini: modellnavnet i endepunktet er UENDRET (gemini-2.5-flash) - Defekt B ble IKKE 'fikset' ved å gjette et modellnavn-bytte uten bevist rot-årsak", () => {
-    expect(new GeminiAdapter("k", undefined, "http://mock").model).toBe("gemini-2.5-flash");
+  it("gemini: default-modellen er gemini-3.6-flash (D-106 GEMINI MODEL MIGRATION - live-bevis fant en EKTE utdatert default, ikke en gjettet 404-årsak, se gemini.ts)", () => {
+    expect(new GeminiAdapter("k", undefined, "http://mock").model).toBe("gemini-3.6-flash");
+  });
+
+  it("gemini: eksplisitt konstruktør-modell vinner ALLTID over defaulten", () => {
+    expect(new GeminiAdapter("k", "gemini-custom-override", "http://mock").model).toBe("gemini-custom-override");
+  });
+
+  it("gemini: JARVIS_GEMINI_MODEL-miljøvariabelen vinner over defaulten når konstruktør-argumentet er udefinert", () => {
+    const prev = process.env["JARVIS_GEMINI_MODEL"];
+    process.env["JARVIS_GEMINI_MODEL"] = "gemini-env-override";
+    try {
+      expect(new GeminiAdapter("k", process.env["JARVIS_GEMINI_MODEL"], "http://mock").model).toBe("gemini-env-override");
+    } finally {
+      if (prev === undefined) delete process.env["JARVIS_GEMINI_MODEL"];
+      else process.env["JARVIS_GEMINI_MODEL"] = prev;
+    }
+  });
+
+  it("gemini: kanonisk endepunkt med default-modellen er nøyaktig /v1beta/models/gemini-3.6-flash:generateContent - bygget ÉN gang, ingen dobbel sti-konstruksjon", async () => {
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          candidates: [{ content: { parts: [{ text: "pong" }] }, finishReason: "STOP" }],
+          usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 }
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    const adapter = new GeminiAdapter("k", undefined, "http://mock");
+    const result = await adapter.complete(REQUEST);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://mock/v1beta/models/gemini-3.6-flash:generateContent");
+    expect(result.model).toBe("gemini-3.6-flash");
+    expect(result.provider).toBe("gemini");
+    expect(result.text).toBe("pong");
+    expect(result.text.trim().length).toBeGreaterThan(0);
+    expect(result.finish_reason).toBe("STOP");
   });
 
   it("kimi: base-URL-en er UENDRET (https://api.moonshot.ai, matcher offisiell Moonshot-dokumentasjon) - Defekt B ble IKKE 'fikset' ved å gjette en URL uten bevist rot-årsak", () => {

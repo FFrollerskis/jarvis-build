@@ -13,13 +13,28 @@ import {
 /**
  * Google Gemini-adapter (generateContent). Nøkkel sendes i header (x-goog-api-key),
  * ALDRI i URL-query (SECURITY_MODEL: ingen secrets i URL-er/logger).
+ *
+ * D-106 GEMINI MODEL MIGRATION (live-bevis, 2026-08-23): default-modellen var
+ * `"gemini-2.5-flash"` - Tobias sin ekte konfigurerte nøkkel viste denne
+ * FAKTISK i katalogen (`/v1beta/models`), MEN selve `generateContent`-kallet
+ * svarte 404 med Google sin egen feilmelding om at modellen ikke lenger er
+ * tilgjengelig for nye brukere, med eksplisitt henvisning til
+ * `models/gemini-3.6-flash`. Tobias sin direkte autentiserte prøve mot
+ * `gemini-3.6-flash` lyktes (`GEMINI_36_FLASH_LIVE=true`). Uavhengig
+ * WebSearch (direkte `WebFetch` mot `ai.google.dev`/`deepmind.google`/
+ * `blog.google` var nettverks-blokkert i denne økten - kun søke-syntesen var
+ * tilgjengelig) bekreftet `gemini-3.6-flash` som en ekte, offisiell Google
+ * DeepMind-modell (lansert 21. juli 2026), OG at `gemini-2.5-flash` faktisk
+ * er under utfasing. Dette var derfor IKKE et gjettet modellbytte (samme
+ * D-41-disiplin som `kimi-k3`-fiksen) - roten var en utdatert default, ikke
+ * en adapter-/auth-/URL-defekt (uendret her).
  */
 export class GeminiAdapter implements ModelProviderAdapter {
   readonly name: string = "gemini";
 
   constructor(
     private readonly apiKey: string | undefined = process.env["GEMINI_API_KEY"],
-    readonly model: string = process.env["JARVIS_GEMINI_MODEL"] ?? "gemini-2.5-flash",
+    readonly model: string = process.env["JARVIS_GEMINI_MODEL"] ?? "gemini-3.6-flash",
     private readonly baseUrl: string = "https://generativelanguage.googleapis.com",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}
