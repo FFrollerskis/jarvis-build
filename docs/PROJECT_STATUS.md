@@ -1,5 +1,39 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-24 (**D-106 COUNCIL RELIABILITY CLOSEOUT: PR #55
+MERGET, ekte fem-familie host-akseptanse BESTÅTT — `D106_COMPLETE=true`.**)
+
+**Utfall:** ETT ekte kanonisk `AiCouncil.run({requireAllFive: true})`-forsøk
+på Tobias sin host (etter en automatisert, sikker lokal Ollama/`gemma3:4b`-
+preflight - ingen betalte kall før Gemma var bevist frisk) besto FULLSTENDIG
+mot samtlige fem produksjonsfamilier: `gemma_local`/`gemma3:4b`,
+`kimi`/`kimi-k3`, `anthropic`/`claude-sonnet-5`, `openai`/`gpt-5`,
+`gemini`/`gemini-3.6-flash` - alle funksjonelt vellykket, full runde
+1→kryss-kritikk→revisjon→syntese fullført, `KIMI_ROUND1_ELAPSED_MS=41992`
+(komfortabelt innenfor 120000ms-budsjettet), `COUNCIL_WORKLOAD_TIMEOUT_
+ACTIVE=true` (alle fem observerte NØYAKTIG samme 120000ms, målt via en
+transparent adapter-instrumenteringswrapper), trace/provenance/kost-
+persistens og hemmelighet-redaksjon live-bevist, null eksterne sideeffekter.
+Tobias ga eksplisitt merge-godkjenning bundet til nøyaktig PR #55 sin
+godkjente head (`90cf800a651e82f5634bf8c55752c7b3aab9a158`). Fail-closed
+pre-merge-reverifisering bestått; PR #55 merget med en NORMAL to-forelder
+merge-commit (IKKE squash/rebase): `MERGE_COMMIT=
+38e03b070e24d1ac93eac6d5f93ed9b065c2344e`. Post-merge CI på selve merge-
+committen fullt grønt (`build-test`/`windows-git-auth`/`gitleaks`). Full
+evidenskjede (inkl. en tidlig verifiseringsskript-bug som feilaktig
+rapporterte `KIMI_PROVIDER_SPECIFIC_TIMEOUT_USED=true` - rot-årsak
+identifisert som kommentar-strippings-glipp i regex-en, korrigert til
+`false`, deltok ALDRI i selve akseptanseverdikten): D-106-raden «PR #55
+CLOSEOUT» i `docs/DECISIONS_AND_ASSUMPTIONS.md` (datert 2026-08-24).
+`FULL_FIVE_MEMBER_COUNCIL_LIVE=true`, `AI_MESH_HOST_ACCEPTANCE_COMPLETE=
+true`, `D106_RUNTIME_ACCEPTANCE_COMPLETE=true`, `D106_COMPLETE=true`.
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. `UA6_STARTED=false` -
+INGEN UA-6 startet. Denne closeouten er RENT DOKUMENTASJON (ingen
+produksjonskodeendring) - egen PR fra `origin/main` (post-merge-hode
+`38e03b0`), IKKE merget uten Tobias sin eksplisitte godkjenning.
+
+---
+
 **Oppdatert:** 2026-08-24 (**D-106 COUNCIL RELIABILITY: generisk
 arbeidsmengde-spesifikk `ModelGateway`-timeout + Council 120s-policy — PR #54
 (Gemini-migrasjon) er merget; DETTE er en NY, egen PR (#55,
