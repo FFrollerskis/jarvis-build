@@ -123,7 +123,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
       response = await fetch(this.chatCompletionsUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
         body: JSON.stringify({
           model: this.model,
           stream: false,

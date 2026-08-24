@@ -55,7 +55,7 @@ export class KimiAdapter implements ModelProviderAdapter {
       response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
         body: JSON.stringify({
           model: this.model,
           messages,

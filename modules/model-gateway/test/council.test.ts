@@ -527,3 +527,92 @@ describe("D-106 PR #53 HOST FIX: runde-`max_tokens` har reell margin for reasoni
     }
   });
 });
+
+describe("D-106 Council reliability (§ARCHITECTURE DECISION, 2026-08-24): Council bruker en generisk, arbeidsmengde-spesifikk timeout - ALDRI provider-spesifikk", () => {
+  /** Fanger `request.timeoutMs` for hvert kall, i tillegg til å svare normalt via ScriptedJsonAdapter sin logikk (samme mønster som MaxTokensCapturingAdapter over). */
+  class TimeoutCapturingAdapter implements ModelProviderAdapter {
+    readonly model = "test-model";
+    readonly seenTimeouts: Array<number | undefined> = [];
+    constructor(
+      readonly name: string,
+      private readonly responder: (request: ModelRequest) => string
+    ) {}
+    available(): boolean {
+      return true;
+    }
+    async complete(request: ModelRequest): Promise<ModelResult> {
+      this.seenTimeouts.push(request.timeoutMs);
+      return { text: this.responder(request), usage: { input_tokens: 10, output_tokens: 10 }, provider: this.name, model: this.model };
+    }
+  }
+
+  /** Ett medlem som håndterer runde 1/2/3 OG (om QUALITY-ruting velger det) synteserollen - samme mønster som `buildMember()` over, men timeout-fangende. */
+  function buildTimeoutCapturingMember(name: string, conclusion: string, allMemberNames: string[]): TimeoutCapturingAdapter {
+    return new TimeoutCapturingAdapter(name, (req) => {
+      const c = req.messages[0]?.content;
+      const text = typeof c === "string" ? c : "";
+      if (text.includes("MEDLEMMER SOM SVARTE")) return synthesisFor(allMemberNames, []);
+      if (text.includes("ANDRE MEDLEMMERS VURDERING")) return JSON.stringify({ critiques: [] });
+      return round1Answer(conclusion);
+    });
+  }
+
+  it("Z: runde 1, kryss-kritikk (runde 2), revisjon (runde 3) og syntese ber ALLE om NØYAKTIG COUNCIL_MODEL_TIMEOUT_MS (default 120000) - IKKE den ordinære 60000ms-defaulten", async () => {
+    const memberNames = ["anthropic", "openai"];
+    const anthropic = buildTimeoutCapturingMember("anthropic", "konklusjon-anthropic", memberNames);
+    const openai = buildTimeoutCapturingMember("openai", "konklusjon-openai", memberNames);
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [anthropic, openai] });
+    const council = new AiCouncil(gateway);
+    await council.run({ tenant_id: "t1", decision_context: "X?", members: memberNames });
+
+    // Minst runde 1/2/3 (+ evt. syntese, avhengig av QUALITY-rutingens providervalg) må ha blitt fanget for begge.
+    expect(anthropic.seenTimeouts.length).toBeGreaterThanOrEqual(3);
+    expect(openai.seenTimeouts.length).toBeGreaterThanOrEqual(3);
+    for (const seen of [...anthropic.seenTimeouts, ...openai.seenTimeouts]) {
+      expect(seen).toBe(120_000);
+    }
+  });
+
+  it("Æ: provider-identitet avgjør ALDRI timeouten - et medlem navngitt eksakt 'kimi' ser NØYAKTIG samme verdi som anthropic/openai/gemini/gemma_local i SAMME Council-kjøring (ingen `if provider === \"kimi\"`-spesialbehandling)", async () => {
+    const memberNames = ["anthropic", "openai", "gemini", "kimi", "gemma_local"];
+    const members = memberNames.map((name) => buildTimeoutCapturingMember(name, `konklusjon-${name}`, memberNames));
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: members });
+    const council = new AiCouncil(gateway);
+    const result = await council.run({ tenant_id: "t1", decision_context: "X?", members: memberNames, requireAllFive: true });
+
+    expect(result.provenance.full_council).toBe(true);
+    const kimi = members.find((m) => m.name === "kimi") as TimeoutCapturingAdapter;
+    expect(kimi.seenTimeouts.length).toBeGreaterThan(0);
+    const allSeenAcrossAllMembers = members.flatMap((m) => m.seenTimeouts);
+    // Presist ÉN distinkt verdi observert på tvers av ALLE fem medlemmer, uansett navn - beviser fravær av provider-spesifikk gren.
+    expect(new Set(allSeenAcrossAllMembers).size).toBe(1);
+    expect(allSeenAcrossAllMembers[0]).toBe(120_000);
+  });
+
+  it("Ø: JARVIS_COUNCIL_MODEL_TIMEOUT_MS-miljøoverstyring endrer IKKE den ordinære JARVIS_MODEL_TIMEOUT_MS/60000-defaulten for ikke-Council-kall (verifisert strukturelt: Council-kallet bruker den eksporterte konstanten, ordinære kall i denne filens øvrige tester forblir uendret siden de aldri setter CompleteInput.timeoutMs)", async () => {
+    // `COUNCIL_MODEL_TIMEOUT_MS` leses ved modul-load (samme konvensjon som JARVIS_MODEL_TIMEOUT_MS ellers) -
+    // denne testen bekrefter kun at council.ts sin faktiske konstant (uansett verdi, default eller miljø-overstyrt)
+    // konsekvent er DEN SAMME på tvers av samtlige fire kallesteder (runde 1/2/3 + syntese), aldri ulik per runde.
+    const memberNames = ["anthropic", "openai"];
+    const anthropic = buildTimeoutCapturingMember("anthropic", "konklusjon-anthropic", memberNames);
+    const openai = buildTimeoutCapturingMember("openai", "konklusjon-openai", memberNames);
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [anthropic, openai] });
+    const council = new AiCouncil(gateway);
+    await council.run({ tenant_id: "t1", decision_context: "X?", members: memberNames });
+
+    const distinct = new Set([...anthropic.seenTimeouts, ...openai.seenTimeouts]);
+    expect(distinct.size).toBe(1);
+  });
+
+  it("Å: requireAllFive fail-closed forblir UENDRET når Council-medlemmer bruker den nye timeout-overstyringen (én manglende provider -> IncompleteCouncilError, aldri en falsk full Council)", async () => {
+    const memberNames = ["anthropic", "openai", "gemini"];
+    const anthropic = buildTimeoutCapturingMember("anthropic", "konklusjon-anthropic", memberNames);
+    const openai = buildTimeoutCapturingMember("openai", "konklusjon-openai", memberNames);
+    // "gemini" er IKKE registrert i det hele tatt -> manglende medlem, fail-closed.
+    const gateway = new ModelGateway({ pool: fakePool(), trace: new MemoryTraceSink(), providers: [anthropic, openai] });
+    const council = new AiCouncil(gateway);
+    await expect(
+      council.run({ tenant_id: "t1", decision_context: "X?", members: memberNames, requireAllFive: true })
+    ).rejects.toBeInstanceOf(IncompleteCouncilError);
+  });
+});

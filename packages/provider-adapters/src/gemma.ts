@@ -144,7 +144,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       response = await fetch(`${this.baseUrl}/v1beta/models/${this.model}:generateContent`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        signal: AbortSignal.timeout(this.timeoutMs),
+        signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
         body: JSON.stringify({
           ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
           contents,

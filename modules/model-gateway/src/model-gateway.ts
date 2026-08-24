@@ -23,6 +23,51 @@ import { AiRouter, type RoutePlan } from "./router.ts";
 import { costOre as computeCostOre, DEFAULT_PRICING, type PricingTable } from "./pricing.ts";
 import type { TraceSink } from "./trace.ts";
 
+/**
+ * D-106 Council reliability (§ARCHITECTURE DECISION, evidensbasert 2026-08-24):
+ * ordinær `ModelGateway.complete()`/`.stream()`-default - UENDRET fra
+ * adapternes egen historiske `JARVIS_MODEL_TIMEOUT_MS ?? 60000`-konvensjon.
+ * Eksportert kun som dokumentasjon/referanse for kallere og tester - selve
+ * default-oppførselen skjer FORTSATT i den enkelte adapterens konstruktør
+ * (uendret), ikke her.
+ */
+export const DEFAULT_MODEL_TIMEOUT_MS = 60_000;
+
+/**
+ * D-106 Council reliability (§DESIGN REQUIREMENTS pkt. 4-5): hard øvre grense
+ * for ETHVERT eksplisitt `CompleteInput.timeoutMs`-overstyring - ingen kaller
+ * kan be om ubegrenset kjøretid, uansett arbeidsmengde. Council sin egen
+ * `COUNCIL_MODEL_TIMEOUT_MS=120000` (`council.ts`) ligger godt under denne.
+ */
+export const MAX_MODEL_TIMEOUT_MS = 180_000;
+
+/** Ugyldig eksplisitt `CompleteInput.timeoutMs` (ikke-endelig/≤0/over `MAX_MODEL_TIMEOUT_MS`) - feiler høylytt, aldri en stille klemming/gjetning. */
+export class InvalidTimeoutError extends Error {
+  constructor(readonly requestedMs: number) {
+    super(
+      `Ugyldig timeoutMs=${requestedMs}: må være et endelig tall > 0 og <= ${MAX_MODEL_TIMEOUT_MS}ms (${MAX_MODEL_TIMEOUT_MS / 1000}s hard grense).`
+    );
+    this.name = "InvalidTimeoutError";
+  }
+}
+
+/**
+ * D-106 Council reliability: validerer en eksplisitt per-kall
+ * timeout-overstyring. `undefined` (ingen overstyring bedt om) gis tilbake
+ * UENDRET - ordinære kall uten eksplisitt `timeoutMs` oppfører seg
+ * byte-for-byte som før dette feltet fantes (adapterens egen
+ * konstruksjonstidsdefault brukes). Provider-identitet inngår ALDRI i denne
+ * vurderingen (§DESIGN REQUIREMENTS: ingen `if provider === "kimi"`-logikk
+ * noe sted i denne arbeidsmengde-kapabiliteten).
+ */
+function resolveTimeoutMs(requested: number | undefined): number | undefined {
+  if (requested === undefined) return undefined;
+  if (!Number.isFinite(requested) || requested <= 0 || requested > MAX_MODEL_TIMEOUT_MS) {
+    throw new InvalidTimeoutError(requested);
+  }
+  return requested;
+}
+
 /** Tydelig, maskinlesbar feil når budsjettet stopper kall (akseptanse 5). */
 export class BudgetExceededError extends Error {
   constructor(
@@ -59,6 +104,17 @@ export interface CompleteInput {
   paid_models_allowed?: boolean;
   /** D-106: se `RouteInput.providerPreference`. */
   providerPreference?: string[];
+  /**
+   * D-106 Council reliability (§ARCHITECTURE DECISION): eksplisitt, generisk
+   * arbeidsmengde-spesifikk timeout-overstyring for DETTE kallet (millisekunder).
+   * Validert mot `MAX_MODEL_TIMEOUT_MS` (kaster `InvalidTimeoutError` ved
+   * ugyldig verdi - ALDRI en stille klemming). Udefinert (normaltilfellet) =
+   * UENDRET ordinær oppførsel (adapterens egen konstruksjonstidsdefault,
+   * `JARVIS_MODEL_TIMEOUT_MS`/60000). `AiCouncil` bruker dette for sin egen
+   * `COUNCIL_MODEL_TIMEOUT_MS` - ALDRI provider-spesifikk, kun arbeidsmengde-
+   * spesifikk (§DESIGN REQUIREMENTS: ingen `if provider === "kimi"` noe sted).
+   */
+  timeoutMs?: number;
 }
 
 export interface GatewayOptions {
@@ -182,7 +238,22 @@ export class ModelGateway {
     return map;
   }
 
-  async complete(input: CompleteInput): Promise<ModelResult> {
+  /**
+   * D-106 Council reliability: SENTRALISERT, validert anvendelse av ETT
+   * eksplisitt `CompleteInput.timeoutMs`-overstyring - eneste sted dette
+   * feltet kan nå en adapter (`ModelRequest.timeoutMs` fylles KUN inn her,
+   * aldri satt direkte av en kaller). `undefined` (normaltilfellet) gir
+   * `input` tilbake UENDRET - ingen ny objektallokering, ingen atferdsendring
+   * for ordinære kall.
+   */
+  private applyTimeoutOverride(input: CompleteInput): CompleteInput {
+    const resolved = resolveTimeoutMs(input.timeoutMs);
+    if (resolved === undefined) return input;
+    return { ...input, request: { ...input.request, timeoutMs: resolved } };
+  }
+
+  async complete(rawInput: CompleteInput): Promise<ModelResult> {
+    const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;
 
@@ -451,7 +522,8 @@ export class ModelGateway {
    * UA-1 P1A: normalisert streaming (§3-§10). Fallback kun før første output;
    * cancel via signal gir ren avslutning uten zombie-generation (§9/§28).
    */
-  async stream(input: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+  async stream(rawInput: CompleteInput, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+    const input = this.applyTimeoutOverride(rawInput);
     const started = Date.now();
     const traceId = `trace-${randomUUID()}`;
     this.enforceRateLimit(input.tenant_id);
