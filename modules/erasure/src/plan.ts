@@ -153,6 +153,35 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // marketing_spend_events over, slettes FØR marketing_campaigns.
   add(result, "marketing_campaign_observations", await run(client, mode, "marketing_campaign_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_experiments", await run(client, mode, "marketing_experiments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
+  // 039_finance_spend_integrity.sql): `finance_spend_records` har en FK ->
+  // `marketing_campaigns` (valgfri kampanje-kobling for kildefamilien
+  // 'marketing') - MÅ DERFOR slettes FØR `marketing_campaigns` under, IKKE
+  // etter (i motsetning til `payment_intents`-blokken, som IKKE har noen FK
+  // mot marketing_campaigns og derfor trygt kan stå etter). To nye utgifts-
+  // tilknyttede open-loop-typer slettes FØRST, SNEVERT avgrenset til hver
+  // sin nullable FK (rører aldri andre loop_type-er). `finance_spend_records`
+  // har OGSÅ FK -> BÅDE `finance_recurring_commitments` OG
+  // `finance_procurement_items` - MÅ derfor slettes FØR begge (motsatt
+  // retning: `finance_procurement_items` har INGEN FK tilbake til
+  // `finance_spend_records` - se migrasjonens toppkommentar for
+  // begrunnelsen om å unngå en sirkulær FK). Denne rekkefølgen ble
+  // OPPRINNELIG plassert FEIL (etter marketing_campaigns) - fanget av
+  // `growth-erasure.test.ts` sin schema-drevne FK-audit (ekte
+  // `information_schema`-spørring, ikke antatt), IKKE antatt riktig.
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND finance_spend_record_id IS NOT NULL", tv)
+  );
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND finance_recurring_commitment_id IS NOT NULL", tv)
+  );
+  add(result, "finance_spend_records", await run(client, mode, "finance_spend_records", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "finance_recurring_commitments", await run(client, mode, "finance_recurring_commitments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "finance_procurement_items", await run(client, mode, "finance_procurement_items", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-6 Finance & Spend Integrity Gateway (D-107, 038_finance.sql):
   // finans-domenet er KUNDEDATA (samme klasse som contracts/marketing_*),
@@ -335,6 +364,11 @@ export async function planTenant(client: pg.PoolClient, mode: Mode, tenantId: st
   // `messages`/`sessions`/`artifacts` over) - registreres derfor her, ikke
   // i `planMemorySpaceInContext()`.
   add(combined, "finance_kill_switch", await run(client, mode, "finance_kill_switch", "tenant_id = $1", [tenantId]));
+  // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2):
+  // `finance_spend_sync_cursors` er OGSÅ IKKE space-skopet (ETT rad per
+  // (tenant, kildefamilie), SAMME prinsipp som `finance_kill_switch` over)
+  // - registreres derfor her.
+  add(combined, "finance_spend_sync_cursors", await run(client, mode, "finance_spend_sync_cursors", "tenant_id = $1", [tenantId]));
   return combined;
 }
 

@@ -2860,6 +2860,93 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+### UA-6 Finance & Spend Integrity Gateway — ANDRE slice (Slice 2, 2026-08-25)
+
+Base `main=7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5` (PR #57 merget). ZERO ny ekstern
+leverandør, ZERO nye credentials (D-108 uendret) - HELE sliceen er `JARVIS_CANONICAL` mot to
+ALLEREDE eksisterende interne kilder Jarvis eier: `marketing_spend_events` (@jarvis/growth) og
+`cost_events` (@jarvis/model-gateway). Omfang: deterministisk synk av begge kildene til en NY,
+dedikert `finance_spend_records`-tabell; abonnements-/gjentakende forpliktelsesregister;
+anskaffelses-/forventet-utgifts-register; deterministisk avviksdeteksjon (alle 7 typer fra
+byggeordrens §8); avstemming/matching; OpenLoop-surfacing (fem nye loop_type-verdier).
+
+**§2-designvalg (dokumentert her, INGEN ny D-beslutning - byggeordrens egen tillatelse):**
+dedikert `finance_spend_records`-tabell fremfor gjenbruk av `payment_intents`. `payment_intents`
+modellerer en FREMTIDIG, eier-initiert betalingsintensjon med en eksplisitt provider-
+innsendings-lifecycle (draft -> submitted -> ...) og et eier-oppgitt `idempotency_key`. Observert
+intern utgift (annonseforbruk/AI-API-kostnad) har INGEN slik lifecycle - den har ALLEREDE skjedd,
+kommer fra en eksisterende kildetabell med SIN EGEN idempotens-nøkkel, og skal ALDRI "sendes inn"
+noe sted. En egen tabell bevarer begge domenenes presise betydning uten å korrumpere
+`payment_intents` sin state-machine/semantikk.
+
+Ny migrasjon `039_finance_spend_integrity.sql`: `finance_recurring_commitments`,
+`finance_procurement_items`, `finance_spend_records`, `finance_spend_sync_cursors` (RLS/GRANT-
+mønster identisk med `038_finance.sql`), pluss additiv utvidelse av `business_open_loops`
+(to nye nullable FK-pekerkolonner + fem nye `loop_type`-verdier). Ny `SpendService`
+(@jarvis/finance): cursor-basert inkrementell synk for begge kilder (`syncMarketingSpend()`
+sporer `marketing_spend_events.updated_at` - fanger BÅDE ny historikk OG sen-korrigerte eldre
+rader; `syncModelCost()` sporer `cost_events.cost_id`, append-only kilde, INGEN korrigering
+mulig/nødvendig), forpliktelses-/anskaffelses-CRUD + deterministiske state-maskiner
+(`spend-state-machine.ts`), `runAnomalyDetection()` (ren SQL, full erstatning av `anomaly_flags`
+per kjøring - selv-korrigerende, aldri stille akkumulerende), `matchAndReconcile()` (ambiguity-
+safe CTE: flere kandidat-forpliktelser for samme kilde-signatur etterlater raden ULØST). Ny
+`SpendTransport` (`finance_spend.*`-ToolGateway-namespace, 18 handlinger, KUN klasse A/B - INGEN
+provider-kall i dette namespacet, `JARVIS_BUSINESS_INTERNAL_TOKEN`-sentinel som resten av interne
+finance-handlinger). `OpenLoopService` (@jarvis/business) fikk fem nye SURFACE-metoder (leser
+allerede-beregnede avviksflagg, beregner INGENTING selv - samme rollefordeling som
+`detectPaymentAnomalies()`). Ny DailyScheduler-jobb `finance-spend-integrity-sweep` (kl. 04, FØR
+`business-open-loop-sweep` kl. 06 slik at de nye OpenLoop-reglene ser ferske flagg).
+§13 kill switch-distinksjon implementert og testet: `finance_kill_switch` rører ALDRI
+`SpendService` (REN passiv observasjon/regnskap - kun `FinanceService.submitPaymentIntent()`,
+en AKTIV pengeutførelse, gates av nødbryteren).
+
+**Tre reelle defekter funnet og rettet av ekte Postgres-integrasjonstester** (ikke antatt
+riktig ved skriving):
+1. **`timestamptz`-cursor-presisjonstap:** `marketing_spend_events.updated_at` har mikrosekund-
+   presisjon i Postgres, men JS `Date` (som pg sin type-parser konstruerer den TIL, og som
+   cursoren derfor lagres FRA via `.toISOString()`) har KUN millisekund-presisjon. Uten avkorting
+   på BEGGE sider av sammenligningen ville en rad med et mikrosekund-restledd ALLTID vært "større
+   enn" sin egen (avkortede) cursor-verdi - en uendelig re-synk-sløyfe som aldri konvergerer mot
+   `scanned=0`. Fikset med `date_trunc('milliseconds', updated_at)` på begge sider.
+2. **`matchAndReconcile()` sin opprinnelige per-forpliktelse-løkke** kunne stille koble en
+   utgift til FEIL forpliktelse når flere aktive forpliktelser delte samme `source_mapping`-
+   kildesignatur (f.eks. to forpliktelser begge mappet til samme `campaign_id`) - "hvilken som
+   helst forpliktelse iterasjonen traff først" vant stille, i strid med byggeordrens eget §9-krav
+   ("never silently merge ambiguous records"). Erstattet med en ambiguity-safe CTE
+   (`HAVING count(DISTINCT commitment_id) = 1`).
+3. **Erasure-plan FK-ordringsdefekt:** den nye finans-utgifts-blokken var opprinnelig plassert
+   ETTER `marketing_campaigns`-slettingen (samme relative posisjon som den EKSISTERENDE
+   `payment_intents`-blokken, som IKKE har noen FK mot `marketing_campaigns`) - men
+   `finance_spend_records.campaign_id` ER en FK mot `marketing_campaigns`, og måtte derfor slettes
+   FØR. Fanget av `growth-erasure.test.ts` sin schema-drevne `information_schema`-FK-audit
+   (oppdatert til å kjenne igjen den nye, KORREKT-registrerte avhengigheten), IKKE antatt riktig.
+
+**Testmatrise:** `spend-service.test.ts` (30 tester mot ekte embedded Postgres - kilde-synk,
+pengeintegritet, register-CRUD/state-maskiner, alle 7 avvikstyper, avstemming, kill-switch-
+distinksjon, full sveip-idempotens), `open-loop-finance-spend.test.ts` (12 tester - de fem nye
+loop_type-reglene, auto-resolve, tenant-isolasjon), `finance-spend-erasure.test.ts` (2 tester -
+ekte `ErasureService.executeErasure()` inkl. den rettede FK-rekkefølgen, + tenant-only
+cursor-tabellen), `spend-transport-wiring.test.ts` (6 tester - ToolGateway-registrering/
+risikoklasser/dispatch). **Full workspace-suite: 165 filer/2550 tester grønt** (opp fra 160/2456
+ved D-107 FØRSTE-slice-closeout). `pnpm -w typecheck` og `pnpm -w lint` rent hele workspacet.
+
+**Host-akseptanse-infrastruktur bygget** (samme tre-lags mønster som `fiken-live-host-run.ts`/
+`fiken-live.ts`): `modules/finance/scripts/spend-integrity-live-host-run.ts` (avhengighetsfri
+bootstrap-wrapper) → `spend-integrity-live.ts` (12 markører, INGEN credentials nødvendig -
+`finance_d107_invariant_preserved` re-verifiserer D-107 FØRSTE-slice-idempotens PARALLELT med de
+ti nye Slice 2-markørene per byggeordrens §16-krav). Kjørt i denne økten mot en ekte lokal
+Postgres via et embedded-postgres-harness (IKKE Docker) - alle 12 markører PASS. Ekte
+docker-compose-full-stack-kjøring på Tobias sin Windows-host gjenstår.
+
+**Terminalflagg:** `UA6_FIRST_SLICE_COMPLETE=true`, `UA6_SLICE2_IMPLEMENTATION_COMPLETE=true`,
+`UA6_COMPLETE=false` (P1/Stripe-Vipps-bank og P2/kort-wallet fortsatt ikke startet).
+`FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` (avventer Tobias sin host-kjøring).
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. `NEW_EXTERNAL_PROVIDERS=NONE`,
+`NEW_CREDENTIALS_REQUIRED=false`, `D108_DEFERRED_POLICY_PRESERVED=true`. Egen PR fra
+`origin/main` (branch `claude/ua6-slice2-internal-spend-sync`), IKKE merget.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

@@ -18,7 +18,12 @@ export type OpenLoopType =
   | "contract_review_required"
   | "marketing_spend_anomaly"
   | "payment_intent_anomaly"
-  | "payment_intent_reconciliation_mismatch";
+  | "payment_intent_reconciliation_mismatch"
+  | "finance_spend_unexpected"
+  | "finance_spend_amount_deviation"
+  | "finance_recurring_charge_missing"
+  | "finance_recurring_charge_duplicate"
+  | "finance_spend_correction_conflict";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -41,6 +46,10 @@ export interface BusinessOpenLoop {
   campaign_id: string | null;
   /** UA-6 Finance & Spend Integrity Gateway (D-107): peker til `payment_intents`, null for ikke-finans-loops. */
   payment_intent_id: string | null;
+  /** UA-6 Finance & Spend Integrity Gateway Slice 2 (039_finance_spend_integrity.sql): peker til `finance_spend_records`, null for ikke-utgifts-loops. */
+  finance_spend_record_id: string | null;
+  /** UA-6 Finance & Spend Integrity Gateway Slice 2: peker til `finance_recurring_commitments`, null for ikke-forpliktelses-loops. */
+  finance_recurring_commitment_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;

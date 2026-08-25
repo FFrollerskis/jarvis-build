@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@jarvis/business": "workspace:*",
+    "@jarvis/finance": "workspace:*",
     "@types/pg": "^8.15.6",
     "embedded-postgres": "16.14.0-beta.17"
   }

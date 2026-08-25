@@ -448,6 +448,114 @@ export class OpenLoopService {
     });
   }
 
+  /**
+   * UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2, §10 i
+   * byggeordren) §"Reuse OpenLoopService - no separate shadow task system":
+   * fem deterministiske regler mot `finance_spend_records`/
+   * `finance_recurring_commitments` - REN SQL, IKKE en pakkeavhengighet
+   * (`modules/business` kan ALDRI avhenge av `modules/finance`, SAMME
+   * presedens som `detectPaymentAnomalies()`/`detectSpendAnomalies()`
+   * over). Selve avviksflaggene ER ALLEREDE beregnet deterministisk av
+   * `SpendService.runAnomalyDetection()` (039-tabellenes `anomaly_flags`-
+   * kolonner, jsonb) - disse fem metodene SURFACER dem KUN som open-loops,
+   * de beregner INGENTING selv (samme rolle-deling som
+   * `detectPaymentAnomalies()` mot `payment_intents.anomaly_flags`).
+   */
+  async detectUnexpectedSpend(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceSpendRecordAnomaly(tenantId, memorySpace, "UNEXPECTED_SPEND", "finance_spend_unexpected", "high",
+      (row) => `Utgift på ${row.amount_ore} ${row.currency} (${row.category}) skjedde etter at en tilknyttet forpliktelse ble satt på pause/kansellert`,
+      (row) => `Gjennomgå uventet utgift ${row.spend_record_id}`);
+  }
+
+  async detectSpendAmountDeviation(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceSpendRecordAnomaly(tenantId, memorySpace, "AMOUNT_DEVIATION", "finance_spend_amount_deviation", "normal",
+      (row) => `Utgift på ${row.amount_ore} ${row.currency} (${row.category}) avviker fra tilknyttet forpliktelses forventede beløp utover toleransen`,
+      (row) => `Undersøk beløpsavvik for utgift ${row.spend_record_id}`);
+  }
+
+  async detectSpendCorrectionConflicts(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceSpendRecordAnomaly(tenantId, memorySpace, "SOURCE_CORRECTION_CONFLICT", "finance_spend_correction_conflict", "high",
+      (row) => `Kilden korrigerte utgift ${row.spend_record_id} (${row.category}) ETTER at posten allerede var avstemt - uløst konflikt, IKKE stille overskrevet`,
+      (row) => `Løs kildekorreksjonskonflikt for utgift ${row.spend_record_id}`);
+  }
+
+  private async surfaceSpendRecordAnomaly(
+    tenantId: string, memorySpace: MemorySpace, flag: string, loopType: OpenLoopType, priority: OpenLoopPriority,
+    reason: (row: SpendRecordAnomalyRow) => string, nextAction: (row: SpendRecordAnomalyRow) => string
+  ): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // `finance_spend_records` har BEVISST INGEN `owner_person_id`-kolonne
+      // (039_finance_spend_integrity.sql - en observert utgiftspost speiler
+      // en allerede-skjedd hendelse fra en delt kilde, ikke en eier-tilordnet
+      // disposisjon som en forpliktelse/anskaffelse) - loopen opprettes derfor
+      // UTEN eier (samme "ingen gjettet eier"-prinsipp som resten av Q-26-grensen).
+      const { rows } = await client.query(
+        `SELECT spend_record_id, campaign_id, amount_ore, currency, category
+         FROM finance_spend_records WHERE tenant_id = $1 AND memory_space_id = $2 AND anomaly_flags @> $3::jsonb`,
+        [tenantId, memorySpace, JSON.stringify([flag])]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as SpendRecordAnomalyRow[]) {
+        const detectionKey = `${loopType}:${row.spend_record_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: row.campaign_id,
+          finance_spend_record_id: row.spend_record_id, loop_type: loopType, detection_key: detectionKey,
+          reason: reason(row), next_action: nextAction(row), priority, owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  async detectMissingRecurringCharges(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceCommitmentAnomaly(tenantId, memorySpace, "MISSING_EXPECTED_SPEND", "finance_recurring_charge_missing", "high",
+      (row) => `Forpliktelse "${row.description}" til ${row.vendor_name} (${row.expected_amount_ore} ${row.currency}) har uteblitt lenger enn forventet belastningsvindu`,
+      (row) => `Undersøk uteblitt belastning for forpliktelse ${row.commitment_id}`);
+  }
+
+  async detectDuplicateRecurringCharges(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceCommitmentAnomaly(tenantId, memorySpace, "DUPLICATE_RECURRING_CHARGE", "finance_recurring_charge_duplicate", "high",
+      (row) => `Forpliktelse "${row.description}" til ${row.vendor_name} har flere koblede utgifter innenfor samme kadanse-periode - mulig dobbelbelastning`,
+      (row) => `Undersøk mulig dobbelbelastning for forpliktelse ${row.commitment_id}`);
+  }
+
+  private async surfaceCommitmentAnomaly(
+    tenantId: string, memorySpace: MemorySpace, flag: string, loopType: OpenLoopType, priority: OpenLoopPriority,
+    reason: (row: CommitmentAnomalyRow) => string, nextAction: (row: CommitmentAnomalyRow) => string
+  ): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT commitment_id, vendor_name, description, expected_amount_ore, currency, owner_person_id
+         FROM finance_recurring_commitments WHERE tenant_id = $1 AND memory_space_id = $2 AND anomaly_flags @> $3::jsonb`,
+        [tenantId, memorySpace, JSON.stringify([flag])]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as CommitmentAnomalyRow[]) {
+        const detectionKey = `${loopType}:${row.commitment_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          finance_recurring_commitment_id: row.commitment_id, loop_type: loopType, detection_key: detectionKey,
+          reason: reason(row), next_action: nextAction(row), priority, owner_person_id: row.owner_person_id, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
   /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
   async runSweep(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     const results = [
@@ -476,7 +584,20 @@ export class OpenLoopService {
       // UA-6 Finance & Spend Integrity Gateway (D-107): samme prinsipp -
       // regelen kjøres i DENNE sveipen, krever `payment_intents`
       // (038_finance.sql).
-      await this.detectPaymentAnomalies(tenantId, memorySpace)
+      await this.detectPaymentAnomalies(tenantId, memorySpace),
+      // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2):
+      // samme prinsipp - reglene kjøres i DENNE sveipen, krever
+      // `finance_spend_records`/`finance_recurring_commitments`
+      // (039_finance_spend_integrity.sql). SpendService sin egen
+      // `runFullSweep()` (synk/matching/deteksjon) kjøres FØR denne
+      // sveipen (egen DailyScheduler-jobb, tidligere klokkeslett - se
+      // apps/api/src/main.ts) slik at flaggene disse fem reglene SURFACER
+      // allerede er ferske når DENNE sveipen kjører.
+      await this.detectUnexpectedSpend(tenantId, memorySpace),
+      await this.detectSpendAmountDeviation(tenantId, memorySpace),
+      await this.detectMissingRecurringCharges(tenantId, memorySpace),
+      await this.detectDuplicateRecurringCharges(tenantId, memorySpace),
+      await this.detectSpendCorrectionConflicts(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
@@ -601,6 +722,24 @@ interface SpendAnomalyRow {
   owner_person_id: string | null;
 }
 
+/** UA-6 Finance & Spend Integrity Gateway Slice 2 (039_finance_spend_integrity.sql). */
+interface SpendRecordAnomalyRow {
+  spend_record_id: string;
+  campaign_id: string | null;
+  amount_ore: string;
+  currency: string;
+  category: string;
+}
+
+interface CommitmentAnomalyRow {
+  commitment_id: string;
+  vendor_name: string;
+  description: string;
+  expected_amount_ore: string;
+  currency: string;
+  owner_person_id: string | null;
+}
+
 interface UpsertOpenLoopInput {
   open_loop_id: string;
   tenant_id: string;
@@ -616,6 +755,9 @@ interface UpsertOpenLoopInput {
   campaign_id: string | null;
   /** UA-6 Finance & Spend Integrity Gateway (D-107): peker til `payment_intents`, null/utelatt for ikke-finans-loops. Valgfri (default null) for aa unngaa aa roere de 6 eksisterende kallstedene. */
   payment_intent_id?: string | null;
+  /** UA-6 Finance & Spend Integrity Gateway Slice 2: peker til `finance_spend_records`/`finance_recurring_commitments`, null/utelatt for ikke-utgifts-loops. */
+  finance_spend_record_id?: string | null;
+  finance_recurring_commitment_id?: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -629,8 +771,9 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
   const { rows } = await client.query(
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
-        ticket_id, contract_id, campaign_id, payment_intent_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
+        loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -643,7 +786,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     [
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
-      input.payment_intent_id ?? null, input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
+      input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
+      input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );
   return (rows[0] as { inserted: boolean }).inserted ? "inserted" : "updated";

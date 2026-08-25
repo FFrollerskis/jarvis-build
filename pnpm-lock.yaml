@@ -276,6 +276,9 @@ importers:
       '@jarvis/business':
         specifier: workspace:*
         version: link:../business
+      '@jarvis/finance':
+        specifier: workspace:*
+        version: link:../finance
       '@types/pg':
         specifier: ^8.15.6
         version: 8.21.0

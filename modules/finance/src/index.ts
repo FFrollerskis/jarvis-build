@@ -4,3 +4,8 @@ export * from "./fiken-oauth.ts";
 export * from "./fiken-transport.ts";
 export * from "./service.ts";
 export * from "./transport.ts";
+export * from "./spend-types.ts";
+export * from "./spend-state-machine.ts";
+export * from "./spend-service.ts";
+export * from "./spend-transport.ts";
+export * from "./spend-sweep.ts";

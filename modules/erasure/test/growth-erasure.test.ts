@@ -95,7 +95,14 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
     const known = new Set([
       "business_open_loops", "marketing_spend_events", "marketing_attributions", "marketing_experiments",
       "marketing_campaign_events", "marketing_campaign_tracking_tags", "marketing_campaign_action_recommendations",
-      "marketing_campaign_execution_commands", "marketing_campaign_observations"
+      "marketing_campaign_execution_commands", "marketing_campaign_observations",
+      // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2,
+      // 039_finance_spend_integrity.sql): `finance_spend_records.campaign_id`
+      // er en BEVISST, valgfri kampanje-kobling for kildefamilien 'marketing'
+      // - REGISTRERT i erasure-planen (plan.ts) FØR `marketing_campaigns`
+      // slettes (samme "child-før-parent"-lærdom denne testen selv beviser
+      // for de andre marketing_*-barnetabellene).
+      "finance_spend_records"
     ]);
     const unexpected = (rows as Array<{ dependent_table: string }>).filter((r) => !known.has(r.dependent_table));
     expect(unexpected).toHaveLength(0);

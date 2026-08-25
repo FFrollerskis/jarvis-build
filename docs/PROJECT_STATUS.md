@@ -1,5 +1,107 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-25 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — ANDRE
+SLICE (Slice 2) HOST-VERIFISERT.** Tobias kjørte ekte `docker compose`-basert
+host-akseptanse mot PR #58 sin faktiske kode (`d324f49c6bebe3ce75f2b3e846b9f1e74447fb41`,
+verifisert eksakt SHA-match + rent arbeidstre FØR kjøring, fail-closed ellers).
+`run_id=05e33a86`: **alle 12 markører PASS**, `hard_fail=false`,
+`runtime_current_user=jarvis_runtime`. `finance_d107_invariant_preserved=PASS`
+bekrefter D-107 FØRSTE-slice sin idempotens-invariant uendret. ZERO
+Fiken/Google Ads-credentials involvert. Full kvalitetsport re-verifisert PÅ
+denne eksakte host-testede SHA-en: `pnpm -w typecheck` 20/20 pakker rent,
+`pnpm -w lint` rent, full suite 165/166 filer/2547/2556 tester grønt (ett
+fil-nivå-flake i en UBERØRT testfil, bekreftet ikke-regresjon ved isolert
+re-kjøring - 9/9 grønt alene). **`UA6_SLICE2_HOST_VERIFIED=true`,
+`UA6_SLICE2_STATUS=CANONICAL/HOST_VERIFIED/COMPLETE`, `UA6_COMPLETE=false`
+uendret** (kun to sliceer av UA-6 - bank/Stripe/Vipps P1 og kort/wallet P2
+fortsatt ikke startet). **`MERGE_READY=true` - PR #58 MERGES IKKE uten
+Tobias sin eksplisitte godkjenning.**
+
+**Runden før det (samme dag, implementasjon + CI):** UA-6 FINANCE & SPEND
+INTEGRITY GATEWAY — ANDRE slice (Slice 2) implementert: intern utgifts-synk
+(marketing/model_cost) + abonnements-/anskaffelsesregister + deterministisk
+avviksdeteksjon (alle 7 typer) + avstemming + OpenLoop-surfacing.
+`UA6_FIRST_SLICE_COMPLETE=true`, `UA6_SLICE2_IMPLEMENTATION_COMPLETE=true`,
+`UA6_COMPLETE=false`.
+
+**Utfall:** Base `main=7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5` (PR #57
+merget). ZERO ny ekstern leverandør, ZERO nye credentials (D-108 uendret) -
+HELE sliceen er `JARVIS_CANONICAL` mot to ALLEREDE eksisterende interne
+kilder: `marketing_spend_events` (@jarvis/growth) og `cost_events`
+(@jarvis/model-gateway). §2-designvalg (uten ny D-beslutning, se
+byggeordrens egen tillatelse): DEDIKERT `finance_spend_records`-tabell
+fremfor gjenbruk av `payment_intents` (se `039_finance_spend_integrity.sql`
+sin toppkommentar for full begrunnelse - `payment_intents` sin provider-
+innsendings-state-machine ville korrumperes av allerede-skjedd, observert
+utgift).
+
+Ny migrasjon `039_finance_spend_integrity.sql`: `finance_recurring_commitments`,
+`finance_procurement_items`, `finance_spend_records`, `finance_spend_sync_cursors`
+(alle RLS/GRANT-mønsteret identisk med `038_finance.sql`), pluss to nye
+nullable FK-pekerkolonner + fem nye `loop_type`-verdier på
+`business_open_loops` (`finance_spend_unexpected`,
+`finance_spend_amount_deviation`, `finance_recurring_charge_missing`,
+`finance_recurring_charge_duplicate`, `finance_spend_correction_conflict`).
+Ny `SpendService` (@jarvis/finance): `syncMarketingSpend()`/`syncModelCost()`
+(cursor-basert, inkrementell, retry-trygg, sen-korrigering-bevisst via
+`source_correction_state`), forpliktelses-/anskaffelses-CRUD +
+deterministiske state-maskiner, `runAnomalyDetection()` (alle 7 avvikstyper
+fra byggeordrens §8, ren SQL - INGEN AI-inferens), `matchAndReconcile()`
+(ambiguity-safe - flere kandidat-forpliktelser for samme kilde-signatur
+etterlater raden ULØST, aldri en stille gjetning). Ny `SpendTransport`
+(`finance_spend.*`-ToolGateway-namespace, 18 handlinger, KUN klasse A/B -
+INGEN provider-kall i dette namespacet). `OpenLoopService` (@jarvis/business)
+fikk fem nye SURFACE-metoder (leser ALLEREDE-beregnede avviksflagg fra
+`finance_spend_records`/`finance_recurring_commitments`, beregner
+INGENTING selv - samme rollefordeling som `detectPaymentAnomalies()`).
+Ny DailyScheduler-jobb `finance-spend-integrity-sweep` (kl. 04, FØR
+`business-open-loop-sweep` kl. 06) kjører `SpendService.runFullSweep()`
+for alle bedrifts-tenants. Kill switch-distinksjon (byggeordrens §13)
+implementert og testet: `finance_kill_switch` rører ALDRI `SpendService`
+(REN passiv observasjon/regnskap).
+
+Tre reelle defekter funnet og rettet UNDERVEIS av ekte Postgres-
+integrasjonstester (ikke antatt riktig ved skriving): (1) `timestamptz`-
+cursor-presisjonstap (JS `Date.toISOString()` mister mikrosekunder som
+Postgres selv beholder - uendelig re-synk-sløyfe, rettet med
+`date_trunc('milliseconds', ...)` på begge sider av sammenligningen);
+(2) `matchAndReconcile()` sin opprinnelige per-forpliktelse-løkke kunne
+stille koble en utgift til FEIL forpliktelse når flere aktive
+forpliktelser delte samme `source_mapping`-kildesignatur - erstattet med
+en ambiguity-safe CTE (`HAVING count(DISTINCT commitment_id) = 1`);
+(3) erasure-planens nye finans-utgifts-blokk var opprinnelig plassert
+ETTER `marketing_campaigns`-slettingen, til tross for en NY FK
+(`finance_spend_records.campaign_id`) som krever motsatt rekkefølge -
+fanget av `growth-erasure.test.ts` sin schema-drevne FK-audit, flyttet
+FØR. Full test-matrise (spend-service.test.ts 30 tester,
+open-loop-finance-spend.test.ts 12 tester, finance-spend-erasure.test.ts
+2 tester, spend-transport-wiring.test.ts 6 tester) + FULL eksisterende
+regresjonssuite (165 filer/2550 tester) grønn, `pnpm typecheck`/`pnpm
+lint` rene. Live host-akseptanse (`spend-integrity-live.ts`, 12 markører
+inkl. D-107-invariant-bevaring) verifisert mot en ekte lokal Postgres i
+denne økten (embedded-postgres-harness, IKKE Docker - ekte
+docker-compose-kjøring på Tobias sin host gjenstår, se
+`spend-integrity-live-host-run.ts`). D-108 uendret: ingen Fiken/Google
+Ads-live-krav rørt av denne sliceen.
+
+**Branch/PR/CI:** `claude/ua6-slice2-internal-spend-sync`, draft PR #58,
+HEAD `d324f49c6bebe3ce75f2b3e846b9f1e74447fb41` (base `main`
+`7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5`). CI grønn på denne eksakte
+HEAD-en (gitleaks + windows-git-auth + build-test på både push- og
+pull_request-triggeret kjøring). `build-test` traff samme
+`ECONNREFUSED`-embedded-Postgres-parallellitetsflake FIRE ganger totalt på
+tvers av begge commitene i denne PR-en (fire FORSKJELLIGE, uendrede,
+ikke-berørte testfiler hver gang - `data-foundation.test.ts`,
+`github-source.test.ts`, `fase8-device.test.ts`, samt
+`scoring-idempotency-rls.test.ts` lokalt under closeout-re-verifiseringen,
+sistnevnte bekreftet 9/9 grønt isolert) - IKKE en regresjon fra denne
+sliceen, bekreftet grønn ved re-kjøring hver gang. Ingen review-kommentarer.
+Ekte Docker-basert host-akseptanse kjørt av Tobias mot NØYAKTIG denne
+HEAD-en, alle 12 markører PASS (se hoveddetalj over). **`MERGE_READY=true`
+- MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+---
+
 **Oppdatert:** 2026-08-25 (**D-108: EXTERNAL_CREDENTIAL_SETUP_POLICY=
 DEFER_UNTIL_FINAL_INTEGRATION_PHASE (permanent planleggingsregel) + PR #57
 klargjort for merge med utsatt Fiken-live-gate.**)
