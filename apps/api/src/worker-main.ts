@@ -11,6 +11,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
@@ -136,6 +137,18 @@ const consentEnforcementService = new ConsentEnforcementService(pool, consentSer
 // growth.*-handlingene identisk. D-92: consentEnforcementService injisert
 // identisk med apps/api/src/main.ts.
 const growthService = new GrowthService(pool, consentEnforcementService);
+// UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster
+// som apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne
+// kalle finance.*-handlingene identisk.
+const financeService = new FinanceService(pool);
+const fikenCredentialsProvider: FikenCredentialsProvider = {
+  async getCredentials(): Promise<FikenCredentials | null> {
+    const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
+    const companySlug = process.env["JARVIS_FIKEN_COMPANY_SLUG"];
+    if (!refreshToken || !companySlug) return null;
+    return { refreshToken, companySlug };
+  }
+};
 // D-97: identisk wiring-mønster som apps/api/src/main.ts - SAMME pool, altsaa
 // SAMME delte github_rate_limit_state-rad paa tvers av api/worker-prosessene.
 const githubRateLimitController = new GithubRateLimitController(
@@ -161,6 +174,8 @@ for (const tool of firstWaveTools({
   growth: new GrowthTransport(growthService),
   // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
   googleads: new GoogleAdsTransport(growthService),
+  // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
+  finance: new FinanceTransport(financeService, fikenCredentialsProvider),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.

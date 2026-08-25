@@ -39,6 +39,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
   GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
@@ -213,6 +214,24 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // blokkerende når eieren faktisk har aktivert 'enforce' for et gitt
   // tenant/space/formål (se D-92 i DECISIONS_AND_ASSUMPTIONS.md).
   const growthService = new GrowthService(pool, consentEnforcementService);
+  // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107): egen
+  // tjeneste over SAMME runtime-pool, ingen ny motor - avviks-/avstemming-
+  // deteksjon gjenbruker OpenLoopService (payment_intent_anomaly/
+  // payment_intent_reconciliation_mismatch-reglene) uendret. Fiken er
+  // masterplan-navngitt P0-connector (IKKE et Claude-valgt leverandørvalg),
+  // ETT globalt eier-tilkoblet credential-par (SAMME "single-owner, ikke
+  // multi-kunde-SaaS"-mønster som JARVIS_GOOGLE_ADS_REFRESH_TOKEN) - INGEN
+  // tenant-parametrisert oppslag i denne sliceen (kun én Tobias-eid Fiken-
+  // konto er i scope).
+  const financeService = new FinanceService(pool);
+  const fikenCredentialsProvider: FikenCredentialsProvider = {
+    async getCredentials(): Promise<FikenCredentials | null> {
+      const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
+      const companySlug = process.env["JARVIS_FIKEN_COMPANY_SLUG"];
+      if (!refreshToken || !companySlug) return null;
+      return { refreshToken, companySlug };
+    }
+  };
   // D-97: sentralisert GitHub rate-limit-kontroller - Postgres-baaret delt
   // tilstand (SHARED_RUNTIME, deles med worker-main.ts sin egen instans over
   // SAMME pool/tabell). `onTransition` er en bevisst minimal operativ-
@@ -245,6 +264,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
     // nøstet klasse D-handling i denne sliceen).
     googleads: new GoogleAdsTransport(growthService),
+    // UA-6 Finance & Spend Integrity Gateway (D-107): SAMME lat/enkel-
+    // avhengighet-mønster som GrowthTransport/GoogleAdsTransport over -
+    // INGEN toolGateway/ToolInvocationContext (ingen nøstet klasse D-
+    // handling i denne sliceen - `submit_payment_intent` sin klasse D er
+    // selve handlingen, ikke en nøstet under-handling).
+    finance: new FinanceTransport(financeService, fikenCredentialsProvider),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,

@@ -1,5 +1,98 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-25 (**D-108: EXTERNAL_CREDENTIAL_SETUP_POLICY=
+DEFER_UNTIL_FINAL_INTEGRATION_PHASE (permanent planleggingsregel) + PR #57
+klargjort for merge med utsatt Fiken-live-gate.**)
+
+**Utfall:** Tobias har besluttet at eksternt credential-arbeid (API-nøkler,
+OAuth-grants, developer-tokens, kontooppsett) som ikke er nødvendig for å
+fortsette å bygge Jarvis, utsettes til én konsolidert «External Integrations
+& Credentials»-fase nær slutten av masterplanen. Integrasjoner bygges og
+suite-/host-verifiseres fullt ut NÅ; utsatte live-gates merkes eksplisitt
+`PENDING_CREDENTIALS`/`DEFERRED_LIVE_VERIFICATION` og samles i den NYE
+kanoniske sjekklisten i `RUNTIME_GATES.md` §«FINAL INTEGRATION &
+CREDENTIALS PHASE» (per nå: Fiken D-107, Google Ads D-86, GitHub D-94).
+**Fiken-status (ærlig):** `FIKEN_IMPLEMENTATION_COMPLETE=true`,
+`FIKEN_OAUTH_IMPLEMENTATION_COMPLETE=true` (dok-verifisert Basic-auth +
+`fiken-reauth.ts`-bootstrap), `FIKEN_CANONICAL_DOMAIN_HOST_VERIFIED=true`
+(alle åtte credential-uavhengige gater PASS live på Tobias sin host),
+`FIKEN_LIVE_VERIFIED=false`, `FIKEN_LIVE_GATE=PENDING_CREDENTIALS`,
+`FIKEN_CREDENTIAL_SETUP_DEFERRED=true`. PR #57 (fire kodecommits: slice-1
++ tre host-fixes, CI grønn på `0916551`) merges med Tobias sin eksplisitte
+godkjenning i denne økten - `UA6_COMPLETE=false` uendret (kun første
+slice; bank/Stripe/Vipps P1 og kort/wallet P2 ikke startet).
+Tools/ToolGateway-utvidelse, MCP og «Skills» er bevart som eksplisitte
+backlog-punkter i samme RUNTIME_GATES-seksjon (D-108) - ingen spekulativ
+arkitektur bygget. Full detalj: D-108 i `DECISIONS_AND_ASSUMPTIONS.md`.
+
+---
+
+**Oppdatert:** 2026-08-24 (**UA-6 D-107 HOST-FIX #1 på PR #57: to lagvise
+root causes bak `did_not_return_external_id`-host-feilene funnet og rettet —
+én host-script-defekt (bar `EnvSecretProvider` i stedet for produksjonens
+`FallbackSecretProvider(env, BusinessInternalSecretProvider)` →
+`credential_unavailable` for hvert internt finance-kall) og én EKTE
+produksjonsdefekt i `FinanceTransport` (`Number(requireString(...))` for
+z.number()-parameteren `amount_ore` kastet for HVERT ekte ToolGateway-kall;
+samme latente feilklasse i `matched`-håndteringen også rettet). 10 nye
+regresjonstester (`toolgateway-live-wiring.test.ts`) reproduserer den
+eksakte host-feilen og beviser hele finance.*-kontrakten (`{ok:true,
+external_id: payment_intent_id, data}`) gjennom EKTE ToolGateway med
+produksjons-secret-sammensetning. `JARVIS_CANONICAL_DOMAIN_VERIFIED=false`
+til Tobias sin re-kjøring; `FIKEN_LIVE_VERIFIED=false` uendret. Samme PR
+#57, IKKE merget. Full detalj: D-107 HOST-FIX #1 i
+DECISIONS_AND_ASSUMPTIONS.md.**)
+
+---
+
+**Oppdatert:** 2026-08-24 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY —
+FØRSTE vertikale slice startet på eksplisitt ordre fra Tobias: Payment/Spend
+Intent-domene + Fiken (regnskap NO) som P0-leverandør — `UA6_STARTED=true`,
+`UA6_COMPLETE=false`.**)
+
+**Utfall:** UA-6 rekonstruert fra repository-sannhet (masterplan-dokumentet,
+ikke samtalehukommelse). D-64-porten kjørt FØRST: `SOR=
+HYBRID_WITH_CLEAR_AUTHORITY` (Jarvis eier Payment/Spend Intent-domenet,
+idempotens, anomalideteksjon, avstemming, nødbryter, audit; Fiken eier det
+lovpålagte bokførte regnskapet), `CORE_DEPENDENCY_DECISION_REQUIRED=false`
+(Fiken masterplan-navngitt P0, ikke et bekvemmelighetsvalg). D-41-audit av
+Fiken sitt API: primærkilden `api.fiken.no` var `EGRESS_BLOCKED`, falt
+eksplisitt tilbake til Fikens egen swagger.json speilet i en GitHub-
+community-klient (lavere tillitsnivå, merket som sådan) — `POST /purchases`
+BEVISST IKKE implementert (intet pålitelig skjema kunne verifiseres, D-41
+nekter gjetting). Bygget: migrasjon `038_finance.sql`, ny pakke
+`@jarvis/finance` (types/state-machine/`FikenTransport`/`FinanceService`/
+`FinanceTransport`), 10 `finance.*` ToolGateway-handlinger (risikoklasse D
+for `submit_payment_intent`/nødbryter), `OpenLoopService.
+detectPaymentAnomalies()`, Q-20 erasure-plan utvidet, `apps/api` wiret.
+**Tre ekte produksjonsbugs funnet og fikset via faktisk testkjøring** (ikke
+kodegjennomgang): RLS-kontekst-brudd på `finance_kill_switch`, `bigint`→
+streng pg-koersjonsbug i Fiken-postering, og en kryss-tilkoblings FK-
+radlås-selvlåsing (nøstet transaksjon ventet på en radlås den ytre,
+JS-suspenderte transaksjonen aldri ville sluppet — fikset ved å skrive
+hendelsen på samme transaksjon og returnere et diskriminert resultat i
+stedet for å kaste inne i transaksjonen). 53 nye finance-domenetester + 9
+nye open-loop-tester. **Full workspace-suite: 160 filer/2456 tester grønt**
+(opp fra 159/2445 ved forrige D-106-closeout, ingen regresjon — én isolert
+kjent ECONNREFUSED-klasse hook-timeout-flake på `business-brief.test.ts`
+under samtidig kjøring ble reprodusert som IKKE finance-relatert og bekreftet
+grønn i isolert kjøring), `pnpm -w typecheck`/`pnpm -w lint` rent.
+Host-akseptanse-infrastruktur bygget (`fiken-live-host-run.ts`→
+`fiken-live.ts`→`lib/fiken-live-lib.ts`, samme tre-lags mønster som
+Google Ads) — beviser HELE JARVIS_CANONICAL-domenet uavhengig av Fiken-
+credentials; Fiken har INGEN dokumentert sandbox, så et ekte Fiken-
+skriveforsøk gjøres ALDRI av scriptet selv med opt-in satt.
+`FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` (avventer Tobias sin
+host-kjøring), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. Egen
+branch fra `origin/main` (`claude/ua6-finance-core-fiken`), draft-PR
+opprettes i denne økten, IKKE merget. **Denne sliceen bygger KUN Fiken/P0**
+— bank/åpen bank, Stripe, Vipps (P1) og programmerbart kort/wallet (P2) er
+IKKE startet; `UA6_COMPLETE` forblir `false` til flere leverandørspor og
+alle fem akseptansekriterier er dekket. Full detalj: D-107 i
+`DECISIONS_AND_ASSUMPTIONS.md`.
+
+---
+
 **Oppdatert:** 2026-08-24 (**D-106 COUNCIL RELIABILITY CLOSEOUT: PR #55
 MERGET, ekte fem-familie host-akseptanse BESTÅTT — `D106_COMPLETE=true`.**)
 

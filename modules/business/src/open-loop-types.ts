@@ -16,7 +16,9 @@ export type OpenLoopType =
   | "contract_termination_deadline"
   | "contract_obligation_due"
   | "contract_review_required"
-  | "marketing_spend_anomaly";
+  | "marketing_spend_anomaly"
+  | "payment_intent_anomaly"
+  | "payment_intent_reconciliation_mismatch";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -37,6 +39,8 @@ export interface BusinessOpenLoop {
   contract_id: string | null;
   /** UA-4 Native Growth Core (D-74): peker til `marketing_campaigns`, null for ikke-vekst-loops. */
   campaign_id: string | null;
+  /** UA-6 Finance & Spend Integrity Gateway (D-107): peker til `payment_intents`, null for ikke-finans-loops. */
+  payment_intent_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;

@@ -2735,6 +2735,131 @@ closeouten - ren dokumentasjons-/kanoniseringsoppdatering. Full detalj: D-105-ra
 
 ---
 
+### UA-6 — FINANCE & SPEND INTEGRITY GATEWAY: FØRSTE VERTIKALE SLICE (2026-08-24)
+
+Eksplisitt ordre fra Tobias om å begynne UA-6 - rekonstruert FRA REPOSITORY-SANNHET (masterplan
+`docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` linje 508-523), ikke fra samtalehukommelse.
+UA-6 sine fem akseptansekriterier: (1) retry kan aldri dobbeltbetale; (2) hver pengehandling kartlegges
+intent→leverandørforespørsel→utfall→regnskap/avstemming; (3) feil konto/leverandør/beløpsformat/duplikat
+fanges deterministisk; (4) eksterne BankID/KYC/PSD2-kontroller respekteres; (5) finans-nødbryter stopper
+nye transaksjoner umiddelbart. Leverandørprioritet fra masterplanen: Fiken (regnskap) = P0, bank/åpen
+bank + Stripe + Vipps = P1, programmerbart kort/wallet = P2.
+
+**Denne sliceen bygger P0 (Fiken) fullstendig vertikalt** - domenemodell→persistens→service/
+orkestrering→policy→tenant-isolasjon→ToolGateway→runtime/API-overflate→audit/proveniens→feilhåndtering→
+tester→dokumentasjon, samt kriterium 1/2/3/5 for Fiken-sporet (kriterium 4 ikke relevant for et rent
+regnskapsspor - ingen betalingsbevegelse, kun bokføring; blir relevant først ved bank/Stripe/Vipps P1).
+**Bygges IKKE denne sliceen** (eksplisitt DEFERRED/PARTIAL, aldri stille utelatt): `POST /purchases`
+(bilagsregistrering via Fiken - intet pålitelig request-body-skjema kunne D-41-verifiseres); bank/åpen
+bank-leverandør (P1); Stripe betalinger/abonnement (P1); Vipps/MobilePay (P1); programmerbart
+bedriftskort/wallet (P2); owner-konfigurerbare budsjetter/tak (Sovereign Mode støtter fortsatt ingen
+intern kunstig grense - D-41 Owner Connector Capability Invariant uendret).
+
+**D-64-porten kjørt FØRST:** `CAPABILITY=`regnskapsføring/bilagsposering; `JARVIS_CORE=`Payment/Spend
+Intent-domenemodell, idempotensgaranti, deterministisk anomalideteksjon, avstemmingstilstand, eier-
+nødbryter, audit/proveniens; `EXTERNAL_ROLE=`det offisielle bokførte regnskapet under norsk
+bokføringslov; `SYSTEM_OF_RECORD=HYBRID_WITH_CLEAR_AUTHORITY`. `CORE_DEPENDENCY_DECISION_REQUIRED=false`
+- Fiken var masterplan-navngitt P0-leverandør, ikke et Claude-valgt bekvemmelighetsvalg (samme presedens
+som tidligere Google Ads/Zendesk-klasse-beslutninger).
+
+**D-41-audit (anti-gjetting):** direkte `WebFetch` mot `api.fiken.no` var `EGRESS_BLOCKED` denne økten.
+Falt eksplisitt tilbake til Fikens EGEN swagger.json speilet uendret i en GitHub-hostet community-TS-
+klient (`bjerkio/fiken-js`) - lavere tillitsnivå (`VERIFIED_SEARCH_SNIPPET`, ikke
+`VERIFIED_PRIMARY_SOURCE`), merket som sådan i kildekodekommentarer. Verifisert: OAuth2
+`authorization_code`/`refresh_token`-grants mot `https://fiken.no/oauth/{authorize,token}`, scopes
+`read`/`write`, personlig API-token (Bearer) som alternativ (IKKE brukt - ekte OAuth valgt for
+eierkonto-korrekthet), base `https://api.fiken.no/api/v2`, ressurser adressert via
+`/companies/{companySlug}/...`. Les-endepunkter: `/companies`, `/companies/{slug}/contacts`,
+`/companies/{slug}/bankAccounts`, `/companies/{slug}/journalEntries`. Skriv-endepunkt:
+`POST /companies/{slug}/generalJournalEntries` (fri postering - den generiske journalpost-mekanismen,
+IKKE en spesifikk bilag-/faktura-postering). Kontokode-format verifisert som `NNNN` eller `NNNN:NNNNN`
+(reskontro).
+
+**Bygget:** migrasjon `038_finance.sql` (`payment_intents`/`payment_intent_events`/`finance_kill_switch`,
+full RLS FORCE + tenant/space-policyer på de to første, tenant-only-policy på nødbryteren som BEVISST
+ikke er space-scopet - en finans-nødbryter er kontobred, ikke et minnerom-konsept); ny selvstendig pakke
+`@jarvis/finance` (`types.ts`/`state-machine.ts`/`fiken-transport.ts`/`service.ts`/`transport.ts`) - egen
+`modules/finance`-pakke per etablert konvensjon (`@jarvis/contracts` er ALLEREDE den delte kryssgående
+type-kontrakt-pakken, IKKE et domenenavn - samme presedens som `modules/agreements`); state-machine er
+BEVISST strengere enn tidligere domener - `settled`/`failed`/`cancelled` er terminal UTEN
+admin-korrigeringsvei tilbake til draft, siden en ekte pengehandling ikke kan avposteres. 10 nye
+`finance.*` ToolGateway-handlinger (risikoklasse A for lesing, B for interne skrivinger som
+opprettelse/kansellering/avstemming, D for `submit_payment_intent` - `reversible:false`, ingen
+automatisk rollback bygget denne sliceen - og for `enable_kill_switch`/`disable_kill_switch`).
+`OpenLoopService.detectPaymentAnomalies()` (nytt anomali-/avstemmingsavvik-regelsett, samme
+upsert-/auto-resolve-mønster som eksisterende growth-/support-/contract-regler). Q-20 erasure-plan
+utvidet (`payment_intent_events`/`payment_intents` i minnerom-sletting, filtrert `business_open_loops`-
+rad, `finance_kill_switch` i tenant-nivå-sletting siden den ikke er space-scopet). `apps/api`
+`main.ts`/`worker-main.ts` wiret identisk (transport + `FikenCredentialsProvider` lest fra
+`JARVIS_FIKEN_REFRESH_TOKEN`/`JARVIS_FIKEN_COMPANY_SLUG`-env).
+
+**Tre ekte produksjonsbugs funnet OG fikset via faktisk testkjøring mot embedded Postgres** (ikke bare
+kodegjennomgang - nøyaktig den type feilklasse som ville forårsaket en reell produksjonshendelse: en
+hengende API-forespørsel under aktiv nødbryter-tilstand):
+1. **RLS-brudd på `finance_kill_switch`:** `enableKillSwitch`/`disableKillSwitch`/`getKillSwitch` kalte
+   opprinnelig `pool.query()` direkte uten noensinne å sette `jarvis.tenant_id`-sesjonskonfigurasjonen,
+   så RLS-policyen sammenlignet mot NULL og avviste hver skriving. Fikset med ny `withTenantContext()`-
+   hjelpefunksjon (samme BEGIN/set_config/COMMIT-eller-ROLLBACK/release-mønster som
+   `withMemoryTransaction`, minus rom-kravet - en tenant-scopet men bevisst IKKE rom-scopet RLS-
+   transaksjonsprimitiv som ikke fantes i `@jarvis/memory` fra før).
+2. **`bigint`→streng pg-koersjonsbug:** `amount_ore bigint`-kolonner returneres av `pg` som
+   JavaScript-strenger (ingen global OID-20-typeparser registrert noe sted i `@jarvis/core` - samme
+   kjente, pre-eksisterende egenskap som allerede påvirker growth sin `spend_amount_ore`, håndtert der
+   via eksplisitt `Number()`-cast ved bruksstedet). Fikset identisk: eksplisitt `Number(current.amount_
+   ore)`-cast i `submitPaymentIntent()` rett før Fiken-journalpostlinjene konstrueres.
+3. **Kryss-tilkoblings FK-radlås-selvlåsing:** første fiksforsøk for nødbryter-hendelse-varighet skrev
+   `kill_switch_blocked`-hendelsen via en NØSTET, uavhengig `withMemoryTransaction()`-kall (en andre
+   tilkobling) FØR kasting fra den ytre transaksjonen. Dette hang genuint: den ytre transaksjonen holdt
+   `SELECT ... FOR UPDATE` på `payment_intents`-raden, og `payment_intent_events.payment_intent_id
+   REFERENCES payment_intents` betyr at den nøstede INSERT-en trengte en SHARE-lås på nøyaktig den
+   raden - som den ytre (fortsatt åpne, JS-suspenderte) transaksjonen aldri ville sluppet, siden den selv
+   ventet på at den nøstede kallets promise skulle løse seg. IKKE en Postgres-detektert deadlock (ulike
+   tilkoblinger, men "syklusen" spenner applikasjonslogikk usynlig for Postgres sin deadlock-detektor) -
+   den hang bare til timeout. Fikset ved å restrukturere `submitPaymentIntent()` til å skrive hendelsen
+   på SAMME `client`/transaksjon (ingen nøstet pool-utsjekking), returnere et diskriminert
+   `{ok:true,intent}|{ok:false,error}`-resultat i stedet for å kaste inne i transaksjonskroppen, la
+   `withMemoryTransaction` COMMIT-e normalt, deretter pakke ut og kaste `outcome.error` UTENFOR
+   transaksjonen etter at den allerede er committet.
+
+**Testmatrise:** 9 rene state-machine-tester, 28 `service-rls.test.ts`-tester mot ekte embedded Postgres
+(idempotent opprettelse, deterministisk validering, anomali-flagging, fail-closed innsendingsrekkefølge,
+nødbryter, full innsendingsflyt med verifiserte Fiken-kontolinjer, idempotent gjentatt innsending,
+terminal-tilstand-avvisning, avstemming, tenant-isolasjon, listefiltrering), 5 `transport-wiring.test.ts`-
+tester, 11 `fiken-live-lib.test.ts`-tester, pluss 9 nye `open-loop-finance.test.ts`-tester. **Full
+workspace-suite: 160 filer/2456 tester grønt** (opp fra 159/2445 ved forrige D-106-closeout - eksakt
++11 filer/+11 tester, INGEN regresjon). Én isolert hook-timeout på `business-brief.test.ts` under
+samtidig full-suite-kjøring ble undersøkt og bekreftet som en kjent ECONNREFUSED-klasse embedded-
+Postgres-ressurskonkurranse-flake (18/18 grønt i isolert kjøring av nøyaktig samme fil) - IKKE en
+finance-regresjon, ingen produktkode rørt for å "fikse" den. `pnpm -w typecheck` og `pnpm -w lint` rent
+hele workspacet.
+
+**Host-akseptanse-infrastruktur bygget** (samme tre-lags mønster som `google-ads-live-host-run.ts`/
+`google-ads-live.ts`/`google-ads-live-lib.ts`, skalert mindre til Finance sin smalere P0-overflate):
+`modules/finance/scripts/fiken-live-host-run.ts` (avhengighetsfri bootstrap-wrapper - pnpm install,
+Docker-images, migrasjoner, restart) → `fiken-live.ts` (~280 linjer - Q-21 runtime-rolle-sjekk FØRST,
+deretter beviser HELE JARVIS_CANONICAL-domenet (idempotens/validering/kill-switch/state-machine/
+avstemming/tenant-isolasjon) reelt mot Postgres via EKTE `ToolGateway.execute()`, UAVHENGIG av om Fiken-
+credentials er konfigurert; KUN hvis credentials finnes: en les-only `listCompanies()`-reachability-probe,
+ZERO mutasjon) → `lib/fiken-live-lib.ts` (rene, enhetstestede hjelpefunksjoner - `checkRequiredEnv`/
+`isLiveWriteOptedIn`/`evaluateSecretSafety`/`computeHardFail`). **Fiken har INGEN dokumentert sandbox-/
+testmodus-konsept** (i motsetning til Stripe) - D-41 sitt blast-radius-krav ("test-/akseptanseløp
+begrenses til sandbox/test-ressurser") er derfor strukturelt IKKE oppfyllbart for selve skrivehandlingen
+uten at Tobias selv setter opp en dedikert test-bedrift i sin egen Fiken-konto. Akseptansescriptet
+forsøker derfor ALDRI et ekte `submit`-skriveforsøk, selv med eksplisitt opt-in
+(`JARVIS_FIKEN_HOST_ACCEPTANCE_ALLOW_LIVE_WRITE=true`) - selve skrive-verifiseringen er BEVISST utsatt
+til en fremtidig slice der Tobias interaktivt oppgir en ekte Fiken-kontakt-ID/motkonto (utenfor denne
+sliceens omfang).
+
+**Terminalflagg:** `UA6_STARTED=true`, `UA6_COMPLETE=false` (kun P0/Fiken-sporet av fem
+akseptansekriterier bygget for kun én av tre planlagte leverandørspor; P1/P2 ikke startet).
+`FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false` (avventer Tobias sin host-kjøring av
+`fiken-live-host-run.ts`). `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET - ingen ny
+selvrapportert-sannhet-forfremmelsesregel innført av dette domenet. Egen PR fra `origin/main`
+(branch `claude/ua6-finance-core-fiken`), IKKE merget. Full detalj: D-107 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
