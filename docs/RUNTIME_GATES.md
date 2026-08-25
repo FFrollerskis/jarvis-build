@@ -104,7 +104,7 @@ bestått. Ikke-bygde integrasjoner står IKKE her (de bor i sine UA-/Q-backlogs 
 - **IKKE bevist i denne økten (avventer host):** ekte Fiken OAuth2-token-utveksling, ekte `listCompanies()`-reachability, faktisk `POST /companies/{slug}/generalJournalEntries` mot Tobias sin virkelige Fiken-konto.
 - **Terminalflagg:** `FIXED_SUITE_VERIFIED=true`, `LIVE_VERIFIED=false`, `UA6_STARTED=true`, `UA6_COMPLETE=false`.
 
-## D-107 — UA-6 FINANCE & SPEND INTEGRITY GATEWAY, ANDRE SLICE (Slice 2): SUITE-VERIFIED (2026-08-25, IKKE host-verifisert ennå)
+## D-107 — UA-6 FINANCE & SPEND INTEGRITY GATEWAY, ANDRE SLICE (Slice 2): SUITE-VERIFIED + HOST-VERIFIED (2026-08-25)
 - **Omfang:** intern utgifts-synk (marketing_spend_events/cost_events -> `finance_spend_records`), abonnements-/
   gjentakende forpliktelsesregister, anskaffelses-/forventet-utgifts-register, deterministisk avviksdeteksjon (alle
   7 typer: `DUPLICATE_SOURCE_SPEND`/`UNEXPECTED_SPEND`/`AMOUNT_DEVIATION`/`MISSING_EXPECTED_SPEND`/
@@ -114,15 +114,30 @@ bestått. Ikke-bygde integrasjoner står IKKE her (de bor i sine UA-/Q-backlogs 
 - **§2-designvalg (INGEN ny D-beslutning - byggeordrens egen tillatelse):** dedikert `finance_spend_records`-tabell
   fremfor gjenbruk av `payment_intents` - se `039_finance_spend_integrity.sql` sin toppkommentar for full
   begrunnelse.
-- **Kommando (host, kjøres av Tobias):** `node --env-file=.env --experimental-transform-types modules/finance/scripts/spend-integrity-live-host-run.ts`
-- **Bevist i denne økten (embedded Postgres-harness, IKKE Docker - ekte docker-compose-kjøring på Tobias sin host
-  gjenstår):** alle 12 markører i `spend-integrity-live.ts` PASS - `finance_d107_invariant_preserved` (D-107 FØRSTE-
-  slice-idempotens UENDRET), `finance_internal_spend_marketing_sync`, `finance_internal_spend_model_cost_sync`,
+- **Kommando (host, kjørt av Tobias):** `node --env-file=.env --experimental-transform-types modules/finance/scripts/spend-integrity-live-host-run.ts`
+- **Suite-bevist i implementasjonsøkten (embedded Postgres-harness, IKKE Docker):** alle 12 markører i
+  `spend-integrity-live.ts` PASS - `finance_d107_invariant_preserved` (D-107 FØRSTE-slice-idempotens UENDRET),
+  `finance_internal_spend_marketing_sync`, `finance_internal_spend_model_cost_sync`,
   `finance_internal_spend_idempotency`, `finance_subscription_registry`, `finance_procurement_registry`,
   `finance_spend_anomaly_detection`, `finance_spend_reconciliation`, `finance_spend_openloop`,
   `finance_spend_tenant_isolation`, `finance_spend_cleanup`. Full test-matrise (50 nye tester på tvers av
   `spend-service.test.ts`/`open-loop-finance-spend.test.ts`/`finance-spend-erasure.test.ts`/
   `spend-transport-wiring.test.ts`) + FULL eksisterende regresjonssuite (165 filer/2550 tester) grønn.
+- **HOST-BEVIST (2026-08-25, Tobias, ekte `docker compose`-basert kjøring mot PR #58 sin faktiske kode - verifisert
+  eksakt commit-SHA-match `d324f49c6bebe3ce75f2b3e846b9f1e74447fb41` FØR noe kjørte, fail-closed ellers,
+  `git status --porcelain` bekreftet rent FØR kjøring):** `run_id=05e33a86`. Ferske `migrate`/`api`/`worker`-images
+  bygget fra denne commiten, migrasjoner kjørt via admin-rollen, `spend-integrity-live.ts` kjørt mot den ekte
+  containeriserte stacken. **Alle 12 markører PASS**, `hard_fail=false`, `runtime_current_user=jarvis_runtime`
+  (NOSUPERUSER/NOBYPASSRLS uendret) - identisk sett som suite-kjøringen over, nå bevist mot ekte Docker-Postgres i
+  stedet for embedded-postgres-substituttet. `finance_d107_invariant_preserved=PASS` bekrefter D-107 FØRSTE-slice
+  sin idempotens-invariant fortsatt holder UENDRET etter denne sliceen, live. ZERO Fiken/Google Ads-credentials
+  involvert (D-108 uendret - denne sliceen krever ingen). **`UA6_SLICE2_HOST_VERIFIED=true`,
+  `UA6_SLICE2_STATUS=CANONICAL/HOST_VERIFIED/COMPLETE`, `UA6_COMPLETE=false` uendret** (kun to sliceer av UA-6;
+  bank/Stripe/Vipps P1 og kort/wallet P2 fortsatt ikke startet). Full kvalitetsport re-verifisert PÅ denne eksakte
+  host-testede SHA-en rett før dette closeout-punktet: `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent,
+  full suite 165/166 filer/2547/2556 tester grønt (ett fil-nivå-flake i en UBERØRT, ikke-relatert testfil bekreftet
+  ved isolert re-kjøring - 9/9 grønt alene, samme flake-klasse som CI sine tre re-kjøringer under denne PR-en, se
+  under).
 - **Tre reelle defekter funnet og rettet av ekte Postgres-integrasjonstester (IKKE antatt riktig ved skriving):**
   (1) `timestamptz`-cursor-presisjonstap (uendelig re-synk-sløyfe, rettet med `date_trunc('milliseconds', ...)`);
   (2) `matchAndReconcile()` sin opprinnelige per-forpliktelse-løkke kunne stille koble utgift til FEIL forpliktelse

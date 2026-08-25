@@ -1,10 +1,28 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-08-25 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — ANDRE
-slice (Slice 2) implementert: intern utgifts-synk (marketing/model_cost) +
-abonnements-/anskaffelsesregister + deterministisk avviksdeteksjon (alle 7
-typer) + avstemming + OpenLoop-surfacing. `UA6_FIRST_SLICE_COMPLETE=true`,
-`UA6_SLICE2_IMPLEMENTATION_COMPLETE=true`, `UA6_COMPLETE=false`.**)
+SLICE (Slice 2) HOST-VERIFISERT.** Tobias kjørte ekte `docker compose`-basert
+host-akseptanse mot PR #58 sin faktiske kode (`d324f49c6bebe3ce75f2b3e846b9f1e74447fb41`,
+verifisert eksakt SHA-match + rent arbeidstre FØR kjøring, fail-closed ellers).
+`run_id=05e33a86`: **alle 12 markører PASS**, `hard_fail=false`,
+`runtime_current_user=jarvis_runtime`. `finance_d107_invariant_preserved=PASS`
+bekrefter D-107 FØRSTE-slice sin idempotens-invariant uendret. ZERO
+Fiken/Google Ads-credentials involvert. Full kvalitetsport re-verifisert PÅ
+denne eksakte host-testede SHA-en: `pnpm -w typecheck` 20/20 pakker rent,
+`pnpm -w lint` rent, full suite 165/166 filer/2547/2556 tester grønt (ett
+fil-nivå-flake i en UBERØRT testfil, bekreftet ikke-regresjon ved isolert
+re-kjøring - 9/9 grønt alene). **`UA6_SLICE2_HOST_VERIFIED=true`,
+`UA6_SLICE2_STATUS=CANONICAL/HOST_VERIFIED/COMPLETE`, `UA6_COMPLETE=false`
+uendret** (kun to sliceer av UA-6 - bank/Stripe/Vipps P1 og kort/wallet P2
+fortsatt ikke startet). **`MERGE_READY=true` - PR #58 MERGES IKKE uten
+Tobias sin eksplisitte godkjenning.**
+
+**Runden før det (samme dag, implementasjon + CI):** UA-6 FINANCE & SPEND
+INTEGRITY GATEWAY — ANDRE slice (Slice 2) implementert: intern utgifts-synk
+(marketing/model_cost) + abonnements-/anskaffelsesregister + deterministisk
+avviksdeteksjon (alle 7 typer) + avstemming + OpenLoop-surfacing.
+`UA6_FIRST_SLICE_COMPLETE=true`, `UA6_SLICE2_IMPLEMENTATION_COMPLETE=true`,
+`UA6_COMPLETE=false`.
 
 **Utfall:** Base `main=7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5` (PR #57
 merget). ZERO ny ekstern leverandør, ZERO nye credentials (D-108 uendret) -
@@ -66,17 +84,21 @@ docker-compose-kjøring på Tobias sin host gjenstår, se
 `spend-integrity-live-host-run.ts`). D-108 uendret: ingen Fiken/Google
 Ads-live-krav rørt av denne sliceen.
 
-**Branch/PR/CI:** `claude/ua6-slice2-internal-spend-sync`, draft PR #58
-(`2b21da987d4f72e440b195cfd09a6ec223ca03f9`, base `main`
-`7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5`). CI grønn (gitleaks +
-windows-git-auth + build-test på både push- og pull_request-triggeret
-kjøring; ETT build-test-forsøk feilet først med `ECONNREFUSED` i en
-uendret, ikke-berørt fil (`modules/core/test/data-foundation.test.ts`) -
-en kjent embedded-Postgres-parallellitetsflake, IKKE en regresjon fra
-denne sliceen - bekreftet grønn ved re-kjøring). Ingen review-kommentarer.
-**`MERGE_READY=false`** inntil ekte `spend-integrity-live-host-run.ts`
-(Docker-basert) er kjørt av Tobias - **MERGES IKKE uten Tobias sin
-eksplisitte godkjenning.**
+**Branch/PR/CI:** `claude/ua6-slice2-internal-spend-sync`, draft PR #58,
+HEAD `d324f49c6bebe3ce75f2b3e846b9f1e74447fb41` (base `main`
+`7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5`). CI grønn på denne eksakte
+HEAD-en (gitleaks + windows-git-auth + build-test på både push- og
+pull_request-triggeret kjøring). `build-test` traff samme
+`ECONNREFUSED`-embedded-Postgres-parallellitetsflake FIRE ganger totalt på
+tvers av begge commitene i denne PR-en (fire FORSKJELLIGE, uendrede,
+ikke-berørte testfiler hver gang - `data-foundation.test.ts`,
+`github-source.test.ts`, `fase8-device.test.ts`, samt
+`scoring-idempotency-rls.test.ts` lokalt under closeout-re-verifiseringen,
+sistnevnte bekreftet 9/9 grønt isolert) - IKKE en regresjon fra denne
+sliceen, bekreftet grønn ved re-kjøring hver gang. Ingen review-kommentarer.
+Ekte Docker-basert host-akseptanse kjørt av Tobias mot NØYAKTIG denne
+HEAD-en, alle 12 markører PASS (se hoveddetalj over). **`MERGE_READY=true`
+- MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
 
 ---
 
