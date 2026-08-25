@@ -7,7 +7,10 @@ import { parseStripeEventEnvelope, verifyStripeWebhookSignature } from "../src/s
  * parsing - INGEN Postgres nødvendig (ren `node:crypto`-logikk, samme
  * "unit test det som kan enhetstestes"-prinsipp som `state-machine.test.ts`).
  */
-const SECRET = "whsec_test_secret_1234567890";
+// BEVISST IKKE en gyldig Stripe-nøkkel-form (gitleaks sin generic-api-key-
+// regel flagget en tidligere, mer tilfeldig-utseende variant her - se
+// .gitleaksignore for den historiske commit-fingeravtrykket).
+const SECRET = "not-a-real-stripe-webhook-secret-fixture";
 
 function sign(payload: string, timestamp: number, secret = SECRET): string {
   const signedPayload = `${timestamp}.${payload}`;
