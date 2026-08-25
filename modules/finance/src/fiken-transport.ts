@@ -48,8 +48,9 @@
  *     Fiken selv deduplikerer.
  */
 
+import { FIKEN_OAUTH_TOKEN_ENDPOINT, buildRefreshTokenExchangeBody, fikenBasicAuthHeader } from "./fiken-oauth.ts";
+
 const FIKEN_API_BASE = "https://api.fiken.no/api/v2";
-const FIKEN_TOKEN_URL = "https://fiken.no/oauth/token";
 const RETRYABLE_HTTP_STATUS: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 500;
@@ -79,18 +80,24 @@ function classifyFikenErrorBody(rawBody: string): string {
  * Henter et kortlivet access-token fra en persistert OAuth refresh token -
  * ALDRI logget (samme mønster som `googleAccessToken()` i
  * `live-transports.ts`). `JARVIS_FIKEN_CLIENT_ID`/`JARVIS_FIKEN_CLIENT_SECRET`
- * MÅ være konfigurert i `.env` (D-41: eier-tilkoblet, MAKSIMAL nyttig
- * kapabilitet - `read write`-scope forespørres, ALDRI read-only-som-
- * standard-av-bekvemmelighet).
+ * MÅ være konfigurert i `.env`.
+ *
+ * D-107 HOST-FIX #3: token-endepunktet er per Fikens EGEN dokumentasjon
+ * beskyttet med HTTP BASIC-autentisering ("you should use your application
+ * client id and client secret as credentials") - klient-credentials sendes
+ * derfor i `Authorization: Basic ...`-headeren via de delte, testede
+ * hjelperne i `fiken-oauth.ts` (SAMME kode som bootstrappen
+ * `scripts/fiken-reauth.ts` bruker), ALDRI i form-kroppen slik den
+ * opprinnelige D-107-implementasjonen gjorde.
  */
 export async function fikenAccessToken(refreshToken: string): Promise<string> {
   const clientId = process.env["JARVIS_FIKEN_CLIENT_ID"];
   const clientSecret = process.env["JARVIS_FIKEN_CLIENT_SECRET"];
   if (!clientId || !clientSecret) throw new Error("fiken_oauth_client_not_configured");
-  const response = await fetch(FIKEN_TOKEN_URL, {
+  const response = await fetch(FIKEN_OAUTH_TOKEN_ENDPOINT, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, grant_type: "refresh_token", refresh_token: refreshToken })
+    headers: { authorization: fikenBasicAuthHeader(clientId, clientSecret), "content-type": "application/x-www-form-urlencoded" },
+    body: buildRefreshTokenExchangeBody(refreshToken)
   });
   if (!response.ok) {
     const rawBody = await response.text().catch(() => "");
