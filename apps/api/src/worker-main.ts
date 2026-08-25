@@ -11,7 +11,7 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
+import { FinanceService, FinanceTransport, SpendService, SpendTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
@@ -141,6 +141,10 @@ const growthService = new GrowthService(pool, consentEnforcementService);
 // som apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne
 // kalle finance.*-handlingene identisk.
 const financeService = new FinanceService(pool);
+// UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk
+// wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
+// maa kunne kalle finance_spend.*-handlingene identisk.
+const spendService = new SpendService(pool);
 const fikenCredentialsProvider: FikenCredentialsProvider = {
   async getCredentials(): Promise<FikenCredentials | null> {
     const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
@@ -176,6 +180,8 @@ for (const tool of firstWaveTools({
   googleads: new GoogleAdsTransport(growthService),
   // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster som apps/api/src/main.ts.
   finance: new FinanceTransport(financeService, fikenCredentialsProvider),
+  // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.
+  finance_spend: new SpendTransport(spendService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.

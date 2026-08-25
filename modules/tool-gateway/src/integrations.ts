@@ -1643,6 +1643,155 @@ export function firstWaveTools(
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance")
+    },
+    // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): eget
+    // `finance_spend.*`-namespace, SEPARAT fra `finance.*` over - ALDRI en
+    // ekstern leverandør rørt (kun interne kilder Jarvis allerede eier, se
+    // spend-service.ts). Klasse A/B UTELUKKENDE - INGEN klasse C/D-handling
+    // finnes i dette namespacet i det hele tatt (ingen providerkall).
+    {
+      tool_id: "finance_spend", action: "create_recurring_commitment", description: "Opprett en abonnements-/gjentakende forpliktelse",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), vendor_name: z.string(), description: z.string(),
+        cadence: z.enum(["monthly", "yearly", "custom_days"]), cadence_interval_days: z.number().int().positive().optional(),
+        expected_billing_day_of_month: z.number().int().min(1).max(31).optional(), expected_amount_ore: z.number().int().positive(),
+        currency: z.string().optional(), amount_tolerance_ore: z.number().int().nonnegative().optional(),
+        source_mapping: z.record(z.unknown()).optional(), payment_intent_id: z.string().optional(),
+        owner_person_id: z.string().optional(), start_date: z.string(), end_date: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "cancel_recurring_commitment",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "get_recurring_commitment", description: "Les én forpliktelse",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), commitment_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "list_recurring_commitments", description: "List forpliktelser, valgfritt filtrert på state",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), state: z.enum(["active", "paused", "cancelled"]).optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "update_recurring_commitment", description: "Oppdater beskrivelse/beløp/toleranse/mapping-regler for en forpliktelse (ingen state-endring)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), commitment_id: z.string(), description: z.string().optional(),
+        expected_amount_ore: z.number().int().positive().optional(), amount_tolerance_ore: z.number().int().nonnegative().optional(),
+        source_mapping: z.record(z.unknown()).optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "update_recurring_commitment på nytt med forrige verdi",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "pause_recurring_commitment", description: "Sett en forpliktelse på pause (deterministisk state-overgang)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), commitment_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "resume_recurring_commitment",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "resume_recurring_commitment", description: "Gjenoppta en pauset forpliktelse (deterministisk state-overgang)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), commitment_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "pause_recurring_commitment",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "cancel_recurring_commitment", description: "Kanseller en forpliktelse (terminal - ingen vei tilbake, se spend-state-machine.ts)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), commitment_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (kansellering er en endelig disposisjon) - opprett en ny forpliktelse",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "create_procurement_item", description: "Registrer en forventet anskaffelse/utgift",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), vendor_name: z.string(), description: z.string(),
+        expected_amount_ore: z.number().int().positive(), currency: z.string().optional(), expected_date: z.string(),
+        expected_window_days: z.number().int().nonnegative().optional(), payment_intent_id: z.string().optional(), owner_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "cancel_procurement_item",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "get_procurement_item", description: "Les én forventet anskaffelse",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), procurement_item_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "list_procurement_items", description: "List forventede anskaffelser, valgfritt filtrert på status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.enum(["expected", "fulfilled", "cancelled"]).optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "update_procurement_item", description: "Oppdater forventet beløp/dato/vindu for en anskaffelse (kun mens 'expected')",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), procurement_item_id: z.string(),
+        expected_amount_ore: z.number().int().positive().optional(), expected_date: z.string().optional(), expected_window_days: z.number().int().nonnegative().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "update_procurement_item på nytt med forrige verdi",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "cancel_procurement_item", description: "Kanseller en forventet anskaffelse (terminal)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), procurement_item_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (kansellering er en endelig disposisjon) - opprett en ny anskaffelse",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "list_spend_records", description: "List normaliserte interne utgiftsposter (marketing/model_cost), valgfritt filtrert",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), source_family: z.enum(["marketing", "model_cost"]).optional(), campaign_id: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "get_spend_record", description: "Les én normalisert utgiftspost, inkludert kildeproveniens",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), spend_record_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "list_unresolved_spend_anomalies", description: "List uløste deterministiske avvik på tvers av utgiftsposter/forpliktelser/anskaffelser",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "sync_internal_spend", description: "Trigger inkrementell synk av marketing_spend_events + cost_events til finance_spend_records nå (i tillegg til den daglige sveipen) - idempotent, retry-trygg",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rene idempotente leserader, ingen ekstern side-effekt å rulle tilbake)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "run_spend_reconciliation", description: "Trigger deterministisk matching/avstemming av utgiftsposter mot forpliktelser/anskaffelser nå",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "reconcile_spend_record manuelt for feilaktig matchede rader",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
+    },
+    {
+      tool_id: "finance_spend", action: "run_spend_anomaly_detection", description: "Trigger deterministisk avviksdeteksjon (§8: alle 7 typer) nå",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runAnomalyDetection-JSDoc)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_spend")
     }
   ];
 }

@@ -39,7 +39,10 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { FinanceService, FinanceTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
+import {
+  FinanceService, FinanceTransport, SpendService, SpendTransport, runFinanceSpendIntegritySweepForAllTenants,
+  type FikenCredentials, type FikenCredentialsProvider
+} from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
   GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
@@ -224,6 +227,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // tenant-parametrisert oppslag i denne sliceen (kun én Tobias-eid Fiken-
   // konto er i scope).
   const financeService = new FinanceService(pool);
+  // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): egen
+  // tjeneste over SAMME runtime-pool - ZERO ekstern leverandør (kun
+  // interne kilder Jarvis allerede eier, se spend-service.ts). Avviks-
+  // surfacing gjenbruker OpenLoopService (finance_spend_unexpected/
+  // finance_spend_amount_deviation/finance_recurring_charge_missing/
+  // finance_recurring_charge_duplicate/finance_spend_correction_conflict-
+  // reglene) uendret.
+  const spendService = new SpendService(pool);
   const fikenCredentialsProvider: FikenCredentialsProvider = {
     async getCredentials(): Promise<FikenCredentials | null> {
       const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
@@ -270,6 +281,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // handling i denne sliceen - `submit_payment_intent` sin klasse D er
     // selve handlingen, ikke en nøstet under-handling).
     finance: new FinanceTransport(financeService, fikenCredentialsProvider),
+    // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): eget
+    // `finance_spend.*`-namespace, SEPARAT fra `finance` over - SAMME
+    // lat/enkel-avhengighet-mønster som GrowthTransport (INGEN
+    // toolGateway/ToolInvocationContext, ingen provider-kall i dette
+    // namespacet i det hele tatt).
+    finance_spend: new SpendTransport(spendService),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
@@ -416,6 +433,17 @@ porter: se docs/RUNTIME_GATES.md`;
       await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
     });
   }
+  // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2) §12:
+  // periodisk intern utgifts-synk (marketing/model_cost) + matching/
+  // avstemming + deterministisk avviksdeteksjon - SAMME reboot-durable
+  // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env). Kjøres
+  // FØR business-open-loop-sweep (default kl. 06) slik at de fem nye
+  // finance_spend_*-open-loop-reglene ser FERSKE avviksflagg når den
+  // sveipen kjører (default kl. 04) - REN passiv observasjon/regnskap,
+  // ALDRI påvirket av finance_kill_switch (se spend-service.ts §13-JSDoc).
+  new DailyScheduler(
+    pool, "finance-spend-integrity-sweep", Number(process.env["JARVIS_FINANCE_SPEND_SWEEP_HOUR"] ?? 4)
+  ).start(() => runFinanceSpendIntegritySweepForAllTenants(pool, spendService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).
