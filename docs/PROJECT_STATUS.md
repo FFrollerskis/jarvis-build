@@ -1,5 +1,32 @@
 # PROJECT STATUS
 
+**Oppdatert:** 2026-08-25 (**D-108: EXTERNAL_CREDENTIAL_SETUP_POLICY=
+DEFER_UNTIL_FINAL_INTEGRATION_PHASE (permanent planleggingsregel) + PR #57
+klargjort for merge med utsatt Fiken-live-gate.**)
+
+**Utfall:** Tobias har besluttet at eksternt credential-arbeid (API-nøkler,
+OAuth-grants, developer-tokens, kontooppsett) som ikke er nødvendig for å
+fortsette å bygge Jarvis, utsettes til én konsolidert «External Integrations
+& Credentials»-fase nær slutten av masterplanen. Integrasjoner bygges og
+suite-/host-verifiseres fullt ut NÅ; utsatte live-gates merkes eksplisitt
+`PENDING_CREDENTIALS`/`DEFERRED_LIVE_VERIFICATION` og samles i den NYE
+kanoniske sjekklisten i `RUNTIME_GATES.md` §«FINAL INTEGRATION &
+CREDENTIALS PHASE» (per nå: Fiken D-107, Google Ads D-86, GitHub D-94).
+**Fiken-status (ærlig):** `FIKEN_IMPLEMENTATION_COMPLETE=true`,
+`FIKEN_OAUTH_IMPLEMENTATION_COMPLETE=true` (dok-verifisert Basic-auth +
+`fiken-reauth.ts`-bootstrap), `FIKEN_CANONICAL_DOMAIN_HOST_VERIFIED=true`
+(alle åtte credential-uavhengige gater PASS live på Tobias sin host),
+`FIKEN_LIVE_VERIFIED=false`, `FIKEN_LIVE_GATE=PENDING_CREDENTIALS`,
+`FIKEN_CREDENTIAL_SETUP_DEFERRED=true`. PR #57 (fire kodecommits: slice-1
++ tre host-fixes, CI grønn på `0916551`) merges med Tobias sin eksplisitte
+godkjenning i denne økten - `UA6_COMPLETE=false` uendret (kun første
+slice; bank/Stripe/Vipps P1 og kort/wallet P2 ikke startet).
+Tools/ToolGateway-utvidelse, MCP og «Skills» er bevart som eksplisitte
+backlog-punkter i samme RUNTIME_GATES-seksjon (D-108) - ingen spekulativ
+arkitektur bygget. Full detalj: D-108 i `DECISIONS_AND_ASSUMPTIONS.md`.
+
+---
+
 **Oppdatert:** 2026-08-24 (**UA-6 D-107 HOST-FIX #1 på PR #57: to lagvise
 root causes bak `did_not_return_external_id`-host-feilene funnet og rettet —
 én host-script-defekt (bar `EnvSecretProvider` i stedet for produksjonens

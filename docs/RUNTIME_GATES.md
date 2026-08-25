@@ -65,6 +65,23 @@ Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME ·
 
 **Regel:** Ingen gate settes til PRODUCTION_VERIFIED uten faktisk runtime-evidens (kommando + resultat + dato) logget her.
 
+## FINAL INTEGRATION & CREDENTIALS PHASE — KANONISK SJEKKLISTE OVER UTSATTE LIVE-VERIFISERINGER (D-108)
+
+**Policy (D-108, Tobias 2026-08-25): `EXTERNAL_CREDENTIAL_SETUP_POLICY=DEFER_UNTIL_FINAL_INTEGRATION_PHASE`.**
+Integrasjoner bygges og suite-/host-verifiseres så langt det er mulig UTEN eksterne credentials; selve
+credential-oppsettet + live-verifiseringen samles i én konsolidert fase nær slutten av masterplanen.
+Denne listen er det KANONISKE stedet for alt som er BYGGET men ikke LIVE-verifisert - hver ny utsatt
+integrasjon SKAL legges til her (aldri stille glemmes), og ingen rad her betyr noensinne at gaten er
+bestått. Ikke-bygde integrasjoner står IKKE her (de bor i sine UA-/Q-backlogs til de faktisk bygges).
+
+| Integrasjon | Implementasjonsstatus | Utsatt live-gate | Live-runner klar | Credential-krav (se .env.example) |
+|---|---|---|---|---|
+| Fiken (UA-6/D-107) | COMPLETE (domene+adapter+OAuth-bootstrap suite-verifisert; kanonisk domene host-verifisert) | `FIKEN_LIVE_GATE=PENDING_CREDENTIALS` (`provider_auth`/`provider_read`; `provider_write` krever i tillegg trygt test-selskap eller eksplisitt godkjenning - ingen sandbox finnes) | JA - `fiken-reauth.ts` (bootstrap) + `fiken-live-host-run.ts` (guardet akseptanse) | `JARVIS_FIKEN_CLIENT_ID`/`_CLIENT_SECRET`/`_REFRESH_TOKEN`/`_COMPANY_SLUG` |
+| Google Ads (UA-4/D-83/D-86) | COMPLETE for lesing/rapportering (mutate eksplisitt utsatt bak UA-6) | `GOOGLE_ADS_LIVE_VERIFICATION=DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86, syv-punkts backlog der) | JA - `google-ads-live-host-run.ts` | `JARVIS_GOOGLE_ADS_REFRESH_TOKEN`/`_DEVELOPER_TOKEN`/`_CUSTOMER_ID`(/`_LOGIN_CUSTOMER_ID`) |
+| GitHub Developer Control Plane (UA-5/D-94) | COMPLETE (23-handlings D-41-matrise) | `LIVE_PROVIDER_VERIFIED=false` (Q-31 punkt 1) | JA - `ua5-github-live.ts` | `JARVIS_GITHUB_TOKEN` (`repo`+`workflow`-scope) |
+
+**Fremtidige kapabilitetspunkter bevart under Universal Tool & Connector Layer (D-108 §Tools/Skills/MCP - IKKE bygget, IKKE utsatt-live, kun backlog-registrert så de ikke forsvinner):** (1) videre ToolGateway-/connector-utvidelse per masterplanens «Universal Tool & Connector Layer»; (2) MCP-server-tilkobling - governance finnes allerede (CLAUDE.md regel 7, INTEGRATIONS.md §4: ubetrodd inntil verifisert, aldri utenom ToolGateway/Policy Gateway/tenant-isolasjon/A-D-klassifisering), byggefase ikke definert i masterplanen og krever egen D-64/D-41-port når den bestilles; (3) «Skills»-lag - ingen masterplan-forekomst funnet; krever eksplisitt Tobias-definisjon/-bestilling før noe bygges.
+
 ## D-107 HOST-FIX #2 — AGGREGERINGS-SPLITT: JARVIS_CANONICAL-domene vs. Fiken-leverandør (2026-08-24)
 - **Host-evidens (Tobias, head `a5f3d1a` - tre-identisk med host-fix #1-headen `4bb62cd`, mellomcommiten er en TOM CI-retrigger):** alle åtte credential-uavhengige gater PASS live (`q21_runtime_role_safe` + `finance_live_db_idempotency`/`_validation`/`_kill_switch`/`_state_machine`/`_reconciliation`/`_tenant_isolation` + `finance_live_cleanup`), provider-markørene ærlig NOT_RUN (credentials fraværende). **`CANONICAL_DB_GATES_LIVE_PASS=true`.** MEN runneren rapporterte selvmotsigende `JARVIS_CANONICAL_DOMAIN_VERIFIED=false`/`hard_fail=true` samtidig som den logget at domenet var "FULLT ut bevist" - `FINAL_HOST_ACCEPTANCE_VALID=false` inntil re-kjøring på rettet head.
 - **Root cause (aggregeringsdefekt i `fiken-live-lib.ts`, IKKE i domenet):** `finance_live_env_safe` (=`BLOCKED_NO_CREDENTIALS` uten credentials) og `finance_live_secret_safety` (=`NO_DATA` uten secrets å sjekke) lå i SAMME hard-krav-sett som domenegatene, og `JARVIS_CANONICAL_DOMAIN_VERIFIED` ble avledet som `!hard_fail` - manglende credentials tvang dermed hele kjøringen til feil, i strid med bibliotekets egen dokumenterte intensjon OG google-ads-presedensen (`computeHardFail` der returnerer eksplisitt `false` uten credentials).
