@@ -10,6 +10,10 @@ import {
 import type { InfraExecutionGate, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
+import {
+  InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
+  type FinanceService
+} from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
 import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
 
@@ -59,6 +63,14 @@ export interface ApiDeps {
     infraGate: InfraExecutionGate;
     pool: pg.Pool;
   };
+  /**
+   * D-109 (UA-6 Slice 3): eksponerer `FinanceService` for `/webhooks/stripe`.
+   * Valgfritt - uten database-avhengigheter kjører API-et i helse-modus
+   * (samme mønster som `tasks`/`incidents`/`brief`). Denne ruten leser
+   * RÅ body direkte (IKKE via `readBody()`, som JSON-parser og dermed
+   * ødelegger byte-for-byte-signaturen Stripe krever) - se egen gren under.
+   */
+  finance?: { service: FinanceService };
 }
 
 export interface HealthStatus {
@@ -92,6 +104,19 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     chunks.push(chunk as Buffer);
   }
   return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+}
+
+/**
+ * D-109: rå byte-for-byte body - `readBody()` over ville JSON.parse()-et og
+ * dermed gjort HMAC-signaturverifisering (som må hashe EKSAKT det Stripe
+ * sendte) umulig å reprodusere korrekt.
+ */
+async function readRawBody(req: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {
@@ -268,6 +293,34 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
       return json(res, 400, { error: "task_rejected", reason: result.reason });
     }
     return json(res, 200, { task_id: result.value.task_id });
+  }
+
+  if (deps.finance && req.method === "POST" && url.pathname === "/webhooks/stripe") {
+    // D-109 (UA-6 Slice 3): INGEN identity-oppløsning her - Stripe sender
+    // denne ruten direkte, uten en Jarvis-owner-identitet å oppløse. Selve
+    // autentiseringen ER HMAC-signaturverifiseringen (`Stripe-Signature`-
+    // headeren), håndhevet inni `ingestStripeWebhookEvent()` - SAMME
+    // "signatur ER autentisering"-prinsipp som ethvert annet webhook-mottak.
+    const rawBody = await readRawBody(req);
+    const signatureHeader = req.headers["stripe-signature"];
+    try {
+      const result = await deps.finance.service.ingestStripeWebhookEvent(
+        rawBody, typeof signatureHeader === "string" ? signatureHeader : undefined
+      );
+      // Stripe tolker 2xx som "stopp gjentakelse", ALT annet som "prøv igjen
+      // senere" - `failed_retryable` er derfor BEVISST et 502 her (samme
+      // navn/semantikk som `stripe_webhook_events.status`), IKKE en stille 200.
+      const status = result.status === "failed_retryable" ? 502 : 200;
+      return json(res, status, { received: true, status: result.status, event_id: result.eventId });
+    } catch (err) {
+      if (err instanceof InvalidWebhookSignatureError) {
+        return json(res, 400, { error: "invalid_signature", message: err.message });
+      }
+      if (err instanceof StripeCredentialsUnavailableError || err instanceof StripeTenantNotConfiguredError) {
+        return json(res, 503, { error: "not_configured", message: err.message });
+      }
+      throw err;
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/worker/tick") {

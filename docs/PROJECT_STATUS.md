@@ -4533,3 +4533,67 @@ contracts-erasure-suiten re-kjørt uendret grønn. 104 tester totalt for Contrac
 ender `hard_fail=false`.** Q-28 forblir ÅPEN. K1 forblir PARTIAL. PR #18 oppdatert med begge
 run_id-er/rotårsak/fiks/testdekning - forblir draft, IKKE merget. **Ingen e-sign-leverandør. Ingen
 UA-4.**
+
+---
+
+## UA-6 FINANCE & SPEND INTEGRITY GATEWAY - TREDJE SLICE (D-109): Stripe Payments, Refunds, Webhooks & Reconciliation (2026-08-25)
+
+**Aktiv fase/oppgave:** UA-6 Slice 3 - full Stripe (P1) betalingsadapter implementert (utførelse
+uten betalingsmetode-innsamling, refusjon, webhook-ingestion med HMAC-signaturverifisering,
+eksplisitt/hendelsesdrevet utfallssynk, 7-type deterministisk provider-avviksdeteksjon, gjenbruk av
+EKSISTERENDE avstemming/OpenLoop-overflating - INGEN Stripe-spesifikk shadow-mekanisme). D-64/D-41-
+porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_AUTHORITY`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`.
+Full detalj: D-109 i `DECISIONS_AND_ASSUMPTIONS.md`, ny rad i `RUNTIME_GATES.md`.
+
+**Ferdig arbeid:** migrasjon `040_stripe.sql`; `stripe-transport.ts`/`stripe-webhook.ts`/
+`stripe-tool-transport.ts`/`stripe-sweep.ts` (nye filer i `@jarvis/finance`); `FinanceService`
+utvidet med Stripe-utførelse/refusjon/webhook-ingestion/oppfrisking/avviksdeteksjon gjennom ÉN
+deterministisk, ordens-voktet domene-sti; `CreatePaymentIntentInput.provider` (valgfritt,
+byte-for-byte bakoverkompatibelt) lagt til slik at Stripe-intenter faktisk kan opprettes (et reelt
+hull jeg fant og lukket FØR testene ble skrevet); 7 nye `finance_stripe.*` ToolGateway-handlinger;
+`/webhooks/stripe`-HTTP-rute (rå body, IKKE via den JSON-parsende `readBody()`); `stripe-payment-
+sync`-DailyScheduler-jobb (kl. 03); erasure-plan utvidet (`stripe_webhook_events`/`stripe_refunds`
+FØR `payment_intents`); `apps/api/main.ts`/`worker-main.ts`/`server.ts` wiret identisk i begge
+prosesser; `.env.example`-seksjon (`JARVIS_STRIPE_SECRET_KEY`/`_WEBHOOK_SECRET`/`_TENANT_ID`/
+`_SYNC_HOUR` - ingen ekte verdi, kun placeholder-kommentarer).
+
+**Tre ekte produksjonsbugs funnet OG fikset via faktisk testkjøring** (ikke kun kodegjennomgang):
+(1) `refreshStripePaymentState()` brukte `Math.floor(Date.now()/1000)` som ordens-tidsstempel mot en
+millisekund-presis `timestamptz`-kolonne - en oppfrisking i SAMME kalender-sekund som en forutgående
+`submitPaymentIntent()` kunne spuriøst avvises som "stale_event"; fikset med `Math.ceil` for
+oppfriskings-stien OG en sekund-avkortet sammenligning i selve ordens-vokteren (`applyStripe
+PaymentOutcome()`) slik at et EKTE, senere webhook-tidsstempel (Stripe sitt `created`-felt er kun
+hele-sekunds-presisjon) aldri urettmessig avvises. (2) `createStripeRefund()` sin aggregert-
+refusjonsbeløp-spørring brukte `SELECT SUM(...) ... FOR UPDATE` - Postgres tillater IKKE `FOR UPDATE`
+sammen med en aggregatfunksjon, så refusjonsopprettelse ville feilet i PRODUKSJON, ikke bare i test;
+fjernet (TOCTOU-vinduet er allerede lukket av radlåsen på foreldre-`payment_intents`-raden). (3) den
+manglende `provider`-parameteren nevnt over. Alle tre funnet FØR PR-opprettelse, ALDRI skjult.
+
+**Testmatrise:** 77 nye Stripe-spesifikke tester (`stripe-service.test.ts` 51 mot ekte embedded
+Postgres/RLS inkl. PAYMENT/SYNC/WEBHOOK/REFUND/SECURITY/ANOMALY/WORKER/CLEANUP, `stripe-webhook.test.ts`
+16 rene signatur-/envelope-enhetstester, `stripe-transport-wiring.test.ts` 9 wiring-/risikoklasse-
+tester+ét bakoverkompatibilitetsbevis for `finance.create_payment_intent`). **Full workspace-suite:
+169 filer/2632 tester grønt**, `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent hele
+repoet, ingen embedded-Postgres-flake denne kjøringen.
+
+**Guardet host-akseptanse-infrastruktur bygget** (`modules/finance/scripts/stripe-live-host-run.ts`
+→ `stripe-live.ts`): krever BEVISST INGEN Stripe-credentials (D-108) - en skriptbar
+`StripeTransportFactory`-fake injiseres ved Stripe-transportens nettverksgrense, hele akseptansen
+kjører mot Tobias sin EKTE Postgres/runtime-rolle/HTTP-webhook-rute (ekte `createApiServer()` +
+`fetch()`, ikke bare tjenestenivå). Guard: rent arbeidstre, migrasjoner anvendt, Q-21 runtime-rolle.
+14 markører proveres (`stripe_adapter_wiring`/`stripe_payment_idempotency`/`stripe_payment_state_sync`/
+`stripe_webhook_signature_contract`/`stripe_webhook_idempotency`/`stripe_refund_integrity`/
+`stripe_finance_reconciliation`/`stripe_anomaly_integration`/`stripe_tenant_isolation`/
+`stripe_kill_switch_semantics`/`stripe_secret_safety`/`stripe_cleanup`/`finance_d107_invariant_
+preserved`/`finance_slice2_invariants_preserved`) - IKKE kjørt av meg (ingen Docker/ekte Postgres-
+host tilgjengelig i dette byggemiljøet), kun skrevet og lokalt typechecket/lintet rent.
+
+**Blokkeringer:** ingen kjente. `STRIPE_LIVE_VERIFIED=false`, `STRIPE_LIVE_GATE=PENDING_CREDENTIALS`
+(uendret av D-108 - Tobias IKKE bedt om å konfigurere Stripe-credentials denne sliceen). Guardet
+host-akseptanse (`stripe-live-host-run.ts`) IKKE kjørt på ekte host ennå. `UA6_COMPLETE=false`
+uendret (tredje av flere slices - bank/Vipps/kort-wallet ikke startet). Fiken (D-107)/Google Ads/
+GitHub uendret av denne sliceen.
+
+**Neste anbefalte oppgave:** commit/push branch, opprett draft-PR, vent på CI, deretter Tobias sin
+guardede host-kjøring av `stripe-live-host-run.ts` mot PR-ens eksakte HEAD - **MERGES IKKE uten
+Tobias sin eksplisitte godkjenning.**

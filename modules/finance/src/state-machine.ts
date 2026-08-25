@@ -12,11 +12,19 @@ import type { PaymentIntentState } from "./types.ts";
  * administrativ "korriger tilbake til draft" for en pengehandling som
  * faktisk har rørt en ekstern leverandør - en feilaktig postering
  * korrigeres ved en NY, separat intent, aldri ved å gjenåpne den gamle).
+ *
+ * `provider_acknowledged -> cancelled` lagt til for D-109 (UA-6 Slice 3,
+ * Stripe): Stripe sin egen `canceled`-status representerer en BEVISST
+ * avbrutt intensjon (ikke et mislykket forsøk) og kan inntreffe ETTER at
+ * Stripe allerede har anerkjent intensjonen - noe Fiken sin synkrone
+ * postering aldri produserer (Fiken-flyten trigger derfor ALDRI denne
+ * grenen, byte-for-byte uendret oppførsel for `provider='fiken'`, bevist i
+ * regresjonstest).
  */
 export const PAYMENT_INTENT_TRANSITIONS: Readonly<Record<PaymentIntentState, readonly PaymentIntentState[]>> = {
   draft: ["submitted", "cancelled"],
   submitted: ["provider_acknowledged", "failed"],
-  provider_acknowledged: ["settled", "failed"],
+  provider_acknowledged: ["settled", "failed", "cancelled"],
   settled: [],
   failed: [],
   cancelled: []

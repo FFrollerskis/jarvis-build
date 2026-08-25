@@ -19,3 +19,12 @@
 # pattern going forward, but gitleaks scans full history by default and
 # the original commit remains part of this branch's published history.
 f5564247ebd0c3b00d572ba2d897fc39f383188c:docs/RUNTIME_GATES.md:generic-api-key:60
+
+# gitleaks' generic-api-key rule flagged a synthetic Stripe webhook signing
+# secret used ONLY to exercise verifyStripeWebhookSignature()'s HMAC
+# contract in a unit test (D-109 UA-6 Slice 3) - never a real Stripe
+# credential, never used against a real Stripe account. Reworded to a
+# lower-entropy, obviously-fake value in a later commit to remove the
+# trigger pattern going forward, but gitleaks scans full history by default
+# and the original commit remains part of this branch's published history.
+7615ecf9f47b601d3825dc4570edb522163006f3:modules/finance/test/stripe-webhook.test.ts:generic-api-key:10

@@ -2947,6 +2947,72 @@ docker-compose-full-stack-kjøring på Tobias sin Windows-host gjenstår.
 
 ---
 
+### UA-6 Finance & Spend Integrity Gateway — TREDJE slice (Slice 3, D-109): Stripe (2026-08-25)
+
+Ny ekstern leverandør (P1, masterplan-navngitt sammen med Vipps/bank - `CORE_DEPENDENCY_DECISION_
+REQUIRED=false`). D-64-porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_AUTHORITY` - Jarvis eier
+betalings-/refusjons-intensjon, dobbelt idempotens (egen DB-tilstand + deterministisk avledet
+Stripe `Idempotency-Key`), provider-avviksdeteksjon, avstemmingstilstand, nødbryter og audit; Stripe
+eier selve PaymentIntent-/Charge-/Refund-provider-tilstanden og webhook-hendelses-identiteten.
+D-41-audit: primærkilder (`docs.stripe.com` m.fl.) `EGRESS_BLOCKED`, falt tilbake til uavhengig
+`WebSearch`, merket `VERIFIED_SEARCH_SNIPPET`.
+
+**Omfang bygget:** migrasjon `040_stripe.sql` (utvider `payment_intents` med provider-observasjons-
+kolonner, relakserer Fiken-spesifikke CHECK-constraints til å være provider-betinget, to nye
+tabeller `stripe_webhook_events`/`stripe_refunds`); `FinanceService` utvidet med Stripe-utførelse
+(PaymentIntent UTEN betalingsmetode-innsamling, siden ingen kunde-vendt UI finnes i denne backend-
+automasjonskonteksten - deterministisk `provider_acknowledged`, ALDRI antatt `succeeded`),
+refusjon (gjenbruker EKSISTERENDE `payment_intents`-state-machine direkte, `StripeRefundState =
+PaymentIntentState`), webhook-ingestion (rå body, HMAC-SHA256-signaturverifisering, event-ID-
+idempotens, fail-closed tenant-krysssjekk), eksplisitt/hendelsesdrevet utfallssynk gjennom ÉN
+delt, ordens-voktet domenesti (`applyStripePaymentOutcome`), 7-type deterministisk provider-
+avviksdeteksjon (skrevet til DEN EKSISTERENDE `payment_intents.anomaly_flags` - `OpenLoopService.
+detectPaymentAnomalies()` overflater det AUTOMATISK, INGEN ny OpenLoop-kode). 7 nye `finance_stripe.*`
+ToolGateway-handlinger; `/webhooks/stripe`-HTTP-rute (rå `Buffer`, IKKE via den JSON-parsende
+`readBody()`); `stripe-payment-sync`-DailyScheduler-jobb (kl. 03, FØR `finance-spend-integrity-
+sweep` kl. 04); erasure-plan utvidet (`stripe_webhook_events`/`stripe_refunds` FØR `payment_intents`,
+samme FK-ordens-regel som `payment_intent_events`); `apps/api/main.ts`/`worker-main.ts`/`server.ts`
+wiret identisk i begge prosesser.
+
+**Enkelt-global-Stripe-konto-mønster** (SAMME "single-owner, ikke multi-kunde-SaaS" som Fiken/
+GitHub/Google Ads): ett `JARVIS_STRIPE_SECRET_KEY`/`_WEBHOOK_SECRET` + ny `JARVIS_STRIPE_TENANT_ID`.
+Ekte Stripe Connect (fler-konto) BEVISST IKKE bygget denne sliceen - men fail-closed tenant-
+krysssjekk på ethvert provider-objekt-oppslag ER implementert og bevist (standard, ikke-Connect
+Stripe-webhooks bærer uansett INGEN kontofelt).
+
+**Tre reelle produksjonsdefekter funnet og rettet av ekte Postgres-integrasjonstester** (ikke
+antatt riktig ved skriving): (1) `CreatePaymentIntentInput` manglet et `provider`-felt i det hele
+tatt - `createPaymentIntent()` kunne ALDRI faktisk opprette en Stripe-styrt rad (DB-defaulten
+`'fiken'` ble alltid brukt); lagt til som valgfritt felt (byte-for-byte bakoverkompatibelt) +
+`validateCreateInput()` gjort provider-betinget for Fiken sitt strenge kontokodeformat. (2)
+`refreshStripePaymentState()` brukte `Math.floor(Date.now()/1000)` som ordens-tidsstempel mot en
+millisekund-presis `timestamptz`-kolonne - en oppfrisking i SAMME kalender-sekund som en
+forutgående innsending kunne spuriøst avvises som en eldre hendelse; fikset med `Math.ceil` for
+oppfriskings-stien OG en sekund-avkortet sammenligning i selve ordens-vokteren (ekte Stripe-
+webhook-tidsstempler er selv kun hele-sekunds-presise). (3) `createStripeRefund()` sin aggregerte
+refusjonsbeløp-spørring kombinerte `SUM(...)` med `FOR UPDATE` - ugyldig Postgres-syntaks, ville
+feilet i PRODUKSJON; fjernet (TOCTOU-vinduet er allerede lukket av radlåsen på foreldre-raden).
+
+**Testmatrise:** 77 nye Stripe-spesifikke tester (`stripe-service.test.ts` 51 mot ekte embedded
+Postgres/RLS - PAYMENT/SYNC/WEBHOOK/REFUND/SECURITY/ANOMALY/WORKER/CLEANUP, `stripe-webhook.test.ts`
+16 rene signatur-/envelope-enhetstester, `stripe-transport-wiring.test.ts` 9 wiring-/
+risikoklasse-/bakoverkompatibilitetstester). **Full workspace-suite: 169 filer/2632 tester grønt**,
+typecheck/lint rent hele repoet.
+
+**Guardet host-akseptanse-infrastruktur bygget** (`modules/finance/scripts/stripe-live-host-run.ts`
+→ `stripe-live.ts`): krever BEVISST INGEN Stripe-credentials (D-108) - en skriptbar
+`StripeTransportFactory`-fake injiseres ved Stripe-transportens nettverksgrense; beviser hele
+FinanceService/ToolGateway/webhook-HTTP-rute-wiringen mot en EKTE Postgres/runtime-rolle. 14
+markører (`stripe_adapter_wiring` t.o.m. `stripe_cleanup` + `finance_d107_invariant_preserved`/
+`finance_slice2_invariants_preserved`) - IKKE kjørt på Tobias sin faktiske host ennå.
+
+**Terminalflagg:** `UA6_COMPLETE=false` (tredje av flere slices - bank/Vipps/kort-wallet ikke
+startet). `FIXED_SUITE_VERIFIED=true`, `STRIPE_LIVE_VERIFIED=false`,
+`STRIPE_LIVE_GATE=PENDING_CREDENTIALS`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
+Full detalj: D-109 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

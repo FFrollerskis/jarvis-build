@@ -1,20 +1,21 @@
 /**
- * UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107). Jarvis
- * EIER selv Payment/Spend Intent-domenet (JARVIS_CANONICAL, D-64
- * Core-vs-Adapter-porten kjørt FØRST - se DECISIONS_AND_ASSUMPTIONS.md
- * D-107): idempotens, deterministisk avviksdeteksjon, avstemming og
- * eier-kontrollert kill switch er ALDRI utsatt til en leverandør. Fiken
- * (masterplan-navngitt P0-connector, IKKE et Claude-valgt leverandørvalg)
- * forblir bokføring-av-post (norsk bokføringslov) -
- * HYBRID_WITH_CLEAR_AUTHORITY. ZERO Stripe/Vipps/bank-betaling (P1) eller
- * kort/wallet (P2) her - se `PaymentProvider` under, bevisst begrenset til
- * `'fiken'` denne sliceen.
+ * UA-6 Finance & Spend Integrity Gateway. Jarvis EIER selv Payment/Spend
+ * Intent-domenet (JARVIS_CANONICAL, D-64 Core-vs-Adapter-porten kjørt
+ * FØRST for hver leverandør - se DECISIONS_AND_ASSUMPTIONS.md D-107/D-109):
+ * idempotens, deterministisk avviksdeteksjon, avstemming og
+ * eier-kontrollert kill switch er ALDRI utsatt til en leverandør.
+ * Fiken (P0, D-107) og Stripe (P1, D-109, TREDJE slice) er begge
+ * HYBRID_WITH_CLEAR_AUTHORITY: Fiken forblir bokføring-av-post (norsk
+ * bokføringslov) EXTERNAL_CANONICAL; Stripe forblir selve
+ * PaymentIntent-/Charge-/Refund-tilstanden og webhook-hendelses-identiteten
+ * EXTERNAL_CANONICAL. Vipps/bank (resten av P1) og kort/wallet (P2) er
+ * BEVISST IKKE bygget ennå - se `PaymentProvider` under.
  */
 
 export type PaymentIntentState = "draft" | "submitted" | "provider_acknowledged" | "settled" | "failed" | "cancelled";
 export type ReconciliationState = "unreconciled" | "matched" | "mismatched";
-/** Kun 'fiken' bygget denne sliceen (P0). Stripe/Vipps/bank (P1) og programmerbart kort/wallet (P2) er masterplan-navngitte FREMTIDIGE providere. */
-export type PaymentProvider = "fiken";
+/** 'fiken' (P0, D-107) og 'stripe' (P1, D-109) bygget. Vipps/bank (resten av P1) og programmerbart kort/wallet (P2) er masterplan-navngitte FREMTIDIGE providere. */
+export type PaymentProvider = "fiken" | "stripe";
 
 export type PaymentIntentEventType =
   | "intent_created"
@@ -47,6 +48,19 @@ export interface PaymentIntent {
   anomaly_flags: readonly string[];
   failure_reason: string | null;
   owner_person_id: string | null;
+  /**
+   * Siste kjente leverandør-rapporterte tilstand (Stripe `status`-strengen,
+   * f.eks. "requires_payment_method"/"processing"/"succeeded") - REN
+   * observasjon, ALDRI autoritativ over `state`. `null` for Fiken
+   * (synkron postering, ingen egen provider-side-status-maskin).
+   */
+  provider_status: string | null;
+  provider_reported_amount_ore: number | null;
+  provider_reported_currency: string | null;
+  /** Ordens-vokter: en eldre hendelse skal ALDRI overskrive nyere lagret provider_status - se FinanceService sin applyProviderOutcome(). */
+  provider_status_updated_at: string | null;
+  /** Pointer til hvilken stripe_webhook_events-rad som sist oppdaterte provider_status - BEVISST ingen FK (unngår sirkulær avhengighet). */
+  latest_stripe_event_id: string | null;
   created_at: string;
   updated_at: string;
   submitted_at: string | null;
@@ -90,6 +104,17 @@ export interface CreatePaymentIntentInput {
   counter_account_code?: string;
   owner_person_id?: string;
   actor_person_id?: string;
+  /**
+   * D-109 (UA-6 Slice 3): valgfri - `undefined` -> DB-default `'fiken'`
+   * (byte-for-byte UENDRET oppførsel for enhver eksisterende kaller fra
+   * FØR denne sliceen). Eksplisitt `'stripe'` oppretter en Stripe-styrt
+   * intent i stedet - `account_code` forblir OBLIGATORISK for BEGGE
+   * providere (intern bokføringskategori-tag), men det strenge Fiken-
+   * kontokodeformatet (`^\d{4}(:\d{5})?$`) håndheves KUN når provider
+   * faktisk er `'fiken'` (se `validateCreateInput()` i service.ts og
+   * 040_stripe.sql sin betingede CHECK-constraint).
+   */
+  provider?: PaymentProvider;
 }
 
 /** Fiken sin egen kontokode-form (verifisert mot offisiell swagger-spec, D-41): `NNNN` eller `NNNN:NNNNN` (reskontro). */
@@ -164,3 +189,197 @@ export class PaymentIntentNotFoundError extends Error {
     this.name = "PaymentIntentNotFoundError";
   }
 }
+
+// === Stripe (P1, D-109, UA-6 Slice 3) ===================================
+
+export class StripeCredentialsUnavailableError extends Error {
+  constructor(readonly tenantId: string) {
+    super(`stripe_credentials_unavailable:${tenantId}`);
+    this.name = "StripeCredentialsUnavailableError";
+  }
+}
+
+/** Provider-siden svarte, men i en form Jarvis ikke kan tolke deterministisk - ALDRI stille anta suksess (byggeordrens §5/§6). */
+export class AmbiguousProviderResponseError extends Error {
+  constructor(readonly paymentIntentId: string, readonly detail: string) {
+    super(`ambiguous_provider_response:${paymentIntentId}:${detail}`);
+    this.name = "AmbiguousProviderResponseError";
+  }
+}
+
+export class PaymentIntentNotStripeError extends Error {
+  constructor(readonly paymentIntentId: string, readonly actualProvider: PaymentProvider) {
+    super(`payment_intent_not_stripe:${paymentIntentId}:${actualProvider}`);
+    this.name = "PaymentIntentNotStripeError";
+  }
+}
+
+/** Refusjon kan kun opprettes mot en FAKTISK avsluttet (settled) Stripe-betaling - Stripe krever selv en ekte belastning å refundere mot. */
+export class PaymentIntentNotSettledError extends Error {
+  constructor(readonly paymentIntentId: string, readonly state: PaymentIntentState) {
+    super(`payment_intent_not_settled:${paymentIntentId}:${state}`);
+    this.name = "PaymentIntentNotSettledError";
+  }
+}
+
+/** Akseptansekriterium (byggeordrens §9, "prevent invalid aggregate refund amount"): summen av alle ikke-mislykkede refusjoner kan ALDRI overstige det opprinnelige beløpet. */
+export class ExcessiveRefundAmountError extends Error {
+  constructor(readonly paymentIntentId: string, readonly requestedOre: number, readonly remainingOre: number) {
+    super(`excessive_refund_amount:${paymentIntentId}:requested=${requestedOre}:remaining=${remainingOre}`);
+    this.name = "ExcessiveRefundAmountError";
+  }
+}
+
+export class RefundAlreadySubmittedError extends Error {
+  constructor(readonly refundId: string, readonly state: PaymentIntentState) {
+    super(`refund_already_submitted:${refundId}:${state}`);
+    this.name = "RefundAlreadySubmittedError";
+  }
+}
+
+export class RefundNotFoundError extends Error {
+  constructor(readonly refundId: string) {
+    super(`refund_not_found:${refundId}`);
+    this.name = "RefundNotFoundError";
+  }
+}
+
+/** Byggeordrens §12: en webhook-hendelse hvis leverandørobjekt allerede peker til en ANNEN tenant - fail-closed, ALDRI stille rutet/overskrevet. */
+export class ProviderObjectTenantConflictError extends Error {
+  constructor(readonly providerRef: string, readonly expectedTenantId: string, readonly actualTenantId: string) {
+    super(`provider_object_tenant_conflict:${providerRef}:expected=${expectedTenantId}:actual=${actualTenantId}`);
+    this.name = "ProviderObjectTenantConflictError";
+  }
+}
+
+export class InvalidWebhookSignatureError extends Error {
+  constructor(readonly detail: string) {
+    super(`invalid_webhook_signature:${detail}`);
+    this.name = "InvalidWebhookSignatureError";
+  }
+}
+
+export class StripeTenantNotConfiguredError extends Error {
+  constructor() {
+    super("stripe_tenant_not_configured");
+    this.name = "StripeTenantNotConfiguredError";
+  }
+}
+
+/**
+ * Stripe sin egen dokumenterte reason-enum (owner-oppgitt underdel -
+ * 'expired_uncaptured_charge' er Stripe-INTERN-generert, ALDRI noe Jarvis
+ * selv setter ved opprettelse - verifisert mot Stripe sin offisielle
+ * Refund-objekt-dokumentasjon, D-41).
+ */
+export type StripeRefundReason = "duplicate" | "fraudulent" | "requested_by_customer";
+export const STRIPE_REFUND_REASONS: readonly StripeRefundReason[] = ["duplicate", "fraudulent", "requested_by_customer"];
+
+/** Gjenbruker BEVISST samme 6-tilstands livssyklus-vokabular som PaymentIntentState (byggeordrens §9: "reuse existing state-machine conventions", ikke et nytt vokabular). */
+export type StripeRefundState = PaymentIntentState;
+
+export interface StripeRefund {
+  refund_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  payment_intent_id: string;
+  idempotency_key: string;
+  state: StripeRefundState;
+  amount_ore: number;
+  currency: string;
+  reason: StripeRefundReason | null;
+  provider_ref: string | null;
+  failure_reason: string | null;
+  anomaly_flags: readonly string[];
+  owner_person_id: string | null;
+  created_at: string;
+  updated_at: string;
+  submitted_at: string | null;
+  settled_at: string | null;
+  failed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface CreateStripeRefundInput {
+  idempotency_key: string;
+  payment_intent_id: string;
+  amount_ore: number;
+  reason?: StripeRefundReason;
+  owner_person_id?: string;
+  actor_person_id?: string;
+}
+
+export type StripeWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported";
+
+export interface StripeWebhookEventRecord {
+  stripe_event_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  event_type: string;
+  api_version: string | null;
+  payment_intent_id: string | null;
+  status: StripeWebhookEventStatus;
+  payload_summary: Record<string, unknown>;
+  error_message: string | null;
+  stripe_created_at: string;
+  received_at: string;
+  processed_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Deterministisk avviksdeteksjon spesifikk for Stripe (byggeordrens §11) -
+ * ren SQL i FinanceService.runProviderAnomalyDetection(), ALDRI AI-inferert
+ * (Q-26-grensen). Skrives til DEN EKSISTERENDE `payment_intents.anomaly_flags`-
+ * kolonnen (refusjonsavvik propageres opp til foreldre-intenten) slik at
+ * DEN EKSISTERENDE `detectPaymentAnomalies()`-overflatingen fanger det uten
+ * noen ny OpenLoop-mekanisme.
+ */
+export type StripeAnomalyType =
+  | "PROVIDER_AMOUNT_MISMATCH"
+  | "PROVIDER_CURRENCY_MISMATCH"
+  | "PROVIDER_DUPLICATE_OBJECT_CONFLICT"
+  | "UNKNOWN_PROVIDER_OUTCOME"
+  | "WEBHOOK_STATE_CONFLICT"
+  | "REFUND_AMOUNT_CONFLICT"
+  | "PROVIDER_OBJECT_TENANT_CONFLICT";
+
+export interface StripeProviderAnomalyDetectionResult {
+  payment_intent_flags_added: number;
+  refund_flags_added: number;
+  flags_cleared: number;
+}
+
+/**
+ * Deterministisk utfallskartlegging Stripe PaymentIntent.status -> Jarvis
+ * PaymentIntentState (byggeordrens §5: "Map Stripe outcomes
+ * deterministically... Do not silently infer success"). Verifisert mot
+ * Stripe sin dokumenterte status-enum: `requires_payment_method`/
+ * `requires_confirmation`/`requires_action`/`processing`/
+ * `requires_capture` er ALLE mellomtilstander - Stripe har INGEN egen
+ * "failed"-status på selve PaymentIntent-objektet (et mislykket forsøk
+ * holder objektet i `requires_payment_method` med `last_payment_error`
+ * satt - se `payment_intent.payment_failed`-hendelsestype-håndteringen i
+ * FinanceService.ingestStripeWebhookEvent(), IKKE denne statustabellen).
+ * `canceled` mappes til Jarvis sin EGEN `cancelled` (ikke `failed`) - en
+ * bevisst avbrutt intensjon, ikke en feilet en (PAYMENT_INTENT_TRANSITIONS
+ * utvidet til å tillate provider_acknowledged -> cancelled for nettopp
+ * dette).
+ */
+export const STRIPE_STATUS_TO_JARVIS_STATE: Readonly<Record<string, PaymentIntentState | null>> = {
+  requires_payment_method: null, // forblir provider_acknowledged - observasjonell status alene, ingen state-overgang
+  requires_confirmation: null,
+  requires_action: null,
+  processing: null,
+  requires_capture: null,
+  succeeded: "settled",
+  canceled: "cancelled"
+};
+
+export const STRIPE_REFUND_STATUS_TO_STATE: Readonly<Record<string, StripeRefundState | null>> = {
+  pending: null, // forblir provider_acknowledged
+  requires_action: null,
+  succeeded: "settled",
+  failed: "failed",
+  canceled: "cancelled"
+};

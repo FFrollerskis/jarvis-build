@@ -1567,7 +1567,9 @@ export function firstWaveTools(
         tenant_id: z.string(), memory_space: z.string().optional(), idempotency_key: z.string(), purpose: z.string(),
         amount_ore: z.number().int().positive(), currency: z.string().optional(), vendor_name: z.string(),
         vendor_provider_ref: z.string().optional(), account_code: z.string(), counter_account_code: z.string().optional(),
-        owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+        owner_person_id: z.string().optional(), actor_person_id: z.string().optional(),
+        // D-109: valgfri - udefinert beholder DB-defaulten 'fiken'.
+        provider: z.enum(["fiken", "stripe"]).optional()
       }),
       capability_class: "B", scopes: ["finance.write"], reversible: true,
       rollback_procedure: "cancel_payment_intent (kun gyldig fra draft - ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
@@ -1792,6 +1794,66 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runAnomalyDetection-JSDoc)",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_spend")
+    },
+    // D-109 (UA-6 Slice 3): `finance_stripe.*` - de handlingene som er GENUINT
+    // Stripe-spesifikke (refusjon, eksplisitt provider-oppfrisking, hendelses-
+    // inspeksjon). `submit_payment_intent`/`get_payment_intent`/`create_payment_intent`
+    // forblir i det EKSISTERENDE `finance.*`-namespacet (provider-dispatchet
+    // internt av FinanceService - ingen duplisert handling for samme konsept).
+    {
+      tool_id: "finance_stripe", action: "request_refund", description: "Opprett refusjonsutkast (draft) mot en avsluttet Stripe-betalingsintensjon - INGEN Stripe-kall ennå, kun intern tilstand",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(),
+        idempotency_key: z.string(), payment_intent_id: z.string(), amount_ore: z.number().int().positive(),
+        reason: z.enum(["duplicate", "fraudulent", "requested_by_customer"]).optional(),
+        owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "refusjonsutkast forblir i draft - ingen ekstern side-effekt å rulle tilbake før submit_refund",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "submit_refund", description: "Utfør refusjon mot Stripe for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "D", scopes: ["finance.write", "finance.stripe"], reversible: false,
+      rollback_procedure: "ikke reverserbar hos Stripe - ny motsatt-rettet finansoperasjon kreves ved feil, ALDRI en stille reversering",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_STRIPE_SECRET_KEY",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "get_refund", description: "Les én Stripe-refusjonsrad",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "list_refunds", description: "List Stripe-refusjoner, valgfritt filtrert på betalingsintensjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string().optional(), limit: z.number().int().min(1).max(200).optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "refresh_payment_state", description: "Eksplisitt GET-basert oppfrisking av Stripe-betalingsstatus (samme deterministiske domene-sti som webhook-synk, aldri antatt utfall)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ekstern lesing, ingen økonomisk side-effekt)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_STRIPE_SECRET_KEY",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "get_webhook_event", description: "Inspiser én mottatt Stripe-webhook-hendelse (status/behandlingsutfall) for feilsøking/revisjon",
+      input_schema: record({ tenant_id: z.string(), stripe_event_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_stripe")
+    },
+    {
+      tool_id: "finance_stripe", action: "run_provider_anomaly_detection", description: "Trigger deterministisk Stripe-provider-avviksdeteksjon (§10: PROVIDER_AMOUNT_MISMATCH/PROVIDER_CURRENCY_MISMATCH/PROVIDER_DUPLICATE_OBJECT_CONFLICT/UNKNOWN_PROVIDER_OUTCOME/WEBHOOK_STATE_CONFLICT/REFUND_AMOUNT_CONFLICT/PROVIDER_OBJECT_TENANT_CONFLICT) nå",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runProviderAnomalyDetection-JSDoc)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_stripe")
     }
   ];
 }

@@ -195,6 +195,13 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   );
   // `payment_intent_events` har en FK -> payment_intents - MÅ slettes FØR.
   add(result, "payment_intent_events", await run(client, mode, "payment_intent_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-109 (UA-6 Slice 3, 040_stripe.sql): `stripe_webhook_events` og
+  // `stripe_refunds` har BEGGE en FK -> `payment_intents` (payment_intent_id)
+  // - SAMME "barn-FK FØR forelder"-regel som `payment_intent_events` over,
+  // MÅ derfor også slettes FØR `payment_intents`. Ingen FK MELLOM de to
+  // Stripe-tabellene selv, rekkefølgen dem imellom er derfor vilkårlig.
+  add(result, "stripe_webhook_events", await run(client, mode, "stripe_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "stripe_refunds", await run(client, mode, "stripe_refunds", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "payment_intents", await run(client, mode, "payment_intents", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
