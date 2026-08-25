@@ -13,3 +13,7 @@ export * from "./spend-service.ts";
 export * from "./spend-transport.ts";
 export * from "./spend-sweep.ts";
 export * from "./stripe-sweep.ts";
+export * from "./vipps-webhook.ts";
+export * from "./vipps-transport.ts";
+export * from "./vipps-tool-transport.ts";
+export * from "./vipps-sweep.ts";

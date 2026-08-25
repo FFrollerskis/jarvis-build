@@ -1569,7 +1569,7 @@ export function firstWaveTools(
         vendor_provider_ref: z.string().optional(), account_code: z.string(), counter_account_code: z.string().optional(),
         owner_person_id: z.string().optional(), actor_person_id: z.string().optional(),
         // D-109: valgfri - udefinert beholder DB-defaulten 'fiken'.
-        provider: z.enum(["fiken", "stripe"]).optional()
+        provider: z.enum(["fiken", "stripe", "vipps"]).optional()
       }),
       capability_class: "B", scopes: ["finance.write"], reversible: true,
       rollback_procedure: "cancel_payment_intent (kun gyldig fra draft - ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
@@ -1854,6 +1854,106 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runProviderAnomalyDetection-JSDoc)",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_stripe")
+    },
+    // D-110 (UA-6 Slice 4): `finance_vipps.*` - de handlingene som er GENUINT
+    // Vipps-spesifikke (capture/cancel/refusjon/oppfrisking/hendelses-
+    // inspeksjon). Betalingsopprettelse/-innsending forblir i det
+    // EKSISTERENDE `finance.*`-namespacet (provider-dispatchet internt av
+    // FinanceService - ingen duplisert handling for samme konsept).
+    {
+      tool_id: "finance_vipps", action: "request_capture", description: "Opprett capture-utkast (draft) mot en autorisert Vipps-betaling - INGEN Vipps-kall ennå, kun intern tilstand (over-capture avvises deterministisk allerede her)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(),
+        idempotency_key: z.string(), payment_intent_id: z.string(), amount_ore: z.number().int().positive(),
+        owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "capture-utkast forblir i draft - ingen ekstern side-effekt å rulle tilbake før submit_capture",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "submit_capture", description: "Utfør capture mot Vipps for et eksisterende capture-utkast (klasse D - reell økonomisk handling som faktisk flytter reserverte kundepenger, kill-switch-gated, deterministisk provider-idempotens)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
+      rollback_procedure: "ikke reverserbar hos Vipps - en fanget betaling korrigeres kun via en NY, separat refusjon (request_refund/submit_refund), ALDRI en stille reversering",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "get_capture", description: "Les én Vipps-capture-rad",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), capture_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "list_captures", description: "List Vipps-captures, valgfritt filtrert på betalingsintensjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string().optional(), limit: z.number().int().min(1).max(200).optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "cancel_payment", description: "Avbryt en Vipps-betaling (før brukerbekreftelse, eller etter autorisering før full capture - frigjør reservasjonen; klasse C - påvirker kun en IKKE-oppgjort reservasjon, aldri allerede flyttede penger)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["finance.write", "finance.vipps"], reversible: false,
+      rollback_procedure: "en avbrutt Vipps-betaling kan IKKE gjenopptas - en ny betalingsintensjon må opprettes",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "request_refund", description: "Opprett refusjonsutkast (draft) mot en oppgjort Vipps-betaling - INGEN Vipps-kall ennå, kun intern tilstand (over-refusjon avvises deterministisk allerede her)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(),
+        idempotency_key: z.string(), payment_intent_id: z.string(), amount_ore: z.number().int().positive(),
+        owner_person_id: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "refusjonsutkast forblir i draft - ingen ekstern side-effekt å rulle tilbake før submit_refund",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "submit_refund", description: "Utfør refusjon mot Vipps for et eksisterende refusjonsutkast (klasse D - reell utgående økonomisk handling, kill-switch-gated, deterministisk provider-idempotens)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "D", scopes: ["finance.write", "finance.vipps"], reversible: false,
+      rollback_procedure: "ikke reverserbar hos Vipps - ny motsatt-rettet finansoperasjon kreves ved feil, ALDRI en stille reversering",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "get_refund", description: "Les én Vipps-refusjonsrad",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), refund_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "list_refunds", description: "List Vipps-refusjoner, valgfritt filtrert på betalingsintensjon",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string().optional(), limit: z.number().int().min(1).max(200).optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "refresh_payment_state", description: "Eksplisitt GET-basert oppfrisking av Vipps-betalingsstatus (samme deterministiske domene-sti som webhook-synk, aldri antatt utfall)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ekstern lesing, ingen økonomisk side-effekt)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "get_webhook_event", description: "Inspiser én mottatt Vipps-webhook-hendelse (status/behandlingsutfall) for feilsøking/revisjon",
+      input_schema: record({ tenant_id: z.string(), dedupe_key: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      tool_id: "finance_vipps", action: "run_provider_anomaly_detection", description: "Trigger deterministisk Vipps-provider-avviksdeteksjon (§12: PROVIDER_AMOUNT_MISMATCH/PROVIDER_CURRENCY_MISMATCH/PROVIDER_REFERENCE_CONFLICT/UNKNOWN_PROVIDER_OUTCOME/PROVIDER_STATE_CONFLICT/CAPTURE_AMOUNT_CONFLICT/REFUND_AMOUNT_CONFLICT/PROVIDER_OBJECT_TENANT_CONFLICT/EXPIRED_PAYMENT_WITH_ACTIVE_INTENT) nå",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runVippsProviderAnomalyDetection-JSDoc)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_vipps")
     }
   ];
 }

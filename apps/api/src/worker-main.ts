@@ -12,8 +12,9 @@ import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, Ope
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
-  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport,
-  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider
+  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
+  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
+  type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
@@ -155,7 +156,23 @@ const stripeCredentialsProvider: StripeCredentialsProvider = {
 };
 const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
 const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
-const financeService = new FinanceService(pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver);
+// D-110 (UA-6 Slice 4): identisk wiring-mønster som apps/api/src/main.ts.
+const vippsCredentialsProvider: VippsCredentialsProvider = {
+  async getCredentials(): Promise<VippsCredentials | null> {
+    const clientId = process.env["JARVIS_VIPPS_CLIENT_ID"];
+    const clientSecret = process.env["JARVIS_VIPPS_CLIENT_SECRET"];
+    const subscriptionKey = process.env["JARVIS_VIPPS_SUBSCRIPTION_KEY"];
+    const merchantSerialNumber = process.env["JARVIS_VIPPS_MSN"];
+    if (!clientId || !clientSecret || !subscriptionKey || !merchantSerialNumber) return null;
+    return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
+  }
+};
+const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
+const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
+const financeService = new FinanceService(
+  pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
+  vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver
+);
 // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk
 // wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
 // maa kunne kalle finance_spend.*-handlingene identisk.
@@ -199,6 +216,8 @@ for (const tool of firstWaveTools({
   finance_spend: new SpendTransport(spendService),
   // D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts.
   finance_stripe: new StripeFinanceTransport(financeService),
+  // D-110 (UA-6 Slice 4): identisk wiring-mønster som apps/api/src/main.ts.
+  finance_vipps: new VippsFinanceTransport(financeService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.

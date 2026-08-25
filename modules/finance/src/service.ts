@@ -6,6 +6,8 @@ import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTermi
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
 import { StripeTransport, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
 import { verifyStripeWebhookSignature, parseStripeEventEnvelope } from "./stripe-webhook.ts";
+import { VippsTransport, type VippsPaymentObject, type VippsPaymentWriter } from "./vipps-transport.ts";
+import { verifyVippsWebhookSignature, parseVippsEventEnvelope, type VippsWebhookRequestHeaders } from "./vipps-webhook.ts";
 import {
   ACCOUNT_CODE_PATTERN,
   CURRENCY_PATTERN,
@@ -29,11 +31,21 @@ import {
   StripeTenantNotConfiguredError,
   STRIPE_STATUS_TO_JARVIS_STATE,
   STRIPE_REFUND_STATUS_TO_STATE,
-  STRIPE_REFUND_REASONS
+  STRIPE_REFUND_REASONS,
+  VippsCredentialsUnavailableError,
+  PaymentIntentNotVippsError,
+  PaymentIntentNotAuthorizedError,
+  VippsTenantNotConfiguredError,
+  ExcessiveCaptureAmountError,
+  CaptureAlreadySubmittedError,
+  CaptureNotFoundError,
+  VIPPS_STATUS_TO_JARVIS_STATE
 } from "./types.ts";
 import type {
   CreatePaymentIntentInput,
   CreateStripeRefundInput,
+  CreateVippsCaptureInput,
+  CreateVippsRefundInput,
   FinanceKillSwitch,
   PaymentIntent,
   PaymentIntentEventType,
@@ -44,7 +56,13 @@ import type {
   StripeRefundReason,
   StripeRefundState,
   StripeWebhookEventRecord,
-  StripeWebhookEventStatus
+  StripeWebhookEventStatus,
+  VippsAnomalyType,
+  VippsCapture,
+  VippsProviderAnomalyDetectionResult,
+  VippsRefund,
+  VippsWebhookEventRecord,
+  VippsWebhookEventStatus
 } from "./types.ts";
 
 export interface FikenCredentials {
@@ -109,6 +127,38 @@ export type StripeWebhookSecretProvider = () => string | null;
  * Connect) er EKSPLISITT IKKE bygget - se 040_stripe.sql sin toppkommentar.
  */
 export type StripeTenantResolver = () => string | null;
+
+/** ÉTT globalt eier-tilkoblet Vipps-selgerkonto-credential-sett (SAMME "single-owner, ikke multi-kunde-SaaS"-mønster som `StripeCredentials`). `environment` velger test-/produksjons-base-URL (vipps-transport.ts). */
+export interface VippsCredentials {
+  clientId: string;
+  clientSecret: string;
+  subscriptionKey: string;
+  merchantSerialNumber: string;
+  environment: "test" | "production";
+}
+
+export interface VippsCredentialsProvider {
+  getCredentials(tenantId: string): Promise<VippsCredentials | null>;
+}
+
+export type VippsTransportFactory = (credentials: VippsCredentials) => VippsPaymentWriter;
+
+const defaultVippsTransportFactory: VippsTransportFactory = (credentials) =>
+  new VippsTransport(credentials.clientId, credentials.clientSecret, credentials.subscriptionKey, credentials.merchantSerialNumber, credentials.environment);
+
+/** SAMME sentinel-mønster som `StripeWebhookSecretProvider` - ETT globalt webhook-signeringssekret (fra Vipps sin webhook-registrering), ikke tenant-parametrisert. */
+export type VippsWebhookSecretProvider = () => string | null;
+
+/** D-110 tenant/konto-mapping-grense (byggeordrens §10): ETT globalt Vipps-selgerkonto (MSN) tilhører NØYAKTIG ÉN eksplisitt konfigurert tenant - ALDRI utledet fra webhook-nyttelastens egen metadata. */
+export type VippsTenantResolver = () => string | null;
+
+/**
+ * IKKE en ekte, besøkbar URL denne sliceen (INGEN kundevendt UI eksisterer
+ * i denne backend-konteksten, SAMME begrunnelse som Stripe sin
+ * `automatic_payment_methods[allow_redirects]=never`) - Vipps sin
+ * ePayment-API krever likevel SYNTAKTISK en `returnUrl` ved opprettelse.
+ */
+const VIPPS_PLACEHOLDER_RETURN_URL = "https://jarvis.internal/vipps/return";
 
 async function insertEvent(
   client: pg.PoolClient,
@@ -175,7 +225,12 @@ export class FinanceService {
     private readonly stripeCredentialsProvider: StripeCredentialsProvider = { getCredentials: async () => null },
     private readonly stripeTransportFactory: StripeTransportFactory = defaultStripeTransportFactory,
     private readonly stripeWebhookSecretProvider: StripeWebhookSecretProvider = () => null,
-    private readonly stripeTenantResolver: StripeTenantResolver = () => null
+    private readonly stripeTenantResolver: StripeTenantResolver = () => null,
+    /** D-110 (UA-6 Slice 4): SAMME konstruktørnivå-mønster som Stripe sine fire parametre over. */
+    private readonly vippsCredentialsProvider: VippsCredentialsProvider = { getCredentials: async () => null },
+    private readonly vippsTransportFactory: VippsTransportFactory = defaultVippsTransportFactory,
+    private readonly vippsWebhookSecretProvider: VippsWebhookSecretProvider = () => null,
+    private readonly vippsTenantResolver: VippsTenantResolver = () => null
   ) {}
 
   private validateCreateInput(input: CreatePaymentIntentInput): void {
@@ -368,6 +423,47 @@ export class FinanceService {
         await insertEvent(client, tenantId, memorySpace, {
           payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
           summary: "Stripe bekreftet opprettelsen av PaymentIntent-objektet", actor_person_id: actorPersonId ?? null, metadata: {}
+        });
+        return { ok: true, intent: updated };
+      }
+
+      if (current.provider === "vipps") {
+        const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+        const amountOre = Number(current.amount_ore);
+        const transport = this.vippsTransportFactory(credentials);
+        // Deterministisk idempotens-nøkkel avledet FRA payment_intent_id -
+        // SAMME dobbel-idempotens-begrunnelse som Stripe sin gren (Jarvis
+        // sin egen DB-tilstandssjekk over + Vipps sin egen
+        // `Idempotency-Key`-mekanisme).
+        const idempotencyKey = `vipps-submit:${paymentIntentId}`;
+        // Vipps sin `reference` er UNIK PER MSN (IKKE globalt unik) -
+        // Jarvis sin egen `payment_intent_id` gjenbrukt DIREKTE (allerede
+        // globalt unik via `randomUUID()`, se `createPaymentIntent()`),
+        // SAMME "pointer, aldri en separat generert streng"-prinsipp.
+        const vippsPayment: VippsPaymentObject = await transport.createPayment({
+          amountOre, currency: current.currency, reference: paymentIntentId,
+          paymentDescription: current.purpose.slice(0, 100), returnUrl: VIPPS_PLACEHOLDER_RETURN_URL, idempotencyKey
+        });
+
+        const { rows } = await client.query(
+          `UPDATE payment_intents
+             SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
+                 provider_reported_amount_ore = $5, provider_reported_currency = $6,
+                 provider_status_updated_at = now(), submitted_at = now(), updated_at = now()
+           WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+          [tenantId, paymentIntentId, vippsPayment.reference, vippsPayment.state, vippsPayment.amount.value, vippsPayment.amount.currency.toUpperCase()]
+        );
+        const updated = rows[0] as PaymentIntent;
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: paymentIntentId, event_type: "submitted",
+          summary: `Sendt til Vipps - betaling ${vippsPayment.reference} (state=${vippsPayment.state})`,
+          actor_person_id: actorPersonId ?? null, metadata: { provider_ref: vippsPayment.reference, provider_status: vippsPayment.state }
+        });
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
+          summary: "Vipps bekreftet opprettelsen - VENTER på brukerbekreftelse i Vipps-appen (state=CREATED)",
+          actor_person_id: actorPersonId ?? null, metadata: {}
         });
         return { ok: true, intent: updated };
       }
@@ -605,7 +701,7 @@ export class FinanceService {
     return { applied: true, intent: updated };
   }
 
-  private async appendAnomalyFlags(client: pg.PoolClient, table: "payment_intents" | "stripe_refunds", idColumn: string, id: string, flags: readonly StripeAnomalyType[]): Promise<void> {
+  private async appendAnomalyFlags(client: pg.PoolClient, table: "payment_intents" | "stripe_refunds", idColumn: string, id: string, flags: readonly (StripeAnomalyType | VippsAnomalyType)[]): Promise<void> {
     await client.query(
       `UPDATE ${table} SET anomaly_flags = (
          SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
@@ -1087,6 +1183,690 @@ export class FinanceService {
     for (const paymentIntentId of pending) {
       try {
         await this.refreshStripePaymentState(tenantId, memorySpace, paymentIntentId);
+        synced++;
+      } catch {
+        failed++;
+      }
+    }
+    return { synced, failed };
+  }
+
+  // ======================================================================
+  // D-110 (UA-6 Slice 4): Vipps MobilePay payment outcome sync/webhooks/
+  // captures/refunds/anomalies. Speiler Stripe-strukturen over der
+  // semantikken faktisk overlapper - ALDRI en tvunget kopi der Vipps sin
+  // VERIFISERTE kontrakt er materielt annerledes (byggeordrens §9 "Do not
+  // force a Stripe pattern"), se vipps-transport.ts/vipps-webhook.ts sine
+  // toppkommentarer for hvor og hvorfor.
+  // ======================================================================
+
+  private async requireVippsPaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
+    const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
+    if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+    if (current.provider !== "vipps") throw new PaymentIntentNotVippsError(paymentIntentId, current.provider);
+    return current;
+  }
+
+  /**
+   * DEN ENE deterministiske domenestien for Vipps provider-tilstandsendring
+   * (SAMME "one deterministic domain path" prinsipp som
+   * `applyStripePaymentOutcome()`) - kalt av BÅDE `refreshVippsPaymentState()`
+   * OG `ingestVippsWebhookEvent()`. Ordens-vokter sammenligner millisekund-
+   * presise epoch-verdier DIREKTE (INGEN sekund-avkortings-hack nødvendig
+   * her - i motsetning til Stripe, som kun har sekunds-presisjon på sitt
+   * `created`-felt, gir Vipps sitt `timestamp`-felt full ISO8601-presisjon
+   * OG en eksplisitt oppfrisking bruker `Date.now()` direkte, SAMME
+   * presisjon på begge sider av sammenligningen).
+   */
+  private async applyVippsPaymentOutcome(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    current: PaymentIntent,
+    outcome: { vippsState: string; vippsAmountOre: number | null; vippsCurrency: string | null; sourceEventKey: string | null; sourceEventEpochMs: number },
+    actorPersonId: string | null
+  ): Promise<{ applied: true; intent: PaymentIntent } | { applied: false; reason: "stale_event" | "terminal_state_conflict"; intent: PaymentIntent }> {
+    if (current.provider_status_updated_at !== null) {
+      const storedMs = new Date(current.provider_status_updated_at).getTime();
+      if (outcome.sourceEventEpochMs < storedMs) {
+        return { applied: false, reason: "stale_event", intent: current }; // eldre hendelse - ALDRI la den overskrive en nyere allerede-lagret tilstand.
+      }
+    }
+
+    const targetState = VIPPS_STATUS_TO_JARVIS_STATE[outcome.vippsState] ?? null;
+    let stateChanges = "";
+    const values: unknown[] = [tenantId, current.payment_intent_id, outcome.vippsState, outcome.vippsAmountOre, outcome.vippsCurrency, new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey];
+
+    if (targetState !== null && targetState !== current.state) {
+      if (!canTransitionPaymentIntent(current.state, targetState)) {
+        // F.eks. en sen/duplisert hendelse som rapporterer TERMINATED ETTER
+        // at raden allerede er `settled` - fail-closed: FLAGG, ALDRI
+        // overskriv en allerede etablert terminal-tilstand.
+        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["PROVIDER_STATE_CONFLICT"]);
+        const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
+        return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
+      }
+      const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
+      stateChanges = `state = $8${timestampColumn ? `, ${timestampColumn} = now()` : ""}, `;
+      values.push(targetState);
+    }
+
+    const { rows } = await client.query(
+      `UPDATE payment_intents
+         SET ${stateChanges}provider_status = $3, provider_reported_amount_ore = $4, provider_reported_currency = $5,
+             provider_status_updated_at = $6, latest_vipps_event_key = $7, updated_at = now()
+       WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+      values
+    );
+    const updated = rows[0] as PaymentIntent;
+
+    if (targetState !== null && targetState !== current.state) {
+      const eventType: PaymentIntentEventType = targetState === "settled" ? "settled" : targetState === "failed" ? "failed" : "cancelled";
+      await insertEvent(client, tenantId, memorySpace, {
+        payment_intent_id: current.payment_intent_id, event_type: eventType,
+        summary: `Vipps-utfall synkronisert: ${outcome.vippsState} -> ${targetState}${outcome.sourceEventKey ? ` (hendelse ${outcome.sourceEventKey})` : " (eksplisitt oppfrisking)"}`,
+        actor_person_id: actorPersonId, metadata: { provider_status: outcome.vippsState, source_event_key: outcome.sourceEventKey }
+      });
+    }
+    return { applied: true, intent: updated };
+  }
+
+  /**
+   * Eksplisitt oppfriskings-sti - leser Vipps sin GJELDENDE `state`
+   * direkte. Vipps sitt `payment.state`-felt forblir BEVISST 'AUTHORIZED'
+   * selv ETTER capture/refund (VERIFIED_SEARCH_SNIPPET) - denne stien
+   * distingverer derfor KUN CREATED (venter bruker) / AUTHORIZED (reservert)
+   * / TERMINATED/EXPIRED/CANCELLED (avsluttet uten oppgjør). Faktisk
+   * capture-/refund-oppgjør avgjøres ALDRI her - se
+   * `checkVippsFullSettlement()`/`submitVippsCapture()`.
+   */
+  async refreshVippsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
+      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
+      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+      const transport = this.vippsTransportFactory(credentials);
+      const vippsPayment = await transport.getPayment(current.provider_ref);
+      const result = await this.applyVippsPaymentOutcome(
+        client, tenantId, memorySpace, current,
+        {
+          vippsState: vippsPayment.state, vippsAmountOre: vippsPayment.amount.value, vippsCurrency: vippsPayment.amount.currency.toUpperCase(),
+          sourceEventKey: null, sourceEventEpochMs: Date.now()
+        },
+        actorPersonId ?? null
+      );
+      return result.intent;
+    });
+  }
+
+  /**
+   * Vipps-webhook-innhentingsstien - SAMME struktur som
+   * `ingestStripeWebhookEvent()`, MEN med Vipps sin HELT ANDERLEDES HMAC-
+   * autentiseringskontrakt (`vipps-webhook.ts`, IKKE `Stripe-Signature`).
+   * `method`/`pathAndQuery`/`headers` MÅ speile EKSAKT den mottatte HTTP-
+   * forespørselen (samme "rå byte-for-byte input"-prinsipp).
+   */
+  async ingestVippsWebhookEvent(
+    rawBody: Buffer,
+    method: string,
+    pathAndQuery: string,
+    headers: VippsWebhookRequestHeaders,
+    nowMs: number = Date.now()
+  ): Promise<{ status: VippsWebhookEventStatus | "duplicate"; eventId?: string }> {
+    void nowMs; // Vipps sin Webhooks API har INGEN bekreftet tidsstempel-toleransevindu-kontrakt (se vipps-webhook.ts) - parameteren beholdes for signatur-symmetri med Stripe-stien og fremtidig bruk, men brukes bevisst ikke til en oppfunnet avvisning ennå.
+    const webhookSecret = this.vippsWebhookSecretProvider();
+    if (!webhookSecret) throw new VippsCredentialsUnavailableError("(webhook-signeringshemmelighet ikke konfigurert)");
+    const verification = verifyVippsWebhookSignature(rawBody, method, pathAndQuery, headers, webhookSecret);
+    if (!verification.valid) {
+      throw new InvalidWebhookSignatureError(verification.reason ?? "unknown");
+    }
+
+    const vippsTenantId = this.vippsTenantResolver();
+    if (!vippsTenantId) throw new VippsTenantNotConfiguredError();
+
+    let envelope: ReturnType<typeof parseVippsEventEnvelope>;
+    try {
+      envelope = parseVippsEventEnvelope(rawBody);
+    } catch {
+      throw new Error("vipps_event_envelope_malformed");
+    }
+
+    return withMemoryTransaction(this.pool, vippsTenantId, ["business"], async (client) => {
+      const inserted = await client.query(
+        `INSERT INTO vipps_webhook_events (dedupe_key, tenant_id, memory_space_id, event_name, status, payload_summary, vipps_event_timestamp)
+         VALUES ($1, $2, 'business', $3, 'received', $4, $5)
+         ON CONFLICT (dedupe_key) DO NOTHING
+         RETURNING *`,
+        [envelope.dedupeKey, vippsTenantId, envelope.name, JSON.stringify({
+          reference: envelope.reference, amount_ore: envelope.amount_ore, currency: envelope.currency, success: envelope.success
+        }), envelope.timestamp ? new Date(envelope.timestamp).toISOString() : null]
+      );
+      if (inserted.rows.length === 0) {
+        return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+      }
+
+      await client.query(`UPDATE vipps_webhook_events SET status = 'verified' WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+
+      try {
+        const existing = await client.query(`SELECT * FROM payment_intents WHERE provider_ref = $1 AND provider = 'vipps' FOR UPDATE`, [envelope.reference]);
+        const intentRow = existing.rows[0] as PaymentIntent | undefined;
+        if (!intentRow) {
+          await client.query(`UPDATE vipps_webhook_events SET status = 'unsupported', processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+          return { status: "unsupported" as const, eventId: envelope.dedupeKey };
+        }
+        if (intentRow.tenant_id !== vippsTenantId) {
+          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
+          await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', payment_intent_id = $2, error_message = $3, processed_at = now() WHERE dedupe_key = $1`, [
+            envelope.dedupeKey, intentRow.payment_intent_id, new ProviderObjectTenantConflictError(envelope.reference, vippsTenantId, intentRow.tenant_id).message
+          ]);
+          return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
+        }
+
+        const sourceEpochMs = envelope.timestamp ? new Date(envelope.timestamp).getTime() : Date.now();
+        await this.applyVippsPaymentOutcome(
+          client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow,
+          { vippsState: envelope.name, vippsAmountOre: envelope.amount_ore, vippsCurrency: envelope.currency, sourceEventKey: envelope.dedupeKey, sourceEventEpochMs: sourceEpochMs },
+          null
+        );
+
+        // CAPTURED/REFUNDED-hendelser er BEVISST rene bekreftelses-signaler
+        // (Vipps sin capture-/refund-respons gir INGEN egen objekt-id å
+        // matche mot en spesifikk vipps_captures/vipps_refunds-rad, i
+        // motsetning til Stripe sin refund.id - se vipps-transport.ts sin
+        // toppkommentar) - de trigger en re-evaluering av AGGREGAT-oppgjør
+        // fra Jarvis sin EGEN bokføring, ALDRI en gjettet beløps-kilde fra
+        // webhooken selv.
+        if (envelope.name === "CAPTURED") {
+          await this.checkVippsFullSettlement(client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow.payment_intent_id, null);
+        }
+
+        await client.query(`UPDATE vipps_webhook_events SET status = 'processed', payment_intent_id = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, intentRow.payment_intent_id]);
+        return { status: "processed" as const, eventId: envelope.dedupeKey };
+      } catch (err) {
+        await client.query(`UPDATE vipps_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
+        return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
+      }
+    });
+  }
+
+  async getVippsWebhookEvent(tenantId: string, dedupeKey: string): Promise<VippsWebhookEventRecord | null> {
+    return withMemoryTransaction(this.pool, tenantId, ["business"], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM vipps_webhook_events WHERE tenant_id = $1 AND dedupe_key = $2`, [tenantId, dedupeKey]);
+      return (rows[0] as VippsWebhookEventRecord | undefined) ?? null;
+    });
+  }
+
+  // === Captures (byggeordrens §7) =========================================
+
+  /**
+   * Oppretter en draft-capture - INGEN Vipps-kall ennå (SAMME to-stegs
+   * draft->submit-mønster som refusjon). Forhindrer over-capture
+   * DETERMINISTISK FØR raden opprettes - summerer alle IKKE-mislykkede/
+   * -kansellerte captures for samme intent, radlåst innenfor SAMME
+   * transaksjon som selve INSERT-en (ingen TOCTOU-vindu, SAMME prinsipp
+   * som `createStripeRefund()`).
+   */
+  async createVippsCapture(tenantId: string, memorySpace: MemorySpace, input: CreateVippsCaptureInput): Promise<VippsCapture> {
+    if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
+
+      const captureId = `fin-vc-${randomUUID()}`;
+      const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
+      if (existingByKey.length > 0) return existingByKey[0] as VippsCapture;
+
+      // Radlåsen over (`requireVippsPaymentIntent(..., forUpdate=true)`)
+      // lukker TOCTOU-vinduet - Postgres tillater IKKE `FOR UPDATE` sammen
+      // med `SUM` (SAMME begrensning som stripe_refunds).
+      const { rows: aggregateRows } = await client.query(
+        `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_captures
+         WHERE tenant_id = $1 AND payment_intent_id = $2 AND state NOT IN ('failed', 'cancelled')`,
+        [tenantId, input.payment_intent_id]
+      );
+      const alreadyCapturedOre = Number((aggregateRows[0] as { total: string }).total);
+      const remainingOre = Number(intent.amount_ore) - alreadyCapturedOre;
+      if (input.amount_ore > remainingOre) {
+        throw new ExcessiveCaptureAmountError(input.payment_intent_id, input.amount_ore, remainingOre);
+      }
+
+      const { rows } = await client.query(
+        `INSERT INTO vipps_captures (capture_id, tenant_id, memory_space_id, payment_intent_id, idempotency_key, amount_ore, currency, owner_person_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+         RETURNING *`,
+        [captureId, tenantId, memorySpace, input.payment_intent_id, input.idempotency_key, input.amount_ore, intent.currency, input.owner_person_id ?? null]
+      );
+      if (rows.length === 0) {
+        const existing = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
+        return existing.rows[0] as VippsCapture;
+      }
+      return rows[0] as VippsCapture;
+    });
+  }
+
+  /**
+   * Sender capturen til Vipps. SAMME fail-closed rekkefølge som
+   * `submitStripeRefund()` (idempotent no-op -> kill switch -> precondition
+   * -> provider-kall). Vipps sin capture-respons er SYNKRON og ENDELIG
+   * (VERIFIED_SEARCH_SNIPPET - INGEN dokumentert asynkron "vent på
+   * bekreftelse"-mellomtilstand for selve capture-handlingen, i motsetning
+   * til selve BETALINGEN som krever ekte brukerinteraksjon) - en 2xx-
+   * respons ER oppgjøret, `state` settes derfor DIREKTE til `settled` (IKKE
+   * `provider_acknowledged`, som ville antydet en fortsatt uavklart
+   * mellomtilstand som faktisk ikke eksisterer for denne handlingen).
+   */
+  async submitVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string, actorPersonId?: string): Promise<VippsCapture> {
+    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; capture: VippsCapture; performed: boolean } | { ok: false; error: FinanceKillSwitchActiveError }> => {
+      const { rows: captureRows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2 FOR UPDATE`, [tenantId, captureId]);
+      const current = captureRows[0] as VippsCapture | undefined;
+      if (!current) throw new CaptureNotFoundError(captureId);
+
+      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
+        // Idempotent no-op - `performed: false` slik at post-transaksjons-
+        // blokken under ALDRI logger et nytt 'captured'-event for en retry
+        // (ville forurenset audit-historikken med duplikater).
+        return { ok: true, capture: current, performed: false };
+      }
+      if (isTerminalPaymentIntentState(current.state)) {
+        throw new CaptureAlreadySubmittedError(captureId, current.state);
+      }
+
+      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
+      }
+
+      assertValidPaymentIntentTransition(current.state, "submitted");
+      const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
+      if (!intent.provider_ref) throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+      if (intent.provider_status !== "AUTHORIZED") throw new PaymentIntentNotAuthorizedError(current.payment_intent_id, intent.provider_status);
+      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+      const transport = this.vippsTransportFactory(credentials);
+
+      await transport.capturePayment({
+        reference: intent.provider_ref, amountOre: current.amount_ore, currency: current.currency,
+        // SAMME dobbel-idempotens-begrunnelse som Stripe: avledet FRA capture_id, ALDRI random per forsøk.
+        idempotencyKey: `vipps-capture:${captureId}`
+      });
+
+      const { rows } = await client.query(
+        `UPDATE vipps_captures SET state = 'settled', submitted_at = now(), settled_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND capture_id = $2 RETURNING *`,
+        [tenantId, captureId]
+      );
+      return { ok: true, capture: rows[0] as VippsCapture, performed: true };
+    });
+    if (!outcome.ok) throw outcome.error;
+
+    if (outcome.performed) {
+      await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        await insertEvent(client, tenantId, memorySpace, {
+          payment_intent_id: outcome.capture.payment_intent_id, event_type: "captured",
+          summary: `Vipps-capture ${captureId} fullført (${outcome.capture.amount_ore} øre)`, actor_person_id: actorPersonId ?? null,
+          metadata: { capture_id: captureId, amount_ore: outcome.capture.amount_ore }
+        });
+        await this.checkVippsFullSettlement(client, tenantId, memorySpace, outcome.capture.payment_intent_id, actorPersonId ?? null);
+      });
+    }
+    return outcome.capture;
+  }
+
+  /**
+   * Sjekker om AGGREGAT vellykkede captures nå dekker HELE
+   * `payment_intents.amount_ore` - i så fall er intensjonen ØKONOMISK
+   * fullført (`settled`). Kalt BÅDE fra `submitVippsCapture()` (eksplisitt
+   * merchant-initiert capture) OG fra `ingestVippsWebhookEvent()` sin
+   * CAPTURED-hendelse-håndtering (SAMME "one deterministic domain path"-
+   * prinsipp, ALDRI to konkurrerende oppgjørsstier). Delvis capture
+   * etterlater intensjonen `provider_acknowledged` - IKKE en feil, bare
+   * fortsatt økonomisk uavklart.
+   */
+  private async checkVippsFullSettlement(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId: string | null): Promise<void> {
+    const { rows: intentRows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2 FOR UPDATE`, [tenantId, paymentIntentId]);
+    const intent = intentRows[0] as PaymentIntent | undefined;
+    if (!intent || intent.state !== "provider_acknowledged") return; // allerede terminal, eller ikke funnet - intet å oppgjøre.
+
+    const { rows: aggregateRows } = await client.query(
+      `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2 AND state = 'settled'`,
+      [tenantId, paymentIntentId]
+    );
+    const capturedOre = Number((aggregateRows[0] as { total: string }).total);
+    if (capturedOre < Number(intent.amount_ore)) return; // delvis - fortsatt uavklart, ALDRI en feil.
+    if (capturedOre > Number(intent.amount_ore)) {
+      // Bør være strukturelt umulig (createVippsCapture() forhindrer det
+      // deterministisk FØR opprettelse) - defensivt bevist likevel, ALDRI antatt.
+      await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", paymentIntentId, ["CAPTURE_AMOUNT_CONFLICT"]);
+      return;
+    }
+    if (!canTransitionPaymentIntent(intent.state, "settled")) return;
+    await client.query(`UPDATE payment_intents SET state = 'settled', settled_at = now(), updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+    await insertEvent(client, tenantId, memorySpace, {
+      payment_intent_id: paymentIntentId, event_type: "settled",
+      summary: `Fullt oppgjort via Vipps-capture(r) (${capturedOre} øre)`, actor_person_id: actorPersonId, metadata: { captured_ore: capturedOre }
+    });
+  }
+
+  async getVippsCapture(tenantId: string, memorySpace: MemorySpace, captureId: string): Promise<VippsCapture | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND capture_id = $2`, [tenantId, captureId]);
+      return (rows[0] as VippsCapture | undefined) ?? null;
+    });
+  }
+
+  async listVippsCaptures(tenantId: string, memorySpace: MemorySpace, paymentIntentId?: string, limit = 50): Promise<VippsCapture[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const cappedLimit = Math.min(limit, 200);
+      const { rows } = paymentIntentId
+        ? await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 AND payment_intent_id = $2 ORDER BY created_at DESC LIMIT $3`, [tenantId, paymentIntentId, cappedLimit])
+        : await client.query(`SELECT * FROM vipps_captures WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`, [tenantId, cappedLimit]);
+      return rows as VippsCapture[];
+    });
+  }
+
+  // === Cancel (byggeordrens §7) ============================================
+
+  /**
+   * Avbryter en Vipps-betaling (FØR autorisering: avslutter en fortsatt
+   * ventende CREATED-betaling; ETTER autorisering, FØR full capture:
+   * frigjør gjenværende reservasjon). Gjenbruker DEN EKSISTERENDE
+   * `provider_acknowledged -> cancelled`-kanten (lagt til for D-109/Stripe,
+   * IDENTISK semantikk, ALDRI en ny state-maskin-endring for D-110).
+   */
+  async cancelVippsPayment(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; intent: PaymentIntent } | { ok: false; error: FinanceKillSwitchActiveError }> => {
+      const current = await this.requireVippsPaymentIntent(client, tenantId, paymentIntentId, true);
+      if (isTerminalPaymentIntentState(current.state)) {
+        return { ok: true, intent: current }; // idempotent no-op - ALDRI et nytt provider-kall for en allerede-terminal intensjon.
+      }
+      if (!current.provider_ref) {
+        // Aldri innsendt til Vipps ennå - reint lokal avbrytelse (SAMME sti som `cancelPaymentIntent()`).
+        assertValidPaymentIntentTransition(current.state, "cancelled");
+        const { rows } = await client.query(
+          `UPDATE payment_intents SET state = 'cancelled', cancelled_at = now(), updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+          [tenantId, paymentIntentId]
+        );
+        await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert (aldri innsendt til Vipps)", actor_person_id: actorPersonId ?? null, metadata: {} });
+        return { ok: true, intent: rows[0] as PaymentIntent };
+      }
+
+      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
+      }
+
+      assertValidPaymentIntentTransition(current.state, "cancelled");
+      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+      const transport = this.vippsTransportFactory(credentials);
+      await transport.cancelPayment(current.provider_ref, `vipps-cancel:${paymentIntentId}`);
+
+      const { rows } = await client.query(
+        `UPDATE payment_intents SET state = 'cancelled', provider_status = 'CANCELLED', provider_status_updated_at = now(), cancelled_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+        [tenantId, paymentIntentId]
+      );
+      await insertEvent(client, tenantId, memorySpace, { payment_intent_id: paymentIntentId, event_type: "cancelled", summary: "Kansellert hos Vipps (reservasjon frigjort)", actor_person_id: actorPersonId ?? null, metadata: {} });
+      return { ok: true, intent: rows[0] as PaymentIntent };
+    });
+    if (!outcome.ok) throw outcome.error;
+    return outcome.intent;
+  }
+
+  // === Refunds (byggeordrens §8) ===========================================
+
+  /** SAMME to-stegs draft->submit-mønster og over-refusjon-vokter som `createStripeRefund()` - refusjon krever et FAKTISK oppgjort (`settled`) beløp, SAMME precondition som Stripe (gjenbruker `PaymentIntentNotSettledError`). */
+  async createVippsRefund(tenantId: string, memorySpace: MemorySpace, input: CreateVippsRefundInput): Promise<VippsRefund> {
+    if (!Number.isInteger(input.amount_ore) || input.amount_ore <= 0) throw new InvalidAmountError(input.amount_ore);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const intent = await this.requireVippsPaymentIntent(client, tenantId, input.payment_intent_id, true);
+      if (intent.state !== "settled") throw new PaymentIntentNotSettledError(input.payment_intent_id, intent.state);
+
+      const refundId = `fin-vr-${randomUUID()}`;
+      const { rows: existingByKey } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
+      if (existingByKey.length > 0) return existingByKey[0] as VippsRefund;
+
+      const { rows: aggregateRows } = await client.query(
+        `SELECT COALESCE(SUM(amount_ore), 0)::bigint AS total FROM vipps_refunds
+         WHERE tenant_id = $1 AND payment_intent_id = $2 AND state NOT IN ('failed', 'cancelled')`,
+        [tenantId, input.payment_intent_id]
+      );
+      const alreadyRefundedOre = Number((aggregateRows[0] as { total: string }).total);
+      const remainingOre = Number(intent.amount_ore) - alreadyRefundedOre;
+      if (input.amount_ore > remainingOre) {
+        throw new ExcessiveRefundAmountError(input.payment_intent_id, input.amount_ore, remainingOre);
+      }
+
+      const { rows } = await client.query(
+        `INSERT INTO vipps_refunds (refund_id, tenant_id, memory_space_id, payment_intent_id, idempotency_key, amount_ore, currency, owner_person_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+         RETURNING *`,
+        [refundId, tenantId, memorySpace, input.payment_intent_id, input.idempotency_key, input.amount_ore, intent.currency, input.owner_person_id ?? null]
+      );
+      if (rows.length === 0) {
+        const existing = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, input.idempotency_key]);
+        return existing.rows[0] as VippsRefund;
+      }
+      return rows[0] as VippsRefund;
+    });
+  }
+
+  /** Vipps sin refund-respons er, SAMME begrunnelse som capture, SYNKRON og ENDELIG - `state` settes DIREKTE til `settled` ved 2xx. */
+  async submitVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string, actorPersonId?: string): Promise<VippsRefund> {
+    void actorPersonId; // SAMME begrunnelse som `submitStripeRefund()` sin `void actorPersonId` - radens egen tidsstempel-historikk ER audit-stien.
+    const outcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<{ ok: true; refund: VippsRefund } | { ok: false; error: FinanceKillSwitchActiveError }> => {
+      const { rows: refundRows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2 FOR UPDATE`, [tenantId, refundId]);
+      const current = refundRows[0] as VippsRefund | undefined;
+      if (!current) throw new RefundNotFoundError(refundId);
+
+      if (current.state === "submitted" || current.state === "provider_acknowledged" || current.state === "settled") {
+        return { ok: true, refund: current };
+      }
+      if (isTerminalPaymentIntentState(current.state)) {
+        throw new RefundAlreadySubmittedError(refundId, current.state);
+      }
+
+      const killSwitch = await client.query(`SELECT enabled FROM finance_kill_switch WHERE tenant_id = $1`, [tenantId]);
+      if ((killSwitch.rows[0] as { enabled: boolean } | undefined)?.enabled === true) {
+        return { ok: false, error: new FinanceKillSwitchActiveError(tenantId) };
+      }
+
+      assertValidPaymentIntentTransition(current.state, "submitted");
+      const intent = await this.requireVippsPaymentIntent(client, tenantId, current.payment_intent_id, false);
+      if (!intent.provider_ref) throw new PaymentIntentNotSettledError(current.payment_intent_id, intent.state);
+      const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+      const transport = this.vippsTransportFactory(credentials);
+
+      await transport.refundPayment({
+        reference: intent.provider_ref, amountOre: current.amount_ore, currency: current.currency,
+        idempotencyKey: `vipps-refund:${refundId}`
+      });
+
+      const { rows } = await client.query(
+        `UPDATE vipps_refunds SET state = 'settled', provider_ref = $3, submitted_at = now(), settled_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND refund_id = $2 RETURNING *`,
+        [tenantId, refundId, intent.provider_ref]
+      );
+      return { ok: true, refund: rows[0] as VippsRefund };
+    });
+    if (!outcome.ok) throw outcome.error;
+    return outcome.refund;
+  }
+
+  async getVippsRefund(tenantId: string, memorySpace: MemorySpace, refundId: string): Promise<VippsRefund | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND refund_id = $2`, [tenantId, refundId]);
+      return (rows[0] as VippsRefund | undefined) ?? null;
+    });
+  }
+
+  async listVippsRefunds(tenantId: string, memorySpace: MemorySpace, paymentIntentId?: string, limit = 50): Promise<VippsRefund[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const cappedLimit = Math.min(limit, 200);
+      const { rows } = paymentIntentId
+        ? await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 AND payment_intent_id = $2 ORDER BY created_at DESC LIMIT $3`, [tenantId, paymentIntentId, cappedLimit])
+        : await client.query(`SELECT * FROM vipps_refunds WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`, [tenantId, cappedLimit]);
+      return rows as VippsRefund[];
+    });
+  }
+
+  // === Deterministisk Vipps-avviksdeteksjon (byggeordrens §12) ============
+
+  /** SAMME "full gjenberegning per kjøring, selv-korrigerende" mønster som `runProviderAnomalyDetection()` (Stripe). */
+  async runVippsProviderAnomalyDetection(tenantId: string, memorySpace: MemorySpace): Promise<VippsProviderAnomalyDetectionResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const candidateFlags = new Map<string, Set<VippsAnomalyType>>();
+      const addFlag = (id: string, flag: VippsAnomalyType): void => {
+        if (!candidateFlags.has(id)) candidateFlags.set(id, new Set());
+        candidateFlags.get(id)!.add(flag);
+      };
+
+      // A) PROVIDER_AMOUNT_MISMATCH
+      const amountMismatch = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps'
+           AND provider_reported_amount_ore IS NOT NULL AND provider_reported_amount_ore != amount_ore`,
+        [tenantId, memorySpace]
+      );
+      for (const row of amountMismatch.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_AMOUNT_MISMATCH");
+
+      // B) PROVIDER_CURRENCY_MISMATCH
+      const currencyMismatch = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps'
+           AND provider_reported_currency IS NOT NULL AND provider_reported_currency != currency`,
+        [tenantId, memorySpace]
+      );
+      for (const row of currencyMismatch.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_CURRENCY_MISMATCH");
+
+      // C) PROVIDER_REFERENCE_CONFLICT - to Jarvis-rader peker til SAMME Vipps-referanse (bør være strukturelt umulig - reference=payment_intent_id, som er UNIQUE - defensivt bevist likevel).
+      const duplicateObject = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND provider_ref IN (
+           SELECT provider_ref FROM payment_intents WHERE tenant_id = $1 AND provider = 'vipps' AND provider_ref IS NOT NULL
+           GROUP BY provider_ref HAVING count(*) > 1
+         )`,
+        [tenantId, memorySpace]
+      );
+      for (const row of duplicateObject.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_REFERENCE_CONFLICT");
+
+      // D) UNKNOWN_PROVIDER_OUTCOME / EXPIRED_PAYMENT_WITH_ACTIVE_INTENT - Vipps anerkjente opprettelsen, men fortsatt CREATED (venter bruker) langt utover et rimelig vindu (24t) - brukeren fullførte trolig ALDRI i appen, men Jarvis sin egen state henger fortsatt i provider_acknowledged.
+      const staleAwaitingUser = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND state = 'provider_acknowledged'
+           AND provider_status = 'CREATED' AND provider_status_updated_at < now() - interval '24 hours'`,
+        [tenantId, memorySpace]
+      );
+      for (const row of staleAwaitingUser.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT");
+
+      const staleAuthorized = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND state = 'provider_acknowledged'
+           AND provider_status = 'AUTHORIZED' AND provider_status_updated_at < now() - interval '24 hours'`,
+        [tenantId, memorySpace]
+      );
+      for (const row of staleAuthorized.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "UNKNOWN_PROVIDER_OUTCOME");
+
+      // E) PROVIDER_OBJECT_TENANT_CONFLICT (defensivt - hovedvokteren er ingestVippsWebhookEvent() sin fail-closed sjekk).
+      const configuredTenant = this.vippsTenantResolver();
+      if (configuredTenant) {
+        const tenantConflict = await client.query(
+          `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND tenant_id != $3`,
+          [tenantId, memorySpace, configuredTenant]
+        );
+        for (const row of tenantConflict.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_OBJECT_TENANT_CONFLICT");
+      }
+
+      // Re-evaluer allerede flaggede rader også (selv-korrigerende).
+      const alreadyFlagged = await client.query(
+        `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND jsonb_array_length(anomaly_flags) > 0`,
+        [tenantId, memorySpace]
+      );
+      for (const row of alreadyFlagged.rows as Array<{ payment_intent_id: string }>) {
+        if (!candidateFlags.has(row.payment_intent_id)) candidateFlags.set(row.payment_intent_id, new Set());
+      }
+
+      let paymentIntentFlagsAdded = 0;
+      let flagsCleared = 0;
+      for (const [paymentIntentId, flags] of candidateFlags) {
+        const { rows } = await client.query(`SELECT anomaly_flags FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+        const before = new Set((rows[0]?.["anomaly_flags"] as string[] | undefined) ?? []);
+        const vippsFlagTypes: readonly VippsAnomalyType[] = [
+          "PROVIDER_AMOUNT_MISMATCH", "PROVIDER_CURRENCY_MISMATCH", "PROVIDER_REFERENCE_CONFLICT",
+          "UNKNOWN_PROVIDER_OUTCOME", "PROVIDER_OBJECT_TENANT_CONFLICT", "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT"
+        ]; // PROVIDER_STATE_CONFLICT/CAPTURE_AMOUNT_CONFLICT/REFUND_AMOUNT_CONFLICT/DUPLICATE_PROVIDER_EFFECT håndteres ved kilden - ALDRI overskrevet av denne full-rewrite-sveipen.
+        const preserved = [...before].filter((f) => !vippsFlagTypes.includes(f as VippsAnomalyType));
+        const next = new Set([...preserved, ...flags]);
+        if (next.size < before.size) flagsCleared++;
+        if (next.size > before.size) paymentIntentFlagsAdded++;
+        await client.query(`UPDATE payment_intents SET anomaly_flags = $2::jsonb, updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $3`, [tenantId, JSON.stringify([...next]), paymentIntentId]);
+      }
+
+      // F) REFUND_AMOUNT_CONFLICT - defensiv, propageres opp til foreldre-intenten.
+      const refundConflicts = await client.query(
+        `SELECT vr.payment_intent_id, array_agg(vr.refund_id) AS refund_ids FROM vipps_refunds vr
+         JOIN payment_intents pi ON pi.tenant_id = vr.tenant_id AND pi.payment_intent_id = vr.payment_intent_id
+         WHERE vr.tenant_id = $1 AND vr.memory_space_id = $2 AND vr.state NOT IN ('failed', 'cancelled')
+         GROUP BY vr.payment_intent_id, pi.amount_ore HAVING SUM(vr.amount_ore) > pi.amount_ore`,
+        [tenantId, memorySpace]
+      );
+      let refundFlagsAdded = 0;
+      for (const row of refundConflicts.rows as Array<{ payment_intent_id: string; refund_ids: string[] }>) {
+        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", row.payment_intent_id, ["REFUND_AMOUNT_CONFLICT"]);
+        for (const refundId of row.refund_ids) {
+          await this.appendVippsAnomalyFlags(client, "vipps_refunds", "refund_id", refundId, ["REFUND_AMOUNT_CONFLICT"]);
+        }
+        refundFlagsAdded++;
+      }
+
+      // G) CAPTURE_AMOUNT_CONFLICT - defensiv (createVippsCapture()/checkVippsFullSettlement() forhindrer dette allerede) - propageres opp til foreldre-intenten.
+      const captureConflicts = await client.query(
+        `SELECT vc.payment_intent_id, array_agg(vc.capture_id) AS capture_ids FROM vipps_captures vc
+         JOIN payment_intents pi ON pi.tenant_id = vc.tenant_id AND pi.payment_intent_id = vc.payment_intent_id
+         WHERE vc.tenant_id = $1 AND vc.memory_space_id = $2 AND vc.state NOT IN ('failed', 'cancelled')
+         GROUP BY vc.payment_intent_id, pi.amount_ore HAVING SUM(vc.amount_ore) > pi.amount_ore`,
+        [tenantId, memorySpace]
+      );
+      let captureFlagsAdded = 0;
+      for (const row of captureConflicts.rows as Array<{ payment_intent_id: string; capture_ids: string[] }>) {
+        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", row.payment_intent_id, ["CAPTURE_AMOUNT_CONFLICT"]);
+        for (const captureId of row.capture_ids) {
+          await this.appendVippsAnomalyFlags(client, "vipps_captures", "capture_id", captureId, ["CAPTURE_AMOUNT_CONFLICT"]);
+        }
+        captureFlagsAdded++;
+      }
+
+      return { payment_intent_flags_added: paymentIntentFlagsAdded, capture_flags_added: captureFlagsAdded, refund_flags_added: refundFlagsAdded, flags_cleared: flagsCleared };
+    });
+  }
+
+  /** SAMME som `appendAnomalyFlags()`, men for `vipps_captures`/`vipps_refunds` (egen overload - `appendAnomalyFlags()` sin `table`-parameter er typet snevert til de Stripe-tabellene, BEVISST IKKE utvidet for å unngå å svekke den eksisterende typesikkerheten). */
+  private async appendVippsAnomalyFlags(client: pg.PoolClient, table: "vipps_captures" | "vipps_refunds", idColumn: string, id: string, flags: readonly VippsAnomalyType[]): Promise<void> {
+    await client.query(
+      `UPDATE ${table} SET anomaly_flags = (
+         SELECT jsonb_agg(DISTINCT v) FROM jsonb_array_elements_text(anomaly_flags || $2::jsonb) AS v
+       ), updated_at = now() WHERE ${idColumn} = $1`,
+      [id, JSON.stringify(flags)]
+    );
+  }
+
+  /** Worker-sveip (byggeordrens §14): synker alle ikke-terminale Vipps-`payment_intents` for en tenant. SAMME retry-/krasj-trygg struktur som `syncPendingStripePayments()`. */
+  async syncPendingVippsPayments(tenantId: string, memorySpace: MemorySpace): Promise<{ synced: number; failed: number }> {
+    const pending = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'vipps' AND state = 'provider_acknowledged'`,
+        [tenantId, memorySpace]
+      );
+      return (rows as Array<{ payment_intent_id: string }>).map((r) => r.payment_intent_id);
+    });
+    let synced = 0;
+    let failed = 0;
+    for (const paymentIntentId of pending) {
+      try {
+        await this.refreshVippsPaymentState(tenantId, memorySpace, paymentIntentId);
         synced++;
       } catch {
         failed++;

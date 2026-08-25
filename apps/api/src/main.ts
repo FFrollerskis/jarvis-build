@@ -40,9 +40,10 @@ import {
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
-  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport,
-  runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants,
-  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider
+  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
+  runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants, runVippsPaymentSyncForAllTenants,
+  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
+  type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
@@ -240,7 +241,25 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
   const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
-  const financeService = new FinanceService(pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver);
+  // D-110 (UA-6 Slice 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
+  // mønster som Stripe over - INGEN tenant-parametrisert multi-MSN-oppslag
+  // denne sliceen (kun én Tobias-eid Vipps-selgerkonto er i scope).
+  const vippsCredentialsProvider: VippsCredentialsProvider = {
+    async getCredentials(): Promise<VippsCredentials | null> {
+      const clientId = process.env["JARVIS_VIPPS_CLIENT_ID"];
+      const clientSecret = process.env["JARVIS_VIPPS_CLIENT_SECRET"];
+      const subscriptionKey = process.env["JARVIS_VIPPS_SUBSCRIPTION_KEY"];
+      const merchantSerialNumber = process.env["JARVIS_VIPPS_MSN"];
+      if (!clientId || !clientSecret || !subscriptionKey || !merchantSerialNumber) return null;
+      return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
+    }
+  };
+  const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
+  const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
+  const financeService = new FinanceService(
+    pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
+    vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver
+  );
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): egen
   // tjeneste over SAMME runtime-pool - ZERO ekstern leverandør (kun
   // interne kilder Jarvis allerede eier, se spend-service.ts). Avviks-
@@ -305,6 +324,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `finance`/`finance_spend` over - SAMME lat/enkel-avhengighet-mønster
     // (INGEN toolGateway/ToolInvocationContext).
     finance_stripe: new StripeFinanceTransport(financeService),
+    // D-110 (UA-6 Slice 4): eget `finance_vipps.*`-namespace - SAMME mønster.
+    finance_vipps: new VippsFinanceTransport(financeService),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
@@ -479,6 +500,13 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "stripe-payment-sync", Number(process.env["JARVIS_STRIPE_SYNC_HOUR"] ?? 3)
   ).start(() => runStripePaymentSyncForAllTenants(pool, financeService).then(() => undefined));
+  // D-110 (UA-6 Slice 4) §14: periodisk Vipps-utfallssynk + provider-
+  // avviksdeteksjon - SAMME mekanisme/begrunnelse som stripe-payment-sync
+  // over (eget job_name, egen klokkeslett-env, trygt å kjøre uten
+  // JARVIS_VIPPS_*-credentials konfigurert).
+  new DailyScheduler(
+    pool, "vipps-payment-sync", Number(process.env["JARVIS_VIPPS_SYNC_HOUR"] ?? 3)
+  ).start(() => runVippsPaymentSyncForAllTenants(pool, financeService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).
