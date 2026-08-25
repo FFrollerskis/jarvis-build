@@ -231,9 +231,15 @@ async function main(): Promise<void> {
 
   // ===== Slice 2 invariant preservert (intern utgiftsdomene, UENDRET av denne sliceen) =====
   await section("SLICE 2 INVARIANTER PRESERVERT (finance_spend_records-idempotens, UENDRET av Stripe-tillegget)", async () => {
+    // Kolonner MÅ speile 039_finance_spend_integrity.sql eksakt - `spend_date`/
+    // `vendor_name` fantes ALDRI i dette skjemaet (`occurred_at`/`category` er
+    // de faktiske NOT NULL-kolonnene) - en tidligere versjon av DENNE
+    // akseptanseseksjonen gjettet feil kolonnenavn, fanget FØRSTE gang
+    // scriptet faktisk kjørte mot en ekte Postgres (Tobias sin host-kjøring,
+    // run_id 1244e885) - IKKE en feil i selve Stripe-/Slice 2-implementasjonen.
     await adminPool.query(
-      `INSERT INTO finance_spend_records (spend_record_id, tenant_id, memory_space_id, source_family, source_record_id, spend_date, amount_ore, currency, vendor_name)
-       VALUES ($1, $2, 'business', 'model_cost', $3, now()::date, 500, 'NOK', 'Live acceptance')`,
+      `INSERT INTO finance_spend_records (spend_record_id, tenant_id, memory_space_id, source_family, source_record_id, occurred_at, amount_ore, currency, category)
+       VALUES ($1, $2, 'business', 'model_cost', $3, now(), 500, 'NOK', 'ai_api_cost')`,
       [`fsr-live-${runId}`, TENANT_A, `src-live-${runId}`]
     );
     const before = await adminPool.query("SELECT count(*)::int AS n FROM finance_spend_records WHERE tenant_id = $1", [TENANT_A]);
