@@ -40,8 +40,9 @@ import {
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
-  FinanceService, FinanceTransport, SpendService, SpendTransport, runFinanceSpendIntegritySweepForAllTenants,
-  type FikenCredentials, type FikenCredentialsProvider
+  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport,
+  runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants,
+  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
@@ -226,7 +227,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // multi-kunde-SaaS"-mønster som JARVIS_GOOGLE_ADS_REFRESH_TOKEN) - INGEN
   // tenant-parametrisert oppslag i denne sliceen (kun én Tobias-eid Fiken-
   // konto er i scope).
-  const financeService = new FinanceService(pool);
+  // D-109 (UA-6 Slice 3): SAMME "ETT globalt eier-tilkoblet credential-par"-
+  // mønster som `fikenCredentialsProvider` under - INGEN tenant-parametrisert
+  // Stripe-Connect-oppslag denne sliceen (kun én Tobias-eid Stripe-konto er i
+  // scope, se stripe-transport.ts/types.ts sin D-109-kommentar).
+  const stripeCredentialsProvider: StripeCredentialsProvider = {
+    async getCredentials(): Promise<StripeCredentials | null> {
+      const secretKey = process.env["JARVIS_STRIPE_SECRET_KEY"];
+      if (!secretKey) return null;
+      return { secretKey };
+    }
+  };
+  const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
+  const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
+  const financeService = new FinanceService(pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver);
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): egen
   // tjeneste over SAMME runtime-pool - ZERO ekstern leverandør (kun
   // interne kilder Jarvis allerede eier, se spend-service.ts). Avviks-
@@ -287,6 +301,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // toolGateway/ToolInvocationContext, ingen provider-kall i dette
     // namespacet i det hele tatt).
     finance_spend: new SpendTransport(spendService),
+    // D-109 (UA-6 Slice 3): eget `finance_stripe.*`-namespace, SEPARAT fra
+    // `finance`/`finance_spend` over - SAMME lat/enkel-avhengighet-mønster
+    // (INGEN toolGateway/ToolInvocationContext).
+    finance_stripe: new StripeFinanceTransport(financeService),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
@@ -350,6 +368,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       service: incidentService, deployments: deploymentService, diagnosis: diagnosisService,
       gateway: toolGateway, controls: ownerControls, infraGate, pool
     },
+    // D-109 (UA-6 Slice 3): eksponerer FinanceService for `/webhooks/stripe`-
+    // ruten i server.ts - webhook-ingestion krever rå (usignert-parset) body
+    // og skjer derfor UTENFOR den generiske `readBody()`-JSON-parseren, se
+    // server.ts sin nye rute-gren.
+    finance: { service: financeService },
     conversation: new ConversationEngine({
       messages: new MessageStore(pool),
       context: new ContextBuilder(pool),
@@ -444,6 +467,18 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "finance-spend-integrity-sweep", Number(process.env["JARVIS_FINANCE_SPEND_SWEEP_HOUR"] ?? 4)
   ).start(() => runFinanceSpendIntegritySweepForAllTenants(pool, spendService).then(() => undefined));
+  // D-109 (UA-6 Slice 3) §15: periodisk Stripe-utfallssynk (explicit GET-
+  // refresh av `provider_acknowledged`-rader) + provider-avviksdeteksjon -
+  // SAMME reboot-durable DailyScheduler-mekanisme (eget job_name, egen
+  // klokkeslett-env). Kjøres FØR finance-spend-integrity-sweep (default
+  // kl. 03, mot kl. 04) slik at ferske Stripe-utfall er tilgjengelige når
+  // resten av finans-sveipet kjører samme morgen. Trygt å kjøre uten
+  // JARVIS_STRIPE_SECRET_KEY konfigurert - `listBusinessTenantIds` finner
+  // ingen `provider_acknowledged`-Stripe-rader å synke før noen faktisk
+  // sender en Stripe-betaling.
+  new DailyScheduler(
+    pool, "stripe-payment-sync", Number(process.env["JARVIS_STRIPE_SYNC_HOUR"] ?? 3)
+  ).start(() => runStripePaymentSyncForAllTenants(pool, financeService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).

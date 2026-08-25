@@ -43,7 +43,10 @@ export class FinanceTransport implements ToolTransport {
           ...(parameters["vendor_provider_ref"] !== undefined ? { vendor_provider_ref: String(parameters["vendor_provider_ref"]) } : {}),
           ...(parameters["counter_account_code"] !== undefined ? { counter_account_code: String(parameters["counter_account_code"]) } : {}),
           ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {}),
-          ...(actorPersonId !== undefined ? { actor_person_id: actorPersonId } : {})
+          ...(actorPersonId !== undefined ? { actor_person_id: actorPersonId } : {}),
+          // D-109: valgfri - udefinert beholder DB-defaulten 'fiken' (byte-
+          // for-byte uendret for enhver eksisterende kaller).
+          ...(parameters["provider"] !== undefined ? { provider: String(parameters["provider"]) as NonNullable<CreatePaymentIntentInput["provider"]> } : {})
         };
         const row = await this.service.createPaymentIntent(tenantId, memorySpace, input);
         return { external_id: row.payment_intent_id, data: row as unknown as JsonValue };

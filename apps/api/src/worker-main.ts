@@ -11,7 +11,10 @@ import {
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
-import { FinanceService, FinanceTransport, SpendService, SpendTransport, type FikenCredentials, type FikenCredentialsProvider } from "@jarvis/finance";
+import {
+  FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport,
+  type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider
+} from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import { GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource } from "@jarvis/growth";
 import { executiveHandler } from "./executive.ts";
@@ -140,7 +143,19 @@ const growthService = new GrowthService(pool, consentEnforcementService);
 // UA-6 Finance & Spend Integrity Gateway (D-107): identisk wiring-mønster
 // som apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne
 // kalle finance.*-handlingene identisk.
-const financeService = new FinanceService(pool);
+// D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts -
+// ETT globalt eier-tilkoblet Stripe-credential-par, ingen tenant-
+// parametrisert Stripe-Connect-oppslag denne sliceen.
+const stripeCredentialsProvider: StripeCredentialsProvider = {
+  async getCredentials(): Promise<StripeCredentials | null> {
+    const secretKey = process.env["JARVIS_STRIPE_SECRET_KEY"];
+    if (!secretKey) return null;
+    return { secretKey };
+  }
+};
+const stripeWebhookSecretProvider = () => process.env["JARVIS_STRIPE_WEBHOOK_SECRET"] ?? null;
+const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? null;
+const financeService = new FinanceService(pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver);
 // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk
 // wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
 // maa kunne kalle finance_spend.*-handlingene identisk.
@@ -182,6 +197,8 @@ for (const tool of firstWaveTools({
   finance: new FinanceTransport(financeService, fikenCredentialsProvider),
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk wiring-mønster som apps/api/src/main.ts.
   finance_spend: new SpendTransport(spendService),
+  // D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts.
+  finance_stripe: new StripeFinanceTransport(financeService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.
