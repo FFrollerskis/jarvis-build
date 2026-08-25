@@ -66,6 +66,18 @@ docker-compose-kjøring på Tobias sin host gjenstår, se
 `spend-integrity-live-host-run.ts`). D-108 uendret: ingen Fiken/Google
 Ads-live-krav rørt av denne sliceen.
 
+**Branch/PR/CI:** `claude/ua6-slice2-internal-spend-sync`, draft PR #58
+(`2b21da987d4f72e440b195cfd09a6ec223ca03f9`, base `main`
+`7d4ef43c8e4e2f83db1a1ce24845f2e311a41bd5`). CI grønn (gitleaks +
+windows-git-auth + build-test på både push- og pull_request-triggeret
+kjøring; ETT build-test-forsøk feilet først med `ECONNREFUSED` i en
+uendret, ikke-berørt fil (`modules/core/test/data-foundation.test.ts`) -
+en kjent embedded-Postgres-parallellitetsflake, IKKE en regresjon fra
+denne sliceen - bekreftet grønn ved re-kjøring). Ingen review-kommentarer.
+**`MERGE_READY=false`** inntil ekte `spend-integrity-live-host-run.ts`
+(Docker-basert) er kjørt av Tobias - **MERGES IKKE uten Tobias sin
+eksplisitte godkjenning.**
+
 ---
 
 **Oppdatert:** 2026-08-25 (**D-108: EXTERNAL_CREDENTIAL_SETUP_POLICY=
