@@ -4679,3 +4679,55 @@ kort-wallet ikke startet), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`.
 **Neste:** denne docs-only-closeouten flytter PR-headen - fersk CI + én
 avsluttende guardet host-kjøring på NY eksakt head kreves (merge-evidens er
 HEAD-bundet), deretter **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+---
+
+## UA-6 FEMTE SLICE (Slice 5, D-111): Neonomics Open Banking — implementert (2026-08-26)
+
+**Forrige runde:** PR #60 (Slice 4, Vipps) merget etter Tobias sin eksplisitte
+godkjenning av eksakt head `4fe70d96e43311f603953b5c19ba9c03b63900c2`
+(to-forelder-merge `738916718f3c251d6c76c9de6851e01b9dcdf2a4`, post-merge-CI
+grønn på main; andre guardede host-kjøring `run_id=bfc33d35` 19/19 PASS på den
+endelige headen).
+
+**Aktiv fase/oppgave:** UA-6 Finance & Spend Integrity Gateway — FEMTE
+vertikale slice (D-111): Neonomics Open Banking (Tobias-godkjent primær
+bank-/open-banking-leverandør, `CORE_DEPENDENCY=false`, Norge-først) -
+samtykke-livssyklus (CSRF-/replay-beskyttet callback-state), kontodiscovery
+(idempotent, maskert identifikator), append-only saldo, paginert
+transaksjonssynk (pending->booked på SAMME rad, korreksjonsflagg, eksplisitt
+debit/kredit-retning - kredit ALDRI tvunget inn i spend-modellen),
+PIS-betalingsinitiering via EKSISTERENDE `finance.submit_payment_intent`
+(provider-dispatchet, deterministisk `endToEndReference = payment_intent_id`,
+SCA-ventetilstand SANNFERDIG modellert), statussynk (KUN ACSC/ACCC -> settled),
+webhook-ingestion (Neonomics sin EGEN API-nøkkel-kontrakt i `x-api-key` -
+IKKE HMAC), deterministisk bank<->Finance-avstemming (REGEL 1
+provider-referanse / REGEL 2 eksakt-én-kandidat, tvetydig forblir uløst),
+bank-avviksdeteksjon (selv-korrigerende), to nye OpenLoop-typer,
+19 `finance_neonomics.*` ToolGateway-handlinger (A/B/C - ingen egen D, ingen
+rå provider-proxy), `neonomics-sweep`-schedulerjobb, erasure-plan utvidet,
+migrasjon `042_neonomics.sql` (5 nye tabeller, full RLS FORCE).
+
+**Ferdig arbeid:** all produksjonskode + wiring (server/main/worker/
+integrations/erasure/.env.example-placeholders) + 52 nye tester
+(`neonomics-webhook.test.ts` 15, `neonomics-transport-wiring.test.ts` 7,
+`neonomics-service.test.ts` 30 mot ekte embedded Postgres/RLS) + guardet
+host-akseptanse (`neonomics-live-host-run.ts` -> `neonomics-live.ts`,
+23 markører inkl. 4 slice-invariant-bevaringer) + docs (D-111,
+RUNTIME_GATES-rad, IMPLEMENTATION_PLAN-underseksjon). Kvalitetsporter:
+`pnpm -r typecheck` rent, `pnpm lint` rent, FULL workspace-suite 175 filer/
+2754 tester grønn.
+
+**D-108 utvidet:** `NEONOMICS_CREDENTIAL_SETUP_DEFERRED=true`,
+`NEONOMICS_LIVE_GATE=PENDING_CREDENTIALS`, `NEONOMICS_LIVE_VERIFIED=false`,
+`NEONOMICS_WEBHOOK_SUPPORT=implemented` - Tobias er IKKE bedt om å
+konfigurere Neonomics-credentials denne sliceen. Bank-login/SCA-credentials
+lagres ALDRI. `UA6_COMPLETE=false` (kort/wallet ikke startet),
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
+
+**Blokkeringer:** ingen.
+
+**Neste:** branch `claude/ua6-slice5-neonomics-open-banking` -> push -> draft
+PR -> CI på eksakt head -> guardet host-kjøring (Tobias) -> docs-only
+closeout på endelig head (fersk CI + ny host-kjøring hvis headen flyttes) ->
+**MERGES IKKE uten Tobias sin eksplisitte godkjenning** (`MERGE_READY=false`).

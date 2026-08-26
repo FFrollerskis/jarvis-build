@@ -3055,6 +3055,54 @@ bevist UENDRET av dette tillegget) - kjøres på Tobias sin host ved PR-closeout
 `VIPPS_CREDENTIAL_SETUP_DEFERRED=true`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
 Full detalj: D-110 i DECISIONS_AND_ASSUMPTIONS.md.
 
+### UA-6 Finance & Spend Integrity Gateway — FEMTE slice (Slice 5, D-111): Neonomics Open Banking (2026-08-26)
+
+Ny ekstern leverandør (Tobias-godkjent primær bank-/open-banking-leverandør, masterplan-P1 «bank» -
+`CORE_DEPENDENCY=false`). D-64-porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_AUTHORITY` - Jarvis eier
+den kanoniske bankdomene-tilstanden (samtykke-livssyklus, kanoniske kontoer/saldo/transaksjoner med
+EKSPLISITT debit/kredit-retning, deterministisk avstemming, avviksdeteksjon, PIS-intensjon via
+eksisterende `payment_intents`, idempotens, nødbryter, audit); Neonomics eier selve PSD2-tilgangen
+(de er den LISENSIERTE TPP-en (AISP+PISP) - Jarvis trenger ingen egen konsesjon), provider-
+sesjons-/betalings-identiteten og SCA-utførelsen hos banken (alltid en brukerhandling). D-41-audit:
+`docs.neonomics.io` `EGRESS_BLOCKED`, uavhengig `WebSearch`-kryssverifisering, merket
+`VERIFIED_SEARCH_SNIPPET`.
+
+**Omfang bygget:** migrasjon `042_neonomics.sql` (provider-CHECK -> 'neonomics',
+`latest_neonomics_event_key`, fem nye tabeller `bank_consents`/`bank_accounts`/
+`bank_account_balances`/`bank_transactions`/`neonomics_webhook_events` med full RLS FORCE,
+`business_open_loops`-CHECK utvidet); `neonomics-transport.ts` (fetch-basert, INGEN SDK, OAuth2
+client_credentials + obligatorisk `x-device-id`, 1426/1428 som typede flytsignaler, eksakt
+desimal->øre-strengparsing - aldri flyttall-penger); `banking-service.ts` (AIS: samtykke med
+CSRF-/replay-beskyttet callback-state, idempotent kontodiscovery med maskert identifikator,
+append-only saldo, paginert transaksjonssynk med pending->booked-overgang på SAMME rad og
+korreksjonsflagg; deterministisk avstemming REGEL 1 provider-referanse / REGEL 2
+eksakt-én-kandidat beløp+datovindu, tvetydig forblir uløst; bank-avviksdeteksjon selv-
+korrigerende); `FinanceService` utvidet (neonomics-gren i `submitPaymentIntent` med deterministisk
+`endToEndReference = payment_intent_id`, SCA-ventetilstand SANNFERDIG modellert, statussynk der
+KUN ACSC/ACCC -> settled, webhook-ingestion med API-nøkkel-auth (Neonomics sin EGEN kontrakt -
+IKKE HMAC), ordens-vokter + terminal-bevaring, provider-avviksdeteksjon, worker-sveip);
+OpenLoopService +2 regler (`bank_transaction_unmatched`/`bank_consent_attention`); 19 nye
+`finance_neonomics.*` ToolGateway-handlinger (A/B/C for revoke_consent - INGEN egen D og INGEN rå
+provider-proxy: pengebevegelsen bor i `finance.submit_payment_intent`); `/webhooks/neonomics`-rute;
+`neonomics-sweep`-DailyScheduler-jobb; erasure-plan utvidet (5 banktabeller); main.ts/
+worker-main.ts wiret identisk.
+
+**Testmatrise:** 52 nye Neonomics-tester (`neonomics-service.test.ts` 30 mot ekte embedded
+Postgres/RLS, `neonomics-webhook.test.ts` 15 rene enhetstester,
+`neonomics-transport-wiring.test.ts` 7); full workspace-suite 175 filer/2754 tester grønn.
+
+**Guardet host-akseptanse** (`neonomics-live-host-run.ts` → `neonomics-live.ts`): krever INGEN
+Neonomics-credentials (D-108) - 23 markører inkl. fire slice-invariant-bevaringer
+(`finance_d107_invariant_preserved`/`finance_slice2_invariants_preserved`/
+`stripe_slice3_invariants_preserved`/`vipps_slice4_invariants_preserved`) - kjøres på Tobias sin
+host ved PR-closeout.
+
+**Terminalflagg:** `UA6_COMPLETE=false` (femte slice - kort/wallet ikke startet).
+`NEONOMICS_LIVE_VERIFIED=false`, `NEONOMICS_LIVE_GATE=PENDING_CREDENTIALS`,
+`NEONOMICS_CREDENTIAL_SETUP_DEFERRED=true`, `NEONOMICS_WEBHOOK_SUPPORT=implemented`.
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
+Full detalj: D-111 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
