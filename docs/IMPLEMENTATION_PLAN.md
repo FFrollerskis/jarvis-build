@@ -3094,8 +3094,9 @@ Postgres/RLS, `neonomics-webhook.test.ts` 15 rene enhetstester,
 **Guardet host-akseptanse** (`neonomics-live-host-run.ts` → `neonomics-live.ts`): krever INGEN
 Neonomics-credentials (D-108) - 23 markører inkl. fire slice-invariant-bevaringer
 (`finance_d107_invariant_preserved`/`finance_slice2_invariants_preserved`/
-`stripe_slice3_invariants_preserved`/`vipps_slice4_invariants_preserved`) - kjøres på Tobias sin
-host ved PR-closeout.
+`stripe_slice3_invariants_preserved`/`vipps_slice4_invariants_preserved`) - BESTÅTT på Tobias sin
+ekte host 2026-08-26 mot PR #61 sin CI-grønne head `b733a26`: `run_id=6b99ca26`, alle 23 markører
+PASS, `hard_fail=false`, ingen host-fix-runde nødvendig.
 
 **Terminalflagg:** `UA6_COMPLETE=false` (femte slice - kort/wallet ikke startet).
 `NEONOMICS_LIVE_VERIFIED=false`, `NEONOMICS_LIVE_GATE=PENDING_CREDENTIALS`,
