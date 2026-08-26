@@ -3104,6 +3104,67 @@ PASS, `hard_fail=false`, ingen host-fix-runde nødvendig.
 `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
 Full detalj: D-111 i DECISIONS_AND_ASSUMPTIONS.md.
 
+### UA-6 Finance & Spend Integrity Gateway — SJETTE slice (Slice 6, D-112): Wallester programmerbare kort (2026-08-26)
+
+Ny ekstern leverandør (Tobias-godkjent primær kort-/wallet-leverandør, masterplan-P1 «kort/wallet» -
+`CORE_DEPENDENCY=false`). D-64-porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_AUTHORITY` - Jarvis eier
+den kanoniske kortdomene-tilstanden (kortformål/eierpolicy, ØNSKEDE spend-grenser, prosjekt-/
+leverandør-binding, deterministisk avstemming, avviksdeteksjon, nødbryter, audit); Wallester eier
+faktisk utstedt kortidentitet, provider-livssyklustilstand, nettverks-autorisasjonsbeslutninger,
+transaksjons-/oppgjørstilstand, provider-saldo og webhook-hendelsesidentitet (de er selv lisensiert
+finansforetak - estisk e-pengeinstitusjon, Visa Principal Member - Jarvis trenger ingen egen
+konsesjon). D-41-audit: `docs.wallester.com`/`wallester.com`/`api-frontend.wallester.com`/
+`deepwiki.com` ALLE `EGRESS_BLOCKED`, uavhengig `WebSearch`-kryssverifisering, merket
+`VERIFIED_SEARCH_SNIPPET`. **Sanntidsautorisasjon (§10): NOT_APPLICABLE** - Wallester-webhooks er
+varsler om beslutninger Wallester selv fatter, IKKE beslutnings-callbacks - ærlig rapportert, aldri
+fabrikkert.
+
+**Omfang bygget:** migrasjon `043_wallester.sql` (provider-CHECK -> 'wallester', seks nye tabeller
+`provider_cards`/`card_spend_policies`/`card_events`/`card_authorizations`/`card_transactions`/
+`wallester_webhook_events` med full RLS FORCE + RESTRICTIVE space-policyer, `business_open_loops`-
+CHECK utvidet med `card_anomaly_attention`); `wallester-transport.ts` (fetch-basert, INGEN SDK,
+RS256-JWT per forespørsel signert med kundens PRIVATE RSA-nøkkel, `rbh` = base64(sha256(request-body
+som BINÆR)), retry/backoff på 429/500/502/503/504); `card-types.ts` (provider-nøytral kortmodell,
+deterministisk tilstandsmaskin draft->pending_provider->active<->frozen->closed,
+`mapWallesterCardState()`); `wallester-webhook.ts` (HTTP Basic-verifisering konstant-tid +
+envelope-parsing); `card-service.ts` (opprettelse med deterministisk idempotens, livssyklus der
+provider-feil ALDRI endrer kanonisk tilstand, ØNSKET vs PROVIDER-ANVENDT spend-policy-splitt - INGEN
+kunstig global Jarvis-beløpstak, autorisasjon->oppgjør korrekt modellert - ALDRI dobbel-telling,
+transaksjonssynk med paginering/dedup, formålsbundet avstemming REGEL 1 forpliktelse > REGEL 2
+eksakt-én-kandidat-beløp, selv-korrigerende avviksdeteksjon (14 typer), webhook-ingestion delt med
+polling via samme `ingestTransaction()`); `wallester-sweep.ts` (DailyScheduler kl. 05, per-steg-
+feilisolasjon); 18 nye `finance_wallester.*` ToolGateway-handlinger (A lesinger, B lokale
+mutasjoner/synk, C spend-muliggjørende submit_card/unfreeze_card/update_spend_policy/close_card -
+INGEN egen D, INGEN rå provider-proxy); `/webhooks/wallester`-rute; OpenLoop-integrasjon
+(`detectCardAnomalies()`, ny loop-type); erasure-plan utvidet (6 korttabeller, MÅ slettes FØR BÅDE
+`finance_recurring_commitments` OG `marketing_campaigns` - `provider_cards.commitment_id`/
+`campaign_id`-FK-ene); main.ts/worker-main.ts wiret identisk.
+
+**Testmatrise:** 54 nye Wallester-tester (`wallester-service.test.ts` 36 mot ekte embedded
+Postgres/RLS, `wallester-webhook.test.ts` 12 rene enhetstester inkl. JWT/rbh-kontrakten mot ekte
+RSA-nøkkelpar, `wallester-transport-wiring.test.ts` 6) - ALLE grønne på FØRSTE kjøring (Slice 5-
+lærdommen om proaktiv `beforeEach`-tabell-tømming anvendt fra start). Full workspace-suite grønn
+etter én reell regresjonsrettelse: den schema-drevne FK-audit-testen i `growth-erasure.test.ts`
+fanget at `provider_cards.campaign_id` sto som en NY, uregistrert ekstern FK inn mot
+`marketing_campaigns` - erasure-planens rekkefølge var FEIL (kortblokken sto etter BÅDE
+`finance_recurring_commitments` OG `marketing_campaigns`, ikke før) - rettet ved å flytte hele
+kortblokken foran begge FK-målene i `plan.ts`, samme mønster/lærdom som `finance_spend_records`
+(Slice 2) allerede dokumenterer i samme fil.
+
+**Guardet host-akseptanse** (`wallester-live-host-run.ts` → `wallester-live.ts`): krever INGEN
+Wallester-credentials (D-108) - 24 markører inkl. fem slice-invariant-bevaringer
+(`finance_d107_invariant_preserved`/`finance_slice2_invariants_preserved`/
+`stripe_slice3_invariants_preserved`/`vipps_slice4_invariants_preserved`/
+`neonomics_slice5_invariants_preserved`) og `wallester_realtime_authorization_policy` hardkodet
+`NOT_APPLICABLE` (aldri PASS/FAIL). **HOST-AKSEPTANSE: VENTER** - kjøres av Tobias mot eksakt
+CI-grønn PR-head; oppdateres i docs-closeouten FØR merge-godkjenning.
+
+**Terminalflagg:** `UA6_COMPLETE=false` (siste store kapabilitets-slice bygget - gjenstår dedikert
+UA-6-closeout + konsolidert credential-fase). `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, `WALLESTER_CREDENTIAL_SETUP_DEFERRED=true`.
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
+Full detalj: D-112 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

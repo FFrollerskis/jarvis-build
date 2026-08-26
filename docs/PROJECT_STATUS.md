@@ -1,6 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-25 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — ANDRE
+**Oppdatert:** 2026-08-26 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — SJETTE
+SLICE (Slice 6, D-112): Wallester programmerbare kort, wallet og spend-
+kontroll - IMPLEMENTASJON FERDIG, KVALITETSPORTER GRØNNE, VENTER PÅ
+BRANCH/PR/HOST-AKSEPTANSE.** Tobias-godkjent (`PROVIDER=Wallester`,
+`CORE_DEPENDENCY=false`). D-64-porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_
+AUTHORITY`. Migrasjon `043_wallester.sql` (6 nye tabeller `provider_cards`/
+`card_spend_policies`/`card_events`/`card_authorizations`/`card_transactions`/
+`wallester_webhook_events`, full RLS FORCE); `card-service.ts` (opprettelse/
+livssyklus/spend-policy/synk/avstemming/avviksdeteksjon); `wallester-
+transport.ts` (RS256-JWT, `rbh`-kontrakt); `wallester-webhook.ts` (HTTP
+Basic, konstant-tid); 18 nye `finance_wallester.*` ToolGateway-handlinger;
+OpenLoop-integrasjon (`card_anomaly_attention`); erasure-plan utvidet.
+**Sanntidsautorisasjon (§10): NOT_APPLICABLE** - ærlig rapportert (Wallester-
+webhooks er varsler, ikke beslutnings-callbacks). **Reell regresjon fanget
+og rettet FØR commit:** full workspace-suite viste FØRST 1 ekte testfeil -
+`growth-erasure.test.ts` sin schema-drevne FK-audit avdekket at
+`provider_cards.campaign_id` (ny FK -> `marketing_campaigns`) IKKE var
+registrert i testens kjente-tabeller-sett, OG at erasure-planens rekkefølge
+i `plan.ts` var FEIL (kortblokken slettet EFTER både
+`finance_recurring_commitments` OG `marketing_campaigns`, ikke før - samme
+FK-brudd-klasse som `finance_spend_records` allerede måtte rettes for i
+Slice 2). Rettet ved å flytte hele kortblokken foran begge FK-målene +
+utvide testens kjente-sett med `provider_cards`. **Kvalitetsporter etter
+retting (denne eksakte arbeidstre-tilstanden, IKKE committet ennå):**
+`pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent, full suite
+**178/178 filer, 2808/2808 tester grønt** (bekreftet ved full re-kjøring
+etter fiksen - INGEN gjenværende feil). Manuell secret-scan av hele diffen
+(tracked + untracked) fant INGEN treff. ZERO Wallester-credentials
+konfigurert (D-108 uendret) - `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`. **Gjenstår:** branch/commit/push,
+draft PR, CI-verifisering, guardet host-akseptanse (`wallester-live-host-
+run.ts`) på Tobias sin host mot eksakt CI-grønn head, docs-closeout med
+run_id/markørresultat, FINAL REPORT, STOPP for Tobias sin eksplisitte
+merge-godkjenning (ingen merge uten den). `UA6_COMPLETE=false` uendret.
+Full detalj: D-112 i DECISIONS_AND_ASSUMPTIONS.md,
+IMPLEMENTATION_PLAN.md §«SJETTE slice».
+
+**Runden før det:** 2026-08-25 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — ANDRE
 SLICE (Slice 2) HOST-VERIFISERT.** Tobias kjørte ekte `docker compose`-basert
 host-akseptanse mot PR #58 sin faktiske kode (`d324f49c6bebe3ce75f2b3e846b9f1e74447fb41`,
 verifisert eksakt SHA-match + rent arbeidstre FØR kjøring, fail-closed ellers).
