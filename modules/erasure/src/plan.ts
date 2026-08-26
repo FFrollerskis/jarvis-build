@@ -180,6 +180,26 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
     await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND finance_recurring_commitment_id IS NOT NULL", tv)
   );
   add(result, "finance_spend_records", await run(client, mode, "finance_spend_records", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-112 (UA-6 Slice 6, 043_wallester.sql): kortdomenet. MÅ slettes FØR
+  // BÅDE `finance_recurring_commitments` OG `marketing_campaigns` under -
+  // `provider_cards.commitment_id`/`campaign_id` og
+  // `card_transactions.matched_commitment_id` har alle en direkte FK mot
+  // dem (fanget av `growth-erasure.test.ts` sin schema-drevne FK-audit,
+  // IKKE antatt riktig - samme lærdom som `finance_spend_records`-
+  // kommentaren over allerede dokumenterer for søsken-tabellen). Intern
+  // avhengighets-rekkefølge: webhook_events/transactions -> authorizations
+  // -> events/policies -> provider_cards (FK-kjede). §24-distinksjonen
+  // (slettbar bruker-metadata vs finansielt revisjonsbevis): en TENANT-
+  // SLETTING (Q-20, hele tenants livssyklus avsluttes) fjerner ALT -
+  // retensjon av finansbevis for en LEVENDE tenant håndteres ved at
+  // ingenting annet enn full tenant-erasure sletter
+  // korttransaksjoner/hendelser.
+  add(result, "wallester_webhook_events", await run(client, mode, "wallester_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "card_transactions", await run(client, mode, "card_transactions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "card_authorizations", await run(client, mode, "card_authorizations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "card_events", await run(client, mode, "card_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "card_spend_policies", await run(client, mode, "card_spend_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "provider_cards", await run(client, mode, "provider_cards", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "finance_recurring_commitments", await run(client, mode, "finance_recurring_commitments", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "finance_procurement_items", await run(client, mode, "finance_procurement_items", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
