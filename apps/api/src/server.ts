@@ -13,6 +13,7 @@ import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
+  NeonomicsCredentialsUnavailableError, NeonomicsTenantNotConfiguredError,
   type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
@@ -353,6 +354,34 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 401, { error: "invalid_signature", message: err.message });
       }
       if (err instanceof VippsCredentialsUnavailableError || err instanceof VippsTenantNotConfiguredError) {
+        return json(res, 503, { error: "not_configured", message: err.message });
+      }
+      throw err;
+    }
+  }
+
+  if (deps.finance && req.method === "POST" && url.pathname === "/webhooks/neonomics") {
+    // D-111 (UA-6 Slice 5): Neonomics sin EGEN offisielle webhook-kontrakt
+    // (betalingsstatus-oppdateringer): API-NØKKEL-autentisering - nøkkelen
+    // Tobias selv velger ved registrering i Merchant-portalen, sendt av
+    // Neonomics i `x-api-key`-headeren. IKKE HMAC (Stripe) og IKKE
+    // forespørselssignering (Vipps) - se neonomics-webhook.ts.
+    const rawBody = await readRawBody(req);
+    const apiKeyHeader = req.headers["x-api-key"];
+    try {
+      const result = await deps.finance.service.ingestNeonomicsWebhookEvent(
+        rawBody, typeof apiKeyHeader === "string" ? apiKeyHeader : undefined
+      );
+      // SAMME 2xx-stopper-gjentakelse / ikke-2xx-be-om-retry-semantikk som
+      // Stripe-/Vipps-rutene (Neonomics retryer eksponentielt i opptil 7
+      // dager på alt annet enn 200).
+      const status = result.status === "failed_retryable" ? 502 : 200;
+      return json(res, status, { received: true, status: result.status, event_id: result.eventId });
+    } catch (err) {
+      if (err instanceof InvalidWebhookSignatureError) {
+        return json(res, 401, { error: "invalid_api_key", message: err.message });
+      }
+      if (err instanceof NeonomicsCredentialsUnavailableError || err instanceof NeonomicsTenantNotConfiguredError) {
         return json(res, 503, { error: "not_configured", message: err.message });
       }
       throw err;

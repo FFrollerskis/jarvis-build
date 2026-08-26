@@ -41,6 +41,8 @@ import { SupportEmailService, SupportService, SupportTransport, runSupportInboxS
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
+  BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
+  type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants, runVippsPaymentSyncForAllTenants,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
   type VippsCredentials, type VippsCredentialsProvider
@@ -256,10 +258,29 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
   const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
+  // D-111 (UA-6 Slice 5): SAMME "ETT globalt eier-tilkoblet credential-sett"-
+  // mønster - ett Neonomics-kundeforhold, en Jarvis-stabil x-device-id.
+  const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
+    async getCredentials(): Promise<NeonomicsCredentials | null> {
+      const clientId = process.env["JARVIS_NEONOMICS_CLIENT_ID"];
+      const clientSecret = process.env["JARVIS_NEONOMICS_CLIENT_SECRET"];
+      const deviceId = process.env["JARVIS_NEONOMICS_DEVICE_ID"];
+      if (!clientId || !clientSecret || !deviceId) return null;
+      return {
+        clientId, clientSecret, deviceId,
+        environment: process.env["JARVIS_NEONOMICS_ENVIRONMENT"] === "production" ? "production" : "sandbox",
+        ...(process.env["JARVIS_NEONOMICS_REALM"] ? { realm: process.env["JARVIS_NEONOMICS_REALM"] } : {})
+      };
+    }
+  };
+  const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
+  const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
   const financeService = new FinanceService(
     pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
-    vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver
+    vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver,
+    neonomicsCredentialsProvider, undefined, neonomicsWebhookApiKeyProvider, neonomicsTenantResolver
   );
+  const bankingService = new BankingService(pool, neonomicsCredentialsProvider);
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): egen
   // tjeneste over SAMME runtime-pool - ZERO ekstern leverandør (kun
   // interne kilder Jarvis allerede eier, se spend-service.ts). Avviks-
@@ -326,6 +347,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     finance_stripe: new StripeFinanceTransport(financeService),
     // D-110 (UA-6 Slice 4): eget `finance_vipps.*`-namespace - SAMME mønster.
     finance_vipps: new VippsFinanceTransport(financeService),
+    // D-111 (UA-6 Slice 5): eget `finance_neonomics.*`-namespace - SAMME mønster.
+    finance_neonomics: new NeonomicsFinanceTransport(bankingService, financeService),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
@@ -507,6 +530,14 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vipps-payment-sync", Number(process.env["JARVIS_VIPPS_SYNC_HOUR"] ?? 3)
   ).start(() => runVippsPaymentSyncForAllTenants(pool, financeService).then(() => undefined));
+  // D-111 (UA-6 Slice 5) §17: periodisk open-banking-sveip (samtykke-
+  // verifisering/konto-/transaksjonssynk/betalingsstatus/avstemming/avvik)
+  // - SAMME mekanisme/tidsvindu-klasse som Stripe-/Vipps-sveipene. Trygg
+  // uten JARVIS_NEONOMICS_*-credentials (provider-steg blir no-op, de
+  // rent lokale avstemmings-/avviks-stegene kjører fortsatt).
+  new DailyScheduler(
+    pool, "neonomics-sweep", Number(process.env["JARVIS_NEONOMICS_SYNC_HOUR"] ?? 3)
+  ).start(() => runNeonomicsSweepForAllTenants(pool, bankingService, financeService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).
