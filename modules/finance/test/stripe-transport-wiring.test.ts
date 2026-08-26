@@ -85,8 +85,10 @@ describe("D: finance.create_payment_intent aksepterer et valgfritt provider-felt
   it("avviser en ugyldig provider-verdi (fail-closed, ikke stille ignorert)", () => {
     const tools = firstWaveTools({});
     const createPaymentIntent = tools.find((t) => t.tool_id === "finance" && t.action === "create_payment_intent");
+    // D-110: 'vipps' er nå en EKTE bygget provider (Slice 4) og aksepteres -
+    // en genuint ustøttet verdi brukes i stedet for å bevise fail-closed.
     const parsed = createPaymentIntent!.input_schema.safeParse({
-      tenant_id: "t", idempotency_key: "k", purpose: "p", amount_ore: 100, vendor_name: "v", account_code: "cat", provider: "vipps"
+      tenant_id: "t", idempotency_key: "k", purpose: "p", amount_ore: 100, vendor_name: "v", account_code: "cat", provider: "paypal"
     });
     expect(parsed.success).toBe(false);
   });

@@ -12,6 +12,7 @@ import type { InProcessWorker, TaskService } from "@jarvis/tasks";
 import type { DockerMutationAction, ToolGateway } from "@jarvis/tool-gateway";
 import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
+  VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
   type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
@@ -317,6 +318,41 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 400, { error: "invalid_signature", message: err.message });
       }
       if (err instanceof StripeCredentialsUnavailableError || err instanceof StripeTenantNotConfiguredError) {
+        return json(res, 503, { error: "not_configured", message: err.message });
+      }
+      throw err;
+    }
+  }
+
+  if (deps.finance && req.method === "POST" && url.pathname === "/webhooks/vipps") {
+    // D-110 (UA-6 Slice 4): SAMME "signatur ER autentisering"-prinsipp som
+    // /webhooks/stripe, men med Vipps sin HELT ANDERLEDES HMAC-kontrakt
+    // (Host/X-Ms-Date/X-Ms-Content-Sha256/Authorization-headere, se
+    // vipps-webhook.ts) - `method`/`pathAndQuery` deltar i den signerte
+    // strengen og MÅ derfor speile den faktiske forespørselen eksakt.
+    const rawBody = await readRawBody(req);
+    const hostHeader = req.headers["host"];
+    const dateHeader = req.headers["x-ms-date"];
+    const contentHashHeader = req.headers["x-ms-content-sha256"];
+    const authHeader = req.headers["authorization"];
+    try {
+      const result = await deps.finance.service.ingestVippsWebhookEvent(
+        rawBody, req.method, url.pathname + url.search,
+        {
+          host: typeof hostHeader === "string" ? hostHeader : undefined,
+          xMsDate: typeof dateHeader === "string" ? dateHeader : undefined,
+          xMsContentSha256: typeof contentHashHeader === "string" ? contentHashHeader : undefined,
+          authorization: typeof authHeader === "string" ? authHeader : undefined
+        }
+      );
+      // SAMME 2xx-stopper-gjentakelse / ikke-2xx-be-om-retry-semantikk som Stripe-ruten.
+      const status = result.status === "failed_retryable" ? 502 : 200;
+      return json(res, status, { received: true, status: result.status, event_id: result.eventId });
+    } catch (err) {
+      if (err instanceof InvalidWebhookSignatureError) {
+        return json(res, 401, { error: "invalid_signature", message: err.message });
+      }
+      if (err instanceof VippsCredentialsUnavailableError || err instanceof VippsTenantNotConfiguredError) {
         return json(res, 503, { error: "not_configured", message: err.message });
       }
       throw err;

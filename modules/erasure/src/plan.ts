@@ -202,6 +202,13 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // Stripe-tabellene selv, rekkefølgen dem imellom er derfor vilkårlig.
   add(result, "stripe_webhook_events", await run(client, mode, "stripe_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "stripe_refunds", await run(client, mode, "stripe_refunds", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-110 (UA-6 Slice 4, 041_vipps.sql): `vipps_webhook_events`/
+  // `vipps_captures`/`vipps_refunds` har ALLE en FK -> `payment_intents` -
+  // SAMME "barn-FK FØR forelder"-regel, MÅ slettes FØR `payment_intents`.
+  // Ingen FK MELLOM de tre Vipps-tabellene selv.
+  add(result, "vipps_webhook_events", await run(client, mode, "vipps_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vipps_captures", await run(client, mode, "vipps_captures", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vipps_refunds", await run(client, mode, "vipps_refunds", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "payment_intents", await run(client, mode, "payment_intents", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN

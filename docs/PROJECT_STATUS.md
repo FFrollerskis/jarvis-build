@@ -4597,3 +4597,85 @@ GitHub uendret av denne sliceen.
 **Neste anbefalte oppgave:** commit/push branch, opprett draft-PR, vent på CI, deretter Tobias sin
 guardede host-kjøring av `stripe-live-host-run.ts` mot PR-ens eksakte HEAD - **MERGES IKKE uten
 Tobias sin eksplisitte godkjenning.**
+
+---
+
+## UA-6 FJERDE SLICE (Slice 4, D-110): Vipps MobilePay-adapter — implementert (2026-08-25)
+
+**Aktiv fase/oppgave:** UA-6 Finance & Spend Integrity Gateway — FJERDE vertikale slice (D-110):
+Vipps MobilePay (P1) payments/captures/cancels/refunds/webhooks/reconciliation-adapter. Branch
+`claude/ua6-slice4-vipps-adapter` fra main `95c79cf362b67f519ce51c3ab9daee7f13cf5c3a`
+(Slice 3-merge, post-merge CI grønn).
+
+**Ferdig arbeid:** D-64/D-41-port kjørt (SOR=HYBRID_WITH_CLEAR_AUTHORITY,
+CORE_DEPENDENCY_DECISION_REQUIRED=false - masterplan-navngitt P1;
+`developer.vippsmobilepay.com` EGRESS_BLOCKED -> uavhengig WebSearch,
+VERIFIED_SEARCH_SNIPPET). ePayment API (`/epayment/v1/*`) valgt (Vipps sitt
+anbefalte API for nye integrasjoner). Bygget: migrasjon `041_vipps.sql`
+(provider='vipps', `captured`-event-type, `vipps_webhook_events`/`vipps_captures`/
+`vipps_refunds` med full RLS FORCE), `vipps-transport.ts` (fetch, to-stegs
+accesstoken-auth, INGEN SDK), `vipps-webhook.ts` (Azure-stil HMAC - EGEN
+kontrakt, ikke Stripe-mønsteret), FinanceService-utvidelser (submit med
+SANNFERDIG CREATED-venter-på-bruker-tilstand, capture delvis/full med
+aggregat-oppgjør via `checkVippsFullSettlement()` siden Vipps sitt
+payment.state forblir AUTHORIZED etter capture, cancel, refund,
+webhook-ingestion med idempotencyKey-dedup + ordens-vokter, 10-type
+avviksdeteksjon til EKSISTERENDE anomaly_flags/OpenLoop, worker-sveip),
+12 `finance_vipps.*` ToolGateway-handlinger (submit_capture/submit_refund=D,
+cancel_payment=C), `/webhooks/vipps`-rute, `vipps-payment-sync`-scheduler,
+erasure-plan, main/worker-wiring, `.env.example` (KUN plassholdere -
+`JARVIS_VIPPS_CLIENT_ID`/`_CLIENT_SECRET`/`_SUBSCRIPTION_KEY`/`_MSN`/
+`_ENVIRONMENT`/`_WEBHOOK_SECRET`/`_TENANT_ID`/`_SYNC_HOUR`).
+Guardet host-akseptanse `vipps-live-host-run.ts`/`vipps-live.ts` (19 markører
+inkl. `stripe_slice3_invariants_preserved`) skrevet - IKKE kjørt på ekte host ennå.
+
+**Testmatrise:** 70 nye Vipps-tester (44 integrasjon mot ekte embedded
+Postgres/RLS + 18 webhook-enhet + 8 wiring), alle grønne første kjøring.
+Én eksisterende test oppdatert (provider='vipps' er nå gyldig - 'paypal'
+brukes som ugyldig-provider-bevis). Typecheck 20/20 rent, lint rent.
+Full workspace-suite: kjøres ved commit (se PR for endelig tall).
+
+**Blokkeringer:** ingen kjente. `VIPPS_LIVE_VERIFIED=false`,
+`VIPPS_LIVE_GATE=PENDING_CREDENTIALS`, `VIPPS_CREDENTIAL_SETUP_DEFERRED=true`
+(D-108 uendret - Tobias IKKE bedt om å konfigurere Vipps-credentials).
+`UA6_COMPLETE=false` (fjerde slice - bank/kort-wallet ikke startet).
+Fiken/Stripe/Google Ads/GitHub uendret.
+
+**Neste anbefalte oppgave:** commit/push branch, opprett draft-PR, vent på CI,
+deretter Tobias sin guardede host-kjøring av `vipps-live-host-run.ts` mot
+PR-ens eksakte HEAD - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+---
+
+## UA-6 FJERDE SLICE (Slice 4, D-110): HOST-VERIFISERT (2026-08-26)
+
+Tobias kjørte ekte guardet `docker compose`-basert host-akseptanse mot PR #60
+sin faktiske CI-grønne kode (`0289271b99037d7957d0ef0109d06996310e4ef9`,
+verifisert eksakt SHA-match + rent arbeidstre FØR kjøring, fail-closed
+ellers). `run_id=b5cd45bb`: **ALLE 19 markører PASS på FØRSTE kjøring**
+(q21_runtime_role_safe, finance_d107_invariant_preserved,
+finance_slice2_invariants_preserved, stripe_slice3_invariants_preserved,
+vipps_adapter_wiring, vipps_payment_idempotency, vipps_payment_state_sync,
+vipps_user_action_state, vipps_capture_integrity, vipps_cancel_integrity,
+vipps_refund_integrity, vipps_event_idempotency, vipps_event_auth_contract,
+vipps_finance_reconciliation, vipps_anomaly_integration,
+vipps_tenant_isolation, vipps_kill_switch_semantics, vipps_secret_safety,
+vipps_cleanup), `hard_fail=false`, `runtime_current_user=jarvis_runtime` -
+INGEN host-fix-runde nødvendig (i motsetning til Slice 2/3).
+`vipps_secret_safety=PASS` beviste EKTE fail-closed (`credential_unavailable`
+uten `JARVIS_VIPPS_CLIENT_SECRET`). ZERO Vipps-credentials involvert.
+CI (gitleaks/windows-git-auth/build-test) grønn på samme eksakte head;
+full lokal suite 2697 passed/5 skipped (1 bevist teardown-flake i uberørt fil,
+5/5 grønn isolert).
+
+**Terminalstatus:** `VIPPS_IMPLEMENTATION_COMPLETE=true`,
+`VIPPS_CANONICAL_HOST_VERIFIED=true`, `VIPPS_LIVE_VERIFIED=false`,
+`VIPPS_LIVE_GATE=PENDING_CREDENTIALS`, `VIPPS_CREDENTIAL_SETUP_DEFERRED=true`
+(host-kjøringen beviser kanonisk produkt-wiring mot en skriptet fake ved
+Vipps-transportens nettverksgrense, ALDRI ekte Vipps-reachability - D-108
+UENDRET). `UA6_SLICE4_HOST_VERIFIED=true`, `UA6_COMPLETE=false` (bank/
+kort-wallet ikke startet), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`.
+
+**Neste:** denne docs-only-closeouten flytter PR-headen - fersk CI + én
+avsluttende guardet host-kjøring på NY eksakt head kreves (merge-evidens er
+HEAD-bundet), deretter **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**

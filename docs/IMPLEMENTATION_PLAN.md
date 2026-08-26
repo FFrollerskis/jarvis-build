@@ -3011,6 +3011,50 @@ startet). `FIXED_SUITE_VERIFIED=true`, `STRIPE_LIVE_VERIFIED=false`,
 `STRIPE_LIVE_GATE=PENDING_CREDENTIALS`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
 Full detalj: D-109 i DECISIONS_AND_ASSUMPTIONS.md.
 
+### UA-6 Finance & Spend Integrity Gateway — FJERDE slice (Slice 4, D-110): Vipps MobilePay (2026-08-25)
+
+Ny ekstern leverandør (P1, masterplan-navngitt sammen med Stripe/bank - `CORE_DEPENDENCY_DECISION_
+REQUIRED=false`). D-64-porten kjørt FØRST: `SOR=HYBRID_WITH_CLEAR_AUTHORITY` - Jarvis eier
+betalings-/capture-/refusjons-intensjon, dobbelt idempotens (egen DB-tilstand + Vipps sin egen
+`Idempotency-Key`), aggregat-oppgjørslogikken, provider-avviksdeteksjon, avstemming, nødbryter og
+audit; Vipps eier selve betalings-/capture-/refund-/cancel-provider-tilstanden og webhook-
+hendelses-identiteten. D-41-audit: `developer.vippsmobilepay.com` `EGRESS_BLOCKED`, uavhengig
+`WebSearch`-fallback, merket `VERIFIED_SEARCH_SNIPPET`. **API-produkt:** ePayment API
+(`/epayment/v1/*`) - Vipps sitt anbefalte API for nye integrasjoner (eldre eCom/PSP IKKE brukt).
+
+**Omfang bygget:** migrasjon `041_vipps.sql` (provider-CHECK -> 'vipps', `latest_vipps_event_key`,
+ny `captured`-event-type, tre nye tabeller `vipps_webhook_events`/`vipps_captures`/`vipps_refunds`
+med full RLS FORCE); `vipps-transport.ts` (fetch-basert, to-stegs accesstoken-auth innkapslet,
+INGEN SDK); `vipps-webhook.ts` (Azure-stil HMAC-SHA256-forespørselssignering - Host/X-Ms-Date/
+X-Ms-Content-Sha256/Authorization, FUNDAMENTALT annerledes enn Stripe, egen implementasjon);
+`FinanceService` utvidet: Vipps-innsending (deterministisk `provider_acknowledged` med
+`provider_status='CREATED'` - VENTER-PÅ-BRUKER-tilstanden i Vipps-appen er SANNFERDIG modellert,
+aldri antatt fullført), capture som førsteklasses økonomisk handling (delvis/full, over-capture
+avvist deterministisk FØR provider-kall, aggregat-oppgjør via `checkVippsFullSettlement()` - Vipps
+sitt `payment.state` forblir 'AUTHORIZED' selv etter capture, så oppgjør avgjøres av Jarvis sin
+EGEN capture-bokføring), cancel (lokal før innsending / provider-kall etter, frigjør reservasjon),
+refusjon (mot oppgjort beløp, samme aggregat-vokter), webhook-ingestion (idempotencyKey-basert
+dedup med deterministisk fallback, fail-closed tenant-krysssjekk, ordens-voktet
+`applyVippsPaymentOutcome` med ms-presisjon), 10-type avviksdeteksjon (gjenbrukte + nye typer,
+skrevet til SAMME `payment_intents.anomaly_flags` - OpenLoopService fanger dem UTEN ny kode),
+`syncPendingVippsPayments`-worker-sveip. 12 nye `finance_vipps.*` ToolGateway-handlinger (A/B/C
+for cancel_payment/D for submit_capture+submit_refund); `/webhooks/vipps`-HTTP-rute;
+`vipps-payment-sync`-DailyScheduler-jobb; erasure-plan utvidet (tre Vipps-tabeller FØR
+`payment_intents`); main.ts/worker-main.ts wiret identisk.
+
+**Testmatrise:** 70 nye Vipps-tester (`vipps-service.test.ts` 44 mot ekte embedded Postgres/RLS,
+`vipps-webhook.test.ts` 18 rene enhetstester, `vipps-transport-wiring.test.ts` 8). Én selvfanget
+designfeil rettet FØR test (duplisert 'captured'-event ved idempotent capture-retry).
+
+**Guardet host-akseptanse** (`vipps-live-host-run.ts` → `vipps-live.ts`): krever INGEN
+Vipps-credentials (D-108) - 19 markører inkl. `stripe_slice3_invariants_preserved` (Stripe-grenen
+bevist UENDRET av dette tillegget) - kjøres på Tobias sin host ved PR-closeout.
+
+**Terminalflagg:** `UA6_COMPLETE=false` (fjerde slice - bank/kort-wallet ikke startet).
+`VIPPS_LIVE_VERIFIED=false`, `VIPPS_LIVE_GATE=PENDING_CREDENTIALS`,
+`VIPPS_CREDENTIAL_SETUP_DEFERRED=true`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
+Full detalj: D-110 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

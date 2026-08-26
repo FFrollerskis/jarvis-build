@@ -4,18 +4,18 @@
  * FØRST for hver leverandør - se DECISIONS_AND_ASSUMPTIONS.md D-107/D-109):
  * idempotens, deterministisk avviksdeteksjon, avstemming og
  * eier-kontrollert kill switch er ALDRI utsatt til en leverandør.
- * Fiken (P0, D-107) og Stripe (P1, D-109, TREDJE slice) er begge
- * HYBRID_WITH_CLEAR_AUTHORITY: Fiken forblir bokføring-av-post (norsk
- * bokføringslov) EXTERNAL_CANONICAL; Stripe forblir selve
- * PaymentIntent-/Charge-/Refund-tilstanden og webhook-hendelses-identiteten
- * EXTERNAL_CANONICAL. Vipps/bank (resten av P1) og kort/wallet (P2) er
- * BEVISST IKKE bygget ennå - se `PaymentProvider` under.
+ * Fiken (P0, D-107), Stripe (P1, D-109, TREDJE slice) og Vipps MobilePay
+ * (P1, D-110, FJERDE slice) er ALLE HYBRID_WITH_CLEAR_AUTHORITY: Fiken
+ * forblir bokføring-av-post (norsk bokføringslov) EXTERNAL_CANONICAL;
+ * Stripe/Vipps forblir selve betalings-/capture-/refund-tilstanden og
+ * webhook-hendelses-identiteten EXTERNAL_CANONICAL. Bank (resten av P1) og
+ * kort/wallet (P2) er BEVISST IKKE bygget ennå - se `PaymentProvider` under.
  */
 
 export type PaymentIntentState = "draft" | "submitted" | "provider_acknowledged" | "settled" | "failed" | "cancelled";
 export type ReconciliationState = "unreconciled" | "matched" | "mismatched";
-/** 'fiken' (P0, D-107) og 'stripe' (P1, D-109) bygget. Vipps/bank (resten av P1) og programmerbart kort/wallet (P2) er masterplan-navngitte FREMTIDIGE providere. */
-export type PaymentProvider = "fiken" | "stripe";
+/** 'fiken' (P0, D-107), 'stripe' (P1, D-109) og 'vipps' (P1, D-110) bygget. Bank (resten av P1) og programmerbart kort/wallet (P2) er masterplan-navngitte FREMTIDIGE providere. */
+export type PaymentProvider = "fiken" | "stripe" | "vipps";
 
 export type PaymentIntentEventType =
   | "intent_created"
@@ -26,7 +26,9 @@ export type PaymentIntentEventType =
   | "cancelled"
   | "anomaly_flagged"
   | "reconciled"
-  | "kill_switch_blocked";
+  | "kill_switch_blocked"
+  /** D-110 (UA-6 Slice 4): Vipps sitt payment.state forblir 'AUTHORIZED' selv ETTER en vellykket capture (VERIFIED_SEARCH_SNIPPET) - en distinkt hendelsestype er derfor nødvendig, ALDRI korrekt uttrykt som 'settled' alene for et delvis capture-steg. */
+  | "captured";
 
 export interface PaymentIntent {
   payment_intent_id: string;
@@ -61,6 +63,8 @@ export interface PaymentIntent {
   provider_status_updated_at: string | null;
   /** Pointer til hvilken stripe_webhook_events-rad som sist oppdaterte provider_status - BEVISST ingen FK (unngår sirkulær avhengighet). */
   latest_stripe_event_id: string | null;
+  /** D-110: pointer til hvilken vipps_webhook_events-rad (dedupe_key) som sist oppdaterte provider_status - SAMME "pointer, ingen FK"-prinsipp. */
+  latest_vipps_event_key: string | null;
   created_at: string;
   updated_at: string;
   submitted_at: string | null;
@@ -382,4 +386,201 @@ export const STRIPE_REFUND_STATUS_TO_STATE: Readonly<Record<string, StripeRefund
   succeeded: "settled",
   failed: "failed",
   canceled: "cancelled"
+};
+
+// === Vipps MobilePay (P1, D-110, UA-6 Slice 4) ===========================
+
+export class VippsCredentialsUnavailableError extends Error {
+  constructor(readonly tenantId: string) {
+    super(`vipps_credentials_unavailable:${tenantId}`);
+    this.name = "VippsCredentialsUnavailableError";
+  }
+}
+
+export class PaymentIntentNotVippsError extends Error {
+  constructor(readonly paymentIntentId: string, readonly actualProvider: PaymentProvider) {
+    super(`payment_intent_not_vipps:${paymentIntentId}:${actualProvider}`);
+    this.name = "PaymentIntentNotVippsError";
+  }
+}
+
+/**
+ * Capture/cancel krever at Vipps FAKTISK har autorisert (reservert) beløpet
+ * - IKKE bare "sendt inn" (`CREATED`, fortsatt VENTER på brukerbekreftelse
+ * i Vipps-appen - byggeordrens §5 "represent intermediate/waiting states
+ * correctly", §7 "no over-capture"/"invalid-state capture"). Refusjon
+ * gjenbruker DEN EKSISTERENDE `PaymentIntentNotSettledError` (generisk
+ * navngitt, INGEN Stripe-spesifikk streng i selve klassen) - SAMME
+ * precondition som Stripe (kun refunder en FAKTISK oppgjort betaling).
+ */
+export class PaymentIntentNotAuthorizedError extends Error {
+  constructor(readonly paymentIntentId: string, readonly providerStatus: string | null) {
+    super(`payment_intent_not_authorized:${paymentIntentId}:${providerStatus ?? "unknown"}`);
+    this.name = "PaymentIntentNotAuthorizedError";
+  }
+}
+
+export class VippsTenantNotConfiguredError extends Error {
+  constructor() {
+    super("vipps_tenant_not_configured");
+    this.name = "VippsTenantNotConfiguredError";
+  }
+}
+
+/** Speiler `ExcessiveRefundAmountError` (byggeordrens §7 "no over-capture") - egen klasse for korrekt feilnavn/melding, ALDRI gjenbruk av refusjons-klassen for en INNGÅENDE handling. */
+export class ExcessiveCaptureAmountError extends Error {
+  constructor(readonly paymentIntentId: string, readonly requestedOre: number, readonly remainingOre: number) {
+    super(`excessive_capture_amount:${paymentIntentId}:requested=${requestedOre}:remaining=${remainingOre}`);
+    this.name = "ExcessiveCaptureAmountError";
+  }
+}
+
+export class CaptureAlreadySubmittedError extends Error {
+  constructor(readonly captureId: string, readonly state: PaymentIntentState) {
+    super(`capture_already_submitted:${captureId}:${state}`);
+    this.name = "CaptureAlreadySubmittedError";
+  }
+}
+
+export class CaptureNotFoundError extends Error {
+  constructor(readonly captureId: string) {
+    super(`capture_not_found:${captureId}`);
+    this.name = "CaptureNotFoundError";
+  }
+}
+
+/** Gjenbruker BEVISST samme 6-tilstands livssyklus-vokabular som PaymentIntentState (byggeordrens §14: "reuse existing state-machine conventions"). */
+export type VippsCaptureState = PaymentIntentState;
+export type VippsRefundState = PaymentIntentState;
+
+export interface VippsCapture {
+  capture_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  payment_intent_id: string;
+  idempotency_key: string;
+  state: VippsCaptureState;
+  amount_ore: number;
+  currency: string;
+  failure_reason: string | null;
+  anomaly_flags: readonly string[];
+  owner_person_id: string | null;
+  created_at: string;
+  updated_at: string;
+  submitted_at: string | null;
+  settled_at: string | null;
+  failed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface CreateVippsCaptureInput {
+  idempotency_key: string;
+  payment_intent_id: string;
+  amount_ore: number;
+  owner_person_id?: string;
+  actor_person_id?: string;
+}
+
+export interface VippsRefund {
+  refund_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  payment_intent_id: string;
+  idempotency_key: string;
+  state: VippsRefundState;
+  amount_ore: number;
+  currency: string;
+  provider_ref: string | null;
+  failure_reason: string | null;
+  anomaly_flags: readonly string[];
+  owner_person_id: string | null;
+  created_at: string;
+  updated_at: string;
+  submitted_at: string | null;
+  settled_at: string | null;
+  failed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface CreateVippsRefundInput {
+  idempotency_key: string;
+  payment_intent_id: string;
+  amount_ore: number;
+  owner_person_id?: string;
+  actor_person_id?: string;
+}
+
+export type VippsWebhookEventStatus = "received" | "verified" | "processed" | "failed_retryable" | "unsupported";
+
+export interface VippsWebhookEventRecord {
+  dedupe_key: string;
+  tenant_id: string;
+  memory_space_id: string;
+  event_name: string;
+  payment_intent_id: string | null;
+  status: VippsWebhookEventStatus;
+  payload_summary: Record<string, unknown>;
+  error_message: string | null;
+  vipps_event_timestamp: string | null;
+  received_at: string;
+  processed_at: string | null;
+  created_at: string;
+}
+
+/**
+ * Deterministisk avviksdeteksjon spesifikk for Vipps (byggeordrens §12) -
+ * ren SQL i FinanceService.runVippsProviderAnomalyDetection(), ALDRI
+ * AI-inferert (Q-26-grensen). Skrives til DEN EKSISTERENDE
+ * `payment_intents.anomaly_flags`-kolonnen (SAMME gjenbruk som Stripe) slik
+ * at DEN EKSISTERENDE `detectPaymentAnomalies()`-overflatingen fanger det
+ * uten noen ny OpenLoop-mekanisme. `CAPTURE_AMOUNT_CONFLICT`/
+ * `DUPLICATE_PROVIDER_EFFECT`/`EXPIRED_PAYMENT_WITH_ACTIVE_INTENT` er NYE
+ * (Vipps-spesifikke situasjoner uten Stripe-parallell); resten gjenbruker
+ * de EKSISTERENDE StripeAnomalyType-navnene der semantikken faktisk
+ * overlapper (byggeordrens §12: "Reuse existing canonical anomaly
+ * structures... Do not duplicate anomaly types unnecessarily").
+ */
+export type VippsAnomalyType =
+  | "PROVIDER_AMOUNT_MISMATCH"
+  | "PROVIDER_CURRENCY_MISMATCH"
+  | "PROVIDER_REFERENCE_CONFLICT"
+  | "UNKNOWN_PROVIDER_OUTCOME"
+  | "PROVIDER_STATE_CONFLICT"
+  | "CAPTURE_AMOUNT_CONFLICT"
+  | "REFUND_AMOUNT_CONFLICT"
+  | "PROVIDER_OBJECT_TENANT_CONFLICT"
+  | "DUPLICATE_PROVIDER_EFFECT"
+  | "EXPIRED_PAYMENT_WITH_ACTIVE_INTENT";
+
+export interface VippsProviderAnomalyDetectionResult {
+  payment_intent_flags_added: number;
+  capture_flags_added: number;
+  refund_flags_added: number;
+  flags_cleared: number;
+}
+
+/**
+ * Deterministisk utfallskartlegging Vipps `state` -> Jarvis
+ * PaymentIntentState (byggeordrens §6: "Map real Vipps states
+ * deterministically... Do not collapse materially different economic
+ * states"). `null` betyr "bli i `provider_acknowledged`, KUN observasjonell
+ * endring av `provider_status`" (SAMME mønster som
+ * `STRIPE_STATUS_TO_JARVIS_STATE`). `CAPTURED` er BEVISST IKKE i dette
+ * kartet - overgang til `settled` avgjøres av AGGREGAT fanget beløp (kan
+ * være delvis, se `vipps_captures`), håndtert i FinanceService sin egen
+ * oppgjørs-sjekk (`checkVippsFullSettlement()`), ALDRI av selve
+ * hendelsesnavnet alene. `TERMINATED` (avbrutt FØR autorisering) og
+ * `CANCELLED` (selgerinitiert avbrudd ETTER autorisering)/`EXPIRED` er
+ * BEGGE en bevisst IKKE-fullført intensjon - mappes til Jarvis sin egen
+ * `cancelled` (IKKE `failed`), SAMME begrunnelse som Stripe sin
+ * `canceled -> cancelled`-mapping. Den EKSAKTE Vipps-tilstanden er ALDRI
+ * tapt selv om Jarvis sin `state` kollapser dem - `provider_status`
+ * (observasjonelt felt) beholder den nøyaktige, ukollapsede verdien.
+ */
+export const VIPPS_STATUS_TO_JARVIS_STATE: Readonly<Record<string, PaymentIntentState | null>> = {
+  CREATED: null,
+  AUTHORIZED: null,
+  TERMINATED: "cancelled",
+  EXPIRED: "cancelled",
+  CANCELLED: "cancelled"
 };
