@@ -4644,3 +4644,38 @@ Fiken/Stripe/Google Ads/GitHub uendret.
 **Neste anbefalte oppgave:** commit/push branch, opprett draft-PR, vent på CI,
 deretter Tobias sin guardede host-kjøring av `vipps-live-host-run.ts` mot
 PR-ens eksakte HEAD - **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
+
+---
+
+## UA-6 FJERDE SLICE (Slice 4, D-110): HOST-VERIFISERT (2026-08-26)
+
+Tobias kjørte ekte guardet `docker compose`-basert host-akseptanse mot PR #60
+sin faktiske CI-grønne kode (`0289271b99037d7957d0ef0109d06996310e4ef9`,
+verifisert eksakt SHA-match + rent arbeidstre FØR kjøring, fail-closed
+ellers). `run_id=b5cd45bb`: **ALLE 19 markører PASS på FØRSTE kjøring**
+(q21_runtime_role_safe, finance_d107_invariant_preserved,
+finance_slice2_invariants_preserved, stripe_slice3_invariants_preserved,
+vipps_adapter_wiring, vipps_payment_idempotency, vipps_payment_state_sync,
+vipps_user_action_state, vipps_capture_integrity, vipps_cancel_integrity,
+vipps_refund_integrity, vipps_event_idempotency, vipps_event_auth_contract,
+vipps_finance_reconciliation, vipps_anomaly_integration,
+vipps_tenant_isolation, vipps_kill_switch_semantics, vipps_secret_safety,
+vipps_cleanup), `hard_fail=false`, `runtime_current_user=jarvis_runtime` -
+INGEN host-fix-runde nødvendig (i motsetning til Slice 2/3).
+`vipps_secret_safety=PASS` beviste EKTE fail-closed (`credential_unavailable`
+uten `JARVIS_VIPPS_CLIENT_SECRET`). ZERO Vipps-credentials involvert.
+CI (gitleaks/windows-git-auth/build-test) grønn på samme eksakte head;
+full lokal suite 2697 passed/5 skipped (1 bevist teardown-flake i uberørt fil,
+5/5 grønn isolert).
+
+**Terminalstatus:** `VIPPS_IMPLEMENTATION_COMPLETE=true`,
+`VIPPS_CANONICAL_HOST_VERIFIED=true`, `VIPPS_LIVE_VERIFIED=false`,
+`VIPPS_LIVE_GATE=PENDING_CREDENTIALS`, `VIPPS_CREDENTIAL_SETUP_DEFERRED=true`
+(host-kjøringen beviser kanonisk produkt-wiring mot en skriptet fake ved
+Vipps-transportens nettverksgrense, ALDRI ekte Vipps-reachability - D-108
+UENDRET). `UA6_SLICE4_HOST_VERIFIED=true`, `UA6_COMPLETE=false` (bank/
+kort-wallet ikke startet), `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`.
+
+**Neste:** denne docs-only-closeouten flytter PR-headen - fersk CI + én
+avsluttende guardet host-kjøring på NY eksakt head kreves (merge-evidens er
+HEAD-bundet), deretter **MERGES IKKE uten Tobias sin eksplisitte godkjenning.**
