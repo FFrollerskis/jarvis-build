@@ -42,6 +42,8 @@ import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
+  CardService, WallesterFinanceTransport, runWallesterSweepForAllTenants,
+  type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants, runVippsPaymentSyncForAllTenants,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
@@ -275,12 +277,36 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
   const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
+  // D-112 (UA-6 Slice 6): SAMME "ETT globalt eier-tilkoblet credential-sett"-
+  // mønster - ett Wallester-kundeforhold (RS256-JWT med kundens private
+  // nøkkel; base-URL/audience env-konfigurert - ingen gjettet hardkodet vert).
+  const wallesterCredentialsProvider: WallesterCredentialsProvider = {
+    async getCredentials(): Promise<WallesterCredentials | null> {
+      const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
+      const issuer = process.env["JARVIS_WALLESTER_ISSUER"];
+      const audience = process.env["JARVIS_WALLESTER_AUDIENCE"];
+      const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
+      if (!baseUrl || !issuer || !audience || !privateKeyPem) return null;
+      return {
+        baseUrl, issuer, audience, privateKeyPem,
+        productCode: process.env["JARVIS_WALLESTER_PRODUCT_CODE"] ?? null,
+        environment: process.env["JARVIS_WALLESTER_ENVIRONMENT"] === "production" ? "production" : "sandbox"
+      };
+    }
+  };
+  const wallesterWebhookBasicAuthProvider = () => {
+    const username = process.env["JARVIS_WALLESTER_WEBHOOK_BASIC_USER"];
+    const password = process.env["JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD"];
+    return username && password ? { username, password } : null;
+  };
+  const wallesterTenantResolver = () => process.env["JARVIS_WALLESTER_TENANT_ID"] ?? null;
   const financeService = new FinanceService(
     pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
     vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver,
     neonomicsCredentialsProvider, undefined, neonomicsWebhookApiKeyProvider, neonomicsTenantResolver
   );
   const bankingService = new BankingService(pool, neonomicsCredentialsProvider);
+  const cardService = new CardService(pool, wallesterCredentialsProvider, undefined, wallesterWebhookBasicAuthProvider, wallesterTenantResolver);
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): egen
   // tjeneste over SAMME runtime-pool - ZERO ekstern leverandør (kun
   // interne kilder Jarvis allerede eier, se spend-service.ts). Avviks-
@@ -349,6 +375,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     finance_vipps: new VippsFinanceTransport(financeService),
     // D-111 (UA-6 Slice 5): eget `finance_neonomics.*`-namespace - SAMME mønster.
     finance_neonomics: new NeonomicsFinanceTransport(bankingService, financeService),
+    // D-112 (UA-6 Slice 6): eget `finance_wallester.*`-namespace - SAMME mønster.
+    finance_wallester: new WallesterFinanceTransport(cardService),
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - SAMME lat/enkel-avhengighet-mønster som GrowthTransport/
     // AgreementsTransport over (INGEN toolGateway/ToolInvocationContext,
@@ -416,7 +444,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // ruten i server.ts - webhook-ingestion krever rå (usignert-parset) body
     // og skjer derfor UTENFOR den generiske `readBody()`-JSON-parseren, se
     // server.ts sin nye rute-gren.
-    finance: { service: financeService },
+    finance: { service: financeService, cards: cardService },
     conversation: new ConversationEngine({
       messages: new MessageStore(pool),
       context: new ContextBuilder(pool),
@@ -538,6 +566,12 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "neonomics-sweep", Number(process.env["JARVIS_NEONOMICS_SYNC_HOUR"] ?? 3)
   ).start(() => runNeonomicsSweepForAllTenants(pool, bankingService, financeService).then(() => undefined));
+  // D-112 (UA-6 Slice 6): daglig Wallester-kortsveip (tilstands-/
+  // autorisasjons-/transaksjonssynk -> avstemming -> avviksdeteksjon) -
+  // SAMME reboot-durable DailyScheduler-mekanisme.
+  new DailyScheduler(
+    pool, "wallester-sweep", Number(process.env["JARVIS_WALLESTER_SYNC_HOUR"] ?? 5)
+  ).start(() => runWallesterSweepForAllTenants(pool, cardService).then(() => undefined));
   // UA-3 next slice (D-53) §19/§20: periodisk open-loop-sveip - gjenbruker SAMME
   // reboot-durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
   // uavhengig av om Telegram er konfigurert (deteksjon != levering).

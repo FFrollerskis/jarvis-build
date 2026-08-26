@@ -14,7 +14,8 @@ import {
   InvalidWebhookSignatureError, StripeCredentialsUnavailableError, StripeTenantNotConfiguredError,
   VippsCredentialsUnavailableError, VippsTenantNotConfiguredError,
   NeonomicsCredentialsUnavailableError, NeonomicsTenantNotConfiguredError,
-  type FinanceService
+  WallesterCredentialsUnavailableError, WallesterTenantNotConfiguredError,
+  type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
 import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
@@ -72,7 +73,7 @@ export interface ApiDeps {
    * RÅ body direkte (IKKE via `readBody()`, som JSON-parser og dermed
    * ødelegger byte-for-byte-signaturen Stripe krever) - se egen gren under.
    */
-  finance?: { service: FinanceService };
+  finance?: { service: FinanceService; cards?: CardService };
 }
 
 export interface HealthStatus {
@@ -382,6 +383,35 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         return json(res, 401, { error: "invalid_api_key", message: err.message });
       }
       if (err instanceof NeonomicsCredentialsUnavailableError || err instanceof NeonomicsTenantNotConfiguredError) {
+        return json(res, 503, { error: "not_configured", message: err.message });
+      }
+      throw err;
+    }
+  }
+
+  if (deps.finance?.cards && req.method === "POST" && url.pathname === "/webhooks/wallester") {
+    // D-112 (UA-6 Slice 6): Wallester sin EGEN offisielle webhook-kontrakt
+    // (autorisasjons-/transaksjons-/korthendelser): HTTP BASIC-
+    // autentisering med kunde-konfigurert brukernavn/passord i
+    // `Authorization`-headeren, verifisert konstant-tid i
+    // ingestWallesterWebhookEvent(). IKKE HMAC (Stripe), IKKE
+    // forespørselssignering (Vipps), IKKE API-nøkkel (Neonomics) - se
+    // wallester-webhook.ts.
+    const rawBody = await readRawBody(req);
+    const authHeader = req.headers["authorization"];
+    try {
+      const result = await deps.finance.cards.ingestWallesterWebhookEvent(
+        rawBody, typeof authHeader === "string" ? authHeader : undefined
+      );
+      // SAMME 2xx-stopper-gjentakelse / ikke-2xx-be-om-retry-semantikk som
+      // de øvrige webhook-rutene.
+      const status = result.status === "failed_retryable" ? 502 : 200;
+      return json(res, status, { received: true, status: result.status, event_id: result.eventId });
+    } catch (err) {
+      if (err instanceof InvalidWebhookSignatureError) {
+        return json(res, 401, { error: "invalid_basic_auth", message: err.message });
+      }
+      if (err instanceof WallesterCredentialsUnavailableError || err instanceof WallesterTenantNotConfiguredError) {
         return json(res, 503, { error: "not_configured", message: err.message });
       }
       throw err;
