@@ -8,6 +8,17 @@ import { StripeTransport, type StripePaymentIntentObject, type StripeRefundObjec
 import { verifyStripeWebhookSignature, parseStripeEventEnvelope } from "./stripe-webhook.ts";
 import { VippsTransport, type VippsPaymentObject, type VippsPaymentWriter } from "./vipps-transport.ts";
 import { verifyVippsWebhookSignature, parseVippsEventEnvelope, type VippsWebhookRequestHeaders } from "./vipps-webhook.ts";
+import { NeonomicsTransport, NeonomicsPaymentAuthorizationRequiredError, type NeonomicsGateway, type NeonomicsPaymentObject } from "./neonomics-transport.ts";
+import { verifyNeonomicsWebhookApiKey, parseNeonomicsEventEnvelope } from "./neonomics-webhook.ts";
+import {
+  NeonomicsCredentialsUnavailableError,
+  NeonomicsTenantNotConfiguredError,
+  PaymentIntentNotNeonomicsError,
+  BankAccountNotFoundError,
+  BankConsentNotActiveError,
+  NEONOMICS_STATUS_TO_JARVIS_STATE
+} from "./banking-types.ts";
+import type { BankAccount, BankConsent } from "./banking-types.ts";
 import {
   ACCOUNT_CODE_PATTERN,
   CURRENCY_PATTERN,
@@ -20,6 +31,7 @@ import {
   MissingVendorProviderRefError,
   PaymentIntentAlreadySubmittedError,
   PaymentIntentNotFoundError,
+  AmbiguousProviderResponseError,
   StripeCredentialsUnavailableError,
   PaymentIntentNotStripeError,
   PaymentIntentNotSettledError,
@@ -149,6 +161,36 @@ const defaultVippsTransportFactory: VippsTransportFactory = (credentials) =>
 /** SAMME sentinel-mønster som `StripeWebhookSecretProvider` - ETT globalt webhook-signeringssekret (fra Vipps sin webhook-registrering), ikke tenant-parametrisert. */
 export type VippsWebhookSecretProvider = () => string | null;
 
+/**
+ * D-111 (UA-6 Slice 5): ETT globalt eier-tilkoblet Neonomics-credential-sett
+ * (SAMME "single-owner"-mønster som Stripe/Vipps). `deviceId` er Jarvis sin
+ * STABILE x-device-id (Neonomics knytter samtykke/sesjon til den - aldri
+ * generert per kall). `realm` er OAuth2-realmen (sandbox: 'sandbox';
+ * produksjonsverdien konfigureres i credential-fasen, D-108).
+ */
+export interface NeonomicsCredentials {
+  clientId: string;
+  clientSecret: string;
+  deviceId: string;
+  environment: "sandbox" | "production";
+  realm?: string;
+}
+
+export interface NeonomicsCredentialsProvider {
+  getCredentials(tenantId: string): Promise<NeonomicsCredentials | null>;
+}
+
+export type NeonomicsGatewayFactory = (credentials: NeonomicsCredentials) => NeonomicsGateway;
+
+export const defaultNeonomicsGatewayFactory: NeonomicsGatewayFactory = (credentials) =>
+  new NeonomicsTransport(credentials.clientId, credentials.clientSecret, credentials.deviceId, credentials.environment, credentials.realm ?? (credentials.environment === "production" ? "production" : "sandbox"));
+
+/** Webhook-API-nøkkelen Tobias selv velger ved registrering i Neonomics sin Merchant-portal (se neonomics-webhook.ts) - SAMME sentinel-mønster som Stripe-/Vipps-webhook-secret-providerne. */
+export type NeonomicsWebhookApiKeyProvider = () => string | null;
+
+/** D-111 tenant-mapping-grense: ETT globalt Neonomics-kundeforhold tilhører NØYAKTIG ÉN eksplisitt konfigurert tenant - ALDRI utledet fra webhook-nyttelast-metadata. */
+export type NeonomicsTenantResolver = () => string | null;
+
 /** D-110 tenant/konto-mapping-grense (byggeordrens §10): ETT globalt Vipps-selgerkonto (MSN) tilhører NØYAKTIG ÉN eksplisitt konfigurert tenant - ALDRI utledet fra webhook-nyttelastens egen metadata. */
 export type VippsTenantResolver = () => string | null;
 
@@ -230,7 +272,12 @@ export class FinanceService {
     private readonly vippsCredentialsProvider: VippsCredentialsProvider = { getCredentials: async () => null },
     private readonly vippsTransportFactory: VippsTransportFactory = defaultVippsTransportFactory,
     private readonly vippsWebhookSecretProvider: VippsWebhookSecretProvider = () => null,
-    private readonly vippsTenantResolver: VippsTenantResolver = () => null
+    private readonly vippsTenantResolver: VippsTenantResolver = () => null,
+    /** D-111 (UA-6 Slice 5): SAMME konstruktørnivå-mønster som Stripe/Vipps sine parametre over. */
+    private readonly neonomicsCredentialsProvider: NeonomicsCredentialsProvider = { getCredentials: async () => null },
+    private readonly neonomicsGatewayFactory: NeonomicsGatewayFactory = defaultNeonomicsGatewayFactory,
+    private readonly neonomicsWebhookApiKeyProvider: NeonomicsWebhookApiKeyProvider = () => null,
+    private readonly neonomicsTenantResolver: NeonomicsTenantResolver = () => null
   ) {}
 
   private validateCreateInput(input: CreatePaymentIntentInput): void {
@@ -466,6 +513,78 @@ export class FinanceService {
           actor_person_id: actorPersonId ?? null, metadata: {}
         });
         return { ok: true, intent: updated };
+      }
+
+      if (current.provider === "neonomics") {
+        // PIS-bankbetaling (D-111, byggeordrens §11): kanonisk feltmapping -
+        // `vendor_provider_ref` = KREDITOR-kontoidentifikator (BBAN/konto-
+        // nummer, mottakeren av pengene), `vendor_name` = kreditornavn,
+        // `counter_account_code` = Jarvis sin EGEN kanoniske
+        // `bank_account_id` (DEBITOR-kontoen pengene forlater - semantisk
+        // KONSISTENT med feltets Fiken-betydning «motkonto/bankkonto»,
+        // Fiken-sifferformatet håndheves kun for provider='fiken').
+        if (!current.vendor_provider_ref) throw new MissingVendorProviderRefError(paymentIntentId);
+        if (!current.counter_account_code) throw new MissingCounterAccountError(paymentIntentId);
+        // Debitor-konto-eierskapsvalidering (byggeordrens §11 "debtor
+        // account ownership validation"): kontoen MÅ finnes i DENNE
+        // tenantens bank_accounts (RLS avgrenser allerede spørringen -
+        // dobbel vokter), være aktiv, og samtykket dens MÅ være 'active'.
+        const { rows: accountRows } = await client.query(`SELECT * FROM bank_accounts WHERE tenant_id = $1 AND bank_account_id = $2`, [tenantId, current.counter_account_code]);
+        const debtorAccount = accountRows[0] as BankAccount | undefined;
+        if (!debtorAccount || !debtorAccount.active) throw new BankAccountNotFoundError(current.counter_account_code);
+        const { rows: consentRows } = await client.query(`SELECT * FROM bank_consents WHERE tenant_id = $1 AND consent_id = $2`, [tenantId, debtorAccount.consent_id]);
+        const consent = consentRows[0] as BankConsent | undefined;
+        if (!consent || consent.state !== "active" || !consent.provider_session_id) {
+          throw new BankConsentNotActiveError(debtorAccount.consent_id, consent?.state ?? "created");
+        }
+
+        const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+        if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+        const amountOre = Number(current.amount_ore);
+        const gateway = this.neonomicsGatewayFactory(credentials);
+        try {
+          // Dobbel idempotens (samme prinsipp som Stripe/Vipps): Jarvis
+          // sin DB-tilstandssjekk over + `endToEndReference` =
+          // payment_intent_id (deterministisk, ALDRI random per forsøk) -
+          // et usikkert forrige utfall kan gjenfinnes hos provider via
+          // referansen i stedet for å blindt sende en NY bankbetaling
+          // (byggeordrens §12).
+          const neonomicsPayment: NeonomicsPaymentObject = await gateway.initiateDomesticPayment({
+            sessionId: consent.provider_session_id, debtorAccountId: debtorAccount.provider_account_id,
+            creditorName: current.vendor_name, creditorAccountIdentifier: current.vendor_provider_ref,
+            amountOre, currency: current.currency, referenceText: current.purpose, endToEndReference: paymentIntentId
+          });
+          const { rows } = await client.query(
+            `UPDATE payment_intents
+               SET state = 'provider_acknowledged', provider_ref = $3, provider_status = $4,
+                   provider_reported_amount_ore = $5, provider_reported_currency = $6,
+                   provider_status_updated_at = now(), submitted_at = now(), updated_at = now()
+             WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+            [tenantId, paymentIntentId, neonomicsPayment.id, neonomicsPayment.status, amountOre, current.currency]
+          );
+          const updated = rows[0] as PaymentIntent;
+          await insertEvent(client, tenantId, memorySpace, {
+            payment_intent_id: paymentIntentId, event_type: "submitted",
+            summary: `Sendt til Neonomics - bankbetaling ${neonomicsPayment.id} (status=${neonomicsPayment.status})`,
+            actor_person_id: actorPersonId ?? null, metadata: { provider_ref: neonomicsPayment.id, provider_status: neonomicsPayment.status }
+          });
+          await insertEvent(client, tenantId, memorySpace, {
+            payment_intent_id: paymentIntentId, event_type: "provider_acknowledged",
+            summary: "Neonomics bekreftet betalingsinitieringen - SCA hos banken kan fortsatt kreves (se get_payment_authorization_url)",
+            actor_person_id: actorPersonId ?? null, metadata: {}
+          });
+          return { ok: true, intent: updated };
+        } catch (err) {
+          if (err instanceof NeonomicsPaymentAuthorizationRequiredError) {
+            // 1428 UNDER selve initieringen, uten en returnert betalings-ID
+            // å forankre SCA-fortsettelsen mot - et GENUINT tvetydig
+            // provider-svar (byggeordrens §5-prinsipp «aldri stille anta»).
+            // Raden forblir draft (ingen state-mutasjon skjedde) - en
+            // korrigert retry med samme deterministiske referanse er trygg.
+            throw new AmbiguousProviderResponseError(paymentIntentId, "sca_required_without_payment_id");
+          }
+          throw err;
+        }
       }
 
       // provider === "fiken" (uendret oppførsel, byte-for-byte identisk med FØR D-109).
@@ -1867,6 +1986,291 @@ export class FinanceService {
     for (const paymentIntentId of pending) {
       try {
         await this.refreshVippsPaymentState(tenantId, memorySpace, paymentIntentId);
+        synced++;
+      } catch {
+        failed++;
+      }
+    }
+    return { synced, failed };
+  }
+
+  // ======================================================================
+  // D-111 (UA-6 Slice 5): Neonomics PIS - statussynk/SCA/webhooks/avvik
+  // ======================================================================
+
+  private async requireNeonomicsPaymentIntent(client: pg.PoolClient, tenantId: string, paymentIntentId: string, forUpdate: boolean): Promise<PaymentIntent> {
+    const current = await readForUpdate(client, tenantId, paymentIntentId, forUpdate);
+    if (!current) throw new PaymentIntentNotFoundError(paymentIntentId);
+    if (current.provider !== "neonomics") throw new PaymentIntentNotNeonomicsError(paymentIntentId, current.provider);
+    return current;
+  }
+
+  /** Slår opp debitor-kontoens AKTIVE samtykke-sesjon for en Neonomics-intent (alle status-/SCA-kall krever sesjonen). Fail-closed på tapt/utløpt samtykke - en operasjonell tilstand, aldri en skjult feil. */
+  private async requireNeonomicsSession(client: pg.PoolClient, tenantId: string, intent: PaymentIntent): Promise<string> {
+    const { rows: accountRows } = await client.query(`SELECT * FROM bank_accounts WHERE tenant_id = $1 AND bank_account_id = $2`, [tenantId, intent.counter_account_code]);
+    const account = accountRows[0] as BankAccount | undefined;
+    if (!account) throw new BankAccountNotFoundError(intent.counter_account_code ?? "(mangler)");
+    const { rows: consentRows } = await client.query(`SELECT * FROM bank_consents WHERE tenant_id = $1 AND consent_id = $2`, [tenantId, account.consent_id]);
+    const consent = consentRows[0] as BankConsent | undefined;
+    if (!consent || consent.state !== "active" || !consent.provider_session_id) {
+      throw new BankConsentNotActiveError(account.consent_id, consent?.state ?? "created");
+    }
+    return consent.provider_session_id;
+  }
+
+  /**
+   * DEN ENE deterministiske domenestien for Neonomics provider-
+   * tilstandsendring - kalt av BÅDE `refreshNeonomicsPaymentState()` OG
+   * `ingestNeonomicsWebhookEvent()` (SAMME "one deterministic domain
+   * path"-prinsipp som Stripe/Vipps). Millisekund-presis ordens-vokter
+   * (samme begrunnelse som Vipps - begge sider av sammenligningen har
+   * full presisjon). KUN ACSC/ACCC mapper til `settled` (byggeordrens §13
+   * - «request accepted» er ALDRI «money settled»).
+   */
+  private async applyNeonomicsPaymentOutcome(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    current: PaymentIntent,
+    outcome: { isoStatus: string; sourceEventKey: string | null; sourceEventEpochMs: number },
+    actorPersonId: string | null
+  ): Promise<{ applied: true; intent: PaymentIntent } | { applied: false; reason: "stale_event" | "terminal_state_conflict"; intent: PaymentIntent }> {
+    if (current.provider_status_updated_at !== null) {
+      const storedMs = new Date(current.provider_status_updated_at).getTime();
+      if (outcome.sourceEventEpochMs < storedMs) {
+        return { applied: false, reason: "stale_event", intent: current };
+      }
+    }
+
+    const targetState = NEONOMICS_STATUS_TO_JARVIS_STATE[outcome.isoStatus] ?? null;
+    let stateChanges = "";
+    const values: unknown[] = [tenantId, current.payment_intent_id, outcome.isoStatus, new Date(outcome.sourceEventEpochMs).toISOString(), outcome.sourceEventKey];
+
+    if (targetState !== null && targetState !== current.state) {
+      if (!canTransitionPaymentIntent(current.state, targetState)) {
+        await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", current.payment_intent_id, ["WEBHOOK_STATE_CONFLICT"]);
+        const { rows } = await client.query(`SELECT * FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, current.payment_intent_id]);
+        return { applied: false, reason: "terminal_state_conflict", intent: rows[0] as PaymentIntent };
+      }
+      const timestampColumn = targetState === "settled" ? "settled_at" : targetState === "failed" ? "failed_at" : targetState === "cancelled" ? "cancelled_at" : null;
+      stateChanges = `state = $6${timestampColumn ? `, ${timestampColumn} = now()` : ""}, `;
+      values.push(targetState);
+    }
+
+    const { rows } = await client.query(
+      `UPDATE payment_intents
+         SET ${stateChanges}provider_status = $3, provider_status_updated_at = $4, latest_neonomics_event_key = $5, updated_at = now()
+       WHERE tenant_id = $1 AND payment_intent_id = $2 RETURNING *`,
+      values
+    );
+    const updated = rows[0] as PaymentIntent;
+
+    if (targetState !== null && targetState !== current.state) {
+      const eventType: PaymentIntentEventType = targetState === "settled" ? "settled" : targetState === "failed" ? "failed" : "cancelled";
+      await insertEvent(client, tenantId, memorySpace, {
+        payment_intent_id: current.payment_intent_id, event_type: eventType,
+        summary: `Neonomics-utfall synkronisert: ${outcome.isoStatus} -> ${targetState}${outcome.sourceEventKey ? ` (hendelse ${outcome.sourceEventKey})` : " (eksplisitt oppfrisking)"}`,
+        actor_person_id: actorPersonId, metadata: { provider_status: outcome.isoStatus, source_event_key: outcome.sourceEventKey }
+      });
+    }
+    return { applied: true, intent: updated };
+  }
+
+  /** Eksplisitt oppfriskings-sti (byggeordrens §13) - leser Neonomics sin GJELDENDE ISO 20022-status via GET payments/{id}. */
+  async refreshNeonomicsPaymentState(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, actorPersonId?: string): Promise<PaymentIntent> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, true);
+      if (!current.provider_ref) return current; // aldri innsendt ennå - intet å hente.
+      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
+      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+      const gateway = this.neonomicsGatewayFactory(credentials);
+      const payment = await gateway.getPayment(sessionId, current.provider_ref);
+      const result = await this.applyNeonomicsPaymentOutcome(
+        client, tenantId, memorySpace, current,
+        { isoStatus: payment.status, sourceEventKey: null, sourceEventEpochMs: Date.now() },
+        actorPersonId ?? null
+      );
+      return result.intent;
+    });
+  }
+
+  /**
+   * SCA-fortsettelse (byggeordrens §11/§13): henter autorisasjons-URL-en
+   * sluttbrukeren MÅ besøke for å fullføre bankbetalingen (feilkode 1428-
+   * flyten). En BRUKER-handling - Jarvis fabrikkerer ALDRI autonom
+   * fullføring; URL-en overflates til eieren (og en `bank_consent_attention`-
+   * klasse-ventetilstand er synlig via provider_status inntil brukeren
+   * handler).
+   */
+  async getNeonomicsPaymentAuthorizationUrl(tenantId: string, memorySpace: MemorySpace, paymentIntentId: string, redirectUrl: string): Promise<{ url: string }> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const current = await this.requireNeonomicsPaymentIntent(client, tenantId, paymentIntentId, false);
+      if (!current.provider_ref) throw new PaymentIntentAlreadySubmittedError(paymentIntentId, current.state);
+      const sessionId = await this.requireNeonomicsSession(client, tenantId, current);
+      const credentials = await this.neonomicsCredentialsProvider.getCredentials(tenantId);
+      if (!credentials) throw new NeonomicsCredentialsUnavailableError(tenantId);
+      const gateway = this.neonomicsGatewayFactory(credentials);
+      return gateway.getPaymentAuthorizeUrl(sessionId, current.provider_ref, redirectUrl);
+    });
+  }
+
+  /**
+   * Neonomics-webhook-innhenting (byggeordrens §23) - Neonomics sin EGEN
+   * offisielle kontrakt: API-NØKKEL-autentisering (registrert i Merchant-
+   * portalen), IKKE HMAC-signatur - se neonomics-webhook.ts. SAMME
+   * dedup-/tenant-vokter-/ordens-struktur som Stripe-/Vipps-mottakene.
+   */
+  async ingestNeonomicsWebhookEvent(rawBody: Buffer, apiKeyHeader: string | undefined, nowMs: number = Date.now()): Promise<{ status: "received" | "verified" | "processed" | "failed_retryable" | "unsupported" | "duplicate"; eventId?: string }> {
+    const configuredKey = this.neonomicsWebhookApiKeyProvider();
+    if (!configuredKey) throw new NeonomicsCredentialsUnavailableError("(webhook-API-nøkkel ikke konfigurert)");
+    const auth = verifyNeonomicsWebhookApiKey(apiKeyHeader, configuredKey);
+    if (!auth.valid) {
+      throw new InvalidWebhookSignatureError(auth.reason ?? "unknown");
+    }
+
+    const neonomicsTenantId = this.neonomicsTenantResolver();
+    if (!neonomicsTenantId) throw new NeonomicsTenantNotConfiguredError();
+
+    let envelope: ReturnType<typeof parseNeonomicsEventEnvelope>;
+    try {
+      envelope = parseNeonomicsEventEnvelope(rawBody);
+    } catch {
+      throw new Error("neonomics_event_envelope_malformed");
+    }
+
+    return withMemoryTransaction(this.pool, neonomicsTenantId, ["business"], async (client) => {
+      const inserted = await client.query(
+        `INSERT INTO neonomics_webhook_events (dedupe_key, tenant_id, memory_space_id, provider_payment_id, payment_status, status, payload_summary)
+         VALUES ($1, $2, 'business', $3, $4, 'received', $5)
+         ON CONFLICT (dedupe_key) DO NOTHING
+         RETURNING *`,
+        [envelope.dedupeKey, neonomicsTenantId, envelope.paymentId, envelope.status, JSON.stringify({ payment_id: envelope.paymentId, status: envelope.status })]
+      );
+      if (inserted.rows.length === 0) {
+        return { status: "duplicate" as const, eventId: envelope.dedupeKey };
+      }
+
+      await client.query(`UPDATE neonomics_webhook_events SET status = 'verified' WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+
+      try {
+        const existing = await client.query(`SELECT * FROM payment_intents WHERE provider_ref = $1 AND provider = 'neonomics' FOR UPDATE`, [envelope.paymentId]);
+        const intentRow = existing.rows[0] as PaymentIntent | undefined;
+        if (!intentRow) {
+          await client.query(`UPDATE neonomics_webhook_events SET status = 'unsupported', processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey]);
+          return { status: "unsupported" as const, eventId: envelope.dedupeKey };
+        }
+        if (intentRow.tenant_id !== neonomicsTenantId) {
+          await this.appendAnomalyFlags(client, "payment_intents", "payment_intent_id", intentRow.payment_intent_id, ["PROVIDER_OBJECT_TENANT_CONFLICT"]);
+          await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', payment_intent_id = $2, error_message = $3, processed_at = now() WHERE dedupe_key = $1`, [
+            envelope.dedupeKey, intentRow.payment_intent_id, new ProviderObjectTenantConflictError(envelope.paymentId, neonomicsTenantId, intentRow.tenant_id).message
+          ]);
+          return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
+        }
+
+        await this.applyNeonomicsPaymentOutcome(
+          client, intentRow.tenant_id, intentRow.memory_space_id as MemorySpace, intentRow,
+          { isoStatus: envelope.status, sourceEventKey: envelope.dedupeKey, sourceEventEpochMs: nowMs },
+          null
+        );
+
+        await client.query(`UPDATE neonomics_webhook_events SET status = 'processed', payment_intent_id = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, intentRow.payment_intent_id]);
+        return { status: "processed" as const, eventId: envelope.dedupeKey };
+      } catch (err) {
+        await client.query(`UPDATE neonomics_webhook_events SET status = 'failed_retryable', error_message = $2, processed_at = now() WHERE dedupe_key = $1`, [envelope.dedupeKey, (err as Error).message.slice(0, 500)]);
+        return { status: "failed_retryable" as const, eventId: envelope.dedupeKey };
+      }
+    });
+  }
+
+  /**
+   * Deterministisk Neonomics-betalingsavviksdeteksjon (byggeordrens §12/
+   * §15, betalings-nivå - bank-transaksjons-nivået bor i BankingService):
+   * (A) UNKNOWN_PROVIDER_OUTCOME - anerkjent men uavklart > 24t (usikkert
+   * utfall skal LØSES, aldri blindt resendes), (B)
+   * PROVIDER_DUPLICATE_OBJECT_CONFLICT - to intents peker til samme
+   * provider-betaling (duplikat økonomisk effekt), (C)
+   * PROVIDER_OBJECT_TENANT_CONFLICT - defensiv. SAMME full-gjenberegnings-
+   * mønster som Stripe-/Vipps-sveipene; skriver til DEN EKSISTERENDE
+   * `payment_intents.anomaly_flags` (detectPaymentAnomalies() overflater
+   * uendret).
+   */
+  async runNeonomicsProviderAnomalyDetection(tenantId: string, memorySpace: MemorySpace): Promise<{ payment_intent_flags_added: number; flags_cleared: number }> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const candidateFlags = new Map<string, Set<StripeAnomalyType>>();
+      const addFlag = (id: string, flag: StripeAnomalyType): void => {
+        if (!candidateFlags.has(id)) candidateFlags.set(id, new Set());
+        candidateFlags.get(id)!.add(flag);
+      };
+
+      const unknownOutcome = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'neonomics' AND state = 'provider_acknowledged'
+           AND provider_status_updated_at < now() - interval '24 hours'`,
+        [tenantId, memorySpace]
+      );
+      for (const row of unknownOutcome.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "UNKNOWN_PROVIDER_OUTCOME");
+
+      const duplicateObject = await client.query(
+        `SELECT payment_intent_id FROM payment_intents
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'neonomics' AND provider_ref IN (
+           SELECT provider_ref FROM payment_intents WHERE tenant_id = $1 AND provider = 'neonomics' AND provider_ref IS NOT NULL
+           GROUP BY provider_ref HAVING count(*) > 1
+         )`,
+        [tenantId, memorySpace]
+      );
+      for (const row of duplicateObject.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_DUPLICATE_OBJECT_CONFLICT");
+
+      const configuredTenant = this.neonomicsTenantResolver();
+      if (configuredTenant) {
+        const tenantConflict = await client.query(
+          `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'neonomics' AND tenant_id != $3`,
+          [tenantId, memorySpace, configuredTenant]
+        );
+        for (const row of tenantConflict.rows as Array<{ payment_intent_id: string }>) addFlag(row.payment_intent_id, "PROVIDER_OBJECT_TENANT_CONFLICT");
+      }
+
+      const alreadyFlagged = await client.query(
+        `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'neonomics' AND jsonb_array_length(anomaly_flags) > 0`,
+        [tenantId, memorySpace]
+      );
+      for (const row of alreadyFlagged.rows as Array<{ payment_intent_id: string }>) {
+        if (!candidateFlags.has(row.payment_intent_id)) candidateFlags.set(row.payment_intent_id, new Set());
+      }
+
+      let flagsAdded = 0;
+      let flagsCleared = 0;
+      const sweepOwnedFlags: readonly StripeAnomalyType[] = ["UNKNOWN_PROVIDER_OUTCOME", "PROVIDER_DUPLICATE_OBJECT_CONFLICT", "PROVIDER_OBJECT_TENANT_CONFLICT"];
+      for (const [paymentIntentId, flags] of candidateFlags) {
+        const { rows } = await client.query(`SELECT anomaly_flags FROM payment_intents WHERE tenant_id = $1 AND payment_intent_id = $2`, [tenantId, paymentIntentId]);
+        const before = new Set((rows[0]?.["anomaly_flags"] as string[] | undefined) ?? []);
+        // WEBHOOK_STATE_CONFLICT/PROVIDER_OBJECT_TENANT_CONFLICT satt ved
+        // KILDEN (apply/ingest) bevares av sveipen for typene sveipen selv
+        // ikke eier - kun sveipens egne typer full-gjenberegnes.
+        const preserved = [...before].filter((f) => !sweepOwnedFlags.includes(f as StripeAnomalyType));
+        const next = new Set([...preserved, ...flags]);
+        if (next.size < before.size) flagsCleared++;
+        if (next.size > before.size) flagsAdded++;
+        await client.query(`UPDATE payment_intents SET anomaly_flags = $2::jsonb, updated_at = now() WHERE tenant_id = $1 AND payment_intent_id = $3`, [tenantId, JSON.stringify([...next]), paymentIntentId]);
+      }
+      return { payment_intent_flags_added: flagsAdded, flags_cleared: flagsCleared };
+    });
+  }
+
+  /** Worker-sveip (byggeordrens §17): synker alle ikke-terminale Neonomics-`payment_intents`. SAMME feilisolasjons-struktur som Stripe-/Vipps-sveipene (tapt samtykke på ÉN intent velter aldri resten). */
+  async syncPendingNeonomicsPayments(tenantId: string, memorySpace: MemorySpace): Promise<{ synced: number; failed: number }> {
+    const pending = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT payment_intent_id FROM payment_intents WHERE tenant_id = $1 AND memory_space_id = $2 AND provider = 'neonomics' AND state = 'provider_acknowledged'`,
+        [tenantId, memorySpace]
+      );
+      return (rows as Array<{ payment_intent_id: string }>).map((r) => r.payment_intent_id);
+    });
+    let synced = 0;
+    let failed = 0;
+    for (const paymentIntentId of pending) {
+      try {
+        await this.refreshNeonomicsPaymentState(tenantId, memorySpace, paymentIntentId);
         synced++;
       } catch {
         failed++;

@@ -557,6 +557,81 @@ export class OpenLoopService {
   }
 
   /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
+  /**
+   * UA-6 Slice 5 (D-111, byggeordrens §16): en booket banktransaksjon med
+   * persisterte `anomaly_flags` (satt deterministisk av BankingService -
+   * unmatched debet/kredit, korreksjonskonflikt, stor debet, duplikat,
+   * betalings-mismatch) overflates som ÉN `bank_transaction_unmatched`-
+   * loop per transaksjon. REN SQL mot 042-tabellen - INGEN
+   * pakkeavhengighet (samme presedens som detectPaymentAnomalies()).
+   */
+  async detectBankTransactionAnomalies(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT bank_transaction_id, direction, amount_ore, currency, counterparty_name, anomaly_flags
+         FROM bank_transactions
+         WHERE tenant_id = $1 AND jsonb_array_length(anomaly_flags) > 0`,
+        [tenantId]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as Array<{ bank_transaction_id: string; direction: string; amount_ore: string; currency: string; counterparty_name: string | null; anomaly_flags: string[] }>) {
+        const detectionKey = `bank_transaction_unmatched:${row.bank_transaction_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          loop_type: "bank_transaction_unmatched", detection_key: detectionKey,
+          reason: `Banktransaksjon ${row.bank_transaction_id} (${row.direction === "debit" ? "utgående" : "inngående"} ${row.amount_ore} ${row.currency}${row.counterparty_name ? ` - ${row.counterparty_name}` : ""}) har uløste bankavvik: ${row.anomaly_flags.join(", ")}`,
+          next_action: `Undersøk og avstem banktransaksjon ${row.bank_transaction_id}`,
+          priority: row.anomaly_flags.includes("UNEXPECTED_LARGE_DEBIT") ? "high" : "normal",
+          owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "bank_transaction_unmatched", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  /**
+   * UA-6 Slice 5 (D-111): et banksamtykke i en tilstand som krever
+   * MENNESKELIG handling (utløpt/tilbakekalt/avvist/venter-SCA) betyr
+   * reelt tapt kontotilgang - overflates som `bank_consent_attention`.
+   * SCA er alltid en brukerhandling (aldri automatiserbar), så loop-en
+   * er nettopp «be Tobias handle», ikke en retry.
+   */
+  async detectBankConsentAttention(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT consent_id, bank_id, bank_name, state FROM bank_consents
+         WHERE tenant_id = $1 AND state IN ('authorization_required', 'expired', 'revoked', 'rejected')`,
+        [tenantId]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as Array<{ consent_id: string; bank_id: string; bank_name: string | null; state: string }>) {
+        const detectionKey = `bank_consent_attention:${row.consent_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          loop_type: "bank_consent_attention", detection_key: detectionKey,
+          reason: `Banksamtykke ${row.consent_id} (${row.bank_name ?? row.bank_id}) er i tilstand '${row.state}' - kontotilgang krever brukerhandling (SCA hos banken)`,
+          next_action: row.state === "authorization_required" ? `Fullfør bankautorisering for samtykke ${row.consent_id}` : `Opprett/reautoriser banksamtykke for ${row.bank_name ?? row.bank_id}`,
+          priority: "high", owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "bank_consent_attention", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
   async runSweep(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     const results = [
       await this.detectOverdueFollowups(tenantId, memorySpace),
@@ -597,7 +672,13 @@ export class OpenLoopService {
       await this.detectSpendAmountDeviation(tenantId, memorySpace),
       await this.detectMissingRecurringCharges(tenantId, memorySpace),
       await this.detectDuplicateRecurringCharges(tenantId, memorySpace),
-      await this.detectSpendCorrectionConflicts(tenantId, memorySpace)
+      await this.detectSpendCorrectionConflicts(tenantId, memorySpace),
+      // UA-6 Slice 5 (D-111): samme prinsipp - reglene kjøres i DENNE
+      // sveipen, krever `bank_transactions`/`bank_consents`
+      // (042_neonomics.sql). Selve flaggene er allerede beregnet
+      // deterministisk av BankingService sine sveip.
+      await this.detectBankTransactionAnomalies(tenantId, memorySpace),
+      await this.detectBankConsentAttention(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),

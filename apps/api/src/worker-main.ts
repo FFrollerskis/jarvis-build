@@ -13,6 +13,8 @@ import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
+  BankingService, NeonomicsFinanceTransport,
+  type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
   type VippsCredentials, type VippsCredentialsProvider
 } from "@jarvis/finance";
@@ -169,10 +171,27 @@ const vippsCredentialsProvider: VippsCredentialsProvider = {
 };
 const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRET"] ?? null;
 const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
+const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
+  async getCredentials(): Promise<NeonomicsCredentials | null> {
+    const clientId = process.env["JARVIS_NEONOMICS_CLIENT_ID"];
+    const clientSecret = process.env["JARVIS_NEONOMICS_CLIENT_SECRET"];
+    const deviceId = process.env["JARVIS_NEONOMICS_DEVICE_ID"];
+    if (!clientId || !clientSecret || !deviceId) return null;
+    return {
+      clientId, clientSecret, deviceId,
+      environment: process.env["JARVIS_NEONOMICS_ENVIRONMENT"] === "production" ? "production" : "sandbox",
+      ...(process.env["JARVIS_NEONOMICS_REALM"] ? { realm: process.env["JARVIS_NEONOMICS_REALM"] } : {})
+    };
+  }
+};
+const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
+const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
 const financeService = new FinanceService(
   pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
-  vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver
+  vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver,
+  neonomicsCredentialsProvider, undefined, neonomicsWebhookApiKeyProvider, neonomicsTenantResolver
 );
+const bankingService = new BankingService(pool, neonomicsCredentialsProvider);
 // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk
 // wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
 // maa kunne kalle finance_spend.*-handlingene identisk.
@@ -218,6 +237,7 @@ for (const tool of firstWaveTools({
   finance_stripe: new StripeFinanceTransport(financeService),
   // D-110 (UA-6 Slice 4): identisk wiring-mønster som apps/api/src/main.ts.
   finance_vipps: new VippsFinanceTransport(financeService),
+  finance_neonomics: new NeonomicsFinanceTransport(bankingService, financeService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.

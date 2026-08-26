@@ -23,7 +23,10 @@ export type OpenLoopType =
   | "finance_spend_amount_deviation"
   | "finance_recurring_charge_missing"
   | "finance_recurring_charge_duplicate"
-  | "finance_spend_correction_conflict";
+  | "finance_spend_correction_conflict"
+  // UA-6 Slice 5 (D-111) - speiler 042_neonomics.sql sin utvidede CHECK.
+  | "bank_transaction_unmatched"
+  | "bank_consent_attention";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";

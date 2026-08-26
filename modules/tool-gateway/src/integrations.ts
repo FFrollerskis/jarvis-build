@@ -1569,7 +1569,7 @@ export function firstWaveTools(
         vendor_provider_ref: z.string().optional(), account_code: z.string(), counter_account_code: z.string().optional(),
         owner_person_id: z.string().optional(), actor_person_id: z.string().optional(),
         // D-109: valgfri - udefinert beholder DB-defaulten 'fiken'.
-        provider: z.enum(["fiken", "stripe", "vipps"]).optional()
+        provider: z.enum(["fiken", "stripe", "vipps", "neonomics"]).optional()
       }),
       capability_class: "B", scopes: ["finance.write"], reversible: true,
       rollback_procedure: "cancel_payment_intent (kun gyldig fra draft - ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
@@ -1954,6 +1954,148 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runVippsProviderAnomalyDetection-JSDoc)",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_vipps")
+    },
+    // D-111 (UA-6 Slice 5): `finance_neonomics.*` - open-banking-handlingene
+    // (samtykke/kontoer/saldo/transaksjoner/avstemming + PIS-status/SCA).
+    // PIS-innsendingen forblir i `finance.submit_payment_intent`
+    // (provider-dispatchet, aldri to konkurrerende handlinger). INGEN rå
+    // Neonomics-proxy eksponeres. A-D-klassene speiler reell økonomisk
+    // risiko: rene lesinger A, samtykke-/synk-/avstemmings-mutasjoner mot
+    // Jarvis sin egen tilstand B, samtykke-tilbakekalling C (fjerner reell
+    // banktilgang), selve pengebevegelsen (submit_payment_intent) er
+    // allerede klasse C i finance.* med kill-switch-gate i FinanceService.
+    {
+      tool_id: "finance_neonomics", action: "list_banks", description: "List bankene/institusjonene Neonomics dekker (Norge-først) - katalogoppslag for samtykkeopprettelse",
+      input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "untrusted", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "create_consent", description: "Opprett banksamtykke-sesjon hos Neonomics for en gitt bank (starter samtykke-livssyklusen - selve SCA-en er ALLTID en brukerhandling via authorization-URL)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), bank_id: z.string(), bank_name: z.string().optional(), requested_scope: z.enum(["ais", "pis", "ais_pis"]).optional(), owner_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "revoke_consent",
+      idempotent_external: false, timeout_ms: 20_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "get_consent_authorization_url", description: "Hent SCA-autorisasjons-URL-en sluttbrukeren MÅ besøke hos banken (genererer samtidig Jarvis sin CSRF-callback-state)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string(), redirect_base_url: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "ingen (URL-utstedelse muterer kun Jarvis-tilstand)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "complete_consent_callback", description: "Fullfør samtykke-callbacken etter bank-SCA (konstant-tid state-verifisering, fail-closed på CSRF/replay/stale)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string(), callback_state: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "revoke_consent",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "get_consent", description: "Les ett banksamtykke",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "list_consents", description: "List banksamtykker",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "verify_consent", description: "Verifiser at et aktivt samtykke fortsatt gir banktilgang (billig provider-probe - utløpt tilgang blir en operasjonell 'expired'-tilstand, aldri en skjult feil)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "ingen (kun tilstandsobservasjon)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "revoke_consent", description: "Tilbakekall et banksamtykke (klasse C - fjerner reell banktilgang; gjenoppretting krever ny SCA hos banken)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string() }),
+      capability_class: "C", scopes: ["finance.write", "finance.banking"], reversible: false, rollback_procedure: "opprett NYTT samtykke + ny bruker-SCA - det gamle kan ikke gjenopplives",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "sync_accounts", description: "Synk bankkontoer fra et aktivt samtykke inn i kanoniske bank_accounts (idempotent - dupliserer aldri; forsvunne kontoer inaktiveres, aldri slettes)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), consent_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "ingen (idempotent synk av Jarvis-tilstand)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "list_bank_accounts", description: "List kanoniske bankkontoer",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), include_inactive: z.boolean().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "sync_balances", description: "Hent ferske saldo-observasjoner for en bankkonto (append-only, provider-saldotypene bevares rått)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), bank_account_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "ingen (append-only observasjon)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "list_balances", description: "Les lagrede saldo-observasjoner for en bankkonto",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), bank_account_id: z.string(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "sync_transactions", description: "Synk banktransaksjoner (paginert, inkrementell, idempotent - pending->booked-overganger håndteres, provider-korreksjoner flagges i stedet for å overskrive)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), bank_account_id: z.string(), max_pages: z.number().optional() }),
+      capability_class: "B", scopes: ["finance.write", "finance.banking"], reversible: true, rollback_procedure: "ingen (idempotent synk)",
+      idempotent_external: true, timeout_ms: 60_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "list_bank_transactions", description: "List/filtrer kanoniske banktransaksjoner (konto/avstemmingstilstand)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), bank_account_id: z.string().optional(), reconciliation_state: z.enum(["unmatched", "matched", "ambiguous"]).optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "reconcile_bank_transactions", description: "Kjør deterministisk bankavstemming nå (regel 1 provider-referanse, regel 2 eksakt-én-kandidat beløp+dato-vindu - tvetydige forblir uløste)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (en match er bevisbasert lenking - manuell reconcile_payment_intent(matched=false) korrigerer ved behov)",
+      idempotent_external: true, timeout_ms: 60_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "run_bank_anomaly_detection", description: "Trigger deterministisk bank-avviksdeteksjon nå (UNMATCHED_BANK_DEBIT/UNMATCHED_BANK_CREDIT/UNEXPECTED_LARGE_DEBIT/BANK_DUPLICATE_TRANSACTION - korreksjons-/mismatch-flagg settes ved kilden)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "refresh_payment_state", description: "Eksplisitt oppfrisking av Neonomics-bankbetalingsstatus (ISO 20022 - kun ACSC/ACCC regnes som oppgjort, aldri 'accepted')",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "ingen (kun observasjons-synk)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "get_payment_authorization_url", description: "Hent SCA-URL-en sluttbrukeren MÅ besøke for å autorisere en initiert bankbetaling (1428-flyten - Jarvis fullfører ALDRI SCA autonomt)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), payment_intent_id: z.string(), redirect_url: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "ingen (URL-utstedelse)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NEONOMICS_CLIENT_SECRET",
+      output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    {
+      tool_id: "finance_neonomics", action: "run_provider_anomaly_detection", description: "Trigger deterministisk Neonomics-betalingsavviksdeteksjon nå (UNKNOWN_PROVIDER_OUTCOME/PROVIDER_DUPLICATE_OBJECT_CONFLICT/PROVIDER_OBJECT_TENANT_CONFLICT)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_neonomics")
     }
   ];
 }

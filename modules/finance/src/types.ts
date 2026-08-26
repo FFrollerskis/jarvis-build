@@ -14,8 +14,8 @@
 
 export type PaymentIntentState = "draft" | "submitted" | "provider_acknowledged" | "settled" | "failed" | "cancelled";
 export type ReconciliationState = "unreconciled" | "matched" | "mismatched";
-/** 'fiken' (P0, D-107), 'stripe' (P1, D-109) og 'vipps' (P1, D-110) bygget. Bank (resten av P1) og programmerbart kort/wallet (P2) er masterplan-navngitte FREMTIDIGE providere. */
-export type PaymentProvider = "fiken" | "stripe" | "vipps";
+/** 'fiken' (P0, D-107), 'stripe' (P1, D-109), 'vipps' (P1, D-110) og 'neonomics' (P1 bank/open-banking, D-111) bygget. Programmerbart kort/wallet (P2) er masterplan-navngitt FREMTIDIG provider. */
+export type PaymentProvider = "fiken" | "stripe" | "vipps" | "neonomics";
 
 export type PaymentIntentEventType =
   | "intent_created"

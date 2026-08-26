@@ -209,6 +209,15 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "vipps_webhook_events", await run(client, mode, "vipps_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vipps_captures", await run(client, mode, "vipps_captures", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vipps_refunds", await run(client, mode, "vipps_refunds", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-111 (UA-6 Slice 5, 042_neonomics.sql): bankdomenet. Avhengighets-
+  // rekkefølge: balances/transactions -> accounts -> consents (FK-kjede);
+  // neonomics_webhook_events har kun payment_intents-FK og slettes før
+  // payment_intents (som allerede står SENERE i denne planen).
+  add(result, "neonomics_webhook_events", await run(client, mode, "neonomics_webhook_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "bank_account_balances", await run(client, mode, "bank_account_balances", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "bank_transactions", await run(client, mode, "bank_transactions", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "bank_accounts", await run(client, mode, "bank_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "bank_consents", await run(client, mode, "bank_consents", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "payment_intents", await run(client, mode, "payment_intents", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
