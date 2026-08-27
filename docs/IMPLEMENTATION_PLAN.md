@@ -3156,14 +3156,27 @@ Wallester-credentials (D-108) - 24 markører inkl. fem slice-invariant-bevaringe
 (`finance_d107_invariant_preserved`/`finance_slice2_invariants_preserved`/
 `stripe_slice3_invariants_preserved`/`vipps_slice4_invariants_preserved`/
 `neonomics_slice5_invariants_preserved`) og `wallester_realtime_authorization_policy` hardkodet
-`NOT_APPLICABLE` (aldri PASS/FAIL). **HOST-AKSEPTANSE: VENTER** - kjøres av Tobias mot eksakt
-CI-grønn PR-head; oppdateres i docs-closeouten FØR merge-godkjenning.
+`UNVERIFIED_PRODUCT_ENTITLEMENT` (aldri PASS/FAIL - korrigert D-113, se under). **HOST-AKSEPTANSE:
+VENTER** - kjøres av Tobias mot eksakt CI-grønn PR-head; oppdateres i docs-closeouten FØR
+merge-godkjenning.
+
+**D-113 (2026-08-27, primærkilde-kontrakt-korrigering FØR host-akseptanse):** Tobias sin
+uavhengige gjennomgang av Wallester-dokumentasjon fant to mulige avvik. Funn 1 (auth-kontrakt)
+BEKREFTET og RETTET mot en EKTE primærkilde (`github.com/wallester/integration-examples`,
+Wallester sitt eget offisielle referanse-repo, klonbart selv om `docs.wallester.com`/
+`api-frontend.wallester.com`/`api-doc.wallester.com` fortsatt er `EGRESS_BLOCKED`): `sub`-claimen
+skal være den faste literalen `"api-request"` (ikke utsteder-ID-en) og `Authorization`-headeren
+skal være `"Bearer <JWT>"` (manglet prefikset) - begge rettet i `wallester-transport.ts` med ny
+regresjonstest. Funn 2 (sanntidsautorisasjon) kunne IKKE bekreftes ELLER avkreftes gjennom noen
+tilgjengelig kanal - §10 sin klassifisering endret fra `NOT_APPLICABLE` til
+`UNVERIFIED_PRODUCT_ENTITLEMENT` (ærligere: fravær av bekreftelse, ikke bekreftet fravær).
+Full detalj: D-113 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Terminalflagg:** `UA6_COMPLETE=false` (siste store kapabilitets-slice bygget - gjenstår dedikert
 UA-6-closeout + konsolidert credential-fase). `WALLESTER_LIVE_VERIFIED=false`,
 `WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, `WALLESTER_CREDENTIAL_SETUP_DEFERRED=true`.
 `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
-Full detalj: D-112 i DECISIONS_AND_ASSUMPTIONS.md.
+Full detalj: D-112/D-113 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

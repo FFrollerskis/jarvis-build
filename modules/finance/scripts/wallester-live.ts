@@ -19,12 +19,19 @@
 // forblir sanne til Tobias selv oppretter og verifiserer en ekte
 // Wallester Business-konto med API-tilgang (D-108).
 //
-// SANNTIDSAUTORISASJON (§10): `wallester_realtime_authorization_policy`
-// rapporteres ærlig NOT_APPLICABLE - det uavhengige kildesøket viser at
-// Wallester-webhooks er VARSLER om beslutninger Wallester selv har fattet
-// mot provider-anvendte grenser/kontroller, IKKE beslutnings-callbacks
-// kunden svarer approve/decline på. Jarvis uttrykker policy GJENNOM de
-// provider-anvendte grensene + frys (D-112).
+// SANNTIDSAUTORISASJON (§10, korrigert D-113): `wallester_realtime_
+// authorization_policy` rapporteres `UNVERIFIED_PRODUCT_ENTITLEMENT` -
+// IKKE et bekreftet fravær av kapabilitet. ALLE tilgjengelige kilder
+// (docs.wallester.com/api-frontend.wallester.com/api-doc.wallester.com
+// ALLE EGRESS_BLOCKED; github.com/wallester/integration-examples dekker
+// KUN auth+ping+KYC, ingen webhooks; gjentatte uavhengige WebSearch-
+// kryssverifiseringer beskriver KONSEKVENT autorisasjonswebhooks som
+// post-beslutnings-varsler, ALDRI en decision-request kunden svarer
+// synkront på) er uttømt UTEN å bekrefte ELLER avkrefte en decision-
+// request-kapabilitet for det valgte programmet. IKKE implementert mot
+// en gjettet kontrakt for en direkte finansiell autorisasjonsbeslutning
+// (D-41 anti-gjetting) - Jarvis uttrykker policy GJENNOM de provider-
+// anvendte grensene + frys inntil videre.
 //
 // Kjøres: node --env-file=.env --experimental-transform-types modules/finance/scripts/wallester-live.ts
 // (normalt via modules/finance/scripts/wallester-live-host-run.ts)
@@ -87,7 +94,7 @@ const results: Record<string, string> = {
   wallester_secret_safety: "NOT_RUN",
   wallester_pci_boundary: "NOT_RUN",
   // §10/§27: ærlig provider-produkt-begrensning - IKKE en feil (se filhodet).
-  wallester_realtime_authorization_policy: "NOT_APPLICABLE",
+  wallester_realtime_authorization_policy: "UNVERIFIED_PRODUCT_ENTITLEMENT",
   wallester_cleanup: "NOT_RUN"
 };
 
@@ -270,7 +277,7 @@ async function main(): Promise<void> {
   });
   if (!runtimeRoleSafe) {
     for (const key of Object.keys(results)) {
-      if (results[key] !== "NOT_APPLICABLE") results[key] = "BLOCKED_BY_RUNTIME_ROLE";
+      if (results[key] !== "UNVERIFIED_PRODUCT_ENTITLEMENT") results[key] = "BLOCKED_BY_RUNTIME_ROLE";
     }
     return finish(true);
   }
@@ -735,7 +742,7 @@ async function main(): Promise<void> {
     log(`no_pan=${noPan} no_cvv=${noCvv} no_private_key=${noKey} masked_reference_present=${maskedOnly} -> wallester_pci_boundary: ${results.wallester_pci_boundary}`);
   });
 
-  log(`\nwallester_realtime_authorization_policy=NOT_APPLICABLE (verifisert provider-produkt-begrensning: Wallester-webhooks er varsler om Wallester-fattede beslutninger, ikke beslutnings-callbacks - se D-112)`);
+  log(`\nwallester_realtime_authorization_policy=UNVERIFIED_PRODUCT_ENTITLEMENT (INGEN kilde bekreftet eller avkreftet en decision-request-kapabilitet for det valgte programmet - IKKE implementert mot en gjettet kontrakt, se D-113)`);
 
   // ===== wallester_cleanup =====
   await section("CLEANUP (KUN denne kjøringens egne syntetiske fixtures - inkl. alle 043-korttabellene)", async () => {
@@ -755,9 +762,10 @@ async function main(): Promise<void> {
 function finish(blockedByRuntimeRole: boolean): void {
   log("\n== UA-6 FINANCE & SPEND INTEGRITY GATEWAY - SJETTE SLICE (D-112) WALLESTER GUARDED LIVE ACCEPTANCE SUMMARY ==");
   for (const [key, value] of Object.entries(results)) log(`${key}=${value}`);
-  // NOT_APPLICABLE er en ÆRLIG, verifisert provider-produkt-begrensning
-  // (§10/§27) - aldri en feil. Alt annet enn PASS/NOT_APPLICABLE feiler hardt.
-  const hardFail = blockedByRuntimeRole || Object.values(results).some((v) => v !== "PASS" && v !== "NOT_APPLICABLE");
+  // UNVERIFIED_PRODUCT_ENTITLEMENT er en ÆRLIG "ikke bekreftet, derfor ikke
+  // implementert"-status (§10/§27, D-113) - aldri en feil. Alt annet enn
+  // PASS/UNVERIFIED_PRODUCT_ENTITLEMENT feiler hardt.
+  const hardFail = blockedByRuntimeRole || Object.values(results).some((v) => v !== "PASS" && v !== "UNVERIFIED_PRODUCT_ENTITLEMENT");
   // D-108: ærlig, permanent grense for DENNE runneren - den beviser KUN
   // produkt-wiring mot en fake ved nettverksgrensen, ALDRI ekte Wallester-
   // reachability. WALLESTER_LIVE_VERIFIED/WALLESTER_LIVE_GATE skal ALDRI
