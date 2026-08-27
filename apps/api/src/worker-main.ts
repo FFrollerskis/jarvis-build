@@ -14,7 +14,7 @@ import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport,
-  CardService, WallesterFinanceTransport,
+  CardService, WallesterFinanceTransport, createRsaJwtSigner,
   type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
@@ -188,17 +188,19 @@ const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
 };
 const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
 const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
-// D-112 (UA-6 Slice 6): SAMME enkelt-globale credential-mønster som main.ts.
+// D-112 (UA-6 Slice 6), korrigert owner-provided primary-source-audit
+// (PR #62 runde 4): SAMME enkelt-globale credential-mønster som main.ts -
+// se main.ts sin wallesterCredentialsProvider for full begrunnelse.
 const wallesterCredentialsProvider: WallesterCredentialsProvider = {
   async getCredentials(): Promise<WallesterCredentials | null> {
     const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
-    const issuer = process.env["JARVIS_WALLESTER_ISSUER"];
-    const audience = process.env["JARVIS_WALLESTER_AUDIENCE"];
+    const apiKey = process.env["JARVIS_WALLESTER_API_KEY"];
+    const accountId = process.env["JARVIS_WALLESTER_ACCOUNT_ID"];
     const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
-    if (!baseUrl || !issuer || !audience || !privateKeyPem) return null;
+    if (!baseUrl || !apiKey || !accountId || !privateKeyPem) return null;
     return {
-      baseUrl, issuer, audience, privateKeyPem,
-      productCode: process.env["JARVIS_WALLESTER_PRODUCT_CODE"] ?? null,
+      baseUrl, apiKey, accountId,
+      sign: createRsaJwtSigner(privateKeyPem),
       environment: process.env["JARVIS_WALLESTER_ENVIRONMENT"] === "production" ? "production" : "sandbox"
     };
   }

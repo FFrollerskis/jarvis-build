@@ -42,7 +42,7 @@ import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
-  CardService, WallesterFinanceTransport, runWallesterSweepForAllTenants,
+  CardService, WallesterFinanceTransport, runWallesterSweepForAllTenants, createRsaJwtSigner,
   type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   runFinanceSpendIntegritySweepForAllTenants, runStripePaymentSyncForAllTenants, runVippsPaymentSyncForAllTenants,
@@ -277,19 +277,24 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   };
   const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
   const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
-  // D-112 (UA-6 Slice 6): SAMME "ETT globalt eier-tilkoblet credential-sett"-
-  // mønster - ett Wallester-kundeforhold (RS256-JWT med kundens private
-  // nøkkel; base-URL/audience env-konfigurert - ingen gjettet hardkodet vert).
+  // D-112 (UA-6 Slice 6), korrigert owner-provided primary-source-audit
+  // (PR #62 runde 4): SAMME "ETT globalt eier-tilkoblet credential-sett"-
+  // mønster - ett Wallester Business-kundeforhold. Autentisering er
+  // api_key/ts JWT signert RS256 (IKKE issuer/audience/sub/rbh - den
+  // modellen gjaldt Wallester Card API, en ANNEN produkt-grense, se
+  // wallester-transport.ts filhode). Selve nøkkelanskaffelsen
+  // (BUSINESS_AUTH_SIGNING_MATERIAL) er PRIMARY_SOURCE_PUBLIC_DOC_GAP -
+  // `sign` forblir injiserbar/fail-closed fremfor gjettet.
   const wallesterCredentialsProvider: WallesterCredentialsProvider = {
     async getCredentials(): Promise<WallesterCredentials | null> {
       const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
-      const issuer = process.env["JARVIS_WALLESTER_ISSUER"];
-      const audience = process.env["JARVIS_WALLESTER_AUDIENCE"];
+      const apiKey = process.env["JARVIS_WALLESTER_API_KEY"];
+      const accountId = process.env["JARVIS_WALLESTER_ACCOUNT_ID"];
       const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
-      if (!baseUrl || !issuer || !audience || !privateKeyPem) return null;
+      if (!baseUrl || !apiKey || !accountId || !privateKeyPem) return null;
       return {
-        baseUrl, issuer, audience, privateKeyPem,
-        productCode: process.env["JARVIS_WALLESTER_PRODUCT_CODE"] ?? null,
+        baseUrl, apiKey, accountId,
+        sign: createRsaJwtSigner(privateKeyPem),
         environment: process.env["JARVIS_WALLESTER_ENVIRONMENT"] === "production" ? "production" : "sandbox"
       };
     }
