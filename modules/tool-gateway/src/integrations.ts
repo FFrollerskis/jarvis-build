@@ -2096,6 +2096,142 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende)",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_neonomics")
+    },
+    // D-112 (UA-6 Slice 6): `finance_wallester.*` - programmerbare kort
+    // (opprettelse/livssyklus/spend-kontroller/synk/avstemming/avvik).
+    // INGEN rå Wallester-proxy eksponeres. A-D-klassene speiler reell
+    // økonomisk risiko: rene lesinger A, lokale Jarvis-mutasjoner/synk B,
+    // spend-MULIGGJØRENDE handlinger C (submit_card oppretter et reelt
+    // spend-kapabelt instrument, unfreeze re-muliggjør spend,
+    // update_spend_policy kan HEVE grenser, close_card er irreversibel) -
+    // ingen egen D: selve pengetrekket skjer hos brukersteder besluttet av
+    // WALLESTER mot provider-anvendte grenser (§10 NOT_APPLICABLE), aldri
+    // som en Jarvis-handling.
+    {
+      tool_id: "finance_wallester", action: "create_card", description: "Opprett kanonisk kortutkast (draft) med formål/policy - deterministisk idempotent, INGEN provider-kall (submit_card er den spend-muliggjørende innsendingen)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), idempotency_key: z.string(), name: z.string(), purpose: z.string(), card_type: z.enum(["virtual", "physical", "disposable"]), currency: z.string().optional(), cardholder_person_id: z.string().optional(), commitment_id: z.string().optional(), campaign_id: z.string().optional(), vendor_name: z.string().optional(), transaction_limit_ore: z.number().optional(), daily_limit_ore: z.number().optional(), weekly_limit_ore: z.number().optional(), monthly_limit_ore: z.number().optional(), atm_enabled: z.boolean().optional(), online_enabled: z.boolean().optional(), contactless_enabled: z.boolean().optional() }),
+      capability_class: "B", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "close_card (utkast uten provider-kort kan lukkes fritt)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "submit_card", description: "Send kortutkastet til Wallester (oppretter det REELLE kortet - spend-muliggjørende, kill-switch-gated; idempotent retry kan aldri duplisere)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: false, rollback_procedure: "freeze_card + close_card (kortet kan fryses/lukkes, men utstedelsen har skjedd)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "get_card", description: "Les ett kanonisk kort",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "list_cards", description: "List kanoniske kort",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), include_closed: z.boolean().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "activate_card", description: "Aktiver et provider-opprettet kort (fysiske kort krever aktivering; reversibelt via freeze_card)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "freeze_card", description: "Frys/blokker et kort (spend-REDUSERENDE - alltid tillatt, også under nødbryter)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "unfreeze_card",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "unfreeze_card", description: "Avfrys et kort (RE-muliggjør spend - kill-switch-gated, klasse C)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "close_card", description: "Lukk et kort permanent (irreversibelt - historiske transaksjoner/hendelser BEVARES)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: false, rollback_procedure: "opprett NYTT kort - et lukket kort kan ikke gjenopplives",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "get_spend_policy", description: "Les kortets spend-policy (ØNSKET vs PROVIDER-ANVENDT - aldri antatt like)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "update_spend_policy", description: "Oppdater kortets spend-grenser/kanaler og push til provider (grense-ØKNINGER er kill-switch-gated; anvendt tilstand settes KUN fra provider-bekreftelse)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string(), transaction_limit_ore: z.number().nullable().optional(), daily_limit_ore: z.number().nullable().optional(), weekly_limit_ore: z.number().nullable().optional(), monthly_limit_ore: z.number().nullable().optional(), atm_enabled: z.boolean().optional(), online_enabled: z.boolean().optional(), contactless_enabled: z.boolean().optional() }),
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "sett grensene tilbake (ny update_spend_policy)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "sync_card_state", description: "Passiv reparasjon av kanonisk korttilstand fra provider-sannheten (resurrekterer aldri et lukket kort - konflikt flagges)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "ingen (observasjons-synk)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "sync_authorizations", description: "Synk kortautorisasjoner (paginert, idempotent - statusprogresjon på samme rad)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string(), max_pages: z.number().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "ingen (idempotent synk)",
+      idempotent_external: true, timeout_ms: 60_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "sync_transactions", description: "Synk oppgjorte korttransaksjoner (paginert, idempotent - autorisasjon<->oppgjør lenkes deterministisk, korreksjoner flagges i stedet for å overskrive)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string(), max_pages: z.number().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "ingen (idempotent synk)",
+      idempotent_external: true, timeout_ms: 60_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "list_authorizations", description: "List kortautorisasjoner (approve/decline/reversering/oppgjør - besluttet av Wallester mot provider-anvendte grenser)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "list_card_transactions", description: "List/filtrer kanoniske korttransaksjoner (kort/avstemmingstilstand)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string().optional(), reconciliation_state: z.enum(["unmatched", "matched", "ambiguous"]).optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "reconcile_card_transactions", description: "Kjør deterministisk kortspend-avstemming nå (regel 1 formålsbundet forpliktelse, regel 2 eksakt-én-kandidat beløp - tvetydige forblir uløste)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (en match er bevisbasert lenking)",
+      idempotent_external: true, timeout_ms: 60_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "run_card_anomaly_detection", description: "Trigger deterministisk kortavviksdeteksjon nå (UNEXPECTED_CARD_SPEND/CARD_AMOUNT_LIMIT_BREACH/CARD_CURRENCY_MISMATCH/CARD_DUPLICATE_TRANSACTION/CARD_SPEND_AFTER_FREEZE/CARD_SPEND_AFTER_CLOSE/UNEXPECTED_CASH_WITHDRAWAL/UNEXPECTED_ONLINE_PURCHASE m.fl. - kilde-satte flagg bevares)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende)",
+      idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance_wallester")
+    },
+    {
+      tool_id: "finance_wallester", action: "get_provider_balance", description: "Les Wallester-kontosaldoen (read-only provider-tilstand - dupliserer aldri Neonomics-bankautoriteten)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (ren lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
+      output_trust: "untrusted", transport: transport("finance_wallester")
     }
   ];
 }

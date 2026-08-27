@@ -14,6 +14,8 @@ import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport,
+  CardService, WallesterFinanceTransport, createRsaJwtSigner,
+  type WallesterCredentials, type WallesterCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
   type FikenCredentials, type FikenCredentialsProvider, type StripeCredentials, type StripeCredentialsProvider,
   type VippsCredentials, type VippsCredentialsProvider
@@ -186,12 +188,36 @@ const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
 };
 const neonomicsWebhookApiKeyProvider = () => process.env["JARVIS_NEONOMICS_WEBHOOK_API_KEY"] ?? null;
 const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] ?? null;
+// D-112 (UA-6 Slice 6), korrigert owner-provided primary-source-audit
+// (PR #62 runde 4): SAMME enkelt-globale credential-mønster som main.ts -
+// se main.ts sin wallesterCredentialsProvider for full begrunnelse.
+const wallesterCredentialsProvider: WallesterCredentialsProvider = {
+  async getCredentials(): Promise<WallesterCredentials | null> {
+    const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
+    const apiKey = process.env["JARVIS_WALLESTER_API_KEY"];
+    const accountId = process.env["JARVIS_WALLESTER_ACCOUNT_ID"];
+    const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
+    if (!baseUrl || !apiKey || !accountId || !privateKeyPem) return null;
+    return {
+      baseUrl, apiKey, accountId,
+      sign: createRsaJwtSigner(privateKeyPem),
+      environment: process.env["JARVIS_WALLESTER_ENVIRONMENT"] === "production" ? "production" : "sandbox"
+    };
+  }
+};
+const wallesterWebhookBasicAuthProvider = () => {
+  const username = process.env["JARVIS_WALLESTER_WEBHOOK_BASIC_USER"];
+  const password = process.env["JARVIS_WALLESTER_WEBHOOK_BASIC_PASSWORD"];
+  return username && password ? { username, password } : null;
+};
+const wallesterTenantResolver = () => process.env["JARVIS_WALLESTER_TENANT_ID"] ?? null;
 const financeService = new FinanceService(
   pool, undefined, stripeCredentialsProvider, undefined, stripeWebhookSecretProvider, stripeTenantResolver,
   vippsCredentialsProvider, undefined, vippsWebhookSecretProvider, vippsTenantResolver,
   neonomicsCredentialsProvider, undefined, neonomicsWebhookApiKeyProvider, neonomicsTenantResolver
 );
 const bankingService = new BankingService(pool, neonomicsCredentialsProvider);
+const cardService = new CardService(pool, wallesterCredentialsProvider, undefined, wallesterWebhookBasicAuthProvider, wallesterTenantResolver);
 // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): identisk
 // wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
 // maa kunne kalle finance_spend.*-handlingene identisk.
@@ -238,6 +264,8 @@ for (const tool of firstWaveTools({
   // D-110 (UA-6 Slice 4): identisk wiring-mønster som apps/api/src/main.ts.
   finance_vipps: new VippsFinanceTransport(financeService),
   finance_neonomics: new NeonomicsFinanceTransport(bankingService, financeService),
+  // D-112 (UA-6 Slice 6): eget `finance_wallester.*`-namespace - SAMME mønster.
+  finance_wallester: new WallesterFinanceTransport(cardService),
   // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
   consent: new ConsentTransport(consentService, consentEnforcementService),
   // D-105: samme wiring-mønster som apps/api/src/main.ts.

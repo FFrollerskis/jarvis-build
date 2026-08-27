@@ -102,7 +102,13 @@ describe("A: schema-drevet FK-audit - business_open_loops er DET ENESTE eksterne
       // - REGISTRERT i erasure-planen (plan.ts) FØR `marketing_campaigns`
       // slettes (samme "child-før-parent"-lærdom denne testen selv beviser
       // for de andre marketing_*-barnetabellene).
-      "finance_spend_records"
+      "finance_spend_records",
+      // UA-6 Finance & Spend Integrity Gateway - SJETTE slice (Slice 6,
+      // D-112, 043_wallester.sql): `provider_cards.campaign_id` er SAMME
+      // BEVISSTE, valgfrie kampanje-kobling som `finance_spend_records`
+      // over (formåls-/leverandørbinding, §8) - REGISTRERT i erasure-planen
+      // (plan.ts) FØR `marketing_campaigns` slettes.
+      "provider_cards"
     ]);
     const unexpected = (rows as Array<{ dependent_table: string }>).filter((r) => !known.has(r.dependent_table));
     expect(unexpected).toHaveLength(0);

@@ -632,6 +632,61 @@ export class OpenLoopService {
     });
   }
 
+  /**
+   * UA-6 Slice 6 (D-112): en korttransaksjon ELLER et kort med uløste
+   * deterministiske avviksflagg (satt av CardService - ALDRI AI-inferert,
+   * Q-26) overflates som `card_anomaly_attention`. Selv-korrigerende via
+   * SAMME upsert/autoResolveStale-mønster som bankreglene over.
+   */
+  async detectCardAnomalies(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      const { rows: txRows } = await client.query(
+        `SELECT ct.card_transaction_id, ct.amount_ore, ct.currency, ct.merchant_name, ct.anomaly_flags, pc.name AS card_name
+         FROM card_transactions ct JOIN provider_cards pc ON pc.card_id = ct.card_id AND pc.tenant_id = ct.tenant_id
+         WHERE ct.tenant_id = $1 AND jsonb_array_length(ct.anomaly_flags) > 0`,
+        [tenantId]
+      );
+      for (const row of txRows as Array<{ card_transaction_id: string; amount_ore: string; currency: string; merchant_name: string | null; anomaly_flags: string[]; card_name: string }>) {
+        const detectionKey = `card_anomaly_attention:tx:${row.card_transaction_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          loop_type: "card_anomaly_attention", detection_key: detectionKey,
+          reason: `Korttransaksjon ${row.card_transaction_id} (${row.amount_ore} ${row.currency}${row.merchant_name ? ` - ${row.merchant_name}` : ""}, kort «${row.card_name}») har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
+          next_action: `Undersøk korttransaksjon ${row.card_transaction_id}`,
+          priority: row.anomaly_flags.some((f) => f === "DUPLICATE_ECONOMIC_EFFECT" || f === "CARD_SPEND_AFTER_FREEZE" || f === "CARD_SPEND_AFTER_CLOSE") ? "high" : "normal",
+          owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const { rows: cardRows } = await client.query(
+        `SELECT card_id, name, anomaly_flags FROM provider_cards WHERE tenant_id = $1 AND jsonb_array_length(anomaly_flags) > 0`,
+        [tenantId]
+      );
+      for (const row of cardRows as Array<{ card_id: string; name: string; anomaly_flags: string[] }>) {
+        const detectionKey = `card_anomaly_attention:card:${row.card_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          loop_type: "card_anomaly_attention", detection_key: detectionKey,
+          reason: `Kort «${row.name}» (${row.card_id}) har uløste kortavvik: ${row.anomaly_flags.join(", ")}`,
+          next_action: `Undersøk kort ${row.card_id}`,
+          priority: "high", owner_person_id: null, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "card_anomaly_attention", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
   async runSweep(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
     const results = [
       await this.detectOverdueFollowups(tenantId, memorySpace),
@@ -678,7 +733,8 @@ export class OpenLoopService {
       // (042_neonomics.sql). Selve flaggene er allerede beregnet
       // deterministisk av BankingService sine sveip.
       await this.detectBankTransactionAnomalies(tenantId, memorySpace),
-      await this.detectBankConsentAttention(tenantId, memorySpace)
+      await this.detectBankConsentAttention(tenantId, memorySpace),
+      await this.detectCardAnomalies(tenantId, memorySpace)
     ];
     return results.reduce(
       (acc, r) => ({ detected: acc.detected + r.detected, updated: acc.updated + r.updated, auto_resolved: acc.auto_resolved + r.auto_resolved }),
