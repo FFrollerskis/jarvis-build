@@ -3172,11 +3172,25 @@ tilgjengelig kanal - §10 sin klassifisering endret fra `NOT_APPLICABLE` til
 `UNVERIFIED_PRODUCT_ENTITLEMENT` (ærligere: fravær av bekreftelse, ikke bekreftet fravær).
 Full detalj: D-113 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**D-114 (2026-08-27, PR #62 runde 4, `PRIMARY_SOURCE_EVIDENCE_MODE=OWNER_PROVIDED_PRIMARY_SOURCE_AUDIT`):**
+Tobias sin eier-leverte primærkilde-audit avdekket at Wallester publiserer TO DISTINKTE API-produkter
+(Business, det VALGTE produktet, vs Card API) - D-113 sin retting gjaldt feil produkt (Card API). Hele
+Business-kontrakten erstattet: auth (api_key/ts/RS256/Bearer, INGEN iss/aud/sub/exp/rbh, INGEN
+X-Product-Code/X-Audit-*-headere), kortopprettelse (`type: "Virtual"|"ChipAndPin"` + `is_disposable`,
+fysisk kort FAIL-CLOSED), livssyklus (PATCH ikke POST), grenser/sikkerhet (to separate PATCH-
+endepunkter), paginering (`from_record`/`records_count`), saldo (`GET /v1/accounts/{account_id}`),
+webhook-konvolutt (`event`/`type`-skille, `authorization_release` lagt til). `BUSINESS_AUTH_SIGNING_
+MATERIAL=PRIMARY_SOURCE_PUBLIC_DOC_GAP` løst med injiserbar `WallesterBusinessJwtSigner` (aldri
+gjettet nøkkelopphav). Fail-safe utvidet: ukjent providerstatus/-type lagres `"unknown"` (migrasjon 043
+CHECK-constraints utvidet), ALDRI stille "approved"/"purchase" - rettet i BÅDE transport- og
+webhook-ingestion-laget. §10 reklassifisert `UNVERIFIED_PRODUCT_ENTITLEMENT` →
+`NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API`. Full detalj: D-114 i DECISIONS_AND_ASSUMPTIONS.md.
+
 **Terminalflagg:** `UA6_COMPLETE=false` (siste store kapabilitets-slice bygget - gjenstår dedikert
 UA-6-closeout + konsolidert credential-fase). `WALLESTER_LIVE_VERIFIED=false`,
 `WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, `WALLESTER_CREDENTIAL_SETUP_DEFERRED=true`.
 `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
-Full detalj: D-112/D-113 i DECISIONS_AND_ASSUMPTIONS.md.
+Full detalj: D-112/D-113/D-114 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

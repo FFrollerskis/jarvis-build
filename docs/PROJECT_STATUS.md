@@ -1,6 +1,55 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-26 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — SJETTE
+**Oppdatert:** 2026-08-27 (**PR #62 runde 4 - Wallester Business vs Card API
+produkt-splitt-korrigering (D-114), `PRIMARY_SOURCE_EVIDENCE_MODE=
+OWNER_PROVIDED_PRIMARY_SOURCE_AUDIT` - IKKE self-verifisert av denne økten.**
+Tobias sin eier-leverte primærkilde-audit avdekket at D-112/D-113 sin
+implementerte auth-/wire-kontrakt (RS256/iss/aud/sub="api-request"/rbh)
+faktisk beskrev Wallester Card API - en produkt-grense IKKE valgt for D-112.
+Det VALGTE produktet, Wallester Business, har en HELT ANNEN kontrakt: JWT
+Bearer med KUN `api_key`+`ts`-claims (RS256, ~5s levetid, INGEN iss/aud/sub/
+exp/rbh, INGEN X-Product-Code/X-Audit-*-headere); kortopprettelse
+`type: "Virtual"|"ChipAndPin"` + `is_disposable`-boolean (fysisk/ChipAndPin
+kort er FAIL-CLOSED - Jarvis samler ikke inn embossing-/utleveringsfelt);
+livssyklus (aktiver/blokker/lukk/gjenåpne) via PATCH IKKE POST; grenser
+(PATCH `.../limits`) og sikkerhet (PATCH `.../security`) som TO separate
+endepunkter; paginering `from_record`/`records_count` IKKE et side-token;
+saldo fra `GET /v1/accounts/{account_id}` IKKE et globalt endepunkt; webhook-
+konvolutt skiller `event` (konstant "notification") fra `type` (klassifikator
+"authorization"|"authorization_release"|"transaction"). `BUSINESS_AUTH_
+SIGNING_MATERIAL=PRIMARY_SOURCE_PUBLIC_DOC_GAP` (eksplisitt Tobias-flagget,
+IKKE gjettet): løst med en injiserbar `WallesterBusinessJwtSigner`-
+funksjonstype (`createRsaJwtSigner()`), produksjons-nøkkelopphavet forblir en
+D-108-avklaring. **Ny fail-safe-utvidelse (Tobias-krevd):** `CardAuthorization
+Status`/`CardTransactionType` fikk en EKTE `"unknown"`-verdi (migrasjon 043
+CHECK-constraints utvidet) - en ubekreftet providerstatus/-type mappes ALDRI
+LENGER stille til "approved"/"purchase"; rettet i BÅDE `wallester-
+transport.ts` sin wire-mapping OG `card-service.ts` sin webhook-ingestion
+(samme bug-klasse fantes begge steder). §10 sanntidsautorisasjon reklassifisert
+fra `UNVERIFIED_PRODUCT_ENTITLEMENT` (D-113) til `NOT_APPLICABLE_TO_SELECTED_
+WALLESTER_BUSINESS_API` (Business har ingen synkron decision-request-
+kapabilitet - den tilhører utelukkende det ikke-valgte Card API-produktet).
+**Berørte filer:** `wallester-transport.ts` (fullstendig omskrevet),
+`card-types.ts`, `wallester-webhook.ts`, `card-service.ts`, `apps/api/src/
+main.ts`+`worker-main.ts`+`server.ts` (X-Request-ID-korrelasjon), `.env.example`,
+`043_wallester.sql`, `wallester-webhook.test.ts` (nye seksjoner C/D/E),
+`wallester-service.test.ts` (credential-/webhook-envelope-form + nye fail-
+safe-/authorization_release-/fysisk-kort-fail-closed-tester), `wallester-
+live.ts` (ny `wallester_business_auth_contract`-markør, §10-reklassifisering,
+ALLE 5 tidligere slice-invariant-markører preservert uendret). **Kvalitets-
+porter:** `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent, finance-
+modul 443/443 tester grønt (26 filer, inkl. 23 nye/endrede Wallester-tester),
+erasure-modul uendret grønt. Full workspace-suite kjøres FØR push (se PR #62-
+oppdateringen for eksakt filantall/testantall). ZERO Wallester-credentials
+konfigurert (D-108 uendret) - `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`. `HOST_ACCEPTANCE_RUN=false`
+(byggeordrens eksplisitte instruks - kjøres KUN etter Tobias sin godkjenning
+av denne eksakte HEAD-en). `UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_
+IMPLEMENTED=false` uendret. **`MERGE_READY=false` - PR #62 MERGES IKKE.**
+Full detalj: D-114 i DECISIONS_AND_ASSUMPTIONS.md, IMPLEMENTATION_PLAN.md
+§«SJETTE slice».
+
+**Runden før det:** 2026-08-26 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY — SJETTE
 SLICE (Slice 6, D-112): Wallester programmerbare kort, wallet og spend-
 kontroll - IMPLEMENTASJON FERDIG, KVALITETSPORTER GRØNNE, VENTER PÅ
 BRANCH/PR/HOST-AKSEPTANSE.** Tobias-godkjent (`PROVIDER=Wallester`,
