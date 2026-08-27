@@ -169,7 +169,11 @@ CREATE TABLE card_authorizations (
   card_id                      text NOT NULL REFERENCES provider_cards (card_id),
   provider                      text NOT NULL DEFAULT 'wallester' CHECK (provider IN ('wallester')),
   provider_authorization_id      text NOT NULL,
-  status                          text NOT NULL CHECK (status IN ('approved', 'declined', 'reversed', 'settled', 'expired')),
+  -- 'unknown' lagt til i owner-provided primary-source-korrigeringen (PR #62,
+  -- runde 4): en ubekreftet providerstatus er en EKTE, lagringsbar
+  -- fail-safe-tilstand - ALDRI en stille CHECK-avvist verdi som ville
+  -- tvunget koden til å gjette et positivt utfall for å unngå constraint-brudd.
+  status                          text NOT NULL CHECK (status IN ('approved', 'declined', 'reversed', 'settled', 'expired', 'unknown')),
   amount_ore                       bigint NOT NULL CHECK (amount_ore > 0),
   currency                          text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
   merchant_name                      text,
@@ -204,7 +208,8 @@ CREATE TABLE card_transactions (
   -- autorisasjonen det gjør opp. TO oppgjør mot SAMME autorisasjon er
   -- avviket DUPLICATE_ECONOMIC_EFFECT (aldri stille akseptert).
   authorization_id                text REFERENCES card_authorizations (authorization_id),
-  transaction_type                 text NOT NULL CHECK (transaction_type IN ('purchase', 'refund', 'reversal', 'fee')),
+  -- 'unknown' - samme fail-safe-begrunnelse som card_authorizations.status over.
+  transaction_type                 text NOT NULL CHECK (transaction_type IN ('purchase', 'refund', 'reversal', 'fee', 'unknown')),
   amount_ore                        bigint NOT NULL CHECK (amount_ore > 0),
   currency                           text NOT NULL CHECK (currency ~ '^[A-Z]{3}$'),
   merchant_name                       text,

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
-import { WallesterApiError, WallesterTransport, type WallesterGateway, type WallesterCardLimitsInput, type WallesterAccountBalance } from "./wallester-transport.ts";
+import { WallesterApiError, WallesterTransport, type WallesterGateway, type WallesterCardLimitsInput, type WallesterAccountBalance, type WallesterBusinessJwtSigner } from "./wallester-transport.ts";
 import { parseWallesterEventEnvelope, verifyWallesterWebhookBasicAuth, WallesterEventEnvelopeError, type WallesterEventEnvelope } from "./wallester-webhook.ts";
 import {
   CardInvalidStateError,
@@ -49,12 +49,20 @@ import { FinanceKillSwitchActiveError, InvalidWebhookSignatureError } from "./ty
 /** Deterministiske konstanter - dokumentert, aldri skjult-tilfeldige. */
 export const CARD_UNMATCHED_FLAG_AGE_DAYS = 3;
 
+/**
+ * Owner-provided primary-source-audit (PR #62, runde 4): Wallester Business
+ * sin autentiseringskontrakt bruker api_key/ts JWT-claims signert med RS256
+ * - IKKE issuer/audience/sub/exp/rbh (D-113-modellen gjaldt Wallester Card
+ * API, en ANNEN produkt-grense - se wallester-transport.ts filhode).
+ * Signeringsmekanismen (`sign`) er injiserbar med hensikt: selve
+ * nøkkelanskaffelsen (BUSINESS_AUTH_SIGNING_MATERIAL) er
+ * PRIMARY_SOURCE_PUBLIC_DOC_GAP - ALDRI gjettet her.
+ */
 export interface WallesterCredentials {
   baseUrl: string;
-  issuer: string;
-  audience: string;
-  privateKeyPem: string;
-  productCode: string | null;
+  apiKey: string;
+  sign: WallesterBusinessJwtSigner;
+  accountId: string;
   environment: "sandbox" | "production";
 }
 
@@ -65,7 +73,7 @@ export interface WallesterCredentialsProvider {
 export type WallesterGatewayFactory = (credentials: WallesterCredentials) => WallesterGateway;
 
 export const defaultWallesterGatewayFactory: WallesterGatewayFactory = (c) =>
-  new WallesterTransport(c.baseUrl, c.issuer, c.audience, c.privateKeyPem, c.productCode);
+  new WallesterTransport(c.baseUrl, c.apiKey, c.sign, c.accountId);
 
 /** Webhook-Basic-credential (kunde-konfigurert hos Wallester) - `null` = webhook ikke konfigurert (fail-closed). */
 export type WallesterWebhookBasicAuthProvider = () => { username: string; password: string } | null;
@@ -547,7 +555,7 @@ export class CardService {
     tenantId: string,
     memorySpace: MemorySpace,
     cardId: string,
-    tx: { id: string; authorizationId: string | null; type: "purchase" | "refund" | "reversal" | "fee"; amountOre: number; currency: string; merchantName: string | null; merchantCategoryCode: string | null; channel: string; transactionAt: string | null; settledAt: string | null },
+    tx: { id: string; authorizationId: string | null; type: "purchase" | "refund" | "reversal" | "fee" | "unknown"; amountOre: number; currency: string; merchantName: string | null; merchantCategoryCode: string | null; channel: string; transactionAt: string | null; settledAt: string | null },
     count: (n: { inserted: number; corrections: number }) => void
   ): Promise<void> {
     // Deterministisk autorisasjon<->oppgjør-lenking (§9).
@@ -855,10 +863,16 @@ export class CardService {
       const cardId = (cardRow.rows[0] as { card_id: string }).card_id;
 
       try {
-        if (envelope.kind === "authorization") {
+        // "authorization_release" (owner-provided primary-source-audit, PR #62
+        // runde 4) rapporterer et senere utfall for en EKSISTERENDE
+        // autorisasjon (f.eks. reversert/utløpt uten oppgjør) - samme
+        // status-lagrings-/korrigeringssti som "authorization".
+        if (envelope.kind === "authorization" || envelope.kind === "authorization_release") {
           const p = envelope.payload;
-          const status = String(p["status"] ?? "approved").toLowerCase();
-          const mapped = status === "approved" || status === "declined" || status === "reversed" || status === "settled" || status === "expired" ? status : "approved";
+          const status = String(p["status"] ?? "unknown").toLowerCase();
+          // Fail-safe (owner-provided primary-source-audit, PR #62 runde 4): en
+          // ubekreftet providerstatus mappes ALDRI stille til "approved".
+          const mapped = status === "approved" || status === "declined" || status === "reversed" || status === "settled" || status === "expired" ? status : "unknown";
           const insertedAuth = await client.query(
             `INSERT INTO card_authorizations (authorization_id, tenant_id, memory_space_id, card_id, provider_authorization_id, status, amount_ore, currency, merchant_name, merchant_category_code, channel, decline_reason, authorized_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
@@ -874,18 +888,23 @@ export class CardService {
             ]
           );
           if (insertedAuth.rows.length === 0) {
+            // Kun ikke-terminale plassholdertilstander ('approved' fra
+            // optimistisk polling, 'unknown' fra en tidligere uidentifisert
+            // status) korrigeres ved en senere, mer presis hendelse.
             await client.query(
-              `UPDATE card_authorizations SET status = $3, updated_at = now() WHERE tenant_id = $1 AND provider_authorization_id = $2 AND status = 'approved' AND $3 != 'approved'`,
+              `UPDATE card_authorizations SET status = $3, updated_at = now() WHERE tenant_id = $1 AND provider_authorization_id = $2 AND status IN ('approved', 'unknown') AND $3 != status`,
               [tenantId, envelope.providerObjectId, mapped]
             );
           }
         } else if (envelope.kind === "transaction") {
           const p = envelope.payload;
-          const type = String(p["transaction_type"] ?? p["type"] ?? "purchase").toLowerCase();
+          const type = String(p["transaction_type"] ?? p["type"] ?? "unknown").toLowerCase();
+          // Fail-safe (owner-provided primary-source-audit, PR #62 runde 4): en
+          // ubekreftet transaksjonstype mappes ALDRI stille til "purchase".
           await this.ingestTransaction(client, tenantId, memorySpace, cardId, {
             id: envelope.providerObjectId,
             authorizationId: typeof p["authorization_id"] === "string" ? (p["authorization_id"] as string) : null,
-            type: type === "refund" || type === "reversal" || type === "fee" ? (type as "refund" | "reversal" | "fee") : "purchase",
+            type: type === "purchase" || type === "refund" || type === "reversal" || type === "fee" ? (type as "purchase" | "refund" | "reversal" | "fee") : "unknown",
             amountOre: Number(p["amount"] ?? 0),
             currency: String(p["currency"] ?? "EUR").toUpperCase(),
             merchantName: typeof p["merchant_name"] === "string" ? (p["merchant_name"] as string) : null,

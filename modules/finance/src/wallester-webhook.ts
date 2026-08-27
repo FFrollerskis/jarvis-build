@@ -1,23 +1,33 @@
 import { timingSafeEqual } from "node:crypto";
 
 /**
- * UA-6 Slice 6 (D-112): Wallester webhook-autentisering og envelope-
- * parsing - ren, avhengighetsfri modul (samme arkitekturrolle som
- * stripe-webhook.ts/vipps-webhook.ts/neonomics-webhook.ts).
+ * UA-6 Slice 6 (D-112, korrigert D-11x runde 4): Wallester webhook-
+ * autentisering og envelope-parsing - ren, avhengighetsfri modul (samme
+ * arkitekturrolle som stripe-webhook.ts/vipps-webhook.ts/neonomics-webhook.ts).
  *
- * Kontrakt (VERIFIED_SEARCH_SNIPPET + byggeordrens §15): Wallester
- * leverer hendelser (autorisasjon approve/decline i beslutnings-
- * øyeblikket, oppgjør, korthendelser) som HTTP POST til et forhånds-
- * konfigurert endepunkt, autentisert med HTTP BASIC (kunde-konfigurert
- * brukernavn/passord) - IKKE HMAC (Stripe), IKKE forespørselssignering
- * (Vipps), IKKE ren API-nøkkel (Neonomics). Implementert som SIN EGEN
- * kontrakt: konstant-tid-sammenligning av det dekodede
- * `brukernavn:passord`-paret. INGEN bekreftet global hendelses-ID i det
- * uavhengige søket - dedupe-nøkkelen er Jarvis-utledet (hendelses-id når
- * til stede, ellers deterministisk `type:objekt-id:status`), samme
- * konservative prinsipp som Vipps/Neonomics: under-deduplisering i verste
- * fall, aldri feilaktig dropp - idempotens-invariantene i CardService
- * gjør en duplisert levering uskadelig uansett.
+ * Autentisering (uendret, fortsatt korrekt per owner-provided Business-
+ * kontrakt): HTTP BASIC (kunde-konfigurert brukernavn/passord) -
+ * IKKE HMAC (Stripe), IKKE forespørselssignering (Vipps), IKKE ren
+ * API-nøkkel (Neonomics). Konstant-tid-sammenligning av det dekodede
+ * `brukernavn:passord`-paret.
+ *
+ * Envelope-kontrakt: PRIMARY_SOURCE_EVIDENCE_MODE=OWNER_PROVIDED_PRIMARY_SOURCE_AUDIT
+ * (PR #62, runde 4 - IKKE selv hentet, se wallester-transport.ts filhode for
+ * full sourcing-forklaring). Wallester Business skiller `event` (konstant
+ * konvolutt-markør, dokumentert verdi "notification") fra `type` (den
+ * faktiske klassifikatoren: "authorization" | "authorization_release" |
+ * "transaction") - IKKE et enkelt punktum-separert felt som i den
+ * tidligere (feilaktig antatte) modellen. `event !== "notification"` er en
+ * uventet konvoluttform og avvises (fail-safe - ALDRI gjettet videre).
+ * Wallester ekko-er X-Request-ID for korrelasjon (håndtert i
+ * apps/api/src/server.ts sin webhook-rute, IKKE her).
+ *
+ * INGEN bekreftet global hendelses-ID i det owner-provided materialet -
+ * dedupe-nøkkelen er fortsatt Jarvis-utledet (hendelses-id når til stede,
+ * ellers deterministisk `type:objekt-id:status`), samme konservative
+ * prinsipp som Vipps/Neonomics: under-deduplisering i verste fall, aldri
+ * feilaktig dropp - idempotens-invariantene i CardService gjør en
+ * duplisert levering uskadelig uansett.
  */
 
 export interface WallesterWebhookAuthResult {
@@ -56,11 +66,15 @@ export function verifyWallesterWebhookBasicAuth(
   return timingSafeEqual(a, b) ? { valid: true } : { valid: false, reason: "credential_mismatch" };
 }
 
-export type WallesterEventKind = "authorization" | "transaction" | "card" | "unknown";
+/** Konstant konvolutt-markør Wallester Business dokumenterer for `event` (owner-provided). */
+const WALLESTER_ENVELOPE_EVENT = "notification";
+
+export type WallesterEventKind = "authorization" | "authorization_release" | "transaction" | "card" | "unknown";
 
 export interface WallesterEventEnvelope {
   /** Provider-hendelses-id når til stede - ellers null (dedupeKey dekker identiteten uansett). */
   eventId: string | null;
+  /** Rå `type`-feltverdi fra Wallester (klassifikatoren - se filhode). */
   eventType: string;
   kind: WallesterEventKind;
   /** Provider-objektet hendelsen gjelder (autorisasjons-, transaksjons- eller kort-ID). */
@@ -79,12 +93,26 @@ export class WallesterEventEnvelopeError extends Error {
   }
 }
 
+/**
+ * `type` er dokumentert som et LUKKET sett (owner-provided): eksakt
+ * matching - ALDRI substreng-heuristikk (den forrige, feilaktig antatte
+ * "authorization.approved"-stilen fantes ikke i det owner-provided
+ * materialet). En ukjent `type`-verdi klassifiseres "unknown" -
+ * fail-safe, aldri gjettet til en av de kjente klassene.
+ */
 function classifyKind(eventType: string): WallesterEventKind {
-  const t = eventType.toLowerCase();
-  if (t.includes("authorization")) return "authorization";
-  if (t.includes("transaction")) return "transaction";
-  if (t.includes("card")) return "card";
-  return "unknown";
+  switch (eventType.toLowerCase()) {
+    case "authorization":
+      return "authorization";
+    case "authorization_release":
+      return "authorization_release";
+    case "transaction":
+      return "transaction";
+    case "card":
+      return "card";
+    default:
+      return "unknown";
+  }
 }
 
 export function parseWallesterEventEnvelope(rawBody: Buffer): WallesterEventEnvelope {
@@ -94,6 +122,8 @@ export function parseWallesterEventEnvelope(rawBody: Buffer): WallesterEventEnve
   } catch {
     throw new WallesterEventEnvelopeError("invalid_json");
   }
+  const envelopeMarker = typeof parsed["event"] === "string" ? (parsed["event"] as string) : null;
+  if (envelopeMarker !== WALLESTER_ENVELOPE_EVENT) throw new WallesterEventEnvelopeError("unexpected_envelope_event");
   const eventType = typeof parsed["type"] === "string" ? (parsed["type"] as string) : null;
   if (!eventType) throw new WallesterEventEnvelopeError("missing_type");
   const data = (parsed["data"] as Record<string, unknown> | undefined) ?? parsed;

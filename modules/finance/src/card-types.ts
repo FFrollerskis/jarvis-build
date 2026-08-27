@@ -88,7 +88,14 @@ export interface CardSpendPolicy {
   applied_at: string | null;
 }
 
-export type CardAuthorizationStatus = "approved" | "declined" | "reversed" | "settled" | "expired";
+/**
+ * "unknown" lagt til i owner-provided primary-source-korrigeringen
+ * (PR #62, runde 4): en ubekreftet/uventet provider-statusstreng skal
+ * ALDRI mappes til et positivt/godkjent økonomisk utfall (fail-safe,
+ * byggeordrens eget krav). `unknown` er en EKTE, lagringsbar tilstand -
+ * ALDRI en stille erstatning for "approved".
+ */
+export type CardAuthorizationStatus = "approved" | "declined" | "reversed" | "settled" | "expired" | "unknown";
 export type CardChannel = "pos" | "online" | "atm" | "contactless" | "unknown";
 
 export interface CardAuthorization {
@@ -109,7 +116,8 @@ export interface CardAuthorization {
   anomaly_flags: string[];
 }
 
-export type CardTransactionType = "purchase" | "refund" | "reversal" | "fee";
+/** "unknown" - samme fail-safe-begrunnelse som CardAuthorizationStatus over: en ubekreftet transaksjonstype mappes ALDRI stille til "purchase". */
+export type CardTransactionType = "purchase" | "refund" | "reversal" | "fee" | "unknown";
 export type CardReconciliationState = "unmatched" | "matched" | "ambiguous";
 
 export interface CardTransaction {
@@ -192,6 +200,22 @@ export class WallesterTenantNotConfiguredError extends Error {
 }
 
 /**
+ * Owner-provided primary-source-audit (PR #62, runde 4): Wallester
+ * Business sin dokumenterte ChipAndPin (fysisk kort)-opprettelse krever
+ * embossing-/utleveringsfelt (delivery_address, embossing_name,
+ * embossing_company_name, personalization_product_code) Jarvis IKKE
+ * samler inn i denne sliceen. Sendes ALDRI fabrikkert - fysisk
+ * kortinnsending feiler FAIL-CLOSED inntil disse feltene finnes som
+ * ekte Jarvis-input, fremfor å gjette verdier for en ekte kortbestilling.
+ */
+export class WallesterPhysicalCardUnsupportedError extends Error {
+  constructor() {
+    super("wallester_physical_card_delivery_fields_unavailable");
+    this.name = "WallesterPhysicalCardUnsupportedError";
+  }
+}
+
+/**
  * Deterministisk mapping fra Wallester sin rå provider-korttilstand til
  * kanonisk CardState (VERIFIED_SEARCH_SNIPPET-klassen tilstander:
  * aktiv/blokkert/lukket + venter-personalisering for fysiske kort).
@@ -204,6 +228,10 @@ export function mapWallesterCardState(providerState: string): CardState | null {
       return "active";
     case "blocked":
     case "frozen":
+    case "closing":
+      // "Closing" (owner-provided primary-source audit, PR #62 runde 4):
+      // kortet er PÅ VEI mot lukket men ikke terminalt ennå - trygg,
+      // spend-restriktiv tolkning er "frozen" (ALDRI fortsatt "active").
       return "frozen";
     case "closed":
     case "expired":
@@ -212,7 +240,12 @@ export function mapWallesterCardState(providerState: string): CardState | null {
     case "personalized":
     case "awaitingactivation":
     case "created":
+    case "dispatched":
+      // "Dispatched" (fysisk kort sendt, ikke ennå aktivert av kortholder).
       return "pending_provider";
+    // "AwaitingRenewal" - EKSAKT betydning ikke bekreftet fra primærkilde;
+    // ALDRI gjettet til en positiv tilstand. Forblir `null` (ukjent) -
+    // synken flagger CARD_PROVIDER_STATE_CONFLICT fremfor å anta.
     default:
       return null;
   }
