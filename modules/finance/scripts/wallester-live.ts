@@ -19,19 +19,17 @@
 // forblir sanne til Tobias selv oppretter og verifiserer en ekte
 // Wallester Business-konto med API-tilgang (D-108).
 //
-// SANNTIDSAUTORISASJON (§10, korrigert D-113): `wallester_realtime_
-// authorization_policy` rapporteres `UNVERIFIED_PRODUCT_ENTITLEMENT` -
-// IKKE et bekreftet fravær av kapabilitet. ALLE tilgjengelige kilder
-// (docs.wallester.com/api-frontend.wallester.com/api-doc.wallester.com
-// ALLE EGRESS_BLOCKED; github.com/wallester/integration-examples dekker
-// KUN auth+ping+KYC, ingen webhooks; gjentatte uavhengige WebSearch-
-// kryssverifiseringer beskriver KONSEKVENT autorisasjonswebhooks som
-// post-beslutnings-varsler, ALDRI en decision-request kunden svarer
-// synkront på) er uttømt UTEN å bekrefte ELLER avkrefte en decision-
-// request-kapabilitet for det valgte programmet. IKKE implementert mot
-// en gjettet kontrakt for en direkte finansiell autorisasjonsbeslutning
-// (D-41 anti-gjetting) - Jarvis uttrykker policy GJENNOM de provider-
-// anvendte grensene + frys inntil videre.
+// SANNTIDSAUTORISASJON (§10, korrigert owner-provided primary-source-audit,
+// PR #62 runde 4): `wallester_realtime_authorization_policy` rapporteres
+// `NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API`. TO DISTINKTE
+// Wallester-API-produkter er nå owner-provided bekreftet: Wallester
+// Business (det VALGTE produktet, api-frontend.wallester.com) dokumenterer
+// INGEN synkron decision-request-kapabilitet; Wallester Card API
+// (api-doc.wallester.com, IKKE det valgte produktet) gjør det. Dette er en
+// ærlig produkt-VALG-begrensning, IKKE lenger en uverifisert kapabilitet -
+// IKKE implementert mot en gjettet kontrakt for en direkte finansiell
+// autorisasjonsbeslutning (D-41 anti-gjetting) - Jarvis uttrykker policy
+// GJENNOM de provider-anvendte grensene + frys inntil videre.
 //
 // Kjøres: node --env-file=.env --experimental-transform-types modules/finance/scripts/wallester-live.ts
 // (normalt via modules/finance/scripts/wallester-live-host-run.ts)
@@ -41,7 +39,7 @@
 // fjernes ved slutten (inkl. provider_cards/card_spend_policies/
 // card_events/card_authorizations/card_transactions/wallester_webhook_events).
 
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import type { IdentityContext } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
 import { PolicyGateway, InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch } from "@jarvis/policy";
@@ -63,6 +61,7 @@ import type {
   InitiateNeonomicsPaymentInput, NeonomicsAccount, NeonomicsBalance, NeonomicsBank,
   NeonomicsGateway, NeonomicsPaymentObject, NeonomicsTransaction, NeonomicsTransactionPage
 } from "../src/neonomics-transport.ts";
+import { buildWallesterBusinessJwt, createRsaJwtSigner } from "../src/wallester-transport.ts";
 import type {
   WallesterAccountBalance, WallesterAuthorizationObject, WallesterCardLimitsApplied, WallesterCardLimitsInput,
   WallesterCardObject, WallesterGateway, WallesterPage, WallesterTransactionObject
@@ -77,6 +76,11 @@ const results: Record<string, string> = {
   stripe_slice3_invariants_preserved: "NOT_RUN",
   vipps_slice4_invariants_preserved: "NOT_RUN",
   neonomics_slice5_invariants_preserved: "NOT_RUN",
+  // Owner-provided primary-source-audit (PR #62 runde 4): bekrefter det
+  // valgte Wallester Business-produktets api_key/ts/RS256/Bearer-
+  // autentiseringskontrakt (verifisert via wallester-transport.test.ts
+  // sitt vi.stubGlobal-wire-nivå-bevis, IKKE nettverksreachability).
+  wallester_business_auth_contract: "NOT_RUN",
   wallester_adapter_wiring: "NOT_RUN",
   wallester_card_creation_idempotency: "NOT_RUN",
   wallester_card_lifecycle: "NOT_RUN",
@@ -93,8 +97,13 @@ const results: Record<string, string> = {
   wallester_kill_switch_semantics: "NOT_RUN",
   wallester_secret_safety: "NOT_RUN",
   wallester_pci_boundary: "NOT_RUN",
-  // §10/§27: ærlig provider-produkt-begrensning - IKKE en feil (se filhodet).
-  wallester_realtime_authorization_policy: "UNVERIFIED_PRODUCT_ENTITLEMENT",
+  // §10/§27, korrigert owner-provided primary-source-audit (PR #62 runde 4):
+  // det VALGTE produktet er Wallester Business, som IKKE dokumenterer en
+  // synkron decision-request-kapabilitet (den finnes i Wallester Card API -
+  // en ANNEN, IKKE-valgt produkt-grense). Ærlig produkt-begrensning for det
+  // valgte produktet - IKKE en feil, IKKE lenger "uverifisert" (begge
+  // produktenes kapabilitet er nå owner-provided bekreftet distinkt).
+  wallester_realtime_authorization_policy: "NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API",
   wallester_cleanup: "NOT_RUN"
 };
 
@@ -277,7 +286,7 @@ async function main(): Promise<void> {
   });
   if (!runtimeRoleSafe) {
     for (const key of Object.keys(results)) {
-      if (results[key] !== "UNVERIFIED_PRODUCT_ENTITLEMENT") results[key] = "BLOCKED_BY_RUNTIME_ROLE";
+      if (results[key] !== "NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API") results[key] = "BLOCKED_BY_RUNTIME_ROLE";
     }
     return finish(true);
   }
@@ -298,7 +307,12 @@ async function main(): Promise<void> {
   const configuredTenant: string | null = TENANT_A;
   const wallesterCredentialsProvider: WallesterCredentialsProvider = {
     async getCredentials(): Promise<WallesterCredentials | null> {
-      return { baseUrl: "https://wallester.invalid", issuer: "fake-issuer-live", audience: "wallester", privateKeyPem: FAKE_PRIVATE_KEY, productCode: null, environment: "sandbox" };
+      // Owner-provided primary-source-audit (PR #62 runde 4): api_key/ts,
+      // IKKE issuer/audience (Wallester Card API-modellen - annen
+      // produkt-grense). `sign` er en fake her - den EKTE
+      // `WallesterTransport` konstrueres uansett ALDRI i dette scriptet
+      // (D-108, se filhode).
+      return { baseUrl: "https://wallester.invalid", apiKey: "fake-api-key-live", accountId: "wacc-live-1", sign: () => `fake-sig-${FAKE_PRIVATE_KEY}`, environment: "sandbox" };
     }
   };
   const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
@@ -472,6 +486,27 @@ async function main(): Promise<void> {
     log(`card_id=${wiringCardId} list_cards_ok=${listResult.ok} list_card_transactions_ok=${txResult.ok} -> wallester_adapter_wiring: ${results.wallester_adapter_wiring}`);
   });
 
+  // ===== wallester_business_auth_contract =====
+  await section("WALLESTER BUSINESS AUTH CONTRACT (owner-provided primary-source-audit, PR #62 runde 4: api_key/ts-claims, RS256, Bearer - IKKE issuer/audience/sub/exp/rbh)", async () => {
+    // Ephemeral test-nøkkelpar (byggeordrens eksplisitte instruks: ALDRI en
+    // gjettet/antatt EKTE Wallester-nøkkel her - kun for å bevise at
+    // `createRsaJwtSigner`/`buildWallesterBusinessJwt` PRODUSERER den
+    // dokumenterte wire-formen, IKKE reell Wallester-reachability).
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const sign = createRsaJwtSigner(privateKey.export({ type: "pkcs1", format: "pem" }).toString());
+    const nowEpochSeconds = Math.floor(Date.now() / 1000);
+    const jwt = buildWallesterBusinessJwt({ apiKey: "wba-live-test-key", sign, nowEpochSeconds });
+    const parts = jwt.split(".");
+    const header = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as Record<string, unknown>;
+    const headerOk = header["alg"] === "RS256" && header["typ"] === "JWT";
+    const payloadOk = payload["api_key"] === "wba-live-test-key" && payload["ts"] === nowEpochSeconds;
+    const noCardApiClaims = !("iss" in payload) && !("aud" in payload) && !("sub" in payload) && !("exp" in payload) && !("rbh" in payload);
+    const threeParts = parts.length === 3;
+    results.wallester_business_auth_contract = headerOk && payloadOk && noCardApiClaims && threeParts ? "PASS" : "FAIL";
+    log(`header_alg_typ_ok=${headerOk} payload_api_key_ts_ok=${payloadOk} no_card_api_claims=${noCardApiClaims} jwt_three_parts=${threeParts} -> wallester_business_auth_contract: ${results.wallester_business_auth_contract}`);
+  });
+
   // ===== wallester_secret_safety (fail-closed uten JARVIS_WALLESTER_PRIVATE_KEY_PEM - EKTE, ikke simulert) =====
   await section("WALLESTER SECRET SAFETY (provider-berørende finance_wallester.* MÅ avvises credential_unavailable UTEN JARVIS_WALLESTER_PRIVATE_KEY_PEM - D-108)", async () => {
     const secretConfigured = Boolean(process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"]);
@@ -598,8 +633,11 @@ async function main(): Promise<void> {
     const port = typeof address === "object" && address ? address.port : 0;
     const host = `127.0.0.1:${port}`;
     try {
+      // Owner-provided Business-konvolutt (PR #62 runde 4): `event`
+      // (konstant "notification") DISTINKT fra `type` (klassifikatoren)
+      // - IKKE lenger et punktum-separert "authorization.approved"-felt.
       const body = JSON.stringify({
-        type: "authorization.approved", event_id: `evt-live-${runId}`,
+        event: "notification", type: "authorization", event_id: `evt-live-${runId}`,
         data: { id: `wauth-${runId}-wh`, card_id: providerCardId, status: "approved", amount: 7_500, currency: "EUR", channel: "online" }
       });
       const validRes = await fetch(`http://${host}${WEBHOOK_PATH}`, { method: "POST", body, headers: { authorization: basicHeader() } });
@@ -742,7 +780,7 @@ async function main(): Promise<void> {
     log(`no_pan=${noPan} no_cvv=${noCvv} no_private_key=${noKey} masked_reference_present=${maskedOnly} -> wallester_pci_boundary: ${results.wallester_pci_boundary}`);
   });
 
-  log(`\nwallester_realtime_authorization_policy=UNVERIFIED_PRODUCT_ENTITLEMENT (INGEN kilde bekreftet eller avkreftet en decision-request-kapabilitet for det valgte programmet - IKKE implementert mot en gjettet kontrakt, se D-113)`);
+  log(`\nwallester_realtime_authorization_policy=NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API (owner-provided primary-source-audit, PR #62 runde 4: Wallester Business dokumenterer INGEN synkron decision-request-kapabilitet - den finnes i Wallester Card API, en ANNEN, IKKE-valgt produkt-grense - IKKE implementert mot en gjettet kontrakt for det valgte produktet)`);
 
   // ===== wallester_cleanup =====
   await section("CLEANUP (KUN denne kjøringens egne syntetiske fixtures - inkl. alle 043-korttabellene)", async () => {
@@ -762,10 +800,11 @@ async function main(): Promise<void> {
 function finish(blockedByRuntimeRole: boolean): void {
   log("\n== UA-6 FINANCE & SPEND INTEGRITY GATEWAY - SJETTE SLICE (D-112) WALLESTER GUARDED LIVE ACCEPTANCE SUMMARY ==");
   for (const [key, value] of Object.entries(results)) log(`${key}=${value}`);
-  // UNVERIFIED_PRODUCT_ENTITLEMENT er en ÆRLIG "ikke bekreftet, derfor ikke
-  // implementert"-status (§10/§27, D-113) - aldri en feil. Alt annet enn
-  // PASS/UNVERIFIED_PRODUCT_ENTITLEMENT feiler hardt.
-  const hardFail = blockedByRuntimeRole || Object.values(results).some((v) => v !== "PASS" && v !== "UNVERIFIED_PRODUCT_ENTITLEMENT");
+  // NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API er en ÆRLIG
+  // produkt-valg-begrensning (§10/§27, korrigert owner-provided
+  // primary-source-audit PR #62 runde 4) - aldri en feil. Alt annet enn
+  // PASS/NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API feiler hardt.
+  const hardFail = blockedByRuntimeRole || Object.values(results).some((v) => v !== "PASS" && v !== "NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API");
   // D-108: ærlig, permanent grense for DENNE runneren - den beviser KUN
   // produkt-wiring mot en fake ved nettverksgrensen, ALDRI ekte Wallester-
   // reachability. WALLESTER_LIVE_VERIFIED/WALLESTER_LIVE_GATE skal ALDRI

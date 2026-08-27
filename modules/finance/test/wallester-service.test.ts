@@ -14,6 +14,7 @@ import { CardInvalidStateError, CardNotSubmittedError, WallesterCredentialsUnava
 import { FinanceKillSwitchActiveError, InvalidWebhookSignatureError } from "../src/types.ts";
 import {
   WallesterApiError,
+  createRsaJwtSigner,
   type CreateWallesterCardInput,
   type WallesterAccountBalance,
   type WallesterAuthorizationObject,
@@ -24,6 +25,7 @@ import {
   type WallesterPage,
   type WallesterTransactionObject
 } from "../src/wallester-transport.ts";
+import { generateKeyPairSync } from "node:crypto";
 
 /**
  * D-112 (UA-6 Slice 6): ekte Postgres/RLS-integrasjonsbevis for kort-
@@ -107,9 +109,18 @@ let cards: CardService;
 let finance: FinanceService;
 let configuredTenant: string | null = TENANT_A;
 
+// Owner-provided primary-source-audit (PR #62 runde 4): api_key/ts/RS256,
+// IKKE issuer/audience (Wallester Card API-modellen - annen produkt-grense,
+// se wallester-transport.ts filhode). Ephemeral test-nøkkelpar - ALDRI en
+// gjettet/antatt EKTE Wallester-nøkkel.
+const { privateKey: TEST_PRIVATE_KEY } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" }
+});
 const credentialsProvider: WallesterCredentialsProvider = {
   async getCredentials(): Promise<WallesterCredentials | null> {
-    return { baseUrl: "https://wallester.invalid", issuer: "fake-issuer", audience: "wallester", privateKeyPem: FAKE_PRIVATE_KEY, productCode: null, environment: "sandbox" };
+    return { baseUrl: "https://wallester.invalid", apiKey: "wba-test-key", sign: createRsaJwtSigner(TEST_PRIVATE_KEY), accountId: "wacc-live-1", environment: "sandbox" };
   }
 };
 const noCredentialsProvider: WallesterCredentialsProvider = {
@@ -243,6 +254,7 @@ describe("A: kortopprettelse + idempotens", () => {
     const draft = await cards.createCard(TENANT_A, "business", { idempotency_key: `card-idem-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual" });
     await expect(cards.submitCard(TENANT_A, "business", draft.card_id)).rejects.toThrow(WallesterCredentialsUnavailableError);
   });
+
 });
 
 describe("B: kortlivssyklus", () => {
@@ -469,7 +481,7 @@ describe("F: webhook-ingestion", () => {
     freshServices();
     const { card_id, provider_card_id } = await activeCard();
     const body = Buffer.from(JSON.stringify({
-      type: "authorization.approved", event_id: `evt-${randomUUID()}`,
+      event: "notification", type: "authorization", event_id: `evt-${randomUUID()}`,
       data: { id: `wauth-${randomUUID()}`, card_id: provider_card_id, status: "approved", amount: 7_500, currency: "EUR", channel: "online" }
     }));
     const processed = await cards.ingestWallesterWebhookEvent(body, basicHeader());
@@ -482,10 +494,51 @@ describe("F: webhook-ingestion", () => {
     await expect(cards.ingestWallesterWebhookEvent(body, basicHeader(WEBHOOK_USER, "feil-passord"))).rejects.toThrow(InvalidWebhookSignatureError);
 
     const unknown = await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
-      type: "authorization.approved", event_id: `evt-${randomUUID()}`,
+      event: "notification", type: "authorization", event_id: `evt-${randomUUID()}`,
       data: { id: `wauth-${randomUUID()}`, card_id: "wcard-finnes-ikke", status: "approved", amount: 1, currency: "EUR" }
     })), basicHeader());
     expect(unknown.status).toBe("unsupported");
+  });
+
+  it("ukjent autorisasjonsstatus lagres 'unknown' - ALDRI stille som 'approved' (fail-safe, owner-provided primary-source-audit PR #62 runde 4)", async () => {
+    freshServices();
+    const { card_id, provider_card_id } = await activeCard();
+    const processed = await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
+      event: "notification", type: "authorization", event_id: `evt-${randomUUID()}`,
+      data: { id: `wauth-${randomUUID()}`, card_id: provider_card_id, status: "en_helt_ukjent_status", amount: 1_000, currency: "EUR" }
+    })), basicHeader());
+    expect(processed.status).toBe("processed");
+    const auths = await cards.listAuthorizations(TENANT_A, "business", { card_id });
+    expect(auths[0]!.status).toBe("unknown");
+  });
+
+  it("ukjent transaksjonstype lagres 'unknown' - ALDRI stille som 'purchase' (fail-safe, owner-provided primary-source-audit PR #62 runde 4)", async () => {
+    freshServices();
+    const { card_id, provider_card_id } = await activeCard();
+    const processed = await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
+      event: "notification", type: "transaction", event_id: `evt-${randomUUID()}`,
+      data: { id: `wtx-${randomUUID()}`, card_id: provider_card_id, transaction_type: "en_helt_ukjent_type", amount: 1_000, currency: "EUR" }
+    })), basicHeader());
+    expect(processed.status).toBe("processed");
+    const txs = await cards.listCardTransactions(TENANT_A, "business", { card_id });
+    expect(txs[0]!.transaction_type).toBe("unknown");
+  });
+
+  it("authorization_release oppdaterer EKSISTERENDE autorisasjon (owner-provided Business-kontrakt, PR #62 runde 4)", async () => {
+    freshServices();
+    const { card_id, provider_card_id } = await activeCard();
+    const providerAuthorizationId = `wauth-${randomUUID()}`;
+    await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
+      event: "notification", type: "authorization", event_id: `evt-${randomUUID()}`,
+      data: { id: providerAuthorizationId, card_id: provider_card_id, status: "approved", amount: 3_000, currency: "EUR" }
+    })), basicHeader());
+    await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
+      event: "notification", type: "authorization_release", event_id: `evt-${randomUUID()}`,
+      data: { id: providerAuthorizationId, card_id: provider_card_id, status: "reversed", amount: 3_000, currency: "EUR" }
+    })), basicHeader());
+    const auths = await cards.listAuthorizations(TENANT_A, "business", { card_id });
+    expect(auths).toHaveLength(1);
+    expect(auths[0]!.status).toBe("reversed");
   });
 
   it("webhook + polling-observasjon av SAMME transaksjon dupliserer aldri (delt idempotent ingest)", async () => {
@@ -493,7 +546,7 @@ describe("F: webhook-ingestion", () => {
     const { card_id, provider_card_id } = await activeCard();
     const txId = `wtx-${randomUUID()}`;
     await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
-      type: "transaction.settled", event_id: `evt-${randomUUID()}`,
+      event: "notification", type: "transaction", event_id: `evt-${randomUUID()}`,
       data: { id: txId, card_id: provider_card_id, status: "settled", transaction_type: "purchase", amount: 12_000, currency: "EUR", channel: "online" }
     })), basicHeader());
     gateway.onListTransactions = async () => ({ items: [providerTx({ id: txId, amountOre: 12_000 })], nextPageToken: null });
@@ -507,7 +560,7 @@ describe("F: webhook-ingestion", () => {
     const { card_id, provider_card_id } = await activeCard();
     await cards.closeCard(TENANT_A, "business", card_id);
     const result = await cards.ingestWallesterWebhookEvent(Buffer.from(JSON.stringify({
-      type: "card.status_changed", event_id: `evt-${randomUUID()}`,
+      event: "notification", type: "card", event_id: `evt-${randomUUID()}`,
       data: { id: provider_card_id, status: "active" }
     })), basicHeader());
     expect(result.status).toBe("processed");
