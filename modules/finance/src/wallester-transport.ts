@@ -23,15 +23,26 @@ import { createHash, createSign } from "node:crypto";
  *     Business er tilgjengelig for EØS-selskaper (Norge kvalifisert);
  *     API-tilgang krever kommersiell aktivering ("eligible plans").
  *     KYB (selskap) og KYC (kortholder) er provider-kanoniske prosesser.
- *   - **Auth (JWT/RS256)**: kunden genererer RSA-nøkkelpar (2048),
+ *   - **Auth (JWT/RS256) - VERIFIED_PRIMARY_SOURCE** (D-112 HOST FIX #1:
+ *     `github.com/wallester/integration-examples`, README.md +
+ *     `examples/go/jwt/jwt.go` - Wallester sitt EGET offisielle
+ *     referanse-repo, IKKE lenger kun `VERIFIED_SEARCH_SNIPPET` for denne
+ *     delen av kontrakten): kunden genererer RSA-nøkkelpar (2048),
  *     registrerer OFFENTLIG nøkkel hos Wallester, og signerer et FERSKT
- *     JWT per forespørsel med PRIVAT nøkkel (RS256). Claims: standard
- *     iss/aud/sub/exp + `rbh` = base64(sha256(request-body som BINÆR,
- *     IKKE hex)). Token sendes i `Authorization`-headeren. RESPONSEN
- *     bærer også et JWT med `rbh` over responskroppen som SKAL
- *     verifiseres (respons-verifisering krever Wallester sin offentlige
- *     nøkkel - konfigureres i credential-fasen, D-108; transporten
- *     verifiserer strukturelt når nøkkel er satt).
+ *     JWT per forespørsel med PRIVAT nøkkel (RS256). Claims: iss (egen
+ *     utsteder-ID), aud (Wallester sin audience-ID), sub = FAST LITERAL
+ *     `"api-request"` (IKKE utsteder-ID - opprinnelig kode hadde dette
+ *     feil, rettet i D-112 HOST FIX #1), exp, `rbh` =
+ *     base64(sha256(request-body som BINÆR, IKKE hex)). Token sendes i
+ *     `Authorization`-headeren som `"Bearer <JWT>"` (opprinnelig kode
+ *     manglet "Bearer "-prefikset, rettet samme runde). RESPONSEN bærer
+ *     ALLTID et JWT i `Authorization`-headeren (samme "Bearer <JWT>"-
+ *     format) med `rbh` over responskroppen - primærkilden instruerer
+ *     kunden til å verifisere dette. IKKE IMPLEMENTERT ENNÅ: denne
+ *     transporten verifiserer IKKE responsens JWT/signatur (krever
+ *     Wallester sin offentlige nøkkel, en credential-fase-artefakt per
+ *     D-108) - dette er en bevisst, ærlig avgrenset gap, IKKE en stille
+ *     antakelse om at det skjer.
  *   - **Produkt-kode**: byggeordren angir en `X-Product-Code`-header for
  *     produkt-/programruting. UBEKREFTET i det uavhengige søket
  *     (UNCONFIRMED_FIELD) - sendes derfor KUN når eksplisitt konfigurert;
@@ -51,9 +62,11 @@ import { createHash, createSign } from "node:crypto";
  *   - **Autorisasjon vs oppgjør**: autorisasjonshendelser (approve/
  *     decline besluttet AV WALLESTER i beslutningsøyeblikket) er DISTINKT
  *     fra oppgjørstransaksjoner. Webhooks er VARSLER om fattede
- *     beslutninger - IKKE beslutnings-callbacks (ingen kilde viser at
- *     Business-kunden kan svare approve/decline i sanntid) -> §10
- *     sanntidsautorisasjons-policy er ærlig NOT_APPLICABLE (D-112).
+ *     beslutninger - IKKE beslutnings-callbacks (ingen tilgjengelig kilde,
+ *     primær eller sekundær, bekreftet ELLER avkreftet en decision-request-
+ *     kapabilitet for det valgte programmet) -> §10 sanntidsautorisasjons-
+ *     policy er `UNVERIFIED_PRODUCT_ENTITLEMENT` (korrigert D-113 - IKKE
+ *     `NOT_APPLICABLE`, som ville påstått et bekreftet fravær).
  *   - **Miljøer**: privat sandbox med test-kort-simulering + produksjon -
  *     separate base-URL-er/credential-sett (eksakte verter konfigureres
  *     via env i credential-fasen; ingen verifisert offentlig sandbox-vert
@@ -101,11 +114,20 @@ export function computeRequestBodyHash(body: string): string {
 }
 
 /**
+ * Wallester sin faste, dokumenterte `sub`-claim-verdi for ALLE
+ * API-forespørsler (PRIMARY SOURCE: github.com/wallester/integration-
+ * examples, README.md + examples/go/jwt/jwt.go - `sub: "api-request"` er
+ * en LITERAL konstant, IKKE utstederens egen ID). Rettet i D-112 HOST FIX
+ * #1 - opprinnelig implementasjon satte feilaktig `sub = iss`.
+ */
+const JWT_SUBJECT = "api-request";
+
+/**
  * Bygger og RS256-signerer et Wallester-forespørsels-JWT. Ren funksjon
- * over injisert klokke (testbar deterministisk). Claims per verifisert
- * kontrakt: iss (kunde-/API-identitet registrert hos Wallester), aud
- * (Wallester), sub (= iss for maskin-til-maskin), exp (kort fremtid),
- * rbh (kropphash).
+ * over injisert klokke (testbar deterministisk). Claims per PRIMARY
+ * SOURCE (github.com/wallester/integration-examples): iss (kunde-/API-
+ * identitet registrert hos Wallester), aud (Wallester sin audience-ID),
+ * sub (FAST "api-request"), exp (kort fremtid), rbh (kropphash).
  */
 export function buildWallesterJwt(input: {
   issuer: string;
@@ -120,7 +142,7 @@ export function buildWallesterJwt(input: {
     JSON.stringify({
       iss: input.issuer,
       aud: input.audience,
-      sub: input.issuer,
+      sub: JWT_SUBJECT,
       exp: input.nowEpochSeconds + (input.ttlSeconds ?? JWT_TTL_SECONDS),
       rbh: computeRequestBodyHash(input.body)
     })
@@ -258,7 +280,11 @@ export class WallesterTransport implements WallesterGateway {
       const response = await fetch(`${this.baseUrl}${path}`, {
         method,
         headers: {
-          authorization: jwt,
+          // PRIMARY SOURCE (wallester/integration-examples README): headeren
+          // er "Authorization: Bearer <JWT>", ikke det rå JWT-et alene.
+          // Rettet i D-112 HOST FIX #1 - opprinnelig implementasjon manglet
+          // "Bearer "-prefikset.
+          authorization: `Bearer ${jwt}`,
           accept: "application/json",
           ...(this.productCode ? { "x-product-code": this.productCode } : {}),
           ...(body !== undefined ? { "content-type": "application/json" } : {})

@@ -1,7 +1,7 @@
 import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseWallesterEventEnvelope, verifyWallesterWebhookBasicAuth } from "../src/wallester-webhook.ts";
-import { buildWallesterJwt, computeRequestBodyHash } from "../src/wallester-transport.ts";
+import { buildWallesterJwt, computeRequestBodyHash, WallesterTransport } from "../src/wallester-transport.ts";
 
 /**
  * D-112 (UA-6 Slice 6): rene enhetstester for Wallester webhook-Basic-
@@ -103,7 +103,10 @@ describe("C: JWT/rbh-forespørselskontrakten (RS256)", () => {
     const claims = JSON.parse(Buffer.from(payload!, "base64url").toString("utf8")) as Record<string, unknown>;
     expect(claims["iss"]).toBe("fake-issuer");
     expect(claims["aud"]).toBe("wallester");
-    expect(claims["sub"]).toBe("fake-issuer");
+    // PRIMARY SOURCE (github.com/wallester/integration-examples): `sub` er
+    // ALLTID den faste literalen "api-request" - IKKE utsteder-ID-en (D-112
+    // HOST FIX #1 - opprinnelig kode/test hadde dette feil).
+    expect(claims["sub"]).toBe("api-request");
     expect(claims["exp"]).toBe(1_700_000_060);
     expect(claims["rbh"]).toBe(computeRequestBodyHash(body));
   });
@@ -116,5 +119,35 @@ describe("C: JWT/rbh-forespørselskontrakten (RS256)", () => {
     expect(verifier.verify(publicKey, Buffer.from(signature!, "base64url"))).toBe(true);
     const tampered = createVerify("RSA-SHA256").update(`${header}.${Buffer.from("{}").toString("base64url")}`, "utf8");
     expect(tampered.verify(publicKey, Buffer.from(signature!, "base64url"))).toBe(false);
+  });
+});
+
+describe("D: WallesterTransport - Authorization-header-formatet på tråden (D-112 HOST FIX #1)", () => {
+  const { privateKey: transportPrivateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" }
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sender 'Authorization: Bearer <jwt>' - IKKE det rå JWT-et alene (PRIMARY SOURCE: wallester/integration-examples)", async () => {
+    let capturedHeaders: Record<string, string> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: { headers: Record<string, string> }) => {
+        capturedHeaders = init.headers;
+        return new Response(JSON.stringify({ id: "wcard-1", status: "active" }), { status: 200 });
+      })
+    );
+    const transport = new WallesterTransport("https://sandbox.example", "fake-issuer", "wallester", transportPrivateKey, null);
+    await transport.getCard("wcard-1");
+    expect(capturedHeaders?.["authorization"]).toMatch(/^Bearer eyJ/);
+    const rawJwt = capturedHeaders!["authorization"]!.slice("Bearer ".length);
+    const [, payload] = rawJwt.split(".");
+    const claims = JSON.parse(Buffer.from(payload!, "base64url").toString("utf8")) as Record<string, unknown>;
+    expect(claims["sub"]).toBe("api-request");
   });
 });

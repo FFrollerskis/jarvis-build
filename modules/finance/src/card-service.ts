@@ -35,11 +35,15 @@ import { FinanceKillSwitchActiveError, InvalidWebhookSignatureError } from "./ty
  * ALDRI passiv transaksjons-ingestion/avstemming/avviksdeteksjon/
  * tilstandssynk/audit. Frys/lukking (spend-REDUSERENDE) er alltid tillatt.
  *
- * Sanntidsautorisasjon (§10): NOT_APPLICABLE for Wallester Business -
- * approve/decline besluttes av WALLESTER mot provider-anvendte grenser/
- * kontroller (verifisert: webhooks er varsler om fattede beslutninger,
- * ikke beslutnings-callbacks). Jarvis uttrykker policy GJENNOM de
- * provider-anvendte grensene + frys - se D-112.
+ * Sanntidsautorisasjon (§10): `UNVERIFIED_PRODUCT_ENTITLEMENT` for det
+ * valgte Wallester-programmet (korrigert D-113 - IKKE `NOT_APPLICABLE`).
+ * Wallester-webhooks OBSERVERT som varsler om beslutninger WALLESTER
+ * allerede har fattet mot provider-anvendte grenser/kontroller - men
+ * INGEN tilgjengelig kilde (primær eller sekundær) bekreftet ELLER
+ * avkreftet en synkron decision-request-kapabilitet for dette programmet.
+ * Ikke implementert mot en gjettet kontrakt for en direkte finansiell
+ * autorisasjonsbeslutning (D-41 anti-gjetting). Jarvis uttrykker policy
+ * GJENNOM de provider-anvendte grensene + frys inntil videre - se D-113.
  */
 
 /** Deterministiske konstanter - dokumentert, aldri skjult-tilfeldige. */
