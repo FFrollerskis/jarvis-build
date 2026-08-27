@@ -1,6 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-27 (**PR #62 runde 4 - Wallester Business vs Card API
+**Oppdatert:** 2026-08-27 (**PR #62 - D-114 HOST-VERIFISERT.** Tobias kjørte
+den guardede, no-credential `wallester-live-host-run.ts` mot eksakt PR-head
+`a5d8c5ae977b6526c7484eae4599f0bd2dd9e059` (fail-closed branch-/HEAD-/rent-
+arbeidstre-guard verifisert FØR kjøring - fanget og korrigerte to stale
+lokal-branch-/HEAD-avvik underveis, ingen kjøring før guardene passerte).
+`run_id=ab30dbcf`: **alle 24 kjørbare markører PASS** (q21_runtime_role_safe,
+finance_d107_invariant_preserved, finance_slice2/stripe_slice3/vipps_slice4/
+neonomics_slice5_invariants_preserved, wallester_business_auth_contract - NY
+denne runden, beviser api_key/ts/RS256-JWT-formen strukturelt uten
+nettverkskall - wallester_adapter_wiring, wallester_card_creation_idempotency,
+wallester_card_lifecycle, wallester_spend_controls, wallester_card_state_sync,
+wallester_authorization_settlement, wallester_transaction_idempotency,
+wallester_webhook_auth_contract, wallester_webhook_idempotency,
+wallester_finance_reconciliation, wallester_anomaly_integration,
+wallester_openloop_integration, wallester_tenant_isolation,
+wallester_kill_switch_semantics, wallester_secret_safety - ekte
+`credential_unavailable` fail-closed uten `JARVIS_WALLESTER_PRIVATE_KEY_PEM`,
+wallester_pci_boundary, wallester_cleanup), `hard_fail=false`,
+`wallester_realtime_authorization_policy=NOT_APPLICABLE_TO_SELECTED_
+WALLESTER_BUSINESS_API` (klassifiseringsverdi, ikke PASS/FAIL - uendret fra
+D-114). `WALLESTER_IMPLEMENTATION_COMPLETE=true`. ZERO Wallester-credentials
+konfigurert eller kontaktet (D-108 uendret) - `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`. Docs-only closeout (denne
+oppdateringen) flytter PR-headen - fersk CI + ny guardet host-akseptanse på
+NY eksakt head kreves FØR merge-godkjenning (host-akseptanse er HEAD-bundet).
+`UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret.
+**`MERGE_READY=false` - PR #62 MERGES IKKE uten Tobias sin eksplisitte
+godkjenning.** Full detalj: D-114 i DECISIONS_AND_ASSUMPTIONS.md,
+IMPLEMENTATION_PLAN.md §«SJETTE slice».
+
+**Runden før det:** 2026-08-27 (**PR #62 runde 4 - Wallester Business vs Card API
 produkt-splitt-korrigering (D-114), `PRIMARY_SOURCE_EVIDENCE_MODE=
 OWNER_PROVIDED_PRIMARY_SOURCE_AUDIT` - IKKE self-verifisert av denne økten.**
 Tobias sin eier-leverte primærkilde-audit avdekket at D-112/D-113 sin

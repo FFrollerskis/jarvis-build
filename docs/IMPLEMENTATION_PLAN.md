@@ -3186,6 +3186,17 @@ CHECK-constraints utvidet), ALDRI stille "approved"/"purchase" - rettet i BÅDE 
 webhook-ingestion-laget. §10 reklassifisert `UNVERIFIED_PRODUCT_ENTITLEMENT` →
 `NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API`. Full detalj: D-114 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**D-114 HOST-VERIFISERT (2026-08-27):** Tobias kjørte den guardede, no-credential
+`wallester-live-host-run.ts` mot eksakt PR #62-head `a5d8c5ae977b6526c7484eae4599f0bd2dd9e059`
+(fail-closed branch-/HEAD-/rent-arbeidstre-guard verifisert FØR kjøring). `run_id=ab30dbcf`: alle 24
+kjørbare markører PASS (inkl. NY `wallester_business_auth_contract` - beviser api_key/ts/RS256-JWT-
+formen strukturelt uten nettverkskall, og `wallester_secret_safety` - ekte `credential_unavailable`
+fail-closed uten `JARVIS_WALLESTER_PRIVATE_KEY_PEM`), `hard_fail=false`,
+`wallester_realtime_authorization_policy=NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API`
+(klassifiseringsverdi, ikke PASS/FAIL). `WALLESTER_IMPLEMENTATION_COMPLETE=true`. ZERO Wallester-
+credentials involvert (D-108 uendret) - `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`.
+
 **Terminalflagg:** `UA6_COMPLETE=false` (siste store kapabilitets-slice bygget - gjenstår dedikert
 UA-6-closeout + konsolidert credential-fase). `WALLESTER_LIVE_VERIFIED=false`,
 `WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, `WALLESTER_CREDENTIAL_SETUP_DEFERRED=true`.
