@@ -36,6 +36,7 @@ const results: Record<string, Verdict> = {
   finance_spend_anomaly_detection: "NOT_RUN",
   finance_spend_reconciliation: "NOT_RUN",
   finance_spend_openloop: "NOT_RUN",
+  finance_procurement_openloop: "NOT_RUN",
   finance_spend_tenant_isolation: "NOT_RUN",
   finance_spend_cleanup: "NOT_RUN"
 };
@@ -237,6 +238,16 @@ async function main(): Promise<void> {
     const commitmentLoop = loops.find((l) => l.finance_recurring_commitment_id === commitmentId && l.loop_type === "finance_recurring_charge_missing");
     results.finance_spend_openloop = commitmentLoop !== undefined ? "PASS" : "FAIL";
     log(`finance_recurring_charge_missing_loop_found=${commitmentLoop !== undefined} commitment_id=${commitmentId} -> finance_spend_openloop: ${results.finance_spend_openloop}`);
+  });
+
+  // ===== UA-6 closeout (D-115, migrasjon 044): finance_procurement_missing-overflating =====
+  await section("PROCUREMENT OPENLOOP (D-115 - migration 044 + business_open_loops.finance_procurement_item_id + OpenLoopService.detectMissingProcurementFulfillment() bevist mot ekte Postgres/runtime, gjenbruker den SAMME runSweep()-kjøringen over)", async () => {
+    const loopsA = await openLoops.listOpenLoops(TENANT_A, "business", "all");
+    const procurementLoop = loopsA.find((l) => l.finance_procurement_item_id === procurementId && l.loop_type === "finance_procurement_missing");
+    const loopsB = await openLoops.listOpenLoops(TENANT_B, "business", "all");
+    const leakedToTenantB = loopsB.some((l) => l.finance_procurement_item_id === procurementId);
+    results.finance_procurement_openloop = procurementLoop !== undefined && !leakedToTenantB ? "PASS" : "FAIL";
+    log(`finance_procurement_missing_loop_found=${procurementLoop !== undefined} procurement_id=${procurementId} leaked_to_tenant_b=${leakedToTenantB} -> finance_procurement_openloop: ${results.finance_procurement_openloop}`);
   });
 
   // ===== §14: tenant-isolasjon =====

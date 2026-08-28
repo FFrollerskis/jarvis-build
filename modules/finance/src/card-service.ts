@@ -430,6 +430,14 @@ export class CardService {
           [tenantId, cardId, applied.transactionLimitOre, applied.dailyLimitOre, applied.weeklyLimitOre, applied.monthlyLimitOre, applied.atmEnabled, applied.onlineEnabled, applied.contactlessEnabled]
         );
         await this.logCardEvent(client, tenantId, memorySpace, cardId, "limits_applied", { applied }, actorPersonId);
+        // UA-6 closeout (D-115): en vellykket anvendelse superseder en
+        // TIDLIGERE avvisning - selv-korrigerende, samme prinsipp som
+        // resten av avviksdeteksjonen (ALDRI en stale flagg-rest).
+        await client.query(
+          `UPDATE provider_cards SET anomaly_flags = anomaly_flags - 'CARD_SPEND_POLICY_REJECTED', updated_at = now()
+           WHERE tenant_id = $1 AND card_id = $2 AND anomaly_flags @> '["CARD_SPEND_POLICY_REJECTED"]'::jsonb`,
+          [tenantId, cardId]
+        );
         return rowToPolicy(rows[0] as Record<string, unknown>);
       });
     } catch (err) {
@@ -437,6 +445,18 @@ export class CardService {
         await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           await client.query(`UPDATE card_spend_policies SET sync_state = 'rejected', updated_at = now() WHERE tenant_id = $1 AND card_id = $2`, [tenantId, cardId]);
           await this.logCardEvent(client, tenantId, memorySpace, cardId, "limits_rejected", { error: err.message.slice(0, 200) }, actorPersonId);
+          // UA-6 closeout (D-115): en avvist grenseendring ble tidligere
+          // KUN logget til card_events - card_anomaly_attention-open-loop-
+          // regelen leser `provider_cards.anomaly_flags` (ren SQL, ALDRI
+          // AI-inferert - Q-26-grensen), IKKE card_events, så avvisningen
+          // var usynlig for den automatiserte daglige sveipen. SAMME jsonb-
+          // append-mønster som CARD_PROVIDER_OBJECT_TENANT_CONFLICT over -
+          // guard mot duplikat-append ved gjentatt avvisning.
+          await client.query(
+            `UPDATE provider_cards SET anomaly_flags = anomaly_flags || '["CARD_SPEND_POLICY_REJECTED"]'::jsonb, updated_at = now()
+             WHERE tenant_id = $1 AND card_id = $2 AND NOT (anomaly_flags @> '["CARD_SPEND_POLICY_REJECTED"]'::jsonb)`,
+            [tenantId, cardId]
+          );
         });
       }
       throw err;

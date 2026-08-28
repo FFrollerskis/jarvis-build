@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { parseNeonomicsEventEnvelope, verifyNeonomicsWebhookApiKey } from "../src/neonomics-webhook.ts";
-import { decimalToMinorUnits } from "../src/neonomics-transport.ts";
+import { decimalToMinorUnits, minorUnitsToDecimalString } from "../src/neonomics-transport.ts";
 
 /**
  * D-111 (UA-6 Slice 5): rene enhetstester for Neonomics webhook-API-nøkkel-
@@ -87,5 +87,33 @@ describe("C: eksakt desimal->øre (aldri flyttall-pengearitmetikk)", () => {
 
   it("kaster på uparsbar verdi", () => {
     expect(() => decimalToMinorUnits("ikke-et-tall")).toThrow("neonomics_unparseable_amount");
+  });
+});
+
+describe("D: eksakt øre->desimal (UA-6 closeout, D-115 - retningen initiateDomesticPayment() faktisk bruker)", () => {
+  it("konverterer heltalls-øre-beløp eksakt", () => {
+    expect(minorUnitsToDecimalString(10_000)).toBe("100.00");
+    expect(minorUnitsToDecimalString(1)).toBe("0.01");
+    expect(minorUnitsToDecimalString(0)).toBe("0.00");
+  });
+
+  it("håndterer det klassiske flyttall-fellebeløpet eksakt (1999 øre -> '19.99', ALDRI '19.990000000000002')", () => {
+    // (1999 / 100).toFixed(2) er et EKTE IEEE-754-avrundingsfeller-kandidat -
+    // strengbasert konvertering unngår hele flyttallsveien.
+    expect(minorUnitsToDecimalString(1_999)).toBe("19.99");
+  });
+
+  it("er den nøyaktige inverse av decimalToMinorUnits() for representative beløp", () => {
+    for (const decimal of ["100.00", "0.01", "19.99", "1000.00", "0.50", "12345.67"]) {
+      expect(minorUnitsToDecimalString(decimalToMinorUnits(decimal))).toBe(decimal);
+    }
+  });
+
+  it("kaster deterministisk paa ikke-heltall (aldri stille avrunding av penger)", () => {
+    expect(() => minorUnitsToDecimalString(19.5)).toThrow("neonomics_invalid_minor_units");
+  });
+
+  it("kaster deterministisk paa negativt beløp (initiateDomesticPayment() sender aldri negative beløp)", () => {
+    expect(() => minorUnitsToDecimalString(-100)).toThrow("neonomics_invalid_minor_units");
   });
 });

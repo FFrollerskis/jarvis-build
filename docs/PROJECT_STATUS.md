@@ -1,6 +1,88 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-27 (**PR #62 - UA-6 Slice 6 (D-112/D-113/D-114) Wallester
+**Oppdatert:** 2026-08-28 (**PR #64 - D-115 GUARDED HOST ACCEPTANCE BESTÅTT.** Fresh CI GRØNN på
+eksakt head `578b45898a96bc3f861a5c121c8e218a672ae463` (branch `claude/ua6-finance-closeout`,
+build-test/gitleaks/windows-git-auth alle PASS på BÅDE push- og pull_request-trigger). Tobias
+kjørte deretter BEGGE de utvidede guardede host-akseptanse-runnerne mot nøyaktig samme HEAD -
+INGEN annen kjøring registreres som closeout-evidens for PR #64.
+
+**Spend-integrity host (`modules/finance/scripts/spend-integrity-live-host-run.ts`),
+`run_id=6a362680`:** alle 13 markører PASS inkl. den NYE `finance_procurement_openloop`
+(migrasjon 044 + `business_open_loops.finance_procurement_item_id` +
+`OpenLoopService.detectMissingProcurementFulfillment()` bevist sammen mot ekte Postgres/runtime,
+`leaked_to_tenant_b=false`), `hard_fail=false`.
+
+**Wallester host (`modules/finance/scripts/wallester-live-host-run.ts`), `run_id=34f7e900`:**
+alle 24 markører PASS inkl. de TO nye `wallester_spend_policy_rejection_openloop` (provider-
+avvisning -> `CARD_SPEND_POLICY_REJECTED` -> `card_anomaly_attention`, idempotent, selv-
+korrigerende) og det utvidede `wallester_kill_switch_semantics` (`close_allowed=true` sammen med
+uendret `submitBlocked`/`unfreezeBlocked`/`increaseBlocked`/`passive_paths_okay=true` - INGEN
+svekking av nødbryteren), `hard_fail=false`. `wallester_realtime_authorization_policy` forblir
+`NOT_APPLICABLE_TO_SELECTED_WALLESTER_BUSINESS_API` (klassifisering, uendret).
+`WALLESTER_IMPLEMENTATION_COMPLETE=true`. ZERO ekte credentials, ZERO live provider-kall i BEGGE
+kjøringer - `WALLESTER_LIVE_VERIFIED=false`/`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS` UENDRET
+(D-108).
+
+**Neonomics `minorUnitsToDecimalString()`-fiksen forblir `NEONOMICS_AMOUNT_SERIALIZATION_HOST_
+PROOF=NOT_APPLICABLE_PURE_WIRE_CONTRACT`** (ren wire-format-rettelse, ingen canonical host-sti
+utøver den ekte transporten uten enten ekte credentials eller et nytt kunstig testlag - INGEN av
+delene bygget) - `neonomics-webhook.test.ts` §D (6 tester, inkl. IEEE-754-fellebeløpet 1999 øre
+og inverse rundtur mot `decimalToMinorUnits()`) + full CI er den faktiske evidensen, ikke et
+konstruert host-bevis.
+
+**Wallester signeringsmateriale (uendret fra D-114):** `BUSINESS_AUTH_SIGNING_MATERIAL=
+PRIMARY_SOURCE_PUBLIC_DOC_GAP` - `PRIVATE_KEY_PEM`-produksjonsnøkkel-PROVISJONERINGSKILDEN er
+FORTSATT IKKE primærkilde-verifisert (kun RS256/api_key/ts/Bearer-wire-formen selv er bekreftet,
+D-114). Ingen endring av denne sannheten denne runden.
+
+**HEAD FLYTTES av denne docs-closeouten - derfor `HOST_ACCEPTANCE_FINAL=false` inntil de to
+navngitte runnerne kjøres PÅ NYTT mot den NYE eksakte HEAD-en denne commiten produserer** (SAMME
+HEAD-bundne akseptanse-regime som tidligere i denne PR-en). `FINAL_HEAD_HOST_ACCEPTANCE_
+REQUIRED=true`.
+
+**Flagg-disiplin uendret (ingen forfremming):** `UA6_IMPLEMENTATION_COMPLETE=true`,
+`UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false` (kriterium 3 forblir PARTIAL - leverandør-
+korrekthets-undergapet er en iboende grense, IKKE en implementasjonsdefekt),
+`UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`, `UA6_CREDENTIAL_PHASE_COMPLETE=false`,
+`D108_COMPLETE=false` (D-108 fortsatt IKKE startet), `UA6_COMPLETE=false`,
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. `D108_DEFERRED_POLICY_PRESERVED=true`.
+Branch `claude/ua6-finance-closeout`, PR #64 forblir draft, IKKE merget uten Tobias sin
+eksplisitte godkjenning. Full detalj: D-115 i DECISIONS_AND_ASSUMPTIONS.md,
+IMPLEMENTATION_PLAN.md §«UA-6 DEDIKERT CLOSEOUT».
+
+**Runden før det:** 2026-08-28 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY - DEDIKERT CLOSEOUT-AUDIT
+(D-115).** Base `main=40fad14bd8fd832f0718b251dce2e944c5b0fef6` (PR #62 sitt merge-commit).
+Eksplisitt Tobias-ordre: IKKE en ny provider-slice, IKKE D-108 - en dedikert audit av HELE UA-6
+(seks allerede-bygde/merget slices) mot masterplanens fem akseptansekriterier, med
+file:line-evidens fra tre uavhengige research-agenter. **RESULTAT: 4 av 5 kriterier FULLT PASS
+med konkret evidens; kriterium 3 PARTIAL** (kun leverandør-korrekthets-undergap - feil-MEN-
+TILSTEDEVÆRENDE `vendor_provider_ref` fanges ikke deterministisk, en iboende ekstern-
+verifiseringsgrense uten live credentials/register, IKKE en implementasjonsdefekt, dokumentert
+siden D-107 sin ORIGINALE design - ingen kosmetisk pseudo-rettelse konstruert). **4 konkrete
+implementasjonsgap funnet OG rettet i SAMME PR (closeout-beslutning C):** (1)
+`finance_procurement_items` sitt `MISSING_EXPECTED_SPEND`-flagg manglet HELT OpenLoop-
+overflating (ny migrasjon `044_finance_procurement_openloop.sql` + `detectMissingProcurement
+Fulfillment()`); (2) Wallester avvist grenseendring var KUN synlig i `card_events`, ikke i
+`card_anomaly_attention` (ny `CARD_SPEND_POLICY_REJECTED`-flagg, selv-korrigerende); (3)
+`NeonomicsTransport.initiateDomesticPayment()` brukte flyttalls-divisjon på et pengebeløp (ny
+`minorUnitsToDecimalString()`, ren strengbasert); (4) manglende regresjonstest for `closeCard`
+under aktiv nødbryter (test-dekningsgap, lagt til). Ellers: idempotens/dobbel-betaling-
+beskyttelse, kill switch-dekning på ALLE aktive pengeutførende stier, BankID/KYC/PSD2/SCA
+ALDRI bypasset, SOR-disiplin uendret, "ukjent forblir ukjent"-fail-safe (Wallester D-114-fiksen
+bekreftet komplett, samme bug-klasse IKKE funnet i Stripe/Vipps/Neonomics), 23/23 UA-6-tabeller
+`FORCE ROW LEVEL SECURITY` - ALLE bekreftet med konkret file:line-evidens + navngitt test.
+**Kvalitetsporter:** `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent, full
+workspace-suite **178/178 filer, 2835/2835 tester grønt** (opp fra 178/2822, INGEN regresjon).
+**Flagg:** `UA6_IMPLEMENTATION_COMPLETE=true`, `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false`
+(PARTIAL kriterium 3), `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+`UA6_CREDENTIAL_PHASE_COMPLETE=false`, `D108_COMPLETE=false` (uendret, IKKE startet),
+`UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. ZERO ekte
+leverandørkredensialer konfigurert eller kontaktet. Branch `claude/ua6-finance-closeout` fra
+eksakt `main`, draft PR, venter på fresh CI. **`MERGE_READY=false` - MERGES IKKE uten Tobias
+sin eksplisitte godkjenning.** Full detalj: D-115 i DECISIONS_AND_ASSUMPTIONS.md,
+IMPLEMENTATION_PLAN.md §«UA-6 DEDIKERT CLOSEOUT».
+
+**Runden før det:** 2026-08-27 (**PR #62 - UA-6 Slice 6 (D-112/D-113/D-114) Wallester
 programmerbare kort - MERGET.** PR #62 merget til `main` med ekte to-forelder-
 merge-commit `40fad14bd8fd832f0718b251dce2e944c5b0fef6` (foreldre: `7c7608f`
 (forrige `main`) + `86dc762` (PR-HEAD) - bekreftet via `git log --format=%P`),

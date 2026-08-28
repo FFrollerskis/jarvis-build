@@ -57,6 +57,20 @@ async function insertCommitment(tenantId: string, opts: { anomalyFlags?: string[
   return id;
 }
 
+/** UA-6 closeout (D-115): `finance_procurement_items` fixture. */
+async function insertProcurementItem(tenantId: string, opts: { anomalyFlags?: string[] } = {}): Promise<string> {
+  const id = `fin-pi-${randomUUID()}`;
+  await withMemoryTransaction(appPool, tenantId, ["business"], (client) =>
+    client.query(
+      `INSERT INTO finance_procurement_items
+         (procurement_item_id, tenant_id, memory_space_id, vendor_name, description, expected_amount_ore, expected_date, anomaly_flags, owner_person_id)
+       VALUES ($1, $2, 'business', 'Vendor', 'Anskaffelse', 20000, '2026-01-01', $3, 'person-tobias')`,
+      [id, tenantId, JSON.stringify(opts.anomalyFlags ?? [])]
+    )
+  );
+  return id;
+}
+
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-openloop-spend-"));
   epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
@@ -150,6 +164,37 @@ describe("E: finance_recurring_charge_duplicate", () => {
     expect(result.detected).toBeGreaterThanOrEqual(1);
     const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
     expect(loops.find((l) => l.finance_recurring_commitment_id === id)?.loop_type).toBe("finance_recurring_charge_duplicate");
+  });
+});
+
+describe("I: finance_procurement_missing (UA-6 closeout, D-115)", () => {
+  it("en anskaffelse med MISSING_EXPECTED_SPEND-flagget blir et open loop (priority high)", async () => {
+    const id = await insertProcurementItem(TENANT_A, { anomalyFlags: ["MISSING_EXPECTED_SPEND"] });
+    const result = await openLoops.detectMissingProcurementFulfillment(TENANT_A, "business");
+    expect(result.detected).toBeGreaterThanOrEqual(1);
+    const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    const loop = loops.find((l) => l.finance_procurement_item_id === id);
+    expect(loop?.loop_type).toBe("finance_procurement_missing");
+    expect(loop?.priority).toBe("high");
+    expect(loop?.campaign_id).toBeNull();
+  });
+  it("en anskaffelse UTEN flagget gir INGEN open loop", async () => {
+    const id = await insertProcurementItem(TENANT_A, { anomalyFlags: [] });
+    await openLoops.detectMissingProcurementFulfillment(TENANT_A, "business");
+    const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    expect(loops.find((l) => l.finance_procurement_item_id === id)).toBeUndefined();
+  });
+  it("runSweep() detekterer finance_procurement_missing UTEN et separat kall", async () => {
+    const id = await insertProcurementItem(TENANT_A, { anomalyFlags: ["MISSING_EXPECTED_SPEND"] });
+    await openLoops.runSweep(TENANT_A, "business");
+    const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    expect(loops.find((l) => l.finance_procurement_item_id === id)?.loop_type).toBe("finance_procurement_missing");
+  });
+  it("TENANT_B faar ALDRI et open loop for TENANT_A sin anskaffelse", async () => {
+    const id = await insertProcurementItem(TENANT_A, { anomalyFlags: ["MISSING_EXPECTED_SPEND"] });
+    await openLoops.detectMissingProcurementFulfillment(TENANT_A, "business");
+    const loopsB = await openLoops.listOpenLoops(TENANT_B, "business", "open");
+    expect(loopsB.find((l) => l.finance_procurement_item_id === id)).toBeUndefined();
   });
 });
 
