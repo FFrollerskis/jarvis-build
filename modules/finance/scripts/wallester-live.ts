@@ -61,7 +61,7 @@ import type {
   InitiateNeonomicsPaymentInput, NeonomicsAccount, NeonomicsBalance, NeonomicsBank,
   NeonomicsGateway, NeonomicsPaymentObject, NeonomicsTransaction, NeonomicsTransactionPage
 } from "../src/neonomics-transport.ts";
-import { buildWallesterBusinessJwt, createRsaJwtSigner } from "../src/wallester-transport.ts";
+import { WallesterApiError, buildWallesterBusinessJwt, createRsaJwtSigner } from "../src/wallester-transport.ts";
 import type {
   WallesterAccountBalance, WallesterAuthorizationObject, WallesterCardLimitsApplied, WallesterCardLimitsInput,
   WallesterCardObject, WallesterGateway, WallesterPage, WallesterTransactionObject
@@ -85,6 +85,10 @@ const results: Record<string, string> = {
   wallester_card_creation_idempotency: "NOT_RUN",
   wallester_card_lifecycle: "NOT_RUN",
   wallester_spend_controls: "NOT_RUN",
+  // UA-6 closeout (D-115): provider-avvist grenseendring -> CARD_SPEND_
+  // POLICY_REJECTED -> card_anomaly_attention-overflating, tidligere
+  // KUN synlig i card_events (ikke bevist av noen eksisterende markør).
+  wallester_spend_policy_rejection_openloop: "NOT_RUN",
   wallester_card_state_sync: "NOT_RUN",
   wallester_authorization_settlement: "NOT_RUN",
   wallester_transaction_idempotency: "NOT_RUN",
@@ -231,8 +235,9 @@ class ScriptedWallesterGateway implements WallesterGateway {
   async closeCard(providerCardId: string): Promise<WallesterCardObject> {
     return { id: providerCardId, status: "closed", maskedCardNumber: "…4321", accountId: "wacc-live-1", tokenizationStatus: null };
   }
-  async updateCardLimits(_providerCardId: string, limits: WallesterCardLimitsInput): Promise<WallesterCardLimitsApplied> {
-    return { ...limits, confirmed: true };
+  onUpdateLimits: (providerCardId: string, limits: WallesterCardLimitsInput) => Promise<WallesterCardLimitsApplied> = async (_id, limits) => ({ ...limits, confirmed: true });
+  async updateCardLimits(providerCardId: string, limits: WallesterCardLimitsInput): Promise<WallesterCardLimitsApplied> {
+    return this.onUpdateLimits(providerCardId, limits);
   }
   async listAuthorizations(providerCardId: string, pageToken: string | null): Promise<WallesterPage<WallesterAuthorizationObject>> {
     return this.onListAuthorizations(providerCardId, pageToken);
@@ -568,6 +573,47 @@ async function main(): Promise<void> {
     log(`sync_state=${policy.sync_state} applied_daily=${policy.applied_daily_limit_ore} applied_atm=${policy.applied_atm_enabled} -> wallester_spend_controls: ${results.wallester_spend_controls}`);
   });
 
+  // ===== wallester_spend_policy_rejection_openloop (UA-6 closeout, D-115) =====
+  await section("WALLESTER SPEND POLICY REJECTION OPENLOOP (provider-avvisning -> CARD_SPEND_POLICY_REJECTED -> card_anomaly_attention; idempotent append; selv-korrigerende + loop auto-resolves ved påfølgende suksess - INGEN ekte Wallester-request)", async () => {
+    gateway.onUpdateLimits = async () => {
+      throw new WallesterApiError("wallester_api_failed_422:limit_rejected_live_acceptance", 422, false);
+    };
+    let rejected1 = false;
+    try {
+      await cardService.updateSpendPolicy(TENANT_A, "business", cardId, { requested_daily_limit_ore: 50_000 });
+    } catch (err) {
+      rejected1 = err instanceof WallesterApiError;
+    }
+    let rejected2 = false;
+    try {
+      await cardService.updateSpendPolicy(TENANT_A, "business", cardId, { requested_daily_limit_ore: 60_000 });
+    } catch (err) {
+      rejected2 = err instanceof WallesterApiError;
+    }
+    const afterRejection = await cardService.getCard(TENANT_A, "business", cardId);
+    const flagPresentOnce = (afterRejection?.anomaly_flags.filter((f) => f === "CARD_SPEND_POLICY_REJECTED").length ?? 0) === 1;
+
+    const rejectionOpenLoops = new OpenLoopService(pool);
+    await rejectionOpenLoops.runSweep(TENANT_A, "business");
+    const loopsOpen = await rejectionOpenLoops.listOpenLoops(TENANT_A, "business", "open");
+    const rejectionLoop = loopsOpen.find((l) => l.loop_type === "card_anomaly_attention" && l.detection_key === `card_anomaly_attention:card:${cardId}`);
+    const loopSurfaced = rejectionLoop !== undefined;
+
+    // Etterfølgende vellykket anvendelse klarerer flagget (selv-korrigerende) og lar loopen auto-resolve.
+    gateway.onUpdateLimits = async (_id, limits) => ({ ...limits, confirmed: true });
+    const applied = await cardService.updateSpendPolicy(TENANT_A, "business", cardId, { requested_daily_limit_ore: 200_000 });
+    const clearedAfterSuccess = applied.sync_state === "applied";
+    const cardAfterClear = await cardService.getCard(TENANT_A, "business", cardId);
+    const flagCleared = !(cardAfterClear?.anomaly_flags.includes("CARD_SPEND_POLICY_REJECTED") ?? false);
+    await rejectionOpenLoops.runSweep(TENANT_A, "business");
+    const loopsAfterClear = await rejectionOpenLoops.listOpenLoops(TENANT_A, "business", "open");
+    const loopAutoResolved = loopsAfterClear.find((l) => l.detection_key === `card_anomaly_attention:card:${cardId}`) === undefined;
+
+    results.wallester_spend_policy_rejection_openloop =
+      rejected1 && rejected2 && flagPresentOnce && loopSurfaced && clearedAfterSuccess && flagCleared && loopAutoResolved ? "PASS" : "FAIL";
+    log(`rejected_1=${rejected1} rejected_2=${rejected2} flag_present_once=${flagPresentOnce} loop_surfaced=${loopSurfaced} cleared_after_success=${clearedAfterSuccess} flag_cleared=${flagCleared} loop_auto_resolved=${loopAutoResolved} -> wallester_spend_policy_rejection_openloop: ${results.wallester_spend_policy_rejection_openloop}`);
+  });
+
   // ===== wallester_card_state_sync =====
   await section("WALLESTER CARD STATE SYNC (passiv reparasjon fra provider; lukket kort resurrekteres ALDRI - konflikt flagges)", async () => {
     gateway.onGetCard = async (id) => ({ id, status: "blocked", maskedCardNumber: "…4321", accountId: "wacc-live-1", tokenizationStatus: null });
@@ -731,6 +777,10 @@ async function main(): Promise<void> {
   await section("WALLESTER KILL SWITCH SEMANTICS (blokkerer submit/unfreeze/grense-ØKNING; PASSIV synk/avstemming/avviksdeteksjon fortsetter)", async () => {
     const draft = await cardService.createCard(TENANT_A, "business", { idempotency_key: `killswitch-${runId}`, name: "KS-kort", purpose: "KS", card_type: "virtual" });
     await cardService.freezeCard(TENANT_A, "business", cardId);
+    // UA-6 closeout (D-115): et EGET, alt aktivt kort MÅ opprettes+submittes
+    // FØR nødbryteren aktiveres (submitCard er selv nødbryter-gatet) - kortet
+    // lukkes FØRST etter at bryteren er aktiv, under.
+    const { card_id: closeKsCardId } = await newActiveCard();
     await finance.enableKillSwitch(TENANT_A, OWNER_PERSON, "Wallester live-akseptanse kill-switch-test");
     let submitBlocked = false;
     try {
@@ -750,15 +800,28 @@ async function main(): Promise<void> {
     } catch (err) {
       increaseBlocked = (err as Error).message.includes("finance_kill_switch_active");
     }
+    // UA-6 closeout (D-115): closeCard er spend-REDUSERENDE (irreversibel,
+    // klasse C) og skal derfor ALDRI blokkeres av nødbryteren - SAMME
+    // begrunnelse som freezeCard over. `closeKsCardId` (opprettet+submittet
+    // FØR nødbryteren ble aktivert, over) er ALDRI `cardId` selv, slik at
+    // resten av seksjonens frys->avfrys-flyt på `cardId` forblir urørt.
+    let closeAllowed = false;
+    try {
+      const closed = await cardService.closeCard(TENANT_A, "business", closeKsCardId);
+      closeAllowed = closed.state === "closed";
+    } catch {
+      closeAllowed = false;
+    }
     gateway.onListTransactions = async () => ({ items: [], nextPageToken: null });
     const passiveSync = await cardService.syncTransactions(TENANT_A, "business", cardId);
     const passiveReconcile = await cardService.reconcileCardTransactions(TENANT_A, "business");
     const passiveAnomaly = await cardService.runCardAnomalyDetection(TENANT_A, "business");
+    const passivePathsOkay = passiveSync !== undefined && passiveReconcile !== undefined && passiveAnomaly !== undefined;
     await finance.disableKillSwitch(TENANT_A, OWNER_PERSON);
     await cardService.unfreezeCard(TENANT_A, "business", cardId);
     results.wallester_kill_switch_semantics =
-      submitBlocked && unfreezeBlocked && increaseBlocked && passiveSync !== undefined && passiveReconcile !== undefined && passiveAnomaly !== undefined ? "PASS" : "FAIL";
-    log(`submit_blocked=${submitBlocked} unfreeze_blocked=${unfreezeBlocked} limit_increase_blocked=${increaseBlocked} passive_ok=${passiveSync !== undefined && passiveReconcile !== undefined && passiveAnomaly !== undefined} -> wallester_kill_switch_semantics: ${results.wallester_kill_switch_semantics}`);
+      submitBlocked && unfreezeBlocked && increaseBlocked && closeAllowed && passivePathsOkay ? "PASS" : "FAIL";
+    log(`submit_blocked=${submitBlocked} unfreeze_blocked=${unfreezeBlocked} limit_increase_blocked=${increaseBlocked} close_allowed=${closeAllowed} passive_paths_okay=${passivePathsOkay} -> wallester_kill_switch_semantics: ${results.wallester_kill_switch_semantics}`);
   });
 
   // ===== wallester_pci_boundary =====

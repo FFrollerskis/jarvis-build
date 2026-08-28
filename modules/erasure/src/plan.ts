@@ -201,6 +201,16 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "card_spend_policies", await run(client, mode, "card_spend_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "provider_cards", await run(client, mode, "provider_cards", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "finance_recurring_commitments", await run(client, mode, "finance_recurring_commitments", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-6 closeout (D-115, 044_finance_procurement_openloop.sql):
+  // `business_open_loops.finance_procurement_item_id` er en NY FK ->
+  // `finance_procurement_items` - MÅ derfor slettes FØR, SAMME "barn-FK FØR
+  // forelder"-regel/SNEVER avgrensning (rører aldri andre loop_type-er) som
+  // `finance_recurring_commitment_id`-blokken over.
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND finance_procurement_item_id IS NOT NULL", tv)
+  );
   add(result, "finance_procurement_items", await run(client, mode, "finance_procurement_items", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "marketing_campaigns", await run(client, mode, "marketing_campaigns", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-6 Finance & Spend Integrity Gateway (D-107, 038_finance.sql):

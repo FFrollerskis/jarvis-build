@@ -556,6 +556,49 @@ export class OpenLoopService {
     });
   }
 
+  /**
+   * UA-6 closeout (D-115): `finance_procurement_items.anomaly_flags`
+   * (MISSING_EXPECTED_SPEND, satt av SpendService.runAnomalyDetection() siden
+   * Slice 2) manglet en surfacing-regel - SAMME rolle-deling som
+   * `surfaceCommitmentAnomaly()` (denne metoden beregner INGENTING selv, kun
+   * overflater et allerede-satt avviksflagg).
+   */
+  async detectMissingProcurementFulfillment(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return this.surfaceProcurementAnomaly(tenantId, memorySpace, "MISSING_EXPECTED_SPEND", "finance_procurement_missing", "high",
+      (row) => `Anskaffelse "${row.description}" fra ${row.vendor_name} (${row.expected_amount_ore} ${row.currency}, forventet ${row.expected_date}) er uteblitt utover det forventede vinduet`,
+      (row) => `Undersøk uteblitt anskaffelse ${row.procurement_item_id}`);
+  }
+
+  private async surfaceProcurementAnomaly(
+    tenantId: string, memorySpace: MemorySpace, flag: string, loopType: OpenLoopType, priority: OpenLoopPriority,
+    reason: (row: ProcurementAnomalyRow) => string, nextAction: (row: ProcurementAnomalyRow) => string
+  ): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT procurement_item_id, vendor_name, description, expected_amount_ore, currency, expected_date, owner_person_id
+         FROM finance_procurement_items WHERE tenant_id = $1 AND memory_space_id = $2 AND anomaly_flags @> $3::jsonb`,
+        [tenantId, memorySpace, JSON.stringify([flag])]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows as ProcurementAnomalyRow[]) {
+        const detectionKey = `${loopType}:${row.procurement_item_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          finance_procurement_item_id: row.procurement_item_id, loop_type: loopType, detection_key: detectionKey,
+          reason: reason(row), next_action: nextAction(row), priority, owner_person_id: row.owner_person_id, due_at: null
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
   /** Full sweep: alle deterministiske regler - trygt aa kalle gjentatte ganger (idempotent). */
   /**
    * UA-6 Slice 5 (D-111, byggeordrens §16): en booket banktransaksjon med
@@ -728,6 +771,11 @@ export class OpenLoopService {
       await this.detectMissingRecurringCharges(tenantId, memorySpace),
       await this.detectDuplicateRecurringCharges(tenantId, memorySpace),
       await this.detectSpendCorrectionConflicts(tenantId, memorySpace),
+      // UA-6 closeout (D-115): finance_procurement_items sitt
+      // MISSING_EXPECTED_SPEND-flagg (SpendService.runAnomalyDetection(),
+      // Slice 2) manglet en surfacing-regel - samme sveip-rekkefølge-
+      // begrunnelse som forpliktelses-reglene over.
+      await this.detectMissingProcurementFulfillment(tenantId, memorySpace),
       // UA-6 Slice 5 (D-111): samme prinsipp - reglene kjøres i DENNE
       // sveipen, krever `bank_transactions`/`bank_consents`
       // (042_neonomics.sql). Selve flaggene er allerede beregnet
@@ -877,6 +925,17 @@ interface CommitmentAnomalyRow {
   owner_person_id: string | null;
 }
 
+/** UA-6 closeout (D-115, 044_finance_procurement_openloop.sql). */
+interface ProcurementAnomalyRow {
+  procurement_item_id: string;
+  vendor_name: string;
+  description: string;
+  expected_amount_ore: string;
+  currency: string;
+  expected_date: string;
+  owner_person_id: string | null;
+}
+
 interface UpsertOpenLoopInput {
   open_loop_id: string;
   tenant_id: string;
@@ -895,6 +954,8 @@ interface UpsertOpenLoopInput {
   /** UA-6 Finance & Spend Integrity Gateway Slice 2: peker til `finance_spend_records`/`finance_recurring_commitments`, null/utelatt for ikke-utgifts-loops. */
   finance_spend_record_id?: string | null;
   finance_recurring_commitment_id?: string | null;
+  /** UA-6 closeout (D-115): peker til `finance_procurement_items`, null/utelatt for ikke-anskaffelses-loops. */
+  finance_procurement_item_id?: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -909,8 +970,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
         ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
-        loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+        finance_procurement_item_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -924,6 +985,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
       input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
+      input.finance_procurement_item_id ?? null,
       input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );

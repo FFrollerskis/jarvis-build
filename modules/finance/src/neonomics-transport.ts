@@ -183,6 +183,21 @@ export function decimalToMinorUnits(decimal: string | number): number {
 }
 
 /**
+ * Eksakt øre->desimal-konvertering via strengmanipulasjon - den OMVENDTE
+ * retningen av `decimalToMinorUnits()`, SAMME "aldri flyttall for penger"-
+ * prinsipp (CLAUDE.md/§Financial Data Integrity). `amountOre / 100` ville
+ * introdusert flyttall-presisjonstap for beløp som ikke er eksakt
+ * representerbare i IEEE-754 (f.eks. 1999 øre -> 19.99, som IKKE er en
+ * eksakt binær flyttallsverdi) - dette var en reell, tidligere untestet
+ * inkonsistens i `initiateDomesticPayment()` (UA-6 closeout-audit).
+ */
+export function minorUnitsToDecimalString(amountOre: number): string {
+  if (!Number.isInteger(amountOre) || amountOre < 0) throw new Error(`neonomics_invalid_minor_units:${amountOre}`);
+  const s = String(amountOre).padStart(3, "0");
+  return `${s.slice(0, -2)}.${s.slice(-2)}`;
+}
+
+/**
  * Minimalt grensesnitt FinanceService/BankingService faktisk trenger -
  * SAMME "narrow injectable writer"-prinsipp som Stripe-/Vipps-
  * transportene. Token-/sesjonshåndtering er innkapslet.
@@ -341,7 +356,7 @@ export class NeonomicsTransport implements NeonomicsGateway {
         debtorAccount: { id: input.debtorAccountId },
         creditorName: input.creditorName,
         creditorAccount: { bban: input.creditorAccountIdentifier },
-        instrumentedAmount: (input.amountOre / 100).toFixed(2),
+        instrumentedAmount: minorUnitsToDecimalString(input.amountOre),
         currency: input.currency,
         remittanceInformationUnstructured: input.referenceText.slice(0, 140),
         endToEndIdentification: input.endToEndReference

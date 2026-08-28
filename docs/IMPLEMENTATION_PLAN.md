@@ -3205,6 +3205,79 @@ Full detalj: D-112/D-113/D-114 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+### UA-6 Finance & Spend Integrity Gateway — DEDIKERT CLOSEOUT (D-115, 2026-08-28)
+
+Eksplisitt Tobias-ordre: IKKE en ny provider-slice, IKKE D-108. En dedikert audit av HELE
+UA-6 (seks allerede-bygde slices, D-107/D-112/D-113/D-114, alle merget til `main`) mot
+masterplanens fem akseptansekriterier, med konkret file:line-evidens per krav fra tre
+uavhengige research-agenter (kill switch/idempotens/dataintegritet; feil-mål/BankID-KYC-PSD2/
+SOR-drift; full ende-til-ende pengesti-sporbarhet). Full detalj/begrunnelse: D-115 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**UA-6 AKSEPTANSEMATRISE** (STATUS: PASS/PASS_DEFERRED_LIVE_CREDENTIAL_VERIFICATION/PARTIAL/FAIL/NOT_APPLICABLE):
+
+| Krav | Status | Evidens |
+|---|---|---|
+| 1. Retry kan aldri dobbeltbetale | PASS | DB `UNIQUE(tenant_id, idempotency_key)` (038) + `ON CONFLICT DO NOTHING RETURNING` (service.ts); deterministiske provider-idempotensnøkler avledet fra `payment_intent_id` (Stripe/Vipps/Neonomics `endToEndReference`); Wallester kort-/autorisasjon-/transaksjon-dedup via `UNIQUE(tenant,provider,provider_*_id)`; webhook-event-dedup-tabell PER leverandør (stripe_webhook_events/vipps_webhook_events/neonomics_webhook_events/wallester_webhook_events, alle PK på event-/dedupe-nøkkel) |
+| 2. Hver pengehandling kartlegges intent→leverandørforespørsel→utfall→regnskap/avstemming | PASS for Fiken (skriver direkte til Fiken-regnskapet); PASS for sporbarhet forøvrig, men Stripe/Vipps/Neonomics/Wallester poster ALDRI automatisk til Fiken-regnskapet - kun `reconciliation_state`. Dette er BEVISST arkitektur (038_finance.sql: Jarvis bygger aldri om dobbel bokføring selv), IKKE et gap, men et governance-synlig grensepunkt: ingen open-loop dytter eieren til faktisk å bokføre en oppgjort Stripe/Vipps-betaling i Fiken ennå. Full join-sti (payment_intents→payment_intent_events→provider-webhook-tabell→bank_transactions for Neonomics) lar et menneske rekonstruere "hva skjedde med disse pengene" fra DB-en alene for ALLE fem leverandører | `payment_intents.provider_ref`/`payment_intent_events`/provider-webhook-tabeller/`bank_transactions.matched_payment_intent_id`; `card_authorizations`→`card_transactions.authorization_id` |
+| 3a. Feil konto fanges deterministisk | PASS | `ACCOUNT_CODE_PATTERN=/^\d{4}(:\d{5})?$/` (Fiken, regex FØR providerkall); Neonomics debitorkonto MÅ eksistere+være aktiv i Jarvis sitt eget `bank_accounts`-register (`BankAccountNotFoundError`) |
+| 3b. Feil leverandør fanges deterministisk | **PARTIAL** | Kun FRAVÆR av `vendor_provider_ref` kastes deterministisk (`MissingVendorProviderRefError`, ALDRI stille default/gjettet). En syntaktisk gyldig men FEIL leverandørreferanse kan IKKE skilles fra korrekt uten enten et ekte leverandør-rundtrip-kall (utenfor D-108-grensen) eller et Jarvis-eid leverandørregister (ny, ubestilt scope). Strukturelt IDENTISK med kontokode-valideringsdybden for Fiken/Stripe/Vipps (kun format-/tilstedeværelse - Neonomics er ENESTE unntak siden Jarvis der eier `bank_accounts`). Dokumentert siden D-107 sin ORIGINALE design (`038_finance.sql` toppkommentar: "NULL tillatt... FØR vendor er slått opp/matchet i Fiken"). Ingen kosmetisk pseudo-rettelse konstruert - se D-115 |
+| 3c. Feil beløpsformat fanges deterministisk | PASS | `Number.isInteger(amount_ore) && amount_ore > 0`, `CURRENCY_PATTERN=/^[A-Z]{3}$/` (service.ts, FØR providerkall + DB CHECK som andre sikkerhetsnett); ALLE pengekolonner `bigint` (heltalls-øre), INGEN flyttalls-pengearitmetikk i `modules/finance/src` (én reell inkonsistens funnet og rettet denne runden - Neonomics utgående `initiateDomesticPayment()`, se D-115 punkt 3) |
+| 3d. Duplikat intent fanges deterministisk | PASS | Samme mekanisme som krav 1 |
+| 4. Eksterne BankID/KYC/PSD2-kontroller respekteres, aldri bypasset | PASS | Neonomics SCA/samtykke skjer UTELUKKENDE via ekte gateway-kall (`getConsentAuthorizationUrl()`), `state='active'` settes KUN i `completeConsentCallback()` med et ekte, kryptografisk tilfeldig, CSRF-/replay-beskyttet `callback_state` (`timingSafeEqual`, nullstilles ved konsumering); PIS feiler fail-closed uten aktivt samtykke (`BankConsentNotActiveError`); repo-bred grep fant INGEN hardkodet "approved"/"authorized"/"consented"-default eller bypass-flagg noe sted i `modules/finance/src` |
+| 5. Finans-nødbryter stopper nye transaksjoner umiddelbart | PASS | ALLE aktive pengeutførende stier (Fiken/Stripe/Vipps/Neonomics `submitPaymentIntent`, Vipps capture/refund, Wallester submit_card/unfreeze/grense-økning) sjekker `finance_kill_switch` FØR providerkall; PASSIVE stier (SpendService-synk, bank-/webhook-mottak, avstemming) er BEVISST UPÅVIRKET (§13-distinksjon, testbevist); nødbryteren er tenant-only RLS (ikke space-scopet, kontobred handling per design) |
+
+**IDEMPOTENS/DOBBEL-BETALING-DYPDYKK (ingen ny test skrevet der invarianten allerede eksplisitt er bevist):** autorisasjon konflateres ALDRI med oppgjør - Vipps `submitVippsCapture()` krever `provider_status==="AUTHORIZED"` (`PaymentIntentNotAuthorizedError` ellers), oppgjør avgjøres av Jarvis sin EGEN aggregerte capture-bokføring (`checkVippsFullSettlement()`), ikke av Vipps sitt `payment.state` (som forblir `AUTHORIZED`); Wallester `card_authorizations` (reservasjon) er en DISTINKT tabell fra `card_transactions` (oppgjør), et andre oppgjør mot samme autorisasjon flagges `DUPLICATE_ECONOMIC_EFFECT`, et oppgjør STØRRE enn autorisert beløp flagges `CARD_AUTH_SETTLEMENT_CONFLICT`. Terminale tilstander (`settled`/`failed`/`cancelled`) har INGEN utgående overgang i `state-machine.ts` - en senere, "mer positiv" providerhendelse kan ALDRI overskrive en allerede-terminal Jarvis-tilstand (flagges `WEBHOOK_STATE_CONFLICT` i stedet, testbevist for Stripe/Neonomics).
+
+**SOR/"UKJENT FORBLIR UKJENT"-DYPDYKK:** Wallester sin D-114-fiks (ukjent autorisasjonsstatus/transaksjonstype → `"unknown"`, ALDRI stille "approved"/"purchase") bekreftet REELL og komplett i BÅDE `wallester-transport.ts` sin wire-mapping OG `card-service.ts` sin webhook-ingestion. SAMME bug-klasse IKKE funnet i Stripe/Vipps/Neonomics: alle tre ruter gjennom en eksplisitt `Record<string, State|null>`-oppslagstabell med `?? null`-fallback (ALDRI en direkte streng-til-"settled"-gjetning) - en ukjent/urecognisert providerstatus forblir derfor strukturelt non-terminal (samme fail-safe-form som en kjent mellomtilstand), selv om Stripe/Vipps/Neonomics mangler Wallester sin DEDIKERTE "ukjent status"-regresjonstest (et mindre test-dekningspunkt, IKKE en funksjonell defekt).
+
+**FINANSIELL DATAINTEGRITET:** 23/23 UA-6-tabeller (migrasjon 038-043) har `FORCE ROW LEVEL SECURITY`; valuta lagres/valideres PER RAD på hver pengetabell (aldri antatt konstant); fortegnskonvensjon er KONSEKVENT magnitude+eksplisitt-retning (`direction`-kolonne for bank, type-basert for kort, aldri en signert beløpskolonne som kunne feiltolkes) på tvers av alle fem leverandører.
+
+**FIRE KONKRETE IMPLEMENTASJONSGAP FUNNET OG RETTET I SAMME PR (closeout-beslutning C):**
+1. `finance_procurement_items` sitt `MISSING_EXPECTED_SPEND`-flagg manglet HELT OpenLoop-overflating (ny migrasjon `044_finance_procurement_openloop.sql` + `detectMissingProcurementFulfillment()`, speiler `detectMissingRecurringCharges()` eksakt).
+2. Wallester avvist grenseendring (`sync_state='rejected'`) var KUN synlig i `card_events`, ikke i `card_anomaly_attention` (ny `CARD_SPEND_POLICY_REJECTED`-flagg på `provider_cards.anomaly_flags`, selv-korrigerende ved påfølgende suksess).
+3. `NeonomicsTransport.initiateDomesticPayment()` brukte flyttalls-divisjon på et pengebeløp (`minorUnitsToDecimalString()`, ren strengbasert - erstatter `.toFixed(2)`).
+4. Manglende regresjonstest for `closeCard` under aktiv nødbryter (test-dekningsgap, lagt til).
+
+**Kvalitetsporter:** `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent, full workspace-suite
+**178/178 filer, 2835/2835 tester grønt** (opp fra 178/2822 - eksakt +13 nye closeout-tester,
+INGEN regresjon).
+
+**Terminalflagg:** `UA6_IMPLEMENTATION_COMPLETE=true` (seks slices + fire closeout-rettelser
+kodefullstendige, testbevist). `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false` (4/5
+akseptansekriterier FULLT PASS med konkret evidens; kriterium 3 PARTIAL utelukkende pga. det
+ærlig-dokumenterte leverandør-korrekthets-undergapet - en iboende ekstern-verifiseringsgrense,
+IKKE en implementasjonsdefekt). `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+`UA6_CREDENTIAL_PHASE_COMPLETE=false`, `D108_COMPLETE=false` (D-108 forblir utsatt, IKKE
+startet denne runden). `UA6_COMPLETE=false` (styrt av BÅDE D-108 OG den PARTIAL
+arkitektur-aksept-statusen). `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. ZERO ekte
+leverandørkredensialer konfigurert eller kontaktet. Branch `claude/ua6-finance-closeout` fra
+eksakt `main=40fad14b`, draft PR, IKKE merget uten Tobias sin eksplisitte godkjenning. Full
+detalj: D-115 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**D-115 GUARDED HOST ACCEPTANCE BESTÅTT (2026-08-28):** Tobias kjørte de to utvidede guardede
+host-akseptanse-runnerne mot eksakt CI-grønn head `578b45898a96bc3f861a5c121c8e218a672ae463`
+(branch `claude/ua6-finance-closeout`). **Spend-integrity
+(`spend-integrity-live-host-run.ts`), `run_id=6a362680`:** alle 13 markører PASS inkl. den nye
+`finance_procurement_openloop` (`leaked_to_tenant_b=false`), `hard_fail=false`. **Wallester
+(`wallester-live-host-run.ts`), `run_id=34f7e900`:** alle 24 markører PASS inkl. de to nye
+`wallester_spend_policy_rejection_openloop` og det utvidede `wallester_kill_switch_semantics`
+(`close_allowed=true`, `passive_paths_okay=true`, INGEN svekking av `submitBlocked`/
+`unfreezeBlocked`/`increaseBlocked`), `hard_fail=false`. ZERO ekte credentials, ZERO live
+provider-kall i noen av kjøringene - `WALLESTER_LIVE_VERIFIED=false`/`WALLESTER_LIVE_GATE=
+PENDING_CREDENTIALS` UENDRET (D-108). `NEONOMICS_AMOUNT_SERIALIZATION_HOST_PROOF=NOT_
+APPLICABLE_PURE_WIRE_CONTRACT` forblir korrekt evidensklassifisering for
+`minorUnitsToDecimalString()`-fiksen (test/CI-lag, ikke et kunstig host-bevis). Wallester
+signeringsmateriale uendret fra D-114: `BUSINESS_AUTH_SIGNING_MATERIAL=PRIMARY_SOURCE_PUBLIC_
+DOC_GAP`, `PRIVATE_KEY_PEM`-provisjoneringskilden fortsatt IKKE primærkilde-verifisert. Denne
+docs-closeouten flytter selv HEAD - `HOST_ACCEPTANCE_FINAL=false` inntil begge runnerne kjøres
+på nytt mot den nye eksakte HEAD-en denne commiten produserer (samme HEAD-bundne regime som
+resten av denne PR-en). `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false`/`UA6_COMPLETE=false`
+uendret - host-akseptanse beviser produkt-/runtime-wiring, IKKE live leverandør-reachability
+eller kriterium 3 sitt PARTIAL leverandør-korrekthets-undergap.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
