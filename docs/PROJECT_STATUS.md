@@ -1,6 +1,29 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-27 (**PR #62 - D-114 HOST-VERIFISERT.** Tobias kjørte
+**Oppdatert:** 2026-08-27 (**PR #62 - UA-6 Slice 6 (D-112/D-113/D-114) Wallester
+programmerbare kort - MERGET.** PR #62 merget til `main` med ekte to-forelder-
+merge-commit `40fad14bd8fd832f0718b251dce2e944c5b0fef6` (foreldre: `7c7608f`
+(forrige `main`) + `86dc762` (PR-HEAD) - bekreftet via `git log --format=%P`),
+på eksplisitt godkjenning av Tobias (`merged_by=tsworkflow`). Host-akseptanse
+kjørt TO ganger av Tobias på hver sin eksakte PR-head, BEGGE ganger 24/24
+kjørbare markører PASS, `hard_fail=false`: `run_id=ab30dbcf` på
+`a5d8c5ae977b6526c7484eae4599f0bd2dd9e059` (pre-docs-closeout-head) og
+`run_id=5d931b8a` på `86dc7624ba014aad0162ed2ad0d39fc3e103db43` (eksakt
+merget PR-head, samme resultat identisk). `origin/main` og lokal `main`
+synkronisert (fast-forward `7c7608f..40fad14`), arbeidstre rent. Kanoniske
+D-114-elementer bekreftet TIL STEDE på `main` etter merge (`api_key`/`ts`-JWT-
+claims i `wallester-transport.ts`, `NOT_APPLICABLE_TO_SELECTED_WALLESTER_
+BUSINESS_API`-klassifiseringen i host-scriptet). `WALLESTER_IMPLEMENTATION_
+COMPLETE=true` for kort-/wallet-domenet. `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, `WALLESTER_CREDENTIAL_SETUP_
+DEFERRED=true` UENDRET (D-108) - ZERO ekte Wallester-credentials konfigurert
+eller kontaktet noe sted i denne sliceen. `UA6_COMPLETE=false` UENDRET (siste
+store kapabilitets-slice bygget - gjenstår dedikert UA-6-closeout + konsolidert
+credential-fase på tvers av Fiken/Stripe/Vipps/Neonomics/Wallester).
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET. **INGEN ny slice startet
+denne runden.** Full detalj: D-112/D-113/D-114 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Runden før det:** 2026-08-27 (**PR #62 - D-114 HOST-VERIFISERT.** Tobias kjørte
 den guardede, no-credential `wallester-live-host-run.ts` mot eksakt PR-head
 `a5d8c5ae977b6526c7484eae4599f0bd2dd9e059` (fail-closed branch-/HEAD-/rent-
 arbeidstre-guard verifisert FØR kjøring - fanget og korrigerte to stale
