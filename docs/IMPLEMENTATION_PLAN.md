@@ -3287,9 +3287,10 @@ run `cef5f134`** (alle markører PASS inkl. `finance_procurement_openloop`, `har
 `wallester_spend_policy_rejection_openloop` og utvidet `wallester_kill_switch_semantics`
 (`close_allowed=true`), `hard_fail=false`). Den tidligere pre-docs-kjøringen (head `578b458...`,
 run-id-er `6a362680`/`34f7e900`) forblir gyldig historisk evidens for DEN daværende HEAD-en; den
-senere final-head-kjøringen erstatter behovet for videre ny host-akseptanse. PR #64 deretter
-merget av Tobias (eksplisitt godkjenning): merge-SHA `1bc9cf090ebb8ea8df9859a1ab34d3577d6a641f`,
-normal to-forelder-merge (`40fad14b` + `9e5f8ce`), post-merge CI PASS (`run=33171106394`) på
+senere final-head-kjøringen erstatter behovet for videre ny host-akseptanse. PR #64 ble deretter
+merget etter eksplisitt merge-godkjenning fra Tobias, som en normal two-parent merge: merge-SHA
+`1bc9cf090ebb8ea8df9859a1ab34d3577d6a641f`
+(foreldre `40fad14b` + `9e5f8ce`), post-merge CI PASS (`run=33171106394`) på
 `main`, lokal `main`-synk PASS. De faglige UA-6-akseptanseflaggene er UENDRET av denne
 truth-sync-runden (ingen ny audit, ingen forfremming): `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=
 false`/`UA6_COMPLETE=false`/`D108_COMPLETE=false` fortsatt PARTIAL/false av samme grunner som

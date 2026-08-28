@@ -16,8 +16,9 @@ tidligere pre-docs host-kjøringen (head `578b45898a96...`, spend `run_id=6a3626
 final-head-kjøringen over ERSTATTER behovet for ytterligere ny host-akseptanse for PR #64 sin
 faktiske merge-payload.
 
-**Tobias merget deretter PR #64 selv (eksplisitt godkjenning), etter denne final-head-host-
-akseptansen:** `PR64_MERGED=true`, `PR64_MERGE_SHA=1bc9cf090ebb8ea8df9859a1ab34d3577d6a641f`,
+**PR #64 ble deretter merget etter eksplisitt merge-godkjenning fra Tobias, som en normal
+two-parent merge, etter denne final-head-host-akseptansen:** `PR64_MERGED=true`,
+`PR64_MERGE_SHA=1bc9cf090ebb8ea8df9859a1ab34d3577d6a641f`,
 `NORMAL_TWO_PARENT_MERGE=true` (foreldre `40fad14b` base + `9e5f8ce` PR64 final head - INGEN
 uvanlig merge-topologi). `POST_MERGE_CI=PASS` (`run=33171106394`/#450: build-test/gitleaks/
 windows-git-auth alle PASS på `main`). `LOCAL_MAIN_SYNC=PASS` (lokal `main` verifisert eksakt lik
