@@ -3255,6 +3255,27 @@ leverandørkredensialer konfigurert eller kontaktet. Branch `claude/ua6-finance-
 eksakt `main=40fad14b`, draft PR, IKKE merget uten Tobias sin eksplisitte godkjenning. Full
 detalj: D-115 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**D-115 GUARDED HOST ACCEPTANCE BESTÅTT (2026-08-28):** Tobias kjørte de to utvidede guardede
+host-akseptanse-runnerne mot eksakt CI-grønn head `578b45898a96bc3f861a5c121c8e218a672ae463`
+(branch `claude/ua6-finance-closeout`). **Spend-integrity
+(`spend-integrity-live-host-run.ts`), `run_id=6a362680`:** alle 13 markører PASS inkl. den nye
+`finance_procurement_openloop` (`leaked_to_tenant_b=false`), `hard_fail=false`. **Wallester
+(`wallester-live-host-run.ts`), `run_id=34f7e900`:** alle 24 markører PASS inkl. de to nye
+`wallester_spend_policy_rejection_openloop` og det utvidede `wallester_kill_switch_semantics`
+(`close_allowed=true`, `passive_paths_okay=true`, INGEN svekking av `submitBlocked`/
+`unfreezeBlocked`/`increaseBlocked`), `hard_fail=false`. ZERO ekte credentials, ZERO live
+provider-kall i noen av kjøringene - `WALLESTER_LIVE_VERIFIED=false`/`WALLESTER_LIVE_GATE=
+PENDING_CREDENTIALS` UENDRET (D-108). `NEONOMICS_AMOUNT_SERIALIZATION_HOST_PROOF=NOT_
+APPLICABLE_PURE_WIRE_CONTRACT` forblir korrekt evidensklassifisering for
+`minorUnitsToDecimalString()`-fiksen (test/CI-lag, ikke et kunstig host-bevis). Wallester
+signeringsmateriale uendret fra D-114: `BUSINESS_AUTH_SIGNING_MATERIAL=PRIMARY_SOURCE_PUBLIC_
+DOC_GAP`, `PRIVATE_KEY_PEM`-provisjoneringskilden fortsatt IKKE primærkilde-verifisert. Denne
+docs-closeouten flytter selv HEAD - `HOST_ACCEPTANCE_FINAL=false` inntil begge runnerne kjøres
+på nytt mot den nye eksakte HEAD-en denne commiten produserer (samme HEAD-bundne regime som
+resten av denne PR-en). `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false`/`UA6_COMPLETE=false`
+uendret - host-akseptanse beviser produkt-/runtime-wiring, IKKE live leverandør-reachability
+eller kriterium 3 sitt PARTIAL leverandør-korrekthets-undergap.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
