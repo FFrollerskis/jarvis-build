@@ -1,6 +1,38 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-27 (**PR #62 - D-114 HOST-VERIFISERT.** Tobias kjørte
+**Oppdatert:** 2026-08-28 (**UA-6 FINANCE & SPEND INTEGRITY GATEWAY - DEDIKERT CLOSEOUT-AUDIT
+(D-115).** Base `main=40fad14bd8fd832f0718b251dce2e944c5b0fef6` (PR #62 sitt merge-commit).
+Eksplisitt Tobias-ordre: IKKE en ny provider-slice, IKKE D-108 - en dedikert audit av HELE UA-6
+(seks allerede-bygde/merget slices) mot masterplanens fem akseptansekriterier, med
+file:line-evidens fra tre uavhengige research-agenter. **RESULTAT: 4 av 5 kriterier FULLT PASS
+med konkret evidens; kriterium 3 PARTIAL** (kun leverandør-korrekthets-undergap - feil-MEN-
+TILSTEDEVÆRENDE `vendor_provider_ref` fanges ikke deterministisk, en iboende ekstern-
+verifiseringsgrense uten live credentials/register, IKKE en implementasjonsdefekt, dokumentert
+siden D-107 sin ORIGINALE design - ingen kosmetisk pseudo-rettelse konstruert). **4 konkrete
+implementasjonsgap funnet OG rettet i SAMME PR (closeout-beslutning C):** (1)
+`finance_procurement_items` sitt `MISSING_EXPECTED_SPEND`-flagg manglet HELT OpenLoop-
+overflating (ny migrasjon `044_finance_procurement_openloop.sql` + `detectMissingProcurement
+Fulfillment()`); (2) Wallester avvist grenseendring var KUN synlig i `card_events`, ikke i
+`card_anomaly_attention` (ny `CARD_SPEND_POLICY_REJECTED`-flagg, selv-korrigerende); (3)
+`NeonomicsTransport.initiateDomesticPayment()` brukte flyttalls-divisjon på et pengebeløp (ny
+`minorUnitsToDecimalString()`, ren strengbasert); (4) manglende regresjonstest for `closeCard`
+under aktiv nødbryter (test-dekningsgap, lagt til). Ellers: idempotens/dobbel-betaling-
+beskyttelse, kill switch-dekning på ALLE aktive pengeutførende stier, BankID/KYC/PSD2/SCA
+ALDRI bypasset, SOR-disiplin uendret, "ukjent forblir ukjent"-fail-safe (Wallester D-114-fiksen
+bekreftet komplett, samme bug-klasse IKKE funnet i Stripe/Vipps/Neonomics), 23/23 UA-6-tabeller
+`FORCE ROW LEVEL SECURITY` - ALLE bekreftet med konkret file:line-evidens + navngitt test.
+**Kvalitetsporter:** `pnpm -w typecheck` 20/20 pakker rent, `pnpm -w lint` rent, full
+workspace-suite **178/178 filer, 2835/2835 tester grønt** (opp fra 178/2822, INGEN regresjon).
+**Flagg:** `UA6_IMPLEMENTATION_COMPLETE=true`, `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false`
+(PARTIAL kriterium 3), `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+`UA6_CREDENTIAL_PHASE_COMPLETE=false`, `D108_COMPLETE=false` (uendret, IKKE startet),
+`UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret. ZERO ekte
+leverandørkredensialer konfigurert eller kontaktet. Branch `claude/ua6-finance-closeout` fra
+eksakt `main`, draft PR, venter på fresh CI. **`MERGE_READY=false` - MERGES IKKE uten Tobias
+sin eksplisitte godkjenning.** Full detalj: D-115 i DECISIONS_AND_ASSUMPTIONS.md,
+IMPLEMENTATION_PLAN.md §«UA-6 DEDIKERT CLOSEOUT».
+
+**Runden før det:** 2026-08-27 (**PR #62 - D-114 HOST-VERIFISERT.** Tobias kjørte
 den guardede, no-credential `wallester-live-host-run.ts` mot eksakt PR-head
 `a5d8c5ae977b6526c7484eae4599f0bd2dd9e059` (fail-closed branch-/HEAD-/rent-
 arbeidstre-guard verifisert FØR kjøring - fanget og korrigerte to stale

@@ -311,6 +311,14 @@ describe("B: kortlivssyklus", () => {
     await expect(cards.unfreezeCard(TENANT_A, "business", card_id)).rejects.toThrow(FinanceKillSwitchActiveError);
   });
 
+  it("UA-6 closeout (D-115): nødbryteren blokkerer ALDRI lukking (irreversibel, spend-reduserende klasse C)", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    const closed = await cards.closeCard(TENANT_A, "business", card_id); // alltid tillatt, samme begrunnelse som freeze over
+    expect(closed.state).toBe("closed");
+  });
+
   it("livssyklushandling mot uinnsendt kort avvises (CardNotSubmittedError)", async () => {
     freshServices();
     const draft = await cards.createCard(TENANT_A, "business", { idempotency_key: `card-idem-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual" });
@@ -341,6 +349,43 @@ describe("C: programmerbare spend-kontroller (ønsket vs provider-anvendt)", () 
     expect(after?.sync_state).toBe("rejected");
     expect(after?.applied_daily_limit_ore).toBe(100_000); // uendret provider-sannhet.
     expect(after?.requested_daily_limit_ore).toBe(200_000); // ærlig requested-vs-applied-avvik.
+  });
+
+  it("UA-6 closeout (D-115): en avvist grenseendring flagger kortet CARD_SPEND_POLICY_REJECTED - overflates av card_anomaly_attention, IKKE lenger kun synlig i card_events", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    gateway.onUpdateLimits = async () => {
+      throw new WallesterApiError("wallester_api_failed_422:limit_rejected", 422, false);
+    };
+    await expect(cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_daily_limit_ore: 200_000 })).rejects.toThrow(WallesterApiError);
+    const card = await cards.getCard(TENANT_A, "business", card_id);
+    expect(card?.anomaly_flags).toContain("CARD_SPEND_POLICY_REJECTED");
+  });
+
+  it("UA-6 closeout (D-115): en gjentatt avvisning legger ALDRI til flagget to ganger (idempotent append)", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    gateway.onUpdateLimits = async () => {
+      throw new WallesterApiError("wallester_api_failed_422:limit_rejected", 422, false);
+    };
+    await expect(cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_daily_limit_ore: 200_000 })).rejects.toThrow(WallesterApiError);
+    await expect(cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_daily_limit_ore: 300_000 })).rejects.toThrow(WallesterApiError);
+    const card = await cards.getCard(TENANT_A, "business", card_id);
+    expect(card?.anomaly_flags.filter((f) => f === "CARD_SPEND_POLICY_REJECTED")).toHaveLength(1);
+  });
+
+  it("UA-6 closeout (D-115): en ETTERFØLGENDE vellykket anvendelse klarerer CARD_SPEND_POLICY_REJECTED (selv-korrigerende)", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    gateway.onUpdateLimits = async () => {
+      throw new WallesterApiError("wallester_api_failed_422:limit_rejected", 422, false);
+    };
+    await expect(cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_daily_limit_ore: 200_000 })).rejects.toThrow(WallesterApiError);
+    expect((await cards.getCard(TENANT_A, "business", card_id))?.anomaly_flags).toContain("CARD_SPEND_POLICY_REJECTED");
+
+    gateway.onUpdateLimits = async (_id, limits) => ({ ...limits, confirmed: true });
+    await cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_daily_limit_ore: 150_000 });
+    expect((await cards.getCard(TENANT_A, "business", card_id))?.anomaly_flags).not.toContain("CARD_SPEND_POLICY_REJECTED");
   });
 
   it("nødbryteren blokkerer grense-ØKNING og kanal-reaktivering, men tillater REDUKSJON", async () => {

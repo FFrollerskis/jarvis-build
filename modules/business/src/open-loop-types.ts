@@ -28,7 +28,9 @@ export type OpenLoopType =
   | "bank_transaction_unmatched"
   | "bank_consent_attention"
   // UA-6 Slice 6 (D-112) - speiler 043_wallester.sql sin utvidede CHECK.
-  | "card_anomaly_attention";
+  | "card_anomaly_attention"
+  // UA-6 closeout (D-115) - speiler 044_finance_procurement_openloop.sql sin utvidede CHECK.
+  | "finance_procurement_missing";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -55,6 +57,8 @@ export interface BusinessOpenLoop {
   finance_spend_record_id: string | null;
   /** UA-6 Finance & Spend Integrity Gateway Slice 2: peker til `finance_recurring_commitments`, null for ikke-forpliktelses-loops. */
   finance_recurring_commitment_id: string | null;
+  /** UA-6 closeout (D-115): peker til `finance_procurement_items`, null for ikke-anskaffelses-loops. */
+  finance_procurement_item_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
