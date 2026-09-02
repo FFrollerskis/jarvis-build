@@ -20,6 +20,11 @@ import {
 } from "./banking-types.ts";
 import type { BankAccount, BankConsent } from "./banking-types.ts";
 import {
+  createVendor, getVendor, listVendors, bindVendorProvider, revokeVendorProviderBinding, listVendorBindings, assertValidVendorBinding,
+  VendorNotFoundError,
+  type FinanceVendor, type FinanceVendorProviderBinding
+} from "./vendor-registry.ts";
+import {
   ACCOUNT_CODE_PATTERN,
   CURRENCY_PATTERN,
   FikenCredentialsUnavailableError,
@@ -61,6 +66,7 @@ import type {
   FinanceKillSwitch,
   PaymentIntent,
   PaymentIntentEventType,
+  PaymentProvider,
   PaymentIntentState,
   StripeAnomalyType,
   StripeProviderAnomalyDetectionResult,
@@ -314,17 +320,22 @@ export class FinanceService {
       if (!input.vendor_provider_ref) anomalyFlags.push("vendor_provider_ref_missing_at_creation");
       if (!input.counter_account_code) anomalyFlags.push("counter_account_code_missing_at_creation");
 
+      if (input.vendor_id) {
+        const vendor = await getVendor(client, tenantId, input.vendor_id);
+        if (!vendor) throw new VendorNotFoundError(input.vendor_id);
+      }
+
       const paymentIntentId = `fin-pi-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO payment_intents
            (payment_intent_id, tenant_id, memory_space_id, idempotency_key, purpose, amount_ore, currency,
-            vendor_name, vendor_provider_ref, account_code, counter_account_code, owner_person_id, anomaly_flags, provider)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            vendor_name, vendor_provider_ref, vendor_id, account_code, counter_account_code, owner_person_id, anomaly_flags, provider)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
          RETURNING *`,
         [
           paymentIntentId, tenantId, memorySpace, input.idempotency_key, input.purpose, input.amount_ore,
-          input.currency ?? "NOK", input.vendor_name, input.vendor_provider_ref ?? null, input.account_code,
+          input.currency ?? "NOK", input.vendor_name, input.vendor_provider_ref ?? null, input.vendor_id ?? null, input.account_code,
           input.counter_account_code ?? null, input.owner_person_id ?? null, JSON.stringify(anomalyFlags),
           // D-109: eksplisitt `provider` - `?? "fiken"` matcher DB-defaulten
           // byte-for-byte, så en kaller som aldri sender feltet (all
@@ -419,6 +430,18 @@ export class FinanceService {
       }
 
       assertValidPaymentIntentTransition(current.state, "submitted");
+
+      // D-116: DEN kanoniske vendor-korrekthets-choke-pointen - kjøres FØR
+      // ALLE fire provider-grener under (fiken/stripe/vipps/neonomics), i
+      // SAMME transaksjon/lås som `readForUpdate()` over. Utløses KUN når
+      // intensjonen eksplisitt hevder en canonical vendor (`vendor_id`) -
+      // en mismatch/revokert binding kaster FØR noe utgående provider-kall
+      // skjer (byggeordrens §5, "provider transport invocation count = 0"
+      // ved mismatch). `vendor_id = NULL` (enhver historisk eller bevisst
+      // vendor-fri intent) omgår denne HELT - "ukjent forblir ukjent".
+      if (current.vendor_id) {
+        await assertValidVendorBinding(client, tenantId, paymentIntentId, current.vendor_id, current.provider, current.vendor_provider_ref);
+      }
 
       if (current.provider === "stripe") {
         const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
@@ -630,6 +653,32 @@ export class FinanceService {
     });
     if (!outcome.ok) throw outcome.error;
     return outcome.intent;
+  }
+
+  // --- D-116: vendor-identitetsregister (JARVIS_CANONICAL) ---
+  // Tynne wrappere rundt de rene funksjonene i `vendor-registry.ts` - egen
+  // transaksjon PER kall (IKKE del av en pengehandlings-transaksjon; kun
+  // `assertValidVendorBinding()` selv kjøres inne i `submitPaymentIntent()`
+  // sin transaksjon, se der).
+
+  async createVendor(tenantId: string, memorySpace: MemorySpace, name: string, actorPersonId?: string): Promise<FinanceVendor> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => createVendor(client, tenantId, memorySpace, name, actorPersonId));
+  }
+
+  async listVendors(tenantId: string, memorySpace: MemorySpace, limit?: number): Promise<FinanceVendor[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => listVendors(client, tenantId, memorySpace, limit));
+  }
+
+  async bindVendorProvider(tenantId: string, memorySpace: MemorySpace, vendorId: string, provider: PaymentProvider, providerVendorRef: string, actorPersonId?: string): Promise<FinanceVendorProviderBinding> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => bindVendorProvider(client, tenantId, memorySpace, vendorId, provider, providerVendorRef, actorPersonId));
+  }
+
+  async revokeVendorProviderBinding(tenantId: string, memorySpace: MemorySpace, provider: PaymentProvider, providerVendorRef: string, actorPersonId?: string): Promise<FinanceVendorProviderBinding | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => revokeVendorProviderBinding(client, tenantId, provider, providerVendorRef, actorPersonId));
+  }
+
+  async listVendorBindings(tenantId: string, memorySpace: MemorySpace, vendorId: string): Promise<FinanceVendorProviderBinding[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) => listVendorBindings(client, tenantId, vendorId));
   }
 
   /** Eier/agent markerer en intensjon som endelig oppgjort (f.eks. etter manuell bankavstemming) - egen, eksplisitt handling, ALDRI auto-utledet. */

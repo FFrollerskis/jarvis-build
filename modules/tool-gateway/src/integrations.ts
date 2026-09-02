@@ -1569,7 +1569,9 @@ export function firstWaveTools(
         vendor_provider_ref: z.string().optional(), account_code: z.string(), counter_account_code: z.string().optional(),
         owner_person_id: z.string().optional(), actor_person_id: z.string().optional(),
         // D-109: valgfri - udefinert beholder DB-defaulten 'fiken'.
-        provider: z.enum(["fiken", "stripe", "vipps", "neonomics"]).optional()
+        provider: z.enum(["fiken", "stripe", "vipps", "neonomics"]).optional(),
+        // D-116: valgfri eksplisitt canonical vendor-identitet (finance_vendors.vendor_id) - udefinert gir INGEN vendor-korrekthetskontroll (byte-for-byte uendret for enhver eksisterende kaller).
+        vendor_id: z.string().optional()
       }),
       capability_class: "B", scopes: ["finance.write"], reversible: true,
       rollback_procedure: "cancel_payment_intent (kun gyldig fra draft - ingen provider-side-effekt å rulle tilbake)", idempotent_external: true,
@@ -1642,6 +1644,47 @@ export function firstWaveTools(
     {
       tool_id: "finance", action: "get_kill_switch", description: "Les gjeldende finans-nødbryter-tilstand for tenanten",
       input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    // UA-6 Finance & Spend Integrity Gateway - HARDENING (D-116): vendor-
+    // identitetsregister. REN lokal Jarvis-tilstandsmutasjon (klasse B,
+    // SAMME begrunnelse som create_payment_intent/settle/cancel over) -
+    // ALDRI et provider-kall. Selve pengehandlingen som BRUKER en binding
+    // (submit_payment_intent) forblir uendret klasse D.
+    {
+      tool_id: "finance", action: "create_vendor", description: "Opprett en ny canonical Jarvis-vendor-identitet (D-116 vendor-identitetsregister)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), name: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: false,
+      rollback_procedure: "ingen automatisk sletting bygget denne sliceen - vendor forblir registrert inntil eksplisitt Q-20-erasure", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "list_vendors", description: "List canonical Jarvis-vendor-identiteter for tenanten",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "bind_vendor_provider", description: "Registrer/reaktiver DEN eier-/systemregistrerte provider-referansen for en canonical vendor (fiken/stripe/vipps/neonomics) - denne bindingen er selve identitetsmatchen submit_payment_intent validerer mot FØR provider-kallet",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), vendor_id: z.string(), provider: z.enum(["fiken", "stripe", "vipps", "neonomics"]), provider_vendor_ref: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "revoke_vendor_provider_binding",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "revoke_vendor_provider_binding", description: "Revoker en vendor-provider-binding - en revokert binding kan ALDRI brukes for en NY pengehandling (submit_payment_intent feiler deterministisk FØR provider-kall)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), provider: z.enum(["fiken", "stripe", "vipps", "neonomics"]), provider_vendor_ref: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["finance.write"], reversible: true, rollback_procedure: "bind_vendor_provider på nytt med samme vendor",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("finance")
+    },
+    {
+      tool_id: "finance", action: "list_vendor_bindings", description: "List alle provider-bindinger (aktive og revokerte) for én canonical vendor",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), vendor_id: z.string() }),
       capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance")
