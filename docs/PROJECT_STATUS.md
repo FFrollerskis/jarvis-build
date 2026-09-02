@@ -1,6 +1,49 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-08-28 (**PR #64 - D-115 GUARDED HOST ACCEPTANCE BESTÅTT.** Fresh CI GRØNN på
+**Oppdatert:** 2026-08-28 (**PR #64 - D-115 UA-6 CLOSEOUT: FINAL-HEAD HOST ACCEPTANCE BESTÅTT,
+MERGET.** Ren governance/truth-sync (denne runden endrer INGEN kode/tester/migrasjoner - kun
+`docs/**`). Tobias kjørte de to navngitte guardede host-akseptanse-runnerne på nytt mot PR #64 sin
+FAKTISKE final executable HEAD `9e5f8cecdac4398c522d24916abd413911d5e6af` (den forrige
+docs-closeout-commiten selv, som den forrige statuslinjen korrekt flagget måtte re-testes).
+**Spend-integrity (`spend-integrity-live-host-run.ts`), `run_id=cef5f134`:** PASS, inkl.
+`finance_procurement_openloop=PASS`, `leaked_to_tenant_b=false`, `hard_fail=false`. **Wallester
+(`wallester-live-host-run.ts`), `run_id=f2fe17d1`:** PASS, inkl.
+`wallester_spend_policy_rejection_openloop=PASS` og `wallester_kill_switch_semantics=PASS`
+(`close_allowed=true`, `passive_paths_okay=true`), `hard_fail=false`. `PR64_FINAL_HEAD_HOST_
+ACCEPTANCE=PASS`. ZERO ekte credentials, ZERO live provider-kall i noen av kjøringene. Den
+tidligere pre-docs host-kjøringen (head `578b45898a96...`, spend `run_id=6a362680`, Wallester
+`run_id=34f7e900`) FORBLIR gyldig historisk evidens for den daværende HEAD-en - den senere
+final-head-kjøringen over ERSTATTER behovet for ytterligere ny host-akseptanse for PR #64 sin
+faktiske merge-payload.
+
+**PR #64 ble deretter merget etter eksplisitt merge-godkjenning fra Tobias, som en normal
+two-parent merge, etter denne final-head-host-akseptansen:** `PR64_MERGED=true`,
+`PR64_MERGE_SHA=1bc9cf090ebb8ea8df9859a1ab34d3577d6a641f`,
+`NORMAL_TWO_PARENT_MERGE=true` (foreldre `40fad14b` base + `9e5f8ce` PR64 final head - INGEN
+uvanlig merge-topologi). `POST_MERGE_CI=PASS` (`run=33171106394`/#450: build-test/gitleaks/
+windows-git-auth alle PASS på `main`). `LOCAL_MAIN_SYNC=PASS` (lokal `main` verifisert eksakt lik
+`origin/main` = `1bc9cf0...` før denne truth-sync-branchen ble opprettet fra samme SHA).
+
+**Denne statuslinjen selv er en docs-only truth-sync-PR** (branch `claude/ua6-final-truth-sync`
+fra eksakt `main=1bc9cf0...`) som retter opp foregående statuslinje sin nå-utdaterte
+`HOST_ACCEPTANCE_FINAL=false`/`FINAL_HEAD_HOST_ACCEPTANCE_REQUIRED=true`/"PR #64 forblir draft,
+IKKE merget" - disse var SANNE på det tidspunktet de ble skrevet (FØR final-head-host-kjøringen og
+merge), men er nå objektivt utdatert og erstattes her. `HOST_ACCEPTANCE_REQUIRED=false` for DENNE
+truth-sync-PR-en spesifikt (ingen kildekode/scripts/tester/migrasjoner endret - kun allerede
+inntrufne, verifiserte hendelser registrert).
+
+**Flagg-disiplin uendret (ingen forfremming - dette er evidensregistrering, ikke ny audit):**
+`UA6_IMPLEMENTATION_COMPLETE=true`, `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=false` (kriterium 3
+forblir PARTIAL - leverandør-korrekthets-undergapet er en iboende grense, IKKE en
+implementasjonsdefekt), `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+`UA6_CREDENTIAL_PHASE_COMPLETE=false`, `D108_COMPLETE=false` (D-108 fortsatt IKKE startet),
+`UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` uendret.
+`D108_DEFERRED_POLICY_PRESERVED=true`. Wallester signeringsmateriale uendret fra D-114:
+`BUSINESS_AUTH_SIGNING_MATERIAL=PRIMARY_SOURCE_PUBLIC_DOC_GAP`, `PRIVATE_KEY_PEM`-
+produksjonsnøkkel-provisjoneringskilden FORTSATT IKKE primærkilde-verifisert. Full detalj: D-115 i
+DECISIONS_AND_ASSUMPTIONS.md, IMPLEMENTATION_PLAN.md §«UA-6 DEDIKERT CLOSEOUT».
+
+**Runden før det:** 2026-08-28 (**PR #64 - D-115 GUARDED HOST ACCEPTANCE BESTÅTT.** Fresh CI GRØNN på
 eksakt head `578b45898a96bc3f861a5c121c8e218a672ae463` (branch `claude/ua6-finance-closeout`,
 build-test/gitleaks/windows-git-auth alle PASS på BÅDE push- og pull_request-trigger). Tobias
 kjørte deretter BEGGE de utvidede guardede host-akseptanse-runnerne mot nøyaktig samme HEAD -
