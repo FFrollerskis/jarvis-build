@@ -3380,6 +3380,15 @@ UENDRET: `UA6_COMPLETE=false`/`D108_COMPLETE=false` (styrt av D-108-avhengighete
 detalj: D-118 sitt addendum i DECISIONS_AND_ASSUMPTIONS.md. PR #66 forblir draft - INGEN merge
 uten Tobias sin eksplisitte godkjenning.
 
+**SUPERSEDERT (2026-09-02, samme dag):** en påfølgende ren docs-commit (`04f5d7b`, registrerte
+NETTOPP kjøringen over) flyttet HEAD forbi `3a4255b`. Tobias kjørte host-akseptansen EN FJERDE
+gang mot den faktiske eksakte HEAD-en `04f5d7b4c7e4a14af23585eabcde6dfe87fa2830`: **run
+`run_id=6a4b83ac`, ALLE 18 markører PASS, `hard_fail=false`.** Dette er nå DEN AUTORITATIVE
+D-116 host-akseptansen (`run_id=9d33892e`/`HEAD=3a4255b` forblir gyldig historisk evidens for
+den daværende HEAD-en, ikke lenger gjeldende registrering). `D116_HOST_ACCEPTANCE_FINAL=true`
+forankret til `run_id=6a4b83ac`/`HEAD=04f5d7b`. Full detalj: D-118 sitt siste addendum i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
