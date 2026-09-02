@@ -11,8 +11,16 @@ import { describe, expect, it } from "vitest";
  * `counter_account_code` FØR selve Fiken-transporten nås) kastet deretter
  * `MissingCounterAccountError`, så `finance_vendor_binding_match` ble
  * stående `NOT_RUN` (harness-fixturfeil, ikke en vendor-registry-runtime-feil).
- * Denne suiten beviser strukturelt at fixturen forblir komplett, uten å
- * kjøre selve host-scriptet (det er host-akseptansens jobb).
+ *
+ * HOST FIX #2 (D-118, run_id c0c91446): fixturen var deretter strukturelt
+ * komplett, men den positive assertionen forventet feilaktig
+ * `submitted.state === "submitted"`. Den EKSISTERENDE, uendrede Fiken-
+ * grenen i `service.ts` setter alltid `state = 'provider_acknowledged'`
+ * (ALDRI 'submitted') rett etter en vellykket `createGeneralJournalEntry()`
+ * - `HARNESS_EXPECTATION_FAILURE`, ikke en runtime-feil. Denne suiten
+ * beviser strukturelt at BÅDE fixturens payload OG selve suksess-
+ * assertionen forblir låst til den kanoniske eksisterende Fiken-semantikken,
+ * uten å kjøre selve host-scriptet (det er host-akseptansens jobb).
  */
 function readSource(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
@@ -29,5 +37,13 @@ describe("VENDOR BINDING MATCH-fixturen (D-116) er strukturelt komplett for Fike
     const section = liveScriptSource.slice(sectionIdx, nextSectionIdx);
     expect(section).toMatch(/vendor_provider_ref:\s*`fiken-ref-\$\{runId\}`/);
     expect(section).toContain('counter_account_code: "1920"');
+  });
+
+  it("suksess-assertionen forventer den kanoniske eksisterende Fiken-suksesstilstanden 'provider_acknowledged', ALDRI 'submitted'", () => {
+    const sectionIdx = liveScriptSource.indexOf('"VENDOR BINDING MATCH');
+    const nextSectionIdx = liveScriptSource.indexOf('"VENDOR BINDING MISMATCH BLOCKED');
+    const section = liveScriptSource.slice(sectionIdx, nextSectionIdx);
+    expect(section).toContain('submitted.state === "provider_acknowledged" && dispatched');
+    expect(section).not.toMatch(/submitted\.state\s*===\s*"submitted"/);
   });
 });

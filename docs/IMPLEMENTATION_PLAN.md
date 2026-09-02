@@ -3356,6 +3356,19 @@ vendor-gate, men i `spend-integrity-live.ts` sin "VENDOR BINDING MATCH"-fixture,
 ny strukturell regresjonstest. Full detalj: D-117 i DECISIONS_AND_ASSUMPTIONS.md. `D116_HOST_
 ACCEPTANCE_FINAL=false` inntil host-akseptansen kjøres på nytt mot den nye HEAD-en.
 
+**HOST FIX #2 (D-118, 2026-09-02):** andre host-akseptanse (`run_id=c0c91446`, testet HEAD
+`8c0a328` etter D-117) feilet igjen (`finance_vendor_binding_match=FAIL`, `hard_fail=true`) -
+denne gangen var fixturen strukturelt komplett, men suksess-assertionen forventet feilaktig
+`submitted.state === "submitted"`. Den EKSISTERENDE, uendrede Fiken-grenen i `service.ts` setter
+alltid `state = 'provider_acknowledged'` etter en vellykket `createGeneralJournalEntry()`, ALDRI
+'submitted'. Klassifisert `HARNESS_EXPECTATION_FAILURE`, IKKE `VENDOR_REGISTRY_RUNTIME_FAILURE`
+eller `FIKEN_RUNTIME_FAILURE` - vendor-bindingen ble godtatt korrekt, Fiken-faken ble nådd EKSAKT
+én gang, hele flyten fullførte normalt. Minimal fiks (kun forventet streng i harnesset) + utvidet
+den EKSISTERENDE regresjonstesten fra D-117. Full detalj: D-118 i DECISIONS_AND_ASSUMPTIONS.md.
+Begge historiske mislykkede kjøringer (`f271e1db`/`c0c91446`) bevart ærlig, ingen brukt som final
+D-116 host-akseptanse. `D116_HOST_ACCEPTANCE_FINAL=false` inntil host-akseptansen kjøres på nytt
+(en TREDJE gang) mot den nye HEAD-en denne fiksen produserer.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

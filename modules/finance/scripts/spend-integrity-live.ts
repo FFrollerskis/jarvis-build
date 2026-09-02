@@ -315,7 +315,14 @@ async function main(): Promise<void> {
     const before = fikenCalls.length;
     const submitted = await financeVendorProof.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, fakeFikenCredentialsProvider, OWNER_PERSON);
     const dispatched = fikenCalls.length === before + 1;
-    results.finance_vendor_binding_match = submitted.state === "submitted" && dispatched ? "PASS" : "FAIL";
+    // HOST FIX #2 (D-118, run_id c0c91446): den EKSISTERENDE, uendrede Fiken-
+    // grenen i service.ts (linje ~638) setter `state = 'provider_acknowledged'`
+    // - IKKE 'submitted' - rett etter en vellykket `createGeneralJournalEntry()`.
+    // Denne D-116-fixturen forventet feilaktig 'submitted' (en tilstand Fiken-
+    // stien aldri returnerer som SLUTTRESULTAT av selve innsendingskallet).
+    // HARNESS_EXPECTATION_FAILURE, IKKE en vendor-registry- eller Fiken-
+    // runtime-feil - produksjonskoden er UENDRET, kun denne forventningen rettes.
+    results.finance_vendor_binding_match = submitted.state === "provider_acknowledged" && dispatched ? "PASS" : "FAIL";
     log(`vendor_id=${vendorId} submitted_state=${submitted.state} fiken_dispatched=${dispatched} -> finance_vendor_binding_match: ${results.finance_vendor_binding_match}`);
   });
 
