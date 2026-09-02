@@ -249,6 +249,16 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "bank_accounts", await run(client, mode, "bank_accounts", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "bank_consents", await run(client, mode, "bank_consents", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "payment_intents", await run(client, mode, "payment_intents", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-116 (UA-6 HARDENING, 045_finance_vendor_registry.sql): vendor-
+  // identitetsregisteret. `payment_intents.vendor_id` er en FK ->
+  // `finance_vendors` - `payment_intents` slettes derfor allerede FØR
+  // (linjen over) `finance_vendors` kan slettes. `finance_vendor_provider_
+  // bindings` har SIN EGEN FK -> `finance_vendors` (vendor_id) - SAMME
+  // "barn-FK FØR forelder"-regel, MÅ derfor slettes FØR `finance_vendors`
+  // her under. Ingen FK fra business_open_loops eller andre tabeller inn
+  // til vendor-registeret (ingen forhåndsslettet open-loop-blokk nødvendig).
+  add(result, "finance_vendor_provider_bindings", await run(client, mode, "finance_vendor_provider_bindings", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "finance_vendors", await run(client, mode, "finance_vendors", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
   // `business_contacts` er FORTSATT IKKE registrert i denne erasure-planen

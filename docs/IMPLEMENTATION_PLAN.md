@@ -3298,6 +3298,57 @@ over.
 
 ---
 
+### UA-6 HARDENING — Deterministisk vendor-identitet/vendor-provider-reference-validering (D-116, 2026-09-02)
+
+Eksplisitt Tobias-ordre (delegert valg av neste steg): lukk UA-6 sitt ENESTE gjenværende
+D-115-arkitekturgap (kriterium 3b, PARTIAL - se D-115 over) UTEN D-108, UTEN ekte credentials,
+UTEN ekte leverandørkall, UTEN å starte UA-7. Base: `main=12f642b44f679bd8cf6f8604c78268e2ccb94b21`
+(PR #65 sitt merge-commit, verifisert eksakt match mot lokal `claude/ua6-vendor-registry` FØR
+implementering startet - ingen annen åpen PR dekket samme gap). Full arkitekturbegrunnelse,
+D-64-port og reuse-audit: D-116 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Ny struktur:** migrasjon `045_finance_vendor_registry.sql` (`finance_vendors` +
+`finance_vendor_provider_bindings`, `UNIQUE (tenant_id, provider, provider_vendor_ref)`, FORCE RLS,
+additiv `payment_intents.vendor_id`); ny `modules/finance/src/vendor-registry.ts`
+(`assertValidVendorBinding()` = den nye choke-pointen); `FinanceService.submitPaymentIntent()`
+kaller den FØR alle fire provider-grener; `modules/erasure/src/plan.ts` utvidet (barn-FK-før-
+forelder); `ToolGateway` fikk `create_vendor`/`list_vendors`/`bind_vendor_provider`/
+`revoke_vendor_provider_binding`/`list_vendor_bindings`.
+
+**RE-EVALUERT MASTERPLAN-AKSEPTANSEKRITERIUM 3** (masterplanens eksakte tekst: "Wrong
+account/vendor/amount-format and duplicate intents are deterministically caught.") - alle FIRE
+delkrav re-vurdert med konkret file:line-evidens, ALDRI inferert PASS:
+
+| Delkrav | Status | Evidens (file:line) |
+|---|---|---|
+| 3a. Feil konto (account_code) | PASS (uendret fra D-115) | `service.ts:300/305` `InvalidAccountCodeError` mot `ACCOUNT_CODE_PATTERN` (FØR providerkall); DB-nivå `CHECK (account_code ~ '^\d{4}(:\d{5})?$')` (`038_finance.sql:54`); testbevist `service-rls.test.ts:132-134,140-141` |
+| 3b. Feil vendor (vendor_provider_ref) | **PASS (NYTT - lukket denne sliceen, tidligere PARTIAL i D-115)** | `vendor-registry.ts` `assertValidVendorBinding()` kalt fra `service.ts` (submitPaymentIntent, rett etter `assertValidPaymentIntentTransition()`, FØR alle fire provider-grener); DB `UNIQUE (tenant_id, provider, provider_vendor_ref)` (`045_finance_vendor_registry.sql`) gjør et binding-kollisjons-scenario STRUKTURELT umulig; testbevist `modules/finance/test/vendor-registry.test.ts` (23 tester, scenario 2-9 dekker mismatch/revoked/tenant-/provider-isolasjon, `fikenCalls.length===0` på ALLE mismatch-klasser) + `spend-integrity-live.ts` sine tre nye host-markører (ekte Postgres/RLS, ZERO ekte credentials/kall) |
+| 3c. Feil beløpsformat | PASS (uendret fra D-115) | `service.ts:290` `InvalidAmountError` (ikke-heltall/`<=0`), `service.ts:292` `InvalidCurrencyError`; DB `CHECK (amount_ore > 0)` (`038_finance.sql:42`); testbevist `service-rls.test.ts:121-130` |
+| 3d. Duplikat intent | PASS (uendret fra D-115) | `service.ts:331-347` `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` + eksisterende-rad-retur; DB `UNIQUE (tenant_id, idempotency_key)` (`038_finance.sql:83`); testbevist `service-rls.test.ts:101-114` |
+
+**Alle FIRE delkrav nå PASS med konkret file:line/test-evidens → `UA6_ARCHITECTURE_ACCEPTANCE_
+COMPLETE=true`** (opp fra `false` i D-115 - kriterium 3 var det ENESTE PARTIAL-kriteriet av
+masterplanens fem; kriterium 1/2/4/5 var allerede FULLT PASS i D-115 og er UENDRET av denne
+sliceen). Dette er en ren arkitektur-akseptanse-forfremmelse basert på faktisk ny determinisme,
+IKKE en kosmetisk omklassifisering - selve gapet (syntaktisk gyldig men feil `vendor_provider_ref`)
+er nå strukturelt lukket av choke-pointen over.
+
+**Flagg som EKSPLISITT FORBLIR UENDRET (ingen falsk forfremmelse utover kriterium 3):**
+`UA6_IMPLEMENTATION_COMPLETE=true` (uendret), `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+`UA6_CREDENTIAL_PHASE_COMPLETE=false`, `D108_COMPLETE=false`, `UA6_COMPLETE=false` (fortsatt
+styrt av D-108-avhengigheten ALENE nå, siden arkitektur-aksept-halvparten er lukket),
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`, `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`. Vendor-registeret er et Jarvis-internt
+korrekthets-register (`JARVIS_CANONICAL` - "dette er den registrerte referansen"), ALDRI live
+leverandør-verifisering av at referansen faktisk eksisterer hos leverandøren - D-108 forblir den
+eneste gjenværende UA-6-sluttporten.
+
+**Kvalitetsporter, branch, PR, host-akseptanse-status og eksakt endelig HEAD:** registreres i
+PROJECT_STATUS.md og PR-beskrivelsen for å unngå SHA-drift mellom dokumenter (samme prinsipp som
+D-114/D-115).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

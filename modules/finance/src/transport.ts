@@ -1,7 +1,7 @@
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import type { FinanceService, FikenCredentialsProvider } from "./service.ts";
-import type { CreatePaymentIntentInput, PaymentIntentState } from "./types.ts";
+import type { CreatePaymentIntentInput, PaymentIntentState, PaymentProvider } from "./types.ts";
 
 /**
  * UA-6 Finance & Spend Integrity Gateway (D-107): provider-nøytralt
@@ -41,6 +41,8 @@ export class FinanceTransport implements ToolTransport {
           account_code: requireString(parameters, "account_code"),
           ...(parameters["currency"] !== undefined ? { currency: String(parameters["currency"]) } : {}),
           ...(parameters["vendor_provider_ref"] !== undefined ? { vendor_provider_ref: String(parameters["vendor_provider_ref"]) } : {}),
+          // D-116: valgfri eksplisitt canonical vendor-identitet - udefinert beholder byte-for-byte uendret oppførsel (INGEN vendor-korrekthetskontroll for denne intenten).
+          ...(parameters["vendor_id"] !== undefined ? { vendor_id: String(parameters["vendor_id"]) } : {}),
           ...(parameters["counter_account_code"] !== undefined ? { counter_account_code: String(parameters["counter_account_code"]) } : {}),
           ...(parameters["owner_person_id"] !== undefined ? { owner_person_id: String(parameters["owner_person_id"]) } : {}),
           ...(actorPersonId !== undefined ? { actor_person_id: actorPersonId } : {}),
@@ -94,6 +96,37 @@ export class FinanceTransport implements ToolTransport {
       case "get_kill_switch": {
         const row = await this.service.getKillSwitch(tenantId);
         return { data: row as unknown as JsonValue };
+      }
+      // D-116: vendor-identitetsregister (JARVIS_CANONICAL) - REN lokal
+      // tilstandsmutasjon, ALDRI et provider-kall. `bind_vendor_provider`/
+      // `revoke_vendor_provider_binding` styrer HVILKEN provider-referanse
+      // som anses korrekt for en canonical vendor - selve pengehandlingen
+      // som faktisk BRUKER bindingen (`submit_payment_intent`) forblir
+      // uendret klasse D.
+      case "create_vendor": {
+        const row = await this.service.createVendor(tenantId, memorySpace, requireString(parameters, "name"), actorPersonId);
+        return { external_id: row.vendor_id, data: row as unknown as JsonValue };
+      }
+      case "list_vendors": {
+        const rows = await this.service.listVendors(tenantId, memorySpace, parameters["limit"] !== undefined ? Number(parameters["limit"]) : undefined);
+        return { data: rows as unknown as JsonValue };
+      }
+      case "bind_vendor_provider": {
+        const row = await this.service.bindVendorProvider(
+          tenantId, memorySpace, requireString(parameters, "vendor_id"),
+          requireString(parameters, "provider") as PaymentProvider, requireString(parameters, "provider_vendor_ref"), actorPersonId
+        );
+        return { external_id: row.binding_id, data: row as unknown as JsonValue };
+      }
+      case "revoke_vendor_provider_binding": {
+        const row = await this.service.revokeVendorProviderBinding(
+          tenantId, memorySpace, requireString(parameters, "provider") as PaymentProvider, requireString(parameters, "provider_vendor_ref"), actorPersonId
+        );
+        return { ...(row ? { external_id: row.binding_id } : {}), data: row as unknown as JsonValue };
+      }
+      case "list_vendor_bindings": {
+        const rows = await this.service.listVendorBindings(tenantId, memorySpace, requireString(parameters, "vendor_id"));
+        return { data: rows as unknown as JsonValue };
       }
       default:
         throw new Error(`finance_action_not_implemented:${action}`);

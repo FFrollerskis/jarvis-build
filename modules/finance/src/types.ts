@@ -41,6 +41,8 @@ export interface PaymentIntent {
   currency: string;
   vendor_name: string;
   vendor_provider_ref: string | null;
+  /** D-116: peker til `finance_vendors` - NULLABLE, "ukjent forblir ukjent" for enhver intent som ikke eksplisitt hevder en canonical vendor-identitet. Se `vendor-registry.ts`. */
+  vendor_id: string | null;
   account_code: string;
   counter_account_code: string | null;
   provider: PaymentProvider;
@@ -103,6 +105,8 @@ export interface CreatePaymentIntentInput {
   currency?: string;
   vendor_name: string;
   vendor_provider_ref?: string;
+  /** D-116: valgfri eksplisitt canonical vendor-identitet (`finance_vendors.vendor_id`) - `undefined` betyr INGEN vendor-korrekthetskontroll for denne intenten (byte-for-byte uendret oppførsel for enhver kaller fra FØR denne sliceen). */
+  vendor_id?: string;
   account_code: string;
   /** Motkonto (bank-/kontantkonto) for balansert postering - se `MissingCounterAccountError`. */
   counter_account_code?: string;

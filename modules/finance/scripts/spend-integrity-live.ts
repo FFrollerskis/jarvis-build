@@ -20,7 +20,10 @@
 
 import { randomUUID } from "node:crypto";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool } from "@jarvis/core";
-import { FinanceService, SpendService } from "../src/index.ts";
+import {
+  FinanceService, SpendService,
+  type FikenCredentials, type FikenCredentialsProvider, type FikenGeneralJournalEntryWriter
+} from "../src/index.ts";
 import { OpenLoopService } from "../../business/src/index.ts";
 
 type Verdict = "PASS" | "FAIL" | "NOT_RUN";
@@ -37,6 +40,14 @@ const results: Record<string, Verdict> = {
   finance_spend_reconciliation: "NOT_RUN",
   finance_spend_openloop: "NOT_RUN",
   finance_procurement_openloop: "NOT_RUN",
+  // D-116 (UA-6 HARDENING, migrasjon 045): vendor-identitetsregisteret.
+  // ZERO ekte provider-credentials/kall - `fikenTransportFactory` er en
+  // lokal fake (SAMME mønster som `vendor-registry.test.ts`), så disse tre
+  // markørene beviser den EKTE Postgres/RLS/runtime-choke-pointen i
+  // `FinanceService.submitPaymentIntent()` uten noensinne å nå nettverket.
+  finance_vendor_binding_match: "NOT_RUN",
+  finance_vendor_binding_mismatch_blocked: "NOT_RUN",
+  finance_vendor_binding_tenant_isolation: "NOT_RUN",
   finance_spend_tenant_isolation: "NOT_RUN",
   finance_spend_cleanup: "NOT_RUN"
 };
@@ -69,6 +80,26 @@ const TENANT_B = `tenant-spend-live-${runId}-b`;
 const OWNER_PERSON = `person-spend-live-${runId}`;
 let campaignId = "";
 
+// D-116: dedikert vendor-binding-bevis krever en `submitPaymentIntent()`-
+// kjøring HELT gjennom `FinanceService` sin ekte runtime-kodesti, MEN §14/§1
+// forbyr ekte provider-credentials/-kall. Denne faken (SAMME mønster som
+// `vendor-registry.test.ts`) erstatter KUN selve Fiken-HTTP-transporten -
+// alle deterministiske håndhevelser (vendor-gaten inkludert) kjører ekte,
+// mot ekte Postgres/RLS, FØR faken noensinne nås. `fikenCalls.length` er
+// derfor et gyldig bevis for "provider transport invocation count".
+const fikenCalls: Array<{ description: string }> = [];
+const fakeFikenTransportFactory = (_credentials: FikenCredentials): FikenGeneralJournalEntryWriter => ({
+  async createGeneralJournalEntry(input) {
+    fikenCalls.push({ description: input.description });
+    return { journalEntryId: 99, description: input.description, date: input.date };
+  }
+});
+const fakeFikenCredentialsProvider: FikenCredentialsProvider = {
+  async getCredentials(): Promise<FikenCredentials | null> {
+    return { refreshToken: "d116-host-acceptance-fake-refresh-token", companySlug: "d116-host-acceptance-fake-company" };
+  }
+};
+
 async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM business_open_loops WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM finance_spend_records WHERE tenant_id = $1", [tenantId]);
@@ -80,6 +111,11 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM cost_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM payment_intent_events WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM payment_intents WHERE tenant_id = $1", [tenantId]);
+  // D-116 (migrasjon 045): barn-FK FØR forelder - `payment_intents.vendor_id`
+  // er allerede slettet over; `finance_vendor_provider_bindings` har SIN
+  // EGEN FK -> `finance_vendors` og MÅ derfor også vekk før selve vendoren.
+  await adminPool.query("DELETE FROM finance_vendor_provider_bindings WHERE tenant_id = $1", [tenantId]);
+  await adminPool.query("DELETE FROM finance_vendors WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM finance_kill_switch WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM tool_executions WHERE tenant_id = $1", [tenantId]);
   await adminPool.query("DELETE FROM memory_spaces WHERE tenant_id = $1", [tenantId]);
@@ -248,6 +284,64 @@ async function main(): Promise<void> {
     const leakedToTenantB = loopsB.some((l) => l.finance_procurement_item_id === procurementId);
     results.finance_procurement_openloop = procurementLoop !== undefined && !leakedToTenantB ? "PASS" : "FAIL";
     log(`finance_procurement_missing_loop_found=${procurementLoop !== undefined} procurement_id=${procurementId} leaked_to_tenant_b=${leakedToTenantB} -> finance_procurement_openloop: ${results.finance_procurement_openloop}`);
+  });
+
+  // ===== D-116 (UA-6 HARDENING, migrasjon 045): vendor-identitetsregister =====
+  // Egen FinanceService-instans med en LOKAL FAKE Fiken-transport (SAMME
+  // mønster som `vendor-registry.test.ts`) - beviser den EKTE
+  // `submitPaymentIntent()`-choke-pointen mot ekte Postgres/RLS UTEN
+  // noensinne å nå et ekte nettverk eller trenge ekte credentials (§0/§1/
+  // §14 forbyr begge deler for denne sliceen).
+  const financeVendorProof = new FinanceService(pool, fakeFikenTransportFactory);
+  let vendorId = "";
+  await section("VENDOR BINDING MATCH (D-116 - korrekt registrert vendor/provider/ref slipper gjennom choke-pointen, EKTE Fiken-dispatch nås KUN via faken over, ALDRI ekte nettverk)", async () => {
+    const vendor = await financeVendorProof.createVendor(TENANT_A, "business", `D-116 Live Vendor ${runId}`, OWNER_PERSON);
+    vendorId = vendor.vendor_id;
+    await financeVendorProof.bindVendorProvider(TENANT_A, "business", vendorId, "fiken", `fiken-ref-${runId}`, OWNER_PERSON);
+    const intent = await financeVendorProof.createPaymentIntent(TENANT_A, "business", {
+      idempotency_key: `d116-match-${runId}`, purpose: "D-116 vendor binding match", amount_ore: 4200,
+      vendor_name: "D-116 Live Vendor", account_code: "6540", vendor_id: vendorId, vendor_provider_ref: `fiken-ref-${runId}`
+    });
+    const before = fikenCalls.length;
+    const submitted = await financeVendorProof.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, fakeFikenCredentialsProvider, OWNER_PERSON);
+    const dispatched = fikenCalls.length === before + 1;
+    results.finance_vendor_binding_match = submitted.state === "submitted" && dispatched ? "PASS" : "FAIL";
+    log(`vendor_id=${vendorId} submitted_state=${submitted.state} fiken_dispatched=${dispatched} -> finance_vendor_binding_match: ${results.finance_vendor_binding_match}`);
+  });
+
+  await section("VENDOR BINDING MISMATCH BLOCKED (D-116 - en payment_intent som peker på vendorId=X men bruker en provider_ref som IKKE er registrert til X MÅ kastes FØR provider-transporten, provider_call_count=0)", async () => {
+    const before = fikenCalls.length;
+    let blocked = false;
+    let errorName = "";
+    try {
+      const mismatchIntent = await financeVendorProof.createPaymentIntent(TENANT_A, "business", {
+        idempotency_key: `d116-mismatch-${runId}`, purpose: "D-116 vendor binding mismatch", amount_ore: 4200,
+        vendor_name: "D-116 Live Vendor", account_code: "6540", vendor_id: vendorId, vendor_provider_ref: `fiken-ref-WRONG-${runId}`
+      });
+      await financeVendorProof.submitPaymentIntent(TENANT_A, "business", mismatchIntent.payment_intent_id, fakeFikenCredentialsProvider, OWNER_PERSON);
+    } catch (err) {
+      blocked = true;
+      errorName = (err as Error).message.split(":")[0] ?? "";
+    }
+    const zeroProviderCalls = fikenCalls.length === before;
+    results.finance_vendor_binding_mismatch_blocked = blocked && errorName === "vendor_binding_mismatch" && zeroProviderCalls ? "PASS" : "FAIL";
+    log(`blocked=${blocked} error=${errorName} provider_call_count_delta=${fikenCalls.length - before} -> finance_vendor_binding_mismatch_blocked: ${results.finance_vendor_binding_mismatch_blocked}`);
+  });
+
+  await section("VENDOR BINDING TENANT ISOLATION (D-116 - tenant B kan ALDRI bruke tenant A sin canonical vendor_id, RLS+FK blokkerer FØR choke-pointen i det hele tatt nås)", async () => {
+    let blocked = false;
+    let errorName = "";
+    try {
+      await financeVendorProof.createPaymentIntent(TENANT_B, "business", {
+        idempotency_key: `d116-tenant-isolation-${runId}`, purpose: "D-116 tenant isolation", amount_ore: 4200,
+        vendor_name: "D-116 Live Vendor", account_code: "6540", vendor_id: vendorId, vendor_provider_ref: `fiken-ref-${runId}`
+      });
+    } catch (err) {
+      blocked = true;
+      errorName = (err as Error).message.split(":")[0] ?? "";
+    }
+    results.finance_vendor_binding_tenant_isolation = blocked && errorName === "vendor_not_found" ? "PASS" : "FAIL";
+    log(`blocked=${blocked} error=${errorName} -> finance_vendor_binding_tenant_isolation: ${results.finance_vendor_binding_tenant_isolation}`);
   });
 
   // ===== §14: tenant-isolasjon =====
