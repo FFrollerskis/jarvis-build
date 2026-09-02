@@ -300,7 +300,17 @@ async function main(): Promise<void> {
     await financeVendorProof.bindVendorProvider(TENANT_A, "business", vendorId, "fiken", `fiken-ref-${runId}`, OWNER_PERSON);
     const intent = await financeVendorProof.createPaymentIntent(TENANT_A, "business", {
       idempotency_key: `d116-match-${runId}`, purpose: "D-116 vendor binding match", amount_ore: 4200,
-      vendor_name: "D-116 Live Vendor", account_code: "6540", vendor_id: vendorId, vendor_provider_ref: `fiken-ref-${runId}`
+      vendor_name: "D-116 Live Vendor", account_code: "6540", vendor_id: vendorId, vendor_provider_ref: `fiken-ref-${runId}`,
+      // HOST FIX #1 (run_id f271e1db): den pre-eksisterende Fiken-innsendingsstien
+      // (service.ts, uendret siden D-107/D-109 - "provider === 'fiken'"-grenen)
+      // krever BÅDE vendor_provider_ref OG counter_account_code (MissingCounterAccountError
+      // ellers) FØR selve Fiken-transporten nås. Denne D-116-fixturen manglet
+      // counter_account_code - vendor-gaten (D-116) PASSERTE korrekt, men
+      // submitPaymentIntent() kastet deretter på den ELDRE, urelaterte
+      // Fiken-kontrollen, så finance_vendor_binding_match ble stående NOT_RUN.
+      // Synteisk motkonto "1920" - SAMME verdi som resten av UA-6 sine
+      // Fiken-fixturer (service-rls.test.ts/vendor-registry.test.ts/fiken-live.ts).
+      counter_account_code: "1920"
     });
     const before = fikenCalls.length;
     const submitted = await financeVendorProof.submitPaymentIntent(TENANT_A, "business", intent.payment_intent_id, fakeFikenCredentialsProvider, OWNER_PERSON);

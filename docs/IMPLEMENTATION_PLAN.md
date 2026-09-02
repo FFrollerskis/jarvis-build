@@ -3347,6 +3347,15 @@ eneste gjenværende UA-6-sluttporten.
 PROJECT_STATUS.md og PR-beskrivelsen for å unngå SHA-drift mellom dokumenter (samme prinsipp som
 D-114/D-115).
 
+**HOST FIX #1 (D-117, 2026-09-02):** første ekte host-akseptanse (`run_id=f271e1db`) feilet
+(`finance_vendor_binding_match=NOT_RUN`, `hard_fail=true`) - rotårsaken var IKKE i D-116 sin
+vendor-gate, men i `spend-integrity-live.ts` sin "VENDOR BINDING MATCH"-fixture, som manglet
+`counter_account_code` (påkrevd av den pre-eksisterende, urelaterte Fiken-innsendingskontrollen i
+`service.ts`, uendret siden D-107/D-109). Klassifisert `HARNESS_FIXTURE_FAILURE`, IKKE
+`VENDOR_REGISTRY_RUNTIME_FAILURE` - choke-pointen selv fungerte som designet. Minimal fiks +
+ny strukturell regresjonstest. Full detalj: D-117 i DECISIONS_AND_ASSUMPTIONS.md. `D116_HOST_
+ACCEPTANCE_FINAL=false` inntil host-akseptansen kjøres på nytt mot den nye HEAD-en.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
