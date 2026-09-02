@@ -3369,6 +3369,17 @@ Begge historiske mislykkede kjøringer (`f271e1db`/`c0c91446`) bevart ærlig, in
 D-116 host-akseptanse. `D116_HOST_ACCEPTANCE_FINAL=false` inntil host-akseptansen kjøres på nytt
 (en TREDJE gang) mot den nye HEAD-en denne fiksen produserer.
 
+**D-116 FINAL HOST ACCEPTANCE BESTÅTT (2026-09-02, ren evidensregistrering, INGEN kode/tester/
+migrasjoner endret):** Tobias kjørte host-akseptansen (`spend-integrity-live-host-run.ts`) en
+TREDJE gang mot HEAD `3a4255bf7836321528aa57e79f44985c15aab616` (HOST FIX #2 sin faktiske head).
+**Run `run_id=9d33892e`:** `finance_vendor_binding_match=PASS`,
+`finance_vendor_binding_mismatch_blocked=PASS`, `finance_vendor_binding_tenant_isolation=PASS`,
+`finance_spend_cleanup=PASS`, alle øvrige markører PASS, `hard_fail=false`. ZERO ekte
+leverandørkredensialer/-kall. `D116_HOST_ACCEPTANCE_FINAL=true` (opp fra `false`). Øvrige flagg
+UENDRET: `UA6_COMPLETE=false`/`D108_COMPLETE=false` (styrt av D-108-avhengigheten alene). Full
+detalj: D-118 sitt addendum i DECISIONS_AND_ASSUMPTIONS.md. PR #66 forblir draft - INGEN merge
+uten Tobias sin eksplisitte godkjenning.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

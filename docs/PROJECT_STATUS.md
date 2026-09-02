@@ -7,11 +7,12 @@
 
 ## Aktiv fase/oppgave
 
-UA-6 Finance & Spend Integrity Gateway - HARDENING (D-116) + to host-fix-runder (D-117/D-118).
-D-116 lukket UA-6 sitt eneste gjenværende D-115-arkitekturgap (vendor-korrekthets-registeret). To
-påfølgende ekte host-akseptanse-forsøk har feilet - begge rotårsak-sporet til host-HARNESSET
-(IKKE vendor-registeret/Fiken-produksjonskoden) og fikset denne runden. Eksplisitt Tobias-ordre
-fortsatt bindende: IKKE D-108, IKKE ekte credentials/leverandørkall, IKKE UA-7.
+UA-6 Finance & Spend Integrity Gateway - HARDENING (D-116), lukket. To host-fix-runder
+(D-117/D-118, begge rotårsak-sporet til host-HARNESSET, IKKE vendor-registeret/Fiken-
+produksjonskoden), deretter TREDJE host-akseptanse PASSERTE (`run_id=9d33892e`,
+`hard_fail=false`) mot eksakt HEAD `3a4255b`. `D116_HOST_ACCEPTANCE_FINAL=true`. PR #66 forblir
+draft - venter på Tobias sin eksplisitte merge-godkjenning. Eksplisitt Tobias-ordre fortsatt
+bindende: IKKE D-108, IKKE ekte credentials/leverandørkall, IKKE UA-7 uten videre beskjed.
 
 ## D-116 (implementert, PR #66)
 
@@ -60,6 +61,17 @@ nytt testtilfelle som låser at suksess-assertionen forventer `"provider_acknowl
 host-akseptanse:** `run_id=f271e1db` (D-117, `HARNESS_FIXTURE_FAILURE`) og `run_id=c0c91446`
 (D-118, `HARNESS_EXPECTATION_FAILURE`).
 
+## D-116 FINAL HOST ACCEPTANCE (etter HOST FIX #2, denne runden)
+
+Tobias kjørte host-akseptansen en TREDJE gang mot eksakt HEAD `3a4255bf7836321528aa57e79f44985c15aab616`
+(HOST FIX #2 sin faktiske head, samme SHA som ble committet/pushet/CI-verifisert over).
+**Run `run_id=9d33892e`:** `finance_vendor_binding_match=PASS`,
+`finance_vendor_binding_mismatch_blocked=PASS`, `finance_vendor_binding_tenant_isolation=PASS`,
+`finance_spend_cleanup=PASS`, alle øvrige markører PASS, `hard_fail=false`. ZERO ekte
+leverandørkredensialer/-kall. **`D116_HOST_ACCEPTANCE_FINAL=true`** (opp fra `false`) - dette er
+UA-6 sitt tredje host-akseptanse-forsøk i denne sliceen og det første som består. Ren
+evidensregistrering i denne runden - INGEN kode/tester/migrasjoner endret, kun docs.
+
 ## Kvalitetsporter (denne HOST FIX #2-runden, kjørt lokalt)
 
 - `pnpm -r typecheck`: 20/20 pakker rent.
@@ -75,10 +87,10 @@ host-akseptanse:** `run_id=f271e1db` (D-117, `HARNESS_FIXTURE_FAILURE`) og `run_
 
 `UA6_IMPLEMENTATION_COMPLETE=true`, `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true`,
 `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`, `UA6_CREDENTIAL_PHASE_COMPLETE=false`,
-`D108_COMPLETE=false`, `UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`,
-`WALLESTER_LIVE_VERIFIED=false`, `WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`,
-`D116_HOST_ACCEPTANCE_FINAL=false` (host-akseptansen må kjøres PÅ NYTT - en TREDJE gang - mot den
-nye HEAD-en denne fiksen produserer).
+`D108_COMPLETE=false`, `UA6_COMPLETE=false` (styrt av D-108-avhengigheten alene),
+`Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`, `WALLESTER_LIVE_VERIFIED=false`,
+`WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`, **`D116_HOST_ACCEPTANCE_FINAL=true`** (NYTT denne
+runden - `run_id=9d33892e` mot HEAD `3a4255b`).
 
 ## Blokkeringer
 
@@ -86,7 +98,6 @@ Ingen.
 
 ## Neste oppgave
 
-Commit/push HOST FIX #2 til PR #66 (samme PR, HEAD flyttes), vent på fresh CI grønt på den NYE
-HEAD-en, rapporter eksakt ny SHA til Tobias sammen med eksakt host-kommando. Host-akseptanse skal
-IKKE kjøres på nytt før CI er grønt på den nye HEAD-en. INGEN merge uten Tobias sin eksplisitte
-godkjenning. INGEN D-108. INGEN UA-7.
+D-116-sliceen (arkitektur + implementasjon + host-akseptanse) er nå ferdig og bevist. PR #66
+forblir DRAFT - venter på Tobias sin eksplisitte beslutning om merge. INGEN merge uten
+uttrykkelig godkjenning. INGEN D-108 startet. INGEN UA-7 startet.
