@@ -54,6 +54,10 @@ import {
   GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
+import {
+  ConversationGraphService, ConversationGraphSyncService, ConversationGraphTransport,
+  runConversationGraphSyncForAllTenants
+} from "@jarvis/conversation-graph";
 import { ConversationEngine } from "./conversation.ts";
 import { executiveHandler } from "./executive.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
@@ -188,6 +192,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // UA-3 profiling/scoring-slice (D-61): egen tjeneste over samme runtime-pool,
   // ingen ny kø/motor (§14/§23 i byggeordren) - gjenbruker Business Graph uendret.
   const scoringService = new ScoringService(pool);
+  // UA-7 Communications Hub - foerste slice (D-119): egen tjeneste over
+  // SAMME runtime-pool, ingen ny motor - gjenbruker Business Graph
+  // (business_contacts/business_followups/business_activities) uendret via
+  // pekere (linked_business_contact_id), aldri en kopi.
+  const conversationGraphService = new ConversationGraphService(pool);
   // UA-3 Native Jarvis Support Core (D-66): egen tjeneste over SAMME
   // runtime-pool, ingen ny motor - gjenbruker Business Graph (kontakt-/
   // selskap-kobling) og OpenLoopService (§17 i byggeordren) uendret.
@@ -392,6 +401,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // docker-transport.ts) - uten den satt er "docker" strukturelt
     // credential_unavailable, ALDRI et stille fall til en ambient binærsti.
     docker: new DockerTransport(),
+    // UA-7 Communications Hub - foerste slice (D-119): eget
+    // `conversation_graph.*`-namespace - SAMME lat/enkel-avhengighet-mønster
+    // som GrowthTransport/AgreementsTransport (INGEN toolGateway/
+    // ToolInvocationContext - `merge_identities`/`split_merge` sin klasse C
+    // er selve handlingen, ikke en nøstet under-handling).
+    conversation_graph: new ConversationGraphTransport(conversationGraphService),
     ...driveTransportsIfConfigured()
   }, {
     // D-105 host-fix (D-41-korreksjon): eier-konfigurert produksjonsmål-
@@ -405,6 +420,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
+  // UA-7 Communications Hub - foerste slice (D-119): SAMME toolGateway-
+  // instans (allerede registrert med Gmail over) - ingen ny transport-vei,
+  // gjenbruker DENNE toolGateway-instansens `email.list_messages` (den
+  // SAMME motpart-e-post-utledningen som businessEventSyncService, kun i en
+  // egen, tynn synk-tjeneste for å unngå en sirkulær pakkeavhengighet - se
+  // `@jarvis/conversation-graph` sin `sync.ts`).
+  const conversationGraphSyncService = new ConversationGraphSyncService(toolGateway, businessService, conversationGraphService);
   // UA-3 Native Jarvis Support Core (D-66) §7/§24: egen instans for den
   // periodiske innboks-sveipen (SAMME mønster som `businessEventSyncService`
   // over - en direkte, parallell instans, IKKE den lazy interne i
@@ -592,6 +614,13 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-events-sync", Number(process.env["JARVIS_BUSINESS_EVENTS_SYNC_HOUR"] ?? 5)
   ).start(() => runBusinessEventSyncForAllTenants(pool, businessEventSyncService).then(() => undefined));
+  // UA-7 Communications Hub - foerste slice (D-119): periodisk Gmail->
+  // Conversation Graph-identitetskobling - SAMME reboot-durable
+  // DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env),
+  // uavhengig av business-events-sync over.
+  new DailyScheduler(
+    pool, "conversation-graph-sync", Number(process.env["JARVIS_CONVERSATION_GRAPH_SYNC_HOUR"] ?? 5)
+  ).start(() => runConversationGraphSyncForAllTenants(pool, conversationGraphSyncService).then(() => undefined));
   // UA-3 profiling/scoring-slice (D-61) §23: periodisk, idempotent
   // score-rekalkulering - SAMME reboot-durable DailyScheduler-mekanisme (eget
   // job_name, egen klokkeslett-env). Kjøres ETTER events-sync (05) og

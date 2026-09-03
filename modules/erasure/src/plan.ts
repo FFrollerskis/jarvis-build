@@ -259,6 +259,24 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // til vendor-registeret (ingen forhåndsslettet open-loop-blokk nødvendig).
   add(result, "finance_vendor_provider_bindings", await run(client, mode, "finance_vendor_provider_bindings", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "finance_vendors", await run(client, mode, "finance_vendors", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // D-119 (UA-7 Communications Hub - foerste slice, 046_conversation_graph.sql):
+  // `conversation_identity_merges` har FK -> `conversation_identities` (BÅDE
+  // source_identity_id OG target_identity_id) - MÅ derfor slettes FØR
+  // `conversation_identities` under. `conversation_channel_links` har SIN
+  // EGEN FK -> `conversation_identities` (identity_id) - SAMME "barn-FK
+  // FØR forelder"-regel, MÅ derfor OGSÅ slettes FØR `conversation_identities`.
+  // Ingen FK MELLOM merges og links selv (`affected_link_ids` er en JSONB-
+  // array, ALDRI en ekte fremmednøkkel - bevisst, se 046_conversation_
+  // graph.sql sitt filhode), rekkefølgen dem imellom er derfor vilkårlig.
+  // `conversation_identities.linked_business_contact_id`/`linked_person_id`
+  // peker til `business_contacts`/`people` - SAMME pre-eksisterende gap som
+  // consent_decisions-kommentaren under dokumenterer (`business_contacts`
+  // er FORTSATT IKKE registrert i denne planen) - INGEN ordringskonflikt
+  // i dag, men MÅ slettes FØR `business_contacts` dersom den noen gang
+  // legges til.
+  add(result, "conversation_identity_merges", await run(client, mode, "conversation_identity_merges", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "conversation_channel_links", await run(client, mode, "conversation_channel_links", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "conversation_identities", await run(client, mode, "conversation_identities", "tenant_id = $1 AND memory_space_id = $2", tv));
   // D-91 (UA-4 NESTE SLICE, 032_consent_governance.sql): samtykke-
   // beslutnings-loggen har en FK -> business_contacts.contact_id - MEN
   // `business_contacts` er FORTSATT IKKE registrert i denne erasure-planen

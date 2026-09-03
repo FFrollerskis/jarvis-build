@@ -3389,6 +3389,96 @@ den daværende HEAD-en, ikke lenger gjeldende registrering). `D116_HOST_ACCEPTAN
 forankret til `run_id=6a4b83ac`/`HEAD=04f5d7b`. Full detalj: D-118 sitt siste addendum i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+
+## UA-7 COMMUNICATIONS HUB — Første slice: Conversation Graph + identitetsoppløsning (D-119, 2026-09-03)
+
+**Masterplan-basis:** `docs/input/02_Jarvis_Masterplan_Sovereign_Autonomy_v4.0.md` §"UA-7 - Communications Hub"
+(mal: "Samle communication per person/project/customer and make follow-up executable") og §17
+"Communications Hub". Fire akseptansekriterier: (1) open commitments/next actions visible across
+channels, (2) untrusted messages cannot exfiltrate unrelated private data/raw secrets, (3) identity
+merges reversible+confidence-tracked, (4) transcription/call processing has documented retention/legal
+basis.
+
+**Reuse-audit (før design, to parallelle Explore-agenter, read-only):**
+
+| UA-7 capability | Status | Evidens | Avhengighet |
+|---|---|---|---|
+| Email (Gmail) read/search/draft/send | PARTIAL | `live-transports.ts:242-345` read/list/attachment; `email.send` er kun et skall | D-108 (ny scope) |
+| Calendar read/create/update | PARTIAL | `live-transports.ts:347-410` kun read | D-108 (ny scope) |
+| Telegram | PARTIAL | outbound `notify` LIVE+VERIFIED (RUNTIME_GATES.md); ingen inbound | ingen (token allerede live) |
+| Phone/SIP + Voice Gateway | PARTIAL | D-30 sesjons-/SpeechAdapter-arkitektur solid, ZERO telefoni-inngang/transkript-persistens | D-108 (ny SIP-leverandør) |
+| Slack/Teams/WhatsApp/Discord/SMS | MISSING | null kode | D-108 + Tobias-leverandørvalg |
+| Meeting transcription | MISSING | eksplisitt utsatt 3x i denne filen tidligere | avhenger av Conversation Graph + transcript-leverandør |
+| **Conversation Graph** | MISSING | null kode noe sted, ren masterplan-vokabular | ingen — rent internt domene |
+| **Identity resolution w/ confidence + reversible split/merge** | MISSING | kun deterministisk e-post-eksakt-match finnes (D-57/D-60), ingen confidence/merge | ingen — rent internt domene |
+| Autonomous draft/send | MISSING | ingen send-kapabilitet finnes | avhenger av Email/Messaging write |
+| Outbound AI calling | MISSING | ingen SIP i det hele tatt | avhenger av Phone/SIP |
+
+**Slice-derivering:** alle andre kapabiliteter krever enten en ny leverandør-/scope-beslutning
+(D-108-sperret) eller strider mot "no big-bang all-providers"-prinsippet. Conversation Graph +
+identitetsoppløsning er den ENESTE kapabiliteten som er 100% `JARVIS_CANONICAL`, credential-
+uavhengig, OG et hardt forutsetning for akseptansekriterium 1+3 samtidig.
+
+**D-64-gate:** `CAPABILITY=cross-channel identitetsoppløsning+reversibel merge/split`,
+`EXISTING_CANONICAL_DOMAIN=ingen (kun business_contacts som gjenbrukt peker)`, `JARVIS_CORE=ja`,
+`SYSTEM_OF_RECORD=JARVIS_CANONICAL` (kanalene selv forblir `EXTERNAL_CANONICAL` for
+meldingsinnhold), `CAN_REUSE_EXISTING_DOMAIN=delvis`, `NEW_DOMAIN_GENUINELY_REQUIRED=true`,
+`CORE_DEPENDENCY_DECISION_REQUIRED=false`.
+
+**Skjema (migrasjon `046_conversation_graph.sql`, samme RLS-/GRANT-mønster som
+`019_business.sql`/`045_finance_vendor_registry.sql`):** `conversation_identities` (kanonisk node,
+`status active|merged`, ALDRI DELETE ved merge — tombstone), `conversation_channel_links`
+(confidence-scoret kanal-identifikator<->identitet, delvis unik indeks `WHERE status='active'`),
+`conversation_identity_merges` (append-only reversibel merge-/split-revisjonslogg,
+`affected_link_ids jsonb` fanger EKSAKT hvilke lenker en merge omdirigerte).
+
+**Strukturell "aldri LLM-alene permanent merge":** `MergePerformedBy`-TypeScript-typen
+(`'owner'|'deterministic_rule'`) utelater `'ai_assisted'` fullstendig; databasens
+`CHECK (performed_by IN ('owner','deterministic_rule'))` håndhever det samme uavhengig av
+kalllag — bevist BÅDE ved direkte SQL-forsøk OG via den fulle `ToolGateway.execute()`-veien.
+
+**Ny pakke `@jarvis/conversation-graph`:** `ConversationGraphService` (link/resolve/merge/
+split/cross-channel commitments/timeline — gjenbruker `business_followups`/`business_activities`
+UENDRET via `linked_business_contact_id`, D-64), `ConversationGraphSyncService` (gjenbruker SAMME
+`email.list_messages`+`extractCounterpartEmails()` som D-57 sin `BusinessEventSyncService`, egen
+tynn tjeneste for å unngå sirkulær `@jarvis/business`<->`@jarvis/conversation-graph`-
+avhengighet — leser KUN strukturerte From/To/Cc-adresser, ALDRI emne/brødtekst, Ingestion Zone-
+disiplin CLAUDE.md regel 7), `ConversationGraphTransport` (nytt `conversation_graph.*` ToolGateway-
+namespace, 8 handlinger — lese-handlinger klasse A, `link_channel_identity` klasse B,
+`merge_identities`/`split_merge` klasse C reversibel-via-presis-split). Ny `conversation-graph-sync`
+DailyScheduler-jobb (samme reboot-durable mekanisme som `business-events-sync`).
+
+**Q-20:** alle tre tabeller registrert i `modules/erasure/src/plan.ts`, barn-FK-før-forelder
+(`conversation_identity_merges`/`conversation_channel_links` FØR `conversation_identities`).
+
+**Tester:** 33 målrettede tester (ekte embedded Postgres/RLS) — `service.test.ts` (26:
+domenelivssyklus, idempotent lenking, confidence-monoton bump uten stille repointing, e-post-
+normalisering, reversibel merge/split inkl. dobbel-split-avvisning, tenant-/space-isolasjon,
+ToolGateway-registrering, transport-dispatch-feilbaner) + `security.test.ts` (7: prompt-injeksjon
+i emne/brødtekst gir INGEN utover-strukturert kanal-lenke, eier-adresse-eksklusjon, syntaktisk
+ugyldig fail-closed, kryss-tenant-merge-avvisning, `ai_assisted`-blokkering direkte OG via full
+ToolGateway-vei, ingen rå credential i feilmeldinger).
+
+**Full regresjon:** `pnpm -r typecheck` 21/21 pakker rent, `pnpm lint` rent, gitleaks (git-
+historikk OG working tree) `no leaks found`, full workspace-suite **182/182 filer, 2893/2893
+tester grønt** (opp fra 179/2858 — INGEN regresjon, INGEN skips).
+
+**12-spørsmåls adversarial selvgjennomgang:** ingen ekte upatchede funn. To dokumenterte,
+ikke-sikkerhetskritiske forenklinger (sjelden lenkefri-identitet-race ved samtidig første-
+lenking; flertrinns merge-kjede oppdaterer ikke `merged_into_identity_id` transitivt — lenke-
+omdirigeringen ER korrekt transitiv) — se D-119 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Flagg:** `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
+`UA7_CONVERSATION_GRAPH_SUITE_VERIFIED=true`, `UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED`
+(hele sliceen er deterministisk bevist gjennom embedded Postgres/RLS-suiten, ingen Windows/
+Docker/fysisk-host-avhengig atferd), `UA7_COMPLETE=false`,
+`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`. UA-7 akseptansekriterier: 1 PASS (for
+identiteter med lenket kontakt) / NOT_STARTED (andre kanaler), 2 PASS (Gmail-stien) / PARTIAL
+(UA-7 helhet), 3 PASS, 4 NOT_STARTED. Uendret: `D108_COMPLETE=false`, alle UA-6-flagg fra
+D-116/D-117/D-118.
+
+Full detalj: D-119 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
