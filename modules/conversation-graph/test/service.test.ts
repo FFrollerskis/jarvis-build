@@ -323,21 +323,250 @@ describe("ConversationGraphService - tenant/space-isolasjon (RLS)", () => {
   });
 });
 
+describe("ConversationGraphService - kryss-tenant-pekervalidering (D-119 SECURITY HARDENING §11/§12)", () => {
+  it("AA: avviser identity_id fra en ANNEN tenant (FK-eksistens beviser IKKE tenant-eierskap)", async () => {
+    const identityInB = await graph.linkChannelIdentity(TENANT_B, "business", {
+      channel: "email", channel_identifier: "cross-tenant-identity@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    await expect(
+      graph.linkChannelIdentity(TENANT_A, "business", {
+        identity_id: identityInB.identity_id, channel: "telegram", channel_identifier: "cross-tenant-attempt",
+        confidence: 1.0, match_method: "manual"
+      })
+    ).rejects.toThrow("conversation_identity_not_found");
+  });
+
+  it("BB: avviser linked_business_contact_id som peker til en ANNEN tenants business_contacts-rad", async () => {
+    const companyB = await business.createCompany(TENANT_B, "business", { name: "Tenant B AS" });
+    const contactB = await business.createContact(TENANT_B, "business", { name: "B-kontakt", company_id: companyB.company_id, email: "b-contact@tenantb.no" });
+    await expect(
+      graph.linkChannelIdentity(TENANT_A, "business", {
+        channel: "email", channel_identifier: "cross-tenant-contact@acme.no", confidence: 1.0, match_method: "exact_email",
+        linked_business_contact_id: contactB.contact_id
+      })
+    ).rejects.toThrow("conversation_linked_contact_not_found");
+  });
+
+  it("CC: avviser linked_person_id for en person som IKKE er medlem av denne tenanten", async () => {
+    await adminPool.query(`INSERT INTO people (person_id, display_name) VALUES ('person-conv-not-in-a', 'Ikke i A') ON CONFLICT DO NOTHING`);
+    await adminPool.query(
+      `INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-conv-not-in-a', $1) ON CONFLICT DO NOTHING`,
+      [TENANT_B]
+    );
+    await expect(
+      graph.linkChannelIdentity(TENANT_A, "business", {
+        channel: "email", channel_identifier: "cross-tenant-person@acme.no", confidence: 1.0, match_method: "exact_email",
+        linked_person_id: "person-conv-not-in-a"
+      })
+    ).rejects.toThrow("conversation_linked_person_not_found");
+  });
+
+  it("DD: godtar linked_business_contact_id/linked_person_id som FAKTISK tilhoerer denne tenanten (ikke en falsk positiv)", async () => {
+    const companyA = await business.createCompany(TENANT_A, "business", { name: "Tenant A Legit AS" });
+    const contactA = await business.createContact(TENANT_A, "business", { name: "A-kontakt", company_id: companyA.company_id, email: "a-contact@tenanta.no" });
+    await adminPool.query(
+      `INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-conv-owner', $1) ON CONFLICT DO NOTHING`,
+      [TENANT_A]
+    );
+    const link = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "legit-owned-pointers@acme.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contactA.contact_id, linked_person_id: "person-conv-owner"
+    });
+    expect(link.identity_id).toBeTruthy();
+  });
+});
+
+describe("ConversationGraphService - multi-hop reversibilitet (D-119 SECURITY HARDENING §13/§14)", () => {
+  it("EE: A->B, deretter B->C - split av A->B MENS B->C fortsatt er aktiv avvises (aldri stille overskriving av senere merge)", async () => {
+    const identityA = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "chain-a@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityB = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "chain-b@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityC = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "chain-c@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const mergeAB = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityA.identity_id, target_identity_id: identityB.identity_id,
+      confidence: 0.9, reason: "A inn i B", performed_by: "owner"
+    });
+    await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityB.identity_id, target_identity_id: identityC.identity_id,
+      confidence: 0.9, reason: "B inn i C", performed_by: "owner"
+    });
+
+    await expect(
+      graph.splitMerge(TENANT_A, "business", { merge_id: mergeAB.merge_id, performed_by: "owner", reason: "forsoek paa aa reversere A->B foerst" })
+    ).rejects.toThrow("conversation_split_blocked_by_later_merge");
+
+    const bAfter = await graph.readIdentity(TENANT_A, "business", identityB.identity_id);
+    expect(bAfter?.status).toBe("merged");
+    expect(bAfter?.merged_into_identity_id).toBe(identityC.identity_id);
+  });
+
+  it("FF: A->B, deretter B->C - reversering i KORREKT rekkefolge (B->C foerst, saa A->B) gjenoppretter begge korrekt", async () => {
+    const identityA = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "correct-order-a@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityB = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "correct-order-b@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityC = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "correct-order-c@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const mergeAB = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityA.identity_id, target_identity_id: identityB.identity_id,
+      confidence: 0.9, reason: "A inn i B", performed_by: "owner"
+    });
+    const mergeBC = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityB.identity_id, target_identity_id: identityC.identity_id,
+      confidence: 0.9, reason: "B inn i C", performed_by: "owner"
+    });
+
+    await graph.splitMerge(TENANT_A, "business", { merge_id: mergeBC.merge_id, performed_by: "owner", reason: "reverser B->C foerst" });
+    const bAfterFirstSplit = await graph.readIdentity(TENANT_A, "business", identityB.identity_id);
+    expect(bAfterFirstSplit?.status).toBe("active");
+
+    await graph.splitMerge(TENANT_A, "business", { merge_id: mergeAB.merge_id, performed_by: "owner", reason: "reverser A->B naa" });
+    const aAfterSecondSplit = await graph.readIdentity(TENANT_A, "business", identityA.identity_id);
+    expect(aAfterSecondSplit?.status).toBe("active");
+    expect(aAfterSecondSplit?.merged_into_identity_id).toBeNull();
+
+    const resolvedA = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", "correct-order-a@acme.no");
+    expect(resolvedA?.identity_id).toBe(identityA.identity_id);
+    const resolvedB = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", "correct-order-b@acme.no");
+    expect(resolvedB?.identity_id).toBe(identityB.identity_id);
+  });
+
+  it("GG: resolveEffectiveIdentity() foelger en A->B->C-kjede deterministisk til C, og til A etter full reversering", async () => {
+    const identityA = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "effective-a@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityB = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "effective-b@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityC = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "effective-c@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const mergeAB = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityA.identity_id, target_identity_id: identityB.identity_id,
+      confidence: 0.9, reason: "A inn i B", performed_by: "owner"
+    });
+    const mergeBC = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: identityB.identity_id, target_identity_id: identityC.identity_id,
+      confidence: 0.9, reason: "B inn i C", performed_by: "owner"
+    });
+
+    const effectiveFromA = await graph.resolveEffectiveIdentity(TENANT_A, "business", identityA.identity_id);
+    expect(effectiveFromA?.identity_id).toBe(identityC.identity_id);
+
+    await graph.splitMerge(TENANT_A, "business", { merge_id: mergeBC.merge_id, performed_by: "owner", reason: "reverser B->C" });
+    await graph.splitMerge(TENANT_A, "business", { merge_id: mergeAB.merge_id, performed_by: "owner", reason: "reverser A->B" });
+
+    const effectiveAfterFullReversal = await graph.resolveEffectiveIdentity(TENANT_A, "business", identityA.identity_id);
+    expect(effectiveAfterFullReversal?.identity_id).toBe(identityA.identity_id);
+  });
+});
+
+describe("ConversationGraphService - samtidighet (D-119 SECURITY HARDENING §15/§16/§17, ekte parallelle Postgres-kall)", () => {
+  it("HH: to SAMTIDIGE splitMerge()-kall paa SAMME merge gir noeyaktig EN vellykket reversering, den andre feiler deterministisk", async () => {
+    const source = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "concurrent-split-src@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const target = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "concurrent-split-target@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const merge = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: source.identity_id, target_identity_id: target.identity_id,
+      confidence: 1.0, reason: "test samtidig split", performed_by: "owner"
+    });
+
+    const results = await Promise.allSettled([
+      graph.splitMerge(TENANT_A, "business", { merge_id: merge.merge_id, performed_by: "owner", reason: "forsoek 1" }),
+      graph.splitMerge(TENANT_A, "business", { merge_id: merge.merge_id, performed_by: "owner", reason: "forsoek 2" })
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toContain("conversation_merge_already_reversed");
+
+    const { rows } = await adminPool.query(
+      `SELECT count(*)::int AS n FROM conversation_identity_merges WHERE tenant_id = $1 AND reverses_merge_id = $2`,
+      [TENANT_A, merge.merge_id]
+    );
+    expect((rows[0] as { n: number }).n).toBe(1);
+  });
+
+  it("II: to SAMTIDIGE foerste-lenke-forsoek for SAMME nye kanal-identifikator gir NOEYAKTIG EN kanonisk identitet (ingen fantom-rad)", async () => {
+    const results = await Promise.all([
+      graph.linkChannelIdentity(TENANT_A, "business", {
+        channel: "email", channel_identifier: "concurrent-first-link@acme.no", confidence: 1.0, match_method: "exact_email"
+      }),
+      graph.linkChannelIdentity(TENANT_A, "business", {
+        channel: "email", channel_identifier: "concurrent-first-link@acme.no", confidence: 1.0, match_method: "exact_email"
+      })
+    ]);
+    expect(results[0].identity_id).toBe(results[1].identity_id);
+
+    const { rows } = await adminPool.query(
+      `SELECT count(DISTINCT identity_id)::int AS n FROM conversation_channel_links
+       WHERE tenant_id = $1 AND channel = 'email' AND channel_identifier = 'concurrent-first-link@acme.no' AND status = 'active'`,
+      [TENANT_A]
+    );
+    expect((rows[0] as { n: number }).n).toBe(1);
+  });
+
+  it("JJ: motsatte samtidige merge-forsoek (A->B og B->A) deadlocker ALDRI - noeyaktig ett lykkes deterministisk", async () => {
+    const identityA = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "deadlock-a@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const identityB = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "deadlock-b@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+
+    const results = await Promise.allSettled([
+      graph.mergeIdentities(TENANT_A, "business", {
+        source_identity_id: identityA.identity_id, target_identity_id: identityB.identity_id,
+        confidence: 1.0, reason: "A inn i B", performed_by: "owner"
+      }),
+      graph.mergeIdentities(TENANT_A, "business", {
+        source_identity_id: identityB.identity_id, target_identity_id: identityA.identity_id,
+        confidence: 1.0, reason: "B inn i A", performed_by: "owner"
+      })
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason.message).toMatch(/conversation_merge_source_not_active|conversation_merge_target_not_active/);
+  }, 15_000);
+});
+
 describe("ToolGateway-registrering: firstWaveTools() eksponerer conversation_graph.* med korrekt capability_class", () => {
-  it("U: registrerer alle 8 handlinger med forventet capability_class", () => {
+  it("U: registrerer 7 handlinger med forventet capability_class - merge_identities/split_merge FJERNET (D-119 SECURITY HARDENING)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
     const byAction = Object.fromEntries(tools.map((t) => [t.action, t.capability_class]));
     expect(byAction).toEqual({
-      resolve_identity: "A", read_identity: "A", list_channel_links: "A",
-      link_channel_identity: "B", merge_identities: "C", split_merge: "C",
+      resolve_identity: "A", read_identity: "A", resolve_effective_identity: "A", list_channel_links: "A",
+      link_channel_identity: "B",
       read_cross_channel_commitments: "A", read_identity_timeline: "A"
     });
+    expect(byAction["merge_identities"]).toBeUndefined();
+    expect(byAction["split_merge"]).toBeUndefined();
   });
 
-  it("V: alle 8 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
+  it("V: alle 7 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
-    expect(tools).toHaveLength(8);
+    expect(tools).toHaveLength(7);
     for (const t of tools) expect(t.credential_ref).toBe("JARVIS_BUSINESS_INTERNAL_TOKEN");
+  });
+
+  it("V2: link_channel_identity sin input_schema krever IKKE lenger confidence/match_method (D-119 - transporten bestemmer dem, aldri kalleren)", () => {
+    const tool = firstWaveTools({}).find((t) => t.tool_id === "conversation_graph" && t.action === "link_channel_identity")!;
+    const parsed = tool.input_schema.safeParse({ tenant_id: TENANT_A, channel: "email", channel_identifier: "schema-check@acme.no" });
+    expect(parsed.success).toBe(true);
   });
 });
 
@@ -350,18 +579,38 @@ describe("ConversationGraphTransport - direkte dispatch-feilbaner", () => {
     );
   });
 
+  it("W2: merge_identities er IKKE lenger en dispatchbar handling (D-119 SECURITY HARDENING - fjernet fra ToolGateway-overflaten)", async () => {
+    await expect(
+      transport().invoke("merge_identities", {
+        tenant_id: TENANT_A, source_identity_id: "conv-id-a", target_identity_id: "conv-id-b",
+        confidence: 1.0, reason: "forsoek", performed_by: "owner"
+      })
+    ).rejects.toThrow("conversation_graph_action_not_implemented:merge_identities");
+  });
+
+  it("W3: split_merge er IKKE lenger en dispatchbar handling (D-119 SECURITY HARDENING - fjernet fra ToolGateway-overflaten)", async () => {
+    await expect(
+      transport().invoke("split_merge", { tenant_id: TENANT_A, merge_id: "conv-merge-x", performed_by: "owner", reason: "forsoek" })
+    ).rejects.toThrow("conversation_graph_action_not_implemented:split_merge");
+  });
+
   it("X: kaster for manglende tenant_id", async () => {
     await expect(transport().invoke("read_identity", { identity_id: "conv-id-x" })).rejects.toThrow(
       "conversation_graph_missing_parameter:tenant_id"
     );
   });
 
-  it("Y: link_channel_identity dispatcher ruter korrekt til service og returnerer external_id", async () => {
+  it("Y: link_channel_identity dispatcher ruter korrekt til service og returnerer external_id - confidence/match_method IGNORERES fra parameters (D-119)", async () => {
     const result = await transport().invoke("link_channel_identity", {
       tenant_id: TENANT_A, memory_space: "business", channel: "email",
+      // Simulerer et forsoek paa aa forfalske sterk deterministisk proveniens -
+      // transporten skal IGNORERE begge feltene fullstendig.
       channel_identifier: "transport-dispatch@acme.no", confidence: 1.0, match_method: "exact_email"
     });
     expect(result.external_id).toBeTruthy();
+    const link = result.data as { confidence: number; match_method: string };
+    expect(link.match_method).toBe("manual");
+    expect(link.confidence).toBe(0.5);
   });
 
   it("Z: resolve_identity for en ukjent kanal-identifikator returnerer data=null uten external_id (Q-26)", async () => {

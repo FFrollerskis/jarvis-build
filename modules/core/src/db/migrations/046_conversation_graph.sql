@@ -26,6 +26,22 @@
 -- confidence-scoret, reversibel kanal-identitet-kobling - en minimal, ny
 -- struktur er derfor nødvendig (D-64: NEW_DOMAIN_GENUINELY_REQUIRED=true).
 --
+-- D-119 SECURITY HARDENING-addendum (pre-merge, PR #67, amendert i SAMME
+-- migrasjonsfil - IKKE en ny 047: `046` var ALDRI kjørt mot noen
+-- persistent/produksjons-database, kun mot engangs embedded-Postgres-
+-- instanser i test/CI - å amendere den her endrer INGENTING reproduserbart,
+-- se D-119-addendumet for full begrunnelse). Ekstern final-review fant at
+-- `performed_by`/`confidence`/`linked_business_contact_id`/
+-- `linked_person_id`/`identity_id` var akseptert UKRITISK fra
+-- ToolGateway-kallerparametre i `ConversationGraphTransport` - selve
+-- databaseskjemaet under er UENDRET korrekt (CHECK-en under utelater
+-- fortsatt strukturelt 'ai_assisted'), men `merge_identities`/`split_merge`
+-- er nå FJERNET fra det ToolGateway-eksponerte `conversation_graph.*`-
+-- navnerommet (se transport.ts/integrations.ts) inntil en ekte, tiltrodd
+-- eier-godkjenningsvei finnes - selve tjenestemetodene forblir en fullt
+-- testet, intern API. Full detalj: D-119 SECURITY HARDENING-addendum i
+-- DECISIONS_AND_ASSUMPTIONS.md.
+--
 -- Tre tabeller, SAMME RLS-/GRANT-/erasure-mønster som 019_business.sql/
 -- 045_finance_vendor_registry.sql:
 --
@@ -139,6 +155,15 @@ CREATE TABLE conversation_identity_merges (
 );
 CREATE INDEX conversation_identity_merges_source_idx ON conversation_identity_merges (tenant_id, source_identity_id);
 CREATE INDEX conversation_identity_merges_target_idx ON conversation_identity_merges (tenant_id, target_identity_id);
+-- D-119 SECURITY HARDENING (pre-merge, PR #67): DB-nivå forsvar-i-dybden mot
+-- to samtidige `splitMerge()`-kall som begge reverserer SAMME merge (§15 i
+-- herdingsordren) - selv om applikasjonslaget allerede låser merge-raden
+-- (`FOR UPDATE`) FØR denne sjekken, håndhever denne delvise unike indeksen
+-- INVARIANTEN strukturelt uansett fremtidig kallerkode: høyst ÉN
+-- split-rad kan noensinne peke tilbake til samme `reverses_merge_id`.
+CREATE UNIQUE INDEX conversation_identity_merges_reverses_unique_idx
+  ON conversation_identity_merges (tenant_id, reverses_merge_id)
+  WHERE reverses_merge_id IS NOT NULL;
 
 GRANT SELECT, INSERT, UPDATE ON
   conversation_identities, conversation_channel_links, conversation_identity_merges

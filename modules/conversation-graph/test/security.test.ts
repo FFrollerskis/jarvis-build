@@ -155,50 +155,102 @@ describe("B: cross-tenant identitetsisolasjon under merge/split", () => {
   });
 });
 
-describe("C: 'never LLM-alone permanent merge' - hele ToolGateway-veien, ikke bare direkte service-kall", () => {
-  it("5: ConversationGraphTransport.invoke('merge_identities', { performed_by: 'ai_assisted' }) blokkeres av databasens CHECK-constraint", async () => {
+describe("C: 'never LLM-alone permanent merge' - D-119 SECURITY HARDENING (pre-merge, PR #67)", () => {
+  /**
+   * Ekstern final-review (pre-merge) fant at DEN OPPRINNELIGE
+   * `ConversationGraphTransport` aksepterte `performed_by` UKRITISK fra
+   * `parameters` - ETHVERT ToolGateway-kall (uansett faktisk
+   * kalleridentitet) kunne skrive `performed_by: "owner"` og dermed
+   * FORFALSKE eier-proveniens for en PERMANENT identitets-sammenslåing.
+   * `D119_PERFORMED_BY_SPOOF_CONFIRMED=true` (bekreftet ved kildekode-
+   * lesing: `requireString(parameters, "performed_by") as MergePerformedBy`
+   * hadde INGEN kobling til `ToolInvocationContext.identity` i det hele
+   * tatt). Retting: `merge_identities`/`split_merge` er FJERNET fra
+   * ToolGateway-navnerommet (se `transport.ts`/`integrations.ts` sine
+   * filhoder) - disse to testene beviser at BEGGE handlingene nå er
+   * KATEGORISK uoppnåelige via den fulle `ToolGateway.execute()`-veien,
+   * UANSETT `performed_by`-verdi (ikke bare `ai_assisted` som den
+   * opprinnelige, utilstrekkelige testen beviste) - selve angrepsflaten er
+   * fjernet, ikke bare symptomet. Service-nivå-forsvaret (DB-CHECK
+   * utelater strukturelt 'ai_assisted') forblir UENDRET testet i
+   * `service.test.ts` test O (forsvar i dybden for den interne, tiltrodde
+   * API-en `mergeIdentities()`/`splitMerge()` fortsatt eksponerer).
+   */
+  it("5: merge_identities er uoppnåelig via den fulle ToolGateway.execute()-veien - 'owner' spoofes IKKE lenger inn", async () => {
     const source = await graph.linkChannelIdentity(TENANT_A, "business", {
       channel: "email", channel_identifier: "ai-src@acme.no", confidence: 1.0, match_method: "exact_email"
     });
     const target = await graph.linkChannelIdentity(TENANT_A, "business", {
       channel: "email", channel_identifier: "ai-target@acme.no", confidence: 1.0, match_method: "exact_email"
     });
-    const transport = new ConversationGraphTransport(graph);
-    await expect(
-      transport.invoke("merge_identities", {
+    const result = await toolGateway.execute({
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "merge_identities",
+      parameters: {
         tenant_id: TENANT_A, memory_space: "business",
         source_identity_id: source.identity_id, target_identity_id: target.identity_id,
-        confidence: 0.99, reason: "modellen foreslo dette selv",
-        // TypeScript-typen MergePerformedBy utelater 'ai_assisted' allerede -
-        // her simuleres et forsøk PAA Å OMGAA typen (som en rå ToolGateway-
-        // kall-vei fra modell-output kunne, se transport.ts sin z.string()-
-        // input_schema for performed_by) for å bevise at databasen fortsatt
-        // stopper det strukturelt, ikke bare TypeScript-kompilatoren.
-        performed_by: "ai_assisted" as never
-      })
-    ).rejects.toThrow();
+        confidence: 0.99, reason: "modellen foreslo dette selv - forsoek paa forfalsket eier-proveniens",
+        performed_by: "owner"
+      }
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unknown_tool");
     const sourceAfter = await graph.readIdentity(TENANT_A, "business", source.identity_id);
     expect(sourceAfter?.status).toBe("active");
   });
 
-  it("6: ConversationGraphTransport.invoke() via den FULLE ToolGateway.execute()-veien avviser samme forsøk", async () => {
+  it("6: split_merge er uoppnåelig via den fulle ToolGateway.execute()-veien - 'deterministic_rule' spoofes IKKE lenger inn", async () => {
     const source = await graph.linkChannelIdentity(TENANT_A, "business", {
       channel: "email", channel_identifier: "ai-src-2@acme.no", confidence: 1.0, match_method: "exact_email"
     });
     const target = await graph.linkChannelIdentity(TENANT_A, "business", {
       channel: "email", channel_identifier: "ai-target-2@acme.no", confidence: 1.0, match_method: "exact_email"
     });
+    const merge = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: source.identity_id, target_identity_id: target.identity_id,
+      confidence: 1.0, reason: "test-fixture", performed_by: "owner"
+    });
     const result = await toolGateway.execute({
-      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "merge_identities",
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "split_merge",
       parameters: {
-        tenant_id: TENANT_A, memory_space: "business",
-        source_identity_id: source.identity_id, target_identity_id: target.identity_id,
-        confidence: 0.99, reason: "modellen foreslo dette selv", performed_by: "ai_assisted"
+        tenant_id: TENANT_A, memory_space: "business", merge_id: merge.merge_id,
+        reason: "modellen foreslo dette selv - forsoek paa forfalsket deterministisk-regel-proveniens",
+        performed_by: "deterministic_rule"
       }
     });
     expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unknown_tool");
     const sourceAfter = await graph.readIdentity(TENANT_A, "business", source.identity_id);
-    expect(sourceAfter?.status).toBe("active");
+    expect(sourceAfter?.status).toBe("merged"); // uendret - splitten skjedde ALDRI
+  });
+
+  it("6b: link_channel_identity via den fulle ToolGateway.execute()-veien AVVISER et forsøk på å sende confidence/match_method (§8-10 - fjernet fra input_schema, strict zod avviser ukjente felt FØR transporten i det hele tatt nås)", async () => {
+    const result = await toolGateway.execute({
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "link_channel_identity",
+      parameters: {
+        tenant_id: TENANT_A, memory_space: "business", channel: "email",
+        channel_identifier: "full-path-confidence-spoof@acme.no",
+        // Forsoek paa aa hevde sterk, deterministisk proveniens gjennom parametrene -
+        // strict input_schema avviser dette FØR PolicyGateway/transporten nås.
+        confidence: 1.0, match_method: "exact_email"
+      }
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("invalid_parameters");
+  });
+
+  it("6c: link_channel_identity via den fulle ToolGateway.execute()-veien UTEN confidence/match_method (korrekt bruk) tvinges alltid til manual/0.5", async () => {
+    const result = await toolGateway.execute({
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "link_channel_identity",
+      parameters: {
+        tenant_id: TENANT_A, memory_space: "business", channel: "email",
+        channel_identifier: "full-path-manual-forced@acme.no"
+      }
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok result");
+    const link = result.data as unknown as { confidence: number; match_method: string };
+    expect(link.match_method).toBe("manual");
+    expect(link.confidence).toBe(0.5);
   });
 });
 

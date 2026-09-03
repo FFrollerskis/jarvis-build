@@ -3443,9 +3443,11 @@ UENDRET via `linked_business_contact_id`, D-64), `ConversationGraphSyncService` 
 `email.list_messages`+`extractCounterpartEmails()` som D-57 sin `BusinessEventSyncService`, egen
 tynn tjeneste for å unngå sirkulær `@jarvis/business`<->`@jarvis/conversation-graph`-
 avhengighet — leser KUN strukturerte From/To/Cc-adresser, ALDRI emne/brødtekst, Ingestion Zone-
-disiplin CLAUDE.md regel 7), `ConversationGraphTransport` (nytt `conversation_graph.*` ToolGateway-
+disiplin CLAUDE.md regel 7), `ConversationGraphTransport` (opprinnelig `conversation_graph.*` ToolGateway-
 namespace, 8 handlinger — lese-handlinger klasse A, `link_channel_identity` klasse B,
-`merge_identities`/`split_merge` klasse C reversibel-via-presis-split). Ny `conversation-graph-sync`
+`merge_identities`/`split_merge` klasse C reversibel-via-presis-split — **se D-119 SECURITY
+HARDENING-ADDENDUM nedenfor: `merge_identities`/`split_merge` senere FJERNET fra ToolGateway-
+overflaten, namespace er nå 7 handlinger**). Ny `conversation-graph-sync`
 DailyScheduler-jobb (samme reboot-durable mekanisme som `business-events-sync`).
 
 **Q-20:** alle tre tabeller registrert i `modules/erasure/src/plan.ts`, barn-FK-før-forelder
@@ -3463,21 +3465,35 @@ ToolGateway-vei, ingen rå credential i feilmeldinger).
 historikk OG working tree) `no leaks found`, full workspace-suite **182/182 filer, 2893/2893
 tester grønt** (opp fra 179/2858 — INGEN regresjon, INGEN skips).
 
-**12-spørsmåls adversarial selvgjennomgang:** ingen ekte upatchede funn. To dokumenterte,
-ikke-sikkerhetskritiske forenklinger (sjelden lenkefri-identitet-race ved samtidig første-
-lenking; flertrinns merge-kjede oppdaterer ikke `merged_into_identity_id` transitivt — lenke-
-omdirigeringen ER korrekt transitiv) — se D-119 i DECISIONS_AND_ASSUMPTIONS.md.
+**12-spørsmåls adversarial selvgjennomgang (opprinnelig, FØR ekstern hardening-review):** hevdet
+ingen ekte upatchede funn utover to dokumenterte, ikke-sikkerhetskritiske forenklinger. **Denne
+konklusjonen var UTILSTREKKELIG** — se "D-119 SECURITY HARDENING-ADDENDUM" nedenfor: en
+uavhengig ekstern final-review FØR merge fant seks reelle strukturelle svakheter selvgjennomgangen
+ikke fanget opp (proveniens-forfalskning, confidence-selvforfremming, kryss-tenant-pekere,
+flertrinns-reversibilitet, to samtidighetsraser). Ikke stol på "PASS" for dette
+akseptansekriteriet uten å lese addendumet.
 
-**Flagg:** `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
+**D-119 SECURITY HARDENING-ADDENDUM (pre-merge på PR #67, 2026-09-03):** `conversation_graph.*`
+ToolGateway-namespace endret fra 8 til **7 handlinger** — `merge_identities`/`split_merge`
+(tidligere klasse C) er **FJERNET** fra det modell-/kall-synlige ToolGateway-overflaten (selve
+`ConversationGraphService`-metodene forblir en tiltrodd intern API); ny `resolve_effective_identity`
+(klasse A) lagt til. `link_channel_identity` sitt `input_schema` inneholder ikke lenger
+`confidence`/`match_method` (transporten hardkoder `manual`/`0.5`). Testtallet økte fra 33 til
+**48** (39 service + 9 security). Full rotårsak/fiks/regresjon for alle seks bekreftede funn: se
+D-119-addendumet i DECISIONS_AND_ASSUMPTIONS.md — IKKE dupliser den logikken her.
+
+**Flagg (etter herding):** `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
 `UA7_CONVERSATION_GRAPH_SUITE_VERIFIED=true`, `UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED`
-(hele sliceen er deterministisk bevist gjennom embedded Postgres/RLS-suiten, ingen Windows/
-Docker/fysisk-host-avhengig atferd), `UA7_COMPLETE=false`,
-`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`. UA-7 akseptansekriterier: 1 PASS (for
-identiteter med lenket kontakt) / NOT_STARTED (andre kanaler), 2 PASS (Gmail-stien) / PARTIAL
-(UA-7 helhet), 3 PASS, 4 NOT_STARTED. Uendret: `D108_COMPLETE=false`, alle UA-6-flagg fra
-D-116/D-117/D-118.
+(hele sliceen, inkl. herdingen, er deterministisk bevist gjennom embedded Postgres/RLS-suiten,
+ingen Windows/Docker/fysisk-host-avhengig atferd), `UA7_COMPLETE=false`,
+`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`, `D119_PREMERGE_HARDENING=PASS`,
+`PR67_READY_FOR_FINAL_REVIEW=true`. UA-7 akseptansekriterier (re-evaluert etter herding): 1 PASS
+(for identiteter med lenket kontakt) / NOT_STARTED (andre kanaler), 2 PASS (Gmail-stien) / PARTIAL
+(UA-7 helhet), 3 PASS (nå med bevist proveniens-grense/kryss-tenant-isolasjon/flertrinns-
+reversibilitet/samtidighet, ikke kun den opprinnelige selvgjennomgangen), 4 NOT_STARTED. Uendret:
+`D108_COMPLETE=false`, alle UA-6-flagg fra D-116/D-117/D-118.
 
-Full detalj: D-119 i DECISIONS_AND_ASSUMPTIONS.md.
+Full detalj: D-119 (inkl. SECURITY HARDENING-ADDENDUM) i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

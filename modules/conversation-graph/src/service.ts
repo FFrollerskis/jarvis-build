@@ -9,21 +9,63 @@
  * `conversation_identity_merges.affected_link_ids` - `splitMerge()` bruker
  * DENNE presise listen til å gjenopprette akkurat de samme lenkene, aldri
  * en gjetning. `MergePerformedBy` (types.ts) UTELATER strukturelt
- * 'ai_assisted' som en gyldig utfoerer av selve handlingen - en modell kan
- * KUN foreslå en merge, aldri utføre den selv (CLAUDE.md regel 8 +
- * byggeordrens "never LLM-alone permanent merge"), håndhevet BÅDE i
- * TypeScript-typen her OG i databasens CHECK-constraint (forsvar i
- * dybden, ikke bare én lagvakt).
+ * 'ai_assisted' som en gyldig utfoerer av selve handlingen.
  *
- * Kjent, dokumentert forenkling (IKKE stille utelatt): ved en
- * FLERTRINNS merge-kjede (A slås sammen til B, B slås SIDEN sammen til C)
- * peker A sin `merged_into_identity_id` fortsatt til B, ikke transitivt
- * til C - selve lenke-omdirigeringen ER korrekt transitiv (se
- * `mergeIdentities()`), men "hvem er den GJELDENDE eieren av A" krever i
- * dette tilfellet å følge merge-loggen ett steg videre. Full transitiv
- * "effective identity"-oppslag er utenfor scope for dette FOERSTE sliceet
- * (akseptansekriteriet krever reversibel+confidence-sporet, ikke
- * n-nivå-transitiv oppslag) - se D-119 for begrunnelse.
+ * D-119 SECURITY HARDENING (pre-merge, PR #67): denne SERVICE-en er den
+ * TILTRODDE interne API-en (`mergeIdentities()`/`splitMerge()` forblir
+ * fullt implementert og testet), MEN den er IKKE lenger nådd via
+ * ToolGateway (se `transport.ts`) - ekstern final-review fant at
+ * `ConversationGraphTransport` tidligere aksepterte `performed_by` UKRITISK
+ * fra kallerparametre, som ville latt ETHVERT tool/model-kall skrive
+ * `performed_by: "owner"` og dermed FORFALSKE eier-proveniens (§4/§5C i
+ * herdingsordren - "owner identity is executing a Jarvis conversation" er
+ * IKKE det samme som "Tobias manually asserted this specific identity
+ * merge is correct"). Fremfor å bygge en helt ny, uprøvd signert
+ * godkjenningsvei INN i denne PR-en (høyere risiko enn selve funnet),
+ * fjernes `merge_identities`/`split_merge` fra det modell-/kall-synlige
+ * verktøyoverflaten helt til en ekte, tiltrodd eier-godkjenningsvei
+ * finnes (§6: "Correct architecture > test-count preservation") - selve
+ * metodene her forblir klare for (a) en fremtidig deterministisk
+ * auto-lenke-sveip (`performed_by='deterministic_rule'`, kalt DIREKTE fra
+ * tiltrodd internkode, ALDRI via ToolGateway) eller (b) en fremtidig
+ * eier-only administrasjonsvei.
+ *
+ * Multi-hop reversibilitet (§13/§14 i herdingsordren): en flertrinns
+ * merge-kjede (A->B, deretter B->C) krever at `splitMerge()` ALDRI
+ * overskriver tilstand en SENERE, fortsatt aktiv merge har skapt.
+ * `splitMerge()` sjekker derfor at merge-hendelsens `target_identity_id`
+ * fortsatt er `status='active'` FØR reversering - er target selv siden
+ * slått sammen videre (B->C), avvises splitten eksplisitt
+ * (`conversation_split_blocked_by_later_merge`) og kalleren må reversere i
+ * omvendt avhengighetsrekkefølge (B->C FØR A->B) - ALDRI en stille,
+ * korrupt tilstandsoverskriving. `resolveEffectiveIdentity()` gir en
+ * deterministisk "hvem er den nåværende eieren" langs kjeden UTEN å endre
+ * selve tombstone-/peker-mekanikken (Case 3).
+ *
+ * Samtidighet (§15/§17): `splitMerge()` låser merge-raden (`FOR UPDATE`)
+ * FØR allerede-reversert-sjekken (hindrer to samtidige splitter av SAMME
+ * merge - forsterket av en delvis unik DB-indeks som andre lag, se
+ * migrasjonen); `mergeIdentities()` låser de to identitetsradene i
+ * DETERMINISTISK (sortert identity_id-) rekkefølge, ALDRI kilde-så-mål,
+ * for å unngå en unngåelig lock-order-inversjons-deadlock mellom to
+ * motsatte samtidige merge-forsøk (A->B og B->A); `linkChannelIdentity()`
+ * tar en Postgres advisory-transaksjonslås på
+ * `(tenant_id, channel, channel_identifier)` FØR den sjekker/oppretter en
+ * ny identitet naar `identity_id` ikke oppgis - lukker den tidligere
+ * dokumenterte "harmløse" samtidig-foerste-lenke-race-en strukturelt i
+ * stedet for å godta et fantom-identitets-utfall (§16).
+ *
+ * Kryss-tenant-pekere (§11/§12): Postgres sine FOREIGN KEY-sjekker
+ * respekterer IKKE Row Level Security (bevist empirisk mot ekte embedded
+ * Postgres under denne herdingsrunden - en FK-referanse til en rad i en
+ * ANNEN tenant lykkes selv om RLS ville skjult raden for en vanlig
+ * SELECT). `linkChannelIdentity()` verifiserer derfor EKSPLISITT, i SAMME
+ * transaksjon, at et oppgitt `identity_id` tilhører DENNE tenanten (og er
+ * aktiv), at `linked_business_contact_id` tilhører DENNE tenanten
+ * (`business_contacts.tenant_id`), og at `linked_person_id` faktisk er
+ * medlem av DENNE tenanten (`person_tenants`) - FØR noen INSERT/UPDATE.
+ * `mergeIdentities()` gjorde dette allerede korrekt (eksplisitt
+ * `WHERE tenant_id = $1`-oppslag, ikke bare FK-tillit).
  */
 
 import { randomUUID } from "node:crypto";
@@ -79,6 +121,40 @@ export class ConversationGraphService {
     });
   }
 
+  /**
+   * Følger `merged_into_identity_id`-pekeren transitivt til den nåværende
+   * AKTIVE identiteten (§13 Case 3: "there must be a deterministic
+   * definition of current/effective identity - no caller should need to
+   * guess"). Rent additivt lese-oppslag - endrer ALDRI selve
+   * tombstone-/peker-mekanikken `mergeIdentities()`/`splitMerge()`
+   * vedlikeholder. Sirkel-trygg (begrenset antall hopp); returnerer `null`
+   * hvis kjeden er brutt (peker til en slettet/ukjent rad - skal aldri
+   * skje under normal drift, men fail-safe fremfor en uendelig løkke).
+   */
+  async resolveEffectiveIdentity(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    identityId: string
+  ): Promise<ConversationIdentity | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      let currentId: string | null = identityId;
+      const seen = new Set<string>();
+      for (let hop = 0; hop < 50 && currentId !== null; hop++) {
+        if (seen.has(currentId)) return null; // defensiv sirkel-vakt, skal aldri inntreffe
+        seen.add(currentId);
+        const { rows } = await client.query(
+          `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
+          [tenantId, currentId]
+        );
+        const row = rows[0] as ConversationIdentity | undefined;
+        if (!row) return null;
+        if (row.status === "active") return row;
+        currentId = row.merged_into_identity_id;
+      }
+      return null;
+    });
+  }
+
   async listChannelLinks(tenantId: string, memorySpace: MemorySpace, identityId: string): Promise<ConversationChannelLink[]> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(
@@ -100,13 +176,15 @@ export class ConversationGraphService {
    * ekte identitetskonflikt MÅ løses eksplisitt via `mergeIdentities()`,
    * aldri stille overskrives her).
    *
-   * Kjent, dokumentert race (ufarlig): dersom `identity_id` IKKE oppgis
-   * OG to samtidige kall linker SAMME nye kanal-identifikator, kan begge
-   * rekke å opprette en ny `conversation_identities`-rad før
-   * lenke-INSERT-en kolliderer for den ene - resultatet er én ekstra,
-   * lenkefri (harmløs) identitetsrad, ALDRI et datakvalitetsbrudd. Aksepert
-   * for dette FOERSTE sliceet (samme presedens-nivå som andre
-   * lav-samtidighets-idempotens-forenklinger i denne kodebasen).
+   * D-119 SECURITY HARDENING: advisory-lås på `(tenant_id, channel,
+   * channel_identifier)` FØR eksistenssjekken lukker den TIDLIGERE
+   * dokumenterte samtidig-foerste-lenke-racen strukturelt (§16) - to
+   * samtidige kall for SAMME nye identifikator serialiseres nå, den andre
+   * finner og gjenbruker identiteten den første opprettet, ALDRI to
+   * separate identitetsrader. Eksplisitt tenant-eierskapsvalidering av
+   * `identity_id`/`linked_business_contact_id`/`linked_person_id` (§11/§12
+   * - Postgres FK-sjekker respekterer IKKE RLS, bevist empirisk under
+   * denne herdingsrunden) hindrer en kryss-tenant-pekerkorrupsjon.
    */
   async linkChannelIdentity(
     tenantId: string,
@@ -116,7 +194,21 @@ export class ConversationGraphService {
     const normalized = normalizeChannelIdentifier(input.channel, input.channel_identifier);
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       let identityId = input.identity_id;
-      if (!identityId) {
+      if (identityId) {
+        // §11/§12: et oppgitt identity_id MÅ tilhøre DENNE tenanten og være aktivt -
+        // FK alene beviser IKKE tenant-eierskap (RLS-blind FK-sjekk, se filhode).
+        const owned = await client.query(
+          `SELECT 1 FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active'`,
+          [tenantId, identityId]
+        );
+        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_identity_not_found");
+      } else {
+        // §16: serialiser samtidige foerste-lenke-forsoek for SAMME identifikator -
+        // en transaksjonsskopet advisory-laas, frigitt automatisk ved COMMIT/ROLLBACK.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [
+          `conv:${tenantId}:${input.channel}`,
+          normalized
+        ]);
         const existing = await client.query(
           `SELECT identity_id FROM conversation_channel_links
            WHERE tenant_id = $1 AND channel = $2 AND channel_identifier = $3 AND status = 'active'`,
@@ -125,6 +217,20 @@ export class ConversationGraphService {
         if (existing.rows.length === 1) {
           identityId = (existing.rows[0] as { identity_id: string }).identity_id;
         }
+      }
+      if (input.linked_business_contact_id !== undefined) {
+        const owned = await client.query(
+          `SELECT 1 FROM business_contacts WHERE tenant_id = $1 AND contact_id = $2`,
+          [tenantId, input.linked_business_contact_id]
+        );
+        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_contact_not_found");
+      }
+      if (input.linked_person_id !== undefined) {
+        const owned = await client.query(
+          `SELECT 1 FROM person_tenants WHERE tenant_id = $1 AND person_id = $2`,
+          [tenantId, input.linked_person_id]
+        );
+        if ((owned.rowCount ?? 0) === 0) throw new Error("conversation_linked_person_not_found");
       }
       if (!identityId) {
         identityId = `conv-id-${randomUUID()}`;
@@ -165,7 +271,16 @@ export class ConversationGraphService {
    * mål-identiteten, og EKSAKT hvilke lenker som ble omdirigert lagres i
    * revisjonsloggen (se filhode). `performed_by` er strukturelt begrenset
    * til `'owner' | 'deterministic_rule'` - se `MergePerformedBy` i
-   * types.ts.
+   * types.ts. IKKE nådd via ToolGateway (se filhode, D-119 SECURITY
+   * HARDENING) - kun tiltrodd internkode kaller denne metoden direkte.
+   *
+   * D-119 SECURITY HARDENING (§17): de to identitetsradene låses i
+   * DETERMINISTISK (sortert identity_id-streng-) rekkefølge, ALDRI
+   * ubetinget kilde-så-mål - to motsatte samtidige merge-forsøk (A->B og
+   * B->A) laaser da ALLTID i SAMME rekkefoelge og kan derfor ikke
+   * deadlocke hverandre (Postgres sin egen deadlock-detector ville uansett
+   * til slutt avbrutt en av dem, men en UNNGAAELIG deadlock er en
+   * kvalitetsfeil, ikke en aksepert risiko naar den er triviell å unngå).
    */
   async mergeIdentities(
     tenantId: string,
@@ -176,12 +291,16 @@ export class ConversationGraphService {
       throw new Error("conversation_merge_source_equals_target");
     }
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const lockOrder = [input.source_identity_id, input.target_identity_id].sort();
+      for (const id of lockOrder) {
+        await client.query(`SELECT 1 FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 FOR UPDATE`, [tenantId, id]);
+      }
       const sourceRes = await client.query(
-        `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 FOR UPDATE`,
+        `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
         [tenantId, input.source_identity_id]
       );
       const targetRes = await client.query(
-        `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2 FOR UPDATE`,
+        `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
         [tenantId, input.target_identity_id]
       );
       const source = sourceRes.rows[0] as ConversationIdentity | undefined;
@@ -231,7 +350,18 @@ export class ConversationGraphService {
    * "angre siste merge"): kilde-identiteten reaktiveres, og EKSAKT de
    * lenkene `merge_id`-hendelsen omdirigerte flyttes tilbake. En allerede
    * reversert merge kan ikke reverseres på nytt (`conversation_merge_
-   * already_reversed`) - hindrer en dobbel-split fra å kollidere.
+   * already_reversed`) - hindrer en dobbel-split fra å kollidere. IKKE
+   * nådd via ToolGateway (se filhode).
+   *
+   * D-119 SECURITY HARDENING: merge-raden låses (`FOR UPDATE`) FØR
+   * allerede-reversert-sjekken (§15 - to samtidige `splitMerge()`-kall for
+   * SAMME merge serialiseres nå: den andre transaksjonen venter til den
+   * første er ferdig, ser deretter `already_reversed=true` og avviser
+   * korrekt - forsterket av en delvis unik DB-indeks i migrasjonen som
+   * SISTE forsvarslinje). Multi-hop-vakt (§13/§14): reverserer ALDRI en
+   * merge hvis maal-identiteten siden er slaatt sammen videre (en SENERE
+   * aktiv merge) - avviser eksplisitt fremfor aa risikere aa flytte lenker
+   * ut fra under en fortsatt aktiv senere sammenslaaing.
    */
   async splitMerge(
     tenantId: string,
@@ -240,7 +370,7 @@ export class ConversationGraphService {
   ): Promise<ConversationIdentityMerge> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const mergeRes = await client.query(
-        `SELECT * FROM conversation_identity_merges WHERE tenant_id = $1 AND merge_id = $2 AND action = 'merge'`,
+        `SELECT * FROM conversation_identity_merges WHERE tenant_id = $1 AND merge_id = $2 AND action = 'merge' FOR UPDATE`,
         [tenantId, input.merge_id]
       );
       const mergeRow = mergeRes.rows[0] as (ConversationIdentityMerge & { affected_link_ids: string[] }) | undefined;
@@ -251,6 +381,16 @@ export class ConversationGraphService {
         [tenantId, input.merge_id]
       );
       if ((alreadyReversed.rowCount ?? 0) > 0) throw new Error("conversation_merge_already_reversed");
+
+      const targetRes = await client.query(
+        `SELECT status FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
+        [tenantId, mergeRow.target_identity_id]
+      );
+      const targetStatus = (targetRes.rows[0] as { status: string } | undefined)?.status;
+      if (targetStatus === undefined) throw new Error("conversation_merge_target_not_found");
+      if (targetStatus !== "active") {
+        throw new Error("conversation_split_blocked_by_later_merge");
+      }
 
       const affectedLinkIds = mergeRow.affected_link_ids;
       if (affectedLinkIds.length > 0) {

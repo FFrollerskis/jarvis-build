@@ -2280,10 +2280,24 @@ export function firstWaveTools(
     // conversation_graph.*-namespace - JARVIS_CANONICAL (D-64), ZERO ekstern
     // leverandør-avhengighet (samme interne sentinel-credential-mønster som
     // business/support). Lagt til på SLUTTEN av samme grunn som over -
-    // eksisterende tester indekserer dette arrayet posisjonelt. `merge_
-    // identities`/`split_merge` er klasse C (material, reversibel - samme
-    // klasse som masterplanens eget "møtebooking"-eksempel, IKKE klasse D:
-    // handlingen har en full, presis rollback-vei via revisjonsloggen).
+    // eksisterende tester indekserer dette arrayet posisjonelt.
+    //
+    // D-119 SECURITY HARDENING (pre-merge, PR #67): `merge_identities`/
+    // `split_merge` er BEVISST FJERNET fra dette navnerommet - ekstern
+    // final-review fant at `performed_by` (som skulle håndheve "aldri en
+    // LLM-alene permanent merge") ble akseptert UKRITISK fra
+    // ToolGateway-kallerparametre, uansett faktisk kalleridentitet
+    // (bevist adversarielt, se `conversation-graph/test/authority-
+    // security.test.ts`). Ingen tiltrodd eier-godkjenningsvei (signert
+    // enhets-approval, D-68/klasse-D-mønsteret) er bygget INN i denne
+    // sliceen ennå - fremfor å retrofitte den under tidspress i en
+    // herdingsrunde, forblir selve `ConversationGraphService.
+    // mergeIdentities()`/`splitMerge()` en fullt testet, TILTRODD intern
+    // API (klar for en fremtidig deterministisk sveip eller en ekte
+    // eier-godkjenningsvei), MEN uten noen ToolGateway-handling som
+    // eksponerer den. `link_channel_identity` beholdes (klasse B) - se
+    // dens beskrivelse under for hvorfor `confidence`/`match_method` IKKE
+    // lenger er kallerstyrte parametre.
     {
       tool_id: "conversation_graph", action: "resolve_identity", description: "Slå opp kanonisk Conversation Graph-identitet for en kjent kanal-identifikator (eksakt, deterministisk - aldri fuzzy)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), channel: z.string(), channel_identifier: z.string() }),
@@ -2309,27 +2323,19 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("conversation_graph")
     },
     {
-      tool_id: "conversation_graph", action: "link_channel_identity", description: "Koble en kanal-identifikator (e-post/Telegram chat-id) til en kanonisk identitet - oppretter en ny identitet hvis ingen oppgis og ingen aktiv lenke finnes",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), identity_id: z.string().optional(), channel: z.string(), channel_identifier: z.string(), confidence: z.number(), match_method: z.string(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), display_name: z.string().optional(), linked_business_contact_id: z.string().optional(), linked_person_id: z.string().optional(), created_by_person_id: z.string().optional() }),
+      tool_id: "conversation_graph", action: "link_channel_identity", description: "Koble en kanal-identifikator (e-post/Telegram chat-id) TIL en kanonisk identitet - oppretter en ny identitet hvis ingen oppgis og ingen aktiv lenke finnes. D-119 SECURITY HARDENING: confidence/match_method er IKKE kallerstyrte - en ToolGateway-kalt lenke er ALLTID 'manual' med fast, lav confidence (§8-10 i herdingsordren) - ekte deterministisk 'exact_email'/'owner_configured'-lenking skjer KUN via intern sync-kode, aldri via denne handlingen",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), identity_id: z.string().optional(), channel: z.string(), channel_identifier: z.string(), source_type: z.string().optional(), source_instance_id: z.string().optional(), external_id: z.string().optional(), display_name: z.string().optional(), linked_business_contact_id: z.string().optional(), linked_person_id: z.string().optional(), created_by_person_id: z.string().optional() }),
       capability_class: "B", scopes: ["conversation_graph.write"], reversible: true,
       rollback_procedure: "revoker lenken (fremtidig split/manuell korreksjon) - repointer ALDRI en eksisterende aktiv lenke stille", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("conversation_graph")
     },
     {
-      tool_id: "conversation_graph", action: "merge_identities", description: "Slå sammen to identiteter (reversibelt - kilde-identiteten tombstones, aldri slettet). performed_by MÅ være 'owner' eller 'deterministic_rule' - ALDRI en direkte AI-utført handling",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), source_identity_id: z.string(), target_identity_id: z.string(), confidence: z.number(), reason: z.string(), performed_by: z.string(), created_by_person_id: z.string().optional() }),
-      capability_class: "C", scopes: ["conversation_graph.write"], reversible: true,
-      rollback_procedure: "split_merge (reverserer EKSAKT denne merge-hendelsen)", idempotent_external: false,
-      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
-      output_trust: "internal", transport: transport("conversation_graph")
-    },
-    {
-      tool_id: "conversation_graph", action: "split_merge", description: "Reverser EN spesifikk, tidligere merge-hendelse - gjenoppretter kilde-identiteten og EKSAKT de lenkene som ble omdirigert",
-      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), merge_id: z.string(), performed_by: z.string(), reason: z.string(), created_by_person_id: z.string().optional() }),
-      capability_class: "C", scopes: ["conversation_graph.write"], reversible: false,
-      rollback_procedure: "ikke reverserbar herfra - en ny merge_identities kan gjenopprette den forrige tilstanden ved behov", idempotent_external: false,
-      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      tool_id: "conversation_graph", action: "resolve_effective_identity", description: "Følg merged_into_identity_id transitivt til den nåværende AKTIVE identiteten i en flertrinns merge-kjede (deterministisk 'hvem eier dette nå', D-119 SECURITY HARDENING §13 Case 3) - rent lese-oppslag, endrer ingenting",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), identity_id: z.string() }),
+      capability_class: "A", scopes: ["conversation_graph.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("conversation_graph")
     },
     {

@@ -1,79 +1,89 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-03 (branch `claude/ua7-conversation-graph`, base `main=db0bf1c575ded615b93bca4367681e3f458853da`)
+**Oppdatert:** 2026-09-03 (branch `claude/ua7-conversation-graph`, base uendret
+`main=db0bf1c575ded615b93bca4367681e3f458853da`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser, ikke her.
 
 ## Aktiv fase/oppgave
 
-UA-6 (D-116/D-117/D-118) er FERDIG og merget - PR #66 merget som `db0bf1c` etter Tobias sin
-eksplisitte godkjenning, post-merge CI grønt, lokal `main` synket. UA-7 Communications Hub er nå
-startet: **D-119, første slice - Conversation Graph + confidence-basert, reversibel
-identitetsopploesning**, gjenbruker eksisterende Gmail/Telegram-kanaler, ZERO nye credentials
-(D-108 uendret utsatt).
+D-119 (UA-7 første slice, Conversation Graph + confidence-basert reversibel
+identitetsopploesning) er implementert og lå som draft PR #67. En ekstern uavhengig final-review
+FØR merge fant reelle svakheter i selvgjennomgangen - **D-119 SECURITY HARDENING-runde** kjørt og
+fullført på SAMME PR #67 (ingen ny D-ID, ingen nytt slice). Full detalj: D-119-addendum i
+DECISIONS_AND_ASSUMPTIONS.md.
 
-## Sammendrag av D-119-sliceen
+## D-119 SECURITY HARDENING - seks bekreftede funn, alle rettet
 
-- **Reuse-audit** (to parallelle Explore-agenter): Gmail/Calendar/Telegram/Voice/Business/
-  Identity/Memory/ToolGateway kartlagt mot hele UA-7 "Bygges"-listen. Eneste kapabilitet som er
-  100% `JARVIS_CANONICAL`, credential-uavhengig OG et hardt forutsetning for akseptansekriterium
-  1+3: Conversation Graph/identitetsopploesning (null eksisterende kode).
-- **D-64-gate:** `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`.
-- **Migrasjon `046_conversation_graph.sql`:** `conversation_identities` (tombstone-basert merge,
-  ALDRI DELETE), `conversation_channel_links` (confidence-scoret, delvis unik indeks),
-  `conversation_identity_merges` (append-only reversibel revisjonslogg med presis
-  `affected_link_ids`-snapshot).
-- **Ny pakke `@jarvis/conversation-graph`:** `ConversationGraphService` (link/resolve/merge/
-  split/cross-channel commitments/timeline), `ConversationGraphSyncService` (gjenbruker
-  `email.list_messages`+`extractCounterpartEmails()` fra D-57, INGEN nye leverandører), ny
-  `conversation_graph.*` ToolGateway-namespace (8 handlinger), ny `conversation-graph-sync`
-  DailyScheduler-jobb.
-- **Strukturell "aldri LLM-alene permanent merge":** `MergePerformedBy`-typen utelater
-  `'ai_assisted'`, DB `CHECK`-constraint håndhever det samme uavhengig av kalllag - bevist via
-  full `ToolGateway.execute()`-vei.
-- **Q-20:** alle tre tabeller registrert i `modules/erasure/src/plan.ts`, korrekt FK-rekkefølge.
-- Full detalj: D-119 i DECISIONS_AND_ASSUMPTIONS.md.
+1. **`performed_by`-forfalskning (CONFIRMED):** `ConversationGraphTransport.invoke()` mottok
+   aldri den ekte `ToolInvocationContext` (D-68) og stolte råtekst på
+   `parameters.performed_by`. Fiks: `merge_identities`/`split_merge` FJERNET fra
+   ToolGateway-overflaten (8→7 handlinger); service-metodene forblir en tiltrodd intern API.
+2. **tenant/space-spoofing:** revidert - bekreftet et REPO-BREDT, allerede dokumentert D-49-mønster
+   (delt av alle transporter), ikke en D-119-spesifikk defekt. Ingen kodeendring, dokumentert
+   ærlig.
+3. **Confidence-selvforfremming (CONFIRMED):** transporten leste `confidence`/`match_method` råtekst
+   fra parametre. Fiks: hardkodet `manual`/`0.5`, fjernet feltene fra ToolGateway sitt
+   `input_schema` (strict zod avviser nå ethvert forsøk på å sende dem).
+4. **Kryss-tenant-pekere (CONFIRMED, bevist empirisk mot ekte Postgres):** FK-sjekker respekterer
+   ikke RLS. Fiks: eksplisitt tenant-eierskapsvalidering av `identity_id`/
+   `linked_business_contact_id`/`linked_person_id` i `linkChannelIdentity()`.
+5. **Flertrinns merge/split-reversibilitet (CONFIRMED):** `splitMerge()` sjekket ikke om
+   `target_identity_id` siden var slått sammen videre. Fiks: `target`-status-sjekk +
+   `resolveEffectiveIdentity()`.
+6. **Samtidighet (CONFIRMED, begge):** dobbel-split-race og foerste-lenke-orphan-race. Fiks:
+   `FOR UPDATE` + unik indeks; Postgres advisory-lås. Pluss deterministisk lock-rekkefølge i
+   `mergeIdentities()` for å unngå en unngåelig deadlock (samme gjennomgangsrunde).
 
-## Kvalitetsporter (D-119)
+Migrasjon `046_conversation_graph.sql` AMENDERT (ikke ny `047`) - aldri kjørt mot en persistent
+database, PR #67 fortsatt umerget (§23 i herdingsordren).
 
-- `pnpm -r typecheck`: 21/21 pakker rent (ny `@jarvis/conversation-graph`).
+## Kvalitetsporter (etter herding)
+
+- `pnpm -r typecheck`: 21/21 pakker rent.
 - `pnpm lint` (`eslint .`): rent.
-- Målrettet: `modules/conversation-graph/test/*.test.ts` - 33/33 grønt (26 service + 7 security).
-- Full workspace-suite: **182/182 filer, 2893/2893 tester grønt** (opp fra 179/2858 - +3 filer/
-  +35 tester, INGEN regresjon, INGEN skips).
-- gitleaks (git-historikk OG working tree): `no leaks found`.
-- 12-spørsmåls adversarial selvgjennomgang: ingen ekte upatchede funn (to dokumenterte,
-  ikke-sikkerhetskritiske forenklinger - se D-119).
+- `modules/conversation-graph/test/*.test.ts`: **48/48 grønt** (39 service + 9 security, opp fra
+  33 - +15 nye herding-regresjonstester). Samtidighetstestene (dobbel-split, foerste-lenke-race,
+  motsatt-retning-merge) verifisert stabile over 4 uavhengige kjøringer.
+- Full workspace-suite: **182/182 filer, 2908/2908 tester grønt** (opp fra 182/2893). Ett
+  urelatert pre-eksisterende flakey-funn (`modules/tasks/test/coding-agent-eval-timeout.test.ts`,
+  hook-timeout under FULL parallell ressurskonkurranse) - bekreftet IKKE-relatert ved isolert
+  kjøring (består konsekvent, ~2.7s) og ved en etterfølgende full ren kjøring som ga 182/182 uten
+  unntak.
+- gitleaks (hele git-historikken, 277 commits): `no leaks found`.
 
 ## Flagg-status
 
+`D119_PREMERGE_HARDENING=PASS`, `PR67_READY_FOR_FINAL_REVIEW=true`,
 `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
 `UA7_CONVERSATION_GRAPH_SUITE_VERIFIED=true`,
-`UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED`, `UA7_COMPLETE=false` (kun første slice),
-`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`. Uendret: `D108_COMPLETE=false`,
+`UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED` (ren TypeScript/ToolGateway/PolicyGateway/
+Postgres/RLS/samtidighet/DB-constraint-herding, fullt bevist i eksisterende embedded-Postgres-
+testmiljø - ingen fysisk-host-avhengig atferd introdusert av denne runden), `UA7_COMPLETE=false`
+(kun første slice), `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`. Uendret: `D108_COMPLETE=false`,
 `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`, `UA6_CREDENTIAL_PHASE_COMPLETE=false`,
-`UA6_COMPLETE=false`, `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false`,
-`WALLESTER_LIVE_VERIFIED=false`, `WALLESTER_LIVE_GATE=PENDING_CREDENTIALS`.
+`UA6_COMPLETE=false`.
 
-UA-7 akseptansekriterier: **1 (commitments across channels): PASS** for identiteter med lenket
-kontakt, NOT_STARTED for kanaler utover Gmail/Telegram. **2 (untrusted messages cannot
-exfiltrate): PASS** for Gmail-innhøstingsstien, PARTIAL for UA-7 som helhet. **3 (identity
-merges reversible+confidence-tracked): PASS.** **4 (transcription retention): NOT_STARTED.**
+UA-7 akseptansekriterier re-evaluert etter herding: **1 (commitments across channels): PASS**
+for identiteter med lenket kontakt. **2 (untrusted messages cannot exfiltrate): PASS** for
+Gmail-innhøstingsstien. **3 (identity merges reversible+confidence-tracked): PASS** (nå med
+bevist proveniens-grense, kryss-tenant-isolasjon, flertrinns-reversibilitet og samtidighet -
+ikke bare den opprinnelige selvgjennomgangen). **4 (transcription retention): NOT_STARTED.**
 
 ## PR-status
 
-PR #66 (UA-6/D-116-118) er `merged=true` (`db0bf1c`) - historisk, lukket. Ny PR for D-119
-opprettes som draft fra branch `claude/ua7-conversation-graph` - INGEN merge uten Tobias sin
-eksplisitte godkjenning.
+PR #67 (branch `claude/ua7-conversation-graph`) forblir **draft** - fersk CI ventes/verifiseres
+mot den eksakte nye HEAD-en denne herdingen produserer FØR noe merge-forslag vurderes. INGEN
+merge uten Tobias/ekstern arkitekt sin eksplisitte godkjenning.
 
 ## Blokkeringer
 
-Ingen tekniske.
+Ingen tekniske. Venter på fersk CI-bekreftelse på ny HEAD, deretter Tobias/ekstern arkitekt sin
+endelige merge-vurdering.
 
 ## Neste oppgave
 
-D-119-sliceen (Conversation Graph, foerste UA-7-slice) er implementasjons-/testbevist. Venter på
-Tobias sin gjennomgang av draft-PR-en. Neste UA-7-slice (utover denne) krever enten en ny
-kanal-/leverandørbeslutning (D-108-sperret for credentials) eller videre reuse-audit - IKKE
-startet. INGEN D-108. INGEN UA-8.
+Push herdingscommiten, vent på og bekreft fersk CI grønt på eksakt ny HEAD, oppdater PR #67 sin
+beskrivelse med herdingssammendraget, lever sluttrapport. INGEN merge, INGEN neste UA-7-slice,
+INGEN D-108, INGEN UA-8 startet av denne runden.

@@ -12,6 +12,20 @@ export type ChannelLinkMatchMethod = "exact_email" | "owner_configured" | "manua
 export type MergeAction = "merge" | "split";
 export type MergePerformedBy = "owner" | "deterministic_rule";
 
+/**
+ * D-119 SECURITY HARDENING (pre-merge, PR #67): den ENESTE `match_method`
+ * `ConversationGraphTransport` (ToolGateway-overflaten) noensinne kan
+ * produsere - en modell/kaller kan ALDRI selv-hevde `exact_email`/
+ * `owner_configured` (de krever faktisk deterministisk kode - se
+ * `ConversationGraphSyncService`, som kaller SERVICE-en direkte, ALDRI
+ * via ToolGateway). Samsvarende `MANUAL_LINK_CONFIDENCE` er en FAST,
+ * lav verdi - ALDRI et fritt tall en kaller kan sette (§8-10 i
+ * herdingsordren: confidence maa foelge evidens, ikke `max(gammel, ny)`
+ * paa et fritt kallertall).
+ */
+export const TOOLGATEWAY_LINK_MATCH_METHOD: ChannelLinkMatchMethod = "manual";
+export const MANUAL_LINK_CONFIDENCE = 0.5;
+
 export interface ConversationIdentity {
   identity_id: string;
   tenant_id: string;
