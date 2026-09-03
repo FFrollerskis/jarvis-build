@@ -73,17 +73,21 @@ ikke bare den opprinnelige selvgjennomgangen). **4 (transcription retention): NO
 
 ## PR-status
 
-PR #67 (branch `claude/ua7-conversation-graph`) forblir **draft** - fersk CI ventes/verifiseres
-mot den eksakte nye HEAD-en denne herdingen produserer FØR noe merge-forslag vurderes. INGEN
-merge uten Tobias/ekstern arkitekt sin eksplisitte godkjenning.
+PR #67 (branch `claude/ua7-conversation-graph`) forblir **draft**, `mergeable_state=clean`, ZERO
+åpne review-tråder. Fersk CI BEKREFTET grønt mot den eksakte nye HEAD-en `6d4017579948be7716c24cc8f86708b2a9d0bf32`
+denne herdingen produserte - `build-test`/`gitleaks`/`windows-git-auth` alle `conclusion=success`
+(workflow run `33764910713`, samme resultat replikert på run `33764906350`). PR-beskrivelsen
+oppdatert med full herdingssammendrag. INGEN merge uten Tobias/ekstern arkitekt sin eksplisitte
+godkjenning.
 
 ## Blokkeringer
 
-Ingen tekniske. Venter på fersk CI-bekreftelse på ny HEAD, deretter Tobias/ekstern arkitekt sin
-endelige merge-vurdering.
+Ingen. Venter KUN på Tobias/ekstern arkitekt sin endelige merge-vurdering.
 
 ## Neste oppgave
 
-Push herdingscommiten, vent på og bekreft fersk CI grønt på eksakt ny HEAD, oppdater PR #67 sin
-beskrivelse med herdingssammendraget, lever sluttrapport. INGEN merge, INGEN neste UA-7-slice,
-INGEN D-108, INGEN UA-8 startet av denne runden.
+D-119 PRE-MERGE SECURITY HARDENING er FERDIG: seks bekreftede funn rettet, 48/48 målrettede
+tester grønt, full regresjon 182/182/2908/2908 grønt, gitleaks rent, fersk CI grønt på eksakt HEAD,
+PR-beskrivelse oppdatert, ZERO åpne review-tråder. `D119_PREMERGE_HARDENING=PASS`,
+`PR67_READY_FOR_FINAL_REVIEW=true`. Venter på Tobias/ekstern arkitekt sin finale merge-beslutning
+- INGEN merge utført av denne økten. INGEN neste UA-7-slice, INGEN D-108, INGEN UA-8 startet.
