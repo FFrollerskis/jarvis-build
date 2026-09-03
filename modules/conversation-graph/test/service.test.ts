@@ -4,7 +4,9 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import type { ToolInvocationContext } from "@jarvis/tool-gateway";
 import { firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "../src/service.ts";
@@ -25,6 +27,14 @@ let business: BusinessService;
 
 const TENANT_A = "tenant-conv-a";
 const TENANT_B = "tenant-conv-b";
+
+/** D-119 FINAL AUTHORITY HARDENING: den ekte, tiltrodde konteksten `ToolGateway.execute()` ville bygget - ALDRI en kallerstyrt parameter. */
+const contextFor = (tenantId: string): ToolInvocationContext => ({
+  identity: {
+    person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+    session_id: `sess-${tenantId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
+  } satisfies IdentityContext
+});
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-conv-"));
@@ -545,78 +555,96 @@ describe("ConversationGraphService - samtidighet (D-119 SECURITY HARDENING §15/
 });
 
 describe("ToolGateway-registrering: firstWaveTools() eksponerer conversation_graph.* med korrekt capability_class", () => {
-  it("U: registrerer 7 handlinger med forventet capability_class - merge_identities/split_merge FJERNET (D-119 SECURITY HARDENING)", () => {
+  it("U: registrerer 6 handlinger med forventet capability_class - merge_identities/split_merge/link_channel_identity ALLE FJERNET (D-119 FINAL AUTHORITY HARDENING - navnerommet er nå READ-ONLY)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
     const byAction = Object.fromEntries(tools.map((t) => [t.action, t.capability_class]));
     expect(byAction).toEqual({
       resolve_identity: "A", read_identity: "A", resolve_effective_identity: "A", list_channel_links: "A",
-      link_channel_identity: "B",
       read_cross_channel_commitments: "A", read_identity_timeline: "A"
     });
     expect(byAction["merge_identities"]).toBeUndefined();
     expect(byAction["split_merge"]).toBeUndefined();
+    expect(byAction["link_channel_identity"]).toBeUndefined();
   });
 
-  it("V: alle 7 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
+  it("V: alle 6 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
-    expect(tools).toHaveLength(7);
+    expect(tools).toHaveLength(6);
     for (const t of tools) expect(t.credential_ref).toBe("JARVIS_BUSINESS_INTERNAL_TOKEN");
   });
 
-  it("V2: link_channel_identity sin input_schema krever IKKE lenger confidence/match_method (D-119 - transporten bestemmer dem, aldri kalleren)", () => {
-    const tool = firstWaveTools({}).find((t) => t.tool_id === "conversation_graph" && t.action === "link_channel_identity")!;
-    const parsed = tool.input_schema.safeParse({ tenant_id: TENANT_A, channel: "email", channel_identifier: "schema-check@acme.no" });
-    expect(parsed.success).toBe(true);
+  it("V2: INGEN av de 6 gjenværende input_schema-ene godtar tenant_id/memory_space (D-119 FINAL AUTHORITY HARDENING §4 - 'no parameter = no spoof surface')", () => {
+    const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
+    for (const t of tools) {
+      const parsedWithTenant = t.input_schema.safeParse({ tenant_id: TENANT_B, identity_id: "x", channel: "email", channel_identifier: "x" });
+      expect(parsedWithTenant.success).toBe(false);
+      const parsedWithSpace = t.input_schema.safeParse({ memory_space: "personal", identity_id: "x", channel: "email", channel_identifier: "x" });
+      expect(parsedWithSpace.success).toBe(false);
+    }
   });
 });
 
-describe("ConversationGraphTransport - direkte dispatch-feilbaner", () => {
+describe("ConversationGraphTransport - direkte dispatch-feilbaner + tiltrodd konteksthenting (D-119 FINAL AUTHORITY HARDENING)", () => {
   const transport = () => new ConversationGraphTransport(graph);
 
   it("W: kaster for en ukjent handling", async () => {
-    await expect(transport().invoke("does_not_exist", { tenant_id: TENANT_A })).rejects.toThrow(
+    await expect(transport().invoke("does_not_exist", {}, "cred", contextFor(TENANT_A))).rejects.toThrow(
       "conversation_graph_action_not_implemented:does_not_exist"
     );
   });
 
-  it("W2: merge_identities er IKKE lenger en dispatchbar handling (D-119 SECURITY HARDENING - fjernet fra ToolGateway-overflaten)", async () => {
+  it("W2: merge_identities er IKKE lenger en dispatchbar handling (fjernet fra ToolGateway-overflaten)", async () => {
     await expect(
       transport().invoke("merge_identities", {
-        tenant_id: TENANT_A, source_identity_id: "conv-id-a", target_identity_id: "conv-id-b",
+        source_identity_id: "conv-id-a", target_identity_id: "conv-id-b",
         confidence: 1.0, reason: "forsoek", performed_by: "owner"
-      })
+      }, "cred", contextFor(TENANT_A))
     ).rejects.toThrow("conversation_graph_action_not_implemented:merge_identities");
   });
 
-  it("W3: split_merge er IKKE lenger en dispatchbar handling (D-119 SECURITY HARDENING - fjernet fra ToolGateway-overflaten)", async () => {
+  it("W3: split_merge er IKKE lenger en dispatchbar handling (fjernet fra ToolGateway-overflaten)", async () => {
     await expect(
-      transport().invoke("split_merge", { tenant_id: TENANT_A, merge_id: "conv-merge-x", performed_by: "owner", reason: "forsoek" })
+      transport().invoke("split_merge", { merge_id: "conv-merge-x", performed_by: "owner", reason: "forsoek" }, "cred", contextFor(TENANT_A))
     ).rejects.toThrow("conversation_graph_action_not_implemented:split_merge");
   });
 
-  it("X: kaster for manglende tenant_id", async () => {
-    await expect(transport().invoke("read_identity", { identity_id: "conv-id-x" })).rejects.toThrow(
-      "conversation_graph_missing_parameter:tenant_id"
+  it("W4: link_channel_identity er IKKE lenger en dispatchbar handling (Blocker B - fjernet fra ToolGateway-overflaten, se transport.ts sitt filhode)", async () => {
+    await expect(
+      transport().invoke("link_channel_identity", { channel: "email", channel_identifier: "no-longer-dispatchable@acme.no" }, "cred", contextFor(TENANT_A))
+    ).rejects.toThrow("conversation_graph_action_not_implemented:link_channel_identity");
+  });
+
+  it("X: kaster (fail-closed) naar ToolInvocationContext.identity mangler helt - ALDRI et stille fall til en parameter", async () => {
+    await expect(
+      transport().invoke("read_identity", { identity_id: "conv-id-x" }, "cred", {} as never)
+    ).rejects.toThrow("conversation_graph_missing_invocation_context");
+  });
+
+  it("X2: kaster for manglende identity_id-parameter (selve handlingens egne parametre valideres fortsatt)", async () => {
+    await expect(transport().invoke("read_identity", {}, "cred", contextFor(TENANT_A))).rejects.toThrow(
+      "conversation_graph_missing_parameter:identity_id"
     );
   });
 
-  it("Y: link_channel_identity dispatcher ruter korrekt til service og returnerer external_id - confidence/match_method IGNORERES fra parameters (D-119)", async () => {
-    const result = await transport().invoke("link_channel_identity", {
-      tenant_id: TENANT_A, memory_space: "business", channel: "email",
-      // Simulerer et forsoek paa aa forfalske sterk deterministisk proveniens -
-      // transporten skal IGNORERE begge feltene fullstendig.
-      channel_identifier: "transport-dispatch@acme.no", confidence: 1.0, match_method: "exact_email"
+  it("Y: tenantId/memorySpace kommer UTELUKKENDE fra context.identity - en tenant_id/memory_space i parameters paavirker INGENTING (dispatch-nivaa, samme bevis som full ToolGateway-vei i security.test.ts)", async () => {
+    const identityInA = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "context-derived@acme.no", confidence: 1.0, match_method: "exact_email"
     });
-    expect(result.external_id).toBeTruthy();
-    const link = result.data as { confidence: number; match_method: string };
-    expect(link.match_method).toBe("manual");
-    expect(link.confidence).toBe(0.5);
+    // Selv om parameters PAASTAAR tenant_id=B/memory_space=personal (feltene finnes
+    // ikke lenger i input_schema, men transporten selv skal uansett IGNORERE dem
+    // hvis en direkte dispatch-kaller likevel sender dem) - konteksten (A) skal vinne.
+    const result = await transport().invoke(
+      "read_identity",
+      { identity_id: identityInA.identity_id, tenant_id: TENANT_B, memory_space: "personal" } as never,
+      "cred", contextFor(TENANT_A)
+    );
+    expect(result.external_id).toBe(identityInA.identity_id);
   });
 
   it("Z: resolve_identity for en ukjent kanal-identifikator returnerer data=null uten external_id (Q-26)", async () => {
-    const result = await transport().invoke("resolve_identity", {
-      tenant_id: TENANT_A, memory_space: "business", channel: "email", channel_identifier: "never-dispatched@acme.no"
-    });
+    const result = await transport().invoke(
+      "resolve_identity", { channel: "email", channel_identifier: "never-dispatched@acme.no" }, "cred", contextFor(TENANT_A)
+    );
     expect(result.external_id).toBeUndefined();
     expect(result.data).toBeNull();
   });

@@ -3482,18 +3482,31 @@ ToolGateway-namespace endret fra 8 til **7 handlinger** — `merge_identities`/`
 **48** (39 service + 9 security). Full rotårsak/fiks/regresjon for alle seks bekreftede funn: se
 D-119-addendumet i DECISIONS_AND_ASSUMPTIONS.md — IKKE dupliser den logikken her.
 
-**Flagg (etter herding):** `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
-`UA7_CONVERSATION_GRAPH_SUITE_VERIFIED=true`, `UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED`
-(hele sliceen, inkl. herdingen, er deterministisk bevist gjennom embedded Postgres/RLS-suiten,
-ingen Windows/Docker/fysisk-host-avhengig atferd), `UA7_COMPLETE=false`,
-`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`, `D119_PREMERGE_HARDENING=PASS`,
-`PR67_READY_FOR_FINAL_REVIEW=true`. UA-7 akseptansekriterier (re-evaluert etter herding): 1 PASS
-(for identiteter med lenket kontakt) / NOT_STARTED (andre kanaler), 2 PASS (Gmail-stien) / PARTIAL
-(UA-7 helhet), 3 PASS (nå med bevist proveniens-grense/kryss-tenant-isolasjon/flertrinns-
-reversibilitet/samtidighet, ikke kun den opprinnelige selvgjennomgangen), 4 NOT_STARTED. Uendret:
-`D108_COMPLETE=false`, alle UA-6-flagg fra D-116/D-117/D-118.
+**D-119 FINAL AUTHORITY / TENANT-BOUNDARY HARDENING-ADDENDUM, ANDRE runde (pre-merge på PR #67,
+2026-09-03):** en ANDRE ekstern final-review, ETTER at addendumet over allerede var grønt, fant
+at `tenant_id`/`memory_space` FORTSATT ble lest fra kallerparametre (SAMME feilklasse som
+`performed_by`-funnet), OG at `link_channel_identity` (som overlevde forrige runde) hadde ZERO
+produksjonskallere og en usann `reversible: true`-påstand. `conversation_graph.*` ToolGateway-
+namespace er derfor endret fra 7 til **6 handlinger, ALLE klasse A** — navnerommet er nå
+**READ-ONLY** via ToolGateway (`link_channel_identity` fjernet, SAMME presedens som
+`merge_identities`/`split_merge`); `tenant_id`/`memory_space` fjernet fra ALLE `input_schema`-er,
+transporten henter dem UTELUKKENDE fra `context.identity` (nå REQUIRED, fail-closed uten den).
+Testtallet økte fra 48 til **51** (41 service + 10 security). Full rotårsak/fiks/regresjon: se
+DET ANDRE D-119-addendumet i DECISIONS_AND_ASSUMPTIONS.md — IKKE dupliser den logikken her.
 
-Full detalj: D-119 (inkl. SECURITY HARDENING-ADDENDUM) i DECISIONS_AND_ASSUMPTIONS.md.
+**Flagg (etter begge herdingsrunder):** `UA7_CONVERSATION_GRAPH_IMPLEMENTATION_COMPLETE=true`,
+`UA7_CONVERSATION_GRAPH_SUITE_VERIFIED=true`, `UA7_CONVERSATION_GRAPH_HOST_VERIFIED=NOT_REQUIRED`
+(hele sliceen, inkl. begge herdingsrundene, er deterministisk bevist gjennom embedded Postgres/
+RLS-suiten, ingen Windows/Docker/fysisk-host-avhengig atferd), `UA7_COMPLETE=false`,
+`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`, `D119_PREMERGE_HARDENING=PASS`,
+`D119_FINAL_AUTHORITY_HARDENING=PASS`, `PR67_READY_FOR_FINAL_REVIEW=true`. UA-7
+akseptansekriterier (re-evaluert etter begge herdingsrunder): 1 PASS (for identiteter med lenket
+kontakt) / NOT_STARTED (andre kanaler), 2 PASS (Gmail-stien) / PARTIAL (UA-7 helhet), 3 PASS (nå
+med bevist proveniens-/tenant-grense, kryss-tenant-isolasjon, flertrinns-reversibilitet,
+samtidighet, OG strukturelt umulig tenant-spoofing/canonical-link-forfalskning), 4 NOT_STARTED.
+Uendret: `D108_COMPLETE=false`, alle UA-6-flagg fra D-116/D-117/D-118.
+
+Full detalj: D-119 (begge herdingsaddenda) i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 

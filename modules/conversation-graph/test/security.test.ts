@@ -175,6 +175,16 @@ describe("C: 'never LLM-alone permanent merge' - D-119 SECURITY HARDENING (pre-m
    * utelater strukturelt 'ai_assisted') forblir UENDRET testet i
    * `service.test.ts` test O (forsvar i dybden for den interne, tiltrodde
    * API-en `mergeIdentities()`/`splitMerge()` fortsatt eksponerer).
+   *
+   * D-119 FINAL AUTHORITY / TENANT-BOUNDARY HARDENING (andre runde, se
+   * `transport.ts` sitt filhode): `link_channel_identity` er NÅ OGSÅ
+   * fjernet (Blocker B - test 6d), og `tenant_id`/`memory_space` er
+   * fjernet fra ALLE gjenværende `input_schema`-er (Blocker A - tester 6e/6f)
+   * etter at et forsøk på å motbevise den FØRSTE herdingsrunden viste at
+   * en tenant-A-autentisert kaller likevel kunne lese OG skrive tenant B
+   * sine rader ved å sette `parameters.tenant_id` (bevist adversarielt via
+   * en midlertidig probe FØR fiksen, se D-119-addendumet i
+   * DECISIONS_AND_ASSUMPTIONS.md - `D119_TENANT_PARAMETER_AUTHORITY_BYPASS_CONFIRMED=true`).
    */
   it("5: merge_identities er uoppnåelig via den fulle ToolGateway.execute()-veien - 'owner' spoofes IKKE lenger inn", async () => {
     const source = await graph.linkChannelIdentity(TENANT_A, "business", {
@@ -186,7 +196,6 @@ describe("C: 'never LLM-alone permanent merge' - D-119 SECURITY HARDENING (pre-m
     const result = await toolGateway.execute({
       identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "merge_identities",
       parameters: {
-        tenant_id: TENANT_A, memory_space: "business",
         source_identity_id: source.identity_id, target_identity_id: target.identity_id,
         confidence: 0.99, reason: "modellen foreslo dette selv - forsoek paa forfalsket eier-proveniens",
         performed_by: "owner"
@@ -212,7 +221,7 @@ describe("C: 'never LLM-alone permanent merge' - D-119 SECURITY HARDENING (pre-m
     const result = await toolGateway.execute({
       identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "split_merge",
       parameters: {
-        tenant_id: TENANT_A, memory_space: "business", merge_id: merge.merge_id,
+        merge_id: merge.merge_id,
         reason: "modellen foreslo dette selv - forsoek paa forfalsket deterministisk-regel-proveniens",
         performed_by: "deterministic_rule"
       }
@@ -223,34 +232,42 @@ describe("C: 'never LLM-alone permanent merge' - D-119 SECURITY HARDENING (pre-m
     expect(sourceAfter?.status).toBe("merged"); // uendret - splitten skjedde ALDRI
   });
 
-  it("6b: link_channel_identity via den fulle ToolGateway.execute()-veien AVVISER et forsøk på å sende confidence/match_method (§8-10 - fjernet fra input_schema, strict zod avviser ukjente felt FØR transporten i det hele tatt nås)", async () => {
+  it("6d: link_channel_identity er uoppnåelig via den fulle ToolGateway.execute()-veien (Blocker B - fjernet helt, ZERO produksjonskallere, ingen legitim kallerstyrt provenance-bruk)", async () => {
     const result = await toolGateway.execute({
       identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "link_channel_identity",
-      parameters: {
-        tenant_id: TENANT_A, memory_space: "business", channel: "email",
-        channel_identifier: "full-path-confidence-spoof@acme.no",
-        // Forsoek paa aa hevde sterk, deterministisk proveniens gjennom parametrene -
-        // strict input_schema avviser dette FØR PolicyGateway/transporten nås.
-        confidence: 1.0, match_method: "exact_email"
-      }
+      parameters: { channel: "email", channel_identifier: "link-no-longer-reachable@acme.no" }
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("unknown_tool");
+    const found = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", "link-no-longer-reachable@acme.no");
+    expect(found).toBeNull();
+  });
+
+  it("6e: TENANT AUTHORITY - et forsøk på å sende tenant_id/memory_space som parameter (les-handling) AVVISES av strict input_schema FØR transporten i det hele tatt nås (D119_TENANT_PARAMETER_AUTHORITY_BYPASS - retting)", async () => {
+    const victimInB = await graph.linkChannelIdentity(TENANT_B, "business", {
+      channel: "email", channel_identifier: "victim-tenant-authority@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const result = await toolGateway.execute({
+      // Kalleren er FAKTISK autentisert som tenant A - forsøker aa lese en tenant-B-rad
+      // ved aa forfalske tenant_id i parametrene (den GAMLE angrepsveien).
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "read_identity",
+      parameters: { identity_id: victimInB.identity_id, tenant_id: TENANT_B }
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.reason).toBe("invalid_parameters");
   });
 
-  it("6c: link_channel_identity via den fulle ToolGateway.execute()-veien UTEN confidence/match_method (korrekt bruk) tvinges alltid til manual/0.5", async () => {
+  it("6f: TENANT AUTHORITY - selv med et STRUKTURELT gyldig kall (ingen tenant_id-parameter i det hele tatt) leser en tenant-A-kaller ALDRI en tenant-B-rad - effective_tenant kommer utelukkende fra context.identity", async () => {
+    const victimInB = await graph.linkChannelIdentity(TENANT_B, "business", {
+      channel: "email", channel_identifier: "victim-tenant-authority-2@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
     const result = await toolGateway.execute({
-      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "link_channel_identity",
-      parameters: {
-        tenant_id: TENANT_A, memory_space: "business", channel: "email",
-        channel_identifier: "full-path-manual-forced@acme.no"
-      }
+      identity: identityFor(TENANT_A), tool_id: "conversation_graph", action: "read_identity",
+      parameters: { identity_id: victimInB.identity_id }
     });
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("expected ok result");
-    const link = result.data as unknown as { confidence: number; match_method: string };
-    expect(link.match_method).toBe("manual");
-    expect(link.confidence).toBe(0.5);
+    expect(result.data).toBeNull(); // RLS under tenant A ser aldri tenant B sin rad
   });
 });
 

@@ -402,10 +402,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // credential_unavailable, ALDRI et stille fall til en ambient binærsti.
     docker: new DockerTransport(),
     // UA-7 Communications Hub - foerste slice (D-119): eget
-    // `conversation_graph.*`-namespace - SAMME lat/enkel-avhengighet-mønster
-    // som GrowthTransport/AgreementsTransport (INGEN toolGateway/
-    // ToolInvocationContext - `merge_identities`/`split_merge` sin klasse C
-    // er selve handlingen, ikke en nøstet under-handling).
+    // `conversation_graph.*`-namespace. D-119 FINAL AUTHORITY HARDENING:
+    // denne transporten MOTTAR og KREVER `ToolInvocationContext` (D-68) -
+    // tenant/space avledes UTELUKKENDE fra den, aldri fra kallerparametre
+    // (se `transport.ts` sitt filhode). Navnerommet er READ-ONLY via
+    // ToolGateway (`merge_identities`/`split_merge`/`link_channel_identity`
+    // alle fjernet - canonical mutasjon skjer kun via
+    // `ConversationGraphSyncService`, direkte mot service-en).
     conversation_graph: new ConversationGraphTransport(conversationGraphService),
     ...driveTransportsIfConfigured()
   }, {
