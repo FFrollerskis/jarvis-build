@@ -13,6 +13,7 @@
     "@jarvis/business": "workspace:*",
     "@jarvis/consent": "workspace:*",
     "@jarvis/contracts": "workspace:*",
+    "@jarvis/conversation-graph": "workspace:*",
     "@jarvis/core": "workspace:*",
     "@jarvis/finance": "workspace:*",
     "@jarvis/growth": "workspace:*",

@@ -15,7 +15,8 @@ export default defineConfig({
       "@jarvis/knowledge": fileURLToPath(new URL("./modules/knowledge/src/index.ts", import.meta.url)),
       "@jarvis/watchdog": fileURLToPath(new URL("./modules/watchdog/src/index.ts", import.meta.url)),
       "@jarvis/erasure": fileURLToPath(new URL("./modules/erasure/src/index.ts", import.meta.url)),
-      "@jarvis/business": fileURLToPath(new URL("./modules/business/src/index.ts", import.meta.url))
+      "@jarvis/business": fileURLToPath(new URL("./modules/business/src/index.ts", import.meta.url)),
+      "@jarvis/conversation-graph": fileURLToPath(new URL("./modules/conversation-graph/src/index.ts", import.meta.url))
     }
   },
   test: {

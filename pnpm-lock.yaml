@@ -41,6 +41,9 @@ importers:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@jarvis/conversation-graph':
+        specifier: workspace:*
+        version: link:../../modules/conversation-graph
       '@jarvis/core':
         specifier: workspace:*
         version: link:../../modules/core
@@ -220,6 +223,37 @@ importers:
       '@jarvis/business':
         specifier: workspace:*
         version: link:../business
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  modules/conversation-graph:
+    dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
