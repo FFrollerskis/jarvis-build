@@ -3510,6 +3510,79 @@ Full detalj: D-119 (begge herdingsaddenda) i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+## UA-7 COMMUNICATIONS HUB — Andre slice: tverr-kanal-forpliktelser og neste handlinger (D-121, 2026-09-04)
+
+**Masterplan-basis:** samme §"UA-7 - Communications Hub" som D-119. Akseptansekriterium 1 ordrett:
+«Open commitments **and next actions** visible **across channels**».
+
+**Styrt gap-audit av faktisk `main` (`ce326f51`) — hele gjenstående UA-7-scope:**
+
+| UA-7 capability | Klassifisering | Evidens (file:path) |
+|---|---|---|
+| Conversation Graph (identiteter/lenker/merges) | `ALREADY_IMPLEMENTED_REUSE` | `modules/core/src/db/migrations/046_conversation_graph.sql`, `modules/conversation-graph/src/service.ts` |
+| Confidence-basert reversibel identitetsoppløsning | `ALREADY_IMPLEMENTED_REUSE` | `modules/conversation-graph/src/service.ts:189+` (link), `:300+` (merge/split) |
+| Gmail les/søk/vedlegg | `ALREADY_IMPLEMENTED_REUSE` | `modules/tool-gateway/src/live-transports.ts:242-345` |
+| Gmail **send/draft** | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | `live-transports.ts:247-256` — ingen `send`-gren (`gmail_unsupported_action_send`); `email.send` er en registrert ToolDefinition (`integrations.ts:105-112`) UTEN utførende transport; krever `mail.send`-scope |
+| Google Calendar les | `ALREADY_IMPLEMENTED_REUSE` | `live-transports.ts:347-410` |
+| Google Calendar **skriv** | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | `live-transports.ts:350-357` — ingen `create_event`-gren; krever skrive-scope |
+| Contacts / person-røtter | `ALREADY_IMPLEMENTED_REUSE` | `019_business.sql` (`business_contacts`), `001_identity.sql` (`people`/`person_tenants`) |
+| Telegram utgående | `ALREADY_IMPLEMENTED_REUSE` | `live-transports.ts:797-800` (`notify`, LIVE+VERIFIED i RUNTIME_GATES.md) |
+| Telegram inngående som samtalekanal | `NOT_STARTED_PROVIDER_INDEPENDENT` | kun `TelegramCommandPoller` (`/brief`,`/status`), ingen melding→graf-vei |
+| Business followups / open loops / aktiviteter | `ALREADY_IMPLEMENTED_REUSE` | `019_business.sql`, `020_business_open_loops.sql`, `modules/business/src/open-loop-service.ts` |
+| Support-tickets som kanalmeldinger | `ALREADY_IMPLEMENTED_REUSE` | `modules/support/src/email-ingress.ts`, `024_support.sql` |
+| **Tverr-kanal-forpliktelser + neste handlinger** | **`PARTIAL_REUSE_NEEDS_SLICE` → denne sliceen** | `service.ts` (D-119) leste KUN `business_followups`, fulgte ikke merge-kjeden, viste ingen kanal-nåbarhet |
+| Slack / Teams / WhatsApp Business / Messenger / Instagram / Discord / SMS | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | null kode; krever leverandørvalg + credentials |
+| SIP/telefoni + utgående AI-samtaler | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | `apps/voice-gateway/` har sesjons-/SpeechAdapter-arkitektur, ZERO telefoni-inngang |
+| Møtetranskripsjon + retensjon/rettsgrunnlag (kriterium 4) | `DEFERRED_WITHIN_UA7_BY_DEPENDENCY` | avhenger av transkripsjons-/SIP-leverandør; `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE` |
+| Autonom drafting/sending i eier-autoriserte kanaler | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | avhenger av Gmail/messaging skrive-scope over |
+
+**Slice-derivering:** alt annet gjenstående krever enten en ny leverandør/scope (D-108-sperret) eller en
+leverandør som ikke er kanonisk forfalt ennå. Akseptansekriterium 1 var det ENESTE gjenstående,
+leverandør-uavhengige kriteriet — og er samtidig den kanoniske laget som MÅ komme først: uten en
+identitets-forankret forpliktelsesvisning ville enhver ny kanal (Slack/WhatsApp/SMS) gi null
+forpliktelses-synlighet fra dag én.
+
+**Bygget (NULL nye tabeller, NULL nye migrasjoner, NULL nye leverandører, NULL nye credentials):**
+`crossChannelCommitmentView()` (union av `business_followups` + `business_open_loops` for den
+EFFEKTIVE identiteten, med `source_kind`, uendret proveniens, delt prioritets-bucket og aktiv
+kanal-nåbarhet), `crossChannelAttention()` (tenant-bred, deterministisk sortert, `channel_reachable`
+eksplisitt), KORREKTHETSFIKS i `linkedContactId()` (følger merge-kjeden — gjelder også
+`crossChannelCommitments()`/`identityTimeline()`), og delt `classifyAttentionBucket()` gjenbrukt av
+BÅDE `OpenLoopService.attentionQueue()` og den nye visningen.
+
+**Arkitekt-review-fiks (PR #70, ingen ny D-ID):** `crossChannelAttention()` valgte først den ELDSTE
+aktive identiteten per kontakt og leste kanaler kun fra den. `046_conversation_graph.sql:94` har
+ingen unikhets-skranke på `(tenant_id, linked_business_contact_id)` for aktive identiteter, så FLERE
+aktive identiteter kan lovlig peke på samme kontakt — visningen kunne derfor stille utelate aktive
+kanaler på en senere identitet, og i verste fall rapportere `channel_reachable=false` for en motpart
+som faktisk var nåbar. Rekkevidden aggregeres nå over ALLE aktive identiteter for kontakten, og
+returformen bytter det ene, vilkårlige `identity_id`/`display_name`-paret med `identities[]`
+(`AttentionIdentityReach`) slik at hver kanal fortsatt attribueres EKSAKT til identiteten som eier
+lenken. Ingen identitet og ingen kanal droppes; merge-/split-mekanikken er urørt.
+
+**ToolGateway:** `conversation_graph.*` 6 → **8 handlinger, ALLE fortsatt klasse A — namespacet
+forblir READ-ONLY**. Begge nye `input_schema`-er er `.strict()` uten `tenant_id`/`memory_space` **og
+uten `now`** (en kaller som kunne styre «nå» kunne styre prioritets-bucket).
+
+**Tester:** `modules/conversation-graph/test/*.test.ts` **74/74 grønt** (60 service + 14 security, opp
+fra 51) mot ekte embedded Postgres/RLS — inkl. adversariell prompt-injeksjon mot en urelatert privat
+kontakts forpliktelser, tenant-isolasjon via FULL `ToolGateway.execute()`, split-reversibilitet,
+ikke-muterende radtelling før/etter, og de to review-regresjonene (AQ: to aktive identiteter mot
+samme kontakt → unionen av begge kanalene; AR: eldste identitet kun revokert lenke mens en senere er
+nåbar → `channel_reachable=true`, aldri et falskt «vi når ikke denne»).
+
+**Flagg:** `UA7_CROSS_CHANNEL_COMMITMENTS_IMPLEMENTATION_COMPLETE=true`,
+`UA7_CONVERSATION_GRAPH_NAMESPACE_READ_ONLY=true`, `UA7_NEW_TABLES_ADDED=0`,
+`UA7_NEW_PROVIDERS_ADDED=0`, `HOST_ACCEPTANCE_REQUIRED=false`, `UA7_COMPLETE=false`,
+`D108_COMPLETE=false`. UA-7-kriterier: **1 PASS** (for identiteter med lenket kontakt, nå med neste
+handlinger + merge-korrekt oppslag + observerbar kanal-nåbarhet) / PARTIAL for UA-7 som helhet så
+lenge kanalene selv er D-108-sperret, **2 PASS** (Gmail-stien, nå også bevist for
+forpliktelses-visningen), **3 PASS** (uendret fra D-119), **4 NOT_STARTED**.
+
+Full detalj: D-121 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

@@ -2353,6 +2353,30 @@ export function firstWaveTools(
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("conversation_graph")
+    },
+    // UA-7 slice 2 (D-121): akseptansekriterium 1 FULLT UT ("open commitments
+    // AND NEXT ACTIONS visible ACROSS CHANNELS"). Begge er rene lese-oppslag,
+    // klasse A - `conversation_graph.*` forblir READ-ONLY (D-119 FINAL
+    // AUTHORITY HARDENING uendret), namespacet gaar 6 -> 8 handlinger. Ingen
+    // ny tabell, ingen ny leverandoer, ingen nye scopes: begge unionerer de
+    // EKSISTERENDE `business_followups`/`business_open_loops`. `tenant_id`/
+    // `memory_space`/`now` er BEVISST fravaerende fra begge input_schema-er -
+    // ingen parameter = ingen forfalskningsflate.
+    {
+      tool_id: "conversation_graph", action: "read_cross_channel_commitment_view", description: "Les FULL tverr-kanal-visning for én identitet: åpne forpliktelser (business_followups) OG deterministisk detekterte neste handlinger (business_open_loops), med kilde-proveniens, prioritets-bucket og hvilke kanaler motparten faktisk er nåbar på. Følger merge-kjeden til den effektive identiteten og skiller eksplisitt mellom 'ingenting åpent', 'identitet ikke funnet' og 'ingen lenket kontakt'. tenant/space kommer fra den tiltrodde kalleridentiteten, ALDRI fra parametre",
+      input_schema: record({ identity_id: z.string() }),
+      capability_class: "A", scopes: ["conversation_graph.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("conversation_graph")
+    },
+    {
+      tool_id: "conversation_graph", action: "read_cross_channel_attention", description: "Les tenant-bred 'hva er åpent på tvers av kanaler nå?' - alle åpne forpliktelser/neste handlinger sortert på forfall, hver merket med kanal-nåbarhet aggregert over ALLE aktive Conversation Graph-identiteter for kontakten (identities[] gir eksakt hvilken identitet som eier hvilken kanal - aldri én vilkårlig valgt identitet). Forpliktelser som INGEN kanal når rapporteres eksplisitt (channel_reachable=false), aldri stille utelatt. tenant/space kommer fra den tiltrodde kalleridentiteten, ALDRI fra parametre",
+      input_schema: empty,
+      capability_class: "A", scopes: ["conversation_graph.read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 15_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("conversation_graph")
     }
   ];
 }

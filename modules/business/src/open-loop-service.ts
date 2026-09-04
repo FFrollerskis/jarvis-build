@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
-import type { AttentionBucket, AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
+import type { AttentionQueueEntry, BusinessOpenLoop, OpenLoopPriority, OpenLoopType, SweepResult } from "./open-loop-types.ts";
+import { classifyAttentionBucket } from "./open-loop-types.ts";
 
 /**
  * UA-3 next slice (D-53): automatisk open-loop-deteksjon. Gjenbruker
@@ -813,16 +814,10 @@ export class OpenLoopService {
   async attentionQueue(tenantId: string, memorySpace: MemorySpace): Promise<AttentionQueueEntry[]> {
     const loops = await this.listOpenLoops(tenantId, memorySpace, "open");
     const now = Date.now();
-    return loops.map((loop) => {
-      const overdue = loop.due_at !== null && new Date(loop.due_at).getTime() < now;
-      const dueSoon = loop.due_at !== null && !overdue && new Date(loop.due_at).getTime() - now < 48 * 3_600_000;
-      let bucket: AttentionBucket;
-      if (loop.priority === "high" && overdue) bucket = "critical";
-      else if (overdue) bucket = "overdue";
-      else if (dueSoon) bucket = "due_soon";
-      else bucket = "informational";
-      return { bucket, loop };
-    });
+    // D-121: bucket-regelen er flyttet UENDRET til `classifyAttentionBucket()`
+    // (open-loop-types.ts) slik at den kanal-bevisste tverr-kanal-visningen
+    // deler NOEYAKTIG samme regel - ingen ny/parallell prioriteringsmodell.
+    return loops.map((loop) => ({ bucket: classifyAttentionBucket(loop.priority, loop.due_at, now), loop }));
   }
 
   async resolveOpenLoop(tenantId: string, memorySpace: MemorySpace, openLoopId: string, resolutionReason: string): Promise<BusinessOpenLoop | null> {

@@ -5,6 +5,11 @@
  * (D-64 Core-vs-Adapter, reuse-audit).
  */
 
+// D-121: `AttentionBucket` er GJENBRUKT uendret fra `@jarvis/business` -
+// prioriterings-taksonomien har ETT hjem (open-loop-types.ts), aldri en
+// nesten-lik kopi her.
+import type { AttentionBucket } from "@jarvis/business";
+
 export type ConversationIdentityStatus = "active" | "merged";
 export type ConversationChannel = "email" | "telegram";
 export type ChannelLinkStatus = "active" | "revoked";
@@ -108,4 +113,127 @@ export interface IdentityTimelineEntry {
   summary: string;
   canonical_uri: string | null;
   occurred_at: string;
+}
+
+/* -------------------------------------------------------------------------
+ * UA-7 slice 2 (D-121): tverr-kanal-forpliktelses-/neste-handlings-visning.
+ *
+ * Ingen ny tabell, ingen ny forpliktelses-silo: ALT under er en LESE-visning
+ * over de to EKSISTERENDE systems-of-record `business_followups` (eksplisitte
+ * oppfoelginger) og `business_open_loops` (deterministisk detekterte neste
+ * handlinger), forankret paa Conversation Graph-identiteten i stedet for paa
+ * EN CRM-kontakt. Se D-121 i DECISIONS_AND_ASSUMPTIONS.md for
+ * system-of-record-auditen.
+ * ------------------------------------------------------------------------- */
+
+/** Hvilket EKSISTERENDE system-of-record forpliktelsen faktisk kommer fra - aldri en Jarvis-oppfunnet post. */
+export type CommitmentSourceKind = "business_followup" | "business_open_loop";
+
+/**
+ * Proveniens for HVORDAN forpliktelsen oppstod. `business_followups` har
+ * ingen `detection_method`-kolonne - den er per definisjon eksplisitt
+ * opprettet ('explicit'). `business_open_loops.detection_method`
+ * ('deterministic'|'ai_assisted') gjengis UENDRET, aldri oppgradert: en
+ * kaller skal kunne se at en ai_assisted-detektert neste handling IKKE er
+ * det samme som en deterministisk bevist en (byggeordrens
+ * "LLM extraction = candidate/proposal", aldri stille kanonisert).
+ */
+export type CommitmentProvenance = "explicit" | "deterministic" | "ai_assisted";
+
+export interface CrossChannelCommitmentEntry {
+  source_kind: CommitmentSourceKind;
+  /** `business_followups.followup_id` eller `business_open_loops.open_loop_id`. */
+  source_id: string;
+  title: string;
+  reason: string | null;
+  next_action: string | null;
+  /** `business_open_loops.due_at` er nullbar - en forpliktelse uten frist er gyldig, aldri en fabrikkert dato. */
+  due_at: string | null;
+  priority: "low" | "normal" | "high";
+  provenance: CommitmentProvenance;
+  /** Loes peker til kilden (kun open loops har den) - ALDRI en kopi av innhold. */
+  canonical_uri: string | null;
+  /** SAMME regel som `OpenLoopService.attentionQueue()` (delt `classifyAttentionBucket`). */
+  bucket: AttentionBucket;
+}
+
+/** En kanal motparten faktisk er naabar paa - kun AKTIVE lenker, med sin confidence-proveniens. */
+export interface ChannelReach {
+  channel: ConversationChannel;
+  channel_identifier: string;
+  confidence: number;
+  match_method: ChannelLinkMatchMethod;
+}
+
+/**
+ * Hvorfor visningen ser ut som den gjoer - ALDRI en tom liste uten
+ * forklaring (en tom liste kan bety "ingenting aapent" ELLER "vi vet ikke
+ * hvem dette er"; de to maa aldri forveksles).
+ */
+export type CommitmentResolutionState =
+  /** Identiteten er (eller ble slaatt sammen til) en aktiv identitet med lenket kontakt - listen er fullstendig. */
+  | "resolved"
+  /** Identiteten finnes ikke, eller merge-kjeden er brutt - INGEN forpliktelser kan sies noe om. */
+  | "identity_not_found"
+  /** Identiteten finnes, men har ingen lenket CRM-kontakt - ukjent forblir ukjent (Q-26), aldri gjettet. */
+  | "no_linked_contact";
+
+export interface CrossChannelCommitmentView {
+  /** Identiteten kalleren spurte om (kan vaere en tombstonet, sammenslaatt identitet). */
+  requested_identity_id: string;
+  /** Den NAAVAERENDE aktive identiteten etter `merged_into_identity_id`-kjeden - null naar kjeden ikke kan loeses. */
+  effective_identity_id: string | null;
+  resolution: CommitmentResolutionState;
+  display_name: string | null;
+  linked_business_contact_id: string | null;
+  /** Alle aktive kanaler den EFFEKTIVE identiteten er naabar paa (unionen etter merge). */
+  channels: ChannelReach[];
+  commitments: CrossChannelCommitmentEntry[];
+}
+
+/**
+ * EN aktiv identitet som bidrar med kanal-rekkevidde for en kontakt, med
+ * NOEYAKTIG de kanalene den identiteten faktisk eier.
+ *
+ * D-121 REVIEW-FIKS: `046_conversation_graph.sql` har KUN en ikke-unik indeks
+ * paa `(tenant_id, linked_business_contact_id)` (linje 94) - FLERE aktive
+ * identiteter kan derfor lovlig peke paa SAMME kanoniske kontakt (to
+ * uavhengig opprettede kanal-identiteter som begge ble lenket til kontakten
+ * uten at noen har kjoert en eksplisitt `mergeIdentities()`). Denne typen
+ * finnes for at unionen av kanaler skal kunne rapporteres UTEN aa merke
+ * kanaler fra flere identiteter som om de tilhoerte EN vilkaarlig valgt
+ * identitet. Attribusjonen er alltid eksakt: hver kanal ligger under
+ * identiteten som faktisk eier lenken.
+ */
+export interface AttentionIdentityReach {
+  identity_id: string;
+  display_name: string | null;
+  /** Kun AKTIVE kanal-lenker for DENNE identiteten. Tom liste = identiteten finnes, men naas ikke. */
+  channels: ChannelReach[];
+}
+
+/**
+ * Tenant-bred "hva er aapent paa tvers av kanaler NAA?". Hver rad baerer sin
+ * egen kanal-naabarhet. Tom `identities` + tom `channels` er en EKSPLISITT,
+ * aerlig markering av at forpliktelsen IKKE er knyttet til noen
+ * kommunikasjonskanal ennaa - aldri stille utelatt, aldri fabrikkert kanal.
+ */
+export interface CrossChannelAttentionEntry {
+  /**
+   * ALLE aktive identiteter lenket til `contact_id`, deterministisk sortert
+   * (`created_at ASC, identity_id ASC`) - aldri bare den eldste, aldri stille
+   * droppet. En identitet UTEN aktive kanaler blir staaende med tom
+   * `channels`: at identiteten finnes men ikke er naabar er selv et faktum.
+   */
+  identities: AttentionIdentityReach[];
+  contact_id: string | null;
+  /**
+   * Unionen av de aktive kanalene over ALLE identitetene i `identities`,
+   * deterministisk sortert. Dette er svaret paa "naar vi motparten, og
+   * hvordan?" - `identities` svarer paa "via hvilken identitet?".
+   */
+  channels: ChannelReach[];
+  /** Sann hvis MINST EN av identitetene har minst en aktiv kanal - aldri basert paa kun én av dem. */
+  channel_reachable: boolean;
+  commitment: CrossChannelCommitmentEntry;
 }

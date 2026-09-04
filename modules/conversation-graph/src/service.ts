@@ -72,13 +72,21 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+// D-121: DEN delte prioriteringsregelen fra `@jarvis/business` - aldri en
+// nesten-lik kopi (se `classifyAttentionBucket` i open-loop-types.ts).
+import { classifyAttentionBucket } from "@jarvis/business";
 import { normalizeChannelIdentifier } from "./normalize.ts";
 import type {
+  AttentionIdentityReach,
+  ChannelReach,
   ConversationChannel,
   ConversationChannelLink,
   ConversationIdentity,
   ConversationIdentityMerge,
+  CrossChannelAttentionEntry,
   CrossChannelCommitment,
+  CrossChannelCommitmentEntry,
+  CrossChannelCommitmentView,
   IdentityTimelineEntry,
   LinkChannelIdentityInput,
   MergeIdentitiesInput,
@@ -136,23 +144,13 @@ export class ConversationGraphService {
     memorySpace: MemorySpace,
     identityId: string
   ): Promise<ConversationIdentity | null> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      let currentId: string | null = identityId;
-      const seen = new Set<string>();
-      for (let hop = 0; hop < 50 && currentId !== null; hop++) {
-        if (seen.has(currentId)) return null; // defensiv sirkel-vakt, skal aldri inntreffe
-        seen.add(currentId);
-        const { rows } = await client.query(
-          `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
-          [tenantId, currentId]
-        );
-        const row = rows[0] as ConversationIdentity | undefined;
-        if (!row) return null;
-        if (row.status === "active") return row;
-        currentId = row.merged_into_identity_id;
-      }
-      return null;
-    });
+    // D-121: selve traverseringen bor i `resolveEffectiveIdentityIn()` slik at
+    // de sammensatte tverr-kanal-oppslagene kan gjenbruke NOEYAKTIG samme
+    // kjede-logikk INNENFOR sin egen transaksjon - aldri to kopier som kan
+    // divergere. Atferden her er UENDRET fra D-119.
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
+      this.resolveEffectiveIdentityIn(client, tenantId, identityId)
+    );
   }
 
   async listChannelLinks(tenantId: string, memorySpace: MemorySpace, identityId: string): Promise<ConversationChannelLink[]> {
@@ -428,6 +426,13 @@ export class ConversationGraphService {
    * allerede lenkede `business_contact_id`en (D-64: ingen ny
    * forpliktelse-silo). Identitet uten lenket kontakt gir tom liste
    * (ukjent forblir ukjent), aldri en gjettet kobling.
+   *
+   * D-121: `linkedContactId()` foelger nå merge-kjeden (se den metodens
+   * kommentar) - denne handlingens RETURFORM er UENDRET (kun aapne
+   * `business_followups`), den er den smale, bakoverkompatible visningen.
+   * Den FULLSTENDIGE visningen (neste handlinger fra `business_open_loops`
+   * + kanal-naabarhet + eksplisitt resolusjonstilstand) er
+   * `crossChannelCommitmentView()`.
    */
   async crossChannelCommitments(
     tenantId: string,
@@ -444,6 +449,182 @@ export class ConversationGraphService {
         [tenantId, contactId]
       );
       return rows as CrossChannelCommitment[];
+    });
+  }
+
+  /**
+   * UA-7 slice 2 (D-121), akseptansekriterium 1 FULLT UT: "Open commitments
+   * AND NEXT ACTIONS visible ACROSS CHANNELS".
+   *
+   * Tre ting D-119 sin `crossChannelCommitments()` manglet, alle uten noen
+   * ny tabell og uten noen ny leverandoer:
+   *
+   * 1. **Neste handlinger.** `business_followups` er KUN de eksplisitt
+   *    opprettede oppfoelgingene. Den deterministisk detekterte
+   *    "neste handling"-kolonnen er `business_open_loops.next_action` - et
+   *    SEPARAT, allerede eksisterende system-of-record (020_business_open_
+   *    loops.sql) som dekker forfalte oppfoelginger, stagnerte muligheter,
+   *    support-tickets, kontraktsfrister og finans-avvik. Unionen av de to
+   *    er det akseptansekriteriet ordrett ber om. INGEN tredje
+   *    forpliktelses-tabell opprettes (D-64 system-of-record-audit).
+   * 2. **Merge-korrekthet.** Se `linkedContactId()`.
+   * 3. **Kanal-naabarhet.** "Across channels" krever at kalleren faktisk kan
+   *    SE hvilke kanaler motparten er naabar paa - unionen av de AKTIVE
+   *    kanal-lenkene til den EFFEKTIVE identiteten (etter merge), hver med
+   *    sin confidence/match_method-proveniens.
+   *
+   * `resolution` skiller EKSPLISITT mellom "ingenting aapent",
+   * "identiteten finnes ikke" og "vi vet ikke hvem dette er" - en tom
+   * `commitments`-liste er ellers tvetydig. Proveniensen til hver rad
+   * (`explicit`/`deterministic`/`ai_assisted`) gjengis UENDRET fra kilden -
+   * en ai_assisted-detektert neste handling blir ALDRI stille presentert som
+   * deterministisk bevist (byggeordrens promoterings-regel).
+   *
+   * Rent lese-oppslag: ingen INSERT/UPDATE/DELETE noe sted i denne metoden.
+   */
+  async crossChannelCommitmentView(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    identityId: string,
+    now: number = Date.now()
+  ): Promise<CrossChannelCommitmentView> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const effective = await this.resolveEffectiveIdentityIn(client, tenantId, identityId);
+      if (!effective) {
+        return {
+          requested_identity_id: identityId, effective_identity_id: null,
+          resolution: "identity_not_found", display_name: null,
+          linked_business_contact_id: null, channels: [], commitments: []
+        };
+      }
+      const channels = await this.activeChannelReach(client, tenantId, effective.identity_id);
+      const base = {
+        requested_identity_id: identityId,
+        effective_identity_id: effective.identity_id,
+        display_name: effective.display_name,
+        linked_business_contact_id: effective.linked_business_contact_id,
+        channels
+      };
+      if (!effective.linked_business_contact_id) {
+        return { ...base, resolution: "no_linked_contact" as const, commitments: [] };
+      }
+      const commitments = await this.commitmentsForContacts(
+        client, tenantId, [effective.linked_business_contact_id], now
+      );
+      return { ...base, resolution: "resolved" as const, commitments: commitments.map((c) => c.entry) };
+    });
+  }
+
+  /**
+   * D-121: tenant-bred "hva er aapent paa tvers av kanaler NAA?". Samme to
+   * systems-of-record, samme prioriteringsregel som
+   * `OpenLoopService.attentionQueue()` - forskjellen er at HVER rad her
+   * baerer sin kanal-naabarhet, og at forpliktelser UTEN noen
+   * kommunikasjonsidentitet rapporteres EKSPLISITT
+   * (`channel_reachable: false`) i stedet for aa forsvinne stille. Det er
+   * nettopp den aerlige halvparten akseptansekriteriet trenger: en
+   * forpliktelse ingen kanal naar er et REELT gap, ikke en tom liste.
+   *
+   * Sortert paa forfall (nullbare frister sist), deretter kilde-id for en
+   * deterministisk, stabil rekkefoelge.
+   *
+   * D-121 REVIEW-FIKS ("across channels" var ikke sant naar EN kontakt har
+   * FLERE aktive identiteter): den foerste implementasjonen valgte den
+   * eldste aktive identiteten per kontakt og leste kanaler KUN fra den.
+   * `046_conversation_graph.sql:94` har ingen unikhets-skranke paa
+   * `(tenant_id, linked_business_contact_id)` for aktive identiteter, saa
+   * flere aktive identiteter kan lovlig peke paa samme kanoniske kontakt
+   * (to uavhengig opprettede kanal-identiteter lenket til samme kontakt uten
+   * en eksplisitt `mergeIdentities()`). Konsekvensen var reell og todelt:
+   * aktive kanaler paa en SENERE identitet ble stille utelatt, og en
+   * kontakt hvis eldste identitet kun hadde REVOKERTE lenker ble rapportert
+   * `channel_reachable=false` selv om en annen aktiv identitet var fullt
+   * naabar - altsaa et FALSKT "vi naar ikke denne". Naa aggregeres
+   * rekkevidden over ALLE aktive identiteter for kontakten, og
+   * returformen baerer `identities[]` slik at hver kanal fortsatt kan
+   * attribueres eksakt til identiteten som eier den - aldri merket som om
+   * den tilhoerte EN vilkaarlig valgt identitet. Ingen identitet og ingen
+   * kanal droppes. Merge-mekanikken er UROERT: en tombstonet identitet er
+   * fortsatt ekskludert av `status = 'active'`, og `splitMerge()` gir
+   * uendret det reaktiverte bildet tilbake.
+   */
+  async crossChannelAttention(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    now: number = Date.now()
+  ): Promise<CrossChannelAttentionEntry[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const commitments = await this.commitmentsForContacts(client, tenantId, null, now);
+      const contactIds = [...new Set(commitments.map((c) => c.contact_id).filter((id): id is string => id !== null))];
+
+      // Kun AKTIVE identiteter: en tombstonet (sammenslaatt) identitet skal
+      // aldri dukke opp som en egen rad - dens kanaler tilhoerer naa
+      // maal-identiteten (som selv er aktiv og staar for kontakten).
+      //
+      // D-121 REVIEW-FIKS: ALLE aktive identiteter for kontakten samles, ikke
+      // bare den eldste. Se `AttentionIdentityReach` i types.ts for hvorfor
+      // flere aktive identiteter per kontakt er en LOVLIG skjematilstand.
+      const identitiesByContact = new Map<string, ConversationIdentity[]>();
+      if (contactIds.length > 0) {
+        const { rows } = await client.query(
+          `SELECT * FROM conversation_identities
+           WHERE tenant_id = $1 AND status = 'active' AND linked_business_contact_id = ANY($2::text[])
+           ORDER BY created_at ASC, identity_id ASC`,
+          [tenantId, contactIds]
+        );
+        for (const row of rows as ConversationIdentity[]) {
+          if (!row.linked_business_contact_id) continue;
+          const existing = identitiesByContact.get(row.linked_business_contact_id);
+          if (existing) existing.push(row);
+          else identitiesByContact.set(row.linked_business_contact_id, [row]);
+        }
+      }
+
+      // Kanal-oppslag EN gang per kontakt (ikke per forpliktelse) - flere
+      // forpliktelser deler typisk kontakt, og oppslaget er rent lesende.
+      const reachByContact = new Map<string, { identities: AttentionIdentityReach[]; channels: ChannelReach[] }>();
+      for (const [contactId, identities] of identitiesByContact) {
+        const perIdentity: AttentionIdentityReach[] = [];
+        for (const identity of identities) {
+          perIdentity.push({
+            identity_id: identity.identity_id,
+            display_name: identity.display_name,
+            channels: await this.activeChannelReach(client, tenantId, identity.identity_id)
+          });
+        }
+        // Unionen kan IKKE inneholde duplikater: `conversation_channel_links_
+        // active_unique_idx` (046:124-126) er unik paa (tenant_id, channel,
+        // channel_identifier) WHERE status='active', saa den samme naabare
+        // adressen kan aldri vaere aktiv paa to identiteter samtidig. Derfor
+        // flates listene sammen UTEN aa droppe noe - kun deterministisk
+        // sortert med SAMME regel som `activeChannelReach()` bruker internt.
+        const channels = perIdentity
+          .flatMap((i) => i.channels)
+          .sort((a, b) =>
+            a.channel === b.channel
+              ? a.channel_identifier < b.channel_identifier ? -1 : a.channel_identifier > b.channel_identifier ? 1 : 0
+              : a.channel < b.channel ? -1 : 1
+          );
+        reachByContact.set(contactId, { identities: perIdentity, channels });
+      }
+
+      const entries: CrossChannelAttentionEntry[] = [];
+      for (const { contact_id, entry } of commitments) {
+        const reach = contact_id !== null ? reachByContact.get(contact_id) : undefined;
+        const identities = reach?.identities ?? [];
+        const channels = reach?.channels ?? [];
+        entries.push({
+          identities,
+          contact_id,
+          channels,
+          // Naabar hvis MINST EN identitet naar frem - en eldste identitet
+          // med kun revokerte lenker skal ALDRI overstyre en senere,
+          // faktisk naabar identitet for samme kontakt.
+          channel_reachable: channels.length > 0,
+          commitment: entry
+        });
+      }
+      return entries;
     });
   }
 
@@ -466,12 +647,157 @@ export class ConversationGraphService {
     });
   }
 
+  /**
+   * D-121 KORREKTHETSFIKS: slaar opp kontakten via den EFFEKTIVE identiteten
+   * (`resolveEffectiveIdentity`-kjeden), ikke via den forespurte raden
+   * direkte.
+   *
+   * FOER denne fiksen leste `crossChannelCommitments()`/`identityTimeline()`
+   * `linked_business_contact_id` rett fra den forespurte raden. En
+   * TOMBSTONET (`status='merged'`) identitet beholder sin EGEN, naa
+   * historiske `linked_business_contact_id` - som per D-119 sin merge-
+   * mekanikk kan vaere `NULL` eller en ANNEN kontakt enn maal-identitetens.
+   * En kaller som slo opp via en kanal-identifikator som SIDEN ble slaatt
+   * sammen fikk derfor enten en tom liste eller kontaktens FOER-merge-bilde -
+   * altsaa nettopp det tverr-kanal-bildet merge-en fantes for aa skape.
+   * Aa foelge kjeden er additivt og endrer ALDRI selve tombstone-/peker-
+   * mekanikken `mergeIdentities()`/`splitMerge()` vedlikeholder; en
+   * etterfoelgende `splitMerge()` reaktiverer kilden og oppslaget gaar
+   * automatisk tilbake til foer-merge-bildet (reversibilitet bevart).
+   */
   private async linkedContactId(client: pg.PoolClient, tenantId: string, identityId: string): Promise<string | null> {
+    const effective = await this.resolveEffectiveIdentityIn(client, tenantId, identityId);
+    return effective?.linked_business_contact_id ?? null;
+  }
+
+  /**
+   * Samme deterministiske merge-kjede-traversering som
+   * `resolveEffectiveIdentity()`, men INNENFOR en allerede aapen
+   * RLS-transaksjon - slik at et sammensatt oppslag ser ETT konsistent
+   * snapshot i stedet for aa aapne en ny transaksjon per ledd.
+   */
+  private async resolveEffectiveIdentityIn(
+    client: pg.PoolClient,
+    tenantId: string,
+    identityId: string
+  ): Promise<ConversationIdentity | null> {
+    let currentId: string | null = identityId;
+    const seen = new Set<string>();
+    for (let hop = 0; hop < 50 && currentId !== null; hop++) {
+      if (seen.has(currentId)) return null; // defensiv sirkel-vakt, skal aldri inntreffe
+      seen.add(currentId);
+      const { rows } = await client.query(
+        `SELECT * FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
+        [tenantId, currentId]
+      );
+      const row = rows[0] as ConversationIdentity | undefined;
+      if (!row) return null;
+      if (row.status === "active") return row;
+      currentId = row.merged_into_identity_id;
+    }
+    return null;
+  }
+
+  /** Kun AKTIVE kanal-lenker: en revokert lenke er historikk, ALDRI en kanal noen kan naas paa naa. */
+  private async activeChannelReach(
+    client: pg.PoolClient,
+    tenantId: string,
+    identityId: string
+  ): Promise<ChannelReach[]> {
     const { rows } = await client.query(
-      `SELECT linked_business_contact_id FROM conversation_identities WHERE tenant_id = $1 AND identity_id = $2`,
+      `SELECT channel, channel_identifier, confidence, match_method
+       FROM conversation_channel_links
+       WHERE tenant_id = $1 AND identity_id = $2 AND status = 'active'
+       ORDER BY channel ASC, channel_identifier ASC`,
       [tenantId, identityId]
     );
-    const contactId = (rows[0] as { linked_business_contact_id: string | null } | undefined)?.linked_business_contact_id;
-    return contactId ?? null;
+    return rows as ChannelReach[];
+  }
+
+  /**
+   * Unionen av de to EKSISTERENDE forpliktelses-systems-of-record, uten aa
+   * endre noen av dem. `contactIds === null` betyr "hele tenanten"
+   * (tenant-bred visning); en liste betyr "kun disse kontaktene".
+   *
+   * `business_open_loops` filtreres bevisst IKKE paa `contact_id IS NOT NULL`
+   * i tenant-bred modus - en finans-/kontrakt-loop uten motpart er en helt
+   * reell aapen neste handling, den er bare ikke kanal-naabar (og merkes
+   * saann). I identitets-modus filtreres den derimot naturlig bort av
+   * kontakt-filteret.
+   */
+  private async commitmentsForContacts(
+    client: pg.PoolClient,
+    tenantId: string,
+    contactIds: string[] | null,
+    now: number
+  ): Promise<Array<{ contact_id: string | null; entry: CrossChannelCommitmentEntry }>> {
+    const scoped = contactIds !== null;
+    if (scoped && contactIds.length === 0) return [];
+
+    const followups = await client.query(
+      `SELECT followup_id, contact_id, title, reason, next_action, due_at, priority
+       FROM business_followups
+       WHERE tenant_id = $1 AND status = 'open'
+         AND ($2::boolean = false OR contact_id = ANY($3::text[]))`,
+      [tenantId, scoped, contactIds ?? []]
+    );
+    const openLoops = await client.query(
+      `SELECT open_loop_id, contact_id, loop_type, reason, next_action, due_at, priority,
+              detection_method, canonical_uri
+       FROM business_open_loops
+       WHERE tenant_id = $1 AND status = 'open'
+         AND ($2::boolean = false OR contact_id = ANY($3::text[]))`,
+      [tenantId, scoped, contactIds ?? []]
+    );
+
+    const toIso = (value: Date | string | null): string | null =>
+      value === null ? null : value instanceof Date ? value.toISOString() : value;
+
+    const entries: Array<{ contact_id: string | null; entry: CrossChannelCommitmentEntry }> = [];
+    for (const row of followups.rows as Array<{
+      followup_id: string; contact_id: string | null; title: string; reason: string | null;
+      next_action: string | null; due_at: Date | string; priority: "low" | "normal" | "high";
+    }>) {
+      const dueAt = toIso(row.due_at);
+      entries.push({
+        contact_id: row.contact_id,
+        entry: {
+          source_kind: "business_followup", source_id: row.followup_id,
+          title: row.title, reason: row.reason, next_action: row.next_action, due_at: dueAt,
+          priority: row.priority, provenance: "explicit", canonical_uri: null,
+          bucket: classifyAttentionBucket(row.priority, dueAt, now)
+        }
+      });
+    }
+    for (const row of openLoops.rows as Array<{
+      open_loop_id: string; contact_id: string | null; loop_type: string; reason: string;
+      next_action: string | null; due_at: Date | string | null; priority: "low" | "normal" | "high";
+      detection_method: "deterministic" | "ai_assisted"; canonical_uri: string | null;
+    }>) {
+      const dueAt = toIso(row.due_at);
+      entries.push({
+        contact_id: row.contact_id,
+        entry: {
+          source_kind: "business_open_loop", source_id: row.open_loop_id,
+          // `business_open_loops` har ingen `title`-kolonne - `loop_type` ER den
+          // deterministiske, oversettbare tittelen (aldri en LLM-generert tekst).
+          title: row.loop_type, reason: row.reason, next_action: row.next_action, due_at: dueAt,
+          priority: row.priority, provenance: row.detection_method, canonical_uri: row.canonical_uri,
+          bucket: classifyAttentionBucket(row.priority, dueAt, now)
+        }
+      });
+    }
+
+    // Deterministisk, stabil rekkefoelge: forfall foerst (uten frist sist),
+    // deretter kilde-id - ALDRI en databasens tilfeldige radrekkefoelge.
+    entries.sort((a, b) => {
+      if (a.entry.due_at === b.entry.due_at) {
+        return a.entry.source_id < b.entry.source_id ? -1 : a.entry.source_id > b.entry.source_id ? 1 : 0;
+      }
+      if (a.entry.due_at === null) return 1;
+      if (b.entry.due_at === null) return -1;
+      return a.entry.due_at < b.entry.due_at ? -1 : 1;
+    });
+    return entries;
   }
 }
