@@ -77,6 +77,7 @@ import type { MemorySpace } from "@jarvis/contracts";
 import { classifyAttentionBucket } from "@jarvis/business";
 import { normalizeChannelIdentifier } from "./normalize.ts";
 import type {
+  AttentionIdentityReach,
   ChannelReach,
   ConversationChannel,
   ConversationChannelLink,
@@ -526,6 +527,26 @@ export class ConversationGraphService {
    *
    * Sortert paa forfall (nullbare frister sist), deretter kilde-id for en
    * deterministisk, stabil rekkefoelge.
+   *
+   * D-121 REVIEW-FIKS ("across channels" var ikke sant naar EN kontakt har
+   * FLERE aktive identiteter): den foerste implementasjonen valgte den
+   * eldste aktive identiteten per kontakt og leste kanaler KUN fra den.
+   * `046_conversation_graph.sql:94` har ingen unikhets-skranke paa
+   * `(tenant_id, linked_business_contact_id)` for aktive identiteter, saa
+   * flere aktive identiteter kan lovlig peke paa samme kanoniske kontakt
+   * (to uavhengig opprettede kanal-identiteter lenket til samme kontakt uten
+   * en eksplisitt `mergeIdentities()`). Konsekvensen var reell og todelt:
+   * aktive kanaler paa en SENERE identitet ble stille utelatt, og en
+   * kontakt hvis eldste identitet kun hadde REVOKERTE lenker ble rapportert
+   * `channel_reachable=false` selv om en annen aktiv identitet var fullt
+   * naabar - altsaa et FALSKT "vi naar ikke denne". Naa aggregeres
+   * rekkevidden over ALLE aktive identiteter for kontakten, og
+   * returformen baerer `identities[]` slik at hver kanal fortsatt kan
+   * attribueres eksakt til identiteten som eier den - aldri merket som om
+   * den tilhoerte EN vilkaarlig valgt identitet. Ingen identitet og ingen
+   * kanal droppes. Merge-mekanikken er UROERT: en tombstonet identitet er
+   * fortsatt ekskludert av `status = 'active'`, og `splitMerge()` gir
+   * uendret det reaktiverte bildet tilbake.
    */
   async crossChannelAttention(
     tenantId: string,
@@ -539,7 +560,11 @@ export class ConversationGraphService {
       // Kun AKTIVE identiteter: en tombstonet (sammenslaatt) identitet skal
       // aldri dukke opp som en egen rad - dens kanaler tilhoerer naa
       // maal-identiteten (som selv er aktiv og staar for kontakten).
-      const identityByContact = new Map<string, ConversationIdentity>();
+      //
+      // D-121 REVIEW-FIKS: ALLE aktive identiteter for kontakten samles, ikke
+      // bare den eldste. Se `AttentionIdentityReach` i types.ts for hvorfor
+      // flere aktive identiteter per kontakt er en LOVLIG skjematilstand.
+      const identitiesByContact = new Map<string, ConversationIdentity[]>();
       if (contactIds.length > 0) {
         const { rows } = await client.query(
           `SELECT * FROM conversation_identities
@@ -548,29 +573,53 @@ export class ConversationGraphService {
           [tenantId, contactIds]
         );
         for (const row of rows as ConversationIdentity[]) {
-          // Foerste (eldste) aktive identitet vinner deterministisk hvis to
-          // aktive identiteter peker til SAMME kontakt - aldri en tilfeldig.
-          if (row.linked_business_contact_id && !identityByContact.has(row.linked_business_contact_id)) {
-            identityByContact.set(row.linked_business_contact_id, row);
-          }
+          if (!row.linked_business_contact_id) continue;
+          const existing = identitiesByContact.get(row.linked_business_contact_id);
+          if (existing) existing.push(row);
+          else identitiesByContact.set(row.linked_business_contact_id, [row]);
         }
       }
 
-      const reachCache = new Map<string, ChannelReach[]>();
+      // Kanal-oppslag EN gang per kontakt (ikke per forpliktelse) - flere
+      // forpliktelser deler typisk kontakt, og oppslaget er rent lesende.
+      const reachByContact = new Map<string, { identities: AttentionIdentityReach[]; channels: ChannelReach[] }>();
+      for (const [contactId, identities] of identitiesByContact) {
+        const perIdentity: AttentionIdentityReach[] = [];
+        for (const identity of identities) {
+          perIdentity.push({
+            identity_id: identity.identity_id,
+            display_name: identity.display_name,
+            channels: await this.activeChannelReach(client, tenantId, identity.identity_id)
+          });
+        }
+        // Unionen kan IKKE inneholde duplikater: `conversation_channel_links_
+        // active_unique_idx` (046:124-126) er unik paa (tenant_id, channel,
+        // channel_identifier) WHERE status='active', saa den samme naabare
+        // adressen kan aldri vaere aktiv paa to identiteter samtidig. Derfor
+        // flates listene sammen UTEN aa droppe noe - kun deterministisk
+        // sortert med SAMME regel som `activeChannelReach()` bruker internt.
+        const channels = perIdentity
+          .flatMap((i) => i.channels)
+          .sort((a, b) =>
+            a.channel === b.channel
+              ? a.channel_identifier < b.channel_identifier ? -1 : a.channel_identifier > b.channel_identifier ? 1 : 0
+              : a.channel < b.channel ? -1 : 1
+          );
+        reachByContact.set(contactId, { identities: perIdentity, channels });
+      }
+
       const entries: CrossChannelAttentionEntry[] = [];
       for (const { contact_id, entry } of commitments) {
-        const identity = contact_id !== null ? identityByContact.get(contact_id) : undefined;
-        let channels: ChannelReach[] = [];
-        if (identity) {
-          const cached = reachCache.get(identity.identity_id);
-          channels = cached ?? (await this.activeChannelReach(client, tenantId, identity.identity_id));
-          reachCache.set(identity.identity_id, channels);
-        }
+        const reach = contact_id !== null ? reachByContact.get(contact_id) : undefined;
+        const identities = reach?.identities ?? [];
+        const channels = reach?.channels ?? [];
         entries.push({
-          identity_id: identity?.identity_id ?? null,
-          display_name: identity?.display_name ?? null,
+          identities,
           contact_id,
           channels,
+          // Naabar hvis MINST EN identitet naar frem - en eldste identitet
+          // med kun revokerte lenker skal ALDRI overstyre en senere,
+          // faktisk naabar identitet for samme kontakt.
           channel_reachable: channels.length > 0,
           commitment: entry
         });

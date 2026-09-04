@@ -30,7 +30,8 @@ stedet for på ÉN CRM-kontakt.
    mellom `resolved` / `no_linked_contact` / `identity_not_found` - en tom liste er aldri tvetydig.
 2. **`crossChannelAttention()`** - tenant-bred «hva er åpent på tvers av kanaler nå», deterministisk
    sortert på forfall (fristløse sist). Forpliktelser som INGEN kanal når rapporteres EKSPLISITT
-   (`channel_reachable=false`), aldri stille utelatt.
+   (`channel_reachable=false`), aldri stille utelatt. Kanal-rekkevidden aggregeres over **ALLE**
+   aktive identiteter lenket til kontakten (se «Arkitekt-review-fiks» under).
 3. **KORREKTHETSFIKS:** `linkedContactId()` følger nå merge-kjeden. Før dette ga et oppslag på en
    tombstonet (`status='merged'`) identitet kildens historiske (ofte `NULL`) kontakt i stedet for
    målets - altså nøyaktig det tverr-kanal-bildet merge-en finnes for å skape. Gjelder også
@@ -38,6 +39,34 @@ stedet for på ÉN CRM-kontakt.
 4. **Delt prioriteringsregel:** `classifyAttentionBucket()` trukket ut av
    `OpenLoopService.attentionQueue()` og gjenbrukt begge steder - ÉN kanonisk regel, aldri to
    nesten-like prioriteringsmodeller.
+
+## Arkitekt-review-fiks på PR #70 (ingen ny D-ID, ingen ny slice)
+
+Uavhengig ChatGPT-arkitekt-review fant at `crossChannelAttention()` ikke var sannferdig «på tvers av
+kanaler» når ÉN forretningskontakt har FLERE aktive Conversation Graph-identiteter. Første
+implementasjon beholdt kun den ELDSTE aktive identiteten per `linked_business_contact_id` og leste
+kanaler kun fra den. `046_conversation_graph.sql:94` har KUN en ikke-unik indeks på
+`(tenant_id, linked_business_contact_id)` - flere aktive identiteter kan derfor lovlig peke på samme
+kanoniske kontakt (to uavhengig opprettede kanal-identiteter lenket til kontakten uten en eksplisitt
+`mergeIdentities()`; tilstanden oppstår gjennom det ORDINÆRE API-et). Konsekvensen var reell og
+todelt: aktive kanaler på en senere identitet ble **stille utelatt**, og en kontakt hvis eldste
+identitet kun hadde REVOKERTE lenker ble rapportert `channel_reachable=false` selv om en annen aktiv
+identitet var fullt nåbar - altså et **FALSKT «vi når ikke denne»**.
+
+**Rettet:** rekkevidden aggregeres nå over ALLE aktive identiteter for kontakten. Returformen bytter
+det ene, vilkårlige `identity_id`/`display_name`-paret med `identities[]` (`AttentionIdentityReach`)
+slik at hver kanal fortsatt attribueres EKSAKT til identiteten som eier lenken - unionen merkes
+ALDRI som om den tilhørte én vilkårlig valgt identitet. Ingen identitet og ingen kanal droppes: en
+identitet uten aktive kanaler blir stående med tom `channels` («identiteten finnes, men nås ikke» er
+selv et faktum). Unionen kan ikke inneholde duplikater fordi
+`conversation_channel_links_active_unique_idx` (046:124-126) er unik på
+`(tenant_id, channel, channel_identifier) WHERE status='active'`. RLS, read-only-semantikk,
+deterministisk ordning, proveniens per kanal og merge/split-mekanikken er UENDRET.
+
+**To nye embedded Postgres-regresjoner** (`service.test.ts`): **AQ** - to aktive identiteter mot
+samme kontakt med ulike aktive kanaler → resultatet inneholder BEGGE, korrekt attribuert; **AR** -
+eldste identitet har kun en revokert lenke mens en senere identitet er nåbar → `channel_reachable`
+er `true`, unionen inneholder den nåbare kanalen, og den revokerte dukker ALDRI opp.
 
 ## Autoritet/sikkerhet (D-119-herdingen utvidet, aldri svekket)
 
@@ -53,30 +82,43 @@ lekkasje.
 
 - `pnpm -r typecheck`: 21/21 pakker rent.
 - `pnpm lint` (`eslint .`): rent.
-- `modules/conversation-graph/test/*.test.ts`: **72/72 grønt** (58 service + 14 security, opp fra
-  51) mot ekte embedded Postgres/RLS.
-- Full workspace-suite i CI (Linux, autoritativ - run `33830570796`/`33830506706`, begge på eksakt
-  HEAD `daf231c89d4c36854d9c79216a61bad8cb9f00f6`): **182/182 filer, 2932/2932 tester grønt**, null
-  feil, null skips. Alle tre CI-jobber (`build-test`, `windows-git-auth`, `gitleaks`) `success`.
-- gitleaks: `success` i CI (egen jobb, hele historikken) - IKKE kjørt lokalt denne økten (binæren
-  finnes ikke på denne hosten).
-- Lokalt (Windows) feiler 31 tester i 5 filer. Disse er **pre-eksisterende og host-spesifikke**,
-  bevist ved at NØYAKTIG samme 5 filer/31 tester feiler på et rent tre med denne sliceens endringer
-  stashet: `apps/api/test/worker-coding-wiring.test.ts`,
+- `modules/conversation-graph/test/*.test.ts`: **74/74 grønt** (60 service + 14 security, opp fra
+  51) mot ekte embedded Postgres/RLS - inkl. de to nye review-regresjonene AQ/AR.
+- Lokal full workspace-suite (Windows): **2900/2934 grønt**, 34 feil i 6 filer. Disse er
+  **pre-eksisterende og host-spesifikke**, bevist ved en kontrollert A/B-kjøring: NØYAKTIG samme
+  filer/tester feiler med og uten denne sliceens endringer stashet (isolert kjøring av de samme
+  filene: 31 feil i 5 filer i BEGGE retninger; de resterende 3 er lastavhengig ustabilitet under
+  full parallell kjøring, ingen av dem i `conversation-graph`):
+  `apps/api/test/worker-coding-wiring.test.ts`,
+  `modules/agreements/test/service-rls.test.ts`,
   `modules/business/test/ua3-live-pool-separation.test.ts`,
+  `modules/business/test/ua3-open-loops-cost-cleanup.test.ts`,
   `modules/tasks/test/claude-code-agent.test.ts`,
   `modules/tasks/test/sandbox-docker-extra-env.test.ts`,
   `modules/tool-gateway/test/docker-transport.test.ts` (Windows-prosessoppstart `EFTYPE`/`ENOENT`
-  mot fake `.cjs`-binærer, og kildetekst-assertions). Alle passerer i CI.
+  mot fake `.cjs`-binærer, kildetekst-assertions, og WIN1252-begrensningen under). Alle passerer i
+  CI på Linux.
+- gitleaks: egen CI-jobb over hele historikken - **IKKE kjørt lokalt** denne økten (binæren finnes
+  ikke på denne hosten).
+- **CI på eksakt endelig HEAD:** denne filen navngir BEVISST ingen run-id for den endelige HEAD-en.
+  Enhver commit som skriver run-id-en hit endrer selv HEAD og gjør påstanden umiddelbart usann -
+  derfor rapporteres run-id + jobbstatus for eksakt endelig HEAD i `CLAUDE_REPORT` på GitHub-issue
+  **#68**, som postes FØRST etter at kjøringen faktisk er ferdig og ikke er del av treet. Forrige
+  registrerte grønne kjøringer i denne sliceen: run `33831046020` på HEAD
+  `ca1d19b7974d73bda7ffbff5935dab3b590cb24b` og run `33830570796`/`33830506706` på HEAD
+  `daf231c89d4c36854d9c79216a61bad8cb9f00f6` (**182/182 filer, 2932/2932 tester**, alle tre jobber
+  `build-test`/`windows-git-auth`/`gitleaks` `success`). Begge er per definisjon foreldet av
+  review-fiks-commiten over.
 
 ## Kjent, pre-eksisterende miljøbegrensning (IKKE innført av denne sliceen)
 
 `040_stripe.sql:55` inneholder ett mojibake-tegn (`Ē`, U+0112) i en KOMMENTAR. Uskadelig på
 UTF8-databaser (Linux-CI), men gjør at HELE den eksisterende embedded-Postgres-suiten feiler lokalt
 på en Windows-host der klyngen initialiseres som WIN1252 - **bevist på et HELT RENT `main`-tre**.
-Lokal kjøring denne økten krevde en MIDLERTIDIG, IKKE-COMMITTET ett-tegns endring som ble reversert
-før commit (den er IKKE del av diffen). Bør rettes som en egen, liten oppgave - ikke smugles inn i
-en UA-7-slice.
+Lokal kjøring krevde også denne økten en MIDLERTIDIG, IKKE-COMMITTET ett-tegns endring som ble
+reversert før commit (den er IKKE del av diffen; verifisert med `git status` etterpå). Bør rettes
+som en egen, liten oppgave - arkitekten har eksplisitt instruert at den IKKE skal smugles inn i
+denne PR-en.
 
 ## Flagg-status
 
@@ -94,7 +136,9 @@ forpliktelses-visningen), **3 PASS** (uendret fra D-119), **4 NOT_STARTED**. Uen
 ## PR-status
 
 Draft-PR **#70** på branch `claude/ua7-cross-channel-commitments`. **IKKE merget, IKKE
-self-approved.** Fersk CI på eksakt endelig HEAD er grønn (se Kvalitetsporter). Venter på uavhengig
+self-approved.** Arkitekt-review-funn 1 og 2 er rettet (se avsnittene over). Fersk CI på eksakt
+endelig HEAD kjøres etter push og rapporteres med run-id og jobbstatus i `CLAUDE_REPORT` på issue
+#68 - ikke i denne filen (se Kvalitetsporter for hvorfor). Venter på ny uavhengig
 ChatGPT-arkitekt-review (D-120).
 
 ## Blokkeringer

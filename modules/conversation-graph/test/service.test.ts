@@ -894,7 +894,8 @@ describe("D-121: crossChannelAttention - tenant-bred tverr-kanal-visning", () =>
     const reachable = entries.find((e) => e.commitment.source_id === "ol-union-1");
     expect(reachable?.channel_reachable).toBe(true);
     expect(reachable?.channels.map((c) => c.channel)).toEqual(["email"]);
-    expect(reachable?.identity_id).toBeTruthy();
+    expect(reachable?.identities.length).toBeGreaterThan(0);
+    expect(reachable?.identities.every((i) => i.identity_id.length > 0)).toBe(true);
 
     // En kontaktloes finans-/kontrakt-loop er en helt reell aapen neste handling,
     // men INGEN kanal naar den - det maa staa eksplisitt, aldri stille utelates.
@@ -907,7 +908,7 @@ describe("D-121: crossChannelAttention - tenant-bred tverr-kanal-visning", () =>
     expect(orphan).toBeDefined();
     expect(orphan!.channel_reachable).toBe(false);
     expect(orphan!.channels).toEqual([]);
-    expect(orphan!.identity_id).toBeNull();
+    expect(orphan!.identities).toEqual([]);
     expect(orphan!.commitment.bucket).toBe("critical");
   });
 
@@ -930,7 +931,7 @@ describe("D-121: crossChannelAttention - tenant-bred tverr-kanal-visning", () =>
 
   it("AK: en TOMBSTONET identitet dukker ALDRI opp som en egen rad - dens kanaler tilhoerer naa maal-identiteten", async () => {
     const entries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
-    const identityIds = entries.map((e) => e.identity_id).filter((id): id is string => id !== null);
+    const identityIds = entries.flatMap((e) => e.identities.map((i) => i.identity_id));
     const { rows } = await adminPool.query(
       `SELECT identity_id FROM conversation_identities WHERE tenant_id = $1 AND status = 'merged'`,
       [TENANT_A]
@@ -951,6 +952,119 @@ describe("D-121: crossChannelAttention - tenant-bred tverr-kanal-visning", () =>
 
     const aEntries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
     expect(aEntries.map((e) => e.commitment.title)).not.toContain("Kun for B");
+  });
+
+  /*
+   * D-121 REVIEW-REGRESJON (AQ/AR): `046_conversation_graph.sql:94` har KUN en
+   * IKKE-unik indeks paa (tenant_id, linked_business_contact_id) - FLERE
+   * aktive identiteter kan derfor lovlig peke paa SAMME kontakt. Begge
+   * testene under bygger den tilstanden gjennom det ORDINAERE offentlige
+   * API-et (`linkChannelIdentity` uten `identity_id` for en NY
+   * kanal-identifikator oppretter en ny identitet, service.ts:233-247) -
+   * altsaa ingen hand-laget SQL-tilstand som ikke kan oppstaa i produksjon.
+   *
+   * `created_at` settes eksplisitt bakover for den foerste identiteten slik
+   * at "eldst" er entydig og testen ikke kan vippe paa mikrosekund-likhet.
+   */
+  it("AQ: TO aktive identiteter mot SAMME kontakt - kanal-rekkevidden er UNIONEN over begge, aldri kun den eldste", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Multi-identitet AS" });
+    const contact = await business.createContact(TENANT_A, "business", {
+      name: "Multi Kontakt", company_id: company.company_id, email: "multi@multi.no"
+    });
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-multi-identitet", detection_key: "d121:multi:1", loop_type: "stalled_opportunity",
+      reason: "To aktive identiteter", next_action: "Foelg opp", contact_id: contact.contact_id,
+      due_at: SOON, priority: "high"
+    });
+
+    const first = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "multi@multi.no", confidence: 1.0, match_method: "exact_email",
+      display_name: "Multi via e-post", linked_business_contact_id: contact.contact_id
+    });
+    await adminPool.query(
+      `UPDATE conversation_identities SET created_at = '2026-01-01T00:00:00Z' WHERE tenant_id = $1 AND identity_id = $2`,
+      [TENANT_A, first.identity_id]
+    );
+    const second = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "telegram", channel_identifier: "tg-multi-9001", confidence: 0.9, match_method: "owner_configured",
+      display_name: "Multi via Telegram", linked_business_contact_id: contact.contact_id
+    });
+
+    // Forutsetningen testen hviler paa: to SEPARATE, BEGGE aktive identiteter mot samme kontakt.
+    expect(second.identity_id).not.toBe(first.identity_id);
+    const { rows: activeRows } = await adminPool.query(
+      `SELECT identity_id FROM conversation_identities
+       WHERE tenant_id = $1 AND status = 'active' AND linked_business_contact_id = $2`,
+      [TENANT_A, contact.contact_id]
+    );
+    expect(activeRows).toHaveLength(2);
+
+    const entry = (await graph.crossChannelAttention(TENANT_A, "business", NOW))
+      .find((e) => e.commitment.source_id === "ol-multi-identitet");
+    expect(entry).toBeDefined();
+
+    // Unionen: BEGGE kanalene, deterministisk sortert - ingen stille utelatt.
+    expect(entry!.channel_reachable).toBe(true);
+    expect(entry!.channels.map((c) => `${c.channel}:${c.channel_identifier}`))
+      .toEqual(["email:multi@multi.no", "telegram:tg-multi-9001"]);
+
+    // Attribusjonen er EKSAKT: hver kanal ligger under identiteten som faktisk
+    // eier lenken - aldri merket som om alt tilhoerte EN vilkaarlig identitet.
+    expect(entry!.identities.map((i) => i.identity_id)).toEqual([first.identity_id, second.identity_id]);
+    expect(entry!.identities[0]!.display_name).toBe("Multi via e-post");
+    expect(entry!.identities[0]!.channels.map((c) => c.channel_identifier)).toEqual(["multi@multi.no"]);
+    expect(entry!.identities[1]!.display_name).toBe("Multi via Telegram");
+    expect(entry!.identities[1]!.channels.map((c) => c.channel_identifier)).toEqual(["tg-multi-9001"]);
+    // Proveniensen per kanal er gjengitt UENDRET fra kilden, ikke slaatt sammen bort.
+    expect(entry!.identities[1]!.channels[0]!.match_method).toBe("owner_configured");
+    expect(entry!.identities[1]!.channels[0]!.confidence).toBeCloseTo(0.9, 5);
+  });
+
+  it("AR: eldste identitet har KUN en revokert lenke mens en SENERE identitet er naabar - forpliktelsen merkes ALDRI falskt som unaabar", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Eldste-revokert AS" });
+    const contact = await business.createContact(TENANT_A, "business", {
+      name: "Eldste Revokert Kontakt", company_id: company.company_id, email: "eldste@eldste.no"
+    });
+    await business.createFollowup(TENANT_A, "business", {
+      title: "Naabar via senere identitet", due_at: FAR, contact_id: contact.contact_id
+    });
+
+    const oldest = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "eldste@eldste.no", confidence: 1.0, match_method: "exact_email",
+      display_name: "Eldste (revokert)", linked_business_contact_id: contact.contact_id
+    });
+    await adminPool.query(
+      `UPDATE conversation_identities SET created_at = '2026-01-01T00:00:00Z' WHERE tenant_id = $1 AND identity_id = $2`,
+      [TENANT_A, oldest.identity_id]
+    );
+    // Eldste identitet mister sin ENESTE kanal - identiteten forblir aktiv, men naas ikke.
+    await adminPool.query(
+      `UPDATE conversation_channel_links SET status = 'revoked', revoked_at = now() WHERE tenant_id = $1 AND link_id = $2`,
+      [TENANT_A, oldest.link_id]
+    );
+    const later = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "telegram", channel_identifier: "tg-senere-7002", confidence: 0.95, match_method: "owner_configured",
+      display_name: "Senere (naabar)", linked_business_contact_id: contact.contact_id
+    });
+    expect(later.identity_id).not.toBe(oldest.identity_id);
+
+    const entry = (await graph.crossChannelAttention(TENANT_A, "business", NOW))
+      .find((e) => e.commitment.title === "Naabar via senere identitet");
+    expect(entry).toBeDefined();
+
+    // KJERNEN i regresjonen: den eldste identiteten ville foer fiksen blitt
+    // valgt alene og gitt channel_reachable=false - et FALSKT "vi naar ikke
+    // denne" for en motpart vi faktisk naar paa Telegram.
+    expect(entry!.channel_reachable).toBe(true);
+    expect(entry!.channels.map((c) => `${c.channel}:${c.channel_identifier}`)).toEqual(["telegram:tg-senere-7002"]);
+
+    // Den eldste identiteten droppes ikke stille: den staar med TOM channels -
+    // "identiteten finnes, men naas ikke" er selv et faktum, ikke stoey.
+    expect(entry!.identities.map((i) => i.identity_id)).toEqual([oldest.identity_id, later.identity_id]);
+    expect(entry!.identities[0]!.channels).toEqual([]);
+    expect(entry!.identities[1]!.channels).toHaveLength(1);
+    // En revokert lenke er historikk - den skal ALDRI dukke opp i unionen.
+    expect(entry!.channels.some((c) => c.channel_identifier === "eldste@eldste.no")).toBe(false);
   });
 });
 

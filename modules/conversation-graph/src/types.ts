@@ -192,16 +192,48 @@ export interface CrossChannelCommitmentView {
 }
 
 /**
+ * EN aktiv identitet som bidrar med kanal-rekkevidde for en kontakt, med
+ * NOEYAKTIG de kanalene den identiteten faktisk eier.
+ *
+ * D-121 REVIEW-FIKS: `046_conversation_graph.sql` har KUN en ikke-unik indeks
+ * paa `(tenant_id, linked_business_contact_id)` (linje 94) - FLERE aktive
+ * identiteter kan derfor lovlig peke paa SAMME kanoniske kontakt (to
+ * uavhengig opprettede kanal-identiteter som begge ble lenket til kontakten
+ * uten at noen har kjoert en eksplisitt `mergeIdentities()`). Denne typen
+ * finnes for at unionen av kanaler skal kunne rapporteres UTEN aa merke
+ * kanaler fra flere identiteter som om de tilhoerte EN vilkaarlig valgt
+ * identitet. Attribusjonen er alltid eksakt: hver kanal ligger under
+ * identiteten som faktisk eier lenken.
+ */
+export interface AttentionIdentityReach {
+  identity_id: string;
+  display_name: string | null;
+  /** Kun AKTIVE kanal-lenker for DENNE identiteten. Tom liste = identiteten finnes, men naas ikke. */
+  channels: ChannelReach[];
+}
+
+/**
  * Tenant-bred "hva er aapent paa tvers av kanaler NAA?". Hver rad baerer sin
- * egen kanal-naabarhet. `identity_id: null` + tom `channels` er en EKSPLISITT,
+ * egen kanal-naabarhet. Tom `identities` + tom `channels` er en EKSPLISITT,
  * aerlig markering av at forpliktelsen IKKE er knyttet til noen
  * kommunikasjonskanal ennaa - aldri stille utelatt, aldri fabrikkert kanal.
  */
 export interface CrossChannelAttentionEntry {
-  identity_id: string | null;
-  display_name: string | null;
+  /**
+   * ALLE aktive identiteter lenket til `contact_id`, deterministisk sortert
+   * (`created_at ASC, identity_id ASC`) - aldri bare den eldste, aldri stille
+   * droppet. En identitet UTEN aktive kanaler blir staaende med tom
+   * `channels`: at identiteten finnes men ikke er naabar er selv et faktum.
+   */
+  identities: AttentionIdentityReach[];
   contact_id: string | null;
+  /**
+   * Unionen av de aktive kanalene over ALLE identitetene i `identities`,
+   * deterministisk sortert. Dette er svaret paa "naar vi motparten, og
+   * hvordan?" - `identities` svarer paa "via hvilken identitet?".
+   */
   channels: ChannelReach[];
+  /** Sann hvis MINST EN av identitetene har minst en aktiv kanal - aldri basert paa kun én av dem. */
   channel_reachable: boolean;
   commitment: CrossChannelCommitmentEntry;
 }

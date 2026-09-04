@@ -3550,14 +3550,26 @@ eksplisitt), KORREKTHETSFIKS i `linkedContactId()` (følger merge-kjeden — gje
 `crossChannelCommitments()`/`identityTimeline()`), og delt `classifyAttentionBucket()` gjenbrukt av
 BÅDE `OpenLoopService.attentionQueue()` og den nye visningen.
 
+**Arkitekt-review-fiks (PR #70, ingen ny D-ID):** `crossChannelAttention()` valgte først den ELDSTE
+aktive identiteten per kontakt og leste kanaler kun fra den. `046_conversation_graph.sql:94` har
+ingen unikhets-skranke på `(tenant_id, linked_business_contact_id)` for aktive identiteter, så FLERE
+aktive identiteter kan lovlig peke på samme kontakt — visningen kunne derfor stille utelate aktive
+kanaler på en senere identitet, og i verste fall rapportere `channel_reachable=false` for en motpart
+som faktisk var nåbar. Rekkevidden aggregeres nå over ALLE aktive identiteter for kontakten, og
+returformen bytter det ene, vilkårlige `identity_id`/`display_name`-paret med `identities[]`
+(`AttentionIdentityReach`) slik at hver kanal fortsatt attribueres EKSAKT til identiteten som eier
+lenken. Ingen identitet og ingen kanal droppes; merge-/split-mekanikken er urørt.
+
 **ToolGateway:** `conversation_graph.*` 6 → **8 handlinger, ALLE fortsatt klasse A — namespacet
 forblir READ-ONLY**. Begge nye `input_schema`-er er `.strict()` uten `tenant_id`/`memory_space` **og
 uten `now`** (en kaller som kunne styre «nå» kunne styre prioritets-bucket).
 
-**Tester:** `modules/conversation-graph/test/*.test.ts` **72/72 grønt** (58 service + 14 security, opp
+**Tester:** `modules/conversation-graph/test/*.test.ts` **74/74 grønt** (60 service + 14 security, opp
 fra 51) mot ekte embedded Postgres/RLS — inkl. adversariell prompt-injeksjon mot en urelatert privat
-kontakts forpliktelser, tenant-isolasjon via FULL `ToolGateway.execute()`, split-reversibilitet og
-ikke-muterende radtelling før/etter.
+kontakts forpliktelser, tenant-isolasjon via FULL `ToolGateway.execute()`, split-reversibilitet,
+ikke-muterende radtelling før/etter, og de to review-regresjonene (AQ: to aktive identiteter mot
+samme kontakt → unionen av begge kanalene; AR: eldste identitet kun revokert lenke mens en senere er
+nåbar → `channel_reachable=true`, aldri et falskt «vi når ikke denne»).
 
 **Flagg:** `UA7_CROSS_CHANNEL_COMMITMENTS_IMPLEMENTATION_COMPLETE=true`,
 `UA7_CONVERSATION_GRAPH_NAMESPACE_READ_ONLY=true`, `UA7_NEW_TABLES_ADDED=0`,

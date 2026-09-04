@@ -2371,7 +2371,7 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("conversation_graph")
     },
     {
-      tool_id: "conversation_graph", action: "read_cross_channel_attention", description: "Les tenant-bred 'hva er åpent på tvers av kanaler nå?' - alle åpne forpliktelser/neste handlinger sortert på forfall, hver merket med sin Conversation Graph-identitet og kanal-nåbarhet. Forpliktelser som INGEN kanal når rapporteres eksplisitt (channel_reachable=false), aldri stille utelatt. tenant/space kommer fra den tiltrodde kalleridentiteten, ALDRI fra parametre",
+      tool_id: "conversation_graph", action: "read_cross_channel_attention", description: "Les tenant-bred 'hva er åpent på tvers av kanaler nå?' - alle åpne forpliktelser/neste handlinger sortert på forfall, hver merket med kanal-nåbarhet aggregert over ALLE aktive Conversation Graph-identiteter for kontakten (identities[] gir eksakt hvilken identitet som eier hvilken kanal - aldri én vilkårlig valgt identitet). Forpliktelser som INGEN kanal når rapporteres eksplisitt (channel_reachable=false), aldri stille utelatt. tenant/space kommer fra den tiltrodde kalleridentiteten, ALDRI fra parametre",
       input_schema: empty,
       capability_class: "A", scopes: ["conversation_graph.read"], reversible: true,
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
