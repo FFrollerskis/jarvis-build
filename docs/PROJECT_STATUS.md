@@ -55,9 +55,19 @@ lekkasje.
 - `pnpm lint` (`eslint .`): rent.
 - `modules/conversation-graph/test/*.test.ts`: **72/72 grønt** (58 service + 14 security, opp fra
   51) mot ekte embedded Postgres/RLS.
-- Full workspace-suite: se PR-beskrivelsen/CI for eksakte tall på endelig HEAD.
-- gitleaks: kjøres autoritativt i CI (egen jobb, hele historikken) - IKKE kjørt lokalt denne økten
-  (binæren finnes ikke på denne hosten).
+- Full workspace-suite i CI (Linux, autoritativ - run `33830570796`/`33830506706`, begge på eksakt
+  HEAD `daf231c89d4c36854d9c79216a61bad8cb9f00f6`): **182/182 filer, 2932/2932 tester grønt**, null
+  feil, null skips. Alle tre CI-jobber (`build-test`, `windows-git-auth`, `gitleaks`) `success`.
+- gitleaks: `success` i CI (egen jobb, hele historikken) - IKKE kjørt lokalt denne økten (binæren
+  finnes ikke på denne hosten).
+- Lokalt (Windows) feiler 31 tester i 5 filer. Disse er **pre-eksisterende og host-spesifikke**,
+  bevist ved at NØYAKTIG samme 5 filer/31 tester feiler på et rent tre med denne sliceens endringer
+  stashet: `apps/api/test/worker-coding-wiring.test.ts`,
+  `modules/business/test/ua3-live-pool-separation.test.ts`,
+  `modules/tasks/test/claude-code-agent.test.ts`,
+  `modules/tasks/test/sandbox-docker-extra-env.test.ts`,
+  `modules/tool-gateway/test/docker-transport.test.ts` (Windows-prosessoppstart `EFTYPE`/`ENOENT`
+  mot fake `.cjs`-binærer, og kildetekst-assertions). Alle passerer i CI.
 
 ## Kjent, pre-eksisterende miljøbegrensning (IKKE innført av denne sliceen)
 
@@ -83,8 +93,9 @@ forpliktelses-visningen), **3 PASS** (uendret fra D-119), **4 NOT_STARTED**. Uen
 
 ## PR-status
 
-Draft-PR på branch `claude/ua7-cross-channel-commitments`. **IKKE merget, IKKE self-approved.**
-Venter på fersk CI på eksakt endelig HEAD, deretter uavhengig ChatGPT-arkitekt-review (D-120).
+Draft-PR **#70** på branch `claude/ua7-cross-channel-commitments`. **IKKE merget, IKKE
+self-approved.** Fersk CI på eksakt endelig HEAD er grønn (se Kvalitetsporter). Venter på uavhengig
+ChatGPT-arkitekt-review (D-120).
 
 ## Blokkeringer
 
