@@ -555,25 +555,36 @@ describe("ConversationGraphService - samtidighet (D-119 SECURITY HARDENING §15/
 });
 
 describe("ToolGateway-registrering: firstWaveTools() eksponerer conversation_graph.* med korrekt capability_class", () => {
-  it("U: registrerer 6 handlinger med forventet capability_class - merge_identities/split_merge/link_channel_identity ALLE FJERNET (D-119 FINAL AUTHORITY HARDENING - navnerommet er nå READ-ONLY)", () => {
+  it("U: registrerer 8 handlinger med forventet capability_class - merge_identities/split_merge/link_channel_identity ALLE FJERNET (D-119 FINAL AUTHORITY HARDENING - navnerommet er nå READ-ONLY; D-121 la til to NYE lese-handlinger, fortsatt klasse A)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
     const byAction = Object.fromEntries(tools.map((t) => [t.action, t.capability_class]));
     expect(byAction).toEqual({
       resolve_identity: "A", read_identity: "A", resolve_effective_identity: "A", list_channel_links: "A",
-      read_cross_channel_commitments: "A", read_identity_timeline: "A"
+      read_cross_channel_commitments: "A", read_identity_timeline: "A",
+      read_cross_channel_commitment_view: "A", read_cross_channel_attention: "A"
     });
     expect(byAction["merge_identities"]).toBeUndefined();
     expect(byAction["split_merge"]).toBeUndefined();
     expect(byAction["link_channel_identity"]).toBeUndefined();
   });
 
-  it("V: alle 6 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
+  it("U2: D-121 introduserte INGEN mutasjonsflate - ALLE conversation_graph.*-handlinger er fortsatt klasse A, reversible og idempotente (READ-ONLY-invarianten holder)", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
-    expect(tools).toHaveLength(6);
+    for (const t of tools) {
+      expect(t.capability_class).toBe("A");
+      expect(t.reversible).toBe(true);
+      expect(t.idempotent_external).toBe(true);
+      expect(t.scopes).toEqual(["conversation_graph.read"]);
+    }
+  });
+
+  it("V: alle 8 handlinger bruker den interne, ikke-hemmelige sentinel-credential_ref (JARVIS_CANONICAL, ingen ekstern leverandør)", () => {
+    const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
+    expect(tools).toHaveLength(8);
     for (const t of tools) expect(t.credential_ref).toBe("JARVIS_BUSINESS_INTERNAL_TOKEN");
   });
 
-  it("V2: INGEN av de 6 gjenværende input_schema-ene godtar tenant_id/memory_space (D-119 FINAL AUTHORITY HARDENING §4 - 'no parameter = no spoof surface')", () => {
+  it("V2: INGEN av de 8 gjenværende input_schema-ene godtar tenant_id/memory_space (D-119 FINAL AUTHORITY HARDENING §4 - 'no parameter = no spoof surface')", () => {
     const tools = firstWaveTools({}).filter((t) => t.tool_id === "conversation_graph");
     for (const t of tools) {
       const parsedWithTenant = t.input_schema.safeParse({ tenant_id: TENANT_B, identity_id: "x", channel: "email", channel_identifier: "x" });
@@ -647,5 +658,349 @@ describe("ConversationGraphTransport - direkte dispatch-feilbaner + tiltrodd kon
     );
     expect(result.external_id).toBeUndefined();
     expect(result.data).toBeNull();
+  });
+});
+
+/* =========================================================================
+ * UA-7 slice 2 (D-121): tverr-kanal-forpliktelser + neste handlinger.
+ * Akseptansekriterium 1 ordrett: "Open commitments AND NEXT ACTIONS visible
+ * ACROSS CHANNELS".
+ * ========================================================================= */
+
+/** Faste tidspunkter - ALDRI Date.now() i assertions, slik at bucket-utfall er deterministiske. */
+const NOW = Date.parse("2026-09-04T12:00:00Z");
+const PAST = "2026-09-01T09:00:00Z";
+const SOON = "2026-09-05T09:00:00Z"; // < 48t frem
+const FAR = "2026-12-01T09:00:00Z";
+
+/** Direkte, deterministisk open-loop-innsetting (ingen sveip-avhengighet) - samme RLS-vei som produksjonskoden. */
+async function insertOpenLoop(
+  tenantId: string,
+  row: {
+    open_loop_id: string; detection_key: string; loop_type: string; reason: string;
+    contact_id?: string | null; next_action?: string | null; due_at?: string | null;
+    priority?: string; detection_method?: string; canonical_uri?: string | null; status?: string;
+  }
+): Promise<void> {
+  await adminPool.query(
+    `INSERT INTO business_open_loops
+       (open_loop_id, tenant_id, memory_space_id, contact_id, loop_type, detection_key, detection_method,
+        reason, next_action, canonical_uri, priority, status, due_at)
+     VALUES ($1, $2, 'business', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      row.open_loop_id, tenantId, row.contact_id ?? null, row.loop_type, row.detection_key,
+      row.detection_method ?? "deterministic", row.reason, row.next_action ?? null,
+      row.canonical_uri ?? null, row.priority ?? "normal", row.status ?? "open", row.due_at ?? null
+    ]
+  );
+}
+
+describe("D-121: crossChannelCommitmentView - forpliktelser OG neste handlinger, med kanal-naabarhet", () => {
+  it("AA: unionerer business_followups OG business_open_loops for den lenkede kontakten, med korrekt kilde/proveniens", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Union AS" });
+    const contact = await business.createContact(TENANT_A, "business", { name: "Union Kontakt", company_id: company.company_id, email: "union@union.no" });
+    await business.createFollowup(TENANT_A, "business", { title: "Eksplisitt oppfoelging", due_at: FAR, contact_id: contact.contact_id });
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-union-1", detection_key: "d121:union:1", loop_type: "stalled_opportunity",
+      reason: "Ingen aktivitet paa 30 dager", next_action: "Ring kunden", contact_id: contact.contact_id,
+      due_at: PAST, priority: "high", canonical_uri: "https://mail.google.com/mail/u/0/#all/msg-union"
+    });
+
+    const link = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "union@union.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contact.contact_id
+    });
+
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", link.identity_id, NOW);
+    expect(view.resolution).toBe("resolved");
+    expect(view.effective_identity_id).toBe(link.identity_id);
+    expect(view.linked_business_contact_id).toBe(contact.contact_id);
+
+    const byKind = Object.fromEntries(view.commitments.map((c) => [c.source_kind, c]));
+    expect(Object.keys(byKind).sort()).toEqual(["business_followup", "business_open_loop"]);
+    expect(byKind["business_followup"]!.title).toBe("Eksplisitt oppfoelging");
+    expect(byKind["business_followup"]!.provenance).toBe("explicit");
+    expect(byKind["business_open_loop"]!.next_action).toBe("Ring kunden");
+    expect(byKind["business_open_loop"]!.provenance).toBe("deterministic");
+    expect(byKind["business_open_loop"]!.canonical_uri).toBe("https://mail.google.com/mail/u/0/#all/msg-union");
+
+    // Deterministisk rekkefoelge: forfalt (PAST) foer fremtidig (FAR).
+    expect(view.commitments[0]!.source_kind).toBe("business_open_loop");
+    // Delt bucket-regel: high + forfalt = critical.
+    expect(view.commitments[0]!.bucket).toBe("critical");
+    expect(view.commitments[1]!.bucket).toBe("informational");
+  });
+
+  it("AB: 'across channels' er bokstavelig - unionen av ALLE aktive kanal-lenker (e-post + telegram) foelger med visningen", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Multikanal AS" });
+    const contact = await business.createContact(TENANT_A, "business", { name: "Multi Kontakt", company_id: company.company_id, email: "multi@multikanal.no" });
+    await business.createFollowup(TENANT_A, "business", { title: "Multikanal-oppfoelging", due_at: SOON, contact_id: contact.contact_id });
+
+    const emailLink = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "multi@multikanal.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contact.contact_id
+    });
+    await graph.linkChannelIdentity(TENANT_A, "business", {
+      identity_id: emailLink.identity_id, channel: "telegram", channel_identifier: "555444333",
+      confidence: 0.8, match_method: "owner_configured"
+    });
+
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", emailLink.identity_id, NOW);
+    expect(view.channels.map((c) => c.channel)).toEqual(["email", "telegram"]);
+    expect(view.channels.find((c) => c.channel === "telegram")).toMatchObject({
+      channel_identifier: "555444333", confidence: 0.8, match_method: "owner_configured"
+    });
+    expect(view.commitments.map((c) => c.title)).toContain("Multikanal-oppfoelging");
+    expect(view.commitments[0]!.bucket).toBe("due_soon");
+  });
+
+  it("AC: en REVOKERT kanal-lenke er historikk, ALDRI rapportert som en kanal motparten kan naas paa naa", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Revokert AS" });
+    const contact = await business.createContact(TENANT_A, "business", { name: "Revokert Kontakt", company_id: company.company_id, email: "revokert@revokert.no" });
+    const link = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "revokert@revokert.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contact.contact_id
+    });
+    await adminPool.query(
+      `UPDATE conversation_channel_links SET status = 'revoked', revoked_at = now() WHERE tenant_id = $1 AND link_id = $2`,
+      [TENANT_A, link.link_id]
+    );
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", link.identity_id, NOW);
+    expect(view.channels).toEqual([]);
+  });
+
+  it("AD: skiller EKSPLISITT mellom 'ingen lenket kontakt' og 'identitet ikke funnet' - en tom liste er aldri tvetydig", async () => {
+    const orphan = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "d121-orphan@acme.no", confidence: 1.0, match_method: "exact_email"
+    });
+    const noContact = await graph.crossChannelCommitmentView(TENANT_A, "business", orphan.identity_id, NOW);
+    expect(noContact.resolution).toBe("no_linked_contact");
+    expect(noContact.commitments).toEqual([]);
+    expect(noContact.channels).toHaveLength(1); // kanalen er kjent selv om kontakten ikke er det
+
+    const missing = await graph.crossChannelCommitmentView(TENANT_A, "business", "conv-id-finnes-ikke", NOW);
+    expect(missing.resolution).toBe("identity_not_found");
+    expect(missing.effective_identity_id).toBeNull();
+    expect(missing.channels).toEqual([]);
+    expect(missing.commitments).toEqual([]);
+  });
+
+  it("AE: KORREKTHETSFIKS - et oppslag paa en SAMMENSLAATT (tombstonet) identitet returnerer maal-identitetens forpliktelser, ikke kildens foer-merge-bilde", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Merge Commit AS" });
+    const target = await business.createContact(TENANT_A, "business", { name: "Merge Maal", company_id: company.company_id, email: "merge-target@mc.no" });
+    await business.createFollowup(TENANT_A, "business", { title: "Maalets forpliktelse", due_at: FAR, contact_id: target.contact_id });
+
+    // Kilden har BEVISST ingen lenket kontakt - foer D-121 ga et oppslag paa
+    // den (etter merge) en TOM liste, altsaa nettopp det tverr-kanal-bildet
+    // merge-en fantes for aa skape.
+    const sourceLink = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "telegram", channel_identifier: "d121-merge-source", confidence: 0.6, match_method: "owner_configured"
+    });
+    const targetLink = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "merge-target@mc.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: target.contact_id
+    });
+
+    const merge = await graph.mergeIdentities(TENANT_A, "business", {
+      source_identity_id: sourceLink.identity_id, target_identity_id: targetLink.identity_id,
+      confidence: 0.95, reason: "Samme motpart, bekreftet av eier", performed_by: "owner"
+    });
+
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", sourceLink.identity_id, NOW);
+    expect(view.requested_identity_id).toBe(sourceLink.identity_id);
+    expect(view.effective_identity_id).toBe(targetLink.identity_id);
+    expect(view.resolution).toBe("resolved");
+    expect(view.commitments.map((c) => c.title)).toContain("Maalets forpliktelse");
+    // Unionen av begge kanalene, som er hele poenget med merge-en.
+    expect(view.channels.map((c) => c.channel).sort()).toEqual(["email", "telegram"]);
+
+    // SAMME fiks gjelder den smale, bakoverkompatible handlingen og tidslinjen.
+    const narrow = await graph.crossChannelCommitments(TENANT_A, "business", sourceLink.identity_id);
+    expect(narrow.map((c) => c.title)).toContain("Maalets forpliktelse");
+
+    // Reversibilitet bevart: etter split gaar oppslaget tilbake til foer-merge-bildet.
+    await graph.splitMerge(TENANT_A, "business", {
+      merge_id: merge.merge_id, performed_by: "owner", reason: "Feilaktig sammenslaaing"
+    });
+    const afterSplit = await graph.crossChannelCommitmentView(TENANT_A, "business", sourceLink.identity_id, NOW);
+    expect(afterSplit.effective_identity_id).toBe(sourceLink.identity_id);
+    expect(afterSplit.resolution).toBe("no_linked_contact");
+    expect(afterSplit.commitments).toEqual([]);
+  });
+
+  it("AF: gjengir ai_assisted-proveniens UENDRET - en modell-detektert neste handling blir ALDRI presentert som deterministisk bevist", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Proveniens AS" });
+    const contact = await business.createContact(TENANT_A, "business", { name: "Proveniens Kontakt", company_id: company.company_id, email: "prov@proveniens.no" });
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-prov-ai", detection_key: "d121:prov:ai", loop_type: "stalled_opportunity",
+      reason: "Modell-foreslaatt", next_action: "Vurder oppfoelging", contact_id: contact.contact_id,
+      due_at: FAR, detection_method: "ai_assisted"
+    });
+    const link = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "prov@proveniens.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contact.contact_id
+    });
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", link.identity_id, NOW);
+    const aiEntry = view.commitments.find((c) => c.source_id === "ol-prov-ai");
+    expect(aiEntry?.provenance).toBe("ai_assisted");
+  });
+
+  it("AG: en LUKKET forpliktelse/loep vises ikke (kun status='open' i begge kilder)", async () => {
+    const company = await business.createCompany(TENANT_A, "business", { name: "Lukket AS" });
+    const contact = await business.createContact(TENANT_A, "business", { name: "Lukket Kontakt", company_id: company.company_id, email: "lukket@lukket.no" });
+    const followup = await business.createFollowup(TENANT_A, "business", { title: "Blir fullfoert", due_at: FAR, contact_id: contact.contact_id });
+    await business.completeFollowup(TENANT_A, "business", followup.followup_id);
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-lukket", detection_key: "d121:lukket", loop_type: "stalled_opportunity",
+      reason: "Allerede loest", contact_id: contact.contact_id, status: "resolved", due_at: FAR
+    });
+    const link = await graph.linkChannelIdentity(TENANT_A, "business", {
+      channel: "email", channel_identifier: "lukket@lukket.no", confidence: 1.0, match_method: "exact_email",
+      linked_business_contact_id: contact.contact_id
+    });
+    const view = await graph.crossChannelCommitmentView(TENANT_A, "business", link.identity_id, NOW);
+    expect(view.resolution).toBe("resolved");
+    expect(view.commitments).toEqual([]);
+  });
+
+  it("AH: rent lese-oppslag - to identiske kall gir identisk resultat og skriver INGEN rad noe sted (idempotent/ikke-muterende)", async () => {
+    const before = await adminPool.query(
+      `SELECT (SELECT count(*) FROM conversation_identities) AS i,
+              (SELECT count(*) FROM conversation_channel_links) AS l,
+              (SELECT count(*) FROM conversation_identity_merges) AS m,
+              (SELECT count(*) FROM business_followups) AS f,
+              (SELECT count(*) FROM business_open_loops) AS o`
+    );
+    const identity = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", "union@union.no");
+    const first = await graph.crossChannelCommitmentView(TENANT_A, "business", identity!.identity_id, NOW);
+    const second = await graph.crossChannelCommitmentView(TENANT_A, "business", identity!.identity_id, NOW);
+    expect(second).toEqual(first);
+    await graph.crossChannelAttention(TENANT_A, "business", NOW);
+    const after = await adminPool.query(
+      `SELECT (SELECT count(*) FROM conversation_identities) AS i,
+              (SELECT count(*) FROM conversation_channel_links) AS l,
+              (SELECT count(*) FROM conversation_identity_merges) AS m,
+              (SELECT count(*) FROM business_followups) AS f,
+              (SELECT count(*) FROM business_open_loops) AS o`
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+  });
+});
+
+describe("D-121: crossChannelAttention - tenant-bred tverr-kanal-visning", () => {
+  it("AI: hver rad baerer sin kanal-naabarhet, og forpliktelser UTEN noen kommunikasjonsidentitet rapporteres EKSPLISITT som ikke-naabare", async () => {
+    const entries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
+
+    const reachable = entries.find((e) => e.commitment.source_id === "ol-union-1");
+    expect(reachable?.channel_reachable).toBe(true);
+    expect(reachable?.channels.map((c) => c.channel)).toEqual(["email"]);
+    expect(reachable?.identity_id).toBeTruthy();
+
+    // En kontaktloes finans-/kontrakt-loop er en helt reell aapen neste handling,
+    // men INGEN kanal naar den - det maa staa eksplisitt, aldri stille utelates.
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-uten-motpart", detection_key: "d121:uten-motpart", loop_type: "finance_spend_unexpected",
+      reason: "Ukjent utgift", next_action: "Undersoek utgiften", contact_id: null, due_at: PAST, priority: "high"
+    });
+    const withOrphan = await graph.crossChannelAttention(TENANT_A, "business", NOW);
+    const orphan = withOrphan.find((e) => e.commitment.source_id === "ol-uten-motpart");
+    expect(orphan).toBeDefined();
+    expect(orphan!.channel_reachable).toBe(false);
+    expect(orphan!.channels).toEqual([]);
+    expect(orphan!.identity_id).toBeNull();
+    expect(orphan!.commitment.bucket).toBe("critical");
+  });
+
+  it("AJ: sortert deterministisk paa forfall - rader uten frist kommer sist, aldri en fabrikkert dato", async () => {
+    await insertOpenLoop(TENANT_A, {
+      open_loop_id: "ol-uten-frist", detection_key: "d121:uten-frist", loop_type: "stalled_opportunity",
+      reason: "Ingen frist satt", contact_id: null, due_at: null
+    });
+    const entries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
+    const dueAts = entries.map((e) => e.commitment.due_at);
+    const firstNullIndex = dueAts.indexOf(null);
+    expect(firstNullIndex).toBeGreaterThan(-1);
+    // Ingen ikke-null frist etter den foerste null-en.
+    expect(dueAts.slice(firstNullIndex).every((d) => d === null)).toBe(true);
+    // Stigende blant de med frist.
+    const withDue = dueAts.slice(0, firstNullIndex) as string[];
+    expect([...withDue].sort()).toEqual(withDue);
+    expect(entries.find((e) => e.commitment.source_id === "ol-uten-frist")!.commitment.bucket).toBe("informational");
+  });
+
+  it("AK: en TOMBSTONET identitet dukker ALDRI opp som en egen rad - dens kanaler tilhoerer naa maal-identiteten", async () => {
+    const entries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
+    const identityIds = entries.map((e) => e.identity_id).filter((id): id is string => id !== null);
+    const { rows } = await adminPool.query(
+      `SELECT identity_id FROM conversation_identities WHERE tenant_id = $1 AND status = 'merged'`,
+      [TENANT_A]
+    );
+    for (const row of rows as Array<{ identity_id: string }>) {
+      expect(identityIds).not.toContain(row.identity_id);
+    }
+  });
+
+  it("AL: tenant-isolasjon - tenant B ser ALDRI tenant A sine forpliktelser eller kanaler (RLS)", async () => {
+    const companyB = await business.createCompany(TENANT_B, "business", { name: "B-selskap" });
+    const contactB = await business.createContact(TENANT_B, "business", { name: "B-kontakt", company_id: companyB.company_id, email: "kun-b@b.no" });
+    await business.createFollowup(TENANT_B, "business", { title: "Kun for B", due_at: FAR, contact_id: contactB.contact_id });
+
+    const bEntries = await graph.crossChannelAttention(TENANT_B, "business", NOW);
+    expect(bEntries.map((e) => e.commitment.title)).toContain("Kun for B");
+    expect(bEntries.map((e) => e.commitment.source_id)).not.toContain("ol-union-1");
+
+    const aEntries = await graph.crossChannelAttention(TENANT_A, "business", NOW);
+    expect(aEntries.map((e) => e.commitment.title)).not.toContain("Kun for B");
+  });
+});
+
+describe("D-121: ConversationGraphTransport - de to nye lese-handlingene", () => {
+  const transport = () => new ConversationGraphTransport(graph);
+
+  it("AM: read_cross_channel_commitment_view henter tenant/space UTELUKKENDE fra context.identity - en forfalsket tenant_id i parameters paavirker INGENTING", async () => {
+    const identityInA = await graph.resolveIdentityByChannel(TENANT_A, "business", "email", "union@union.no");
+    const result = await transport().invoke(
+      "read_cross_channel_commitment_view",
+      { identity_id: identityInA!.identity_id, tenant_id: TENANT_B, memory_space: "personal" } as never,
+      "cred", contextFor(TENANT_A)
+    );
+    expect(result.external_id).toBe(identityInA!.identity_id);
+    const view = result.data as unknown as { resolution: string; commitments: unknown[] };
+    expect(view.resolution).toBe("resolved");
+    expect(view.commitments.length).toBeGreaterThan(0);
+
+    // SAMME identity_id lest med tenant B sin kontekst finnes ikke der (RLS + kontekst-avledet tenant).
+    const asB = await transport().invoke(
+      "read_cross_channel_commitment_view", { identity_id: identityInA!.identity_id }, "cred", contextFor(TENANT_B)
+    );
+    expect((asB.data as unknown as { resolution: string }).resolution).toBe("identity_not_found");
+  });
+
+  it("AN: read_cross_channel_attention er tenant-scopet av konteksten alene og feiler lukket uten den", async () => {
+    const asA = await transport().invoke("read_cross_channel_attention", {}, "cred", contextFor(TENANT_A));
+    const rowsA = asA.data as unknown as Array<{ commitment: { title: string } }>;
+    expect(rowsA.map((r) => r.commitment.title)).not.toContain("Kun for B");
+
+    await expect(
+      transport().invoke("read_cross_channel_attention", {}, "cred", {} as never)
+    ).rejects.toThrow("conversation_graph_missing_invocation_context");
+  });
+
+  it("AO: read_cross_channel_commitment_view krever identity_id (egne parametre valideres fortsatt)", async () => {
+    await expect(
+      transport().invoke("read_cross_channel_commitment_view", {}, "cred", contextFor(TENANT_A))
+    ).rejects.toThrow("conversation_graph_missing_parameter:identity_id");
+  });
+
+  it("AP: INGEN av de to nye input_schema-ene godtar 'now' - en kaller kan ikke styre hvilken prioritets-bucket noe havner i", () => {
+    const tools = firstWaveTools({}).filter(
+      (t: { tool_id: string; action: string }) =>
+        t.tool_id === "conversation_graph" &&
+        (t.action === "read_cross_channel_commitment_view" || t.action === "read_cross_channel_attention")
+    );
+    expect(tools).toHaveLength(2);
+    for (const t of tools as Array<{ input_schema: { safeParse: (v: unknown) => { success: boolean } } }>) {
+      expect(t.input_schema.safeParse({ identity_id: "x", now: 0 }).success).toBe(false);
+    }
   });
 });

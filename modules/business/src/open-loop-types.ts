@@ -85,6 +85,30 @@ export interface AttentionQueueEntry {
   loop: BusinessOpenLoop;
 }
 
+/**
+ * UA-7 slice 2 (D-121): DEN ENE, delte prioriterings-regelen for "hvor mye
+ * haster dette?". Trukket UT av `OpenLoopService.attentionQueue()` (der den
+ * tidligere var inline) UTEN aa endre semantikken, slik at den
+ * kanal-bevisste tverr-kanal-visningen i `@jarvis/conversation-graph` kan
+ * gjenbruke NOEYAKTIG samme regel i stedet for aa duplisere en nesten-lik
+ * variant (D-64: én kanonisk regel, aldri to parallelle
+ * prioriteringsmodeller). Ren funksjon, ingen I/O - `now` injiseres slik at
+ * tester er deterministiske.
+ */
+export function classifyAttentionBucket(
+  priority: OpenLoopPriority,
+  dueAt: string | null,
+  now: number
+): AttentionBucket {
+  const dueMs = dueAt !== null ? new Date(dueAt).getTime() : null;
+  const overdue = dueMs !== null && dueMs < now;
+  const dueSoon = dueMs !== null && !overdue && dueMs - now < 48 * 3_600_000;
+  if (priority === "high" && overdue) return "critical";
+  if (overdue) return "overdue";
+  if (dueSoon) return "due_soon";
+  return "informational";
+}
+
 export interface SweepResult {
   detected: number;
   updated: number;

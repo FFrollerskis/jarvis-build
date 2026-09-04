@@ -73,6 +73,15 @@ import type { ConversationChannel } from "./types.ts";
  * internal `ConversationGraphSyncService` (Gmail sync, owner Telegram
  * config) or a future trusted owner-only admin path - never via a
  * model-/tool-call-reachable surface, mirroring the merge/split precedent.
+ *
+ * UA-7 slice 2 (D-121) adds `read_cross_channel_commitment_view` and
+ * `read_cross_channel_attention` - 8 actions, STILL all class A, the
+ * namespace is STILL READ-ONLY. Both new actions are pure SELECTs over the
+ * two existing commitment systems-of-record (`business_followups`,
+ * `business_open_loops`) joined through the Conversation Graph identity;
+ * they create no new durable row and no new mutation surface, and they read
+ * `tenant_id`/`memory_space` from `context.identity` exactly like the six
+ * existing actions.
  */
 export class ConversationGraphTransport implements ToolTransport {
   constructor(private readonly service: ConversationGraphService) {}
@@ -116,6 +125,26 @@ export class ConversationGraphTransport implements ToolTransport {
       }
       case "read_identity_timeline": {
         const rows = await this.service.identityTimeline(tenantId, memorySpace, requireString(parameters, "identity_id"));
+        return { data: rows as unknown as JsonValue };
+      }
+      // UA-7 slice 2 (D-121): to NYE handlinger, begge klasse A og rene
+      // lese-oppslag - namespacet forblir READ-ONLY (ingen mutasjonsflate
+      // gjeninnfoeres, D-119 FINAL AUTHORITY HARDENING uendret). `now`
+      // hentes IKKE fra parametre: en kaller som kunne styre "naa" kunne
+      // styre hvilken bucket en forpliktelse havner i - tiden kommer
+      // utelukkende fra serveren, samme "no parameter = no spoof surface"-
+      // prinsipp som tenant/space.
+      case "read_cross_channel_commitment_view": {
+        const view = await this.service.crossChannelCommitmentView(
+          tenantId, memorySpace, requireString(parameters, "identity_id")
+        );
+        return {
+          ...(view.effective_identity_id !== null ? { external_id: view.effective_identity_id } : {}),
+          data: view as unknown as JsonValue
+        };
+      }
+      case "read_cross_channel_attention": {
+        const rows = await this.service.crossChannelAttention(tenantId, memorySpace);
         return { data: rows as unknown as JsonValue };
       }
       default:
