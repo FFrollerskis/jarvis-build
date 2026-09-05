@@ -5,3 +5,4 @@ export * from "./approval.ts";
 export * from "./job.ts";
 export * from "./event.ts";
 export * from "./model.ts";
+export * from "./speech.ts";

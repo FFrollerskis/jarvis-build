@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 import { SentenceChunker } from "../src/chunker.ts";
 import { VoiceHealth } from "../src/health.ts";
 import { summarizeLatency } from "../src/benchmark.ts";
@@ -33,10 +34,23 @@ const identity: VoiceIdentity = {
   channel: "voice"
 };
 
+/**
+ * D-122: testadaptere kjører i prosessen - lokal behandler. Erklæringen er
+ * PÅKREVD av `SttAdapter`/`TtsAdapter` slik at ingen adapter (heller ikke en
+ * fremtidig ekte leverandør) kan legges til uten å ta stilling til lokalitet.
+ */
+const LOCAL_TEST_PROCESSOR: SpeechProcessorDeclaration = {
+  processor_id: "voice-test-fake",
+  locality: "local",
+  processor_row_declared: true,
+  processor_terms_status: "NOT_APPLICABLE_LOCAL"
+};
+
 /** STT-fake: fast transkript, valgfri feil. */
 function fixedStt(text: string, fail = false): SttAdapter {
   return {
     name: "fixed-stt",
+    processor: LOCAL_TEST_PROCESSOR,
     available: () => true,
     startStream(): SttStream {
       return {
@@ -60,6 +74,7 @@ function taggedTts(msPerFrame = 5, framesPerChunk = 4): { adapter: TtsAdapter; s
     synthCalls,
     adapter: {
       name: "tagged-tts",
+      processor: LOCAL_TEST_PROCESSOR,
       available: () => true,
       synthesize(text: string): TtsPlayback {
         synthCalls.push(text);
@@ -389,6 +404,7 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     const seen: string[] = [];
     const stt: SttAdapter = {
       name: "recording-stt",
+      processor: LOCAL_TEST_PROCESSOR,
       available: () => true,
       startStream(): SttStream {
         return {
@@ -501,6 +517,7 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
   it("TTS-feil forkaster ALDRI svaret: reply leveres, 'tts_error' normalisert, helse DEGRADED (§36)", async () => {
     const failingTts: TtsAdapter = {
       name: "failing-tts",
+      processor: LOCAL_TEST_PROCESSOR,
       available: () => true,
       synthesize: () => {
         throw new Error("tts_provider_500 with secret-ish detail");

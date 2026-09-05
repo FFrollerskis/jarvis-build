@@ -3583,6 +3583,68 @@ Full detalj: D-121 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+## UA-7 COMMUNICATIONS HUB — Tredje slice: tale-/transkripsjonsbehandling, retensjon og rettsgrunnlag (D-122, 2026-09-05)
+
+**Masterplan-basis:** samme §"UA-7 - Communications Hub" som D-119/D-121. Akseptansekriterium 4
+ordrett: «Transcription/call processing has documented retention and legal basis **where
+required**». Appendiks D gjør det til en **gate FØR production** («Call recording/transcripts,
+outbound AI calls → Disclosure/legal basis/retention»).
+
+**Re-audit av faktisk `main` (`9106936`) — hele gjenstående UA-7-scope:**
+
+| UA-7 capability | Klassifisering | Evidens (file:path) |
+|---|---|---|
+| Conversation Graph, identitetsoppløsning, merge/split (kriterium 3) | `ALREADY_IMPLEMENTED_REUSE` | `046_conversation_graph.sql`, `modules/conversation-graph/src/service.ts` |
+| Tverr-kanal-forpliktelser + neste handlinger (kriterium 1) | `ALREADY_IMPLEMENTED_REUSE` | `service.ts:485` (`crossChannelCommitmentView`), `:551` (`crossChannelAttention`) — D-121 |
+| Untrusted-innhold-isolasjon (kriterium 2) | `ALREADY_IMPLEMENTED_REUSE` | `modules/conversation-graph/src/sync.ts:14-21`, `test/security.test.ts` |
+| Gmail les/søk/vedlegg · Calendar les · Contacts · Telegram utgående | `ALREADY_IMPLEMENTED_REUSE` | `live-transports.ts:242-410`, `:797-800`, `019_business.sql` |
+| **Tale-/transkripsjonsbehandling: retensjon + rettsgrunnlag (kriterium 4)** | **`PARTIAL_REUSE_NEEDS_SLICE` → denne sliceen** | Behandlingen FINNES live: `apps/voice-gateway/src/stt.ts:94` (rå wav → `api.openai.com`), `tts.ts:77`, `main.ts:15-16`, host-bevist i `RUNTIME_GATES.md:1217`/`:1230`. Men: `DPIA_VOICE.md` påsto "ingen rå lyd forlater maskinen"; `PROCESSOR_REGION_MATRIX.md` sine STT-/TTS-rader sto `TBD` i strid med filens egen regel 1; og D-23/regel 2 (`health` aldri til sky) var IKKE håndhevet — `memory_space` forekom ÉN gang i hele `apps/voice-gateway/src` (`session.ts:19`) og styrte ingenting |
+| Telegram inngående som samtalekanal | `NOT_STARTED_PROVIDER_INDEPENDENT` | `TelegramCommandPoller` (`live-transports.ts:1251-1283`) dropper alt fra ikke-eier og kjenner kun `/brief`,`/status`,`/ai`; `linkOwnerTelegramIdentity()` (`sync.ts:100`) er aldri kalt fra noen wiring. **Vurdert og valgt bort denne runden:** Telegram gir ingen deterministisk nøkkel (e-post/telefon) å koble en motpart til `business_contacts` med, så nye identiteter ville endt `no_linked_contact` og gitt null forpliktelses-verdi — å gjette på navn ville brutt D-57/D-119 sitt "deterministisk, aldri AI-gjettet identitetstreff" |
+| Gmail send/draft · Calendar skriv · Slack/Teams/WhatsApp/Messenger/Discord/SMS · SIP/telefoni · autonom utsending | `BLOCKED_BY_D108_OR_EXTERNAL_SCOPE` | uendret fra D-121 |
+| Møtetranskripsjon · samtaleopptak av tredjepart · utgående AI-samtaler | `DEFERRED_WITHIN_UA7_BY_DEPENDENCY` | krever leverandør + D-108; porten som må kjøres først er nå navngitt i `docs/UA7_COMMUNICATIONS_DPIA.md` §5 |
+
+**Slice-derivering:** kriterium 4 var det ENESTE gjenstående kriteriet, og re-auditen viste at D-121
+sin `DEFERRED_WITHIN_UA7_BY_DEPENDENCY`-klassifisering av det var feil: transkripsjonsbehandlingen
+finnes allerede og er host-verifisert, så "where required" er oppfylt NÅ. Sliceen er dermed både
+provider-uavhengig OG den som direkte lukker et umøtt akseptansekriterium — akkurat det
+prioriteringsregelen krever.
+
+**Bygget (NULL nye tabeller, NULL nye migrasjoner, NULL nye leverandører, NULL nye credentials):**
+`packages/contracts/src/speech.ts` med `evaluateSpeechRouting()` — den kanoniske, leverandør-
+uavhengige rutingsporten, som gjenbruker det EKSISTERENDE `DataSensitivity`-vokabularet og samme
+regelform som `isSensitivityEligible()` (aldri en parallell sikkerhetsvei). `processor` er nå
+PÅKREVD på `SttAdapter`/`TtsAdapter` (en ny leverandør uten erklæring kompilerer ikke).
+`VoiceSession` håndhever porten før filtre/VAD/adapter og på TTS-siden, fail-closed og uten stille
+fallback. `/status` eksponerer `speech_routing` per memory space.
+
+**Dokumentasjon (selve kriteriet):** ny `docs/UA7_COMMUNICATIONS_DPIA.md`; `PROCESSOR_REGION_MATRIX.md`
+STT-/TTS-rader navngir nå OpenAI med region/DPA/trening/retensjon eksplisitt `IKKE VERIFISERT`
+(Q-32); `DPIA_VOICE.md` har fått en eksplisitt RETTELSE-blokk.
+
+**Tester:** `apps/voice-gateway/test/ua7-speech-routing.test.ts` **32/32 grønt**.
+
+**RETTET etter uavhengig arkitekt-review av PR #71 (2026-09-05, samme D-122):** to funn tatt til
+følge. (A) Matrisens regel 3 var dokumentert, men ikke håndhevet — en NAVNGITT rad kvalifiserte
+alene en ekstern behandler. Regel 3 er nå kanonisk status (`processor_terms_status`, fail-closed
+default `NOT_VERIFIED`), så OpenAI STT/TTS er **avvist for ALLE memory spaces** mens radene står
+`IKKE VERIFISERT`. BO-12 sin talekjede er dermed policy-blokkert til Q-32 besvares — en ærlig,
+tilsiktet konsekvens, ikke en skjult regresjon. (B) Porten utledet sensitivitet fra en
+`memory_space` klienten selv oppgir. Re-audit bekreftet at ingen betrodd server-side space-autoritet
+finnes; den ble BEVISST ikke oppfunnet her (egen kanonisk slice, Q-32). Tillitsnivået er i stedet et
+påkrevd argument (`MemorySpaceAuthority`), og en `CLIENT_ASSERTED` space kan kun NEKTE, aldri
+kvalifisere for ekstern behandling. **D-23 er derfor eksplisitt IKKE påstått strukturelt lukket for
+tale**, og kriterium 4 er nedgradert til `PARTIAL`.
+
+**Flagg:** `UA7_ACCEPTANCE_4=PARTIAL` (dokumentasjon og håndheving finnes og er sann; kriteriet
+lukkes FØRST når Q-32 sine eier-/juridiske fakta faktisk foreligger),
+`UA7_SPEECH_ROUTING_ENFORCED=true`, `UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32`,
+`UA7_TRUSTED_MEMORY_SPACE_AUTHORITY=false`, `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
+`UA7_COMPLETE=false`, `D108_COMPLETE=false`, `HOST_ACCEPTANCE_REQUIRED=false`.
+
+Full detalj: D-122 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
