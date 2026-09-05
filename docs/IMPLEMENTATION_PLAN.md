@@ -3645,6 +3645,69 @@ Full detalj: D-122 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+## UA-7 COMMUNICATIONS HUB — Fjerde slice: betrodd server-side sesjons-/memory-space-autoritet i voice-transporten (D-123, 2026-09-05)
+
+**Derivert, ikke fritt valgt.** D-122 sin arkitekt-review registrerte Q-32 med to lukkedeler:
+(1) eier-/juridisk verifisering av OpenAI som databehandler — **ren ekstern handling, kan ikke
+lukkes av kode**; (2) manglende betrodd server-side sesjons-/space-autoritet — **uavhengig
+implementasjonsarbeid**. Punkt (2) er derfor den dependency-korrekte neste sliceen, og punkt (1)
+røres ikke.
+
+**Problemet på `main@f8e849b`, bevist i kode:** `apps/voice-gateway/src/server.ts:138` hadde
+`VOICE_MEMORY_SPACE_AUTHORITY = "CLIENT_ASSERTED"` som hardkodet konstant, og `server.ts:217` tok
+`person_id`/`tenant_id`/`device_id`/`memory_space` uendret fra den uautentiserte `start`-meldingen.
+`SERVER_VERIFIED` fantes kun som enum-verdi — ingen kode kunne produsere den.
+
+**System-of-record-/skjemaaudit (FØR implementering) → 0 nye tabeller, 0 nye migrasjoner.**
+`person_tenants` + `devices (device_id, tenant_id, person_id, public_key_pem)` + `memory_spaces
+(tenant_id, space) UNIQUE` + `sessions (…, status, last_device_id)` representerer allerede
+bindingen fullt ut, og `resolveIdentity()` håndhever konjunksjonen under RLS. En per-person
+space-hviteliste ble BEVISST forkastet: den finnes ikke i modellen (minne-RLS er tenant+space, ikke
+person+space), så å innføre den her ville vært en ny autorisasjonsmodell for tale alene — nøyaktig
+det Q-32 forbyr.
+
+**Implementasjon — ren komposisjon, aldri en parallell autorisasjonsvei:**
+
+| Lag | Fil | Rolle |
+| --- | --- | --- |
+| Kontrakt | `packages/contracts/src/voice-authority.ts` | `VoiceAuthorizationEvidence` (`.strict()`, klientens PÅSTAND) · `VoiceSessionGrant` med `memory_space_authority` som LITERAL `"SERVER_VERIFIED"` (en svak grant kan ikke eksistere) · `voiceAuthorityFromGrant()` — eneste vei til `SERVER_VERIFIED` |
+| Core | `modules/core/src/services/voice-session-authority.ts` | Komponerer `DeviceService.verifyChallenge()` → `SessionService.resumeOrCreate()` → `resolveIdentity()`. Ingen egen autorisasjonslogikk |
+| Core | `modules/core/src/services/device-service.ts` | VALGFRI `personId` på `verifyChallenge()` — binder beviset til påstått eier. Eksisterende kallere uendret |
+| API | `apps/api/src/server.ts` / `main.ts` | `POST /voice/session/authorize` (ingen egen logikk) · ÉN delt instans av hver identitetsprimitiv (`DeviceService` holder challenges in-memory — to instanser ville vært en stille funksjonsfeil) |
+| Transport | `apps/voice-gateway/src/server.ts` | Henter grant selv over egen Core-forbindelse; leser ALDRI et grant-felt fra websocketen. Ved gyldig grant overskrives HVERT identitetsfelt fra grant-en |
+
+**Rekkefølgen er sikkerhetskritisk** og avviker bevisst fra `/chat` sin
+(`resumeOrCreate()`-før-`resolveIdentity()`): enhetsbeviset kjøres FØRST og bindes til påstått
+person, ellers ville en angriper med sin EGEN registrerte enhet kunne bevist enheten mens den påsto
+en ANNEN persons `person_id`, og `resumeOrCreate()` ville rukket å mutere offerets sesjonsrad
+(`last_device_id`/`last_active_at`) før avslaget kom.
+
+**Fail-closed-oppførsel:** avvist bevis starter INGEN sesjon (heller ikke en nedgradert — det ville
+skjult et mislykket autentiseringsforsøk); utilgjengelig autoritet nekter framfor å degradere
+stille; grant-levetid (15 min, konstant) håndheves ved HVER bruk og river sesjonen ned ved utløp.
+`/status` rapporterer nå rutingutfall for BEGGE tillitsnivåene.
+
+**D-122 er uendret og overordnet:** `SERVER_VERIFIED` er **nødvendig, men ikke tilstrekkelig**.
+OpenAI STT/TTS forblir avvist mens `processor_terms_status=NOT_VERIFIED` (Q-32 punkt 1), og `health`
+forblir avvist mot enhver ekstern behandler (D-23).
+
+**Tester:** `apps/voice-gateway/test/ua7-voice-session-authority.test.ts` **19/19 grønt lokalt**
+(ekte gateway bak ekte WebSocket, fiendtlig klient) · `modules/core/test/d123-voice-session-authority.test.ts`
+13 tester mot ekte embedded Postgres/RLS (kryss-person/-tenant/-space/-enhet, tilbakekalt enhet,
+replay, utløpt nonce, malformed evidence) — **kunne IKKE kjøres lokalt** pga. den PRE-EKSISTERENDE
+`040_stripe.sql`-mojibaken som feiler enhver embedded-Postgres-suite på en WIN1252-initialisert
+Windows-host; kjøres i CI på Linux.
+
+**Flagg:** `UA7_TRUSTED_MEMORY_SPACE_AUTHORITY=true`, `Q32_POINT2=RESOLVED_IN_CODE`,
+`Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `UA7_ACCEPTANCE_4=PARTIAL` (UENDRET — lukkes av punkt 1),
+`UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32_POINT1`, `UA7_NEW_TABLES_ADDED=0`,
+`UA7_NEW_PROVIDERS_ADDED=0`, `UA7_COMPLETE=false`, `D108_COMPLETE=false`,
+`HOST_ACCEPTANCE_REQUIRED=false`.
+
+Full detalj: D-123 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

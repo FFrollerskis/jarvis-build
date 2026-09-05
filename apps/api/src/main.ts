@@ -7,6 +7,7 @@ import {
   PgApprovalStore,
   PgDeviceRegistry,
   SessionService,
+  VoiceSessionAuthority,
   assertRuntimeCredentialsConfigured,
   assertRuntimeRoleSafe,
   configFromEnv,
@@ -455,14 +456,27 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // nye `/tasks/submit`-HTTP-ruten (full `JobContract`, inkl. `agent_profile:
   // "coding"`) - ALDRI to parallelle `TaskService`-konstruksjoner mot samme pool.
   const taskService = new TaskService(pool, queue, policy);
+  // D-123 (Q-32 punkt 2): ÉN delt instans av hver identitetsprimitiv.
+  // `DeviceService` holder utstedte challenges in-memory, så en egen instans
+  // til voice-autoriteten ville aldri gjenkjent en nonce utstedt av
+  // `/devices/challenge` - to instanser er her en STILLE funksjonsfeil, ikke
+  // bare uryddig. Samme delings-disiplin som D-102 sin `taskService`.
+  const identityService = new IdentityService(pool);
+  const deviceService = new DeviceService(pool);
+  const sessionService = new SessionService(pool);
   const deps: ApiDeps = {
-    identity: new IdentityService(pool),
-    devices: new DeviceService(pool),
+    identity: identityService,
+    devices: deviceService,
+    voiceAuthority: new VoiceSessionAuthority({
+      devices: deviceService,
+      sessions: sessionService,
+      identity: identityService
+    }),
     brief: {
       generate: (identity) => dailyBrief.generate(identity as never),
       render: (artifact) => DailyBrief.render(artifact as never)
     },
-    sessions: new SessionService(pool),
+    sessions: sessionService,
     policy,
     worker,
     tasks: taskService,

@@ -136,6 +136,13 @@ export type SpeechProcessorDeclaration = z.infer<typeof SpeechProcessorDeclarati
  * `CLIENT_ASSERTED`, kan den ikke brukes til å KVALIFISERE for ekstern
  * behandling. Den kan fortsatt brukes til å NEKTE (en klient som selv oppgir
  * `health` blir tatt på ordet i innstrammende retning).
+ *
+ * D-123 (2026-09-05): autoriteten Q-32 punkt 2 etterlyste FINNES NÅ - se
+ * `voice-authority.ts` og `modules/core/src/services/voice-session-authority.ts`.
+ * `SERVER_VERIFIED` er ikke lenger en verdi ingen kan produsere: den utstedes
+ * av Core etter proof-of-possession + server-eid sesjon + `resolveIdentity()`.
+ * Denne enum-en og selve porten er UENDRET av D-123 - det var aldri denne
+ * filen som manglet noe, det var produsenten av `SERVER_VERIFIED`.
  */
 export const MemorySpaceAuthoritySchema = z.enum([
   /** Space-verdien kommer fra en betrodd server-side autoritet. */

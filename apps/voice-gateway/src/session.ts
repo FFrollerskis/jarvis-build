@@ -1,4 +1,9 @@
-import { evaluateSpeechRouting, type MemorySpaceAuthority, type SpeechRoutingDecision } from "@jarvis/contracts";
+import {
+  evaluateSpeechRouting,
+  type MemorySpaceAuthority,
+  type SpeechRoutingDecision,
+  type VoiceAuthorizationResult
+} from "@jarvis/contracts";
 import { PassthroughAec, PassthroughNoiseSuppressor, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
@@ -39,6 +44,19 @@ export type CoreStreamEvent =
 
 /** Core-klient: gatewayen snakker KUN med Core - all dialog/policy/minne bor der. */
 export interface CoreClient {
+  /**
+   * D-123 (Q-32 punkt 2): be Core avgjøre om et klientbevis gir en betrodd
+   * sesjons-/memory-space-autoritet. Dette er den ENESTE veien til
+   * `SERVER_VERIFIED` i voice-transporten.
+   *
+   * Ligger på `CoreClient` og ikke i gatewayen selv fordi CLAUDE.md regel 5
+   * gjør Voice Gateway til en EGEN prosess: identitet, sesjon og policy bor i
+   * Core, og gatewayen skal spørre - aldri holde sin egen kopi av
+   * enhetsnøkler, sesjonstabell eller space-regler. Valgfri på interfacet slik
+   * at eksisterende `CoreClient`-implementasjoner (tester, fakes) forblir
+   * gyldige og deterministisk havner i den fail-closed grenen.
+   */
+  authorizeVoiceSession?(evidence: unknown): Promise<VoiceAuthorizationResult>;
   chat(identity: VoiceIdentity, message: string): Promise<CoreReply>;
   /**
    * BO-12 §12-§13: streaming-variant - tokens driver setningschunking → TTS

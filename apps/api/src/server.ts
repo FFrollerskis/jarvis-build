@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import type { DeviceService, IdentityService, SessionService } from "@jarvis/core";
+import type { DeviceService, IdentityService, SessionService, VoiceSessionAuthority } from "@jarvis/core";
 import {
   acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
   getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
@@ -36,6 +36,13 @@ export interface ApiDeps {
   worker: InProcessWorker;
   /** Fase 8: enhetsregistrering/challenge-auth for mobil/Watch. */
   devices?: DeviceService;
+  /**
+   * D-123 (UA-7 slice 4, Q-32 punkt 2): betrodd server-side sesjons-/
+   * memory-space-autoritet for Voice Gateway. Valgfri av samme grunn som
+   * `devices`/`tasks`: uten database-avhengigheter kjører API-et i helse-modus.
+   * Ingen NY autorisasjonsmekanisme - se `VoiceSessionAuthority`.
+   */
+  voiceAuthority?: VoiceSessionAuthority;
   /** v4.0 BO-02: Daily Executive Brief on demand. */
   brief?: { generate(identity: unknown): Promise<unknown>; render(artifact: unknown): string };
   /**
@@ -154,7 +161,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   const depRoutes = [
-    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit",
+    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit", "/voice/session/authorize",
     "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
     "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
   ];
@@ -275,6 +282,29 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     };
     const ok = await deps.devices.verifyChallenge(body.tenant_id, body.device_id, body.challenge, body.signature);
     return json(res, ok ? 200 : 403, { verified: ok, auth_strength: ok ? "signed" : "passive" });
+  }
+
+  if (deps.voiceAuthority && req.method === "POST" && url.pathname === "/voice/session/authorize") {
+    // D-123 (Q-32 punkt 2): den BETRODDE server-side space-/sesjonsautoriteten
+    // for voice-transporten. Ruten har med vilje INGEN egen logikk - den leser
+    // en kropp, gir den til `VoiceSessionAuthority.authorize()` (som kun
+    // komponerer `DeviceService`/`SessionService`/`resolveIdentity()`) og
+    // returnerer vedtaket. Ingen `resolveIdentity()`-kall her oppe: det ville
+    // vært en ANDRE identitetssti ved siden av den autoriteten selv kjører.
+    //
+    // Kroppen valideres inne i autoriteten (`.strict()`-skjema), ikke her, slik
+    // at det finnes ÉN valideringssannhet. Ugyldig JSON fanges likevel her og
+    // sendes inn som `undefined`, slik at ALLE former for ugyldig input gir
+    // det samme fail-closed `403 malformed_evidence` - aldri en `500` som en
+    // klient kan bruke til å skille «parseren knakk» fra «beviset holdt ikke».
+    let body: unknown;
+    try {
+      body = await readBody(req);
+    } catch {
+      body = undefined;
+    }
+    const result = await deps.voiceAuthority.authorize(body);
+    return json(res, result.ok ? 200 : 403, result);
   }
 
   if (deps.tasks && req.method === "POST" && url.pathname === "/tasks/submit") {
