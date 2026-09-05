@@ -1,3 +1,5 @@
+import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
  * utenfor denne filen. Valg av leverandør skjer i stop/go-porten etter norsk
@@ -12,6 +14,12 @@ export interface SttStream {
 
 export interface SttAdapter {
   readonly name: string;
+  /**
+   * D-122: erklæringen rutingsporten (`evaluateSpeechRouting`) dømmer på.
+   * PÅKREVD - en ny STT-leverandør kan ikke legges til uten å ta stilling til
+   * lokalitet og matriserad (`docs/security/PROCESSOR_REGION_MATRIX.md`).
+   */
+  readonly processor: SpeechProcessorDeclaration;
   available(): boolean;
   startStream(): SttStream;
 }
@@ -23,6 +31,12 @@ export interface SttAdapter {
  */
 export class MarkerStt implements SttAdapter {
   readonly name = "marker-test";
+  /** Ren testadapter i prosessen - ingen lyd forlater maskinen. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "marker-test",
+    locality: "local",
+    processor_row_declared: true
+  };
   constructor(private readonly partialDelayMs = 40) {}
 
   available(): boolean {
@@ -64,6 +78,18 @@ export class MarkerStt implements SttAdapter {
  */
 export class OpenAiStt implements SttAdapter {
   readonly name = "openai-stt";
+  /**
+   * EKSTERN databehandler: rå lyd (wav) sendes til OpenAI. Raden finnes
+   * navngitt i `PROCESSOR_REGION_MATRIX.md` fra D-122 - men se
+   * `docs/UA7_COMMUNICATIONS_DPIA.md`: region/databehandleravtale/
+   * treningsvilkår/retensjon er en EIER-verifisering som gjenstår (Q-32),
+   * ikke noe denne koden påstår er avklart.
+   */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "openai-audio-transcriptions",
+    locality: "external",
+    processor_row_declared: true
+  };
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
     private readonly model: string = "whisper-1",
@@ -114,6 +140,12 @@ export class OpenAiStt implements SttAdapter {
  */
 export class LocalWhisperStt implements SttAdapter {
   readonly name = "local-whisper";
+  /** Lokal binær - rå lyd forlater aldri maskinen (D-23-kandidaten for `health`). */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "local-whisper-cpp",
+    locality: "local",
+    processor_row_declared: true
+  };
   constructor(private readonly binPath: string | undefined = process.env["JARVIS_WHISPER_BIN"]) {}
 
   available(): boolean {

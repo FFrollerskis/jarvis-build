@@ -1,3 +1,4 @@
+import { evaluateSpeechRouting, type SpeechRoutingDecision } from "@jarvis/contracts";
 import { PassthroughAec, PassthroughNoiseSuppressor, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
@@ -135,6 +136,18 @@ export class VoiceSession {
   private ttsQueue: string[] = [];
   private ttsWorker: Promise<void> = Promise.resolve();
   private activeTurnAbort: AbortController | null = null;
+  /**
+   * D-122 (UA-7 kriterium 4): rutingsporten avgjøres ÉN gang per sesjon, ved
+   * konstruksjon, fra sesjonens memory space og adapterens egen
+   * databehandler-erklæring. Deterministisk og uforanderlig gjennom sesjonen -
+   * en kaller kan ikke «forhandle» seg til en ekstern behandler midt i en
+   * samtale ved å endre noe underveis.
+   */
+  private readonly sttRouting: SpeechRoutingDecision;
+  private readonly ttsRouting: SpeechRoutingDecision;
+  /** Avslaget rapporteres ÉN gang per sesjon per retning - aldri per lydramme. */
+  private sttDenialReported = false;
+  private ttsDenialReported = false;
 
   constructor(
     private readonly identity: VoiceIdentity,
@@ -149,14 +162,36 @@ export class VoiceSession {
     /** Failover-tilfelle: gjenoppta med kjente utterance-IDer. */
     private readonly utteranceIdPrefix = `utt-${Date.now().toString(36)}`,
     private readonly health?: VoiceHealth
-  ) {}
+  ) {
+    // Bruker parameterne direkte (ikke `this.*`): parameter-properties og
+    // felt-initialisering har subtil rekkefølge, og denne porten skal aldri
+    // avhenge av den.
+    this.sttRouting = evaluateSpeechRouting(sttAdapter.processor, identity.memory_space);
+    this.ttsRouting = evaluateSpeechRouting(ttsAdapter.processor, identity.memory_space);
+  }
 
   currentState(): VoiceState {
     return this.state;
   }
 
+  /** D-122: observerbar for `/status`, tester og revisjon - aldri en skjult beslutning. */
+  speechRouting(): { stt: SpeechRoutingDecision; tts: SpeechRoutingDecision } {
+    return { stt: this.sttRouting, tts: this.ttsRouting };
+  }
+
   /** Mater én lydramme inn i kjeden. Full duplex: mottas også mens Jarvis snakker. */
   pushAudio(rawFrame: Buffer, atMs: number = Date.now()): void {
+    // D-122: FØR filtre, VAD og adapter. Er STT-behandleren ikke kvalifisert
+    // for denne sesjonens memory space, skal IKKE ÉN lydramme nå adapteren.
+    // Ingen stille fallback til en annen behandler: sesjonen feiler synlig, og
+    // det er hele poenget (et fallback ville skjult at porten slo inn).
+    if (!this.sttRouting.allowed) {
+      if (!this.sttDenialReported) {
+        this.sttDenialReported = true;
+        this.events.onError(`speech_routing_denied_stt:${this.sttRouting.outcome}`);
+      }
+      return;
+    }
     const frame = this.noise.process(this.aec.process(rawFrame));
     const vadEvent = this.vad.push(frame, atMs);
 
@@ -322,9 +357,27 @@ export class VoiceSession {
     return reply;
   }
 
+  /**
+   * D-122: ett avslag, rapportert ÉN gang per sesjon. `health.recordFailure`
+   * kalles bevisst IKKE - se begrunnelsen i `speakNext()`.
+   */
+  private reportTtsDenial(): void {
+    this.ttsQueue = [];
+    if (!this.ttsDenialReported) {
+      this.ttsDenialReported = true;
+      this.events.onError(`speech_routing_denied_tts:${this.ttsRouting.outcome}`);
+    }
+  }
+
   /** Sekvensiell TTS-kø med epoch-vern: chunk fra gammel epoch tales aldri (§16). */
   private enqueueTts(chunk: string, turnEpoch: number, metrics?: TurnMetrics): void {
     if (this.epoch !== turnEpoch || chunk.trim().length === 0) {
+      return;
+    }
+    // D-122: køes ikke i det hele tatt når behandleren er avvist - da forblir
+    // `tts_chars` ÆRLIG null i stedet for å telle tegn som aldri ble behandlet.
+    if (!this.ttsRouting.allowed) {
+      this.reportTtsDenial();
       return;
     }
     if (metrics) {
@@ -344,6 +397,16 @@ export class VoiceSession {
     }
     const chunk = this.ttsQueue.shift();
     if (chunk === undefined) {
+      return;
+    }
+    // D-122: svarteksten fra en sensitiv samtale er like avslørende som
+    // spørsmålet. Er TTS-behandleren ikke kvalifisert, syntetiseres INGENTING.
+    // `health.recordFailure` kalles bevisst IKKE: dette er et policy-avslag,
+    // ikke en leverandørfeil - å merke leverandøren «unhealthy» ville vært
+    // direkte usant og kunne utløst feilaktig failover.
+    if (!this.ttsRouting.allowed) {
+      this.ttsQueue = [];
+      this.reportTtsDenial();
       return;
     }
     this.setState("speaking");

@@ -1,5 +1,11 @@
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
+import {
+  MemorySpaceSchema,
+  evaluateSpeechRouting,
+  type SpeechProcessorDeclaration,
+  type SpeechRoutingOutcome
+} from "@jarvis/contracts";
 import { VoiceHealth } from "./health.ts";
 import {
   UtteranceJournal,
@@ -113,6 +119,22 @@ export interface VoiceGatewayOptions {
   health?: VoiceHealth;
 }
 
+/**
+ * D-122: rutingutfall per memory space for én konfigurert behandler. Ren
+ * oppslagsfunksjon over den KANONISKE `evaluateSpeechRouting()` - aldri en
+ * andre, nesten-lik regel (samme disiplin som D-121 sin delte
+ * `classifyAttentionBucket()`).
+ */
+function speechRoutingBySpace(
+  processor: SpeechProcessorDeclaration
+): Record<string, SpeechRoutingOutcome> {
+  const bySpace: Record<string, SpeechRoutingOutcome> = {};
+  for (const space of MemorySpaceSchema.options) {
+    bySpace[space] = evaluateSpeechRouting(processor, space).outcome;
+  }
+  return bySpace;
+}
+
 export function createVoiceGateway(options: VoiceGatewayOptions): Server {
   const health = options.health ?? new VoiceHealth();
   const server = createServer((req, res) => {
@@ -128,10 +150,17 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         JSON.stringify({
           service: "jarvis-voice-gateway",
           transport: "websocket",
-          stt: { name: options.stt.name, ...healthOf("stt") },
-          tts: { name: options.tts.name, ...healthOf("tts") },
+          stt: { name: options.stt.name, ...healthOf("stt"), processor: options.stt.processor },
+          tts: { name: options.tts.name, ...healthOf("tts"), processor: options.tts.processor },
           barge_in: health.bargeInSeen ? "VERIFIED" : "READY",
-          audio_persistence: "none" // §22: rå lyd lagres aldri permanent
+          audio_persistence: "none", // §22: rå lyd lagres aldri permanent
+          // D-122: hvilke memory spaces de KONFIGURERTE behandlerne faktisk kan
+          // betjene. Gjør porten observerbar UTEN en sesjon - en eier skal kunne
+          // se «health-tale er ikke mulig med denne konfigurasjonen» direkte.
+          speech_routing: {
+            stt: speechRoutingBySpace(options.stt.processor),
+            tts: speechRoutingBySpace(options.tts.processor)
+          }
         })
       );
       return;

@@ -1,3 +1,5 @@
+import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+
 /**
  * SpeechAdapter (TTS): streaming-kontrakt med kansellering (barge-in-krav).
  * cancel() SKAL stoppe produksjonen umiddelbart - avbrutt tale logges som
@@ -11,6 +13,12 @@ export interface TtsPlayback {
 
 export interface TtsAdapter {
   readonly name: string;
+  /**
+   * D-122: samme erklæring som `SttAdapter.processor`. TTS er tatt med fordi
+   * SVAR-teksten fra en `health`-samtale er like avslørende som spørsmålet -
+   * å beskytte kun STT ville lekket halve samtalen.
+   */
+  readonly processor: SpeechProcessorDeclaration;
   available(): boolean;
   synthesize(text: string): TtsPlayback;
 }
@@ -21,6 +29,12 @@ export interface TtsAdapter {
  */
 export class FakeTts implements TtsAdapter {
   readonly name = "fake-tts";
+  /** Ren testadapter i prosessen - ingen tekst/lyd forlater maskinen. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "fake-tts",
+    locality: "local",
+    processor_row_declared: true
+  };
   constructor(private readonly msPerChar = 40) {}
 
   available(): boolean {
@@ -57,6 +71,12 @@ export class FakeTts implements TtsAdapter {
 /** OpenAI TTS (batch; streaming-kandidater vurderes i benchmark). UVERIFISERT uten nøkkel. */
 export class OpenAiTts implements TtsAdapter {
   readonly name = "openai-tts";
+  /** EKSTERN databehandler: svartekst sendes til OpenAI. Se `OpenAiStt.processor`. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "openai-audio-speech",
+    locality: "external",
+    processor_row_declared: true
+  };
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
     private readonly model: string = "gpt-4o-mini-tts",
@@ -102,6 +122,12 @@ export class OpenAiTts implements TtsAdapter {
 /** Lokal TTS via piper-binær (JARVIS_PIPER_BIN). Lokal kandidat - UVERIFISERT til installert. */
 export class LocalPiperTts implements TtsAdapter {
   readonly name = "local-piper";
+  /** Lokal binær - tekst/lyd forlater aldri maskinen. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "local-piper",
+    locality: "local",
+    processor_row_declared: true
+  };
   constructor(private readonly binPath: string | undefined = process.env["JARVIS_PIPER_BIN"]) {}
 
   available(): boolean {
