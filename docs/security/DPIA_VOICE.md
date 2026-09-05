@@ -27,8 +27,13 @@ akseptansekriterium 4).**
 - **NYTT (D-122):** `health`-space kan ikke lenger nå en ekstern behandler. Rutingsporten
   `evaluateSpeechRouting()` (`packages/contracts/src/speech.ts`) avviser det fail-closed, uten
   stille fallback, og ikke én lydramme når adapteren. Se
-  [../UA7_COMMUNICATIONS_DPIA.md](../UA7_COMMUNICATIONS_DPIA.md) §6 — og §6.1 for hva porten IKKE
-  garanterer (klient-oppgitt `memory_space`).
+  [../UA7_COMMUNICATIONS_DPIA.md](../UA7_COMMUNICATIONS_DPIA.md) §6.
+- **NYTT (D-123, 2026-09-05):** `memory_space` er ikke lenger en verdi klienten bare kan påstå.
+  En enhet som beviser besittelse av sin registrerte nøkkel får en server-utstedt grant
+  (`VoiceSessionAuthority`, ren komposisjon av `DeviceService`/`SessionService`/`resolveIdentity()`),
+  og sesjonens person/tenant/enhet/space kommer da UTELUKKENDE fra den grant-en. En ubevist klient
+  kjører `CLIENT_ASSERTED`, som per konstruksjon kun kan nekte ekstern behandling. Punktet §6.1
+  tidligere listet som «hva porten IKKE garanterer» er dermed lukket — se §6.1 «Status etter D-123».
 - **RETTET 2026-09-05 etter uavhengig arkitekt-review av PR #71:** det første strekpunktet over —
   «rå lyd FORLATER maskinen» — beskriver hva koden GJORDE. Med regel 3 håndhevet er ekstern
   tale-behandling nå **avvist for alle memory spaces** så lenge OpenAI-radene står `IKKE VERIFISERT`.

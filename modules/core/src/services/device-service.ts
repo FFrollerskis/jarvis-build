@@ -42,19 +42,34 @@ export class DeviceService {
     return challenge;
   }
 
-  /** true => enheten har bevist besittelse av privat nøkkel (auth_strength kan heves). */
+  /**
+   * true => enheten har bevist besittelse av privat nøkkel (auth_strength kan heves).
+   *
+   * D-123 (Q-32 punkt 2): valgfri `personId` binder beviset til en PÅSTÅTT
+   * eier. Uten den svarer metoden kun på «holder noen den private nøkkelen til
+   * enhet X?», og en kaller som holder sin EGEN registrerte enhetsnøkkel kunne
+   * derfor bevise enheten mens den påsto en ANNEN persons `person_id`. For
+   * `/devices/challenge/verify` (fase 8, uendret oppførsel) er det uskadelig,
+   * fordi ruten kun rapporterer en `auth_strength` og ikke muterer noe på
+   * vegne av en person. For voice-autoriteten er det IKKE uskadelig: der
+   * skrives det server-eid sesjonstilstand rett etter beviset, så bindingen
+   * må skje FØR. Parameteren er valgfri nettopp for å la eksisterende kallere
+   * være bit-for-bit uendret i stedet for å innføre en ny, parallell metode
+   * som gjør «nesten det samme».
+   */
   async verifyChallenge(
     tenantId: string,
     deviceId: string,
     challenge: string,
-    signatureB64: string
+    signatureB64: string,
+    personId?: string
   ): Promise<boolean> {
     const pending = this.challenges.get(challenge);
     if (!pending || pending.device_id !== deviceId || pending.expires < Date.now()) {
       return false;
     }
     this.challenges.delete(challenge); // engangs - replay av challenge er umulig
-    const key = await this.publicKeyFromDb(tenantId, deviceId);
+    const key = await this.publicKeyFromDb(tenantId, deviceId, personId);
     if (!key) {
       return false;
     }
@@ -65,9 +80,22 @@ export class DeviceService {
     }
   }
 
-  private async publicKeyFromDb(tenantId: string, deviceId: string): Promise<KeyObject | null> {
+  private async publicKeyFromDb(
+    tenantId: string,
+    deviceId: string,
+    personId?: string
+  ): Promise<KeyObject | null> {
+    // Tenant-RLS gjelder allerede via `withTenantTransaction`; `person_id`
+    // legges på som et EKSPLISITT predikat når kalleren har oppgitt en påstått
+    // eier, slik at en enhet i riktig tenant men hos feil person ikke kan
+    // bevise seg. En enhet uten `public_key_pem` (tilbakekalt) gir `null`.
     const result = await withTenantTransaction(this.pool, tenantId, (client) =>
-      client.query("SELECT public_key_pem FROM devices WHERE device_id = $1", [deviceId])
+      personId === undefined
+        ? client.query("SELECT public_key_pem FROM devices WHERE device_id = $1", [deviceId])
+        : client.query("SELECT public_key_pem FROM devices WHERE device_id = $1 AND person_id = $2", [
+            deviceId,
+            personId
+          ])
     );
     const pem = (result.rows[0] as { public_key_pem: string | null } | undefined)?.public_key_pem;
     return pem ? createPublicKey(pem) : null;

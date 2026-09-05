@@ -17,9 +17,14 @@ Skrevet i D-122 (2026-09-05). Samme form og disiplin som `UA2_KNOWLEDGE_DPIA.md`
 > den uavhengige arkitekt-reviewen av PR #71 fant motsigelsen. Kriteriet krever *dokumentert*
 > retensjon og rettsgrunnlag «where required»; dokumentasjonen finnes nå og er sann, og
 > håndhevingen er strukturell og fail-closed — men de faktiske behandler-fakta (region,
-> databehandleravtale, treningsvilkår, retensjon) er fortsatt `IKKE VERIFISERT` (**Q-32**), og
-> voice-transporten mangler en betrodd server-side memory-space-autoritet (også Q-32). Kriteriet
-> settes til `PASS` FØRST når de fakta faktisk foreligger — ikke av kode, og ikke av dette notatet.
+> databehandleravtale, treningsvilkår, retensjon) er fortsatt `IKKE VERIFISERT` (**Q-32 punkt 1**).
+> Kriteriet settes til `PASS` FØRST når de fakta faktisk foreligger — ikke av kode, og ikke av dette
+> notatet.
+>
+> **OPPDATERT 2026-09-05 (D-123):** den ANDRE mangelen dette avsnittet navnga — «voice-transporten
+> mangler en betrodd server-side memory-space-autoritet» (Q-32 punkt 2) — er nå BYGGET, se §6.1
+> «Status etter D-123». `UA7_ACCEPTANCE_4` er likevel UENDRET `PARTIAL`: kriteriet lukkes av
+> punkt 1, som er en eier-/juridisk handling ingen kode kan utføre.
 
 > **Jarvis avgjør ALDRI selv et rettslig grunnlag.** Samme prinsipp som `modules/consent` (D-91):
 > koden håndhever en REGISTRERT erklæring. Ingenting i dette notatet er en påstand fra Jarvis om at
@@ -147,7 +152,11 @@ parallell sikkerhetsvei**.
 Bevist i `apps/voice-gateway/test/ua7-speech-routing.test.ts` (32 tester, A1-A8/E1-E4/F1-F5/B1-B4/
 C1-C8/D1-D3), og observerbart uten en sesjon via `/status` → `speech_routing`.
 
-### 6.1 Hva porten IKKE garanterer (tillitsgrensen, eksplisitt)
+### 6.1 Tillitsgrensen — LUKKET av D-123 (2026-09-05)
+
+> **OPPDATERT D-123.** Avsnittene under beskriver tilstanden slik den var i D-122, og beholdes
+> uendret som historikk framfor å bli stille omskrevet. **Avhengigheten de peker på (Q-32 punkt 2)
+> er nå bygget**, og nøyaktig i den formen som ble anvist: se «Status etter D-123» nedenfor.
 
 Porten utleder sensitivitet fra `identity.memory_space`. I voice-transporten kommer den verdien fra
 klientens `start`-melding, og gatewayen autentiserer ikke klienten i det hele tatt. Core sin
@@ -169,6 +178,35 @@ server-eid sesjon via `SessionService`, og en person/enhet → tillatte spaces-b
 `resolveIdentity()` — ikke et nytt identitetssystem. Først når den finnes kan en kaller sende
 `SERVER_VERIFIED`, og først da er `health → aldri ekstern` en garanti og ikke en forutsetning.
 
+#### Status etter D-123 (2026-09-05) — autoriteten finnes nå
+
+`VoiceSessionAuthority` (`modules/core/src/services/voice-session-authority.ts`) er bygget som ren
+komposisjon av de tre eksisterende kanoniske primitivene, i den rekkefølgen §6.1 anviste:
+
+1. `DeviceService.verifyChallenge()` — ekte proof-of-possession, nå bundet til den påståtte personen
+   og tenanten. Den bindingen kjøres FØR noen sesjonstilstand skrives, slik at et kryss-person-forsøk
+   ikke kan mutere offerets `sessions`-rad før avslaget kommer.
+2. `SessionService.resumeOrCreate()` — server-EID sesjon. Klienten oppgir aldri en `session_id`.
+   Eksisterende gjenopptaks-semantikk på tvers av kanaler er uendret.
+3. `resolveIdentity()` — den kanoniske person↔tenant↔enhet↔space-konjunksjonen under RLS, som ER
+   definisjonen av «en faktisk tillatt memory space».
+
+**0 nye tabeller, 0 nye migrasjoner.** System-of-record-auditen (D-123) viste at `person_tenants`,
+`devices`, `memory_spaces` og `sessions` allerede representerer bindingen fullt ut. En per-person
+space-hviteliste ble bevisst forkastet: den finnes ikke i den kanoniske modellen (minne-RLS er
+tenant+space, ikke person+space), og å innføre den i en transport-slice ville vært en ny
+autorisasjonsmodell for tale alene.
+
+Tillitsnivået er ikke lenger en konstant. `voiceAuthorityFromGrant()` er den ENESTE veien til
+`SERVER_VERIFIED`, og gatewayen henter grant-en selv fra Core (`POST /voice/session/authorize`) —
+den leser aldri et grant-felt fra websocketen. En manglende, utløpt eller ugyldig grant faller
+innstrammende til `CLIENT_ASSERTED`. Et AVVIST enhetsbevis starter ingen sesjon i det hele tatt.
+
+**`health → aldri ekstern` er dermed en garanti, ikke en forutsetning.** Men merk hva som IKKE
+endret seg: ekstern talebehandling er fortsatt avvist for ALLE spaces, nå utelukkende fordi
+leverandørens vilkår er uverifiserte (§4, Q-32 punkt 1). `SERVER_VERIFIED` er **nødvendig, men ikke
+tilstrekkelig**.
+
 ## 7. Kjent, dokumentert restrisiko (ikke skjult)
 
 1. **`health`-tale er i praksis utilgjengelig med dagens konfigurasjon.** Den eneste lokale
@@ -176,11 +214,22 @@ server-eid sesjon via `SessionService`, og en person/enhet → tillatte spaces-b
    Konsekvensen av porten er derfor ærlig: en `health`-samtale AVVISES i stedet for å bli sendt til
    sky. Det er det korrekte utfallet av D-23, men det er en reell kapabilitets-mangel, ikke en
    løsning — den lukkes først når en lokal STT/TTS faktisk installeres.
-2. **`memory_space` oppgis av klienten** i `start`-meldingen (`server.ts`) og valideres ikke mot en
-   server-side sesjonsautoritet. Dette er en PRE-EKSISTERENDE egenskap ved voice-transporten (D-122
-   innfører den ikke). Etter arkitekt-reviewen av PR #71 er konsekvensen ikke lenger bare beskrevet,
-   men håndtert fail-closed: en klient-oppgitt space kvalifiserer ikke for ekstern behandling i det
-   hele tatt. Full redegjørelse og avhengighet: §6.1. Registrert som del av Q-32.
+2. ~~**`memory_space` oppgis av klienten** og valideres ikke mot en server-side sesjonsautoritet.~~
+   **LUKKET av D-123 (2026-09-05).** En klient som beviser enheten sin får nå en server-utstedt
+   grant, og HVERT identitetsfelt i sesjonen kommer fra den grant-en — ikke fra `start`-meldingen.
+   En klient som IKKE beviser noe kjører fortsatt `CLIENT_ASSERTED`, som per konstruksjon bare kan
+   nekte ekstern behandling. Restrisikoen som gjenstår er en helt annen og mindre: en ubevist klient
+   kan fortsatt merke sin EGEN samtale feil og dermed få sin egen lokale ruting feil. Den kan ikke
+   nå en ekstern behandler, ikke nå en annen persons space, og ikke heve sin egen autoritet. Full
+   redegjørelse: §6.1 «Status etter D-123».
+2b. **Gateway→Core-kanalen er selv uautentisert** (D-123, eksplisitt oppgitt framfor skjult).
+   Grant-ens troverdighet hviler på at Voice Gateway faktisk snakker med den ekte Core-en på
+   `JARVIS_CORE_URL`. Det er en PRE-EKSISTERENDE egenskap - `/chat` har alltid hatt samme
+   forutsetning - og den er ikke innført av D-123, som strengt strammer inn: før D-123 kunne
+   *klienten* velge space, nå kan bare *Core* det. I dagens oppsett binder begge prosessene
+   localhost på samme maskin (`DEPLOYMENT_STRATEGY.md`). En gjensidig autentisert intern kanal
+   mellom Jarvis-prosessene er en egen, bredere oppgave enn taleautoritet, og er bevisst ikke
+   oppfunnet inne i denne sliceen.
 3. **Leverandørens egne vilkår er ikke verifisert** (§4), og ekstern talebehandling er derfor
    avvist i dag. Porten sier ingenting om hva OpenAI gjør med dataene — den nekter bare å sende dem.
 4. **`UA7_ACCEPTANCE_4` er `PARTIAL`, ikke `PASS`** — se kriterium-statusen øverst. Kriteriet lukkes
