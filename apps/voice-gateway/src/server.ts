@@ -3,6 +3,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import {
   MemorySpaceSchema,
   evaluateSpeechRouting,
+  type MemorySpaceAuthority,
   type SpeechProcessorDeclaration,
   type SpeechRoutingOutcome
 } from "@jarvis/contracts";
@@ -120,6 +121,23 @@ export interface VoiceGatewayOptions {
 }
 
 /**
+ * D-122: HVOR memory space-verdien i voice-transporten kommer fra.
+ *
+ * Klienten oppgir `identity` i `start`-meldingen, og gatewayen har ingen
+ * autentisering av den (ingen handshake-verifisering, ingen device-signatur -
+ * `modules/core/src/services/device-service.ts` brukes i dag KUN til
+ * klasse-D-godkjenninger i Policy Gateway). Core sin `resolveIdentity()`
+ * verifiserer at person/tenant/device/space EKSISTERER, men ingenting beviser
+ * at kalleren ER den påståtte personen, og det finnes ingen binding
+ * person/enhet → tillatte spaces.
+ *
+ * Denne konstanten er derfor sannheten om tillitsgrensen, ikke en konfigmulighet.
+ * Den endres FØRST når en betrodd server-side space-/sesjonsautoritet faktisk
+ * finnes (Q-32, egen kanonisk slice) - ikke for å åpne talekjeden igjen.
+ */
+const VOICE_MEMORY_SPACE_AUTHORITY: MemorySpaceAuthority = "CLIENT_ASSERTED";
+
+/**
  * D-122: rutingutfall per memory space for én konfigurert behandler. Ren
  * oppslagsfunksjon over den KANONISKE `evaluateSpeechRouting()` - aldri en
  * andre, nesten-lik regel (samme disiplin som D-121 sin delte
@@ -130,7 +148,7 @@ function speechRoutingBySpace(
 ): Record<string, SpeechRoutingOutcome> {
   const bySpace: Record<string, SpeechRoutingOutcome> = {};
   for (const space of MemorySpaceSchema.options) {
-    bySpace[space] = evaluateSpeechRouting(processor, space).outcome;
+    bySpace[space] = evaluateSpeechRouting(processor, space, VOICE_MEMORY_SPACE_AUTHORITY).outcome;
   }
   return bySpace;
 }
@@ -158,6 +176,10 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           // betjene. Gjør porten observerbar UTEN en sesjon - en eier skal kunne
           // se «health-tale er ikke mulig med denne konfigurasjonen» direkte.
           speech_routing: {
+            // Tillitsgrensen rapporteres SAMMEN med utfallene: uten den kunne
+            // et avslag feilleses som «feil space» i stedet for «space-verdien
+            // er ikke autoritativ» (Q-32).
+            memory_space_authority: VOICE_MEMORY_SPACE_AUTHORITY,
             stt: speechRoutingBySpace(options.stt.processor),
             tts: speechRoutingBySpace(options.tts.processor)
           }
@@ -214,7 +236,11 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
             undefined,
             undefined,
             undefined,
-            health
+            health,
+            // D-122: `identity` - inkludert `memory_space` - kommer fra den
+            // UAUTENTISERTE klienten. Sendes eksplisitt videre som
+            // klient-påstått, aldri som en verifisert autoritet.
+            VOICE_MEMORY_SPACE_AUTHORITY
           );
           send({ type: "started" });
           break;

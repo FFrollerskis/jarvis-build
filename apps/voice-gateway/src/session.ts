@@ -1,4 +1,4 @@
-import { evaluateSpeechRouting, type SpeechRoutingDecision } from "@jarvis/contracts";
+import { evaluateSpeechRouting, type MemorySpaceAuthority, type SpeechRoutingDecision } from "@jarvis/contracts";
 import { PassthroughAec, PassthroughNoiseSuppressor, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
@@ -138,10 +138,10 @@ export class VoiceSession {
   private activeTurnAbort: AbortController | null = null;
   /**
    * D-122 (UA-7 kriterium 4): rutingsporten avgjøres ÉN gang per sesjon, ved
-   * konstruksjon, fra sesjonens memory space og adapterens egen
-   * databehandler-erklæring. Deterministisk og uforanderlig gjennom sesjonen -
-   * en kaller kan ikke «forhandle» seg til en ekstern behandler midt i en
-   * samtale ved å endre noe underveis.
+   * konstruksjon, fra sesjonens memory space, space-verdiens TILLITSNIVÅ og
+   * adapterens egen databehandler-erklæring. Deterministisk og uforanderlig
+   * gjennom sesjonen - en kaller kan ikke «forhandle» seg til en ekstern
+   * behandler midt i en samtale ved å endre noe underveis.
    */
   private readonly sttRouting: SpeechRoutingDecision;
   private readonly ttsRouting: SpeechRoutingDecision;
@@ -161,13 +161,26 @@ export class VoiceSession {
     private readonly noise: AudioFilter = new PassthroughNoiseSuppressor(),
     /** Failover-tilfelle: gjenoppta med kjente utterance-IDer. */
     private readonly utteranceIdPrefix = `utt-${Date.now().toString(36)}`,
-    private readonly health?: VoiceHealth
+    private readonly health?: VoiceHealth,
+    /**
+     * D-122 (rettelse etter arkitekt-review av PR #71): HVOR
+     * `identity.memory_space` kom fra. Bevisst et EGET konstruktørargument og
+     * IKKE et felt på `VoiceIdentity`: `VoiceIdentity` er nøyaktig den
+     * strukturen klienten sender i `start`-meldingen, så et tillitsnivå der
+     * ville vært selv-erklært av den parten vi ikke stoler på.
+     *
+     * Default er `CLIENT_ASSERTED` = fail-closed. En kaller som IKKE tar
+     * stilling får det svakeste nivået, aldri det sterkeste. Voice-transporten
+     * har ingen betrodd server-side space-autoritet i dag (Q-32), så
+     * `server.ts` setter denne eksplisitt til `CLIENT_ASSERTED`.
+     */
+    private readonly memorySpaceAuthority: MemorySpaceAuthority = "CLIENT_ASSERTED"
   ) {
     // Bruker parameterne direkte (ikke `this.*`): parameter-properties og
     // felt-initialisering har subtil rekkefølge, og denne porten skal aldri
     // avhenge av den.
-    this.sttRouting = evaluateSpeechRouting(sttAdapter.processor, identity.memory_space);
-    this.ttsRouting = evaluateSpeechRouting(ttsAdapter.processor, identity.memory_space);
+    this.sttRouting = evaluateSpeechRouting(sttAdapter.processor, identity.memory_space, memorySpaceAuthority);
+    this.ttsRouting = evaluateSpeechRouting(ttsAdapter.processor, identity.memory_space, memorySpaceAuthority);
   }
 
   currentState(): VoiceState {

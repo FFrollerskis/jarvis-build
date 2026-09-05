@@ -35,7 +35,8 @@ export class MarkerStt implements SttAdapter {
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "marker-test",
     locality: "local",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
   constructor(private readonly partialDelayMs = 40) {}
 
@@ -79,16 +80,19 @@ export class MarkerStt implements SttAdapter {
 export class OpenAiStt implements SttAdapter {
   readonly name = "openai-stt";
   /**
-   * EKSTERN databehandler: rå lyd (wav) sendes til OpenAI. Raden finnes
-   * navngitt i `PROCESSOR_REGION_MATRIX.md` fra D-122 - men se
-   * `docs/UA7_COMMUNICATIONS_DPIA.md`: region/databehandleravtale/
-   * treningsvilkår/retensjon er en EIER-verifisering som gjenstår (Q-32),
-   * ikke noe denne koden påstår er avklart.
+   * EKSTERN databehandler: rå lyd (wav) sendes til OpenAI. Raden er NAVNGITT i
+   * `PROCESSOR_REGION_MATRIX.md` (regel 1 oppfylt), men region/
+   * databehandleravtale/treningsvilkår/retensjon står `IKKE VERIFISERT`
+   * (regel 3 IKKE oppfylt) - derfor `NOT_VERIFIED`, og derfor AVVISER
+   * `evaluateSpeechRouting()` denne behandleren for ALLE memory spaces til en
+   * eier-/juridisk verifisering faktisk er gjort (Q-32). Verdien endres KUN
+   * sammen med matriseraden - aldri for å få talekjeden i gang igjen.
    */
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "openai-audio-transcriptions",
     locality: "external",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
   };
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
@@ -144,7 +148,8 @@ export class LocalWhisperStt implements SttAdapter {
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "local-whisper-cpp",
     locality: "local",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
   constructor(private readonly binPath: string | undefined = process.env["JARVIS_WHISPER_BIN"]) {}
 

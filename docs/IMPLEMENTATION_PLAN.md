@@ -3621,10 +3621,24 @@ fallback. `/status` eksponerer `speech_routing` per memory space.
 STT-/TTS-rader navngir nå OpenAI med region/DPA/trening/retensjon eksplisitt `IKKE VERIFISERT`
 (Q-32); `DPIA_VOICE.md` har fått en eksplisitt RETTELSE-blokk.
 
-**Tester:** `apps/voice-gateway/test/ua7-speech-routing.test.ts` **17/17 grønt**.
+**Tester:** `apps/voice-gateway/test/ua7-speech-routing.test.ts` **32/32 grønt**.
 
-**Flagg:** `UA7_ACCEPTANCE_4=PASS` (for behandlingen som faktisk finnes),
-`UA7_SPEECH_ROUTING_ENFORCED=true`, `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
+**RETTET etter uavhengig arkitekt-review av PR #71 (2026-09-05, samme D-122):** to funn tatt til
+følge. (A) Matrisens regel 3 var dokumentert, men ikke håndhevet — en NAVNGITT rad kvalifiserte
+alene en ekstern behandler. Regel 3 er nå kanonisk status (`processor_terms_status`, fail-closed
+default `NOT_VERIFIED`), så OpenAI STT/TTS er **avvist for ALLE memory spaces** mens radene står
+`IKKE VERIFISERT`. BO-12 sin talekjede er dermed policy-blokkert til Q-32 besvares — en ærlig,
+tilsiktet konsekvens, ikke en skjult regresjon. (B) Porten utledet sensitivitet fra en
+`memory_space` klienten selv oppgir. Re-audit bekreftet at ingen betrodd server-side space-autoritet
+finnes; den ble BEVISST ikke oppfunnet her (egen kanonisk slice, Q-32). Tillitsnivået er i stedet et
+påkrevd argument (`MemorySpaceAuthority`), og en `CLIENT_ASSERTED` space kan kun NEKTE, aldri
+kvalifisere for ekstern behandling. **D-23 er derfor eksplisitt IKKE påstått strukturelt lukket for
+tale**, og kriterium 4 er nedgradert til `PARTIAL`.
+
+**Flagg:** `UA7_ACCEPTANCE_4=PARTIAL` (dokumentasjon og håndheving finnes og er sann; kriteriet
+lukkes FØRST når Q-32 sine eier-/juridiske fakta faktisk foreligger),
+`UA7_SPEECH_ROUTING_ENFORCED=true`, `UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32`,
+`UA7_TRUSTED_MEMORY_SPACE_AUTHORITY=false`, `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
 `UA7_COMPLETE=false`, `D108_COMPLETE=false`, `HOST_ACCEPTANCE_REQUIRED=false`.
 
 Full detalj: D-122 i DECISIONS_AND_ASSUMPTIONS.md.

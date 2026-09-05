@@ -11,6 +11,16 @@ Skrevet i D-122 (2026-09-05). Samme form og disiplin som `UA2_KNOWLEDGE_DPIA.md`
 `UA3_BUSINESS_DPIA.md`: kort og teknisk, ikke juridisk teater — og det utfyller, erstatter ikke,
 `docs/security/DPIA_VOICE.md` (fase 5-piloten) og `docs/security/DPIA_DRAFT.md`.
 
+> **KRITERIUM-STATUS: `UA7_ACCEPTANCE_4=PARTIAL` — IKKE `PASS`.**
+> Første versjon av D-122 satte `PASS` samtidig som dette notatet sa at ekstern-behandlerens
+> retensjon og rettsgrunnlag IKKE er verifisert. De to påstandene kan ikke være sanne samtidig, og
+> den uavhengige arkitekt-reviewen av PR #71 fant motsigelsen. Kriteriet krever *dokumentert*
+> retensjon og rettsgrunnlag «where required»; dokumentasjonen finnes nå og er sann, og
+> håndhevingen er strukturell og fail-closed — men de faktiske behandler-fakta (region,
+> databehandleravtale, treningsvilkår, retensjon) er fortsatt `IKKE VERIFISERT` (**Q-32**), og
+> voice-transporten mangler en betrodd server-side memory-space-autoritet (også Q-32). Kriteriet
+> settes til `PASS` FØRST når de fakta faktisk foreligger — ikke av kode, og ikke av dette notatet.
+
 > **Jarvis avgjør ALDRI selv et rettslig grunnlag.** Samme prinsipp som `modules/consent` (D-91):
 > koden håndhever en REGISTRERT erklæring. Ingenting i dette notatet er en påstand fra Jarvis om at
 > et gitt grunnlag faktisk er gyldig — det er et menneskelig/juridisk spørsmål utenfor kodens
@@ -63,8 +73,8 @@ verifiseres av eieren.
 | Behandling | Registrert grunnlag | Merknad |
 |---|---|---|
 | Eierens egen tale mot sitt eget system | Eierens egen behandling av egne data i eget system | Ingen tredjepart involvert. Ingen `consent_decisions`-rad kreves — `modules/consent` sin modell er kontakt-/tredjeparts-orientert (`contact_id` er påkrevd) |
-| Overføring av eierens lyd/tekst til en ekstern databehandler | Eier-konfigurert bruk av en databehandler | Forutsetter en gyldig databehandleravtale — **IKKE VERIFISERT**, se §4/Q-32 |
-| `health`-space | **Ikke tillatt mot ekstern behandler.** D-23 + matrise-regel 2 | Nå STRUKTURELT håndhevet, se §6 |
+| Overføring av eierens lyd/tekst til en ekstern databehandler | Eier-konfigurert bruk av en databehandler | Forutsetter en gyldig databehandleravtale — **IKKE VERIFISERT**, se §4/Q-32. Overføringen er derfor **blokkert i dag**, ikke bare udokumentert |
+| `health`-space | **Ikke tillatt mot ekstern behandler.** D-23 + matrise-regel 2 | Strukturelt håndhevet, se §6 — med det uttrykkelige forbeholdet i §6.1 (space-verdien er ikke autoritativ ennå) |
 | Opptak/transkripsjon av en TREDJEPART (møter, telefoni, utgående AI-samtaler) | **INGEN registrert** — kapabiliteten finnes ikke | Får ikke bygges før §5-porten er kjørt |
 
 ## 4. Databehandlere
@@ -81,6 +91,18 @@ eier-/juridisk handling — Jarvis har ikke og skal ikke gjette disse verdiene.
 matrisen. Det er **ikke** en påstand om at vilkårene er verifisert. Skillet er bevisst og er
 dokumentert både her og i `packages/contracts/src/speech.ts`.
 
+**Rettelse etter arkitekt-review av PR #71:** skillet var dokumentert, men ikke håndhevet — koden
+lot en navngitt rad alene kvalifisere for ekstern behandling. Matrisens regel 3 er derfor nå en
+egen, kanonisk status i erklæringen: `processor_terms_status`. Kun `VERIFIED` kvalifiserer;
+`NOT_VERIFIED` er fail-closed default. OpenAI STT/TTS står `NOT_VERIFIED` og er dermed **avvist for
+alle memory spaces**, ikke bare `health`.
+
+> **Ærlig konsekvens, ikke skjult:** BO-12 sin host-verifiserte talekjede er med dette
+> **policy-blokkert**. `evaluateSpeechRouting()` gir `DENIED_PROCESSOR_TERMS_NOT_VERIFIED`, ingen
+> lyd eller svartekst forlater huset, og en sesjon med OpenAI-adapterne feiler synlig i stedet for
+> å behandle. Det er den korrekte følgen av at radene står `IKKE VERIFISERT` — kapabiliteten
+> gjenopprettes ved å BESVARE Q-32, aldri ved å endre statusfeltet alene.
+
 ## 5. Bevisst utsatt innenfor UA-7 (`DEFERRED_WITHIN_UA7_BY_DEPENDENCY`)
 
 Følgende er **ikke bygget** og skal ikke bygges før den navngitte porten er kjørt:
@@ -92,7 +114,9 @@ Følgende er **ikke bygget** og skal ikke bygges før den navngitte porten er kj
 | Utgående AI-samtaler | Som over, PLUSS masterplanens «marketing/reservation/platform rules» |
 
 Å legge til en slik leverandør uten en matriserad blir nå **automatisk blokkert** av porten i §6
-(`processor_row_declared` er `false` som default) — kapabiliteten kan ikke tas stille i bruk.
+(`processor_row_declared` er `false` som default), og en leverandør med en rad, men uten verifiserte
+vilkår, blokkeres like automatisk (`processor_terms_status` faller til `NOT_VERIFIED`) —
+kapabiliteten kan ikke tas stille i bruk.
 
 ## 6. Hva som er STRUKTURELT håndhevet (ikke bare skrevet)
 
@@ -102,22 +126,48 @@ samme regelform som `isSensitivityEligible()` i `modules/model-gateway/src/route
 parallell sikkerhetsvei**.
 
 1. **`health` → aldri ekstern behandler** (D-23, matrise-regel 2). `health` er den ENESTE space-en
-   som klassifiseres `SECRET_RESTRICTED`; alle andre beholder nøyaktig dagens ruting, så BO-12 sin
-   host-verifiserte talekjede er uendret.
+   som klassifiseres `SECRET_RESTRICTED`. Se det viktige forbeholdet i §6.1 — garantien er bare så
+   sterk som space-verdien er autoritativ.
 2. **Ukjent/manglende memory space tolkes ALDRI som lav-sensitiv** — fail-closed. Dette er D-81 sin
    lærdom ordrett gjenbrukt.
 3. **Ekstern behandler uten navngitt matriserad avvises** (matrise-regel 1 gjort strukturell).
-4. **Ingen stille fallback.** Et avslag gir en eksplisitt feil (`speech_routing_denied_stt:<utfall>`
+4. **Ekstern behandler uten VERIFISERTE vilkår avvises** (matrise-regel 3 gjort strukturell):
+   `processor_terms_status` må være `VERIFIED`. Navngitt ≠ kvalifisert. Sjekken kjøres FØR space
+   vurderes, så en lav-sensitiv space kan aldri «redde» en uverifisert behandler.
+5. **Ingen stille fallback.** Et avslag gir en eksplisitt feil (`speech_routing_denied_stt:<utfall>`
    / `speech_routing_denied_tts:<utfall>`) — porten bytter ALDRI til en annen behandler bak ryggen
    på eieren. Et stille fallback ville skjult at porten slo inn.
-5. **Ikke ÉN lydramme** når en ukvalifisert STT-behandler: kontrollen ligger først i `pushAudio()`,
+6. **Ikke ÉN lydramme** når en ukvalifisert STT-behandler: kontrollen ligger først i `pushAudio()`,
    FØR filtre, VAD og adapter. TTS er dekket tilsvarende, fordi svarteksten i en sensitiv samtale er
    like avslørende som spørsmålet.
-6. **Adaptere KAN ikke legges til uten å ta stilling:** `processor` er et påkrevd felt på
-   `SttAdapter`/`TtsAdapter`. En ny leverandør uten erklæring kompilerer ikke.
+7. **Adaptere KAN ikke legges til uten å ta stilling:** `processor` er et påkrevd felt på
+   `SttAdapter`/`TtsAdapter`, og `processor_terms_status` er påkrevd i erklæringen. En ny leverandør
+   uten erklæring kompilerer ikke, og en som glemmer statusen faller til `NOT_VERIFIED`.
 
-Bevist i `apps/voice-gateway/test/ua7-speech-routing.test.ts` (17 tester, A1-A8/B1-B2/C1-C5/D1-D2),
-og observerbart uten en sesjon via `/status` → `speech_routing`.
+Bevist i `apps/voice-gateway/test/ua7-speech-routing.test.ts` (32 tester, A1-A8/E1-E4/F1-F5/B1-B4/
+C1-C8/D1-D3), og observerbart uten en sesjon via `/status` → `speech_routing`.
+
+### 6.1 Hva porten IKKE garanterer (tillitsgrensen, eksplisitt)
+
+Porten utleder sensitivitet fra `identity.memory_space`. I voice-transporten kommer den verdien fra
+klientens `start`-melding, og gatewayen autentiserer ikke klienten i det hele tatt. Core sin
+`resolveIdentity()` (`modules/core/src/services/identity-service.ts`) verifiserer at person, tenant,
+enhet og space EKSISTERER, men ingen mekanisme beviser at kalleren ER den påståtte personen, og det
+finnes ingen binding person/enhet → tillatte spaces. `DeviceService.verifyChallenge()` finnes og er
+ekte proof-of-possession, men brukes i dag KUN til klasse-D-godkjenninger i Policy Gateway.
+
+En feilkonfigurert eller fiendtlig klient kunne derfor merke en helsesamtale `personal` og få
+ikke-health-ruting. **D-122 påstår derfor IKKE at D-23 er strukturelt lukket for tale.** Porten er
+eksplisitt PARTIAL, og det håndteres fail-closed: en space-verdi som kun er `CLIENT_ASSERTED` kan
+ikke KVALIFISERE for ekstern behandling (`DENIED_MEMORY_SPACE_NOT_SERVER_VERIFIED`) — den kan bare
+NEKTE. En klient som selv oppgir `health` blir tatt på ordet i innstrammende retning.
+
+**Avhengighet (Q-32, egen fremtidig kanonisk slice — bevisst IKKE bygget i D-122):** en betrodd
+server-side memory-space-/sesjonsautoritet i voice-transporten. Den naturlige, ikke-parallelle
+formen er gjenbruk av det som allerede finnes — `DeviceService`-utfordring ved tilkobling,
+server-eid sesjon via `SessionService`, og en person/enhet → tillatte spaces-binding lest inne i
+`resolveIdentity()` — ikke et nytt identitetssystem. Først når den finnes kan en kaller sende
+`SERVER_VERIFIED`, og først da er `health → aldri ekstern` en garanti og ikke en forutsetning.
 
 ## 7. Kjent, dokumentert restrisiko (ikke skjult)
 
@@ -127,13 +177,15 @@ og observerbart uten en sesjon via `/status` → `speech_routing`.
    sky. Det er det korrekte utfallet av D-23, men det er en reell kapabilitets-mangel, ikke en
    løsning — den lukkes først når en lokal STT/TTS faktisk installeres.
 2. **`memory_space` oppgis av klienten** i `start`-meldingen (`server.ts`) og valideres ikke mot en
-   server-side sesjonsautoritet. En klient som oppgir feil space får den space-ens ruting. Dette er
-   en PRE-EKSISTERENDE egenskap ved voice-transporten (D-122 innfører den ikke), og porten er en
-   strengt innstrammende endring: den kan bare nekte behandling, aldri åpne for mer enn før.
-   Registrert som del av Q-32.
-3. **Leverandørens egne vilkår er ikke verifisert** (§4). Porten sier ingenting om hva OpenAI gjør
-   med dataene — kun hvor de sendes.
-4. **Realtime/tale-til-tale** er fortsatt `TBD` i matrisen og ikke i bruk.
+   server-side sesjonsautoritet. Dette er en PRE-EKSISTERENDE egenskap ved voice-transporten (D-122
+   innfører den ikke). Etter arkitekt-reviewen av PR #71 er konsekvensen ikke lenger bare beskrevet,
+   men håndtert fail-closed: en klient-oppgitt space kvalifiserer ikke for ekstern behandling i det
+   hele tatt. Full redegjørelse og avhengighet: §6.1. Registrert som del av Q-32.
+3. **Leverandørens egne vilkår er ikke verifisert** (§4), og ekstern talebehandling er derfor
+   avvist i dag. Porten sier ingenting om hva OpenAI gjør med dataene — den nekter bare å sende dem.
+4. **`UA7_ACCEPTANCE_4` er `PARTIAL`, ikke `PASS`** — se kriterium-statusen øverst. Kriteriet lukkes
+   av eier-/juridiske fakta (Q-32), ikke av kode.
+5. **Realtime/tale-til-tale** er fortsatt `TBD` i matrisen og ikke i bruk.
 
 ## 8. Oppdateringsplikt
 

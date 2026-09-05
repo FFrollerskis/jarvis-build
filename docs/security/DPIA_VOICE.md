@@ -27,7 +27,13 @@ akseptansekriterium 4).**
 - **NYTT (D-122):** `health`-space kan ikke lenger nå en ekstern behandler. Rutingsporten
   `evaluateSpeechRouting()` (`packages/contracts/src/speech.ts`) avviser det fail-closed, uten
   stille fallback, og ikke én lydramme når adapteren. Se
-  [../UA7_COMMUNICATIONS_DPIA.md](../UA7_COMMUNICATIONS_DPIA.md) §6.
+  [../UA7_COMMUNICATIONS_DPIA.md](../UA7_COMMUNICATIONS_DPIA.md) §6 — og §6.1 for hva porten IKKE
+  garanterer (klient-oppgitt `memory_space`).
+- **RETTET 2026-09-05 etter uavhengig arkitekt-review av PR #71:** det første strekpunktet over —
+  «rå lyd FORLATER maskinen» — beskriver hva koden GJORDE. Med regel 3 håndhevet er ekstern
+  tale-behandling nå **avvist for alle memory spaces** så lenge OpenAI-radene står `IKKE VERIFISERT`.
+  I praksis forlater altså ingen lyd huset i dag; talekjeden er policy-blokkert, ikke lokal.
+  Blir radene verifisert (Q-32), gjelder første strekpunkt igjen.
 - Leverandørens region/databehandleravtale/treningsvilkår/retensjon er fortsatt **IKKE VERIFISERT**
   (Q-32) — radene i [PROCESSOR_REGION_MATRIX.md](PROCESSOR_REGION_MATRIX.md) navngir nå behandleren,
   men er ikke ferdig verifisert.

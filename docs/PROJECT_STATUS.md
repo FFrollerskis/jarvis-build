@@ -16,6 +16,10 @@ sin klassifisering av det som `DEFERRED_WITHIN_UA7_BY_DEPENDENCY` **var feil**. 
 IMPLEMENTATION_PLAN.md, seksjon «UA-7 ... Tredje slice (D-122)». Full begrunnelse: D-122 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+**Andre runde på samme slice:** uavhengig ChatGPT-arkitekt-review av PR #71 (task
+`D122-ARCHITECT-REVIEW-FIX-20260905-1604`) fant to governance-/sikkerhetsfunn. Begge er tatt til
+følge på samme branch, uten ny D-ID og uten ny slice - se «Rettelser etter arkitekt-review» under.
+
 ## Hva re-auditen faktisk fant
 
 Transkripsjonsbehandling finnes ALLEREDE på `main` og er host-verifisert - `stt.ts:94` POSTer rå wav
@@ -43,15 +47,17 @@ gjør invarianten strukturelt håndhevet (CLAUDE.md regel 2).
 1. **`packages/contracts/src/speech.ts`** - `evaluateSpeechRouting()`, den kanoniske,
    leverandør-uavhengige rutingsporten. Gjenbruker det EKSISTERENDE `DataSensitivity`-vokabularet
    (D-79/D-81) og samme regelform som `isSensitivityEligible()` i `model-gateway/src/router.ts` -
-   **aldri en parallell sikkerhetsvei**. Fire regler i bevisst rekkefølge: lokal behandler alltid
+   **aldri en parallell sikkerhetsvei**. Seks regler i bevisst rekkefølge: lokal behandler alltid
    tillatt · ekstern uten navngitt matriserad avvises FØR space vurderes (regel 1 gjort strukturell)
-   · ukjent/manglende space avvises fail-closed (D-81-lærdommen) · `SECRET_RESTRICTED` avvises mot
-   ekstern behandler (D-23/regel 2). `health` er den ENESTE space-en som er `SECRET_RESTRICTED`, så
-   alle andre beholder NØYAKTIG dagens ruting - BO-12 sin talekjede er uendret.
+   · ekstern uten VERIFISERTE vilkår avvises, også før space (regel 3 gjort strukturell) ·
+   ukjent/manglende space avvises fail-closed (D-81-lærdommen) · `SECRET_RESTRICTED` avvises mot
+   ekstern behandler (D-23/regel 2) · kun klient-oppgitt space kan ikke kvalifisere for ekstern
+   behandling. `health` er den ENESTE space-en som er `SECRET_RESTRICTED`.
 2. **`processor` er PÅKREVD** på `SttAdapter`/`TtsAdapter`: en ny tale-leverandør uten erklæring
    **kompilerer ikke** (typecheck feilet på fire eksisterende fixturer og krevde stillingtagen -
-   det var beviset på at porten binder). `processor_row_declared` er `false` som default, så en
-   fremtidig SIP-/møtetranskripsjons-leverandør blokkeres automatisk.
+   det var beviset på at porten binder). `processor_row_declared` er `false` som default og
+   `processor_terms_status` faller til `NOT_VERIFIED`, så en fremtidig
+   SIP-/møtetranskripsjons-leverandør blokkeres automatisk på begge regler.
 3. **`VoiceSession` håndhever porten** i `pushAudio()` FØR filtre/VAD/adapter (ikke ÉN lydramme når
    en ukvalifisert behandler) og i `enqueueTts()`/`speakNext()` (svarteksten i en sensitiv samtale er
    like avslørende som spørsmålet). Ingen stille fallback - eksplisitt
@@ -62,23 +68,56 @@ gjør invarianten strukturelt håndhevet (CLAUDE.md regel 2).
    UA-2-/UA-3-DPIA-ene); `PROCESSOR_REGION_MATRIX.md` STT-/TTS-rader NAVNGIR nå OpenAI med
    region/DPA/trening/retensjon eksplisitt `IKKE VERIFISERT`; `DPIA_VOICE.md` har fått en eksplisitt
    RETTELSE-blokk framfor en stille omskriving.
+5. **Etter arkitekt-review:** `processor_terms_status` (matrise-regel 3) og `MemorySpaceAuthority`
+   (tillitsgrensen) som eksplisitte, fail-closed felt; `server.ts` navngir tillitsnivået der den
+   uautentiserte klientverdien faktisk kommer inn (`VOICE_MEMORY_SPACE_AUTHORITY`), og `/status`
+   rapporterer det sammen med utfallene.
+
+## Rettelser etter arkitekt-review (funn 1 og 2)
+
+**Funn 1 - navngitt rad var ikke det samme som kvalifisert behandler.** Koden lot
+`processor_row_declared: true` alene kvalifisere en ekstern behandler, mens matrisens egen regel 3
+krever verifisert region, akseptert databehandleravtale, dokumenterte trenings-/retensjonsvilkår og
+kontrolldato - og OpenAI-radene står `IKKE VERIFISERT`. Samtidig sto `UA7_ACCEPTANCE_4=PASS`. Det
+kunne ikke være sant samtidig. Regel 3 er nå kanonisk status i erklæringen
+(`processor_terms_status`: `VERIFIED` / `NOT_VERIFIED` / `NOT_APPLICABLE_LOCAL`, fail-closed default
+`NOT_VERIFIED`, også når feltet mangler; `NOT_APPLICABLE_LOCAL` på en ekstern behandler kvalifiserer
+ikke). Sjekken kjøres FØR space vurderes.
+
+**Funn 2 - D-23-håndhevingen stolte på klient-oppgitt `memory_space`.** Re-audit av eksisterende
+identitets-sti: `resolveIdentity()` (`modules/core/src/services/identity-service.ts`) verifiserer at
+person/tenant/enhet/space EKSISTERER, men ingenting beviser at kalleren ER den påståtte personen;
+`DeviceService.verifyChallenge()` er ekte proof-of-possession, men brukes kun til
+klasse-D-godkjenninger; voice-transporten har ingen autentisering. **Det finnes altså ingen betrodd
+server-side space-autoritet i dag** - og den er BEVISST ikke oppfunnet inne i D-122 (egen kanonisk
+slice, Q-32). I stedet er tillitsnivået et påkrevd argument (`MemorySpaceAuthority`), og en
+`CLIENT_ASSERTED` space kan kun NEKTE, aldri kvalifisere for ekstern behandling. Porten er derfor
+eksplisitt PARTIAL: **D-23 påstås IKKE strukturelt lukket for tale.**
 
 ## Ærlighet framfor stillhet
 
-`LocalWhisperStt.startStream()` kaster fortsatt `local_whisper_not_implemented_in_pilot`. Konsekvensen
-av porten er derfor at en `health`-samtale **AVVISES** i stedet for å behandles lokalt - korrekt
-utfall av D-23, men en reell kapabilitets-mangel, dokumentert (DPIA §7.1 / Q-32) i stedet for skjult.
-`memory_space` oppgis fortsatt av klienten i `start`-meldingen og valideres ikke server-side
-(PRE-EKSISTERENDE, ikke innført her; porten er strengt innstrammende - kan kun nekte, aldri åpne).
+**Ekstern talebehandling er AVVIST i dag - for alle memory spaces, ikke bare `health`.** OpenAI
+STT/TTS blokkeres av regel 3 (uverifiserte vilkår), og selv en fullt verifisert ekstern behandler
+ville blitt blokkert av manglende space-autoritet. BO-12 sin host-verifiserte talekjede er dermed
+**policy-blokkert**, ikke fjernet: den gjenopprettes ved å BESVARE Q-32 (eier-/juridisk verifisering
++ betrodd space-autoritet), aldri ved å endre et statusfelt alene. Dette er det korrekte utfallet av
+at radene står `IKKE VERIFISERT`, og det rapporteres her i stedet for å skjules. `/status` viser
+utfallet per space, så tilstanden er observerbar uten en sesjon.
+
+`LocalWhisperStt.startStream()` kaster fortsatt `local_whisper_not_implemented_in_pilot`. En
+`health`-samtale **AVVISES** derfor i stedet for å behandles lokalt - korrekt utfall av D-23, men en
+reell kapabilitets-mangel, dokumentert (DPIA §7.1 / Q-32) i stedet for skjult.
 
 ## Kvalitetsporter
 
 - `pnpm -r typecheck`: 21/21 pakker rent.
 - `pnpm lint` (`eslint .`): rent.
-- `apps/voice-gateway/test/ua7-speech-routing.test.ts`: **17/17 grønt** (A1-A8 ren regel · B1-B2
-  adaptererklæring mot faktisk oppførsel · C1-C5 `VoiceSession` med rammetellende spion-adapter ·
-  D1-D2 TTS-siden).
-- Øvrige voice-tester: 43/43 grønt lokalt (4 av 5 filer). `voice-e2e.test.ts` kunne IKKE kjøres på
+- `apps/voice-gateway/test/ua7-speech-routing.test.ts`: **32/32 grønt** (A1-A8 ren regel · **E1-E4
+  matrise-regel 3, arkitekt-funn 1** · **F1-F5 adversarielle tester for klient-oppgitt space,
+  arkitekt-funn 2** · B1-B4 adaptererklæring mot faktisk oppførsel · C1-C8 `VoiceSession` med
+  rammetellende spion-adapter · D1-D3 TTS-siden). +15 tester mot forrige HEAD.
+- `apps/voice-gateway/test/d30-foundation.test.ts`: 18/18 grønt (ingen regresjon).
+- Øvrige voice-tester: grønt lokalt (5 av 6 filer). `voice-e2e.test.ts` kunne IKKE kjøres på
   denne Windows-hosten - **pre-eksisterende, ikke innført av denne sliceen**: `040_stripe.sql`
   inneholder ett mojibake-tegn (`Ē`, U+0112) i en KOMMENTAR som feiler på en WIN1252-initialisert
   embedded-Postgres-klynge. Migrasjonen feiler FØR noen av denne sliceens kode kjører, og suiten
@@ -92,30 +131,41 @@ utfall av D-23, men en reell kapabilitets-mangel, dokumentert (DPIA §7.1 / Q-32
 
 ## Flagg-status
 
-`UA7_ACCEPTANCE_4=PASS` (for den tale-/transkripsjonsbehandlingen som FAKTISK finnes),
-`UA7_SPEECH_ROUTING_ENFORCED=true`, `UA7_NEW_TABLES_ADDED=0`, `UA7_NEW_PROVIDERS_ADDED=0`,
-`HOST_ACCEPTANCE_REQUIRED=false`. UA-7-akseptansekriterier: **1 PASS** (D-121), **2 PASS**,
-**3 PASS**, **4 PASS** (møtetranskripsjon/SIP/tredjeparts-opptak forblir
-`DEFERRED_WITHIN_UA7_BY_DEPENDENCY` med navngitt port i DPIA §5). Uendret: `UA7_COMPLETE=false`
-(kanalene selv er fortsatt D-108-sperret), `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
-`D108_COMPLETE=false`, `UA6_COMPLETE=false`.
+`UA7_ACCEPTANCE_4=PARTIAL` (**nedgradert fra `PASS` etter arkitekt-review** - dokumentasjonen og den
+strukturelle håndhevingen finnes og er sann, men de påkrevde retensjons-/rettsgrunnlagsfaktaene er
+IKKE verifisert; kriteriet lukkes av Q-32, ikke av kode), `UA7_SPEECH_ROUTING_ENFORCED=true`,
+`UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32`, `UA7_TRUSTED_MEMORY_SPACE_AUTHORITY=false`,
+`UA7_NEW_TABLES_ADDED=0`, `UA7_NEW_PROVIDERS_ADDED=0`, `HOST_ACCEPTANCE_REQUIRED=false`.
+UA-7-akseptansekriterier: **1 PASS** (D-121), **2 PASS**, **3 PASS**, **4 PARTIAL**
+(møtetranskripsjon/SIP/tredjeparts-opptak forblir `DEFERRED_WITHIN_UA7_BY_DEPENDENCY` med navngitt
+port i DPIA §5). Uendret: `UA7_COMPLETE=false` (kanalene selv er fortsatt D-108-sperret),
+`UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`, `D108_COMPLETE=false`, `UA6_COMPLETE=false`.
+**Q-32 er FORTSATT ÅPEN og påstås ikke lukket av kode.**
 
 ## PR-status
 
-Draft-PR på branch `claude/ua7-speech-retention-legal-basis`. **IKKE merget, IKKE self-approved.**
-Fersk CI på eksakt endelig HEAD kjøres etter push og rapporteres med run-id og jobbstatus i
-`CLAUDE_REPORT` på issue #68. Venter på uavhengig ChatGPT-arkitekt-review (D-120).
+Draft-PR **#71** på branch `claude/ua7-speech-retention-legal-basis`. **IKKE merget, IKKE
+self-approved.** Andre runde: de to arkitekt-funnene er rettet på samme branch (task
+`D122-ARCHITECT-REVIEW-FIX-20260905-1604`, `ARCHITEKT_MERGE_APPROVED=false`). Fersk CI på ny eksakt
+endelig HEAD kjøres etter push og rapporteres med run-id og jobbstatus i `CLAUDE_REPORT` på issue
+#68. Venter på ny uavhengig ChatGPT-arkitekt-review (D-120).
 
 ## Blokkeringer
 
-Ingen tekniske. `HARD_EXTERNAL_BLOCKER=false`. Ny åpen post **Q-32** krever en eier-/juridisk
-handling fra Tobias (verifisering av OpenAI som databehandler for tale) - den blokkerer ikke denne
-sliceen, men den kan ikke lukkes av kode.
+Ingen tekniske. `HARD_EXTERNAL_BLOCKER=false`. **Q-32** krever en eier-/juridisk handling fra Tobias
+(verifisering av OpenAI som databehandler for tale) og en fremtidig, egen slice for betrodd
+server-side memory-space-autoritet. Den blokkerer ikke denne PR-en, men den er nå det som faktisk
+holder ekstern talebehandling AVVIST og `UA7_ACCEPTANCE_4` på `PARTIAL` - og den kan ikke lukkes av
+kode.
 
 ## Neste oppgave
 
-Avventer arkitekt-review. INGEN merge, INGEN neste UA-7-slice, INGEN D-108, INGEN UA-8 startet av
-denne runden. Naturlige kandidater etter review: (a) Telegram inngående som samtalekanal (eneste
-gjenstående `NOT_STARTED_PROVIDER_INDEPENDENT` - se forbeholdet om manglende deterministisk
-koblingsnøkkel i IMPLEMENTATION_PLAN sin D-122-matrise), (b) egen liten oppgave for
-`040_stripe.sql`-mojibake, (c) nye kanaler når D-108 faktisk forfaller.
+Avventer ny arkitekt-review. INGEN merge, INGEN neste UA-7-slice, INGEN D-108, INGEN UA-8, INGEN ny
+D-ID startet av denne runden. Naturlige kandidater etter review: (a) **server-side memory-space-/
+sesjonsautoritet i voice-transporten** (Q-32 punkt 2 - den eneste som faktisk løfter D-23 fra
+fail-closed-nekt til ekte garanti; gjenbruker `DeviceService`/`SessionService`/`resolveIdentity()`,
+aldri et parallelt identitetssystem), (b) Telegram inngående som samtalekanal (eneste gjenstående
+`NOT_STARTED_PROVIDER_INDEPENDENT` - se forbeholdet om manglende deterministisk koblingsnøkkel i
+IMPLEMENTATION_PLAN sin D-122-matrise), (c) egen liten oppgave for `040_stripe.sql`-mojibake,
+(d) nye kanaler når D-108 faktisk forfaller. Q-32 punkt 1 er en ren eier-/juridisk handling Tobias
+må gjøre selv.

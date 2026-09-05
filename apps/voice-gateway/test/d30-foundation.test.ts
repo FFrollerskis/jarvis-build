@@ -42,7 +42,8 @@ const identity: VoiceIdentity = {
 const LOCAL_TEST_PROCESSOR: SpeechProcessorDeclaration = {
   processor_id: "voice-test-fake",
   locality: "local",
-  processor_row_declared: true
+  processor_row_declared: true,
+  processor_terms_status: "NOT_APPLICABLE_LOCAL"
 };
 
 /** STT-fake: fast transkript, valgfri feil. */

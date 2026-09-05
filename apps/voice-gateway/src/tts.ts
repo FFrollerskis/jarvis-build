@@ -33,7 +33,8 @@ export class FakeTts implements TtsAdapter {
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "fake-tts",
     locality: "local",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
   constructor(private readonly msPerChar = 40) {}
 
@@ -71,11 +72,15 @@ export class FakeTts implements TtsAdapter {
 /** OpenAI TTS (batch; streaming-kandidater vurderes i benchmark). UVERIFISERT uten nøkkel. */
 export class OpenAiTts implements TtsAdapter {
   readonly name = "openai-tts";
-  /** EKSTERN databehandler: svartekst sendes til OpenAI. Se `OpenAiStt.processor`. */
+  /**
+   * EKSTERN databehandler: svartekst sendes til OpenAI. Navngitt rad, men
+   * regel 3-feltene står `IKKE VERIFISERT` - se `OpenAiStt.processor` og Q-32.
+   */
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "openai-audio-speech",
     locality: "external",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
   };
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],
@@ -126,7 +131,8 @@ export class LocalPiperTts implements TtsAdapter {
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "local-piper",
     locality: "local",
-    processor_row_declared: true
+    processor_row_declared: true,
+    processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
   constructor(private readonly binPath: string | undefined = process.env["JARVIS_PIPER_BIN"]) {}
 
