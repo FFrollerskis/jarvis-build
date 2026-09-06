@@ -22,7 +22,19 @@ export type MemorySpace = z.infer<typeof MemorySpaceSchema>;
 export const AuthStrengthSchema = z.enum(["passive", "active", "signed"]);
 export type AuthStrength = z.infer<typeof AuthStrengthSchema>;
 
-export const ChannelSchema = z.enum(["web", "mobile", "watch", "voice", "api", "system"]);
+/**
+ * D-125 (UA-7): `telegram` er lagt til fordi eier-innkommende Telegram-tekst nå
+ * faktisk går inn i den kanoniske samtale-/sesjonsbanen. Uten verdien måtte den
+ * banen ha merket `sessions.last_channel` og audit-radene som `api` - altså
+ * skrevet en USANN kilde (CLAUDE.md regel 4: alt minne og alle handlinger merkes
+ * med kilde). Utvidelsen krever INGEN migrasjon (`sessions.last_channel` er
+ * `text NOT NULL` uten CHECK-constraint, 002_sessions_events.sql) og INGEN
+ * kodeendring andre steder (ingen uttømmende `switch` over `Channel` finnes;
+ * `ChannelSchema` brukes kun i denne filen). Den utvider kun hva som ER gyldig -
+ * den fjerner ingen tidligere gyldig verdi. Telegram forblir en TRANSPORT
+ * (D-64 `EXTERNAL_CANONICAL`), aldri en identitets- eller autoritetskilde.
+ */
+export const ChannelSchema = z.enum(["web", "mobile", "watch", "voice", "api", "system", "telegram"]);
 export type Channel = z.infer<typeof ChannelSchema>;
 
 /**

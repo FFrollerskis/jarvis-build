@@ -1245,16 +1245,74 @@ export class GithubTransport implements ToolTransport {
 }
 
 /**
+ * D-125 (UA-7): en inngående eier-melding, slik den overleveres til
+ * `handlers.chat`. Feltene er UBETRODD innhold fra Telegram (Ingestion Zone,
+ * CLAUDE.md regel 7) og er DATA - aldri instruksjoner. `chat_id` er den ENESTE
+ * verdien som får delta i identitets-/autoritetsavgjørelser, og den avgjøres
+ * ikke her: den sendes videre nettopp slik at den betrodde server-side
+ * autoriteten kan gjøre sin EGEN uavhengige eier-sjekk (forsvar i dybden -
+ * pollerens egen sjekk under er den første, ikke den eneste).
+ */
+export interface TelegramInboundOwnerMessage {
+  chat_id: string;
+  text: string;
+}
+
+/**
+ * Maks antall `update_id` som huskes som allerede behandlet. Rikelig for et
+ * hvilket som helst realistisk poll-vindu, og bundet slik at en langtkjørende
+ * prosess ikke vokser ubegrenset.
+ */
+const TELEGRAM_HANDLED_UPDATE_MEMORY = 512;
+
+/**
  * Telegram-kommandopolling: /brief og /status via getUpdates (long-poll).
  * Svar leveres via Tool Gateway (policy/audit) - aldri direkte fetch tilbake.
+ *
+ * D-125 (UA-7, FEMTE slice): i tillegg til de eksisterende kommandoene kan
+ * VANLIG eier-tekst nå rutes videre via den valgfrie `chat`-handleren, som
+ * apps/api binder til den kanoniske samtalebanen. Er `chat` ikke satt, oppfører
+ * polleren seg NØYAKTIG som før (vanlig tekst ignoreres) - eksisterende
+ * oppsett er derfor uendret.
+ *
+ * To ting endret seg strukturelt, og begge er PÅKREVD av at `chat` kan være
+ * treg (en modellsamtale tar sekunder, en `/status` gjør ikke det):
+ *
+ *  1. RE-ENTRANS-LÅS. `start()` bruker `setInterval`. Uten låsen ville tick
+ *     nr. 2 startet en ny `getUpdates` mens tick nr. 1 fortsatt ventet på
+ *     modellen - og fordi `offset` først avanseres NÅR svaret er lest, ville
+ *     nr. 2 hentet NØYAKTIG DE SAMME oppdateringene og svart en gang til.
+ *  2. BEHANDLET-UPDATE-GUARD. `update_id` markeres som behandlet FØR
+ *     dispatch. Telegram kan gjenlevere en oppdatering helt til en senere
+ *     `getUpdates` med høyere `offset` bekrefter den; guarden gjør leveringen
+ *     at-most-once innenfor prosessens levetid. At-most-once er den TRYGGE
+ *     retningen: en tapt `/brief` er ubehagelig, en dobbelt utført handling
+ *     er en ekte feil.
+ *
+ * Hver oppdatering håndteres også isolert: en feil på én melding avslutter
+ * ikke løkken. Uten det ville de resterende oppdateringene i samme batch blitt
+ * stille borte - `offset` var allerede avansert forbi dem.
  */
 export class TelegramCommandPoller {
   private offset = 0;
   private timer: NodeJS.Timeout | undefined;
+  private polling = false;
+  private readonly handled = new Set<number>();
   constructor(
     private readonly token: string,
     private readonly ownerChatId: string,
-    private readonly handlers: { brief(): Promise<string>; status(): Promise<string>; ai?(): Promise<string> },
+    private readonly handlers: {
+      brief(): Promise<string>;
+      status(): Promise<string>;
+      ai?(): Promise<string>;
+      /**
+       * D-125: vanlig (ikke-kommando) eier-tekst. Returner `undefined` for å
+       * ikke svare i det hele tatt - det er hva en fail-closed autoritet skal
+       * gi, og polleren sender da INGENTING (ingen informasjonslekkasje, ikke
+       * engang en feilmelding som bekrefter at boten finnes).
+       */
+      chat?(message: TelegramInboundOwnerMessage): Promise<string | undefined>;
+    },
     private readonly send: (text: string) => Promise<void>
   ) {}
 
@@ -1267,17 +1325,54 @@ export class TelegramCommandPoller {
   }
 
   async poll(): Promise<void> {
-    const response = await fetch(`https://api.telegram.org/bot${this.token}/getUpdates?offset=${this.offset}&timeout=0`);
-    if (!response.ok) return;
-    const body = (await response.json()) as { result?: Array<{ update_id: number; message?: { chat: { id: number }; text?: string } }> };
-    for (const update of body.result ?? []) {
-      this.offset = update.update_id + 1;
-      const chat = String(update.message?.chat.id ?? "");
-      if (chat !== this.ownerChatId) continue; // kun owner - ingen fremmede kommandoer
-      const text = update.message?.text ?? "";
-      if (text.startsWith("/brief")) await this.send(await this.handlers.brief());
-      else if (text.startsWith("/status")) await this.send(await this.handlers.status());
-      else if (text.startsWith("/ai") && this.handlers.ai) await this.send(await this.handlers.ai());
+    if (this.polling) return; // se §1 i klassekommentaren - aldri to samtidige poll
+    this.polling = true;
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${this.token}/getUpdates?offset=${this.offset}&timeout=0`);
+      if (!response.ok) return;
+      const body = (await response.json()) as { result?: Array<{ update_id: number; message?: { chat: { id: number }; text?: string } }> };
+      for (const update of body.result ?? []) {
+        this.offset = update.update_id + 1;
+        if (this.handled.has(update.update_id)) continue; // §2 - aldri dobbel handling
+        const chat = String(update.message?.chat.id ?? "");
+        // Fail-closed FØR alt annet: en fremmed chat markeres ikke, teller ikke,
+        // og utløser ingen modell-, verktøy- eller sesjonsarbeid.
+        if (chat !== this.ownerChatId) continue; // kun owner - ingen fremmede kommandoer
+        this.rememberHandled(update.update_id);
+        const text = update.message?.text ?? "";
+        try {
+          await this.dispatch(chat, text);
+        } catch {
+          // Én melding som feiler skal aldri stjele resten av batchen.
+        }
+      }
+    } finally {
+      this.polling = false;
+    }
+  }
+
+  /**
+   * Kommandoene er UENDRET og har fortsatt forrang. Kun tekst som verken er
+   * tom eller starter med `/` når `chat`-handleren: kommando-navnerommet
+   * forblir dermed 100% deterministisk, og en ukjent `/kommando` blir aldri
+   * stille omtolket til en modellsamtale.
+   */
+  private async dispatch(chatId: string, text: string): Promise<void> {
+    if (text.startsWith("/brief")) return void (await this.send(await this.handlers.brief()));
+    if (text.startsWith("/status")) return void (await this.send(await this.handlers.status()));
+    if (text.startsWith("/ai") && this.handlers.ai) return void (await this.send(await this.handlers.ai()));
+    if (text.startsWith("/") || text.trim().length === 0 || !this.handlers.chat) return;
+    const reply = await this.handlers.chat({ chat_id: chatId, text });
+    if (reply !== undefined && reply.length > 0) await this.send(reply);
+  }
+
+  private rememberHandled(updateId: number): void {
+    this.handled.add(updateId);
+    if (this.handled.size > TELEGRAM_HANDLED_UPDATE_MEMORY) {
+      // Sett bevarer innsettingsrekkefølge - den eldste er alltid først, og
+      // `offset` gjør uansett at gamle ID-er aldri hentes på nytt.
+      const oldest = this.handled.values().next();
+      if (!oldest.done) this.handled.delete(oldest.value);
     }
   }
 }
