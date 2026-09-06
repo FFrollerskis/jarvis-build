@@ -52,7 +52,7 @@
 -- ALDRI på nyttelast-metadata alene, enhver payment_intents-oppslag via
 -- provider_ref kryssjekker tenant_id FØR noe skrives -
 -- PROVIDER_OBJECT_TENANT_CONFLICT ved avvik) HÅNDHEVES i applikasjonskode
--- (FinanceService), uavhengig av at kun ĒN tenant faktisk er konfigurert
+-- (FinanceService), uavhengig av at kun EN tenant faktisk er konfigurert
 -- i dag.
 --
 -- RLS/GRANT/erasure-mønster IDENTISK med 038_finance.sql/039_finance_spend_
