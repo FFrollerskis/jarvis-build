@@ -7,6 +7,7 @@ import {
   PgApprovalStore,
   PgDeviceRegistry,
   SessionService,
+  TelegramOwnerAuthority,
   VoiceSessionAuthority,
   assertRuntimeCredentialsConfigured,
   assertRuntimeRoleSafe,
@@ -464,6 +465,29 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const identityService = new IdentityService(pool);
   const deviceService = new DeviceService(pool);
   const sessionService = new SessionService(pool);
+  // D-125 (UA-7, FEMTE slice): ÉN delt `ConversationEngine`-instans. Den er
+  // hevet ut av `deps`-literalen fordi den inngående Telegram-banen skal bruke
+  // NØYAKTIG samme motor som `/chat` - ikke en parallell konstruksjon (samme
+  // delings-disiplin som D-102 sin `taskService` og D-123 sine identitets-
+  // primitiver). To instanser ville gitt to separate verktøy-/trace-oppsett
+  // mot samme pool, altså en stille divergens mellom kanalene.
+  const conversationEngine = new ConversationEngine({
+    messages: new MessageStore(pool),
+    context: new ContextBuilder(pool),
+    gateway,
+    tasks: taskService,
+    worker,
+    trace,
+    memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
+    council: aiCouncil,
+    // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
+    // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
+    // slik at tenant/delegation/authority følger den som faktisk snakker.
+    tools: {
+      definitions: meshToolDefinitions(),
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
+    }
+  });
   const deps: ApiDeps = {
     identity: identityService,
     devices: deviceService,
@@ -489,23 +513,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // og skjer derfor UTENFOR den generiske `readBody()`-JSON-parseren, se
     // server.ts sin nye rute-gren.
     finance: { service: financeService, cards: cardService },
-    conversation: new ConversationEngine({
-      messages: new MessageStore(pool),
-      context: new ContextBuilder(pool),
-      gateway,
-      tasks: taskService,
-      worker,
-      trace,
-      memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
-      council: aiCouncil,
-      // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
-      // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
-      // slik at tenant/delegation/authority følger den som faktisk snakker.
-      tools: {
-        definitions: meshToolDefinitions(),
-        executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
-      }
-    })
+    conversation: conversationEngine
   };
   setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
 
@@ -562,10 +570,56 @@ ${await voiceText()}
 porter: se docs/RUNTIME_GATES.md`;
   };
   if (process.env["JARVIS_TELEGRAM_TOKEN"] && process.env["JARVIS_TELEGRAM_CHAT_ID"]) {
+    // D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
+    // inngående Telegram. HVER verdi kommer fra prosessens egen konfigurasjon
+    // og fra `seedOwner()`-radene (`apps/api/src/seed.ts`) - INGEN av dem kan
+    // påvirkes av en Telegram-melding. `person_id` utledes med SAMME uttrykk
+    // som seeden (`JARVIS_OWNER_PERSON_ID`), ikke hardkodet, slik at en
+    // konfigurert eier-ID ikke gir `unknown_membership` mot en seedet database.
+    const telegramOwnerAuthority = new TelegramOwnerAuthority(
+      { sessions: sessionService, identity: identityService },
+      {
+        owner_chat_id: process.env["JARVIS_TELEGRAM_CHAT_ID"],
+        tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+        person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
+        // Tjeneste-enheten denne prosessen allerede ER seedet som.
+        device_id: "jarvis-core",
+        memory_space: "personal"
+      }
+    );
     new TelegramCommandPoller(process.env["JARVIS_TELEGRAM_TOKEN"], process.env["JARVIS_TELEGRAM_CHAT_ID"], {
       brief: async () => DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)),
       status: statusText,
-      ai: aiMeshText
+      ai: aiMeshText,
+      // D-125: vanlig eier-tekst inn i den KANONISKE samtalebanen. Ingen ny
+      // chat-motor, ingen ny identitetslagring, ingen ny sesjonsmodell.
+      chat: async ({ chat_id, text }) => {
+        // 1. Uavhengig, server-side autoritet. Meldingsteksten er ALDRI et
+        //    argument her - se `authorize()`-signaturen. Avslag ⇒ `undefined`
+        //    ⇒ polleren sender ingenting (fail-closed, ingen bekreftelse).
+        const authorized = await telegramOwnerAuthority.authorize(chat_id);
+        if (!authorized.ok) return undefined;
+        // 2. Idempotent eier-identitetslenking i Conversation Graph (D-119).
+        //    KUN den konfigurerte chat-ID-en deltar; `match_method` forblir
+        //    `owner_configured`. En feil her skal aldri hindre selve samtalen
+        //    - lenken er proveniens, ikke en autorisasjonsavhengighet.
+        try {
+          await conversationGraphSyncService.linkOwnerTelegramIdentity(
+            authorized.identity.tenant_id,
+            authorized.identity.memory_space_id,
+            authorized.chat_id,
+            authorized.identity.person_id
+          );
+        } catch (err) {
+          console.error(JSON.stringify({
+            msg: "telegram_owner_identity_link_failed",
+            reason: err instanceof Error ? err.message.slice(0, 120) : "unknown"
+          }));
+        }
+        // 3. SAMME motor som /chat, bundet til den OPPLØSTE identiteten.
+        const result = await conversationEngine.handle(authorized.identity, text);
+        return result.reply;
+      }
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
     new DailyScheduler(pool).start(async () => {

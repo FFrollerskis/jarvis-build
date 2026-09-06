@@ -1,127 +1,138 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-06 (branch `claude/d124-windows-db-migration-encoding`, base
-`main=4a3c15d4ba72f6dd4b5829acc7e3648be9344fd3`)
+**Oppdatert:** 2026-09-06 (branch `claude/d125-ua7-telegram-inbound-owner`, base
+`main=2e86e047eec98b736987bf7704c5e28c6d8c240d`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser, ikke her.
 
 ## Aktiv fase/oppgave
 
-**D-124 - Windows-trygg migrasjonsencoding: `040_stripe.sql` reparert og regresjonsvaktet.**
-Derivert, ikke fritt valgt. Dette er IKKE en ny masterplan-slice, men reparasjonen av en
-PRE-EKSISTERENDE blocker som D-121 registrerte som «separat, IKKE-relatert funn (bevisst IKKE rettet
-i den sliceen)», og som D-123 måtte rapportere som årsaken til at 14 av sliceens egne RLS-tester
-ALDRI kunne kjøres lokalt. Oppgaven er 100% leverandør-uavhengig og var derfor den dependency-korrekte
-neste. Full begrunnelse: D-124 i DECISIONS_AND_ASSUMPTIONS.md.
+**D-125 - UA-7 femte slice: eier-Telegram inngående som samtalekanal.**
+Det siste `NOT_STARTED_PROVIDER_INDEPENDENT`-elementet i UA-7, og det denne filen selv pekte ut som
+neste naturlige oppgave. Full begrunnelse: D-125 i DECISIONS_AND_ASSUMPTIONS.md.
 
-## Hva som faktisk var galt på `main@4a3c15d`
+## Omfanget er bevisst begrenset - og hvorfor
 
-`modules/core/src/db/migrations/040_stripe.sql:55` inneholdt tegnet `Ē` (U+0112) i en SQL-KOMMENTAR
-(`kun ĒN tenant faktisk er konfigurert` - en mojibake av `ÉN`).
-
-Filen var gyldig UTF-8, så INGEN eksisterende port fanget den: `tsc` og `eslint` leser ikke `.sql`,
-og Linux-CI initialiserer klyngen som UTF8 der tegnet er uskadelig. På Tobias sin Windows-host
-initialiserer `embedded-postgres` derimot klyngen med `server_encoding=WIN1252`, og U+0112 har INGEN
-WIN1252-ekvivalent:
-
-```
-ERROR: character with byte sequence 0xc4 0x92 in encoding "UTF8" has no equivalent in encoding "WIN1252"
-Migrasjon 040_stripe.sql feilet: ...
-```
-
-Fordi `runMigrations()` kjører filene i rekkefølge FØR noen test kjører, feilet **ENHVER DB-suite på
-hosten ved migrasjon 040** - også suiter uten noe forhold til Stripe. Reprodusert på rent tre FØR
-endring: `modules/core/test/fase8-device.test.ts` → 5 tester skippet, 0 kjørt.
+D-122-matrisen i IMPLEMENTATION_PLAN registrerer den styrende begrensningen: **Telegram gir INGEN
+deterministisk e-post-/telefon-nøkkel for en vilkårlig motpart.** Sliceen er derfor strukturelt
+begrenset til den ALLEREDE konfigurerte eier-chatten (`JARVIS_TELEGRAM_CHAT_ID`). Motpart-identitet
+gjettes ALDRI fra visningsnavn, `@username` eller meldingstekst, og banen utvides ALDRI til
+ikke-eiere. `UA7_TELEGRAM_INBOUND_NON_OWNER=NOT_BUILT_BY_DESIGN_D122` - eksplisitt ikke-bygget, ikke
+stille utelatt.
 
 ## Hva som faktisk ble bygget
 
-**NULL nye tabeller, NULL nye migrasjoner, NULL nye kolonner, NULL nye leverandører, NULL nye
-credentials/scopes, NULL nye produktkapabiliteter, NULL urelatert refactor.**
+**NULL nye leverandører, credentials, scopes, tabeller, migrasjoner, kolonner eller
+system-of-record.** Telegram forblir TRANSPORT (D-64 `EXTERNAL_CANONICAL`);
+`CORE_DEPENDENCY_DECISION_REQUIRED=false`.
 
-1. **Reparasjonen** - `Ē` → ASCII `EN`, KUN i kommentaren. Diffen er **én linje**; eksekverbar SQL,
-   skjema, RLS, GRANT, indekser og tabellsemantikk er bit-for-bit uendret. Ingen ny migrasjonsfil ble
-   lagt til for å «rette» den gamle: `040_stripe.sql` er aldri kjørt i noen produksjonsdatabase, så
-   in-place kommentarretting etterlater ingen drift mellom kilde og anvendt skjema, og
-   `schema_migrations` bruker filnavn som nøkkel.
-2. **Regresjonsvakten** (`modules/core/test/d124-migration-encoding.test.ts`) - policyen er «hvert
-   tegn i en migrasjons-`.sql` må kunne representeres i WIN1252». Repertoaret utledes fra
-   `TextDecoder("windows-1252")` over 0x00-0xFF framfor fra en håndskrevet liste, minus de fem bytene
-   som er UDEFINERTE i WIN1252 (0x81/0x8D/0x8F/0x90/0x9D).
-   **Dette er ingen ASCII-vakt:** `ø`, `å`, `æ`, `Ø`, `Å`, `Æ`, `É`, `§`, `«»` ligger alle i WIN1252
-   og passerer uendret, så historiske norske kommentarer skrives IKKE om. Vakten dekker KUN
-   migrasjons-SQL - nøyaktig de filene som sendes ordrett til en server som kan være
-   WIN1252-initialisert; docs og TypeScript berøres ikke, fordi de aldri går gjennom en
-   database-encoding-konvertering. Hver fil valideres også som streng UTF-8 (`fatal: true`), fordi
-   `runMigrations()` leser med `"utf8"`.
-   Vakten **beviser seg selv framfor å passere vakuøst**: egne tester på at den faktisk flagger
-   U+0112 med linje/kolonne/kodepunkt, at den finner brudd på andre linjer enn første, at den flagger
-   andre smugtegn (U+0100, U+0435 kyrillisk homoglyf, U+4E2D, U+1F600, U+202F - merk at U+00A0 IKKE
-   er brudd), at norske tegn IKKE flagges, og at fillisten ikke er tom.
+1. **`TelegramOwnerAuthority`** (`modules/core/src/services/telegram-owner-authority.ts`) - betrodd
+   server-side identitets-/sesjonsautoritet med SAMME komposisjons-disiplin som D-123 sin
+   `VoiceSessionAuthority`: ingen egen autorisasjonslogikk, kun tillitsankeret (eksakt streng-likhet
+   mot den KONFIGURERTE chat-ID-en) + `SessionService.resumeOrCreate()` +
+   `IdentityService.resolveIdentity()`.
+   **Den avgjørende egenskapen er strukturell:** `authorize()` tar KUN en chat-ID og har INGEN
+   parameter for meldingstekst, avsendernavn eller `@username`. Ubetrodd innhold kan derfor ikke
+   velge person, tenant, memory space, sesjon, policy, scopes eller ruting - det er umulig gjennom
+   signaturen, ikke bare forbudt i en kommentar.
+   Eier-sjekken kjøres FØR `resumeOrCreate()`, så en fremmed chat muterer aldri eierens server-eide
+   sesjonsrad. Chat-ID-en tvinges ALDRI med `String()`. Ukonfigurert eier-chat er permanent
+   fail-closed.
+2. **`TelegramCommandPoller`** fikk en VALGFRI `chat`-handler. Uten den er oppførselen bit-for-bit som
+   før. To strukturelle rettelser var PÅKREVD fordi en samtale er treg der kommandoene ikke er:
+   **re-entrans-lås** (ellers ville tick nr. 2 hentet SAMME `update_id` mens nr. 1 ventet på modellen
+   og svart dobbelt) og **behandlet-update-guard** (`update_id` markeres FØR dispatch). Sammen gir de
+   at-most-once innenfor prosessens levetid - den trygge retningen. Hver oppdatering håndteres
+   isolert, så én feil ikke stjeler resten av batchen.
+   `/brief`, `/status` og `/ai` er **uendret** og har forrang; en UKJENT `/kommando` blir aldri stille
+   omtolket til en modellsamtale.
+3. **`apps/api/src/main.ts`** - ÉN delt `ConversationEngine` brukes nå av BÅDE `/chat` og
+   Telegram-banen (to instanser ville gitt stille divergens mellom kanalene). Den eksisterende, aldri
+   tidligere wirede `linkOwnerTelegramIdentity()` kobles inn, idempotent, `match_method` fortsatt
+   `owner_configured`, KUN chat-ID-en deltar. Svaret går ut via den EKSISTERENDE ToolGateway-styrte
+   `sendTelegram` - aldri en ny direkte `fetch`.
+4. **`ChannelSchema` utvidet med `telegram`.** Alternativet (gjenbruke `api`) ville krevd null
+   endring, men skrevet en USANN kilde i `sessions.last_channel` og audit - i strid med CLAUDE.md
+   regel 4. Verifisert ufarlig mot faktisk kode: kolonnen er `text NOT NULL` uten CHECK-constraint,
+   `ChannelSchema` brukes kun i én fil, og ingen uttømmende `switch` over `Channel` finnes. Ingen
+   migrasjon. `auth_strength` er `active`, ALDRI `signed` - en bot-token er ingen enhetssignatur.
 
 ## Kvalitetsporter
 
-- **Reproduksjon FØR fiks:** `fase8-device.test.ts` feilet på `Migrasjon 040_stripe.sql feilet: …`
-  (5 skippet, 0 kjørt). Feilen er altså bevist, ikke antatt.
-- **Full migrasjonskjede mot ekte embedded Postgres på denne Windows-hosten:**
-  `server_encoding=WIN1252`, `datcollate/datctype=English_American Samoa.1252`,
-  **46/46 migrasjoner anvendt** (`001_identity.sql` → `046_conversation_graph.sql`, inkl.
-  `040_stripe.sql`), 46 rader i `schema_migrations`, 100 tabeller i `public`, andre kjøring anvendte
-  **0** (idempotens bevart). Bevisskriptet ble kjørt UTENFOR repoet (scratch-disiplin).
-- **Tidligere blokkerte suiter kjører nå faktisk: 25/25 grønt** -
-  `modules/core/test/fase8-device.test.ts` · `modules/core/test/d123-voice-session-authority.test.ts`
-  (D-123 sine 14 RLS-tester, som ALDRI hadde kjørt lokalt før) ·
-  `apps/voice-gateway/test/voice-e2e.test.ts`.
-- **Regresjonsvakten:** 52/52 grønt (46 migrasjonsfiler + 6 vakt-egentester).
-- `pnpm -r typecheck`: **21/21 pakker rent.**
-- `pnpm lint` (`eslint .`): **rent.**
-- **Full lokal regresjonssuite:** se `CLAUDE_REPORT` på issue #68 for eksakt fil-/testtelling på
-  endelig HEAD.
-- gitleaks: egen CI-jobb over hele historikken - **IKKE kjørt lokalt** (binæren finnes ikke på denne
-  hosten).
+- **51 nye tester, alle grønne lokalt på Windows-hosten:**
+  `modules/core/test/d125-telegram-owner-authority.test.ts` (15, ekte embedded Postgres + ekte RLS) ·
+  `modules/tool-gateway/test/d125-telegram-inbound-poller.test.ts` (15) ·
+  `modules/conversation-graph/test/d125-owner-telegram-link.test.ts` (6, ekte Postgres) ·
+  `apps/api/test/d125-telegram-inbound-wiring.test.ts` (15).
+  Dekker alle syv verifikasjonskravene: kanonisk samtale-/svarbane, server-avledet og stabil
+  identitet, fremmed chat avvist FØR modell/verktøy/sesjon, adversariell tekst kan ikke velge annen
+  person/tenant/space eller lenke en gjettet kontakt, kommandoene uten regresjon, idempotent lenking
+  uten meldingsinnhold, og ingen dobbel handling/svar for samme update.
+- `pnpm -r typecheck`: **21/21 pakker rent.** `pnpm lint` (`eslint .`): **rent.**
+- **Full lokal suite: 3071/3102 grønt.** De 31 feilene i 5 filer er **PRE-EKSISTERENDE**: nøyaktig de
+  samme 5 filene og 31 testene feiler på det URØRTE base-committet `2e86e04` (verifisert ved detached
+  checkout av basen og ny kjøring). Denne sliceen forårsaker **null regresjon**.
+- gitleaks: egen CI-jobb over hele historikken - **IKKE kjørt lokalt** (binæren finnes ikke på hosten).
 - **CI på eksakt endelig HEAD:** denne filen navngir BEVISST ingen run-id (enhver commit som skriver
   run-id-en hit endrer selv HEAD og gjør påstanden umiddelbart usann). Run-id + status for
   `build-test`, `windows-git-auth` og `gitleaks` rapporteres i `CLAUDE_REPORT` på GitHub-issue **#68**.
 
+## Separat observerte Windows-host-gap (IKKE rørt i denne sliceen)
+
+Rapportert, ikke opportunistisk fikset - de hindrer ikke sannferdig D-125-verifikasjon:
+
+1. **`.cjs` EFTYPE ved `spawnSync`** - `docker-transport.test.ts`, `sandbox-docker-extra-env.test.ts`,
+   `claude-code-agent.test.ts`. Windows kan ikke `spawnSync` en `.cjs`-fil direkte som kjørbar.
+2. **CRLF-vs-LF i kildeteksts-assertions** - `worker-coding-wiring.test.ts`,
+   `ua3-live-pool-separation.test.ts`. Root cause er nå identifisert: repoet har `core.autocrlf=true`
+   og **ingen `.gitattributes`**, så assertions med innebygd `\n`
+   (f.eks. `toContain("new ToolGateway(\n      pool, policy,")`) kan aldri matche en CRLF-checkout.
+3. **embedded-Postgres port-race** - observert som flakiness (en kjøring ga 6 filer/45 feil der
+   samme tre ellers gir 5/31). Portene velges tilfeldig uten kollisjonssjekk.
+
 ## Flagg-status
 
-`WINDOWS_MIGRATION_ENCODING_SAFE=true`, `MIGRATION_ENCODING_GUARD_ENFORCED=true`,
-`LOCAL_DB_SUITES_RUNNABLE_ON_WINDOWS_HOST=true` (**endret fra `false`**), `NEW_TABLES_ADDED=0`,
-`NEW_PROVIDERS_ADDED=0`, `HOST_ACCEPTANCE_REQUIRED=false`, `HARD_EXTERNAL_BLOCKER=false`.
+`UA7_TELEGRAM_INBOUND_OWNER=true`, `UA7_TELEGRAM_INBOUND_NON_OWNER=NOT_BUILT_BY_DESIGN_D122`,
+`NEW_TABLES_ADDED=0`, `NEW_MIGRATIONS_ADDED=0`, `NEW_PROVIDERS_ADDED=0`,
+`NEW_CREDENTIALS_OR_SCOPES=0`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`,
+`HOST_ACCEPTANCE_REQUIRED=false`, `HARD_EXTERNAL_BLOCKER=false`.
 
 **INGEN sannhetsflagg er flippet av denne oppgaven.** Uendret og fortsatt åpent:
 `Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `UA7_ACCEPTANCE_4=PARTIAL`, `UA7_COMPLETE=false`,
 `D108_COMPLETE=false`, `UA6_COMPLETE=false`, `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
 `UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32_POINT1`. Denne oppgaven rørte hverken credentials,
-leverandør-verifisering, juridisk vurdering eller D-108, og gjør **ingen UA-7-påstand sannere enn
-før**. Det eneste som er endret er at UA-7-arbeidet nå er lokalt verifiserbart på Tobias sin egen
-host framfor å måtte utsettes til Linux-CI. UA-7-akseptansekriterier uendret: **1 PASS** (D-121),
-**2 PASS**, **3 PASS**, **4 PARTIAL**. **Q-32 er FORTSATT ÅPEN** (punkt 1 og 3).
+leverandør-verifisering, juridisk vurdering eller D-108. UA-7-akseptansekriterier uendret:
+**1 PASS** (D-121), **2 PASS**, **3 PASS**, **4 PARTIAL**. **Q-32 er FORTSATT ÅPEN** (punkt 1 og 3).
+
+## Gjenstående UA-7-gap (eksakt)
+
+- **Akseptansekriterium 4 = PARTIAL**, blokkert av **Q-32 punkt (1)** - en eier-/juridisk handling
+  Tobias må gjøre selv (kontroll av OpenAI som databehandler for tale: region, databehandleravtale,
+  treningsvilkår, retensjon + utfylling av `PROCESSOR_REGION_MATRIX.md`). Kode kan ikke lukke den.
+- **Q-32 punkt (3)** - Tobias må installere whisper.cpp/piper-binærer på hosten før `health`-tale er
+  reelt tilgjengelig.
+- **Ikke-eier-Telegram-identiteter** - bevisst ikke bygget (D-122: ingen deterministisk koblingsnøkkel).
+- **Møtetranskripsjon** - `DEFERRED_WITHIN_PHASE`, uendret.
+- Credentials, leverandør-live-verifisering, juridisk/kontraktsverifisering og D-108 er av Tobias
+  eksplisitt sekvensert til den avsluttende integrasjons-/deploy-fasen.
 
 ## PR-status
 
-Draft-PR på branch `claude/d124-windows-db-migration-encoding` mot `main`. **IKKE merget, IKKE
+Draft-PR på branch `claude/d125-ua7-telegram-inbound-owner` mot `main`. **IKKE merget, IKKE
 self-approved** (`ARCHITECT_MERGE_APPROVED=false` i byggeordren). Fersk CI på eksakt endelig HEAD
 kjøres etter push og rapporteres med run-id og jobbstatus i `CLAUDE_REPORT` på issue #68. Venter på
 uavhengig ChatGPT-arkitekt-review (D-120).
 
 ## Blokkeringer
 
-Ingen tekniske. `HARD_EXTERNAL_BLOCKER=false`.
-
-Uendret fra før, og IKKE berørt av denne oppgaven: **Q-32 punkt (1)** krever en eier-/juridisk
-handling fra Tobias (kontroll av OpenAI som databehandler for tale - region, databehandleravtale,
-treningsvilkår, retensjon - og utfylling av radene i `PROCESSOR_REGION_MATRIX.md`); dette er den
-eneste gjenstående avhengigheten for `UA7_ACCEPTANCE_4`, og kode kan ikke lukke den. **Q-32 punkt
-(3)** krever at Tobias installerer whisper.cpp/piper-binærer på hosten før `health`-tale blir reelt
-tilgjengelig. Tobias har eksplisitt sekvensert alle credentials, leverandør-live-verifisering,
-juridisk/kontraktsverifisering og D-108-arbeid til den avsluttende integrasjons-/deploy-fasen.
+Ingen tekniske for denne sliceen. `HARD_EXTERNAL_BLOCKER=false`.
+Q-32 punkt (1) og (3) er uendret eier-/host-handlinger Tobias må utføre selv.
 
 ## Neste oppgave
 
 Avventer uavhengig arkitekt-review av denne PR-en. INGEN merge, INGEN neste slice, INGEN D-108,
-INGEN UA-8 startet av denne runden. Naturlig kandidat etter review er den som sto oppført før denne
-oppgaven: Telegram inngående som samtalekanal - det eneste gjenstående
-`NOT_STARTED_PROVIDER_INDEPENDENT`-elementet, med det dokumenterte forbeholdet om manglende
-deterministisk koblingsnøkkel i IMPLEMENTATION_PLAN sin D-122-matrise. Q-32 punkt 1 og 3 forblir
-eier-/host-handlinger Tobias må gjøre selv.
+INGEN UA-8 startet av denne runden. Etter review er de dependency-korrekte kandidatene: (a) de tre
+separat rapporterte Windows-host-gapene over som egen, avgrenset oppgave (samme mønster som D-124 -
+de er en akkumulerende skatt på lokal verifiserbarhet), eller (b) neste masterplan-slice slik
+IMPLEMENTATION_PLAN sekvenserer den. UA-7 kan IKKE lukkes av kode alene så lenge Q-32 punkt 1 er åpen.

@@ -11,6 +11,7 @@ export * from "./services/context-builder.ts";
 export * from "./services/fast-router.ts";
 export * from "./services/device-service.ts";
 export * from "./services/voice-session-authority.ts";
+export * from "./services/telegram-owner-authority.ts";
 export * from "./services/runtime-role.ts";
 export * from "./services/erasure-ledger.ts";
 export * from "./services/tenant-catalog.ts";
