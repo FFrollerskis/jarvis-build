@@ -11,17 +11,35 @@
     Authorised by the scope update on WORKER-SELF-RECOVERY-20260907: this is ONE
     recovery supervisor, never a second implementation worker.
 
+    D126 review blocker 4, same fixes as install-task.ps1:
+      - the existing task's principal and executable are REUSED by default, so
+        the host's actual logon/auth context is never silently replaced;
+      - the existing definition is exported to a backup first;
+      - registration is PROBED under a temporary name, so a denial leaves any
+        working task completely untouched;
+      - the real task is replaced with Register-ScheduledTask -Force, never
+        unregister-then-register, so there is no window with no task;
+      - the result is verified, and the backup is restored if it is wrong.
+
+    Because this task is INTRODUCED by the D-126 change, a rollback removes it
+    again: deploy.mjs records introduced tasks in the install manifest and
+    rollback.ps1 unregisters them.
+
   .PARAMETER IntervalMinutes
     How often the supervisor checks the worker. Default 15 - deliberately much
     less frequent than the worker's own 5-minute cadence, because the supervisor
     only needs to notice a DEAD worker, not to race it.
 #>
 
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$TaskName = "JarvisWorkerSupervisor",
     [string]$WorkerTaskName = "JarvisClaudeWorker",
     [int]$IntervalMinutes = 15,
-    [switch]$Interactive
+    [ValidateSet("S4U", "Interactive", "Password", "ServiceAccount", "InteractiveOrPassword")]
+    [string]$LogonType,
+    [switch]$Interactive,
+    [string]$Shell
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,12 +59,61 @@ if ($null -eq $worker) {
 }
 
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($existing) {
-    Write-Host "Existing task '$TaskName' found - unregistering before re-registering (idempotent update)."
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+
+# --- preserve the host's actual execution context -------------------------
+$existingExecute = $null
+$existingUserId = $null
+$existingLogonType = $null
+$existingRunLevel = $null
+if ($null -ne $existing) {
+    $existingUserId = [string]$existing.Principal.UserId
+    $existingLogonType = [string]$existing.Principal.LogonType
+    $existingRunLevel = [string]$existing.Principal.RunLevel
+    $firstAction = @($existing.Actions)[0]
+    if ($null -ne $firstAction) { $existingExecute = [string]$firstAction.Execute }
+    Write-Host "Existing task '$TaskName' found (execute=$existingExecute, logonType=$existingLogonType)."
 }
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
+if ($Shell) {
+    $shellPath = $Shell
+} elseif ($existingExecute) {
+    $shellPath = $existingExecute
+} elseif ($null -ne $worker -and $null -ne @($worker.Actions)[0]) {
+    # Match whatever the worker task already uses, rather than assuming.
+    $shellPath = [string](@($worker.Actions)[0].Execute)
+    Write-Host "Reusing the shell the worker task already runs: $shellPath"
+} else {
+    $pwsh = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($null -ne $pwsh) { $shellPath = $pwsh.Source } else { $shellPath = (Get-Command powershell.exe -ErrorAction Stop).Source }
+}
+
+if ($Interactive) { $LogonType = "Interactive" }
+if (-not $LogonType) {
+    if ($existingLogonType) {
+        $LogonType = $existingLogonType
+    } elseif ($null -ne $worker) {
+        # Match the worker's context: a supervisor that cannot run in the same
+        # circumstances as the worker is no recovery path at all.
+        $LogonType = [string]$worker.Principal.LogonType
+        Write-Host "Reusing the worker task's logon type: $LogonType"
+    } else {
+        $LogonType = "S4U"
+    }
+}
+$userId = if ($existingUserId) { $existingUserId } elseif ($null -ne $worker) { [string]$worker.Principal.UserId } else { $env:USERNAME }
+$runLevel = if ($existingRunLevel) { $existingRunLevel } else { "Limited" }
+
+$backupXml = $null
+if ($null -ne $existing) {
+    $backupDir = Join-Path $here "backups\task-definitions"
+    New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+    $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss")
+    $backupXml = Join-Path $backupDir "$TaskName-$stamp.xml"
+    Export-ScheduledTask -TaskName $TaskName | Out-File -FilePath $backupXml -Encoding utf8
+    Write-Host "Backed up the existing definition to: $backupXml"
+}
+
+$action = New-ScheduledTaskAction -Execute $shellPath `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$runScript`"" `
     -WorkingDirectory $here
 
@@ -60,27 +127,50 @@ $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30)
 
-if ($Interactive) {
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
-} else {
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType $LogonType -RunLevel $runLevel
+
+if (-not $PSCmdlet.ShouldProcess($TaskName, "Register the supervisor scheduled task")) {
+    Write-Host "-WhatIf: would register '$TaskName' with execute=$shellPath user=$userId logonType=$LogonType. Nothing was changed."
+    exit 0
 }
 
+$probeName = "$TaskName-probe"
 try {
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($periodic, $atStartup) -Settings $settings -Principal $principal | Out-Null
+    Register-ScheduledTask -TaskName $probeName -Action $action -Trigger @($periodic, $atStartup) -Settings $settings -Principal $principal -Force | Out-Null
 } catch {
     Write-Error @"
-Registration of '$TaskName' was DENIED: $($_.Exception.Message)
+Registration of '$TaskName' was DENIED (verified with a temporary probe task, so any existing
+task was NOT touched): $($_.Exception.Message)
 
 This script does not change permissions to work around a denial. Required host action:
   - run this script from an elevated PowerShell, or
-  - grant '$env:USERNAME' the 'Log on as a batch job' right, or
-  - re-run with -Interactive.
+  - grant '$userId' the 'Log on as a batch job' right, or
+  - re-run with -LogonType Interactive.
 "@
+    exit 1
+}
+try { Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
+
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger @($periodic, $atStartup) -Settings $settings -Principal $principal -Force | Out-Null
+} catch {
+    Write-Error "Replacing '$TaskName' failed after the probe succeeded: $($_.Exception.Message)"
+    if ($backupXml -and (Test-Path -LiteralPath $backupXml)) {
+        Register-ScheduledTask -TaskName $TaskName -Xml (Get-Content -LiteralPath $backupXml -Raw) -User $userId -Force | Out-Null
+        Write-Host "Previous definition restored."
+    }
+    exit 1
+}
+
+$verify = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($null -eq $verify) {
+    Write-Error "Verification failed: '$TaskName' is not registered after the replace."
     exit 1
 }
 
 Write-Host "Registered '$TaskName' - at startup and every $IntervalMinutes minute(s)."
+Write-Host "  execute:   $shellPath"
+Write-Host "  principal: user=$userId logonType=$LogonType runLevel=$runLevel"
 Write-Host "Read-only check:  node supervisor.mjs status"
 Write-Host "Dry run:          node supervisor.mjs run --dry-run"
 Write-Host ""

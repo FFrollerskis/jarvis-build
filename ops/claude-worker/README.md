@@ -26,30 +26,67 @@ I tillegg: en håndskrevet patch av wrapperen fra mobil innførte et fremmed teg
 ga ParserError, og stoppet alt uten at noe rapporterte det. Derfor er alle
 `.ps1`-filer nå ren ASCII, sporet i repoet, og verifisert av `verify-scripts.ps1`.
 
+## Hvorfor v2.1 finnes (D-126 arkitekt-review, 2026-09-07)
+
+Den uavhengige arkitekt-reviewen av den faktiske v2-koden fant syv reelle feil
+som CI ikke fanget. Hver enkelt er reprodusert lokalt av arkitekten, og hver
+enkelt har nå en test som feiler på den gamle implementasjonen:
+
+| # | Faktisk feil i v2 | Reprodusert som | Rettet i |
+|---|-------------------|-----------------|----------|
+| 1 | Kandidat ble valgt FØR låsen, og `isEligibleNow` avviser alltid `IN_PROGRESS`. En krasj/reboot midt i dispatch nådde derfor aldri rekonsilieringen: tasken kunne aldri kjøre igjen. Barnets pid ble dessuten lagret FØRST etter at `runClaude` returnerte, så under hele dispatchen fantes barnet kun i låsen — som slettes ved reclaim av død forelder. | `CRASHED_IN_PROGRESS_ELIGIBLE=false` | `worker.mjs` (lås → state → recovery → kandidat), `lib/recovery.mjs`, `lib/procid.mjs`, `lib/dispatch.mjs` (`onSpawn`) |
+| 2 | `acquireLock` publiserte en TOM `wx`-fil, lukket fd og skrev JSON etterpå; tomme/ugyldige låser ble slettet umiddelbart. `heartbeat` trunkerte samme fil på hvert slag. Samtidige reclaimere kunne slette hverandres ferske låser. State ble lastet FØR låsen og skrevet uten lås. | `EMPTY_LOCK_RECLAIMED=true` | `lib/lock.mjs` (link-atomisk publisering, rename-atomisk heartbeat, innholdsverifisert reclaim, eierskaps-token), `lib/statusjournal.mjs`, `worker.mjs` |
+| 3 | `saveStateAtomic` kopierte en korrupt primær over den eneste gode backupen rett etter gjenoppretting. `migrateState(null)` og annen syntaktisk gyldig, ugyldig JSON ble stille til tom historikk. | `BACKUP_AFTER_RECOVERY_SAVE=corrupt`, `NULL_STATE_ACCEPTED_AS_EMPTY=true` | `lib/state.mjs` (skjemavalidering, verifisert backup-rotasjon, `first_run` skilt fra tapt state) |
+| 4 | `install.ps1` kopierte over levende deployment fil for fil og slettet `run-worker-safe.ps1` mens den registrerte oppgaven kunne peke på den. `install-task.ps1` avregistrerte fungerende oppgave FØR ny registrering kunne feile. Rollback lot innførte moduler/oppgaver stå igjen og håndhevet ikke gamle hasher. | — | `lib/deploy.mjs` + `deploy.mjs` (stage → verifiser → bytt → auto-rollback), `install.ps1`, `rollback.ps1`, `install-task.ps1`, `install-supervisor.ps1`, `run-worker.ps1` (pending-activation-handoff) |
+| 5 | Kommanderte restarts hoppet over døgnbudsjett/backoff; kommandoer ble validert i én batch, så to like `COMMAND_ID` i samme poll kjørte begge; `performRestart` merket kommandoen utført FØR starten uten noen rekonsiliering, så en krasj før start mistet forespørselen for alltid; utsatte forespørsler ble konsumert; `Start-ScheduledTask` kunne returnere ok etter en ikke-terminerende feil. | — | `supervisor.mjs` (intent → effect → result → receipt), `lib/supervise.mjs`, `lib/wintask.mjs` |
+| 6 | Hele TASK_ID-sluggen finnes ikke i faktiske branch-navn, så `existingBranch`/`PR` ble `null` selv når PR-en fantes — og en retry ville duplisert branch/PR/merge. Feilede GitHub-oppslag ble til tomme lister. | `KNOWN_D125_BRANCH=null KNOWN_PR=null` | `lib/reconcile.mjs` (eksakte assosiasjoner), `lib/github.mjs` (`{ok, items, error}`, paginering) |
+| 7 | `gitStatusLines` ignorerte exit/feil og leste manglende stdout som «rent». `claudeArgs` defaultet til `--dangerously-skip-permissions`. Ingen grensesjekk, ingen path-containment, ingen TASK_ID-validering før bruk som katalognavn, ingen ekte vertsbinding. `TEMP` hindrer ikke relative kladdefiler. | — | `lib/git.mjs`, `lib/config.mjs`, `lib/state.mjs` (`isValidTaskId`), `lib/dispatch.mjs` (scratch-disiplin i prompten) |
+
 ## Hva som faktisk garanteres
 
 Worker (`worker.mjs`):
 
-- **A.** Kladd havner utenfor repoet ved konstruksjon (`TEMP`/`TMP` peker på
-  `tmp/`). Gamle etterlatenskaper flyttes til unik karantene FØR dirty-guarden,
-  men bare hvis filnavnet treffer en fullt ankret allowlist, filen er en vanlig
-  fil (aldri symlink/reparse point), innholdet faktisk er et protokolldokument,
-  og `TASK_ID` er kjent for workeren. Bytes hashes før og etter. Ukjente og
-  sporede filer røres aldri. Ingen `git clean/reset/stash`, ingen `.gitignore`.
+- **A.** Kladd havner utenfor repoet ved konstruksjon (`TEMP`/`TMP`/`TMPDIR`
+  peker på `tmp/`), OG prompten oppgir den absolutte scratch-stien eksplisitt med
+  kladdedisiplin — miljøvariabler alene stopper ikke en relativ filsti. Gamle
+  etterlatenskaper flyttes til unik karantene FØR dirty-guarden, men bare hvis
+  filnavnet treffer en fullt ankret allowlist, filen er en vanlig fil (aldri
+  symlink/reparse point), innholdet faktisk er et protokolldokument, og `TASK_ID`
+  er kjent for workeren. Bytes hashes før og etter. Ukjente og sporede filer røres
+  aldri. Ingen `git clean/reset/stash`, ingen `.gitignore`.
 - **B.** Timeout, exit≠0, spawn-feil eller manglende report gir ALDRI
   «processed». Fullført krever en matchende betrodd `CLAUDE_REPORT` for akkurat
   den `TASK_ID`-en, postet etter dispatch, med terminal `STATUS`. State skrives
-  atomisk med backup; er både primær og backup ulesbar, nekter workeren å kjøre
-  i stedet for å miste replay-beskyttelsen.
-- **C.** Én lås dekker preflight, karantene, dispatch og alle state-skriv.
-  Levende eier avgjøres av prosessidentitet (pid + starttid + host) og
-  heartbeat, ikke av alder. En aktiv lås ryddes aldri automatisk.
+  atomisk med en VERIFISERT backup; en korrupt primær overskriver aldri en god
+  backup. Er både primær og backup ulesbar, nekter workeren å kjøre i stedet for
+  å miste replay-beskyttelsen. Ekte førstegangskjøring rapporteres eksplisitt og
+  kan aldri forveksles med tapt historikk.
+- **C.** Låsen tas FØRST, og dekker state-lesing, preflight, karantene, dispatch
+  og alle state-skriv. Levende eier avgjøres av prosessidentitet (pid + starttid
+  + host) og heartbeat, ikke av alder. Eierskap er et token, ikke en pid. En
+  aktiv, fremmed eller uverifiserbar lås ryddes aldri automatisk, publisering er
+  link-atomisk, heartbeat er rename-atomisk, og en reclaim fjerner kun de
+  nøyaktige bytene som ble klassifisert.
+- **C2 (crash-recovery).** Under låsen, FØR noen kandidat velges, gjenopprettes
+  hver task som en krasjet forelder etterlot `IN_PROGRESS`: et beviselig levende
+  barn beskyttes (identitet, aldri pid alene, med etterkommere rapportert),
+  en eksisterende betrodd report lukker tasken uten ny dispatch, og ellers går
+  tasken tilbake til den vanlige retry-banen. Et uprøvbart pid blokkerer kun
+  innenfor barnets eget levetidsbudsjett — pid-gjenbruk kan aldri stoppe loopen
+  permanent.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
-  gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen. Exit-koden er
+  gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
+  append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
   aldri 0 når noe er blokkert.
 - **E.** Bare allerede autoriserte tasks kjøres. Ingen oppfunnet neste arbeid.
 - **F.** Egne health-hendelser per steg, så «scheduleren kjørte» aldri forveksles
   med «arbeidet ble fullført».
+- **Fail-closed.** Et git-spørsmål som ikke kan besvares er UKJENT, aldri «rent».
+  `origin` må peke på det konfigurerte repoet. `claudeArgs` er påkrevd og
+  eksplisitt — det finnes ingen permissiv default, og et permission-bypass-flagg
+  krever `acknowledgeDangerousClaudeArgs: true` i samme fil. Alle numeriske
+  grenser er endelige og validerte, alle skrivestier må ligge utenfor repoet, og
+  `TASK_ID` valideres som én trygg path-komponent før den brukes som katalognavn.
 
 Supervisor (`supervisor.mjs`), autorisert av scope-oppdateringen på
 WORKER-SELF-RECOVERY-20260907 — ÉN recovery-supervisor, aldri en andre
@@ -60,10 +97,18 @@ implementasjons-worker:
 - poller SAMME betrodde issue for nøyaktig to kommandoer: `STATUS` og
   `RESTART_WORKER`, med ankret skjema, unik `COMMAND_ID`, host-/worker-binding,
   kort utløp, avvisning av redigerte og replayede kommentarer,
+- validerer hver kommando I DET ØYEBLIKKET den utføres, mot fersk observasjon —
+  to like `COMMAND_ID` i samme poll kan ikke begge kjøre,
 - starter den eksisterende oppgaven når workeren beviselig er en død
-  kø-konsument, innenfor et døgnbudsjett og med backoff,
-- **avbryter aldri levende arbeid** og **avslutter aldri en prosess** — en
-  `RESTART_WORKER` mot en travel worker blir utsatt, ikke tvunget.
+  kø-konsument, innenfor et døgnbudsjett og med backoff — som gjelder KOMMANDERTE
+  restarts på nøyaktig samme måte,
+- bruker durable stadier (intent → effect → result → receipt): en krasj rundt
+  starten rekonsilieres fra faktisk host-bevis (workerens egen health-journal),
+  en kvittering som ikke ble postet forsøkes på nytt UTEN å gjenta effekten, og
+  en forespørsel går aldri tapt,
+- **utsetter, konsumerer ikke**: en `RESTART_WORKER` mot en travel worker bevares
+  og revurderes hver poll til den trygt kan utføres eller utløper eksplisitt,
+- **avbryter aldri levende arbeid** og **avslutter aldri en prosess**.
 
 ## Exit-koder (både worker og supervisor)
 
@@ -77,39 +122,67 @@ implementasjons-worker:
 En Windows-oppgave i `Ready` med `LastTaskResult=0` betyr KUN at scheduleren
 kjørte. Ekte køhelse: `node worker.mjs health`.
 
-## Installasjon (staged, aldri in-place over en kjørende worker)
+## Installasjon (transaksjonell: stage → verifiser → bytt → auto-rollback)
 
 ```powershell
 cd <repo>\ops\claude-worker
-.\verify-scripts.ps1              # alle .ps1 parser og er ASCII
+.\verify-scripts.ps1              # alle .ps1 parser (ekte AST) og er ASCII; alle .mjs parser med node
 .\install.ps1 -WhatIf             # full plan, endrer ingenting
-.\install.ps1                     # backup + kopier + hash-verifiser
+.\install.ps1                     # stage + hash-verifiser + bytt
 ```
 
-`install.ps1` nekter å skrive over en worker med levende lås, tar backup av alle
-eksisterende filer OG av oppgavedefinisjonene til
-`backups\<tidsstempel>\`, skriver et manifest med SHA256 før/etter, og rører
-aldri `config.json`, `state.json`, `logs/` eller `tmp/`.
+Motoren ligger i `lib/deploy.mjs`/`deploy.mjs` (Node, ikke PowerShell), nettopp
+for at hele feilbanen kan kjøres med ekte filer og injiserte feil i CI. PowerShell
+beholder kun det som virkelig krever det: registrering av oppgaver.
 
-Etter staging (registrerer ingenting av seg selv):
+Garantier:
+
+- alt stages og hash-verifiseres i `staging\<versjon>\` FØR noe levende røres;
+- en levende worker- ELLER supervisor-lås gir UTSATT aktivering med en
+  `pending-activation.json`-markør — ingenting overskrives, ingenting drepes.
+  `run-worker.ps1` anvender markøren ved neste tikk, altså etter at den
+  legitime forelderen har avsluttet. En installasjon startet av workeren selv
+  kan derfor aldri overskrive sin egen forelder;
+- hver fil skrives ved siden av målet og `rename`-es over — et entrypoint
+  forsvinner aldri, ikke et øyeblikk;
+- `run-worker-safe.ps1` fjernes KUN når ingen registrert oppgave refererer den,
+  og aldri i det hele tatt hvis oppgavene ikke kunne spørres;
+- enhver feil under byttet ruller automatisk tilbake til de registrerte gamle
+  hashene og fjerner filer installasjonen innførte;
+- `config.json`, `supervisor.config.json`, `state.json`, `logs/` og `tmp/` er
+  aldri i payloaden og røres aldri.
+
+Etter installasjon (registrerer ingenting av seg selv):
 
 ```powershell
-copy config.example.json config.json                      # hvis den mangler
-copy supervisor.config.example.json supervisor.config.json # sett host + workerTaskName
+copy config.example.json config.json                       # claudeArgs er PÅKREVD og eksplisitt
+copy supervisor.config.example.json supervisor.config.json # sett host til EKSAKT hostname
 node worker.mjs status
-node worker.mjs run --dry-run
+node worker.mjs run --dry-run     # kun lesing: tar ingen lås og skriver ingenting
 node supervisor.mjs status
 node supervisor.mjs run --dry-run
 .\install-task.ps1                # worker-schedule (samme ene worker som før)
 .\install-supervisor.ps1          # supervisor-schedule (startup + intervall)
 ```
 
+`install-task.ps1`/`install-supervisor.ps1` gjenbruker hostens EKSISTERENDE
+principal (UserId/LogonType/RunLevel) og faktiske shell — ingen stille
+substitusjon til `powershell.exe`/S4U. De eksporterer eksisterende definisjon,
+PRØVER registreringen under et midlertidig navn først (så et avslag aldri ødelegger
+en fungerende oppgave), erstatter deretter med `Register-ScheduledTask -Force`
+(aldri avregistrer-så-registrer), verifiserer resultatet og gjenoppretter backupen
+hvis verifikasjonen feiler. Ingen rettigheter endres for å omgå et avslag.
+
 Rollback:
 
 ```powershell
-.\rollback.ps1 -BackupDir "$env:USERPROFILE\.jarvis-claude-worker\backups\<stempel>" -WhatIf
-.\rollback.ps1 -BackupDir "..." -RestoreTasks
+.\rollback.ps1 -WhatIf
+.\rollback.ps1 -RestoreTasks
 ```
+
+Rollback håndhever manifestets gamle SHA256, fjerner filer og oppgaver
+installasjonen innførte, gjenoppretter filer den fjernet, og rører ingen
+operasjonelle data.
 
 ## Kontrollkommandoer til supervisoren
 
@@ -128,7 +201,9 @@ EXPIRES_AT=2026-09-07T02:25:00Z
 
 Avvises ved: feil forfatter, ikke-OWNER, redigert kommentar, gjenbrukt
 `COMMAND_ID`, utløpt, levetid over én time, feil host/worker, ukjent kommando
-eller nøkkel. Supervisoren tolker aldri fritekst, stier eller argumenter.
+eller nøkkel. `TARGET_HOST` må dessuten være maskinen supervisoren FAKTISK kjører
+på — konfigurasjonen valideres mot `os.hostname()` ved oppstart. Supervisoren
+tolker aldri fritekst, stier eller argumenter.
 
 ## Sikkerhet
 
@@ -136,7 +211,8 @@ Ingen token håndteres, leses eller logges her — all GitHub-tilgang går gjenn
 `gh`, som eier sin egen lagrede auth. Alt som skrives til logg, manifest eller
 en kommentar går gjennom `sanitize()`. Manifestet inneholder stier og hasher,
 aldri filinnhold. Ingen tillits- eller godkjenningsgrense er svekket av denne
-reparasjonen: merge-autoritet (D-120) er uendret, og supervisoren kan ikke merge.
+reparasjonen: merge-autoritet (D-120) er uendret, supervisoren kan ikke merge,
+og ingen permission-bypass legges til implisitt noe sted.
 
 ## Tester
 
@@ -144,11 +220,31 @@ reparasjonen: merge-autoritet (D-120) er uendret, og supervisoren kan ikke merge
 npx vitest run ops/claude-worker/test
 ```
 
-103 tester dekker karantene (inkludert den eksakte D125-filen, symlink,
-reparse point, kollisjon, sporede filer), state-migrering og korrupsjons-
-gjenoppretting, låsklassifisering, completion-bevis, backoff, status-dedup,
-tillitsgrensen, supervisor-beslutninger og hemmelighetsvask.
+280 tester. I tillegg til v2-dekningen (karantene inkludert den eksakte
+D125-filen, symlink, reparse point, kollisjon, sporede filer; completion-bevis;
+backoff; status-dedup; tillitsgrensen; hemmelighetsvask) dekker v2.1:
 
-Ikke dekket av vitest og må kjøres på hosten: `verify-scripts.ps1`,
-`install.ps1`/`rollback.ps1`, ekte Task Scheduler-registrering og ekte
+- **ekte samtidighet**: åtte separate OS-prosesser som kolliderer mot samme lås
+  (`test/fixtures/lock-racer.mjs`), inkludert at en tom lås ikke stjeles og at en
+  levende heartbeat-eier aldri fortrenges;
+- **ekte crash-recovery mot det FAKTISKE entrypointet**: `node worker.mjs run`
+  startes som prosess og drepes før spawn, under barnets kjøring og etter
+  report men før completion-lagring (`test/worker-crash-recovery.test.mjs`);
+- **feilinjeksjon i durabilitet**: korrupt primær + gyldig backup, avbrutt
+  skriving, `null`/`[]`/`{}`-state;
+- **installasjon/rollback som fixtures**: injisert feil i hvert steg av byttet,
+  hash-håndhevet rollback, fjerning av innførte filer, bevaring av operasjonelle
+  data, utsatt aktivering under levende lås;
+- **supervisor-protokollen ende-til-ende**: to like `COMMAND_ID` i samme poll,
+  budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet
+  kvittering, og bevart utsettelse fra travel til ledig.
+
+Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
+(`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte
 reboot-persistens.
+
+En ferdig CI-jobb som kjører den EKTE PowerShell-parseren og hele worker-suiten
+på `windows-latest` ligger i `ci/worker-scripts-windows.job.yml`. Den kunne ikke
+legges inn i `.github/workflows/ci.yml` herfra: GitHub-tokenet mangler
+`workflow`-scope (`remote rejected ... without workflow scope`). Lim den inn rett
+før `gitleaks:` med et token som har det scopet.

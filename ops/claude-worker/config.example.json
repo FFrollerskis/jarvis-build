@@ -1,4 +1,6 @@
 {
+  "_comment_claudeArgs": "REQUIRED and explicit. There is deliberately no default: the previous build defaulted a missing claudeArgs to --dangerously-skip-permissions, which silently bypassed the host's permission setup. If this host genuinely needs a permission-bypass flag, add it here AND set acknowledgeDangerousClaudeArgs to true, so the decision is recorded and reviewable.",
+
   "repoOwner": "tsworkflow",
   "repoName": "jarvisbuild",
   "controlIssue": 68,
@@ -7,7 +9,8 @@
   "repoPath": "C:\\Users\\YOU\\path\\to\\jarvisbuild",
 
   "claudeCommand": "claude",
-  "claudeArgs": ["-p", "--dangerously-skip-permissions"],
+  "claudeArgs": ["-p"],
+  "acknowledgeDangerousClaudeArgs": false,
   "promptDelivery": "stdin",
   "claudeTimeoutMinutes": 55,
 
@@ -17,6 +20,7 @@
   "stateBackupFile": "state.json.bak",
   "lockFile": ".worker.lock",
   "disabledFlagFile": "disabled.flag",
+  "postedStatusFile": "logs/posted-status.jsonl",
 
   "scratchRoot": "tmp",
   "quarantineRoot": "tmp/quarantine",
@@ -24,6 +28,7 @@
 
   "heartbeatSeconds": 60,
   "heartbeatTimeoutMinutes": 15,
+  "malformedLockGraceSeconds": 60,
 
   "maxAttempts": 4,
   "backoffBaseMinutes": 10,

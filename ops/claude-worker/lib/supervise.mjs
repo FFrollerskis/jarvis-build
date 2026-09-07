@@ -12,6 +12,17 @@
  *     termination is never performed by the supervisor at all.
  *   - Restarts are budgeted per day and backed off, so a permanently broken
  *     worker cannot become a restart loop.
+ *
+ * D126 review blocker 5, fixed here:
+ *   - a COMMANDED restart used to bypass the daily budget and the backoff
+ *     entirely; only the autonomous path applied them. One operator with a
+ *     script - or one replayed comment stream - could therefore restart the
+ *     worker without limit. `planCommandedRestart` now takes the same budget and
+ *     backoff as `planAutonomousAction`.
+ *   - a crash between "intent recorded" and "start confirmed" had no
+ *     reconciliation at all. `planIntentReconciliation` decides from actual host
+ *     evidence (did the worker's scheduler fire after the intent?) whether the
+ *     effect happened, must be retried, or is genuinely still uncertain.
  */
 
 import { classifyLock } from "./lock.mjs";
@@ -55,10 +66,10 @@ export function assessWorker({
         lockVerdict
       };
     }
-    if (lockVerdict.state === "stale_no_heartbeat") {
+    if (lockVerdict.state === "stale_no_heartbeat" || lockVerdict.state === "unproven_identity") {
       return {
         verdict: WORKER_VERDICT.UNKNOWN,
-        reason: `lock owner alive but not heartbeating: ${lockVerdict.reason}`,
+        reason: `worker lock owner cannot be cleared: ${lockVerdict.reason}`,
         health,
         lockVerdict
       };
@@ -67,6 +78,14 @@ export function assessWorker({
     // the lock tells us nothing about liveness, so judge by the health journal.
   }
 
+  if (scheduledTask?.query_failed) {
+    // "I could not ask" is never "the task is not registered".
+    return {
+      verdict: WORKER_VERDICT.UNKNOWN,
+      reason: `the scheduled task could not be queried: ${scheduledTask.error ?? "unknown error"}`,
+      health
+    };
+  }
   if (!scheduledTask?.exists) {
     return { verdict: WORKER_VERDICT.UNKNOWN, reason: "scheduled task is not registered", health };
   }
@@ -92,11 +111,37 @@ export function assessWorker({
   return { verdict: WORKER_VERDICT.HEALTHY, reason: `queue polled ${Math.round(age / 60000)} min ago`, health };
 }
 
-/** Restarts consumed in the trailing 24h window. */
+/**
+ * Restarts consumed in the trailing 24h window.
+ *
+ * Counted per distinct INTENT, so re-driving one interrupted intent to
+ * completion is one restart, not two.
+ */
 export function restartsInWindow(journal, nowMs, windowMs = 24 * 3_600_000) {
-  return (journal ?? []).filter(
-    (e) => e && e.action === "restart_started" && Number.isFinite(Date.parse(e.ts)) && nowMs - Date.parse(e.ts) <= windowMs
-  ).length;
+  const intents = new Set();
+  let unattributed = 0;
+  for (const e of journal ?? []) {
+    if (!e || e.action !== "restart_started") continue;
+    const ts = Date.parse(e.ts);
+    if (!Number.isFinite(ts) || nowMs - ts > windowMs) continue;
+    if (e.intent_id) intents.add(e.intent_id);
+    else unattributed += 1;
+  }
+  return intents.size + unattributed;
+}
+
+function budgetGate({ journal, nowMs, budgetPerDay, backoffMs, lastRestartAt, describe }) {
+  const used = restartsInWindow(journal, nowMs);
+  if (used >= budgetPerDay) {
+    return { action: "report_blocked", reason: `restart budget exhausted (${used}/${budgetPerDay} in 24h): ${describe}` };
+  }
+  if (lastRestartAt) {
+    const since = nowMs - Date.parse(lastRestartAt);
+    if (Number.isFinite(since) && since < backoffMs) {
+      return { action: "defer", reason: `backoff active: ${Math.round((backoffMs - since) / 60000)} min remaining` };
+    }
+  }
+  return null;
 }
 
 /**
@@ -119,24 +164,19 @@ export function planAutonomousAction({ assessment, journal, nowMs, budgetPerDay,
   }
 
   // verdict === DEAD
-  const used = restartsInWindow(journal, nowMs);
-  if (used >= budgetPerDay) {
-    return { action: "report_blocked", reason: `restart budget exhausted (${used}/${budgetPerDay} in 24h): ${assessment.reason}` };
-  }
-  if (lastRestartAt) {
-    const since = nowMs - Date.parse(lastRestartAt);
-    if (Number.isFinite(since) && since < backoffMs) {
-      return { action: "defer", reason: `backoff active: ${Math.round((backoffMs - since) / 60000)} min remaining` };
-    }
-  }
+  const gated = budgetGate({ journal, nowMs, budgetPerDay, backoffMs, lastRestartAt, describe: assessment.reason });
+  if (gated) return gated;
   return { action: "restart", reason: assessment.reason };
 }
 
 /**
  * Decide what to do about an authorised RESTART_WORKER command.
- * Graceful by default: active work defers the restart rather than interrupting it.
+ *
+ * Graceful by default: active work defers the restart rather than interrupting
+ * it. The daily budget and the backoff apply here EXACTLY as they do to the
+ * autonomous path - a commanded restart is not a bypass.
  */
-export function planCommandedRestart({ assessment }) {
+export function planCommandedRestart({ assessment, journal = [], nowMs = Date.now(), budgetPerDay, backoffMs, lastRestartAt = null }) {
   if (assessment.verdict === WORKER_VERDICT.BUSY) {
     return {
       action: "defer",
@@ -152,5 +192,90 @@ export function planCommandedRestart({ assessment }) {
   if (assessment.verdict === WORKER_VERDICT.DISABLED) {
     return { action: "report_blocked", reason: "worker is disabled; a restart would not produce a running worker" };
   }
+  if (budgetPerDay !== undefined) {
+    const gated = budgetGate({
+      journal,
+      nowMs,
+      budgetPerDay,
+      backoffMs: backoffMs ?? 0,
+      lastRestartAt,
+      describe: `commanded restart while worker is ${assessment.verdict}`
+    });
+    if (gated) return gated;
+  }
   return { action: "restart", reason: `worker is ${assessment.verdict}; safe to start the scheduled task` };
+}
+
+/** ---------------- durable intent reconciliation ---------------- */
+
+export const INTENT_STAGE = Object.freeze({
+  INTENT: "intent",                   // recorded, effect NOT yet attempted
+  EFFECT_ATTEMPTED: "effect_attempted", // Start-ScheduledTask was invoked, outcome unknown
+  RESULT_RECORDED: "result_recorded"    // outcome known and durable
+});
+
+/**
+ * Reconcile an intent left behind by a crash, using ACTUAL host evidence.
+ *
+ * The evidence is the worker's own health journal: if the worker's scheduler
+ * fired (or the queue was polled) at or after the moment the intent was
+ * recorded, the intended effect demonstrably occurred - regardless of whether we
+ * lived long enough to write that down.
+ *
+ * Deliberately NOT used as evidence: `LastRunTime` of a task that repeats every
+ * five minutes, because it advances on its own and would "prove" a restart that
+ * never happened.
+ *
+ * Returns `{ action, reason }`:
+ *   clear         - nothing left to do
+ *   post_receipt  - the effect is settled; only the receipt is missing
+ *   confirm       - host evidence shows the effect happened; record and receipt it
+ *   retry_effect  - the effect provably did not happen; re-drive the SAME intent
+ *   uncertain     - not yet decidable; report and wait rather than guess
+ */
+export function planIntentReconciliation({ intent, nowMs, workerHealth, evidenceWindowMs = 20 * 60_000 }) {
+  if (!intent) return { action: "clear", reason: "no pending intent" };
+
+  if (intent.stage === INTENT_STAGE.RESULT_RECORDED) {
+    return intent.receipt_posted
+      ? { action: "clear", reason: "intent fully settled" }
+      : { action: "post_receipt", reason: "result is durable; only the receipt is missing" };
+  }
+
+  const intentMs = Date.parse(intent.created_at ?? "");
+  if (!Number.isFinite(intentMs)) {
+    return { action: "uncertain", reason: "pending intent has no usable timestamp" };
+  }
+
+  const invoked = Date.parse(workerHealth?.last_scheduler_invocation ?? "");
+  const polled = Date.parse(workerHealth?.last_queue_poll ?? "");
+  const evidenceMs = Math.max(
+    Number.isFinite(invoked) ? invoked : Number.NEGATIVE_INFINITY,
+    Number.isFinite(polled) ? polled : Number.NEGATIVE_INFINITY
+  );
+  if (Number.isFinite(evidenceMs) && evidenceMs >= intentMs) {
+    return {
+      action: "confirm",
+      reason: `the worker recorded activity at ${new Date(evidenceMs).toISOString()}, at or after the intent - the restart took effect`
+    };
+  }
+
+  if (intent.stage === INTENT_STAGE.INTENT) {
+    return {
+      action: "retry_effect",
+      reason: "the intent was recorded but the start was never attempted; no effect has occurred, so re-driving it repeats nothing"
+    };
+  }
+
+  if (nowMs - intentMs > evidenceWindowMs) {
+    return {
+      action: "retry_effect",
+      reason: `the start was attempted ${Math.round((nowMs - intentMs) / 60000)} min ago and the worker still shows no activity, so the effect did not take`
+    };
+  }
+
+  return {
+    action: "uncertain",
+    reason: "the start was attempted but its effect is not yet observable; waiting rather than repeating it"
+  };
 }

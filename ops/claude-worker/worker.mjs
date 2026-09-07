@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Jarvis Architect <-> Claude worker (v2, self-recovering).
+ * Jarvis Architect <-> Claude worker (v2.1, self-recovering).
  *
  * Polls the GitHub control issue for trusted ARCHITECT_TASK comments and
  * dispatches at most ONE per invocation to a non-interactive Claude Code
@@ -9,33 +9,64 @@
  * detects, validates trust, quarantines legacy scratch, dispatches, and then
  * records the outcome HONESTLY.
  *
- * What changed in v2 (see ops/claude-worker/README.md and D-126):
- *   A. legacy in-repo scratch is quarantined outside the repo before the dirty
- *      guard, with provenance checks - no more permanent "dirty worktree" stall;
- *   B. timeout / non-zero / spawn error / missing report never mark a task
- *      processed, and completion requires a matching trusted CLAUDE_REPORT;
- *   C. the single-worker lock spans preflight..state-write and uses process
- *      identity + heartbeat instead of a pid and an age budget;
- *   D. bounded retries with backoff, and a deduplicated control-queue status on
- *      repeated failure - never a silent exit 0 while blocked;
- *   E. only the already-authorised task is ever resumed;
- *   F. distinct health events, so "the scheduler ran" is never mistaken for
- *      "the work completed".
+ * Requirements A-F are unchanged (see README.md and D-126).
+ *
+ * What the D126 independent review changed in this file:
+ *
+ *   BLOCKER 1 - the run used to be: load state -> pick candidate -> acquire lock
+ *   -> reconcile. A task left IN_PROGRESS by a crashed parent is not eligible,
+ *   so it was never picked, so the lock was never taken for it, so reconciliation
+ *   never ran: a permanent stall. The order is now
+ *       acquire lock -> load state -> RECOVER abandoned tasks -> pick candidate,
+ *   and the child's identity is persisted at spawn rather than after the run.
+ *
+ *   BLOCKER 2 - state was loaded before the lock and written on the no-candidate
+ *   and lock-denied paths with no lock at all. Every state write now happens
+ *   under verified ownership (`persistState`), state is re-read AFTER the lock,
+ *   and status dedup moved to its own append-only journal so it never needs the
+ *   exclusive lock.
+ *
+ *   BLOCKER 6 - reconciliation now uses exact recorded associations and treats a
+ *   failed GitHub lookup as UNKNOWN, never as "no PR exists".
+ *
+ *   BLOCKER 7 - git failures are explicit, the TASK_ID is validated before it is
+ *   used as a path component, and the remote is checked against the configured
+ *   repository.
  */
 
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
 import { WORKER_VERSION, loadWorkerConfig } from "./lib/config.mjs";
 import { HEALTH_EVENTS, emitHealth, readHealth, summarizeHealth, sanitize } from "./lib/health.mjs";
-import { TASK_STATUS, loadState, saveStateAtomic, upsertTask, getTask, isEligibleNow, isTerminal } from "./lib/state.mjs";
-import { acquireLock, heartbeat, releaseLock, readLock, isProcessAlive } from "./lib/lock.mjs";
+import {
+  TASK_STATUS,
+  loadState,
+  saveStateAtomic,
+  upsertTask,
+  getTask,
+  isEligibleNow,
+  isTerminal,
+  isValidTaskId,
+  findAbandonedTasks
+} from "./lib/state.mjs";
+import { acquireLock, heartbeat, releaseLock, readLock, holdsLock } from "./lib/lock.mjs";
+import { matchProcessIdentity, listDescendants, isProcessAlive } from "./lib/procid.mjs";
 import { recoverScratch } from "./lib/quarantine.mjs";
 import { collectTrustedTasks } from "./lib/trust.mjs";
-import { assessCompletion, reconcilePriorAttempt, computeBackoff, shouldPostStatus, statusKey } from "./lib/reconcile.mjs";
+import {
+  assessCompletion,
+  reconcilePriorAttempt,
+  mergeObservedAssociations,
+  computeBackoff,
+  shouldPostStatus,
+  statusKey
+} from "./lib/reconcile.mjs";
+import { RECOVERY, planTaskRecovery, childLifetimeBudgetMs, describeProtectedChild } from "./lib/recovery.mjs";
 import { runClaude, OUTCOME } from "./lib/dispatch.mjs";
+import { collectRepoFacts, gitStatusLines, gitHead, gitCurrentBranch, remoteMatchesRepo } from "./lib/git.mjs";
+import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import { verifyAuth, fetchIssueComments, postComment, listRemoteBranches, listPulls } from "./lib/github.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -61,22 +92,33 @@ function log(cfg, line) {
   }
 }
 
-function git(cfg, args) {
-  return spawnSync("git", args, { cwd: cfg.repoPath, encoding: "utf8" });
-}
-
-function gitStatusLines(cfg) {
-  const out = git(cfg, ["status", "--porcelain=v1", "--untracked-files=all"]).stdout ?? "";
-  return out.split(/\r?\n/).filter((l) => l.trim().length > 0);
+/**
+ * Every state write goes through here.
+ *
+ * Blocker 2: a worker that has lost the lock (reclaimed as stale, or the file
+ * replaced under it) must never write the task history. Losing ownership is a
+ * hard stop, not a warning.
+ */
+function persistState(cfg, state, token) {
+  if (!holdsLock(cfg.lockFile, token)) {
+    throw new Error(
+      "refusing to write worker state: this process no longer owns the worker lock. "
+      + "Another instance may have reclaimed it; the in-memory state is not authoritative any more."
+    );
+  }
+  return saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile, { schema: "worker" });
 }
 
 /**
- * Post a deduplicated status to the control queue and record that we did.
+ * Post a deduplicated status to the control queue.
  * Requirement D: repeated failure must stay VISIBLE without spamming.
+ * Dedup state lives in an append-only journal, so this works with or without
+ * the exclusive lock.
  */
-function reportStatus(cfg, state, { taskId, phase, reason, detail, nextAction }) {
+function reportStatus(cfg, { taskId, phase, reason, detail, nextAction }) {
   const key = statusKey({ taskId, phase, reason });
-  const decision = shouldPostStatus(state.posted_status_keys, key, Date.now(), cfg.statusRepeatHours * 3_600_000);
+  const posted = readPostedStatus(cfg.postedStatusFile);
+  const decision = shouldPostStatus(posted, key, Date.now(), cfg.statusRepeatHours * 3_600_000);
   if (!decision.post) {
     log(cfg, `Status suppressed (${decision.reason}): ${phase}/${reason}`);
     return { posted: false, reason: decision.reason };
@@ -99,7 +141,7 @@ function reportStatus(cfg, state, { taskId, phase, reason, detail, nextAction })
 
   const res = postComment(cfg, body, cfg.scratchRoot);
   if (res.ok) {
-    state.posted_status_keys[key] = new Date().toISOString();
+    recordPostedStatus(cfg.postedStatusFile, key);
     log(cfg, `Posted status comment ${res.commentId} for ${phase}/${reason}`);
   } else {
     log(cfg, `Failed to post status comment: ${res.error}`);
@@ -117,20 +159,75 @@ async function cmdRun(cfg, { dryRun }) {
     return EXIT.OK;
   }
 
-  // --- state, loaded before anything mutates ---
-  const loaded = loadState(cfg.stateFile, cfg.stateBackupFile);
+  if (dryRun) {
+    // Strictly read-only: no lock is taken and NOTHING is written, so a dry run
+    // can never disturb a live owner or the task history.
+    return cmdDryRun(cfg);
+  }
+
+  // --- ownership FIRST: nothing is read as authoritative and nothing is written
+  //     before this process provably owns the critical section (blocker 2).
+  const lock = acquireLock(cfg.lockFile, {
+    phase: "startup",
+    heartbeatTimeoutMs: cfg.heartbeatTimeoutMinutes * 60_000,
+    malformedGraceMs: cfg.malformedLockGraceSeconds * 1000
+  });
+
+  if (!lock.acquired) {
+    if (lock.needs_attention) {
+      log(cfg, `Lock owner ${lock.owner?.pid} is alive but has not heartbeated: ${lock.verdict.reason}`);
+      reportStatus(cfg, {
+        taskId: lock.owner?.task_id ?? null,
+        phase: "lock",
+        reason: "owner_alive_but_not_heartbeating",
+        detail: `Lock owner pid=${lock.owner?.pid} phase=${lock.owner?.phase} last heartbeat=${lock.owner?.heartbeat_at}. It was NOT terminated: an alive owner may still be doing real work.`,
+        nextAction: "Inspect the process by hand. If it is genuinely hung, stop that pid, then the next scheduled run reclaims the lock automatically."
+      });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "lock_owner_not_heartbeating" });
+      return EXIT.BLOCKED;
+    }
+    if (lock.verdict?.state === "unproven_identity") {
+      log(cfg, `Lock owner identity could not be confirmed (${lock.verdict.reason}) - refusing to reclaim it.`);
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "lock_owner_identity_unproven" });
+      return EXIT.TRANSIENT;
+    }
+    log(cfg, `Another worker instance is active (${lock.verdict?.reason}) - exiting cleanly without starting a second process.`);
+    return EXIT.OK;
+  }
+
+  try {
+    return await runOwned(cfg, lock.token);
+  } finally {
+    releaseLock(cfg.lockFile, lock.token);
+  }
+}
+
+/** Everything below here runs under verified exclusive ownership. */
+async function runOwned(cfg, token) {
+  // --- state is read AFTER the lock, never before (blocker 2) ---
+  const loaded = loadState(cfg.stateFile, cfg.stateBackupFile, { schema: "worker" });
   if (!loaded.state) {
     // Requirement B: NEVER silently reset. A lost history means lost replay
     // protection, which is far more dangerous than refusing to run.
-    log(cfg, `FATAL: state file and backup are both unreadable (primary=${loaded.primary_error}, backup=${loaded.backup_error}).`);
+    log(cfg, `FATAL: state file and backup are both unusable (primary=${loaded.primary_error}, backup=${loaded.backup_error}).`);
     log(cfg, "Refusing to run rather than discard processed-task history. Inspect state.json / state.json.bak by hand.");
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "state_unreadable" });
+    reportStatus(cfg, {
+      taskId: null,
+      phase: "state",
+      reason: "state_and_backup_unusable",
+      detail: `primary: ${loaded.primary_error}\nbackup: ${loaded.backup_error}\n\nNothing was reset and no history was discarded.`,
+      nextAction: "Inspect state.json and state.json.bak on the host. Restore a good copy, or deliberately initialise a fresh one; the worker will not invent an empty history."
+    });
     return EXIT.BLOCKED;
   }
   const state = loaded.state;
   state.worker_version = WORKER_VERSION;
+  if (loaded.first_run) {
+    log(cfg, "First run: no state file has ever existed on this host. Starting with an empty, explicitly initialised history.");
+  }
   if (loaded.recovered_from_backup) {
-    log(cfg, `WARNING: primary state was corrupt; recovered from backup (${loaded.primary_error}). History preserved.`);
+    log(cfg, `WARNING: primary state was unusable; recovered from backup (${loaded.primary_error}). History preserved, and the backup is NOT overwritten until the primary is valid again.`);
   }
 
   const auth = verifyAuth();
@@ -151,14 +248,24 @@ async function cmdRun(cfg, { dryRun }) {
   }
   emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, { comment_count: comments.length });
 
+  // --- BLOCKER 1: recover anything a crashed parent left behind, before any
+  //     candidate is chosen and before eligibility is even considered. ---
+  const recovery = recoverAbandonedTasks(cfg, state, token, comments);
+  if (recovery.stop) return recovery.exit;
+
   const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
   const nowMs = Date.now();
 
   // Requirement E: only already-authorised tasks. Nothing is invented here.
   const candidate = tasks.find((t) => {
-    const rec = getTask(state, t.taskId);
-    return isEligibleNow(rec, nowMs);
+    if (!isValidTaskId(t.taskId)) return false;
+    return isEligibleNow(getTask(state, t.taskId), nowMs);
   });
+
+  const unsafeIds = tasks.filter((t) => !isValidTaskId(t.taskId)).map((t) => t.taskId);
+  if (unsafeIds.length > 0) {
+    log(cfg, `Ignoring ${unsafeIds.length} trusted task(s) with an unsafe TASK_ID (it is used as a directory name): ${unsafeIds.map((i) => String(i).slice(0, 48)).join(", ")}`);
+  }
 
   if (!candidate) {
     const waiting = tasks.filter((t) => {
@@ -170,82 +277,170 @@ async function cmdRun(cfg, { dryRun }) {
     } else {
       log(cfg, "No new trusted ARCHITECT_TASK found. Exiting cleanly.");
     }
-    if (!dryRun) {
-      state.last_run_at = new Date().toISOString();
-      saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
-    }
-    return EXIT.OK;
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    return recovery.exit ?? EXIT.OK;
   }
 
   log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, posted ${candidate.comment.created_at}, ${candidate.updates.length} scope update(s))`);
-  if (dryRun) {
-    log(cfg, "Dry run: would dispatch this task now. No mutation performed.");
-    return EXIT.OK;
-  }
+  heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
-  // --- lock covers preflight, quarantine, dispatch AND every state write ---
-  const lock = acquireLock(cfg.lockFile, {
-    taskId: candidate.taskId,
-    phase: "preflight",
-    heartbeatTimeoutMs: cfg.heartbeatTimeoutMinutes * 60_000
-  });
-  if (!lock.acquired) {
-    if (lock.needs_attention) {
-      log(cfg, `Lock owner ${lock.owner?.pid} is alive but has not heartbeated: ${lock.verdict.reason}`);
-      reportStatus(cfg, state, {
-        taskId: candidate.taskId,
-        phase: "lock",
-        reason: "owner_alive_but_not_heartbeating",
-        detail: `Lock owner pid=${lock.owner?.pid} phase=${lock.owner?.phase} last heartbeat=${lock.owner?.heartbeat_at}. It was NOT terminated: an alive owner may still be doing real work.`,
-        nextAction: "Inspect the process by hand. If it is genuinely hung, stop that pid, then the next scheduled run reclaims the lock automatically."
-      });
-      saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
-      return EXIT.BLOCKED;
-    }
-    log(cfg, `Another worker instance is active (${lock.verdict.reason}) - exiting cleanly without starting a second process.`);
-    return EXIT.OK;
-  }
-
-  try {
-    return await runLocked(cfg, state, candidate, comments);
-  } finally {
-    releaseLock(cfg.lockFile);
-  }
+  return await runTask(cfg, state, token, candidate, comments);
 }
 
-async function runLocked(cfg, state, candidate, comments) {
-  const taskId = candidate.taskId;
-  const prior = getTask(state, taskId);
+/**
+ * BLOCKER 1: convert every task a crashed/rebooted parent left IN_PROGRESS back
+ * into a decided state, under ownership, protecting a live child.
+ *
+ * Also reconciles the report for non-terminal tasks that are merely in backoff -
+ * "reconcile report regardless of next-attempt eligibility".
+ */
+function recoverAbandonedTasks(cfg, state, token, comments) {
+  const abandoned = findAbandonedTasks(state);
+  if (abandoned.length === 0) return { stop: false, exit: null };
 
-  // --- orphan-child accounting BEFORE any retry (requirement C) ---
-  if (prior?.last_child_pid && isProcessAlive(prior.last_child_pid)) {
-    log(cfg, `Previous Claude child pid=${prior.last_child_pid} is STILL ALIVE - refusing to start an overlapping Claude process.`);
-    reportStatus(cfg, state, {
-      taskId,
-      phase: "orphan_check",
-      reason: "previous_claude_child_still_running",
-      detail: `A Claude child from an earlier attempt (pid=${prior.last_child_pid}) is still alive. Starting a second one would risk duplicate commits/PRs.`,
-      nextAction: "Wait for that process to finish, or stop that specific pid by hand. The next scheduled run then resumes this task."
-    });
-    saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
-    return EXIT.BLOCKED;
-  }
+  const lifetimeBudgetMs = childLifetimeBudgetMs({ claudeTimeoutMinutes: cfg.claudeTimeoutMinutes });
+  const branchLookup = listRemoteBranches(cfg);
+  const pullLookup = listPulls(cfg);
+  let mutated = false;
 
-  // --- reconcile prior side effects so a retry resumes rather than duplicates ---
-  let resume = null;
-  if (prior && prior.attempts > 0) {
+  for (const task of abandoned) {
+    const taskId = task.task_id;
+    log(cfg, `Recovering abandoned IN_PROGRESS task ${taskId} (attempts=${task.attempts ?? 0}, last dispatch ${task.last_dispatch_at ?? "unknown"}).`);
+
     const rec = reconcilePriorAttempt({
       taskId,
       comments,
       trustedAuthor: cfg.trustedAuthor,
-      branches: listRemoteBranches(cfg),
-      pulls: listPulls(cfg),
+      priorTask: task,
+      branchLookup,
+      pullLookup,
+      sinceIso: task.first_dispatch_at ?? null
+    });
+
+    const identityVerdict = task.child_identity ? matchProcessIdentity(task.child_identity) : null;
+    const plan = planTaskRecovery({
+      task,
+      nowMs: Date.now(),
+      completion: rec.completion,
+      identityVerdict,
+      lifetimeBudgetMs,
+      duplicateRiskUnknown: rec.duplicateRiskUnknown
+    });
+
+    if (plan.action === RECOVERY.PROTECT_LIVE_CHILD) {
+      const descendants = task.child_identity?.pid ? listDescendants(task.child_identity.pid) : [];
+      log(cfg, `PROTECTED: ${plan.reason}`);
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+        task_id: taskId,
+        reason: "live_orphan_child_protected",
+        child_pid: task.child_identity?.pid ?? null,
+        descendants: descendants.length
+      });
+      reportStatus(cfg, {
+        taskId,
+        phase: "recovery",
+        reason: "previous_claude_child_still_running",
+        detail: describeProtectedChild({ task, identityVerdict, descendants }),
+        nextAction: "Wait for that process to finish, or stop that specific pid by hand. The next scheduled run then resumes this task automatically."
+      });
+      // Leave the task IN_PROGRESS: the live child still owns it.
+      if (mutated) {
+        state.last_run_at = new Date().toISOString();
+        persistState(cfg, state, token);
+      }
+      return { stop: true, exit: EXIT.BLOCKED };
+    }
+
+    const observed = mergeObservedAssociations(task, {
+      branch: rec.existingBranch,
+      prNumber: rec.existingPr?.number ?? rec.prNumberKnownButUnverified
+    });
+
+    if (plan.action === RECOVERY.COMPLETE_FROM_REPORT) {
+      log(cfg, `Reconciled ${taskId} WITHOUT re-dispatching: ${plan.reason}`);
+      upsertTask(state, taskId, {
+        ...observed,
+        status: TASK_STATUS.COMPLETED,
+        completed_at: new Date().toISOString(),
+        report_comment_id: rec.completion.reportCommentId,
+        report_status: rec.completion.status,
+        successful: rec.completion.successful,
+        reconciled_without_redispatch: true,
+        recovered_from_crash: true,
+        child_identity: null,
+        last_child_pid: null
+      });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
+        task_id: taskId, report_comment_id: rec.completion.reportCommentId, via: "crash_recovery"
+      });
+      mutated = true;
+      continue;
+    }
+
+    if (plan.action === RECOVERY.DEFER_UNKNOWN) {
+      log(cfg, `DEFERRED ${taskId}: ${plan.reason} (${rec.lookupFailures.join("; ")})`);
+      upsertTask(state, taskId, {
+        ...observed,
+        status: TASK_STATUS.FAILED_RETRYABLE,
+        last_failure_reason: `abandoned_in_progress_but_duplicate_risk_unknown (${rec.lookupFailures.join("; ")})`,
+        next_eligible_at: new Date(Date.now() + cfg.backoffBaseMinutes * 60_000).toISOString(),
+        recovered_from_crash: true,
+        child_identity: null,
+        last_child_pid: null
+      });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "duplicate_risk_unknown", retryable: true });
+      mutated = true;
+      continue;
+    }
+
+    // RETRY: return it to the normal path, eligible immediately. The attempt
+    // count is NOT reset - a crash loop still runs out of budget.
+    log(cfg, `Recovered ${taskId} for retry: ${plan.reason}`);
+    upsertTask(state, taskId, {
+      ...observed,
+      status: TASK_STATUS.FAILED_RETRYABLE,
+      last_failure_reason: task.last_failure_reason ?? "abandoned_in_progress_after_parent_crash",
+      next_eligible_at: null,
+      recovered_from_crash: true,
+      child_identity: null,
+      last_child_pid: null
+    });
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "recovered_abandoned_in_progress", retryable: true
+    });
+    mutated = true;
+  }
+
+  if (mutated) {
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+  }
+  return { stop: false, exit: null };
+}
+
+async function runTask(cfg, state, token, candidate, comments) {
+  const taskId = candidate.taskId;
+  const prior = getTask(state, taskId);
+
+  // --- reconcile prior side effects so a retry resumes rather than duplicates ---
+  let resume = null;
+  if (prior && (prior.attempts ?? 0) > 0) {
+    const rec = reconcilePriorAttempt({
+      taskId,
+      comments,
+      trustedAuthor: cfg.trustedAuthor,
+      priorTask: prior,
+      branchLookup: listRemoteBranches(cfg),
+      pullLookup: listPulls(cfg),
       sinceIso: prior.first_dispatch_at ?? null
     });
+
     if (rec.completion.complete) {
       // Crash-after-report case: the work IS done; close it out, do not re-run.
       log(cfg, `Reconciled: a matching trusted report already exists (comment ${rec.completion.reportCommentId}, STATUS=${rec.completion.status}). Marking complete without re-dispatching.`);
       upsertTask(state, taskId, {
+        ...mergeObservedAssociations(prior, { branch: rec.existingBranch, prNumber: rec.existingPr?.number }),
         status: TASK_STATUS.COMPLETED,
         completed_at: new Date().toISOString(),
         report_comment_id: rec.completion.reportCommentId,
@@ -254,30 +449,55 @@ async function runLocked(cfg, state, candidate, comments) {
         reconciled_without_redispatch: true
       });
       state.last_run_at = new Date().toISOString();
-      saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
+      persistState(cfg, state, token);
       emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
         task_id: taskId, report_comment_id: rec.completion.reportCommentId, via: "reconciliation"
       });
       return EXIT.OK;
     }
+
+    if (rec.duplicateRiskUnknown) {
+      log(cfg, `Refusing to retry ${taskId}: ${rec.lookupFailures.join("; ")}. A failed lookup is not proof that no branch/PR exists.`);
+      upsertTask(state, taskId, {
+        status: TASK_STATUS.FAILED_RETRYABLE,
+        last_failure_reason: `duplicate_risk_unknown (${rec.lookupFailures.join("; ")})`,
+        next_eligible_at: new Date(Date.now() + cfg.backoffBaseMinutes * 60_000).toISOString()
+      });
+      state.last_run_at = new Date().toISOString();
+      persistState(cfg, state, token);
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "duplicate_risk_unknown", retryable: true });
+      return EXIT.TRANSIENT;
+    }
+
     resume = {
       attempts: prior.attempts,
       lastFailureReason: prior.last_failure_reason,
       existingBranch: rec.existingBranch,
+      branchVerified: rec.branchVerified,
       existingPr: rec.existingPr,
-      alreadyMerged: rec.alreadyMerged
+      prNumberKnownButUnverified: rec.prNumberKnownButUnverified,
+      alreadyMerged: rec.alreadyMerged,
+      duplicateRiskUnknown: rec.duplicateRiskUnknown
     };
-    log(cfg, `Resuming TASK_ID=${taskId} (attempt ${prior.attempts + 1}); existing branch=${rec.existingBranch ?? "none"}, PR=${rec.existingPr?.number ?? "none"}, alreadyMerged=${rec.alreadyMerged}`);
+    upsertTask(state, taskId, mergeObservedAssociations(prior, {
+      branch: rec.existingBranch,
+      prNumber: rec.existingPr?.number ?? rec.prNumberKnownButUnverified
+    }));
+    log(cfg, `Resuming TASK_ID=${taskId} (attempt ${prior.attempts + 1}); existing branch=${rec.existingBranch ?? "none"} (verified=${rec.branchVerified}), PR=${rec.existingPr?.number ?? "none"}, alreadyMerged=${rec.alreadyMerged}`);
   }
 
   // --- scratch quarantine, BEFORE the dirty guard (requirement A) ---
-  heartbeat(cfg.lockFile, { phase: "quarantine", taskId });
-  const knownTaskIds = Object.keys(state.tasks);
+  heartbeat(cfg.lockFile, { token, phase: "quarantine", taskId });
+  const preStatus = gitStatusLines(cfg);
+  if (!preStatus.ok) {
+    return blockOnGitFailure(cfg, state, token, taskId, [preStatus.error]);
+  }
+
   const quarantine = recoverScratch({
     repoPath: cfg.repoPath,
-    statusLines: gitStatusLines(cfg),
+    statusLines: preStatus.lines,
     quarantineRoot: cfg.quarantineRoot,
-    knownTaskIds,
+    knownTaskIds: Object.keys(state.tasks),
     manifestFile: cfg.manifestFile
   });
   for (const r of quarantine.recovered) {
@@ -289,19 +509,38 @@ async function runLocked(cfg, state, candidate, comments) {
     left: quarantine.left
   });
 
+  // --- preflight: every git fact must be ANSWERED, not assumed (blocker 7) ---
+  const facts = collectRepoFacts(cfg);
+  if (!facts.ok) {
+    return blockOnGitFailure(cfg, state, token, taskId, facts.failures);
+  }
+  if (!remoteMatchesRepo(facts.remoteUrl, cfg)) {
+    log(cfg, `BLOCKED: origin is ${facts.remoteUrl}, which is not ${cfg.repoOwner}/${cfg.repoName}.`);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "remote_mismatch" });
+    reportStatus(cfg, {
+      taskId,
+      phase: "preflight",
+      reason: "origin_remote_does_not_match_configured_repository",
+      detail: `origin = ${facts.remoteUrl}\nconfigured = ${cfg.repoOwner}/${cfg.repoName}\n\nNothing was changed, fetched or pushed.`,
+      nextAction: "Point the checkout at the configured repository, or correct repoOwner/repoName in config.json. The worker will not act on an unexpected remote."
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    return EXIT.BLOCKED;
+  }
+
   // --- dirty guard: never bypassed, never widened ---
-  const remaining = gitStatusLines(cfg);
-  if (remaining.length > 0) {
+  if (facts.statusLines.length > 0) {
     const detail = [
       "Files still present after known-scratch quarantine (NOTHING was deleted, reset, stashed or ignored):",
-      ...remaining.map((l) => `  ${l}`),
+      ...facts.statusLines.map((l) => `  ${l}`),
       "",
       "Reasons they were left alone:",
       ...quarantine.left.map((l) => `  ${l.name}: ${l.reason}`)
     ].join("\n");
-    log(cfg, `BLOCKED: worktree at ${cfg.repoPath} still has ${remaining.length} entry/entries after quarantine.`);
-    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "worktree_dirty_unknown", entries: remaining.length });
-    reportStatus(cfg, state, {
+    log(cfg, `BLOCKED: worktree at ${cfg.repoPath} still has ${facts.statusLines.length} entry/entries after quarantine.`);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "worktree_dirty_unknown", entries: facts.statusLines.length });
+    reportStatus(cfg, {
       taskId,
       phase: "preflight",
       reason: "worktree_dirty_unknown_files",
@@ -309,12 +548,13 @@ async function runLocked(cfg, state, candidate, comments) {
       nextAction: "Inspect the listed paths. Commit, move or delete them deliberately; the worker will not touch unknown or tracked files. The next scheduled run then dispatches this same task automatically."
     });
     state.last_run_at = new Date().toISOString();
-    saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
+    persistState(cfg, state, token);
     return EXIT.BLOCKED; // task stays non-terminal and eligible - NOT processed
   }
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.PREFLIGHT, { task_id: taskId, worktree: "clean" });
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.PREFLIGHT, { task_id: taskId, worktree: "clean", head: facts.head, branch: facts.branch });
 
   // --- mark in progress and dispatch ---
+  // TASK_ID has already been validated as a single safe path component.
   const scratchDir = join(cfg.scratchRoot, taskId);
   mkdirSync(scratchDir, { recursive: true });
 
@@ -325,19 +565,38 @@ async function runLocked(cfg, state, candidate, comments) {
     attempts,
     first_dispatch_at: prior?.first_dispatch_at ?? dispatchStartedAt,
     last_dispatch_at: dispatchStartedAt,
-    comment_id: candidate.comment.id
+    comment_id: candidate.comment.id,
+    branch_before: facts.branch,
+    head_before: facts.head,
+    child_identity: null
   });
-  saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
+  persistState(cfg, state, token);
 
-  const branchBefore = git(cfg, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout?.trim();
-  const headBefore = git(cfg, ["rev-parse", "HEAD"]).stdout?.trim();
-  log(cfg, `Dispatching TASK_ID=${taskId} attempt ${attempts} (branch=${branchBefore}, head=${headBefore})...`);
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, { task_id: taskId, attempt: attempts, head: headBefore });
+  log(cfg, `Dispatching TASK_ID=${taskId} attempt ${attempts} (branch=${facts.branch}, head=${facts.head})...`);
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, { task_id: taskId, attempt: attempts, head: facts.head });
 
   const result = await runClaude(cfg, { ...candidate, resume, scratchDir }, {
     heartbeatMs: cfg.heartbeatSeconds * 1000,
-    onHeartbeat: (childPid) => {
-      heartbeat(cfg.lockFile, { phase: "dispatch", taskId, childPid });
+    // BLOCKER 1: the child's identity is durable BEFORE we wait on it, so a
+    // parent crash right here still leaves a record that protects the child.
+    onSpawn: (identity) => {
+      try {
+        upsertTask(state, taskId, {
+          child_identity: identity,
+          last_child_pid: identity?.pid ?? null,
+          child_started_at: identity?.observed_at ?? null
+        });
+        persistState(cfg, state, token);
+        heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid: identity?.pid ?? null, childIdentity: identity });
+        emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, {
+          task_id: taskId, attempt: attempts, child_pid: identity?.pid ?? null, child_start_time: identity?.start_time ?? null
+        });
+      } catch (err) {
+        log(cfg, `WARNING: could not persist child identity at spawn: ${sanitize(err.message)}`);
+      }
+    },
+    onHeartbeat: (childPid, identity) => {
+      heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid, childIdentity: identity });
       emitHealth(cfg.healthFile, HEALTH_EVENTS.HEARTBEAT, { task_id: taskId, child_pid: childPid });
     }
   });
@@ -350,7 +609,7 @@ async function runLocked(cfg, state, candidate, comments) {
   if (result.error) log(cfg, `spawn error: ${result.error}`);
 
   // --- completion requires EVIDENCE, never exit code alone (requirement B) ---
-  heartbeat(cfg.lockFile, { phase: "verify", taskId });
+  heartbeat(cfg.lockFile, { token, phase: "verify", taskId });
   let postComments = [];
   try {
     postComments = fetchIssueComments(cfg);
@@ -364,29 +623,39 @@ async function runLocked(cfg, state, candidate, comments) {
     sinceIso: dispatchStartedAt
   });
 
+  const headAfter = gitHead(cfg);
+  const branchAfter = gitCurrentBranch(cfg);
   const checkpoint = {
     last_outcome: result.outcome,
     last_exit_code: result.code ?? null,
     last_child_pid: result.childPid ?? null,
     last_dispatch_finished_at: new Date().toISOString(),
-    branch_before: branchBefore,
-    head_before: headBefore,
-    head_after: git(cfg, ["rev-parse", "HEAD"]).stdout?.trim(),
-    branch_after: git(cfg, ["rev-parse", "--abbrev-ref", "HEAD"]).stdout?.trim()
+    branch_before: facts.branch,
+    head_before: facts.head,
+    head_after: headAfter.ok ? headAfter.value : null,
+    head_after_error: headAfter.ok ? null : headAfter.error,
+    branch_after: branchAfter.ok ? branchAfter.value : null,
+    branch_after_error: branchAfter.ok ? null : branchAfter.error
   };
+
+  // The branch this attempt actually ended on is an EXACT association: record it
+  // so a later reconciliation never has to guess (blocker 6).
+  const observed = mergeObservedAssociations(getTask(state, taskId), { branch: checkpoint.branch_after });
 
   if (completion.complete) {
     upsertTask(state, taskId, {
       ...checkpoint,
+      ...observed,
       status: TASK_STATUS.COMPLETED,
       completed_at: new Date().toISOString(),
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,
       successful: completion.successful,
+      child_identity: null,
       last_child_pid: null
     });
     state.last_run_at = new Date().toISOString();
-    saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
+    persistState(cfg, state, token);
     emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
       task_id: taskId, report_comment_id: completion.reportCommentId, report_status: completion.status
     });
@@ -408,12 +677,16 @@ async function runLocked(cfg, state, candidate, comments) {
   if (backoff.exhausted) {
     upsertTask(state, taskId, {
       ...checkpoint,
+      ...observed,
       status: TASK_STATUS.BLOCKED,
       last_failure_reason: failureReason,
-      blocked_at: new Date().toISOString()
+      blocked_at: new Date().toISOString(),
+      child_identity: null
     });
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "retry_budget_exhausted", attempts });
-    reportStatus(cfg, state, {
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    reportStatus(cfg, {
       taskId,
       phase: "dispatch",
       reason: "retry_budget_exhausted",
@@ -427,8 +700,6 @@ async function runLocked(cfg, state, candidate, comments) {
       ].join("\n"),
       nextAction: "Inspect logs/worker-*.log and the branch state, then issue a FRESH TASK_ID for a repair attempt. This worker will not replay a blocked task on its own."
     });
-    state.last_run_at = new Date().toISOString();
-    saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
     log(cfg, `TASK_ID=${taskId} BLOCKED after ${attempts} attempts: ${failureReason}`);
     return EXIT.BLOCKED;
   }
@@ -436,32 +707,104 @@ async function runLocked(cfg, state, candidate, comments) {
   const nextEligible = new Date(Date.now() + backoff.delayMs).toISOString();
   upsertTask(state, taskId, {
     ...checkpoint,
+    ...observed,
     status: TASK_STATUS.FAILED_RETRYABLE,
     last_failure_reason: failureReason,
-    next_eligible_at: nextEligible
+    next_eligible_at: nextEligible,
+    child_identity: null
   });
   state.last_run_at = new Date().toISOString();
-  saveStateAtomic(cfg.stateFile, state, cfg.stateBackupFile);
+  persistState(cfg, state, token);
   log(cfg, `TASK_ID=${taskId} NOT complete (${failureReason}). Retryable; next eligible at ${nextEligible} (attempt ${attempts}/${cfg.maxAttempts}).`);
   emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: failureReason, retryable: true, next_eligible_at: nextEligible });
   return EXIT.TRANSIENT;
 }
 
+function blockOnGitFailure(cfg, state, token, taskId, failures) {
+  log(cfg, `BLOCKED: git could not answer the preflight questions: ${failures.join("; ")}`);
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { task_id: taskId, reason: "git_preflight_failed" });
+  reportStatus(cfg, {
+    taskId,
+    phase: "preflight",
+    reason: "git_preflight_failed",
+    detail: [
+      "git could not be queried, so the state of the worktree is UNKNOWN.",
+      "An unanswerable git query is never treated as a clean worktree.",
+      "",
+      ...failures.map((f) => `  ${f}`)
+    ].join("\n"),
+    nextAction: "Check that git is installed and on PATH for the scheduled task's account, and that the configured repoPath is a valid git repository. Nothing was dispatched."
+  });
+  state.last_run_at = new Date().toISOString();
+  persistState(cfg, state, token);
+  return EXIT.BLOCKED;
+}
+
 /** ---------------- other subcommands ---------------- */
 
+/** Read-only preview. Takes no lock and writes nothing at all. */
+function cmdDryRun(cfg) {
+  const loaded = loadState(cfg.stateFile, cfg.stateBackupFile, { schema: "worker" });
+  if (!loaded.state) {
+    console.log(`Dry run: state is unusable (primary=${loaded.primary_error}, backup=${loaded.backup_error}). A real run would refuse to start.`);
+    return EXIT.BLOCKED;
+  }
+  const auth = verifyAuth();
+  if (!auth.ok) {
+    console.log(`Dry run: GitHub auth unavailable (${auth.error}). A real run would exit TRANSIENT.`);
+    return EXIT.TRANSIENT;
+  }
+  let comments = [];
+  try {
+    comments = fetchIssueComments(cfg);
+  } catch (err) {
+    console.log(`Dry run: control issue unreachable (${sanitize(err.message)}). A real run would exit TRANSIENT.`);
+    return EXIT.TRANSIENT;
+  }
+  const abandoned = findAbandonedTasks(loaded.state);
+  const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
+  const nowMs = Date.now();
+  const candidate = tasks.find((t) => isValidTaskId(t.taskId) && isEligibleNow(getTask(loaded.state, t.taskId), nowMs));
+  const status = gitStatusLines(cfg);
+  console.log(JSON.stringify({
+    dry_run: true,
+    wrote_anything: false,
+    took_lock: false,
+    state_source: loaded.source,
+    first_run: loaded.first_run,
+    abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
+    next_candidate: candidate?.taskId ?? null,
+    worktree_query_ok: status.ok,
+    worktree_dirty_entries: status.ok ? status.lines : null,
+    worktree_query_error: status.ok ? null : status.error
+  }, null, 2));
+  return EXIT.OK;
+}
+
 function cmdStatus(cfg) {
-  const loaded = loadState(cfg.stateFile, cfg.stateBackupFile);
+  const loaded = loadState(cfg.stateFile, cfg.stateBackupFile, { schema: "worker" });
   const state = loaded.state;
   const auth = verifyAuth();
   const lock = readLock(cfg.lockFile);
-  const dirty = gitStatusLines(cfg);
+  const status = gitStatusLines(cfg);
   const tasks = state ? Object.values(state.tasks) : [];
   console.log(JSON.stringify({
     worker_version: WORKER_VERSION,
     state_readable: Boolean(state),
     state_source: loaded.source,
+    state_first_run: Boolean(loaded.first_run),
+    state_primary_error: loaded.primary_error ?? null,
     enabled: !existsSync(cfg.disabledFlagFile),
-    lock: lock ? { pid: lock.pid, phase: lock.phase, task_id: lock.task_id, heartbeat_at: lock.heartbeat_at, alive: isProcessAlive(lock.pid) } : null,
+    lock: lock && !lock.malformed
+      ? {
+        pid: lock.pid,
+        host: lock.host ?? null,
+        phase: lock.phase,
+        task_id: lock.task_id,
+        heartbeat_at: lock.heartbeat_at,
+        alive: isProcessAlive(lock.pid)
+      }
+      : (lock ? { malformed: true } : null),
     last_run_at: state?.last_run_at ?? null,
     counts: {
       completed: tasks.filter((t) => t.status === TASK_STATUS.COMPLETED).length,
@@ -470,12 +813,22 @@ function cmdStatus(cfg) {
       in_progress: tasks.filter((t) => t.status === TASK_STATUS.IN_PROGRESS).length
     },
     unfinished: tasks.filter((t) => !isTerminal(t)).map((t) => ({
-      task_id: t.task_id, status: t.status, attempts: t.attempts, next_eligible_at: t.next_eligible_at ?? null, last_failure_reason: t.last_failure_reason ?? null
+      task_id: t.task_id,
+      status: t.status,
+      attempts: t.attempts,
+      next_eligible_at: t.next_eligible_at ?? null,
+      last_failure_reason: t.last_failure_reason ?? null,
+      child_pid: t.child_identity?.pid ?? null,
+      observed_branches: t.observed_branches ?? [],
+      observed_pr_numbers: t.observed_pr_numbers ?? []
     })),
     github_reachable: auth.ok,
     repo_path: cfg.repoPath,
-    repo_clean: dirty.length === 0,
-    repo_dirty_entries: dirty
+    // An unanswerable git query is reported as unknown, never as clean.
+    repo_query_ok: status.ok,
+    repo_clean: status.ok ? status.lines.length === 0 : null,
+    repo_dirty_entries: status.ok ? status.lines : null,
+    repo_query_error: status.ok ? null : status.error
   }, null, 2));
   return EXIT.OK;
 }
@@ -518,9 +871,14 @@ async function main() {
   }
 }
 
-main()
-  .then((code) => { process.exitCode = code ?? EXIT.OK; })
-  .catch((err) => {
-    console.error(`[${new Date().toISOString()}] FATAL: ${sanitize(err.message)}`);
-    process.exitCode = EXIT.FATAL;
-  });
+const invokedDirectly = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (invokedDirectly) {
+  main()
+    .then((code) => { process.exitCode = code ?? EXIT.OK; })
+    .catch((err) => {
+      console.error(`[${new Date().toISOString()}] FATAL: ${sanitize(err.message)}`);
+      process.exitCode = EXIT.FATAL;
+    });
+}
+
+export { main, cmdRun, runOwned, recoverAbandonedTasks };

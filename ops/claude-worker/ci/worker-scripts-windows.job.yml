@@ -1,0 +1,49 @@
+# CI-jobb som IKKE kunne pushes fra denne oekten - krever `workflow`-scope.
+#
+# D-126 REVIEW-FIX (2026-09-07). Arkitekten ba om "actual PowerShell parser
+# result or precise denied operation" og "Windows integration in CI if
+# available". Den presise nektede operasjonen er:
+#
+#   $ git push origin claude/worker-self-recovery-20260907
+#   ! [remote rejected] ... (refusing to allow an OAuth App to create or update
+#     workflow `.github/workflows/ci.yml` without `workflow` scope)
+#
+# GitHub-tokenet denne workeren bruker har ikke `workflow`-scope, saa
+# `.github/workflows/ci.yml` kan ikke endres herfra. Jobben er derfor levert som
+# denne filen i stedet for aa bli stille utelatt.
+#
+# BRUK: lim innholdet under inn i `.github/workflows/ci.yml`, som en ny jobb paa
+# samme niva som `build-test`, `windows-git-auth` og `gitleaks` (rett foer
+# `gitleaks:`). Ingen andre endringer i filen er noedvendige.
+#
+# HVORFOR den trengs: den opprinnelige feilen som stoppet hele arkitekt/Claude-
+# loopen var en ParserError i en .ps1 som var haandredigert paa hosten. Kun den
+# EKTE PowerShell-AST-parseren kan bevise at scriptene faktisk parser -
+# `node --check` og eslint sier ingenting om PowerShell. I tillegg kjoerer jobben
+# hele worker-testsuiten paa Windows, fordi laase-, prosessidentitets- og
+# atomisk-rename-semantikken er NTFS-/Win32-spesifikk. Samme laerdom som
+# D-103 HOST-FIX v2: en full groenn Linux-suite beviste ikke Windows.
+
+  worker-scripts-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: PowerShell AST-parsing og ASCII-kontroll av alle worker-scripts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\ops\claude-worker\verify-scripts.ps1 -Path "$PWD\ops\claude-worker"
+
+      - name: Worker/supervisor-tester paa ekte Windows (laas, prosessidentitet, crash-recovery)
+        run: pnpm exec vitest run ops/claude-worker/test

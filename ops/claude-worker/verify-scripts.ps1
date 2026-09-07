@@ -1,6 +1,7 @@
 <#
   .SYNOPSIS
-    Verifies that every delivered .ps1 actually PARSES and is pure ASCII.
+    Verifies that every delivered .ps1 actually PARSES with the real PowerShell
+    AST parser and is pure ASCII, and that every delivered .mjs parses with node.
 
   .DESCRIPTION
     This is the check that would have caught the failure described in the
@@ -51,6 +52,21 @@ foreach ($s in $scripts) {
     }
     else {
         Write-Host ("PARSE_OK    " + $s.Name + "  ascii  " + $bytes.Length + "b  sha256=" + $sha.Substring(0, 16) + "...")
+    }
+}
+
+# The same class of failure can hit the JavaScript modules, so check them with
+# the real node parser rather than assuming.
+$modules = @(Get-ChildItem -Path $Path -Filter *.mjs -File -Recurse -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\(staging|backups|tmp|logs|supervisor-logs)\\' })
+
+foreach ($m in $modules) {
+    $null = & node --check $m.FullName 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host ("NODE_PARSE_FAIL  " + $m.Name)
+        $fail = 1
+    } else {
+        Write-Host ("NODE_PARSE_OK    " + $m.FullName.Substring($Path.Length).TrimStart('\', '/'))
     }
 }
 

@@ -1,95 +1,110 @@
 <#
   .SYNOPSIS
     Restore a previous worker/supervisor deployment from a backup directory
-    created by install.ps1.
+    created by install.ps1 / deploy.mjs.
 
   .DESCRIPTION
-    Restores the exact bytes that were deployed before an install, verifying
-    each file's SHA256 against the manifest. Optionally restores the exported
-    scheduled task definitions.
+    Thin wrapper around `node deploy.mjs rollback`, which:
+      - ENFORCES the manifest's recorded old SHA256 for every restored file
+        (the previous rollback.ps1 restored bytes without checking them);
+      - REMOVES files the install INTRODUCED, so a failed upgrade cannot leave
+        new modules behind for old code to import (the previous version restored
+        only files that had existed before, and left the new supervisor modules
+        and task active);
+      - restores files the install removed as superseded;
+      - refuses to write over a RUNNING worker or supervisor and never terminates
+        a process;
+      - never touches operational data (config.json, state.json, logs, tmp).
 
-    Like install.ps1 it refuses to write over a RUNNING worker and never
-    terminates a process. Operational data (config.json, state.json, logs, tmp)
-    is not touched.
+    Scheduled tasks the install INTRODUCED are reported by deploy.mjs and are
+    unregistered here, explicitly, and backed-up task definitions can be
+    re-imported with -RestoreTasks.
 
   .PARAMETER BackupDir
-    A directory under <worker>\backups\<timestamp> produced by install.ps1.
+    A directory under <Destination>\backups\<version>. Defaults to the most
+    recent backup that contains an install-manifest.json.
 
   .PARAMETER RestoreTasks
     Also re-import the backed-up scheduled task definitions.
 
   .EXAMPLE
-    .\rollback.ps1 -BackupDir "$env:USERPROFILE\.jarvis-claude-worker\backups\20260907-011500" -WhatIf
+    .\rollback.ps1 -WhatIf
+    .\rollback.ps1 -Destination "$env:USERPROFILE\.jarvis-claude-worker"
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true)][string]$BackupDir,
+    [string]$BackupDir,
     [string]$Destination = (Join-Path $env:USERPROFILE ".jarvis-claude-worker"),
     [switch]$RestoreTasks
 )
 
 $ErrorActionPreference = "Stop"
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$deploy = Join-Path $here "deploy.mjs"
 
-if (-not (Test-Path -LiteralPath $BackupDir)) {
-    throw "Backup directory not found: $BackupDir"
+if (-not (Test-Path -LiteralPath $deploy)) {
+    throw "deploy.mjs not found next to rollback.ps1 ($here)."
 }
 
-$lockPath = Join-Path $Destination ".worker.lock"
-if (Test-Path -LiteralPath $lockPath) {
+# Quiescence: never roll back under a running worker or supervisor.
+foreach ($lockName in @(".worker.lock", ".supervisor.lock")) {
+    $lockPath = Join-Path $Destination $lockName
+    if (-not (Test-Path -LiteralPath $lockPath)) { continue }
     $lock = $null
     try { $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json } catch { $lock = $null }
-    if ($null -ne $lock -and $null -ne $lock.pid) {
+    if ($null -eq $lock) {
+        throw "$lockName is unreadable. Refusing to roll back while a lock cannot be interpreted. This script never terminates a process."
+    }
+    if ($null -ne $lock.pid) {
         $proc = Get-Process -Id $lock.pid -ErrorAction SilentlyContinue
         if ($null -ne $proc) {
-            throw "Worker lock is held by a LIVE process (pid=$($lock.pid)). Refusing to roll back under a running worker. This script never terminates a process."
+            throw "$lockName is held by a LIVE process (pid=$($lock.pid), phase=$($lock.phase)). Refusing to roll back under a running process. This script never terminates a process."
         }
     }
 }
 
-$manifestPath = Join-Path $BackupDir "install-manifest.json"
-$manifest = $null
-if (Test-Path -LiteralPath $manifestPath) {
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    Write-Host "Restoring the deployment that was replaced at $($manifest.installed_at_utc)"
+if (-not $PSCmdlet.ShouldProcess($Destination, "Roll back the worker deployment")) {
+    Write-Host "-WhatIf: nothing was restored."
+    exit 0
 }
 
-# Restore every regular file in the backup except bookkeeping artefacts.
-$files = Get-ChildItem -LiteralPath $BackupDir -Recurse -File |
-    Where-Object { $_.Name -ne "install-manifest.json" -and $_.Extension -ne ".xml" }
+$rollbackArgs = @("rollback", "--destination", $Destination)
+if ($BackupDir) { $rollbackArgs += @("--backup-dir", $BackupDir) }
 
-if ($files.Count -eq 0) {
-    Write-Host "Backup contains no payload files - the previous state was an empty destination."
+$json = & node $deploy @rollbackArgs
+$rollbackExit = $LASTEXITCODE
+Write-Host $json
+
+if ($rollbackExit -ne 0) {
+    throw "Rollback reported failures (exit $rollbackExit). Read the JSON above; nothing was force-restored past a hash mismatch."
 }
 
-foreach ($f in $files) {
-    $rel = $f.FullName.Substring($BackupDir.Length).TrimStart('\', '/')
-    $dst = Join-Path $Destination $rel
-    if ($PSCmdlet.ShouldProcess($dst, "Restore $rel")) {
-        New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
-        Copy-Item -LiteralPath $f.FullName -Destination $dst -Force
-        $restored = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
-        $expected = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
-        if ($restored -ne $expected) {
-            throw "Hash mismatch after restoring $rel."
-        }
-        Write-Host "restored   $rel  sha256=$($restored.Substring(0,16))..."
-    } else {
-        Write-Host "would restore  $rel"
+$result = $json | ConvertFrom-Json
+
+foreach ($taskName in @($result.tasks_to_unregister)) {
+    if (-not $taskName) { continue }
+    $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -eq $existing) { continue }
+    if ($PSCmdlet.ShouldProcess($taskName, "Unregister scheduled task introduced by the rolled-back install")) {
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        Write-Host "unregistered introduced task: $taskName"
     }
 }
 
 if ($RestoreTasks) {
-    foreach ($xml in (Get-ChildItem -LiteralPath $BackupDir -Filter "*.task.xml" -File -ErrorAction SilentlyContinue)) {
-        $taskName = $xml.Name -replace '\.task\.xml$', ''
-        if ($PSCmdlet.ShouldProcess($taskName, "Re-register scheduled task from backup")) {
-            $definition = Get-Content -LiteralPath $xml.FullName -Raw
-            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-            Register-ScheduledTask -TaskName $taskName -Xml $definition -User $env:USERNAME | Out-Null
-            Write-Host "restored scheduled task: $taskName"
-        }
+    foreach ($t in @($result.tasks_to_reimport)) {
+        if (-not $t -or -not (Test-Path -LiteralPath $t.xml_path)) { continue }
+        if (-not $PSCmdlet.ShouldProcess($t.name, "Re-register scheduled task from backup")) { continue }
+        $definition = Get-Content -LiteralPath $t.xml_path -Raw
+        # Register with -Force: the existing registration is REPLACED, never
+        # unregistered first, so a failure cannot leave the host with no task.
+        Register-ScheduledTask -TaskName $t.name -Xml $definition -User $env:USERNAME -Force | Out-Null
+        Write-Host "restored scheduled task: $($t.name)"
     }
 }
 
 Write-Host ""
-Write-Host "Rollback complete. Verify with:  node worker.mjs status"
+Write-Host "Rollback complete. Verify with:"
+Write-Host "  .\verify-scripts.ps1"
+Write-Host "  node worker.mjs status"
