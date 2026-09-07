@@ -484,3 +484,119 @@ describe("blocker 2: state writes and the lock", () => {
     expect(readFileSync(join(workerRoot, "state.json"), "utf8")).toBe("null");
   }, 60_000);
 });
+
+/**
+ * D126 FINAL review finding 1: "child identity persistence is best-effort, not a
+ * precondition".
+ *
+ * The architect's direct-module reproduction on the exact HEAD made `onSpawn`
+ * throw `durable write failed` and still got back
+ * `{"outcome":"completed_exit_0","code":0,"childPid":14}` - a live Claude with
+ * durable state saying IN_PROGRESS and `child_identity: null`, which recovery
+ * cannot tell apart from a pre-spawn crash.
+ *
+ * These drive the REAL entrypoint (`node worker.mjs run` as its own OS process)
+ * with the precondition faulted, and assert the four properties the review
+ * demands: zero untracked live child, no duplicate dispatch, a truthful
+ * non-zero/blocked outcome, and safe recovery afterwards.
+ */
+describe("finding 1: the durable child-identity handoff is an enforced gate", () => {
+  for (const [fault, label] of [
+    ["spawn_state_write", "a durable state-write failure during onSpawn"],
+    ["spawn_lost_lock", "a lost lock during onSpawn"]
+  ]) {
+    describe(label, () => {
+      it("never reports completion, and exits non-zero", async () => {
+        const res = await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        expect(res.code).not.toBe(0);
+        expect(res.output).toMatch(/HANDOFF FAILED/);
+        const t = task();
+        expect(t.status).not.toBe(TASK_STATUS.COMPLETED);
+        expect(t.last_outcome).toBe("handoff_failed");
+      }, 120_000);
+
+      it("leaves ZERO untracked live children", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        // The child announces its own pid before it can be aborted, so this is
+        // the real process the worker created, not an inferred one.
+        const runningPath = join(claudeDir, "running");
+        if (!existsSync(runningPath)) return; // aborted before it announced: also fine
+        const childPid = Number(readFileSync(runningPath, "utf8"));
+        stray.push(childPid);
+        await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+        expect(isProcessAlive(childPid)).toBe(false);
+      }, 120_000);
+
+      it("never delivers the task to the child it is about to abort", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        // The handshake: with stdin delivery the prompt is written only after
+        // the identity record and the lock heartbeat are durable. A faulted
+        // handoff therefore means the child never received its task at all.
+        expect(existsSync(join(claudeDir, "prompt.txt"))).toBe(false);
+      }, 120_000);
+
+      it("dispatches exactly once and the NEXT run does not duplicate it", async () => {
+        const first = await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        expect(first.code).not.toBe(0);
+        expect(invocations()).toHaveLength(1);
+
+        const runningPath = join(claudeDir, "running");
+        if (existsSync(runningPath)) {
+          const childPid = Number(readFileSync(runningPath, "utf8"));
+          stray.push(childPid);
+          await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+        }
+
+        // The child was PROVEN gone, so the attempt simply did not happen and
+        // the task stays retryable - not dropped, not stuck IN_PROGRESS.
+        const before = task();
+        expect(before.status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+        expect(before.child_identity).toBeNull();
+        expect(before.next_eligible_at).toBeTruthy();
+
+        // An IMMEDIATE re-run must not dispatch again: the backoff still holds.
+        const tooSoon = await runWorker("report");
+        expect(tooSoon.code).toBe(0);
+        expect(invocations()).toHaveLength(1);
+
+        // Once the backoff has elapsed, recovery dispatches EXACTLY once more.
+        const s = state().state;
+        s.tasks[TASK_ID].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+        saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+
+        const second = await runWorker("report");
+        expect(invocations()).toHaveLength(2);
+        expect(second.code).toBe(0);
+        expect(task().status).toBe(TASK_STATUS.COMPLETED);
+      }, 180_000);
+
+      it("records the abort verification truthfully instead of asserting success", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        const t = task();
+        // Not "we killed it" - "we re-checked the exact identity and this is
+        // what we found". GONE/REUSED are the only proofs of death.
+        expect(t.handoff_child_terminated).toBe(true);
+        expect(["gone", "reused"]).toContain(t.handoff_identity_state);
+        expect(t.last_failure_reason).toMatch(/handoff_failed_child_aborted/);
+      }, 120_000);
+
+      it("leaves the lock released, so the next scheduled run is not blocked out", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        expect(readLock(join(workerRoot, ".worker.lock"))).toBeNull();
+      }, 120_000);
+    });
+  }
+
+  it("the armed fault is announced loudly and can never be silent", async () => {
+    const res = await runWorker("hang", { JARVIS_WORKER_FAULT: "spawn_state_write" });
+    expect(res.output).toMatch(/JARVIS_WORKER_FAULT=spawn_state_write is armed/);
+    expect(res.output).toMatch(/TEST-ONLY/);
+  }, 120_000);
+
+  it("an unarmed run is completely unaffected by the fault machinery", async () => {
+    const res = await runWorker("report");
+    expect(res.code).toBe(0);
+    expect(res.output).not.toMatch(/is armed/);
+    expect(task().status).toBe(TASK_STATUS.COMPLETED);
+  }, 60_000);
+});

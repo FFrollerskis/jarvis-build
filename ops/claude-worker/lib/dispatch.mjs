@@ -24,14 +24,22 @@
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { sanitize } from "./health.mjs";
-import { captureIdentity } from "./procid.mjs";
+import { captureIdentity, matchProcessIdentity, IDENTITY } from "./procid.mjs";
 
 export const OUTCOME = Object.freeze({
   COMPLETED_EXIT_0: "completed_exit_0",
   NONZERO_EXIT: "nonzero_exit",
   TIMEOUT: "timeout",
-  SPAWN_ERROR: "spawn_error"
+  SPAWN_ERROR: "spawn_error",
+  // D126 FINAL review finding 1: the durable handoff FAILED. The child was
+  // created but its identity could not be recorded durably, so it was aborted
+  // rather than allowed to run untracked. This is never a success.
+  HANDOFF_FAILED: "handoff_failed"
 });
+
+/** How long we wait for an aborted child to actually go away before escalating. */
+const ABORT_TERM_GRACE_MS = 10_000;
+const ABORT_DEADLINE_MS = 30_000;
 
 export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
   const { comment, updates = [] } = task;
@@ -127,7 +135,10 @@ export function runClaude(cfg, task, {
   heartbeatMs = 60_000,
   spawnImpl = spawn,
   identityImpl = captureIdentity,
-  graceMs = 20_000
+  matchImpl = matchProcessIdentity,
+  graceMs = 20_000,
+  abortTermGraceMs = ABORT_TERM_GRACE_MS,
+  abortDeadlineMs = ABORT_DEADLINE_MS
 } = {}) {
   const prompt = buildPrompt(cfg, task);
   const timeoutMs = cfg.claudeTimeoutMinutes * 60_000;
@@ -168,23 +179,123 @@ export function runClaude(cfg, task, {
     } catch {
       childIdentity = { pid: childPid, host: hostname(), start_time: null, observed_at: new Date().toISOString() };
     }
-    try {
-      onSpawn(childIdentity);
-    } catch {
-      // A bookkeeping failure must not orphan the child silently; the outcome
-      // still carries the identity below.
-    }
-
     let settled = false;
+    let aborting = false;
     let stderrTail = "";
     let stdoutTail = "";
     let timedOut = false;
 
-    const beat = setInterval(() => onHeartbeat(childPid, childIdentity), heartbeatMs);
-    onHeartbeat(childPid, childIdentity);
+    /**
+     * FINDING 1: the durable handoff is a GATE, not a best-effort side effect.
+     *
+     * Previously `onSpawn` failure was caught here and logged as a warning, and
+     * the dispatch simply continued. The architect's reproduction made `onSpawn`
+     * throw `durable write failed` and still got
+     * `{"outcome":"completed_exit_0","code":0,"childPid":14}` back: durable
+     * state said IN_PROGRESS with `child_identity: null` while a live Claude was
+     * running, so a later recovery could not tell that orphan apart from a
+     * pre-spawn crash and could dispatch a duplicate on top of it.
+     *
+     * If we cannot record WHAT WE JUST STARTED, we are not allowed to let it
+     * run. The child is aborted under a bounded escalation and the exact
+     * captured identity - pid AND start time AND host, never the pid alone - is
+     * then re-checked to prove it is really gone. Whether that proof succeeded
+     * is reported truthfully; it is never assumed.
+     */
+    const abortForFailedHandoff = (handoffError) => {
+      const startedAt = Date.now();
+      let forceSent = false;
+      // Set BEFORE any listener can fire: once we are aborting, the ordinary
+      // close handler must never be able to report this run as a completion.
+      aborting = true;
+
+      const verifyGone = () => {
+        // NEVER pid-only: `matchProcessIdentity` requires pid + start time +
+        // host to agree before it will say a process is still ours. GONE and
+        // REUSED both mean our child is not running any more; MATCH means it
+        // is; UNPROVEN means we could not tell, which is NOT proof of death.
+        let verdict;
+        try {
+          verdict = matchImpl(childIdentity);
+        } catch (err) {
+          return { gone: false, state: "unproven", reason: sanitize(err.message) };
+        }
+        return {
+          gone: verdict.state === IDENTITY.GONE || verdict.state === IDENTITY.REUSED,
+          state: verdict.state,
+          reason: verdict.reason
+        };
+      };
+
+      const conclude = () => {
+        clearInterval(abortPoll);
+        clearTimeout(abortDeadline);
+        const check = verifyGone();
+        if (settled) return;
+        settled = true;
+        clearInterval(beat);
+        clearTimeout(killTimer);
+        clearTimeout(forceTimer);
+        resolve({
+          outcome: OUTCOME.HANDOFF_FAILED,
+          error: sanitize(handoffError?.message ?? String(handoffError)),
+          childPid,
+          childIdentity,
+          handoff: {
+            failed: true,
+            aborted: true,
+            // The single fact every caller must branch on: is there now a live
+            // child nobody has a durable record of?
+            child_terminated: check.gone,
+            untracked_child_live: !check.gone,
+            identity_state: check.state,
+            identity_reason: check.reason,
+            escalated_to_force: forceSent,
+            waited_ms: Date.now() - startedAt
+          }
+        });
+      };
+
+      // Graceful first, exactly as the timeout path does. We signal through the
+      // child HANDLE, which the OS binds to the process object we created, so
+      // this cannot be misdirected by pid reuse either.
+      try { child.kill("SIGTERM"); } catch { /* may already be gone */ }
+
+      const abortPoll = setInterval(() => {
+        if (Date.now() - startedAt >= abortTermGraceMs && !forceSent) {
+          forceSent = true;
+          try { child.kill("SIGKILL"); } catch { /* may already be gone */ }
+        }
+        if (verifyGone().gone) conclude();
+      }, 250);
+
+      const abortDeadline = setTimeout(conclude, abortDeadlineMs);
+
+      // A clean exit resolves it immediately rather than waiting out the poll.
+      child.once("close", conclude);
+      child.once("exit", conclude);
+    };
+
+    let handoffOk = false;
+    let handoffError = null;
+    try {
+      onSpawn(childIdentity);
+      handoffOk = true;
+    } catch (err) {
+      handoffError = err;
+    }
+
+    const beat = setInterval(() => {
+      if (aborting) return;
+      onHeartbeat(childPid, childIdentity);
+    }, heartbeatMs);
+    if (handoffOk) onHeartbeat(childPid, childIdentity);
 
     const finish = (result) => {
-      if (settled) return;
+      // An aborted handoff owns the outcome. Without this guard the ordinary
+      // close handler would race the abort and report the very
+      // `completed_exit_0` the architect reproduced.
+      if (settled || aborting) return;
       settled = true;
       clearInterval(beat);
       clearTimeout(killTimer);
@@ -229,10 +340,25 @@ export function runClaude(cfg, task, {
       });
     });
 
-    if (cfg.promptDelivery === "stdin") {
-      child.stdin?.on("error", () => { /* child may exit before stdin drains */ });
+    child.stdin?.on("error", () => { /* child may exit before stdin drains */ });
+
+    if (!handoffOk) {
+      // THE GATE. The prompt is the task; withholding it means the child never
+      // begins the work, and we abort it before it can. Nothing is delivered,
+      // nothing is left running untracked.
+      abortForFailedHandoff(handoffError);
+    } else if (cfg.promptDelivery === "stdin") {
+      // The child-start handshake: with stdin delivery the child cannot start
+      // the task until this write happens, and this write only happens once the
+      // identity record and the lock heartbeat are durable. Task execution
+      // therefore cannot begin before the handoff is committed.
       child.stdin?.end(prompt);
     } else {
+      // `argv` delivery hands the child its prompt in the command line, so the
+      // pre-execution gate above is NOT available: the child may already have
+      // begun. The abort path still applies, but the handshake does not, and
+      // that difference is reported rather than glossed over. `stdin` is the
+      // configured default for exactly this reason.
       child.stdin?.end();
     }
   });

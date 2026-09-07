@@ -80,6 +80,31 @@ export const EXIT = Object.freeze({
   FATAL: 1
 });
 
+/**
+ * TEST-ONLY fault injection.
+ *
+ * The D126 final review requires fault-injection tests "through the actual
+ * worker entrypoint" for a state-write failure and a lost lock during
+ * `onSpawn`. Those are preconditions failing INSIDE a live dispatch; there is no
+ * way to provoke them from outside the process without racing the spawn, and a
+ * racy test proves nothing. This follows the convention `acquireLock` already
+ * established with `hooks.afterClassify` - "exists so tests can stall a process
+ * at EXACTLY the point v2 was unsafe... never set in production".
+ *
+ * Only the PRECONDITION is faked. Everything the fault then triggers - the
+ * abort, the identity re-check, the recorded outcome, the exit code and the
+ * later recovery - is the real code path, unmodified.
+ *
+ * It is armed exclusively by JARVIS_WORKER_FAULT and announced loudly in both
+ * the log and the health journal whenever it is set, so it can never be
+ * silently active on the host.
+ */
+const ARMED_FAULT = process.env.JARVIS_WORKER_FAULT || null;
+
+function faultArmed(name) {
+  return ARMED_FAULT !== null && ARMED_FAULT === name;
+}
+
 function log(cfg, line) {
   const stamped = `[${new Date().toISOString()}] ${sanitize(line)}`;
   console.log(stamped);
@@ -152,7 +177,14 @@ function reportStatus(cfg, { taskId, phase, reason, detail, nextAction }) {
 /** ---------------- run ---------------- */
 
 async function cmdRun(cfg, { dryRun }) {
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.WORKER_STARTED, { worker_version: WORKER_VERSION, pid: process.pid });
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.WORKER_STARTED, {
+    worker_version: WORKER_VERSION, pid: process.pid, armed_fault: ARMED_FAULT
+  });
+  if (ARMED_FAULT) {
+    // Never silent. If this ever appears in a host log, the run is a test run.
+    log(cfg, `WARNING: JARVIS_WORKER_FAULT=${ARMED_FAULT} is armed. This is a TEST-ONLY fault injection `
+      + "and must never be set on the host. The run will deliberately fail a precondition.");
+  }
 
   if (existsSync(cfg.disabledFlagFile) && !dryRun) {
     log(cfg, "Worker is disabled (disabled.flag present) - exiting cleanly.");
@@ -579,21 +611,36 @@ async function runTask(cfg, state, token, candidate, comments) {
     heartbeatMs: cfg.heartbeatSeconds * 1000,
     // BLOCKER 1: the child's identity is durable BEFORE we wait on it, so a
     // parent crash right here still leaves a record that protects the child.
+    // FINDING 1: this is a HANDOFF GATE, not bookkeeping. It must either make
+    // the child's identity durable or THROW. Swallowing the failure here is
+    // what let a live Claude run with `child_identity: null` on disk, which a
+    // later recovery could not distinguish from a pre-spawn crash. On a throw,
+    // runClaude aborts the child it just created and reports HANDOFF_FAILED.
     onSpawn: (identity) => {
-      try {
-        upsertTask(state, taskId, {
-          child_identity: identity,
-          last_child_pid: identity?.pid ?? null,
-          child_started_at: identity?.observed_at ?? null
-        });
-        persistState(cfg, state, token);
-        heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid: identity?.pid ?? null, childIdentity: identity });
-        emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, {
-          task_id: taskId, attempt: attempts, child_pid: identity?.pid ?? null, child_start_time: identity?.start_time ?? null
-        });
-      } catch (err) {
-        log(cfg, `WARNING: could not persist child identity at spawn: ${sanitize(err.message)}`);
+      if (faultArmed("spawn_state_write")) {
+        throw new Error("durable write failed (injected fault: spawn_state_write)");
       }
+      upsertTask(state, taskId, {
+        child_identity: identity,
+        last_child_pid: identity?.pid ?? null,
+        child_started_at: identity?.observed_at ?? null
+      });
+      persistState(cfg, state, token);
+      // The lock heartbeat carries the same identity, so the ledger and the
+      // task state agree about what is running. It returns false rather than
+      // throwing when ownership is gone, so an explicit check is required: a
+      // child we cannot cover with a held lock is not a tracked child.
+      const beatOk = !faultArmed("spawn_lost_lock")
+        && heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid: identity?.pid ?? null, childIdentity: identity });
+      if (!beatOk) {
+        throw new Error(
+          "the worker lock could not be heartbeated with the child's identity at spawn; "
+          + "ownership has been lost, so this child cannot be tracked and must not be left running."
+        );
+      }
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, {
+        task_id: taskId, attempt: attempts, child_pid: identity?.pid ?? null, child_start_time: identity?.start_time ?? null
+      });
     },
     onHeartbeat: (childPid, identity) => {
       heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid, childIdentity: identity });
@@ -604,6 +651,83 @@ async function runTask(cfg, state, token, candidate, comments) {
   emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_EXITED, {
     task_id: taskId, outcome: result.outcome, code: result.code ?? null, child_pid: result.childPid ?? null
   });
+
+  // --- FINDING 1: a failed durable handoff is never a completion -------------
+  // The child was created and then aborted because we could not record it. We
+  // must not fall through into the completion assessment: exit codes and
+  // reports from a task we never actually delegated say nothing. Every write
+  // below is best effort ON PURPOSE - the handoff failed precisely because
+  // durable state or lock ownership was unavailable, and the process must still
+  // terminate with a truthful non-zero code even when it cannot write anything.
+  if (result.outcome === OUTCOME.HANDOFF_FAILED) {
+    const handoff = result.handoff ?? {};
+    const untracked = handoff.untracked_child_live !== false;
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason: "child_identity_handoff_failed",
+      child_pid: result.childPid ?? null,
+      child_terminated: handoff.child_terminated ?? false,
+      untracked_child_live: untracked,
+      identity_state: handoff.identity_state ?? null
+    });
+    log(cfg, `HANDOFF FAILED for TASK_ID=${taskId}: ${result.error}. `
+      + `Child pid ${result.childPid ?? "n/a"} aborted; terminated=${handoff.child_terminated ?? false} `
+      + `(identity ${handoff.identity_state ?? "unknown"}).`);
+
+    // If the child is PROVEN gone, the attempt simply did not happen and is
+    // safely retryable. If we could not prove it, a retry might start a second
+    // Claude on top of a live one, so the task is parked as BLOCKED instead.
+    const failureReason = untracked
+      ? `handoff_failed_untracked_child_may_be_live (${result.error})`
+      : `handoff_failed_child_aborted (${result.error})`;
+    const handoffPatch = {
+      last_outcome: result.outcome,
+      last_child_pid: result.childPid ?? null,
+      last_dispatch_finished_at: new Date().toISOString(),
+      last_failure_reason: failureReason,
+      // The identity is KEPT when we could not prove the child is gone: it is
+      // the only thing a later recovery can use to find and protect that
+      // orphan. It is cleared only when termination was actually verified.
+      child_identity: untracked ? (result.childIdentity ?? null) : null,
+      handoff_failed_at: new Date().toISOString(),
+      handoff_child_terminated: handoff.child_terminated ?? false,
+      handoff_identity_state: handoff.identity_state ?? null
+    };
+    let persisted = false;
+    try {
+      upsertTask(state, taskId, untracked
+        ? { ...handoffPatch, status: TASK_STATUS.BLOCKED, blocked_at: new Date().toISOString() }
+        : { ...handoffPatch, status: TASK_STATUS.FAILED_RETRYABLE, next_eligible_at: new Date(Date.now() + cfg.backoffBaseMinutes * 60_000).toISOString() });
+      state.last_run_at = new Date().toISOString();
+      persistState(cfg, state, token);
+      persisted = true;
+    } catch (err) {
+      log(cfg, `Could not record the failed handoff in worker state either: ${sanitize(err.message)}. `
+        + "The exit code below is the only truthful signal this run can emit.");
+    }
+    try {
+      reportStatus(cfg, {
+        taskId,
+        phase: "dispatch",
+        reason: untracked ? "handoff_failed_untracked_child" : "handoff_failed_child_aborted",
+        detail: [
+          `The Claude child was created (pid ${result.childPid ?? "unknown"}) but its identity could not be recorded durably: ${result.error}`,
+          `Abort was attempted and the EXACT captured identity (pid + start time + host) was re-checked: `
+            + `terminated=${handoff.child_terminated ?? false}, identity=${handoff.identity_state ?? "unknown"}.`,
+          untracked
+            ? "Termination could NOT be proven, so this task is BLOCKED rather than retried: a retry could start a second Claude on top of a live one."
+            : "The child is proven gone, so nothing is running untracked and the task stays retryable.",
+          persisted ? "The outcome was recorded in worker state." : "Worker state could NOT be written; only this status and the exit code record the outcome."
+        ].join("\n"),
+        nextAction: untracked
+          ? "Inspect the recorded child_identity, confirm whether that exact process is still running, then issue a FRESH TASK_ID. The worker will not replay a blocked task on its own."
+          : "No action required; the next scheduled run retries this task after the backoff."
+      });
+    } catch (err) {
+      log(cfg, `Could not post the handoff status: ${sanitize(err.message)}`);
+    }
+    return untracked ? EXIT.BLOCKED : EXIT.TRANSIENT;
+  }
   log(cfg, `Claude dispatch finished: outcome=${result.outcome} code=${result.code ?? "n/a"} signal=${result.signal ?? "none"}`);
   if (result.stderrTail) log(cfg, `stderr (last 2000 chars): ${result.stderrTail.slice(-2000)}`);
   if (result.error) log(cfg, `spawn error: ${result.error}`);
