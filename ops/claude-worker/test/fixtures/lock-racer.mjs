@@ -51,6 +51,7 @@ const result = {
   enter_ms: null,
   exit_ms: null,
   beats: 0,
+  heartbeat_write_failures: 0,
   lost_ownership_during_hold: false,
   still_held_at_exit: null,
   release_ok: null,
@@ -108,11 +109,13 @@ try {
 
     const holdUntil = result.enter_ms + holdMs;
     while (Date.now() < holdUntil) {
-      if (!heartbeat(lockFile, { token: held.token, phase: "race-beat" })) {
-        result.lost_ownership_during_hold = true;
-        break;
-      }
-      result.beats += 1;
+      // A heartbeat that does not land is NOT the same as losing the lock: on
+      // Windows a rename over a file another process is reading fails
+      // transiently. Ownership is judged by holdsLock alone; a failed beat is
+      // reported separately so it can never be silently read as displacement.
+      if (heartbeat(lockFile, { token: held.token, phase: "race-beat" })) result.beats += 1;
+      else result.heartbeat_write_failures += 1;
+
       if (!holdsLock(lockFile, held.token)) {
         result.lost_ownership_during_hold = true;
         break;

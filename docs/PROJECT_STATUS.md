@@ -76,16 +76,21 @@ rollback avregistrerer også ubekreftede intensjoner for oppgaver som ikke fante
 
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **`npx vitest run ops/claude-worker/test` → 14 filer / 304 tester.**
-  **Dette er IKKE en ubetinget «alle grønne»-påstand.** Faktisk observert på endelig kode:
-  fire fulle kjøringer, to grønne (304/304) og to med ÉN feilende test (303/304). Feilen er
-  intermitterende og gjelder flerprosess-harnessen under CPU-metning når flere tunge testfiler
-  kjører parallelt - ikke låseprotokollen, som er dekket av deterministiske tester uten
-  tidsavhengighet. Ett tiltak er allerede gjort (all venting i `lock-racer.mjs` er nå ekte inaktiv
-  via `Atomics.wait` i stedet for busy-wait, som fjernet CPU-overtegningen), men det var ikke
-  tilstrekkelig. Nøyaktig hvilken test og nøyaktig årsak er rapportert som et ÅPENT, UAVKLART FUNN
-  i `CLAUDE_REPORT` på issue #68. Ingen assertion er svekket, ingenting er kjørt bort, og
-  ingen «rerun until green» er brukt.
+- **`npx vitest run ops/claude-worker/test` → 14 filer / 304 tester passed.**
+  **Sannferdig historikk, ikke en ubetinget påstand:** underveis feilet suiten intermitterende
+  (to av fem kjøringer ga 303/304). Feilen ble IKKE kjørt bort. Den ble diagnostisert til
+  `lock.test.mjs > a live heartbeating owner is never displaced by six concurrent challengers`,
+  der eieren rapporterte `lost_ownership_during_hold=true` - og årsaken var en EKTE Windows-defekt
+  i den nye koden, ikke en flaky test: libuv åpner vanlige filer uten `FILE_SHARE_DELETE`, så et
+  `rename` over en claim en annen prosess akkurat leser feiler forbigående med `EPERM`/`EACCES`,
+  og en lesing under et samtidig `rename` feiler på samme måte. Det ga to reelle feilmoduser:
+  (1) en heartbeat som ikke landet ble lest som «jeg har mistet låsen» - som ville avbrutt en frisk
+  50-minutters kjøring; (2) en claim som ikke kunne LESES ble klassifisert som «uleselig» og kunne
+  dermed forbigås - altså kunne en utfordrer forbigått en levende eier. Rettet: forbigående
+  filsystemfeil (`EPERM`/`EACCES`/`EBUSY`/`EMFILE`/`ENFILE`/`EAGAIN`) gir bundet retry med backoff,
+  en claim som ikke kunne leses gir `unreadable` og FAIL-CLOSED (aldri «kan forbigås»), og
+  harnessen skiller nå `heartbeat_write_failures` fra faktisk tap av eierskap. Ingen assertion er
+  svekket. Etter rettelsen: grønt.
   Nye tester i denne runden:
   - `lock.test.mjs` (36): den deterministiske stale-read → erstatningseier → forsinket reclaim →
     utfordrer-sekvensen via `hooks.afterClassify` (nøyaktig punktet v2 var utrygt), åtte ekte

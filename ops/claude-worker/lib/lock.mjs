@@ -194,24 +194,59 @@ export function publishExclusive(targetPath, contents) {
 function replaceOwnClaim(dir, generation, contents) {
   const staging = stagingPath(dir, "beat");
   writeDurable(staging, contents);
-  try {
-    renameSync(staging, claimPath(dir, generation));
-    return true;
-  } catch (err) {
-    try { unlinkSync(staging); } catch { /* best effort */ }
-    throw err;
+  const target = claimPath(dir, generation);
+  for (let attempt = 0; attempt <= TRANSIENT_RETRIES; attempt += 1) {
+    try {
+      renameSync(staging, target);
+      return true;
+    } catch (err) {
+      if (!TRANSIENT_FS_ERRORS.includes(err.code) || attempt === TRANSIENT_RETRIES) {
+        try { unlinkSync(staging); } catch { /* best effort */ }
+        throw err;
+      }
+      backoff(attempt);
+    }
   }
+  return false;
 }
 
 /** ---------------- reading the ledger ---------------- */
 
+/**
+ * Errors that mean "the filesystem was busy", not "the data is bad".
+ *
+ * On Windows a rename over an open file, or a read of a file being renamed over,
+ * fails transiently with EPERM/EACCES/EBUSY because libuv does not open regular
+ * files with FILE_SHARE_DELETE. Treating that as "unreadable claim" would let a
+ * challenger supersede a perfectly live owner, and treating it as "I lost the
+ * lock" would abort a healthy 50-minute run. It is neither: it is a retry.
+ */
+const TRANSIENT_FS_ERRORS = Object.freeze(["EPERM", "EACCES", "EBUSY", "EMFILE", "ENFILE", "EAGAIN"]);
+const TRANSIENT_RETRIES = 8;
+
+const IO_SLEEPER = new Int32Array(new SharedArrayBuffer(4));
+function backoff(attempt) {
+  Atomics.wait(IO_SLEEPER, 0, 0, Math.min(1 + attempt, 8));
+}
+
 function readClaimFile(path) {
   let raw;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (err) {
-    if (err.code === "ENOENT") return null;
-    return { malformed: true, raw: null, mtimeMs: null, read_error: err.code ?? err.message };
+  let lastError = null;
+  for (let attempt = 0; attempt <= TRANSIENT_RETRIES; attempt += 1) {
+    try {
+      raw = readFileSync(path, "utf8");
+      lastError = null;
+      break;
+    } catch (err) {
+      if (err.code === "ENOENT") return null;
+      lastError = err;
+      if (!TRANSIENT_FS_ERRORS.includes(err.code)) break;
+      backoff(attempt);
+    }
+  }
+  if (lastError) {
+    // Never "malformed enough to supersede": io_error means we do not KNOW.
+    return { malformed: true, io_error: true, raw: null, mtimeMs: null, read_error: lastError.code ?? lastError.message };
   }
   let mtimeMs = null;
   try {
@@ -395,6 +430,11 @@ function refusal(state, reason, extra = {}) {
  * Returns `{ ok: true }` or a ready-made refusal.
  */
 function judgeIncumbent(claim, { nowMs, malformedGraceMs, classifyOpts }) {
+  if (claim.io_error) {
+    // We could not READ the claim, which is not the same as the claim being
+    // garbage. Fail closed: never supersede a claim we never saw.
+    return refusal("unreadable", `claim ${claim.generation} could not be read (${claim.read_error}); refusing to supersede a claim we have not seen`);
+  }
   if (claim.malformed) {
     const age = claim.mtimeMs === null ? Number.POSITIVE_INFINITY : nowMs - claim.mtimeMs;
     if (age < malformedGraceMs) {
@@ -453,6 +493,9 @@ export function acquireLock(lockFile, {
 
   // A pre-v3 deployment's plain lock file is honoured but never touched.
   const legacy = readLegacyLock(lockFile);
+  if (legacy?.io_error) {
+    return refusal("unreadable", `the legacy v1/v2 lock file could not be read (${legacy.read_error}); refusing to guess whether a process owns it`, { legacy: true });
+  }
   if (legacy) {
     const legacyVerdict = legacy.malformed
       ? { state: "malformed", reason: "legacy lock file is unreadable" }

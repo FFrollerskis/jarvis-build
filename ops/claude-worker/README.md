@@ -100,6 +100,15 @@ kjører nå en eksplisitt READY -> START -> ATTEMPT -> RELEASE-protokoll, og
 to intervaller får overlappe. Alle forventede barn må returnere en resultatfil og
 avslutte med exit 0; ingenting filtreres bort.
 
+En EKTE Windows-defekt i v3 ble funnet av nettopp denne harnessen og rettet før levering: libuv
+åpner vanlige filer uten `FILE_SHARE_DELETE`, så et `rename` over en claim en annen prosess akkurat
+leser feiler forbigående med `EPERM`/`EACCES`. Uten håndtering ga det (1) en heartbeat som ikke
+landet, lest som «jeg har mistet låsen» - som ville avbrutt en frisk 50-minutters kjøring, og (2) en
+claim som ikke kunne LESES, klassifisert som «uleselig» og dermed forbigåelig - altså kunne en
+utfordrer forbigått en levende eier. Rettet med bundet retry + backoff på forbigående
+filsystemfeil, og med et eget `unreadable`-verdikt som er FAIL-CLOSED: en claim vi ikke har SETT
+blir aldri forbigått. Harnessen skiller nå `heartbeat_write_failures` fra faktisk tap av eierskap.
+
 I tillegg lukkes den gjenstående deployment-forpliktelsen: `install-task.ps1` og
 `install-supervisor.ps1` skriver nå en DURABEL INTENSJON i install-manifestet FØR
 noen registrering forsøkes, og AVBRYTER installasjonen hvis den ikke kan skrives.

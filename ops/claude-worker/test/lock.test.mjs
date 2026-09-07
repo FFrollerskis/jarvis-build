@@ -565,7 +565,7 @@ describe("genuine multiprocess serialization", () => {
     }
     for (const loser of outcomes.filter((o) => !o.result.acquired)) {
       expect(loser.result.attempts).toHaveLength(1);
-      expect(["active", "lost_acquisition_race", "publishing", "superseded", "unproven_identity"])
+      expect(["active", "lost_acquisition_race", "publishing", "superseded", "unproven_identity", "unreadable"])
         .toContain(loser.result.attempts[0].verdict);
     }
 
@@ -615,10 +615,11 @@ describe("genuine multiprocess serialization", () => {
     for (const o of outcomes) {
       expect(o.result.acquired, `challenger ${o.index} displaced a live owner`).toBe(false);
       expect(o.result.attempts).toHaveLength(1);
-      // `unproven_identity` is the fail-closed verdict when this host refuses to
-      // report another process's start time; it is a refusal exactly like
-      // `active` and is accepted here for that reason, never as a weakening.
-      expect(["active", "unproven_identity"]).toContain(o.result.attempts[0].verdict);
+      // `unproven_identity` (this host refuses to report another process's start
+      // time) and `unreadable` (a transient Windows sharing violation) are
+      // fail-closed REFUSALS exactly like `active`. They are accepted here for
+      // that reason - the load-bearing assertion is `acquired === false`.
+      expect(["active", "unproven_identity", "unreadable"]).toContain(o.result.attempts[0].verdict);
     }
 
     // Phase 3: the owner is still the same claim, still held, still its own pid.
