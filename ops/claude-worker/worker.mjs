@@ -677,9 +677,20 @@ async function runTask(cfg, state, token, candidate, comments) {
     // If the child is PROVEN gone, the attempt simply did not happen and is
     // safely retryable. If we could not prove it, a retry might start a second
     // Claude on top of a live one, so the task is parked as BLOCKED instead.
+    //
+    // A retryable handoff failure still consumes the ordinary attempt budget: a
+    // precondition that keeps failing is a real problem that must surface as
+    // BLOCKED, not spin forever because "the attempt did not really happen".
+    const handoffBackoff = computeBackoff(attempts, {
+      maxAttempts: cfg.maxAttempts,
+      baseMs: cfg.backoffBaseMinutes * 60_000,
+      maxMs: cfg.backoffMaxHours * 3_600_000
+    });
+    const parkAsBlocked = untracked || handoffBackoff.exhausted;
     const failureReason = untracked
       ? `handoff_failed_untracked_child_may_be_live (${result.error})`
-      : `handoff_failed_child_aborted (${result.error})`;
+      : `handoff_failed_child_aborted (${result.error})`
+        + (handoffBackoff.exhausted ? ` [retry budget exhausted after ${attempts}/${cfg.maxAttempts} attempts]` : "");
     const handoffPatch = {
       last_outcome: result.outcome,
       last_child_pid: result.childPid ?? null,
@@ -695,9 +706,9 @@ async function runTask(cfg, state, token, candidate, comments) {
     };
     let persisted = false;
     try {
-      upsertTask(state, taskId, untracked
+      upsertTask(state, taskId, parkAsBlocked
         ? { ...handoffPatch, status: TASK_STATUS.BLOCKED, blocked_at: new Date().toISOString() }
-        : { ...handoffPatch, status: TASK_STATUS.FAILED_RETRYABLE, next_eligible_at: new Date(Date.now() + cfg.backoffBaseMinutes * 60_000).toISOString() });
+        : { ...handoffPatch, status: TASK_STATUS.FAILED_RETRYABLE, next_eligible_at: new Date(Date.now() + handoffBackoff.delayMs).toISOString() });
       state.last_run_at = new Date().toISOString();
       persistState(cfg, state, token);
       persisted = true;
@@ -709,24 +720,31 @@ async function runTask(cfg, state, token, candidate, comments) {
       reportStatus(cfg, {
         taskId,
         phase: "dispatch",
-        reason: untracked ? "handoff_failed_untracked_child" : "handoff_failed_child_aborted",
+        reason: untracked
+          ? "handoff_failed_untracked_child"
+          : (handoffBackoff.exhausted ? "handoff_failed_retry_budget_exhausted" : "handoff_failed_child_aborted"),
         detail: [
           `The Claude child was created (pid ${result.childPid ?? "unknown"}) but its identity could not be recorded durably: ${result.error}`,
           `Abort was attempted and the EXACT captured identity (pid + start time + host) was re-checked: `
             + `terminated=${handoff.child_terminated ?? false}, identity=${handoff.identity_state ?? "unknown"}.`,
           untracked
             ? "Termination could NOT be proven, so this task is BLOCKED rather than retried: a retry could start a second Claude on top of a live one."
-            : "The child is proven gone, so nothing is running untracked and the task stays retryable.",
+            : (handoffBackoff.exhausted
+              ? `The child is proven gone, but the handoff has now failed ${attempts}/${cfg.maxAttempts} times. `
+                + "A precondition that keeps failing is a real problem, so the task is parked as BLOCKED instead of spinning."
+              : "The child is proven gone, so nothing is running untracked and the task stays retryable."),
           persisted ? "The outcome was recorded in worker state." : "Worker state could NOT be written; only this status and the exit code record the outcome."
         ].join("\n"),
         nextAction: untracked
           ? "Inspect the recorded child_identity, confirm whether that exact process is still running, then issue a FRESH TASK_ID. The worker will not replay a blocked task on its own."
-          : "No action required; the next scheduled run retries this task after the backoff."
+          : (handoffBackoff.exhausted
+            ? "Find out why the durable state write or the lock heartbeat keeps failing (disk, permissions, a competing instance), then issue a FRESH TASK_ID."
+            : "No action required; the next scheduled run retries this task after the backoff.")
       });
     } catch (err) {
       log(cfg, `Could not post the handoff status: ${sanitize(err.message)}`);
     }
-    return untracked ? EXIT.BLOCKED : EXIT.TRANSIENT;
+    return parkAsBlocked ? EXIT.BLOCKED : EXIT.TRANSIENT;
   }
   log(cfg, `Claude dispatch finished: outcome=${result.outcome} code=${result.code ?? "n/a"} signal=${result.signal ?? "none"}`);
   if (result.stderrTail) log(cfg, `stderr (last 2000 chars): ${result.stderrTail.slice(-2000)}`);

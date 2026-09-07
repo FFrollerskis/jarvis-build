@@ -587,6 +587,38 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
     });
   }
 
+  /**
+   * A precondition that keeps failing is a real problem. "The attempt did not
+   * really happen" must not become a licence to retry forever.
+   */
+  it("a handoff that keeps failing consumes the attempt budget and ends BLOCKED", async () => {
+    let lastCode = 0;
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      const res = await runWorker("hang", { JARVIS_WORKER_FAULT: "spawn_state_write" });
+      lastCode = res.code;
+      const t = task();
+      if (t.status === TASK_STATUS.BLOCKED) break;
+      expect(t.status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+      // Make the next attempt eligible immediately instead of waiting out the
+      // real backoff.
+      const s = state().state;
+      s.tasks[TASK_ID].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+      saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+    }
+    const t = task();
+    expect(t.status).toBe(TASK_STATUS.BLOCKED);
+    expect(t.attempts).toBe(4); // maxAttempts in this fixture's config
+    expect(t.last_failure_reason).toMatch(/retry budget exhausted/);
+    expect(lastCode).toBe(3);
+    // Still no untracked child, even at the end of the budget.
+    const runningPath = join(claudeDir, "running");
+    if (existsSync(runningPath)) {
+      const childPid = Number(readFileSync(runningPath, "utf8"));
+      stray.push(childPid);
+      await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+    }
+  }, 300_000);
+
   it("the armed fault is announced loudly and can never be silent", async () => {
     const res = await runWorker("hang", { JARVIS_WORKER_FAULT: "spawn_state_write" });
     expect(res.output).toMatch(/JARVIS_WORKER_FAULT=spawn_state_write is armed/);
