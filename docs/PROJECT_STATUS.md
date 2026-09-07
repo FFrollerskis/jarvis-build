@@ -20,6 +20,16 @@ Runde 7 lukker nøyaktig tre ting: den gjenstående defekten i dispatch-ens feil
 callbackene lå utenfor handoff-gaten), en CI-divergens på SAMME SHA som måtte diagnostiseres i
 stedet for kjøres bort, og en read-only rekonsiliering av host-sannhet. Ingenting annet.
 
+**Runde 7 gikk i TO forsøk, og det er verdt å si rett ut.** Forsøk 1 (18:31:20Z → 18:58:29Z på
+`head=3734c0e`) implementerte, committet og pushet rettelsen `a8bc7321`, men avsluttet UTEN å poste
+en terminal `CLAUDE_REPORT`. Workeren nektet å tolke `exit 0` som fullført og parkerte oppgaven
+`blocked` med `reason="exit_0_without_matching_report (no_matching_trusted_report)"` - bevis-porten
+gjorde altså nøyaktig jobben sin. Forsøk 2 (`attempt 2`, 19:11:22Z på `head=a8bc7321`) gjenbrukte
+SAMME branch og SAMME PR #75, postet ingen duplikat-ACK, re-implementerte ingenting, men verifiserte
+den eksisterende diffen mot faktisk kilde, styrket host-beviset (funn 3b/3c under) og rapporterte.
+HEAD har derfor lovlig beveget seg forbi byggeordrens `EXPECTED_HEAD_SHA=3734c0e` - drivet er vårt
+eget fra forsøk 1, ikke en tredjepart.
+
 ## Runde 1 (v2) - hva som ble reparert
 
 Fire uavhengige, produksjonsobserverte feil i den lokale worker-loopen: kladd i repoet som blokkerte
@@ -264,12 +274,47 @@ workeren dispatchet denne oppgaven 18:31:20Z på `head=3734c0e`. De utdaterte p�
 installert» / «hosten kjører v1» er dermed rettet nedenfor. **Merk:** den deployerte
 `lib/dispatch.mjs` er pre-fix - rettelsen i denne runden er IKKE deployert.
 
-**Presist nektet, ikke omgått:** `sha256sum` mot de installerte filene og `schtasks /query` ble
-nektet av øktens tillatelseslag. Manifest-hashene er derfor manifest-REGISTRERTE, ikke re-hashede
-bytes på disk. Ingen installasjon, aktivering, restart, reboot eller task-reregistrering er utført.
+**Funn 3b (host) - hashene er nå RE-HASHEDE BYTES, ikke bare manifest-registrerte.** Runde 7s
+opprinnelige forbehold («manifest-REGISTRERTE, ikke re-hashede bytes på disk») er nå OPPHEVET for
+disse tre filene: de installerte filene under `C:\Users\Tobia\.jarvis-claude-worker\` er lest og
+hashet på nytt READ-ONLY, og bytene på disk gir nøyaktig:
+
+```
+worker.mjs        fbfd6b398bf7391bcb772afcfc5a1b29d6230d4cad7568b916125b3b95e2d416
+supervisor.mjs    4eafd096aebcd4bea9263088d3e528fade273b53ecce6fca794c5fe07ca97730
+lib/dispatch.mjs  171e672b5c1fd218681a36cb1d5fe80c080c9c408b198f2173cbe84a4c948b7e
+```
+
+Dette er identisk BÅDE med manifestets `new_sha256` OG med `git show 3734c0e:ops/claude-worker/<fil>
+| sha256sum`. Hosten kjører altså bevislig `3734c0e`-bytes - og den siste linjen bekrefter direkte at
+den deployerte `lib/dispatch.mjs` er PRE-FIX (rettelsen i `a8bc732` endret nettopp den filen).
+`old_sha256 == new_sha256` for alle tre: deployment `20260907-140934` skrev innhold som allerede var
+identisk.
+
+**Funn 3c (host) - scheduler-drevet drift er observert, selv-recovery er det fortsatt IKKE.**
+`logs/health.jsonl` (219 linjer) inneholder 59 `scheduler_invoked`-hendelser fra `run-worker.ps1`,
+i ubrutt 5-minutters kadens 14:16:19Z → 18:31:18Z. Workeren startes altså av den registrerte
+oppgaven, ikke bare av en kommandert start. Hullet 18:36Z → 18:56Z er forklart, ikke ukjent: forrige
+forsøk på DENNE oppgaven kjørte 18:31:20Z → 18:58:29Z, og planleggerens single-instance-policy
+undertrykker en ny instans mens den forrige lever; kadensen gjenopptas 19:01:18Z. **Det viktigste
+funnet:** forrige forsøk avsluttet `completed_exit_0`, men workeren nektet å påstå fullføring og
+parkerte `blocked` med `reason="exit_0_without_matching_report (no_matching_trusted_report)"`
+(18:58:30Z, `next_eligible_at=19:08:30Z`). Bevis-porten fungerte altså på ekte host, mot en ekte
+kjøring. **Dette er fortsatt IKKE selv-recovery:** ingen krasj er indusert, ingen reboot er testet.
+
+**Presist nektet, ikke omgått:** `schtasks /query` / `Get-ScheduledTask` ble nektet av øktens
+tillatelseslag og er IKKE omgått; oppgaveregistreringen hviler derfor på manifestets `task_intents`
+pluss de observerte `scheduler_invoked`-hendelsene, ikke på et direkte planlegger-oppslag. Ingen
+installasjon, aktivering, restart, reboot eller task-reregistrering er utført.
 
 ## Kvalitetsporter (kjørt i denne økten)
 
+- **Runde 7-closeout, re-verifisert på den endelige HEAD `a8bc7321`:** suiten kjørt TO ganger til
+  (15 filer / 421 passed begge ganger), og full CI på `a8bc7321` er GRØNN i BEGGE kontekster -
+  kjøring `34153564568` (`event: push`) og `34153567937` (`event: pull_request`). Divergensen som
+  fantes på `3734c0e` (push rød / PR grønn) opptrer altså ikke på denne HEAD. Det er IKKE et bevis
+  på at racet er borte: ingen assertion er endret, så en grønn kjøring er forventet i det vanlige
+  tilfellet uansett. Rot-årsaken står udekket til uavhengig review godkjenner et bundet scope.
 - **`npx vitest run ops/claude-worker/test` → 15 filer / 421 tester passed, kjørt TO ganger,
   421/421 begge ganger** (387 → 421; 34 nye i runde 7). Nye tester i runde 7:
   - `dispatch.test.mjs` (21 → 36), direkte modulkall: arkitektens repro RESOLVER nå til
@@ -431,8 +476,12 @@ Historikk fra runde 3, uendret:
 
 **Hva de tre true-flaggene faktisk betyr - ikke mer:**
 
-- `DEPLOYED_TO_HOST=true`: deployment `20260907-140934`, manifest-registrerte `new_sha256` for
-  `worker.mjs`/`supervisor.mjs`/`lib/dispatch.mjs` er bit-identiske med `git show 3734c0e:`.
+- `DEPLOYED_TO_HOST=true`: deployment `20260907-140934`. **Styrket i closeout:** de installerte
+  filene er RE-HASHET read-only, og bytene på disk for `worker.mjs`/`supervisor.mjs`/
+  `lib/dispatch.mjs` er identiske både med manifestets `new_sha256` og med
+  `git show 3734c0e:`-blobene (se funn 3b). Dette er ikke lenger bare en manifest-påstand.
+  I tillegg: 59 `scheduler_invoked`-hendelser viser planlegger-drevet drift, ikke bare kommandert
+  start (funn 3c).
 - `SUPERVISOR_INSTALLED=true`: `JarvisWorkerSupervisor` `introduced`/`confirmed` 14:11:28Z, og
   supervisoren har postet en ekte `SUPERVISOR_RECEIPT` på issue #68.
 - `REMOTE_RESTART_VERIFIED=true`: KUN kommandert start av en FRISK worker - supervisor-kvittering
@@ -483,9 +532,12 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
    kontrollerte bootstrap-handoffen, som venter på at den eksakte forelderen avslutter og deretter
    aktiverer - den krever IKKE at den nye `run-worker.ps1` allerede er live) → config-filer →
    `node worker.mjs status` / `run --dry-run` → `.\install-task.ps1` → `.\install-supervisor.ps1`.
-3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon, den
-   FAKTISKE registrerte scheduled-task-kommandolinjen på hosten (for å bekrefte hvilken entrypoint
-   som virkelig kjører), en observert ekte bootstrap-handoff, en ekte planlagt kjøring som fullfører
+3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon
+   (**dette punktet er nå oppfylt read-only** - se funn 3b, bytene på disk er re-hashet og matcher
+   `3734c0e`), den FAKTISKE registrerte scheduled-task-kommandolinjen på hosten (for å bekrefte
+   hvilken entrypoint som virkelig kjører - **delvis dekket:** `scheduler_invoked`-hendelsene
+   navngir `run-worker.ps1`, men selve task-registreringen er ikke lest, siden `schtasks /query`
+   ble nektet), en observert ekte bootstrap-handoff, en ekte planlagt kjøring som fullfører
    en ufarlig autorisert probe, og en ekte `RESTART_WORKER`-kvittering. Først da kan
    `WORKER_SELF_RECOVERY_VERIFIED`, `SUPERVISOR_INSTALLED` og `REMOTE_RESTART_VERIFIED` settes true -
    individuelt, aldri samlet. **Installasjon er ikke påstått fra fixtures.**
