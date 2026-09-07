@@ -538,7 +538,12 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
       it("dispatches exactly once and the NEXT run does not duplicate it", async () => {
         const first = await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
         expect(first.code).not.toBe(0);
-        expect(invocations()).toHaveLength(1);
+        // How far the child got before the abort reached it is a race, not a
+        // property: on Linux the signal usually lands before it executes its
+        // first line, on Windows it usually does not. What MUST hold is that
+        // the worker started at most one child and never a second.
+        const afterFirst = invocations().length;
+        expect(afterFirst).toBeLessThanOrEqual(1);
 
         const runningPath = join(claudeDir, "running");
         if (existsSync(runningPath)) {
@@ -557,7 +562,7 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
         // An IMMEDIATE re-run must not dispatch again: the backoff still holds.
         const tooSoon = await runWorker("report");
         expect(tooSoon.code).toBe(0);
-        expect(invocations()).toHaveLength(1);
+        expect(invocations()).toHaveLength(afterFirst); // nothing new was started
 
         // Once the backoff has elapsed, recovery dispatches EXACTLY once more.
         const s = state().state;
@@ -565,7 +570,7 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
         saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
 
         const second = await runWorker("report");
-        expect(invocations()).toHaveLength(2);
+        expect(invocations()).toHaveLength(afterFirst + 1);
         expect(second.code).toBe(0);
         expect(task().status).toBe(TASK_STATUS.COMPLETED);
       }, 180_000);
