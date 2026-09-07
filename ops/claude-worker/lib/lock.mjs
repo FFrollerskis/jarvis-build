@@ -390,6 +390,73 @@ function isHeld(info) {
 }
 
 /**
+ * May we ACT on what this claim says about ownership?
+ *
+ * Only a schema-valid claim gets to say "I was retracted, look past me" or "I
+ * was released, the lock is free". A malformed claim says nothing we are
+ * entitled to believe, so it stops resolution and is handed to the caller's
+ * fail-closed malformed policy instead (finding 2).
+ */
+function isWellFormedClaim(info) {
+  return validateClaimSchema(info).length === 0;
+}
+
+/**
+ * Schema/semantic validation of a claim that already PARSED as JSON.
+ *
+ * D126 final review finding 2: `readClaimFile` only ever reported claims that
+ * failed to PARSE as malformed. A syntactically valid object such as
+ * `{"state":"held"}` therefore sailed past the malformed grace rule entirely and
+ * was superseded on sight - including when it was a brand new claim another
+ * instance was in the middle of publishing.
+ *
+ * "Parsed as JSON" and "is a claim" are different questions. A claim that parses
+ * but is missing its pid, its host binding, or carries an unparseable timestamp
+ * tells us exactly as little about who owns the lock as one that does not parse
+ * at all, so it must be judged under the SAME fail-closed policy.
+ *
+ * Returns a list of problems; an empty list means the claim is well formed.
+ * Optional fields are only rejected when they are PRESENT and wrong, so legacy
+ * v1/v2 locks that simply omit newer fields are still readable.
+ */
+export function validateClaimSchema(info) {
+  if (!info || typeof info !== "object" || Array.isArray(info)) {
+    return ["claim is not a JSON object"];
+  }
+  const problems = [];
+  if (!Number.isInteger(info.pid) || info.pid <= 0) {
+    problems.push("pid is missing or is not a positive integer");
+  }
+  if (typeof info.host !== "string" || info.host.trim() === "") {
+    problems.push("host binding is missing or is not a non-empty string");
+  }
+  if (info.state !== undefined && typeof info.state !== "string") {
+    problems.push("state is present but is not a string");
+  }
+  if (info.owner_token !== undefined
+      && (typeof info.owner_token !== "string" || info.owner_token.trim() === "")) {
+    problems.push("owner_token is present but is not a non-empty string");
+  }
+  if (info.generation !== undefined && (!Number.isInteger(info.generation) || info.generation <= 0)) {
+    problems.push("generation is present but is not a positive integer");
+  }
+  if (info.start_time !== undefined && info.start_time !== null && typeof info.start_time !== "string") {
+    problems.push("start_time is present but is not a string");
+  }
+  // An unparseable heartbeat used to fall straight through to "active": the
+  // NaN it produced failed `Number.isFinite`, so the staleness check was simply
+  // skipped and a garbage timestamp read as a healthy owner forever.
+  for (const field of ["started_at", "heartbeat_at", "released_at", "voided_at"]) {
+    const value = info[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "string" || !Number.isFinite(new Date(value).getTime())) {
+      problems.push(`${field} is present but is not a parseable ISO timestamp`);
+    }
+  }
+  return problems;
+}
+
+/**
  * Resolve the EFFECTIVE claim: the highest generation that is not void.
  *
  * Walks DOWN from the raw maximum, stepping past void claims, and stops at the
@@ -414,7 +481,11 @@ function resolveEffectiveClaim(dir, generations) {
     }
     const file = readClaimFile(claimPath(dir, generation));
     if (file === null) return { unresolved: true, missingGeneration: generation, voided };
-    if (!file.malformed && claimState(file.info) === CLAIM_VOID) {
+    // A void claim is transparent ONLY when it is a valid claim. An object that
+    // merely contains `"state":"void"` but is not a claim must not be able to
+    // make the resolver step past it - that would let a malformed file erase a
+    // live predecessor exactly the way a retracted claim used to (5567261855).
+    if (!file.malformed && isWellFormedClaim(file.info) && claimState(file.info) === CLAIM_VOID) {
       voided.push(generation);
       expected = generation - 1;
       continue;
@@ -470,8 +541,8 @@ export function readLockRaw(lockFile) {
     };
   }
   if (ledger.claim) {
-    if (!ledger.claim.malformed && !isHeld(ledger.claim.info)) {
-      // Highest claim is an explicit release: the lock is free.
+    if (!ledger.claim.malformed && isWellFormedClaim(ledger.claim.info) && !isHeld(ledger.claim.info)) {
+      // Highest claim is a VALID explicit release: the lock is free.
       return readLegacyLock(lockFile);
     }
     return ledger.claim;
@@ -509,8 +580,12 @@ export function classifyLock(info, {
   alive = isProcessAlive,
   startTime = readProcessStartTime
 } = {}) {
-  if (!info || typeof info !== "object" || !Number.isInteger(info.pid)) {
-    return { state: "malformed", reason: "lock file unreadable or missing pid" };
+  // Finding 2: schema validation runs BEFORE anything is concluded from the
+  // content - including before `released`/`void`. A claim we cannot validate
+  // must not be able to declare the lock free just by claiming to be a release.
+  const problems = validateClaimSchema(info);
+  if (problems.length > 0) {
+    return { state: "malformed", reason: `claim does not satisfy the lock schema: ${problems.join("; ")}` };
   }
   const state = claimState(info);
   if (state === CLAIM_VOID) {
@@ -522,12 +597,10 @@ export function classifyLock(info, {
   if (state === CLAIM_RELEASED) {
     return { state: "released", reason: `generation ${info.generation ?? "?"} was released by its owner` };
   }
-  if (info.host && info.host !== host) {
+  if (info.host !== host) {
+    // The host binding is guaranteed to be a non-empty string by the schema
+    // check above; a lock without one is malformed, never "ours by default".
     return { state: "foreign_host", reason: `lock owned by host ${info.host}` };
-  }
-  if (!info.host) {
-    // A lock without a host binding cannot be reasoned about safely.
-    return { state: "malformed", reason: "lock has no host binding" };
   }
   if (!alive(info.pid)) {
     return { state: "stale_dead", reason: `owner pid ${info.pid} is gone` };
@@ -568,6 +641,38 @@ function refusal(state, reason, extra = {}) {
  * Decide whether the current maximum claim may be superseded.
  * Returns `{ ok: true }` or a ready-made refusal.
  */
+/**
+ * ONE fail-closed policy for every malformed current claim, whether it failed to
+ * parse or parsed into something that is not a valid claim (finding 2).
+ *
+ * A FRESH malformed claim gets the publication grace: another instance may be
+ * halfway through writing it, and superseding it would break mutual exclusion
+ * against a process that is about to be a perfectly legitimate owner. Only once
+ * it has aged past that bounded, documented window may it be superseded - and
+ * even then it is superseded, never deleted.
+ *
+ * Unreadable I/O never reaches here: `judgeIncumbent` refuses that outright,
+ * because "I could not read it" is not evidence about its contents at all.
+ */
+function judgeMalformedClaim(claim, { nowMs, malformedGraceMs, kind, detail }) {
+  const age = claim.mtimeMs === null ? Number.POSITIVE_INFINITY : nowMs - claim.mtimeMs;
+  const suffix = detail ? ` (${detail})` : "";
+  if (age < malformedGraceMs) {
+    return refusal(
+      "publishing",
+      `claim ${claim.generation} is ${kind} but only ${Math.max(0, Math.round(age / 1000))}s old`
+      + ` - another instance may be publishing it${suffix}`
+    );
+  }
+  return {
+    ok: true,
+    verdict: {
+      state: "malformed",
+      reason: `${kind} claim older than the ${Math.round(malformedGraceMs / 1000)}s publication grace window${suffix}`
+    }
+  };
+}
+
 function judgeIncumbent(claim, { nowMs, malformedGraceMs, classifyOpts }) {
   if (claim.io_error) {
     // We could not READ the claim, which is not the same as the claim being
@@ -575,17 +680,18 @@ function judgeIncumbent(claim, { nowMs, malformedGraceMs, classifyOpts }) {
     return refusal("unreadable", `claim ${claim.generation} could not be read (${claim.read_error}); refusing to supersede a claim we have not seen`);
   }
   if (claim.malformed) {
-    const age = claim.mtimeMs === null ? Number.POSITIVE_INFINITY : nowMs - claim.mtimeMs;
-    if (age < malformedGraceMs) {
-      return refusal(
-        "publishing",
-        `claim ${claim.generation} is unreadable but only ${Math.max(0, Math.round(age / 1000))}s old - another instance may be publishing it`
-      );
-    }
-    // Aged-out unreadable claim: superseded, never deleted.
-    return { ok: true, verdict: { state: "malformed", reason: "unreadable claim older than the grace window" } };
+    // Did not parse.
+    return judgeMalformedClaim(claim, { nowMs, malformedGraceMs, kind: "unreadable" });
   }
   const verdict = classifyLock(claim.info, { nowMs, ...classifyOpts });
+  if (verdict.state === "malformed") {
+    // Parsed, but is not a claim. Exactly as unknown as one that did not parse,
+    // and therefore judged by exactly the same rule instead of falling through
+    // to `ok: true` and superseding a brand new claim on sight.
+    return judgeMalformedClaim(claim, {
+      nowMs, malformedGraceMs, kind: "semantically malformed", detail: verdict.reason
+    });
+  }
   if (verdict.state === "released") return { ok: true, verdict };
   if (verdict.state === "stale_no_heartbeat") {
     return { acquired: false, verdict, owner: claim.info, needs_attention: true };

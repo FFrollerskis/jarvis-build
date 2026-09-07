@@ -491,6 +491,101 @@ describe("claims that must never be superseded", () => {
     expect(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).toBe('{"pid": 12');
   });
 
+  /**
+   * D126 FINAL review finding 2, architect deterministic repro on f123e650:
+   * publish a fresh generation 1 containing `{"state":"held"}` and acquireLock
+   * returned `acquired=true` - a brand new claim was superseded on sight,
+   * because only claims that failed to PARSE were ever judged as malformed.
+   */
+  it("the architect's exact repro: a fresh {\"state\":\"held\"} claim is NOT superseded", () => {
+    seedClaim(1, '{"state":"held"}');
+    const res = acquireLock(lockFile, { malformedGraceMs: 60_000 });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("publishing");
+    // Never rewritten, never deleted.
+    expect(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).toBe('{"state":"held"}');
+  });
+
+  it("an AGED semantically malformed claim is superseded under the bounded rule, never deleted", () => {
+    seedClaim(1, '{"state":"held"}', { ageMs: MALFORMED_LOCK_GRACE_MS + 60_000 });
+    const res = acquireLock(lockFile);
+    expect(res.acquired).toBe(true);
+    expect(res.generation).toBe(2);
+    expect(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).toBe('{"state":"held"}');
+  });
+
+  it("classifyLock reports each schema defect as malformed, not as a usable verdict", () => {
+    const cases = [
+      ["missing pid", { pid: undefined }],
+      ["pid is not a positive integer", { pid: 0 }],
+      ["pid is a string", { pid: "4242" }],
+      ["missing host", { host: undefined }],
+      ["blank host", { host: "   " }],
+      ["state is not a string", { state: 7 }],
+      ["owner_token is blank", { owner_token: "" }],
+      ["owner_token is not a string", { owner_token: 12 }],
+      ["generation is not a positive integer", { generation: 0 }],
+      ["started_at is unparseable", { started_at: "not-a-date" }],
+      ["heartbeat_at is unparseable", { heartbeat_at: "garbage" }],
+      ["start_time is not a string", { start_time: 12345 }]
+    ];
+    for (const [label, over] of cases) {
+      const info = lockInfo(over);
+      if (over.pid === undefined && "pid" in over) delete info.pid;
+      if (over.host === undefined && "host" in over) delete info.host;
+      if (over.started_at === undefined && "started_at" in over) delete info.started_at;
+      const verdict = classifyLock(info, { nowMs: NOW, alive: () => true, startTime: () => lockInfo().start_time });
+      expect(verdict.state, label).toBe("malformed");
+    }
+  });
+
+  /**
+   * An unparseable heartbeat used to produce NaN, which failed `Number.isFinite`
+   * and so SKIPPED the staleness check entirely: garbage read as a healthy,
+   * eternally active owner. It is now malformed, i.e. fail-closed but bounded.
+   */
+  it("a garbage heartbeat timestamp is malformed, not silently 'active' forever", () => {
+    const verdict = classifyLock(lockInfo({ heartbeat_at: "soon" }), {
+      nowMs: NOW, alive: () => true, startTime: () => lockInfo().start_time
+    });
+    expect(verdict.state).toBe("malformed");
+  });
+
+  it("a claim missing pid or host cannot declare the lock free by claiming to be released", () => {
+    for (const raw of ['{"state":"released"}', '{"state":"void"}']) {
+      rmSync(ledgerDir(lockFile), { recursive: true, force: true });
+      seedClaim(1, raw);
+      const fresh = acquireLock(lockFile, { malformedGraceMs: 60_000 });
+      expect(fresh.acquired, raw).toBe(false);
+      expect(fresh.verdict.state, raw).toBe("publishing");
+    }
+  });
+
+  it("unreadable I/O is never superseded automatically, no matter how old it is", () => {
+    // A directory where a claim file must be: reading it is an EISDIR, i.e. an
+    // I/O error rather than evidence about the contents.
+    const d = ledgerDir(lockFile);
+    mkdirSync(join(d, "000000000001.claim"), { recursive: true });
+    const t = (Date.now() - (MALFORMED_LOCK_GRACE_MS + 3_600_000)) / 1000;
+    utimesSync(join(d, "000000000001.claim"), t, t);
+    const res = acquireLock(lockFile);
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("unreadable");
+    expect(existsSync(join(d, "000000000001.claim"))).toBe(true);
+  });
+
+  it("a semantically malformed claim being REWRITTEN into a valid one is re-read, not stolen", () => {
+    // Concurrent publication: the challenger sees the half-written object first.
+    seedClaim(1, '{"state":"held"}');
+    expect(acquireLock(lockFile, { malformedGraceMs: 60_000 }).acquired).toBe(false);
+    // The publisher completes its claim; it is a live, valid owner now.
+    rmSync(join(ledgerDir(lockFile), "000000000001.claim"), { force: true });
+    seedClaim(1, { pid: process.pid, start_time: readProcessStartTime(process.pid) });
+    const after = acquireLock(lockFile, { alive: () => true, startTime: () => readProcessStartTime(process.pid) });
+    expect(after.acquired).toBe(false);
+    expect(after.verdict.state).toBe("active");
+  });
+
   it("a ledger that cannot be listed fails closed", () => {
     mkdirSync(ledgerDir(lockFile), { recursive: true });
     // A file where the ledger directory must be is an ENOTDIR on read.
