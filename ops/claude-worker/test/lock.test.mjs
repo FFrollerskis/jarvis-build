@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
 
@@ -26,6 +26,7 @@ import {
 } from "../lib/lock.mjs";
 
 const RACER = fileURLToPath(new URL("./fixtures/lock-racer.mjs", import.meta.url));
+const LOCK_MODULE = fileURLToPath(new URL("../lib/lock.mjs", import.meta.url));
 
 let dir;
 let lockFile;
@@ -266,6 +267,178 @@ describe("a stale reclaimer cannot displace a live owner (architect repro 556511
     // The incumbent claim is still on disk at the moment of mutation.
     expect(seen[0]).toBe(1);
     expect(claimFiles()).toEqual(["000000000001.claim", "000000000002.claim"]);
+  });
+});
+
+/** ---------------- retracted claims must not mask a live predecessor ---------------- */
+
+describe("a retracted claim cannot mask a live predecessor (architect repro 5567261855)", () => {
+  const PROBE = { alive: (pid) => pid === process.pid, startTime: (pid) => readProcessStartTime(pid) };
+
+  /**
+   * The architect's exact three-party sequence, driven deterministically by the
+   * scheduling hook - no sleeps, no timing luck:
+   *   1. generation 1 is acquired normally by a process that stays live;
+   *   2. a second acquirer is fed `alive = () => false`, so it misclassifies
+   *      generation 1 as dead and publishes generation 2;
+   *   3. `afterClassify` flips that probe back to the truth, so post-publication
+   *      confirmation correctly rejects and retracts generation 2;
+   *   4. a third acquirer runs with honest probes.
+   *
+   * On f839668 step 4 succeeded, because the retracted generation 2 was written
+   * as an ordinary `released` claim and the live generation 1 underneath it was
+   * never looked at again.
+   */
+  function runThreePartySequence() {
+    const first = acquireLock(lockFile, { ...PROBE, phase: "live-owner" });
+
+    let probeLies = true;
+    const second = acquireLock(lockFile, {
+      alive: (pid) => (probeLies ? false : pid === process.pid),
+      startTime: (pid) => readProcessStartTime(pid),
+      phase: "stale-reclaimer",
+      hooks: { afterClassify: () => { probeLies = false; } }
+    });
+
+    const third = acquireLock(lockFile, { ...PROBE, phase: "challenger" });
+    return { first, second, third };
+  }
+
+  /**
+   * Re-read the ledger the way a restart would: a brand new Node process with no
+   * in-memory state, importing the module fresh from disk.
+   */
+  function readLedgerInFreshProcess() {
+    const source = `
+      const { pathToFileURL } = require("node:url");
+      import(pathToFileURL(process.argv[1]).href).then((lock) => {
+        const ledger = lock.scanLedger(process.argv[2]);
+        const claim = ledger.claim && !ledger.claim.malformed ? ledger.claim : null;
+        const res = lock.acquireLock(process.argv[2], { collectGarbage: false });
+        process.stdout.write(JSON.stringify({
+          maxGeneration: ledger.maxGeneration,
+          effectiveGeneration: claim ? claim.generation : null,
+          voidGenerations: ledger.voidGenerations,
+          ownerToken: claim ? claim.info.owner_token : null,
+          acquired: res.acquired === true,
+          verdict: res.verdict ?? null
+        }));
+      });
+    `;
+    const out = execFileSync(process.execPath, ["-e", source, LOCK_MODULE, lockFile], { encoding: "utf8" });
+    return JSON.parse(out);
+  }
+
+  it("the live generation-1 owner survives a retracted generation 2 and generation 3 is refused", () => {
+    const { first, second, third } = runThreePartySequence();
+
+    expect(first.acquired).toBe(true);
+    expect(first.generation).toBe(1);
+
+    // The speculative generation 2 published, then confirmation caught the truth.
+    expect(second.acquired).toBe(false);
+    expect(second.verdict.state).toBe("active");
+    expect(second.verdict.reason).toContain("generation 1 is live after all");
+
+    // The forbidden outcome: a challenger entering while a live worker is inside.
+    expect(third.acquired).toBe(false);
+    expect(third.verdict.state).toBe("active");
+
+    // The original owner is still effective, not merely still running.
+    expect(holdsLock(lockFile, first.token)).toBe(true);
+    expect(heldGeneration(lockFile, first.token)).toBe(1);
+    expect(readLock(lockFile).owner_token).toBe(first.token);
+
+    // Append-only is intact: nothing was moved, emptied or deleted, and the
+    // retracted claim is recorded as void rather than as a voluntary release.
+    expect(claimFiles()).toEqual(["000000000001.claim", "000000000002.claim"]);
+    const retracted = JSON.parse(readFileSync(join(ledgerDir(lockFile), "000000000002.claim"), "utf8"));
+    expect(retracted.state).toBe("void");
+    expect(retracted.owner_token).not.toBe(first.token);
+
+    // The ledger resolves to the effective claim, not to the raw maximum.
+    const ledger = scanLedger(lockFile);
+    expect(ledger.maxGeneration).toBe(2);
+    expect(ledger.claim.generation).toBe(1);
+    expect(ledger.voidGenerations).toEqual([2]);
+
+    expect(releaseLock(lockFile, first.token)).toBe(true);
+  });
+
+  it("the surviving owner can still heartbeat and release across the retracted claim", () => {
+    const { first } = runThreePartySequence();
+
+    expect(heartbeat(lockFile, { token: first.token, phase: "still-working" })).toBe(true);
+    expect(readLock(lockFile).phase).toBe("still-working");
+
+    expect(releaseLock(lockFile, first.token)).toBe(true);
+    expect(holdsLock(lockFile, first.token)).toBe(false);
+
+    // Liveness: once the real owner is gone the void claim must not deadlock the
+    // lock either. The next acquirer appends ABOVE the raw maximum.
+    const next = acquireLock(lockFile, PROBE);
+    expect(next.acquired).toBe(true);
+    expect(next.generation).toBe(3);
+    releaseLock(lockFile, next.token);
+  });
+
+  it("a restarted process re-reading the ledger from disk reaches the same verdict", () => {
+    const { first } = runThreePartySequence();
+
+    const fromDisk = readLedgerInFreshProcess();
+    expect(fromDisk.maxGeneration).toBe(2);
+    expect(fromDisk.effectiveGeneration).toBe(1);
+    expect(fromDisk.voidGenerations).toEqual([2]);
+    expect(fromDisk.ownerToken).toBe(first.token);
+
+    // A genuinely separate process, using real probes against this test process,
+    // must refuse - and must not append a claim while refusing.
+    expect(fromDisk.acquired).toBe(false);
+    expect(["active", "unproven_identity"]).toContain(fromDisk.verdict.state);
+    expect(claimFiles()).toEqual(["000000000001.claim", "000000000002.claim"]);
+
+    expect(holdsLock(lockFile, first.token)).toBe(true);
+    releaseLock(lockFile, first.token);
+  });
+
+  it("a claim retracted by an older build (released + release_reason) is read as void", () => {
+    seedClaim(1, { pid: process.pid, owner_token: "live-owner", start_time: readProcessStartTime(process.pid) });
+    seedClaim(2, { pid: 999999, state: "released", release_reason: "retracted", owner_token: "failed-challenger" });
+
+    expect(readLock(lockFile).owner_token).toBe("live-owner");
+    expect(scanLedger(lockFile).claim.generation).toBe(1);
+
+    const res = acquireLock(lockFile, PROBE);
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("active");
+  });
+
+  it("a void claim over an unresolvable ancestry fails closed instead of looking free", () => {
+    seedClaim(1, { pid: process.pid, owner_token: "live-owner", start_time: readProcessStartTime(process.pid) });
+    // Generation 2 is absent, so nothing proves what generation 3 was hiding.
+    seedClaim(3, { pid: 999999, state: "void", owner_token: "failed-challenger" });
+
+    const ledger = scanLedger(lockFile);
+    expect(ledger.claim).toBeNull();
+    expect(ledger.vanished).toBe(true);
+    expect(ledger.unresolvedGeneration).toBe(2);
+    expect(readLockRaw(lockFile).read_error).toContain("ancestry");
+
+    const res = acquireLock(lockFile, PROBE);
+    expect(res.acquired).toBe(false);
+    expect(claimFiles()).toEqual(["000000000001.claim", "000000000003.claim"]);
+  });
+
+  it("a genuine voluntary release still frees the lock", () => {
+    const first = acquireLock(lockFile, PROBE);
+    expect(releaseLock(lockFile, first.token)).toBe(true);
+    expect(scanLedger(lockFile).claim.generation).toBe(1);
+    expect(readLock(lockFile)).toBeNull();
+
+    const second = acquireLock(lockFile, PROBE);
+    expect(second.acquired).toBe(true);
+    expect(second.generation).toBe(2);
+    releaseLock(lockFile, second.token);
   });
 });
 

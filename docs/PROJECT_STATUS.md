@@ -8,12 +8,12 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 3: `D126-LOCK-REVIEW-FIX-20260907-B`** (byggeordre
-5565113307 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens review av den
-FAKTISKE `lock.mjs`/`lock.test.mjs`/`lock-racer.mjs` på `efa62d7`). Samme branch, samme PR #75.
+**Infrastrukturreparasjon, review-runde 4: `D126-LOCK-LEDGER-REVIEW-FIX-20260907-C`** (byggeordre
+5567261855 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens review av den
+FAKTISKE `lock.mjs` på `f839668`). Samme branch, samme PR #75.
 **Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
 Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126, D-126a og D-126b i DECISIONS_AND_ASSUMPTIONS.md.
+Full begrunnelse: D-126, D-126a, D-126b og D-126c i DECISIONS_AND_ASSUMPTIONS.md.
 
 **De seks øvrige gruppene fra runde 2 er IKKE godkjent** - arkitekten har uttrykkelig holdt dem
 åpne i påvente av den komplette gjennomgangen av den rettede koden.
@@ -74,7 +74,49 @@ skriver en DURABEL INTENSJON i install-manifestet FØR noen registrering og avbr
 hvis den ikke kan skrives; `reconcile-task-intents` løser krasj-vinduet fra vertens eget svar; og
 rollback avregistrerer også ubekreftede intensjoner for oppgaver som ikke fantes fra før.
 
+## Runde 4 (v2.3) - en tilbaketrukket claim kunne fortsatt maskere en levende forgjenger
+
+Arkitekten leste den faktiske `lock.mjs` på `f839668` og reproduserte deterministisk én gjenstående
+P1-feil - i selve den NYE append-only hovedboken. Den grønne CI-kjøringen 34086249211 dekket ikke
+dette interleavinget.
+
+`confirmOwnership()` re-probet generasjon N-1 korrekt, men `retractOwnClaim()` skrev N som en
+ORDINÆR `state: "released"`, og eierskap ble lest av RÅ maksimum. Da kunne en FEILET utfordrer gi
+bort låsen: gen 1 lever → en foreldet reclaimer publiserer gen 2 → bekreftelsen ser korrekt at 1
+lever og trekker 2 tilbake → en tredje anskaffer ser bare en «released» gen 2, tror låsen er fri,
+publiserer gen 3 og re-sjekker KUN mot 2. Den levende gen 1 mistet `holdsLock()`.
+
+Reprodusert lokalt på nøyaktig `f839668`-modulen og på den rettede modulen, fra samme driver, uten
+sleeps (scratch utenfor repoet):
+
+```
+f839668: firstAcquired=true  secondAcquired=false generation2StateOnDisk=released
+         thirdAcquired=true  firstStillOwnsLock=false thirdOwnsLock=true
+v2.3:    firstAcquired=true  secondAcquired=false generation2StateOnDisk=void
+         thirdAcquired=false firstStillOwnsLock=true  thirdOwnsLock=false
+```
+
+Rettelsen er en tredje krav-tilstand, ikke en rekkefølgelapp: `released` = «EIDE låsen og ga slipp»
+(avslutter avstamningen), `void` = «EIDE ALDRI noe» (TRANSPARENT - oppslaget går videre nedover til
+det EFFEKTIVE kravet). Ny generasjon appendes fortsatt over RÅ maksimum, så telleren går aldri
+bakover. `confirmOwnership()` re-klassifiserer den EFFEKTIVE forgjengeren med samme dom som før
+publisering, så også en uleselig forgjenger feiler nå lukket. Kan avstamningen ikke bevises (hull
+under et void-krav, uleselig krav på veien, void-kjede som ikke når gen 1) nektes anskaffelsen -
+aldri «fri». Eldre `released` + `release_reason: "retracted"` leses som `void`.
+
 ## Kvalitetsporter (kjørt i denne økten)
+
+- **`npx vitest run ops/claude-worker/test` → 14 filer / 310 tester passed, kjørt TRE ganger,
+  310/310 hver gang. Ingen intermitterende feil observert i denne runden.**
+  Seks nye tester i `lock.test.mjs`: den eksakte tre-parts-sekvensen deterministisk via
+  `hooks.afterClassify` (levende gen 1 → spekulativ gen 2 → tilbaketrukket → gen 3 NEKTES, eieren
+  beholder låsen); at eieren fortsatt kan heartbeate og release på tvers av det tilbaketrukne
+  kravet OG at låsen ikke deadlocker etterpå; re-lesing fra disk i en HELT NY Node-prosess med
+  ekte prosess-prober (restart-oppførsel); bakoverkompatibel lesing av eldre
+  `release_reason: "retracted"`; fail-closed på uløselig avstamning; og at en ekte frivillig
+  release fortsatt frigjør låsen.
+
+Historikk fra runde 3, uendret:
 
 - **`npx vitest run ops/claude-worker/test` → 14 filer / 304 tester passed.**
   **Sannferdig historikk, ikke en ubetinget påstand:** underveis feilet suiten intermitterende
@@ -91,8 +133,8 @@ rollback avregistrerer også ubekreftede intensjoner for oppgaver som ikke fante
   en claim som ikke kunne leses gir `unreadable` og FAIL-CLOSED (aldri «kan forbigås»), og
   harnessen skiller nå `heartbeat_write_failures` fra faktisk tap av eierskap. Ingen assertion er
   svekket. Etter rettelsen: grønt.
-  Nye tester i denne runden:
-  - `lock.test.mjs` (36): den deterministiske stale-read → erstatningseier → forsinket reclaim →
+  Nye tester i runde 3:
+  - `lock.test.mjs` (36 → nå 42): den deterministiske stale-read → erstatningseier → forsinket reclaim →
     utfordrer-sekvensen via `hooks.afterClassify` (nøyaktig punktet v2 var utrygt), åtte ekte
     samtidige OS-prosesser med intervall-bevis, legacy v1/v2-låsefil som respekteres men aldri
     røres, GC som aldri fjerner maksimum;
@@ -164,8 +206,11 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
   `.github/workflows/ci.yml` av noen med det scopet. Dette er en ekstern tilgangsblokkering, ikke et
   utelatt krav.
 - **Installasjon og aktivering avventer bevisst fersk uavhengig arkitekt-review** av den rettede
-  diffen. Ingen merge, ingen live aktivering før det.
-- `HARD_EXTERNAL_BLOCKER=false`.
+  diffen. Ingen merge, ingen live aktivering før det. Ingenting er installert eller restartet på
+  Windows-hosten av denne økten.
+- `HARD_EXTERNAL_BLOCKER=true`, `BLOCKER_SCOPE=WINDOWS_HOST_VERIFICATION_AND_LATER_INSTALLATION_ONLY`.
+  Blokkeringen gjelder PowerShell-/Task Scheduler-verifisering på hosten og senere installasjon;
+  den blokkerer ikke kildekorreksjonene over, og den er ikke omgått.
 
 ## Neste oppgave
 
@@ -181,4 +226,5 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
    og `REMOTE_RESTART_VERIFIED` settes true - individuelt, aldri samlet.
 
 Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkrete, uavhengig
-reproduserte feilmoduser og gjør resten synlige i stedet for stille.
+reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
+utelukkelse, og resten gjøres synlig i stedet for stille.

@@ -34,14 +34,40 @@
  *   files named `<generation>.claim` (12-digit, zero padded). Generation
  *   numbers only ever increase.
  *
- *   OWNERSHIP  = "I created the highest-numbered claim file, and its content is
- *                 still mine and still `held`."
+ *   OWNERSHIP  = "I created the EFFECTIVE claim - the highest claim that is not
+ *                 void - and its content is still mine and still `held`."
  *   ACQUISITION= append `<maxGeneration + 1>.claim` with create-if-absent.
  *                Exactly one process can win a given generation - the loser
  *                gets EEXIST from the kernel, not from a byte comparison.
  *   RECLAIM    = there is none. A stale claim is SUPERSEDED by a higher
  *                generation; it is never moved, emptied or deleted.
  *   RELEASE    = mark MY OWN claim `released` (atomic rename over my own path).
+ *   RETRACTION = mark MY OWN claim `void` when post-publication confirmation
+ *                proves it never owned anything.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY `void` IS NOT `released` (the defect found on f839668)
+ * ---------------------------------------------------------------------------
+ * The first ledger implementation retracted a failed speculative claim by
+ * writing it as an ordinary `released` claim, and read ownership off the RAW
+ * maximum. That let a FAILURE grant the lock:
+ *
+ *   Generation 1 is held by a live worker.
+ *   A stale reclaimer misclassifies generation 1 as dead and publishes 2.
+ *   Post-publication confirmation correctly re-probes 1, finds it LIVE, and
+ *     retracts 2 - as `released`.
+ *   A third acquirer reads the maximum, sees a released generation 2, concludes
+ *     the lock is free, publishes 3, and confirms only against 2.
+ *   The live generation-1 owner is displaced and the challenger walks into the
+ *     critical section.
+ *
+ * The append-only file invariant did not stop this, because the ownership logic
+ * treated a retracted claim as equivalent to a voluntary release and never
+ * looked at the predecessor it was hiding. The fix is a third state: a retracted
+ * claim is `void` and TRANSPARENT. Resolution walks down past void claims to the
+ * first claim that actually says something, so a failed challenger can neither
+ * free the lock nor conceal a live owner, and an ancestry that cannot be
+ * resolved refuses rather than guesses.
  *
  * THE INVARIANT THAT MAKES THIS SAFE:
  *
@@ -52,8 +78,10 @@
  *   - A live owner's claim can never be moved out of the public path, not even
  *     for a microsecond, so there is no window in which the lock looks free.
  *   - A stale reclaimer's worst case is that it appends a generation that has
- *     already been superseded. It then observes that it is NOT the maximum and
- *     retracts by marking ONLY ITS OWN file released. Nobody else is touched.
+ *     already been superseded. It then observes that it is NOT the maximum - or
+ *     that the claim it superseded is live after all - and retracts by marking
+ *     ONLY ITS OWN file void. Nobody else is touched, and because a void claim
+ *     is transparent, the retraction changes nothing for anyone else either.
  *   - The architect's schedule (classify -> stall -> live replacement -> resume)
  *     ends in EEXIST or in self-retraction. It cannot displace anyone. This is
  *     covered by `hooks.afterClassify` in the deterministic tests below.
@@ -265,10 +293,16 @@ function readClaimFile(path) {
 }
 
 /**
- * Snapshot of the ledger: every generation present, and the maximum one.
+ * Snapshot of the ledger: every generation present, the raw maximum, and the
+ * EFFECTIVE claim - the highest generation that is not void.
+ *
+ * `maxGeneration` is the raw maximum and is what a new claim must be appended
+ * above. `claim` is the effective claim and is what ownership is decided from.
+ * They differ exactly when the top of the ledger is a retracted (void) claim.
  *
  * Read-only. Never repairs, never deletes. A directory listing that fails is
- * reported as an error rather than as "empty" (fail closed).
+ * reported as an error rather than as "empty" (fail closed), and an ancestry
+ * that cannot be resolved is reported as `vanished` rather than as free.
  */
 export function scanLedger(lockFile) {
   const dir = ledgerDir(lockFile);
@@ -276,8 +310,8 @@ export function scanLedger(lockFile) {
   try {
     names = readdirSync(dir);
   } catch (err) {
-    if (err.code === "ENOENT") return { dir, exists: false, generations: [], maxGeneration: 0, claim: null };
-    return { dir, exists: true, error: err.code ?? err.message, generations: [], maxGeneration: 0, claim: null };
+    if (err.code === "ENOENT") return { dir, exists: false, generations: [], maxGeneration: 0, claim: null, voidGenerations: [] };
+    return { dir, exists: true, error: err.code ?? err.message, generations: [], maxGeneration: 0, claim: null, voidGenerations: [] };
   }
   const generations = [];
   for (const name of names) {
@@ -286,22 +320,113 @@ export function scanLedger(lockFile) {
   }
   generations.sort((a, b) => a - b);
   if (generations.length === 0) {
-    return { dir, exists: true, generations, maxGeneration: 0, claim: null };
+    return { dir, exists: true, generations, maxGeneration: 0, claim: null, voidGenerations: [] };
   }
   const maxGeneration = generations[generations.length - 1];
-  const file = readClaimFile(claimPath(dir, maxGeneration));
-  if (file === null) {
-    // Vanished between listing and reading. Only a verified holder's garbage
-    // collection removes claims, and it never removes the maximum, so treat
-    // this as a transient and report it as unknown rather than as "free".
-    return { dir, exists: true, generations, maxGeneration, claim: null, vanished: true };
+  const resolved = resolveEffectiveClaim(dir, generations);
+  if (resolved.unresolved) {
+    // A claim vanished between listing and reading, or the ancestry under a
+    // void claim has a hole in it. Only a verified holder's garbage collection
+    // removes claims, and it only ever removes a prefix strictly below its own
+    // confirmed hold, so neither should be reachable. Report it as unknown
+    // rather than as "free" and let the caller fail closed.
+    return {
+      dir,
+      exists: true,
+      generations,
+      maxGeneration,
+      claim: null,
+      vanished: true,
+      unresolvedGeneration: resolved.missingGeneration,
+      voidGenerations: resolved.voided
+    };
   }
-  return { dir, exists: true, generations, maxGeneration, claim: { generation: maxGeneration, ...file } };
+  return { dir, exists: true, generations, maxGeneration, claim: resolved.claim, voidGenerations: resolved.voided };
 }
 
-/** Is this claim a live ownership assertion (as opposed to a released one)? */
+/** ---------------- claim states ---------------- */
+
+/**
+ * A claim is in exactly one of three states, and the difference between the last
+ * two is what makes mutual exclusion hold:
+ *
+ *   held     - an ownership assertion. Classify it before doing anything.
+ *   released - the claim DID own the lock and its owner gave it up. It is the
+ *              end of the ancestry: everything below it was already settled when
+ *              the owner was confirmed, so the lock is free.
+ *   void     - the claim NEVER owned anything. It was published speculatively
+ *              and then retracted by its own author because post-publication
+ *              confirmation proved the predecessor was live (or that we lost the
+ *              race). A void claim is TRANSPARENT: resolution must continue
+ *              downwards past it, because whatever it was hiding is still there.
+ *
+ * Collapsing `void` into `released` is exactly the defect the architect
+ * reproduced on f839668: a failed challenger could mask a live predecessor
+ * simply by failing, and the next acquirer only ever re-checked the failed
+ * challenger. Failing must never grant anyone the lock.
+ */
+const CLAIM_HELD = "held";
+const CLAIM_RELEASED = "released";
+const CLAIM_VOID = "void";
+
+function claimState(info) {
+  if (!info || typeof info !== "object") return CLAIM_HELD;
+  if (info.state === CLAIM_VOID) return CLAIM_VOID;
+  if (info.state === CLAIM_RELEASED) {
+    // Pre-`void` spelling written by an earlier build of this module: a
+    // retraction recorded as a release. Read it as what it actually was.
+    return info.release_reason === "retracted" ? CLAIM_VOID : CLAIM_RELEASED;
+  }
+  // `held`, a legacy lock with no state field, or an unrecognised value. An
+  // unrecognised value is treated as an ownership assertion on purpose: the
+  // conservative reading is "someone may own this", and classification will
+  // still supersede it if the process behind it is provably gone.
+  return CLAIM_HELD;
+}
+
+/** Is this claim a live ownership assertion (as opposed to released or void)? */
 function isHeld(info) {
-  return !!info && info.state !== "released";
+  return !!info && claimState(info) === CLAIM_HELD;
+}
+
+/**
+ * Resolve the EFFECTIVE claim: the highest generation that is not void.
+ *
+ * Walks DOWN from the raw maximum, stepping past void claims, and stops at the
+ * first claim that actually says something about ownership. Fails closed rather
+ * than guessing:
+ *   - a claim that cannot be read stops the walk and is returned as-is (the
+ *     caller's malformed/io_error policy then applies) - we cannot see past a
+ *     claim whose contents are unknown;
+ *   - a MISSING generation below a void claim means the ancestry cannot be
+ *     proven, and so does a chain of void claims that never reaches generation
+ *     1. Both are reported as unresolved, never as "the lock is free".
+ *
+ * `generations` must be ascending.
+ */
+function resolveEffectiveClaim(dir, generations) {
+  const voided = [];
+  let expected = null;
+  for (let i = generations.length - 1; i >= 0; i -= 1) {
+    const generation = generations[i];
+    if (expected !== null && generation !== expected) {
+      return { unresolved: true, missingGeneration: expected, voided };
+    }
+    const file = readClaimFile(claimPath(dir, generation));
+    if (file === null) return { unresolved: true, missingGeneration: generation, voided };
+    if (!file.malformed && claimState(file.info) === CLAIM_VOID) {
+      voided.push(generation);
+      expected = generation - 1;
+      continue;
+    }
+    return { claim: { generation, ...file }, voided };
+  }
+  if (expected !== null && expected >= 1) {
+    return { unresolved: true, missingGeneration: expected, voided };
+  }
+  // Either the ledger is empty, or every claim in it is void down to generation
+  // 1 - nobody ever held this lock.
+  return { claim: null, voided };
 }
 
 /** ---------------- legacy (v1/v2) plain-file locks ---------------- */
@@ -335,7 +460,14 @@ export function readLockRaw(lockFile) {
     return { malformed: true, raw: null, mtimeMs: null, read_error: ledger.error };
   }
   if (ledger.vanished) {
-    return { malformed: true, raw: null, mtimeMs: null, read_error: "claim vanished while reading the ledger" };
+    return {
+      malformed: true,
+      raw: null,
+      mtimeMs: null,
+      read_error: ledger.unresolvedGeneration
+        ? `claim ${ledger.unresolvedGeneration} is missing, so the ledger ancestry cannot be resolved`
+        : "claim vanished while reading the ledger"
+    };
   }
   if (ledger.claim) {
     if (!ledger.claim.malformed && !isHeld(ledger.claim.info)) {
@@ -380,7 +512,14 @@ export function classifyLock(info, {
   if (!info || typeof info !== "object" || !Number.isInteger(info.pid)) {
     return { state: "malformed", reason: "lock file unreadable or missing pid" };
   }
-  if (info.state === "released") {
+  const state = claimState(info);
+  if (state === CLAIM_VOID) {
+    // The claim itself owns nothing. It is only ever reached directly through
+    // the public read API; the ledger resolution never stops on one, precisely
+    // because a void claim must not stand in for its predecessor.
+    return { state: "released", reason: `generation ${info.generation ?? "?"} was retracted by its author and never held the lock` };
+  }
+  if (state === CLAIM_RELEASED) {
     return { state: "released", reason: `generation ${info.generation ?? "?"} was released by its owner` };
   }
   if (info.host && info.host !== host) {
@@ -574,11 +713,14 @@ export function acquireLock(lockFile, {
       continue;
     }
 
-    // Post-publication confirmation. If we are no longer the maximum, someone
-    // superseded us; we retract by marking ONLY OUR OWN claim released.
-    const confirm = confirmOwnership(lockFile, generation, token, { nowMs, classifyOpts: opts });
+    // Post-publication confirmation. If we are no longer the maximum, or the
+    // ancestry we superseded turns out to be live, we retract by marking ONLY
+    // OUR OWN claim void.
+    const confirm = confirmOwnership(lockFile, generation, token, { nowMs, malformedGraceMs, classifyOpts: opts });
     if (!confirm.ok) {
-      retractOwnClaim(dir, generation, token, nowMs);
+      // Retract as VOID, not as released: this claim never owned anything, so
+      // it must not stand between a later acquirer and whatever is below it.
+      retractOwnClaim(dir, generation, token, nowMs, confirm.verdict?.state ?? "unconfirmed");
       lastRefusal = { acquired: false, verdict: confirm.verdict, owner: confirm.owner ?? null };
       if (confirm.terminal) return lastRefusal;
       continue;
@@ -593,10 +735,16 @@ export function acquireLock(lockFile, {
 }
 
 /**
- * Confirm that our generation is still the maximum and that the claim we
+ * Confirm that our generation is still the maximum and that the ancestry we
  * superseded has not turned out to be live after all.
+ *
+ * The predecessor we re-probe is the EFFECTIVE claim below us, not blindly
+ * `generation - 1`: if generation - 1 is a void claim left by a challenger that
+ * failed, the thing we actually superseded is whatever that void claim sits on.
+ * The re-probe reuses `judgeIncumbent`, so an unreadable or unproven predecessor
+ * fails closed here exactly as it does before publication.
  */
-function confirmOwnership(lockFile, generation, token, { nowMs, classifyOpts }) {
+function confirmOwnership(lockFile, generation, token, { nowMs, malformedGraceMs, classifyOpts }) {
   const ledger = scanLedger(lockFile);
   if (ledger.error) {
     return { ok: false, terminal: true, verdict: { state: "filesystem_error", reason: `cannot confirm ownership: ${ledger.error}` } };
@@ -611,31 +759,51 @@ function confirmOwnership(lockFile, generation, token, { nowMs, classifyOpts }) 
   if (!ledger.claim || ledger.claim.malformed || ledger.claim.info.owner_token !== token) {
     return { ok: false, terminal: true, verdict: { state: "lost_acquisition_race", reason: "our claim is not the current maximum" } };
   }
-  // Re-classify the claim we superseded, with fresh probes.
-  const prev = generation - 1;
-  if (ledger.generations.includes(prev)) {
-    const prevClaim = readClaimFile(claimPath(ledger.dir, prev));
-    if (prevClaim && !prevClaim.malformed) {
-      const verdict = classifyLock(prevClaim.info, { nowMs, ...classifyOpts });
-      if (NEVER_SUPERSEDE.includes(verdict.state)) {
-        return {
-          ok: false,
-          terminal: true,
-          verdict: { state: verdict.state, reason: `generation ${prev} is live after all: ${verdict.reason}` },
-          owner: prevClaim.info
-        };
+  // Re-resolve and re-classify the ancestry we superseded, with fresh probes.
+  const below = ledger.generations.filter((gen) => gen < generation);
+  const previous = resolveEffectiveClaim(ledger.dir, below);
+  if (previous.unresolved) {
+    return {
+      ok: false,
+      terminal: true,
+      verdict: {
+        state: "unresolved_ancestry",
+        reason: `generation ${previous.missingGeneration} is missing below our claim ${generation}; refusing to assume nothing owns it`
       }
+    };
+  }
+  if (previous.claim) {
+    const judged = judgeIncumbent(previous.claim, { nowMs, malformedGraceMs, classifyOpts });
+    if (!judged.ok) {
+      return {
+        ok: false,
+        terminal: true,
+        verdict: {
+          state: judged.verdict.state,
+          reason: `generation ${previous.claim.generation} is live after all: ${judged.verdict.reason}`
+        },
+        owner: judged.owner ?? (previous.claim.malformed ? null : previous.claim.info)
+      };
     }
   }
   return { ok: true };
 }
 
-/** Mark our own claim released. Touches no other path, ever. */
-function retractOwnClaim(dir, generation, token, nowMs) {
+/**
+ * Mark our own claim VOID: it never owned the lock, so it must not be mistaken
+ * for a voluntary release and must not mask whatever lies below it. Touches no
+ * other path, ever.
+ */
+function retractOwnClaim(dir, generation, token, nowMs, reason) {
   try {
     const current = readClaimFile(claimPath(dir, generation));
     if (!current || current.malformed || current.info.owner_token !== token) return false;
-    const info = { ...current.info, state: "released", released_at: new Date(nowMs).toISOString(), release_reason: "retracted" };
+    const info = {
+      ...current.info,
+      state: CLAIM_VOID,
+      voided_at: new Date(nowMs).toISOString(),
+      void_reason: reason ?? "retracted"
+    };
     replaceOwnClaim(dir, generation, JSON.stringify(info, null, 2));
     return true;
   } catch {
@@ -692,7 +860,8 @@ export function holdsLock(lockFile, token) {
 /** Our current generation, or null when we do not hold the lock. */
 export function heldGeneration(lockFile, token) {
   if (!holdsLock(lockFile, token)) return null;
-  return scanLedger(lockFile).maxGeneration;
+  // The EFFECTIVE generation: void claims above ours do not move us.
+  return scanLedger(lockFile).claim?.generation ?? null;
 }
 
 /** ---------------- heartbeat / release ---------------- */

@@ -68,13 +68,15 @@ v3: existingOwnerAcquired=true challengerAcquired=false
 den eneste ekte enkeltvinner-operasjonen filsystemet tilbyr. Låsen er en
 append-only hovedbok `<lockFile>.d/` med `<generasjon>.claim`-filer:
 
-- **eierskap** = «jeg opprettet den høyeste claim-filen, og innholdet er
-  fortsatt mitt og fortsatt `held`»;
+- **eierskap** = «jeg opprettet det EFFEKTIVE kravet - den høyeste claim-filen
+  som ikke er `void` - og innholdet er fortsatt mitt og fortsatt `held`»;
 - **anskaffelse** = append `maks+1` med create-if-absent; taperen får `EEXIST`
   fra kjernen, ikke fra en byte-sammenligning;
 - **reclaim finnes ikke** - en foreldet claim BLIR ERSTATTET av en høyere
   generasjon; den flyttes, tømmes eller slettes aldri;
-- **release** = merk MIN EGEN claim `released` (atomisk rename over egen sti).
+- **release** = merk MIN EGEN claim `released` (atomisk rename over egen sti);
+- **tilbaketrekning** = merk MIN EGEN claim `void` når bekreftelsen etter
+  publisering viser at den aldri eide noe.
 
 Ufravikelig invariant: *ingen prosess omdøper, overskriver, trunkerer eller
 sletter en sti den ikke selv opprettet med create-if-absent.* Derfor kan en
@@ -108,6 +110,41 @@ claim som ikke kunne LESES, klassifisert som «uleselig» og dermed forbigåelig
 utfordrer forbigått en levende eier. Rettet med bundet retry + backoff på forbigående
 filsystemfeil, og med et eget `unreadable`-verdikt som er FAIL-CLOSED: en claim vi ikke har SETT
 blir aldri forbigått. Harnessen skiller nå `heartbeat_write_failures` fra faktisk tap av eierskap.
+
+### Runde 4 (v2.3) - en tilbaketrukket claim kan ikke lenger maskere en levende forgjenger
+
+Arkitektens review av `f839668` fant og reproduserte en gjenstående P1-feil i selve hovedboken.
+`confirmOwnership()` re-probet generasjon N-1 riktig, men `retractOwnClaim()` skrev N som en
+ORDINÆR `state: "released"`, og eierskap ble lest av RÅ maksimum. Da kunne en FEILET utfordrer gi
+bort låsen: generasjon 1 lever, en foreldet reclaimer publiserer 2, bekreftelsen ser korrekt at 1
+lever og trekker 2 tilbake - men en tredje anskaffer leser bare maksimum, ser en «released»
+generasjon 2, konkluderer at låsen er fri, publiserer 3 og re-sjekker kun mot 2. Den levende
+generasjon 1 mistet `holdsLock()`, og utfordreren gikk inn i den kritiske seksjonen.
+
+Reprodusert lokalt på nøyaktig `f839668`-modulen og på den rettede modulen, fra samme driver:
+
+```
+f839668: firstAcquired=true secondAcquired=false generation2StateOnDisk=released
+         thirdAcquired=true  firstStillOwnsLock=false thirdOwnsLock=true
+v2.3:    firstAcquired=true secondAcquired=false generation2StateOnDisk=void
+         thirdAcquired=false firstStillOwnsLock=true  thirdOwnsLock=false
+```
+
+Rettelsen er en tredje krav-tilstand, ikke en rekkefølgelapp. En claim er nå `held`, `released`
+eller `void`:
+
+- `released` betyr «denne claimen EIDE låsen og eieren ga slipp» - den avslutter avstamningen, for
+  alt under den var allerede avgjort da eieren ble bekreftet;
+- `void` betyr «denne claimen EIDE ALDRI noe» - den er TRANSPARENT, og oppslaget går videre NEDOVER
+  forbi den til første krav som faktisk sier noe (det EFFEKTIVE kravet).
+
+`acquireLock`, `holdsLock`, `heartbeat`, `releaseLock` og `readLockRaw` bruker det effektive
+kravet; en ny generasjon appendes fortsatt over RÅ maksimum, så generasjonstelleren går aldri
+bakover. `confirmOwnership()` re-klassifiserer den EFFEKTIVE forgjengeren (ikke blindt N-1) med
+samme dom som før publisering, slik at også en uleselig eller ubevist forgjenger feiler lukket.
+Kan avstamningen ikke bevises - et hull under et void-krav, eller en ren void-kjede som ikke når
+generasjon 1 - nektes anskaffelsen; den leses ALDRI som «fri». En claim retrahert av en eldre bygg
+(`released` + `release_reason: "retracted"`) leses som `void`.
 
 I tillegg lukkes den gjenstående deployment-forpliktelsen: `install-task.ps1` og
 `install-supervisor.ps1` skriver nå en DURABEL INTENSJON i install-manifestet FØR
