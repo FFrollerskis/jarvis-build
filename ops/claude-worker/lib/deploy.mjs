@@ -58,6 +58,7 @@ import {
 import { join, dirname, relative, sep } from "node:path";
 
 import { readLockRaw, classifyLock } from "./lock.mjs";
+import { matchProcessIdentity, IDENTITY, hostname } from "./procid.mjs";
 
 export const DEPLOY_VERSION = 1;
 
@@ -229,8 +230,12 @@ export function assessQuiescence({ destination, lockFiles = [".worker.lock", ".s
       continue;
     }
     const verdict = classifyLock(snap.info, { nowMs });
-    if (["active", "unproven_identity", "stale_no_heartbeat", "foreign_host"].includes(verdict.state)) {
-      blockers.push({ lock: rel, state: verdict.state, pid: snap.info.pid, reason: verdict.reason });
+    // `malformed` is in this list for the same reason as the `snap.malformed`
+    // branch above: a lock we cannot validate is not evidence that nothing is
+    // running. Overwriting a live deployment on the strength of an unparseable
+    // claim is exactly the outcome quiescence exists to prevent.
+    if (["active", "unproven_identity", "stale_no_heartbeat", "foreign_host", "malformed"].includes(verdict.state)) {
+      blockers.push({ lock: rel, state: verdict.state, pid: snap.info?.pid ?? null, reason: verdict.reason });
     }
   }
   return { quiet: blockers.length === 0, blockers };
@@ -272,9 +277,18 @@ export function stageRelease({ sourceDir, destination, payload = PAYLOAD, versio
 
 /**
  * Record a pending activation so a LATER, quiescent run applies it.
- * This is how an install launched by the running worker hands off safely: the
- * parent is neither killed nor overwritten, it simply exits, and the next
- * scheduler tick activates before node starts.
+ *
+ * The marker on its own is NOT the handoff. Writing it proves only that
+ * activation was refused safely; something still has to apply it, and that
+ * something must not be assumed to be the newly staged runner (finding 3). The
+ * marker is applied by whichever of these actually runs first:
+ *   - `runBootstrapHandoff`, started by install.ps1 from the SOURCE tree at
+ *     defer time. This is the one that works from a LEGACY deployment, because
+ *     it does not require the staged run-worker.ps1 to be live;
+ *   - `run-worker.ps1 -> deploy.mjs apply-pending`, which only helps once the
+ *     new runner is already deployed;
+ *   - a human running `deploy.mjs apply-pending` or `bootstrap-handoff`.
+ * Until one of them succeeds the marker simply stays on disk; it is never lost.
  */
 export function writePendingActivation({ destination, version, reason, now = () => new Date() }) {
   const path = join(destination, "pending-activation.json");
@@ -352,8 +366,10 @@ export function activateRelease({
         reason,
         detail:
           "Activation was DEFERRED, not forced. A live worker or supervisor still owns its lock, so the "
-          + "deployment was left exactly as it is and a pending-activation marker was written. The next "
-          + "quiescent scheduler tick applies it. Nothing was terminated and no file was overwritten."
+          + "deployment was left exactly as it is and a pending-activation marker was written. Nothing was "
+          + "terminated and no file was overwritten. The marker is applied by the controlled bootstrap "
+          + "handoff (deploy.mjs bootstrap-handoff), which install.ps1 starts from the SOURCE tree at this "
+          + "point; it does NOT depend on the staged run-worker.ps1 already being the live entrypoint."
       };
     }
   }
@@ -470,6 +486,237 @@ export function activateRelease({
   }
 
   return { ok: true, backupDir, manifestPath, manifest, switched, obsolete: obsoletePlan, stagingDir };
+}
+
+/** ---------------- controlled bootstrap handoff ---------------- */
+
+/**
+ * D126 FINAL review finding 3.
+ *
+ * The deferred-activation path was CIRCULAR. `install.ps1` stages the payload
+ * and writes `pending-activation.json`; the new `run-worker.ps1` knows how to
+ * apply that marker - but the new `run-worker.ps1` is exactly the file that has
+ * not been installed yet. When the installation is launched by the currently
+ * deployed OLD worker, quiescence correctly defers, and the next scheduler tick
+ * then invokes the OLD registered entrypoint, which has never heard of
+ * `pending-activation.json`. "The next scheduler tick applies it" is only true
+ * if the already-deployed entrypoint supports the protocol, and host evidence
+ * says it does not: the host still runs the old worker path.
+ *
+ * This is the non-circular half. It runs from the SOURCE tree, with the node
+ * binary that is already on the host, and it is therefore runnable BEFORE the
+ * payload is switched - it never depends on the staged runner being live. It:
+ *
+ *   1. captures the EXACT identity (pid + start time + host) of every process
+ *      that currently blocks quiescence, ONCE, at install time;
+ *   2. waits for precisely those identities to exit - never a pid on its own,
+ *      and never treating "cannot tell" as "has exited";
+ *   3. re-checks worker AND supervisor quiescence afterwards, so a NEW owner
+ *      that started meanwhile defers the handoff again instead of being
+ *      overwritten;
+ *   4. only then activates, transactionally, through the same
+ *      `activateRelease` that verifies staged hashes, backs up, renames over
+ *      (never deletes first) and rolls back on any failure.
+ *
+ * It NEVER terminates anything, never overwrites a live parent, never touches
+ * scheduled-task registration, credentials or principal, and never requires the
+ * newly staged runner to already be active. On any refusal the
+ * pending-activation marker is left exactly where it is, so the handoff can be
+ * retried instead of being lost.
+ */
+
+/**
+ * Capture, once, the exact identity of everything that currently blocks
+ * activation. `null` start times are recorded as such rather than invented.
+ */
+export function captureQuiescenceOwners({ destination, lockFiles = [".worker.lock", ".supervisor.lock"], nowMs = Date.now() }) {
+  const owners = [];
+  const unreadable = [];
+  for (const rel of lockFiles) {
+    const snap = readLockRaw(join(destination, rel));
+    if (!snap) continue;
+    if (snap.malformed) {
+      unreadable.push({ lock: rel, reason: snap.read_error ?? "unreadable lock content" });
+      continue;
+    }
+    const verdict = classifyLock(snap.info, { nowMs });
+    if (!["active", "unproven_identity", "stale_no_heartbeat", "foreign_host"].includes(verdict.state)) continue;
+    owners.push({
+      lock: rel,
+      state: verdict.state,
+      identity: {
+        pid: snap.info.pid ?? null,
+        host: snap.info.host ?? null,
+        start_time: snap.info.start_time ?? null
+      },
+      task_id: snap.info.task_id ?? null
+    });
+  }
+  return { owners, unreadable };
+}
+
+/** Has this exact recorded identity stopped running? Never pid-only. */
+function ownerHasExited(owner, matchIdentity) {
+  let verdict;
+  try {
+    verdict = matchIdentity(owner.identity);
+  } catch (err) {
+    return { exited: false, state: "probe_failed", reason: err.message };
+  }
+  // GONE  - the process does not exist any more.
+  // REUSED- the pid belongs to a different process, so ours is finished.
+  // MATCH / UNPROVEN / FOREIGN_HOST are all "not proven to have exited", and
+  // UNPROVEN in particular must never be read as permission to proceed.
+  return {
+    exited: verdict.state === IDENTITY.GONE || verdict.state === IDENTITY.REUSED,
+    state: verdict.state,
+    reason: verdict.reason
+  };
+}
+
+/**
+ * Run the handoff. Synchronous by design: it is a standalone process whose only
+ * job is to wait and then activate, and a blocking poll is the simplest thing
+ * that cannot leave a half-finished activation behind if the event loop dies.
+ *
+ * `hooks` injects a fault at each individual step so tests can prove that a
+ * failure before OR after every step still leaves a rollback-complete
+ * deployment with no missing entrypoint.
+ */
+export function runBootstrapHandoff({
+  destination,
+  version = null,
+  owners = null,
+  waitDeadlineMs = 30 * 60_000,
+  pollIntervalMs = 2_000,
+  matchIdentity = matchProcessIdentity,
+  sleep = defaultSleep,
+  now = () => new Date(),
+  clock = () => Date.now(),
+  hooks = {},
+  activate = activateRelease,
+  taskCommandLines = [],
+  taskQueryOk = true,
+  exportTask = null
+}) {
+  const startedAt = clock();
+  const pending = readPendingActivation(destination);
+  const target = version ?? pending?.version ?? null;
+  if (!target) {
+    return { ok: false, activated: false, deferred: false, reason: "no pending activation and no --version was given" };
+  }
+
+  // The identities we wait for are captured ONCE. Re-deriving them later would
+  // mean a brand new owner could reset the wait indefinitely, and worse, could
+  // silently redefine "the legitimate parent" to be some other process.
+  const captured = owners ?? captureQuiescenceOwners({ destination }).owners;
+
+  hooks.beforeWait?.();
+
+  const waited = [];
+  for (const owner of captured) {
+    let last = ownerHasExited(owner, matchIdentity);
+    while (!last.exited) {
+      if (clock() - startedAt >= waitDeadlineMs) {
+        // Give up WITHOUT activating. The marker stays, so a later run - or a
+        // human - can complete the handoff. Nothing is terminated.
+        return {
+          ok: false,
+          activated: false,
+          deferred: true,
+          reason: `the legitimate parent for ${owner.lock} (pid ${owner.identity.pid}) had not exited within the wait budget`
+            + ` (last verdict: ${last.state} - ${last.reason}). Nothing was activated and nothing was terminated.`,
+          version: target,
+          parents: captured,
+          waited_ms: clock() - startedAt
+        };
+      }
+      sleep(pollIntervalMs);
+      last = ownerHasExited(owner, matchIdentity);
+    }
+    waited.push({ lock: owner.lock, pid: owner.identity.pid, exit_state: last.state });
+  }
+
+  hooks.afterParentExit?.();
+
+  // A new owner may have started while we waited. Re-check BOTH locks before
+  // touching anything; deferring again is always safe, overwriting never is.
+  const quiescence = assessQuiescence({ destination });
+  if (!quiescence.quiet) {
+    return {
+      ok: false,
+      activated: false,
+      deferred: true,
+      reason: "a worker or supervisor became active again while the handoff was waiting: "
+        + quiescence.blockers.map((b) => `${b.lock}: ${b.state} (${b.reason})`).join("; ")
+        + ". The pending-activation marker was left in place and nothing was overwritten.",
+      version: target,
+      parents: captured,
+      waited,
+      quiescence,
+      waited_ms: clock() - startedAt
+    };
+  }
+
+  hooks.beforeActivate?.();
+
+  let result;
+  try {
+    result = activate({
+      destination,
+      version: target,
+      taskCommandLines,
+      taskQueryOk,
+      exportTask,
+      now,
+      // Belt and braces: activateRelease re-checks quiescence itself, so even a
+      // process that starts between the check above and the switch defers.
+      requireQuiescence: true,
+      hooks
+    });
+  } catch (err) {
+    return {
+      ok: false, activated: false, deferred: false,
+      reason: `activation threw: ${err.message}. The pending-activation marker was left in place.`,
+      version: target, parents: captured, waited, waited_ms: clock() - startedAt
+    };
+  }
+
+  hooks.afterActivate?.();
+
+  if (!result.ok) {
+    // Deferred or failed-and-rolled-back. Either way the marker stays so the
+    // handoff is retryable rather than silently lost.
+    return {
+      ok: false,
+      activated: false,
+      deferred: result.deferred === true,
+      reason: result.reason ?? result.error ?? "activation did not succeed",
+      rolled_back: result.rolled_back ?? false,
+      rollback: result.rollback ?? null,
+      version: target, parents: captured, waited, waited_ms: clock() - startedAt
+    };
+  }
+
+  clearPendingActivation(destination);
+  return {
+    ok: true,
+    activated: true,
+    deferred: false,
+    version: target,
+    parents: captured,
+    waited,
+    switched: result.switched,
+    backupDir: result.backupDir,
+    manifestPath: result.manifestPath,
+    waited_ms: clock() - startedAt
+  };
+}
+
+/** Blocking sleep: this process has nothing else to do, and must not race. */
+function defaultSleep(ms) {
+  const shared = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(shared, 0, 0, Math.max(1, ms));
 }
 
 /** ---------------- rollback ---------------- */

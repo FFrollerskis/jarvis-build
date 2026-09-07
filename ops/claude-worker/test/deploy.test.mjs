@@ -19,8 +19,11 @@ import {
   readPendingActivation,
   latestBackupDir,
   isOperationalPath,
-  sha256
+  sha256,
+  captureQuiescenceOwners,
+  runBootstrapHandoff
 } from "../lib/deploy.mjs";
+import { IDENTITY, readProcessStartTime } from "../lib/procid.mjs";
 
 let dir;
 let source;
@@ -518,5 +521,302 @@ describe("blocker 4: rollback is complete and hash-enforced", () => {
     for (const rel of TEST_PAYLOAD) {
       expect(existsSync(join(destination, rel))).toBe(false);
     }
+  });
+});
+
+/**
+ * D126 FINAL review finding 3: "deferred activation is not a proven bootstrap
+ * handoff from the deployed legacy runner".
+ *
+ * The fixture deliberately starts from a LEGACY deployed destination: the
+ * installed run-worker.ps1 has NO pending-activation support, and the registered
+ * scheduled task points at that legacy entrypoint. That is the state the host is
+ * actually in, and it is exactly the state in which "the next scheduler tick
+ * applies the marker" is circular - the tick runs the OLD file.
+ *
+ * `runBootstrapHandoff` is the non-circular half: it runs from the source tree
+ * before the payload is switched, waits for the EXACT captured parent identity
+ * to exit, re-checks quiescence, and only then activates transactionally.
+ */
+describe("finding 3: controlled bootstrap handoff from a LEGACY deployment", () => {
+  const VERSION = "20260907-010000";
+  const LEGACY_ENTRYPOINT = "OLD run-worker.ps1 - no pending-activation support\n";
+  // The "legitimate parent" is a genuinely live process with a real start time,
+  // so `classifyLock` reaches the same `active` verdict it would on the host.
+  // Anything less and quiescence would classify it as stale and the install
+  // would never defer in the first place.
+  const PARENT = { pid: process.pid, host: hostname(), start_time: readProcessStartTime(process.pid) };
+
+  /** The legacy scheduled task command line: it points at the OLD entrypoint. */
+  function legacyTask() {
+    return [{
+      taskName: "JarvisClaudeWorker",
+      command: `powershell.exe -File ${join(destination, "run-worker.ps1")}`,
+      principal: { userId: "Tobia", logonType: "Password", runLevel: "Highest" }
+    }];
+  }
+
+  function seedLegacyDeployment() {
+    mkdirSync(join(destination, "lib"), { recursive: true });
+    writeFileSync(join(destination, "worker.mjs"), "OLD worker.mjs (v1)\n", "utf8");
+    writeFileSync(join(destination, "run-worker.ps1"), LEGACY_ENTRYPOINT, "utf8");
+    writeFileSync(join(destination, "lib", "state.mjs"), "OLD lib/state.mjs\n", "utf8");
+    writeFileSync(join(destination, "config.json"), '{"host":"real"}', "utf8");
+    writeFileSync(join(destination, "state.json"), '{"state_version":2,"tasks":{}}', "utf8");
+    mkdirSync(join(destination, "logs"), { recursive: true });
+    writeFileSync(join(destination, "logs", "worker.log"), "history\n", "utf8");
+  }
+
+  /** The live parent that launched this install and still owns the lock. */
+  function writeParentLock(name = ".worker.lock") {
+    writeFileSync(join(destination, name), JSON.stringify({
+      lock_version: 2,
+      pid: PARENT.pid,
+      host: PARENT.host,
+      start_time: PARENT.start_time,
+      started_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString(),
+      phase: "dispatch",
+      task_id: "T-LEGACY",
+      owner_token: "t"
+    }, null, 2), "utf8");
+  }
+
+  /**
+   * Identity probe under our control. It reports the parent as alive for the
+   * first `aliveFor` probes, then gone - i.e. the parent exits on its own. It
+   * is never killed; nothing in this path terminates anything.
+   */
+  function exitingParent(aliveFor = 2) {
+    let probes = 0;
+    return () => {
+      probes += 1;
+      return probes <= aliveFor
+        ? { state: IDENTITY.MATCH, reason: `pid ${PARENT.pid} is the same process that was recorded` }
+        : { state: IDENTITY.GONE, reason: `pid ${PARENT.pid} no longer exists` };
+    };
+  }
+
+  /** The parent exits, so the lock it owned stops being a blocker. */
+  function parentExits() {
+    rmSync(join(destination, ".worker.lock"), { force: true });
+  }
+
+  const NEVER_SLEEP = () => {};
+
+  function deferInstall() {
+    seedLegacyDeployment();
+    writeParentLock();
+    stage(VERSION);
+    const res = activateRelease({ destination, version: VERSION, taskCommandLines: legacyTask() });
+    expect(res.deferred).toBe(true);
+    return res;
+  }
+
+  it("install invoked by its child defers, and the legacy entrypoint is untouched", () => {
+    deferInstall();
+    expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+    expect(readFileSync(join(destination, "worker.mjs"), "utf8")).toBe("OLD worker.mjs (v1)\n");
+    expect(readPendingActivation(destination).version).toBe(VERSION);
+  });
+
+  it("captures the EXACT parent identity, pid AND start time AND host", () => {
+    deferInstall();
+    const { owners } = captureQuiescenceOwners({ destination });
+    expect(owners).toHaveLength(1);
+    expect(owners[0].lock).toBe(".worker.lock");
+    expect(owners[0].identity).toEqual({ pid: PARENT.pid, host: PARENT.host, start_time: PARENT.start_time });
+  });
+
+  it("the full handoff: parent exits -> activation applies the EXACT staged hashes", () => {
+    deferInstall();
+    const owners = captureQuiescenceOwners({ destination }).owners;
+
+    const res = runBootstrapHandoff({
+      destination,
+      owners,
+      matchIdentity: exitingParent(2),
+      sleep: () => parentExits(), // the parent exits while we wait; never killed
+      taskCommandLines: legacyTask(),
+      pollIntervalMs: 1
+    });
+
+    expect(res.ok).toBe(true);
+    expect(res.activated).toBe(true);
+    expect(res.version).toBe(VERSION);
+    expect(res.waited[0]).toEqual({ lock: ".worker.lock", pid: PARENT.pid, exit_state: IDENTITY.GONE });
+
+    // Every switched file matches the hash recorded when it was staged.
+    const stageManifest = JSON.parse(readFileSync(join(destination, "staging", VERSION, "stage-manifest.json"), "utf8"));
+    for (const f of stageManifest.files) {
+      expect(sha256(join(destination, f.file)), f.file).toBe(f.new_sha256);
+    }
+    // The marker is consumed only on success.
+    expect(readPendingActivation(destination)).toBeNull();
+    expect(operationalIntact()).toBe(true);
+  });
+
+  it("the scheduled task remains runnable: its entrypoint still exists afterwards", () => {
+    deferInstall();
+    const owners = captureQuiescenceOwners({ destination }).owners;
+    runBootstrapHandoff({
+      destination, owners, matchIdentity: exitingParent(1),
+      sleep: () => parentExits(), taskCommandLines: legacyTask(), pollIntervalMs: 1
+    });
+    // The command line the scheduler holds still resolves to a real file, and
+    // that file is now the NEW runner - registration was never touched.
+    const entrypoint = join(destination, "run-worker.ps1");
+    expect(existsSync(entrypoint)).toBe(true);
+    expect(readFileSync(entrypoint, "utf8")).toBe("NEW run-worker.ps1\n");
+  });
+
+  it("waits for the EXACT identity: a live parent is never overwritten", () => {
+    deferInstall();
+    const owners = captureQuiescenceOwners({ destination }).owners;
+    const res = runBootstrapHandoff({
+      destination, owners,
+      matchIdentity: () => ({ state: IDENTITY.MATCH, reason: "still running" }),
+      sleep: NEVER_SLEEP, waitDeadlineMs: 0, taskCommandLines: legacyTask()
+    });
+    expect(res.ok).toBe(false);
+    expect(res.deferred).toBe(true);
+    expect(res.activated).toBe(false);
+    // Nothing was activated, nothing was terminated, the marker survives.
+    expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+    expect(readPendingActivation(destination).version).toBe(VERSION);
+  });
+
+  it("UNPROVEN liveness is never accepted as 'the parent exited'", () => {
+    deferInstall();
+    const owners = captureQuiescenceOwners({ destination }).owners;
+    const res = runBootstrapHandoff({
+      destination, owners,
+      matchIdentity: () => ({ state: IDENTITY.UNPROVEN, reason: "start time cannot be read" }),
+      sleep: NEVER_SLEEP, waitDeadlineMs: 0, taskCommandLines: legacyTask()
+    });
+    expect(res.activated).toBe(false);
+    expect(res.reason).toMatch(/unproven/);
+    expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+  });
+
+  it("a NEW owner that appears while waiting defers the handoff again", () => {
+    deferInstall();
+    const owners = captureQuiescenceOwners({ destination }).owners;
+    const res = runBootstrapHandoff({
+      destination, owners,
+      matchIdentity: () => ({ state: IDENTITY.GONE, reason: "the original parent exited" }),
+      // The original parent is gone, but a fresh supervisor has taken its own
+      // lock in the meantime.
+      sleep: NEVER_SLEEP,
+      hooks: { afterParentExit: () => writeParentLock(".supervisor.lock") },
+      taskCommandLines: legacyTask()
+    });
+    expect(res.ok).toBe(false);
+    expect(res.deferred).toBe(true);
+    expect(res.reason).toMatch(/became active again/);
+    expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+    expect(readPendingActivation(destination).version).toBe(VERSION);
+  });
+
+  it("does not require the staged runner to be live: it works from the OLD one", () => {
+    deferInstall();
+    // Proof the legacy entrypoint has no idea about the marker: it is still the
+    // old bytes at the moment the handoff starts, and the handoff never reads
+    // or executes it.
+    expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+    const owners = captureQuiescenceOwners({ destination }).owners;
+    const res = runBootstrapHandoff({
+      destination, owners, matchIdentity: exitingParent(1),
+      sleep: () => parentExits(), taskCommandLines: legacyTask(), pollIntervalMs: 1
+    });
+    expect(res.activated).toBe(true);
+  });
+
+  /**
+   * Fault injection before and after every handoff step. After each one the
+   * deployment must be rollback-complete and the scheduler's entrypoint must
+   * still exist - a missing entrypoint is the failure that stopped the loop.
+   */
+  describe("injected failures at each handoff step", () => {
+    const STEPS = ["beforeWait", "afterParentExit", "beforeActivate", "beforeSwitch", "afterObsoleteRemoval", "afterActivate"];
+
+    for (const step of STEPS) {
+      it(`a failure at ${step} leaves no missing entrypoint`, () => {
+        deferInstall();
+        const owners = captureQuiescenceOwners({ destination }).owners;
+        let threw = null;
+        let res = null;
+        try {
+          res = runBootstrapHandoff({
+            destination, owners, matchIdentity: exitingParent(1),
+            sleep: () => parentExits(), taskCommandLines: legacyTask(), pollIntervalMs: 1,
+            hooks: { [step]: () => { throw new Error(`injected failure at ${step}`); } }
+          });
+        } catch (err) {
+          threw = err;
+        }
+
+        // Whatever happened, the scheduler's entrypoint exists and is one of the
+        // two complete, valid versions - never absent, never a partial file.
+        const entrypoint = join(destination, "run-worker.ps1");
+        expect(existsSync(entrypoint), step).toBe(true);
+        const bytes = readFileSync(entrypoint, "utf8");
+        expect([LEGACY_ENTRYPOINT, "NEW run-worker.ps1\n"], step).toContain(bytes);
+
+        // Operational data is never collateral damage.
+        expect(operationalIntact(), step).toBe(true);
+
+        // A fault inside the switch must have rolled the whole deployment back
+        // to the legacy bytes, not left a mixture of old and new modules.
+        if (step === "beforeSwitch") {
+          expect(threw).toBeNull();
+          expect(res.ok).toBe(false);
+          expect(res.rolled_back).toBe(true);
+          expect(bytes).toBe(LEGACY_ENTRYPOINT);
+          expect(readFileSync(join(destination, "worker.mjs"), "utf8")).toBe("OLD worker.mjs (v1)\n");
+          // Files the install INTRODUCED are removed again.
+          expect(existsSync(join(destination, "lib", "supervise.mjs"))).toBe(false);
+        }
+
+        // A fault before activation must not have touched anything at all.
+        if (step === "beforeWait" || step === "afterParentExit" || step === "beforeActivate") {
+          expect(bytes).toBe(LEGACY_ENTRYPOINT);
+          expect(readFileSync(join(destination, "worker.mjs"), "utf8")).toBe("OLD worker.mjs (v1)\n");
+        }
+
+        // The marker survives every failure, so the handoff is retryable and
+        // never silently lost.
+        if (step !== "afterActivate") {
+          expect(readPendingActivation(destination)?.version, step).toBe(VERSION);
+        }
+      });
+    }
+
+    it("a retry after a rolled-back switch still completes cleanly", () => {
+      deferInstall();
+      const owners = captureQuiescenceOwners({ destination }).owners;
+      const failed = runBootstrapHandoff({
+        destination, owners, matchIdentity: exitingParent(1),
+        sleep: () => parentExits(), taskCommandLines: legacyTask(), pollIntervalMs: 1,
+        hooks: { beforeSwitch: () => { throw new Error("injected"); } }
+      });
+      expect(failed.rolled_back).toBe(true);
+
+      const retry = runBootstrapHandoff({
+        destination, owners,
+        matchIdentity: () => ({ state: IDENTITY.GONE, reason: "parent already exited" }),
+        sleep: () => {}, taskCommandLines: legacyTask(), pollIntervalMs: 1
+      });
+      expect(retry.ok).toBe(true);
+      expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe("NEW run-worker.ps1\n");
+      expect(operationalIntact()).toBe(true);
+    });
+  });
+
+  it("refuses when there is no pending activation and no version", () => {
+    seedLegacyDeployment();
+    const res = runBootstrapHandoff({ destination, owners: [], sleep: NEVER_SLEEP });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/no pending activation/);
   });
 });

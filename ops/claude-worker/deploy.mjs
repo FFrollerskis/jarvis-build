@@ -11,6 +11,12 @@
  *   stage    --source <dir> --destination <dir>     copy + hash-verify into staging/<version>
  *   activate --destination <dir> [--version <v>]    switch, verify, auto-rollback on failure
  *   apply-pending --destination <dir>               activate a deferred handoff, if quiescent
+ *   bootstrap-handoff --destination <dir> [--version <v>] [--wait-seconds <n>]
+ *                                                   wait for the EXACT legitimate parent to exit,
+ *                                                   re-check quiescence, then activate. Runs from
+ *                                                   the SOURCE tree, so it works before the payload
+ *                                                   is switched and never needs the staged runner
+ *                                                   to already be live (finding 3).
  *   rollback --destination <dir> [--backup-dir <d>] restore, enforcing manifest old hashes
  *   status   --destination <dir>                    what is deployed / staged / pending
  *   record-task-intent      --destination <dir> --task <n> [--pre-existing]
@@ -42,7 +48,9 @@ import {
   latestBackupDir,
   assessQuiescence,
   readPendingActivation,
-  clearPendingActivation
+  clearPendingActivation,
+  captureQuiescenceOwners,
+  runBootstrapHandoff
 } from "./lib/deploy.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -176,6 +184,29 @@ async function main() {
     });
     if (result.ok && sub === "apply-pending") clearPendingActivation(destination);
     if (result.ok) clearPendingActivation(destination);
+    return out({ subcommand: sub, ...result }, result.ok ? EXIT.OK : (result.deferred ? EXIT.DEFERRED : EXIT.FAILED));
+  }
+
+  if (sub === "bootstrap-handoff") {
+    // FINDING 3: the non-circular half of the deferred activation. This runs
+    // from the SOURCE tree with the node binary already on the host, so it is
+    // runnable BEFORE the payload is switched and never assumes the newly
+    // staged run-worker.ps1 is live. It waits for the EXACT captured parent
+    // identity to exit, re-checks quiescence, then activates transactionally.
+    // It never terminates anything and never touches task registration.
+    const tasks = await collectTaskCommandLines(args);
+    const waitSeconds = Number(args["wait-seconds"] ?? 1800);
+    if (!Number.isFinite(waitSeconds) || waitSeconds <= 0) {
+      return out({ subcommand: sub, error: "--wait-seconds must be a positive number" }, EXIT.FAILED);
+    }
+    const result = runBootstrapHandoff({
+      destination,
+      version: args.version ? String(args.version) : null,
+      waitDeadlineMs: waitSeconds * 1000,
+      taskCommandLines: tasks.lines,
+      taskQueryOk: tasks.ok,
+      exportTask: process.platform === "win32" ? (name) => exportTaskXmlSync(name) : null
+    });
     return out({ subcommand: sub, ...result }, result.ok ? EXIT.OK : (result.deferred ? EXIT.DEFERRED : EXIT.FAILED));
   }
 

@@ -4,14 +4,22 @@
 
   .DESCRIPTION
     Thin, deliberately boring wrapper. It does exactly four things:
-      1. applies a PENDING ACTIVATION, if one is waiting. This is the handoff
-         half of D126 review blocker 4: an installation launched by the running
-         worker cannot overwrite its own live parent, so install.ps1 stages it
-         and writes a marker instead. This runs BEFORE the worker takes its lock
-         and BEFORE node starts, i.e. after the legitimate parent has exited, so
-         the new files are in place for the run that is about to begin. If a
-         worker or supervisor still holds a lock, deploy.mjs defers again rather
-         than overwriting anything, and nothing is ever terminated;
+      1. applies a PENDING ACTIVATION, if one is waiting. An installation
+         launched by the running worker cannot overwrite its own live parent, so
+         install.ps1 stages it and writes a marker instead. This runs BEFORE the
+         worker takes its lock and BEFORE node starts. If a worker or supervisor
+         still holds a lock, deploy.mjs defers again rather than overwriting
+         anything, and nothing is ever terminated.
+
+         THIS IS A SECOND NET, NOT THE HANDOFF. It only helps once THIS file is
+         already the live entrypoint. D126 final review finding 3: when the
+         install is launched by the currently deployed OLD worker, the next
+         scheduler tick invokes the OLD registered entrypoint, which has never
+         heard of pending-activation.json - so "the next tick applies it" is
+         circular reasoning about a file that is not deployed yet. The handoff
+         that actually works from a legacy deployment is
+         `deploy.mjs bootstrap-handoff`, which install.ps1 starts from the
+         SOURCE tree at defer time and which never assumes this file is live;
       2. points TEMP/TMP at the worker's own scratch root, so nothing the child
          process creates can ever land inside the Jarvis repository;
       3. records a scheduler_invoked health event BEFORE node starts, so a

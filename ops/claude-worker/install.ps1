@@ -110,9 +110,50 @@ $activateExit = $LASTEXITCODE
 if ($activateExit -eq 5) {
     Write-Host ""
     Write-Host "ACTIVATION DEFERRED. A live worker or supervisor still owns its lock, so nothing was"
-    Write-Host "overwritten and no process was terminated. A pending-activation marker was written;"
-    Write-Host "the next quiescent scheduled run applies it automatically before node starts."
-    Write-Host "You can also apply it by hand once the worker is idle:"
+    Write-Host "overwritten and no process was terminated. A pending-activation marker was written."
+    Write-Host ""
+
+    # D126 FINAL review finding 3: do NOT rely on the next scheduler tick to
+    # apply the marker. When this install was launched by the CURRENTLY DEPLOYED
+    # worker, the next tick invokes the OLD registered entrypoint, which knows
+    # nothing about pending-activation.json - the staged new run-worker.ps1 is
+    # not live yet. Claiming otherwise is circular.
+    #
+    # Instead start the controlled bootstrap handoff NOW, from the SOURCE tree,
+    # with the node binary already on this host. It is therefore runnable before
+    # the payload is switched, and does not require the staged runner to be
+    # active. It waits for the EXACT legitimate parent identity to exit,
+    # re-checks worker + supervisor quiescence, and only then activates
+    # transactionally. It terminates nothing and touches no scheduled task.
+    $handoffLog = Join-Path $Destination "logs\bootstrap-handoff.log"
+    $handoffLogDir = Split-Path -Parent $handoffLog
+    if (-not (Test-Path -LiteralPath $handoffLogDir)) {
+        New-Item -ItemType Directory -Path $handoffLogDir -Force | Out-Null
+    }
+
+    $handoffArgs = @(
+        $deploy, "bootstrap-handoff",
+        "--destination", $Destination,
+        "--version", $Version,
+        "--wait-seconds", "1800"
+    )
+
+    try {
+        $handoff = Start-Process -FilePath "node" -ArgumentList $handoffArgs `
+            -RedirectStandardOutput $handoffLog -RedirectStandardError "$handoffLog.err" `
+            -WindowStyle Hidden -PassThru
+        Write-Host "Controlled bootstrap handoff started (pid $($handoff.Id))."
+        Write-Host "It waits for the exact process that currently owns the lock to exit, re-checks"
+        Write-Host "quiescence, then activates version $Version transactionally. Nothing is terminated."
+        Write-Host "Progress: $handoffLog"
+    } catch {
+        Write-Host "WARNING: the bootstrap handoff could not be started: $($_.Exception.Message)"
+        Write-Host "The staged release and the pending-activation marker are intact; NOTHING was lost."
+    }
+
+    Write-Host ""
+    Write-Host "You can also complete the handoff by hand once the worker is idle:"
+    Write-Host "  node deploy.mjs bootstrap-handoff --destination '$Destination' --version '$Version'"
     Write-Host "  node deploy.mjs apply-pending --destination '$Destination'"
     exit 0
 }
