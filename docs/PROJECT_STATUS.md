@@ -38,7 +38,7 @@ brukte ekte samtidige prosesser, ingen injiserte feil i durabilitets- eller inst
 
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **`npx vitest run ops/claude-worker/test` → 14 filer / 280 tester passed.** Nye, som feiler på den
+- **`npx vitest run ops/claude-worker/test` → 14 filer / 282 tester passed.** Nye, som feiler på den
   gamle implementasjonen:
   - `worker-crash-recovery.test.mjs` (16): starter det FAKTISKE `node worker.mjs run` som prosess og
     dreper det før spawn, under barnets kjøring og etter report men før completion-lagring; verifiserer
@@ -48,8 +48,9 @@ brukte ekte samtidige prosesser, ingen injiserte feil i durabilitets- eller inst
     levende heartbeat-eier som ikke fortrenges, innholdsverifisert reclaim, token-eierskap;
   - `state.test.mjs` (33): korrupt primær + gyldig backup (eksakt arkitekt-repro), avbrutt skriving,
     `null`/`[]`/`{}`-avvisning, supervisor-skjema;
-  - `deploy.test.mjs` (29): injisert feil i hvert steg av byttet, hash-håndhevet rollback, fjerning av
-    innførte filer, bevaring av operasjonelle data, utsatt aktivering under levende lås;
+  - `deploy.test.mjs` (31): injisert feil i hvert steg av byttet, hash-håndhevet rollback, fjerning av
+    innførte filer OG av oppgaver installasjonen innførte, bevaring av operasjonelle data, utsatt
+    aktivering under levende lås;
   - `supervisor-run.test.mjs` (16) + `supervise-protocol.test.mjs` (19): to like `COMMAND_ID` i én
     poll, budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet kvittering,
     bevart utsettelse fra travel til ledig;
@@ -73,7 +74,7 @@ brukte ekte samtidige prosesser, ingen injiserte feil i durabilitets- eller inst
   Statisk kontroll som FAKTISK ble kjørt: alle 8 `.ps1` er ren ASCII uten kontrolltegn (byte-nivå),
   og alle 19 `.mjs` er `node --check`-rene.
 - Full produktsuite ble ikke kjørt lokalt (endringene rører ingen produktkode; utenfor `ops/` er kun
-  `.github/workflows/ci.yml` og dokumentasjon endret). CI på eksakt endelig HEAD rapporteres i
+  dokumentasjon endret - `.github/` er URØRT, se den nektede push-operasjonen over). CI på eksakt endelig HEAD rapporteres i
   `CLAUDE_REPORT` på issue #68.
 
 ## Flagg-status - alt uverifisert til det er bevist på hosten

@@ -168,6 +168,19 @@ if ($null -eq $verify) {
     exit 1
 }
 
+# If this registration INTRODUCED the task, record it in the latest install
+# manifest so rollback.ps1 unregisters it again. Without this, rolling the files
+# back would leave a brand-new schedule running against restored older code.
+if ($null -eq $existing) {
+    $deploy = Join-Path $here "deploy.mjs"
+    if (Test-Path -LiteralPath $deploy) {
+        & node $deploy record-introduced-task --destination $here --task $TaskName | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not record '$TaskName' as an introduced task. A rollback will NOT unregister it automatically; do that by hand with uninstall-task.ps1 -IncludeSupervisor."
+        }
+    }
+}
+
 Write-Host "Registered '$TaskName' - at startup and every $IntervalMinutes minute(s)."
 Write-Host "  execute:   $shellPath"
 Write-Host "  principal: user=$userId logonType=$LogonType runLevel=$runLevel"

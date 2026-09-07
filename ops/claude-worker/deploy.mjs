@@ -31,6 +31,7 @@ import {
   stageRelease,
   activateRelease,
   rollbackRelease,
+  recordIntroducedTask,
   latestBackupDir,
   assessQuiescence,
   readPendingActivation,
@@ -169,6 +170,19 @@ async function main() {
     if (result.ok && sub === "apply-pending") clearPendingActivation(destination);
     if (result.ok) clearPendingActivation(destination);
     return out({ subcommand: sub, ...result }, result.ok ? EXIT.OK : (result.deferred ? EXIT.DEFERRED : EXIT.FAILED));
+  }
+
+  if (sub === "record-introduced-task") {
+    const taskName = String(args.task ?? "");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(taskName)) {
+      return out({ subcommand: sub, error: "--task must be a plain scheduled task name" }, EXIT.FAILED);
+    }
+    const result = recordIntroducedTask({
+      destination,
+      taskName,
+      backupDir: args["backup-dir"] ? resolve(String(args["backup-dir"])) : null
+    });
+    return out({ subcommand: sub, task: taskName, ...result }, result.ok ? EXIT.OK : EXIT.FAILED);
   }
 
   if (sub === "rollback") {

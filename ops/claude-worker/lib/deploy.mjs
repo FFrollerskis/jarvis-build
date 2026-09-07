@@ -556,6 +556,29 @@ export function rollbackRelease({ destination, backupDir, reason = "manual rollb
   };
 }
 
+/**
+ * Record that this install INTRODUCED a scheduled task that did not exist
+ * before, so a rollback can unregister it again.
+ *
+ * The task scripts call this after a successful first-time registration. Without
+ * it, rolling back the files would leave a brand-new schedule running against
+ * the restored older code - which is exactly the gap the D126 review named
+ * ("rollback ... leaves the newly added supervisor task/modules active").
+ */
+export function recordIntroducedTask({ destination, taskName, backupDir = null }) {
+  const dir = backupDir ?? latestBackupDir(destination);
+  if (!dir) return { ok: false, error: "no install manifest to record against" };
+  const manifestPath = join(dir, "install-manifest.json");
+  if (!existsSync(manifestPath)) return { ok: false, error: `no install-manifest.json in ${dir}` };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const tasks = new Set(manifest.introduced_tasks ?? []);
+  if (tasks.has(taskName)) return { ok: true, alreadyRecorded: true, manifestPath };
+  tasks.add(taskName);
+  manifest.introduced_tasks = [...tasks];
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  return { ok: true, alreadyRecorded: false, manifestPath, introduced_tasks: manifest.introduced_tasks };
+}
+
 /** Most recent backup directory, used by `rollback.ps1` with no explicit -BackupDir. */
 export function latestBackupDir(destination) {
   const root = join(destination, "backups");

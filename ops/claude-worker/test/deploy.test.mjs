@@ -10,6 +10,7 @@ import {
   stageRelease,
   activateRelease,
   rollbackRelease,
+  recordIntroducedTask,
   assessQuiescence,
   readPendingActivation,
   latestBackupDir,
@@ -382,6 +383,28 @@ describe("blocker 4: rollback is complete and hash-enforced", () => {
     stageRelease({ sourceDir: source, destination, payload: TEST_PAYLOAD, version: "20260907-020000" });
     activateRelease({ destination, version: "20260907-020000", taskCommandLines: [] });
     expect(latestBackupDir(destination)).toBe(join(destination, "backups", "20260907-020000"));
+  });
+
+  it("unregisters a task the install INTRODUCED, and only that task", () => {
+    seedOldDeployment();
+    stage();
+    const res = activateRelease({ destination, version: "20260907-010000", taskCommandLines: [] });
+    // install-supervisor.ps1 records this after a first-time registration.
+    expect(recordIntroducedTask({ destination, taskName: "JarvisWorkerSupervisor" }).ok).toBe(true);
+    // Recording twice must stay idempotent.
+    expect(recordIntroducedTask({ destination, taskName: "JarvisWorkerSupervisor" }).alreadyRecorded).toBe(true);
+
+    const back = rollbackRelease({ destination, backupDir: res.backupDir });
+    expect(back.ok).toBe(true);
+    expect(back.tasks_to_unregister).toEqual(["JarvisWorkerSupervisor"]);
+    // The pre-existing worker task is NOT in the list: rollback never removes a
+    // schedule the install did not create.
+    expect(back.tasks_to_unregister).not.toContain("JarvisClaudeWorker");
+  });
+
+  it("refuses to record an introduced task with no manifest to record against", () => {
+    const res = recordIntroducedTask({ destination, taskName: "JarvisWorkerSupervisor" });
+    expect(res.ok).toBe(false);
   });
 
   it("a first-time install rolls back to an empty destination", () => {

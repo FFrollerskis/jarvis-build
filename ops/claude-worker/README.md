@@ -184,6 +184,12 @@ Rollback håndhever manifestets gamle SHA256, fjerner filer og oppgaver
 installasjonen innførte, gjenoppretter filer den fjernet, og rører ingen
 operasjonelle data.
 
+En oppgave regnes som «innført» kun når den ikke fantes fra før:
+`install-task.ps1` og `install-supervisor.ps1` kaller da
+`node deploy.mjs record-introduced-task`, som skriver navnet inn i det siste
+install-manifestet. Rollback avregistrerer nøyaktig de navnene og aldri en
+oppgave installasjonen ikke opprettet.
+
 ## Kontrollkommandoer til supervisoren
 
 Postes som kommentar på kontroll-issuen av repo-eieren. Alle felt er
@@ -220,7 +226,7 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-280 tester. I tillegg til v2-dekningen (karantene inkludert den eksakte
+282 tester. I tillegg til v2-dekningen (karantene inkludert den eksakte
 D125-filen, symlink, reparse point, kollisjon, sporede filer; completion-bevis;
 backoff; status-dedup; tillitsgrensen; hemmelighetsvask) dekker v2.1:
 

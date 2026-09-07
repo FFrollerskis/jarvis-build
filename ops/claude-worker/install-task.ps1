@@ -183,6 +183,18 @@ if ($null -eq $verify -or $verifyExecute -ne $shellPath) {
     exit 1
 }
 
+# If this registration INTRODUCED the task, record it so a rollback can
+# unregister it again rather than leaving a new schedule against restored code.
+if ($null -eq $existing) {
+    $deploy = Join-Path $here "deploy.mjs"
+    if (Test-Path -LiteralPath $deploy) {
+        & node $deploy record-introduced-task --destination $here --task $TaskName | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Could not record '$TaskName' as an introduced task. A rollback will NOT unregister it automatically; do that by hand with uninstall-task.ps1."
+        }
+    }
+}
+
 Write-Host "Registered scheduled task '$TaskName' - fires every $IntervalMinutes minute(s), indefinitely."
 Write-Host "  execute:   $shellPath"
 Write-Host "  principal: user=$userId logonType=$LogonType runLevel=$runLevel"
