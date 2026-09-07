@@ -819,4 +819,263 @@ describe("finding 3: controlled bootstrap handoff from a LEGACY deployment", () 
     expect(res.ok).toBe(false);
     expect(res.reason).toMatch(/no pending activation/);
   });
+
+  /**
+   * D126 ADDENDUM ITEM 5: "bootstrap handoff can abandon a deferred legacy
+   * install forever".
+   *
+   * The defect: `captureQuiescenceOwners` put a syntactically unreadable lock
+   * into a separate `unreadable` list that nothing consumed, and dropped a
+   * SEMANTICALLY malformed verdict - which is exactly what a genuine legacy
+   * lock without a `host` produces - entirely. `runBootstrapHandoff` consumed
+   * only `owners`, so against such a lock it captured ZERO identities, waited
+   * for nothing, hit `assessQuiescence` (which DOES treat those as blockers),
+   * returned `deferred` immediately, and the standalone process EXITED. On a
+   * legacy installation the registered entrypoint has no pending-activation
+   * support, so the marker had no future consumer at all.
+   *
+   * The corrected behaviour: stay alive and poll fail-closed inside ONE fixed
+   * bounded deadline for BOTH kinds of blocker, preserve the exact captured
+   * identities, never terminate or substitute anything, and only activate once
+   * the blockers have resolved and quiescence has been re-checked.
+   */
+  describe("addendum item 5: an unclassifiable lock is polled, never abandoned", () => {
+    /** A lock file whose bytes are not JSON at all. */
+    function writeMalformedJsonLock(name = ".worker.lock") {
+      writeFileSync(join(destination, name), "{not json at all", "utf8");
+    }
+
+    /**
+     * A GENUINE old lock shape: the v1 file the currently deployed worker
+     * writes. It has no host binding and no start time, so the schema check
+     * fails and `classifyLock` returns `malformed` - a semantic verdict, not a
+     * parse error. This is the shape the previous code discarded silently.
+     */
+    function writeLegacyMissingHostLock(name = ".worker.lock") {
+      writeFileSync(join(destination, name), JSON.stringify({
+        pid: 4242,
+        started_at: new Date().toISOString(),
+        phase: "dispatch"
+      }, null, 2), "utf8");
+    }
+
+    /** A reader that fails the way an access-denied or sharing violation does. */
+    function throwingReader(rel = ".worker.lock") {
+      return (path) => {
+        if (path.endsWith(rel)) throw new Error("EACCES: permission denied");
+        return null;
+      };
+    }
+
+    /** A clock that only moves when the handoff sleeps: deterministic timing. */
+    function fakeClock(stepMs) {
+      let t = 0;
+      return { clock: () => t, sleep: () => { t += stepMs; } };
+    }
+
+    function deferWithBlocker(seedBlocker) {
+      seedLegacyDeployment();
+      writeParentLock();
+      stage(VERSION);
+      const res = activateRelease({ destination, version: VERSION, taskCommandLines: legacyTask() });
+      expect(res.deferred).toBe(true);
+      // Replace the well-formed parent lock with the blocking shape under test.
+      rmSync(join(destination, ".worker.lock"), { force: true });
+      seedBlocker();
+    }
+
+    it("records a syntactically malformed lock as a blocker, not as an absence", () => {
+      deferWithBlocker(writeMalformedJsonLock);
+      const snap = captureQuiescenceOwners({ destination });
+      expect(snap.owners).toHaveLength(0);
+      expect(snap.blockers).toHaveLength(1);
+      expect(snap.blockers[0].lock).toBe(".worker.lock");
+      expect(snap.blockers[0].kind).toBe("unreadable");
+      // The old `unreadable` list is still populated for existing reporting.
+      expect(snap.unreadable).toHaveLength(1);
+    });
+
+    it("records a SEMANTIC malformed verdict (legacy, no host) as a blocker", () => {
+      deferWithBlocker(writeLegacyMissingHostLock);
+      const snap = captureQuiescenceOwners({ destination });
+      // This is the case that used to vanish completely: it parses fine, so it
+      // never reached `unreadable`, and its verdict was not in the owner list.
+      expect(snap.owners).toHaveLength(0);
+      expect(snap.blockers).toHaveLength(1);
+      expect(snap.blockers[0].kind).toBe("malformed_claim");
+      expect(snap.blockers[0].reason).toMatch(/host binding is missing/);
+    });
+
+    it("records a read/access error as a blocker, never as a free lock", () => {
+      deferWithBlocker(writeMalformedJsonLock);
+      const snap = captureQuiescenceOwners({ destination, readRaw: throwingReader() });
+      expect(snap.owners).toHaveLength(0);
+      expect(snap.blockers[0].kind).toBe("read_error");
+      expect(snap.blockers[0].reason).toMatch(/EACCES/);
+      // assessQuiescence agrees: an unreadable lock is never quiet.
+      expect(assessQuiescence({ destination, readRaw: throwingReader() }).quiet).toBe(false);
+    });
+
+    for (const [label, seed] of [
+      ["syntactically malformed JSON", writeMalformedJsonLock],
+      ["a genuine legacy lock with no host", writeLegacyMissingHostLock]
+    ]) {
+      it(`polls instead of abandoning the install when the lock is ${label}`, () => {
+        deferWithBlocker(seed);
+        const { clock, sleep } = fakeClock(1_000);
+        let polls = 0;
+        const res = runBootstrapHandoff({
+          destination,
+          matchIdentity: () => ({ state: IDENTITY.GONE, reason: "no captured owner" }),
+          clock,
+          // The blocker clears on the third poll: the legacy owner released it.
+          sleep: () => {
+            sleep();
+            polls += 1;
+            if (polls === 3) rmSync(join(destination, ".worker.lock"), { force: true });
+          },
+          waitDeadlineMs: 60_000,
+          pollIntervalMs: 1_000,
+          taskCommandLines: legacyTask()
+        });
+
+        // The decisive assertion: it did NOT return on the first look.
+        expect(polls).toBeGreaterThanOrEqual(3);
+        expect(res.polls).toBeGreaterThanOrEqual(3);
+        expect(res.ok).toBe(true);
+        expect(res.activated).toBe(true);
+        expect(readPendingActivation(destination)).toBeNull();
+        expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe("NEW run-worker.ps1\n");
+      });
+    }
+
+    it("polls through a transient read/access error and activates once it clears", () => {
+      deferWithBlocker(writeMalformedJsonLock);
+      rmSync(join(destination, ".worker.lock"), { force: true });
+      let reads = 0;
+      const { clock, sleep } = fakeClock(1_000);
+      const res = runBootstrapHandoff({
+        destination,
+        // Inaccessible for the first four reads (one of which is the initial
+        // capture), then genuinely absent.
+        readRaw: (path) => {
+          if (!path.endsWith(".worker.lock")) return null;
+          reads += 1;
+          if (reads <= 4) throw new Error("EACCES: permission denied");
+          return null;
+        },
+        blockers: [{ lock: ".worker.lock", kind: "read_error", reason: "EACCES: permission denied", pid: null }],
+        owners: [],
+        matchIdentity: () => ({ state: IDENTITY.GONE, reason: "no captured owner" }),
+        clock, sleep,
+        waitDeadlineMs: 60_000,
+        pollIntervalMs: 1_000,
+        taskCommandLines: legacyTask()
+      });
+      expect(res.polls).toBeGreaterThanOrEqual(3);
+      expect(res.ok).toBe(true);
+      expect(res.activated).toBe(true);
+    });
+
+    it("a blocker that never resolves expires the ONE deadline and defers, marker intact", () => {
+      deferWithBlocker(writeLegacyMissingHostLock);
+      const before = readFileSync(join(destination, ".worker.lock"), "utf8");
+      const { clock, sleep } = fakeClock(1_000);
+      const res = runBootstrapHandoff({
+        destination,
+        matchIdentity: () => ({ state: IDENTITY.GONE, reason: "no captured owner" }),
+        clock, sleep,
+        waitDeadlineMs: 5_000,
+        pollIntervalMs: 1_000,
+        taskCommandLines: legacyTask()
+      });
+
+      expect(res.ok).toBe(false);
+      expect(res.activated).toBe(false);
+      expect(res.deferred).toBe(true);
+      expect(res.deadline_expired).toBe(true);
+      // It waited out the whole budget rather than giving up immediately.
+      expect(res.polls).toBeGreaterThanOrEqual(5);
+      expect(res.waited_ms).toBeGreaterThanOrEqual(5_000);
+      expect(res.unresolved_blockers[0].kind).toBe("malformed_claim");
+      // Nothing was terminated, nothing was overwritten, nothing was lost: the
+      // lock file is byte-identical and the marker is still there.
+      expect(readFileSync(join(destination, ".worker.lock"), "utf8")).toBe(before);
+      expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+      expect(readPendingActivation(destination).version).toBe(VERSION);
+      expect(operationalIntact()).toBe(true);
+    });
+
+    it("a captured owner that never exits expires the SAME single deadline", () => {
+      deferInstall();
+      const owners = captureQuiescenceOwners({ destination }).owners;
+      const { clock, sleep } = fakeClock(1_000);
+      const res = runBootstrapHandoff({
+        destination, owners,
+        matchIdentity: () => ({ state: IDENTITY.MATCH, reason: "still running" }),
+        clock, sleep, waitDeadlineMs: 4_000, pollIntervalMs: 1_000,
+        taskCommandLines: legacyTask()
+      });
+      expect(res.deferred).toBe(true);
+      expect(res.deadline_expired).toBe(true);
+      expect(res.unresolved_owners[0]).toMatchObject({ lock: ".worker.lock", pid: PARENT.pid, state: IDENTITY.MATCH });
+      // The EXACT captured identity is preserved and reported, never swapped
+      // for whatever happens to hold the lock now.
+      expect(res.parents[0].identity).toEqual({ pid: PARENT.pid, host: PARENT.host, start_time: PARENT.start_time });
+      expect(readPendingActivation(destination).version).toBe(VERSION);
+    });
+
+    it("a NEW owner appearing while polling defers instead of overwriting it", () => {
+      deferWithBlocker(writeMalformedJsonLock);
+      const { clock, sleep } = fakeClock(1_000);
+      let polls = 0;
+      const res = runBootstrapHandoff({
+        destination,
+        matchIdentity: () => ({ state: IDENTITY.GONE, reason: "no captured owner" }),
+        clock,
+        sleep: () => {
+          sleep();
+          polls += 1;
+          // The malformed lock is replaced by a VALID, live owner: the race the
+          // handoff must lose safely rather than win destructively.
+          if (polls === 2) writeParentLock();
+        },
+        waitDeadlineMs: 60_000,
+        pollIntervalMs: 1_000,
+        taskCommandLines: legacyTask()
+      });
+
+      expect(res.ok).toBe(false);
+      expect(res.activated).toBe(false);
+      expect(res.deferred).toBe(true);
+      expect(res.reason).toMatch(/became active again/);
+      // The new owner was never adopted as "the captured parent" and never
+      // terminated: its lock is untouched and it still owns the deployment.
+      expect(res.parents).toEqual([]);
+      expect(existsSync(join(destination, ".worker.lock"))).toBe(true);
+      expect(readFileSync(join(destination, "run-worker.ps1"), "utf8")).toBe(LEGACY_ENTRYPOINT);
+      expect(readPendingActivation(destination).version).toBe(VERSION);
+    });
+
+    it("the OLD defect is gone: an unclassifiable lock no longer defers on poll zero", () => {
+      deferWithBlocker(writeLegacyMissingHostLock);
+      const { clock, sleep } = fakeClock(1_000);
+      let polls = 0;
+      const res = runBootstrapHandoff({
+        destination,
+        matchIdentity: () => ({ state: IDENTITY.GONE, reason: "no captured owner" }),
+        clock,
+        sleep: () => { sleep(); polls += 1; },
+        waitDeadlineMs: 3_000,
+        pollIntervalMs: 1_000,
+        taskCommandLines: legacyTask()
+      });
+      // Previously: zero captured owners -> zero waiting -> immediate deferral
+      // and process exit, with no future consumer for the marker.
+      expect(polls).toBeGreaterThan(0);
+      expect(res.deadline_expired).toBe(true);
+      expect(res.reason).toMatch(/wait budget expired/);
+      expect(res.reason).toMatch(/could not be classified as safe/);
+    });
+  });
 });

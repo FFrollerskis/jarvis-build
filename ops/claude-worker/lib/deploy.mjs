@@ -219,11 +219,25 @@ export function planObsolete({ destination, obsolete = OBSOLETE, taskCommandLine
  * A live worker (or supervisor) lock means NO. The installer never terminates
  * anything, so the answer is "stage it and hand off", never "overwrite it".
  */
-export function assessQuiescence({ destination, lockFiles = [".worker.lock", ".supervisor.lock"], nowMs = Date.now() }) {
+export function assessQuiescence({
+  destination,
+  lockFiles = [".worker.lock", ".supervisor.lock"],
+  nowMs = Date.now(),
+  readRaw = readLockRaw
+}) {
   const blockers = [];
   for (const rel of lockFiles) {
     const path = join(destination, rel);
-    const snap = readLockRaw(path);
+    let snap;
+    try {
+      snap = readRaw(path);
+    } catch (err) {
+      // A read or access ERROR is not an absence. Being unable to look at a
+      // lock is the one situation where guessing is most tempting and most
+      // dangerous, so it fails closed like any other unreadable lock.
+      blockers.push({ lock: rel, state: "read_error", reason: `the lock file could not be read: ${err.message}` });
+      continue;
+    }
     if (!snap) continue;
     if (snap.malformed) {
       blockers.push({ lock: rel, state: "malformed", reason: "lock file is unreadable; refusing to guess whether a process is running" });
@@ -508,9 +522,12 @@ export function activateRelease({
  * payload is switched - it never depends on the staged runner being live. It:
  *
  *   1. captures the EXACT identity (pid + start time + host) of every process
- *      that currently blocks quiescence, ONCE, at install time;
- *   2. waits for precisely those identities to exit - never a pid on its own,
- *      and never treating "cannot tell" as "has exited";
+ *      that currently blocks quiescence, ONCE, at install time, AND records
+ *      every lock it could not turn into an identity at all (addendum item 5);
+ *   2. stays alive and polls, fail-closed, inside ONE fixed bounded deadline,
+ *      until precisely those identities have exited - never a pid on its own,
+ *      and never treating "cannot tell" as "has exited" - and until every
+ *      unclassifiable lock has disappeared or become readable and validatable;
  *   3. re-checks worker AND supervisor quiescence afterwards, so a NEW owner
  *      that started meanwhile defers the handoff again instead of being
  *      overwritten;
@@ -525,23 +542,69 @@ export function activateRelease({
  * retried instead of being lost.
  */
 
+/** Lock states that mean "something may be running here". */
+const BLOCKING_LOCK_STATES = Object.freeze(["active", "unproven_identity", "stale_no_heartbeat", "foreign_host"]);
+
 /**
- * Capture, once, the exact identity of everything that currently blocks
- * activation. `null` start times are recorded as such rather than invented.
+ * Look at ONE lock and decide which of three things it is.
+ *
+ * D126 addendum item 5. The previous split was the defect: a syntactically
+ * unreadable lock went into a separate `unreadable` list that nothing consumed,
+ * and a SEMANTICALLY malformed one - `classifyLock` returning `malformed`,
+ * which is exactly what a genuine legacy lock missing `host`/`start_time`
+ * produces - was dropped on the floor entirely. Both then left `owners` empty,
+ * and an empty `owners` list looked identical to "nothing is running".
+ *
+ * There are only three honest answers:
+ *   - `null`          : there is no lock here at all;
+ *   - `{ owner }`     : we have an EXACT identity we can wait for;
+ *   - `{ blocker }`   : something is here that we cannot turn into an identity.
+ *
+ * The third one is never silently discarded and never invented into an
+ * identity, because waiting for a process we guessed at would be far worse than
+ * waiting for one we can name.
  */
-export function captureQuiescenceOwners({ destination, lockFiles = [".worker.lock", ".supervisor.lock"], nowMs = Date.now() }) {
-  const owners = [];
-  const unreadable = [];
-  for (const rel of lockFiles) {
-    const snap = readLockRaw(join(destination, rel));
-    if (!snap) continue;
-    if (snap.malformed) {
-      unreadable.push({ lock: rel, reason: snap.read_error ?? "unreadable lock content" });
-      continue;
-    }
-    const verdict = classifyLock(snap.info, { nowMs });
-    if (!["active", "unproven_identity", "stale_no_heartbeat", "foreign_host"].includes(verdict.state)) continue;
-    owners.push({
+function inspectLock({ destination, rel, nowMs, readRaw }) {
+  let snap;
+  try {
+    snap = readRaw(join(destination, rel));
+  } catch (err) {
+    return { blocker: { lock: rel, kind: "read_error", reason: `the lock file could not be read: ${err.message}`, pid: null } };
+  }
+  if (!snap) return null;
+  if (snap.malformed) {
+    return {
+      blocker: {
+        lock: rel,
+        kind: "unreadable",
+        reason: snap.read_error ?? "unreadable lock content",
+        pid: null
+      }
+    };
+  }
+  let verdict;
+  try {
+    verdict = classifyLock(snap.info, { nowMs });
+  } catch (err) {
+    return { blocker: { lock: rel, kind: "classify_error", reason: `the lock could not be classified: ${err.message}`, pid: snap.info?.pid ?? null } };
+  }
+  if (verdict.state === "malformed") {
+    // Parsed, but not a claim we can validate: a legacy shape without the newer
+    // identity fields, a missing host, an invalid timestamp. We cannot derive
+    // pid + start_time + host, so there is no identity to wait for - and an
+    // unvalidatable claim is emphatically not proof that nothing is running.
+    return {
+      blocker: {
+        lock: rel,
+        kind: "malformed_claim",
+        reason: verdict.reason,
+        pid: snap.info?.pid ?? null
+      }
+    };
+  }
+  if (!BLOCKING_LOCK_STATES.includes(verdict.state)) return null;
+  return {
+    owner: {
       lock: rel,
       state: verdict.state,
       identity: {
@@ -550,9 +613,66 @@ export function captureQuiescenceOwners({ destination, lockFiles = [".worker.loc
         start_time: snap.info.start_time ?? null
       },
       task_id: snap.info.task_id ?? null
-    });
+    }
+  };
+}
+
+/**
+ * Capture, once, the exact identity of everything that currently blocks
+ * activation. `null` start times are recorded as such rather than invented.
+ *
+ * Returns THREE lists, and the handoff consumes all of them:
+ *   - `owners`         : exact identities to wait for;
+ *   - `blockers`       : locks we could not turn into an identity at all
+ *                        (unreadable, semantically malformed, legacy shape,
+ *                        read/access error). These must RESOLVE before
+ *                        activation, they are never treated as absence;
+ *   - `unreadable`     : the syntactic subset of `blockers`, kept because it is
+ *                        what earlier callers and reports refer to by name.
+ */
+export function captureQuiescenceOwners({
+  destination,
+  lockFiles = [".worker.lock", ".supervisor.lock"],
+  nowMs = Date.now(),
+  readRaw = readLockRaw
+}) {
+  const owners = [];
+  const blockers = [];
+  const unreadable = [];
+  for (const rel of lockFiles) {
+    const seen = inspectLock({ destination, rel, nowMs, readRaw });
+    if (!seen) continue;
+    if (seen.owner) {
+      owners.push(seen.owner);
+      continue;
+    }
+    blockers.push(seen.blocker);
+    if (seen.blocker.kind === "unreadable" || seen.blocker.kind === "read_error") {
+      unreadable.push({ lock: seen.blocker.lock, reason: seen.blocker.reason });
+    }
   }
-  return { owners, unreadable };
+  return { owners, blockers, unreadable };
+}
+
+/**
+ * Re-examine, on every poll, the locks that could not be turned into an
+ * identity. One that is now GONE, or that now classifies into a state we can
+ * reason about, has resolved. Anything still unreadable/unvalidatable is still
+ * a blocker.
+ *
+ * A blocker that resolves into a LIVE owner is deliberately treated as resolved
+ * HERE and left to the quiescence re-check below: we do not start waiting on a
+ * newly appeared identity, because re-deriving who "the legitimate parent" is
+ * while waiting is precisely how a wait becomes unbounded and how the wrong
+ * process gets adopted as the parent.
+ */
+function probeBlockers({ destination, blockers, nowMs = Date.now(), readRaw = readLockRaw }) {
+  const still = [];
+  for (const blocker of blockers) {
+    const seen = inspectLock({ destination, rel: blocker.lock, nowMs, readRaw });
+    if (seen?.blocker) still.push({ ...seen.blocker, first_seen_kind: blocker.kind });
+  }
+  return still;
 }
 
 /** Has this exact recorded identity stopped running? Never pid-only. */
@@ -587,9 +707,12 @@ export function runBootstrapHandoff({
   destination,
   version = null,
   owners = null,
+  blockers = null,
+  lockFiles = [".worker.lock", ".supervisor.lock"],
   waitDeadlineMs = 30 * 60_000,
   pollIntervalMs = 2_000,
   matchIdentity = matchProcessIdentity,
+  readRaw = readLockRaw,
   sleep = defaultSleep,
   now = () => new Date(),
   clock = () => Date.now(),
@@ -609,39 +732,96 @@ export function runBootstrapHandoff({
   // The identities we wait for are captured ONCE. Re-deriving them later would
   // mean a brand new owner could reset the wait indefinitely, and worse, could
   // silently redefine "the legitimate parent" to be some other process.
-  const captured = owners ?? captureQuiescenceOwners({ destination }).owners;
+  const snapshot = captureQuiescenceOwners({ destination, lockFiles, readRaw });
+  const captured = owners ?? snapshot.owners;
+  const capturedBlockers = blockers ?? snapshot.blockers;
 
   hooks.beforeWait?.();
 
-  const waited = [];
-  for (const owner of captured) {
-    let last = ownerHasExited(owner, matchIdentity);
-    while (!last.exited) {
-      if (clock() - startedAt >= waitDeadlineMs) {
-        // Give up WITHOUT activating. The marker stays, so a later run - or a
-        // human - can complete the handoff. Nothing is terminated.
-        return {
-          ok: false,
-          activated: false,
-          deferred: true,
-          reason: `the legitimate parent for ${owner.lock} (pid ${owner.identity.pid}) had not exited within the wait budget`
-            + ` (last verdict: ${last.state} - ${last.reason}). Nothing was activated and nothing was terminated.`,
-          version: target,
-          parents: captured,
-          waited_ms: clock() - startedAt
-        };
-      }
-      sleep(pollIntervalMs);
-      last = ownerHasExited(owner, matchIdentity);
+  /**
+   * D126 ADDENDUM ITEM 5 - ONE bounded deadline covering BOTH kinds of blocker.
+   *
+   * The defect this replaces: only `owners` was consumed. Against a genuine
+   * legacy or malformed lock nothing could be captured, so the loop below had
+   * nothing to wait for, fell straight through to `assessQuiescence` - which
+   * DOES count those locks as blockers - and returned `deferred` on the spot.
+   * The standalone bootstrap process then EXITED. On a legacy installation the
+   * already-registered entrypoint has no pending-activation support, so there
+   * was no future consumer for the marker at all and the handoff was abandoned
+   * forever, which is the one outcome this whole mechanism exists to prevent.
+   *
+   * So the process now stays alive and polls, fail-closed, until either
+   * everything has resolved or ONE fixed deadline expires:
+   *   - every EXACT captured identity is proven exited (GONE/REUSED only -
+   *     never pid alone, and "cannot tell" is never "has exited"), and
+   *   - every lock we could not classify has disappeared or become readable
+   *     and validatable.
+   *
+   * Nothing is ever terminated, no other process is substituted for a captured
+   * owner, and on every refusal the pending-activation marker is left exactly
+   * where it is.
+   */
+  const exitStates = new Map();
+  let polls = 0;
+  let unresolved = null;
+  for (;;) {
+    const pendingOwners = [];
+    for (const owner of captured) {
+      const last = ownerHasExited(owner, matchIdentity);
+      exitStates.set(`${owner.lock}#${owner.identity.pid}`, last);
+      if (!last.exited) pendingOwners.push({ owner, last });
     }
-    waited.push({ lock: owner.lock, pid: owner.identity.pid, exit_state: last.state });
+    const stillBlocked = probeBlockers({ destination, blockers: capturedBlockers, readRaw });
+
+    if (pendingOwners.length === 0 && stillBlocked.length === 0) break;
+
+    if (clock() - startedAt >= waitDeadlineMs) {
+      // Give up WITHOUT activating. The marker stays, so a later run - or a
+      // human - can complete the handoff. Nothing is terminated.
+      unresolved = { pendingOwners, stillBlocked };
+      break;
+    }
+    polls += 1;
+    sleep(pollIntervalMs);
   }
+
+  if (unresolved) {
+    const parts = [
+      ...unresolved.pendingOwners.map(({ owner, last }) =>
+        `the legitimate parent for ${owner.lock} (pid ${owner.identity.pid}) had not exited (last verdict: ${last.state} - ${last.reason})`),
+      ...unresolved.stillBlocked.map((b) =>
+        `${b.lock} could not be classified as safe (${b.kind}: ${b.reason})`)
+    ];
+    return {
+      ok: false,
+      activated: false,
+      deferred: true,
+      deadline_expired: true,
+      reason: `the handoff wait budget expired with unresolved blockers: ${parts.join("; ")}. `
+        + "Nothing was activated, nothing was terminated, and the pending-activation marker was left in place.",
+      version: target,
+      parents: captured,
+      blockers: capturedBlockers,
+      unresolved_owners: unresolved.pendingOwners.map(({ owner, last }) => ({
+        lock: owner.lock, pid: owner.identity.pid, state: last.state, reason: last.reason
+      })),
+      unresolved_blockers: unresolved.stillBlocked,
+      polls,
+      waited_ms: clock() - startedAt
+    };
+  }
+
+  const waited = captured.map((owner) => {
+    const last = exitStates.get(`${owner.lock}#${owner.identity.pid}`);
+    return { lock: owner.lock, pid: owner.identity.pid, exit_state: last?.state ?? null };
+  });
 
   hooks.afterParentExit?.();
 
-  // A new owner may have started while we waited. Re-check BOTH locks before
-  // touching anything; deferring again is always safe, overwriting never is.
-  const quiescence = assessQuiescence({ destination });
+  // A new owner may have started while we waited, and a blocker may have
+  // resolved INTO one. Re-check BOTH locks before touching anything; deferring
+  // again is always safe, overwriting never is.
+  const quiescence = assessQuiescence({ destination, lockFiles, readRaw });
   if (!quiescence.quiet) {
     return {
       ok: false,
@@ -652,7 +832,9 @@ export function runBootstrapHandoff({
         + ". The pending-activation marker was left in place and nothing was overwritten.",
       version: target,
       parents: captured,
+      blockers: capturedBlockers,
       waited,
+      polls,
       quiescence,
       waited_ms: clock() - startedAt
     };
@@ -678,7 +860,7 @@ export function runBootstrapHandoff({
     return {
       ok: false, activated: false, deferred: false,
       reason: `activation threw: ${err.message}. The pending-activation marker was left in place.`,
-      version: target, parents: captured, waited, waited_ms: clock() - startedAt
+      version: target, parents: captured, blockers: capturedBlockers, waited, polls, waited_ms: clock() - startedAt
     };
   }
 
@@ -694,7 +876,7 @@ export function runBootstrapHandoff({
       reason: result.reason ?? result.error ?? "activation did not succeed",
       rolled_back: result.rolled_back ?? false,
       rollback: result.rollback ?? null,
-      version: target, parents: captured, waited, waited_ms: clock() - startedAt
+      version: target, parents: captured, blockers: capturedBlockers, waited, polls, waited_ms: clock() - startedAt
     };
   }
 
@@ -705,7 +887,9 @@ export function runBootstrapHandoff({
     deferred: false,
     version: target,
     parents: captured,
+    blockers: capturedBlockers,
     waited,
+    polls,
     switched: result.switched,
     backupDir: result.backupDir,
     manifestPath: result.manifestPath,
