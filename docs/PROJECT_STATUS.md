@@ -164,13 +164,16 @@ ANDRE nett.
 
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **`npx vitest run ops/claude-worker/test` → 15 filer / 358 tester passed, kjørt TO ganger,
-  358/358 begge ganger.** Nye tester i runde 5:
-  - `worker-crash-recovery.test.mjs` (16 → 30): fault-injection gjennom det FAKTISKE entrypointet
+- **`npx vitest run ops/claude-worker/test` → 15 filer / 359 tester passed, kjørt TO ganger,
+  359/359 begge ganger.** Nye tester i runde 5:
+  - `worker-crash-recovery.test.mjs` (16 → 31): fault-injection gjennom det FAKTISKE entrypointet
     (`node worker.mjs run` som ekte OS-prosess) for state-write-feil OG tapt lås under `onSpawn`.
     Beviser null usporet levende barn, ingen duplikat-dispatch, sannferdig non-zero utfall, at
     oppgaven aldri leveres til barnet, og trygg recovery etterpå (inkludert at en for tidlig retry
-    ikke dispatcher, og at nøyaktig én ny dispatch skjer når backoffen er ute);
+    ikke dispatcher, og at nøyaktig én ny dispatch skjer når backoffen er ute). Egen test for at en
+    handoff som fortsetter å feile bruker opp forsøksbudsjettet og ender BLOCKED på 4/4 med
+    `retry budget exhausted`, exit 3 og fortsatt null usporet levende barn - «forsøket skjedde
+    egentlig ikke» er ikke en lisens til å prøve for alltid;
   - `dispatch.test.mjs` (NY, 11): arkitektens eksakte repro, pluss grenene en OS-prosess ikke kan
     fremtvinge - barn som ikke dør, `UNPROVEN`, `REUSED`, probe som kaster, og exit 0 midt i abort;
   - `lock.test.mjs` (42 → 49): fersk/aldret semantisk-malformed, manglende/ugyldig pid, manglende
