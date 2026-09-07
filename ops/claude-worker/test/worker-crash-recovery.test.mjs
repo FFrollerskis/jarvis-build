@@ -637,3 +637,91 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
     expect(task().status).toBe(TASK_STATUS.COMPLETED);
   }, 60_000);
 });
+
+/**
+ * D126 ADDENDUM ITEM 4, through the REAL entrypoint.
+ *
+ * The direct-module coverage lives in `dispatch.test.mjs`. These drive
+ * `node worker.mjs run` as its own OS process and assert the two properties
+ * that only a real process can demonstrate: an unsupported delivery mode never
+ * gets as far as creating a child, and the child that IS created never receives
+ * the task on its command line - so with persistence or heartbeat faulted there
+ * is provably zero prompt consumption and zero task effect before the gate.
+ */
+describe("addendum item 4: stdin-only delivery at the real entrypoint", () => {
+  function setPromptDelivery(mode) {
+    const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+    if (mode === undefined) delete cfg.promptDelivery;
+    else cfg.promptDelivery = mode;
+    writeFileSync(configPath, JSON.stringify(cfg, null, 2), "utf8");
+  }
+
+  it("refuses to start at all when the config asks for argv delivery", async () => {
+    setPromptDelivery("argv");
+    const res = await runWorker("report");
+    expect(res.code).not.toBe(0);
+    expect(res.output).toMatch(/promptDelivery must be "stdin"/);
+    // Nothing was spawned and no task effect exists: no child, no prompt file.
+    expect(invocations()).toHaveLength(0);
+    expect(existsSync(join(claudeDir, "prompt.txt"))).toBe(false);
+    expect(existsSync(join(claudeDir, "argv.json"))).toBe(false);
+    // The queue was never even consumed, so nothing was marked as attempted.
+    expect(task()).toBeNull();
+  }, 60_000);
+
+  it("rejects any other unimplemented mode the same way", async () => {
+    setPromptDelivery("carrier-pigeon");
+    const res = await runWorker("report");
+    expect(res.code).not.toBe(0);
+    expect(invocations()).toHaveLength(0);
+  }, 60_000);
+
+  it("a real child never receives the task on its command line", async () => {
+    await runWorker("report");
+    const argv = JSON.parse(readFileSync(join(claudeDir, "argv.json"), "utf8"));
+    // argv[0] is node, argv[1] is the fixture path. Nothing else, and above all
+    // nothing carrying the ARCHITECT_TASK body.
+    expect(argv).toHaveLength(2);
+    for (const arg of argv) {
+      expect(arg).not.toMatch(/ARCHITECT_TASK/);
+      expect(arg).not.toMatch(new RegExp(TASK_ID));
+    }
+    // The task did arrive - over stdin, after the gate.
+    expect(readFileSync(join(claudeDir, "prompt.txt"), "utf8")).toMatch(/ARCHITECT_TASK/);
+  }, 60_000);
+
+  for (const [fault, label] of [
+    ["spawn_state_write", "an injected PERSISTENCE failure"],
+    ["spawn_lost_lock", "an injected HEARTBEAT failure"]
+  ]) {
+    it(`${label} leaves the child with no task in argv and none on stdin`, async () => {
+      await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+
+      // If the child got far enough to record anything, prove its command line
+      // was clean. If it never ran at all, that is a stronger version of the
+      // same property.
+      const argvPath = join(claudeDir, "argv.json");
+      if (existsSync(argvPath)) {
+        const argv = JSON.parse(readFileSync(argvPath, "utf8"));
+        expect(argv).toHaveLength(2);
+        for (const arg of argv) expect(arg).not.toMatch(/ARCHITECT_TASK/);
+        const childPid = Number(readFileSync(join(claudeDir, "child.pid"), "utf8"));
+        stray.push(childPid);
+        await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+      }
+      // The gate never succeeded, so the prompt was never written: zero prompt
+      // consumption and zero task effects.
+      expect(existsSync(join(claudeDir, "prompt.txt"))).toBe(false);
+      expect(existsSync(join(claudeDir, "report-posted"))).toBe(false);
+      expect(task().status).not.toBe(TASK_STATUS.COMPLETED);
+      expect(task().last_outcome).toBe("handoff_failed");
+    }, 120_000);
+  }
+
+  it("stdin remains accepted, with or without the field present", async () => {
+    setPromptDelivery(undefined);
+    const res = await runWorker("report");
+    expect(res.code).toBe(0);
+    expect(task().status).toBe(TASK_STATUS.COMPLETED);
+  }, 60_000);
+});

@@ -15,7 +15,7 @@
 import { describe, it, expect } from "vitest";
 import { EventEmitter } from "node:events";
 
-import { runClaude, OUTCOME, buildPrompt } from "../lib/dispatch.mjs";
+import { runClaude, OUTCOME, buildPrompt, SUPPORTED_PROMPT_DELIVERY } from "../lib/dispatch.mjs";
 import { IDENTITY } from "../lib/procid.mjs";
 
 const CFG = {
@@ -226,4 +226,116 @@ describe("finding 1: termination is verified, never assumed", () => {
     await promise;
     expect(beats).toBe(0);
   });
+});
+
+/**
+ * D126 ADDENDUM ITEM 4: "accepted argv delivery bypasses the durable
+ * pre-execution handoff gate".
+ *
+ * `argv` put the complete task on the command line handed to `spawn`, so the
+ * child could read and begin executing the authorized task before `onSpawn` had
+ * committed anything. The abort path could still fire, but it could never prove
+ * the task had not already been consumed - and no dispatch test covered the
+ * accepted argv path at all.
+ *
+ * The correction is the strong one the addendum prefers: `stdin` is the ONLY
+ * accepted mode, and the rejection is enforced here in `runClaude` as well as in
+ * `config.mjs`, because a DIRECT module call never goes through config loading.
+ */
+describe("addendum item 4: stdin is the only accepted prompt-delivery mode", () => {
+  it("stdin is the entire accepted set", () => {
+    expect(SUPPORTED_PROMPT_DELIVERY).toEqual(["stdin"]);
+  });
+
+  for (const mode of ["argv", "carrier-pigeon", "", null, undefined]) {
+    it(`a DIRECT module call with promptDelivery=${JSON.stringify(mode)} spawns nothing`, async () => {
+      let spawned = 0;
+      const res = await runClaude({ ...CFG, promptDelivery: mode }, TASK, {
+        spawnImpl: () => { spawned += 1; return fakeChild(); },
+        onSpawn: () => {},
+        onHeartbeat: () => {}
+      });
+      // The rejection happens BEFORE process creation, which is the only point
+      // at which "the child has not consumed the task" is provable at all.
+      expect(spawned).toBe(0);
+      expect(res.outcome).toBe(OUTCOME.UNSUPPORTED_PROMPT_DELIVERY);
+      expect(res.spawned).toBe(false);
+      expect(res.promptBuilt).toBe(false);
+      expect(res.childPid).toBeNull();
+      expect(res.childIdentity).toBeNull();
+      expect(res.error).toMatch(/promptDelivery must be "stdin"/);
+      // Never mistakable for a completed run.
+      expect(res.outcome).not.toBe(OUTCOME.COMPLETED_EXIT_0);
+      expect(res.code).toBeUndefined();
+    });
+  }
+
+  it("the prompt is NEVER placed on the child's command line", async () => {
+    let seenArgs = null;
+    const child = fakeChild();
+    await runClaude({ ...CFG, claudeArgs: ["--print", "--model", "opus"] }, TASK, {
+      spawnImpl: (_cmd, args) => { seenArgs = args; setTimeout(() => child.emit("close", 0, null), 5); return child; },
+      identityImpl: () => IDENT,
+      onSpawn: () => {},
+      heartbeatMs: 10_000
+    });
+    expect(seenArgs).toEqual(["--print", "--model", "opus"]);
+    // The decisive property: nothing in argv carries the task.
+    for (const arg of seenArgs) {
+      expect(arg).not.toContain("ARCHITECT_TASK");
+      expect(arg).not.toContain(TASK.comment.body);
+    }
+    // It travelled over stdin instead, after the gate.
+    expect(child.stdinPayload).toBe(buildPrompt({ ...CFG, claudeArgs: ["--print", "--model", "opus"] }, TASK));
+  });
+
+  /**
+   * The addendum's core demand: for EVERY accepted delivery mode, injected
+   * persistence and heartbeat failures must prove zero prompt consumption and
+   * zero task effects before the gate succeeds.
+   */
+  for (const mode of SUPPORTED_PROMPT_DELIVERY) {
+    describe(`accepted mode "${mode}"`, () => {
+      for (const [label, failure] of [
+        ["a persistence failure", new Error("durable write failed")],
+        ["a lock-heartbeat failure", new Error("the worker lock could not be heartbeated with the child's identity at spawn")]
+      ]) {
+        it(`${label} in the gate delivers ZERO prompt bytes to the child`, async () => {
+          const child = fakeChild();
+          const res = await runClaude({ ...CFG, promptDelivery: mode }, TASK, {
+            spawnImpl: () => child,
+            identityImpl: () => IDENT,
+            matchImpl: () => ({ state: IDENTITY.GONE, reason: "pid 14 no longer exists" }),
+            onSpawn: () => { throw failure; },
+            heartbeatMs: 10_000,
+            abortTermGraceMs: 30,
+            abortDeadlineMs: 900
+          });
+          expect(res.outcome).toBe(OUTCOME.HANDOFF_FAILED);
+          // Not "an empty prompt was written" - stdin was never ended at all,
+          // so the child got no task and no end-of-input to act on.
+          expect(child.stdinPayload).toBeUndefined();
+          expect(child.stdinEnded).toBe(false);
+          expect(res.handoff.child_terminated).toBe(true);
+        });
+      }
+
+      it("the gate runs to completion BEFORE a single prompt byte is written", async () => {
+        const order = [];
+        const child = fakeChild();
+        child.stdin.end = (payload) => { order.push("prompt"); child.stdinPayload = payload; };
+        await runClaude({ ...CFG, promptDelivery: mode }, TASK, {
+          spawnImpl: () => { setTimeout(() => child.emit("close", 0, null), 5); return child; },
+          identityImpl: () => IDENT,
+          onSpawn: () => { order.push("persist"); order.push("heartbeat"); },
+          onHeartbeat: () => { order.push("beat"); },
+          heartbeatMs: 10_000
+        });
+        // Persistence and heartbeat both commit first; the prompt is last.
+        expect(order.indexOf("persist")).toBeLessThan(order.indexOf("prompt"));
+        expect(order.indexOf("heartbeat")).toBeLessThan(order.indexOf("prompt"));
+        expect(order[order.length - 1]).toBe("prompt");
+      });
+    });
+  }
 });

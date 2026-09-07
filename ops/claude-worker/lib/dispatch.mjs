@@ -19,6 +19,16 @@
  * `.claude-ack-d125-merge.md` got there. The scratch directory is now stated
  * explicitly in the prompt, together with the draft discipline the child must
  * follow.
+ *
+ * D126 addendum item 4: `argv` prompt delivery is GONE. It put the complete task
+ * on the command line handed to `spawn`, so the child could read and begin the
+ * authorized task before `onSpawn` had committed its durable identity - the
+ * pre-execution gate simply did not exist for that mode, and no amount of
+ * post-hoc aborting can prove a task was not already consumed. `stdin` is now
+ * the ONLY accepted mode, because it is the only one where withholding the write
+ * genuinely withholds the task. The rejection is enforced here as well as in
+ * `config.mjs`, so a DIRECT module call cannot bypass configuration validation,
+ * and it happens BEFORE the prompt is built and before any process is created.
  */
 
 import { spawn } from "node:child_process";
@@ -34,8 +44,35 @@ export const OUTCOME = Object.freeze({
   // D126 FINAL review finding 1: the durable handoff FAILED. The child was
   // created but its identity could not be recorded durably, so it was aborted
   // rather than allowed to run untracked. This is never a success.
-  HANDOFF_FAILED: "handoff_failed"
+  HANDOFF_FAILED: "handoff_failed",
+  // D126 addendum item 4: a delivery mode without a pre-execution gate was
+  // requested. NOTHING was spawned - refusing before process creation is the
+  // whole point, because an already-running child cannot be un-told its task.
+  UNSUPPORTED_PROMPT_DELIVERY: "unsupported_prompt_delivery"
 });
+
+/**
+ * The ONLY accepted prompt-delivery mode.
+ *
+ * With `stdin` the prompt - which IS the task - is written after the durable
+ * identity record and the lock heartbeat have both committed, so a child cannot
+ * consume its task before the gate succeeds. `argv` had no such gate: the
+ * complete prompt was part of the command line passed to `spawn`, so the child
+ * could already be executing by the time the first durable write was even
+ * attempted. That mode is rejected, not merely discouraged.
+ */
+export const PROMPT_DELIVERY_STDIN = "stdin";
+export const SUPPORTED_PROMPT_DELIVERY = Object.freeze([PROMPT_DELIVERY_STDIN]);
+
+/** The single rejection message, shared by config validation and `runClaude`. */
+export function unsupportedPromptDeliveryReason(mode) {
+  return `promptDelivery must be "stdin" (got ${JSON.stringify(mode ?? null)}). `
+    + "stdin is the only mode with a real pre-execution handshake: the prompt IS the task, and it is "
+    + "written only after the child's durable identity record and the lock heartbeat have committed. "
+    + "argv delivery puts the whole task on the command line handed to the process at creation time, "
+    + "so the child can read and start executing it before the handoff gate has run, and no later abort "
+    + "can prove it did not. Refusing before any process is created.";
+}
 
 /** How long we wait for an aborted child to actually go away before escalating. */
 const ABORT_TERM_GRACE_MS = 10_000;
@@ -140,9 +177,29 @@ export function runClaude(cfg, task, {
   abortTermGraceMs = ABORT_TERM_GRACE_MS,
   abortDeadlineMs = ABORT_DEADLINE_MS
 } = {}) {
+  // ADDENDUM ITEM 4 - THE PRE-SPAWN REJECTION.
+  //
+  // This runs before `buildPrompt`, before `spawn`, and before ANY side effect.
+  // `config.mjs` rejects `argv` too, but a direct module call never goes through
+  // config loading, and that is exactly how the architect reproduced the gap.
+  // Refusing here means an unsupported mode cannot create a process at all, so
+  // there is no child that could have consumed the task, and nothing to abort.
+  if (!SUPPORTED_PROMPT_DELIVERY.includes(cfg.promptDelivery)) {
+    return Promise.resolve({
+      outcome: OUTCOME.UNSUPPORTED_PROMPT_DELIVERY,
+      error: unsupportedPromptDeliveryReason(cfg.promptDelivery),
+      childPid: null,
+      childIdentity: null,
+      spawned: false,
+      promptBuilt: false
+    });
+  }
+
   const prompt = buildPrompt(cfg, task);
   const timeoutMs = cfg.claudeTimeoutMinutes * 60_000;
-  const args = cfg.promptDelivery === "stdin" ? [...cfg.claudeArgs] : [...cfg.claudeArgs, prompt];
+  // The prompt is NEVER an argv element. The command line carries only the
+  // operator-configured flags; the task itself travels exclusively over stdin.
+  const args = [...cfg.claudeArgs];
 
   return new Promise((resolve) => {
     let child;
@@ -345,21 +402,17 @@ export function runClaude(cfg, task, {
     if (!handoffOk) {
       // THE GATE. The prompt is the task; withholding it means the child never
       // begins the work, and we abort it before it can. Nothing is delivered,
-      // nothing is left running untracked.
+      // nothing is left running untracked. Because `stdin` is now the only
+      // accepted mode, this is a complete gate for EVERY accepted delivery
+      // mode - there is no longer a path where the task is already in the
+      // child's hands by the time we get here.
       abortForFailedHandoff(handoffError);
-    } else if (cfg.promptDelivery === "stdin") {
-      // The child-start handshake: with stdin delivery the child cannot start
-      // the task until this write happens, and this write only happens once the
-      // identity record and the lock heartbeat are durable. Task execution
-      // therefore cannot begin before the handoff is committed.
-      child.stdin?.end(prompt);
     } else {
-      // `argv` delivery hands the child its prompt in the command line, so the
-      // pre-execution gate above is NOT available: the child may already have
-      // begun. The abort path still applies, but the handshake does not, and
-      // that difference is reported rather than glossed over. `stdin` is the
-      // configured default for exactly this reason.
-      child.stdin?.end();
+      // The child-start handshake. The child cannot start the task until this
+      // write happens, and this write only happens once the identity record and
+      // the lock heartbeat are durable. Task execution therefore cannot begin
+      // before the handoff is committed.
+      child.stdin?.end(prompt);
     }
   });
 }

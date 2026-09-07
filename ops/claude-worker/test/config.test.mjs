@@ -125,6 +125,25 @@ describe("blocker 7: every numeric bound is finite and checked", () => {
   it("rejects a promptDelivery it does not implement", () => {
     expect(() => loadWorkerConfig(write(baseConfig({ promptDelivery: "carrier-pigeon" })), root)).toThrow(/promptDelivery/);
   });
+
+  /**
+   * D126 addendum item 4: `argv` is no longer an accepted mode. It handed the
+   * whole task to the child on its command line at process-creation time, so
+   * there was no point at which the durable-handoff gate could withhold it.
+   */
+  it("rejects argv delivery: it has no pre-execution handshake", () => {
+    expect(() => loadWorkerConfig(write(baseConfig({ promptDelivery: "argv" })), root))
+      .toThrow(/promptDelivery must be "stdin"/);
+    expect(() => loadWorkerConfig(write(baseConfig({ promptDelivery: "argv" })), root))
+      .toThrow(/before the handoff gate has run/);
+  });
+
+  it("stdin is accepted and is also the default", () => {
+    expect(loadWorkerConfig(write(baseConfig({ promptDelivery: "stdin" })), root).promptDelivery).toBe("stdin");
+    const withoutField = baseConfig();
+    delete withoutField.promptDelivery;
+    expect(loadWorkerConfig(write(withoutField), root).promptDelivery).toBe("stdin");
+  });
 });
 
 describe("blocker 7: nothing the worker writes may land inside the repository", () => {

@@ -25,6 +25,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute, resolve, relative } from "node:path";
 import { hostname as osHostname } from "node:os";
 
+// The accepted prompt-delivery modes are defined next to the gate that enforces
+// them, so configuration and direct module calls can never drift apart.
+import {
+  PROMPT_DELIVERY_STDIN,
+  SUPPORTED_PROMPT_DELIVERY,
+  unsupportedPromptDeliveryReason
+} from "./dispatch.mjs";
+
 export const WORKER_VERSION = "2.1.0";
 
 const REQUIRED_WORKER = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "repoPath", "claudeArgs"];
@@ -178,9 +186,14 @@ export function loadWorkerConfig(configPath, root) {
     acknowledgeDangerous: raw.acknowledgeDangerousClaudeArgs === true
   });
 
-  const promptDelivery = raw.promptDelivery ?? "stdin";
-  if (!["stdin", "argv"].includes(promptDelivery)) {
-    throw new Error(`config field promptDelivery must be "stdin" or "argv" (got ${JSON.stringify(promptDelivery)})`);
+  // D126 addendum item 4: `argv` is no longer an accepted mode. It handed the
+  // complete task to the child on its command line at process-creation time, so
+  // the child could begin executing before the durable-handoff gate had run.
+  // `stdin` is the only mode where withholding the write genuinely withholds the
+  // task. The same rejection is enforced inside `runClaude` for direct calls.
+  const promptDelivery = raw.promptDelivery ?? PROMPT_DELIVERY_STDIN;
+  if (!SUPPORTED_PROMPT_DELIVERY.includes(promptDelivery)) {
+    throw new Error(`config field promptDelivery: ${unsupportedPromptDeliveryReason(promptDelivery)}`);
   }
 
   const logDir = resolveUnder(root, raw.logDir, "logs");

@@ -652,6 +652,37 @@ async function runTask(cfg, state, token, candidate, comments) {
     task_id: taskId, outcome: result.outcome, code: result.code ?? null, child_pid: result.childPid ?? null
   });
 
+  // --- ADDENDUM ITEM 4: an unsupported delivery mode never creates a child ---
+  // `loadWorkerConfig` already rejects anything but stdin, so reaching this is
+  // a programming error rather than an operator mistake. It is still handled
+  // explicitly: nothing was spawned, so there is no child to abort and no
+  // outcome to assess, and the run must park truthfully instead of falling
+  // through into a completion check for a task that was never delegated.
+  if (result.outcome === OUTCOME.UNSUPPORTED_PROMPT_DELIVERY) {
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "unsupported_prompt_delivery", child_pid: null
+    });
+    log(cfg, `BLOCKED for TASK_ID=${taskId}: ${result.error} No child process was created.`);
+    upsertTask(state, taskId, {
+      status: TASK_STATUS.BLOCKED,
+      last_outcome: result.outcome,
+      last_dispatch_finished_at: new Date().toISOString(),
+      last_failure_reason: `unsupported_prompt_delivery (${result.error})`,
+      blocked_at: new Date().toISOString(),
+      child_identity: null,
+      last_child_pid: null
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    reportStatus(cfg, {
+      taskId,
+      phase: "dispatch",
+      reason: "unsupported_prompt_delivery",
+      detail: [result.error, "Nothing was spawned and the task was not delivered to any process."]
+    });
+    return EXIT.BLOCKED;
+  }
+
   // --- FINDING 1: a failed durable handoff is never a completion -------------
   // The child was created and then aborted because we could not record it. We
   // must not fall through into the completion assessment: exit codes and

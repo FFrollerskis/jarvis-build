@@ -29,6 +29,10 @@ process.stderr.on("error", () => {});
 
 appendFileSync(join(DIR, "invocations.log"), `${new Date().toISOString()} pid=${process.pid} mode=${MODE}\n`, "utf8");
 writeFileSync(join(DIR, "child.pid"), String(process.pid), "utf8");
+// D126 addendum item 4: the command line this child was CREATED with, recorded
+// before it reads anything. It is the evidence that the task never travels in
+// argv - where the child could consume it before the handoff gate has run.
+writeFileSync(join(DIR, "argv.json"), JSON.stringify(process.argv), "utf8");
 
 const hangs = MODE === "hang" || MODE === "report-hang";
 let keepAlive = null;
