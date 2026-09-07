@@ -118,8 +118,7 @@ $action = New-ScheduledTaskAction -Execute $shellPath `
     -WorkingDirectory $here
 
 $periodic = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $atStartup = New-ScheduledTaskTrigger -AtStartup
 
 $settings = New-ScheduledTaskSettingsSet `

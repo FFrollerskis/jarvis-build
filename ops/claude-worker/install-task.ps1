@@ -121,8 +121,7 @@ $action = New-ScheduledTaskAction -Execute $shellPath `
     -WorkingDirectory $here
 
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::MaxValue)
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 
 # MultipleInstances IgnoreNew is a second line of defence behind the worker's
 # own lock: Windows will not start a second run while one is still going.
