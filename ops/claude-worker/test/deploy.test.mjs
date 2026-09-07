@@ -11,6 +11,10 @@ import {
   activateRelease,
   rollbackRelease,
   recordIntroducedTask,
+  recordTaskIntent,
+  confirmTaskIntent,
+  reconcileTaskIntents,
+  tasksToUnregister,
   assessQuiescence,
   readPendingActivation,
   latestBackupDir,
@@ -405,6 +409,104 @@ describe("blocker 4: rollback is complete and hash-enforced", () => {
   it("refuses to record an introduced task with no manifest to record against", () => {
     const res = recordIntroducedTask({ destination, taskName: "JarvisWorkerSupervisor" });
     expect(res.ok).toBe(false);
+  });
+
+  /**
+   * The remaining D126 deployment obligation: the installer used to REGISTER
+   * first and journal afterwards, warning if the journalling failed. A crash in
+   * that window left an introduced task absent from rollback history.
+   */
+  describe("durable registration intent (crash window between register and journal)", () => {
+    function installed() {
+      seedOldDeployment();
+      stage();
+      const res = activateRelease({ destination, version: "20260907-010000", taskCommandLines: [] });
+      expect(res.ok).toBe(true);
+      return res;
+    }
+
+    it("the intent is durable BEFORE registration, so a crash right after registering is still rolled back", () => {
+      const res = installed();
+      // Step 1: the installer records the intent and only THEN registers.
+      expect(recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false }).ok).toBe(true);
+      // Step 2 happens on the host. Step 3 (confirmation) never runs: crash.
+      const back = rollbackRelease({ destination, backupDir: res.backupDir });
+      expect(back.tasks_to_unregister).toEqual(["JarvisWorkerSupervisor"]);
+      expect(back.unconfirmed_task_intents.map((i) => i.task)).toEqual(["JarvisWorkerSupervisor"]);
+    });
+
+    it("an install that cannot journal its intent is refused before anything is registered", () => {
+      // No manifest at all: the installer must abort rather than register.
+      const res = recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/manifest/);
+    });
+
+    it("a REPLACED pre-existing task is never unregistered by a rollback", () => {
+      const res = installed();
+      expect(recordTaskIntent({ destination, taskName: "JarvisClaudeWorker", preExisting: true }).ok).toBe(true);
+      // Even unconfirmed, a pre-existing task is not ours to remove.
+      const back = rollbackRelease({ destination, backupDir: res.backupDir });
+      expect(back.tasks_to_unregister).toEqual([]);
+    });
+
+    it("confirmation promotes an intent to an introduced task exactly once", () => {
+      const res = installed();
+      recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      const confirmed = confirmTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", outcome: "introduced" });
+      expect(confirmed.ok).toBe(true);
+      expect(confirmed.intent.state).toBe("confirmed");
+      expect(confirmed.introduced_tasks).toEqual(["JarvisWorkerSupervisor"]);
+      const back = rollbackRelease({ destination, backupDir: res.backupDir });
+      expect(back.tasks_to_unregister).toEqual(["JarvisWorkerSupervisor"]);
+      expect(back.unconfirmed_task_intents).toEqual([]);
+    });
+
+    it("confirming without a durable intent is refused - the order can never be inverted", () => {
+      installed();
+      const res = confirmTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", outcome: "introduced" });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/BEFORE registering/);
+    });
+
+    it("reconciliation resolves a crashed intent from the HOST, not from an assumption", () => {
+      installed();
+      recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      const rec = reconcileTaskIntents({ destination, queryTask: () => ({ ok: true, exists: true }) });
+      expect(rec.ok).toBe(true);
+      expect(rec.resolved).toEqual([{ task: "JarvisWorkerSupervisor", outcome: "introduced" }]);
+      expect(rec.introduced_tasks).toEqual(["JarvisWorkerSupervisor"]);
+    });
+
+    it("a task the host says does not exist is resolved as aborted and not unregistered", () => {
+      const res = installed();
+      recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      const rec = reconcileTaskIntents({ destination, queryTask: () => ({ ok: true, exists: false }) });
+      expect(rec.resolved).toEqual([{ task: "JarvisWorkerSupervisor", outcome: "aborted" }]);
+      const back = rollbackRelease({ destination, backupDir: res.backupDir });
+      expect(back.tasks_to_unregister).toEqual([]);
+    });
+
+    it("'I could not ask the host' never resolves an intent, and rollback keeps it", () => {
+      const res = installed();
+      recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      const rec = reconcileTaskIntents({ destination, queryTask: () => ({ ok: false, error: "access denied" }) });
+      expect(rec.ok).toBe(false);
+      expect(rec.resolved).toEqual([]);
+      expect(rec.unresolved).toEqual([{ task: "JarvisWorkerSupervisor", reason: "access denied" }]);
+      const back = rollbackRelease({ destination, backupDir: res.backupDir });
+      expect(back.tasks_to_unregister).toEqual(["JarvisWorkerSupervisor"]);
+    });
+
+    it("tasksToUnregister never duplicates a task recorded by both paths", () => {
+      installed();
+      recordTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", preExisting: false });
+      confirmTaskIntent({ destination, taskName: "JarvisWorkerSupervisor", outcome: "introduced" });
+      recordIntroducedTask({ destination, taskName: "JarvisWorkerSupervisor" });
+      const manifestPath = join(latestBackupDir(destination), "install-manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      expect(tasksToUnregister(manifest)).toEqual(["JarvisWorkerSupervisor"]);
+    });
   });
 
   it("a first-time install rolls back to an empty destination", () => {

@@ -13,6 +13,10 @@
  *   apply-pending --destination <dir>               activate a deferred handoff, if quiescent
  *   rollback --destination <dir> [--backup-dir <d>] restore, enforcing manifest old hashes
  *   status   --destination <dir>                    what is deployed / staged / pending
+ *   record-task-intent      --destination <dir> --task <n> [--pre-existing]
+ *                                                   DURABLE intent, written BEFORE registering
+ *   confirm-task-intent     --destination <dir> --task <n> --outcome <introduced|replaced|aborted>
+ *   reconcile-task-intents  --destination <dir>     resolve crash-window intents from the host
  *
  * Nothing here registers, starts or stops a scheduled task. That stays in
  * install-task.ps1 / install-supervisor.ps1, so file deployment and schedule
@@ -32,6 +36,9 @@ import {
   activateRelease,
   rollbackRelease,
   recordIntroducedTask,
+  recordTaskIntent,
+  confirmTaskIntent,
+  reconcileTaskIntents,
   latestBackupDir,
   assessQuiescence,
   readPendingActivation,
@@ -172,6 +179,27 @@ async function main() {
     return out({ subcommand: sub, ...result }, result.ok ? EXIT.OK : (result.deferred ? EXIT.DEFERRED : EXIT.FAILED));
   }
 
+  if (sub === "record-task-intent" || sub === "confirm-task-intent") {
+    const taskName = String(args.task ?? "");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(taskName)) {
+      return out({ subcommand: sub, error: "--task must be a plain scheduled task name" }, EXIT.FAILED);
+    }
+    const backupDir = args["backup-dir"] ? resolve(String(args["backup-dir"])) : null;
+    const result = sub === "record-task-intent"
+      ? recordTaskIntent({ destination, taskName, preExisting: args["pre-existing"] === true || args["pre-existing"] === "true", backupDir })
+      : confirmTaskIntent({ destination, taskName, outcome: String(args.outcome ?? ""), backupDir });
+    return out({ subcommand: sub, task: taskName, ...result }, result.ok ? EXIT.OK : EXIT.FAILED);
+  }
+
+  if (sub === "reconcile-task-intents") {
+    const result = reconcileTaskIntents({
+      destination,
+      backupDir: args["backup-dir"] ? resolve(String(args["backup-dir"])) : null,
+      queryTask: process.platform === "win32" ? (name) => queryTaskExistsSync(name) : () => ({ ok: false, error: "task query is only available on Windows" })
+    });
+    return out({ subcommand: sub, ...result }, result.ok ? EXIT.OK : EXIT.FAILED);
+  }
+
   if (sub === "record-introduced-task") {
     const taskName = String(args.task ?? "");
     if (!/^[A-Za-z0-9._-]{1,64}$/.test(taskName)) {
@@ -219,12 +247,31 @@ function exportTaskXmlSync(taskName) {
   }
 }
 
+/**
+ * Does the host actually have this task registered right now?
+ *
+ * `{ ok: false }` means "I could not ask", which `reconcileTaskIntents` must
+ * never read as "the task does not exist".
+ */
+let cachedGetTask = null;
+function queryTaskExistsSync(taskName) {
+  if (!cachedGetTask) return { ok: false, error: "the Windows task query is unavailable in this process" };
+  try {
+    const info = cachedGetTask(taskName);
+    if (info.query_failed) return { ok: false, error: info.error ?? "the scheduled task could not be queried" };
+    return { ok: true, exists: info.exists === true };
+  } catch (err) {
+    return { ok: false, error: String(err.message ?? err).slice(0, 300) };
+  }
+}
+
 async function bootstrap() {
   if (process.platform === "win32") {
     try {
-      ({ ps: cachedPs } = await import("./lib/wintask.mjs"));
+      ({ ps: cachedPs, getScheduledTask: cachedGetTask } = await import("./lib/wintask.mjs"));
     } catch {
       cachedPs = null;
+      cachedGetTask = null;
     }
   }
   return main();

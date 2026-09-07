@@ -157,6 +157,34 @@ This script does not change permissions to work around a denial. Required host a
 }
 try { Unregister-ScheduledTask -TaskName $probeName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
 
+# --- 1b. DURABLE INTENT, before any registration is attempted. ------------
+# The reviewed order was register-then-journal-and-only-warn: a crash or a
+# denied write in that window left a task on the host that no rollback history
+# knew about. The intent is now written FIRST and the install ABORTS if it
+# cannot be written, so rollback always knows a task may exist.
+$deploy = Join-Path $here "deploy.mjs"
+$intentRecorded = $false
+if (Test-Path -LiteralPath $deploy) {
+    $preExistingArgs = @("record-task-intent", "--destination", $here, "--task", $TaskName)
+    if ($null -ne $existing) { $preExistingArgs += "--pre-existing" }
+    & node $deploy @preExistingArgs | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error @"
+Could not durably record the intent to register '$TaskName' in the install manifest.
+NOTHING has been registered. Registering without a durable intent would risk leaving a
+scheduled task on this host that a rollback cannot find and unregister.
+
+Fix the install manifest (run deploy.mjs stage/activate first, or pass an existing
+--backup-dir), then re-run this script.
+"@
+        exit 1
+    }
+    $intentRecorded = $true
+} else {
+    Write-Error "deploy.mjs is missing next to this script, so the registration intent cannot be journalled. Refusing to register '$TaskName'."
+    exit 1
+}
+
 # --- 2. replace the real task. -Force REPLACES: the old task is never
 #        unregistered first, so there is no window with no task. -----------
 try {
@@ -183,15 +211,19 @@ if ($null -eq $verify -or $verifyExecute -ne $shellPath) {
     exit 1
 }
 
-# If this registration INTRODUCED the task, record it so a rollback can
-# unregister it again rather than leaving a new schedule against restored code.
-if ($null -eq $existing) {
-    $deploy = Join-Path $here "deploy.mjs"
-    if (Test-Path -LiteralPath $deploy) {
-        & node $deploy record-introduced-task --destination $here --task $TaskName | Out-Host
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Could not record '$TaskName' as an introduced task. A rollback will NOT unregister it automatically; do that by hand with uninstall-task.ps1."
-        }
+# --- 4. CONFIRM the durable intent with the observed outcome. This step is
+#        allowed to fail: the intent from step 1b already guarantees that a
+#        rollback treats an unconfirmed, not-pre-existing task as introduced.
+if ($intentRecorded) {
+    $outcome = if ($null -eq $existing) { "introduced" } else { "replaced" }
+    & node $deploy confirm-task-intent --destination $here --task $TaskName --outcome $outcome | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning @"
+'$TaskName' is registered, but the outcome could not be confirmed in the install manifest.
+This is SAFE but unresolved: the durable intent is still recorded, so a rollback will still
+attempt to unregister '$TaskName'. Run 'node deploy.mjs reconcile-task-intents --destination
+$here' to resolve it from the host's own answer.
+"@
     }
 }
 

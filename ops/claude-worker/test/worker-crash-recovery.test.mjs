@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 import { loadState, saveStateAtomic, defaultState, TASK_STATUS } from "../lib/state.mjs";
-import { readLock } from "../lib/lock.mjs";
+import { readLock, ledgerDir } from "../lib/lock.mjs";
 import { isProcessAlive, captureIdentity } from "../lib/procid.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -191,7 +191,9 @@ describe("baseline: the entrypoint completes a task on real evidence", () => {
     const t = task();
     expect(t.status).toBe(TASK_STATUS.COMPLETED);
     expect(t.report_comment_id).toBeTruthy();
-    expect(existsSync(join(workerRoot, ".worker.lock"))).toBe(false);
+    // The lock is an append-only claim ledger: "released" is what the highest
+    // claim says, not the absence of a path.
+    expect(readLock(join(workerRoot, ".worker.lock"))).toBeNull();
   }, 60_000);
 
   it("records the child's identity at spawn, not after the run", async () => {
@@ -224,12 +226,13 @@ describe("baseline: the entrypoint completes a task on real evidence", () => {
 describe("blocker 1: crash BEFORE spawn", () => {
   it("a kill during the queue poll leaves no stall: the next run dispatches normally", async () => {
     const handle = startWorker("report", { JARVIS_FAKE_GH_DELAY_MS: "4000" });
-    await waitFor(() => existsSync(join(workerRoot, ".worker.lock")));
+    await waitFor(() => readLock(join(workerRoot, ".worker.lock")) !== null);
     handle.child.kill("SIGKILL");
     await handle.exited;
 
-    // A crashed parent leaves its lock behind. It must not block the next run.
-    expect(existsSync(join(workerRoot, ".worker.lock"))).toBe(true);
+    // A crashed parent leaves its claim behind, still marked held. It must not
+    // block the next run - and the next run must SUPERSEDE it, never delete it.
+    expect(readLock(join(workerRoot, ".worker.lock")).state).toBe("held");
     expect(invocations()).toHaveLength(0);
 
     const res = await runWorker("report");
@@ -448,7 +451,7 @@ describe("blocker 2: state writes and the lock", () => {
     child.stdout.on("data", (d) => { out += d; });
     await new Promise((resolve) => child.on("close", resolve));
     expect(out).toMatch(/"took_lock": false/);
-    expect(existsSync(join(workerRoot, ".worker.lock"))).toBe(false);
+    expect(existsSync(ledgerDir(join(workerRoot, ".worker.lock")))).toBe(false);
     expect(existsSync(join(workerRoot, "state.json"))).toBe(before);
     expect(invocations()).toHaveLength(0);
   }, 60_000);

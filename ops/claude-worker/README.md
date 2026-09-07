@@ -42,6 +42,71 @@ enkelt har nå en test som feiler på den gamle implementasjonen:
 | 6 | Hele TASK_ID-sluggen finnes ikke i faktiske branch-navn, så `existingBranch`/`PR` ble `null` selv når PR-en fantes — og en retry ville duplisert branch/PR/merge. Feilede GitHub-oppslag ble til tomme lister. | `KNOWN_D125_BRANCH=null KNOWN_PR=null` | `lib/reconcile.mjs` (eksakte assosiasjoner), `lib/github.mjs` (`{ok, items, error}`, paginering) |
 | 7 | `gitStatusLines` ignorerte exit/feil og leste manglende stdout som «rent». `claudeArgs` defaultet til `--dangerously-skip-permissions`. Ingen grensesjekk, ingen path-containment, ingen TASK_ID-validering før bruk som katalognavn, ingen ekte vertsbinding. `TEMP` hindrer ikke relative kladdefiler. | — | `lib/git.mjs`, `lib/config.mjs`, `lib/state.mjs` (`isValidTaskId`), `lib/dispatch.mjs` (scratch-disiplin i prompten) |
 
+## Runde 3 (v2.2) - låsen er ikke lenger «reclaim», men en append-only hevdelses-hovedbok
+
+Arkitektens review av den faktiske v2-koden (issue #68, kommentar 5565113307)
+bekreftet en KILDEDEFEKT, ikke en flaky test: `removeVerified` flyttet den
+NÅVÆRENDE låsen til en tombstone FØR bytene ble sammenlignet med det
+klassifiserte øyeblikksbildet. rename-så-sammenlign er ikke en atomisk
+compare-and-delete; i vinduet er den offentlige stien tom, en utfordrer kan
+publisere og tro at den eier den kritiske seksjonen, og gjenopprettingen feiler
+med `EEXIST`. Heartbeatens check-then-rename hadde samme klasse feil.
+
+Reprodusert på nøyaktig efa62d7-modulen (ett tillagt observasjonspunkt rett
+etter `renameSync`, ingen endret beslutning):
+
+```
+v2: existingOwnerAcquired=true challengerAcquired=true
+    reclaimResult=lock_changed_during_reclaim
+    existingOwnerStillHolds=false challengerStillHolds=true
+v3: existingOwnerAcquired=true challengerAcquired=false
+    reclaimResult=active
+    existingOwnerStillHolds=true  challengerStillHolds=false
+```
+
+**Serialiseringsprimitivet i v3 er CREATE-IF-ABSENT** (`link()` / `open(wx)`) -
+den eneste ekte enkeltvinner-operasjonen filsystemet tilbyr. Låsen er en
+append-only hovedbok `<lockFile>.d/` med `<generasjon>.claim`-filer:
+
+- **eierskap** = «jeg opprettet den høyeste claim-filen, og innholdet er
+  fortsatt mitt og fortsatt `held`»;
+- **anskaffelse** = append `maks+1` med create-if-absent; taperen får `EEXIST`
+  fra kjernen, ikke fra en byte-sammenligning;
+- **reclaim finnes ikke** - en foreldet claim BLIR ERSTATTET av en høyere
+  generasjon; den flyttes, tømmes eller slettes aldri;
+- **release** = merk MIN EGEN claim `released` (atomisk rename over egen sti).
+
+Ufravikelig invariant: *ingen prosess omdøper, overskriver, trunkerer eller
+sletter en sti den ikke selv opprettet med create-if-absent.* Derfor kan en
+levende eiers hevdelse aldri forsvinne fra den offentlige stien - ikke engang i
+et mikrosekund - og en foreldet reclaimer sitt verste utfall er at den legger
+til en generasjon som allerede er forbigått, oppdager at den ikke er maksimum og
+trekker tilbake KUN sin egen fil.
+
+Feil-/gjenopprettingssemantikk: en krasjet eier etterlater sin claim som
+maksimum med `state: "held"`; neste anskaffer klassifiserer den på
+prosessidentitet (pid + starttid + host) og heartbeat-alder og kan bare
+erstatte den når den beviselig ikke lever. `active`, `foreign_host`,
+`unproven_identity` og `stale_no_heartbeat` erstattes ALDRI automatisk. Ukjent
+identitet, uleselig claim eller enhver filsystemfeil er fail-closed. En uleselig
+claim slettes aldri - etter et grace-vindu blir den bare forbigått, så korrupsjon
+kan heller ikke låse workeren ute permanent. En pre-v3 vanlig låsefil respekteres
+(vi nekter mens den ser levende ut) men skrives, flyttes eller slettes aldri.
+
+Testharnessen ble også avvist med rette: veggklokke-barriere og telling av
+`acquired=true` beviser ikke overlappende eierskap. `test/fixtures/lock-racer.mjs`
+kjører nå en eksplisitt READY -> START -> ATTEMPT -> RELEASE-protokoll, og
+`test/lock.test.mjs` dømmer ut fra INTERVALLER for den kritiske seksjonen: ingen
+to intervaller får overlappe. Alle forventede barn må returnere en resultatfil og
+avslutte med exit 0; ingenting filtreres bort.
+
+I tillegg lukkes den gjenstående deployment-forpliktelsen: `install-task.ps1` og
+`install-supervisor.ps1` skriver nå en DURABEL INTENSJON i install-manifestet FØR
+noen registrering forsøkes, og AVBRYTER installasjonen hvis den ikke kan skrives.
+Bekreftelsen skjer etterpå og har lov til å feile; `reconcile-task-intents` løser
+et krasj-vindu fra vertens eget svar, og rollback avregistrerer også ubekreftede
+intensjoner for oppgaver som ikke fantes fra før.
+
 ## Hva som faktisk garanteres
 
 Worker (`worker.mjs`):
@@ -226,13 +291,18 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-282 tester. I tillegg til v2-dekningen (karantene inkludert den eksakte
-D125-filen, symlink, reparse point, kollisjon, sporede filer; completion-bevis;
-backoff; status-dedup; tillitsgrensen; hemmelighetsvask) dekker v2.1:
+304 tester (kjørt 2026-09-07 på denne branchen: 14 filer / 304 passed). I tillegg
+til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
+point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
+tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
 
-- **ekte samtidighet**: åtte separate OS-prosesser som kolliderer mot samme lås
-  (`test/fixtures/lock-racer.mjs`), inkludert at en tom lås ikke stjeles og at en
-  levende heartbeat-eier aldri fortrenges;
+- **ekte samtidighet med intervall-bevis**: åtte separate OS-prosesser med
+  eksplisitt READY/START/ATTEMPT/RELEASE-koordinering (`test/fixtures/lock-racer.mjs`);
+  gjensidig utelukkelse avgjøres av at ingen to kritiske seksjoner overlapper,
+  ikke av en telling. Alle barn må levere resultatfil og avslutte med exit 0;
+- **den bekreftede kildedefekten**: kontrollert stale-read -> erstatningseier ->
+  forsinket reclaim -> utfordrer, deterministisk via `hooks.afterClassify`
+  (nøyaktig punktet v2 var utrygt);
 - **ekte crash-recovery mot det FAKTISKE entrypointet**: `node worker.mjs run`
   startes som prosess og drepes før spawn, under barnets kjøring og etter
   report men før completion-lagring (`test/worker-crash-recovery.test.mjs`);

@@ -420,7 +420,11 @@ export function activateRelease({
     backed_up_tasks: backedUpTasks,
     // Tasks this install introduces are recorded so a rollback can remove them
     // again instead of leaving a new schedule running against old code.
-    introduced_tasks: []
+    introduced_tasks: [],
+    // Durable INTENT records, written BEFORE any registration is attempted, so a
+    // crash between "register" and "journal" can never hide a task from
+    // rollback. See recordTaskIntent / reconcileTaskIntents.
+    task_intents: []
   };
   const manifestPath = join(backupDir, "install-manifest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
@@ -550,7 +554,10 @@ export function rollbackRelease({ destination, backupDir, reason = "manual rollb
     restored,
     removed_introduced_files: removed,
     // The caller unregisters these; this module never touches Task Scheduler.
-    tasks_to_unregister: manifest.introduced_tasks ?? [],
+    // Unconfirmed intents are included: a task that was never created is
+    // harmless to unregister, one left behind is not.
+    tasks_to_unregister: tasksToUnregister(manifest),
+    unconfirmed_task_intents: (manifest.task_intents ?? []).filter((i) => i.state === "intended"),
     tasks_to_reimport: manifest.backed_up_tasks ?? [],
     failures
   };
@@ -575,8 +582,152 @@ export function recordIntroducedTask({ destination, taskName, backupDir = null }
   if (tasks.has(taskName)) return { ok: true, alreadyRecorded: true, manifestPath };
   tasks.add(taskName);
   manifest.introduced_tasks = [...tasks];
-  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+  writeManifest(manifestPath, manifest);
   return { ok: true, alreadyRecorded: false, manifestPath, introduced_tasks: manifest.introduced_tasks };
+}
+
+/** ---------------- durable task-registration intent ---------------- */
+
+/**
+ * The D126 review's remaining deployment obligation.
+ *
+ * The old order was: register the task, THEN journal it, and only WARN if the
+ * journalling failed. A crash - or a denied write - in that window left a task
+ * registered on the host that no rollback history knew about, so a rollback
+ * restored the old files and left a brand-new schedule pointing at them.
+ *
+ * The order is now INTENT -> EFFECT -> CONFIRMATION:
+ *
+ *   1. `recordTaskIntent` writes a durable `intended` record BEFORE anything is
+ *      registered, and FAILS the install if it cannot be written. Nothing is
+ *      registered unless the rollback history already knows it might be.
+ *   2. The installer registers the task.
+ *   3. `confirmTaskIntent` records the observed outcome. This step is allowed to
+ *      fail, because step 1 already made the rollback safe.
+ *   4. `reconcileTaskIntents` resolves any intent still in `intended` from the
+ *      HOST's actual answer, so a crash in the window is repaired from evidence
+ *      rather than assumed either way.
+ *
+ * `rollbackRelease` treats an unconfirmed intent for a task that did NOT exist
+ * before as something to unregister: unregistering a task that was never
+ * created is harmless, leaving one behind is not.
+ */
+export function recordTaskIntent({ destination, taskName, preExisting, backupDir = null, now = () => new Date() }) {
+  const dir = backupDir ?? latestBackupDir(destination);
+  if (!dir) return { ok: false, error: "no install manifest to record the intent against" };
+  const manifestPath = join(dir, "install-manifest.json");
+  if (!existsSync(manifestPath)) return { ok: false, error: `no install-manifest.json in ${dir}` };
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  } catch (err) {
+    return { ok: false, error: `install-manifest.json in ${dir} is unreadable: ${err.message}` };
+  }
+  const intents = manifest.task_intents ?? [];
+  const existing = intents.find((i) => i.task === taskName);
+  const record = {
+    task: taskName,
+    pre_existing: preExisting === true,
+    state: "intended",
+    intended_at_utc: now().toISOString(),
+    confirmed_at_utc: null,
+    outcome: null
+  };
+  if (existing) Object.assign(existing, record);
+  else intents.push(record);
+  manifest.task_intents = intents;
+  try {
+    writeManifest(manifestPath, manifest);
+  } catch (err) {
+    return { ok: false, error: `could not durably record the intent: ${err.message}` };
+  }
+  return { ok: true, manifestPath, intent: record };
+}
+
+/** Record the observed outcome of a registration whose intent is already durable. */
+export function confirmTaskIntent({ destination, taskName, outcome, backupDir = null, now = () => new Date() }) {
+  const dir = backupDir ?? latestBackupDir(destination);
+  if (!dir) return { ok: false, error: "no install manifest to confirm against" };
+  const manifestPath = join(dir, "install-manifest.json");
+  if (!existsSync(manifestPath)) return { ok: false, error: `no install-manifest.json in ${dir}` };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const intents = manifest.task_intents ?? [];
+  const record = intents.find((i) => i.task === taskName);
+  if (!record) return { ok: false, error: `no durable intent for '${taskName}'; the installer must record one BEFORE registering` };
+  if (!["introduced", "replaced", "aborted"].includes(outcome)) {
+    return { ok: false, error: `unknown outcome '${outcome}'` };
+  }
+  record.state = "confirmed";
+  record.outcome = outcome;
+  record.confirmed_at_utc = now().toISOString();
+  if (outcome === "introduced") {
+    const tasks = new Set(manifest.introduced_tasks ?? []);
+    tasks.add(taskName);
+    manifest.introduced_tasks = [...tasks];
+  }
+  manifest.task_intents = intents;
+  writeManifest(manifestPath, manifest);
+  return { ok: true, manifestPath, intent: record, introduced_tasks: manifest.introduced_tasks ?? [] };
+}
+
+/**
+ * Resolve intents left in `intended` by a crash, from the host's own answer.
+ *
+ * `queryTask(name)` must return `{ ok, exists }`. "I could not ask" is never
+ * read as "the task does not exist": an unanswerable intent stays unresolved
+ * and is reported, and rollback keeps treating it as possibly-introduced.
+ */
+export function reconcileTaskIntents({ destination, backupDir = null, queryTask, now = () => new Date() }) {
+  const dir = backupDir ?? latestBackupDir(destination);
+  if (!dir) return { ok: false, error: "no install manifest to reconcile" };
+  const manifestPath = join(dir, "install-manifest.json");
+  if (!existsSync(manifestPath)) return { ok: false, error: `no install-manifest.json in ${dir}` };
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const intents = manifest.task_intents ?? [];
+  const resolved = [];
+  const unresolved = [];
+  for (const record of intents) {
+    if (record.state !== "intended") continue;
+    const answer = typeof queryTask === "function" ? queryTask(record.task) : { ok: false, error: "no host query available" };
+    if (!answer?.ok) {
+      unresolved.push({ task: record.task, reason: answer?.error ?? "the host could not be queried" });
+      continue;
+    }
+    record.state = "confirmed";
+    record.confirmed_at_utc = now().toISOString();
+    record.outcome = answer.exists ? (record.pre_existing ? "replaced" : "introduced") : "aborted";
+    record.reconciled_from = "host_query";
+    if (record.outcome === "introduced") {
+      const tasks = new Set(manifest.introduced_tasks ?? []);
+      tasks.add(record.task);
+      manifest.introduced_tasks = [...tasks];
+    }
+    resolved.push({ task: record.task, outcome: record.outcome });
+  }
+  manifest.task_intents = intents;
+  writeManifest(manifestPath, manifest);
+  return { ok: unresolved.length === 0, manifestPath, resolved, unresolved, introduced_tasks: manifest.introduced_tasks ?? [] };
+}
+
+/**
+ * Tasks a rollback must attempt to unregister: everything confirmed as
+ * introduced, PLUS every intent that is still unconfirmed for a task that did
+ * not exist before the install. The second group is the crash window.
+ */
+export function tasksToUnregister(manifest) {
+  const tasks = new Set(manifest.introduced_tasks ?? []);
+  for (const record of manifest.task_intents ?? []) {
+    if (record.pre_existing) continue;
+    if (record.state === "intended") tasks.add(record.task);
+    if (record.state === "confirmed" && record.outcome === "introduced") tasks.add(record.task);
+  }
+  return [...tasks];
+}
+
+/** Manifest writes are durable: a rollback history that was not flushed is not history. */
+function writeManifest(manifestPath, manifest) {
+  const tmp = writeDurable(manifestPath, JSON.stringify(manifest, null, 2));
+  renameSync(tmp, manifestPath);
 }
 
 /** Most recent backup directory, used by `rollback.ps1` with no explicit -BackupDir. */

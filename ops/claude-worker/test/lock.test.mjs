@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync, statSync, readdirSync } from "node:fs";
-import { tmpdir, hostname } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, mkdirSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { hostname } from "node:os";
 
 import {
   classifyLock,
@@ -14,13 +15,17 @@ import {
   readLockRaw,
   holdsLock,
   publishExclusive,
-  removeVerified,
+  scanLedger,
+  ledgerDir,
+  collectLedgerGarbage,
+  heldGeneration,
+  readProcessStartTime,
+  DEFAULT_HEARTBEAT_TIMEOUT_MS,
   MALFORMED_LOCK_GRACE_MS,
-  DEFAULT_HEARTBEAT_TIMEOUT_MS
+  LOCK_VERSION
 } from "../lib/lock.mjs";
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const RACER = join(HERE, "fixtures", "lock-racer.mjs");
+const RACER = fileURLToPath(new URL("./fixtures/lock-racer.mjs", import.meta.url));
 
 let dir;
 let lockFile;
@@ -36,245 +41,610 @@ afterEach(() => {
 
 const NOW = Date.parse("2026-09-07T02:00:00.000Z");
 
-function lockInfo(overrides = {}) {
+function lockInfo(over = {}) {
   return {
-    lock_version: 2,
+    lock_version: LOCK_VERSION,
+    generation: 1,
+    state: "held",
     pid: 4242,
     host: hostname(),
     start_time: "2026-09-07T01:00:00.0000000Z",
     started_at: new Date(NOW - 60_000).toISOString(),
-    heartbeat_at: new Date(NOW - 10_000).toISOString(),
-    task_id: "T",
+    heartbeat_at: new Date(NOW - 60_000).toISOString(),
+    task_id: "T-1",
     phase: "dispatch",
     owner_token: "token-1",
-    ...overrides
+    ...over
   };
 }
 
-describe("classification binds to process identity, not to a pid", () => {
-  it("a live, heartbeating owner is active however long it has been running", () => {
-    const info = lockInfo({ started_at: new Date(NOW - 50 * 60_000).toISOString() });
+/**
+ * Like `lockInfo`, but with timestamps relative to the real clock so that
+ * anything seeded onto disk is judged against `Date.now()`, not against the
+ * frozen NOW used by the pure classification tests.
+ */
+function freshInfo(over = {}) {
+  const now = Date.now();
+  return lockInfo({
+    started_at: new Date(now - 1000).toISOString(),
+    heartbeat_at: new Date(now - 1000).toISOString(),
+    ...over
+  });
+}
+
+/** Write a claim straight into the ledger, the way a previous run would have left it. */
+function seedClaim(generation, over = {}, { ageMs = 0 } = {}) {
+  const d = ledgerDir(lockFile);
+  mkdirSync(d, { recursive: true });
+  const path = join(d, `${String(generation).padStart(12, "0")}.claim`);
+  const raw = typeof over === "string"
+    ? over
+    : JSON.stringify(freshInfo({ generation, ...over }), null, 2);
+  writeFileSync(path, raw, "utf8");
+  if (ageMs > 0) {
+    const t = (Date.now() - ageMs) / 1000;
+    utimesSync(path, t, t);
+  }
+  return path;
+}
+
+function claimFiles() {
+  const d = ledgerDir(lockFile);
+  if (!existsSync(d)) return [];
+  return readdirSync(d).filter((n) => /^\d{12}\.claim$/.test(n)).sort();
+}
+
+/** ---------------- classification (pure) ---------------- */
+
+describe("classifyLock", () => {
+  it("an alive owner with a matching start time is active", () => {
+    const info = lockInfo();
     const verdict = classifyLock(info, { nowMs: NOW, alive: () => true, startTime: () => info.start_time });
     expect(verdict.state).toBe("active");
   });
 
-  it("a reused pid is never mistaken for our worker", () => {
+  it("a reused pid is stale, not active", () => {
     const info = lockInfo();
     const verdict = classifyLock(info, { nowMs: NOW, alive: () => true, startTime: () => "2026-09-07T01:59:00.0000000Z" });
     expect(verdict.state).toBe("stale_reused_pid");
   });
 
-  it("a dead owner is detected immediately, without an age budget", () => {
-    const verdict = classifyLock(lockInfo(), { nowMs: NOW, alive: () => false });
-    expect(verdict.state).toBe("stale_dead");
+  it("a dead owner is stale_dead", () => {
+    expect(classifyLock(lockInfo(), { nowMs: NOW, alive: () => false }).state).toBe("stale_dead");
   });
 
-  it("an unreadable start time is UNPROVEN, never assumed dead or alive", () => {
-    const verdict = classifyLock(lockInfo(), { nowMs: NOW, alive: () => true, startTime: () => null });
-    expect(verdict.state).toBe("unproven_identity");
+  it("an unreadable start time is unproven_identity, never a guess", () => {
+    expect(classifyLock(lockInfo(), { nowMs: NOW, alive: () => true, startTime: () => null }).state)
+      .toBe("unproven_identity");
   });
 
-  it("a foreign host is never touched", () => {
-    const verdict = classifyLock(lockInfo({ host: "OTHER-MACHINE" }), { nowMs: NOW, alive: () => true });
-    expect(verdict.state).toBe("foreign_host");
+  it("a lock from another host is never touched", () => {
+    expect(classifyLock(lockInfo({ host: "OTHER-MACHINE" }), { nowMs: NOW, alive: () => true }).state)
+      .toBe("foreign_host");
   });
 
-  it("a lock without a host binding cannot be reasoned about and is malformed", () => {
-    const verdict = classifyLock(lockInfo({ host: undefined }), { nowMs: NOW, alive: () => true });
-    expect(verdict.state).toBe("malformed");
+  it("a lock without a host binding is malformed", () => {
+    expect(classifyLock(lockInfo({ host: undefined }), { nowMs: NOW, alive: () => true }).state).toBe("malformed");
   });
 
-  it("an alive owner past the heartbeat budget needs attention, not a silent kill", () => {
+  it("an alive owner past the heartbeat budget is stale_no_heartbeat", () => {
     const info = lockInfo({ heartbeat_at: new Date(NOW - DEFAULT_HEARTBEAT_TIMEOUT_MS - 60_000).toISOString() });
     const verdict = classifyLock(info, { nowMs: NOW, alive: () => true, startTime: () => info.start_time });
     expect(verdict.state).toBe("stale_no_heartbeat");
   });
-});
 
-/**
- * D126 review blocker 2, architect reproduction: EMPTY_LOCK_RECLAIMED=true.
- *
- * "acquireLock publishes an EMPTY wx file, closes fd then writes JSON.
- *  Empty/malformed locks are immediately unlinked."
- */
-describe("blocker 2: a freshly unreadable lock is NOT stolen", () => {
-  it("refuses to reclaim an empty lock inside the publication grace window", () => {
-    writeFileSync(lockFile, "", "utf8"); // exactly what a mid-publication lock looks like
-    const res = acquireLock(lockFile, { nowMs: Date.now() });
-    expect(res.acquired).toBe(false);
-    expect(res.verdict.state).toBe("publishing");
-    expect(readFileSync(lockFile, "utf8")).toBe(""); // untouched
-  });
-
-  it("refuses to reclaim a half-written JSON lock inside the grace window", () => {
-    writeFileSync(lockFile, '{"pid": 12', "utf8");
-    const res = acquireLock(lockFile, { nowMs: Date.now() });
-    expect(res.acquired).toBe(false);
-    expect(res.verdict.state).toBe("publishing");
-    expect(existsSync(lockFile)).toBe(true);
-  });
-
-  it("does reclaim an unreadable lock once it is demonstrably old", () => {
-    writeFileSync(lockFile, "", "utf8");
-    const old = (Date.now() - MALFORMED_LOCK_GRACE_MS - 60_000) / 1000;
-    utimesSync(lockFile, old, old);
-    const res = acquireLock(lockFile, { nowMs: Date.now() });
-    expect(res.acquired).toBe(true);
-    expect(JSON.parse(readFileSync(lockFile, "utf8")).pid).toBe(process.pid);
+  it("an explicitly released claim is free, not owned", () => {
+    expect(classifyLock(lockInfo({ state: "released" }), { nowMs: NOW, alive: () => true }).state).toBe("released");
   });
 });
 
-describe("blocker 2: publication is atomic - the lock is never observable empty", () => {
+/** ---------------- the serialization primitive ---------------- */
+
+describe("create-if-absent is the only mutation primitive", () => {
   it("publishExclusive writes complete content or nothing at all", () => {
+    const target = join(dir, "x.claim");
     const payload = JSON.stringify(lockInfo(), null, 2);
-    const first = publishExclusive(lockFile, payload);
-    expect(first.ok).toBe(true);
-    expect(readFileSync(lockFile, "utf8")).toBe(payload);
+    expect(publishExclusive(target, payload).ok).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe(payload);
 
-    const second = publishExclusive(lockFile, JSON.stringify({ pid: 1 }));
+    const second = publishExclusive(target, JSON.stringify({ pid: 1 }));
     expect(second.ok).toBe(false);
     expect(second.code).toBe("EEXIST");
-    // The loser must not have disturbed the winner's bytes.
-    expect(readFileSync(lockFile, "utf8")).toBe(payload);
+    expect(readFileSync(target, "utf8")).toBe(payload); // the loser changed nothing
   });
 
-  it("leaves no staging files behind", () => {
-    publishExclusive(lockFile, JSON.stringify(lockInfo()));
-    const leftovers = readdirSync(dir).filter((f) => f.includes(".staging-"));
-    expect(leftovers).toEqual([]);
+  it("publishExclusive leaves no staging files behind", () => {
+    publishExclusive(join(dir, "y.claim"), "content");
+    expect(readdirSync(dir).filter((n) => n.endsWith(".tmp"))).toHaveLength(0);
   });
 
-  it("a heartbeat is published atomically and the file always parses", () => {
+  it("acquiring appends a generation and never removes the one it superseded", () => {
+    seedClaim(1, { pid: 999999, start_time: null }, { ageMs: 3600_000 });
+    const res = acquireLock(lockFile, { nowMs: Date.now(), alive: () => false });
+    expect(res.acquired).toBe(true);
+    expect(res.generation).toBe(2);
+    expect(claimFiles()).toEqual(["000000000001.claim", "000000000002.claim"]);
+    expect(JSON.parse(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).pid).toBe(999999);
+  });
+
+  it("release marks our own claim released instead of unlinking it", () => {
+    const res = acquireLock(lockFile);
+    expect(releaseLock(lockFile, res.token)).toBe(true);
+    expect(claimFiles()).toEqual(["000000000001.claim"]);
+    expect(readLock(lockFile)).toBeNull();
+    const next = acquireLock(lockFile);
+    expect(next.generation).toBe(2); // generations never go backwards
+    releaseLock(lockFile, next.token);
+  });
+});
+
+/** ---------------- the confirmed source defect ---------------- */
+
+describe("a stale reclaimer cannot displace a live owner (architect repro 5565113307)", () => {
+  /**
+   * The exact schedule the architect ran against v2:
+   *   A classifies the current lock as stale and stalls at that point;
+   *   B publishes a fresh lock and is genuinely live;
+   *   A resumes and performs its mutation;
+   *   C then tries to acquire.
+   * On v2 this produced challengerStillHolds=true with B displaced. Here A's
+   * mutation is a create-if-absent on a generation B already took, so A cannot
+   * touch B at all.
+   */
+  /**
+   * Realistic probes: only THIS process is alive, so the seeded dead pid is
+   * genuinely dead while a claim taken by this test process is genuinely live.
+   */
+  const PROBE = { alive: (pid) => pid === process.pid, startTime: (pid) => readProcessStartTime(pid) };
+
+  it("A stalls after classification, B takes over, A's resumed mutation fails and B keeps the lock", () => {
+    seedClaim(1, { pid: 999999, start_time: null }, { ageMs: 3600_000 });
+
+    let bToken = null;
+    let bGeneration = null;
+
+    // A: classify -> STALL (this is where v2 renamed the live lock away) -> mutate.
+    const aResult = acquireLock(lockFile, {
+      ...PROBE,
+      hooks: {
+        afterClassify: () => {
+          if (bToken) return;
+          const b = acquireLock(lockFile, { ...PROBE, phase: "replacement-owner" });
+          bToken = b.token;
+          bGeneration = b.generation;
+        }
+      }
+    });
+
+    // B is the live owner and was never moved, emptied or overwritten.
+    expect(bGeneration).toBe(2);
+    expect(holdsLock(lockFile, bToken)).toBe(true);
+    expect(readLock(lockFile).owner_token).toBe(bToken);
+
+    // A lost. It either hit EEXIST on generation 2 or retracted its own claim.
+    expect(aResult.acquired).toBe(false);
+    expect(["lost_acquisition_race", "superseded", "active"]).toContain(aResult.verdict.state);
+
+    // C: the challenger that used to win in v2's displacement window.
+    const c = acquireLock(lockFile, PROBE);
+    expect(c.acquired).toBe(false);
+    expect(holdsLock(lockFile, bToken)).toBe(true);
+  });
+
+  it("a DELAYED reclaimer that wakes after B released and C acquired retracts only its own claim", () => {
+    seedClaim(1, { pid: 999999, start_time: null }, { ageMs: 3600_000 });
+
+    let cToken = null;
+    const stale = acquireLock(lockFile, {
+      ...PROBE,
+      hooks: {
+        afterClassify: () => {
+          if (cToken) return;
+          // B takes over and releases; C then acquires and is still holding.
+          const b = acquireLock(lockFile, PROBE);
+          releaseLock(lockFile, b.token);
+          const c = acquireLock(lockFile, PROBE);
+          cToken = c.token;
+        }
+      }
+    });
+
+    expect(stale.acquired).toBe(false);
+    expect(holdsLock(lockFile, cToken)).toBe(true);
+    expect(readLock(lockFile).owner_token).toBe(cToken);
+    // Nothing the stale process wrote is the current claim.
+    expect(readLock(lockFile).state).toBe("held");
+  });
+
+  it("no state where the lock momentarily looks free: every generation file survives", () => {
+    seedClaim(1, { pid: 999999, start_time: null }, { ageMs: 3600_000 });
+    const seen = [];
+    acquireLock(lockFile, {
+      alive: () => false,
+      hooks: { afterClassify: () => { seen.push(claimFiles().length); } }
+    });
+    // The incumbent claim is still on disk at the moment of mutation.
+    expect(seen[0]).toBe(1);
+    expect(claimFiles()).toEqual(["000000000001.claim", "000000000002.claim"]);
+  });
+});
+
+/** ---------------- never-supersede rules ---------------- */
+
+describe("claims that must never be superseded", () => {
+  it("an active owner is refused, not reclaimed", () => {
+    seedClaim(1, { pid: 4242 });
+    const res = acquireLock(lockFile, { alive: () => true, startTime: () => lockInfo().start_time });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("active");
+    expect(claimFiles()).toEqual(["000000000001.claim"]);
+  });
+
+  it("an owner with unprovable identity is refused, never guessed away", () => {
+    seedClaim(1);
+    const res = acquireLock(lockFile, { alive: () => true, startTime: () => null });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("unproven_identity");
+  });
+
+  it("a foreign-host claim is refused", () => {
+    seedClaim(1, { host: "OTHER-MACHINE" });
+    const res = acquireLock(lockFile, { alive: () => true });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("foreign_host");
+  });
+
+  it("an alive owner that stopped heartbeating is flagged, never taken", () => {
+    seedClaim(1, { heartbeat_at: new Date(Date.now() - DEFAULT_HEARTBEAT_TIMEOUT_MS - 60_000).toISOString() });
+    const res = acquireLock(lockFile, { alive: () => true, startTime: () => lockInfo().start_time });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("stale_no_heartbeat");
+    expect(res.needs_attention).toBe(true);
+  });
+
+  it("a fresh unreadable claim is treated as mid-publication, not as garbage", () => {
+    seedClaim(1, "");
+    const res = acquireLock(lockFile);
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("publishing");
+    expect(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).toBe("");
+  });
+
+  it("an aged-out unreadable claim is superseded, never deleted, so it cannot deadlock", () => {
+    seedClaim(1, '{"pid": 12', { ageMs: MALFORMED_LOCK_GRACE_MS + 60_000 });
     const res = acquireLock(lockFile);
     expect(res.acquired).toBe(true);
-    for (let i = 0; i < 300; i += 1) {
-      expect(heartbeat(lockFile, { token: res.token, phase: `p${i}` })).toBe(true);
-      const raw = readFileSync(lockFile, "utf8");
-      expect(raw.length).toBeGreaterThan(0);
-      expect(() => JSON.parse(raw)).not.toThrow();
-      expect(JSON.parse(raw).pid).toBe(process.pid);
-    }
-    releaseLock(lockFile, res.token);
+    expect(res.generation).toBe(2);
+    expect(readFileSync(join(ledgerDir(lockFile), "000000000001.claim"), "utf8")).toBe('{"pid": 12');
+  });
+
+  it("a ledger that cannot be listed fails closed", () => {
+    mkdirSync(ledgerDir(lockFile), { recursive: true });
+    // A file where the ledger directory must be is an ENOTDIR on read.
+    const bogus = join(dir, "bogus.lock");
+    writeFileSync(`${bogus}.d`, "not a directory", "utf8");
+    const res = acquireLock(bogus);
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("filesystem_error");
   });
 });
 
-/**
- * "Concurrent reclaimers can unlink each other's new locks."
- */
-describe("blocker 2: reclaim is content-verified and single-winner", () => {
-  it("removeVerified refuses when the bytes changed under it", () => {
-    writeFileSync(lockFile, "ORIGINAL", "utf8");
-    const res = removeVerified(lockFile, "SOMETHING ELSE");
-    expect(res.ok).toBe(false);
-    expect(res.reason).toBe("lock_changed_during_reclaim");
-    // The lock we did NOT verify must still be there.
-    expect(readFileSync(lockFile, "utf8")).toBe("ORIGINAL");
+/** ---------------- legacy v1/v2 plain-file locks ---------------- */
+
+describe("pre-v3 plain lock files", () => {
+  it("a live legacy lock blocks acquisition and is never written to or removed", () => {
+    const raw = JSON.stringify(freshInfo({ generation: undefined }), null, 2);
+    writeFileSync(lockFile, raw, "utf8");
+    const res = acquireLock(lockFile, { alive: () => true, startTime: () => lockInfo().start_time });
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("active");
+    expect(res.legacy).toBe(true);
+    expect(readFileSync(lockFile, "utf8")).toBe(raw);
   });
 
-  it("removeVerified succeeds only for the exact classified bytes", () => {
-    writeFileSync(lockFile, "ORIGINAL", "utf8");
-    expect(removeVerified(lockFile, "ORIGINAL").ok).toBe(true);
-    expect(existsSync(lockFile)).toBe(false);
+  it("a dead legacy lock is ignored and still left untouched on disk", () => {
+    const raw = JSON.stringify(freshInfo({ pid: 999999, generation: undefined }), null, 2);
+    writeFileSync(lockFile, raw, "utf8");
+    const res = acquireLock(lockFile, { alive: () => false });
+    expect(res.acquired).toBe(true);
+    expect(readFileSync(lockFile, "utf8")).toBe(raw); // never deleted by us
   });
 
-  it("reports a lost reclaim race instead of destroying the winner's lock", () => {
-    const dead = lockInfo({ pid: 999999, start_time: null, host: hostname() });
-    writeFileSync(lockFile, JSON.stringify(dead, null, 2), "utf8");
-    // Between classification and reclaim, another instance publishes a new lock.
-    // `removeVerified` is handed the bytes we classified, so the swap is caught.
-    const swapped = JSON.stringify(lockInfo({ pid: 4242 }), null, 2);
-    writeFileSync(lockFile, swapped, "utf8");
-    const res = removeVerified(lockFile, JSON.stringify(dead, null, 2));
-    expect(res.ok).toBe(false);
-    expect(readFileSync(lockFile, "utf8")).toBe(swapped);
+  it("an empty legacy lock file is not stolen while it is fresh", () => {
+    writeFileSync(lockFile, "", "utf8");
+    const res = acquireLock(lockFile);
+    expect(res.acquired).toBe(false);
+    expect(res.verdict.state).toBe("publishing");
+    expect(statSync(lockFile).size).toBe(0);
   });
 });
+
+/** ---------------- ownership is a token, not a pid ---------------- */
 
 describe("ownership is a token, not a pid", () => {
   it("heartbeat and release require the exact token", () => {
     const res = acquireLock(lockFile);
-    expect(res.acquired).toBe(true);
     expect(holdsLock(lockFile, res.token)).toBe(true);
     expect(holdsLock(lockFile, "wrong-token")).toBe(false);
     expect(heartbeat(lockFile, { token: "wrong-token" })).toBe(false);
     expect(releaseLock(lockFile, "wrong-token")).toBe(false);
-    expect(existsSync(lockFile)).toBe(true);
+    expect(holdsLock(lockFile, res.token)).toBe(true);
     expect(releaseLock(lockFile, res.token)).toBe(true);
-    expect(existsSync(lockFile)).toBe(false);
+    expect(holdsLock(lockFile, res.token)).toBe(false);
   });
 
-  it("a lock replaced by someone else is not released by us", () => {
+  it("heartbeat writes a complete document every time", () => {
     const res = acquireLock(lockFile);
-    writeFileSync(lockFile, JSON.stringify(lockInfo({ pid: 777, owner_token: "someone-else" })), "utf8");
-    expect(releaseLock(lockFile, res.token)).toBe(false);
-    expect(existsSync(lockFile)).toBe(true);
+    const path = join(ledgerDir(lockFile), "000000000001.claim");
+    for (let i = 0; i < 30; i += 1) {
+      expect(heartbeat(lockFile, { token: res.token, phase: `p${i}` })).toBe(true);
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      expect(parsed.phase).toBe(`p${i}`);
+      expect(parsed.owner_token).toBe(res.token);
+    }
+    releaseLock(lockFile, res.token);
+  });
+
+  it("a heartbeat from a superseded holder cannot overwrite the current owner", () => {
+    const first = acquireLock(lockFile);
+    // Simulate a replacement owner appearing at a higher generation.
+    seedClaim(2, { pid: process.pid, owner_token: "replacement", start_time: readProcessStartTime(process.pid) });
+    expect(heartbeat(lockFile, { token: first.token, phase: "should-not-apply" })).toBe(false);
+    expect(readLock(lockFile).owner_token).toBe("replacement");
+    expect(holdsLock(lockFile, first.token)).toBe(false);
+    expect(releaseLock(lockFile, first.token)).toBe(false);
   });
 
   it("readLock reports malformed content without throwing", () => {
-    writeFileSync(lockFile, "not json", "utf8");
+    seedClaim(1, "not json");
     expect(readLock(lockFile)).toEqual({ malformed: true });
-    expect(readLockRaw(lockFile).malformed).toBe(true);
     expect(readLockRaw(lockFile).raw).toBe("not json");
+  });
+
+  it("heldGeneration reports our generation only while we own it", () => {
+    const res = acquireLock(lockFile);
+    expect(heldGeneration(lockFile, res.token)).toBe(1);
+    releaseLock(lockFile, res.token);
+    expect(heldGeneration(lockFile, res.token)).toBeNull();
   });
 });
 
-/** ---------------- real concurrency ---------------- */
+/** ---------------- history / garbage collection ---------------- */
 
-function runRacers(count, { holdMs = 250, mode = "acquire", barrierDelayMs = 900 } = {}) {
-  const barrier = Date.now() + barrierDelayMs;
-  const results = [];
+describe("ledger history", () => {
+  it("garbage collection never removes the maximum claim and requires ownership", () => {
+    for (let g = 1; g <= 30; g += 1) seedClaim(g, { pid: 999999, state: "released" });
+    const res = acquireLock(lockFile, { alive: () => false, collectGarbage: false });
+    expect(res.generation).toBe(31);
+
+    expect(collectLedgerGarbage(lockFile, res.generation, "wrong-token").removed).toEqual([]);
+    expect(claimFiles()).toHaveLength(31);
+
+    const gc = collectLedgerGarbage(lockFile, res.generation, res.token, { keep: 5 });
+    expect(gc.removed.length).toBeGreaterThan(0);
+    const remaining = claimFiles();
+    expect(remaining).toContain("000000000031.claim");
+    expect(holdsLock(lockFile, res.token)).toBe(true);
+    releaseLock(lockFile, res.token);
+  });
+
+  it("scanLedger reports an unreadable ledger as an error, never as empty", () => {
+    const bogus = join(dir, "bogus2.lock");
+    writeFileSync(`${bogus}.d`, "not a directory", "utf8");
+    expect(scanLedger(bogus).error).toBeTruthy();
+    expect(readLockRaw(bogus).malformed).toBe(true);
+  });
+});
+
+/** ---------------- real multiprocess evidence ---------------- */
+
+/**
+ * Explicit four-phase harness: every child announces READY, the parent releases
+ * them all with a single START file, and every child MUST return a result file
+ * and exit 0. Nothing is filtered away, and mutual exclusion is judged from
+ * critical-section INTERVALS, not from a count of `acquired`.
+ */
+function runRacers(count, { holdMs = 120, mode = "contend", deadlineMs = 25_000, tag = "r" } = {}) {
+  const startFile = join(dir, `start-${tag}`);
   const children = [];
+  const expected = [];
   for (let i = 0; i < count; i += 1) {
-    const resultFile = join(dir, `result-${i}.json`);
-    results.push(resultFile);
+    const resultFile = join(dir, `result-${tag}-${i}.json`);
+    const readyFile = join(dir, `ready-${tag}-${i}`);
+    expected.push({ resultFile, readyFile, index: i });
     children.push(new Promise((resolve) => {
-      const child = spawn(process.execPath, [RACER, lockFile, resultFile, String(barrier), String(holdMs), mode], {
-        stdio: "ignore"
-      });
-      child.on("close", () => resolve());
-      child.on("error", () => resolve());
+      const child = spawn(
+        process.execPath,
+        [RACER, lockFile, resultFile, readyFile, startFile, String(holdMs), mode, String(deadlineMs)],
+        { stdio: "ignore" }
+      );
+      let stderr = null;
+      child.on("error", (err) => { stderr = String(err.message); });
+      child.on("close", (code) => resolve({ index: i, code, spawnError: stderr }));
     }));
   }
-  return Promise.all(children).then(() => results
-    .filter((f) => existsSync(f))
-    .map((f) => JSON.parse(readFileSync(f, "utf8"))));
+
+  return waitForAll(expected.map((e) => e.readyFile), deadlineMs)
+    .then((ready) => {
+      if (!ready) throw new Error("not every child reached READY before the deadline");
+      writeFileSync(startFile, "go", "utf8");
+      return Promise.all(children);
+    })
+    .then((exits) => {
+      const outcomes = expected.map((e, i) => ({
+        ...exits[i],
+        resultFilePresent: existsSync(e.resultFile),
+        result: existsSync(e.resultFile) ? JSON.parse(readFileSync(e.resultFile, "utf8")) : null
+      }));
+      return outcomes;
+    });
 }
 
-describe("blocker 2: REAL concurrent processes, not a sequential simulation", () => {
-  it("exactly one of eight simultaneous processes acquires the lock", async () => {
-    const outcomes = await runRacers(8, { holdMs: 400 });
-    expect(outcomes.length).toBe(8);
-    const winners = outcomes.filter((o) => o.acquired);
-    expect(winners).toHaveLength(1);
-    expect(winners[0].lostOwnership).toBe(false);
-    expect(winners[0].still_holds).toBe(true);
-    for (const loser of outcomes.filter((o) => !o.acquired)) {
-      expect(loser.threw).toBeUndefined();
+function waitForAll(paths, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (paths.every((p) => existsSync(p))) return resolve(true);
+      if (Date.now() > deadline) return resolve(false);
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+
+/** Every child accounted for: exit 0, result file present, protocol completed. */
+function assertAllAccountedFor(outcomes, count) {
+  expect(outcomes).toHaveLength(count);
+  for (const o of outcomes) {
+    expect(o.spawnError, `child ${o.index} failed to spawn`).toBeNull();
+    expect(o.resultFilePresent, `child ${o.index} produced no result file`).toBe(true);
+    expect(o.code, `child ${o.index} exited non-zero`).toBe(0);
+    expect(o.result.threw, `child ${o.index} threw`).toBeNull();
+    expect(o.result.protocol_complete, `child ${o.index} did not complete the protocol`).toBe(true);
+  }
+}
+
+/** The actual mutual-exclusion evidence: no two critical sections overlap. */
+function assertNoOverlap(outcomes) {
+  const intervals = outcomes
+    .filter((o) => o.result.acquired)
+    .map((o) => ({ pid: o.result.pid, enter: o.result.enter_ms, exit: o.result.exit_ms }))
+    .sort((a, b) => a.enter - b.enter);
+  for (const iv of intervals) {
+    expect(Number.isFinite(iv.enter) && Number.isFinite(iv.exit)).toBe(true);
+    expect(iv.exit).toBeGreaterThanOrEqual(iv.enter);
+  }
+  for (let i = 1; i < intervals.length; i += 1) {
+    const prev = intervals[i - 1];
+    const cur = intervals[i];
+    expect(
+      cur.enter >= prev.exit,
+      `critical sections overlapped: pid ${prev.pid} [${prev.enter},${prev.exit}] and pid ${cur.pid} [${cur.enter},${cur.exit}]`
+    ).toBe(true);
+  }
+  return intervals;
+}
+
+describe("genuine multiprocess serialization", () => {
+  it("eight simultaneous processes each get the lock, and no two critical sections overlap", async () => {
+    const outcomes = await runRacers(8, { holdMs: 120, mode: "contend", tag: "contend" });
+    assertAllAccountedFor(outcomes, 8);
+
+    // Every child must eventually acquire: a serialized lock is also a LIVE one.
+    for (const o of outcomes) {
+      expect(o.result.acquired, `child ${o.index} never acquired`).toBe(true);
+      expect(o.result.lost_ownership_during_hold, `child ${o.index} lost ownership mid-section`).toBe(false);
+      expect(o.result.still_held_at_exit).toBe(true);
+      expect(o.result.release_ok).toBe(true);
+      expect(o.result.beats).toBeGreaterThan(0);
     }
-    expect(existsSync(lockFile)).toBe(false); // the winner released it
-  }, 30_000);
+    const intervals = assertNoOverlap(outcomes);
+    expect(intervals).toHaveLength(8);
+    expect(readLock(lockFile)).toBeNull(); // the last holder released
+  }, 60_000);
+
+  /**
+   * Deliberately NOT "exactly one acquired". Eight children released from one
+   * barrier are not guaranteed to attempt inside the first holder's critical
+   * section - the OS may delay a child past the release, and acquiring then is
+   * CORRECT, not a bug. Counting winners would therefore be a flaky assertion
+   * about scheduling rather than a statement about mutual exclusion. What is
+   * asserted instead: no two critical sections overlap, every refusal is a
+   * genuine ownership refusal, and the run really was contended.
+   */
+  it("at a single collision point no two processes are ever inside the critical section", async () => {
+    const outcomes = await runRacers(8, { holdMs: 250, mode: "single", tag: "single" });
+    assertAllAccountedFor(outcomes, 8);
+
+    const winners = outcomes.filter((o) => o.result.acquired);
+    expect(winners.length).toBeGreaterThanOrEqual(1);
+    for (const w of winners) {
+      expect(w.result.lost_ownership_during_hold).toBe(false);
+      expect(w.result.still_held_at_exit).toBe(true);
+      expect(w.result.release_ok).toBe(true);
+    }
+    for (const loser of outcomes.filter((o) => !o.result.acquired)) {
+      expect(loser.result.attempts).toHaveLength(1);
+      expect(["active", "lost_acquisition_race", "publishing", "superseded", "unproven_identity"])
+        .toContain(loser.result.attempts[0].verdict);
+    }
+
+    assertNoOverlap(outcomes);
+
+    // Prove the run was genuinely contended and not a vacuous pass: most
+    // children must have been refused BECAUSE they observed another process's
+    // claim, which is only possible if they attempted while it existed.
+    const blockedByAnother = outcomes.filter((o) => !o.result.acquired
+      && ["active", "unproven_identity", "lost_acquisition_race"].includes(o.result.attempts[0].verdict));
+    expect(blockedByAnother.length, "no child was refused because of another process's claim")
+      .toBeGreaterThanOrEqual(outcomes.length - winners.length - 1);
+  }, 60_000);
 
   it("a live heartbeating owner is never displaced by six concurrent challengers", async () => {
-    const outcomes = await runRacers(6, { holdMs: 700, mode: "heartbeat" });
-    const winners = outcomes.filter((o) => o.acquired);
-    expect(winners).toHaveLength(1);
-    expect(winners[0].beats).toBeGreaterThan(0);
-    expect(winners[0].lostOwnership).toBe(false);
-  }, 30_000);
+    // Phase 1: establish a real owner in its OWN process and wait until it holds.
+    const ownerResult = join(dir, "owner-result.json");
+    const ownerReady = join(dir, "owner-ready");
+    const ownerStart = join(dir, "owner-start");
+    const ownerExit = new Promise((resolve) => {
+      const child = spawn(
+        process.execPath,
+        [RACER, lockFile, ownerResult, ownerReady, ownerStart, "6000", "contend", "25000"],
+        { stdio: "ignore" }
+      );
+      child.on("close", (code) => resolve(code));
+    });
+    expect(await waitForAll([ownerReady], 20_000)).toBe(true);
+    writeFileSync(ownerStart, "go", "utf8");
 
-  it("a stale lock left by a dead process is reclaimed by exactly one racer", async () => {
-    writeFileSync(lockFile, JSON.stringify(lockInfo({ pid: 999999, start_time: null }), null, 2), "utf8");
-    const old = (Date.now() - 3600_000) / 1000;
-    utimesSync(lockFile, old, old);
-    const outcomes = await runRacers(6, { holdMs: 200 });
-    expect(outcomes.filter((o) => o.acquired)).toHaveLength(1);
-  }, 30_000);
+    const ownerPid = await new Promise((resolve) => {
+      const deadline = Date.now() + 20_000;
+      const tick = () => {
+        const cur = readLock(lockFile);
+        if (cur && !cur.malformed && cur.state === "held") return resolve(cur.pid);
+        if (Date.now() > deadline) return resolve(null);
+        setTimeout(tick, 10);
+      };
+      tick();
+    });
+    expect(ownerPid, "the owner process never established the lock").not.toBeNull();
+    const ownerGeneration = scanLedger(lockFile).maxGeneration;
 
-  it("an EMPTY lock file is not stolen by any of six concurrent racers while it is fresh", async () => {
-    writeFileSync(lockFile, "", "utf8");
-    const outcomes = await runRacers(6, { holdMs: 100 });
-    expect(outcomes.filter((o) => o.acquired)).toHaveLength(0);
-    expect(readFileSync(lockFile, "utf8")).toBe("");
-    expect(statSync(lockFile).size).toBe(0);
-  }, 30_000);
+    // Phase 2: six challengers, one attempt each, while the owner is alive.
+    const outcomes = await runRacers(6, { holdMs: 50, mode: "challenge", tag: "challenge" });
+    assertAllAccountedFor(outcomes, 6);
+    for (const o of outcomes) {
+      expect(o.result.acquired, `challenger ${o.index} displaced a live owner`).toBe(false);
+      expect(o.result.attempts).toHaveLength(1);
+      // `unproven_identity` is the fail-closed verdict when this host refuses to
+      // report another process's start time; it is a refusal exactly like
+      // `active` and is accepted here for that reason, never as a weakening.
+      expect(["active", "unproven_identity"]).toContain(o.result.attempts[0].verdict);
+    }
+
+    // Phase 3: the owner is still the same claim, still held, still its own pid.
+    const during = readLock(lockFile);
+    expect(during.pid).toBe(ownerPid);
+    expect(during.state).toBe("held");
+    expect(scanLedger(lockFile).maxGeneration).toBe(ownerGeneration);
+
+    expect(await ownerExit).toBe(0);
+    const owner = JSON.parse(readFileSync(ownerResult, "utf8"));
+    expect(owner.acquired).toBe(true);
+    expect(owner.lost_ownership_during_hold).toBe(false);
+    expect(owner.beats).toBeGreaterThan(0);
+    expect(owner.release_ok).toBe(true);
+  }, 90_000);
+
+  it("a stale claim left by a dead process is superseded without any two racers overlapping", async () => {
+    seedClaim(1, { pid: 999999, start_time: null }, { ageMs: 3600_000 });
+    const outcomes = await runRacers(6, { holdMs: 200, mode: "single", tag: "stale" });
+    assertAllAccountedFor(outcomes, 6);
+    expect(outcomes.filter((o) => o.result.acquired).length).toBeGreaterThanOrEqual(1);
+    assertNoOverlap(outcomes);
+    // The dead claim is still on disk: superseded, never destroyed.
+    expect(claimFiles()).toContain("000000000001.claim");
+    // Every generation from 1 upwards is present: the ledger is append-only.
+    const generations = claimFiles().map((n) => Number(n.slice(0, 12)));
+    expect(generations).toEqual(generations.map((_, i) => i + 1));
+  }, 60_000);
 });

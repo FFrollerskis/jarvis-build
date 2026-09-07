@@ -8,11 +8,15 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 2: `D126-REVIEW-FIX-20260907-A`** (byggeordre 5563925449 på
-issue #68, som svar på arkitektens review av den FAKTISKE koden på `a9fe152`). Samme branch, samme
-PR #75. **Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
+**Infrastrukturreparasjon, review-runde 3: `D126-LOCK-REVIEW-FIX-20260907-B`** (byggeordre
+5565113307 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens review av den
+FAKTISKE `lock.mjs`/`lock.test.mjs`/`lock-racer.mjs` på `efa62d7`). Samme branch, samme PR #75.
+**Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
 Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126 og D-126a i DECISIONS_AND_ASSUMPTIONS.md.
+Full begrunnelse: D-126, D-126a og D-126b i DECISIONS_AND_ASSUMPTIONS.md.
+
+**De seks øvrige gruppene fra runde 2 er IKKE godkjent** - arkitekten har uttrykkelig holdt dem
+åpne i påvente av den komplette gjennomgangen av den rettede koden.
 
 ## Runde 1 (v2) - hva som ble reparert
 
@@ -36,16 +40,65 @@ brukte ekte samtidige prosesser, ingen injiserte feil i durabilitets- eller inst
 | 6 | Hele TASK_ID-sluggen finnes ikke i faktiske branch-navn ⇒ retry ville duplisert branch/PR/merge; feilede GitHub-oppslag ble tomme lister | `KNOWN_D125_BRANCH=null KNOWN_PR=null` | eksakte persisterte branch-/PR-assosiasjoner fra state og betrodde protokollkommentarer; paginering; `{ok, items, error}` så et feilet oppslag aldri leses som «ingen PR finnes» |
 | 7 | `gitStatusLines` ignorerte exit/feil og leste manglende stdout som «rent»; `claudeArgs` defaultet til `--dangerously-skip-permissions`; ingen grense-/path-/TASK_ID-/vertsbindingsvalidering; `TEMP` hindrer ikke relative kladdefiler | — | `lib/git.mjs` fail-closed; `lib/config.mjs` påkrevd eksplisitt `claudeArgs` + bounds + path-containment + ekte vertsbinding; `isValidTaskId`; eksplisitt scratch-sti og kladdedisiplin i prompten |
 
+## Runde 3 (v2.2) - bekreftet kildedefekt i låsen, og harness-defekten
+
+Arkitekten bekreftet en KILDEDEFEKT, ikke en flaky test: `removeVerified` omdøpte den NÅVÆRENDE
+låsen til en tombstone FØR bytene ble sammenlignet med det klassifiserte øyeblikksbildet.
+rename-så-sammenlign er ikke en atomisk compare-and-delete; i vinduet er den offentlige stien tom.
+
+Reprodusert lokalt på nøyaktig `efa62d7`-modulen (kopi i scratch, ett tillagt observasjonspunkt rett
+etter `renameSync`, ingen endret beslutning), og samme skjema mot den nye koden:
+
+```
+v2 (efa62d7): existingOwnerAcquired=true  challengerAcquired=true
+              reclaimResult=lock_changed_during_reclaim
+              existingOwnerStillHolds=false challengerStillHolds=true
+v3 (denne):   existingOwnerAcquired=true  challengerAcquired=false
+              reclaimResult=active
+              existingOwnerStillHolds=true  challengerStillHolds=false
+```
+
+Rettet ved å bytte primitiv: **create-if-absent** (`link()` / `open(wx)`) er den eneste ekte
+enkeltvinner-operasjonen filsystemet gir, og låsen er nå en append-only hovedbok `<lockFile>.d/`
+med `<generasjon>.claim`. Ingen prosess omdøper, overskriver eller sletter en sti den ikke selv
+opprettet; en foreldet claim BLIR FORBIGÅTT av en høyere generasjon, aldri fjernet. Full
+beskrivelse av primitivet og feil-/gjenopprettingssemantikken: `ops/claude-worker/README.md` og
+D-126b.
+
+Harness-defekten er også rettet: `lock-racer.mjs` bruker eksplisitt READY → START → ATTEMPT →
+RELEASE, og gjensidig utelukkelse dømmes av INTERVALLER (ingen to kritiske seksjoner får overlappe),
+ikke av en telling av `acquired`. Alle forventede barn må levere resultatfil og avslutte med exit 0.
+
+Deployment-forpliktelsen er lukket i denne runden: `install-task.ps1`/`install-supervisor.ps1`
+skriver en DURABEL INTENSJON i install-manifestet FØR noen registrering og avbryter installasjonen
+hvis den ikke kan skrives; `reconcile-task-intents` løser krasj-vinduet fra vertens eget svar; og
+rollback avregistrerer også ubekreftede intensjoner for oppgaver som ikke fantes fra før.
+
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **`npx vitest run ops/claude-worker/test` → 14 filer / 282 tester passed.** Nye, som feiler på den
-  gamle implementasjonen:
+- **`npx vitest run ops/claude-worker/test` → 14 filer / 304 tester.**
+  **Dette er IKKE en ubetinget «alle grønne»-påstand.** Faktisk observert på endelig kode:
+  fire fulle kjøringer, to grønne (304/304) og to med ÉN feilende test (303/304). Feilen er
+  intermitterende og gjelder flerprosess-harnessen under CPU-metning når flere tunge testfiler
+  kjører parallelt - ikke låseprotokollen, som er dekket av deterministiske tester uten
+  tidsavhengighet. Ett tiltak er allerede gjort (all venting i `lock-racer.mjs` er nå ekte inaktiv
+  via `Atomics.wait` i stedet for busy-wait, som fjernet CPU-overtegningen), men det var ikke
+  tilstrekkelig. Nøyaktig hvilken test og nøyaktig årsak er rapportert som et ÅPENT, UAVKLART FUNN
+  i `CLAUDE_REPORT` på issue #68. Ingen assertion er svekket, ingenting er kjørt bort, og
+  ingen «rerun until green» er brukt.
+  Nye tester i denne runden:
+  - `lock.test.mjs` (36): den deterministiske stale-read → erstatningseier → forsinket reclaim →
+    utfordrer-sekvensen via `hooks.afterClassify` (nøyaktig punktet v2 var utrygt), åtte ekte
+    samtidige OS-prosesser med intervall-bevis, legacy v1/v2-låsefil som respekteres men aldri
+    røres, GC som aldri fjerner maksimum;
+  - `deploy.test.mjs` (40): åtte nye for durabel registreringsintensjon, inkludert krasj mellom
+    registrering og journalføring, «jeg kunne ikke spørre verten» som ALDRI løser en intensjon, og
+    at en pre-eksisterende oppgave aldri avregistreres av en rollback.
+  Fra runde 2, uendret og fortsatt grønne:
   - `worker-crash-recovery.test.mjs` (16): starter det FAKTISKE `node worker.mjs run` som prosess og
     dreper det før spawn, under barnets kjøring og etter report men før completion-lagring; verifiserer
     at et levende barn beskyttes uten at en andre Claude startes, at en eksisterende report lukker
     tasken uten ny dispatch, og at git-/remote-/dirty-feil blokkerer i stedet for å dispatche;
-  - `lock.test.mjs` (23): åtte ekte samtidige OS-prosesser mot samme lås, tom lås som ikke stjeles,
-    levende heartbeat-eier som ikke fortrenges, innholdsverifisert reclaim, token-eierskap;
   - `state.test.mjs` (33): korrupt primær + gyldig backup (eksakt arkitekt-repro), avbrutt skriving,
     `null`/`[]`/`{}`-avvisning, supervisor-skjema;
   - `deploy.test.mjs` (31): injisert feil i hvert steg av byttet, hash-håndhevet rollback, fjerning av
