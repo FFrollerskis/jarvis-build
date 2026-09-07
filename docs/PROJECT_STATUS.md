@@ -8,15 +8,16 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 4: `D126-LOCK-LEDGER-REVIEW-FIX-20260907-C`** (byggeordre
-5567261855 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens review av den
-FAKTISKE `lock.mjs` på `f839668`). Samme branch, samme PR #75.
+**Infrastrukturreparasjon, review-runde 5: `D126-FINAL-REVIEW-FIX-20260907-D`** (byggeordre
+5569145037 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens komplette
+gjennomgang av den FAKTISKE kilden på `f123e650`). Samme branch, samme PR #75.
 **Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
 Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126, D-126a, D-126b og D-126c i DECISIONS_AND_ASSUMPTIONS.md.
+Full begrunnelse: D-126, D-126a, D-126b, D-126c og D-126d i DECISIONS_AND_ASSUMPTIONS.md.
 
-**De seks øvrige gruppene fra runde 2 er IKKE godkjent** - arkitekten har uttrykkelig holdt dem
-åpne i påvente av den komplette gjennomgangen av den rettede koden.
+Låse-hovedbokdefekten fra runde 4 er bekreftet lukket av arkitekten, og CI-kjøring 34099447903
+forsøk 2 var grønn. Den komplette gjennomgangen av de opprinnelige sju gruppene fant likevel tre
+gjenstående P1-blokkere, som er rettet i denne runden.
 
 ## Runde 1 (v2) - hva som ble reparert
 
@@ -104,10 +105,93 @@ publisering, så også en uleselig forgjenger feiler nå lukket. Kan avstamninge
 under et void-krav, uleselig krav på veien, void-kjede som ikke når gen 1) nektes anskaffelsen -
 aldri «fri». Eldre `released` + `release_reason: "retracted"` leses som `void`.
 
+## Runde 5 (v2.4) - tre gjenstående P1-blokkere fra den komplette gjennomgangen
+
+Alle tre deler én rot: **en operasjon som IKKE lyktes fikk lov til å se ut som om den hadde
+lyktes.**
+
+**Funn 1 - barn-identitet var best-effort, ikke en forutsetning.** `onSpawn` fanget
+`persistState`-/heartbeat-feil og logget bare en warning, og `dispatch.mjs` fanget i tillegg enhver
+`onSpawn`-exception og lot barnet fortsette. Arkitektens direkte modul-repro med `onSpawn` som
+kaster `durable write failed`:
+
+```
+f123e650: {"outcome":"completed_exit_0","code":0,"childPid":14}
+v2.4:     {"outcome":"handoff_failed","childPid":14,
+           "handoff":{"child_terminated":true,"untracked_child_live":false,"identity_state":"gone"}}
+```
+
+Rettet med et nytt utfall `HANDOFF_FAILED` og en HÅNDHEVET gate: `onSpawn` kaster nå, og sjekker at
+lås-heartbeaten faktisk landet. Feiler handoffen etter prosess-opprettelse, avbrytes barnet i en
+bundet eskalering (SIGTERM → grace → SIGKILL) gjennom child-HANDLE - aldri PID-alene - og den
+EKSAKTE fangede identiteten re-sjekkes; kun `GONE`/`REUSED` teller som bevis. `MATCH`/`UNPROVEN`/
+probe-feil rapporteres sannferdig som `untracked_child_live`. **Child-start-handshake:** ved
+`promptDelivery=stdin` skrives prompten - som ER oppgaven - først når identitetsrecord og heartbeat
+er durable, så oppgaven kan ikke starte før handoffen er commitet. Barn bevist borte →
+`FAILED_RETRYABLE` (exit 4); ikke bevist borte → `BLOCKED` (exit 3) med `child_identity` BEVART.
+
+**Funn 2 - semantisk malformede claims omgikk grace-/fail-closed-regelen.** Bare claims som ikke lot
+seg PARSE ble merket malformed, så `{"state":"held"}` fikk `verdict.state:"malformed"` og falt
+gjennom `judgeIncumbent` til `ok:true`:
+
+```
+f123e650: fersk gen 1 = {"state":"held"} + malformedGraceMs=60000 → acquired=true
+v2.4:     samme input → acquired=false, verdict.state=publishing (fersk),
+          og etter grace-vinduet: acquired=true, claimen aldri slettet
+```
+
+Rettet med `validateClaimSchema` + skjemavalidering FØR noe konkluderes av innholdet (også før
+`released`/`void`), og `judgeMalformedClaim` som gir ÉN fail-closed policy for både parse- og
+semantisk malformed. Uleselig I/O er fortsatt aldri automatisk supersederbar. Kun en GYLDIG
+void-claim er transparent og kun en GYLDIG release frigjør låsen - ellers kunne `{"state":"void"}`
+viske ut en levende forgjenger. Sidefunn lukket: uparsbart `heartbeat_at` ga `NaN`, hoppet over
+staleness-sjekken og leste som en evig «active» eier.
+
+**Funn 3 - utsatt aktivering var ikke en bevist bootstrap-handoff.** Den nye `run-worker.ps1`
+anvender markøren, men den filen ligger selv bare i den stagede payloaden. Startes installasjonen av
+den deployerte GAMLE workeren, kaller neste scheduler-tikk den GAMLE entrypointen, som aldri har
+hørt om `pending-activation.json`. Påstanden «neste tikk anvender den» var sirkulær, og host-bevis
+sier at hosten fortsatt kjører v1.
+
+Rettet med `captureQuiescenceOwners` + `runBootstrapHandoff` (`deploy.mjs bootstrap-handoff`), som
+kjøres fra KILDETREET og derfor er kjørbar FØR payloaden byttes. Den venter på at den EKSAKTE
+legitime forelder-identiteten avslutter av seg selv, sjekker worker- OG supervisor-quiescence på
+nytt, og aktiverer først da transaksjonelt med rollback. Den terminerer ingenting, rører ingen
+scheduled task, og krever aldri at den nystagede runneren er aktiv. `install.ps1` starter den
+detached ved utsatt aktivering. Den sirkulære påstanden er fjernet fra `run-worker.ps1`,
+`activateRelease`, `writePendingActivation` og README; `apply-pending` er nå dokumentert som et
+ANDRE nett.
+
 ## Kvalitetsporter (kjørt i denne økten)
 
+- **`npx vitest run ops/claude-worker/test` → 15 filer / 358 tester passed, kjørt TO ganger,
+  358/358 begge ganger.** Nye tester i runde 5:
+  - `worker-crash-recovery.test.mjs` (16 → 30): fault-injection gjennom det FAKTISKE entrypointet
+    (`node worker.mjs run` som ekte OS-prosess) for state-write-feil OG tapt lås under `onSpawn`.
+    Beviser null usporet levende barn, ingen duplikat-dispatch, sannferdig non-zero utfall, at
+    oppgaven aldri leveres til barnet, og trygg recovery etterpå (inkludert at en for tidlig retry
+    ikke dispatcher, og at nøyaktig én ny dispatch skjer når backoffen er ute);
+  - `dispatch.test.mjs` (NY, 11): arkitektens eksakte repro, pluss grenene en OS-prosess ikke kan
+    fremtvinge - barn som ikke dør, `UNPROVEN`, `REUSED`, probe som kaster, og exit 0 midt i abort;
+  - `lock.test.mjs` (42 → 49): fersk/aldret semantisk-malformed, manglende/ugyldig pid, manglende
+    host, ugyldig state/owner_token/generation/start_time, uparsbare tidsstempler, `released`/`void`
+    uten pid, uleselig I/O uansett alder, og samtidig publisering/re-read;
+  - `deploy.test.mjs` (40 → 56): fixture som starter fra en LEGACY deployert destination der
+    installert `run-worker.ps1` IKKE har markør-støtte og den registrerte oppgaven peker på den
+    gamle entrypointen. Beviser install startet av sitt barn → utsatt og legacy-entrypoint urørt →
+    forelder avslutter av seg selv (aldri drept) → kontrollert handoff aktiverer de EKSAKTE stagede
+    hashene → scheduled task fortsatt kjørbar. Pluss feilinjeksjon før/etter hvert handoff-steg
+    (`beforeWait`, `afterParentExit`, `beforeActivate`, `beforeSwitch`, `afterObsoleteRemoval`,
+    `afterActivate`) med bevist rollback, ingen manglende entrypoint, urørt operasjonell data og en
+    ren retry.
+
+  `JARVIS_WORKER_FAULT` er TEST-ONLY, følger konvensjonen fra `acquireLock` sin `hooks.afterClassify`,
+  og annonseres høylytt i logg + health når den er armert.
+
+Historikk fra runde 4, uendret:
+
 - **`npx vitest run ops/claude-worker/test` → 14 filer / 310 tester passed, kjørt TRE ganger,
-  310/310 hver gang. Ingen intermitterende feil observert i denne runden.**
+  310/310 hver gang. Ingen intermitterende feil observert i den runden.**
   Seks nye tester i `lock.test.mjs`: den eksakte tre-parts-sekvensen deterministisk via
   `hooks.afterClassify` (levende gen 1 → spekulativ gen 2 → tilbaketrukket → gen 3 NEKTES, eieren
   beholder låsen); at eieren fortsatt kan heartbeate og release på tvers av det tilbaketrukne
@@ -217,14 +301,18 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
 1. Fersk uavhengig ChatGPT-arkitekt-review av den rettede diffen på PR #75 (INGEN self-approval,
    `ARCHITECT_MERGE_APPROVED=false`).
 2. Etter godkjent review, på hosten i rekkefølge: `.\verify-scripts.ps1` → `.\install.ps1 -WhatIf` →
-   `.\install.ps1` (utsettes automatisk hvis workeren kjører; `run-worker.ps1` anvender den ved neste
-   tikk) → config-filer → `node worker.mjs status` / `run --dry-run` → `.\install-task.ps1` →
-   `.\install-supervisor.ps1`.
-3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon, en
-   ekte planlagt kjøring som fullfører en ufarlig autorisert probe, og en ekte
-   `RESTART_WORKER`-kvittering. Først da kan `WORKER_SELF_RECOVERY_VERIFIED`, `SUPERVISOR_INSTALLED`
-   og `REMOTE_RESTART_VERIFIED` settes true - individuelt, aldri samlet.
+   `.\install.ps1` (utsettes automatisk hvis workeren kjører; installasjonen starter da den
+   kontrollerte bootstrap-handoffen, som venter på at den eksakte forelderen avslutter og deretter
+   aktiverer - den krever IKKE at den nye `run-worker.ps1` allerede er live) → config-filer →
+   `node worker.mjs status` / `run --dry-run` → `.\install-task.ps1` → `.\install-supervisor.ps1`.
+3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon, den
+   FAKTISKE registrerte scheduled-task-kommandolinjen på hosten (for å bekrefte hvilken entrypoint
+   som virkelig kjører), en observert ekte bootstrap-handoff, en ekte planlagt kjøring som fullfører
+   en ufarlig autorisert probe, og en ekte `RESTART_WORKER`-kvittering. Først da kan
+   `WORKER_SELF_RECOVERY_VERIFIED`, `SUPERVISOR_INSTALLED` og `REMOTE_RESTART_VERIFIED` settes true -
+   individuelt, aldri samlet. **Installasjon er ikke påstått fra fixtures.**
 
 Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkrete, uavhengig
 reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
-utelukkelse, og resten gjøres synlig i stedet for stille.
+utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, og resten gjøres
+synlig i stedet for stille.

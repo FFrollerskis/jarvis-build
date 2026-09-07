@@ -58,7 +58,7 @@ import {
 import { join, dirname, relative, sep } from "node:path";
 
 import { readLockRaw, classifyLock } from "./lock.mjs";
-import { matchProcessIdentity, IDENTITY, hostname } from "./procid.mjs";
+import { matchProcessIdentity, IDENTITY } from "./procid.mjs";
 
 export const DEPLOY_VERSION = 1;
 

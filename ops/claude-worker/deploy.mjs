@@ -49,7 +49,6 @@ import {
   assessQuiescence,
   readPendingActivation,
   clearPendingActivation,
-  captureQuiescenceOwners,
   runBootstrapHandoff
 } from "./lib/deploy.mjs";
 

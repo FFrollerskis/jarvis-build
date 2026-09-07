@@ -251,9 +251,17 @@ Garantier:
 - alt stages og hash-verifiseres i `staging\<versjon>\` FØR noe levende røres;
 - en levende worker- ELLER supervisor-lås gir UTSATT aktivering med en
   `pending-activation.json`-markør — ingenting overskrives, ingenting drepes.
-  `run-worker.ps1` anvender markøren ved neste tikk, altså etter at den
-  legitime forelderen har avsluttet. En installasjon startet av workeren selv
-  kan derfor aldri overskrive sin egen forelder;
+  En installasjon startet av workeren selv kan derfor aldri overskrive sin egen
+  forelder. **Markøren anvendes av den kontrollerte bootstrap-handoffen**
+  (`deploy.mjs bootstrap-handoff`), som `install.ps1` starter fra KILDETREET i
+  samme øyeblikk aktiveringen utsettes. Den venter på at den EKSAKTE legitime
+  forelder-identiteten (pid + starttid + host) avslutter av seg selv, sjekker
+  worker- og supervisor-quiescence på nytt, og aktiverer først da
+  transaksjonelt. Den dreper ingenting og rører ingen scheduled task.
+  `run-worker.ps1` sin `apply-pending` er et ANDRE nett som kun hjelper når den
+  nye runneren allerede ER den installerte entrypointen: en installasjon startet
+  av en GAMMEL deployert worker kan ikke regne med at neste scheduler-tikk
+  anvender markøren, fordi det tikket kjører den gamle filen (D-126d, funn 3);
 - hver fil skrives ved siden av målet og `rename`-es over — et entrypoint
   forsvinner aldri, ikke et øyeblikk;
 - `run-worker-safe.ps1` fjernes KUN når ingen registrert oppgave refererer den,
