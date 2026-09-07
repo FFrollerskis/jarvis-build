@@ -85,7 +85,17 @@ export const EXIT = Object.freeze({
  *
  * The D126 final review requires fault-injection tests "through the actual
  * worker entrypoint" for a state-write failure and a lost lock during
- * `onSpawn`. Those are preconditions failing INSIDE a live dispatch; there is no
+ * `onSpawn`; review F extends that to the two heartbeat callback sites, which
+ * behave differently on purpose:
+ *
+ *   spawn_state_write            - the durable identity write fails
+ *   spawn_lost_lock              - the lock is gone when the identity is recorded
+ *   first_heartbeat_throw        - the FIRST beat (second half of the gate) throws
+ *   first_heartbeat_lost_lock    - the FIRST beat reports lost ownership
+ *   periodic_heartbeat_throw     - a LATER beat throws, mid-run
+ *   periodic_heartbeat_lost_lock - a LATER beat reports lost ownership, mid-run
+ *
+ * Those are preconditions failing INSIDE a live dispatch; there is no
  * way to provoke them from outside the process without racing the spawn, and a
  * racy test proves nothing. This follows the convention `acquireLock` already
  * established with `hooks.afterClassify` - "exists so tests can stall a process
@@ -607,6 +617,7 @@ async function runTask(cfg, state, token, candidate, comments) {
   log(cfg, `Dispatching TASK_ID=${taskId} attempt ${attempts} (branch=${facts.branch}, head=${facts.head})...`);
   emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, { task_id: taskId, attempt: attempts, head: facts.head });
 
+  let beatCount = 0;
   const result = await runClaude(cfg, { ...candidate, resume, scratchDir }, {
     heartbeatMs: cfg.heartbeatSeconds * 1000,
     // BLOCKER 1: the child's identity is durable BEFORE we wait on it, so a
@@ -642,9 +653,31 @@ async function runTask(cfg, state, token, candidate, comments) {
         task_id: taskId, attempt: attempts, child_pid: identity?.pid ?? null, child_start_time: identity?.start_time ?? null
       });
     },
+    // REVIEW F, finding 3: this callback used to DISCARD the boolean.
+    // `lock.heartbeat` reports lost ownership by returning false rather than by
+    // throwing (see the explicit check in `onSpawn` above), so ignoring it made
+    // ownership loss mid-dispatch completely invisible: the run kept beating
+    // into a lock another instance had already reclaimed and still reported a
+    // healthy dispatch. The result is now returned to `runClaude`, which treats
+    // a strict `false` as a failure - fatal for the FIRST beat (the child is
+    // aborted before the task is delivered) and recorded but non-fatal for
+    // later beats, because a child doing legitimate authorized work must not be
+    // killed over our bookkeeping.
     onHeartbeat: (childPid, identity) => {
-      heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid, childIdentity: identity });
-      emitHealth(cfg.healthFile, HEALTH_EVENTS.HEARTBEAT, { task_id: taskId, child_pid: childPid });
+      // The first call is the second half of the handoff gate; every later one
+      // is a periodic renewal. The two have deliberately different consequences,
+      // so the injected faults address them separately.
+      beatCount += 1;
+      const first = beatCount === 1;
+      if (faultArmed(first ? "first_heartbeat_throw" : "periodic_heartbeat_throw")) {
+        throw new Error(`durable write failed (injected fault: ${first ? "first" : "periodic"}_heartbeat_throw)`);
+      }
+      const beatOk = !faultArmed(first ? "first_heartbeat_lost_lock" : "periodic_heartbeat_lost_lock")
+        && heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid, childIdentity: identity });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.HEARTBEAT, {
+        task_id: taskId, child_pid: childPid, lock_ownership: beatOk ? "held" : "lost"
+      });
+      return beatOk;
     }
   });
 
@@ -780,6 +813,81 @@ async function runTask(cfg, state, token, candidate, comments) {
   log(cfg, `Claude dispatch finished: outcome=${result.outcome} code=${result.code ?? "n/a"} signal=${result.signal ?? "none"}`);
   if (result.stderrTail) log(cfg, `stderr (last 2000 chars): ${result.stderrTail.slice(-2000)}`);
   if (result.error) log(cfg, `spawn error: ${result.error}`);
+
+  // --- REVIEW F: a dispatch whose heartbeats never recovered is NOT healthy ---
+  //
+  // The periodic heartbeat is what keeps this worker's claim on the lock alive.
+  // If it threw and never recovered, or if it reported LOST OWNERSHIP, then for
+  // some part of the run another instance may have believed the lock was free.
+  // The child was deliberately left alone - it was doing authorized work and
+  // killing it is never the answer here - but its exit code proves nothing about
+  // OUR bookkeeping, and this run's in-memory state is no longer authoritative.
+  //
+  // So the run fails closed: it is parked as BLOCKED, which the worker never
+  // replays on its own, rather than assessed for completion. That is the whole
+  // point - a duplicate dispatch on top of a live or just-finished child is
+  // exactly what a stale lock invites.
+  const beatHealth = result.heartbeat ?? null;
+  if (beatHealth?.unrecovered) {
+    const lostOwnership = beatHealth.ownership_lost === true;
+    const reason = lostOwnership ? "lock_ownership_lost_during_dispatch" : "heartbeat_unrecovered_during_dispatch";
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason,
+      child_pid: result.childPid ?? null,
+      outcome: result.outcome,
+      heartbeat_failures: beatHealth.failures,
+      heartbeat_ownership_lost: lostOwnership
+    });
+    log(cfg, `BLOCKED for TASK_ID=${taskId}: ${reason}. Dispatch outcome was ${result.outcome}, but `
+      + `${beatHealth.failures} heartbeat(s) failed and the last one did not recover `
+      + `(ownership_lost=${lostOwnership}). The child was NOT killed; completion is NOT claimed.`);
+    let persisted = false;
+    try {
+      upsertTask(state, taskId, {
+        status: TASK_STATUS.BLOCKED,
+        last_outcome: result.outcome,
+        last_exit_code: result.code ?? null,
+        last_child_pid: result.childPid ?? null,
+        last_dispatch_finished_at: new Date().toISOString(),
+        last_failure_reason: `${reason} (${beatHealth.last_error ?? "no detail"})`,
+        blocked_at: new Date().toISOString(),
+        heartbeat_failures: beatHealth.failures,
+        heartbeat_ownership_lost: lostOwnership,
+        // The exact identity is kept: it is what an operator needs to check
+        // whether that specific process is still around.
+        child_identity: result.childIdentity ?? null
+      });
+      state.last_run_at = new Date().toISOString();
+      persistState(cfg, state, token);
+      persisted = true;
+    } catch (err) {
+      // Expected when ownership really is gone - `persistState` refuses to write
+      // state this process no longer owns. The exit code stays truthful.
+      log(cfg, `Could not record the degraded dispatch in worker state: ${sanitize(err.message)}`);
+    }
+    try {
+      reportStatus(cfg, {
+        taskId,
+        phase: "dispatch",
+        reason,
+        detail: [
+          `The dispatch finished with outcome=${result.outcome}, but the worker lock heartbeat failed `
+            + `${beatHealth.failures} time(s) during the run and had NOT recovered when it settled.`,
+          lostOwnership
+            ? "The lock heartbeat reported LOST OWNERSHIP: another instance may have reclaimed the lock while this child was running."
+            : `Last heartbeat error: ${beatHealth.last_error ?? "unknown"}.`,
+          `Child pid ${result.childPid ?? "unknown"} was NOT terminated - it was doing authorized work, and this is a bookkeeping failure, not a reason to kill it.`,
+          "Completion was NOT assessed and NOT claimed. The task is parked as BLOCKED so no run replays it on top of that work.",
+          persisted ? "The outcome was recorded in worker state." : "Worker state could NOT be written; only this status and the exit code record the outcome."
+        ].join("\n"),
+        nextAction: "Confirm no second worker instance is running and that the lock file is writable, verify the recorded child_identity and the control issue for a posted report, then issue a FRESH TASK_ID. The worker will not replay a blocked task on its own."
+      });
+    } catch (err) {
+      log(cfg, `Could not post the degraded-heartbeat status: ${sanitize(err.message)}`);
+    }
+    return EXIT.BLOCKED;
+  }
 
   // --- completion requires EVIDENCE, never exit code alone (requirement B) ---
   heartbeat(cfg.lockFile, { token, phase: "verify", taskId });

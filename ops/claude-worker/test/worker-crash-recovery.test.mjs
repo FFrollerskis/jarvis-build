@@ -639,6 +639,159 @@ describe("finding 1: the durable child-identity handoff is an enforced gate", ()
 });
 
 /**
+ * D126 REVIEW F, through the REAL entrypoint.
+ *
+ * The gate used to end at `onSpawn`. The FIRST heartbeat - which is what puts
+ * the child's identity on the worker lock - sat outside it, so a failure there
+ * rejected `runClaude` and left a live child with no listeners, no timeout and
+ * an armed interval. The direct-module proof is in `dispatch.test.mjs`; this
+ * drives `node worker.mjs run` as its own OS process, because only that shows
+ * the exit code, the persisted state and the real child's fate together.
+ */
+describe("review F: a failing FIRST heartbeat is gated at the real entrypoint", () => {
+  for (const [fault, label] of [
+    ["first_heartbeat_throw", "a durable write failure in the first heartbeat"],
+    ["first_heartbeat_lost_lock", "lost lock ownership at the first heartbeat"]
+  ]) {
+    describe(label, () => {
+      it("never reports completion, and exits non-zero", async () => {
+        const res = await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        expect(res.code).not.toBe(0);
+        expect(res.output).toMatch(/HANDOFF FAILED/);
+        // The old behaviour: an unhandled rejection out of runClaude.
+        expect(res.output).not.toMatch(/UnhandledPromiseRejection|ERR_UNHANDLED_REJECTION/);
+        const t = task();
+        expect(t.status).not.toBe(TASK_STATUS.COMPLETED);
+        expect(t.last_outcome).toBe("handoff_failed");
+      }, 120_000);
+
+      it("never delivers the task to the child it is about to abort", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        // Zero pre-gate task effect: with stdin delivery the prompt IS the task.
+        expect(existsSync(join(claudeDir, "prompt.txt"))).toBe(false);
+      }, 120_000);
+
+      it("leaves ZERO untracked live children", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        const runningPath = join(claudeDir, "running");
+        if (!existsSync(runningPath)) return; // aborted before it announced: also fine
+        const childPid = Number(readFileSync(runningPath, "utf8"));
+        stray.push(childPid);
+        await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+        expect(isProcessAlive(childPid)).toBe(false);
+      }, 120_000);
+
+      it("records the abort verification truthfully and releases the lock", async () => {
+        await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        const t = task();
+        expect(t.handoff_child_terminated).toBe(true);
+        expect(["gone", "reused"]).toContain(t.handoff_identity_state);
+        // Not stuck IN_PROGRESS, and the next scheduled run is not locked out.
+        expect(t.status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+        expect(readLock(join(workerRoot, ".worker.lock"))).toBeNull();
+      }, 120_000);
+
+      it("starts at most one child and the next run does not duplicate it", async () => {
+        const first = await runWorker("hang", { JARVIS_WORKER_FAULT: fault });
+        expect(first.code).not.toBe(0);
+        const afterFirst = invocations().length;
+        expect(afterFirst).toBeLessThanOrEqual(1);
+
+        const runningPath = join(claudeDir, "running");
+        if (existsSync(runningPath)) {
+          const childPid = Number(readFileSync(runningPath, "utf8"));
+          stray.push(childPid);
+          await waitFor(() => !isProcessAlive(childPid), { timeoutMs: 45_000 });
+        }
+        const s = state().state;
+        s.tasks[TASK_ID].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+        saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+
+        const second = await runWorker("report");
+        expect(invocations()).toHaveLength(afterFirst + 1);
+        expect(second.code).toBe(0);
+        expect(task().status).toBe(TASK_STATUS.COMPLETED);
+      }, 180_000);
+    });
+  }
+});
+
+/**
+ * D126 REVIEW F, the PERIODIC callback at the real entrypoint.
+ *
+ * `mode=report-slow` posts a genuine trusted CLAUDE_REPORT and then exits 0
+ * after outliving one heartbeat interval. Every ordinary signal therefore says
+ * "healthy": exit 0, matching report, HEAD as expected. The only thing wrong is
+ * the worker's OWN bookkeeping - and that must be enough to stop it claiming
+ * completion, without an uncaught crash and without killing the child.
+ */
+describe("review F: a failing PERIODIC heartbeat fails closed at the real entrypoint", () => {
+  // heartbeatSeconds is 5 in this fixture's config and its minimum is 5, so the
+  // child must live past that for a periodic beat to exist at all.
+  const SLOW = { JARVIS_FAKE_CLAUDE_LINGER_MS: "7000" };
+
+  for (const [fault, reason] of [
+    ["periodic_heartbeat_throw", "heartbeat_unrecovered_during_dispatch"],
+    ["periodic_heartbeat_lost_lock", "lock_ownership_lost_during_dispatch"]
+  ]) {
+    describe(fault, () => {
+      it("does not crash the worker on an uncaught exception", async () => {
+        const res = await runWorker("report-slow", { ...SLOW, JARVIS_WORKER_FAULT: fault });
+        // A throw inside a setInterval callback used to be fatal to the process.
+        expect(res.output).not.toMatch(/UnhandledPromiseRejection|ERR_UNHANDLED_REJECTION/);
+        expect(res.output).not.toMatch(/Uncaught|uncaughtException/);
+        expect(res.code).toBe(3); // EXIT.BLOCKED - a deliberate, truthful outcome
+      }, 120_000);
+
+      it("does NOT claim completion even though the child exited 0 with a real report", async () => {
+        await runWorker("report-slow", { ...SLOW, JARVIS_WORKER_FAULT: fault });
+        // The evidence a healthy run would have used really is there.
+        expect(existsSync(join(claudeDir, "report-posted"))).toBe(true);
+        expect(comments().some((c) => c.body.includes("CLAUDE_REPORT"))).toBe(true);
+        const t = task();
+        expect(t.status).not.toBe(TASK_STATUS.COMPLETED);
+        expect(t.status).toBe(TASK_STATUS.BLOCKED);
+        expect(t.last_outcome).toBe("completed_exit_0");
+        expect(t.last_failure_reason).toMatch(new RegExp(reason));
+      }, 120_000);
+
+      it("leaves the child alone: it was doing legitimate authorized work", async () => {
+        await runWorker("report-slow", { ...SLOW, JARVIS_WORKER_FAULT: fault });
+        // The task WAS delivered and the child ran it to completion; the gate
+        // had already passed, so withholding or killing would be wrong here.
+        expect(existsSync(join(claudeDir, "prompt.txt"))).toBe(true);
+        expect(invocations()).toHaveLength(1);
+      }, 120_000);
+
+      it("records the heartbeat failure truthfully and blocks replay", async () => {
+        const res = await runWorker("report-slow", { ...SLOW, JARVIS_WORKER_FAULT: fault });
+        expect(res.output).toMatch(new RegExp(`BLOCKED for TASK_ID=${TASK_ID}: ${reason}`));
+        expect(res.output).toMatch(/The child was NOT killed; completion is NOT claimed/);
+        const t = task();
+        expect(t.heartbeat_failures).toBeGreaterThan(0);
+        expect(t.heartbeat_ownership_lost).toBe(fault === "periodic_heartbeat_lost_lock");
+        expect(t.blocked_at).toBeTruthy();
+
+        // BLOCKED is never replayed on its own: a second run must not start a
+        // second Claude on top of work that may already have landed.
+        const second = await runWorker("report");
+        expect(invocations()).toHaveLength(1);
+        expect(second.code).toBe(0);
+        expect(task().status).toBe(TASK_STATUS.BLOCKED);
+      }, 180_000);
+    });
+  }
+
+  it("an unfaulted slow child is still completed normally", async () => {
+    const res = await runWorker("report-slow", SLOW);
+    // The control: the fail-closed branch must not fire on a healthy long run.
+    expect(res.code).toBe(0);
+    expect(task().status).toBe(TASK_STATUS.COMPLETED);
+    expect(invocations()).toHaveLength(1);
+  }, 120_000);
+});
+
+/**
  * D126 ADDENDUM ITEM 4, through the REAL entrypoint.
  *
  * The direct-module coverage lives in `dispatch.test.mjs`. These drive

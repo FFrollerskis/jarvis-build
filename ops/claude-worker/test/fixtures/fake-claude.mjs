@@ -7,6 +7,10 @@
  *   - posts a report then hangs (mode=report-hang)  - the crash-after-report case
  *   - posts a report and exits  (mode=report)       - the happy path
  *   - exits non-zero            (mode=fail)
+ *   - posts a report, stays alive for JARVIS_FAKE_CLAUDE_LINGER_MS, then exits 0
+ *     (mode=report-slow) - a child that outlives at least one heartbeat interval,
+ *     which is the only way to reach the PERIODIC heartbeat callback through the
+ *     real entrypoint (D126 review F)
  *
  * It deliberately keeps running when its parent is killed, which is exactly the
  * situation the worker must survive without starting a second Claude. That means
@@ -35,6 +39,10 @@ writeFileSync(join(DIR, "child.pid"), String(process.pid), "utf8");
 writeFileSync(join(DIR, "argv.json"), JSON.stringify(process.argv), "utf8");
 
 const hangs = MODE === "hang" || MODE === "report-hang";
+// A bounded version of "hang": long enough for a periodic heartbeat to fire,
+// short enough that the dispatch still settles on its own.
+const lingers = MODE === "report-slow";
+const LINGER_MS = Number(process.env.JARVIS_FAKE_CLAUDE_LINGER_MS ?? 8000);
 let keepAlive = null;
 if (hangs) {
   // Announce liveness immediately so the test can grab the pid and kill the
@@ -55,8 +63,15 @@ function act() {
   if (MODE === "fail") {
     process.exit(7);
   }
-  if (MODE === "report" || MODE === "report-hang") {
+  if (MODE === "report" || MODE === "report-hang" || MODE === "report-slow") {
     postReport();
+  }
+  if (lingers) {
+    // Stay alive on purpose. The report is already posted and the exit will be
+    // a clean 0, so the worker has every reason to call the run healthy - which
+    // is exactly what must NOT happen when its own heartbeat broke meanwhile.
+    setTimeout(() => process.exit(0), LINGER_MS);
+    return;
   }
   if (!hangs) {
     process.exit(0);

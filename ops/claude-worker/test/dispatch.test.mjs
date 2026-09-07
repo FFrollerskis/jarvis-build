@@ -139,7 +139,261 @@ describe("finding 1: a failed handoff is never a completion", () => {
       spawnImpl: () => { setTimeout(() => child.emit("close", 0, null), 5); return child; }
     });
     await promise;
+    // The first heartbeat is the second half of the gate, so it lands between
+    // the identity record and the prompt - never after it.
     expect(order).toEqual(["onSpawn:14", "prompt"]);
+  });
+});
+
+/**
+ * D126 REVIEW F, finding 1: the gate covered `onSpawn` but not `onHeartbeat`.
+ *
+ * The architect injected a throwing `onHeartbeat` together with a successful
+ * `onSpawn` into the real `runClaude` and got:
+ *
+ *   {"rejected":"heartbeat persistence failed","kills":0,"writes":0,
+ *    "closeListeners":0,"errorListeners":0}
+ *
+ * Every number in that object is a separate defect: the promise REJECTED rather
+ * than resolving to an outcome, nothing was killed, and the live child had no
+ * `close` or `error` listener because the immediate call sat ABOVE the listener
+ * setup. `writes: 0` is the one reassuring number - the prompt had not been
+ * delivered - and it must stay 0.
+ */
+describe("review F: a failing IMMEDIATE heartbeat is a failed handoff, not a rejection", () => {
+  function runImmediateFailure(overrides = {}, cfg = CFG) {
+    const child = overrides.child ?? fakeChild();
+    const seen = { closeListeners: null, errorListeners: null };
+    const opts = {
+      spawnImpl: () => child,
+      identityImpl: () => IDENT,
+      matchImpl: () => ({ state: IDENTITY.GONE, reason: "pid 14 no longer exists" }),
+      onSpawn: () => {},
+      onHeartbeat: () => {
+        seen.closeListeners = child.listenerCount("close");
+        seen.errorListeners = child.listenerCount("error");
+        throw new Error("heartbeat persistence failed");
+      },
+      heartbeatMs: 10_000,
+      abortTermGraceMs: 30,
+      abortDeadlineMs: 900,
+      ...overrides
+    };
+    delete opts.child;
+    return { child, seen, promise: runClaude(cfg, TASK, opts) };
+  }
+
+  it("does not reject: it resolves to HANDOFF_FAILED", async () => {
+    let rejection = null;
+    const { promise } = runImmediateFailure();
+    const res = await promise.catch((err) => { rejection = err; return null; });
+    // "rejected":"heartbeat persistence failed" - gone.
+    expect(rejection).toBeNull();
+    expect(res.outcome).toBe(OUTCOME.HANDOFF_FAILED);
+    expect(res.outcome).not.toBe(OUTCOME.COMPLETED_EXIT_0);
+    expect(res.code).toBeUndefined();
+    expect(res.error).toMatch(/heartbeat persistence failed/);
+    // Which half of the handoff broke, so the caller is not left guessing.
+    expect(res.handoff.stage).toBe("first_heartbeat");
+  });
+
+  it("the child IS cleaned up: kills is no longer 0", async () => {
+    const { child, promise } = runImmediateFailure();
+    const res = await promise;
+    expect(child.signals[0]).toBe("SIGTERM");
+    expect(child.signals.length).toBeGreaterThan(0);
+    expect(res.handoff.aborted).toBe(true);
+    expect(res.handoff.child_terminated).toBe(true);
+    expect(res.handoff.untracked_child_live).toBe(false);
+  });
+
+  it("the close and error listeners are already attached when the callback runs", async () => {
+    const { seen, promise } = runImmediateFailure();
+    await promise;
+    // "closeListeners":0,"errorListeners":0 - both were zero because the
+    // immediate call ran above the listener setup. They are now non-zero.
+    expect(seen.closeListeners).toBeGreaterThan(0);
+    expect(seen.errorListeners).toBeGreaterThan(0);
+  });
+
+  it("delivers ZERO prompt bytes - the pre-gate task effect stays at nothing", async () => {
+    const { child, promise } = runImmediateFailure();
+    await promise;
+    expect(child.stdinPayload).toBeUndefined();
+    expect(child.stdinEnded).toBe(false);
+  });
+
+  it("leaves no heartbeat interval armed for a child that was aborted", async () => {
+    let calls = 0;
+    const { promise } = runImmediateFailure({
+      heartbeatMs: 5,
+      onHeartbeat: () => { calls += 1; throw new Error("heartbeat persistence failed"); }
+    });
+    await promise;
+    const atSettle = calls;
+    await new Promise((r) => setTimeout(r, 80));
+    // The interval used to be created BEFORE the immediate call and survived the
+    // rejection. There must be exactly one call ever: the gate's own.
+    expect(atSettle).toBe(1);
+    expect(calls).toBe(atSettle);
+  });
+
+  it("leaves no timeout timer armed after the abort settles", async () => {
+    // 60 ms timeout: it would fire well after the ~40 ms abort if it survived.
+    const { child, promise } = runImmediateFailure({}, { ...CFG, claudeTimeoutMinutes: 0.001 });
+    await promise;
+    const atSettle = [...child.signals];
+    await new Promise((r) => setTimeout(r, 250));
+    expect(child.signals).toEqual(atSettle);
+  });
+
+  it("preserves the EXACT captured identity, never a bare pid", async () => {
+    const { promise } = runImmediateFailure({
+      child: fakeChild({ diesOnSignal: false }),
+      matchImpl: () => ({ state: IDENTITY.MATCH, reason: "pid 14 is still the same process" })
+    });
+    const res = await promise;
+    expect(res.childIdentity).toEqual(IDENT);
+    expect(res.handoff.untracked_child_live).toBe(true);
+    expect(res.handoff.identity_state).toBe(IDENTITY.MATCH);
+  });
+
+  /**
+   * `lock.heartbeat` reports LOST OWNERSHIP by returning false, not by throwing.
+   * An ignored return value is exactly how that became invisible.
+   */
+  it("a strict false from the first heartbeat fails the gate just like a throw", async () => {
+    const { child, promise } = runImmediateFailure({ onHeartbeat: () => false });
+    const res = await promise;
+    expect(res.outcome).toBe(OUTCOME.HANDOFF_FAILED);
+    expect(res.handoff.stage).toBe("first_heartbeat");
+    expect(res.heartbeat.ownership_lost).toBe(true);
+    expect(res.error).toMatch(/lost ownership/);
+    expect(child.stdinPayload).toBeUndefined();
+    expect(child.signals[0]).toBe("SIGTERM");
+  });
+
+  it("an ordinary undefined return is a SUCCESS, not a failure", async () => {
+    const child = fakeChild();
+    const res = await runClaude(CFG, TASK, {
+      spawnImpl: () => { setTimeout(() => child.emit("close", 0, null), 5); return child; },
+      identityImpl: () => IDENT,
+      onSpawn: () => {},
+      onHeartbeat: () => undefined,
+      heartbeatMs: 10_000
+    });
+    expect(res.outcome).toBe(OUTCOME.COMPLETED_EXIT_0);
+    expect(res.heartbeat.degraded).toBe(false);
+    expect(res.heartbeat.unrecovered).toBe(false);
+    expect(res.heartbeat.succeeded).toBe(1);
+    expect(child.stdinPayload).toBe(buildPrompt(CFG, TASK));
+  });
+
+  it("an onSpawn failure is still attributed to the identity record, not the heartbeat", async () => {
+    const { promise } = run({ onSpawn: () => { throw new Error("durable write failed"); } });
+    const res = await promise;
+    expect(res.handoff.stage).toBe("identity_record");
+    // The heartbeat was never even attempted for a child that failed earlier.
+    expect(res.heartbeat.attempted).toBe(0);
+  });
+});
+
+/**
+ * D126 REVIEW F, finding 2: the PERIODIC callback had no exception boundary at
+ * all. A throw inside a `setInterval` callback is an uncaught exception - it
+ * does not reject the dispatch promise, it takes the whole worker process down
+ * mid-dispatch, orphaning a live child.
+ *
+ * The constraint is two-sided: no crash and no false healthy claim, but also no
+ * killing of a child that is doing legitimate authorized work.
+ */
+describe("review F: a failing PERIODIC heartbeat neither crashes nor claims health", () => {
+  /** A child that stays alive across several beats, then exits cleanly. */
+  function runPeriodic({ onHeartbeat, liveMs = 90, heartbeatMs = 10 }) {
+    const child = fakeChild();
+    return {
+      child,
+      promise: runClaude(CFG, TASK, {
+        spawnImpl: () => { setTimeout(() => child.emit("close", 0, null), liveMs); return child; },
+        identityImpl: () => IDENT,
+        matchImpl: () => ({ state: IDENTITY.GONE, reason: "pid 14 no longer exists" }),
+        onSpawn: () => {},
+        onHeartbeat,
+        heartbeatMs
+      })
+    };
+  }
+
+  it("a throwing periodic beat does not reject and does not kill the child", async () => {
+    let rejection = null;
+    let calls = 0;
+    const { child, promise } = runPeriodic({
+      onHeartbeat: () => { calls += 1; if (calls > 1) throw new Error("durable write failed"); }
+    });
+    const res = await promise.catch((err) => { rejection = err; return null; });
+    expect(rejection).toBeNull();
+    expect(calls).toBeGreaterThan(1);
+    // The child was doing real work. Bookkeeping failure is not a death warrant.
+    expect(child.signals).toEqual([]);
+    // The task WAS delivered - the gate had already passed.
+    expect(child.stdinPayload).toBe(buildPrompt(CFG, TASK));
+    // The exit code is reported truthfully...
+    expect(res.outcome).toBe(OUTCOME.COMPLETED_EXIT_0);
+    // ...but the run is NOT presented as healthy.
+    expect(res.heartbeat.degraded).toBe(true);
+    expect(res.heartbeat.unrecovered).toBe(true);
+    expect(res.heartbeat.failures).toBeGreaterThan(0);
+    expect(res.heartbeat.last_error).toMatch(/durable write failed/);
+  });
+
+  it("a periodic failure that RECOVERS is degraded but not unrecovered", async () => {
+    let calls = 0;
+    const { promise } = runPeriodic({
+      // Fail only the second beat; every later one succeeds again.
+      onHeartbeat: () => { calls += 1; if (calls === 2) throw new Error("transient disk hiccup"); }
+    });
+    const res = await promise;
+    expect(res.heartbeat.failures).toBe(1);
+    expect(res.heartbeat.degraded).toBe(true);
+    // It came back before the dispatch settled, so the lock was ours at the end.
+    expect(res.heartbeat.consecutive_failures).toBe(0);
+    expect(res.heartbeat.unrecovered).toBe(false);
+    expect(res.heartbeat.ownership_lost).toBe(false);
+  });
+
+  it("ownership lost on a later beat is sticky, stops the beating, and never recovers", async () => {
+    let calls = 0;
+    const { child, promise } = runPeriodic({
+      onHeartbeat: () => { calls += 1; return calls === 1 ? true : false; }
+    });
+    const res = await promise;
+    // Beat 1 (the gate) succeeded; beat 2 reported lost ownership and the
+    // interval stopped rather than failing on a fixed schedule forever.
+    expect(calls).toBe(2);
+    expect(res.heartbeat.ownership_lost).toBe(true);
+    expect(res.heartbeat.unrecovered).toBe(true);
+    expect(res.outcome).toBe(OUTCOME.COMPLETED_EXIT_0);
+    // Still no killing of legitimate work.
+    expect(child.signals).toEqual([]);
+  });
+
+  it("a fully healthy run reports no degradation at all", async () => {
+    const { promise } = runPeriodic({ onHeartbeat: () => true });
+    const res = await promise;
+    expect(res.heartbeat.degraded).toBe(false);
+    expect(res.heartbeat.unrecovered).toBe(false);
+    expect(res.heartbeat.ownership_lost).toBe(false);
+    expect(res.heartbeat.failures).toBe(0);
+    expect(res.heartbeat.succeeded).toBe(res.heartbeat.attempted);
+  });
+
+  it("beating stops once the dispatch has settled", async () => {
+    let calls = 0;
+    const { promise } = runPeriodic({ onHeartbeat: () => { calls += 1; }, liveMs: 45 });
+    await promise;
+    const atSettle = calls;
+    await new Promise((r) => setTimeout(r, 80));
+    expect(calls).toBe(atSettle);
   });
 });
 

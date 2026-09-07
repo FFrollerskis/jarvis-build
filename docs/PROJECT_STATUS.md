@@ -8,17 +8,17 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 6: `D126-D-ADDENDUM-CLOSEOUT-20260907-E`** (byggeordre
-5571297930 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, `TASK_TYPE=BOUNDED_UNFULFILLED_REVIEW_
-CONTINUATION` mot addendum-kommentar 5569563886). Samme branch, samme PR #75.
+**Infrastrukturreparasjon, review-runde 7: `D126-HEARTBEAT-CI-CLOSEOUT-20260907-F`** (byggeordre
+5574439334 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`,
+`TASK_TYPE=BOUNDED_REVIEW_FIX_AND_EVIDENCE_RECONCILIATION`, base-HEAD `3734c0e`).
+Samme branch, samme PR #75.
 **Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
 Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126, D-126a til D-126e i DECISIONS_AND_ASSUMPTIONS.md.
+Full begrunnelse: D-126, D-126a til D-126f i DECISIONS_AND_ASSUMPTIONS.md.
 
-Runde 5 rettet de TRE opprinnelige funnene og rapporterte dem (kommentar 5569790727), men de TO
-addendum-kravene (punkt 4 og 5 i kommentar 5569563886) sto igjen uimplementert på `df5c7be`.
-Arkitekten verifiserte dette mot faktisk kilde; CI-kjøring 34114575086 var grønn, men grønn CI
-lukker ikke kildenivå-blokkere. Runde 6 lukker nøyaktig de to - ingenting annet.
+Runde 7 lukker nøyaktig tre ting: den gjenstående defekten i dispatch-ens feilbane (heartbeat-
+callbackene lå utenfor handoff-gaten), en CI-divergens på SAMME SHA som måtte diagnostiseres i
+stedet for kjøres bort, og en read-only rekonsiliering av host-sannhet. Ingenting annet.
 
 ## Runde 1 (v2) - hva som ble reparert
 
@@ -200,10 +200,100 @@ re-sjekker deretter quiescence. Den terminerer aldri noe, substituerer aldri en 
 fanget eier, og lar markøren ligge ved enhver nekting. `assessQuiescence` behandler nå også en
 lesefeil som blocker i stedet for som fravær.
 
+## Runde 7 (v2.6) - heartbeat-callbackene, CI-divergensen og host-sannheten
+
+**Funn 1 (kilde) - gaten var definert av ÉN funksjon, ikke av egenskapen.** Handoff-gaten dekket
+`onSpawn`, men ikke de to `onHeartbeat`-stedene, og de feiler på tre ulike måter:
+
+- **1a - det umiddelbare kallet lå utenfor try/catch OG over listener-oppsettet.** `dispatch.mjs`
+  kalte `onHeartbeat` rett etter en vellykket `onSpawn`, men før `finish`, `close`-/`error`-
+  listenerne og timeout-timeren i det hele tatt fantes. En exception der slapp ut av Promise-
+  executoren, så `runClaude` REJECTED med et levende barn som ingenting kunne settle. Arkitektens
+  repro mot faktisk `runClaude`:
+
+  ```
+  3734c0e: {"rejected":"heartbeat persistence failed","kills":0,"writes":0,
+            "closeListeners":0,"errorListeners":0}
+  v2.6:    {"outcome":"handoff_failed","handoff":{"stage":"first_heartbeat","aborted":true,
+            "child_terminated":true},"stdinPayload":undefined,"signals":["SIGTERM"]}
+  ```
+
+  `writes:0` var den ENESTE gode verdien der, og den er bevart: prompten - som ER oppgaven - leveres
+  fortsatt aldri.
+- **1b - tapt eierskap var usynlig.** `lock.heartbeat` rapporterer tapt eierskap ved å returnere
+  `false`, ikke ved å kaste. `onSpawn` sjekket dette eksplisitt; `onHeartbeat` i `worker.mjs` kastet
+  returverdien.
+- **1c - den periodiske callbacken hadde ingen exception-grense.** En throw i en `setInterval`-
+  callback er en uncaught exception som river ned hele workeren midt i dispatch.
+
+Rettet: hele settlement-apparatet settes opp FØR handoffen; den første heartbeaten er nå andre
+halvdel av gaten inne i samme try/catch (både throw og strikt `false` gir bundet, identitets-sikker
+`HANDOFF_FAILED` med `handoff.stage`); intervallet opprettes først når gaten har passert; den
+periodiske callbacken har egen grense som REGISTRERER feil i `result.heartbeat` og aldri dreper
+barnet - et barn som gjør ekte autorisert arbeid henrettes ikke for vår bokføring. `worker.mjs`
+returnerer nå heartbeat-resultatet og feiler LUKKET på `heartbeat.unrecovered`: `BLOCKED` (exit 3)
+med bevart `child_identity`, selv når barnet avsluttet med 0 og postet en ekte betrodd rapport.
+
+**Funn 2 (CI) - to kjøringer, samme SHA, ulikt resultat.** Kjøring 34132097909 (`event: push`) feilet
+på `apps/api/test/fase3-e2e.test.ts:479`; 34132101745 (`event: pull_request`) var grønn. BEGGE på
+`headSha=3734c0e`, samme workflow, samme `ubuntu-24.04`. Det er per definisjon ikke en checkout-
+eller event-kontekstforskjell. Diagnose mot faktisk kilde:
+
+- `SessionService.resumeOrCreate` velger aktiv sesjon på `tenant_id`+`person_id` ALENE
+  (`session-service.ts:29-34`), så `dev-web` og `dev-voice` deler sesjon og meldingshistorikk.
+- `ScriptedAdapter` er deterministisk gitt sin request; det eneste ikke-deterministiske inputet er
+  historikken. `conversation.ts:164-168` sender `context.history.slice(-20)`, og tool-scriptet ser
+  KUN på `messages.at(-1)`.
+- Testen rett foran (§8.D, linje 436) avbryter en SSE-strøm etter 2 tokens. Serversiden lagrer da
+  `"… [avbrutt av bruker]"` (`conversation.ts:230`) i en skrivning testen ALDRI venter på. Lander den
+  etter neste tests brukermelding, er siste historikk-melding ikke lenger kalenderspørsmålet, tool-
+  kallet uteblir, og runde 1s standardtekst returneres - nøyaktig
+  `expected 'Hei Tobias, dette er et modellsvar.' to contain 'standup 09:00'`.
+
+Dette er en **test-synkroniseringsdefekt**, ikke en produktdefekt i tool-broen. Ingen assertion er
+svekket, ingen rerun-until-green, og **ingen produktendring er gjort** - foreslått bundet scope
+ligger til uavhengig review (se `CLAUDE_REPORT`). **Sannferdig om reproduksjon:** 7 lokale kjøringer
+av filen på denne HEAD ga 18/18 hver gang. Racet ble IKKE reprodusert lokalt, og det påstås ikke.
+
+**Funn 3 (host) - rekonsiliert READ-ONLY.** `install-manifest.json` for deployment `20260907-140934`
+er lest. De registrerte `new_sha256` for `worker.mjs`, `supervisor.mjs` og `lib/dispatch.mjs` er
+bit-identiske med `git show 3734c0e:`-versjonene; `task_intents` viser `JarvisClaudeWorker`
+`replaced` (bekreftet 14:11:19Z) og `JarvisWorkerSupervisor` `introduced` (bekreftet 14:11:28Z).
+Workerloggen viser ubrutt 5-minutters kø-polling 14:16:20Z → 18:26:20Z, og at DEN DEPLOYERTE
+workeren dispatchet denne oppgaven 18:31:20Z på `head=3734c0e`. De utdaterte påstandene «ikke
+installert» / «hosten kjører v1» er dermed rettet nedenfor. **Merk:** den deployerte
+`lib/dispatch.mjs` er pre-fix - rettelsen i denne runden er IKKE deployert.
+
+**Presist nektet, ikke omgått:** `sha256sum` mot de installerte filene og `schtasks /query` ble
+nektet av øktens tillatelseslag. Manifest-hashene er derfor manifest-REGISTRERTE, ikke re-hashede
+bytes på disk. Ingen installasjon, aktivering, restart, reboot eller task-reregistrering er utført.
+
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **`npx vitest run ops/claude-worker/test` → 15 filer / 387 tester passed, kjørt TO ganger,
-  387/387 begge ganger** (359 → 387; 28 nye i runde 6). Nye tester i runde 6:
+- **`npx vitest run ops/claude-worker/test` → 15 filer / 421 tester passed, kjørt TO ganger,
+  421/421 begge ganger** (387 → 421; 34 nye i runde 7). Nye tester i runde 7:
+  - `dispatch.test.mjs` (21 → 36), direkte modulkall: arkitektens repro RESOLVER nå til
+    `HANDOFF_FAILED` i stedet for å reject-e; `handoff.stage=first_heartbeat`; barnet SIGTERM-es
+    (`kills` er ikke lenger 0); `close`- og `error`-listenerne er allerede tilkoblet NÅR callbacken
+    kjører (begge var 0); null prompt-bytes (`stdinEnded=false`); ingen armert heartbeat-intervall og
+    ingen armert timeout-timer etter abort; eksakt identitet bevart ved `MATCH`; strikt `false` fra
+    første beat feiler gaten akkurat som en throw; `undefined` er fortsatt SUKSESS; og for den
+    periodiske banen: en throw rejecter ikke og dreper ikke barnet, oppgaven ER levert, utfallet
+    rapporteres sannferdig som `completed_exit_0` MEN med `heartbeat.unrecovered=true`; en feil som
+    kommer seg er `degraded` men ikke `unrecovered`; tapt eierskap er sticky og stopper beatingen; en
+    helt frisk kjøring rapporterer null degradering; beatingen stopper når dispatchen settler.
+  - `worker-crash-recovery.test.mjs` (37 → 56), EKTE entrypoint som OS-prosess: fire nye
+    fault-injections (`first_heartbeat_throw`, `first_heartbeat_lost_lock`,
+    `periodic_heartbeat_throw`, `periodic_heartbeat_lost_lock`). Første-beat-feil gir non-zero exit,
+    `HANDOFF FAILED`, ingen `UnhandledPromiseRejection`, ingen `prompt.txt`, null usporede levende
+    barn, sannferdig abort-verifisering, frigjort lås og nøyaktig én ny dispatch etterpå. Periodisk
+    feil bruker ny fixture-modus `report-slow`: barnet POSTER en ekte betrodd `CLAUDE_REPORT` og
+    avslutter med 0 etter å ha overlevd ett heartbeat-intervall - workeren krasjer ikke, dreper ikke
+    barnet, og parkerer likevel `BLOCKED` (exit 3) med `heartbeat_failures`/`heartbeat_ownership_lost`
+    registrert, og en påfølgende kjøring starter ingen ny Claude. Kontrolltest: en UFAULTET treg
+    kjøring fullfører normalt, så fail-closed-grenen fyrer ikke på en frisk lang kjøring.
+
+  Historikk fra runde 6, uendret (359 → 387):
   - `dispatch.test.mjs` (11 → 21): `stdin` er hele det aksepterte settet; direkte modulkall med
     `argv`, `carrier-pigeon`, `""`, `null` og `undefined` spawner INGENTING (`spawned=0`,
     `promptBuilt=false`, aldri `completed_exit_0`); prompten er aldri i argv; og for HVER akseptert
@@ -307,7 +397,10 @@ Historikk fra runde 3, uendret:
     poll, budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet kvittering,
     bevart utsettelse fra travel til ledig;
   - `config.test.mjs` (26), `git.test.mjs` (13), `recovery.test.mjs` (20).
-- `npx eslint ops/claude-worker`: **rent** (kjørt på nytt i runde 6).
+- `pnpm lint` (eslint på hele repoet): **rent** (runde 7).
+- `pnpm typecheck` (alle workspace-pakker): **rent, exit 0** (runde 7).
+- `npx vitest run apps/api/test/fase3-e2e.test.ts` kjørt **7 ganger** på denne HEAD: **18/18 hver
+  gang.** CI-racet ble IKKE reprodusert lokalt; det påstås ikke å være borte, det er diagnostisert.
 - `node --check` på alle endrede `.mjs`-moduler og `JSON.parse` på `config.example.json`: **rent.**
 - **Ekte PowerShell-AST-parsing ble IKKE kjørt, og CI-jobben kunne ikke pushes. To uavhengige,
   presist nektede operasjoner:**
@@ -325,18 +418,31 @@ Historikk fra runde 3, uendret:
   **Ingenting er utelatt stille**, og ingen påstand om «alle scripts parser» gjøres uten den kjøringen.
   Statisk kontroll som FAKTISK ble kjørt: alle 8 `.ps1` er ren ASCII uten kontrolltegn (byte-nivå),
   og alle 19 `.mjs` er `node --check`-rene.
-- Full produktsuite ble ikke kjørt lokalt (endringene rører ingen produktkode; utenfor `ops/` er kun
-  dokumentasjon endret - `.github/` er URØRT, se den nektede push-operasjonen over). CI på eksakt endelig HEAD rapporteres i
-  `CLAUDE_REPORT` på issue #68.
+- Full produktsuite ble ikke kjørt lokalt i sin helhet (endringene rører ingen produktkode; utenfor
+  `ops/` er kun dokumentasjon endret - `.github/` er URØRT, se den nektede push-operasjonen over).
+  Den ENE filen CI-divergensen gjaldt er kjørt lokalt 7 ganger, se over. CI på eksakt endelig HEAD
+  rapporteres i `CLAUDE_REPORT` på issue #68.
 
-## Flagg-status - alt uverifisert til det er bevist på hosten
+## Flagg-status - oppdatert mot faktisk host-bevis i runde 7
 
-`WORKER_SELF_RECOVERY_VERIFIED=false` · `SUPERVISOR_INSTALLED=false` ·
-`REMOTE_RESTART_VERIFIED=false` · `REBOOT_PERSISTENCE=UNVERIFIED` ·
-`SOURCE_CHANGED=true` · `DEPLOYED_TO_HOST=false` · `ARCHITECT_MERGE_APPROVED=false`.
+`DEPLOYED_TO_HOST=true` · `SUPERVISOR_INSTALLED=true` · `REMOTE_RESTART_VERIFIED=true` ·
+`WORKER_SELF_RECOVERY_VERIFIED=false` · `REBOOT_PERSISTENCE=UNVERIFIED` ·
+`SOURCE_CHANGED=true` · `ARCHITECT_MERGE_APPROVED=false`.
 
-**Kildeendring er IKKE deployment.** Den kjørende workeren på hosten er fortsatt v1 med alle de
-opprinnelige feilene. Ingenting er installert, registrert eller startet av denne økten.
+**Hva de tre true-flaggene faktisk betyr - ikke mer:**
+
+- `DEPLOYED_TO_HOST=true`: deployment `20260907-140934`, manifest-registrerte `new_sha256` for
+  `worker.mjs`/`supervisor.mjs`/`lib/dispatch.mjs` er bit-identiske med `git show 3734c0e:`.
+- `SUPERVISOR_INSTALLED=true`: `JarvisWorkerSupervisor` `introduced`/`confirmed` 14:11:28Z, og
+  supervisoren har postet en ekte `SUPERVISOR_RECEIPT` på issue #68.
+- `REMOTE_RESTART_VERIFIED=true`: KUN kommandert start av en FRISK worker - supervisor-kvittering
+  14:15:23Z fulgt av kø-poll 14:15:24.949Z. Kvitteringen selv sier at den ikke er beviset; polleren
+  er det. **Ingen prosess ble terminert, så dette er ikke crash recovery.**
+
+**Fortsatt ubevist, og påstås ikke:** automatisk crash recovery (ingen krasj er indusert), reboot-
+persistens, en post-restart probe med ACK+REPORT, og full E2E PASS. **Den deployerte
+`lib/dispatch.mjs` er pre-fix** - heartbeat-rettelsen i runde 7 er IKKE deployert. Ingenting er
+installert, registrert, startet, restartet eller reregistrert av denne økten.
 
 Uendret av denne oppgaven: `UA7_COMPLETE=false`, `UA7_ACCEPTANCE_4=PARTIAL`,
 `Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `D108_COMPLETE=false`, `UA6_COMPLETE=false`,
@@ -357,9 +463,13 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
   `ops/claude-worker/ci/worker-scripts-windows.job.yml` og må limes inn i
   `.github/workflows/ci.yml` av noen med det scopet. Dette er en ekstern tilgangsblokkering, ikke et
   utelatt krav.
-- **Installasjon og aktivering avventer bevisst fersk uavhengig arkitekt-review** av den rettede
-  diffen. Ingen merge, ingen live aktivering før det. Ingenting er installert eller restartet på
-  Windows-hosten av denne økten.
+- **Ny deployment av heartbeat-rettelsen avventer bevisst fersk uavhengig arkitekt-review.** Hosten
+  kjører nå D-126-koden fra `3734c0e` (bevist i runde 7), men den er PRE-FIX for denne rundens
+  dispatch-korreksjon. Ingen merge, ingen installasjon, ingen restart/reboot/reregistrering utført av
+  denne økten - en senere, uavhengig gjennomgått oppgave må autorisere oppdatert deployment + probe.
+- **Åpen, ikke-autorisert i denne runden: test-synkroniseringsdefekten i `fase3-e2e.test.ts`.**
+  Diagnostisert (se runde 7 over), men bevisst IKKE rettet - byggeordren krever uavhengig review av
+  et eventuelt separat produkt-/testscope først. Foreslått bundet scope ligger i `CLAUDE_REPORT`.
 - `HARD_EXTERNAL_BLOCKER=true`, `BLOCKER_SCOPE=WINDOWS_HOST_VERIFICATION_AND_LATER_INSTALLATION_ONLY`.
   Blokkeringen gjelder PowerShell-/Task Scheduler-verifisering på hosten og senere installasjon;
   den blokkerer ikke kildekorreksjonene over, og den er ikke omgått.
@@ -384,4 +494,6 @@ Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkre
 reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
 utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, runde 6 de to
 uoppfylte addendum-kravene (argv-levering uten pre-execution-gate, og en bootstrap-handoff som kunne
-forlate en utsatt legacy-installasjon), og resten gjøres synlig i stedet for stille.
+forlate en utsatt legacy-installasjon), runde 7 de tre heartbeat-callback-stedene som lå utenfor
+handoff-gaten - og resten gjøres synlig i stedet for stille. At denne bundne oppgaven er ferdig
+betyr IKKE at de gjenstående gruppene i den opprinnelige gjennomgangen er godkjent.

@@ -29,6 +29,24 @@
  * genuinely withholds the task. The rejection is enforced here as well as in
  * `config.mjs`, so a DIRECT module call cannot bypass configuration validation,
  * and it happens BEFORE the prompt is built and before any process is created.
+ *
+ * D126 review F: the handoff gate covered `onSpawn` but not the HEARTBEAT
+ * callbacks, and there are three distinct sites.
+ *
+ *  a) The immediate `onHeartbeat` after a successful `onSpawn` sat outside the
+ *     try/catch AND above the listener/timeout setup. A throw escaped the
+ *     Promise executor, so `runClaude` rejected while a live child had no
+ *     `close` listener, no `error` listener, no timeout and a still-armed
+ *     interval. It is now the second half of the gate, inside the same
+ *     boundary, with every settlement path already wired up.
+ *  b) `lock.heartbeat` reports LOST OWNERSHIP by returning `false`, not by
+ *     throwing, so an ignored return value made ownership loss invisible. A
+ *     strict `false` from `onHeartbeat` is now treated exactly like a throw.
+ *  c) The periodic interval callback had no boundary at all - a throw inside a
+ *     timer callback is an uncaught exception that takes the worker down
+ *     mid-dispatch. It is now caught and RECORDED, and the child is left to
+ *     finish its legitimate work; the result carries the degradation so the
+ *     caller can fail closed instead of claiming a healthy run.
  */
 
 import { spawn } from "node:child_process";
@@ -163,8 +181,13 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
  * before doing anything else; that record is what protects a live orphan after a
  * parent crash.
  *
- * `onHeartbeat(childPid)` is invoked on an interval so the lock stays fresh for
- * as long as the child genuinely runs.
+ * `onHeartbeat(childPid, identity)` is invoked once as the second half of that
+ * gate and then on an interval, so the lock stays fresh for as long as the child
+ * genuinely runs. It may report failure by throwing OR by returning a strict
+ * `false` (which is how `lock.heartbeat` reports lost ownership); `undefined` is
+ * an ordinary success. A failure in the FIRST call fails the gate and aborts the
+ * child before the task is delivered. A failure in a LATER call never kills the
+ * child - it is recorded in `result.heartbeat` so the caller can fail closed.
  */
 export function runClaude(cfg, task, {
   onHeartbeat = () => {},
@@ -241,6 +264,56 @@ export function runClaude(cfg, task, {
     let stderrTail = "";
     let stdoutTail = "";
     let timedOut = false;
+    let beat = null;
+    let killTimer = null;
+    let forceTimer = null;
+
+    /**
+     * D126 review F, finding 1b: the heartbeat callbacks are FALLIBLE, and the
+     * result must say so.
+     *
+     * `onHeartbeat` is where the caller renews the worker lock. It can fail in
+     * two distinct ways, and neither used to be represented anywhere:
+     *
+     *  - it THROWS (a durable write failed), or
+     *  - it returns `false`, which is how `lock.heartbeat` reports LOST
+     *    OWNERSHIP - it deliberately does not throw for that.
+     *
+     * Only a strict `false` counts as failure; `undefined` is the ordinary
+     * return of a callback that did its job, and must never be read as one.
+     *
+     * `ownership_lost` is STICKY: an owner token, once reclaimed by another
+     * instance, never becomes ours again, so a later beat cannot clear it.
+     */
+    const beats = {
+      attempted: 0,
+      succeeded: 0,
+      failures: 0,
+      consecutiveFailures: 0,
+      ownershipLost: false,
+      lastError: null
+    };
+
+    const heartbeatSummary = () => ({
+      attempted: beats.attempted,
+      succeeded: beats.succeeded,
+      failures: beats.failures,
+      consecutive_failures: beats.consecutiveFailures,
+      ownership_lost: beats.ownershipLost,
+      // Something went wrong at least once, even if a later beat recovered.
+      degraded: beats.failures > 0,
+      // The decisive flag for the caller: at the moment this dispatch settled
+      // the lock was NOT known to be ours. A run in that state must never be
+      // reported as healthy, whatever the child's exit code says.
+      unrecovered: beats.ownershipLost || beats.consecutiveFailures > 0,
+      last_error: beats.lastError
+    });
+
+    const clearAllTimers = () => {
+      if (beat) clearInterval(beat);
+      if (killTimer) clearTimeout(killTimer);
+      if (forceTimer) clearTimeout(forceTimer);
+    };
 
     /**
      * FINDING 1: the durable handoff is a GATE, not a best-effort side effect.
@@ -259,7 +332,7 @@ export function runClaude(cfg, task, {
      * then re-checked to prove it is really gone. Whether that proof succeeded
      * is reported truthfully; it is never assumed.
      */
-    const abortForFailedHandoff = (handoffError) => {
+    const abortForFailedHandoff = (handoffError, stage) => {
       const startedAt = Date.now();
       let forceSent = false;
       // Set BEFORE any listener can fire: once we are aborting, the ordinary
@@ -290,17 +363,20 @@ export function runClaude(cfg, task, {
         const check = verifyGone();
         if (settled) return;
         settled = true;
-        clearInterval(beat);
-        clearTimeout(killTimer);
-        clearTimeout(forceTimer);
+        clearAllTimers();
         resolve({
           outcome: OUTCOME.HANDOFF_FAILED,
           error: sanitize(handoffError?.message ?? String(handoffError)),
           childPid,
           childIdentity,
+          heartbeat: heartbeatSummary(),
           handoff: {
             failed: true,
             aborted: true,
+            // WHICH half of the handoff failed. Both abort the child, but the
+            // caller needs to know whether the identity record or the lock
+            // heartbeat is the thing that is broken on this host.
+            stage,
             // The single fact every caller must branch on: is there now a live
             // child nobody has a durable record of?
             child_terminated: check.gone,
@@ -333,38 +409,35 @@ export function runClaude(cfg, task, {
       child.once("exit", conclude);
     };
 
-    let handoffOk = false;
-    let handoffError = null;
-    try {
-      onSpawn(childIdentity);
-      handoffOk = true;
-    } catch (err) {
-      handoffError = err;
-    }
-
-    const beat = setInterval(() => {
-      if (aborting) return;
-      onHeartbeat(childPid, childIdentity);
-    }, heartbeatMs);
-    if (handoffOk) onHeartbeat(childPid, childIdentity);
-
     const finish = (result) => {
       // An aborted handoff owns the outcome. Without this guard the ordinary
       // close handler would race the abort and report the very
       // `completed_exit_0` the architect reproduced.
       if (settled || aborting) return;
       settled = true;
-      clearInterval(beat);
-      clearTimeout(killTimer);
-      clearTimeout(forceTimer);
-      resolve({ ...result, childPid, childIdentity });
+      clearAllTimers();
+      resolve({ ...result, childPid, childIdentity, heartbeat: heartbeatSummary() });
     };
 
+    // D126 review F, finding 1a: EVERY settlement path is wired up BEFORE the
+    // handoff runs.
+    //
+    // Previously the immediate `onHeartbeat` call sat above this point, outside
+    // the handoff try/catch. A throw there escaped the Promise executor, so
+    // `runClaude` REJECTED with a live child that had no `close` listener, no
+    // `error` listener, no timeout and a still-armed heartbeat interval. The
+    // architect's reproduction returned exactly that:
+    // {"rejected":"heartbeat persistence failed","kills":0,"writes":0,
+    //  "closeListeners":0,"errorListeners":0}.
+    // Nothing could ever settle that child, and nothing was cleaned up.
+    //
+    // Attaching the listeners first is safe: `finish` refuses to run while
+    // `aborting` is set, and `abortForFailedHandoff` sets that flag
+    // synchronously before the first event loop turn after a failed handoff.
     child.stdout?.on("data", (d) => { stdoutTail = (stdoutTail + d).slice(-4000); });
     child.stderr?.on("data", (d) => { stderrTail = (stderrTail + d).slice(-4000); });
 
-    let forceTimer = null;
-    const killTimer = setTimeout(() => {
+    killTimer = setTimeout(() => {
       timedOut = true;
       // Graceful first. Forced termination is never the default.
       try { child.kill("SIGTERM"); } catch { /* already gone */ }
@@ -399,6 +472,81 @@ export function runClaude(cfg, task, {
 
     child.stdin?.on("error", () => { /* child may exit before stdin drains */ });
 
+    // --- THE HANDOFF GATE, both halves inside one boundary -------------------
+    //
+    // The first heartbeat is not bookkeeping that happens to follow the handoff;
+    // it is the SECOND HALF of it. `onSpawn` makes the child's identity durable,
+    // and the first `onHeartbeat` puts that identity on the worker lock. A child
+    // covered by neither is an untracked child, so a failure in either half must
+    // reach the same bounded, identity-safe abort - and the prompt, which IS the
+    // task, must still never be written.
+    let handoffOk = false;
+    let handoffError = null;
+    let handoffStage = null;
+    try {
+      handoffStage = "identity_record";
+      onSpawn(childIdentity);
+      handoffStage = "first_heartbeat";
+      beats.attempted += 1;
+      // A strict `false` is `lock.heartbeat` reporting lost ownership; it
+      // reports that by return value rather than by throwing, which is exactly
+      // why an ignored result was invisible. `undefined` is an ordinary success.
+      if (onHeartbeat(childPid, childIdentity) === false) {
+        beats.ownershipLost = true;
+        throw new Error(
+          "the first lock heartbeat for the child reported lost ownership; this child cannot be "
+          + "tracked by a lock we no longer hold and must not be left running."
+        );
+      }
+      beats.succeeded += 1;
+      handoffOk = true;
+    } catch (err) {
+      handoffError = err;
+      beats.failures += 1;
+      beats.consecutiveFailures += 1;
+      beats.lastError = sanitize(err?.message ?? String(err));
+    }
+
+    // The interval is created ONLY once the gate has passed. An aborted handoff
+    // used to leave a live interval behind for a child that no longer exists.
+    if (handoffOk) {
+      beat = setInterval(() => {
+        // D126 review F, finding 1c: a throw in a timer callback is an UNCAUGHT
+        // EXCEPTION, not a promise rejection - it takes the whole worker down
+        // mid-dispatch. The periodic beat therefore has its own boundary.
+        //
+        // A failure here is NOT a reason to kill the child: it is doing real,
+        // authorized work, and the architect's constraint is explicit that
+        // legitimate active work must survive. The child runs on; the failure is
+        // recorded and surfaces in the result, so the caller can fail closed
+        // instead of claiming a healthy run.
+        if (settled || aborting) return;
+        beats.attempted += 1;
+        try {
+          if (onHeartbeat(childPid, childIdentity) === false) {
+            // Ownership is gone for good - the token cannot become ours again -
+            // so stop beating rather than failing on a fixed interval forever.
+            beats.ownershipLost = true;
+            beats.failures += 1;
+            beats.consecutiveFailures += 1;
+            beats.lastError = "the worker lock heartbeat reported lost ownership during dispatch";
+            if (beat) clearInterval(beat);
+            beat = null;
+            return;
+          }
+          beats.succeeded += 1;
+          beats.consecutiveFailures = 0;
+        } catch (err) {
+          // An exception may be transient (a momentarily unwritable disk), so
+          // beating continues. `consecutiveFailures` is what tells the caller
+          // whether it ever recovered before the dispatch settled.
+          beats.failures += 1;
+          beats.consecutiveFailures += 1;
+          beats.lastError = sanitize(err?.message ?? String(err));
+        }
+      }, heartbeatMs);
+    }
+
     if (!handoffOk) {
       // THE GATE. The prompt is the task; withholding it means the child never
       // begins the work, and we abort it before it can. Nothing is delivered,
@@ -406,7 +554,7 @@ export function runClaude(cfg, task, {
       // accepted mode, this is a complete gate for EVERY accepted delivery
       // mode - there is no longer a path where the task is already in the
       // child's hands by the time we get here.
-      abortForFailedHandoff(handoffError);
+      abortForFailedHandoff(handoffError, handoffStage);
     } else {
       // The child-start handshake. The child cannot start the task until this
       // write happens, and this write only happens once the identity record and
