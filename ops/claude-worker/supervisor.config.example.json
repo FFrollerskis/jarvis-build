@@ -1,0 +1,26 @@
+{
+  "repoOwner": "tsworkflow",
+  "repoName": "jarvisbuild",
+  "controlIssue": 68,
+  "trustedAuthor": "tsworkflow",
+
+  "workerTaskName": "JarvisClaudeWorker",
+
+  "host": "SET-THIS-TO-THE-EXACT-HOSTNAME",
+
+  "workerHealthFile": "logs/health.jsonl",
+  "workerLockFile": ".worker.lock",
+
+  "logDir": "supervisor-logs",
+  "supervisorHealthFile": "supervisor-logs/supervisor-health.jsonl",
+  "supervisorStateFile": "supervisor-state.json",
+  "supervisorStateBackupFile": "supervisor-state.json.bak",
+  "supervisorLockFile": ".supervisor.lock",
+  "supervisorDisabledFlagFile": "supervisor-disabled.flag",
+
+  "deadWorkerMinutes": 30,
+  "restartBudgetPerDay": 4,
+  "backoffBaseMinutes": 10,
+  "maxAttempts": 4,
+  "statusRepeatHours": 6
+}

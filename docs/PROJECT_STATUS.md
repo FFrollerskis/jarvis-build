@@ -1,138 +1,124 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-06 (branch `claude/d125-ua7-telegram-inbound-owner`, base
-`main=2e86e047eec98b736987bf7704c5e28c6d8c240d`)
+**Oppdatert:** 2026-09-07 (branch `claude/worker-self-recovery-20260907`, base
+`main=94e4aaa528477fbdc87ce8f4f6c37cb9d3bebb1d`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser, ikke her.
 
 ## Aktiv fase/oppgave
 
-**D-125 - UA-7 femte slice: eier-Telegram inngående som samtalekanal.**
-Det siste `NOT_STARTED_PROVIDER_INDEPENDENT`-elementet i UA-7, og det denne filen selv pekte ut som
-neste naturlige oppgave. Full begrunnelse: D-125 i DECISIONS_AND_ASSUMPTIONS.md.
+**Infrastrukturreparasjon: `WORKER-SELF-RECOVERY-20260907`** (byggeordre 5563608364 +
+scope-oppdatering 5563627689 på issue #68). **Eksplisitt bestilt av eieren, IKKE en masterplan-slice
+og IKKE en ny produktkapabilitet.** Ingen faseport er passert, ingen UA-slice er startet, ingen
+sannhetsflagg for produktet er flippet. Full begrunnelse: D-126 i DECISIONS_AND_ASSUMPTIONS.md.
 
-## Omfanget er bevisst begrenset - og hvorfor
+## Hva som ble reparert - og hvorfor det stoppet loopen
 
-D-122-matrisen i IMPLEMENTATION_PLAN registrerer den styrende begrensningen: **Telegram gir INGEN
-deterministisk e-post-/telefon-nøkkel for en vilkårlig motpart.** Sliceen er derfor strukturelt
-begrenset til den ALLEREDE konfigurerte eier-chatten (`JARVIS_TELEGRAM_CHAT_ID`). Motpart-identitet
-gjettes ALDRI fra visningsnavn, `@username` eller meldingstekst, og banen utvides ALDRI til
-ikke-eiere. `UA7_TELEGRAM_INBOUND_NON_OWNER=NOT_BUILT_BY_DESIGN_D122` - eksplisitt ikke-bygget, ikke
-stille utelatt.
+Fire uavhengige, produksjonsobserverte feil i den lokale worker-loopen:
+
+| # | Feil | Konsekvens |
+|---|------|-----------|
+| A | Claude skrev ACK-/report-kladd INN i repoet; `.claude-ack-d125-merge.md` ble liggende | dirty-guarden blokkerte hver eneste påfølgende kjøring, permanent |
+| B | `processed_task_ids.push()` kjørte uansett utfall | `spawnSync claude ETIMEDOUT` ble registrert som «ferdig»; D125-arbeidet forsvant |
+| C | Låsen brukte pid + fast aldersbudsjett | frisk 50-minutters jobb kunne erklæres stale; gjenbrukt pid så levende ut |
+| D | Ingen retry-grense, ingen synlig status | blokkert worker gikk stille ut med **exit 0** |
+
+I tillegg: en håndskrevet wrapper-patch fra mobil innførte et fremmed tegn, ga ParserError og stoppet
+alt **uten at noe rapporterte det**. Bekreftet ved inspeksjon av faktisk disk - den foreslåtte
+patchen var aldri installert.
 
 ## Hva som faktisk ble bygget
 
-**NULL nye leverandører, credentials, scopes, tabeller, migrasjoner, kolonner eller
-system-of-record.** Telegram forblir TRANSPORT (D-64 `EXTERNAL_CANONICAL`);
-`CORE_DEPENDENCY_DECISION_REQUIRED=false`.
+Ny sporet kilde i **`ops/claude-worker/`** (13 `.mjs`-moduler, 8 `.ps1`-skript, 2 config-eksempler,
+README). Se README.md der for full runbook.
 
-1. **`TelegramOwnerAuthority`** (`modules/core/src/services/telegram-owner-authority.ts`) - betrodd
-   server-side identitets-/sesjonsautoritet med SAMME komposisjons-disiplin som D-123 sin
-   `VoiceSessionAuthority`: ingen egen autorisasjonslogikk, kun tillitsankeret (eksakt streng-likhet
-   mot den KONFIGURERTE chat-ID-en) + `SessionService.resumeOrCreate()` +
-   `IdentityService.resolveIdentity()`.
-   **Den avgjørende egenskapen er strukturell:** `authorize()` tar KUN en chat-ID og har INGEN
-   parameter for meldingstekst, avsendernavn eller `@username`. Ubetrodd innhold kan derfor ikke
-   velge person, tenant, memory space, sesjon, policy, scopes eller ruting - det er umulig gjennom
-   signaturen, ikke bare forbudt i en kommentar.
-   Eier-sjekken kjøres FØR `resumeOrCreate()`, så en fremmed chat muterer aldri eierens server-eide
-   sesjonsrad. Chat-ID-en tvinges ALDRI med `String()`. Ukonfigurert eier-chat er permanent
-   fail-closed.
-2. **`TelegramCommandPoller`** fikk en VALGFRI `chat`-handler. Uten den er oppførselen bit-for-bit som
-   før. To strukturelle rettelser var PÅKREVD fordi en samtale er treg der kommandoene ikke er:
-   **re-entrans-lås** (ellers ville tick nr. 2 hentet SAMME `update_id` mens nr. 1 ventet på modellen
-   og svart dobbelt) og **behandlet-update-guard** (`update_id` markeres FØR dispatch). Sammen gir de
-   at-most-once innenfor prosessens levetid - den trygge retningen. Hver oppdatering håndteres
-   isolert, så én feil ikke stjeler resten av batchen.
-   `/brief`, `/status` og `/ai` er **uendret** og har forrang; en UKJENT `/kommando` blir aldri stille
-   omtolket til en modellsamtale.
-3. **`apps/api/src/main.ts`** - ÉN delt `ConversationEngine` brukes nå av BÅDE `/chat` og
-   Telegram-banen (to instanser ville gitt stille divergens mellom kanalene). Den eksisterende, aldri
-   tidligere wirede `linkOwnerTelegramIdentity()` kobles inn, idempotent, `match_method` fortsatt
-   `owner_configured`, KUN chat-ID-en deltar. Svaret går ut via den EKSISTERENDE ToolGateway-styrte
-   `sendTelegram` - aldri en ny direkte `fetch`.
-4. **`ChannelSchema` utvidet med `telegram`.** Alternativet (gjenbruke `api`) ville krevd null
-   endring, men skrevet en USANN kilde i `sessions.last_channel` og audit - i strid med CLAUDE.md
-   regel 4. Verifisert ufarlig mot faktisk kode: kolonnen er `text NOT NULL` uten CHECK-constraint,
-   `ChannelSchema` brukes kun i én fil, og ingen uttømmende `switch` over `Channel` finnes. Ingen
-   migrasjon. `auth_strength` er `active`, ALDRI `signed` - en bot-token er ingen enhetssignatur.
+- **A.** Kladd utenfor repoet ved konstruksjon; gammel kladd karantenes FØR dirty-guarden, men kun
+  ved fullt ankret filnavn + innholds-/provenienssjekk + `TASK_ID` kjent for workeren. Aldri
+  symlink/reparse point/sporet/ukjent fil. Hash før og etter. Bundet manifest med stier og hasher,
+  aldri innhold. **Ingen** `git clean/reset/stash`, ingen `.gitignore`-skjuling.
+- **B.** Timeout/exit≠0/spawn-feil/manglende report gir ALDRI «processed». Fullført krever matchende
+  betrodd `CLAUDE_REPORT` for eksakt `TASK_ID` med terminal `STATUS`. Atomisk state med backup;
+  ulesbar primær + backup ⇒ workeren NEKTER å kjøre framfor å miste replay-beskyttelse.
+- **C.** Én lås dekker preflight → karantene → dispatch → alle state-skriv. Levende eier avgjøres av
+  prosessidentitet (pid + starttid + host) og heartbeat. Aktiv lås ryddes ALDRI automatisk. Orphan
+  Claude-barn sjekkes før retry, så to Claude-prosesser aldri overlapper.
+- **D.** Bundet backoff med hardt tak; deduplisert `CLAUDE_WORKER_STATUS` på issue #68. Exit-koden er
+  aldri 0 når noe er blokkert (0 frisk / 3 blokkert / 4 forbigående / 1 fatal).
+- **E.** Kun allerede autoriserte tasks; ingen oppfunnet neste arbeid.
+- **F.** Egne health-hendelser per steg, så «scheduleren kjørte» aldri forveksles med «arbeidet ble
+  fullført». `node worker.mjs health` svarer på det faktiske spørsmålet.
+- **Supervisor** (autorisert av scope-oppdateringen, ÉN recovery-supervisor - aldri en andre
+  implementasjons-worker): egen state/lås/logg, kun lesende observasjon av worker-oppgaven, ankret
+  `ARCHITECT_CONTROL`-skjema med kun `STATUS` og `RESTART_WORKER`, unik `COMMAND_ID`,
+  host-/worker-binding, kort utløp, avvisning av redigerte/replayede kommentarer, døgnbudsjett og
+  backoff. **Avbryter aldri levende arbeid, avslutter aldri en prosess.**
 
 ## Kvalitetsporter
 
-- **51 nye tester, alle grønne lokalt på Windows-hosten:**
-  `modules/core/test/d125-telegram-owner-authority.test.ts` (15, ekte embedded Postgres + ekte RLS) ·
-  `modules/tool-gateway/test/d125-telegram-inbound-poller.test.ts` (15) ·
-  `modules/conversation-graph/test/d125-owner-telegram-link.test.ts` (6, ekte Postgres) ·
-  `apps/api/test/d125-telegram-inbound-wiring.test.ts` (15).
-  Dekker alle syv verifikasjonskravene: kanonisk samtale-/svarbane, server-avledet og stabil
-  identitet, fremmed chat avvist FØR modell/verktøy/sesjon, adversariell tekst kan ikke velge annen
-  person/tenant/space eller lenke en gjettet kontakt, kommandoene uten regresjon, idempotent lenking
-  uten meldingsinnhold, og ingen dobbel handling/svar for samme update.
-- `pnpm -r typecheck`: **21/21 pakker rent.** `pnpm lint` (`eslint .`): **rent.**
-- **Full lokal suite: 3071/3102 grønt.** De 31 feilene i 5 filer er **PRE-EKSISTERENDE**: nøyaktig de
-  samme 5 filene og 31 testene feiler på det URØRTE base-committet `2e86e04` (verifisert ved detached
-  checkout av basen og ny kjøring). Denne sliceen forårsaker **null regresjon**.
-- gitleaks: egen CI-jobb over hele historikken - **IKKE kjørt lokalt** (binæren finnes ikke på hosten).
-- **CI på eksakt endelig HEAD:** denne filen navngir BEVISST ingen run-id (enhver commit som skriver
-  run-id-en hit endrer selv HEAD og gjør påstanden umiddelbart usann). Run-id + status for
-  `build-test`, `windows-git-auth` og `gitleaks` rapporteres i `CLAUDE_REPORT` på GitHub-issue **#68**.
+- **103 nye tester, alle grønne lokalt:** `npx vitest run ops/claude-worker/test` →
+  **7 filer / 103 tester passed**. Dekker alle åtte akseptansetestene i byggeordren + de seks i
+  scope-oppdateringen som kan dekkes med fixtures: den eksakte D125-ACK-filen (hash bevart, tre blir
+  ren, dispatch mulig), ukjent fil / sporet endring / symlink / reparse point / kollisjon, timeout og
+  exit≠0 markerer ikke processed, exit 0 uten matchende report er ikke fullført, krasj etter
+  report/PR/merge rekonsilieres uten duplikat-effekt, samtidige invokasjoner dispatcher én gang,
+  levende langtidsjobb forveksles ikke med stale lås, korrupt/avbrutt state gjenopprettes uten å
+  slette historikk, backoff-utmatting gir synlig deduplisert status, og supervisor-avvisning av
+  replay/utløp/feil forfatter/feil host/vilkårlig kommando.
+- `npx eslint ops/ eslint.config.mjs`: **rent.**
+- `node --check` på alle 13 `.mjs`-filer: **rent.**
+- **Én ekte sikkerhetsfeil funnet av testene og rettet:** `Authorization:\s*\S+` konsumerte kun
+  skjemaet («Bearer») og lot selve credentialet stå igjen i klartekst i logg/kommentar. Nå redigeres
+  hele linjen bort.
+- **`.ps1`-verifisering:** alle 8 skript er verifisert **ren ASCII og balansert** statisk via Node.
+  **Ekte PowerShell-AST-parsing ble IKKE kjørt** - PowerShell-kjøring krevde godkjenning som ikke
+  ble gitt i denne økten. `verify-scripts.ps1` er levert i repoet nettopp for dette og MÅ kjøres på
+  hosten før installasjon.
+- **Full produktsuite ble IKKE kjørt** i denne økten (endringene rører ingen produktkode; kun
+  `vitest.config.ts` include og `eslint.config.mjs` er endret utenfor `ops/`). CI på eksakt endelig
+  HEAD rapporteres med run-id i `CLAUDE_REPORT` på issue #68.
 
-## Separat observerte Windows-host-gap (IKKE rørt i denne sliceen)
+## Flagg-status - alt uverifisert til det er bevist på hosten
 
-Rapportert, ikke opportunistisk fikset - de hindrer ikke sannferdig D-125-verifikasjon:
+`WORKER_SELF_RECOVERY_VERIFIED=false` · `SUPERVISOR_INSTALLED=false` ·
+`REMOTE_RESTART_VERIFIED=false` · `REBOOT_PERSISTENCE=UNVERIFIED` ·
+`SOURCE_CHANGED=true` · `DEPLOYED_TO_HOST=false`.
 
-1. **`.cjs` EFTYPE ved `spawnSync`** - `docker-transport.test.ts`, `sandbox-docker-extra-env.test.ts`,
-   `claude-code-agent.test.ts`. Windows kan ikke `spawnSync` en `.cjs`-fil direkte som kjørbar.
-2. **CRLF-vs-LF i kildeteksts-assertions** - `worker-coding-wiring.test.ts`,
-   `ua3-live-pool-separation.test.ts`. Root cause er nå identifisert: repoet har `core.autocrlf=true`
-   og **ingen `.gitattributes`**, så assertions med innebygd `\n`
-   (f.eks. `toContain("new ToolGateway(\n      pool, policy,")`) kan aldri matche en CRLF-checkout.
-3. **embedded-Postgres port-race** - observert som flakiness (en kjøring ga 6 filer/45 feil der
-   samme tre ellers gir 5/31). Portene velges tilfeldig uten kollisjonssjekk.
+**Kildeendring er IKKE deployment.** Den kjørende workeren på hosten er fortsatt v1 med alle fire
+feilene. Ingenting er installert, registrert eller startet av denne økten.
 
-## Flagg-status
+Uendret av denne oppgaven: `UA7_COMPLETE=false`, `UA7_ACCEPTANCE_4=PARTIAL`,
+`Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `D108_COMPLETE=false`, `UA6_COMPLETE=false`,
+`NEW_PROVIDERS_ADDED=0`, `NEW_CREDENTIALS_OR_SCOPES=0`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`.
 
-`UA7_TELEGRAM_INBOUND_OWNER=true`, `UA7_TELEGRAM_INBOUND_NON_OWNER=NOT_BUILT_BY_DESIGN_D122`,
-`NEW_TABLES_ADDED=0`, `NEW_MIGRATIONS_ADDED=0`, `NEW_PROVIDERS_ADDED=0`,
-`NEW_CREDENTIALS_OR_SCOPES=0`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`,
-`HOST_ACCEPTANCE_REQUIRED=false`, `HARD_EXTERNAL_BLOCKER=false`.
+## Normativ endring som MÅ bekreftes i review
 
-**INGEN sannhetsflagg er flippet av denne oppgaven.** Uendret og fortsatt åpent:
-`Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `UA7_ACCEPTANCE_4=PARTIAL`, `UA7_COMPLETE=false`,
-`D108_COMPLETE=false`, `UA6_COMPLETE=false`, `UA7_MEETING_TRANSCRIPTION=DEFERRED_WITHIN_PHASE`,
-`UA7_SPEECH_EXTERNAL_PROCESSING=DENIED_PENDING_Q32_POINT1`. Denne oppgaven rørte hverken credentials,
-leverandør-verifisering, juridisk vurdering eller D-108. UA-7-akseptansekriterier uendret:
-**1 PASS** (D-121), **2 PASS**, **3 PASS**, **4 PARTIAL**. **Q-32 er FORTSATT ÅPEN** (punkt 1 og 3).
-
-## Gjenstående UA-7-gap (eksakt)
-
-- **Akseptansekriterium 4 = PARTIAL**, blokkert av **Q-32 punkt (1)** - en eier-/juridisk handling
-  Tobias må gjøre selv (kontroll av OpenAI som databehandler for tale: region, databehandleravtale,
-  treningsvilkår, retensjon + utfylling av `PROCESSOR_REGION_MATRIX.md`). Kode kan ikke lukke den.
-- **Q-32 punkt (3)** - Tobias må installere whisper.cpp/piper-binærer på hosten før `health`-tale er
-  reelt tilgjengelig.
-- **Ikke-eier-Telegram-identiteter** - bevisst ikke bygget (D-122: ingen deterministisk koblingsnøkkel).
-- **Møtetranskripsjon** - `DEFERRED_WITHIN_PHASE`, uendret.
-- Credentials, leverandør-live-verifisering, juridisk/kontraktsverifisering og D-108 er av Tobias
-  eksplisitt sekvensert til den avsluttende integrasjons-/deploy-fasen.
-
-## PR-status
-
-Draft-PR på branch `claude/d125-ua7-telegram-inbound-owner` mot `main`. **IKKE merget, IKKE
-self-approved** (`ARCHITECT_MERGE_APPROVED=false` i byggeordren). Fersk CI på eksakt endelig HEAD
-kjøres etter push og rapporteres med run-id og jobbstatus i `CLAUDE_REPORT` på issue #68. Venter på
-uavhengig ChatGPT-arkitekt-review (D-120).
+D-120 sa «ren infrastruktur ... derfor INGEN kode i dette repoet» / «ALDRI committet i dette repoet».
+Byggeordren ba samtidig om å utvide en «existing tracked source/install flow» (som ikke fantes) og om
+draft-PR med tester og CI - strukturelt umulig for en usporet kilde, og usporet håndredigering er
+nettopp ParserError-årsaken. **D-126 endrer derfor KUN «ingen kode i repoet»-klausulen:** kilden
+spores i `ops/claude-worker/`, utenfor pnpm-workspacet og produktbygget; KJØRETIDEN ligger fortsatt
+utenfor repoet i `%USERPROFILE%\.jarvis-claude-worker\`. Avviser arkitekten dette, må en annen
+leveransekanal utpekes - da kan reparasjonen ikke leveres som en reviewbar PR.
 
 ## Blokkeringer
 
-Ingen tekniske for denne sliceen. `HARD_EXTERNAL_BLOCKER=false`.
-Q-32 punkt (1) og (3) er uendret eier-/host-handlinger Tobias må utføre selv.
+- **Ekte PowerShell-parse-verifisering ikke kjørt** (godkjenning ikke gitt i økten). Må kjøres på
+  hosten: `.\verify-scripts.ps1`.
+- **Installasjon avventer bevisst uavhengig arkitekt-review** (byggeordren krever det eksplisitt før
+  aktivering av endret worker-logikk).
+- `HARD_EXTERNAL_BLOCKER=false`.
 
 ## Neste oppgave
 
-Avventer uavhengig arkitekt-review av denne PR-en. INGEN merge, INGEN neste slice, INGEN D-108,
-INGEN UA-8 startet av denne runden. Etter review er de dependency-korrekte kandidatene: (a) de tre
-separat rapporterte Windows-host-gapene over som egen, avgrenset oppgave (samme mønster som D-124 -
-de er en akkumulerende skatt på lokal verifiserbarhet), eller (b) neste masterplan-slice slik
-IMPLEMENTATION_PLAN sekvenserer den. UA-7 kan IKKE lukkes av kode alene så lenge Q-32 punkt 1 er åpen.
+1. Uavhengig ChatGPT-arkitekt-review av PR-en (INGEN self-approval, `ARCHITECT_MERGE_APPROVED=false`).
+2. Etter godkjent review, på hosten i rekkefølge: `.\verify-scripts.ps1` → `.\install.ps1 -WhatIf` →
+   `.\install.ps1` → config-filer → `node worker.mjs status` / `run --dry-run` →
+   `.\install-task.ps1` → `.\install-supervisor.ps1`.
+3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon, en
+   ekte planlagt kjøring som fullfører en ufarlig autorisert probe, og en ekte
+   `RESTART_WORKER`-kvittering. Først da kan `WORKER_SELF_RECOVERY_VERIFIED`, `SUPERVISOR_INSTALLED`
+   og `REMOTE_RESTART_VERIFIED` settes true - individuelt, aldri samlet.
+
+Ingen påstand om at alle framtidige feil er umulige. Reparasjonen fjerner fire konkrete, observerte
+feilmoduser og gjør resten synlige i stedet for stille.

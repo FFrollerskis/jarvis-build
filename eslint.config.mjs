@@ -10,5 +10,24 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }]
     }
+  },
+  {
+    // Ikke-produkt infrastruktur (D-126): ops/-worker og -supervisor er ren
+    // Node-ESM (.mjs) som kjøres direkte på hosten, uten TypeScript-byggesteg.
+    files: ["ops/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
+        clearInterval: "readonly"
+      }
+    }
   }
 );

@@ -1,0 +1,34 @@
+{
+  "repoOwner": "tsworkflow",
+  "repoName": "jarvisbuild",
+  "controlIssue": 68,
+  "trustedAuthor": "tsworkflow",
+
+  "repoPath": "C:\\Users\\YOU\\path\\to\\jarvisbuild",
+
+  "claudeCommand": "claude",
+  "claudeArgs": ["-p", "--dangerously-skip-permissions"],
+  "promptDelivery": "stdin",
+  "claudeTimeoutMinutes": 55,
+
+  "logDir": "logs",
+  "healthFile": "logs/health.jsonl",
+  "stateFile": "state.json",
+  "stateBackupFile": "state.json.bak",
+  "lockFile": ".worker.lock",
+  "disabledFlagFile": "disabled.flag",
+
+  "scratchRoot": "tmp",
+  "quarantineRoot": "tmp/quarantine",
+  "manifestFile": "logs/quarantine-manifest.jsonl",
+
+  "heartbeatSeconds": 60,
+  "heartbeatTimeoutMinutes": 15,
+
+  "maxAttempts": 4,
+  "backoffBaseMinutes": 10,
+  "backoffMaxHours": 6,
+  "statusRepeatHours": 6,
+
+  "workerTaskName": "JarvisClaudeWorker"
+}

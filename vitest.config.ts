@@ -20,7 +20,12 @@ export default defineConfig({
     }
   },
   test: {
-    include: ["{apps,packages,modules}/*/test/**/*.test.ts"],
+    include: [
+      "{apps,packages,modules}/*/test/**/*.test.ts",
+      // Ikke-produkt infrastruktur (D-126): worker/supervisor-kilden i ops/ er
+      // ren .mjs uten byggesteg, fordi den kjøres direkte av node på hosten.
+      "ops/*/test/**/*.test.mjs"
+    ],
     // Databasetester kjører mot ekte embedded PostgreSQL - oppstart tar tid,
     // og flere testfiler starter hver sin instans: kjør filene sekvensielt.
     fileParallelism: false,
