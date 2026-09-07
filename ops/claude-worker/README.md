@@ -198,6 +198,16 @@ Worker (`worker.mjs`):
   krever `acknowledgeDangerousClaudeArgs: true` i samme fil. Alle numeriske
   grenser er endelige og validerte, alle skrivestier må ligge utenfor repoet, og
   `TASK_ID` valideres som én trygg path-komponent før den brukes som katalognavn.
+- **`promptDelivery` er `stdin` og INGENTING annet** (D-126e, addendum-punkt 4).
+  `argv`-levering la hele oppgaven på kommandolinjen som ble gitt til `spawn`, så
+  barnet kunne lese og begynne å utføre den autoriserte oppgaven FØR den durable
+  handoff-gaten hadde commitet — og ingen etterfølgende abort kan bevise at den
+  ikke allerede var konsumert. Med `stdin` ER prompten oppgaven, og den skrives
+  først når identitetsrecord og lås-heartbeat er durable. Avvisningen håndheves
+  både i `loadWorkerConfig` OG i `runClaude` selv, FØR `spawn` — et direkte
+  modulkall går aldri gjennom konfigurasjonsvalidering, og det var nettopp slik
+  gapet ble reprodusert. Utfallet er `unsupported_prompt_delivery`: ingen prosess
+  opprettes, så det finnes ikke noe barn som kunne ha konsumert oppgaven.
 
 Supervisor (`supervisor.mjs`), autorisert av scope-oppdateringen på
 WORKER-SELF-RECOVERY-20260907 — ÉN recovery-supervisor, aldri en andre
@@ -258,6 +268,17 @@ Garantier:
   forelder-identiteten (pid + starttid + host) avslutter av seg selv, sjekker
   worker- og supervisor-quiescence på nytt, og aktiverer først da
   transaksjonelt. Den dreper ingenting og rører ingen scheduled task.
+  **Den blir også VÆRENDE i live og poller fail-closed innenfor ÉN fast bundet
+  deadline** for enhver lås den ikke kan gjøre om til en eksakt identitet:
+  syntaktisk uleselig, semantisk malformed, ekte legacy-form uten `host`, eller
+  midlertidig utilgjengelig (lese-/tilgangsfeil). Slike låser ble tidligere lagt
+  i en `unreadable`-liste ingen konsumerte, eller stille utelatt helt — da fanget
+  handoffen null identiteter, ventet på ingenting og returnerte `deferred` med én
+  gang. På en legacy-installasjon finnes det ingen fremtidig konsument for
+  markøren, så handoffen ble forlatt for godt (D-126e, addendum-punkt 5). Den
+  aktiverer først når blokkererne er borte eller trygt klassifiserbare OG alle
+  eksakt fangede eiere er bevist avsluttet; en ny eier som dukker opp underveis
+  gir ny utsettelse, aldri overskriving, og markøren blir alltid liggende.
   `run-worker.ps1` sin `apply-pending` er et ANDRE nett som kun hjelper når den
   nye runneren allerede ER den installerte entrypointen: en installasjon startet
   av en GAMMEL deployert worker kan ikke regne med at neste scheduler-tikk

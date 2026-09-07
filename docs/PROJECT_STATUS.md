@@ -8,16 +8,17 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 5: `D126-FINAL-REVIEW-FIX-20260907-D`** (byggeordre
-5569145037 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, som svar på arkitektens komplette
-gjennomgang av den FAKTISKE kilden på `f123e650`). Samme branch, samme PR #75.
+**Infrastrukturreparasjon, review-runde 6: `D126-D-ADDENDUM-CLOSEOUT-20260907-E`** (byggeordre
+5571297930 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`, `TASK_TYPE=BOUNDED_UNFULFILLED_REVIEW_
+CONTINUATION` mot addendum-kommentar 5569563886). Samme branch, samme PR #75.
 **Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
 Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126, D-126a, D-126b, D-126c og D-126d i DECISIONS_AND_ASSUMPTIONS.md.
+Full begrunnelse: D-126, D-126a til D-126e i DECISIONS_AND_ASSUMPTIONS.md.
 
-Låse-hovedbokdefekten fra runde 4 er bekreftet lukket av arkitekten, og CI-kjøring 34099447903
-forsøk 2 var grønn. Den komplette gjennomgangen av de opprinnelige sju gruppene fant likevel tre
-gjenstående P1-blokkere, som er rettet i denne runden.
+Runde 5 rettet de TRE opprinnelige funnene og rapporterte dem (kommentar 5569790727), men de TO
+addendum-kravene (punkt 4 og 5 i kommentar 5569563886) sto igjen uimplementert på `df5c7be`.
+Arkitekten verifiserte dette mot faktisk kilde; CI-kjøring 34114575086 var grønn, men grønn CI
+lukker ikke kildenivå-blokkere. Runde 6 lukker nøyaktig de to - ingenting annet.
 
 ## Runde 1 (v2) - hva som ble reparert
 
@@ -162,7 +163,71 @@ detached ved utsatt aktivering. Den sirkulære påstanden er fjernet fra `run-wo
 `activateRelease`, `writePendingActivation` og README; `apply-pending` er nå dokumentert som et
 ANDRE nett.
 
+## Runde 6 (v2.5) - de to uoppfylte addendum-kravene
+
+Begge deler én rot: **en garanti som bare gjaldt den banen vi tilfeldigvis testet.**
+
+**Punkt 4 - `argv`-levering omgikk hele den durable pre-execution-gaten.** `config.mjs` aksepterte
+fortsatt `promptDelivery: "argv"`, og `dispatch.mjs` bygget `args` ved å legge HELE prompten bakerst
+og ga den til `spawn` FØR `onSpawn`. Handoff-gaten fra runde 5 kunne avbryte etter en feilet durabel
+skriving, men et argv-barn kunne allerede ha lest og begynt å utføre den autoriserte oppgaven, og en
+abort i ettertid kan ikke bevise at den ikke ble konsumert. Alle nye dispatch-tester brukte `stdin`,
+så den aksepterte argv-banen var helt utestet.
+
+Rettet med det arkitekten anga som foretrukket: **`stdin` er eneste aksepterte modus.** `argv` og alt
+annet avvises i `loadWorkerConfig` OG i `runClaude` selv, FØR `spawn` og før prompten i det hele tatt
+bygges - et direkte modulkall går aldri gjennom konfigurasjonsvalidering, og det var nettopp slik
+gapet ble reprodusert. Nytt utfall `unsupported_prompt_delivery`: ingen prosess opprettes, så det
+finnes ikke noe barn som kunne ha konsumert oppgaven. Prompten er aldri lenger et argv-element;
+kommandolinjen bærer bare operatørens `claudeArgs`. `worker.mjs` håndterer utfallet eksplisitt som
+BLOCKED i stedet for å falle gjennom til fullførings-vurderingen.
+
+**Punkt 5 - bootstrap-handoffen kunne forlate en utsatt legacy-installasjon for godt.**
+`captureQuiescenceOwners` la syntaktisk uleselige låser i en `unreadable`-liste ingen konsumerte, og
+utelot semantisk malformede dommer (`classifyLock` → `malformed`, som er nøyaktig det en ekte
+legacy-lås uten `host` gir) HELT fra `owners`. `runBootstrapHandoff` konsumerte kun `owners`: med
+null fangede identiteter ventet den på ingenting, nådde `assessQuiescence` - som DERIMOT teller de
+låsene som blokkere - og returnerte `deferred` med én gang. Den frittstående prosessen avsluttet
+deretter. På en legacy-installasjon har den registrerte entrypointen ingen markør-støtte, så
+markøren hadde ingen garantert fremtidig konsument.
+
+Rettet: `captureQuiescenceOwners` returnerer nå `{ owners, blockers, unreadable }`, der `blockers`
+dekker uleselig, semantisk malformed, ekte legacy-form uten `host`, og lese-/tilgangsfeil.
+`runBootstrapHandoff` BLIR VÆRENDE i live og poller fail-closed innenfor ÉN fast bundet deadline på
+BÅDE de eksakte fangede identitetene OG blokkererne. Den aktiverer først når alle eiere er bevist
+avsluttet (kun `GONE`/`REUSED`) og alle blokkere er borte eller trygt klassifiserbare, og
+re-sjekker deretter quiescence. Den terminerer aldri noe, substituerer aldri en annen prosess for en
+fanget eier, og lar markøren ligge ved enhver nekting. `assessQuiescence` behandler nå også en
+lesefeil som blocker i stedet for som fravær.
+
 ## Kvalitetsporter (kjørt i denne økten)
+
+- **`npx vitest run ops/claude-worker/test` → 15 filer / 387 tester passed, kjørt TO ganger,
+  387/387 begge ganger** (359 → 387; 28 nye i runde 6). Nye tester i runde 6:
+  - `dispatch.test.mjs` (11 → 21): `stdin` er hele det aksepterte settet; direkte modulkall med
+    `argv`, `carrier-pigeon`, `""`, `null` og `undefined` spawner INGENTING (`spawned=0`,
+    `promptBuilt=false`, aldri `completed_exit_0`); prompten er aldri i argv; og for HVER akseptert
+    modus: injisert persistens-feil OG injisert heartbeat-feil gir null prompt-bytes til barnet
+    (`stdinEnded=false`, ikke bare tom payload), pluss rekkefølgebevis for at persist og heartbeat
+    begge commiter før første prompt-byte;
+  - `config.test.mjs` (26 → 28): `argv` avvises med begrunnelsen, `stdin` aksepteres både eksplisitt
+    og som default;
+  - `worker-crash-recovery.test.mjs` (31 → 37): ekte entrypoint (`node worker.mjs run` som OS-
+    prosess) nekter å starte på `argv`-config (null invocations, ingen `prompt.txt`, ingen
+    `argv.json`, tasken aldri berørt); et EKTE barn får aldri oppgaven på kommandolinjen (fixturen
+    logger nå sin egen `process.argv`, som er nøyaktig to elementer); og med persistens- eller
+    heartbeat-feil injisert er argv rent OG `prompt.txt`/`report-posted` finnes ikke - null
+    prompt-konsum, null oppgave-effekt;
+  - `deploy.test.mjs` (56 → 66): syntaktisk malformed JSON, ekte legacy-form uten `host` og
+    lese-/tilgangsfeil registreres alle som blokkere (ikke som fravær); handoffen POLLER gjennom hver
+    av dem og aktiverer når de klarner (`polls >= 3`); en blokker som aldri klarner bruker opp ÉN
+    deadline og utsetter med `deadline_expired`, byte-identisk låsefil og markøren intakt; en fanget
+    eier som aldri avslutter bruker SAMME ene deadline og den eksakte identiteten bevares i
+    rapporten; en ny eier som dukker opp under pollingen gir utsettelse i stedet for overskriving og
+    blir aldri adoptert som «forelder»; og en eksplisitt regresjonstest for at den GAMLE feilen -
+    utsettelse på poll null - er borte.
+
+Historikk fra runde 5, uendret:
 
 - **`npx vitest run ops/claude-worker/test` → 15 filer / 359 tester passed, kjørt TO ganger,
   359/359 begge ganger.** Nye tester i runde 5:
@@ -242,8 +307,8 @@ Historikk fra runde 3, uendret:
     poll, budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet kvittering,
     bevart utsettelse fra travel til ledig;
   - `config.test.mjs` (26), `git.test.mjs` (13), `recovery.test.mjs` (20).
-- `npx eslint ops/claude-worker`: **rent.**
-- `node --check` på alle 19 `.mjs`-moduler: **rent.**
+- `npx eslint ops/claude-worker`: **rent** (kjørt på nytt i runde 6).
+- `node --check` på alle endrede `.mjs`-moduler og `JSON.parse` på `config.example.json`: **rent.**
 - **Ekte PowerShell-AST-parsing ble IKKE kjørt, og CI-jobben kunne ikke pushes. To uavhengige,
   presist nektede operasjoner:**
   1. `powershell.exe -NoProfile -Command "echo PSOK"` → «This command requires approval».
@@ -317,5 +382,6 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
 
 Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkrete, uavhengig
 reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
-utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, og resten gjøres
-synlig i stedet for stille.
+utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, runde 6 de to
+uoppfylte addendum-kravene (argv-levering uten pre-execution-gate, og en bootstrap-handoff som kunne
+forlate en utsatt legacy-installasjon), og resten gjøres synlig i stedet for stille.
