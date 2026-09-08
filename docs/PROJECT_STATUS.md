@@ -18,7 +18,7 @@ er `"available"` på `main`. UA-3 kriterium 2 sto ved D-128 sin merge på 4/5 do
 
 ## Aktiv fase/oppgave
 
-**UA-3: Native Jarvis Operations Core - `operations`-domenet (D-129). Branch
+**UA-3: Native Jarvis Operations Core - `operations`-domenet (D-129). PR #78, branch
 `claude/fase-3-operations-core`, base eksakt `main=0b350f448673b52f361cdea65110ab8939d9f889`.**
 Manuell fortsettelse etter D-128-merget, derivert fra en frisk read-only rekonstruksjon
 (`git fetch origin --prune`, lokal HEAD = origin/main verifisert, rent worktree, CLAUDE.md/
@@ -118,8 +118,8 @@ arkitekt-review når kontrollsløyfen gjenopptas.
 
 ## Neste oppgave
 
-1. **Umiddelbart:** draft-PR for D-129 opprettes fra denne branchen, CI-status følges opp på
-   eksakt HEAD (ikke gjenbruk av lokal quality-gate-kjøring som "CI-bevis"). INGEN self-approval/
+1. **Umiddelbart:** PR #78 (draft) venter på uavhengig arkitekt-review og CI-status på eksakt HEAD
+   (ikke gjenbruk av lokal quality-gate-kjøring som "CI-bevis"). INGEN self-approval/
    merge under noen omstendighet (D-120/CLAUDE.md, uendret) - kontrollsløyfen er pauset, ingen
    `ARCHITECT_TASK` postes.
 2. Etter D-129 er merget (av arkitekten/Tobias, ikke av denne økten): re-derivere neste slice fra
