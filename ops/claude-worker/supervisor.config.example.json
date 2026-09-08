@@ -1,0 +1,30 @@
+{
+  "_comment_host": "Must equal this machine's ACTUAL hostname. The supervisor refuses to start if it does not - a control comment naming a host proves nothing on its own, so the binding is verified against os.hostname() at load time.",
+
+  "repoOwner": "tsworkflow",
+  "repoName": "jarvisbuild",
+  "controlIssue": 68,
+  "trustedAuthor": "tsworkflow",
+
+  "workerTaskName": "JarvisClaudeWorker",
+  "supervisorTaskName": "JarvisWorkerSupervisor",
+
+  "host": "SET-THIS-TO-THE-EXACT-HOSTNAME",
+
+  "workerHealthFile": "logs/health.jsonl",
+  "workerLockFile": ".worker.lock",
+
+  "logDir": "supervisor-logs",
+  "supervisorHealthFile": "supervisor-logs/supervisor-health.jsonl",
+  "supervisorStateFile": "supervisor-state.json",
+  "supervisorStateBackupFile": "supervisor-state.json.bak",
+  "supervisorLockFile": ".supervisor.lock",
+  "supervisorDisabledFlagFile": "supervisor-disabled.flag",
+  "scratchRoot": "supervisor-logs/tmp",
+
+  "deadWorkerMinutes": 30,
+  "restartBudgetPerDay": 4,
+  "backoffBaseMinutes": 10,
+  "maxAttempts": 4,
+  "statusRepeatHours": 6
+}
