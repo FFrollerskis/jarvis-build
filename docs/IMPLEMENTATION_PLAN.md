@@ -3706,6 +3706,46 @@ Windows-host; kjøres i CI på Linux.
 
 Full detalj: D-123 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-3: FINANCE → BUSINESS DOMAIN COVERAGE-INTEGRASJON (2026-09-08) → D-127
+
+Samme mønster og samme rettferdiggjørelse som D-78 (UA4_SLICE_2), men for `finance` i stedet for
+`marketing`, og oppdaget under en generell repo-/masterplan-rekonstruksjon (ikke en ny byggeordre):
+`BUSINESS_DOMAIN_COVERAGE.finance` (`business-brief.ts`) hardkodet FORTSATT `"not_integrated"`
+etter at UA-6 Finance & Spend Integrity Gateway allerede var VERIFIED/COMPLETE (D-107-D-116) OG
+`OpenLoopService` (D-115/D-116) allerede overflatet `finance_spend_records`/`finance_recurring_
+commitments`/`finance_procurement_items`-avvik som `business_open_loops`, som `businessOpenLoopsSource()`
+allerede viser i DENNE briefen. **Datastrømmen fantes altså allerede - kun dekningstabellen løy om
+den.** Samme «aktivt usann dokumentasjon er farligere enn manglende dokumentasjon»-lærdom som D-122.
+
+**D-64-gate:** `CAPABILITY=`domenedekning-rapportering for finance; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`;
+`CAN_RUN_WITHOUT_PROVIDER=true` - ingen ny leverandør introdusert (Wallester/Stripe/Vipps/Fiken/
+Neonomics var allerede tilkoblet av UA-6, men DENNE endringen kobler ingen av dem inn - kun den
+EKSISTERENDE `businessOpenLoopsSource()`-strømmen leses annerledes).
+
+**Endring:** `finance.status` flippet til `"available"` (source: Native Jarvis Finance & Spend
+Integrity Gateway, D-107-D-116), `finance.live_provider_connected = false` (samme separasjon som
+marketing - domenekapabilitet ≠ leverandør-tilkobling). `sales`/`product`/`marketing`/`operations`
+uendret i sak. Ingen ny `BriefSource` bygget (bevisst forkastet - ville duplisert data som
+`businessOpenLoopsSource()` allerede leverer via samme mekanisme som `sales`).
+
+**11 nye/oppdaterte tester** i `business-brief.test.ts`: coverage-status/kilde/leverandør-uavhengighet
+for finance, sales/product/operations uendret-regresjon, render-tekst (3/5), determinisme,
+strukturell leverandør-SDK-uavhengighet (`STRIPE|VIPPS|WALLESTER|FIKEN|NEONOMICS|@jarvis/finance`),
+ukentlig brief sitt `data_coverage`-felt for finance identisk på tvers av tenants - OG én ny EMPIRISK
+ende-til-ende-test (describe "G"): en ekte `finance_spend_records`-rad med `UNEXPECTED_SPEND`-flagg
+→ `OpenLoopService.detectUnexpectedSpend()` → `finance_spend_unexpected`-open-loop →
+`businessOpenLoopsSource()` → et faktisk `DailyBrief`-punkt med finansielt kilde-forankret `why`.
+**Samme presedens-drift oppdaget og rettet i to host-akseptanse-scripts** som fortsatt forventet
+`finance: not_integrated` (`ua4-growth-domain-coverage-live.ts`) eller til og med `marketing: IKKE
+integrert` (`ua3-open-loops-live.ts` - ALDRI oppdatert siden D-78, egen, dypere pre-eksisterende
+drift funnet i samme slag). Q-20 N/A (ingen ny tabell/persistert data). Q-21/Q-27/Q-26 uendret.
+INGEN ny ToolGateway-handling. `pnpm -w typecheck`/`pnpm -w lint` rent, full lokal regresjon grønn
+(se kvalitetsport-seksjon i PROJECT_STATUS.md for eksakte tall). **UA-3 kriterium 2 (`"kombinerer
+sales, product, finance, marketing, operations"`) re-evaluert: `sales=AVAILABLE marketing=AVAILABLE
+finance=AVAILABLE product/operations=NOT_INTEGRATED` - 3/5 domener, FORTSATT IKKE komplett** (krever
+alle fem - `product`/`operations` har ingen kanonisk Jarvis-kapabilitet ennå, ingen ble oppfunnet
+her). Draft-PR, IKKE merget, ingen self-approval. Full detalj: D-127 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

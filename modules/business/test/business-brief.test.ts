@@ -128,15 +128,16 @@ describe("B: ukentlig brief - egen, kilde-forankret aggregering (ikke en andre m
   // oppdaterte kartleggingen (ikke en separat, frosset kopi) - OG dekningen er en arkitektonisk
   // (build-time) fakta, ikke tenant-data, saa den er IDENTISK for begge tenantene (bevisst, ikke
   // en tenant-isolasjonsfeil - se filkommentaren i business-brief.ts).
-  it("weekly.data_coverage reflekterer marketing=available (Growth Core) for ALLE tenants likt - domenedekning er arkitektur, ikke tenant-data", async () => {
+  it("weekly.data_coverage reflekterer marketing/finance=available (Growth Core/Finance Gateway) for ALLE tenants likt - domenedekning er arkitektur, ikke tenant-data", async () => {
     const weeklyA = await generateWeeklyBrief(appPool, TENANT_A, "business");
     const weeklyB = await generateWeeklyBrief(appPool, TENANT_B, "business");
     expect(weeklyA.data_coverage.marketing.status).toBe("available");
     expect(weeklyB.data_coverage.marketing.status).toBe("available");
+    expect(weeklyA.data_coverage.finance.status).toBe("available");
+    expect(weeklyB.data_coverage.finance.status).toBe("available");
     expect(weeklyA.data_coverage).toEqual(weeklyB.data_coverage);
     expect(weeklyA.data_coverage.sales.status).toBe("available");
     expect(weeklyA.data_coverage.product.status).toBe("not_integrated");
-    expect(weeklyA.data_coverage.finance.status).toBe("not_integrated");
     expect(weeklyA.data_coverage.operations.status).toBe("not_integrated");
   });
 });
@@ -180,13 +181,18 @@ describe("E: Business OS-tidslinje-regresjon (D-78 - Growth Core sameksistens)",
 describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, marketing, operations') er IKKE fullt oppfylt", () => {
   // UA-4 Growth -> Business Domain Coverage-integrasjon (D-78): `marketing` gikk fra
   // `not_integrated` til `available` FORDI Native Jarvis Growth Core (D-74/D-75/D-76/D-77) nå
-  // faktisk finnes - IKKE en fabrikkert/kosmetisk endring. `product`/`finance`/`operations`
-  // forblir eksplisitt `not_integrated`, uendret.
-  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing som tilgjengelig - de tre andre er eksplisitt not_integrated, aldri fabrikkert", () => {
+  // faktisk finnes - IKKE en fabrikkert/kosmetisk endring.
+  // D-127: `finance` gikk fra `not_integrated` til `available` av SAMME grunn - UA-6 Finance &
+  // Spend Integrity Gateway (D-107-D-116) var allerede VERIFIED/COMPLETE, og dens
+  // avviksdeteksjon var allerede overflatert som `business_open_loops` (open-loop-finance-
+  // spend.test.ts) som SAMME `businessOpenLoopsSource()` under allerede viser i denne briefen -
+  // PÅSTANDEN var usann, ikke kapabiliteten. `product`/`operations` forblir eksplisitt
+  // `not_integrated`, uendret - ingen ny kapabilitet for dem finnes.
+  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing OG finance som tilgjengelig - product/operations er eksplisitt not_integrated, aldri fabrikkert", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.marketing.status).toBe("available");
+    expect(BUSINESS_DOMAIN_COVERAGE.finance.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.product.status).toBe("not_integrated");
-    expect(BUSINESS_DOMAIN_COVERAGE.finance.status).toBe("not_integrated");
     expect(BUSINESS_DOMAIN_COVERAGE.operations.status).toBe("not_integrated");
   });
 
@@ -197,21 +203,29 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
     expect(BUSINESS_DOMAIN_COVERAGE.marketing.live_provider_connected).toBe(false);
   });
 
-  it("sales/product/finance/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
+  it("finance sin dekning er eksplisitt begrunnet i Finance & Spend Integrity Gateway, ALDRI en bank-/regnskapsleverandør-tilkobling", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.finance.source).toMatch(/Finance & Spend Integrity Gateway/);
+    // Samme separasjon som marketing (D-78): domenekapabilitet != ekstern leverandør-tilkobling.
+    // Wallester/Stripe/Vipps/Fiken/Neonomics er allerede tilkoblet PROVIDER-siden av UA-6, men
+    // DENNE briefen hevder ikke det - kun at Jarvis kan rapportere avvik den selv har oppdaget.
+    expect(BUSINESS_DOMAIN_COVERAGE.finance.live_provider_connected).toBe(false);
+  });
+
+  it("sales/product/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales).toEqual({ status: "available", source: "Business Graph/CRM", live_provider_connected: false });
     expect(BUSINESS_DOMAIN_COVERAGE.product).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
-    expect(BUSINESS_DOMAIN_COVERAGE.finance).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
     expect(BUSINESS_DOMAIN_COVERAGE.operations).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
   });
 
-  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing som tilgjengelig uten aa hevde en live leverandør", () => {
+  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing/finance som tilgjengelig uten aa hevde en live leverandør", () => {
     const text = renderDomainCoverage();
     expect(text).toContain("IKKE fullt oppfylt");
     expect(text).toContain("IKKE integrert");
     expect(text).toContain("marketing: tilgjengelig");
+    expect(text).toContain("finance: tilgjengelig");
     expect(text).toContain("ingen live ekstern leverandør tilkoblet");
-    // 2/5 domener dekket (sales + marketing) - eksplisitt telling, ikke en gjettet brøk.
-    expect(text).toContain("2/5 domener dekket");
+    // 3/5 domener dekket (sales + marketing + finance) - eksplisitt telling, ikke en gjettet brøk.
+    expect(text).toContain("3/5 domener dekket");
   });
 
   it("renderDomainCoverage() er 100% deterministisk (samme resultat ved gjentatte kall, ingen DB/klokke-avhengighet)", () => {
@@ -224,6 +238,51 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
   it("business-brief.ts krever INGEN annonseplattform-credential/SDK for aa markere marketing tilgjengelig", async () => {
     const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
     expect(source).not.toMatch(/GOOGLE_ADS|META_ADS|GA4|SEARCH_CONSOLE|FACEBOOK_ADS|LINKEDIN_ADS|TIKTOK_ADS/i);
+  });
+
+  // D-127 (samme disiplin som D-78 over, men for finance-leverandører): ingen bank-/
+  // betalings-/regnskapsleverandør-credential-formet streng skal noensinne trenge å stå i
+  // DENNE filen for at `finance.status = "available"` skal være sant - business-brief.ts
+  // importerer aldri `@jarvis/finance` og kjenner ingen leverandør-SDK.
+  it("business-brief.ts krever INGEN bank-/betalings-/regnskapsleverandør-credential/SDK for aa markere finance tilgjengelig", async () => {
+    const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/STRIPE|VIPPS|WALLESTER|FIKEN|NEONOMICS/i);
+    expect(source).not.toMatch(/@jarvis\/finance/);
+  });
+});
+
+describe("G (D-127): finance-avledede open loops overflater i Business OS-briefen via SAMME businessOpenLoopsSource() som sales", () => {
+  // Beviser EMPIRISK, ikke bare via BUSINESS_DOMAIN_COVERAGE-paastanden over, at finance
+  // sin dekning er reell: en ekte `finance_spend_records`-avviksrad (identisk fixture-form som
+  // `open-loop-finance-spend.test.ts` §A) -> OpenLoopService.detectUnexpectedSpend() ->
+  // `finance_spend_unexpected`-open-loop -> businessOpenLoopsSource() -> DailyBrief-punkt.
+  // INGEN ny BriefSource bygget her - dette er den EKSISTERENDE `businessOpenLoopsSource()`
+  // (§13/D-53), som allerede haandterer ENHVER open_loop_type generisk. Testen beviser at
+  // finance-opprinnelse ikke er noe spesialtilfelle den faller utenfor.
+  it("en finance_spend_unexpected-open-loop dukker opp som et brief-punkt, med finansielt kilde-forankret 'why'", async () => {
+    const spendRecordId = `fin-sr-brief-${randomUUID()}`;
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(
+        `INSERT INTO finance_spend_records
+           (spend_record_id, tenant_id, memory_space_id, source_family, source_record_id, occurred_at, amount_ore, currency, category, anomaly_flags)
+         VALUES ($1, $2, 'business', 'model_cost', $1, now(), 12345, 'NOK', 'ai_api_cost', $3)`,
+        [spendRecordId, TENANT_A, JSON.stringify(["UNEXPECTED_SPEND"])]
+      )
+    );
+    const detection = await openLoops.detectUnexpectedSpend(TENANT_A, "business");
+    expect(detection.detected).toBeGreaterThanOrEqual(1);
+
+    const dailyBrief = new DailyBrief([businessOpenLoopsSource(openLoops)], appPool);
+    const artifact = await dailyBrief.generate(identityA);
+    const allBuckets = [
+      ...artifact.top_priorities, ...artifact.today, ...artifact.needs_attention,
+      ...artifact.follow_ups, ...artifact.build_status, ...artifact.fyi
+    ];
+    const item = allBuckets.find((i) => i.source === "business-open-loops" && i.title.includes("finance_spend_unexpected"));
+    expect(item).toBeTruthy();
+    expect(item?.why).toContain("Utgift på");
+    // høy prioritet (finance_spend_unexpected er "high") -> ikke i FYI-boetta.
+    expect(artifact.fyi.find((i) => i.ref === item?.ref)).toBeUndefined();
   });
 });
 

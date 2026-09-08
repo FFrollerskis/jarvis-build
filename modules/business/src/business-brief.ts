@@ -29,7 +29,8 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * - `status: "available"` betyr KUN at Jarvis har en kanonisk, intern (JARVIS_CANONICAL)
  *   kapabilitet for domenet - f.eks. `sales` via Business Graph/CRM, `marketing` via Native
  *   Jarvis Growth Core (D-74/D-75/D-76/D-77: kampanjeregister/utgiftsledger/attribusjon/
- *   CAC-ROAS/avviksdeteksjon).
+ *   CAC-ROAS/avviksdeteksjon), `finance` via Native Jarvis Finance & Spend Integrity Gateway
+ *   (D-107-D-116: UA-6, se under).
  * - `live_provider_connected` betyr at en EKSTERN tredjeparts-annonseplattform faktisk er
  *   tilkoblet og leverer RÅ live-data. Domenekapabilitet og
  *   leverandør-tilkobling er ALDRI det samme - `marketing.status === "available"` med
@@ -39,6 +40,18 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * Fortsatt en ren, statisk kartlegging (INGEN DB-spørring/runtime-avledning) - samme
  * arkitektoniske mønster som `sales` alltid har brukt: dette er en build-time-fakta om HVILKE
  * domenemoduler som faktisk finnes i kodebasen, ikke en per-tenant datasjekk.
+ *
+ * `finance` flippet til `available` (D-127) fordi PÅSTANDEN var blitt usann, ikke fordi noe
+ * nytt ble bygget her: UA-6 Finance & Spend Integrity Gateway var allerede
+ * VERIFIED/COMPLETE (D-107-D-116), og `OpenLoopService` (`open-loop-service.ts`) har SIDEN
+ * D-115/D-116 allerede overflatet `finance_spend_records`/`finance_recurring_commitments`/
+ * `finance_procurement_items`-avvik som `finance_spend_unexpected`/`finance_spend_amount_
+ * deviation`/`finance_spend_correction_conflict`/`finance_recurring_charge_missing`/
+ * `finance_recurring_charge_duplicate`/`finance_procurement_missing`-open-loops - som
+ * `businessOpenLoopsSource()` (under, SAMME kilde som allerede gir `sales` sin dekning)
+ * allerede overflater i DENNE briefen. Datastrømmen fantes altså allerede; kun
+ * dekningstabellen løy fortsatt om den. Samme "aktivt usann dokumentasjon er farligere enn
+ * manglende dokumentasjon"-lærdom som D-122.
  */
 export interface DomainCoverage {
   status: "available" | "not_integrated";
@@ -51,7 +64,11 @@ export interface DomainCoverage {
 export const BUSINESS_DOMAIN_COVERAGE: Record<BusinessDomain, DomainCoverage> = {
   sales: { status: "available", source: "Business Graph/CRM", live_provider_connected: false },
   product: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false },
-  finance: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false },
+  finance: {
+    status: "available",
+    source: "Native Jarvis Finance & Spend Integrity Gateway (utgifts-/forpliktelses-/anskaffelses-avviksdeteksjon overflatert som open loops, D-107-D-116)",
+    live_provider_connected: false
+  },
   marketing: {
     status: "available",
     source: "Native Jarvis Growth Core (kampanjeregister/utgiftsledger/attribusjon/CAC-ROAS/avviksdeteksjon, D-74)",

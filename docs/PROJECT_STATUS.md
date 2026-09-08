@@ -1,639 +1,92 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-08 (branch `claude/worker-self-recovery-20260907`, PR #75, base
-`main=94e4aaa528477fbdc87ce8f4f6c37cb9d3bebb1d`)
+**Oppdatert:** 2026-09-08 (branch `claude/ua3-finance-domain-coverage`, base `main=1b5da61bc070eb7fa8e5068e0c9ba8ecc015e1bd`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
-> historikk finnes i git-commits/diff/PR-beskrivelser, ikke her.
+> historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 8: `D126-ARCHITECT-REVIEW-FIX-20260908-G`** (byggeordre
-5577450319 på issue #68, `TASK_TYPE=BOUNDED_FINAL_REVIEW_FIX`, base-HEAD `8758d2f`,
-`ARCHITECT_MERGE_APPROVED=false`). Samme branch, samme PR #75. Runde 8 lukker nøyaktig to bundne
-blokkere fra den uavhengige arkitekt-gjennomgangen av eksakt denne HEAD - se «Runde 8» under - og
-rører ingenting annet.
-
-Forrige runde: **review-runde 7: `D126-HEARTBEAT-CI-CLOSEOUT-20260907-F`** (byggeordre
-5574439334 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`,
-`TASK_TYPE=BOUNDED_REVIEW_FIX_AND_EVIDENCE_RECONCILIATION`, base-HEAD `3734c0e`).
-
-**Hele D-126-arbeidet er eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny
-produktkapabilitet.** Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-
-sannhetsflagg er flippet. Full begrunnelse: D-126, D-126a til D-126f i DECISIONS_AND_ASSUMPTIONS.md.
-Runde 8 innfører bevisst ingen ny D-ID: den korrigerer to funn innenfor eksisterende D-126-scope.
-
-Runde 7 lukker nøyaktig tre ting: den gjenstående defekten i dispatch-ens feilbane (heartbeat-
-callbackene lå utenfor handoff-gaten), en CI-divergens på SAMME SHA som måtte diagnostiseres i
-stedet for kjøres bort, og en read-only rekonsiliering av host-sannhet. Ingenting annet.
-
-**Runde 7 gikk i TO forsøk, og det er verdt å si rett ut.** Forsøk 1 (18:31:20Z → 18:58:29Z på
-`head=3734c0e`) implementerte, committet og pushet rettelsen `a8bc7321`, men avsluttet UTEN å poste
-en terminal `CLAUDE_REPORT`. Workeren nektet å tolke `exit 0` som fullført og parkerte oppgaven
-`blocked` med `reason="exit_0_without_matching_report (no_matching_trusted_report)"` - bevis-porten
-gjorde altså nøyaktig jobben sin. Forsøk 2 (`attempt 2`, 19:11:22Z på `head=a8bc7321`) gjenbrukte
-SAMME branch og SAMME PR #75, postet ingen duplikat-ACK, re-implementerte ingenting, men verifiserte
-den eksisterende diffen mot faktisk kilde, styrket host-beviset (funn 3b/3c under) og rapporterte.
-HEAD har derfor lovlig beveget seg forbi byggeordrens `EXPECTED_HEAD_SHA=3734c0e` - drivet er vårt
-eget fra forsøk 1, ikke en tredjepart.
-
-## Runde 1 (v2) - hva som ble reparert
-
-Fire uavhengige, produksjonsobserverte feil i den lokale worker-loopen: kladd i repoet som blokkerte
-dirty-guarden permanent (A), `processed_task_ids.push()` som registrerte en `ETIMEDOUT` som «ferdig»
-(B), en lås basert på pid + aldersbudsjett (C), og en blokkert worker som gikk stille ut med exit 0
-(D). I tillegg en håndredigert `.ps1` fra mobil som ga ParserError uten at noe rapporterte det.
-
-## Runde 2 (v2.1) - syv P1-feil arkitekten fant i den faktiske v2-koden
-
-Grønn CI beviste dem ikke fraværende: ingen test kjørte det ekte entrypointet under krasj, ingen
-brukte ekte samtidige prosesser, ingen injiserte feil i durabilitets- eller installasjonsbanen.
-
-| # | Faktisk feil | Arkitektens repro | Rettet |
-|---|--------------|-------------------|--------|
-| 1 | Kandidat valgt FØR låsen + `isEligibleNow` avviser alltid `IN_PROGRESS` ⇒ krasj midt i dispatch kunne aldri kjøre igjen. Barnets pid lagret først ETTER `runClaude`. | `CRASHED_IN_PROGRESS_ELIGIBLE=false` | rekkefølge lås → state → recovery → kandidat; identitet (pid+starttid+host) persistert ved spawn; levende foreldreløst barn beskyttes med etterkommer-regnskap; bundet levetidsbudsjett så pid-gjenbruk aldri blokkerer permanent |
-| 2 | Låsen publisert som TOM `wx`-fil før JSON; heartbeat trunkerte samme fil; tomme låser slettet umiddelbart; samtidige reclaimere slettet hverandres låser; state lest før og skrevet uten lås | `EMPTY_LOCK_RECLAIMED=true` | link-atomisk publisering, rename-atomisk heartbeat, innholdsverifisert reclaim, eierskaps-token, state lest ETTER låsen, egen append-only journal for status-dedup |
-| 3 | Korrupt primær kopiert over eneste gode backup; `migrateState(null)` ble tom historikk | `BACKUP_AFTER_RECOVERY_SAVE=corrupt`, `NULL_STATE_ACCEPTED_AS_EMPTY=true` | skjemavalidering (worker + supervisor), backup-rotasjon kun fra verifisert gyldig primær, `first_run` skilt fra tapt state |
-| 4 | In-place kopiering over levende deployment; `run-worker-safe.ps1` slettet mens en oppgave kunne peke på den; fungerende oppgave avregistrert FØR ny registrering kunne feile; rollback lot innførte moduler/oppgaver stå og håndhevet ikke gamle hasher | — | transaksjonell stage → verifiser → bytt → auto-rollback i Node (`lib/deploy.mjs`), rename-over per fil, utsatt aktivering med handoff-markør ved levende lås, probe-basert registrering som bevarer hostens principal/shell, hash-håndhevet rollback som også fjerner det installasjonen innførte |
-| 5 | Kommanderte restarts hoppet over budsjett/backoff; to like `COMMAND_ID` i én batch kjørte begge; kommando merket utført FØR start uten rekonsiliering; utsatte forespørsler ble konsumert; `Start-ScheduledTask` kunne rapportere ok etter ikke-terminerende feil | — | durable intent → effect → result → receipt; per-kommando revalidering mot fersk observasjon; rekonsiliering fra faktisk host-bevis; kvitterings-retry uten å gjenta effekten; bevart utsettelse; terminerende PowerShell-feil med verifisert sentinel |
-| 6 | Hele TASK_ID-sluggen finnes ikke i faktiske branch-navn ⇒ retry ville duplisert branch/PR/merge; feilede GitHub-oppslag ble tomme lister | `KNOWN_D125_BRANCH=null KNOWN_PR=null` | eksakte persisterte branch-/PR-assosiasjoner fra state og betrodde protokollkommentarer; paginering; `{ok, items, error}` så et feilet oppslag aldri leses som «ingen PR finnes» |
-| 7 | `gitStatusLines` ignorerte exit/feil og leste manglende stdout som «rent»; `claudeArgs` defaultet til `--dangerously-skip-permissions`; ingen grense-/path-/TASK_ID-/vertsbindingsvalidering; `TEMP` hindrer ikke relative kladdefiler | — | `lib/git.mjs` fail-closed; `lib/config.mjs` påkrevd eksplisitt `claudeArgs` + bounds + path-containment + ekte vertsbinding; `isValidTaskId`; eksplisitt scratch-sti og kladdedisiplin i prompten |
-
-## Runde 3 (v2.2) - bekreftet kildedefekt i låsen, og harness-defekten
-
-Arkitekten bekreftet en KILDEDEFEKT, ikke en flaky test: `removeVerified` omdøpte den NÅVÆRENDE
-låsen til en tombstone FØR bytene ble sammenlignet med det klassifiserte øyeblikksbildet.
-rename-så-sammenlign er ikke en atomisk compare-and-delete; i vinduet er den offentlige stien tom.
-
-Reprodusert lokalt på nøyaktig `efa62d7`-modulen (kopi i scratch, ett tillagt observasjonspunkt rett
-etter `renameSync`, ingen endret beslutning), og samme skjema mot den nye koden:
-
-```
-v2 (efa62d7): existingOwnerAcquired=true  challengerAcquired=true
-              reclaimResult=lock_changed_during_reclaim
-              existingOwnerStillHolds=false challengerStillHolds=true
-v3 (denne):   existingOwnerAcquired=true  challengerAcquired=false
-              reclaimResult=active
-              existingOwnerStillHolds=true  challengerStillHolds=false
-```
-
-Rettet ved å bytte primitiv: **create-if-absent** (`link()` / `open(wx)`) er den eneste ekte
-enkeltvinner-operasjonen filsystemet gir, og låsen er nå en append-only hovedbok `<lockFile>.d/`
-med `<generasjon>.claim`. Ingen prosess omdøper, overskriver eller sletter en sti den ikke selv
-opprettet; en foreldet claim BLIR FORBIGÅTT av en høyere generasjon, aldri fjernet. Full
-beskrivelse av primitivet og feil-/gjenopprettingssemantikken: `ops/claude-worker/README.md` og
-D-126b.
-
-Harness-defekten er også rettet: `lock-racer.mjs` bruker eksplisitt READY → START → ATTEMPT →
-RELEASE, og gjensidig utelukkelse dømmes av INTERVALLER (ingen to kritiske seksjoner får overlappe),
-ikke av en telling av `acquired`. Alle forventede barn må levere resultatfil og avslutte med exit 0.
-
-Deployment-forpliktelsen er lukket i denne runden: `install-task.ps1`/`install-supervisor.ps1`
-skriver en DURABEL INTENSJON i install-manifestet FØR noen registrering og avbryter installasjonen
-hvis den ikke kan skrives; `reconcile-task-intents` løser krasj-vinduet fra vertens eget svar; og
-rollback avregistrerer også ubekreftede intensjoner for oppgaver som ikke fantes fra før.
-
-## Runde 4 (v2.3) - en tilbaketrukket claim kunne fortsatt maskere en levende forgjenger
-
-Arkitekten leste den faktiske `lock.mjs` på `f839668` og reproduserte deterministisk én gjenstående
-P1-feil - i selve den NYE append-only hovedboken. Den grønne CI-kjøringen 34086249211 dekket ikke
-dette interleavinget.
-
-`confirmOwnership()` re-probet generasjon N-1 korrekt, men `retractOwnClaim()` skrev N som en
-ORDINÆR `state: "released"`, og eierskap ble lest av RÅ maksimum. Da kunne en FEILET utfordrer gi
-bort låsen: gen 1 lever → en foreldet reclaimer publiserer gen 2 → bekreftelsen ser korrekt at 1
-lever og trekker 2 tilbake → en tredje anskaffer ser bare en «released» gen 2, tror låsen er fri,
-publiserer gen 3 og re-sjekker KUN mot 2. Den levende gen 1 mistet `holdsLock()`.
-
-Reprodusert lokalt på nøyaktig `f839668`-modulen og på den rettede modulen, fra samme driver, uten
-sleeps (scratch utenfor repoet):
-
-```
-f839668: firstAcquired=true  secondAcquired=false generation2StateOnDisk=released
-         thirdAcquired=true  firstStillOwnsLock=false thirdOwnsLock=true
-v2.3:    firstAcquired=true  secondAcquired=false generation2StateOnDisk=void
-         thirdAcquired=false firstStillOwnsLock=true  thirdOwnsLock=false
-```
-
-Rettelsen er en tredje krav-tilstand, ikke en rekkefølgelapp: `released` = «EIDE låsen og ga slipp»
-(avslutter avstamningen), `void` = «EIDE ALDRI noe» (TRANSPARENT - oppslaget går videre nedover til
-det EFFEKTIVE kravet). Ny generasjon appendes fortsatt over RÅ maksimum, så telleren går aldri
-bakover. `confirmOwnership()` re-klassifiserer den EFFEKTIVE forgjengeren med samme dom som før
-publisering, så også en uleselig forgjenger feiler nå lukket. Kan avstamningen ikke bevises (hull
-under et void-krav, uleselig krav på veien, void-kjede som ikke når gen 1) nektes anskaffelsen -
-aldri «fri». Eldre `released` + `release_reason: "retracted"` leses som `void`.
-
-## Runde 5 (v2.4) - tre gjenstående P1-blokkere fra den komplette gjennomgangen
-
-Alle tre deler én rot: **en operasjon som IKKE lyktes fikk lov til å se ut som om den hadde
-lyktes.**
-
-**Funn 1 - barn-identitet var best-effort, ikke en forutsetning.** `onSpawn` fanget
-`persistState`-/heartbeat-feil og logget bare en warning, og `dispatch.mjs` fanget i tillegg enhver
-`onSpawn`-exception og lot barnet fortsette. Arkitektens direkte modul-repro med `onSpawn` som
-kaster `durable write failed`:
-
-```
-f123e650: {"outcome":"completed_exit_0","code":0,"childPid":14}
-v2.4:     {"outcome":"handoff_failed","childPid":14,
-           "handoff":{"child_terminated":true,"untracked_child_live":false,"identity_state":"gone"}}
-```
-
-Rettet med et nytt utfall `HANDOFF_FAILED` og en HÅNDHEVET gate: `onSpawn` kaster nå, og sjekker at
-lås-heartbeaten faktisk landet. Feiler handoffen etter prosess-opprettelse, avbrytes barnet i en
-bundet eskalering (SIGTERM → grace → SIGKILL) gjennom child-HANDLE - aldri PID-alene - og den
-EKSAKTE fangede identiteten re-sjekkes; kun `GONE`/`REUSED` teller som bevis. `MATCH`/`UNPROVEN`/
-probe-feil rapporteres sannferdig som `untracked_child_live`. **Child-start-handshake:** ved
-`promptDelivery=stdin` skrives prompten - som ER oppgaven - først når identitetsrecord og heartbeat
-er durable, så oppgaven kan ikke starte før handoffen er commitet. Barn bevist borte →
-`FAILED_RETRYABLE` (exit 4); ikke bevist borte → `BLOCKED` (exit 3) med `child_identity` BEVART.
-
-**Funn 2 - semantisk malformede claims omgikk grace-/fail-closed-regelen.** Bare claims som ikke lot
-seg PARSE ble merket malformed, så `{"state":"held"}` fikk `verdict.state:"malformed"` og falt
-gjennom `judgeIncumbent` til `ok:true`:
-
-```
-f123e650: fersk gen 1 = {"state":"held"} + malformedGraceMs=60000 → acquired=true
-v2.4:     samme input → acquired=false, verdict.state=publishing (fersk),
-          og etter grace-vinduet: acquired=true, claimen aldri slettet
-```
-
-Rettet med `validateClaimSchema` + skjemavalidering FØR noe konkluderes av innholdet (også før
-`released`/`void`), og `judgeMalformedClaim` som gir ÉN fail-closed policy for både parse- og
-semantisk malformed. Uleselig I/O er fortsatt aldri automatisk supersederbar. Kun en GYLDIG
-void-claim er transparent og kun en GYLDIG release frigjør låsen - ellers kunne `{"state":"void"}`
-viske ut en levende forgjenger. Sidefunn lukket: uparsbart `heartbeat_at` ga `NaN`, hoppet over
-staleness-sjekken og leste som en evig «active» eier.
-
-**Funn 3 - utsatt aktivering var ikke en bevist bootstrap-handoff.** Den nye `run-worker.ps1`
-anvender markøren, men den filen ligger selv bare i den stagede payloaden. Startes installasjonen av
-den deployerte GAMLE workeren, kaller neste scheduler-tikk den GAMLE entrypointen, som aldri har
-hørt om `pending-activation.json`. Påstanden «neste tikk anvender den» var sirkulær, og host-bevis
-sier at hosten fortsatt kjører v1.
-
-Rettet med `captureQuiescenceOwners` + `runBootstrapHandoff` (`deploy.mjs bootstrap-handoff`), som
-kjøres fra KILDETREET og derfor er kjørbar FØR payloaden byttes. Den venter på at den EKSAKTE
-legitime forelder-identiteten avslutter av seg selv, sjekker worker- OG supervisor-quiescence på
-nytt, og aktiverer først da transaksjonelt med rollback. Den terminerer ingenting, rører ingen
-scheduled task, og krever aldri at den nystagede runneren er aktiv. `install.ps1` starter den
-detached ved utsatt aktivering. Den sirkulære påstanden er fjernet fra `run-worker.ps1`,
-`activateRelease`, `writePendingActivation` og README; `apply-pending` er nå dokumentert som et
-ANDRE nett.
-
-## Runde 6 (v2.5) - de to uoppfylte addendum-kravene
-
-Begge deler én rot: **en garanti som bare gjaldt den banen vi tilfeldigvis testet.**
-
-**Punkt 4 - `argv`-levering omgikk hele den durable pre-execution-gaten.** `config.mjs` aksepterte
-fortsatt `promptDelivery: "argv"`, og `dispatch.mjs` bygget `args` ved å legge HELE prompten bakerst
-og ga den til `spawn` FØR `onSpawn`. Handoff-gaten fra runde 5 kunne avbryte etter en feilet durabel
-skriving, men et argv-barn kunne allerede ha lest og begynt å utføre den autoriserte oppgaven, og en
-abort i ettertid kan ikke bevise at den ikke ble konsumert. Alle nye dispatch-tester brukte `stdin`,
-så den aksepterte argv-banen var helt utestet.
-
-Rettet med det arkitekten anga som foretrukket: **`stdin` er eneste aksepterte modus.** `argv` og alt
-annet avvises i `loadWorkerConfig` OG i `runClaude` selv, FØR `spawn` og før prompten i det hele tatt
-bygges - et direkte modulkall går aldri gjennom konfigurasjonsvalidering, og det var nettopp slik
-gapet ble reprodusert. Nytt utfall `unsupported_prompt_delivery`: ingen prosess opprettes, så det
-finnes ikke noe barn som kunne ha konsumert oppgaven. Prompten er aldri lenger et argv-element;
-kommandolinjen bærer bare operatørens `claudeArgs`. `worker.mjs` håndterer utfallet eksplisitt som
-BLOCKED i stedet for å falle gjennom til fullførings-vurderingen.
-
-**Punkt 5 - bootstrap-handoffen kunne forlate en utsatt legacy-installasjon for godt.**
-`captureQuiescenceOwners` la syntaktisk uleselige låser i en `unreadable`-liste ingen konsumerte, og
-utelot semantisk malformede dommer (`classifyLock` → `malformed`, som er nøyaktig det en ekte
-legacy-lås uten `host` gir) HELT fra `owners`. `runBootstrapHandoff` konsumerte kun `owners`: med
-null fangede identiteter ventet den på ingenting, nådde `assessQuiescence` - som DERIMOT teller de
-låsene som blokkere - og returnerte `deferred` med én gang. Den frittstående prosessen avsluttet
-deretter. På en legacy-installasjon har den registrerte entrypointen ingen markør-støtte, så
-markøren hadde ingen garantert fremtidig konsument.
-
-Rettet: `captureQuiescenceOwners` returnerer nå `{ owners, blockers, unreadable }`, der `blockers`
-dekker uleselig, semantisk malformed, ekte legacy-form uten `host`, og lese-/tilgangsfeil.
-`runBootstrapHandoff` BLIR VÆRENDE i live og poller fail-closed innenfor ÉN fast bundet deadline på
-BÅDE de eksakte fangede identitetene OG blokkererne. Den aktiverer først når alle eiere er bevist
-avsluttet (kun `GONE`/`REUSED`) og alle blokkere er borte eller trygt klassifiserbare, og
-re-sjekker deretter quiescence. Den terminerer aldri noe, substituerer aldri en annen prosess for en
-fanget eier, og lar markøren ligge ved enhver nekting. `assessQuiescence` behandler nå også en
-lesefeil som blocker i stedet for som fravær.
-
-## Runde 7 (v2.6) - heartbeat-callbackene, CI-divergensen og host-sannheten
-
-**Funn 1 (kilde) - gaten var definert av ÉN funksjon, ikke av egenskapen.** Handoff-gaten dekket
-`onSpawn`, men ikke de to `onHeartbeat`-stedene, og de feiler på tre ulike måter:
-
-- **1a - det umiddelbare kallet lå utenfor try/catch OG over listener-oppsettet.** `dispatch.mjs`
-  kalte `onHeartbeat` rett etter en vellykket `onSpawn`, men før `finish`, `close`-/`error`-
-  listenerne og timeout-timeren i det hele tatt fantes. En exception der slapp ut av Promise-
-  executoren, så `runClaude` REJECTED med et levende barn som ingenting kunne settle. Arkitektens
-  repro mot faktisk `runClaude`:
-
-  ```
-  3734c0e: {"rejected":"heartbeat persistence failed","kills":0,"writes":0,
-            "closeListeners":0,"errorListeners":0}
-  v2.6:    {"outcome":"handoff_failed","handoff":{"stage":"first_heartbeat","aborted":true,
-            "child_terminated":true},"stdinPayload":undefined,"signals":["SIGTERM"]}
-  ```
-
-  `writes:0` var den ENESTE gode verdien der, og den er bevart: prompten - som ER oppgaven - leveres
-  fortsatt aldri.
-- **1b - tapt eierskap var usynlig.** `lock.heartbeat` rapporterer tapt eierskap ved å returnere
-  `false`, ikke ved å kaste. `onSpawn` sjekket dette eksplisitt; `onHeartbeat` i `worker.mjs` kastet
-  returverdien.
-- **1c - den periodiske callbacken hadde ingen exception-grense.** En throw i en `setInterval`-
-  callback er en uncaught exception som river ned hele workeren midt i dispatch.
-
-Rettet: hele settlement-apparatet settes opp FØR handoffen; den første heartbeaten er nå andre
-halvdel av gaten inne i samme try/catch (både throw og strikt `false` gir bundet, identitets-sikker
-`HANDOFF_FAILED` med `handoff.stage`); intervallet opprettes først når gaten har passert; den
-periodiske callbacken har egen grense som REGISTRERER feil i `result.heartbeat` og aldri dreper
-barnet - et barn som gjør ekte autorisert arbeid henrettes ikke for vår bokføring. `worker.mjs`
-returnerer nå heartbeat-resultatet og feiler LUKKET på `heartbeat.unrecovered`: `BLOCKED` (exit 3)
-med bevart `child_identity`, selv når barnet avsluttet med 0 og postet en ekte betrodd rapport.
-
-**Funn 2 (CI) - to kjøringer, samme SHA, ulikt resultat.** Kjøring 34132097909 (`event: push`) feilet
-på `apps/api/test/fase3-e2e.test.ts:479`; 34132101745 (`event: pull_request`) var grønn. BEGGE på
-`headSha=3734c0e`, samme workflow, samme `ubuntu-24.04`. Det er per definisjon ikke en checkout-
-eller event-kontekstforskjell. Diagnose mot faktisk kilde:
-
-- `SessionService.resumeOrCreate` velger aktiv sesjon på `tenant_id`+`person_id` ALENE
-  (`session-service.ts:29-34`), så `dev-web` og `dev-voice` deler sesjon og meldingshistorikk.
-- `ScriptedAdapter` er deterministisk gitt sin request; det eneste ikke-deterministiske inputet er
-  historikken. `conversation.ts:164-168` sender `context.history.slice(-20)`, og tool-scriptet ser
-  KUN på `messages.at(-1)`.
-- Testen rett foran (§8.D, linje 436) avbryter en SSE-strøm etter 2 tokens. Serversiden lagrer da
-  `"… [avbrutt av bruker]"` (`conversation.ts:230`) i en skrivning testen ALDRI venter på. Lander den
-  etter neste tests brukermelding, er siste historikk-melding ikke lenger kalenderspørsmålet, tool-
-  kallet uteblir, og runde 1s standardtekst returneres - nøyaktig
-  `expected 'Hei Tobias, dette er et modellsvar.' to contain 'standup 09:00'`.
-
-Dette er en **test-synkroniseringsdefekt**, ikke en produktdefekt i tool-broen. Ingen assertion er
-svekket, ingen rerun-until-green, og **ingen produktendring er gjort** - foreslått bundet scope
-ligger til uavhengig review (se `CLAUDE_REPORT`). **Sannferdig om reproduksjon:** 7 lokale kjøringer
-av filen på denne HEAD ga 18/18 hver gang. Racet ble IKKE reprodusert lokalt, og det påstås ikke.
-
-**Funn 3 (host) - rekonsiliert READ-ONLY.** `install-manifest.json` for deployment `20260907-140934`
-er lest. De registrerte `new_sha256` for `worker.mjs`, `supervisor.mjs` og `lib/dispatch.mjs` er
-bit-identiske med `git show 3734c0e:`-versjonene; `task_intents` viser `JarvisClaudeWorker`
-`replaced` (bekreftet 14:11:19Z) og `JarvisWorkerSupervisor` `introduced` (bekreftet 14:11:28Z).
-Workerloggen viser ubrutt 5-minutters kø-polling 14:16:20Z → 18:26:20Z, og at DEN DEPLOYERTE
-workeren dispatchet denne oppgaven 18:31:20Z på `head=3734c0e`. De utdaterte påstandene «ikke
-installert» / «hosten kjører v1» er dermed rettet nedenfor. **Merk:** den deployerte
-`lib/dispatch.mjs` er pre-fix - rettelsen i denne runden er IKKE deployert.
-
-**Funn 3b (host) - hashene er nå RE-HASHEDE BYTES, ikke bare manifest-registrerte.** Runde 7s
-opprinnelige forbehold («manifest-REGISTRERTE, ikke re-hashede bytes på disk») er nå OPPHEVET for
-disse tre filene: de installerte filene under `C:\Users\Tobia\.jarvis-claude-worker\` er lest og
-hashet på nytt READ-ONLY, og bytene på disk gir nøyaktig:
-
-```
-worker.mjs        fbfd6b398bf7391bcb772afcfc5a1b29d6230d4cad7568b916125b3b95e2d416
-supervisor.mjs    4eafd096aebcd4bea9263088d3e528fade273b53ecce6fca794c5fe07ca97730
-lib/dispatch.mjs  171e672b5c1fd218681a36cb1d5fe80c080c9c408b198f2173cbe84a4c948b7e
-```
-
-Dette er identisk BÅDE med manifestets `new_sha256` OG med `git show 3734c0e:ops/claude-worker/<fil>
-| sha256sum`. Hosten kjører altså bevislig `3734c0e`-bytes - og den siste linjen bekrefter direkte at
-den deployerte `lib/dispatch.mjs` er PRE-FIX (rettelsen i `a8bc732` endret nettopp den filen).
-`old_sha256 == new_sha256` for alle tre: deployment `20260907-140934` skrev innhold som allerede var
-identisk.
-
-**Funn 3c (host) - scheduler-drevet drift er observert, selv-recovery er det fortsatt IKKE.**
-`logs/health.jsonl` (219 linjer) inneholder 59 `scheduler_invoked`-hendelser fra `run-worker.ps1`,
-i ubrutt 5-minutters kadens 14:16:19Z → 18:31:18Z. Workeren startes altså av den registrerte
-oppgaven, ikke bare av en kommandert start. Hullet 18:36Z → 18:56Z er forklart, ikke ukjent: forrige
-forsøk på DENNE oppgaven kjørte 18:31:20Z → 18:58:29Z, og planleggerens single-instance-policy
-undertrykker en ny instans mens den forrige lever; kadensen gjenopptas 19:01:18Z. **Det viktigste
-funnet:** forrige forsøk avsluttet `completed_exit_0`, men workeren nektet å påstå fullføring og
-parkerte `blocked` med `reason="exit_0_without_matching_report (no_matching_trusted_report)"`
-(18:58:30Z, `next_eligible_at=19:08:30Z`). Bevis-porten fungerte altså på ekte host, mot en ekte
-kjøring. **Dette er fortsatt IKKE selv-recovery:** ingen krasj er indusert, ingen reboot er testet.
-
-**Presist nektet, ikke omgått:** `schtasks /query` / `Get-ScheduledTask` ble nektet av øktens
-tillatelseslag og er IKKE omgått; oppgaveregistreringen hviler derfor på manifestets `task_intents`
-pluss de observerte `scheduler_invoked`-hendelsene, ikke på et direkte planlegger-oppslag. Ingen
-installasjon, aktivering, restart, reboot eller task-reregistrering er utført.
-
-## Runde 8 (v2.7) - quiescence-bypassen i produksjons-CLI-en, og sannhets-synk
-
-Den uavhengige arkitekt-gjennomgangen av eksakt `8758d2f` fant funnene fra A-F materielt lukket, men
-holdt merge tilbake på to bundne blokkere. Begge er rettet i denne runden, og ingenting annet er rørt.
-
-**Blokker 1 (kilde) - produksjons-CLI-en eksponerte en vei rundt quiescence.**
-`ops/claude-worker/deploy.mjs` kalte `activateRelease` med
-`requireQuiescence: args["force-unquiesced"] !== true`. Det gjorde et udokumentert `--force-unquiesced`
-til en ordinær runtime-bryter som strukturelt kunne slå av D-126s sentrale invariant: en deployment
-skal aldri overskrive en levende worker eller supervisor. Flagget var reelt virksomt, ikke kosmetisk -
-verifisert utenfor repoet ved å drive den gamle banen direkte mot biblioteket med en levende lås holdt:
-
-```
-requireQuiescence:false → ok=true, deferred=false,
-                          worker.mjs på disk = "NEW worker.mjs"
-                          live_deployment_was_overwritten_while_lock_held = true
-```
-
-Rettet: CLI-en har ingen bypass igjen. `activate` og `apply-pending` kaller `activateRelease` UTEN
-`requireQuiescence`-argument, så bibliotekets default (`true`) er den eneste oppførselen entrypointet
-kan produsere. `--force-unquiesced` er i tillegg AVVIST eksplisitt, sammen med enhver nærliggende
-staving (`force-quiescence`, `skip-quiescence`, `no-quiescence`, `ignore-quiescence` og
-`require-quiescence`), med `EXIT.BLOCKED` og en feilmelding som peker på den lovlige veien:
-`activate` utsetter av seg selv og `bootstrap-handoff` anvender markøren når den eksakte forelderen
-har avsluttet. Avvist framfor stilltiende ignorert, nettopp så en operatør aldri kan gå fra kallet i
-den tro at en tvunget aktivering skjedde. Ingen env-variabel og ingen config-nøkkel erstatter
-flagget; det finnes ingen annen vei. Biblioteks-parameteren `requireQuiescence` beholdes som en
-TEST-ONLY søm, slik byggeordren tillater, men er ikke lenger nåbar fra produksjonsbanen.
-Bootstrap-handoff-semantikken og den transaksjonelle rollbacken er uendret.
-
-Ny regresjon på CLI-/entrypoint-grensen: `ops/claude-worker/test/deploy-cli.test.mjs` (7 tester)
-driver den eksporterte `main()` - nøyaktig det `node deploy.mjs ...` kjører - i stedet for biblioteket.
-Den beviser at `activate --force-unquiesced` og `apply-pending --force-unquiesced` mot en levende
-`.worker.lock` gir `EXIT.BLOCKED` og lar hver eneste live-fil stå urørt; at ingen av de seks
-forbudte stavingene slipper gjennom på noen av de to underkommandoene; at kildefilen ikke inneholder
-noe `requireQuiescence:`-argument i det hele tatt; og - som kontroll, så testen ikke bare måler et
-generelt avslag - at et vanlig `activate` mot en levende worker- ELLER supervisor-lås fortsatt
-UTSETTER (`EXIT.DEFERRED`) med markør, og at nøyaktig samme stagede release aktiverer normalt
-(`EXIT.OK`) når ingen lås holdes.
-
-**Blokker 2 (dokumentasjon) - status-sannheten var utdatert og selvmotsigende.** PR #75-beskrivelsen
-sto fortsatt med `SUPERVISOR_INSTALLED=false`, `REMOTE_RESTART_VERIFIED=false`, `DEPLOYED_TO_HOST=false`
-og «Hosten kjører fortsatt v1», selv om senere host-bevis (funn 3, 3b, 3c i runde 7) motsier alle fire.
-Denne filen kalte samtidig `a8bc7321` «den endelige HEAD» selv om PR-hodet siden er `8758d2f`, og lot
-en avsluttende setning si at `SUPERVISOR_INSTALLED` og `REMOTE_RESTART_VERIFIED` først KAN settes true
-etter framtidig bevis - to flagg som allerede står true lenger opp i samme fil på bevis som faktisk
-finnes. Rettet begge steder: PR-beskrivelsen er sannhets-synket, den selvmotsigende setningen er
-erstattet av en som skiller flagg-for-flagg, og den selvrefererende «CI grønn på endelig HEAD»-
-påstanden er ute av dokumentasjonen. Slik det ble etablert etter D-121 hører bevis for CI på eksakt
-endelig HEAD hjemme i den terminale `CLAUDE_REPORT` som postes ETTER at siste commit har flyttet HEAD -
-en docs-commit kan per konstruksjon ikke sitere sin egen etterfølger.
-
-**Ikke rørt i runde 8, bevisst:** test-synkroniseringsdefekten i `apps/api/test/fase3-e2e.test.ts`
-(fortsatt diagnostisert, fortsatt ikke autorisert), D-108, UA-8, ny infrastruktur og enhver
-host-mutasjon. Ingen deployment, aktivering, restart, reboot eller task-reregistrering i denne runden.
-
-## Kvalitetsporter (kjørt i denne økten)
-
-- **`npx vitest run ops/claude-worker/test` → 16 filer / 428 tester passed (runde 8; 421 → 428, 7 nye
-  i `deploy-cli.test.mjs`).** Nye tester i runde 8, alle på CLI-/entrypoint-grensen (`main()`):
-  `activate --force-unquiesced` og `apply-pending --force-unquiesced` mot en levende `.worker.lock`
-  gir `EXIT.BLOCKED` og bytter ingen live-fil; alle seks forbudte stavinger avvises på begge
-  underkommandoene; kilden inneholder ikke noe `requireQuiescence:`-argument; og tre kontrolltester
-  som viser at håndhevingen er ekte og ikke et blankt avslag - vanlig `activate` mot levende worker-
-  lås utsetter med markør, det samme mot levende `.supervisor.lock`, og samme stagede release
-  aktiverer normalt når ingen lås holdes.
-- **CI på eksakt endelig HEAD rapporteres i `CLAUDE_REPORT` på issue #68, ikke her.** Denne filen kan
-  per konstruksjon ikke sitere en kjøring mot en SHA som først finnes etter at den selv er committet
-  (etablert etter D-121). Historisk, og fortsatt sant: divergensen som fantes på `3734c0e` (push rød /
-  PR grønn) opptrådte ikke på `a8bc7321`, der begge kontekster var grønne (kjøring `34153564568`
-  `event: push` og `34153567937` `event: pull_request`). Det er IKKE bevis på at racet er borte -
-  ingen assertion er endret, så en grønn kjøring er forventet i det vanlige tilfellet uansett.
-  Rot-årsaken står udekket til uavhengig review godkjenner et bundet scope.
-- **Runde 7, uendret: `npx vitest run ops/claude-worker/test` → 15 filer / 421 tester passed, kjørt
-  TO ganger, 421/421 begge ganger** (387 → 421; 34 nye i runde 7). Nye tester i runde 7:
-  - `dispatch.test.mjs` (21 → 36), direkte modulkall: arkitektens repro RESOLVER nå til
-    `HANDOFF_FAILED` i stedet for å reject-e; `handoff.stage=first_heartbeat`; barnet SIGTERM-es
-    (`kills` er ikke lenger 0); `close`- og `error`-listenerne er allerede tilkoblet NÅR callbacken
-    kjører (begge var 0); null prompt-bytes (`stdinEnded=false`); ingen armert heartbeat-intervall og
-    ingen armert timeout-timer etter abort; eksakt identitet bevart ved `MATCH`; strikt `false` fra
-    første beat feiler gaten akkurat som en throw; `undefined` er fortsatt SUKSESS; og for den
-    periodiske banen: en throw rejecter ikke og dreper ikke barnet, oppgaven ER levert, utfallet
-    rapporteres sannferdig som `completed_exit_0` MEN med `heartbeat.unrecovered=true`; en feil som
-    kommer seg er `degraded` men ikke `unrecovered`; tapt eierskap er sticky og stopper beatingen; en
-    helt frisk kjøring rapporterer null degradering; beatingen stopper når dispatchen settler.
-  - `worker-crash-recovery.test.mjs` (37 → 56), EKTE entrypoint som OS-prosess: fire nye
-    fault-injections (`first_heartbeat_throw`, `first_heartbeat_lost_lock`,
-    `periodic_heartbeat_throw`, `periodic_heartbeat_lost_lock`). Første-beat-feil gir non-zero exit,
-    `HANDOFF FAILED`, ingen `UnhandledPromiseRejection`, ingen `prompt.txt`, null usporede levende
-    barn, sannferdig abort-verifisering, frigjort lås og nøyaktig én ny dispatch etterpå. Periodisk
-    feil bruker ny fixture-modus `report-slow`: barnet POSTER en ekte betrodd `CLAUDE_REPORT` og
-    avslutter med 0 etter å ha overlevd ett heartbeat-intervall - workeren krasjer ikke, dreper ikke
-    barnet, og parkerer likevel `BLOCKED` (exit 3) med `heartbeat_failures`/`heartbeat_ownership_lost`
-    registrert, og en påfølgende kjøring starter ingen ny Claude. Kontrolltest: en UFAULTET treg
-    kjøring fullfører normalt, så fail-closed-grenen fyrer ikke på en frisk lang kjøring.
-
-  Historikk fra runde 6, uendret (359 → 387):
-  - `dispatch.test.mjs` (11 → 21): `stdin` er hele det aksepterte settet; direkte modulkall med
-    `argv`, `carrier-pigeon`, `""`, `null` og `undefined` spawner INGENTING (`spawned=0`,
-    `promptBuilt=false`, aldri `completed_exit_0`); prompten er aldri i argv; og for HVER akseptert
-    modus: injisert persistens-feil OG injisert heartbeat-feil gir null prompt-bytes til barnet
-    (`stdinEnded=false`, ikke bare tom payload), pluss rekkefølgebevis for at persist og heartbeat
-    begge commiter før første prompt-byte;
-  - `config.test.mjs` (26 → 28): `argv` avvises med begrunnelsen, `stdin` aksepteres både eksplisitt
-    og som default;
-  - `worker-crash-recovery.test.mjs` (31 → 37): ekte entrypoint (`node worker.mjs run` som OS-
-    prosess) nekter å starte på `argv`-config (null invocations, ingen `prompt.txt`, ingen
-    `argv.json`, tasken aldri berørt); et EKTE barn får aldri oppgaven på kommandolinjen (fixturen
-    logger nå sin egen `process.argv`, som er nøyaktig to elementer); og med persistens- eller
-    heartbeat-feil injisert er argv rent OG `prompt.txt`/`report-posted` finnes ikke - null
-    prompt-konsum, null oppgave-effekt;
-  - `deploy.test.mjs` (56 → 66): syntaktisk malformed JSON, ekte legacy-form uten `host` og
-    lese-/tilgangsfeil registreres alle som blokkere (ikke som fravær); handoffen POLLER gjennom hver
-    av dem og aktiverer når de klarner (`polls >= 3`); en blokker som aldri klarner bruker opp ÉN
-    deadline og utsetter med `deadline_expired`, byte-identisk låsefil og markøren intakt; en fanget
-    eier som aldri avslutter bruker SAMME ene deadline og den eksakte identiteten bevares i
-    rapporten; en ny eier som dukker opp under pollingen gir utsettelse i stedet for overskriving og
-    blir aldri adoptert som «forelder»; og en eksplisitt regresjonstest for at den GAMLE feilen -
-    utsettelse på poll null - er borte.
-
-Historikk fra runde 5, uendret:
-
-- **`npx vitest run ops/claude-worker/test` → 15 filer / 359 tester passed, kjørt TO ganger,
-  359/359 begge ganger.** Nye tester i runde 5:
-  - `worker-crash-recovery.test.mjs` (16 → 31): fault-injection gjennom det FAKTISKE entrypointet
-    (`node worker.mjs run` som ekte OS-prosess) for state-write-feil OG tapt lås under `onSpawn`.
-    Beviser null usporet levende barn, ingen duplikat-dispatch, sannferdig non-zero utfall, at
-    oppgaven aldri leveres til barnet, og trygg recovery etterpå (inkludert at en for tidlig retry
-    ikke dispatcher, og at nøyaktig én ny dispatch skjer når backoffen er ute). Egen test for at en
-    handoff som fortsetter å feile bruker opp forsøksbudsjettet og ender BLOCKED på 4/4 med
-    `retry budget exhausted`, exit 3 og fortsatt null usporet levende barn - «forsøket skjedde
-    egentlig ikke» er ikke en lisens til å prøve for alltid;
-  - `dispatch.test.mjs` (NY, 11): arkitektens eksakte repro, pluss grenene en OS-prosess ikke kan
-    fremtvinge - barn som ikke dør, `UNPROVEN`, `REUSED`, probe som kaster, og exit 0 midt i abort;
-  - `lock.test.mjs` (42 → 49): fersk/aldret semantisk-malformed, manglende/ugyldig pid, manglende
-    host, ugyldig state/owner_token/generation/start_time, uparsbare tidsstempler, `released`/`void`
-    uten pid, uleselig I/O uansett alder, og samtidig publisering/re-read;
-  - `deploy.test.mjs` (40 → 56): fixture som starter fra en LEGACY deployert destination der
-    installert `run-worker.ps1` IKKE har markør-støtte og den registrerte oppgaven peker på den
-    gamle entrypointen. Beviser install startet av sitt barn → utsatt og legacy-entrypoint urørt →
-    forelder avslutter av seg selv (aldri drept) → kontrollert handoff aktiverer de EKSAKTE stagede
-    hashene → scheduled task fortsatt kjørbar. Pluss feilinjeksjon før/etter hvert handoff-steg
-    (`beforeWait`, `afterParentExit`, `beforeActivate`, `beforeSwitch`, `afterObsoleteRemoval`,
-    `afterActivate`) med bevist rollback, ingen manglende entrypoint, urørt operasjonell data og en
-    ren retry.
-
-  `JARVIS_WORKER_FAULT` er TEST-ONLY, følger konvensjonen fra `acquireLock` sin `hooks.afterClassify`,
-  og annonseres høylytt i logg + health når den er armert.
-
-Historikk fra runde 4, uendret:
-
-- **`npx vitest run ops/claude-worker/test` → 14 filer / 310 tester passed, kjørt TRE ganger,
-  310/310 hver gang. Ingen intermitterende feil observert i den runden.**
-  Seks nye tester i `lock.test.mjs`: den eksakte tre-parts-sekvensen deterministisk via
-  `hooks.afterClassify` (levende gen 1 → spekulativ gen 2 → tilbaketrukket → gen 3 NEKTES, eieren
-  beholder låsen); at eieren fortsatt kan heartbeate og release på tvers av det tilbaketrukne
-  kravet OG at låsen ikke deadlocker etterpå; re-lesing fra disk i en HELT NY Node-prosess med
-  ekte prosess-prober (restart-oppførsel); bakoverkompatibel lesing av eldre
-  `release_reason: "retracted"`; fail-closed på uløselig avstamning; og at en ekte frivillig
-  release fortsatt frigjør låsen.
-
-Historikk fra runde 3, uendret:
-
-- **`npx vitest run ops/claude-worker/test` → 14 filer / 304 tester passed.**
-  **Sannferdig historikk, ikke en ubetinget påstand:** underveis feilet suiten intermitterende
-  (to av fem kjøringer ga 303/304). Feilen ble IKKE kjørt bort. Den ble diagnostisert til
-  `lock.test.mjs > a live heartbeating owner is never displaced by six concurrent challengers`,
-  der eieren rapporterte `lost_ownership_during_hold=true` - og årsaken var en EKTE Windows-defekt
-  i den nye koden, ikke en flaky test: libuv åpner vanlige filer uten `FILE_SHARE_DELETE`, så et
-  `rename` over en claim en annen prosess akkurat leser feiler forbigående med `EPERM`/`EACCES`,
-  og en lesing under et samtidig `rename` feiler på samme måte. Det ga to reelle feilmoduser:
-  (1) en heartbeat som ikke landet ble lest som «jeg har mistet låsen» - som ville avbrutt en frisk
-  50-minutters kjøring; (2) en claim som ikke kunne LESES ble klassifisert som «uleselig» og kunne
-  dermed forbigås - altså kunne en utfordrer forbigått en levende eier. Rettet: forbigående
-  filsystemfeil (`EPERM`/`EACCES`/`EBUSY`/`EMFILE`/`ENFILE`/`EAGAIN`) gir bundet retry med backoff,
-  en claim som ikke kunne leses gir `unreadable` og FAIL-CLOSED (aldri «kan forbigås»), og
-  harnessen skiller nå `heartbeat_write_failures` fra faktisk tap av eierskap. Ingen assertion er
-  svekket. Etter rettelsen: grønt.
-  Nye tester i runde 3:
-  - `lock.test.mjs` (36 → nå 42): den deterministiske stale-read → erstatningseier → forsinket reclaim →
-    utfordrer-sekvensen via `hooks.afterClassify` (nøyaktig punktet v2 var utrygt), åtte ekte
-    samtidige OS-prosesser med intervall-bevis, legacy v1/v2-låsefil som respekteres men aldri
-    røres, GC som aldri fjerner maksimum;
-  - `deploy.test.mjs` (40): åtte nye for durabel registreringsintensjon, inkludert krasj mellom
-    registrering og journalføring, «jeg kunne ikke spørre verten» som ALDRI løser en intensjon, og
-    at en pre-eksisterende oppgave aldri avregistreres av en rollback.
-  Fra runde 2, uendret og fortsatt grønne:
-  - `worker-crash-recovery.test.mjs` (16): starter det FAKTISKE `node worker.mjs run` som prosess og
-    dreper det før spawn, under barnets kjøring og etter report men før completion-lagring; verifiserer
-    at et levende barn beskyttes uten at en andre Claude startes, at en eksisterende report lukker
-    tasken uten ny dispatch, og at git-/remote-/dirty-feil blokkerer i stedet for å dispatche;
-  - `state.test.mjs` (33): korrupt primær + gyldig backup (eksakt arkitekt-repro), avbrutt skriving,
-    `null`/`[]`/`{}`-avvisning, supervisor-skjema;
-  - `deploy.test.mjs` (31): injisert feil i hvert steg av byttet, hash-håndhevet rollback, fjerning av
-    innførte filer OG av oppgaver installasjonen innførte, bevaring av operasjonelle data, utsatt
-    aktivering under levende lås;
-  - `supervisor-run.test.mjs` (16) + `supervise-protocol.test.mjs` (19): to like `COMMAND_ID` i én
-    poll, budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet kvittering,
-    bevart utsettelse fra travel til ledig;
-  - `config.test.mjs` (26), `git.test.mjs` (13), `recovery.test.mjs` (20).
-- `pnpm lint` (eslint på hele repoet): **rent** (kjørt på nytt i runde 8, ingen output).
-- `pnpm typecheck` (alle workspace-pakker): **rent, exit 0** (kjørt på nytt i runde 8).
-- `npx vitest run apps/api/test/fase3-e2e.test.ts` kjørt **7 ganger** på denne HEAD: **18/18 hver
-  gang.** CI-racet ble IKKE reprodusert lokalt; det påstås ikke å være borte, det er diagnostisert.
-- `node --check` på alle endrede `.mjs`-moduler og `JSON.parse` på `config.example.json`: **rent.**
-  I runde 8 gjelder det `ops/claude-worker/deploy.mjs` og `ops/claude-worker/test/deploy-cli.test.mjs`.
-- **Ekte PowerShell-AST-parsing ble IKKE kjørt, og CI-jobben kunne ikke pushes. To uavhengige,
-  presist nektede operasjoner:**
-  1. `powershell.exe -NoProfile -Command "echo PSOK"` → «This command requires approval».
-     PowerShell-kjøring er nektet av tillatelseslaget i denne økten, så
-     `System.Management.Automation.Language.Parser` kunne ikke kjøres lokalt.
-  2. `git push origin claude/worker-self-recovery-20260907` →
-     `! [remote rejected] ... (refusing to allow an OAuth App to create or update workflow`
-     `.github/workflows/ci.yml` `without workflow scope)`. GitHub-tokenet mangler `workflow`-scope,
-     så CI-jobben kunne ikke legges inn i `.github/workflows/ci.yml` herfra.
-
-  Jobben er derfor levert som **`ops/claude-worker/ci/worker-scripts-windows.job.yml`** — ferdig
-  YAML som limes inn rett før `gitleaks:` i `.github/workflows/ci.yml` av noen med `workflow`-scope.
-  Den kjører `verify-scripts.ps1` med den EKTE PowerShell-parseren OG hele worker-suiten på Windows.
-  **Ingenting er utelatt stille**, og ingen påstand om «alle scripts parser» gjøres uten den kjøringen.
-  Statisk kontroll som FAKTISK ble kjørt: alle 8 `.ps1` er ren ASCII uten kontrolltegn (byte-nivå),
-  og alle 19 `.mjs` er `node --check`-rene.
-- Full produktsuite ble ikke kjørt lokalt i sin helhet (endringene rører ingen produktkode; utenfor
-  `ops/` er kun dokumentasjon endret - `.github/` er URØRT, se den nektede push-operasjonen over).
-  Den ENE filen CI-divergensen gjaldt er kjørt lokalt 7 ganger, se over. CI på eksakt endelig HEAD
-  rapporteres i `CLAUDE_REPORT` på issue #68.
-
-## Flagg-status - oppdatert mot faktisk host-bevis (runde 7, uendret av runde 8)
-
-`DEPLOYED_TO_HOST=true` · `SUPERVISOR_INSTALLED=true` · `REMOTE_RESTART_VERIFIED=true` ·
-`CURRENT_SOURCE_DEPLOYED_TO_HOST=false` · `WORKER_SELF_RECOVERY_VERIFIED=false` ·
-`REBOOT_PERSISTENCE=UNVERIFIED` · `SOURCE_CHANGED=true` · `ARCHITECT_MERGE_APPROVED=false`.
-
-**Det viktigste skillet, sagt først:** flaggene over beskriver PRE-runde-F-bytene som faktisk står
-installert på hosten (deployment `20260907-140934` = `3734c0e`-kilde). De sier INGENTING om koden i
-denne PR-en. Verken runde 7s heartbeat-rettelse (`a8bc732`) eller runde 8s CLI-rettelse er deployert;
-`CURRENT_SOURCE_DEPLOYED_TO_HOST=false` inntil en senere, separat autorisert host-handling.
-
-**Hva de tre true-flaggene faktisk betyr - ikke mer:**
-
-- `DEPLOYED_TO_HOST=true`: deployment `20260907-140934`. **Styrket i closeout:** de installerte
-  filene er RE-HASHET read-only, og bytene på disk for `worker.mjs`/`supervisor.mjs`/
-  `lib/dispatch.mjs` er identiske både med manifestets `new_sha256` og med
-  `git show 3734c0e:`-blobene (se funn 3b). Dette er ikke lenger bare en manifest-påstand.
-  I tillegg: 59 `scheduler_invoked`-hendelser viser planlegger-drevet drift, ikke bare kommandert
-  start (funn 3c).
-- `SUPERVISOR_INSTALLED=true`: `JarvisWorkerSupervisor` `introduced`/`confirmed` 14:11:28Z, og
-  supervisoren har postet en ekte `SUPERVISOR_RECEIPT` på issue #68.
-- `REMOTE_RESTART_VERIFIED=true`: KUN kommandert start av en FRISK worker - supervisor-kvittering
-  14:15:23Z fulgt av kø-poll 14:15:24.949Z. Kvitteringen selv sier at den ikke er beviset; polleren
-  er det. **Ingen prosess ble terminert, så dette er ikke crash recovery.**
-
-**Fortsatt ubevist, og påstås ikke:** automatisk crash self-recovery (ingen krasj er indusert - en
-KOMMANDERT start er ikke crash recovery og telles ikke som det), reboot-persistens, en post-restart
-probe med ACK+REPORT, og full E2E PASS. **De deployerte bytene er pre-fix** - både runde 7s
-heartbeat-rettelse i `lib/dispatch.mjs` og runde 8s CLI-rettelse i `deploy.mjs` mangler på hosten.
-Ingenting er installert, registrert, startet, restartet eller reregistrert av denne økten.
-
-Uendret av denne oppgaven: `UA7_COMPLETE=false`, `UA7_ACCEPTANCE_4=PARTIAL`,
-`Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `D108_COMPLETE=false`, `UA6_COMPLETE=false`,
-`NEW_PROVIDERS_ADDED=0`, `NEW_CREDENTIALS_OR_SCOPES=0`, `CORE_DEPENDENCY_DECISION_REQUIRED=false`.
-
-## Normativ endring, akseptert av arkitekten
-
-`D126_AMENDMENT_ACCEPTED=true` (byggeordre 5563925449): kilden til worker-infrastrukturen spores i
-`ops/claude-worker/`, eksplisitt utenfor pnpm-workspacet og produktbygget, mens deployert
-runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-worker\`.
+**UA-3: finance → Business Domain Coverage-integrasjon (D-127).** `BUSINESS_DOMAIN_COVERAGE.finance`
+(`modules/business/src/business-brief.ts`) hardkodet `"not_integrated"` selv om UA-6 Finance & Spend
+Integrity Gateway (D-107-D-116) allerede var VERIFIED/COMPLETE og allerede overflatet
+utgifts-/forpliktelses-/anskaffelsesavvik som `business_open_loops` som DEN EKSISTERENDE
+`businessOpenLoopsSource()` allerede viste i briefen. Datastrømmen fantes; kun dekningstabellen løy
+om den - samme mønster som D-78 (marketing) og samme lærdom som D-122 ("aktivt usann dokumentasjon
+er farligere enn manglende"). `finance` flippet til `available`, 11 nye/oppdaterte tester (inkl. én
+empirisk ende-til-ende-test: ekte finance-avviksrad → open loop → faktisk brief-punkt), pluss to
+uavhengig oppdagede, pre-eksisterende host-akseptanse-script-drifter rettet i samme slag
+(`ua4-growth-domain-coverage-live.ts`, `ua3-open-loops-live.ts` - sistnevnte aldri oppdatert siden
+D-78). UA-3 kriterium 2: 3/5 domener (sales+marketing+finance), fortsatt IKKE komplett
+(product/operations har ingen kapabilitet). Full detalj: D-127 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Oppgaven derivert av en Claude-økt som fikk direkte instruks fra Tobias** om å gjenoppta ordinær
+Jarvis-produktutvikling manuelt (den automatiske arkitekt-loopen er bevisst pauset mens dette pågår
+- `JarvisClaudeWorker`/`JarvisWorkerSupervisor` deaktivert på PC-en, `disabled.flag` satt). En
+research-agent rekonstruerte repo-/masterplan-status FØRST (les IMPLEMENTATION_PLAN.md/OPEN_QUESTIONS.md/
+masterplan v4.0/faktisk kode) og rangerte kandidater før denne ble valgt - se D-127 for full
+derivering og hvorfor UA-8/9/10/11 IKKE ble valgt (ingen av dem har én linje implementasjon ennå, og
+å hoppe dit ville brutt CLAUDE.md regel 10, "ingen fri sekvens-hopping").
+
+## D-126: worker-infrastruktur - MERGET, KILDEMERGET OG HOST-DEPLOYERT (oppdatering fra forrige økt)
+
+**Viktig korreksjon av forrige versjon av denne filen:** den forrige `PROJECT_STATUS.md`
+(runde 8/`D126-ARCHITECT-REVIEW-FIX-20260908-G`) sa PR #75 fortsatt ventet på uavhengig review og
+IKKE var merget. Det er nå UTDATERT. Faktisk forløp, verifisert direkte mot GitHub og lokal git i
+DENNE økten:
+
+- Arkitekten godkjente merge (`D126-MERGE-CLOSEOUT-20260908-H`, `ARCHITECT_MERGE_APPROVED=true`).
+  PR #75 merget som normal two-parent-merge: merge-SHA `1b5da61bc070eb7fa8e5068e0c9ba8ecc015e1bd`,
+  parents `94e4aaa5` (gammel main) og `e4178587` (PR-hode) - verifisert med `git rev-list --parents`.
+  Fersk post-merge CI på EKSAKT merge-SHA grønn (build-test/windows-git-auth/gitleaks, run
+  `34187076196`, 206 testfiler/3530 tester).
+- Host-deployment fullført og read-only-verifisert (`D126-HOST-DEPLOY-HANDOFF-20260908-I` →
+  `D126-POSTDEPLOY-VERIFY-20260908-J`): PowerShell-tillatelsesgapet fra runde I ble løst av Tobias
+  selv (smalt `Bash(powershell.exe:*)` lagt til workerens `allowedTools`), deployment
+  `20260908-115207` installert, alle 30 payload-filer hash-verifisert kilde==host==manifest, ekte
+  Windows-oppgaver (`JarvisClaudeWorker`/`JarvisWorkerSupervisor`) bekreftet kjørbare med
+  post-deploy scheduler-tikk. `CURRENT_SOURCE_DEPLOYED_TO_HOST=true`,
+  `D126_HOST_DEPLOYMENT_VERIFIED=true`, `SUPERVISOR_INSTALLED=true`.
+- Ende-til-ende-automasjon bekreftet (`D126-AUTOMATION-E2E-PROBE-20260908-K`): en ny arkitektoppgave
+  ble oppdaget og dispatchet av den EKTE Windows-planleggeren uten manuell trigger
+  (`AUTOMATED_WORKER_QUEUE_PICKUP=PASS`).
+- **Fortsatt bevisst ubevist, uendret:** `WORKER_SELF_RECOVERY_VERIFIED=false` (ingen krasj indusert),
+  `REMOTE_RESTART_VERIFIED_CURRENT_SOURCE=false`, `REBOOT_PERSISTENCE=UNVERIFIED`.
+- **Dokumentasjonsgap oppdaget, IKKE lukket her** (utenfor denne sliceens scope, flagget som egen
+  fremtidig oppgave i D-127): review-rundene G/H/I/J/K eksisterer KUN som issue #68-kommentarer og
+  har aldri fått egne D-ID-rader i DECISIONS_AND_ASSUMPTIONS.md eller en IMPLEMENTATION_PLAN.md-seksjon.
+
+**Autonom-loopen er nå bevisst PAUSET av Tobias** (ikke krasjet, ikke feilet) mens han jobber direkte
+med denne Claude-økten. Ikke start/aktiver/endre `JarvisClaudeWorker`/`JarvisWorkerSupervisor` uten
+eksplisitt beskjed.
+
+## Kvalitetsporter kjørt i denne økten (D-127)
+
+- `npx vitest run modules/business/test/business-brief.test.ts modules/business/test/open-loop-finance-spend.test.ts`
+  → **37/37 grønt** (21 i business-brief.test.ts inkl. 3 nye/utvidede describe-blokker, 16 uendret i
+  open-loop-finance-spend.test.ts, kjørt som regresjonsbevis - urørt av denne sliceen).
+- `git status --porcelain` tom før og etter; `git diff` kontrollert manuelt - kun
+  `modules/business/src/business-brief.ts`, `modules/business/test/business-brief.test.ts`,
+  `modules/business/scripts/ua4-growth-domain-coverage-live.ts`,
+  `modules/business/scripts/ua3-open-loops-live.ts`, samt disse tre dokumentasjonsfilene rørt.
+- Hemmelighetsskann av diff: 0 treff.
+- **Ikke kjørt i denne økten ennå:** full monorepo `pnpm -w typecheck`/`pnpm -w lint`/full testsuite
+  (kjøres før PR opprettes/oppdateres - se sluttrapport for faktisk resultat, ikke anta grønt her).
 
 ## Blokkeringer
 
-- **Ekte PowerShell-parse-verifisering ikke kjørt lokalt** - `powershell.exe` nektet av
-  tillatelseslaget i økten. Må kjøres på hosten (`.\verify-scripts.ps1`) før installasjon.
-- **CI-jobben for Windows kunne ikke pushes** - GitHub-tokenet mangler `workflow`-scope
-  (`remote rejected ... without workflow scope`). YAML-en ligger klar i
-  `ops/claude-worker/ci/worker-scripts-windows.job.yml` og må limes inn i
-  `.github/workflows/ci.yml` av noen med det scopet. Dette er en ekstern tilgangsblokkering, ikke et
-  utelatt krav.
-- **Ny deployment av gjeldende kilde avventer bevisst fersk uavhengig arkitekt-review.** Hosten
-  kjører D-126-koden fra `3734c0e` (bevist i runde 7), som er PRE-FIX for både runde 7s dispatch-
-  korreksjon og runde 8s CLI-korreksjon. Ingen merge, ingen installasjon, ingen restart/reboot/
-  reregistrering utført av denne økten - en senere, uavhengig gjennomgått oppgave må autorisere
-  oppdatert deployment + probe.
-- **Åpen, ikke-autorisert i denne runden: test-synkroniseringsdefekten i `fase3-e2e.test.ts`.**
-  Diagnostisert (se runde 7 over), men bevisst IKKE rettet - byggeordren krever uavhengig review av
-  et eventuelt separat produkt-/testscope først. Foreslått bundet scope ligger i `CLAUDE_REPORT`.
-- `HARD_EXTERNAL_BLOCKER=true`, `BLOCKER_SCOPE=WINDOWS_HOST_VERIFICATION_AND_LATER_INSTALLATION_ONLY`.
-  Blokkeringen gjelder PowerShell-/Task Scheduler-verifisering på hosten og senere installasjon;
-  den blokkerer ikke kildekorreksjonene over, og den er ikke omgått.
+Ingen for D-127 selv (ingen credential, ingen ny leverandør, ingen host-avhengighet). D-126 sine
+gjenstående punkter (self-recovery/reboot-bevis, dokumentasjonslukking for G-K) er uendret utenfor
+scope og krever enten en fremtidig autorisert feilinjeksjons-/reboot-oppgave eller en egen
+dokumentasjons-closeout-oppgave - ingen av dem blokkerer D-127.
 
 ## Neste oppgave
 
-1. Fersk uavhengig ChatGPT-arkitekt-review av den rettede diffen på PR #75 (INGEN self-approval,
-   `ARCHITECT_MERGE_APPROVED=false`).
-2. Etter godkjent review, på hosten i rekkefølge: `.\verify-scripts.ps1` → `.\install.ps1 -WhatIf` →
-   `.\install.ps1` (utsettes automatisk hvis workeren kjører; installasjonen starter da den
-   kontrollerte bootstrap-handoffen, som venter på at den eksakte forelderen avslutter og deretter
-   aktiverer - den krever IKKE at den nye `run-worker.ps1` allerede er live) → config-filer →
-   `node worker.mjs status` / `run --dry-run` → `.\install-task.ps1` → `.\install-supervisor.ps1`.
-3. Endelig akseptanse krever, i tillegg til fixture-testene, disse punktene - hvert flagg settes for
-   seg, på sitt eget bevis, aldri samlet. **Installasjon er ikke påstått fra fixtures.**
-   - **Allerede oppfylt, og flaggene står derfor allerede true:** deployerte skript-hasher/versjon
-     (funn 3b - bytene på disk er re-hashet read-only og matcher `3734c0e`) ⇒ `DEPLOYED_TO_HOST=true`;
-     `JarvisWorkerSupervisor` `introduced`/`confirmed` + ekte `SUPERVISOR_RECEIPT` ⇒
-     `SUPERVISOR_INSTALLED=true`; kommandert start av en frisk worker med påfølgende kø-poll ⇒
-     `REMOTE_RESTART_VERIFIED=true`. Disse skal IKKE settes på nytt og skal ikke settes tilbake til
-     false; de gjelder de installerte pre-fix-bytene.
-   - **Delvis dekket:** den FAKTISKE registrerte scheduled-task-kommandolinjen på hosten.
-     `scheduler_invoked`-hendelsene navngir `run-worker.ps1`, men selve task-registreringen er ikke
-     lest, siden `schtasks /query` / `Get-ScheduledTask` ble nektet av tillatelseslaget.
-   - **Gjenstår, og er det eneste som kan flippe de resterende flaggene:** en deployment av
-     GJELDENDE kilde ⇒ `CURRENT_SOURCE_DEPLOYED_TO_HOST`; en observert ekte bootstrap-handoff; en ekte
-     planlagt kjøring som fullfører en ufarlig autorisert probe; en indusert krasj som workeren
-     kommer tilbake fra av seg selv ⇒ `WORKER_SELF_RECOVERY_VERIFIED` (en kommandert start teller
-     ALDRI som dette); og en ekte reboot ⇒ `REBOOT_PERSISTENCE`.
-
-Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkrete, uavhengig
-reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
-utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, runde 6 de to
-uoppfylte addendum-kravene (argv-levering uten pre-execution-gate, og en bootstrap-handoff som kunne
-forlate en utsatt legacy-installasjon), runde 7 de tre heartbeat-callback-stedene som lå utenfor
-handoff-gaten, og runde 8 den ene veien produksjons-CLI-en fortsatt hadde rundt quiescence - og
-resten gjøres synlig i stedet for stille. At denne bundne oppgaven er ferdig betyr IKKE at de
-gjenstående gruppene i den opprinnelige gjennomgangen er godkjent, og den er ikke merge-godkjent.
+1. Fullføre kvalitetsportene for D-127 (full monorepo typecheck/lint/test), commit, push, draft PR.
+2. Etter D-127: re-derivere neste slice fra faktisk repo-/masterplan-status på nytt (ikke anta en
+   fast rekkefølge) - `product`/`operations`-domenene i UA-3 kriterium 2 har ingen kapabilitet ennå
+   og er kandidater, likeledes UA-4 punkt (4) (Finance Integrity Gateway-audit/reconciliation-
+   integrasjon for marketing spend) og UA-5 sitt incident→diagnose→fix-gap - se D-127 sin
+   kandidatvurdering for full begrunnelse.
+3. Separat, lavere prioritet: dokumentasjonslukking for D-126 review-runder G-K (formell D-ID-
+   registrering av allerede-fullført arbeid som kun finnes i issue #68).
