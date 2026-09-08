@@ -41,18 +41,23 @@ MERGE BLOCKERS, begge rettet på SAMME branch/PR (ingen ny slice, ingen ny D-ID)
    og Q-25 sin utdaterte hale ("...avhenger av product/finance/marketing/operations som ikke er
    startet ennå") fjernet - erstattet med den faktiske 4/5-tilstanden.
 
-**Fiksrunden PUSHET og CI-verifisert:** ny eksakt HEAD `61a10f0ee97c18e043ed161ed42ab1b8a31cf81e`
-(commit `61a10f0`, på toppen av den forrige HEAD `b04cac9c...`), CI grønn på DENNE eksakte HEAD-en
-(GitHub Actions run `34281655599` - `build-test`/`windows-git-auth`/`gitleaks` alle
-`completed`/`success`, INGEN re-run nødvendig denne gangen). PR-body oppdatert til å reflektere
-798/798 (var 792/792). **En ANDRE uavhengig arkitekt-review (`REVIEW_ID` ikke separat
-nummerert i selve GitHub-reviewen utover kommentar-tidsstempel 2026-09-08T21:52, mot NETTOPP denne
-HEAD-en `61a10f0e...`) bekreftet KODE-DELEN av fiksen PASS** (alle fire no-op-fiksene og den
-empiriske stagnasjons-friskhet-regresjonstesten til stede, CI grønn på eksakt reviewed HEAD) - MEN
-fant at DENNE filen (`PROJECT_STATUS.md`) selv fortsatt beskrev en FØR-push-tilstand ("neste steg:
-push og avvent CI" mens push+grønn-CI allerede var fullført) - en RENT dokumentasjons-/metadata-
-blokker, INGEN kode-/skjema-/test-endring krevd. Rettet i DENNE committen (se "Neste oppgave" under
-for den oppdaterte, faktiske tilstanden).
+**Fiksrunden PUSHET og CI-verifisert:** kode-fiksen for MERGE BLOCKER 1 (no-op-mutatorene) landet på
+eksakt HEAD `61a10f0ee97c18e043ed161ed42ab1b8a31cf81e`, CI grønn på DENNE HEAD-en (GitHub Actions
+run `34281655599` - `build-test`/`windows-git-auth`/`gitleaks` alle `completed`/`success`, INGEN
+re-run nødvendig). PR-body oppdatert til å reflektere 798/798 (var 792/792). **Uavhengig
+arkitekt-review `5147386218` (mot NETTOPP `61a10f0e...`) bekreftet KODE-DELEN av fiksen PASS**
+(alle fire no-op-fiksene og den empiriske stagnasjons-friskhet-regresjonstesten til stede, CI grønn
+på eksakt reviewed HEAD) - MEN fant at `PROJECT_STATUS.md` selv FORTSATT beskrev en FØR-push-
+tilstand for `61a10f0e...` ("neste steg: push og avvent CI" mens push+grønn-CI for DEN HEAD-en
+allerede var fullført) - en RENT dokumentasjons-/metadata-blokker, INGEN kode-/skjema-/test-endring
+krevd. **Rettet i en påfølgende ren docs-commit** (denne filens tekst oppdatert til å beskrive den
+stabile tilstanden ovenfor uten selvrefererende "push denne committen"-formulering om sin egen
+SHA/CI - unngår en uendelig selv-referanse-løkke der hver dokumentasjonsrettelse umiddelbart blir
+utdatert av sin egen push). PR forblir åpen/draft/mergeable, base uendret
+`4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`, og venter nå på en FRISK uavhengig
+arkitekt-re-review/merge-beslutning - INGEN ytterligere kode-/test-/schema-/docs-arbeid gjenstår fra
+noen av de tre foregående review-rundene (`5147198284`, `5147386218`, og re-reviewen av
+docs-fiksen på denne selv).
 
 **Kandidatvurdering (research-agent, mot faktisk kode - ikke docs):** fire kandidater vurdert. UA-4
 sin gjenstående Finance Integrity/marketing-spend-integrasjon og UA-5 «incident → diagnose → fix»
@@ -130,11 +135,12 @@ kontrollsløyfen gjenopptas.
 
 ## Neste oppgave
 
-1. **Umiddelbart:** DENNE dokumentasjons-fiksen (kun `PROJECT_STATUS.md`) pushes til SAMME
-   branch/PR #77. Etter push: avvent grønn CI på DEN nye eksakte HEAD-en, deretter avvent en FRISK
-   uavhengig arkitekt-re-review - ingen ytterligere kode-/test-/schema-endring gjenstår fra noen av
-   de to foregående review-rundene. INGEN self-approval/merge under noen omstendighet (D-120/
-   CLAUDE.md, uendret) - kontrollsløyfen er pauset, ingen `ARCHITECT_TASK` postes.
+1. **Umiddelbart:** PR #77 venter på en FRISK uavhengig arkitekt-re-review/merge-beslutning. Kode-
+   og test-tilstanden er stabil og uendret siden `61a10f0e...` (CI grønn, review `5147386218`
+   bekreftet kode PASS) - kun denne filens EGEN beskrivelse av seg selv var bak, nå rettet.
+   INGEN ytterligere kode-/test-/schema-/docs-endring er identifisert som gjenstående. INGEN
+   self-approval/merge under noen omstendighet (D-120/CLAUDE.md, uendret) - kontrollsløyfen er
+   pauset, ingen `ARCHITECT_TASK` postes.
 2. Etter D-128 er merget (av arkitekten/Tobias, ikke av denne økten): re-derivere neste slice fra
    faktisk repo-/masterplan-status på nytt (ikke anta en fast rekkefølge). Kandidater: UA-3
    `operations`-domenet (siste gjenstående UA-3-kriterium-2-domene - leverandørregister + runbooks +
