@@ -183,7 +183,10 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
   // `not_integrated` til `available` FORDI Native Jarvis Growth Core (D-74/D-75/D-76/D-77) nå
   // faktisk finnes - IKKE en fabrikkert/kosmetisk endring.
   // D-127: `finance` gikk fra `not_integrated` til `available` av SAMME grunn - UA-6 Finance &
-  // Spend Integrity Gateway (D-107-D-116) var allerede VERIFIED/COMPLETE, og dens
+  // Spend Integrity Gateway sin interne implementasjon/arkitektur var allerede komplett/
+  // verifisert (UA6_IMPLEMENTATION_COMPLETE=true, UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true,
+  // D-107-D-118) - MEN live leverandørverifisering/D-108-credentials gjenstår fortsatt
+  // (UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false, uendret av D-127) - og dens
   // avviksdeteksjon var allerede overflatert som `business_open_loops` (open-loop-finance-
   // spend.test.ts) som SAMME `businessOpenLoopsSource()` under allerede viser i denne briefen -
   // PÅSTANDEN var usann, ikke kapabiliteten. `product`/`operations` forblir eksplisitt
@@ -206,8 +209,10 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
   it("finance sin dekning er eksplisitt begrunnet i Finance & Spend Integrity Gateway, ALDRI en bank-/regnskapsleverandør-tilkobling", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.finance.source).toMatch(/Finance & Spend Integrity Gateway/);
     // Samme separasjon som marketing (D-78): domenekapabilitet != ekstern leverandør-tilkobling.
-    // Wallester/Stripe/Vipps/Fiken/Neonomics er allerede tilkoblet PROVIDER-siden av UA-6, men
-    // DENNE briefen hevder ikke det - kun at Jarvis kan rapportere avvik den selv har oppdaget.
+    // Wallester/Stripe/Vipps/Fiken/Neonomics-adapterne er allerede implementert i UA-6 på
+    // arkitektur-/kode-nivå (UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true) - IKKE at deres live
+    // credentials er verifisert (UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false, uendret her).
+    // DENNE briefen hevder ikke live tilkobling - kun at Jarvis kan rapportere avvik den selv har oppdaget.
     expect(BUSINESS_DOMAIN_COVERAGE.finance.live_provider_connected).toBe(false);
   });
 

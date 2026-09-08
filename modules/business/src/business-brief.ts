@@ -42,8 +42,11 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * domenemoduler som faktisk finnes i kodebasen, ikke en per-tenant datasjekk.
  *
  * `finance` flippet til `available` (D-127) fordi PÅSTANDEN var blitt usann, ikke fordi noe
- * nytt ble bygget her: UA-6 Finance & Spend Integrity Gateway var allerede
- * VERIFIED/COMPLETE (D-107-D-116), og `OpenLoopService` (`open-loop-service.ts`) har SIDEN
+ * nytt ble bygget her: UA-6 Finance & Spend Integrity Gateway sin interne implementasjon/
+ * arkitektur var allerede komplett/verifisert (`UA6_IMPLEMENTATION_COMPLETE=true`,
+ * `UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true`, D-107-D-118) - MEN live leverandørverifisering
+ * og D-108-credentials gjenstår fortsatt (`UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`,
+ * uendret av D-127). `OpenLoopService` (`open-loop-service.ts`) har SIDEN
  * D-115/D-116 allerede overflatet `finance_spend_records`/`finance_recurring_commitments`/
  * `finance_procurement_items`-avvik som `finance_spend_unexpected`/`finance_spend_amount_
  * deviation`/`finance_spend_correction_conflict`/`finance_recurring_charge_missing`/
