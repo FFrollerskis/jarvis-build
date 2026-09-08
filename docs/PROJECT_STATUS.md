@@ -41,23 +41,29 @@ MERGE BLOCKERS, begge rettet på SAMME branch/PR (ingen ny slice, ingen ny D-ID)
    og Q-25 sin utdaterte hale ("...avhenger av product/finance/marketing/operations som ikke er
    startet ennå") fjernet - erstattet med den faktiske 4/5-tilstanden.
 
-**Fiksrunden PUSHET og CI-verifisert:** kode-fiksen for MERGE BLOCKER 1 (no-op-mutatorene) landet på
-eksakt HEAD `61a10f0ee97c18e043ed161ed42ab1b8a31cf81e`, CI grønn på DENNE HEAD-en (GitHub Actions
-run `34281655599` - `build-test`/`windows-git-auth`/`gitleaks` alle `completed`/`success`, INGEN
-re-run nødvendig). PR-body oppdatert til å reflektere 798/798 (var 792/792). **Uavhengig
-arkitekt-review `5147386218` (mot NETTOPP `61a10f0e...`) bekreftet KODE-DELEN av fiksen PASS**
-(alle fire no-op-fiksene og den empiriske stagnasjons-friskhet-regresjonstesten til stede, CI grønn
-på eksakt reviewed HEAD) - MEN fant at `PROJECT_STATUS.md` selv FORTSATT beskrev en FØR-push-
-tilstand for `61a10f0e...` ("neste steg: push og avvent CI" mens push+grønn-CI for DEN HEAD-en
-allerede var fullført) - en RENT dokumentasjons-/metadata-blokker, INGEN kode-/skjema-/test-endring
-krevd. **Rettet i en påfølgende ren docs-commit** (denne filens tekst oppdatert til å beskrive den
-stabile tilstanden ovenfor uten selvrefererende "push denne committen"-formulering om sin egen
-SHA/CI - unngår en uendelig selv-referanse-løkke der hver dokumentasjonsrettelse umiddelbart blir
-utdatert av sin egen push). PR forblir åpen/draft/mergeable, base uendret
-`4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`, og venter nå på en FRISK uavhengig
-arkitekt-re-review/merge-beslutning - INGEN ytterligere kode-/test-/schema-/docs-arbeid gjenstår fra
-noen av de tre foregående review-rundene (`5147198284`, `5147386218`, og re-reviewen av
-docs-fiksen på denne selv).
+**Presis review-/fiks-historikk (kode ferdig, kun dokumentasjonens EGEN selvbeskrivelse har lagget
+bak seg selv over flere runder):**
+- Review `5147198284` (mot `b04cac9c...`) → to blockers: kode (no-op-mutatorene) + docs.
+- Kode-fiksen landet på eksakt HEAD `61a10f0ee97c18e043ed161ed42ab1b8a31cf81e`, CI grønn på DENNE
+  HEAD-en (GitHub Actions run `34281655599` - `build-test`/`windows-git-auth`/`gitleaks` alle
+  `completed`/`success`, INGEN re-run nødvendig). PR-body oppdatert til å reflektere 798/798 (var
+  792/792).
+- Review `5147386218` (mot NETTOPP `61a10f0e...`) → **bekreftet KODE-DELEN PASS** (alle fire
+  no-op-fiksene og den empiriske stagnasjons-friskhet-regresjonstesten til stede, CI grønn på
+  eksakt reviewed HEAD) - MEN fant én gjenværende docs-only blocker: `PROJECT_STATUS.md` beskrev
+  fortsatt en FØR-push-tilstand for `61a10f0e...` ("neste steg: push og avvent CI" mens
+  push+grønn-CI for DEN HEAD-en allerede var fullført).
+- Commit `321a1dc77f53027ff746928a96b0fd84369c4604` forsøkte å lukke DENNE docs-blokkeren, men
+  beholdt utilsiktet en NY variant av samme selvrefererende "push/avvent CI"-formulering (nå om
+  seg selv, ikke om `61a10f0e...`).
+- Review `5147497517` (mot NETTOPP `321a1dc...`) → fant nettopp denne gjenværende
+  selvreferansen og krevde én siste, ren docs-only rettelse - INGEN kode-/test-/schema-endring.
+- **Rettet i denne påfølgende ren docs-commit-en**, som beskriver den stabile tilstanden ovenfor
+  UTEN å beskrive sin egen kommende SHA/CI (unngår en uendelig selv-referanse-løkke der hver
+  dokumentasjonsrettelse umiddelbart blir utdatert av sin egen push). PR forblir åpen/draft/
+  mergeable, base uendret `4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`, og venter nå på en FRISK
+  uavhengig arkitekt-re-review/merge-beslutning - INGEN ytterligere kode-/test-/schema-/docs-arbeid
+  er identifisert som gjenstående fra noen av de fire foregående review-/fiks-rundene.
 
 **Kandidatvurdering (research-agent, mot faktisk kode - ikke docs):** fire kandidater vurdert. UA-4
 sin gjenstående Finance Integrity/marketing-spend-integrasjon og UA-5 «incident → diagnose → fix»
