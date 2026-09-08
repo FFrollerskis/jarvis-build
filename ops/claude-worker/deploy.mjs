@@ -27,6 +27,9 @@
  * Nothing here registers, starts or stops a scheduled task. That stays in
  * install-task.ps1 / install-supervisor.ps1, so file deployment and schedule
  * changes are separately reviewable.
+ *
+ * There is deliberately NO way to activate over a live worker or supervisor
+ * from this CLI. See FORBIDDEN_BYPASS_OPTIONS below.
  */
 
 import { dirname, join, resolve } from "node:path";
@@ -81,6 +84,36 @@ function defaultVersion() {
 }
 
 /**
+ * D126 review round G, blocker 1: the production CLI must not expose a
+ * quiescence escape hatch.
+ *
+ * `activateRelease` still takes a `requireQuiescence` parameter, because the
+ * library's own tests have to be able to drive the unguarded path and prove
+ * what it would do. That seam is test-only: it is NOT reachable from here.
+ * `activate` and `apply-pending` always run with the library default
+ * (`requireQuiescence: true`), so a deployment can never overwrite a live
+ * worker or supervisor - it defers to the bootstrap handoff instead.
+ *
+ * Anything that looks like a bypass is REJECTED rather than silently ignored,
+ * so an operator can never come away believing a forced activation happened.
+ * `--require-quiescence` is on the list as well: enforcement is unconditional,
+ * so even naming it is a misunderstanding worth failing on. No environment
+ * variable or config key substitutes for these flags; there is no other path.
+ */
+const FORBIDDEN_BYPASS_OPTIONS = Object.freeze([
+  "force-unquiesced",
+  "force-quiescence",
+  "skip-quiescence",
+  "no-quiescence",
+  "ignore-quiescence",
+  "require-quiescence"
+]);
+
+function forbiddenBypassOption(args) {
+  return FORBIDDEN_BYPASS_OPTIONS.find((name) => Object.prototype.hasOwnProperty.call(args, name)) ?? null;
+}
+
+/**
  * What each registered scheduled task actually runs.
  *
  * `--tasks <file.json>` lets a test (and a non-Windows CI run) supply the same
@@ -129,6 +162,22 @@ function out(obj, code) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const sub = args._[0] ?? "status";
+
+  const bypass = forbiddenBypassOption(args);
+  if (bypass) {
+    return out({
+      subcommand: sub,
+      error: `--${bypass} is not a supported option: quiescence is always enforced and cannot be turned off`,
+      quiescence_enforced: true,
+      activated: false,
+      detail:
+        "Deployment never overwrites a live worker or supervisor. If a lock is held, run `activate` "
+        + "anyway: it defers, writes a pending-activation marker and leaves every live file untouched. "
+        + "The controlled `bootstrap-handoff` subcommand applies that marker once the exact legitimate "
+        + "parent has exited and quiescence has been re-verified."
+    }, EXIT.BLOCKED);
+  }
+
   const source = resolve(args.source ?? HERE);
   const destination = resolve(args.destination ?? join(process.env.USERPROFILE ?? process.env.HOME ?? ".", ".jarvis-claude-worker"));
 
@@ -178,8 +227,9 @@ async function main() {
       version,
       taskCommandLines: tasks.lines,
       taskQueryOk: tasks.ok,
-      exportTask: process.platform === "win32" ? (name) => exportTaskXmlSync(name) : null,
-      requireQuiescence: args["force-unquiesced"] !== true
+      exportTask: process.platform === "win32" ? (name) => exportTaskXmlSync(name) : null
+      // No `requireQuiescence` override: the library default (true) is the only
+      // behaviour this CLI can produce. See FORBIDDEN_BYPASS_OPTIONS.
     });
     if (result.ok && sub === "apply-pending") clearPendingActivation(destination);
     if (result.ok) clearPendingActivation(destination);
@@ -317,4 +367,4 @@ if (invokedDirectly) {
     });
 }
 
-export { main, parseArgs, collectTaskCommandLines, exportTaskXml, EXIT };
+export { main, parseArgs, collectTaskCommandLines, exportTaskXml, EXIT, FORBIDDEN_BYPASS_OPTIONS };
