@@ -398,12 +398,15 @@ async function main(): Promise<void> {
     log(`weekly_brief_ok=${weeklyBriefResult.ok} opened_loops=${weeklyData?.opened_loops} -> ua3_business_weekly_brief: ${results.ua3_business_weekly_brief}`);
 
     const weeklyRendered = String(weeklyData?.rendered ?? "");
+    // Pre-eksisterende drift oppdaget og rettet i D-127: denne sjekken forble uendret siden
+    // UA-3 P0 og ble ALDRI oppdatert da D-78 flippet `marketing` til tilgjengelig - fanget nå
+    // fordi D-127 gjør samme flipp for `finance` og retter begge i samme slag.
     results.ua3_brief_missing_domains_honest =
       weeklyRendered.includes("product: IKKE integrert") &&
-      weeklyRendered.includes("finance: IKKE integrert") &&
-      weeklyRendered.includes("marketing: IKKE integrert") &&
       weeklyRendered.includes("operations: IKKE integrert") &&
-      weeklyRendered.includes("sales: tilgjengelig")
+      weeklyRendered.includes("sales: tilgjengelig") &&
+      weeklyRendered.includes("marketing: tilgjengelig") &&
+      weeklyRendered.includes("finance: tilgjengelig")
         ? "PASS" : "FAIL";
     log(`weekly_rendered_excerpt=${weeklyRendered.slice(weeklyRendered.indexOf("DATA COVERAGE")).slice(0, 300)} -> ua3_brief_missing_domains_honest: ${results.ua3_brief_missing_domains_honest}`);
     void stillOpenFollowup;

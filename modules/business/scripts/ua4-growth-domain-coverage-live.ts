@@ -166,7 +166,10 @@ async function main(): Promise<void> {
     results.ua4_sales_coverage_unchanged =
       weeklyA.data_coverage.sales.status === "available" && weeklyA.data_coverage.sales.source === "Business Graph/CRM" ? "PASS" : "FAIL";
     results.ua4_product_coverage_truthful = weeklyA.data_coverage.product.status === "not_integrated" ? "PASS" : "FAIL";
-    results.ua4_finance_coverage_truthful = weeklyA.data_coverage.finance.status === "not_integrated" ? "PASS" : "FAIL";
+    // D-127: finance flipped to "available" (Finance & Spend Integrity Gateway, UA-6) - this
+    // marker still checks TRUTHFULNESS, just against the now-correct expected value, exactly
+    // the same update this script already applied to `marketing` in D-78.
+    results.ua4_finance_coverage_truthful = weeklyA.data_coverage.finance.status === "available" ? "PASS" : "FAIL";
     results.ua4_operations_coverage_truthful = weeklyA.data_coverage.operations.status === "not_integrated" ? "PASS" : "FAIL";
     log(
       `sales=${weeklyA.data_coverage.sales.status} product=${weeklyA.data_coverage.product.status} finance=${weeklyA.data_coverage.finance.status} operations=${weeklyA.data_coverage.operations.status} -> ` +
