@@ -7,9 +7,14 @@
 
 ## Aktiv fase/oppgave
 
-**UA-3: finance → Business Domain Coverage-integrasjon (D-127).** `BUSINESS_DOMAIN_COVERAGE.finance`
-(`modules/business/src/business-brief.ts`) hardkodet `"not_integrated"` selv om UA-6 Finance & Spend
-Integrity Gateway (D-107-D-116) allerede var VERIFIED/COMPLETE og allerede overflatet
+**UA-3: finance → Business Domain Coverage-integrasjon (D-127). PR #76, branch
+`claude/ua3-finance-domain-coverage`, opprettet, CI grønn, under uavhengig arkitekt-review - IKKE
+merget.** `BUSINESS_DOMAIN_COVERAGE.finance` (`modules/business/src/business-brief.ts`) hardkodet
+`"not_integrated"` selv om UA-6 Finance & Spend Integrity Gateway sin kanoniske kapabilitet/arkitektur
+allerede var implementert og arkitektur-akseptert (`UA6_IMPLEMENTATION_COMPLETE=true`,
+`UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true`, D-107-D-118 - se D-118 for gjeldende flaggsett;
+`UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`/`UA6_CREDENTIAL_PHASE_COMPLETE=false`/
+`D108_COMPLETE=false`/`UA6_COMPLETE=false` er ALLE uendret av D-127) og allerede overflatet
 utgifts-/forpliktelses-/anskaffelsesavvik som `business_open_loops` som DEN EKSISTERENDE
 `businessOpenLoopsSource()` allerede viste i briefen. Datastrømmen fantes; kun dekningstabellen løy
 om den - samme mønster som D-78 (marketing) og samme lærdom som D-122 ("aktivt usann dokumentasjon
@@ -65,13 +70,33 @@ eksplisitt beskjed.
 - `npx vitest run modules/business/test/business-brief.test.ts modules/business/test/open-loop-finance-spend.test.ts`
   → **37/37 grønt** (21 i business-brief.test.ts inkl. 3 nye/utvidede describe-blokker, 16 uendret i
   open-loop-finance-spend.test.ts, kjørt som regresjonsbevis - urørt av denne sliceen).
-- `git status --porcelain` tom før og etter; `git diff` kontrollert manuelt - kun
-  `modules/business/src/business-brief.ts`, `modules/business/test/business-brief.test.ts`,
+- Full monorepo `pnpm -w typecheck` og `pnpm -w lint` kjørt - begge grønne, ingen nye feil/warnings.
+- CI på PR #76 (GitHub Actions, `build-test`/`windows-git-auth`/`gitleaks`): grønn på det opprinnelige
+  koden-HEAD etter én begrunnet re-run av `build-test` (kjent, PR-urelatert flaky-mønster - ECONNREFUSED
+  mot embedded Postgres under `runMigrations()` i `modules/finance/test/service-rls.test.ts`, samme
+  Postgres-oppstart-race sett flere ganger tidligere i prosjektet; 3505/3533 tester besto ved første
+  forsøk, re-run løste resten - ingen kodeendring nødvendig).
+  Denne truth-sync-runden (docs-only, ingen ny D-ID, ingen produktkodeendring - se under) er pushet
+  som en ny commit på SAMME branch/PR; CI må verifiseres grønn på DENNE nye eksakte HEAD før videre
+  review, jf. arkitektens instruks.
+- `git status --porcelain` tom før og etter; `git diff` kontrollert manuelt for hele PR-en (8 filer
+  totalt): kode/tester/scripts - `modules/business/src/business-brief.ts`,
+  `modules/business/test/business-brief.test.ts`,
   `modules/business/scripts/ua4-growth-domain-coverage-live.ts`,
-  `modules/business/scripts/ua3-open-loops-live.ts`, samt disse tre dokumentasjonsfilene rørt.
-- Hemmelighetsskann av diff: 0 treff.
-- **Ikke kjørt i denne økten ennå:** full monorepo `pnpm -w typecheck`/`pnpm -w lint`/full testsuite
-  (kjøres før PR opprettes/oppdateres - se sluttrapport for faktisk resultat, ikke anta grønt her).
+  `modules/business/scripts/ua3-open-loops-live.ts` - samt FIRE dokumentasjonsfiler -
+  `docs/DECISIONS_AND_ASSUMPTIONS.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/OPEN_QUESTIONS.md`,
+  `docs/PROJECT_STATUS.md` (denne filen selv, siden den beskriver PR-ens egen sluttilstand).
+- Hemmelighetsskann av diff: 0 treff (kjørt både på D-127-hovedsliceen og på denne truth-sync-runden).
+- **Uavhengig arkitekt-review (GitHub PR-review, `tsworkflow`/OWNER, mot eksakt HEAD
+  `c3a0e4875d44d8d916ab3b0a566b3da0384f956c`):** CODE/BEHAVIOR PASS, CI PASS. To MERGE BLOCKERS reist,
+  begge dokumentasjons-presisjon (ingen kodefeil funnet): (1) denne filen beskrev en FØR-fullført
+  tilstand (porter "ikke kjørt ennå", neste oppgave "fullfør porter/PR") mens alt faktisk allerede var
+  gjort, og undertalte berørte filer (sa 3 docs/7 filer, faktisk 4 docs/8 filer); (2) UA-6-
+  fullføringsspråket ("VERIFIED/COMPLETE"/"allerede tilkoblet") i D-127-teksten i
+  DECISIONS_AND_ASSUMPTIONS.md og IMPLEMENTATION_PLAN.md kunne mistolkes som at UA-6 var HELT
+  ferdig inkl. live leverandørverifisering. Begge rettet i denne truth-sync-runden (kun docs, ingen
+  ny D-ID, ingen produktkode rørt) - se D-127-raden i DECISIONS_AND_ASSUMPTIONS.md for eksakt
+  før/etter-ordlyd.
 
 ## Blokkeringer
 
@@ -82,10 +107,12 @@ dokumentasjons-closeout-oppgave - ingen av dem blokkerer D-127.
 
 ## Neste oppgave
 
-1. Fullføre kvalitetsportene for D-127 (full monorepo typecheck/lint/test), commit, push, draft PR.
-2. Etter D-127: re-derivere neste slice fra faktisk repo-/masterplan-status på nytt (ikke anta en
-   fast rekkefølge) - `product`/`operations`-domenene i UA-3 kriterium 2 har ingen kapabilitet ennå
-   og er kandidater, likeledes UA-4 punkt (4) (Finance Integrity Gateway-audit/reconciliation-
+1. **Umiddelbart:** verifisere at CI er grønn på denne truth-sync-commitens eksakte HEAD på PR #76,
+   deretter avvente ny uavhengig arkitekt-re-review. Ingen selv-godkjenning/merge under noen
+   omstendighet (D-120/CLAUDE.md, uendret).
+2. Etter D-127 er merget: re-derivere neste slice fra faktisk repo-/masterplan-status på nytt (ikke
+   anta en fast rekkefølge) - `product`/`operations`-domenene i UA-3 kriterium 2 har ingen kapabilitet
+   ennå og er kandidater, likeledes UA-4 punkt (4) (Finance Integrity Gateway-audit/reconciliation-
    integrasjon for marketing spend) og UA-5 sitt incident→diagnose→fix-gap - se D-127 sin
    kandidatvurdering for full begrunnelse.
 3. Separat, lavere prioritet: dokumentasjonslukking for D-126 review-runder G-K (formell D-ID-

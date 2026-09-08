@@ -3711,16 +3711,24 @@ Full detalj: D-123 i DECISIONS_AND_ASSUMPTIONS.md.
 Samme mønster og samme rettferdiggjørelse som D-78 (UA4_SLICE_2), men for `finance` i stedet for
 `marketing`, og oppdaget under en generell repo-/masterplan-rekonstruksjon (ikke en ny byggeordre):
 `BUSINESS_DOMAIN_COVERAGE.finance` (`business-brief.ts`) hardkodet FORTSATT `"not_integrated"`
-etter at UA-6 Finance & Spend Integrity Gateway allerede var VERIFIED/COMPLETE (D-107-D-116) OG
-`OpenLoopService` (D-115/D-116) allerede overflatet `finance_spend_records`/`finance_recurring_
-commitments`/`finance_procurement_items`-avvik som `business_open_loops`, som `businessOpenLoopsSource()`
-allerede viser i DENNE briefen. **Datastrømmen fantes altså allerede - kun dekningstabellen løy om
-den.** Samme «aktivt usann dokumentasjon er farligere enn manglende dokumentasjon»-lærdom som D-122.
+etter at UA-6 Finance & Spend Integrity Gateway sin kanoniske kapabilitet/arkitektur allerede var
+implementert og arkitektur-akseptert (`UA6_IMPLEMENTATION_COMPLETE=true`,
+`UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true`, D-107-D-118 - se D-118 for gjeldende flaggsett). **Presist,
+ikke overstat:** `UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`, `UA6_CREDENTIAL_PHASE_COMPLETE=false`,
+`D108_COMPLETE=false`, `UA6_COMPLETE=false` er ALLE uendret av D-127 - denne sliceen krever ingen av
+dem, og `finance.live_provider_connected=false` reflekterer nettopp dette skillet korrekt (samme
+skille som marketing/D-78). OG `OpenLoopService` (D-115/D-116) allerede overflatet
+`finance_spend_records`/`finance_recurring_commitments`/`finance_procurement_items`-avvik som
+`business_open_loops`, som `businessOpenLoopsSource()` allerede viser i DENNE briefen. **Datastrømmen
+fantes altså allerede - kun dekningstabellen løy om den.** Samme «aktivt usann dokumentasjon er
+farligere enn manglende dokumentasjon»-lærdom som D-122.
 
 **D-64-gate:** `CAPABILITY=`domenedekning-rapportering for finance; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`;
-`CAN_RUN_WITHOUT_PROVIDER=true` - ingen ny leverandør introdusert (Wallester/Stripe/Vipps/Fiken/
-Neonomics var allerede tilkoblet av UA-6, men DENNE endringen kobler ingen av dem inn - kun den
-EKSISTERENDE `businessOpenLoopsSource()`-strømmen leses annerledes).
+`CAN_RUN_WITHOUT_PROVIDER=true` - ZERO ny leverandør introdusert (Wallester/Stripe/Vipps/Fiken/
+Neonomics-adapterne er allerede implementert i UA-6 på arkitektur-/kode-nivå,
+`UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true` - IKKE at deres live credentials er verifisert,
+`UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false` uendret - og denne sliceen kobler uansett ingen av
+dem inn: kun `businessOpenLoopsSource()`-lesingen endres, ikke datainnhentingen).
 
 **Endring:** `finance.status` flippet til `"available"` (source: Native Jarvis Finance & Spend
 Integrity Gateway, D-107-D-116), `finance.live_provider_connected = false` (samme separasjon som
