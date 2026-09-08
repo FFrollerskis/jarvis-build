@@ -410,6 +410,89 @@ export class OpenLoopService {
   }
 
   /**
+   * UA-3 Native Jarvis Operations Core (D-129): "Reuse OpenLoopService for
+   * driftsoppgave-frister - No second task/reminder engine" - en
+   * driftsoppgave med passert `due_at` som IKKE er terminal (done/
+   * cancelled) er akkurat den typen "open loop" masterplan-
+   * akseptansekriterium 3 skal fange automatisk. SAMME dag-basert
+   * prioritets-heuristikk som `detectOverdueFollowups`.
+   */
+  async detectOverdueOperationsTasks(tenantId: string, memorySpace: MemorySpace): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT task_id, title, owner_person_id, due_at
+         FROM operations_tasks WHERE tenant_id = $1 AND status NOT IN ('done','cancelled') AND due_at IS NOT NULL AND due_at < now()`,
+        [tenantId]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows.rows as OperationsTaskRow[]) {
+        const detectionKey = `operations_task_overdue:${row.task_id}`;
+        currentKeys.push(detectionKey);
+        const overdueDays = (Date.now() - new Date(row.due_at as string).getTime()) / 86_400_000;
+        const priority: OpenLoopPriority = overdueDays > 3 ? "high" : "normal";
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          operations_task_id: row.task_id,
+          loop_type: "operations_task_overdue", detection_key: detectionKey,
+          reason: `Driftsoppgave "${row.title}" er forfalt`, next_action: `Fullfør eller avbryt driftsoppgave ${row.task_id}`,
+          priority, owner_person_id: row.owner_person_id, due_at: row.due_at
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "operations_task_overdue", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  /**
+   * §13 "escalations": en driftsoppgave som har vært forfalt i mer enn
+   * `escalationThresholdDays` dager UTEN å ha blitt eskalert
+   * (`escalation_level = 0`) trenger et menneske/agent sin eksplisitte
+   * `OperationsService.escalateTask`-handling. Deteksjonen overflater KUN
+   * behovet - selve eskaleringen er en EGEN, sporbar handling (§ "Reuse
+   * OpenLoopService, no second reminder/notification engine", samme
+   * presedens som alle andre regler i denne filen). Auto-resolves neste
+   * sveip når enten fristen ikke lenger er passert, oppgaven er
+   * terminal, ELLER `escalation_level` har blitt inkrementert (ikke lenger
+   * i WHERE-settet).
+   */
+  async detectOperationsTasksNeedingEscalation(tenantId: string, memorySpace: MemorySpace, escalationThresholdDays = 3): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT task_id, title, owner_person_id, due_at
+         FROM operations_tasks
+         WHERE tenant_id = $1 AND status NOT IN ('done','cancelled') AND escalation_level = 0
+           AND due_at IS NOT NULL AND due_at < now() - ($2 || ' days')::interval`,
+        [tenantId, escalationThresholdDays]
+      );
+      let detected = 0;
+      let updated = 0;
+      const currentKeys: string[] = [];
+      for (const row of rows.rows as OperationsTaskRow[]) {
+        const detectionKey = `operations_task_escalation_needed:${row.task_id}`;
+        currentKeys.push(detectionKey);
+        const result = await upsertOpenLoop(client, {
+          open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+          company_id: null, contact_id: null, opportunity_id: null, lead_id: null, followup_id: null,
+          activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+          operations_task_id: row.task_id,
+          loop_type: "operations_task_escalation_needed", detection_key: detectionKey,
+          reason: `Driftsoppgave "${row.title}" har vært forfalt i over ${escalationThresholdDays} dager uten eskalering`,
+          next_action: `Eskaler driftsoppgave ${row.task_id}`,
+          priority: "high", owner_person_id: row.owner_person_id, due_at: row.due_at
+        });
+        if (result === "inserted") detected++; else updated++;
+      }
+      const autoResolved = await autoResolveStale(client, tenantId, "operations_task_escalation_needed", currentKeys);
+      return { detected, updated, auto_resolved: autoResolved };
+    });
+  }
+
+  /**
    * UA-4 Native Jarvis Growth Core (D-74): "Reuse OpenLoopService... No
    * second task/reminder engine" - deterministisk utgifts-avviksdeteksjon
    * for aktive kampanjer. En kampanjes SISTE registrerte utgiftsdag
@@ -828,6 +911,10 @@ export class OpenLoopService {
       // kjøres i DENNE sveipen, krever `product_items` (047_product.sql).
       await this.detectProductItemsNeedingTriage(tenantId, memorySpace),
       await this.detectStalledHighPriorityProductItems(tenantId, memorySpace),
+      // UA-3 Native Jarvis Operations Core (D-129): samme prinsipp - reglene
+      // kjøres i DENNE sveipen, krever `operations_tasks` (048_operations.sql).
+      await this.detectOverdueOperationsTasks(tenantId, memorySpace),
+      await this.detectOperationsTasksNeedingEscalation(tenantId, memorySpace),
       // UA-4 Native Jarvis Growth Core (D-74): samme prinsipp - regelen
       // kjøres i DENNE sveipen, krever `marketing_campaigns`/
       // `marketing_spend_events` (027_growth.sql).
@@ -970,6 +1057,14 @@ interface ProductItemRow {
   updated_at?: string;
 }
 
+/** UA-3 Native Jarvis Operations Core (D-129). */
+interface OperationsTaskRow {
+  task_id: string;
+  title: string;
+  owner_person_id: string | null;
+  due_at: string | null;
+}
+
 interface ContractObligationRow {
   obligation_id: string;
   contract_id: string;
@@ -1041,6 +1136,8 @@ interface UpsertOpenLoopInput {
   finance_procurement_item_id?: string | null;
   /** UA-3 Native Jarvis Product Core (D-128): peker til `product_items`, null/utelatt for ikke-produkt-loops. */
   product_item_id?: string | null;
+  /** UA-3 Native Jarvis Operations Core (D-129): peker til `operations_tasks`, null/utelatt for ikke-driftsoppgave-loops. */
+  operations_task_id?: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -1055,8 +1152,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
         ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
-        finance_procurement_item_id, product_item_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+        finance_procurement_item_id, product_item_id, operations_task_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -1070,7 +1167,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
       input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
-      input.finance_procurement_item_id ?? null, input.product_item_id ?? null,
+      input.finance_procurement_item_id ?? null, input.product_item_id ?? null, input.operations_task_id ?? null,
       input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );

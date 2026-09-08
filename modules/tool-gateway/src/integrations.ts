@@ -2467,6 +2467,195 @@ export function firstWaveTools(
       capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("product")
+    },
+    // UA-3 Native Jarvis Operations Core (D-129): provider-nøytralt
+    // `operations.*`-namespace - JARVIS_CANONICAL, ZERO ekstern
+    // driftsplattform-/ticketing-leverandør-avhengighet (D-129/D-64). Lagt
+    // til på SLUTTEN (samme grunn som product.* over - eksisterende tester
+    // indekserer dette arrayet posisjonelt). `escalate_task` er klasse C
+    // (endrer eskaleringsnivå/mottaker - reell konsekvens, men ingen
+    // nøstet klasse D-handling i denne sliceen, ingen utgående kommunikasjon
+    // bygget her).
+    {
+      tool_id: "operations", action: "create_vendor", description: "Registrer en leverandør (suppliers) - valgfri kobling til eksisterende Business OS company/contact",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), name: z.string(), category: z.string().optional(),
+        company_id: z.string().optional(), contact_id: z.string().optional(), escalation_contact_person_id: z.string().optional(), notes: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett status til 'inactive'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "get_vendor", description: "Les én leverandør",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), vendor_id: z.string() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "list_vendors", description: "List leverandører etter status (default: active)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_vendor_status", description: "Sett leverandørstatus (active/inactive)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), vendor_id: z.string(), status: z.string() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett status tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "create_runbook", description: "Opprett et runbook (driftsdokumentasjon) - valgfritt koblet til en leverandør",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), content: z.string(),
+        category: z.string().optional(), vendor_id: z.string().optional(), owner_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett is_active til false", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "get_runbook", description: "Les ett runbook",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), runbook_id: z.string() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "list_runbooks", description: "List runbooks (default: kun aktive)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), active_only: z.boolean().optional() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "update_runbook_content", description: "Oppdater innholdet i et runbook",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), runbook_id: z.string(), content: z.string() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt update_runbook_content-kall med forrige innhold", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_runbook_active", description: "Aktiver/deaktiver et runbook",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), runbook_id: z.string(), is_active: z.boolean() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett is_active tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "create_task", description: "Opprett en driftsoppgave (tasks/owners/deadlines) - valgfritt koblet til leverandør/runbook",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), description: z.string().optional(),
+        priority: z.string().optional(), vendor_id: z.string().optional(), runbook_id: z.string().optional(),
+        owner_person_id: z.string().optional(), due_at: z.string().optional(), canonical_uri: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett status til 'cancelled'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "get_task", description: "Les én driftsoppgave",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "list_tasks", description: "List driftsoppgaver etter status (default: open)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "search_tasks", description: "Deterministisk filter-/fritekstsøk i driftsoppgaver (oppgavenummer/leverandør/status/prioritet/eier/tittel)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional(), priority: z.string().optional(),
+        vendor_id: z.string().optional(), owner_person_id: z.string().optional(), title_contains: z.string().optional(),
+        task_number: z.number().optional(), limit: z.number().optional()
+      }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "list_by_vendor", description: "Hva er utestående for leverandør X? - deterministisk leverandør-oppslag",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), vendor_id: z.string(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_status", description: "Deterministisk lifecycle-overgang (open/in_progress/blocked/done/cancelled)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt set_status-kall tilbake til forrige status (unntatt gjenåpningsveien fra done/cancelled, som kun går til open)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_priority", description: "Sett prioritet (low/normal/high/critical)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), priority: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett prioritet tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_owner", description: "Sett/fjern oppgaveeier (gjenbruker eksisterende person-/identitetsarkitektur)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), owner_person_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett eier tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "set_due_at", description: "Sett/fjern frist (deadline)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), due_at: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett frist tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "link_vendor", description: "Koble/fjern leverandør på en driftsoppgave",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), vendor_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett leverandørkobling tilbake via nytt link_vendor-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "link_runbook", description: "Koble/fjern runbook på en driftsoppgave",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), runbook_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["operations.write"], reversible: true,
+      rollback_procedure: "sett runbook-kobling tilbake via nytt link_runbook-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "escalate_task", description: "Eskaler en driftsoppgave (§13 'escalations') - inkrementerer eskaleringsnivå, faller tilbake til leverandørens eskaleringskontakt hvis ingen mottaker oppgitt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string(), escalated_to_person_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["operations.write"], reversible: false,
+      rollback_procedure: "ingen (eskaleringsnivå er en akkumulerende historikk, aldri tilbakestilt)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
+    },
+    {
+      tool_id: "operations", action: "list_task_events", description: "List hele hendelseshistorikken for én driftsoppgave (driftsoppgave-tidslinje, ikke audit_events)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), task_id: z.string() }),
+      capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("operations")
     }
   ];
 }

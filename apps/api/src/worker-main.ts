@@ -12,6 +12,7 @@ import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, Ope
 import { SupportService, SupportTransport } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
+import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport,
@@ -140,6 +141,10 @@ const agreementsService = new AgreementsService(pool);
 // apps/api/src/main.ts - workeren sin mesh-tool-executor maa kunne kalle
 // product.*-handlingene identisk.
 const productService = new ProductService(pool);
+// UA-3 Native Jarvis Operations Core (D-129): samme OperationsService-
+// wiring som apps/api/src/main.ts - workeren sin mesh-tool-executor maa
+// kunne kalle operations.*-handlingene identisk.
+const operationsService = new OperationsService(pool);
 // D-91 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts.
 const consentService = new ConsentService(pool);
 // D-92 (UA-4 NESTE SLICE): identisk wiring-mønster som apps/api/src/main.ts -
@@ -259,6 +264,8 @@ for (const tool of firstWaveTools({
   contract: new AgreementsTransport(agreementsService),
   // UA-3 Native Jarvis Product Core (D-128): identisk wiring-mønster som apps/api/src/main.ts.
   product: new ProductTransport(productService),
+  // UA-3 Native Jarvis Operations Core (D-129): identisk wiring-mønster som apps/api/src/main.ts.
+  operations: new OperationsTransport(operationsService),
   growth: new GrowthTransport(growthService),
   // UA-4 Google Ads-slice (D-83): identisk wiring-mønster som apps/api/src/main.ts.
   googleads: new GoogleAdsTransport(growthService),

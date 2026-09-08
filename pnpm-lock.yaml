@@ -65,6 +65,9 @@ importers:
       '@jarvis/model-gateway':
         specifier: workspace:*
         version: link:../../modules/model-gateway
+      '@jarvis/operations':
+        specifier: workspace:*
+        version: link:../../modules/operations
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../../modules/policy
@@ -520,6 +523,37 @@ importers:
         specifier: ^8.16.3
         version: 8.23.0
     devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  modules/operations:
+    dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
       '@types/pg':
         specifier: ^8.15.6
         version: 8.21.0

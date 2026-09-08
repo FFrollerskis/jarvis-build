@@ -63,6 +63,18 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * med samme rapportør-/OpenLoopService-/erasure-mønster som Support Core (D-66)/Contracts Core
  * (D-71). ZERO ekstern produkt-analytics-/issue-tracker-leverandør - et fremtidig eksternt
  * verktøy er en VALGFRI, senere adapter, aldri domeneeier (D-64) - `live_provider_connected=false`.
+ *
+ * `operations` flippet til `available` (D-129) - SAMME mønster som `product`/D-128: her fantes
+ * INGEN eksisterende kapabilitet fra før (D-64-gaten bekreftet at `finance_vendors`,
+ * `modules/incidents`/`modules/watchdog` IKKE dekker business-operations - navnelikhet beviser
+ * aldri kapasitet), en genuint ny JARVIS_CANONICAL Operations Core ble bygget for
+ * leverandører/driftsoppgaver/runbooks/eskalering (masterplan §13, egen domenepakke, IKKE
+ * importert herfra - denne filen kjenner kun det statiske `BUSINESS_DOMAIN_COVERAGE`-
+ * strengfeltet under), med samme rapportør-/OpenLoopService-/erasure-mønster som Product Core.
+ * ZERO ekstern driftsplattform-leverandør - `live_provider_connected=false`. UA-3
+ * akseptansekriterium 2 ("kombinerer sales, product, finance, marketing, operations") har NÅ
+ * alle fem domener dekket - se `docs/OPEN_QUESTIONS.md` Q-25 for presis, ikke-overdrevet
+ * ordlyd om hva "dekket" betyr (JARVIS_CANONICAL kapabilitet, IKKE live ekstern leverandørdata).
  */
 export interface DomainCoverage {
   status: "available" | "not_integrated";
@@ -89,7 +101,11 @@ export const BUSINESS_DOMAIN_COVERAGE: Record<BusinessDomain, DomainCoverage> = 
     source: "Native Jarvis Growth Core (kampanjeregister/utgiftsledger/attribusjon/CAC-ROAS/avviksdeteksjon, D-74)",
     live_provider_connected: false
   },
-  operations: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false }
+  operations: {
+    status: "available",
+    source: "Native Jarvis Operations Core (leverandørregister/driftsoppgaver/runbooks/eskalering overflatert som open loops, D-129)",
+    live_provider_connected: false
+  }
 };
 
 export function renderDomainCoverage(): string {
@@ -100,7 +116,17 @@ export function renderDomainCoverage(): string {
     const providerNote = d.live_provider_connected ? "" : " - ingen live ekstern leverandør tilkoblet";
     return `- ${domain}: tilgjengelig (${d.source}${providerNote})`;
   });
-  return `DATA COVERAGE (akseptansekriterium 2 er IKKE fullt oppfylt - ${availableCount}/${totalCount} domener dekket)\n${lines.join("\n")}`;
+  // §15: `availableCount === totalCount` betyr KUN at Jarvis har en JARVIS_CANONICAL kapabilitet
+  // for alle domener - IKKE at live eksterne leverandører er tilkoblet noe sted (se
+  // `live_provider_connected`-notatene per domene under). Overskriften MÅ derfor være
+  // beregnet, aldri en hardkodet "IKKE fullt oppfylt"-påstand som ville blitt usann i det
+  // øyeblikket det femte domenet ble dekket (samme "aktivt usann dokumentasjon er farligere
+  // enn manglende dokumentasjon"-lærdom som D-122).
+  const headline =
+    availableCount === totalCount
+      ? `akseptansekriterium 2 er dekket for alle ${availableCount}/${totalCount} domener (JARVIS_CANONICAL kapabilitet - ikke nødvendigvis live ekstern leverandørdata, se per-domene-notat)`
+      : `akseptansekriterium 2 er IKKE fullt oppfylt - ${availableCount}/${totalCount} domener dekket`;
+  return `DATA COVERAGE (${headline})\n${lines.join("\n")}`;
 }
 
 /** Ny BriefSource for eksisterende DailyBrief-motor - aapne loops som brief-punkter. */
