@@ -15,8 +15,9 @@ merge på 3/5 domener (sales/marketing/finance). Full detalj: D-127 i DECISIONS_
 
 ## Aktiv fase/oppgave
 
-**UA-3: Native Jarvis Product Core - `product`-domenet (D-128). Branch `claude/ua3-product-domain`,
-base eksakt `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`.** Manuell fortsettelse etter D-127-
+**UA-3: Native Jarvis Product Core - `product`-domenet (D-128). PR #77, branch
+`claude/ua3-product-domain`, base eksakt `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`, opprettet
+som draft, CI under verifisering.** Manuell fortsettelse etter D-127-
 merget, derivert fra en frisk read-only rekonstruksjon (`git fetch origin --prune`, lokal HEAD =
 origin/main verifisert, rent worktree, CLAUDE.md/PROJECT_STATUS.md/IMPLEMENTATION_PLAN.md/
 OPEN_QUESTIONS.md/DECISIONS_AND_ASSUMPTIONS.md/masterplan v4.0 lest på nytt, `list_pull_requests`/
