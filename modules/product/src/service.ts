@@ -92,12 +92,21 @@ export class ProductService {
     return this.searchItems(tenantId, memorySpace, { company_id: companyId, ...(status !== "all" ? { status } : {}), limit: 200 });
   }
 
-  /** Deterministisk statusovergang håndheves i state-machine.ts - ugyldig overgang kaster, endrer INGENTING. */
+  /**
+   * Deterministisk statusovergang håndheves i state-machine.ts - ugyldig overgang kaster, endrer
+   * INGENTING. `canTransitionProductItem` tillater `from===to` som en GYLDIG overgang, men det
+   * betyr IKKE at et repetert samme-status-kall skal skrive en ny `updated_at`/`status_changed`-
+   * event/`closed_at` - en samme-verdi-overgang er en EKTE no-op (ingen UPDATE, ingen event),
+   * ellers ville repeterte `set_status`-kall med samme verdi kunne stille undertrykke
+   * `product_item_high_priority_stalled`-deteksjonen (frisk `updated_at` uten reell fremgang) og
+   * overskrive den opprinnelige `closed_at`-terminaltidsstemplingen ved gjentatt `shipped->shipped`.
+   */
   async setStatus(tenantId: string, memorySpace: MemorySpace, itemId: string, status: ProductItemStatus, actorPersonId?: string): Promise<ProductItem | null> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, itemId, true);
       if (!current) return null;
       assertValidProductItemTransition(current.status, status);
+      if (status === current.status) return current;
       const closedAtClause =
         (status === "shipped" || status === "declined" || status === "closed")
           ? ", closed_at = now()"
@@ -120,6 +129,7 @@ export class ProductService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, itemId, true);
       if (!current) return null;
+      if (priority === current.priority) return current;
       const { rows } = await client.query(
         `UPDATE product_items SET priority = $1, updated_at = now() WHERE tenant_id = $2 AND item_id = $3 RETURNING *`,
         [priority, tenantId, itemId]
@@ -136,6 +146,7 @@ export class ProductService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, itemId, true);
       if (!current) return null;
+      if (ownerPersonId === current.owner_person_id) return current;
       const { rows } = await client.query(
         `UPDATE product_items SET owner_person_id = $1, updated_at = now() WHERE tenant_id = $2 AND item_id = $3 RETURNING *`,
         [ownerPersonId, tenantId, itemId]
@@ -160,6 +171,7 @@ export class ProductService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, itemId, true);
       if (!current) return null;
+      if (companyId === current.company_id && contactId === current.contact_id) return current;
       const { rows } = await client.query(
         `UPDATE product_items SET company_id = $1, contact_id = $2, updated_at = now() WHERE tenant_id = $3 AND item_id = $4 RETURNING *`,
         [companyId, contactId, tenantId, itemId]

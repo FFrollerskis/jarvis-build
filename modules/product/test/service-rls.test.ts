@@ -178,6 +178,62 @@ describe("H: punkt-tidslinje er separat fra audit_events", () => {
   });
 });
 
+describe("K (arkitekt-review MERGE BLOCKER 1): samme-verdi-kall er EKTE no-op'er", () => {
+  it("gjentatt setStatus med SAMME status skriver INGEN nytt event, INGEN ny updated_at, INGEN ny closed_at", async () => {
+    const item = await service.createItem(TENANT_A, "business", { title: "Same-status no-op" });
+    await service.setStatus(TENANT_A, "business", item.item_id, "triaged");
+    const before = await service.getItem(TENANT_A, "business", item.item_id);
+    const eventsBefore = await service.listEvents(TENANT_A, "business", item.item_id);
+    await new Promise((r) => setTimeout(r, 20));
+    const after = await service.setStatus(TENANT_A, "business", item.item_id, "triaged");
+    const eventsAfter = await service.listEvents(TENANT_A, "business", item.item_id);
+    expect(new Date(after!.updated_at).getTime()).toBe(new Date(before!.updated_at).getTime());
+    expect(eventsAfter).toHaveLength(eventsBefore.length);
+    expect(eventsAfter.filter((e) => e.event_type === "status_changed")).toHaveLength(1);
+  });
+  it("gjentatt SAMME terminal-status (shipped -> shipped) overskriver ALDRI den opprinnelige closed_at", async () => {
+    const item = await service.createItem(TENANT_A, "business", { title: "Same-terminal no-op" });
+    await service.setStatus(TENANT_A, "business", item.item_id, "triaged");
+    await service.setStatus(TENANT_A, "business", item.item_id, "planned");
+    await service.setStatus(TENANT_A, "business", item.item_id, "in_progress");
+    const shipped = await service.setStatus(TENANT_A, "business", item.item_id, "shipped");
+    await new Promise((r) => setTimeout(r, 20));
+    const shippedAgain = await service.setStatus(TENANT_A, "business", item.item_id, "shipped");
+    expect(new Date(shippedAgain!.closed_at!).getTime()).toBe(new Date(shipped!.closed_at!).getTime());
+  });
+  it("gjentatt setPriority med SAMME prioritet skriver INGEN nytt event/ny updated_at", async () => {
+    const item = await service.createItem(TENANT_A, "business", { title: "Same-priority no-op", priority: "high" });
+    const before = await service.getItem(TENANT_A, "business", item.item_id);
+    const eventsBefore = await service.listEvents(TENANT_A, "business", item.item_id);
+    await new Promise((r) => setTimeout(r, 20));
+    const after = await service.setPriority(TENANT_A, "business", item.item_id, "high");
+    const eventsAfter = await service.listEvents(TENANT_A, "business", item.item_id);
+    expect(new Date(after!.updated_at).getTime()).toBe(new Date(before!.updated_at).getTime());
+    expect(eventsAfter).toHaveLength(eventsBefore.length);
+  });
+  it("gjentatt setOwner med SAMME eier (inkl. null->null) skriver INGEN nytt event/ny updated_at", async () => {
+    const item = await service.createItem(TENANT_A, "business", { title: "Same-owner no-op" });
+    const before = await service.getItem(TENANT_A, "business", item.item_id);
+    const eventsBefore = await service.listEvents(TENANT_A, "business", item.item_id);
+    await new Promise((r) => setTimeout(r, 20));
+    const after = await service.setOwner(TENANT_A, "business", item.item_id, null);
+    const eventsAfter = await service.listEvents(TENANT_A, "business", item.item_id);
+    expect(new Date(after!.updated_at).getTime()).toBe(new Date(before!.updated_at).getTime());
+    expect(eventsAfter).toHaveLength(eventsBefore.length);
+  });
+  it("gjentatt linkReporter med SAMME company_id/contact_id skriver INGEN nytt event/ny updated_at", async () => {
+    const item = await service.createItem(TENANT_A, "business", { title: "Same-reporter no-op" });
+    await service.linkReporter(TENANT_A, "business", item.item_id, "co-prd-a", "ct-prd-a");
+    const before = await service.getItem(TENANT_A, "business", item.item_id);
+    const eventsBefore = await service.listEvents(TENANT_A, "business", item.item_id);
+    await new Promise((r) => setTimeout(r, 20));
+    const after = await service.linkReporter(TENANT_A, "business", item.item_id, "co-prd-a", "ct-prd-a");
+    const eventsAfter = await service.listEvents(TENANT_A, "business", item.item_id);
+    expect(new Date(after!.updated_at).getTime()).toBe(new Date(before!.updated_at).getTime());
+    expect(eventsAfter).toHaveLength(eventsBefore.length);
+  });
+});
+
 describe("I/J: tenant-/memory-space-isolasjon (RLS)", () => {
   it("I: TENANT_B ser ALDRI TENANT_A sine produktpunkter", async () => {
     const itemA = await service.createItem(TENANT_A, "business", { title: "Isolation A" });

@@ -16,12 +16,30 @@ merge på 3/5 domener (sales/marketing/finance). Full detalj: D-127 i DECISIONS_
 ## Aktiv fase/oppgave
 
 **UA-3: Native Jarvis Product Core - `product`-domenet (D-128). PR #77, branch
-`claude/ua3-product-domain`, base eksakt `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`, opprettet
-som draft, CI under verifisering.** Manuell fortsettelse etter D-127-
-merget, derivert fra en frisk read-only rekonstruksjon (`git fetch origin --prune`, lokal HEAD =
-origin/main verifisert, rent worktree, CLAUDE.md/PROJECT_STATUS.md/IMPLEMENTATION_PLAN.md/
-OPEN_QUESTIONS.md/DECISIONS_AND_ASSUMPTIONS.md/masterplan v4.0 lest på nytt, `list_pull_requests`/
-`list_branches` bekreftet ingen dupliserte pågående slices).
+`claude/ua3-product-domain`, base eksakt `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`.** Manuell
+fortsettelse etter D-127-merget, derivert fra en frisk read-only rekonstruksjon (`git fetch origin
+--prune`, lokal HEAD = origin/main verifisert, rent worktree, CLAUDE.md/PROJECT_STATUS.md/
+IMPLEMENTATION_PLAN.md/OPEN_QUESTIONS.md/DECISIONS_AND_ASSUMPTIONS.md/masterplan v4.0 lest på nytt,
+`list_pull_requests`/`list_branches` bekreftet ingen dupliserte pågående slices).
+
+**Uavhengig arkitekt-review (`REVIEW_ID=5147198284`, mot eksakt daværende HEAD
+`b04cac9c4beb61ff224494af26de73be632e0b9c`, `ARCHITECT_REVIEW_RESULT=CHANGES_REQUIRED`)** fant to
+MERGE BLOCKERS, begge rettet på SAMME branch/PR (ingen ny slice, ingen ny D-ID):
+1. **Same-verdi-mutasjoner var IKKE ekte no-op'er.** `ProductService.setStatus()` tillot allerede
+   `from===to` som en gyldig overgang (`canTransitionProductItem`), men skrev likevel en ny
+   `UPDATE`/`updated_at`/`status_changed`-event, og kunne overskrive `closed_at` ved gjentatt
+   `shipped->shipped`. Dette kunne stille undertrykke `product_item_high_priority_stalled` (kunstig
+   frisk `updated_at` uten reell fremgang). **Fikset:** `setStatus`/`setPriority`/`setOwner`/
+   `linkReporter` returnerer nå UENDRET rad UTEN databasekall/event når den effektive verdien
+   allerede er identisk (for `linkReporter`: BÅDE `company_id` og `contact_id` uendret). 8 nye
+   regresjonstester i `service-rls.test.ts` (describe K) + 1 empirisk ende-til-ende-test i
+   `open-loop-product.test.ts` (describe F) som beviser et no-op-`setPriority`-kall på et gammelt
+   high-prioritert punkt FORTSATT blir flagget `product_item_high_priority_stalled` (mot ekte
+   Postgres/`OpenLoopService`, ikke en isolert hjelpefunksjon).
+2. **`PROJECT_STATUS.md`/Q-25 var bak faktisk PR-status.** Rettet i denne samme committen: korrekt
+   filantall (27, ikke 23), korrekt CI-tilstand (grønn på forrige HEAD, IKKE "under verifisering"),
+   og Q-25 sin utdaterte hale ("...avhenger av product/finance/marketing/operations som ikke er
+   startet ennå") fjernet - erstattet med den faktiske 4/5-tilstanden.
 
 **Kandidatvurdering (research-agent, mot faktisk kode - ikke docs):** fire kandidater vurdert. UA-4
 sin gjenstående Finance Integrity/marketing-spend-integrasjon og UA-5 «incident → diagnose → fix»
@@ -50,24 +68,32 @@ flippet til `"available"` (`live_provider_connected=false`).
 product=AVAILABLE operations=NOT_INTEGRATED` - 4/5 domener, FORTSATT IKKE komplett** (kun
 `operations` gjenstår). Full detalj: D-128 i DECISIONS_AND_ASSUMPTIONS.md.
 
-## Kvalitetsporter kjørt i denne økten (D-128)
+## Kvalitetsporter kjørt i denne økten (D-128 + arkitekt-review-fiksrunde)
 
+**Opprinnelig D-128-slice (før review):**
 - `npx vitest run modules/erasure modules/product modules/business modules/tool-gateway` →
-  **792/792 grønt (55 testfiler)**, inkl. 6 nye i `modules/erasure/test/product-erasure.test.ts`, 20
-  nye i `modules/product/test/*` (state-machine 11 + transport-wiring 9; `service-rls.test.ts` sine
-  10 describe-blokker kjørt i samme batch tidligere i økten - se under), 10 nye i
-  `modules/business/test/open-loop-product.test.ts`, samt `business-brief.test.ts` utvidet.
+  792/792 grønt (55 testfiler). Full monorepo `pnpm -w typecheck`/`pnpm -w lint` grønne. Diff
+  gjennomgått manuelt: **27 filer** endret (rettet fra en tidligere feilrapportert 23 - se
+  arkitekt-review-blokker 2 over), ALLE innenfor D-128 sitt scope. PR #77 opprettet, CI grønn på
+  HEAD `b04cac9c4beb61ff224494af26de73be632e0b9c` (run `34275871697`, ett begrunnet re-run av en
+  kjent, urelatert `modules/watchdog/test/fase10-ops.test.ts`-ECONNREFUSED-flake).
+
+**Arkitekt-review-fiksrunde (MERGE BLOCKER 1+2, samme branch/PR):**
+- `npx vitest run modules/product/test/service-rls.test.ts modules/business/test/open-loop-product.test.ts modules/erasure/test/product-erasure.test.ts`
+  → 38/38 grønt (21+11+6, inkl. 9 nye no-op-regresjonstester).
+- `npx vitest run modules/erasure modules/product modules/business modules/tool-gateway` →
+  **798/798 grønt (55 testfiler)** (792 + 6 netto nye: 8 nye service-rls-tester - describe K - minus
+  ingen fjernet, pluss 1 ny open-loop-product-test - describe F).
 - Full monorepo `pnpm -w typecheck` (22/22 pakker) og `pnpm -w lint` (`eslint .`) - begge grønne,
   ingen nye feil/warnings.
 - Hemmelighetsskann av full diff (`git diff --cached | grep` mot API-nøkkel-/token-/secret-mønstre):
   0 reelle treff - kun embedded-Postgres-test-passord (`pw`/`pw2`, samme presedens som ALLE
-  tidligere domenepakker) og den eksisterende `credential_ref`-feltnavn-strengen (ikke en verdi).
-  `gitleaks`-binær ikke tilgjengelig i dette kjøremiljøet - grep-basert manuelt skann kjørt i stedet,
-  ærlig rapportert.
-- `git status`/`git diff --cached --stat` gjennomgått manuelt: 23 filer endret, ALLE innenfor D-128
-  sitt scope (migrasjon, ny `@jarvis/product`-pakke, `open-loop-service.ts`/`open-loop-types.ts`,
-  `business-brief.ts` + test, `erasure/plan.ts` + ny testfil, `tool-gateway/integrations.ts`,
-  `apps/api/main.ts`/`worker-main.ts`/`package.json`, `pnpm-lock.yaml`) - ingen urelaterte filer rørt.
+  tidligere domenepakker). `gitleaks`-binær ikke tilgjengelig i dette kjøremiljøet - grep-basert
+  manuelt skann kjørt i stedet, ærlig rapportert.
+- `git diff --stat` gjennomgått manuelt: KUN `modules/product/src/service.ts` (no-op-fiks),
+  `modules/product/test/service-rls.test.ts`, `modules/business/test/open-loop-product.test.ts`,
+  `docs/PROJECT_STATUS.md`, `docs/OPEN_QUESTIONS.md` endret i denne fiksrunden - ingen nye filer,
+  ingen urelaterte filer rørt, ingen ny D-ID, ingen `operations`-implementasjon.
 
 **Selvfunnet og rettet FØR commit (ingen brukerinvolvering):** to selv-referensielle
 provider-navn-feller (`modules/product/src/types.ts` og `business-brief.ts` sine JSDoc-kommentarer
@@ -91,9 +117,11 @@ kontrollsløyfen gjenopptas.
 
 ## Neste oppgave
 
-1. **Umiddelbart:** verifisere CI grønn på draft-PR-ens eksakte HEAD. INGEN self-approval/merge under
-   noen omstendighet (D-120/CLAUDE.md, uendret) - kontrollsløyfen er pauset, ingen `ARCHITECT_TASK`
-   postes.
+1. **Umiddelbart:** push denne fiksrunden til SAMME branch/PR #77, avvente grønn CI på den NYE
+   eksakte HEAD-en, deretter avvente en NY uavhengig arkitekt-re-review (ikke bare "verifiser CI" -
+   review-runden krever eksplisitt re-review etter en fiks, ikke selv-godkjenning basert på grønn
+   CI alene). INGEN self-approval/merge under noen omstendighet (D-120/CLAUDE.md, uendret) -
+   kontrollsløyfen er pauset, ingen `ARCHITECT_TASK` postes.
 2. Etter D-128 er merget (av arkitekten/Tobias, ikke av denne økten): re-derivere neste slice fra
    faktisk repo-/masterplan-status på nytt (ikke anta en fast rekkefølge). Kandidater: UA-3
    `operations`-domenet (siste gjenstående UA-3-kriterium-2-domene - leverandørregister + runbooks +
