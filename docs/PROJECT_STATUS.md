@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-07 (branch `claude/worker-self-recovery-20260907`, PR #75, base
+**Oppdatert:** 2026-09-08 (branch `claude/worker-self-recovery-20260907`, PR #75, base
 `main=94e4aaa528477fbdc87ce8f4f6c37cb9d3bebb1d`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
@@ -8,13 +8,20 @@
 
 ## Aktiv fase/oppgave
 
-**Infrastrukturreparasjon, review-runde 7: `D126-HEARTBEAT-CI-CLOSEOUT-20260907-F`** (byggeordre
+**Infrastrukturreparasjon, review-runde 8: `D126-ARCHITECT-REVIEW-FIX-20260908-G`** (byggeordre
+5577450319 på issue #68, `TASK_TYPE=BOUNDED_FINAL_REVIEW_FIX`, base-HEAD `8758d2f`,
+`ARCHITECT_MERGE_APPROVED=false`). Samme branch, samme PR #75. Runde 8 lukker nøyaktig to bundne
+blokkere fra den uavhengige arkitekt-gjennomgangen av eksakt denne HEAD - se «Runde 8» under - og
+rører ingenting annet.
+
+Forrige runde: **review-runde 7: `D126-HEARTBEAT-CI-CLOSEOUT-20260907-F`** (byggeordre
 5574439334 på issue #68, `REVIEW_RESULT=CHANGES_REQUIRED`,
 `TASK_TYPE=BOUNDED_REVIEW_FIX_AND_EVIDENCE_RECONCILIATION`, base-HEAD `3734c0e`).
-Samme branch, samme PR #75.
-**Eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny produktkapabilitet.**
-Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-sannhetsflagg er flippet.
-Full begrunnelse: D-126, D-126a til D-126f i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Hele D-126-arbeidet er eksplisitt bestilt av eieren, IKKE en masterplan-slice og IKKE en ny
+produktkapabilitet.** Ingen faseport er passert, ingen UA-slice er startet, ingen produkt-
+sannhetsflagg er flippet. Full begrunnelse: D-126, D-126a til D-126f i DECISIONS_AND_ASSUMPTIONS.md.
+Runde 8 innfører bevisst ingen ny D-ID: den korrigerer to funn innenfor eksisterende D-126-scope.
 
 Runde 7 lukker nøyaktig tre ting: den gjenstående defekten i dispatch-ens feilbane (heartbeat-
 callbackene lå utenfor handoff-gaten), en CI-divergens på SAMME SHA som måtte diagnostiseres i
@@ -307,16 +314,81 @@ tillatelseslag og er IKKE omgått; oppgaveregistreringen hviler derfor på manif
 pluss de observerte `scheduler_invoked`-hendelsene, ikke på et direkte planlegger-oppslag. Ingen
 installasjon, aktivering, restart, reboot eller task-reregistrering er utført.
 
+## Runde 8 (v2.7) - quiescence-bypassen i produksjons-CLI-en, og sannhets-synk
+
+Den uavhengige arkitekt-gjennomgangen av eksakt `8758d2f` fant funnene fra A-F materielt lukket, men
+holdt merge tilbake på to bundne blokkere. Begge er rettet i denne runden, og ingenting annet er rørt.
+
+**Blokker 1 (kilde) - produksjons-CLI-en eksponerte en vei rundt quiescence.**
+`ops/claude-worker/deploy.mjs` kalte `activateRelease` med
+`requireQuiescence: args["force-unquiesced"] !== true`. Det gjorde et udokumentert `--force-unquiesced`
+til en ordinær runtime-bryter som strukturelt kunne slå av D-126s sentrale invariant: en deployment
+skal aldri overskrive en levende worker eller supervisor. Flagget var reelt virksomt, ikke kosmetisk -
+verifisert utenfor repoet ved å drive den gamle banen direkte mot biblioteket med en levende lås holdt:
+
+```
+requireQuiescence:false → ok=true, deferred=false,
+                          worker.mjs på disk = "NEW worker.mjs"
+                          live_deployment_was_overwritten_while_lock_held = true
+```
+
+Rettet: CLI-en har ingen bypass igjen. `activate` og `apply-pending` kaller `activateRelease` UTEN
+`requireQuiescence`-argument, så bibliotekets default (`true`) er den eneste oppførselen entrypointet
+kan produsere. `--force-unquiesced` er i tillegg AVVIST eksplisitt, sammen med enhver nærliggende
+staving (`force-quiescence`, `skip-quiescence`, `no-quiescence`, `ignore-quiescence` og
+`require-quiescence`), med `EXIT.BLOCKED` og en feilmelding som peker på den lovlige veien:
+`activate` utsetter av seg selv og `bootstrap-handoff` anvender markøren når den eksakte forelderen
+har avsluttet. Avvist framfor stilltiende ignorert, nettopp så en operatør aldri kan gå fra kallet i
+den tro at en tvunget aktivering skjedde. Ingen env-variabel og ingen config-nøkkel erstatter
+flagget; det finnes ingen annen vei. Biblioteks-parameteren `requireQuiescence` beholdes som en
+TEST-ONLY søm, slik byggeordren tillater, men er ikke lenger nåbar fra produksjonsbanen.
+Bootstrap-handoff-semantikken og den transaksjonelle rollbacken er uendret.
+
+Ny regresjon på CLI-/entrypoint-grensen: `ops/claude-worker/test/deploy-cli.test.mjs` (7 tester)
+driver den eksporterte `main()` - nøyaktig det `node deploy.mjs ...` kjører - i stedet for biblioteket.
+Den beviser at `activate --force-unquiesced` og `apply-pending --force-unquiesced` mot en levende
+`.worker.lock` gir `EXIT.BLOCKED` og lar hver eneste live-fil stå urørt; at ingen av de seks
+forbudte stavingene slipper gjennom på noen av de to underkommandoene; at kildefilen ikke inneholder
+noe `requireQuiescence:`-argument i det hele tatt; og - som kontroll, så testen ikke bare måler et
+generelt avslag - at et vanlig `activate` mot en levende worker- ELLER supervisor-lås fortsatt
+UTSETTER (`EXIT.DEFERRED`) med markør, og at nøyaktig samme stagede release aktiverer normalt
+(`EXIT.OK`) når ingen lås holdes.
+
+**Blokker 2 (dokumentasjon) - status-sannheten var utdatert og selvmotsigende.** PR #75-beskrivelsen
+sto fortsatt med `SUPERVISOR_INSTALLED=false`, `REMOTE_RESTART_VERIFIED=false`, `DEPLOYED_TO_HOST=false`
+og «Hosten kjører fortsatt v1», selv om senere host-bevis (funn 3, 3b, 3c i runde 7) motsier alle fire.
+Denne filen kalte samtidig `a8bc7321` «den endelige HEAD» selv om PR-hodet siden er `8758d2f`, og lot
+en avsluttende setning si at `SUPERVISOR_INSTALLED` og `REMOTE_RESTART_VERIFIED` først KAN settes true
+etter framtidig bevis - to flagg som allerede står true lenger opp i samme fil på bevis som faktisk
+finnes. Rettet begge steder: PR-beskrivelsen er sannhets-synket, den selvmotsigende setningen er
+erstattet av en som skiller flagg-for-flagg, og den selvrefererende «CI grønn på endelig HEAD»-
+påstanden er ute av dokumentasjonen. Slik det ble etablert etter D-121 hører bevis for CI på eksakt
+endelig HEAD hjemme i den terminale `CLAUDE_REPORT` som postes ETTER at siste commit har flyttet HEAD -
+en docs-commit kan per konstruksjon ikke sitere sin egen etterfølger.
+
+**Ikke rørt i runde 8, bevisst:** test-synkroniseringsdefekten i `apps/api/test/fase3-e2e.test.ts`
+(fortsatt diagnostisert, fortsatt ikke autorisert), D-108, UA-8, ny infrastruktur og enhver
+host-mutasjon. Ingen deployment, aktivering, restart, reboot eller task-reregistrering i denne runden.
+
 ## Kvalitetsporter (kjørt i denne økten)
 
-- **Runde 7-closeout, re-verifisert på den endelige HEAD `a8bc7321`:** suiten kjørt TO ganger til
-  (15 filer / 421 passed begge ganger), og full CI på `a8bc7321` er GRØNN i BEGGE kontekster -
-  kjøring `34153564568` (`event: push`) og `34153567937` (`event: pull_request`). Divergensen som
-  fantes på `3734c0e` (push rød / PR grønn) opptrer altså ikke på denne HEAD. Det er IKKE et bevis
-  på at racet er borte: ingen assertion er endret, så en grønn kjøring er forventet i det vanlige
-  tilfellet uansett. Rot-årsaken står udekket til uavhengig review godkjenner et bundet scope.
-- **`npx vitest run ops/claude-worker/test` → 15 filer / 421 tester passed, kjørt TO ganger,
-  421/421 begge ganger** (387 → 421; 34 nye i runde 7). Nye tester i runde 7:
+- **`npx vitest run ops/claude-worker/test` → 16 filer / 428 tester passed (runde 8; 421 → 428, 7 nye
+  i `deploy-cli.test.mjs`).** Nye tester i runde 8, alle på CLI-/entrypoint-grensen (`main()`):
+  `activate --force-unquiesced` og `apply-pending --force-unquiesced` mot en levende `.worker.lock`
+  gir `EXIT.BLOCKED` og bytter ingen live-fil; alle seks forbudte stavinger avvises på begge
+  underkommandoene; kilden inneholder ikke noe `requireQuiescence:`-argument; og tre kontrolltester
+  som viser at håndhevingen er ekte og ikke et blankt avslag - vanlig `activate` mot levende worker-
+  lås utsetter med markør, det samme mot levende `.supervisor.lock`, og samme stagede release
+  aktiverer normalt når ingen lås holdes.
+- **CI på eksakt endelig HEAD rapporteres i `CLAUDE_REPORT` på issue #68, ikke her.** Denne filen kan
+  per konstruksjon ikke sitere en kjøring mot en SHA som først finnes etter at den selv er committet
+  (etablert etter D-121). Historisk, og fortsatt sant: divergensen som fantes på `3734c0e` (push rød /
+  PR grønn) opptrådte ikke på `a8bc7321`, der begge kontekster var grønne (kjøring `34153564568`
+  `event: push` og `34153567937` `event: pull_request`). Det er IKKE bevis på at racet er borte -
+  ingen assertion er endret, så en grønn kjøring er forventet i det vanlige tilfellet uansett.
+  Rot-årsaken står udekket til uavhengig review godkjenner et bundet scope.
+- **Runde 7, uendret: `npx vitest run ops/claude-worker/test` → 15 filer / 421 tester passed, kjørt
+  TO ganger, 421/421 begge ganger** (387 → 421; 34 nye i runde 7). Nye tester i runde 7:
   - `dispatch.test.mjs` (21 → 36), direkte modulkall: arkitektens repro RESOLVER nå til
     `HANDOFF_FAILED` i stedet for å reject-e; `handoff.stage=first_heartbeat`; barnet SIGTERM-es
     (`kills` er ikke lenger 0); `close`- og `error`-listenerne er allerede tilkoblet NÅR callbacken
@@ -442,11 +514,12 @@ Historikk fra runde 3, uendret:
     poll, budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet kvittering,
     bevart utsettelse fra travel til ledig;
   - `config.test.mjs` (26), `git.test.mjs` (13), `recovery.test.mjs` (20).
-- `pnpm lint` (eslint på hele repoet): **rent** (runde 7).
-- `pnpm typecheck` (alle workspace-pakker): **rent, exit 0** (runde 7).
+- `pnpm lint` (eslint på hele repoet): **rent** (kjørt på nytt i runde 8, ingen output).
+- `pnpm typecheck` (alle workspace-pakker): **rent, exit 0** (kjørt på nytt i runde 8).
 - `npx vitest run apps/api/test/fase3-e2e.test.ts` kjørt **7 ganger** på denne HEAD: **18/18 hver
   gang.** CI-racet ble IKKE reprodusert lokalt; det påstås ikke å være borte, det er diagnostisert.
 - `node --check` på alle endrede `.mjs`-moduler og `JSON.parse` på `config.example.json`: **rent.**
+  I runde 8 gjelder det `ops/claude-worker/deploy.mjs` og `ops/claude-worker/test/deploy-cli.test.mjs`.
 - **Ekte PowerShell-AST-parsing ble IKKE kjørt, og CI-jobben kunne ikke pushes. To uavhengige,
   presist nektede operasjoner:**
   1. `powershell.exe -NoProfile -Command "echo PSOK"` → «This command requires approval».
@@ -468,11 +541,16 @@ Historikk fra runde 3, uendret:
   Den ENE filen CI-divergensen gjaldt er kjørt lokalt 7 ganger, se over. CI på eksakt endelig HEAD
   rapporteres i `CLAUDE_REPORT` på issue #68.
 
-## Flagg-status - oppdatert mot faktisk host-bevis i runde 7
+## Flagg-status - oppdatert mot faktisk host-bevis (runde 7, uendret av runde 8)
 
 `DEPLOYED_TO_HOST=true` · `SUPERVISOR_INSTALLED=true` · `REMOTE_RESTART_VERIFIED=true` ·
-`WORKER_SELF_RECOVERY_VERIFIED=false` · `REBOOT_PERSISTENCE=UNVERIFIED` ·
-`SOURCE_CHANGED=true` · `ARCHITECT_MERGE_APPROVED=false`.
+`CURRENT_SOURCE_DEPLOYED_TO_HOST=false` · `WORKER_SELF_RECOVERY_VERIFIED=false` ·
+`REBOOT_PERSISTENCE=UNVERIFIED` · `SOURCE_CHANGED=true` · `ARCHITECT_MERGE_APPROVED=false`.
+
+**Det viktigste skillet, sagt først:** flaggene over beskriver PRE-runde-F-bytene som faktisk står
+installert på hosten (deployment `20260907-140934` = `3734c0e`-kilde). De sier INGENTING om koden i
+denne PR-en. Verken runde 7s heartbeat-rettelse (`a8bc732`) eller runde 8s CLI-rettelse er deployert;
+`CURRENT_SOURCE_DEPLOYED_TO_HOST=false` inntil en senere, separat autorisert host-handling.
 
 **Hva de tre true-flaggene faktisk betyr - ikke mer:**
 
@@ -488,10 +566,11 @@ Historikk fra runde 3, uendret:
   14:15:23Z fulgt av kø-poll 14:15:24.949Z. Kvitteringen selv sier at den ikke er beviset; polleren
   er det. **Ingen prosess ble terminert, så dette er ikke crash recovery.**
 
-**Fortsatt ubevist, og påstås ikke:** automatisk crash recovery (ingen krasj er indusert), reboot-
-persistens, en post-restart probe med ACK+REPORT, og full E2E PASS. **Den deployerte
-`lib/dispatch.mjs` er pre-fix** - heartbeat-rettelsen i runde 7 er IKKE deployert. Ingenting er
-installert, registrert, startet, restartet eller reregistrert av denne økten.
+**Fortsatt ubevist, og påstås ikke:** automatisk crash self-recovery (ingen krasj er indusert - en
+KOMMANDERT start er ikke crash recovery og telles ikke som det), reboot-persistens, en post-restart
+probe med ACK+REPORT, og full E2E PASS. **De deployerte bytene er pre-fix** - både runde 7s
+heartbeat-rettelse i `lib/dispatch.mjs` og runde 8s CLI-rettelse i `deploy.mjs` mangler på hosten.
+Ingenting er installert, registrert, startet, restartet eller reregistrert av denne økten.
 
 Uendret av denne oppgaven: `UA7_COMPLETE=false`, `UA7_ACCEPTANCE_4=PARTIAL`,
 `Q32_POINT1=OPEN_EXTERNAL_OWNER_ACTION`, `D108_COMPLETE=false`, `UA6_COMPLETE=false`,
@@ -512,10 +591,11 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
   `ops/claude-worker/ci/worker-scripts-windows.job.yml` og må limes inn i
   `.github/workflows/ci.yml` av noen med det scopet. Dette er en ekstern tilgangsblokkering, ikke et
   utelatt krav.
-- **Ny deployment av heartbeat-rettelsen avventer bevisst fersk uavhengig arkitekt-review.** Hosten
-  kjører nå D-126-koden fra `3734c0e` (bevist i runde 7), men den er PRE-FIX for denne rundens
-  dispatch-korreksjon. Ingen merge, ingen installasjon, ingen restart/reboot/reregistrering utført av
-  denne økten - en senere, uavhengig gjennomgått oppgave må autorisere oppdatert deployment + probe.
+- **Ny deployment av gjeldende kilde avventer bevisst fersk uavhengig arkitekt-review.** Hosten
+  kjører D-126-koden fra `3734c0e` (bevist i runde 7), som er PRE-FIX for både runde 7s dispatch-
+  korreksjon og runde 8s CLI-korreksjon. Ingen merge, ingen installasjon, ingen restart/reboot/
+  reregistrering utført av denne økten - en senere, uavhengig gjennomgått oppgave må autorisere
+  oppdatert deployment + probe.
 - **Åpen, ikke-autorisert i denne runden: test-synkroniseringsdefekten i `fase3-e2e.test.ts`.**
   Diagnostisert (se runde 7 over), men bevisst IKKE rettet - byggeordren krever uavhengig review av
   et eventuelt separat produkt-/testscope først. Foreslått bundet scope ligger i `CLAUDE_REPORT`.
@@ -532,20 +612,28 @@ runtime/state/scratch forblir utenfor repoet i `%USERPROFILE%\.jarvis-claude-wor
    kontrollerte bootstrap-handoffen, som venter på at den eksakte forelderen avslutter og deretter
    aktiverer - den krever IKKE at den nye `run-worker.ps1` allerede er live) → config-filer →
    `node worker.mjs status` / `run --dry-run` → `.\install-task.ps1` → `.\install-supervisor.ps1`.
-3. Endelig akseptanse krever, i tillegg til fixture-testene: deployerte skript-hasher/versjon
-   (**dette punktet er nå oppfylt read-only** - se funn 3b, bytene på disk er re-hashet og matcher
-   `3734c0e`), den FAKTISKE registrerte scheduled-task-kommandolinjen på hosten (for å bekrefte
-   hvilken entrypoint som virkelig kjører - **delvis dekket:** `scheduler_invoked`-hendelsene
-   navngir `run-worker.ps1`, men selve task-registreringen er ikke lest, siden `schtasks /query`
-   ble nektet), en observert ekte bootstrap-handoff, en ekte planlagt kjøring som fullfører
-   en ufarlig autorisert probe, og en ekte `RESTART_WORKER`-kvittering. Først da kan
-   `WORKER_SELF_RECOVERY_VERIFIED`, `SUPERVISOR_INSTALLED` og `REMOTE_RESTART_VERIFIED` settes true -
-   individuelt, aldri samlet. **Installasjon er ikke påstått fra fixtures.**
+3. Endelig akseptanse krever, i tillegg til fixture-testene, disse punktene - hvert flagg settes for
+   seg, på sitt eget bevis, aldri samlet. **Installasjon er ikke påstått fra fixtures.**
+   - **Allerede oppfylt, og flaggene står derfor allerede true:** deployerte skript-hasher/versjon
+     (funn 3b - bytene på disk er re-hashet read-only og matcher `3734c0e`) ⇒ `DEPLOYED_TO_HOST=true`;
+     `JarvisWorkerSupervisor` `introduced`/`confirmed` + ekte `SUPERVISOR_RECEIPT` ⇒
+     `SUPERVISOR_INSTALLED=true`; kommandert start av en frisk worker med påfølgende kø-poll ⇒
+     `REMOTE_RESTART_VERIFIED=true`. Disse skal IKKE settes på nytt og skal ikke settes tilbake til
+     false; de gjelder de installerte pre-fix-bytene.
+   - **Delvis dekket:** den FAKTISKE registrerte scheduled-task-kommandolinjen på hosten.
+     `scheduler_invoked`-hendelsene navngir `run-worker.ps1`, men selve task-registreringen er ikke
+     lest, siden `schtasks /query` / `Get-ScheduledTask` ble nektet av tillatelseslaget.
+   - **Gjenstår, og er det eneste som kan flippe de resterende flaggene:** en deployment av
+     GJELDENDE kilde ⇒ `CURRENT_SOURCE_DEPLOYED_TO_HOST`; en observert ekte bootstrap-handoff; en ekte
+     planlagt kjøring som fullfører en ufarlig autorisert probe; en indusert krasj som workeren
+     kommer tilbake fra av seg selv ⇒ `WORKER_SELF_RECOVERY_VERIFIED` (en kommandert start teller
+     ALDRI som dette); og en ekte reboot ⇒ `REBOOT_PERSISTENCE`.
 
 Ingen påstand om at alle framtidige feil er umulige. Runde 2 fjerner syv konkrete, uavhengig
 reproduserte feilmoduser, runde 3 og 4 hver sin uavhengig reproduserte P1-feil i gjensidig
 utelukkelse, runde 5 tre gjenstående P1-blokkere fra den komplette gjennomgangen, runde 6 de to
 uoppfylte addendum-kravene (argv-levering uten pre-execution-gate, og en bootstrap-handoff som kunne
 forlate en utsatt legacy-installasjon), runde 7 de tre heartbeat-callback-stedene som lå utenfor
-handoff-gaten - og resten gjøres synlig i stedet for stille. At denne bundne oppgaven er ferdig
-betyr IKKE at de gjenstående gruppene i den opprinnelige gjennomgangen er godkjent.
+handoff-gaten, og runde 8 den ene veien produksjons-CLI-en fortsatt hadde rundt quiescence - og
+resten gjøres synlig i stedet for stille. At denne bundne oppgaven er ferdig betyr IKKE at de
+gjenstående gruppene i den opprinnelige gjennomgangen er godkjent, og den er ikke merge-godkjent.
