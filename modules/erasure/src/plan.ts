@@ -105,6 +105,19 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "contract_obligations", await run(client, mode, "contract_obligations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "contract_versions", await run(client, mode, "contract_versions", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "contracts", await run(client, mode, "contracts", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-3 Native Jarvis Product Core (D-128, 047_product.sql): registrer
+  // produkt-tabellene i erasure-planen (SAMME mønster/begrunnelse som
+  // support_*/contract_* over). En produkt-tilknyttet open-loop slettes
+  // FØRST, SNEVERT avgrenset til `product_item_id IS NOT NULL` (rører
+  // aldri andre loop_type-er).
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND product_item_id IS NOT NULL", tv)
+  );
+  // `product_item_events` FØR `product_items` (FK -> product_items).
+  add(result, "product_item_events", await run(client, mode, "product_item_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "product_items", await run(client, mode, "product_items", "tenant_id = $1 AND memory_space_id = $2", tv));
   // UA-4 Native Jarvis Growth Core (D-74, 027_growth.sql): registrer
   // vekst-tabellene i erasure-planen (SAMME mønster/begrunnelse som
   // support_*/contract_* over).

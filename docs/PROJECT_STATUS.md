@@ -1,119 +1,104 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-08 (branch `claude/ua3-finance-domain-coverage`, base `main=1b5da61bc070eb7fa8e5068e0c9ba8ecc015e1bd`)
+**Oppdatert:** 2026-09-08 (branch `claude/ua3-product-domain`, base `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
+## D-127: MERGET (korreksjon av forrige versjon av denne filen)
+
+**Viktig korreksjon:** den forrige `PROJECT_STATUS.md` beskrev PR #76 (D-127, `finance` →
+Business Domain Coverage) som fortsatt "under uavhengig arkitekt-review - IKKE merget". Det er nå
+UTDATERT. PR #76 er MERGET til `main` som merge-commit `4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`.
+`BUSINESS_DOMAIN_COVERAGE.finance` er `"available"` på `main`. UA-3 kriterium 2 sto ved D-127 sin
+merge på 3/5 domener (sales/marketing/finance). Full detalj: D-127 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ## Aktiv fase/oppgave
 
-**UA-3: finance → Business Domain Coverage-integrasjon (D-127). PR #76, branch
-`claude/ua3-finance-domain-coverage`, opprettet, CI grønn, under uavhengig arkitekt-review - IKKE
-merget.** `BUSINESS_DOMAIN_COVERAGE.finance` (`modules/business/src/business-brief.ts`) hardkodet
-`"not_integrated"` selv om UA-6 Finance & Spend Integrity Gateway sin kanoniske kapabilitet/arkitektur
-allerede var implementert og arkitektur-akseptert (`UA6_IMPLEMENTATION_COMPLETE=true`,
-`UA6_ARCHITECTURE_ACCEPTANCE_COMPLETE=true`, D-107-D-118 - se D-118 for gjeldende flaggsett;
-`UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false`/`UA6_CREDENTIAL_PHASE_COMPLETE=false`/
-`D108_COMPLETE=false`/`UA6_COMPLETE=false` er ALLE uendret av D-127) og allerede overflatet
-utgifts-/forpliktelses-/anskaffelsesavvik som `business_open_loops` som DEN EKSISTERENDE
-`businessOpenLoopsSource()` allerede viste i briefen. Datastrømmen fantes; kun dekningstabellen løy
-om den - samme mønster som D-78 (marketing) og samme lærdom som D-122 ("aktivt usann dokumentasjon
-er farligere enn manglende"). `finance` flippet til `available`, 11 nye/oppdaterte tester (inkl. én
-empirisk ende-til-ende-test: ekte finance-avviksrad → open loop → faktisk brief-punkt), pluss to
-uavhengig oppdagede, pre-eksisterende host-akseptanse-script-drifter rettet i samme slag
-(`ua4-growth-domain-coverage-live.ts`, `ua3-open-loops-live.ts` - sistnevnte aldri oppdatert siden
-D-78). UA-3 kriterium 2: 3/5 domener (sales+marketing+finance), fortsatt IKKE komplett
-(product/operations har ingen kapabilitet). Full detalj: D-127 i DECISIONS_AND_ASSUMPTIONS.md.
+**UA-3: Native Jarvis Product Core - `product`-domenet (D-128). Branch `claude/ua3-product-domain`,
+base eksakt `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`.** Manuell fortsettelse etter D-127-
+merget, derivert fra en frisk read-only rekonstruksjon (`git fetch origin --prune`, lokal HEAD =
+origin/main verifisert, rent worktree, CLAUDE.md/PROJECT_STATUS.md/IMPLEMENTATION_PLAN.md/
+OPEN_QUESTIONS.md/DECISIONS_AND_ASSUMPTIONS.md/masterplan v4.0 lest på nytt, `list_pull_requests`/
+`list_branches` bekreftet ingen dupliserte pågående slices).
 
-**Oppgaven derivert av en Claude-økt som fikk direkte instruks fra Tobias** om å gjenoppta ordinær
-Jarvis-produktutvikling manuelt (den automatiske arkitekt-loopen er bevisst pauset mens dette pågår
-- `JarvisClaudeWorker`/`JarvisWorkerSupervisor` deaktivert på PC-en, `disabled.flag` satt). En
-research-agent rekonstruerte repo-/masterplan-status FØRST (les IMPLEMENTATION_PLAN.md/OPEN_QUESTIONS.md/
-masterplan v4.0/faktisk kode) og rangerte kandidater før denne ble valgt - se D-127 for full
-derivering og hvorfor UA-8/9/10/11 IKKE ble valgt (ingen av dem har én linje implementasjon ennå, og
-å hoppe dit ville brutt CLAUDE.md regel 10, "ingen fri sekvens-hopping").
+**Kandidatvurdering (research-agent, mot faktisk kode - ikke docs):** fire kandidater vurdert. UA-4
+sin gjenstående Finance Integrity/marketing-spend-integrasjon og UA-5 «incident → diagnose → fix»
+viste seg BEGGE **allerede fullt bygget** (kun `OPEN_QUESTIONS.md` Q-29(4)/Q-31(3) uoppdatert siden
+hhv. D-115/D-116 og D-104/D-105) - IKKE gjenbygget, flagget for en egen fremtidig ren docs-lukking
+(ville vært en meningsløs docs-only-PR i strid med ordren). Reelle gap: UA-3 `product`
+(produkt-tilbakemeldinger/feature-requests/bug-reports - ingen kanonisk Jarvis-data noe sted) og
+UA-3 `operations` (leverandør-/runbook-/eskaleringsstyring i FORRETNINGS-forstand - bekreftet en
+HELT ANNEN masterplan-betydning enn `modules/incidents`/`modules/watchdog`, som er Jarvis sin EGEN
+infra-drift). `product` valgt: mindre, bedre spesifisert, ingen leverandørbeslutning nødvendig.
 
-## D-126: worker-infrastruktur - MERGET, KILDEMERGET OG HOST-DEPLOYERT (oppdatering fra forrige økt)
+**D-64-gate:** `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CAN_RUN_WITHOUT_PROVIDER=true` - ZERO ekstern
+leverandør (Linear/Jira/GitHub Issues) introdusert eller navngitt noe sted i `modules/product/src/*`
+(strukturelt bevist, no-provider-proof-test).
 
-**Viktig korreksjon av forrige versjon av denne filen:** den forrige `PROJECT_STATUS.md`
-(runde 8/`D126-ARCHITECT-REVIEW-FIX-20260908-G`) sa PR #75 fortsatt ventet på uavhengig review og
-IKKE var merget. Det er nå UTDATERT. Faktisk forløp, verifisert direkte mot GitHub og lokal git i
-DENNE økten:
+**Bygget (samme mal som Contracts Core/D-71):** migrasjon `047_product.sql` (`product_items`,
+`product_item_events`, RLS, Q-20 `GRANT DELETE`, `business_open_loops.product_item_id`); ny pakke
+`@jarvis/product` (types/state-machine/service/transport, deterministisk lifecycle); to nye
+`OpenLoopService`-regler (`product_item_needs_triage`, `product_item_high_priority_stalled`)
+registrert i `runSweep()`; `businessOpenLoopsSource()` overflater disse GRATIS i briefen - INGEN ny
+`BriefSource`; 10 nye `product.*` ToolGateway-handlinger (A/B/C, INGEN D); wired identisk i
+`apps/api/src/main.ts`/`worker-main.ts`; Q-20 erasure-plan utvidet. `BUSINESS_DOMAIN_COVERAGE.product`
+flippet til `"available"` (`live_provider_connected=false`).
 
-- Arkitekten godkjente merge (`D126-MERGE-CLOSEOUT-20260908-H`, `ARCHITECT_MERGE_APPROVED=true`).
-  PR #75 merget som normal two-parent-merge: merge-SHA `1b5da61bc070eb7fa8e5068e0c9ba8ecc015e1bd`,
-  parents `94e4aaa5` (gammel main) og `e4178587` (PR-hode) - verifisert med `git rev-list --parents`.
-  Fersk post-merge CI på EKSAKT merge-SHA grønn (build-test/windows-git-auth/gitleaks, run
-  `34187076196`, 206 testfiler/3530 tester).
-- Host-deployment fullført og read-only-verifisert (`D126-HOST-DEPLOY-HANDOFF-20260908-I` →
-  `D126-POSTDEPLOY-VERIFY-20260908-J`): PowerShell-tillatelsesgapet fra runde I ble løst av Tobias
-  selv (smalt `Bash(powershell.exe:*)` lagt til workerens `allowedTools`), deployment
-  `20260908-115207` installert, alle 30 payload-filer hash-verifisert kilde==host==manifest, ekte
-  Windows-oppgaver (`JarvisClaudeWorker`/`JarvisWorkerSupervisor`) bekreftet kjørbare med
-  post-deploy scheduler-tikk. `CURRENT_SOURCE_DEPLOYED_TO_HOST=true`,
-  `D126_HOST_DEPLOYMENT_VERIFIED=true`, `SUPERVISOR_INSTALLED=true`.
-- Ende-til-ende-automasjon bekreftet (`D126-AUTOMATION-E2E-PROBE-20260908-K`): en ny arkitektoppgave
-  ble oppdaget og dispatchet av den EKTE Windows-planleggeren uten manuell trigger
-  (`AUTOMATED_WORKER_QUEUE_PICKUP=PASS`).
-- **Fortsatt bevisst ubevist, uendret:** `WORKER_SELF_RECOVERY_VERIFIED=false` (ingen krasj indusert),
-  `REMOTE_RESTART_VERIFIED_CURRENT_SOURCE=false`, `REBOOT_PERSISTENCE=UNVERIFIED`.
-- **Dokumentasjonsgap oppdaget, IKKE lukket her** (utenfor denne sliceens scope, flagget som egen
-  fremtidig oppgave i D-127): review-rundene G/H/I/J/K eksisterer KUN som issue #68-kommentarer og
-  har aldri fått egne D-ID-rader i DECISIONS_AND_ASSUMPTIONS.md eller en IMPLEMENTATION_PLAN.md-seksjon.
+**UA-3 kriterium 2 re-evaluert: `sales=AVAILABLE marketing=AVAILABLE finance=AVAILABLE
+product=AVAILABLE operations=NOT_INTEGRATED` - 4/5 domener, FORTSATT IKKE komplett** (kun
+`operations` gjenstår). Full detalj: D-128 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Autonom-loopen er nå bevisst PAUSET av Tobias** (ikke krasjet, ikke feilet) mens han jobber direkte
-med denne Claude-økten. Ikke start/aktiver/endre `JarvisClaudeWorker`/`JarvisWorkerSupervisor` uten
-eksplisitt beskjed.
+## Kvalitetsporter kjørt i denne økten (D-128)
 
-## Kvalitetsporter kjørt i denne økten (D-127)
+- `npx vitest run modules/erasure modules/product modules/business modules/tool-gateway` →
+  **792/792 grønt (55 testfiler)**, inkl. 6 nye i `modules/erasure/test/product-erasure.test.ts`, 20
+  nye i `modules/product/test/*` (state-machine 11 + transport-wiring 9; `service-rls.test.ts` sine
+  10 describe-blokker kjørt i samme batch tidligere i økten - se under), 10 nye i
+  `modules/business/test/open-loop-product.test.ts`, samt `business-brief.test.ts` utvidet.
+- Full monorepo `pnpm -w typecheck` (22/22 pakker) og `pnpm -w lint` (`eslint .`) - begge grønne,
+  ingen nye feil/warnings.
+- Hemmelighetsskann av full diff (`git diff --cached | grep` mot API-nøkkel-/token-/secret-mønstre):
+  0 reelle treff - kun embedded-Postgres-test-passord (`pw`/`pw2`, samme presedens som ALLE
+  tidligere domenepakker) og den eksisterende `credential_ref`-feltnavn-strengen (ikke en verdi).
+  `gitleaks`-binær ikke tilgjengelig i dette kjøremiljøet - grep-basert manuelt skann kjørt i stedet,
+  ærlig rapportert.
+- `git status`/`git diff --cached --stat` gjennomgått manuelt: 23 filer endret, ALLE innenfor D-128
+  sitt scope (migrasjon, ny `@jarvis/product`-pakke, `open-loop-service.ts`/`open-loop-types.ts`,
+  `business-brief.ts` + test, `erasure/plan.ts` + ny testfil, `tool-gateway/integrations.ts`,
+  `apps/api/main.ts`/`worker-main.ts`/`package.json`, `pnpm-lock.yaml`) - ingen urelaterte filer rørt.
 
-- `npx vitest run modules/business/test/business-brief.test.ts modules/business/test/open-loop-finance-spend.test.ts`
-  → **37/37 grønt** (21 i business-brief.test.ts inkl. 3 nye/utvidede describe-blokker, 16 uendret i
-  open-loop-finance-spend.test.ts, kjørt som regresjonsbevis - urørt av denne sliceen).
-- Full monorepo `pnpm -w typecheck` og `pnpm -w lint` kjørt - begge grønne, ingen nye feil/warnings.
-- CI på PR #76 (GitHub Actions, `build-test`/`windows-git-auth`/`gitleaks`): grønn på det opprinnelige
-  koden-HEAD etter én begrunnet re-run av `build-test` (kjent, PR-urelatert flaky-mønster - ECONNREFUSED
-  mot embedded Postgres under `runMigrations()` i `modules/finance/test/service-rls.test.ts`, samme
-  Postgres-oppstart-race sett flere ganger tidligere i prosjektet; 3505/3533 tester besto ved første
-  forsøk, re-run løste resten - ingen kodeendring nødvendig).
-  Denne truth-sync-runden (docs-only, ingen ny D-ID, ingen produktkodeendring - se under) er pushet
-  som en ny commit på SAMME branch/PR; CI må verifiseres grønn på DENNE nye eksakte HEAD før videre
-  review, jf. arkitektens instruks.
-- `git status --porcelain` tom før og etter; `git diff` kontrollert manuelt for hele PR-en (8 filer
-  totalt): kode/tester/scripts - `modules/business/src/business-brief.ts`,
-  `modules/business/test/business-brief.test.ts`,
-  `modules/business/scripts/ua4-growth-domain-coverage-live.ts`,
-  `modules/business/scripts/ua3-open-loops-live.ts` - samt FIRE dokumentasjonsfiler -
-  `docs/DECISIONS_AND_ASSUMPTIONS.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/OPEN_QUESTIONS.md`,
-  `docs/PROJECT_STATUS.md` (denne filen selv, siden den beskriver PR-ens egen sluttilstand).
-- Hemmelighetsskann av diff: 0 treff (kjørt både på D-127-hovedsliceen og på denne truth-sync-runden).
-- **Uavhengig arkitekt-review (GitHub PR-review, `tsworkflow`/OWNER, mot eksakt HEAD
-  `c3a0e4875d44d8d916ab3b0a566b3da0384f956c`):** CODE/BEHAVIOR PASS, CI PASS. To MERGE BLOCKERS reist,
-  begge dokumentasjons-presisjon (ingen kodefeil funnet): (1) denne filen beskrev en FØR-fullført
-  tilstand (porter "ikke kjørt ennå", neste oppgave "fullfør porter/PR") mens alt faktisk allerede var
-  gjort, og undertalte berørte filer (sa 3 docs/7 filer, faktisk 4 docs/8 filer); (2) UA-6-
-  fullføringsspråket ("VERIFIED/COMPLETE"/"allerede tilkoblet") i D-127-teksten i
-  DECISIONS_AND_ASSUMPTIONS.md og IMPLEMENTATION_PLAN.md kunne mistolkes som at UA-6 var HELT
-  ferdig inkl. live leverandørverifisering. Begge rettet i denne truth-sync-runden (kun docs, ingen
-  ny D-ID, ingen produktkode rørt) - se D-127-raden i DECISIONS_AND_ASSUMPTIONS.md for eksakt
-  før/etter-ordlyd.
+**Selvfunnet og rettet FØR commit (ingen brukerinvolvering):** to selv-referensielle
+provider-navn-feller (`modules/product/src/types.ts` og `business-brief.ts` sine JSDoc-kommentarer
+nevnte "Linear/Jira/GitHub Issues" som illustrative eksempler, som traff mine egne
+no-provider-proof-regex-tester) - rettet ved å beskrive fremtidige adaptere generisk, ALDRI navngi en
+spesifikk leverandør (samme disiplin som `agreements/types.ts`). Én reell testoppsett-bug i
+`modules/erasure/test/product-erasure.test.ts`: backdating av `created_at` via en rå
+`appPool.query()` UTENFOR `withMemoryTransaction()` ble stille RLS-blokkert (0 rader truffet, ingen
+feil kastet) og gjorde punktet aldri faktisk stale nok til å trigge deteksjonsregelen - diagnostisert
+med et midlertidig debug-testoppsett (kjørt og SLETTET, aldri committet), rettet ved å pakke
+backdating-oppdateringen inn i `withMemoryTransaction()` (samme presedens som
+`open-loop-product.test.ts` sin `insertProductItem`-hjelper).
 
 ## Blokkeringer
 
-Ingen for D-127 selv (ingen credential, ingen ny leverandør, ingen host-avhengighet). D-126 sine
-gjenstående punkter (self-recovery/reboot-bevis, dokumentasjonslukking for G-K) er uendret utenfor
-scope og krever enten en fremtidig autorisert feilinjeksjons-/reboot-oppgave eller en egen
-dokumentasjons-closeout-oppgave - ingen av dem blokkerer D-127.
+Ingen for D-128 selv (ingen credential, ingen ny leverandør, ingen host-avhengighet). Den automatiske
+arkitekt-loopen forblir bevisst PAUSET av Tobias (`JarvisClaudeWorker`/`JarvisWorkerSupervisor`
+deaktivert på PC-en) - INGEN posting til issue #68 i denne økten, per eksplisitt instruks. Ingen
+merge utført eller forsøkt - draft-PR opprettes og venter på uavhengig arkitekt-review når
+kontrollsløyfen gjenopptas.
 
 ## Neste oppgave
 
-1. **Umiddelbart:** verifisere at CI er grønn på denne truth-sync-commitens eksakte HEAD på PR #76,
-   deretter avvente ny uavhengig arkitekt-re-review. Ingen selv-godkjenning/merge under noen
-   omstendighet (D-120/CLAUDE.md, uendret).
-2. Etter D-127 er merget: re-derivere neste slice fra faktisk repo-/masterplan-status på nytt (ikke
-   anta en fast rekkefølge) - `product`/`operations`-domenene i UA-3 kriterium 2 har ingen kapabilitet
-   ennå og er kandidater, likeledes UA-4 punkt (4) (Finance Integrity Gateway-audit/reconciliation-
-   integrasjon for marketing spend) og UA-5 sitt incident→diagnose→fix-gap - se D-127 sin
-   kandidatvurdering for full begrunnelse.
-3. Separat, lavere prioritet: dokumentasjonslukking for D-126 review-runder G-K (formell D-ID-
-   registrering av allerede-fullført arbeid som kun finnes i issue #68).
+1. **Umiddelbart:** verifisere CI grønn på draft-PR-ens eksakte HEAD. INGEN self-approval/merge under
+   noen omstendighet (D-120/CLAUDE.md, uendret) - kontrollsløyfen er pauset, ingen `ARCHITECT_TASK`
+   postes.
+2. Etter D-128 er merget (av arkitekten/Tobias, ikke av denne økten): re-derivere neste slice fra
+   faktisk repo-/masterplan-status på nytt (ikke anta en fast rekkefølge). Kandidater: UA-3
+   `operations`-domenet (siste gjenstående UA-3-kriterium-2-domene - leverandørregister + runbooks +
+   eskaleringspolicy, flerdel-kapabilitet som fortjener egen slice); rene docs-lukkinger for
+   `OPEN_QUESTIONS.md` Q-29(4) (UA-4 marketing-spend-integrasjon, allerede fullt bygget) og Q-31(3)
+   (UA-5 incident→diagnose→fix, allerede fullt bygget) - begge kun dokumentasjonsdrift, ingen ny kode
+   nødvendig.
+3. Separat, lavere prioritet, uendret fra forrige økt: dokumentasjonslukking for D-126 review-runder
+   G-K (formell D-ID-registrering av allerede-fullført arbeid som kun finnes i issue #68).

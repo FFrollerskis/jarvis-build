@@ -3754,6 +3754,45 @@ finance=AVAILABLE product/operations=NOT_INTEGRATED` - 3/5 domener, FORTSATT IKK
 alle fem - `product`/`operations` har ingen kanonisk Jarvis-kapabilitet ennå, ingen ble oppfunnet
 her). Draft-PR, IKKE merget, ingen self-approval. Full detalj: D-127 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-3: NATIVE JARVIS PRODUCT CORE - `product`-DOMENET (2026-09-08) → D-128
+
+Manuell fortsettelse etter D-127-merget (base `main=4cc144f57888c1fd0d7ca4009405f9aae46b4e5b`), derivert
+fra en frisk read-only rekonstruksjon. Fire kandidater vurdert mot faktisk kode: UA-4 sin gjenstående
+Finance Integrity/marketing-spend-integrasjon og UA-5 «incident → diagnose → fix» viste seg **begge
+ALLEREDE FULLT BYGGET** (kun `OPEN_QUESTIONS.md` Q-29(4)/Q-31(3) uoppdatert siden hhv. D-115/D-116 og
+D-104/D-105) - IKKE gjenbygget her, flagget for en egen fremtidig ren docs-lukking. Reelle gap: UA-3
+`product` (produkt-tilbakemeldinger/feature-requests/bug-reports - ingen kanonisk Jarvis-data noe sted)
+og UA-3 `operations` (leverandør-/runbook-/eskaleringsstyring i FORRETNINGS-forstand - bekreftet en HELT
+ANNEN masterplan-betydning enn `modules/incidents`/`modules/watchdog`, som er Jarvis sin EGEN
+infra-drift). `product` valgt som den mindre, bedre spesifiserte av de to.
+
+**D-64-gate:** `CAPABILITY=`produkt-tilbakemeldings-/roadmap-lifecycle; `SYSTEM_OF_RECORD=JARVIS_CANONICAL`;
+`CAN_RUN_WITHOUT_PROVIDER=true` - ZERO ekstern leverandør (Linear/Jira/GitHub Issues) introdusert eller
+navngitt i `modules/product/src/*` (strukturelt bevist via no-provider-proof-test). Et fremtidig eksternt
+issue-tracker-verktøy forblir en VALGFRI senere adapter, aldri domeneeier.
+
+**Bygget, samme mal som Contracts Core/D-71:** migrasjon `047_product.sql` (`product_items`,
+`product_item_events`, RLS tenant+RESTRICTIVE-space, `GRANT DELETE` for Q-20,
+`business_open_loops.product_item_id`-pekerkolonne domene-prefikset per
+`044_finance_procurement_openloop.sql`-presedens); ny pakke `@jarvis/product` (types/state-machine/
+service/transport, deterministisk lifecycle `new→triaged→planned→in_progress→shipped/declined/closed`
+med administrativ gjenåpning); to nye `OpenLoopService`-regler (`product_item_needs_triage`,
+`product_item_high_priority_stalled`) registrert i `runSweep()`; `businessOpenLoopsSource()` (§13/D-53)
+overflater disse GRATIS i briefen - ingen ny `BriefSource` bygget; 10 nye `product.*`
+ToolGateway-handlinger (klasse A/B/C, INGEN klasse D); wired identisk i `apps/api/src/main.ts`/
+`worker-main.ts`; Q-20 erasure-plan utvidet (open-loop FØRST, så events, så item).
+`BUSINESS_DOMAIN_COVERAGE.product` flippet til `"available"` (source: Native Jarvis Product Core,
+D-128), `product.live_provider_connected=false`.
+
+**UA-3 kriterium 2 re-evaluert: `sales=AVAILABLE marketing=AVAILABLE finance=AVAILABLE
+product=AVAILABLE operations=NOT_INTEGRATED` - 4/5 domener, FORTSATT IKKE komplett** (kun `operations`
+gjenstår). Testmatrise: `modules/product/test/*` (31: state-machine 11, service-rls 10 describes A-J,
+transport-wiring 9), `modules/business/test/open-loop-product.test.ts` (10), `business-brief.test.ts`
+(utvidet med produkt-dekning/leverandør-uavhengighet/empirisk ende-til-ende), `modules/erasure/test/
+product-erasure.test.ts` (6, A-H). `pnpm -w typecheck`/`pnpm -w lint` rent, full berørt testsuite grønn
+(792/792 på 55 filer). Draft-PR, IKKE merget, ingen self-approval, INGEN posting til issue #68. Full
+detalj: D-128 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

@@ -337,6 +337,79 @@ export class OpenLoopService {
   }
 
   /**
+   * UA-3 Native Jarvis Product Core (D-128): "Reuse OpenLoopService for
+   * product-item triage - No second task/reminder engine" - et punkt i
+   * `new` (aldri triagert) i `staleDays` dager er en stille glipp, ikke et
+   * fravaer av produkt-arbeid. SAMME "stagnasjon"-heuristikk som
+   * `detectContractsNeedingReview`.
+   */
+  async detectProductItemsNeedingTriage(tenantId: string, memorySpace: MemorySpace, staleDays = 7): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT item_id, company_id, contact_id, title, owner_person_id, created_at
+         FROM product_items WHERE tenant_id = $1 AND status = 'new'
+           AND created_at < now() - ($2 || ' days')::interval`,
+        [tenantId, staleDays]
+      );
+      return this.upsertProductItemLoop(
+        client, tenantId, memorySpace, rows.rows as ProductItemRow[], "product_item_needs_triage",
+        (row) => ({ reason: `Produktpunkt "${row.title}" har ikke blitt triagert på ${staleDays} dager`, next_action: `Triager produktpunkt ${row.item_id}`, priority: "normal", due_at: null })
+      );
+    });
+  }
+
+  /**
+   * En `high`/`critical`-prioritert punkt som IKKE er terminal (shipped/
+   * declined/closed) og ikke har flyttet seg (`updated_at`) på `staleDays`
+   * dager - en høyt prioritert sak som stagnerer er akkurat den typen
+   * "open loop" masterplan-akseptansekriterium 3 skal fange automatisk.
+   */
+  async detectStalledHighPriorityProductItems(tenantId: string, memorySpace: MemorySpace, staleDays = 14): Promise<SweepResult> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const rows = await client.query(
+        `SELECT item_id, company_id, contact_id, title, owner_person_id, updated_at
+         FROM product_items WHERE tenant_id = $1 AND priority IN ('high','critical')
+           AND status NOT IN ('shipped','declined','closed')
+           AND updated_at < now() - ($2 || ' days')::interval`,
+        [tenantId, staleDays]
+      );
+      return this.upsertProductItemLoop(
+        client, tenantId, memorySpace, rows.rows as ProductItemRow[], "product_item_high_priority_stalled",
+        (row) => ({ reason: `Høyt prioritert produktpunkt "${row.title}" har stagnert i ${staleDays} dager`, next_action: `Følg opp produktpunkt ${row.item_id}`, priority: "high", due_at: null })
+      );
+    });
+  }
+
+  private async upsertProductItemLoop(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    rows: ProductItemRow[],
+    loopType: OpenLoopType,
+    build: (row: ProductItemRow) => { reason: string; next_action: string; priority: OpenLoopPriority; due_at: string | null }
+  ): Promise<SweepResult> {
+    let detected = 0;
+    let updated = 0;
+    const currentKeys: string[] = [];
+    for (const row of rows) {
+      const detectionKey = `${loopType}:${row.item_id}`;
+      currentKeys.push(detectionKey);
+      const built = build(row);
+      const result = await upsertOpenLoop(client, {
+        open_loop_id: `biz-ol-${randomUUID()}`, tenant_id: tenantId, memory_space: memorySpace,
+        company_id: row.company_id, contact_id: row.contact_id, opportunity_id: null,
+        lead_id: null, followup_id: null, activity_id: null, ticket_id: null, contract_id: null, campaign_id: null,
+        product_item_id: row.item_id,
+        loop_type: loopType, detection_key: detectionKey, reason: built.reason, next_action: built.next_action,
+        priority: built.priority, owner_person_id: row.owner_person_id, due_at: built.due_at
+      });
+      if (result === "inserted") detected++; else updated++;
+    }
+    const autoResolved = await autoResolveStale(client, tenantId, loopType, currentKeys);
+    return { detected, updated, auto_resolved: autoResolved };
+  }
+
+  /**
    * UA-4 Native Jarvis Growth Core (D-74): "Reuse OpenLoopService... No
    * second task/reminder engine" - deterministisk utgifts-avviksdeteksjon
    * for aktive kampanjer. En kampanjes SISTE registrerte utgiftsdag
@@ -751,6 +824,10 @@ export class OpenLoopService {
       await this.detectContractTerminationDeadlines(tenantId, memorySpace),
       await this.detectContractObligationsDue(tenantId, memorySpace),
       await this.detectContractsNeedingReview(tenantId, memorySpace),
+      // UA-3 Native Jarvis Product Core (D-128): samme prinsipp - reglene
+      // kjøres i DENNE sveipen, krever `product_items` (047_product.sql).
+      await this.detectProductItemsNeedingTriage(tenantId, memorySpace),
+      await this.detectStalledHighPriorityProductItems(tenantId, memorySpace),
       // UA-4 Native Jarvis Growth Core (D-74): samme prinsipp - regelen
       // kjøres i DENNE sveipen, krever `marketing_campaigns`/
       // `marketing_spend_events` (027_growth.sql).
@@ -882,6 +959,17 @@ interface ContractRow {
   updated_at?: string;
 }
 
+/** UA-3 Native Jarvis Product Core (D-128). */
+interface ProductItemRow {
+  item_id: string;
+  company_id: string | null;
+  contact_id: string | null;
+  title: string;
+  owner_person_id: string | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
 interface ContractObligationRow {
   obligation_id: string;
   contract_id: string;
@@ -951,6 +1039,8 @@ interface UpsertOpenLoopInput {
   finance_recurring_commitment_id?: string | null;
   /** UA-6 closeout (D-115): peker til `finance_procurement_items`, null/utelatt for ikke-anskaffelses-loops. */
   finance_procurement_item_id?: string | null;
+  /** UA-3 Native Jarvis Product Core (D-128): peker til `product_items`, null/utelatt for ikke-produkt-loops. */
+  product_item_id?: string | null;
   loop_type: string;
   detection_key: string;
   reason: string;
@@ -965,8 +1055,8 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
     `INSERT INTO business_open_loops
        (open_loop_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, followup_id, activity_id,
         ticket_id, contract_id, campaign_id, payment_intent_id, finance_spend_record_id, finance_recurring_commitment_id,
-        finance_procurement_item_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+        finance_procurement_item_id, product_item_id, loop_type, detection_key, reason, next_action, priority, owner_person_id, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
      ON CONFLICT (tenant_id, detection_key) DO UPDATE SET
        -- Gjenaapning (§9 i byggeordren): en tidligere resolved loop for SAMME vilkaar settes
        -- eksplisitt tilbake til 'open' med ny opened_at - historikken bevares i audit_events,
@@ -980,7 +1070,7 @@ async function upsertOpenLoop(client: pg.PoolClient, input: UpsertOpenLoopInput)
       input.open_loop_id, input.tenant_id, input.memory_space, input.company_id, input.contact_id,
       input.opportunity_id, input.lead_id, input.followup_id, input.activity_id, input.ticket_id, input.contract_id, input.campaign_id,
       input.payment_intent_id ?? null, input.finance_spend_record_id ?? null, input.finance_recurring_commitment_id ?? null,
-      input.finance_procurement_item_id ?? null,
+      input.finance_procurement_item_id ?? null, input.product_item_id ?? null,
       input.loop_type, input.detection_key, input.reason, input.next_action, input.priority, input.owner_person_id, input.due_at
     ]
   );

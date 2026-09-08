@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/product",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-3 Native Jarvis Product Core (D-128): JARVIS_CANONICAL produkt-tilbakemeldings-/roadmap-domene - ZERO ekstern produkt-analytics-/issue-tracker-leverandor-avhengighet.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

@@ -23,6 +23,7 @@
     "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/policy": "workspace:*",
+    "@jarvis/product": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",
     "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",

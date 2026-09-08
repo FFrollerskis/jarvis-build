@@ -2377,6 +2377,96 @@ export function firstWaveTools(
       rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 15_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("conversation_graph")
+    },
+    // UA-3 Native Jarvis Product Core (D-128): provider-nøytralt
+    // `product.*`-namespace - JARVIS_CANONICAL, ZERO ekstern produkt-
+    // analytics-/issue-tracker-leverandør-avhengighet (D-128/D-64). Lagt
+    // til på SLUTTEN (samme grunn som contract.*/growth.* over -
+    // eksisterende tester indekserer dette arrayet posisjonelt). Ingen
+    // handling her er klasse D (ingen nøstet ekstern handling i denne
+    // sliceen).
+    {
+      tool_id: "product", action: "create_item", description: "Opprett et produktpunkt (feature request/bug report/usage feedback/improvement); rapportør via eksisterende Business OS company/contact",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), title: z.string(), description: z.string().optional(),
+        item_type: z.string().optional(), priority: z.string().optional(), company_id: z.string().optional(), contact_id: z.string().optional(),
+        owner_person_id: z.string().optional(), canonical_uri: z.string().optional(), actor_person_id: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["product.write"], reversible: true,
+      rollback_procedure: "sett status til 'declined'", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "get_item", description: "Les ett produktpunkt",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string() }),
+      capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "list_items", description: "List produktpunkter etter status",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "search_items", description: "Deterministisk filter-/fritekstsøk i produktpunkter (punktnummer/selskap/kontakt/status/prioritet/eier/tittel)",
+      input_schema: record({
+        tenant_id: z.string(), memory_space: z.string().optional(), status: z.string().optional(), priority: z.string().optional(),
+        company_id: z.string().optional(), contact_id: z.string().optional(), owner_person_id: z.string().optional(),
+        title_contains: z.string().optional(), item_number: z.number().optional(), limit: z.number().optional()
+      }),
+      capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "list_by_company", description: "Hva har selskap X rapportert? - deterministisk rapportør-oppslag",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), company_id: z.string(), status: z.string().optional() }),
+      capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "set_status", description: "Deterministisk lifecycle-overgang (new/triaged/planned/in_progress/shipped/declined/closed)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string(), status: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "C", scopes: ["product.write"], reversible: true,
+      rollback_procedure: "eksplisitt nytt set_status-kall tilbake til forrige status (unntatt gjenåpningsveien fra shipped/declined/closed, som kun går til new)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "set_priority", description: "Sett prioritet (low/normal/high/critical)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string(), priority: z.string(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["product.write"], reversible: true,
+      rollback_procedure: "sett prioritet tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "set_owner", description: "Sett/fjern punkteier (gjenbruker eksisterende person-/identitetsarkitektur)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string(), owner_person_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["product.write"], reversible: true,
+      rollback_procedure: "sett eier tilbake til forrige verdi", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "link_reporter", description: "Oppdater rapportør (selskap/kontakt) - gjenbruker eksisterende Business OS-entiteter",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string(), company_id: z.string().optional(), contact_id: z.string().optional(), actor_person_id: z.string().optional() }),
+      capability_class: "B", scopes: ["product.write"], reversible: true,
+      rollback_procedure: "sett rapportør tilbake via nytt link_reporter-kall", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
+    },
+    {
+      tool_id: "product", action: "list_events", description: "List hele hendelseshistorikken for ett produktpunkt (produkt-tidslinje, ikke audit_events)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), item_id: z.string() }),
+      capability_class: "A", scopes: ["product.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
+      output_trust: "internal", transport: transport("product")
     }
   ];
 }

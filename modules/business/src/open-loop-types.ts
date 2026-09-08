@@ -30,7 +30,10 @@ export type OpenLoopType =
   // UA-6 Slice 6 (D-112) - speiler 043_wallester.sql sin utvidede CHECK.
   | "card_anomaly_attention"
   // UA-6 closeout (D-115) - speiler 044_finance_procurement_openloop.sql sin utvidede CHECK.
-  | "finance_procurement_missing";
+  | "finance_procurement_missing"
+  // UA-3 Native Jarvis Product Core (D-128) - speiler 047_product.sql sin utvidede CHECK.
+  | "product_item_needs_triage"
+  | "product_item_high_priority_stalled";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -59,6 +62,8 @@ export interface BusinessOpenLoop {
   finance_recurring_commitment_id: string | null;
   /** UA-6 closeout (D-115): peker til `finance_procurement_items`, null for ikke-anskaffelses-loops. */
   finance_procurement_item_id: string | null;
+  /** UA-3 Native Jarvis Product Core (D-128): peker til `product_items`, null for ikke-produkt-loops. */
+  product_item_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
@@ -116,7 +121,8 @@ export interface SweepResult {
 }
 
 /** §15: bedriftshelse-akseptansekriteriet krever sales+product+finance+marketing+operations -
- * `sales` (Business Graph/CRM) og `marketing` (Native Jarvis Growth Core, D-74/D-78) er dekket;
- * `product`/`finance`/`operations` MÅ fortsatt rapporteres som ikke-integrert, aldri fabrikkert -
+ * `sales` (Business Graph/CRM), `marketing` (Native Jarvis Growth Core, D-74/D-78), `finance`
+ * (Native Jarvis Finance & Spend Integrity Gateway, D-127) og NÅ `product` (Native Jarvis Product
+ * Core, D-128) er dekket; `operations` MÅ fortsatt rapporteres som ikke-integrert, aldri fabrikkert -
  * se `BUSINESS_DOMAIN_COVERAGE` i business-brief.ts. */
 export type BusinessDomain = "sales" | "product" | "finance" | "marketing" | "operations";

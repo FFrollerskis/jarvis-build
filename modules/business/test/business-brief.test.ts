@@ -128,16 +128,17 @@ describe("B: ukentlig brief - egen, kilde-forankret aggregering (ikke en andre m
   // oppdaterte kartleggingen (ikke en separat, frosset kopi) - OG dekningen er en arkitektonisk
   // (build-time) fakta, ikke tenant-data, saa den er IDENTISK for begge tenantene (bevisst, ikke
   // en tenant-isolasjonsfeil - se filkommentaren i business-brief.ts).
-  it("weekly.data_coverage reflekterer marketing/finance=available (Growth Core/Finance Gateway) for ALLE tenants likt - domenedekning er arkitektur, ikke tenant-data", async () => {
+  it("weekly.data_coverage reflekterer marketing/finance/product=available (Growth Core/Finance Gateway/Product Core) for ALLE tenants likt - domenedekning er arkitektur, ikke tenant-data", async () => {
     const weeklyA = await generateWeeklyBrief(appPool, TENANT_A, "business");
     const weeklyB = await generateWeeklyBrief(appPool, TENANT_B, "business");
     expect(weeklyA.data_coverage.marketing.status).toBe("available");
     expect(weeklyB.data_coverage.marketing.status).toBe("available");
     expect(weeklyA.data_coverage.finance.status).toBe("available");
     expect(weeklyB.data_coverage.finance.status).toBe("available");
+    expect(weeklyA.data_coverage.product.status).toBe("available");
+    expect(weeklyB.data_coverage.product.status).toBe("available");
     expect(weeklyA.data_coverage).toEqual(weeklyB.data_coverage);
     expect(weeklyA.data_coverage.sales.status).toBe("available");
-    expect(weeklyA.data_coverage.product.status).toBe("not_integrated");
     expect(weeklyA.data_coverage.operations.status).toBe("not_integrated");
   });
 });
@@ -189,13 +190,17 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
   // (UA6_LIVE_PROVIDER_VERIFICATION_COMPLETE=false, uendret av D-127) - og dens
   // avviksdeteksjon var allerede overflatert som `business_open_loops` (open-loop-finance-
   // spend.test.ts) som SAMME `businessOpenLoopsSource()` under allerede viser i denne briefen -
-  // PÅSTANDEN var usann, ikke kapabiliteten. `product`/`operations` forblir eksplisitt
-  // `not_integrated`, uendret - ingen ny kapabilitet for dem finnes.
-  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing OG finance som tilgjengelig - product/operations er eksplisitt not_integrated, aldri fabrikkert", () => {
+  // PÅSTANDEN var usann, ikke kapabiliteten.
+  // D-128: `product` gikk fra `not_integrated` til `available` av et ANNET mønster enn D-78/D-127
+  // - her fantes INGEN eksisterende kapabilitet fra før; en genuint ny JARVIS_CANONICAL Product
+  // Core (`@jarvis/product`) ble bygget, med samme rapportør-/OpenLoopService-mønster som
+  // Support/Contracts Core. `operations` forblir eksplisitt `not_integrated`, uendret - ingen ny
+  // kapabilitet for det domenet finnes ennå.
+  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing OG finance OG product som tilgjengelig - operations er eksplisitt not_integrated, aldri fabrikkert", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.marketing.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.finance.status).toBe("available");
-    expect(BUSINESS_DOMAIN_COVERAGE.product.status).toBe("not_integrated");
+    expect(BUSINESS_DOMAIN_COVERAGE.product.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.operations.status).toBe("not_integrated");
   });
 
@@ -216,21 +221,29 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
     expect(BUSINESS_DOMAIN_COVERAGE.finance.live_provider_connected).toBe(false);
   });
 
-  it("sales/product/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
+  it("product sin dekning er eksplisitt begrunnet i Native Product Core, ALDRI en issue-tracker-/analytics-leverandør-tilkobling", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.product.source).toMatch(/Product Core/);
+    // Samme separasjon som marketing/finance: domenekapabilitet != ekstern leverandør-tilkobling.
+    // Linear/Jira/GitHub Issues er en FREMTIDIG, valgfri adapter, aldri domeneeier (D-64) - denne
+    // briefen hevder ikke live tilkobling, kun at Jarvis kan rapportere produktpunkter den selv sporer.
+    expect(BUSINESS_DOMAIN_COVERAGE.product.live_provider_connected).toBe(false);
+  });
+
+  it("sales/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales).toEqual({ status: "available", source: "Business Graph/CRM", live_provider_connected: false });
-    expect(BUSINESS_DOMAIN_COVERAGE.product).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
     expect(BUSINESS_DOMAIN_COVERAGE.operations).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
   });
 
-  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing/finance som tilgjengelig uten aa hevde en live leverandør", () => {
+  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing/finance/product som tilgjengelig uten aa hevde en live leverandør", () => {
     const text = renderDomainCoverage();
     expect(text).toContain("IKKE fullt oppfylt");
     expect(text).toContain("IKKE integrert");
     expect(text).toContain("marketing: tilgjengelig");
     expect(text).toContain("finance: tilgjengelig");
+    expect(text).toContain("product: tilgjengelig");
     expect(text).toContain("ingen live ekstern leverandør tilkoblet");
-    // 3/5 domener dekket (sales + marketing + finance) - eksplisitt telling, ikke en gjettet brøk.
-    expect(text).toContain("3/5 domener dekket");
+    // 4/5 domener dekket (sales + marketing + finance + product) - eksplisitt telling, ikke en gjettet brøk.
+    expect(text).toContain("4/5 domener dekket");
   });
 
   it("renderDomainCoverage() er 100% deterministisk (samme resultat ved gjentatte kall, ingen DB/klokke-avhengighet)", () => {
@@ -253,6 +266,16 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
     const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
     expect(source).not.toMatch(/STRIPE|VIPPS|WALLESTER|FIKEN|NEONOMICS/i);
     expect(source).not.toMatch(/@jarvis\/finance/);
+  });
+
+  // D-128 (samme disiplin som D-78/D-127 over, men for produkt-analytics-/issue-tracker-
+  // leverandører): ingen slik leverandør-credential-formet streng skal noensinne trenge å stå i
+  // DENNE filen for at `product.status = "available"` skal være sant - business-brief.ts
+  // importerer aldri `@jarvis/product` og kjenner ingen leverandør-SDK.
+  it("business-brief.ts krever INGEN produkt-analytics-/issue-tracker-leverandør-credential/SDK for aa markere product tilgjengelig", async () => {
+    const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/LINEAR|JIRA|MIXPANEL|AMPLITUDE|POSTHOG/i);
+    expect(source).not.toMatch(/@jarvis\/product/);
   });
 });
 
@@ -288,6 +311,37 @@ describe("G (D-127): finance-avledede open loops overflater i Business OS-briefe
     expect(item?.why).toContain("Utgift på");
     // høy prioritet (finance_spend_unexpected er "high") -> ikke i FYI-boetta.
     expect(artifact.fyi.find((i) => i.ref === item?.ref)).toBeUndefined();
+  });
+});
+
+describe("H (D-128): produkt-avledede open loops overflater i Business OS-briefen via SAMME businessOpenLoopsSource() som sales/finance", () => {
+  // Beviser EMPIRISK, ikke bare via BUSINESS_DOMAIN_COVERAGE-paastanden over, at product sin
+  // dekning er reell: en ekte `product_items`-rad i status 'new' (identisk fixture-form som
+  // `open-loop-product.test.ts` §A) -> OpenLoopService.detectProductItemsNeedingTriage() ->
+  // `product_item_needs_triage`-open-loop -> businessOpenLoopsSource() -> DailyBrief-punkt.
+  // INGEN ny BriefSource bygget her - dette er den EKSISTERENDE `businessOpenLoopsSource()`
+  // (§13/D-53), som allerede haandterer ENHVER open_loop_type generisk.
+  it("et product_item_needs_triage-open-loop dukker opp som et brief-punkt, med produkt-kilde-forankret 'why'", async () => {
+    const itemId = `prd-it-brief-${randomUUID()}`;
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(
+        `INSERT INTO product_items (item_id, tenant_id, memory_space_id, title, status, priority, created_at, updated_at)
+         VALUES ($1, $2, 'business', 'Brief-test produktpunkt', 'new', 'normal', now() - interval '10 days', now() - interval '10 days')`,
+        [itemId, TENANT_A]
+      )
+    );
+    const detection = await openLoops.detectProductItemsNeedingTriage(TENANT_A, "business");
+    expect(detection.detected).toBeGreaterThanOrEqual(1);
+
+    const dailyBrief = new DailyBrief([businessOpenLoopsSource(openLoops)], appPool);
+    const artifact = await dailyBrief.generate(identityA);
+    const allBuckets = [
+      ...artifact.top_priorities, ...artifact.today, ...artifact.needs_attention,
+      ...artifact.follow_ups, ...artifact.build_status, ...artifact.fyi
+    ];
+    const item = allBuckets.find((i) => i.source === "business-open-loops" && i.title.includes("product_item_needs_triage"));
+    expect(item).toBeTruthy();
+    expect(item?.why).toContain("triagert");
   });
 });
 

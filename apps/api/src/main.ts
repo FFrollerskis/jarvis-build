@@ -41,6 +41,7 @@ import {
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
+import { ProductService, ProductTransport } from "@jarvis/product";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -210,6 +211,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // trenger derfor IKKE `toolGateway`/`ToolInvocationContext`, i motsetning
   // til `SupportTransport`.
   const agreementsService = new AgreementsService(pool);
+  // UA-3 Native Jarvis Product Core (D-128): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - rapportør gjenbruker Business Graph
+  // (company_id/contact_id) og OpenLoopService (triage/stagnasjon-reglene)
+  // uendret. Ingen ekstern issue-tracker-avhengighet - SAMME lat/enkel-
+  // avhengighet-mønster som `AgreementsTransport`.
+  const productService = new ProductService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
@@ -366,6 +373,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // bygger `SupportEmailService` lat ved første `reply`/`ingest`-kall.
     support: new SupportTransport(supportService, businessService, toolGateway),
     contract: new AgreementsTransport(agreementsService),
+    // UA-3 Native Jarvis Product Core (D-128): SAMME lat/enkel-avhengighet-
+    // mønster som AgreementsTransport over (INGEN toolGateway/
+    // ToolInvocationContext, ingen nøstet klasse D-handling).
+    product: new ProductTransport(productService),
     growth: new GrowthTransport(growthService),
     // UA-4 Google Ads-slice (D-83): SAMME lat/enkel-avhengighet-mønster som
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
