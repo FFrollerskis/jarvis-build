@@ -55,6 +55,14 @@ import type { BusinessDomain } from "./open-loop-types.ts";
  * allerede overflater i DENNE briefen. Datastrømmen fantes altså allerede; kun
  * dekningstabellen løy fortsatt om den. Samme "aktivt usann dokumentasjon er farligere enn
  * manglende dokumentasjon"-lærdom som D-122.
+ *
+ * `product` flippet til `available` (D-128) - ANNERLEDES mønster enn D-78/D-127: her fantes
+ * INGEN eksisterende kapabilitet fra før, en genuint ny JARVIS_CANONICAL Product Core ble bygget
+ * for produkt-tilbakemeldinger/feature-requests/bug-reports (egen domenepakke, IKKE importert
+ * herfra - denne filen kjenner kun det statiske `BUSINESS_DOMAIN_COVERAGE`-strengfeltet under),
+ * med samme rapportør-/OpenLoopService-/erasure-mønster som Support Core (D-66)/Contracts Core
+ * (D-71). ZERO ekstern produkt-analytics-/issue-tracker-leverandør - et fremtidig eksternt
+ * verktøy er en VALGFRI, senere adapter, aldri domeneeier (D-64) - `live_provider_connected=false`.
  */
 export interface DomainCoverage {
   status: "available" | "not_integrated";
@@ -66,7 +74,11 @@ export interface DomainCoverage {
 
 export const BUSINESS_DOMAIN_COVERAGE: Record<BusinessDomain, DomainCoverage> = {
   sales: { status: "available", source: "Business Graph/CRM", live_provider_connected: false },
-  product: { status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false },
+  product: {
+    status: "available",
+    source: "Native Jarvis Product Core (produkt-tilbakemeldinger/feature-requests/bug-reports overflatert som open loops, D-128)",
+    live_provider_connected: false
+  },
   finance: {
     status: "available",
     source: "Native Jarvis Finance & Spend Integrity Gateway (utgifts-/forpliktelses-/anskaffelses-avviksdeteksjon overflatert som open loops, D-107-D-116)",
