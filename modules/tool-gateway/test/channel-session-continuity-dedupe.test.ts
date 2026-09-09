@@ -125,7 +125,7 @@ describe("F: kanalbytte-dedupe - samme idempotency_key, mobile deretter web, ING
     const toolGateway = new ToolGateway(appPool, policy, { name: "test", async get() { return "secret-never-leaks"; } });
     for (const tool of firstWaveTools({ calendar: calendarTransport })) toolGateway.register(tool);
 
-    const idempotencyKey = "chdedupe-fixed-key-001";
+    const idempotencyKey = "not-a-real-secret-chdedupe-test-fixture-marker";
     const params = { title: "Tannlege", start: new Date().toISOString(), end: new Date(Date.now() + 3_600_000).toISOString() };
 
     // Første kall: utført VIA `mobile`-identiteten.

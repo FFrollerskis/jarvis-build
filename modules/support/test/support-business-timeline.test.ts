@@ -91,7 +91,7 @@ describe("A: ticket-opprettelse havner i selskapets tidslinje", () => {
       [TENANT_A, "ct-sup-tl-a", "Ticket opprettet: Kontakt-only-ticket"]
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0].company_id).toBeNull();
+    expect(rows[0]?.company_id).toBeNull();
   });
 });
 
