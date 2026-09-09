@@ -3842,6 +3842,47 @@ operations-erasure.test.ts` (9, A-H). `pnpm -w typecheck`/`pnpm -w lint` rent, F
 testsuite grønn (3666/3666 på 216 filer). Draft-PR, IKKE merget, ingen self-approval, INGEN posting til
 issue #68. Full detalj: D-129 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### UA-8: PERSONAL DIGITAL TWIN - provider-uavhengig kjerne + UA-3 kriterium 1-fiks (2026-09-09) → D-130
+
+Manuell fortsettelse etter D-129-merget (base `main=5df11e5add901f3fff10c2ef266c40e3e35e3f48`), ny
+arbeidsregel: STØRSTE TRYGGE SAMMENHENGENDE leveranse per slice. Formell re-evaluering (parallelle
+research-agenter) bekreftet UA-4/UA-5 COMPLETE og UA-6/UA-7 kode-komplette (kun eksterne D-108-
+credential-blokkere gjenstår) - ZERO provider-uavhengig kode igjen for noen av de fire. Fant at UA-3
+kriterium 1 ("Hva skjer med kunde X?") IKKE var faktisk VERIFIED som D-73 påsto - support/kontrakter
+skrev aldri til `business_activities`. Rettet i SAMME PR (ikke docs-only).
+
+**Bygget (seks parallelle, filsti-partisjonerte agentleveranser, sentralt integrert):**
+1. UA-3 kriterium 1-fiks: `SupportService`/`AgreementsService` skriver nå til `business_activities`
+   ved opprettelse/status-/versjonsoverganger. Fant, men rettet IKKE, en pre-eksisterende, urelatert
+   kryss-tenant `company_id`/`contact_id`-valideringsgap (Q-33).
+2. `@jarvis/context` (`049_context_engine.sql`): person+tenant+space-skopet kontekstmotor (sted/
+   enhet/møte/aktivitet), deterministisk-vinner-alltid-presedens.
+3. `@jarvis/location` (`050_location.sql`): provider-nøytral geofencing, eier-håndhevet retensjon,
+   sammensatte tenant/space-FK-er (D-129-lærdommen gjenbrukt direkte).
+4. `@jarvis/health` (`051_health.sql`): provider-nøytral helse-ingestion, `health`-space strukturelt
+   låst (DB-CHECK + RLS), `HealthMetricSource`-adapterkontrakt.
+5. `ChannelSessionAuthority` (generalisert `VoiceSessionAuthority`-mønster, ALLE kanaler) + `desktop`-
+   kanal + lokal-agent-kontrakt (gjenbruker `devices`, INGEN ny tabell). Kanalbytte uten duplikate
+   handlinger bevist via EKSISTERENDE `ToolGateway`-idempotency-dedupe.
+6. HA-kritisk-handling-bevistester (fant ett reelt, IKKE rettet gap - Q-34), `MobilityAdapter`-
+   kontrakt (`packages/contracts/src/mobility.ts`, INGEN bilprovider valgt), familie/delt-space-audit
+   (Q-15 oppdatert).
+
+**Sentral integrasjon:** erasure-plan utvidet for alle tre nye domener (fant og rettet en RLS-blind
+person-scoped erasure-spørring i eget førsteutkast FØR commit); ny `jarvis_list_all_tenant_ids()`
+(`052_tenant_catalog_all.sql`) for lokasjon/helse-sveip-fan-out (Q-27/D-65-mønster, uten
+`kind='business'`-filter); to nye `DailyScheduler`-retensjonssveip; ny DPIA
+`docs/UA8_PERSONAL_TWIN_DPIA.md`; `OPEN_QUESTIONS.md` Q-29(4)/Q-31(3) rettet til STALE (uavhengig
+re-verifisert), Q-13/Q-14/Q-15 oppdatert, Q-33/Q-34 nye funn logget.
+
+**UA8_ACCEPTANCE:** (1) session continuity PASS, (2) helse/lokasjon routing+retensjon PASS,
+(3) HA/car pre/post-verifisering PARTIAL (mål-eksistens-sjekk-gap, Q-34, ingen falsk PASS),
+(4) DPIA PASS. **UA3_COMPLETE=true** etter kriterium 1-fiksen. `pnpm -w typecheck`/`pnpm -w lint`
+rent, full arbeidsområde-testsuite 3764/3770 grønt (228 filer, 6 forventet skip) - én urelatert fil
+feilet på en `afterAll`-hook-timeout under full-suite-kjøring, bekreftet flake ved isolert re-kjøring
+(6/6 på 2.4s). Draft-PR, ikke merget, ingen self-approval, ingen posting til issue #68. Full detalj:
+D-130 i DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

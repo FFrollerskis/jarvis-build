@@ -1,134 +1,122 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-08 (branch `claude/fase-3-operations-core`, base `main=0b350f448673b52f361cdea65110ab8939d9f889`)
+**Oppdatert:** 2026-09-09 (branch `claude/ua8-personal-digital-twin-core`, base `main=5df11e5add901f3fff10c2ef266c40e3e35e3f48`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## D-128: MERGET (korreksjon av forrige versjon av denne filen)
+## D-129: MERGET (korreksjon av forrige versjon av denne filen)
 
-**Viktig korreksjon:** den forrige `PROJECT_STATUS.md` beskrev PR #77 (D-128, `product` →
-Native Jarvis Product Core) som fortsatt "under uavhengig arkitekt-review - IKKE merget". Det er nå
-UTDATERT (denne filen selv var en del av PR #77 og kunne derfor ikke beskrive sin egen merge på
-forhånd). PR #77 er MERGET til `main` som merge-commit
-`0b350f448673b52f361cdea65110ab8939d9f889` (verifisert ekte to-forelder-merge via
-`git cat-file -p`, fersk post-merge CI grønn på run `34286600540`). `BUSINESS_DOMAIN_COVERAGE.product`
-er `"available"` på `main`. UA-3 kriterium 2 sto ved D-128 sin merge på 4/5 domener
-(sales/marketing/finance/product). Full detalj: D-128 i DECISIONS_AND_ASSUMPTIONS.md.
+PR #78 (D-129, `operations` → Native Jarvis Operations Core, pluss arkitekt-review MERGE BLOCKER-fiks
+for kryss-tenant/space-relasjonsintegritet) er MERGET til `main` som ekte to-forelder-merge-commit
+`5df11e5add901f3fff10c2ef266c40e3e35e3f48` (verifisert `git log --pretty=raw`, fersk post-merge CI
+grønn på run `34295189226`). `BUSINESS_DOMAIN_COVERAGE` viste 5/5 domener på `main` FØR denne sliceen
+startet.
 
 ## Aktiv fase/oppgave
 
-**UA-3: Native Jarvis Operations Core - `operations`-domenet (D-129). PR #78, branch
-`claude/fase-3-operations-core`, base eksakt `main=0b350f448673b52f361cdea65110ab8939d9f889`.**
-Manuell fortsettelse etter D-128-merget, derivert fra en frisk read-only rekonstruksjon
-(`git fetch origin --prune`, lokal HEAD = origin/main verifisert, rent worktree, CLAUDE.md/
-PROJECT_STATUS.md/IMPLEMENTATION_PLAN.md/OPEN_QUESTIONS.md/DECISIONS_AND_ASSUMPTIONS.md/masterplan
-v4.0 lest på nytt, `list_pull_requests`/`list_branches` bekreftet ingen dupliserte pågående slices).
+**UA-8: Personal Digital Twin - provider-uavhengig kjerne + UA-3 kriterium 1-fiks (D-130). PR ikke
+opprettet ennå i denne økten, branch `claude/ua8-personal-digital-twin-core`, base eksakt
+`main=5df11e5add901f3fff10c2ef266c40e3e35e3f48`.** Manuell fortsettelse etter D-129-merget, derivert
+fra en frisk read-only rekonstruksjon (`git fetch origin --prune`, lokal HEAD=origin/main verifisert,
+rent worktree). Ny arbeidsregel fra denne sliceen: STØRSTE TRYGGE SAMMENHENGENDE
+masterplan-leveranse per slice, ikke minste mulige.
 
-**Kandidatvurdering (background research-agent, mot faktisk kode - ikke docs-tekst):** UA-4 sin
-gjenstående Finance Integrity/marketing-spend-integrasjon (Q-29(4)) og UA-5 «incident → diagnose →
-fix» (Q-31(3)) ble UAVHENGIG re-verifisert (samme konklusjon som D-128 sin egen tidligere vurdering,
-nå med eksplisitt fil:linje-bevis) - BEGGE **allerede fullt bygget** i kode
-(`spend-service.ts` `syncMarketingSpend()`/`matchAndReconcile()`, `039_finance_spend_integrity.sql`
-`campaign_id`-FK, `open-loop-service.ts` sine finance-spend-regler; `repair.ts` sin
-`proposeRepairTask()` → ekte `ClaudeCodeAgent`, `correlation.ts`, `infra-execution-gate.ts`) - IKKE
-gjenbygget, kun dokumentasjonsdrift i `OPEN_QUESTIONS.md`, flagget for en egen fremtidig ren
-docs-lukking (ikke løst her - ville vært en meningsløs docs-only-PR i strid med ordren). Eneste
-reelle, ubestridte gap: UA-3 `operations` (masterplan §13, linje 748: "Tasks, owners, deadlines,
-suppliers, runbooks, escalations") - INGEN kanonisk business-operations-datamodell fantes noe sted
-(`finance_vendors`, D-116, er et betalings-MOTPART-identitetsregister for rekonsiliering, IKKE et
-leverandør-/driftsregister; `modules/incidents`/`modules/watchdog` er Jarvis sin EGEN
-infra-drift/Fase-10-konsept, en HELT ANNEN masterplan-betydning - navnelikhet beviser aldri
-kapasitet, samme D-122-lærdom).
+**Formell re-evaluering (parallelle background research-agenter, kode-nivå, ikke docs-tekst):**
+UA-4 og UA-5 begge COMPLETE (uavhengig re-bekreftet, samme konklusjon som D-129); UA-6 og UA-7 begge
+kode-komplette, kun eksterne D-108-credential-blokkere (pluss Q-32 punkt 1 for UA-7) gjenstår - ZERO
+provider-uavhengig kode igjen for noen av de fire. **Kritisk funn:** UA-3 kriterium 1 ("Hva skjer med
+kunde X?") var IKKE faktisk VERIFIED som D-73/Q-25 påsto - support-tickets/kontrakter skrev aldri til
+`business_activities`. Rettet i SAMME PR (ikke en separat docs-only-PR, per ordren).
 
-**D-64-gate:** `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CAN_RUN_WITHOUT_PROVIDER=true` - ZERO ekstern
-driftsplattform-/ticketing-leverandør (ServiceNow/Notion/Jira/Atlassian) introdusert eller navngitt
-noe sted i `modules/operations/src/*` (strukturelt bevist, no-provider-proof-test, samme disiplin
-som `product`/D-128).
+**Bygget (seks parallelle, filsti-partisjonerte agentleveranser, sentralt integrert av meg selv):**
 
-**Bygget (samme mal som Product Core/D-128):** migrasjon `048_operations.sql` (`operations_vendors`,
-`operations_runbooks`, `operations_tasks`, `operations_task_events`, RLS tenant+RESTRICTIVE-space,
-Q-20 `GRANT DELETE`, `business_open_loops.operations_task_id`-pekerkolonne); ny pakke
-`@jarvis/operations` (types/state-machine/service/transport, deterministisk oppgave-lifecycle
-`open→in_progress/blocked→done/cancelled` med administrativ gjenåpning); to nye
-`OpenLoopService`-regler (`operations_task_overdue`, `operations_task_escalation_needed`)
-registrert i `runSweep()`; eksplisitt `OperationsService.escalateTask()` (akkumulerende
-eskaleringsnivå, faller tilbake til leverandørens eskaleringskontakt) - INGEN ny varslings-/
-reminder-motor; `businessOpenLoopsSource()` overflater begge GRATIS i briefen - INGEN ny
-`BriefSource`; 22 nye `operations.*` ToolGateway-handlinger (A/B/C, INGEN D); wired identisk i
-`apps/api/src/main.ts`/`worker-main.ts`; Q-20 erasure-plan utvidet (open-loop → task_events → tasks
-→ runbooks → vendors, FK-trygg rekkefølge). `BUSINESS_DOMAIN_COVERAGE.operations` flippet til
-`"available"` (`live_provider_connected=false`). `renderDomainCoverage()`-overskriften gjort
-beregnet (ikke hardkodet "IKKE fullt oppfylt") for å unngå en aktivt usann påstand fra det
-øyeblikket det femte domenet ble dekket.
+1. **UA-3 kriterium 1-fiks:** `SupportService`/`AgreementsService` skriver nå til `business_activities`
+   ved ticket-/kontrakt-opprettelse og status-/versjonsoverganger. 16 nye tester inkl. ekte
+   ende-til-ende-bevis (`apps/api/test/ua3-business-timeline-e2e.test.ts`). Fant, men rettet IKKE i
+   denne sliceen, en pre-eksisterende kryss-tenant `company_id`/`contact_id`-valideringsgap (Q-33,
+   samme feilklasse som D-119, urelatert til UA-8, egen fremtidig fiks).
+2. **`@jarvis/context`** (`049_context_engine.sql`): person+tenant+space-skopet kontekstmotor
+   (sted/enhet/møte/aktivitet), `basis` deterministisk-vinner-alltid-presedens, møtekontekst utledet
+   fra eksisterende `business_activities` (ærlig `end_time_known: false` der ukjent).
+3. **`@jarvis/location`** (`050_location.sql`): provider-nøytral geofencing (sirkulære soner,
+   Haversine, ingen PostGIS), eier-KONFIGURERT retensjon faktisk håndhevet, sammensatte
+   `(tenant_id, memory_space_id, id)`-FK-er (D-129-lærdommen gjenbrukt direkte).
+4. **`@jarvis/health`** (`051_health.sql`): provider-nøytral helse-ingestion, `health`-space
+   STRUKTURELT låst (DB-CHECK + RLS), `HealthMetricSource`-adapterkontrakt + `FakeHealthMetricSource`.
+5. **`ChannelSessionAuthority`** (`modules/core/src/services/channel-session-authority.ts`):
+   generaliserer `VoiceSessionAuthority`-komposisjonsmønsteret til ALLE kanaler (`VoiceSessionAuthority`
+   selv bevisst uendret). Ny `"desktop"`-kanal, lokal-agent modellert fullt ut via eksisterende
+   `devices`-tabell (ingen ny migrasjon, ingen klientkode). Kanalbytte uten duplikate handlinger
+   bevist via EKSISTERENDE `ToolGateway`-idempotency-dedupe.
+6. **HA-kritisk-handling-bevis** (fant ett reelt, IKKE rettet gap - mål-eksistens-sjekk, Q-34, for
+   bred blast radius for denne sliceen), **`MobilityAdapter`-kontrakt** (typer only, ingen
+   bilprovider valgt), **familie/delt-space-audit** (eksisterende modell bekreftet trygg, Q-15
+   oppdatert med et presist funn: `memory_spaces` er tenant-scoped, ikke person-scoped).
 
-**UA-3 kriterium 2 re-evaluert: `sales=AVAILABLE marketing=AVAILABLE finance=AVAILABLE
-product=AVAILABLE operations=AVAILABLE` - 5/5 domener, NÅ dekket** (JARVIS_CANONICAL kapabilitet
-for alle fem - presist: dette betyr IKKE at noen av de fem har en LIVE ekstern leverandør
-tilkoblet, `live_provider_connected=false` er uendret sant for alle fem). Full detalj: D-129 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Sentral integrasjon:** migrasjonsnummer-kollisjon mellom to agenter selv-oppdaget/-rettet
+(context=049, location=050, health=051, tenant-catalog=052); erasure-plan utvidet for alle tre nye
+domener (fant og rettet en RLS-blind person-scoped erasure-spørring i EGET førsteutkast FØR commit -
+`context_observations` krever `jarvis.memory_spaces` satt, `setTenantOnlyContext` alene var
+utilstrekkelig); ny `jarvis_list_all_tenant_ids()` (Q-27/D-65-mønster, uten `kind='business'`-filter)
+for lokasjon/helse-sveip; to nye `DailyScheduler`-retensjonssveip; 2 lint-feil fra parallelle agenters
+testfiler rettet; ny DPIA `docs/UA8_PERSONAL_TWIN_DPIA.md`; `OPEN_QUESTIONS.md` Q-29(4)/Q-31(3)
+rettet til STALE, Q-13/Q-14/Q-15 oppdatert, Q-33/Q-34 nye funn logget (ikke rettet, bevisst).
+
+**UA8_ACCEPTANCE:** (1) session continuity PASS, (2) helse/lokasjon routing+retensjon PASS,
+(3) HA/car pre/post-verifisering PARTIAL (Q-34, ingen falsk PASS), (4) DPIA PASS.
+**UA3_COMPLETE=true** etter kriterium 1-fiksen (alle fire kriterier nå faktisk VERIFIED mot kode).
 
 ## Kvalitetsporter kjørt i denne økten
 
-- Ny pakke `modules/operations` (`package.json`/`tsconfig.json`/`src/{types,state-machine,service,
-  transport,index}.ts`, 5 nye filer) + migrasjon `048_operations.sql` + endringer i
-  `modules/business/src/open-loop-service.ts`/`open-loop-types.ts`/`business-brief.ts`,
-  `modules/erasure/src/plan.ts`, `modules/tool-gateway/src/integrations.ts`,
-  `apps/api/src/main.ts`/`worker-main.ts`, `apps/api/package.json`.
-- Ny testmatrise: `modules/operations/test/{state-machine,service-rls,transport-wiring}.test.ts`
-  (47), `modules/business/test/open-loop-operations.test.ts` (13, ny fil), utvidet
-  `modules/business/test/business-brief.test.ts` (+34, inkl. ny empirisk `describe I`),
-  `modules/erasure/test/operations-erasure.test.ts` (9, ny fil).
-- `pnpm install` (workspace-symlink for `@jarvis/operations` opprettet), full monorepo
-  `pnpm -w typecheck` (23/23 pakker inkl. `modules/operations`) og `pnpm -w lint` (`eslint .`) -
-  begge grønne, ingen nye feil/warnings.
-- **FULL arbeidsområde-testsuite (`npx vitest run`, ingen filter): 3666/3666 grønt på 216
-  testfiler** (94 av disse er nye/endrede tester fra denne sliceen - `modules/operations/test/*`,
-  `open-loop-operations.test.ts`, utvidelsene i `business-brief.test.ts`,
-  `operations-erasure.test.ts` - de øvrige ~3572 er FØR-eksisterende tester, uendret grønne, ingen
-  regresjon).
-- Hemmelighetsskann av full diff (`git diff | grep` mot API-nøkkel-/token-/secret-/private-key-
-  mønstre): 0 reelle treff - kun embedded-Postgres-test-passord (`pw`/`pw2`, samme presedens som
-  ALLE tidligere domenepakker). `gitleaks`-binær ikke tilgjengelig i dette kjøremiljøet -
-  grep-basert manuelt skann kjørt i stedet, ærlig rapportert.
-- `git diff --stat`/`git status` gjennomgått manuelt: 10 endrede filer + 4 nye stier
-  (`modules/operations/` som helhet, migrasjonen, to nye testfiler) - alle innenfor D-129 sitt
-  scope, ingen urelaterte filer rørt, ingen `D108`/credential-arbeid startet, ingen
-  issue #68-mutasjon, worker/supervisor urørt.
-
-**Selvfunnet og rettet FØR commit (ingen brukerinvolvering):** (1) et selv-referensielt
-provider-navn-fangst - `business-brief.ts` sin egen JSDoc-prosa om `operations` skrev opprinnelig
-det bokstavelige pakkenavnet `` `@jarvis/operations` `` i teksten, som traff min egen
-no-provider-proof-aktige `not.toMatch(/@jarvis\/operations/)`-test i `business-brief.test.ts` -
-rettet ved å beskrive pakken generisk ("egen domenepakke, IKKE importert herfra"), samme disiplin
-som `product`-paragrafens eksisterende ordlyd (D-128-presedens, samme fellegruppe som
-Linear/Jira-fellene i D-128 selv). (2) en test-assertion-bug i `business-brief.test.ts` sin nye
-`describe I`: `operations_task_overdue`-loopens brief-tittel prefikses med `"OVERDUE"` (fordi
-loopen HAR en `due_at`, i motsetning til `product_item_needs_triage` som aldri har det) - testen
-lette feilaktig etter `loop_type`-strengen i tittelen; rettet ved å identifisere punktet via
-`why`-teksten i stedet (samme mønster som followup-loopene i `describe A`).
+- Seks nye/utvidede pakker: `modules/context/`, `modules/location/`, `modules/health/` (nye), samt
+  endringer i `modules/support/src/service.ts`, `modules/agreements/src/service.ts`,
+  `modules/core/src/services/channel-session-authority.ts` (ny), `modules/core/src/index.ts`,
+  `packages/contracts/src/identity.ts`, `packages/contracts/src/mobility.ts` (ny),
+  `packages/contracts/src/index.ts`, `modules/erasure/src/plan.ts`, `apps/api/src/main.ts`,
+  `apps/api/package.json`.
+- Fire nye migrasjoner: `049_context_engine.sql`, `050_location.sql`, `051_health.sql`,
+  `052_tenant_catalog_all.sql`.
+- Ny testmatrise (82 nye tester på tvers av 11 nye testfiler): `modules/context/test/service-rls.test.ts`
+  (12), `modules/location/test/{service-rls,zone-scope-integrity}.test.ts` (14),
+  `modules/health/test/service-rls.test.ts` (18), `modules/support/test/support-business-timeline.test.ts`
+  (9), `modules/agreements/test/agreements-business-timeline.test.ts` (6),
+  `apps/api/test/ua3-business-timeline-e2e.test.ts` (1), `modules/core/test/channel-session-authority.test.ts`
+  (7), `modules/tool-gateway/test/channel-session-continuity-dedupe.test.ts` (1),
+  `modules/core/test/shared-space-authority.test.ts` (3), `modules/tool-gateway/test/home-assistant-critical-action.test.ts`
+  (11).
+- `pnpm -w typecheck` (26/26 pakker) og `pnpm -w lint` (`eslint .`) - begge grønne, ingen nye
+  feil/warnings (2 lint-feil fra parallelle agenters testfiler funnet og rettet FØR denne rapporten).
+- **FULL arbeidsområde-testsuite (`npx vitest run`, ingen filter): 3764/3770 grønt (6 forventet skip,
+  uendret fra tidligere) på 228 testfiler.** ÉN fil (`modules/knowledge/test/rls-role-isolation.test.ts`,
+  urørt av denne sliceen) feilet under full-suite-kjøringen (600s) med en `afterAll`-hook-TIMEOUT
+  (`appPool?.end()`), IKKE en assertion-feil - sannsynlig ressurskonkurranse fra hundrevis av
+  parallelle embedded-Postgres-instanser i én prosess. Isolert re-kjøring: 6/6 grønt på 2.4s -
+  bekreftet flake, IKKE en reell regresjon, rapportert ærlig og eksplisitt.
+- Hemmelighetsskann av full diff: 0 reelle treff (kun Norsk prosa-tekst som inneholder ordet "token"/
+  "password"/"secret" i beskrivende sammenheng, verifisert manuelt; targetert regex mot faktiske
+  nøkkelmønstre i `.ts`/`.sql`-diffen: 0 treff).
+- `git status`/`git diff --stat` gjennomgått manuelt: alle endrede/nye filer innenfor D-130 sitt scope,
+  ingen urelaterte filer rørt, ingen D-108/credential-arbeid startet, ingen issue #68-mutasjon,
+  worker/supervisor urørt.
 
 ## Blokkeringer
 
-Ingen for D-129 selv (ingen credential, ingen ny leverandør, ingen host-avhengighet). Den
-automatiske arkitekt-loopen forblir bevisst PAUSET av Tobias (`JarvisClaudeWorker`/
-`JarvisWorkerSupervisor` deaktivert på PC-en) - INGEN posting til issue #68 i denne økten, per
-eksplisitt instruks. Ingen merge utført eller forsøkt - draft-PR opprettes og venter på uavhengig
-arkitekt-review når kontrollsløyfen gjenopptas.
+Ingen for D-130 selv (ingen credential, ingen ny leverandør, ingen host-avhengighet). To reelle,
+bevisst IKKE rettede funn er logget for fremtidig arbeid (Q-33: kryss-tenant company_id/contact_id-gap
+i Support/Agreements, pre-eksisterende; Q-34: HA-gateway mål-eksistens-sjekk-gap, krever en bredere
+cross-domene-audit av gateway.ts FØR en trygg generisk fiks). Den automatiske arkitekt-loopen forblir
+bevisst PAUSET av Tobias - INGEN posting til issue #68 i denne økten.
 
 ## Neste oppgave
 
-1. **Umiddelbart:** PR #78 (draft) venter på uavhengig arkitekt-review og CI-status på eksakt HEAD
-   (ikke gjenbruk av lokal quality-gate-kjøring som "CI-bevis"). INGEN self-approval/
-   merge under noen omstendighet (D-120/CLAUDE.md, uendret) - kontrollsløyfen er pauset, ingen
-   `ARCHITECT_TASK` postes.
-2. Etter D-129 er merget (av arkitekten/Tobias, ikke av denne økten): re-derivere neste slice fra
-   faktisk repo-/masterplan-status på nytt (ikke anta en fast rekkefølge). Kandidater: rene
-   docs-lukkinger for `OPEN_QUESTIONS.md` Q-29(4) (UA-4 marketing-spend-integrasjon, uavhengig
-   re-bekreftet allerede fullt bygget i DENNE sliceen også) og Q-31(3) (UA-5
-   incident→diagnose→fix, samme) - begge kun dokumentasjonsdrift, ingen ny kode nødvendig. UA-3
-   kriterium 2 (5-domene business-brief-dekning) er nå FERDIG - ingen videre slice gjenstår for
-   selve domenedekningen; en fremtidig BO om LIVE ekstern leverandørtilkobling for noen av de fem
-   domenene er en separat, senere Tobias-provider-beslutning.
-3. Separat, lavere prioritet, uendret fra forrige økt: dokumentasjonslukking for D-126 review-runder
-   G-K (formell D-ID-registrering av allerede-fullført arbeid som kun finnes i issue #68).
+1. **Umiddelbart:** commit/push denne branchen, opprett draft-PR, verifiser CI grønn på eksakt HEAD.
+   INGEN merge/self-approval under noen omstendighet - kontrollsløyfen er pauset, ingen `ARCHITECT_TASK`
+   postes.
+2. Etter D-130 er merget (av arkitekten/Tobias, ikke av denne økten): egen, dedikert sikkerhetsfiks-
+   slice for Q-33 (kryss-tenant `company_id`/`contact_id`-vakt i Support/Agreements, samme mønster som
+   D-119/D-129). Egen, dedikert cross-domene-audit-slice for Q-34 FØR en generisk `gateway.ts`-fiks
+   for mål-eksistens-sjekk vurderes.
+3. Deretter: re-derivere neste STØRSTE TRYGGE SAMMENHENGENDE leveranse fra faktisk repo-/masterplan-
+   status på nytt (ikke anta en fast rekkefølge) - kandidater inkluderer videre UA-8-utvidelser (når
+   fysiske Apple-/leverandørporter åpnes) eller andre gjenstående masterplan-kapabiliteter.

@@ -43,6 +43,8 @@ import { SupportEmailService, SupportService, SupportTransport, runSupportInboxS
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
 import { OperationsService, OperationsTransport } from "@jarvis/operations";
+import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
+import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -224,6 +226,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // reglene) uendret. Ingen ekstern driftsplattform-/ticketing-avhengighet
   // - SAMME lat/enkel-avhengighet-mønster som `ProductTransport`.
   const operationsService = new OperationsService(pool);
+  // UA-8 Personal Digital Twin (D-130): provider-nøytral lokasjon/geofencing
+  // og helse-ingestion - egne tjenester over SAMME runtime-pool, ingen ny
+  // motor. Ingen ToolGateway-handlinger/API-flate lagt til her i denne
+  // sliceen (bevisst utenfor UA-8-kjernens akseptansekriterier) - kun
+  // datamodellen + retensjons-håndhevelsen (se DailyScheduler-sveipene under).
+  const locationService = new LocationService(pool);
+  const healthService = new HealthService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
@@ -743,6 +752,22 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "growth-action-recommendation-sweep", Number(process.env["JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR"] ?? 9)
   ).start(() => runActionRecommendationSweepForAllTenants(pool, growthService).then(() => undefined));
+  // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
+  // for lokasjonsobservasjoner - SAMME reboot-durable DailyScheduler-
+  // mekanisme (eget job_name, egen klokkeslett-env). Trygt å kjøre uten noen
+  // faktiske observasjoner ennå (ingen ekstern lokasjons-leverandør koblet
+  // til i denne sliceen) - sveipet blir da et no-op.
+  new DailyScheduler(
+    pool, "location-retention-sweep", Number(process.env["JARVIS_LOCATION_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() => runLocationRetentionSweepForAllTenants(pool, locationService).then(() => undefined));
+  // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
+  // for helseobservasjoner - SAMME mekanisme/begrunnelse som
+  // location-retention-sweep over. Kjøres i samme tidlige klokkeslett-vindu
+  // (default kl. 02) - begge er rene, uavhengige retensjons-ryddejobber uten
+  // downstream-avhengigheter til andre UA-3/UA-4-sveip.
+  new DailyScheduler(
+    pool, "health-retention-sweep", Number(process.env["JARVIS_HEALTH_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then(() => undefined));
   return deps;
 }
 

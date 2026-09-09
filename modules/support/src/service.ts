@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { BusinessService } from "@jarvis/business";
 import { assertValidTicketTransition, isTerminalTicketStatus, reopenTargetStatus } from "./state-machine.ts";
 import type {
   CreateTicketInput,
@@ -32,10 +33,24 @@ export interface SearchTicketsFilter {
  * ingen Gmail-spesifikk logikk her - se `email-ingress.ts` for normalisering.
  */
 export class SupportService {
-  constructor(private readonly pool: pg.Pool) {}
+  /**
+   * UA-3 AC1 (D-73/Q-25 fiks): `BusinessService` konstrueres internt fra
+   * SAMME `pool` som injiseres her - IKKE et nytt konstruktørparameter -
+   * fordi begge komposisjonsrøttene (`apps/api/src/main.ts`/`worker-main.ts`)
+   * allerede kaller `new SupportService(pool)` med ett argument, og disse
+   * filene eies av andre agenter i denne worktreen (utenfor mitt
+   * eierskapsomraade). `@jarvis/business` er allerede en deklarert
+   * `package.json`-avhengighet av `@jarvis/support` (ingen sirkulær
+   * avhengighet - `@jarvis/business` avhenger ALDRI av `@jarvis/support`).
+   */
+  private readonly business: BusinessService;
+
+  constructor(private readonly pool: pg.Pool) {
+    this.business = new BusinessService(pool);
+  }
 
   async createTicket(tenantId: string, memorySpace: MemorySpace, input: CreateTicketInput): Promise<SupportTicket> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const ticket = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const ticket = await insertTicket(client, tenantId, memorySpace, input);
       await insertEvent(client, tenantId, memorySpace, {
         ticket_id: ticket.ticket_id,
@@ -51,6 +66,11 @@ export class SupportService {
       });
       return ticket;
     });
+    await this.recordTicketTimelineActivity(
+      tenantId, memorySpace, ticket, "external_event",
+      input.initial_summary ?? `Ticket opprettet: ${input.subject}`, "created", input.occurred_at ?? null
+    );
+    return ticket;
   }
 
   async getTicket(tenantId: string, memorySpace: MemorySpace, ticketId: string): Promise<SupportTicket | null> {
@@ -103,7 +123,7 @@ export class SupportService {
     status: TicketStatus,
     actorPersonId?: string
   ): Promise<SupportTicket | null> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const result = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, ticketId);
       if (!current) return null;
       assertValidTicketTransition(current.status, status);
@@ -121,8 +141,17 @@ export class SupportService {
         actor_person_id: actorPersonId ?? null, source_type: null, source_instance_id: null, source_message_id: null,
         canonical_uri: null, metadata: { from: current.status, to: status }, occurred_at: null
       });
-      return updated;
+      return { updated, fromStatus: current.status };
     });
+    if (!result) return null;
+    // UA-3 AC1: statusovergangen er ALLEREDE gyldig-håndhevet/committet over
+    // (state-machine.ts) - denne posten er en RENT additiv tidslinje-speiling,
+    // ALDRI en andre kilde-til-sannhet for selve overgangen.
+    await this.recordTicketTimelineActivity(
+      tenantId, memorySpace, result.updated, "status_change",
+      `Status endret: ${result.fromStatus} -> ${status}`, `status:${status}`
+    );
+    return result.updated;
   }
 
   async setPriority(tenantId: string, memorySpace: MemorySpace, ticketId: string, priority: TicketPriority, actorPersonId?: string): Promise<SupportTicket | null> {
@@ -221,7 +250,7 @@ export class SupportService {
    * (§16 - ikke en LLM-vurdering av om reåpning er riktig).
    */
   async ingestMessage(tenantId: string, memorySpace: MemorySpace, input: IngestMessageInput): Promise<IngestMessageResult> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const result = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       let ticket: SupportTicket | undefined;
       let ticketCreated = false;
       if (input.source_thread_id) {
@@ -274,11 +303,71 @@ export class SupportService {
       );
       return { ticket, event: eventResult.event, ticket_created: ticketCreated, event_created: eventResult.created, reopened };
     });
+    // UA-3 AC1: samme post-commit tidslinje-speiling som createTicket()/
+    // setStatus() - `ticket_created`/`reopened` kan begge trigges her (kanal-
+    // nøytral ingress), ALDRI dupliserte innsatte hvis worker-leveringen
+    // gjentas (§8: `source_thread_id`-oppslaget over gjør denne grenen
+    // idempotent - `ticket_created`/`reopened` blir kun `true` FØRSTE gang).
+    if (result.ticket_created) {
+      await this.recordTicketTimelineActivity(
+        tenantId, memorySpace, result.ticket, "external_event",
+        `Ticket opprettet fra ${input.channel}: ${input.subject}`, "created", input.occurred_at ?? null
+      );
+    }
+    if (result.reopened) {
+      await this.recordTicketTimelineActivity(
+        tenantId, memorySpace, result.ticket, "status_change",
+        "Status endret: ticket gjenåpnet av ny kundemelding", `status:${result.ticket.status}`
+      );
+    }
+    return result;
   }
 
   private async readForUpdate(client: pg.PoolClient, tenantId: string, ticketId: string): Promise<SupportTicket | null> {
     const { rows } = await client.query(`SELECT * FROM support_tickets WHERE tenant_id = $1 AND ticket_id = $2`, [tenantId, ticketId]);
     return (rows[0] as SupportTicket) ?? null;
+  }
+
+  /**
+   * UA-3 akseptansekriterium 1 ("Hva skjer med kunde X?"): speiler ticket-
+   * lifecycle-hendelser inn i `business_activities` (kalt ETTER at
+   * ticket-transaksjonen over er committet - SAMME frakoblede, idempotente
+   * mønster som `BusinessEventSyncService`/`business-event-sync.ts` allerede
+   * bruker for Gmail/Calendar -> `BusinessService.recordActivity()`, ingen
+   * ny mekanisme). En ticket UTEN `company_id`/`contact_id` har ingenting å
+   * feste seg til på tidslinjen - hoppes BEVISST over her (ALDRI en
+   * oppdiktet plassholder-kobling, se D-64/§9: "never silently link the
+   * wrong company"). `external_id` er en stabil, deterministisk nøkkel per
+   * LOGISK hendelse (`{ticket_id}:created` / `{ticket_id}:status:{status}`)
+   * - `recordActivity()` sin EKSISTERENDE `ON CONFLICT (tenant_id,
+   * source_type, source_instance_id, external_id)`-idempotens hindrer derfor
+   * en duplikat rad ved en gjentatt/retried kilde-hendelse (§22), UTEN at
+   * denne funksjonen selv trenger noen egen dedup-logikk. `canonical_uri`
+   * peker TILBAKE til selve ticketen - ALDRI en kopi av meldingsinnhold
+   * (019_business.sql: "Peker til Knowledge/kilde - ALDRI kopi av full
+   * innhold").
+   */
+  private async recordTicketTimelineActivity(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    ticket: Pick<SupportTicket, "ticket_id" | "company_id" | "contact_id">,
+    activityType: "external_event" | "status_change",
+    summary: string,
+    externalIdSuffix: string,
+    occurredAt?: string | null
+  ): Promise<void> {
+    if (!ticket.company_id && !ticket.contact_id) return;
+    await this.business.recordActivity(tenantId, memorySpace, {
+      activity_type: activityType,
+      summary,
+      ...(ticket.company_id ? { company_id: ticket.company_id } : {}),
+      ...(ticket.contact_id ? { contact_id: ticket.contact_id } : {}),
+      source_type: "support_ticket",
+      source_instance_id: "native",
+      external_id: `${ticket.ticket_id}:${externalIdSuffix}`,
+      canonical_uri: `jarvis:support_ticket:${ticket.ticket_id}`,
+      ...(occurredAt ? { occurred_at: occurredAt } : {})
+    });
   }
 }
 

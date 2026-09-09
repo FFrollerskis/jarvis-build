@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { BusinessService } from "@jarvis/business";
 import { assertValidContractTransition, assertValidObligationTransition } from "./state-machine.ts";
 import type {
   AddObligationInput,
@@ -36,10 +37,24 @@ export interface SearchContractsFilter {
  * motpart-tabell/-tjeneste.
  */
 export class AgreementsService {
-  constructor(private readonly pool: pg.Pool) {}
+  /**
+   * UA-3 AC1 (D-73/Q-25 fiks): `BusinessService` konstrueres internt fra
+   * SAMME `pool` som injiseres her - IKKE et nytt konstruktørparameter -
+   * fordi begge komposisjonsrøttene (`apps/api/src/main.ts`/`worker-main.ts`)
+   * allerede kaller `new AgreementsService(pool)` med ett argument, og disse
+   * filene eies av andre agenter i denne worktreen (utenfor mitt
+   * eierskapsomraade). `@jarvis/business` er allerede en deklarert
+   * `package.json`-avhengighet av `@jarvis/agreements` (ingen sirkulær
+   * avhengighet - `@jarvis/business` avhenger ALDRI av `@jarvis/agreements`).
+   */
+  private readonly business: BusinessService;
+
+  constructor(private readonly pool: pg.Pool) {
+    this.business = new BusinessService(pool);
+  }
 
   async createContract(tenantId: string, memorySpace: MemorySpace, input: CreateContractInput): Promise<Contract> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const contract = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const contract = await insertContract(client, tenantId, memorySpace, input);
       await insertEvent(client, tenantId, memorySpace, {
         contract_id: contract.contract_id,
@@ -50,6 +65,10 @@ export class AgreementsService {
       });
       return contract;
     });
+    await this.recordContractTimelineActivity(
+      tenantId, memorySpace, contract, "external_event", `Kontrakt opprettet: ${input.title}`, "created"
+    );
+    return contract;
   }
 
   async getContract(tenantId: string, memorySpace: MemorySpace, contractId: string): Promise<Contract | null> {
@@ -136,7 +155,7 @@ export class AgreementsService {
 
   /** Deterministisk statsovergang håndheves i state-machine.ts - ugyldig overgang kaster, endrer INGENTING. */
   async setStatus(tenantId: string, memorySpace: MemorySpace, contractId: string, status: ContractStatus, actorPersonId?: string): Promise<Contract | null> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const result = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, contractId, true);
       if (!current) return null;
       assertValidContractTransition(current.status, status);
@@ -148,8 +167,16 @@ export class AgreementsService {
         contract_id: contractId, event_type: "status_changed", summary: `Status endret: ${current.status} -> ${status}`,
         actor_person_id: actorPersonId ?? null, metadata: { from: current.status, to: status }
       });
-      return rows[0] as Contract;
+      return { updated: rows[0] as Contract, fromStatus: current.status };
     });
+    if (!result) return null;
+    // UA-3 AC1: samme post-commit, rent additive tidslinje-speiling som
+    // createContract() - se recordContractTimelineActivity() sin kommentar.
+    await this.recordContractTimelineActivity(
+      tenantId, memorySpace, result.updated, "status_change",
+      `Status endret: ${result.fromStatus} -> ${status}`, `status:${status}`
+    );
+    return result.updated;
   }
 
   async setOwner(tenantId: string, memorySpace: MemorySpace, contractId: string, ownerPersonId: string | null, actorPersonId?: string): Promise<Contract | null> {
@@ -231,7 +258,7 @@ export class AgreementsService {
    * (`FOR UPDATE`) for å unngå et race mellom to samtidige versjonsopprettelser.
    */
   async addVersion(tenantId: string, memorySpace: MemorySpace, contractId: string, input: AddVersionInput): Promise<ContractVersion> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+    const result = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, contractId, true);
       if (!current) throw new Error("contract_not_found");
       const { rows: maxRows } = await client.query(
@@ -255,8 +282,16 @@ export class AgreementsService {
         contract_id: contractId, event_type: "version_added", summary: `Versjon ${nextVersion} lagt til: ${input.summary}`,
         actor_person_id: input.created_by_person_id ?? null, metadata: { version_number: nextVersion }
       });
-      return rows[0] as ContractVersion;
+      return { version: rows[0] as ContractVersion, contract: current };
     });
+    // UA-3 AC1: en ny kontraktversjon er et dokument-øyeblikksbilde (§"Peker
+    // til Knowledge/kilde - ALDRI kopi av full innhold") - `activity_type:
+    // "document"` (EKSISTERENDE CHECK-verdi, ingen skjemaendring nødvendig).
+    await this.recordContractTimelineActivity(
+      tenantId, memorySpace, result.contract, "document",
+      `Versjon ${result.version.version_number} lagt til: ${input.summary}`, `version:${result.version.version_number}`
+    );
+    return result.version;
   }
 
   async listVersions(tenantId: string, memorySpace: MemorySpace, contractId: string): Promise<ContractVersion[]> {
@@ -398,6 +433,44 @@ export class AgreementsService {
       [tenantId, contractId]
     );
     return (rows[0] as Contract) ?? null;
+  }
+
+  /**
+   * UA-3 akseptansekriterium 1 ("Hva skjer med kunde X?"): speiler kontrakt-
+   * lifecycle-hendelser inn i `business_activities` (kalt ETTER at
+   * kontrakt-transaksjonen over er committet - SAMME frakoblede, idempotente
+   * mønster som `BusinessEventSyncService`/`business-event-sync.ts` allerede
+   * bruker for Gmail/Calendar -> `BusinessService.recordActivity()`, ingen
+   * ny mekanisme - se samme kommentar i `modules/support/src/service.ts`
+   * sin `recordTicketTimelineActivity()`). En kontrakt UTEN `company_id`/
+   * `contact_id` har ingen motpart å feste seg til på tidslinjen - hoppes
+   * BEVISST over her (ALDRI en oppdiktet plassholder-kobling). `external_id`
+   * er en stabil, deterministisk nøkkel per LOGISK hendelse
+   * (`{contract_id}:created` / `{contract_id}:status:{status}` /
+   * `{contract_id}:version:{version_number}`) - `recordActivity()` sin
+   * EKSISTERENDE `ON CONFLICT`-idempotens hindrer derfor en duplikat rad ved
+   * en gjentatt/retried kilde-hendelse (§22). `canonical_uri` peker TILBAKE
+   * til selve kontrakten - ALDRI en kopi av kontraktinnhold.
+   */
+  private async recordContractTimelineActivity(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    contract: Pick<Contract, "contract_id" | "company_id" | "contact_id">,
+    activityType: "external_event" | "status_change" | "document",
+    summary: string,
+    externalIdSuffix: string
+  ): Promise<void> {
+    if (!contract.company_id && !contract.contact_id) return;
+    await this.business.recordActivity(tenantId, memorySpace, {
+      activity_type: activityType,
+      summary,
+      ...(contract.company_id ? { company_id: contract.company_id } : {}),
+      ...(contract.contact_id ? { contact_id: contract.contact_id } : {}),
+      source_type: "contract",
+      source_instance_id: "native",
+      external_id: `${contract.contract_id}:${externalIdSuffix}`,
+      canonical_uri: `jarvis:contract:${contract.contract_id}`
+    });
   }
 }
 
