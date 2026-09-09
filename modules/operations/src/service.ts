@@ -17,6 +17,44 @@ import type {
   VendorStatus
 } from "./types.ts";
 
+/**
+ * Arkitekt-review MERGE BLOCKER (D-129, PR #78): en enkel FK på en global
+ * ID er IKKE en tenant/space-autorisasjonsgrense - Postgres sin FK-sjekk
+ * kjører med forhøyet privilegium og omgår RLS. Kastes naar et
+ * caller-oppgitt relasjonsmaal (vendor_id/runbook_id/company_id/contact_id)
+ * IKKE finnes i EGEN tenant+memory_space (deterministisk, RLS-scopet
+ * SELECT-sjekk FØR skriving - se `assertVendorInScope`/`assertRunbookInScope`/
+ * `assertCompanyContactInScope` under). De sammensatte
+ * `(tenant_id, memory_space_id, id)`-fremmednøklene i `048_operations.sql`
+ * er en STRUKTURELL backstop for de operations-eide relasjonene (vendor/
+ * runbook/task) - denne feilklassen gir et rent, deterministisk avslag FØR
+ * det i det hele tatt naar databasen, for BÅDE de operations-eide
+ * relasjonene OG business_companies/business_contacts (som IKKE har
+ * sammensatte nøkler - se D-129 i DECISIONS_AND_ASSUMPTIONS.md for
+ * begrunnelsen om hvorfor en tjenestelags-vakt er valgt der i stedet for en
+ * bred, urelatert Business OS-skjemaendring).
+ */
+export class OperationsCrossScopeReferenceError extends Error {
+  constructor(
+    public readonly field: string,
+    public readonly id: string
+  ) {
+    super(`operations_cross_scope_reference:${field}:${id}`);
+    this.name = "OperationsCrossScopeReferenceError";
+  }
+}
+
+/** Kastes naar BÅDE company_id OG contact_id er oppgitt, men kontakten faktisk tilhoerer en ANNEN company. */
+export class OperationsContactCompanyMismatchError extends Error {
+  constructor(
+    public readonly contactId: string,
+    public readonly companyId: string
+  ) {
+    super(`operations_contact_company_mismatch:${contactId}:${companyId}`);
+    this.name = "OperationsContactCompanyMismatchError";
+  }
+}
+
 export interface SearchOperationsTasksFilter {
   status?: OperationsTaskStatus;
   priority?: OperationsTaskPriority;
@@ -45,6 +83,7 @@ export class OperationsService {
 
   async createVendor(tenantId: string, memorySpace: MemorySpace, input: CreateVendorInput): Promise<OperationsVendor> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      await this.assertCompanyContactInScope(client, tenantId, memorySpace, input.company_id, input.contact_id);
       const vendor_id = `ops-vn-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO operations_vendors (vendor_id, tenant_id, memory_space_id, company_id, contact_id, name, category, escalation_contact_person_id, notes)
@@ -94,12 +133,67 @@ export class OperationsService {
     return (rows[0] as OperationsVendor) ?? null;
   }
 
+  /** Kaster `OperationsCrossScopeReferenceError` dersom `vendorId` ikke finnes i EGEN tenant+memory_space. */
+  private async assertVendorInScope(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, vendorId: string): Promise<void> {
+    const { rows } = await client.query(
+      `SELECT 1 FROM operations_vendors WHERE tenant_id = $1 AND memory_space_id = $2 AND vendor_id = $3`,
+      [tenantId, memorySpace, vendorId]
+    );
+    if (rows.length === 0) throw new OperationsCrossScopeReferenceError("vendor_id", vendorId);
+  }
+
+  /** Kaster `OperationsCrossScopeReferenceError` dersom `runbookId` ikke finnes i EGEN tenant+memory_space. */
+  private async assertRunbookInScope(client: pg.PoolClient, tenantId: string, memorySpace: MemorySpace, runbookId: string): Promise<void> {
+    const { rows } = await client.query(
+      `SELECT 1 FROM operations_runbooks WHERE tenant_id = $1 AND memory_space_id = $2 AND runbook_id = $3`,
+      [tenantId, memorySpace, runbookId]
+    );
+    if (rows.length === 0) throw new OperationsCrossScopeReferenceError("runbook_id", runbookId);
+  }
+
+  /**
+   * Arkitekt-review MERGE BLOCKER (D-129, PR #78): `operations_vendors.company_id`/
+   * `contact_id` peker til de EKSISTERENDE `business_companies`/
+   * `business_contacts`-tabellene (INGEN sammensatt nøkkel der - bevisst
+   * unngått bred, urelatert Business OS-skjemaendring). Denne
+   * tjenestelags-vakten er derfor den ENESTE håndhevingen for disse to
+   * relasjonene: begge maa eksistere i EGEN tenant+memory_space, og dersom
+   * BEGGE er oppgitt maa kontakten faktisk tilhøre den oppgitte company-en.
+   */
+  private async assertCompanyContactInScope(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    companyId: string | undefined,
+    contactId: string | undefined
+  ): Promise<void> {
+    if (companyId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT 1 FROM business_companies WHERE tenant_id = $1 AND memory_space_id = $2 AND company_id = $3`,
+        [tenantId, memorySpace, companyId]
+      );
+      if (rows.length === 0) throw new OperationsCrossScopeReferenceError("company_id", companyId);
+    }
+    if (contactId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT company_id FROM business_contacts WHERE tenant_id = $1 AND memory_space_id = $2 AND contact_id = $3`,
+        [tenantId, memorySpace, contactId]
+      );
+      if (rows.length === 0) throw new OperationsCrossScopeReferenceError("contact_id", contactId);
+      if (companyId !== undefined) {
+        const contactCompanyId = (rows[0] as { company_id: string | null }).company_id;
+        if (contactCompanyId !== companyId) throw new OperationsContactCompanyMismatchError(contactId, companyId);
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------
   // Runbooks (§13: "runbooks")
   // ---------------------------------------------------------------------
 
   async createRunbook(tenantId: string, memorySpace: MemorySpace, input: CreateRunbookInput): Promise<OperationsRunbook> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      if (input.vendor_id !== undefined) await this.assertVendorInScope(client, tenantId, memorySpace, input.vendor_id);
       const runbook_id = `ops-rb-${randomUUID()}`;
       const { rows } = await client.query(
         `INSERT INTO operations_runbooks (runbook_id, tenant_id, memory_space_id, vendor_id, title, category, content, owner_person_id)
@@ -163,6 +257,8 @@ export class OperationsService {
 
   async createTask(tenantId: string, memorySpace: MemorySpace, input: CreateOperationsTaskInput): Promise<OperationsTask> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      if (input.vendor_id !== undefined) await this.assertVendorInScope(client, tenantId, memorySpace, input.vendor_id);
+      if (input.runbook_id !== undefined) await this.assertRunbookInScope(client, tenantId, memorySpace, input.runbook_id);
       const task = await insertTask(client, tenantId, memorySpace, input);
       await insertEvent(client, tenantId, memorySpace, {
         task_id: task.task_id,
@@ -311,6 +407,7 @@ export class OperationsService {
       const current = await this.readTaskForUpdate(client, tenantId, taskId, true);
       if (!current) return null;
       if (vendorId === current.vendor_id) return current;
+      if (vendorId !== null) await this.assertVendorInScope(client, tenantId, memorySpace, vendorId);
       const { rows } = await client.query(
         `UPDATE operations_tasks SET vendor_id = $1, updated_at = now() WHERE tenant_id = $2 AND task_id = $3 RETURNING *`,
         [vendorId, tenantId, taskId]
@@ -328,6 +425,7 @@ export class OperationsService {
       const current = await this.readTaskForUpdate(client, tenantId, taskId, true);
       if (!current) return null;
       if (runbookId === current.runbook_id) return current;
+      if (runbookId !== null) await this.assertRunbookInScope(client, tenantId, memorySpace, runbookId);
       const { rows } = await client.query(
         `UPDATE operations_tasks SET runbook_id = $1, updated_at = now() WHERE tenant_id = $2 AND task_id = $3 RETURNING *`,
         [runbookId, tenantId, taskId]
@@ -357,8 +455,8 @@ export class OperationsService {
       let target = escalatedToPersonId ?? null;
       if (target === null && current.vendor_id !== null) {
         const { rows: vendorRows } = await client.query(
-          `SELECT escalation_contact_person_id FROM operations_vendors WHERE tenant_id = $1 AND vendor_id = $2`,
-          [tenantId, current.vendor_id]
+          `SELECT escalation_contact_person_id FROM operations_vendors WHERE tenant_id = $1 AND memory_space_id = $2 AND vendor_id = $3`,
+          [tenantId, memorySpace, current.vendor_id]
         );
         target = (vendorRows[0] as { escalation_contact_person_id: string | null } | undefined)?.escalation_contact_person_id ?? null;
       }

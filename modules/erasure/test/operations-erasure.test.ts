@@ -14,7 +14,7 @@ import { ErasureService } from "../src/erasure-service.ts";
 // Relativ import (IKKE en ny @jarvis/erasure -> @jarvis/operations
 // pakkeavhengighet kun for en testfil) - samme presedens som
 // product-erasure.test.ts sin import av ProductService.
-import { OperationsService } from "../../operations/src/service.ts";
+import { OperationsCrossScopeReferenceError, OperationsService } from "../../operations/src/service.ts";
 
 /**
  * UA-3 Native Jarvis Operations Core (D-129) Q-20/Q-27: erasure av en
@@ -37,6 +37,7 @@ let openLoops: OpenLoopService;
 let business: BusinessService;
 
 const TENANT_A = "tenant-ops-erase-a";
+const TENANT_B = "tenant-ops-erase-b";
 
 function identityFor(tenantId: string): IdentityContext {
   return {
@@ -59,10 +60,11 @@ beforeAll(async () => {
   await adminPool.query("CREATE ROLE jarvis_ops_erasure_test LOGIN PASSWORD 'pw2' NOSUPERUSER NOBYPASSRLS");
   await adminPool.query("GRANT jarvis_app TO jarvis_ops_erasure_test");
   await adminPool.query(`
-    INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}','Ops Erasure Test','business');
+    INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}','Ops Erasure Test','business'), ('${TENANT_B}','Ops Erasure Test B','business');
     INSERT INTO people (person_id, display_name) VALUES ('person-tobias','Tobias');
-    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','${TENANT_A}');
-    INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES ('ms-ops-erase-business','${TENANT_A}','business');
+    INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias','${TENANT_A}'), ('person-tobias','${TENANT_B}');
+    INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES
+      ('ms-ops-erase-business','${TENANT_A}','business'), ('ms-ops-erase-b-business','${TENANT_B}','business');
   `);
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_ops_erasure_test", password: "pw2" });
   embedding = new LocalHashEmbedding();
@@ -252,5 +254,46 @@ describe("H: idempotens - samme request_id kjørt to ganger paa et operations-sc
     expect(second.status).toBe("completed");
     expect(second.idempotent_replay).toBe(true);
     expect(second.record_counts).toEqual(first.record_counts);
+  });
+});
+
+describe("I (arkitekt-review MERGE BLOCKER-tillegg, D-129, review 5148211856, punkt 8): en cross-tenant/cross-space Operations-relasjon kan IKKE opprettes, og erasure fullfoeres UTEN FK-blokkering", () => {
+  it("beviser at et forsoek paa en cross-tenant vendor-kobling avvises FOeR databasen i det hele tatt, og at en gyldig, SAMME-scope oppgave deretter eraseres helt uten FK-brudd", async () => {
+    // Beviser FOeRST at selve angrepsflaten (en cross-tenant Operations-
+    // relasjon) er strukturelt umulig - IKKE bare "det finnes ingen slik
+    // rad i dag" - se scope-integrity.test.ts for den fulle matrisen; dette
+    // er en fokusert regresjon paa SELVE erasure-konsekvensen.
+    const vendorA = await operations.createVendor(TENANT_A, "business", { name: "Erasure regression vendor A" });
+    await expect(
+      operations.createTask(TENANT_B, "business", { title: "Should never exist", vendor_id: vendorA.vendor_id })
+    ).rejects.toThrow(OperationsCrossScopeReferenceError);
+    const tasksB = await operations.listTasks(TENANT_B, "business", "all");
+    expect(tasksB.some((t) => t.title === "Should never exist")).toBe(false);
+
+    // Deretter: en GYLDIG, SAMME-scope driftsoppgave (med linket vendor OG
+    // linket open-loop, akkurat som §B/C/D over) eraseres helt uten NOEN
+    // FK-blokkering fra de nye sammensatte fremmednoeklene i 048_operations.sql.
+    const task = await operations.createTask(TENANT_A, "business", { title: "Erasure regression task", vendor_id: vendorA.vendor_id });
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query("UPDATE operations_tasks SET due_at = now() - interval '5 days' WHERE tenant_id = $1 AND task_id = $2", [TENANT_A, task.task_id])
+    );
+    await openLoops.runSweep(TENANT_A, "business");
+    const linkedBefore = (await openLoops.listOpenLoops(TENANT_A, "business", "all")).find(
+      (l: BusinessOpenLoop) => l.operations_task_id === task.task_id
+    );
+    expect(linkedBefore).toBeDefined();
+
+    const service = new ErasureService(appPool, sovereignPolicy, embedding);
+    const result = await service.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "business" },
+      requestId: `req-ops-erase-scope-regression-${randomUUID()}`,
+      identity: identityFor(TENANT_A)
+    });
+    expect(result.status).toBe("completed"); // Ville rapportert "failed" ved en FK-regresjon fra de nye sammensatte noeklene.
+
+    const taskGone = await operations.getTask(TENANT_A, "business", task.task_id);
+    expect(taskGone).toBeNull();
+    const vendorGone = await operations.getVendor(TENANT_A, "business", vendorA.vendor_id);
+    expect(vendorGone).toBeNull();
   });
 });
