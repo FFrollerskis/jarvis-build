@@ -254,17 +254,57 @@ export class LocationService {
    * Sletter alle `location_observations`-rader for ÉN (tenant, memory_space)
    * hvis `retention_expires_at` har passert. Dette er den FAKTISKE
    * håndhevingen - `retention_expires_at`-kolonnen alene håndhever
-   * ingenting. Returnerer antall slettede rader. Rader UTEN en satt frist
-   * røres ALDRI (skal i praksis ikke forekomme, se `ingestObservation()`,
-   * men behandles bevisst som "ikke forfalt" - fail-safe mot utilsiktet
-   * sletting av data uten kjent policy).
+   * ingenting. Returnerer antall slettede OBSERVASJONER. Rader UTEN en satt
+   * frist røres ALDRI (skal i praksis ikke forekomme, se
+   * `ingestObservation()`, men behandles bevisst som "ikke forfalt" -
+   * fail-safe mot utilsiktet sletting av data uten kjent policy).
+   *
+   * MERGE BLOCKER A (arkitekt-review, PR #79): `location_zone_visits.
+   * source_observation_id` er en NOT NULL sammensatt FK (default RESTRICT)
+   * mot `location_observations` - et rått `DELETE` av en utløpt observasjon
+   * som en gang ÅPNET/LUKKET et sonebesøk ville derfor kastet et
+   * FK-brudd. VALGT retensjonssemantikk for AVLEDET data (samme prinsipp
+   * som filhodet over: fravær av policy skal ALDRI stille bety "behold for
+   * alltid"): et sonebesøk hvis UTLØSENDE observasjon er utløpt ER SELV
+   * utløpt posisjonshistorikk, og slettes SAMMEN med observasjonen - IKKE
+   * gjort nullable/ON DELETE SET NULL, som ville latt besøksrader overleve
+   * som "spøkelser" uten kjent proveniens og latt en sensitiv
+   * posisjonshistorikk-rad stille unndra seg retensjonsvinduet for alltid.
+   * MERK: dette gjelder likt for et PÅGÅENDE besøk (left_at IS NULL) - et
+   * fortsatt åpent besøk hvis inngangsobservasjon er utløpt purges også (det
+   * finnes bevisst ingen "behold pågående besøk for alltid"-unntak her,
+   * samme disiplin som resten av dette domenet).
+   *
+   * Deterministisk ETT-transaksjons-operasjon: de utløpte observasjons-IDene
+   * beregnes ÉN gang (samme sett brukes til begge DELETE-ene under, ingen
+   * ny WHERE-evaluering mot `now()` mellom dem) - `FOR UPDATE` låser radene
+   * mot samtidig `evaluateZoneTransitionsInTransaction`-aktivitet i vinduet.
    */
   async purgeExpiredObservations(tenantId: string, memorySpace: MemorySpace): Promise<number> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: expiredRows } = await client.query(
+        `SELECT observation_id FROM location_observations
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND retention_expires_at IS NOT NULL AND retention_expires_at < now()
+         FOR UPDATE`,
+        [tenantId, memorySpace]
+      );
+      const expiredIds = (expiredRows as Array<{ observation_id: string }>).map((row) => row.observation_id);
+      if (expiredIds.length === 0) return 0;
+
+      // Avledet tilstand FØRST: sonebesøk utløst av en av de utløpende
+      // observasjonene er selv utløpt derivert data (se metodekommentaren
+      // over) - må slettes FØR observasjonene for ikke å treffe
+      // `location_zone_visits_observation_tenant_space_fkey` (RESTRICT).
+      await client.query(
+        `DELETE FROM location_zone_visits
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND source_observation_id = ANY($3::text[])`,
+        [tenantId, memorySpace, expiredIds]
+      );
+
       const { rowCount } = await client.query(
         `DELETE FROM location_observations
-         WHERE tenant_id = $1 AND memory_space_id = $2 AND retention_expires_at IS NOT NULL AND retention_expires_at < now()`,
-        [tenantId, memorySpace]
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND observation_id = ANY($3::text[])`,
+        [tenantId, memorySpace, expiredIds]
       );
       return rowCount ?? 0;
     });

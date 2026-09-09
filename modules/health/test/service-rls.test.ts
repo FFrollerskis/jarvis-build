@@ -60,6 +60,12 @@ beforeAll(async () => {
   await adminPool.query(
     `INSERT INTO people (person_id, display_name) VALUES ('${PERSON_A}', 'Person A'), ('${PERSON_B}', 'Person B')`
   );
+  // Sammensatt (person_id, tenant_id)-medlemskaps-FK mot person_tenants (051_health.sql,
+  // rettet etter arkitekt-review av PR #79/D-130) - PERSON_A maa vaere et faktisk medlem
+  // av BAADE TENANT_A og TENANT_B foer noen observasjon kan skrives for de tenantene.
+  await adminPool.query(
+    `INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${TENANT_A}'), ('${PERSON_A}', '${TENANT_B}')`
+  );
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_hlt_svc_test", password: "pw2" });
   service = new HealthService(appPool);
@@ -126,6 +132,7 @@ describe("C: retention_expires_at beregnes korrekt fra det konfigurerte vinduet"
   it("fravær av en konfigurert policy gir retention_expires_at = NULL (aldri automatisk purget)", async () => {
     const tenantNoPolicy = "tenant-hlt-svc-nopolicy";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantNoPolicy}', 'No Policy', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantNoPolicy}')`);
     const row = await service.ingestObservation(tenantNoPolicy, PERSON_A, validHeartRate());
     expect(row.retention_expires_at).toBeNull();
   });
@@ -133,6 +140,7 @@ describe("C: retention_expires_at beregnes korrekt fra det konfigurerte vinduet"
   it("en konfigurert policy på N dager gir retention_expires_at = observed_at + N dager, eksakt", async () => {
     const tenantId = "tenant-hlt-svc-retention";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'Retention', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
     const policy = await service.setRetentionPolicy(tenantId, { retention_days: 30 });
     expect(policy.retention_days).toBe(30);
 
@@ -157,6 +165,7 @@ describe("D: purgeExpiredObservations sletter KUN rader forbi utløp", () => {
   it("en utløpt rad slettes; en ikke-utløpt OG en uten konfigurert retention (NULL) forblir urørt", async () => {
     const tenantId = "tenant-hlt-svc-purge";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'Purge', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
 
     const expiredId = "health-obs-purge-expired";
     const futureId = "health-obs-purge-future";
@@ -261,6 +270,7 @@ describe("H: HealthMetricSource-adapterkontrakten komponerer ende-til-ende via i
   it("FakeHealthMetricSource -> ingestFromSource() validerer OG skriver alle produserte observasjoner", async () => {
     const tenantId = "tenant-hlt-svc-source";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'Source', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_B}', '${tenantId}')`);
 
     const source = new FakeHealthMetricSource([
       validHeartRate({ observed_at: "2026-09-01T06:00:00.000Z" }),
@@ -280,6 +290,7 @@ describe("H: HealthMetricSource-adapterkontrakten komponerer ende-til-ende via i
   it("sinceMs filtreres av kilden selv - HealthService pålegger INGEN egen filtrering utover det kilden returnerer", async () => {
     const tenantId = "tenant-hlt-svc-source-since";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'SourceSince', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_B}', '${tenantId}')`);
     const source = new FakeHealthMetricSource([
       validHeartRate({ observed_at: "2026-01-01T00:00:00.000Z" }),
       validHeartRate({ observed_at: "2026-05-01T00:00:00.000Z" })

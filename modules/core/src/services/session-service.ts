@@ -24,6 +24,33 @@ export interface SessionPrincipal {
 export class SessionService {
   constructor(private readonly pool: pg.Pool) {}
 
+  /**
+   * Arkitekt-review-fiks (D-130, MERGE BLOCKER 1): den betrodde server-side
+   * oppslagsveien for et allerede-utstedt `session_id` - den eneste måten
+   * `/chat`/`/brief` skal slå opp HVEM en sesjon tilhører fra nå av.
+   *
+   * `session_id` ER selve bæreren-beviset her: den utstedes KUN av
+   * `ChannelSessionAuthority`/`VoiceSessionAuthority`, som BEGGE krever ekte
+   * enhetsbevis (Ed25519-signatur over en engangs-nonce) FØR noen sesjonsrad
+   * i det hele tatt berøres. Et gyldig `session_id` er derfor i seg selv
+   * kryptografisk begrunnet - klienten kan ALDRI velge/gjette en fremmed
+   * sesjon (122-bits tilfeldig UUID), og et forsøk med feil `tenant_id`
+   * finner ingen rad (RLS-scopet søk) i stedet for å lekke andre tenanters
+   * sesjoner. `person_id`/`device_id` returneres HERFRA (server-eid
+   * tilstand) - ALDRI fra noe klienten selv påstår i request-kroppen.
+   */
+  async getActive(tenantId: string, sessionId: string): Promise<SessionPrincipal | null> {
+    return withTenantTransaction(this.pool, tenantId, async (client) => {
+      const result = await client.query(
+        `SELECT person_id, last_device_id AS device_id FROM sessions
+         WHERE tenant_id = $1 AND session_id = $2 AND status = 'active'`,
+        [tenantId, sessionId]
+      );
+      const row = result.rows[0] as { person_id: string; device_id: string } | undefined;
+      return row ? { tenant_id: tenantId, person_id: row.person_id, device_id: row.device_id } : null;
+    });
+  }
+
   async resumeOrCreate(principal: SessionPrincipal, channel: Channel): Promise<SessionRef> {
     return withTenantTransaction(this.pool, principal.tenant_id, async (client) => {
       const existing = await client.query(

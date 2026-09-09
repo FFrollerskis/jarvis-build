@@ -7,7 +7,7 @@ import pg from "pg";
 import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ContextBuilder, IdentityService, MessageStore, SessionService, createPool, runMigrations
+  ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionService, createPool, runMigrations
 } from "@jarvis/core";
 import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
@@ -151,9 +151,16 @@ beforeAll(async () => {
   const taskService = new TaskService(appPool, queue, policy);
   const worker = new InProcessWorker(queue, 60);
 
+  const identityService = new IdentityService(appPool);
+  const sessionService = new SessionService(appPool);
+  const deviceService = new DeviceService(appPool);
   server = createApiServer({
-    identity: new IdentityService(appPool),
-    sessions: new SessionService(appPool),
+    identity: identityService,
+    sessions: sessionService,
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `ApiDeps.channelAuthority`
+    // er nå påkrevd - strukturelt nødvendig her, ikke brukt av denne testens
+    // `/deployments/ingest/github`-fokus.
+    channelAuthority: new ChannelSessionAuthority({ devices: deviceService, sessions: sessionService, identity: identityService }),
     policy,
     worker,
     tasks: taskService,

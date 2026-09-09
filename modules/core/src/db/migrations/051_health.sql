@@ -84,6 +84,16 @@ CREATE POLICY health_retention_policies_space ON health_retention_policies AS RE
 -- (mikrosekund-oppløsning på `observed_at`/`recorded_at` er IKKE alltid nok
 -- til å garantere en unik/deterministisk rekkefølge under samtidige
 -- innsettinger).
+-- RETTET etter ekte arkitekt-review av PR #79 (D-130), MERGE BLOCKER: en
+-- ENKEL `person_id text REFERENCES people (person_id)` beviser KUN at
+-- personen eksisterer GLOBALT, ALDRI at personen faktisk er MEDLEM av
+-- tenanten raden selv hevder å tilhøre (`tenant_id`-kolonnen under) - SAMME
+-- feil, samme retting, som `context_observations` (049_context_engine.sql,
+-- se den migrasjonens kommentar for full begrunnelse). `FOREIGN KEY
+-- (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id)`
+-- under gjør medlemskap i tenanten til en DB-håndhevet garanti - RLS alene
+-- (kun `tenant_id`-basert) ville IKKE fanget et (person, tenant)-par uten
+-- faktisk medlemskap.
 CREATE TABLE health_metric_observations (
   seq                  bigserial UNIQUE,
   observation_id       text PRIMARY KEY,
@@ -91,7 +101,7 @@ CREATE TABLE health_metric_observations (
   -- Strukturell garanti (se migrasjons-kommentaren over) - IKKE bare en
   -- DEFAULT: helsedata kan ALDRI havne i et annet memory space enn 'health'.
   memory_space_id      text NOT NULL DEFAULT 'health' CHECK (memory_space_id = 'health'),
-  person_id            text NOT NULL REFERENCES people (person_id),
+  person_id            text NOT NULL,
   -- BEVISST SMALT MVP-sett (v1) - se migrasjons-kommentaren over. IKKE et
   -- forsøk på å dekke hele Apple HealthKit-ontologien.
   metric_type          text NOT NULL CHECK (metric_type IN ('heart_rate', 'steps', 'sleep_duration_minutes', 'weight_kg')),
@@ -112,7 +122,10 @@ CREATE TABLE health_metric_observations (
   recorded_at          timestamptz NOT NULL DEFAULT now(),
   -- Beregnet VED INNSETTING fra `health_retention_policies` (se over) - NULL
   -- inntil eieren har konfigurert et retention-vindu for tenanten.
-  retention_expires_at timestamptz
+  retention_expires_at timestamptz,
+  -- Sammensatt medlemskaps-FK (se migrasjons-kommentaren over) - erstatter
+  -- den tidligere enkle `people`-FK-en på `person_id` alene.
+  FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id)
 );
 CREATE INDEX health_metric_observations_lookup_idx
   ON health_metric_observations (tenant_id, person_id, metric_type, observed_at DESC);

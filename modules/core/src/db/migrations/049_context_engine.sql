@@ -44,17 +44,27 @@
 -- innhold (samme pointer-not-payload-prinsipp som
 -- `operations_tasks.source_instance_id`/`business_activities.canonical_uri`).
 --
--- Ingen sammensatt FK trengs her (D-129-lærdommen gjelder FK-SHAPED
--- relasjoner MELLOM to tenant/space-skopede tabeller): `person_id` er en
--- ENKEL FK mot den globale, ikke-tenant-skopede `people`-tabellen (SAMME
--- mønster som `devices.person_id`/`operations_tasks.owner_person_id`), og
--- `source_instance_id` er en LØS tekst-pekerkolonne, IKKE en ekte
--- fremmednøkkel mot noen annen kanonisk tabell (samme mønster som
--- `business_activities.external_id`).
+-- RETTET etter ekte arkitekt-review av PR #79 (D-130), MERGE BLOCKER: en
+-- ENKEL `person_id text REFERENCES people (person_id)` beviser KUN at
+-- personen eksisterer GLOBALT, ALDRI at personen faktisk er MEDLEM av
+-- tenanten raden selv hevder å tilhøre (`tenant_id`-kolonnen under). Uten en
+-- sammensatt FK kunne en applikasjonsfeil - eller et fremtidig rått INSERT -
+-- attributert en observasjon til et (person, tenant)-par personen IKKE har
+-- noe medlemskap i, og RLS alene (som kun sjekker `tenant_id` mot sesjonens
+-- `jarvis.tenant_id`) ville IKKE fanget det. `person_tenants`
+-- (001_identity.sql, `PRIMARY KEY (person_id, tenant_id)`) er den kanoniske
+-- medlemskapstabellen - SAMME "strukturelt, ikke konvensjonelt"-lærdom som
+-- D-129 krevde for FK-SHAPED relasjoner MELLOM to tenant-skopede tabeller
+-- (048_operations.sql), nå riktig anvendt her: `FOREIGN KEY (person_id,
+-- tenant_id) REFERENCES person_tenants (person_id, tenant_id)` under gjør
+-- medlemskap til en DB-håndhevet garanti, ikke bare en antakelse i
+-- applikasjonskoden. `source_instance_id` forblir en LØS tekst-pekerkolonne,
+-- IKKE en ekte fremmednøkkel mot noen annen kanonisk tabell (samme mønster
+-- som `business_activities.external_id`).
 CREATE TABLE context_observations (
   observation_id      text PRIMARY KEY,
   tenant_id            text NOT NULL REFERENCES tenants (tenant_id),
-  person_id            text NOT NULL REFERENCES people (person_id),
+  person_id            text NOT NULL,
   memory_space_id      text NOT NULL CHECK (memory_space_id IN ('personal','business','project','health','home','guest','shared')),
   dimension            text NOT NULL CHECK (dimension IN ('place','device','meeting','activity')),
   value                jsonb NOT NULL,
@@ -67,6 +77,9 @@ CREATE TABLE context_observations (
   observed_at          timestamptz NOT NULL,
   created_at           timestamptz NOT NULL DEFAULT now(),
   updated_at           timestamptz NOT NULL DEFAULT now(),
+  -- Sammensatt medlemskaps-FK (se migrasjons-kommentaren over) - erstatter
+  -- den tidligere enkle `people`-FK-en på `person_id` alene.
+  FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id),
   -- Ferskhetsbevisst "gjeldende tilstand"-modell (se filhode): ÉN rad per
   -- (tenant, person, space, dimensjon) - `ContextEngine.recordObservation()`
   -- skriver via `ON CONFLICT ... DO UPDATE` mot nettopp denne nøkkelen.

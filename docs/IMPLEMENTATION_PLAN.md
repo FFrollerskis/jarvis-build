@@ -3883,6 +3883,33 @@ feilet på en `afterAll`-hook-timeout under full-suite-kjøring, bekreftet flake
 (6/6 på 2.4s). Draft-PR, ikke merget, ingen self-approval, ingen posting til issue #68. Full detalj:
 D-130 i DECISIONS_AND_ASSUMPTIONS.md.
 
+#### D-130 arkitekt-review-herdingsrunde (2026-09-09) → D-131
+
+Uavhengig arkitekt-review (REVIEW_ID=5149129191, repo-eier, ikke Claude selv) fant fem MERGE BLOCKERS
+mot faktisk kode/tester/CI/sikkerhet på PR #79 sin da-pushede HEAD. Rettet som ÉN sammenhengende
+herdingsrunde på SAMME PR/branch, ikke mikro-slices: (1) `ChannelSessionAuthority` koblet inn på den
+FAKTISKE `/chat`/`/brief`-produksjonsstien via ny `POST /session/authorize`-rute - slank
+sesjonsbasert `/chat`/`/brief`-kropp (`session_id`/`tenant_id`/`memory_space`/`channel`/`message`),
+`person_id`/`device_id`/`auth_strength` fjernet fra kroppen helt, server slår opp person/enhet fra
+sesjonsraden via ny `SessionService.getActive()`; mobil/web/voice-gateway-klienter wired til den nye
+kontrakten; ny ekte API-komposisjon-sikkerhetstest (`session-authority-e2e.test.ts`, 8 tester) beviser
+kanalbytte-kontinuitet OG null sesjonsmutasjon på ugyldig/kryss-person/kryss-tenant/replayed bevis.
+(2) UA-3 kriterium 1-tidslinjeskrivingen gjort atomisk (`recordActivityInTransaction()`, samme
+transaksjon som ticket/kontrakt-raden, ekte feilinjeksjonsbevist rollback). (3) Q-33 lukket NÅ (var
+bevisst utsatt i D-130, korrigert av reviewen siden D-130 selv gjorde gapet relevant) -
+`assertCompanyContactInScope()` i Support/Agreements. (4) Person/tenant-integritet for alle fem nye
+UA-8-tabeller - sammensatt FK mot `person_tenants`, `location_zone_visits` sine D-129-mønster-FKer
+utvidet til å inkludere `person_id`. (5) Location-retensjon FK-trygg (avhengige visitter purges
+sammen med utløpte observasjoner) og observerbar (sveip-feil logges/telles strukturert, aldri
+svelget stille) - health-sveipet fikk samme observability-fiks. (6) Q-20 person-erasure utvidet med
+alle fire nye Personal-Twin-tabeller (var kun `context_observations` i D-130). Full arbeidsområde-
+testsuite kjørt to ganger: 235/235 filer, 3820/3820 tester grønt (fant og rettet en reell D-124-
+migrasjonsencoding-feil underveis - U+2194 i `050_location.sql`; én urelatert embedded-Postgres-flake
+i `modules/knowledge`, bekreftet ved isolert re-kjøring). `pnpm -w typecheck`/`pnpm -w lint` rent.
+Q-34 bevisst IKKE rørt (reviewen selv sa eksplisitt vent på en dedikert cross-domene-audit). Draft-PR
+uendret, ikke merget, ingen self-approval, ingen posting til issue #68. Full detalj: D-131 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

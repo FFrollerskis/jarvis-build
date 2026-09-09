@@ -381,13 +381,17 @@ describe("D-123 / Q-32 punkt 2: server-side memory-space-autoritet i voice-trans
     await client.speakOneTurn();
     await client.waitFor("reply");
 
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `session_id` er nå med -
+    // grant-en ER selve beviset for at en gyldig `/chat`-sesjon finnes, og
+    // `server.ts` setter den nå på identiteten den bygger fra grant-en.
     expect(core.seenIdentity[0]).toEqual({
       person_id: GRANTED_IDENTITY.person_id,
       tenant_id: GRANTED_IDENTITY.tenant_id,
       device_id: GRANTED_IDENTITY.device_id,
       memory_space: GRANTED_IDENTITY.memory_space,
       channel: "voice",
-      provider: "anthropic"
+      provider: "anthropic",
+      session_id: GRANTED_IDENTITY.session_id
     });
     // Ingen av angriperens påstander overlevde.
     expect(core.seenIdentity[0]?.person_id).not.toBe(CLAIMED.person_id);

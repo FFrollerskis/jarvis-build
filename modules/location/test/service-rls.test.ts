@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { DEFAULT_RETENTION_DAYS, LocationService } from "../src/service.ts";
+import { runLocationRetentionSweepForAllTenants } from "../src/sweep.ts";
 
 /**
  * UA-8 Personal Digital Twin - Native Jarvis Location/Geofencing Core:
@@ -48,6 +49,18 @@ beforeAll(async () => {
     `INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}', 'Location Svc A', 'person'), ('${TENANT_B}', 'Location Svc B', 'person')`
   );
   await adminPool.query(`INSERT INTO people (person_id, display_name) VALUES ('${PERSON_A}', 'Person A'), ('${PERSON_B}', 'Person B')`);
+  // MERGE BLOCKER B (arkitekt-review, PR #79): `location_zones`/
+  // `location_observations`/`location_zone_visits.person_id` er nå en
+  // sammensatt FK mot `person_tenants (person_id, tenant_id)`, IKKE en
+  // enkel `people`-FK - PERSON_A må derfor være et EKTE registrert medlem av
+  // TENANT_A (via `person_tenants`) før noen av denne filens
+  // `LocationService`-kall kan sette inn en rad, ellers 23503.
+  await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${TENANT_A}')`);
+  // Trengs KUN av den nye sweep-baserte "H"-testen under (egen tenant, egen
+  // memory_spaces-katalograd for 'health' - se den testen for begrunnelse).
+  await adminPool.query(
+    `INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES ('ms-loc-svc-a-health', '${TENANT_A}', 'health')`
+  );
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_loc_svc_test", password: "pw2" });
   service = new LocationService(appPool);
@@ -215,5 +228,94 @@ describe("E/F: tenant-/memory-space-isolasjon (RLS)", () => {
     } finally {
       client.release();
     }
+  });
+});
+
+describe("H: MERGE BLOCKER A - retensjonspurge er FK-trygg for AVLEDEDE sonebesøk (regresjon)", () => {
+  it("purgeExpiredObservations sletter en utløpt observasjon OG dens LUKKEDE avledede besøk UTEN FK-brudd, ingen svelget feil", async () => {
+    await service.setRetentionPolicy(TENANT_A, "health", { retention_days: 1 });
+
+    const zone = await service.createZone(TENANT_A, "health", {
+      person_id: PERSON_A, name: "Blocker A sone (lukket)", center_lat: HOME_LAT, center_lon: HOME_LON, radius_meters: 200
+    });
+    // Begge observasjoner ligger LANGT forbi det 1-dags retensjonsvinduet -
+    // "enter" ÅPNER besøket, "leave" LUKKER det - før purge kjøres.
+    const enter = await service.ingestObservation(TENANT_A, "health", {
+      person_id: PERSON_A, source_type: "device", lat: HOME_LAT, lon: HOME_LON,
+      observed_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+    });
+    const leave = await service.ingestObservation(TENANT_A, "health", {
+      person_id: PERSON_A, source_type: "device", lat: AWAY_LAT, lon: AWAY_LON,
+      observed_at: new Date(Date.now() - 9 * 24 * 60 * 60 * 1000).toISOString()
+    });
+
+    const visitsBefore = await service.listZoneVisits(TENANT_A, "health", PERSON_A, { zone_id: zone.zone_id });
+    expect(visitsBefore).toHaveLength(1);
+    expect(visitsBefore[0]!.source_observation_id).toBe(enter.observation_id);
+    expect(visitsBefore[0]!.left_at).not.toBeNull();
+
+    // FØR fiksen kastet dette et 23503 FK-brudd (location_zone_visits_
+    // observation_tenant_space_fkey, RESTRICT) - MÅ nå fullføre rent.
+    await expect(service.purgeExpiredObservations(TENANT_A, "health")).resolves.toBeGreaterThanOrEqual(2);
+
+    const { rows: obsRows } = await adminPool.query(
+      `SELECT observation_id FROM location_observations WHERE observation_id = ANY($1::text[])`,
+      [[enter.observation_id, leave.observation_id]]
+    );
+    expect(obsRows).toHaveLength(0);
+
+    const { rows: visitRows } = await adminPool.query(
+      `SELECT visit_id FROM location_zone_visits WHERE visit_id = $1`,
+      [visitsBefore[0]!.visit_id]
+    );
+    expect(visitRows).toHaveLength(0);
+  });
+
+  it("et FORTSATT ÅPENT besøk hvis inngangsobservasjon er utløpt purges også (ingen 'behold pågående besøk for alltid'-unntak)", async () => {
+    const zone = await service.createZone(TENANT_A, "health", {
+      person_id: PERSON_A, name: "Blocker A sone (åpen)", center_lat: HOME_LAT, center_lon: HOME_LON, radius_meters: 200
+    });
+    await service.ingestObservation(TENANT_A, "health", {
+      person_id: PERSON_A, source_type: "device", lat: HOME_LAT, lon: HOME_LON,
+      observed_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+    });
+    const openVisits = await service.listZoneVisits(TENANT_A, "health", PERSON_A, { zone_id: zone.zone_id, open_only: true });
+    expect(openVisits).toHaveLength(1);
+
+    await expect(service.purgeExpiredObservations(TENANT_A, "health")).resolves.toBeGreaterThanOrEqual(1);
+
+    const { rows } = await adminPool.query(`SELECT visit_id FROM location_zone_visits WHERE visit_id = $1`, [openVisits[0]!.visit_id]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("runLocationRetentionSweepForAllTenants (den EKTE scheduler-inngangen) kjører samme håndhevelse og rapporterer den STRUKTURERT (ingen svelget feil)", async () => {
+    await service.setRetentionPolicy(TENANT_A, "health", { retention_days: 1 });
+    const zone = await service.createZone(TENANT_A, "health", {
+      person_id: PERSON_A, name: "Blocker A sone (sweep)", center_lat: HOME_LAT, center_lon: HOME_LON, radius_meters: 200
+    });
+    const enter = await service.ingestObservation(TENANT_A, "health", {
+      person_id: PERSON_A, source_type: "device", lat: HOME_LAT, lon: HOME_LON,
+      observed_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString()
+    });
+    const visitsBefore = await service.listZoneVisits(TENANT_A, "health", PERSON_A, { zone_id: zone.zone_id });
+    expect(visitsBefore).toHaveLength(1);
+
+    const summary = await runLocationRetentionSweepForAllTenants(adminPool, service);
+    // Strukturert sammendrag: INGEN feilet (tenant, space) - purge fullførte
+    // for TENANT_A/'health' (og alle andre (tenant, space)-par denne
+    // testfilens embedded Postgres har, uten unntak).
+    expect(summary.failed).toEqual([]);
+    expect(summary.succeeded).toBeGreaterThanOrEqual(1);
+
+    const { rows: obsRows } = await adminPool.query(
+      `SELECT 1 FROM location_observations WHERE observation_id = $1`,
+      [enter.observation_id]
+    );
+    expect(obsRows).toHaveLength(0);
+    const { rows: visitRows } = await adminPool.query(
+      `SELECT 1 FROM location_zone_visits WHERE visit_id = $1`,
+      [visitsBefore[0]!.visit_id]
+    );
+    expect(visitRows).toHaveLength(0);
   });
 });

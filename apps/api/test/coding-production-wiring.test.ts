@@ -8,7 +8,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { IdentityService, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { ChannelSessionAuthority, DeviceService, IdentityService, SessionService, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import type { CodingAgentAdapter, CodingAgentExec } from "@jarvis/tasks";
 import {
@@ -154,9 +154,16 @@ beforeAll(async () => {
 
   const trace = new MemoryTraceSink();
   const gateway = new ModelGateway({ pool: appPool, trace, providers: [new ScriptedAdapter(() => "ok")] });
+  const identityService = new IdentityService(appPool);
+  const sessionService = new SessionService(appPool);
+  const deviceService = new DeviceService(appPool);
   server = createApiServer({
-    identity: new IdentityService(appPool),
-    sessions: new SessionService(appPool),
+    identity: identityService,
+    sessions: sessionService,
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `ApiDeps.channelAuthority`
+    // er nå påkrevd (ikke brukt av denne testens `/tasks/submit`-fokus, men
+    // strukturelt nødvendig for å konstruere en gyldig `ApiDeps`).
+    channelAuthority: new ChannelSessionAuthority({ devices: deviceService, sessions: sessionService, identity: identityService }),
     policy,
     worker,
     tasks: taskService,

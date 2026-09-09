@@ -33,8 +33,29 @@ import type { TtsAdapter } from "./tts.ts";
 export class HttpCoreClient implements CoreClient {
   constructor(private readonly baseUrl: string) {}
 
+  /**
+   * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat` godtar ikke lenger
+   * hele `VoiceIdentity`-objektet - den slanke kroppen (`session_id`,
+   * `tenant_id`, `memory_space`, `channel`, `message`, `provider?`) er den
+   * ENESTE gyldige formen (se `ChatBody` i apps/api/src/server.ts).
+   * `identity.session_id` finnes KUN når denne talesesjonen faktisk kommer
+   * fra en vellykket `/voice/session/authorize` - er den `undefined` (den
+   * ubeviste/`CLIENT_ASSERTED`-stien), kastes en tydelig feil FØR noe
+   * HTTP-kall gjøres, i stedet for å sende en kropp `/chat` uansett ville
+   * avvist med et forvirrende `403`.
+   */
   private body(identity: VoiceIdentity, message: string): string {
-    return JSON.stringify({ ...identity, message });
+    if (identity.session_id === undefined) {
+      throw new Error("voice_session_required");
+    }
+    return JSON.stringify({
+      session_id: identity.session_id,
+      tenant_id: identity.tenant_id,
+      memory_space: identity.memory_space,
+      channel: identity.channel,
+      message,
+      ...(identity.provider !== undefined ? { provider: identity.provider } : {})
+    });
   }
 
   /**
@@ -322,6 +343,14 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         // påvirke rutingen - tillitsnivået er et eget argument - men å
         // videresende dem i det hele tatt motsier prinsippet om at
         // klientfelter er bevismateriale og ikke tilstand.
+        //
+        // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `session_id` settes
+        // BEVISST IKKE her - denne stien har ingen bevist enhet, og et
+        // `session_id` finnes derfor ikke. Lokal STT/TTS fungerer fortsatt
+        // (D-122 regel 1), men Core sin `/chat` (LLM/verktøy/minne) er nå
+        // strukturelt uoppnåelig herfra - `HttpCoreClient` kaster
+        // `voice_session_required` FØR noe HTTP-kall, som `runTurn()` allerede
+        // fanger og rapporterer som `core_error`.
         startSession(
           {
             person_id: claimed.person_id,
@@ -388,7 +417,12 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           memory_space: grant.memory_space,
           channel: "voice",
           // §33: ren LLM-provider-preferanse, ikke et identitets-/autoritetsfelt.
-          ...(claimed?.provider !== undefined ? { provider: claimed.provider } : {})
+          ...(claimed?.provider !== undefined ? { provider: claimed.provider } : {}),
+          // D-130 arkitekt-review MERGE BLOCKER 1-fiks: den ENESTE stien der
+          // `session_id` settes - enheten har faktisk bevist besittelse via
+          // `/voice/session/authorize`, så grant-en sin `session_id` er en
+          // ekte, server-utstedt sesjon `/chat` godtar.
+          session_id: grant.session_id
         },
         voiceAuthorityFromGrant(grant, Date.now())
       );

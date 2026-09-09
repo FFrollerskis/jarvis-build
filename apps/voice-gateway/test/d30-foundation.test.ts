@@ -563,8 +563,11 @@ describe("HttpCoreClient (§12/§24/§33): SSE-parsing, abort og provider-overri
     );
     const client = new HttpCoreClient("http://core");
     const seen: CoreStreamEvent[] = [];
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `HttpCoreClient` krever nå
+    // `identity.session_id` (bevist sti) FØR den sender noe til `/chat` -
+    // uten den kastes `voice_session_required` FØR fetch() i det hele tatt kalles.
     const reply = await client.chatStream(
-      { ...identity, provider: "anthropic" },
+      { ...identity, provider: "anthropic", session_id: "sess-http-core-client-test" },
       "hei",
       (e) => seen.push(e)
     );
@@ -591,8 +594,10 @@ describe("HttpCoreClient (§12/§24/§33): SSE-parsing, abort og provider-overri
       })
     );
     const client = new HttpCoreClient("http://core");
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: samme grunn som testen over
+    // - `session_id` må være satt for at HttpCoreClient skal nå fetch() i det hele tatt.
     const err = await client
-      .chatStream(identity, "hei", () => undefined, controller.signal)
+      .chatStream({ ...identity, session_id: "sess-http-core-client-test" }, "hei", () => undefined, controller.signal)
       .then(() => null)
       .catch((e: unknown) => e);
     expect((err as Error).name).toBe("AbortError");

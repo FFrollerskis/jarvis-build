@@ -33,11 +33,18 @@
   const form = document.getElementById("form");
   const input = document.getElementById("input");
 
-  // Dev-identitet (fase 3): enhetsautentisering kommer med kanalene i senere faser.
+  // Dev-identitet (fase 3): enhetsautentisering er nå faktisk koblet til for
+  // DENNE dev-siden også (Ed25519 via Web Crypto, se setupDeviceSession()
+  // under) - `/chat` godtar ikke lenger en bar klient-påstått identitet, kun
+  // et sesjons-ID fra en bevist enhet. Fortsatt en lokal, enkeltbruker
+  // dev-demo - ingen ekte multi-enhet-/multi-bruker-onboarding her.
   const identity = {
     person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
     memory_space: "personal", channel: "web"
   };
+
+  /** Betrodd sesjons-ID fra en vellykket /session/authorize - satt av setupDeviceSession(). */
+  let sessionId = null;
 
   function add(cls, text) {
     const el = document.createElement("div");
@@ -48,6 +55,99 @@
     return el;
   }
 
+  function base64FromBuffer(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  /** SPKI DER → PEM, 64 tegn per linje - speiler EKSAKT DeviceKeys.publicKeyPem() i JarvisClient.swift. */
+  function pemFromSpki(spkiBuffer) {
+    const b64 = base64FromBuffer(spkiBuffer);
+    const lines = b64.match(/.{1,64}/g) || [];
+    return "-----BEGIN PUBLIC KEY-----\n" + lines.join("\n") + "\n-----END PUBLIC KEY-----\n";
+  }
+
+  /**
+   * Enhetsnøkkel i localStorage (JWK, Ed25519). Rundtrippen JWK → JWK er
+   * enklere enn rå PKCS8 i nettleseren, og JWK for Ed25519 bærer allerede den
+   * offentlige komponenten (`x`) sammen med den private (`d`), så vi kan
+   * rekonstruere en offentlig nøkkel fra kun det lagrede private JWK-et.
+   */
+  async function loadOrCreateDeviceKey() {
+    const stored = localStorage.getItem("jarvis.devicekey");
+    if (stored) {
+      const jwk = JSON.parse(stored);
+      const privateKey = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+      const publicKey = await crypto.subtle.importKey(
+        "jwk", { kty: "OKP", crv: "Ed25519", x: jwk.x }, { name: "Ed25519" }, true, ["verify"]
+      );
+      return { privateKey, publicKey };
+    }
+    const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    localStorage.setItem("jarvis.devicekey", JSON.stringify(jwk));
+    return { privateKey: pair.privateKey, publicKey: pair.publicKey };
+  }
+
+  /**
+   * Registrerer enheten (idempotent, samme mønster som JarvisClient.swift sin
+   * registerDevice()) og beviser besittelse via /devices/challenge →
+   * /session/authorize, som setter det betrodde `sessionId` over. Kastes
+   * videre til kalleren (se bunnen av filen) - siden skal ALDRI late som den
+   * er autorisert når den ikke er det.
+   */
+  async function setupDeviceSession() {
+    const { privateKey, publicKey } = await loadOrCreateDeviceKey();
+    const pem = pemFromSpki(await crypto.subtle.exportKey("spki", publicKey));
+
+    try {
+      await fetch("/devices/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          identity: { ...identity, session_id: "sess-device-setup", auth_strength: "active" },
+          device: { device_id: identity.device_id, kind: "web", public_key_pem: pem }
+        })
+      });
+    } catch (err) {
+      // Blokkerer ikke UI-et - challenge/authorize under feiler uansett tydelig hvis registrering faktisk manglet.
+      console.error("devices/register feilet", err);
+    }
+
+    const challengeRes = await fetch("/devices/challenge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: identity.device_id })
+    });
+    if (!challengeRes.ok) throw new Error("devices/challenge: " + challengeRes.status);
+    const { challenge } = await challengeRes.json();
+    const signature = base64FromBuffer(
+      await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(challenge))
+    );
+
+    const authRes = await fetch("/session/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        channel: identity.channel, person_id: identity.person_id, tenant_id: identity.tenant_id,
+        device_id: identity.device_id, memory_space: identity.memory_space,
+        device_proof: { challenge, signature }
+      })
+    });
+    const authBody = await authRes.json();
+    if (!authRes.ok || !authBody.ok) {
+      throw new Error("session/authorize: " + (authBody.reason || authRes.status));
+    }
+    sessionId = authBody.session_id;
+  }
+
+  const sessionReady = setupDeviceSession();
+  sessionReady.catch((err) => {
+    add("jarvis", "Autorisering feilet: " + err.message);
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const message = input.value.trim();
@@ -56,10 +156,23 @@
     add("user", message);
     const reply = add("jarvis", "…");
     try {
+      await sessionReady;
+    } catch (err) {
+      reply.textContent = "Autorisering feilet: " + err.message;
+      return;
+    }
+    if (!sessionId) {
+      reply.textContent = "Ikke autorisert ennå - prøv igjen om et øyeblikk.";
+      return;
+    }
+    try {
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "text/event-stream" },
-        body: JSON.stringify({ ...identity, message })
+        body: JSON.stringify({
+          session_id: sessionId, tenant_id: identity.tenant_id, memory_space: identity.memory_space,
+          channel: identity.channel, message
+        })
       });
       if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); return; }
       reply.textContent = "";

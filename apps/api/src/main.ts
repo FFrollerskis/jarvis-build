@@ -1,5 +1,6 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import {
+  ChannelSessionAuthority,
   ContextBuilder,
   DeviceService,
   IdentityService,
@@ -521,6 +522,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     identity: identityService,
     devices: deviceService,
     voiceAuthority: new VoiceSessionAuthority({
+      devices: deviceService,
+      sessions: sessionService,
+      identity: identityService
+    }),
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: SAMME delte instanser som
+    // `voiceAuthority` over (D-123-delingsdisiplinen - `DeviceService` holder
+    // utstedte challenges in-memory, så en egen instans her ville aldri
+    // gjenkjent en nonce utstedt av `/devices/challenge`/`/session/authorize`).
+    channelAuthority: new ChannelSessionAuthority({
       devices: deviceService,
       sessions: sessionService,
       identity: identityService

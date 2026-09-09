@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +8,8 @@ import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ContextBuilder, IdentityService, MessageStore, PgApprovalStore, SessionService, createPool, runMigrations
+  ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, PgApprovalStore,
+  SessionService, VoiceSessionAuthority, createPool, runMigrations
 } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -29,6 +31,18 @@ let voiceServer: ReturnType<typeof createVoiceGateway>;
 let coreUrl: string;
 let voiceUrl: string;
 const journal = new UtteranceJournal();
+/**
+ * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `dev-web` sitt ekte Ed25519-
+ * nøkkelpar (registrert med `public_key_pem` i seed-fasen under). `/chat`
+ * krever nå et bevist `session_id` - denne testfilen kan derfor ikke lenger
+ * nå Core via en selv-oppgitt identitet, og må faktisk bevise enheten via
+ * `/devices/challenge` + `/session/authorize` (tekst) og
+ * `/voice/session/authorize` (tale) FØR noen tur som forventer et ekte
+ * Core-svar. Samme mønster som `modules/core/test/channel-session-authority.test.ts`.
+ */
+const deviceKeys = generateKeyPairSync("ed25519");
+/** `DeviceService`-instansen delt med `apiServer` sine deps (samme delingsdisiplin som main.ts). */
+let devices: DeviceService;
 
 const identity = {
   person_id: "person-tobias",
@@ -36,6 +50,26 @@ const identity = {
   device_id: "dev-web",
   memory_space: "personal"
 };
+
+/** Et gyldig enhetsbevis for `identity.device_id`, signert med `deviceKeys`. */
+function deviceProof(): { challenge: string; signature: string } {
+  const challenge = devices.issueChallenge(identity.device_id);
+  return { challenge, signature: sign(null, Buffer.from(challenge, "utf8"), deviceKeys.privateKey).toString("base64") };
+}
+
+/** Autoriserer en tekstkanal-sesjon (f.eks. "web") og returnerer sesjonens `session_id`. */
+async function authorizeChannelSession(channel: string): Promise<string> {
+  const res = await fetch(`${coreUrl}/session/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ channel, ...identity, device_proof: deviceProof() })
+  });
+  const body = (await res.json()) as { ok: boolean; session_id?: string; reason?: string };
+  if (!body.ok || !body.session_id) {
+    throw new Error(`session_authorize_failed: ${JSON.stringify(body)}`);
+  }
+  return body.session_id;
+}
 
 type WsMessage = Record<string, unknown> & { type: string };
 
@@ -118,11 +152,17 @@ beforeAll(async () => {
     INSERT INTO tenants (tenant_id, name, kind) VALUES ('tenant-personal', 'Tobias', 'person');
     INSERT INTO people (person_id, display_name) VALUES ('person-tobias', 'Tobias');
     INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-tobias', 'tenant-personal');
-    INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES
-      ('dev-web', 'tenant-personal', 'person-tobias', 'web');
     INSERT INTO memory_spaces (memory_space_id, tenant_id, space) VALUES
       ('sp-personal', 'tenant-personal', 'personal');
   `);
+  // D-130 arkitekt-review MERGE BLOCKER 1-fiks: enheten registreres med sin
+  // EKTE offentlige nøkkel (samme mønster som channel-session-authority.test.ts)
+  // - `/session/authorize`/`/voice/session/authorize` verifiserer ekte
+  // Ed25519-signaturer, ikke en påstått identitet.
+  await adminPool.query(
+    `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem) VALUES ($1, $2, $3, $4, $5)`,
+    [identity.device_id, identity.tenant_id, identity.person_id, "web", deviceKeys.publicKey.export({ type: "spki", format: "pem" }).toString()]
+  );
   appPool = createPool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_test", password: "test-app-pw"
   });
@@ -138,9 +178,19 @@ beforeAll(async () => {
   const queue = new PgTaskQueue(appPool);
   const worker = new InProcessWorker(queue);
   worker.register("executive", async (task) => ({ echo: task.contract.goal }));
+  const identityService = new IdentityService(appPool);
+  const sessionService = new SessionService(appPool);
+  devices = new DeviceService(appPool);
   apiServer = createApiServer({
-    identity: new IdentityService(appPool),
-    sessions: new SessionService(appPool),
+    identity: identityService,
+    sessions: sessionService,
+    devices,
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: SAMME delte instanser
+    // (main.ts sin delingsdisiplin) - `DeviceService` holder utstedte
+    // challenges in-memory, så en egen instans her ville aldri gjenkjent en
+    // nonce utstedt av `/devices/challenge`/`/session/authorize`.
+    channelAuthority: new ChannelSessionAuthority({ devices, sessions: sessionService, identity: identityService }),
+    voiceAuthority: new VoiceSessionAuthority({ devices, sessions: sessionService, identity: identityService }),
     policy,
     worker,
     conversation: new ConversationEngine({
@@ -175,16 +225,24 @@ afterAll(async () => {
 
 describe("Sesjonskontinuitet: tekst ↔ tale bruker samme sesjon", () => {
   it("tekstsesjon gjenopptas av talekanalen med samme session_id", async () => {
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat` godtar ikke lenger
+    // en klient-oppgitt identitet - tekstkanalen må først bevise enheten via
+    // `/session/authorize` for å få et gyldig `session_id`.
+    const textSessionId = await authorizeChannelSession("web");
     const textResponse = await fetch(`${coreUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...identity, channel: "web", message: "status" })
+      body: JSON.stringify({
+        session_id: textSessionId, tenant_id: identity.tenant_id, memory_space: identity.memory_space,
+        channel: "web", message: "status"
+      })
     });
     const textSession = ((await textResponse.json()) as { session_id: string }).session_id;
+    expect(textSession).toBe(textSessionId);
 
     const client = new VoiceClient();
     await client.connect();
-    client.send({ type: "start", identity });
+    client.send({ type: "start", identity, device_proof: deviceProof() });
     await client.waitFor((m) => m.type === "started");
     await client.utter("status");
     const reply = await client.waitFor((m) => m.type === "reply");
@@ -197,7 +255,7 @@ describe("Akseptanse 3: enkel talekommando uten stor LLM", () => {
   it("'status' via tale rutes deterministisk (routed=fast)", async () => {
     const client = new VoiceClient();
     await client.connect();
-    client.send({ type: "start", identity });
+    client.send({ type: "start", identity, device_proof: deviceProof() });
     await client.waitFor((m) => m.type === "started");
     await client.utter("status");
     const reply = await client.waitFor((m) => m.type === "reply");
@@ -212,7 +270,7 @@ describe("Akseptanse 1: barge-in ≤ 250 ms", () => {
   it("tale under avspilling kansellerer TTS innen 250 ms og ny tur fullføres", async () => {
     const client = new VoiceClient();
     await client.connect();
-    client.send({ type: "start", identity });
+    client.send({ type: "start", identity, device_proof: deviceProof() });
     await client.waitFor((m) => m.type === "started");
 
     // Modellrute => langt svar => lang avspilling
@@ -239,7 +297,7 @@ describe("Akseptanse 2: latens målt per delstrekning (median/P95)", () => {
   it("8 turer: median total < 1500 ms med testadaptere; alle delmålinger finnes", async () => {
     const client = new VoiceClient();
     await client.connect();
-    client.send({ type: "start", identity });
+    client.send({ type: "start", identity, device_proof: deviceProof() });
     await client.waitFor((m) => m.type === "started");
 
     const totals: number[] = [];
@@ -268,7 +326,7 @@ describe("Akseptanse 4: failover uten doble verktøyhandlinger", () => {
   it("fullført utterance re-sendt etter 'restart' utføres ikke på nytt", async () => {
     const client = new VoiceClient();
     await client.connect();
-    client.send({ type: "start", identity });
+    client.send({ type: "start", identity, device_proof: deviceProof() });
     await client.waitFor((m) => m.type === "started");
     client.send({ type: "replay_final", utterance_id: "utt-failover-1", text: "opprett jobb: failovertest" });
     const reply = await client.waitFor((m) => m.type === "reply");
@@ -278,7 +336,7 @@ describe("Akseptanse 4: failover uten doble verktøyhandlinger", () => {
     // "Gateway-restart": ny tilkobling/sesjon med samme (delte/persisterte) journal
     const restarted = new VoiceClient();
     await restarted.connect();
-    restarted.send({ type: "start", identity });
+    restarted.send({ type: "start", identity, device_proof: deviceProof() });
     await restarted.waitFor((m) => m.type === "started");
     restarted.send({ type: "replay_final", utterance_id: "utt-failover-1", text: "opprett jobb: failovertest" });
     const error = await restarted.waitFor((m) => m.type === "error");

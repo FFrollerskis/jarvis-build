@@ -31,6 +31,11 @@ const TENANT_A = "tenant-loc-scope-a";
 const TENANT_B = "tenant-loc-scope-b";
 const PERSON_A = "person-loc-scope-a";
 const PERSON_B = "person-loc-scope-b";
+// MERGE BLOCKER B: en TREDJE person, EKTE medlem av TENANT_A (SAMME tenant
+// som PERSON_A) - trengs for å bevise at et cross-PERSON (ikke bare
+// cross-tenant/cross-space) referansemål avvises selv når BEGGE personene
+// faktisk er medlemmer av den SAMME tenanten (se testblokk "I" under).
+const PERSON_C = "person-loc-scope-c";
 const LAT = 59.9139;
 const LON = 10.7522;
 
@@ -50,7 +55,20 @@ beforeAll(async () => {
   await adminPool.query(
     `INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}','Loc Scope A','person'), ('${TENANT_B}','Loc Scope B','person')`
   );
-  await adminPool.query(`INSERT INTO people (person_id, display_name) VALUES ('${PERSON_A}','Scope Person A'), ('${PERSON_B}','Scope Person B')`);
+  await adminPool.query(
+    `INSERT INTO people (person_id, display_name) VALUES ('${PERSON_A}','Scope Person A'), ('${PERSON_B}','Scope Person B'), ('${PERSON_C}','Scope Person C')`
+  );
+  // MERGE BLOCKER B (arkitekt-review, PR #79): `location_zones`/
+  // `location_observations`/`location_zone_visits.person_id` er nå en
+  // sammensatt FK mot `person_tenants (person_id, tenant_id)`, IKKE en
+  // enkel `people`-FK - hver person MÅ være et EKTE registrert medlem av
+  // tenanten en `LocationService`-rad settes inn for, ellers 23503. PERSON_A
+  // og PERSON_C er BEGGE medlemmer av TENANT_A (kreves av testblokk "I"
+  // under: cross-PERSON, SAMME tenant); PERSON_B er KUN medlem av TENANT_B
+  // (kreves av testblokk "H" under: en ikke-medlem skal avvises).
+  await adminPool.query(
+    `INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}','${TENANT_A}'), ('${PERSON_C}','${TENANT_A}'), ('${PERSON_B}','${TENANT_B}')`
+  );
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_loc_scope_test", password: "pw2" });
   service = new LocationService(appPool);
@@ -153,6 +171,116 @@ describe("G: sammensatt FK på location_zone_visits.zone_id blokkerer STRUKTUREL
       person_id: PERSON_A, source_type: "device", lat: LAT, lon: LON, observed_at: "2026-05-04T00:00:00.000Z"
     });
     const visits = await service.listZoneVisits(TENANT_A, "guest", PERSON_A, { zone_id: zone.zone_id });
+    expect(visits).toHaveLength(1);
+    expect(visits[0]!.source_observation_id).toBe(obs.observation_id);
+  });
+});
+
+describe("H: MERGE BLOCKER B - person_id er en sammensatt FK mot person_tenants (bevis: medlemskap, ikke bare eksistens)", () => {
+  it("en person som IKKE er medlem av tenanten kan IKKE få en location_zones-rad for den tenanten (rå FK-brudd, 23503)", async () => {
+    // PERSON_B er KUN medlem av TENANT_B (se beforeAll) - strukturelt
+    // umulig å attribuere en TENANT_A-sone til PERSON_B, selv om PERSON_B
+    // finnes GLOBALT i `people`.
+    await expect(
+      rawInsert(
+        TENANT_A, "personal",
+        `INSERT INTO location_zones (zone_id, tenant_id, memory_space_id, person_id, name, center_lat, center_lon, radius_meters)
+         VALUES ('loc-zn-nonmember-attempt', $1, 'personal', $2, 'Nonmember zone', $3, $4, 100)`,
+        [TENANT_A, PERSON_B, LAT, LON]
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const { rows } = await adminPool.query(`SELECT 1 FROM location_zones WHERE zone_id = 'loc-zn-nonmember-attempt'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("en person som IKKE er medlem av tenanten kan IKKE få en location_observations-rad for den tenanten (rå FK-brudd, 23503)", async () => {
+    await expect(
+      rawInsert(
+        TENANT_A, "personal",
+        `INSERT INTO location_observations (observation_id, tenant_id, memory_space_id, person_id, source_type, lat, lon, observed_at)
+         VALUES ('loc-ob-nonmember-attempt', $1, 'personal', $2, 'device', $3, $4, now())`,
+        [TENANT_A, PERSON_B, LAT, LON]
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const { rows } = await adminPool.query(`SELECT 1 FROM location_observations WHERE observation_id = 'loc-ob-nonmember-attempt'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("en person som IKKE er medlem av tenanten kan IKKE få en location_zone_visits-rad for den tenanten (rå FK-brudd, 23503)", async () => {
+    const zone = await service.createZone(TENANT_A, "shared", {
+      person_id: PERSON_A, name: "Nonmember visit zone", center_lat: LAT, center_lon: LON, radius_meters: 100
+    });
+    const obs = await service.ingestObservation(TENANT_A, "shared", {
+      person_id: PERSON_A, source_type: "device", lat: LAT, lon: LON, observed_at: "2026-05-05T00:00:00.000Z"
+    });
+
+    await expect(
+      rawInsert(
+        TENANT_A, "shared",
+        `INSERT INTO location_zone_visits (visit_id, tenant_id, memory_space_id, person_id, zone_id, entered_at, source_observation_id)
+         VALUES ('loc-vi-nonmember-attempt', $1, 'shared', $2, $3, now(), $4)`,
+        [TENANT_A, PERSON_B, zone.zone_id, obs.observation_id]
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const { rows } = await adminPool.query(`SELECT 1 FROM location_zone_visits WHERE visit_id = 'loc-vi-nonmember-attempt'`);
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("I: MERGE BLOCKER B - location_zone_visits kan IKKE krysse-referere en ANNEN persons sone/observasjon, selv i SAMME tenant+space", () => {
+  it("en visit for PERSON_C kan IKKE bruke en zone_id som tilhører PERSON_A, selv om BEGGE er medlemmer av SAMME tenant (rå FK-brudd, 23503)", async () => {
+    const zoneOfA = await service.createZone(TENANT_A, "shared", {
+      person_id: PERSON_A, name: "Cross-person zone owner A", center_lat: LAT, center_lon: LON, radius_meters: 100
+    });
+    const obsOfC = await service.ingestObservation(TENANT_A, "shared", {
+      person_id: PERSON_C, source_type: "device", lat: LAT, lon: LON, observed_at: "2026-05-06T00:00:00.000Z"
+    });
+
+    await expect(
+      rawInsert(
+        TENANT_A, "shared",
+        `INSERT INTO location_zone_visits (visit_id, tenant_id, memory_space_id, person_id, zone_id, entered_at, source_observation_id)
+         VALUES ('loc-vi-cross-person-zone-attempt', $1, 'shared', $2, $3, now(), $4)`,
+        [TENANT_A, PERSON_C, zoneOfA.zone_id, obsOfC.observation_id]
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const { rows } = await adminPool.query(`SELECT 1 FROM location_zone_visits WHERE visit_id = 'loc-vi-cross-person-zone-attempt'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("en visit for PERSON_A kan IKKE bruke en source_observation_id som tilhører PERSON_C, selv i SAMME tenant+space (rå FK-brudd, 23503)", async () => {
+    const zoneOfA = await service.createZone(TENANT_A, "project", {
+      person_id: PERSON_A, name: "Cross-person obs zone owner A", center_lat: LAT, center_lon: LON, radius_meters: 100
+    });
+    const obsOfC = await service.ingestObservation(TENANT_A, "project", {
+      person_id: PERSON_C, source_type: "device", lat: LAT, lon: LON, observed_at: "2026-05-07T00:00:00.000Z"
+    });
+
+    await expect(
+      rawInsert(
+        TENANT_A, "project",
+        `INSERT INTO location_zone_visits (visit_id, tenant_id, memory_space_id, person_id, zone_id, entered_at, source_observation_id)
+         VALUES ('loc-vi-cross-person-obs-attempt', $1, 'project', $2, $3, now(), $4)`,
+        [TENANT_A, PERSON_A, zoneOfA.zone_id, obsOfC.observation_id]
+      )
+    ).rejects.toMatchObject({ code: "23503" });
+
+    const { rows } = await adminPool.query(`SELECT 1 FROM location_zone_visits WHERE visit_id = 'loc-vi-cross-person-obs-attempt'`);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("positiv kontroll: en SAME-tenant/SAME-space/SAME-person visit fortsatt lykkes for PERSON_C (beviser at I ikke bare feiler alt)", async () => {
+    const zone = await service.createZone(TENANT_A, "home", {
+      person_id: PERSON_C, name: "Valid same-person zone", center_lat: LAT, center_lon: LON, radius_meters: 100
+    });
+    const obs = await service.ingestObservation(TENANT_A, "home", {
+      person_id: PERSON_C, source_type: "device", lat: LAT, lon: LON, observed_at: "2026-05-08T00:00:00.000Z"
+    });
+    const visits = await service.listZoneVisits(TENANT_A, "home", PERSON_C, { zone_id: zone.zone_id });
     expect(visits).toHaveLength(1);
     expect(visits[0]!.source_observation_id).toBe(obs.observation_id);
   });

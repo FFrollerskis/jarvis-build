@@ -6,8 +6,8 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { BusinessService } from "@jarvis/business";
-import { SupportService } from "@jarvis/support";
-import { AgreementsService } from "@jarvis/agreements";
+import { SupportCrossScopeReferenceError, SupportService } from "@jarvis/support";
+import { AgreementsCrossScopeReferenceError, AgreementsService } from "@jarvis/agreements";
 
 /**
  * UA-3 akseptansekriterium 1 ("Hva skjer med kunde X?") - HOST FIX, ekte
@@ -35,6 +35,12 @@ let support: SupportService;
 let agreements: AgreementsService;
 
 const TENANT_A = "tenant-ua3-tl-e2e-a";
+// Arkitekt-review MERGE BLOCKER B (Q-33/D-130, PR #79): egen, urelatert
+// tenant KUN for kryss-tenant-avvisningstesten under (describe H) - beviser
+// at Q-33-vakten er wired inn i den SAMME komposisjonsroten som
+// `apps/api/src/main.ts`/`worker-main.ts` faktisk bruker i produksjon
+// (BEGGE tjenester konstruert fra ÉN delt `pool`, se `beforeAll` under).
+const TENANT_B = "tenant-ua3-tl-e2e-b";
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-ua3-timeline-e2e-"));
@@ -49,11 +55,16 @@ beforeAll(async () => {
   await adminPool.query("CREATE ROLE jarvis_ua3_tl_e2e_test LOGIN PASSWORD 'pw2' NOSUPERUSER NOBYPASSRLS");
   await adminPool.query("GRANT jarvis_app TO jarvis_ua3_tl_e2e_test");
 
-  await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}', 'UA-3 Timeline E2E A', 'business')`);
+  await adminPool.query(
+    `INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}', 'UA-3 Timeline E2E A', 'business'), ('${TENANT_B}', 'UA-3 Timeline E2E B', 'business')`
+  );
   await adminPool.query(`INSERT INTO business_companies (company_id, tenant_id, name) VALUES ('co-ua3-tl-e2e', '${TENANT_A}', 'Acme AS')`);
   await adminPool.query(
     `INSERT INTO business_contacts (contact_id, tenant_id, company_id, name, email) VALUES ('ct-ua3-tl-e2e', '${TENANT_A}', 'co-ua3-tl-e2e', 'Kari', 'kari@acme.no')`
   );
+  // Q-33: en company i TENANT_B - brukes KUN til aa bevise at TENANT_A ALDRI
+  // kan referere den (describe H under).
+  await adminPool.query(`INSERT INTO business_companies (company_id, tenant_id, name) VALUES ('co-ua3-tl-e2e-b', '${TENANT_B}', 'Globex AS')`);
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_ua3_tl_e2e_test", password: "pw2" });
   business = new BusinessService(appPool);
@@ -122,5 +133,33 @@ describe("G: 'Hva skjer med kunde X?' - komplett, kilde-forankret tidslinje", ()
     expect(occurredTimestamps).toEqual(sorted);
 
     expect(timeline.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+/**
+ * Arkitekt-review MERGE BLOCKER B (Q-33/D-130, PR #79): SAMME ende-til-ende
+ * komposisjon som describe G over (SupportService/AgreementsService/
+ * BusinessService konstruert fra ÉN delt `pool`, identisk med
+ * `apps/api/src/main.ts`/`worker-main.ts` i produksjon) - beviser at
+ * `assertCompanyContactInScope()`-vakten faktisk virker i DEN wiringen
+ * appen ekte kjoerer, ikke bare isolert i modul-testene
+ * (`support-timeline-atomicity.test.ts`/`agreements-timeline-atomicity.test.ts`,
+ * som beviser samme oppførsel mer utfoerlig per modul).
+ */
+describe("H: Q-33 - kryss-tenant company_id avvises i den SAMME komposisjonsroten produksjonen bruker", () => {
+  it("SupportService.createTicket() avviser TENANT_B sin company_id fra TENANT_A - INGEN ticket-rad opprettes", async () => {
+    await expect(
+      support.createTicket(TENANT_A, "business", { subject: "E2E-Cross-Tenant-Ticket", company_id: "co-ua3-tl-e2e-b" })
+    ).rejects.toThrow(SupportCrossScopeReferenceError);
+    const rows = await adminPool.query(`SELECT 1 FROM support_tickets WHERE tenant_id = $1 AND subject = $2`, [TENANT_A, "E2E-Cross-Tenant-Ticket"]);
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  it("AgreementsService.createContract() avviser TENANT_B sin company_id fra TENANT_A - INGEN kontrakt-rad opprettes", async () => {
+    await expect(
+      agreements.createContract(TENANT_A, "business", { title: "E2E-Cross-Tenant-Kontrakt", company_id: "co-ua3-tl-e2e-b" })
+    ).rejects.toThrow(AgreementsCrossScopeReferenceError);
+    const rows = await adminPool.query(`SELECT 1 FROM contracts WHERE tenant_id = $1 AND title = $2`, [TENANT_A, "E2E-Cross-Tenant-Kontrakt"]);
+    expect(rows.rows).toHaveLength(0);
   });
 });

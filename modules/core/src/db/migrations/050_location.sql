@@ -79,7 +79,14 @@ CREATE TABLE location_zones (
   tenant_id       text NOT NULL REFERENCES tenants (tenant_id),
   memory_space_id text NOT NULL DEFAULT 'personal'
     CHECK (memory_space_id IN ('personal','business','project','health','home','guest','shared')),
-  person_id       text NOT NULL REFERENCES people (person_id),
+  -- Arkitekt-review-funn (MERGE BLOCKER B, PR #79): `person_id` FKes IKKE
+  -- lenger mot `people (person_id)` alene lenger nede - en enkel `people`-FK
+  -- beviser KUN at personen finnes GLOBALT, ikke at personen faktisk er
+  -- MEDLEM av tenanten raden hevder å tilhøre. Sammensatt FK mot
+  -- `person_tenants (person_id, tenant_id)` legges til RETT under tabellen -
+  -- SAMME "enkel FK er ikke en autorisasjonsgrense"-lærdom som D-129,
+  -- anvendt på person/tenant-medlemskap i stedet for tenant/space-scope.
+  person_id       text NOT NULL,
   name            text NOT NULL,
   center_lat      double precision NOT NULL CHECK (center_lat BETWEEN -90 AND 90),
   center_lon      double precision NOT NULL CHECK (center_lon BETWEEN -180 AND 180),
@@ -87,13 +94,22 @@ CREATE TABLE location_zones (
   created_at      timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX location_zones_lookup_idx ON location_zones (tenant_id, memory_space_id, person_id);
+-- MERGE BLOCKER B: sammensatt FK mot `person_tenants` i stedet for en enkel
+-- `people`-FK - beviser at `person_id` FAKTISK er medlem av `tenant_id`
+-- (ikke bare at personen eksisterer et sted).
+ALTER TABLE location_zones ADD CONSTRAINT location_zones_person_tenant_fkey
+  FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id);
 -- Arkitekt-review-lærdom (D-129, samme prinsipp gjenbrukt her): en enkel
 -- `zone_id text PRIMARY KEY`-FK er IKKE en tenant/space-autorisasjonsgrense
 -- - Postgres sin FK-sjekk kjører med forhøyet privilegium og omgår RLS, saa
 -- et FK-maal fra en ANNEN tenant/space ville blitt akseptert stille. Denne
 -- UNIQUE-nøkkelen er FK-MÅLET for `location_zone_visits.zone_id` sin
--- sammensatte fremmednøkkel under.
-ALTER TABLE location_zones ADD CONSTRAINT location_zones_tenant_space_key UNIQUE (tenant_id, memory_space_id, zone_id);
+-- sammensatte fremmednøkkel under. MERGE BLOCKER B (utvidelse): `person_id`
+-- er nå MED i nøkkelen (ikke bare tenant_id/memory_space_id/zone_id) - en
+-- visit skal kun kunne peke til en sone som tilhører SAMME person, ikke bare
+-- samme tenant+space (to ulike personers soner i samme tenant+space kunne
+-- ellers strukturelt krysse-refereres).
+ALTER TABLE location_zones ADD CONSTRAINT location_zones_tenant_space_key UNIQUE (tenant_id, memory_space_id, person_id, zone_id);
 
 -- Rå, leverandør-nøytrale posisjonspunkter. `source_type`/
 -- `source_instance_id` er en POINTER til den innhentende adapteren/enheten
@@ -111,7 +127,10 @@ CREATE TABLE location_observations (
   tenant_id            text NOT NULL REFERENCES tenants (tenant_id),
   memory_space_id      text NOT NULL DEFAULT 'personal'
     CHECK (memory_space_id IN ('personal','business','project','health','home','guest','shared')),
-  person_id            text NOT NULL REFERENCES people (person_id),
+  -- MERGE BLOCKER B (samme begrunnelse som `location_zones.person_id`
+  -- over): sammensatt FK mot `person_tenants` legges til RETT under
+  -- tabellen i stedet for en enkel `people`-FK her.
+  person_id            text NOT NULL,
   source_type          text NOT NULL,
   source_instance_id   text,
   lat                  double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
@@ -126,10 +145,16 @@ CREATE INDEX location_observations_lookup_idx ON location_observations (tenant_i
 -- håndhevings-spørring - partial index (kun rader med en satt frist) holder
 -- den billig å skanne selv med et stort, voksende observasjonsvolum.
 CREATE INDEX location_observations_retention_idx ON location_observations (retention_expires_at) WHERE retention_expires_at IS NOT NULL;
+-- MERGE BLOCKER B: sammensatt FK mot `person_tenants` (samme begrunnelse
+-- som `location_zones_person_tenant_fkey` over).
+ALTER TABLE location_observations ADD CONSTRAINT location_observations_person_tenant_fkey
+  FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id);
 -- FK-MÅL for `location_zone_visits.source_observation_id` sin sammensatte
 -- fremmednøkkel under (SAMME "enkel FK er ikke en autorisasjonsgrense"-
--- begrunnelse som `location_zones_tenant_space_key` over).
-ALTER TABLE location_observations ADD CONSTRAINT location_observations_tenant_space_key UNIQUE (tenant_id, memory_space_id, observation_id);
+-- begrunnelse som `location_zones_tenant_space_key` over). MERGE BLOCKER B
+-- (utvidelse): `person_id` er nå MED i nøkkelen, samme begrunnelse som
+-- `location_zones_tenant_space_key` over.
+ALTER TABLE location_observations ADD CONSTRAINT location_observations_tenant_space_key UNIQUE (tenant_id, memory_space_id, person_id, observation_id);
 
 -- DERIVERT tilstand: inn/ut av en sone. Skrives UTELUKKENDE av
 -- `LocationService.evaluateZoneTransitions()` (deterministisk punkt-i-
@@ -141,7 +166,9 @@ CREATE TABLE location_zone_visits (
   tenant_id            text NOT NULL REFERENCES tenants (tenant_id),
   memory_space_id      text NOT NULL DEFAULT 'personal'
     CHECK (memory_space_id IN ('personal','business','project','health','home','guest','shared')),
-  person_id            text NOT NULL REFERENCES people (person_id),
+  -- MERGE BLOCKER B (samme begrunnelse som `location_zones.person_id`
+  -- over): sammensatt FK mot `person_tenants` lagt til NEDENFOR.
+  person_id            text NOT NULL,
   -- Sammensatt FK til `location_zones` lagt til NEDENFOR (etter tabellen) -
   -- IKKE en enkel `REFERENCES location_zones (zone_id)` her (samme D-129-
   -- lærdom som resten av denne migrasjonen: en enkel FK er ikke en
@@ -160,10 +187,22 @@ CREATE INDEX location_zone_visits_lookup_idx ON location_zone_visits (tenant_id,
 -- PÅGÅENDE besøket for en (person, sone) den skal lukke - partial index
 -- (kun åpne besøk) holder oppslaget billig.
 CREATE INDEX location_zone_visits_open_idx ON location_zone_visits (tenant_id, memory_space_id, person_id, zone_id) WHERE left_at IS NULL;
+-- MERGE BLOCKER B: sammensatt FK mot `person_tenants` (samme begrunnelse
+-- som `location_zones_person_tenant_fkey` over) - beviser at
+-- `location_zone_visits.person_id` faktisk er medlem av `tenant_id`.
+ALTER TABLE location_zone_visits ADD CONSTRAINT location_zone_visits_person_tenant_fkey
+  FOREIGN KEY (person_id, tenant_id) REFERENCES person_tenants (person_id, tenant_id);
+-- MERGE BLOCKER B (utvidelse av D-129-mønsteret): `person_id` er nå MED i
+-- BEGGE sammensatte fremmednøkler under (ikke bare tenant_id/
+-- memory_space_id) - en visit kan strukturelt KUN peke til en sone/
+-- observasjon som tilhører SAMME person som visit-raden selv, ikke bare
+-- samme tenant+space. Uten dette kunne to ulike personers soner/
+-- observasjoner i samme tenant+space strukturelt krysse-refereres (visit
+-- for person A kunne pekt til person B sin sone).
 ALTER TABLE location_zone_visits ADD CONSTRAINT location_zone_visits_zone_tenant_space_fkey
-  FOREIGN KEY (tenant_id, memory_space_id, zone_id) REFERENCES location_zones (tenant_id, memory_space_id, zone_id);
+  FOREIGN KEY (tenant_id, memory_space_id, person_id, zone_id) REFERENCES location_zones (tenant_id, memory_space_id, person_id, zone_id);
 ALTER TABLE location_zone_visits ADD CONSTRAINT location_zone_visits_observation_tenant_space_fkey
-  FOREIGN KEY (tenant_id, memory_space_id, source_observation_id) REFERENCES location_observations (tenant_id, memory_space_id, observation_id);
+  FOREIGN KEY (tenant_id, memory_space_id, person_id, source_observation_id) REFERENCES location_observations (tenant_id, memory_space_id, person_id, observation_id);
 
 -- Q-20-mønster (samme presedens som `048_operations.sql`): location-
 -- domenet er PERSONLIG POSISJONSDATA, IKKE append-only systemrevisjon -

@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import type { DeviceService, IdentityService, SessionService, VoiceSessionAuthority } from "@jarvis/core";
+import type { ChannelSessionAuthority, DeviceService, IdentityService, SessionService, VoiceSessionAuthority } from "@jarvis/core";
 import {
   acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
   getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
@@ -18,7 +18,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
-import type { AuthStrength, Channel, MemorySpace } from "@jarvis/contracts";
+import type { Channel, MemorySpace } from "@jarvis/contracts";
 
 /**
  * Fase 3: minimalt API uten rammeverk (rammeverksvalg utsatt til behovet
@@ -43,6 +43,17 @@ export interface ApiDeps {
    * Ingen NY autorisasjonsmekanisme - se `VoiceSessionAuthority`.
    */
   voiceAuthority?: VoiceSessionAuthority;
+  /**
+   * D-130 arkitekt-review MERGE BLOCKER 1-fiks: den generaliserte, kanal-
+   * uavhengige søsteren til `voiceAuthority` over - PÅKREVD (ikke valgfri, i
+   * motsetning til `voiceAuthority`) fordi `/chat`/`/brief` fra nå av ALDRI
+   * stoler på klient-oppgitt `person_id`/`device_id`/`auth_strength` direkte
+   * (se `/session/authorize`-ruten og de nye `/chat`/`/brief`-grenene under).
+   * Konstrueres i `main.ts` fra de SAMME delte `devices`/`sessions`/`identity`-
+   * instansene som `voiceAuthority` allerede bruker (samme delingsdisiplin som
+   * D-123 krevde - `DeviceService` holder utstedte challenges in-memory).
+   */
+  channelAuthority: ChannelSessionAuthority;
   /** v4.0 BO-02: Daily Executive Brief on demand. */
   brief?: { generate(identity: unknown): Promise<unknown>; render(artifact: unknown): string };
   /**
@@ -94,16 +105,31 @@ export function healthStatus(): HealthStatus {
   return { status: "ok", service: "jarvis-api", version: "0.1.0", time: new Date().toISOString() };
 }
 
+/**
+ * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `person_id`/`device_id`/
+ * `auth_strength` er BEVISST FJERNET fra denne kroppen - en klient kan ikke
+ * lenger PÅSTÅ noen av dem direkte til `/chat`/`/brief`. `session_id`
+ * kommer UTELUKKENDE fra en tidligere vellykket `/session/authorize`- eller
+ * `/voice/session/authorize`-autorisasjon (BEGGE krever ekte enhetsbevis
+ * FØR noen sesjonsrad røres) - se `sessions.getActive()`, som slår opp
+ * `person_id`/`device_id` FRA sesjonsraden selv, ALDRI fra klienten.
+ */
 interface ChatBody {
-  person_id: string;
+  session_id: string;
   tenant_id: string;
-  device_id: string;
   memory_space: MemorySpace;
   channel: Channel;
-  auth_strength?: AuthStrength;
   message: string;
   /** BO-12 §33: valgfri owner-override av LLM-provider (router §38-semantikk). */
   provider?: string;
+}
+
+/** Kroppen for `/brief` - samme sesjonsbaserte autoritet som `/chat`, uten `message`. */
+interface BriefBody {
+  session_id: string;
+  tenant_id: string;
+  memory_space: MemorySpace;
+  channel: Channel;
 }
 
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
@@ -161,7 +187,7 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
   }
 
   const depRoutes = [
-    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit", "/voice/session/authorize",
+    "/chat", "/worker/tick", "/tools/critical-demo", "/tasks/submit", "/voice/session/authorize", "/session/authorize",
     "/incidents/create", "/incidents/get", "/incidents/list", "/incidents/evidence/add", "/incidents/correlate", "/incidents/repair",
     "/infra/recovery/attempt", "/infra/pause", "/infra/resume", "/infra/degrade", "/infra/status"
   ];
@@ -172,20 +198,54 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     return json(res, 404, { error: "not_found" });
   }
 
+  if (req.method === "POST" && url.pathname === "/session/authorize") {
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: generisk, kanal-uavhengig
+    // søster til `/voice/session/authorize` - eneste vei til et gyldig
+    // `session_id` for `/chat`/`/brief` fra nå av. INGEN egen logikk her,
+    // nøyaktig samme disiplin som `/voice/session/authorize`: les kroppen,
+    // gi den til `ChannelSessionAuthority.authorize()` (som selv krever ekte
+    // enhetsbevis FØR noen sesjonsrad røres), returner vedtaket. Ugyldig JSON
+    // fanges og sendes inn som `undefined` -> deterministisk fail-closed
+    // `403 malformed_evidence` (aldri en `500` en klient kan skille fra et
+    // ekte avslag). `channel` skilles ut FØR resten sendes som bevismateriale
+    // - `ChannelSessionAuthority.authorize()` avviser ukjente nøkler i
+    // bevismaterialet (inkl. et forsøk på å smugle inn `channel` der).
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
+    }
+    const obj = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+    const { channel, ...evidence } = obj;
+    if (typeof channel !== "string") {
+      return json(res, 403, { ok: false, reason: "malformed_evidence" });
+    }
+    const result = await deps.channelAuthority.authorize(channel as Channel, evidence);
+    if (!result.ok) {
+      return json(res, 403, result);
+    }
+    return json(res, 200, { ok: true, session_id: result.session.session_id, identity: result.identity });
+  }
+
   if (req.method === "POST" && url.pathname === "/chat") {
     const body = (await readBody(req)) as ChatBody;
-    const session = await deps.sessions.resumeOrCreate(
-      { tenant_id: body.tenant_id, person_id: body.person_id, device_id: body.device_id },
-      body.channel
-    );
+    const principal = await deps.sessions.getActive(body.tenant_id, body.session_id);
+    if (!principal) {
+      return json(res, 403, { error: "identity_denied", reason: "session_not_found" });
+    }
     const resolved = await deps.identity.resolveIdentity({
-      person_id: body.person_id,
+      person_id: principal.person_id,
       tenant_id: body.tenant_id,
       memory_space: body.memory_space,
-      session_id: session.session_id,
-      device_id: body.device_id,
+      session_id: body.session_id,
+      device_id: principal.device_id,
       channel: body.channel,
-      auth_strength: body.auth_strength ?? "active"
+      // D-130 arkitekt-review MERGE BLOCKER 1-fiks: ALDRI klient-oppgitt -
+      // et gyldig `session_id` finnes KUN fordi enheten allerede har bevist
+      // besittelse over sin private nøkkel via `ChannelSessionAuthority`/
+      // `VoiceSessionAuthority` (se `ChatBody`-kommentaren over).
+      auth_strength: "signed"
     });
     if (!resolved.ok) {
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
@@ -232,30 +292,33 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
         (toolName) => send("tool_call", { tool_name: toolName })
       );
-      send("done", { ...result, session_id: session.session_id });
+      send("done", { ...result, session_id: body.session_id });
       res.end();
       return;
     }
 
     const result = await deps.conversation.handle(resolved.identity, body.message, undefined, undefined, body.provider);
-    return json(res, 200, { ...result, session_id: session.session_id });
+    return json(res, 200, { ...result, session_id: body.session_id });
   }
 
   if (deps.brief && req.method === "POST" && url.pathname === "/brief") {
-    const body = (await readBody(req)) as ChatBody;
-    const session = await deps.sessions.resumeOrCreate(
-      { tenant_id: body.tenant_id, person_id: body.person_id, device_id: body.device_id }, body.channel ?? "api"
-    );
+    const body = (await readBody(req)) as BriefBody;
+    const principal = await deps.sessions.getActive(body.tenant_id, body.session_id);
+    if (!principal) {
+      return json(res, 403, { error: "identity_denied", reason: "session_not_found" });
+    }
     const resolved = await deps.identity.resolveIdentity({
-      person_id: body.person_id, tenant_id: body.tenant_id, memory_space: body.memory_space,
-      session_id: session.session_id, device_id: body.device_id,
-      channel: body.channel ?? "api", auth_strength: body.auth_strength ?? "active"
+      person_id: principal.person_id, tenant_id: body.tenant_id, memory_space: body.memory_space,
+      session_id: body.session_id, device_id: principal.device_id,
+      channel: body.channel ?? "api",
+      // D-130 arkitekt-review MERGE BLOCKER 1-fiks: samme prinsipp som /chat over.
+      auth_strength: "signed"
     });
     if (!resolved.ok) {
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const artifact = await deps.brief.generate(resolved.identity);
-    return json(res, 200, { brief: artifact, rendered: deps.brief.render(artifact), session_id: session.session_id });
+    return json(res, 200, { brief: artifact, rendered: deps.brief.render(artifact), session_id: body.session_id });
   }
 
   if (deps.devices && req.method === "POST" && url.pathname === "/devices/register") {

@@ -107,6 +107,11 @@ public actor JarvisClient {
     let baseURL: URL
     public var identity: JarvisIdentity
     private var completedUtterances: Set<String>
+    /// D-130 arkitekt-review MERGE BLOCKER 1-fiks: den betrodde `session_id`
+    /// fra en vellykket `authorizeSession()` (`/session/authorize`). `chat()`
+    /// stoler ikke lenger på klient-oppgitt identitet - uten en gyldig
+    /// `sessionId` her finnes det ingen vei til `/chat` i det hele tatt.
+    private var sessionId: String?
 
     public init(baseURL: URL, identity: JarvisIdentity) {
         self.baseURL = baseURL
@@ -119,10 +124,21 @@ public actor JarvisClient {
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
+    /// D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat` godtar ikke lenger
+    /// en klient-oppgitt identitet - `sessionId` MÅ komme fra en tidligere
+    /// vellykket `authorizeSession()`. Kroppen er nå den slanke formen
+    /// (`session_id`/`tenant_id`/`memory_space`/`channel`/`message`), ALDRI
+    /// hele identitetsobjektet.
     public func chat(_ message: String, utteranceId: String = UUID().uuidString) async throws -> ChatReply? {
         guard !completedUtterances.contains(utteranceId) else { return nil } // aldri dobbel handling
-        var body: [String: Any] = ["message": message]
-        for (k, v) in try dict(identity) { body[k] = v }
+        guard let sessionId else {
+            throw NSError(domain: "Jarvis", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "not_authorized: call authorizeSession first"])
+        }
+        let body: [String: Any] = [
+            "session_id": sessionId, "tenant_id": identity.tenant_id,
+            "memory_space": identity.memory_space, "channel": identity.channel, "message": message
+        ]
         let reply: ChatReply = try await post("chat", body: body)
         completedUtterances.insert(utteranceId)
         UserDefaults.standard.set(Array(completedUtterances), forKey: "jarvis.completed")
@@ -139,16 +155,46 @@ public actor JarvisClient {
         ])
     }
 
-    public func proveDevice(key: Curve25519.Signing.PrivateKey) async throws -> Bool {
+    /// Lavnivå-primitiv: løser kun challenge-/signatur-runden mot
+    /// `/devices/challenge`, uten å utstede noen sesjon. Gjenbrukt av
+    /// `authorizeSession()` under - ingen duplisert signeringslogikk.
+    private func signChallenge(key: Curve25519.Signing.PrivateKey) async throws -> (challenge: String, signature: String) {
         struct Challenge: Codable { let challenge: String }
         let challenge: Challenge = try await post("devices/challenge", body: ["device_id": identity.device_id])
         let signature = try key.signature(for: Data(challenge.challenge.utf8)).base64EncodedString()
+        return (challenge.challenge, signature)
+    }
+
+    public func proveDevice(key: Curve25519.Signing.PrivateKey) async throws -> Bool {
+        let (challenge, signature) = try await signChallenge(key: key)
         struct Verified: Codable { let verified: Bool }
         let result: Verified = try await post("devices/challenge/verify", body: [
             "tenant_id": identity.tenant_id, "device_id": identity.device_id,
-            "challenge": challenge.challenge, "signature": signature
+            "challenge": challenge, "signature": signature
         ])
         return result.verified
+    }
+
+    /// D-130 arkitekt-review MERGE BLOCKER 1-fiks: den ENESTE veien til et
+    /// gyldig `session_id` for `chat()`. Beviser enhetsbesittelse (samme
+    /// challenge-/signatur-runde som `proveDevice()`, via `signChallenge()`),
+    /// og binder resultatet til `/session/authorize` - IKKE bare
+    /// `/devices/challenge/verify`, som kun rapporterer `auth_strength` og
+    /// aldri utsteder en sesjon.
+    public func authorizeSession(key: Curve25519.Signing.PrivateKey) async throws -> String {
+        let (challenge, signature) = try await signChallenge(key: key)
+        struct SessionAuthorizeResponse: Codable { let ok: Bool; let session_id: String? }
+        let result: SessionAuthorizeResponse = try await post("session/authorize", body: [
+            "channel": identity.channel, "person_id": identity.person_id, "tenant_id": identity.tenant_id,
+            "device_id": identity.device_id, "memory_space": identity.memory_space,
+            "device_proof": ["challenge": challenge, "signature": signature]
+        ])
+        guard result.ok, let newSessionId = result.session_id else {
+            throw NSError(domain: "Jarvis", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "session_authorize_failed"])
+        }
+        sessionId = newSessionId
+        return newSessionId
     }
 
     func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {

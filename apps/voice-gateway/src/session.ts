@@ -26,6 +26,17 @@ export interface VoiceIdentity {
   channel: "voice";
   /** BO-12 §33: valgfri owner-override av LLM-provider - voice-laget er likt uansett. */
   provider?: string;
+  /**
+   * D-130 arkitekt-review MERGE BLOCKER 1-fiks: den betrodde sesjons-ID-en
+   * fra en vellykket `/voice/session/authorize` (grant-en). KUN satt på den
+   * BEVISTE stien (`server.ts` sin `grant`-gren) - `undefined` på den
+   * ubeviste/`CLIENT_ASSERTED`-stien, siden `/chat` ikke lenger godtar noen
+   * annen vei til et gyldig `session_id`. Rent additivt felt: alle
+   * eksisterende felter over er UENDRET, så D-122 sin rutingslogikk
+   * (`identity.memory_space`/`identity.channel`) fortsetter å virke akkurat
+   * som før.
+   */
+  session_id?: string;
 }
 
 export interface CoreReply {
