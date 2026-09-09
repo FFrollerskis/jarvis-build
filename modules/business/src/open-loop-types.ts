@@ -33,7 +33,10 @@ export type OpenLoopType =
   | "finance_procurement_missing"
   // UA-3 Native Jarvis Product Core (D-128) - speiler 047_product.sql sin utvidede CHECK.
   | "product_item_needs_triage"
-  | "product_item_high_priority_stalled";
+  | "product_item_high_priority_stalled"
+  // UA-3 Native Jarvis Operations Core (D-129) - speiler 048_operations.sql sin utvidede CHECK.
+  | "operations_task_overdue"
+  | "operations_task_escalation_needed";
 export type OpenLoopDetectionMethod = "deterministic" | "ai_assisted";
 export type OpenLoopPriority = "low" | "normal" | "high";
 export type OpenLoopStatus = "open" | "resolved";
@@ -64,6 +67,8 @@ export interface BusinessOpenLoop {
   finance_procurement_item_id: string | null;
   /** UA-3 Native Jarvis Product Core (D-128): peker til `product_items`, null for ikke-produkt-loops. */
   product_item_id: string | null;
+  /** UA-3 Native Jarvis Operations Core (D-129): peker til `operations_tasks`, null for ikke-driftsoppgave-loops. */
+  operations_task_id: string | null;
   loop_type: OpenLoopType;
   detection_key: string;
   detection_method: OpenLoopDetectionMethod;
@@ -122,7 +127,8 @@ export interface SweepResult {
 
 /** §15: bedriftshelse-akseptansekriteriet krever sales+product+finance+marketing+operations -
  * `sales` (Business Graph/CRM), `marketing` (Native Jarvis Growth Core, D-74/D-78), `finance`
- * (Native Jarvis Finance & Spend Integrity Gateway, D-127) og NÅ `product` (Native Jarvis Product
- * Core, D-128) er dekket; `operations` MÅ fortsatt rapporteres som ikke-integrert, aldri fabrikkert -
- * se `BUSINESS_DOMAIN_COVERAGE` i business-brief.ts. */
+ * (Native Jarvis Finance & Spend Integrity Gateway, D-127), `product` (Native Jarvis Product
+ * Core, D-128) og NÅ `operations` (Native Jarvis Operations Core, D-129) er dekket - se
+ * `BUSINESS_DOMAIN_COVERAGE` i business-brief.ts (den faktiske, oppdaterte statusen ligger DER,
+ * aldri fabrikkert her). */
 export type BusinessDomain = "sales" | "product" | "finance" | "marketing" | "operations";

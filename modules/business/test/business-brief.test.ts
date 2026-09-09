@@ -139,7 +139,7 @@ describe("B: ukentlig brief - egen, kilde-forankret aggregering (ikke en andre m
     expect(weeklyB.data_coverage.product.status).toBe("available");
     expect(weeklyA.data_coverage).toEqual(weeklyB.data_coverage);
     expect(weeklyA.data_coverage.sales.status).toBe("available");
-    expect(weeklyA.data_coverage.operations.status).toBe("not_integrated");
+    expect(weeklyA.data_coverage.operations.status).toBe("available");
   });
 });
 
@@ -179,7 +179,7 @@ describe("E: Business OS-tidslinje-regresjon (D-78 - Growth Core sameksistens)",
   });
 });
 
-describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, marketing, operations') er IKKE fullt oppfylt", () => {
+describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, marketing, operations') er NÅ dekket for alle fem domener (D-129)", () => {
   // UA-4 Growth -> Business Domain Coverage-integrasjon (D-78): `marketing` gikk fra
   // `not_integrated` til `available` FORDI Native Jarvis Growth Core (D-74/D-75/D-76/D-77) nå
   // faktisk finnes - IKKE en fabrikkert/kosmetisk endring.
@@ -194,14 +194,18 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
   // D-128: `product` gikk fra `not_integrated` til `available` av et ANNET mønster enn D-78/D-127
   // - her fantes INGEN eksisterende kapabilitet fra før; en genuint ny JARVIS_CANONICAL Product
   // Core (`@jarvis/product`) ble bygget, med samme rapportør-/OpenLoopService-mønster som
-  // Support/Contracts Core. `operations` forblir eksplisitt `not_integrated`, uendret - ingen ny
-  // kapabilitet for det domenet finnes ennå.
-  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing OG finance OG product som tilgjengelig - operations er eksplisitt not_integrated, aldri fabrikkert", () => {
+  // Support/Contracts Core.
+  // D-129: `operations` gikk fra `not_integrated` til `available` av SAMME mønster som D-128 -
+  // ingen eksisterende kapabilitet fantes (D-64-gaten bekreftet at `finance_vendors`/
+  // `modules/incidents`/`modules/watchdog` IKKE dekker business-operations); en genuint ny
+  // JARVIS_CANONICAL Operations Core (`@jarvis/operations`) ble bygget for
+  // leverandører/driftsoppgaver/runbooks/eskalering (masterplan §13).
+  it("BUSINESS_DOMAIN_COVERAGE markerer sales OG marketing OG finance OG product OG operations som tilgjengelig - aldri fabrikkert", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.marketing.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.finance.status).toBe("available");
     expect(BUSINESS_DOMAIN_COVERAGE.product.status).toBe("available");
-    expect(BUSINESS_DOMAIN_COVERAGE.operations.status).toBe("not_integrated");
+    expect(BUSINESS_DOMAIN_COVERAGE.operations.status).toBe("available");
   });
 
   it("marketing sin dekning er eksplisitt begrunnet i Native Growth Core, ALDRI en leverandør-tilkobling", () => {
@@ -229,21 +233,25 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
     expect(BUSINESS_DOMAIN_COVERAGE.product.live_provider_connected).toBe(false);
   });
 
-  it("sales/operations sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
+  it("sales sin dekning er uendret av denne sliceen (ingen regresjon)", () => {
     expect(BUSINESS_DOMAIN_COVERAGE.sales).toEqual({ status: "available", source: "Business Graph/CRM", live_provider_connected: false });
-    expect(BUSINESS_DOMAIN_COVERAGE.operations).toEqual({ status: "not_integrated", source: "ikke bygget ennå", live_provider_connected: false });
   });
 
-  it("renderDomainCoverage() sier eksplisitt fra at kriteriet ikke er fullt oppfylt, OG nevner marketing/finance/product som tilgjengelig uten aa hevde en live leverandør", () => {
+  it("operations sin dekning er eksplisitt begrunnet i Native Operations Core, ALDRI en driftsplattform-leverandør-tilkobling", () => {
+    expect(BUSINESS_DOMAIN_COVERAGE.operations.source).toMatch(/Operations Core/);
+    // Samme separasjon som marketing/finance/product: domenekapabilitet != ekstern leverandør-tilkobling.
+    expect(BUSINESS_DOMAIN_COVERAGE.operations.live_provider_connected).toBe(false);
+  });
+
+  it("renderDomainCoverage() sier eksplisitt fra at alle 5 domener er dekket, OG nevner marketing/finance/product/operations som tilgjengelig uten aa hevde en live leverandør", () => {
     const text = renderDomainCoverage();
-    expect(text).toContain("IKKE fullt oppfylt");
-    expect(text).toContain("IKKE integrert");
+    expect(text).toContain("dekket for alle 5/5 domener");
+    expect(text).not.toContain("IKKE integrert");
     expect(text).toContain("marketing: tilgjengelig");
     expect(text).toContain("finance: tilgjengelig");
     expect(text).toContain("product: tilgjengelig");
+    expect(text).toContain("operations: tilgjengelig");
     expect(text).toContain("ingen live ekstern leverandør tilkoblet");
-    // 4/5 domener dekket (sales + marketing + finance + product) - eksplisitt telling, ikke en gjettet brøk.
-    expect(text).toContain("4/5 domener dekket");
   });
 
   it("renderDomainCoverage() er 100% deterministisk (samme resultat ved gjentatte kall, ingen DB/klokke-avhengighet)", () => {
@@ -276,6 +284,16 @@ describe("C: §15 aerlighet - akseptansekriterium 2 ('sales, product, finance, m
     const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
     expect(source).not.toMatch(/LINEAR|JIRA|MIXPANEL|AMPLITUDE|POSTHOG/i);
     expect(source).not.toMatch(/@jarvis\/product/);
+  });
+
+  // D-129 (samme disiplin som D-78/D-127/D-128 over, men for driftsplattform-leverandører):
+  // ingen slik leverandør-credential-formet streng skal noensinne trenge å stå i DENNE filen
+  // for at `operations.status = "available"` skal være sant - business-brief.ts importerer
+  // aldri `@jarvis/operations` og kjenner ingen leverandør-SDK.
+  it("business-brief.ts krever INGEN driftsplattform-/ticketing-leverandør-credential/SDK for aa markere operations tilgjengelig", async () => {
+    const source = await readFile(fileURLToPath(new URL("../src/business-brief.ts", import.meta.url)), "utf8");
+    expect(source).not.toMatch(/SERVICENOW|NOTION|JIRA|ATLASSIAN/i);
+    expect(source).not.toMatch(/@jarvis\/operations/);
   });
 });
 
@@ -342,6 +360,41 @@ describe("H (D-128): produkt-avledede open loops overflater i Business OS-briefe
     const item = allBuckets.find((i) => i.source === "business-open-loops" && i.title.includes("product_item_needs_triage"));
     expect(item).toBeTruthy();
     expect(item?.why).toContain("triagert");
+  });
+});
+
+describe("I (D-129): driftsoppgave-avledede open loops overflater i Business OS-briefen via SAMME businessOpenLoopsSource() som sales/finance/product", () => {
+  // Beviser EMPIRISK, ikke bare via BUSINESS_DOMAIN_COVERAGE-paastanden over, at operations sin
+  // dekning er reell: en ekte `operations_tasks`-rad med passert `due_at` (identisk fixture-form
+  // som `open-loop-operations.test.ts` §A) -> OpenLoopService.detectOverdueOperationsTasks() ->
+  // `operations_task_overdue`-open-loop -> businessOpenLoopsSource() -> DailyBrief-punkt.
+  // INGEN ny BriefSource bygget her - dette er den EKSISTERENDE `businessOpenLoopsSource()`
+  // (§13/D-53), som allerede haandterer ENHVER open_loop_type generisk.
+  it("et operations_task_overdue-open-loop dukker opp som et brief-punkt, med driftsoppgave-kilde-forankret 'why'", async () => {
+    const taskId = `ops-tk-brief-${randomUUID()}`;
+    await withMemoryTransaction(appPool, TENANT_A, ["business"], (client) =>
+      client.query(
+        `INSERT INTO operations_tasks (task_id, tenant_id, memory_space_id, title, status, priority, due_at)
+         VALUES ($1, $2, 'business', 'Brief-test driftsoppgave', 'open', 'normal', now() - interval '1 day')`,
+        [taskId, TENANT_A]
+      )
+    );
+    const detection = await openLoops.detectOverdueOperationsTasks(TENANT_A, "business");
+    expect(detection.detected).toBeGreaterThanOrEqual(1);
+
+    const dailyBrief = new DailyBrief([businessOpenLoopsSource(openLoops)], appPool);
+    const artifact = await dailyBrief.generate(identityA);
+    const allBuckets = [
+      ...artifact.top_priorities, ...artifact.today, ...artifact.needs_attention,
+      ...artifact.follow_ups, ...artifact.build_status, ...artifact.fyi
+    ];
+    // Merk: `operations_task_overdue` HAR en `due_at` (i motsetning til `product_item_needs_triage`,
+    // som aldri har en frist) - `businessOpenLoopsSource()` prefikser derfor tittelen med "OVERDUE",
+    // IKKE loop_type-strengen (samme regel som followup-loopene i blokk A) - identifiser derfor
+    // via `why`, som er unikt for driftsoppgave-teksten.
+    const item = allBuckets.find((i) => i.source === "business-open-loops" && i.why.includes("Driftsoppgave") && i.why.includes("forfalt"));
+    expect(item).toBeTruthy();
+    expect(item?.title).toContain("OVERDUE");
   });
 });
 

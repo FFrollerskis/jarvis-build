@@ -3795,6 +3795,55 @@ detalj: D-128 i DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+#### UA-3: NATIVE JARVIS OPERATIONS CORE - `operations`-DOMENET (2026-09-08) → D-129
+
+Manuell fortsettelse etter D-128-merget (base `main=0b350f448673b52f361cdea65110ab8939d9f889`), derivert
+fra en frisk read-only rekonstruksjon. Uavhengig kode-nivå-reverifisering (ikke docs-tekst) bekreftet at
+Q-29(4) (UA-4 marketing-spend ↔ Finance Integrity) og Q-31(3) (UA-5 incident→diagnose→fix) er BEGGE
+stale-docs-funn, allerede fullt bygget - IKKE gjenbygget her, uendret. Eneste reelle gap: UA-3
+`operations` (masterplan §13: "Tasks, owners, deadlines, suppliers, runbooks, escalations") - INGEN
+kanonisk business-operations-datamodell fantes (`finance_vendors` er et betalings-MOTPART-register for
+rekonsiliering, D-116, IKKE et leverandør-/driftsregister; `modules/incidents`/`modules/watchdog` er
+Jarvis sin EGEN infra-drift, en HELT ANNEN masterplan-betydning - navnelikhet beviser aldri kapasitet).
+
+**D-64-gate:** `CAPABILITY=`business-operations (leverandørregister/driftsoppgaver/runbooks/
+eskaleringspolicy); `SYSTEM_OF_RECORD=JARVIS_CANONICAL`; `CAN_RUN_WITHOUT_PROVIDER=true` - ZERO ekstern
+driftsplattform-/ticketing-leverandør (ServiceNow/Notion/Jira/Atlassian) introdusert eller navngitt i
+`modules/operations/src/*` (strukturelt bevist via no-provider-proof-test, samme disiplin som D-128). Et
+fremtidig eksternt driftsverktøy forblir en VALGFRI senere adapter, aldri domeneeier.
+
+**Bygget, samme mal som Product Core/D-128:** migrasjon `048_operations.sql` (`operations_vendors`,
+`operations_runbooks`, `operations_tasks`, `operations_task_events`, RLS tenant+RESTRICTIVE-space,
+`GRANT DELETE` for Q-20, `business_open_loops.operations_task_id`-pekerkolonne domene-prefikset per
+etablert presedens); ny pakke `@jarvis/operations` (types/state-machine/service/transport, deterministisk
+oppgave-lifecycle `open→in_progress/blocked→done/cancelled` med administrativ gjenåpning - leverandør/
+runbook er enklere referanseentiteter uten egen state-machine); to nye `OpenLoopService`-regler
+(`operations_task_overdue` - passert frist på ikke-terminal oppgave, `operations_task_escalation_needed`
+- forfalt >3 dager uten eskalering) registrert i `runSweep()`; eskalering er en EKSPLISITT, deterministisk
+`OperationsService.escalateTask()`-handling (akkumulerende nivå, faller tilbake til leverandørens
+eskaleringskontakt) - OpenLoopService overflater KUN behovet, bygger ALDRI en ny varslings-/reminder-
+motor; `businessOpenLoopsSource()` (§13/D-53) overflater begge GRATIS i briefen - ingen ny `BriefSource`
+bygget; 22 nye `operations.*` ToolGateway-handlinger (klasse A/B/C, INGEN klasse D); wired identisk i
+`apps/api/src/main.ts`/`worker-main.ts`; Q-20 erasure-plan utvidet (open-loop FØRST, så task_events, så
+tasks, så runbooks, så vendors - FK-trygg rekkefølge).
+`BUSINESS_DOMAIN_COVERAGE.operations` flippet til `"available"` (source: Native Jarvis Operations Core,
+D-129), `operations.live_provider_connected=false`. `renderDomainCoverage()`-overskriften gjort beregnet
+i stedet for en hardkodet "IKKE fullt oppfylt"-påstand, som ellers ville blitt aktivt usann i samme
+øyeblikk denne sliceen landet.
+
+**UA-3 kriterium 2 re-evaluert: `sales=AVAILABLE marketing=AVAILABLE finance=AVAILABLE
+product=AVAILABLE operations=AVAILABLE` - 5/5 domener, NÅ dekket** (JARVIS_CANONICAL kapabilitet for alle
+fem - IKKE et krav om at alle har live eksterne leverandører tilkoblet, `live_provider_connected=false`
+for alle fem er fortsatt sant og uendret). Testmatrise: `modules/operations/test/*` (47: state-machine
+11, service-rls 25 describes A-G, transport-wiring 11), `modules/business/test/
+open-loop-operations.test.ts` (13), `business-brief.test.ts` (utvidet med drift-dekning/leverandør-
+uavhengighet/§15-ærlighet-nå-5-av-5/empirisk ende-til-ende), `modules/erasure/test/
+operations-erasure.test.ts` (9, A-H). `pnpm -w typecheck`/`pnpm -w lint` rent, FULL arbeidsområde-
+testsuite grønn (3666/3666 på 216 filer). Draft-PR, IKKE merget, ingen self-approval, INGEN posting til
+issue #68. Full detalj: D-129 i DECISIONS_AND_ASSUMPTIONS.md.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

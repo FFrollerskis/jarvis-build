@@ -333,6 +333,28 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "incident_diagnoses", await run(client, mode, "incident_diagnoses", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "incident_evidence", await run(client, mode, "incident_evidence", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "incidents", await run(client, mode, "incidents", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-3 Native Jarvis Operations Core (D-129, 048_operations.sql): registrer
+  // driftsdomene-tabellene i erasure-planen (SAMME mønster/begrunnelse som
+  // support_*/contract_*/product_* over). En driftsoppgave-tilknyttet
+  // open-loop (samme FK-lærdom som HOST FIX #1/D-67 for `ticket_id`) slettes
+  // FØRST, SNEVERT avgrenset til `operations_task_id IS NOT NULL` (rører
+  // aldri andre loop_type-er).
+  add(
+    result,
+    "business_open_loops",
+    await run(client, mode, "business_open_loops", "tenant_id = $1 AND memory_space_id = $2 AND operations_task_id IS NOT NULL", tv)
+  );
+  // `operations_task_events` FØR `operations_tasks` (FK -> operations_tasks).
+  // `operations_tasks` har FK -> BÅDE `operations_vendors` OG
+  // `operations_runbooks` - MÅ derfor slettes FØR begge under (samme "barn-FK
+  // FØR forelder"-regel som resten av denne planen). `operations_runbooks`
+  // har SIN EGEN FK -> `operations_vendors` - MÅ derfor slettes FØR
+  // `operations_vendors` (etter `operations_tasks`, som selv kan peke til
+  // et runbook).
+  add(result, "operations_task_events", await run(client, mode, "operations_task_events", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "operations_tasks", await run(client, mode, "operations_tasks", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "operations_runbooks", await run(client, mode, "operations_runbooks", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "operations_vendors", await run(client, mode, "operations_vendors", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

@@ -42,6 +42,7 @@ import {
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
+import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -217,6 +218,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // uendret. Ingen ekstern issue-tracker-avhengighet - SAMME lat/enkel-
   // avhengighet-mønster som `AgreementsTransport`.
   const productService = new ProductService(pool);
+  // UA-3 Native Jarvis Operations Core (D-129): egen tjeneste over SAMME
+  // runtime-pool, ingen ny motor - leverandørkontakt gjenbruker Business
+  // Graph (company_id/contact_id) og OpenLoopService (forfalt/eskalerings-
+  // reglene) uendret. Ingen ekstern driftsplattform-/ticketing-avhengighet
+  // - SAMME lat/enkel-avhengighet-mønster som `ProductTransport`.
+  const operationsService = new OperationsService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
@@ -377,6 +384,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // mønster som AgreementsTransport over (INGEN toolGateway/
     // ToolInvocationContext, ingen nøstet klasse D-handling).
     product: new ProductTransport(productService),
+    // UA-3 Native Jarvis Operations Core (D-129): identisk wiring-mønster som ProductTransport over.
+    operations: new OperationsTransport(operationsService),
     growth: new GrowthTransport(growthService),
     // UA-4 Google Ads-slice (D-83): SAMME lat/enkel-avhengighet-mønster som
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
