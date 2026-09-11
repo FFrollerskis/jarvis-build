@@ -107,6 +107,85 @@ export function collectRepoFacts(cfg, runner = spawnSync) {
   };
 }
 
+/** ---------------- linked worktrees (D-133) ---------------- */
+
+/**
+ * Run a git query with the working directory pointed somewhere else - normally
+ * a task's isolated linked worktree rather than the primary checkout.
+ *
+ * Every helper above takes its cwd from `cfg.repoPath`, so a shallow override is
+ * all that is needed and no signature changes. It is a function rather than an
+ * inline spread so the intent is greppable and so a caller cannot accidentally
+ * mutate the shared config object.
+ */
+export function atPath(cfg, path) {
+  return { ...cfg, repoPath: path };
+}
+
+/**
+ * `git worktree list --porcelain` as `[{ path, head, branch, detached, bare }]`.
+ *
+ * `{ ok: false }` means UNKNOWN. It never means "no linked worktrees exist" -
+ * treating a failed query as absence is exactly how a worker would conclude a
+ * task's isolated context had vanished and start over on top of live work.
+ */
+export function gitWorktreeList(cfg, runner = spawnSync) {
+  const res = runGit(cfg, ["worktree", "list", "--porcelain"], runner);
+  if (!res.ok) return { ok: false, items: null, error: res.error };
+
+  const items = [];
+  let current = null;
+  for (const raw of res.stdout.split(/\r?\n/)) {
+    const line = raw.trimEnd();
+    if (line === "") {
+      if (current) items.push(current);
+      current = null;
+      continue;
+    }
+    const [key, ...rest] = line.split(" ");
+    const value = rest.join(" ");
+    if (key === "worktree") {
+      if (current) items.push(current);
+      current = { path: value, head: null, branch: null, detached: false, bare: false };
+    } else if (current) {
+      if (key === "HEAD") current.head = value;
+      else if (key === "branch") current.branch = value;
+      else if (key === "detached") current.detached = true;
+      else if (key === "bare") current.bare = true;
+    }
+  }
+  if (current) items.push(current);
+  return { ok: true, items };
+}
+
+/**
+ * Create a linked worktree, DETACHED at an exact commit.
+ *
+ * Detached on purpose: the primary checkout may already have the interesting
+ * branch checked out, and git refuses to check the same branch out twice. The
+ * child creates its own branch inside its own worktree, which is also what keeps
+ * two concurrent tasks from ever contending for one ref.
+ */
+export function gitWorktreeAdd(cfg, { path, commitish }, runner = spawnSync) {
+  const res = runGit(cfg, ["worktree", "add", "--detach", path, commitish], runner);
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
+/**
+ * Remove a linked worktree WITHOUT `--force`.
+ *
+ * The missing `--force` is the safety property, not an oversight: git itself
+ * then refuses to remove a worktree that still has modifications, so an
+ * uncommitted task-owned change cannot be destroyed by a cleanup pass even if
+ * the caller's own guards were wrong.
+ */
+export function gitWorktreeRemove(cfg, path, runner = spawnSync) {
+  const res = runGit(cfg, ["worktree", "remove", path], runner);
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true };
+}
+
 /**
  * Does the configured remote actually point at the repository this worker is
  * allowed to act on? A worker that has been pointed at a different remote must

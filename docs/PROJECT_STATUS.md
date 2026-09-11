@@ -1,7 +1,7 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-11 (branch `claude/d132-worker-recovery-reconciliation`, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`)
+**Oppdatert:** 2026-09-11 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-133**, PR #80-review-herding.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -80,6 +80,67 @@ credentials, deploy, merge, self-approval, produktkapabilitet-endringer, urelate
 
 Full detalj: **D-132** i DECISIONS_AND_ASSUMPTIONS.md.
 
+## Herdingsrunde 2 på SAMME PR #80: D-133 (PR #80-review, REF_REVIEW_ID=5175627340)
+
+TASK_ID `D132-PR80-REVIEW-HARDENING-20260911-A` (kommentar 5630497923 på issue #68). En NY
+uavhengig arkitektkontroll av D-132 sin eksakte HEAD `4f1b7b4` fant TO sammenhengende
+kontrollplan-blokkere. Rettet som ÉN runde på SAMME branch og SAMME PR - ingen ny PR.
+
+**Blocker 1 - commit-SHA-er er ikke en proveniensmodell.** D-132 registrerte hvilke COMMITS en task
+eide, men et forsøk som avslutter/krasjer uten betrodd rapport ETTER legitime UKOMMITERTE endringer
+etterlot dem som anonymt skitt i den DELTE checkouten. Ingenting attribuerte dem til en task, så
+neste kjørings dirty-guard blokkerte - korrekt - og arbeidet var strandet, med bare de to forbudte
+utveiene igjen (adoptere uattribuerte filer, eller stashe/resette dem bort). Manglende STRUKTUR,
+ikke manglende regel: det fantes ikke noe sted en tasks ukommiterte arbeid kunne bo som ikke også
+var brukerens arbeidsområde.
+
+Rettet med **isolasjon + claim** (nytt `lib/worktree.mjs`, ny `worktreeRoot`-konfig):
+
+1. Hver task får sin EGEN linkede git-worktree, nøklet på `TASK_ID`, UTENFOR den primære checkouten
+   (standard: en SØSKENKATALOG av `scratchRoot` - bevisst ikke under den, som gis barnet som TEMP). Barnet kjører med den som
+   `cwd`; prompten oppgir stien, baseline-commiten og forbudet mot å mutere primær-checkouten.
+2. En DURABEL CLAIM (`.claims/<TASK_ID>.json`, fsynced) skrives FØR `git worktree add` og
+   re-verifiseres før gjenbruk. Den binder katalogen til eksakt `task_id`, betrodd
+   `task_comment_id`, repo + lokal repo-sti, kontroll-issue, `baseline_sha`, `worktree_path` og
+   attempt-identitet. **Eierskap hevdes FRAMOVER før noe røres og BARE sjekkes etterpå - det utledes
+   aldri BAKOVER fra hvilke filer som er skitne**, fordi det «beviset» er like forenlig med
+   brukerens eget arbeid.
+3. Skitt under en gyldig claim for DENNE tasken er task-eid ved konstruksjon og leveres til et
+   gjenopptatt barn som «dette er DITT eget arbeid - aldri stash/reset/checkout over/clean/slett».
+   Skitt alle andre steder er UKJENT og FAIL-CLOSED: rapportert med eksakt sti, aldri adoptert,
+   aldri endret. En nyere task kan hverken dispatches inn i eller blokkeres av en annen tasks
+   skitne kontekst.
+4. Opprydding kun etter terminal OG VELLYKKET rekonsiliering, kun når worktreen er ren, kun via
+   `git worktree remove` UTEN `--force` (git nekter selv hvis våre garder tar feil). Claim-filen
+   slettes ALDRI - den merkes `released`, så beviset overlever katalogen.
+
+**Blocker 2 - supersesjon pensjonerte arbeid på et ikke-bevis.** `isComplete` godtok ENHVER terminal
+rapport, inkludert `BLOCKED`/`FAILED` der `assessCompletion()` allerede hadde beregnet
+`successful: false` uten at noen leste det - og fordi workeren skriver slike utfall som
+`completed, successful: false`, ville en fiks som bare så på ferske kommentarer sluppet feilen inn
+igjen fra state-filen. Nå kreves POSITIVT bevis: `newer_task_completed_successfully` (kanonisk
+vellykket terminalutfall, `successful === true`; `undefined` er ikke suksess) eller
+`explicit_trusted_supersedes_declaration` (`SUPERSEDES=<eksakt TASK_ID>` i en strengt nyere BETRODD
+`ARCHITECT_TASK` - eksakt, retningsbestemt, aldri selvrefererende, aldri fra ubetrodd innhold).
+Grunnlaget er auditbart: `superseded_basis` + `superseded_declared_by_comment_id` i state, i
+statusmeldingen og i `--dry-run`.
+
+**Kvalitetsporter for D-133 - faktisk kjørt:**
+
+- Worker-suiten: **20/20 filer, 538/538 tester grønt** (fra 470; ingen eksisterende test svekket
+  eller fjernet - den ene endrede assertionen ER den tilsiktede oppførselsendringen i blocker 2).
+- Ny `test/worktree.test.mjs` (34 enhetstester) og ny `test/worker-task-worktree.test.mjs`
+  (10 prosess-tester mot det EKTE entrypointet og et EKTE git-repo - `JARVIS_WORKER_GIT` bevisst
+  IKKE satt, fordi påstanden er fysisk og en fake-git bare ville vært enig med workeren).
+- Nye entrypoint- og enhetstester for supersesjon i `worker-queue-reconciliation.test.mjs` og
+  `queue.test.mjs`.
+- `fixtures/fake-git.mjs` modellerer nå `git worktree list/add/remove` (inkl. at en ikke-tvunget
+  `remove` FEILER på en skitten worktree); `fixtures/fake-claude.mjs` gjør EKTE tracked/untracked
+  mutasjoner og commits i sin `cwd`; ny `fixtures/real-git-repo.mjs`.
+
+Stashen `worker-dirty-backup-2026-09-11` er URØRT. Full detalj: **D-133** i
+DECISIONS_AND_ASSUMPTIONS.md.
+
 ## Blokkeringer
 
 Ingen harde blockere. `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` fra oppgaven:
@@ -90,6 +151,14 @@ Merk som miljøfakta, ikke som en test som ble hoppet over: den fulle arbeidsomr
 (`pnpm test`) starter embedded Postgres for produktmodulene. Denne oppgaven endrer null produktkode,
 og CI kjører hele suiten på eksakt PR-HEAD uansett; det som er kjørt lokalt her er hele
 worker-suiten (som er det denne diffen faktisk berører) pluss `eslint .` over hele repoet.
+
+## Vertsoppgave som følger av D-133 (ikke en blocker for review)
+
+Isolerte task-worktrees legger administrasjonsposter under `<repoPath>/.git/worktrees/` når en task
+kjører. Det er git sin egen standardmekanisme og påvirker ikke `git status` i arbeidstreet, men det
+er en reell endring i den lokale checkouten som er verdt å kjenne til. `worktreeRoot` er valgfri i
+config og faller tilbake til en søskenkatalog av `scratchRoot`, så eksisterende `config.json` på
+verten trenger ingen endring.
 
 ## Neste oppgave
 

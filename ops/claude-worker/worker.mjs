@@ -37,6 +37,7 @@
 import { existsSync, mkdirSync, writeFileSync, unlinkSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
 import { WORKER_VERSION, loadWorkerConfig } from "./lib/config.mjs";
 import { HEALTH_EVENTS, emitHealth, readHealth, summarizeHealth, sanitize } from "./lib/health.mjs";
@@ -68,7 +69,15 @@ import {
 } from "./lib/reconcile.mjs";
 import { RECOVERY, planTaskRecovery, childLifetimeBudgetMs, describeProtectedChild } from "./lib/recovery.mjs";
 import { runClaude, OUTCOME } from "./lib/dispatch.mjs";
-import { collectRepoFacts, gitStatusLines, gitHead, gitCurrentBranch, remoteMatchesRepo } from "./lib/git.mjs";
+import { collectRepoFacts, gitStatusLines, gitHead, gitCurrentBranch, remoteMatchesRepo, atPath } from "./lib/git.mjs";
+import {
+  establishTaskWorktree,
+  releaseTaskWorktree,
+  describeRefusal,
+  taskWorktreePath,
+  claimFilePath,
+  readClaim
+} from "./lib/worktree.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import { verifyAuth, fetchIssueComments, postComment, listRemoteBranches, listPulls } from "./lib/github.mjs";
 
@@ -185,6 +194,36 @@ function reportStatus(cfg, { taskId, phase, reason, detail, nextAction }) {
     log(cfg, `Failed to post status comment: ${res.error}`);
   }
   return { posted: res.ok, ...res };
+}
+
+/**
+ * D-133: conservative cleanup of a task's isolated worktree.
+ *
+ * Called ONLY from a terminal reconciliation, and even then it does nothing
+ * unless the task completed SUCCESSFULLY and its worktree is clean -
+ * `releaseTaskWorktree` re-checks both, and the underlying `git worktree remove`
+ * is deliberately unforced so git refuses on its own if either guard were wrong.
+ *
+ * Retention is the default and is never silent: the reason is logged, so a
+ * directory kept because work is still uncommitted is visible rather than
+ * mysterious. The claim file is never deleted, so the evidence of what ran there
+ * outlives the directory.
+ */
+function releaseWorktreeIfSettled(cfg, taskId, successful) {
+  let outcome;
+  try {
+    outcome = releaseTaskWorktree({ cfg, taskId, worktreeRoot: cfg.worktreeRoot, successful });
+  } catch (err) {
+    log(cfg, `Could not evaluate worktree release for ${taskId}: ${sanitize(err.message)}. Nothing was removed.`);
+    return { released: false, retained: true, reason: "release_evaluation_failed" };
+  }
+  if (outcome.released) {
+    log(cfg, `Released the isolated worktree for ${taskId} (${outcome.reason}). Its claim file is kept as evidence.`);
+  } else if (outcome.retained) {
+    log(cfg, `RETAINED the isolated worktree for ${taskId}: ${outcome.reason}. `
+      + "Nothing was deleted - ownership or completion is not certain enough to clean up.");
+  }
+  return outcome;
 }
 
 /** ---------------- run ---------------- */
@@ -392,8 +431,10 @@ function reconcileReportedTasks(cfg, state, token, comments) {
       task_id: task.task_id,
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,
+      successful: completion.successful,
       via: "pre_selection_reconciliation"
     });
+    releaseWorktreeIfSettled(cfg, task.task_id, completion.successful);
     reconciled.push(task.task_id);
   }
 
@@ -429,17 +470,27 @@ function retireIneligibleTasks(cfg, state, token, selection) {
     if (!record || isTerminal(record)) continue;
 
     if (decision.reason === INELIGIBLE.SUPERSEDED) {
-      log(cfg, `SUPERSEDED ${decision.taskId}: a strictly newer trusted task (${decision.supersededBy}) has already `
-        + "completed, so replaying this older order would apply a stale instruction to changed state.");
+      // PR #80 review blocker 3: the BASIS is recorded, not just the id. A
+      // retirement that cannot be traced back to positive successful completion
+      // or to an exact trusted declaration is not auditable, and this is the
+      // only place a task is silently taken out of the queue forever.
+      log(cfg, `SUPERSEDED ${decision.taskId}: ${decision.supersessionDetail} `
+        + `(basis=${decision.supersessionBasis}). Replaying this older order would apply a stale `
+        + "instruction to changed state.");
       upsertTask(state, decision.taskId, {
         status: TASK_STATUS.SUPERSEDED,
         superseded_at: new Date().toISOString(),
         superseded_by: decision.supersededBy,
-        last_failure_reason: `superseded_by_newer_completed_task (${decision.supersededBy})`,
+        superseded_basis: decision.supersessionBasis,
+        superseded_declared_by_comment_id: decision.supersessionDeclaredByCommentId ?? null,
+        last_failure_reason: `${decision.supersessionBasis} (${decision.supersededBy})`,
         child_identity: null
       });
       emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
-        task_id: decision.taskId, reason: "superseded_by_newer_completed_task", superseded_by: decision.supersededBy
+        task_id: decision.taskId,
+        reason: "superseded_by_newer_completed_task",
+        superseded_by: decision.supersededBy,
+        basis: decision.supersessionBasis
       });
       reportStatus(cfg, {
         taskId: decision.taskId,
@@ -447,9 +498,14 @@ function retireIneligibleTasks(cfg, state, token, selection) {
         reason: "superseded_by_newer_completed_task",
         detail: [
           `This task was issued at ${decision.createdAt ?? "an unknown time"} and had ${decision.attempts} attempt(s).`,
-          `A STRICTLY NEWER trusted ARCHITECT_TASK (${decision.supersededBy}) has since completed.`,
-          "Re-running this older order would apply a stale instruction to repository state that has",
-          "already moved on, so it is retired instead of retried.",
+          `BASIS: ${decision.supersessionBasis}`,
+          `EVIDENCE: ${decision.supersessionDetail}`,
+          decision.supersessionDeclaredByCommentId !== null
+            ? `DECLARED BY: trusted control-issue comment ${decision.supersessionDeclaredByCommentId}`
+            : "DECLARED BY: nothing - retirement follows from the newer task's SUCCESSFUL completion.",
+          "",
+          "A newer task that ended BLOCKED, FAILED or with an unreadable status never retires an older",
+          "one: it did not move the repository on, so the older order is not stale.",
           "",
           "NOTHING was reset, reverted or deleted. No repository action was taken for this task."
         ].join("\n"),
@@ -590,6 +646,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
       emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
         task_id: taskId, report_comment_id: rec.completion.reportCommentId, via: "crash_recovery"
       });
+      releaseWorktreeIfSettled(cfg, taskId, rec.completion.successful);
       mutated = true;
       continue;
     }
@@ -669,6 +726,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
         task_id: taskId, report_comment_id: rec.completion.reportCommentId, via: "reconciliation"
       });
+      releaseWorktreeIfSettled(cfg, taskId, rec.completion.successful);
       return EXIT.OK;
     }
 
@@ -780,30 +838,108 @@ async function runTask(cfg, state, token, candidate, comments) {
   }
   emitHealth(cfg.healthFile, HEALTH_EVENTS.PREFLIGHT, { task_id: taskId, worktree: "clean", head: facts.head, branch: facts.branch });
 
+  // --- D-133: ESTABLISH THE TASK'S ISOLATED CONTEXT, BEFORE ANY MUTATION ----
+  //
+  // The dirty guard above protects the USER's checkout and is unchanged. This
+  // step gives the task somewhere of its own to be dirty in, with a durable
+  // ownership claim written before the worktree it covers exists.
+  //
+  // Every refusal here is FAIL-CLOSED: the task stays non-terminal and eligible,
+  // nothing is stashed, reset, cleaned, deleted or adopted, and the exact reason
+  // - including the precise path and what was found there - is reported.
+  const attempts = (prior?.attempts ?? 0) + 1;
+  const attemptId = randomUUID();
+  heartbeat(cfg.lockFile, { token, phase: "worktree", taskId });
+  const workspace = establishTaskWorktree({
+    cfg,
+    taskId,
+    comment: candidate.comment,
+    worktreeRoot: cfg.worktreeRoot,
+    baselineSha: facts.head,
+    baselineBranch: facts.branch,
+    attempt: attempts,
+    attemptId,
+    workerVersion: WORKER_VERSION
+  });
+
+  if (!workspace.ok) {
+    log(cfg, `BLOCKED: could not establish the isolated worktree for ${taskId} (${workspace.state}): ${workspace.reason}`);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "task_worktree_unavailable", worktree_state: workspace.state
+    });
+    reportStatus(cfg, {
+      taskId,
+      phase: "worktree",
+      reason: `task_worktree_${workspace.state}`,
+      detail: describeRefusal({ taskId, path: workspace.path, state: workspace.state, reason: workspace.reason, claim: workspace.claim }),
+      nextAction: "Inspect the listed path by hand. If it holds work you want, move or commit it deliberately; "
+        + "if it is genuinely yours to discard, remove it yourself. The worker will never adopt or destroy "
+        + "content it cannot attribute. The next scheduled run then dispatches this same task automatically."
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    return EXIT.BLOCKED; // task stays non-terminal and eligible - NOT processed
+  }
+
+  log(cfg, `Task worktree ${workspace.created ? "CREATED" : "RESUMED"} at ${workspace.path} `
+    + `(baseline=${facts.head}, head=${workspace.head ?? "unknown"}, branch=${workspace.branch ?? "unknown"}, `
+    + `task-owned uncommitted entries=${workspace.dirty.length}).`);
+  if (workspace.dirty.length > 0) {
+    for (const line of workspace.dirty) log(cfg, `  TASK_OWNED_DIRTY ${line}`);
+  }
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.PREFLIGHT, {
+    task_id: taskId,
+    worktree: workspace.created ? "created" : "resumed",
+    worktree_path: workspace.path,
+    task_owned_dirty_entries: workspace.dirty.length,
+    head: workspace.head,
+    branch: workspace.branch
+  });
+
   // --- mark in progress and dispatch ---
   // TASK_ID has already been validated as a single safe path component.
   const scratchDir = join(cfg.scratchRoot, taskId);
   mkdirSync(scratchDir, { recursive: true });
 
-  const attempts = (prior?.attempts ?? 0) + 1;
   const dispatchStartedAt = new Date().toISOString();
   upsertTask(state, taskId, {
     status: TASK_STATUS.IN_PROGRESS,
     attempts,
+    attempt_id: attemptId,
     first_dispatch_at: prior?.first_dispatch_at ?? dispatchStartedAt,
     last_dispatch_at: dispatchStartedAt,
     comment_id: candidate.comment.id,
-    branch_before: facts.branch,
-    head_before: facts.head,
+    // D-133: `branch_before` / `head_before` describe the TASK'S OWN context,
+    // not the user's checkout. Recording the primary checkout's head here would
+    // make a resumed child compare its work against a tree it never touched.
+    branch_before: workspace.branch,
+    head_before: workspace.head,
+    primary_branch_at_dispatch: facts.branch,
+    primary_head_at_dispatch: facts.head,
+    worktree_path: workspace.path,
+    worktree_claim_file: workspace.claimFile,
+    worktree_baseline_sha: workspace.claim?.baseline_sha ?? facts.head,
+    worktree_task_owned_dirty: workspace.dirty,
     child_identity: null
   });
   persistState(cfg, state, token);
 
-  log(cfg, `Dispatching TASK_ID=${taskId} attempt ${attempts} (branch=${facts.branch}, head=${facts.head})...`);
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, { task_id: taskId, attempt: attempts, head: facts.head });
+  log(cfg, `Dispatching TASK_ID=${taskId} attempt ${attempts} in ${workspace.path} `
+    + `(branch=${workspace.branch}, head=${workspace.head})...`);
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.DISPATCH_STARTED, { task_id: taskId, attempt: attempts, head: workspace.head });
 
   let beatCount = 0;
-  const result = await runClaude(cfg, { ...candidate, resume, scratchDir }, {
+  const result = await runClaude(cfg, {
+    ...candidate,
+    resume,
+    scratchDir,
+    workspace: {
+      path: workspace.path,
+      baselineSha: workspace.claim?.baseline_sha ?? facts.head,
+      baselineBranch: workspace.claim?.baseline_branch ?? facts.branch,
+      dirty: workspace.dirty
+    }
+  }, {
     heartbeatMs: cfg.heartbeatSeconds * 1000,
     // BLOCKER 1: the child's identity is durable BEFORE we wait on it, so a
     // parent crash right here still leaves a record that protects the child.
@@ -1089,20 +1225,35 @@ async function runTask(cfg, state, token, candidate, comments) {
     sinceIso: dispatchStartedAt
   });
 
-  const headAfter = gitHead(cfg);
-  const branchAfter = gitCurrentBranch(cfg);
+  // D-133: every "after" fact is read from the TASK'S OWN worktree. Reading the
+  // primary checkout here would record the user's HEAD as this task's result and
+  // make the provenance handed to a resumed child actively misleading.
+  const wtCfg = atPath(cfg, workspace.path);
+  const headAfter = gitHead(wtCfg);
+  const branchAfter = gitCurrentBranch(wtCfg);
+  const dirtyAfter = gitStatusLines(wtCfg);
   const checkpoint = {
     last_outcome: result.outcome,
     last_exit_code: result.code ?? null,
     last_child_pid: result.childPid ?? null,
     last_dispatch_finished_at: new Date().toISOString(),
-    branch_before: facts.branch,
-    head_before: facts.head,
+    branch_before: workspace.branch,
+    head_before: workspace.head,
     head_after: headAfter.ok ? headAfter.value : null,
     head_after_error: headAfter.ok ? null : headAfter.error,
     branch_after: branchAfter.ok ? branchAfter.value : null,
-    branch_after_error: branchAfter.ok ? null : branchAfter.error
+    branch_after_error: branchAfter.ok ? null : branchAfter.error,
+    // The task-owned uncommitted state this attempt LEFT BEHIND. This is the
+    // record that turns "exited without a report having changed files" from a
+    // stranded, unattributable mess into a resumable task context.
+    worktree_path: workspace.path,
+    worktree_task_owned_dirty: dirtyAfter.ok ? dirtyAfter.lines : null,
+    worktree_dirty_query_error: dirtyAfter.ok ? null : dirtyAfter.error
   };
+  if (dirtyAfter.ok && dirtyAfter.lines.length > 0) {
+    log(cfg, `TASK_ID=${taskId} left ${dirtyAfter.lines.length} task-owned uncommitted entry/entries in its own `
+      + `worktree (${workspace.path}). They are recorded as task-owned and will be resumed, not discarded.`);
+  }
 
   // The branch this attempt actually ended on is an EXACT association: record it
   // so a later reconciliation never has to guess (blocker 6). D132 adds the head
@@ -1128,9 +1279,11 @@ async function runTask(cfg, state, token, candidate, comments) {
     state.last_run_at = new Date().toISOString();
     persistState(cfg, state, token);
     emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
-      task_id: taskId, report_comment_id: completion.reportCommentId, report_status: completion.status
+      task_id: taskId, report_comment_id: completion.reportCommentId, report_status: completion.status,
+      successful: completion.successful
     });
     log(cfg, `TASK_ID=${taskId} COMPLETE - matching trusted report ${completion.reportCommentId} (STATUS=${completion.status}).`);
+    releaseWorktreeIfSettled(cfg, taskId, completion.successful);
     return EXIT.OK;
   }
 
@@ -1262,6 +1415,37 @@ function blockOnGitFailure(cfg, state, token, taskId, failures) {
 
 /** ---------------- other subcommands ---------------- */
 
+/**
+ * Read-only description of a task's isolated context, for `status` and the dry
+ * run. Takes no lock and mutates nothing; an unanswerable git query is reported
+ * as unknown, never as clean.
+ */
+function describeTaskWorktree(cfg, taskId) {
+  let path;
+  let claimFile;
+  try {
+    path = taskWorktreePath(cfg.worktreeRoot, taskId);
+    claimFile = claimFilePath(cfg.worktreeRoot, taskId);
+  } catch (err) {
+    return { path: null, claim_state: null, error: sanitize(err.message) };
+  }
+  const claimRead = readClaim(claimFile);
+  const exists = existsSync(path);
+  const status = exists ? gitStatusLines(atPath(cfg, path)) : { ok: true, lines: [] };
+  return {
+    path,
+    exists,
+    claim_state: claimRead.ok ? claimRead.claim.state : null,
+    claim_problem: claimRead.ok ? null : claimRead.reason,
+    baseline_sha: claimRead.ok ? claimRead.claim.baseline_sha : null,
+    task_comment_id: claimRead.ok ? claimRead.claim.task_comment_id : null,
+    latest_attempt_id: claimRead.ok ? claimRead.claim.latest_attempt_id : null,
+    status_query_ok: status.ok,
+    task_owned_dirty_entries: status.ok ? status.lines : null,
+    status_query_error: status.ok ? null : status.error
+  };
+}
+
 /** Read-only preview. Takes no lock and writes nothing at all. */
 function cmdDryRun(cfg) {
   const loaded = loadState(cfg.stateFile, cfg.stateBackupFile, { schema: "worker" });
@@ -1305,8 +1489,28 @@ function cmdDryRun(cfg) {
     unrecognised_report_status: selection.unrecognisedStatusTaskIds,
     waiting_for_backoff: selection.waitingTaskIds,
     queue_decisions: selection.decisions.map((d) => ({
-      task_id: d.taskId, eligible: d.eligible, reason: d.reason, tier: d.tier, attempts: d.attempts
+      task_id: d.taskId,
+      eligible: d.eligible,
+      reason: d.reason,
+      tier: d.tier,
+      attempts: d.attempts,
+      // PR #80 blocker 3: the dry run must show WHY a retirement would happen,
+      // or the host cannot verify that an unsuccessful newer task is no longer
+      // silently invalidating older work.
+      superseded_by: d.supersededBy ?? null,
+      supersession_basis: d.supersessionBasis ?? null
     })),
+    newest_successful_task: selection.newestSuccessfulTaskId,
+    // The USER's checkout. A task's own dirt never appears here by construction.
+    primary_worktree_query_ok: status.ok,
+    primary_worktree_dirty_entries: status.ok ? status.lines : null,
+    primary_worktree_query_error: status.ok ? null : status.error,
+    // D-133: each known task's own isolated context, including the uncommitted
+    // work it owns. This is what makes "task-owned, not stranded" inspectable.
+    task_worktrees: Object.keys(loaded.state.tasks ?? {}).map((id) => ({
+      task_id: id, ...describeTaskWorktree(cfg, id)
+    })),
+    // Retained under the pre-D133 names so existing host tooling still parses.
     worktree_query_ok: status.ok,
     worktree_dirty_entries: status.ok ? status.lines : null,
     worktree_query_error: status.ok ? null : status.error
@@ -1353,7 +1557,11 @@ function cmdStatus(cfg) {
       last_failure_reason: t.last_failure_reason ?? null,
       child_pid: t.child_identity?.pid ?? null,
       observed_branches: t.observed_branches ?? [],
-      observed_pr_numbers: t.observed_pr_numbers ?? []
+      observed_pr_numbers: t.observed_pr_numbers ?? [],
+      // D-133: the task's own isolated context, so an operator can see WHERE a
+      // task's uncommitted work lives without guessing - and see that it is
+      // attributed rather than anonymous.
+      worktree: describeTaskWorktree(cfg, t.task_id)
     })),
     github_reachable: auth.ok,
     repo_path: cfg.repoPath,

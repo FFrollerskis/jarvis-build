@@ -24,6 +24,7 @@
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const DIR = process.env.JARVIS_FAKE_CLAUDE_DIR;
 const MODE = process.env.JARVIS_FAKE_CLAUDE_MODE ?? "report";
@@ -71,11 +72,69 @@ if (hangs) {
 let prompt = "";
 process.stdin.on("data", (d) => { prompt += d; });
 
+/**
+ * D-133: make REAL repository changes in whatever directory this child was
+ * given as its cwd.
+ *
+ * The isolation tests need a child that behaves like the real one - it edits
+ * tracked files, creates untracked files and sometimes commits - because the
+ * whole property under test is "where did those changes land, and who owns
+ * them". A child that only ever posts comments cannot exercise it at all.
+ *
+ *   JARVIS_FAKE_CLAUDE_MUTATE=tracked,untracked   which mutations to make
+ *   JARVIS_FAKE_CLAUDE_COMMIT=1                   also commit what it did
+ *
+ * cwd is used deliberately and not a configured path: if the worker ever
+ * dispatched a child into the wrong directory, these writes would land there,
+ * and the tests assert on exactly that.
+ */
+function mutateWorkspace(taskId) {
+  const kinds = String(process.env.JARVIS_FAKE_CLAUDE_MUTATE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (kinds.length === 0) return;
+  const cwd = process.cwd();
+  const made = [];
+
+  if (kinds.includes("tracked")) {
+    // `tracked.txt` exists in the baseline commit, so appending to it is a
+    // MODIFICATION of a tracked file - the case quarantine may never touch.
+    const file = join(cwd, "tracked.txt");
+    const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+    writeFileSync(file, `${before}edited by ${taskId} at ${new Date().toISOString()}\n`, "utf8");
+    made.push("tracked.txt");
+  }
+  if (kinds.includes("untracked")) {
+    const name = `work-${taskId}.md`;
+    writeFileSync(join(cwd, name), `# work in progress for ${taskId}\n`, "utf8");
+    made.push(name);
+  }
+
+  if (process.env.JARVIS_FAKE_CLAUDE_COMMIT === "1") {
+    const run = (args) => spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
+    run(["add", "-A"]);
+    run(["-c", "user.email=fake@example.invalid", "-c", "user.name=fake-claude",
+      "commit", "-m", `work for ${taskId}`]);
+    const head = run(["rev-parse", "HEAD"]);
+    try {
+      appendFileSync(join(DIR, "commits.log"), `${taskId} ${String(head.stdout ?? "").trim()}\n`, "utf8");
+    } catch { /* best effort */ }
+  }
+
+  try {
+    appendFileSync(join(DIR, "mutations.log"), `${taskId} ${cwd} ${made.join(",")}\n`, "utf8");
+  } catch { /* best effort */ }
+}
+
 let acted = false;
 function act() {
   if (acted) return;
   acted = true;
   try { writeFileSync(join(DIR, "prompt.txt"), prompt, "utf8"); } catch { /* best effort */ }
+  // Every prompt this child has ever been handed, so a test can assert what a
+  // RESUMED attempt was told - `prompt.txt` only ever holds the latest one.
+  try {
+    appendFileSync(join(DIR, "prompts.jsonl"), JSON.stringify({ cwd: process.cwd(), prompt }) + "\n", "utf8");
+  } catch { /* best effort */ }
+  try { mutateWorkspace(taskIdFrom(prompt)); } catch { /* best effort */ }
   // D132: which TASK_ID this invocation was actually handed. This is the
   // evidence a queue-ordering test needs - "was the old task dispatched again?"
   // cannot be answered from an invocation count alone.

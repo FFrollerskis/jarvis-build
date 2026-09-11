@@ -380,7 +380,14 @@ export function loadState(stateFile, backupFile = `${stateFile}.bak`, { schema =
 
 /** ---------------- atomic save ---------------- */
 
-function writeFileDurable(target, payload) {
+/**
+ * Write + fsync a uniquely named temp file, then rename it over the target
+ * (atomic on NTFS and POSIX). Exported because the task-worktree claim in
+ * worktree.mjs has the same durability requirement as the state file: an
+ * interrupted write must leave either the old claim or the new one, never a
+ * truncated document that would make a task's ownership unreadable.
+ */
+export function writeFileDurable(target, payload) {
   const tmp = `${target}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
   const fd = openSync(tmp, "wx");
   try {

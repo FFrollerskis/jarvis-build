@@ -99,6 +99,7 @@ const ABORT_DEADLINE_MS = 30_000;
 export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
   const { comment, updates = [] } = task;
   const scratchDir = task.scratchDir ?? null;
+  const workspace = task.workspace ?? null;
   const lines = [
     "You are the Claude implementation agent in the autonomous Jarvis Architect <-> Claude build loop.",
     `Repository: ${repoOwner}/${repoName}. Control issue: #${controlIssue}.`,
@@ -123,6 +124,41 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
       "you deliberately intend to commit.",
       ""
     );
+  }
+
+  // --- D-133: the child works in ITS OWN isolated linked worktree ----------
+  //
+  // The child must know this, for two reasons that matter to its behaviour:
+  // it may leave uncommitted work behind without stranding anyone (the dirty
+  // guard on the user's primary checkout is untouched by it), and it must not
+  // go looking for "the repo" somewhere else and mutate the shared checkout.
+  if (workspace) {
+    lines.push(
+      "ISOLATED TASK WORKTREE (D-133):",
+      `Your working directory is a linked git worktree owned exclusively by this TASK_ID: ${workspace.path}`,
+      `It was created from baseline commit ${workspace.baselineSha}`
+        + `${workspace.baselineBranch ? ` (branch ${workspace.baselineBranch} in the primary checkout)` : ""}`
+        + ", and a durable ownership claim binds it to this exact task, this control comment and this repository.",
+      "Work ONLY here. Never cd into, write to, commit in or otherwise mutate the primary checkout at "
+        + `${repoOwner}/${repoName}'s main working directory - it belongs to the user, and a task must never dirty it.`,
+      "Uncommitted changes you leave in THIS worktree are recorded as task-owned, so an interrupted attempt",
+      "is resumable here rather than stranded. That is not licence to leave work uncommitted: commit and push",
+      "as normal. It means an interruption is recoverable, not that it is free.",
+      ""
+    );
+
+    if (workspace.dirty?.length > 0) {
+      lines.push(
+        "TASK-OWNED UNCOMMITTED CHANGES ALREADY PRESENT IN YOUR WORKTREE:",
+        ...workspace.dirty.map((l) => `  ${l}`),
+        "",
+        "These are YOUR OWN previous attempt's changes, proven by the ownership claim on this directory -",
+        "they are not foreign work and not the user's. Read them, verify them, and carry them forward or",
+        "deliberately change them. NEVER stash, reset, checkout over, clean or delete them to get a clean",
+        "tree: that would destroy real work, which is exactly the failure this isolation exists to prevent.",
+        ""
+      );
+    }
   }
 
   if (task.resume) {
@@ -274,7 +310,11 @@ export function runClaude(cfg, task, {
     let child;
     try {
       child = spawnImpl(cfg.claudeCommand, args, {
-        cwd: cfg.repoPath,
+        // D-133: the child runs INSIDE its own isolated linked worktree when one
+        // has been established. `cfg.repoPath` remains the fallback so a direct
+        // module call, and every pre-D133 test, still behaves as before - but the
+        // worker itself never dispatches without a workspace.
+        cwd: task.workspace?.path ?? cfg.repoPath,
         env: {
           ...process.env,
           // Keep every temp artefact the child creates outside the repository.

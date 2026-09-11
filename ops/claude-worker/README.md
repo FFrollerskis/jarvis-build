@@ -202,16 +202,72 @@ Worker (`worker.mjs`):
     uprosessert `ARCHITECT_TASK` kan ikke preemptes av stale retry-bokføring.
     Ordningen er total: tier → tid → comment-id (ferske eldst-først, retries
     nyest-først).
-  - En ikke-terminal task som er STRENGT ELDRE enn en task som allerede er
-    COMPLETE blir `superseded` — terminal, med `superseded_by`/`superseded_at`
-    registrert og én statusmelding postet. Ingenting slettes stille, og verken
-    restart, supervisor-restart eller tilbakespolt backoff-klokke kan gjenopplive
-    en terminal eller superseded task.
+  - En ikke-terminal task som er STRENGT ELDRE enn en task som har fullført
+    VELLYKKET blir `superseded` — terminal, med `superseded_by`/`superseded_at`/
+    `superseded_basis` registrert og én statusmelding postet. Ingenting slettes
+    stille, og verken restart, supervisor-restart eller tilbakespolt
+    backoff-klokke kan gjenopplive en terminal eller superseded task.
   - En gjenopptatt task får merge-sannheten (`merge_commit_sha`, `mergedAt`) og
     sin EGEN proveniens (`head_before → head_after`, `observed_heads`) i prompten,
     med eksplisitt instruks om at commitene i spennet er task-ens eget arbeid —
     aldri stash/reset/force/revert/re-apply over dem, og nyere tilstand er
     autoritativ.
+- **C4 (supersesjon krever POSITIVT bevis, PR #80-review).** En retirement er
+  permanent, så terskelen er positivt bevis for at arkitektens nyere ordre
+  FAKTISK gikk igjennom. En eldre task pensjoneres KUN på ett av to grunnlag,
+  og grunnlaget registreres (`superseded_basis`) og rapporteres:
+  - `newer_task_completed_successfully` — en strengt nyere task har et KANONISK
+    VELLYKKET terminal-utfall, enten fra en fersk betrodd report
+    (`successful === true`) eller fra en lokal post som POSITIVT sier
+    `successful: true`. `STATUS=BLOCKED`/`FAILED`, en ugjenkjent status, og en
+    `completed`-post som aldri registrerte suksess (f.eks. en v1-migrert rad)
+    pensjonerer INGENTING. Fersk sannhet vinner begge veier: en fersk
+    `BLOCKED`-report stopper supersesjon selv om state-filen fortsatt sier
+    `completed, successful: true`.
+  - `explicit_trusted_supersedes_declaration` — en strengt nyere BETRODD
+    `ARCHITECT_TASK` inneholder `SUPERSEDES=<eksakt TASK_ID>`. Eksakt
+    strenglikhet mot en task workeren faktisk kjenner (ingen prefiks, ingen
+    normalisering), retningsbestemt (en eldre erklæring kan aldri pensjonere en
+    nyere task), aldri selvrefererende, og auditbar — den erklærende
+    kommentar-ID-en registreres og oppgis i statusmeldingen. Erklæringen leses
+    KUN fra betrodd kontroll-issue-innhold, aldri fra PR-body, CI-logg eller
+    annet ubetrodd innhold.
+- **C5 (ISOLERT TASK-WORKTREE og task-eid proveniens, D-133).** Et avbrutt
+  forsøk som etterlot LEGITIME UKOMMITERTE endringer var tidligere anonymt
+  skitt i den delte checkouten: ingenting attribuerte det til en task, så neste
+  kjørings dirty-guard blokkerte — korrekt — og arbeidet var strandet, med kun
+  to utveier, begge forbudte (adopter uattribuerte filer, eller stash/reset dem
+  bort). Det manglet en STRUKTUR, ikke en regel:
+  - Hver task får sin EGEN linkede git-worktree, nøklet på `TASK_ID`, UTENFOR
+    den primære checkouten (`worktreeRoot`, standard en SØSKENKATALOG av
+    `scratchRoot` — bevisst ikke under den, siden `scratchRoot` gis barnet som
+    `TEMP` — og `assertOutsideRepo`-håndhevet). Barnet kjører med den som
+    `cwd`. Brukerens
+    checkout kan derfor ikke bli skitten på en tasks vegne, og task A sitt
+    ukommiterte arbeid ligger et sted task B aldri ser.
+  - En DURABEL CLAIM (`<worktreeRoot>/.claims/<TASK_ID>.json`) skrives og
+    fsynces FØR `git worktree add` kjøres, og re-verifiseres før en worktree
+    gjenbrukes. Den binder katalogen til eksakt `TASK_ID`, betrodd
+    kommentar-ID, repo (owner/name + lokal sti), kontroll-issue, baseline-SHA,
+    worktree-sti og attempt-identitet. Eierskap hevdes FRAMOVER før noe røres
+    og BARE sjekkes etterpå — det utledes aldri BAKOVER fra skitne filer, for
+    den slutningen er nøyaktig den utrygge (en endret fil er like forenlig med
+    brukerens eget arbeid).
+  - Skitt inne i en katalog dekket av en GYLDIG claim for DENNE tasken er
+    task-eid ved konstruksjon, og gis til et gjenopptatt barn som eksplisitt
+    «dette er DITT eget arbeid — aldri stash/reset/checkout over/clean/slett det».
+    Skitt alle andre steder (primær checkout, uclaimet katalog, katalog med
+    claim for en annen task/repo/kommentar) er UKJENT og forblir fail-closed:
+    rapportert med eksakt sti, aldri adoptert, aldri endret.
+  - Et krasj mellom claim og worktree er rekonsilierbart (claimen har sin egen
+    livssyklus `creating → ready → released`, altså staged intensjon → effekt →
+    resultat), og en uleselig claim er en NEKTELSE, ikke en invitasjon til å
+    overskrive.
+  - Opprydding skjer kun etter en terminal og VELLYKKET rekonsiliering, kun når
+    worktreen er ren, og kun via `git worktree remove` UTEN `--force` — så git
+    selv nekter å ødelegge ukommitert arbeid hvis våre egne garder skulle ta
+    feil. Claim-filen slettes ALDRI; den merkes `released` slik at beviset
+    overlever katalogen.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -393,8 +449,8 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-470 tester (kjørt 2026-09-11 på `claude/d132-worker-recovery-reconciliation`:
-18 filer / 470 passed; baseline før D-132 var 16 filer / 428). I tillegg
+538 tester (kjørt 2026-09-11 på `claude/d132-worker-recovery-reconciliation`:
+20 filer / 538 passed; 18 filer / 470 etter D-132, 16 filer / 428 før). I tillegg
 til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
 point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
 tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
@@ -439,6 +495,37 @@ Merk: `fixtures/fake-claude.mjs` poster som standard `STATUS=COMPLETE` — den
 EKTE staveformen. Den postet tidligere `STATUS=COMPLETED`, som ingen ekte
 barneprosess bruker, og det er grunnen til at 428 grønne tester kunne sameksistere
 med en worker som ikke kjente igjen en eneste ekte fullføringsrapport.
+
+og v2.8 (D-133, PR #80-review) legger til:
+
+- **claim-modellen og klassifiseringen** (`test/worktree.test.mjs`, 34 tester):
+  sti-validering av `TASK_ID`, alle claim-felter, MISSING vs. UNUSABLE, eksakt
+  `verifyClaim` (ingen prefiks, ingen case-variant), og HVER fail-closed gren i
+  `classifyTaskWorktree` — inkludert at en uleselig claim er en NEKTELSE, at et
+  uanswerbart `worktree list` aldri leses som «ingenting registrert», og at
+  eierskap ikke kan utledes bakover fra vilkårlige skitne filer;
+- **ISOLASJON MOT EKTE GIT** (`test/worker-task-worktree.test.mjs`, 10 tester):
+  disse setter bevisst IKKE `JARVIS_WORKER_GIT`. Påstanden er fysisk — hvilken
+  katalog havnet bytene i, er brukerens checkout fortsatt ren, nekter git faktisk
+  å slette ukommitert arbeid — og en fake-git ville bare vært enig med workeren.
+  Dekker: exit 0 + ingen rapport + ekte tracked/untracked mutasjoner → restart →
+  gjenopptagelse i samme beviste kontekst; primær checkout ren gjennom alt;
+  brukerens egne skitne filer byte-for-byte urørt; uclaimet katalog og fremmed
+  claim avvist uten mutasjon; nyere task kjører i sin egen worktree og blokkeres
+  ikke av den eldres skitt; to tasks skitne samtidig; restart dupliserer ingen
+  commit; krasjet `IN_PROGRESS`-forelder gjenopptas i samme claimede kontekst;
+  og opprydding kun ved suksess, med claimen bevart som `released`;
+- **supersesjon krever positivt suksessbevis** (`test/queue.test.mjs` +
+  `test/worker-queue-reconciliation.test.mjs`): nyere `BLOCKED`/`FAILED`
+  pensjonerer ikke en eldre retry — og den eldre KJØRER faktisk etterpå; et
+  lokalt rekonsilert `successful: false` pensjonerer ikke; ekte suksess
+  pensjonerer fortsatt og registrerer grunnlaget; eksplisitt `SUPERSEDES` er
+  eksakt, retningsbestemt og auditbar; `SUPERSEDES` fra UBETRODD innhold
+  ignoreres helt.
+
+Merk også: `fixtures/fake-git.mjs` modellerer nå `git worktree list/add/remove`,
+og en ikke-tvunget `remove` FEILER der på en skitten worktree akkurat som i ekte
+git — en alltid-lykkes-stub ville skjult nettopp egenskapen testen skal bevise.
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

@@ -24,8 +24,11 @@
   "disabledFlagFile": "disabled.flag",
   "postedStatusFile": "logs/posted-status.jsonl",
 
+  "_comment_worktreeRoot": "D-133. Root for the ISOLATED linked git worktree each task gets, keyed by TASK_ID. It must be OUTSIDE repoPath, which is asserted at load time: the whole point is that a task's uncommitted work can never appear in the primary checkout the dirty guard protects. Optional - it defaults to a SIBLING of scratchRoot (not a child: scratchRoot is handed to the child as TEMP, and a worktree holding real uncommitted work must not live where a temp sweeper may delete it), so an existing config does not have to change.",
+
   "scratchRoot": "tmp",
   "quarantineRoot": "tmp/quarantine",
+  "worktreeRoot": "worktrees",
   "manifestFile": "logs/quarantine-manifest.jsonl",
 
   "heartbeatSeconds": 60,

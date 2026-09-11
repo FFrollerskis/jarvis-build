@@ -376,6 +376,159 @@ describe("D132: an already-merged task is reconciled, not re-merged", () => {
   }, 120_000);
 });
 
+/**
+ * PR #80 review blocker 3, through the real entrypoint.
+ *
+ * The unit tests in queue.test.mjs pin the decision function; these pin the
+ * whole process - state file, retirement persistence and status posting
+ * included - because the defect had TWO doors into it and only one of them was
+ * visible from `selectNextTask` in isolation: the worker writes an unsuccessful
+ * terminal report into state as `completed, successful: false`, so a fix that
+ * only consulted fresh comments would still have superseded on the next run.
+ */
+describe("PR#80 blocker 3: an unsuccessful newer task never retires older work (real entrypoint)", () => {
+  for (const status of ["BLOCKED", "FAILED"]) {
+    it(`a newer ${status} task does not supersede an older retry, now or after a restart`, async () => {
+      setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+
+      // The older task has real, unfinished work: one attempt, no report.
+      await runWorker("silent");
+      expect(dispatched()).toEqual([OLD_TASK]);
+      expect(task(OLD_TASK).status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+
+      // A newer task arrives and ends TERMINAL BUT UNSUCCESSFUL.
+      appendComment(architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2));
+      await runWorker("report", { JARVIS_FAKE_CLAUDE_STATUS: status });
+      expect(dispatched()).toEqual([OLD_TASK, NEW_TASK]);
+
+      // It is recorded as terminal, and honestly as NOT successful.
+      const newRec = task(NEW_TASK);
+      expect(newRec.report_status).toBe(status);
+      expect(newRec.successful).toBe(false);
+
+      // THE INVARIANT: the older task is untouched and still dispatchable.
+      expect(task(OLD_TASK).status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+      expect(task(OLD_TASK).superseded_by ?? null).toBeNull();
+
+      elapseBackoff(OLD_TASK);
+      await runWorker("report");
+
+      // It actually RAN - not merely "was not retired".
+      expect(dispatched()).toEqual([OLD_TASK, NEW_TASK, OLD_TASK]);
+      expect(task(OLD_TASK).status).toBe(TASK_STATUS.COMPLETED);
+      expect(task(OLD_TASK).successful).toBe(true);
+
+      // And no supersession notice was ever posted about it.
+      const notice = comments().find((c) =>
+        String(c.body).includes("superseded_by_newer_completed_task") && String(c.body).includes(OLD_TASK));
+      expect(notice).toBeFalsy();
+    }, 180_000);
+  }
+
+  it("a LOCALLY RECONCILED unsuccessful terminal record does not supersede on a later run", async () => {
+    // The second door into the defect: the state file, not the fresh comments.
+    setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+    await runWorker("silent");
+
+    // Seed exactly what the worker writes for an unsuccessful terminal report,
+    // with no corresponding comment left for the fresh-truth path to find.
+    const s = state();
+    s.tasks[NEW_TASK] = {
+      task_id: NEW_TASK,
+      status: TASK_STATUS.COMPLETED,
+      attempts: 1,
+      successful: false,
+      report_status: "FAILED",
+      reconciled_without_redispatch: true,
+      first_dispatch_at: "2026-09-11T05:23:05Z"
+    };
+    s.tasks[OLD_TASK].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+    saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+    appendComment(architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2));
+
+    await runWorker("report");
+
+    expect(task(OLD_TASK).status).not.toBe(TASK_STATUS.SUPERSEDED);
+    expect(dispatched()).toContain(OLD_TASK);
+  }, 180_000);
+
+  it("a GENUINELY successful newer completion still supersedes, and records the basis", async () => {
+    // The capability must survive the fix - this is the original D-131 case.
+    setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+    await runWorker("silent");
+    appendComment(architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2));
+    elapseBackoff(OLD_TASK);
+    await runWorker("report");                      // NEW completes, STATUS=COMPLETE
+    expect(task(NEW_TASK).successful).toBe(true);
+
+    elapseBackoff(OLD_TASK);
+    const before = dispatched().length;
+    await runWorker("report");
+
+    expect(dispatched()).toHaveLength(before);
+    const rec = task(OLD_TASK);
+    expect(rec.status).toBe(TASK_STATUS.SUPERSEDED);
+    expect(rec.superseded_by).toBe(NEW_TASK);
+    expect(rec.superseded_basis).toBe("newer_task_completed_successfully");
+  }, 180_000);
+
+  it("an EXPLICIT trusted SUPERSEDES declaration retires the exact named task, auditably", async () => {
+    setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+    await runWorker("silent");
+    expect(task(OLD_TASK).status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+
+    // A newer trusted task states, in the control issue, that it replaces the
+    // older order. It has not run yet - the architect's word is the authority.
+    appendComment({
+      id: 2,
+      created_at: "2026-09-11T05:22:00Z",
+      updated_at: "2026-09-11T05:22:00Z",
+      author_association: "OWNER",
+      user: { login: TRUSTED },
+      body: `ARCHITECT_TASK\nTASK_ID=${NEW_TASK}\nSUPERSEDES=${OLD_TASK}\nDo the newer thing.`
+    });
+    elapseBackoff(OLD_TASK);
+
+    await runWorker("report");
+
+    const rec = task(OLD_TASK);
+    expect(rec.status).toBe(TASK_STATUS.SUPERSEDED);
+    expect(rec.superseded_by).toBe(NEW_TASK);
+    expect(rec.superseded_basis).toBe("explicit_trusted_supersedes_declaration");
+    // Auditable: the exact declaring comment is recorded and reported.
+    expect(rec.superseded_declared_by_comment_id).toBe(2);
+    const notice = comments().find((c) =>
+      String(c.body).includes("superseded_by_newer_completed_task") && String(c.body).includes(OLD_TASK));
+    expect(String(notice.body)).toContain("explicit_trusted_supersedes_declaration");
+    expect(String(notice.body)).toContain("trusted control-issue comment 2");
+
+    // The declaring task is the one that runs; the old one never runs again.
+    expect(dispatched()).toEqual([OLD_TASK, NEW_TASK]);
+  }, 180_000);
+
+  it("a SUPERSEDES line in UNTRUSTED content is ignored completely", async () => {
+    setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+    await runWorker("silent");
+
+    // Same text, wrong author: not command authority, so it retires nothing.
+    appendComment({
+      id: 3,
+      created_at: "2026-09-11T05:22:00Z",
+      updated_at: "2026-09-11T05:22:00Z",
+      author_association: "NONE",
+      user: { login: "someone-else" },
+      body: `ARCHITECT_TASK\nTASK_ID=${NEW_TASK}\nSUPERSEDES=${OLD_TASK}\n`
+    });
+    elapseBackoff(OLD_TASK);
+
+    await runWorker("report");
+
+    expect(task(OLD_TASK).status).not.toBe(TASK_STATUS.SUPERSEDED);
+    expect(task(NEW_TASK)).toBeNull();  // the untrusted "task" was never a task
+    expect(dispatched()).toEqual([OLD_TASK, OLD_TASK]);
+  }, 180_000);
+});
+
 describe("D132: the dry run previews the SAME decision the real run would make", () => {
   it("reports the chosen candidate, its tier and what would be retired", async () => {
     setComments([

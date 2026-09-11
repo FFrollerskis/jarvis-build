@@ -67,6 +67,66 @@ export const INELIGIBLE = Object.freeze({
   BACKOFF: "waiting_for_backoff"
 });
 
+/**
+ * PR #80 REVIEW BLOCKER 3 - AN UNSUCCESSFUL TERMINAL REPORT SUPERSEDED REAL WORK.
+ *
+ * Supersession is a RETIREMENT: the older task becomes TERMINAL and is never
+ * dispatched again by any run. The only thing that may justify it is positive
+ * evidence that the architect's newer order actually carried, because that is
+ * the whole argument - "the repository has moved on, so the older instruction is
+ * stale". The first implementation asked a much weaker question:
+ *
+ *     const isComplete = (e) =>
+ *       e.record?.status === TASK_STATUS.COMPLETED || e.completion?.complete === true;
+ *
+ * Both halves are wrong for this purpose:
+ *
+ *  - `completion.complete` is true for EVERY terminal report, including
+ *    `STATUS=BLOCKED` and `STATUS=FAILED`. `assessCompletion` already computes
+ *    `successful` and it was simply not consulted. A newer task that reported
+ *    "I am blocked, I changed nothing" therefore permanently retired an older,
+ *    still-valid retry - the newer task did NOT move the repository on, so the
+ *    older order was not stale at all.
+ *
+ *  - the worker records an unsuccessful terminal report as
+ *    `status: COMPLETED, successful: false` (see `reconcileReportedTasks` and
+ *    the completion path in worker.mjs). So the local-record half re-admitted
+ *    exactly the same failure through the state file, one run later, even after
+ *    the fresh-truth half had been fixed.
+ *
+ * The rule is now POSITIVE and explicit. An older task may be retired only when
+ * one of these is true:
+ *
+ *   SUCCESSFUL_COMPLETION   a strictly newer task has a terminal outcome that is
+ *                           canonically SUCCESSFUL - from a fresh trusted report
+ *                           (`successful === true`) or from a local record that
+ *                           positively states `successful === true`. Anything
+ *                           less - blocked, failed, unknown vocabulary, a legacy
+ *                           record that never recorded success - supersedes
+ *                           NOTHING and leaves the older task exactly as it was.
+ *
+ *   EXPLICIT_DECLARATION    a strictly newer TRUSTED ARCHITECT_TASK states
+ *                           `SUPERSEDES=<exact TASK_ID>`. This is the architect
+ *                           saying so directly, which is authority in its own
+ *                           right and does not need the new task to have run.
+ *                           It is exact (full string equality against a task the
+ *                           worker actually knows), directional (an older
+ *                           declaration can never retire a newer task), and
+ *                           auditable (the declaring comment id is carried into
+ *                           the decision and into worker state).
+ *
+ * Fail-closed direction: when in doubt the older task is NOT retired. The cost
+ * of not retiring is one status notice and a task that stays visible; the cost
+ * of retiring wrongly is silently discarded work.
+ */
+export const SUPERSESSION_BASIS = Object.freeze({
+  SUCCESSFUL_COMPLETION: "newer_task_completed_successfully",
+  EXPLICIT_DECLARATION: "explicit_trusted_supersedes_declaration"
+});
+
+/** The field a trusted ARCHITECT_TASK uses to retire an older order explicitly. */
+export const SUPERSEDES_FIELD = "SUPERSEDES";
+
 /** Dispatch tiers. Lower sorts first. */
 export const TIER = Object.freeze({
   FRESH: 0,
@@ -81,6 +141,39 @@ function createdMs(entry) {
 function commentId(entry) {
   const n = Number(entry?.comment?.id);
   return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Every TASK_ID this trusted task explicitly declares it supersedes.
+ *
+ * Read from the ARCHITECT_TASK comment and from its additive scope updates -
+ * both of which `collectTrustedTasks` has already validated as authored by the
+ * trusted login on the control issue. Nothing else is consulted: a PR body, a CI
+ * log or an untrusted comment can never declare a supersession.
+ *
+ * Every declared id must itself be a syntactically valid TASK_ID, so a malformed
+ * or path-shaped value is dropped rather than matched loosely.
+ */
+export function declaredSupersedes(entry) {
+  const bodies = [entry?.comment?.body, ...(entry?.updates ?? []).map((u) => u?.body)];
+  const ids = [];
+  for (const body of bodies) {
+    for (const line of String(body ?? "").split(/\r?\n/)) {
+      const m = line.match(new RegExp(`^${SUPERSEDES_FIELD}=(.*)$`));
+      if (!m) continue;
+      for (const raw of m[1].split(/[,\s]+/)) {
+        const id = raw.trim();
+        if (id && isValidTaskId(id) && !ids.includes(id)) ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+/** Total, deterministic "a was issued before b": time first, comment id as tie-break. */
+function strictlyOlder(a, b) {
+  if (a.createdMs !== b.createdMs) return a.createdMs < b.createdMs;
+  return a.commentId < b.commentId;
 }
 
 /**
@@ -136,31 +229,87 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
   }
 
   /**
-   * A task counts as COMPLETE for supersession purposes when either the worker
-   * already recorded it completed, or a trusted terminal report exists for it
-   * right now. Both are positive evidence that the architect's newer order was
-   * actually carried out.
+   * Did this task end in POSITIVE SUCCESS?
+   *
+   * Fresh truth wins and is answered on its own terms: when a trusted terminal
+   * report exists, `successful` is the canonical verdict for it and the local
+   * record is not consulted at all - otherwise a stale `completed` row could
+   * re-admit a report the vocabulary has since classified as BLOCKED/FAILED.
+   *
+   * Only when there is no fresh terminal report do we fall back to the record,
+   * and then `successful` must be POSITIVELY true. `undefined` is not success:
+   * a legacy v1-migrated row, or any row written before this field existed,
+   * never proves the newer order carried.
    */
-  const isComplete = (e) =>
-    e.record?.status === TASK_STATUS.COMPLETED || e.completion?.complete === true;
+  const isSuccessfullyComplete = (e) => {
+    if (e.completion?.complete === true) return e.completion.successful === true;
+    if (e.record?.status === TASK_STATUS.COMPLETED) return e.record.successful === true;
+    return false;
+  };
 
-  // The newest task that has genuinely completed. Anything strictly older than
-  // this is a stale order.
-  let newestCompletedMs = null;
-  let newestCompletedId = null;
+  // The newest task that genuinely SUCCEEDED. Anything strictly older than that
+  // is a stale order - and nothing else implies staleness.
+  let newestSuccessful = null;
   for (const e of entries) {
-    if (!isComplete(e)) continue;
-    if (newestCompletedMs === null || e.createdMs > newestCompletedMs) {
-      newestCompletedMs = e.createdMs;
-      newestCompletedId = e.taskId;
+    if (!isValidTaskId(e.taskId)) continue;
+    if (!isSuccessfullyComplete(e)) continue;
+    if (newestSuccessful === null || strictlyOlder(newestSuccessful, e)) newestSuccessful = e;
+  }
+
+  // Explicit, trusted, exact retirements: `SUPERSEDES=<TASK_ID>` on a strictly
+  // newer trusted ARCHITECT_TASK. Directional by construction - an older
+  // declaration can never retire a task issued after it.
+  const explicitSupersessions = new Map();
+  for (const e of entries) {
+    if (!isValidTaskId(e.taskId)) continue;
+    for (const targetId of declaredSupersedes(e.entry)) {
+      if (targetId === e.taskId) continue; // a task never retires itself
+      const victim = entries.find((x) => x.taskId === targetId);
+      if (!victim) continue;               // only tasks this worker actually knows
+      if (!strictlyOlder(victim, e)) continue;
+      if (explicitSupersessions.has(targetId)) continue; // first (oldest) declaration wins
+      explicitSupersessions.set(targetId, {
+        by: e.taskId,
+        commentId: e.commentId,
+        createdAt: e.entry?.comment?.created_at ?? null
+      });
     }
   }
+
+  /**
+   * Should this task be retired as superseded, and on exactly what evidence?
+   * Returns `null` when it must NOT be retired - which is the default.
+   */
+  const supersessionFor = (e) => {
+    const explicit = explicitSupersessions.get(e.taskId);
+    if (explicit) {
+      return {
+        basis: SUPERSESSION_BASIS.EXPLICIT_DECLARATION,
+        by: explicit.by,
+        declaredByCommentId: explicit.commentId,
+        detail: `trusted ARCHITECT_TASK ${explicit.by} (comment ${explicit.commentId}) declares `
+          + `${SUPERSEDES_FIELD}=${e.taskId}`
+      };
+    }
+    if (newestSuccessful && strictlyOlder(e, newestSuccessful)) {
+      return {
+        basis: SUPERSESSION_BASIS.SUCCESSFUL_COMPLETION,
+        by: newestSuccessful.taskId,
+        declaredByCommentId: null,
+        detail: `${newestSuccessful.taskId} completed SUCCESSFULLY `
+          + `(${newestSuccessful.completion?.canonicalStatus ?? newestSuccessful.record?.report_status_canonical ?? "recorded successful"})`
+      };
+    }
+    return null;
+  };
 
   // --- pass 2: eligibility --------------------------------------------------
   const decisions = [];
   const dispatchable = [];
 
   for (const e of entries) {
+    const supersession = isValidTaskId(e.taskId) ? supersessionFor(e) : null;
+
     const push = (eligible, reason) => {
       decisions.push({
         taskId: e.taskId,
@@ -170,7 +319,11 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
         attempts: e.record?.attempts ?? 0,
         createdAt: e.entry?.comment?.created_at ?? null,
         completion: e.completion,
-        supersededBy: reason === INELIGIBLE.SUPERSEDED ? newestCompletedId : null
+        supersededBy: reason === INELIGIBLE.SUPERSEDED ? supersession.by : null,
+        supersessionBasis: reason === INELIGIBLE.SUPERSEDED ? supersession.basis : null,
+        supersessionDetail: reason === INELIGIBLE.SUPERSEDED ? supersession.detail : null,
+        supersessionDeclaredByCommentId:
+          reason === INELIGIBLE.SUPERSEDED ? supersession.declaredByCommentId : null
       });
     };
 
@@ -194,8 +347,10 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
       continue;
     }
 
-    // The architect has moved on: a strictly newer order already completed.
-    if (newestCompletedMs !== null && e.createdMs < newestCompletedMs) {
+    // The architect has moved on: a strictly newer order either SUCCEEDED, or
+    // explicitly declared this one retired. A newer BLOCKED/FAILED/unknown task
+    // reaches neither condition and leaves this task untouched.
+    if (supersession) {
       push(false, INELIGIBLE.SUPERSEDED);
       continue;
     }
@@ -240,7 +395,11 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
     candidate: chosen?.entry ?? null,
     candidateTier: chosen?.tier ?? null,
     decisions,
-    supersededBy: newestCompletedId,
+    // The newest task that positively SUCCEEDED, or null. Kept as a summary for
+    // logging and the dry run; the per-decision `supersededBy` is authoritative,
+    // because an explicit declaration can retire a task no successful run covers.
+    supersededBy: newestSuccessful?.taskId ?? null,
+    newestSuccessfulTaskId: newestSuccessful?.taskId ?? null,
     supersededTaskIds: decisions.filter((d) => d.reason === INELIGIBLE.SUPERSEDED).map((d) => d.taskId),
     completedByReportTaskIds: decisions
       .filter((d) => d.reason === INELIGIBLE.TERMINAL_REPORT)

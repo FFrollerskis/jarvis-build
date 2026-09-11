@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 
-import { selectNextTask, INELIGIBLE, TIER } from "../lib/queue.mjs";
+import { selectNextTask, INELIGIBLE, TIER, SUPERSESSION_BASIS, declaredSupersedes } from "../lib/queue.mjs";
 import { TASK_STATUS, defaultState, upsertTask } from "../lib/state.mjs";
 
 const TRUSTED = "tsworkflow";
@@ -182,7 +182,12 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
     ];
     const state = stateWith({
       "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 3, first_dispatch_at: "2026-09-11T04:18:05Z" },
-      "NEW-TASK": { status: TASK_STATUS.COMPLETED, attempts: 1, first_dispatch_at: "2026-09-11T05:23:05Z" }
+      // `successful: true` is REQUIRED, not decoration. A `completed` record
+      // that does not positively state success supersedes nothing - see the
+      // "unsuccessful terminal outcomes" block below.
+      "NEW-TASK": {
+        status: TASK_STATUS.COMPLETED, attempts: 1, successful: true, first_dispatch_at: "2026-09-11T05:23:05Z"
+      }
     });
 
     const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
@@ -190,6 +195,8 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
     expect(sel.candidate).toBeNull();
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     expect(sel.supersededBy).toBe("NEW-TASK");
+    const d = sel.decisions.find((x) => x.taskId === "OLD-TASK");
+    expect(d.supersessionBasis).toBe(SUPERSESSION_BASIS.SUCCESSFUL_COMPLETION);
   });
 
   it("a NEWER task is never superseded by an older completed one", () => {
@@ -198,7 +205,9 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
       taskEntry("NEW-PENDING", "2026-09-11T05:00:00Z", 200)
     ];
     const state = stateWith({
-      "OLD-DONE": { status: TASK_STATUS.COMPLETED, attempts: 1, first_dispatch_at: "2026-09-11T04:05:00Z" }
+      "OLD-DONE": {
+        status: TASK_STATUS.COMPLETED, attempts: 1, successful: true, first_dispatch_at: "2026-09-11T04:05:00Z"
+      }
     });
 
     const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
@@ -238,6 +247,197 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
 
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     expect(sel.candidate).toBeNull();
+  });
+});
+
+/**
+ * PR #80 review blocker 3.
+ *
+ * Supersession is a permanent retirement, so the bar is positive evidence that
+ * the architect's newer order actually carried. Before this fix ANY terminal
+ * report cleared that bar - including `STATUS=BLOCKED` and `STATUS=FAILED`,
+ * where `assessCompletion` had already computed `successful: false` and nobody
+ * looked. A newer task that changed nothing therefore permanently discarded an
+ * older, still-valid retry.
+ */
+describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes nothing", () => {
+  const olderRetry = () => [
+    taskEntry("OLD-RETRY", "2026-09-11T04:18:00Z", 100),
+    taskEntry("NEW-TASK", "2026-09-11T05:23:00Z", 200)
+  ];
+  const retryState = () => stateWith({
+    "OLD-RETRY": {
+      status: TASK_STATUS.FAILED_RETRYABLE,
+      attempts: 1,
+      first_dispatch_at: "2026-09-11T04:18:05Z",
+      next_eligible_at: "2026-09-11T04:30:00Z" // backoff elapsed: it IS due
+    }
+  });
+
+  for (const status of ["BLOCKED", "STOPPED", "HALTED"]) {
+    it(`a newer ${status} report does not supersede an older retry`, () => {
+      const comments = [report("NEW-TASK", status, "2026-09-11T05:45:00Z", 900)];
+      const sel = selectNextTask({
+        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+      });
+      expect(sel.supersededTaskIds).toHaveLength(0);
+      // And the older task is still genuinely dispatchable, not merely un-retired.
+      expect(sel.candidate.taskId).toBe("OLD-RETRY");
+    });
+  }
+
+  for (const status of ["FAILED", "ERROR", "ABORTED", "CANCELLED"]) {
+    it(`a newer ${status} report does not supersede an older retry`, () => {
+      const comments = [report("NEW-TASK", status, "2026-09-11T05:45:00Z", 900)];
+      const sel = selectNextTask({
+        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+      });
+      expect(sel.supersededTaskIds).toHaveLength(0);
+      expect(sel.candidate.taskId).toBe("OLD-RETRY");
+    });
+  }
+
+  it("a LOCALLY RECONCILED unsuccessful terminal record does not supersede", () => {
+    // This is the second half of the defect. The worker writes an unsuccessful
+    // terminal report into state as `status: completed, successful: false`
+    // (reconcileReportedTasks / the completion path in worker.mjs), so a fix
+    // that only consulted fresh comments would have let the same task supersede
+    // again one run later, straight out of the state file.
+    const state = stateWith({
+      "OLD-RETRY": {
+        status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z"
+      },
+      "NEW-TASK": {
+        status: TASK_STATUS.COMPLETED,
+        attempts: 1,
+        successful: false,
+        report_status: "BLOCKED",
+        reconciled_without_redispatch: true,
+        first_dispatch_at: "2026-09-11T05:23:05Z"
+      }
+    });
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+    expect(sel.newestSuccessfulTaskId).toBeNull();
+    expect(sel.candidate.taskId).toBe("OLD-RETRY");
+  });
+
+  it("a completed record that never recorded success does not supersede", () => {
+    // e.g. a legacy v1-migrated row. Absence of evidence is not success.
+    const state = stateWith({
+      "OLD-RETRY": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": { status: TASK_STATUS.COMPLETED, attempts: 1, legacy_unverified: true }
+    });
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+  });
+
+  it("an UNRECOGNISED newer report status supersedes nothing", () => {
+    const comments = [report("NEW-TASK", "MOSTLY_THERE_ISH", "2026-09-11T05:45:00Z", 900)];
+    const sel = selectNextTask({
+      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+    });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+    expect(sel.candidate.taskId).toBe("OLD-RETRY");
+  });
+
+  it("a GENUINE successful newer completion still supersedes the older stale order", () => {
+    // The capability must not be lost to the fix: this is the D-131 case.
+    const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:45:00Z", 900)];
+    const sel = selectNextTask({
+      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+    });
+    expect(sel.supersededTaskIds).toEqual(["OLD-RETRY"]);
+    expect(sel.candidate).toBeNull();
+    const d = sel.decisions.find((x) => x.taskId === "OLD-RETRY");
+    expect(d.supersessionBasis).toBe(SUPERSESSION_BASIS.SUCCESSFUL_COMPLETION);
+    expect(d.supersededBy).toBe("NEW-TASK");
+  });
+
+  it("a fresh BLOCKED report overrides a stale `completed` row and stops superseding", () => {
+    // Fresh truth must win in BOTH directions. A state file that still says
+    // `completed, successful: true` cannot keep retiring work once the trusted
+    // report for that task is readable as BLOCKED.
+    const state = stateWith({
+      "OLD-RETRY": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": { status: TASK_STATUS.COMPLETED, attempts: 1, successful: true, first_dispatch_at: "2026-09-11T05:23:05Z" }
+    });
+    const comments = [report("NEW-TASK", "BLOCKED", "2026-09-11T05:45:00Z", 900)];
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+  });
+});
+
+describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable", () => {
+  const declaring = (createdAt, id, supersedes) => ({
+    taskId: "NEW-TASK",
+    comment: {
+      id,
+      created_at: createdAt,
+      user: { login: TRUSTED },
+      body: `ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=${supersedes}\nDo the thing.`
+    },
+    updates: []
+  });
+
+  it("parses only syntactically valid ids, from the task comment and its updates", () => {
+    expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "A-1, B-2  C-3"))).toEqual(["A-1", "B-2", "C-3"]);
+    expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "../escape"))).toEqual([]);
+    expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "a/b"))).toEqual([]);
+  });
+
+  it("an explicit declaration retires the named older task without it having run", () => {
+    const tasks = [
+      taskEntry("OLD-TASK", "2026-09-11T04:18:00Z", 100),
+      declaring("2026-09-11T05:23:00Z", 200, "OLD-TASK")
+    ];
+    const state = stateWith({
+      "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" }
+    });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+
+    expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
+    const d = sel.decisions.find((x) => x.taskId === "OLD-TASK");
+    expect(d.supersessionBasis).toBe(SUPERSESSION_BASIS.EXPLICIT_DECLARATION);
+    expect(d.supersededBy).toBe("NEW-TASK");
+    // Auditable: the exact comment that declared it is carried into the decision.
+    expect(d.supersessionDeclaredByCommentId).toBe(200);
+    // The declaring task itself is what runs.
+    expect(sel.candidate.taskId).toBe("NEW-TASK");
+  });
+
+  it("an OLDER declaration can never retire a NEWER task", () => {
+    const tasks = [
+      declaring("2026-09-11T04:00:00Z", 100, "LATER-TASK"),
+      taskEntry("LATER-TASK", "2026-09-11T05:00:00Z", 200)
+    ];
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+  });
+
+  it("a task cannot declare itself superseded", () => {
+    const tasks = [declaring("2026-09-11T05:00:00Z", 200, "NEW-TASK")];
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+    expect(sel.candidate.taskId).toBe("NEW-TASK");
+  });
+
+  it("a declaration naming a task this worker does not know retires nothing", () => {
+    const tasks = [declaring("2026-09-11T05:00:00Z", 200, "TASK-THAT-DOES-NOT-EXIST")];
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
+  });
+
+  it("the declaration must be EXACT - a prefix of a real task id matches nothing", () => {
+    const tasks = [
+      taskEntry("OLD-TASK-20260911-A", "2026-09-11T04:00:00Z", 100),
+      declaring("2026-09-11T05:00:00Z", 200, "OLD-TASK")
+    ];
+    const state = stateWith({
+      "OLD-TASK-20260911-A": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1 }
+    });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    expect(sel.supersededTaskIds).toHaveLength(0);
   });
 });
 
