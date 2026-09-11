@@ -40,11 +40,32 @@ export const TASK_STATUS = Object.freeze({
   IN_PROGRESS: "in_progress",
   FAILED_RETRYABLE: "failed_retryable",
   BLOCKED: "blocked",
-  COMPLETED: "completed"
+  COMPLETED: "completed",
+  /**
+   * D132: the architect has moved past this task - a STRICTLY NEWER trusted
+   * ARCHITECT_TASK has already run to completion. Replaying it would apply a
+   * stale instruction to state that has since moved on, which is precisely what
+   * happened on 2026-09-11: `D131-PR79-STASH-RECOVERY-20260911-A` (first
+   * dispatched 04:18Z) was dispatched AGAIN at 05:38Z, after the newer
+   * `D131-PR79-MERGE-F12FF3B-20260911-B` had already merged PR #79.
+   *
+   * It is TERMINAL on purpose. Nothing is silently dropped: `superseded_by` and
+   * `superseded_at` are recorded, and the worker posts one status notice, so the
+   * architect can re-issue a FRESH TASK_ID if the old order is still wanted.
+   */
+  SUPERSEDED: "superseded"
 });
 
-/** Terminal states: never dispatched again. */
-export const TERMINAL_STATUSES = Object.freeze([TASK_STATUS.COMPLETED, TASK_STATUS.BLOCKED]);
+/**
+ * Terminal states: never dispatched again, and - decisively for requirement
+ * "worker restart/supervisor restart cannot resurrect a terminal or superseded
+ * task" - never made eligible again by any amount of stale retry bookkeeping.
+ */
+export const TERMINAL_STATUSES = Object.freeze([
+  TASK_STATUS.COMPLETED,
+  TASK_STATUS.BLOCKED,
+  TASK_STATUS.SUPERSEDED
+]);
 
 const KNOWN_STATUSES = Object.freeze(Object.values(TASK_STATUS));
 

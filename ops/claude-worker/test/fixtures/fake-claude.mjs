@@ -11,6 +11,9 @@
  *     (mode=report-slow) - a child that outlives at least one heartbeat interval,
  *     which is the only way to reach the PERIODIC heartbeat callback through the
  *     real entrypoint (D126 review F)
+ *   - exits 0 posting NOTHING  (mode=silent)  - D132: the "exit 0 without a
+ *     matching report" case, which is how every D-131 attempt actually ended.
+ *     `fail` cannot stand in for it: a non-zero exit takes a different path.
  *
  * It deliberately keeps running when its parent is killed, which is exactly the
  * situation the worker must survive without starting a second Claude. That means
@@ -24,8 +27,22 @@ import { join } from "node:path";
 
 const DIR = process.env.JARVIS_FAKE_CLAUDE_DIR;
 const MODE = process.env.JARVIS_FAKE_CLAUDE_MODE ?? "report";
-const TASK_ID = process.env.JARVIS_FAKE_CLAUDE_TASK_ID ?? "UNKNOWN";
 const GH_DIR = process.env.JARVIS_FAKE_GH_DIR;
+
+/**
+ * D132: when no TASK_ID is pinned, report for the task we were ACTUALLY given.
+ *
+ * A fixture that always reports for one env-configured id cannot express a queue
+ * with more than one task in it, so it could never have reproduced the D-131
+ * selection defect (older task dispatched instead of the newer one). Reading the
+ * id out of the delivered prompt is also what the real child does.
+ */
+function taskIdFrom(prompt) {
+  const pinned = process.env.JARVIS_FAKE_CLAUDE_TASK_ID;
+  if (pinned) return pinned;
+  const m = String(prompt ?? "").match(/^TASK_ID=(.*)$/m);
+  return m ? m[1].trim() : "UNKNOWN";
+}
 
 process.stdin.on("error", () => {});
 process.stdout.on("error", () => {});
@@ -59,9 +76,20 @@ function act() {
   if (acted) return;
   acted = true;
   try { writeFileSync(join(DIR, "prompt.txt"), prompt, "utf8"); } catch { /* best effort */ }
+  // D132: which TASK_ID this invocation was actually handed. This is the
+  // evidence a queue-ordering test needs - "was the old task dispatched again?"
+  // cannot be answered from an invocation count alone.
+  try {
+    appendFileSync(join(DIR, "dispatched.log"), `${taskIdFrom(prompt)}\n`, "utf8");
+  } catch { /* best effort */ }
 
   if (MODE === "fail") {
     process.exit(7);
+  }
+  if (MODE === "silent") {
+    // Exit 0 having posted nothing at all. The worker must NOT read this as
+    // success - requirement B - and must park the task as retryable.
+    process.exit(0);
   }
   if (MODE === "report" || MODE === "report-hang" || MODE === "report-slow") {
     postReport();
@@ -79,6 +107,7 @@ function act() {
 }
 
 function postReport() {
+  const taskId = taskIdFrom(prompt);
   const path = join(GH_DIR, "comments.json");
   const comments = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : [];
   const now = new Date().toISOString();
@@ -86,8 +115,17 @@ function postReport() {
     id: 800000 + comments.length,
     body: [
       "CLAUDE_REPORT",
-      `TASK_ID=${TASK_ID}`,
-      "STATUS=COMPLETED",
+      `TASK_ID=${taskId}`,
+      // D132: the default is the spelling the REAL child actually posts.
+      //
+      // This fixture used to hard-code `STATUS=COMPLETED`, a spelling Claude
+      // does not use, which is why 428 green tests coexisted with a worker that
+      // could not recognise a single real completion report. The host's own
+      // state.json recorded the consequence verbatim:
+      //   "exit_0_without_matching_report (report_status_not_terminal (COMPLETE))"
+      // A fixture that speaks a dialect the production child does not speak
+      // proves nothing about production.
+      `STATUS=${process.env.JARVIS_FAKE_CLAUDE_STATUS ?? "COMPLETE"}`,
       `BRANCH=${process.env.JARVIS_FAKE_CLAUDE_BRANCH ?? "claude/fake-branch"}`,
       `PR_NUMBER=${process.env.JARVIS_FAKE_CLAUDE_PR ?? "1234"}`
     ].join("\n"),

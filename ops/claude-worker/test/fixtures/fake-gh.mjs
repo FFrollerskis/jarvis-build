@@ -92,6 +92,7 @@ if (urlArg.includes("/pulls")) {
     headRefName: p.headRefName,
     state: p.state,
     mergedAt: p.mergedAt ?? null,
+    mergeCommitSha: p.mergeCommitSha ?? null,
     title: p.title ?? "",
     body: p.body ?? ""
   })).join("\n") + (pulls.length > 0 ? "\n" : ""));

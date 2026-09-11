@@ -140,7 +140,20 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
         : (task.resume.prNumberKnownButUnverified
           ? `A PR number is recorded for this task (#${task.resume.prNumberKnownButUnverified}) but could NOT be confirmed in this run. Verify it yourself before creating anything.`
           : "No existing PR for this task was found."),
-      task.resume.alreadyMerged ? "A PR for this task is ALREADY MERGED. Do not merge again; reconcile and report." : "",
+      task.resume.alreadyMerged
+        // D132: a merge task that already caused its authorised state transition
+        // must be RECONCILED from the resulting truth, never retried. Carrying
+        // the merge commit and timestamp is what makes that verifiable rather
+        // than merely asserted.
+        ? "A PR for this task is ALREADY MERGED"
+          + (task.resume.existingPr?.mergedAt ? ` (merged at ${task.resume.existingPr.mergedAt}` : "")
+          + (task.resume.existingPr?.mergeCommitSha
+            ? `${task.resume.existingPr?.mergedAt ? ", " : " ("}merge commit ${task.resume.existingPr.mergeCommitSha}`
+            : "")
+          + (task.resume.existingPr?.mergedAt || task.resume.existingPr?.mergeCommitSha ? ")" : "")
+          + ". Do NOT merge again and do NOT re-run a pre-merge instruction against post-merge state. "
+          + "Verify the resulting merge/CI/local-sync truth, then report."
+        : "",
       task.resume.duplicateRiskUnknown
         ? "WARNING: the branch/PR lookup FAILED in this run, so absence of a branch or PR is NOT proven. "
           + "Verify the actual repository and PR state yourself before creating a branch, a PR or a commit."
@@ -148,6 +161,39 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
       "Reconcile the actual repository/PR/report state BEFORE making any change, and avoid duplicate commits, branches, PRs or merge actions.",
       ""
     );
+
+    // --- D132: TASK-OWNED PROVENANCE -------------------------------------
+    //
+    // A previous attempt at THIS task may already have committed real work. The
+    // worker records where that attempt started and where it ended, so the
+    // resumed child can tell its OWN prior output apart from foreign changes.
+    //
+    // Without this the child sees unexplained commits ahead of what it expects
+    // and reaches for a destructive reconciliation - stash, reset, re-apply -
+    // which is how `worker-dirty-backup-2026-09-11` came to exist and why
+    // re-applying it would have regressed already-merged D-131b work.
+    const prov = task.resume.provenance;
+    if (prov && (prov.headBefore || prov.headAfter)) {
+      const advanced = prov.headAfter && prov.headBefore && prov.headAfter !== prov.headBefore;
+      lines.push(
+        "TASK-OWNED PROVENANCE (recorded by the worker, not inferred):",
+        `The previous attempt started at HEAD ${prov.headBefore ?? "unknown"}`
+          + `${prov.branchBefore ? ` on branch ${prov.branchBefore}` : ""}`
+          + ` and ended at HEAD ${prov.headAfter ?? "unknown"}`
+          + `${prov.branchAfter ? ` on branch ${prov.branchAfter}` : ""}.`,
+        advanced
+          ? "HEAD ADVANCED during that attempt, so commits in that range are THIS TASK'S OWN WORK. "
+            + "Treat them as yours: verify and build on them. Never stash, reset, force-push, revert or "
+            + "re-apply an older snapshot over them, and never treat them as foreign or unknown changes."
+          : "HEAD did NOT move during that attempt.",
+        prov.observedHeads?.length > 1
+          ? `All heads this task has been observed at: ${prov.observedHeads.join(", ")}.`
+          : "",
+        "If the repository is now AHEAD of those commits, the newer state is authoritative. Reconcile "
+          + "forward against it; do not attempt to restore the older state.",
+        ""
+      );
+    }
   }
 
   lines.push(

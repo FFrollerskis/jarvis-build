@@ -1,75 +1,99 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-11 (branch `claude/ua8-personal-digital-twin-core`, base `main=5df11e5add901f3fff10c2ef266c40e3e35e3f48`)
+**Oppdatert:** 2026-09-11 (branch `claude/d132-worker-recovery-reconciliation`, base
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`)
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## Aktiv oppgave: D-131b - TOCTOU-lukking i proof-til-grant-/innrulleringsbindingen (samme PR #79)
+## Forrige leveranse lukket: PR #79 / D-131b er MERGET
 
-Uavhengig arkitektkontroll (repo-eier, ikke Claude selv) av HEAD `72c4d0ebc580258607c33ea94ec8934004ddc1ca`
-(D-131a sin autoritets-herding, satt sammen av en ANNEN økt enn denne - se
-`git log`/DECISIONS_AND_ASSUMPTIONS.md for den fulle kjeden) fant ÉN gjenstående MERGE BLOCKER:
-beviset var ikke bundet til den EKSAKTE enhetsnøkkel-VERSJONEN som faktisk ble verifisert (TOCTOU
-mellom `DeviceService.verifyChallenge()` sin egen transaksjon og en SENERE, uavhengig transaksjon som
-fingerprintet grantet/innrulleringen mot nøkkelen slik den sto DA). `MERGE_AUTHORIZED=false` - ingen
-merge, ingen self-approval.
+- PR #79 MERGET 2026-09-11T05:23:48Z av eieren `tsworkflow` (IKKE av Claude).
+- Merge-commit `c67a7ba792b8d655a26379655ffec31b353b7101`, ekte two-parent merge:
+  `5df11e5add901f3fff10c2ef266c40e3e35e3f48` + `f12ff3b2f344d17f8e020088083b3bf88129585d`.
+- Fersk post-merge CI på nøyaktig merge-SHA: run `34565797633`, `completed/success`
+  (build-test, gitleaks, windows-git-auth alle grønne).
+- Lokal `main` var allerede nøyaktig merge-SHA-en; ingen fast-forward var nødvendig, ingen
+  reset/clean/stash utført. Stashen `worker-dirty-backup-2026-09-11` er IKKE rørt.
 
-**Fikset (ÉN sammenhengende runde, identisk mønster på alle tre autoritetsstier):**
+## Aktiv oppgave: D-132 - permanent herding av worker-kontrollplanen
 
-1. `DeviceService.verifyChallenge()` returnerer nå `string | null` - fingerprinten (SHA-256 av PEM)
-   av NØYAKTIG den nøkkelen som faktisk verifiserte signaturen, ikke lenger en bar boolean. Ny delt
-   `fingerprintPem()` erstatter tre uavhengige `sha256Hex()`-kopier.
-2. Ny `DeviceService.lockDeviceKeyOn(client, principal)`: `SELECT ... FOR UPDATE` + re-lesing av
-   enhetsraden som FØRSTE steg INNE I mutasjonstransaksjonen (`authorizeProvenDevice()` og
-   `DeviceEnrollmentService.enroll()` sin `device_proof`-vei), FØR enhver sesjons-/grant-/
-   innrullerings-/rotasjonsskriving. Et mismatch mot den bevist fingerprinten (rotert ELLER
-   tilbakekalt) avvises identisk med et ugyldig bevis. Låsen holdes til COMMIT/ROLLBACK, så en
-   SAMTIDIG rotasjon for samme enhet serialiseres mot autorisasjonen i stedet for å smette imellom.
-3. `SessionGrantService.issueOn()` leser ikke lenger `devices` selv - `device_key_fingerprint` er nå
-   en PARAMETER fra kallerens nettopp låste/verifiserte lesing (det var selve TOCTOU-hullet).
-4. Anvendt identisk på: `authorizeProvenDevice()` (delt av `ChannelSessionAuthority` OG
-   `VoiceSessionAuthority`) og `DeviceEnrollmentService.enroll()` (dekker både «autoriser ny enhet»
-   og «enheten roterer sin egen nøkkel»).
+TASK_ID `D132-WORKER-RECOVERY-RECONCILIATION-20260911-A`. Ikke produktarbeid: worker-laget
+re-dispatchet den ELDRE `D131-PR79-STASH-RECOVERY-20260911-A` kl. 05:38:07Z, ETTER at den nyere
+merge-tasken allerede hadde merget PR #79 kl. 05:23:48Z.
 
-**Kvalitetsporter - denne runden FAKTISK kjørt lokalt (Linux, ingen Windows-administrator-token-
-blokkering denne gangen):**
+**Rotårsak utledet fra kode OG fra hostens egen `state.json` - to uavhengige defekter:**
 
-- `pnpm -w typecheck`: 26/26 pakker grønt.
-- `pnpm -w lint` (`eslint .`): 0 feil/advarsler.
-- Ny `modules/core/test/d131b-toctou-authority.test.ts` (10 tester, ekte embedded Postgres, ekte
-  RLS): deterministisk INJEKSJON (bevis hentet mot gammel nøkkel, nøkkel rotert/tilbakekalt DIREKTE i
-  databasen, gammelt bevis presentert for autorisasjons-/innrulleringstransaksjonen - dekker
-  grant-utstedelse, innrullering av ny enhet, selv-rotasjon-kappløp; alle verifiserer NULL mutasjon
-  via rad-snapshot, ikke bare avslagsresultatet) + EKTE OVERLAPPENDE `pg`-transaksjoner som beviser at
-  `FOR UPDATE` FAKTISK blokkerer en samtidig rotasjon (≥300ms bevist blokkert, fullfører først etter
-  commit) og at et rullet-tilbake avslag frigjør låsen umiddelbart.
-- `modules/core/test/fase8-device.test.ts` oppdatert til den nye `string | null`-kontrakten (var
-  skrevet mot den gamle `boolean`-en - dette var den ENESTE eksisterende testen som brøt).
-- Full arbeidsområde-testsuite kjørt: **237/237 filer, 3856/3856 tester grønt**, inkl.
-  `apps/api/test/d131-authority-hardening-e2e.test.ts` (24 tester fra D-131a-runden, som IKKE hadde
-  kjørt lokalt i den forrige økten pga. et Windows-miljøproblem - kjører nå grønt her).
-- Manuell hemmelighetsskann av full diff: 0 reelle treff.
+1. **Terminal-status-vokabularet var ikke kanonisk.** `TERMINAL_REPORT_STATUSES` inneholdt
+   `COMPLETED`; Claude poster `STATUS=COMPLETE`, og sammenligningen var eksakt streng. Registrert
+   ordrett på hosten for to tasks: `exit_0_without_matching_report (report_status_not_terminal
+   (COMPLETE))` - blant dem merge-tasken som ALLEREDE hadde utført den autoriserte merge-handlingen
+   (`head_after=c67a7ba`). Suiten var grønn samtidig fordi test-fixturen postet `STATUS=COMPLETED`,
+   en dialekt den ekte barneprosessen ikke bruker.
+2. **Kandidatvalget lot en eldre task preempte en nyere.** `tasks.find(isEligibleNow)` over en
+   ELDST-FØRST-sortert liste valgte alltid den eldste task-en med utløpt backoff, uansett hvor mange
+   nyere, aldri-utsendte ARCHITECT_TASK som lå i køen.
 
-**Ikke gjort (bevisst, per oppgavens eksplisitte grenser):** Q-34 gateway-audit, D-108/provider-live,
-nye eksterne credentials, merge, deploy, self-approval, ny PR, worker-/automasjonsendring, ny
-masterplan-slice.
+**Begge reprodusert mot base-commiten `c67a7ba` i et isolert worktree FØR fiksen**, ikke antatt:
+`ROOT_CAUSE_1_reason = report_status_not_terminal (COMPLETE)` og
+`ROOT_CAUSE_2_chosen_at_0538 = D131-PR79-STASH-RECOVERY-20260911-A`.
 
-Full detalj: **D-131b** i DECISIONS_AND_ASSUMPTIONS.md (D-131/D-131a er tidligere runder på samme PR
-og står uendret).
+**Rettet som ÉN sammenhengende infrastruktur-PR (kun `ops/claude-worker/**` + docs):**
+
+1. Kanonisk statusklassifisering i `lib/reconcile.mjs`: `normalizeReportStatus()` +
+   `TERMINAL_STATUS_ALIASES` + eksplisitt `NON_TERMINAL_STATUSES`. Avgjørende nytt skille mellom
+   «gjenkjent, ikke-terminal» (`IN_PROGRESS` → retry er riktig) og «ikke gjenkjent»
+   (`statusRecognised=false` → parkeres som BLOCKED, ALDRI retryet i det uendelige).
+2. Nytt rent modul `lib/queue.mjs` (`selectNextTask()`): TIERING (aldri-utsendt task slår alltid en
+   retry), TOTAL DETERMINISTISK ORDNING (tier → tid → comment-id) og SUPERSESJON (ikke-terminal task
+   som er strengt eldre enn en COMPLETE task pensjoneres).
+3. Ny terminal `TASK_STATUS.SUPERSEDED` med `superseded_by`/`superseded_at`. Ingenting slettes
+   stille - worker poster én statusmelding til issue #68. Verken restart, supervisor-restart eller
+   tilbakespolt backoff-klokke kan gjenopplive en terminal/superseded task.
+4. Fersk GitHub-sannhet slår stale lokal state: ny `reconcileReportedTasks()`-pass kjører UNDER
+   låsen FØR kandidatvalg, over alle ikke-terminale tasks med `attempts>0` (bruker
+   `findUnreconciledTasks()`, ubrukt i `state.mjs` siden D-126), uavhengig av backoff.
+5. Idempotent post-merge-rekonsiliering: `merge_commit_sha`/`mergedAt` hentes nå og legges i
+   resume-prompten, så en gjenopptatt merge-task VERIFISERER overgangen den allerede forårsaket i
+   stedet for å kjøre en foreldet pre-merge-instruks mot post-merge-tilstand.
+6. Task-eiet proveniens: `observed_heads` registreres, og en gjenopptatt barneprosess får eksplisitt
+   `head_before → head_after` med instruksen om at commitene i spennet er TASK-ENS EGET ARBEID -
+   aldri stash/reset/force/revert/re-apply over dem. Det er nettopp den forvekslingen som skapte
+   stashen `worker-dirty-backup-2026-09-11`.
+
+**Uendret og ikke svekket:** den strenge dirty-worktree-beskyttelsen (ingen `git clean/reset/stash`,
+ukjente/sporede filer røres aldri) og tillitsgrensen i `lib/trust.mjs` (betrodd forfatter + eksakt
+TASK_ID kreves fortsatt for all autoritet).
+
+**Kvalitetsporter - faktisk kjørt:**
+
+- Worker-suiten: **18/18 filer, 470/470 tester grønt** (baseline før endring: 16 filer / 428 tester;
+  ingen eksisterende test svekket eller fjernet).
+- Ny `test/queue.test.mjs` (23 tester) og ny `test/worker-queue-reconciliation.test.mjs` (7
+  integrasjonstester mot den EKTE `node worker.mjs run`-prosessen), som replayer NØYAKTIG
+  D-131-sekvensen: eldre recovery-task → nyere merge-task → ACK → merge lykkes → prosess-/
+  rapportavbrudd → restart, og beviser at den gamle task-en aldri dispatches igjen.
+- `npx eslint .`: 0 feil/advarsler.
+
+**Ikke gjort (bevisst, per oppgavens eksplisitte grenser):** Q-34, D-108/provider-live, nye
+credentials, deploy, merge, self-approval, produktkapabilitet-endringer, urelatert opprydding.
+
+Full detalj: **D-132** i DECISIONS_AND_ASSUMPTIONS.md.
 
 ## Blokkeringer
 
-Ingen. Denne økten kjørte på Linux uten miljøbegrensningene forrige økt (Windows-administrator-token)
-rapporterte - full testsuite er faktisk kjørt og grønn, ikke antatt.
+Ingen harde blockere. `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` fra oppgaven:
+denne PR-en skal IKKE self-approves eller merges - uavhengig arkitektkontroll mot eksakt PR-HEAD
+kreves først.
 
-`MERGE_AUTHORIZED=false` fra oppgaven: PR #79 forblir draft og kan ikke merges før en NY uavhengig
-arkitektkontroll har godkjent eksakt ny HEAD/base og gitt en separat guarded two-parent mergeordre.
+Merk som miljøfakta, ikke som en test som ble hoppet over: den fulle arbeidsområde-suiten
+(`pnpm test`) starter embedded Postgres for produktmodulene. Denne oppgaven endrer null produktkode,
+og CI kjører hele suiten på eksakt PR-HEAD uansett; det som er kjørt lokalt her er hele
+worker-suiten (som er det denne diffen faktisk berører) pluss `eslint .` over hele repoet.
 
 ## Neste oppgave
 
-1. Push denne runden, verifiser CI grønt på eksakt ny HEAD, vent på en NY uavhengig arkitektkontroll.
-2. Etter godkjent merge + fersk post-merge CI på merge-SHA + bevist trygg lokal main-sync: egen,
-   dedikert cross-domene-audit-slice for Q-34 FØR en generisk `gateway.ts`-fiks vurderes.
-3. Deretter: re-derivere neste STØRSTE TRYGGE SAMMENHENGENDE leveranse fra faktisk repo-/masterplan-
-   status (ikke anta en fast rekkefølge).
+1. Vent på uavhengig arkitektkontroll av denne PR-en mot eksakt HEAD, og på fersk CI på samme HEAD.
+2. Etter godkjent merge: verifiser fersk post-merge CI på merge-SHA og trygg lokal main-sync.
+3. Deretter: egen, dedikert cross-domene-audit-slice for **Q-34** (FØR en generisk `gateway.ts`-fiks
+   vurderes), som var den neste produktleveransen i køen før denne kontrollplan-herdingen.

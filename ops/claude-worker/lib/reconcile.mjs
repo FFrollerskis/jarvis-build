@@ -33,18 +33,182 @@
 
 import { firstNonEmptyLine, extractField } from "./trust.mjs";
 
-/** STATUS values that genuinely close a task. */
-export const TERMINAL_REPORT_STATUSES = Object.freeze([
-  "COMPLETED",
-  "CLOSEOUT_COMPLETED",
-  "MERGED",
-  "DELIVERED",
-  "BLOCKED",
-  "FAILED"
+/**
+ * D132 ROOT CAUSE 1 - THE TERMINAL-STATUS VOCABULARY WAS NOT CANONICAL.
+ *
+ * The list below used to be a bare string array containing `COMPLETED`, and
+ * `assessCompletion` compared `STATUS=` against it with `Array.includes`. Claude
+ * writes `STATUS=COMPLETE`. Those are different strings, so a genuinely finished
+ * task was classified `report_status_not_terminal (COMPLETE)` - real evidence of
+ * completion, read correctly, and then thrown away over one letter.
+ *
+ * This is not hypothetical. It is recorded verbatim in the host's own state file
+ * for two separate D-131 tasks:
+ *
+ *   D131-PR79-PROVEN-KEY-BINDING-20260911-A
+ *     last_failure_reason: exit_0_without_matching_report
+ *                          (report_status_not_terminal (COMPLETE))
+ *     status: failed_retryable, attempts: 3
+ *
+ *   D131-PR79-MERGE-F12FF3B-20260911-B
+ *     last_failure_reason: exit_0_without_matching_report
+ *                          (report_status_not_terminal (COMPLETE))
+ *     status: failed_retryable, head_after: c67a7ba (the merge it had ALREADY
+ *     performed and correctly reported)
+ *
+ * A task that reports completion and is recorded as retryable is re-dispatched
+ * until its attempt budget runs out - which is exactly the "old task re-runs
+ * after the work is done" failure this module now has to make impossible.
+ *
+ * The repair is to stop doing exact-string equality against one spelling and to
+ * classify the status CANONICALLY instead:
+ *
+ *   - normalise the raw value (case, whitespace, markdown/quoting noise that
+ *     survives a copy-paste, hyphens vs underscores),
+ *   - map every accepted spelling onto ONE canonical outcome,
+ *   - and - decisively - distinguish "I recognise this and it is not terminal"
+ *     (STATUS=IN_PROGRESS: retry is correct) from "I do not recognise this at
+ *     all" (retrying forever is NOT correct; see `recognised` below).
+ *
+ * The existing test suite could never have caught this: `fixtures/fake-claude.mjs`
+ * posted `STATUS=COMPLETED`, a spelling the real child does not use. The fixture
+ * now defaults to the real one.
+ */
+
+/** Canonical terminal outcomes a report can carry. */
+export const REPORT_OUTCOME = Object.freeze({
+  COMPLETE: "COMPLETE",
+  BLOCKED: "BLOCKED",
+  FAILED: "FAILED"
+});
+
+/**
+ * Every accepted spelling -> canonical outcome.
+ *
+ * Keys are already normalised by `normalizeReportStatus`. Being generous here is
+ * safe in a way that being strict is not: a spelling we fail to recognise costs a
+ * duplicate dispatch of real work, while a spelling we recognise too eagerly is
+ * still gated on a TRUSTED report for that EXACT TASK_ID - the trust boundary in
+ * trust.mjs is untouched and does all the authority work.
+ */
+export const TERMINAL_STATUS_ALIASES = Object.freeze({
+  COMPLETE: REPORT_OUTCOME.COMPLETE,
+  COMPLETED: REPORT_OUTCOME.COMPLETE,
+  CLOSEOUT_COMPLETE: REPORT_OUTCOME.COMPLETE,
+  CLOSEOUT_COMPLETED: REPORT_OUTCOME.COMPLETE,
+  DONE: REPORT_OUTCOME.COMPLETE,
+  FINISHED: REPORT_OUTCOME.COMPLETE,
+  SUCCESS: REPORT_OUTCOME.COMPLETE,
+  SUCCEEDED: REPORT_OUTCOME.COMPLETE,
+  SUCCESSFUL: REPORT_OUTCOME.COMPLETE,
+  DELIVERED: REPORT_OUTCOME.COMPLETE,
+  MERGED: REPORT_OUTCOME.COMPLETE,
+  BLOCKED: REPORT_OUTCOME.BLOCKED,
+  STOPPED: REPORT_OUTCOME.BLOCKED,
+  HALTED: REPORT_OUTCOME.BLOCKED,
+  FAILED: REPORT_OUTCOME.FAILED,
+  FAILURE: REPORT_OUTCOME.FAILED,
+  ERROR: REPORT_OUTCOME.FAILED,
+  ABORTED: REPORT_OUTCOME.FAILED,
+  CANCELLED: REPORT_OUTCOME.FAILED,
+  CANCELED: REPORT_OUTCOME.FAILED
+});
+
+/**
+ * Spellings that are RECOGNISED and deliberately NOT terminal.
+ *
+ * This set is what keeps the fix honest. Without it the only safe reading of an
+ * unknown status would be "not terminal", which is precisely the behaviour that
+ * produced the D-131 loop. With it, "not terminal" is a POSITIVE statement about
+ * a status we understand, and anything outside both sets is an explicit
+ * vocabulary mismatch the control plane must surface rather than silently retry.
+ */
+export const NON_TERMINAL_STATUSES = Object.freeze([
+  "IN_PROGRESS",
+  "PROGRESS",
+  "STARTED",
+  "RUNNING",
+  "WORKING",
+  "CONTINUING",
+  "PARTIAL",
+  "PENDING",
+  "ACCEPTED",
+  "ACK",
+  "ACKNOWLEDGED",
+  "RESUMED"
 ]);
 
+/** Canonical outcomes that close the task but must NOT be presented as success. */
+export const UNSUCCESSFUL_OUTCOMES = Object.freeze([REPORT_OUTCOME.BLOCKED, REPORT_OUTCOME.FAILED]);
+
+/**
+ * Strip the formatting noise a status value picks up in practice and fold it to
+ * one comparable token.
+ *
+ * Handles: surrounding whitespace, markdown emphasis and code fencing
+ * (`**COMPLETE**`, `` `COMPLETE` ``), quotes, a trailing comment or parenthetical
+ * (`COMPLETE (all gates green)`), lowercase, and hyphen/space vs underscore.
+ * Returns `null` for anything that normalises away to nothing.
+ */
+export function normalizeReportStatus(raw) {
+  if (raw === null || raw === undefined) return null;
+  let s = String(raw).trim();
+  // A trailing parenthetical or comment is commentary ABOUT the status, not part
+  // of it: `STATUS=COMPLETE (CI green)` means COMPLETE.
+  s = s.replace(/\s*[(#].*$/, "");
+  // Markdown emphasis, code fencing and quoting.
+  s = s.replace(/^[\s*_`'"[\]]+/, "").replace(/[\s*_`'"[\]]+$/, "");
+  // Trailing sentence punctuation.
+  s = s.replace(/[.,;:]+$/, "");
+  s = s.trim().toUpperCase();
+  // Internal separators: COMPLETE, "closeout complete" and CLOSEOUT-COMPLETE are
+  // the same token.
+  s = s.replace(/[\s-]+/g, "_");
+  return s.length > 0 ? s : null;
+}
+
+/**
+ * Classify a raw `STATUS=` value.
+ *
+ * Returns `{ raw, canonical, outcome, terminal, successful, recognised }`.
+ *
+ *   recognised=false  the vocabulary does not contain this spelling AT ALL. The
+ *                     caller must NOT treat that as ordinary progress and must
+ *                     NOT retry on it indefinitely - that is the D-131 loop. It
+ *                     is a control-plane defect and has to become visible.
+ */
+export function classifyReportStatus(raw) {
+  const canonical = normalizeReportStatus(raw);
+  if (canonical === null) {
+    return { raw: raw ?? null, canonical: null, outcome: null, terminal: false, successful: false, recognised: false };
+  }
+  const outcome = TERMINAL_STATUS_ALIASES[canonical] ?? null;
+  if (outcome) {
+    return {
+      raw,
+      canonical,
+      outcome,
+      terminal: true,
+      successful: !UNSUCCESSFUL_OUTCOMES.includes(outcome),
+      recognised: true
+    };
+  }
+  if (NON_TERMINAL_STATUSES.includes(canonical)) {
+    return { raw, canonical, outcome: null, terminal: false, successful: false, recognised: true };
+  }
+  return { raw, canonical, outcome: null, terminal: false, successful: false, recognised: false };
+}
+
+/**
+ * Every spelling that closes a task. Kept as a derived export because callers and
+ * tests enumerate it; it is no longer the thing the comparison is done against.
+ */
+export const TERMINAL_REPORT_STATUSES = Object.freeze(Object.keys(TERMINAL_STATUS_ALIASES));
+
 /** Statuses that close the task but must NOT be presented as success. */
-export const UNSUCCESSFUL_REPORT_STATUSES = Object.freeze(["BLOCKED", "FAILED"]);
+export const UNSUCCESSFUL_REPORT_STATUSES = Object.freeze(
+  Object.keys(TERMINAL_STATUS_ALIASES).filter((k) => UNSUCCESSFUL_OUTCOMES.includes(TERMINAL_STATUS_ALIASES[k]))
+);
 
 /** Protocol headers that may legitimately carry a branch/PR association. */
 export const ASSOCIATION_HEADERS = Object.freeze(["CLAUDE_ACK", "CLAUDE_REPORT"]);
@@ -100,25 +264,43 @@ export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = n
       complete: false,
       successful: false,
       status: null,
+      canonicalStatus: null,
+      statusRecognised: false,
       reportCommentId: report.id,
       reason: "report_has_no_status_field"
     };
   }
-  if (!TERMINAL_REPORT_STATUSES.includes(status)) {
-    // e.g. STATUS=IN_PROGRESS - real evidence of progress, but not completion.
+
+  const verdict = classifyReportStatus(status);
+
+  if (!verdict.terminal) {
     return {
       complete: false,
       successful: false,
       status,
+      canonicalStatus: verdict.canonical,
+      // The decisive new field. `false` means the report exists and was trusted,
+      // but its STATUS is a spelling this worker does not know. Retrying on that
+      // basis is what produced the D-131 loop, so the caller must fail closed and
+      // make the mismatch visible instead of spinning.
+      statusRecognised: verdict.recognised,
       reportCommentId: report.id,
-      reason: `report_status_not_terminal (${status})`
+      reason: verdict.recognised
+        // e.g. STATUS=IN_PROGRESS - real evidence of progress, but not completion.
+        ? `report_status_not_terminal (${verdict.canonical})`
+        : `report_status_unrecognised (${String(status).slice(0, 48)})`
     };
   }
+
   return {
     complete: true,
-    successful: !UNSUCCESSFUL_REPORT_STATUSES.includes(status),
+    successful: verdict.successful,
     status,
+    canonicalStatus: verdict.canonical,
+    outcome: verdict.outcome,
+    statusRecognised: true,
     reportCommentId: report.id,
+    reportCreatedAt: report.created_at ?? null,
     reason: "matching_trusted_report_with_terminal_status"
   };
 }
@@ -171,13 +353,24 @@ export function extractAssociations({ taskId, comments = [], trustedAuthor, prio
   return { branches, prNumbers, sources };
 }
 
+/**
+ * D132: the merge TRUTH travels with the association, not just a boolean.
+ *
+ * A merge task that already performed its authorised state transition and then
+ * lost its report must be closeable from evidence. "merged=true" alone does not
+ * let the resumed child verify anything; the merge commit and the timestamp do.
+ * Re-running a pre-merge instruction against post-merge state is exactly the
+ * stale action the architect forbids.
+ */
 function normalisePull(pr) {
   if (!pr) return null;
   return {
     number: Number(pr.number),
     state: pr.state ?? null,
     headRefName: typeof pr.headRefName === "string" ? pr.headRefName : null,
-    merged: Boolean(pr.merged || pr.mergedAt)
+    merged: Boolean(pr.merged || pr.mergedAt),
+    mergedAt: pr.mergedAt ?? null,
+    mergeCommitSha: pr.mergeCommitSha ?? null
   };
 }
 
@@ -259,13 +452,19 @@ export function reconcilePriorAttempt({
  * Merge freshly observed associations into a task record, without ever dropping
  * one we already knew about.
  */
-export function mergeObservedAssociations(task, { branch = null, prNumber = null } = {}) {
+export function mergeObservedAssociations(task, { branch = null, prNumber = null, head = null } = {}) {
   const branches = [...(task?.observed_branches ?? [])];
   const prNumbers = [...(task?.observed_pr_numbers ?? [])];
+  // D132: every commit this task has been observed at, in order. This is the
+  // task-owned provenance a resumed child needs to recognise its OWN prior
+  // commits instead of mistaking them for foreign work and reaching for a
+  // destructive reconciliation.
+  const heads = [...(task?.observed_heads ?? [])];
   if (usableBranch(branch) && !branches.includes(branch)) branches.push(branch);
   const n = Number(prNumber);
   if (Number.isInteger(n) && n > 0 && !prNumbers.includes(n)) prNumbers.push(n);
-  return { observed_branches: branches, observed_pr_numbers: prNumbers };
+  if (typeof head === "string" && /^[0-9a-f]{7,40}$/i.test(head) && !heads.includes(head)) heads.push(head);
+  return { observed_branches: branches, observed_pr_numbers: prNumbers, observed_heads: heads };
 }
 
 /** ---------------- bounded backoff ---------------- */

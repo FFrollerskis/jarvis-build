@@ -185,6 +185,33 @@ Worker (`worker.mjs`):
   tasken tilbake til den vanlige retry-banen. Et uprøvbart pid blokkerer kun
   innenfor barnets eget levetidsbudsjett — pid-gjenbruk kan aldri stoppe loopen
   permanent.
+- **C3 (kø-rekonsiliering og supersesjon, D-132).** FERSK kontroll-issue-sannhet
+  slår stale lokal bokføring, og køvalget er totalt og deterministisk:
+  - Terminal `STATUS` leses KANONISK (`normalizeReportStatus()` +
+    `TERMINAL_STATUS_ALIASES`), ikke med eksakt strengsammenligning.
+    `COMPLETE`/`COMPLETED`/`MERGED`/`DELIVERED`/`BLOCKED`/`FAILED` m.fl. er samme
+    kanoniske utfall uansett case, markdown-utheving, kodefencing, sitattegn,
+    etterstilt parentes eller bindestrek-vs-understrek. En status som er
+    GJENKJENT og ikke-terminal (`IN_PROGRESS`) er fortsatt retry; en status som
+    IKKE er gjenkjent i det hele tatt parkeres som BLOCKED med vokabularet oppgitt
+    — retry på en uleselig status er selve feilklassen D-132 lukker.
+  - FØR noen kandidat velges pensjoneres hver ikke-terminal task med
+    `attempts>0` som har en betrodd terminal `CLAUDE_REPORT` — uavhengig av
+    backoff, og uavhengig av om den ville blitt kjøringens kandidat.
+  - En aldri-utsendt task slår ALLTID en retry (tiering), så en nyere gyldig
+    uprosessert `ARCHITECT_TASK` kan ikke preemptes av stale retry-bokføring.
+    Ordningen er total: tier → tid → comment-id (ferske eldst-først, retries
+    nyest-først).
+  - En ikke-terminal task som er STRENGT ELDRE enn en task som allerede er
+    COMPLETE blir `superseded` — terminal, med `superseded_by`/`superseded_at`
+    registrert og én statusmelding postet. Ingenting slettes stille, og verken
+    restart, supervisor-restart eller tilbakespolt backoff-klokke kan gjenopplive
+    en terminal eller superseded task.
+  - En gjenopptatt task får merge-sannheten (`merge_commit_sha`, `mergedAt`) og
+    sin EGEN proveniens (`head_before → head_after`, `observed_heads`) i prompten,
+    med eksplisitt instruks om at commitene i spennet er task-ens eget arbeid —
+    aldri stash/reset/force/revert/re-apply over dem, og nyere tilstand er
+    autoritativ.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -366,7 +393,8 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-304 tester (kjørt 2026-09-07 på denne branchen: 14 filer / 304 passed). I tillegg
+470 tester (kjørt 2026-09-11 på `claude/d132-worker-recovery-reconciliation`:
+18 filer / 470 passed; baseline før D-132 var 16 filer / 428). I tillegg
 til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
 point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
 tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
@@ -389,6 +417,28 @@ tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
 - **supervisor-protokollen ende-til-ende**: to like `COMMAND_ID` i samme poll,
   budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet
   kvittering, og bevart utsettelse fra travel til ledig.
+
+og v2.7 (D-132) legger til:
+
+- **kø-ordning og supersesjon** (`test/queue.test.mjs`, 23 tester): tiering,
+  total deterministisk ordning inkl. like tidsstempler, supersesjon drevet av
+  ferske kommentarer når lokal state er stale, og at terminal/superseded state
+  ikke kan gjenopplives av en tilbakespolt backoff-klokke;
+- **kanonisk statusparsing** (`test/reconcile.test.mjs`): `STATUS=COMPLETE`
+  lukker tasken, staveformer og formateringsstøy normaliseres, og en UGJENKJENT
+  status skilles eksplisitt fra gjenkjent framdrift;
+- **NØYAKTIG D-131-sekvensen mot det EKTE entrypointet**
+  (`test/worker-queue-reconciliation.test.mjs`, 7 tester): eldre recovery-task →
+  nyere merge-task → ACK → merge lykkes → prosess-/rapportavbrudd → restart, med
+  bevis for at den gamle task-en aldri dispatches igjen og at tre påfølgende
+  restarter ikke gjenoppliver den; pluss at en allerede merget task får
+  merge-commit og «ikke merge igjen» i resume-prompten, og at en gjenopptatt
+  task får sin egen head-proveniens.
+
+Merk: `fixtures/fake-claude.mjs` poster som standard `STATUS=COMPLETE` — den
+EKTE staveformen. Den postet tidligere `STATUS=COMPLETED`, som ingen ekte
+barneprosess bruker, og det er grunnen til at 428 grønne tester kunne sameksistere
+med en worker som ikke kjente igjen en eneste ekte fullføringsrapport.
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

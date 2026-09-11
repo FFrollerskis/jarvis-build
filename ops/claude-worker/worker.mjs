@@ -46,11 +46,12 @@ import {
   saveStateAtomic,
   upsertTask,
   getTask,
-  isEligibleNow,
   isTerminal,
   isValidTaskId,
-  findAbandonedTasks
+  findAbandonedTasks,
+  findUnreconciledTasks
 } from "./lib/state.mjs";
+import { selectNextTask, INELIGIBLE } from "./lib/queue.mjs";
 import { acquireLock, heartbeat, releaseLock, readLock, holdsLock } from "./lib/lock.mjs";
 import { matchProcessIdentity, listDescendants, isProcessAlive } from "./lib/procid.mjs";
 import { recoverScratch } from "./lib/quarantine.mjs";
@@ -61,7 +62,9 @@ import {
   mergeObservedAssociations,
   computeBackoff,
   shouldPostStatus,
-  statusKey
+  statusKey,
+  TERMINAL_REPORT_STATUSES,
+  NON_TERMINAL_STATUSES
 } from "./lib/reconcile.mjs";
 import { RECOVERY, planTaskRecovery, childLifetimeBudgetMs, describeProtectedChild } from "./lib/recovery.mjs";
 import { runClaude, OUTCOME } from "./lib/dispatch.mjs";
@@ -298,36 +301,207 @@ async function runOwned(cfg, token) {
   const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
   const nowMs = Date.now();
 
-  // Requirement E: only already-authorised tasks. Nothing is invented here.
-  const candidate = tasks.find((t) => {
-    if (!isValidTaskId(t.taskId)) return false;
-    return isEligibleNow(getTask(state, t.taskId), nowMs);
-  });
-
   const unsafeIds = tasks.filter((t) => !isValidTaskId(t.taskId)).map((t) => t.taskId);
   if (unsafeIds.length > 0) {
     log(cfg, `Ignoring ${unsafeIds.length} trusted task(s) with an unsafe TASK_ID (it is used as a directory name): ${unsafeIds.map((i) => String(i).slice(0, 48)).join(", ")}`);
   }
 
+  // --- D132: RETIRE FINISHED WORK BEFORE CHOOSING ANYTHING -----------------
+  //
+  // Every non-terminal task that has been dispatched at least once is checked
+  // against the FRESH control-issue comments for a trusted terminal report -
+  // regardless of whether its backoff has elapsed and regardless of whether it
+  // would have been this run's candidate.
+  //
+  // This is the structural half of the D-131 repair. Previously a report was
+  // only ever reconciled for the ONE task that happened to be selected, so a
+  // finished task sitting in backoff kept its stale `failed_retryable` record
+  // and returned to the front of the queue later. `findUnreconciledTasks` has
+  // existed in state.mjs since D126 and was never called; it is now the basis of
+  // this pass.
+  reconcileReportedTasks(cfg, state, token, comments);
+
+  // Requirement E: only already-authorised tasks. Nothing is invented here.
+  const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs });
+
+  // Persist the retirements the selection identified, so they survive a restart
+  // and can never be re-decided differently by a later run.
+  const retired = retireIneligibleTasks(cfg, state, token, selection);
+
+  const candidate = selection.candidate;
+
   if (!candidate) {
-    const waiting = tasks.filter((t) => {
-      const rec = getTask(state, t.taskId);
-      return rec && !isTerminal(rec) && !isEligibleNow(rec, nowMs);
-    });
-    if (waiting.length > 0) {
-      log(cfg, `No task eligible right now; ${waiting.length} in backoff (next: ${waiting[0].taskId} at ${getTask(state, waiting[0].taskId)?.next_eligible_at}).`);
+    if (selection.waitingTaskIds.length > 0) {
+      const first = selection.waitingTaskIds[0];
+      log(cfg, `No task eligible right now; ${selection.waitingTaskIds.length} in backoff (next: ${first} at ${getTask(state, first)?.next_eligible_at}).`);
     } else {
       log(cfg, "No new trusted ARCHITECT_TASK found. Exiting cleanly.");
     }
     state.last_run_at = new Date().toISOString();
     persistState(cfg, state, token);
-    return recovery.exit ?? EXIT.OK;
+    return recovery.exit ?? (retired.blocked ? EXIT.BLOCKED : EXIT.OK);
   }
 
-  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, posted ${candidate.comment.created_at}, ${candidate.updates.length} scope update(s))`);
+  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, `
+    + `posted ${candidate.comment.created_at}, ${candidate.updates.length} scope update(s), `
+    + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
   return await runTask(cfg, state, token, candidate, comments);
+}
+
+/**
+ * D132: close out every already-dispatched, non-terminal task that now has a
+ * trusted terminal CLAUDE_REPORT.
+ *
+ * Runs under ownership, against comments fetched THIS run, before any candidate
+ * is chosen. A task retired here is terminal, so no restart, no elapsed backoff
+ * and no stale retry bookkeeping can bring it back.
+ */
+function reconcileReportedTasks(cfg, state, token, comments) {
+  const unreconciled = findUnreconciledTasks(state);
+  if (unreconciled.length === 0) return { reconciled: [] };
+
+  const reconciled = [];
+  for (const task of unreconciled) {
+    // IN_PROGRESS belongs to the recovery pass, which has already run and which
+    // owns the live-child protection decision.
+    if (task.status === TASK_STATUS.IN_PROGRESS) continue;
+
+    const completion = assessCompletion({
+      taskId: task.task_id,
+      comments,
+      trustedAuthor: cfg.trustedAuthor,
+      sinceIso: task.first_dispatch_at ?? null
+    });
+    if (!completion.complete) continue;
+
+    log(cfg, `Retiring ${task.task_id} from its trusted terminal report `
+      + `(comment ${completion.reportCommentId}, STATUS=${completion.status} -> ${completion.canonicalStatus}) `
+      + "without re-dispatching.");
+    upsertTask(state, task.task_id, {
+      status: TASK_STATUS.COMPLETED,
+      completed_at: new Date().toISOString(),
+      report_comment_id: completion.reportCommentId,
+      report_status: completion.status,
+      report_status_canonical: completion.canonicalStatus,
+      successful: completion.successful,
+      reconciled_without_redispatch: true
+    });
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
+      task_id: task.task_id,
+      report_comment_id: completion.reportCommentId,
+      report_status: completion.status,
+      via: "pre_selection_reconciliation"
+    });
+    reconciled.push(task.task_id);
+  }
+
+  if (reconciled.length > 0) {
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+  }
+  return { reconciled };
+}
+
+/**
+ * D132: persist the retirements `selectNextTask` identified.
+ *
+ * Two kinds, both durable and both TERMINAL:
+ *
+ *   SUPERSEDED  a strictly newer trusted ARCHITECT_TASK has already completed.
+ *               Nothing is silently dropped - `superseded_by` is recorded and a
+ *               status notice is posted, so the architect can re-issue a FRESH
+ *               TASK_ID if the old order is still wanted.
+ *
+ *   UNRECOGNISED REPORT STATUS
+ *               a trusted report exists for the task but its STATUS is a
+ *               spelling this worker does not know. Retrying on that basis is
+ *               the exact D-131 loop, so the task is parked as BLOCKED and the
+ *               vocabulary mismatch is reported rather than absorbed.
+ */
+function retireIneligibleTasks(cfg, state, token, selection) {
+  let mutated = false;
+  let blocked = false;
+
+  for (const decision of selection.decisions) {
+    const record = getTask(state, decision.taskId);
+    if (!record || isTerminal(record)) continue;
+
+    if (decision.reason === INELIGIBLE.SUPERSEDED) {
+      log(cfg, `SUPERSEDED ${decision.taskId}: a strictly newer trusted task (${decision.supersededBy}) has already `
+        + "completed, so replaying this older order would apply a stale instruction to changed state.");
+      upsertTask(state, decision.taskId, {
+        status: TASK_STATUS.SUPERSEDED,
+        superseded_at: new Date().toISOString(),
+        superseded_by: decision.supersededBy,
+        last_failure_reason: `superseded_by_newer_completed_task (${decision.supersededBy})`,
+        child_identity: null
+      });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+        task_id: decision.taskId, reason: "superseded_by_newer_completed_task", superseded_by: decision.supersededBy
+      });
+      reportStatus(cfg, {
+        taskId: decision.taskId,
+        phase: "queue",
+        reason: "superseded_by_newer_completed_task",
+        detail: [
+          `This task was issued at ${decision.createdAt ?? "an unknown time"} and had ${decision.attempts} attempt(s).`,
+          `A STRICTLY NEWER trusted ARCHITECT_TASK (${decision.supersededBy}) has since completed.`,
+          "Re-running this older order would apply a stale instruction to repository state that has",
+          "already moved on, so it is retired instead of retried.",
+          "",
+          "NOTHING was reset, reverted or deleted. No repository action was taken for this task."
+        ].join("\n"),
+        nextAction: "If this older order is still wanted against CURRENT repository truth, issue a FRESH TASK_ID for it. The worker will not replay a superseded task on its own."
+      });
+      mutated = true;
+      continue;
+    }
+
+    if (decision.reason === INELIGIBLE.UNRECOGNISED_REPORT_STATUS) {
+      const raw = decision.completion?.status ?? "unknown";
+      log(cfg, `BLOCKED ${decision.taskId}: a trusted report exists (comment ${decision.completion?.reportCommentId}) `
+        + `but STATUS=${String(raw).slice(0, 48)} is not a spelling this worker recognises. `
+        + "Refusing to retry on an unreadable status.");
+      upsertTask(state, decision.taskId, {
+        status: TASK_STATUS.BLOCKED,
+        blocked_at: new Date().toISOString(),
+        report_comment_id: decision.completion?.reportCommentId ?? null,
+        report_status: raw,
+        last_failure_reason: `report_status_unrecognised (${String(raw).slice(0, 48)})`,
+        child_identity: null
+      });
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+        task_id: decision.taskId, reason: "report_status_unrecognised", report_status: String(raw).slice(0, 48)
+      });
+      reportStatus(cfg, {
+        taskId: decision.taskId,
+        phase: "queue",
+        reason: "report_status_unrecognised",
+        detail: [
+          `A TRUSTED CLAUDE_REPORT for this task exists (comment ${decision.completion?.reportCommentId ?? "unknown"}),`,
+          `but its STATUS value is ${JSON.stringify(String(raw).slice(0, 64))}, which this worker's canonical`,
+          "vocabulary does not contain - so it can be read neither as completion nor as progress.",
+          "",
+          "The task is parked as BLOCKED rather than retried. Retrying on an unreadable status is exactly",
+          "how a finished task gets dispatched again (D-131).",
+          "",
+          "Terminal spellings: " + TERMINAL_REPORT_STATUSES.join(", "),
+          "Non-terminal spellings: " + NON_TERMINAL_STATUSES.join(", ")
+        ].join("\n"),
+        nextAction: "Confirm from the report whether the task actually finished. If it did, no action is needed beyond using a canonical STATUS next time; if it did not, issue a FRESH TASK_ID."
+      });
+      mutated = true;
+      blocked = true;
+    }
+  }
+
+  if (mutated) {
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+  }
+  return { mutated, blocked };
 }
 
 /**
@@ -519,11 +693,22 @@ async function runTask(cfg, state, token, candidate, comments) {
       existingPr: rec.existingPr,
       prNumberKnownButUnverified: rec.prNumberKnownButUnverified,
       alreadyMerged: rec.alreadyMerged,
-      duplicateRiskUnknown: rec.duplicateRiskUnknown
+      duplicateRiskUnknown: rec.duplicateRiskUnknown,
+      // D132: what THIS task's own previous attempt actually did to the
+      // repository. The child needs it to recognise its own commits instead of
+      // treating them as foreign work to be stashed or reset over.
+      provenance: {
+        branchBefore: prior.branch_before ?? null,
+        headBefore: prior.head_before ?? null,
+        branchAfter: prior.branch_after ?? null,
+        headAfter: prior.head_after ?? null,
+        observedHeads: prior.observed_heads ?? []
+      }
     };
     upsertTask(state, taskId, mergeObservedAssociations(prior, {
       branch: rec.existingBranch,
-      prNumber: rec.existingPr?.number ?? rec.prNumberKnownButUnverified
+      prNumber: rec.existingPr?.number ?? rec.prNumberKnownButUnverified,
+      head: prior.head_after ?? null
     }));
     log(cfg, `Resuming TASK_ID=${taskId} (attempt ${prior.attempts + 1}); existing branch=${rec.existingBranch ?? "none"} (verified=${rec.branchVerified}), PR=${rec.existingPr?.number ?? "none"}, alreadyMerged=${rec.alreadyMerged}`);
   }
@@ -920,8 +1105,12 @@ async function runTask(cfg, state, token, candidate, comments) {
   };
 
   // The branch this attempt actually ended on is an EXACT association: record it
-  // so a later reconciliation never has to guess (blocker 6).
-  const observed = mergeObservedAssociations(getTask(state, taskId), { branch: checkpoint.branch_after });
+  // so a later reconciliation never has to guess (blocker 6). D132 adds the head
+  // it ended at, which is this task's own provenance for a later resume.
+  const observed = mergeObservedAssociations(getTask(state, taskId), {
+    branch: checkpoint.branch_after,
+    head: checkpoint.head_after
+  });
 
   if (completion.complete) {
     upsertTask(state, taskId, {
@@ -931,6 +1120,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       completed_at: new Date().toISOString(),
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,
+      report_status_canonical: completion.canonicalStatus,
       successful: completion.successful,
       child_identity: null,
       last_child_pid: null
@@ -942,6 +1132,55 @@ async function runTask(cfg, state, token, candidate, comments) {
     });
     log(cfg, `TASK_ID=${taskId} COMPLETE - matching trusted report ${completion.reportCommentId} (STATUS=${completion.status}).`);
     return EXIT.OK;
+  }
+
+  // --- D132: AN UNREADABLE STATUS IS NEVER A REASON TO RETRY ----------------
+  //
+  // The child posted a TRUSTED report for this exact task, but its STATUS is a
+  // spelling the canonical vocabulary does not contain, so it can be read
+  // neither as completion nor as progress. Retrying here is the precise
+  // mechanism of the D-131 loop: `STATUS=COMPLETE` fell outside the vocabulary,
+  // was recorded as `report_status_not_terminal (COMPLETE)`, and the finished
+  // task was dispatched again and again.
+  //
+  // Fail closed: park it as BLOCKED - which the worker never replays on its own
+  // - and make the vocabulary mismatch visible instead of absorbing it.
+  if (completion.reportCommentId !== null && completion.statusRecognised === false) {
+    log(cfg, `BLOCKED for TASK_ID=${taskId}: a trusted report (comment ${completion.reportCommentId}) exists but `
+      + `STATUS=${String(completion.status).slice(0, 48)} is not recognised. NOT retrying on an unreadable status.`);
+    upsertTask(state, taskId, {
+      ...checkpoint,
+      ...observed,
+      status: TASK_STATUS.BLOCKED,
+      report_comment_id: completion.reportCommentId,
+      report_status: completion.status,
+      last_failure_reason: `report_status_unrecognised (${String(completion.status).slice(0, 48)})`,
+      blocked_at: new Date().toISOString(),
+      child_identity: null
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "report_status_unrecognised", report_status: String(completion.status).slice(0, 48)
+    });
+    reportStatus(cfg, {
+      taskId,
+      phase: "verify",
+      reason: "report_status_unrecognised",
+      detail: [
+        `The dispatch finished (outcome=${result.outcome}) and a TRUSTED CLAUDE_REPORT for this exact TASK_ID`,
+        `was posted (comment ${completion.reportCommentId}), but its STATUS value is`,
+        `${JSON.stringify(String(completion.status).slice(0, 64))}, which is not in this worker's canonical vocabulary.`,
+        "",
+        "It is therefore readable neither as completion nor as progress, and the task is parked as BLOCKED",
+        "rather than retried - retrying on an unreadable status is how a finished task gets run again.",
+        "",
+        "Terminal spellings: " + TERMINAL_REPORT_STATUSES.join(", "),
+        "Non-terminal spellings: " + NON_TERMINAL_STATUSES.join(", ")
+      ].join("\n"),
+      nextAction: "Read the report and confirm whether the work finished. If it did, use a canonical STATUS next time; if it did not, issue a FRESH TASK_ID."
+    });
+    return EXIT.BLOCKED;
   }
 
   // Not complete: exit 0 without a matching report is explicitly NOT success.
@@ -1045,7 +1284,12 @@ function cmdDryRun(cfg) {
   const abandoned = findAbandonedTasks(loaded.state);
   const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
   const nowMs = Date.now();
-  const candidate = tasks.find((t) => isValidTaskId(t.taskId) && isEligibleNow(getTask(loaded.state, t.taskId), nowMs));
+  // D132: the dry run must preview the SAME decision the real run would make,
+  // including tiering and supersession - otherwise it cannot be used to verify
+  // queue behaviour on the host, which is exactly what was needed here.
+  const selection = selectNextTask({
+    tasks, state: loaded.state, comments, trustedAuthor: cfg.trustedAuthor, nowMs
+  });
   const status = gitStatusLines(cfg);
   console.log(JSON.stringify({
     dry_run: true,
@@ -1054,7 +1298,15 @@ function cmdDryRun(cfg) {
     state_source: loaded.source,
     first_run: loaded.first_run,
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
-    next_candidate: candidate?.taskId ?? null,
+    next_candidate: selection.candidate?.taskId ?? null,
+    next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
+    would_retire_superseded: selection.supersededTaskIds,
+    would_retire_from_report: selection.completedByReportTaskIds,
+    unrecognised_report_status: selection.unrecognisedStatusTaskIds,
+    waiting_for_backoff: selection.waitingTaskIds,
+    queue_decisions: selection.decisions.map((d) => ({
+      task_id: d.taskId, eligible: d.eligible, reason: d.reason, tier: d.tier, attempts: d.attempts
+    })),
     worktree_query_ok: status.ok,
     worktree_dirty_entries: status.ok ? status.lines : null,
     worktree_query_error: status.ok ? null : status.error

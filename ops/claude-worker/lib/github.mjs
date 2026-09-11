@@ -148,7 +148,11 @@ export function listPulls({ repoOwner, repoName }, runner = gh) {
       `repos/${repoOwner}/${repoName}/pulls?state=all&per_page=100`,
       "--paginate",
       "--jq",
-      ".[] | {number: .number, headRefName: .head.ref, state: .state, mergedAt: .merged_at, title: .title, body: .body}"
+      // D132: `merge_commit_sha` is carried through so a resumed merge/post-merge
+      // task can VERIFY the transition it already caused instead of retrying a
+      // now-stale pre-merge action against post-merge state.
+      ".[] | {number: .number, headRefName: .head.ref, state: .state, mergedAt: .merged_at, "
+        + "mergeCommitSha: .merge_commit_sha, title: .title, body: .body}"
     ]);
     return { ok: true, items: parseJsonLines(out) };
   } catch (err) {
@@ -163,7 +167,8 @@ export function getPull({ repoOwner, repoName }, number, runner = gh) {
       "api",
       `repos/${repoOwner}/${repoName}/pulls/${Number(number)}`,
       "--jq",
-      "{number: .number, headRefName: .head.ref, state: .state, mergedAt: .merged_at, title: .title}"
+      "{number: .number, headRefName: .head.ref, state: .state, mergedAt: .merged_at, "
+        + "mergeCommitSha: .merge_commit_sha, title: .title}"
     ]);
     const parsed = parseJsonLines(out);
     return parsed.length > 0 ? { ok: true, item: parsed[0] } : { ok: false, item: null, error: "empty_response" };
