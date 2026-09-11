@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { ChannelSessionAuthority, DeviceService, IdentityService, PgApprovalStore, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { ChannelSessionAuthority, DeviceService, IdentityService, PgApprovalStore, SessionGrantService, SessionService, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 
@@ -72,11 +72,14 @@ beforeAll(async () => {
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_chdedupe", password: "pw2" });
   devices = new DeviceService(appPool);
   authority = new ChannelSessionAuthority({
+    pool: appPool,
     devices,
     sessions: new SessionService(appPool),
-    identity: new IdentityService(appPool)
+    identity: new IdentityService(appPool),
+    // D-131: autoriteten utsteder nå også et avgrenset, revokerbart grant.
+    grants: new SessionGrantService(appPool)
   });
-  await devices.registerDevice(seedIdentity, { device_id: "phone-tobias", kind: "mobile", public_key_pem: pem(phoneKeys) });
+  await devices.registerDeviceTrusted(seedIdentity,{ device_id: "phone-tobias", kind: "mobile", public_key_pem: pem(phoneKeys) });
 }, 240_000);
 
 afterAll(async () => {

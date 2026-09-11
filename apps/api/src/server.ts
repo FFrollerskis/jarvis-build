@@ -2,7 +2,10 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type pg from "pg";
-import type { ChannelSessionAuthority, DeviceService, IdentityService, SessionService, VoiceSessionAuthority } from "@jarvis/core";
+import type {
+  ChannelSessionAuthority, DeviceEnrollmentService, DeviceService, IdentityService,
+  SessionGrantService, SessionService, VoiceSessionAuthority
+} from "@jarvis/core";
 import {
   acquireContainerLogs, attemptRecovery, correlateDbState, correlateIncident, dockerProviderStatus, executeInfraMutation,
   getInfraExecution, ingestGithubDeployment, proposeRepairTask, type DeploymentService, type DiagnosisService, type IncidentService
@@ -18,7 +21,7 @@ import {
   type CardService, type FinanceService
 } from "@jarvis/finance";
 import type { ConversationEngine } from "./conversation.ts";
-import type { Channel, MemorySpace } from "@jarvis/contracts";
+import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 
 /**
  * Fase 3: minimalt API uten rammeverk (rammeverksvalg utsatt til behovet
@@ -54,6 +57,20 @@ export interface ApiDeps {
    * D-123 krevde - `DeviceService` holder utstedte challenges in-memory).
    */
   channelAuthority: ChannelSessionAuthority;
+  /**
+   * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): den server-side
+   * eieren av `session_grants`. PÅKREVD, ikke valgfri: `/chat`/`/brief` har
+   * ingen annen autoritetskilde igjen - de godtar KUN et `grant_token`, og
+   * ALDRI en rå sesjons-ID.
+   */
+  grants: SessionGrantService;
+  /**
+   * D-131 funn 2: den betrodde innrullerings-autoriteten bak
+   * `/devices/register`. Valgfri på samme måte som `devices`: uten
+   * database-avhengigheter kjører API-et i helse-modus, og da er ruten 404
+   * i stedet for en åpen innrulleringsflate.
+   */
+  enrollment?: DeviceEnrollmentService;
   /** v4.0 BO-02: Daily Executive Brief on demand. */
   brief?: { generate(identity: unknown): Promise<unknown>; render(artifact: unknown): string };
   /**
@@ -106,30 +123,106 @@ export function healthStatus(): HealthStatus {
 }
 
 /**
- * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `person_id`/`device_id`/
- * `auth_strength` er BEVISST FJERNET fra denne kroppen - en klient kan ikke
- * lenger PÅSTÅ noen av dem direkte til `/chat`/`/brief`. `session_id`
- * kommer UTELUKKENDE fra en tidligere vellykket `/session/authorize`- eller
- * `/voice/session/authorize`-autorisasjon (BEGGE krever ekte enhetsbevis
- * FØR noen sesjonsrad røres) - se `sessions.getActive()`, som slår opp
- * `person_id`/`device_id` FRA sesjonsraden selv, ALDRI fra klienten.
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): kroppen inneholder nå
+ * IKKE ETT ENESTE identitetsbærende felt.
+ *
+ * D-130-runden fjernet `person_id`/`device_id`/`auth_strength`, men beholdt
+ * `session_id` som bevis - og slo opp `person_id`/`device_id` fra sesjonsraden
+ * via `sessions.getActive()`. Reviewen påviste at det gjorde
+ * SAMTALEKONTINUITET om til DEVICE-AUTHENTICATION: en sesjon deles bevisst
+ * mellom personens kanaler og `last_device_id` overskrives ved hvert
+ * kanalbytte, så en eldre klient ble re-attribuert til den sist aktive
+ * enhetens identitet, en tilbakekalt nøkkel fortsatte å virke, og en
+ * `TelegramOwnerAuthority`-sesjon (`active`) ble oppgradert til `signed`.
+ *
+ * Nå presenteres KUN et `grant_token`: et serverutstedt, avgrenset og
+ * revokerbart bevis (`session_grants`, migrasjon 053) bundet til NØYAKTIG én
+ * bevist enhet, ett autorisert scope, én kanal og et utløp.
+ * `tenant_id`/`memory_space`/`channel` er FJERNET fordi de nå leses ut av
+ * grantet - en klient kan ikke lenger be om et annet scope enn det den faktisk
+ * er autorisert for. Vil den ha en annen memory space, må den autorisere på
+ * nytt (én signatur). `session_id` returneres i SVARET som ren
+ * samtalekontinuitet, men godtas aldri mer som input.
  */
 interface ChatBody {
-  session_id: string;
-  tenant_id: string;
-  memory_space: MemorySpace;
-  channel: Channel;
+  grant_token: string;
   message: string;
   /** BO-12 §33: valgfri owner-override av LLM-provider (router §38-semantikk). */
   provider?: string;
 }
 
-/** Kroppen for `/brief` - samme sesjonsbaserte autoritet som `/chat`, uten `message`. */
+/** Kroppen for `/brief` - samme grant-baserte autoritet som `/chat`, uten `message`. */
 interface BriefBody {
-  session_id: string;
-  tenant_id: string;
-  memory_space: MemorySpace;
-  channel: Channel;
+  grant_token: string;
+}
+
+/** Nøkkel-hvitelistene for de to kroppene - alt annet er fail-closed avvist. */
+const CHAT_BODY_KEYS = ["grant_token", "message", "provider"] as const;
+const BRIEF_BODY_KEYS = ["grant_token"] as const;
+
+/**
+ * Fail-closed parsing, speilbildet av `.strict()`: et forsøk på å sende f.eks.
+ * `session_id`, `tenant_id`, `person_id`, `memory_space`, `channel` eller
+ * `auth_strength` gir `malformed_request` i stedet for å bli stille ignorert.
+ * Stille ignorering er farlig her: en klient (eller en fremtidig
+ * refaktorering) kunne ellers TRO at feltet virket.
+ */
+function parseGrantBody<K extends readonly string[]>(raw: unknown, allowedKeys: K): Record<string, unknown> | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  if (Object.keys(obj).some((key) => !(allowedKeys as readonly string[]).includes(key))) {
+    return null;
+  }
+  if (typeof obj["grant_token"] !== "string" || obj["grant_token"].length === 0) {
+    return null;
+  }
+  return obj;
+}
+
+/**
+ * D-131 funn 1: DEN ENE veien fra et framlagt bærer-bevis til en
+ * kontraktvalidert `IdentityContext`.
+ *
+ * To uavhengige porter, i denne rekkefølgen:
+ *
+ *   1. `grants.verify()` - er beviset selv fortsatt gyldig? (finnes / ikke
+ *      utløpt / ikke tilbakekalt / enhetsnøkkelen er fortsatt NØYAKTIG den som
+ *      ble bevist da grantet ble utstedt). Det er her tilbakekalling og
+ *      nøkkelrotasjon slår inn STRUKTURELT, ved hvert eneste kall.
+ *   2. `identity.resolveIdentity()` - er kombinasjonen person↔tenant↔enhet↔
+ *      space fortsatt tillatt NÅ? Et grant fryser ikke medlemskap: mister
+ *      personen tilgangen, eller slettes enheten/space-en, nektes kallet
+ *      umiddelbart selv om grantet ennå ikke er utløpt.
+ *
+ * Hvert felt kommer fra grant-raden - `auth_strength` inkludert. En transport
+ * kan derfor ikke lenger «oppgradere» seg selv: en `active`-autoritet (f.eks.
+ * Telegram sin bot-token-baserte sesjon) forblir `active` hele veien, mens
+ * kun et enhetssignert grant er `signed`.
+ */
+async function resolveFromGrant(
+  deps: ApiDeps,
+  grantToken: string
+): Promise<{ ok: true; identity: IdentityContext } | { ok: false; reason: string }> {
+  const verified = await deps.grants.verify(grantToken);
+  if (!verified.ok) {
+    return { ok: false, reason: verified.reason };
+  }
+  const grant = verified.grant;
+  const resolved = await deps.identity.resolveIdentity({
+    person_id: grant.person_id,
+    tenant_id: grant.tenant_id,
+    memory_space: grant.memory_space,
+    session_id: grant.session_id,
+    device_id: grant.device_id,
+    channel: grant.channel,
+    auth_strength: grant.auth_strength
+  });
+  if (!resolved.ok) {
+    return { ok: false, reason: resolved.reason };
+  }
+  return { ok: true, identity: resolved.identity };
 }
 
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
@@ -210,6 +303,13 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     // ekte avslag). `channel` skilles ut FØR resten sendes som bevismateriale
     // - `ChannelSessionAuthority.authorize()` avviser ukjente nøkler i
     // bevismaterialet (inkl. et forsøk på å smugle inn `channel` der).
+    //
+    // D-131 funn 3: `channel` sendes videre som `unknown` og valideres mot
+    // kontraktens ENUM inne i autoriteten. Ruten sjekket tidligere kun
+    // `typeof === "string"`, så en vilkårlig streng ble skrevet rett inn i
+    // `sessions.last_channel` og i audit-radene - en usann kildemerking
+    // (CLAUDE.md regel 4). Valideringen hører hjemme i autoriteten slik at det
+    // finnes ÉN valideringssannhet uansett hvilken transport som kaller.
     let raw: unknown;
     try {
       raw = await readBody(req);
@@ -218,38 +318,36 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
     const obj = typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
     const { channel, ...evidence } = obj;
-    if (typeof channel !== "string") {
-      return json(res, 403, { ok: false, reason: "malformed_evidence" });
-    }
-    const result = await deps.channelAuthority.authorize(channel as Channel, evidence);
+    const result = await deps.channelAuthority.authorize(channel, evidence);
     if (!result.ok) {
       return json(res, 403, result);
     }
-    return json(res, 200, { ok: true, session_id: result.session.session_id, identity: result.identity });
+    // D-131 funn 1: `grant` er det klienten skal bruke videre. `session_id`
+    // beholdes i svaret som SAMTALEKONTINUITET (og for bakoverkompatibel
+    // korrelasjon/logging), men gir i seg selv ingen tilgang lenger.
+    return json(res, 200, {
+      ok: true,
+      grant: result.grant,
+      session_id: result.session.session_id,
+      identity: result.identity
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/chat") {
-    const body = (await readBody(req)) as ChatBody;
-    const principal = await deps.sessions.getActive(body.tenant_id, body.session_id);
-    if (!principal) {
-      return json(res, 403, { error: "identity_denied", reason: "session_not_found" });
+    const parsedBody = parseGrantBody(await readBody(req), CHAT_BODY_KEYS);
+    if (!parsedBody || typeof parsedBody["message"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
     }
-    const resolved = await deps.identity.resolveIdentity({
-      person_id: principal.person_id,
-      tenant_id: body.tenant_id,
-      memory_space: body.memory_space,
-      session_id: body.session_id,
-      device_id: principal.device_id,
-      channel: body.channel,
-      // D-130 arkitekt-review MERGE BLOCKER 1-fiks: ALDRI klient-oppgitt -
-      // et gyldig `session_id` finnes KUN fordi enheten allerede har bevist
-      // besittelse over sin private nøkkel via `ChannelSessionAuthority`/
-      // `VoiceSessionAuthority` (se `ChatBody`-kommentaren over).
-      auth_strength: "signed"
-    });
+    const body: ChatBody = {
+      grant_token: parsedBody["grant_token"] as string,
+      message: parsedBody["message"],
+      ...(typeof parsedBody["provider"] === "string" ? { provider: parsedBody["provider"] } : {})
+    };
+    const resolved = await resolveFromGrant(deps, body.grant_token);
     if (!resolved.ok) {
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
+    const sessionId = resolved.identity.session_id;
 
     const wantsStream = (req.headers.accept ?? "").includes("text/event-stream");
     if (wantsStream) {
@@ -292,46 +390,66 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
         // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
         (toolName) => send("tool_call", { tool_name: toolName })
       );
-      send("done", { ...result, session_id: body.session_id });
+      send("done", { ...result, session_id: sessionId });
       res.end();
       return;
     }
 
     const result = await deps.conversation.handle(resolved.identity, body.message, undefined, undefined, body.provider);
-    return json(res, 200, { ...result, session_id: body.session_id });
+    return json(res, 200, { ...result, session_id: sessionId });
   }
 
   if (deps.brief && req.method === "POST" && url.pathname === "/brief") {
-    const body = (await readBody(req)) as BriefBody;
-    const principal = await deps.sessions.getActive(body.tenant_id, body.session_id);
-    if (!principal) {
-      return json(res, 403, { error: "identity_denied", reason: "session_not_found" });
+    // D-131 funn 1: identisk autoritetsmodell som `/chat` over - `/brief` var
+    // den ANDRE ruten som oppgraderte en rå sesjons-ID til `signed`.
+    const parsedBody = parseGrantBody(await readBody(req), BRIEF_BODY_KEYS);
+    if (!parsedBody) {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
     }
-    const resolved = await deps.identity.resolveIdentity({
-      person_id: principal.person_id, tenant_id: body.tenant_id, memory_space: body.memory_space,
-      session_id: body.session_id, device_id: principal.device_id,
-      channel: body.channel ?? "api",
-      // D-130 arkitekt-review MERGE BLOCKER 1-fiks: samme prinsipp som /chat over.
-      auth_strength: "signed"
-    });
+    const body: BriefBody = { grant_token: parsedBody["grant_token"] as string };
+    const resolved = await resolveFromGrant(deps, body.grant_token);
     if (!resolved.ok) {
       return json(res, 403, { error: "identity_denied", reason: resolved.reason });
     }
     const artifact = await deps.brief.generate(resolved.identity);
-    return json(res, 200, { brief: artifact, rendered: deps.brief.render(artifact), session_id: body.session_id });
+    return json(res, 200, {
+      brief: artifact,
+      rendered: deps.brief.render(artifact),
+      session_id: resolved.identity.session_id
+    });
   }
 
-  if (deps.devices && req.method === "POST" && url.pathname === "/devices/register") {
-    const body = (await readBody(req)) as {
-      identity: Parameters<IdentityService["resolveIdentity"]>[0];
-      device: { device_id: string; kind: string; public_key_pem: string };
-    };
-    const resolved = await deps.identity.resolveIdentity(body.identity);
-    if (!resolved.ok) {
-      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+  if (deps.enrollment && req.method === "POST" && url.pathname === "/devices/register") {
+    // D-131 funn 2: ruten har med vilje INGEN egen logikk lenger - den leser en
+    // kropp og gir den til `DeviceEnrollmentService.enroll()`, som krever
+    // eksplisitt eier-/bootstrap-autoritet (proof-of-possession fra en allerede
+    // innrullert enhet, ELLER en engangs innrullerings-billett fra en lokal
+    // eier-handling). Den gamle veien - `resolveIdentity(body.identity)` -
+    // VERIFISERTE EKSISTENS og autentiserte ingenting: en caller med bare
+    // gyldige, ikke-hemmelige ID-er kunne skrive sin egen nøkkel inn på en
+    // fremmed enhet og deretter «bevise» den.
+    //
+    // Ugyldig JSON fanges og sendes inn som `undefined` → deterministisk
+    // `malformed_request`, aldri en 500 en klient kan skille fra et avslag.
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
     }
-    await deps.devices.registerDevice(resolved.identity, body.device);
-    return json(res, 200, { registered: body.device.device_id });
+    const result = await deps.enrollment.enroll(raw);
+    if (!result.ok) {
+      // 400 for en syntaktisk ugyldig kropp, 403 for et ekte
+      // autorisasjons-/eierskapsavslag.
+      const status = result.reason === "malformed_request" || result.reason === "invalid_public_key" ? 400 : 403;
+      return json(res, status, { ok: false, reason: result.reason });
+    }
+    return json(res, 200, {
+      ok: true,
+      registered: result.device_id,
+      rotated: result.rotated,
+      revoked_grants: result.revoked_grants
+    });
   }
 
   if (deps.devices && req.method === "POST" && url.pathname === "/devices/challenge") {

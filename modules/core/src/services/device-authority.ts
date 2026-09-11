@@ -1,0 +1,146 @@
+import type pg from "pg";
+import type { AuthStrength, Channel, IdentityContext, MemorySpace } from "@jarvis/contracts";
+import { withTenantTransaction } from "../db/pool.ts";
+import { writeAudit } from "./audit-writer.ts";
+import type { IdentityDenialReason, IdentityService } from "./identity-service.ts";
+import type { IssuedSessionGrant, SessionGrantService } from "./session-grant-service.ts";
+import type { SessionRef, SessionService } from "./session-service.ts";
+
+/**
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 1 og 3): DEN ENE
+ * transaksjonelle autorisasjonskjernen som brukes av BÅDE
+ * `ChannelSessionAuthority` og `VoiceSessionAuthority`.
+ *
+ * Reviewen fant to ting i den gamle rekkefølgen (`verifyChallenge()` →
+ * `resumeOrCreate()` → `resolveIdentity()`):
+ *
+ *   1. Et gyldig enhetsbevis med et syntaktisk gyldig, men IKKE-EKSISTERENDE
+ *      memory space rakk å opprette/oppdatere en sesjonsrad FØR avslaget kom.
+ *      Et avslag hadde altså en varig sideeffekt på server-eid tilstand.
+ *   2. Resultatet var bare en sesjons-ID - ikke et avgrenset, revokerbart bevis.
+ *
+ * Denne funksjonen lukker begge: HELE autorisasjonen (medlemskaps-/enhets-/
+ * space-sjekk → sesjon → grant → ALLOW-audit) kjøres i ÉN transaksjon, og et
+ * avslag returnerer FØR noen skriving har skjedd - eller ruller tilbake alt,
+ * hvis avslaget først kan avgjøres etter en skriving. Avslaget revideres
+ * etterpå i sin egen transaksjon (`IdentityService.recordDenial()`), slik at
+ * sikkerhetsauditen overlever rollbacken.
+ *
+ * Enhetsbeviset (`DeviceService.verifyChallenge()`) er kjørt av KALLEREN, FØR
+ * denne funksjonen. Rekkefølgen er uendret sikkerhetskritisk av samme grunn som
+ * i D-123: uten proof-of-possession bundet til den PÅSTÅTTE personen ville en
+ * angriper med sin egen registrerte enhet kunne påstå en annen persons
+ * `person_id`, og sesjonsraden ville blitt rørt før avvisningen. Nonce-en er
+ * konsumert på det tidspunktet - det er tilsiktet, og skal IKKE rulles tilbake:
+ * en engangs-nonce som «kommer tilbake» ved avslag ville vært et replay-hull.
+ */
+export interface DeviceAuthorityDeps {
+  /** SAMME pool som tjenestene under - transaksjonen eies her, ikke i dem. */
+  pool: pg.Pool;
+  sessions: SessionService;
+  identity: IdentityService;
+  grants: SessionGrantService;
+}
+
+/** Påstanden, etter at enhetsbeviset ER verifisert av kalleren. */
+export interface ProvenDeviceRequest {
+  person_id: string;
+  tenant_id: string;
+  device_id: string;
+  memory_space: MemorySpace;
+  channel: Channel;
+  auth_strength: AuthStrength;
+}
+
+export type DeviceAuthorityDenialReason = IdentityDenialReason | "device_authority_revoked";
+
+export type DeviceAuthorityOutcome =
+  | { ok: true; identity: IdentityContext; session: SessionRef; grant: IssuedSessionGrant }
+  | { ok: false; reason: DeviceAuthorityDenialReason };
+
+/**
+ * Kastes KUN for avslag som først kan avgjøres etter at transaksjonen har
+ * skrevet noe. Poenget er å tvinge en ROLLBACK - `withTenantTransaction()`
+ * ruller tilbake og kaster videre ved enhver exception.
+ */
+class RollbackDenial extends Error {
+  constructor(readonly reason: DeviceAuthorityDenialReason) {
+    super(`authority_denied: ${reason}`);
+    this.name = "RollbackDenial";
+  }
+}
+
+export async function authorizeProvenDevice(
+  deps: DeviceAuthorityDeps,
+  request: ProvenDeviceRequest,
+  nowMs: number = Date.now()
+): Promise<DeviceAuthorityOutcome> {
+  const subject = {
+    tenant_id: request.tenant_id,
+    person_id: request.person_id,
+    device_id: request.device_id
+  };
+
+  let outcome: DeviceAuthorityOutcome;
+  try {
+    outcome = await withTenantTransaction(deps.pool, request.tenant_id, async (client) => {
+      // 1. FULL autorisasjon FØR enhver sesjons-sideeffekt. Ved avslag her har
+      //    transaksjonen ikke skrevet noe i det hele tatt, så det finnes ikke
+      //    noe å rulle tilbake - vi returnerer bare avslaget.
+      const check = await deps.identity.checkAuthorizationOn(client, request);
+      if (!check.ok) {
+        return { ok: false, reason: check.reason } as const;
+      }
+
+      // 2. Først NÅ røres server-eid sesjonstilstand.
+      const session = await deps.sessions.resumeOrCreateOn(
+        client,
+        { tenant_id: request.tenant_id, person_id: request.person_id, device_id: request.device_id },
+        request.channel
+      );
+
+      // 3. Det avgrensede, revokerbare beviset. `issueOn()` leser enhetens
+      //    registrerte nøkkel i SAMME transaksjon - er den borte (tilbakekalt
+      //    i vinduet siden `verifyChallenge()`), fail-closes vi og ruller
+      //    sesjonsmutasjonen tilbake i stedet for å utstede et bevis mot en
+      //    nøkkel som ikke lenger gjelder.
+      const grant = await deps.grants.issueOn(
+        client,
+        {
+          tenant_id: request.tenant_id,
+          person_id: request.person_id,
+          device_id: request.device_id,
+          session_id: session.session_id,
+          memory_space: request.memory_space,
+          channel: request.channel,
+          auth_strength: request.auth_strength
+        },
+        nowMs
+      );
+      if (!grant) {
+        throw new RollbackDenial("device_authority_revoked");
+      }
+
+      const identity = deps.identity.buildContext({ ...request, session_id: session.session_id });
+      await writeAudit(
+        client,
+        { ...subject, session_id: session.session_id },
+        { type: "identity.resolved", decision: "ALLOW" }
+      );
+      return { ok: true, identity, session, grant } as const;
+    });
+  } catch (err) {
+    if (err instanceof RollbackDenial) {
+      await deps.identity.recordDenial(subject, err.reason);
+      return { ok: false, reason: err.reason };
+    }
+    throw err;
+  }
+
+  if (!outcome.ok) {
+    // Avslaget skjedde FØR enhver skriving. Audit-raden skrives i sin EGEN
+    // transaksjon - den skal overleve nettopp fordi ingenting annet gjorde det.
+    await deps.identity.recordDenial(subject, outcome.reason);
+  }
+  return outcome;
+}

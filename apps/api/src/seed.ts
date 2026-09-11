@@ -11,15 +11,17 @@ import type pg from "pg";
  * 403 identity_denied/unknown_device på host-live - derfor seedes den her,
  * i samme transaksjonsfrie idempotente stil som jarvis-core.
  *
- * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `apps/web/index.html`s dev-
- * chat-demo registrerer nå sin egen enhetsnøkkel via `/devices/register` FØR
- * den kan autorisere en sesjon - men `/devices/register` selv krever en
- * ALLEREDE KJENT enhet (`resolveIdentity()` avviser `unknown_device` for en
- * device_id uten noen rad i det hele tatt, uavhengig av om raden har en
- * nøkkel). Samme bootstrap-mønster som `jarvis-core`/den beviste
- * voice-enheten over - IKKE en ny tillitsgrense, kun én til rad i den
- * samme idempotente pre-seeden slik at web-demoen faktisk fungerer på en
- * fersk database.
+ * `dev-web` er `apps/web/index.html`s dev-chat-demo sin enhet.
+ *
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 2): raden seedes fortsatt,
+ * men den er ikke lenger noen forutsetning for innrullering -
+ * `DeviceEnrollmentService` oppretter raden selv når en gyldig eier-billett
+ * legges fram. Ingen av de seedede radene har `public_key_pem`, og det er
+ * hele poenget: en seedet enhet UTEN nøkkel kan ikke bevise noe som helst, og
+ * kan derfor ikke gi noen autoritet. Nøkkelen kommer først når eieren faktisk
+ * innrullerer enheten med et eksplisitt bevis (`pnpm --filter @jarvis/api
+ * enroll-ticket`, eller proof-of-possession fra en allerede innrullert enhet).
+ * Seeden er altså identitets-/medlemskapsdata, ALDRI en tillitsgrense.
  */
 export async function seedOwner(pool: pg.Pool): Promise<void> {
   const tenant = process.env["JARVIS_TENANT_ID"] ?? "tenant-personal";

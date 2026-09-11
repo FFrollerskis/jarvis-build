@@ -2,7 +2,9 @@
 import {
   ChannelSessionAuthority,
   ContextBuilder,
+  DeviceEnrollmentService,
   DeviceService,
+  SessionGrantService,
   IdentityService,
   MessageStore,
   PgApprovalStore,
@@ -495,6 +497,27 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const identityService = new IdentityService(pool);
   const deviceService = new DeviceService(pool);
   const sessionService = new SessionService(pool);
+  // D-131 (uavhengig arkitektkontroll av PR #79): SAMME delings-disiplin som
+  // over. `SessionGrantService` eier `session_grants` - det avgrensede,
+  // revokerbare autorisasjonsbeviset som erstatter «rå session_id = autentisert
+  // enhet» - og `DeviceEnrollmentService` er den ENESTE nettverksnære veien til
+  // å skrive nytt enhetsnøkkelmateriale.
+  const grantService = new SessionGrantService(pool);
+  const enrollmentService = new DeviceEnrollmentService({
+    pool,
+    devices: deviceService,
+    grants: grantService
+  });
+  // Autoritetene eier sin egen transaksjon (D-131 funn 3: hele autorisasjonen
+  // må kunne rulles tilbake ved avslag), og trenger derfor SAMME pool som
+  // tjenestene de komponerer.
+  const authorityDeps = {
+    pool,
+    devices: deviceService,
+    sessions: sessionService,
+    identity: identityService,
+    grants: grantService
+  };
   // D-125 (UA-7, FEMTE slice): ÉN delt `ConversationEngine`-instans. Den er
   // hevet ut av `deps`-literalen fordi den inngående Telegram-banen skal bruke
   // NØYAKTIG samme motor som `/chat` - ikke en parallell konstruksjon (samme
@@ -521,20 +544,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const deps: ApiDeps = {
     identity: identityService,
     devices: deviceService,
-    voiceAuthority: new VoiceSessionAuthority({
-      devices: deviceService,
-      sessions: sessionService,
-      identity: identityService
-    }),
+    grants: grantService,
+    enrollment: enrollmentService,
+    voiceAuthority: new VoiceSessionAuthority(authorityDeps),
     // D-130 arkitekt-review MERGE BLOCKER 1-fiks: SAMME delte instanser som
     // `voiceAuthority` over (D-123-delingsdisiplinen - `DeviceService` holder
     // utstedte challenges in-memory, så en egen instans her ville aldri
     // gjenkjent en nonce utstedt av `/devices/challenge`/`/session/authorize`).
-    channelAuthority: new ChannelSessionAuthority({
-      devices: deviceService,
-      sessions: sessionService,
-      identity: identityService
-    }),
+    channelAuthority: new ChannelSessionAuthority(authorityDeps),
     brief: {
       generate: (identity) => dailyBrief.generate(identity as never),
       render: (artifact) => DailyBrief.render(artifact as never)

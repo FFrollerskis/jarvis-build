@@ -8,7 +8,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { ChannelSessionAuthority, DeviceService, IdentityService, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { ChannelSessionAuthority, DeviceService, IdentityService, SessionGrantService, SessionService, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import type { CodingAgentAdapter, CodingAgentExec } from "@jarvis/tasks";
 import {
@@ -157,13 +157,17 @@ beforeAll(async () => {
   const identityService = new IdentityService(appPool);
   const sessionService = new SessionService(appPool);
   const deviceService = new DeviceService(appPool);
+  const grantService = new SessionGrantService(appPool);
   server = createApiServer({
     identity: identityService,
     sessions: sessionService,
-    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `ApiDeps.channelAuthority`
-    // er nå påkrevd (ikke brukt av denne testens `/tasks/submit`-fokus, men
-    // strukturelt nødvendig for å konstruere en gyldig `ApiDeps`).
-    channelAuthority: new ChannelSessionAuthority({ devices: deviceService, sessions: sessionService, identity: identityService }),
+    // D-130/D-131: `ApiDeps.channelAuthority` og `ApiDeps.grants` er nå
+    // påkrevde (ikke brukt av denne testens `/tasks/submit`-fokus, men
+    // strukturelt nødvendige for å konstruere en gyldig `ApiDeps`).
+    grants: grantService,
+    channelAuthority: new ChannelSessionAuthority({
+      pool: appPool, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService
+    }),
     policy,
     worker,
     tasks: taskService,

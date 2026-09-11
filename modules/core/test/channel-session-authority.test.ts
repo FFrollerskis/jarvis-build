@@ -10,6 +10,7 @@ import {
   ChannelSessionAuthority,
   DeviceService,
   IdentityService,
+  SessionGrantService,
   SessionService,
   createPool,
   runMigrations
@@ -101,18 +102,24 @@ beforeAll(async () => {
   devices = new DeviceService(appPool);
   sessions = new SessionService(appPool);
   authority = new ChannelSessionAuthority({
+    pool: appPool,
     devices,
     sessions,
-    identity: new IdentityService(appPool)
+    identity: new IdentityService(appPool),
+    // D-131: autoriteten utsteder nå et avgrenset, revokerbart grant i SAMME
+    // transaksjon som sesjonen - se modules/core/src/services/device-authority.ts.
+    grants: new SessionGrantService(appPool)
   });
 
-  // Tobias sine tre kanal-enheter registreres via DEN EKTE
-  // `DeviceService.registerDevice()`-primitiven - nøyaktig den koden en
-  // ekte enhets-registreringsrute ville kjørt, inkludert `kind =
-  // 'desktop-agent'` for local-agent-kontrakten (masterplan del 2).
-  await devices.registerDevice(seedIdentity, { device_id: "phone-tobias", kind: "mobile", public_key_pem: pem(phoneKeys) });
-  await devices.registerDevice(seedIdentity, { device_id: "watch-tobias", kind: "watch", public_key_pem: pem(watchKeys) });
-  await devices.registerDevice(seedIdentity, { device_id: "mac-tobias", kind: "desktop-agent", public_key_pem: pem(macKeys) });
+  // Tobias sine tre kanal-enheter seedes via `registerDeviceTrusted()` - den
+  // BETRODDE server-side provisjoneringsprimitiven, ikke en nettverksvei.
+  // D-131 funn 2: den nettverksnære innrulleringen går gjennom
+  // `DeviceEnrollmentService` og krever eksplisitt eier-/bootstrap-autoritet;
+  // den testes for seg i `apps/api/test/d131-authority-hardening-e2e.test.ts`.
+  // `kind = 'desktop-agent'` dekker local-agent-kontrakten (masterplan del 2).
+  await devices.registerDeviceTrusted(seedIdentity,{ device_id: "phone-tobias", kind: "mobile", public_key_pem: pem(phoneKeys) });
+  await devices.registerDeviceTrusted(seedIdentity,{ device_id: "watch-tobias", kind: "watch", public_key_pem: pem(watchKeys) });
+  await devices.registerDeviceTrusted(seedIdentity,{ device_id: "mac-tobias", kind: "desktop-agent", public_key_pem: pem(macKeys) });
 }, 240_000);
 
 afterAll(async () => {

@@ -16,23 +16,84 @@ export class DeviceService {
 
   constructor(private readonly pool: pg.Pool) {}
 
-  async registerDevice(
+  /**
+   * D-131 (uavhengig arkitektkontroll av PR #79, funn 2): skriver enhetsraden
+   * PÅ EN EKSISTERENDE TRANSAKSJONSKLIENT, og gjør INGEN autorisasjon i det
+   * hele tatt. Kalleren MÅ ha bevist innrullerings-autoritet først - se
+   * `DeviceEnrollmentService`, som er den ENESTE nettverksnære veien hit.
+   *
+   * EIERSKAPSGARDEN (`WHERE devices.tenant_id = ... AND devices.person_id = ...`
+   * på `DO UPDATE`) er ny og gjelder ALLE kallere, også betrodde: en
+   * `device_id` som allerede tilhører en annen person/tenant kan ALDRI
+   * overtas ved å skrive en ny `public_key_pem`. Den gamle `ON CONFLICT
+   * (device_id) DO UPDATE SET public_key_pem = $5` gjorde nettopp det.
+   *
+   * Returnerer `false` når garden slo inn (0 rader) - kalleren avgjør om det
+   * skal bli et avslag eller en feil.
+   */
+  async registerDeviceOn(
+    client: pg.PoolClient,
+    principal: { tenant_id: string; person_id: string },
+    device: { device_id: string; kind: string; public_key_pem: string }
+  ): Promise<boolean> {
+    createPublicKey(device.public_key_pem); // valider PEM før lagring
+    let result;
+    try {
+      result = await client.query(
+        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (device_id) DO UPDATE
+           SET public_key_pem = EXCLUDED.public_key_pem, kind = EXCLUDED.kind
+         WHERE devices.tenant_id = EXCLUDED.tenant_id AND devices.person_id = EXCLUDED.person_id
+         RETURNING device_id`,
+        [device.device_id, principal.tenant_id, principal.person_id, device.kind, device.public_key_pem]
+      );
+    } catch (err) {
+      // En kolliderende rad i en ANNEN tenant er ikke synlig under RLS, så
+      // Postgres avviser `ON CONFLICT DO UPDATE` mot den med en RLS-/unik-feil
+      // i stedet for å returnere 0 rader. Begge betyr det SAMME for oss -
+      // `device_id` er opptatt av en annen prinsipal - og begge må bli et
+      // avslag, aldri en 500 som lekker at ID-en finnes et annet sted.
+      const code = (err as { code?: string }).code;
+      if (code === "42501" || code === "23505" || code === "23503") {
+        return false;
+      }
+      throw err;
+    }
+    if (!result.rowCount) {
+      return false;
+    }
+    await writeAudit(
+      client,
+      { tenant_id: principal.tenant_id, person_id: principal.person_id, device_id: device.device_id },
+      { type: "device.registered", payload: { device_id: device.device_id, kind: device.kind } }
+    );
+    return true;
+  }
+
+  /**
+   * BETRODD server-side seeding/provisjonering (tester, `seedOwner()`-lignende
+   * oppsett). Gjør INGEN autorisasjon - navnet sier det, slik at ingen
+   * fremtidig rute kobler den til nettverket ved et uhell. Nettverksveien er
+   * `DeviceEnrollmentService.enroll()`, som krever eksplisitt eier-/bootstrap-
+   * autoritet.
+   *
+   * Kaller BEVISST ikke `SessionGrantService.revokeForDeviceOn()`: den er for
+   * NØKKELROTASJON på en enhet som allerede kan ha utestående grants, og den
+   * hører hjemme i innrulleringsstien. Utestående grants blir uansett ugyldige
+   * strukturelt, fordi `SessionGrantService.verify()` sammenligner mot
+   * nøkkelens fingerprint slik den står NÅ.
+   */
+  async registerDeviceTrusted(
     identity: IdentityContext,
     device: { device_id: string; kind: string; public_key_pem: string }
   ): Promise<void> {
-    createPublicKey(device.public_key_pem); // valider PEM før lagring
-    await withTenantTransaction(this.pool, identity.tenant_id, async (client) => {
-      await client.query(
-        `INSERT INTO devices (device_id, tenant_id, person_id, kind, public_key_pem)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (device_id) DO UPDATE SET public_key_pem = $5, kind = $4`,
-        [device.device_id, identity.tenant_id, identity.person_id, device.kind, device.public_key_pem]
-      );
-      await writeAudit(client, identity, {
-        type: "device.registered",
-        payload: { device_id: device.device_id, kind: device.kind }
-      });
-    });
+    const written = await withTenantTransaction(this.pool, identity.tenant_id, (client) =>
+      this.registerDeviceOn(client, identity, device)
+    );
+    if (!written) {
+      throw new Error(`device_owned_by_other_principal: ${device.device_id}`);
+    }
   }
 
   /** Challenge-respons: klienten signerer en engangs-nonce med enhetsnøkkelen. */

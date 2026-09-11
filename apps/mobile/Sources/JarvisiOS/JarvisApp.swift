@@ -11,20 +11,47 @@ final class ChatModel: ObservableObject {
     @Published var messages: [(role: String, text: String)] = []
     @Published var sessionId = "-"
     @Published var deviceVerified = false
+    /// D-131 funn 2: engangs-billett fra en lokal eier-handling
+    /// (`pnpm --filter @jarvis/api enroll-ticket`). Kreves KUN første gang -
+    /// anonym innrullering finnes ikke lenger.
+    @Published var enrollmentTicket = ""
     @AppStorage("jarvis.server") var server = "http://192.168.1.10:3010"
     @AppStorage("jarvis.device") var deviceId = "iphone-\(UUID().uuidString.prefix(8))"
 
-    var client: JarvisClient {
-        JarvisClient(baseURL: URL(string: server)!,
-                     identity: JarvisIdentity(person: "person-tobias", tenant: "tenant-personal",
-                                              device: deviceId, channel: "mobile"))
-    }
+    /// D-131 funn 1: klienten MÅ være ÉN instans som lever. Den var tidligere en
+    /// COMPUTED property, så hvert eneste kall fikk en fersk `JarvisClient` -
+    /// og det server-utstedte beviset (tidligere `sessionId`, nå `grantToken`)
+    /// ble kastet mellom `authorizeSession()` og `chat()`. Med et grant som
+    /// faktisk må presenteres ved hvert kall, er det forskjellen på at
+    /// klienten virker og ikke virker.
+    lazy var client: JarvisClient = JarvisClient(
+        baseURL: URL(string: server)!,
+        identity: JarvisIdentity(person: "person-tobias", tenant: "tenant-personal",
+                                 device: deviceId, channel: "mobile")
+    )
 
+    /// Autoriserer med den eksisterende innrulleringen hvis den finnes; ellers
+    /// innrullerer den med en eier-billett. Ingen anonym innrullering, og ingen
+    /// stille «prøvde å registrere, ignorerte feilen»-sti.
     func setupDevice() async {
         do {
             let key = try DeviceKeys.loadOrCreate()
-            try await client.registerDevice(kind: "iphone", publicKeyPem: DeviceKeys.publicKeyPem(key))
-            deviceVerified = try await client.proveDevice(key: key)
+            if (try? await client.authorizeSession(key: key)) != nil {
+                deviceVerified = true
+                return
+            }
+            let ticket = enrollmentTicket.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !ticket.isEmpty else {
+                messages.append(("system",
+                    "Enheten er ikke innrullert. Kjør `pnpm --filter @jarvis/api enroll-ticket` på Jarvis-maskinen og lim inn billetten."))
+                return
+            }
+            try await client.enrollWithTicket(kind: "iphone",
+                                              publicKeyPem: DeviceKeys.publicKeyPem(key),
+                                              ticket: ticket)
+            enrollmentTicket = ""
+            try await client.authorizeSession(key: key)
+            deviceVerified = true
         } catch { messages.append(("system", "Enhetsoppsett feilet: \(error.localizedDescription)")) }
     }
 
@@ -70,6 +97,15 @@ struct ChatView: View {
             List(model.messages.indices, id: \.self) { i in
                 Text(model.messages[i].text)
                     .frame(maxWidth: .infinity, alignment: model.messages[i].role == "user" ? .trailing : .leading)
+            }
+            if !model.deviceVerified {
+                // D-131 funn 2: synlig bootstrap-sti i stedet for en usynlig,
+                // anonym innrullering som «bare virket».
+                HStack {
+                    TextField("Innrullerings-billett …", text: $model.enrollmentTicket)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Innrullér") { Task { await model.setupDevice() } }
+                }.padding(.horizontal)
             }
             HStack {
                 TextField("Snakk med Jarvis …", text: $input).textFieldStyle(.roundedBorder)

@@ -1,97 +1,62 @@
-import { MemorySpaceSchema, type Channel, type IdentityContext, type MemorySpace } from "@jarvis/contracts";
+import {
+  ChannelSchema,
+  MemorySpaceSchema,
+  type Channel,
+  type IdentityContext,
+  type MemorySpace,
+  type SessionGrant
+} from "@jarvis/contracts";
+import { authorizeProvenDevice, type DeviceAuthorityDeps } from "./device-authority.ts";
 import type { DeviceService } from "./device-service.ts";
-import type { IdentityService } from "./identity-service.ts";
-import type { SessionRef, SessionService } from "./session-service.ts";
+import type { SessionRef } from "./session-service.ts";
 
 /**
- * UA-7-GENERALISERING av D-123 (`VoiceSessionAuthority`, se den filens egen
- * doc-kommentar): den betrodde server-side sesjons-/identitetsautoriteten for
- * ENHVER kanal med enhetsbundet proof-of-possession - ikke bare tale.
- *
- * `VoiceSessionAuthority`s doc-kommentar sa det ordrett da D-123 ble skrevet:
- * "Blir en slik hviteliste en gang ønsket, er den en egen kanonisk beslutning
- * på minne-/identitetsnivå som `resolveIdentity()` skal bære for ALLE kanaler
- * samtidig - ikke bare for tale." Denne klassen ER den generaliseringen: den
- * komponerer PRESIS de samme tre eksisterende kanoniske primitivene, i PRESIS
- * samme rekkefølge, men tar `Channel` som en eksplisitt parameter i stedet for
- * å hardkode `"voice"`. Ingen ny autorisasjonslogikk oppstår her - nøyaktig
- * samme disiplin som D-123 og D-125 (`TelegramOwnerAuthority`):
- *
- *   1. `DeviceService.verifyChallenge()` - ekte Ed25519 proof-of-possession,
- *      bundet til BÅDE påstått person og tenant (`personId`-parameteren).
- *   2. `SessionService.resumeOrCreate()` - server-EID sesjon. Klienten oppgir
- *      aldri en `session_id`. Fordi denne metoden allerede gjenopptar
- *      PERSONENS aktive sesjon UANSETT kanal (fase 2 akseptansekriterium 3),
- *      får ethvert kall via DENNE klassen "kanalbytte uten ny sesjon" helt
- *      gratis - se testen for kanalbytte (mobile → web) i
- *      `modules/core/test/channel-session-authority.test.ts`.
- *   3. `IdentityService.resolveIdentity()` - den kanoniske
- *      person↔tenant↔enhet↔space-konjunksjonen under RLS, med audit-rad for
- *      både ALLOW og DENY.
- *
- * INGEN ny tabell, INGEN ny migrasjon, INGEN ny nøkkel, INGEN kanal-spesifikk
- * autorisasjonsdatabase. Se D-123 sin egen SYSTEM-OF-RECORD-AUDIT
- * (`voice-session-authority.ts`) - den gjelder ordrett her også: den tillatte
- * space-mengden for en person er kanonisk definert av `resolveIdentity()`,
- * uavhengig av hvilken kanal som spør.
+ * UA-7-GENERALISERING av D-123 (`VoiceSessionAuthority`): den betrodde
+ * server-side sesjons-/identitetsautoriteten for ENHVER kanal med enhetsbundet
+ * proof-of-possession - ikke bare tale. Klassen komponerer PRESIS de samme
+ * eksisterende kanoniske primitivene, men tar `Channel` som en eksplisitt
+ * parameter i stedet for å hardkode `"voice"`. Ingen ny autorisasjonslogikk
+ * oppstår her.
  *
  * ---
  *
- * REKKEFØLGEN ER SIKKERHETSKRITISK, av NØYAKTIG samme grunn som D-123:
- * enhetsbeviset kjøres FØRST og bindes til den påståtte personen
- * (`verifyChallenge(..., personId)`) FØR noen sesjonsrad røres. Uten den
- * bindingen ville en angriper med sin EGEN gyldig registrerte enhet kunne
- * bevise enheten, men påstå en ANNEN persons `person_id` - og
- * `resumeOrCreate()` ville da MUTERT offerets aktive sesjonsrad
- * (`last_channel`, `last_device_id`, `last_active_at`) FØR `resolveIdentity()`
- * rakk å avvise kombinasjonen. Avslaget hadde kommet, men skaden - en
- * kryss-person-sideeffekt på en server-eid tilstandsrad - hadde allerede
- * skjedd. Derfor: ingen sesjonsskriving før prinsipalen er bevist. Dette
- * gjelder for `mobile`/`watch`/`desktop`/`web`/`api` nøyaktig som for `voice`.
+ * D-131 (uavhengig arkitektkontroll av PR #79) - HVA SOM ENDRET SEG:
  *
- * Et avslag er et normalt, revidert utfall - ikke en feil. `authorize()`
- * kaster aldri på avslag, og returnerer ALDRI en delvis autoritet.
+ * **Funn 1 - samtalekontinuitet var brukt som device-authentication.**
+ * `authorize()` returnerte tidligere kun en sesjons-ID, og `/chat`/`/brief`
+ * slo opp `person_id`/`device_id` fra den rå sesjonsraden. Det er strukturelt
+ * feil: en sesjon er BEVISST delt mellom personens kanaler, og
+ * `last_device_id` overskrives ved hvert kanalbytte (se `SessionService`).
+ * Nå utstedes i tillegg et SERVERUTSTEDT, AVGRENSET og REVOKERBART grant
+ * (`session_grants`, migrasjon 053) bundet til NØYAKTIG den beviste enheten,
+ * det autoriserte scopet, kanalen og et utløp - og med en fingerprint av
+ * enhetsnøkkelen, slik at tilbakekalling/rotasjon dreper beviset STRUKTURELT.
+ * `session_id` returneres fortsatt, men som ren samtalekontinuitet: mange
+ * enheters grants kan peke på SAMME samtale uten å dele autoritet.
+ *
+ * **Funn 3 - avslått autorisasjon kunne mutere sesjonen.** Rekkefølgen var
+ * `verifyChallenge()` → `resumeOrCreate()` → `resolveIdentity()`, så et gyldig
+ * enhetsbevis med en ikke-eksisterende memory space rakk å opprette/oppdatere
+ * en sesjonsrad før DENY. Hele autorisasjonen kjøres nå i ÉN transaksjon i
+ * `authorizeProvenDevice()`, som validerer medlemskap/enhet/space FØR noen
+ * sesjons-sideeffekt og ruller tilbake hvis et avslag først kan avgjøres
+ * senere. I tillegg valideres `channel` mot kontraktens ENUM
+ * (`ChannelSchema`) - HTTP-ruten sjekket tidligere kun `typeof === "string"`,
+ * så en vilkårlig streng ble skrevet rett inn i `sessions.last_channel` og i
+ * audit-radene (CLAUDE.md regel 4: kilden som merkes må være sann).
  *
  * ---
  *
- * REFAKTORERINGSBESLUTNING (påkrevd av byggeordren - dokumentert her fordi
- * DENNE filen er generaliseringen `VoiceSessionAuthority` selv pekte mot):
+ * REKKEFØLGEN ER FORTSATT SIKKERHETSKRITISK: enhetsbeviset kjøres FØRST og
+ * bindes til den påståtte personen (`verifyChallenge(..., personId)`) FØR noe
+ * annet. Uten den bindingen kunne en angriper med sin EGEN gyldig registrerte
+ * enhet bevise enheten, men påstå en ANNEN persons `person_id`.
  *
- * `VoiceSessionAuthority` er BEVISST IKKE gjort om til en tynn wrapper rundt
- * denne klassen. Den er en egen, uendret klasse. Begrunnelse:
- *
- *   - `VoiceSessionAuthority` har en egen, adversarielt uttestet
- *     bevismateriale-kontrakt (`VoiceAuthorizationEvidenceSchema`, et ekte
- *     `.strict()` zod-skjema i `packages/contracts/src/voice-authority.ts`)
- *     og et eget utstedt objekt (`VoiceSessionGrant`, med
- *     `memory_space_authority: "SERVER_VERIFIED"` som en LITERAL og en
- *     tale-spesifikk `VOICE_GRANT_TTL_MS`). Denne klassen returnerer i stedet
- *     den oppløste `IdentityContext` direkte - riktig for en generisk
- *     kanalautoritet uten en tale-spesifikk utløpspolicy, men et ANNET
- *     kontraktformat enn `VoiceSessionGrant`.
- *   - En wrapper måtte enten (a) oversette mellom de to formatene ved hvert
- *     kall - ekstra kode i en sikkerhetskritisk sti uten sikkerhetsgevinst -
- *     eller (b) endre `VoiceAuthorizationEvidenceSchema`/`VoiceSessionGrant`
- *     for å gjøre de to formatene identiske, noe som ville rørt en
- *     kontraktfil denne oppgaven eksplisitt IKKE eier i denne runden.
- *   - `voice-session-authority.ts` har sin egen, allerede grundig
- *     adversarielt uttestede suite (kryss-person, kryss-tenant, kryss-space,
- *     tilbakekalt enhet, replay, utløpt nonce, smuglet bevismateriale). Å
- *     legge en indirection inn i den stien for DRY sin egen skyld, uten at
- *     noen ny funksjonalitet krever det, er nøyaktig den typen unødvendig
- *     regresjonsrisiko i sikkerhetskritisk kode byggeordren advarer mot.
- *
- * Konklusjon: To uavhengige, parallelle klasser som komponerer de SAMME tre
- * primitivene i den SAMME rekkefølgen - ikke fordi koden ikke KUNNE deles,
- * men fordi delingen her ikke betaler for seg sikkerhetsmessig. Skulle
- * `VoiceSessionGrant` og den generiske identitetsformen en dag konvergere (en
- * egen, eksplisitt kontraktbeslutning), er wrapping en ren, lav-risiko
- * refaktorering FORDI rekkefølgen og feilsemantikken allerede er identiske.
+ * Et avslag er et normalt, revidert utfall - ikke en feil. `authorize()` kaster
+ * aldri på avslag, og returnerer ALDRI en delvis autoritet.
  */
-export interface ChannelSessionAuthorityDeps {
+export interface ChannelSessionAuthorityDeps extends DeviceAuthorityDeps {
   devices: DeviceService;
-  sessions: SessionService;
-  identity: IdentityService;
 }
 
 /** Nøyaktig de to feltene `DeviceService`s eksisterende challenge-/respons-flyt bruker. */
@@ -107,7 +72,7 @@ export interface ChannelDeviceProof {
  * IDENTISK med `VoiceAuthorizationEvidence` (bevisst - bevismaterialet en
  * enhet legger fram er det samme uansett hvilken kanal den kobler til med),
  * men typet lokalt i `@jarvis/core` for å unngå å utvide en kontraktfil
- * (`packages/contracts/src/voice-authority.ts`) denne oppgaven ikke eier.
+ * (`packages/contracts/src/voice-authority.ts`) denne stien ikke eier.
  */
 export interface ChannelAuthorizationEvidence {
   person_id: string;
@@ -120,18 +85,22 @@ export interface ChannelAuthorizationEvidence {
 
 /**
  * Hvorfor en autorisasjon ble avvist. Verdiene speiler PRESIST de tilstandene
- * de gjenbrukte kanoniske primitivene faktisk eksponerer - samme enum-verdier
- * som `VoiceAuthorizationDenialReason`, ingen oppfunne feilklasser.
+ * de gjenbrukte kanoniske primitivene faktisk eksponerer - ingen oppfunne
+ * feilklasser.
  */
 export type ChannelAuthorizationDenialReason =
   | "device_proof_invalid"
   | "unknown_membership"
   | "unknown_device"
   | "unknown_memory_space"
-  | "malformed_evidence";
+  | "malformed_evidence"
+  /** D-131 funn 3: `channel` var ikke en verdi i kontraktens `ChannelSchema`. */
+  | "unknown_channel"
+  /** D-131 funn 1: enhetens nøkkel forsvant mellom bevis og utstedelse - fail-closed. */
+  | "device_authority_revoked";
 
 export type ChannelAuthorizationResult =
-  | { ok: true; identity: IdentityContext; session: SessionRef }
+  | { ok: true; identity: IdentityContext; session: SessionRef; grant: SessionGrant }
   | { ok: false; reason: ChannelAuthorizationDenialReason };
 
 /** Nøklene `ChannelAuthorizationEvidence` og `ChannelDeviceProof` tillater - intet mer. */
@@ -147,8 +116,8 @@ function isNonEmptyString(value: unknown): value is string {
  * zod-avhengighet i `@jarvis/core` (pakken har den ikke i dag - kun
  * `@jarvis/contracts` sine allerede bygde skjemaer brukes, som andre filer
  * her allerede gjør). Avviser eksplisitt smuglede felt (f.eks. et forsøk på å
- * oppgi `session_id` eller en ferdig autoritet selv), speilbildet av
- * `VoiceAuthorizationEvidenceSchema.strict()` sin oppførsel.
+ * oppgi `session_id`, `grant_token` eller en ferdig autoritet selv),
+ * speilbildet av `VoiceAuthorizationEvidenceSchema.strict()` sin oppførsel.
  */
 function parseEvidence(raw: unknown): ChannelAuthorizationEvidence | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -190,18 +159,27 @@ export class ChannelSessionAuthority {
 
   /**
    * Avgjør om et enhetsbevis, PÅ EN GITT KANAL, gir en betrodd
-   * sesjons-/identitetsautoritet. `channel` velges av den kallende
-   * transportkoden (`mobile`/`watch`/`desktop`/`web`/`api` osv.) - aldri av
-   * bevismaterialet selv.
+   * sesjons-/identitetsautoritet, og utsteder i så fall et avgrenset,
+   * revokerbart grant.
+   *
+   * `rawChannel` er typet `unknown` med vilje: den kommer fra transportkoden,
+   * som igjen kan ha lest den fra en ubetrodd HTTP-kropp. D-131 funn 3 var
+   * nettopp at ruten kun sjekket `typeof === "string"` - valideringen mot
+   * kontraktens enum hører hjemme HER, slik at det finnes ÉN valideringssannhet
+   * uansett hvilken transport som kaller.
    */
-  async authorize(channel: Channel, rawEvidence: unknown): Promise<ChannelAuthorizationResult> {
+  async authorize(rawChannel: unknown, rawEvidence: unknown): Promise<ChannelAuthorizationResult> {
+    const channel = ChannelSchema.safeParse(rawChannel);
+    if (!channel.success) {
+      return { ok: false, reason: "unknown_channel" };
+    }
     const evidence = parseEvidence(rawEvidence);
     if (!evidence) {
       return { ok: false, reason: "malformed_evidence" };
     }
 
-    // 1. Proof-of-possession, bundet til person OG tenant - FØR noen
-    //    sesjonsrad røres. Se SIKKERHETSKRITISK-avsnittet over.
+    // 1. Proof-of-possession, bundet til person OG tenant - FØR noe annet.
+    //    Se SIKKERHETSKRITISK-avsnittet over.
     const proven = await this.deps.devices.verifyChallenge(
       evidence.tenant_id,
       evidence.device_id,
@@ -213,33 +191,45 @@ export class ChannelSessionAuthority {
       return { ok: false, reason: "device_proof_invalid" };
     }
 
-    // 2. Server-EID sesjon, på DENNE kanalen. `resumeOrCreate()` gjenopptar
-    //    personens aktive sesjon uansett hvilken kanal som spør - dette er
-    //    nøyaktig kanalbytte-kontinuiteten byggeordren krever, arvet
-    //    uendret fra den eksisterende primitiven.
-    const session = await this.deps.sessions.resumeOrCreate(
-      { tenant_id: evidence.tenant_id, person_id: evidence.person_id, device_id: evidence.device_id },
-      channel
-    );
+    // 2. Den transaksjonelle autorisasjonskjernen: medlemskap/enhet/space FØR
+    //    sesjons-sideeffekt, deretter sesjon + grant + ALLOW-audit atomisk.
+    //    Enheten har bevist besittelse over den registrerte private nøkkelen -
+    //    det er enhetssignaturen som gir styrken, ikke kanalvalget (BO-12 §43).
+    return this.finish(await this.authorizeProven(evidence, channel.data));
+  }
 
-    // 3. Den kanoniske identitets-stien avgjør om space-en faktisk er tillatt.
-    const resolved = await this.deps.identity.resolveIdentity({
+  private async authorizeProven(evidence: ChannelAuthorizationEvidence, channel: Channel) {
+    return authorizeProvenDevice(this.deps, {
       person_id: evidence.person_id,
       tenant_id: evidence.tenant_id,
-      memory_space: evidence.memory_space,
-      session_id: session.session_id,
       device_id: evidence.device_id,
+      memory_space: evidence.memory_space,
       channel,
-      // Enheten har bevist besittelse over den registrerte private nøkkelen -
-      // det er enhetssignaturen som gir styrken, ikke kanalvalget (BO-12 §43,
-      // samme resonnement som D-123: verken tale eller noen annen kanal alene
-      // gir forhøyet styrke).
       auth_strength: "signed"
     });
-    if (!resolved.ok) {
-      return { ok: false, reason: resolved.reason };
-    }
+  }
 
-    return { ok: true, identity: resolved.identity, session };
+  private finish(outcome: Awaited<ReturnType<typeof authorizeProvenDevice>>): ChannelAuthorizationResult {
+    if (!outcome.ok) {
+      return { ok: false, reason: outcome.reason };
+    }
+    return {
+      ok: true,
+      identity: outcome.identity,
+      session: outcome.session,
+      grant: {
+        // Hvert eneste felt kommer fra den OPPLØSTE identiteten, den server-eide
+        // sesjonen eller det utstedte grantet - ingen verdi ekkoes fra forespørselen.
+        grant_token: outcome.grant.grant_token,
+        expires_at_ms: outcome.grant.expires_at_ms,
+        session_id: outcome.identity.session_id,
+        person_id: outcome.identity.person_id,
+        tenant_id: outcome.identity.tenant_id,
+        device_id: outcome.identity.device_id,
+        memory_space: outcome.identity.memory_space_id,
+        channel: outcome.identity.channel,
+        auth_strength: outcome.identity.auth_strength
+      }
+    };
   }
 }

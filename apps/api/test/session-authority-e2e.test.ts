@@ -7,8 +7,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionService,
-  createPool, runMigrations
+  ChannelSessionAuthority, ContextBuilder, DeviceEnrollmentService, DeviceService, IdentityService, MessageStore,
+  SessionGrantService, SessionService, createPool, runMigrations
 } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -102,11 +102,16 @@ beforeAll(async () => {
   const identityService = new IdentityService(appPool);
   const sessionService = new SessionService(appPool);
   const deviceService = new DeviceService(appPool);
+  const grantService = new SessionGrantService(appPool);
   server = createApiServer({
     identity: identityService,
     sessions: sessionService,
     devices: deviceService,
-    channelAuthority: new ChannelSessionAuthority({ devices: deviceService, sessions: sessionService, identity: identityService }),
+    grants: grantService,
+    enrollment: new DeviceEnrollmentService({ pool: appPool, devices: deviceService, grants: grantService }),
+    channelAuthority: new ChannelSessionAuthority({
+      pool: appPool, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService
+    }),
     policy,
     worker,
     conversation: new ConversationEngine({
@@ -146,7 +151,7 @@ async function sessionRowCount(tenantId: string): Promise<number> {
 }
 
 describe("A/B: kanalbytte-kontinuitet - mobile→web og mobile→watch gjenbruker SAMME server-eide session_id", () => {
-  it("mobile→web→watch: alle tre autorisasjoner returnerer nøyaktig samme session_id", async () => {
+  it("mobile→web→watch: alle tre autorisasjoner deler session_id, men får HVER SITT grant", async () => {
     const mobileChallenge = await challengeFor("dev-sa-mobile");
     const mobileSig = sign(null, Buffer.from(mobileChallenge, "utf8"), mobileKeys.privateKey).toString("base64");
     const onMobile = await authorizeRaw({
@@ -156,6 +161,9 @@ describe("A/B: kanalbytte-kontinuitet - mobile→web og mobile→watch gjenbruke
     expect(onMobile.status).toBe(200);
     expect(onMobile.body["ok"]).toBe(true);
     const sessionIdMobile = onMobile.body["session_id"];
+    const grantMobile = onMobile.body["grant"] as Record<string, unknown>;
+    expect(grantMobile["device_id"]).toBe("dev-sa-mobile");
+    expect(grantMobile["channel"]).toBe("mobile");
 
     const webChallenge = await challengeFor("dev-sa-web");
     const webSig = sign(null, Buffer.from(webChallenge, "utf8"), webKeys.privateKey).toString("base64");
@@ -174,11 +182,18 @@ describe("A/B: kanalbytte-kontinuitet - mobile→web og mobile→watch gjenbruke
     });
     expect(onWatch.status).toBe(200);
     expect(onWatch.body["session_id"]).toBe(sessionIdMobile);
+    const grantWatch = onWatch.body["grant"] as Record<string, unknown>;
 
-    // Ekte API-komposisjon, ikke bare autorisasjon: samme session_id fungerer FAKTISK mot /chat.
+    // D-131 funn 1: SAMTALEN deles (samme session_id), men AUTORITETEN gjør
+    // det ikke - hver enhet har sitt eget, distinkte grant.
+    expect(grantWatch["grant_token"]).not.toBe(grantMobile["grant_token"]);
+    expect(grantWatch["device_id"]).toBe("dev-sa-watch");
+
+    // Ekte API-komposisjon: grantet fungerer FAKTISK mot /chat, og svarets
+    // session_id er den delte samtalen.
     const chatRes = await fetch(`${baseUrl}/chat`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session_id: sessionIdMobile, tenant_id: TENANT_A, memory_space: "personal", channel: "watch", message: "status" })
+      body: JSON.stringify({ grant_token: grantWatch["grant_token"], message: "status" })
     });
     expect(chatRes.status).toBe(200);
     const chatBody = (await chatRes.json()) as Record<string, unknown>;
@@ -283,13 +298,33 @@ describe("G: forsøk på å smugle auth_strength/session_id inn i bevismateriale
     expect(result.body["reason"]).toBe("malformed_evidence");
   });
 
-  it("/chat med et oppdiktet/ukjent session_id → 403 session_not_found, aldri identitetsoppløsning", async () => {
+  it("/chat med et oppdiktet/ukjent grant_token → 403 grant_not_found, aldri identitetsoppløsning", async () => {
     const res = await fetch(`${baseUrl}/chat`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ session_id: "sess-does-not-exist", tenant_id: TENANT_A, memory_space: "personal", channel: "web", message: "hei" })
+      body: JSON.stringify({ grant_token: "grt_does-not-exist", message: "hei" })
     });
     expect(res.status).toBe(403);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body["reason"]).toBe("session_not_found");
+    expect(body["reason"]).toBe("grant_not_found");
+  });
+
+  it("/chat med en RÅ sesjons-ID (ikke et grant) → 400 malformed_request, aldri en oppgradering til signed", async () => {
+    // D-131 funn 1 i sin reneste form: en gyldig, aktiv sesjons-ID er
+    // SAMTALEKONTINUITET. Den skal ikke engang være en gyldig kropp lenger.
+    const challenge = await challengeFor("dev-sa-web");
+    const signature = sign(null, Buffer.from(challenge, "utf8"), webKeys.privateKey).toString("base64");
+    const authorized = await authorizeRaw({
+      channel: "web", person_id: PERSON_OWNER, tenant_id: TENANT_A, device_id: "dev-sa-web",
+      memory_space: "personal", device_proof: { challenge, signature }
+    });
+    expect(authorized.status).toBe(200);
+    const realSessionId = authorized.body["session_id"] as string;
+
+    const res = await fetch(`${baseUrl}/chat`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session_id: realSessionId, tenant_id: TENANT_A, memory_space: "personal", channel: "web", message: "hei" })
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Record<string, unknown>)["error"]).toBe("malformed_request");
   });
 });

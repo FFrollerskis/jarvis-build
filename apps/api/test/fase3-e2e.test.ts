@@ -14,6 +14,7 @@ import {
   IdentityService,
   MessageStore,
   PgApprovalStore,
+  SessionGrantService,
   SessionService,
   createPool,
   runMigrations,
@@ -95,11 +96,15 @@ function makeApproval(overrides: Partial<ApprovalPayload> = {}): SignedApproval 
 }
 
 /**
- * D-130 arkitekt-review MERGE BLOCKER 1-fiks: ekte enhetsbevis (utstedt
- * challenge signert med enhetens Ed25519-nøkkel) → `/session/authorize` →
- * et server-eid `session_id` - eneste vei til et gyldig `/chat`-kall fra nå
- * av. Kaster på avslag (aldri en stille `undefined`) - en test som feiler
- * her betyr autorisasjonen faktisk ble avvist, ikke en tilfeldig 403 lenger nede.
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): ekte enhetsbevis
+ * (utstedt challenge signert med enhetens Ed25519-nøkkel) →
+ * `/session/authorize` → et SERVERUTSTEDT, AVGRENSET og REVOKERBART
+ * `grant_token`. D-130-runden returnerte her et `session_id`; reviewen påviste
+ * at en samtale-ID ikke kan være et autorisasjonsbevis (delt på tvers av
+ * kanaler, mutabel `last_device_id`, ingen utløp, ingen tilbakekalling).
+ *
+ * Kaster på avslag (aldri en stille `undefined`) - en test som feiler her
+ * betyr autorisasjonen faktisk ble avvist, ikke en tilfeldig 403 lenger nede.
  */
 async function authorize(identity: Record<string, string>): Promise<string> {
   const challengeRes = await fetch(`${baseUrl}/devices/challenge`, {
@@ -118,33 +123,30 @@ async function authorize(identity: Record<string, string>): Promise<string> {
       device_proof: { challenge, signature }
     })
   });
-  const body = (await res.json()) as { ok: boolean; session_id?: string; reason?: string };
-  if (!body.ok || !body.session_id) {
+  const body = (await res.json()) as { ok: boolean; grant?: { grant_token: string }; reason?: string };
+  if (!body.ok || !body.grant) {
     throw new Error(`authorize_failed:${body.reason ?? "unknown"}`);
   }
-  return body.session_id;
+  return body.grant.grant_token;
 }
 
 async function chat(message: string, identity: Record<string, string> = webIdentity) {
-  const session_id = await authorize(identity);
+  const grant_token = await authorize(identity);
   const response = await fetch(`${baseUrl}/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      session_id, tenant_id: identity["tenant_id"], memory_space: identity["memory_space"],
-      channel: identity["channel"], message
-    })
+    // D-131 funn 1: KUN beviset. `tenant_id`/`memory_space`/`channel`/
+    // `session_id` leses server-side ut av grant-raden, og en kropp med
+    // ukjente felter avvises som `malformed_request`.
+    body: JSON.stringify({ grant_token, message })
   });
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
-/** Samme sesjonsautorisering som `chat()`, for de rå SSE-`fetch()`-kallene under. */
+/** Samme grant-autorisering som `chat()`, for de rå SSE-`fetch()`-kallene under. */
 async function chatSseBody(message: string, identity: Record<string, string> = webIdentity): Promise<string> {
-  const session_id = await authorize(identity);
-  return JSON.stringify({
-    session_id, tenant_id: identity["tenant_id"], memory_space: identity["memory_space"],
-    channel: identity["channel"], message
-  });
+  const grant_token = await authorize(identity);
+  return JSON.stringify({ grant_token, message });
 }
 
 beforeAll(async () => {
@@ -257,16 +259,20 @@ beforeAll(async () => {
   const identityService = new IdentityService(appPool);
   const sessionService = new SessionService(appPool);
   const deviceService = new DeviceService(appPool);
+  const grantService = new SessionGrantService(appPool);
   server = createApiServer({
     identity: identityService,
     sessions: sessionService,
-    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat` krever nå et ekte
-    // enhetsbevist `session_id` - `devices`/`channelAuthority` må derfor
-    // faktisk være wired her (ikke bare strukturelt til stede), siden
+    // D-130/D-131: `/chat` krever nå et ekte, enhetsbevist GRANT (ikke lenger
+    // en sesjons-ID) - `devices`/`channelAuthority`/`grants` må derfor faktisk
+    // være wired her (ikke bare strukturelt til stede), siden
     // `authorize()`-hjelperen over faktisk kaller `/devices/challenge` og
     // `/session/authorize`.
     devices: deviceService,
-    channelAuthority: new ChannelSessionAuthority({ devices: deviceService, sessions: sessionService, identity: identityService }),
+    grants: grantService,
+    channelAuthority: new ChannelSessionAuthority({
+      pool: appPool, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService
+    }),
     policy,
     worker,
     conversation: new ConversationEngine({

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AuthStrengthSchema, MemorySpaceSchema } from "./identity.ts";
+import { SESSION_GRANT_TTL_MS } from "./session-grant.ts";
 import { MemorySpaceAuthoritySchema, type MemorySpaceAuthority } from "./speech.ts";
 
 /**
@@ -100,7 +101,13 @@ export const VoiceAuthorizationDenialReasonSchema = z.enum([
   /** `resolveIdentity()`: memory space-en finnes ikke i tenanten (kryss-space). */
   "unknown_memory_space",
   /** Forespørselen validerte ikke mot `VoiceAuthorizationEvidenceSchema`. */
-  "malformed_evidence"
+  "malformed_evidence",
+  /**
+   * D-131: enhetens registrerte nøkkel var borte i det øyeblikket grantet
+   * skulle utstedes (tilbakekalt i vinduet etter `verifyChallenge()`).
+   * Fail-closed - sesjons-sideeffekten rulles tilbake, ingen grant utstedes.
+   */
+  "device_authority_revoked"
 ]);
 export type VoiceAuthorizationDenialReason = z.infer<typeof VoiceAuthorizationDenialReasonSchema>;
 
@@ -111,7 +118,15 @@ export type VoiceAuthorizationDenialReason = z.infer<typeof VoiceAuthorizationDe
  * bevise enheten på nytt - det er billig (én signatur) og det er hele poenget
  * med proof-of-possession.
  */
-export const VOICE_GRANT_TTL_MS = 15 * 60 * 1000;
+/**
+ * D-131: er nå EKSPLISITT den samme levetiden som ethvert annet grant
+ * (`SESSION_GRANT_TTL_MS`), i stedet for en parallell 15-minutters literal som
+ * kunne drive fra hverandre ved en senere endring. Voice er ikke lenger et
+ * unntak fra den generelle autoritetsmodellen: den utsteder samme
+ * `session_grants`-rad som alle andre kanaler, og den AUTORITATIVE utløpstiden
+ * er den som faktisk står i den raden.
+ */
+export const VOICE_GRANT_TTL_MS = SESSION_GRANT_TTL_MS;
 
 /**
  * Serverens vedtak. Utstedes KUN av `VoiceSessionAuthority.authorize()` i Core.
@@ -130,8 +145,24 @@ export const VoiceSessionGrantSchema = z
     person_id: z.string().min(1),
     tenant_id: z.string().min(1),
     device_id: z.string().min(1),
-    /** Server-eid sesjon fra `SessionService.resumeOrCreate()` - aldri klient-oppgitt. */
+    /**
+     * SAMTALEKONTINUITET - server-eid sesjon fra
+     * `SessionService.resumeOrCreate()`, aldri klient-oppgitt.
+     *
+     * D-131 (arkitektkontroll av PR #79, funn 1): dette feltet er IKKE lenger
+     * et autorisasjonsbevis. Voice-gatewayen skal presentere `grant_token`
+     * under for Core - `session_id` er kun samtalens identitet, og deles
+     * BEVISST med andre kanalers grants for samme person.
+     */
     session_id: z.string().min(1),
+    /**
+     * D-131 funn 1: det FAKTISKE bærer-beviset - server-utstedt, lagret i
+     * `session_grants` (migrasjon 053), bundet til NØYAKTIG denne enheten,
+     * dette scopet og denne kanalen, med utløp og tilbakekalling. Voice er
+     * ikke lenger et unntak fra den generelle autoritetsmodellen: den bruker
+     * PRESIS samme grant-primitiv som alle andre kanaler.
+     */
+    grant_token: z.string().min(1),
     /** Den FAKTISK tillatte space-en, lest ut av den oppløste identiteten. */
     memory_space: MemorySpaceSchema,
     memory_space_authority: z.literal("SERVER_VERIFIED"),

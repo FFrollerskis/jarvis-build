@@ -27,16 +27,23 @@ export interface VoiceIdentity {
   /** BO-12 §33: valgfri owner-override av LLM-provider - voice-laget er likt uansett. */
   provider?: string;
   /**
-   * D-130 arkitekt-review MERGE BLOCKER 1-fiks: den betrodde sesjons-ID-en
-   * fra en vellykket `/voice/session/authorize` (grant-en). KUN satt på den
-   * BEVISTE stien (`server.ts` sin `grant`-gren) - `undefined` på den
-   * ubeviste/`CLIENT_ASSERTED`-stien, siden `/chat` ikke lenger godtar noen
-   * annen vei til et gyldig `session_id`. Rent additivt felt: alle
+   * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): det betrodde
+   * BÆRER-BEVISET fra en vellykket `/voice/session/authorize`.
+   *
+   * D-130-runden la her et `session_id`. Reviewen påviste at en sesjons-ID
+   * ikke KAN være et autorisasjonsbevis: den er bevisst delt mellom personens
+   * kanaler, og `last_device_id` overskrives ved hvert kanalbytte. Feltet er
+   * derfor byttet til `grant_token` - et serverutstedt, avgrenset og
+   * revokerbart bevis bundet til NØYAKTIG denne enheten, dette scopet og denne
+   * kanalen, med utløp og en fingerprint av enhetsnøkkelen.
+   *
+   * KUN satt på den BEVISTE stien (`server.ts` sin `grant`-gren) - `undefined`
+   * på den ubeviste/`CLIENT_ASSERTED`-stien. Rent additivt felt: alle
    * eksisterende felter over er UENDRET, så D-122 sin rutingslogikk
    * (`identity.memory_space`/`identity.channel`) fortsetter å virke akkurat
    * som før.
    */
-  session_id?: string;
+  grant_token?: string;
 }
 
 export interface CoreReply {

@@ -34,25 +34,25 @@ export class HttpCoreClient implements CoreClient {
   constructor(private readonly baseUrl: string) {}
 
   /**
-   * D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat` godtar ikke lenger
-   * hele `VoiceIdentity`-objektet - den slanke kroppen (`session_id`,
-   * `tenant_id`, `memory_space`, `channel`, `message`, `provider?`) er den
-   * ENESTE gyldige formen (se `ChatBody` i apps/api/src/server.ts).
-   * `identity.session_id` finnes KUN når denne talesesjonen faktisk kommer
-   * fra en vellykket `/voice/session/authorize` - er den `undefined` (den
-   * ubeviste/`CLIENT_ASSERTED`-stien), kastes en tydelig feil FØR noe
-   * HTTP-kall gjøres, i stedet for å sende en kropp `/chat` uansett ville
-   * avvist med et forvirrende `403`.
+   * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): `/chat` godtar ikke
+   * lenger ETT ENESTE identitetsbærende felt fra klienten - kroppen er
+   * `{ grant_token, message, provider? }` og INTET annet (se `ChatBody` i
+   * apps/api/src/server.ts). `tenant_id`/`memory_space`/`channel` er borte
+   * fordi de nå leses ut av grant-raden server-side; å sende dem ville blitt
+   * avvist som `malformed_request`.
+   *
+   * `identity.grant_token` finnes KUN når denne talesesjonen faktisk kommer fra
+   * en vellykket `/voice/session/authorize` - er den `undefined` (den
+   * ubeviste/`CLIENT_ASSERTED`-stien), kastes en tydelig feil FØR noe HTTP-kall
+   * gjøres, i stedet for å sende en kropp `/chat` uansett ville avvist med et
+   * forvirrende `403`.
    */
   private body(identity: VoiceIdentity, message: string): string {
-    if (identity.session_id === undefined) {
+    if (identity.grant_token === undefined) {
       throw new Error("voice_session_required");
     }
     return JSON.stringify({
-      session_id: identity.session_id,
-      tenant_id: identity.tenant_id,
-      memory_space: identity.memory_space,
-      channel: identity.channel,
+      grant_token: identity.grant_token,
       message,
       ...(identity.provider !== undefined ? { provider: identity.provider } : {})
     });
@@ -344,9 +344,9 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         // videresende dem i det hele tatt motsier prinsippet om at
         // klientfelter er bevismateriale og ikke tilstand.
         //
-        // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `session_id` settes
-        // BEVISST IKKE her - denne stien har ingen bevist enhet, og et
-        // `session_id` finnes derfor ikke. Lokal STT/TTS fungerer fortsatt
+        // D-131 (arkitektkontroll av PR #79, funn 1): `grant_token` settes
+        // BEVISST IKKE her - denne stien har ingen bevist enhet, og et grant
+        // finnes derfor ikke. Lokal STT/TTS fungerer fortsatt
         // (D-122 regel 1), men Core sin `/chat` (LLM/verktøy/minne) er nå
         // strukturelt uoppnåelig herfra - `HttpCoreClient` kaster
         // `voice_session_required` FØR noe HTTP-kall, som `runTurn()` allerede
@@ -418,11 +418,12 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           channel: "voice",
           // §33: ren LLM-provider-preferanse, ikke et identitets-/autoritetsfelt.
           ...(claimed?.provider !== undefined ? { provider: claimed.provider } : {}),
-          // D-130 arkitekt-review MERGE BLOCKER 1-fiks: den ENESTE stien der
-          // `session_id` settes - enheten har faktisk bevist besittelse via
-          // `/voice/session/authorize`, så grant-en sin `session_id` er en
-          // ekte, server-utstedt sesjon `/chat` godtar.
-          session_id: grant.session_id
+          // D-131 (arkitektkontroll av PR #79, funn 1): den ENESTE stien der
+          // `grant_token` settes - enheten har faktisk bevist besittelse via
+          // `/voice/session/authorize`, så grantet er et ekte, server-utstedt,
+          // avgrenset og revokerbart bevis `/chat` godtar. Grantets
+          // `session_id` er samtalekontinuitet og sendes IKKE til `/chat`.
+          grant_token: grant.grant_token
         },
         voiceAuthorityFromGrant(grant, Date.now())
       );

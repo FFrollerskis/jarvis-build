@@ -61,7 +61,7 @@ afterAll(async () => {
 
 describe("Enhetsidentitet: registrering + DB-basert godkjenningsverifisering", () => {
   it("registrert Watch-nøkkel verifiserer klasse D via PgDeviceRegistry; uregistrert enhet DENY", async () => {
-    await devices.registerDevice(identity, {
+    await devices.registerDeviceTrusted(identity, {
       device_id: "watch-tobias", kind: "watch",
       public_key_pem: watchKeys.publicKey.export({ type: "spki", format: "pem" }).toString()
     });
