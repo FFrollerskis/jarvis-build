@@ -2,6 +2,7 @@ import type pg from "pg";
 import type { AuthStrength, Channel, IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
+import type { DeviceService } from "./device-service.ts";
 import type { IdentityDenialReason, IdentityService } from "./identity-service.ts";
 import type { IssuedSessionGrant, SessionGrantService } from "./session-grant-service.ts";
 import type { SessionRef, SessionService } from "./session-service.ts";
@@ -33,6 +34,22 @@ import type { SessionRef, SessionService } from "./session-service.ts";
  * `person_id`, og sesjonsraden ville blitt rørt før avvisningen. Nonce-en er
  * konsumert på det tidspunktet - det er tilsiktet, og skal IKKE rulles tilbake:
  * en engangs-nonce som «kommer tilbake» ved avslag ville vært et replay-hull.
+ *
+ * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+ * `verifyChallenge()` og DENNE funksjonen kjørte tidligere i to ADSKILTE
+ * transaksjoner - beviset ble sjekket mot nøkkelen SLIK DEN STO DA, mens
+ * `SessionGrantService.issueOn()` fingerprintet grantet mot nøkkelen slik den
+ * sto på et SENERE tidspunkt. Roterte nøkkelen i mellomrommet, kunne en
+ * forespørsel signert med den GAMLE nøkkelen ende opp med et bærer-bevis
+ * fingerprintet til den NYE - `verify()` sin fingerprint-sjekk ville deretter
+ * ALLTID stemme, fordi begge sider av sammenligningen kom fra samme, for
+ * sene, lesing. `request.proven_key_fingerprint` er fingerprinten
+ * `verifyChallenge()` FAKTISK beviste besittelse over. Denne funksjonen låser
+ * (`FOR UPDATE`) og leser enhetsraden PÅ NYTT som sitt FØRSTE steg inne i
+ * transaksjonen, og krever et EKSAKT fingerprint-treff FØR noen sesjons-/
+ * grant-mutasjon - se `DeviceService.lockDeviceKeyOn()`. Låsen holdes til
+ * commit/rollback, så en SAMTIDIG rotasjon for samme enhet serialiseres mot
+ * denne autorisasjonen i stedet for å kunne smette imellom.
  */
 export interface DeviceAuthorityDeps {
   /** SAMME pool som tjenestene under - transaksjonen eies her, ikke i dem. */
@@ -40,6 +57,7 @@ export interface DeviceAuthorityDeps {
   sessions: SessionService;
   identity: IdentityService;
   grants: SessionGrantService;
+  devices: DeviceService;
 }
 
 /** Påstanden, etter at enhetsbeviset ER verifisert av kalleren. */
@@ -50,6 +68,12 @@ export interface ProvenDeviceRequest {
   memory_space: MemorySpace;
   channel: Channel;
   auth_strength: AuthStrength;
+  /**
+   * Fingerprinten `DeviceService.verifyChallenge()` FAKTISK beviste besittelse
+   * over - ALDRI utledet på nytt her. Sammenlignes mot en FERSK, LÅST lesing
+   * av enhetsraden inne i transaksjonen (se filhode).
+   */
+  proven_key_fingerprint: string;
 }
 
 export type DeviceAuthorityDenialReason = IdentityDenialReason | "device_authority_revoked";
@@ -92,6 +116,20 @@ export async function authorizeProvenDevice(
         return { ok: false, reason: check.reason } as const;
       }
 
+      // 1b. D-131b TOCTOU-lukking: lås OG les enhetens nøkkel PÅ NYTT, inne i
+      //     DENNE transaksjonen, og krev et EKSAKT treff mot fingerprinten
+      //     `verifyChallenge()` faktisk beviste - FØR noen sesjons-/grant-
+      //     mutasjon. En rotasjon/tilbakekalling i vinduet siden beviset gir
+      //     her samme avslag som om beviset aldri hadde holdt.
+      const lockedKey = await deps.devices.lockDeviceKeyOn(client, {
+        tenant_id: request.tenant_id,
+        person_id: request.person_id,
+        device_id: request.device_id
+      });
+      if (!lockedKey || lockedKey.fingerprint !== request.proven_key_fingerprint) {
+        return { ok: false, reason: "device_authority_revoked" } as const;
+      }
+
       // 2. Først NÅ røres server-eid sesjonstilstand.
       const session = await deps.sessions.resumeOrCreateOn(
         client,
@@ -99,11 +137,10 @@ export async function authorizeProvenDevice(
         request.channel
       );
 
-      // 3. Det avgrensede, revokerbare beviset. `issueOn()` leser enhetens
-      //    registrerte nøkkel i SAMME transaksjon - er den borte (tilbakekalt
-      //    i vinduet siden `verifyChallenge()`), fail-closes vi og ruller
-      //    sesjonsmutasjonen tilbake i stedet for å utstede et bevis mot en
-      //    nøkkel som ikke lenger gjelder.
+      // 3. Det avgrensede, revokerbare beviset, bundet til NØYAKTIG den
+      //    fingerprinten vi selv nettopp låste og verifiserte over - IKKE en
+      //    ny, uavhengig lesing (det var selve TOCTOU-hullet). `issueOn()` tar
+      //    derfor fingerprinten som parameter i stedet for å lese raden selv.
       const grant = await deps.grants.issueOn(
         client,
         {
@@ -113,13 +150,11 @@ export async function authorizeProvenDevice(
           session_id: session.session_id,
           memory_space: request.memory_space,
           channel: request.channel,
-          auth_strength: request.auth_strength
+          auth_strength: request.auth_strength,
+          device_key_fingerprint: lockedKey.fingerprint
         },
         nowMs
       );
-      if (!grant) {
-        throw new RollbackDenial("device_authority_revoked");
-      }
 
       const identity = deps.identity.buildContext({ ...request, session_id: session.session_id });
       await writeAudit(

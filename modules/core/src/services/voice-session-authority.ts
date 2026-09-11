@@ -139,7 +139,11 @@ export class VoiceSessionAuthority {
         device_id: evidence.device_id,
         memory_space: evidence.memory_space,
         channel: "voice",
-        auth_strength: "signed"
+        auth_strength: "signed",
+        // D-131b: fingerprinten `verifyChallenge()` FAKTISK beviste over -
+        // `authorizeProvenDevice()` låser og krever et eksakt treff mot
+        // DENNE, ikke en senere uavhengig lesing (se device-authority.ts).
+        proven_key_fingerprint: proven
       },
       nowMs
     );

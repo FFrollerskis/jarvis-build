@@ -1,9 +1,21 @@
-import { createPublicKey, randomUUID, verify, type KeyObject } from "node:crypto";
+import { createHash, createPublicKey, randomUUID, verify, type KeyObject } from "node:crypto";
 import type pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import type { DeviceRegistry } from "@jarvis/policy";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
+
+/**
+ * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+ * DEN ENE fingerprint-funksjonen, brukt av `DeviceService`,
+ * `SessionGrantService` og `DeviceEnrollmentService`. Tidligere fantes
+ * identiske `sha256Hex()`-kopier i alle tre filene - harmløst for HASHING,
+ * men et upåaktet sted en fremtidig endring kunne latt dem divergere. Delt
+ * her (der nøkkelen selv leses) i stedet for i en fjerde fil.
+ */
+export function fingerprintPem(pem: string): string {
+  return createHash("sha256").update(pem, "utf8").digest("hex");
+}
 
 /**
  * Enhetsidentitet (fase 8-fundament): enheter registreres server-side med
@@ -104,19 +116,25 @@ export class DeviceService {
   }
 
   /**
-   * true => enheten har bevist besittelse av privat nøkkel (auth_strength kan heves).
+   * Fingerprint av nøkkelen som FAKTISK verifiserte signaturen, eller `null`
+   * ved avslag (auth_strength kan heves når resultatet ikke er `null`).
+   *
+   * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+   * denne metoden kjører i SIN EGEN transaksjon, atskilt i tid fra enhver
+   * senere mutasjon (sesjon/grant/innrullering/rotasjon) som stoler på
+   * resultatet. Tidligere returnerte den kun `boolean`, og kalleren utstedte
+   * et bevis mot HVA ENN NØKKEL SOM STO I RADEN på et SENERE tidspunkt - roterte
+   * nøkkelen i mellomtiden, kunne en forespørsel signert med den GAMLE nøkkelen
+   * ende opp med et bærer-bevis fingerprintet til den NYE. Ved å returnere
+   * fingerprinten av den NØYAKTIGE nøkkelen som ble brukt her, kan kalleren
+   * (`authorizeProvenDevice()`/`DeviceEnrollmentService.enroll()`) låse og
+   * lese raden PÅ NYTT inne i sin egen mutasjonstransaksjon og kreve et EKSAKT
+   * fingerprint-treff FØR noen skriving - se de filene for resten av lukkingen.
    *
    * D-123 (Q-32 punkt 2): valgfri `personId` binder beviset til en PÅSTÅTT
    * eier. Uten den svarer metoden kun på «holder noen den private nøkkelen til
    * enhet X?», og en kaller som holder sin EGEN registrerte enhetsnøkkel kunne
-   * derfor bevise enheten mens den påsto en ANNEN persons `person_id`. For
-   * `/devices/challenge/verify` (fase 8, uendret oppførsel) er det uskadelig,
-   * fordi ruten kun rapporterer en `auth_strength` og ikke muterer noe på
-   * vegne av en person. For voice-autoriteten er det IKKE uskadelig: der
-   * skrives det server-eid sesjonstilstand rett etter beviset, så bindingen
-   * må skje FØR. Parameteren er valgfri nettopp for å la eksisterende kallere
-   * være bit-for-bit uendret i stedet for å innføre en ny, parallell metode
-   * som gjør «nesten det samme».
+   * derfor bevise enheten mens den påsto en ANNEN persons `person_id`.
    */
   async verifyChallenge(
     tenantId: string,
@@ -124,28 +142,51 @@ export class DeviceService {
     challenge: string,
     signatureB64: string,
     personId?: string
-  ): Promise<boolean> {
+  ): Promise<string | null> {
     const pending = this.challenges.get(challenge);
     if (!pending || pending.device_id !== deviceId || pending.expires < Date.now()) {
-      return false;
+      return null;
     }
     this.challenges.delete(challenge); // engangs - replay av challenge er umulig
-    const key = await this.publicKeyFromDb(tenantId, deviceId, personId);
-    if (!key) {
-      return false;
+    const proven = await this.publicKeyFromDb(tenantId, deviceId, personId);
+    if (!proven) {
+      return null;
     }
     try {
-      return verify(null, Buffer.from(challenge, "utf8"), key, Buffer.from(signatureB64, "base64"));
+      const ok = verify(null, Buffer.from(challenge, "utf8"), proven.key, Buffer.from(signatureB64, "base64"));
+      return ok ? proven.fingerprint : null;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /**
+   * D-131b: lås OG les enhetens registrerte nøkkel PÅ NYTT, INNE I kallerens
+   * egen mutasjonstransaksjon - den andre halvparten av TOCTOU-lukkingen over.
+   * `FOR UPDATE` holder raden låst til transaksjonen committer eller ruller
+   * tilbake, slik at en SAMTIDIG rotasjon/tilbakekalling for SAMME enhet må
+   * vente til denne autorisasjonen er avgjort (og omvendt) - de kan aldri
+   * interleaves. Returnerer `null` når enheten mangler nøkkel (tilbakekalt)
+   * ELLER ikke tilhører den påståtte person/tenant - kalleren skiller ikke på
+   * de to, av samme "aldri lekk hvorfor"-grunn som `checkAuthorizationOn()`.
+   */
+  async lockDeviceKeyOn(
+    client: pg.PoolClient,
+    principal: { tenant_id: string; person_id: string; device_id: string }
+  ): Promise<{ fingerprint: string } | null> {
+    const result = await client.query(
+      "SELECT public_key_pem FROM devices WHERE device_id = $1 AND tenant_id = $2 AND person_id = $3 FOR UPDATE",
+      [principal.device_id, principal.tenant_id, principal.person_id]
+    );
+    const pem = (result.rows[0] as { public_key_pem: string | null } | undefined)?.public_key_pem;
+    return pem ? { fingerprint: fingerprintPem(pem) } : null;
   }
 
   private async publicKeyFromDb(
     tenantId: string,
     deviceId: string,
     personId?: string
-  ): Promise<KeyObject | null> {
+  ): Promise<{ key: KeyObject; fingerprint: string } | null> {
     // Tenant-RLS gjelder allerede via `withTenantTransaction`; `person_id`
     // legges på som et EKSPLISITT predikat når kalleren har oppgitt en påstått
     // eier, slik at en enhet i riktig tenant men hos feil person ikke kan
@@ -159,7 +200,7 @@ export class DeviceService {
           ])
     );
     const pem = (result.rows[0] as { public_key_pem: string | null } | undefined)?.public_key_pem;
-    return pem ? createPublicKey(pem) : null;
+    return pem ? { key: createPublicKey(pem), fingerprint: fingerprintPem(pem) } : null;
   }
 }
 

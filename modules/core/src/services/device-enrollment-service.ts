@@ -11,6 +11,22 @@ import type { DeviceService } from "./device-service.ts";
 import type { SessionGrantService } from "./session-grant-service.ts";
 
 /**
+ * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+ * SAMME sårbarhetsklasse som i `device-authority.ts` fantes her også.
+ * `verifyChallenge()` (for `device_proof`-innrulleringsveien) kjørte i sin
+ * EGEN transaksjon, atskilt i tid fra selve innrulleringstransaksjonen under.
+ * Roterte den AUTORISERENDE enhetens nøkkel i vinduet mellom de to, kunne et
+ * bevis signert med den GAMLE nøkkelen fortsatt autorisere at en NY enhet ble
+ * lagt til (eller at NØKKELEN PÅ SEG SELV ble rotert igjen) - reviewen kalte
+ * dette "proof from a just-replaced key can race a new device/key mutation".
+ * Lukket identisk med `device-authority.ts`: `enroll()` låser (`FOR UPDATE`)
+ * og leser den autoriserende enhetens rad PÅ NYTT som sitt FØRSTE steg inne i
+ * innrulleringstransaksjonen, og krever et EKSAKT fingerprint-treff mot det
+ * `verifyChallenge()` faktisk beviste FØR billett-konsumering, enhetsskriving
+ * eller grant-tilbakekalling.
+ */
+
+/**
  * D-131 (uavhengig arkitektkontroll av PR #79, funn 2): den betrodde
  * server-side INNRULLERINGS-autoriteten - den ENESTE nettverksnære veien til å
  * skrive nytt nøkkelmateriale for en enhet.
@@ -111,7 +127,10 @@ export class DeviceEnrollmentService {
     //     IKKE rulles tilbake ved avslag (en engangs-nonce som «kommer
     //     tilbake» ville vært et replay-hull). `verifyChallenge(..., personId)`
     //     binder beviset til den påståtte personen OG tenanten, og returnerer
-    //     false for en autoriserende enhet uten registrert nøkkel (tilbakekalt).
+    //     `null` for en autoriserende enhet uten registrert nøkkel (tilbakekalt).
+    //     D-131b: fingerprinten den FAKTISK beviste besittelse over bæres
+    //     videre inn i transaksjonen under, for TOCTOU-lukkingen der.
+    let provenAuthorizingFingerprint: string | null = null;
     if (request.enrollment.kind === "device_proof") {
       const proven = await this.deps.devices.verifyChallenge(
         request.tenant_id,
@@ -124,6 +143,7 @@ export class DeviceEnrollmentService {
         await this.auditDenial(request, "authorizing_device_proof_invalid");
         return { ok: false, reason: "authorizing_device_proof_invalid" };
       }
+      provenAuthorizingFingerprint = proven;
     }
 
     try {
@@ -134,6 +154,23 @@ export class DeviceEnrollmentService {
         );
         if (!membership.rowCount) {
           throw new EnrollmentDenial("unknown_membership");
+        }
+
+        // D-131b TOCTOU-lukking: lås OG les den AUTORISERENDE enhetens nøkkel
+        // PÅ NYTT, inne i DENNE transaksjonen, og krev et EKSAKT treff mot
+        // fingerprinten `verifyChallenge()` faktisk beviste - FØR billett-
+        // konsumering, enhetsskriving eller grant-tilbakekalling. En rotasjon
+        // i vinduet siden beviset gir her samme avslag som om beviset aldri
+        // hadde holdt.
+        if (request.enrollment.kind === "device_proof") {
+          const lockedKey = await this.deps.devices.lockDeviceKeyOn(client, {
+            tenant_id: request.tenant_id,
+            person_id: request.person_id,
+            device_id: request.enrollment.authorizing_device_id
+          });
+          if (!lockedKey || lockedKey.fingerprint !== provenAuthorizingFingerprint) {
+            throw new EnrollmentDenial("authorizing_device_proof_invalid");
+          }
         }
 
         // (b) Billetten konsumeres ATOMISK (test-and-set i én UPDATE), aldri

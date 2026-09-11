@@ -9,6 +9,7 @@ import {
 } from "@jarvis/contracts";
 import { withTenantTransaction } from "../db/pool.ts";
 import { writeAudit } from "./audit-writer.ts";
+import { fingerprintPem } from "./device-service.ts";
 
 /**
  * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): den server-side
@@ -32,6 +33,16 @@ export interface SessionGrantIssueInput {
   memory_space: MemorySpace;
   channel: Channel;
   auth_strength: AuthStrength;
+  /**
+   * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+   * fingerprinten kalleren SELV nettopp låste (`FOR UPDATE`) og verifiserte
+   * i SAMME transaksjon mot den fingerprinten `DeviceService.verifyChallenge()`
+   * faktisk beviste besittelse over - se `device-authority.ts`. `issueOn()`
+   * leser IKKE lenger `devices` selv: en egen, uavhengig lesing HER var
+   * nettopp TOCTOU-hullet (utstedt mot nøkkelen slik den sto PÅ DETTE
+   * SENERE tidspunktet, ikke den som ble bevist).
+   */
+  device_key_fingerprint: string;
 }
 
 export interface IssuedSessionGrant {
@@ -79,26 +90,20 @@ export class SessionGrantService {
    * omvendt). Kalleren eier transaksjonen, slik at et avslag hvor som helst i
    * autorisasjonen ruller ALT tilbake.
    *
-   * `device_key_fingerprint` leses fra `devices` i SAMME transaksjon i stedet
-   * for å tas imot som parameter: da er det umulig for en kaller å utstede et
-   * grant mot en annen nøkkel enn den som faktisk står registrert. Mangler
-   * enheten en nøkkel (tilbakekalt) returneres `null` - fail-closed, selv om
-   * `verifyChallenge()` nettopp lyktes.
+   * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
+   * `input.device_key_fingerprint` MÅ komme fra en lås+lesing kalleren nettopp
+   * gjorde i SAMME transaksjon (`DeviceService.lockDeviceKeyOn()`), sammenlignet
+   * mot fingerprinten `verifyChallenge()` faktisk beviste. Denne metoden leser
+   * IKKE `devices` selv lenger - det var nettopp den andre, senere, uavhengige
+   * lesingen som lot en rotasjon i vinduet mellom bevis og utstedelse smette
+   * imellom. Kalleren er ansvarlig for å ALDRI kalle denne uten en gyldig,
+   * fersk låst fingerprint - `authorizeProvenDevice()` er den ENESTE kalleren.
    */
   async issueOn(
     client: pg.PoolClient,
     input: SessionGrantIssueInput,
     nowMs: number = Date.now()
-  ): Promise<IssuedSessionGrant | null> {
-    const device = await client.query(
-      "SELECT public_key_pem FROM devices WHERE device_id = $1 AND tenant_id = $2 AND person_id = $3",
-      [input.device_id, input.tenant_id, input.person_id]
-    );
-    const pem = (device.rows[0] as { public_key_pem: string | null } | undefined)?.public_key_pem;
-    if (!pem) {
-      return null;
-    }
-
+  ): Promise<IssuedSessionGrant> {
     // 256 bits entropi. Tokenet vises kun her og i svaret til klienten.
     const token = `grt_${randomBytes(32).toString("base64url")}`;
     const expiresAtMs = nowMs + SESSION_GRANT_TTL_MS;
@@ -116,7 +121,7 @@ export class SessionGrantService {
         input.memory_space,
         input.channel,
         input.auth_strength,
-        sha256Hex(pem),
+        input.device_key_fingerprint,
         nowMs,
         expiresAtMs
       ]
@@ -226,7 +231,7 @@ export class SessionGrantService {
       // bevist ved utstedelse må fortsatt være NØYAKTIG den som står registrert.
       // NULL = tilbakekalt enhet; en annen hash = rotert nøkkel. Begge dreper
       // alle utestående grants for enheten uten noen opprydningsjobb.
-      if (!row.public_key_pem || sha256Hex(row.public_key_pem) !== row.device_key_fingerprint) {
+      if (!row.public_key_pem || fingerprintPem(row.public_key_pem) !== row.device_key_fingerprint) {
         return deny("device_authority_revoked");
       }
 

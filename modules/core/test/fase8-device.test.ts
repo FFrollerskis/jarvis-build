@@ -94,12 +94,16 @@ describe("Enhetsidentitet: registrering + DB-basert godkjenningsverifisering", (
   it("challenge-respons: gyldig signatur bevises; replay og feil nøkkel avvises", async () => {
     const challenge = devices.issueChallenge("watch-tobias");
     const signature = sign(null, Buffer.from(challenge, "utf8"), watchKeys.privateKey).toString("base64");
-    expect(await devices.verifyChallenge("tenant-a", "watch-tobias", challenge, signature)).toBe(true);
-    // engangs: samme challenge igjen => false
-    expect(await devices.verifyChallenge("tenant-a", "watch-tobias", challenge, signature)).toBe(false);
+    // D-131b: `verifyChallenge()` returnerer nå fingerprinten av nøkkelen som
+    // FAKTISK verifiserte (ikke lenger en bar boolean) - se device-service.ts.
+    const proven = await devices.verifyChallenge("tenant-a", "watch-tobias", challenge, signature);
+    expect(proven).not.toBeNull();
+    expect(proven).toMatch(/^[0-9a-f]{64}$/);
+    // engangs: samme challenge igjen => null
+    expect(await devices.verifyChallenge("tenant-a", "watch-tobias", challenge, signature)).toBeNull();
     const challenge2 = devices.issueChallenge("watch-tobias");
     const badSig = sign(null, Buffer.from(challenge2, "utf8"), rogueKeys.privateKey).toString("base64");
-    expect(await devices.verifyChallenge("tenant-a", "watch-tobias", challenge2, badSig)).toBe(false);
+    expect(await devices.verifyChallenge("tenant-a", "watch-tobias", challenge2, badSig)).toBeNull();
   });
 });
 

@@ -461,7 +461,8 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     const body = (await readBody(req)) as {
       tenant_id: string; device_id: string; challenge: string; signature: string;
     };
-    const ok = await deps.devices.verifyChallenge(body.tenant_id, body.device_id, body.challenge, body.signature);
+    const fingerprint = await deps.devices.verifyChallenge(body.tenant_id, body.device_id, body.challenge, body.signature);
+    const ok = fingerprint !== null;
     return json(res, ok ? 200 : 403, { verified: ok, auth_strength: ok ? "signed" : "passive" });
   }
 

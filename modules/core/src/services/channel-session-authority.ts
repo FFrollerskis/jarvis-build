@@ -179,7 +179,10 @@ export class ChannelSessionAuthority {
     }
 
     // 1. Proof-of-possession, bundet til person OG tenant - FØR noe annet.
-    //    Se SIKKERHETSKRITISK-avsnittet over.
+    //    Se SIKKERHETSKRITISK-avsnittet over. Fingerprinten som kommer
+    //    tilbake er NØYAKTIG nøkkelen dette beviset gjaldt - D-131b krever at
+    //    `authorizeProvenDevice()` låser og sammenligner mot DENNE, ikke en
+    //    senere, uavhengig lesing (se den filens filhode).
     const proven = await this.deps.devices.verifyChallenge(
       evidence.tenant_id,
       evidence.device_id,
@@ -195,17 +198,18 @@ export class ChannelSessionAuthority {
     //    sesjons-sideeffekt, deretter sesjon + grant + ALLOW-audit atomisk.
     //    Enheten har bevist besittelse over den registrerte private nøkkelen -
     //    det er enhetssignaturen som gir styrken, ikke kanalvalget (BO-12 §43).
-    return this.finish(await this.authorizeProven(evidence, channel.data));
+    return this.finish(await this.authorizeProven(evidence, channel.data, proven));
   }
 
-  private async authorizeProven(evidence: ChannelAuthorizationEvidence, channel: Channel) {
+  private async authorizeProven(evidence: ChannelAuthorizationEvidence, channel: Channel, proven_key_fingerprint: string) {
     return authorizeProvenDevice(this.deps, {
       person_id: evidence.person_id,
       tenant_id: evidence.tenant_id,
       device_id: evidence.device_id,
       memory_space: evidence.memory_space,
       channel,
-      auth_strength: "signed"
+      auth_strength: "signed",
+      proven_key_fingerprint
     });
   }
 
