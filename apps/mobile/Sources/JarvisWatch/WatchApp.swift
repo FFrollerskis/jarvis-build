@@ -8,31 +8,61 @@ struct JarvisWatchApp: App {
     var body: some Scene { WindowGroup { WatchHome() } }
 }
 
-struct WatchHome: View {
+/**
+ D-131 (uavhengig arkitektkontroll av PR #79): flyttet ut av `WatchHome` fordi
+ klienten MÅ være ÉN instans som lever på tvers av kall.
+
+ `client` var en COMPUTED property på en SwiftUI-`View`-struct, så hvert kall
+ fikk en fersk `JarvisClient` - og det server-utstedte beviset (tidligere
+ `sessionId`, nå `grantToken`) ble kastet mellom `authorizeSession()` og
+ `chat()`. Med et grant som faktisk må presenteres ved hvert kall er det
+ forskjellen på at klokken virker og ikke virker.
+ */
+@MainActor
+final class WatchModel: ObservableObject {
+    @Published var status = "…"
+    /// D-131 funn 2: engangs-billett fra en lokal eier-handling
+    /// (`pnpm --filter @jarvis/api enroll-ticket`). Anonym innrullering finnes
+    /// ikke lenger - klokken kan ikke lenger skrive sin egen nøkkel uten bevis.
+    @Published var enrollmentTicket = ""
+    @Published var enrolled = false
     @AppStorage("jarvis.server") var server = "http://192.168.1.10:3010"
     @AppStorage("jarvis.device") var deviceId = "watch-\(UUID().uuidString.prefix(8))"
-    @State var status = "…"
 
-    var client: JarvisClient {
-        JarvisClient(baseURL: URL(string: server)!,
-                     identity: JarvisIdentity(person: "person-tobias", tenant: "tenant-personal",
-                                              device: deviceId, channel: "watch"))
-    }
+    lazy var client: JarvisClient = JarvisClient(
+        baseURL: URL(string: server)!,
+        identity: JarvisIdentity(person: "person-tobias", tenant: "tenant-personal",
+                                 device: deviceId, channel: "watch")
+    )
 
-    var body: some View {
-        VStack(spacing: 8) {
-            Text("Jarvis").font(.headline)
-            Text(status).font(.footnote).lineLimit(4)
-            Button("Status") { Task { await quick("status") } }
-            Button("Godkjenn (D)") { Task { await approve() } }
+    /// Autoriserer med den eksisterende innrulleringen hvis den finnes; ellers
+    /// innrullerer med eier-billetten. `try?` brukes KUN på autorisasjons-
+    /// forsøket (der «ikke innrullert ennå» er et forventet utfall) - aldri på
+    /// selve innrulleringen, som skal feile synlig.
+    func setup() async {
+        guard let key = try? DeviceKeys.loadOrCreate() else {
+            status = "Nøkkelfeil"
+            return
         }
-        .task { await registerOnce() }
-    }
-
-    func registerOnce() async {
-        if let key = try? DeviceKeys.loadOrCreate() {
-            try? await client.registerDevice(kind: "watch", publicKeyPem: DeviceKeys.publicKeyPem(key))
+        if (try? await client.authorizeSession(key: key)) != nil {
+            enrolled = true
+            status = "Klar"
+            return
         }
+        let ticket = enrollmentTicket.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !ticket.isEmpty else {
+            status = "Ikke innrullert - lim inn billett"
+            return
+        }
+        do {
+            try await client.enrollWithTicket(kind: "watch",
+                                              publicKeyPem: DeviceKeys.publicKeyPem(key),
+                                              ticket: ticket)
+            enrollmentTicket = ""
+            try await client.authorizeSession(key: key)
+            enrolled = true
+            status = "Klar"
+        } catch { status = "Innrullering feilet: \(error.localizedDescription)" }
     }
 
     func quick(_ text: String) async {
@@ -58,5 +88,23 @@ struct WatchHome: View {
             ])
             status = "Godkjenning: \(result.decision)"
         } catch { status = "Avvist: \(error.localizedDescription)" }
+    }
+}
+
+struct WatchHome: View {
+    @StateObject private var model = WatchModel()
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Text("Jarvis").font(.headline)
+            Text(model.status).font(.footnote).lineLimit(4)
+            if !model.enrolled {
+                TextField("Billett", text: $model.enrollmentTicket)
+                Button("Innrullér") { Task { await model.setup() } }
+            }
+            Button("Status") { Task { await model.quick("status") } }
+            Button("Godkjenn (D)") { Task { await model.approve() } }
+        }
+        .task { await model.setup() }
     }
 }

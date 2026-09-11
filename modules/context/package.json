@@ -1,0 +1,20 @@
+{
+  "name": "@jarvis/context",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-8 Personal Digital Twin - kanonisk, kildeforankret Personal Context Engine (sted/enhet/møte/aktivitet), person-/tenant-/space-skopet og ferskhetsbevisst.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

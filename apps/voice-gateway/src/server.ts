@@ -33,8 +33,29 @@ import type { TtsAdapter } from "./tts.ts";
 export class HttpCoreClient implements CoreClient {
   constructor(private readonly baseUrl: string) {}
 
+  /**
+   * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): `/chat` godtar ikke
+   * lenger ETT ENESTE identitetsbærende felt fra klienten - kroppen er
+   * `{ grant_token, message, provider? }` og INTET annet (se `ChatBody` i
+   * apps/api/src/server.ts). `tenant_id`/`memory_space`/`channel` er borte
+   * fordi de nå leses ut av grant-raden server-side; å sende dem ville blitt
+   * avvist som `malformed_request`.
+   *
+   * `identity.grant_token` finnes KUN når denne talesesjonen faktisk kommer fra
+   * en vellykket `/voice/session/authorize` - er den `undefined` (den
+   * ubeviste/`CLIENT_ASSERTED`-stien), kastes en tydelig feil FØR noe HTTP-kall
+   * gjøres, i stedet for å sende en kropp `/chat` uansett ville avvist med et
+   * forvirrende `403`.
+   */
   private body(identity: VoiceIdentity, message: string): string {
-    return JSON.stringify({ ...identity, message });
+    if (identity.grant_token === undefined) {
+      throw new Error("voice_session_required");
+    }
+    return JSON.stringify({
+      grant_token: identity.grant_token,
+      message,
+      ...(identity.provider !== undefined ? { provider: identity.provider } : {})
+    });
   }
 
   /**
@@ -322,6 +343,14 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
         // påvirke rutingen - tillitsnivået er et eget argument - men å
         // videresende dem i det hele tatt motsier prinsippet om at
         // klientfelter er bevismateriale og ikke tilstand.
+        //
+        // D-131 (arkitektkontroll av PR #79, funn 1): `grant_token` settes
+        // BEVISST IKKE her - denne stien har ingen bevist enhet, og et grant
+        // finnes derfor ikke. Lokal STT/TTS fungerer fortsatt
+        // (D-122 regel 1), men Core sin `/chat` (LLM/verktøy/minne) er nå
+        // strukturelt uoppnåelig herfra - `HttpCoreClient` kaster
+        // `voice_session_required` FØR noe HTTP-kall, som `runTurn()` allerede
+        // fanger og rapporterer som `core_error`.
         startSession(
           {
             person_id: claimed.person_id,
@@ -388,7 +417,13 @@ export function createVoiceGateway(options: VoiceGatewayOptions): Server {
           memory_space: grant.memory_space,
           channel: "voice",
           // §33: ren LLM-provider-preferanse, ikke et identitets-/autoritetsfelt.
-          ...(claimed?.provider !== undefined ? { provider: claimed.provider } : {})
+          ...(claimed?.provider !== undefined ? { provider: claimed.provider } : {}),
+          // D-131 (arkitektkontroll av PR #79, funn 1): den ENESTE stien der
+          // `grant_token` settes - enheten har faktisk bevist besittelse via
+          // `/voice/session/authorize`, så grantet er et ekte, server-utstedt,
+          // avgrenset og revokerbart bevis `/chat` godtar. Grantets
+          // `session_id` er samtalekontinuitet og sendes IKKE til `/chat`.
+          grant_token: grant.grant_token
         },
         voiceAuthorityFromGrant(grant, Date.now())
       );

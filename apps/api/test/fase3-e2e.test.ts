@@ -8,10 +8,13 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
 import {
+  ChannelSessionAuthority,
   ContextBuilder,
+  DeviceService,
   IdentityService,
   MessageStore,
   PgApprovalStore,
+  SessionGrantService,
   SessionService,
   createPool,
   runMigrations,
@@ -35,6 +38,25 @@ import { createApiServer } from "../src/server.ts";
 
 const PORT = 30000 + Math.floor(Math.random() * 20000);
 const watchKeys = generateKeyPairSync("ed25519");
+// D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat`/`/brief` stoler ikke
+// lenger på klient-oppgitt `person_id`/`device_id`/`auth_strength` - ETT
+// Ed25519-nøkkelpar per test-enhet, registrert med ekte `public_key_pem` i
+// seed-SQL under, brukt til å faktisk BEVISE enhetsbesittelse via
+// `/devices/challenge` + `/session/authorize` FØR hvert `/chat`-kall (samme
+// mønster som `modules/tool-gateway/test/channel-session-continuity-dedupe.test.ts`).
+const deviceKeys: Record<string, ReturnType<typeof generateKeyPairSync>> = {
+  "dev-web": generateKeyPairSync("ed25519"),
+  "dev-web-b": generateKeyPairSync("ed25519"),
+  "dev-voice": generateKeyPairSync("ed25519"),
+  "dev-web-c": generateKeyPairSync("ed25519")
+};
+function keyFor(deviceId: string): ReturnType<typeof generateKeyPairSync> {
+  const keys = deviceKeys[deviceId];
+  if (!keys) throw new Error(`no test keypair seeded for device_id ${deviceId}`);
+  return keys;
+}
+const devicePem = (deviceId: string): string =>
+  keyFor(deviceId).publicKey.export({ type: "spki", format: "pem" }).toString();
 
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
@@ -73,13 +95,58 @@ function makeApproval(overrides: Partial<ApprovalPayload> = {}): SignedApproval 
   return { ...payload, signature };
 }
 
+/**
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 1): ekte enhetsbevis
+ * (utstedt challenge signert med enhetens Ed25519-nøkkel) →
+ * `/session/authorize` → et SERVERUTSTEDT, AVGRENSET og REVOKERBART
+ * `grant_token`. D-130-runden returnerte her et `session_id`; reviewen påviste
+ * at en samtale-ID ikke kan være et autorisasjonsbevis (delt på tvers av
+ * kanaler, mutabel `last_device_id`, ingen utløp, ingen tilbakekalling).
+ *
+ * Kaster på avslag (aldri en stille `undefined`) - en test som feiler her
+ * betyr autorisasjonen faktisk ble avvist, ikke en tilfeldig 403 lenger nede.
+ */
+async function authorize(identity: Record<string, string>): Promise<string> {
+  const challengeRes = await fetch(`${baseUrl}/devices/challenge`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ device_id: identity["device_id"] })
+  });
+  const { challenge } = (await challengeRes.json()) as { challenge: string };
+  const signature = sign(null, Buffer.from(challenge, "utf8"), keyFor(identity["device_id"] as string).privateKey).toString("base64");
+  const res = await fetch(`${baseUrl}/session/authorize`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      channel: identity["channel"], person_id: identity["person_id"], tenant_id: identity["tenant_id"],
+      device_id: identity["device_id"], memory_space: identity["memory_space"],
+      device_proof: { challenge, signature }
+    })
+  });
+  const body = (await res.json()) as { ok: boolean; grant?: { grant_token: string }; reason?: string };
+  if (!body.ok || !body.grant) {
+    throw new Error(`authorize_failed:${body.reason ?? "unknown"}`);
+  }
+  return body.grant.grant_token;
+}
+
 async function chat(message: string, identity: Record<string, string> = webIdentity) {
+  const grant_token = await authorize(identity);
   const response = await fetch(`${baseUrl}/chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...identity, message })
+    // D-131 funn 1: KUN beviset. `tenant_id`/`memory_space`/`channel`/
+    // `session_id` leses server-side ut av grant-raden, og en kropp med
+    // ukjente felter avvises som `malformed_request`.
+    body: JSON.stringify({ grant_token, message })
   });
   return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+}
+
+/** Samme grant-autorisering som `chat()`, for de rå SSE-`fetch()`-kallene under. */
+async function chatSseBody(message: string, identity: Record<string, string> = webIdentity): Promise<string> {
+  const grant_token = await authorize(identity);
+  return JSON.stringify({ grant_token, message });
 }
 
 beforeAll(async () => {
@@ -123,6 +190,13 @@ beforeAll(async () => {
     -- Simulert forbruk over hardgrensen (3 000 kr = 300 000 øre) for tenant-budget:
     INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ('tenant-budget', 'model:test', 310000);
   `);
+  // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `public_key_pem` satt via
+  // PARAMETRISERT spørring (aldri tekstlig interpolert inn i SQL-en over) -
+  // en PEM-streng inneholder ekte linjeskift, som ikke overlever
+  // tekst-escaping inn i en enkeltsitert SQL-literal uten `E''`-syntaks.
+  for (const deviceId of Object.keys(deviceKeys)) {
+    await adminPool.query("UPDATE devices SET public_key_pem = $1 WHERE device_id = $2", [devicePem(deviceId), deviceId]);
+  }
 
   appPool = createPool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_test", password: "test-app-pw"
@@ -182,9 +256,23 @@ beforeAll(async () => {
   for (const tool of firstWaveTools({
     calendar: calendarTransport, email: new FakeTransport(), github: new FakeTransport(), telegram: new FakeTransport()
   })) toolGateway.register(tool);
+  const identityService = new IdentityService(appPool);
+  const sessionService = new SessionService(appPool);
+  const deviceService = new DeviceService(appPool);
+  const grantService = new SessionGrantService(appPool);
   server = createApiServer({
-    identity: new IdentityService(appPool),
-    sessions: new SessionService(appPool),
+    identity: identityService,
+    sessions: sessionService,
+    // D-130/D-131: `/chat` krever nå et ekte, enhetsbevist GRANT (ikke lenger
+    // en sesjons-ID) - `devices`/`channelAuthority`/`grants` må derfor faktisk
+    // være wired her (ikke bare strukturelt til stede), siden
+    // `authorize()`-hjelperen over faktisk kaller `/devices/challenge` og
+    // `/session/authorize`.
+    devices: deviceService,
+    grants: grantService,
+    channelAuthority: new ChannelSessionAuthority({
+      pool: appPool, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService
+    }),
     policy,
     worker,
     conversation: new ConversationEngine({
@@ -350,7 +438,7 @@ describe("SSE-streaming", () => {
     const response = await fetch(`${baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ ...webIdentity, message: "status" })
+      body: await chatSseBody("status")
     });
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const text = await response.text();
@@ -365,7 +453,7 @@ describe("BO-11.1 §6-§7: SSE klient-disconnect → upstream abort (barge-in-fu
     const response = await fetch(`${baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie" }),
+      body: await chatSseBody("fortell en langsom historie"),
       signal: controller.signal
     });
     // Les til første token-event er mottatt, koble så fra midt i genereringen:
@@ -397,7 +485,7 @@ describe("BO-11.1 §6-§7: SSE klient-disconnect → upstream abort (barge-in-fu
     const response = await fetch(`${baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ ...webIdentity, message: "hva er planen for dagen?" })
+      body: await chatSseBody("hva er planen for dagen?")
     });
     const text = await response.text();
     expect(text).toContain("Hei Tobias, dette er et modellsvar.".split(" ")[0] as string);
@@ -410,7 +498,7 @@ describe("D-30 HOST BLOCKER §1-§3/§8: stream-levering + kansellering mot EKTE
     const response = await fetch(`${baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie" })
+      body: await chatSseBody("fortell en langsom historie")
     });
     const reader = (response.body as ReadableStream<Uint8Array>).getReader();
     const decoder = new TextDecoder();
@@ -442,7 +530,7 @@ describe("D-30 HOST BLOCKER §1-§3/§8: stream-levering + kansellering mot EKTE
       const response = await fetch(`${baseUrl}/chat`, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "text/event-stream" },
-        body: JSON.stringify({ ...webIdentity, message: "fortell en langsom historie to" }),
+        body: await chatSseBody("fortell en langsom historie to"),
         signal: controller.signal
       });
       const reader = (response.body as ReadableStream<Uint8Array>).getReader();
@@ -492,7 +580,7 @@ describe("D-30 live-funn-fix: ConversationEngine → mesh tool bridge (§1-§6)"
     const response = await fetch(`${baseUrl}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ ...webIdentity, message: "Hva står på kalenderen min i dag?" })
+      body: await chatSseBody("Hva står på kalenderen min i dag?")
     });
     const text = await response.text();
     expect(text).toContain("event: tool_call");
@@ -528,13 +616,17 @@ describe("D-30 live-funn-fix: ConversationEngine → mesh tool bridge (§1-§6)"
     expect(tenants).toEqual(["tenant-personal", "tenant-second"]);
   });
 
-  it("H: owner-seed (inkl. voice-device) er idempotent - to kjøringer, én rad per device", async () => {
+  it("H: owner-seed (inkl. voice-device og web-device) er idempotent - to kjøringer, én rad per device", async () => {
     await seedOwner(adminPool);
     await seedOwner(adminPool); // idempotens: andre kjøring endrer ingenting
     const devices = await adminPool.query(
-      "SELECT device_id, kind, COUNT(*)::int AS n FROM devices WHERE device_id IN ('jarvis-core','jarvis-voice-live') GROUP BY device_id, kind ORDER BY device_id"
+      "SELECT device_id, kind, COUNT(*)::int AS n FROM devices WHERE device_id IN ('jarvis-core','jarvis-voice-live','dev-web') GROUP BY device_id, kind ORDER BY device_id"
     );
+    // D-130: `dev-web` finnes FRA FØR (seedet med ekte public_key_pem i denne
+    // filens egen beforeAll) - `ON CONFLICT DO NOTHING` etterlater den
+    // eksisterende nøkkelen urørt, kun ÉN rad totalt.
     expect(devices.rows).toEqual([
+      { device_id: "dev-web", kind: "web", n: 1 },
       { device_id: "jarvis-core", kind: "service", n: 1 },
       { device_id: "jarvis-voice-live", kind: "voice", n: 1 }
     ]);

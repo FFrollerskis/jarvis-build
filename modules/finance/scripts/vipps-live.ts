@@ -417,6 +417,9 @@ async function main(): Promise<void> {
     const server = createApiServer({
       identity: { resolveIdentity: async () => ({ ok: false, reason: "not_used" }) } as never,
       sessions: {} as never, conversation: {} as never, policy, worker: {} as never,
+      // D-130/D-131 arkitekt-review-fikser: strukturelt paakrevd, ubrukt av dette host-scriptet.
+      channelAuthority: {} as never,
+      grants: {} as never,
       finance: { service: finance }
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

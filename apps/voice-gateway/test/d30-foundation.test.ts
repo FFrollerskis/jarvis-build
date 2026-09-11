@@ -563,13 +563,22 @@ describe("HttpCoreClient (§12/§24/§33): SSE-parsing, abort og provider-overri
     );
     const client = new HttpCoreClient("http://core");
     const seen: CoreStreamEvent[] = [];
+    // D-131 (arkitektkontroll av PR #79, funn 1): `HttpCoreClient` krever nå
+    // `identity.grant_token` (bevist sti) FØR den sender noe til `/chat` -
+    // uten det kastes `voice_session_required` FØR fetch() i det hele tatt kalles.
     const reply = await client.chatStream(
-      { ...identity, provider: "anthropic" },
+      { ...identity, provider: "anthropic", grant_token: "grt-http-core-client-test" },
       "hei",
       (e) => seen.push(e)
     );
     expect(captured["provider"]).toBe("anthropic");
-    expect(captured["channel"]).toBe("voice");
+    // D-131 funn 1: kroppen er `{grant_token, message, provider?}` og INTET
+    // annet. `channel`/`tenant_id`/`memory_space`/`session_id` er BEVISST
+    // borte - de leses server-side ut av grant-raden, så en klient kan ikke
+    // lenger påstå dem. `/chat` avviser dessuten ukjente felter, så å sende
+    // dem ville gitt `malformed_request`.
+    expect(captured["grant_token"]).toBe("grt-http-core-client-test");
+    expect(Object.keys(captured).sort()).toEqual(["grant_token", "message", "provider"]);
     expect(seen).toEqual([
       { type: "token", text: "Hei " },
       { type: "tool", tool_name: "read_calendar_today" },
@@ -591,8 +600,10 @@ describe("HttpCoreClient (§12/§24/§33): SSE-parsing, abort og provider-overri
       })
     );
     const client = new HttpCoreClient("http://core");
+    // D-131 funn 1: samme grunn som testen over - `grant_token` må være satt
+    // for at HttpCoreClient skal nå fetch() i det hele tatt.
     const err = await client
-      .chatStream(identity, "hei", () => undefined, controller.signal)
+      .chatStream({ ...identity, grant_token: "grt-http-core-client-test" }, "hei", () => undefined, controller.signal)
       .then(() => null)
       .catch((e: unknown) => e);
     expect((err as Error).name).toBe("AbortError");

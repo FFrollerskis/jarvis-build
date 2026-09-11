@@ -9,6 +9,7 @@ import { VOICE_GRANT_TTL_MS, VoiceSessionGrantSchema } from "@jarvis/contracts";
 import {
   DeviceService,
   IdentityService,
+  SessionGrantService,
   SessionService,
   VoiceSessionAuthority,
   createPool,
@@ -96,9 +97,12 @@ beforeAll(async () => {
   devices = new DeviceService(appPool);
   sessions = new SessionService(appPool);
   authority = new VoiceSessionAuthority({
+    pool: appPool,
     devices,
     sessions,
-    identity: new IdentityService(appPool)
+    identity: new IdentityService(appPool),
+    // D-131: samme transaksjonelle autoritetskjerne som ChannelSessionAuthority.
+    grants: new SessionGrantService(appPool)
   });
 }, 240_000);
 

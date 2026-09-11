@@ -34,7 +34,32 @@ export type AuthStrength = z.infer<typeof AuthStrengthSchema>;
  * den fjerner ingen tidligere gyldig verdi. Telegram forblir en TRANSPORT
  * (D-64 `EXTERNAL_CANONICAL`), aldri en identitets- eller autoritetskilde.
  */
-export const ChannelSchema = z.enum(["web", "mobile", "watch", "voice", "api", "system", "telegram"]);
+/**
+ * `desktop` (UA-7-generalisering av D-123/D-125, kanonisk local-agent-kontrakt
+ * for Mac/Windows fra masterplanen): modellerer en lokal desktop-agent som en
+ * ordinær `devices`-rad (`kind = 'desktop-agent'` - ingen skjemaendring,
+ * `devices.kind` er allerede fritekst), autentisert med SAMME
+ * `DeviceService.verifyChallenge()` Ed25519-proof-of-possession-primitiv som
+ * enhver annen enhet, og autorisert via den nye, generiske
+ * `ChannelSessionAuthority` (`modules/core/src/services/
+ * channel-session-authority.ts`) med `channel = "desktop"` - IKKE en parallell
+ * lokal-agent-infrastruktur. `desktop` er bevisst IKKE en tredjeparts-
+ * leverandør-integrasjon (D-64): enheten er alltid Tobias sin egen, kjørt på
+ * hans egen maskin, og eies fullt ut av den eksisterende kanoniske
+ * enhets-/identitetsmodellen.
+ *
+ * Krever INGEN migrasjon, av samme grunn som D-125 sin `telegram`-utvidelse
+ * over: `sessions.last_channel` er `text NOT NULL` uten CHECK-constraint
+ * (002_sessions_events.sql), og ingen uttømmende `switch` over `Channel`
+ * finnes andre steder - `ChannelSchema` brukes kun i denne filen. Utvidelsen
+ * legger kun til en gyldig verdi; ingen tidligere gyldig verdi fjernes.
+ *
+ * MERK (ærlighet om sporbarhet, CLAUDE.md): denne verdien er lagt til uten et
+ * eget logget D-nummer i `docs/DECISIONS_AND_ASSUMPTIONS.md`, fordi den
+ * økten som skrev dette eksplisitt ikke fikk endre `docs/*`. Bør formaliseres
+ * med et D-xx av en økt som har den tilgangen.
+ */
+export const ChannelSchema = z.enum(["web", "mobile", "watch", "voice", "api", "system", "telegram", "desktop"]);
 export type Channel = z.infer<typeof ChannelSchema>;
 
 /**

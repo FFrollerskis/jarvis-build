@@ -19,6 +19,10 @@
   input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
           border-radius:8px; padding:10px; font-size:15px; }
   button { background:#238636; color:#fff; border:0; border-radius:8px; padding:0 18px; cursor:pointer; }
+  #enroll { display:none; padding:12px 16px; background:#161b22; border-top:1px solid #30363d; }
+  #enroll p { margin:0 0 8px; color:#8b949e; font-size:13px; }
+  #enroll code { color:#e6edf3; background:#0d1117; padding:2px 5px; border-radius:4px; }
+  #enroll form { padding:0; background:none; }
 </style>
 </head>
 <body>
@@ -28,16 +32,45 @@
   <input id="input" placeholder="Snakk med Jarvis …" autocomplete="off" autofocus>
   <button>Send</button>
 </form>
+<div id="enroll">
+  <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
+     <code>pnpm --filter @jarvis/api enroll-ticket</code> og lim inn billetten under.</p>
+  <form id="enroll-form">
+    <input id="enroll-ticket" placeholder="Innrullerings-billett …" autocomplete="off">
+    <button>Innrullér</button>
+  </form>
+</div>
 <script>
   const log = document.getElementById("log");
   const form = document.getElementById("form");
   const input = document.getElementById("input");
+  const enrollPanel = document.getElementById("enroll");
+  const enrollForm = document.getElementById("enroll-form");
+  const enrollTicket = document.getElementById("enroll-ticket");
 
-  // Dev-identitet (fase 3): enhetsautentisering kommer med kanalene i senere faser.
+  // Dev-identitet (fase 3): enhetsautentisering er faktisk koblet til for
+  // DENNE dev-siden også (Ed25519 via Web Crypto). Fortsatt en lokal,
+  // enkeltbruker dev-demo - ingen ekte multi-enhet-/multi-bruker-onboarding.
+  //
+  // D-131 (uavhengig arkitektkontroll av PR #79): feltene under er PÅSTANDER
+  // som legges fram sammen med et enhetsbevis for /session/authorize. De gir
+  // ingen tilgang i seg selv, og de sendes ALDRI til /chat - der presenteres
+  // kun grant-tokenet, og serveren leser person/tenant/enhet/space/kanal ut av
+  // grant-raden.
   const identity = {
     person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
     memory_space: "personal", channel: "web"
   };
+
+  /**
+   * D-131 funn 1: det betrodde BÆRER-BEVISET fra /session/authorize
+   * ({ grant_token, expires_at_ms, ... }), ikke en sesjons-ID. En sesjons-ID
+   * er samtalekontinuitet og kan ikke dokumentere hvilken enhet som står bak
+   * et kall, om nøkkelen er tilbakekalt, eller når autoriteten utløper.
+   */
+  let grant = null;
+  /** Enhetsnøkkelen, holdt for å kunne re-autorisere når grantet utløper. */
+  let deviceKey = null;
 
   function add(cls, text) {
     const el = document.createElement("div");
@@ -48,6 +81,148 @@
     return el;
   }
 
+  function base64FromBuffer(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  /** SPKI DER → PEM, 64 tegn per linje - speiler EKSAKT DeviceKeys.publicKeyPem() i JarvisClient.swift. */
+  function pemFromSpki(spkiBuffer) {
+    const b64 = base64FromBuffer(spkiBuffer);
+    const lines = b64.match(/.{1,64}/g) || [];
+    return "-----BEGIN PUBLIC KEY-----\n" + lines.join("\n") + "\n-----END PUBLIC KEY-----\n";
+  }
+
+  /**
+   * Enhetsnøkkel i localStorage (JWK, Ed25519). Rundtrippen JWK → JWK er
+   * enklere enn rå PKCS8 i nettleseren, og JWK for Ed25519 bærer allerede den
+   * offentlige komponenten (`x`) sammen med den private (`d`), så vi kan
+   * rekonstruere en offentlig nøkkel fra kun det lagrede private JWK-et.
+   */
+  async function loadOrCreateDeviceKey() {
+    const stored = localStorage.getItem("jarvis.devicekey");
+    if (stored) {
+      const jwk = JSON.parse(stored);
+      const privateKey = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+      const publicKey = await crypto.subtle.importKey(
+        "jwk", { kty: "OKP", crv: "Ed25519", x: jwk.x }, { name: "Ed25519" }, true, ["verify"]
+      );
+      return { privateKey, publicKey };
+    }
+    const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    localStorage.setItem("jarvis.devicekey", JSON.stringify(jwk));
+    return { privateKey: pair.privateKey, publicKey: pair.publicKey };
+  }
+
+  /** Signerer en fersk engangs-nonce med enhetsnøkkelen. Gjenbrukt av begge stiene under. */
+  async function signChallenge(privateKey, deviceId) {
+    const res = await fetch("/devices/challenge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId })
+    });
+    if (!res.ok) throw new Error("devices/challenge: " + res.status);
+    const { challenge } = await res.json();
+    const signature = base64FromBuffer(
+      await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(challenge))
+    );
+    return { challenge, signature };
+  }
+
+  /**
+   * Beviser enheten og henter et ferskt grant. Returnerer `null` (aldri en
+   * kastet feil) når enheten rett og slett ikke er innrullert ennå - da er
+   * innrullering, ikke en feilmelding, det riktige neste steget.
+   */
+  async function authorize(privateKey) {
+    const { challenge, signature } = await signChallenge(privateKey, identity.device_id);
+    const res = await fetch("/session/authorize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        channel: identity.channel, person_id: identity.person_id, tenant_id: identity.tenant_id,
+        device_id: identity.device_id, memory_space: identity.memory_space,
+        device_proof: { challenge, signature }
+      })
+    });
+    const body = await res.json();
+    if (res.ok && body.ok) return body.grant;
+    if (body.reason === "device_proof_invalid" || body.reason === "unknown_device") return null;
+    throw new Error("session/authorize: " + (body.reason || res.status));
+  }
+
+  /**
+   * D-131 (arkitektkontroll av PR #79, funn 2): innrullering krever nå
+   * EKSPLISITT eier-/bootstrap-autoritet. Den gamle koden her kalte
+   * /devices/register med en selvoppgitt `identity` og `auth_strength:"active"`
+   * - altså anonym innrullering: enhver nettverksklient som kjente de (ikke
+   * hemmelige) ID-ene kunne skrive sin egen nøkkel og deretter «bevise» den.
+   *
+   * To lovlige veier nå. Har vi allerede en innrullert nøkkel på denne enheten,
+   * autoriserer den sin EGEN rotasjon (`device_proof`). Ellers kreves en
+   * engangs-billett fra en lokal eier-handling
+   * (`pnpm --filter @jarvis/api enroll-ticket`).
+   */
+  async function enrollDevice(privateKey, publicKey, ticket) {
+    const pem = pemFromSpki(await crypto.subtle.exportKey("spki", publicKey));
+    const enrollment = ticket
+      ? { kind: "enrollment_ticket", ticket }
+      : (() => { throw new Error("enrollment_authority_required"); })();
+    const res = await fetch("/devices/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: identity.tenant_id,
+        person_id: identity.person_id,
+        device: { device_id: identity.device_id, kind: "web", public_key_pem: pem },
+        enrollment
+      })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error("devices/register: " + (body.reason || res.status));
+  }
+
+  /**
+   * Sørger for at vi har et GYLDIG grant akkurat nå. Et grant er kortlevd med
+   * vilje (SESSION_GRANT_TTL_MS) - re-autorisering koster én signatur, og det
+   * er nettopp derfor kort levetid er trygt. 30 s margin så vi ikke sender et
+   * bevis som utløper mens forespørselen er underveis.
+   */
+  async function ensureGrant() {
+    if (grant && grant.expires_at_ms - 30_000 > Date.now()) return grant;
+    if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+    grant = await authorize(deviceKey.privateKey);
+    if (!grant) {
+      enrollPanel.style.display = "block";
+      throw new Error("enhet ikke innrullert");
+    }
+    enrollPanel.style.display = "none";
+    return grant;
+  }
+
+  const sessionReady = ensureGrant();
+  sessionReady.catch((err) => {
+    add("jarvis", "Autorisering feilet: " + err.message);
+  });
+
+  enrollForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    try {
+      if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+      await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
+      await ensureGrant();
+      add("jarvis", "Enheten er innrullert.");
+    } catch (err) {
+      add("jarvis", "Innrullering feilet: " + err.message);
+    }
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const message = input.value.trim();
@@ -55,11 +230,22 @@
     input.value = "";
     add("user", message);
     const reply = add("jarvis", "…");
+    let active;
     try {
+      // Fornyer automatisk hvis grantet er i ferd med å utløpe - se ensureGrant().
+      active = await ensureGrant();
+    } catch (err) {
+      reply.textContent = "Autorisering feilet: " + err.message;
+      return;
+    }
+    try {
+      // D-131 funn 1: KUN grant-tokenet. `tenant_id`/`memory_space`/`channel`/
+      // `session_id` sendes ikke lenger - serveren leser dem ut av grant-raden,
+      // og /chat avviser en kropp med ukjente felter.
       const res = await fetch("/chat", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "text/event-stream" },
-        body: JSON.stringify({ ...identity, message })
+        body: JSON.stringify({ grant_token: active.grant_token, message })
       });
       if (!res.ok) { reply.textContent = "Feil: " + res.status + " " + await res.text(); return; }
       reply.textContent = "";

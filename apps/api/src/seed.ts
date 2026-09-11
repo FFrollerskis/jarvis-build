@@ -10,6 +10,18 @@ import type pg from "pg";
  * som default, konfigurerbar via JARVIS_VOICE_DEVICE_ID). Uten seed ga /chat
  * 403 identity_denied/unknown_device på host-live - derfor seedes den her,
  * i samme transaksjonsfrie idempotente stil som jarvis-core.
+ *
+ * `dev-web` er `apps/web/index.html`s dev-chat-demo sin enhet.
+ *
+ * D-131 (uavhengig arkitektkontroll av PR #79, funn 2): raden seedes fortsatt,
+ * men den er ikke lenger noen forutsetning for innrullering -
+ * `DeviceEnrollmentService` oppretter raden selv når en gyldig eier-billett
+ * legges fram. Ingen av de seedede radene har `public_key_pem`, og det er
+ * hele poenget: en seedet enhet UTEN nøkkel kan ikke bevise noe som helst, og
+ * kan derfor ikke gi noen autoritet. Nøkkelen kommer først når eieren faktisk
+ * innrullerer enheten med et eksplisitt bevis (`pnpm --filter @jarvis/api
+ * enroll-ticket`, eller proof-of-possession fra en allerede innrullert enhet).
+ * Seeden er altså identitets-/medlemskapsdata, ALDRI en tillitsgrense.
  */
 export async function seedOwner(pool: pg.Pool): Promise<void> {
   const tenant = process.env["JARVIS_TENANT_ID"] ?? "tenant-personal";
@@ -26,6 +38,10 @@ export async function seedOwner(pool: pg.Pool): Promise<void> {
   await pool.query(
     "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ($1,$2,$3,'voice') ON CONFLICT DO NOTHING",
     [voiceDevice, tenant, person]
+  );
+  await pool.query(
+    "INSERT INTO devices (device_id,tenant_id,person_id,kind) VALUES ('dev-web',$1,$2,'web') ON CONFLICT DO NOTHING",
+    [tenant, person]
   );
   await pool.query(
     "INSERT INTO memory_spaces (memory_space_id,tenant_id,space) VALUES ('personal',$1,'personal') ON CONFLICT DO NOTHING",

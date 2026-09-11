@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { recordActivityInTransaction } from "@jarvis/business";
 import { assertValidContractTransition, assertValidObligationTransition } from "./state-machine.ts";
 import type {
   AddObligationInput,
@@ -15,6 +16,35 @@ import type {
   CreateContractInput,
   ObligationStatus
 } from "./types.ts";
+
+/**
+ * Arkitekt-review MERGE BLOCKER (Q-33/D-130, PR #79): mirrors
+ * `OperationsCrossScopeReferenceError` i `modules/operations/src/service.ts`
+ * (D-129) - SAMME feilklasse/mønster, egen navngiving per domene. Postgres
+ * sin FK-sjekk kjører med forhøyet privilegium og omgår RLS, saa en enkel FK
+ * paa `company_id`/`contact_id` er ALDRI en tenant/space-autorisasjonsgrense
+ * - se `assertCompanyContactInScope()` under.
+ */
+export class AgreementsCrossScopeReferenceError extends Error {
+  constructor(
+    public readonly field: string,
+    public readonly id: string
+  ) {
+    super(`agreements_cross_scope_reference:${field}:${id}`);
+    this.name = "AgreementsCrossScopeReferenceError";
+  }
+}
+
+/** Kastes naar BÅDE company_id OG contact_id er oppgitt, men kontakten faktisk tilhoerer en ANNEN company. */
+export class AgreementsContactCompanyMismatchError extends Error {
+  constructor(
+    public readonly contactId: string,
+    public readonly companyId: string
+  ) {
+    super(`agreements_contact_company_mismatch:${contactId}:${companyId}`);
+    this.name = "AgreementsContactCompanyMismatchError";
+  }
+}
 
 export interface SearchContractsFilter {
   status?: ContractStatus;
@@ -36,10 +66,25 @@ export interface SearchContractsFilter {
  * motpart-tabell/-tjeneste.
  */
 export class AgreementsService {
+  /**
+   * UA-3 AC1 (D-73/Q-25 fiks, oppdatert D-130): tidslinje-speilingen kaller
+   * `recordActivityInTransaction()` DIREKTE med den allerede-åpne `client`en
+   * fra egen `withMemoryTransaction` (se `recordContractTimelineActivity()`
+   * under) - `@jarvis/business` sin egen `BusinessService`-klasse (med sin
+   * EGEN, frakoblede transaksjon) trengs derfor ikke lenger konstrueres her.
+   * `@jarvis/business` forblir en deklarert `package.json`-avhengighet av
+   * `@jarvis/agreements` (ingen sirkulær avhengighet - `@jarvis/business`
+   * avhenger ALDRI av `@jarvis/agreements`) - kun for
+   * `recordActivityInTransaction()`.
+   */
   constructor(private readonly pool: pg.Pool) {}
 
   async createContract(tenantId: string, memorySpace: MemorySpace, input: CreateContractInput): Promise<Contract> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // Q-33/D-130: verifiser FØR INSERT - et caller-oppgitt company_id/
+      // contact_id fra en ANNEN tenant/space skal aldri kunne knyttes seg
+      // til en kontrakt (Postgres sin FK-sjekk alene omgår RLS).
+      await this.assertCompanyContactInScope(client, tenantId, memorySpace, input.company_id, input.contact_id);
       const contract = await insertContract(client, tenantId, memorySpace, input);
       await insertEvent(client, tenantId, memorySpace, {
         contract_id: contract.contract_id,
@@ -48,6 +93,12 @@ export class AgreementsService {
         actor_person_id: input.actor_person_id ?? null,
         metadata: {}
       });
+      // Arkitekt-review MERGE BLOCKER (D-130, PR #79): tidslinje-speilingen
+      // skjer NAA INNE i SAMME transaksjon som selve kontrakt-raden - se
+      // recordContractTimelineActivity() sin kommentar under.
+      await this.recordContractTimelineActivity(
+        client, tenantId, memorySpace, contract, "external_event", `Kontrakt opprettet: ${input.title}`, "created"
+      );
       return contract;
     });
   }
@@ -144,11 +195,18 @@ export class AgreementsService {
         `UPDATE contracts SET status = $1, updated_at = now() WHERE tenant_id = $2 AND contract_id = $3 RETURNING *`,
         [status, tenantId, contractId]
       );
+      const updated = rows[0] as Contract;
       await insertEvent(client, tenantId, memorySpace, {
         contract_id: contractId, event_type: "status_changed", summary: `Status endret: ${current.status} -> ${status}`,
         actor_person_id: actorPersonId ?? null, metadata: { from: current.status, to: status }
       });
-      return rows[0] as Contract;
+      // D-130: samme SAMME-transaksjon, rent additive tidslinje-speiling som
+      // createContract() - se recordContractTimelineActivity() sin kommentar.
+      await this.recordContractTimelineActivity(
+        client, tenantId, memorySpace, updated, "status_change",
+        `Status endret: ${current.status} -> ${status}`, `status:${status}`
+      );
+      return updated;
     });
   }
 
@@ -180,6 +238,10 @@ export class AgreementsService {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const current = await this.readForUpdate(client, tenantId, contractId, true);
       if (!current) return null;
+      // Q-33/D-130: `null` betyr eksplisitt "fjern koblingen" - hoppes over
+      // (ingenting å verifisere); en oppgitt streng-verdi maa derimot
+      // finnes i EGEN tenant+memory_space FØR den lagres på kontrakten.
+      await this.assertCompanyContactInScope(client, tenantId, memorySpace, companyId ?? undefined, contactId ?? undefined);
       const { rows } = await client.query(
         `UPDATE contracts SET company_id = $1, contact_id = $2, updated_at = now() WHERE tenant_id = $3 AND contract_id = $4 RETURNING *`,
         [companyId, contactId, tenantId, contractId]
@@ -255,7 +317,17 @@ export class AgreementsService {
         contract_id: contractId, event_type: "version_added", summary: `Versjon ${nextVersion} lagt til: ${input.summary}`,
         actor_person_id: input.created_by_person_id ?? null, metadata: { version_number: nextVersion }
       });
-      return rows[0] as ContractVersion;
+      const version = rows[0] as ContractVersion;
+      // UA-3 AC1 / D-130: en ny kontraktversjon er et dokument-øyeblikksbilde
+      // (§"Peker til Knowledge/kilde - ALDRI kopi av full innhold") -
+      // `activity_type: "document"` (EKSISTERENDE CHECK-verdi, ingen
+      // skjemaendring nødvendig). Skrives NAA i SAMME transaksjon som selve
+      // versjonsraden - se recordContractTimelineActivity() sin kommentar.
+      await this.recordContractTimelineActivity(
+        client, tenantId, memorySpace, current, "document",
+        `Versjon ${version.version_number} lagt til: ${input.summary}`, `version:${version.version_number}`
+      );
+      return version;
     });
   }
 
@@ -398,6 +470,91 @@ export class AgreementsService {
       [tenantId, contractId]
     );
     return (rows[0] as Contract) ?? null;
+  }
+
+  /**
+   * UA-3 akseptansekriterium 1 ("Hva skjer med kunde X?"): speiler kontrakt-
+   * lifecycle-hendelser inn i `business_activities`.
+   *
+   * Arkitekt-review MERGE BLOCKER (D-130, PR #79): kaller NAA
+   * `recordActivityInTransaction()` DIREKTE med den ALLEREDE ÅPNE `client`
+   * fra kallerens `withMemoryTransaction`-blokk - IKKE lenger
+   * `this.business.recordActivity()` (som åpner sin EGEN, frakoblede
+   * transaksjon) - se samme kommentar i `modules/support/src/service.ts`
+   * sin `recordTicketTimelineActivity()`. Dette gjør skrivingen ATOMISK med
+   * selve kontrakt-/versjons-raden: feiler denne INSERT-en, ruller HELE den
+   * omsluttende transaksjonen tilbake. En kontrakt UTEN `company_id`/
+   * `contact_id` har ingen motpart å feste seg til på tidslinjen - hoppes
+   * BEVISST over her (ALDRI en oppdiktet plassholder-kobling). `external_id`
+   * er en stabil, deterministisk nøkkel per LOGISK hendelse
+   * (`{contract_id}:created` / `{contract_id}:status:{status}` /
+   * `{contract_id}:version:{version_number}`) - `recordActivityInTransaction()`
+   * sin EKSISTERENDE `ON CONFLICT`-idempotens hindrer derfor en duplikat rad
+   * ved en gjentatt/retried kilde-hendelse (§22). `canonical_uri` peker
+   * TILBAKE til selve kontrakten - ALDRI en kopi av kontraktinnhold.
+   */
+  private async recordContractTimelineActivity(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    contract: Pick<Contract, "contract_id" | "company_id" | "contact_id">,
+    activityType: "external_event" | "status_change" | "document",
+    summary: string,
+    externalIdSuffix: string
+  ): Promise<void> {
+    if (!contract.company_id && !contract.contact_id) return;
+    await recordActivityInTransaction(client, tenantId, memorySpace, {
+      activity_type: activityType,
+      summary,
+      ...(contract.company_id ? { company_id: contract.company_id } : {}),
+      ...(contract.contact_id ? { contact_id: contract.contact_id } : {}),
+      source_type: "contract",
+      source_instance_id: "native",
+      external_id: `${contract.contract_id}:${externalIdSuffix}`,
+      canonical_uri: `jarvis:contract:${contract.contract_id}`
+    });
+  }
+
+  /**
+   * Arkitekt-review MERGE BLOCKER (Q-33/D-130, PR #79): mirrors
+   * `OperationsService.assertCompanyContactInScope()` i
+   * `modules/operations/src/service.ts` (D-129) - SAMME mønster/håndheving,
+   * kun flyttet til Agreements. `business_companies.company_id`/
+   * `business_contacts.contact_id` er GLOBALE primærnøkler (ingen sammensatt
+   * `(tenant_id, memory_space_id, id)`-nøkkel der - bevisst unngått en bred,
+   * urelatert Business OS-skjemaendring, se D-129). Denne
+   * tjenestelags-vakten er derfor den ENESTE håndhevingen for disse to
+   * relasjonene fra Agreements: begge maa eksistere i EGEN
+   * tenant+memory_space, og dersom BEGGE er oppgitt maa kontakten faktisk
+   * tilhøre den oppgitte company-en. Kalles FØR enhver INSERT/UPDATE som
+   * setter company_id/contact_id, INNE i samme åpne transaksjon (client) -
+   * avslag etterlater derfor INGEN rad noe sted.
+   */
+  private async assertCompanyContactInScope(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    companyId: string | undefined,
+    contactId: string | undefined
+  ): Promise<void> {
+    if (companyId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT 1 FROM business_companies WHERE tenant_id = $1 AND memory_space_id = $2 AND company_id = $3`,
+        [tenantId, memorySpace, companyId]
+      );
+      if (rows.length === 0) throw new AgreementsCrossScopeReferenceError("company_id", companyId);
+    }
+    if (contactId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT company_id FROM business_contacts WHERE tenant_id = $1 AND memory_space_id = $2 AND contact_id = $3`,
+        [tenantId, memorySpace, contactId]
+      );
+      if (rows.length === 0) throw new AgreementsCrossScopeReferenceError("contact_id", contactId);
+      if (companyId !== undefined) {
+        const contactCompanyId = (rows[0] as { company_id: string | null }).company_id;
+        if (contactCompanyId !== companyId) throw new AgreementsContactCompanyMismatchError(contactId, companyId);
+      }
+    }
   }
 }
 

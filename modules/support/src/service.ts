@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
+import { recordActivityInTransaction } from "@jarvis/business";
 import { assertValidTicketTransition, isTerminalTicketStatus, reopenTargetStatus } from "./state-machine.ts";
 import type {
   CreateTicketInput,
@@ -12,6 +13,35 @@ import type {
   TicketPriority,
   TicketStatus
 } from "./types.ts";
+
+/**
+ * Arkitekt-review MERGE BLOCKER (Q-33/D-130, PR #79): mirrors
+ * `OperationsCrossScopeReferenceError` i `modules/operations/src/service.ts`
+ * (D-129) - SAMME feilklasse/mønster, egen navngiving per domene. Postgres
+ * sin FK-sjekk kjører med forhøyet privilegium og omgår RLS, saa en enkel FK
+ * paa `company_id`/`contact_id` er ALDRI en tenant/space-autorisasjonsgrense
+ * - se `assertCompanyContactInScope()` under.
+ */
+export class SupportCrossScopeReferenceError extends Error {
+  constructor(
+    public readonly field: string,
+    public readonly id: string
+  ) {
+    super(`support_cross_scope_reference:${field}:${id}`);
+    this.name = "SupportCrossScopeReferenceError";
+  }
+}
+
+/** Kastes naar BÅDE company_id OG contact_id er oppgitt, men kontakten faktisk tilhoerer en ANNEN company. */
+export class SupportContactCompanyMismatchError extends Error {
+  constructor(
+    public readonly contactId: string,
+    public readonly companyId: string
+  ) {
+    super(`support_contact_company_mismatch:${contactId}:${companyId}`);
+    this.name = "SupportContactCompanyMismatchError";
+  }
+}
 
 export interface SearchTicketsFilter {
   status?: TicketStatus;
@@ -32,10 +62,25 @@ export interface SearchTicketsFilter {
  * ingen Gmail-spesifikk logikk her - se `email-ingress.ts` for normalisering.
  */
 export class SupportService {
+  /**
+   * UA-3 AC1 (D-73/Q-25 fiks, oppdatert D-130): tidslinje-speilingen kaller
+   * `recordActivityInTransaction()` DIREKTE med den allerede-åpne
+   * `client`en fra egen `withMemoryTransaction` (se
+   * `recordTicketTimelineActivity()` under) - `@jarvis/business` sin egen
+   * `BusinessService`-klasse (med sin EGEN, frakoblede transaksjon) trengs
+   * derfor ikke lenger konstrueres her. `@jarvis/business` forblir en
+   * deklarert `package.json`-avhengighet av `@jarvis/support` (ingen
+   * sirkulær avhengighet - `@jarvis/business` avhenger ALDRI av
+   * `@jarvis/support`) - kun for `recordActivityInTransaction()`.
+   */
   constructor(private readonly pool: pg.Pool) {}
 
   async createTicket(tenantId: string, memorySpace: MemorySpace, input: CreateTicketInput): Promise<SupportTicket> {
     return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // Q-33/D-130: verifiser FØR INSERT - et caller-oppgitt company_id/
+      // contact_id fra en ANNEN tenant/space skal aldri kunne knyttes seg
+      // til en ticket (Postgres sin FK-sjekk alene omgår RLS).
+      await this.assertCompanyContactInScope(client, tenantId, memorySpace, input.company_id, input.contact_id);
       const ticket = await insertTicket(client, tenantId, memorySpace, input);
       await insertEvent(client, tenantId, memorySpace, {
         ticket_id: ticket.ticket_id,
@@ -49,6 +94,15 @@ export class SupportService {
         metadata: {},
         occurred_at: input.occurred_at ?? null
       });
+      // Arkitekt-review MERGE BLOCKER (D-130, PR #79): tidslinje-speilingen
+      // skjer NAA INNE i SAMME transaksjon som selve ticket-raden (se
+      // recordTicketTimelineActivity() sin kommentar under) - IKKE lenger et
+      // eget, frakoblet post-commit-kall. Feiler business_activities-
+      // skrivingen, ruller HELE transaksjonen (inkl. ticket-raden) tilbake.
+      await this.recordTicketTimelineActivity(
+        client, tenantId, memorySpace, ticket, "external_event",
+        input.initial_summary ?? `Ticket opprettet: ${input.subject}`, "created", input.occurred_at ?? null
+      );
       return ticket;
     });
   }
@@ -121,6 +175,14 @@ export class SupportService {
         actor_person_id: actorPersonId ?? null, source_type: null, source_instance_id: null, source_message_id: null,
         canonical_uri: null, metadata: { from: current.status, to: status }, occurred_at: null
       });
+      // UA-3 AC1: statusovergangen er ALLEREDE gyldig-håndhevet over
+      // (state-machine.ts). D-130-fiksen: denne tidslinje-speilingen skjer
+      // NAA i SAMME transaksjon som selve UPDATE-en - RENT additiv, men
+      // ALDRI lenger en andre, frakoblet kilde-til-sannhet for overgangen.
+      await this.recordTicketTimelineActivity(
+        client, tenantId, memorySpace, updated, "status_change",
+        `Status endret: ${current.status} -> ${status}`, `status:${status}`
+      );
       return updated;
     });
   }
@@ -233,6 +295,10 @@ export class SupportService {
       }
       let reopened = false;
       if (!ticket) {
+        // Q-33/D-130: samme vakt som createTicket() - kun relevant paa
+        // FØRSTE melding i en tråd (der en ny ticket faktisk opprettes med
+        // et caller-oppgitt company_id/contact_id).
+        await this.assertCompanyContactInScope(client, tenantId, memorySpace, input.company_id, input.contact_id);
         ticket = await insertTicket(client, tenantId, memorySpace, {
           subject: input.subject, channel: input.channel, source_type: input.source_type,
           source_instance_id: input.source_instance_id, source_thread_id: input.source_thread_id,
@@ -272,6 +338,25 @@ export class SupportService {
         },
         true
       );
+      // UA-3 AC1 / D-130: samme SAMME-transaksjon tidslinje-speiling som
+      // createTicket()/setStatus() - `ticket_created`/`reopened` kan begge
+      // trigges her (kanal-nøytral ingress), ALDRI dupliserte innsatte hvis
+      // worker-leveringen gjentas (§8: `source_thread_id`-oppslaget over gjør
+      // denne grenen idempotent - `ticket_created`/`reopened` blir kun
+      // `true` FØRSTE gang). Feiler business_activities-skrivingen, ruller
+      // HELE transaksjonen (ticket/event inkludert) tilbake.
+      if (ticketCreated) {
+        await this.recordTicketTimelineActivity(
+          client, tenantId, memorySpace, ticket, "external_event",
+          `Ticket opprettet fra ${input.channel}: ${input.subject}`, "created", input.occurred_at ?? null
+        );
+      }
+      if (reopened) {
+        await this.recordTicketTimelineActivity(
+          client, tenantId, memorySpace, ticket, "status_change",
+          "Status endret: ticket gjenåpnet av ny kundemelding", `status:${ticket.status}`
+        );
+      }
       return { ticket, event: eventResult.event, ticket_created: ticketCreated, event_created: eventResult.created, reopened };
     });
   }
@@ -279,6 +364,96 @@ export class SupportService {
   private async readForUpdate(client: pg.PoolClient, tenantId: string, ticketId: string): Promise<SupportTicket | null> {
     const { rows } = await client.query(`SELECT * FROM support_tickets WHERE tenant_id = $1 AND ticket_id = $2`, [tenantId, ticketId]);
     return (rows[0] as SupportTicket) ?? null;
+  }
+
+  /**
+   * UA-3 akseptansekriterium 1 ("Hva skjer med kunde X?"): speiler ticket-
+   * lifecycle-hendelser inn i `business_activities`.
+   *
+   * Arkitekt-review MERGE BLOCKER (D-130, PR #79): kaller NAA
+   * `recordActivityInTransaction()` DIREKTE med den ALLEREDE ÅPNE `client`
+   * fra kallerens `withMemoryTransaction`-blokk - IKKE lenger
+   * `this.business.recordActivity()` (som åpner sin EGEN, frakoblede
+   * transaksjon). Dette gjør skrivingen ATOMISK med selve ticket-raden:
+   * feiler denne INSERT-en, ruller HELE den omsluttende transaksjonen
+   * (ticket/event inkludert) tilbake - se `modules/memory/src/spaces.ts`
+   * sin `withMemoryTransaction()` for ROLLBACK-håndteringen. En ticket UTEN
+   * `company_id`/`contact_id` har ingenting å feste seg til på tidslinjen -
+   * hoppes BEVISST over her (ALDRI en oppdiktet plassholder-kobling, se
+   * D-64/§9: "never silently link the wrong company"). `external_id` er en
+   * stabil, deterministisk nøkkel per LOGISK hendelse (`{ticket_id}:created`
+   * / `{ticket_id}:status:{status}`) - `recordActivityInTransaction()` sin
+   * EKSISTERENDE `ON CONFLICT (tenant_id, source_type, source_instance_id,
+   * external_id)`-idempotens hindrer derfor en duplikat rad ved en gjentatt/
+   * retried kilde-hendelse (§22), UTEN at denne funksjonen selv trenger noen
+   * egen dedup-logikk. `canonical_uri` peker TILBAKE til selve ticketen -
+   * ALDRI en kopi av meldingsinnhold (019_business.sql: "Peker til
+   * Knowledge/kilde - ALDRI kopi av full innhold").
+   */
+  private async recordTicketTimelineActivity(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    ticket: Pick<SupportTicket, "ticket_id" | "company_id" | "contact_id">,
+    activityType: "external_event" | "status_change",
+    summary: string,
+    externalIdSuffix: string,
+    occurredAt?: string | null
+  ): Promise<void> {
+    if (!ticket.company_id && !ticket.contact_id) return;
+    await recordActivityInTransaction(client, tenantId, memorySpace, {
+      activity_type: activityType,
+      summary,
+      ...(ticket.company_id ? { company_id: ticket.company_id } : {}),
+      ...(ticket.contact_id ? { contact_id: ticket.contact_id } : {}),
+      source_type: "support_ticket",
+      source_instance_id: "native",
+      external_id: `${ticket.ticket_id}:${externalIdSuffix}`,
+      canonical_uri: `jarvis:support_ticket:${ticket.ticket_id}`,
+      ...(occurredAt ? { occurred_at: occurredAt } : {})
+    });
+  }
+
+  /**
+   * Arkitekt-review MERGE BLOCKER (Q-33/D-130, PR #79): mirrors
+   * `OperationsService.assertCompanyContactInScope()` i
+   * `modules/operations/src/service.ts` (D-129) - SAMME mønster/håndheving,
+   * kun flyttet til Support. `business_companies.company_id`/
+   * `business_contacts.contact_id` er GLOBALE primærnøkler (ingen sammensatt
+   * `(tenant_id, memory_space_id, id)`-nøkkel der - bevisst unngått en bred,
+   * urelatert Business OS-skjemaendring, se D-129). Denne
+   * tjenestelags-vakten er derfor den ENESTE håndhevingen for disse to
+   * relasjonene fra Support: begge maa eksistere i EGEN tenant+memory_space,
+   * og dersom BEGGE er oppgitt maa kontakten faktisk tilhøre den oppgitte
+   * company-en. Kalles FØR enhver INSERT/UPDATE som setter company_id/
+   * contact_id, INNE i samme åpne transaksjon (client) - avslag etterlater
+   * derfor INGEN rad noe sted.
+   */
+  private async assertCompanyContactInScope(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    companyId: string | undefined,
+    contactId: string | undefined
+  ): Promise<void> {
+    if (companyId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT 1 FROM business_companies WHERE tenant_id = $1 AND memory_space_id = $2 AND company_id = $3`,
+        [tenantId, memorySpace, companyId]
+      );
+      if (rows.length === 0) throw new SupportCrossScopeReferenceError("company_id", companyId);
+    }
+    if (contactId !== undefined) {
+      const { rows } = await client.query(
+        `SELECT company_id FROM business_contacts WHERE tenant_id = $1 AND memory_space_id = $2 AND contact_id = $3`,
+        [tenantId, memorySpace, contactId]
+      );
+      if (rows.length === 0) throw new SupportCrossScopeReferenceError("contact_id", contactId);
+      if (companyId !== undefined) {
+        const contactCompanyId = (rows[0] as { company_id: string | null }).company_id;
+        if (contactCompanyId !== companyId) throw new SupportContactCompanyMismatchError(contactId, companyId);
+      }
+    }
   }
 }
 

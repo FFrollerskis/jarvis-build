@@ -198,24 +198,26 @@ export class BusinessService {
     });
   }
 
-  /** Idempotent naar source_type/source_instance_id/external_id oppgis (§22/§9 i BO-en): trygg re-prosessering av kilde-hendelser. */
+  /**
+   * Idempotent naar source_type/source_instance_id/external_id oppgis
+   * (§22/§9 i BO-en): trygg re-prosessering av kilde-hendelser.
+   *
+   * Arkitekt-review MERGE BLOCKER (D-130, PR #79): selve INSERT-logikken bor
+   * naa i `recordActivityInTransaction()` (frittstående funksjon under, tar
+   * en ALLEREDE ÅPEN `pg.PoolClient`) - denne metoden er en TYNN wrapper som
+   * åpner sin EGEN, frittstående transaksjon (uendret utad signatur/
+   * oppførsel for eksisterende kallere, f.eks. `business-event-sync.ts`
+   * sin Gmail/Calendar-synk). Support/Agreements kaller derimot
+   * `recordActivityInTransaction()` DIREKTE med sin EGEN allerede-åpne
+   * `client`, slik at tidslinje-raden skrives i SAMME transaksjon som selve
+   * ticket-/kontrakt-raden - se `recordTicketTimelineActivity()`/
+   * `recordContractTimelineActivity()` i `modules/support/src/service.ts`/
+   * `modules/agreements/src/service.ts`.
+   */
   async recordActivity(tenantId: string, memorySpace: MemorySpace, input: RecordActivityInput): Promise<BusinessActivity> {
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const activity_id = `biz-ac-${randomUUID()}`;
-      const { rows } = await client.query(
-        `INSERT INTO business_activities (activity_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, activity_type, summary, source_type, source_instance_id, external_id, canonical_uri, owner_person_id, occurred_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, now()))
-         ON CONFLICT (tenant_id, source_type, source_instance_id, external_id) DO UPDATE SET summary = business_activities.summary
-         RETURNING *`,
-        [
-          activity_id, tenantId, memorySpace, input.company_id ?? null, input.contact_id ?? null,
-          input.opportunity_id ?? null, input.lead_id ?? null, input.activity_type, input.summary,
-          input.source_type ?? null, input.source_instance_id ?? null, input.external_id ?? null,
-          input.canonical_uri ?? null, input.owner_person_id ?? null, input.occurred_at ?? null
-        ]
-      );
-      return rows[0] as BusinessActivity;
-    });
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], (client) =>
+      recordActivityInTransaction(client, tenantId, memorySpace, input)
+    );
   }
 
   /**
@@ -349,4 +351,38 @@ export class BusinessService {
       };
     });
   }
+}
+
+/**
+ * Arkitekt-review MERGE BLOCKER (D-130, PR #79): den faktiske
+ * business_activities-INSERT-en, trukket ut fra `recordActivity()` til en
+ * frittstående funksjon som tar en ALLEREDE ÅPEN `pg.PoolClient` - INGEN
+ * egen transaksjon her. Dette lar Support/Agreements skrive tidslinje-raden
+ * i SAMME transaksjon som selve ticket-/kontrakt-raden: enten committer
+ * BEGGE, eller ingen av dem (kaster INSERT-en, ruller `withMemoryTransaction`
+ * sin BEGIN/COMMIT/ROLLBACK i `modules/memory/src/spaces.ts` automatisk
+ * tilbake HELE transaksjonen, ticket/kontrakt-raden inkludert). Samme
+ * `ON CONFLICT`-idempotens som før - uendret oppførsel, kun flyttet ut av
+ * sin egen transaksjonsgrense.
+ */
+export async function recordActivityInTransaction(
+  client: pg.PoolClient,
+  tenantId: string,
+  memorySpace: MemorySpace,
+  input: RecordActivityInput
+): Promise<BusinessActivity> {
+  const activity_id = `biz-ac-${randomUUID()}`;
+  const { rows } = await client.query(
+    `INSERT INTO business_activities (activity_id, tenant_id, memory_space_id, company_id, contact_id, opportunity_id, lead_id, activity_type, summary, source_type, source_instance_id, external_id, canonical_uri, owner_person_id, occurred_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, COALESCE($15, now()))
+     ON CONFLICT (tenant_id, source_type, source_instance_id, external_id) DO UPDATE SET summary = business_activities.summary
+     RETURNING *`,
+    [
+      activity_id, tenantId, memorySpace, input.company_id ?? null, input.contact_id ?? null,
+      input.opportunity_id ?? null, input.lead_id ?? null, input.activity_type, input.summary,
+      input.source_type ?? null, input.source_instance_id ?? null, input.external_id ?? null,
+      input.canonical_uri ?? null, input.owner_person_id ?? null, input.occurred_at ?? null
+    ]
+  );
+  return rows[0] as BusinessActivity;
 }

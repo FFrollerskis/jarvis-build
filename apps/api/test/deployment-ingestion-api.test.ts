@@ -7,7 +7,8 @@ import pg from "pg";
 import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  ContextBuilder, IdentityService, MessageStore, SessionService, createPool, runMigrations
+  ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionGrantService,
+  SessionService, createPool, runMigrations
 } from "@jarvis/core";
 import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
@@ -151,9 +152,20 @@ beforeAll(async () => {
   const taskService = new TaskService(appPool, queue, policy);
   const worker = new InProcessWorker(queue, 60);
 
+  const identityService = new IdentityService(appPool);
+  const sessionService = new SessionService(appPool);
+  const deviceService = new DeviceService(appPool);
+  const grantService = new SessionGrantService(appPool);
   server = createApiServer({
-    identity: new IdentityService(appPool),
-    sessions: new SessionService(appPool),
+    identity: identityService,
+    sessions: sessionService,
+    // D-130/D-131: `ApiDeps.channelAuthority` og `ApiDeps.grants` er nå
+    // påkrevde - strukturelt nødvendige her, ikke brukt av denne testens
+    // `/deployments/ingest/github`-fokus.
+    grants: grantService,
+    channelAuthority: new ChannelSessionAuthority({
+      pool: appPool, devices: deviceService, sessions: sessionService, identity: identityService, grants: grantService
+    }),
     policy,
     worker,
     tasks: taskService,

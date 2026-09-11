@@ -107,6 +107,20 @@ public actor JarvisClient {
     let baseURL: URL
     public var identity: JarvisIdentity
     private var completedUtterances: Set<String>
+    /// D-131 (uavhengig arkitektkontroll av PR #79, funn 1): det betrodde
+    /// BÆRER-BEVISET fra en vellykket `authorizeSession()`.
+    ///
+    /// D-130-runden holdt her et `session_id`. Reviewen påviste at en
+    /// sesjons-ID er samtalekontinuitet - bevisst delt mellom personens
+    /// kanaler, med en `last_device_id` som overskrives ved hvert kanalbytte -
+    /// og derfor strukturelt ute av stand til å dokumentere hvilken enhet som
+    /// står bak et kall, om nøkkelen er tilbakekalt, eller når autoriteten
+    /// utløper. Et grant er bundet til NØYAKTIG denne enheten, dette scopet og
+    /// denne kanalen, og har et utløp.
+    private var grantToken: String?
+    /// Absolutt utløp (epoch ms) for `grantToken`. Håndheves server-side ved
+    /// hvert kall; her brukes den kun til å re-autorisere i tide.
+    private var grantExpiresAtMs: Double?
 
     public init(baseURL: URL, identity: JarvisIdentity) {
         self.baseURL = baseURL
@@ -119,36 +133,129 @@ public actor JarvisClient {
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
+    /// D-131 funn 1: `/chat` godtar ikke ETT ENESTE identitetsbærende felt
+    /// lenger - kroppen er `{ grant_token, message }` og intet annet.
+    /// `tenant_id`/`memory_space`/`channel` er fjernet fordi serveren leser dem
+    /// ut av grant-raden; å sende dem ville blitt avvist som
+    /// `malformed_request`.
     public func chat(_ message: String, utteranceId: String = UUID().uuidString) async throws -> ChatReply? {
         guard !completedUtterances.contains(utteranceId) else { return nil } // aldri dobbel handling
-        var body: [String: Any] = ["message": message]
-        for (k, v) in try dict(identity) { body[k] = v }
-        let reply: ChatReply = try await post("chat", body: body)
+        guard let grantToken else {
+            throw NSError(domain: "Jarvis", code: -2,
+                          userInfo: [NSLocalizedDescriptionKey: "not_authorized: call authorizeSession first"])
+        }
+        let reply: ChatReply = try await post("chat", body: ["grant_token": grantToken, "message": message])
         completedUtterances.insert(utteranceId)
         UserDefaults.standard.set(Array(completedUtterances), forKey: "jarvis.completed")
         return reply
     }
 
-    public func registerDevice(kind: String, publicKeyPem: String) async throws {
-        var identityBody = try dict(identity)
-        identityBody["session_id"] = "sess-device-setup"
-        identityBody["auth_strength"] = "active"
-        let _: [String: String] = try await post("devices/register", body: [
-            "identity": identityBody,
-            "device": ["device_id": identity.device_id, "kind": kind, "public_key_pem": publicKeyPem]
+    /// Er grantet fortsatt gyldig lenge nok til å brukes? 30 s margin så vi
+    /// ikke sender et bevis som utløper mens forespørselen er underveis.
+    public var hasUsableGrant: Bool {
+        guard grantToken != nil, let expiry = grantExpiresAtMs else { return false }
+        return expiry - 30_000 > Date().timeIntervalSince1970 * 1000
+    }
+
+    /// D-131 (uavhengig arkitektkontroll av PR #79, funn 2): innrullering og
+    /// nøkkelrotasjon krever nå EKSPLISITT eier-/bootstrap-autoritet.
+    ///
+    /// Den gamle implementasjonen sendte en SELVOPPGITT `identity` med
+    /// `auth_strength: "active"`, og serveren autoriserte den med
+    /// `resolveIdentity()` - som verifiserer EKSISTENS, ikke AUTENTISERING. En
+    /// nettverksklient som kjente de (ikke hemmelige) ID-ene kunne dermed
+    /// skrive sin EGEN offentlige nøkkel og deretter «bevise» enheten med sin
+    /// egen private nøkkel.
+    ///
+    /// Nå må kalleren legge fram ett av to bevis:
+    ///   - `enrollWithExistingDevice(...)` - proof-of-possession fra en enhet
+    ///     som allerede er innrullert på samme person (også veien for
+    ///     nøkkelrotasjon på denne enheten selv), eller
+    ///   - `enrollWithTicket(...)` - en engangs-billett fra en lokal
+    ///     eier-handling (`pnpm --filter @jarvis/api enroll-ticket`), som er
+    ///     den eneste veien inn for aller FØRSTE enhet.
+    public func enrollWithTicket(kind: String, publicKeyPem: String, ticket: String) async throws {
+        try await enroll(kind: kind, publicKeyPem: publicKeyPem,
+                         enrollment: ["kind": "enrollment_ticket", "ticket": ticket])
+    }
+
+    /// Innrullering/rotasjon autorisert av en ALLEREDE innrullert enhet. Send
+    /// `authorizingDeviceId` = denne enhetens egen id for ren nøkkelrotasjon.
+    public func enrollWithExistingDevice(
+        kind: String,
+        publicKeyPem: String,
+        authorizingDeviceId: String,
+        authorizingKey: Curve25519.Signing.PrivateKey
+    ) async throws {
+        let (challenge, signature) = try await signChallenge(key: authorizingKey, deviceId: authorizingDeviceId)
+        try await enroll(kind: kind, publicKeyPem: publicKeyPem, enrollment: [
+            "kind": "device_proof", "authorizing_device_id": authorizingDeviceId,
+            "challenge": challenge, "signature": signature
         ])
     }
 
-    public func proveDevice(key: Curve25519.Signing.PrivateKey) async throws -> Bool {
+    private func enroll(kind: String, publicKeyPem: String, enrollment: [String: Any]) async throws {
+        struct EnrollResponse: Codable { let ok: Bool }
+        let result: EnrollResponse = try await post("devices/register", body: [
+            "tenant_id": identity.tenant_id,
+            "person_id": identity.person_id,
+            "device": ["device_id": identity.device_id, "kind": kind, "public_key_pem": publicKeyPem],
+            "enrollment": enrollment
+        ])
+        guard result.ok else {
+            throw NSError(domain: "Jarvis", code: -4,
+                          userInfo: [NSLocalizedDescriptionKey: "device_enrollment_failed"])
+        }
+    }
+
+    /// Lavnivå-primitiv: løser kun challenge-/signatur-runden mot
+    /// `/devices/challenge`, uten å utstede noen sesjon. Gjenbrukt av
+    /// `authorizeSession()` under - ingen duplisert signeringslogikk.
+    private func signChallenge(
+        key: Curve25519.Signing.PrivateKey,
+        deviceId: String? = nil
+    ) async throws -> (challenge: String, signature: String) {
         struct Challenge: Codable { let challenge: String }
-        let challenge: Challenge = try await post("devices/challenge", body: ["device_id": identity.device_id])
+        let challenge: Challenge = try await post("devices/challenge", body: ["device_id": deviceId ?? identity.device_id])
         let signature = try key.signature(for: Data(challenge.challenge.utf8)).base64EncodedString()
+        return (challenge.challenge, signature)
+    }
+
+    public func proveDevice(key: Curve25519.Signing.PrivateKey) async throws -> Bool {
+        let (challenge, signature) = try await signChallenge(key: key)
         struct Verified: Codable { let verified: Bool }
         let result: Verified = try await post("devices/challenge/verify", body: [
             "tenant_id": identity.tenant_id, "device_id": identity.device_id,
-            "challenge": challenge.challenge, "signature": signature
+            "challenge": challenge, "signature": signature
         ])
         return result.verified
+    }
+
+    /// D-131 funn 1: den ENESTE veien til et gyldig `grant_token` for `chat()`.
+    /// Beviser enhetsbesittelse (samme challenge-/signatur-runde som
+    /// `proveDevice()`, via `signChallenge()`) og binder resultatet til
+    /// `/session/authorize` - IKKE bare `/devices/challenge/verify`, som kun
+    /// rapporterer `auth_strength` og aldri utsteder noen autoritet.
+    ///
+    /// Returnerer grantets `session_id` (SAMTALEKONTINUITET, til korrelasjon/
+    /// visning) - selve beviset holdes internt og sendes aldri av kalleren.
+    @discardableResult
+    public func authorizeSession(key: Curve25519.Signing.PrivateKey) async throws -> String {
+        let (challenge, signature) = try await signChallenge(key: key)
+        struct Grant: Codable { let grant_token: String; let expires_at_ms: Double; let session_id: String }
+        struct SessionAuthorizeResponse: Codable { let ok: Bool; let grant: Grant? }
+        let result: SessionAuthorizeResponse = try await post("session/authorize", body: [
+            "channel": identity.channel, "person_id": identity.person_id, "tenant_id": identity.tenant_id,
+            "device_id": identity.device_id, "memory_space": identity.memory_space,
+            "device_proof": ["challenge": challenge, "signature": signature]
+        ])
+        guard result.ok, let grant = result.grant else {
+            throw NSError(domain: "Jarvis", code: -3,
+                          userInfo: [NSLocalizedDescriptionKey: "session_authorize_failed"])
+        }
+        grantToken = grant.grant_token
+        grantExpiresAtMs = grant.expires_at_ms
+        return grant.session_id
     }
 
     func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {

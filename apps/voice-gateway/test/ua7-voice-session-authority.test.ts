@@ -55,6 +55,9 @@ function grantFor(overrides: Partial<VoiceSessionGrant> = {}): VoiceSessionGrant
     ...GRANTED_IDENTITY,
     memory_space_authority: "SERVER_VERIFIED",
     auth_strength: "signed",
+    // D-131 (arkitektkontroll av PR #79, funn 1): grantet bærer nå et
+    // server-utstedt bærer-bevis, ikke bare en sesjons-ID.
+    grant_token: "grt-test-server-issued",
     expires_at_ms: Date.now() + VOICE_GRANT_TTL_MS,
     ...overrides
   };
@@ -381,13 +384,19 @@ describe("D-123 / Q-32 punkt 2: server-side memory-space-autoritet i voice-trans
     await client.speakOneTurn();
     await client.waitFor("reply");
 
+    // D-131 (arkitektkontroll av PR #79, funn 1): `grant_token` - IKKE
+    // `session_id` - er det som følger med videre. En sesjons-ID er
+    // samtalekontinuitet og kan ikke bevise hvilken enhet som ringer nå;
+    // grant-en er det server-utstedte, avgrensede og revokerbare beviset
+    // `server.ts` setter på identiteten den bygger fra grant-en.
     expect(core.seenIdentity[0]).toEqual({
       person_id: GRANTED_IDENTITY.person_id,
       tenant_id: GRANTED_IDENTITY.tenant_id,
       device_id: GRANTED_IDENTITY.device_id,
       memory_space: GRANTED_IDENTITY.memory_space,
       channel: "voice",
-      provider: "anthropic"
+      provider: "anthropic",
+      grant_token: "grt-test-server-issued"
     });
     // Ingen av angriperens påstander overlevde.
     expect(core.seenIdentity[0]?.person_id).not.toBe(CLAIMED.person_id);

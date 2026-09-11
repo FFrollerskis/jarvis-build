@@ -1,7 +1,10 @@
 // .ts-utvidelser kreves: filene kjøres direkte med Nodes type-stripping (ingen build-steg)
 import {
+  ChannelSessionAuthority,
   ContextBuilder,
+  DeviceEnrollmentService,
   DeviceService,
+  SessionGrantService,
   IdentityService,
   MessageStore,
   PgApprovalStore,
@@ -43,6 +46,8 @@ import { SupportEmailService, SupportService, SupportTransport, runSupportInboxS
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
 import { ProductService, ProductTransport } from "@jarvis/product";
 import { OperationsService, OperationsTransport } from "@jarvis/operations";
+import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
+import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -224,6 +229,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // reglene) uendret. Ingen ekstern driftsplattform-/ticketing-avhengighet
   // - SAMME lat/enkel-avhengighet-mønster som `ProductTransport`.
   const operationsService = new OperationsService(pool);
+  // UA-8 Personal Digital Twin (D-130): provider-nøytral lokasjon/geofencing
+  // og helse-ingestion - egne tjenester over SAMME runtime-pool, ingen ny
+  // motor. Ingen ToolGateway-handlinger/API-flate lagt til her i denne
+  // sliceen (bevisst utenfor UA-8-kjernens akseptansekriterier) - kun
+  // datamodellen + retensjons-håndhevelsen (se DailyScheduler-sveipene under).
+  const locationService = new LocationService(pool);
+  const healthService = new HealthService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
@@ -485,6 +497,27 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const identityService = new IdentityService(pool);
   const deviceService = new DeviceService(pool);
   const sessionService = new SessionService(pool);
+  // D-131 (uavhengig arkitektkontroll av PR #79): SAMME delings-disiplin som
+  // over. `SessionGrantService` eier `session_grants` - det avgrensede,
+  // revokerbare autorisasjonsbeviset som erstatter «rå session_id = autentisert
+  // enhet» - og `DeviceEnrollmentService` er den ENESTE nettverksnære veien til
+  // å skrive nytt enhetsnøkkelmateriale.
+  const grantService = new SessionGrantService(pool);
+  const enrollmentService = new DeviceEnrollmentService({
+    pool,
+    devices: deviceService,
+    grants: grantService
+  });
+  // Autoritetene eier sin egen transaksjon (D-131 funn 3: hele autorisasjonen
+  // må kunne rulles tilbake ved avslag), og trenger derfor SAMME pool som
+  // tjenestene de komponerer.
+  const authorityDeps = {
+    pool,
+    devices: deviceService,
+    sessions: sessionService,
+    identity: identityService,
+    grants: grantService
+  };
   // D-125 (UA-7, FEMTE slice): ÉN delt `ConversationEngine`-instans. Den er
   // hevet ut av `deps`-literalen fordi den inngående Telegram-banen skal bruke
   // NØYAKTIG samme motor som `/chat` - ikke en parallell konstruksjon (samme
@@ -511,11 +544,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const deps: ApiDeps = {
     identity: identityService,
     devices: deviceService,
-    voiceAuthority: new VoiceSessionAuthority({
-      devices: deviceService,
-      sessions: sessionService,
-      identity: identityService
-    }),
+    grants: grantService,
+    enrollment: enrollmentService,
+    voiceAuthority: new VoiceSessionAuthority(authorityDeps),
+    // D-130 arkitekt-review MERGE BLOCKER 1-fiks: SAMME delte instanser som
+    // `voiceAuthority` over (D-123-delingsdisiplinen - `DeviceService` holder
+    // utstedte challenges in-memory, så en egen instans her ville aldri
+    // gjenkjent en nonce utstedt av `/devices/challenge`/`/session/authorize`).
+    channelAuthority: new ChannelSessionAuthority(authorityDeps),
     brief: {
       generate: (identity) => dailyBrief.generate(identity as never),
       render: (artifact) => DailyBrief.render(artifact as never)
@@ -743,6 +779,22 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "growth-action-recommendation-sweep", Number(process.env["JARVIS_GROWTH_RECOMMENDATION_SWEEP_HOUR"] ?? 9)
   ).start(() => runActionRecommendationSweepForAllTenants(pool, growthService).then(() => undefined));
+  // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
+  // for lokasjonsobservasjoner - SAMME reboot-durable DailyScheduler-
+  // mekanisme (eget job_name, egen klokkeslett-env). Trygt å kjøre uten noen
+  // faktiske observasjoner ennå (ingen ekstern lokasjons-leverandør koblet
+  // til i denne sliceen) - sveipet blir da et no-op.
+  new DailyScheduler(
+    pool, "location-retention-sweep", Number(process.env["JARVIS_LOCATION_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() => runLocationRetentionSweepForAllTenants(pool, locationService).then(() => undefined));
+  // UA-8 Personal Digital Twin (D-130) §6: periodisk retensjons-håndhevelse
+  // for helseobservasjoner - SAMME mekanisme/begrunnelse som
+  // location-retention-sweep over. Kjøres i samme tidlige klokkeslett-vindu
+  // (default kl. 02) - begge er rene, uavhengige retensjons-ryddejobber uten
+  // downstream-avhengigheter til andre UA-3/UA-4-sveip.
+  new DailyScheduler(
+    pool, "health-retention-sweep", Number(process.env["JARVIS_HEALTH_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then(() => undefined));
   return deps;
 }
 

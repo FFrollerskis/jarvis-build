@@ -1,11 +1,6 @@
-import {
-  VOICE_GRANT_TTL_MS,
-  VoiceAuthorizationEvidenceSchema,
-  type VoiceAuthorizationResult
-} from "@jarvis/contracts";
+import { VoiceAuthorizationEvidenceSchema, type VoiceAuthorizationResult } from "@jarvis/contracts";
+import { authorizeProvenDevice, type DeviceAuthorityDeps } from "./device-authority.ts";
 import type { DeviceService } from "./device-service.ts";
-import type { IdentityService } from "./identity-service.ts";
-import type { SessionService } from "./session-service.ts";
 
 /**
  * D-123 (UA-7, FJERDE slice) - Q-32 punkt (2): den betrodde server-side
@@ -72,10 +67,8 @@ import type { SessionService } from "./session-service.ts";
  * Q-20-slettesemantikk berørt (denne tjenesten skriver ingen nye rader utover
  * de `sessions`-/`audit`-radene de eksisterende primitivene allerede skriver).
  */
-export interface VoiceSessionAuthorityDeps {
+export interface VoiceSessionAuthorityDeps extends DeviceAuthorityDeps {
   devices: DeviceService;
-  sessions: SessionService;
-  identity: IdentityService;
 }
 
 export class VoiceSessionAuthority {
@@ -84,18 +77,25 @@ export class VoiceSessionAuthority {
   /**
    * Avgjør om et talebevis gir en betrodd sesjons-/space-autoritet.
    *
-   * REKKEFØLGEN ER SIKKERHETSKRITISK og avviker bevisst fra `/chat` sin
-   * (`resumeOrCreate()` FØR `resolveIdentity()`):
+   * REKKEFØLGEN ER SIKKERHETSKRITISK:
    *
    * Enhetsbeviset kjøres FØRST, og det bindes til den påståtte personen og
    * tenanten (`verifyChallenge(..., personId)`). Uten den bindingen ville en
    * angriper med sin EGEN gyldig registrerte enhet kunne bevise enheten, men
-   * påstå en ANNEN persons `person_id` - og `resumeOrCreate()` ville da ha
+   * påstå en ANNEN persons `person_id` - og sesjonsoppslaget ville da ha
    * gjenopptatt og MUTERT offerets aktive sesjonsrad (`last_device_id`,
-   * `last_active_at`) FØR `resolveIdentity()` rakk å avvise kombinasjonen.
-   * Avslaget ville kommet, men skaden - en kryss-person-sideeffekt på en
-   * server-eid tilstandsrad - hadde allerede skjedd. Derfor: ingen
-   * sesjonsskriving før prinsipalen er bevist.
+   * `last_active_at`) før kombinasjonen rakk å bli avvist. Avslaget ville
+   * kommet, men skaden - en kryss-person-sideeffekt på en server-eid
+   * tilstandsrad - hadde allerede skjedd. Derfor: ingen sesjonsskriving før
+   * prinsipalen er bevist.
+   *
+   * D-131 (arkitektkontroll av PR #79, funn 3): den samme klassen feil fantes
+   * ETT steg lenger inn - `resumeOrCreate()` kjørte FØR medlemskaps-/space-
+   * sjekken, så et gyldig enhetsbevis med en ikke-eksisterende memory space
+   * muterte sesjonsraden før DENY. Hele autorisasjonen kjøres nå i ÉN
+   * transaksjon (`authorizeProvenDevice()`), delt med
+   * `ChannelSessionAuthority`, som validerer ALT før første skriving og ruller
+   * tilbake hvis et avslag først kan avgjøres senere.
    *
    * Funksjonen kaster aldri på et avslag: et avslag er et normalt, revidert
    * utfall, ikke en feil. Den returnerer ALDRI en delvis grant.
@@ -121,41 +121,54 @@ export class VoiceSessionAuthority {
       return { ok: false, reason: "device_proof_invalid" };
     }
 
-    // 2. Server-EID sesjon. Klienten har aldri sagt noe om sesjons-ID.
-    const session = await this.deps.sessions.resumeOrCreate(
-      { tenant_id: evidence.tenant_id, person_id: evidence.person_id, device_id: evidence.device_id },
-      "voice"
+    // 2-4. D-131 (arkitektkontroll av PR #79, funn 1 og 3): den DELTE,
+    //      transaksjonelle autorisasjonskjernen - NØYAKTIG den samme
+    //      `ChannelSessionAuthority` bruker. Den validerer medlemskap/enhet/
+    //      space FØR noen sesjons-sideeffekt (tidligere kunne et gyldig
+    //      enhetsbevis med ukjent space mutere sesjonsraden før DENY), og
+    //      utsteder deretter sesjon + et avgrenset, revokerbart grant
+    //      (`session_grants`) + ALLOW-audit ATOMISK.
+    //
+    //      `auth_strength: "signed"` fordi enheten HAR bevist besittelse -
+    //      styrken kommer fra enhetssignaturen, ikke fra at kanalen er tale.
+    const outcome = await authorizeProvenDevice(
+      this.deps,
+      {
+        person_id: evidence.person_id,
+        tenant_id: evidence.tenant_id,
+        device_id: evidence.device_id,
+        memory_space: evidence.memory_space,
+        channel: "voice",
+        auth_strength: "signed",
+        // D-131b: fingerprinten `verifyChallenge()` FAKTISK beviste over -
+        // `authorizeProvenDevice()` låser og krever et eksakt treff mot
+        // DENNE, ikke en senere uavhengig lesing (se device-authority.ts).
+        proven_key_fingerprint: proven
+      },
+      nowMs
     );
-
-    // 3. Den kanoniske identitets-stien avgjør om space-en faktisk er tillatt.
-    const resolved = await this.deps.identity.resolveIdentity({
-      person_id: evidence.person_id,
-      tenant_id: evidence.tenant_id,
-      memory_space: evidence.memory_space,
-      session_id: session.session_id,
-      device_id: evidence.device_id,
-      channel: "voice",
-      // Enheten HAR bevist besittelse over. `signed` er derfor sant her, og
-      // det er enhetssignaturen som gir styrken - ikke det at kanalen er tale.
-      auth_strength: "signed"
-    });
-    if (!resolved.ok) {
-      return { ok: false, reason: resolved.reason };
+    if (!outcome.ok) {
+      return { ok: false, reason: outcome.reason };
     }
 
     return {
       ok: true,
       grant: {
-        // Hvert eneste felt kommer fra den OPPLØSTE identiteten eller fra den
-        // server-eide sesjonen - ingen verdi ekkoes tilbake fra forespørselen.
-        person_id: resolved.identity.person_id,
-        tenant_id: resolved.identity.tenant_id,
-        device_id: resolved.identity.device_id,
-        session_id: resolved.identity.session_id,
-        memory_space: resolved.identity.memory_space_id,
+        // Hvert eneste felt kommer fra den OPPLØSTE identiteten, den server-eide
+        // sesjonen eller det utstedte grantet - ingen verdi ekkoes fra forespørselen.
+        person_id: outcome.identity.person_id,
+        tenant_id: outcome.identity.tenant_id,
+        device_id: outcome.identity.device_id,
+        session_id: outcome.identity.session_id,
+        // D-131 funn 1: det FAKTISKE bærer-beviset voice-gatewayen presenterer
+        // for Core. `session_id` over er kun samtalens identitet.
+        grant_token: outcome.grant.grant_token,
+        memory_space: outcome.identity.memory_space_id,
         memory_space_authority: "SERVER_VERIFIED",
-        auth_strength: resolved.identity.auth_strength,
-        expires_at_ms: nowMs + VOICE_GRANT_TTL_MS
+        auth_strength: outcome.identity.auth_strength,
+        // Den AUTORITATIVE utløpstiden er den som faktisk står i grant-raden,
+        // ikke en verdi regnet ut på nytt her.
+        expires_at_ms: outcome.grant.expires_at_ms
       }
     };
   }

@@ -7,3 +7,5 @@ export * from "./event.ts";
 export * from "./model.ts";
 export * from "./speech.ts";
 export * from "./voice-authority.ts";
+export * from "./session-grant.ts";
+export * from "./mobility.ts";

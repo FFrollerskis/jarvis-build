@@ -355,6 +355,31 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "operations_tasks", await run(client, mode, "operations_tasks", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "operations_runbooks", await run(client, mode, "operations_runbooks", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "operations_vendors", await run(client, mode, "operations_vendors", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-8 Personal Digital Twin (D-130, 049_context_engine.sql): Personal
+  // Context Engine. `context_observations` har INGEN FK mot noen annen
+  // tabell i denne planen (person_id er en enkel FK -> people, en GLOBAL,
+  // tenant-uavhengig identitet - samme presedens som owner_person_id
+  // andre steder i denne filen dokumenterer som utenfor denne feilklassen).
+  add(result, "context_observations", await run(client, mode, "context_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-8 (D-130, 050_location.sql): provider-nøytral lokasjon/geofencing.
+  // `location_zone_visits` har sammensatte FK-er -> BÅDE `location_zones`
+  // OG `location_observations` - MÅ derfor slettes FØRST av denne blokken
+  // (barn-FK FØR forelder). `location_retention_policies` er ren
+  // eier-konfigurert retensjonspolicy uten FK til noen av de tre andre -
+  // slettes sist for konsistens (samme "ingen dinglende konfigurasjonsrad"-
+  // begrunnelse som consent_enforcement_policies over).
+  add(result, "location_zone_visits", await run(client, mode, "location_zone_visits", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "location_observations", await run(client, mode, "location_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "location_zones", await run(client, mode, "location_zones", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "location_retention_policies", await run(client, mode, "location_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-8 (D-130, 051_health.sql): provider-nøytral helse-ingestion.
+  // `health_metric_observations` er strukturelt låst til `memory_space_id
+  // = 'health'` (database-CHECK) - denne spørringen er likevel den SAMME
+  // generiske (tenant_id, memory_space_id)-formen som resten av planen;
+  // den treffer naturlig kun rader når `space = 'health'` selv slettes.
+  // Ingen FK mellom de to helse-tabellene.
+  add(result, "health_metric_observations", await run(client, mode, "health_metric_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "health_retention_policies", await run(client, mode, "health_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 
@@ -448,6 +473,65 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
       add(result, table, await run(client, mode, table, `memory_item_id IN (${ownedSubquery})`, ownedValues));
     }
     add(result, "memory_items", await run(client, mode, "memory_items", "tenant_id = $1 AND owner_person_id = $2", ownedValues));
+    // UA-8 Personal Digital Twin (D-130, 049_context_engine.sql):
+    // `context_observations` HAR en RESTRICTIVE `jarvis.memory_spaces`-RLS-
+    // policy (samme mønster som `consent_decisions`) - i MOTSETNING til
+    // `messages`/`sessions` under, som ikke har noen `memory_space_id` i det
+    // hele tatt og derfor er trygge under `setTenantOnlyContext` alene. Et
+    // forsøk på å slette denne tabellen etter `setTenantOnlyContext` (uten
+    // `jarvis.memory_spaces` satt) ville stille funnet null rader - RLS
+    // ville filtrert bort ALT, IKKE kastet en feil - nøyaktig samme
+    // RLS-blind-spørrings-feilklasse som Q-27/D-54 fanget tidligere i dette
+    // prosjektet. Slettes derfor HER, INNENFOR `forEachSpaceGroup`, der
+    // riktig `jarvis.memory_spaces`-kontekst allerede er satt.
+    add(result, "context_observations", await run(client, mode, "context_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
+    // MERGE BLOCKER-fiks (ekte arkitekt-review av PR #79, D-130): person-scope
+    // erasure lot TIDLIGERE `location_zone_visits`/`location_observations`/
+    // `location_zones`/`health_metric_observations` stå UBERØRT - en
+    // person-scope Q-20-erasure fjernet dermed IKKE personens faktiske
+    // Personal Digital Twin-data (posisjonshistorikk, helsedata), et reelt
+    // personvern-/compliance-hull. SAMME RLS-blind-spørrings-feilklasse som
+    // `context_observations`-kommentaren over allerede dokumenterer (Q-27/
+    // D-54): alle fire tabellene har en RESTRICTIVE `jarvis.memory_spaces`-
+    // RLS-policy (se `050_location.sql`/`051_health.sql`) - `setTenantOnlyContext`
+    // under (linje ~491) setter ALDRI den session-variabelen, saa et forsøk
+    // paa aa slette disse etter den ville stille funnet null rader (RLS ville
+    // filtrert bort ALT, IKKE kastet en feil) - IKKE en ekte sletting, bare en
+    // usynlig no-op. Slettes derfor HER, INNENFOR `forEachSpaceGroup`, der
+    // riktig `jarvis.memory_spaces`-kontekst allerede er satt (SAMME sted som
+    // `context_observations`).
+    //
+    // Rekkefølge (barn-FK FØR forelder, samme "sammensatt FK er ikke en
+    // autorisasjonsgrense uten (tenant_id, memory_space_id, ...)"-lærdom som
+    // `050_location.sql` sin migrasjons-kommentar dokumenterer):
+    //  1. `location_zone_visits` FØRST - har sammensatte FK-er -> BÅDE
+    //     `location_zones` OG `location_observations` (begge inkluderer
+    //     `person_id` implisitt via visit-raden selv, siden visits alltid
+    //     tilhører SAMME person som sonen/observasjonen de peker til i denne
+    //     sliceen).
+    //  2. `location_observations` - etter visits (visits FK-refererer den).
+    //  3. `location_zones` - etter visits (visits FK-refererer den); rekkefølge
+    //     relativt til (2) er vilkårlig, INGEN FK mellom `location_observations`
+    //     og `location_zones` selv.
+    //  4. `health_metric_observations` - ingen dependents, INGEN FK-ordrings-
+    //     krav mot noen av de tre location-tabellene (helt separat domene).
+    //
+    // BEVISST IKKE med her: `location_retention_policies`/
+    // `health_retention_policies` - dette er tenant/space-nivå POLICY-
+    // KONFIGURASJON (eierens retensjonsvindu-valg), IKKE person-eid data -
+    // sletting av ÉN person sitt Digital Twin-innhold skal ALDRI fjerne den
+    // konfigurasjonen som fortsatt gjelder resten av tenanten/space-en (samme
+    // "ingen dinglende konfigurasjonsrad, men ALDRI heller feilaktig fjernet
+    // policy for gjenværende data"-prinsipp som `consent_enforcement_policies`
+    // andre steder i denne filen).
+    add(result, "location_zone_visits", await run(client, mode, "location_zone_visits", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "location_observations", await run(client, mode, "location_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "location_zones", await run(client, mode, "location_zones", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(
+      result,
+      "health_metric_observations",
+      await run(client, mode, "health_metric_observations", "tenant_id = $1 AND person_id = $2", ownedValues)
+    );
     return result;
   });
 

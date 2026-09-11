@@ -6,7 +6,8 @@
   "description": "Jarvis Core API - fase 1: minimalt kjørbart fundament med health-endepunkt",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "dev": "node --experimental-transform-types src/main.ts"
+    "dev": "node --experimental-transform-types src/main.ts",
+    "enroll-ticket": "node --experimental-transform-types src/enroll-ticket-main.ts"
   },
   "dependencies": {
     "@jarvis/agreements": "workspace:*",
@@ -17,8 +18,10 @@
     "@jarvis/core": "workspace:*",
     "@jarvis/finance": "workspace:*",
     "@jarvis/growth": "workspace:*",
+    "@jarvis/health": "workspace:*",
     "@jarvis/incidents": "workspace:*",
     "@jarvis/knowledge": "workspace:*",
+    "@jarvis/location": "workspace:*",
     "@jarvis/memory": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
