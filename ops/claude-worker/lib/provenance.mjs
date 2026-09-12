@@ -115,8 +115,38 @@ export function isVerifiedVerdict(verdict) {
 }
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
-/** Bound what a single record may carry, so state.json cannot grow without limit. */
-const MAX_RECORDED_COMMITS = 50;
+
+/**
+ * D-135: TWO DIFFERENT BOUNDS, deliberately not the same number and deliberately
+ * not the same KIND of bound. Conflating them is what produced the PR #80
+ * false-verification edge:
+ *
+ *     for (const commit of commits.slice(0, MAX_RECORDED_COMMITS)) { ... }
+ *
+ * That loop bounded the DECISION as a side effect of bounding the RECORD. A
+ * range of 51 commits whose first 50 carried this task's trailers and whose 51st
+ * was a foreign commit was classified `task_attributed`, `verified: true` - the
+ * one commit that mattered was never looked at, and the verdict said the
+ * opposite of the truth. A bound on evidence storage must never become a bound
+ * on evidence evaluation.
+ *
+ *   MAX_EXAMINED_COMMITS         how many commits we are willing to READ AND
+ *                                CLASSIFY. Every commit inside this bound is
+ *                                examined; a range LARGER than it is not
+ *                                partially trusted, it is UNVERIFIED as a whole
+ *                                (`unknown`), because commits we never read
+ *                                cannot be vouched for.
+ *
+ *   MAX_RECORDED_COMMIT_DETAILS  how many per-commit DETAIL ROWS a single record
+ *                                may persist, per list, so state.json cannot grow
+ *                                without limit. Truncating this list never
+ *                                changes a verdict: the counts are always the
+ *                                FULL counts, and `details_truncated` says so.
+ */
+const MAX_EXAMINED_COMMITS = 1000;
+const MAX_RECORDED_COMMIT_DETAILS = 50;
+
+export { MAX_EXAMINED_COMMITS, MAX_RECORDED_COMMIT_DETAILS };
 
 function usableSha(value) {
   return typeof value === "string" && SHA_RE.test(value.trim());
@@ -181,6 +211,15 @@ export function classifyCommitRange({ taskId, attemptIds, headBefore, headAfter,
     checked_at: new Date().toISOString(),
     attributed_commits: [],
     unattributed_commits: [],
+    // D-135: the COUNTS are the decision surface; the arrays above are only the
+    // bounded human-readable detail. They are initialised here so every early
+    // return carries the same shape and no consumer has to guess.
+    commit_count: 0,
+    examined_commit_count: 0,
+    attributed_count: 0,
+    unattributed_count: 0,
+    details_truncated: false,
+    range_truncated: range.truncated === true,
     error: range.error ?? null
   };
 
@@ -225,6 +264,23 @@ export function classifyCommitRange({ taskId, attemptIds, headBefore, headAfter,
     };
   }
 
+  // D-135: A RANGE WE DID NOT READ IN FULL IS NOT A RANGE WE MAY CLASSIFY.
+  //
+  // This is checked BEFORE the commits are looked at, so no prefix of a
+  // truncated range can reach the attribution loop and produce a verdict about
+  // commits nobody examined. Fail-closed: `unknown`, never `task_attributed`.
+  if (range.truncated === true) {
+    return {
+      ...base,
+      commit_count: null,
+      examined_commit_count: Array.isArray(range.commits) ? range.commits.length : 0,
+      verdict: COMMIT_PROVENANCE.UNKNOWN,
+      verified: false,
+      reason: `the commit range is larger than this worker will examine (more than ${MAX_EXAMINED_COMMITS} `
+        + "commits), so at least one commit in it was never read; an unexamined commit is never vouched for"
+    };
+  }
+
   const commits = Array.isArray(range.commits) ? range.commits : [];
   if (commits.length === 0) {
     // Heads differ but the range is empty. Nothing here is explicable, so it is
@@ -237,9 +293,18 @@ export function classifyCommitRange({ taskId, attemptIds, headBefore, headAfter,
     };
   }
 
+  // --- D-135: EVERY commit in the range is classified. No slice, no prefix. ---
+  //
+  // The counts below drive the verdict and are always the FULL counts. Only the
+  // two detail lists are capped, and capping them is visible in the record
+  // (`details_truncated`) rather than silent.
   const attributed = [];
   const unattributed = [];
-  for (const commit of commits.slice(0, MAX_RECORDED_COMMITS)) {
+  let attributedCount = 0;
+  let unattributedCount = 0;
+  let detailsTruncated = false;
+
+  for (const commit of commits) {
     const verdict = commitIsAttributed(commit, { taskId, attemptIds });
     const row = {
       sha: commit.sha,
@@ -247,32 +312,51 @@ export function classifyCommitRange({ taskId, attemptIds, headBefore, headAfter,
       committed_at: commit.committed_at ?? null,
       author: commit.author_email ? `${commit.author_name} <${commit.author_email}>` : (commit.author_name ?? null)
     };
-    if (verdict.attributed) attributed.push({ ...row, attempt_id: verdict.attemptId });
-    else unattributed.push({ ...row, reason: verdict.reason });
+    if (verdict.attributed) {
+      attributedCount += 1;
+      if (attributed.length < MAX_RECORDED_COMMIT_DETAILS) attributed.push({ ...row, attempt_id: verdict.attemptId });
+      else detailsTruncated = true;
+    } else {
+      unattributedCount += 1;
+      if (unattributed.length < MAX_RECORDED_COMMIT_DETAILS) unattributed.push({ ...row, reason: verdict.reason });
+      else detailsTruncated = true;
+    }
   }
 
-  const out = { ...base, attributed_commits: attributed, unattributed_commits: unattributed };
-  if (unattributed.length === 0) {
+  const out = {
+    ...base,
+    attributed_commits: attributed,
+    unattributed_commits: unattributed,
+    commit_count: commits.length,
+    examined_commit_count: commits.length,
+    attributed_count: attributedCount,
+    unattributed_count: unattributedCount,
+    details_truncated: detailsTruncated
+  };
+
+  // `unattributedCount`, not `unattributed.length`: the detail list is capped and
+  // the count is not, so a foreign commit past the detail cap still decides.
+  if (unattributedCount === 0) {
     return {
       ...out,
       verdict: COMMIT_PROVENANCE.ATTRIBUTED,
       verified: true,
-      reason: `every commit in the range carries this task's own attempt evidence (${attributed.length})`
+      reason: `every commit in the range carries this task's own attempt evidence (${attributedCount} of ${commits.length} examined)`
     };
   }
-  if (attributed.length === 0) {
+  if (attributedCount === 0) {
     return {
       ...out,
       verdict: COMMIT_PROVENANCE.UNATTRIBUTED,
       verified: false,
-      reason: `no commit in the range carries this task's attempt evidence (${unattributed.length} unexplained)`
+      reason: `no commit in the range carries this task's attempt evidence (${unattributedCount} unexplained)`
     };
   }
   return {
     ...out,
     verdict: COMMIT_PROVENANCE.PARTIAL,
     verified: false,
-    reason: `the range mixes this task's commits (${attributed.length}) with commits it cannot account for (${unattributed.length})`
+    reason: `the range mixes this task's commits (${attributedCount}) with commits it cannot account for (${unattributedCount})`
   };
 }
 
@@ -303,10 +387,14 @@ export function collectCommitProvenance(wtCfg, { taskId, attemptIds, headBefore,
       range: { ok: true, isAncestor: false, commits: [] }
     });
   }
-  const log = gitLogRange(wtCfg, headBefore, headAfter, runner);
+  // D-135: bounded READ, and the bound is reported rather than hidden. A range
+  // bigger than `MAX_EXAMINED_COMMITS` comes back `truncated: true`, which
+  // `classifyCommitRange` turns into `unknown` - not into a verdict about the
+  // prefix git happened to return first.
+  const log = gitLogRange(wtCfg, headBefore, headAfter, runner, { limit: MAX_EXAMINED_COMMITS });
   return classifyCommitRange({
     taskId, attemptIds, headBefore, headAfter,
-    range: { ok: log.ok, isAncestor: true, commits: log.commits, error: log.error ?? null }
+    range: { ok: log.ok, isAncestor: true, commits: log.commits, truncated: log.truncated === true, error: log.error ?? null }
   });
 }
 
@@ -390,6 +478,12 @@ export function describeCommitProvenance(prov) {
     ];
   }
 
+  // D-135: the detail lists are capped; the counts are not. Say so explicitly
+  // whenever the two differ, so "5 commits listed" is never read as "5 commits".
+  const listNote = (shown, total) => (Number.isFinite(total) && total > shown
+    ? [`  (${shown} of ${total} shown - the detail list is capped; the verdict covers ALL ${total})`]
+    : []);
+
   if (prov.verdict === COMMIT_PROVENANCE.ATTRIBUTED) {
     return [
       "COMMIT PROVENANCE: VERIFIED AS THIS TASK'S OWN WORK.",
@@ -398,6 +492,7 @@ export function describeCommitProvenance(prov) {
         + `${TRAILER_ATTEMPT} matching an attempt id issued to this task alone), which is what makes them `
         + "provably yours rather than merely concurrent:",
       ...prov.attributed_commits.map((c) => `  ${c.sha} ${c.subject}`),
+      ...listNote(prov.attributed_commits?.length ?? 0, prov.attributed_count),
       "Treat them as yours: verify them and build on them. Never stash, reset, force-push, revert or",
       "re-apply an older snapshot over them, and never treat them as foreign or unknown changes.",
       "If the repository is now AHEAD of those commits, the newer state is authoritative. Reconcile",
@@ -428,10 +523,14 @@ export function describeCommitProvenance(prov) {
       + `${why}.`,
     prov.reason ? `Recorded reason: ${prov.reason}` : "",
     ...(prov.unattributed_commits?.length > 0
-      ? ["Commits that are NOT accounted for by this task:", ...prov.unattributed_commits.map((c) => `  ${c.sha} ${c.subject}`)]
+      ? ["Commits that are NOT accounted for by this task:",
+        ...prov.unattributed_commits.map((c) => `  ${c.sha} ${c.subject}`),
+        ...listNote(prov.unattributed_commits.length, prov.unattributed_count)]
       : []),
     ...(prov.attributed_commits?.length > 0
-      ? ["Commits that ARE bound to this task by evidence trailers:", ...prov.attributed_commits.map((c) => `  ${c.sha} ${c.subject}`)]
+      ? ["Commits that ARE bound to this task by evidence trailers:",
+        ...prov.attributed_commits.map((c) => `  ${c.sha} ${c.subject}`),
+        ...listNote(prov.attributed_commits.length, prov.attributed_count)]
       : []),
     "",
     "REQUIRED HANDLING - fail closed in BOTH directions:",
@@ -472,4 +571,160 @@ export function describeCommitEvidenceRequirement({ taskId, attemptId }) {
     "this task's output. Omitting the trailers does not lose work - it strands it.",
     ""
   ];
+}
+
+/* ==========================================================================
+ * THE COMPLETION GATE (D-135)
+ * ==========================================================================
+ *
+ * D-134 answered the authorship question honestly and then did nothing with the
+ * answer. `commit_provenance` was computed, logged, persisted and handed to a
+ * resumed child - and the very next branch in `worker.mjs` was:
+ *
+ *     if (completion.complete) { ... status: COMPLETED, successful: ...,
+ *                                emit COMPLETION_CONFIRMED,
+ *                                releaseWorktreeIfSettled(...) ... }
+ *
+ * with no reference to the verdict at all. So the adversarial case the D-134
+ * tests set up - an unrelated writer advances the claimed worktree's HEAD inside
+ * the attempt window - still ended in a clean success IF the child also posted a
+ * trusted `STATUS=COMPLETE`: the task was marked completed AND successful, the
+ * worktree holding the unexplained commit was released, and - because the queue
+ * asks the FRESH control issue whether a task "completed successfully" - that
+ * record went on to retire strictly older, still-valid tasks. Three fail-open
+ * consequences from one missing condition.
+ *
+ * The gate closes that. It is PURE, it is evaluated from the verdict that was
+ * already computed, and it answers exactly one question:
+ *
+ *     may this successful completion claim be ACTED ON?
+ *
+ * WHAT THE GATE DOES NOT DO, on purpose:
+ *
+ *   - it never touches the repository, never reverts, never removes and never
+ *     rewrites anything. Held work is PRESERVED and parked, exactly as the
+ *     unverified-resume path already preserves it. Fail-closed here means "do
+ *     not adopt AND do not destroy", the same as everywhere else in D-134;
+ *
+ *   - it does not gate UNSUCCESSFUL terminal reports. A `STATUS=BLOCKED` or
+ *     `STATUS=FAILED` report may still be terminal, because it makes no claim
+ *     about work having landed: it cannot release a worktree (release already
+ *     demands `successful === true`) and it cannot create successful-supersession
+ *     truth (supersession already demands positive success). Gating it would
+ *     resurrect finished-and-abandoned tasks for no safety gain;
+ *
+ *   - it does not invent evidence. When NO provenance record exists at all - a
+ *     state row written before D-134 ever ran - the gate passes and says so.
+ *     The dispatch path always computes a verdict, so a missing record means
+ *     "no attempt of this worker version produced one", not "the answer was bad".
+ */
+
+export const COMPLETION_GATE = Object.freeze({
+  /** Not a success claim (BLOCKED/FAILED/non-terminal). Nothing to gate. */
+  PASSED_NOT_A_SUCCESS_CLAIM: "report_is_not_a_success_claim",
+  /** `unchanged` or `task_attributed`: the claim rests on proven ground. */
+  PASSED_PROVENANCE_VERIFIED: "commit_provenance_verified",
+  /** Pre-D-134 record. Stated explicitly rather than silently treated as proof. */
+  PASSED_NO_PROVENANCE_RECORD: "no_commit_provenance_record_exists",
+  /** The one HELD reason: a success claim standing on an unverified range. */
+  HELD_PROVENANCE_UNVERIFIED: "commit_provenance_unverified"
+});
+
+/**
+ * Evaluate the gate for one task.
+ *
+ * `completion` is an `assessCompletion` result; `provenance` is a stored or
+ * freshly computed `classifyCommitRange` record (or `null`).
+ *
+ * Returns `{ held, passed, reason, ... }`. `held === true` means: do NOT mark
+ * this task completed or successful, do NOT release its worktree, do NOT emit a
+ * completion-confirmed event, and do NOT let it retire any other task.
+ */
+export function evaluateCompletionGate({ completion, provenance, now = () => new Date() }) {
+  const prov = provenance && typeof provenance === "object" ? provenance : null;
+  const evidence = {
+    provenance_verdict: prov?.verdict ?? null,
+    provenance_reason: prov?.reason ?? null,
+    head_before: prov?.head_before ?? null,
+    head_after: prov?.head_after ?? null,
+    head_now: prov?.head_now ?? null,
+    // Full counts, never the capped detail-list lengths.
+    unattributed_count: Number.isFinite(prov?.unattributed_count)
+      ? prov.unattributed_count
+      : (prov?.unattributed_commits?.length ?? 0),
+    unattributed_commits: (prov?.unattributed_commits ?? []).map((c) => c?.sha).filter(Boolean),
+    report_comment_id: completion?.reportCommentId ?? null,
+    report_status: completion?.status ?? null,
+    evaluated_at: now().toISOString()
+  };
+
+  if (completion?.complete !== true || completion?.successful !== true) {
+    return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM, ...evidence };
+  }
+  if (!prov) {
+    return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_NO_PROVENANCE_RECORD, ...evidence };
+  }
+  // BOTH halves are required, and neither is inferred from the other: a record
+  // may carry a verified verdict with `verified` explicitly downgraded (that is
+  // precisely what `provenanceForResume` does on drift), and a record from a
+  // future version may carry a verdict this build does not know.
+  if (isVerifiedVerdict(prov.verdict) && prov.verified === true) {
+    return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
+  }
+  return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
+}
+
+/**
+ * Is a DURABLY RECORDED gate held for this task?
+ *
+ * This is the predicate the queue consults, and it is why the gate survives the
+ * run that set it. The queue decides supersession from FRESH control-issue truth
+ * - deliberately, so a terminal report beats stale bookkeeping - and that fresh
+ * truth is exactly the `STATUS=COMPLETE` report the gate does not trust. Without
+ * a durable local override, the held task would go on retiring older work on the
+ * very next run, through a path that never looks at a provenance verdict.
+ *
+ * Positive and explicit: only `held === true` holds. A missing field, a legacy
+ * row or a malformed value is not a hold.
+ */
+export function completionGateHeld(record) {
+  return record?.completion_gate?.held === true;
+}
+
+/**
+ * The status-comment body for a held gate. Says what was claimed, what was
+ * actually proven, what the worker did NOT do, and what a human must decide.
+ */
+export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
+  return [
+    `A TRUSTED report for ${taskId} claims SUCCESSFUL completion (comment ${gate.report_comment_id ?? "unknown"}, `
+      + `STATUS=${gate.report_status ?? "unknown"}), but this worker cannot prove that the commits produced `
+      + "during the attempt are this task's own work.",
+    "",
+    `COMMIT PROVENANCE VERDICT: ${gate.provenance_verdict ?? "unknown"} (verified=false)`,
+    gate.provenance_reason ? `REASON: ${gate.provenance_reason}` : "",
+    `HEAD observed: ${gate.head_before ?? "unknown"} -> ${gate.head_after ?? "unknown"}`
+      + (gate.head_now && gate.head_now !== gate.head_after ? ` (now ${gate.head_now})` : ""),
+    gate.unattributed_count > 0
+      ? `UNEXPLAINED COMMITS (${gate.unattributed_count}): `
+        + `${gate.unattributed_commits.map((s) => String(s).slice(0, 12)).join(", ") || "not listed"}`
+      : "",
+    worktreePath ? `WORKTREE (retained, untouched): ${worktreePath}` : "",
+    "",
+    "A moved HEAD is an OBSERVATION, not proof of authorship: the worker reads the ref twice and cannot",
+    "see who moved it in between. A success claim that rests on commits it cannot account for is therefore",
+    "not accepted, however trusted the report itself is.",
+    "",
+    "WHAT THE WORKER DID:",
+    "  - parked the task as BLOCKED, NOT completed and NOT successful;",
+    "  - did NOT emit a completion-confirmed event;",
+    "  - did NOT release or remove the task's isolated worktree, and did NOT delete its claim;",
+    "  - did NOT let this record retire (supersede) any older task;",
+    "  - did NOT stash, reset, revert, clean, checkout over, force-push or rebase anything. Every commit",
+    "    and every file is exactly where the attempt left it.",
+    "",
+    "This needs an explicit human reconciliation: establish what those commits are, against the actual",
+    "diff, the PR and CI. If the work is good, issue a FRESH TASK_ID to carry it forward; if it is not,",
+    "decide that deliberately. The worker will not replay a blocked task on its own."
+  ].filter((l) => l !== "").join("\n");
 }

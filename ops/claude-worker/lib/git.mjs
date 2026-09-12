@@ -217,11 +217,25 @@ const RECORD_SEP = "";
  * that binds a commit to a task and attempt lives in its trailers (see
  * `lib/provenance.mjs`), and `%s` would throw that away. `{ ok: false }` means
  * UNKNOWN; it never means "the range is empty".
+ *
+ * D-135: `limit` bounds how much of the range is READ, so an unexpectedly huge
+ * range cannot be pulled into memory whole. The bound is applied by asking git
+ * for ONE MORE commit than the caller is willing to examine: if that extra
+ * commit comes back, the range is larger than the bound and `truncated` is
+ * `true`. The caller must then treat the range as UNEXAMINED, because a verdict
+ * derived from a prefix says nothing about the commits behind it - that was
+ * exactly the false-verification edge the PR #80 review found.
  */
-export function gitLogRange(cfg, from, to, runner = spawnSync) {
+export function gitLogRange(cfg, from, to, runner = spawnSync, { limit = null } = {}) {
   const format = `--format=%H${FIELD_SEP}%cI${FIELD_SEP}%an${FIELD_SEP}%ae${FIELD_SEP}%B${RECORD_SEP}`;
-  const res = runGit(cfg, ["log", "--reverse", format, `${from}..${to}`], runner);
-  if (!res.ok) return { ok: false, commits: null, error: res.error };
+  const bounded = Number.isFinite(limit) && limit > 0;
+  const args = ["log", "--reverse", format];
+  // One more than the bound: the (limit + 1)-th commit is the PROOF of overflow,
+  // never something we pretend to have classified.
+  if (bounded) args.push(`-n`, String(limit + 1));
+  args.push(`${from}..${to}`);
+  const res = runGit(cfg, args, runner);
+  if (!res.ok) return { ok: false, commits: null, truncated: null, error: res.error };
 
   const commits = [];
   for (const block of res.stdout.split(RECORD_SEP)) {
@@ -238,7 +252,13 @@ export function gitLogRange(cfg, from, to, runner = spawnSync) {
       message: rest.join(FIELD_SEP)
     });
   }
-  return { ok: true, commits };
+  if (bounded && commits.length > limit) {
+    // Do NOT hand back the prefix as if it were the range. The caller is told
+    // the range is bigger than it agreed to examine, and the commits it did get
+    // are returned only so the refusal can name a few of them.
+    return { ok: true, commits: commits.slice(0, limit), truncated: true };
+  }
+  return { ok: true, commits, truncated: false };
 }
 
 /**

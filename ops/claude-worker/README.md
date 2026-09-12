@@ -317,6 +317,59 @@ Worker (`worker.mjs`):
   - `observed_heads` er en LOGG OVER OBSERVASJONER og merkes eksplisitt som det
     i både kode og prompt: den sier at disse commitene fantes da workeren så
     etter, ikke at tasken lagde noen av dem.
+- **C7 (UVERIFISERT PROVENIENS ER EN EKTE FULLFØRINGSPORT, D-135 / PR
+  #80-review runde 4).** D-134 svarte ærlig på forfatterskapsspørsmålet og gjorde
+  så ingenting med svaret. Fullføringsbanen leste `completion.complete` og
+  ingenting annet, så det adversarielle tilfellet D-134 selv satte opp — en
+  uvedkommende skriver flytter den claimede worktreens HEAD mens barnet kjører —
+  endte fortsatt i en ren suksess hvis barnet OGSÅ postet en betrodd
+  `STATUS=COMPLETE`. Tre fail-open-konsekvenser av én manglende betingelse:
+  tasken ble markert `completed` OG `successful`, `completion_confirmed` ble
+  emittert, worktreen med den uforklarte commiten ble frigitt, og recorden gikk
+  videre og pensjonerte strengt eldre, fortsatt gyldige tasks gjennom køens
+  fresh-truth-supersesjon.
+  - **Porten (`evaluateCompletionGate`).** Er rapporten terminal OG
+    `successful === true`, men proveniensen IKKE verifisert (`unattributed`,
+    `partially_attributed`, `diverged`, `drifted_after_attempt`, `unknown`),
+    HOLDES fullføringen. Tasken parkeres som `blocked` med `successful: false`
+    og en durabel `completion_gate`-record; `completed_at` settes ikke.
+  - **Alle fire fullføringsbanene er portet**, ikke bare dispatch-banen:
+    `reconcileReportedTasks`, krasj-recovery (`COMPLETE_FROM_REPORT`),
+    pre-dispatch-rekonsilieringen i `runTask` og etter-dispatch-sjekken. En port
+    i bare én av dem ville blitt gått rundt av neste kjøring gjennom en annen.
+    De tre ikke-dispatch-banene vurderer verdiktet tasken DURABELT REGISTRERTE
+    ved slutten av forrige forsøk — det eneste beviset som fantes mens spennet
+    ennå var lite.
+  - **Porten overstyrer fresh truth i køen — og kun der.** Køen avgjør
+    supersesjon fra ferske kontroll-issue-kommentarer med vilje, men den ferske
+    sannheten HER er nettopp `STATUS=COMPLETE`-rapporten hvis suksesspåstand
+    workeren avviste. Uten den durable overstyringen ville en nettopp parkert
+    task pensjonert eldre arbeid på neste kjøring. Asymmetrien er hele
+    sikkerhetsargumentet: en holdt port kan bare gjøre en task MINDRE vellykket,
+    aldri mer, og kan derfor bare FORHINDRE en pensjonering.
+  - **Også en eksplisitt `SUPERSEDES=`-erklæring holdes** når porten er holdt.
+    Dette er bevisst strengere enn D-133-regelen om at erklæringen er arkitektens
+    egen myndighet: en task som påsto suksess over commits ingen kan gjøre rede
+    for, er ikke et trygt grunnlag for å pensjonere annet arbeid før et menneske
+    har rekonsilert. Å gjenutstede pensjoneringen er én kommentar; arbeidet som
+    går tapt ved å ta feil er ikke like billig å hente tilbake.
+  - **Mislykkede terminalrapporter portes IKKE.** `STATUS=BLOCKED`/`FAILED` får
+    fortsatt være terminale: de påstår ikke at arbeid landet, kan ikke frigi en
+    worktree (frigivelse krever allerede `successful === true`) og kan ikke skape
+    suksess-supersesjon (som allerede krever positiv suksess).
+  - **Ingenting destrueres.** Alle commits og filer blir stående nøyaktig der
+    forsøket forlot dem, worktreen og claimen beholdes, og statusnotisen sier
+    eksplisitt hva som IKKE ble gjort. Exit-koden er 3 (blokkert), aldri 0.
+  - **Beslutningen dekker HVER commit i spennet.** `MAX_EXAMINED_COMMITS` (1000)
+    begrenser hvor mye som LESES OG KLASSIFISERES; `MAX_RECORDED_COMMIT_DETAILS`
+    (50) begrenser kun hvor mange detaljrader som PERSISTERES per liste. Den
+    gamle koden brukte ett tall til begge (`commits.slice(0, 50)`), så et spenn
+    på 51 commits der de 50 første bar task-ens trailere og den 51. var fremmed
+    ble klassifisert `task_attributed`, `verified: true` — en positiv
+    eierskapspåstand om en commit som aldri ble lest. Nå er `*_count` alltid de
+    FULLE tallene, `details_truncated` sier når listen er kuttet, og et spenn
+    større enn lesegrensen er `unknown` — aldri et verdikt om prefiksen git
+    tilfeldigvis returnerte først.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -498,9 +551,9 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-588 tester (kjørt 2026-09-12 på `claude/d132-worker-recovery-reconciliation`:
-21 filer / 588 passed; 20 filer / 538 etter D-133, 18 filer / 470 etter D-132,
-16 filer / 428 før). I tillegg
+628 tester (kjørt 2026-09-12 på `claude/d132-worker-recovery-reconciliation`:
+21 filer / 628 passed; 21 filer / 588 etter D-134, 20 filer / 538 etter D-133,
+18 filer / 470 etter D-132, 16 filer / 428 før). I tillegg
 til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
 point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
 tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
@@ -607,6 +660,41 @@ git — en alltid-lykkes-stub ville skjult nettopp egenskapen testen skal bevise
 trailerne fra den attempt-ID-en workeren faktisk eksporterte) og som et
 GLEMSOMT barn (`JARVIS_FAKE_CLAUDE_NO_TRAILER=1`), fordi de to skal gi ULIKE
 verdikter og begge må kunne uttrykkes.
+
+og v2.10 (D-135, PR #80-review runde 4) legger til:
+
+- **fullføringsporten som en EGENSKAP, ikke bare en record**
+  (`test/provenance.test.mjs`): hvert av de fem uverifiserte verdiktene holder en
+  suksessrapport, mens `unchanged`/`task_attributed` slipper gjennom; en
+  MISLYKKET terminalrapport portes ikke; et verdikt som SER verifisert ut men har
+  `verified` degradert (nøyaktig formen `provenanceForResume` produserer ved
+  drift) holdes likevel, fordi begge halvdelene kreves; og `completionGateHeld`
+  leser kun et POSITIVT `held === true` — ikke en manglende, legacy- eller
+  misformet verdi;
+- **ADVERSARIELL TEST MOT EKTE ENTRYPOINT: fremmed commit + betrodd
+  `STATUS=COMPLETE`** (`test/worker-task-worktree.test.mjs`). Begge halvdelene er
+  ekte: rapporten er faktisk postet av den betrodde forfatteren med
+  `STATUS=COMPLETE`, og commiten er faktisk en annen git-identitets, racet inn i
+  den claimede worktreen mens forsøket kjører. Bevist: tilstanden blir `blocked`
+  med `successful: false` (ikke `completed`), `completed_at` settes ikke,
+  `completion_confirmed` emitteres ALDRI, worktreen/claimen og den fremmede
+  commiten består, og recorden pensjonerer ikke en strengt eldre task — den
+  eldre KJØRER faktisk på neste runde. Én test kjører med en REN worktree, siden
+  frigivelse uansett nekter på en skitten worktree: uten den ville retensjonen
+  ikke kunne tilskrives porten. En KONTROLL med samme rapport og ingen fremmed
+  commit fullfører helt normalt, så testene ikke kan tilfredsstilles av en worker
+  som bare aldri fullfører noe;
+- **porten i rekonsilieringsbanen** (`test/worker-queue-reconciliation.test.mjs`):
+  en `COMPLETE`-rapport som ankommer utenfor et forsøk parkeres mot det durabelt
+  registrerte verdiktet, blir ikke re-dispatchet, og gir ikke exit 0;
+- **eksakte grensetester for >50-commit-kanten** (`test/provenance.test.mjs`):
+  nøyaktig 50 ekte commits er verifisert; 51 der den ENESTE fremmede er den
+  siste — den eksakte saken den gamle koden verifiserte feilaktig — er
+  `partially_attributed`, uverifisert, med den fremmede commiten NAVNGITT;
+  fremmed commit på plass 500 av 500 finnes fortsatt; og et spenn workeren nektet
+  å lese i sin helhet er `unknown`, aldri et verdikt om prefiksen. `gitLogRange`
+  ber om `limit + 1` og rapporterer `truncated` som et faktum
+  (`test/git.test.mjs`).
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

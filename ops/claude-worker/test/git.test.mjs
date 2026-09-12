@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { runGit, gitStatusLines, gitHead, gitCurrentBranch, collectRepoFacts, remoteMatchesRepo } from "../lib/git.mjs";
+import { runGit, gitStatusLines, gitHead, gitCurrentBranch, gitLogRange, collectRepoFacts, remoteMatchesRepo } from "../lib/git.mjs";
 
 const cfg = { repoPath: "/repo", repoOwner: "tsworkflow", repoName: "jarvisbuild" };
 
@@ -112,5 +112,69 @@ describe("runGit surfaces the arguments it failed on", () => {
   it("includes argv in the failure", () => {
     const res = runGit(cfg, ["status"], runner({ status: 1, stdout: "", stderr: "x" }));
     expect(res.args).toEqual(["status"]);
+  });
+});
+
+/**
+ * D-135: a bounded read must be able to SAY that it was bounded.
+ *
+ * Returning a prefix that looks exactly like a complete answer is how a caller
+ * ends up classifying commits it never saw - the >50-commit false-verification
+ * edge in `lib/provenance.mjs`. So the overflow is reported as a fact, and the
+ * unbounded and non-overflowing cases both report `truncated: false` positively
+ * rather than leaving the field absent.
+ */
+describe("D-135: gitLogRange reports truncation instead of hiding it", () => {
+  const FLD = "";
+  const REC = "";
+
+  /** `n` well-formed log records, exactly as `git log --format=...` emits them. */
+  const stream = (n) => Array.from({ length: n }, (_, i) =>
+    `${String(i + 1).padStart(40, "0")}${FLD}2026-09-12T10:00:00+00:00${FLD}a${FLD}a@b.invalid${FLD}subject ${i + 1}\n${REC}\n`
+  ).join("");
+
+  function recording(n) {
+    const calls = [];
+    return {
+      calls,
+      runner: (_cmd, args) => {
+        calls.push(args);
+        return { status: 0, stdout: stream(n), stderr: "" };
+      }
+    };
+  }
+
+  it("passes no -n and reports truncated:false when unbounded", () => {
+    const { runner: r, calls } = recording(3);
+    const res = gitLogRange(cfg, "aaa", "bbb", r);
+    expect(res.ok).toBe(true);
+    expect(res.commits).toHaveLength(3);
+    expect(res.truncated).toBe(false);
+    expect(calls[0]).not.toContain("-n");
+  });
+
+  it("asks for limit+1 and reports truncated:false when the range fits exactly", () => {
+    const { runner: r, calls } = recording(3);
+    const res = gitLogRange(cfg, "aaa", "bbb", r, { limit: 3 });
+    expect(calls[0]).toContain("-n");
+    expect(calls[0][calls[0].indexOf("-n") + 1]).toBe("4");
+    expect(res.commits).toHaveLength(3);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("reports truncated:true - and hands back only the agreed bound - when it overflows", () => {
+    const { runner: r } = recording(4);
+    const res = gitLogRange(cfg, "aaa", "bbb", r, { limit: 3 });
+    expect(res.ok).toBe(true);
+    expect(res.truncated).toBe(true);
+    // The (limit + 1)-th record was proof of overflow, never a classified commit.
+    expect(res.commits).toHaveLength(3);
+  });
+
+  it("a failed log is UNKNOWN in every field, never an empty untruncated range", () => {
+    const res = gitLogRange(cfg, "aaa", "bbb", runner({ status: 128, stdout: "", stderr: "fatal" }), { limit: 3 });
+    expect(res.ok).toBe(false);
+    expect(res.commits).toBeNull();
+    expect(res.truncated).toBeNull();
   });
 });

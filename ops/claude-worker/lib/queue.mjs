@@ -53,6 +53,7 @@
  * the same queue always produces the same choice, and a test can assert it.
  */
 
+import { completionGateHeld } from "./provenance.mjs";
 import { assessCompletion } from "./reconcile.mjs";
 import { TASK_STATUS, getTask, isTerminal, isValidTaskId } from "./state.mjs";
 
@@ -242,6 +243,22 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
    * never proves the newer order carried.
    */
   const isSuccessfullyComplete = (e) => {
+    // D-135: THE DURABLE COMPLETION GATE OUTRANKS FRESH TRUTH - and only here.
+    //
+    // Fresh truth normally wins on purpose (see FRESH TRUTH above), but the fresh
+    // truth in question IS the `STATUS=COMPLETE` report, and the gate exists
+    // precisely because that report's success claim could not be substantiated:
+    // the commits the attempt left behind are not provably this task's own. So
+    // the check below is not "stale bookkeeping beating a report" - it is a
+    // recorded, positive finding that the report's SUCCESS claim is unproven.
+    //
+    // Note the asymmetry, which is the whole safety argument: a held gate can
+    // only ever make a task count as LESS successful, never more. It can
+    // therefore only ever PREVENT a retirement, and the failure it prevents
+    // (older, still-valid work silently discarded on the strength of an
+    // unverified commit range) is strictly worse than the one it costs (one
+    // extra status notice and a task that stays visible).
+    if (completionGateHeld(e.record)) return false;
     if (e.completion?.complete === true) return e.completion.successful === true;
     if (e.record?.status === TASK_STATUS.COMPLETED) return e.record.successful === true;
     return false;
@@ -262,6 +279,19 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
   const explicitSupersessions = new Map();
   for (const e of entries) {
     if (!isValidTaskId(e.taskId)) continue;
+    // D-135: a task whose completion gate is HELD retires nothing, on ANY basis.
+    //
+    // This is deliberately stricter than D-133's explicit-declaration rule, which
+    // holds that `SUPERSEDES=` is the architect's own authority and does not need
+    // the declaring task to have run. That argument is sound for a task that is
+    // merely unfinished. It is not sound for THIS state, which is narrower and
+    // worse: the declaring task claimed success, and the worker found commits in
+    // its worktree that it cannot account for. Until a human has established what
+    // those commits are, the declaring task is not a safe basis for retiring
+    // anything - so the order is preserved unexecuted rather than acted on
+    // halfway. Re-issuing the retirement after reconciliation is one comment; the
+    // work discarded by getting this wrong is not recoverable that cheaply.
+    if (completionGateHeld(e.record)) continue;
     for (const targetId of declaredSupersedes(e.entry)) {
       if (targetId === e.taskId) continue; // a task never retires itself
       const victim = entries.find((x) => x.taskId === targetId);

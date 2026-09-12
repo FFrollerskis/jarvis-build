@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-12 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-134**, PR #80-review-herding
-runde 3 (proveniens-closeout).
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-135**, PR #80-review-herding
+runde 4 (proveniens fail-closed: fullføringsport + full commit-range-dekning).
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -226,6 +226,79 @@ rekonsiliering, den strenge primære dirty-guarden og hele `lib/trust.mjs`.
 
 Full detalj: **D-134** i DECISIONS_AND_ASSUMPTIONS.md.
 
+## Herdingsrunde 4 på SAMME PR #80: D-135 (PR #80-review, REF_REVIEW_ID=5187449834)
+
+TASK_ID `D135-PR80-PROVENANCE-FAIL-CLOSED-20260912-A` (kommentar 5647721653 på issue #68,
+SUPERSEDES `D134-PR80-PROVENANCE-CLOSEOUT-20260912-A`). Kontrollert HEAD `37fafa1`, base uendret
+`c67a7ba`. TO gjenstående fail-open-baner i proveniensmodellen, lukket som ÉN runde på SAMME branch
+og SAMME draft-PR.
+
+### Fail-open 1: verdiktet var bevis ingen handlet på
+
+D-134 beregnet, logget og persisterte verdiktet - og den aller neste grenen i `worker.mjs` var
+`if (completion.complete) { ...COMPLETED, successful, COMPLETION_CONFIRMED, release... }`, uten én
+referanse til det. Det adversarielle tilfellet D-134 SELV satte opp endte derfor fortsatt i en ren
+suksess hvis barnet OGSÅ postet en ekte, betrodd `STATUS=COMPLETE`: tasken ble `completed` OG
+`successful`, `completion_confirmed` ble emittert, worktreen med den uforklarte commiten ble
+FRIGITT, og recorden pensjonerte deretter strengt eldre, fortsatt gyldige tasks gjennom køens
+fresh-truth-supersesjon. Tre fail-open-konsekvenser av én manglende betingelse.
+
+**Rettet med en ren fullføringsport** (`evaluateCompletionGate`): terminal + `successful === true`
++ uverifisert proveniens (`unattributed`, `partially_attributed`, `diverged`,
+`drifted_after_attempt`, `unknown`) ⇒ HOLDT. Tasken parkeres som `blocked` med `successful: false`
+(eksplisitt `false`, ikke fraværende) og en durabel `completion_gate`-record; `completed_at` settes
+ikke, `completion_confirmed` emitteres ikke, worktree og claim frigis ikke, exit-koden er 3 og ikke
+0, og en statusnotis sier eksplisitt hva som IKKE ble gjort. **Alle fire fullføringsbanene er
+portet** (`reconcileReportedTasks`, krasj-recovery, pre-dispatch-rekonsiliering, etter-dispatch) -
+en port i bare én ville blitt gått rundt av neste kjøring gjennom en annen. Porten overstyrer fersk
+sannhet i køen, og kun der; asymmetrien er argumentet: en holdt port kan bare gjøre en task MINDRE
+vellykket, aldri mer, og kan derfor bare FORHINDRE en pensjonering. Også en eksplisitt
+`SUPERSEDES=`-erklæring holdes - bevisst strengere enn D-133. Mislykkede terminalrapporter
+(`BLOCKED`/`FAILED`) portes IKKE: de påstår ikke at arbeid landet, kan ikke frigi en worktree og
+kan ikke skape suksess-supersesjon. Ingenting destrueres.
+
+### Fail-open 2: >50-commit falsk-verifisering
+
+`classifyCommitRange` hadde `for (const commit of commits.slice(0, MAX_RECORDED_COMMITS))` - ÉN
+løkke som begrenset BESLUTNINGEN som bieffekt av å begrense RECORDEN. 51 commits der de 50 første
+bar task-ens trailere og den 51. var fremmed ⇒ `task_attributed`, `verified: true`. Rettet ved å
+skille grensene: `MAX_EXAMINED_COMMITS` (1000) begrenser hva som LESES OG KLASSIFISERES,
+`MAX_RECORDED_COMMIT_DETAILS` (50) kun antall persisterte detaljrader per liste. Hver commit
+klassifiseres; `*_count` er alltid FULLE tall og er det verdiktet avgjøres på; `details_truncated`
+sier når listen er kuttet; `gitLogRange` ber om `limit + 1` og rapporterer `truncated` som et faktum,
+og et trunkert spenn blir `unknown`.
+
+**Beholdt uendret:** trailer-bundne ekte commits, manglende trailere, blandede spenn,
+ref-drift/rewind, isolert dirty-state-resume, fremmed primær-dirt, suksess-only/eksplisitt
+supersesjon, kanonisk terminal-status, already-merged-rekonsiliering, ingen duplisert branch/PR,
+den strenge primære dirty-guarden og hele `lib/trust.mjs`.
+
+**Kvalitetsporter for D-135 - faktisk kjørt lokalt 2026-09-12:**
+
+- `npx vitest run ops/claude-worker/test`: **21/21 filer, 628/628 tester grønt** (fra 588; ingen
+  eksisterende test svekket, endret eller fjernet).
+- Fokuserte kjøringer: `provenance.test.mjs` 65/65 (fra 42), `queue.test.mjs` 46/46 (fra 41),
+  `git.test.mjs` 17/17 (fra 13), `worker-queue-reconciliation.test.mjs` 16/16 (fra 15),
+  `worker-task-worktree.test.mjs` D-135-gruppen 7/7 (76 s, ekte entrypoint + ekte git).
+- **Hver ny test er kjørt som MOTPRØVE mot den gamle koden og feiler der** - ikke antatt:
+  med porten deaktivert feiler 4/7 entrypoint-tester (`expected 'completed' to be 'blocked'`,
+  `completion_confirmed` emittert, worktree frigitt, eldre task pensjonert); med
+  køoverstyringen deaktivert feiler 2 kø-tester (`expected [ 'OLD-TASK' ] to deeply equal []`);
+  med den gamle `slice`-løkken feiler 4 grensetester, deriblant nøyaktig den rapporterte defekten
+  `expected 'task_attributed' to be 'partially_attributed'`. Alle motprøvene er reversert, og
+  `grep TEMP-COUNTERFACTUAL` gir 0 treff.
+- En KONTROLL-test (samme betrodde rapport, ingen fremmed commit) fullfører helt normalt, så suiten
+  ikke kan tilfredsstilles av en worker som bare aldri fullfører noe.
+- `npx eslint .`: 0 feil/advarsler (én `no-unused-vars` i ny testkode ble rettet). `node --check` på
+  alle endrede `.mjs`: OK.
+- Hemmelighetsskann over `ops/claude-worker/**` (7 mønstergrupper: `gh*_`, `github_pat_`, `sk-`,
+  `xox*-`, private-key-header, `AKIA`, `Authorization:`): **0 treff i endret kode**. Det ene
+  treffet i repoet er den uendrede sanitizer-testen i `test/health.test.mjs` med en oppdiktet verdi.
+- `git status --porcelain`: kun de 11 tilsiktede filene. Ingen scratch-/hjelpe-/rapportfiler i
+  repoet - alt slikt ligger i den tildelte scratch-katalogen.
+
+Full detalj: **D-135** i DECISIONS_AND_ASSUMPTIONS.md, og C7 i `ops/claude-worker/README.md`.
+
 ## Blokkeringer
 
 Ingen harde blockere. `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` fra oppgaven:
@@ -234,8 +307,8 @@ kreves først.
 
 Den fulle arbeidsområde-suiten ER kjørt lokalt (to ganger) i tillegg til på CI. Resultatet, og
 hvorfor de 31 lokale Windows-feilene ikke er en regresjon fra denne PR-en, står under
-«Kvalitetsporter for D-133» over - ikke skjult, ikke hoppet over. D-134 endrer ingen av de fem
-berørte produkt-testfilene og berører utelukkende `ops/claude-worker/**` + `docs/**`.
+«Kvalitetsporter for D-133» over - ikke skjult, ikke hoppet over. D-134 og D-135 endrer ingen av de
+fem berørte produkt-testfilene og berører utelukkende `ops/claude-worker/**` + `docs/**`.
 
 ## Vertsoppgave som følger av D-133 (ikke en blocker for review)
 

@@ -12,14 +12,19 @@ import { describe, it, expect } from "vitest";
 
 import {
   COMMIT_PROVENANCE,
+  COMPLETION_GATE,
+  MAX_EXAMINED_COMMITS,
   TRAILER_TASK,
   TRAILER_ATTEMPT,
   classifyCommitRange,
   collectCommitProvenance,
   commitIsAttributed,
   commitTrailerLines,
+  completionGateHeld,
   describeCommitEvidenceRequirement,
   describeCommitProvenance,
+  describeCompletionGate,
+  evaluateCompletionGate,
   isVerifiedVerdict,
   parseCommitEvidence,
   provenanceForResume
@@ -407,5 +412,315 @@ describe("describeCommitEvidenceRequirement", () => {
   it("says nothing rather than something half-true when an id is missing", () => {
     expect(describeCommitEvidenceRequirement({ taskId: TASK, attemptId: null })).toEqual([]);
     expect(describeCommitEvidenceRequirement({ taskId: null, attemptId: ATTEMPT })).toEqual([]);
+  });
+});
+
+/* ==========================================================================
+ * D-135 (1): THE >50-COMMIT FALSE-VERIFICATION EDGE
+ * ==========================================================================
+ *
+ * The defect, exactly as it stood:
+ *
+ *     for (const commit of commits.slice(0, MAX_RECORDED_COMMITS)) { ... }
+ *
+ * One loop bounded both the RECORD and the DECISION. A 51-commit range whose
+ * first 50 commits carried this task's trailers and whose 51st was a foreign
+ * commit came out `task_attributed`, `verified: true` - a positive claim of
+ * ownership over a commit that was never read.
+ *
+ * Every case below puts the ONLY foreign commit past the detail limit, which is
+ * the position the old code could not see, and pins the exact boundary: 50 is
+ * the last size the old code got right, 51 is the first it got wrong.
+ */
+describe("D-135: the decision covers EVERY commit, the record is merely bounded", () => {
+  const base = { taskId: TASK, attemptIds: [ATTEMPT] };
+
+  /** `n` commits, all properly stamped, oldest first - exactly as git returns them. */
+  function mineRange(n, { from = 0 } = {}) {
+    return Array.from({ length: n }, (_, i) =>
+      commit(String(from + i + 1).padStart(40, "0"), stamped(`feat: mine ${from + i + 1}`)));
+  }
+
+  /** One commit by an unrelated writer: no trailers at all. */
+  function foreign(sha = "f".repeat(40)) {
+    return commit(sha, "unrelated maintenance commit\n");
+  }
+
+  const ok = (commits) => ({ ok: true, isAncestor: true, commits, truncated: false });
+
+  it("EXACTLY 50 genuine commits are verified, and all 50 details are kept", () => {
+    const v = classifyCommitRange({ ...base, headBefore: BEFORE, headAfter: AFTER, range: ok(mineRange(50)) });
+
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.ATTRIBUTED);
+    expect(v.verified).toBe(true);
+    expect(v.commit_count).toBe(50);
+    expect(v.examined_commit_count).toBe(50);
+    expect(v.attributed_count).toBe(50);
+    expect(v.attributed_commits).toHaveLength(50);
+    expect(v.details_truncated).toBe(false);
+  });
+
+  it("51 commits, the ONLY foreign one LAST - the exact case that used to verify - is PARTIAL", () => {
+    const intruder = foreign();
+    const range = [...mineRange(50), intruder];
+    expect(range).toHaveLength(51);
+
+    const v = classifyCommitRange({ ...base, headBefore: BEFORE, headAfter: AFTER, range: ok(range) });
+
+    // The whole point: never verified, never `task_attributed`.
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.PARTIAL);
+    expect(v.verified).toBe(false);
+    expect(isVerifiedVerdict(v.verdict)).toBe(false);
+
+    // The decision counted all 51; the detail list is capped at 50 and says so.
+    expect(v.commit_count).toBe(51);
+    expect(v.examined_commit_count).toBe(51);
+    expect(v.attributed_count).toBe(50);
+    expect(v.unattributed_count).toBe(1);
+    expect(v.attributed_commits).toHaveLength(50);
+
+    // And the commit that decided it is NAMED, not merely counted - the operator
+    // has to be able to go and look at it.
+    expect(v.unattributed_commits.map((c) => c.sha)).toEqual([intruder.sha]);
+  });
+
+  it("a foreign commit at position 500 of 500 is still found", () => {
+    const intruder = foreign("e".repeat(40));
+    const v = classifyCommitRange({
+      ...base, headBefore: BEFORE, headAfter: AFTER, range: ok([...mineRange(499), intruder])
+    });
+
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.PARTIAL);
+    expect(v.verified).toBe(false);
+    expect(v.attributed_count).toBe(499);
+    expect(v.unattributed_count).toBe(1);
+    // Storage stayed bounded while the decision did not.
+    expect(v.attributed_commits).toHaveLength(50);
+    expect(v.details_truncated).toBe(true);
+    expect(v.unattributed_commits.map((c) => c.sha)).toEqual([intruder.sha]);
+  });
+
+  it("51 UNSTAMPED commits are UNATTRIBUTED, counted in full, listed in part", () => {
+    const range = Array.from({ length: 51 }, (_, i) => foreign(String(i + 1).padStart(40, "a")));
+    const v = classifyCommitRange({ ...base, headBefore: BEFORE, headAfter: AFTER, range: ok(range) });
+
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(v.verified).toBe(false);
+    expect(v.unattributed_count).toBe(51);
+    expect(v.unattributed_commits).toHaveLength(50);
+    expect(v.details_truncated).toBe(true);
+    expect(v.reason).toContain("51 unexplained");
+  });
+
+  it("a range the worker REFUSED TO READ IN FULL is UNKNOWN, never attributed", () => {
+    // Every commit git handed back is genuine and stamped. That is precisely the
+    // trap: the prefix looks perfect, and the commits behind it were never read.
+    const v = classifyCommitRange({
+      ...base,
+      headBefore: BEFORE,
+      headAfter: AFTER,
+      range: { ok: true, isAncestor: true, commits: mineRange(50), truncated: true }
+    });
+
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.UNKNOWN);
+    expect(v.verified).toBe(false);
+    expect(v.range_truncated).toBe(true);
+    expect(v.commit_count).toBeNull();
+    expect(v.reason).toContain("never read");
+    // Nothing from the prefix is presented as proven.
+    expect(v.attributed_commits).toEqual([]);
+  });
+
+  it("the prompt states the FULL count, so a capped list is never read as the whole range", () => {
+    const v = classifyCommitRange({
+      ...base, headBefore: BEFORE, headAfter: AFTER,
+      range: ok([...mineRange(499), foreign("e".repeat(40))])
+    });
+    const text = describeCommitProvenance({ ...v, head_now: AFTER, drifted: false }).join("\n");
+
+    expect(text).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(text).toContain("50 of 499 shown");
+    expect(text).toContain("the verdict covers ALL 499");
+  });
+
+  it("collectCommitProvenance asks git for a BOUNDED log and fails closed when it overflows", () => {
+    const FLD = "\u001f";
+    const REC = "\u001e";
+    const cfg = { repoPath: "C:/nowhere" };
+    const calls = [];
+    // git returns limit+1 records, which is the overflow proof.
+    const stream = Array.from({ length: MAX_EXAMINED_COMMITS + 1 }, (_, i) =>
+      `${String(i + 1).padStart(40, "0")}${FLD}2026-09-12T10:00:00+00:00${FLD}fake${FLD}f@x.invalid`
+      + `${FLD}${stamped(`feat: mine ${i + 1}`)}${REC}\n`).join("");
+
+    const runner = (_cmd, args) => {
+      calls.push(args.join(" "));
+      if (args.includes("--is-ancestor")) return { status: 0, stdout: "", stderr: "" };
+      return { status: 0, stdout: stream, stderr: "" };
+    };
+
+    const v = collectCommitProvenance(cfg, { taskId: TASK, attemptIds: [ATTEMPT], headBefore: BEFORE, headAfter: AFTER }, runner);
+
+    // The bound is asked for as limit+1 on purpose: the extra record is evidence.
+    expect(calls.some((c) => c.includes(`-n ${MAX_EXAMINED_COMMITS + 1}`))).toBe(true);
+    expect(v.verdict).toBe(COMMIT_PROVENANCE.UNKNOWN);
+    expect(v.verified).toBe(false);
+    expect(v.range_truncated).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * D-135 (2): THE COMPLETION GATE
+ * ========================================================================== */
+describe("D-135: evaluateCompletionGate", () => {
+  const successfulReport = {
+    complete: true, successful: true, status: "COMPLETE", canonicalStatus: "COMPLETE", reportCommentId: 4242
+  };
+  const blockedReport = {
+    complete: true, successful: false, status: "BLOCKED", canonicalStatus: "BLOCKED", reportCommentId: 4243
+  };
+  const verifiedProvenance = {
+    verdict: COMMIT_PROVENANCE.ATTRIBUTED, verified: true, head_before: BEFORE, head_after: AFTER,
+    attributed_commits: [{ sha: AFTER }], unattributed_commits: [], unattributed_count: 0
+  };
+
+  const unverified = (verdict, extra = {}) => ({
+    verdict,
+    verified: false,
+    head_before: BEFORE,
+    head_after: AFTER,
+    attributed_commits: [],
+    unattributed_commits: [{ sha: AFTER, subject: "unrelated maintenance commit" }],
+    unattributed_count: 1,
+    reason: `recorded reason for ${verdict}`,
+    ...extra
+  });
+
+  it("passes a successful report standing on a VERIFIED range", () => {
+    const gate = evaluateCompletionGate({ completion: successfulReport, provenance: verifiedProvenance });
+    expect(gate.held).toBe(false);
+    expect(gate.passed).toBe(true);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED);
+  });
+
+  it("passes an unmoved HEAD - there was never an authorship question", () => {
+    const gate = evaluateCompletionGate({
+      completion: successfulReport,
+      provenance: { verdict: COMMIT_PROVENANCE.UNCHANGED, verified: true, head_before: BEFORE, head_after: BEFORE }
+    });
+    expect(gate.held).toBe(false);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED);
+  });
+
+  // The enumerated list from the architect's order, each one asserted on its own.
+  for (const verdict of [
+    COMMIT_PROVENANCE.UNATTRIBUTED,
+    COMMIT_PROVENANCE.PARTIAL,
+    COMMIT_PROVENANCE.DIVERGED,
+    COMMIT_PROVENANCE.DRIFTED,
+    COMMIT_PROVENANCE.UNKNOWN
+  ]) {
+    it(`HOLDS a successful report when provenance is ${verdict}`, () => {
+      const gate = evaluateCompletionGate({ completion: successfulReport, provenance: unverified(verdict) });
+      expect(gate.held).toBe(true);
+      expect(gate.passed).toBe(false);
+      expect(gate.reason).toBe(COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED);
+      expect(gate.provenance_verdict).toBe(verdict);
+      // The evidence a human needs travels with the gate, not just the answer.
+      expect(gate.unattributed_commits).toEqual([AFTER]);
+      expect(gate.report_comment_id).toBe(4242);
+    });
+  }
+
+  it("does NOT gate an unsuccessful terminal report - it claims nothing that could be false", () => {
+    const gate = evaluateCompletionGate({
+      completion: blockedReport, provenance: unverified(COMMIT_PROVENANCE.UNATTRIBUTED)
+    });
+    expect(gate.held).toBe(false);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM);
+  });
+
+  it("does NOT gate a non-terminal report", () => {
+    const gate = evaluateCompletionGate({
+      completion: { complete: false, successful: false, status: "IN_PROGRESS", reportCommentId: 7 },
+      provenance: unverified(COMMIT_PROVENANCE.PARTIAL)
+    });
+    expect(gate.held).toBe(false);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM);
+  });
+
+  it("a legacy record with no provenance at all passes, and SAYS which case it is", () => {
+    const gate = evaluateCompletionGate({ completion: successfulReport, provenance: null });
+    expect(gate.held).toBe(false);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NO_PROVENANCE_RECORD);
+  });
+
+  it("a verified-looking VERDICT with `verified` downgraded still holds - both halves are required", () => {
+    // This is exactly the shape `provenanceForResume` produces when it cannot
+    // re-confirm a stored verdict: the verdict string survives, `verified` does
+    // not. Reading the string alone would re-open the hole.
+    const gate = evaluateCompletionGate({
+      completion: successfulReport,
+      provenance: { ...verifiedProvenance, verified: false }
+    });
+    expect(gate.held).toBe(true);
+  });
+
+  it("an unknown verdict from a future record shape holds rather than passing", () => {
+    const gate = evaluateCompletionGate({
+      completion: successfulReport,
+      provenance: { verdict: "something_this_build_has_never_heard_of", verified: true }
+    });
+    expect(gate.held).toBe(true);
+  });
+});
+
+describe("D-135: completionGateHeld reads only a POSITIVE durable hold", () => {
+  it("is true only for an explicit held:true", () => {
+    expect(completionGateHeld({ completion_gate: { held: true } })).toBe(true);
+  });
+
+  it("is false for a passed gate, a missing gate, a legacy row and a malformed value", () => {
+    expect(completionGateHeld({ completion_gate: { held: false } })).toBe(false);
+    expect(completionGateHeld({ status: "completed", successful: true })).toBe(false);
+    expect(completionGateHeld({})).toBe(false);
+    expect(completionGateHeld(null)).toBe(false);
+    expect(completionGateHeld({ completion_gate: "held" })).toBe(false);
+    expect(completionGateHeld({ completion_gate: { held: "true" } })).toBe(false);
+  });
+});
+
+describe("D-135: describeCompletionGate tells the operator what was NOT done", () => {
+  const gate = {
+    held: true,
+    reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED,
+    provenance_verdict: COMMIT_PROVENANCE.UNATTRIBUTED,
+    provenance_reason: "no commit in the range carries this task's attempt evidence (1 unexplained)",
+    head_before: BEFORE,
+    head_after: AFTER,
+    head_now: AFTER,
+    unattributed_count: 1,
+    unattributed_commits: [AFTER],
+    report_comment_id: 4242,
+    report_status: "COMPLETE"
+  };
+
+  it("names the claim, the verdict and the unexplained commit", () => {
+    const text = describeCompletionGate({ taskId: TASK, gate, worktreePath: "C:/wt/task" });
+    expect(text).toContain("claims SUCCESSFUL completion");
+    expect(text).toContain(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(text).toContain(AFTER.slice(0, 12));
+    expect(text).toContain("C:/wt/task");
+  });
+
+  it("states every refusal explicitly, and offers no destructive remedy", () => {
+    const text = describeCompletionGate({ taskId: TASK, gate });
+    expect(text).toContain("NOT completed");
+    expect(text).toContain("did NOT emit a completion-confirmed event");
+    expect(text).toContain("did NOT release or remove");
+    expect(text).toContain("did NOT let this record retire (supersede) any older task");
+    for (const forbidden of [/\bgit stash\b/, /\bgit reset\b/, /\bgit revert\b/, /\bgit clean\b/, /--force\b/]) {
+      expect(text).not.toMatch(forbidden);
+    }
   });
 });

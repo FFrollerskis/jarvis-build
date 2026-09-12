@@ -316,6 +316,71 @@ describe("D132: a trusted terminal report closes a task without re-dispatching i
     await runWorker("report");
     expect(dispatched()).toHaveLength(before);
   }, 120_000);
+
+  /**
+   * D-135: the same out-of-band COMPLETE report, against a task whose LAST
+   * ATTEMPT recorded that it could not account for the commits in its worktree.
+   *
+   * This is the non-dispatch half of the gate. The report arrives while no child
+   * is running, so no fresh provenance is computed - the gate is evaluated
+   * against the verdict the previous attempt durably recorded, which is the only
+   * evidence that ever existed while the range was still small. Without the gate
+   * here, a run that merely RE-READ the control issue would launder exactly the
+   * completion the dispatch path had just refused.
+   */
+  it("D-135: an out-of-band COMPLETE report is PARKED when the recorded provenance is unverified", async () => {
+    const FOREIGN = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    setComments([architectTask(OLD_TASK, "2026-09-11T04:17:00Z", 1)]);
+
+    await runWorker("silent");
+    expect(task(OLD_TASK).status).toBe(TASK_STATUS.FAILED_RETRYABLE);
+
+    // The honest verdict the previous attempt left behind.
+    const s = state();
+    s.tasks[OLD_TASK].commit_provenance = {
+      verdict: "unattributed",
+      verified: false,
+      head_before: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      head_after: FOREIGN,
+      attributed_commits: [],
+      unattributed_commits: [{ sha: FOREIGN, subject: "unrelated maintenance commit" }],
+      unattributed_count: 1,
+      reason: "no commit in the range carries this task's attempt evidence (1 unexplained)"
+    };
+    s.tasks[OLD_TASK].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+    saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+
+    appendComment({
+      id: 5628000042,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      author_association: "OWNER",
+      user: { login: TRUSTED },
+      body: `CLAUDE_REPORT\nTASK_ID=${OLD_TASK}\nSTATUS=COMPLETE\nBRANCH=${BRANCH}`
+    });
+
+    const before = dispatched().length;
+    const res = await runWorker("report");
+
+    // Not re-dispatched (a second child on top of unexplained commits is exactly
+    // what must not happen) and not completed either.
+    expect(dispatched()).toHaveLength(before);
+    const rec = task(OLD_TASK);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.status).not.toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).toBe(false);
+    expect(rec.completion_gate.held).toBe(true);
+    expect(rec.completion_gate.provenance_verdict).toBe("unattributed");
+    expect(rec.completion_gate.unattributed_commits).toEqual([FOREIGN]);
+    expect(res.code).not.toBe(0);
+
+    // The health journal never claims this completed.
+    const health = existsSync(join(workerRoot, "logs", "health.jsonl"))
+      ? readFileSync(join(workerRoot, "logs", "health.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
+      : [];
+    expect(health.filter((e) => e.event === "completion_confirmed" && e.task_id === OLD_TASK)).toEqual([]);
+    expect(health.some((e) => e.event === "blocked" && e.reason === "completion_gate_held")).toBe(true);
+  }, 120_000);
 });
 
 describe("D132: an already-merged task is reconciled, not re-merged", () => {

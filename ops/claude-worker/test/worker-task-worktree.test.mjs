@@ -725,3 +725,217 @@ describe("D-134: an unrelated writer moves the worktree HEAD during a running at
     expect(statusLines(repoPath)).toEqual([]);
   }, 300_000);
 });
+
+/**
+ * D-135: THE ADVERSARIAL CASE D-134 SET UP AND THEN DID NOT ACT ON.
+ *
+ * Everything above proves the worker ANSWERS the authorship question honestly.
+ * None of it proves the answer CHANGES anything, and it did not: the completion
+ * path read `completion.complete` and nothing else. So the full adversarial
+ * scenario - unrelated writer advances the claimed worktree's HEAD inside the
+ * attempt window, AND the child posts a genuine, trusted `STATUS=COMPLETE` -
+ * still ended in a clean success. The worker marked the task completed and
+ * successful, emitted COMPLETION_CONFIRMED, released the worktree holding the
+ * unexplained commit, and that record then retired strictly older, still-valid
+ * tasks through the queue's fresh-truth supersession rule.
+ *
+ * This is that exact scenario, through the real entrypoint, against a real git
+ * repository. The two halves - the foreign commit and the trusted success report
+ * - must BOTH be real for the test to mean anything: a fake verdict or a
+ * hand-written state row would prove only that the assertion matches itself.
+ */
+describe("D-135: a foreign commit mid-attempt + a trusted STATUS=COMPLETE is NOT a success", () => {
+  const TASK_OLDER = "D135-OLDER-TASK-20260911-A";
+
+  function healthEvents() {
+    const path = join(workerRoot, "logs", "health.jsonl");
+    if (!existsSync(path)) return [];
+    return readFileSync(path, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  }
+
+  function statusComments() {
+    return comments().filter((c) => String(c.body ?? "").includes("REASON="));
+  }
+
+  /**
+   * One attempt in which the child posts a REAL trusted completion report and an
+   * unrelated writer commits into the claimed worktree while it is still running.
+   */
+  async function successReportRacedByForeignCommit(extraEnv = {}) {
+    const run = runWorker("report-slow", {
+      // Untracked only: the child never commits, so the ONLY thing that moves
+      // HEAD in this window is the foreign writer. That keeps the assertion
+      // about authorship rather than about ordering.
+      JARVIS_FAKE_CLAUDE_MUTATE: "untracked",
+      JARVIS_FAKE_CLAUDE_LINGER_MS: "12000",
+      ...extraEnv
+    });
+
+    // `report-slow` writes `running` AFTER it has posted its report, so by the
+    // time the foreign commit lands, the trusted success claim already exists.
+    await waitForFile(join(claudeDir, "running"), 90_000);
+    const foreign = foreignCommit(wt(TASK_A));
+
+    const res = await run;
+    return { res, foreign };
+  }
+
+  it("the setup is real: a trusted COMPLETE report AND an unexplained commit", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    const { foreign } = await successReportRacedByForeignCommit();
+
+    // The report genuinely exists, is genuinely trusted, and genuinely says
+    // COMPLETE. Nothing about this half is faked or weakened.
+    const posted = comments().filter((c) => String(c.body ?? "").startsWith("CLAUDE_REPORT"));
+    expect(posted).toHaveLength(1);
+    expect(posted[0].user.login).toBe(TRUSTED);
+    expect(posted[0].body).toContain(`TASK_ID=${TASK_A}`);
+    expect(posted[0].body).toContain("STATUS=COMPLETE");
+
+    // And the commit genuinely is not the child's.
+    expect(head(wt(TASK_A))).toBe(foreign);
+    const rec = task(TASK_A);
+    expect(rec.head_before).toBe(baseline);
+    expect(rec.head_after).toBe(foreign);
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(rec.commit_provenance.verified).toBe(false);
+  }, 300_000);
+
+  it("the task is NOT successful and NOT completed - it is parked for reconciliation", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    const { res, foreign } = await successReportRacedByForeignCommit();
+
+    const rec = task(TASK_A);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.status).not.toBe(TASK_STATUS.COMPLETED);
+    // Positively false, not merely absent: the queue's supersession rule demands
+    // a positive `true`, so an absent field must never drift into meaning success.
+    expect(rec.successful).toBe(false);
+    expect(rec.completed_at).toBeUndefined();
+
+    // The gate is recorded durably, with the evidence that produced it.
+    expect(rec.completion_gate.held).toBe(true);
+    expect(rec.completion_gate.reason).toBe("commit_provenance_unverified");
+    expect(rec.completion_gate.provenance_verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(rec.completion_gate.unattributed_commits).toEqual([foreign]);
+    expect(rec.completion_gate.report_status).toBe("COMPLETE");
+
+    // The run itself does not claim to be healthy.
+    expect(res.code).not.toBe(0);
+  }, 300_000);
+
+  it("COMPLETION_CONFIRMED is never emitted, and the block is visible instead", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    await successReportRacedByForeignCommit();
+
+    const events = healthEvents();
+    // The decisive negative: nothing in the health journal says this completed.
+    expect(events.filter((e) => e.event === "completion_confirmed")).toEqual([]);
+
+    const blocked = events.filter((e) => e.event === "blocked" && e.reason === "completion_gate_held");
+    expect(blocked).toHaveLength(1);
+    expect(blocked[0].task_id).toBe(TASK_A);
+    expect(blocked[0].verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    // Not retryable: a second child must not be launched on top of commits
+    // nobody has accounted for.
+    expect(blocked[0].retryable).toBe(false);
+
+    // And a human-readable status notice was posted, naming what was refused.
+    const notice = statusComments().find((c) => c.body.includes("completion_gate_held"));
+    expect(notice).toBeTruthy();
+    expect(notice.body).toContain("claims SUCCESSFUL completion");
+    expect(notice.body).toContain("did NOT release or remove");
+  }, 300_000);
+
+  it("the worktree, the claim and the foreign commit all survive untouched", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    const { foreign } = await successReportRacedByForeignCommit();
+
+    // The worktree was NOT released - which is the concrete difference the gate
+    // makes, because a successful completion would have removed this directory.
+    expect(existsSync(wt(TASK_A))).toBe(true);
+    expect(claim(TASK_A).claim.state).toBe(CLAIM_STATE.READY);
+    expect(claim(TASK_A).claim.released_at ?? null).toBeNull();
+    expect(git(repoPath, ["worktree", "list", "--porcelain"])).toContain(wt(TASK_A).replace(/\\/g, "/"));
+
+    // The foreign commit and its file are exactly where the intruder left them,
+    // and the child's own uncommitted work is still there too.
+    expect(head(wt(TASK_A))).toBe(foreign);
+    expect(log(wt(TASK_A))).toHaveLength(2);
+    expect(existsSync(join(wt(TASK_A), "unrelated-writer.txt"))).toBe(true);
+    expect(existsSync(join(wt(TASK_A), `work-${TASK_A}.md`))).toBe(true);
+
+    // Nothing reached the user's checkout.
+    expect(statusLines(repoPath)).toEqual([]);
+    expect(head(repoPath)).toBe(baseline);
+  }, 300_000);
+
+  it("retains the worktree even when it is CLEAN - the gate is the only thing stopping release", async () => {
+    // The case above is not sufficient on its own: the child left an untracked
+    // file there, and `releaseTaskWorktree` refuses on a dirty worktree anyway,
+    // so the retention could not be attributed to the gate. Here the child makes
+    // NO uncommitted changes and the foreign writer commits its own file, so the
+    // worktree ends CLEAN at the unexplained tip - the exact state in which a
+    // successful completion WOULD have removed the directory.
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    const { foreign } = await successReportRacedByForeignCommit({ JARVIS_FAKE_CLAUDE_MUTATE: "" });
+
+    expect(statusLines(wt(TASK_A))).toEqual([]);   // genuinely clean
+    expect(head(wt(TASK_A))).toBe(foreign);        // and genuinely at the foreign tip
+
+    expect(task(TASK_A).completion_gate.held).toBe(true);
+    expect(existsSync(wt(TASK_A))).toBe(true);
+    expect(claim(TASK_A).claim.state).toBe(CLAIM_STATE.READY);
+    expect(claim(TASK_A).claim.released_at ?? null).toBeNull();
+    expect(existsSync(join(wt(TASK_A), "unrelated-writer.txt"))).toBe(true);
+  }, 300_000);
+
+  it("the parked record cannot retire older valid work, and is never re-dispatched", async () => {
+    // TASK_A is the NEWER order; the older one has never run. Before D-135 the
+    // fresh `STATUS=COMPLETE` report made TASK_A count as "completed
+    // successfully", so this strictly older task was retired as stale - work the
+    // architect had asked for, discarded on the strength of a commit range the
+    // worker itself could not account for.
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    await successReportRacedByForeignCommit();
+    expect(task(TASK_A).completion_gate.held).toBe(true);
+
+    appendComment(architectTask(TASK_OLDER, "2026-09-11T04:00:00Z", 1));
+    await runWorker("silent");
+
+    // The older task ran, on its own merits.
+    expect(dispatched()).toContain(TASK_OLDER);
+    const older = task(TASK_OLDER);
+    expect(older.status).not.toBe(TASK_STATUS.SUPERSEDED);
+    expect(older.superseded_by ?? null).toBeNull();
+
+    // The held task was not touched again: still BLOCKED, still never completed,
+    // still one dispatch only, and its worktree is still retained.
+    expect(dispatched().filter((d) => d === TASK_A)).toHaveLength(1);
+    expect(task(TASK_A).status).toBe(TASK_STATUS.BLOCKED);
+    expect(task(TASK_A).successful).toBe(false);
+    expect(claim(TASK_A).claim.state).toBe(CLAIM_STATE.READY);
+    expect(healthEvents().filter((e) => e.event === "completion_confirmed" && e.task_id === TASK_A)).toEqual([]);
+  }, 300_000);
+
+  it("CONTROL: the same trusted report with NO foreign commit completes normally", async () => {
+    // Without this, every assertion above could be satisfied by a worker that
+    // simply never completes anything. Same fixture, same report, same mode -
+    // the ONLY difference is that nobody races a commit into the worktree.
+    setComments([architectTask(TASK_A, "2026-09-11T05:00:00Z", 2)]);
+    const res = await runWorker("report-slow", {
+      JARVIS_FAKE_CLAUDE_MUTATE: "",
+      JARVIS_FAKE_CLAUDE_LINGER_MS: "1000"
+    });
+
+    const rec = task(TASK_A);
+    expect(res.code).toBe(0);
+    expect(rec.status).toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).toBe(true);
+    // HEAD never moved, so there was no authorship question to answer.
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.UNCHANGED);
+    expect(rec.completion_gate.held).toBe(false);
+    expect(rec.completion_gate.reason).toBe("commit_provenance_verified");
+    expect(healthEvents().some((e) => e.event === "completion_confirmed" && e.task_id === TASK_A)).toBe(true);
+  }, 300_000);
+});

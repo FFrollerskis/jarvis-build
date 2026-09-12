@@ -441,6 +441,150 @@ describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable"
   });
 });
 
+/* ==========================================================================
+ * D-135: A HELD COMPLETION GATE RETIRES NOTHING
+ * ==========================================================================
+ *
+ * This is the third of the three fail-open consequences the PR #80 review
+ * found, and it is the one that survives a restart. The queue decides
+ * supersession from FRESH control-issue truth on purpose - that is what makes a
+ * terminal report beat stale bookkeeping - but the fresh truth here IS the
+ * `STATUS=COMPLETE` report whose success claim the worker refused. Without a
+ * durable local override, a task the worker had just parked as unverified would
+ * go on retiring strictly older, still-valid tasks on the very next run,
+ * through a code path that never looks at a provenance verdict at all.
+ *
+ * The state below is exactly what `parkHeldCompletion` writes.
+ */
+describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
+  const held = {
+    status: TASK_STATUS.BLOCKED,
+    successful: false,
+    attempts: 1,
+    first_dispatch_at: "2026-09-11T05:23:05Z",
+    completion_gate: {
+      held: true,
+      reason: "commit_provenance_unverified",
+      provenance_verdict: "unattributed",
+      report_comment_id: 900,
+      report_status: "COMPLETE"
+    }
+  };
+
+  it("does not retire an older task, even though the FRESH report says COMPLETE", () => {
+    const tasks = [
+      taskEntry("OLD-TASK", "2026-09-11T04:18:00Z", 100),
+      taskEntry("NEW-TASK", "2026-09-11T05:23:00Z", 200)
+    ];
+    const state = stateWith({
+      "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": held
+    });
+    // The trusted, terminal, SUCCESSFUL report really is on the control issue.
+    const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)];
+
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+
+    expect(sel.supersededTaskIds).toEqual([]);
+    expect(sel.newestSuccessfulTaskId).toBeNull();
+    // The older task is untouched and still the thing to run.
+    const old = sel.decisions.find((d) => d.taskId === "OLD-TASK");
+    expect(old.eligible).toBe(true);
+    expect(old.reason).toBeNull();
+    expect(sel.candidate.taskId).toBe("OLD-TASK");
+  });
+
+  it("the SAME queue WITHOUT the gate does retire the older task - the gate is what changes it", () => {
+    // The control: identical inputs, `completion_gate` removed. If this did not
+    // supersede, the test above would prove nothing about the gate.
+    const tasks = [
+      taskEntry("OLD-TASK", "2026-09-11T04:18:00Z", 100),
+      taskEntry("NEW-TASK", "2026-09-11T05:23:00Z", 200)
+    ];
+    const withoutGate = { ...held };
+    delete withoutGate.completion_gate;
+    const state = stateWith({
+      "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": { ...withoutGate, status: TASK_STATUS.COMPLETED, successful: true }
+    });
+    const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)];
+
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+
+    expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
+    expect(sel.newestSuccessfulTaskId).toBe("NEW-TASK");
+  });
+
+  it("a held task's EXPLICIT `SUPERSEDES=` declaration is preserved unexecuted, not acted on", () => {
+    const declaringEntry = {
+      taskId: "NEW-TASK",
+      comment: {
+        id: 200,
+        created_at: "2026-09-11T05:23:00Z",
+        user: { login: TRUSTED },
+        body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=OLD-TASK\nDo the thing."
+      },
+      updates: []
+    };
+    const state = stateWith({
+      "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": held
+    });
+
+    const sel = selectNextTask({
+      tasks: [taskEntry("OLD-TASK", "2026-09-11T04:18:00Z", 100), declaringEntry],
+      state,
+      comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
+      trustedAuthor: TRUSTED,
+      nowMs: NOW
+    });
+
+    // Deliberately stricter than the D-133 explicit-declaration rule: a task that
+    // claimed success over commits nobody can account for is not a safe basis for
+    // retiring other work until a human has reconciled it.
+    expect(sel.supersededTaskIds).toEqual([]);
+    expect(sel.candidate.taskId).toBe("OLD-TASK");
+  });
+
+  it("the held task itself stays terminal and is never dispatched again", () => {
+    const state = stateWith({ "NEW-TASK": held });
+    const sel = selectNextTask({
+      tasks: [taskEntry("NEW-TASK", "2026-09-11T05:23:00Z", 200)],
+      state,
+      comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
+      trustedAuthor: TRUSTED,
+      nowMs: NOW
+    });
+    expect(sel.candidate).toBeNull();
+    expect(sel.decisions.find((d) => d.taskId === "NEW-TASK").reason).toBe(INELIGIBLE.TERMINAL_STATE);
+  });
+
+  it("a task whose gate PASSED still supersedes normally - only a hold blocks it", () => {
+    const tasks = [
+      taskEntry("OLD-TASK", "2026-09-11T04:18:00Z", 100),
+      taskEntry("NEW-TASK", "2026-09-11T05:23:00Z", 200)
+    ];
+    const state = stateWith({
+      "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
+      "NEW-TASK": {
+        status: TASK_STATUS.COMPLETED,
+        successful: true,
+        attempts: 1,
+        first_dispatch_at: "2026-09-11T05:23:05Z",
+        completion_gate: { held: false, passed: true, reason: "commit_provenance_verified" }
+      }
+    });
+    const sel = selectNextTask({
+      tasks, state,
+      comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
+      trustedAuthor: TRUSTED, nowMs: NOW
+    });
+    expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
+    expect(sel.decisions.find((d) => d.taskId === "OLD-TASK").supersessionBasis)
+      .toBe(SUPERSESSION_BASIS.SUCCESSFUL_COMPLETION);
+  });
+});
+
 describe("D132: terminal state cannot be resurrected", () => {
   for (const status of [TASK_STATUS.COMPLETED, TASK_STATUS.BLOCKED, TASK_STATUS.SUPERSEDED]) {
     it(`a ${status} task is never dispatched, even with an elapsed backoff clock`, () => {
