@@ -137,6 +137,29 @@ statusmeldingen og i `--dry-run`.
 - `fixtures/fake-git.mjs` modellerer nå `git worktree list/add/remove` (inkl. at en ikke-tvunget
   `remove` FEILER på en skitten worktree); `fixtures/fake-claude.mjs` gjør EKTE tracked/untracked
   mutasjoner og commits i sin `cwd`; ny `fixtures/real-git-repo.mjs`.
+- `npx eslint .`: 0 feil/advarsler. `pnpm -w typecheck`: grønt.
+- Hemmelighetsskann av full diff: 0 treff (og CI-jobben `gitleaks` grønn).
+- **CI mot eksakt ny HEAD `e58a870`:** BEGGE kjøringene grønne på alle tre jobber -
+  push-run `34578080627` og PR-run `34578084000` (`build-test` 3960 passed / 6 skipped / 0 failed,
+  `gitleaks`, `windows-git-auth`). PR-runens første forsøk feilet på
+  `modules/conversation-graph/test/d125-owner-telegram-link.test.ts` med `ECONNREFUSED` fra embedded
+  Postgres under `runMigrations` - et oppstartsproblem i testinfrastrukturen, ikke en assertion; den
+  ble kjørt på nytt og er grønn, og push-runen på NØYAKTIG samme SHA var grønn hele tiden.
+
+**Lokale Windows-feil som rapporteres som de er, ikke bortforklares:** den fulle
+arbeidsområde-suiten lokalt gir **31 feilede tester i 5 produkt-testfiler**, reproduserbart i to
+uavhengige kjøringer: `modules/tool-gateway/test/docker-transport.test.ts` (12),
+`apps/api/test/worker-coding-wiring.test.ts` (8), `modules/tasks/test/sandbox-docker-extra-env.test.ts`
+(5), `modules/tasks/test/claude-code-agent.test.ts` (4),
+`modules/business/test/ua3-live-pool-separation.test.ts` (2). Feilsignaturene er verts-/
+plattformspesifikke: `spawnSync ... docker.cjs EFTYPE` (Windows kan ikke eksekvere en `.cjs` som
+binærfil), `ENOENT` på fake-docker sin `record.json`, og kildetekst-assertions som feiler på CRLF vs.
+LF (`expected 'await selfHeal();\r\n ...' to contain '...\n...'`). HELE grenen (D-132 + D-133)
+berører utelukkende `ops/claude-worker/**` og `docs/**` - ingen av de fem filene, og ingen kode de
+importerer, er i diffen (`git diff c67a7ba..HEAD --name-only`), og de samme filene er grønne på
+Linux-CI mot eksakt samme HEAD. Dette er altså et kjent Windows-vertsproblem i produkttester, ikke
+en regresjon fra denne PR-en - og det er heller ikke fikset her, fordi det er utenfor oppgavens
+scope.
 
 Stashen `worker-dirty-backup-2026-09-11` er URØRT. Full detalj: **D-133** i
 DECISIONS_AND_ASSUMPTIONS.md.
@@ -147,10 +170,9 @@ Ingen harde blockere. `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=fals
 denne PR-en skal IKKE self-approves eller merges - uavhengig arkitektkontroll mot eksakt PR-HEAD
 kreves først.
 
-Merk som miljøfakta, ikke som en test som ble hoppet over: den fulle arbeidsområde-suiten
-(`pnpm test`) starter embedded Postgres for produktmodulene. Denne oppgaven endrer null produktkode,
-og CI kjører hele suiten på eksakt PR-HEAD uansett; det som er kjørt lokalt her er hele
-worker-suiten (som er det denne diffen faktisk berører) pluss `eslint .` over hele repoet.
+Den fulle arbeidsområde-suiten ER nå kjørt lokalt (to ganger) i tillegg til på CI. Resultatet, og
+hvorfor de 31 lokale Windows-feilene ikke er en regresjon fra denne PR-en, står under
+«Kvalitetsporter for D-133» over - ikke skjult, ikke hoppet over.
 
 ## Vertsoppgave som følger av D-133 (ikke en blocker for review)
 
