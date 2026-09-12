@@ -1,7 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-11 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-133**, PR #80-review-herding.
+**Oppdatert:** 2026-09-12 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-134**, PR #80-review-herding
+runde 3 (proveniens-closeout).
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -164,15 +165,77 @@ scope.
 Stashen `worker-dirty-backup-2026-09-11` er URØRT. Full detalj: **D-133** i
 DECISIONS_AND_ASSUMPTIONS.md.
 
+## Herdingsrunde 3 på SAMME PR #80: D-134 (PR #80-review, REF_REVIEW_ID=5187359752)
+
+TASK_ID `D134-PR80-PROVENANCE-CLOSEOUT-20260912-A` (kommentar 5647527873 på issue #68,
+SUPERSEDES `D133-PR80-PROVENANCE-CLOSEOUT-20260911-A`). Kontrollert HEAD `86784d8`, base uendret
+`c67a7ba`. ÉN gjenstående recovery-sikkerhetsblocker, lukket på SAMME branch og SAMME PR.
+
+**Blockeren er en kategorifeil, ikke en manglende sjekk.** D-132 ga et gjenopptatt barn setningen
+«HEAD ADVANCED during that attempt, so commits in that range are THIS TASK'S OWN WORK». Den
+slutningen er ugyldig: `head_before != head_after` er to avlesninger av en ref på to tidspunkter -
+den sier AT refen flyttet seg, aldri HVEM som flyttet den. Enhver prosess med tilgang til katalogen
+kan flytte den inne i forsøksvinduet. Å ta feil i DENNE retningen er verre enn motsatt vei:
+konsekvensen er at en fremmed commit adopteres som task-output og shippes i en PR. D-133 forsterket
+feilen ved å beskrive den kommiterte halvdelen som «lukket» - den påstanden er nå eksplisitt RETTET
+i D-133-raden i beslutningsloggen, ikke stille overskrevet.
+
+**Rettet (nytt `lib/provenance.mjs`):**
+
+1. To ULIKE typer attribusjon skilles. KATALOG-/DIRTY-STATE-attribusjon (D-133) er sann VED
+   KONSTRUKSJON. COMMIT-forfatterskap følger IKKE av den, fordi claimen dekker katalogen og ikke
+   hver skriving inn i den, og fordi en commit er et durabelt artefakt som havner i en PR.
+2. POSITIVT BEVIS: forsøkets `attempt_id` (`randomUUID()`, durabel i claim og state FØR barnet
+   finnes) gis KUN til det barnet, og barnet stempler hver commit med `Jarvis-Task-Id` +
+   `Jarvis-Attempt-Id`. BEGGE kreves, begge med eksakt strenglikhet.
+3. VERDIKTER: kun `unchanged` og `task_attributed` er VERIFISERT. `partially_attributed` (én
+   uforklart commit forgifter hele spennet), `unattributed`, `diverged` (ref spolt tilbake),
+   `drifted_after_attempt` og `unknown` er UVERIFISERT.
+4. UVERIFISERT ER FAIL-CLOSED I BEGGE RETNINGER: arbeidet BEVARES, presenteres som UKJENT
+   forfatterskap, og prompten autoriserer INGEN destruktiv rekonsiliering - den inneholder ingen
+   `git stash`/`reset`/`revert`/`clean`/`--force`-instruks i det hele tatt.
+5. Et lagret verdikt re-sjekkes mot worktreens FAKTISKE HEAD ved gjenopptagelse; drift eller
+   uleselig HEAD DEGRADERER det. Ingen bane kan oppgradere et uverifisert spenn.
+6. `observed_heads` merkes eksplisitt som observasjonslogg i kode, prompt og README. State fra en
+   PRE-D134 worker leses som UVERIFISERT, aldri som forfatterskap.
+
+**Ærlig grense, oppgitt og ikke skjult:** dette er bevis mot UVEDKOMMENDE skrivere. Det er IKKE
+beskyttelse mot en bevisst forfalsker som allerede har lesetilgang til verten (`attempt_id` ligger
+durabelt på disk og havner i en publisert commit-melding).
+
+**Beholdt uendret:** isolerte per-task-worktrees, durable claims, task-eid dirty-state-recovery,
+suksess-/eksplisitt-supersesjon, kanonisk terminal-status, fresh-before-retry, already-merged-
+rekonsiliering, den strenge primære dirty-guarden og hele `lib/trust.mjs`.
+
+**Kvalitetsporter for D-134 - faktisk kjørt lokalt 2026-09-12:**
+
+- `npx vitest run ops/claude-worker/test`: **21/21 filer, 588/588 tester grønt** (fra 20/538; ingen
+  eksisterende test svekket eller fjernet).
+- Ny `test/provenance.test.mjs` (42 enhetstester) og ny ADVERSARIELL dekning i
+  `test/worker-task-worktree.test.mjs` (16/16 grønt, 84s): en UVEDKOMMENDE SKRIVER committer inn i
+  den isolerte task-worktreen MENS et forsøk kjører, synkronisert på fixturens `running`-markør.
+  Bevist at neste resume ikke kaller commiten task-eid, ikke aksepterer den som task-output og ikke
+  autoriserer destruktiv rekonsiliering. Dekker også blandet spenn, glemte trailere fra workerens
+  EGET barn, ref spolt tilbake, og den positive motprøven.
+- Den tidligere testen «a resumed attempt is told which commits are its OWN prior work»
+  ASSERTERTE DEFEKTEN og er skrevet om; injeksjonen er beholdt ordrett som en tro modell av
+  pre-D134-state, men den påkrevde konklusjonen er snudd.
+- `npx eslint .`: 0 feil/advarsler. `pnpm -w typecheck`: grønt. `node --check` på alle endrede
+  `.mjs`: OK.
+- Hemmelighetsskann av full diff + begge nye filer (153 466 bytes, 10 mønstergrupper): **0 treff**.
+
+Full detalj: **D-134** i DECISIONS_AND_ASSUMPTIONS.md.
+
 ## Blokkeringer
 
 Ingen harde blockere. `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` fra oppgaven:
 denne PR-en skal IKKE self-approves eller merges - uavhengig arkitektkontroll mot eksakt PR-HEAD
 kreves først.
 
-Den fulle arbeidsområde-suiten ER nå kjørt lokalt (to ganger) i tillegg til på CI. Resultatet, og
+Den fulle arbeidsområde-suiten ER kjørt lokalt (to ganger) i tillegg til på CI. Resultatet, og
 hvorfor de 31 lokale Windows-feilene ikke er en regresjon fra denne PR-en, står under
-«Kvalitetsporter for D-133» over - ikke skjult, ikke hoppet over.
+«Kvalitetsporter for D-133» over - ikke skjult, ikke hoppet over. D-134 endrer ingen av de fem
+berørte produkt-testfilene og berører utelukkende `ops/claude-worker/**` + `docs/**`.
 
 ## Vertsoppgave som følger av D-133 (ikke en blocker for review)
 

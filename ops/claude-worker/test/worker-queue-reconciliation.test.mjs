@@ -354,25 +354,105 @@ describe("D132: an already-merged task is reconciled, not re-merged", () => {
     expect(delivered).toContain("post-merge state");
   }, 120_000);
 
-  it("a resumed attempt is told which commits are its OWN prior work", async () => {
+  /**
+   * D-134. This test used to assert the DEFECT.
+   *
+   * It injected `head_after = <some sha>` into state and then required the
+   * prompt to say "THIS TASK'S OWN WORK" - i.e. it pinned the invalid inference
+   * that a moved HEAD proves authorship. The injection is kept EXACTLY as it
+   * was, because it is a faithful model of what a PRE-D134 worker left on disk:
+   * a pair of ref readings and no evidence of any kind. It is therefore also the
+   * migration case - state written by the old worker, read by the new one. What
+   * changed is the required conclusion.
+   */
+  it("a bare head_after with NO commit evidence is presented as UNVERIFIED, not as the task's work", async () => {
     setComments([architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2)]);
 
     await runWorker("silent");
 
-    // The first attempt advanced HEAD: that is task-owned provenance, and the
-    // resumed child must be told so it does not stash or reset over it.
     const s = state();
     s.tasks[NEW_TASK].head_after = MERGE_SHA;
+    // Exactly the shape a pre-D134 worker persisted: no verdict was ever
+    // computed, because that worker did not ask the question at all.
+    delete s.tasks[NEW_TASK].commit_provenance;
     s.tasks[NEW_TASK].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
     saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
 
     await runWorker("report");
 
     const delivered = prompt();
-    expect(delivered).toContain("TASK-OWNED PROVENANCE");
+    // The observation is still reported - suppressing it would strand the child.
     expect(delivered).toContain(MERGE_SHA);
-    expect(delivered).toContain("THIS TASK'S OWN WORK");
+    // But it is never dressed up as authorship.
+    expect(delivered).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(delivered).not.toContain("THIS TASK'S OWN WORK");
+    expect(delivered).toContain("A moved HEAD is an OBSERVATION, not proof of authorship");
+    // Fail-closed in BOTH directions: not adopted, and not destroyed either.
+    expect(delivered).toMatch(/Never stash, reset, revert, clean, checkout over, force-push, rebase or/);
+    expect(delivered).toContain("Do NOT adopt them as this task's output");
+  }, 120_000);
+
+  it("a recorded ATTRIBUTED verdict IS presented as the task's own work, with the same anti-destruction rule", async () => {
+    setComments([architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2)]);
+
+    await runWorker("silent");
+
+    // What a well-behaved previous attempt leaves behind: a durable verdict that
+    // was computed from positive per-commit evidence, not from the head pair.
+    const s = state();
+    const wtHead = s.tasks[NEW_TASK].head_after;
+    s.tasks[NEW_TASK].commit_provenance = {
+      verdict: "task_attributed",
+      verified: true,
+      head_before: "f12ff3b2f344d17f8e020088083b3bf88129585d",
+      head_after: wtHead,
+      attributed_commits: [{ sha: MERGE_SHA, subject: "feat: the task's own commit" }],
+      unattributed_commits: [],
+      reason: "every commit in the range carries this task's own attempt evidence (1)",
+      error: null,
+      checked_at: new Date().toISOString()
+    };
+    s.tasks[NEW_TASK].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+    saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+
+    await runWorker("report");
+
+    const delivered = prompt();
+    expect(delivered).toContain("COMMIT PROVENANCE: VERIFIED AS THIS TASK'S OWN WORK");
+    expect(delivered).toContain(MERGE_SHA);
     expect(delivered).toMatch(/Never stash, reset, force-push, revert or\s+re-apply/);
+    expect(delivered).not.toContain("COMMIT PROVENANCE: UNVERIFIED");
+  }, 120_000);
+
+  it("a verified verdict is DOWNGRADED when the worktree head has drifted since it was recorded", async () => {
+    setComments([architectTask(NEW_TASK, "2026-09-11T05:22:00Z", 2)]);
+
+    await runWorker("silent");
+
+    // Same verified record as above, except that it names a head_after which is
+    // NOT where the worktree actually sits now. Something moved the ref while no
+    // attempt was running, so the stored verdict can no longer be relied on.
+    const s = state();
+    s.tasks[NEW_TASK].commit_provenance = {
+      verdict: "task_attributed",
+      verified: true,
+      head_before: "f12ff3b2f344d17f8e020088083b3bf88129585d",
+      head_after: MERGE_SHA,
+      attributed_commits: [{ sha: MERGE_SHA, subject: "feat: the task's own commit" }],
+      unattributed_commits: [],
+      reason: "every commit in the range carries this task's own attempt evidence (1)",
+      error: null,
+      checked_at: new Date().toISOString()
+    };
+    s.tasks[NEW_TASK].next_eligible_at = new Date(Date.now() - 60_000).toISOString();
+    saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+
+    await runWorker("report");
+
+    const delivered = prompt();
+    expect(delivered).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(delivered).not.toContain("VERIFIED AS THIS TASK'S OWN WORK");
+    expect(delivered).toMatch(/moved again AFTER the previous attempt had already ended/);
   }, 120_000);
 });
 

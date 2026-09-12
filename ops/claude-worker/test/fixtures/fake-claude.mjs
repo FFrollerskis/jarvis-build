@@ -14,6 +14,19 @@
  *   - exits 0 posting NOTHING  (mode=silent)  - D132: the "exit 0 without a
  *     matching report" case, which is how every D-131 attempt actually ended.
  *     `fail` cannot stand in for it: a non-zero exit takes a different path.
+ *   - posts NOTHING, stays alive for JARVIS_FAKE_CLAUDE_LINGER_MS, then exits 0
+ *     (mode=silent-slow) - D-134: the same "exit 0 without a report" case, but
+ *     with a real, observable window in which the attempt is genuinely RUNNING.
+ *     That window is what lets a test act as an UNRELATED WRITER and move the
+ *     worktree's HEAD mid-attempt, which is the whole point of the adversarial
+ *     provenance test. A `running` marker is written as soon as the child has
+ *     started working, so the test synchronises on fact rather than on a sleep.
+ *
+ * D-134 commit evidence: when this child commits, it stamps the task/attempt
+ * trailers onto the commit exactly as the real child is instructed to, reading
+ * them from the environment the worker set. `JARVIS_FAKE_CLAUDE_NO_TRAILER=1`
+ * makes it FORGET them - the "well-behaved child" and the "forgetful child" must
+ * both be expressible, because they are supposed to lead to different verdicts.
  *
  * It deliberately keeps running when its parent is killed, which is exactly the
  * situation the worker must survive without starting a second Claude. That means
@@ -59,7 +72,8 @@ writeFileSync(join(DIR, "argv.json"), JSON.stringify(process.argv), "utf8");
 const hangs = MODE === "hang" || MODE === "report-hang";
 // A bounded version of "hang": long enough for a periodic heartbeat to fire,
 // short enough that the dispatch still settles on its own.
-const lingers = MODE === "report-slow";
+const lingers = MODE === "report-slow" || MODE === "silent-slow";
+const reports = MODE === "report" || MODE === "report-hang" || MODE === "report-slow";
 const LINGER_MS = Number(process.env.JARVIS_FAKE_CLAUDE_LINGER_MS ?? 8000);
 let keepAlive = null;
 if (hangs) {
@@ -111,8 +125,17 @@ function mutateWorkspace(taskId) {
   if (process.env.JARVIS_FAKE_CLAUDE_COMMIT === "1") {
     const run = (args) => spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
     run(["add", "-A"]);
+    // D-134: the evidence trailers the worker requires, taken from the exact
+    // values the worker exported for THIS attempt. A fixture that invented its
+    // own values would prove nothing, and one that never stamped them could not
+    // express the well-behaved child at all.
+    const attemptId = process.env.JARVIS_TASK_ATTEMPT_ID ?? "";
+    const stampedTaskId = process.env.JARVIS_TASK_ID ?? taskId;
+    const trailers = process.env.JARVIS_FAKE_CLAUDE_NO_TRAILER === "1" || !attemptId
+      ? ""
+      : `\n\nJarvis-Task-Id: ${stampedTaskId}\nJarvis-Attempt-Id: ${attemptId}\n`;
     run(["-c", "user.email=fake@example.invalid", "-c", "user.name=fake-claude",
-      "commit", "-m", `work for ${taskId}`]);
+      "commit", "-m", `work for ${taskId}${trailers}`]);
     const head = run(["rev-parse", "HEAD"]);
     try {
       appendFileSync(join(DIR, "commits.log"), `${taskId} ${String(head.stdout ?? "").trim()}\n`, "utf8");
@@ -150,8 +173,15 @@ function act() {
     // success - requirement B - and must park the task as retryable.
     process.exit(0);
   }
-  if (MODE === "report" || MODE === "report-hang" || MODE === "report-slow") {
+  if (reports) {
     postReport();
+  }
+  // D-134: announce that the attempt is genuinely RUNNING, after this child has
+  // done its own work. A test acting as an unrelated writer synchronises on
+  // this, so the foreign mutation provably lands INSIDE the attempt window and
+  // after the child's own changes - not before, and not in a race.
+  if (lingers) {
+    try { writeFileSync(join(DIR, "running"), String(process.pid), "utf8"); } catch { /* best effort */ }
   }
   if (lingers) {
     // Stay alive on purpose. The report is already posted and the exit will be

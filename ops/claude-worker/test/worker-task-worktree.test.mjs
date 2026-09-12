@@ -27,7 +27,8 @@ import { spawn } from "node:child_process";
 
 import { loadState, saveStateAtomic, TASK_STATUS } from "../lib/state.mjs";
 import { readClaim, claimFilePath, taskWorktreePath, CLAIM_STATE } from "../lib/worktree.mjs";
-import { createRepo, statusLines, head, log, git } from "./fixtures/real-git-repo.mjs";
+import { COMMIT_PROVENANCE } from "../lib/provenance.mjs";
+import { createRepo, statusLines, head, log, logBodies, git, foreignCommit } from "./fixtures/real-git-repo.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKER = join(HERE, "..", "worker.mjs");
@@ -190,6 +191,16 @@ function elapseBackoff(taskId) {
 
 /** Make the child produce real tracked + untracked changes and report nothing. */
 const MUTATE_SILENT = { JARVIS_FAKE_CLAUDE_MUTATE: "tracked,untracked" };
+
+/** Wait for a file the fixture writes, so a test never synchronises on a sleep. */
+async function waitForFile(path, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(path)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
 
 /** ---------------- the regression ---------------- */
 
@@ -471,6 +482,36 @@ describe("D-133: a restart preserves ownership and does not duplicate work", () 
     expect(head(repoPath)).toBe(baseline);
   }, 240_000);
 
+  it("a resumed attempt that committed WITH evidence trailers is told the commits are proven its own", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T04:00:00Z", 1)]);
+
+    // A well-behaved child: it commits, and it stamps the task/attempt trailers
+    // the worker gave it. That - and only that - is what makes the commit
+    // provably the task's rather than merely concurrent with it.
+    await runWorker("silent", { JARVIS_FAKE_CLAUDE_MUTATE: "tracked,untracked", JARVIS_FAKE_CLAUDE_COMMIT: "1" });
+
+    const committed = head(wt(TASK_A));
+    expect(committed).not.toBe(baseline);
+    expect(logBodies(wt(TASK_A))[0].message).toContain(`Jarvis-Task-Id: ${TASK_A}`);
+
+    const rec = task(TASK_A);
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.ATTRIBUTED);
+    expect(rec.commit_provenance.verified).toBe(true);
+    expect(rec.commit_provenance.attributed_commits.map((c) => c.sha)).toEqual([committed]);
+    expect(rec.commit_provenance.unattributed_commits).toEqual([]);
+    // The attempt id in the evidence is the one the claim actually issued.
+    expect(claim(TASK_A).claim.attempts.map((a) => a.attempt_id))
+      .toContain(rec.commit_provenance.attributed_commits[0].attempt_id);
+
+    elapseBackoff(TASK_A);
+    await runWorker("silent");
+
+    const resumed = prompts()[prompts().length - 1].prompt;
+    expect(resumed).toContain("COMMIT PROVENANCE: VERIFIED AS THIS TASK'S OWN WORK");
+    expect(resumed).toContain(committed);
+    expect(resumed).not.toContain("COMMIT PROVENANCE: UNVERIFIED");
+  }, 240_000);
+
   it("a crashed parent that left the task IN_PROGRESS resumes in the same claimed context", async () => {
     setComments([architectTask(TASK_A, "2026-09-11T04:00:00Z", 1)]);
     await runWorker("silent", MUTATE_SILENT);
@@ -501,4 +542,186 @@ describe("D-133: a restart preserves ownership and does not duplicate work", () 
     }
     expect(statusLines(repoPath)).toEqual([]);
   }, 240_000);
+});
+
+/**
+ * D-134, THE ADVERSARIAL CASE, through the real entrypoint against real git.
+ *
+ * PR #80 review blocker: D-132/D-133 told a resumed child that any HEAD movement
+ * during an attempt window was "THIS TASK'S OWN WORK". That is not an inference
+ * the worker is entitled to make. It reads the ref twice; it cannot see who
+ * moved it in between, and any process with access to the worktree can.
+ *
+ * So here an UNRELATED WRITER - the test process, using a different git identity
+ * and touching a file the child never touches - commits into the isolated task
+ * worktree WHILE an attempt is genuinely running. Everything the worker records
+ * is then exactly what it records for a legitimate self-made commit:
+ * head_before != head_after, in the task's own claimed directory, inside the
+ * attempt window.
+ *
+ * The required outcome is not "detect the intruder" - that is not knowable. It
+ * is: do not CLAIM to know. Preserve the commit, present it as unverified, and
+ * authorise nothing destructive in either direction.
+ *
+ * Real git, real worktree, real process boundary: a fake git would simply agree
+ * with whatever the worker concluded, which is worthless for this property.
+ */
+describe("D-134: an unrelated writer moves the worktree HEAD during a running attempt", () => {
+  /** Drive an attempt with a real, observable running window and race a commit into it. */
+  async function attemptWithForeignCommit(extraEnv = {}) {
+    setComments([architectTask(TASK_A, "2026-09-11T04:00:00Z", 1)]);
+
+    const run = runWorker("silent-slow", {
+      // By default the child makes only UNCOMMITTED changes, so the only thing
+      // that moves HEAD in this window is the foreign writer. That keeps the
+      // assertion about authorship rather than about ordering.
+      JARVIS_FAKE_CLAUDE_MUTATE: "untracked",
+      JARVIS_FAKE_CLAUDE_LINGER_MS: "12000",
+      ...extraEnv
+    });
+
+    // Synchronise on the fixture's own "I am running" marker, not on a sleep.
+    await waitForFile(join(claudeDir, "running"), 90_000);
+    const foreign = foreignCommit(wt(TASK_A));
+
+    const res = await run;
+    return { res, foreign };
+  }
+
+  /** Resume once more and return the prompt the resumed child was handed. */
+  async function resumePrompt() {
+    elapseBackoff(TASK_A);
+    await runWorker("silent");
+    return prompts()[prompts().length - 1].prompt;
+  }
+
+  it("does not call the foreign commit task-owned and does not accept it as task output", async () => {
+    const { foreign } = await attemptWithForeignCommit();
+
+    // The setup is real: HEAD genuinely moved inside the attempt window, in the
+    // task's own claimed worktree, and the commit is genuinely not the child's.
+    expect(head(wt(TASK_A))).toBe(foreign);
+    const rec = task(TASK_A);
+    expect(rec.head_before).toBe(baseline);
+    expect(rec.head_after).toBe(foreign);
+
+    // The verdict answers the question instead of assuming it.
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(rec.commit_provenance.verified).toBe(false);
+    expect(rec.commit_provenance.attributed_commits).toEqual([]);
+    expect(rec.commit_provenance.unattributed_commits.map((c) => c.sha)).toEqual([foreign]);
+
+    // --- the resume prompt: the part that actually reaches a decision-maker ---
+    const resumed = await resumePrompt();
+
+    expect(resumed).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(resumed).toContain(foreign);
+    // It is never described as the task's own work, in any of the old phrasings.
+    expect(resumed).not.toContain("THIS TASK'S OWN WORK");
+    expect(resumed).not.toContain("HEAD ADVANCED during that attempt");
+    expect(resumed).not.toContain("TASK-OWNED PROVENANCE");
+    expect(resumed).not.toMatch(/Treat them as yours/);
+    // And it is not accepted as this attempt's output either.
+    expect(resumed).toContain("Do NOT adopt them as this task's output");
+    expect(resumed).toContain("A moved HEAD is an OBSERVATION, not proof of authorship");
+  }, 300_000);
+
+  it("authorises NO destructive reconciliation, and destroys nothing itself", async () => {
+    const { foreign } = await attemptWithForeignCommit();
+    const resumed = await resumePrompt();
+
+    // The explicit prohibition is present...
+    expect(resumed).toMatch(/Never stash, reset, revert, clean, checkout over, force-push, rebase or/);
+    // ...and no destructive instruction is offered anywhere in the prompt.
+    for (const forbidden of [/\bgit stash\b/, /\bgit reset\b/, /\bgit revert\b/, /\bgit clean\b/, /--force\b/]) {
+      expect(resumed).not.toMatch(forbidden);
+    }
+
+    // The worker did not act on it either: the foreign commit is still there,
+    // still reachable, and the file it introduced is untouched.
+    expect(head(wt(TASK_A))).toBe(foreign);
+    expect(existsSync(join(wt(TASK_A), "unrelated-writer.txt"))).toBe(true);
+    expect(log(wt(TASK_A))).toHaveLength(2);
+
+    // The claim is intact and the user's primary checkout never saw any of it.
+    expect(claim(TASK_A).claim.state).toBe(CLAIM_STATE.READY);
+    expect(statusLines(repoPath)).toEqual([]);
+    expect(head(repoPath)).toBe(baseline);
+  }, 300_000);
+
+  it("a MIXED range - the child's own commit plus a foreign one - is unverified as a whole", async () => {
+    const { foreign } = await attemptWithForeignCommit({
+      JARVIS_FAKE_CLAUDE_MUTATE: "tracked,untracked",
+      JARVIS_FAKE_CLAUDE_COMMIT: "1"
+    });
+
+    const rec = task(TASK_A);
+    // One of each: the child's stamped commit, and the intruder's.
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.PARTIAL);
+    expect(rec.commit_provenance.verified).toBe(false);
+    expect(rec.commit_provenance.attributed_commits).toHaveLength(1);
+    expect(rec.commit_provenance.unattributed_commits.map((c) => c.sha)).toEqual([foreign]);
+
+    const resumed = await resumePrompt();
+
+    // One unexplained commit poisons the whole range: partial trust is not trust.
+    expect(resumed).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(resumed).not.toContain("VERIFIED AS THIS TASK'S OWN WORK");
+    expect(resumed).toContain(foreign);
+  }, 300_000);
+
+  it("a commit made WITHOUT the evidence trailers is unverified, even from the worker's own child", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T04:00:00Z", 1)]);
+
+    // The forgetful child: it really is the worker's own, and it really did the
+    // work - but it left no evidence, so nothing can prove that afterwards.
+    // Fail-closed means this is treated as unknown, NOT waved through because
+    // "it was probably ours". The work is still preserved.
+    await runWorker("silent", {
+      JARVIS_FAKE_CLAUDE_MUTATE: "tracked,untracked",
+      JARVIS_FAKE_CLAUDE_COMMIT: "1",
+      JARVIS_FAKE_CLAUDE_NO_TRAILER: "1"
+    });
+
+    const committed = head(wt(TASK_A));
+    expect(committed).not.toBe(baseline);
+    const rec = task(TASK_A);
+    expect(rec.commit_provenance.verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(rec.commit_provenance.verified).toBe(false);
+
+    const resumed = await resumePrompt();
+    expect(resumed).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(resumed).not.toContain("THIS TASK'S OWN WORK");
+    // Preserved regardless: unverified is not unwanted.
+    expect(head(wt(TASK_A))).toBe(committed);
+    expect(log(wt(TASK_A))).toHaveLength(2);
+  }, 300_000);
+
+  it("an unrelated writer that REWINDS the ref is reported as drifted, and nothing is restored", async () => {
+    setComments([architectTask(TASK_A, "2026-09-11T04:00:00Z", 1)]);
+
+    // Attempt 1: the child commits its own, properly stamped work.
+    await runWorker("silent", { JARVIS_FAKE_CLAUDE_MUTATE: "tracked", JARVIS_FAKE_CLAUDE_COMMIT: "1" });
+    const mine = head(wt(TASK_A));
+    expect(task(TASK_A).commit_provenance.verdict).toBe(COMMIT_PROVENANCE.ATTRIBUTED);
+
+    // Then an unrelated writer replaces the tip with an unrelated history while
+    // no attempt is running at all. A stored "verified" verdict must not survive
+    // that: it was true about a tip the worktree no longer sits on.
+    git(wt(TASK_A), ["checkout", "--detach", baseline]);
+    const rewound = foreignCommit(wt(TASK_A), { file: "rewritten.txt", message: "replacement history" });
+    expect(rewound).not.toBe(mine);
+
+    const resumed = await resumePrompt();
+
+    expect(resumed).toContain("COMMIT PROVENANCE: UNVERIFIED");
+    expect(resumed).not.toContain("VERIFIED AS THIS TASK'S OWN WORK");
+    expect(resumed).toMatch(/moved again AFTER the previous attempt had already ended/);
+
+    // The worker restored nothing and rewrote nothing: the tip is exactly where
+    // the unrelated writer left it, and the earlier commit still exists.
+    expect(head(wt(TASK_A))).toBe(rewound);
+    expect(git(wt(TASK_A), ["cat-file", "-t", mine])).toBe("commit");
+    expect(statusLines(repoPath)).toEqual([]);
+  }, 300_000);
 });

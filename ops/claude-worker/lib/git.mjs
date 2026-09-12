@@ -186,6 +186,61 @@ export function gitWorktreeRemove(cfg, path, runner = spawnSync) {
   return { ok: true };
 }
 
+/** ---------------- commit-range queries (D-134) ---------------- */
+
+/**
+ * Is `ancestor` reachable from `descendant`?
+ *
+ * `git merge-base --is-ancestor` answers by EXIT CODE: 0 yes, 1 no, anything
+ * else is a real failure. `runGit` reports any non-zero exit as `ok: false`, so
+ * the "no" answer has to be separated from the "could not be answered" answer
+ * here - collapsing them would turn an ordinary negative into an unknown, and
+ * turn a broken repository into a confident negative. Both directions matter:
+ * `false` means the ref was REWOUND or REPLACED (a reset/force somewhere), which
+ * is a strictly more serious observation than a plain fast-forward.
+ */
+export function gitIsAncestor(cfg, ancestor, descendant, runner = spawnSync) {
+  const res = runGit(cfg, ["merge-base", "--is-ancestor", ancestor, descendant], runner);
+  if (res.ok) return { ok: true, isAncestor: true };
+  if (res.code === 1) return { ok: true, isAncestor: false };
+  return { ok: false, isAncestor: null, error: res.error ?? "git_merge_base_failed" };
+}
+
+/** Field/record separators: control characters a commit message cannot contain. */
+const FIELD_SEP = "";
+const RECORD_SEP = "";
+
+/**
+ * The commits in `from..to`, oldest first, with their FULL message bodies.
+ *
+ * The full body - not the subject - is the point: the only positive evidence
+ * that binds a commit to a task and attempt lives in its trailers (see
+ * `lib/provenance.mjs`), and `%s` would throw that away. `{ ok: false }` means
+ * UNKNOWN; it never means "the range is empty".
+ */
+export function gitLogRange(cfg, from, to, runner = spawnSync) {
+  const format = `--format=%H${FIELD_SEP}%cI${FIELD_SEP}%an${FIELD_SEP}%ae${FIELD_SEP}%B${RECORD_SEP}`;
+  const res = runGit(cfg, ["log", "--reverse", format, `${from}..${to}`], runner);
+  if (!res.ok) return { ok: false, commits: null, error: res.error };
+
+  const commits = [];
+  for (const block of res.stdout.split(RECORD_SEP)) {
+    const record = block.replace(/^[\r\n]+/, "");
+    if (record.trim() === "") continue;
+    const [sha, committedAt, authorName, authorEmail, ...rest] = record.split(FIELD_SEP);
+    commits.push({
+      sha: String(sha ?? "").trim(),
+      committed_at: String(committedAt ?? "").trim(),
+      author_name: String(authorName ?? "").trim(),
+      author_email: String(authorEmail ?? "").trim(),
+      // Rejoining on the separator keeps a message that somehow contains one
+      // intact rather than silently truncating the evidence we are about to read.
+      message: rest.join(FIELD_SEP)
+    });
+  }
+  return { ok: true, commits };
+}
+
 /**
  * Does the configured remote actually point at the repository this worker is
  * allowed to act on? A worker that has been pointed at a different remote must

@@ -207,11 +207,11 @@ Worker (`worker.mjs`):
     `superseded_basis` registrert og én statusmelding postet. Ingenting slettes
     stille, og verken restart, supervisor-restart eller tilbakespolt
     backoff-klokke kan gjenopplive en terminal eller superseded task.
-  - En gjenopptatt task får merge-sannheten (`merge_commit_sha`, `mergedAt`) og
-    sin EGEN proveniens (`head_before → head_after`, `observed_heads`) i prompten,
-    med eksplisitt instruks om at commitene i spennet er task-ens eget arbeid —
-    aldri stash/reset/force/revert/re-apply over dem, og nyere tilstand er
-    autoritativ.
+  - En gjenopptatt task får merge-sannheten (`merge_commit_sha`, `mergedAt`) i
+    prompten, slik at en allerede utført merge VERIFISERES i stedet for å kjøres
+    på nytt. `head_before → head_after` og `observed_heads` gis også, men KUN
+    som observasjoner — D-132 lot dem stå som påstand om forfatterskap, og den
+    slutningen er fjernet i D-134 (se C6).
 - **C4 (supersesjon krever POSITIVT bevis, PR #80-review).** En retirement er
   permanent, så terskelen er positivt bevis for at arkitektens nyere ordre
   FAKTISK gikk igjennom. En eldre task pensjoneres KUN på ett av to grunnlag,
@@ -232,7 +232,7 @@ Worker (`worker.mjs`):
     kommentar-ID-en registreres og oppgis i statusmeldingen. Erklæringen leses
     KUN fra betrodd kontroll-issue-innhold, aldri fra PR-body, CI-logg eller
     annet ubetrodd innhold.
-- **C5 (ISOLERT TASK-WORKTREE og task-eid proveniens, D-133).** Et avbrutt
+- **C5 (ISOLERT TASK-WORKTREE og task-eid UKOMMITERT tilstand, D-133).** Et avbrutt
   forsøk som etterlot LEGITIME UKOMMITERTE endringer var tidligere anonymt
   skitt i den delte checkouten: ingenting attribuerte det til en task, så neste
   kjørings dirty-guard blokkerte — korrekt — og arbeidet var strandet, med kun
@@ -259,6 +259,12 @@ Worker (`worker.mjs`):
     Skitt alle andre steder (primær checkout, uclaimet katalog, katalog med
     claim for en annen task/repo/kommentar) er UKJENT og forblir fail-closed:
     rapportert med eksakt sti, aldri adoptert, aldri endret.
+  - **Rekkevidden er UKOMMITERT TILSTAND I EN KATALOG, og stopper der.** Claimen
+    dekker katalogen, ikke hver enkelt skriving inn i den, og en COMMIT er et
+    durabelt artefakt som havner i en PR. Hvem som har FORFATTET en commit er
+    derfor et annet spørsmål med et annet bevis — se C6. Å la
+    katalog-attribusjon smitte over på commit-forfatterskap er nøyaktig
+    kategorifeilen D-134 lukker.
   - Et krasj mellom claim og worktree er rekonsilierbart (claimen har sin egen
     livssyklus `creating → ready → released`, altså staged intensjon → effekt →
     resultat), og en uleselig claim er en NEKTELSE, ikke en invitasjon til å
@@ -268,6 +274,49 @@ Worker (`worker.mjs`):
     selv nekter å ødelegge ukommitert arbeid hvis våre egne garder skulle ta
     feil. Claim-filen slettes ALDRI; den merkes `released` slik at beviset
     overlever katalogen.
+- **C6 (COMMIT-FORFATTERSKAP krever eget POSITIVT bevis, D-134 / PR #80-review).**
+  D-132 fortalte et gjenopptatt barn at «HEAD flyttet seg i forsøksvinduet,
+  altså er commitene i spennet TASK-ENS EGET ARBEID». Den slutningen er ugyldig:
+  `head_before != head_after` er to avlesninger av en ref på to tidspunkter. Den
+  sier AT en ref flyttet seg, aldri HVEM som flyttet den — enhver prosess med
+  tilgang til katalogen (brukeren, et script, en editor, en annen
+  worker-instans) kan gjøre det, og workeren kan ikke se forskjell. Å ta feil i
+  DEN retningen er verre enn å ta feil motsatt vei, for den ender med at en
+  fremmed commit adopteres som task-output og shippes i en PR.
+  - **To ULIKE typer attribusjon, bevisst ikke slått sammen.**
+    KATALOG-/DIRTY-STATE-attribusjon (C5) er sann VED KONSTRUKSJON: workeren
+    lagde en tom worktree fra en kjent baseline, skrev claimen FØR noe ble rørt,
+    og pekte nøyaktig ett barn dit. COMMIT-forfatterskap følger IKKE av det.
+  - **Beviset (`lib/provenance.mjs`).** Hvert forsøk har en fersk tilfeldig
+    `attempt_id`, generert av workeren, registrert durabelt i claim og state FØR
+    barnet finnes, og gitt KUN til det barnet. En commit som bærer
+    `Jarvis-Task-Id: <TASK_ID>` OG `Jarvis-Attempt-Id: <attempt_id>` som trailere
+    er bundet til nøyaktig den tasken og det forsøket. Begge halvdeler kreves,
+    begge sammenlignes med eksakt strenglikhet: task-ID-en alene er offentlig og
+    gjettbar, attempt-ID-en alene sier ikke hvilken task den gjaldt.
+  - **Utfall.** Kun `unchanged` og `task_attributed` er VERIFISERT. `partially_
+    attributed` (én uforklart commit forgifter hele spennet), `unattributed`,
+    `diverged` (refen ble spolt tilbake/erstattet), `drifted_after_attempt`
+    (refen flyttet seg ETTER at forsøket var ferdig) og `unknown` (git kunne
+    ikke svare) er UVERIFISERT.
+  - **Uverifisert er fail-closed I BEGGE RETNINGER.** Arbeidet BEVARES, blir
+    presentert for barnet som UKJENT forfatterskap, og barnet får beskjed om å
+    verifisere og rekonsilere FRAMOVER. Ingen destruktiv rekonsiliering
+    autoriseres — ikke stash, reset, revert, clean, checkout over, force-push,
+    rebase eller re-apply av et eldre snapshot. Uverifisert er ikke det samme
+    som uønsket, og workeren har ikke myndighet til å avgjøre hvilket det er.
+  - **Et lagret verdikt gjelder bare for HEAD-en det ble beregnet på.** Ved
+    gjenopptagelse sammenlignes det med worktreens FAKTISKE HEAD nå; har refen
+    driftet, eller kan HEAD ikke leses, degraderes verdiktet. Ingenting i denne
+    banen kan OPPGRADERE et uverifisert spenn til et verifisert.
+  - **Ærlig grense, oppgitt og ikke skjult:** dette er bevis mot UVEDKOMMENDE
+    skrivere. Det er IKKE beskyttelse mot en bevisst forfalsker som allerede har
+    lesetilgang til verten — `attempt_id` ligger durabelt på disk og havner i en
+    publisert commit-melding. Workeren kan ikke bevise forfatterskap mot en
+    angriper som allerede eier maskinen, og påstår ikke at den kan.
+  - `observed_heads` er en LOGG OVER OBSERVASJONER og merkes eksplisitt som det
+    i både kode og prompt: den sier at disse commitene fantes da workeren så
+    etter, ikke at tasken lagde noen av dem.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -449,8 +498,9 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-538 tester (kjørt 2026-09-11 på `claude/d132-worker-recovery-reconciliation`:
-20 filer / 538 passed; 18 filer / 470 etter D-132, 16 filer / 428 før). I tillegg
+588 tester (kjørt 2026-09-12 på `claude/d132-worker-recovery-reconciliation`:
+21 filer / 588 passed; 20 filer / 538 etter D-133, 18 filer / 470 etter D-132,
+16 filer / 428 før). I tillegg
 til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
 point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
 tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
@@ -504,7 +554,7 @@ og v2.8 (D-133, PR #80-review) legger til:
   `classifyTaskWorktree` — inkludert at en uleselig claim er en NEKTELSE, at et
   uanswerbart `worktree list` aldri leses som «ingenting registrert», og at
   eierskap ikke kan utledes bakover fra vilkårlige skitne filer;
-- **ISOLASJON MOT EKTE GIT** (`test/worker-task-worktree.test.mjs`, 10 tester):
+- **ISOLASJON MOT EKTE GIT** (`test/worker-task-worktree.test.mjs`):
   disse setter bevisst IKKE `JARVIS_WORKER_GIT`. Påstanden er fysisk — hvilken
   katalog havnet bytene i, er brukerens checkout fortsatt ren, nekter git faktisk
   å slette ukommitert arbeid — og en fake-git ville bare vært enig med workeren.
@@ -523,9 +573,40 @@ og v2.8 (D-133, PR #80-review) legger til:
   eksakt, retningsbestemt og auditbar; `SUPERSEDES` fra UBETRODD innhold
   ignoreres helt.
 
-Merk også: `fixtures/fake-git.mjs` modellerer nå `git worktree list/add/remove`,
+og v2.9 (D-134, PR #80-review runde 3) legger til:
+
+- **bevismodellen** (`test/provenance.test.mjs`, 42 tester): trailer-parsing
+  (case, whitespace, CRLF, og at PROSA som bare NEVNER ID-ene ikke er et
+  trailer), at BEGGE halvdelene kreves (task-ID alene er offentlig; attempt-ID
+  alene sier ikke hvilken task), at et TIDLIGERE forsøk av SAMME task godtas,
+  og hvert eneste verdikt inkludert `unknown` for uleselig git. Rendringen
+  testes separat fra klassifiseringen, fordi en modul som klassifiserer riktig
+  men fortsatt skriver «dette er ditt eget arbeid» ville vært like farlig som
+  defekten;
+- **ADVERSARIELL TEST MOT EKTE ENTRYPOINT OG EKTE GIT**
+  (`test/worker-task-worktree.test.mjs`): en UVEDKOMMENDE SKRIVER — test-
+  prosessen, med en annen git-identitet, på en fil barnet aldri rører — committer
+  inn i den isolerte task-worktreen MENS et forsøk faktisk kjører (synkronisert
+  på fixturens egen `running`-markør, ikke på en sleep). Alt workeren kan
+  observere er da identisk med en legitim egen commit. Bevist: neste resume
+  kaller den IKKE task-eid, aksepterer den IKKE som task-output, og autoriserer
+  INGEN destruktiv rekonsiliering — prompten inneholder heller ikke noen
+  `git stash`/`reset`/`revert`/`clean`/`--force`-instruks i det hele tatt. Dekker
+  også BLANDET spenn (egen + fremmed commit → hele spennet uverifisert),
+  glemte trailere fra workerens EGET barn (uverifisert, men bevart), refen
+  spolt tilbake mellom forsøk (`drifted_after_attempt`, ingenting gjenopprettet),
+  og den POSITIVE motprøven: et barn som stempler trailerne korrekt FÅR sine
+  commits presentert som beviselig sine egne;
+- **migrering**: state skrevet av en pre-D134 worker (kun `head_before`/
+  `head_after`, ingen verdikt) leses som UVERIFISERT, ikke som forfatterskap.
+
+Merk også: `fixtures/fake-git.mjs` modellerer `git worktree list/add/remove`,
 og en ikke-tvunget `remove` FEILER der på en skitten worktree akkurat som i ekte
 git — en alltid-lykkes-stub ville skjult nettopp egenskapen testen skal bevise.
+`fixtures/fake-claude.mjs` kan opptre både som et VELOPPDRAGENT barn (stempler
+trailerne fra den attempt-ID-en workeren faktisk eksporterte) og som et
+GLEMSOMT barn (`JARVIS_FAKE_CLAUDE_NO_TRAILER=1`), fordi de to skal gi ULIKE
+verdikter og begge må kunne uttrykkes.
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

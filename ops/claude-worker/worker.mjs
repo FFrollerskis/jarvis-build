@@ -78,6 +78,11 @@ import {
   claimFilePath,
   readClaim
 } from "./lib/worktree.mjs";
+import {
+  collectCommitProvenance,
+  provenanceForResume,
+  COMMIT_PROVENANCE
+} from "./lib/provenance.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import { verifyAuth, fetchIssueComments, postComment, listRemoteBranches, listPulls } from "./lib/github.mjs";
 
@@ -752,16 +757,13 @@ async function runTask(cfg, state, token, candidate, comments) {
       prNumberKnownButUnverified: rec.prNumberKnownButUnverified,
       alreadyMerged: rec.alreadyMerged,
       duplicateRiskUnknown: rec.duplicateRiskUnknown,
-      // D132: what THIS task's own previous attempt actually did to the
-      // repository. The child needs it to recognise its own commits instead of
-      // treating them as foreign work to be stashed or reset over.
-      provenance: {
-        branchBefore: prior.branch_before ?? null,
-        headBefore: prior.head_before ?? null,
-        branchAfter: prior.branch_after ?? null,
-        headAfter: prior.head_after ?? null,
-        observedHeads: prior.observed_heads ?? []
-      }
+      // D-134: the commit-authorship verdict is NOT built here. `head_before` /
+      // `head_after` / `observed_heads` are observations, and turning them into
+      // an authorship claim is the exact defect this round removes. The verdict
+      // recorded at the END of the previous attempt is re-checked against the
+      // worktree's CURRENT head once the isolated context is established, below.
+      provenance: null,
+      observedHeads: prior.observed_heads ?? []
     };
     upsertTask(state, taskId, mergeObservedAssociations(prior, {
       branch: rec.existingBranch,
@@ -896,6 +898,26 @@ async function runTask(cfg, state, token, candidate, comments) {
     branch: workspace.branch
   });
 
+  // --- D-134: RE-CHECK the recorded commit verdict against the CURRENT head ---
+  //
+  // The verdict stored at the end of the previous attempt was true when it was
+  // computed. Since then the worktree has sat on disk with nobody watching it,
+  // so a stored "verified" answer is only still usable if HEAD has not moved in
+  // the meantime. Drift can only ever DOWNGRADE the record; nothing here can
+  // promote an unproven range into a proven one.
+  if (resume) {
+    resume.provenance = provenanceForResume({
+      record: prior?.commit_provenance ?? null,
+      headNow: workspace.head,
+      headBefore: prior?.head_before ?? null,
+      headAfter: prior?.head_after ?? null
+    });
+    if (resume.provenance && resume.provenance.verdict !== COMMIT_PROVENANCE.UNCHANGED) {
+      log(cfg, `COMMIT_PROVENANCE for ${taskId}: verdict=${resume.provenance.verdict} `
+        + `verified=${resume.provenance.verified} (${resume.provenance.reason})`);
+    }
+  }
+
   // --- mark in progress and dispatch ---
   // TASK_ID has already been validated as a single safe path component.
   const scratchDir = join(cfg.scratchRoot, taskId);
@@ -937,7 +959,12 @@ async function runTask(cfg, state, token, candidate, comments) {
       path: workspace.path,
       baselineSha: workspace.claim?.baseline_sha ?? facts.head,
       baselineBranch: workspace.claim?.baseline_branch ?? facts.branch,
-      dirty: workspace.dirty
+      dirty: workspace.dirty,
+      // D-134: the identity the child must stamp onto every commit it makes.
+      // Without it there is no positive evidence, and the next resume has no
+      // way to tell this attempt's commits from anyone else's.
+      taskId,
+      attemptId
     }
   }, {
     heartbeatMs: cfg.heartbeatSeconds * 1000,
@@ -1232,6 +1259,48 @@ async function runTask(cfg, state, token, candidate, comments) {
   const headAfter = gitHead(wtCfg);
   const branchAfter = gitCurrentBranch(wtCfg);
   const dirtyAfter = gitStatusLines(wtCfg);
+
+  // --- D-134: ANSWER THE AUTHORSHIP QUESTION, DO NOT ASSUME IT ---------------
+  //
+  // `head_before` and `head_after` are two reads of a ref taken at two moments.
+  // They establish THAT it moved, never WHO moved it, and the worker is the only
+  // actor in a position to look for real evidence while the range is still
+  // small: the commits in it either carry this task's own attempt trailers or
+  // they do not. The verdict is computed once, here, and stored - so a later
+  // resume reads a recorded answer instead of re-deriving one from an inference.
+  //
+  // Every attempt id the CLAIM has ever recorded is accepted, not just this
+  // attempt's: a commit made by an earlier attempt of the SAME task is still
+  // this task's work. Nothing outside the claim can widen that set.
+  const claimedAttemptIds = (workspace.claim?.attempts ?? [])
+    .map((a) => a?.attempt_id)
+    .filter((a) => typeof a === "string" && a.length > 0);
+  const commitProvenance = collectCommitProvenance(wtCfg, {
+    taskId,
+    attemptIds: claimedAttemptIds.includes(attemptId) ? claimedAttemptIds : [...claimedAttemptIds, attemptId],
+    headBefore: workspace.head,
+    headAfter: headAfter.ok ? headAfter.value : null
+  });
+  if (commitProvenance.verdict !== COMMIT_PROVENANCE.UNCHANGED) {
+    log(cfg, `COMMIT_PROVENANCE for ${taskId} attempt ${attempts}: verdict=${commitProvenance.verdict} `
+      + `verified=${commitProvenance.verified} (${commitProvenance.reason})`);
+    for (const c of commitProvenance.unattributed_commits) {
+      log(cfg, `  UNATTRIBUTED_COMMIT ${c.sha} ${c.subject} [${c.reason}]`);
+    }
+  }
+  if (!commitProvenance.verified) {
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason: "commit_provenance_unverified",
+      verdict: commitProvenance.verdict,
+      // Not a blocker on its own - the work is preserved and the task keeps its
+      // normal outcome. It is emitted so an unexplained commit is VISIBLE in the
+      // health journal rather than only inside a prompt nobody reads later.
+      retryable: true,
+      unattributed: commitProvenance.unattributed_commits.map((c) => c.sha)
+    });
+  }
+
   const checkpoint = {
     last_outcome: result.outcome,
     last_exit_code: result.code ?? null,
@@ -1243,6 +1312,10 @@ async function runTask(cfg, state, token, candidate, comments) {
     head_after_error: headAfter.ok ? null : headAfter.error,
     branch_after: branchAfter.ok ? branchAfter.value : null,
     branch_after_error: branchAfter.ok ? null : branchAfter.error,
+    // D-134: the VERDICT, not the raw observation. `head_before`/`head_after`
+    // above remain exactly what they always were - observations - and are never
+    // read as authorship anywhere.
+    commit_provenance: commitProvenance,
     // The task-owned uncommitted state this attempt LEFT BEHIND. This is the
     // record that turns "exited without a report having changed files" from a
     // stranded, unattributable mess into a resumable task context.
@@ -1256,8 +1329,10 @@ async function runTask(cfg, state, token, candidate, comments) {
   }
 
   // The branch this attempt actually ended on is an EXACT association: record it
-  // so a later reconciliation never has to guess (blocker 6). D132 adds the head
-  // it ended at, which is this task's own provenance for a later resume.
+  // so a later reconciliation never has to guess (blocker 6). The head is
+  // recorded alongside it as a SIGHTING - "this commit existed here when the
+  // worker looked" - and D-134 removed the step that used to read that log as
+  // proof of what the task had authored.
   const observed = mergeObservedAssociations(getTask(state, taskId), {
     branch: checkpoint.branch_after,
     head: checkpoint.head_after
@@ -1367,10 +1442,16 @@ async function runTask(cfg, state, token, candidate, comments) {
         `Attempts: ${attempts}/${cfg.maxAttempts}. Last outcome: ${result.outcome}.`,
         `Completion check: ${completion.reason}.`,
         checkpoint.head_after === checkpoint.head_before
-          ? "Repository HEAD did not move during the last attempt."
-          : `Repository HEAD moved ${checkpoint.head_before} -> ${checkpoint.head_after} on branch ${checkpoint.branch_after}.`,
+          ? "The task worktree's HEAD did not move during the last attempt."
+          : `The task worktree's HEAD moved ${checkpoint.head_before} -> ${checkpoint.head_after} on branch `
+            + `${checkpoint.branch_after}. That is an OBSERVATION, not a statement about who committed: `
+            + `commit-authorship verdict = ${commitProvenance.verdict} (verified=${commitProvenance.verified}).`,
+        commitProvenance.verified
+          ? ""
+          : `Unexplained commits (preserved, never adopted, never reverted): `
+            + `${commitProvenance.unattributed_commits.map((c) => c.sha.slice(0, 12)).join(", ") || "none listed"}.`,
         "The task is NOT marked processed and NOT silently dropped; it is parked as BLOCKED."
-      ].join("\n"),
+      ].filter((l) => l !== "").join("\n"),
       nextAction: "Inspect logs/worker-*.log and the branch state, then issue a FRESH TASK_ID for a repair attempt. This worker will not replay a blocked task on its own."
     });
     log(cfg, `TASK_ID=${taskId} BLOCKED after ${attempts} attempts: ${failureReason}`);

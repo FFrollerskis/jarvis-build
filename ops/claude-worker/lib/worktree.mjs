@@ -6,8 +6,11 @@
  * ------------------------------------------------------------------------
  *
  * D132 taught the worker to remember `head_before` / `head_after` / every head a
- * task had been observed at, and to hand that to a resumed child. That closed
- * the COMMITTED half of the problem and left the other half wide open:
+ * task had been observed at, and to hand that to a resumed child. It did NOT
+ * close the committed half of the problem - it asserted an invalid inference
+ * about it, which D-134 removed and replaced with real commit evidence (see
+ * `lib/provenance.mjs`). What follows is about the OTHER half, which D-133 did
+ * close and which this module owns:
  *
  *   A dispatch that exits - or crashes - without a trusted report, having made
  *   LEGITIMATE UNCOMMITTED changes, leaves those changes as anonymous dirt in
@@ -47,6 +50,12 @@
  *   - dirty state inside a directory covered by a VALID claim for THIS task is
  *     task-owned by construction: the worktree was created empty at a known
  *     baseline and no other actor has ever been pointed at it;
+ *   - that is a statement about UNCOMMITTED STATE IN A DIRECTORY, and D-134 draws
+ *     the line here explicitly: it does NOT extend to commit authorship. The
+ *     claim covers the directory, not every write into it, and a commit is a
+ *     durable artefact that ends up in a PR. Whether a COMMIT belongs to this
+ *     task is answered only by `lib/provenance.mjs`, from positive per-attempt
+ *     evidence carried in the commit message itself;
  *   - dirty state anywhere else - the primary checkout, an unclaimed directory,
  *     a directory whose claim names a different task/repo/comment - is UNKNOWN
  *     and stays fail-closed. It is reported, never adopted, never modified;

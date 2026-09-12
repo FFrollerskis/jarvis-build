@@ -455,10 +455,13 @@ export function reconcilePriorAttempt({
 export function mergeObservedAssociations(task, { branch = null, prNumber = null, head = null } = {}) {
   const branches = [...(task?.observed_branches ?? [])];
   const prNumbers = [...(task?.observed_pr_numbers ?? [])];
-  // D132: every commit this task has been observed at, in order. This is the
-  // task-owned provenance a resumed child needs to recognise its OWN prior
-  // commits instead of mistaking them for foreign work and reaching for a
-  // destructive reconciliation.
+  // Every commit this task has been OBSERVED at, in order.
+  //
+  // D-134: this is a log of SIGHTINGS and nothing more. It records that a given
+  // commit was the worktree's HEAD at a moment when the worker looked; it does
+  // NOT record that this task authored any of them, and no code may read it that
+  // way. Commit authorship is answered only by `lib/provenance.mjs`, from
+  // positive per-attempt evidence carried in the commit itself.
   const heads = [...(task?.observed_heads ?? [])];
   if (usableBranch(branch) && !branches.includes(branch)) branches.push(branch);
   const n = Number(prNumber);

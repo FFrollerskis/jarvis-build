@@ -53,6 +53,12 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { sanitize } from "./health.mjs";
 import { captureIdentity, matchProcessIdentity, IDENTITY } from "./procid.mjs";
+import {
+  describeCommitProvenance,
+  describeCommitEvidenceRequirement,
+  ENV_TASK_ID,
+  ENV_ATTEMPT_ID
+} from "./provenance.mjs";
 
 export const OUTCOME = Object.freeze({
   COMPLETED_EXIT_0: "completed_exit_0",
@@ -147,6 +153,12 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
       ""
     );
 
+    // D-134: the trailers are what make the NEXT resume able to prove anything.
+    lines.push(...describeCommitEvidenceRequirement({
+      taskId: workspace.taskId,
+      attemptId: workspace.attemptId
+    }));
+
     if (workspace.dirty?.length > 0) {
       lines.push(
         "TASK-OWNED UNCOMMITTED CHANGES ALREADY PRESENT IN YOUR WORKTREE:",
@@ -156,6 +168,10 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
         "they are not foreign work and not the user's. Read them, verify them, and carry them forward or",
         "deliberately change them. NEVER stash, reset, checkout over, clean or delete them to get a clean",
         "tree: that would destroy real work, which is exactly the failure this isolation exists to prevent.",
+        "",
+        "D-134 scope note: this statement is about UNCOMMITTED state in a directory the worker claimed for",
+        "this task before anything was written to it. It is NOT a statement about who authored any COMMIT.",
+        "Commit authorship is answered separately, and only by evidence trailers - see COMMIT PROVENANCE.",
         ""
       );
     }
@@ -198,35 +214,36 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
       ""
     );
 
-    // --- D132: TASK-OWNED PROVENANCE -------------------------------------
+    // --- COMMIT PROVENANCE (D-132, corrected by D-134) --------------------
     //
-    // A previous attempt at THIS task may already have committed real work. The
-    // worker records where that attempt started and where it ended, so the
-    // resumed child can tell its OWN prior output apart from foreign changes.
+    // A previous attempt at THIS task may already have committed real work, and
+    // a resumed child that mistakes its own commits for foreign ones reaches for
+    // a destructive reconciliation - stash, reset, re-apply - which is how
+    // `worker-dirty-backup-2026-09-11` came to exist and why re-applying it
+    // would have regressed already-merged D-131b work.
     //
-    // Without this the child sees unexplained commits ahead of what it expects
-    // and reaches for a destructive reconciliation - stash, reset, re-apply -
-    // which is how `worker-dirty-backup-2026-09-11` came to exist and why
-    // re-applying it would have regressed already-merged D-131b work.
+    // D-132 solved that by asserting the opposite error: it told the child that
+    // ANY head movement during the attempt window was the task's own work. That
+    // inference is invalid (`lib/provenance.mjs`), and being wrong in THIS
+    // direction is worse, because it ends with a foreign commit adopted as task
+    // output and shipped in a PR.
+    //
+    // The verdict is computed from positive commit evidence and is rendered by
+    // the provenance module, which writes the verified and unverified cases out
+    // separately rather than flipping an adjective in a shared sentence.
     const prov = task.resume.provenance;
-    if (prov && (prov.headBefore || prov.headAfter)) {
-      const advanced = prov.headAfter && prov.headBefore && prov.headAfter !== prov.headBefore;
+    if (prov) {
+      lines.push(...describeCommitProvenance(prov));
+    }
+
+    // `observed_heads` is a LOG OF SIGHTINGS, and is labelled as one. It was
+    // previously offered next to an authorship claim, which invited the child to
+    // read it as a list of commits the task had made.
+    if (task.resume.observedHeads?.length > 1) {
       lines.push(
-        "TASK-OWNED PROVENANCE (recorded by the worker, not inferred):",
-        `The previous attempt started at HEAD ${prov.headBefore ?? "unknown"}`
-          + `${prov.branchBefore ? ` on branch ${prov.branchBefore}` : ""}`
-          + ` and ended at HEAD ${prov.headAfter ?? "unknown"}`
-          + `${prov.branchAfter ? ` on branch ${prov.branchAfter}` : ""}.`,
-        advanced
-          ? "HEAD ADVANCED during that attempt, so commits in that range are THIS TASK'S OWN WORK. "
-            + "Treat them as yours: verify and build on them. Never stash, reset, force-push, revert or "
-            + "re-apply an older snapshot over them, and never treat them as foreign or unknown changes."
-          : "HEAD did NOT move during that attempt.",
-        prov.observedHeads?.length > 1
-          ? `All heads this task has been observed at: ${prov.observedHeads.join(", ")}.`
-          : "",
-        "If the repository is now AHEAD of those commits, the newer state is authoritative. Reconcile "
-          + "forward against it; do not attempt to restore the older state.",
+        `For reference only, every HEAD this task has ever been OBSERVED at: ${task.resume.observedHeads.join(", ")}.`,
+        "That is a log of sightings, not a record of authorship: it says these commits existed when the",
+        "worker looked, not that this task created any of them.",
         ""
       );
     }
@@ -324,7 +341,12 @@ export function runClaude(cfg, task, {
           TEMP: cfg.scratchRoot,
           TMP: cfg.scratchRoot,
           TMPDIR: cfg.scratchRoot,
-          JARVIS_WORKER_SCRATCH: task.scratchDir ?? cfg.scratchRoot
+          JARVIS_WORKER_SCRATCH: task.scratchDir ?? cfg.scratchRoot,
+          // D-134: the commit-evidence values, so a commit helper does not have
+          // to parse them back out of the prompt. The prompt states them too -
+          // this is a convenience, never the only channel.
+          ...(task.workspace?.taskId ? { [ENV_TASK_ID]: task.workspace.taskId } : {}),
+          ...(task.workspace?.attemptId ? { [ENV_ATTEMPT_ID]: task.workspace.attemptId } : {})
         },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true

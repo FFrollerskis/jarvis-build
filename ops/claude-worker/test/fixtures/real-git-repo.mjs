@@ -58,6 +58,36 @@ export function log(cwd) {
 }
 
 /**
+ * Commit subjects AND full bodies on HEAD, newest first. `log()` gives subjects
+ * only, which cannot show whether a commit carries its evidence trailers - and
+ * that is precisely what D-134 has to assert about.
+ */
+export function logBodies(cwd) {
+  const out = git(cwd, ["log", "--format=%H%x1f%B%x1e"]);
+  return out.split("").map((b) => b.replace(/^[\r\n]+/, "")).filter((b) => b.trim() !== "")
+    .map((b) => {
+      const [sha, ...rest] = b.split("");
+      return { sha: sha.trim(), message: rest.join("") };
+    });
+}
+
+/**
+ * An UNRELATED WRITER: some other process on the host commits into a checkout.
+ *
+ * This is the actor the worker cannot see and must never mistake for its own
+ * child. It is a plain `git commit` by a different identity - nothing exotic -
+ * because the point is that the ORDINARY case is already indistinguishable from
+ * the child's work if you only look at HEAD before and after.
+ */
+export function foreignCommit(cwd, { file = "unrelated-writer.txt", message = "unrelated maintenance commit" } = {}) {
+  writeFileSync(join(cwd, file), `written by an unrelated process at ${new Date().toISOString()}\n`, "utf8");
+  git(cwd, ["add", "--", file]);
+  git(cwd, ["-c", "user.email=someone-else@example.invalid", "-c", "user.name=unrelated writer",
+    "commit", "-m", message]);
+  return head(cwd);
+}
+
+/**
  * Create a repository with one baseline commit containing a TRACKED file, so a
  * test can produce a genuine tracked modification as well as untracked files.
  */
