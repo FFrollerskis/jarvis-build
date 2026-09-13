@@ -649,10 +649,49 @@ describe("D-135: evaluateCompletionGate", () => {
     expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM);
   });
 
-  it("a legacy record with no provenance at all passes, and SAYS which case it is", () => {
+  /**
+   * D-136. This assertion used to be the exact opposite, and the opposite was
+   * the last fail-open path in the gate.
+   *
+   * D-135 argued that a missing record meant "no attempt of this worker version
+   * produced one" and let it pass. It does not mean that. It means NOBODY
+   * LOOKED - and it is reachable on the CURRENT worker, not just from pre-D-134
+   * rows: the durable claim, the child identity and IN_PROGRESS are written
+   * before the child is spawned, while `commit_provenance` is written only at
+   * the post-dispatch checkpoint after it exits. A parent killed in between
+   * leaves precisely this shape, with a trusted STATUS=COMPLETE already posted.
+   */
+  it("a record with NO provenance at all HOLDS - absence of evidence is not evidence", () => {
     const gate = evaluateCompletionGate({ completion: successfulReport, provenance: null });
+    expect(gate.held).toBe(true);
+    expect(gate.passed).toBe(false);
+    expect(gate.reason).toBe(COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD);
+    // Nothing is invented to fill the gap: the evidence fields stay empty.
+    expect(gate.provenance_verdict).toBeNull();
+    expect(gate.unattributed_commits).toEqual([]);
+    // The report itself is still described truthfully.
+    expect(gate.report_comment_id).toBe(4242);
+    expect(gate.report_status).toBe("COMPLETE");
+  });
+
+  it("an UNSUCCESSFUL report with no provenance is still not gated", () => {
+    // The no-record hold must not resurrect finished-and-abandoned tasks: a
+    // BLOCKED/FAILED report claims nothing that provenance could contradict.
+    const gate = evaluateCompletionGate({ completion: blockedReport, provenance: null });
     expect(gate.held).toBe(false);
-    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NO_PROVENANCE_RECORD);
+    expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM);
+  });
+
+  it("the two held reasons are distinguishable, and the notice says which one fired", () => {
+    const noRecord = evaluateCompletionGate({ completion: successfulReport, provenance: null });
+    const unverifiedRange = evaluateCompletionGate({
+      completion: successfulReport, provenance: unverified(COMMIT_PROVENANCE.UNATTRIBUTED)
+    });
+    expect(noRecord.reason).not.toBe(unverifiedRange.reason);
+    expect(describeCompletionGate({ taskId: TASK, gate: noRecord }))
+      .toContain(COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD);
+    expect(describeCompletionGate({ taskId: TASK, gate: unverifiedRange }))
+      .toContain(COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED);
   });
 
   it("a verified-looking VERDICT with `verified` downgraded still holds - both halves are required", () => {

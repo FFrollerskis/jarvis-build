@@ -76,8 +76,11 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 
-import { gitIsAncestor, gitLogRange } from "./git.mjs";
+import { atPath, gitHead, gitIsAncestor, gitLogRange, gitWorktreeList } from "./git.mjs";
+import { CLAIM_STATE, claimFilePath, expectationFor, readClaim, taskWorktreePath, verifyClaim } from "./worktree.mjs";
 
 /** The trailer keys. Matched case-insensitively, emitted in this exact casing. */
 export const TRAILER_TASK = "Jarvis-Task-Id";
@@ -611,12 +614,41 @@ export function describeCommitEvidenceRequirement({ taskId, attemptId }) {
  *     about work having landed: it cannot release a worktree (release already
  *     demands `successful === true`) and it cannot create successful-supersession
  *     truth (supersession already demands positive success). Gating it would
- *     resurrect finished-and-abandoned tasks for no safety gain;
+ *     resurrect finished-and-abandoned tasks for no safety gain.
  *
- *   - it does not invent evidence. When NO provenance record exists at all - a
- *     state row written before D-134 ever ran - the gate passes and says so.
- *     The dispatch path always computes a verdict, so a missing record means
- *     "no attempt of this worker version produced one", not "the answer was bad".
+ * ------------------------------------------------------------------------
+ * D-136: THE NULL-PROVENANCE SUCCESS BYPASS IS GONE
+ * ------------------------------------------------------------------------
+ *
+ * D-135 shipped the gate with one deliberate hole in it, written out in its own
+ * comment as a feature:
+ *
+ *     "it does not invent evidence. When NO provenance record exists at all - a
+ *      state row written before D-134 ever ran - the gate passes and says so."
+ *
+ * That reasoning is wrong in exactly the way the rest of this module exists to
+ * prevent. ABSENCE OF EVIDENCE IS NOT EVIDENCE. `provenance === null` does not
+ * mean "the range was fine"; it means nobody looked, and a gate that converts
+ * "nobody looked" into "successful completion accepted" is a fail-open default
+ * wearing an honest-sounding label.
+ *
+ * It was also not limited to pre-D-134 rows, which is what made it live rather
+ * than historical. The CURRENT worker persists `IN_PROGRESS`, the child identity
+ * and the durable claim BEFORE it spawns, and only writes `commit_provenance` at
+ * the post-dispatch checkpoint AFTER the child has exited. A parent killed in
+ * that window - the ordinary crash this whole subsystem is built around - leaves
+ * a record with a durable claim, a real worktree, commits possibly made by
+ * anyone, a trusted `STATUS=COMPLETE` posted by the child, and NO provenance
+ * record. On the next run the crash-recovery path read `null`, passed the gate,
+ * and marked the task completed AND successful.
+ *
+ * So `null` now HOLDS. The three non-dispatch reconciliation paths do not rely
+ * on that refusal alone, though - a gate that only ever says "no" to a legitimate
+ * crash recovery would be useless. They DERIVE trustworthy current provenance
+ * first (`deriveReconciliationProvenance` below) from the durable claim, the
+ * exact isolated worktree, the recorded attempt ids and the worktree's actual
+ * HEAD right now, and hand THAT to the gate. `null` therefore only reaches the
+ * gate when even the derivation was not attempted, and it is refused there.
  */
 
 export const COMPLETION_GATE = Object.freeze({
@@ -624,8 +656,11 @@ export const COMPLETION_GATE = Object.freeze({
   PASSED_NOT_A_SUCCESS_CLAIM: "report_is_not_a_success_claim",
   /** `unchanged` or `task_attributed`: the claim rests on proven ground. */
   PASSED_PROVENANCE_VERIFIED: "commit_provenance_verified",
-  /** Pre-D-134 record. Stated explicitly rather than silently treated as proof. */
-  PASSED_NO_PROVENANCE_RECORD: "no_commit_provenance_record_exists",
+  /**
+   * D-136: no verdict exists at all. HELD, not passed - this used to be the
+   * null-provenance success bypass, and absence of evidence is not evidence.
+   */
+  HELD_NO_PROVENANCE_RECORD: "no_commit_provenance_record_exists",
   /** The one HELD reason: a success claim standing on an unverified range. */
   HELD_PROVENANCE_UNVERIFIED: "commit_provenance_unverified"
 });
@@ -661,8 +696,11 @@ export function evaluateCompletionGate({ completion, provenance, now = () => new
   if (completion?.complete !== true || completion?.successful !== true) {
     return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM, ...evidence };
   }
+  // D-136: NO record is not a good record. A success claim with no commit
+  // verdict behind it at all is held exactly like an unverified one - the
+  // worker never looked, so it has nothing to accept the claim on.
   if (!prov) {
-    return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_NO_PROVENANCE_RECORD, ...evidence };
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD, ...evidence };
   }
   // BOTH halves are required, and neither is inferred from the other: a record
   // may carry a verified verdict with `verified` explicitly downgraded (that is
@@ -672,6 +710,295 @@ export function evaluateCompletionGate({ completion, provenance, now = () => new
     return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
   }
   return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
+}
+
+/* ==========================================================================
+ * D-136: CURRENT PROVENANCE FOR A NON-DISPATCH RECONCILIATION
+ * ==========================================================================
+ *
+ * There are three places a task can be closed out WITHOUT a dispatch having just
+ * happened in this process: abandoned-IN_PROGRESS crash recovery, the
+ * pre-selection reconciliation pass, and the pre-dispatch reconciliation inside
+ * `runTask`. D-135 pointed all three at `task.commit_provenance` - the verdict
+ * durably recorded at the END of the previous attempt - and called that "the only
+ * evidence that ever existed while the range was still small".
+ *
+ * That is true only when a previous attempt actually reached its post-dispatch
+ * checkpoint. The crash window this subsystem exists for is precisely the one in
+ * which it did not:
+ *
+ *     persist IN_PROGRESS + child identity + durable claim
+ *       -> child runs, commits, posts a TRUSTED STATUS=COMPLETE
+ *         -> **PARENT DIES HERE**
+ *           -> post-dispatch provenance checkpoint (never reached)
+ *
+ * The state row left behind has no `commit_provenance` at all. Under D-135 that
+ * `null` passed the gate; under D-136 `null` holds, which is correct but not by
+ * itself sufficient - it would refuse every legitimate crash recovery too.
+ *
+ * So the reconciliation paths ANSWER the question instead of inheriting or
+ * skipping it. Everything needed is on disk and none of it comes from the child:
+ *
+ *   1. the DURABLE CLAIM, written before the worktree existed, binding one
+ *      directory to this exact task / repo / control comment;
+ *   2. the ATTEMPT IDS the worker itself generated and recorded in that claim,
+ *      the only values that can positively bind a commit to this task;
+ *   3. the BASELINE commit the worktree was created at, also from the claim;
+ *   4. the worktree's ACTUAL HEAD right now, read from the task's own worktree.
+ *
+ * The full baseline..current range is then classified by the same bounded,
+ * fail-closed rules the dispatch path uses. Anchoring at the CLAIM BASELINE
+ * rather than at a per-attempt `head_before` is deliberate and strictly stronger:
+ * it covers every commit that has ever appeared in that directory, across every
+ * attempt, so a foreign commit left behind by an earlier attempt cannot be
+ * laundered by a later one that happened to start after it.
+ *
+ * Anything missing, unreadable, mismatched or unexaminable is UNKNOWN and
+ * unverified - never "clean". Nothing here writes, removes or rewrites anything;
+ * it is a read-only question with a fail-closed answer.
+ */
+
+export const RECONCILE_PROVENANCE = Object.freeze({
+  /** The range was read and classified. The verdict decides, not this field. */
+  CLASSIFIED: "classified",
+  /** The task id is not usable as a path component, so no context can be located. */
+  UNSAFE_TASK_ID: "task_id_is_not_a_safe_path_component",
+  /** No durable claim file exists: nothing binds any directory to this task. */
+  CLAIM_MISSING: "no_durable_task_claim_exists",
+  /** A claim exists and cannot be parsed. Evidence, never overwritten. */
+  CLAIM_UNREADABLE: "durable_task_claim_unreadable",
+  /** A claim exists but does not bind THIS task to THIS directory/repo/comment. */
+  CLAIM_FOREIGN: "durable_task_claim_does_not_bind_this_task",
+  /** The claim is staged CREATING or already RELEASED: not a usable context. */
+  CLAIM_NOT_READY: "durable_task_claim_is_not_in_the_ready_state",
+  /** The claim records no usable baseline commit, so no range can be anchored. */
+  BASELINE_MISSING: "durable_task_claim_has_no_usable_baseline_commit",
+  /** No attempt id was ever issued, so no commit could ever be bound to the task. */
+  ATTEMPT_IDS_MISSING: "no_attempt_id_was_ever_recorded_for_this_task",
+  /** The claimed directory is gone. */
+  WORKTREE_MISSING: "the_claimed_isolated_worktree_directory_is_missing",
+  /** `git worktree list` could not be answered: the topology is UNKNOWN. */
+  WORKTREE_TOPOLOGY_UNKNOWN: "git_could_not_list_linked_worktrees",
+  /** A directory is there, but git has no worktree registered at that exact path. */
+  WORKTREE_NOT_REGISTERED: "git_has_no_worktree_registered_at_the_claimed_path",
+  /** The worktree's current HEAD could not be read. */
+  HEAD_UNREADABLE: "the_task_worktree_head_could_not_be_read"
+});
+
+/**
+ * Derive the CURRENT commit provenance for one task, for a reconciliation that
+ * is not backed by a live dispatch in this process.
+ *
+ * Returns `{ state, provenance }`. `provenance` is always a record in the same
+ * shape `classifyCommitRange` produces - never `null` - so the completion gate
+ * has something concrete to refuse. It additionally carries:
+ *
+ *   derived_for_reconciliation  always true, so a stored record and a derived
+ *                               one are never confused in state.json;
+ *   derivation_state            which `RECONCILE_PROVENANCE` branch produced it;
+ *   head_now                    the worktree HEAD this verdict was computed on;
+ *   recorded_head_before        the per-attempt `head_before` from the task row,
+ *                               read and reported but never used as the anchor.
+ */
+export function deriveReconciliationProvenance({
+  cfg,
+  taskId,
+  task = null,
+  worktreeRoot,
+  runner = spawnSync,
+  exists = existsSync,
+  now = () => new Date()
+}) {
+  const recordedHeadBefore = usableSha(task?.head_before) ? task.head_before : null;
+
+  const unknown = (state, detail, extra = {}) => ({
+    state,
+    provenance: {
+      verdict: COMMIT_PROVENANCE.UNKNOWN,
+      verified: false,
+      head_before: null,
+      head_after: null,
+      head_now: null,
+      attributed_commits: [],
+      unattributed_commits: [],
+      commit_count: null,
+      examined_commit_count: 0,
+      attributed_count: 0,
+      unattributed_count: 0,
+      details_truncated: false,
+      range_truncated: false,
+      error: null,
+      checked_at: now().toISOString(),
+      derived_for_reconciliation: true,
+      derivation_state: state,
+      recorded_head_before: recordedHeadBefore,
+      reason: "current commit provenance could not be derived for this reconciliation, so this task's "
+        + `commits cannot be vouched for: ${detail}`,
+      ...extra
+    }
+  });
+
+  // --- 1. the durable claim ------------------------------------------------
+  let claimFile;
+  let path;
+  try {
+    claimFile = claimFilePath(worktreeRoot, taskId);
+    path = taskWorktreePath(worktreeRoot, taskId);
+  } catch (err) {
+    return unknown(RECONCILE_PROVENANCE.UNSAFE_TASK_ID, err.message);
+  }
+
+  const claimRead = readClaim(claimFile);
+  if (!claimRead.ok) {
+    return unknown(
+      claimRead.missing ? RECONCILE_PROVENANCE.CLAIM_MISSING : RECONCILE_PROVENANCE.CLAIM_UNREADABLE,
+      claimRead.missing
+        ? `no claim file at ${claimFile}, so no directory is durably bound to this task and no attempt id `
+          + "was ever recorded for it"
+        : claimRead.reason,
+      { claim_file: claimFile }
+    );
+  }
+
+  const claim = claimRead.claim;
+  // The expectation is built from CONTROL-PLANE truth for this task, exactly as
+  // `establishTaskWorktree` builds it - never from anything read off the disk.
+  const expectation = expectationFor({
+    cfg, taskId, comment: { id: task?.comment_id ?? null }, worktreeRoot
+  });
+  const verdict = verifyClaim(claim, expectation);
+  if (!verdict.ok) {
+    return unknown(RECONCILE_PROVENANCE.CLAIM_FOREIGN, verdict.mismatches.join("; "), { claim_file: claimFile });
+  }
+  if (claim.state !== CLAIM_STATE.READY) {
+    return unknown(
+      RECONCILE_PROVENANCE.CLAIM_NOT_READY,
+      `the claim is in state ${JSON.stringify(claim.state)}, not ${CLAIM_STATE.READY}`,
+      { claim_file: claimFile }
+    );
+  }
+
+  // --- 2. baseline and attempt ids, both from the claim ---------------------
+  const baseline = usableSha(claim.baseline_sha) ? claim.baseline_sha : null;
+  if (!baseline) {
+    return unknown(
+      RECONCILE_PROVENANCE.BASELINE_MISSING,
+      `baseline_sha=${JSON.stringify(claim.baseline_sha ?? null)} is not a usable commit id`,
+      { claim_file: claimFile }
+    );
+  }
+
+  // Every attempt id this task has EVER been issued. A commit made by an earlier
+  // attempt of the same task is still this task's work; nothing outside the
+  // claim and this task's own state row may widen the set.
+  const attemptIds = [...new Set([
+    ...(Array.isArray(claim.attempts) ? claim.attempts.map((a) => a?.attempt_id) : []),
+    claim.first_attempt_id,
+    claim.latest_attempt_id,
+    task?.attempt_id
+  ].filter((a) => typeof a === "string" && a.length > 0))];
+  if (attemptIds.length === 0) {
+    return unknown(
+      RECONCILE_PROVENANCE.ATTEMPT_IDS_MISSING,
+      "the claim records no attempt id, so no commit in this worktree could ever carry evidence binding it "
+        + "to this task",
+      { claim_file: claimFile }
+    );
+  }
+
+  // --- 3. the exact isolated worktree --------------------------------------
+  if (!exists(path)) {
+    return unknown(RECONCILE_PROVENANCE.WORKTREE_MISSING, `nothing exists at ${path}`, { claim_file: claimFile });
+  }
+  const listed = gitWorktreeList(cfg, runner);
+  if (!listed.ok) {
+    return unknown(RECONCILE_PROVENANCE.WORKTREE_TOPOLOGY_UNKNOWN, listed.error, { claim_file: claimFile });
+  }
+  const wanted = resolve(path);
+  if (!listed.items.some((w) => resolve(w.path) === wanted)) {
+    return unknown(
+      RECONCILE_PROVENANCE.WORKTREE_NOT_REGISTERED,
+      `git lists no linked worktree at ${wanted}`,
+      { claim_file: claimFile }
+    );
+  }
+
+  // --- 4. the worktree's ACTUAL head, right now ----------------------------
+  const wtCfg = atPath(cfg, path);
+  const headNow = gitHead(wtCfg, runner);
+  if (!headNow.ok) {
+    return unknown(RECONCILE_PROVENANCE.HEAD_UNREADABLE, headNow.error, { claim_file: claimFile });
+  }
+
+  // --- 5. classify the FULL baseline..current range ------------------------
+  const classified = collectCommitProvenance(
+    wtCfg, { taskId, attemptIds, headBefore: baseline, headAfter: headNow.value }, runner
+  );
+  return {
+    state: RECONCILE_PROVENANCE.CLASSIFIED,
+    provenance: {
+      ...classified,
+      head_now: headNow.value,
+      derived_for_reconciliation: true,
+      derivation_state: RECONCILE_PROVENANCE.CLASSIFIED,
+      recorded_head_before: recordedHeadBefore,
+      claim_file: claimFile,
+      worktree_path: wanted,
+      baseline_sha: baseline
+    }
+  };
+}
+
+/**
+ * Combine what was RECORDED with what was just DERIVED, for the completion gate.
+ *
+ * Deriving a fresh verdict answers the crash window, but it must never become a
+ * way to ERASE a finding. The two records look at different windows and a later
+ * look can be blind to what an earlier one saw: a range that a previous attempt
+ * classified `unattributed` can look `unchanged` now simply because the ref has
+ * since been moved back, and a directory whose history was replaced wholesale
+ * can present a perfectly tidy range that descends from the baseline.
+ *
+ * So the rule is the same one that governs every other verdict in this module:
+ * evidence may only ever DOWNGRADE. A recorded unverified verdict keeps the
+ * combined answer unverified no matter what the fresh derivation found, and a
+ * recorded verified verdict buys nothing on its own - the derivation still has
+ * to stand up by itself. Verified therefore requires BOTH.
+ *
+ * Pure, and `derived` is required: a caller with nothing to combine has nothing
+ * to gate, and the gate refuses `null` on its own.
+ */
+export function reconciliationProvenanceForGate({ stored, derived }) {
+  const base = derived && typeof derived === "object" ? derived : null;
+  if (!base) return null;
+  const rec = stored && typeof stored === "object" ? stored : null;
+  if (!rec) return base;
+  if (isVerifiedVerdict(rec.verdict) && rec.verified === true) return base;
+
+  // The recorded finding travels with the combined record, so the operator sees
+  // the commits the EARLIER look could not account for even when they are no
+  // longer reachable from the current tip.
+  const derivedDetails = base.unattributed_commits ?? [];
+  const known = new Set(derivedDetails.map((c) => c?.sha).filter(Boolean));
+  const carried = (rec.unattributed_commits ?? []).filter((c) => c?.sha && !known.has(c.sha));
+  const baseCount = Number.isFinite(base.unattributed_count) ? base.unattributed_count : derivedDetails.length;
+
+  return {
+    ...base,
+    // When the fresh look found something wrong, that is the current truth and
+    // it is reported. When it found nothing wrong, the RECORDED verdict is the
+    // reason for the refusal and must be the one named.
+    verdict: base.verified === true ? (rec.verdict ?? COMMIT_PROVENANCE.UNKNOWN) : base.verdict,
+    verified: false,
+    downgraded_by_recorded_verdict: true,
+    recorded_verdict: rec.verdict ?? null,
+    recorded_reason: rec.reason ?? null,
+    unattributed_commits: [...derivedDetails, ...carried].slice(0, MAX_RECORDED_COMMIT_DETAILS),
+    unattributed_count: baseCount + carried.length,
+    reason: `${base.reason ?? "the current range was classified"}; but this task's last attempt durably `
+      + `recorded an UNVERIFIED verdict (${rec.verdict ?? "unknown"}${rec.reason ? `: ${rec.reason}` : ""}), and a `
+      + "later look never unmakes an earlier finding - evidence may only downgrade"
+  };
 }
 
 /**
@@ -702,6 +1029,11 @@ export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
       + "during the attempt are this task's own work.",
     "",
     `COMMIT PROVENANCE VERDICT: ${gate.provenance_verdict ?? "unknown"} (verified=false)`,
+    // D-136: the two held reasons are different findings and must not read the
+    // same. `commit_provenance_unverified` means the worker looked and could not
+    // account for the range; `no_commit_provenance_record_exists` means no
+    // verdict existed at all and none could be derived - which used to PASS.
+    `GATE REASON: ${gate.reason ?? "unknown"}`,
     gate.provenance_reason ? `REASON: ${gate.provenance_reason}` : "",
     `HEAD observed: ${gate.head_before ?? "unknown"} -> ${gate.head_after ?? "unknown"}`
       + (gate.head_now && gate.head_now !== gate.head_after ? ` (now ${gate.head_now})` : ""),

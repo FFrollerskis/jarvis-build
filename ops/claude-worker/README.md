@@ -337,9 +337,9 @@ Worker (`worker.mjs`):
     `reconcileReportedTasks`, krasj-recovery (`COMPLETE_FROM_REPORT`),
     pre-dispatch-rekonsilieringen i `runTask` og etter-dispatch-sjekken. En port
     i bare én av dem ville blitt gått rundt av neste kjøring gjennom en annen.
-    De tre ikke-dispatch-banene vurderer verdiktet tasken DURABELT REGISTRERTE
-    ved slutten av forrige forsøk — det eneste beviset som fantes mens spennet
-    ennå var lite.
+    De tre ikke-dispatch-banene UTLEDER nå ferskt verdikt (se C8); D-135 lot dem
+    arve det durabelt registrerte, og et krasj i det ordinære vinduet etterlater
+    ingen slik record.
   - **Porten overstyrer fresh truth i køen — og kun der.** Køen avgjør
     supersesjon fra ferske kontroll-issue-kommentarer med vilje, men den ferske
     sannheten HER er nettopp `STATUS=COMPLETE`-rapporten hvis suksesspåstand
@@ -370,6 +370,54 @@ Worker (`worker.mjs`):
     FULLE tallene, `details_truncated` sier når listen er kuttet, og et spenn
     større enn lesegrensen er `unknown` — aldri et verdikt om prefiksen git
     tilfeldigvis returnerte først.
+- **C8 (FRAVÆR AV BEVIS ER IKKE BEVIS — KRASJVINDUET, D-136 / PR #80-review
+  runde 5).** D-135 sendte porten med ett bevisst hull, skrevet ut i sin egen
+  kommentar som en egenskap: «den finner ikke opp bevis. Når det IKKE finnes noen
+  proveniens-record i det hele tatt — en state-rad skrevet før D-134 fantes —
+  slipper porten gjennom og sier det.» Den slutningen er feil på nøyaktig samme
+  måte som den D-134 fjernet. `provenance === null` betyr ikke «spennet var i
+  orden»; det betyr at INGEN SÅ ETTER, og en port som gjør «ingen så etter» om
+  til «vellykket fullføring akseptert» er en fail-open-default med et ærlig navn.
+  - **Det var heller ikke begrenset til pre-D-134-rader.** Workerens EGEN
+    rekkefølge lager vinduet, på hver eneste dispatch: `IN_PROGRESS`, barnets
+    identitet og den durable claimen skrives FØR spawn, mens `commit_provenance`
+    skrives KUN i etter-dispatch-sjekkpunktet ETTER at barnet har avsluttet. En
+    forelder som dør imellom — det ordinære krasjet hele delsystemet finnes for —
+    etterlater durabel claim, ekte worktree, en betrodd `STATUS=COMPLETE` postet
+    av barnet, og INGEN record. Krasj-recovery leste `null`, slapp gjennom, og
+    markerte tasken `completed` OG `successful`, frigav worktreen og lot recorden
+    pensjonere eldre tasks. Alle D-135s egne tester passerte fortsatt, fordi hver
+    eneste av dem gikk gjennom ETTER-DISPATCH-banen, der et verdikt alltid finnes.
+  - **`null` HOLDER nå** (`COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD`).
+  - **Men de tre ikke-dispatch-banene lener seg ikke på den nektelsen alene** —
+    en port som bare sier «nei» til enhver legitim krasj-recovery ville vært
+    ubrukelig. De UTLEDER ferskt verdikt (`deriveReconciliationProvenance`) FØR
+    hver suksess-rekonsiliering, av ting som finnes på disk og som ikke kommer
+    fra barnet: (1) den DURABLE CLAIMEN, verifisert eksakt mot task/repo/
+    kontroll-kommentar/worktree-sti og krav om `ready`; (2) ATTEMPT-ID-ene
+    workeren selv genererte og registrerte der; (3) BASELINE-commiten claimen ble
+    opprettet på; (4) worktreens FAKTISKE HEAD akkurat nå. Hele spennet
+    `baseline..nå` klassifiseres med de samme bundne fail-closed-reglene som
+    dispatch-banen bruker.
+  - **Ankeret er claimens BASELINE, ikke forsøkets `head_before`.** Det er
+    bevisst strengere: det dekker hver commit som noen gang har dukket opp i
+    katalogen, på tvers av alle forsøk, så en fremmed commit fra et TIDLIGERE
+    forsøk ikke kan hvitvaskes av et senere som tilfeldigvis startet etter den.
+  - **Manglende claim/worktree/baseline/attempt-ID, uleselige git-fakta, drift,
+    divergens, delvis/uattribuerte commits eller avkortet bevis er UKJENT** og
+    uverifisert — aldri «rent». Alt bevares; utledningen skriver, fjerner og
+    omskriver ingenting.
+  - **Bevis kan KUN degradere.** Et ferskt verdikt kan ikke slette et gammelt
+    funn: et spenn et tidligere forsøk klassifiserte `unattributed` kan se
+    `unchanged` ut nå bare fordi refen er flyttet tilbake. Porten ser derfor det
+    VERSTE av registrert og utledet verdikt (`reconciliationProvenanceForGate`),
+    og VERIFISERT krever BEGGE. En registrert verifisert record kjøper ingenting
+    alene — utledningen må stå på egne bein.
+  - **En holdt port overlever i exit-koden uansett hvor den fyrte.** D-135 bar
+    kun pre-seleksjons-passet inn i exit-koden, så en hold reist under
+    krasj-recovery — nettopp banen D-136-vinduet lander på — avsluttet med 0. Nå
+    gir enhver holdt port exit 3, også når kjøringen etterpå dispatchet en annen
+    task uten problemer.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -695,6 +743,41 @@ og v2.10 (D-135, PR #80-review runde 4) legger til:
   å lese i sin helhet er `unknown`, aldri et verdikt om prefiksen. `gitLogRange`
   ber om `limit + 1` og rapporterer `truncated` som et faktum
   (`test/git.test.mjs`).
+
+og v2.11 (D-136, PR #80-review runde 5) legger til:
+
+- **KRASJVINDUET MOT EKTE ENTRYPOINT OG EKTE GIT**
+  (`test/worker-crash-provenance.test.mjs`, 10 tester). Vinduet lages ikke opp:
+  et ekte barn poster en ekte betrodd `STATUS=COMPLETE`, og forelderen
+  SIGKILL-es av testen mens rapporten finnes og etter-dispatch-sjekkpunktet ennå
+  ikke er nådd. Én test fastslår selve FORMEN — `status=in_progress`,
+  `commit_provenance` `undefined`, `head_after` `undefined`, men durabel claim,
+  ekte worktree og en betrodd COMPLETE-rapport — altså nøyaktig det D-135 slapp
+  gjennom. Så flytter en UVEDKOMMENDE SKRIVER (annen git-identitet, egen fil)
+  den claimede worktreens HEAD. Bevist ved restart: exit 3, `blocked`,
+  `successful: false`, ingen `completed_at`, ALDRI `completion_confirmed`, ingen
+  frigivelse, ingen fjerning, ingen supersesjon — og claim, worktree, den
+  fremmede commiten og filen dens står nøyaktig der de var. Den holdte recorden
+  pensjonerer heller ikke en strengt ELDRE task: den eldre kjører på neste runde.
+- **POSITIVE KONTROLLER i samme vindu**, uten hvilke alt over ville vært
+  tilfredsstilt av en worker som bare aldri fullfører noe etter et krasj:
+  (a) URØRT HEAD + betrodd COMPLETE og (b) et FULLSTENDIG trailer-attribuert
+  spenn + betrodd COMPLETE rekonsilieres begge normalt, uten re-dispatch, med
+  `completion_confirmed` emittert og — i (b) — worktreen frigitt og claimen
+  beholdt som `released`.
+- **MIGRERING**: en pre-D-133-rad (ingen claim i det hele tatt) og en
+  pre-D-134-rad (rå `head_after`, intet verdikt) parkeres begge, aldri fullføres;
+  fravær av verdikt gir ingen tillit.
+- **utledningen som enhet** (`test/reconcile-provenance.test.mjs`, 32 tester,
+  ekte git og ekte linked worktrees): de positive utfallene (urørt HEAD, fullt
+  attribuert spenn, commit stemplet av et TIDLIGERE forsøk av samme task), de
+  adversarielle (fremmed commit, blandet spenn, manglende trailere, tilbakespolt
+  ref), og hver eneste nektelse som UKJENT — manglende/uleselig/fremmed/
+  ikke-`ready` claim, manglende baseline, manglende attempt-ID, fjernet worktree,
+  uregistrert sti, uleselig `worktree list`, uleselig HEAD, uleselig spenn og
+  usikker `TASK_ID`. Pluss at ankeret er claimens baseline (en fremmed commit fra
+  et tidligere forsøk telles fortsatt), at degradering kun går én vei, og at
+  utledningen ikke skriver, fjerner eller omskriver noe som helst.
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

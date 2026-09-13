@@ -80,6 +80,8 @@ import {
 } from "./lib/worktree.mjs";
 import {
   collectCommitProvenance,
+  deriveReconciliationProvenance,
+  reconciliationProvenanceForGate,
   provenanceForResume,
   evaluateCompletionGate,
   describeCompletionGate,
@@ -244,16 +246,67 @@ function releaseWorktreeIfSettled(cfg, taskId, successful) {
  * completion-confirmed, release the worktree). A gate installed in one of them
  * would simply be walked around by the next run through another.
  *
- * The three non-dispatch paths have no live worktree observation to work from,
- * so they evaluate the gate against the provenance verdict this task DURABLY
- * RECORDED at the end of its last attempt. That is the correct input: it is the
- * verdict computed while the range was still small, by the only actor that ever
- * had the attempt id.
+ * D-136: the three NON-DISPATCH paths no longer inherit the verdict from the
+ * previous attempt's record. That record is exactly what a crash in the ordinary
+ * window does not leave behind - the worker persists IN_PROGRESS, the child
+ * identity and the durable claim BEFORE spawning, and writes `commit_provenance`
+ * only at the post-dispatch checkpoint AFTER the child exits - so a parent that
+ * died between those two points left `null`, which D-135 passed.
  *
- * Returns the gate object. The caller must branch on `gate.held`.
+ * They now DERIVE the current verdict instead: durable claim -> exact isolated
+ * worktree -> recorded attempt ids and baseline -> the worktree's HEAD right now
+ * -> the full baseline..current range, classified by the same bounded fail-closed
+ * rules the dispatch path uses. Anything missing, unreadable, drifted, diverged,
+ * partial, unattributed or too large to examine comes back UNKNOWN/unverified.
+ *
+ * The derivation is skipped - and only skipped - for a report that is not a
+ * SUCCESS claim, because the gate passes those without consulting provenance at
+ * all and running git for them would be pure noise.
+ *
+ * Returns `{ gate, provenance }`. The caller must branch on `gate.held`.
  */
-function completionGateFor(task, completion) {
-  return evaluateCompletionGate({ completion, provenance: task?.commit_provenance ?? null });
+function completionGateFor(cfg, task, completion) {
+  if (completion?.complete !== true || completion?.successful !== true) {
+    return { gate: evaluateCompletionGate({ completion, provenance: null }), provenance: null };
+  }
+  const taskId = task?.task_id;
+  let derived;
+  try {
+    derived = deriveReconciliationProvenance({ cfg, taskId, task, worktreeRoot: cfg.worktreeRoot });
+  } catch (err) {
+    // A derivation that THREW answered nothing. It is UNKNOWN, never "clean" -
+    // and it is reported with the same shape as any other refusal so the gate
+    // and the status comment do not need a special case for it.
+    log(cfg, `Could not derive current commit provenance for ${taskId}: ${sanitize(err.message)}. `
+      + "Treating it as UNVERIFIED.");
+    derived = {
+      state: "derivation_threw",
+      provenance: {
+        verdict: COMMIT_PROVENANCE.UNKNOWN,
+        verified: false,
+        derived_for_reconciliation: true,
+        derivation_state: "derivation_threw",
+        attributed_commits: [],
+        unattributed_commits: [],
+        unattributed_count: 0,
+        checked_at: new Date().toISOString(),
+        reason: `deriving current commit provenance threw: ${sanitize(err.message)}`
+      }
+    };
+  }
+  // A fresh look must never ERASE an earlier finding: a range a previous attempt
+  // classified `unattributed` can look `unchanged` now simply because the ref was
+  // moved back. Evidence may only ever downgrade, so the gate sees the WORSE of
+  // the recorded verdict and the derived one.
+  const provenance = reconciliationProvenanceForGate({
+    stored: task?.commit_provenance ?? null,
+    derived: derived.provenance
+  });
+  log(cfg, `RECONCILIATION_PROVENANCE for ${taskId}: derivation=${derived.state} `
+    + `verdict=${provenance.verdict} verified=${provenance.verified}`
+    + `${provenance.downgraded_by_recorded_verdict ? " (downgraded by the recorded verdict)" : ""} `
+    + `(${provenance.reason})`);
+  return { gate: evaluateCompletionGate({ completion, provenance }), provenance };
 }
 
 /**
@@ -320,7 +373,10 @@ function parkHeldCompletion(cfg, state, token, taskId, { gate, completion, extra
   reportStatus(cfg, {
     taskId,
     phase: "verify",
-    reason: "completion_gate_held_commit_provenance_unverified",
+    // D-136: the gate's own reason is part of the dedup key. "the worker looked
+    // and could not account for the range" and "no verdict existed at all" are
+    // different findings, and one must never suppress the other's notice.
+    reason: `completion_gate_held_${gate.reason}`,
     detail: describeCompletionGate({ taskId, gate, worktreePath }),
     nextAction: "Inspect the retained worktree and the unexplained commits listed above against the PR diff and CI. "
       + "Then reconcile explicitly: issue a FRESH TASK_ID to carry the work forward, or decide deliberately that it "
@@ -463,6 +519,12 @@ async function runOwned(cfg, token) {
   // this pass.
   const preReconciliation = reconcileReportedTasks(cfg, state, token, comments);
 
+  // D-136: EVERY gate held this run, wherever it fired. D-135 only carried the
+  // pre-selection pass into the exit code, so a hold raised during crash
+  // recovery - which is the path the D-136 window actually lands on - still
+  // exited 0 and told the supervisor the run had settled normally.
+  const gateHeld = [...recovery.gateHeld, ...preReconciliation.gateHeld];
+
   // Requirement E: only already-authorised tasks. Nothing is invented here.
   const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs });
 
@@ -485,7 +547,7 @@ async function runOwned(cfg, token) {
     // here would tell the supervisor - and the operator reading a task-scheduler
     // result code - that everything settled normally, when in fact work is
     // sitting in a retained worktree waiting for a human.
-    if (preReconciliation.gateHeld.length > 0) return EXIT.BLOCKED;
+    if (gateHeld.length > 0) return EXIT.BLOCKED;
     return recovery.exit ?? (retired.blocked ? EXIT.BLOCKED : EXIT.OK);
   }
 
@@ -494,7 +556,13 @@ async function runOwned(cfg, token) {
     + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
-  return await runTask(cfg, state, token, candidate, comments);
+  const dispatchExit = await runTask(cfg, state, token, candidate, comments);
+  // D-136: a successful dispatch of a DIFFERENT task does not make this run
+  // healthy either. A held gate means work is parked in a retained worktree
+  // waiting for a human, and that has to survive into the exit code whatever
+  // else the run went on to do. Only an otherwise-clean run is downgraded -
+  // a worse code from the dispatch itself is never softened.
+  return dispatchExit === EXIT.OK && gateHeld.length > 0 ? EXIT.BLOCKED : dispatchExit;
 }
 
 /**
@@ -524,13 +592,16 @@ function reconcileReportedTasks(cfg, state, token, comments) {
     });
     if (!completion.complete) continue;
 
-    // D-135: a SUCCESSFUL claim standing on an unverified commit range is parked,
-    // not retired as completed. Evaluated against the verdict this task recorded
-    // at the end of its last attempt.
-    const gate = completionGateFor(task, completion);
+    // D-135/D-136: a SUCCESSFUL claim standing on an unverified commit range is
+    // parked, not retired as completed. The verdict is DERIVED from the task's
+    // durable claim and the current state of its own worktree, not inherited
+    // from a record a crashed parent may never have written.
+    const { gate, provenance } = completionGateFor(cfg, task, completion);
     if (gate.held) {
       parkHeldCompletion(cfg, state, token, task.task_id, {
-        gate, completion, extra: { reconciled_without_redispatch: true }
+        gate,
+        completion,
+        extra: { reconciled_without_redispatch: true, reconciliation_provenance: provenance }
       });
       // Counted as reconciled: it IS retired from the dispatch queue (BLOCKED is
       // terminal). It is simply not retired as a SUCCESS - and the run itself
@@ -550,7 +621,11 @@ function reconcileReportedTasks(cfg, state, token, comments) {
       report_status: completion.status,
       report_status_canonical: completion.canonicalStatus,
       successful: completion.successful,
-      reconciled_without_redispatch: true
+      reconciled_without_redispatch: true,
+      // Recorded on the PASS path too, so the record always states positively
+      // what the acceptance rested on rather than leaving it to be inferred.
+      completion_gate: gate,
+      reconciliation_provenance: provenance
     });
     emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
       task_id: task.task_id,
@@ -694,11 +769,12 @@ function retireIneligibleTasks(cfg, state, token, selection) {
  */
 function recoverAbandonedTasks(cfg, state, token, comments) {
   const abandoned = findAbandonedTasks(state);
-  if (abandoned.length === 0) return { stop: false, exit: null };
+  if (abandoned.length === 0) return { stop: false, exit: null, gateHeld: [] };
 
   const lifetimeBudgetMs = childLifetimeBudgetMs({ claudeTimeoutMinutes: cfg.claudeTimeoutMinutes });
   const branchLookup = listRemoteBranches(cfg);
   const pullLookup = listPulls(cfg);
+  const gateHeld = [];
   let mutated = false;
 
   for (const task of abandoned) {
@@ -746,7 +822,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
         state.last_run_at = new Date().toISOString();
         persistState(cfg, state, token);
       }
-      return { stop: true, exit: EXIT.BLOCKED };
+      return { stop: true, exit: EXIT.BLOCKED, gateHeld };
     }
 
     const observed = mergeObservedAssociations(task, {
@@ -755,16 +831,26 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
     });
 
     if (plan.action === RECOVERY.COMPLETE_FROM_REPORT) {
-      // D-135: the gate applies to crash recovery too. A parent that died after
-      // its child posted `STATUS=COMPLETE` must not be able to launder an
-      // unverified commit range into a successful completion on the next run.
-      const gate = completionGateFor(task, rec.completion);
+      // D-135/D-136: the gate applies to crash recovery too, and THIS is the
+      // path the D-136 kill window lands on. A parent that died after its child
+      // posted `STATUS=COMPLETE` but before the post-dispatch provenance
+      // checkpoint leaves NO recorded verdict, so the verdict is derived here
+      // from the durable claim and the worktree's actual current HEAD. It must
+      // not be able to launder an unaccounted-for commit range into a successful
+      // completion on the next run.
+      const { gate, provenance } = completionGateFor(cfg, task, rec.completion);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
           completion: rec.completion,
-          extra: { ...observed, reconciled_without_redispatch: true, recovered_from_crash: true }
+          extra: {
+            ...observed,
+            reconciled_without_redispatch: true,
+            recovered_from_crash: true,
+            reconciliation_provenance: provenance
+          }
         });
+        gateHeld.push(taskId);
         mutated = true;
         continue;
       }
@@ -778,6 +864,8 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
         successful: rec.completion.successful,
         reconciled_without_redispatch: true,
         recovered_from_crash: true,
+        completion_gate: gate,
+        reconciliation_provenance: provenance,
         child_identity: null,
         last_child_pid: null
       });
@@ -827,7 +915,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
     state.last_run_at = new Date().toISOString();
     persistState(cfg, state, token);
   }
-  return { stop: false, exit: null };
+  return { stop: false, exit: null, gateHeld };
 }
 
 async function runTask(cfg, state, token, candidate, comments) {
@@ -848,16 +936,19 @@ async function runTask(cfg, state, token, candidate, comments) {
     });
 
     if (rec.completion.complete) {
-      // D-135: "the work IS done" is the CLAIM, and this is the last place it can
-      // be accepted without the verdict being consulted. Gate it here too.
-      const gate = completionGateFor(prior, rec.completion);
+      // D-135/D-136: "the work IS done" is the CLAIM, and this is the last place
+      // it can be accepted without the verdict being consulted. Gate it here too,
+      // on a FRESHLY DERIVED verdict rather than on whatever the previous attempt
+      // did or did not manage to record before it died.
+      const { gate, provenance } = completionGateFor(cfg, prior, rec.completion);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
           completion: rec.completion,
           extra: {
             ...mergeObservedAssociations(prior, { branch: rec.existingBranch, prNumber: rec.existingPr?.number }),
-            reconciled_without_redispatch: true
+            reconciled_without_redispatch: true,
+            reconciliation_provenance: provenance
           }
         });
         return EXIT.BLOCKED;
@@ -871,7 +962,9 @@ async function runTask(cfg, state, token, candidate, comments) {
         report_comment_id: rec.completion.reportCommentId,
         report_status: rec.completion.status,
         successful: rec.completion.successful,
-        reconciled_without_redispatch: true
+        reconciled_without_redispatch: true,
+        completion_gate: gate,
+        reconciliation_provenance: provenance
       });
       state.last_run_at = new Date().toISOString();
       persistState(cfg, state, token);
