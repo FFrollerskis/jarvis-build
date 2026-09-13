@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ApprovalPayload, IdentityContext, JsonValue, SignedApproval } from "@jarvis/contracts";
 import { approvalSigningBytes } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "@jarvis/knowledge";
 import { KnowledgeRetriever } from "@jarvis/knowledge";
@@ -22,7 +22,7 @@ import { ErasureService } from "../src/erasure-service.ts";
  * ALDRI regresere - ALLE tester i denne filen kjører gjennom `appPool`,
  * som er akkurat en slik rolle, aldri superbruker).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

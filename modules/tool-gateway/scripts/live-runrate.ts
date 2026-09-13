@@ -1,9 +1,9 @@
 import { mkdtemp } from "node:fs/promises"; import { tmpdir } from "node:os"; import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres"; import pg from "pg";
-import { runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, runMigrations } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { OpenAiAdapter } from "@jarvis/provider-adapters";
-const port = 34567;
+const port = allocateEmbeddedPostgresPort();
 const epg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(),"jarvis-live-")), user:"postgres", password:"pw", port, persistent:false });
 await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_live");
 const pool = new pg.Pool({ host:"127.0.0.1", port, database:"jarvis_live", user:"postgres", password:"pw" });

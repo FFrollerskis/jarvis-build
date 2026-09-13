@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { AgreementsService } from "../src/service.ts";
 import { InvalidContractTransitionError, InvalidObligationTransitionError } from "../src/state-machine.ts";
 
@@ -15,7 +15,7 @@ import { InvalidContractTransitionError, InvalidObligationTransitionError } from
  * en EKTE NOSUPERUSER/NOBYPASSRLS-rolle (samme mønster som
  * support-service-rls.test.ts, IKKE en `fakePool()`-mock).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

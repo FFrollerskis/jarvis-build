@@ -29,7 +29,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ArtifactStore, ClaudeCodeAgent, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, createCodingHandler } from "@jarvis/tasks";
 import {
@@ -153,7 +153,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  const PORT = allocateEmbeddedPostgresPort();
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-live-eval-"));
   // D-100 §4: eksplisitt UTF8-encoding+C-locale - uten dette avleder `initdb`
   // encoding fra vertens OS-locale (WIN1252 pa den affiserte Windows-verten,

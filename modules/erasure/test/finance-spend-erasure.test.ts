@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { OpenLoopService, type BusinessOpenLoop } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -30,7 +30,7 @@ import { GrowthService } from "../../growth/src/service.ts";
  * (ingen antatt FK-orden - SAMME presedens/lærdom som growth-erasure.test.ts,
  * som denne sliceen selv fanget en reell FK-ordringsdefekt via, se plan.ts).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

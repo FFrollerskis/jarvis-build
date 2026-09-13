@@ -1,11 +1,45 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-12 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-135**, PR #80-review-herding
-runde 4 (proveniens fail-closed: fullføringsport + full commit-range-dekning).
+**Oppdatert:** 2026-09-14 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-137**, CI-blokker på PR #80
+(testenes portvalg for embedded Postgres). Manuell recovery-økt - ingen Jarvis-task-proveniens.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
+
+## Aktiv oppgave: D-137 - CI-blokkeren på PR #80 er funnet og rettet
+
+**Feilen (lest ut av CI, ikke gjettet).** Run `34774371210` (pull_request) feilet i `build-test` med
+`connect ECONNREFUSED 127.0.0.1:40688` i `runMigrations` for
+`modules/business/test/scoring-service.test.ts`: 1 suite feilet, 243 passerte, 4082 tester passerte.
+PUSH-kjøringen på NØYAKTIG samme tre (`34774369522`) var grønn - feilen er altså ikke innført av
+PR-ens diff, som kun rører `ops/claude-worker/**` og `docs/**`.
+
+**Rotårsak.** Postgres logget `listening on IPv6 address "::1", port 40688`, deretter
+`could not bind IPv4 address "127.0.0.1": Address already in use`, og likevel
+`database system is ready to accept connections`. En delvis bind-feil er ikke-fatal for postgres:
+den binder IPv6 + unix-socket og melder «ready», `EmbeddedPostgres.start()` resolver, og testen som
+kobler til `127.0.0.1` får ECONNREFUSED. Porten var opptatt fordi alle 117 kallsteder valgte
+`30000 + random(20000)` - midt i Linux sitt efemere portintervall (typisk 32768-60999), som enhver
+utgående forbindelse på runneren kan okkupere.
+
+**Fiks (fail-closed, permanent, i repoet).** Ny delt allokator `allocateEmbeddedPostgresPort()` i
+`modules/core/src/testing/embedded-postgres-port.ts` velger alltid en port strengt UNDER det efemere
+intervallet (leser `/proc/sys/net/ipv4/ip_local_port_range` på Linux; konservativ fallback 32768
+ellers, også trygt på Windows/macOS), og kaster heller enn å velge en utrygg port. Alle 117
+kallsteder bruker den nå. D-136 ble samtidig ført i beslutningsloggen - den var implementert i kode
+og README, men manglet der.
+
+**Verifisert:** lint grønn; `pnpm -r run typecheck` grønn; claude-worker-suiten 672/672 (23 filer);
+allokator-test 3/3; `node --check` grønn på alle 22 worker-runtime-filer; `git diff --check` ren;
+ingen hemmeligheter i diffen.
+**IKKE verifisert lokalt:** de DB-baserte suitene kjører ikke på Windows-hosten -
+`scoring-service.test.ts` feiler identisk MED og UTEN endringen (hook-timeout i embedded-postgres).
+Endelig bekreftelse må komme fra CI på Linux.
+
+**Ikke gjort (bevisst):** ingen merge, ingen ny branch/PR, ingen scheduler startet
+(`JarvisClaudeWorker`/`JarvisWorkerSupervisor` står fortsatt `Disabled`), ingen ad-hoc endringer i
+worker-hostmappen `.jarvis-claude-worker`, ingen fabrikkert `Jarvis-Task-Id`/`Jarvis-Attempt-Id`.
 
 ## Forrige leveranse lukket: PR #79 / D-131b er MERGET
 

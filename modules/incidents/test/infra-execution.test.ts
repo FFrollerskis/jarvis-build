@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
   ToolGateway, authorizeDockerTarget, type DockerMutationAction, type SecretProvider, type ToolDefinition, type ToolTransport
@@ -28,7 +28,7 @@ import { executeInfraMutation, getInfraExecution } from "../src/infra-execution.
  * isolasjon for eksekusjons-/recovery-journalen.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

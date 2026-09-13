@@ -15,6 +15,7 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * UA-7-generalisering av D-123 (`voice-session-authority.ts`): beviser at
@@ -31,7 +32,7 @@ import {
  * negativ test er et konkret forsøk på å få en autoritet man ikke skal ha.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 /** Tobias sine ekte enheter - én per kanal-kontekst, akkurat som i produksjon. */
 const phoneKeys = generateKeyPairSync("ed25519");
 const watchKeys = generateKeyPairSync("ed25519");

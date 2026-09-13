@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, runMigrations } from "@jarvis/core";
 
 /**
  * UA-3 P0 HOST FIX #2 (2026-08-17, ekte host-funn run_id `ad45603d`): ALLE
@@ -29,7 +29,7 @@ import { runMigrations } from "@jarvis/core";
  * rekkefølgen (samme SQL-sekvens som `cleanupTenant()` i
  * `ua3-business-live.ts`) direkte mot ekte embedded Postgres.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 

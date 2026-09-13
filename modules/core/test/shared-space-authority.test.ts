@@ -5,6 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { IdentityService, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * Familie-/delt-space-audit (masterplan-ordre for UA-8): "Ikke oppfinn en ny
@@ -34,7 +35,7 @@ import { IdentityService, createPool, runMigrations } from "@jarvis/core";
  * enhet gir INGEN identitetsoppløsning i det hele tatt, uansett space).
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;

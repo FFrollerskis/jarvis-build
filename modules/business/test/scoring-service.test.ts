@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { BusinessService } from "../src/service.ts";
 import { OpenLoopService } from "../src/open-loop-service.ts";
 import { ScoringService } from "../src/scoring-service.ts";
@@ -17,7 +17,7 @@ import { ScoringService } from "../src/scoring-service.ts";
  * ekte RLS via en GARANTERT non-bypass rolle - samme mønster som
  * open-loop-service.test.ts.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

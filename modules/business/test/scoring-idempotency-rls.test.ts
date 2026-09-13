@@ -7,7 +7,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
@@ -37,7 +37,7 @@ import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, Ope
  * override=PASS` beviser at raden faktisk ble lest korrekt via SAMME
  * ToolGateway-vei rett før idempotens-seksjonen kjørte.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

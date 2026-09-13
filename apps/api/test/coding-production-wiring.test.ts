@@ -8,7 +8,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { ChannelSessionAuthority, DeviceService, IdentityService, SessionGrantService, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, ChannelSessionAuthority, createPool, DeviceService, IdentityService, runMigrations, SessionGrantService, SessionService } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import type { CodingAgentAdapter, CodingAgentExec } from "@jarvis/tasks";
 import {
@@ -38,7 +38,7 @@ import { meshToolDefinitions, MeshToolExecutor } from "@jarvis/tool-gateway";
  * `fase6-worker.test.ts` - IKKE en ny/parallell produksjonsarkitektur).
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

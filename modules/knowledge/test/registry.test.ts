@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import { KnowledgeSourceRegistry, UnknownSourceInstanceError, type KnowledgeSourceConfig } from "../src/registry.ts";
@@ -129,7 +129,7 @@ describe("KnowledgeSourceRegistry - config/tenant-binding (ingen DB nødvendig)"
 });
 
 describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgres nødvendig)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  const PORT = allocateEmbeddedPostgresPort();
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;

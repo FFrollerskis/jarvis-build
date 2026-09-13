@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
-import { createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider, type ToolDefinition, type ToolTransport } from "@jarvis/tool-gateway";
 import { attemptRecovery, supportedRecoveryStrategies } from "../src/recovery.ts";
@@ -23,7 +23,7 @@ import { attemptRecovery, supportedRecoveryStrategies } from "../src/recovery.ts
  * forsøk forblir eksplisitt FAILED/UNKNOWN - ALDRI en fabrikkert SUCCESS.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

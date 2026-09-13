@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { KnowledgeRetriever } from "../src/retriever.ts";
@@ -21,7 +21,7 @@ import { KnowledgeSyncService } from "../src/sync.ts";
  * er medlem av `jarvis_app`, ALDRI superuser), og (2) HVORFOR admin/bypass-
  * tilkoblinger ALDRI kan brukes som bevis for RLS (§5.K).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -8,6 +8,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
 import {
+  allocateEmbeddedPostgresPort,
   ChannelSessionAuthority,
   ContextBuilder,
   DeviceService,
@@ -36,7 +37,7 @@ import { ConversationEngine } from "../src/conversation.ts";
 import { seedOwner } from "../src/seed.ts";
 import { createApiServer } from "../src/server.ts";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const watchKeys = generateKeyPairSync("ed25519");
 // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat`/`/brief` stoler ikke
 // lenger på klient-oppgitt `person_id`/`device_id`/`auth_strength` - ETT

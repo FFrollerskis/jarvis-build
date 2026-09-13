@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { BusinessService, OpenLoopService, type BusinessOpenLoop } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -25,7 +25,7 @@ import { ProductService } from "../../product/src/service.ts";
  * business_open_loops FØR product_items) mot en EKTE embedded Postgres via
  * den EKTE `ErasureService.executeErasure()`-APIen.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { PgApprovalStore, computeErasureFingerprint, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, computeErasureFingerprint, createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, firstWaveTools, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
@@ -21,7 +21,7 @@ import type { ImageInput, OcrProvider, VisionDescriptionProvider } from "../src/
  * kildens `external_id`-skjema (`msg:`/`att:`) - ikke bare antatt å arve fra
  * andre kilders tester fordi mekanismen er delt.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

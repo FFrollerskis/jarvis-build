@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { FinanceService } from "../src/service.ts";
 import type { NeonomicsCredentials, NeonomicsCredentialsProvider } from "../src/service.ts";
 import { BankingService, LARGE_DEBIT_THRESHOLD_ORE } from "../src/banking-service.ts";
@@ -36,7 +36,7 @@ import {
  * Postgres, ekte tjenester, fake KUN ved NETTVERKSGRENSEN (injisert
  * NeonomicsGatewayFactory), ALDRI en adapter-omgåelse.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import type { ToolInvocationContext } from "@jarvis/tool-gateway";
 import { firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessService } from "@jarvis/business";
@@ -18,7 +18,7 @@ import { ConversationGraphTransport } from "../src/transport.ts";
  * identitetsopploesning. SAMME "ekte embedded Postgres, IKKE fakePool()"-
  * mønster som `finance/test/vendor-registry.test.ts`.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

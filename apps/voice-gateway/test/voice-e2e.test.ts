@@ -8,6 +8,7 @@ import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  allocateEmbeddedPostgresPort,
   ChannelSessionAuthority, ContextBuilder, DeviceEnrollmentService, DeviceService, IdentityService, MessageStore,
   PgApprovalStore, SessionGrantService, SessionService, VoiceSessionAuthority, createPool, runMigrations
 } from "@jarvis/core";
@@ -22,7 +23,7 @@ import { MarkerStt } from "../src/stt.ts";
 import { FakeTts } from "../src/tts.ts";
 import { UtteranceJournal } from "../src/session.ts";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

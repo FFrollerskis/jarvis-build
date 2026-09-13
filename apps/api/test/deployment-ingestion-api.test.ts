@@ -7,6 +7,7 @@ import pg from "pg";
 import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  allocateEmbeddedPostgresPort,
   ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionGrantService,
   SessionService, createPool, runMigrations
 } from "@jarvis/core";
@@ -34,7 +35,7 @@ import { createApiServer } from "../src/server.ts";
  * `ToolGateway.execute()`, ikke et direkte provider-kall.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

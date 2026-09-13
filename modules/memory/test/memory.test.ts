@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
-import { MessageStore, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, MessageStore, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
   LocalHashEmbedding,
@@ -18,7 +18,7 @@ import {
   type SourceRef
 } from "@jarvis/memory";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { computeErasureFingerprint, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, computeErasureFingerprint, runMigrations } from "@jarvis/core";
 import { reapplyErasuresAfterRestore } from "@jarvis/watchdog";
 
 /**
@@ -17,7 +17,7 @@ import { reapplyErasuresAfterRestore } from "@jarvis/watchdog";
  * i favør av ledgeren - deterministisk, idempotent, uten å kreve selve
  * innholdet i ledgeren.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 

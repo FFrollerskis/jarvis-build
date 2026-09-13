@@ -14,6 +14,7 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
@@ -26,7 +27,7 @@ import {
  * ikke skal ha - fremmed chat, nesten-lik chat, feiltypet chat, ukonfigurert
  * eier, kryss-tenant og kryss-space.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 
 const OWNER_CHAT = "987654321";
 const TENANT_A = "tenant-a";

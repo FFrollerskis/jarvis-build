@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { ConsentEnforcementService } from "../src/enforcement-service.ts";
 import { ConsentService } from "../src/service.ts";
@@ -17,7 +17,7 @@ import type { EnforcementSubject } from "../src/types.ts";
  * mot en EKTE NOSUPERUSER/NOBYPASSRLS-rolle (SAMME mønster som D-91 sin
  * service-rls.test.ts).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

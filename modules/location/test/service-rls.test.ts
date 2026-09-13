@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { DEFAULT_RETENTION_DAYS, LocationService } from "../src/service.ts";
 import { runLocationRetentionSweepForAllTenants } from "../src/sweep.ts";
 
@@ -14,7 +14,7 @@ import { runLocationRetentionSweepForAllTenants } from "../src/sweep.ts";
  * NOSUPERUSER/NOBYPASSRLS-rolle (samme mønster som
  * modules/operations/test/service-rls.test.ts) - IKKE en mock-pool.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

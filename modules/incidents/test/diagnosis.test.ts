@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations, withTenantTransaction } from "@jarvis/core";
 import { DiagnosisService } from "../src/diagnosis.ts";
 import { IncidentService } from "../src/service.ts";
 
@@ -14,7 +14,7 @@ import { IncidentService } from "../src/service.ts";
  * type/tabell (ikke bare en evidens-rad), en MOTSAGT/revurdert diagnose
  * forblir UENDRET og spørrbar (ALDRI overskrevet), og tenant-isolasjon.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { JobContract } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { InProcessWorker, PgTaskQueue } from "@jarvis/tasks";
 
 /**
@@ -20,7 +20,7 @@ import { InProcessWorker, PgTaskQueue } from "@jarvis/tasks";
  * src/main.ts sin egen "executive"-only InProcessWorker og apps/api/src/
  * worker-main.ts sin "coding"-worker poller SAMME kø samtidig.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

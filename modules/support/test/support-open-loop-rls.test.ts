@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, listBusinessTenantIds, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, listBusinessTenantIds, runMigrations } from "@jarvis/core";
 import { OpenLoopService } from "@jarvis/business";
 import { SupportService } from "../src/service.ts";
 
@@ -15,7 +15,7 @@ import { SupportService } from "../src/service.ts";
  * kanoniske `listBusinessTenantIds()` er den ENESTE tenant-katalog-veien,
  * verifisert direkte her.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

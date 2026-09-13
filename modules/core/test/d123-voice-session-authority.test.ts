@@ -15,6 +15,7 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * D-123 (UA-7, FJERDE slice) - Q-32 punkt (2), DB-siden.
@@ -31,7 +32,7 @@ import {
  * tilbakekalt enhet, replay og utløpt nonce.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 /** Tobias sin ekte enhet. */
 const watchKeys = generateKeyPairSync("ed25519");
 /** En ANNEN person sin fullt gyldige, registrerte enhet - angriperens utgangspunkt. */

@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { ChannelSessionAuthority, DeviceService, IdentityService, PgApprovalStore, SessionGrantService, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, ChannelSessionAuthority, createPool, DeviceService, IdentityService, PgApprovalStore, runMigrations, SessionGrantService, SessionService } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 
@@ -23,7 +23,7 @@ import { FakeTransport, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway
  * `idempotency_key` - via `web`, for samme person/tenant.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const phoneKeys = generateKeyPairSync("ed25519");
 
 let epg: InstanceType<typeof EmbeddedPostgres>;

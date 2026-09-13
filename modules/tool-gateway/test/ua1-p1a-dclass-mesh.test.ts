@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { ScriptedAdapter, type ToolCallRequest } from "@jarvis/provider-adapters";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -35,7 +35,7 @@ import { z } from "zod";
  * Kjeden er hele den ekte: ModelGateway.completeWithTools → normalized call →
  * MeshToolExecutor → ToolGateway → Policy Gateway → audit. Ufarlig fake-D-handling.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const watchKeys = generateKeyPairSync("ed25519");
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;

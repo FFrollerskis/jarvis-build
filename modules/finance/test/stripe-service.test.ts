@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import {
   ExcessiveRefundAmountError,
   FinanceKillSwitchActiveError,
@@ -35,7 +35,7 @@ import type { StripePaymentIntentObject, StripeRefundObject } from "../src/strip
  * (mock ved NETTVERKSGRENSEN - byggeordrens testmatrise-krav, ikke en
  * adapter-omgåelse: hele `FinanceService`-domenelogikken kjører uendret).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrator.ts";
 import { assertRuntimeRoleSafe, checkRuntimeRoleStatus, ensureRuntimeRole } from "../src/services/runtime-role.ts";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * Q-21 (UA-2 P0 host-blocker, 2026-08-15): host bekreftet at den faktiske
@@ -13,7 +14,7 @@ import { assertRuntimeRoleSafe, checkRuntimeRoleStatus, ensureRuntimeRole } from
  * policyene fantes og var FORCE-et, men ble aldri håndhevet. Denne suiten
  * beviser `ensureRuntimeRole`/`assertRuntimeRoleSafe` (§10.A-D/J-K i BO-en).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 

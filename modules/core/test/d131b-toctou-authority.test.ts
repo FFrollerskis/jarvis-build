@@ -17,6 +17,7 @@ import {
   runMigrations,
   type DeviceAuthorityDeps
 } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
@@ -40,7 +41,7 @@ import {
  * grants - et avslag skal aldri ha noen synlig sideeffekt utover audit.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const TENANT = "tenant-toctou";
 const PERSON = "person-toctou";
 

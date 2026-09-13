@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding, type EmbeddingProvider } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { KnowledgeSyncService } from "../src/sync.ts";
@@ -18,7 +18,7 @@ import { KnowledgeSyncService } from "../src/sync.ts";
  * token-tak) eller stille mistet halene av innholdet fra fulltekstsøk (hvis
  * noen ved en feil hadde trunkert `content` selv).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

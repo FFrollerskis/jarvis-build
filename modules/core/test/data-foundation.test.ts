@@ -15,9 +15,10 @@ import {
   withTenantTransaction
 } from "@jarvis/core";
 import type { EventEnvelope } from "@jarvis/contracts";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 // Ekte PostgreSQL 16 (embedded) - ingen mocks. Datamappe utenfor repoet.
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

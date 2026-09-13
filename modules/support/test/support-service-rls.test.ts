@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { SupportService } from "../src/service.ts";
 import { InvalidTicketTransitionError } from "../src/state-machine.ts";
@@ -15,7 +15,7 @@ import { InvalidTicketTransitionError } from "../src/state-machine.ts";
  * memory-space-isolasjon mot en EKTE NOSUPERUSER/NOBYPASSRLS-rolle (samme
  * mønster som Q-27 sine RLS-tester, IKKE en `fakePool()`-mock).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

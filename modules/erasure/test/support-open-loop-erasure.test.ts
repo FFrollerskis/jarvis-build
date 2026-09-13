@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { BusinessService, OpenLoopService, type BusinessOpenLoop } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -38,7 +38,7 @@ import { SupportService } from "../../support/src/service.ts";
  * mønster som `erasure-service.test.ts` og `modules/erasure/scripts/
  * q20-erasure-live.ts`) - ALDRI raa ad-hoc DELETE-setninger.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

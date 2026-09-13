@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { PaymentIntentNotFoundError } from "../src/types.ts";
 import { VendorNotFoundError, VendorProviderRefAlreadyBoundError, VendorBindingMismatchError, VendorBindingRevokedError } from "../src/vendor-registry.ts";
 import { FinanceService, type FikenCredentials, type FikenCredentialsProvider, type FikenGeneralJournalEntryWriter } from "../src/service.ts";
@@ -23,7 +23,7 @@ import { FinanceService, type FikenCredentials, type FikenCredentialsProvider, t
  * for disse testene - se punkt 11/15 under, "provider transport
  * invocation count = 0").
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

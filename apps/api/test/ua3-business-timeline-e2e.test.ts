@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { BusinessService } from "@jarvis/business";
 import { SupportCrossScopeReferenceError, SupportService } from "@jarvis/support";
 import { AgreementsCrossScopeReferenceError, AgreementsService } from "@jarvis/agreements";
@@ -26,7 +26,7 @@ import { AgreementsCrossScopeReferenceError, AgreementsService } from "@jarvis/a
  * `worker-main.ts` allerede bruker i produksjon) - ingen ny avhengighet lagt
  * til noe sted for aa faa denne testen til aa kompilere.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

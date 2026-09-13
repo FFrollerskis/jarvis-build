@@ -4,7 +4,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { OperationsContactCompanyMismatchError, OperationsCrossScopeReferenceError, OperationsService } from "../src/service.ts";
 
 /**
@@ -25,7 +25,7 @@ import { OperationsContactCompanyMismatchError, OperationsCrossScopeReferenceErr
  * DECISIONS_AND_ASSUMPTIONS.md). Hver avvist mutasjon MAA vaere ATOMISK:
  * ingen delvis rad, ingen event, ingen `updated_at`-endring.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

@@ -6,14 +6,14 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding, MemoryRetriever, MemoryWriter, RuleBasedExtractor } from "@jarvis/memory";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
   FakeTransport, IngestionService, ToolGateway, firstWaveTools, type SecretProvider
 } from "@jarvis/tool-gateway";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const watchKeys = generateKeyPairSync("ed25519");
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;

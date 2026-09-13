@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { computeErasureFingerprint, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, computeErasureFingerprint, createPool, runMigrations } from "@jarvis/core";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { ObsidianVaultKnowledgeSource } from "../src/obsidian-source.ts";
 import { KnowledgeSyncService } from "../src/sync.ts";
@@ -17,7 +17,7 @@ import { KnowledgeRetriever } from "../src/retriever.ts";
  * embedded Postgres (ekte migrasjoner/RLS/sync), ekte filsystem-I/O i en
  * midlertidig vault - ALDRI Tobias sin ekte vault.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

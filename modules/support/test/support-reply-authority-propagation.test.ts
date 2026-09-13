@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ApprovalPayload, IdentityContext, SignedApproval } from "@jarvis/contracts";
 import { approvalSigningBytes } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService } from "@jarvis/business";
@@ -37,7 +37,7 @@ import { SupportTransport } from "../src/transport.ts";
  * This suite proves the invariant: effective_authority(nested email.send)
  * <= effective_authority(original support.reply caller), never elevated.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

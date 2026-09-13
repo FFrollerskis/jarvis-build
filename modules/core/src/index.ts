@@ -19,3 +19,4 @@ export * from "./services/telegram-owner-authority.ts";
 export * from "./services/runtime-role.ts";
 export * from "./services/erasure-ledger.ts";
 export * from "./services/tenant-catalog.ts";
+export * from "./testing/embedded-postgres-port.ts";

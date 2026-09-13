@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { JobContract } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { ArtifactStore, PgTaskQueue } from "@jarvis/tasks";
 import { LIVE_EVAL_INITDB_FLAGS } from "../src/coding-agent-eval.ts";
 
@@ -24,7 +24,7 @@ import { LIVE_EVAL_INITDB_FLAGS } from "../src/coding-agent-eval.ts";
  * skjult et ekte portabilitetsproblem (§4, eksplisitt forbudt).
  */
 describe("D-100: UTF8-persistering gjennom ekte embedded-Postgres (LIVE_EVAL_INITDB_FLAGS)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  const PORT = allocateEmbeddedPostgresPort();
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;

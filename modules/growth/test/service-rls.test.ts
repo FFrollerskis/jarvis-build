@@ -6,7 +6,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, pgDateToIsoDate, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, pgDateToIsoDate, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { marketingMemoryBriefSource } from "../src/business-os-integration.ts";
 import { GrowthService } from "../src/service.ts";
@@ -19,7 +19,7 @@ import { InvalidCampaignTransitionError, InvalidExperimentTransitionError } from
  * mot en EKTE NOSUPERUSER/NOBYPASSRLS-rolle (samme mønster som
  * agreements/support service-rls.test.ts, IKKE en `fakePool()`-mock).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

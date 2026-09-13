@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { ScriptedAdapter, type StreamEvent, type ToolCallRequest } from "@jarvis/provider-adapters";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -30,7 +30,7 @@ import { FakeTransport, MeshToolExecutor, ToolGateway, firstWaveTools, meshToolD
  * en EKSTRA MODELLRUNDE (modellen ba om verktøyet på nytt før den svarte),
  * IKKE en ekstra ToolGateway-/transport-utførelse.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

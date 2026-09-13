@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "../src/service.ts";
 import { ConversationGraphSyncService } from "../src/sync.ts";
@@ -23,7 +23,7 @@ import { ConversationGraphSyncService } from "../src/sync.ts";
  *      forretningskontakt opprettes eller lenkes (D-122: Telegram gir INGEN
  *      deterministisk e-post-/telefon-nøkkel for en vilkårlig motpart).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const TENANT = "tenant-d125";
 const OWNER_PERSON = "person-d125-owner";
 const OWNER_CHAT = "987654321";

@@ -5,6 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, listBusinessTenantIds, runMigrations } from "../src/index.ts";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
 /**
  * Q-27 (2026-08-18, D-65): mekanisk bevis for BÅDE bug-mekanismen OG fiksen
@@ -16,7 +17,7 @@ import { createPool, listBusinessTenantIds, runMigrations } from "../src/index.t
  * feilklasse, denne gangen i selve `tenants`-katalogoppslaget som tre
  * produksjons-schedulere er avhengige av (se D-65).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

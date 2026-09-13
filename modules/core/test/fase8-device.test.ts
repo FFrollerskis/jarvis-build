@@ -8,8 +8,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
 import { DeviceService, FakePushAdapter, PgApprovalStore, PgDeviceRegistry, SessionService, createPool, runMigrations } from "@jarvis/core";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 const watchKeys = generateKeyPairSync("ed25519");
 const rogueKeys = generateKeyPairSync("ed25519");
 let epg: InstanceType<typeof EmbeddedPostgres>;

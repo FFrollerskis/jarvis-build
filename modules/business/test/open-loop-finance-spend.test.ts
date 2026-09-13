@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { withMemoryTransaction } from "@jarvis/memory";
 import { OpenLoopService } from "../src/open-loop-service.ts";
 import { runOpenLoopSweepForAllTenants } from "../src/open-loop-sweep.ts";
@@ -22,7 +22,7 @@ import { runOpenLoopSweepForAllTenants } from "../src/open-loop-sweep.ts";
  * open-loop-service.ts-JSDoc) - `@jarvis/business` importerer BEVISST IKKE
  * `@jarvis/finance` (samme presedens som `open-loop-finance.test.ts`).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;

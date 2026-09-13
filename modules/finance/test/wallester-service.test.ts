@@ -5,7 +5,7 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { OpenLoopService } from "@jarvis/business";
 import { CardService } from "../src/card-service.ts";
 import type { WallesterCredentials, WallesterCredentialsProvider } from "../src/card-service.ts";
@@ -35,7 +35,7 @@ import { generateKeyPairSync } from "node:crypto";
  * adapter-omgåelse. Test-isolasjon: globalt unike provider-ID-er +
  * per-test-opprydding (lærdommene fra Slice 5).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+const PORT = allocateEmbeddedPostgresPort();
 
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;

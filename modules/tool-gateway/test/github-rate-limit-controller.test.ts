@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { GithubApiError, GithubTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import {
@@ -351,7 +351,7 @@ describe("X: mutasjons-serialisering (§7/§14 - prosess-lokal, min. 1s avstand,
 });
 
 describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transporten, uavhengig av rate-limit-cooldown-tilstand (§21)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  const PORT = allocateEmbeddedPostgresPort();
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
@@ -412,7 +412,7 @@ describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transpor
 });
 
 describe("Z: PgGithubRateLimitStore mot ekte Postgres (restart-sikkerhet/delt tilstand, §17)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  const PORT = allocateEmbeddedPostgresPort();
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
