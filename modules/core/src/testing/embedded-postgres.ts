@@ -42,6 +42,20 @@
  *
  * Feiler noe av dette, stoppes instansen, KUN vaar egen leie frigjoeres, porten
  * utelukkes, og vi gaar bundet videre til neste kandidat.
+ *
+ * ------------------------------------------------------------------------
+ * DET ER HER FENCINGEN FAKTISK HAANDHEVES (D-142 A.3)
+ * ------------------------------------------------------------------------
+ *
+ * En fillei kan ikke rive socketen ut av en gammel prosess. Blir en utloept eier
+ * gyldig overtatt mens den fortsatt kjoerer, er det RESSURSprotokollen som maa
+ * si nei - og det gjoer den: den nye eieren moeter en postmaster som er eldre
+ * enn dens egen oppstart, eller som ikke godtar dens credentials, og beviset
+ * avvises endelig. Ingen deler ressursen; kandidaten forkastes.
+ *
+ * Motsatt vei gjelder det samme: `lease.assertOwned()` kjoeres ETTER beviset,
+ * fordi initdb/start/bevis tar tid nok til at vaar EGEN leie kan ha blitt
+ * overtatt underveis. Et bevis tatt mens vi var fenced er ikke et eierskap.
  */
 
 import { connect, createServer } from "node:net";
@@ -306,6 +320,21 @@ export async function assertPostgresIdentityIPv4(
   );
 }
 
+/**
+ * Beskriv hva som helst som ble kastet - ogsaa `undefined`.
+ *
+ * `embedded-postgres` avviser oppstartsfeil med en tom verdi paa Windows. En
+ * naiv `(err as Error).message` blir da en TypeError som erstatter den ekte
+ * aarsaken med en feil i vaar egen feilhaandtering.
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (err === undefined) return "(leverandoeren avviste uten feilobjekt: undefined)";
+  if (err === null) return "(leverandoeren avviste uten feilobjekt: null)";
+  const message = (err as { message?: unknown }).message;
+  return typeof message === "string" && message.length > 0 ? message : String(err);
+}
+
 export interface LeasedEmbeddedPostgres<T extends EmbeddedPostgresLike> {
   readonly postgres: T;
   readonly port: number;
@@ -382,6 +411,12 @@ export async function startLeasedEmbeddedPostgres<T extends EmbeddedPostgresLike
         ...(options.clockToleranceMs === undefined ? {} : { clockToleranceMs: options.clockToleranceMs })
       });
 
+      // D-142 A.3: initdb + start + bevis tar tid, og i det vinduet kan leien vaar
+      // ha blitt gyldig overtatt (hoeyere epoke) eller gaatt forbi sin egen TTL.
+      // Et bevis vi tok MENS vi var fenced er ikke et eierskap. Da forkastes
+      // kandidaten paa samme bundne maate som et avvist identitetsbevis.
+      lease.assertOwned();
+
       let stopped = false;
       return {
         postgres,
@@ -401,7 +436,10 @@ export async function startLeasedEmbeddedPostgres<T extends EmbeddedPostgresLike
     } catch (err) {
       // B.2: stopp DENNE instansen, frigjoer KUN dens egen leie, og gjoer bundet
       // framgang til en annen, ikke-utelukket kandidat.
-      problems.push("port " + lease.port + ": " + (err as Error).message);
+      // `err` er ikke garantert en Error - en leverandoer som avviser med
+      // `undefined` skal gi en aerlig diagnose, ikke en TypeError som skjuler
+      // hva som faktisk gikk galt.
+      problems.push("port " + lease.port + ": " + describeError(err));
       rejected.add(lease.port);
       try {
         await postgres.stop();

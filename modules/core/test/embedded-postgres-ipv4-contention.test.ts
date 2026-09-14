@@ -1,7 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
@@ -11,8 +11,11 @@ import {
   DEFAULT_PROBE_IDENTITY,
   assertPostgresIdentityIPv4,
   candidateWindow,
+  ensureLeaseDirId,
+  highestEpoch,
   ipv4PortIsFree,
   readEphemeralRange,
+  readLeaseDirId,
   startLeasedEmbeddedPostgres,
   type CandidateWindow
 } from "../src/testing/index.ts";
@@ -30,6 +33,11 @@ import {
  *
  * Her snus det: den generiske lytteren er naa et NEGATIVT kontrolltilfelle, og
  * alle positive kontroller bruker ekte PostgreSQL med ekte klientsporringer.
+ *
+ * D-142 A.3 legger til den andre halvdelen av fencingen: en fillei kan ikke rive
+ * socketen ut av en gammel prosess, saa det er RESSURSprotokollen som maa si nei
+ * naar en utloept, men fortsatt kjoerende eier staar i veien - og motsatt, en
+ * eier som ble fenced MENS postgres startet, faar ikke levere beviset sitt.
  */
 
 /**
@@ -137,6 +145,8 @@ describe("B.4: samtidige EKTE postgres-instanser - unike porter, ekte klientspor
 
             // Leien holdes i HELE databasens levetid, ikke bare gjennom oppstart.
             expect(s.lease.released).toBe(false);
+            expect(s.lease.fenced).toBe(false);
+            expect(s.lease.verifyOwnership().ok).toBe(true);
             expect(existsSync(s.lease.file)).toBe(true);
           }
         } finally {
@@ -144,7 +154,12 @@ describe("B.4: samtidige EKTE postgres-instanser - unike porter, ekte klientspor
         }
         for (const s of started) {
           expect(s.lease.released).toBe(true);
-          expect(existsSync(s.lease.file)).toBe(false);
+          // D-142 A.1: nedstenging SLETTER ikke leien - den etterlater en
+          // gravstein, slik at epoken for porten aldri kan deles ut paa nytt.
+          expect(existsSync(s.lease.file)).toBe(true);
+          const doc = JSON.parse(readFileSync(s.lease.file, "utf8")) as { state: string; epoch: number };
+          expect(doc.state).toBe("released");
+          expect(doc.epoch).toBe(s.lease.epoch);
         }
       }
     },
@@ -226,10 +241,17 @@ describe("B.3: check-to-bind-motstanderen - fremmed lytter binder ETTER at probe
         expect(started.proof.server_port).toBe(started.port);
         expect(await realClientQuery(started.port)).toBe(started.port);
 
-        // B.2: KUN offerets egen leie ble frigjort - ingen leie ligger igjen for
-        // den forkastede porten, og vaar egen staar.
-        expect(readdirSync(leaseDir).filter((n) => n.startsWith(victim + "."))).toEqual([]);
+        // B.2: KUN offerets egen leie ble frigjort. Etter D-142 A.1 betyr
+        // "frigjort" en GRAVSTEIN, ikke en sletting: ingen HOLDT leie ligger
+        // igjen for den forkastede porten, epoken dens er brukt opp for godt,
+        // og vaar egen leie staar.
+        const victimLeases = readdirSync(leaseDir).filter((n) => n.startsWith(victim + "."));
+        expect(victimLeases.length).toBeLessThanOrEqual(1);
+        for (const name of victimLeases) {
+          expect((JSON.parse(readFileSync(join(leaseDir, name), "utf8")) as { state: string }).state).toBe("released");
+        }
         expect(existsSync(started.lease.file)).toBe(true);
+        expect(started.lease.verifyOwnership().ok).toBe(true);
       } finally {
         await started.stop();
         rmSync(leaseDir, { recursive: true, force: true });
@@ -250,6 +272,120 @@ describe("B.3: check-to-bind-motstanderen - fremmed lytter binder ETTER at probe
       ).rejects.toThrow(/Feiler lukket/);
     },
     300_000
+  );
+});
+
+describe("A.3: en UTLOEPT, men fortsatt KJOERENDE eier fences av RESSURSprotokollen", () => {
+  it(
+    "leielaget ville tillatt overtakelsen - postgres-beviset gjoer det ikke, og den gamle eieren forstyrres ikke",
+    async () => {
+      const victimDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-victim-"));
+      const raiderDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-raider-"));
+      const started = await startOne("a3-still-running", { leaseDir: victimDir });
+
+      try {
+        const port = started.port;
+        expect(await realClientQuery(port)).toBe(port);
+
+        // I ANGRIPERENS leiekatalog ser porten ut som en forlatt kryssvert-leie
+        // med utloept heartbeat. Leielaget alene ville altsaa sagt "ta den".
+        ensureLeaseDirId(raiderDir);
+        writeFileSync(
+          join(raiderDir, `${port}.1.lease`),
+          JSON.stringify({
+            v: 3,
+            port,
+            epoch: 1,
+            dir_id: readLeaseDirId(raiderDir),
+            state: "held",
+            owner: { pid: 4242, uuid: "utloept-men-lever", host: "en-annen-maskin", acquired_at_ms: 0 },
+            heartbeat_at_ms: 0,
+            ttl_ms: 1_000,
+            released_at_ms: null
+          })
+        );
+
+        // Ressursen er likevel ikke ledig: den gamle postmasteren staar der.
+        expect(await ipv4PortIsFree(port)).toBe(false);
+        await expect(
+          startOne("a3-raider", {
+            leaseDir: raiderDir,
+            window: { low: port, high: port, proven: true, basis: "a3" },
+            attempts: 1,
+            verifyTimeoutMs: 5_000
+          })
+        ).rejects.toThrow(/Feiler lukket/);
+
+        // Offeret er uroert: samme instans, samme port, fortsatt eid.
+        expect(await realClientQuery(port)).toBe(port);
+        expect(started.lease.fenced).toBe(false);
+        expect(started.lease.verifyOwnership().ok).toBe(true);
+      } finally {
+        await started.stop();
+        rmSync(victimDir, { recursive: true, force: true });
+        rmSync(raiderDir, { recursive: true, force: true });
+      }
+    },
+    900_000
+  );
+
+  it(
+    "blir VI fenced mens postgres starter, forkastes kandidaten - et bevis tatt uten eierskap teller ikke",
+    async () => {
+      const leaseDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-self-"));
+      const base = candidateWindow(readEphemeralRange());
+      const window: CandidateWindow = { low: base.low + 70, high: base.low + 71, proven: base.proven, basis: base.basis };
+      const fencedPorts: number[] = [];
+
+      const started = await startLeasedEmbeddedPostgres(
+        async (port) => {
+          // Foerste kandidat: en gyldig overtakelse skjer MENS vi starter opp.
+          // Fabrikken kjoerer etter at leien er tatt, saa fencingen staar lenge
+          // foer identitetsbeviset i det hele tatt kan tas.
+          if (fencedPorts.length === 0) {
+            fencedPorts.push(port);
+            const current = highestEpoch(leaseDir, port);
+            writeFileSync(
+              join(leaseDir, `${port}.${current.epoch + 1}.lease`),
+              JSON.stringify({
+                v: 3,
+                port,
+                epoch: current.epoch + 1,
+                dir_id: readLeaseDirId(leaseDir),
+                state: "held",
+                owner: { pid: process.pid, uuid: "gyldig-etterfoelger", host: hostname(), acquired_at_ms: Date.now() },
+                heartbeat_at_ms: Date.now(),
+                ttl_ms: 600_000,
+                released_at_ms: null
+              })
+            );
+          }
+          const dir = await mkdtemp(join(tmpdir(), `jarvis-pg-a3-self-${port}-`));
+          return new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false });
+        },
+        {
+          leaseDir,
+          window,
+          attempts: 2,
+          verifyTimeoutMs: 30_000,
+          pickCandidate: (w, attempt) => w.low + (attempt % (w.high - w.low + 1))
+        }
+      );
+
+      try {
+        // Kandidat 1 ble forkastet fordi VI var fenced, ikke fordi postgres feilet.
+        expect(fencedPorts).toHaveLength(1);
+        expect(started.port).not.toBe(fencedPorts[0]);
+        // Og den vi endte paa er baade bevist ekte OG faktisk vaar.
+        expect(started.proof.server_port).toBe(started.port);
+        expect(await realClientQuery(started.port)).toBe(started.port);
+        expect(started.lease.verifyOwnership().ok).toBe(true);
+      } finally {
+        await started.stop();
+        rmSync(leaseDir, { recursive: true, force: true });
+      }
+    },
+    900_000
   );
 });
 
