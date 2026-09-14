@@ -81,17 +81,35 @@
  * videre. Leien gir intensjon; beviset gir sannhet; ingen av dem gjetter.
  *
  * ------------------------------------------------------------------------
- * HVEM SOM LEVER, OG HVA VI GJOER NAAR VI IKKE VET
+ * KRYSSVERT: FAIL CLOSED, FORDI KLOKKER IKKE ER SAMMENLIGNBARE (D-143 A)
  * ------------------------------------------------------------------------
+ *
+ * D-141 og D-142 tok over en kryssvert-leie naar heartbeaten var "utloept".
+ * Den slutningen holder ikke: `heartbeat_at_ms` er skrevet med den FREMMEDE
+ * vertens wall clock, og vi maalte den mot VAAR. Uten en bevist kontrakt for
+ * bundet klokkeavvik er det ikke en observasjon, det er en antakelse - og den
+ * feiler i den farlige retningen: en kontender med en klokke som gaar for fort
+ * "observerer" en helt frisk leie som forlatt, og stjeler den.
+ *
+ * Vi trenger heller ikke den overtakelsen. Leiekatalogen er VERTSLOKAL (en
+ * temp-katalog), saa distribuert overtakelse loeser et problem vi ikke har.
+ * Derfor: en leie eid av en annen vert er ALDRI reclaimable. Ingen delt
+ * lock-tjeneste, ingen klokkeavhengighet, ingen halvveis distribuert protokoll
+ * med semantikk vi ikke kan bevise.
+ *
+ * Alt vi FAKTISK tar over kan vi verifisere med vaar egen klokke og vaart eget
+ * prosesstre:
  *
  *   gravstein                       -> ledig. Eieren ga eksplisitt slipp.
  *   samme vert, eier LEVER          -> aldri, uansett alder eller utloep
  *   samme vert, eier DOED, fersk    -> aldri (den kan vaere midt i oppstart)
  *   samme vert, eier DOED, gammel   -> kan tas over
- *   ANNEN vert                      -> KUN naar en verifiserbar heartbeat har
- *                                      utloept. Ingen heartbeat = ingen sannhet
- *                                      = ingen overtakelse.
+ *   ANNEN vert                      -> ALDRI. Fail closed, uansett heartbeat.
  *   uleselig leie                   -> aldri. Vi vet ikke hvem som eier den.
+ *
+ * TTL-en beholdes, men den er ikke lenger et overtakelsesgrunnlag for noen. Den
+ * brukes KUN av en eier mot sine EGNE tidsstempler i `verifyOwnership()` - samme
+ * prosess, samme klokke, og dermed en sammenligning som faktisk betyr noe.
  */
 
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeSync } from "node:fs";
@@ -192,7 +210,13 @@ export interface AcquireOptions {
   readonly maxAttempts?: number;
   /** Hvor gammel en DOED samme-vert-leie maa vaere foer den kan tas over. */
   readonly staleAfterMs?: number;
-  /** Hvor lenge en heartbeat er gyldig. Grunnlaget for kryssvert-utloep. */
+  /**
+   * Hvor lenge en eier regner sin EGEN heartbeat som gyldig.
+   *
+   * Etter D-143 A er dette ikke lenger et overtakelsesgrunnlag for noen andre -
+   * det brukes kun av eieren selv i `verifyOwnership()`, mot sine egne
+   * tidsstempler paa sin egen klokke.
+   */
   readonly ttlMs?: number;
   /** Hvor ofte eieren fornyer sin egen heartbeat. */
   readonly heartbeatIntervalMs?: number;
@@ -225,16 +249,17 @@ export const RECLAIM_VERDICT = Object.freeze({
   RECLAIMABLE_RELEASED: "reclaimable_released_tombstone",
   /** Kan tas over: doed samme-vert-eier, eldre enn stale-grensen. */
   RECLAIMABLE_DEAD_OWNER: "reclaimable_dead_local_owner",
-  /** Kan tas over: verifiserbar heartbeat har utloept. */
-  RECLAIMABLE_EXPIRED: "reclaimable_expired_heartbeat",
   /** Eieren lever her. */
   HELD_LOCAL_OWNER_ALIVE: "held_local_owner_alive",
   /** Doed eier, men leien er for fersk til aa kalles forlatt. */
   HELD_TOO_FRESH: "held_too_fresh",
-  /** Annen vert, og heartbeaten er fortsatt gyldig. */
-  HELD_REMOTE_HEARTBEAT_VALID: "held_remote_heartbeat_valid",
-  /** Annen vert uten verifiserbar heartbeat. Fail-closed. */
-  HELD_REMOTE_UNVERIFIABLE: "held_remote_unverifiable",
+  /**
+   * Eid av en ANNEN VERT. Aldri reclaimable - uansett hva heartbeaten sier.
+   *
+   * D-143 A: vi har ingen kontrakt for bundet klokkeavvik mellom verter, saa en
+   * fremmed tidsstempel maalt mot vaar klokke er ikke et bevis for noe som helst.
+   */
+  HELD_REMOTE_OWNER: "held_remote_owner_fail_closed",
   /** Uleselig dokument. Vi vet ikke hvem som eier den. Fail-closed. */
   HELD_UNREADABLE: "held_unreadable"
 });
@@ -578,16 +603,16 @@ export function reclaimVerdict(doc: LeaseDocument | null, ctx: ReclaimContext): 
   // ingenting om epoken - den staar, og neste eier faar den neste.
   if (doc.state === "released") return RECLAIM_VERDICT.RECLAIMABLE_RELEASED;
 
-  const heartbeat = Number.isFinite(doc.heartbeat_at_ms) ? doc.heartbeat_at_ms : null;
-  const ttl = Number.isFinite(doc.ttl_ms) && doc.ttl_ms > 0 ? doc.ttl_ms : null;
-  const expired = heartbeat !== null && ttl !== null && ctx.now > heartbeat + ttl;
+  // D-143 A: en leie eid av en ANNEN VERT tas aldri over. Punktum.
+  //
+  // `heartbeat_at_ms` er skrevet med den fremmede vertens wall clock. Aa maale
+  // den mot VAAR klokke er ikke en observasjon, det er en antakelse om bundet
+  // klokkeavvik vi ikke har noen kontrakt for - og en kontender med en klokke som
+  // gaar for fort ville "observert" en helt frisk leie som utloept. Vi trenger
+  // heller ingen slik overtakelse: leiekatalogen er vertslokal.
+  if (doc.owner.host !== ctx.hostId) return RECLAIM_VERDICT.HELD_REMOTE_OWNER;
 
-  if (doc.owner.host !== ctx.hostId) {
-    // A.3: en annen vert sin pid betyr ingenting her, men det gir oss ingen rett
-    // til aa ta leien. Bare en verifiserbar, utloept heartbeat gjoer det.
-    if (heartbeat === null || ttl === null) return RECLAIM_VERDICT.HELD_REMOTE_UNVERIFIABLE;
-    return expired ? RECLAIM_VERDICT.RECLAIMABLE_EXPIRED : RECLAIM_VERDICT.HELD_REMOTE_HEARTBEAT_VALID;
-  }
+  const heartbeat = Number.isFinite(doc.heartbeat_at_ms) ? doc.heartbeat_at_ms : null;
 
   // A.3: en LEVENDE lokal eier tas aldri over - heller ikke naar heartbeaten har
   // utloept. En vridd prosess som fortsatt holder socketen er noeyaktig den
@@ -687,11 +712,17 @@ function withdraw(file: string, reason: string): TakeOverOutcome {
   return { ok: false, reason };
 }
 
+/**
+ * De ENESTE tilstandene som gir rett til aa ta en port.
+ *
+ * Listen er bevisst kort, og etter D-143 A finnes ingen kryssvert-oppfoering i
+ * den: alt vi kan ta over, kan vi ogsaa verifisere med VAAR EGEN klokke og
+ * VAART EGET prosesstre.
+ */
 const RECLAIMABLE = new Set<string>([
   RECLAIM_VERDICT.FREE,
   RECLAIM_VERDICT.RECLAIMABLE_RELEASED,
-  RECLAIM_VERDICT.RECLAIMABLE_DEAD_OWNER,
-  RECLAIM_VERDICT.RECLAIMABLE_EXPIRED
+  RECLAIM_VERDICT.RECLAIMABLE_DEAD_OWNER
 ]);
 
 /**

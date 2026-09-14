@@ -23,7 +23,8 @@ import {
   type CandidateWindow,
   type EphemeralRangeReading,
   type LeaseDocument,
-  type LeaseOwner
+  type LeaseOwner,
+  type PortLease
 } from "../src/testing/index.ts";
 
 /**
@@ -433,23 +434,44 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     expect(reclaimVerdict(doc(), ctx())).toBe(RECLAIM_VERDICT.RECLAIMABLE_DEAD_OWNER);
   });
 
-  it("ANNEN vert med GYLDIG heartbeat: aldri - en levende eier stjeles ikke", () => {
-    const remote = doc({ heartbeat_at_ms: 9_999_999, ttl_ms: 60_000, host: "en-annen-maskin" });
-    expect(reclaimVerdict(remote, ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.HELD_REMOTE_HEARTBEAT_VALID);
-    // Og lokal pid-liveness er irrelevant: svaret er det samme uansett.
-    expect(reclaimVerdict(remote, ctx({ isProcessAlive: dead }))).toBe(RECLAIM_VERDICT.HELD_REMOTE_HEARTBEAT_VALID);
+  it("ANNEN vert: ALDRI - uansett hva heartbeaten sier", () => {
+    // Frisk, utloept, uleselig, uten ttl: ett og samme svar. Det er hele poenget
+    // med D-143 A - vi leser ikke en fremmed klokke som om den var vaar.
+    const cases = [
+      doc({ heartbeat_at_ms: 9_999_999, ttl_ms: 60_000, host: "en-annen-maskin" }),
+      doc({ heartbeat_at_ms: 0, ttl_ms: 1_000, host: "en-annen-maskin" }),
+      doc({ heartbeat_at_ms: Number.NaN, host: "en-annen-maskin" }),
+      doc({ ttl_ms: 0, host: "en-annen-maskin" })
+    ];
+    for (const remote of cases) {
+      expect(reclaimVerdict(remote, ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.HELD_REMOTE_OWNER);
+      // Lokal pid-liveness er irrelevant for en fremmed vert: samme svar uansett.
+      expect(reclaimVerdict(remote, ctx({ isProcessAlive: dead }))).toBe(RECLAIM_VERDICT.HELD_REMOTE_OWNER);
+    }
   });
 
-  it("ANNEN vert UTEN verifiserbar heartbeat: fail-closed, ikke fail-open", () => {
-    const noHeartbeat = doc({ heartbeat_at_ms: Number.NaN, host: "en-annen-maskin" });
-    expect(reclaimVerdict(noHeartbeat, ctx())).toBe(RECLAIM_VERDICT.HELD_REMOTE_UNVERIFIABLE);
-    const noTtl = doc({ ttl_ms: 0, host: "en-annen-maskin" });
-    expect(reclaimVerdict(noTtl, ctx())).toBe(RECLAIM_VERDICT.HELD_REMOTE_UNVERIFIABLE);
+  it("KLOKKESKJEV FRAMOVER: en kontender med klokke langt foran stjeler ikke en frisk fjern leie", () => {
+    // Fjern eier skrev heartbeat paa SIN klokke. Vaar klokke ligger en time foran.
+    // Under D-141/D-142 ville `now > heartbeat + ttl` gjort dette til RECLAIMABLE.
+    const remoteFresh = doc({ heartbeat_at_ms: 10_000_000, ttl_ms: 60_000, host: "en-annen-maskin" });
+    const skewedAhead = { now: 10_000_000 + 3_600_000, staleAfterMs: 1_000, hostId: hostname(), isProcessAlive: alive };
+    expect(reclaimVerdict(remoteFresh, skewedAhead)).toBe(RECLAIM_VERDICT.HELD_REMOTE_OWNER);
   });
 
-  it("ANNEN vert med UTLOEPT heartbeat: da - og bare da - kan den tas over", () => {
-    const expired = doc({ heartbeat_at_ms: 0, ttl_ms: 1_000, host: "en-annen-maskin" });
-    expect(reclaimVerdict(expired, ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.RECLAIMABLE_EXPIRED);
+  it("KLOKKESKJEV BAKOVER: en klokke langt bak gir heller ingen ny rettighet", () => {
+    const remoteOld = doc({ heartbeat_at_ms: 10_000_000, ttl_ms: 1, host: "en-annen-maskin" });
+    const skewedBehind = { now: 10_000_000 - 3_600_000, staleAfterMs: 1_000, hostId: hostname(), isProcessAlive: dead };
+    expect(reclaimVerdict(remoteOld, skewedBehind)).toBe(RECLAIM_VERDICT.HELD_REMOTE_OWNER);
+  });
+
+  it("klokkeskjev endrer ALDRI svaret for en fjern eier - verdiktet er uavhengig av now", () => {
+    const remote = doc({ heartbeat_at_ms: 5_000_000, ttl_ms: 30_000, host: "en-annen-maskin" });
+    const verdicts = new Set(
+      [-10_000_000, -1, 0, 1, 10_000_000, Number.MAX_SAFE_INTEGER].map((offset) =>
+        reclaimVerdict(remote, { now: 5_000_000 + offset, staleAfterMs: 1_000, hostId: hostname(), isProcessAlive: alive })
+      )
+    );
+    expect([...verdicts]).toEqual([RECLAIM_VERDICT.HELD_REMOTE_OWNER]);
   });
 
   it("en ULESELIG leie er ALDRI stale - vi vet ikke hvem som eier den", () => {
@@ -485,7 +507,7 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     expect(ownerUuid(file)).toBe("nettopp-doed");
   });
 
-  it("ende-til-ende: en KRYSSVERT-leie med gyldig heartbeat kan ikke tas - og feilen sier hvorfor", () => {
+  it("ende-til-ende: en KRYSSVERT-leie kan ikke tas - og feilen sier hvorfor", () => {
     const port = 20601;
     const file = plantLease(leaseDir, port, 1, {
       heartbeat_at_ms: 999_000,
@@ -494,11 +516,11 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     });
     expect(() =>
       acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: dead, heartbeat: false })
-    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_HEARTBEAT_VALID));
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
     expect(ownerUuid(file)).toBe("fjern-og-levende");
   });
 
-  it("ende-til-ende: en KRYSSVERT-leie uten heartbeat feiler LUKKET", () => {
+  it("ende-til-ende: en KRYSSVERT-leie uten heartbeat feiler LUKKET paa samme maate", () => {
     const port = 20602;
     const file = plantLease(leaseDir, port, 1, {
       ttl_ms: 0,
@@ -506,21 +528,28 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     });
     expect(() =>
       acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: dead, heartbeat: false })
-    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_UNVERIFIABLE));
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
     expect(ownerUuid(file)).toBe("fjern-og-ukjent");
   });
 
-  it("ende-til-ende: en KRYSSVERT-leie med UTLOEPT heartbeat kan tas over - og epoken gaar opp", () => {
+  it("ende-til-ende: en KRYSSVERT-leie som SER utloept ut blir staaende - ingen overtakelse, ingen epoke-bevegelse", () => {
+    // Dette er testen som snudde i D-143 A. Under D-141/D-142 tok vi denne leien.
     const port = 20603;
-    plantLease(leaseDir, port, 1, {
+    const file = plantLease(leaseDir, port, 1, {
       heartbeat_at_ms: 1_000,
       ttl_ms: 1_000,
-      owner: { pid: 4242, uuid: "fjern-og-forlatt", host: "en-annen-maskin", acquired_at_ms: 0 }
+      owner: { pid: 4242, uuid: "fjern-og-ser-forlatt-ut", host: "en-annen-maskin", acquired_at_ms: 0 }
     });
-    const lease = acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: alive, heartbeat: false });
-    expect(lease.epoch).toBe(2);
-    expect(ownerUuid(lease.file)).toBe(lease.owner.uuid);
-    lease.release();
+    const before = readFileSync(file, "utf8");
+
+    expect(() =>
+      acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: alive, heartbeat: false })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
+
+    // Offeret staar BYTE-IDENTISK, og hoeyvannsmerket har ikke flyttet seg.
+    expect(readFileSync(file, "utf8")).toBe(before);
+    expect(highestEpoch(leaseDir, port).epoch).toBe(1);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.1.lease`]);
   });
 
   it("ende-til-ende: en ULESELIG leie blokkerer porten i stedet for aa bli revet vekk", () => {
@@ -827,6 +856,108 @@ describe("A.4: eksklusivitet, eier-identitet, bounded retry og utelukkelse", () 
     expect(() => acquirePortLease({ leaseDir, window: window4, exclude: [20000, 20001, 20002, 20003], heartbeat: false })).toThrow(
       /utelukket av kalleren/
     );
+  });
+});
+
+describe("D-143 A: DELT leiekatalog - en fjern eier tas ALDRI over", () => {
+  it("offer og raider i SAMME katalog: raideren feiler lukket, offeret staar byte-identisk og eier fortsatt", () => {
+    const port = 21500;
+    // Offeret tar leien mens det presenterer seg som en ANNEN vert. Katalogen er
+    // den SAMME for begge - dette er ikke to uavhengige leiekataloger.
+    const victim = acquirePortLease({ leaseDir, window: onePort(port), hostId: "victim-host", heartbeat: false });
+    const before = readFileSync(victim.file, "utf8");
+    expect(victim.epoch).toBe(1);
+
+    expect(() =>
+      acquirePortLease({ leaseDir, window: onePort(port), hostId: "raider-host", heartbeat: false })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
+
+    expect(readFileSync(victim.file, "utf8")).toBe(before);
+    expect(victim.verifyOwnership().ok).toBe(true);
+    expect(victim.fenced).toBe(false);
+    expect(highestEpoch(leaseDir, port).epoch).toBe(1);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.1.lease`]);
+    victim.release();
+  });
+
+  it("raider med klokke en TIME foran: fortsatt ingen overtakelse, fortsatt byte-identisk offer", () => {
+    const port = 21501;
+    const victim = acquirePortLease({ leaseDir, window: onePort(port), hostId: "victim-host", heartbeat: false, ttlMs: 30_000, now: () => 1_000_000 });
+    const before = readFileSync(victim.file, "utf8");
+
+    expect(() =>
+      acquirePortLease({
+        leaseDir,
+        window: onePort(port),
+        hostId: "raider-host",
+        heartbeat: false,
+        now: () => 1_000_000 + 3_600_000,
+        isProcessAlive: dead
+      })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
+
+    expect(readFileSync(victim.file, "utf8")).toBe(before);
+    expect(highestEpoch(leaseDir, port).epoch).toBe(1);
+  });
+
+  it("raider med klokke en TIME BAK: heller ingen ny rettighet", () => {
+    const port = 21502;
+    const victim = acquirePortLease({ leaseDir, window: onePort(port), hostId: "victim-host", heartbeat: false, now: () => 1_000_000 });
+    const before = readFileSync(victim.file, "utf8");
+
+    expect(() =>
+      acquirePortLease({ leaseDir, window: onePort(port), hostId: "raider-host", heartbeat: false, now: () => 1_000 })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_REMOTE_OWNER));
+
+    expect(readFileSync(victim.file, "utf8")).toBe(before);
+    expect(victim.verifyOwnership().ok).toBe(true);
+  });
+
+  it("en fjern GRAVSTEIN er fortsatt ledig - fail-closed gjelder eierskap, ikke et eksplisitt farvel", () => {
+    // Viktig avgrensning: vi naegter aa GJETTE om en fjern eier lever. Har den
+    // sagt fra selv, er det ikke et gjett lenger.
+    const port = 21503;
+    plantLease(leaseDir, port, 4, {
+      state: "released",
+      owner: { pid: 4242, uuid: "fjern-som-ga-slipp", host: "en-annen-maskin", acquired_at_ms: 0 }
+    });
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(lease.epoch).toBe(5);
+    lease.release();
+  });
+
+  it("INGEN intervall har to autoritative eiere: etterfoelgeren finnes foerst NAAR forgjengeren er fenced", () => {
+    const port = 21504;
+    const steps: Array<{ step: string; authoritative: number }> = [];
+
+    const a = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    const count = (step: string, leases: PortLease[]) =>
+      steps.push({ step, authoritative: leases.filter((l) => l.verifyOwnership().ok).length });
+
+    count("A holder", [a]);
+
+    // En etterfoelger vinner epoken. Fra det oeyeblikket filen finnes er A ikke
+    // lenger autoritativ - det er ingen overlapp aa observere.
+    const successor = takeOverEpoch({
+      leaseDir,
+      port,
+      inspectedEpoch: a.epoch,
+      inspectedDirId: dirId,
+      owner: someOwner("etterfoelger", 1),
+      ttlMs: 60_000
+    });
+    expect(successor.ok).toBe(true);
+    count("etterfoelger finnes", [a]);
+
+    a.release();
+    count("A har gitt slipp", [a]);
+
+    expect(steps).toEqual([
+      { step: "A holder", authoritative: 1 },
+      { step: "etterfoelger finnes", authoritative: 0 },
+      { step: "A har gitt slipp", authoritative: 0 }
+    ]);
+    expect(a.fenced).toBe(true);
   });
 });
 

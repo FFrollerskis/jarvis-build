@@ -11,7 +11,6 @@ import {
   DEFAULT_PROBE_IDENTITY,
   assertPostgresIdentityIPv4,
   candidateWindow,
-  ensureLeaseDirId,
   highestEpoch,
   ipv4PortIsFree,
   readEphemeralRange,
@@ -275,55 +274,58 @@ describe("B.3: check-to-bind-motstanderen - fremmed lytter binder ETTER at probe
   );
 });
 
-describe("A.3: en UTLOEPT, men fortsatt KJOERENDE eier fences av RESSURSprotokollen", () => {
+describe("D-143 A: DELT leiekatalog - en fjern eier fences aldri bort, og ressursen deles aldri", () => {
   it(
-    "leielaget ville tillatt overtakelsen - postgres-beviset gjoer det ikke, og den gamle eieren forstyrres ikke",
+    "offer og raider i SAMME leiekatalog: raideren feiler lukket, offeret er byte-identisk, eid OG sporbart",
     async () => {
-      const victimDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-victim-"));
-      const raiderDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-raider-"));
-      const started = await startOne("a3-still-running", { leaseDir: victimDir });
+      // ÉN katalog for begge. Dette er poenget: D-142 brukte to uavhengige
+      // leiekataloger, og beviste dermed ikke at en raider som FAKTISK ser
+      // offerets leie lar den staa.
+      const leaseDir = mkdtempSync(join(tmpdir(), "jarvis-lease-d143-shared-"));
+      const started = await startOne("d143-victim", { leaseDir, hostId: "victim-host" });
 
       try {
         const port = started.port;
         expect(await realClientQuery(port)).toBe(port);
+        const victimLeaseBefore = readFileSync(started.lease.file, "utf8");
 
-        // I ANGRIPERENS leiekatalog ser porten ut som en forlatt kryssvert-leie
-        // med utloept heartbeat. Leielaget alene ville altsaa sagt "ta den".
-        ensureLeaseDirId(raiderDir);
-        writeFileSync(
-          join(raiderDir, `${port}.1.lease`),
-          JSON.stringify({
-            v: 3,
-            port,
-            epoch: 1,
-            dir_id: readLeaseDirId(raiderDir),
-            state: "held",
-            owner: { pid: 4242, uuid: "utloept-men-lever", host: "en-annen-maskin", acquired_at_ms: 0 },
-            heartbeat_at_ms: 0,
-            ttl_ms: 1_000,
-            released_at_ms: null
-          })
-        );
-
-        // Ressursen er likevel ikke ledig: den gamle postmasteren staar der.
-        expect(await ipv4PortIsFree(port)).toBe(false);
+        // Raideren deler katalogen og ser en leie eid av en ANNEN vert.
+        // Under D-141/D-142 kunne en utloept heartbeat gjort denne reclaimable.
         await expect(
-          startOne("a3-raider", {
-            leaseDir: raiderDir,
-            window: { low: port, high: port, proven: true, basis: "a3" },
+          startOne("d143-raider", {
+            leaseDir,
+            hostId: "raider-host",
+            window: { low: port, high: port, proven: true, basis: "d143" },
             attempts: 1,
             verifyTimeoutMs: 5_000
           })
-        ).rejects.toThrow(/Feiler lukket/);
+        ).rejects.toThrow(/held_remote_owner_fail_closed/);
 
-        // Offeret er uroert: samme instans, samme port, fortsatt eid.
-        expect(await realClientQuery(port)).toBe(port);
+        // Og med klokken en TIME foran: fortsatt nei. Klokkeskjev gir ingen rett.
+        await expect(
+          startOne("d143-raider-skew", {
+            leaseDir,
+            hostId: "raider-host",
+            window: { low: port, high: port, proven: true, basis: "d143" },
+            attempts: 1,
+            verifyTimeoutMs: 5_000,
+            now: () => Date.now() + 3_600_000
+          })
+        ).rejects.toThrow(/held_remote_owner_fail_closed/);
+
+        // Offeret: byte-identisk leie, fortsatt eier, og fortsatt en EKTE
+        // spoerrbar database. Ingen av de to raiderne roerte ressursen.
+        expect(readFileSync(started.lease.file, "utf8")).toBe(victimLeaseBefore);
         expect(started.lease.fenced).toBe(false);
         expect(started.lease.verifyOwnership().ok).toBe(true);
+        expect(await realClientQuery(port)).toBe(port);
+
+        // Hoeyvannsmerket har ikke flyttet seg: ingen epoke ble brent paa et
+        // forsoek som aldri skulle vaert tillatt.
+        expect(readdirSync(leaseDir).filter((n) => n.startsWith(port + "."))).toEqual([`${port}.1.lease`]);
       } finally {
         await started.stop();
-        rmSync(victimDir, { recursive: true, force: true });
-        rmSync(raiderDir, { recursive: true, force: true });
+        rmSync(leaseDir, { recursive: true, force: true });
       }
     },
     900_000
