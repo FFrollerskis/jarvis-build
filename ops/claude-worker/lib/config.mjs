@@ -226,6 +226,27 @@ export function loadWorkerConfig(configPath, root) {
     quarantineRoot: resolveUnder(root, raw.quarantineRoot, join(scratchRoot, "quarantine")),
     manifestFile: resolveUnder(root, raw.manifestFile, join(logDir, "quarantine-manifest.jsonl")),
 
+    // D-133: the root under which every task's ISOLATED linked git worktree
+    // lives. It is asserted to be outside the repository for the same reason as
+    // every other writable path - a task's uncommitted work must never be able
+    // to appear in the primary checkout the dirty guard protects.
+    //
+    // The default is a SIBLING of `scratchRoot`, which is deliberate on both
+    // counts:
+    //
+    //   - not `root`-relative, because `root` is the worker's own directory and
+    //     on this host that lives inside the repository; a `root`-relative
+    //     default would make `assertOutsideRepo` throw on every existing host
+    //     config that had simply never heard of this field. A sibling of
+    //     scratchRoot inherits its outside-the-repo guarantee (a directory's
+    //     parent always contains it, so the parent of an outside path is also
+    //     outside), and the assertion below still verifies it rather than
+    //     trusting the reasoning.
+    //   - not UNDER `scratchRoot`, because scratchRoot is handed to the child as
+    //     TEMP/TMP/TMPDIR. A git worktree holding real uncommitted work has no
+    //     business living somewhere a temp sweeper is entitled to delete.
+    worktreeRoot: resolveUnder(root, raw.worktreeRoot, resolve(scratchRoot, "..", "worktrees")),
+
     heartbeatSeconds: requireBoundedNumber(raw, "heartbeatSeconds", { min: 5, max: 3600, fallback: 60 }),
     heartbeatTimeoutMinutes: requireBoundedNumber(raw, "heartbeatTimeoutMinutes", { min: 1, max: 1440, fallback: 15 }),
     maxAttempts: requireBoundedNumber(raw, "maxAttempts", { min: 1, max: 50, fallback: 4 }),
@@ -257,7 +278,8 @@ export function loadWorkerConfig(configPath, root) {
     postedStatusFile: cfg.postedStatusFile,
     scratchRoot: cfg.scratchRoot,
     quarantineRoot: cfg.quarantineRoot,
-    manifestFile: cfg.manifestFile
+    manifestFile: cfg.manifestFile,
+    worktreeRoot: cfg.worktreeRoot
   });
 
   return cfg;

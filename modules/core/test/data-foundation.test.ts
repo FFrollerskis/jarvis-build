@@ -14,10 +14,12 @@ import {
   runMigrations,
   withTenantTransaction
 } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import type { EventEnvelope } from "@jarvis/contracts";
 
 // Ekte PostgreSQL 16 (embedded) - ingen mocks. Datamappe utenfor repoet.
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -29,15 +31,20 @@ let approvalStore: PgApprovalStore;
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-"));
-  epg = new EmbeddedPostgres({
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({
     databaseDir,
     user: "postgres",
     password: "test-superuser-pw",
-    port: PORT,
+    port,
     persistent: false
-  });
-  await epg.initialise();
-  await epg.start();
+  }),
+    // D-141 B: proben maa bruke instansens EGNE credentials.
+    { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
 
   adminPool = new pg.Pool({
@@ -94,7 +101,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 function envelope(overrides: Partial<EventEnvelope> = {}): EventEnvelope {

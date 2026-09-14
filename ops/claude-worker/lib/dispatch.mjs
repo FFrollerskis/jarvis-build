@@ -53,6 +53,12 @@ import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { sanitize } from "./health.mjs";
 import { captureIdentity, matchProcessIdentity, IDENTITY } from "./procid.mjs";
+import {
+  describeCommitProvenance,
+  describeCommitEvidenceRequirement,
+  ENV_TASK_ID,
+  ENV_ATTEMPT_ID
+} from "./provenance.mjs";
 
 export const OUTCOME = Object.freeze({
   COMPLETED_EXIT_0: "completed_exit_0",
@@ -99,6 +105,7 @@ const ABORT_DEADLINE_MS = 30_000;
 export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
   const { comment, updates = [] } = task;
   const scratchDir = task.scratchDir ?? null;
+  const workspace = task.workspace ?? null;
   const lines = [
     "You are the Claude implementation agent in the autonomous Jarvis Architect <-> Claude build loop.",
     `Repository: ${repoOwner}/${repoName}. Control issue: #${controlIssue}.`,
@@ -125,6 +132,51 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
     );
   }
 
+  // --- D-133: the child works in ITS OWN isolated linked worktree ----------
+  //
+  // The child must know this, for two reasons that matter to its behaviour:
+  // it may leave uncommitted work behind without stranding anyone (the dirty
+  // guard on the user's primary checkout is untouched by it), and it must not
+  // go looking for "the repo" somewhere else and mutate the shared checkout.
+  if (workspace) {
+    lines.push(
+      "ISOLATED TASK WORKTREE (D-133):",
+      `Your working directory is a linked git worktree owned exclusively by this TASK_ID: ${workspace.path}`,
+      `It was created from baseline commit ${workspace.baselineSha}`
+        + `${workspace.baselineBranch ? ` (branch ${workspace.baselineBranch} in the primary checkout)` : ""}`
+        + ", and a durable ownership claim binds it to this exact task, this control comment and this repository.",
+      "Work ONLY here. Never cd into, write to, commit in or otherwise mutate the primary checkout at "
+        + `${repoOwner}/${repoName}'s main working directory - it belongs to the user, and a task must never dirty it.`,
+      "Uncommitted changes you leave in THIS worktree are recorded as task-owned, so an interrupted attempt",
+      "is resumable here rather than stranded. That is not licence to leave work uncommitted: commit and push",
+      "as normal. It means an interruption is recoverable, not that it is free.",
+      ""
+    );
+
+    // D-134: the trailers are what make the NEXT resume able to prove anything.
+    lines.push(...describeCommitEvidenceRequirement({
+      taskId: workspace.taskId,
+      attemptId: workspace.attemptId
+    }));
+
+    if (workspace.dirty?.length > 0) {
+      lines.push(
+        "TASK-OWNED UNCOMMITTED CHANGES ALREADY PRESENT IN YOUR WORKTREE:",
+        ...workspace.dirty.map((l) => `  ${l}`),
+        "",
+        "These are YOUR OWN previous attempt's changes, proven by the ownership claim on this directory -",
+        "they are not foreign work and not the user's. Read them, verify them, and carry them forward or",
+        "deliberately change them. NEVER stash, reset, checkout over, clean or delete them to get a clean",
+        "tree: that would destroy real work, which is exactly the failure this isolation exists to prevent.",
+        "",
+        "D-134 scope note: this statement is about UNCOMMITTED state in a directory the worker claimed for",
+        "this task before anything was written to it. It is NOT a statement about who authored any COMMIT.",
+        "Commit authorship is answered separately, and only by evidence trailers - see COMMIT PROVENANCE.",
+        ""
+      );
+    }
+  }
+
   if (task.resume) {
     // A retry must resume, never duplicate. Tell Claude exactly what already exists.
     lines.push(
@@ -140,7 +192,20 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
         : (task.resume.prNumberKnownButUnverified
           ? `A PR number is recorded for this task (#${task.resume.prNumberKnownButUnverified}) but could NOT be confirmed in this run. Verify it yourself before creating anything.`
           : "No existing PR for this task was found."),
-      task.resume.alreadyMerged ? "A PR for this task is ALREADY MERGED. Do not merge again; reconcile and report." : "",
+      task.resume.alreadyMerged
+        // D132: a merge task that already caused its authorised state transition
+        // must be RECONCILED from the resulting truth, never retried. Carrying
+        // the merge commit and timestamp is what makes that verifiable rather
+        // than merely asserted.
+        ? "A PR for this task is ALREADY MERGED"
+          + (task.resume.existingPr?.mergedAt ? ` (merged at ${task.resume.existingPr.mergedAt}` : "")
+          + (task.resume.existingPr?.mergeCommitSha
+            ? `${task.resume.existingPr?.mergedAt ? ", " : " ("}merge commit ${task.resume.existingPr.mergeCommitSha}`
+            : "")
+          + (task.resume.existingPr?.mergedAt || task.resume.existingPr?.mergeCommitSha ? ")" : "")
+          + ". Do NOT merge again and do NOT re-run a pre-merge instruction against post-merge state. "
+          + "Verify the resulting merge/CI/local-sync truth, then report."
+        : "",
       task.resume.duplicateRiskUnknown
         ? "WARNING: the branch/PR lookup FAILED in this run, so absence of a branch or PR is NOT proven. "
           + "Verify the actual repository and PR state yourself before creating a branch, a PR or a commit."
@@ -148,6 +213,40 @@ export function buildPrompt({ repoOwner, repoName, controlIssue }, task) {
       "Reconcile the actual repository/PR/report state BEFORE making any change, and avoid duplicate commits, branches, PRs or merge actions.",
       ""
     );
+
+    // --- COMMIT PROVENANCE (D-132, corrected by D-134) --------------------
+    //
+    // A previous attempt at THIS task may already have committed real work, and
+    // a resumed child that mistakes its own commits for foreign ones reaches for
+    // a destructive reconciliation - stash, reset, re-apply - which is how
+    // `worker-dirty-backup-2026-09-11` came to exist and why re-applying it
+    // would have regressed already-merged D-131b work.
+    //
+    // D-132 solved that by asserting the opposite error: it told the child that
+    // ANY head movement during the attempt window was the task's own work. That
+    // inference is invalid (`lib/provenance.mjs`), and being wrong in THIS
+    // direction is worse, because it ends with a foreign commit adopted as task
+    // output and shipped in a PR.
+    //
+    // The verdict is computed from positive commit evidence and is rendered by
+    // the provenance module, which writes the verified and unverified cases out
+    // separately rather than flipping an adjective in a shared sentence.
+    const prov = task.resume.provenance;
+    if (prov) {
+      lines.push(...describeCommitProvenance(prov));
+    }
+
+    // `observed_heads` is a LOG OF SIGHTINGS, and is labelled as one. It was
+    // previously offered next to an authorship claim, which invited the child to
+    // read it as a list of commits the task had made.
+    if (task.resume.observedHeads?.length > 1) {
+      lines.push(
+        `For reference only, every HEAD this task has ever been OBSERVED at: ${task.resume.observedHeads.join(", ")}.`,
+        "That is a log of sightings, not a record of authorship: it says these commits existed when the",
+        "worker looked, not that this task created any of them.",
+        ""
+      );
+    }
   }
 
   lines.push(
@@ -228,7 +327,11 @@ export function runClaude(cfg, task, {
     let child;
     try {
       child = spawnImpl(cfg.claudeCommand, args, {
-        cwd: cfg.repoPath,
+        // D-133: the child runs INSIDE its own isolated linked worktree when one
+        // has been established. `cfg.repoPath` remains the fallback so a direct
+        // module call, and every pre-D133 test, still behaves as before - but the
+        // worker itself never dispatches without a workspace.
+        cwd: task.workspace?.path ?? cfg.repoPath,
         env: {
           ...process.env,
           // Keep every temp artefact the child creates outside the repository.
@@ -238,7 +341,12 @@ export function runClaude(cfg, task, {
           TEMP: cfg.scratchRoot,
           TMP: cfg.scratchRoot,
           TMPDIR: cfg.scratchRoot,
-          JARVIS_WORKER_SCRATCH: task.scratchDir ?? cfg.scratchRoot
+          JARVIS_WORKER_SCRATCH: task.scratchDir ?? cfg.scratchRoot,
+          // D-134: the commit-evidence values, so a commit helper does not have
+          // to parse them back out of the prompt. The prompt states them too -
+          // this is a convenience, never the only channel.
+          ...(task.workspace?.taskId ? { [ENV_TASK_ID]: task.workspace.taskId } : {}),
+          ...(task.workspace?.attemptId ? { [ENV_ATTEMPT_ID]: task.workspace.attemptId } : {})
         },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true

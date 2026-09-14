@@ -17,6 +17,7 @@ import {
   runMigrations,
   type DeviceAuthorityDeps
 } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * D-131b (uavhengig arkitektkontroll av PR #79, HEAD 72c4d0e - TOCTOU-funn):
@@ -40,7 +41,8 @@ import {
  * grants - et avslag skal aldri ha noen synlig sideeffekt utover audit.
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 const TENANT = "tenant-toctou";
 const PERSON = "person-toctou";
 
@@ -104,9 +106,12 @@ async function deviceExists(deviceId: string): Promise<boolean> {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-toctou-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -135,7 +140,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("D-131b A: proof-til-grant - en rotasjon FULLFØRT i vinduet mellom bevis og autorisasjon", () => {

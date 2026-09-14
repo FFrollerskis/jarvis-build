@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrator.ts";
 import { assertRuntimeRoleSafe, checkRuntimeRoleStatus, ensureRuntimeRole } from "../src/services/runtime-role.ts";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * Q-21 (UA-2 P0 host-blocker, 2026-08-15): host bekreftet at den faktiske
@@ -13,7 +14,8 @@ import { assertRuntimeRoleSafe, checkRuntimeRoleStatus, ensureRuntimeRole } from
  * policyene fantes og var FORCE-et, men ble aldri håndhevet. Denne suiten
  * beviser `ensureRuntimeRole`/`assertRuntimeRoleSafe` (§10.A-D/J-K i BO-en).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 
@@ -23,9 +25,12 @@ function connectAs(user: string, password: string): pg.Pool {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-runtime-role-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -34,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("ensureRuntimeRole (§10.A-D)", () => {

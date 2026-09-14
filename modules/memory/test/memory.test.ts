@@ -5,7 +5,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
-import { MessageStore, createPool, runMigrations } from "@jarvis/core";
+import { createPool, MessageStore, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import {
   LocalHashEmbedding,
@@ -18,7 +19,8 @@ import {
   type SourceRef
 } from "@jarvis/memory";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -54,11 +56,16 @@ function candidate(space: MemorySpace, subject: string, content: string, observe
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg4-"));
-  epg = new EmbeddedPostgres({
-    databaseDir, user: "postgres", password: "test-superuser-pw", port: PORT, persistent: false
-  });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({
+    databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false
+  }),
+    // D-141 B: proben maa bruke instansens EGNE credentials.
+    { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "test-superuser-pw"
@@ -96,7 +103,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("Skriveflyt: ADD/UPDATE/NOOP/INVALIDATE med versjonering", () => {

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   PAYLOAD,
@@ -30,6 +31,46 @@ let source;
 let destination;
 
 const TEST_PAYLOAD = ["worker.mjs", "run-worker.ps1", "lib/state.mjs", "lib/supervise.mjs", "supervisor.mjs"];
+
+const RUNTIME_SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const RUNTIME_ENTRYPOINTS = Object.freeze(["worker.mjs", "supervisor.mjs", "deploy.mjs"]);
+
+function runtimeImportClosure(entrypoints = RUNTIME_ENTRYPOINTS) {
+  const seen = new Set();
+  const pending = [...entrypoints];
+
+  while (pending.length > 0) {
+    const rel = pending.pop();
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+
+    const absolute = resolve(RUNTIME_SOURCE_ROOT, rel);
+    const sourceText = readFileSync(absolute, "utf8");
+    const patterns = [
+      /^\s*(?:import|export)\s+(?:[^"'`]*?\s+from\s+)?["'](\.[^"']+)["']/gm,
+      /\bimport\s*\(\s*["'](\.[^"']+)["']\s*\)/g
+    ];
+
+    for (const pattern of patterns) {
+      for (const match of sourceText.matchAll(pattern)) {
+        const depAbsolute = resolve(dirname(absolute), match[1]);
+        const depRel = relative(RUNTIME_SOURCE_ROOT, depAbsolute).split(sep).join("/");
+
+        if (depRel === ".." || depRel.startsWith("../")) {
+          throw new Error(`runtime import escapes worker source root: ${rel} -> ${match[1]}`);
+        }
+
+        if (!existsSync(depAbsolute)) {
+          throw new Error(`runtime import does not exist: ${rel} -> ${match[1]} (${depRel})`);
+        }
+
+        if (!seen.has(depRel)) pending.push(depRel);
+      }
+    }
+  }
+
+  return [...seen].sort();
+}
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "jarvis-deploy-"));
@@ -94,10 +135,10 @@ describe("planning", () => {
     expect(isOperationalPath("lib/state.mjs")).toBe(false);
   });
 
-  it("the real payload lists every shipped module", () => {
-    for (const rel of ["worker.mjs", "supervisor.mjs", "deploy.mjs", "lib/recovery.mjs", "lib/procid.mjs", "lib/git.mjs", "lib/statusjournal.mjs", "lib/deploy.mjs"]) {
-      expect(PAYLOAD).toContain(rel);
-    }
+  it("the real payload contains the complete local ESM runtime import closure", () => {
+    const closure = runtimeImportClosure();
+    const missing = closure.filter((rel) => !PAYLOAD.includes(rel));
+    expect(missing, `missing runtime payload modules: ${missing.join(", ")}`).toEqual([]);
   });
 });
 

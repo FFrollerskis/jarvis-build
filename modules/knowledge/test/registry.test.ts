@@ -5,7 +5,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FakeTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import { KnowledgeSourceRegistry, UnknownSourceInstanceError, type KnowledgeSourceConfig } from "../src/registry.ts";
@@ -129,7 +130,8 @@ describe("KnowledgeSourceRegistry - config/tenant-binding (ingen DB nødvendig)"
 });
 
 describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgres nødvendig)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  let PORT = 0;
+  let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
@@ -141,9 +143,12 @@ describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgre
 
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-reg-gh-"));
-    epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-    await epg.initialise();
-    await epg.start();
+    const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+      new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+    );
+    epg = leasedPostgres.postgres;
+    PORT = leasedPostgres.port;
+    stopEmbeddedPostgres = leasedPostgres.stop;
     await epg.createDatabase("jarvis_test");
     adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
     adminPool.on("error", () => undefined);
@@ -161,7 +166,7 @@ describe("KnowledgeSourceRegistry - github-fabrikk med ekte ToolGateway (Postgre
   afterAll(async () => {
     await appPool?.end();
     await adminPool?.end();
-    await epg?.stop();
+    await stopEmbeddedPostgres?.();
   }, 120_000);
 
   it("build() av github-config MED injiserte avhengigheter gir en fungerende GithubKnowledgeSource", async () => {

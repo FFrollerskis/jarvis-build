@@ -9,7 +9,10 @@ import {
   computeBackoff,
   shouldPostStatus,
   statusKey,
-  TERMINAL_REPORT_STATUSES
+  classifyReportStatus,
+  TERMINAL_REPORT_STATUSES,
+  NON_TERMINAL_STATUSES,
+  REPORT_OUTCOME
 } from "../lib/reconcile.mjs";
 
 const TRUSTED = "tsworkflow";
@@ -64,6 +67,135 @@ describe("completion requires task-specific trusted evidence", () => {
     const comments = [comment(1, `CLAUDE_REPORT\nTASK_ID=${taskId}\nSTATUS=COMPLETED`, { created_at: "2026-09-01T00:00:00Z" })];
     const res = findTrustedReport(comments, { taskId, trustedAuthor: TRUSTED, sinceIso: "2026-09-06T00:00:00Z" });
     expect(res).toBeNull();
+  });
+});
+
+/**
+ * D132 ROOT CAUSE 1 - the terminal-status vocabulary was not canonical.
+ *
+ * The host's own state.json recorded the consequence for two D-131 tasks:
+ *   "exit_0_without_matching_report (report_status_not_terminal (COMPLETE))"
+ * A finished task, correctly reported, was re-dispatched over one letter.
+ */
+describe("D132: canonical terminal-status parsing", () => {
+  const taskId = "D132-X";
+
+  const assess = (status) => assessCompletion({
+    taskId,
+    comments: [comment(1, `CLAUDE_REPORT\nTASK_ID=${taskId}\nSTATUS=${status}`)],
+    trustedAuthor: TRUSTED
+  });
+
+  it("THE REGRESSION: STATUS=COMPLETE closes the task", () => {
+    const res = assess("COMPLETE");
+    expect(res.complete).toBe(true);
+    expect(res.successful).toBe(true);
+    expect(res.canonicalStatus).toBe("COMPLETE");
+    expect(res.reason).toBe("matching_trusted_report_with_terminal_status");
+  });
+
+  it("COMPLETE and COMPLETED are the same canonical outcome", () => {
+    expect(classifyReportStatus("COMPLETE").outcome).toBe(REPORT_OUTCOME.COMPLETE);
+    expect(classifyReportStatus("COMPLETED").outcome).toBe(REPORT_OUTCOME.COMPLETE);
+  });
+
+  it("normalises the formatting noise a status value picks up in practice", () => {
+    for (const raw of [
+      "complete", " COMPLETE ", "**COMPLETE**", "`COMPLETE`", "\"COMPLETE\"",
+      "COMPLETE.", "COMPLETE (all CI gates green)", "closeout-complete", "Closeout Complete"
+    ]) {
+      expect(classifyReportStatus(raw).terminal, `raw=${JSON.stringify(raw)}`).toBe(true);
+      expect(classifyReportStatus(raw).outcome).toBe(REPORT_OUTCOME.COMPLETE);
+    }
+  });
+
+  it("MERGED and DELIVERED still close the task", () => {
+    expect(assess("MERGED").complete).toBe(true);
+    expect(assess("DELIVERED").complete).toBe(true);
+  });
+
+  it("BLOCKED and FAILED close the task but are never success", () => {
+    for (const status of ["BLOCKED", "FAILED", "ABORTED", "ERROR", "CANCELLED"]) {
+      const res = assess(status);
+      expect(res.complete, status).toBe(true);
+      expect(res.successful, status).toBe(false);
+    }
+  });
+
+  it("recognised progress statuses stay non-terminal and retryable", () => {
+    for (const status of NON_TERMINAL_STATUSES) {
+      const res = assess(status);
+      expect(res.complete, status).toBe(false);
+      expect(res.statusRecognised, status).toBe(true);
+      expect(res.reason, status).toMatch(/not_terminal/);
+    }
+  });
+
+  it("an UNRECOGNISED status is reported distinctly from recognised progress", () => {
+    const res = assess("MOSTLY_THERE_ISH");
+    expect(res.complete).toBe(false);
+    // The decisive distinction: this is a vocabulary mismatch, not progress.
+    expect(res.statusRecognised).toBe(false);
+    expect(res.reason).toMatch(/report_status_unrecognised/);
+  });
+
+  it("an empty or whitespace-only status normalises to nothing and is not recognised", () => {
+    expect(classifyReportStatus("   ").recognised).toBe(false);
+    expect(classifyReportStatus(null).recognised).toBe(false);
+  });
+
+  it("the trust boundary is untouched: an untrusted COMPLETE closes nothing", () => {
+    const comments = [comment(1, `CLAUDE_REPORT\nTASK_ID=${taskId}\nSTATUS=COMPLETE`, { login: "someone-else" })];
+    expect(assessCompletion({ taskId, comments, trustedAuthor: TRUSTED }).complete).toBe(false);
+  });
+});
+
+describe("D132: merge truth travels with the association", () => {
+  const taskId = "D132-MERGE";
+  const branch = "claude/ua8-personal-digital-twin-core";
+
+  it("carries mergedAt and the merge commit so a resumed task can verify, not retry", () => {
+    const rec = reconcilePriorAttempt({
+      taskId,
+      comments: [comment(1, `CLAUDE_ACK\nTASK_ID=${taskId}\nBRANCH=${branch}\nPR_NUMBER=79`)],
+      trustedAuthor: TRUSTED,
+      branchLookup: { ok: true, items: ["main", branch] },
+      pullLookup: {
+        ok: true,
+        items: [{
+          number: 79,
+          headRefName: branch,
+          state: "closed",
+          mergedAt: "2026-09-11T05:23:48Z",
+          mergeCommitSha: "c67a7ba792b8d655a26379655ffec31b353b7101"
+        }]
+      }
+    });
+    expect(rec.alreadyMerged).toBe(true);
+    expect(rec.existingPr.mergedAt).toBe("2026-09-11T05:23:48Z");
+    expect(rec.existingPr.mergeCommitSha).toBe("c67a7ba792b8d655a26379655ffec31b353b7101");
+  });
+});
+
+describe("D132: observed heads are task-owned provenance", () => {
+  it("accumulates every head this task has been observed at, without dropping one", () => {
+    const a = mergeObservedAssociations({}, { head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+    expect(a.observed_heads).toEqual(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]);
+
+    const b = mergeObservedAssociations(
+      { observed_heads: a.observed_heads },
+      { head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+    );
+    expect(b.observed_heads).toHaveLength(2);
+
+    // Idempotent: the same head twice is recorded once.
+    const c = mergeObservedAssociations({ observed_heads: b.observed_heads }, { head: b.observed_heads[1] });
+    expect(c.observed_heads).toHaveLength(2);
+  });
+
+  it("ignores a value that is not a commit sha", () => {
+    expect(mergeObservedAssociations({}, { head: "not-a-sha" }).observed_heads).toEqual([]);
+    expect(mergeObservedAssociations({}, { head: null }).observed_heads).toEqual([]);
   });
 });
 

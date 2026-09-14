@@ -5,6 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, listBusinessTenantIds, runMigrations } from "../src/index.ts";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * Q-27 (2026-08-18, D-65): mekanisk bevis for BÅDE bug-mekanismen OG fiksen
@@ -16,7 +17,8 @@ import { createPool, listBusinessTenantIds, runMigrations } from "../src/index.t
  * feilklasse, denne gangen i selve `tenants`-katalogoppslaget som tre
  * produksjons-schedulere er avhengige av (se D-65).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -30,9 +32,12 @@ let emptyResultTenantIds: string[] | undefined;
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-q27-catalog-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -74,7 +79,7 @@ afterAll(async () => {
   await appPool?.end();
   await outsiderPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("A: RLS-BLIND rå spørring (den opprinnelige Q-27-bugen) reproduseres mekanisk", () => {

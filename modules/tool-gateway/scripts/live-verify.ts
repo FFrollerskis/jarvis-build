@@ -6,11 +6,16 @@ for (const line of readFileSync(new URL("../../../.env", import.meta.url), "utf8
 import { mkdtemp } from "node:fs/promises"; import { tmpdir } from "node:os"; import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres"; import pg from "pg";
 import { runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { DailyBrief, EnvSecretProvider, GithubTransport, GmailTransport, GoogleCalendarTransport, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, emailSource, tasksSource } from "../src/index.ts";
-const epg = new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), "jarvis-bo4-")), user: "postgres", password: "pw", port: 34568, persistent: false });
-await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_live");
-const pool = new pg.Pool({ host: "127.0.0.1", port: 34568, database: "jarvis_live", user: "postgres", password: "pw" });
+const leasedPostgres = await startLeasedEmbeddedPostgres(async (leasedPort) =>
+  new EmbeddedPostgres({ databaseDir: await mkdtemp(join(tmpdir(), "jarvis-bo4-")), user: "postgres", password: "pw", port: leasedPort, persistent: false })
+);
+const epg = leasedPostgres.postgres;
+const port = leasedPostgres.port;
+await epg.createDatabase("jarvis_live");
+const pool = new pg.Pool({ host: "127.0.0.1", port, database: "jarvis_live", user: "postgres", password: "pw" });
 await runMigrations(pool);
 await pool.query(`INSERT INTO tenants (tenant_id,name,kind) VALUES ('tenant-personal','Tobias','person');
   INSERT INTO people (person_id,display_name) VALUES ('person-tobias','Tobias');
@@ -47,4 +52,4 @@ const statusText = `JARVIS STATUS\nconnectors: ${Object.entries(out["health"] as
 const st = await gw.execute({ identity: owner as never, tool_id: "telegram", action: "notify", parameters: { message: statusText } });
 out["status_delivered"] = st.ok;
 console.log(JSON.stringify(out, null, 1));
-await pool.end(); await epg.stop();
+await pool.end(); await leasedPostgres.stop();

@@ -7,9 +7,11 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
 import { DeviceService, FakePushAdapter, PgApprovalStore, PgDeviceRegistry, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { KillSwitch, PolicyGateway } from "@jarvis/policy";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 const watchKeys = generateKeyPairSync("ed25519");
 const rogueKeys = generateKeyPairSync("ed25519");
 let epg: InstanceType<typeof EmbeddedPostgres>;
@@ -33,9 +35,12 @@ function approval(overrides: Partial<ApprovalPayload> = {}, key = watchKeys.priv
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg8-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
@@ -56,7 +61,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("Enhetsidentitet: registrering + DB-basert godkjenningsverifisering", () => {

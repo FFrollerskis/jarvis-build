@@ -6,7 +6,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { approvalSigningBytes, type ApprovalPayload, type IdentityContext, type SignedApproval } from "@jarvis/contracts";
-import { PgApprovalStore, createPool, runMigrations } from "@jarvis/core";
+import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { ScriptedAdapter, type ToolCallRequest } from "@jarvis/provider-adapters";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -35,7 +36,8 @@ import { z } from "zod";
  * Kjeden er hele den ekte: ModelGateway.completeWithTools → normalized call →
  * MeshToolExecutor → ToolGateway → Policy Gateway → audit. Ufarlig fake-D-handling.
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 const watchKeys = generateKeyPairSync("ed25519");
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
@@ -106,9 +108,12 @@ const dCall = (id: string, note = "test"): ToolCallRequest => ({
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pgdm-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
@@ -158,7 +163,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 function fakeModelPool(): pg.Pool {

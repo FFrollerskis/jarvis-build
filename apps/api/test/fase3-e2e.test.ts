@@ -20,6 +20,7 @@ import {
   runMigrations,
   withTenantTransaction
 } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { FailingAdapter, ScriptedAdapter, textOnly } from "@jarvis/provider-adapters";
@@ -36,7 +37,8 @@ import { ConversationEngine } from "../src/conversation.ts";
 import { seedOwner } from "../src/seed.ts";
 import { createApiServer } from "../src/server.ts";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 const watchKeys = generateKeyPairSync("ed25519");
 // D-130 arkitekt-review MERGE BLOCKER 1-fiks: `/chat`/`/brief` stoler ikke
 // lenger på klient-oppgitt `person_id`/`device_id`/`auth_strength` - ETT
@@ -151,15 +153,20 @@ async function chatSseBody(message: string, identity: Record<string, string> = w
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg3-"));
-  epg = new EmbeddedPostgres({
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({
     databaseDir,
     user: "postgres",
     password: "test-superuser-pw",
-    port: PORT,
+    port,
     persistent: false
-  });
-  await epg.initialise();
-  await epg.start();
+  }),
+    // D-141 B: proben maa bruke instansens EGNE credentials.
+    { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "test-superuser-pw"
@@ -301,7 +308,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("Akseptanse 1: samtale oppretter og følger jobb til sluttstatus", () => {

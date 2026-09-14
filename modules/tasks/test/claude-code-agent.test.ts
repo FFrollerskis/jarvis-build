@@ -9,6 +9,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ArtifactStore, ClaudeCodeAgent, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, createCodingHandler } from "@jarvis/tasks";
 import type { CodingAgentExec } from "../src/coding.ts";
@@ -117,7 +118,8 @@ describe("A-K: ClaudeCodeAgent.modify() (ren logikk, ingen ekte prosess)", () =>
 });
 
 describe("L-O: ClaudeCodeAgent via createCodingHandler (ekte embedded-Postgres + ekte sandbox-prosesskjøring)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  let PORT = 0;
+  let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
@@ -159,9 +161,12 @@ describe("L-O: ClaudeCodeAgent via createCodingHandler (ekte embedded-Postgres +
 
   beforeAll(async () => {
     const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-cc-"));
-    epg = new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false });
-    await epg.initialise();
-    await epg.start();
+    const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+      new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port, persistent: false })
+    );
+    epg = leasedPostgres.postgres;
+    PORT = leasedPostgres.port;
+    stopEmbeddedPostgres = leasedPostgres.stop;
     await epg.createDatabase("jarvis_test");
     adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
     adminPool.on("error", () => undefined);
@@ -226,7 +231,7 @@ process.exit(0);
   afterAll(async () => {
     await appPool?.end();
     await adminPool?.end();
-    await epg?.stop();
+    await stopEmbeddedPostgres?.();
   }, 120_000);
 
   function runCodingJob(overrides: { goal?: string; claudeCodeCredential?: boolean }) {

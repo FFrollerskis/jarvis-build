@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { GithubApiError, GithubTransport, ToolGateway, firstWaveTools, type SecretProvider } from "@jarvis/tool-gateway";
 import {
@@ -351,7 +352,8 @@ describe("X: mutasjons-serialisering (§7/§14 - prosess-lokal, min. 1s avstand,
 });
 
 describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transporten, uavhengig av rate-limit-cooldown-tilstand (§21)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  let PORT = 0;
+  let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
@@ -366,8 +368,13 @@ describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transpor
 
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "jarvis-pggh97-"));
-    epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-    await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_test");
+    const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+      new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+    );
+    epg = leasedPostgres.postgres;
+    PORT = leasedPostgres.port;
+    stopEmbeddedPostgres = leasedPostgres.stop;
+    await epg.createDatabase("jarvis_test");
     adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
     adminPool.on("error", () => undefined);
     await runMigrations(adminPool);
@@ -393,7 +400,7 @@ describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transpor
 
   afterAll(async () => {
     vi.unstubAllGlobals();
-    await appPool?.end(); await adminPool?.end(); await epg?.stop();
+    await appPool?.end(); await adminPool?.end(); await stopEmbeddedPostgres?.();
   }, 120_000);
 
   it("frosset 'github'-connector stopper handlingen FØR transporten nås - selv naar rate-limit-tilstanden er NORMAL", async () => {
@@ -412,15 +419,21 @@ describe("Y: owner freeze/global pause håndheves FORTSATT foran GitHub-transpor
 });
 
 describe("Z: PgGithubRateLimitStore mot ekte Postgres (restart-sikkerhet/delt tilstand, §17)", () => {
-  const PORT = 30000 + Math.floor(Math.random() * 20000);
+  let PORT = 0;
+  let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
 
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "jarvis-pggh97store-"));
-    epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-    await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_test");
+    const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+      new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+    );
+    epg = leasedPostgres.postgres;
+    PORT = leasedPostgres.port;
+    stopEmbeddedPostgres = leasedPostgres.stop;
+    await epg.createDatabase("jarvis_test");
     adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
     adminPool.on("error", () => undefined);
     await runMigrations(adminPool);
@@ -428,7 +441,7 @@ describe("Z: PgGithubRateLimitStore mot ekte Postgres (restart-sikkerhet/delt ti
     appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_test97b", password: "pw2" });
   }, 240_000);
 
-  afterAll(async () => { await appPool?.end(); await adminPool?.end(); await epg?.stop(); }, 120_000);
+  afterAll(async () => { await appPool?.end(); await adminPool?.end(); await stopEmbeddedPostgres?.(); }, 120_000);
 
   it("en violation skrevet av ÉN store-instans (t.d. 'api'-prosessen) leses tilbake av en HELT NY instans (t.d. 'worker'-prosessen etter restart) - delt/overlevende tilstand", async () => {
     const apiInstance = new PgGithubRateLimitStore(appPool);

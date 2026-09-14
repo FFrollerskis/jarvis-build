@@ -6,6 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
@@ -14,7 +15,8 @@ import {
   firstWaveTools, homeAssistantTools, tasksSource, type SecretProvider
 } from "@jarvis/tool-gateway";
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -33,8 +35,13 @@ const lockParams = { site_id: "hus", room_id: "gang", entity: "lock.dor", locked
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pgua0-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise(); await epg.start(); await epg.createDatabase("jarvis_test");
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
+  await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   // Teardown-race (embedded-PG): server-terminert klient skal aldri bli uncaught.
   adminPool.on("error", () => undefined);
@@ -82,7 +89,7 @@ beforeAll(async () => {
   })]) gateway.register(t);
 }, 240_000);
 
-afterAll(async () => { await appPool?.end(); await adminPool?.end(); await epg?.stop(); }, 120_000);
+afterAll(async () => { await appPool?.end(); await adminPool?.end(); await stopEmbeddedPostgres?.(); }, 120_000);
 
 describe("UA0-AUTHORITY: Sovereign owner-modus", () => {
   it("owner-tenant: klasse D utføres autonomt UTEN approval, med preflight + before/after-evidens", async () => {

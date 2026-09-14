@@ -185,6 +185,239 @@ Worker (`worker.mjs`):
   tasken tilbake til den vanlige retry-banen. Et uprøvbart pid blokkerer kun
   innenfor barnets eget levetidsbudsjett — pid-gjenbruk kan aldri stoppe loopen
   permanent.
+- **C3 (kø-rekonsiliering og supersesjon, D-132).** FERSK kontroll-issue-sannhet
+  slår stale lokal bokføring, og køvalget er totalt og deterministisk:
+  - Terminal `STATUS` leses KANONISK (`normalizeReportStatus()` +
+    `TERMINAL_STATUS_ALIASES`), ikke med eksakt strengsammenligning.
+    `COMPLETE`/`COMPLETED`/`MERGED`/`DELIVERED`/`BLOCKED`/`FAILED` m.fl. er samme
+    kanoniske utfall uansett case, markdown-utheving, kodefencing, sitattegn,
+    etterstilt parentes eller bindestrek-vs-understrek. En status som er
+    GJENKJENT og ikke-terminal (`IN_PROGRESS`) er fortsatt retry; en status som
+    IKKE er gjenkjent i det hele tatt parkeres som BLOCKED med vokabularet oppgitt
+    — retry på en uleselig status er selve feilklassen D-132 lukker.
+  - FØR noen kandidat velges pensjoneres hver ikke-terminal task med
+    `attempts>0` som har en betrodd terminal `CLAUDE_REPORT` — uavhengig av
+    backoff, og uavhengig av om den ville blitt kjøringens kandidat.
+  - En aldri-utsendt task slår ALLTID en retry (tiering), så en nyere gyldig
+    uprosessert `ARCHITECT_TASK` kan ikke preemptes av stale retry-bokføring.
+    Ordningen er total: tier → tid → comment-id (ferske eldst-først, retries
+    nyest-først).
+  - En ikke-terminal task som er STRENGT ELDRE enn en task som har fullført
+    VELLYKKET blir `superseded` — terminal, med `superseded_by`/`superseded_at`/
+    `superseded_basis` registrert og én statusmelding postet. Ingenting slettes
+    stille, og verken restart, supervisor-restart eller tilbakespolt
+    backoff-klokke kan gjenopplive en terminal eller superseded task.
+  - En gjenopptatt task får merge-sannheten (`merge_commit_sha`, `mergedAt`) i
+    prompten, slik at en allerede utført merge VERIFISERES i stedet for å kjøres
+    på nytt. `head_before → head_after` og `observed_heads` gis også, men KUN
+    som observasjoner — D-132 lot dem stå som påstand om forfatterskap, og den
+    slutningen er fjernet i D-134 (se C6).
+- **C4 (supersesjon krever POSITIVT bevis, PR #80-review).** En retirement er
+  permanent, så terskelen er positivt bevis for at arkitektens nyere ordre
+  FAKTISK gikk igjennom. En eldre task pensjoneres KUN på ett av to grunnlag,
+  og grunnlaget registreres (`superseded_basis`) og rapporteres:
+  - `newer_task_completed_successfully` — en strengt nyere task har et KANONISK
+    VELLYKKET terminal-utfall, enten fra en fersk betrodd report
+    (`successful === true`) eller fra en lokal post som POSITIVT sier
+    `successful: true`. `STATUS=BLOCKED`/`FAILED`, en ugjenkjent status, og en
+    `completed`-post som aldri registrerte suksess (f.eks. en v1-migrert rad)
+    pensjonerer INGENTING. Fersk sannhet vinner begge veier: en fersk
+    `BLOCKED`-report stopper supersesjon selv om state-filen fortsatt sier
+    `completed, successful: true`.
+  - `explicit_trusted_supersedes_declaration` — en strengt nyere BETRODD
+    `ARCHITECT_TASK` inneholder `SUPERSEDES=<eksakt TASK_ID>`. Eksakt
+    strenglikhet mot en task workeren faktisk kjenner (ingen prefiks, ingen
+    normalisering), retningsbestemt (en eldre erklæring kan aldri pensjonere en
+    nyere task), aldri selvrefererende, og auditbar — den erklærende
+    kommentar-ID-en registreres og oppgis i statusmeldingen. Erklæringen leses
+    KUN fra betrodd kontroll-issue-innhold, aldri fra PR-body, CI-logg eller
+    annet ubetrodd innhold.
+- **C5 (ISOLERT TASK-WORKTREE og task-eid UKOMMITERT tilstand, D-133).** Et avbrutt
+  forsøk som etterlot LEGITIME UKOMMITERTE endringer var tidligere anonymt
+  skitt i den delte checkouten: ingenting attribuerte det til en task, så neste
+  kjørings dirty-guard blokkerte — korrekt — og arbeidet var strandet, med kun
+  to utveier, begge forbudte (adopter uattribuerte filer, eller stash/reset dem
+  bort). Det manglet en STRUKTUR, ikke en regel:
+  - Hver task får sin EGEN linkede git-worktree, nøklet på `TASK_ID`, UTENFOR
+    den primære checkouten (`worktreeRoot`, standard en SØSKENKATALOG av
+    `scratchRoot` — bevisst ikke under den, siden `scratchRoot` gis barnet som
+    `TEMP` — og `assertOutsideRepo`-håndhevet). Barnet kjører med den som
+    `cwd`. Brukerens
+    checkout kan derfor ikke bli skitten på en tasks vegne, og task A sitt
+    ukommiterte arbeid ligger et sted task B aldri ser.
+  - En DURABEL CLAIM (`<worktreeRoot>/.claims/<TASK_ID>.json`) skrives og
+    fsynces FØR `git worktree add` kjøres, og re-verifiseres før en worktree
+    gjenbrukes. Den binder katalogen til eksakt `TASK_ID`, betrodd
+    kommentar-ID, repo (owner/name + lokal sti), kontroll-issue, baseline-SHA,
+    worktree-sti og attempt-identitet. Eierskap hevdes FRAMOVER før noe røres
+    og BARE sjekkes etterpå — det utledes aldri BAKOVER fra skitne filer, for
+    den slutningen er nøyaktig den utrygge (en endret fil er like forenlig med
+    brukerens eget arbeid).
+  - Skitt inne i en katalog dekket av en GYLDIG claim for DENNE tasken er
+    task-eid ved konstruksjon, og gis til et gjenopptatt barn som eksplisitt
+    «dette er DITT eget arbeid — aldri stash/reset/checkout over/clean/slett det».
+    Skitt alle andre steder (primær checkout, uclaimet katalog, katalog med
+    claim for en annen task/repo/kommentar) er UKJENT og forblir fail-closed:
+    rapportert med eksakt sti, aldri adoptert, aldri endret.
+  - **Rekkevidden er UKOMMITERT TILSTAND I EN KATALOG, og stopper der.** Claimen
+    dekker katalogen, ikke hver enkelt skriving inn i den, og en COMMIT er et
+    durabelt artefakt som havner i en PR. Hvem som har FORFATTET en commit er
+    derfor et annet spørsmål med et annet bevis — se C6. Å la
+    katalog-attribusjon smitte over på commit-forfatterskap er nøyaktig
+    kategorifeilen D-134 lukker.
+  - Et krasj mellom claim og worktree er rekonsilierbart (claimen har sin egen
+    livssyklus `creating → ready → released`, altså staged intensjon → effekt →
+    resultat), og en uleselig claim er en NEKTELSE, ikke en invitasjon til å
+    overskrive.
+  - Opprydding skjer kun etter en terminal og VELLYKKET rekonsiliering, kun når
+    worktreen er ren, og kun via `git worktree remove` UTEN `--force` — så git
+    selv nekter å ødelegge ukommitert arbeid hvis våre egne garder skulle ta
+    feil. Claim-filen slettes ALDRI; den merkes `released` slik at beviset
+    overlever katalogen.
+- **C6 (COMMIT-FORFATTERSKAP krever eget POSITIVT bevis, D-134 / PR #80-review).**
+  D-132 fortalte et gjenopptatt barn at «HEAD flyttet seg i forsøksvinduet,
+  altså er commitene i spennet TASK-ENS EGET ARBEID». Den slutningen er ugyldig:
+  `head_before != head_after` er to avlesninger av en ref på to tidspunkter. Den
+  sier AT en ref flyttet seg, aldri HVEM som flyttet den — enhver prosess med
+  tilgang til katalogen (brukeren, et script, en editor, en annen
+  worker-instans) kan gjøre det, og workeren kan ikke se forskjell. Å ta feil i
+  DEN retningen er verre enn å ta feil motsatt vei, for den ender med at en
+  fremmed commit adopteres som task-output og shippes i en PR.
+  - **To ULIKE typer attribusjon, bevisst ikke slått sammen.**
+    KATALOG-/DIRTY-STATE-attribusjon (C5) er sann VED KONSTRUKSJON: workeren
+    lagde en tom worktree fra en kjent baseline, skrev claimen FØR noe ble rørt,
+    og pekte nøyaktig ett barn dit. COMMIT-forfatterskap følger IKKE av det.
+  - **Beviset (`lib/provenance.mjs`).** Hvert forsøk har en fersk tilfeldig
+    `attempt_id`, generert av workeren, registrert durabelt i claim og state FØR
+    barnet finnes, og gitt KUN til det barnet. En commit som bærer
+    `Jarvis-Task-Id: <TASK_ID>` OG `Jarvis-Attempt-Id: <attempt_id>` som trailere
+    er bundet til nøyaktig den tasken og det forsøket. Begge halvdeler kreves,
+    begge sammenlignes med eksakt strenglikhet: task-ID-en alene er offentlig og
+    gjettbar, attempt-ID-en alene sier ikke hvilken task den gjaldt.
+  - **Utfall.** Kun `unchanged` og `task_attributed` er VERIFISERT. `partially_
+    attributed` (én uforklart commit forgifter hele spennet), `unattributed`,
+    `diverged` (refen ble spolt tilbake/erstattet), `drifted_after_attempt`
+    (refen flyttet seg ETTER at forsøket var ferdig) og `unknown` (git kunne
+    ikke svare) er UVERIFISERT.
+  - **Uverifisert er fail-closed I BEGGE RETNINGER.** Arbeidet BEVARES, blir
+    presentert for barnet som UKJENT forfatterskap, og barnet får beskjed om å
+    verifisere og rekonsilere FRAMOVER. Ingen destruktiv rekonsiliering
+    autoriseres — ikke stash, reset, revert, clean, checkout over, force-push,
+    rebase eller re-apply av et eldre snapshot. Uverifisert er ikke det samme
+    som uønsket, og workeren har ikke myndighet til å avgjøre hvilket det er.
+  - **Et lagret verdikt gjelder bare for HEAD-en det ble beregnet på.** Ved
+    gjenopptagelse sammenlignes det med worktreens FAKTISKE HEAD nå; har refen
+    driftet, eller kan HEAD ikke leses, degraderes verdiktet. Ingenting i denne
+    banen kan OPPGRADERE et uverifisert spenn til et verifisert.
+  - **Ærlig grense, oppgitt og ikke skjult:** dette er bevis mot UVEDKOMMENDE
+    skrivere. Det er IKKE beskyttelse mot en bevisst forfalsker som allerede har
+    lesetilgang til verten — `attempt_id` ligger durabelt på disk og havner i en
+    publisert commit-melding. Workeren kan ikke bevise forfatterskap mot en
+    angriper som allerede eier maskinen, og påstår ikke at den kan.
+  - `observed_heads` er en LOGG OVER OBSERVASJONER og merkes eksplisitt som det
+    i både kode og prompt: den sier at disse commitene fantes da workeren så
+    etter, ikke at tasken lagde noen av dem.
+- **C7 (UVERIFISERT PROVENIENS ER EN EKTE FULLFØRINGSPORT, D-135 / PR
+  #80-review runde 4).** D-134 svarte ærlig på forfatterskapsspørsmålet og gjorde
+  så ingenting med svaret. Fullføringsbanen leste `completion.complete` og
+  ingenting annet, så det adversarielle tilfellet D-134 selv satte opp — en
+  uvedkommende skriver flytter den claimede worktreens HEAD mens barnet kjører —
+  endte fortsatt i en ren suksess hvis barnet OGSÅ postet en betrodd
+  `STATUS=COMPLETE`. Tre fail-open-konsekvenser av én manglende betingelse:
+  tasken ble markert `completed` OG `successful`, `completion_confirmed` ble
+  emittert, worktreen med den uforklarte commiten ble frigitt, og recorden gikk
+  videre og pensjonerte strengt eldre, fortsatt gyldige tasks gjennom køens
+  fresh-truth-supersesjon.
+  - **Porten (`evaluateCompletionGate`).** Er rapporten terminal OG
+    `successful === true`, men proveniensen IKKE verifisert (`unattributed`,
+    `partially_attributed`, `diverged`, `drifted_after_attempt`, `unknown`),
+    HOLDES fullføringen. Tasken parkeres som `blocked` med `successful: false`
+    og en durabel `completion_gate`-record; `completed_at` settes ikke.
+  - **Alle fire fullføringsbanene er portet**, ikke bare dispatch-banen:
+    `reconcileReportedTasks`, krasj-recovery (`COMPLETE_FROM_REPORT`),
+    pre-dispatch-rekonsilieringen i `runTask` og etter-dispatch-sjekken. En port
+    i bare én av dem ville blitt gått rundt av neste kjøring gjennom en annen.
+    De tre ikke-dispatch-banene UTLEDER nå ferskt verdikt (se C8); D-135 lot dem
+    arve det durabelt registrerte, og et krasj i det ordinære vinduet etterlater
+    ingen slik record.
+  - **Porten overstyrer fresh truth i køen — og kun der.** Køen avgjør
+    supersesjon fra ferske kontroll-issue-kommentarer med vilje, men den ferske
+    sannheten HER er nettopp `STATUS=COMPLETE`-rapporten hvis suksesspåstand
+    workeren avviste. Uten den durable overstyringen ville en nettopp parkert
+    task pensjonert eldre arbeid på neste kjøring. Asymmetrien er hele
+    sikkerhetsargumentet: en holdt port kan bare gjøre en task MINDRE vellykket,
+    aldri mer, og kan derfor bare FORHINDRE en pensjonering.
+  - **Også en eksplisitt `SUPERSEDES=`-erklæring holdes** når porten er holdt.
+    Dette er bevisst strengere enn D-133-regelen om at erklæringen er arkitektens
+    egen myndighet: en task som påsto suksess over commits ingen kan gjøre rede
+    for, er ikke et trygt grunnlag for å pensjonere annet arbeid før et menneske
+    har rekonsilert. Å gjenutstede pensjoneringen er én kommentar; arbeidet som
+    går tapt ved å ta feil er ikke like billig å hente tilbake.
+  - **Mislykkede terminalrapporter portes IKKE.** `STATUS=BLOCKED`/`FAILED` får
+    fortsatt være terminale: de påstår ikke at arbeid landet, kan ikke frigi en
+    worktree (frigivelse krever allerede `successful === true`) og kan ikke skape
+    suksess-supersesjon (som allerede krever positiv suksess).
+  - **Ingenting destrueres.** Alle commits og filer blir stående nøyaktig der
+    forsøket forlot dem, worktreen og claimen beholdes, og statusnotisen sier
+    eksplisitt hva som IKKE ble gjort. Exit-koden er 3 (blokkert), aldri 0.
+  - **Beslutningen dekker HVER commit i spennet.** `MAX_EXAMINED_COMMITS` (1000)
+    begrenser hvor mye som LESES OG KLASSIFISERES; `MAX_RECORDED_COMMIT_DETAILS`
+    (50) begrenser kun hvor mange detaljrader som PERSISTERES per liste. Den
+    gamle koden brukte ett tall til begge (`commits.slice(0, 50)`), så et spenn
+    på 51 commits der de 50 første bar task-ens trailere og den 51. var fremmed
+    ble klassifisert `task_attributed`, `verified: true` — en positiv
+    eierskapspåstand om en commit som aldri ble lest. Nå er `*_count` alltid de
+    FULLE tallene, `details_truncated` sier når listen er kuttet, og et spenn
+    større enn lesegrensen er `unknown` — aldri et verdikt om prefiksen git
+    tilfeldigvis returnerte først.
+- **C8 (FRAVÆR AV BEVIS ER IKKE BEVIS — KRASJVINDUET, D-136 / PR #80-review
+  runde 5).** D-135 sendte porten med ett bevisst hull, skrevet ut i sin egen
+  kommentar som en egenskap: «den finner ikke opp bevis. Når det IKKE finnes noen
+  proveniens-record i det hele tatt — en state-rad skrevet før D-134 fantes —
+  slipper porten gjennom og sier det.» Den slutningen er feil på nøyaktig samme
+  måte som den D-134 fjernet. `provenance === null` betyr ikke «spennet var i
+  orden»; det betyr at INGEN SÅ ETTER, og en port som gjør «ingen så etter» om
+  til «vellykket fullføring akseptert» er en fail-open-default med et ærlig navn.
+  - **Det var heller ikke begrenset til pre-D-134-rader.** Workerens EGEN
+    rekkefølge lager vinduet, på hver eneste dispatch: `IN_PROGRESS`, barnets
+    identitet og den durable claimen skrives FØR spawn, mens `commit_provenance`
+    skrives KUN i etter-dispatch-sjekkpunktet ETTER at barnet har avsluttet. En
+    forelder som dør imellom — det ordinære krasjet hele delsystemet finnes for —
+    etterlater durabel claim, ekte worktree, en betrodd `STATUS=COMPLETE` postet
+    av barnet, og INGEN record. Krasj-recovery leste `null`, slapp gjennom, og
+    markerte tasken `completed` OG `successful`, frigav worktreen og lot recorden
+    pensjonere eldre tasks. Alle D-135s egne tester passerte fortsatt, fordi hver
+    eneste av dem gikk gjennom ETTER-DISPATCH-banen, der et verdikt alltid finnes.
+  - **`null` HOLDER nå** (`COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD`).
+  - **Men de tre ikke-dispatch-banene lener seg ikke på den nektelsen alene** —
+    en port som bare sier «nei» til enhver legitim krasj-recovery ville vært
+    ubrukelig. De UTLEDER ferskt verdikt (`deriveReconciliationProvenance`) FØR
+    hver suksess-rekonsiliering, av ting som finnes på disk og som ikke kommer
+    fra barnet: (1) den DURABLE CLAIMEN, verifisert eksakt mot task/repo/
+    kontroll-kommentar/worktree-sti og krav om `ready`; (2) ATTEMPT-ID-ene
+    workeren selv genererte og registrerte der; (3) BASELINE-commiten claimen ble
+    opprettet på; (4) worktreens FAKTISKE HEAD akkurat nå. Hele spennet
+    `baseline..nå` klassifiseres med de samme bundne fail-closed-reglene som
+    dispatch-banen bruker.
+  - **Ankeret er claimens BASELINE, ikke forsøkets `head_before`.** Det er
+    bevisst strengere: det dekker hver commit som noen gang har dukket opp i
+    katalogen, på tvers av alle forsøk, så en fremmed commit fra et TIDLIGERE
+    forsøk ikke kan hvitvaskes av et senere som tilfeldigvis startet etter den.
+  - **Manglende claim/worktree/baseline/attempt-ID, uleselige git-fakta, drift,
+    divergens, delvis/uattribuerte commits eller avkortet bevis er UKJENT** og
+    uverifisert — aldri «rent». Alt bevares; utledningen skriver, fjerner og
+    omskriver ingenting.
+  - **Bevis kan KUN degradere.** Et ferskt verdikt kan ikke slette et gammelt
+    funn: et spenn et tidligere forsøk klassifiserte `unattributed` kan se
+    `unchanged` ut nå bare fordi refen er flyttet tilbake. Porten ser derfor det
+    VERSTE av registrert og utledet verdikt (`reconciliationProvenanceForGate`),
+    og VERIFISERT krever BEGGE. En registrert verifisert record kjøper ingenting
+    alene — utledningen må stå på egne bein.
+  - **En holdt port overlever i exit-koden uansett hvor den fyrte.** D-135 bar
+    kun pre-seleksjons-passet inn i exit-koden, så en hold reist under
+    krasj-recovery — nettopp banen D-136-vinduet lander på — avsluttet med 0. Nå
+    gir enhver holdt port exit 3, også når kjøringen etterpå dispatchet en annen
+    task uten problemer.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
@@ -366,7 +599,9 @@ og ingen permission-bypass legges til implisitt noe sted.
 npx vitest run ops/claude-worker/test
 ```
 
-304 tester (kjørt 2026-09-07 på denne branchen: 14 filer / 304 passed). I tillegg
+628 tester (kjørt 2026-09-12 på `claude/d132-worker-recovery-reconciliation`:
+21 filer / 628 passed; 21 filer / 588 etter D-134, 20 filer / 538 etter D-133,
+18 filer / 470 etter D-132, 16 filer / 428 før). I tillegg
 til v2-dekningen (karantene inkludert den eksakte D125-filen, symlink, reparse
 point, kollisjon, sporede filer; completion-bevis; backoff; status-dedup;
 tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
@@ -389,6 +624,160 @@ tillitsgrensen; hemmelighetsvask) dekker v2.1/v2.2:
 - **supervisor-protokollen ende-til-ende**: to like `COMMAND_ID` i samme poll,
   budsjett for to unike restarts, krasj før/etter `Start-ScheduledTask`, feilet
   kvittering, og bevart utsettelse fra travel til ledig.
+
+og v2.7 (D-132) legger til:
+
+- **kø-ordning og supersesjon** (`test/queue.test.mjs`, 23 tester): tiering,
+  total deterministisk ordning inkl. like tidsstempler, supersesjon drevet av
+  ferske kommentarer når lokal state er stale, og at terminal/superseded state
+  ikke kan gjenopplives av en tilbakespolt backoff-klokke;
+- **kanonisk statusparsing** (`test/reconcile.test.mjs`): `STATUS=COMPLETE`
+  lukker tasken, staveformer og formateringsstøy normaliseres, og en UGJENKJENT
+  status skilles eksplisitt fra gjenkjent framdrift;
+- **NØYAKTIG D-131-sekvensen mot det EKTE entrypointet**
+  (`test/worker-queue-reconciliation.test.mjs`, 7 tester): eldre recovery-task →
+  nyere merge-task → ACK → merge lykkes → prosess-/rapportavbrudd → restart, med
+  bevis for at den gamle task-en aldri dispatches igjen og at tre påfølgende
+  restarter ikke gjenoppliver den; pluss at en allerede merget task får
+  merge-commit og «ikke merge igjen» i resume-prompten, og at en gjenopptatt
+  task får sin egen head-proveniens.
+
+Merk: `fixtures/fake-claude.mjs` poster som standard `STATUS=COMPLETE` — den
+EKTE staveformen. Den postet tidligere `STATUS=COMPLETED`, som ingen ekte
+barneprosess bruker, og det er grunnen til at 428 grønne tester kunne sameksistere
+med en worker som ikke kjente igjen en eneste ekte fullføringsrapport.
+
+og v2.8 (D-133, PR #80-review) legger til:
+
+- **claim-modellen og klassifiseringen** (`test/worktree.test.mjs`, 34 tester):
+  sti-validering av `TASK_ID`, alle claim-felter, MISSING vs. UNUSABLE, eksakt
+  `verifyClaim` (ingen prefiks, ingen case-variant), og HVER fail-closed gren i
+  `classifyTaskWorktree` — inkludert at en uleselig claim er en NEKTELSE, at et
+  uanswerbart `worktree list` aldri leses som «ingenting registrert», og at
+  eierskap ikke kan utledes bakover fra vilkårlige skitne filer;
+- **ISOLASJON MOT EKTE GIT** (`test/worker-task-worktree.test.mjs`):
+  disse setter bevisst IKKE `JARVIS_WORKER_GIT`. Påstanden er fysisk — hvilken
+  katalog havnet bytene i, er brukerens checkout fortsatt ren, nekter git faktisk
+  å slette ukommitert arbeid — og en fake-git ville bare vært enig med workeren.
+  Dekker: exit 0 + ingen rapport + ekte tracked/untracked mutasjoner → restart →
+  gjenopptagelse i samme beviste kontekst; primær checkout ren gjennom alt;
+  brukerens egne skitne filer byte-for-byte urørt; uclaimet katalog og fremmed
+  claim avvist uten mutasjon; nyere task kjører i sin egen worktree og blokkeres
+  ikke av den eldres skitt; to tasks skitne samtidig; restart dupliserer ingen
+  commit; krasjet `IN_PROGRESS`-forelder gjenopptas i samme claimede kontekst;
+  og opprydding kun ved suksess, med claimen bevart som `released`;
+- **supersesjon krever positivt suksessbevis** (`test/queue.test.mjs` +
+  `test/worker-queue-reconciliation.test.mjs`): nyere `BLOCKED`/`FAILED`
+  pensjonerer ikke en eldre retry — og den eldre KJØRER faktisk etterpå; et
+  lokalt rekonsilert `successful: false` pensjonerer ikke; ekte suksess
+  pensjonerer fortsatt og registrerer grunnlaget; eksplisitt `SUPERSEDES` er
+  eksakt, retningsbestemt og auditbar; `SUPERSEDES` fra UBETRODD innhold
+  ignoreres helt.
+
+og v2.9 (D-134, PR #80-review runde 3) legger til:
+
+- **bevismodellen** (`test/provenance.test.mjs`, 42 tester): trailer-parsing
+  (case, whitespace, CRLF, og at PROSA som bare NEVNER ID-ene ikke er et
+  trailer), at BEGGE halvdelene kreves (task-ID alene er offentlig; attempt-ID
+  alene sier ikke hvilken task), at et TIDLIGERE forsøk av SAMME task godtas,
+  og hvert eneste verdikt inkludert `unknown` for uleselig git. Rendringen
+  testes separat fra klassifiseringen, fordi en modul som klassifiserer riktig
+  men fortsatt skriver «dette er ditt eget arbeid» ville vært like farlig som
+  defekten;
+- **ADVERSARIELL TEST MOT EKTE ENTRYPOINT OG EKTE GIT**
+  (`test/worker-task-worktree.test.mjs`): en UVEDKOMMENDE SKRIVER — test-
+  prosessen, med en annen git-identitet, på en fil barnet aldri rører — committer
+  inn i den isolerte task-worktreen MENS et forsøk faktisk kjører (synkronisert
+  på fixturens egen `running`-markør, ikke på en sleep). Alt workeren kan
+  observere er da identisk med en legitim egen commit. Bevist: neste resume
+  kaller den IKKE task-eid, aksepterer den IKKE som task-output, og autoriserer
+  INGEN destruktiv rekonsiliering — prompten inneholder heller ikke noen
+  `git stash`/`reset`/`revert`/`clean`/`--force`-instruks i det hele tatt. Dekker
+  også BLANDET spenn (egen + fremmed commit → hele spennet uverifisert),
+  glemte trailere fra workerens EGET barn (uverifisert, men bevart), refen
+  spolt tilbake mellom forsøk (`drifted_after_attempt`, ingenting gjenopprettet),
+  og den POSITIVE motprøven: et barn som stempler trailerne korrekt FÅR sine
+  commits presentert som beviselig sine egne;
+- **migrering**: state skrevet av en pre-D134 worker (kun `head_before`/
+  `head_after`, ingen verdikt) leses som UVERIFISERT, ikke som forfatterskap.
+
+Merk også: `fixtures/fake-git.mjs` modellerer `git worktree list/add/remove`,
+og en ikke-tvunget `remove` FEILER der på en skitten worktree akkurat som i ekte
+git — en alltid-lykkes-stub ville skjult nettopp egenskapen testen skal bevise.
+`fixtures/fake-claude.mjs` kan opptre både som et VELOPPDRAGENT barn (stempler
+trailerne fra den attempt-ID-en workeren faktisk eksporterte) og som et
+GLEMSOMT barn (`JARVIS_FAKE_CLAUDE_NO_TRAILER=1`), fordi de to skal gi ULIKE
+verdikter og begge må kunne uttrykkes.
+
+og v2.10 (D-135, PR #80-review runde 4) legger til:
+
+- **fullføringsporten som en EGENSKAP, ikke bare en record**
+  (`test/provenance.test.mjs`): hvert av de fem uverifiserte verdiktene holder en
+  suksessrapport, mens `unchanged`/`task_attributed` slipper gjennom; en
+  MISLYKKET terminalrapport portes ikke; et verdikt som SER verifisert ut men har
+  `verified` degradert (nøyaktig formen `provenanceForResume` produserer ved
+  drift) holdes likevel, fordi begge halvdelene kreves; og `completionGateHeld`
+  leser kun et POSITIVT `held === true` — ikke en manglende, legacy- eller
+  misformet verdi;
+- **ADVERSARIELL TEST MOT EKTE ENTRYPOINT: fremmed commit + betrodd
+  `STATUS=COMPLETE`** (`test/worker-task-worktree.test.mjs`). Begge halvdelene er
+  ekte: rapporten er faktisk postet av den betrodde forfatteren med
+  `STATUS=COMPLETE`, og commiten er faktisk en annen git-identitets, racet inn i
+  den claimede worktreen mens forsøket kjører. Bevist: tilstanden blir `blocked`
+  med `successful: false` (ikke `completed`), `completed_at` settes ikke,
+  `completion_confirmed` emitteres ALDRI, worktreen/claimen og den fremmede
+  commiten består, og recorden pensjonerer ikke en strengt eldre task — den
+  eldre KJØRER faktisk på neste runde. Én test kjører med en REN worktree, siden
+  frigivelse uansett nekter på en skitten worktree: uten den ville retensjonen
+  ikke kunne tilskrives porten. En KONTROLL med samme rapport og ingen fremmed
+  commit fullfører helt normalt, så testene ikke kan tilfredsstilles av en worker
+  som bare aldri fullfører noe;
+- **porten i rekonsilieringsbanen** (`test/worker-queue-reconciliation.test.mjs`):
+  en `COMPLETE`-rapport som ankommer utenfor et forsøk parkeres mot det durabelt
+  registrerte verdiktet, blir ikke re-dispatchet, og gir ikke exit 0;
+- **eksakte grensetester for >50-commit-kanten** (`test/provenance.test.mjs`):
+  nøyaktig 50 ekte commits er verifisert; 51 der den ENESTE fremmede er den
+  siste — den eksakte saken den gamle koden verifiserte feilaktig — er
+  `partially_attributed`, uverifisert, med den fremmede commiten NAVNGITT;
+  fremmed commit på plass 500 av 500 finnes fortsatt; og et spenn workeren nektet
+  å lese i sin helhet er `unknown`, aldri et verdikt om prefiksen. `gitLogRange`
+  ber om `limit + 1` og rapporterer `truncated` som et faktum
+  (`test/git.test.mjs`).
+
+og v2.11 (D-136, PR #80-review runde 5) legger til:
+
+- **KRASJVINDUET MOT EKTE ENTRYPOINT OG EKTE GIT**
+  (`test/worker-crash-provenance.test.mjs`, 10 tester). Vinduet lages ikke opp:
+  et ekte barn poster en ekte betrodd `STATUS=COMPLETE`, og forelderen
+  SIGKILL-es av testen mens rapporten finnes og etter-dispatch-sjekkpunktet ennå
+  ikke er nådd. Én test fastslår selve FORMEN — `status=in_progress`,
+  `commit_provenance` `undefined`, `head_after` `undefined`, men durabel claim,
+  ekte worktree og en betrodd COMPLETE-rapport — altså nøyaktig det D-135 slapp
+  gjennom. Så flytter en UVEDKOMMENDE SKRIVER (annen git-identitet, egen fil)
+  den claimede worktreens HEAD. Bevist ved restart: exit 3, `blocked`,
+  `successful: false`, ingen `completed_at`, ALDRI `completion_confirmed`, ingen
+  frigivelse, ingen fjerning, ingen supersesjon — og claim, worktree, den
+  fremmede commiten og filen dens står nøyaktig der de var. Den holdte recorden
+  pensjonerer heller ikke en strengt ELDRE task: den eldre kjører på neste runde.
+- **POSITIVE KONTROLLER i samme vindu**, uten hvilke alt over ville vært
+  tilfredsstilt av en worker som bare aldri fullfører noe etter et krasj:
+  (a) URØRT HEAD + betrodd COMPLETE og (b) et FULLSTENDIG trailer-attribuert
+  spenn + betrodd COMPLETE rekonsilieres begge normalt, uten re-dispatch, med
+  `completion_confirmed` emittert og — i (b) — worktreen frigitt og claimen
+  beholdt som `released`.
+- **MIGRERING**: en pre-D-133-rad (ingen claim i det hele tatt) og en
+  pre-D-134-rad (rå `head_after`, intet verdikt) parkeres begge, aldri fullføres;
+  fravær av verdikt gir ingen tillit.
+- **utledningen som enhet** (`test/reconcile-provenance.test.mjs`, 32 tester,
+  ekte git og ekte linked worktrees): de positive utfallene (urørt HEAD, fullt
+  attribuert spenn, commit stemplet av et TIDLIGERE forsøk av samme task), de
+  adversarielle (fremmed commit, blandet spenn, manglende trailere, tilbakespolt
+  ref), og hver eneste nektelse som UKJENT — manglende/uleselig/fremmed/
+  ikke-`ready` claim, manglende baseline, manglende attempt-ID, fjernet worktree,
+  uregistrert sti, uleselig `worktree list`, uleselig HEAD, uleselig spenn og
+  usikker `TASK_ID`. Pluss at ankeret er claimens baseline (en fremmed commit fra
+  et tidligere forsøk telles fortsatt), at degradering kun går én vei, og at
+  utledningen ikke skriver, fjerner eller omskriver noe som helst.
 
 Ikke dekket av vitest og må kjøres på hosten: ekte PowerShell AST-parsing
 (`verify-scripts.ps1`), ekte Task Scheduler-registrering, og ekte

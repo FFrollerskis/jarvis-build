@@ -5,6 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { correlateDbState } from "../src/db-correlation.ts";
 
 /**
@@ -12,7 +13,8 @@ import { correlateDbState } from "../src/db-correlation.ts";
  * det D-104-audit fant var en ubrukt `source_type`-tag. Bruker DEN
  * EKSISTERENDE `schema_migrations`-tabellen (migrator.ts, uendret).
  */
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -21,9 +23,12 @@ const TENANT = "tenant-dbcorr";
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-dbcorr-"));
-  epg = new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -41,7 +46,7 @@ afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
   await unreachablePool?.end().catch(() => undefined);
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("D-105 Part F: correlateDbState (EKTE schema_migrations, ingen ny leverandør)", () => {

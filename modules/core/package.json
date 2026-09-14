@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Jarvis Core datafundament: migrasjoner, RLS, identity/session-tjenester, idempotente hendelser og audit",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

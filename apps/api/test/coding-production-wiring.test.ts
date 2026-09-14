@@ -8,7 +8,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { ChannelSessionAuthority, DeviceService, IdentityService, SessionGrantService, SessionService, createPool, runMigrations } from "@jarvis/core";
+import { ChannelSessionAuthority, createPool, DeviceService, IdentityService, runMigrations, SessionGrantService, SessionService } from "@jarvis/core";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import type { CodingAgentAdapter, CodingAgentExec } from "@jarvis/tasks";
 import {
@@ -19,6 +19,7 @@ import type { ToolExecutionResult } from "@jarvis/tasks";
 import { createApiServer } from "../src/server.ts";
 import { ConversationEngine } from "../src/conversation.ts";
 import { MessageStore, ContextBuilder } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ModelGateway, MemoryTraceSink } from "@jarvis/model-gateway";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
 import { meshToolDefinitions, MeshToolExecutor } from "@jarvis/tool-gateway";
@@ -38,7 +39,8 @@ import { meshToolDefinitions, MeshToolExecutor } from "@jarvis/tool-gateway";
  * `fase6-worker.test.ts` - IKKE en ny/parallell produksjonsarkitektur).
  */
 
-const PORT = 30000 + Math.floor(Math.random() * 20000);
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -95,9 +97,12 @@ function fakeGithubGateway(calls: { count: number }) {
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-codingwiring-"));
-  epg = new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -185,7 +190,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 async function submit(c: JobContract): Promise<{ status: number; body: Record<string, unknown> }> {
