@@ -1,20 +1,25 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   CONSERVATIVE_EPHEMERAL_LOW,
+  FENCE_REASON,
+  LEASE_DIR_ID_FILE,
   RECLAIM_VERDICT,
   SAFETY_FLOOR,
+  TAKEOVER_REJECTED,
   acquirePortLease,
   candidateWindow,
+  ensureLeaseDirId,
   heldLeaseCount,
-  highestGeneration,
+  highestEpoch,
   readEphemeralRange,
+  readLeaseDirId,
   reclaimVerdict,
-  takeOverGeneration,
+  takeOverEpoch,
   type CandidateWindow,
   type EphemeralRangeReading,
   type LeaseDocument,
@@ -22,29 +27,29 @@ import {
 } from "../src/testing/index.ts";
 
 /**
- * D-141 A - OBLIGATORISK LEIEBEVIS.
+ * D-142 A - OBLIGATORISK LEIEBEVIS.
  *
- * D-139 gjorde leien atomisk, men ikke FENCED. Den skrev til én fast sti per
- * port og tok over ved aa `rename`-e stien vekk - en UBETINGET operasjon som
- * flytter det som ligger der naa, ikke det kalleren inspiserte. Derav ABA:
+ * D-141 gjorde overtakelse betinget av den eksakte generasjonen kalleren
+ * inspiserte. Det holdt innenfor ÉN sammenhengende serie - men generasjonen ble
+ * utledet av filene som laa der, og `release()` SLETTET filen. Slapp den siste
+ * eieren, startet telleren paa 1 igjen, og ABA var tilbake:
  *
- *     P1 leser leien L      -> vurderer den stale
- *     P2 leser leien L      -> vurderer den stale, tar over, skriver etterfoelger S
- *     P1 rename-r stien     -> river vekk S, en leie P1 aldri saa
+ *     A inspiserer 1 -> B tar 2 og RELEASER -> C tar 1 paa nytt -> A tar 2 og
+ *     pruner C vekk.
  *
- * I tillegg tok D-139 over enhver leie fra en annen vert fordi pid-en "ikke
- * betyr noe der" - en fail-OPEN antakelse som stjeler fra en levende eier.
- *
- * Denne suiten beviser at begge er lukket: overtakelse er betinget av den
- * EKSAKTE generasjonen som ble inspisert, frigjoering kan ikke naa en
- * etterfoelger, og en kryssvert-leie tas aldri over uten verifiserbar
- * fencing-sannhet.
+ * Denne suiten beviser at hoeyvannsmerket naa er DURABELT: en frigjoering
+ * skriver gravstein i stedet for aa slette, en overtakelse verifiserer at den
+ * faktisk ER hoeyvannsmerket etter at stien er sikret, en reinkarnert leiekatalog
+ * feiler lukket, og en forbigaatt eller utloept eier blir FENCED - den kan verken
+ * skrive, prune eller frigjoere noe etterpaa.
  */
 
 let leaseDir: string;
+let dirId: string;
 
 beforeEach(() => {
   leaseDir = mkdtempSync(join(tmpdir(), "jarvis-lease-test-"));
+  dirId = ensureLeaseDirId(leaseDir);
 });
 
 afterEach(() => {
@@ -60,19 +65,23 @@ interface PlantOverrides {
   readonly owner?: LeaseOwner;
   readonly heartbeat_at_ms?: number;
   readonly ttl_ms?: number;
+  readonly state?: "held" | "released";
 }
 
 /** Legger en leie paa disk slik en annen prosess ville gjort det. */
-function plantLease(dir: string, port: number, generation: number, over: PlantOverrides = {}): string {
+function plantLease(dir: string, port: number, epoch: number, over: PlantOverrides = {}): string {
   const doc: LeaseDocument = {
-    v: 2,
+    v: 3,
     port,
-    generation,
-    owner: over.owner ?? { pid: 999_999, uuid: "planted-" + generation, host: hostname(), acquired_at_ms: 0 },
+    epoch,
+    dir_id: readLeaseDirId(dir) ?? "",
+    state: over.state ?? "held",
+    owner: over.owner ?? { pid: 999_999, uuid: "planted-" + epoch, host: hostname(), acquired_at_ms: 0 },
     heartbeat_at_ms: over.heartbeat_at_ms ?? 0,
-    ttl_ms: over.ttl_ms ?? 60_000
+    ttl_ms: over.ttl_ms ?? 60_000,
+    released_at_ms: null
   };
-  const file = join(dir, `${port}.${generation}.lease`);
+  const file = join(dir, `${port}.${epoch}.lease`);
   writeFileSync(file, JSON.stringify(doc, null, 2));
   return file;
 }
@@ -83,9 +92,15 @@ function leaseNames(dir: string, port: number): string[] {
     .sort();
 }
 
-function ownerUuid(file: string): string {
-  return (JSON.parse(readFileSync(file, "utf8")) as LeaseDocument).owner.uuid;
+function readDoc(file: string): LeaseDocument {
+  return JSON.parse(readFileSync(file, "utf8")) as LeaseDocument;
 }
+
+function ownerUuid(file: string): string {
+  return readDoc(file).owner.uuid;
+}
+
+const someOwner = (uuid: string, at = 0): LeaseOwner => ({ pid: process.pid, uuid, host: hostname(), acquired_at_ms: at });
 
 describe("A.4: det efemere intervallet leses - det antas aldri", () => {
   it("leser Linux ip_local_port_range som et FAKTISK intervall", () => {
@@ -185,89 +200,207 @@ describe("A.4: kandidatvinduet - bevist disjunkt, eller aerlig merket som antatt
   });
 });
 
-describe("A.1: overtakelse er BETINGET av den generasjonen kalleren inspiserte", () => {
-  it("en ledig port gir generasjon 1, og generasjonen ligger i filnavnet", () => {
+describe("A.1: hoeyvannsmerket er DURABELT - en frigjoering nullstiller ingenting", () => {
+  it("en ubrukt port gir epoke 1, og epoken ligger i filnavnet", () => {
     const lease = acquirePortLease({ leaseDir, window: onePort(20400), heartbeat: false });
-    expect(lease.generation).toBe(1);
+    expect(lease.epoch).toBe(1);
     expect(lease.file).toBe(join(leaseDir, "20400.1.lease"));
-    expect(highestGeneration(leaseDir, 20400)).toEqual({ generation: 1, file: lease.file });
+    expect(highestEpoch(leaseDir, 20400)).toEqual({ epoch: 1, file: lease.file });
     lease.release();
   });
 
-  it("DETERMINISTISK ABA: en etterfoelger opprettes foer den tapende reclaimeren handler", () => {
-    const port = 20700;
-    // Den stale leien BEGGE inspiserer.
-    plantLease(leaseDir, port, 1);
-    expect(highestGeneration(leaseDir, port).generation).toBe(1);
+  it("release skriver GRAVSTEIN - den sletter ikke, og epoken blir staaende", () => {
+    const lease = acquirePortLease({ leaseDir, window: onePort(20401), heartbeat: false, now: () => 5_000 });
+    lease.release();
 
-    // P2 rekker foerst og oppretter etterfoelgeren.
-    const successor = takeOverGeneration({
-      leaseDir,
-      port,
-      inspectedGeneration: 1,
-      owner: { pid: process.pid, uuid: "etterfoelger", host: hostname(), acquired_at_ms: 1_000 },
-      ttlMs: 60_000
-    });
-    expect(successor?.generation).toBe(2);
-    const snapshot = readFileSync(successor!.file, "utf8");
-
-    // P1 handler NAA paa sin foreldede lesning av generasjon 1. Under D-139 var
-    // dette et ubetinget `rename` som rev vekk S. Naa er det et `wx`-forsoek paa
-    // en generasjon som allerede finnes.
-    const loser = takeOverGeneration({
-      leaseDir,
-      port,
-      inspectedGeneration: 1,
-      owner: { pid: process.pid, uuid: "taper", host: hostname(), acquired_at_ms: 2_000 },
-      ttlMs: 60_000
-    });
-    expect(loser).toBeNull();
-
-    // Etterfoelgeren staar BYTE-IDENTISK, og taperen etterlot seg ingenting.
-    expect(readFileSync(successor!.file, "utf8")).toBe(snapshot);
-    expect(leaseNames(leaseDir, port)).toEqual([`${port}.2.lease`]);
+    // Selve kjernen i D-142 A.1: filen finnes fortsatt.
+    expect(existsSync(lease.file)).toBe(true);
+    const doc = readDoc(lease.file);
+    expect(doc.state).toBe("released");
+    expect(doc.epoch).toBe(1);
+    expect(doc.owner.uuid).toBe(lease.owner.uuid);
+    expect(doc.released_at_ms).toBe(5_000);
+    expect(highestEpoch(leaseDir, 20401).epoch).toBe(1);
   });
 
-  it("bare EN av mange samtidige overtakere av samme generasjon lykkes", () => {
+  it("en gravstein er LEDIG, men epoken deles aldri ut paa nytt", () => {
+    const first = acquirePortLease({ leaseDir, window: onePort(20402), heartbeat: false });
+    expect(first.epoch).toBe(1);
+    first.release();
+
+    const second = acquirePortLease({ leaseDir, window: onePort(20402), heartbeat: false });
+    expect(second.port).toBe(20402);
+    expect(second.epoch).toBe(2);
+    expect(second.file).not.toBe(first.file);
+    second.release();
+  });
+
+  it("MANGE fulle sykluser: verken epoke eller sti gjentas noen gang", () => {
+    const port = 20403;
+    const epochs: number[] = [];
+    const paths: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+      epochs.push(lease.epoch);
+      paths.push(lease.file);
+      lease.release();
+    }
+    expect(epochs).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(new Set(paths).size).toBe(12);
+    // Og katalogen vokser ikke: kun hoeyvannsmerket staar igjen.
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.12.lease`]);
+    expect(highestEpoch(leaseDir, port).epoch).toBe(12);
+  });
+
+  it("DETERMINISTISK RESET-ABA: den forsinkede aktoeren kan verken skaffe seg noe eller roere C", () => {
+    const port = 20700;
+
+    // Den stale leien BAADE A og B inspiserer.
+    plantLease(leaseDir, port, 1);
+    const inspectedByA = highestEpoch(leaseDir, port);
+    const dirIdSeenByA = readLeaseDirId(leaseDir)!;
+    expect(inspectedByA.epoch).toBe(1);
+
+    // B tar over og RELEASER - noeyaktig det tomme vinduet D-141 nullstilte i.
+    const b = acquirePortLease({ leaseDir, window: onePort(port), staleAfterMs: 1, isProcessAlive: dead, heartbeat: false });
+    expect(b.epoch).toBe(2);
+    b.release();
+
+    // C skaffer seg porten etter det tomme vinduet. Under D-141 fikk C epoke 1
+    // paa nytt; naa staar gravsteinen, saa C faar 3.
+    const c = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(c.epoch).toBe(3);
+    const cSnapshot = readFileSync(c.file, "utf8");
+
+    // A handler NAA paa sin foreldede lesning av epoke 1.
+    const delayedA = takeOverEpoch({
+      leaseDir,
+      port,
+      inspectedEpoch: inspectedByA.epoch,
+      inspectedDirId: dirIdSeenByA,
+      owner: someOwner("forsinket-A", 2_000),
+      ttlMs: 60_000
+    });
+
+    // A kan ikke skaffe seg noe: stien var ledig (epoke 2 ble ryddet), men A er
+    // ikke hoeyvannsmerket. Den trakk seg og fjernet kun sin egen fil.
+    expect(delayedA.ok).toBe(false);
+    if (!delayedA.ok) expect(delayedA.reason).toBe(TAKEOVER_REJECTED.NOT_HIGHEST_EPOCH);
+
+    // C staar BYTE-IDENTISK, og A etterlot seg ingenting.
+    expect(existsSync(c.file)).toBe(true);
+    expect(readFileSync(c.file, "utf8")).toBe(cSnapshot);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.3.lease`]);
+    expect(c.verifyOwnership().ok).toBe(true);
+    c.release();
+  });
+
+  it("den forsinkede aktoeren taper ogsaa naar epoken FINNES: ingenting opprettes, ingenting rives", () => {
     const port = 20701;
     plantLease(leaseDir, port, 3);
-    const results = [0, 1, 2, 3, 4, 5].map((i) =>
-      takeOverGeneration({
-        leaseDir,
-        port,
-        inspectedGeneration: 3,
-        owner: { pid: process.pid, uuid: "kandidat-" + i, host: hostname(), acquired_at_ms: i },
-        ttlMs: 60_000
-      })
-    );
-    expect(results.filter((r) => r !== null)).toHaveLength(1);
+
+    const successor = takeOverEpoch({
+      leaseDir,
+      port,
+      inspectedEpoch: 3,
+      inspectedDirId: dirId,
+      owner: someOwner("etterfoelger", 1_000),
+      ttlMs: 60_000
+    });
+    expect(successor.ok).toBe(true);
+    if (!successor.ok) return;
+    const snapshot = readFileSync(successor.file, "utf8");
+
+    const loser = takeOverEpoch({
+      leaseDir,
+      port,
+      inspectedEpoch: 3,
+      inspectedDirId: dirId,
+      owner: someOwner("taper", 2_000),
+      ttlMs: 60_000
+    });
+    expect(loser.ok).toBe(false);
+    if (!loser.ok) expect(loser.reason).toBe(TAKEOVER_REJECTED.LOST_EPOCH_RACE);
+
+    expect(readFileSync(successor.file, "utf8")).toBe(snapshot);
     expect(leaseNames(leaseDir, port)).toEqual([`${port}.4.lease`]);
   });
 
-  it("opprydding fjerner KUN strengt lavere generasjoner", () => {
+  it("bare EN av mange samtidige overtakere av samme epoke lykkes", () => {
     const port = 20702;
+    plantLease(leaseDir, port, 3);
+    const results = [0, 1, 2, 3, 4, 5].map((i) =>
+      takeOverEpoch({ leaseDir, port, inspectedEpoch: 3, inspectedDirId: dirId, owner: someOwner("kandidat-" + i, i), ttlMs: 60_000 })
+    );
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.4.lease`]);
+  });
+
+  it("opprydding fjerner KUN strengt lavere epoker", () => {
+    const port = 20703;
     plantLease(leaseDir, port, 1);
     plantLease(leaseDir, port, 2);
-    const taken = takeOverGeneration({
+    const taken = takeOverEpoch({ leaseDir, port, inspectedEpoch: 2, inspectedDirId: dirId, owner: someOwner("ny"), ttlMs: 60_000 });
+    expect(taken.ok).toBe(true);
+    if (taken.ok) expect(taken.epoch).toBe(3);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.3.lease`]);
+  });
+
+  it("en REINKARNERT leiekatalog feiler lukket - den ferske eieren overlever", () => {
+    const port = 20704;
+    plantLease(leaseDir, port, 5);
+    const staleDirId = readLeaseDirId(leaseDir)!;
+    expect(highestEpoch(leaseDir, port).epoch).toBe(5);
+
+    // Katalogen slettes og gjenskapes under oss. En fersk eier tar epoke 1.
+    rmSync(leaseDir, { recursive: true, force: true });
+    mkdirSync(leaseDir, { recursive: true });
+    const freshDirId = ensureLeaseDirId(leaseDir);
+    expect(freshDirId).not.toBe(staleDirId);
+    const fresh = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(fresh.epoch).toBe(1);
+    const freshSnapshot = readFileSync(fresh.file, "utf8");
+
+    // Den forsinkede aktoeren fra FORRIGE inkarnasjon proever epoke 6.
+    const delayed = takeOverEpoch({
       leaseDir,
       port,
-      inspectedGeneration: 2,
-      owner: { pid: process.pid, uuid: "ny", host: hostname(), acquired_at_ms: 0 },
+      inspectedEpoch: 5,
+      inspectedDirId: staleDirId,
+      owner: someOwner("fra-forrige-inkarnasjon"),
       ttlMs: 60_000
     });
-    expect(taken?.generation).toBe(3);
-    expect(leaseNames(leaseDir, port)).toEqual([`${port}.3.lease`]);
+    expect(delayed.ok).toBe(false);
+    if (!delayed.ok) expect(delayed.reason).toBe(TAKEOVER_REJECTED.LEASE_DIR_REINCARNATED);
+
+    // Den ferske eieren er uroert, og ingen epoke-6-fil ble liggende igjen.
+    expect(readFileSync(fresh.file, "utf8")).toBe(freshSnapshot);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.1.lease`]);
+    expect(fresh.verifyOwnership().ok).toBe(true);
+    fresh.release();
+  });
+
+  it("inkarnasjons-iden opprettes én gang og er stabil", () => {
+    const again = ensureLeaseDirId(leaseDir);
+    expect(again).toBe(dirId);
+    expect(readLeaseDirId(leaseDir)).toBe(dirId);
+    expect(existsSync(join(leaseDir, LEASE_DIR_ID_FILE))).toBe(true);
+    // Id-filen forveksles aldri med en leie.
+    expect(highestEpoch(leaseDir, 20705).epoch).toBe(0);
   });
 });
 
 describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
-  const doc = (over: { heartbeat_at_ms?: number; ttl_ms?: number; host?: string } = {}): LeaseDocument => ({
-    v: 2,
+  const doc = (over: { heartbeat_at_ms?: number; ttl_ms?: number; host?: string; state?: "held" | "released" } = {}): LeaseDocument => ({
+    v: 3,
     port: 1234,
-    generation: 1,
+    epoch: 1,
+    dir_id: "x",
+    state: over.state ?? "held",
     heartbeat_at_ms: over.heartbeat_at_ms ?? 0,
     ttl_ms: over.ttl_ms ?? 60_000,
-    owner: { pid: 4242, uuid: "u", host: over.host ?? hostname(), acquired_at_ms: 0 }
+    owner: { pid: 4242, uuid: "u", host: over.host ?? hostname(), acquired_at_ms: 0 },
+    released_at_ms: null
   });
 
   const ctx = (over: { isProcessAlive?: (pid: number) => boolean } = {}) => ({
@@ -277,8 +410,19 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     isProcessAlive: over.isProcessAlive ?? dead
   });
 
+  it("en GRAVSTEIN er ledig - ogsaa naar eierprosessen fortsatt lever", () => {
+    expect(reclaimVerdict(doc({ state: "released" }), ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.RECLAIMABLE_RELEASED);
+  });
+
   it("samme vert, eieren LEVER: aldri, uansett alder", () => {
     expect(reclaimVerdict(doc(), ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.HELD_LOCAL_OWNER_ALIVE);
+  });
+
+  it("samme vert, eieren LEVER og heartbeaten er UTLOEPT: fortsatt aldri", () => {
+    // A.3: en vridd, men levende prosess kan fortsatt holde socketen. En
+    // overtakelse her ville gitt to eiere av samme ressurs.
+    const wedged = doc({ heartbeat_at_ms: 0, ttl_ms: 1_000 });
+    expect(reclaimVerdict(wedged, ctx({ isProcessAlive: alive }))).toBe(RECLAIM_VERDICT.HELD_LOCAL_OWNER_ALIVE);
   });
 
   it("samme vert, eieren er DOED men leien FERSK: aldri", () => {
@@ -297,7 +441,6 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
   });
 
   it("ANNEN vert UTEN verifiserbar heartbeat: fail-closed, ikke fail-open", () => {
-    // Noeyaktig D-139-defekten: pid-en kan ikke sjekkes her, saa leien ble tatt.
     const noHeartbeat = doc({ heartbeat_at_ms: Number.NaN, host: "en-annen-maskin" });
     expect(reclaimVerdict(noHeartbeat, ctx())).toBe(RECLAIM_VERDICT.HELD_REMOTE_UNVERIFIABLE);
     const noTtl = doc({ ttl_ms: 0, host: "en-annen-maskin" });
@@ -319,7 +462,7 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
 
     const taken = acquirePortLease({ leaseDir, window: onePort(port), staleAfterMs: 1_000, now: () => 1_000_000, isProcessAlive: dead, heartbeat: false });
     expect(taken.port).toBe(port);
-    expect(taken.generation).toBe(2);
+    expect(taken.epoch).toBe(2);
     expect(ownerUuid(taken.file)).not.toBe("gammel");
     taken.release();
 
@@ -328,6 +471,18 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
       acquirePortLease({ leaseDir, window: onePort(port), staleAfterMs: 1_000, now: () => 1_000_000, isProcessAlive: alive, heartbeat: false })
     ).toThrow(/Fikk ingen eksklusiv portleie/);
     expect(ownerUuid(liveFile)).toBe("levende");
+  });
+
+  it("ende-til-ende: en FERSK doed leie er ikke forlatt - porten blokkeres", () => {
+    const port = 20605;
+    const file = plantLease(leaseDir, port, 1, {
+      heartbeat_at_ms: 999_500,
+      owner: { pid: 999_999, uuid: "nettopp-doed", host: hostname(), acquired_at_ms: 999_500 }
+    });
+    expect(() =>
+      acquirePortLease({ leaseDir, window: onePort(port), staleAfterMs: 60_000, now: () => 1_000_000, isProcessAlive: dead, heartbeat: false })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_TOO_FRESH));
+    expect(ownerUuid(file)).toBe("nettopp-doed");
   });
 
   it("ende-til-ende: en KRYSSVERT-leie med gyldig heartbeat kan ikke tas - og feilen sier hvorfor", () => {
@@ -355,7 +510,7 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     expect(ownerUuid(file)).toBe("fjern-og-ukjent");
   });
 
-  it("ende-til-ende: en KRYSSVERT-leie med UTLOEPT heartbeat kan tas over", () => {
+  it("ende-til-ende: en KRYSSVERT-leie med UTLOEPT heartbeat kan tas over - og epoken gaar opp", () => {
     const port = 20603;
     plantLease(leaseDir, port, 1, {
       heartbeat_at_ms: 1_000,
@@ -363,7 +518,7 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
       owner: { pid: 4242, uuid: "fjern-og-forlatt", host: "en-annen-maskin", acquired_at_ms: 0 }
     });
     const lease = acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: alive, heartbeat: false });
-    expect(lease.generation).toBe(2);
+    expect(lease.epoch).toBe(2);
     expect(ownerUuid(lease.file)).toBe(lease.owner.uuid);
     lease.release();
   });
@@ -377,47 +532,220 @@ describe("A.2: hvem som lever - og hva vi gjoer naar vi ikke vet", () => {
     );
     expect(readFileSync(file, "utf8")).toBe("{ dette er ikke gyldig json");
   });
+
+  it("et etterlatt D-141-dokument (v2) leses som holdt - det blokkerer, det forsvinner ikke", () => {
+    const port = 20606;
+    const file = join(leaseDir, `${port}.4.lease`);
+    writeFileSync(
+      file,
+      JSON.stringify({
+        v: 2,
+        port,
+        generation: 4,
+        owner: { pid: 4242, uuid: "v2-eier", host: hostname(), acquired_at_ms: 0 },
+        heartbeat_at_ms: 999_000,
+        ttl_ms: 60_000
+      })
+    );
+    expect(highestEpoch(leaseDir, port).epoch).toBe(4);
+    expect(() =>
+      acquirePortLease({ leaseDir, window: onePort(port), now: () => 1_000_000, isProcessAlive: alive, heartbeat: false })
+    ).toThrow(new RegExp(RECLAIM_VERDICT.HELD_LOCAL_OWNER_ALIVE));
+    expect(ownerUuid(file)).toBe("v2-eier");
+  });
 });
 
-describe("A.3: frigjoering kan ALDRI fjerne en etterfoelger", () => {
-  it("release fjerner vaar EGEN generasjon", () => {
-    const lease = acquirePortLease({ leaseDir, window: window4, heartbeat: false });
-    expect(leaseNames(leaseDir, lease.port)).toEqual([`${lease.port}.1.lease`]);
-    lease.release();
-    expect(leaseNames(leaseDir, lease.port)).toEqual([]);
+describe("A.2/A.3: en forbigaatt eller utloept eier blir FENCED - og roerer aldri disk igjen", () => {
+  it("en hoeyere epoke fencer oss: vi er ikke autoritative lenger", () => {
+    const port = 20900;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(lease.verifyOwnership().ok).toBe(true);
+
+    plantLease(leaseDir, port, lease.epoch + 1, { owner: someOwner("etterfoelger") });
+
+    const verdict = lease.verifyOwnership();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(FENCE_REASON.SUPERSEDED_BY_HIGHER_EPOCH);
+    expect(lease.fenced).toBe(true);
+    expect(lease.released).toBe(true);
+    expect(() => lease.assertOwned()).toThrow(/ikke lenger vaar/);
   });
 
-  it("release kappes mot en overtakelse: etterfoelgeren staar uroert", () => {
-    const lease = acquirePortLease({ leaseDir, window: onePort(20800), heartbeat: false });
-    expect(lease.generation).toBe(1);
+  it("en FENCED eier kan verken skrive gravstein, prune eller frigjoere noe", () => {
+    const port = 20901;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    const successorFile = plantLease(leaseDir, port, lease.epoch + 1, { owner: someOwner("etterfoelger") });
+    const successorSnapshot = readFileSync(successorFile, "utf8");
+    const ownSnapshot = readFileSync(lease.file, "utf8");
 
-    // Noen tar over mens vi er paa vei til aa gi slipp.
-    const successor = takeOverGeneration({
-      leaseDir,
-      port: lease.port,
-      inspectedGeneration: lease.generation,
-      owner: { pid: process.pid, uuid: "etterfoelger", host: hostname(), acquired_at_ms: 1 },
-      ttlMs: 60_000
-    })!;
-    expect(successor.generation).toBe(2);
+    lease.verifyOwnership(); // fencer oss
+    expect(lease.fenced).toBe(true);
+
+    lease.release();
+    lease.release();
+
+    // Ingenting er endret: heller ikke vaar EGEN fil, for vi hadde ingen rett
+    // til aa si noe om den lenger.
+    expect(readFileSync(successorFile, "utf8")).toBe(successorSnapshot);
+    expect(readFileSync(lease.file, "utf8")).toBe(ownSnapshot);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.1.lease`, `${port}.2.lease`]);
+  });
+
+  it("en ZOMBIE kan ikke fornye seg tilbake til autoritet over sin egen TTL", () => {
+    const port = 20902;
+    let clock = 1_000_000;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), ttlMs: 10_000, heartbeat: false, now: () => clock });
+    expect(lease.verifyOwnership().ok).toBe(true);
+
+    // Prosessen har ligget suspendert forbi sin egen TTL.
+    clock = 1_000_000 + 10_001;
+
+    const verdict = lease.verifyOwnership();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(FENCE_REASON.OWN_LEASE_EXPIRED);
+    expect(lease.fenced).toBe(true);
+    // Heartbeaten i filen staar uroert paa det den var - ingen selvfornyelse.
+    expect(readDoc(lease.file).heartbeat_at_ms).toBe(1_000_000);
+    expect(readDoc(lease.file).state).toBe("held");
+  });
+
+  it("en borte leiefil fencer oss - vi gjenoppretter den ikke", () => {
+    const port = 20903;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    rmSync(lease.file, { force: true });
+
+    const verdict = lease.verifyOwnership();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(FENCE_REASON.LEASE_FILE_GONE);
+    lease.release();
+    expect(existsSync(lease.file)).toBe(false);
+  });
+
+  it("en overskrevet eier fencer oss - vi tar ikke stien tilbake", () => {
+    const port = 20904;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    writeFileSync(
+      lease.file,
+      JSON.stringify({ v: 3, port, epoch: lease.epoch, dir_id: dirId, state: "held", owner: someOwner("noen-andre"), heartbeat_at_ms: 0, ttl_ms: 60_000, released_at_ms: null })
+    );
+    const snapshot = readFileSync(lease.file, "utf8");
+
+    const verdict = lease.verifyOwnership();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(FENCE_REASON.OWNER_REPLACED);
+    lease.release();
+    expect(readFileSync(lease.file, "utf8")).toBe(snapshot);
+  });
+
+  it("en reinkarnert katalog fencer en holdt leie", () => {
+    const port = 20905;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    rmSync(join(leaseDir, LEASE_DIR_ID_FILE), { force: true });
+    ensureLeaseDirId(leaseDir);
+
+    const verdict = lease.verifyOwnership();
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(FENCE_REASON.LEASE_DIR_REINCARNATED);
+  });
+
+  it("onFenced varsler kalleren slik at ressursen kan rives ned", () => {
+    const port = 20906;
+    const seen: string[] = [];
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false, onFenced: (reason) => seen.push(reason) });
+    plantLease(leaseDir, port, lease.epoch + 1, { owner: someOwner("etterfoelger") });
+
+    lease.verifyOwnership();
+    lease.verifyOwnership(); // idempotent - fencing varsles én gang
+    expect(seen).toEqual([FENCE_REASON.SUPERSEDED_BY_HIGHER_EPOCH]);
+  });
+
+  it("fencing tar leien ut av bokfoeringen, akkurat som en frigjoering", () => {
+    const port = 20907;
+    const start = heldLeaseCount();
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(heldLeaseCount()).toBe(start + 1);
+    plantLease(leaseDir, port, lease.epoch + 1, { owner: someOwner("etterfoelger") });
+    lease.verifyOwnership();
+    expect(heldLeaseCount()).toBe(start);
+  });
+
+  it("HEARTBEAT-kapploep: en forbigaatt eier fornyer ingenting, og etterfoelgeren staar uroert", async () => {
+    const port = 20908;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeatIntervalMs: 20 });
+    const ownHeartbeatBefore = readDoc(lease.file).heartbeat_at_ms;
+
+    const successorFile = plantLease(leaseDir, port, lease.epoch + 1, { owner: someOwner("etterfoelger") });
+    const successorSnapshot = readFileSync(successorFile, "utf8");
+
+    // La heartbeat-timeren faa flere sjanser til aa gjoere skade.
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(lease.fenced).toBe(true);
+    expect(lease.fenceReason).toBe(FENCE_REASON.SUPERSEDED_BY_HIGHER_EPOCH);
+    expect(readFileSync(successorFile, "utf8")).toBe(successorSnapshot);
+    expect(readDoc(lease.file).heartbeat_at_ms).toBe(ownHeartbeatBefore);
+  });
+
+  it("HEARTBEAT fornyer faktisk naar vi FORTSATT eier - ellers beviser testen over ingenting", async () => {
+    const port = 20909;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeatIntervalMs: 20 });
+    const before = readDoc(lease.file).heartbeat_at_ms;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(readDoc(lease.file).heartbeat_at_ms).toBeGreaterThan(before);
+    expect(lease.fenced).toBe(false);
+    lease.release();
+  });
+});
+
+describe("A.3: frigjoering kan ALDRI fjerne eller overskrive en etterfoelger", () => {
+  it("release skriver gravstein paa VAAR egen sti - etterfoelgeren staar byte-identisk", () => {
+    const port = 20800;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+    expect(lease.epoch).toBe(1);
+
+    // En etterfoelger dukker opp mens vi er paa vei til aa gi slipp.
+    const successorFile = plantLease(leaseDir, port, 2, { owner: someOwner("etterfoelger", 1) });
+    const successorSnapshot = readFileSync(successorFile, "utf8");
 
     lease.release();
 
-    // Etterfoelgeren finnes fortsatt, og er fortsatt DERES.
-    expect(existsSync(successor.file)).toBe(true);
-    expect(ownerUuid(successor.file)).toBe("etterfoelger");
-    expect(leaseNames(leaseDir, lease.port)).toEqual([`${lease.port}.2.lease`]);
+    expect(readFileSync(successorFile, "utf8")).toBe(successorSnapshot);
+    expect(ownerUuid(successorFile)).toBe("etterfoelger");
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.1.lease`, `${port}.2.lease`]);
+  });
+
+  it("en overtakelse som rydder vekk vaar fil: release skriver ingenting, etterfoelgeren staar", () => {
+    const port = 20801;
+    const lease = acquirePortLease({ leaseDir, window: onePort(port), heartbeat: false });
+
+    const successor = takeOverEpoch({
+      leaseDir,
+      port,
+      inspectedEpoch: lease.epoch,
+      inspectedDirId: dirId,
+      owner: someOwner("etterfoelger", 1),
+      ttlMs: 60_000
+    });
+    expect(successor.ok).toBe(true);
+    if (!successor.ok) return;
+    const snapshot = readFileSync(successor.file, "utf8");
+
+    lease.release();
+
+    expect(existsSync(lease.file)).toBe(false);
+    expect(readFileSync(successor.file, "utf8")).toBe(snapshot);
+    expect(leaseNames(leaseDir, port)).toEqual([`${port}.2.lease`]);
   });
 
   it("release roerer ALDRI vaar egen sti naar den i mellomtiden har faatt en annen eier", () => {
     const lease = acquirePortLease({ leaseDir, window: window4, heartbeat: false });
     writeFileSync(
       lease.file,
-      JSON.stringify({ v: 2, port: lease.port, generation: lease.generation, owner: { pid: 1, uuid: "noen-andre", host: hostname(), acquired_at_ms: 0 }, heartbeat_at_ms: 0, ttl_ms: 1 })
+      JSON.stringify({ v: 3, port: lease.port, epoch: lease.epoch, dir_id: dirId, state: "held", owner: someOwner("noen-andre"), heartbeat_at_ms: 0, ttl_ms: 1, released_at_ms: null })
     );
     lease.release();
     expect(ownerUuid(lease.file)).toBe("noen-andre");
-    rmSync(lease.file, { force: true });
+    expect(readDoc(lease.file).state).toBe("held");
   });
 
   it("release er idempotent og holder bokfoeringen riktig", () => {
@@ -427,19 +755,22 @@ describe("A.3: frigjoering kan ALDRI fjerne en etterfoelger", () => {
     lease.release();
     lease.release();
     expect(lease.released).toBe(true);
+    expect(lease.fenced).toBe(false);
     expect(heldLeaseCount()).toBe(start);
   });
 });
 
 describe("A.4: eksklusivitet, eier-identitet, bounded retry og utelukkelse", () => {
-  it("to kall om SAMME port gir noeyaktig én eier", () => {
+  it("to kall om SAMME port gir noeyaktig én eier - og epoken gaar opp etter frigjoering", () => {
     const only = onePort(20500);
     const first = acquirePortLease({ leaseDir, window: only, heartbeat: false });
     expect(first.port).toBe(20500);
+    expect(first.epoch).toBe(1);
     expect(() => acquirePortLease({ leaseDir, window: only, isProcessAlive: alive, heartbeat: false })).toThrow(/Feiler lukket/);
     first.release();
     const second = acquirePortLease({ leaseDir, window: only, heartbeat: false });
     expect(second.port).toBe(20500);
+    expect(second.epoch).toBe(2);
     second.release();
   });
 
@@ -461,10 +792,12 @@ describe("A.4: eksklusivitet, eier-identitet, bounded retry og utelukkelse", () 
 
   it("skriver eksplisitt eier-identitet og fencing-felter, ikke bare en tom markoer", () => {
     const lease = acquirePortLease({ leaseDir, window: window4, heartbeat: false });
-    const doc = JSON.parse(readFileSync(lease.file, "utf8")) as LeaseDocument;
-    expect(doc.v).toBe(2);
+    const doc = readDoc(lease.file);
+    expect(doc.v).toBe(3);
     expect(doc.port).toBe(lease.port);
-    expect(doc.generation).toBe(lease.generation);
+    expect(doc.epoch).toBe(lease.epoch);
+    expect(doc.state).toBe("held");
+    expect(doc.dir_id).toBe(dirId);
     expect(doc.owner.pid).toBe(process.pid);
     expect(doc.owner.host).toBe(hostname());
     expect(doc.owner.uuid).toMatch(/^[0-9a-f-]{36}$/);
@@ -505,7 +838,7 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
    * kjemper. Rapporten kommer foer ventingen nettopp fordi foreldreprosessen
    * skal kunne inspisere disken MENS vinneren fortsatt eier leien.
    */
-  const childSource = (dir: string, low: number, high: number, holdMs: number, staleAfterMs: number) =>
+  const childSource = (dir: string, low: number, high: number, holdMs: number, staleAfterMs: number, releaseAtEnd = false) =>
     [
       "const { acquirePortLease } = await import(process.argv[1]);",
       "try {",
@@ -513,12 +846,15 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
       `    window: { low: ${low}, high: ${high}, proven: true, basis: "child" },`,
       `    staleAfterMs: ${staleAfterMs}, isProcessAlive: () => false, heartbeat: false });`,
       "  process.stdout.write('WIN ' + JSON.stringify({ port: lease.port, file: lease.file,",
-      "    generation: lease.generation, uuid: lease.owner.uuid }) + '\\n');",
+      "    epoch: lease.epoch, uuid: lease.owner.uuid }) + '\\n');",
       `  await new Promise((r) => setTimeout(r, ${holdMs}));`,
+      releaseAtEnd ? "  lease.release();" : "",
       "} catch (err) {",
       "  process.stdout.write('LOSE ' + String(err && err.message).slice(0, 160).replace(/\\s+/g, ' ') + '\\n');",
       "}"
-    ].join("\n");
+    ]
+      .filter(Boolean)
+      .join("\n");
 
   /**
    * Starter et barn og gir tilbake BAADE foerste linje og exit.
@@ -526,10 +862,16 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
    * Skillet er selve poenget: `first` lar oss lese disken mens vinneren
    * fortsatt holder leien, `done` lar oss vente til alle taperne er ute.
    */
-  function runChild(dir: string, low: number, high: number, holdMs: number, staleAfterMs: number) {
+  function runChild(dir: string, low: number, high: number, holdMs: number, staleAfterMs: number, releaseAtEnd = false) {
     const proc = spawn(
       process.execPath,
-      ["--experimental-transform-types", "--input-type=module", "-e", childSource(dir, low, high, holdMs, staleAfterMs), modulePath()],
+      [
+        "--experimental-transform-types",
+        "--input-type=module",
+        "-e",
+        childSource(dir, low, high, holdMs, staleAfterMs, releaseAtEnd),
+        modulePath()
+      ],
       { stdio: ["ignore", "pipe", "pipe"] }
     );
     let out = "";
@@ -565,6 +907,7 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
         const dir = mkdtempSync(join(tmpdir(), `jarvis-stale-race-${round}-`));
         const port = 22000 + round;
         try {
+          ensureLeaseDirId(dir);
           // Én stale leie alle 8 inspiserer - doed eier, langt eldre enn grensen.
           plantLease(dir, port, 1);
 
@@ -577,20 +920,49 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
           expect(losses).toHaveLength(CONTENDERS - 1);
           for (const l of losses) expect(l).toMatch(/Fikk ingen eksklusiv portleie/);
 
-          const winner = JSON.parse(wins[0]!.slice(4)) as { port: number; file: string; generation: number; uuid: string };
+          const winner = JSON.parse(wins[0]!.slice(4)) as { port: number; file: string; epoch: number; uuid: string };
           expect(winner.port).toBe(port);
-          expect(winner.generation).toBe(2);
+          expect(winner.epoch).toBe(2);
 
           // Taperne er ute; vinneren holder fortsatt. Leien maa staa, med
-          // vinnerens egen eier - og den stale generasjonen maa vaere ryddet.
+          // vinnerens egen eier - og den stale epoken maa vaere ryddet.
           expect(existsSync(winner.file)).toBe(true);
           expect(ownerUuid(winner.file)).toBe(winner.uuid);
+          expect(readDoc(winner.file).state).toBe("held");
           expect(leaseNames(dir, port)).toEqual([`${port}.2.lease`]);
 
           await Promise.all(children.map((c) => c.done));
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
+      }
+    },
+    300_000
+  );
+
+  it(
+    "FULLE SYKLUSER paa tvers av PROSESSER: epoken gaar bare oppover, aldri tilbake til 1",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "jarvis-epoch-cycles-"));
+      const port = 22500;
+      try {
+        ensureLeaseDirId(dir);
+        const epochs: number[] = [];
+        for (let i = 0; i < 6; i++) {
+          // Ett barn av gangen: hvert tar leien, gir eksplisitt slipp, og doer.
+          // Under D-141 ville hver eneste runde ha faatt generasjon 1.
+          const child = runChild(dir, port, port, 10, 60_000, true);
+          const line = await child.first;
+          expect(line.startsWith("WIN ")).toBe(true);
+          epochs.push((JSON.parse(line.slice(4)) as { epoch: number }).epoch);
+          await child.done;
+        }
+        expect(epochs).toEqual([1, 2, 3, 4, 5, 6]);
+        expect(highestEpoch(dir, port).epoch).toBe(6);
+        expect(leaseNames(dir, port)).toEqual([`${port}.6.lease`]);
+        expect(readDoc(join(dir, `${port}.6.lease`)).state).toBe("released");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
     },
     300_000
@@ -605,6 +977,7 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
         const low = 21000 + round * 100;
         const high = low + CONTENDERS - 1;
         try {
+          ensureLeaseDirId(dir);
           const children = Array.from({ length: CONTENDERS }, () => runChild(dir, low, high, 1_500, 60_000));
           const lines = await Promise.all(children.map((c) => c.first));
           const ports = lines.map((l) => {
@@ -627,6 +1000,7 @@ describe("A.1/A.2/A.3: EKTE kapploep mellom SEPARATE PROSESSER", () => {
     async () => {
       const dir = mkdtempSync(join(tmpdir(), "jarvis-race-over-"));
       try {
+        ensureLeaseDirId(dir);
         const low = 21900;
         const high = 21903; // 4 porter, 10 kandidater
         const children = Array.from({ length: 10 }, () => runChild(dir, low, high, 2_000, 60_000));
