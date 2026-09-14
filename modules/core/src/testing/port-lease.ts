@@ -62,6 +62,15 @@ export interface AcquireOptions {
   readonly window?: CandidateWindow;
   /** Kandidatrekkefoelge. Standard er tilfeldig - KUN for aa spre last, aldri som eksklusivitet. */
   readonly pickCandidate?: (window: CandidateWindow, attempt: number) => number;
+  /**
+   * Porter kalleren allerede har forkastet, og som ALDRI skal deles ut igjen.
+   *
+   * Uten dette var "en pre-okkupert port hoppes over" en sannsynlighet, ikke en
+   * garanti: hvert kall starter sitt eget sveip, saa en port som nettopp ble
+   * avvist kunne trekkes om igjen med det samme. Med utelukkelsen gjoer hvert
+   * nytt forsoek reell framgang.
+   */
+  readonly exclude?: Iterable<number>;
 }
 
 export const DEFAULT_LEASE_DIR = join(tmpdir(), "jarvis-embedded-pg-leases");
@@ -228,6 +237,11 @@ export function acquirePortLease(options: AcquireOptions = {}): PortLease {
   installExitHook();
 
   const attempts = Math.max(1, Math.min(maxAttempts, span * 2));
+  // Forkastede porter er utelukket fra start, slik at et nytt forsoek aldri kan
+  // lande paa den samme porten som nettopp feilet. Holdt adskilt fra `tried`,
+  // som ryddes opp i naar en leiefil forsvinner mellom to kall - en utelukket
+  // port skal aldri komme tilbake paa den maaten.
+  const excluded = new Set<number>(options.exclude ?? []);
   const tried = new Set<number>();
   let reclaimedStale = 0;
   let skippedLive = 0;
@@ -235,7 +249,7 @@ export function acquirePortLease(options: AcquireOptions = {}): PortLease {
   for (let attempt = 0; attempt < attempts; attempt++) {
     const port = pick(window, attempt);
     if (!Number.isInteger(port) || port < window.low || port > window.high) continue;
-    if (tried.has(port)) continue;
+    if (excluded.has(port) || tried.has(port)) continue;
     tried.add(port);
 
     const file = join(leaseDir, port + ".lease");
@@ -268,7 +282,8 @@ export function acquirePortLease(options: AcquireOptions = {}): PortLease {
   throw new Error(
     "Fikk ingen eksklusiv portleie etter " + attempts + " forsoek i vinduet " + window.low + "-" + window.high +
       " (" + (window.proven ? "bevist disjunkt" : "antatt vindu") + "; " + skippedLive + " levende leier hoppet over, " +
-      reclaimedStale + " stale tatt over). Feiler lukket i stedet for aa gjette en port."
+      reclaimedStale + " stale tatt over, " + excluded.size + " utelukket av kalleren). " +
+      "Feiler lukket i stedet for aa gjette en port."
   );
 }
 

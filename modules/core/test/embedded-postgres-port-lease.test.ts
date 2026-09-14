@@ -247,6 +247,34 @@ describe("A.2: opprydding frigjoer KUN kallerens egen leie", () => {
     rmSync(lease.file, { force: true });
   });
 
+  it("en UTELUKKET port deles aldri ut - et nytt forsoek gjoer reell framgang", () => {
+    // Dette er defekten CI fant: uten utelukkelse starter hvert kall sitt eget
+    // sveip, saa en port som nettopp ble forkastet kunne deles ut igjen med det
+    // samme. Med et deterministisk portvalg skjedde det hver eneste gang, og
+    // retry-loekken sto og stanget mot den samme opptatte porten.
+    const deterministic = { leaseDir, window: window4, pickCandidate: (w: CandidateWindow, i: number) => w.low + i };
+
+    const first = acquirePortLease(deterministic);
+    expect(first.port).toBe(20000);
+    first.release();
+
+    // Samme deterministiske valg, men 20000 er naa forkastet av kalleren.
+    const second = acquirePortLease({ ...deterministic, exclude: [20000] });
+    expect(second.port).toBe(20001);
+    second.release();
+
+    // Og utelukkelsen gjelder kumulativt, slik start-wrapperen bruker den.
+    const third = acquirePortLease({ ...deterministic, exclude: [20000, 20001] });
+    expect(third.port).toBe(20002);
+    third.release();
+  });
+
+  it("naar ALT er utelukket feiler den lukket i stedet for aa gjenbruke en forkastet port", () => {
+    expect(() => acquirePortLease({ leaseDir, window: window4, exclude: [20000, 20001, 20002, 20003] })).toThrow(
+      /utelukket av kalleren/
+    );
+  });
+
   it("release er idempotent og holder bokfoeringen riktig", () => {
     const start = heldLeaseCount();
     const lease = acquirePortLease({ leaseDir, window: window4 });

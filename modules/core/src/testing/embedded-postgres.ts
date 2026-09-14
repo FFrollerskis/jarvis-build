@@ -130,14 +130,24 @@ export async function startLeasedEmbeddedPostgres<T extends EmbeddedPostgresLike
   const attempts = Math.max(1, options.attempts ?? 8);
   const verifyTimeoutMs = options.verifyTimeoutMs ?? 30_000;
   const problems: string[] = [];
+  /**
+   * Porter dette kallet allerede har forkastet.
+   *
+   * Uten denne var "en pre-okkupert kandidat hoppes over" bare sannsynlig:
+   * hvert `acquirePortLease` starter sitt eget sveip, saa den porten som nettopp
+   * feilet kunne deles ut igjen med det samme - og med et deterministisk
+   * portvalg skjedde det hver eneste gang. Naa gjoer hvert forsoek framgang.
+   */
+  const rejected = new Set<number>([...(options.exclude ?? [])]);
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    const lease = acquirePortLease(options);
+    const lease = acquirePortLease({ ...options, exclude: rejected });
 
     if (!(await ipv4PortIsFree(lease.port))) {
       // Pre-okkupert av noe utenfor vaart leienavnerom. Hopp over - aldri start
       // Postgres her, for da ville vi faatt nettopp den falske ready-en.
       problems.push("port " + lease.port + ": allerede bundet paa IPv4 foer oppstart");
+      rejected.add(lease.port);
       lease.release();
       continue;
     }
@@ -156,6 +166,7 @@ export async function startLeasedEmbeddedPostgres<T extends EmbeddedPostgresLike
       await assertPostgresBoundIPv4(lease.port, verifyTimeoutMs);
     } catch (err) {
       problems.push("port " + lease.port + ": " + (err as Error).message);
+      rejected.add(lease.port);
       try {
         await postgres.stop();
       } catch {
