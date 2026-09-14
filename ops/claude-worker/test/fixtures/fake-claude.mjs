@@ -102,7 +102,31 @@ process.stdin.on("data", (d) => { prompt += d; });
  * dispatched a child into the wrong directory, these writes would land there,
  * and the tests assert on exactly that.
  */
+/**
+ * D-145: the LOCAL SYNC a guarded merge task performs after the merge lands.
+ *
+ * `JARVIS_FAKE_CLAUDE_SYNC_TO=<sha>` makes the child move its own worktree onto
+ * that commit - exactly what D-144's real child did when it synced local main to
+ * the merge SHA, and exactly the step that advanced the worktree's HEAD by one
+ * commit that Claude did not author and could not trailer.
+ *
+ * A plain `checkout --detach` and not a `reset --hard`: it creates no commit,
+ * rewrites no history, and refuses rather than discarding if the worktree is
+ * dirty. It also works for a target that is NOT a descendant - which is exactly
+ * the shape a SQUASH merge produces, and that case has to be expressible.
+ */
+function syncTo(cwd) {
+  const target = String(process.env.JARVIS_FAKE_CLAUDE_SYNC_TO ?? "").trim();
+  if (!target) return;
+  const res = spawnSync("git", ["checkout", "--detach", target], { cwd, encoding: "utf8", windowsHide: true });
+  try {
+    appendFileSync(join(DIR, "sync.log"),
+      `${cwd} ${target} status=${res.status} ${String(res.stderr ?? "").trim()}\n`, "utf8");
+  } catch { /* best effort */ }
+}
+
 function mutateWorkspace(taskId) {
+  syncTo(process.cwd());
   const kinds = String(process.env.JARVIS_FAKE_CLAUDE_MUTATE ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   if (kinds.length === 0) return;
   const cwd = process.cwd();

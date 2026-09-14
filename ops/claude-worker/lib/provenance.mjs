@@ -657,6 +657,17 @@ export const COMPLETION_GATE = Object.freeze({
   /** `unchanged` or `task_attributed`: the claim rests on proven ground. */
   PASSED_PROVENANCE_VERIFIED: "commit_provenance_verified",
   /**
+   * D-145: the commit range's ONLY unexplained commit is the GitHub-generated
+   * merge commit of an explicitly authorized guarded PR merge, and that
+   * transition is independently proven from the trusted ARCHITECT_TASK plus
+   * fresh remote truth. Claude never authored that commit and never could have
+   * trailered it, so authorship was the wrong thing to demand.
+   *
+   * This is a SEPARATE pass reason, never a variant of the one above, so a
+   * record always states which kind of proof it actually rested on.
+   */
+  PASSED_AUTHORIZED_MERGE_TRANSITION: "authorized_merge_transition_verified",
+  /**
    * D-136: no verdict exists at all. HELD, not passed - this used to be the
    * null-provenance success bypass, and absence of evidence is not evidence.
    */
@@ -788,9 +799,22 @@ export function mergeWorktreeCleanliness(stored, fresh) {
  * this task completed or successful, do NOT release its worktree, do NOT emit a
  * completion-confirmed event, and do NOT let it retire any other task.
  */
-export function evaluateCompletionGate({ completion, provenance, worktree = null, now = () => new Date() }) {
+export function evaluateCompletionGate({
+  completion,
+  provenance,
+  worktree = null,
+  mergeTransition = null,
+  transitionExcuse = null,
+  now = () => new Date()
+}) {
   const prov = provenance && typeof provenance === "object" ? provenance : null;
   const wt = worktree && typeof worktree === "object" ? worktree : null;
+  // D-145: the transition half. `excused === true` is the ONLY value that means
+  // anything here, and it is computed by `mergeTransitionExcusesProvenance`,
+  // which requires the set of unexplained commits to be exactly the verified
+  // merge commit. A verified transition on its own excuses nothing.
+  const excuse = transitionExcuse && typeof transitionExcuse === "object" ? transitionExcuse : null;
+  const transitionExcused = excuse?.excused === true && mergeTransition?.verified === true;
   const evidence = {
     provenance_verdict: prov?.verdict ?? null,
     provenance_reason: prov?.reason ?? null,
@@ -811,6 +835,15 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
     worktree_entry_count: Number.isFinite(wt?.entry_count) ? wt.entry_count : 0,
     worktree_entries: (wt?.entries ?? []).slice(0, 20),
     worktree_error: wt?.error ?? null,
+    // D-145: the transition half of the evidence, recorded whether or not it was
+    // needed, so a held gate can say WHY the transition did not save it and a
+    // passed one can say exactly what it rested on.
+    merge_transition_verified: mergeTransition?.verified === true,
+    merge_transition_reason: mergeTransition?.reason ?? null,
+    merge_transition_pr: mergeTransition?.pr_number ?? null,
+    merge_commit_sha: mergeTransition?.merge_commit_sha ?? null,
+    transition_excuse_reason: excuse?.reason ?? null,
+    transition_excused_commits: excuse?.excused_commits ?? [],
     evaluated_at: now().toISOString()
   };
 
@@ -820,6 +853,11 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
   // D-136: NO record is not a good record. A success claim with no commit
   // verdict behind it at all is held exactly like an unverified one - the
   // worker never looked, so it has nothing to accept the claim on.
+  //
+  // D-145 does NOT reach into this branch. Without a classified range there is
+  // no way to establish that the merge commit is the ONLY unexplained thing, and
+  // `mergeTransitionExcusesProvenance` refuses a null record for exactly that
+  // reason. Absence of evidence is still not evidence.
   if (!prov) {
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD, ...evidence };
   }
@@ -827,7 +865,15 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
   // may carry a verified verdict with `verified` explicitly downgraded (that is
   // precisely what `provenanceForResume` does on drift), and a record from a
   // future version may carry a verdict this build does not know.
-  if (!isVerifiedVerdict(prov.verdict) || prov.verified !== true) {
+  //
+  // D-145: an unverified range is still a hold UNLESS the single thing it could
+  // not attribute is the GitHub-generated merge commit of an authorized merge
+  // that has been independently proven. That is a narrower statement than "the
+  // transition verified": the excuse is computed against THIS record's own
+  // unexplained sha list, so a foreign commit riding alongside the merge commit
+  // holds the gate exactly as before.
+  const provenanceProven = isVerifiedVerdict(prov.verdict) && prov.verified === true;
+  if (!provenanceProven && !transitionExcused) {
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
   }
 
@@ -846,7 +892,17 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_WORKTREE_UNKNOWN, ...evidence };
   }
 
-  return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
+  // D-145: the record states which kind of proof it actually rested on. When the
+  // range itself was proven, that is the reason - the transition path is only
+  // ever named when it was the thing that made the difference.
+  return {
+    held: false,
+    passed: true,
+    reason: provenanceProven
+      ? COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED
+      : COMPLETION_GATE.PASSED_AUTHORIZED_MERGE_TRANSITION,
+    ...evidence
+  };
 }
 
 /* ==========================================================================
@@ -1177,6 +1233,14 @@ export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
     gate.unattributed_count > 0
       ? `UNEXPLAINED COMMITS (${gate.unattributed_count}): `
         + `${gate.unattributed_commits.map((s) => String(s).slice(0, 12)).join(", ") || "not listed"}`
+      : "",
+    // D-145: when a merge-transition check was attempted and did NOT save the
+    // task, say so and say why. Silence here would read as "nobody tried", which
+    // is a different and misleading finding.
+    gate.merge_transition_reason
+      ? `AUTHORIZED MERGE TRANSITION: verified=${gate.merge_transition_verified === true} `
+        + `(${gate.merge_transition_reason})`
+        + (gate.transition_excuse_reason ? `; excuse=${gate.transition_excuse_reason}` : "")
       : "",
     worktreePath ? `WORKTREE (retained, untouched): ${worktreePath}` : "",
     "",

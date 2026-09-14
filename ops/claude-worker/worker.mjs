@@ -88,10 +88,27 @@ import {
   evaluateCompletionGate,
   mergeWorktreeCleanliness,
   describeCompletionGate,
+  isVerifiedVerdict,
   COMMIT_PROVENANCE
 } from "./lib/provenance.mjs";
+import {
+  MERGE_TRANSITION,
+  findMergeAuthorization,
+  verifyMergeTransition,
+  mergeTransitionExcusesProvenance,
+  describeMergeTransition
+} from "./lib/merge-transition.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
-import { verifyAuth, fetchIssueComments, postComment, listRemoteBranches, listPulls } from "./lib/github.mjs";
+import {
+  verifyAuth,
+  fetchIssueComments,
+  postComment,
+  listRemoteBranches,
+  listPulls,
+  getPullMergeState,
+  getCommit,
+  getCommitCheckRuns
+} from "./lib/github.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.JARVIS_WORKER_CONFIG || join(HERE, "config.json");
@@ -299,7 +316,63 @@ function worktreeCleanlinessFor(cfg, task) {
   return merged;
 }
 
-function completionGateFor(cfg, task, completion) {
+/**
+ * D-145: THE AUTHORIZED MERGE-TRANSITION HALF OF THE PROOF.
+ *
+ * Only ever consulted when the generic commit-authorship question has ALREADY
+ * come back unproven, and only ever able to account for the one commit GitHub
+ * itself generates for an authorized merge. It cannot make anything worse and it
+ * cannot make an ordinary implementation task pass: `findMergeAuthorization`
+ * requires this exact task's own trusted ARCHITECT_TASK to carry
+ * `ARCHITECT_MERGE_APPROVED=true`, `MERGE_AUTHORIZED=true` and an exact
+ * PR/base/head, and a task without that never reaches a single remote call.
+ *
+ * Every fact is read FRESH from the remote at gate time. Nothing is taken from
+ * the child's report except the fact that a trusted successful report exists at
+ * all, and nothing is taken from worker state.
+ *
+ * Returns `{ transition, excuse }`, both `null` when the task is not an
+ * authorized merge task - the ordinary case, and the cheap one.
+ */
+function mergeTransitionFor(cfg, taskId, completion, provenance, comments) {
+  const authorization = findMergeAuthorization(comments ?? [], {
+    trustedAuthor: cfg.trustedAuthor,
+    taskId,
+    repoOwner: cfg.repoOwner,
+    repoName: cfg.repoName
+  });
+  if (!authorization.ok) {
+    // Not an authorized merge task. Say nothing, do nothing, spend no API call:
+    // this is the overwhelmingly common path and it must stay invisible.
+    if (authorization.reason === MERGE_TRANSITION.NO_TRUSTED_TASK
+      || authorization.reason === MERGE_TRANSITION.NOT_MERGE_AUTHORIZED) {
+      return { transition: null, excuse: null };
+    }
+    // The task IS its own order and DOES claim a merge authorization, but the
+    // authorization itself is malformed. That is a real finding and is recorded.
+    const transition = verifyMergeTransition({
+      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null
+    });
+    log(cfg, `MERGE_TRANSITION for ${taskId}: NOT VERIFIED (${transition.reason}: ${transition.detail ?? "no detail"})`);
+    return { transition, excuse: mergeTransitionExcusesProvenance({ transition, provenance }) };
+  }
+
+  const pull = getPullMergeState(cfg, authorization.prNumber);
+  const mergeSha = pull.ok ? pull.item?.mergeCommitSha ?? null : null;
+  // Each read is attempted only when the previous one produced something to read
+  // FOR. A lookup we never made comes back `ok: false`, which the verifier
+  // treats as UNKNOWN - never as a pass.
+  const mergeCommit = mergeSha ? getCommit(cfg, mergeSha) : { ok: false, item: null, error: "no merge sha to read" };
+  const headCommit = getCommit(cfg, authorization.expectedHead);
+  const checks = mergeSha ? getCommitCheckRuns(cfg, mergeSha) : { ok: false, runs: [], error: "no merge sha to read" };
+
+  const transition = verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+  const excuse = mergeTransitionExcusesProvenance({ transition, provenance });
+  for (const line of describeMergeTransition(transition, excuse)) log(cfg, `  ${line}`);
+  return { transition, excuse };
+}
+
+function completionGateFor(cfg, task, completion, comments = []) {
   if (completion?.complete !== true || completion?.successful !== true) {
     return { gate: evaluateCompletionGate({ completion, provenance: null }), provenance: null };
   }
@@ -341,7 +414,33 @@ function completionGateFor(cfg, task, completion) {
     + `${provenance.downgraded_by_recorded_verdict ? " (downgraded by the recorded verdict)" : ""} `
     + `(${provenance.reason})`);
   const worktree = worktreeCleanlinessFor(cfg, task);
-  return { gate: evaluateCompletionGate({ completion, provenance, worktree }), provenance, worktree };
+
+  // D-145: only asked when the range is NOT already proven. An authorized merge
+  // transition is an alternative answer to the authorship question, never an
+  // additional requirement on a task that already answered it.
+  let transition = null;
+  let excuse = null;
+  if (!isVerifiedVerdict(provenance?.verdict) || provenance?.verified !== true) {
+    try {
+      ({ transition, excuse } = mergeTransitionFor(cfg, taskId, completion, provenance, comments));
+    } catch (err) {
+      // A verification that THREW verified nothing. Fail closed, exactly like a
+      // derivation that threw: the task stays held on the unverified range.
+      log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
+        + "Treating it as NOT verified.");
+      transition = { verified: false, reason: "merge_transition_verification_threw", detail: sanitize(err.message) };
+      excuse = null;
+    }
+  }
+
+  return {
+    gate: evaluateCompletionGate({
+      completion, provenance, worktree, mergeTransition: transition, transitionExcuse: excuse
+    }),
+    provenance,
+    worktree,
+    mergeTransition: transition
+  };
 }
 
 /**
@@ -636,12 +735,16 @@ function reconcileReportedTasks(cfg, state, token, comments) {
     // parked, not retired as completed. The verdict is DERIVED from the task's
     // durable claim and the current state of its own worktree, not inherited
     // from a record a crashed parent may never have written.
-    const { gate, provenance } = completionGateFor(cfg, task, completion);
+    const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, comments);
     if (gate.held) {
       parkHeldCompletion(cfg, state, token, task.task_id, {
         gate,
         completion,
-        extra: { reconciled_without_redispatch: true, reconciliation_provenance: provenance }
+        extra: {
+          reconciled_without_redispatch: true,
+          reconciliation_provenance: provenance,
+          merge_transition: mergeTransition ?? null
+        }
       });
       // Counted as reconciled: it IS retired from the dispatch queue (BLOCKED is
       // terminal). It is simply not retired as a SUCCESS - and the run itself
@@ -665,7 +768,8 @@ function reconcileReportedTasks(cfg, state, token, comments) {
       // Recorded on the PASS path too, so the record always states positively
       // what the acceptance rested on rather than leaving it to be inferred.
       completion_gate: gate,
-      reconciliation_provenance: provenance
+      reconciliation_provenance: provenance,
+      merge_transition: mergeTransition ?? null
     });
     emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
       task_id: task.task_id,
@@ -878,7 +982,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
       // from the durable claim and the worktree's actual current HEAD. It must
       // not be able to launder an unaccounted-for commit range into a successful
       // completion on the next run.
-      const { gate, provenance } = completionGateFor(cfg, task, rec.completion);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, rec.completion, comments);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -887,7 +991,8 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
             ...observed,
             reconciled_without_redispatch: true,
             recovered_from_crash: true,
-            reconciliation_provenance: provenance
+            reconciliation_provenance: provenance,
+            merge_transition: mergeTransition ?? null
           }
         });
         gateHeld.push(taskId);
@@ -906,6 +1011,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
         recovered_from_crash: true,
         completion_gate: gate,
         reconciliation_provenance: provenance,
+        merge_transition: mergeTransition ?? null,
         child_identity: null,
         last_child_pid: null
       });
@@ -980,7 +1086,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       // it can be accepted without the verdict being consulted. Gate it here too,
       // on a FRESHLY DERIVED verdict rather than on whatever the previous attempt
       // did or did not manage to record before it died.
-      const { gate, provenance } = completionGateFor(cfg, prior, rec.completion);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, prior, rec.completion, comments);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -988,7 +1094,8 @@ async function runTask(cfg, state, token, candidate, comments) {
           extra: {
             ...mergeObservedAssociations(prior, { branch: rec.existingBranch, prNumber: rec.existingPr?.number }),
             reconciled_without_redispatch: true,
-            reconciliation_provenance: provenance
+            reconciliation_provenance: provenance,
+            merge_transition: mergeTransition ?? null
           }
         });
         return EXIT.BLOCKED;
@@ -1004,7 +1111,8 @@ async function runTask(cfg, state, token, candidate, comments) {
         successful: rec.completion.successful,
         reconciled_without_redispatch: true,
         completion_gate: gate,
-        reconciliation_provenance: provenance
+        reconciliation_provenance: provenance,
+        merge_transition: mergeTransition ?? null
       });
       state.last_run_at = new Date().toISOString();
       persistState(cfg, state, token);
@@ -1639,7 +1747,39 @@ async function runTask(cfg, state, token, candidate, comments) {
   // sporsmaal som rekonsiliasjonsveiene - ellers ville en dirty worktree
   // blitt akseptert her og avvist der.
   const worktreeCleanliness = worktreeCleanlinessFor(cfg, getTask(state, taskId));
-  const completionGate = evaluateCompletionGate({ completion, provenance: commitProvenance, worktree: worktreeCleanliness });
+
+  // D-145: the ordinary dispatch path must answer EXACTLY the same question as
+  // the three reconciliation paths - otherwise an authorized merge would be
+  // accepted after a crash and refused when it went through cleanly, which is
+  // the same split-brain D-135 removed from the other direction.
+  //
+  // `postComments` is this run's FRESH control-issue read; the authorization is
+  // taken from the trusted ARCHITECT_TASK in it, never from the child's report.
+  let mergeTransition = null;
+  let transitionExcuse = null;
+  if (completion.complete === true && completion.successful === true
+    && (!isVerifiedVerdict(commitProvenance.verdict) || commitProvenance.verified !== true)) {
+    try {
+      ({ transition: mergeTransition, excuse: transitionExcuse } = mergeTransitionFor(
+        cfg, taskId, completion, commitProvenance, postComments.length > 0 ? postComments : comments
+      ));
+    } catch (err) {
+      log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
+        + "Treating it as NOT verified.");
+      mergeTransition = {
+        verified: false, reason: "merge_transition_verification_threw", detail: sanitize(err.message)
+      };
+      transitionExcuse = null;
+    }
+  }
+
+  const completionGate = evaluateCompletionGate({
+    completion,
+    provenance: commitProvenance,
+    worktree: worktreeCleanliness,
+    mergeTransition,
+    transitionExcuse
+  });
   if (completionGate.held) {
     parkHeldCompletion(cfg, state, token, taskId, {
       gate: completionGate,
@@ -1648,7 +1788,12 @@ async function runTask(cfg, state, token, candidate, comments) {
       // verdict, the task-owned dirty lines and the worktree path are exactly
       // what a human reconciling this needs, and none of it is a claim of
       // ownership - they are observations plus one honest verdict.
-      extra: { ...checkpoint, ...observed, worktree_cleanliness: worktreeCleanliness }
+      extra: {
+        ...checkpoint,
+        ...observed,
+        worktree_cleanliness: worktreeCleanliness,
+        merge_transition: mergeTransition ?? null
+      }
     });
     return EXIT.BLOCKED;
   }
@@ -1664,6 +1809,9 @@ async function runTask(cfg, state, token, candidate, comments) {
       // D-139 B: lagret slik at en senere, ferskere maaling kun kan gjoere
       // svaret VERRE - aldri bedre.
       worktree_cleanliness: worktreeCleanliness,
+      // D-145: recorded on the PASS path too, so an accepted merge task always
+      // states positively WHICH proof carried it.
+      merge_transition: mergeTransition ?? null,
       completed_at: new Date().toISOString(),
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,

@@ -177,6 +177,87 @@ export function getPull({ repoOwner, repoName }, number, runner = gh) {
   }
 }
 
+/**
+ * D-145: the MERGE STATE of one PR, read fresh from the remote.
+ *
+ * Deliberately separate from `getPull`: that projection exists for duplicate
+ * detection and carries no `merged` boolean, no base sha and no head sha, so it
+ * cannot answer "did the AUTHORIZED merge actually happen?" at all. This one
+ * returns only exact, checkable identity - never a summary and never a claim.
+ *
+ * `{ ok, item: { number, merged, mergeCommitSha, headSha, baseSha, baseRef,
+ * headRef, state }, error }`. `ok: false` means UNKNOWN, never "not merged".
+ */
+export function getPullMergeState({ repoOwner, repoName }, number, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/pulls/${Number(number)}`,
+      "--jq",
+      "{number: .number, merged: .merged, mergeCommitSha: .merge_commit_sha, headSha: .head.sha, "
+        + "baseSha: .base.sha, headRef: .head.ref, baseRef: .base.ref, state: .state}"
+    ]);
+    const parsed = parseJsonLines(out);
+    return parsed.length > 0
+      ? { ok: true, item: parsed[0], error: null }
+      : { ok: false, item: null, error: "empty_response" };
+  } catch (err) {
+    return { ok: false, item: null, error: sanitize(err.message) };
+  }
+}
+
+/**
+ * D-145: one commit's exact identity, parents and tree.
+ *
+ * The PARENT LIST is the evidence that a merge was a normal two-parent merge
+ * rather than a squash or a rebase, and the TREE is the evidence that the merge
+ * introduced no content the review never saw. Both come from the remote, not
+ * from anything the child says about what it did.
+ *
+ * `{ ok, item: { sha, parents: [...], treeSha, ... }, error }`.
+ */
+export function getCommit({ repoOwner, repoName }, sha, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/commits/${encodeURIComponent(String(sha))}`,
+      "--jq",
+      "{sha: .sha, treeSha: .commit.tree.sha, parents: [.parents[].sha], "
+        + "verified: .commit.verification.verified, message: .commit.message}"
+    ]);
+    const parsed = parseJsonLines(out);
+    return parsed.length > 0
+      ? { ok: true, item: parsed[0], error: null }
+      : { ok: false, item: null, error: "empty_response" };
+  } catch (err) {
+    return { ok: false, item: null, error: sanitize(err.message) };
+  }
+}
+
+/**
+ * D-145: the check runs on one exact commit.
+ *
+ * Used to confirm POST-MERGE CI on the merge commit itself. The CI a PR ran
+ * before the merge is a different commit and does not answer this question.
+ *
+ * `{ ok, runs: [{ name, status, conclusion }], error }`. `ok: false` is UNKNOWN,
+ * and the caller must never read UNKNOWN as green.
+ */
+export function getCommitCheckRuns({ repoOwner, repoName }, sha, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/commits/${encodeURIComponent(String(sha))}/check-runs?per_page=100`,
+      "--paginate",
+      "--jq",
+      ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion}"
+    ]);
+    return { ok: true, runs: parseJsonLines(out), error: null };
+  } catch (err) {
+    return { ok: false, runs: [], error: sanitize(err.message) };
+  }
+}
+
 /** Does an exact branch exist on the remote? `{ ok, exists, error }`. */
 export function getBranch({ repoOwner, repoName }, branch, runner = gh) {
   try {
