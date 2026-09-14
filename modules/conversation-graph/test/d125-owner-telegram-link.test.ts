@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
+import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { BusinessService } from "@jarvis/business";
 import { ConversationGraphService } from "../src/service.ts";
 import { ConversationGraphSyncService } from "../src/sync.ts";
@@ -23,7 +24,8 @@ import { ConversationGraphSyncService } from "../src/sync.ts";
  *      forretningskontakt opprettes eller lenkes (D-122: Telegram gir INGEN
  *      deterministisk e-post-/telefon-nøkkel for en vilkårlig motpart).
  */
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 const TENANT = "tenant-d125";
 const OWNER_PERSON = "person-d125-owner";
 const OWNER_CHAT = "987654321";
@@ -36,9 +38,12 @@ let sync: ConversationGraphSyncService;
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-d125-link-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -62,7 +67,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 async function counts(): Promise<{ identities: number; links: number; contacts: number }> {

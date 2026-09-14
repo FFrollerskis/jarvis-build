@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { allocateEmbeddedPostgresPort, runMigrations } from "@jarvis/core";
+import { runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * UA-3 P0 HOST FIX #2 (2026-08-17, ekte host-funn run_id `ad45603d`): ALLE
@@ -29,7 +30,8 @@ import { allocateEmbeddedPostgresPort, runMigrations } from "@jarvis/core";
  * rekkefølgen (samme SQL-sekvens som `cleanupTenant()` i
  * `ua3-business-live.ts`) direkte mot ekte embedded Postgres.
  */
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 
@@ -70,9 +72,12 @@ async function cleanupTenantLikeLiveScript(tenantId: string): Promise<void> {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-ua3-cleanup-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -81,7 +86,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("A: append-only audit_events kan ALDRI slettes (triggeren beviser hvorfor cleanup aldri skal forsøke det)", () => {

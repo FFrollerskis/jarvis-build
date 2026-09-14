@@ -6,7 +6,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { JobContract } from "@jarvis/contracts";
-import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
+import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { ArtifactStore, PgTaskQueue } from "@jarvis/tasks";
 import { LIVE_EVAL_INITDB_FLAGS } from "../src/coding-agent-eval.ts";
 
@@ -24,19 +25,23 @@ import { LIVE_EVAL_INITDB_FLAGS } from "../src/coding-agent-eval.ts";
  * skjult et ekte portabilitetsproblem (§4, eksplisitt forbudt).
  */
 describe("D-100: UTF8-persistering gjennom ekte embedded-Postgres (LIVE_EVAL_INITDB_FLAGS)", () => {
-  const PORT = allocateEmbeddedPostgresPort();
+  let PORT = 0;
+  let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
   let epg: InstanceType<typeof EmbeddedPostgres>;
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
 
   beforeAll(async () => {
     const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-utf8persist-"));
-    epg = new EmbeddedPostgres({
-      databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false,
+    const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+      new EmbeddedPostgres({
+      databaseDir, user: "postgres", password: "pw", port, persistent: false,
       initdbFlags: [...LIVE_EVAL_INITDB_FLAGS]
-    });
-    await epg.initialise();
-    await epg.start();
+    })
+    );
+    epg = leasedPostgres.postgres;
+    PORT = leasedPostgres.port;
+    stopEmbeddedPostgres = leasedPostgres.stop;
     await epg.createDatabase("jarvis_test");
     adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
     adminPool.on("error", () => undefined);
@@ -54,7 +59,7 @@ describe("D-100: UTF8-persistering gjennom ekte embedded-Postgres (LIVE_EVAL_INI
   afterAll(async () => {
     await appPool?.end();
     await adminPool?.end();
-    await epg?.stop();
+    await stopEmbeddedPostgres?.();
   }, 120_000);
 
   async function seedTask(): Promise<string> {

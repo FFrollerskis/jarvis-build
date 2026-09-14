@@ -243,7 +243,13 @@ describe("D-133: exit 0, no report, task-owned uncommitted changes -> safe resum
 
     // --- restart: it must RESUME in the same proven context ---------------
     elapseBackoff(TASK_A);
-    const second = await runWorker("report", MUTATE_SILENT);
+    // D-139 B: the resumed attempt COMMITS what it finds and what it adds. The
+    // property under test is resumption in the same proven context, and the
+    // prompt assertions below still prove the child was told the existing dirt
+    // is its own. A resumed attempt that reported COMPLETE while leaving work
+    // uncommitted would now be held on the cleanliness half of the gate - which
+    // is correct, but is a different test (see worker-crash-provenance).
+    const second = await runWorker("report", { ...MUTATE_SILENT, JARVIS_FAKE_CLAUDE_COMMIT: "1" });
 
     expect(dispatched()).toEqual([TASK_A, TASK_A]);
     expect(second.code).toBe(0);
@@ -393,7 +399,14 @@ describe("D-133: one task's dirty context never reaches another task", () => {
     appendComment(architectTask(TASK_B, "2026-09-11T05:00:00Z", 2));
     elapseBackoff(TASK_A);
 
-    const res = await runWorker("report", { JARVIS_FAKE_CLAUDE_MUTATE: "untracked" });
+    // D-139 B: B COMMITS what it does. The property under test is isolation -
+    // that B runs in its own context and is not blocked by A's dirt - and a
+    // child that left its own work uncommitted would now be held on the
+    // cleanliness half of the gate, which would prove nothing about isolation.
+    const res = await runWorker("report", {
+      JARVIS_FAKE_CLAUDE_MUTATE: "untracked",
+      JARVIS_FAKE_CLAUDE_COMMIT: "1"
+    });
 
     // The newer, never-dispatched task wins the queue and is NOT blocked.
     expect(dispatched()).toEqual([TASK_A, TASK_B]);

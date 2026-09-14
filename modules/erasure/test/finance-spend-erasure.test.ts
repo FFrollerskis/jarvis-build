@@ -6,7 +6,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
+import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { LocalHashEmbedding } from "@jarvis/memory";
 import { OpenLoopService, type BusinessOpenLoop } from "@jarvis/business";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -30,7 +31,8 @@ import { GrowthService } from "../../growth/src/service.ts";
  * (ingen antatt FK-orden - SAMME presedens/lærdom som growth-erasure.test.ts,
  * som denne sliceen selv fanget en reell FK-ordringsdefekt via, se plan.ts).
  */
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -51,9 +53,12 @@ function identityFor(tenantId: string): IdentityContext {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-spend-erasure-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -82,7 +87,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("A: erasure av en space med spend-record + kampanje-kobling + forpliktelse + anskaffelse + LINKEDE open-loops lykkes, ingen FK-brudd", () => {

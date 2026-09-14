@@ -69,6 +69,81 @@ export const INELIGIBLE = Object.freeze({
 });
 
 /**
+ * D-139: THE EXPECTED HEAD AN ORDER WAS WRITTEN AGAINST.
+ *
+ * An ARCHITECT_TASK states `EXPECTED_HEAD_SHA=<sha>`, and its own pre-flight
+ * refuses to mutate anything unless the repository is still at exactly that
+ * commit. A task whose declared head no longer matches reality is therefore, by
+ * the architect's own construction, an order that can no longer be carried out
+ * as written. It is STALE.
+ *
+ * The observed danger was concrete. A never-dispatched task from 16:29Z naming
+ * head `4df1472` sorted AHEAD of the architect's current order from 23:33Z
+ * naming the head the repository was actually on - purely because both were
+ * "fresh", and fresh tasks sort oldest-first. The stale order would have been
+ * dispatched, failed its own pre-flight, and consumed an attempt, while the
+ * live order waited behind it.
+ *
+ * The rule is GENERAL and keyed on declared-vs-observed head, never on any
+ * particular TASK_ID: a stale order may not PREEMPT a current one. It is not an
+ * outright refusal - a stale task still sorts last and can still run when
+ * nothing current exists, so a head that moves while the queue is being drained
+ * cannot strand the queue.
+ */
+export const HEAD_TIER = Object.freeze({
+  /** Declares the head we actually observe. The clearest possible live order. */
+  CURRENT: 0,
+  /** Declares no head, or we could not observe one. Makes no claim either way. */
+  UNDECLARED: 1,
+  /** Declares a head that is NOT the one we observe. Stale by construction. */
+  STALE: 2
+});
+
+/** The field an ARCHITECT_TASK uses to bind an order to one exact commit. */
+export const EXPECTED_HEAD_FIELD = "EXPECTED_HEAD_SHA";
+
+const EXPECTED_HEAD_LINE = new RegExp("^" + EXPECTED_HEAD_FIELD + "=([0-9a-fA-F]{7,40})\\s*$");
+
+/**
+ * The exact head this trusted task was written against, or `null`.
+ *
+ * Read only from the trusted ARCHITECT_TASK comment and its trusted scope
+ * updates - the same source `declaredSupersedes` uses. A PR body, a CI log or
+ * an untrusted comment can never move a task between head tiers.
+ */
+export function declaredExpectedHead(entry) {
+  const bodies = [entry?.comment?.body, ...(entry?.updates ?? []).map((u) => u?.body)];
+  let found = null;
+  for (const body of bodies) {
+    for (const line of String(body ?? "").split(/\r?\n/)) {
+      const m = line.match(EXPECTED_HEAD_LINE);
+      // The LAST declaration wins: a trusted scope update that re-points the
+      // order at a new head is the architect correcting themselves, not a
+      // second, competing order.
+      if (m) found = String(m[1]).toLowerCase();
+    }
+  }
+  return found;
+}
+
+/**
+ * Compare a declared head against the observed one.
+ *
+ * Prefix-tolerant in the only direction that is safe: an abbreviated
+ * declaration matches a full observed sha it is a prefix of. An observed head
+ * we could NOT read is never a mismatch - calling an order stale on the
+ * strength of a question we failed to answer would be the same fail-open move
+ * D-134 removed elsewhere.
+ */
+export function headTierFor(declaredHead, observedHead) {
+  if (!declaredHead) return HEAD_TIER.UNDECLARED;
+  const observed = typeof observedHead === "string" ? observedHead.toLowerCase() : null;
+  if (!observed) return HEAD_TIER.UNDECLARED;
+  const shorter = Math.min(declaredHead.length, observed.length);
+  return declaredHead.slice(0, shorter) === observed.slice(0, shorter) ? HEAD_TIER.CURRENT : HEAD_TIER.STALE;
+}
+
+/**
  * PR #80 REVIEW BLOCKER 3 - AN UNSUCCESSFUL TERMINAL REPORT SUPERSEDED REAL WORK.
  *
  * Supersession is a RETIREMENT: the older task becomes TERMINAL and is never
@@ -207,9 +282,10 @@ export function reportVerdictFor(entry, { state, comments, trustedAuthor }) {
  * (`supersededTaskIds`, `completedByReportTaskIds`) before acting on
  * `candidate`, so the decision survives a restart.
  */
-export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs }) {
+export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs, observedHead = null }) {
   const entries = (tasks ?? []).map((entry) => {
     const record = getTask(state, entry.taskId);
+    const expectedHead = declaredExpectedHead(entry);
     return {
       entry,
       taskId: entry.taskId,
@@ -217,7 +293,9 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
       createdMs: createdMs(entry),
       commentId: commentId(entry),
       completion: null,
-      tier: (record?.attempts ?? 0) > 0 ? TIER.RETRY : TIER.FRESH
+      tier: (record?.attempts ?? 0) > 0 ? TIER.RETRY : TIER.FRESH,
+      expectedHead,
+      headTier: headTierFor(expectedHead, observedHead)
     };
   });
 
@@ -346,6 +424,11 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
         eligible,
         reason,
         tier: e.tier,
+        // D-139: surfaced on every decision so a dry run shows WHY a stale
+        // order lost, instead of leaving it to be inferred from the ordering.
+        headTier: e.headTier,
+        expectedHead: e.expectedHead,
+        headMatchesObserved: e.headTier === HEAD_TIER.CURRENT,
         attempts: e.record?.attempts ?? 0,
         createdAt: e.entry?.comment?.created_at ?? null,
         completion: e.completion,
@@ -411,7 +494,15 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
   //
   // Comment id is the final tie-break, so the ordering is total even for two
   // comments with identical timestamps.
+  // D-139: HEAD TIER OUTRANKS EVERYTHING ELSE.
+  //
+  // An order written against a head the repository has since left cannot be
+  // carried out as written - its own pre-flight would refuse. So it may never
+  // be chosen ahead of an order that names the head we are actually on. This
+  // sorts before tier deliberately: a STALE fresh task must lose to a CURRENT
+  // retry, because the retry is at least still executable.
   dispatchable.sort((a, b) => {
+    if (a.headTier !== b.headTier) return a.headTier - b.headTier;
     if (a.tier !== b.tier) return a.tier - b.tier;
     if (a.createdMs !== b.createdMs) {
       return a.tier === TIER.FRESH ? a.createdMs - b.createdMs : b.createdMs - a.createdMs;
@@ -424,6 +515,9 @@ export function selectNextTask({ tasks, state, comments, trustedAuthor, nowMs })
   return {
     candidate: chosen?.entry ?? null,
     candidateTier: chosen?.tier ?? null,
+    candidateHeadTier: chosen?.headTier ?? null,
+    candidateExpectedHead: chosen?.expectedHead ?? null,
+    observedHead: observedHead ?? null,
     decisions,
     // The newest task that positively SUCCEEDED, or null. Kept as a summary for
     // logging and the dry run; the per-decision `supersededBy` is authoritative,

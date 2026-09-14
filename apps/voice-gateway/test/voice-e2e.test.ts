@@ -8,10 +8,20 @@ import pg from "pg";
 import WebSocket from "ws";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  allocateEmbeddedPostgresPort,
-  ChannelSessionAuthority, ContextBuilder, DeviceEnrollmentService, DeviceService, IdentityService, MessageStore,
-  PgApprovalStore, SessionGrantService, SessionService, VoiceSessionAuthority, createPool, runMigrations
+  ChannelSessionAuthority,
+  ContextBuilder,
+  DeviceEnrollmentService,
+  DeviceService,
+  IdentityService,
+  MessageStore,
+  PgApprovalStore,
+  SessionGrantService,
+  SessionService,
+  VoiceSessionAuthority,
+  createPool,
+  runMigrations
 } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ScriptedAdapter } from "@jarvis/provider-adapters";
@@ -23,7 +33,8 @@ import { MarkerStt } from "../src/stt.ts";
 import { FakeTts } from "../src/tts.ts";
 import { UtteranceJournal } from "../src/session.ts";
 
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -141,11 +152,14 @@ class VoiceClient {
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg5-"));
-  epg = new EmbeddedPostgres({
-    databaseDir, user: "postgres", password: "test-superuser-pw", port: PORT, persistent: false
-  });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({
+    databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false
+  })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({
     host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "test-superuser-pw"
@@ -237,7 +251,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => apiServer?.close(() => resolve()));
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("Sesjonskontinuitet: tekst ↔ tale bruker samme sesjon", () => {

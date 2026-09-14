@@ -29,7 +29,8 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import type { IdentityContext, JobContract } from "@jarvis/contracts";
-import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
+import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ArtifactStore, ClaudeCodeAgent, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, createCodingHandler } from "@jarvis/tasks";
 import {
@@ -153,18 +154,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const PORT = allocateEmbeddedPostgresPort();
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-live-eval-"));
   // D-100 §4: eksplisitt UTF8-encoding+C-locale - uten dette avleder `initdb`
   // encoding fra vertens OS-locale (WIN1252 pa den affiserte Windows-verten,
   // UTF8 pa Linux/glibc) - `C`-locale er reservert og garantert tilgjengelig
   // pa enhver plattform uten et installert sprakspraak.
-  const epg = new EmbeddedPostgres({
-    databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false,
-    initdbFlags: [...LIVE_EVAL_INITDB_FLAGS]
-  });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({
+      databaseDir, user: "postgres", password: "pw", port, persistent: false,
+      initdbFlags: [...LIVE_EVAL_INITDB_FLAGS]
+    })
+  );
+  const epg = leasedPostgres.postgres;
+  const PORT = leasedPostgres.port;
   await epg.createDatabase("jarvis_test");
   const adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -223,7 +225,7 @@ async function main(): Promise<void> {
     // modell-kvalitetsbevis, se D-100-dok).
     if (appPool) await appPool.end().catch(() => undefined);
     await adminPool.end().catch(() => undefined);
-    await epg.stop().catch(() => undefined);
+    await leasedPostgres.stop().catch(() => undefined);
   }
 }
 

@@ -1,11 +1,34 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-14 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv runde: **D-137**, CI-blokker på PR #80
-(testenes portvalg for embedded Postgres). Manuell recovery-økt - ingen Jarvis-task-proveniens.
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv ordre: **D-139**
+(`D139-PR80-PORT-LEASE-DIRTY-GATE-20260914-A`, issue #68 kommentar 5657063418). Punkt A+B utfoert som
+MANUAL RECOVERY etter D-139 Phase 0 - ingen Jarvis-task-proveniens, begge schedulere Disabled.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
+
+## Aktiv ordre: D-139 punkt A + B (manuell recovery)
+
+**A - portallokering.** Arkitekt-gjennomgangen forkastet D-137-fiksen som utilstrekkelig. `Math.random()`
+i et intervall er ingen allokering, og fallbacken substituerte stille 32768 naar kjernens efemere
+intervall ikke kunne leses. Erstattet av en ekte atomisk cross-process-leie (`openSync(.., "wx")`) med
+eier-identitet, bounded retry, tidsavgrenset stale-overtakelse som aldri river vekk en levende leie, og
+opprydding som kun frigjoer egen leie - pluss et range-lag som skiller `read`/`unreadable`/`unsupported`
+og aldri presenterer et gjett som et faktum. Etter `start()` kreves en EKTE IPv4-forbindelse foer klienten
+slippes videre, saa den delvise bind-feilen fra D-137 ikke kan passere som «ready». Allokatoren er ute av
+`modules/core/src/index.ts` og naas kun via `@jarvis/core/testing`. Alle 118 kallsteder migrert.
+
+**B - renhetsport.** Terminal suksess krever naa BAADE bevist commit-proveniens OG en fersk, ren
+task-worktree. Dirty eller uleselig holder (`successful=false`, ingen `completed_at`, ingen
+COMPLETION_CONFIRMED, ingen frigjoering/supersesjon). Lagret renhet kan kun nedgradere fersk.
+
+**Generell invariant.** Koeen ville valgt en aldri-utsendt ordre som navnga head `4df1472` - som repoet
+hadde forlatt - foran den gjeldende D-139-ordren, fordi begge var «fresh» og ferske sorteres eldst-foerst.
+Lukket generelt via `EXPECTED_HEAD_SHA` og `HEAD_TIER`, ikke per TASK_ID.
+
+**Host.** Deployet `pr80-4315c631-20260914` er live og hash-verifisert (33/33), men er FRA FOER denne
+endringen. Den nye koden er bevisst IKKE redeployet, og begge schedulere staar fortsatt `Disabled`.
 
 ## Aktiv oppgave: D-137 - CI-blokkeren på PR #80 er funnet og rettet
 

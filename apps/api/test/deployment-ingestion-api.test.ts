@@ -7,10 +7,17 @@ import pg from "pg";
 import { z } from "zod";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  allocateEmbeddedPostgresPort,
-  ChannelSessionAuthority, ContextBuilder, DeviceService, IdentityService, MessageStore, SessionGrantService,
-  SessionService, createPool, runMigrations
+  ChannelSessionAuthority,
+  ContextBuilder,
+  DeviceService,
+  IdentityService,
+  MessageStore,
+  SessionGrantService,
+  SessionService,
+  createPool,
+  runMigrations
 } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DeploymentService, IncidentService } from "@jarvis/incidents";
 import { MemoryTraceSink, ModelGateway } from "@jarvis/model-gateway";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, InfraExecutionGate, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -35,7 +42,8 @@ import { createApiServer } from "../src/server.ts";
  * `ToolGateway.execute()`, ikke et direkte provider-kall.
  */
 
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -114,9 +122,12 @@ let githubTransport: FakeGithubTransport;
 
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-deploy-ingest-"));
-  epg = new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -184,7 +195,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 async function ingest(body: Record<string, unknown>): Promise<{ status: number; body: Record<string, unknown> }> {

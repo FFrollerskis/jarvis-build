@@ -15,7 +15,7 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
-import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * D-123 (UA-7, FJERDE slice) - Q-32 punkt (2), DB-siden.
@@ -32,7 +32,8 @@ import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-p
  * tilbakekalt enhet, replay og utløpt nonce.
  */
 
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 /** Tobias sin ekte enhet. */
 const watchKeys = generateKeyPairSync("ed25519");
 /** En ANNEN person sin fullt gyldige, registrerte enhet - angriperens utgangspunkt. */
@@ -58,9 +59,12 @@ function proof(deviceId: string, key: Parameters<typeof sign>[2]): { challenge: 
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg123-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -110,7 +114,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("D-123: VoiceSessionAuthority gir SERVER_VERIFIED kun for en faktisk bevist prinsipal", () => {

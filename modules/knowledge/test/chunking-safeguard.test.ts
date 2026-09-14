@@ -5,7 +5,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { allocateEmbeddedPostgresPort, createPool, runMigrations } from "@jarvis/core";
+import { createPool, runMigrations } from "@jarvis/core";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { LocalHashEmbedding, type EmbeddingProvider } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "../src/filesystem-source.ts";
 import { KnowledgeSyncService } from "../src/sync.ts";
@@ -18,7 +19,8 @@ import { KnowledgeSyncService } from "../src/sync.ts";
  * token-tak) eller stille mistet halene av innholdet fra fulltekstsøk (hvis
  * noen ved en feil hadde trunkert `content` selv).
  */
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 let epg: InstanceType<typeof EmbeddedPostgres>;
 let adminPool: pg.Pool;
 let appPool: pg.Pool;
@@ -30,9 +32,12 @@ const identity: IdentityContext = {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-chunk-know-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -50,7 +55,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 /** Registrerer lengden på HVER tekst den faktisk fikk til embed() - beviser trunkeringsgrensen uten å bry seg om selve vektoren. */

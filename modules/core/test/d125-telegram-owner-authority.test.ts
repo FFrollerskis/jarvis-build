@@ -14,7 +14,7 @@ import {
   createPool,
   runMigrations
 } from "@jarvis/core";
-import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-port.ts";
+import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 
 /**
  * D-125 (UA-7, FEMTE slice): den betrodde server-side eier-autoriteten for
@@ -27,7 +27,8 @@ import { allocateEmbeddedPostgresPort } from "../src/testing/embedded-postgres-p
  * ikke skal ha - fremmed chat, nesten-lik chat, feiltypet chat, ukonfigurert
  * eier, kryss-tenant og kryss-space.
  */
-const PORT = allocateEmbeddedPostgresPort();
+let PORT = 0;
+let stopEmbeddedPostgres: (() => Promise<void>) | undefined;
 
 const OWNER_CHAT = "987654321";
 const TENANT_A = "tenant-a";
@@ -48,9 +49,12 @@ async function sessionCount(): Promise<number> {
 
 beforeAll(async () => {
   const dir = await mkdtemp(join(tmpdir(), "jarvis-pg125-"));
-  epg = new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port: PORT, persistent: false });
-  await epg.initialise();
-  await epg.start();
+  const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
+    new EmbeddedPostgres({ databaseDir: dir, user: "postgres", password: "pw", port, persistent: false })
+  );
+  epg = leasedPostgres.postgres;
+  PORT = leasedPostgres.port;
+  stopEmbeddedPostgres = leasedPostgres.stop;
   await epg.createDatabase("jarvis_test");
   adminPool = new pg.Pool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "postgres", password: "pw" });
   adminPool.on("error", () => undefined);
@@ -90,7 +94,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await appPool?.end();
   await adminPool?.end();
-  await epg?.stop();
+  await stopEmbeddedPostgres?.();
 }, 120_000);
 
 describe("D-125 A: den konfigurerte eier-chatten gir eierens kanoniske identitet", () => {

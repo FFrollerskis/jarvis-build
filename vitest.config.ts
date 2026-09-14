@@ -6,6 +6,10 @@ export default defineConfig({
     alias: {
       "@jarvis/contracts": fileURLToPath(new URL("./packages/contracts/src/index.ts", import.meta.url)),
       "@jarvis/policy": fileURLToPath(new URL("./modules/policy/src/index.ts", import.meta.url)),
+      // Subpath-aliaset MAA staa foer "@jarvis/core": Vite matcher ogsaa prefiks,
+      // saa den brede noekkelen ville ellers skrevet om "@jarvis/core/testing"
+      // til ".../src/index.ts/testing".
+      "@jarvis/core/testing": fileURLToPath(new URL("./modules/core/src/testing/index.ts", import.meta.url)),
       "@jarvis/core": fileURLToPath(new URL("./modules/core/src/index.ts", import.meta.url)),
       "@jarvis/tasks": fileURLToPath(new URL("./modules/tasks/src/index.ts", import.meta.url)),
       "@jarvis/model-gateway": fileURLToPath(new URL("./modules/model-gateway/src/index.ts", import.meta.url)),

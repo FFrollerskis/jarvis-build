@@ -27,6 +27,7 @@ import {
   RECONCILE_PROVENANCE,
   commitTrailerLines,
   deriveReconciliationProvenance,
+  WORKTREE_CLEANLINESS,
   evaluateCompletionGate,
   reconciliationProvenanceForGate
 } from "../lib/provenance.mjs";
@@ -132,8 +133,24 @@ function runnerFailing(mustContainAll) {
     : spawnSync(command, args, opts));
 }
 
-function gateFor(provenance) {
-  return evaluateCompletionGate({ completion: SUCCESS_REPORT, provenance });
+/**
+ * Denne filen proever PROVENIENS-halvparten av porten. D-139 B la til en andre
+ * halvpart - en fersk, ren task-worktree - saa den leveres eksplisitt som ren
+ * her, slik at et utslag fortsatt handler om proveniensen og ingenting annet.
+ * Selve worktree-halvparten har sine egne bevis i provenance.test.mjs og i
+ * worker-dirty-completion.test.mjs.
+ */
+const CLEAN_WORKTREE = Object.freeze({
+  verdict: WORKTREE_CLEANLINESS.CLEAN,
+  path: "/wt",
+  entry_count: 0,
+  entries: [],
+  error: null,
+  queried: true
+});
+
+function gateFor(provenance, worktree = CLEAN_WORKTREE) {
+  return evaluateCompletionGate({ completion: SUCCESS_REPORT, provenance, worktree });
 }
 
 /** ---------------- the POSITIVE controls ---------------- */

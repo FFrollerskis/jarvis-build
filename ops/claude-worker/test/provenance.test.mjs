@@ -14,6 +14,7 @@ import {
   COMMIT_PROVENANCE,
   COMPLETION_GATE,
   MAX_EXAMINED_COMMITS,
+  WORKTREE_CLEANLINESS,
   TRAILER_TASK,
   TRAILER_ATTEMPT,
   classifyCommitRange,
@@ -26,6 +27,7 @@ import {
   describeCompletionGate,
   evaluateCompletionGate,
   isVerifiedVerdict,
+  mergeWorktreeCleanliness,
   parseCommitEvidence,
   provenanceForResume
 } from "../lib/provenance.mjs";
@@ -596,8 +598,28 @@ describe("D-135: evaluateCompletionGate", () => {
     ...extra
   });
 
-  it("passes a successful report standing on a VERIFIED range", () => {
-    const gate = evaluateCompletionGate({ completion: successfulReport, provenance: verifiedProvenance });
+  // D-139 B: en verifisert provenance er ikke lenger halve beviset - den er
+  // halve beviset. Den andre halvparten er en fersk, ren task-worktree.
+  const cleanWorktree = { verdict: WORKTREE_CLEANLINESS.CLEAN, path: "/wt", entry_count: 0, entries: [], error: null, queried: true };
+  const dirtyWorktree = (entries) => ({
+    verdict: WORKTREE_CLEANLINESS.DIRTY,
+    path: "/wt",
+    entry_count: entries.length,
+    entries,
+    error: null,
+    queried: true
+  });
+  const unknownWorktree = (error) => ({
+    verdict: WORKTREE_CLEANLINESS.UNKNOWN,
+    path: "/wt",
+    entry_count: 0,
+    entries: [],
+    error,
+    queried: true
+  });
+
+  it("passes a successful report standing on a VERIFIED range AND a clean worktree", () => {
+    const gate = evaluateCompletionGate({ completion: successfulReport, provenance: verifiedProvenance, worktree: cleanWorktree });
     expect(gate.held).toBe(false);
     expect(gate.passed).toBe(true);
     expect(gate.reason).toBe(COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED);
@@ -606,10 +628,103 @@ describe("D-135: evaluateCompletionGate", () => {
   it("passes an unmoved HEAD - there was never an authorship question", () => {
     const gate = evaluateCompletionGate({
       completion: successfulReport,
-      provenance: { verdict: COMMIT_PROVENANCE.UNCHANGED, verified: true, head_before: BEFORE, head_after: BEFORE }
+      provenance: { verdict: COMMIT_PROVENANCE.UNCHANGED, verified: true, head_before: BEFORE, head_after: BEFORE },
+      worktree: cleanWorktree
     });
     expect(gate.held).toBe(false);
     expect(gate.reason).toBe(COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED);
+  });
+
+  describe("D-139 B: en ren worktree er den ANDRE halvparten av beviset", () => {
+    it("HOLDER naar ingen har sett paa worktreen i det hele tatt", () => {
+      const gate = evaluateCompletionGate({ completion: successfulReport, provenance: verifiedProvenance, worktree: null });
+      expect(gate.held).toBe(true);
+      expect(gate.passed).toBe(false);
+      expect(gate.reason).toBe(COMPLETION_GATE.HELD_NO_WORKTREE_EVIDENCE);
+    });
+
+    for (const entry of [" M src/a.ts", "A  src/b.ts", " D src/c.ts", "UU src/d.ts", "?? src/e.ts", "R  a -> b"]) {
+      it(`HOLDER paa en porcelain-linje av enhver art: ${JSON.stringify(entry)}`, () => {
+        const gate = evaluateCompletionGate({
+          completion: successfulReport,
+          provenance: verifiedProvenance,
+          worktree: dirtyWorktree([entry])
+        });
+        expect(gate.held).toBe(true);
+        expect(gate.reason).toBe(COMPLETION_GATE.HELD_WORKTREE_DIRTY);
+        expect(gate.worktree_entry_count).toBe(1);
+        expect(gate.worktree_entries).toEqual([entry]);
+      });
+    }
+
+    it("HOLDER naar statusen ikke kunne leses - ukjent er aldri rent", () => {
+      const gate = evaluateCompletionGate({
+        completion: successfulReport,
+        provenance: verifiedProvenance,
+        worktree: unknownWorktree("git status failed: ENOENT")
+      });
+      expect(gate.held).toBe(true);
+      expect(gate.reason).toBe(COMPLETION_GATE.HELD_WORKTREE_UNKNOWN);
+      expect(gate.worktree_error).toContain("ENOENT");
+    });
+
+    it("HOLDER paa et ukjent/fremmed verdikt, aldri som en stille pass", () => {
+      const gate = evaluateCompletionGate({
+        completion: successfulReport,
+        provenance: verifiedProvenance,
+        worktree: { verdict: "noe-helt-annet", entry_count: 0, entries: [] }
+      });
+      expect(gate.held).toBe(true);
+      expect(gate.reason).toBe(COMPLETION_GATE.HELD_WORKTREE_UNKNOWN);
+    });
+
+    it("provenance-halvparten avgjoer FOERST - en dirty worktree skjuler ikke en uverifisert range", () => {
+      const gate = evaluateCompletionGate({
+        completion: successfulReport,
+        provenance: unverified(COMMIT_PROVENANCE.UNATTRIBUTED),
+        worktree: dirtyWorktree([" M x"])
+      });
+      expect(gate.held).toBe(true);
+      expect(gate.reason).toBe(COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED);
+    });
+
+    it("en IKKE-suksess-rapport gates fortsatt ikke paa worktreen", () => {
+      const gate = evaluateCompletionGate({
+        completion: { complete: true, successful: false, status: "BLOCKED" },
+        provenance: null,
+        worktree: dirtyWorktree([" M x"])
+      });
+      expect(gate.held).toBe(false);
+      expect(gate.reason).toBe(COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM);
+    });
+  });
+
+  describe("D-139 B: lagret renhet kan bare NEDGRADERE fersk, aldri oppgradere", () => {
+    it("lagret CLEAN oppgraderer ikke en fersk DIRTY", () => {
+      const merged = mergeWorktreeCleanliness(cleanWorktree, dirtyWorktree([" M x"]));
+      expect(merged.verdict).toBe(WORKTREE_CLEANLINESS.DIRTY);
+    });
+
+    it("lagret CLEAN oppgraderer ikke en fersk UNKNOWN", () => {
+      const merged = mergeWorktreeCleanliness(cleanWorktree, unknownWorktree("uleselig"));
+      expect(merged.verdict).toBe(WORKTREE_CLEANLINESS.UNKNOWN);
+    });
+
+    it("lagret DIRTY nedgraderer en fersk CLEAN - funnet staar til noen forklarer det", () => {
+      const merged = mergeWorktreeCleanliness(dirtyWorktree([" M x"]), cleanWorktree);
+      expect(merged.verdict).toBe(WORKTREE_CLEANLINESS.DIRTY);
+    });
+
+    it("lagret UNKNOWN nedgraderer en fersk CLEAN", () => {
+      const merged = mergeWorktreeCleanliness(unknownWorktree("uleselig"), cleanWorktree);
+      expect(merged.verdict).toBe(WORKTREE_CLEANLINESS.UNKNOWN);
+    });
+
+    it("uten lagret verdikt gjelder det ferske; uten ferskt gjelder det lagrede", () => {
+      expect(mergeWorktreeCleanliness(null, cleanWorktree).verdict).toBe(WORKTREE_CLEANLINESS.CLEAN);
+      expect(mergeWorktreeCleanliness(dirtyWorktree([" M x"]), null).verdict).toBe(WORKTREE_CLEANLINESS.DIRTY);
+      expect(mergeWorktreeCleanliness(null, null)).toBe(null);
+    });
   });
 
   // The enumerated list from the architect's order, each one asserted on its own.

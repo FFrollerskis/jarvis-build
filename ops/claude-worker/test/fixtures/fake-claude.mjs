@@ -140,6 +140,30 @@ function mutateWorkspace(taskId) {
     try {
       appendFileSync(join(DIR, "commits.log"), `${taskId} ${String(head.stdout ?? "").trim()}\n`, "utf8");
     } catch { /* best effort */ }
+
+    /**
+     * D-139 B: commit properly, THEN leave work behind uncommitted.
+     *
+     * This is the state the dirty-completion gate exists for, and it is the one
+     * shape the existing fixture could not express: commit provenance verifies
+     * perfectly - the commits really are this task's own, correctly trailered -
+     * while the worktree still holds work that was never committed at all. A
+     * `STATUS=COMPLETE` posted from here is a claim the repository itself
+     * contradicts.
+     *
+     *   JARVIS_FAKE_CLAUDE_DIRTY_AFTER_COMMIT=tracked|untracked|both
+     */
+    const dirtyAfter = String(process.env.JARVIS_FAKE_CLAUDE_DIRTY_AFTER_COMMIT ?? "").trim();
+    if (dirtyAfter) {
+      if (dirtyAfter === "tracked" || dirtyAfter === "both") {
+        const file = join(cwd, "tracked.txt");
+        const before = existsSync(file) ? readFileSync(file, "utf8") : "";
+        writeFileSync(file, `${before}uncommitted tail for ${taskId}\n`, "utf8");
+      }
+      if (dirtyAfter === "untracked" || dirtyAfter === "both") {
+        writeFileSync(join(cwd, `leftover-${taskId}.tmp`), "never committed\n", "utf8");
+      }
+    }
   }
 
   try {

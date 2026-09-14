@@ -83,7 +83,10 @@ import {
   deriveReconciliationProvenance,
   reconciliationProvenanceForGate,
   provenanceForResume,
+  WORKTREE_CLEANLINESS,
+  assessWorktreeCleanliness,
   evaluateCompletionGate,
+  mergeWorktreeCleanliness,
   describeCompletionGate,
   COMMIT_PROVENANCE
 } from "./lib/provenance.mjs";
@@ -265,6 +268,37 @@ function releaseWorktreeIfSettled(cfg, taskId, successful) {
  *
  * Returns `{ gate, provenance }`. The caller must branch on `gate.held`.
  */
+/**
+ * D-139 B: the worktree half of the completion proof.
+ *
+ * Read FRESH every time, then merged with whatever the record already found, so
+ * a stored verdict can only ever make the answer worse. Used by every path that
+ * can accept a terminal SUCCESS - ordinary post-dispatch, abandoned-child
+ * recovery, pre-selection reconciliation and pre-dispatch reconciliation - so
+ * none of them can accept a claim the other three would refuse.
+ */
+function worktreeCleanlinessFor(cfg, task) {
+  const taskId = task?.task_id;
+  let fresh;
+  try {
+    fresh = assessWorktreeCleanliness(cfg, { taskId, worktreeRoot: cfg.worktreeRoot });
+  } catch (err) {
+    // A query that THREW answered nothing, which is UNKNOWN - never "clean".
+    fresh = {
+      verdict: WORKTREE_CLEANLINESS.UNKNOWN,
+      path: null,
+      entry_count: 0,
+      entries: [],
+      error: `worktree cleanliness query threw: ${sanitize(err.message)}`,
+      queried: true
+    };
+  }
+  const merged = mergeWorktreeCleanliness(task?.worktree_cleanliness ?? null, fresh);
+  log(cfg, `WORKTREE_CLEANLINESS for ${taskId}: ${merged?.verdict ?? "unknown"} `
+    + `(entries=${merged?.entry_count ?? 0}${merged?.error ? `, ${sanitize(String(merged.error))}` : ""})`);
+  return merged;
+}
+
 function completionGateFor(cfg, task, completion) {
   if (completion?.complete !== true || completion?.successful !== true) {
     return { gate: evaluateCompletionGate({ completion, provenance: null }), provenance: null };
@@ -306,7 +340,8 @@ function completionGateFor(cfg, task, completion) {
     + `verdict=${provenance.verdict} verified=${provenance.verified}`
     + `${provenance.downgraded_by_recorded_verdict ? " (downgraded by the recorded verdict)" : ""} `
     + `(${provenance.reason})`);
-  return { gate: evaluateCompletionGate({ completion, provenance }), provenance };
+  const worktree = worktreeCleanlinessFor(cfg, task);
+  return { gate: evaluateCompletionGate({ completion, provenance, worktree }), provenance, worktree };
 }
 
 /**
@@ -526,7 +561,12 @@ async function runOwned(cfg, token) {
   const gateHeld = [...recovery.gateHeld, ...preReconciliation.gateHeld];
 
   // Requirement E: only already-authorised tasks. Nothing is invented here.
-  const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs });
+  // D-139: the observed head decides which orders are still executable at all.
+  // A task naming a head we have left may not preempt one naming the head we
+  // are on. An unreadable head yields null, which makes every task UNDECLARED
+  // rather than falsely stale.
+  const observedHead = gitHead(cfg).value ?? null;
+  const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs, observedHead });
 
   // Persist the retirements the selection identified, so they survive a restart
   // and can never be re-decided differently by a later run.
@@ -1595,7 +1635,11 @@ async function runTask(cfg, state, token, candidate, comments) {
   //
   // The gate is evaluated on the FRESH verdict computed a few lines above, from
   // this task's own worktree, using attempt ids that existed only for this task.
-  const completionGate = evaluateCompletionGate({ completion, provenance: commitProvenance });
+  // D-139 B: den ordinaere fullfoeringsveien maa svare paa NOEYAKTIG samme
+  // sporsmaal som rekonsiliasjonsveiene - ellers ville en dirty worktree
+  // blitt akseptert her og avvist der.
+  const worktreeCleanliness = worktreeCleanlinessFor(cfg, getTask(state, taskId));
+  const completionGate = evaluateCompletionGate({ completion, provenance: commitProvenance, worktree: worktreeCleanliness });
   if (completionGate.held) {
     parkHeldCompletion(cfg, state, token, taskId, {
       gate: completionGate,
@@ -1604,7 +1648,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       // verdict, the task-owned dirty lines and the worktree path are exactly
       // what a human reconciling this needs, and none of it is a claim of
       // ownership - they are observations plus one honest verdict.
-      extra: { ...checkpoint, ...observed }
+      extra: { ...checkpoint, ...observed, worktree_cleanliness: worktreeCleanliness }
     });
     return EXIT.BLOCKED;
   }
@@ -1617,6 +1661,9 @@ async function runTask(cfg, state, token, candidate, comments) {
       // Recorded even when it passes, so the record always states positively WHY
       // the claim was accepted rather than leaving that to be inferred.
       completion_gate: completionGate,
+      // D-139 B: lagret slik at en senere, ferskere maaling kun kan gjoere
+      // svaret VERRE - aldri bedre.
+      worktree_cleanliness: worktreeCleanliness,
       completed_at: new Date().toISOString(),
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,
@@ -1827,7 +1874,8 @@ function cmdDryRun(cfg) {
   // including tiering and supersession - otherwise it cannot be used to verify
   // queue behaviour on the host, which is exactly what was needed here.
   const selection = selectNextTask({
-    tasks, state: loaded.state, comments, trustedAuthor: cfg.trustedAuthor, nowMs
+    tasks, state: loaded.state, comments, trustedAuthor: cfg.trustedAuthor, nowMs,
+    observedHead: gitHead(cfg).value ?? null
   });
   const status = gitStatusLines(cfg);
   console.log(JSON.stringify({
@@ -1839,6 +1887,11 @@ function cmdDryRun(cfg) {
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
     next_candidate: selection.candidate?.taskId ?? null,
     next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
+    observed_head: selection.observedHead,
+    next_candidate_expected_head: selection.candidateExpectedHead,
+    next_candidate_head_tier:
+      selection.candidateHeadTier === 0 ? "current"
+        : (selection.candidateHeadTier === 1 ? "undeclared" : (selection.candidateHeadTier === 2 ? "stale" : null)),
     would_retire_superseded: selection.supersededTaskIds,
     would_retire_from_report: selection.completedByReportTaskIds,
     unrecognised_report_status: selection.unrecognisedStatusTaskIds,

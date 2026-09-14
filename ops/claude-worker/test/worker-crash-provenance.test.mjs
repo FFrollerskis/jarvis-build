@@ -560,3 +560,136 @@ describe("D-136 MIGRATION: legacy rows never gain trust from a missing verdict",
     expect(existsSync(join(wt(TASK_A), "unrelated-writer.txt"))).toBe(true);
   }, 300_000);
 });
+
+/* ==========================================================================
+ * D-139 B: EN SKITTEN TASK-WORKTREE ER IKKE EN FULLFOERT TASK
+ * ==========================================================================
+ *
+ * D-136 lukket forfatterskaps-spoersmaalet: er disse commitene vaare? Det
+ * besvarer ikke det andre spoersmaalet en suksess-paastand hviler paa: ER
+ * arbeidet i det hele tatt committet? Et barn kan committe helt korrekt,
+ * etterlate ukommittert arbeid i sin egen claimede worktree, og likevel poste
+ * en fullstendig ekte, fullstendig betrodd `STATUS=COMPLETE`.
+ *
+ * Testene under bruker EKTE repo, EKTE worker-entrypoint og et EKTE barn som
+ * committer med riktige trailere OG lar noe ligge igjen. Proveniensen er da
+ * verifisert - det er nettopp poenget: uten renhetsporten ville disse blitt
+ * akseptert som vellykket fullfoering.
+ */
+describe("D-139 B: fullfoering krever BAADE bevist proveniens OG en ren worktree", () => {
+  beforeEach(() => {
+    setComments([architectTask(TASK_A, "2026-09-12T10:00:00Z", 9101)]);
+  });
+
+  const committing = (dirtyAfter) => ({
+    JARVIS_FAKE_CLAUDE_MUTATE: "tracked",
+    JARVIS_FAKE_CLAUDE_COMMIT: "1",
+    ...(dirtyAfter ? { JARVIS_FAKE_CLAUDE_DIRTY_AFTER_COMMIT: dirtyAfter } : {})
+  });
+
+  it("POSITIV KONTROLL: committer rent => akseptert som vellykket fullfoert", async () => {
+    await runWorker("report", committing(null));
+
+    const rec = task(TASK_A);
+    expect(rec.status).toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).toBe(true);
+    expect(rec.completion_gate.held).toBe(false);
+    expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED);
+    // Renheten er positivt registrert, ikke utelatt.
+    expect(rec.completion_gate.worktree_verdict).toBe("clean");
+    expect(rec.completion_gate.worktree_entry_count).toBe(0);
+    expect(healthEvents().some((e) => e.event === "completion_confirmed")).toBe(true);
+  }, 300_000);
+
+  for (const [label, dirtyAfter] of [["UTRACKED", "untracked"], ["TRACKED", "tracked"], ["BEGGE", "both"]]) {
+    it(`${label} ukommittert arbeid igjen i worktreen => HOLDT, aldri fullfoert`, async () => {
+      await runWorker("report", committing(dirtyAfter));
+
+      const rec = task(TASK_A);
+      // Proveniensen er FAKTISK verifisert - det er dette som gjoer testen skarp.
+      expect(rec.completion_gate.provenance_verdict).toBe(COMMIT_PROVENANCE.ATTRIBUTED);
+      // ...og likevel holdes den, paa renhets-halvparten.
+      expect(rec.completion_gate.held).toBe(true);
+      expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.HELD_WORKTREE_DIRTY);
+      expect(rec.completion_gate.worktree_verdict).toBe("dirty");
+      expect(rec.completion_gate.worktree_entry_count).toBeGreaterThan(0);
+
+      expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+      expect(rec.successful).toBe(false);
+      expect(rec.completed_at ?? null).toBe(null);
+      expect(healthEvents().some((e) => e.event === "completion_confirmed")).toBe(false);
+
+      // Ingenting ble ryddet, frigjort eller kastet.
+      expect(existsSync(wt(TASK_A))).toBe(true);
+      expect(claim(TASK_A).ok).toBe(true);
+      expect(statusLines(wt(TASK_A)).length).toBeGreaterThan(0);
+    }, 300_000);
+  }
+
+  it("en worktree vi IKKE kan lese er UKJENT - aldri ren", async () => {
+    // Kjoer foerst normalt, saa vi har en claim og en ekte worktree.
+    await runWorker("report", committing(null));
+    expect(task(TASK_A).status).toBe(TASK_STATUS.COMPLETED);
+
+    // Tilbakestill tasken og fjern worktreen under foettene paa den: statusen
+    // kan da ikke besvares, og porten maa behandle det som ukjent.
+    const s = state();
+    s.tasks[TASK_A] = {
+      ...s.tasks[TASK_A],
+      status: TASK_STATUS.IN_PROGRESS,
+      successful: false,
+      completed_at: null,
+      completion_gate: null
+    };
+    saveStateAtomic(join(workerRoot, "state.json"), s, join(workerRoot, "state.json.bak"), { schema: "worker" });
+    rmSync(wt(TASK_A), { recursive: true, force: true });
+
+    await runWorker("silent");
+
+    const rec = task(TASK_A);
+    expect(rec.successful).toBe(false);
+    expect(rec.status).not.toBe(TASK_STATUS.COMPLETED);
+  }, 300_000);
+
+  it("KRASJVINDUET: barnet committer, lar noe ligge igjen, forelderen doer - restart godtar ALDRI", async () => {
+    await crashAfterReportBeforeCheckpoint(committing("untracked"));
+
+    // Ingen provenance-checkpoint ble naadd; rekonsiliasjonsveien maa svare paa
+    // BEGGE spoersmaalene paa nytt, og renheten feller den.
+    await runWorker("silent");
+
+    const rec = task(TASK_A);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.successful).toBe(false);
+    expect(rec.completed_at ?? null).toBe(null);
+    expect(rec.completion_gate.held).toBe(true);
+    expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.HELD_WORKTREE_DIRTY);
+    expect(existsSync(wt(TASK_A))).toBe(true);
+    expect(claim(TASK_A).ok).toBe(true);
+  }, 300_000);
+
+  it("TRE restarts etter et holdt gate: ingen gjenoppstandelse, ingen ny dispatch", async () => {
+    await runWorker("report", committing("untracked"));
+    expect(task(TASK_A).status).toBe(TASK_STATUS.BLOCKED);
+
+    const dispatchedBefore = dispatched().length;
+    for (let i = 0; i < 3; i++) {
+      await runWorker("silent");
+      const rec = task(TASK_A);
+      expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+      expect(rec.successful).toBe(false);
+      expect(rec.completed_at ?? null).toBe(null);
+    }
+    // DUPLICATE_DISPATCH = 0.
+    expect(dispatched().length).toBe(dispatchedBefore);
+    expect(existsSync(wt(TASK_A))).toBe(true);
+    expect(claim(TASK_A).ok).toBe(true);
+  }, 600_000);
+
+  it("en holdt task kan ikke pensjonere en eldre task", async () => {
+    await runWorker("report", committing("untracked"));
+    expect(task(TASK_A).completion_gate.held).toBe(true);
+    const older = task(TASK_OLDER);
+    if (older) expect(older.status).not.toBe(TASK_STATUS.SUPERSEDED);
+  }, 300_000);
+});

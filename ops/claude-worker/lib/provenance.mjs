@@ -79,7 +79,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { atPath, gitHead, gitIsAncestor, gitLogRange, gitWorktreeList } from "./git.mjs";
+import { atPath, gitHead, gitIsAncestor, gitLogRange, gitStatusLines, gitWorktreeList } from "./git.mjs";
 import { CLAIM_STATE, claimFilePath, expectationFor, readClaim, taskWorktreePath, verifyClaim } from "./worktree.mjs";
 
 /** The trailer keys. Matched case-insensitively, emitted in this exact casing. */
@@ -661,9 +661,122 @@ export const COMPLETION_GATE = Object.freeze({
    * null-provenance success bypass, and absence of evidence is not evidence.
    */
   HELD_NO_PROVENANCE_RECORD: "no_commit_provenance_record_exists",
-  /** The one HELD reason: a success claim standing on an unverified range. */
-  HELD_PROVENANCE_UNVERIFIED: "commit_provenance_unverified"
+  /** A success claim standing on an unverified range. */
+  HELD_PROVENANCE_UNVERIFIED: "commit_provenance_unverified",
+  /**
+   * D-139 B: provenance was proven, but the task's own claimed worktree still
+   * has uncommitted state. A success claim means "the work is committed"; a
+   * dirty worktree is direct evidence that it is not.
+   */
+  HELD_WORKTREE_DIRTY: "task_worktree_not_clean",
+  /** D-139 B: the worktree status could not be read. Unknown is never clean. */
+  HELD_WORKTREE_UNKNOWN: "task_worktree_state_unknown",
+  /** D-139 B: nobody looked at the worktree at all. Absence is not cleanliness. */
+  HELD_NO_WORKTREE_EVIDENCE: "no_task_worktree_evidence_exists"
 });
+
+/**
+ * D-139 B - IS THE TASK'S OWN WORKTREE ACTUALLY CLEAN?
+ *
+ * Terminal SUCCESS has always required proven commit provenance. It also has to
+ * require a freshly queried, CLEAN claimed worktree, and for the same reason:
+ * `STATUS=COMPLETE` is the child's claim, and a worktree that still holds
+ * staged, tracked, deleted, conflicted or untracked entries is the repository
+ * itself contradicting that claim. The work is, demonstrably, not committed.
+ *
+ * Three verdicts, and only one of them is success:
+ *   CLEAN    porcelain answered, and answered with nothing
+ *   DIRTY    porcelain answered with at least one entry of ANY kind
+ *   UNKNOWN  porcelain could not be answered, or there was nothing to ask
+ *
+ * UNKNOWN is deliberately NOT a soft pass. A worktree we cannot read is a
+ * worktree we cannot vouch for, and vouching is the whole point of the gate.
+ */
+export const WORKTREE_CLEANLINESS = Object.freeze({
+  CLEAN: "clean",
+  DIRTY: "dirty",
+  UNKNOWN: "unknown"
+});
+
+/** Hvor mange porcelain-linjer vi tar vare paa i beviset. Tallet er alltid fullt. */
+const WORKTREE_ENTRY_SAMPLE = 20;
+
+/**
+ * Read the CURRENT cleanliness of a task's claimed worktree.
+ *
+ * Fresh by construction: it shells out to git every time and never consults a
+ * stored verdict. Nothing here writes, stages, cleans or removes anything.
+ */
+export function assessWorktreeCleanliness(cfg, { taskId, worktreeRoot, path = null }, runner = spawnSync) {
+  const at = (() => {
+    if (path) return path;
+    try {
+      return taskWorktreePath(worktreeRoot ?? cfg?.worktreeRoot, taskId);
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  })();
+
+  if (at && typeof at === "object") {
+    return { verdict: WORKTREE_CLEANLINESS.UNKNOWN, path: null, entry_count: 0, entries: [], error: at.error, queried: true };
+  }
+  if (!existsSync(at)) {
+    return {
+      verdict: WORKTREE_CLEANLINESS.UNKNOWN,
+      path: at,
+      entry_count: 0,
+      entries: [],
+      error: "task worktree does not exist on disk",
+      queried: true
+    };
+  }
+
+  const status = gitStatusLines(atPath(cfg, at), runner);
+  if (!status.ok) {
+    return {
+      verdict: WORKTREE_CLEANLINESS.UNKNOWN,
+      path: at,
+      entry_count: 0,
+      entries: [],
+      error: String(status.error ?? "git status failed"),
+      queried: true
+    };
+  }
+
+  const lines = Array.isArray(status.lines) ? status.lines.filter((l) => String(l).trim() !== "") : [];
+  return {
+    verdict: lines.length === 0 ? WORKTREE_CLEANLINESS.CLEAN : WORKTREE_CLEANLINESS.DIRTY,
+    path: at,
+    entry_count: lines.length,
+    entries: lines.slice(0, WORKTREE_ENTRY_SAMPLE),
+    entries_truncated: lines.length > WORKTREE_ENTRY_SAMPLE,
+    error: null,
+    queried: true
+  };
+}
+
+/** CLEAN is the only verdict better than the others; ties go to the worse one. */
+function cleanlinessRank(verdict) {
+  if (verdict === WORKTREE_CLEANLINESS.CLEAN) return 2;
+  if (verdict === WORKTREE_CLEANLINESS.UNKNOWN) return 1;
+  return 0; // DIRTY, or anything unrecognised
+}
+
+/**
+ * D-139 B: stored evidence may only DOWNGRADE fresh evidence, never upgrade it.
+ *
+ * A recorded `clean` from an earlier attempt cannot make a currently dirty or
+ * unreadable worktree acceptable. A recorded `dirty`, on the other hand, is a
+ * finding that stands until something explains it - so the WORSE of the two
+ * always wins, in both directions.
+ */
+export function mergeWorktreeCleanliness(stored, fresh) {
+  const s = stored && typeof stored === "object" ? stored : null;
+  const f = fresh && typeof fresh === "object" ? fresh : null;
+  if (!f) return s;
+  if (!s) return f;
+  return cleanlinessRank(s.verdict) < cleanlinessRank(f.verdict) ? { ...s, superseded_by_fresh: false } : f;
+}
 
 /**
  * Evaluate the gate for one task.
@@ -675,8 +788,9 @@ export const COMPLETION_GATE = Object.freeze({
  * this task completed or successful, do NOT release its worktree, do NOT emit a
  * completion-confirmed event, and do NOT let it retire any other task.
  */
-export function evaluateCompletionGate({ completion, provenance, now = () => new Date() }) {
+export function evaluateCompletionGate({ completion, provenance, worktree = null, now = () => new Date() }) {
   const prov = provenance && typeof provenance === "object" ? provenance : null;
+  const wt = worktree && typeof worktree === "object" ? worktree : null;
   const evidence = {
     provenance_verdict: prov?.verdict ?? null,
     provenance_reason: prov?.reason ?? null,
@@ -690,6 +804,13 @@ export function evaluateCompletionGate({ completion, provenance, now = () => new
     unattributed_commits: (prov?.unattributed_commits ?? []).map((c) => c?.sha).filter(Boolean),
     report_comment_id: completion?.reportCommentId ?? null,
     report_status: completion?.status ?? null,
+    // D-139 B: the worktree half of the proof, carried in the same evidence
+    // object so a held gate can say WHICH half failed without a second lookup.
+    worktree_verdict: wt?.verdict ?? null,
+    worktree_path: wt?.path ?? null,
+    worktree_entry_count: Number.isFinite(wt?.entry_count) ? wt.entry_count : 0,
+    worktree_entries: (wt?.entries ?? []).slice(0, 20),
+    worktree_error: wt?.error ?? null,
     evaluated_at: now().toISOString()
   };
 
@@ -706,10 +827,26 @@ export function evaluateCompletionGate({ completion, provenance, now = () => new
   // may carry a verified verdict with `verified` explicitly downgraded (that is
   // precisely what `provenanceForResume` does on drift), and a record from a
   // future version may carry a verdict this build does not know.
-  if (isVerifiedVerdict(prov.verdict) && prov.verified === true) {
-    return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
+  if (!isVerifiedVerdict(prov.verdict) || prov.verified !== true) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
   }
-  return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
+
+  // D-139 B: provenance alone is no longer enough. Terminal SUCCESS requires
+  // BOTH a proven commit range AND a freshly, successfully queried CLEAN
+  // worktree. The two answer different questions - "are these commits ours?"
+  // and "is the work actually committed at all?" - and a success claim needs
+  // yes to both.
+  if (!wt) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_NO_WORKTREE_EVIDENCE, ...evidence };
+  }
+  if (wt.verdict === WORKTREE_CLEANLINESS.DIRTY) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_WORKTREE_DIRTY, ...evidence };
+  }
+  if (wt.verdict !== WORKTREE_CLEANLINESS.CLEAN) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_WORKTREE_UNKNOWN, ...evidence };
+  }
+
+  return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
 }
 
 /* ==========================================================================
