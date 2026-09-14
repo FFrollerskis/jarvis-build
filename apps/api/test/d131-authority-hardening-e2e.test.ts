@@ -80,7 +80,9 @@ const pem = (pair: KeyPair): string => pair.publicKey.export({ type: "spki", for
 beforeAll(async () => {
   const databaseDir = await mkdtemp(join(tmpdir(), "jarvis-pg-d131-"));
   const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
-    new EmbeddedPostgres({ databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false })
+    new EmbeddedPostgres({ databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false }),
+    // D-141 B: proben maa bruke instansens EGNE credentials.
+    { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
   );
   epg = leasedPostgres.postgres;
   PORT = leasedPostgres.port;

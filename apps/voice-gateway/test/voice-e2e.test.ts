@@ -155,7 +155,9 @@ beforeAll(async () => {
   const leasedPostgres = await startLeasedEmbeddedPostgres((port) =>
     new EmbeddedPostgres({
     databaseDir, user: "postgres", password: "test-superuser-pw", port, persistent: false
-  })
+  }),
+    // D-141 B: proben maa bruke instansens EGNE credentials.
+    { identity: { user: "postgres", password: "test-superuser-pw", database: "postgres" } }
   );
   epg = leasedPostgres.postgres;
   PORT = leasedPostgres.port;
