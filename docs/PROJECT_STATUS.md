@@ -1,96 +1,96 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-14 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv ordre: **D-142**
-(`D142-PR80-DURABLE-LEASE-EPOCH-RECOVERY-20260914-A`, issue #68 kommentar 5666781419,
-`SUPERSEDES=D141-PR80-FENCED-LEASE-PG-IDENTITY-RECOVERY-20260914-A`). D-139, D-140 og D-141 er superseded.
+`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv ordre: **D-143**
+(`D143-PR80-DISTRIBUTED-FENCING-HOST-RECOVERY-20260914-A`, issue #68 kommentar 5670343618,
+`SUPERSEDES=D142-PR80-DURABLE-LEASE-EPOCH-RECOVERY-20260914-A`). D-139 til D-142 er superseded.
 `MERGE_AUTHORIZED=false`, `ARCHITECT_MERGE_APPROVED=false`, `SELF_APPROVAL=false` - PR #80 er IKKE merget.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## Fase A - durabelt, aldri-nullstilt epoch-hoeyvannsmerke (ferdig, testet)
+## Fase A - kryssvert-overtakelse fjernet (ferdig, testet)
 
-D-141 sin fencing var betinget av den eksakte generasjonen kalleren inspiserte - men generasjonen ble
-utledet av filene som laa der, og `release()` SLETTET filen. Slapp den siste eieren, startet telleren
-paa 1 igjen. Reprodusert mot UENDRET `ee3c902`: C gjenbrukte generasjon 1, forsinket A fikk eierskap
-paa generasjon 2, og C sin leiefil ble revet vekk.
+D-141/D-142 tok over en kryssvert-leie naar `now > heartbeat_at_ms + ttl_ms`. Den slutningen holder
+ikke: `heartbeat_at_ms` er skrevet med den FREMMEDE vertens wall clock og ble maalt mot VAAR. Uten en
+bevist kontrakt for bundet klokkeavvik er det en antakelse, ikke en observasjon - og den feiler i den
+farlige retningen: en kontender med en klokke som gaar for fort «observerer» en frisk leie som
+forlatt og stjeler en port i aktiv bruk.
 
-Tre uavhengige egenskaper lukker det:
+**Valgt arkitektur: fail closed for ALLE kryssvert-eiere.** D-143 tilbød enten dette eller en ekte
+delt, autoritativ expiry-/lock-tjeneste. Leiekatalogen er vertslokal (`os.tmpdir()`), saa distribuert
+overtakelse loeser et problem vi ikke har; en delt tjeneste ville gitt ny driftsavhengighet og en
+distribuert protokoll vi maatte bevise, for null gevinst.
 
-1. **Gravstein.** `release()` skriver `state: "released"` paa sin EGEN sti i stedet for aa slette.
-   Navnerommet for en port toemmes aldri, saa epoken og stien er brukt opp for alltid. Katalogen
-   vokser ikke: opprydding fjerner strengt lavere epoker, saa det ligger én fil per port.
-2. **Hoeyvannssjekk etter sikret sti.** At `wx` ga oss stien er ikke nok - oppryddingen etterlater et
-   hull en forsinket aktoer ellers kunne fylt UNDER en gyldig eier med hoeyere epoke. Hoeyvannsmerket
-   verifiseres etter at stien er sikret; en taper trekker seg og fjerner KUN sin egen fil.
-3. **Katalog-inkarnasjon.** `.lease-dir-id` gjoer at en aktoer fra en slettet/gjenskapt leiekatalog
-   feiler LUKKET i stedet for aa prune en fersk eier vekk.
+- `reclaimVerdict` gir ÉTT verdikt for enhver leie eid av en annen vert: `HELD_REMOTE_OWNER`
+  (`held_remote_owner_fail_closed`) - uavhengig av heartbeat, ttl, lesbarhet og lokal pid-liveness.
+- `RECLAIMABLE_EXPIRED`, `HELD_REMOTE_HEARTBEAT_VALID` og `HELD_REMOTE_UNVERIFIABLE` er FJERNET, ikke
+  beholdt som døde verdikter som kunne lest som om de fortsatt styrte noe.
+- Eneste avgrensning: en fjern GRAVSTEIN er fortsatt ledig. En eier som eksplisitt ga slipp er ikke
+  et gjett om liv.
+- TTL beholdes, men er ikke lenger overtakelsesgrunnlag for NOEN. Den brukes kun av en eier mot sine
+  EGNE tidsstempler i `verifyOwnership()` - samme prosess, samme klokke.
 
-`verifyOwnership()`/`assertOwned()` FENCER en eier som er forbigaatt, har mistet/faatt erstattet filen
-sin, eller har sovet forbi sin EGEN TTL. En fenced eier roerer aldri disk igjen. En LEVENDE lokal eier
-tas aldri over, heller ikke ved utloept heartbeat. Bounded retry, eier-identitet, rejected-port-
-utelukkelse og leie i hele databasens levetid er uendret.
+Samme-vert-oppførsel er uendret: levende pid stjeles aldri, død og gammel nok kan tas over, og
+release/heartbeat/reclaim er fortsatt betinget av eksakt epoke/eier/inkarnasjon. Durable
+aldri-nullstilte epoker, gravsteiner, høyvannssjekk etter sikret sti, katalog-inkarnasjon, bounded
+retry og rejected-port-utelukkelse fra D-142 er bevart uendret.
 
-**Bevis: 65/65, null skipped** - deterministisk reset-ABA, 12 fulle sykluser uten epoke-/sti-gjenbruk,
-6 sekvensielle PROSESSER med epoke 1->6, gjentatt ekte multiprosess-kontensjon (3 runder x 8),
-release/heartbeat/reclaim mot etterfoelger, reinkarnert katalog, samme-vert levende/fersk-doed/
-gammel-doed, kryssvert gyldig/uverifiserbar/utloept, zombie-selvfornyelse, oversubscription.
+**Bevis: 71/71, null skipped.** Nytt i D-143: klokkeskjev i BEGGE retninger (en time foran og en time
+bak gir samme svar), verdikt bevist uavhengig av `now` over seks størrelsesordener, EKTE DELT
+leiekatalog med offer og raider i SAMME katalog (D-142 brukte to uavhengige kataloger og beviste
+dermed ikke dette), og at intet intervall i den offentlige livssyklusen har to autoritative eiere -
+etterfølgeren finnes først NÅR forgjengeren er fenced. Bevart og re-kjørt: reset-ABA, flersyklus
+epoke-unikhet, stale multiprosess-kontensjon, release/heartbeat/etterfølger-kapløp, katalog-
+reinkarnasjon.
 
-## Fase B - PostgreSQL-protokollbevis og kontrollplan (bevart)
+## Fase B - kontrollplanen uendret
 
-D-141 B er uendret og koblet paa fencingen i begge retninger: `lease.assertOwned()` kjoeres ETTER
-identitetsbeviset (et bevis tatt mens vi var fenced er ikke et eierskap), og en ny eier som moeter en
-gammel, fortsatt kjoerende postmaster faar beviset avvist og forkaster porten. Proveniens-, dirty-,
-koe- og restart-gatene fra D-135/D-136/D-139 B er ikke roert: `ops/claude-worker` 24 filer, **715/715**,
-null skipped.
-
-`describeError()` retter en ekte feil funnet underveis: `embedded-postgres` avviser med `undefined` paa
-Windows, og `(err as Error).message` ble da en TypeError som ERSTATTET den ekte aarsaken.
+`ops/claude-worker` er ikke endret. Full suite kjørt som regresjonskontroll: **24 filer, 715/715**,
+null skipped. Proveniens, dirty-completion, kø-rekkefølge ved stale head, isolerte task-worktrees,
+kanoniske terminalstatuser og den strikte primær-worktree-porten er uberørt.
 
 ## Fase C - kvalitet og CI
 
-Lokalt groent: leiesuiten 65/65, `ops/claude-worker` 715/715, `pnpm -w lint`, `pnpm -r run typecheck`,
-`node --check` paa 51 worker-runtime-`.mjs`, `git diff --check`. gitleaks 8.24.3 fant 36 treff - ALLE i
-`.env` og `.env.bak.*`, som er git-ignorerte og USPOREDE lokale filer; null treff i sporet innhold.
+Lokalt grønt: leiesuiten 71/71, `ops/claude-worker` 715/715, `pnpm -w lint`, `pnpm -r run typecheck`,
+`node --check` på 51 worker-runtime-`.mjs`, `git diff --check`. gitleaks 8.24.3 over hele historikken:
+ingen funn (36 `--no-git`-treff er alle i git-ignorerte, usporede `.env`/`.env.bak.*`).
 
-**BLOKKERING FOR LOKALT POSTGRES-BEVIS.** Alle tester som starter EKTE embedded PostgreSQL kunne
-IKKE kjoeres i denne oekten. Claude Code-sesjonen kjoerer FORHOEYET (`High Mandatory Level`,
-Administrator), og PostgreSQL nekter aa starte under en administrator-konto:
+**BLOKKERING FOR LOKALT POSTGRES-BEVIS (uendret).** Claude Code-sesjonen kjører FORHØYET (`High
+Mandatory Level`, Administrator), og PostgreSQL nekter å starte under en administrator-konto:
 
     Execution of PostgreSQL by a user with administrative permissions is not permitted.
 
-Dette er en egenskap ved SESJONEN, ikke ved endringen - UENDRET baseline-kode fra `ee3c902` feiler
-IDENTISK i samme oekt (samme refusjon, samme maskerte TypeError). `runas /trustlevel` for aa kjoere
-ikke-forhoeyet ble avvist av Claude Code sin auto-mode. **For aa gjenopprette lokalt Postgres-bevis maa
-Claude Code startes i et IKKE-forhoeyet terminalvindu.** Konsekvens: den fulle repo-suiten kan ikke
-sammenlignes med D-141 sin lokale kjoering, og de to NYE A.3-bevisene mot ekte PostgreSQL er ikke
-observert groenne lokalt.
+Bevist å være en egenskap ved SESJONEN, ikke ved endringen: uendret baseline-kode fra `ee3c902` feiler
+identisk. `runas /trustlevel` ble avvist av Claude Code sin auto-mode. **For å gjenopprette lokalt
+Postgres-bevis må Claude Code startes i et IKKE-forhøyet terminalvindu.** 116 av 247 testfiler krever
+ekte embedded PostgreSQL og kunne ikke kjøres. De 131 kjørbare gav **2628/2653**; alle 25 feil er den
+pre-eksisterende Windows-`.cjs`-spawn-klassen fra D-141 med identiske tall (12+8+5).
 
-CI er den AUTORITATIVE porten for disse filene - den kjoerer paa Linux i `build-test` uten dette
-problemet. Fersk groenn kjoering paa NOEYAKTIG endelig HEAD kreves for `build-test`, `windows-git-auth`
-og `gitleaks`. Run-ID-ene rapporteres i CLAUDE_REPORT paa issue #68, ikke her (en dokumentoppdatering
-ville flyttet HEAD og ugyldiggjort nettopp den kjoeringen).
+CI på Linux er den AUTORITATIVE porten for disse filene. Fersk grønn kjøring på NØYAKTIG endelig HEAD
+kreves for `build-test`, `windows-git-auth` og `gitleaks`; tidligere CI på `09cc204` teller ikke.
+Run-ID-ene rapporteres i CLAUDE_REPORT på issue #68, ikke her (en dokumentoppdatering ville flyttet
+HEAD og ugyldiggjort nettopp den kjøringen).
 
 ## Fase D - transaksjonell host-recovery
 
-**IKKE utfoert - den er gatet.** Kjoeres kun dersom fase A-C passerer OG fersk exact-head CI er groenn.
-Rekkefoelge: ren primaer-checkout paa eksakt endelig remote HEAD -> repository-eid `install.ps1 -WhatIf`
--> staged/transaksjonell/hash-verifisert install uten quiescence-bypass -> verifiser runtime payload/
-import-closure og eksakte hasher -> read-only worker/supervisor-status uten parser-/modulfeil -> FOERST
-DA enable de EKSISTERENDE supervisor- og worker-schedulene -> bevis fersk queue-poll -> post
-HOST_RECOVERY_RECEIPT. Ved enhver feil: la schedulerne staa `Disabled` og bevar staging/backups/logger.
-Ingen prosess termineres.
+**IKKE utført - den er gatet.** Kjøres kun når fase A-C passerer OG fersk exact-final-head CI er
+grønn. Rekkefølge: ren primær-checkout på eksakt endelig remote HEAD -> repository-eid
+`install.ps1 -WhatIf` -> staged/transaksjonell/hash-verifisert install uten quiescence-bypass ->
+verifiser runtime payload/import-closure og eksakte hasher -> read-only worker/supervisor-status uten
+parser-/modulfeil -> FØRST DA enable de EKSISTERENDE supervisor- og worker-schedulene -> bevis fersk
+queue-poll -> post HOST_RECOVERY_RECEIPT. Ved enhver feil: la schedulerne stå `Disabled` og bevar
+staging/backups/logger. Ingen prosess termineres.
 
-**Naa:** `JarvisClaudeWorker` og `JarvisWorkerSupervisor` er begge `Disabled`. Deployet paa hosten er
-`pr80-ee3c902f-20260914`, altsaa FRA FOER denne endringen.
+**Nå:** `JarvisClaudeWorker` og `JarvisWorkerSupervisor` er begge `Disabled`. Hosten kjører fortsatt
+deployet fra før denne endringen.
 
 ## Blokkeringer
 
-1. **Forhoeyet sesjon.** Ingen lokale ekte-PostgreSQL-bevis i denne oekten. Krever at Claude Code
-   startes ikke-forhoeyet. CI daekker det i mellomtiden.
-2. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-142. PR #80 merges ikke
-   foer en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
+1. **Forhøyet sesjon.** Ingen lokale ekte-PostgreSQL-bevis. Krever at Claude Code startes
+   ikke-forhøyet. CI dekker det i mellomtiden.
+2. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-143. PR #80 merges ikke
+   før en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
 
 ## Neste oppgave
 
