@@ -334,7 +334,10 @@ describe("A.3: en UTLOEPT, men fortsatt KJOERENDE eier fences av RESSURSprotokol
     async () => {
       const leaseDir = mkdtempSync(join(tmpdir(), "jarvis-lease-a3-self-"));
       const base = candidateWindow(readEphemeralRange());
-      const window: CandidateWindow = { low: base.low + 70, high: base.low + 71, proven: base.proven, basis: base.basis };
+      // Fire kandidater, ikke to: fabrikken kjoerer bare for kandidater som
+      // faktisk var ledige, saa et vindu uten slark ville gjort testen avhengig
+      // av at ingen andre paa verten holder noen av portene.
+      const window: CandidateWindow = { low: base.low + 70, high: base.low + 73, proven: base.proven, basis: base.basis };
       const fencedPorts: number[] = [];
 
       const started = await startLeasedEmbeddedPostgres(
@@ -366,7 +369,7 @@ describe("A.3: en UTLOEPT, men fortsatt KJOERENDE eier fences av RESSURSprotokol
         {
           leaseDir,
           window,
-          attempts: 2,
+          attempts: 4,
           verifyTimeoutMs: 30_000,
           pickCandidate: (w, attempt) => w.low + (attempt % (w.high - w.low + 1))
         }
