@@ -418,6 +418,47 @@ Worker (`worker.mjs`):
     krasj-recovery — nettopp banen D-136-vinduet lander på — avsluttet med 0. Nå
     gir enhver holdt port exit 3, også når kjøringen etterpå dispatchet en annen
     task uten problemer.
+- **C9 (ÉN UFORANDERLIG, FULLSTENDIG LEST, UNIKT IDENTIFISERT ORDRE PER TASK,
+  D-150).** En admittert task eksekverer nøyaktig ÉN ordre, eller ingen. Porten
+  (`lib/order-authority.mjs`, `selectAdmissibleOrder`) kjører FØR bindingen, før
+  quarantine, før dirty-guarden, før en worktree finnes og før noe barn er
+  skapt — så en refusjon her dispatcher ingenting i det hele tatt.
+  - **Kompletthet er et krav, ikke en advarsel.** Kontroll-lesningen må være
+    `ok=true` OG `complete=true`. En lesning vi ikke kan gå god for kan verken
+    bevise at ordren er unik eller at den er til stede, og det en tapt
+    `--paginate`-side skjuler er nøyaktig den andre ordren.
+  - **Unikhet avgjøres av MENGDENS STØRRELSE, ikke av et valg.** Nøyaktig én
+    DISTINKT betrodd `ARCHITECT_TASK` for `TASK_ID`-en. Overlappende
+    pagineringskopier (identisk id + kropp + `created_at`) er ÉN ordre; enhver
+    avvikende kropp under samme id er to. Det skannes aldri framover etter en
+    brukbar ordre.
+  - **Deterministisk identitet og ordning kreves:** GitHubs egen comment-id og en
+    parsbar `created_at`. En redigert kommentar (`created_at !== updated_at`, kun
+    når begge finnes) er ikke en ordre.
+  - **SAME-ID `TASK_UPDATE` ER IKKE LENGER EKSEKVERBAR SEMANTIKK.** En ny
+    kommentar med en eksisterende `TASK_ID` er en ANDRE ORDRE, ikke et tillegg.
+    Den havner i `duplicates` som bevis for en refusjon og når ALDRI prompten,
+    `EXPECTED_HEAD_SHA` eller `SUPERSEDES`. **Endret eller konsolidert scope
+    utstedes som en FERSK `TASK_ID` med eksplisitt `SUPERSEDES=<gammel id>`** —
+    det er den støttede, retningsbestemte og reviderbare veien (se C4). Det
+    finnes med vilje ingen kompatibilitetssti: en allerede admittert eller
+    tvetydig legacy-post HOLDER og krever en fersk id.
+  - **To ulike hold, med vilje.** Er funnet om VÅR LESNING (feilet/inkomplett) er
+    tasken ikke-terminal og helt urørt — ingen state-rad, ingen brukt attempt,
+    ingen worktree — og neste kjøring med hel lesning admitterer den normalt; å
+    gjøre én tapt side terminal ville vært en denial of service mot køen. Er
+    funnet om ORDREN (fraværende/tvetydig/redigert/uidentifisert/uordnet) er det
+    terminalt BLOCKED, fordi en retry stiller identisk spørsmål: gjenopprettingen
+    er et menneske og en fersk `TASK_ID`.
+  - **Prompten bærer eksakt de bundne bytene.** `resolveExecutableOrder` krever at
+    bytene som er i ferd med å sendes hasher til nøyaktig digesten som ble
+    registrert ved admittering; ellers `unbound_executable_order`, returnert FØR
+    `buildPrompt` og FØR `spawn`. Håndhevet både i `runClaude` og i `buildPrompt`
+    selv — samme argument som for `promptDelivery` under — og `buildPrompt` har
+    ingen løkke igjen som kan rendre en ubunden kropp.
+  - **`dry-run` viser den samme dommen** (`next_candidate_order_authority`), så
+    en forhåndsvisning aldri kan vise en dispatchbar kandidat som den ekte
+    kjøringen ville refusert.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
