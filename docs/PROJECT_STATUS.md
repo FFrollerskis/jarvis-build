@@ -1,128 +1,130 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-15 (branch `claude/d145-merge-transition-provenance` = PR #81, base
-`main=0c803bf1c1724413dc8e8071a7aabe7fd52562e4`). Aktiv ordre: **D-152**
-(`D152-PR81-ZERO-WRITE-REFUSED-SNAPSHOT-20260915-A`, issue #68 kommentar 5678564408,
-`SUPERSEDES=D151-PR81-ATOMIC-AUTHORITY-SNAPSHOT-20260915-A`, `ARCHITECT_REVIEW_ID=5208613949`).
+**Oppdatert:** 2026-09-15 (branch `claude/d157-merge-transition-tree-proof`, base
+`main=6f1c980c3493c6f68fe97bb2c8f045b4d196af75`). Aktiv ordre: **D-157**
+(`D157-MERGE-TRANSITION-TREE-PROOF-HARDENING-20260915-A`, issue #68 kommentar 5686632375).
 `MERGE_AUTHORIZED=false`, `ARCHITECT_MERGE_APPROVED=false`, `SELF_APPROVAL=false`.
 
-PR #80 er MERGET (merge-SHA `0c803bf1`). PR #81 er ÅPEN og DRAFT og inneholder D-145 + D-146 + D-147
-+ D-148 + D-149 + D-150 + D-151 + D-152 som én sammenhengende kontrollplan-leveranse. D-152 gjør det
-D-151 plasserte riktig, men skrev gjennom: et ubrukelig autoritets-snapshot er nå en EKTE
-null-skrive-beslutningsgrense.
+PR #80, #81 og #82 er MERGET (PR #82 → merge-SHA `6f1c980c`, som er dagens `main` og denne taskens
+base). Denne ordren retter workerens verifiserer for autoriserte merge-overganger som ÉN sammenhengende
+kontrollplan-leveranse. PR #83 er URØRT, og UA-9 er ikke påbegynt.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## Defekten (ferdig, testet)
+## Defekten (ferdig, rettet, testet)
 
-D-151 flyttet kompletthets-spørsmålet øverst i syklusen og gjorde det fatalt for HELE syklusen.
-Plasseringen er riktig. Men selve refusjonsgrenen kalte `reportStatus`, og `reportStatus` er ikke en
-observasjon - den er TRE skrivinger, alle verifisert i koden på `44407ee1`:
+D-145 beviste «mergen innførte ikke innhold som aldri ble reviewet» med
 
-1. **`postComment` PUBLISERER TIL KONTROLL-ISSUEN.** Kontroll-issuen er køens EGEN INNGANG. En syklus
-   som nettopp hadde erklært at den ikke kunne lese den issuen, la likevel til i den - og hver senere
-   syklus leser den kommentaren tilbake som en del av SITT autoritets-snapshot. Én flaky
-   `gh api --paginate` ble dermed et permanent, globalt synlig artefakt forfattet av en syklus uten
-   noen som helst autoritet.
-2. **`postComment` SKRIVER FØRST EN BODY-FIL INN I `scratchRoot`** og oppretter katalogen hvis den
-   mangler - scratch-aktivitet som holdets egen melding SAMTIDIG påstod ikke hadde skjedd.
-3. **`recordPostedStatus` APPENDER TIL DEDUPLISERINGSJOURNALEN.** Det er durabel beslutningstilstand,
-   og den avgjør FRAMTIDEN: når nøkkelen er journalført, undertrykkes det samme funnet i
-   `statusRepeatHours`. En ubevist lesning kjøpte seg altså stille seks timers taushet om en tilstand
-   som til da kan ha blitt reell og genuint verdt å rapportere.
+    merge-commitens tre === godkjent head sitt tre
+
+(`MERGE_TRANSITION.TREE_MISMATCH`, håndhevet i `verifyMergeTransition` steg 5). Den likheten holder
+KUN når branchen allerede inneholder hver commit på sin base - nøyaktig topologien D-144-fiksturet
+tilfeldigvis hadde. Den er IKKE en invariant for en normal merge: en branch kuttet før senere
+base-commits gir en korrekt merge-commit som bærer BÅDE den reviewede head-deltaen OG base-only
+innhold, så treet skiller seg fra head sitt tre av konstruksjon.
+
+**D-156 er beviset.** Lest ferskt fra remote i denne tasken (PR #82, base `091ba091`, head
+`170e5810`, merge `6f1c980c`, review `5211287259` på nøyaktig godkjent head, post-merge-CI-run
+`34995709114` grønn på merge-SHA):
+
+    merge-tre  eef13c74...   head-tre  64815377...        -> IKKE LIKE
+    compare(base...head)     status=diverged  ahead_by=3  behind_by=17
+
+Branchen lå 17 commits bak. Den gamle regelen kalte det
+`..._so_the_merge_introduced_unreviewed_content` og holdt fullføringsporten (worker-status
+5684346209) på en merge som var nøyaktig den autoriserte. En kontrollplan-port som refuserer korrekt
+historikk er ikke «streng» - den er GAL, og den lærer operatøren å rute rundt porten.
 
 ## Rettelsen (ferdig, testet)
 
-**Alle tre skrivingene er fjernet fra refusjonsgrenen** i den ekte eide worker-stien (`runOwned` i
-`ops/claude-worker/worker.mjs`). Ingen `reportStatus`, ingen `postComment`, ingen
-`recordPostedStatus`, ingen scratch-katalog. Det som står igjen er den eneste kategorien som ikke kan
-korrumpere en senere beslutning: LOKALT APPEND-ONLY BEVIS. Logg og health-journal skrives på denne
-verten, leses aldri tilbake som autoritet, og er nøyaktig det en operatør trenger for å se at
-workeren holdt og hvorfor.
+Ny ren løvmodul `ops/claude-worker/lib/merge-delta.mjs`. Spørsmålet var aldri «er treene like?», men:
+innførte mergen, på den autoriserte basen, NØYAKTIG den uavhengig reviewede endringen for den eksakte
+godkjente head-en - og ingenting annet? Det avgjøres fra to SHA-adresserte sammenlikninger:
 
-**Beviset navngir refusjonen og påstår aldri en posting.** Health-eventen
-`control_authority_snapshot_unusable` bærer nå `snapshot_reason`, `snapshot_detail`, `held: true`,
-`exit: 4` og - positivt formulert, slik at beviset er FALSIFISERBART i stedet for bare taust om hva
-det ikke gjorde - `status_comment_posted: false`, `posted_status_recorded: false`,
-`durable_state_written: false`. Loggen sier eksplisitt at INGEN GitHub-kommentar ble postet og INGEN
-dedup-oppføring registrert, og navngir det holdte TRANSIENT-utfallet (exit 4).
+    MERGE-DELTA     compare(parent1 ... mergeSha)              hva mergen faktisk gjorde
+    REVIEWED-DELTA  compare(expectedBase ... expectedHead)     hva ordren autoriserte
 
-**Grensen står strukturelt der den stod.** Snapshotet tas fortsatt i `runOwned` rett etter auth- og
-lesebeviset og FØR recovery, rekonsiliasjon, kø-seleksjon, retirering, supersession,
-task-state-persistering, worktree-/scratch-/repo-handling, transition-lesning, prompt-bygging og
-barne-spawn. `cmdDryRun` skrev allerede ingenting og er uendret.
+`parent1` leses av MERGE-COMMIT-OBJEKTET selv, etter at det allerede er bevist likt `expectedBase`.
+INVARIANTEN: de to deltaene må være IDENTISKE, fil for fil og felt for felt - filnavn, status,
+rename-kilde, RESULTERENDE BLOB-SHA, linjetall og patch-tekst.
 
-**Komplett-snapshot-stien er IKKE svekket.** Forbudet gjelder å skrive FRA EN SYKLUS SOM BEVISTE AT
-DEN IKKE KUNNE LESE - ikke å skrive i det hele tatt. Legitim status-/rapport-posting etter et bevist
-komplett snapshot er uendret og fortsatt dekket, dedupliseringen inkludert.
+**Strengt sterkere enn tre-likhet.** Konfliktløsning som ikke var dekket av reviewen (omskrevet eller
+droppet hunk, fil fra feil side) endrer `compare(parent1...merge)` og avvises som
+`DELTA_CONTENT_MISMATCH`; en ekstra fil smuglet inn i merge-treet avvises som
+`DELTA_FILE_SET_MISMATCH`. Blob-SHA sammenliknes per fil, så innholdslikhet hviler IKKE på patch-tekst
+(binærfiler og for store filer dekkes fortsatt); mangler både blob-sha og patch, avvises filen som
+`DELTA_FILE_UNVERIFIABLE` i stedet for å sammenlikne to null-verdier som «like». Og ÉN regel dekker
+BEGGE topologier: head inneholder allerede base, og head divergert fra base.
 
-**Ny TEST-ONLY fault `control_read_unproven`.** `READ_UNPROVEN` er snapshotets vern mot en lesning
-INGEN GIKK GOD FOR, og `fetchIssueCommentsDetailed` leverer alltid kompletthetsbevis i dag - funnet er
-derfor unåbart utenfra prosessen og finnes for å hindre en FRAMTIDIG kaller eller refaktorering i
-stille å gjeninnføre den svakere kontrakten. Det er nøyaktig situasjonen den etablerte
-`JARVIS_WORKER_FAULT`-konvensjonen allerede dekker. Bare lesningens FORM forfalskes; snapshot-fangst,
-refusjon, bevis og exit er den ekte, uendrede kodestien, og armeringen annonseres høylytt i logg og
-health som alle andre faults.
+**Struktur og fail-closed.** Merge-deltaen må være forankret i merge-commitens EGEN første forelder og
+mergen må STRENGT NEDSTAMME fra den (`merge_base === parent1`, `status=ahead`, `behind_by=0`) - rebase,
+force-pushet erstatning og syntetisk historikk feiler strukturelt. Filside PÅ remote-taket (300) eller
+flere filer rapportert enn returnert er `DELTA_TRUNCATED`. Kappet COMMIT-liste nedgraderer bare den
+REDUNDANTE ende-identitets-kryss-sjekken, og det navngis eksplisitt i beviset. Tom reviewed-delta
+avvises. Ulest sammenlikning er UKJENT, aldri «stemmer».
 
-**Ingenting av D-145..D-151 er svekket.** Uforanderlig ordrebinding, unik uredigert autoritet, ingen
-eksekverbare same-id-oppdateringer, obligatorisk merge-overgangs-/closeout-/navngitt-CI-bevis,
-strenge dirty-/proveniens-/isolasjonsporter og kun normal two-parent merge når det er separat
-autorisert - alt står uendret.
+**Bevisst ikke gjort:** PR-ens egen fil-liste (`pulls/<n>/files`) leses IKKE - den er en muterbar
+projeksjon hvis diff-base GitHub står fritt til å regne om, og den tilfører ingenting når den
+reviewede deltaen allerede er en ren funksjon av de to SHA-ene ordren navngir. `TREE_MISMATCH` er
+FJERNET, ikke beholdt som død konstant. Begge treene bæres fortsatt i beviset, men eksplisitt merket
+«trees (evidence only)».
+
+**Ingenting av D-134..D-152 er svekket.** Eksakt-SHA-autorisasjon, ordnet two-parent-struktur,
+avvisning av squash/rebase, påkrevd review på eksakt head, påkrevd post-merge-CI med eksakte
+jobb-identiteter på eksakt merge-SHA, uforanderlig ordrebinding, unik uredigert autoritet,
+commit-proveniens, den smale «kun merge-commiten»-unnskyldelsen, dirty-/isolasjonsportene og «ingen
+self-approval» står uendret. En flyttet HEAD er fortsatt kun en OBSERVASJON. En vanlig ikke-merge-task
+koster fortsatt NULL remote-kall. `WORKER_VERSION` `2.1.0` → `2.2.0`; `lib/merge-delta.mjs` lagt til
+deploy-payloaden (ESM-closure-testen fanget utelatelsen umiddelbart).
 
 ## Bevis
 
-- Ny `worker-refused-snapshot-zero-write.test.mjs` **11/11** mot EKTE `worker.mjs run` som ekte
-  OS-prosess over et EKTE git-repo.
-- Hver refusjonssak - lesefeil, AVKORTET side, INKOMPLETT lesning som skjuler en same-id-duplikat, og
-  UBEVIST lesning - PRE-SEEDER hver durabel flate refusjonen ikke skal røre (worker-state,
-  state-backup, dedup-journal for postet status, en task-worktree med UCOMMITTED arbeid, og en
-  claim-fil) og asserterer hver av dem BYTE-IDENTISK etterpå. Null kommentar-POST-er, null
-  review-kall, null transition-lesninger, kontroll-issuen byte-identisk, null prompt, null barn, null
-  worktree/claim for den ventende ordren, repo-HEAD/arbeidstre/refs uendret og INGEN
-  `.git/FETCH_HEAD`. Exit er det navngitte TRANSIENT-resultatet 4.
-- En FULL REKURSIV DIGEST av hele worker-roten før og etter beviser at de ENESTE stiene som endret seg
-  er de tillatte append-only-flatene, og at hver av dem bare VOKSTE (gamle bytes fortsatt eksakt
-  prefiks) - så en durabel skriving innført senere dukker opp som en uventet endret sti uten at noen
-  test må forutse den. Lås-hovedboken (`<lockFile>.d/<generasjon>.claim`) er eksplisitt listet, ikke
-  stille filtrert, og assertert STRENGERE enn «ignorer»: en refusert syklus kan APPENDE en ny
-  generasjon og kan ikke endre eller fjerne en eksisterende.
-- Egne saker: refusjonen bruker IKKE opp dedup-budsjettet (to påfølgende refusjoner lar journalen stå
-  urørt begge ganger), oppretter INGEN scratch-katalog, gjør INGEN krasj-recovery og lar en abandonert
-  IN_PROGRESS-task stå, og loggen navngir funnet, «HOLDING the whole cycle», «NO GitHub comment was
-  posted» og «EXIT: 4 (TRANSIENT)» uten noensinne å si «Posted status comment».
-- Positive kontroller: komplett lesning dispatcher normalt og fullfører tasken; legitim status-posting
-  etter en KOMPLETT lesning poster fortsatt nøyaktig én kommentar OG journalfører fortsatt
-  dedup-nøkkelen; en refusert syklus undertrykker IKKE neste syklus sin legitime rapport.
-- **MUTASJONSTEST (bevis på at testene har tenner):** å gjeninnføre ett eneste `reportStatus`-kall i
-  refusjonsgrenen får **9 av 11** til å feile, mens nøyaktig de to positive kontrollene som skal
-  fortsette å virke, fortsatt passerer.
+- Ny `merge-delta.test.mjs` **32/32**, bygget på PR #82s EKTE topologi og SHA-er. Positiv diverged-sak,
+  up-to-date-sak under SAMME regel, og adversarielle negativer: ekstra fil, droppet fil, endret hunk,
+  ulik blob med IDENTISK patch, endret linjetall/status/rename-kilde, uverifiserbar fil, feil
+  forankring, merge bak sin egen forelder, feil merge-base, feil ende av intervall, flyttet base/head,
+  ufullstendig SHA, uleselig/aldri-spurt sammenlikning, filside PÅ taket, filtall større enn returnert,
+  kappet commit-liste som KUN nedgraderer kryss-sjekken, tom delta.
+- `merge-transition.test.mjs` **60/60** inkl. ny D-157-blokk som kjører PR #82s tre-ulikhet gjennom
+  HELE porten og likevel krever hver øvrige garanti. `postmerge-evidence.test.mjs` **70/70**.
+- `worker-merge-transition.test.mjs` **46/46** mot EKTE `worker.mjs run` som ekte OS-prosess over et
+  EKTE git-repo, med ny D-157-blokk **8/8** som gjenskaper den divergerte topologien med EKTE
+  git-objekter: merge-treet beregnes av `git merge-tree --write-tree`, og BEGGE sammenlikningene
+  utledes av samme `compareProjection` fra de virkelige objektene - så porten passerer bare dersom git
+  er enig, og ingen fikstur kan «bli enig med» en bug. Blokken asserterer fiksturet FØR bruk, at
+  `parent1->merge` per ekte git ER den reviewede deltaen, at tasken FULLFØRER med
+  `merge_tree_sha !== head_tree_sha`, og at den FORTSATT holdes ved ureviewet innhold, uleselig
+  sammenlikning og et område som inneholder mer enn merge-commiten.
+- Den gamle «extra content»-saken er flyttet fra `TREE_MISMATCH` til `DELTA_FILE_SET_MISMATCH` - dit
+  innholdet faktisk dukker opp.
+- Full `ops/claude-worker`-akseptanse **39/39 filer, 1259/1259 tester**. Repo-`lint` og
+  repo-`typecheck` rene.
 
 ## Blokkeringer
 
-1. **Forhøyet sesjon (uendret fra D-143/D-145..D-151).** Claude Code kjører FORHØYET, og PostgreSQL
-   nekter å starte under en administrator-konto. Lokalt feiler dessuten tester utenfor
+1. **Flake, ærlig rapportert.** `worker-crash-recovery.test.mjs` feilet to ganger under full parallell
+   last (ULIKE tester, exit 3 og exit 4) og passerte deretter isolert **56/56** og i en full ren
+   kjøring. Suiten spawner ekte OS-prosesser med timeouts og er lastfølsom, og den når ikke den
+   endrede kodestien (en vanlig ikke-merge-task gjør null transition-lesninger). Ingen dekning er
+   svekket, hoppet over eller nøytralisert.
+2. **Forhøyet sesjon (uendret fra D-143/D-145..D-152).** Claude Code kjører FORHØYET, og PostgreSQL
+   nekter å starte under en administrator-konto; lokalt feiler dessuten tester utenfor
    `ops/claude-worker` på den pre-eksisterende Windows-`.cjs`-spawn-klassen (`EFTYPE`). Begge klassene
-   er uavhengige av denne endringen - den er avgrenset til `ops/claude-worker` + docs - og er GRØNNE på
-   Linux-CI, som er den autoritative porten.
-2. **To worker-testfiler kan ikke PARSES lokalt på Windows (pre-eksisterende, IKKE rørt her).**
-   `deploy-cli.test.mjs` og `supervisor-run.test.mjs` feiler lokalt med
-   `SyntaxError: Invalid or unexpected token` allerede ved import, så de rapporterer «no tests» - de
-   kjørte altså IKKE i det lokale løpet. Verifisert årsak: de er de to ENESTE testfilene som
-   `import`-erer en entrypoint med shebang (`ops/claude-worker/deploy.mjs`, `supervisor.mjs`), og på
-   denne Windows-utsjekkingen har shebang-linjen CRLF (`#!/usr/bin/env node\r\n`) - vitest/esbuild sin
-   shebang-håndtering bryter på det. Begge filene er ASCII, passerer `node --check`, er URØRT av D-152
-   (begge testfilene OG begge entrypointene er umodifiserte), og er GRØNNE på Linux-CI (LF) på eksakt
-   PR-head. Klassen er miljøspesifikk, ikke en regresjon fra denne endringen, og er bevisst ikke
-   «fikset» her: det ville krevd å røre urelaterte entrypoints/`.gitattributes` utenfor D-152s mandat.
-   Autoritativt bevis for disse to filene er CI.
-3. **Embedded-Postgres-flake (eksplisitt avdekket, IKKE rørt her).** Den tilbakevendende 16-prosess/
-   16-port-flaken i repo-suiten utenfor `ops/claude-worker` er fortsatt kjent og udekket. Ingen dekning
-   er svekket, hoppet over eller nøytralisert for å oppnå grønn CI.
-4. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-152. PR #81 merges ikke
-   før en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
+   er uavhengige av denne endringen - den er avgrenset til `ops/claude-worker` + docs.
+3. **To worker-testfiler kan ikke PARSES lokalt på Windows (pre-eksisterende, IKKE rørt her).**
+   `deploy-cli.test.mjs` og `supervisor-run.test.mjs` feiler lokalt ved import fordi de er de eneste
+   som `import`-erer en entrypoint med shebang, og shebang-linjen har CRLF på denne utsjekkingen.
+   Urørt av D-157; autoritativt bevis for disse to filene er Linux-CI.
+4. **Embedded-Postgres-flake (eksplisitt avdekket, IKKE rørt her).** Fortsatt kjent og udekket i
+   repo-suiten utenfor `ops/claude-worker`.
+5. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-157. Denne PR-en merges
+   ikke før en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
+6. **D-156-rekonsiliasjon er BEVISST utsatt (per ordren).** D-156s beholdte record rekonsilieres
+   først etter at denne fiksen er uavhengig reviewet, merget, post-merge-testet og deployet.
 
 ## Neste oppgave
 
-Uavhengig arkitekt-gjennomgang av PR #81 mot faktisk diff/tester/CI på eksakt NYTT endelig HEAD.
-Ingen merge uten en ny `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` og eksakt HEAD/base-guard.
+Uavhengig arkitekt-gjennomgang av denne draft-PR-en mot faktisk diff/tester/CI på eksakt HEAD. Deretter,
+i rekkefølge: merge (egen `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` og eksakt HEAD/base-guard),
+deploy av worker `2.2.0`, så D-156-rekonsiliasjon - og først deretter UA-9.

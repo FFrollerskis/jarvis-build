@@ -52,8 +52,20 @@
  *      base, parent 2 == the approved head, in that order. A squash produces one
  *      parent and a rebase produces none of this shape, so the structure alone
  *      refutes both without trusting any field that claims "method=merge";
- *   4. the merge commit's TREE equals the approved head's tree - so the merge
- *      introduced no content that was never reviewed;
+ *   4. D-157: the EFFECTIVE CHANGE the merge introduced onto its own first parent
+ *      is EXACTLY the reviewed delta for the approved head - so the merge
+ *      introduced no content that was never reviewed.
+ *
+ *      This replaces D-145's original input 4, "the merge commit's TREE equals
+ *      the approved head's tree". That equality is a property of ONE topology - a
+ *      head that already contains every commit on its base - and not of a normal
+ *      merge. A branch cut before later base commits produces a merge tree
+ *      carrying the reviewed delta AND base-only content, so tree equality is
+ *      false for every correct merge of a diverged branch. It held D-156 (PR #82,
+ *      17 commits behind its base) on a merge that was exactly the authorized one.
+ *      See `merge-delta.mjs` for the replacement invariant and why it is strictly
+ *      stronger: it compares the merge's effect against the reviewed patch itself,
+ *      per file, by resulting blob sha as well as patch text.
  *   5. fresh post-merge check runs on the merge commit: every REQUIRED check
  *      named by trusted policy present exactly once, finished, and `success`.
  *
@@ -172,6 +184,17 @@ import {
   resolvePostMergeEvidencePolicy,
   verifyCloseoutReport
 } from "./postmerge-evidence.mjs";
+import { MERGE_DELTA, describeMergeDelta, verifyMergeDelta } from "./merge-delta.mjs";
+
+export {
+  MERGE_DELTA,
+  COMPARE_FILE_PAGE_CAP,
+  COMPARE_COMMIT_PAGE_CAP,
+  describeMergeDelta,
+  normalizeComparison,
+  normalizeDeltaFile,
+  verifyMergeDelta
+} from "./merge-delta.mjs";
 
 export {
   ORDER_BINDING,
@@ -208,6 +231,12 @@ export {
  */
 export const MERGE_TRANSITION = Object.freeze({
   ...POST_MERGE_EVIDENCE,
+  /**
+   * D-157: the merge-delta findings, in the SAME reason namespace. They replace
+   * D-145's `TREE_MISMATCH`, which was removed rather than kept alongside them -
+   * see the module header for why tree equality was never the invariant.
+   */
+  ...MERGE_DELTA,
   /**
    * D-149: the durable-order-binding findings, folded into the SAME reason
    * namespace as everything else this module can refuse with, so a record, a log
@@ -292,10 +321,19 @@ export const MERGE_TRANSITION = Object.freeze({
   FIRST_PARENT_MISMATCH: "the_merge_commit_first_parent_is_not_the_approved_base_commit",
   /** Second parent is not the approved head. */
   SECOND_PARENT_MISMATCH: "the_merge_commit_second_parent_is_not_the_approved_head_commit",
-  /** The approved head commit could not be read, so its tree is unknown. */
+  /** The approved head commit could not be read, so it is not a known remote commit. */
   HEAD_COMMIT_UNREADABLE: "the_approved_head_commit_could_not_be_read_from_the_remote",
-  /** The merge tree differs from the approved head tree: unreviewed content. */
-  TREE_MISMATCH: "the_merge_commit_tree_is_not_the_approved_head_tree_so_the_merge_introduced_unreviewed_content",
+  /*
+   * D-157: `TREE_MISMATCH` USED TO LIVE HERE AND IS GONE ON PURPOSE.
+   *
+   * It asserted `merge tree === approved head tree`, which holds only when the
+   * head already contains every commit on its base. For a branch cut before later
+   * base commits it is FALSE for every correct merge, and it held D-156's
+   * completion gate on a merge that was exactly the authorized one. The finding
+   * is not retained as a dead constant: nothing may emit it again, and the
+   * property it was reaching for is now proven by the `MERGE_DELTA` findings
+   * spread in above - strictly more strongly, and for both topologies.
+   */
 
   /* --- post-merge gates -----------------------------------------------------
    *
@@ -957,6 +995,9 @@ export function classifyBoundMergeAuthorization({
  *   mergeCommit    `{ ok, item: { sha, parents: [...], treeSha } }`
  *   headCommit     `{ ok, item: { sha, treeSha } }` for the APPROVED head
  *   checks         `{ ok, runs: [{ name, status, conclusion }] }` on the merge sha
+ *   mergeDelta     D-157: `compareCommits(parent1, mergeSha)` - what the merge did
+ *   reviewedDelta  D-157: `compareCommits(expectedBase, expectedHead)` - what was
+ *                  authorized. Both are `{ ok, item }`; see `merge-delta.mjs`.
  */
 export function verifyMergeTransition({
   authorization,
@@ -965,6 +1006,8 @@ export function verifyMergeTransition({
   mergeCommit,
   headCommit,
   checks,
+  mergeDelta,
+  reviewedDelta,
   now = () => new Date()
 }) {
   const auth = authorization && typeof authorization === "object" ? authorization : null;
@@ -977,8 +1020,16 @@ export function verifyMergeTransition({
     expected_head_sha: auth?.expectedHead ?? null,
     merge_commit_sha: null,
     merge_parents: [],
+    // D-157: recorded as EVIDENCE, never as a gate. These two differing is the
+    // normal, correct shape for a branch cut before later base commits.
     merge_tree_sha: null,
     head_tree_sha: null,
+    // D-157: the effective-change proof that replaced the tree-equality gate.
+    merge_delta: null,
+    reviewed_delta: null,
+    delta_file_count: 0,
+    delta_files: [],
+    delta_evidence: null,
     report_comment_id: completion?.reportCommentId ?? null,
     report_status: completion?.status ?? null,
     check_runs: [],
@@ -1068,7 +1119,16 @@ export function verifyMergeTransition({
       `parent 2 is ${parents[1]}, the authorized head is ${auth.expectedHead}`, withParents);
   }
 
-  // --- 5. the tree: no content the review never saw ------------------------
+  // --- 5. the EFFECTIVE CHANGE: exactly the reviewed delta, nothing else ---
+  //
+  // D-157 replaces D-145's `merge tree === approved head tree` here. That
+  // equality holds only when the head already contains its base; for a branch cut
+  // before later base commits it is false for EVERY correct merge, and it held
+  // D-156 on a merge that was exactly the authorized one.
+  //
+  // The approved head commit is still read, because it must be a real commit on
+  // this remote and its identity must be the one the order names - but its TREE
+  // is now evidence in the record rather than a gate.
   if (!headCommit || headCommit.ok !== true || !headCommit.item) {
     return refuse(MERGE_TRANSITION.HEAD_COMMIT_UNREADABLE, headCommit?.error ?? "not queried", withParents);
   }
@@ -1080,11 +1140,28 @@ export function verifyMergeTransition({
       `read back commit ${JSON.stringify(headCommit.item.sha ?? null)}, expected the approved head `
       + auth.expectedHead, withTrees);
   }
-  if (!mergeTree || !headTree || mergeTree !== headTree) {
-    return refuse(MERGE_TRANSITION.TREE_MISMATCH,
-      `the merge commit tree is ${JSON.stringify(mergeTree || null)} and the approved head tree is `
-      + `${JSON.stringify(headTree || null)}; a normal merge of an up-to-date branch reproduces the head tree `
-      + "exactly, so a difference is content that was never reviewed", withTrees);
+
+  // `parents[0]` rather than `auth.expectedBase`: they were just proven equal, and
+  // anchoring the comparison to the MERGE COMMIT'S OWN first parent keeps this a
+  // statement about the object on the remote instead of about the order's text.
+  const deltaVerdict = verifyMergeDelta({
+    mergeDelta,
+    reviewedDelta,
+    parent1: parents[0],
+    mergeSha,
+    expectedBase: auth.expectedBase,
+    expectedHead: auth.expectedHead
+  });
+  const withDelta = {
+    ...withTrees,
+    merge_delta: deltaVerdict.evidence?.merge_delta ?? null,
+    reviewed_delta: deltaVerdict.evidence?.reviewed_delta ?? null,
+    delta_file_count: deltaVerdict.evidence?.compared_file_count ?? 0,
+    delta_files: deltaVerdict.evidence?.compared_files ?? [],
+    delta_evidence: deltaVerdict.evidence ?? null
+  };
+  if (!deltaVerdict.ok) {
+    return refuse(deltaVerdict.reason, deltaVerdict.detail, withDelta);
   }
 
   // --- 6. the REQUIRED post-merge checks, by name --------------------------
@@ -1094,7 +1171,7 @@ export function verifyMergeTransition({
   // questions differ exactly when a required check is absent, which is the case
   // the PR #81 review found passing.
   const checkVerdict = classifyPostMergeChecks(checks, auth.policy);
-  const withChecks = { ...withTrees, check_runs: checkVerdict.runs };
+  const withChecks = { ...withDelta, check_runs: checkVerdict.runs };
   if (!checkVerdict.ok) {
     return refuse(checkVerdict.reason, checkVerdict.detail, withChecks);
   }
@@ -1137,8 +1214,10 @@ export function verifyMergeTransition({
     verified: true,
     reason: MERGE_TRANSITION.VERIFIED,
     detail: `PR #${auth.prNumber} is merged as ${mergeSha} with exactly two parents `
-      + `(${parents[0]}, ${parents[1]}) matching the authorized base and head, its tree equals the approved head `
-      + `tree ${headTree}, the ${checkVerdict.required.length} REQUIRED post-merge check(s) `
+      + `(${parents[0]}, ${parents[1]}) matching the authorized base and head, the effective change it introduced `
+      + `onto parent 1 is exactly the ${deltaVerdict.evidence.compared_file_count} file(s) of the reviewed delta for `
+      + `the approved head (merge tree ${mergeTree}, head tree ${headTree} - equal only when the head already `
+      + `contained its base, and not required to be), the ${checkVerdict.required.length} REQUIRED post-merge check(s) `
       + `(${checkVerdict.required.join(", ")}) are each present exactly once on the merge commit and concluded `
       + `success, and trusted report ${reportVerdict.report_comment_id} is bound to this exact task, PR and merge `
       + `sha across ${reportVerdict.checked_fields.length} required field(s) - of which `
@@ -1237,7 +1316,15 @@ export function describeMergeTransition(transition, excuse = null) {
     `  authorized base -> head: ${transition.expected_base_sha ?? "unknown"} -> ${transition.expected_head_sha ?? "unknown"}`,
     `  merge commit: ${transition.merge_commit_sha ?? "none"}`
       + (transition.merge_parents?.length ? ` parents [${transition.merge_parents.join(", ")}]` : ""),
-    `  trees: merge=${transition.merge_tree_sha ?? "unknown"} head=${transition.head_tree_sha ?? "unknown"}`,
+    // D-157: trees are EVIDENCE, not a gate. Labelled so, because a reader who
+    // remembers the old rule must not read a difference here as a finding.
+    `  trees (evidence only): merge=${transition.merge_tree_sha ?? "unknown"} `
+      + `head=${transition.head_tree_sha ?? "unknown"}`
+      + (transition.merge_tree_sha && transition.head_tree_sha
+        && transition.merge_tree_sha !== transition.head_tree_sha
+        ? " - differ, which is normal when the head did not already contain its base"
+        : ""),
+    ...describeMergeDelta(transition.delta_evidence),
     `  REQUIRED checks (${transition.policy_sources?.requiredChecks ?? "unresolved"}): `
       + `${transition.required_checks?.length ? transition.required_checks.join(", ") : "none declared"}`
       + `; extras: ${transition.extra_checks_policy ?? "unresolved"}`,

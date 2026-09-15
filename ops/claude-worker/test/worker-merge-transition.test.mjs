@@ -46,7 +46,8 @@ import { readClaim, claimFilePath, taskWorktreePath, CLAIM_STATE } from "../lib/
 import { COMMIT_PROVENANCE, COMPLETION_GATE } from "../lib/provenance.mjs";
 import { MERGE_TRANSITION, TRANSITION_EXCUSE } from "../lib/merge-transition.mjs";
 import {
-  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge, treeWithExtraFile
+  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge, treeWithExtraFile,
+  compareProjection, realMergeTree
 } from "./fixtures/real-git-repo.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -182,7 +183,12 @@ function ordinaryTask() {
  * commit's real parents and tree, the approved head's real tree, and green
  * post-merge check runs on the merge commit.
  */
-function publishMerge(mergeSha, { checks = null, pull = {} } = {}) {
+function publishMerge(mergeSha, {
+  checks = null,
+  pull = {},
+  authorizedBase = prevMain,
+  authorizedHead = prHead
+} = {}) {
   writeFileSync(join(ghDir, "pulls.json"), JSON.stringify([{
     number: PR,
     headRefName: "claude/d132-worker-recovery-reconciliation",
@@ -190,14 +196,14 @@ function publishMerge(mergeSha, { checks = null, pull = {} } = {}) {
     merged: true,
     mergedAt: "2026-09-14T23:05:00Z",
     mergeCommitSha: mergeSha,
-    headSha: prHead,
-    baseSha: prevMain,
+    headSha: authorizedHead,
+    baseSha: authorizedBase,
     baseRef: "main",
     ...pull
   }], null, 2), "utf8");
 
   const commits = {};
-  for (const sha of [mergeSha, prHead, prevMain]) {
+  for (const sha of new Set([mergeSha, prHead, prevMain, authorizedBase, authorizedHead])) {
     commits[sha] = { sha, treeSha: treeOf(repoPath, sha), parents: parentsOf(repoPath, sha) };
   }
   writeFileSync(join(ghDir, "commits.json"), JSON.stringify(commits, null, 2), "utf8");
@@ -209,6 +215,26 @@ function publishMerge(mergeSha, { checks = null, pull = {} } = {}) {
       { name: "gitleaks", status: "completed", conclusion: "success" }
     ]
   }, null, 2), "utf8");
+
+  /**
+   * D-157: the two effective-change comparisons, DERIVED FROM THE REAL REPO.
+   *
+   * Both ranges are computed by `compareProjection` from real git objects, so
+   * neither this fixture nor the test author decides whether they match - git
+   * does. An adversarial case that puts unreviewed content in the merge tree
+   * therefore produces a genuinely different delta, and the gate has to notice
+   * it for the real reason rather than because a fixture said so.
+   */
+  const compare = {};
+  const range = (a, b) => {
+    try {
+      compare[`${a}...${b}`] = compareProjection(repoPath, a, b);
+    } catch { /* a range the fixture cannot compute 404s, exactly like the API */ }
+  };
+  const parent1 = parentsOf(repoPath, mergeSha)[0] ?? null;
+  if (parent1) range(parent1, mergeSha);
+  range(authorizedBase, authorizedHead);
+  writeFileSync(join(ghDir, "compare.json"), JSON.stringify(compare, null, 2), "utf8");
 }
 
 function setComments(list) {
@@ -303,6 +329,209 @@ const mergeChild = (mergeSha, { closeout = {}, ...env } = {}) => ({
   JARVIS_FAKE_CLAUDE_PR: String(PR),
   JARVIS_FAKE_CLAUDE_REPORT_FIELDS: JSON.stringify(closeoutFields(mergeSha, closeout)),
   ...env
+});
+
+/* ==========================================================================
+ * D-157: PR #82's DIVERGED TOPOLOGY, THROUGH THE REAL ENTRYPOINT
+ * ==========================================================================
+ *
+ * The exact shape D-156 was wrongly held on, rebuilt with real git objects:
+ *
+ *   B0                  the commit the branch was cut from
+ *    |\
+ *    | H                 the reviewed head - B0 + the reviewed change
+ *    M                   the authorized base - B0 + work that landed meanwhile
+ *     \|
+ *      MERGE             a real two-parent merge, tree = merge3(B0, M, H)
+ *
+ * `tree(MERGE) != tree(H)`, necessarily and correctly, because the merge carries
+ * M's base-only content as well. D-145's rule called that "unreviewed content"
+ * and held the gate. There is no fixture cheating available here: the merge tree
+ * is computed by `git merge-tree`, and both comparisons are derived from the real
+ * objects by the same code, so the gate passes only if git agrees.
+ */
+
+describe("D-157: a DIVERGED branch merges and retires through the real entrypoint", () => {
+  /** B0 + the reviewed change. */
+  let divergedHead;
+  /** B0 + base-only work that landed while the branch was open. */
+  let divergedBase;
+  let merge;
+
+  beforeEach(() => {
+    // `prHead` is already B0 + feature.txt. Advance main along a SEPARATE line
+    // from the same B0, which is what makes the two genuinely diverge.
+    divergedHead = prHead;
+    git(repoPath, ["checkout", "--quiet", "--detach", prevMain]);
+    writeFileSync(join(repoPath, "base-only.txt"), "landed while the branch was open\n", "utf8");
+    git(repoPath, ["add", "-A"]);
+    git(repoPath, ["commit", "-m", "feat: base-only work the branch never had"]);
+    divergedBase = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "-B", "main", divergedBase]);
+
+    merge = syntheticMerge(repoPath, {
+      base: divergedBase,
+      head: divergedHead,
+      tree: realMergeTree(repoPath, divergedBase, divergedHead),
+      message: `Merge pull request #${PR}`
+    });
+    publishMerge(merge, { authorizedBase: divergedBase, authorizedHead: divergedHead });
+    setComments([mergeTask({ EXPECTED_BASE_SHA: divergedBase, EXPECTED_HEAD_SHA: divergedHead })]);
+  });
+
+  /**
+   * D-156's child, faithfully: it syncs its LOCAL MAIN and reports having done
+   * so, but it never moves its isolated worktree's HEAD - which is why the real
+   * worker observed `head_did_not_move` and a `unchanged` (verified) provenance
+   * verdict, and why the gate still demanded transition proof under D-147.
+   *
+   * Deliberately NOT `JARVIS_FAKE_CLAUDE_SYNC_TO`. Fast-forwarding the worktree
+   * across a DIVERGED base pulls the base-only commits into the range too, so the
+   * range would legitimately hold more than the merge commit and the narrow
+   * single-commit excuse would - correctly - refuse it. That is a real and
+   * separate property, asserted on its own below rather than smuggled in here.
+   */
+  const divergedChild = (over = {}) => ({
+    JARVIS_FAKE_CLAUDE_PR: String(PR),
+    JARVIS_FAKE_CLAUDE_REPORT_FIELDS: JSON.stringify(closeoutFields(merge, {
+      PARENT_1: divergedBase,
+      PARENT_2: divergedHead,
+      EXPECTED_BASE_SHA: divergedBase,
+      EXPECTED_HEAD_SHA: divergedHead,
+      ...(over.closeout ?? {})
+    })),
+    ...(over.env ?? {})
+  });
+
+  /** Local: the later describe blocks have their own, out of scope here. */
+  async function expectHeld(extraEnv = {}) {
+    const res = await runWorker("report", extraEnv);
+    const rec = task(MERGE_TASK);
+    expect(res.code).not.toBe(0);
+    expect(rec.status).not.toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).not.toBe(true);
+    expect(rec.completion_gate.held).toBe(true);
+    // A held merge task keeps its worktree and its claim, always.
+    expect(existsSync(wt(MERGE_TASK))).toBe(true);
+    return rec;
+  }
+
+  it("the fixture really IS the refused shape: correct parents, tree != head tree", () => {
+    // Asserted before it is used. If this fixture ever stopped diverging, every
+    // test below would pass for the wrong reason.
+    expect(parentsOf(repoPath, merge)).toEqual([divergedBase, divergedHead]);
+    expect(treeOf(repoPath, merge)).not.toBe(treeOf(repoPath, divergedHead));
+    expect(treeOf(repoPath, merge)).not.toBe(treeOf(repoPath, divergedBase));
+    // ...and the merge really does carry BOTH sides.
+    expect(git(repoPath, ["ls-tree", "--name-only", merge]).split(/\r?\n/))
+      .toEqual(expect.arrayContaining(["base-only.txt", "feature.txt"]));
+  });
+
+  it("the effective change from parent 1 IS the reviewed delta, per real git", () => {
+    const mergeSide = compareProjection(repoPath, divergedBase, merge);
+    const reviewed = compareProjection(repoPath, divergedBase, divergedHead);
+    expect(reviewed.status).toBe("diverged");
+    expect(reviewed.behindBy).toBeGreaterThan(0);
+    expect(mergeSide.files.map((f) => f.filename)).toEqual(["feature.txt"]);
+    expect(mergeSide.files).toEqual(reviewed.files);
+  });
+
+  it("COMPLETES - the exact case D-156 was held on", async () => {
+    const res = await runWorker("report", divergedChild());
+
+    expect(res.code).toBe(0);
+    const rec = task(MERGE_TASK);
+    expect(rec.status).toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).toBe(true);
+
+    const t = rec.merge_transition;
+    expect(t.verified).toBe(true);
+    expect(t.reason).toBe(MERGE_TRANSITION.VERIFIED);
+    expect(t.merge_parents).toEqual([divergedBase, divergedHead]);
+    // The decisive assertion: the trees DIFFER and the gate passed anyway.
+    expect(t.merge_tree_sha).not.toBe(t.head_tree_sha);
+    expect(t.delta_files).toEqual(["feature.txt"]);
+    expect(rec.completion_gate.held).toBe(false);
+    expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.PASSED_AUTHORIZED_MERGE_TRANSITION);
+  }, 300_000);
+
+  it("and it is STILL refused when the merge introduces unreviewed content", async () => {
+    // Same diverged topology, same correct parents - plus one file nobody
+    // reviewed, added to the real merged tree. Accepting the topology must not
+    // mean accepting the content.
+    merge = syntheticMerge(repoPath, {
+      base: divergedBase,
+      head: divergedHead,
+      tree: realMergeTree(repoPath, divergedBase, divergedHead, { extra: { file: "slipped-in.txt" } }),
+      message: `Merge pull request #${PR}`
+    });
+    publishMerge(merge, { authorizedBase: divergedBase, authorizedHead: divergedHead });
+
+    const rec = await expectHeld(divergedChild());
+    expect(rec.merge_transition.verified).toBe(false);
+    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH);
+    expect(rec.merge_transition.detail).toContain("slipped-in.txt");
+  }, 300_000);
+
+  it("and a diverged merge whose reviewed patch was ALTERED is refused", async () => {
+    // The merge takes the branch's change, but the branch content itself is not
+    // what the order authorized: the head is a different commit carrying a
+    // different version of the same file.
+    git(repoPath, ["checkout", "--quiet", "--detach", prevMain]);
+    writeFileSync(join(repoPath, "feature.txt"), "NOT the reviewed change\n", "utf8");
+    git(repoPath, ["add", "-A"]);
+    git(repoPath, ["commit", "-m", "feat: a different change wearing the same name"]);
+    const tamperedHead = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "-B", "main", divergedBase]);
+
+    merge = syntheticMerge(repoPath, {
+      base: divergedBase,
+      head: tamperedHead,
+      tree: realMergeTree(repoPath, divergedBase, tamperedHead),
+      message: `Merge pull request #${PR}`
+    });
+    // The remote merged the TAMPERED head; the order still names the reviewed one.
+    publishMerge(merge, { authorizedBase: divergedBase, authorizedHead: divergedHead,
+      pull: { headSha: divergedHead } });
+
+    const rec = await expectHeld(divergedChild());
+    expect(rec.merge_transition.verified).toBe(false);
+    // Caught structurally, before the delta is even consulted: parent 2 is not
+    // the approved head. Defence in depth is the point - the delta proof is an
+    // ADDITION to the exact-sha guards, never a replacement for them.
+    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.SECOND_PARENT_MISMATCH);
+  }, 300_000);
+
+  it("an unreadable comparison holds the gate - unreadable is never 'matches'", async () => {
+    writeFileSync(join(ghDir, "fail.json"), JSON.stringify({ compare: true }), "utf8");
+
+    const rec = await expectHeld(divergedChild());
+    expect(rec.merge_transition.verified).toBe(false);
+    expect([MERGE_TRANSITION.MERGE_DELTA_UNREADABLE, MERGE_TRANSITION.REVIEWED_DELTA_UNREADABLE])
+      .toContain(rec.merge_transition.reason);
+  }, 300_000);
+
+  it("nothing here attributes ANY commit to Claude - provenance is untouched", async () => {
+    await runWorker("report", divergedChild());
+    const rec = task(MERGE_TASK);
+    // The transition is proven from remote truth; authorship is never claimed.
+    // D-134's rule - a moved ref is an observation, never proof of who moved it -
+    // is not relaxed by any of this.
+    expect(rec.commit_provenance.attributed_count).toBe(0);
+    expect(rec.commit_provenance.head_before).toBe(rec.commit_provenance.head_after);
+    expect(rec.merge_transition.verified).toBe(true);
+  }, 300_000);
+
+  it("a range holding MORE than the merge commit is still refused, diverged or not", async () => {
+    // The narrowing D-145 built is untouched: proving the transition excuses
+    // EXACTLY the merge commit and never a foreign commit beside it.
+    const rec = await expectHeld({
+      ...divergedChild(),
+      JARVIS_FAKE_CLAUDE_SYNC_TO: merge,
+      JARVIS_FAKE_CLAUDE_STRAY_COMMIT: "1"
+    });
+    expect(rec.completion_gate.held).toBe(true);
+  }, 300_000);
 });
 
 /* ==========================================================================
@@ -496,13 +725,20 @@ describe("D-145: the transition path does not generalize - every deviation is st
 
   it("a two-parent merge carrying EXTRA CONTENT is refused", async () => {
     // Perfectly well-formed parents; a tree the review never saw.
+    //
+    // D-157: the refusal is now `DELTA_FILE_SET_MISMATCH` rather than the old
+    // `TREE_MISMATCH`. The extra file is caught where it actually shows up - in
+    // the effective change from parent 1 to the merge - and that is a reason a
+    // correct diverged merge can never trip, which is exactly why the old one
+    // was replaced.
     const tree = treeWithExtraFile(repoPath, prHead);
     const merge = syntheticMerge(repoPath, { base: prevMain, head: prHead, tree });
     publishMerge(merge);
     setComments([mergeTask()]);
 
     const rec = await expectHeld(mergeChild(merge));
-    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.TREE_MISMATCH);
+    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH);
+    expect(rec.merge_transition.detail).toContain("slipped-in.txt");
   }, 300_000);
 
   it("a PR that is NOT merged is refused", async () => {

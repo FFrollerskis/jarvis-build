@@ -120,7 +120,8 @@ import {
   listPulls,
   getPullMergeState,
   getCommit,
-  getCommitCheckRuns
+  getCommitCheckRuns,
+  compareCommits
 } from "./lib/github.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -348,7 +349,8 @@ function verifyTransitionFor(cfg, claim, completion) {
     // The task IS its own order and DOES claim a merge, but the order is broken.
     // That is a real finding, recorded, and it costs no API call.
     return verifyMergeTransition({
-      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null
+      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null,
+      mergeDelta: null, reviewedDelta: null
     });
   }
 
@@ -361,7 +363,21 @@ function verifyTransitionFor(cfg, claim, completion) {
   const headCommit = getCommit(cfg, authorization.expectedHead);
   const checks = mergeSha ? getCommitCheckRuns(cfg, mergeSha) : { ok: false, runs: [], error: "no merge sha to read" };
 
-  return verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+  // D-157: the two comparisons that prove the merge introduced exactly the
+  // reviewed delta. The merge delta is anchored at the merge commit's OWN first
+  // parent - read off the commit object above, not taken from the order's text -
+  // so it is a statement about the object on the remote. When there is no merge
+  // commit or no first parent to anchor to, the read is not attempted and the
+  // verifier sees UNKNOWN, which is a named refusal rather than a pass.
+  const parent1 = mergeCommit.ok ? mergeCommit.item?.parents?.[0] ?? null : null;
+  const mergeDelta = mergeSha && parent1
+    ? compareCommits(cfg, parent1, mergeSha)
+    : { ok: false, item: null, error: "no merge commit first parent to compare from" };
+  const reviewedDelta = compareCommits(cfg, authorization.expectedBase, authorization.expectedHead);
+
+  return verifyMergeTransition({
+    authorization, completion, pull, mergeCommit, headCommit, checks, mergeDelta, reviewedDelta
+  });
 }
 
 /**

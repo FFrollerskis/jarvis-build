@@ -48,7 +48,7 @@ import { readClaim, claimFilePath, taskWorktreePath, CLAIM_STATE } from "../lib/
 import { COMMIT_PROVENANCE, COMPLETION_GATE } from "../lib/provenance.mjs";
 import { MERGE_TRANSITION, MERGE_AUTHORIZATION } from "../lib/merge-transition.mjs";
 import {
-  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge
+  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge, compareStore
 } from "./fixtures/real-git-repo.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -229,6 +229,9 @@ function publishMerge({ checks = null, pull = {}, extraCommits = [] } = {}) {
   const runs = { [merge]: checks ?? GREEN };
   for (const sha of extraCommits) runs[sha] = checks ?? GREEN;
   writeFileSync(join(ghDir, "check-runs.json"), JSON.stringify(runs, null, 2), "utf8");
+  // D-157: the two effective-change comparisons, derived from the real repo.
+  writeFileSync(join(ghDir, "compare.json"),
+    JSON.stringify(compareStore(repoPath, { mergeSha: merge, base: prevMain, head: prHead }), null, 2), "utf8");
 }
 
 function setComments(list) {

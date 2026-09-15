@@ -163,6 +163,42 @@ const checks = (over = null) => ({
   error: null
 });
 
+/**
+ * D-157: the effective-change comparisons.
+ *
+ * D-144's branch was UP TO DATE with its base, so this fixture is the topology
+ * where the merge tree does equal the head tree - `behindBy: 0` on both sides.
+ * The new proof must accept it for the same reason it accepts PR #82's diverged
+ * branch: `diff(parent1, merge)` is the reviewed delta either way.
+ */
+const DELTA_FILES = [{
+  filename: "feature.txt",
+  status: "added",
+  previousFilename: null,
+  blobSha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
+  additions: 1,
+  deletions: 0,
+  patch: "@@ -0,0 +1 @@\n+the reviewed change\n"
+}];
+const mergeDelta = (over = {}) => ({
+  ok: true,
+  error: null,
+  item: {
+    baseSha: BASE, mergeBaseSha: BASE, headSha: MERGE, status: "ahead",
+    aheadBy: 2, behindBy: 0, totalCommits: 2, commitCount: 2,
+    fileCount: DELTA_FILES.length, files: DELTA_FILES, ...over
+  }
+});
+const reviewedDelta = (over = {}) => ({
+  ok: true,
+  error: null,
+  item: {
+    baseSha: BASE, mergeBaseSha: BASE, headSha: HEAD, status: "ahead",
+    aheadBy: 1, behindBy: 0, totalCommits: 1, commitCount: 1,
+    fileCount: DELTA_FILES.length, files: DELTA_FILES, ...over
+  }
+});
+
 /** The verdict the CURRENT worker produced for D-144, reproduced exactly. */
 const D144_PROVENANCE = Object.freeze({
   verdict: COMMIT_PROVENANCE.UNATTRIBUTED,
@@ -192,7 +228,9 @@ function verify(over = {}) {
     pull: over.pull ?? pull(),
     mergeCommit: over.mergeCommit ?? mergeCommit(),
     headCommit: over.headCommit ?? headCommit(),
-    checks: over.checks ?? checks()
+    checks: over.checks ?? checks(),
+    mergeDelta: "mergeDelta" in over ? over.mergeDelta : mergeDelta(),
+    reviewedDelta: "reviewedDelta" in over ? over.reviewedDelta : reviewedDelta()
   });
 }
 
@@ -225,6 +263,10 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
     expect(t.merge_tree_sha).toBe(TREE);
     expect(t.head_tree_sha).toBe(TREE);
     expect(t.check_runs.map((r) => r.name)).toEqual(["build-test", "windows-git-auth", "gitleaks"]);
+    // D-157: the trees still travel in the record as evidence, and the effective
+    // change is now what was actually PROVEN.
+    expect(t.delta_file_count).toBe(1);
+    expect(t.delta_files).toEqual(["feature.txt"]);
   });
 
   it("it excuses the merge commit WITHOUT ever claiming Claude authored it", () => {
@@ -274,6 +316,74 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
 });
 
 /* ==========================================================================
+ * D-157: THE DIVERGED TOPOLOGY THE OLD TREE RULE REFUSED
+ * ========================================================================== */
+
+describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition gate", () => {
+  /**
+   * D-156's exact shape, at this gate rather than only in the leaf module.
+   *
+   * The merge commit's tree is NOT the approved head's tree, because the branch
+   * was 17 commits behind its base - and under D-145's rule that alone produced
+   * `..._so_the_merge_introduced_unreviewed_content` and held the completion gate
+   * (issue #68 comment 5684346209) on a correct, authorized merge.
+   */
+  const DIVERGED_MERGE_TREE = "eef13c740e69b11c2e1007b2a6b9303e3eda393d";
+  const DIVERGED_HEAD_TREE = "6481537750f78e4956b7d5ad232964dc670f138d";
+
+  const diverged = (over = {}) => verify({
+    mergeCommit: mergeCommit({ treeSha: DIVERGED_MERGE_TREE }),
+    headCommit: headCommit({ treeSha: DIVERGED_HEAD_TREE }),
+    reviewedDelta: reviewedDelta({ mergeBaseSha: OTHER, status: "diverged", aheadBy: 3, behindBy: 17 }),
+    ...over
+  });
+
+  it("verifies even though the merge tree differs from the approved head tree", () => {
+    const t = diverged();
+    expect(t.verified).toBe(true);
+    expect(t.reason).toBe(MERGE_TRANSITION.VERIFIED);
+    expect(t.merge_tree_sha).not.toBe(t.head_tree_sha);
+    expect(t.reviewed_delta.behind_by).toBe(17);
+  });
+
+  it("the record still carries both trees, so the evidence is not lost", () => {
+    const t = diverged();
+    expect(t.merge_tree_sha).toBe(DIVERGED_MERGE_TREE);
+    expect(t.head_tree_sha).toBe(DIVERGED_HEAD_TREE);
+  });
+
+  it("the human description labels the differing trees as evidence, not as a finding", () => {
+    const lines = describeMergeTransition(diverged()).join("\n");
+    expect(lines).toContain("trees (evidence only)");
+    expect(lines).toContain("normal when the head did not already contain its base");
+  });
+
+  it("but a DIVERGED merge that introduced unreviewed content is still refused", () => {
+    // The whole point: the topology is accepted, the unreviewed content is not.
+    const t = diverged({
+      mergeDelta: mergeDelta({
+        fileCount: 2,
+        files: [...DELTA_FILES, {
+          filename: "conflict-resolution.txt", status: "added", previousFilename: null,
+          blobSha: "5555555555555555555555555555555555555555",
+          additions: 3, deletions: 0, patch: "@@ -0,0 +1,3 @@\n+resolved by hand\n"
+        }]
+      })
+    });
+    expect(t.verified).toBe(false);
+    expect(t.reason).toBe(MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH);
+  });
+
+  it("and a diverged merge still owes every OTHER guard - parents, CI, report", () => {
+    expect(diverged({ mergeCommit: mergeCommit({ treeSha: DIVERGED_MERGE_TREE, parents: [BASE, OTHER] }) }).reason)
+      .toBe(MERGE_TRANSITION.SECOND_PARENT_MISMATCH);
+    expect(diverged({ checks: checks([]) }).verified).toBe(false);
+    expect(diverged({ completion: { complete: true, successful: false, status: "BLOCKED", reportCommentId: 1 } })
+      .reason).toBe(MERGE_TRANSITION.REPORT_NOT_SUCCESSFUL);
+  });
+});
+
+/* ==========================================================================
  * ADVERSARIAL NEGATIVES - the transition itself
  * ========================================================================== */
 
@@ -291,9 +401,37 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
       { mergeCommit: mergeCommit({ parents: [] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
     ["an octopus merge (three parents)",
       { mergeCommit: mergeCommit({ parents: [BASE, HEAD, OTHER] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
-    ["extra content in the merge tree",
-      { mergeCommit: mergeCommit({ treeSha: "9999999999999999999999999999999999999999" }) },
-      MERGE_TRANSITION.TREE_MISMATCH],
+    // D-157: "extra content in the merge tree" used to be asserted by moving the
+    // merge commit's TREE sha, because the gate was tree equality. It is now
+    // asserted where the content actually shows up - in the effective change the
+    // merge introduced - so the test can no longer pass by agreeing with a rule
+    // that refused correct merges. A differing tree sha on its own is EVIDENCE,
+    // not a finding, and the case below proves it no longer refuses by itself.
+    ["extra content the review never saw, introduced by the merge",
+      {
+        mergeDelta: mergeDelta({
+          fileCount: DELTA_FILES.length + 1,
+          files: [...DELTA_FILES, {
+            filename: "slipped-in.txt", status: "added", previousFilename: null,
+            blobSha: "9999999999999999999999999999999999999999",
+            additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+never reviewed\n"
+          }]
+        })
+      },
+      MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH],
+    ["the reviewed patch was altered on the way in",
+      {
+        mergeDelta: mergeDelta({
+          files: [{ ...DELTA_FILES[0], patch: "@@ -0,0 +1 @@\n+something else entirely\n" }]
+        })
+      },
+      MERGE_TRANSITION.DELTA_CONTENT_MISMATCH],
+    ["the effective change could not be read from the remote",
+      { mergeDelta: { ok: false, item: null, error: "HTTP 403" } },
+      MERGE_TRANSITION.MERGE_DELTA_UNREADABLE],
+    ["the reviewed delta could not be read from the remote",
+      { reviewedDelta: { ok: false, item: null, error: "HTTP 403" } },
+      MERGE_TRANSITION.REVIEWED_DELTA_UNREADABLE],
     ["the PR is not merged",
       { pull: pull({ merged: false, mergeCommitSha: null }) }, MERGE_TRANSITION.NOT_MERGED],
     ["merged but with no merge sha",

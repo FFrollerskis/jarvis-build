@@ -33,7 +33,11 @@ import {
   unsupportedPromptDeliveryReason
 } from "./dispatch.mjs";
 
-export const WORKER_VERSION = "2.1.0";
+// D-157: the authorized-merge transition verifier no longer requires the merge
+// commit's tree to equal the approved head's tree, and proves the effective
+// change instead. That changes which merges a completion gate accepts and which
+// reasons it can emit, so a deployed worker's version must distinguish it.
+export const WORKER_VERSION = "2.2.0";
 
 const REQUIRED_WORKER = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "repoPath", "claudeArgs"];
 const REQUIRED_SUPERVISOR = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "workerTaskName", "host"];

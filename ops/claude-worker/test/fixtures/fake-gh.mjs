@@ -18,8 +18,11 @@
  *                     404s, exactly as the real API does.
  *   check-runs.json - D-145: `{ "<sha>": [{ name, status, conclusion }] }`,
  *                     served by `repos/O/R/commits/<sha>/check-runs`.
+ *   compare.json    - D-157: `{ "<base>...<head>": { baseSha, mergeBaseSha,
+ *                     status, aheadBy, behindBy, commits: [...], files: [...] } }`,
+ *                     served by `repos/O/R/compare/<base>...<head>`.
  *   fail.json       - optional { auth, comments, branches, pulls, commits,
- *                     checks, mergeState } booleans
+ *                     checks, mergeState, compare } booleans
  */
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -173,6 +176,39 @@ if (commitMatch) {
     parents: commit.parents ?? [],
     verified: commit.verified ?? true,
     message: commit.message ?? ""
+  }) + "\n");
+  process.exit(0);
+}
+
+/**
+ * D-157: `repos/O/R/compare/<base>...<head>`, the effective-change comparison.
+ *
+ * Served from `compare.json`, keyed `"<base>...<head>"`. The stored value is the
+ * projection `compareCommits` asks jq for, so the fixture publishes exactly what
+ * the real endpoint would yield for that range - including `fileCount` and
+ * `totalCommits`/`commitCount`, which are how the verifier detects a capped page.
+ *
+ * A range that is absent 404s, exactly as the real API does for an unknown sha.
+ */
+const compareMatch = urlArg.match(/\/compare\/([^/?]+)$/);
+if (compareMatch) {
+  if (failures.compare) die("gh: HTTP 403 rate limit exceeded");
+  const key = decodeURIComponent(compareMatch[1]);
+  const stored = read("compare.json", {})[key];
+  if (!stored) die(`gh: HTTP 404: No commit found for SHA: ${key}`);
+  const files = stored.files ?? [];
+  const commits = stored.commits ?? [];
+  process.stdout.write(JSON.stringify({
+    baseSha: stored.baseSha ?? null,
+    mergeBaseSha: stored.mergeBaseSha ?? null,
+    headSha: stored.headSha ?? (commits.length > 0 ? commits[commits.length - 1] : null),
+    status: stored.status ?? null,
+    aheadBy: stored.aheadBy ?? null,
+    behindBy: stored.behindBy ?? null,
+    totalCommits: stored.totalCommits ?? commits.length,
+    commitCount: stored.commitCount ?? commits.length,
+    fileCount: stored.fileCount ?? files.length,
+    files
   }) + "\n");
   process.exit(0);
 }
