@@ -94,7 +94,28 @@ if (urlArg.includes("/issues/") && urlArg.includes("/comments")) {
     const until = Date.now() + delay;
     while (Date.now() < until) { /* deliberate busy wait: the test kills us here */ }
   }
-  process.stdout.write(JSON.stringify(read("comments.json", []), null, 2));
+  const stored = read("comments.json", []);
+  /**
+   * D-150: `fail.json { commentsTruncated: true }` - a read that SUCCEEDS and is
+   * still not complete.
+   *
+   * This is the shape that actually loses a control comment in production, and
+   * it is not a failure anywhere: `gh api --paginate` exits 0 and prints one JSON
+   * array per page, and a dropped or cut-off page just means one of those
+   * fragments will not parse. `parsePaginatedJsonDetailed` reports it via
+   * `complete: false`, and nothing may conclude ABSENCE from it.
+   *
+   * The output below is deliberately faithful to that: every stored comment IS
+   * returned, in a first well-formed fragment, followed by a second fragment that
+   * was cut off mid-object. A reader looking only at the resulting array sees a
+   * perfectly good set - which is exactly why absence had to stop being evidence.
+   */
+  if (failures.commentsTruncated) {
+    process.stdout.write(JSON.stringify(stored, null, 2));
+    process.stdout.write("\n[\n  {\n    \"id\": 987654,\n    \"body\": \"ARCHITECT_TASK\\nTASK_ID=");
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify(stored, null, 2));
   process.exit(0);
 }
 

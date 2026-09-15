@@ -17,7 +17,7 @@ function taskEntry(taskId, createdAt, id) {
   return {
     taskId,
     comment: { id, created_at: createdAt, user: { login: TRUSTED }, body: `ARCHITECT_TASK\nTASK_ID=${taskId}` },
-    updates: []
+    uniqueAuthority: true
   };
 }
 
@@ -377,13 +377,24 @@ describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable"
       user: { login: TRUSTED },
       body: `ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=${supersedes}\nDo the thing.`
     },
-    updates: []
+    uniqueAuthority: true
   });
 
-  it("parses only syntactically valid ids, from the task comment and its updates", () => {
+  it("parses only syntactically valid ids, from the task's ONE order comment", () => {
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "A-1, B-2  C-3"))).toEqual(["A-1", "B-2", "C-3"]);
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "../escape"))).toEqual([]);
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "a/b"))).toEqual([]);
+  });
+
+  it("D-150: a task whose authority is NOT unique declares NOTHING", () => {
+    // A forged same-id duplicate used to be folded in as a `TASK_UPDATE` whose
+    // body was read with last-wins semantics, so it could declare a supersession
+    // against an unrelated task - and supersession is a PERMANENT retirement.
+    const entry = declaring("2026-09-11T05:00:00Z", 1, "A-1");
+    expect(declaredSupersedes(entry)).toEqual(["A-1"]);
+    expect(declaredSupersedes({ ...entry, uniqueAuthority: false })).toEqual([]);
+    // And an entry that never established uniqueness at all is not unique.
+    expect(declaredSupersedes({ ...entry, uniqueAuthority: undefined })).toEqual([]);
   });
 
   it("an explicit declaration retires the named older task without it having run", () => {
@@ -524,7 +535,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
         user: { login: TRUSTED },
         body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=OLD-TASK\nDo the thing."
       },
-      updates: []
+      uniqueAuthority: true
     };
     const state = stateWith({
       "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },

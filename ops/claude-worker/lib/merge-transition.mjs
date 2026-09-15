@@ -160,6 +160,7 @@
 import { extractField, validateTrustedTask } from "./trust.mjs";
 import {
   ORDER_BINDING,
+  collapseIdenticalOrderRepeats,
   normalizeCommentId,
   orderBindingEvidence,
   validateOrderBinding,
@@ -539,20 +540,17 @@ export function selectCanonicalArchitectTask(comments, { trustedAuthor, taskId }
   }
 
   // Collapse only provably-identical repeats of ONE comment (see above).
-  const distinct = [];
-  for (const comment of candidates) {
-    const id = commentIdentity(comment);
-    const same = id === null
-      ? undefined
-      : distinct.find((d) => commentIdentity(d) === id
-        && String(d.body ?? "") === String(comment.body ?? "")
-        && String(d.created_at ?? "") === String(comment.created_at ?? ""));
-    if (!same) distinct.push(comment);
-  }
+  //
+  // D-150: the collapse itself lives in the leaf module `order-binding.mjs`, so
+  // the rule the ADMISSION gate counts with and the rule this COMPLETION gate
+  // counts with are ONE implementation and cannot drift apart into two different
+  // answers to "is this authority unique?".
+  const distinct = collapseIdenticalOrderRepeats(candidates);
 
-  // GitHub's own ids, exactly as they came back. The prefixed identity above is an
-  // internal dedupe key only - what a record carries, and what a human is asked to
-  // go and look at, must be the id they can actually paste into a URL.
+  // GitHub's own ids, exactly as they came back. The prefixed identity the
+  // collapse uses is an internal dedupe key only - what a record carries, and
+  // what a human is asked to go and look at, must be the id they can paste into
+  // a URL.
   const ids = distinct.map((c) => c?.id ?? null);
   if (distinct.length === 0) {
     return refuse(MERGE_TRANSITION.NO_TRUSTED_TASK,
@@ -592,14 +590,6 @@ export function selectCanonicalArchitectTask(comments, { trustedAuthor, taskId }
     duplicateIds: [],
     undecidable: false
   };
-}
-
-/** A comment's own identity, or `null` when it carries none we can compare. */
-function commentIdentity(comment) {
-  const id = comment?.id;
-  if (typeof id === "number" && Number.isFinite(id)) return `n:${id}`;
-  if (typeof id === "string" && id.trim() !== "") return `s:${id.trim()}`;
-  return null;
 }
 
 /** The selection evidence carried on every classification, pass or refusal. */

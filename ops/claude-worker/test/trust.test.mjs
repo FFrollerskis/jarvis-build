@@ -43,15 +43,46 @@ describe("ARCHITECT_TASK trust boundary is unchanged", () => {
       .toMatchObject({ ok: false, reason: "missing_task_id" });
   });
 
-  it("folds a TASK_UPDATE into the SAME task instead of creating a parallel one", () => {
+  it("D-150: a same-id TASK_UPDATE is a SECOND ORDER, not an executable amendment", () => {
     const update = {
       id: 2, user: { login: TRUSTED }, created_at: "2026-09-07T01:11:12Z",
       body: "ARCHITECT_TASK\nTASK_ID=WORKER-SELF-RECOVERY-20260907\nTASK_UPDATE=true\nextra scope\n"
     };
     const tasks = collectTrustedTasks([good, update], { trustedAuthor: TRUSTED });
+    // Still ONE queue entry - a same-id comment never becomes a parallel task.
     expect(tasks).toHaveLength(1);
-    expect(tasks[0].updates).toHaveLength(1);
-    expect(tasks[0].updates[0].id).toBe(2);
+    // But it is NOT folded in as executable scope: it is a second distinct order,
+    // and the entry says so rather than quietly picking one of them.
+    expect(tasks[0].duplicates).toHaveLength(1);
+    expect(tasks[0].duplicates[0].id).toBe(2);
+    expect(tasks[0].distinctOrderCount).toBe(2);
+    expect(tasks[0].uniqueAuthority).toBe(false);
+    expect(tasks[0].updates).toBeUndefined();
+  });
+
+  it("D-150: one order is unique, and an identical --paginate repeat is still one", () => {
+    expect(collectTrustedTasks([good], { trustedAuthor: TRUSTED })[0])
+      .toMatchObject({ distinctOrderCount: 1, uniqueAuthority: true, duplicates: [] });
+
+    // Overlapping pages return the SAME comment twice. Calling that ambiguous
+    // would be a false refusal a page boundary alone could trigger.
+    const repeated = collectTrustedTasks([good, { ...good }], { trustedAuthor: TRUSTED });
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0].distinctOrderCount).toBe(1);
+    expect(repeated[0].uniqueAuthority).toBe(true);
+  });
+
+  it("D-150: the entry's representative does not depend on array order", () => {
+    const second = {
+      id: 2, user: { login: TRUSTED }, created_at: "2026-09-07T01:11:12Z",
+      body: "ARCHITECT_TASK\nTASK_ID=WORKER-SELF-RECOVERY-20260907\ndifferent scope\n"
+    };
+    const forward = collectTrustedTasks([good, second], { trustedAuthor: TRUSTED })[0];
+    const reversed = collectTrustedTasks([second, good], { trustedAuthor: TRUSTED })[0];
+    expect(forward.comment.id).toBe(reversed.comment.id);
+    expect(forward.comment.id).toBe(1);
+    expect(forward.uniqueAuthority).toBe(false);
+    expect(reversed.uniqueAuthority).toBe(false);
   });
 
   it("orders distinct tasks oldest first", () => {

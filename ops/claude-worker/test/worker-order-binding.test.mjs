@@ -864,14 +864,49 @@ describe("D-149 POSITIVE CONTROLS", () => {
   }, 300_000);
 
   it("D-148's duplicate refusal still fires, and names AMBIGUITY not the binding", async () => {
-    setComments([mergeTask(), mergeTask({}, { id: ORDER_ID + 1 })]);
+    // D-150 note: the duplicate now arrives FROM THE CHILD, after the task was
+    // admitted from a single unambiguous order. Seeding two orders up front no
+    // longer reaches the completion gate at all - the admission gate refuses
+    // before any child exists (asserted directly in the case below). The
+    // completion-time verdict this control is about is unchanged, and posting the
+    // duplicate mid-attempt is the only remaining way to reach it.
+    setComments([mergeTask()]);
 
-    const res = await runWorker("report", goodChild());
+    const res = await runWorker("report", goodChild({
+      JARVIS_FAKE_CLAUDE_FORGE_ORDER: JSON.stringify({
+        ARCHITECT_MERGE_APPROVED: "true",
+        MERGE_AUTHORIZED: "true",
+        PR_NUMBER: String(PR),
+        EXPECTED_BASE_SHA: prevMain,
+        EXPECTED_HEAD_SHA: prHead
+      })
+    }));
 
     expect(res.code).toBe(3);
+    expect(ordersFor(MERGE_TASK)).toHaveLength(2);
     const rec = task(MERGE_TASK);
     expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE);
     expect(rec.completion_gate.merge_authorization_reason).toBe(MERGE_TRANSITION.AMBIGUOUS_AUTHORITY);
     expect(rec.completion_gate.merge_authority_candidate_count).toBe(2);
+    // The binding is NOT what refused: it is intact and names the real original.
+    expect(rec.architect_order.comment_id).toBe(String(ORDER_ID));
+  }, 300_000);
+
+  it("D-150: the same two orders present up front are refused BEFORE any child", async () => {
+    // Strictly stronger, and the reason the control above had to move. Nothing is
+    // dispatched, so there is no completion gate to reach and no binding to make.
+    setComments([mergeTask(), mergeTask({}, { id: ORDER_ID + 1 })]);
+    const before = dispatched().length;
+
+    const res = await runWorker("report", goodChild());
+
+    expect(res.code).toBe(3);
+    expect(dispatched()).toHaveLength(before);
+    expect(existsSync(wt(MERGE_TASK))).toBe(false);
+    const rec = task(MERGE_TASK);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.completion_gate ?? null).toBeNull();
+    expect(rec.architect_order ?? null).toBeNull();
+    expect(rec.order_authority_failure.distinct_order_count).toBe(2);
   }, 300_000);
 });

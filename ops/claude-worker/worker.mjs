@@ -105,6 +105,7 @@ import {
   digestLabel,
   orderBindingEvidence
 } from "./lib/order-binding.mjs";
+import { ORDER_AUTHORITY, selectAdmissibleOrder, describeOrderAuthority } from "./lib/order-authority.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import {
   verifyAuth,
@@ -826,7 +827,7 @@ async function runOwned(cfg, token) {
   }
 
   log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, `
-    + `posted ${candidate.comment.created_at}, ${candidate.updates.length} scope update(s), `
+    + `posted ${candidate.comment.created_at}, ${candidate.distinctOrderCount} distinct order(s) for this id, `
     + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
@@ -1203,7 +1204,111 @@ function recoverAbandonedTasks(cfg, state, token, control) {
 async function runTask(cfg, state, token, candidate, control) {
   const taskId = candidate.taskId;
   const prior = getTask(state, taskId);
-  const { comments } = controlView(control);
+  const { comments, complete: commentsComplete } = controlView(control);
+
+  // --- D-150: ADMISSION PREREQUISITES, BEFORE THE BINDING ITSELF -------------
+  //
+  // Two questions that D-149 asked at COMPLETION time and not at ADMISSION time,
+  // which is the wrong way round: admission is where the child gets its
+  // instructions, and no later refusal can un-tell it what it was told.
+  //
+  //   WAS THE READ COMPLETE? A run that could not prove it read the whole issue
+  //   cannot prove an order is unique - the second, contradicting same-id order
+  //   would be on exactly the page that went missing. Held, and held RETRYABLY:
+  //   the fault is in this read, nothing about the order is known to be wrong,
+  //   and letting one dropped page permanently kill a task would hand a denial
+  //   of service to the network.
+  //
+  //   IS THE AUTHORITY UNIQUE? Exactly one distinct, unedited, deterministically
+  //   identified trusted ARCHITECT_TASK for this id. `collectTrustedTasks` used
+  //   to answer this by ARRAY POSITION - first same-id comment wins, the rest
+  //   become "scope updates" - so a forged duplicate was refused at completion
+  //   (D-148) and silently accepted at dispatch. Held, and held TERMINALLY: a
+  //   retry asks the identical question, and the recovery is a FRESH TASK_ID.
+  //
+  // Both run before the binding, before the quarantine, before the dirty guard,
+  // before a worktree exists, before any scratch or repository mutation, and
+  // before any child. A refusal here dispatches nothing at all.
+  const authority = selectAdmissibleOrder({
+    comments,
+    commentsOk: control?.ok !== false,
+    commentsComplete,
+    trustedAuthor: cfg.trustedAuthor,
+    taskId
+  });
+  if (!authority.ok) {
+    for (const line of describeOrderAuthority(authority, { taskId })) log(cfg, `  ${line}`);
+    log(cfg, `${authority.retryable ? "HOLDING" : "BLOCKED"}: no admissible ARCHITECT_TASK authority for ${taskId} `
+      + `(${authority.reason}): ${authority.detail ?? "no detail"}. NOT dispatching.`);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason: "architect_order_authority_inadmissible",
+      authority_reason: authority.reason,
+      distinct_order_count: authority.distinctCount,
+      retryable: authority.retryable
+    });
+    // A RETRYABLE hold writes NOTHING to worker state. D-133 requires a task
+    // refused before its worktree exists to be left "not recorded as attempted,
+    // fully eligible for a later run", and that is exactly this case: the next
+    // run with a complete read admits it normally.
+    if (!authority.retryable) {
+      upsertTask(state, taskId, {
+        status: TASK_STATUS.BLOCKED,
+        blocked_at: new Date().toISOString(),
+        successful: false,
+        last_failure_reason: `architect_order_authority_inadmissible (${authority.reason})`,
+        order_authority_failure: {
+          reason: authority.reason,
+          detail: authority.detail ?? null,
+          distinct_order_count: authority.distinctCount,
+          candidate_comment_ids: authority.candidateIds,
+          at: new Date().toISOString()
+        },
+        child_identity: null
+      });
+      state.last_run_at = new Date().toISOString();
+      persistState(cfg, state, token);
+    }
+    reportStatus(cfg, {
+      taskId,
+      phase: "admission",
+      reason: `architect_order_authority_${authority.reason}`,
+      detail: [
+        "This task was NOT dispatched: it has no single, immutable, completely-read original order.",
+        "",
+        `AUTHORITY FINDING: ${authority.reason}`,
+        authority.detail ? `DETAIL: ${authority.detail}` : "",
+        `DISTINCT TRUSTED ORDERS SEEN FOR THIS TASK_ID: ${authority.distinctCount}`
+          + (authority.candidateIds?.length
+            ? ` (comment ids ${authority.candidateIds.map((i) => String(i)).join(", ")})`
+            : ""),
+        `CONTROL COMMENT READ: ok=${control?.ok !== false}, complete=${commentsComplete}`,
+        "",
+        authority.retryable
+          ? "The fault is in THIS READ, not in the order. The task is left untouched and fully eligible: "
+            + "the next run with a complete control-issue read admits it normally. Nothing was recorded as "
+            + "an attempt and no attempt budget was spent."
+          : "A task id has exactly ONE order, and a same-id TASK_UPDATE is a SECOND order rather than an "
+            + "amendment. The worker will not choose between them, because any rule that chooses hands the "
+            + "choice to whoever can post one.",
+        "",
+        "NOTHING was dispatched, fetched, pushed, reset or deleted for this task, and no child process "
+        + "was created."
+      ].filter((l) => l !== "").join("\n"),
+      nextAction: authority.retryable
+        ? "No action required unless it persists; confirm GitHub is reachable and that `gh api --paginate` "
+          + "returns the control issue in full. The next scheduled run dispatches this same task automatically."
+        : "Reconcile the control issue by hand, then reissue the CONSOLIDATED scope under a FRESH TASK_ID "
+          + "carrying an explicit SUPERSEDES=<old id>. The worker will not replay a blocked task on its own."
+    });
+    return EXIT.BLOCKED;
+  }
+
+  // From here on, THE ORDER is `authority.comment` and never `candidate.comment`.
+  // They are the same object whenever admission passed - the gate proved the set
+  // has exactly one member - but naming the proven one is what stops a future
+  // edit from quietly reintroducing an array-position choice.
+  const order = authority.comment;
 
   // --- D-149: BIND THE ORDER BEFORE ANYTHING ELSE HAPPENS -------------------
   //
@@ -1228,7 +1333,7 @@ async function runTask(cfg, state, token, candidate, control) {
   // order and binds identically - or refuses, if the order has changed.
   const admission = bindOrderOnce({
     existing: prior?.architect_order ?? null,
-    comment: candidate.comment,
+    comment: order,
     taskId,
     // The record's own attempt count is what distinguishes "never admitted" from
     // "admitted by a build that recorded no binding". A task that has run before
@@ -1267,7 +1372,7 @@ async function runTask(cfg, state, token, candidate, control) {
       order_binding_failure: {
         reason: admission.reason,
         detail: admission.detail ?? null,
-        observed_comment_id: candidate.comment?.id ?? null,
+        observed_comment_id: order?.id ?? null,
         at: new Date().toISOString()
       },
       child_identity: null
@@ -1283,8 +1388,8 @@ async function runTask(cfg, state, token, candidate, control) {
         "",
         `BINDING FINDING: ${admission.reason}`,
         admission.detail ? `DETAIL: ${admission.detail}` : "",
-        `ORDER OFFERED NOW: control-issue comment ${candidate.comment?.id ?? "unknown"} `
-          + `(created ${candidate.comment?.created_at ?? "unknown"})`,
+        `ORDER OFFERED NOW: control-issue comment ${order?.id ?? "unknown"} `
+          + `(created ${order?.created_at ?? "unknown"})`,
         admission.binding
           ? `ORDER THIS TASK WAS ADMITTED UNDER: comment ${admission.binding.comment_id} `
             + `(created ${admission.binding.created_at ?? "unknown"}, body `
@@ -1487,7 +1592,7 @@ async function runTask(cfg, state, token, candidate, control) {
   const workspace = establishTaskWorktree({
     cfg,
     taskId,
-    comment: candidate.comment,
+    comment: order,
     worktreeRoot: cfg.worktreeRoot,
     baselineSha: facts.head,
     baselineBranch: facts.branch,
@@ -1568,7 +1673,7 @@ async function runTask(cfg, state, token, candidate, control) {
     // binding established at admission; re-writing the value `bindOrderOnce`
     // returned is a no-op for an existing binding by construction, because that
     // function returns the STORED document rather than a fresh one.
-    comment_id: candidate.comment.id,
+    comment_id: order.id,
     architect_order: orderBinding,
     // D-133: `branch_before` / `head_before` describe the TASK'S OWN context,
     // not the user's checkout. Recording the primary checkout's head here would
@@ -1591,7 +1696,16 @@ async function runTask(cfg, state, token, candidate, control) {
 
   let beatCount = 0;
   const result = await runClaude(cfg, {
-    ...candidate,
+    // D-150: the dispatch is constructed EXPLICITLY rather than spread from the
+    // queue entry. Spreading carried `duplicates` and any future field into the
+    // prompt builder by default; naming the three things a dispatch may contain
+    // means a new queue field cannot become executable authority by accident.
+    taskId,
+    comment: order,
+    // The binding is what makes the bytes below provable. `runClaude` refuses,
+    // before it creates any process, unless `comment.body` digests to exactly
+    // what this binding recorded at admission.
+    orderBinding,
     resume,
     scratchDir,
     workspace: {
@@ -1678,16 +1792,23 @@ async function runTask(cfg, state, token, candidate, control) {
   // explicitly: nothing was spawned, so there is no child to abort and no
   // outcome to assess, and the run must park truthfully instead of falling
   // through into a completion check for a task that was never delegated.
-  if (result.outcome === OUTCOME.UNSUPPORTED_PROMPT_DELIVERY) {
+  // D-150: the same shape for the second pre-spawn rejection - the ORDER BYTES
+  // could not be shown to be the bound ones. Reaching it means the admission gate
+  // and the dispatch gate disagreed, which is a programming error rather than an
+  // operator mistake; it is still handled explicitly, and still fails closed.
+  if (result.outcome === OUTCOME.UNSUPPORTED_PROMPT_DELIVERY
+      || result.outcome === OUTCOME.UNBOUND_EXECUTABLE_ORDER) {
+    const unbound = result.outcome === OUTCOME.UNBOUND_EXECUTABLE_ORDER;
+    const reason = unbound ? "unbound_executable_order" : "unsupported_prompt_delivery";
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
-      task_id: taskId, reason: "unsupported_prompt_delivery", child_pid: null
+      task_id: taskId, reason, child_pid: null, order_reason: result.orderReason ?? null
     });
     log(cfg, `BLOCKED for TASK_ID=${taskId}: ${result.error} No child process was created.`);
     upsertTask(state, taskId, {
       status: TASK_STATUS.BLOCKED,
       last_outcome: result.outcome,
       last_dispatch_finished_at: new Date().toISOString(),
-      last_failure_reason: `unsupported_prompt_delivery (${result.error})`,
+      last_failure_reason: `${reason} (${result.error})`,
       blocked_at: new Date().toISOString(),
       child_identity: null,
       last_child_pid: null
@@ -1697,8 +1818,13 @@ async function runTask(cfg, state, token, candidate, control) {
     reportStatus(cfg, {
       taskId,
       phase: "dispatch",
-      reason: "unsupported_prompt_delivery",
-      detail: [result.error, "Nothing was spawned and the task was not delivered to any process."]
+      reason,
+      detail: [result.error, "Nothing was spawned and the task was not delivered to any process."].join("\n"),
+      nextAction: unbound
+        ? "Reconcile the control issue by hand and reissue the work under a FRESH TASK_ID. The prompt may carry "
+          + "only the exact order bytes bound at admission, and this dispatch could not prove that."
+        : "Set promptDelivery to \"stdin\" in config.json. The worker will not deliver a task over a channel "
+          + "without a pre-execution handshake."
     });
     return EXIT.BLOCKED;
   }
@@ -2301,6 +2427,29 @@ function cmdDryRun(cfg) {
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
     next_candidate: selection.candidate?.taskId ?? null,
     next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
+    // D-150: would the candidate's authority actually be ADMISSIBLE? A preview
+    // that showed a dispatchable candidate while the real run would refuse it at
+    // admission would be worse than no preview - so the exact same gate is asked
+    // here, against this preview's own read.
+    next_candidate_order_authority: selection.candidate
+      ? (() => {
+        const a = selectAdmissibleOrder({
+          comments,
+          commentsOk: dryControl.ok,
+          commentsComplete: dryControl.complete === true,
+          trustedAuthor: cfg.trustedAuthor,
+          taskId: selection.candidate.taskId
+        });
+        return {
+          admissible: a.ok,
+          reason: a.reason,
+          retryable: a.ok ? false : a.retryable,
+          distinct_order_count: a.distinctCount,
+          candidate_comment_ids: a.candidateIds,
+          would_dispatch: a.reason === ORDER_AUTHORITY.ADMISSIBLE
+        };
+      })()
+      : null,
     observed_head: selection.observedHead,
     next_candidate_expected_head: selection.candidateExpectedHead,
     next_candidate_head_tier:

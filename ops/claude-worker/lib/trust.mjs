@@ -11,6 +11,8 @@
  * arguments, no paths, host/worker binding, short expiry and replay rejection.
  */
 
+import { collapseIdenticalOrderRepeats, orderByIssueSequence } from "./order-binding.mjs";
+
 export function firstNonEmptyLine(body) {
   const line = String(body ?? "").split(/\r?\n/).find((l) => l.trim().length > 0);
   return (line ?? "").trim();
@@ -33,25 +35,56 @@ export function validateTrustedTask(comment, { trustedAuthor }) {
 }
 
 /**
- * Find every trusted task, oldest first, and fold same-TASK_ID updates together.
- * A TASK_UPDATE=true comment carrying an existing TASK_ID is an additive scope
- * update to that task - never a second, parallel task.
+ * Find every trusted task, oldest first.
+ *
+ * D-150: SAME-ID TASK_UPDATE SEMANTICS ARE GONE. A second comment carrying an
+ * existing TASK_ID used to be folded in as an "additive scope update" and its
+ * body was written straight into the dispatched prompt - executable authority
+ * that the durable admission binding did not cover and that no review had to have
+ * seen. One task id has exactly ONE order. Extra same-id comments are therefore
+ * collected as `duplicates`, which are EVIDENCE FOR A REFUSAL and never an input
+ * to anything executable: not the prompt, not the declared head, not a
+ * supersession. Changed or consolidated scope is issued as a FRESH TASK_ID with
+ * an explicit `SUPERSEDES=<old id>`.
+ *
+ * Each entry carries:
+ *
+ *   comment            the deterministic representative (oldest by created_at,
+ *                      then GitHub id) - a stable ORDERING KEY and the thing a
+ *                      refusal is reported against, never an authority by itself.
+ *   duplicates         every other same-id comment, in issue sequence.
+ *   distinctOrderCount how many DISTINCT orders exist for this id, after
+ *                      provably-identical `--paginate` repeats are collapsed.
+ *   uniqueAuthority    `distinctOrderCount === 1`. Consulted by everything that
+ *                      would otherwise read a body: a non-unique entry declares
+ *                      nothing and executes nothing.
+ *
+ * The final authority decision is `selectAdmissibleOrder` in `order-authority.mjs`
+ * and is made at admission; this function only has to make sure nothing here
+ * quietly picks a winner by array position first.
  */
 export function collectTrustedTasks(comments, { trustedAuthor }) {
   const byId = new Map();
   for (const c of comments) {
     const v = validateTrustedTask(c, { trustedAuthor });
     if (!v.ok) continue;
-    const existing = byId.get(v.taskId);
-    if (!existing) {
-      byId.set(v.taskId, { taskId: v.taskId, comment: c, updates: [] });
-    } else {
-      existing.updates.push(c);
-    }
+    if (!byId.has(v.taskId)) byId.set(v.taskId, []);
+    byId.get(v.taskId).push(c);
   }
-  return Array.from(byId.values()).sort(
-    (a, b) => new Date(a.comment.created_at) - new Date(b.comment.created_at)
-  );
+
+  const entries = [];
+  for (const [taskId, all] of byId) {
+    const ordered = [...all].sort(orderByIssueSequence);
+    const distinctOrderCount = collapseIdenticalOrderRepeats(ordered).length;
+    entries.push({
+      taskId,
+      comment: ordered[0],
+      duplicates: ordered.slice(1),
+      distinctOrderCount,
+      uniqueAuthority: distinctOrderCount === 1
+    });
+  }
+  return entries.sort((a, b) => orderByIssueSequence(a.comment, b.comment));
 }
 
 /** ---------------- ARCHITECT_CONTROL (supervisor) ---------------- */

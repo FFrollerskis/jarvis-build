@@ -34,7 +34,7 @@ function task(taskId, { createdAt, commentId, head = null, attempts = 0, extraBo
     extraBody
   ].filter(Boolean).join("\n");
   return {
-    entry: { taskId, comment: { id: commentId, created_at: createdAt, body }, updates: [] },
+    entry: { taskId, comment: { id: commentId, created_at: createdAt, body }, uniqueAuthority: true },
     record: attempts > 0 ? { attempts, status: TASK_STATUS.FAILED_RETRYABLE, next_eligible_at: "1970-01-01T00:00:00.000Z" } : null
   };
 }
@@ -63,9 +63,21 @@ describe("declaredExpectedHead leser KUN den betrodde task-kommentaren", () => {
     expect(declaredExpectedHead(t.entry)).toBe(null);
   });
 
-  it("en SENERE betrodd scope-update flytter ordren til den nye head-en", () => {
+  it("D-150: en same-id 'scope-update' flytter INGENTING - den er en andre ordre", () => {
+    // Fram til D-150 ble `entry.updates` foldet inn med SIST-VINNER, slik at en
+    // forfalsket duplikat kunne re-peke EXPECTED_HEAD_SHA og flytte tasken
+    // mellom head-tiere. Same-id-oppdateringer er fjernet som eksekverbar
+    // semantikk; en ikke-unik autoritet deklarerer ingenting i det hele tatt.
     const t = task("A-20260101-A", { createdAt: "2026-01-01T00:00:00Z", commentId: 1, head: HEAD_STALE });
-    t.entry.updates = [{ body: `${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}` }];
+    t.entry.duplicates = [{ id: 2, body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}` }];
+    t.entry.uniqueAuthority = false;
+    expect(declaredExpectedHead(t.entry)).toBe(null);
+  });
+
+  it("D-150: en unik ordre som nevner feltet to ganger bruker den siste linjen", () => {
+    // Innenfor ÉN ordre er to linjer arkitektens egen tekst, ikke to autoriteter.
+    const t = task("A-20260101-A", { createdAt: "2026-01-01T00:00:00Z", commentId: 1, head: HEAD_STALE });
+    t.entry.comment.body += `\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}`;
     expect(declaredExpectedHead(t.entry)).toBe(HEAD_CURRENT);
   });
 

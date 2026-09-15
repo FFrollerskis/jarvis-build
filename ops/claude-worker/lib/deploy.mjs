@@ -99,6 +99,11 @@ export const PAYLOAD = Object.freeze([
   // would fail to LOAD ITS OWN STATE, not merely fail a merge gate. The ESM
   // closure test below caught the omission before this line existed.
   "lib/order-binding.mjs",
+  // D-150. `trust.mjs` and `worker.mjs` both import it, and it is the ADMISSION
+  // gate: a deployed worker missing this file would not fail to merge, it would
+  // fail to start a task at all. Listed the moment it was written, because the
+  // closure test below is what turns a forgotten line into a caught one.
+  "lib/order-authority.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",

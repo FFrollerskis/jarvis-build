@@ -180,6 +180,70 @@ export function normalizeCommentId(id) {
   return null;
 }
 
+/**
+ * D-150: a comment's own identity, or `null` when it carries none we can compare.
+ *
+ * The `n:` / `s:` prefix keeps a numeric id and a string id distinguishable as
+ * ORIGINS. This value is an internal dedupe key only - never what a record
+ * carries, and never what a human is asked to go and look at.
+ *
+ * It lives HERE, in the leaf module, rather than next to the rules that use it,
+ * so that `trust.mjs`, `order-authority.mjs` and `merge-transition.mjs` can all
+ * count identical comments the same way without importing each other.
+ */
+export function commentIdentity(comment) {
+  const id = comment?.id;
+  if (typeof id === "number" && Number.isFinite(id)) return `n:${id}`;
+  if (typeof id === "string" && id.trim() !== "") return `s:${id.trim()}`;
+  return null;
+}
+
+/**
+ * D-150: collapse provably-identical repeats of ONE comment, and nothing else.
+ *
+ * Overlapping `--paginate` pages return the same comment twice - identical id,
+ * identical body, identical `created_at` - and calling that a duplicate authority
+ * would be a false refusal that a page boundary alone could trigger.
+ *
+ * A shared id with ANY differing content is NOT collapsed. Two orders wearing one
+ * id is strictly more suspicious than two orders with two ids, not less.
+ *
+ * Order-insensitive: the result's SIZE is identical however the input was
+ * enumerated, which is the property every decision built on this depends on.
+ */
+export function collapseIdenticalOrderRepeats(comments) {
+  const distinct = [];
+  for (const comment of Array.isArray(comments) ? comments : []) {
+    const id = commentIdentity(comment);
+    const same = id === null
+      ? undefined
+      : distinct.find((d) => commentIdentity(d) === id
+        && String(d.body ?? "") === String(comment.body ?? "")
+        && String(d.created_at ?? "") === String(comment.created_at ?? ""));
+    if (!same) distinct.push(comment);
+  }
+  return distinct;
+}
+
+/**
+ * D-150: a total, deterministic order over comments - creation time, then id.
+ *
+ * Used ONLY to pick a stable REPRESENTATIVE for queue ordering and for refusal
+ * messages. It never picks an AUTHORITY: when more than one distinct order
+ * exists the admission gate refuses, and the representative is nothing more than
+ * the thing that refusal is reported against.
+ */
+export function orderByIssueSequence(a, b) {
+  const ta = Date.parse(a?.created_at ?? "");
+  const tb = Date.parse(b?.created_at ?? "");
+  const va = Number.isFinite(ta) ? ta : 0;
+  const vb = Number.isFinite(tb) ? tb : 0;
+  if (va !== vb) return va - vb;
+  const ia = String(normalizeCommentId(a?.id) ?? "");
+  const ib = String(normalizeCommentId(b?.id) ?? "");
+  return ia < ib ? -1 : (ia > ib ? 1 : 0);
+}
+
 /** An ISO timestamp we can actually compare, or `null`. Never a guess. */
 export function normalizeCreatedAt(value) {
   const text = typeof value === "string" ? value.trim() : "";

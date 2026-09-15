@@ -708,9 +708,45 @@ describe("D-148 POSITIVE CONTROLS", () => {
     expect(rec.completion_gate.transition_excused_commits).toEqual([merge]);
   }, 300_000);
 
-  it("(c) and a DUPLICATE authority removes even that exception", async () => {
+  it("(c) and a DUPLICATE authority removes even that exception - AFTER admission", async () => {
     // The narrow excuse is reached through the authorization, so an undecidable
     // authority must take it away rather than leave a second route in.
+    //
+    // D-150 note: the duplicate is now posted BY THE CHILD, after the task was
+    // admitted from a single unambiguous order. Seeding it beforehand no longer
+    // exercises this gate at all - the admission gate refuses the task before any
+    // child exists (see the case below, and
+    // `worker-admission-authority.test.mjs`). The completion-time rule this test
+    // is about is unchanged, and this is the only window left in which it can
+    // still be reached.
+    setComments([mergeTask()]);
+
+    const res = await runWorker("report", {
+      JARVIS_FAKE_CLAUDE_SYNC_TO: merge,
+      JARVIS_FAKE_CLAUDE_PR: String(PR),
+      JARVIS_FAKE_CLAUDE_REPORT_FIELDS: JSON.stringify(closeoutFields()),
+      JARVIS_FAKE_CLAUDE_FORGE_ORDER: JSON.stringify({
+        ARCHITECT_MERGE_APPROVED: "true",
+        MERGE_AUTHORIZED: "true",
+        PR_NUMBER: String(PR),
+        EXPECTED_BASE_SHA: prevMain,
+        EXPECTED_HEAD_SHA: prHead
+      })
+    });
+
+    expect(res.code).toBe(3);
+    expect(forgedOrders(MERGE_TASK)).toHaveLength(2);
+    const rec = expectHeldAndPreserved(MERGE_TASK, COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE);
+    expect(rec.completion_gate.provenance_verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    // The excuse is GONE, not merely unused: nothing was excused.
+    expect(rec.completion_gate.transition_excused_commits ?? []).toEqual([]);
+  }, 300_000);
+
+  it("(c) and a duplicate present BEFORE admission never gets that far (D-150)", async () => {
+    // Strictly stronger than the case above, and the reason that one had to move:
+    // with two orders on the issue from the start the task is refused at
+    // ADMISSION, so there is no child, no prompt, no worktree and no completion
+    // gate to reach. The narrow excuse cannot be applied to a task that never ran.
     setComments([mergeTask(), mergeTask({}, { id: 5674178694 })]);
 
     const res = await runWorker("report", {
@@ -720,8 +756,15 @@ describe("D-148 POSITIVE CONTROLS", () => {
     });
 
     expect(res.code).toBe(3);
-    const rec = expectHeldAndPreserved(MERGE_TASK, COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE);
-    expect(rec.completion_gate.provenance_verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(dispatched()).toEqual([]);
+    expect(existsSync(wt(MERGE_TASK))).toBe(false);
+    const rec = task(MERGE_TASK);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.successful).toBe(false);
+    expect(rec.completion_gate ?? null).toBeNull();
+    expect(rec.architect_order ?? null).toBeNull();
+    expect(rec.order_authority_failure.distinct_order_count).toBe(2);
+    expect(healthEvents().filter((e) => e.event === "completion_confirmed" && e.task_id === MERGE_TASK)).toEqual([]);
   }, 300_000);
 
   it("an overlapping pagination page does NOT look like a duplicate", async () => {

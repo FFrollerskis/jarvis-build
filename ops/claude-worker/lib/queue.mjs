@@ -107,21 +107,28 @@ const EXPECTED_HEAD_LINE = new RegExp("^" + EXPECTED_HEAD_FIELD + "=([0-9a-fA-F]
 /**
  * The exact head this trusted task was written against, or `null`.
  *
- * Read only from the trusted ARCHITECT_TASK comment and its trusted scope
- * updates - the same source `declaredSupersedes` uses. A PR body, a CI log or
- * an untrusted comment can never move a task between head tiers.
+ * D-150: read from the task's ONE order and from nothing else.
+ *
+ * This used to fold same-id "scope update" bodies in with LAST-WINS semantics,
+ * which meant a second same-id comment could re-point `EXPECTED_HEAD_SHA` at a
+ * different commit and move the task between head tiers. That was the residual
+ * finding D-149 reported and did not close. It is closed by removing same-id
+ * update semantics entirely rather than by ranking the updates more carefully:
+ * any rule that CHOOSES between same-id bodies hands the choice to whoever can
+ * post one.
+ *
+ * A non-unique entry declares NOTHING. That is the fail-safe direction here - an
+ * undeclared head is `UNDECLARED`, which merely stops the order preempting a
+ * current one; it never promotes anything.
  */
 export function declaredExpectedHead(entry) {
-  const bodies = [entry?.comment?.body, ...(entry?.updates ?? []).map((u) => u?.body)];
+  if (entry?.uniqueAuthority !== true) return null;
   let found = null;
-  for (const body of bodies) {
-    for (const line of String(body ?? "").split(/\r?\n/)) {
-      const m = line.match(EXPECTED_HEAD_LINE);
-      // The LAST declaration wins: a trusted scope update that re-points the
-      // order at a new head is the architect correcting themselves, not a
-      // second, competing order.
-      if (m) found = String(m[1]).toLowerCase();
-    }
+  for (const line of String(entry?.comment?.body ?? "").split(/\r?\n/)) {
+    const m = line.match(EXPECTED_HEAD_LINE);
+    // The LAST declaration within the ONE order wins - a body that states the
+    // field twice is the architect's own text, not a second authority.
+    if (m) found = String(m[1]).toLowerCase();
   }
   return found;
 }
@@ -222,25 +229,30 @@ function commentId(entry) {
 /**
  * Every TASK_ID this trusted task explicitly declares it supersedes.
  *
- * Read from the ARCHITECT_TASK comment and from its additive scope updates -
- * both of which `collectTrustedTasks` has already validated as authored by the
- * trusted login on the control issue. Nothing else is consulted: a PR body, a CI
- * log or an untrusted comment can never declare a supersession.
+ * Read from the task's ONE trusted ARCHITECT_TASK comment, which
+ * `collectTrustedTasks` has already validated as authored by the trusted login on
+ * the control issue. Nothing else is consulted: a PR body, a CI log, an untrusted
+ * comment - and, since D-150, a second same-id comment - can never declare a
+ * supersession.
+ *
+ * Supersession RETIRES a task permanently. Letting a same-id duplicate contribute
+ * to it meant a forged comment could retire a different, unrelated order outright;
+ * a non-unique entry therefore declares NOTHING. Both directions of that are
+ * fail-safe: a forgery cannot manufacture a retirement, and a forgery that
+ * suppresses a genuine declaration only leaves the older task visible.
  *
  * Every declared id must itself be a syntactically valid TASK_ID, so a malformed
  * or path-shaped value is dropped rather than matched loosely.
  */
 export function declaredSupersedes(entry) {
-  const bodies = [entry?.comment?.body, ...(entry?.updates ?? []).map((u) => u?.body)];
+  if (entry?.uniqueAuthority !== true) return [];
   const ids = [];
-  for (const body of bodies) {
-    for (const line of String(body ?? "").split(/\r?\n/)) {
-      const m = line.match(new RegExp(`^${SUPERSEDES_FIELD}=(.*)$`));
-      if (!m) continue;
-      for (const raw of m[1].split(/[,\s]+/)) {
-        const id = raw.trim();
-        if (id && isValidTaskId(id) && !ids.includes(id)) ids.push(id);
-      }
+  for (const line of String(entry?.comment?.body ?? "").split(/\r?\n/)) {
+    const m = line.match(new RegExp(`^${SUPERSEDES_FIELD}=(.*)$`));
+    if (!m) continue;
+    for (const raw of m[1].split(/[,\s]+/)) {
+      const id = raw.trim();
+      if (id && isValidTaskId(id) && !ids.includes(id)) ids.push(id);
     }
   }
   return ids;
