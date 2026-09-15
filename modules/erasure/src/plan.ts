@@ -380,6 +380,15 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // Ingen FK mellom de to helse-tabellene.
   add(result, "health_metric_observations", await run(client, mode, "health_metric_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "health_retention_policies", await run(client, mode, "health_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-10 (056_situations.sql): Proactive Situation Engine. Samme tenant+
+  // space-scoped registrering som `business_open_loops` (dens egen
+  // nærmeste presedens - se der). `situation_notification_policies`
+  // BEVISST utelatt (tenant/space-nivå eier-konfigurert varslingspolicy,
+  // IKKE hendelses-/personeid data - samme "ingen dinglende
+  // konfigurasjonsrad, men ALDRI heller feilaktig fjernet policy for
+  // gjenværende data"-prinsipp som `location_retention_policies`/
+  // `health_retention_policies` over).
+  add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

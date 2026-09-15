@@ -3912,6 +3912,65 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+## UA-10 – Proactive Situation Engine (P0, masterplan v4.0)
+
+**Manuell, parallell masterplan-slice** - neste UA etter UA-9 (Vision & Physical World, egen draft-PR,
+ikke rørt videre av denne sliceen). Full begrunnelse, D-64-gate og sikkerhetsgrense-diskusjon:
+`docs/UA10_SITUATION_ENGINE_DESIGN.md`.
+
+**Mål (masterplanens egen tekst):** "Gjør Jarvis proaktiv and action-oriented across events."
+
+**Bygget (denne sliceen, P0):**
+- Ny pakke `@jarvis/situations` (JARVIS_CANONICAL, multi-space - samme mønster som
+  `business_open_loops`): `SituationEngine` - `evaluateCandidate()` (idempotent deteksjon,
+  deterministisk stadie-klassifisering, quiet-hours/re-suppress-suppression), `getQueue()`,
+  `resolve()`, `actOn()` (komponerer `ToolGateway.execute()`).
+- `056_situations.sql`: `situations` + `situation_notification_policies` (eier-konfigurert stille
+  timer/re-suppress-vindu).
+- Tilstandsmaskinen, ordrett fra masterplanen: `ignore -> remember -> inform -> suggest -> act ->
+  act_notify -> escalate`. `evaluateCandidate()` tildeler KUN de tre første (deterministiske regler,
+  INGEN modell-assistert klassifisering i P0); `act`/`act_notify`/`escalate` nås UTELUKKENDE via
+  `actOn()`.
+- `DomainPauseRegistry` (`modules/situations/src/domain-pause.ts`) - ny, smal, in-memory
+  domene-scoped pause (samme "instantly"-disiplin som `KillSwitch`), sjekket av `actOn()` FØR
+  `ToolGateway.execute()` i det hele tatt kalles.
+- Q-20-erasure utvidet (`modules/erasure/src/plan.ts`, `planMemorySpace()`) - `situations` registrert,
+  `situation_notification_policies` bevisst utelatt (tenant/space-nivå policy, ikke hendelsesdata).
+
+**Akseptansekriterier lukket (masterplanens egne fire):**
+1. "No duplicate spam for same event" - `detection_key`-dedupe (strukturell UNIQUE) + `resuppress_hours`
+   + quiet-hours, alle ekte testet.
+2. "ACT uses valid owner/delegated authority and logs reason/evidence" - `actOn()` komponerer den
+   allerede reviewte `ToolGateway.execute()`/`PolicyGateway.authorize()`-pipelinen (Q-34/D-130),
+   ingen ny autoritetsmekanikk oppfunnet.
+3. "D-class actions create immediate post-action notification and recovery context" - `execute()` sin
+   egen evidence-/recovery-pipeline gjenbrukt uendret; `actOn()` kjeder ETT Telegram-varsel KUN ved
+   bekreftet suksess.
+4. "Owner can pause a domain or entire Situation Engine instantly" - `DomainPauseRegistry`, in-memory,
+   sjekket FØR enhver ACT-utførelse.
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §5/§8 for full begrunnelse per
+punkt):** nye anomali-detektorer for infra/home/health (ingen eksisterende signalkilde - spend/
+pipeline/deadlines dekkes allerede av `business_open_loops`/`OpenLoopService`); en live bro FRA
+`business_open_loops` TIL `situations` (ingen sweep kaller `evaluateCandidate()` automatisk ennå -
+kontrakten er stabil og klar for en fremtidig wiring-only slice); modell-assistert klassifisering
+(krever ModelGateway/AI Council); counterfactual/simulation/feedback-learning (ML-tungt, masterplanens
+egen "where useful"-kvalifikator); autonom/tidsstyrt auto-ACT (en sweep som kaller `actOn()` uten et
+eksplisitt kall - egen sikkerhetsgrense/blast-radius-vurdering); wiring inn i
+`apps/api/src/main.ts`/en offentlig API-/kommando-overflate (naturlig følger av broen/auto-ACT-
+beslutningen over, ingen mening i å koble en komposisjons-rot til FØR det finnes en reell kaller);
+person-scoped (`planPerson()`) Q-20-erasure for `owner_person_id` (delt, allerede akseptert
+begrensning med `business_open_loops` sin egen `owner_person_id` - IKKE en ny gap, se design-notatet).
+
+**Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
+embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
+deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`) +
+`modules/erasure/test/situations-erasure.test.ts` (ekte end-to-end `ErasureService`-bevis). Se
+`docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen mens PR #84/D-157 aktivt
+endrer den - se PR-en sin egen kommentar).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
