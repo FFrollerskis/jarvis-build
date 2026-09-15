@@ -40,14 +40,27 @@ export function homeAssistantTools(transport: ToolTransport = new UnconfiguredHt
       idempotent_external: true, rate_limit_per_minute: 30, output_trust: "internal"
     },
     {
+      // Q-34 (D-130-funn, lukket her): `read_state` for et ukjent entity er
+      // ALDRI en gyldig tilstand å låse/alarmere mot - `preflight_requires_target`
+      // gjør fail-closed på ukjent mål STRUKTURELT, ikke bare en tilfeldighet
+      // av at en streng HA-transport kaster (se gateway.ts).
+      // Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): en uleselig,
+      // manglende eller FEIL etter-tilstand (kommandoen ble sendt, men døren
+      // låste seg faktisk ikke) skal heller ikke rapporteres ok:true -
+      // `postcondition_predicate` krever at readback FAKTISK viser den
+      // tiltenkte `locked`-verdien.
       ...base, action: "lock_set", description: "Lås/lås opp dør (KRITISK)",
-      input_schema: record({ ...room, entity: z.string(), locked: z.boolean() }), capability_class: "D", preflight_action: "read_state",
+      input_schema: record({ ...room, entity: z.string(), locked: z.boolean() }), capability_class: "D",
+      preflight_action: "read_state", preflight_requires_target: true,
+      postcondition_predicate: (after, parameters) => (after as { locked?: boolean } | null)?.locked === parameters["locked"],
       scopes: ["lock:call"], reversible: true, rollback_procedure: "sett motsatt låstilstand + varsle",
       idempotent_external: true, rate_limit_per_minute: 10, output_trust: "internal"
     },
     {
       ...base, action: "alarm_set", description: "Alarm av/på (KRITISK)",
-      input_schema: record({ ...room, armed: z.boolean() }), capability_class: "D", preflight_action: "read_state",
+      input_schema: record({ ...room, armed: z.boolean() }), capability_class: "D",
+      preflight_action: "read_state", preflight_requires_target: true,
+      postcondition_predicate: (after, parameters) => (after as { armed?: boolean } | null)?.armed === parameters["armed"],
       scopes: ["alarm:call"], reversible: true, rollback_procedure: "sett forrige alarmtilstand + varsle",
       idempotent_external: true, rate_limit_per_minute: 10, output_trust: "internal"
     }

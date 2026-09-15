@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,7 +102,11 @@ class HaScenarioTransport implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
   private readonly locks: Map<string, boolean>;
   private readonly alarms: Map<string, boolean>;
-  private mutationHappened = false;
+  // Q-34 P2-oppfølging: PER SYKLUS (preflight -> mutasjon -> readback), ikke
+  // en engangs-flagg - ellers ville en transport GJENBRUKT på tvers av FLERE
+  // `gateway.execute()`-kall (nødvendig for å teste idempotens-replay, se
+  // beskrivelse G under) feilklassifisert en SENERE preflight som en readback.
+  private awaitingReadback = false;
 
   constructor(
     private readonly opts: {
@@ -111,6 +116,8 @@ class HaScenarioTransport implements ToolTransport {
       failPreflight?: boolean;
       failMutation?: boolean;
       failReadback?: boolean;
+      /** Q-34 P1-oppfølging: kommandoen returnerer suksess, men ENHETEN endret seg faktisk aldri - simulerer en reell "silent failure" på enhets-siden. */
+      mutationSilentlyIneffective?: boolean;
     } = {}
   ) {
     this.locks = new Map(Object.entries(opts.knownLocks ?? {}));
@@ -121,7 +128,8 @@ class HaScenarioTransport implements ToolTransport {
     this.calls.push({ action, parameters });
 
     if (action === "read_state") {
-      const isPreflight = !this.mutationHappened;
+      const isPreflight = !this.awaitingReadback;
+      if (!isPreflight) this.awaitingReadback = false; // konsumer syklusen uansett utfall under
       if (isPreflight && this.opts.failPreflight) {
         throw new Error("ha_device_offline");
       }
@@ -147,20 +155,22 @@ class HaScenarioTransport implements ToolTransport {
     }
 
     if (action === "lock_set") {
-      this.mutationHappened = true;
+      this.awaitingReadback = true;
       if (this.opts.failMutation) throw new Error("ha_lock_command_rejected");
       const entity = parameters["entity"] as string;
       const locked = parameters["locked"] as boolean;
-      this.locks.set(entity, locked);
+      // Q-34 P1-oppfølging: HA svarer 200/suksess, men enheten lot seg
+      // faktisk IKKE kommandere - den registrerte tilstanden endres ALDRI.
+      if (!this.opts.mutationSilentlyIneffective) this.locks.set(entity, locked);
       return { external_id: `ha-lock-${entity}` };
     }
 
     if (action === "alarm_set") {
-      this.mutationHappened = true;
+      this.awaitingReadback = true;
       if (this.opts.failMutation) throw new Error("ha_alarm_command_rejected");
       const roomKey = `${String(parameters["site_id"])}:${String(parameters["room_id"])}`;
       const armed = parameters["armed"] as boolean;
-      this.alarms.set(roomKey, armed);
+      if (!this.opts.mutationSilentlyIneffective) this.alarms.set(roomKey, armed);
       return { external_id: `ha-alarm-${roomKey}` };
     }
 
@@ -283,8 +293,8 @@ describe("C/E: mutasjonskallet feiler → ok:false umiddelbart + tool.failed-aud
   });
 });
 
-describe("D/E: handlingen LYKTES, men readback-lesingen etterpå feiler → ok:true, after_state mangler", () => {
-  it("lock_set: dør ble faktisk låst, men post-lesing feiler (HA blir utilgjengelig rett etter)", async () => {
+describe("D/E: Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82) - postcondition_predicate: uleselig/manglende/FEIL etter-tilstand rapporteres ALDRI ok:true", () => {
+  it("lock_set: mutasjonskallet lyktes, men post-lesing FEILER (HA blir utilgjengelig rett etter) → ok:false, before_state bevart for recovery, connector degradert", async () => {
     const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, failReadback: true });
     const gateway = makeGateway(transport);
     const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
@@ -293,19 +303,42 @@ describe("D/E: handlingen LYKTES, men readback-lesingen etterpå feiler → ok:t
       identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters
     });
 
-    // Handlingen SKJEDDE (mutasjonskallet gikk gjennom uten feil):
-    expect(result.ok).toBe(true);
+    // Mutasjonskallet gikk faktisk gjennom (kommandoen ER sendt) - men det
+    // KAN IKKE bekreftes at døren faktisk låste seg, og det skal ALDRI
+    // rapporteres som en bekreftet suksess:
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
     expect(transport.calls.map((c) => c.action)).toEqual(["read_state", "lock_set", "read_state"]);
+    expect(gateway.health.get("home-assistant")?.state).toBe("degraded");
 
-    const audit = await lastAudit("home-assistant", "lock_set", "tool.executed");
-    expect(audit).toBeDefined();
-    expect(audit!.payload["before_state"]).toEqual({ locked: true });
-    // readback-feilen skjuler ALDRI at handlingen skjedde - men den beviser
-    // heller ikke en ny tilstand den ikke fikk observert:
-    expect(audit!.payload["after_state"]).toBeNull();
+    // EGEN audit-type - ALDRI "tool.executed" for et uverifisert utfall:
+    const unverified = await lastAudit("home-assistant", "lock_set", "tool.postcondition_unverified");
+    expect(unverified).toBeDefined();
+    // before_state er BEVART UENDRET - recovery-tooling må fortsatt se den:
+    expect(unverified!.payload["before_state"]).toEqual({ locked: true });
+    expect(unverified!.payload["after_state"]).toBeNull();
   });
 
-  it("alarm_set: alarm ble faktisk endret, men post-lesing feiler", async () => {
+  it("lock_set: mutasjonskallet lyktes OG post-lesing lykkes, men viser en ANNEN verdi enn kommandert (silent device-side failure) → ok:false postcondition_mismatch", async () => {
+    const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, mutationSilentlyIneffective: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
+
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_mismatch");
+    const unverified = await lastAudit("home-assistant", "lock_set", "tool.postcondition_unverified");
+    expect(unverified).toBeDefined();
+    expect(unverified!.payload["before_state"]).toEqual({ locked: true });
+    // Etter-tilstanden ER lest (ingen feil) - den viser bare fortsatt den
+    // GAMLE, uendrede verdien, ikke den kommanderte:
+    expect(unverified!.payload["after_state"]).toEqual({ locked: true });
+  });
+
+  it("alarm_set: post-lesing feiler → samme lukking (ok:false, before_state bevart)", async () => {
     const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, failReadback: true });
     const gateway = makeGateway(transport);
     const parameters = { site_id: "site-hus", room_id: "rom-gang", armed: true };
@@ -314,15 +347,101 @@ describe("D/E: handlingen LYKTES, men readback-lesingen etterpå feiler → ok:t
       identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters
     });
 
-    expect(result.ok).toBe(true);
-    const audit = await lastAudit("home-assistant", "alarm_set", "tool.executed");
-    expect(audit).toBeDefined();
-    expect(audit!.payload["before_state"]).toEqual({ armed: false });
-    expect(audit!.payload["after_state"]).toBeNull();
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+    const unverified = await lastAudit("home-assistant", "alarm_set", "tool.postcondition_unverified");
+    expect(unverified).toBeDefined();
+    expect(unverified!.payload["before_state"]).toEqual({ armed: false });
+    expect(unverified!.payload["after_state"]).toBeNull();
+  });
+
+  it("alarm_set: mutasjonen lykkes, men enheten forblir uendret (silent failure) → ok:false postcondition_mismatch", async () => {
+    const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, mutationSilentlyIneffective: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", armed: true };
+
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_mismatch");
   });
 });
 
-describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens oppførsel, ikke en påstått kontroll", () => {
+describe("G: Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82, EXACT_HEAD_SHA 91b0168) - en retry med SAMME idempotency_key ETTER en uverifisert postcondition gir ALDRI en tilfeldig ok:true", () => {
+  it("lock_set: FØRSTE kall muterer, men readback feiler; ANDRE kall med SAMME idempotency_key kaller ALDRI lock_set på nytt, og gir det NØYAKTIG samme ok:false - aldri en tilfeldig dedupe-suksess", async () => {
+    const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, failReadback: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
+    const key = `q34-replay-lock-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
+
+    // ANDRE kall med SAMME nøkkel - før fiksen ville dette truffet den
+    // gamle dedupe-grenen (status var lagret som 'succeeded' uansett) og
+    // returnert et FALSKT ok:true UTEN å lese noe på nytt.
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(false);
+    expect((second as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+    // INGEN ny mutasjon ble utløst - fortsatt bare ÉN lock_set totalt:
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
+
+    const replay = await lastAudit("home-assistant", "lock_set", "tool.postcondition_unverified");
+    expect(replay).toBeDefined();
+    expect(replay!.payload["replayed"]).toBe(true);
+    expect(replay!.payload["reason"]).toBe("postcondition_unverified:readback_failed");
+  });
+
+  it("alarm_set: FØRSTE kall muterer men ENHETEN forblir uendret (mismatch); ANDRE kall med SAMME nøkkel gir det SAMME postcondition_mismatch, ALDRI en ny alarm_set", async () => {
+    const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, mutationSilentlyIneffective: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", armed: true };
+    const key = `q34-replay-alarm-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(transport.calls.filter((c) => c.action === "alarm_set")).toHaveLength(1);
+
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(false);
+    expect((second as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(transport.calls.filter((c) => c.action === "alarm_set")).toHaveLength(1);
+  });
+
+  it("lock_set: en VELLYKKET (verifisert) kall dedupliserer FORTSATT normalt ved retry - denne fiksen svekker IKKE den eksisterende idempotens-garantien for ekte suksess", async () => {
+    const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true } });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
+    const key = `q34-replay-success-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(true);
+    expect((second as { deduplicated: boolean }).deduplicated).toBe(true);
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
+  });
+});
+
+describe("F: mål-validering (entity/rom som ikke finnes) - Q-34 lukket: gatewayen har nå sin EGEN uavhengige mål-eksistenskontroll", () => {
   it("STRENG transport (som en ekte HA som feiler på ukjent entity ville gjort): preflight feiler → fail-closed, INGEN kommando sendt", async () => {
     const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, strictEntityCheck: true });
     const gateway = makeGateway(transport);
@@ -352,21 +471,20 @@ describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens
   });
 
   /**
-   * FUNN (rapporteres, ikke skjult): verken `home-assistant.ts` sitt
-   * input-skjema (kun `z.string()` for `entity`/`room_id` - typekontroll, ikke
-   * eksistenskontroll) eller `ToolGateway.execute()` sin generiske pipeline
-   * gjør noen EGEN sjekk av at `entity`/`room_id` faktisk finnes. Fail-closed
-   * for et ukjent mål virker KUN fordi preflight-`read_state`-kallet feiler -
-   * altså er mål-validering i dag 100% delegert til at den virkelige HA-
-   * transporten (i dag et uverifisert HTTP-skall, se `UnconfiguredHttpTransport`
-   * i integrations.ts) faktisk kaster/feiler for et ukjent entity/rom i stedet
-   * for å stille returnere en tom/default-tilstand. Testen under beviser at
-   * OM transporten IKKE gjør det (en lempelig/naiv reell HA-oppsett, eller en
-   * fremtidig transport-bug), rapporterer gatewayen `ok: true` for en
-   * lås/alarm-kommando mot et mål som aldri fantes - INGEN uavhengig
-   * eksistenskontroll fanger det opp i dag.
+   * Q-34 (funnet 2026-09-09, D-130; lukket her): verken `home-assistant.ts`
+   * sitt input-skjema (kun `z.string()` for `entity`/`room_id` - typekontroll,
+   * ikke eksistenskontroll) eller `ToolGateway.execute()` gjorde tidligere
+   * noen EGEN sjekk av at `entity`/`room_id` faktisk finnes - fail-closed for
+   * et ukjent mål virket KUN fordi preflight-`read_state`-kallet kastet.
+   * `lock_set`/`alarm_set` har nå `preflight_requires_target: true`
+   * (home-assistant.ts), så gatewayen selv (gateway.ts) avviser et
+   * preflight-svar som lykkes med `data: null` - UAVHENGIG av om transporten
+   * er streng (kaster) eller lempelig (svarer stille null). Testen under
+   * beviser nettopp DEN tidligere lempelige transporten - som tidligere lot
+   * mutasjonen lykkes - nå blir avvist AV GATEWAYEN, ikke bare av en
+   * tilfeldigvis streng transport.
    */
-  it("LEMPELIG transport (dagens reelle gap): ukjent entity/rom gir INGEN feil → mutasjonen rapporteres ok:true", async () => {
+  it("LEMPELIG transport (Q-34, nå lukket): ukjent entity/rom → gatewayen selv avviser, mutasjonen kalles ALDRI", async () => {
     const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, strictEntityCheck: false });
     const gateway = makeGateway(transport);
     const parameters = { site_id: "site-hus", room_id: "rom-ukjent", entity: "lock.finnes-ikke", locked: false };
@@ -375,9 +493,24 @@ describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens
       identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters
     });
 
-    // Dette ER gapet: gatewayen har ingen egen mål-eksistenskontroll, så en
-    // lempelig transport lar en kommando mot et oppdiktet mål lykkes.
-    expect(result.ok).toBe(true);
-    expect(transport.calls.map((c) => c.action)).toEqual(["read_state", "lock_set", "read_state"]);
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    // KUN preflight ble kalt - mutasjonen (lock_set) ble aldri nådd, og
+    // dermed heller ingen readback-kall.
+    expect(transport.calls.map((c) => c.action)).toEqual(["read_state"]);
+  });
+
+  it("LEMPELIG transport, alarm_set mot ukjent sone: samme lukking", async () => {
+    const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, strictEntityCheck: false });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-ukjent", armed: true };
+
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    expect(transport.calls.map((c) => c.action)).toEqual(["read_state"]);
   });
 });

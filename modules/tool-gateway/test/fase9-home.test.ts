@@ -62,7 +62,29 @@ beforeAll(async () => {
   const devices = new InMemoryDeviceRegistry();
   devices.register("watch-1", watchKeys.publicKey);
   const policy = new PolicyGateway({ devices, nonces: new PgApprovalStore(appPool), killSwitch: new KillSwitch() });
-  ha = new FakeTransport(() => ({ external_id: "ha-ok" }));
+  // Q-34 (D-130, lukket i modules/tool-gateway - `lock_set`/`alarm_set` har nå
+  // `preflight_requires_target: true`): `read_state`-preflighten MÅ svare med
+  // en DEFINERT tilstand, ikke en tom ack - ellers ville denne generiske faken
+  // (som IKKE modellerer entity-/rom-spesifikk tilstand) selv trigget
+  // `preflight_target_not_found` for lås/alarm-testene i beskrivelsen under,
+  // som IKKE handler om mål-eksistens. Se home-assistant-critical-action.test.ts
+  // for den EKTE, entity-/rom-bevisste mål-eksistens-testingen.
+  //
+  // Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): `lock_set`/
+  // `alarm_set` har nå OGSÅ `postcondition_predicate` - readback MÅ faktisk
+  // vise den kommanderte verdien, ikke bare en STATISK, alltid-lik ack. Denne
+  // generiske faken (som ikke bryr seg om entity-/rom-identitet, kun om
+  // "skjedde det en lås-/alarm-kommando") holder derfor ETT enkelt, delt
+  // `locked`/`armed`-par den FAKTISK oppdaterer på mutasjon, slik at
+  // readback-en etterpå ekte reflekterer den siste kommanderte verdien.
+  let lockedState = true;
+  let armedState = false;
+  ha = new FakeTransport((action, parameters) => {
+    if (action === "read_state") return { data: { locked: lockedState, armed: armedState } };
+    if (action === "lock_set") { lockedState = parameters["locked"] as boolean; return { external_id: "ha-ok" }; }
+    if (action === "alarm_set") { armedState = parameters["armed"] as boolean; return { external_id: "ha-ok" }; }
+    return { external_id: "ha-ok" };
+  });
   gateway = new ToolGateway(appPool, policy, secrets);
   for (const tool of homeAssistantTools(ha)) gateway.register(tool);
 }, 240_000);
