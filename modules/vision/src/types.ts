@@ -79,23 +79,29 @@ export type CreateVisionRoomInput = z.infer<typeof CreateVisionRoomInputSchema>;
  * imot direkte. `source_type`/`source_instance_id` er en POINTER til hvilken
  * adapter/enhet hendelsen kom fra.
  *
- * `source_event_id` (ARKITEKT-REVIEW-FIKS, PR #83, P1) - PÅKREVD, kilde-
- * produsert STABIL identitet for denne ENE hendelsen (adapterens egen
- * unike ID/sekvensnøkkel), ALDRI generert av Jarvis selv. Dette er
- * dedupe-grunnlaget `055_vision.sql` sin
+ * `source_event_id`/`source_instance_id` (ARKITEKT-REVIEW-FIKS, PR #83,
+ * RUNDE 1+2, P1) - BEGGE PÅKREVD, kilde-produsert. `source_event_id` er en
+ * STABIL identitet for denne ENE hendelsen (adapterens egen unike ID/
+ * sekvensnøkkel), ALDRI generert av Jarvis selv. `source_instance_id`
+ * (RUNDE 2-fiksen - var tidligere valgfri) er PÅKREVD fordi den er en DEL
+ * av selve dedupe-kollisjonsdomenet: to UAVHENGIGE enheter/kameraer bak
+ * SAMME `source_type` kan legitimt begge produsere en lokal `event_id`
+ * som kolliderer (f.eks. begge starter en egen tellersekvens fra 1) - uten
+ * `source_instance_id` i nøkkelen ville den ANDRE enhetens EKTE, DISTINKTE
+ * hendelse blitt STILLE behandlet som en replay av den FØRSTE (datatap).
+ * Dette er dedupe-grunnlaget `055_vision.sql` sin
  * `vision_event_observations_source_dedupe_key` håndhever strukturelt -
- * uten en kilde-stabil identitet kan et overlappende poll-vindu, en
+ * uten kilde-stabile identiteter kan et overlappende poll-vindu, en
  * transport-retry, eller en krasjet delvis batch som prøves på nytt IKKE
- * skilles fra en genuint NY hendelse, og ville tidligere skrevet en stille
- * duplikat-rad (se `service.ts`).
+ * skilles fra en genuint NY hendelse (se `service.ts`).
  *
- * `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, P1) - FORBUDT i denne
- * P0-sliceen (se `055_vision.sql` sin `CHECK`-kommentar for begrunnelsen:
- * ingen levetids-eid snapshot-lagringsadapter finnes ennå som faktisk
- * sletter det RETTE eksterne objektet når en observasjon purges/eraseres).
- * Feltet finnes bevisst IKKE i dette schemaet - en fremtidig slice som
- * bygger en ekte snapshot-lagring legger det til igjen SAMMEN MED
- * transaksjonell/kompenserende sletting av det refererte objektet.
+ * `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1) - FORBUDT i
+ * denne P0-sliceen (se `055_vision.sql` sin `CHECK`-kommentar for
+ * begrunnelsen: ingen levetids-eid snapshot-lagringsadapter finnes ennå som
+ * faktisk sletter det RETTE eksterne objektet når en observasjon purges/
+ * eraseres). Feltet finnes bevisst IKKE i dette schemaet - en fremtidig
+ * slice som bygger en ekte snapshot-lagring legger det til igjen SAMMEN
+ * MED transaksjonell/kompenserende sletting av det refererte objektet.
  */
 export const VisionObservationInputSchema = z
   .object({
@@ -107,7 +113,7 @@ export const VisionObservationInputSchema = z
     /** ISO 8601-tidsstempel for NÅR hendelsen faktisk skjedde (kan avvike fra `recorded_at`, som er når Jarvis mottok den). */
     observed_at: z.string().min(1),
     source_type: z.string().min(1),
-    source_instance_id: z.string().min(1).optional()
+    source_instance_id: z.string().min(1)
   })
   .strict();
 export type VisionObservationInput = z.infer<typeof VisionObservationInputSchema>;
@@ -124,8 +130,10 @@ export interface VisionEventObservation {
   confidence: number | null;
   snapshot_ref: null;
   source_type: string;
-  source_instance_id: string | null;
+  source_instance_id: string;
   source_event_id: string;
+  /** Intern integritetssjekk (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 2, P1) - se `service.ts` sin `computePayloadFingerprint()`. IKKE tiltenkt tolket av kallere - kun brukt av `VisionService` selv til å oppdage nøkkel-gjenbruk med avvikende payload ved en `ON CONFLICT`-replay. */
+  payload_fingerprint: string;
   observed_at: string;
   recorded_at: string;
   retention_expires_at: string | null;

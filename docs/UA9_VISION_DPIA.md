@@ -14,7 +14,7 @@ utfyller, erstatter ikke, `docs/security/DPIA_DRAFT.md`.
 
 | Datakategori | Tabell | Hva som faktisk lagres |
 |---|---|---|
-| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055_vision.sql`) | Allerede KLASSIFISERTE hendelser (`event_type`, valgfri `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`/`source_instance_id`), en PÅKREVD kilde-stabil `source_event_id` (dedupe-nøkkel, se §6.8), `observed_at`. Eier-definerte navngitte rom (`vision_rooms`) uten geometri. |
+| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055_vision.sql`) | Allerede KLASSIFISERTE hendelser (`event_type`, valgfri `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`, PÅKREVD `source_instance_id`), en PÅKREVD kilde-stabil `source_event_id` (sammen med `source_instance_id` det eksplisitte dedupe-kollisjonsdomenet, se §6.8), en intern `payload_fingerprint` (replay-integritet, se §6.9), `observed_at`. Eier-definerte navngitte rom (`vision_rooms`) uten geometri. |
 
 **Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN live kamera-/leverandør-
 tilkobling (ingen iPhone-kamera, ingen Home Assistant kamera-events, ingen dørklokke-/
@@ -93,15 +93,26 @@ heller, per samme prinsipp motsatt vei).
    BEVISST med `vision_retention_policies` utelatt (tenant/space-nivå policy-konfigurasjon, ikke
    person-eid data) — bevist end-to-end mot en ekte `ErasureService.executeErasure()`-kjøring, IKKE
    kun en kode-lesning av `plan.ts`.
-8. **Idempotent, atomisk kilde-ingestion (ARKITEKT-REVIEW-FIKS, PR #83, P1, 2026-09-15)** — en
-   PÅKREVD kilde-stabil `source_event_id` + en DB-håndhevet scoped UNIQUE-nøkkel
-   (`vision_event_observations_source_dedupe_key`) gjør `INSERT ... ON CONFLICT DO NOTHING` (+
-   hent-eksisterende-rad-ved-konflikt) til den FAKTISKE skriveveien - et overlappende poll-vindu, en
-   transport-retry, eller samtidig duplikat-levering av SAMME kilde-hendelse skriver ALDRI en ny
-   rad. `ingestFromSource()` validerer HELE den innhentede batchen FØR noen INSERT kjøres OG skriver
-   den DERETTER i ÉN DELT transaksjon - en `[gyldig, ugyldig]`-batch committer INGEN rader, ikke et
-   delvis prefiks en retry ville duplisert.
-9. **Snapshot-forbud + betrodd retensjons-klokke (ARKITEKT-REVIEW-FIKS, PR #83, P1, 2026-09-15)** —
+8. **Idempotent, atomisk kilde-ingestion med et eksplisitt kollisjonsdomene (ARKITEKT-REVIEW-FIKS,
+   PR #83, RUNDE 1+2, 2026-09-15)** — PÅKREVD, kilde-stabile `source_event_id` OG `source_instance_id`
+   + en DB-håndhevet scoped UNIQUE-nøkkel (`vision_event_observations_source_dedupe_key` på
+   `(tenant, space, person, source_type, source_instance_id, source_event_id)`) gjør
+   `INSERT ... ON CONFLICT DO NOTHING` (+ hent-eksisterende-rad-ved-konflikt) til den FAKTISKE
+   skriveveien - et overlappende poll-vindu, en transport-retry, eller samtidig duplikat-levering av
+   SAMME kilde-hendelse skriver ALDRI en ny rad. `source_instance_id` er BEVISST MED i nøkkelen
+   (RUNDE 2-fiksen) - UTEN den kunne to uavhengige enheter bak samme `source_type` (f.eks. to
+   kameraer) begge produsere en lokal `event_id` som kolliderer, og den andre enhetens EKTE,
+   DISTINKTE hendelse ville blitt stille tapt som en falsk "replay". `ingestFromSource()` validerer
+   HELE den innhentede batchen FØR noen INSERT kjøres OG skriver den DERETTER i ÉN DELT transaksjon -
+   en `[gyldig, ugyldig]`-batch committer INGEN rader, ikke et delvis prefiks en retry ville duplisert.
+9. **Payload-verifisert replay (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 2, P1, 2026-09-15)** — en
+   deterministisk `payload_fingerprint` (av `event_type`/`room_id`/`object_label`/`confidence`/
+   `observed_at`) lagres per rad og sammenlignes ved HVER `ON CONFLICT`-replay: stemmer den med den
+   nye forsøkte payloaden, er det en genuin, trygg replay (eksisterende rad returneres). Stemmer den
+   IKKE (nøkkel-gjenbruk med et FAKTISK annet innhold - en kilde-bug eller datakorrupsjon), kastes en
+   typet `VisionReplayConflictError` - fail-closed, ALDRI en stille retur av en annen hendelse enn
+   den kalleren faktisk sendte.
+10. **Snapshot-forbud + betrodd retensjons-klokke (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1, 2026-09-15)** —
    `snapshot_ref` er strukturelt FORBUDT (DB-CHECK `IS NULL`, fjernet fra input-schemaet) inntil en
    ekte, levetids-eid snapshot-lagringsadapter med transaksjonell/kompenserende sletting finnes -
    denne sliceen hevder ALDRI håndhevet retensjon/sletting for et eksternt objekt Jarvis ikke selv

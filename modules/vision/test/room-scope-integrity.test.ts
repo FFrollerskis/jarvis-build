@@ -102,8 +102,8 @@ describe("G: sammensatt FK på vision_event_observations.room_id blokkerer STRUK
     await expect(
       rawInsert(
         TENANT_B, "personal",
-        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_event_id, observed_at)
-         VALUES ('vis-ob-cross-tenant-attempt', $1, 'personal', $2, $3, 'motion_detected', 'device', $4, now())`,
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at)
+         VALUES ('vis-ob-cross-tenant-attempt', $1, 'personal', $2, $3, 'motion_detected', 'device', 'device-1', $4, 'fp-test', now())`,
         [TENANT_B, PERSON_B, roomA.room_id, `evt-${randomUUID()}`]
       )
     ).rejects.toMatchObject({ code: "23503" });
@@ -119,8 +119,8 @@ describe("G: sammensatt FK på vision_event_observations.room_id blokkerer STRUK
     await expect(
       rawInsert(
         TENANT_A, "business",
-        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_event_id, observed_at)
-         VALUES ('vis-ob-cross-space-attempt', $1, 'business', $2, $3, 'motion_detected', 'device', $4, now())`,
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at)
+         VALUES ('vis-ob-cross-space-attempt', $1, 'business', $2, $3, 'motion_detected', 'device', 'device-1', $4, 'fp-test', now())`,
         [TENANT_A, PERSON_A, roomPersonal.room_id, `evt-${randomUUID()}`]
       )
     ).rejects.toMatchObject({ code: "23503" });
@@ -132,7 +132,7 @@ describe("G: sammensatt FK på vision_event_observations.room_id blokkerer STRUK
   it("positiv kontroll: en SAME-tenant/SAME-space/SAME-person observasjon med gyldig room_id lykkes (beviser at G ikke bare feiler alt)", async () => {
     const room = await service.createRoom(TENANT_A, "guest", { person_id: PERSON_A, name: "Valid scope room" });
     const observed = await service.ingestObservation(TENANT_A, "guest", PERSON_A, {
-      event_type: "motion_detected", room_id: room.room_id, source_type: "device", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-04T00:00:00.000Z"
+      event_type: "motion_detected", room_id: room.room_id, source_type: "device", source_instance_id: "device-1", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-04T00:00:00.000Z"
     });
     expect(observed.room_id).toBe(room.room_id);
 
@@ -163,8 +163,8 @@ describe("H: person_id er en sammensatt FK mot person_tenants (bevis: medlemskap
     await expect(
       rawInsert(
         TENANT_A, "personal",
-        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at)
-         VALUES ('vis-ob-nonmember-attempt', $1, 'personal', $2, 'motion_detected', 'device', $3, now())`,
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at)
+         VALUES ('vis-ob-nonmember-attempt', $1, 'personal', $2, 'motion_detected', 'device', 'device-1', $3, 'fp-test', now())`,
         [TENANT_A, PERSON_B, `evt-${randomUUID()}`]
       )
     ).rejects.toMatchObject({ code: "23503" });
@@ -181,8 +181,8 @@ describe("I: vision_event_observations kan IKKE krysse-referere en ANNEN persons
     await expect(
       rawInsert(
         TENANT_A, "shared",
-        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_event_id, observed_at)
-         VALUES ('vis-ob-cross-person-room-attempt', $1, 'shared', $2, $3, 'motion_detected', 'device', $4, now())`,
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at)
+         VALUES ('vis-ob-cross-person-room-attempt', $1, 'shared', $2, $3, 'motion_detected', 'device', 'device-1', $4, 'fp-test', now())`,
         [TENANT_A, PERSON_C, roomOfA.room_id, `evt-${randomUUID()}`]
       )
     ).rejects.toMatchObject({ code: "23503" });
@@ -194,7 +194,7 @@ describe("I: vision_event_observations kan IKKE krysse-referere en ANNEN persons
   it("positiv kontroll: en SAME-tenant/SAME-space/SAME-person observasjon fortsatt lykkes for PERSON_C (beviser at I ikke bare feiler alt)", async () => {
     const room = await service.createRoom(TENANT_A, "home", { person_id: PERSON_C, name: "Valid same-person room" });
     const observed = await service.ingestObservation(TENANT_A, "home", PERSON_C, {
-      event_type: "motion_detected", room_id: room.room_id, source_type: "device", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-08T00:00:00.000Z"
+      event_type: "motion_detected", room_id: room.room_id, source_type: "device", source_instance_id: "device-1", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-08T00:00:00.000Z"
     });
     const events = await service.getRecentEvents(TENANT_A, "home", PERSON_C, { roomId: room.room_id });
     expect(events.map((e) => e.observation_id)).toContain(observed.observation_id);
@@ -204,7 +204,7 @@ describe("I: vision_event_observations kan IKKE krysse-referere en ANNEN persons
 describe("J: room_id er NULLABLE - en observasjon UTEN rom omgås FK-en helt (Postgres MATCH SIMPLE)", () => {
   it("en observasjon uten room_id lykkes uansett, selv om ingen rom finnes for personen i det hele tatt", async () => {
     const observed = await service.ingestObservation(TENANT_A, "project", PERSON_A, {
-      event_type: "doorbell_event", source_type: "device", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-09T00:00:00.000Z"
+      event_type: "doorbell_event", source_type: "device", source_instance_id: "device-1", source_event_id: `evt-${randomUUID()}`, observed_at: "2026-05-09T00:00:00.000Z"
     });
     expect(observed.room_id).toBeNull();
   });

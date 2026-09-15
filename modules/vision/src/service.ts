@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
@@ -50,6 +50,54 @@ export class VisionObservationValidationError extends Error {
     super(`vision_observation_invalid:${field}:${detail}`);
     this.name = "VisionObservationValidationError";
   }
+}
+
+/**
+ * ARKITEKT-REVIEW-FIKS (PR #83, RUNDE 2, P1): kastet når en innsettingsforsøk
+ * treffer `055_vision.sql` sin `vision_event_observations_source_dedupe_key`
+ * (samme `(tenant, space, person, source_type, source_instance_id,
+ * source_event_id)`), MEN den eksisterende raden sin `payload_fingerprint`
+ * IKKE stemmer med den nye forsøkte payloaden - dvs. en NØKKEL-GJENBRUK
+ * (samme kilde-hendelses-ID brukt for to FAKTISK ulike hendelser, en
+ * kilde-bug, eller datakorrupsjon), IKKE en genuin replay av SAMME hendelse.
+ * Fail-closed: raden overskrives ALDRI (append-only, se filhode), og
+ * kalleren får ALDRI en stille "vellykket" retur av en ANNEN hendelse enn
+ * den de faktisk sendte.
+ */
+export class VisionReplayConflictError extends Error {
+  constructor(
+    public readonly sourceType: string,
+    public readonly sourceInstanceId: string,
+    public readonly sourceEventId: string
+  ) {
+    super(
+      `vision_replay_conflict:source_type=${sourceType}:source_instance_id=${sourceInstanceId}:source_event_id=${sourceEventId}:existing row has a different payload_fingerprint than this attempt`
+    );
+    this.name = "VisionReplayConflictError";
+  }
+}
+
+/**
+ * ARKITEKT-REVIEW-FIKS (PR #83, RUNDE 2, P1): deterministisk fingerprint av
+ * de semantisk MENINGSFULLE payload-feltene til én hendelse (IKKE av
+ * genererte/interne felter som `observation_id`/`recorded_at`/
+ * `retention_expires_at`) - brukes UTELUKKENDE til å oppdage om en
+ * `ON CONFLICT`-replay under SAMME dedupe-nøkkel faktisk er en gjentatt
+ * levering av DEN SAMME hendelsen (fingerprint stemmer - trygg, deterministisk
+ * replay) eller en nøkkel-kollisjon med en ANNEN, avvikende hendelse
+ * (fingerprint stemmer IKKE - `VisionReplayConflictError`, se der). `null`
+ * verdier normaliseres eksplisitt (`?? null`) FØR JSON-serialisering slik at
+ * `undefined` og `null` aldri gir ulik fingerprint for samme semantiske innhold.
+ */
+function computePayloadFingerprint(value: VisionObservationInput): string {
+  const canonical = JSON.stringify({
+    event_type: value.event_type,
+    room_id: value.room_id ?? null,
+    object_label: value.object_label ?? null,
+    confidence: value.confidence ?? null,
+    observed_at: value.observed_at
+  });
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 /**
@@ -175,26 +223,37 @@ export class VisionService {
    * transaksjon - kalt fra BÅDE `ingestObservation()` (egen transaksjon per
    * kall) OG `ingestFromSource()` (HELE batchen i ÉN transaksjon, se der).
    *
-   * ARKITEKT-REVIEW-FIKS (PR #83, P1x2, 2026-09-15):
-   *  1. **Idempotens.** `INSERT ... ON CONFLICT (tenant_id, memory_space_id,
-   *     person_id, source_type, source_event_id) DO NOTHING` mot
-   *     `055_vision.sql` sin `vision_event_observations_source_dedupe_key` -
-   *     en gjentatt levering av SAMME kilde-hendelse (overlappende poll-
-   *     vindu, transport-retry, en tidligere-innsatt element i en batch som
-   *     retries) skriver INGEN ny rad. Ved konflikt hentes og returneres den
-   *     EKSISTERENDE raden i stedet (deterministisk replay, samme
-   *     "idempotent kall returnerer samme resultat"-kontrakt som resten av
-   *     repoet sin `tool_executions`/erasure-idempotens). Postgres sin EGEN
+   * ARKITEKT-REVIEW-FIKS (PR #83, RUNDE 1+2, 2026-09-15):
+   *  1. **Idempotens (RUNDE 1).** `INSERT ... ON CONFLICT (tenant_id,
+   *     memory_space_id, person_id, source_type, source_instance_id,
+   *     source_event_id) DO NOTHING` mot `055_vision.sql` sin
+   *     `vision_event_observations_source_dedupe_key` - en gjentatt
+   *     levering av SAMME kilde-hendelse (overlappende poll-vindu,
+   *     transport-retry, et tidligere-innsatt element i en batch som
+   *     retries) skriver INGEN ny rad. Postgres sin EGEN
    *     `INSERT ... ON CONFLICT`-låsing gjør dette trygt også for EKTE
    *     SAMTIDIGE dupliserte leveranser (den tapende transaksjonen venter på
-   *     vinnerens commit FØR den evaluerer konflikten, se adversarielle
-   *     tester i `test/ingest-idempotency.test.ts`).
-   *  2. **Klokke-tillit.** `retention_expires_at` beregnes fra `now()`
-   *     (databasens EGEN, BETRODDE mottakstid) i SAMME INSERT, IKKE fra det
-   *     UBETRODDE, kilde-produserte `observed_at` - en feilkonfigurert eller
-   *     ondsinnet kilde kan dermed IKKE omgå retensjonsvinduet med et
-   *     tidsstempel langt inn i fremtiden. `observed_at` sin proveniens er
-   *     UENDRET for alt annet (visning/filtrering/`getLastSeen`).
+   *     vinnerens commit FØR den evaluerer konflikten).
+   *  2. **Kollisjonsdomene inkluderer `source_instance_id` (RUNDE 2).**
+   *     `source_instance_id` er PÅKREVD og MED i nøkkelen - to uavhengige
+   *     enheter bak samme `source_type` kan IKKE lenger overskrive
+   *     hverandres hendelser selv om de tilfeldigvis bruker samme lokale
+   *     `event_id`.
+   *  3. **Payload-verifisert replay (RUNDE 2).** Ved konflikt sammenlignes
+   *     den eksisterende radens `payload_fingerprint` mot en FERSK beregnet
+   *     fingerprint av DENNE forsøkte payloaden (`computePayloadFingerprint()`).
+   *     Stemmer de: deterministisk replay, EKSISTERENDE rad returneres
+   *     (samme "idempotent kall returnerer samme resultat"-kontrakt som
+   *     resten av repoet). Stemmer de IKKE: en `VisionReplayConflictError`
+   *     kastes - ALDRI en stille retur av en annen hendelse enn den som
+   *     faktisk ble sendt (nøkkel-gjenbruk/korrupsjon feiler LUKKET).
+   *  4. **Klokke-tillit (RUNDE 1).** `retention_expires_at` beregnes fra
+   *     `now()` (databasens EGEN, BETRODDE mottakstid) i SAMME INSERT, IKKE
+   *     fra det UBETRODDE, kilde-produserte `observed_at` - en
+   *     feilkonfigurert eller ondsinnet kilde kan dermed IKKE omgå
+   *     retensjonsvinduet med et tidsstempel langt inn i fremtiden.
+   *     `observed_at` sin proveniens er UENDRET for alt annet
+   *     (visning/filtrering/`getLastSeen`).
    */
   private async insertValidatedInTransaction(
     client: pg.PoolClient,
@@ -204,11 +263,12 @@ export class VisionService {
     value: VisionObservationInput
   ): Promise<VisionEventObservation> {
     const retentionDays = await this.retentionDaysInTransaction(client, tenantId, memorySpace);
+    const fingerprint = computePayloadFingerprint(value);
     const { rows } = await client.query(
       `INSERT INTO vision_event_observations
-         (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, object_label, confidence, source_type, source_instance_id, source_event_id, observed_at, retention_expires_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 || ' days')::interval)
-       ON CONFLICT (tenant_id, memory_space_id, person_id, source_type, source_event_id) DO NOTHING
+         (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, object_label, confidence, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, retention_expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now() + ($14 || ' days')::interval)
+       ON CONFLICT (tenant_id, memory_space_id, person_id, source_type, source_instance_id, source_event_id) DO NOTHING
        RETURNING *`,
       [
         `vis-ob-${randomUUID()}`,
@@ -220,8 +280,9 @@ export class VisionService {
         value.object_label ?? null,
         value.confidence ?? null,
         value.source_type,
-        value.source_instance_id ?? null,
+        value.source_instance_id,
         value.source_event_id,
+        fingerprint,
         value.observed_at,
         retentionDays
       ]
@@ -230,10 +291,14 @@ export class VisionService {
 
     const existing = await client.query(
       `SELECT * FROM vision_event_observations
-       WHERE tenant_id = $1 AND memory_space_id = $2 AND person_id = $3 AND source_type = $4 AND source_event_id = $5`,
-      [tenantId, memorySpace, personId, value.source_type, value.source_event_id]
+       WHERE tenant_id = $1 AND memory_space_id = $2 AND person_id = $3 AND source_type = $4 AND source_instance_id = $5 AND source_event_id = $6`,
+      [tenantId, memorySpace, personId, value.source_type, value.source_instance_id, value.source_event_id]
     );
-    return existing.rows[0] as VisionEventObservation;
+    const existingRow = existing.rows[0] as VisionEventObservation;
+    if (existingRow.payload_fingerprint !== fingerprint) {
+      throw new VisionReplayConflictError(value.source_type, value.source_instance_id, value.source_event_id);
+    }
+    return existingRow;
   }
 
   /** Validerer OG skriver ÉN ny hendelse, i sin egen transaksjon. Se `validate()`/`insertValidatedInTransaction()` for den delte logikken med `ingestFromSource()`. */

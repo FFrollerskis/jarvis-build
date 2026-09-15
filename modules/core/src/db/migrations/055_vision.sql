@@ -128,25 +128,48 @@ ALTER TABLE vision_rooms ADD CONSTRAINT vision_rooms_tenant_space_key UNIQUE (te
 -- `vision_rooms` under bruker Postgres sin standard MATCH SIMPLE-semantikk:
 -- FK-en håndheves KUN når `room_id` faktisk er satt.
 --
--- `source_event_id` (ARKITEKT-REVIEW-FIKS, PR #83, P1): kilde-produsert,
--- STABIL identitet for DENNE hendelsen (adapterens egen unike ID/sekvens-
--- nøkkel for det den observerte) - PÅKREVD, IKKE valgfri, fordi den er selve
--- grunnlaget for `vision_event_observations_source_dedupe_key` under.
--- `VisionService.ingestObservation()` bruker `INSERT ... ON CONFLICT DO
--- NOTHING` mot denne nøkkelen og returnerer den EKSISTERENDE raden ved
--- konflikt - en gjentatt levering av SAMME kilde-hendelse (overlappende
--- poll-vindu, transport-retry, en krasjet delvis batch som prøves på nytt)
--- oppdager seg selv strukturelt i stedet for å skrive en ny, duplikat rad.
+-- `source_event_id`/`source_instance_id` (ARKITEKT-REVIEW-FIKS, PR #83,
+-- RUNDE 1+2, P1): `source_event_id` er kilde-produsert, STABIL identitet
+-- for DENNE hendelsen (adapterens egen unike ID/sekvensnøkkel) - PÅKREVD,
+-- IKKE valgfri. `source_instance_id` er RUNDE 2 sin fiks: BLE tidligere
+-- valgfri og UTENFOR dedupe-nøkkelen - to UAVHENGIGE enheter/kameraer bak
+-- SAMME `source_type` kunne dermed legitimt begge produsere `event_id='1'`,
+-- og den andre enhetens EKTE, DISTINKTE hendelse ville blitt STILLE
+-- behandlet som en replay av den første (datatap, falsk `getLastSeen()`/
+-- hendelseshistorikk). `source_instance_id` er derfor nå OGSÅ PÅKREVD og
+-- MED i `vision_event_observations_source_dedupe_key` under - kollisjons-
+-- domenet er eksplisitt (tenant, space, person, source_type,
+-- source_instance_id, source_event_id), ALDRI bare (..., source_type,
+-- source_event_id) alene. `VisionService.ingestObservation()` bruker
+-- `INSERT ... ON CONFLICT DO NOTHING` mot denne nøkkelen og returnerer den
+-- EKSISTERENDE raden ved konflikt - en gjentatt levering av SAMME
+-- kilde-hendelse (overlappende poll-vindu, transport-retry, en krasjet
+-- delvis batch som prøves på nytt) oppdager seg selv strukturelt i stedet
+-- for å skrive en ny, duplikat rad.
 --
--- `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, P1): FORBUDT (CHECK under)
--- i denne P0-sliceen. Kolonnen fantes opprinnelig som en PEKER til et
--- eksternt lagret enkeltbilde, men INGEN levetids-eid lagringsadapter
--- finnes ennå som faktisk sletter/tilbakekaller det RETTE objektet når
--- `purgeExpiredObservations()`/Q-20-erasure sletter PEKEREN - denne PR-en
--- kan derfor IKKE hevde at retensjons-/slette-reglene faktisk er håndhevet
--- for et objekt Jarvis ikke selv eier. En fremtidig slice som bygger en
--- ekte, levetids-eid snapshot-lagring fjerner denne CHECK-en OG legger til
--- transaksjonell/kompenserende sletting av det refererte objektet FØRST.
+-- `payload_fingerprint` (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 2, P1): en
+-- gjentatt levering under SAMME dedupe-nøkkel beviste TIDLIGERE ALDRI at
+-- den faktisk var den SAMME hendelsen igjen - en nøkkel-gjenbruk/-krasj som
+-- sendte et ANNET `event_type`/`observed_at`/`room_id`/`object_label`/
+-- `confidence` under samme `source_event_id` ville stille fått
+-- `ON CONFLICT DO NOTHING` til å beholde den FØRSTE raden og latt kalleren
+-- tro at DENNE (avvikende) hendelsen ble lagret. `VisionService.
+-- ingestObservation()` beregner nå en deterministisk fingerprint av de
+-- semantisk meningsfulle feltene og SAMMENLIGNER den mot en eksisterende
+-- rads fingerprint ved konflikt - et avvik feiler LUKKET (kastet typet
+-- feil), ALDRI en stille "vellykket" retur av feil data. Eksakt samme
+-- payload under samme nøkkel gir fortsatt deterministisk replay.
+--
+-- `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 1, P1): FORBUDT
+-- (CHECK under) i denne P0-sliceen. Kolonnen fantes opprinnelig som en
+-- PEKER til et eksternt lagret enkeltbilde, men INGEN levetids-eid
+-- lagringsadapter finnes ennå som faktisk sletter/tilbakekaller det RETTE
+-- objektet når `purgeExpiredObservations()`/Q-20-erasure sletter PEKEREN -
+-- denne PR-en kan derfor IKKE hevde at retensjons-/slette-reglene faktisk
+-- er håndhevet for et objekt Jarvis ikke selv eier. En fremtidig slice som
+-- bygger en ekte, levetids-eid snapshot-lagring fjerner denne CHECK-en OG
+-- legger til transaksjonell/kompenserende sletting av det refererte
+-- objektet FØRST.
 CREATE TABLE vision_event_observations (
   observation_id       text PRIMARY KEY,
   tenant_id             text NOT NULL REFERENCES tenants (tenant_id),
@@ -162,18 +185,20 @@ CREATE TABLE vision_event_observations (
   confidence             double precision CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
   snapshot_ref           text CHECK (snapshot_ref IS NULL),
   source_type            text NOT NULL,
-  source_instance_id     text,
+  source_instance_id     text NOT NULL,
   source_event_id        text NOT NULL,
+  payload_fingerprint    text NOT NULL,
   observed_at            timestamptz NOT NULL,
   recorded_at            timestamptz NOT NULL DEFAULT now(),
   retention_expires_at   timestamptz
 );
 -- Trengs av `VisionService.getRecentEvents()`/generell lese-scoping.
 CREATE INDEX vision_event_observations_lookup_idx ON vision_event_observations (tenant_id, memory_space_id, person_id, observed_at DESC);
--- ARKITEKT-REVIEW-FIKS (PR #83, P1): scoped dedupe-nøkkel - se
--- `source_event_id`-kommentaren over. `ON CONFLICT`-målet for
--- `VisionService.ingestObservation()` sin idempotente innsetting.
-CREATE UNIQUE INDEX vision_event_observations_source_dedupe_key ON vision_event_observations (tenant_id, memory_space_id, person_id, source_type, source_event_id);
+-- ARKITEKT-REVIEW-FIKS (PR #83, RUNDE 2, P1): scoped dedupe-nøkkel MED
+-- `source_instance_id` - se `source_event_id`/`source_instance_id`-
+-- kommentaren over. `ON CONFLICT`-målet for `VisionService.
+-- ingestObservation()` sin idempotente innsetting.
+CREATE UNIQUE INDEX vision_event_observations_source_dedupe_key ON vision_event_observations (tenant_id, memory_space_id, person_id, source_type, source_instance_id, source_event_id);
 -- Trengs av `VisionService.getLastSeen()` ("object identification and
 -- 'last seen' workflows" - masterplan UA-9 akseptansekriterium 1) - partial
 -- index (kun rader med et satt objektnavn) holder oppslaget billig.

@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { FakeVisionEventSource } from "../src/fake-source.ts";
-import { VisionObservationValidationError, VisionService } from "../src/service.ts";
+import { VisionObservationValidationError, VisionReplayConflictError, VisionService } from "../src/service.ts";
 import { runVisionRetentionSweepForAllTenants } from "../src/sweep.ts";
 import type { VisionObservationInput } from "../src/types.ts";
 
@@ -171,8 +171,8 @@ describe("B: ugyldig verdi/event_type avvises deterministisk - INGEN rad skrevet
   it("databasens EGEN CHECK avviser et rått forsøk på å sette snapshot_ref direkte, UTENOM VisionService", async () => {
     await expect(
       adminPool.query(
-        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, snapshot_ref)
-         VALUES ('vis-ob-bad-snapshot', $1, 'personal', $2, 'motion_detected', 'device', 'evt-bad-snapshot', now(), 's3://bucket/frame.jpg')`,
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, snapshot_ref)
+         VALUES ('vis-ob-bad-snapshot', $1, 'personal', $2, 'motion_detected', 'device', 'device-1', 'evt-bad-snapshot', 'fp-test', now(), 's3://bucket/frame.jpg')`,
         [TENANT_A, PERSON_A]
       )
     ).rejects.toThrow(/check/i);
@@ -249,11 +249,11 @@ describe("D: purgeExpiredObservations sletter KUN rader forbi utløp, scoped til
     const noRetentionId = "vis-ob-purge-noretention";
     await adminPool.query(
       `INSERT INTO vision_event_observations
-         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, retention_expires_at)
+         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, retention_expires_at)
        VALUES
-         ($1, $4, 'personal', $5, 'motion_detected', 'fake', $6, now() - interval '10 days', now() - interval '1 day'),
-         ($2, $4, 'personal', $5, 'motion_detected', 'fake', $7, now() - interval '10 days', now() + interval '10 years'),
-         ($3, $4, 'personal', $5, 'motion_detected', 'fake', $8, now() - interval '10 days', NULL)`,
+         ($1, $4, 'personal', $5, 'motion_detected', 'fake', 'device-1', $6, 'fp-test', now() - interval '10 days', now() - interval '1 day'),
+         ($2, $4, 'personal', $5, 'motion_detected', 'fake', 'device-1', $7, 'fp-test', now() - interval '10 days', now() + interval '10 years'),
+         ($3, $4, 'personal', $5, 'motion_detected', 'fake', 'device-1', $8, 'fp-test', now() - interval '10 days', NULL)`,
       [expiredId, futureId, noRetentionId, tenantId, PERSON_A, `evt-${randomUUID()}`, `evt-${randomUUID()}`, `evt-${randomUUID()}`]
     );
 
@@ -338,7 +338,7 @@ describe("H: VisionEventSource-adapterkontrakten komponerer ende-til-ende via in
 
     const source = new FakeVisionEventSource([
       validObjectDetected({ observed_at: "2026-09-01T06:00:00.000Z" }),
-      { event_type: "doorbell_event", observed_at: "2026-09-01T20:00:00.000Z", source_type: "fake", source_event_id: `evt-${randomUUID()}` }
+      { event_type: "doorbell_event", observed_at: "2026-09-01T20:00:00.000Z", source_type: "fake", source_instance_id: "camera-1", source_event_id: `evt-${randomUUID()}` }
     ]);
 
     const written = await service.ingestFromSource(tenantId, "personal", PERSON_B, source);
@@ -370,8 +370,8 @@ describe("I: runVisionRetentionSweepForAllTenants fan-out mot (tenant, space) - 
     const sweepExpiredId = "vis-ob-sweep-expired";
     await adminPool.query(
       `INSERT INTO vision_event_observations
-         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, retention_expires_at)
-       VALUES ($1, $2, 'personal', $3, 'motion_detected', 'fake', $4, now() - interval '40 days', now() - interval '1 day')`,
+         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_instance_id, source_event_id, payload_fingerprint, observed_at, retention_expires_at)
+       VALUES ($1, $2, 'personal', $3, 'motion_detected', 'fake', 'device-1', $4, 'fp-test', now() - interval '40 days', now() - interval '1 day')`,
       [sweepExpiredId, TENANT_A, PERSON_A, `evt-${randomUUID()}`]
     );
     const keepRow = await service.ingestObservation(TENANT_B, "personal", PERSON_A, validObjectDetected({ observed_at: "2026-09-10T00:00:00.000Z" }));
@@ -472,5 +472,110 @@ describe("J: idempotens/atomisitet for kilde-ingestion (ARKITEKT-REVIEW-FIKS, PR
 
     const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
     expect(all.filter((r) => r.source_event_id === "evt-partial-retry-valid")).toHaveLength(1);
+  });
+});
+
+describe("K: dedupe-kollisjonsdomene + payload-verifisert replay (ARKITEKT-REVIEW-FIKS, PR #83, RUNDE 2, P1x2) - adversarielle tester", () => {
+  it("mangler source_instance_id kastes (zod-avvist - PÅKREVD felt, RUNDE 2)", async () => {
+    const withoutInstance = { ...validObjectDetected() } as Record<string, unknown>;
+    delete withoutInstance["source_instance_id"];
+    await expect(
+      service.ingestObservation(TENANT_A, "personal", PERSON_A, withoutInstance as unknown as VisionObservationInput)
+    ).rejects.toThrow(VisionObservationValidationError);
+  });
+
+  it("to UAVHENGIGE enheter (ulik source_instance_id) bak SAMME source_type kan IKKE overskrive hverandres hendelser selv med SAMME lokale source_event_id (datatap-bug lukket)", async () => {
+    const tenantId = "tenant-vis-svc-two-instances";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'TwoInstances', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+
+    // To FYSISK ULIKE kameraer, begge type 'home_assistant', som begge (uavhengig av hverandre) bruker lokal event-teller '1'.
+    const fromCameraA = validObjectDetected({ source_type: "home_assistant", source_instance_id: "camera-a", source_event_id: "1", object_label: "cat" });
+    const fromCameraB = validObjectDetected({ source_type: "home_assistant", source_instance_id: "camera-b", source_event_id: "1", object_label: "dog" });
+
+    const writtenA = await service.ingestObservation(tenantId, "personal", PERSON_A, fromCameraA);
+    const writtenB = await service.ingestObservation(tenantId, "personal", PERSON_A, fromCameraB);
+
+    expect(writtenA.observation_id).not.toBe(writtenB.observation_id); // IKKE behandlet som en replay av hverandre.
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_type === "home_assistant" && r.source_event_id === "1")).toHaveLength(2);
+    expect(all.map((r) => r.object_label).sort()).toEqual(["cat", "dog"]);
+  });
+
+  it("eksakt SAMME payload under SAMME nøkkel: deterministisk replay, EKSISTERENDE rad returneres uendret (fingerprint stemmer)", async () => {
+    const tenantId = "tenant-vis-svc-fingerprint-match";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'FingerprintMatch', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const input = validObjectDetected({ source_event_id: "evt-fp-match" });
+
+    const first = await service.ingestObservation(tenantId, "personal", PERSON_A, input);
+    const second = await service.ingestObservation(tenantId, "personal", PERSON_A, { ...input }); // NY objekt-referanse, SAMME innhold.
+    expect(second.observation_id).toBe(first.observation_id);
+  });
+
+  it("SAMME nøkkel (source_type/source_instance_id/source_event_id) med ET ANNET event_type kastes som VisionReplayConflictError - ALDRI en stille retur av feil data (nøkkel-gjenbruk/korrupsjon)", async () => {
+    const tenantId = "tenant-vis-svc-fingerprint-mismatch";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'FingerprintMismatch', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const key = "evt-fp-mismatch";
+
+    const first = await service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, event_type: "motion_detected", object_label: undefined }));
+    await expect(
+      service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, event_type: "security_alert", object_label: undefined }))
+    ).rejects.toThrow(VisionReplayConflictError);
+
+    // Den ORIGINALE raden er UENDRET - append-only, ingen overskriving forsøkt.
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    const stored = all.find((r) => r.observation_id === first.observation_id);
+    expect(stored?.event_type).toBe("motion_detected");
+    expect(all.filter((r) => r.source_event_id === key)).toHaveLength(1); // ingen ny rad skrevet av det avviste forsøket heller.
+  });
+
+  it("SAMME nøkkel med ET ANNET observed_at kastes ogsaa (payload-fingerprint dekker observed_at, ikke bare event_type)", async () => {
+    const tenantId = "tenant-vis-svc-fingerprint-mismatch-time";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'FingerprintMismatchTime', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const key = "evt-fp-mismatch-time";
+
+    await service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, observed_at: "2026-06-01T08:00:00.000Z" }));
+    await expect(
+      service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, observed_at: "2026-06-01T09:00:00.000Z" }))
+    ).rejects.toThrow(VisionReplayConflictError);
+  });
+
+  it("samtidig EKSAKT duplikat-levering (SAMME payload, parallelt) forblir trygg med fingerprint-verifiseringen på plass - fortsatt presis ÉN rad", async () => {
+    const tenantId = "tenant-vis-svc-concurrent-fp-match";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'ConcurrentFpMatch', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const input = validObjectDetected({ source_event_id: "evt-concurrent-fp-match" });
+
+    const [a, b] = await Promise.all([
+      service.ingestObservation(tenantId, "personal", PERSON_A, input),
+      service.ingestObservation(tenantId, "personal", PERSON_A, { ...input })
+    ]);
+    expect(a.observation_id).toBe(b.observation_id);
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_event_id === "evt-concurrent-fp-match")).toHaveLength(1);
+  });
+
+  it("samtidig MOTSTRIDENDE levering (SAMME nøkkel, ULIK payload, parallelt) - én lykkes, den andre kastes VisionReplayConflictError, fortsatt presis ÉN rad", async () => {
+    const tenantId = "tenant-vis-svc-concurrent-fp-mismatch";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'ConcurrentFpMismatch', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const key = "evt-concurrent-fp-mismatch";
+
+    const results = await Promise.allSettled([
+      service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, event_type: "motion_detected", object_label: undefined })),
+      service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ source_event_id: key, event_type: "security_alert", object_label: undefined }))
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(VisionReplayConflictError);
+
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_event_id === key)).toHaveLength(1); // fortsatt presis ÉN rad, uansett hvilken som "vant" løpet.
   });
 });
