@@ -15,6 +15,17 @@
 -- ALDRI en lagret payload, i tråd med masterplanens "event snapshots by
 -- default instead of continuous raw video").
 --
+-- ARKITEKT-REVIEW-FIKS (PR #83, P1 x2, 2026-09-15): (1) `source_event_id`
+-- er en NY, PÅKREVD kilde-stabil dedupe-nøkkel - en adapter/poll-sløyfe med
+-- overlappende vinduer, en transport-retry, eller en krasjet delvis batch
+-- produserte tidligere en STILLE duplikat-rad (fersk `randomUUID()` per
+-- innsetting, INGEN identitetsbevaring fra kilden). Se `vision_event_
+-- observations_source_dedupe_key` under - `VisionService.ingestObservation()`
+-- gjør nå en `INSERT ... ON CONFLICT DO NOTHING` mot DENNE nøkkelen og
+-- returnerer den EKSISTERENDE raden ved konflikt (deterministisk replay,
+-- ALDRI en ny rad for samme kilde-hendelse). (2) `snapshot_ref` forbys nå
+-- STRUKTURELT (se CHECK-en under) - se den kommentaren for begrunnelsen.
+--
 -- Biometrisk ansiktsgjenkjenning er EKSPLISITT UTENFOR denne migrasjonen
 -- (masterplan v4.0 UA-9: "Biometric face identification remains outside
 -- this masterplan unless separately decided and lawfully implemented") -
@@ -52,6 +63,14 @@
 -- beskyttende standardvindu (30 dager, se `DEFAULT_RETENTION_DAYS` i
 -- `modules/vision/src/service.ts`) enn location sitt 90-dagers-vindu -
 -- SAMME "fravær av konfigurasjon betyr ALDRI 'behold for alltid'"-prinsipp.
+--
+-- ARKITEKT-REVIEW-FIKS (PR #83, P1, 2026-09-15): utløpet ANKRES på
+-- `recorded_at`/`now()` (databasens EGEN, BETRODDE mottakstid), IKKE på det
+-- UBETRODDE, kilde-produserte `observed_at` - en feilkonfigurert eller
+-- ondsinnet kilde kunne ellers sendt et tidsstempel langt inn i fremtiden
+-- og dermed effektivt omgått retensjonsvinduet i årevis. `observed_at` sin
+-- proveniens er UENDRET for alt annet (visning/filtrering/`getLastSeen`) -
+-- KUN utløpsberegningen bytter ankerpunkt.
 
 CREATE TABLE vision_retention_policies (
   tenant_id       text NOT NULL REFERENCES tenants (tenant_id),
@@ -104,15 +123,30 @@ ALTER TABLE vision_rooms ADD CONSTRAINT vision_rooms_tenant_space_key UNIQUE (te
 -- Rå, leverandør-nøytrale, allerede klassifiserte hendelser. `source_type`/
 -- `source_instance_id` er en POINTER til den innhentende adapteren/enheten
 -- (samme "pointer-not-payload"-prinsipp som `location_observations`/
--- `health_metric_observations`). `snapshot_ref` er OGSÅ en PEKER (f.eks. en
--- ekstern lagringsnøkkel/URI for ETT enkeltbilde-øyeblikksbilde) - ALDRI rå
--- bilde-/videobytes lagret i denne tabellen eller andre steder i denne
--- migrasjonen (masterplanens "event snapshots by default instead of
--- continuous raw video" håndheves her ved at det RETT OG SLETT ikke finnes
--- noen kolonne for kontinuerlig video/rå payload). `room_id` er NULLABLE
--- (ikke alle hendelser er rom-assosierte, f.eks. et dørklokke-event) - en
--- sammensatt FK mot `vision_rooms` under bruker Postgres sin standard MATCH
--- SIMPLE-semantikk: FK-en håndheves KUN når `room_id` faktisk er satt.
+-- `health_metric_observations`). `room_id` er NULLABLE (ikke alle hendelser
+-- er rom-assosierte, f.eks. et dørklokke-event) - en sammensatt FK mot
+-- `vision_rooms` under bruker Postgres sin standard MATCH SIMPLE-semantikk:
+-- FK-en håndheves KUN når `room_id` faktisk er satt.
+--
+-- `source_event_id` (ARKITEKT-REVIEW-FIKS, PR #83, P1): kilde-produsert,
+-- STABIL identitet for DENNE hendelsen (adapterens egen unike ID/sekvens-
+-- nøkkel for det den observerte) - PÅKREVD, IKKE valgfri, fordi den er selve
+-- grunnlaget for `vision_event_observations_source_dedupe_key` under.
+-- `VisionService.ingestObservation()` bruker `INSERT ... ON CONFLICT DO
+-- NOTHING` mot denne nøkkelen og returnerer den EKSISTERENDE raden ved
+-- konflikt - en gjentatt levering av SAMME kilde-hendelse (overlappende
+-- poll-vindu, transport-retry, en krasjet delvis batch som prøves på nytt)
+-- oppdager seg selv strukturelt i stedet for å skrive en ny, duplikat rad.
+--
+-- `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, P1): FORBUDT (CHECK under)
+-- i denne P0-sliceen. Kolonnen fantes opprinnelig som en PEKER til et
+-- eksternt lagret enkeltbilde, men INGEN levetids-eid lagringsadapter
+-- finnes ennå som faktisk sletter/tilbakekaller det RETTE objektet når
+-- `purgeExpiredObservations()`/Q-20-erasure sletter PEKEREN - denne PR-en
+-- kan derfor IKKE hevde at retensjons-/slette-reglene faktisk er håndhevet
+-- for et objekt Jarvis ikke selv eier. En fremtidig slice som bygger en
+-- ekte, levetids-eid snapshot-lagring fjerner denne CHECK-en OG legger til
+-- transaksjonell/kompenserende sletting av det refererte objektet FØRST.
 CREATE TABLE vision_event_observations (
   observation_id       text PRIMARY KEY,
   tenant_id             text NOT NULL REFERENCES tenants (tenant_id),
@@ -126,15 +160,20 @@ CREATE TABLE vision_event_observations (
     CHECK (event_type IN ('object_detected','person_present','motion_detected','doorbell_event','security_alert')),
   object_label          text,
   confidence             double precision CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 1),
-  snapshot_ref           text,
+  snapshot_ref           text CHECK (snapshot_ref IS NULL),
   source_type            text NOT NULL,
   source_instance_id     text,
+  source_event_id        text NOT NULL,
   observed_at            timestamptz NOT NULL,
   recorded_at            timestamptz NOT NULL DEFAULT now(),
   retention_expires_at   timestamptz
 );
 -- Trengs av `VisionService.getRecentEvents()`/generell lese-scoping.
 CREATE INDEX vision_event_observations_lookup_idx ON vision_event_observations (tenant_id, memory_space_id, person_id, observed_at DESC);
+-- ARKITEKT-REVIEW-FIKS (PR #83, P1): scoped dedupe-nøkkel - se
+-- `source_event_id`-kommentaren over. `ON CONFLICT`-målet for
+-- `VisionService.ingestObservation()` sin idempotente innsetting.
+CREATE UNIQUE INDEX vision_event_observations_source_dedupe_key ON vision_event_observations (tenant_id, memory_space_id, person_id, source_type, source_event_id);
 -- Trengs av `VisionService.getLastSeen()` ("object identification and
 -- 'last seen' workflows" - masterplan UA-9 akseptansekriterium 1) - partial
 -- index (kun rader med et satt objektnavn) holder oppslaget billig.

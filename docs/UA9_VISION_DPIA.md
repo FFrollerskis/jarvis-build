@@ -14,22 +14,26 @@ utfyller, erstatter ikke, `docs/security/DPIA_DRAFT.md`.
 
 | Datakategori | Tabell | Hva som faktisk lagres |
 |---|---|---|
-| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055_vision.sql`) | Allerede KLASSIFISERTE hendelser (`event_type`, valgfri `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`/`source_instance_id`) og til et eventuelt lagret enkeltbilde (`snapshot_ref` - en PEKER, aldri en kopi), `observed_at`. Eier-definerte navngitte rom (`vision_rooms`) uten geometri. |
+| **Hendelses-/romobservasjoner** | `vision_event_observations`/`vision_rooms` (`055_vision.sql`) | Allerede KLASSIFISERTE hendelser (`event_type`, valgfri `object_label`/`confidence`/`room_id`), PEKER til kilde (`source_type`/`source_instance_id`), en PÅKREVD kilde-stabil `source_event_id` (dedupe-nøkkel, se §6.8), `observed_at`. Eier-definerte navngitte rom (`vision_rooms`) uten geometri. |
 
 **Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN live kamera-/leverandør-
 tilkobling (ingen iPhone-kamera, ingen Home Assistant kamera-events, ingen dørklokke-/
 sikkerhetssystem-API) — kun den kanoniske, provider-nøytrale ingestion-/lagringskontrakten. INGEN
 faktisk bilde-/objektklassifiseringsmodell er koblet til — `event_type`/`object_label`/`confidence`
 forutsettes PRODUSERT av en fremtidig, ikke bygget adapter/modell-pipeline før de når denne tjenesten.
-INGEN rå bilde-/videobytes lagres NOEN steder i denne sliceen (kun `snapshot_ref`-PEKERE). INGEN
-biometrisk ansiktsgjenkjenning (eksplisitt utenfor masterplan v4.0 UA-9 med mindre separat besluttet
-og lovlig implementert). Se §5.
+INGEN rå bilde-/videobytes lagres NOEN steder i denne sliceen. **`snapshot_ref` (bildepeker) er
+FORBUDT i denne P0-sliceen** (strukturelt, DB-CHECK `IS NULL` + fjernet fra input-schemaet, se
+ARKITEKT-REVIEW-FIKS i §6.9) - ingen levetids-eid snapshot-lagringsadapter finnes ennå som faktisk
+sletter/tilbakekaller et eksternt referert objekt når en observasjon purges/eraseres, så denne
+sliceen unngår helt å skape en peker den ikke kan love å rydde opp etter. INGEN biometrisk
+ansiktsgjenkjenning (eksplisitt utenfor masterplan v4.0 UA-9 med mindre separat besluttet og lovlig
+implementert). Se §5.
 
 ## 2. Retensjon
 
 | Data | Retensjon | Håndhevet av |
 |---|---|---|
-| Vision-hendelsesobservasjoner | Eier-KONFIGURERT vindu per (tenant, space) (`vision_retention_policies`, mirrorer `location_retention_policies`-mønsteret) — i FRAVÆR av konfigurasjon brukes et KORTERE, personvern-beskyttende standardvindu (30 dager, KORTERE enn lokasjon sitt 90-dagers-vindu — kamera-/hendelsesdata avslører BÅDE tilstedeværelse OG aktivitet) | `VisionService.purgeExpiredObservations()`, kjørt daglig via `DailyScheduler` (`vision-retention-sweep`, `apps/api/src/main.ts`) |
+| Vision-hendelsesobservasjoner | Eier-KONFIGURERT vindu per (tenant, space) (`vision_retention_policies`, mirrorer `location_retention_policies`-mønsteret) — i FRAVÆR av konfigurasjon brukes et KORTERE, personvern-beskyttende standardvindu (30 dager, KORTERE enn lokasjon sitt 90-dagers-vindu — kamera-/hendelsesdata avslører BÅDE tilstedeværelse OG aktivitet). **Utløpet ANKRES på `recorded_at`/`now()` (databasens EGEN, BETRODDE mottakstid), IKKE på det ubetrodde, kilde-produserte `observed_at`** (ARKITEKT-REVIEW-FIKS, se §6.9) — en feilkonfigurert/ondsinnet kilde kan derfor IKKE omgå vinduet med et fremtidig tidsstempel | `VisionService.purgeExpiredObservations()`, kjørt daglig via `DailyScheduler` (`vision-retention-sweep`, `apps/api/src/main.ts`) |
 | Vision-rom (`vision_rooms`) | INGEN egen tids-basert retensjon (strukturell definisjonstabell, samme som `location_zones` — et rom slettes eksplisitt via eier-handling eller Q-20-erasure, ikke automatisk over tid) | Q-20/erasure-fundament (`modules/erasure/src/plan.ts`) |
 
 Q-20-sletting treffer begge tabellene direkte (ikke bare via retensjonsvinduet) — se §6.
@@ -60,7 +64,8 @@ heller, per samme prinsipp motsatt vei).
 | Live Home Assistant kamera-/dørklokke-/sikkerhetsevents | Fysisk kamera-/dørklokke-maskinvare koblet til Home Assistant + D-64/D-41-port |
 | Faktisk objekt-/hendelsesklassifisering (den egentlige ML-modell-inferensen på et kamerabilde) | En valgt, koblet modell-pipeline (D-64/D-41-port) — denne sliceen lagrer KUN det strukturerte RESULTATET, produserer det ALDRI selv |
 | Biometrisk ansiktsgjenkjenning | Eksplisitt UTENFOR masterplan v4.0 UA-9 med mindre separat besluttet og lovlig implementert — INGEN kode/kolonne/felt i denne sliceen forbereder dette |
-| Kontinuerlig rå videolagring | Eksplisitt UTENFOR masterplan v4.0 UA-9 ("event snapshots by default instead of continuous raw video") — `snapshot_ref` er en PEKER til ETT enkeltbilde, ALDRI en videostrøm |
+| Kontinuerlig rå videolagring | Eksplisitt UTENFOR masterplan v4.0 UA-9 ("event snapshots by default instead of continuous raw video") |
+| Enkeltbilde-øyeblikksbilder (`snapshot_ref`) | En levetids-eid snapshot-lagringsadapter med transaksjonell/kompenserende sletting av det refererte objektet ved purge/erasure (D-64/D-41-port) — FORBUDT strukturelt (DB-CHECK) inntil dette finnes, se ARKITEKT-REVIEW-FIKS §6.9 |
 
 ## 6. Hva som er STRUKTURELT håndhevet (ikke bare skrevet)
 
@@ -78,9 +83,9 @@ heller, per samme prinsipp motsatt vei).
    faktisk koblet inn i `DailyScheduler` (`apps/api/src/main.ts`, `vision-retention-sweep`, daglig),
    ikke bare skrevet og aldri kalt. Multi-space fan-out (`listAllTenantIds` +
    `listTenantMemorySpaces`, location-mønsteret) — IKKE health sitt enkelt-space-mønster.
-5. **Ingen sensordata uten kilde-peker** — `source_type`/`source_instance_id`/`snapshot_ref` er alle
-   PEKERE, aldri en kopi av rå leverandør-/bildepayload (samme "peker, aldri kopi"-prinsipp som
-   `location_observations`/`health_metric_observations`).
+5. **Ingen sensordata uten kilde-peker** — `source_type`/`source_instance_id` er PEKERE, aldri en
+   kopi av rå leverandør-payload (samme "peker, aldri kopi"-prinsipp som `location_observations`/
+   `health_metric_observations`).
 6. **Append-only** — `vision_event_observations`/`vision_rooms` har INGEN `UPDATE`-grant (samme
    strukturelle, ikke bare konvensjonelle, disiplin som `health_metric_observations`).
 7. **Q-20-erasure dekker faktisk vision-domenet** — `modules/erasure/src/plan.ts` sin `planPerson()`/
@@ -88,9 +93,25 @@ heller, per samme prinsipp motsatt vei).
    BEVISST med `vision_retention_policies` utelatt (tenant/space-nivå policy-konfigurasjon, ikke
    person-eid data) — bevist end-to-end mot en ekte `ErasureService.executeErasure()`-kjøring, IKKE
    kun en kode-lesning av `plan.ts`.
+8. **Idempotent, atomisk kilde-ingestion (ARKITEKT-REVIEW-FIKS, PR #83, P1, 2026-09-15)** — en
+   PÅKREVD kilde-stabil `source_event_id` + en DB-håndhevet scoped UNIQUE-nøkkel
+   (`vision_event_observations_source_dedupe_key`) gjør `INSERT ... ON CONFLICT DO NOTHING` (+
+   hent-eksisterende-rad-ved-konflikt) til den FAKTISKE skriveveien - et overlappende poll-vindu, en
+   transport-retry, eller samtidig duplikat-levering av SAMME kilde-hendelse skriver ALDRI en ny
+   rad. `ingestFromSource()` validerer HELE den innhentede batchen FØR noen INSERT kjøres OG skriver
+   den DERETTER i ÉN DELT transaksjon - en `[gyldig, ugyldig]`-batch committer INGEN rader, ikke et
+   delvis prefiks en retry ville duplisert.
+9. **Snapshot-forbud + betrodd retensjons-klokke (ARKITEKT-REVIEW-FIKS, PR #83, P1, 2026-09-15)** —
+   `snapshot_ref` er strukturelt FORBUDT (DB-CHECK `IS NULL`, fjernet fra input-schemaet) inntil en
+   ekte, levetids-eid snapshot-lagringsadapter med transaksjonell/kompenserende sletting finnes -
+   denne sliceen hevder ALDRI håndhevet retensjon/sletting for et eksternt objekt Jarvis ikke selv
+   eier. `retention_expires_at` beregnes fra `recorded_at`/`now()` (databasens EGEN mottakstid),
+   IKKE fra det ubetrodde, kilde-produserte `observed_at` - en feilkonfigurert/ondsinnet kilde kan
+   derfor ikke omgå retensjonsvinduet med et fremtidig tidsstempel; `observed_at` sin proveniens er
+   uendret for alt annet.
 
-Bevist i `modules/vision/test/{service-rls,room-scope-integrity}.test.ts` (37) og
-`modules/erasure/test/vision-erasure.test.ts` (3).
+Bevist i `modules/vision/test/{service-rls,room-scope-integrity}.test.ts` og
+`modules/erasure/test/vision-erasure.test.ts` (se PROJECT_STATUS.md for eksakte, oppdaterte tall).
 
 ## 7. Kjent, dokumentert restrisiko (ikke skjult)
 

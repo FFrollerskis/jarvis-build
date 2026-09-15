@@ -77,9 +77,25 @@ export type CreateVisionRoomInput = z.infer<typeof CreateVisionRoomInputSchema>;
  * (fremtidig iPhone-kamera/Home Assistant, eller `FakeVisionEventSource` i
  * tester) produserer, OG formen `VisionService.ingestObservation()` tar
  * imot direkte. `source_type`/`source_instance_id` er en POINTER til hvilken
- * adapter/enhet hendelsen kom fra; `snapshot_ref` er OGSÅ en PEKER (f.eks.
- * en ekstern lagringsnøkkel for ETT enkeltbilde) - ALDRI en kopi av rå
- * bilde-/videopayload et annet sted (se `service.ts`).
+ * adapter/enhet hendelsen kom fra.
+ *
+ * `source_event_id` (ARKITEKT-REVIEW-FIKS, PR #83, P1) - PÅKREVD, kilde-
+ * produsert STABIL identitet for denne ENE hendelsen (adapterens egen
+ * unike ID/sekvensnøkkel), ALDRI generert av Jarvis selv. Dette er
+ * dedupe-grunnlaget `055_vision.sql` sin
+ * `vision_event_observations_source_dedupe_key` håndhever strukturelt -
+ * uten en kilde-stabil identitet kan et overlappende poll-vindu, en
+ * transport-retry, eller en krasjet delvis batch som prøves på nytt IKKE
+ * skilles fra en genuint NY hendelse, og ville tidligere skrevet en stille
+ * duplikat-rad (se `service.ts`).
+ *
+ * `snapshot_ref` (ARKITEKT-REVIEW-FIKS, PR #83, P1) - FORBUDT i denne
+ * P0-sliceen (se `055_vision.sql` sin `CHECK`-kommentar for begrunnelsen:
+ * ingen levetids-eid snapshot-lagringsadapter finnes ennå som faktisk
+ * sletter det RETTE eksterne objektet når en observasjon purges/eraseres).
+ * Feltet finnes bevisst IKKE i dette schemaet - en fremtidig slice som
+ * bygger en ekte snapshot-lagring legger det til igjen SAMMEN MED
+ * transaksjonell/kompenserende sletting av det refererte objektet.
  */
 export const VisionObservationInputSchema = z
   .object({
@@ -87,7 +103,7 @@ export const VisionObservationInputSchema = z
     room_id: z.string().min(1).optional(),
     object_label: z.string().min(1).optional(),
     confidence: z.number().min(0).max(1).optional(),
-    snapshot_ref: z.string().min(1).optional(),
+    source_event_id: z.string().min(1),
     /** ISO 8601-tidsstempel for NÅR hendelsen faktisk skjedde (kan avvike fra `recorded_at`, som er når Jarvis mottok den). */
     observed_at: z.string().min(1),
     source_type: z.string().min(1),
@@ -106,9 +122,10 @@ export interface VisionEventObservation {
   event_type: VisionEventType;
   object_label: string | null;
   confidence: number | null;
-  snapshot_ref: string | null;
+  snapshot_ref: null;
   source_type: string;
   source_instance_id: string | null;
+  source_event_id: string;
   observed_at: string;
   recorded_at: string;
   retention_expires_at: string | null;

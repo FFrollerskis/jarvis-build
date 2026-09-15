@@ -57,7 +57,8 @@ interface SeededVision {
 async function seedVision(personId: string, sentinel: string): Promise<SeededVision> {
   const room = await vision.createRoom(TENANT_A, "personal", { person_id: personId, name: `${sentinel}-room` });
   const observation = await vision.ingestObservation(TENANT_A, "personal", personId, {
-    event_type: "object_detected", room_id: room.room_id, object_label: sentinel, source_type: "test", observed_at: new Date().toISOString()
+    event_type: "object_detected", room_id: room.room_id, object_label: sentinel, source_type: "test",
+    source_event_id: `evt-${sentinel}`, observed_at: new Date().toISOString()
   });
   return { room_id: room.room_id, observation_id: observation.observation_id };
 }

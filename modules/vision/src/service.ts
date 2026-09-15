@@ -146,29 +146,18 @@ export class VisionService {
   // ---------------------------------------------------------------------
 
   /**
-   * Validerer OG skriver ÉN ny hendelse. Fail-closed: kaster en typet
-   * `VisionObservationValidationError` (ALDRI en stille avvist/klippet
-   * verdi) for en ugyldig `event_type`/`confidence`-verdi utenfor [0,1]
-   * eller et `observed_at` som ikke er et gyldig parsbart tidsstempel. Et
-   * strukturelt ugyldig `room_id` (rom finnes ikke / tilhører en annen
-   * person) avvises av `055_vision.sql` sin sammensatte FK som en ekte
-   * Postgres-feil (`23503`) - INGEN duplisert eksistens-sjekk her (samme
-   * "databasen er den strukturelle autoriteten"-disiplin som resten av
-   * repoet).
-   *
-   * `retention_expires_at` beregnes ATOMISK i SAMME INSERT (ikke i JS,
-   * unngår enhver klokke-/tidssone-avvik) fra `vision_retention_policies`
-   * sin `retention_days` for tenanten+spacet - faller tilbake til
-   * `DEFAULT_RETENTION_DAYS` (samme "fravær av policy betyr ALDRI 'behold
-   * for alltid'"-prinsipp som `@jarvis/location`, MOTSATT retning av
-   * `@jarvis/health` sin NULL-til-policy-konfigureres-mønster).
+   * Fail-closed synkron validering (ALDRI en stille avvist/klippet verdi):
+   * en ugyldig `event_type`/`confidence`-verdi utenfor [0,1] eller et
+   * `observed_at` som ikke er et gyldig parsbart tidsstempel kaster en typet
+   * `VisionObservationValidationError`. Et strukturelt ugyldig `room_id`
+   * (rom finnes ikke / tilhører en annen person) avvises av `055_vision.sql`
+   * sin sammensatte FK som en ekte Postgres-feil (`23503`) - INGEN duplisert
+   * eksistens-sjekk her (samme "databasen er den strukturelle autoriteten"-
+   * disiplin som resten av repoet). Bevisst UTEN databasetilgang - kalles
+   * FØR noen transaksjon åpnes, både fra `ingestObservation()` OG
+   * `ingestFromSource()` (se ARKITEKT-REVIEW-FIKS-kommentaren der).
    */
-  async ingestObservation(
-    tenantId: string,
-    memorySpace: MemorySpace,
-    personId: string,
-    input: VisionObservationInput
-  ): Promise<VisionEventObservation> {
+  private validate(input: VisionObservationInput): VisionObservationInput {
     const parsed = VisionObservationInputSchema.safeParse(input);
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
@@ -178,46 +167,105 @@ export class VisionService {
     if (Number.isNaN(Date.parse(value.observed_at))) {
       throw new VisionObservationValidationError("observed_at", "not_a_valid_iso_datetime");
     }
+    return value;
+  }
 
-    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-      const retentionDays = await this.retentionDaysInTransaction(client, tenantId, memorySpace);
-      const observedAtMs = new Date(value.observed_at).getTime();
-      const retentionExpiresAt = new Date(observedAtMs + retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  /**
+   * Skriver ÉN allerede-VALIDERT hendelse i en GITT, allerede-åpnet
+   * transaksjon - kalt fra BÅDE `ingestObservation()` (egen transaksjon per
+   * kall) OG `ingestFromSource()` (HELE batchen i ÉN transaksjon, se der).
+   *
+   * ARKITEKT-REVIEW-FIKS (PR #83, P1x2, 2026-09-15):
+   *  1. **Idempotens.** `INSERT ... ON CONFLICT (tenant_id, memory_space_id,
+   *     person_id, source_type, source_event_id) DO NOTHING` mot
+   *     `055_vision.sql` sin `vision_event_observations_source_dedupe_key` -
+   *     en gjentatt levering av SAMME kilde-hendelse (overlappende poll-
+   *     vindu, transport-retry, en tidligere-innsatt element i en batch som
+   *     retries) skriver INGEN ny rad. Ved konflikt hentes og returneres den
+   *     EKSISTERENDE raden i stedet (deterministisk replay, samme
+   *     "idempotent kall returnerer samme resultat"-kontrakt som resten av
+   *     repoet sin `tool_executions`/erasure-idempotens). Postgres sin EGEN
+   *     `INSERT ... ON CONFLICT`-låsing gjør dette trygt også for EKTE
+   *     SAMTIDIGE dupliserte leveranser (den tapende transaksjonen venter på
+   *     vinnerens commit FØR den evaluerer konflikten, se adversarielle
+   *     tester i `test/ingest-idempotency.test.ts`).
+   *  2. **Klokke-tillit.** `retention_expires_at` beregnes fra `now()`
+   *     (databasens EGEN, BETRODDE mottakstid) i SAMME INSERT, IKKE fra det
+   *     UBETRODDE, kilde-produserte `observed_at` - en feilkonfigurert eller
+   *     ondsinnet kilde kan dermed IKKE omgå retensjonsvinduet med et
+   *     tidsstempel langt inn i fremtiden. `observed_at` sin proveniens er
+   *     UENDRET for alt annet (visning/filtrering/`getLastSeen`).
+   */
+  private async insertValidatedInTransaction(
+    client: pg.PoolClient,
+    tenantId: string,
+    memorySpace: MemorySpace,
+    personId: string,
+    value: VisionObservationInput
+  ): Promise<VisionEventObservation> {
+    const retentionDays = await this.retentionDaysInTransaction(client, tenantId, memorySpace);
+    const { rows } = await client.query(
+      `INSERT INTO vision_event_observations
+         (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, object_label, confidence, source_type, source_instance_id, source_event_id, observed_at, retention_expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now() + ($13 || ' days')::interval)
+       ON CONFLICT (tenant_id, memory_space_id, person_id, source_type, source_event_id) DO NOTHING
+       RETURNING *`,
+      [
+        `vis-ob-${randomUUID()}`,
+        tenantId,
+        memorySpace,
+        personId,
+        value.room_id ?? null,
+        value.event_type,
+        value.object_label ?? null,
+        value.confidence ?? null,
+        value.source_type,
+        value.source_instance_id ?? null,
+        value.source_event_id,
+        value.observed_at,
+        retentionDays
+      ]
+    );
+    if (rows[0]) return rows[0] as VisionEventObservation;
 
-      const { rows } = await client.query(
-        `INSERT INTO vision_event_observations
-           (observation_id, tenant_id, memory_space_id, person_id, room_id, event_type, object_label, confidence, snapshot_ref, source_type, source_instance_id, observed_at, retention_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-         RETURNING *`,
-        [
-          `vis-ob-${randomUUID()}`,
-          tenantId,
-          memorySpace,
-          personId,
-          value.room_id ?? null,
-          value.event_type,
-          value.object_label ?? null,
-          value.confidence ?? null,
-          value.snapshot_ref ?? null,
-          value.source_type,
-          value.source_instance_id ?? null,
-          value.observed_at,
-          retentionExpiresAt
-        ]
-      );
-      return rows[0] as VisionEventObservation;
-    });
+    const existing = await client.query(
+      `SELECT * FROM vision_event_observations
+       WHERE tenant_id = $1 AND memory_space_id = $2 AND person_id = $3 AND source_type = $4 AND source_event_id = $5`,
+      [tenantId, memorySpace, personId, value.source_type, value.source_event_id]
+    );
+    return existing.rows[0] as VisionEventObservation;
+  }
+
+  /** Validerer OG skriver ÉN ny hendelse, i sin egen transaksjon. Se `validate()`/`insertValidatedInTransaction()` for den delte logikken med `ingestFromSource()`. */
+  async ingestObservation(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    personId: string,
+    input: VisionObservationInput
+  ): Promise<VisionEventObservation> {
+    const value = this.validate(input);
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) =>
+      this.insertValidatedInTransaction(client, tenantId, memorySpace, personId, value)
+    );
   }
 
   /**
    * Provider-nøytral komposisjons-metode (samme mønster som
    * `HealthService.ingestFromSource()`): henter hendelser fra EN GITT
    * `VisionEventSource`-adapter (ekte fremtidig adapter ELLER
-   * `FakeVisionEventSource` i tester) og validerer + skriver hver av dem
-   * via `ingestObservation()` - ALDRI en egen, parallell skrivevei. En
-   * hendelse som feiler validering kaster UMIDDELBART (fail-fast) - delvis
-   * batch-innsetting for ÉN kildehenting anses som mer overraskende enn
-   * nyttig i v1.
+   * `FakeVisionEventSource` i tester) og validerer + skriver dem via
+   * `insertValidatedInTransaction()` - ALDRI en egen, parallell skrivevei.
+   *
+   * ARKITEKT-REVIEW-FIKS (PR #83, P1, 2026-09-15): HELE den innhentede
+   * batchen valideres FØRST (utenfor enhver transaksjon - `validate()` gjør
+   * INGEN databasekall), FØR noen INSERT overhodet kjøres, OG skrives
+   * DERETTER i ÉN DELT transaksjon. En `[gyldig, ugyldig]`-batch kaster derfor
+   * FØR databasen i det hele tatt er rørt - INGEN delvis committet prefiks
+   * som en retry ville duplisert. En etterfølgende retry av HELE batchen
+   * (etter at kildens feil er rettet, eller ved en identisk re-poll) er trygg
+   * takket være `insertValidatedInTransaction()` sin idempotente
+   * `source_event_id`-dedupe: allerede skrevne elementer skriver ingen ny
+   * rad, kun genuint nye elementer legges til.
    */
   async ingestFromSource(
     tenantId: string,
@@ -227,11 +275,14 @@ export class VisionService {
     options: { sinceMs?: number } = {}
   ): Promise<VisionEventObservation[]> {
     const inputs = await source.fetchRecent({ personId, ...(options.sinceMs !== undefined ? { sinceMs: options.sinceMs } : {}) });
-    const written: VisionEventObservation[] = [];
-    for (const input of inputs) {
-      written.push(await this.ingestObservation(tenantId, memorySpace, personId, input));
-    }
-    return written;
+    const validated = inputs.map((input) => this.validate(input));
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const written: VisionEventObservation[] = [];
+      for (const value of validated) {
+        written.push(await this.insertValidatedInTransaction(client, tenantId, memorySpace, personId, value));
+      }
+      return written;
+    });
   }
 
   /** Lese-API, vision-space-scoped (RLS + eksplisitt `memorySpace`-argument, samme "aldri et blankt gi-meg-alt-kall"-disiplin som `@jarvis/location`). */

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ const TENANT_B = "tenant-vis-svc-b";
 const PERSON_A = "person-vis-a";
 const PERSON_B = "person-vis-b";
 
+/** `source_event_id` defaultes til en FERSK, unik verdi per kall - overstyr eksplisitt i idempotens-/dedupe-tester som trenger en GJENTATT samme id. */
 function validObjectDetected(overrides: Partial<VisionObservationInput> = {}): VisionObservationInput {
   return {
     event_type: "object_detected",
@@ -40,6 +42,7 @@ function validObjectDetected(overrides: Partial<VisionObservationInput> = {}): V
     observed_at: "2026-06-01T08:00:00.000Z",
     source_type: "fake",
     source_instance_id: "camera-1",
+    source_event_id: `evt-${randomUUID()}`,
     ...overrides
   };
 }
@@ -151,31 +154,78 @@ describe("B: ugyldig verdi/event_type avvises deterministisk - INGEN rad skrevet
       service.ingestObservation(TENANT_A, "personal", PERSON_A, validObjectDetected({ room_id: "vis-rm-does-not-exist" }))
     ).rejects.toMatchObject({ code: "23503" });
   });
+
+  it("mangler source_event_id kastes (zod-avvist - PÅKREVD felt, ARKITEKT-REVIEW-FIKS PR #83)", async () => {
+    const withoutId = { ...validObjectDetected() } as Record<string, unknown>;
+    delete withoutId["source_event_id"];
+    await expect(
+      service.ingestObservation(TENANT_A, "personal", PERSON_A, withoutId as unknown as VisionObservationInput)
+    ).rejects.toThrow(VisionObservationValidationError);
+  });
+
+  it("snapshot_ref er FJERNET fra input-schemaet (ARKITEKT-REVIEW-FIKS PR #83, P1) - et forsøk på å sette det avvises strukturelt (.strict())", async () => {
+    const withSnapshot = { ...validObjectDetected(), snapshot_ref: "s3://bucket/frame.jpg" } as unknown as VisionObservationInput;
+    await expect(service.ingestObservation(TENANT_A, "personal", PERSON_A, withSnapshot)).rejects.toThrow(VisionObservationValidationError);
+  });
+
+  it("databasens EGEN CHECK avviser et rått forsøk på å sette snapshot_ref direkte, UTENOM VisionService", async () => {
+    await expect(
+      adminPool.query(
+        `INSERT INTO vision_event_observations (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, snapshot_ref)
+         VALUES ('vis-ob-bad-snapshot', $1, 'personal', $2, 'motion_detected', 'device', 'evt-bad-snapshot', now(), 's3://bucket/frame.jpg')`,
+        [TENANT_A, PERSON_A]
+      )
+    ).rejects.toThrow(/check/i);
+  });
 });
 
-describe("C: retention_expires_at beregnes korrekt fra det konfigurerte vinduet (fallback = DEFAULT_RETENTION_DAYS, IKKE null)", () => {
-  it("fravær av en konfigurert policy gir retention_expires_at = observed_at + DEFAULT_RETENTION_DAYS (location-stil, IKKE health-stil NULL)", async () => {
+describe("C: retention_expires_at beregnes korrekt fra det konfigurerte vinduet, ANKRET på recorded_at/now() - IKKE det ubetrodde observed_at (ARKITEKT-REVIEW-FIKS, PR #83, P1)", () => {
+  it("fravær av en konfigurert policy gir retention_expires_at = now() + DEFAULT_RETENTION_DAYS (location-stil, IKKE health-stil NULL)", async () => {
     const tenantNoPolicy = "tenant-vis-svc-nopolicy";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantNoPolicy}', 'No Policy', 'person')`);
     await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantNoPolicy}')`);
-    const observedAt = "2026-01-01T00:00:00.000Z";
-    const row = await service.ingestObservation(tenantNoPolicy, "personal", PERSON_A, validObjectDetected({ observed_at: observedAt }));
+    const before = Date.now();
+    const row = await service.ingestObservation(tenantNoPolicy, "personal", PERSON_A, validObjectDetected({ observed_at: "2026-01-01T00:00:00.000Z" }));
+    const after = Date.now();
     expect(row.retention_expires_at).not.toBeNull();
-    const expectedMs = Date.parse(observedAt) + 30 * 24 * 60 * 60 * 1000;
-    expect(new Date(row.retention_expires_at as string).getTime()).toBe(expectedMs);
+    const expiresMs = new Date(row.retention_expires_at as string).getTime();
+    // Ankret på databasens EGEN mottakstid (now()), ikke det gamle observed_at - toleranse for test-eksekveringstid.
+    expect(expiresMs).toBeGreaterThanOrEqual(before + 30 * 24 * 60 * 60 * 1000 - 5000);
+    expect(expiresMs).toBeLessThanOrEqual(after + 30 * 24 * 60 * 60 * 1000 + 5000);
   });
 
-  it("en konfigurert policy på N dager gir retention_expires_at = observed_at + N dager, eksakt", async () => {
+  it("en konfigurert policy på N dager gir retention_expires_at = now() + N dager, ikke observed_at + N dager", async () => {
     const tenantId = "tenant-vis-svc-retention";
     await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'Retention', 'person')`);
     await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
     const policy = await service.setRetentionPolicy(tenantId, "personal", { retention_days: 7 });
     expect(policy.retention_days).toBe(7);
 
-    const observedAt = "2026-01-01T00:00:00.000Z";
-    const row = await service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ observed_at: observedAt }));
-    const expectedMs = Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1000;
-    expect(new Date(row.retention_expires_at as string).getTime()).toBe(expectedMs);
+    const before = Date.now();
+    const row = await service.ingestObservation(tenantId, "personal", PERSON_A, validObjectDetected({ observed_at: "2026-01-01T00:00:00.000Z" }));
+    const after = Date.now();
+    const expiresMs = new Date(row.retention_expires_at as string).getTime();
+    expect(expiresMs).toBeGreaterThanOrEqual(before + 7 * 24 * 60 * 60 * 1000 - 5000);
+    expect(expiresMs).toBeLessThanOrEqual(after + 7 * 24 * 60 * 60 * 1000 + 5000);
+  });
+
+  it("ADVERSARIELT: en kilde som sender observed_at langt inn i fremtiden kan IKKE omgå retensjonsvinduet - utløpet er UAVHENGIG av observed_at", async () => {
+    const tenantId = "tenant-vis-svc-future-skew";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'FutureSkew', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    await service.setRetentionPolicy(tenantId, "personal", { retention_days: 7 });
+
+    const before = Date.now();
+    // En ondsinnet/feilkonfigurert kilde hevder hendelsen skjedde om 500 år.
+    const row = await service.ingestObservation(
+      tenantId, "personal", PERSON_A, validObjectDetected({ observed_at: "2526-01-01T00:00:00.000Z" })
+    );
+    const after = Date.now();
+    expect(new Date(row.observed_at).getUTCFullYear()).toBe(2526); // proveniens for observed_at er UENDRET.
+    const expiresMs = new Date(row.retention_expires_at as string).getTime();
+    // Utløpet er ANKRET på mottakstidspunktet, IKKE forskjøvet 500 år frem - beviser at bypasset er lukket.
+    expect(expiresMs).toBeGreaterThanOrEqual(before + 7 * 24 * 60 * 60 * 1000 - 5000);
+    expect(expiresMs).toBeLessThanOrEqual(after + 7 * 24 * 60 * 60 * 1000 + 5000);
   });
 
   it("getRetentionPolicy returnerer null når ingen policy er konfigurert, ellers den registrerte raden", async () => {
@@ -199,12 +249,12 @@ describe("D: purgeExpiredObservations sletter KUN rader forbi utløp, scoped til
     const noRetentionId = "vis-ob-purge-noretention";
     await adminPool.query(
       `INSERT INTO vision_event_observations
-         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, observed_at, retention_expires_at)
+         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, retention_expires_at)
        VALUES
-         ($1, $4, 'personal', $5, 'motion_detected', 'fake', now() - interval '10 days', now() - interval '1 day'),
-         ($2, $4, 'personal', $5, 'motion_detected', 'fake', now() - interval '10 days', now() + interval '10 years'),
-         ($3, $4, 'personal', $5, 'motion_detected', 'fake', now() - interval '10 days', NULL)`,
-      [expiredId, futureId, noRetentionId, tenantId, PERSON_A]
+         ($1, $4, 'personal', $5, 'motion_detected', 'fake', $6, now() - interval '10 days', now() - interval '1 day'),
+         ($2, $4, 'personal', $5, 'motion_detected', 'fake', $7, now() - interval '10 days', now() + interval '10 years'),
+         ($3, $4, 'personal', $5, 'motion_detected', 'fake', $8, now() - interval '10 days', NULL)`,
+      [expiredId, futureId, noRetentionId, tenantId, PERSON_A, `evt-${randomUUID()}`, `evt-${randomUUID()}`, `evt-${randomUUID()}`]
     );
 
     const deletedCount = await service.purgeExpiredObservations(tenantId, "personal");
@@ -288,7 +338,7 @@ describe("H: VisionEventSource-adapterkontrakten komponerer ende-til-ende via in
 
     const source = new FakeVisionEventSource([
       validObjectDetected({ observed_at: "2026-09-01T06:00:00.000Z" }),
-      { event_type: "doorbell_event", observed_at: "2026-09-01T20:00:00.000Z", source_type: "fake" }
+      { event_type: "doorbell_event", observed_at: "2026-09-01T20:00:00.000Z", source_type: "fake", source_event_id: `evt-${randomUUID()}` }
     ]);
 
     const written = await service.ingestFromSource(tenantId, "personal", PERSON_B, source);
@@ -320,9 +370,9 @@ describe("I: runVisionRetentionSweepForAllTenants fan-out mot (tenant, space) - 
     const sweepExpiredId = "vis-ob-sweep-expired";
     await adminPool.query(
       `INSERT INTO vision_event_observations
-         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, observed_at, retention_expires_at)
-       VALUES ($1, $2, 'personal', $3, 'motion_detected', 'fake', now() - interval '40 days', now() - interval '1 day')`,
-      [sweepExpiredId, TENANT_A, PERSON_A]
+         (observation_id, tenant_id, memory_space_id, person_id, event_type, source_type, source_event_id, observed_at, retention_expires_at)
+       VALUES ($1, $2, 'personal', $3, 'motion_detected', 'fake', $4, now() - interval '40 days', now() - interval '1 day')`,
+      [sweepExpiredId, TENANT_A, PERSON_A, `evt-${randomUUID()}`]
     );
     const keepRow = await service.ingestObservation(TENANT_B, "personal", PERSON_A, validObjectDetected({ observed_at: "2026-09-10T00:00:00.000Z" }));
 
@@ -335,5 +385,92 @@ describe("I: runVisionRetentionSweepForAllTenants fan-out mot (tenant, space) - 
 
     const stillThere = await service.getRecentEvents(TENANT_B, "personal", PERSON_A);
     expect(stillThere.map((r) => r.observation_id)).toContain(keepRow.observation_id);
+  });
+});
+
+describe("J: idempotens/atomisitet for kilde-ingestion (ARKITEKT-REVIEW-FIKS, PR #83, P1) - adversarielle tester", () => {
+  it("eksakt retry: samme source_event_id sendt to ganger via ingestObservation() gir SAMME rad, ingen duplikat", async () => {
+    const tenantId = "tenant-vis-svc-retry-exact";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'RetryExact', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const input = validObjectDetected({ source_event_id: "evt-retry-exact-1" });
+
+    const first = await service.ingestObservation(tenantId, "personal", PERSON_A, input);
+    const second = await service.ingestObservation(tenantId, "personal", PERSON_A, input);
+    expect(second.observation_id).toBe(first.observation_id);
+
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.observation_id === first.observation_id)).toHaveLength(1);
+  });
+
+  it("overlappende poll: to ingestFromSource()-kall med delvis overlappende hendelsessett skriver KUN de genuint nye radene", async () => {
+    const tenantId = "tenant-vis-svc-overlap-poll";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'OverlapPoll', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+
+    const shared = validObjectDetected({ source_event_id: "evt-overlap-shared", observed_at: "2026-04-01T00:00:00.000Z" });
+    const onlyFirst = validObjectDetected({ source_event_id: "evt-overlap-first", observed_at: "2026-04-01T01:00:00.000Z" });
+    const onlySecond = validObjectDetected({ source_event_id: "evt-overlap-second", observed_at: "2026-04-01T02:00:00.000Z" });
+
+    const firstPoll = new FakeVisionEventSource([shared, onlyFirst]);
+    const secondPoll = new FakeVisionEventSource([shared, onlySecond]); // "shared" levert på nytt - overlappende vindu.
+
+    await service.ingestFromSource(tenantId, "personal", PERSON_A, firstPoll);
+    await service.ingestFromSource(tenantId, "personal", PERSON_A, secondPoll);
+
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all).toHaveLength(3); // shared + onlyFirst + onlySecond - IKKE 4.
+    expect(all.filter((r) => r.source_event_id === "evt-overlap-shared")).toHaveLength(1);
+  });
+
+  it("samtidig duplikat-levering: to PARALLELLE ingestObservation()-kall med SAMME source_event_id gir presis ÉN rad, ingen krasj", async () => {
+    const tenantId = "tenant-vis-svc-concurrent-dupe";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'ConcurrentDupe', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+    const input = validObjectDetected({ source_event_id: "evt-concurrent-dupe-1" });
+
+    const [a, b] = await Promise.all([
+      service.ingestObservation(tenantId, "personal", PERSON_A, input),
+      service.ingestObservation(tenantId, "personal", PERSON_A, input)
+    ]);
+    expect(a.observation_id).toBe(b.observation_id);
+
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_event_id === "evt-concurrent-dupe-1")).toHaveLength(1);
+  });
+
+  it("valid-så-invalid batch: ingestFromSource() skriver INGEN rader i det hele tatt når ETT element i batchen feiler validering (atomisk, ikke delvis committet prefiks)", async () => {
+    const tenantId = "tenant-vis-svc-partial-batch";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'PartialBatch', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+
+    const validItem = validObjectDetected({ source_event_id: "evt-partial-batch-valid" });
+    const invalidItem = { ...validObjectDetected({ source_event_id: "evt-partial-batch-invalid" }), confidence: 5 };
+    const source = new FakeVisionEventSource([validItem, invalidItem]);
+
+    await expect(service.ingestFromSource(tenantId, "personal", PERSON_A, source)).rejects.toThrow(VisionObservationValidationError);
+
+    // Det GYLDIGE elementet ble IKKE committet før det ugyldige elementet kastet.
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_event_id === "evt-partial-batch-valid")).toHaveLength(0);
+  });
+
+  it("retry ETTER en rettet valid-så-invalid batch er trygg: det tidligere (aldri skrevne) gyldige elementet skrives nå, ingen duplikat av noe som helst", async () => {
+    const tenantId = "tenant-vis-svc-partial-batch-retry";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'PartialBatchRetry', 'person')`);
+    await adminPool.query(`INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${PERSON_A}', '${tenantId}')`);
+
+    const validItem = validObjectDetected({ source_event_id: "evt-partial-retry-valid" });
+    const invalidItem = { ...validObjectDetected({ source_event_id: "evt-partial-retry-invalid" }), confidence: 5 };
+    const failingSource = new FakeVisionEventSource([validItem, invalidItem]);
+    await expect(service.ingestFromSource(tenantId, "personal", PERSON_A, failingSource)).rejects.toThrow(VisionObservationValidationError);
+
+    // Kilden retter feilen og batchen re-polles (samme "valid"-element, IKKE det ugyldige).
+    const fixedSource = new FakeVisionEventSource([validItem]);
+    const written = await service.ingestFromSource(tenantId, "personal", PERSON_A, fixedSource);
+    expect(written).toHaveLength(1);
+
+    const all = await service.getRecentEvents(tenantId, "personal", PERSON_A);
+    expect(all.filter((r) => r.source_event_id === "evt-partial-retry-valid")).toHaveLength(1);
   });
 });
