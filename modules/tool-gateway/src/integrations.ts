@@ -229,23 +229,30 @@ export function firstWaveTools(
       // Drive sin `files.delete` er PERMANENT (bekreftet mot API-dokumentasjonen -
       // flytter IKKE til papirkurv). Klasse D: irreversibel, samme mønster som
       // email.send.
+      // Q-34-revisjon: `get_metadata` KASTER allerede på et ukjent `file_id`
+      // (`drive_not_found_...`, live-transports.ts) - `preflight_requires_target`
+      // er derfor et strukturelt sikkerhetsnett, ikke en oppførselsendring.
       tool_id: "drive", action: "delete_permanent", description: "Slett en Drive-fil/mappe PERMANENT (krever signert godkjenning for delegerte identiteter)",
       input_schema: record({ file_id: z.string() }), capability_class: "D",
       scopes: ["drive.delete"], reversible: false,
       rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: true,
       timeout_ms: 15_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata"
+      output_trust: "internal", transport: transport("drive"), preflight_action: "get_metadata", preflight_requires_target: true
     },
     {
       // Deling/tilgangsstyring er sikkerhetskritisk (kan eksponere innhold for
       // nye parter) - klasse D uavhengig av at selve handlingen teknisk er
       // reverserbar (fjerne tilgangen igjen).
+      // Q-34-revisjon: `read_permissions` returnerer ALDRI `data: null` for en
+      // EKSISTERENDE fil (en fil uten delinger gir `{permissions: []}` - en
+      // gyldig, DEFINERT verdi) og kaster på ukjent `file_id` - "tom" og
+      // "finnes ikke" er derfor aldri det samme svaret her.
       tool_id: "drive", action: "create_permission", description: "Del en Drive-fil/mappe med en bruker/domene/alle (krever signert godkjenning for delegerte identiteter)",
       input_schema: record({ file_id: z.string(), role: z.string(), type: z.string(), email_address: z.string().optional(), domain: z.string().optional() }),
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "fjern den opprettede tilgangen (delete_permission)", idempotent_external: false,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
     },
     {
       tool_id: "drive", action: "update_permission", description: "Endre rollen på en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -253,7 +260,7 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "sett rollen tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
     },
     {
       tool_id: "drive", action: "delete_permission", description: "Fjern en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -261,7 +268,7 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions"
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
     },
     // UA-2 P1B-A §2: e-post-vedlegg-ingestion - full meldingslisting (body-tekst
     // + vedleggs-MIME-metadata) og separat vedleggsnedlasting. Lagt til på
@@ -1465,7 +1472,10 @@ export function firstWaveTools(
       rollback_procedure: "IKKE en ekte 'unmerge' - opprett en revert-PR (github.create_pr fra en revert-commit) og merge den, ELLER github.update_pr for å dokumentere avviket. Ikke reverserbar - derfor klasse D.",
       idempotent_external: false, timeout_ms: 15_000, rate_limit_per_minute: 5,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
-      preflight_action: "get_pull_request"
+      // Q-34-revisjon: `get_pull_request` kaster allerede på et ukjent
+      // `pr_number` (404 er ikke i GITHUB_RETRYABLE_STATUS, live-transports.ts)
+      // - strukturelt sikkerhetsnett, ikke en oppførselsendring.
+      preflight_action: "get_pull_request", preflight_requires_target: true
     },
     {
       // Branch-sletting er PERMANENT hvis sha-en ikke er kjent fra andre steder -
@@ -1478,7 +1488,9 @@ export function firstWaveTools(
       rollback_procedure: "gjenopprett branchen fra sha-en get_branch (preflight) fanget FØR sletting, via github.create_branch",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_GITHUB_TOKEN", output_trust: "internal", transport: transport("github"),
-      preflight_action: "get_branch"
+      // Q-34-revisjon: `get_branch` kaster allerede på en ukjent branch (samme
+      // begrunnelse som merge_pr over).
+      preflight_action: "get_branch", preflight_requires_target: true
     },
     {
       // D-105 (UA-5 kriterium 1): Docker-lesehandlinger - virker mot ETHVERT
@@ -1516,6 +1528,11 @@ export function firstWaveTools(
       // bevist. `preflight_action: "inspect_container"` gjenbruker DEN
       // EKSISTERENDE ToolGateway-D-pipelinen (before/after via tool_executions)
       // UENDRET - se executeInfraMutation() i modules/incidents.
+      // Q-34-revisjon: `preflight_requires_target` er BEVISST IKKE satt her.
+      // `inspect_container` svarer `data: null` for "container finnes ikke
+      // ennå" (docker-transport.ts) som en LEGITIM førstegangs-deploy-tilstand
+      // - strukturelt umulig å ha noen forutgående tilstand for den. Motsatt
+      // av stop/start_container under, som KREVER en eksisterende container.
       tool_id: "docker", action: "redeploy_container", description: "Gjenskap en container med et gitt image (rm -f + run -d) - DEFERRED for produksjon, kun jarvis-sentinel-* (host-akseptanse) inntil konfigurasjonsbevarende redeploy er bevist",
       input_schema: record({ name: z.string(), image: z.string() }), capability_class: "D",
       scopes: ["docker:write"], reversible: true,
@@ -1537,7 +1554,11 @@ export function firstWaveTools(
       rollback_procedure: "docker.start_container mot samme mål, reinspisert for å verifisere kjøretilstand",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
-      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("stop_container")
+      // Q-34-revisjon: i motsetning til redeploy_container over, finnes det
+      // INGEN legitim "stopp en container som ikke finnes"-tilstand - null
+      // preflight betyr her alltid "mål finnes ikke".
+      preflight_action: "inspect_container", preflight_requires_target: true,
+      parameterAuthorizer: dockerTargetAuthorizer("stop_container")
     },
     {
       tool_id: "docker", action: "start_container", description: "Start en container (docker start) - eier-konfigurert produksjonsmål ELLER jarvis-sentinel-* (akseptanse)",
@@ -1546,7 +1567,9 @@ export function firstWaveTools(
       rollback_procedure: "docker.stop_container mot samme mål, reinspisert for å verifisere kjøretilstand",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
-      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("start_container")
+      // Q-34-revisjon: samme begrunnelse som stop_container over.
+      preflight_action: "inspect_container", preflight_requires_target: true,
+      parameterAuthorizer: dockerTargetAuthorizer("start_container")
     },
     // UA-6 Finance & Spend Integrity Gateway - FØRSTE slice (D-107):
     // provider-nøytralt `finance.*`-namespace. `submit_payment_intent` er

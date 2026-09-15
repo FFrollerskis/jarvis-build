@@ -62,7 +62,14 @@ beforeAll(async () => {
   const devices = new InMemoryDeviceRegistry();
   devices.register("watch-1", watchKeys.publicKey);
   const policy = new PolicyGateway({ devices, nonces: new PgApprovalStore(appPool), killSwitch: new KillSwitch() });
-  ha = new FakeTransport(() => ({ external_id: "ha-ok" }));
+  // Q-34 (D-130, lukket i modules/tool-gateway - `lock_set`/`alarm_set` har nå
+  // `preflight_requires_target: true`): `read_state`-preflighten MÅ svare med
+  // en DEFINERT tilstand, ikke en tom ack - ellers ville denne generiske faken
+  // (som IKKE modellerer entity-/rom-spesifikk tilstand) selv trigget
+  // `preflight_target_not_found` for lås/alarm-testene i beskrivelsen under,
+  // som IKKE handler om mål-eksistens. Se home-assistant-critical-action.test.ts
+  // for den EKTE, entity-/rom-bevisste mål-eksistens-testingen.
+  ha = new FakeTransport((action) => action === "read_state" ? { data: { locked: true, armed: false } } : { external_id: "ha-ok" });
   gateway = new ToolGateway(appPool, policy, secrets);
   for (const tool of homeAssistantTools(ha)) gateway.register(tool);
 }, 240_000);

@@ -322,7 +322,7 @@ describe("D/E: handlingen LYKTES, men readback-lesingen etterpå feiler → ok:t
   });
 });
 
-describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens oppførsel, ikke en påstått kontroll", () => {
+describe("F: mål-validering (entity/rom som ikke finnes) - Q-34 lukket: gatewayen har nå sin EGEN uavhengige mål-eksistenskontroll", () => {
   it("STRENG transport (som en ekte HA som feiler på ukjent entity ville gjort): preflight feiler → fail-closed, INGEN kommando sendt", async () => {
     const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, strictEntityCheck: true });
     const gateway = makeGateway(transport);
@@ -352,21 +352,20 @@ describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens
   });
 
   /**
-   * FUNN (rapporteres, ikke skjult): verken `home-assistant.ts` sitt
-   * input-skjema (kun `z.string()` for `entity`/`room_id` - typekontroll, ikke
-   * eksistenskontroll) eller `ToolGateway.execute()` sin generiske pipeline
-   * gjør noen EGEN sjekk av at `entity`/`room_id` faktisk finnes. Fail-closed
-   * for et ukjent mål virker KUN fordi preflight-`read_state`-kallet feiler -
-   * altså er mål-validering i dag 100% delegert til at den virkelige HA-
-   * transporten (i dag et uverifisert HTTP-skall, se `UnconfiguredHttpTransport`
-   * i integrations.ts) faktisk kaster/feiler for et ukjent entity/rom i stedet
-   * for å stille returnere en tom/default-tilstand. Testen under beviser at
-   * OM transporten IKKE gjør det (en lempelig/naiv reell HA-oppsett, eller en
-   * fremtidig transport-bug), rapporterer gatewayen `ok: true` for en
-   * lås/alarm-kommando mot et mål som aldri fantes - INGEN uavhengig
-   * eksistenskontroll fanger det opp i dag.
+   * Q-34 (funnet 2026-09-09, D-130; lukket her): verken `home-assistant.ts`
+   * sitt input-skjema (kun `z.string()` for `entity`/`room_id` - typekontroll,
+   * ikke eksistenskontroll) eller `ToolGateway.execute()` gjorde tidligere
+   * noen EGEN sjekk av at `entity`/`room_id` faktisk finnes - fail-closed for
+   * et ukjent mål virket KUN fordi preflight-`read_state`-kallet kastet.
+   * `lock_set`/`alarm_set` har nå `preflight_requires_target: true`
+   * (home-assistant.ts), så gatewayen selv (gateway.ts) avviser et
+   * preflight-svar som lykkes med `data: null` - UAVHENGIG av om transporten
+   * er streng (kaster) eller lempelig (svarer stille null). Testen under
+   * beviser nettopp DEN tidligere lempelige transporten - som tidligere lot
+   * mutasjonen lykkes - nå blir avvist AV GATEWAYEN, ikke bare av en
+   * tilfeldigvis streng transport.
    */
-  it("LEMPELIG transport (dagens reelle gap): ukjent entity/rom gir INGEN feil → mutasjonen rapporteres ok:true", async () => {
+  it("LEMPELIG transport (Q-34, nå lukket): ukjent entity/rom → gatewayen selv avviser, mutasjonen kalles ALDRI", async () => {
     const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, strictEntityCheck: false });
     const gateway = makeGateway(transport);
     const parameters = { site_id: "site-hus", room_id: "rom-ukjent", entity: "lock.finnes-ikke", locked: false };
@@ -375,9 +374,24 @@ describe("F: mål-validering (entity/rom som ikke finnes) - viser FAKTISK dagens
       identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters
     });
 
-    // Dette ER gapet: gatewayen har ingen egen mål-eksistenskontroll, så en
-    // lempelig transport lar en kommando mot et oppdiktet mål lykkes.
-    expect(result.ok).toBe(true);
-    expect(transport.calls.map((c) => c.action)).toEqual(["read_state", "lock_set", "read_state"]);
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    // KUN preflight ble kalt - mutasjonen (lock_set) ble aldri nådd, og
+    // dermed heller ingen readback-kall.
+    expect(transport.calls.map((c) => c.action)).toEqual(["read_state"]);
+  });
+
+  it("LEMPELIG transport, alarm_set mot ukjent sone: samme lukking", async () => {
+    const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, strictEntityCheck: false });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-ukjent", armed: true };
+
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    expect(transport.calls.map((c) => c.action)).toEqual(["read_state"]);
   });
 });

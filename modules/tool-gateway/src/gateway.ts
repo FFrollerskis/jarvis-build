@@ -127,6 +127,29 @@ export interface ToolDefinition {
   /** v4.0 D-pipeline: handling som leser nå-tilstand for preflight + readback (før/etter-evidens). */
   preflight_action?: string;
   /**
+   * Q-34 (funnet 2026-09-09, D-130; lukket i denne cross-domene-audit-sliceen):
+   * FØR denne fantes var "fail-closed på et ukjent mål" for klasse D KUN en
+   * tilfeldighet av at `preflight_action` fikk transporten til å KASTE for et
+   * ukjent mål - en transport som i stedet svarer NORMALT med `data: null`
+   * (en helt reell HTTP-/CLI-oppførsel) lot en klasse D-mutasjon mot et mål
+   * som aldri fantes rapportere `ok: true`. Denne flagget gjør sjekken
+   * STRUKTURELL i stedet for tilfeldig: satt til `true`, krever
+   * `ToolGateway.execute()` at preflight-resultatet er eksplisitt IKKE
+   * null/undefined FØR selve mutasjonen tillates (se `execute()` under).
+   *
+   * IKKE sett denne blindt for alle klasse D-verktøy med `preflight_action` -
+   * revider FØRST at et null/undefined preflight-resultat for AKKURAT denne
+   * handlingen alltid betyr "mål finnes ikke", aldri en gyldig tom tilstand.
+   * `docker.redeploy_container` er det kjente moteksempelet: dens
+   * `preflight_action` (`inspect_container`) svarer BEVISST `data: null` for
+   * "container finnes ikke ennå" som en LEGITIM førstegangs-deploy-tilstand
+   * (D-105) - denne flagget er derfor BEVISST IKKE satt der. Se
+   * `q34-preflight-target-existence.test.ts` for revisjonen av samtlige
+   * eksisterende brukere og en test som tvinger et eksplisitt valg for hver
+   * FREMTIDIG klasse D + `preflight_action`-kombinasjon.
+   */
+  preflight_requires_target?: boolean;
+  /**
    * D-105 host-fix (D-41-korreksjon): valgfri PARAMETER-nivå-autorisasjon,
    * kjørt av `ToolGateway.execute()` SELV for HVERT kall gjennom denne
    * SAMME, generiske gatewayen - uansett innslagsvei (dedikert REST-rute
@@ -247,6 +270,15 @@ export class ToolGateway {
       try {
         const pre = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
         beforeState = pre.data ?? null;
+        // Q-34: preflight-KALLET lyktes (kastet ikke), men for et revidert
+        // klasse D-verktøy betyr et null/undefined resultat FAKTISK "mål
+        // finnes ikke" - se `preflight_requires_target` sin doc-kommentar.
+        // Denne mutasjonen har ikke skjedd ennå og transaksjonen er ikke
+        // startet, så avslaget her har PRESIS samme "ingenting å rulle
+        // tilbake"-egenskap som en kastet preflight-feil under.
+        if (definition.capability_class === "D" && definition.preflight_requires_target && beforeState === null) {
+          return this.deny(request, "preflight_target_not_found");
+        }
       } catch (err) {
         if (definition.capability_class === "D") {
           return this.deny(request, `preflight_failed:${(err as Error).message.slice(0, 60)}`);
