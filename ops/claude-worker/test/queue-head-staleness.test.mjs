@@ -8,6 +8,7 @@ import {
   selectNextTask
 } from "../lib/queue.mjs";
 import { TASK_STATUS } from "../lib/state.mjs";
+import { entryOf, orderComment } from "./fixtures/authority-entries.mjs";
 
 /**
  * D-139: EN STALE ORDRE KAN ALDRI PREEMPTE EN GJELDENDE ORDRE.
@@ -26,6 +27,12 @@ import { TASK_STATUS } from "../lib/state.mjs";
 const HEAD_CURRENT = "4315c631cd5528f209ddb90256d868e8ce5da2ea";
 const HEAD_STALE = "4df1472ca4f9f6cf25695255691c0a2d945cf472";
 
+/**
+ * D-151: entries go through the REAL authority classifier.
+ *
+ * They used to be hand-assembled `{ ..., uniqueAuthority: true }` literals, which
+ * pre-declared the very verdict this suite is now allowed to depend on.
+ */
 function task(taskId, { createdAt, commentId, head = null, attempts = 0, extraBody = "" }) {
   const body = [
     "ARCHITECT_TASK",
@@ -33,8 +40,9 @@ function task(taskId, { createdAt, commentId, head = null, attempts = 0, extraBo
     head ? `${EXPECTED_HEAD_FIELD}=${head}` : "",
     extraBody
   ].filter(Boolean).join("\n");
+  const comment = orderComment({ taskId, id: commentId, createdAt, body });
   return {
-    entry: { taskId, comment: { id: commentId, created_at: createdAt, body }, uniqueAuthority: true },
+    entry: entryOf([comment], taskId),
     record: attempts > 0 ? { attempts, status: TASK_STATUS.FAILED_RETRYABLE, next_eligible_at: "1970-01-01T00:00:00.000Z" } : null
   };
 }
@@ -68,10 +76,49 @@ describe("declaredExpectedHead leser KUN den betrodde task-kommentaren", () => {
     // forfalsket duplikat kunne re-peke EXPECTED_HEAD_SHA og flytte tasken
     // mellom head-tiere. Same-id-oppdateringer er fjernet som eksekverbar
     // semantikk; en ikke-unik autoritet deklarerer ingenting i det hele tatt.
-    const t = task("A-20260101-A", { createdAt: "2026-01-01T00:00:00Z", commentId: 1, head: HEAD_STALE });
-    t.entry.duplicates = [{ id: 2, body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}` }];
-    t.entry.uniqueAuthority = false;
-    expect(declaredExpectedHead(t.entry)).toBe(null);
+    // D-151: the duplicate is a REAL second comment classified by the REAL gate,
+    // not a flag set on a hand-built entry.
+    const original = orderComment({
+      taskId: "A-20260101-A", id: 1, createdAt: "2026-01-01T00:00:00Z",
+      body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_STALE}`
+    });
+    const forged = orderComment({
+      taskId: "A-20260101-A", id: 2, createdAt: "2026-01-01T01:00:00Z",
+      body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}`
+    });
+    const entry = entryOf([original, forged], "A-20260101-A");
+    expect(entry.admissible).toBe(false);
+    expect(declaredExpectedHead(entry)).toBe(null);
+  });
+
+  it("D-151: en UNIK men REDIGERT ordre deklarerer heller ingen head", () => {
+    // `uniqueAuthority` var en TELLING, og en telling ser ingen redigering. En
+    // ordre som ble gjennomgaatt med én head og naa navngir en annen kunne
+    // dermed fortsatt flytte tasken mellom head-tiere.
+    const edited = orderComment({
+      taskId: "A-20260101-A",
+      id: 1,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T09:00:00Z",
+      body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}`
+    });
+    const entry = entryOf([edited], "A-20260101-A");
+    expect(entry.admissible).toBe(false);
+    expect(declaredExpectedHead(entry)).toBe(null);
+  });
+
+  it("D-151: en ordre uten brukbar comment-id eller created_at deklarerer ingen head", () => {
+    const noId = orderComment({
+      taskId: "A-20260101-A", id: null, createdAt: "2026-01-01T00:00:00Z",
+      body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}`
+    });
+    expect(declaredExpectedHead(entryOf([noId], "A-20260101-A"))).toBe(null);
+
+    const noTime = orderComment({
+      taskId: "A-20260101-A", id: 1, createdAt: "ikke-et-tidspunkt",
+      body: `ARCHITECT_TASK\nTASK_ID=A-20260101-A\n${EXPECTED_HEAD_FIELD}=${HEAD_CURRENT}`
+    });
+    expect(declaredExpectedHead(entryOf([noTime], "A-20260101-A"))).toBe(null);
   });
 
   it("D-150: en unik ordre som nevner feltet to ganger bruker den siste linjen", () => {

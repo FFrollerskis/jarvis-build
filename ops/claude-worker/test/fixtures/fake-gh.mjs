@@ -110,6 +110,26 @@ if (urlArg.includes("/issues/") && urlArg.includes("/comments")) {
    * was cut off mid-object. A reader looking only at the resulting array sees a
    * perfectly good set - which is exactly why absence had to stop being evidence.
    */
+  /**
+   * D-151: `fail.json { commentsOmit: [<id>, ...] }` - the page that went missing
+   * CONTAINED SOMETHING.
+   *
+   * `commentsTruncated` alone loses a page that happens to be empty, so the
+   * surviving array is both incomplete and complete-looking. This knob is the
+   * dangerous shape: the lost fragment held real comments - a second same-id
+   * order, a newer report, a retirement - and what comes back is a perfectly
+   * self-consistent set that says something FALSE about the world. Always
+   * incomplete: a read that silently dropped comments and reported itself whole
+   * is not something `gh api --paginate` can do, and faking it would be testing
+   * an impossible input rather than the real one.
+   */
+  if (Array.isArray(failures.commentsOmit) && failures.commentsOmit.length > 0) {
+    const omit = failures.commentsOmit.map((i) => String(i));
+    const visible = stored.filter((c) => !omit.includes(String(c.id)));
+    process.stdout.write(JSON.stringify(visible, null, 2));
+    process.stdout.write("\n[\n  {\n    \"id\": 987654,\n    \"body\": \"ARCHITECT_TASK\\nTASK_ID=");
+    process.exit(0);
+  }
   if (failures.commentsTruncated) {
     process.stdout.write(JSON.stringify(stored, null, 2));
     process.stdout.write("\n[\n  {\n    \"id\": 987654,\n    \"body\": \"ARCHITECT_TASK\\nTASK_ID=");

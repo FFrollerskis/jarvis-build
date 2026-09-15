@@ -56,7 +56,6 @@ import { selectNextTask, INELIGIBLE } from "./lib/queue.mjs";
 import { acquireLock, heartbeat, releaseLock, readLock, holdsLock } from "./lib/lock.mjs";
 import { matchProcessIdentity, listDescendants, isProcessAlive } from "./lib/procid.mjs";
 import { recoverScratch } from "./lib/quarantine.mjs";
-import { collectTrustedTasks } from "./lib/trust.mjs";
 import {
   assessCompletion,
   reconcilePriorAttempt,
@@ -105,7 +104,13 @@ import {
   digestLabel,
   orderBindingEvidence
 } from "./lib/order-binding.mjs";
-import { ORDER_AUTHORITY, selectAdmissibleOrder, describeOrderAuthority } from "./lib/order-authority.mjs";
+import { ORDER_AUTHORITY, describeOrderAuthority } from "./lib/order-authority.mjs";
+import {
+  authoritySnapshotEvidence,
+  authorityVerdicts,
+  captureAuthoritySnapshot,
+  describeAuthoritySnapshot
+} from "./lib/authority-snapshot.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import {
   verifyAuth,
@@ -737,36 +742,88 @@ async function runOwned(cfg, token) {
     return EXIT.TRANSIENT;
   }
 
-  // D-149: the control-issue read now carries its OWN completeness verdict, and
-  // it travels with the comments everywhere they go. A run that could not prove
-  // it read the whole issue must not let any decision turn on something being
-  // absent from what it did read - and until now the only way to notice was that
-  // `fetchIssueComments` threw, which it does not do for a page that merely
-  // failed to parse.
+  // --- D-151: THE CYCLE'S ONE ATOMIC AUTHORITY SNAPSHOT ---------------------
+  //
+  // Captured here, immediately after the auth and read evidence, and BEFORE any
+  // decision whatsoever. D-149 gave the read its own completeness verdict and
+  // D-150 enforced that verdict at admission - but only at admission, for the one
+  // task the queue had already chosen. Everything ahead of that still ran on a
+  // read with a hole in it: crash recovery retired tasks, report reconciliation
+  // marked them COMPLETED, `selectNextTask` ranked them and `retireIneligibleTasks`
+  // persisted SUPERSEDED. Every one of those is terminal, and every one of them
+  // turns on something being ABSENT from what we managed to read.
+  //
+  // So the question moved to the top and became fatal to the CYCLE rather than to
+  // one task. After this point the snapshot is the only thing anything decides
+  // from, it is frozen, and every task id in it has already been classified once
+  // by the one authority classifier.
+  //
+  // A refusal here performs NO recovery decision, NO queue selection, NO report
+  // retirement, NO supersession, NO task-state mutation, NO worktree, scratch or
+  // repository action, NO transition API read, NO prompt build and NO child
+  // spawn - and leaves every existing task, claim and worktree untouched.
   const control = fetchIssueCommentsDetailed(cfg);
-  if (!control.ok) {
-    log(cfg, `Failed to fetch control issue comments: ${control.error}`);
-    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "control_issue_unreachable" });
+  const snapshot = captureAuthoritySnapshot({ control, trustedAuthor: cfg.trustedAuthor });
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
+    comment_count: snapshot.commentCount,
+    collection_complete: snapshot.complete === true,
+    snapshot_usable: snapshot.ok,
+    snapshot_reason: snapshot.reason
+  });
+  if (!snapshot.ok) {
+    for (const line of describeAuthoritySnapshot(snapshot)) log(cfg, line);
+    log(cfg, `HOLDING the whole cycle: ${snapshot.reason}. Nothing was recovered, reconciled, retired, `
+      + "selected, dispatched or written.");
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      reason: "control_authority_snapshot_unusable",
+      snapshot_reason: snapshot.reason,
+      control_read_ok: snapshot.readOk,
+      collection_complete: snapshot.complete === true
+    });
+    reportStatus(cfg, {
+      taskId: null,
+      phase: "control_snapshot",
+      reason: `control_authority_snapshot_${snapshot.reason}`,
+      detail: [
+        "This worker cycle decided NOTHING, because it could not prove it had read the whole control issue.",
+        "",
+        `SNAPSHOT FINDING: ${snapshot.reason}`,
+        snapshot.detail ? `DETAIL: ${snapshot.detail}` : "",
+        `CONTROL READ: ok=${snapshot.readOk}, proven complete=${snapshot.complete === true}`,
+        "",
+        "A worker cycle ranks a queue, retires finished work, supersedes stale orders and dispatches a child -",
+        "and every one of those turns on something being ABSENT from what was read. A page that did not come",
+        "back is exactly where the second same-id order, the newer report or the contradicting retirement",
+        "would be, so a partial read may not decide any of them.",
+        "",
+        "NOTHING was recovered, reconciled, retired, superseded, selected, fetched, pushed, reset or deleted.",
+        "No task state was written, no worktree or scratch directory was created or removed, no transition",
+        "API was read, no prompt was built and no child process was created. Every existing task, claim and",
+        "worktree is byte-for-byte as it was.",
+        "",
+        "The fault is in THIS READ, not in any order: no attempt was spent and every task stays fully eligible."
+      ].filter((l) => l !== "").join("\n"),
+      nextAction: "No action required unless it persists; confirm GitHub is reachable and that "
+        + "`gh api --paginate` returns the control issue in full. The next scheduled run proceeds normally."
+    });
     return EXIT.TRANSIENT;
   }
-  const comments = control.items;
-  if (!control.complete) {
-    // Not fatal to the run: reconciliation and recovery still do useful, safe
-    // work on an incomplete read - they simply may not conclude ABSENCE from it,
-    // which `control.complete` now makes structurally impossible downstream.
-    log(cfg, `WARNING: the control issue read is INCOMPLETE (${control.error}). `
-      + "No decision this run may treat a missing comment as proof that it does not exist.");
-  }
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
-    comment_count: comments.length, collection_complete: control.complete === true
-  });
+  for (const line of describeAuthoritySnapshot(snapshot)) log(cfg, line);
+
+  // Everything downstream reads THE SNAPSHOT. `control` is still passed along as
+  // the comment carrier the completion/reconciliation paths already take, and it
+  // is now provably `{ ok: true, complete: true }` on every path that reaches it.
+  const comments = snapshot.comments;
 
   // --- BLOCKER 1: recover anything a crashed parent left behind, before any
   //     candidate is chosen and before eligibility is even considered. ---
   const recovery = recoverAbandonedTasks(cfg, state, token, control);
   if (recovery.stop) return recovery.exit;
 
-  const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
+  // D-151: the queue's entries ARE the snapshot's classified entries. There is no
+  // second grouping pass and no array-position representative: an inadmissible
+  // entry carries `order: null`, so nothing can rank, declare or execute from it.
+  const tasks = snapshot.entries;
   const nowMs = Date.now();
 
   const unsafeIds = tasks.filter((t) => !isValidTaskId(t.taskId)).map((t) => t.taskId);
@@ -801,7 +858,13 @@ async function runOwned(cfg, token) {
   // are on. An unreadable head yields null, which makes every task UNDECLARED
   // rather than falsely stale.
   const observedHead = gitHead(cfg).value ?? null;
-  const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs, observedHead });
+  const selection = selectNextTask({
+    tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs, observedHead,
+    // D-151: proven above, or this line is unreachable. Passed explicitly rather
+    // than defaulted, because supersession - the only decision that permanently
+    // discards unreviewed work - refuses unless somebody positively asserts it.
+    snapshotComplete: snapshot.complete === true
+  });
 
   // Persist the retirements the selection identified, so they survive a restart
   // and can never be re-decided differently by a later run.
@@ -826,9 +889,9 @@ async function runOwned(cfg, token) {
     return recovery.exit ?? (retired.blocked ? EXIT.BLOCKED : EXIT.OK);
   }
 
-  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, `
-    + `posted ${candidate.comment.created_at}, ${candidate.distinctOrderCount} distinct order(s) for this id, `
-    + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
+  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (order comment ${candidate.orderCommentId}, `
+    + `posted ${candidate.orderCreatedAt}, ${candidate.distinctOrderCount} distinct order(s) for this id, `
+    + `authority=${candidate.authority?.reason}, tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
   const dispatchExit = await runTask(cfg, state, token, candidate, control);
@@ -837,7 +900,13 @@ async function runOwned(cfg, token) {
   // waiting for a human, and that has to survive into the exit code whatever
   // else the run went on to do. Only an otherwise-clean run is downgraded -
   // a worse code from the dispatch itself is never softened.
-  return dispatchExit === EXIT.OK && gateHeld.length > 0 ? EXIT.BLOCKED : dispatchExit;
+  //
+  // D-151: an order REFUSED by the authority classifier is the same kind of fact.
+  // The run may well have gone on to dispatch a different, admissible task, and
+  // it still must not report itself healthy while a control comment is sitting
+  // there needing a human and a fresh TASK_ID.
+  const held = gateHeld.length > 0 || retired.authorityRefused.length > 0;
+  return dispatchExit === EXIT.OK && held ? EXIT.BLOCKED : dispatchExit;
 }
 
 /**
@@ -944,9 +1013,95 @@ function reconcileReportedTasks(cfg, state, token, control) {
 function retireIneligibleTasks(cfg, state, token, selection) {
   let mutated = false;
   let blocked = false;
+  const authorityRefused = [];
 
   for (const decision of selection.decisions) {
     const record = getTask(state, decision.taskId);
+
+    // --- D-151: NO ADMISSIBLE ORDER ----------------------------------------
+    //
+    // Reported and retired here rather than at dispatch, because an inadmissible
+    // order must not reach the queue's ranking at all: D-150 refused it only once
+    // it had already been CHOSEN, which meant its `EXPECTED_HEAD_SHA` had already
+    // decided where it sorted and whether it preempted a live order.
+    //
+    // A task with no record yet is the common case (the order was never
+    // admissible, so it was never dispatched and has no row). It is still
+    // recorded terminally, so the refusal is durable and the same refusal is not
+    // re-posted on every scheduled run.
+    if (decision.reason === INELIGIBLE.INADMISSIBLE_AUTHORITY) {
+      if (record && isTerminal(record)) continue;
+      const retryable = decision.authorityRetryable === true;
+      const verdict = {
+        ok: false,
+        reason: decision.authorityReason,
+        detail: decision.authorityDetail,
+        distinctCount: decision.distinctOrderCount,
+        candidateIds: decision.candidateCommentIds,
+        commentId: null,
+        createdAt: null,
+        retryable
+      };
+      for (const line of describeOrderAuthority(verdict, { taskId: decision.taskId })) log(cfg, `  ${line}`);
+      log(cfg, `BLOCKED ${decision.taskId}: no admissible ARCHITECT_TASK authority `
+        + `(${decision.authorityReason}): ${decision.authorityDetail ?? "no detail"}. NOT dispatching, and it `
+        + "takes no place in the queue: it declares no expected head, retires nothing and executes nothing.");
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+        task_id: decision.taskId,
+        reason: "architect_order_authority_inadmissible",
+        authority_reason: decision.authorityReason,
+        distinct_order_count: decision.distinctOrderCount,
+        retryable
+      });
+      upsertTask(state, decision.taskId, {
+        status: TASK_STATUS.BLOCKED,
+        blocked_at: new Date().toISOString(),
+        successful: false,
+        last_failure_reason: `architect_order_authority_inadmissible (${decision.authorityReason})`,
+        order_authority_failure: {
+          reason: decision.authorityReason,
+          detail: decision.authorityDetail ?? null,
+          distinct_order_count: decision.distinctOrderCount,
+          candidate_comment_ids: decision.candidateCommentIds,
+          at: new Date().toISOString()
+        },
+        child_identity: null
+      });
+      reportStatus(cfg, {
+        taskId: decision.taskId,
+        phase: "admission",
+        reason: `architect_order_authority_${decision.authorityReason}`,
+        detail: [
+          "This task was NOT dispatched: it has no single, immutable, uniquely identified original order.",
+          "",
+          `AUTHORITY FINDING: ${decision.authorityReason}`,
+          decision.authorityDetail ? `DETAIL: ${decision.authorityDetail}` : "",
+          `DISTINCT TRUSTED ORDERS SEEN FOR THIS TASK_ID: ${decision.distinctOrderCount}`
+            + (decision.candidateCommentIds?.length
+              ? ` (comment ids ${decision.candidateCommentIds.map((i) => String(i)).join(", ")})`
+              : ""),
+          "CONTROL COMMENT READ: proven complete (a cycle with an unproven read decides nothing at all).",
+          "",
+          "A task id has exactly ONE order, and a same-id TASK_UPDATE is a SECOND order rather than an",
+          "amendment. The worker will not choose between them, because any rule that chooses hands the",
+          "choice to whoever can post one.",
+          "",
+          "Nothing semantic from this order reached anything: it declared no EXPECTED_HEAD_SHA, so it could",
+          "not rank or preempt a live order; it declared no SUPERSEDES, so it retired nothing; and no bytes",
+          "of it were built into a prompt.",
+          "",
+          "NOTHING was dispatched, fetched, pushed, reset or deleted for this task, and no child process",
+          "was created."
+        ].filter((l) => l !== "").join("\n"),
+        nextAction: "Reconcile the control issue by hand, then reissue the CONSOLIDATED scope under a FRESH "
+          + "TASK_ID carrying an explicit SUPERSEDES=<old id>. The worker will not replay a blocked task."
+      });
+      authorityRefused.push(decision.taskId);
+      mutated = true;
+      blocked = true;
+      continue;
+    }
+
     if (!record || isTerminal(record)) continue;
 
     if (decision.reason === INELIGIBLE.SUPERSEDED) {
@@ -963,6 +1118,17 @@ function retireIneligibleTasks(cfg, state, token, selection) {
         superseded_by: decision.supersededBy,
         superseded_basis: decision.supersessionBasis,
         superseded_declared_by_comment_id: decision.supersessionDeclaredByCommentId ?? null,
+        // D-151: retirement is the one decision that permanently discards work
+        // nobody reviewed, so the record has to say WHAT ordered it, not just
+        // which task did. Each declaration carries the GitHub comment id AND the
+        // digest of the exact bytes - a comment id alone proves nothing once that
+        // comment has been edited, and the actor able to edit a control comment is
+        // the same login the worker trusts. Every admissible declaration is
+        // recorded; nothing is resolved by keeping the first or the latest.
+        superseded_declarations: decision.supersessionDeclarations ?? [],
+        // Positively recorded, so a later reader never has to infer that the read
+        // this retirement rested on was proven complete.
+        superseded_snapshot_complete: selection.snapshotComplete === true,
         last_failure_reason: `${decision.supersessionBasis} (${decision.supersededBy})`,
         child_identity: null
       });
@@ -980,9 +1146,14 @@ function retireIneligibleTasks(cfg, state, token, selection) {
           `This task was issued at ${decision.createdAt ?? "an unknown time"} and had ${decision.attempts} attempt(s).`,
           `BASIS: ${decision.supersessionBasis}`,
           `EVIDENCE: ${decision.supersessionDetail}`,
-          decision.supersessionDeclaredByCommentId !== null
-            ? `DECLARED BY: trusted control-issue comment ${decision.supersessionDeclaredByCommentId}`
+          (decision.supersessionDeclarations ?? []).length > 0
+            ? "DECLARED BY:\n" + decision.supersessionDeclarations
+              .map((d) => `  - trusted ARCHITECT_TASK ${d.task_id}, control-issue comment ${d.comment_id} `
+                + `(created ${d.created_at ?? "unknown"}, body ${digestLabel(d.body_sha256)}, `
+                + `${d.body_bytes ?? "unknown"} bytes)`)
+              .join("\n")
             : "DECLARED BY: nothing - retirement follows from the newer task's SUCCESSFUL completion.",
+          "CONTROL READ: proven complete - a cycle that cannot prove it read the whole issue retires nothing.",
           "",
           "A newer task that ended BLOCKED, FAILED or with an unreadable status never retires an older",
           "one: it did not move the repository on, so the older order is not stale.",
@@ -1037,7 +1208,7 @@ function retireIneligibleTasks(cfg, state, token, selection) {
     state.last_run_at = new Date().toISOString();
     persistState(cfg, state, token);
   }
-  return { mutated, blocked };
+  return { mutated, blocked, authorityRefused };
 }
 
 /**
@@ -1206,37 +1377,38 @@ async function runTask(cfg, state, token, candidate, control) {
   const prior = getTask(state, taskId);
   const { comments, complete: commentsComplete } = controlView(control);
 
-  // --- D-150: ADMISSION PREREQUISITES, BEFORE THE BINDING ITSELF -------------
+  // --- D-151: THE CARRIED AUTHORITY VERDICT, NOT A SECOND OPINION -----------
   //
-  // Two questions that D-149 asked at COMPLETION time and not at ADMISSION time,
-  // which is the wrong way round: admission is where the child gets its
-  // instructions, and no later refusal can un-tell it what it was told.
+  // D-150 asked `selectAdmissibleOrder` here, which was the right question in the
+  // wrong place: by the time `runTask` is reached the candidate has already been
+  // ranked - possibly on the strength of an `EXPECTED_HEAD_SHA` read from an
+  // order this gate was about to refuse. The classification now happens ONCE per
+  // cycle, in `captureAuthoritySnapshot`, over the whole frozen comment set, and
+  // the verdict TRAVELS on the entry through the queue to here.
   //
-  //   WAS THE READ COMPLETE? A run that could not prove it read the whole issue
-  //   cannot prove an order is unique - the second, contradicting same-id order
-  //   would be on exactly the page that went missing. Held, and held RETRYABLY:
-  //   the fault is in this read, nothing about the order is known to be wrong,
-  //   and letting one dropped page permanently kill a task would hand a denial
-  //   of service to the network.
+  // What is left is a boundary check, and it is deliberately not a second
+  // classifier: it confirms that the entry in hand actually carries an ADMISSIBLE
+  // verdict from this cycle's snapshot. A second set of rules here would be a
+  // second set of rules to drift, and drift between the dispatch gate and the
+  // queue gate is precisely how an order refused at admission still managed to
+  // set a head tier and retire a victim.
   //
-  //   IS THE AUTHORITY UNIQUE? Exactly one distinct, unedited, deterministically
-  //   identified trusted ARCHITECT_TASK for this id. `collectTrustedTasks` used
-  //   to answer this by ARRAY POSITION - first same-id comment wins, the rest
-  //   become "scope updates" - so a forged duplicate was refused at completion
-  //   (D-148) and silently accepted at dispatch. Held, and held TERMINALLY: a
-  //   retry asks the identical question, and the recovery is a FRESH TASK_ID.
-  //
-  // Both run before the binding, before the quarantine, before the dirty guard,
-  // before a worktree exists, before any scratch or repository mutation, and
-  // before any child. A refusal here dispatches nothing at all.
-  const authority = selectAdmissibleOrder({
-    comments,
-    commentsOk: control?.ok !== false,
-    commentsComplete,
-    trustedAuthor: cfg.trustedAuthor,
-    taskId
-  });
-  if (!authority.ok) {
+  // The check runs before the binding, before the quarantine, before the dirty
+  // guard, before a worktree exists, before any scratch or repository mutation,
+  // and before any child. A refusal here dispatches nothing at all.
+  const authority = candidate?.authority ?? {
+    ok: false,
+    reason: ORDER_AUTHORITY.NO_ORDER,
+    detail: "the candidate entry carries no authority verdict from this cycle's control snapshot, so its "
+      + "order was never classified; an unclassified order is never an admissible one",
+    distinctCount: 0,
+    candidateIds: [],
+    commentId: null,
+    createdAt: null,
+    comment: null,
+    retryable: false
+  };
+  if (!authority.ok || authority.reason !== ORDER_AUTHORITY.ADMISSIBLE) {
     for (const line of describeOrderAuthority(authority, { taskId })) log(cfg, `  ${line}`);
     log(cfg, `${authority.retryable ? "HOLDING" : "BLOCKED"}: no admissible ARCHITECT_TASK authority for ${taskId} `
       + `(${authority.reason}): ${authority.detail ?? "no detail"}. NOT dispatching.`);
@@ -2397,20 +2569,37 @@ function cmdDryRun(cfg) {
     return EXIT.TRANSIENT;
   }
   const dryControl = fetchIssueCommentsDetailed(cfg);
-  if (!dryControl.ok) {
-    console.log(`Dry run: control issue unreachable (${dryControl.error}). A real run would exit TRANSIENT.`);
+  // D-151: the preview captures the SAME atomic snapshot the real run would, and
+  // reports the same verdict. A dry run that quietly carried on past an unproven
+  // read would show a queue, a candidate and a set of retirements that the real
+  // run is structurally incapable of producing - which is worse than no preview.
+  const drySnapshot = captureAuthoritySnapshot({ control: dryControl, trustedAuthor: cfg.trustedAuthor });
+  if (!drySnapshot.ok) {
+    console.log(JSON.stringify({
+      dry_run: true,
+      wrote_anything: false,
+      took_lock: false,
+      state_source: loaded.source,
+      first_run: loaded.first_run,
+      ...authoritySnapshotEvidence(drySnapshot),
+      control_comments_read_error: dryControl.error ?? null,
+      would_exit: "TRANSIENT",
+      would_decide: "nothing: no recovery, no reconciliation, no retirement, no supersession, "
+        + "no selection, no prompt, no child"
+    }, null, 2));
     return EXIT.TRANSIENT;
   }
-  const comments = dryControl.items;
+  const comments = drySnapshot.comments;
   const abandoned = findAbandonedTasks(loaded.state);
-  const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
+  const tasks = drySnapshot.entries;
   const nowMs = Date.now();
   // D132: the dry run must preview the SAME decision the real run would make,
   // including tiering and supersession - otherwise it cannot be used to verify
   // queue behaviour on the host, which is exactly what was needed here.
   const selection = selectNextTask({
     tasks, state: loaded.state, comments, trustedAuthor: cfg.trustedAuthor, nowMs,
-    observedHead: gitHead(cfg).value ?? null
+    observedHead: gitHead(cfg).value ?? null,
+    snapshotComplete: drySnapshot.complete === true
   });
   const status = gitStatusLines(cfg);
   console.log(JSON.stringify({
@@ -2419,37 +2608,50 @@ function cmdDryRun(cfg) {
     took_lock: false,
     state_source: loaded.source,
     first_run: loaded.first_run,
-    // D-149: whether this preview's own control-issue read was proven complete.
-    // A dry run that quietly dropped a page would otherwise show a queue that
-    // does not exist, and the host uses this output to verify queue behaviour.
-    control_comments_complete: dryControl.complete === true,
+    // D-149/D-151: this preview's own snapshot - whether the read succeeded,
+    // whether it was PROVEN to cover the whole issue, and which task ids it
+    // classified. A dry run that quietly dropped a page would otherwise show a
+    // queue that does not exist, and the host uses this output to verify queue
+    // behaviour.
+    ...authoritySnapshotEvidence(drySnapshot),
     control_comments_read_error: dryControl.error ?? null,
+    // D-151: EVERY order's authority verdict, not just the chosen candidate's.
+    // An operator can now see at a glance which control comments would execute,
+    // which would be refused and exactly why - before anything runs.
+    order_authority: authorityVerdicts(drySnapshot),
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
     next_candidate: selection.candidate?.taskId ?? null,
     next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
-    // D-150: would the candidate's authority actually be ADMISSIBLE? A preview
-    // that showed a dispatchable candidate while the real run would refuse it at
-    // admission would be worse than no preview - so the exact same gate is asked
-    // here, against this preview's own read.
+    // D-150/D-151: the candidate's verdict, read from the snapshot that chose it
+    // rather than re-derived. `would_dispatch` is therefore exactly the fact the
+    // real run acts on, not a second opinion that could disagree with it.
     next_candidate_order_authority: selection.candidate
-      ? (() => {
-        const a = selectAdmissibleOrder({
-          comments,
-          commentsOk: dryControl.ok,
-          commentsComplete: dryControl.complete === true,
-          trustedAuthor: cfg.trustedAuthor,
-          taskId: selection.candidate.taskId
-        });
-        return {
-          admissible: a.ok,
-          reason: a.reason,
-          retryable: a.ok ? false : a.retryable,
-          distinct_order_count: a.distinctCount,
-          candidate_comment_ids: a.candidateIds,
-          would_dispatch: a.reason === ORDER_AUTHORITY.ADMISSIBLE
-        };
-      })()
+      ? {
+        admissible: selection.candidateAuthority?.ok === true,
+        reason: selection.candidateAuthority?.reason ?? null,
+        retryable: selection.candidateAuthority?.ok === true
+          ? false
+          : (selection.candidateAuthority?.retryable === true),
+        distinct_order_count: selection.candidateAuthority?.distinctCount ?? null,
+        candidate_comment_ids: [...(selection.candidateAuthority?.candidateIds ?? [])],
+        order_comment_id: selection.candidateAuthority?.commentId ?? null,
+        order_created_at: selection.candidateAuthority?.createdAt ?? null,
+        would_dispatch: selection.candidateAuthority?.reason === ORDER_AUTHORITY.ADMISSIBLE
+      }
       : null,
+    // D-151: would a proposed explicit retirement actually be carried out? Shown
+    // for ACCEPTED and REFUSED proposals alike, each with the declaring comment
+    // id and body digest - and shown without mutating anything, which is the
+    // whole point: an operator can check a destructive decision before it runs.
+    supersession_preview: selection.supersessionProposals.map((p) => ({
+      victim_task_id: p.victimTaskId,
+      declared_by_task_id: p.declaredByTaskId,
+      admissible: p.accepted,
+      refused_reason: p.refusedReason,
+      declaring_comment_id: p.declaration?.comment_id ?? null,
+      declaring_order_digest: p.declaration?.body_sha256 ? digestLabel(p.declaration.body_sha256) : null
+    })),
+    inadmissible_authority: selection.inadmissibleAuthorityTaskIds,
     observed_head: selection.observedHead,
     next_candidate_expected_head: selection.candidateExpectedHead,
     next_candidate_head_tier:
@@ -2469,7 +2671,11 @@ function cmdDryRun(cfg) {
       // or the host cannot verify that an unsuccessful newer task is no longer
       // silently invalidating older work.
       superseded_by: d.supersededBy ?? null,
-      supersession_basis: d.supersessionBasis ?? null
+      supersession_basis: d.supersessionBasis ?? null,
+      // D-151: the authority verdict that decided whether this task had any
+      // standing in the queue at all.
+      order_admissible: d.admissible,
+      order_authority_reason: d.authorityReason
     })),
     newest_successful_task: selection.newestSuccessfulTaskId,
     // The USER's checkout. A task's own dirt never appears here by construction.

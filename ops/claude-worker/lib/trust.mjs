@@ -35,37 +35,48 @@ export function validateTrustedTask(comment, { trustedAuthor }) {
 }
 
 /**
- * Find every trusted task, oldest first.
+ * GROUP every trusted ARCHITECT_TASK comment by the TASK_ID it declares.
  *
  * D-150: SAME-ID TASK_UPDATE SEMANTICS ARE GONE. A second comment carrying an
  * existing TASK_ID used to be folded in as an "additive scope update" and its
  * body was written straight into the dispatched prompt - executable authority
  * that the durable admission binding did not cover and that no review had to have
- * seen. One task id has exactly ONE order. Extra same-id comments are therefore
- * collected as `duplicates`, which are EVIDENCE FOR A REFUSAL and never an input
- * to anything executable: not the prompt, not the declared head, not a
- * supersession. Changed or consolidated scope is issued as a FRESH TASK_ID with
- * an explicit `SUPERSEDES=<old id>`.
+ * seen. One task id has exactly ONE order. Changed or consolidated scope is
+ * issued as a FRESH TASK_ID with an explicit `SUPERSEDES=<old id>`.
+ *
+ * D-151: THIS FUNCTION NO LONGER DECIDES ANYTHING. It used to publish two things
+ * that read like verdicts and were not:
+ *
+ *   uniqueAuthority  a boolean derived from a COUNT, computed without knowing
+ *                    whether the read was complete and without any of the edit,
+ *                    comment-id, `created_at` or empty-body checks the real
+ *                    classifier applies. Everything that read a body gated on it,
+ *                    so a unique-but-EDITED order still declared `SUPERSEDES=`.
+ *   comment          the oldest same-id candidate, promoted to "the entry's
+ *                    order" by ARRAY POSITION. The queue then ranked and proved
+ *                    direction from that representative's `created_at` and `id`.
+ *
+ * Both are gone. There is exactly one authority classifier
+ * (`selectAdmissibleOrder`), it is asked once per cycle from the atomic snapshot
+ * (`captureAuthoritySnapshot`), and its verdict is what travels. What is left
+ * here is grouping and counting, which is all a grouping function should ever do.
  *
  * Each entry carries:
  *
- *   comment            the deterministic representative (oldest by created_at,
- *                      then GitHub id) - a stable ORDERING KEY and the thing a
- *                      refusal is reported against, never an authority by itself.
- *   duplicates         every other same-id comment, in issue sequence.
+ *   taskId             the exact id declared.
+ *   candidates         EVERY same-id trusted comment, in a total, deterministic
+ *                      issue sequence. Not "the order and its duplicates" - a
+ *                      candidate SET, with no member privileged over another.
  *   distinctOrderCount how many DISTINCT orders exist for this id, after
  *                      provably-identical `--paginate` repeats are collapsed.
- *   uniqueAuthority    `distinctOrderCount === 1`. Consulted by everything that
- *                      would otherwise read a body: a non-unique entry declares
- *                      nothing and executes nothing.
  *
- * The final authority decision is `selectAdmissibleOrder` in `order-authority.mjs`
- * and is made at admission; this function only has to make sure nothing here
- * quietly picks a winner by array position first.
+ * The returned list is ordered by each group's EARLIEST candidate purely so that
+ * output is stable and diffable. That ordering is presentational: nothing
+ * downstream may rank, dispatch or retire from it.
  */
 export function collectTrustedTasks(comments, { trustedAuthor }) {
   const byId = new Map();
-  for (const c of comments) {
+  for (const c of Array.isArray(comments) ? comments : []) {
     const v = validateTrustedTask(c, { trustedAuthor });
     if (!v.ok) continue;
     if (!byId.has(v.taskId)) byId.set(v.taskId, []);
@@ -74,17 +85,14 @@ export function collectTrustedTasks(comments, { trustedAuthor }) {
 
   const entries = [];
   for (const [taskId, all] of byId) {
-    const ordered = [...all].sort(orderByIssueSequence);
-    const distinctOrderCount = collapseIdenticalOrderRepeats(ordered).length;
+    const candidates = [...all].sort(orderByIssueSequence);
     entries.push({
       taskId,
-      comment: ordered[0],
-      duplicates: ordered.slice(1),
-      distinctOrderCount,
-      uniqueAuthority: distinctOrderCount === 1
+      candidates,
+      distinctOrderCount: collapseIdenticalOrderRepeats(candidates).length
     });
   }
-  return entries.sort((a, b) => orderByIssueSequence(a.comment, b.comment));
+  return entries.sort((a, b) => orderByIssueSequence(a.candidates[0], b.candidates[0]));
 }
 
 /** ---------------- ARCHITECT_CONTROL (supervisor) ---------------- */

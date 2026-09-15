@@ -281,19 +281,21 @@ describe("D-150: the pure helpers are order-insensitive by construction", () => 
   });
 });
 
-describe("D-150: the queue entry and the gate agree about uniqueness", () => {
-  it("collectTrustedTasks marks a duplicated id NON-unique, and the gate refuses it", () => {
+describe("D-151: grouping counts, the gate decides - and only the gate", () => {
+  it("collectTrustedTasks counts a duplicated id, and the ONE gate refuses it", () => {
     const comments = [order(), order({ id: 2, createdAt: "2026-09-15T08:00:00Z", body: `ARCHITECT_TASK\nTASK_ID=${TASK}\nother` })];
     const entries = collectTrustedTasks(comments, { trustedAuthor: TRUSTED });
     expect(entries).toHaveLength(1);
-    expect(entries[0].uniqueAuthority).toBe(false);
     expect(entries[0].distinctOrderCount).toBe(2);
+    // D-151: the grouping function publishes NO verdict of its own. There is one
+    // classifier, and it is this one.
+    expect(entries[0].uniqueAuthority).toBeUndefined();
     expect(admit(comments).reason).toBe(ORDER_AUTHORITY.AMBIGUOUS);
   });
 
-  it("collectTrustedTasks marks a single id unique, and the gate admits it", () => {
+  it("a single id is counted once, and the gate admits it", () => {
     const comments = [order()];
-    expect(collectTrustedTasks(comments, { trustedAuthor: TRUSTED })[0].uniqueAuthority).toBe(true);
+    expect(collectTrustedTasks(comments, { trustedAuthor: TRUSTED })[0].distinctOrderCount).toBe(1);
     expect(admit(comments).ok).toBe(true);
   });
 });

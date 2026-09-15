@@ -355,20 +355,39 @@ function admissionRefusal(taskId) {
  * ========================================================================== */
 
 describe("D-150: an unproven control read admits nothing", () => {
+  /**
+   * D-151 STRENGTHENED THIS, AND MOVED WHERE IT FIRES.
+   *
+   * In D-150 an incomplete read was a PER-TASK hold, reported against the ONE
+   * task the queue had already chosen, exiting BLOCKED (3). It could only fire
+   * after crash recovery, report reconciliation, ranking and retirement had
+   * already run and written terminal state from the same partial read.
+   *
+   * D-151 asks the question at the TOP of the owned run instead, so the hold is
+   * now a WHOLE-CYCLE TRANSIENT (4) with health reason
+   * `control_authority_snapshot_unusable` - and nothing downstream runs at all.
+   * The guarantee these cases assert is unchanged and strictly larger: nothing
+   * is dispatched, nothing is written, no attempt is spent.
+   */
+  const snapshotHold = () => healthEvents()
+    .filter((e) => e.reason === "control_authority_snapshot_unusable").at(-1) ?? null;
+
   it("an INCOMPLETE read dispatches NOTHING, even with the order plainly present", async () => {
     setComments([ordinaryTask()]);
     setFailures({ commentsTruncated: true });
 
     const res = await runWorker("report", goodChild());
 
-    expect(res.code).toBe(3);
+    // D-151: TRANSIENT, and for the whole cycle rather than for this one task.
+    expect(res.code).toBe(4);
     expectNothingDispatched(PLAIN_TASK);
-    const refusal = admissionRefusal(PLAIN_TASK);
-    expect(refusal.authority_reason).toBe(ORDER_AUTHORITY.READ_INCOMPLETE);
-    expect(refusal.retryable).toBe(true);
-    // RETRYABLE means exactly that: nothing at all was written for this task, so
-    // no attempt was spent and the task is still fully eligible.
+    expect(snapshotHold().collection_complete).toBe(false);
+    // Nothing at all was written for this task, so no attempt was spent and the
+    // task is still fully eligible.
     expect(task(PLAIN_TASK)).toBeNull();
+    // And the per-task admission gate never even had to fire - the cycle stopped
+    // long before a candidate existed.
+    expect(admissionRefusal(PLAIN_TASK)).toBeNull();
   }, 300_000);
 
   it("the SAME task then dispatches normally once the read is complete", async () => {
@@ -417,7 +436,8 @@ describe("D-150: an unproven control read admits nothing", () => {
 
     const res = await runWorker("report", goodChild());
 
-    expect(res.code).toBe(3);
+    // D-151: the whole cycle holds, TRANSIENT.
+    expect(res.code).toBe(4);
     expect(dispatched()).toHaveLength(dispatchedBefore);   // NOT re-dispatched
     expect(prompts()).toHaveLength(dispatchedBefore);
     const rec = task(PLAIN_TASK);
@@ -428,7 +448,7 @@ describe("D-150: an unproven control read admits nothing", () => {
     expect(rec.architect_order).toEqual(bound);
     expect(existsSync(wt(PLAIN_TASK))).toBe(true);
     expect(claim(PLAIN_TASK).claim.state).toBe(CLAIM_STATE.READY);
-    expect(admissionRefusal(PLAIN_TASK).authority_reason).toBe(ORDER_AUTHORITY.READ_INCOMPLETE);
+    expect(snapshotHold().collection_complete).toBe(false);
   }, 300_000);
 });
 
@@ -573,9 +593,18 @@ describe("D-150: a task id has exactly one executable order", () => {
 
     const res = await runWorker("report", goodChild());
 
-    expect(res.code).toBe(0);
+    // THE CLAIM UNDER TEST, unchanged: the clean task still runs, in full.
     expect(dispatched()).toEqual([PLAIN_TASK]);
     expect(task(PLAIN_TASK).successful).toBe(true);
+    expect(task(PLAIN_TASK).status).toBe(TASK_STATUS.COMPLETED);
+    // D-151: the ambiguous OTHER order is now refused and retired in the same
+    // cycle rather than merely being skipped, and a control comment that needs a
+    // human plus a fresh TASK_ID keeps the run from reporting itself healthy.
+    // That is a report about the QUEUE, not about this task - which is exactly
+    // why the assertions above are the ones that matter here.
+    expect(res.code).toBe(3);
+    expect(task(MERGE_TASK).status).toBe(TASK_STATUS.BLOCKED);
+    expect(task(MERGE_TASK).order_authority_failure.reason).toBe(ORDER_AUTHORITY.AMBIGUOUS);
   }, 300_000);
 });
 

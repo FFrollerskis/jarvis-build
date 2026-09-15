@@ -104,6 +104,12 @@ export const PAYLOAD = Object.freeze([
   // fail to start a task at all. Listed the moment it was written, because the
   // closure test below is what turns a forgotten line into a caught one.
   "lib/order-authority.mjs",
+  // D-151. The cycle's atomic authority snapshot. `worker.mjs` captures it at the
+  // TOP of the owned run, before recovery, reconciliation, selection, retirement
+  // and dispatch - so a deployed worker missing this file would not fail late, it
+  // would fail on its first line of real work. The ESM-closure test below caught
+  // this omission too, which is exactly what it is for.
+  "lib/authority-snapshot.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",
