@@ -437,7 +437,7 @@ Worker (`worker.mjs`):
     når begge finnes) er ikke en ordre.
   - **SAME-ID `TASK_UPDATE` ER IKKE LENGER EKSEKVERBAR SEMANTIKK.** En ny
     kommentar med en eksisterende `TASK_ID` er en ANDRE ORDRE, ikke et tillegg.
-    Den havner i `duplicates` som bevis for en refusjon og når ALDRI prompten,
+    Den er en KANDIDAT som beviser en refusjon, og når ALDRI prompten,
     `EXPECTED_HEAD_SHA` eller `SUPERSEDES`. **Endret eller konsolidert scope
     utstedes som en FERSK `TASK_ID` med eksplisitt `SUPERSEDES=<gammel id>`** —
     det er den støttede, retningsbestemte og reviderbare veien (se C4). Det
@@ -459,6 +459,49 @@ Worker (`worker.mjs`):
   - **`dry-run` viser den samme dommen** (`next_candidate_order_authority`), så
     en forhåndsvisning aldri kan vise en dispatchbar kandidat som den ekte
     kjøringen ville refusert.
+- **C10 (ÉN FULLSTENDIG, UFORANDERLIG AUTORITETS-SNAPSHOT PER SYKLUS, D-151).**
+  En worker-syklus avgjør fra ÉTT komplett, frosset snapshot, eller den avgjør
+  ingenting. D-150 stilte det riktige spørsmålet på feil sted: porten kjørte
+  SENT, for den ENE tasken køen allerede hadde valgt, mens alt foran den
+  fortsatt kjørte på en ubevist lesning og på en autoritet avgjort en andre,
+  svakere vei.
+  - **Snapshotet tas ØVERST i den eide kjøringen** (`lib/authority-snapshot.mjs`,
+    `captureAuthoritySnapshot`), rett etter auth- og lesebeviset og FØR enhver
+    beslutning. Er lesningen feilet, inkomplett, avkortet eller ubevist (også en
+    bar array uten kompletthetsbevis): navngitt, ikke-null TRANSIENT resultat, og
+    syklusen gjør INGENTING — ingen krasj-recovery-beslutning, ingen
+    kø-seleksjon, ingen rapport-retirering, ingen supersession, ingen
+    task-state-mutasjon, ingen worktree-/scratch-/repo-handling, ingen
+    transition-API-lesning, ingen prompt og ingen barneprosess. Hver eksisterende
+    task, claim og worktree står byte-for-byte som før.
+  - **Autoriteten klassifiseres ÉN gang, for HVER task-id i snapshotet**, av den
+    ene klassifisereren, og dommen REISER MED entryen gjennom kø-seleksjon til
+    dispatch. `collectTrustedTasks` grupperer og teller nå, og publiserer verken
+    `uniqueAuthority` (en telling som ikke kan se en redigering) eller en
+    representant valgt av ARRAY-POSISJON (som køen rangerte og beviste retning
+    fra). `runTask` sjekker den MEDBRAGTE dommen; den utleder ingen ny.
+  - **En inadmissibel ordre bidrar med INGENTING semantisk.** `order`/`comment` er
+    `null`, så `EXPECTED_HEAD_SHA`, `SUPERSEDES`, rangeringsposisjon, egnethet og
+    eksekverbar kropp er strukturelt utilgjengelige — den feiler lukket av
+    konstruksjon, ikke ved at noen husker å sjekke et flagg. Den får sin egen
+    navngitte grunn (`INELIGIBLE.INADMISSIBLE_AUTHORITY`), rapporteres og
+    retireres FØR seleksjonen, og kan derfor aldri preempte en gyldig ordre.
+  - **Uprovbar utstedelsesrekkefølge retirerer ingenting.** `created_at`/comment-id
+    som ikke lot seg lese ble tidligere `0`, som gjorde ordren eldre enn alt som
+    noensinne er utstedt — og «strengt eldre» er hele det retningsbestemte
+    argumentet for å retirere. Nå er svaret: vi vet ikke, og da retireres
+    ingenting.
+  - **Supersession er en durabel destruktiv beslutning.** Den krever komplett
+    snapshot OG en admissibel deklarerende ordre, og HVER admissibel deklarasjon
+    registreres med comment-id OG kroppens digest (`superseded_declarations`,
+    `superseded_snapshot_complete`). Ingenting løses lenger ved å beholde den
+    «første» eller «siste» — en comment-id alene beviser ingenting når den samme
+    GitHub-innloggingen workeren stoler på kan redigere kommentaren.
+  - **`dry-run` viser alt dette uten å mutere noe:** snapshot-kompletthet
+    (`snapshot_usable`, `control_comments_complete`), HVER ordres dom
+    (`order_authority`), og om en foreslått retirering ville blitt utført
+    (`supersession_preview`, med deklarerende comment-id og digest). En ubevist
+    lesning gir `would_exit: TRANSIENT` og INGEN kø, kandidat eller retirering.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
