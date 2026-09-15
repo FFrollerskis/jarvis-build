@@ -8,17 +8,37 @@
  * control issue.
  *
  * Store layout (JARVIS_FAKE_GH_DIR):
- *   comments.json  - the control issue's comments, read and appended to
- *   branches.json  - remote branch names
- *   pulls.json     - pull requests
- *   fail.json      - optional { auth, comments, branches, pulls } booleans
+ *   comments.json   - the control issue's comments, read and appended to
+ *   branches.json   - remote branch names
+ *   pulls.json      - pull requests. D-145: an entry may additionally carry
+ *                     `merged`, `headSha`, `baseSha`, `headRef`, `baseRef`, which
+ *                     `repos/O/R/pulls/<n>` serves as the merge-state projection.
+ *   commits.json    - D-145: `{ "<sha>": { sha, treeSha, parents: [...] } }`,
+ *                     served by `repos/O/R/commits/<sha>`. A sha that is absent
+ *                     404s, exactly as the real API does.
+ *   check-runs.json - D-145: `{ "<sha>": [{ name, status, conclusion }] }`,
+ *                     served by `repos/O/R/commits/<sha>/check-runs`.
+ *   fail.json       - optional { auth, comments, branches, pulls, commits,
+ *                     checks, mergeState } booleans
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DIR = process.env.JARVIS_FAKE_GH_DIR;
 const args = process.argv.slice(2);
+
+/**
+ * D-147: `api.log` - every invocation this fake was asked to serve, in order.
+ *
+ * The ordinary non-merge path is supposed to cost ZERO merge-transition reads,
+ * and an undecidable merge authorization is supposed to fail closed BEFORE any
+ * remote call. Both are claims about calls that did not happen, and a claim like
+ * that can only be checked against a record of the calls that did.
+ */
+try {
+  appendFileSync(join(DIR, "api.log"), `${args.join(" ")}\n`, "utf8");
+} catch { /* best effort: the log is evidence, never a dependency */ }
 
 function read(name, fallback) {
   const path = join(DIR, name);
@@ -74,13 +94,106 @@ if (urlArg.includes("/issues/") && urlArg.includes("/comments")) {
     const until = Date.now() + delay;
     while (Date.now() < until) { /* deliberate busy wait: the test kills us here */ }
   }
-  process.stdout.write(JSON.stringify(read("comments.json", []), null, 2));
+  const stored = read("comments.json", []);
+  /**
+   * D-150: `fail.json { commentsTruncated: true }` - a read that SUCCEEDS and is
+   * still not complete.
+   *
+   * This is the shape that actually loses a control comment in production, and
+   * it is not a failure anywhere: `gh api --paginate` exits 0 and prints one JSON
+   * array per page, and a dropped or cut-off page just means one of those
+   * fragments will not parse. `parsePaginatedJsonDetailed` reports it via
+   * `complete: false`, and nothing may conclude ABSENCE from it.
+   *
+   * The output below is deliberately faithful to that: every stored comment IS
+   * returned, in a first well-formed fragment, followed by a second fragment that
+   * was cut off mid-object. A reader looking only at the resulting array sees a
+   * perfectly good set - which is exactly why absence had to stop being evidence.
+   */
+  /**
+   * D-151: `fail.json { commentsOmit: [<id>, ...] }` - the page that went missing
+   * CONTAINED SOMETHING.
+   *
+   * `commentsTruncated` alone loses a page that happens to be empty, so the
+   * surviving array is both incomplete and complete-looking. This knob is the
+   * dangerous shape: the lost fragment held real comments - a second same-id
+   * order, a newer report, a retirement - and what comes back is a perfectly
+   * self-consistent set that says something FALSE about the world. Always
+   * incomplete: a read that silently dropped comments and reported itself whole
+   * is not something `gh api --paginate` can do, and faking it would be testing
+   * an impossible input rather than the real one.
+   */
+  if (Array.isArray(failures.commentsOmit) && failures.commentsOmit.length > 0) {
+    const omit = failures.commentsOmit.map((i) => String(i));
+    const visible = stored.filter((c) => !omit.includes(String(c.id)));
+    process.stdout.write(JSON.stringify(visible, null, 2));
+    process.stdout.write("\n[\n  {\n    \"id\": 987654,\n    \"body\": \"ARCHITECT_TASK\\nTASK_ID=");
+    process.exit(0);
+  }
+  if (failures.commentsTruncated) {
+    process.stdout.write(JSON.stringify(stored, null, 2));
+    process.stdout.write("\n[\n  {\n    \"id\": 987654,\n    \"body\": \"ARCHITECT_TASK\\nTASK_ID=");
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify(stored, null, 2));
   process.exit(0);
 }
 
 if (urlArg.includes("/branches")) {
   if (failures.branches) die("gh: HTTP 403 rate limit exceeded");
   process.stdout.write(read("branches.json", ["main"]).join("\n") + "\n");
+  process.exit(0);
+}
+
+/**
+ * D-145: one commit's parents and tree, and the check runs on it.
+ *
+ * Matched BEFORE `/pulls` deliberately - `repos/O/R/commits/...` shares no
+ * prefix with it, but keeping the exact-commit routes first makes the ordering
+ * independent of how the pull routes are matched.
+ */
+const commitMatch = urlArg.match(/\/commits\/([^/?]+)(\/check-runs)?/);
+if (commitMatch) {
+  const sha = decodeURIComponent(commitMatch[1]);
+  if (commitMatch[2]) {
+    if (failures.checks) die("gh: HTTP 403 rate limit exceeded");
+    const runs = read("check-runs.json", {})[sha];
+    // An unknown sha has no check runs - not an error, just nothing.
+    process.stdout.write((runs ?? []).map((r) => JSON.stringify({
+      name: r.name, status: r.status ?? "completed", conclusion: r.conclusion ?? null
+    })).join("\n") + ((runs ?? []).length > 0 ? "\n" : ""));
+    process.exit(0);
+  }
+  if (failures.commits) die("gh: HTTP 403 rate limit exceeded");
+  const commit = read("commits.json", {})[sha];
+  if (!commit) die(`gh: HTTP 404: No commit found for SHA: ${sha}`);
+  process.stdout.write(JSON.stringify({
+    sha: commit.sha ?? sha,
+    treeSha: commit.treeSha ?? null,
+    parents: commit.parents ?? [],
+    verified: commit.verified ?? true,
+    message: commit.message ?? ""
+  }) + "\n");
+  process.exit(0);
+}
+
+// D-145: the merge-state projection for ONE pull request. Distinguished from the
+// list route by the trailing number, and from `getPull` by the fields asked for.
+const oneP = urlArg.match(/\/pulls\/(\d+)$/);
+if (oneP && args.some((a) => String(a).includes("merged:"))) {
+  if (failures.mergeState || failures.pulls) die("gh: HTTP 403 rate limit exceeded");
+  const p = read("pulls.json", []).find((x) => Number(x.number) === Number(oneP[1]));
+  if (!p) die(`gh: HTTP 404: Not Found (pulls/${oneP[1]})`);
+  process.stdout.write(JSON.stringify({
+    number: p.number,
+    merged: p.merged ?? false,
+    mergeCommitSha: p.mergeCommitSha ?? null,
+    headSha: p.headSha ?? null,
+    baseSha: p.baseSha ?? null,
+    headRef: p.headRefName ?? null,
+    baseRef: p.baseRef ?? "main",
+    state: p.state ?? "open"
+  }) + "\n");
   process.exit(0);
 }
 

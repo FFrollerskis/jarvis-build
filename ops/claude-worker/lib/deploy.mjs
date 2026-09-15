@@ -89,6 +89,27 @@ export const PAYLOAD = Object.freeze([
   "lib/recovery.mjs",
   "lib/worktree.mjs",
   "lib/provenance.mjs",
+  // D-145 added `merge-transition.mjs` and worker.mjs imports it, but it was
+  // never added here - so a deployed worker would have crashed on an unresolved
+  // import. The ESM-closure test below is what catches that, and it is why the
+  // closure is computed from the real entrypoints rather than maintained by hand.
+  "lib/merge-transition.mjs",
+  "lib/postmerge-evidence.mjs",
+  // D-149. `state.mjs` imports it too, so a deployed worker missing this file
+  // would fail to LOAD ITS OWN STATE, not merely fail a merge gate. The ESM
+  // closure test below caught the omission before this line existed.
+  "lib/order-binding.mjs",
+  // D-150. `trust.mjs` and `worker.mjs` both import it, and it is the ADMISSION
+  // gate: a deployed worker missing this file would not fail to merge, it would
+  // fail to start a task at all. Listed the moment it was written, because the
+  // closure test below is what turns a forgotten line into a caught one.
+  "lib/order-authority.mjs",
+  // D-151. The cycle's atomic authority snapshot. `worker.mjs` captures it at the
+  // TOP of the owned run, before recovery, reconciliation, selection, retirement
+  // and dispatch - so a deployed worker missing this file would not fail late, it
+  // would fail on its first line of real work. The ESM-closure test below caught
+  // this omission too, which is exactly what it is for.
+  "lib/authority-snapshot.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",

@@ -418,6 +418,125 @@ Worker (`worker.mjs`):
     krasj-recovery — nettopp banen D-136-vinduet lander på — avsluttet med 0. Nå
     gir enhver holdt port exit 3, også når kjøringen etterpå dispatchet en annen
     task uten problemer.
+- **C9 (ÉN UFORANDERLIG, FULLSTENDIG LEST, UNIKT IDENTIFISERT ORDRE PER TASK,
+  D-150).** En admittert task eksekverer nøyaktig ÉN ordre, eller ingen. Porten
+  (`lib/order-authority.mjs`, `selectAdmissibleOrder`) kjører FØR bindingen, før
+  quarantine, før dirty-guarden, før en worktree finnes og før noe barn er
+  skapt — så en refusjon her dispatcher ingenting i det hele tatt.
+  - **Kompletthet er et krav, ikke en advarsel.** Kontroll-lesningen må være
+    `ok=true` OG `complete=true`. En lesning vi ikke kan gå god for kan verken
+    bevise at ordren er unik eller at den er til stede, og det en tapt
+    `--paginate`-side skjuler er nøyaktig den andre ordren.
+  - **Unikhet avgjøres av MENGDENS STØRRELSE, ikke av et valg.** Nøyaktig én
+    DISTINKT betrodd `ARCHITECT_TASK` for `TASK_ID`-en. Overlappende
+    pagineringskopier (identisk id + kropp + `created_at`) er ÉN ordre; enhver
+    avvikende kropp under samme id er to. Det skannes aldri framover etter en
+    brukbar ordre.
+  - **Deterministisk identitet og ordning kreves:** GitHubs egen comment-id og en
+    parsbar `created_at`. En redigert kommentar (`created_at !== updated_at`, kun
+    når begge finnes) er ikke en ordre.
+  - **SAME-ID `TASK_UPDATE` ER IKKE LENGER EKSEKVERBAR SEMANTIKK.** En ny
+    kommentar med en eksisterende `TASK_ID` er en ANDRE ORDRE, ikke et tillegg.
+    Den er en KANDIDAT som beviser en refusjon, og når ALDRI prompten,
+    `EXPECTED_HEAD_SHA` eller `SUPERSEDES`. **Endret eller konsolidert scope
+    utstedes som en FERSK `TASK_ID` med eksplisitt `SUPERSEDES=<gammel id>`** —
+    det er den støttede, retningsbestemte og reviderbare veien (se C4). Det
+    finnes med vilje ingen kompatibilitetssti: en allerede admittert eller
+    tvetydig legacy-post HOLDER og krever en fersk id.
+  - **To ulike hold, med vilje.** Er funnet om VÅR LESNING (feilet/inkomplett) er
+    tasken ikke-terminal og helt urørt — ingen state-rad, ingen brukt attempt,
+    ingen worktree — og neste kjøring med hel lesning admitterer den normalt; å
+    gjøre én tapt side terminal ville vært en denial of service mot køen. Er
+    funnet om ORDREN (fraværende/tvetydig/redigert/uidentifisert/uordnet) er det
+    terminalt BLOCKED, fordi en retry stiller identisk spørsmål: gjenopprettingen
+    er et menneske og en fersk `TASK_ID`.
+  - **Prompten bærer eksakt de bundne bytene.** `resolveExecutableOrder` krever at
+    bytene som er i ferd med å sendes hasher til nøyaktig digesten som ble
+    registrert ved admittering; ellers `unbound_executable_order`, returnert FØR
+    `buildPrompt` og FØR `spawn`. Håndhevet både i `runClaude` og i `buildPrompt`
+    selv — samme argument som for `promptDelivery` under — og `buildPrompt` har
+    ingen løkke igjen som kan rendre en ubunden kropp.
+  - **`dry-run` viser den samme dommen** (`next_candidate_order_authority`), så
+    en forhåndsvisning aldri kan vise en dispatchbar kandidat som den ekte
+    kjøringen ville refusert.
+- **C10 (ÉN FULLSTENDIG, UFORANDERLIG AUTORITETS-SNAPSHOT PER SYKLUS, D-151).**
+  En worker-syklus avgjør fra ÉTT komplett, frosset snapshot, eller den avgjør
+  ingenting. D-150 stilte det riktige spørsmålet på feil sted: porten kjørte
+  SENT, for den ENE tasken køen allerede hadde valgt, mens alt foran den
+  fortsatt kjørte på en ubevist lesning og på en autoritet avgjort en andre,
+  svakere vei.
+  - **Snapshotet tas ØVERST i den eide kjøringen** (`lib/authority-snapshot.mjs`,
+    `captureAuthoritySnapshot`), rett etter auth- og lesebeviset og FØR enhver
+    beslutning. Er lesningen feilet, inkomplett, avkortet eller ubevist (også en
+    bar array uten kompletthetsbevis): navngitt, ikke-null TRANSIENT resultat, og
+    syklusen gjør INGENTING — ingen krasj-recovery-beslutning, ingen
+    kø-seleksjon, ingen rapport-retirering, ingen supersession, ingen
+    task-state-mutasjon, ingen worktree-/scratch-/repo-handling, ingen
+    transition-API-lesning, ingen prompt og ingen barneprosess. Hver eksisterende
+    task, claim og worktree står byte-for-byte som før.
+  - **Autoriteten klassifiseres ÉN gang, for HVER task-id i snapshotet**, av den
+    ene klassifisereren, og dommen REISER MED entryen gjennom kø-seleksjon til
+    dispatch. `collectTrustedTasks` grupperer og teller nå, og publiserer verken
+    `uniqueAuthority` (en telling som ikke kan se en redigering) eller en
+    representant valgt av ARRAY-POSISJON (som køen rangerte og beviste retning
+    fra). `runTask` sjekker den MEDBRAGTE dommen; den utleder ingen ny.
+  - **En inadmissibel ordre bidrar med INGENTING semantisk.** `order`/`comment` er
+    `null`, så `EXPECTED_HEAD_SHA`, `SUPERSEDES`, rangeringsposisjon, egnethet og
+    eksekverbar kropp er strukturelt utilgjengelige — den feiler lukket av
+    konstruksjon, ikke ved at noen husker å sjekke et flagg. Den får sin egen
+    navngitte grunn (`INELIGIBLE.INADMISSIBLE_AUTHORITY`), rapporteres og
+    retireres FØR seleksjonen, og kan derfor aldri preempte en gyldig ordre.
+  - **Uprovbar utstedelsesrekkefølge retirerer ingenting.** `created_at`/comment-id
+    som ikke lot seg lese ble tidligere `0`, som gjorde ordren eldre enn alt som
+    noensinne er utstedt — og «strengt eldre» er hele det retningsbestemte
+    argumentet for å retirere. Nå er svaret: vi vet ikke, og da retireres
+    ingenting.
+  - **Supersession er en durabel destruktiv beslutning.** Den krever komplett
+    snapshot OG en admissibel deklarerende ordre, og HVER admissibel deklarasjon
+    registreres med comment-id OG kroppens digest (`superseded_declarations`,
+    `superseded_snapshot_complete`). Ingenting løses lenger ved å beholde den
+    «første» eller «siste» — en comment-id alene beviser ingenting når den samme
+    GitHub-innloggingen workeren stoler på kan redigere kommentaren.
+  - **`dry-run` viser alt dette uten å mutere noe:** snapshot-kompletthet
+    (`snapshot_usable`, `control_comments_complete`), HVER ordres dom
+    (`order_authority`), og om en foreslått retirering ville blitt utført
+    (`supersession_preview`, med deklarerende comment-id og digest). En ubevist
+    lesning gir `would_exit: TRANSIENT` og INGEN kø, kandidat eller retirering.
+- **C11 (ET UBRUKELIG SNAPSHOT SKRIVER INGENTING, D-152).** D-151 plasserte
+  grensen riktig og skrev deretter gjennom den: refusjonsgrenen kalte
+  `reportStatus`, som ikke er en observasjon men TRE skrivinger.
+  - **`postComment` publiserte til KONTROLL-ISSUEN — køens egen inngang.** En
+    syklus som nettopp hadde erklært at den ikke kunne lese den issuen, la
+    likevel til i den, og hver senere syklus leser kommentaren tilbake som en del
+    av SITT autoritets-snapshot. Én flaky `gh api --paginate` ble et permanent,
+    globalt synlig artefakt forfattet av en syklus uten autoritet.
+  - **`postComment` skrev først en body-fil inn i `scratchRoot`** og opprettet
+    katalogen — scratch-aktivitet som holdets egen melding SAMTIDIG påstod ikke
+    hadde skjedd.
+  - **`recordPostedStatus` appendet til dedupliseringsjournalen.** Det er durabel
+    beslutningstilstand, og den avgjør FRAMTIDEN: når nøkkelen er journalført,
+    undertrykkes det samme funnet i `statusRepeatHours`. En ubevist lesning
+    kjøpte seg altså stille seks timers taushet om en tilstand som til da kan ha
+    blitt reell og genuint verdt å rapportere.
+  - **Alle tre er fjernet fra refusjonsgrenen.** Det som står igjen er den eneste
+    kategorien som ikke kan korrumpere en senere beslutning: LOKALT APPEND-ONLY
+    BEVIS. Logg og health-journal skrives på denne verten, leses aldri tilbake
+    som autoritet, og er nøyaktig det en operatør trenger.
+  - **Beviset er falsifiserbart, ikke bare taust.** Health-eventen
+    `control_authority_snapshot_unusable` bærer `snapshot_reason`,
+    `snapshot_detail`, `held: true`, `exit: 4` og — positivt formulert —
+    `status_comment_posted: false`, `posted_status_recorded: false`,
+    `durable_state_written: false`. Loggen navngir funnet og det holdte
+    TRANSIENT-utfallet, og påstår aldri at en status-kommentar ble postet.
+  - **Komplett-snapshot-stien er uendret.** Forbudet gjelder å skrive FRA EN
+    SYKLUS SOM BEVISTE AT DEN IKKE KUNNE LESE — ikke å skrive i det hele tatt.
+    Legitim status-/rapport-posting etter et bevist komplett snapshot virker som
+    før, dedupliseringen inkludert.
+  - **`JARVIS_WORKER_FAULT=control_read_unproven`** (TEST-ONLY) forfalsker BARE
+    lesningens form, slik at `READ_UNPROVEN` — som ellers er unåbar utenfra,
+    fordi `fetchIssueCommentsDetailed` alltid leverer kompletthetsbevis — kan
+    testes gjennom den ekte entrypointen. Armeringen annonseres høylytt i logg og
+    health som alle andre faults.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er

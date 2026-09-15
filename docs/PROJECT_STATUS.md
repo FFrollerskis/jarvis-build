@@ -1,98 +1,128 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-14 (branch `claude/d132-worker-recovery-reconciliation`, PR #80 draft, base
-`main=c67a7ba792b8d655a26379655ffec31b353b7101`). Aktiv ordre: **D-143**
-(`D143-PR80-DISTRIBUTED-FENCING-HOST-RECOVERY-20260914-A`, issue #68 kommentar 5670343618,
-`SUPERSEDES=D142-PR80-DURABLE-LEASE-EPOCH-RECOVERY-20260914-A`). D-139 til D-142 er superseded.
-`MERGE_AUTHORIZED=false`, `ARCHITECT_MERGE_APPROVED=false`, `SELF_APPROVAL=false` - PR #80 er IKKE merget.
+**Oppdatert:** 2026-09-15 (branch `claude/d145-merge-transition-provenance` = PR #81, base
+`main=0c803bf1c1724413dc8e8071a7aabe7fd52562e4`). Aktiv ordre: **D-152**
+(`D152-PR81-ZERO-WRITE-REFUSED-SNAPSHOT-20260915-A`, issue #68 kommentar 5678564408,
+`SUPERSEDES=D151-PR81-ATOMIC-AUTHORITY-SNAPSHOT-20260915-A`, `ARCHITECT_REVIEW_ID=5208613949`).
+`MERGE_AUTHORIZED=false`, `ARCHITECT_MERGE_APPROVED=false`, `SELF_APPROVAL=false`.
+
+PR #80 er MERGET (merge-SHA `0c803bf1`). PR #81 er ÅPEN og DRAFT og inneholder D-145 + D-146 + D-147
++ D-148 + D-149 + D-150 + D-151 + D-152 som én sammenhengende kontrollplan-leveranse. D-152 gjør det
+D-151 plasserte riktig, men skrev gjennom: et ubrukelig autoritets-snapshot er nå en EKTE
+null-skrive-beslutningsgrense.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## Fase A - kryssvert-overtakelse fjernet (ferdig, testet)
+## Defekten (ferdig, testet)
 
-D-141/D-142 tok over en kryssvert-leie naar `now > heartbeat_at_ms + ttl_ms`. Den slutningen holder
-ikke: `heartbeat_at_ms` er skrevet med den FREMMEDE vertens wall clock og ble maalt mot VAAR. Uten en
-bevist kontrakt for bundet klokkeavvik er det en antakelse, ikke en observasjon - og den feiler i den
-farlige retningen: en kontender med en klokke som gaar for fort «observerer» en frisk leie som
-forlatt og stjeler en port i aktiv bruk.
+D-151 flyttet kompletthets-spørsmålet øverst i syklusen og gjorde det fatalt for HELE syklusen.
+Plasseringen er riktig. Men selve refusjonsgrenen kalte `reportStatus`, og `reportStatus` er ikke en
+observasjon - den er TRE skrivinger, alle verifisert i koden på `44407ee1`:
 
-**Valgt arkitektur: fail closed for ALLE kryssvert-eiere.** D-143 tilbød enten dette eller en ekte
-delt, autoritativ expiry-/lock-tjeneste. Leiekatalogen er vertslokal (`os.tmpdir()`), saa distribuert
-overtakelse loeser et problem vi ikke har; en delt tjeneste ville gitt ny driftsavhengighet og en
-distribuert protokoll vi maatte bevise, for null gevinst.
+1. **`postComment` PUBLISERER TIL KONTROLL-ISSUEN.** Kontroll-issuen er køens EGEN INNGANG. En syklus
+   som nettopp hadde erklært at den ikke kunne lese den issuen, la likevel til i den - og hver senere
+   syklus leser den kommentaren tilbake som en del av SITT autoritets-snapshot. Én flaky
+   `gh api --paginate` ble dermed et permanent, globalt synlig artefakt forfattet av en syklus uten
+   noen som helst autoritet.
+2. **`postComment` SKRIVER FØRST EN BODY-FIL INN I `scratchRoot`** og oppretter katalogen hvis den
+   mangler - scratch-aktivitet som holdets egen melding SAMTIDIG påstod ikke hadde skjedd.
+3. **`recordPostedStatus` APPENDER TIL DEDUPLISERINGSJOURNALEN.** Det er durabel beslutningstilstand,
+   og den avgjør FRAMTIDEN: når nøkkelen er journalført, undertrykkes det samme funnet i
+   `statusRepeatHours`. En ubevist lesning kjøpte seg altså stille seks timers taushet om en tilstand
+   som til da kan ha blitt reell og genuint verdt å rapportere.
 
-- `reclaimVerdict` gir ÉTT verdikt for enhver leie eid av en annen vert: `HELD_REMOTE_OWNER`
-  (`held_remote_owner_fail_closed`) - uavhengig av heartbeat, ttl, lesbarhet og lokal pid-liveness.
-- `RECLAIMABLE_EXPIRED`, `HELD_REMOTE_HEARTBEAT_VALID` og `HELD_REMOTE_UNVERIFIABLE` er FJERNET, ikke
-  beholdt som døde verdikter som kunne lest som om de fortsatt styrte noe.
-- Eneste avgrensning: en fjern GRAVSTEIN er fortsatt ledig. En eier som eksplisitt ga slipp er ikke
-  et gjett om liv.
-- TTL beholdes, men er ikke lenger overtakelsesgrunnlag for NOEN. Den brukes kun av en eier mot sine
-  EGNE tidsstempler i `verifyOwnership()` - samme prosess, samme klokke.
+## Rettelsen (ferdig, testet)
 
-Samme-vert-oppførsel er uendret: levende pid stjeles aldri, død og gammel nok kan tas over, og
-release/heartbeat/reclaim er fortsatt betinget av eksakt epoke/eier/inkarnasjon. Durable
-aldri-nullstilte epoker, gravsteiner, høyvannssjekk etter sikret sti, katalog-inkarnasjon, bounded
-retry og rejected-port-utelukkelse fra D-142 er bevart uendret.
+**Alle tre skrivingene er fjernet fra refusjonsgrenen** i den ekte eide worker-stien (`runOwned` i
+`ops/claude-worker/worker.mjs`). Ingen `reportStatus`, ingen `postComment`, ingen
+`recordPostedStatus`, ingen scratch-katalog. Det som står igjen er den eneste kategorien som ikke kan
+korrumpere en senere beslutning: LOKALT APPEND-ONLY BEVIS. Logg og health-journal skrives på denne
+verten, leses aldri tilbake som autoritet, og er nøyaktig det en operatør trenger for å se at
+workeren holdt og hvorfor.
 
-**Bevis: 71/71, null skipped.** Nytt i D-143: klokkeskjev i BEGGE retninger (en time foran og en time
-bak gir samme svar), verdikt bevist uavhengig av `now` over seks størrelsesordener, EKTE DELT
-leiekatalog med offer og raider i SAMME katalog (D-142 brukte to uavhengige kataloger og beviste
-dermed ikke dette), og at intet intervall i den offentlige livssyklusen har to autoritative eiere -
-etterfølgeren finnes først NÅR forgjengeren er fenced. Bevart og re-kjørt: reset-ABA, flersyklus
-epoke-unikhet, stale multiprosess-kontensjon, release/heartbeat/etterfølger-kapløp, katalog-
-reinkarnasjon.
+**Beviset navngir refusjonen og påstår aldri en posting.** Health-eventen
+`control_authority_snapshot_unusable` bærer nå `snapshot_reason`, `snapshot_detail`, `held: true`,
+`exit: 4` og - positivt formulert, slik at beviset er FALSIFISERBART i stedet for bare taust om hva
+det ikke gjorde - `status_comment_posted: false`, `posted_status_recorded: false`,
+`durable_state_written: false`. Loggen sier eksplisitt at INGEN GitHub-kommentar ble postet og INGEN
+dedup-oppføring registrert, og navngir det holdte TRANSIENT-utfallet (exit 4).
 
-## Fase B - kontrollplanen uendret
+**Grensen står strukturelt der den stod.** Snapshotet tas fortsatt i `runOwned` rett etter auth- og
+lesebeviset og FØR recovery, rekonsiliasjon, kø-seleksjon, retirering, supersession,
+task-state-persistering, worktree-/scratch-/repo-handling, transition-lesning, prompt-bygging og
+barne-spawn. `cmdDryRun` skrev allerede ingenting og er uendret.
 
-`ops/claude-worker` er ikke endret. Full suite kjørt som regresjonskontroll: **24 filer, 715/715**,
-null skipped. Proveniens, dirty-completion, kø-rekkefølge ved stale head, isolerte task-worktrees,
-kanoniske terminalstatuser og den strikte primær-worktree-porten er uberørt.
+**Komplett-snapshot-stien er IKKE svekket.** Forbudet gjelder å skrive FRA EN SYKLUS SOM BEVISTE AT
+DEN IKKE KUNNE LESE - ikke å skrive i det hele tatt. Legitim status-/rapport-posting etter et bevist
+komplett snapshot er uendret og fortsatt dekket, dedupliseringen inkludert.
 
-## Fase C - kvalitet og CI
+**Ny TEST-ONLY fault `control_read_unproven`.** `READ_UNPROVEN` er snapshotets vern mot en lesning
+INGEN GIKK GOD FOR, og `fetchIssueCommentsDetailed` leverer alltid kompletthetsbevis i dag - funnet er
+derfor unåbart utenfra prosessen og finnes for å hindre en FRAMTIDIG kaller eller refaktorering i
+stille å gjeninnføre den svakere kontrakten. Det er nøyaktig situasjonen den etablerte
+`JARVIS_WORKER_FAULT`-konvensjonen allerede dekker. Bare lesningens FORM forfalskes; snapshot-fangst,
+refusjon, bevis og exit er den ekte, uendrede kodestien, og armeringen annonseres høylytt i logg og
+health som alle andre faults.
 
-Lokalt grønt: leiesuiten 71/71, `ops/claude-worker` 715/715, `pnpm -w lint`, `pnpm -r run typecheck`,
-`node --check` på 51 worker-runtime-`.mjs`, `git diff --check`. gitleaks 8.24.3 over hele historikken:
-ingen funn (36 `--no-git`-treff er alle i git-ignorerte, usporede `.env`/`.env.bak.*`).
+**Ingenting av D-145..D-151 er svekket.** Uforanderlig ordrebinding, unik uredigert autoritet, ingen
+eksekverbare same-id-oppdateringer, obligatorisk merge-overgangs-/closeout-/navngitt-CI-bevis,
+strenge dirty-/proveniens-/isolasjonsporter og kun normal two-parent merge når det er separat
+autorisert - alt står uendret.
 
-**BLOKKERING FOR LOKALT POSTGRES-BEVIS (uendret).** Claude Code-sesjonen kjører FORHØYET (`High
-Mandatory Level`, Administrator), og PostgreSQL nekter å starte under en administrator-konto:
+## Bevis
 
-    Execution of PostgreSQL by a user with administrative permissions is not permitted.
-
-Bevist å være en egenskap ved SESJONEN, ikke ved endringen: uendret baseline-kode fra `ee3c902` feiler
-identisk. `runas /trustlevel` ble avvist av Claude Code sin auto-mode. **For å gjenopprette lokalt
-Postgres-bevis må Claude Code startes i et IKKE-forhøyet terminalvindu.** 116 av 247 testfiler krever
-ekte embedded PostgreSQL og kunne ikke kjøres. De 131 kjørbare gav **2628/2653**; alle 25 feil er den
-pre-eksisterende Windows-`.cjs`-spawn-klassen fra D-141 med identiske tall (12+8+5).
-
-CI på Linux er den AUTORITATIVE porten for disse filene. Fersk grønn kjøring på NØYAKTIG endelig HEAD
-kreves for `build-test`, `windows-git-auth` og `gitleaks`; tidligere CI på `09cc204` teller ikke.
-Run-ID-ene rapporteres i CLAUDE_REPORT på issue #68, ikke her (en dokumentoppdatering ville flyttet
-HEAD og ugyldiggjort nettopp den kjøringen).
-
-## Fase D - transaksjonell host-recovery
-
-**IKKE utført - den er gatet.** Kjøres kun når fase A-C passerer OG fersk exact-final-head CI er
-grønn. Rekkefølge: ren primær-checkout på eksakt endelig remote HEAD -> repository-eid
-`install.ps1 -WhatIf` -> staged/transaksjonell/hash-verifisert install uten quiescence-bypass ->
-verifiser runtime payload/import-closure og eksakte hasher -> read-only worker/supervisor-status uten
-parser-/modulfeil -> FØRST DA enable de EKSISTERENDE supervisor- og worker-schedulene -> bevis fersk
-queue-poll -> post HOST_RECOVERY_RECEIPT. Ved enhver feil: la schedulerne stå `Disabled` og bevar
-staging/backups/logger. Ingen prosess termineres.
-
-**Nå:** `JarvisClaudeWorker` og `JarvisWorkerSupervisor` er begge `Disabled`. Hosten kjører fortsatt
-deployet fra før denne endringen.
+- Ny `worker-refused-snapshot-zero-write.test.mjs` **11/11** mot EKTE `worker.mjs run` som ekte
+  OS-prosess over et EKTE git-repo.
+- Hver refusjonssak - lesefeil, AVKORTET side, INKOMPLETT lesning som skjuler en same-id-duplikat, og
+  UBEVIST lesning - PRE-SEEDER hver durabel flate refusjonen ikke skal røre (worker-state,
+  state-backup, dedup-journal for postet status, en task-worktree med UCOMMITTED arbeid, og en
+  claim-fil) og asserterer hver av dem BYTE-IDENTISK etterpå. Null kommentar-POST-er, null
+  review-kall, null transition-lesninger, kontroll-issuen byte-identisk, null prompt, null barn, null
+  worktree/claim for den ventende ordren, repo-HEAD/arbeidstre/refs uendret og INGEN
+  `.git/FETCH_HEAD`. Exit er det navngitte TRANSIENT-resultatet 4.
+- En FULL REKURSIV DIGEST av hele worker-roten før og etter beviser at de ENESTE stiene som endret seg
+  er de tillatte append-only-flatene, og at hver av dem bare VOKSTE (gamle bytes fortsatt eksakt
+  prefiks) - så en durabel skriving innført senere dukker opp som en uventet endret sti uten at noen
+  test må forutse den. Lås-hovedboken (`<lockFile>.d/<generasjon>.claim`) er eksplisitt listet, ikke
+  stille filtrert, og assertert STRENGERE enn «ignorer»: en refusert syklus kan APPENDE en ny
+  generasjon og kan ikke endre eller fjerne en eksisterende.
+- Egne saker: refusjonen bruker IKKE opp dedup-budsjettet (to påfølgende refusjoner lar journalen stå
+  urørt begge ganger), oppretter INGEN scratch-katalog, gjør INGEN krasj-recovery og lar en abandonert
+  IN_PROGRESS-task stå, og loggen navngir funnet, «HOLDING the whole cycle», «NO GitHub comment was
+  posted» og «EXIT: 4 (TRANSIENT)» uten noensinne å si «Posted status comment».
+- Positive kontroller: komplett lesning dispatcher normalt og fullfører tasken; legitim status-posting
+  etter en KOMPLETT lesning poster fortsatt nøyaktig én kommentar OG journalfører fortsatt
+  dedup-nøkkelen; en refusert syklus undertrykker IKKE neste syklus sin legitime rapport.
+- **MUTASJONSTEST (bevis på at testene har tenner):** å gjeninnføre ett eneste `reportStatus`-kall i
+  refusjonsgrenen får **9 av 11** til å feile, mens nøyaktig de to positive kontrollene som skal
+  fortsette å virke, fortsatt passerer.
 
 ## Blokkeringer
 
-1. **Forhøyet sesjon.** Ingen lokale ekte-PostgreSQL-bevis. Krever at Claude Code startes
-   ikke-forhøyet. CI dekker det i mellomtiden.
-2. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-143. PR #80 merges ikke
+1. **Forhøyet sesjon (uendret fra D-143/D-145..D-151).** Claude Code kjører FORHØYET, og PostgreSQL
+   nekter å starte under en administrator-konto. Lokalt feiler dessuten tester utenfor
+   `ops/claude-worker` på den pre-eksisterende Windows-`.cjs`-spawn-klassen (`EFTYPE`). Begge klassene
+   er uavhengige av denne endringen - den er avgrenset til `ops/claude-worker` + docs - og er GRØNNE på
+   Linux-CI, som er den autoritative porten.
+2. **To worker-testfiler kan ikke PARSES lokalt på Windows (pre-eksisterende, IKKE rørt her).**
+   `deploy-cli.test.mjs` og `supervisor-run.test.mjs` feiler lokalt med
+   `SyntaxError: Invalid or unexpected token` allerede ved import, så de rapporterer «no tests» - de
+   kjørte altså IKKE i det lokale løpet. Verifisert årsak: de er de to ENESTE testfilene som
+   `import`-erer en entrypoint med shebang (`ops/claude-worker/deploy.mjs`, `supervisor.mjs`), og på
+   denne Windows-utsjekkingen har shebang-linjen CRLF (`#!/usr/bin/env node\r\n`) - vitest/esbuild sin
+   shebang-håndtering bryter på det. Begge filene er ASCII, passerer `node --check`, er URØRT av D-152
+   (begge testfilene OG begge entrypointene er umodifiserte), og er GRØNNE på Linux-CI (LF) på eksakt
+   PR-head. Klassen er miljøspesifikk, ikke en regresjon fra denne endringen, og er bevisst ikke
+   «fikset» her: det ville krevd å røre urelaterte entrypoints/`.gitattributes` utenfor D-152s mandat.
+   Autoritativt bevis for disse to filene er CI.
+3. **Embedded-Postgres-flake (eksplisitt avdekket, IKKE rørt her).** Den tilbakevendende 16-prosess/
+   16-port-flaken i repo-suiten utenfor `ops/claude-worker` er fortsatt kjent og udekket. Ingen dekning
+   er svekket, hoppet over eller nøytralisert for å oppnå grønn CI.
+4. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-152. PR #81 merges ikke
    før en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
 
 ## Neste oppgave
 
-Uavhengig arkitekt-gjennomgang av PR #80 mot faktisk diff/tester/CI. Ingen merge uten en ny
-`ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` og eksakt HEAD/base-guard.
+Uavhengig arkitekt-gjennomgang av PR #81 mot faktisk diff/tester/CI på eksakt NYTT endelig HEAD.
+Ingen merge uten en ny `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` og eksakt HEAD/base-guard.

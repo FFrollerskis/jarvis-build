@@ -56,7 +56,6 @@ import { selectNextTask, INELIGIBLE } from "./lib/queue.mjs";
 import { acquireLock, heartbeat, releaseLock, readLock, holdsLock } from "./lib/lock.mjs";
 import { matchProcessIdentity, listDescendants, isProcessAlive } from "./lib/procid.mjs";
 import { recoverScratch } from "./lib/quarantine.mjs";
-import { collectTrustedTasks } from "./lib/trust.mjs";
 import {
   assessCompletion,
   reconcilePriorAttempt,
@@ -88,10 +87,41 @@ import {
   evaluateCompletionGate,
   mergeWorktreeCleanliness,
   describeCompletionGate,
+  COMPLETION_GATE,
   COMMIT_PROVENANCE
 } from "./lib/provenance.mjs";
+import {
+  MERGE_TRANSITION,
+  MERGE_AUTHORIZATION,
+  classifyBoundMergeAuthorization,
+  verifyMergeTransition,
+  mergeTransitionExcusesProvenance,
+  describeMergeTransition
+} from "./lib/merge-transition.mjs";
+import {
+  bindOrderOnce,
+  describeOrderBinding,
+  digestLabel,
+  orderBindingEvidence
+} from "./lib/order-binding.mjs";
+import { ORDER_AUTHORITY, describeOrderAuthority } from "./lib/order-authority.mjs";
+import {
+  authoritySnapshotEvidence,
+  authorityVerdicts,
+  captureAuthoritySnapshot,
+  describeAuthoritySnapshot
+} from "./lib/authority-snapshot.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
-import { verifyAuth, fetchIssueComments, postComment, listRemoteBranches, listPulls } from "./lib/github.mjs";
+import {
+  verifyAuth,
+  fetchIssueCommentsDetailed,
+  postComment,
+  listRemoteBranches,
+  listPulls,
+  getPullMergeState,
+  getCommit,
+  getCommitCheckRuns
+} from "./lib/github.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.JARVIS_WORKER_CONFIG || join(HERE, "config.json");
@@ -299,7 +329,177 @@ function worktreeCleanlinessFor(cfg, task) {
   return merged;
 }
 
-function completionGateFor(cfg, task, completion) {
+/**
+ * D-145/D-146: THE AUTHORIZED MERGE-TRANSITION HALF OF THE PROOF.
+ *
+ * Every fact about the REMOTE is read FRESH from the remote at gate time, and
+ * nothing is taken from worker state. The child's report contributes only the
+ * LOCAL half of the closeout (LOCAL_HEAD, ORIGIN_MAIN, WORKTREE_CLEAN), which the
+ * worker cannot re-observe once the child has exited and which is therefore
+ * labelled in the record as resting on a bound claim.
+ *
+ * D-147: the caller decides WHETHER this runs; this function only runs it. The
+ * three remote reads happen for a DECIDABLE authorization; an undecidable one is
+ * verified with no remote data at all, which is a named refusal and not a call.
+ */
+function verifyTransitionFor(cfg, claim, completion) {
+  const authorization = claim.authorization;
+  if (claim.decidable !== true) {
+    // The task IS its own order and DOES claim a merge, but the order is broken.
+    // That is a real finding, recorded, and it costs no API call.
+    return verifyMergeTransition({
+      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null
+    });
+  }
+
+  const pull = getPullMergeState(cfg, authorization.prNumber);
+  const mergeSha = pull.ok ? pull.item?.mergeCommitSha ?? null : null;
+  // Each read is attempted only when the previous one produced something to read
+  // FOR. A lookup we never made comes back `ok: false`, which the verifier
+  // treats as UNKNOWN - never as a pass.
+  const mergeCommit = mergeSha ? getCommit(cfg, mergeSha) : { ok: false, item: null, error: "no merge sha to read" };
+  const headCommit = getCommit(cfg, authorization.expectedHead);
+  const checks = mergeSha ? getCommitCheckRuns(cfg, mergeSha) : { ok: false, runs: [], error: "no merge sha to read" };
+
+  return verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+}
+
+/**
+ * D-147: THE ONE SEMANTIC DECISION, shared by all four completion paths.
+ *
+ * ------------------------------------------------------------------------
+ * WHY THIS IS ONE FUNCTION AND NOT A CONDITION AT EACH SITE
+ * ------------------------------------------------------------------------
+ *
+ * D-145 wired the transition check in as a fallback and expressed that as an `if`
+ * at each completion site: "only ask when the commit range is NOT already proven".
+ * Two properties of that shape were wrong, and both are fixed here rather than at
+ * the sites:
+ *
+ *   1. It made generic commit provenance a SUBSTITUTE for transition proof. A
+ *      merge-authorized task whose child correctly trailered an ordinary commit -
+ *      or simply never moved HEAD - skipped every remote read and retired as
+ *      `commit_provenance_verified`, having proven only that Claude wrote its own
+ *      commits. That is not what a merge task delivers.
+ *   2. A condition duplicated at four sites is four chances to drift apart, and
+ *      "accepted after a crash, refused after a clean dispatch" is precisely the
+ *      split-brain the whole gate exists to prevent.
+ *
+ * So the decision is made ONCE, from the task's own trusted order:
+ *
+ *   NONE         no merge claimed: return immediately, no remote call, no record.
+ *                The ordinary path stays exactly as cheap as it was.
+ *   UNDECIDABLE  a claimed merge with a broken order: a named refusal, no calls.
+ *   AUTHORIZED   fresh transition verification, ALWAYS, whatever provenance says.
+ *
+ * The provenance verdict is used for ONE thing only: computing the D-145 excuse,
+ * which can still narrowly account for the single GitHub-generated merge commit.
+ * It never decides whether the verification happens.
+ */
+/**
+ * D-149: ONE SHAPE FOR "THE CONTROL COMMENTS AND HOW MUCH WE TRUST THE READ".
+ *
+ * `fetchIssueCommentsDetailed` returns `{ ok, items, complete }`; several call
+ * sites and every test fixture used to pass a bare array. Both are accepted, and
+ * both collapse to the same two fields - but `complete` is TRUE only when it was
+ * positively established. A bare array therefore reads as NOT proven complete,
+ * which is the fail-closed default: a caller that never told us how good its read
+ * was does not get to conclude that something is missing.
+ */
+function controlView(control) {
+  if (Array.isArray(control)) return { comments: control, complete: false };
+  const comments = Array.isArray(control?.items)
+    ? control.items
+    : (Array.isArray(control?.comments) ? control.comments : []);
+  return { comments, complete: control?.complete === true };
+}
+
+function completionEvidenceFor(cfg, task, taskId, completion, provenance, control) {
+  const none = { mergeAuthorization: null, mergeTransition: null, transitionExcuse: null };
+  if (completion?.complete !== true || completion?.successful !== true) return none;
+
+  // D-149: the DURABLE BINDING this task was admitted under, read from worker
+  // state and never recomputed from the comments in front of us. `control`
+  // carries both the comments AND whether that read was proven complete, because
+  // a decision that turns on ABSENCE must know the difference between "there is
+  // nothing there" and "I could not look".
+  const binding = task?.architect_order ?? null;
+  const { comments, complete: commentsComplete } = controlView(control);
+
+  let claim;
+  try {
+    claim = classifyBoundMergeAuthorization({
+      comments,
+      commentsComplete,
+      binding,
+      trustedAuthor: cfg.trustedAuthor,
+      taskId,
+      repoOwner: cfg.repoOwner,
+      repoName: cfg.repoName,
+      // D-146: the worker's OWN configured post-merge evidence policy. It is the
+      // second-authority source, below this task's trusted ARCHITECT_TASK and
+      // above the repository default. It is deliberately a config value and not
+      // anything derived from the PR, the branch or the child.
+      workerPolicy: cfg.postMergeEvidence ?? null
+    });
+  } catch (err) {
+    // A classification that THREW classified nothing. It cannot be read as "not a
+    // merge task" - that is the assumption this whole change exists to remove.
+    log(cfg, `Could not classify the merge authorization for ${taskId}: ${sanitize(err.message)}. `
+      + "Treating it as a CLAIMED but undecidable merge authorization.");
+    return {
+      mergeAuthorization: {
+        claim: MERGE_AUTHORIZATION.UNDECIDABLE,
+        claimed: true,
+        decidable: false,
+        reason: MERGE_TRANSITION.VERIFICATION_THREW,
+        detail: `classifying the merge authorization threw: ${sanitize(err.message)}`,
+        authorization: null,
+        binding: orderBindingEvidence({
+          binding,
+          verification: { ok: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message) },
+          observedCommentIds: [],
+          collectionComplete: control?.complete ?? null
+        })
+      },
+      mergeTransition: {
+        verified: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message)
+      },
+      transitionExcuse: null
+    };
+  }
+
+  // D-149: the binding verdict is logged on EVERY completion decision, not just
+  // the merge ones. A held task whose order vanished must say so in the log the
+  // operator reads first, and an ordinary task that verified must say that too -
+  // silence on the pass path would make the hold look like a new kind of error
+  // rather than the one invariant it is.
+  for (const line of describeOrderBinding(claim.binding)) log(cfg, `  ${line}`);
+
+  if (claim.claim === MERGE_AUTHORIZATION.NONE) {
+    // Not a merge task - and now provably so, from an order this worker bound
+    // before it dispatched anything. Say nothing more, do nothing, spend no API
+    // call: this is the overwhelmingly common path and it must stay cheap.
+    return { ...none, mergeAuthorization: claim };
+  }
+
+  let transition;
+  try {
+    transition = verifyTransitionFor(cfg, claim, completion);
+  } catch (err) {
+    // A verification that THREW verified nothing. Fail closed: the task is
+    // merge-authorized and its transition is unproven, so the gate holds it.
+    log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
+      + "Treating it as NOT verified.");
+    transition = { verified: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message) };
+  }
+  const excuse = mergeTransitionExcusesProvenance({ transition, provenance });
+  log(cfg, `MERGE_AUTHORIZATION for ${taskId}: ${claim.claim} (${claim.reason})`);
+  for (const line of describeMergeTransition(transition, excuse)) log(cfg, `  ${line}`);
+  return { mergeAuthorization: claim, mergeTransition: transition, transitionExcuse: excuse };
+}
+
+function completionGateFor(cfg, task, completion, control = { comments: [], complete: false }) {
   if (completion?.complete !== true || completion?.successful !== true) {
     return { gate: evaluateCompletionGate({ completion, provenance: null }), provenance: null };
   }
@@ -341,7 +541,21 @@ function completionGateFor(cfg, task, completion) {
     + `${provenance.downgraded_by_recorded_verdict ? " (downgraded by the recorded verdict)" : ""} `
     + `(${provenance.reason})`);
   const worktree = worktreeCleanlinessFor(cfg, task);
-  return { gate: evaluateCompletionGate({ completion, provenance, worktree }), provenance, worktree };
+
+  // D-147: the SAME single decision the dispatch path makes, with no condition of
+  // its own. Whether the merge transition is verified is decided by the task's own
+  // trusted order, never by how well its commit range happened to classify.
+  const { mergeAuthorization, mergeTransition, transitionExcuse } =
+    completionEvidenceFor(cfg, task, taskId, completion, provenance, control);
+
+  return {
+    gate: evaluateCompletionGate({
+      completion, provenance, worktree, mergeTransition, transitionExcuse, mergeAuthorization
+    }),
+    provenance,
+    worktree,
+    mergeTransition
+  };
 }
 
 /**
@@ -363,10 +577,22 @@ function parkHeldCompletion(cfg, state, token, taskId, { gate, completion, extra
     try { return taskWorktreePath(cfg.worktreeRoot, taskId); } catch { return null; }
   })();
 
+  // D-147: the finding must name what ACTUALLY failed. Two of the hold reasons
+  // now fire with a perfectly verified commit range behind them, and reporting
+  // those as "provenance ... (verified=false)" would be a plain untruth in the
+  // one record a human reconciling this reads first.
+  const why = gate.reason === COMPLETION_GATE.HELD_MERGE_TRANSITION_UNVERIFIED
+    ? `this task is MERGE-AUTHORIZED and its authorized merge transition is NOT verified `
+      + `(${gate.merge_transition_reason ?? "not attempted"}); commit provenance is `
+      + `${gate.provenance_verdict ?? "unknown"} and does not answer that question`
+    : gate.reason === COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE
+      ? `this task's own trusted order CLAIMS a merge authorization that cannot be decided `
+        + `(${gate.merge_authorization_reason ?? "unknown"})`
+      : `commit provenance is ${gate.provenance_verdict ?? "unknown"} (verified=false)`;
   log(cfg, `COMPLETION GATE HELD for ${taskId}: a trusted report claims success (comment `
-    + `${gate.report_comment_id ?? "unknown"}, STATUS=${gate.report_status ?? "unknown"}), but commit `
-    + `provenance is ${gate.provenance_verdict ?? "unknown"} (verified=false). The task is parked as `
-    + "BLOCKED - NOT completed, NOT successful - and its worktree is RETAINED untouched.");
+    + `${gate.report_comment_id ?? "unknown"}, STATUS=${gate.report_status ?? "unknown"}), but ${why}. `
+    + "The task is parked as BLOCKED - NOT completed, NOT successful - and its worktree is RETAINED "
+    + "untouched.");
   for (const sha of gate.unattributed_commits ?? []) {
     log(cfg, `  UNEXPLAINED_COMMIT ${sha} (preserved, never adopted, never reverted)`);
   }
@@ -516,22 +742,143 @@ async function runOwned(cfg, token) {
     return EXIT.TRANSIENT;
   }
 
-  let comments;
-  try {
-    comments = fetchIssueComments(cfg);
-  } catch (err) {
-    log(cfg, `Failed to fetch control issue comments: ${sanitize(err.message)}`);
-    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "control_issue_unreachable" });
+  // --- D-151: THE CYCLE'S ONE ATOMIC AUTHORITY SNAPSHOT ---------------------
+  //
+  // Captured here, immediately after the auth and read evidence, and BEFORE any
+  // decision whatsoever. D-149 gave the read its own completeness verdict and
+  // D-150 enforced that verdict at admission - but only at admission, for the one
+  // task the queue had already chosen. Everything ahead of that still ran on a
+  // read with a hole in it: crash recovery retired tasks, report reconciliation
+  // marked them COMPLETED, `selectNextTask` ranked them and `retireIneligibleTasks`
+  // persisted SUPERSEDED. Every one of those is terminal, and every one of them
+  // turns on something being ABSENT from what we managed to read.
+  //
+  // So the question moved to the top and became fatal to the CYCLE rather than to
+  // one task. After this point the snapshot is the only thing anything decides
+  // from, it is frozen, and every task id in it has already been classified once
+  // by the one authority classifier.
+  //
+  // A refusal here performs NO recovery decision, NO queue selection, NO report
+  // retirement, NO supersession, NO task-state mutation, NO worktree, scratch or
+  // repository action, NO transition API read, NO prompt build and NO child
+  // spawn - and leaves every existing task, claim and worktree untouched.
+  const controlRead = fetchIssueCommentsDetailed(cfg);
+  /**
+   * D-152 TEST-ONLY fault `control_read_unproven`.
+   *
+   * READ_UNPROVEN is the snapshot's guard against a read NOBODY VOUCHED FOR -
+   * historically a bare array, and structurally any caller that hands over
+   * comments without completeness evidence. `fetchIssueCommentsDetailed` always
+   * supplies that evidence today, so the finding is unreachable from outside the
+   * process: it exists to stop a FUTURE caller or refactor from quietly
+   * reintroducing the weaker contract.
+   *
+   * That is exactly the situation the `JARVIS_WORKER_FAULT` convention already
+   * covers - a precondition there is no honest way to provoke from outside. Only
+   * the read's SHAPE is faked, by discarding the completeness evidence the real
+   * read produced. The snapshot capture, the refusal, the evidence and the exit
+   * below are the real, unmodified code path.
+   */
+  const control = faultArmed("control_read_unproven")
+    ? { ok: true, items: controlRead.items }
+    : controlRead;
+  const snapshot = captureAuthoritySnapshot({ control, trustedAuthor: cfg.trustedAuthor });
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
+    comment_count: snapshot.commentCount,
+    collection_complete: snapshot.complete === true,
+    snapshot_usable: snapshot.ok,
+    snapshot_reason: snapshot.reason
+  });
+  if (!snapshot.ok) {
+    // --- D-152: THE REFUSAL IS ITSELF A ZERO-WRITE DECISION -----------------
+    //
+    // D-151 put the boundary in the right place and then wrote through it. The
+    // refusal branch called `reportStatus`, and `reportStatus` is not an
+    // observation - it is three writes:
+    //
+    //   1. `postComment` PUBLISHES to the control issue. The control issue is
+    //      the queue's own input. A cycle that could not prove what the issue
+    //      contains was appending to the very thing it had just declared itself
+    //      unable to read, and every later cycle then reads that comment back as
+    //      part of the authority snapshot. A read flake became a permanent,
+    //      globally visible artefact created by a cycle with no authority.
+    //   2. `postComment` first WRITES A BODY FILE into `cfg.scratchRoot`,
+    //      creating the directory if absent - scratch activity the hold's own
+    //      log line simultaneously claimed had not happened.
+    //   3. On success `recordPostedStatus` APPENDS TO THE POSTED-STATUS
+    //      DEDUPLICATION JOURNAL. That is durable decision state, and it decides
+    //      the FUTURE: once the key is journalled, the same finding is suppressed
+    //      for `statusRepeatHours`. So an unproven read silently bought itself
+    //      six hours of silence for a condition that may by then be real and
+    //      genuinely worth reporting.
+    //
+    // All three are gone. What remains is the only category that cannot corrupt
+    // a later decision: APPEND-ONLY LOCAL EVIDENCE. The log and the health
+    // journal are written on this host, are never read back as authority, and
+    // are exactly what an operator needs to see that the worker held and why.
+    //
+    // The evidence deliberately does NOT claim a status notice was posted,
+    // because none was. A held cycle that cannot prove what the control issue
+    // says has no standing to add to it; the operator learns this from the local
+    // log, and the next complete read reports normally.
+    //
+    // NOTE: a COMPLETE snapshot is untouched by any of this. Legitimate status
+    // and report posting below this point is unchanged - the ban is on writing
+    // FROM A CYCLE THAT PROVED IT COULD NOT READ, not on writing at all.
+    for (const line of describeAuthoritySnapshot(snapshot)) log(cfg, line);
+    for (const line of [
+      `HOLDING the whole cycle: ${snapshot.reason}.`,
+      snapshot.detail ? `DETAIL: ${snapshot.detail}` : null,
+      `CONTROL READ: ok=${snapshot.readOk}, proven complete=${snapshot.complete === true}.`,
+      "A worker cycle ranks a queue, retires finished work, supersedes stale orders and dispatches a child -",
+      "and every one of those turns on something being ABSENT from what was read. A page that did not come",
+      "back is exactly where the second same-id order, the newer report or the contradicting retirement",
+      "would be, so a partial read may not decide any of them.",
+      "NOTHING was recovered, reconciled, retired, superseded, selected, fetched, pushed, reset or deleted.",
+      "No task state was written, no worktree or scratch directory was created or removed, no transition",
+      "API was read, no prompt was built and no child process was created. Every existing task, claim and",
+      "worktree is byte-for-byte as it was.",
+      "NO GitHub comment was posted and NO posted-status deduplication entry was recorded: a cycle that",
+      "cannot prove what the control issue contains does not write to the control issue. This log line and",
+      "the health journal are the whole of this cycle's evidence, and both are local and append-only.",
+      "The fault is in THIS READ, not in any order: no attempt was spent and every task stays fully eligible.",
+      `EXIT: ${EXIT.TRANSIENT} (TRANSIENT) - the next scheduled run proceeds normally. If it persists, confirm`,
+      "GitHub is reachable and that `gh api --paginate` returns the control issue in full."
+    ]) {
+      if (line !== null) log(cfg, line);
+    }
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      reason: "control_authority_snapshot_unusable",
+      snapshot_reason: snapshot.reason,
+      snapshot_detail: snapshot.detail ?? null,
+      control_read_ok: snapshot.readOk,
+      collection_complete: snapshot.complete === true,
+      // The zero-write claim, stated positively so that the evidence itself is
+      // falsifiable rather than merely silent about what it did not do.
+      held: true,
+      exit: EXIT.TRANSIENT,
+      status_comment_posted: false,
+      posted_status_recorded: false,
+      durable_state_written: false
+    });
     return EXIT.TRANSIENT;
   }
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, { comment_count: comments.length });
+  for (const line of describeAuthoritySnapshot(snapshot)) log(cfg, line);
+
+  // Everything downstream reads THE SNAPSHOT. `control` is still passed along as
+  // the comment carrier the completion/reconciliation paths already take, and it
+  // is now provably `{ ok: true, complete: true }` on every path that reaches it.
+  const comments = snapshot.comments;
 
   // --- BLOCKER 1: recover anything a crashed parent left behind, before any
   //     candidate is chosen and before eligibility is even considered. ---
-  const recovery = recoverAbandonedTasks(cfg, state, token, comments);
+  const recovery = recoverAbandonedTasks(cfg, state, token, control);
   if (recovery.stop) return recovery.exit;
 
-  const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
+  // D-151: the queue's entries ARE the snapshot's classified entries. There is no
+  // second grouping pass and no array-position representative: an inadmissible
+  // entry carries `order: null`, so nothing can rank, declare or execute from it.
+  const tasks = snapshot.entries;
   const nowMs = Date.now();
 
   const unsafeIds = tasks.filter((t) => !isValidTaskId(t.taskId)).map((t) => t.taskId);
@@ -552,7 +899,7 @@ async function runOwned(cfg, token) {
   // and returned to the front of the queue later. `findUnreconciledTasks` has
   // existed in state.mjs since D126 and was never called; it is now the basis of
   // this pass.
-  const preReconciliation = reconcileReportedTasks(cfg, state, token, comments);
+  const preReconciliation = reconcileReportedTasks(cfg, state, token, control);
 
   // D-136: EVERY gate held this run, wherever it fired. D-135 only carried the
   // pre-selection pass into the exit code, so a hold raised during crash
@@ -566,7 +913,13 @@ async function runOwned(cfg, token) {
   // are on. An unreadable head yields null, which makes every task UNDECLARED
   // rather than falsely stale.
   const observedHead = gitHead(cfg).value ?? null;
-  const selection = selectNextTask({ tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs, observedHead });
+  const selection = selectNextTask({
+    tasks, state, comments, trustedAuthor: cfg.trustedAuthor, nowMs, observedHead,
+    // D-151: proven above, or this line is unreachable. Passed explicitly rather
+    // than defaulted, because supersession - the only decision that permanently
+    // discards unreviewed work - refuses unless somebody positively asserts it.
+    snapshotComplete: snapshot.complete === true
+  });
 
   // Persist the retirements the selection identified, so they survive a restart
   // and can never be re-decided differently by a later run.
@@ -591,18 +944,24 @@ async function runOwned(cfg, token) {
     return recovery.exit ?? (retired.blocked ? EXIT.BLOCKED : EXIT.OK);
   }
 
-  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (comment ${candidate.comment.id}, `
-    + `posted ${candidate.comment.created_at}, ${candidate.updates.length} scope update(s), `
-    + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
+  log(cfg, `Next trusted task: TASK_ID=${candidate.taskId} (order comment ${candidate.orderCommentId}, `
+    + `posted ${candidate.orderCreatedAt}, ${candidate.distinctOrderCount} distinct order(s) for this id, `
+    + `authority=${candidate.authority?.reason}, tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
-  const dispatchExit = await runTask(cfg, state, token, candidate, comments);
+  const dispatchExit = await runTask(cfg, state, token, candidate, control);
   // D-136: a successful dispatch of a DIFFERENT task does not make this run
   // healthy either. A held gate means work is parked in a retained worktree
   // waiting for a human, and that has to survive into the exit code whatever
   // else the run went on to do. Only an otherwise-clean run is downgraded -
   // a worse code from the dispatch itself is never softened.
-  return dispatchExit === EXIT.OK && gateHeld.length > 0 ? EXIT.BLOCKED : dispatchExit;
+  //
+  // D-151: an order REFUSED by the authority classifier is the same kind of fact.
+  // The run may well have gone on to dispatch a different, admissible task, and
+  // it still must not report itself healthy while a control comment is sitting
+  // there needing a human and a fresh TASK_ID.
+  const held = gateHeld.length > 0 || retired.authorityRefused.length > 0;
+  return dispatchExit === EXIT.OK && held ? EXIT.BLOCKED : dispatchExit;
 }
 
 /**
@@ -613,7 +972,7 @@ async function runOwned(cfg, token) {
  * is chosen. A task retired here is terminal, so no restart, no elapsed backoff
  * and no stale retry bookkeeping can bring it back.
  */
-function reconcileReportedTasks(cfg, state, token, comments) {
+function reconcileReportedTasks(cfg, state, token, control) {
   const unreconciled = findUnreconciledTasks(state);
   if (unreconciled.length === 0) return { reconciled: [], gateHeld: [] };
 
@@ -626,7 +985,7 @@ function reconcileReportedTasks(cfg, state, token, comments) {
 
     const completion = assessCompletion({
       taskId: task.task_id,
-      comments,
+      comments: controlView(control).comments,
       trustedAuthor: cfg.trustedAuthor,
       sinceIso: task.first_dispatch_at ?? null
     });
@@ -636,12 +995,16 @@ function reconcileReportedTasks(cfg, state, token, comments) {
     // parked, not retired as completed. The verdict is DERIVED from the task's
     // durable claim and the current state of its own worktree, not inherited
     // from a record a crashed parent may never have written.
-    const { gate, provenance } = completionGateFor(cfg, task, completion);
+    const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, control);
     if (gate.held) {
       parkHeldCompletion(cfg, state, token, task.task_id, {
         gate,
         completion,
-        extra: { reconciled_without_redispatch: true, reconciliation_provenance: provenance }
+        extra: {
+          reconciled_without_redispatch: true,
+          reconciliation_provenance: provenance,
+          merge_transition: mergeTransition ?? null
+        }
       });
       // Counted as reconciled: it IS retired from the dispatch queue (BLOCKED is
       // terminal). It is simply not retired as a SUCCESS - and the run itself
@@ -665,7 +1028,8 @@ function reconcileReportedTasks(cfg, state, token, comments) {
       // Recorded on the PASS path too, so the record always states positively
       // what the acceptance rested on rather than leaving it to be inferred.
       completion_gate: gate,
-      reconciliation_provenance: provenance
+      reconciliation_provenance: provenance,
+      merge_transition: mergeTransition ?? null
     });
     emitHealth(cfg.healthFile, HEALTH_EVENTS.COMPLETION_CONFIRMED, {
       task_id: task.task_id,
@@ -704,9 +1068,95 @@ function reconcileReportedTasks(cfg, state, token, comments) {
 function retireIneligibleTasks(cfg, state, token, selection) {
   let mutated = false;
   let blocked = false;
+  const authorityRefused = [];
 
   for (const decision of selection.decisions) {
     const record = getTask(state, decision.taskId);
+
+    // --- D-151: NO ADMISSIBLE ORDER ----------------------------------------
+    //
+    // Reported and retired here rather than at dispatch, because an inadmissible
+    // order must not reach the queue's ranking at all: D-150 refused it only once
+    // it had already been CHOSEN, which meant its `EXPECTED_HEAD_SHA` had already
+    // decided where it sorted and whether it preempted a live order.
+    //
+    // A task with no record yet is the common case (the order was never
+    // admissible, so it was never dispatched and has no row). It is still
+    // recorded terminally, so the refusal is durable and the same refusal is not
+    // re-posted on every scheduled run.
+    if (decision.reason === INELIGIBLE.INADMISSIBLE_AUTHORITY) {
+      if (record && isTerminal(record)) continue;
+      const retryable = decision.authorityRetryable === true;
+      const verdict = {
+        ok: false,
+        reason: decision.authorityReason,
+        detail: decision.authorityDetail,
+        distinctCount: decision.distinctOrderCount,
+        candidateIds: decision.candidateCommentIds,
+        commentId: null,
+        createdAt: null,
+        retryable
+      };
+      for (const line of describeOrderAuthority(verdict, { taskId: decision.taskId })) log(cfg, `  ${line}`);
+      log(cfg, `BLOCKED ${decision.taskId}: no admissible ARCHITECT_TASK authority `
+        + `(${decision.authorityReason}): ${decision.authorityDetail ?? "no detail"}. NOT dispatching, and it `
+        + "takes no place in the queue: it declares no expected head, retires nothing and executes nothing.");
+      emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+        task_id: decision.taskId,
+        reason: "architect_order_authority_inadmissible",
+        authority_reason: decision.authorityReason,
+        distinct_order_count: decision.distinctOrderCount,
+        retryable
+      });
+      upsertTask(state, decision.taskId, {
+        status: TASK_STATUS.BLOCKED,
+        blocked_at: new Date().toISOString(),
+        successful: false,
+        last_failure_reason: `architect_order_authority_inadmissible (${decision.authorityReason})`,
+        order_authority_failure: {
+          reason: decision.authorityReason,
+          detail: decision.authorityDetail ?? null,
+          distinct_order_count: decision.distinctOrderCount,
+          candidate_comment_ids: decision.candidateCommentIds,
+          at: new Date().toISOString()
+        },
+        child_identity: null
+      });
+      reportStatus(cfg, {
+        taskId: decision.taskId,
+        phase: "admission",
+        reason: `architect_order_authority_${decision.authorityReason}`,
+        detail: [
+          "This task was NOT dispatched: it has no single, immutable, uniquely identified original order.",
+          "",
+          `AUTHORITY FINDING: ${decision.authorityReason}`,
+          decision.authorityDetail ? `DETAIL: ${decision.authorityDetail}` : "",
+          `DISTINCT TRUSTED ORDERS SEEN FOR THIS TASK_ID: ${decision.distinctOrderCount}`
+            + (decision.candidateCommentIds?.length
+              ? ` (comment ids ${decision.candidateCommentIds.map((i) => String(i)).join(", ")})`
+              : ""),
+          "CONTROL COMMENT READ: proven complete (a cycle with an unproven read decides nothing at all).",
+          "",
+          "A task id has exactly ONE order, and a same-id TASK_UPDATE is a SECOND order rather than an",
+          "amendment. The worker will not choose between them, because any rule that chooses hands the",
+          "choice to whoever can post one.",
+          "",
+          "Nothing semantic from this order reached anything: it declared no EXPECTED_HEAD_SHA, so it could",
+          "not rank or preempt a live order; it declared no SUPERSEDES, so it retired nothing; and no bytes",
+          "of it were built into a prompt.",
+          "",
+          "NOTHING was dispatched, fetched, pushed, reset or deleted for this task, and no child process",
+          "was created."
+        ].filter((l) => l !== "").join("\n"),
+        nextAction: "Reconcile the control issue by hand, then reissue the CONSOLIDATED scope under a FRESH "
+          + "TASK_ID carrying an explicit SUPERSEDES=<old id>. The worker will not replay a blocked task."
+      });
+      authorityRefused.push(decision.taskId);
+      mutated = true;
+      blocked = true;
+      continue;
+    }
+
     if (!record || isTerminal(record)) continue;
 
     if (decision.reason === INELIGIBLE.SUPERSEDED) {
@@ -723,6 +1173,17 @@ function retireIneligibleTasks(cfg, state, token, selection) {
         superseded_by: decision.supersededBy,
         superseded_basis: decision.supersessionBasis,
         superseded_declared_by_comment_id: decision.supersessionDeclaredByCommentId ?? null,
+        // D-151: retirement is the one decision that permanently discards work
+        // nobody reviewed, so the record has to say WHAT ordered it, not just
+        // which task did. Each declaration carries the GitHub comment id AND the
+        // digest of the exact bytes - a comment id alone proves nothing once that
+        // comment has been edited, and the actor able to edit a control comment is
+        // the same login the worker trusts. Every admissible declaration is
+        // recorded; nothing is resolved by keeping the first or the latest.
+        superseded_declarations: decision.supersessionDeclarations ?? [],
+        // Positively recorded, so a later reader never has to infer that the read
+        // this retirement rested on was proven complete.
+        superseded_snapshot_complete: selection.snapshotComplete === true,
         last_failure_reason: `${decision.supersessionBasis} (${decision.supersededBy})`,
         child_identity: null
       });
@@ -740,9 +1201,14 @@ function retireIneligibleTasks(cfg, state, token, selection) {
           `This task was issued at ${decision.createdAt ?? "an unknown time"} and had ${decision.attempts} attempt(s).`,
           `BASIS: ${decision.supersessionBasis}`,
           `EVIDENCE: ${decision.supersessionDetail}`,
-          decision.supersessionDeclaredByCommentId !== null
-            ? `DECLARED BY: trusted control-issue comment ${decision.supersessionDeclaredByCommentId}`
+          (decision.supersessionDeclarations ?? []).length > 0
+            ? "DECLARED BY:\n" + decision.supersessionDeclarations
+              .map((d) => `  - trusted ARCHITECT_TASK ${d.task_id}, control-issue comment ${d.comment_id} `
+                + `(created ${d.created_at ?? "unknown"}, body ${digestLabel(d.body_sha256)}, `
+                + `${d.body_bytes ?? "unknown"} bytes)`)
+              .join("\n")
             : "DECLARED BY: nothing - retirement follows from the newer task's SUCCESSFUL completion.",
+          "CONTROL READ: proven complete - a cycle that cannot prove it read the whole issue retires nothing.",
           "",
           "A newer task that ended BLOCKED, FAILED or with an unreadable status never retires an older",
           "one: it did not move the repository on, so the older order is not stale.",
@@ -797,7 +1263,7 @@ function retireIneligibleTasks(cfg, state, token, selection) {
     state.last_run_at = new Date().toISOString();
     persistState(cfg, state, token);
   }
-  return { mutated, blocked };
+  return { mutated, blocked, authorityRefused };
 }
 
 /**
@@ -807,10 +1273,11 @@ function retireIneligibleTasks(cfg, state, token, selection) {
  * Also reconciles the report for non-terminal tasks that are merely in backoff -
  * "reconcile report regardless of next-attempt eligibility".
  */
-function recoverAbandonedTasks(cfg, state, token, comments) {
+function recoverAbandonedTasks(cfg, state, token, control) {
   const abandoned = findAbandonedTasks(state);
   if (abandoned.length === 0) return { stop: false, exit: null, gateHeld: [] };
 
+  const { comments } = controlView(control);
   const lifetimeBudgetMs = childLifetimeBudgetMs({ claudeTimeoutMinutes: cfg.claudeTimeoutMinutes });
   const branchLookup = listRemoteBranches(cfg);
   const pullLookup = listPulls(cfg);
@@ -878,7 +1345,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
       // from the durable claim and the worktree's actual current HEAD. It must
       // not be able to launder an unaccounted-for commit range into a successful
       // completion on the next run.
-      const { gate, provenance } = completionGateFor(cfg, task, rec.completion);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, rec.completion, control);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -887,7 +1354,8 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
             ...observed,
             reconciled_without_redispatch: true,
             recovered_from_crash: true,
-            reconciliation_provenance: provenance
+            reconciliation_provenance: provenance,
+            merge_transition: mergeTransition ?? null
           }
         });
         gateHeld.push(taskId);
@@ -906,6 +1374,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
         recovered_from_crash: true,
         completion_gate: gate,
         reconciliation_provenance: provenance,
+        merge_transition: mergeTransition ?? null,
         child_identity: null,
         last_child_pid: null
       });
@@ -958,9 +1427,222 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
   return { stop: false, exit: null, gateHeld };
 }
 
-async function runTask(cfg, state, token, candidate, comments) {
+async function runTask(cfg, state, token, candidate, control) {
   const taskId = candidate.taskId;
   const prior = getTask(state, taskId);
+  const { comments, complete: commentsComplete } = controlView(control);
+
+  // --- D-151: THE CARRIED AUTHORITY VERDICT, NOT A SECOND OPINION -----------
+  //
+  // D-150 asked `selectAdmissibleOrder` here, which was the right question in the
+  // wrong place: by the time `runTask` is reached the candidate has already been
+  // ranked - possibly on the strength of an `EXPECTED_HEAD_SHA` read from an
+  // order this gate was about to refuse. The classification now happens ONCE per
+  // cycle, in `captureAuthoritySnapshot`, over the whole frozen comment set, and
+  // the verdict TRAVELS on the entry through the queue to here.
+  //
+  // What is left is a boundary check, and it is deliberately not a second
+  // classifier: it confirms that the entry in hand actually carries an ADMISSIBLE
+  // verdict from this cycle's snapshot. A second set of rules here would be a
+  // second set of rules to drift, and drift between the dispatch gate and the
+  // queue gate is precisely how an order refused at admission still managed to
+  // set a head tier and retire a victim.
+  //
+  // The check runs before the binding, before the quarantine, before the dirty
+  // guard, before a worktree exists, before any scratch or repository mutation,
+  // and before any child. A refusal here dispatches nothing at all.
+  const authority = candidate?.authority ?? {
+    ok: false,
+    reason: ORDER_AUTHORITY.NO_ORDER,
+    detail: "the candidate entry carries no authority verdict from this cycle's control snapshot, so its "
+      + "order was never classified; an unclassified order is never an admissible one",
+    distinctCount: 0,
+    candidateIds: [],
+    commentId: null,
+    createdAt: null,
+    comment: null,
+    retryable: false
+  };
+  if (!authority.ok || authority.reason !== ORDER_AUTHORITY.ADMISSIBLE) {
+    for (const line of describeOrderAuthority(authority, { taskId })) log(cfg, `  ${line}`);
+    log(cfg, `${authority.retryable ? "HOLDING" : "BLOCKED"}: no admissible ARCHITECT_TASK authority for ${taskId} `
+      + `(${authority.reason}): ${authority.detail ?? "no detail"}. NOT dispatching.`);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason: "architect_order_authority_inadmissible",
+      authority_reason: authority.reason,
+      distinct_order_count: authority.distinctCount,
+      retryable: authority.retryable
+    });
+    // A RETRYABLE hold writes NOTHING to worker state. D-133 requires a task
+    // refused before its worktree exists to be left "not recorded as attempted,
+    // fully eligible for a later run", and that is exactly this case: the next
+    // run with a complete read admits it normally.
+    if (!authority.retryable) {
+      upsertTask(state, taskId, {
+        status: TASK_STATUS.BLOCKED,
+        blocked_at: new Date().toISOString(),
+        successful: false,
+        last_failure_reason: `architect_order_authority_inadmissible (${authority.reason})`,
+        order_authority_failure: {
+          reason: authority.reason,
+          detail: authority.detail ?? null,
+          distinct_order_count: authority.distinctCount,
+          candidate_comment_ids: authority.candidateIds,
+          at: new Date().toISOString()
+        },
+        child_identity: null
+      });
+      state.last_run_at = new Date().toISOString();
+      persistState(cfg, state, token);
+    }
+    reportStatus(cfg, {
+      taskId,
+      phase: "admission",
+      reason: `architect_order_authority_${authority.reason}`,
+      detail: [
+        "This task was NOT dispatched: it has no single, immutable, completely-read original order.",
+        "",
+        `AUTHORITY FINDING: ${authority.reason}`,
+        authority.detail ? `DETAIL: ${authority.detail}` : "",
+        `DISTINCT TRUSTED ORDERS SEEN FOR THIS TASK_ID: ${authority.distinctCount}`
+          + (authority.candidateIds?.length
+            ? ` (comment ids ${authority.candidateIds.map((i) => String(i)).join(", ")})`
+            : ""),
+        `CONTROL COMMENT READ: ok=${control?.ok !== false}, complete=${commentsComplete}`,
+        "",
+        authority.retryable
+          ? "The fault is in THIS READ, not in the order. The task is left untouched and fully eligible: "
+            + "the next run with a complete control-issue read admits it normally. Nothing was recorded as "
+            + "an attempt and no attempt budget was spent."
+          : "A task id has exactly ONE order, and a same-id TASK_UPDATE is a SECOND order rather than an "
+            + "amendment. The worker will not choose between them, because any rule that chooses hands the "
+            + "choice to whoever can post one.",
+        "",
+        "NOTHING was dispatched, fetched, pushed, reset or deleted for this task, and no child process "
+        + "was created."
+      ].filter((l) => l !== "").join("\n"),
+      nextAction: authority.retryable
+        ? "No action required unless it persists; confirm GitHub is reachable and that `gh api --paginate` "
+          + "returns the control issue in full. The next scheduled run dispatches this same task automatically."
+        : "Reconcile the control issue by hand, then reissue the CONSOLIDATED scope under a FRESH TASK_ID "
+          + "carrying an explicit SUPERSEDES=<old id>. The worker will not replay a blocked task on its own."
+    });
+    return EXIT.BLOCKED;
+  }
+
+  // From here on, THE ORDER is `authority.comment` and never `candidate.comment`.
+  // They are the same object whenever admission passed - the gate proved the set
+  // has exactly one member - but naming the proven one is what stops a future
+  // edit from quietly reintroducing an array-position choice.
+  const order = authority.comment;
+
+  // --- D-149: BIND THE ORDER BEFORE ANYTHING ELSE HAPPENS -------------------
+  //
+  // This is ADMISSION. It runs before the prior-attempt reconciliation, before
+  // the quarantine, before the dirty guard, before a worktree exists and - most
+  // importantly - before any child is created. After this line the worker holds
+  // a durable, self-authored record of WHICH comment ordered this task and
+  // EXACTLY what it said, so nothing that happens to the control issue
+  // afterwards can change the answer to "what was this task authorized to do?".
+  //
+  // The binding is DECIDED here and WRITTEN in the IN_PROGRESS upsert below -
+  // the same atomic, locked `persistState` every other durable fact goes
+  // through, and still strictly before `runClaude` creates anything. There is no
+  // second write path and no window in which a DISPATCHED task has no binding.
+  //
+  // Writing it here instead would be marginally earlier and materially worse: it
+  // would create a state row for a task that the quarantine, the dirty guard or
+  // the worktree step then REFUSES, and D-133 requires such a task to leave no
+  // record at all ("not recorded as attempted, fully eligible for a later run").
+  // Nothing is lost by waiting: if the run dies in between, nothing was
+  // dispatched, `attempts` is still 0, and the next run re-admits from the same
+  // order and binds identically - or refuses, if the order has changed.
+  const admission = bindOrderOnce({
+    existing: prior?.architect_order ?? null,
+    comment: order,
+    taskId,
+    // The record's own attempt count is what distinguishes "never admitted" from
+    // "admitted by a build that recorded no binding". A task that has run before
+    // HAD an order; an absent binding for it is a gap in our records, never
+    // evidence that no order existed, so it is refused rather than filled in.
+    alreadyAdmitted: (prior?.attempts ?? 0) > 0
+  });
+  if (!admission.ok) {
+    // Three shapes reach here, and all three are the same decision: this task's
+    // authority cannot be established, so it is not dispatched and nothing is
+    // repaired from current text.
+    //
+    //   IMMUTABLE_CONFLICT / *_MISMATCH  the order in front of us is NOT the one
+    //       this task was admitted under. Re-binding would be precisely the
+    //       "authority recomputed from later mutable text" move D-149 removes.
+    //   BINDING_MISSING                  a record from before D-149, already
+    //       dispatched at least once. Synthesising a binding for it now would
+    //       adopt whatever order exists today as its original - including one
+    //       posted by the child itself.
+    //   BINDING_INVALID / UNBINDABLE     nothing usable to bind or compare.
+    //
+    // BLOCKED rather than retryable: a retry would ask the identical question
+    // and get the identical answer, and the recovery is a human reconciling it
+    // plus a FRESH TASK_ID, which binds cleanly on its own admission.
+    log(cfg, `BLOCKED: the durable ARCHITECT_TASK order binding for ${taskId} could not be established `
+      + `(${admission.reason}): ${admission.detail ?? "no detail"}. NOT dispatching, and NOT re-binding from `
+      + "the order that is on the issue now.");
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "architect_order_binding_unavailable", binding_reason: admission.reason
+    });
+    upsertTask(state, taskId, {
+      status: TASK_STATUS.BLOCKED,
+      blocked_at: new Date().toISOString(),
+      successful: false,
+      last_failure_reason: `architect_order_binding_unavailable (${admission.reason})`,
+      order_binding_failure: {
+        reason: admission.reason,
+        detail: admission.detail ?? null,
+        observed_comment_id: order?.id ?? null,
+        at: new Date().toISOString()
+      },
+      child_identity: null
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    reportStatus(cfg, {
+      taskId,
+      phase: "admission",
+      reason: `architect_order_binding_${admission.reason}`,
+      detail: [
+        `This task could not be bound to an immutable original ARCHITECT_TASK, so it was NOT dispatched.`,
+        "",
+        `BINDING FINDING: ${admission.reason}`,
+        admission.detail ? `DETAIL: ${admission.detail}` : "",
+        `ORDER OFFERED NOW: control-issue comment ${order?.id ?? "unknown"} `
+          + `(created ${order?.created_at ?? "unknown"})`,
+        admission.binding
+          ? `ORDER THIS TASK WAS ADMITTED UNDER: comment ${admission.binding.comment_id} `
+            + `(created ${admission.binding.created_at ?? "unknown"}, body `
+            + `${digestLabel(admission.binding.body_sha256)}, bound at ${admission.binding.bound_at})`
+          : "ORDER THIS TASK WAS ADMITTED UNDER: none recorded.",
+        "",
+        "A task id has exactly ONE original order. The worker will not re-derive that order from whatever text",
+        "is on the control issue now - the actor able to edit, replace or delete a control comment is the same",
+        "GitHub login the worker trusts, so re-deriving would let a later order authorize itself.",
+        "",
+        "NOTHING was dispatched, fetched, pushed, reset or deleted for this task."
+      ].filter((l) => l !== "").join("\n"),
+      nextAction: "Confirm what happened to the original order. If the work is still wanted, issue a FRESH "
+        + "TASK_ID: a new task binds to its own order on admission. The worker will not replay a blocked task."
+    });
+    return EXIT.BLOCKED;
+  }
+  const orderBinding = admission.binding;
+  if (admission.created) {
+    log(cfg, `ARCHITECT_ORDER BOUND for ${taskId}: comment ${orderBinding.comment_id} `
+      + `(created ${orderBinding.created_at ?? "unknown"}, body ${digestLabel(orderBinding.body_sha256)}, `
+      + `${orderBinding.body_bytes} bytes). This binding is immutable for this TASK_ID.`);
+  } else {
+    log(cfg, `ARCHITECT_ORDER binding REUSED for ${taskId}: the order on the issue is still comment `
+      + `${orderBinding.comment_id} with body ${digestLabel(orderBinding.body_sha256)}, unchanged since admission.`);
+  }
 
   // --- reconcile prior side effects so a retry resumes rather than duplicates ---
   let resume = null;
@@ -980,7 +1662,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       // it can be accepted without the verdict being consulted. Gate it here too,
       // on a FRESHLY DERIVED verdict rather than on whatever the previous attempt
       // did or did not manage to record before it died.
-      const { gate, provenance } = completionGateFor(cfg, prior, rec.completion);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, prior, rec.completion, control);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -988,7 +1670,8 @@ async function runTask(cfg, state, token, candidate, comments) {
           extra: {
             ...mergeObservedAssociations(prior, { branch: rec.existingBranch, prNumber: rec.existingPr?.number }),
             reconciled_without_redispatch: true,
-            reconciliation_provenance: provenance
+            reconciliation_provenance: provenance,
+            merge_transition: mergeTransition ?? null
           }
         });
         return EXIT.BLOCKED;
@@ -1004,7 +1687,8 @@ async function runTask(cfg, state, token, candidate, comments) {
         successful: rec.completion.successful,
         reconciled_without_redispatch: true,
         completion_gate: gate,
-        reconciliation_provenance: provenance
+        reconciliation_provenance: provenance,
+        merge_transition: mergeTransition ?? null
       });
       state.last_run_at = new Date().toISOString();
       persistState(cfg, state, token);
@@ -1135,7 +1819,7 @@ async function runTask(cfg, state, token, candidate, comments) {
   const workspace = establishTaskWorktree({
     cfg,
     taskId,
-    comment: candidate.comment,
+    comment: order,
     worktreeRoot: cfg.worktreeRoot,
     baselineSha: facts.head,
     baselineBranch: facts.branch,
@@ -1210,7 +1894,14 @@ async function runTask(cfg, state, token, candidate, comments) {
     attempt_id: attemptId,
     first_dispatch_at: prior?.first_dispatch_at ?? dispatchStartedAt,
     last_dispatch_at: dispatchStartedAt,
-    comment_id: candidate.comment.id,
+    // D-149: `comment_id` is an OBSERVATION of which comment this attempt was
+    // dispatched from, and it is overwritten on every attempt - which is exactly
+    // why it can never be the authority. `architect_order` is the immutable
+    // binding established at admission; re-writing the value `bindOrderOnce`
+    // returned is a no-op for an existing binding by construction, because that
+    // function returns the STORED document rather than a fresh one.
+    comment_id: order.id,
+    architect_order: orderBinding,
     // D-133: `branch_before` / `head_before` describe the TASK'S OWN context,
     // not the user's checkout. Recording the primary checkout's head here would
     // make a resumed child compare its work against a tree it never touched.
@@ -1232,7 +1923,16 @@ async function runTask(cfg, state, token, candidate, comments) {
 
   let beatCount = 0;
   const result = await runClaude(cfg, {
-    ...candidate,
+    // D-150: the dispatch is constructed EXPLICITLY rather than spread from the
+    // queue entry. Spreading carried `duplicates` and any future field into the
+    // prompt builder by default; naming the three things a dispatch may contain
+    // means a new queue field cannot become executable authority by accident.
+    taskId,
+    comment: order,
+    // The binding is what makes the bytes below provable. `runClaude` refuses,
+    // before it creates any process, unless `comment.body` digests to exactly
+    // what this binding recorded at admission.
+    orderBinding,
     resume,
     scratchDir,
     workspace: {
@@ -1319,16 +2019,23 @@ async function runTask(cfg, state, token, candidate, comments) {
   // explicitly: nothing was spawned, so there is no child to abort and no
   // outcome to assess, and the run must park truthfully instead of falling
   // through into a completion check for a task that was never delegated.
-  if (result.outcome === OUTCOME.UNSUPPORTED_PROMPT_DELIVERY) {
+  // D-150: the same shape for the second pre-spawn rejection - the ORDER BYTES
+  // could not be shown to be the bound ones. Reaching it means the admission gate
+  // and the dispatch gate disagreed, which is a programming error rather than an
+  // operator mistake; it is still handled explicitly, and still fails closed.
+  if (result.outcome === OUTCOME.UNSUPPORTED_PROMPT_DELIVERY
+      || result.outcome === OUTCOME.UNBOUND_EXECUTABLE_ORDER) {
+    const unbound = result.outcome === OUTCOME.UNBOUND_EXECUTABLE_ORDER;
+    const reason = unbound ? "unbound_executable_order" : "unsupported_prompt_delivery";
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
-      task_id: taskId, reason: "unsupported_prompt_delivery", child_pid: null
+      task_id: taskId, reason, child_pid: null, order_reason: result.orderReason ?? null
     });
     log(cfg, `BLOCKED for TASK_ID=${taskId}: ${result.error} No child process was created.`);
     upsertTask(state, taskId, {
       status: TASK_STATUS.BLOCKED,
       last_outcome: result.outcome,
       last_dispatch_finished_at: new Date().toISOString(),
-      last_failure_reason: `unsupported_prompt_delivery (${result.error})`,
+      last_failure_reason: `${reason} (${result.error})`,
       blocked_at: new Date().toISOString(),
       child_identity: null,
       last_child_pid: null
@@ -1338,8 +2045,13 @@ async function runTask(cfg, state, token, candidate, comments) {
     reportStatus(cfg, {
       taskId,
       phase: "dispatch",
-      reason: "unsupported_prompt_delivery",
-      detail: [result.error, "Nothing was spawned and the task was not delivered to any process."]
+      reason,
+      detail: [result.error, "Nothing was spawned and the task was not delivered to any process."].join("\n"),
+      nextAction: unbound
+        ? "Reconcile the control issue by hand and reissue the work under a FRESH TASK_ID. The prompt may carry "
+          + "only the exact order bytes bound at admission, and this dispatch could not prove that."
+        : "Set promptDelivery to \"stdin\" in config.json. The worker will not deliver a task over a channel "
+          + "without a pre-execution handshake."
     });
     return EXIT.BLOCKED;
   }
@@ -1519,12 +2231,29 @@ async function runTask(cfg, state, token, candidate, comments) {
 
   // --- completion requires EVIDENCE, never exit code alone (requirement B) ---
   heartbeat(cfg.lockFile, { token, phase: "verify", taskId });
-  let postComments = [];
-  try {
-    postComments = fetchIssueComments(cfg);
-  } catch (err) {
-    log(cfg, `Could not re-read control issue to verify completion: ${sanitize(err.message)}`);
+  // D-149: THE POST-DISPATCH RE-READ, WITH ITS OWN COMPLETENESS VERDICT.
+  //
+  // This read used to swallow its failure into `postComments = []` and then fall
+  // back to `comments` a hundred lines below with `postComments.length > 0`. That
+  // one expression conflated three genuinely different facts - a failed read, a
+  // proven empty issue, and a successful read - and handed the result to a
+  // decision that treats "the order is not in here" as "there was no order".
+  //
+  // The fresh read is preferred when it SUCCEEDED, not when it happened to be
+  // non-empty; and when it did not succeed, the run's earlier read is used with
+  // ITS completeness carried along, never silently promoted.
+  const postControl = fetchIssueCommentsDetailed(cfg);
+  if (!postControl.ok) {
+    log(cfg, `Could not re-read control issue to verify completion: ${postControl.error}. `
+      + "Falling back to this run's earlier read, which cannot contain a report posted since.");
+  } else if (!postControl.complete) {
+    log(cfg, `WARNING: the post-dispatch control issue read is INCOMPLETE (${postControl.error}). `
+      + "Nothing may conclude that a comment is absent from it.");
   }
+  const verifyControl = postControl.ok
+    ? { comments: postControl.items, complete: postControl.complete === true }
+    : controlView(control);
+  const postComments = verifyControl.comments;
   const completion = assessCompletion({
     taskId,
     comments: postComments,
@@ -1639,7 +2368,33 @@ async function runTask(cfg, state, token, candidate, comments) {
   // sporsmaal som rekonsiliasjonsveiene - ellers ville en dirty worktree
   // blitt akseptert her og avvist der.
   const worktreeCleanliness = worktreeCleanlinessFor(cfg, getTask(state, taskId));
-  const completionGate = evaluateCompletionGate({ completion, provenance: commitProvenance, worktree: worktreeCleanliness });
+
+  // D-145: the ordinary dispatch path must answer EXACTLY the same question as
+  // the three reconciliation paths - otherwise an authorized merge would be
+  // accepted after a crash and refused when it went through cleanly, which is
+  // the same split-brain D-135 removed from the other direction.
+  //
+  // `postComments` is this run's FRESH control-issue read; the authorization is
+  // taken from the trusted ARCHITECT_TASK in it, never from the child's report.
+  //
+  // D-147: no local condition here either. `completionEvidenceFor` is the single
+  // place that decides whether this task owed a transition proof, so the dispatch
+  // path and the three reconciliation paths cannot answer it differently.
+  //
+  // D-149: the task record read back HERE, so the durable binding written at
+  // admission is what decides - not `candidate.comment`, which is current text.
+  const { mergeAuthorization, mergeTransition, transitionExcuse } = completionEvidenceFor(
+    cfg, getTask(state, taskId), taskId, completion, commitProvenance, verifyControl
+  );
+
+  const completionGate = evaluateCompletionGate({
+    completion,
+    provenance: commitProvenance,
+    worktree: worktreeCleanliness,
+    mergeTransition,
+    transitionExcuse,
+    mergeAuthorization
+  });
   if (completionGate.held) {
     parkHeldCompletion(cfg, state, token, taskId, {
       gate: completionGate,
@@ -1648,7 +2403,12 @@ async function runTask(cfg, state, token, candidate, comments) {
       // verdict, the task-owned dirty lines and the worktree path are exactly
       // what a human reconciling this needs, and none of it is a claim of
       // ownership - they are observations plus one honest verdict.
-      extra: { ...checkpoint, ...observed, worktree_cleanliness: worktreeCleanliness }
+      extra: {
+        ...checkpoint,
+        ...observed,
+        worktree_cleanliness: worktreeCleanliness,
+        merge_transition: mergeTransition ?? null
+      }
     });
     return EXIT.BLOCKED;
   }
@@ -1664,6 +2424,9 @@ async function runTask(cfg, state, token, candidate, comments) {
       // D-139 B: lagret slik at en senere, ferskere maaling kun kan gjoere
       // svaret VERRE - aldri bedre.
       worktree_cleanliness: worktreeCleanliness,
+      // D-145: recorded on the PASS path too, so an accepted merge task always
+      // states positively WHICH proof carried it.
+      merge_transition: mergeTransition ?? null,
       completed_at: new Date().toISOString(),
       report_comment_id: completion.reportCommentId,
       report_status: completion.status,
@@ -1860,22 +2623,38 @@ function cmdDryRun(cfg) {
     console.log(`Dry run: GitHub auth unavailable (${auth.error}). A real run would exit TRANSIENT.`);
     return EXIT.TRANSIENT;
   }
-  let comments = [];
-  try {
-    comments = fetchIssueComments(cfg);
-  } catch (err) {
-    console.log(`Dry run: control issue unreachable (${sanitize(err.message)}). A real run would exit TRANSIENT.`);
+  const dryControl = fetchIssueCommentsDetailed(cfg);
+  // D-151: the preview captures the SAME atomic snapshot the real run would, and
+  // reports the same verdict. A dry run that quietly carried on past an unproven
+  // read would show a queue, a candidate and a set of retirements that the real
+  // run is structurally incapable of producing - which is worse than no preview.
+  const drySnapshot = captureAuthoritySnapshot({ control: dryControl, trustedAuthor: cfg.trustedAuthor });
+  if (!drySnapshot.ok) {
+    console.log(JSON.stringify({
+      dry_run: true,
+      wrote_anything: false,
+      took_lock: false,
+      state_source: loaded.source,
+      first_run: loaded.first_run,
+      ...authoritySnapshotEvidence(drySnapshot),
+      control_comments_read_error: dryControl.error ?? null,
+      would_exit: "TRANSIENT",
+      would_decide: "nothing: no recovery, no reconciliation, no retirement, no supersession, "
+        + "no selection, no prompt, no child"
+    }, null, 2));
     return EXIT.TRANSIENT;
   }
+  const comments = drySnapshot.comments;
   const abandoned = findAbandonedTasks(loaded.state);
-  const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
+  const tasks = drySnapshot.entries;
   const nowMs = Date.now();
   // D132: the dry run must preview the SAME decision the real run would make,
   // including tiering and supersession - otherwise it cannot be used to verify
   // queue behaviour on the host, which is exactly what was needed here.
   const selection = selectNextTask({
     tasks, state: loaded.state, comments, trustedAuthor: cfg.trustedAuthor, nowMs,
-    observedHead: gitHead(cfg).value ?? null
+    observedHead: gitHead(cfg).value ?? null,
+    snapshotComplete: drySnapshot.complete === true
   });
   const status = gitStatusLines(cfg);
   console.log(JSON.stringify({
@@ -1884,9 +2663,50 @@ function cmdDryRun(cfg) {
     took_lock: false,
     state_source: loaded.source,
     first_run: loaded.first_run,
+    // D-149/D-151: this preview's own snapshot - whether the read succeeded,
+    // whether it was PROVEN to cover the whole issue, and which task ids it
+    // classified. A dry run that quietly dropped a page would otherwise show a
+    // queue that does not exist, and the host uses this output to verify queue
+    // behaviour.
+    ...authoritySnapshotEvidence(drySnapshot),
+    control_comments_read_error: dryControl.error ?? null,
+    // D-151: EVERY order's authority verdict, not just the chosen candidate's.
+    // An operator can now see at a glance which control comments would execute,
+    // which would be refused and exactly why - before anything runs.
+    order_authority: authorityVerdicts(drySnapshot),
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
     next_candidate: selection.candidate?.taskId ?? null,
     next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
+    // D-150/D-151: the candidate's verdict, read from the snapshot that chose it
+    // rather than re-derived. `would_dispatch` is therefore exactly the fact the
+    // real run acts on, not a second opinion that could disagree with it.
+    next_candidate_order_authority: selection.candidate
+      ? {
+        admissible: selection.candidateAuthority?.ok === true,
+        reason: selection.candidateAuthority?.reason ?? null,
+        retryable: selection.candidateAuthority?.ok === true
+          ? false
+          : (selection.candidateAuthority?.retryable === true),
+        distinct_order_count: selection.candidateAuthority?.distinctCount ?? null,
+        candidate_comment_ids: [...(selection.candidateAuthority?.candidateIds ?? [])],
+        order_comment_id: selection.candidateAuthority?.commentId ?? null,
+        order_created_at: selection.candidateAuthority?.createdAt ?? null,
+        would_dispatch: selection.candidateAuthority?.reason === ORDER_AUTHORITY.ADMISSIBLE
+      }
+      : null,
+    // D-151: would a proposed explicit retirement actually be carried out? Shown
+    // for ACCEPTED and REFUSED proposals alike, each with the declaring comment
+    // id and body digest - and shown without mutating anything, which is the
+    // whole point: an operator can check a destructive decision before it runs.
+    supersession_preview: selection.supersessionProposals.map((p) => ({
+      victim_task_id: p.victimTaskId,
+      declared_by_task_id: p.declaredByTaskId,
+      admissible: p.accepted,
+      refused_reason: p.refusedReason,
+      declaring_comment_id: p.declaration?.comment_id ?? null,
+      declaring_order_digest: p.declaration?.body_sha256 ? digestLabel(p.declaration.body_sha256) : null
+    })),
+    inadmissible_authority: selection.inadmissibleAuthorityTaskIds,
     observed_head: selection.observedHead,
     next_candidate_expected_head: selection.candidateExpectedHead,
     next_candidate_head_tier:
@@ -1906,7 +2726,11 @@ function cmdDryRun(cfg) {
       // or the host cannot verify that an unsuccessful newer task is no longer
       // silently invalidating older work.
       superseded_by: d.supersededBy ?? null,
-      supersession_basis: d.supersessionBasis ?? null
+      supersession_basis: d.supersessionBasis ?? null,
+      // D-151: the authority verdict that decided whether this task had any
+      // standing in the queue at all.
+      order_admissible: d.admissible,
+      order_authority_reason: d.authorityReason
     })),
     newest_successful_task: selection.newestSuccessfulTaskId,
     // The USER's checkout. A task's own dirt never appears here by construction.
@@ -1917,6 +2741,19 @@ function cmdDryRun(cfg) {
     // work it owns. This is what makes "task-owned, not stranded" inspectable.
     task_worktrees: Object.keys(loaded.state.tasks ?? {}).map((id) => ({
       task_id: id, ...describeTaskWorktree(cfg, id)
+    })),
+    // D-149: the durable order binding per known task. Digests only - never a
+    // body - so this output stays safe to paste anywhere. `bound: false` on a
+    // non-terminal task is the legacy-migration case and is visible here rather
+    // than only discoverable when the task next fails to complete.
+    order_bindings: Object.values(loaded.state.tasks ?? {}).map((t) => ({
+      task_id: t.task_id,
+      bound: Boolean(t.architect_order),
+      order_comment_id: t.architect_order?.comment_id ?? null,
+      order_created_at: t.architect_order?.created_at ?? null,
+      order_body_digest: t.architect_order?.body_sha256 ? digestLabel(t.architect_order.body_sha256) : null,
+      bound_at: t.architect_order?.bound_at ?? null,
+      missing_at_migration: t.architect_order_missing_at_migration === true
     })),
     // Retained under the pre-D133 names so existing host tooling still parses.
     worktree_query_ok: status.ok,
@@ -2030,4 +2867,17 @@ if (invokedDirectly) {
     });
 }
 
-export { main, cmdRun, runOwned, recoverAbandonedTasks };
+/**
+ * D-147: `completionGateFor` and `completionEvidenceFor` are exported for the
+ * adversarial suite.
+ *
+ * `completionGateFor` IS the entire gate logic of all three reconciliation sites
+ * - pre-selection, abandoned-task crash recovery and pre-dispatch - each of which
+ * calls it and then acts on `gate.held`. The pre-dispatch site is a BACKSTOP that
+ * the pre-selection pass pre-empts whenever both see the same comments, so it
+ * cannot be reached through the process entrypoint in a single run. Exporting the
+ * shared function lets it be exercised with that site's exact argument shape,
+ * against a real worktree and a real durable claim, instead of being asserted by
+ * inspection or quietly left uncovered.
+ */
+export { main, cmdRun, runOwned, recoverAbandonedTasks, completionGateFor, completionEvidenceFor };

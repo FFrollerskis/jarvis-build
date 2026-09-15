@@ -657,6 +657,36 @@ export const COMPLETION_GATE = Object.freeze({
   /** `unchanged` or `task_attributed`: the claim rests on proven ground. */
   PASSED_PROVENANCE_VERIFIED: "commit_provenance_verified",
   /**
+   * D-145: the commit range's ONLY unexplained commit is the GitHub-generated
+   * merge commit of an explicitly authorized guarded PR merge, and that
+   * transition is independently proven from the trusted ARCHITECT_TASK plus
+   * fresh remote truth. Claude never authored that commit and never could have
+   * trailered it, so authorship was the wrong thing to demand.
+   *
+   * This is a SEPARATE pass reason, never a variant of the one above, so a
+   * record always states which kind of proof it actually rested on.
+   */
+  PASSED_AUTHORIZED_MERGE_TRANSITION: "authorized_merge_transition_verified",
+  /**
+   * D-147: this task's OWN trusted order claims a merge authorization that cannot
+   * be decided - half the flags, no exact PR/base/head, an unknown merge method,
+   * another repository, or a post-merge evidence policy that does not resolve.
+   *
+   * Before D-147 several of those were indistinguishable from "not a merge task",
+   * which routed them down the cheap path where a verified commit range retired
+   * them. A claimed merge whose order is broken is now its own named refusal, and
+   * it holds NO MATTER how well the commit range verifies.
+   */
+  HELD_MERGE_AUTHORIZATION_UNDECIDABLE: "merge_authorization_claimed_but_not_decidable",
+  /**
+   * D-147: the task IS merge-authorized, and the authorized transition is not
+   * proven. This is the bypass D-146 left open, stated as a gate outcome: generic
+   * commit provenance may coexist with the transition proof but may never replace
+   * it, because the two answer different questions. "Claude wrote its own commits"
+   * is not evidence that the remote now holds the authorized merge.
+   */
+  HELD_MERGE_TRANSITION_UNVERIFIED: "authorized_merge_transition_not_verified",
+  /**
    * D-136: no verdict exists at all. HELD, not passed - this used to be the
    * null-provenance success bypass, and absence of evidence is not evidence.
    */
@@ -788,11 +818,43 @@ export function mergeWorktreeCleanliness(stored, fresh) {
  * this task completed or successful, do NOT release its worktree, do NOT emit a
  * completion-confirmed event, and do NOT let it retire any other task.
  */
-export function evaluateCompletionGate({ completion, provenance, worktree = null, now = () => new Date() }) {
+export function evaluateCompletionGate({
+  completion,
+  provenance,
+  worktree = null,
+  mergeTransition = null,
+  transitionExcuse = null,
+  mergeAuthorization = null,
+  now = () => new Date()
+}) {
   const prov = provenance && typeof provenance === "object" ? provenance : null;
   const wt = worktree && typeof worktree === "object" ? worktree : null;
+  /**
+   * D-147: WHAT KIND OF TASK IS THIS, decided from its own trusted order and not
+   * from any provenance verdict. `classifyMergeAuthorization` in
+   * `merge-transition.mjs` produces this; the gate deliberately takes only the two
+   * booleans it needs, so this module keeps no dependency on that one.
+   *
+   *   claimed=false                 ordinary task. Nothing changes for it.
+   *   claimed=true, decidable=false a broken merge order: refused outright.
+   *   claimed=true, decidable=true  merge-authorized: the transition is MANDATORY.
+   */
+  const ma = mergeAuthorization && typeof mergeAuthorization === "object" ? mergeAuthorization : null;
+  const mergeClaimed = ma?.claimed === true;
+  const mergeUndecidable = mergeClaimed && ma?.decidable !== true;
+  const mergeAuthorized = mergeClaimed && ma?.decidable === true;
+  // D-145: the transition half. `excused === true` is the ONLY value that means
+  // anything here, and it is computed by `mergeTransitionExcusesProvenance`,
+  // which requires the set of unexplained commits to be exactly the verified
+  // merge commit. A verified transition on its own excuses nothing.
+  const excuse = transitionExcuse && typeof transitionExcuse === "object" ? transitionExcuse : null;
+  const transitionExcused = excuse?.excused === true && mergeTransition?.verified === true;
   const evidence = {
     provenance_verdict: prov?.verdict ?? null,
+    // D-147: recorded explicitly. Two hold reasons now fire with a VERIFIED range
+    // behind them, so a reader can no longer infer `verified` from the fact that
+    // the gate held - and a record that forces that inference invites the wrong one.
+    provenance_verified: isVerifiedVerdict(prov?.verdict) && prov?.verified === true,
     provenance_reason: prov?.reason ?? null,
     head_before: prov?.head_before ?? null,
     head_after: prov?.head_after ?? null,
@@ -811,15 +873,83 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
     worktree_entry_count: Number.isFinite(wt?.entry_count) ? wt.entry_count : 0,
     worktree_entries: (wt?.entries ?? []).slice(0, 20),
     worktree_error: wt?.error ?? null,
+    // D-145: the transition half of the evidence, recorded whether or not it was
+    // needed, so a held gate can say WHY the transition did not save it and a
+    // passed one can say exactly what it rested on.
+    merge_transition_verified: mergeTransition?.verified === true,
+    merge_transition_reason: mergeTransition?.reason ?? null,
+    merge_transition_pr: mergeTransition?.pr_number ?? null,
+    merge_commit_sha: mergeTransition?.merge_commit_sha ?? null,
+    transition_excuse_reason: excuse?.reason ?? null,
+    transition_excused_commits: excuse?.excused_commits ?? [],
+    // D-147: the CLASSIFICATION, recorded on every outcome. A record must be able
+    // to state, without re-deriving anything, whether this task was required to
+    // prove a transition at all - and if it was not, that it was not.
+    merge_authorization_claim: ma?.claim ?? null,
+    merge_authorization_claimed: mergeClaimed,
+    merge_authorization_decidable: mergeClaimed ? ma?.decidable === true : null,
+    merge_authorization_reason: ma?.reason ?? null,
+    merge_authorization_detail: ma?.detail ?? null,
+    // D-148: WHICH COMMENT WAS THE AUTHORITY, and how many claimed to be. A record
+    // that only says "authorized" cannot be audited afterwards: the whole D-148
+    // failure mode is a SECOND order for the same task id, and its signature is
+    // `merge_authority_candidate_count > 1`. The ids are GitHub's own comment ids,
+    // never anything the comment bodies say about themselves.
+    merge_authority_comment_id: ma?.selection?.canonical_comment_id ?? null,
+    merge_authority_created_at: ma?.selection?.canonical_created_at ?? null,
+    merge_authority_candidate_count: Number.isFinite(ma?.selection?.candidate_count)
+      ? ma.selection.candidate_count
+      : null,
+    merge_authority_candidate_comment_ids: ma?.selection?.candidate_comment_ids ?? [],
+    merge_authority_duplicate_comment_ids: ma?.selection?.duplicate_comment_ids ?? [],
+    // D-149: THE DURABLE ORDER BINDING, recorded on every outcome.
+    //
+    // `merge_authority_comment_id` above says which comment was READ as the
+    // authority THIS TIME. These say which comment the task was ADMITTED bound
+    // to, what its body digested to then, and what was actually observed now.
+    // The whole D-149 failure mode is a bound order that is gone, changed or
+    // never proven present, and its signature is visible here without any
+    // re-derivation: an expected id with no observed ids, or an observed digest
+    // that differs from the expected one.
+    //
+    // Digests only. No order body ever reaches a record, a log or a comment.
+    order_binding_present: ma?.binding?.order_binding_present === true,
+    order_binding_verified: ma?.binding?.order_binding_verified === true,
+    order_binding_reason: ma?.binding?.order_binding_reason ?? null,
+    order_binding_detail: ma?.binding?.order_binding_detail ?? null,
+    expected_order_comment_id: ma?.binding?.expected_order_comment_id ?? null,
+    expected_order_created_at: ma?.binding?.expected_order_created_at ?? null,
+    expected_order_body_digest: ma?.binding?.expected_order_body_digest ?? null,
+    expected_order_body_bytes: ma?.binding?.expected_order_body_bytes ?? null,
+    observed_order_comment_ids: ma?.binding?.observed_order_comment_ids ?? [],
+    observed_order_body_digest: ma?.binding?.observed_order_body_digest ?? null,
+    order_bound_at: ma?.binding?.order_bound_at ?? null,
+    // Tri-state: `null` = nobody established it, `false` = known incomplete,
+    // `true` = proven complete. A read failure must never look like an empty set.
+    control_comments_complete: ma?.binding?.control_comments_complete ?? null,
     evaluated_at: now().toISOString()
   };
 
   if (completion?.complete !== true || completion?.successful !== true) {
     return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_NOT_A_SUCCESS_CLAIM, ...evidence };
   }
+  // D-147: a CLAIMED but undecidable merge authorization is refused first, and
+  // refused whatever the commit range says. "Too little order to decide" is a
+  // decision, and the decision is no - exactly as D-146 already ruled for an
+  // unresolvable post-merge evidence policy. Placing it ahead of the provenance
+  // branches is deliberate: the finding is about the ORDER, and reporting it as
+  // an unverified range would name the wrong thing.
+  if (mergeUndecidable) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE, ...evidence };
+  }
   // D-136: NO record is not a good record. A success claim with no commit
   // verdict behind it at all is held exactly like an unverified one - the
   // worker never looked, so it has nothing to accept the claim on.
+  //
+  // D-145 does NOT reach into this branch. Without a classified range there is
+  // no way to establish that the merge commit is the ONLY unexplained thing, and
+  // `mergeTransitionExcusesProvenance` refuses a null record for exactly that
+  // reason. Absence of evidence is still not evidence.
   if (!prov) {
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_NO_PROVENANCE_RECORD, ...evidence };
   }
@@ -827,8 +957,26 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
   // may carry a verified verdict with `verified` explicitly downgraded (that is
   // precisely what `provenanceForResume` does on drift), and a record from a
   // future version may carry a verdict this build does not know.
-  if (!isVerifiedVerdict(prov.verdict) || prov.verified !== true) {
+  //
+  // D-145: an unverified range is still a hold UNLESS the single thing it could
+  // not attribute is the GitHub-generated merge commit of an authorized merge
+  // that has been independently proven. That is a narrower statement than "the
+  // transition verified": the excuse is computed against THIS record's own
+  // unexplained sha list, so a foreign commit riding alongside the merge commit
+  // holds the gate exactly as before.
+  const provenanceProven = isVerifiedVerdict(prov.verdict) && prov.verified === true;
+  if (!provenanceProven && !transitionExcused) {
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_PROVENANCE_UNVERIFIED, ...evidence };
+  }
+
+  // D-147: THE MANDATORY HALF. For a merge-authorized task the verified
+  // transition is a REQUIREMENT, not a fallback. `provenanceProven` may be true
+  // here and it changes nothing: it proves Claude wrote its own commits, and this
+  // task's deliverable was a state transition on the remote that Claude did not
+  // and could not author. A task that cannot prove the transition is held even
+  // with a perfect commit range behind it.
+  if (mergeAuthorized && mergeTransition?.verified !== true) {
+    return { held: true, passed: false, reason: COMPLETION_GATE.HELD_MERGE_TRANSITION_UNVERIFIED, ...evidence };
   }
 
   // D-139 B: provenance alone is no longer enough. Terminal SUCCESS requires
@@ -846,7 +994,22 @@ export function evaluateCompletionGate({ completion, provenance, worktree = null
     return { held: true, passed: false, reason: COMPLETION_GATE.HELD_WORKTREE_UNKNOWN, ...evidence };
   }
 
-  return { held: false, passed: true, reason: COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED, ...evidence };
+  // The record states which kind of proof it actually rested on.
+  //
+  // D-147: for a MERGE-AUTHORIZED task the answer is always the transition,
+  // whether or not the range also verified - because the transition is what was
+  // required and what was actually checked. `PASSED_PROVENANCE_VERIFIED` is now
+  // unreachable for such a task by construction, and that is the invariant the
+  // adversarial suite asserts across all four completion paths: a merge task can
+  // never retire on "Claude wrote its own commits".
+  return {
+    held: false,
+    passed: true,
+    reason: provenanceProven && !mergeAuthorized
+      ? COMPLETION_GATE.PASSED_PROVENANCE_VERIFIED
+      : COMPLETION_GATE.PASSED_AUTHORIZED_MERGE_TRANSITION,
+    ...evidence
+  };
 }
 
 /* ==========================================================================
@@ -1160,12 +1323,25 @@ export function completionGateHeld(record) {
  * actually proven, what the worker did NOT do, and what a human must decide.
  */
 export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
+  // D-147: the headline must name the thing that actually failed. Two hold
+  // reasons now fire with a fully verified commit range behind them, and opening
+  // with "cannot prove the commits are this task's own work" would be false for
+  // both - in the first line of the one message a human reconciling this reads.
+  const headline = gate.reason === COMPLETION_GATE.HELD_MERGE_TRANSITION_UNVERIFIED
+    ? "but this task is MERGE-AUTHORIZED and this worker cannot prove that the authorized merge "
+      + "transition actually happened on the remote, exactly as authorized. Commit provenance answers a "
+      + "DIFFERENT question - did this task write these commits - and a merge commit is generated by "
+      + "GitHub, so no commit-authorship verdict can stand in for this one."
+    : gate.reason === COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE
+      ? "but this task's OWN trusted order claims a merge authorization that cannot be decided. Too little "
+        + "order to decide is a decision, and the decision is no."
+      : "but this worker cannot prove that the commits produced during the attempt are this task's own work.";
   return [
     `A TRUSTED report for ${taskId} claims SUCCESSFUL completion (comment ${gate.report_comment_id ?? "unknown"}, `
-      + `STATUS=${gate.report_status ?? "unknown"}), but this worker cannot prove that the commits produced `
-      + "during the attempt are this task's own work.",
+      + `STATUS=${gate.report_status ?? "unknown"}), ${headline}`,
     "",
-    `COMMIT PROVENANCE VERDICT: ${gate.provenance_verdict ?? "unknown"} (verified=false)`,
+    `COMMIT PROVENANCE VERDICT: ${gate.provenance_verdict ?? "unknown"} `
+      + `(verified=${gate.provenance_verified === true})`,
     // D-136: the two held reasons are different findings and must not read the
     // same. `commit_provenance_unverified` means the worker looked and could not
     // account for the range; `no_commit_provenance_record_exists` means no
@@ -1177,6 +1353,62 @@ export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
     gate.unattributed_count > 0
       ? `UNEXPLAINED COMMITS (${gate.unattributed_count}): `
         + `${gate.unattributed_commits.map((s) => String(s).slice(0, 12)).join(", ") || "not listed"}`
+      : "",
+    // D-145: when a merge-transition check was attempted and did NOT save the
+    // task, say so and say why. Silence here would read as "nobody tried", which
+    // is a different and misleading finding.
+    gate.merge_transition_reason
+      ? `AUTHORIZED MERGE TRANSITION: verified=${gate.merge_transition_verified === true} `
+        + `(${gate.merge_transition_reason})`
+        + (gate.transition_excuse_reason ? `; excuse=${gate.transition_excuse_reason}` : "")
+      : "",
+    // D-147: whether a transition was REQUIRED of this task at all, and on whose
+    // authority. Without it a reader cannot tell a merge task that failed to
+    // prove its transition from an ordinary task that was never asked to.
+    gate.merge_authorization_claimed === true
+      ? `MERGE AUTHORIZATION: claimed, decidable=${gate.merge_authorization_decidable === true} `
+        + `(${gate.merge_authorization_reason ?? "unknown"})`
+        + (gate.merge_authorization_detail ? `; ${gate.merge_authorization_detail}` : "")
+      : "",
+    // D-148: which comment held the authority - and, when more than one claimed
+    // it, every id that did. A human reconciling a duplicate-authority refusal
+    // needs the ids to look at, not a count.
+    gate.merge_authority_candidate_count > 1
+      ? `DUPLICATE MERGE AUTHORITY (${gate.merge_authority_candidate_count} trusted ARCHITECT_TASK comments claim `
+        + `this TASK_ID): ${(gate.merge_authority_duplicate_comment_ids ?? []).join(", ") || "ids unavailable"}. `
+        + "One task id has exactly ONE original authority. A later order never grants, repairs or widens an "
+        + "earlier one - it makes the authority undecidable, and undecidable fails closed. Reissue under a "
+        + "FRESH TASK_ID."
+      : (gate.merge_authority_comment_id !== null && gate.merge_authority_comment_id !== undefined
+        ? `MERGE AUTHORITY COMMENT: ${gate.merge_authority_comment_id}`
+        : ""),
+    // D-149: the DURABLE BINDING. Printed whenever the task carries one, because
+    // the failure this closes is invisible otherwise: an order that is gone reads
+    // as "no merge authority", which reads as "ordinary task", which reads as
+    // nothing at all. The expected id + digest and the observed ids make the
+    // difference between "deleted", "replaced", "edited" and "we could not read
+    // the issue" legible without re-deriving anything - and none of it is the
+    // order's content.
+    gate.order_binding_present === true && gate.order_binding_verified !== true
+      ? `DURABLE ORDER BINDING: NOT VERIFIED (${gate.order_binding_reason ?? "unknown"}). This task was ADMITTED `
+        + `from trusted comment ${gate.expected_order_comment_id ?? "unknown"} `
+        + `(created ${gate.expected_order_created_at ?? "unknown"}, body ${gate.expected_order_body_digest ?? "unknown"}, `
+        + `${gate.expected_order_body_bytes ?? "unknown"} bytes, bound at ${gate.order_bound_at ?? "unknown"}); `
+        + `observed now: ${(gate.observed_order_comment_ids ?? []).join(", ") || "NO trusted order for this TASK_ID"}`
+        + (gate.observed_order_body_digest ? ` (body ${gate.observed_order_body_digest})` : "")
+        + `. Control comment collection proven complete: ${gate.control_comments_complete === null
+          ? "NOT ESTABLISHED" : String(gate.control_comments_complete)}.`
+        + (gate.order_binding_detail ? ` ${gate.order_binding_detail}` : "")
+      : (gate.order_binding_present === true
+        ? `DURABLE ORDER BINDING: verified against admitted comment ${gate.expected_order_comment_id ?? "unknown"} `
+          + `(body ${gate.expected_order_body_digest ?? "unknown"})`
+        : ""),
+    gate.order_binding_present === false && gate.merge_authorization_claimed === true
+      ? "DURABLE ORDER BINDING: ABSENT. This task has no durable binding to its original ARCHITECT_TASK - it was "
+        + "admitted by a worker build from before D-149, or its record was written without going through "
+        + "admission. The worker will NOT synthesise one from whatever order is on the issue now: that is exactly "
+        + "how a deleted or replaced order would grant itself authority. Reissue under a FRESH TASK_ID, which "
+        + "binds on admission."
       : "",
     worktreePath ? `WORKTREE (retained, untouched): ${worktreePath}` : "",
     "",

@@ -31,6 +31,13 @@
   "worktreeRoot": "worktrees",
   "manifestFile": "logs/quarantine-manifest.jsonl",
 
+  "_comment_postMergeEvidence": "D-146. Optional. This host's policy for what an AUTHORIZED MERGE task must prove AFTER the merge. requiredChecks: the check-run names that must each exist EXACTLY ONCE on the merge commit with status=completed and conclusion=success - missing, duplicate, unfinished, neutral, skipped, cancelled and failed all fail closed, and a check outside the set NEVER substitutes for one inside it. extraChecksPolicy: ignore | must_not_fail (default) | forbid, for check runs outside the required set. profile: which closeout-evidence profile the trusted terminal report must satisfy (merge_closeout_v1). Resolution order is the task's own trusted ARCHITECT_TASK (REQUIRED_POST_MERGE_CHECKS=, EXTRA_POST_MERGE_CHECKS=, POST_MERGE_EVIDENCE_PROFILE=, REQUIRED_CLOSEOUT_FIELDS=), then this key, then the repository's real CI jobs. Omitting this key is safe; setting requiredChecks to [] is NOT a bypass - it makes every authorized merge task fail closed for lack of a decidable policy.",
+  "postMergeEvidence": {
+    "requiredChecks": ["build-test", "windows-git-auth", "gitleaks"],
+    "extraChecksPolicy": "must_not_fail",
+    "profile": "merge_closeout_v1"
+  },
+
   "heartbeatSeconds": 60,
   "heartbeatTimeoutMinutes": 15,
   "malformedLockGraceSeconds": 60,

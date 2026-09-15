@@ -53,24 +53,60 @@ export function verifyAuth(runner = gh) {
   }
 }
 
-/** Parse `gh api --paginate` output, which may be one JSON array per page. */
-export function parsePaginatedJson(text) {
+/**
+ * Parse `gh api --paginate` output, which may be one JSON array per page.
+ *
+ * D-149: this ALSO reports whether every fragment it was handed actually parsed.
+ * The fallback branch below drops a fragment it cannot read, and a dropped page
+ * is indistinguishable from a short page by looking at the result array - which
+ * is precisely how a control comment can go missing without anything failing.
+ * `complete: false` means AT LEAST ONE FRAGMENT WAS LOST, and a caller deciding
+ * anything from the ABSENCE of an element must refuse on it.
+ *
+ * Returns `{ items, complete, dropped_fragments }`.
+ */
+export function parsePaginatedJsonDetailed(text) {
   const trimmed = String(text ?? "").trim();
-  if (!trimmed) return [];
+  // An empty response is a complete answer: `gh` printed nothing because there
+  // was nothing. That is a PROVEN empty set, not a failed read.
+  if (!trimmed) return { items: [], complete: true, dropped_fragments: 0 };
   try {
     const parsed = JSON.parse(trimmed);
-    return Array.isArray(parsed) ? parsed : [parsed];
+    return { items: Array.isArray(parsed) ? parsed : [parsed], complete: true, dropped_fragments: 0 };
   } catch {
-    const parts = trimmed.match(/\[[\s\S]*?\](?=\s*\[|\s*$)/g) || [trimmed];
-    return parts.flatMap((p) => {
+    const re = /\[[\s\S]*?\](?=\s*\[|\s*$)/g;
+    const items = [];
+    let dropped = 0;
+    let covered = 0;
+    let uncovered = "";
+    let match;
+    while ((match = re.exec(trimmed)) !== null) {
+      // Anything BETWEEN two recognised fragments was never even offered to
+      // JSON.parse. A truncated page is exactly that shape, and counting only
+      // parse failures would have missed it entirely - so the gap is measured,
+      // not assumed away.
+      uncovered += trimmed.slice(covered, match.index);
+      covered = match.index + match[0].length;
       try {
-        const parsed = JSON.parse(p);
-        return Array.isArray(parsed) ? parsed : [parsed];
+        const parsed = JSON.parse(match[0]);
+        if (Array.isArray(parsed)) items.push(...parsed);
+        else items.push(parsed);
       } catch {
-        return [];
+        dropped += 1;
       }
-    });
+    }
+    uncovered += trimmed.slice(covered);
+    // Whitespace between pages is not a lost page.
+    if (uncovered.trim() !== "") dropped += 1;
+    // Nothing matched at all: the whole response is one unreadable fragment.
+    if (items.length === 0 && dropped === 0) dropped = 1;
+    return { items, complete: dropped === 0, dropped_fragments: dropped };
   }
+}
+
+/** Backwards-compatible projection: the items alone. */
+export function parsePaginatedJson(text) {
+  return parsePaginatedJsonDetailed(text).items;
 }
 
 /** Parse newline-delimited JSON produced by `gh api --jq`. */
@@ -86,16 +122,57 @@ export function parseJsonLines(text) {
 }
 
 /**
+ * Control-issue comments, WITH an explicit completeness verdict.
+ *
+ * D-149: `{ ok, items, complete, error }`. The three states are deliberately
+ * distinct and a caller must not collapse them:
+ *
+ *   ok:true,  complete:true   every page was read and parsed. An empty `items`
+ *                             is then a PROVEN empty set.
+ *   ok:true,  complete:false  something came back, but at least one fragment
+ *                             could not be parsed. Absence proves NOTHING.
+ *   ok:false, complete:false  the read failed outright. Absence proves nothing,
+ *                             and `items` is empty only because there is no data.
+ *
+ * Reading `items.length === 0` without consulting `complete` is exactly the bug
+ * D-149 closes: a failed read handed to a decision that treats "not found" as
+ * "there was never an order".
+ */
+export function fetchIssueCommentsDetailed({ repoOwner, repoName, controlIssue }, runner = gh) {
+  let out;
+  try {
+    out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/issues/${controlIssue}/comments`,
+      "--paginate"
+    ]);
+  } catch (err) {
+    return { ok: false, items: [], complete: false, dropped_fragments: 0, error: sanitize(err.message) };
+  }
+  const parsed = parsePaginatedJsonDetailed(out);
+  return {
+    ok: true,
+    items: parsed.items,
+    complete: parsed.complete,
+    dropped_fragments: parsed.dropped_fragments,
+    error: parsed.complete
+      ? null
+      : `${parsed.dropped_fragments} paginated fragment(s) could not be parsed, so the comment collection is incomplete`
+  };
+}
+
+/**
  * Control-issue comments. Throws on failure - the caller must treat an
  * unreadable queue as transient, never as an empty queue.
+ *
+ * Retained as the array-returning form for callers that only need the items and
+ * that already treat a throw as "unknown". Anything deciding on ABSENCE must use
+ * `fetchIssueCommentsDetailed` and honour `complete`.
  */
-export function fetchIssueComments({ repoOwner, repoName, controlIssue }, runner = gh) {
-  const out = runner([
-    "api",
-    `repos/${repoOwner}/${repoName}/issues/${controlIssue}/comments`,
-    "--paginate"
-  ]);
-  return parsePaginatedJson(out);
+export function fetchIssueComments(cfg, runner = gh) {
+  const result = fetchIssueCommentsDetailed(cfg, runner);
+  if (!result.ok) throw new Error(result.error);
+  return result.items;
 }
 
 /**
@@ -174,6 +251,87 @@ export function getPull({ repoOwner, repoName }, number, runner = gh) {
     return parsed.length > 0 ? { ok: true, item: parsed[0] } : { ok: false, item: null, error: "empty_response" };
   } catch (err) {
     return { ok: false, item: null, error: sanitize(err.message) };
+  }
+}
+
+/**
+ * D-145: the MERGE STATE of one PR, read fresh from the remote.
+ *
+ * Deliberately separate from `getPull`: that projection exists for duplicate
+ * detection and carries no `merged` boolean, no base sha and no head sha, so it
+ * cannot answer "did the AUTHORIZED merge actually happen?" at all. This one
+ * returns only exact, checkable identity - never a summary and never a claim.
+ *
+ * `{ ok, item: { number, merged, mergeCommitSha, headSha, baseSha, baseRef,
+ * headRef, state }, error }`. `ok: false` means UNKNOWN, never "not merged".
+ */
+export function getPullMergeState({ repoOwner, repoName }, number, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/pulls/${Number(number)}`,
+      "--jq",
+      "{number: .number, merged: .merged, mergeCommitSha: .merge_commit_sha, headSha: .head.sha, "
+        + "baseSha: .base.sha, headRef: .head.ref, baseRef: .base.ref, state: .state}"
+    ]);
+    const parsed = parseJsonLines(out);
+    return parsed.length > 0
+      ? { ok: true, item: parsed[0], error: null }
+      : { ok: false, item: null, error: "empty_response" };
+  } catch (err) {
+    return { ok: false, item: null, error: sanitize(err.message) };
+  }
+}
+
+/**
+ * D-145: one commit's exact identity, parents and tree.
+ *
+ * The PARENT LIST is the evidence that a merge was a normal two-parent merge
+ * rather than a squash or a rebase, and the TREE is the evidence that the merge
+ * introduced no content the review never saw. Both come from the remote, not
+ * from anything the child says about what it did.
+ *
+ * `{ ok, item: { sha, parents: [...], treeSha, ... }, error }`.
+ */
+export function getCommit({ repoOwner, repoName }, sha, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/commits/${encodeURIComponent(String(sha))}`,
+      "--jq",
+      "{sha: .sha, treeSha: .commit.tree.sha, parents: [.parents[].sha], "
+        + "verified: .commit.verification.verified, message: .commit.message}"
+    ]);
+    const parsed = parseJsonLines(out);
+    return parsed.length > 0
+      ? { ok: true, item: parsed[0], error: null }
+      : { ok: false, item: null, error: "empty_response" };
+  } catch (err) {
+    return { ok: false, item: null, error: sanitize(err.message) };
+  }
+}
+
+/**
+ * D-145: the check runs on one exact commit.
+ *
+ * Used to confirm POST-MERGE CI on the merge commit itself. The CI a PR ran
+ * before the merge is a different commit and does not answer this question.
+ *
+ * `{ ok, runs: [{ name, status, conclusion }], error }`. `ok: false` is UNKNOWN,
+ * and the caller must never read UNKNOWN as green.
+ */
+export function getCommitCheckRuns({ repoOwner, repoName }, sha, runner = gh) {
+  try {
+    const out = runner([
+      "api",
+      `repos/${repoOwner}/${repoName}/commits/${encodeURIComponent(String(sha))}/check-runs?per_page=100`,
+      "--paginate",
+      "--jq",
+      ".check_runs[] | {name: .name, status: .status, conclusion: .conclusion}"
+    ]);
+    return { ok: true, runs: parseJsonLines(out), error: null };
+  } catch (err) {
+    return { ok: false, runs: [], error: sanitize(err.message) };
   }
 }
 

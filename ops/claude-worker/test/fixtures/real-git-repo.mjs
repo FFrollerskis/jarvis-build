@@ -87,6 +87,64 @@ export function foreignCommit(cwd, { file = "unrelated-writer.txt", message = "u
   return head(cwd);
 }
 
+/** The tree a commit points at. The D-145 tree-equality evidence is about this. */
+export function treeOf(cwd, sha) {
+  return git(cwd, ["rev-parse", `${sha}^{tree}`]);
+}
+
+/** A commit's parents, in order. The evidence that a merge was a NORMAL merge. */
+export function parentsOf(cwd, sha) {
+  return git(cwd, ["rev-list", "--parents", "-n", "1", sha]).split(/\s+/).slice(1);
+}
+
+/**
+ * D-145: a REAL two-parent merge commit, exactly the shape GitHub produces for a
+ * normal (`--no-ff`) merge of an up-to-date branch.
+ *
+ * Built with `commit-tree` rather than `git merge` so the test controls the
+ * parent ORDER and the committer identity precisely, and so the resulting commit
+ * is - like GitHub's - written by nobody the worker ever dispatched. Its tree is
+ * the HEAD branch's tree, which is what makes "the merge introduced no
+ * unreviewed content" a checkable statement rather than an assumption.
+ *
+ * `squash: true` instead produces the SINGLE-parent commit a squash merge makes,
+ * which the verifier must refuse. `extraContent` adds a file to the merge tree,
+ * producing the tree mismatch it must also refuse.
+ */
+export function syntheticMerge(cwd, {
+  base, head, tree = null, message = "Merge pull request #80", squash = false
+} = {}) {
+  const args = ["-c", "user.email=noreply@github.com", "-c", "user.name=GitHub",
+    "commit-tree", tree ?? treeOf(cwd, head), "-p", base];
+  if (!squash) args.push("-p", head);
+  args.push("-m", message);
+  return git(cwd, args);
+}
+
+/**
+ * A tree that is `head`'s tree PLUS one extra file, built as a real object
+ * without moving any ref. Feeding it to `syntheticMerge({ tree })` produces the
+ * adversarial "unreviewed content slipped in with the merge" case: a perfectly
+ * well-formed two-parent merge whose tree is NOT the approved head tree.
+ */
+export function treeWithExtraFile(cwd, head, { file = "slipped-in.txt", content = "never reviewed\n" } = {}) {
+  const res = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd, input: content, encoding: "utf8", windowsHide: true
+  });
+  if (res.status !== 0) throw new Error(`git hash-object failed: ${res.stderr}`);
+  const blob = String(res.stdout).trim();
+
+  const listing = git(cwd, ["ls-tree", head]);
+  const mk = spawnSync("git", ["mktree"], {
+    cwd,
+    input: `${listing}\n100644 blob ${blob}\t${file}\n`,
+    encoding: "utf8",
+    windowsHide: true
+  });
+  if (mk.status !== 0) throw new Error(`git mktree failed: ${mk.stderr}`);
+  return String(mk.stdout).trim();
+}
+
 /**
  * Create a repository with one baseline commit containing a TRACKED file, so a
  * test can produce a genuine tracked modification as well as untracked files.

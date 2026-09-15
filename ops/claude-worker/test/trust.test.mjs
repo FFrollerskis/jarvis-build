@@ -43,15 +43,57 @@ describe("ARCHITECT_TASK trust boundary is unchanged", () => {
       .toMatchObject({ ok: false, reason: "missing_task_id" });
   });
 
-  it("folds a TASK_UPDATE into the SAME task instead of creating a parallel one", () => {
+  it("D-150: a same-id TASK_UPDATE is a SECOND ORDER, not an executable amendment", () => {
     const update = {
       id: 2, user: { login: TRUSTED }, created_at: "2026-09-07T01:11:12Z",
       body: "ARCHITECT_TASK\nTASK_ID=WORKER-SELF-RECOVERY-20260907\nTASK_UPDATE=true\nextra scope\n"
     };
     const tasks = collectTrustedTasks([good, update], { trustedAuthor: TRUSTED });
+    // Still ONE group - a same-id comment never becomes a parallel task.
     expect(tasks).toHaveLength(1);
-    expect(tasks[0].updates).toHaveLength(1);
-    expect(tasks[0].updates[0].id).toBe(2);
+    // Both comments are CANDIDATES. Neither is promoted, and there is no
+    // `updates` array for anything to render into a prompt.
+    expect(tasks[0].candidates.map((c) => c.id)).toEqual([1, 2]);
+    expect(tasks[0].distinctOrderCount).toBe(2);
+    expect(tasks[0].updates).toBeUndefined();
+  });
+
+  it("D-151: grouping publishes NO authority verdict and NO representative order", () => {
+    // The whole point of the change. `collectTrustedTasks` used to publish
+    // `uniqueAuthority` (a count-derived boolean that could not see an edit, a
+    // missing id or an unparseable timestamp) and `comment` (the oldest
+    // candidate, promoted by ARRAY POSITION and then ranked on by the queue).
+    // Both are gone: the one classifier is `selectAdmissibleOrder`, asked once
+    // per cycle from the atomic snapshot.
+    const entry = collectTrustedTasks([good], { trustedAuthor: TRUSTED })[0];
+    expect(entry.uniqueAuthority).toBeUndefined();
+    expect(entry.comment).toBeUndefined();
+    expect(entry.duplicates).toBeUndefined();
+    expect(entry).toMatchObject({ taskId: "WORKER-SELF-RECOVERY-20260907", distinctOrderCount: 1 });
+  });
+
+  it("D-150: one order is unique, and an identical --paginate repeat is still one", () => {
+    expect(collectTrustedTasks([good], { trustedAuthor: TRUSTED })[0].distinctOrderCount).toBe(1);
+
+    // Overlapping pages return the SAME comment twice. Calling that ambiguous
+    // would be a false refusal a page boundary alone could trigger.
+    const repeated = collectTrustedTasks([good, { ...good }], { trustedAuthor: TRUSTED });
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0].distinctOrderCount).toBe(1);
+    expect(repeated[0].candidates).toHaveLength(2);
+  });
+
+  it("D-150/D-151: the candidate SET does not depend on array order", () => {
+    const second = {
+      id: 2, user: { login: TRUSTED }, created_at: "2026-09-07T01:11:12Z",
+      body: "ARCHITECT_TASK\nTASK_ID=WORKER-SELF-RECOVERY-20260907\ndifferent scope\n"
+    };
+    const forward = collectTrustedTasks([good, second], { trustedAuthor: TRUSTED })[0];
+    const reversed = collectTrustedTasks([second, good], { trustedAuthor: TRUSTED })[0];
+    expect(forward.candidates.map((c) => c.id)).toEqual(reversed.candidates.map((c) => c.id));
+    expect(forward.candidates.map((c) => c.id)).toEqual([1, 2]);
+    expect(forward.distinctOrderCount).toBe(2);
+    expect(reversed.distinctOrderCount).toBe(2);
   });
 
   it("orders distinct tasks oldest first", () => {

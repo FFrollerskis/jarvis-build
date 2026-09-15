@@ -153,6 +153,42 @@ export function assertOutsideRepo(repoPath, entries) {
   return true;
 }
 
+/**
+ * D-146: validate this host's optional post-merge evidence policy.
+ *
+ * Shape: `{ requiredChecks?: string[], extraChecksPolicy?: string, profile?: string }`.
+ *
+ * Only the SHAPE is checked here; whether the values are meaningful (a known
+ * extra-checks policy, a known profile, a non-empty required set) is decided by
+ * `resolvePostMergeEvidencePolicy` at gate time, where the trusted ARCHITECT_TASK
+ * may still override them. Splitting it that way keeps exactly one place that
+ * decides policy and exactly one place that decides whether JSON is well-formed.
+ */
+export function validatePostMergeEvidence(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("config field postMergeEvidence must be a JSON object when present");
+  }
+  const out = {};
+  if (raw.requiredChecks !== undefined) {
+    if (!Array.isArray(raw.requiredChecks) || raw.requiredChecks.some((c) => typeof c !== "string")) {
+      throw new Error("config field postMergeEvidence.requiredChecks must be an array of strings");
+    }
+    // An explicitly empty array is KEPT, not discarded: it is a deliberate
+    // statement that this host declares no required checks, and the gate refuses
+    // such a task rather than falling back to the repository default.
+    out.requiredChecks = raw.requiredChecks.map((c) => c.trim());
+  }
+  for (const key of ["extraChecksPolicy", "profile"]) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== "string") {
+      throw new Error(`config field postMergeEvidence.${key} must be a string`);
+    }
+    out[key] = raw[key];
+  }
+  return out;
+}
+
 export function loadWorkerConfig(configPath, root) {
   if (!existsSync(configPath)) {
     throw new Error(`Config file not found: ${configPath}. Copy config.example.json to config.json and edit it first.`);
@@ -254,6 +290,14 @@ export function loadWorkerConfig(configPath, root) {
     backoffMaxHours: requireBoundedNumber(raw, "backoffMaxHours", { min: 1, max: 168, fallback: 6 }),
     statusRepeatHours: requireBoundedNumber(raw, "statusRepeatHours", { min: 0, max: 168, fallback: 6 }),
     malformedLockGraceSeconds: requireBoundedNumber(raw, "malformedLockGraceSeconds", { min: 5, max: 3600, fallback: 60 }),
+
+    // D-146: this host's own post-merge evidence policy. Optional, and ABSENT is
+    // not permissive - `resolvePostMergeEvidencePolicy` falls through to the
+    // repository's real required CI jobs, and an explicitly EMPTY required set
+    // fails the gate closed rather than accepting whatever check happens to be
+    // green. Validated here rather than at gate time so a typo is a startup
+    // error, not a surprise in the middle of a merge closeout.
+    postMergeEvidence: validatePostMergeEvidence(raw.postMergeEvidence),
 
     workerTaskName: raw.workerTaskName ?? "JarvisClaudeWorker"
   };

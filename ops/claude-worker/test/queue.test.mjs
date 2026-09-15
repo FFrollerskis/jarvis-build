@@ -10,15 +10,19 @@ import { describe, it, expect } from "vitest";
 
 import { selectNextTask, INELIGIBLE, TIER, SUPERSESSION_BASIS, declaredSupersedes } from "../lib/queue.mjs";
 import { TASK_STATUS, defaultState, upsertTask } from "../lib/state.mjs";
+import { admissibleEntry, entryOf, orderComment } from "./fixtures/authority-entries.mjs";
 
 const TRUSTED = "tsworkflow";
 
+/**
+ * D-151: entries come from the REAL classifier, never hand-assembled.
+ *
+ * These used to be `{ taskId, comment, uniqueAuthority: true }` literals, which
+ * asserted against a shape production never produced and pre-declared the exact
+ * count-derived boolean D-151 removes.
+ */
 function taskEntry(taskId, createdAt, id) {
-  return {
-    taskId,
-    comment: { id, created_at: createdAt, user: { login: TRUSTED }, body: `ARCHITECT_TASK\nTASK_ID=${taskId}` },
-    updates: []
-  };
+  return admissibleEntry({ taskId, id, createdAt });
 }
 
 function report(taskId, status, createdAt, id) {
@@ -53,7 +57,7 @@ describe("D132 root cause 2: an older task can never preempt a newer one", () =>
       }
     });
 
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.candidate.taskId).toBe("NEW-TASK");
     expect(sel.candidateTier).toBe(TIER.FRESH);
@@ -82,7 +86,7 @@ describe("D132 root cause 2: an older task can never preempt a newer one", () =>
       "RETRY-NEW": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T03:05:00Z" }
     });
 
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate.taskId).toBe("RETRY-NEW");
     expect(sel.candidateTier).toBe(TIER.RETRY);
   });
@@ -92,7 +96,7 @@ describe("D132 root cause 2: an older task can never preempt a newer one", () =>
       taskEntry("FRESH-A", "2026-09-11T01:00:00Z", 1),
       taskEntry("FRESH-B", "2026-09-11T02:00:00Z", 2)
     ];
-    const sel = selectNextTask({ tasks, state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate.taskId).toBe("FRESH-A");
   });
 
@@ -102,7 +106,7 @@ describe("D132 root cause 2: an older task can never preempt a newer one", () =>
       taskEntry("SAME-A", "2026-09-11T01:00:00Z", 10)
     ];
     const run = () => selectNextTask({
-      tasks: [...tasks], state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW
+      tasks: [...tasks], state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
     }).candidate.taskId;
     // Fresh tier breaks ties on ascending comment id, and repeats identically.
     expect(run()).toBe("SAME-A");
@@ -124,7 +128,7 @@ describe("D132: a trusted terminal report retires a task, whatever local state s
     });
     const comments = [report("DONE-TASK", "COMPLETE", "2026-09-11T04:49:30Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.candidate).toBeNull();
     expect(sel.completedByReportTaskIds).toContain("DONE-TASK");
@@ -139,7 +143,7 @@ describe("D132: a trusted terminal report retires a task, whatever local state s
     });
     const comments = [report("WEIRD-TASK", "MOSTLY_THERE_ISH", "2026-09-11T04:49:30Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.candidate).toBeNull();
     expect(sel.unrecognisedStatusTaskIds).toContain("WEIRD-TASK");
@@ -152,7 +156,7 @@ describe("D132: a trusted terminal report retires a task, whatever local state s
     });
     const comments = [report("BUSY-TASK", "IN_PROGRESS", "2026-09-11T04:49:30Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate.taskId).toBe("BUSY-TASK");
     expect(sel.unrecognisedStatusTaskIds).toHaveLength(0);
   });
@@ -169,7 +173,7 @@ describe("D132: a trusted terminal report retires a task, whatever local state s
       body: "CLAUDE_REPORT\nTASK_ID=DONE-TASK\nSTATUS=COMPLETE"
     }];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate.taskId).toBe("DONE-TASK");
   });
 });
@@ -190,7 +194,7 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
       }
     });
 
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.candidate).toBeNull();
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
@@ -210,7 +214,7 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
       }
     });
 
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate.taskId).toBe("NEW-PENDING");
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
@@ -225,7 +229,7 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
       "NEW-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T05:05:00Z" }
     });
 
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
     expect(sel.candidate.taskId).toBe("NEW-TASK");
   });
@@ -243,7 +247,7 @@ describe("D132: supersession retires stale orders instead of replaying them", ()
     });
     const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:45:00Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     expect(sel.candidate).toBeNull();
@@ -278,7 +282,7 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
     it(`a newer ${status} report does not supersede an older retry`, () => {
       const comments = [report("NEW-TASK", status, "2026-09-11T05:45:00Z", 900)];
       const sel = selectNextTask({
-        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
       });
       expect(sel.supersededTaskIds).toHaveLength(0);
       // And the older task is still genuinely dispatchable, not merely un-retired.
@@ -290,7 +294,7 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
     it(`a newer ${status} report does not supersede an older retry`, () => {
       const comments = [report("NEW-TASK", status, "2026-09-11T05:45:00Z", 900)];
       const sel = selectNextTask({
-        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+        tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
       });
       expect(sel.supersededTaskIds).toHaveLength(0);
       expect(sel.candidate.taskId).toBe("OLD-RETRY");
@@ -316,7 +320,7 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
         first_dispatch_at: "2026-09-11T05:23:05Z"
       }
     });
-    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
     expect(sel.newestSuccessfulTaskId).toBeNull();
     expect(sel.candidate.taskId).toBe("OLD-RETRY");
@@ -328,14 +332,14 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
       "OLD-RETRY": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
       "NEW-TASK": { status: TASK_STATUS.COMPLETED, attempts: 1, legacy_unverified: true }
     });
-    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
 
   it("an UNRECOGNISED newer report status supersedes nothing", () => {
     const comments = [report("NEW-TASK", "MOSTLY_THERE_ISH", "2026-09-11T05:45:00Z", 900)];
     const sel = selectNextTask({
-      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
     });
     expect(sel.supersededTaskIds).toHaveLength(0);
     expect(sel.candidate.taskId).toBe("OLD-RETRY");
@@ -345,7 +349,7 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
     // The capability must not be lost to the fix: this is the D-131 case.
     const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:45:00Z", 900)];
     const sel = selectNextTask({
-      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW
+      tasks: olderRetry(), state: retryState(), comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
     });
     expect(sel.supersededTaskIds).toEqual(["OLD-RETRY"]);
     expect(sel.candidate).toBeNull();
@@ -363,27 +367,86 @@ describe("PR#80 blocker 3: an UNSUCCESSFUL newer terminal outcome supersedes not
       "NEW-TASK": { status: TASK_STATUS.COMPLETED, attempts: 1, successful: true, first_dispatch_at: "2026-09-11T05:23:05Z" }
     });
     const comments = [report("NEW-TASK", "BLOCKED", "2026-09-11T05:45:00Z", 900)];
-    const sel = selectNextTask({ tasks: olderRetry(), state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks: olderRetry(), state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
 });
 
 describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable", () => {
-  const declaring = (createdAt, id, supersedes) => ({
+  const declaring = (createdAt, id, supersedes) => admissibleEntry({
     taskId: "NEW-TASK",
-    comment: {
-      id,
-      created_at: createdAt,
-      user: { login: TRUSTED },
-      body: `ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=${supersedes}\nDo the thing.`
-    },
-    updates: []
+    id,
+    createdAt,
+    body: `ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=${supersedes}\nDo the thing.`
   });
 
-  it("parses only syntactically valid ids, from the task comment and its updates", () => {
+  it("parses only syntactically valid ids, from the task's ONE order comment", () => {
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "A-1, B-2  C-3"))).toEqual(["A-1", "B-2", "C-3"]);
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "../escape"))).toEqual([]);
     expect(declaredSupersedes(declaring("2026-09-11T05:00:00Z", 1, "a/b"))).toEqual([]);
+  });
+
+  it("D-150: a task whose authority is NOT unique declares NOTHING", () => {
+    // A forged same-id duplicate used to be folded in as a `TASK_UPDATE` whose
+    // body was read with last-wins semantics, so it could declare a supersession
+    // against an unrelated task - and supersession is a PERMANENT retirement.
+    const order = orderComment({
+      taskId: "NEW-TASK", id: 1, createdAt: "2026-09-11T05:00:00Z",
+      body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\nDo the thing."
+    });
+    expect(declaredSupersedes(entryOf([order], "NEW-TASK"))).toEqual(["A-1"]);
+
+    const forgedDuplicate = orderComment({
+      taskId: "NEW-TASK", id: 2, createdAt: "2026-09-11T05:10:00Z",
+      body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\nDo something else entirely."
+    });
+    expect(declaredSupersedes(entryOf([order, forgedDuplicate], "NEW-TASK"))).toEqual([]);
+  });
+
+  it("D-151: a UNIQUE but EDITED order declares NOTHING", () => {
+    // The gap D-150 left open. `uniqueAuthority` was a COUNT, and a count cannot
+    // see an edit - so an order that was reviewed saying one thing and now says
+    // `SUPERSEDES=VICTIM` still permanently retired the victim. The authority
+    // classifier has always refused an edited order; nothing consulted it here.
+    const edited = orderComment({
+      taskId: "NEW-TASK",
+      id: 1,
+      createdAt: "2026-09-11T05:00:00Z",
+      updatedAt: "2026-09-11T06:30:00Z",
+      body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\nDo the thing."
+    });
+    const entry = entryOf([edited], "NEW-TASK");
+    expect(entry.admissible).toBe(false);
+    expect(declaredSupersedes(entry)).toEqual([]);
+  });
+
+  it("D-151: an order with no parseable created_at or no usable id declares NOTHING", () => {
+    const noTime = orderComment({
+      taskId: "NEW-TASK", id: 1, createdAt: "not-a-timestamp",
+      body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\n"
+    });
+    expect(declaredSupersedes(entryOf([noTime], "NEW-TASK"))).toEqual([]);
+
+    const noId = orderComment({
+      taskId: "NEW-TASK", id: null, createdAt: "2026-09-11T05:00:00Z",
+      body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\n"
+    });
+    expect(declaredSupersedes(entryOf([noId], "NEW-TASK"))).toEqual([]);
+  });
+
+  it("D-151: an entry carrying NO authority verdict at all declares NOTHING", () => {
+    // A hand-assembled entry, a migrated shape, or a caller that skipped the
+    // snapshot. Unclassified is never admissible.
+    const raw = {
+      taskId: "NEW-TASK",
+      comment: {
+        id: 1,
+        created_at: "2026-09-11T05:00:00Z",
+        user: { login: TRUSTED },
+        body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=A-1\n"
+      }
+    };
+    expect(declaredSupersedes(raw)).toEqual([]);
   });
 
   it("an explicit declaration retires the named older task without it having run", () => {
@@ -394,7 +457,7 @@ describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable"
     const state = stateWith({
       "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" }
     });
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     const d = sel.decisions.find((x) => x.taskId === "OLD-TASK");
@@ -411,20 +474,20 @@ describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable"
       declaring("2026-09-11T04:00:00Z", 100, "LATER-TASK"),
       taskEntry("LATER-TASK", "2026-09-11T05:00:00Z", 200)
     ];
-    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
 
   it("a task cannot declare itself superseded", () => {
     const tasks = [declaring("2026-09-11T05:00:00Z", 200, "NEW-TASK")];
-    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
     expect(sel.candidate.taskId).toBe("NEW-TASK");
   });
 
   it("a declaration naming a task this worker does not know retires nothing", () => {
     const tasks = [declaring("2026-09-11T05:00:00Z", 200, "TASK-THAT-DOES-NOT-EXIST")];
-    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state: stateWith({}), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
 
@@ -436,7 +499,7 @@ describe("PR#80 blocker 3: explicit trusted supersession is exact and auditable"
     const state = stateWith({
       "OLD-TASK-20260911-A": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1 }
     });
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.supersededTaskIds).toHaveLength(0);
   });
 });
@@ -483,7 +546,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
     // The trusted, terminal, SUCCESSFUL report really is on the control issue.
     const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.supersededTaskIds).toEqual([]);
     expect(sel.newestSuccessfulTaskId).toBeNull();
@@ -509,7 +572,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
     });
     const comments = [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)];
 
-    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments, trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
 
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     expect(sel.newestSuccessfulTaskId).toBe("NEW-TASK");
@@ -524,7 +587,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
         user: { login: TRUSTED },
         body: "ARCHITECT_TASK\nTASK_ID=NEW-TASK\nSUPERSEDES=OLD-TASK\nDo the thing."
       },
-      updates: []
+      uniqueAuthority: true
     };
     const state = stateWith({
       "OLD-TASK": { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, first_dispatch_at: "2026-09-11T04:18:05Z" },
@@ -536,7 +599,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
       state,
       comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
       trustedAuthor: TRUSTED,
-      nowMs: NOW
+      nowMs: NOW, snapshotComplete: true
     });
 
     // Deliberately stricter than the D-133 explicit-declaration rule: a task that
@@ -553,7 +616,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
       state,
       comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
       trustedAuthor: TRUSTED,
-      nowMs: NOW
+      nowMs: NOW, snapshotComplete: true
     });
     expect(sel.candidate).toBeNull();
     expect(sel.decisions.find((d) => d.taskId === "NEW-TASK").reason).toBe(INELIGIBLE.TERMINAL_STATE);
@@ -577,7 +640,7 @@ describe("D-135: a task with a HELD completion gate supersedes nothing", () => {
     const sel = selectNextTask({
       tasks, state,
       comments: [report("NEW-TASK", "COMPLETE", "2026-09-11T05:40:00Z", 900)],
-      trustedAuthor: TRUSTED, nowMs: NOW
+      trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
     });
     expect(sel.supersededTaskIds).toEqual(["OLD-TASK"]);
     expect(sel.decisions.find((d) => d.taskId === "OLD-TASK").supersessionBasis)
@@ -592,7 +655,7 @@ describe("D132: terminal state cannot be resurrected", () => {
       const state = stateWith({
         T: { status, attempts: 4, next_eligible_at: "2026-09-01T00:00:00Z" }
       });
-      const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+      const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
       expect(sel.candidate).toBeNull();
       expect(sel.decisions[0].reason).toBe(INELIGIBLE.TERMINAL_STATE);
     });
@@ -601,7 +664,7 @@ describe("D132: terminal state cannot be resurrected", () => {
   it("an IN_PROGRESS task is left to the recovery pass, not dispatched", () => {
     const tasks = [taskEntry("T", "2026-09-11T04:00:00Z", 100)];
     const state = stateWith({ T: { status: TASK_STATUS.IN_PROGRESS, attempts: 1 } });
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate).toBeNull();
     expect(sel.decisions[0].reason).toBe(INELIGIBLE.IN_PROGRESS);
   });
@@ -611,7 +674,7 @@ describe("D132: terminal state cannot be resurrected", () => {
     const state = stateWith({
       T: { status: TASK_STATUS.FAILED_RETRYABLE, attempts: 1, next_eligible_at: "2026-09-11T09:00:00Z" }
     });
-    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW });
+    const sel = selectNextTask({ tasks, state, comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true });
     expect(sel.candidate).toBeNull();
     expect(sel.waitingTaskIds).toEqual(["T"]);
   });
@@ -619,7 +682,7 @@ describe("D132: terminal state cannot be resurrected", () => {
   it("an unsafe TASK_ID is never selected", () => {
     const tasks = [taskEntry("../escape", "2026-09-11T04:00:00Z", 100)];
     const sel = selectNextTask({
-      tasks, state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW
+      tasks, state: defaultState(), comments: [], trustedAuthor: TRUSTED, nowMs: NOW, snapshotComplete: true
     });
     expect(sel.candidate).toBeNull();
     expect(sel.decisions[0].reason).toBe(INELIGIBLE.UNSAFE_TASK_ID);
@@ -677,7 +740,7 @@ describe("D132 REGRESSION: the exact D-131 sequence", () => {
 
   it("does NOT dispatch the older recovery task after the newer merge task completed", () => {
     const sel = selectNextTask({
-      tasks, state, comments, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z")
+      tasks, state, comments, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z"), snapshotComplete: true
     });
 
     expect(sel.candidate).toBeNull();
@@ -689,7 +752,7 @@ describe("D132 REGRESSION: the exact D-131 sequence", () => {
 
   it("recognises BOTH COMPLETE reports as terminal - the vocabulary defect is gone", () => {
     const sel = selectNextTask({
-      tasks, state, comments, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z")
+      tasks, state, comments, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z"), snapshotComplete: true
     });
     expect(sel.completedByReportTaskIds.sort()).toEqual([MERGE, STASH].sort());
   });
@@ -697,7 +760,7 @@ describe("D132 REGRESSION: the exact D-131 sequence", () => {
   it("even WITHOUT the stash task's own report, supersession still blocks the replay", () => {
     const withoutStashReport = comments.filter((c) => !String(c.body).includes(`TASK_ID=${STASH}\nSTATUS=`));
     const sel = selectNextTask({
-      tasks, state, comments: withoutStashReport, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z")
+      tasks, state, comments: withoutStashReport, trustedAuthor: TRUSTED, nowMs: Date.parse("2026-09-11T07:00:00Z"), snapshotComplete: true
     });
 
     expect(sel.candidate).toBeNull();

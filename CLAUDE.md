@@ -104,6 +104,15 @@ ordinære, plan-bestemte implementasjonsvalg. Uendret og ufravikelig selv under 
   direkte (`HARD_EXTERNAL_BLOCKER`) - dette overstyres ALDRI av arkitekt-delegeringen.
 - Masterplanen og eksisterende beslutninger/rekkefølge forblir autoritative; ingen fri sekvens-hopping.
 
+**Én ordre per TASK_ID (D-150, gjelder både arkitekt-loopen og manuelle ordrer):** en `TASK_ID` har
+NØYAKTIG ÉN `ARCHITECT_TASK`-kommentar. Endret eller konsolidert scope utstedes som en **FERSK
+`TASK_ID` med eksplisitt `SUPERSEDES=<gammel id>`** - ALDRI som en ny kommentar med samme `TASK_ID`.
+En same-id `TASK_UPDATE` er en ANDRE ORDRE, ikke et tillegg: workeren nekter å velge mellom to
+ordrer for samme id (enhver regel som velger, gir valget til den som kan poste en av dem), så tasken
+blir terminalt BLOCKED og må reissues under en fersk id. Det samme gjelder en REDIGERT ordre - da er
+ikke teksten som ble reviewet lenger beviselig teksten som eksekveres. Full begrunnelse og
+akseptansebevis: D-150 i DECISIONS_AND_ASSUMPTIONS.md, «C9» i `ops/claude-worker/README.md`.
+
 **Statusfil (kun én):** `docs/PROJECT_STATUS.md` – kort, overskrives: aktiv fase/oppgave, ferdig
 arbeid, blokkeringer, neste oppgave. **Ikke** opprett SESSION_LOG eller HANDOFF_REPORT; Git-commits og
 diff er primærdokumentasjonen som den eksterne AI-arkitekten kontrollerer direkte på GitHub.

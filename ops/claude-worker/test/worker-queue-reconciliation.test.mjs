@@ -642,10 +642,24 @@ describe("PR#80 blocker 3: an unsuccessful newer task never retires older work (
     expect(rec.superseded_basis).toBe("explicit_trusted_supersedes_declaration");
     // Auditable: the exact declaring comment is recorded and reported.
     expect(rec.superseded_declared_by_comment_id).toBe(2);
+    // D-151: and the exact BYTES that ordered it, not just which comment did. A
+    // comment id alone proves nothing once that comment has been edited, and the
+    // actor able to edit a control comment is the login the worker trusts.
+    expect(rec.superseded_declarations).toHaveLength(1);
+    expect(rec.superseded_declarations[0]).toMatchObject({
+      task_id: NEW_TASK,
+      comment_id: "2",
+      created_at: "2026-09-11T05:22:00Z"
+    });
+    expect(rec.superseded_declarations[0].body_sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(rec.superseded_snapshot_complete).toBe(true);
     const notice = comments().find((c) =>
       String(c.body).includes("superseded_by_newer_completed_task") && String(c.body).includes(OLD_TASK));
     expect(String(notice.body)).toContain("explicit_trusted_supersedes_declaration");
-    expect(String(notice.body)).toContain("trusted control-issue comment 2");
+    expect(String(notice.body)).toContain(`trusted ARCHITECT_TASK ${NEW_TASK}, control-issue comment 2`);
+    // The digest is reported too - never the order text.
+    expect(String(notice.body)).toMatch(/body sha256:[0-9a-f]{12}/);
+    expect(String(notice.body)).not.toContain("Do the newer thing.");
 
     // The declaring task is the one that runs; the old one never runs again.
     expect(dispatched()).toEqual([OLD_TASK, NEW_TASK]);

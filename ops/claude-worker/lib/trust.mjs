@@ -11,6 +11,8 @@
  * arguments, no paths, host/worker binding, short expiry and replay rejection.
  */
 
+import { collapseIdenticalOrderRepeats, orderByIssueSequence } from "./order-binding.mjs";
+
 export function firstNonEmptyLine(body) {
   const line = String(body ?? "").split(/\r?\n/).find((l) => l.trim().length > 0);
   return (line ?? "").trim();
@@ -33,25 +35,64 @@ export function validateTrustedTask(comment, { trustedAuthor }) {
 }
 
 /**
- * Find every trusted task, oldest first, and fold same-TASK_ID updates together.
- * A TASK_UPDATE=true comment carrying an existing TASK_ID is an additive scope
- * update to that task - never a second, parallel task.
+ * GROUP every trusted ARCHITECT_TASK comment by the TASK_ID it declares.
+ *
+ * D-150: SAME-ID TASK_UPDATE SEMANTICS ARE GONE. A second comment carrying an
+ * existing TASK_ID used to be folded in as an "additive scope update" and its
+ * body was written straight into the dispatched prompt - executable authority
+ * that the durable admission binding did not cover and that no review had to have
+ * seen. One task id has exactly ONE order. Changed or consolidated scope is
+ * issued as a FRESH TASK_ID with an explicit `SUPERSEDES=<old id>`.
+ *
+ * D-151: THIS FUNCTION NO LONGER DECIDES ANYTHING. It used to publish two things
+ * that read like verdicts and were not:
+ *
+ *   uniqueAuthority  a boolean derived from a COUNT, computed without knowing
+ *                    whether the read was complete and without any of the edit,
+ *                    comment-id, `created_at` or empty-body checks the real
+ *                    classifier applies. Everything that read a body gated on it,
+ *                    so a unique-but-EDITED order still declared `SUPERSEDES=`.
+ *   comment          the oldest same-id candidate, promoted to "the entry's
+ *                    order" by ARRAY POSITION. The queue then ranked and proved
+ *                    direction from that representative's `created_at` and `id`.
+ *
+ * Both are gone. There is exactly one authority classifier
+ * (`selectAdmissibleOrder`), it is asked once per cycle from the atomic snapshot
+ * (`captureAuthoritySnapshot`), and its verdict is what travels. What is left
+ * here is grouping and counting, which is all a grouping function should ever do.
+ *
+ * Each entry carries:
+ *
+ *   taskId             the exact id declared.
+ *   candidates         EVERY same-id trusted comment, in a total, deterministic
+ *                      issue sequence. Not "the order and its duplicates" - a
+ *                      candidate SET, with no member privileged over another.
+ *   distinctOrderCount how many DISTINCT orders exist for this id, after
+ *                      provably-identical `--paginate` repeats are collapsed.
+ *
+ * The returned list is ordered by each group's EARLIEST candidate purely so that
+ * output is stable and diffable. That ordering is presentational: nothing
+ * downstream may rank, dispatch or retire from it.
  */
 export function collectTrustedTasks(comments, { trustedAuthor }) {
   const byId = new Map();
-  for (const c of comments) {
+  for (const c of Array.isArray(comments) ? comments : []) {
     const v = validateTrustedTask(c, { trustedAuthor });
     if (!v.ok) continue;
-    const existing = byId.get(v.taskId);
-    if (!existing) {
-      byId.set(v.taskId, { taskId: v.taskId, comment: c, updates: [] });
-    } else {
-      existing.updates.push(c);
-    }
+    if (!byId.has(v.taskId)) byId.set(v.taskId, []);
+    byId.get(v.taskId).push(c);
   }
-  return Array.from(byId.values()).sort(
-    (a, b) => new Date(a.comment.created_at) - new Date(b.comment.created_at)
-  );
+
+  const entries = [];
+  for (const [taskId, all] of byId) {
+    const candidates = [...all].sort(orderByIssueSequence);
+    entries.push({
+      taskId,
+      candidates,
+      distinctOrderCount: collapseIdenticalOrderRepeats(candidates).length
+    });
+  }
+  return entries.sort((a, b) => orderByIssueSequence(a.candidates[0], b.candidates[0]));
 }
 
 /** ---------------- ARCHITECT_CONTROL (supervisor) ---------------- */
