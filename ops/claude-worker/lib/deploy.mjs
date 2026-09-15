@@ -89,6 +89,12 @@ export const PAYLOAD = Object.freeze([
   "lib/recovery.mjs",
   "lib/worktree.mjs",
   "lib/provenance.mjs",
+  // D-145 added `merge-transition.mjs` and worker.mjs imports it, but it was
+  // never added here - so a deployed worker would have crashed on an unresolved
+  // import. The ESM-closure test below is what catches that, and it is why the
+  // closure is computed from the real entrypoints rather than maintained by hand.
+  "lib/merge-transition.mjs",
+  "lib/postmerge-evidence.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",

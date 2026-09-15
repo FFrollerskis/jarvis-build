@@ -244,8 +244,16 @@ export function findTrustedReport(comments, { taskId, trustedAuthor, sinceIso = 
 /**
  * Decide whether a dispatch actually completed.
  *
- * Returns `{ complete, successful, status, reportCommentId, reason }`.
+ * Returns `{ complete, successful, status, reportCommentId, reportBody, reason }`.
  * `complete` false means the task stays retryable - regardless of exit code.
+ *
+ * D-146: `reportBody` is the EXACT body of the comment `reportCommentId` names,
+ * and the two always travel together. Callers that need to bind closeout evidence
+ * (`verifyCloseoutReport`) must never re-select a report themselves: re-selection
+ * is the seam through which one task's verdict could be paired with another
+ * task's text, or with a stale report for a re-issued id that `sinceIso` had
+ * already excluded here. Selection happens once, in this function, and what comes
+ * out is one verdict bound to one identified body.
  */
 export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = null }) {
   const report = findTrustedReport(comments, { taskId, trustedAuthor, sinceIso });
@@ -255,9 +263,11 @@ export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = n
       successful: false,
       status: null,
       reportCommentId: null,
+      reportBody: null,
       reason: "no_matching_trusted_report"
     };
   }
+  const reportBody = typeof report.body === "string" ? report.body : null;
   const status = extractField(report.body, "STATUS");
   if (!status) {
     return {
@@ -267,6 +277,7 @@ export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = n
       canonicalStatus: null,
       statusRecognised: false,
       reportCommentId: report.id,
+      reportBody,
       reason: "report_has_no_status_field"
     };
   }
@@ -285,6 +296,7 @@ export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = n
       // make the mismatch visible instead of spinning.
       statusRecognised: verdict.recognised,
       reportCommentId: report.id,
+      reportBody,
       reason: verdict.recognised
         // e.g. STATUS=IN_PROGRESS - real evidence of progress, but not completion.
         ? `report_status_not_terminal (${verdict.canonical})`
@@ -300,6 +312,7 @@ export function assessCompletion({ taskId, comments, trustedAuthor, sinceIso = n
     outcome: verdict.outcome,
     statusRecognised: true,
     reportCommentId: report.id,
+    reportBody,
     reportCreatedAt: report.created_at ?? null,
     reason: "matching_trusted_report_with_terminal_status"
   };

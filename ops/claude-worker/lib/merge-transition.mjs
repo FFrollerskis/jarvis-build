@@ -54,7 +54,26 @@
  *      refutes both without trusting any field that claims "method=merge";
  *   4. the merge commit's TREE equals the approved head's tree - so the merge
  *      introduced no content that was never reviewed;
- *   5. fresh post-merge check runs on the merge commit, all finished, all green.
+ *   5. fresh post-merge check runs on the merge commit: every REQUIRED check
+ *      named by trusted policy present exactly once, finished, and `success`.
+ *
+ * D-146 added a sixth input and tightened the fifth. See `postmerge-evidence.mjs`
+ * for both in full; in short:
+ *
+ *   5'. "some green check exists" is no longer an answer. The required set comes
+ *       from trusted policy (this task's own ARCHITECT_TASK, else the worker's
+ *       config, else the repository's actual CI jobs), each required name must
+ *       appear EXACTLY ONCE with `status=completed` and `conclusion=success`, and
+ *       missing / duplicate / unfinished / neutral / skipped / cancelled / failed
+ *       all fail closed. A check outside the required set can never stand in for
+ *       one inside it.
+ *   6.  the EXACT trusted terminal report that completion assessment selected is
+ *       carried in and BOUND: its TASK_ID, PR, base/head, MERGE_SHA, parents and
+ *       CI claims are checked against the verified truth above, and its
+ *       LOCAL_HEAD / ORIGIN_MAIN / WORKTREE_CLEAN fields supply the one thing the
+ *       worker cannot re-observe - whether the child actually synced and left
+ *       nothing behind. Those three, and only those three, rest on a claim; they
+ *       are tagged as such in the record rather than quietly counted as proof.
  *
  * ------------------------------------------------------------------------
  * THE NARROWING THAT KEEPS THIS FROM BECOMING A BYPASS
@@ -84,9 +103,36 @@
  */
 
 import { extractField, validateTrustedTask } from "./trust.mjs";
+import {
+  POST_MERGE_EVIDENCE,
+  classifyPostMergeChecks,
+  resolvePostMergeEvidencePolicy,
+  verifyCloseoutReport
+} from "./postmerge-evidence.mjs";
 
-/** Every outcome this module can produce. One name per distinct finding. */
+export {
+  POST_MERGE_EVIDENCE,
+  EXTRA_CHECK_POLICY,
+  DEFAULT_REQUIRED_POST_MERGE_CHECKS,
+  DEFAULT_CLOSEOUT_PROFILE,
+  CLOSEOUT_PROFILES,
+  classifyPostMergeChecks,
+  resolvePostMergeEvidencePolicy,
+  verifyCloseoutReport,
+  reportFieldForCheck,
+  readAllFields
+} from "./postmerge-evidence.mjs";
+
+/**
+ * Every outcome this module can produce. One name per distinct finding.
+ *
+ * D-146: the post-merge evidence findings are defined in `postmerge-evidence.mjs`
+ * and spread in here, so callers, logs and recorded verdicts keep ONE reason
+ * namespace regardless of which half of the proof refused.
+ */
 export const MERGE_TRANSITION = Object.freeze({
+  ...POST_MERGE_EVIDENCE,
+
   /** The authorized transition is proven from control-plane + fresh remote truth. */
   VERIFIED: "authorized_merge_transition_verified",
 
@@ -132,15 +178,18 @@ export const MERGE_TRANSITION = Object.freeze({
   /** The merge tree differs from the approved head tree: unreviewed content. */
   TREE_MISMATCH: "the_merge_commit_tree_is_not_the_approved_head_tree_so_the_merge_introduced_unreviewed_content",
 
-  /* --- post-merge gates --- */
-  /** Check runs could not be read. Unknown CI is never green CI. */
-  CHECKS_UNREADABLE: "the_post_merge_check_runs_on_the_merge_commit_could_not_be_read",
-  /** No check run exists on the merge commit at all. */
-  CHECKS_MISSING: "no_post_merge_check_run_exists_on_the_merge_commit",
-  /** At least one check run has not finished. */
-  CHECKS_INCOMPLETE: "at_least_one_post_merge_check_run_on_the_merge_commit_has_not_finished",
-  /** At least one finished check run did not succeed. */
-  CHECKS_FAILED: "at_least_one_post_merge_check_run_on_the_merge_commit_did_not_succeed"
+  /* --- post-merge gates -----------------------------------------------------
+   *
+   * D-146: the check-run findings now live in `POST_MERGE_EVIDENCE` (spread in
+   * above) because they are about REQUIRED CHECK IDENTITY, not about the merge's
+   * structure. `CHECKS_UNREADABLE` and `CHECKS_MISSING` keep their D-145 string
+   * values. The two blanket findings D-145 had - "at least one check run has not
+   * finished" and "at least one finished check run did not succeed" - are gone
+   * on purpose: they could only ever describe whatever runs happened to exist,
+   * which is precisely the fail-open the PR #81 review found. They are replaced
+   * by `CHECKS_REQUIRED_UNFINISHED` and `CHECKS_REQUIRED_NOT_SUCCESS`, which name
+   * the required check that failed.
+   */
 });
 
 /**
@@ -169,9 +218,6 @@ export const TRANSITION_EXCUSE = Object.freeze({
 /** Verdicts that represent a RANGE THAT WAS ACTUALLY READ AND CLASSIFIED. */
 const CLASSIFIED_VERDICTS = Object.freeze(["unattributed", "partially_attributed"]);
 
-/** A finished check-run conclusion that is not a failure. */
-const ACCEPTABLE_CONCLUSIONS = Object.freeze(["success", "neutral", "skipped"]);
-
 const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 
 function fullSha(value) {
@@ -197,9 +243,22 @@ function declaredTrue(body, key) {
  * the task being gated EXACTLY. A merge authorization for a different task is
  * not an authorization for this one, however trusted its author.
  *
+ * D-146: the POST-MERGE EVIDENCE POLICY is resolved here too, from this same
+ * trusted body (falling back to the worker's own config and then the repository
+ * default). Resolving it at authorization-read time is deliberate: the policy that
+ * decides which checks are required and which closeout fields must be bound can
+ * then only ever come from a comment that has already passed the author, header
+ * and TASK_ID checks above. There is no later seam where PR text could reach it.
+ *
  * Returns `{ ok, reason, ... }`. `ok: false` is always a named refusal.
  */
-export function readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwner = null, repoName = null }) {
+export function readMergeAuthorization(comment, {
+  trustedAuthor,
+  taskId,
+  repoOwner = null,
+  repoName = null,
+  workerPolicy = null
+}) {
   const refuse = (reason, detail = null) => ({ ok: false, reason, detail });
 
   const trusted = validateTrustedTask(comment, { trustedAuthor });
@@ -251,6 +310,14 @@ export function readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwn
       "EXPECTED_BASE_SHA and EXPECTED_HEAD_SHA are the same commit");
   }
 
+  // D-146: an authorized merge task that cannot produce a decidable post-merge
+  // evidence policy is refused HERE, before a single remote call. "Not enough
+  // policy to decide" is a decision, and the decision is no.
+  const policy = resolvePostMergeEvidencePolicy({ declared: body, workerPolicy });
+  if (!policy.ok) {
+    return refuse(policy.reason, policy.detail);
+  }
+
   return {
     ok: true,
     reason: null,
@@ -261,7 +328,8 @@ export function readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwn
     expectedHead,
     mergeMethod: method === null ? null : method.trim().toLowerCase(),
     repo: repo ? repo.trim() : null,
-    taskType: extractField(body, "TASK_TYPE")
+    taskType: extractField(body, "TASK_TYPE"),
+    policy
   };
 }
 
@@ -272,56 +340,23 @@ export function readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwn
  * order - and never merges later comments into it. A `TASK_UPDATE` cannot grant
  * a merge authorization the original order did not carry.
  */
-export function findMergeAuthorization(comments, { trustedAuthor, taskId, repoOwner = null, repoName = null }) {
+export function findMergeAuthorization(comments, {
+  trustedAuthor,
+  taskId,
+  repoOwner = null,
+  repoName = null,
+  workerPolicy = null
+}) {
   const list = Array.isArray(comments) ? comments : [];
   let lastRefusal = { ok: false, reason: MERGE_TRANSITION.NO_TRUSTED_TASK, detail: "no comment matched" };
   for (const comment of list) {
-    const read = readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwner, repoName });
+    const read = readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwner, repoName, workerPolicy });
     if (read.ok) return read;
     // A comment that is not this task's order at all is not interesting; a
     // comment that IS this task's order but fails a rule is the real finding.
     if (read.reason !== MERGE_TRANSITION.NO_TRUSTED_TASK) lastRefusal = read;
   }
   return lastRefusal;
-}
-
-/**
- * Classify the post-merge check runs on the merge commit.
- *
- * Fail-closed in every direction: unreadable is not green, empty is not green,
- * unfinished is not green.
- */
-export function classifyPostMergeChecks(checks) {
-  if (!checks || checks.ok !== true) {
-    return { ok: false, reason: MERGE_TRANSITION.CHECKS_UNREADABLE, detail: checks?.error ?? "not queried", runs: [] };
-  }
-  const runs = (Array.isArray(checks.runs) ? checks.runs : []).map((r) => ({
-    name: String(r?.name ?? ""),
-    status: String(r?.status ?? "").toLowerCase(),
-    conclusion: r?.conclusion === null || r?.conclusion === undefined ? null : String(r.conclusion).toLowerCase()
-  }));
-  if (runs.length === 0) {
-    return { ok: false, reason: MERGE_TRANSITION.CHECKS_MISSING, detail: "the merge commit has no check runs", runs };
-  }
-  const unfinished = runs.filter((r) => r.status !== "completed");
-  if (unfinished.length > 0) {
-    return {
-      ok: false,
-      reason: MERGE_TRANSITION.CHECKS_INCOMPLETE,
-      detail: unfinished.map((r) => `${r.name}=${r.status}`).join(", "),
-      runs
-    };
-  }
-  const bad = runs.filter((r) => !ACCEPTABLE_CONCLUSIONS.includes(r.conclusion ?? ""));
-  if (bad.length > 0) {
-    return {
-      ok: false,
-      reason: MERGE_TRANSITION.CHECKS_FAILED,
-      detail: bad.map((r) => `${r.name}=${r.conclusion ?? "null"}`).join(", "),
-      runs
-    };
-  }
-  return { ok: true, reason: null, detail: null, runs };
 }
 
 /**
@@ -359,6 +394,16 @@ export function verifyMergeTransition({
     report_comment_id: completion?.reportCommentId ?? null,
     report_status: completion?.status ?? null,
     check_runs: [],
+    // D-146: the policy this verification was decided under, and which half of
+    // the evidence rests on a bound claim rather than a re-observation. Recorded
+    // on EVERY outcome, pass or refusal, so a record never has to be re-derived
+    // to find out what it actually required.
+    required_checks: auth?.policy?.requiredChecks ?? [],
+    extra_checks_policy: auth?.policy?.extraChecksPolicy ?? null,
+    evidence_profile: auth?.policy?.profile ?? null,
+    policy_sources: auth?.policy?.sources ?? null,
+    report_checked_fields: [],
+    report_local_evidence_fields: [],
     detail: null
   };
   const refuse = (reason, detail = null, extra = {}) => ({ ...base, ...extra, reason, detail });
@@ -368,11 +413,12 @@ export function verifyMergeTransition({
     return refuse(auth?.reason ?? MERGE_TRANSITION.NO_TRUSTED_TASK, auth?.detail ?? null);
   }
 
-  // --- 2. the terminal report: a SUCCESSFUL completion for this exact task ---
+  // --- 2. the terminal report exists and claims success ---------------------
   //
-  // The report contributes NO evidence about the merge itself. It is required
-  // only because this whole path exists to accept a success CLAIM, and a claim
-  // that was never made - or that says BLOCKED or FAILED - must not be accepted.
+  // The CHEAP half of the report gate. It establishes only that a trusted
+  // terminal success claim was made at all - a claim that says BLOCKED or FAILED,
+  // or that was never made, must not be accepted. The claim's CONTENT is bound
+  // in step 7, after the remote truth it has to agree with has been established.
   if (completion?.complete !== true || completion?.successful !== true) {
     return refuse(MERGE_TRANSITION.REPORT_NOT_SUCCESSFUL,
       `complete=${completion?.complete ?? null}, successful=${completion?.successful ?? null}, `
@@ -453,22 +499,62 @@ export function verifyMergeTransition({
       + "exactly, so a difference is content that was never reviewed", withTrees);
   }
 
-  // --- 6. the post-merge gates ---------------------------------------------
-  const checkVerdict = classifyPostMergeChecks(checks);
+  // --- 6. the REQUIRED post-merge checks, by name --------------------------
+  //
+  // D-146: not "are the checks that exist green?" but "is every check trusted
+  // policy REQUIRES present exactly once, finished, and success?". The two
+  // questions differ exactly when a required check is absent, which is the case
+  // the PR #81 review found passing.
+  const checkVerdict = classifyPostMergeChecks(checks, auth.policy);
   const withChecks = { ...withTrees, check_runs: checkVerdict.runs };
   if (!checkVerdict.ok) {
     return refuse(checkVerdict.reason, checkVerdict.detail, withChecks);
   }
 
+  // --- 7. the BOUND terminal report ----------------------------------------
+  //
+  // Everything the report claims about the REMOTE is cross-checked against what
+  // steps 3-6 just read from the remote; the report proves none of it on its own.
+  // What the report DOES supply, and nothing else can, is the local half:
+  // LOCAL_HEAD, ORIGIN_MAIN and WORKTREE_CLEAN. The child has exited by now and
+  // its local state is gone, so those three rest on a bound claim - bound to this
+  // exact comment, this exact task and this exact merge sha, and surfaced as
+  // `report_local_evidence_fields` rather than folded in silently.
+  const reportVerdict = verifyCloseoutReport({
+    completion,
+    policy: auth.policy,
+    bindings: {
+      taskId: auth.taskId,
+      prNumber: auth.prNumber,
+      expectedBase: auth.expectedBase,
+      expectedHead: auth.expectedHead,
+      mergeSha,
+      parent1: parents[0],
+      parent2: parents[1]
+    },
+    checkVerdict
+  });
+  const withReport = {
+    ...withChecks,
+    report_checked_fields: reportVerdict.checked_fields,
+    report_local_evidence_fields: reportVerdict.local_evidence_fields
+  };
+  if (!reportVerdict.ok) {
+    return refuse(reportVerdict.reason, reportVerdict.detail, withReport);
+  }
+
   return {
     ...base,
-    ...withChecks,
+    ...withReport,
     verified: true,
     reason: MERGE_TRANSITION.VERIFIED,
     detail: `PR #${auth.prNumber} is merged as ${mergeSha} with exactly two parents `
       + `(${parents[0]}, ${parents[1]}) matching the authorized base and head, its tree equals the approved head `
-      + `tree ${headTree}, and ${checkVerdict.runs.length} post-merge check run(s) on the merge commit are green `
-      + `(${checkVerdict.runs.map((r) => `${r.name}=${r.conclusion}`).join(", ")})`
+      + `tree ${headTree}, the ${checkVerdict.required.length} REQUIRED post-merge check(s) `
+      + `(${checkVerdict.required.join(", ")}) are each present exactly once on the merge commit and concluded `
+      + `success, and trusted report ${reportVerdict.report_comment_id} is bound to this exact task, PR and merge `
+      + `sha across ${reportVerdict.checked_fields.length} required field(s) - of which `
+      + `${reportVerdict.local_evidence_fields.join(", ")} are the LOCAL half, provable only by the report`
   };
 }
 
@@ -564,9 +650,21 @@ export function describeMergeTransition(transition, excuse = null) {
     `  merge commit: ${transition.merge_commit_sha ?? "none"}`
       + (transition.merge_parents?.length ? ` parents [${transition.merge_parents.join(", ")}]` : ""),
     `  trees: merge=${transition.merge_tree_sha ?? "unknown"} head=${transition.head_tree_sha ?? "unknown"}`,
+    `  REQUIRED checks (${transition.policy_sources?.requiredChecks ?? "unresolved"}): `
+      + `${transition.required_checks?.length ? transition.required_checks.join(", ") : "none declared"}`
+      + `; extras: ${transition.extra_checks_policy ?? "unresolved"}`,
     transition.check_runs?.length
       ? `  post-merge checks: ${transition.check_runs.map((r) => `${r.name}=${r.conclusion ?? r.status}`).join(", ")}`
       : "  post-merge checks: none read",
+    `  bound closeout report ${transition.report_comment_id ?? "none"} `
+      + `(profile ${transition.evidence_profile ?? "unresolved"}): `
+      + `${transition.report_checked_fields?.length ?? 0} field(s) verified`,
+    // Named explicitly, every time. A reader must never have to work out for
+    // themselves which part of this proof is a claim rather than an observation.
+    transition.report_local_evidence_fields?.length
+      ? `  LOCAL-ONLY evidence (provable only by the trusted report, not re-observable): `
+        + transition.report_local_evidence_fields.join(", ")
+      : "  LOCAL-ONLY evidence: none established",
     transition.detail ? `  ${transition.detail}` : ""
   ];
   if (excuse) {

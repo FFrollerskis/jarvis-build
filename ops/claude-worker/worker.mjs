@@ -327,9 +327,16 @@ function worktreeCleanlinessFor(cfg, task) {
  * `ARCHITECT_MERGE_APPROVED=true`, `MERGE_AUTHORIZED=true` and an exact
  * PR/base/head, and a task without that never reaches a single remote call.
  *
- * Every fact is read FRESH from the remote at gate time. Nothing is taken from
- * the child's report except the fact that a trusted successful report exists at
- * all, and nothing is taken from worker state.
+ * Every fact about the REMOTE is read FRESH from the remote at gate time, and
+ * nothing is taken from worker state.
+ *
+ * D-146: the child's report is no longer only a "a success claim was made" flag.
+ * The EXACT report `assessCompletion` selected - body and comment id together -
+ * is bound and verified field by field against that fresh remote truth. It still
+ * proves nothing about the remote; what it adds is the LOCAL half of the closeout
+ * (LOCAL_HEAD, ORIGIN_MAIN, WORKTREE_CLEAN), which the worker cannot re-observe
+ * once the child has exited and which is therefore labelled in the record as
+ * resting on a bound claim.
  *
  * Returns `{ transition, excuse }`, both `null` when the task is not an
  * authorized merge task - the ordinary case, and the cheap one.
@@ -339,7 +346,12 @@ function mergeTransitionFor(cfg, taskId, completion, provenance, comments) {
     trustedAuthor: cfg.trustedAuthor,
     taskId,
     repoOwner: cfg.repoOwner,
-    repoName: cfg.repoName
+    repoName: cfg.repoName,
+    // D-146: the worker's OWN configured post-merge evidence policy. It is the
+    // second-authority source, below this task's trusted ARCHITECT_TASK and above
+    // the repository default. It is deliberately a config value and not anything
+    // derived from the PR, the branch or the child.
+    workerPolicy: cfg.postMergeEvidence ?? null
   });
   if (!authorization.ok) {
     // Not an authorized merge task. Say nothing, do nothing, spend no API call:

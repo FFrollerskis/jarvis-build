@@ -243,6 +243,34 @@ function act() {
   }
 }
 
+/**
+ * D-146: the extra protocol fields this child's CLAUDE_REPORT carries.
+ *
+ *   JARVIS_FAKE_CLAUDE_REPORT_FIELDS='{"MERGED":"true","LOCAL_HEAD":"<sha>", ...}'
+ *
+ * A value of `null` OMITS that field, and an ARRAY emits one line per element -
+ * which is how a test produces the duplicate/contradictory report the closeout
+ * gate has to refuse. Without this the fixture could only ever post the four
+ * fields D132 needed, so no process-level test could exercise a real closeout
+ * claim at all, which is exactly why the fail-open survived to PR #81.
+ */
+function extraReportFields() {
+  const raw = process.env.JARVIS_FAKE_CLAUDE_REPORT_FIELDS;
+  if (!raw) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const lines = [];
+  for (const [key, value] of Object.entries(parsed ?? {})) {
+    if (value === null) continue;
+    for (const one of Array.isArray(value) ? value : [value]) lines.push(`${key}=${one}`);
+  }
+  return lines;
+}
+
 function postReport() {
   const taskId = taskIdFrom(prompt);
   const path = join(GH_DIR, "comments.json");
@@ -264,7 +292,8 @@ function postReport() {
       // proves nothing about production.
       `STATUS=${process.env.JARVIS_FAKE_CLAUDE_STATUS ?? "COMPLETE"}`,
       `BRANCH=${process.env.JARVIS_FAKE_CLAUDE_BRANCH ?? "claude/fake-branch"}`,
-      `PR_NUMBER=${process.env.JARVIS_FAKE_CLAUDE_PR ?? "1234"}`
+      ...(process.env.JARVIS_FAKE_CLAUDE_PR === "" ? [] : [`PR_NUMBER=${process.env.JARVIS_FAKE_CLAUDE_PR ?? "1234"}`]),
+      ...extraReportFields()
     ].join("\n"),
     created_at: now,
     updated_at: now,

@@ -262,8 +262,48 @@ function dispatched() {
   return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : [];
 }
 
-/** The child that behaves exactly as D-144's did: sync locally, then report. */
-const mergeChild = (mergeSha, extra = {}) => ({ JARVIS_FAKE_CLAUDE_SYNC_TO: mergeSha, ...extra });
+/**
+ * The closeout evidence D-144's real report carried, field for field.
+ *
+ * D-146: this is no longer optional decoration. `merge_closeout_v1` requires
+ * every one of these, bound to the verified truth, and the three local ones
+ * (LOCAL_HEAD, ORIGIN_MAIN, WORKTREE_CLEAN) are the only evidence the worker will
+ * ever have that the child actually synced and left nothing behind.
+ */
+function closeoutFields(mergeSha, overrides = {}) {
+  return {
+    MERGED: "true",
+    MERGE_SHA: mergeSha,
+    PARENT_1: prevMain,
+    PARENT_2: prHead,
+    EXPECTED_BASE_SHA: prevMain,
+    EXPECTED_HEAD_SHA: prHead,
+    TWO_PARENT_MERGE_VERIFIED: "true",
+    POST_MERGE_CI_RUN: "34906721592",
+    POST_MERGE_BUILD_TEST: "success",
+    POST_MERGE_WINDOWS_GIT_AUTH: "success",
+    POST_MERGE_GITLEAKS: "success",
+    LOCAL_HEAD: mergeSha,
+    ORIGIN_MAIN: mergeSha,
+    WORKTREE_CLEAN: "true",
+    SELF_APPROVAL: "false",
+    HARD_EXTERNAL_BLOCKER: "false",
+    ...overrides
+  };
+}
+
+/**
+ * The child that behaves exactly as D-144's did: sync locally, then post a
+ * COMPLETE closeout report. `extra.closeout` overrides one report field (`null`
+ * deletes it, an array emits it twice); any other key is passed through as an
+ * environment variable.
+ */
+const mergeChild = (mergeSha, { closeout = {}, ...env } = {}) => ({
+  JARVIS_FAKE_CLAUDE_SYNC_TO: mergeSha,
+  JARVIS_FAKE_CLAUDE_PR: String(PR),
+  JARVIS_FAKE_CLAUDE_REPORT_FIELDS: JSON.stringify(closeoutFields(mergeSha, closeout)),
+  ...env
+});
 
 /* ==========================================================================
  * THE REGRESSION: D-144 RETIRES SUCCESSFULLY
@@ -474,16 +514,21 @@ describe("D-145: the transition path does not generalize - every deviation is st
     expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.NOT_MERGED);
   }, 300_000);
 
-  it("a FAILING post-merge check run is refused", async () => {
+  it("a FAILING required post-merge check run is refused", async () => {
+    // D-146: all three REQUIRED checks are present, so the refusal is about the
+    // one that failed rather than about one that never ran. The "a required check
+    // is simply absent" case is a separate test below, because the two used to be
+    // indistinguishable and only one of them was being caught.
     const merge = syntheticMerge(repoPath, { base: prevMain, head: prHead });
     publishMerge(merge, { checks: [
       { name: "build-test", status: "completed", conclusion: "success" },
+      { name: "windows-git-auth", status: "completed", conclusion: "success" },
       { name: "gitleaks", status: "completed", conclusion: "failure" }
     ] });
     setComments([mergeTask()]);
 
     const rec = await expectHeld(mergeChild(merge));
-    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.CHECKS_FAILED);
+    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.CHECKS_REQUIRED_NOT_SUCCESS);
   }, 300_000);
 
   it("an UNRELATED commit riding alongside the merge commit is refused", async () => {
@@ -580,6 +625,226 @@ describe("D-145: the transition path does not generalize - every deviation is st
     // No transition was even attempted for it: it is not a merge task.
     expect(rec.completion_gate.merge_transition_verified).toBe(false);
     expect(rec.merge_transition ?? null).toBe(null);
+  }, 300_000);
+});
+
+/* ==========================================================================
+ * D-146: THE POST-MERGE EVIDENCE GATES, THROUGH THE REAL ENTRYPOINT
+ *
+ * The unit suite in `postmerge-evidence.test.mjs` proves the rules. These prove
+ * the WIRING: that the real worker, dispatching a real child into a real
+ * worktree against a real merge commit, actually reaches those rules and is
+ * actually held by them. A rule nothing calls is not a gate.
+ * ========================================================================== */
+
+describe("D-146: required check identity and bound closeout evidence, end to end", () => {
+  let merge;
+
+  beforeEach(() => {
+    merge = syntheticMerge(repoPath, { base: prevMain, head: prHead, message: `Merge pull request #${PR}` });
+  });
+
+  /**
+   * Refused, nothing destroyed, and for the named post-merge reason.
+   *
+   * Deliberately ONE worker run per call: a BLOCKED task is never replayed, so a
+   * second run inside the same test would assert the FIRST run's record again
+   * and pass for the wrong reason.
+   */
+  async function expectHeldFor(reason, { checks = null, closeout = {}, order = null, env = {} } = {}) {
+    publishMerge(merge, checks ? { checks } : {});
+    setComments([order ?? mergeTask()]);
+
+    const res = await runWorker("report", mergeChild(merge, { closeout, ...env }));
+    expect(res.code).toBe(3);
+    const rec = task(MERGE_TASK);
+    expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+    expect(rec.successful).toBe(false);
+    expect(rec.completed_at ?? null).toBe(null);
+    expect(rec.completion_gate.held).toBe(true);
+    expect(rec.merge_transition.verified).toBe(false);
+    expect(rec.merge_transition.reason).toBe(reason);
+    expect(healthEvents().filter((e) => e.event === "completion_confirmed" && e.task_id === MERGE_TASK)).toEqual([]);
+    // The fail-closed direction that must never move: preserved, not destroyed.
+    expect(existsSync(wt(MERGE_TASK))).toBe(true);
+    expect(claim(MERGE_TASK).claim.state).toBe(CLAIM_STATE.READY);
+    return rec;
+  }
+
+  /** The three required checks, with one of them altered. */
+  const checksWith = (name, over) => [
+    { name: "build-test", status: "completed", conclusion: "success" },
+    { name: "windows-git-auth", status: "completed", conclusion: "success" },
+    { name: "gitleaks", status: "completed", conclusion: "success" }
+  ].map((r) => (r.name === name ? { ...r, ...over } : r));
+
+  describe("gap 1: an unrelated green check is not a required check", () => {
+    it("ONLY an unrelated green check on the merge commit is refused", async () => {
+      // The exact PR #81 fail-open, driven through the real worker: under D-145
+      // this run completed successfully with `build-test` never having run.
+      const rec = await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_MISSING, {
+        checks: [{ name: "some-other-job", status: "completed", conclusion: "success" }]
+      });
+      expect(rec.merge_transition.detail).toContain("build-test");
+      expect(rec.merge_transition.required_checks)
+        .toEqual(["build-test", "windows-git-auth", "gitleaks"]);
+    }, 300_000);
+
+    it("one required check MISSING while the other two are green is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_MISSING, {
+        checks: [
+          { name: "build-test", status: "completed", conclusion: "success" },
+          { name: "gitleaks", status: "completed", conclusion: "success" }
+        ]
+      });
+      expect(rec.merge_transition.detail).toContain("windows-git-auth");
+    }, 300_000);
+
+    it("a DUPLICATE required check name is refused even when both copies are green", async () => {
+      await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_AMBIGUOUS, {
+        checks: [
+          { name: "build-test", status: "completed", conclusion: "success" },
+          { name: "build-test", status: "completed", conclusion: "success" },
+          { name: "windows-git-auth", status: "completed", conclusion: "success" },
+          { name: "gitleaks", status: "completed", conclusion: "success" }
+        ]
+      });
+    }, 300_000);
+
+    it("a required check concluding NEUTRAL is refused", async () => {
+      await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_NOT_SUCCESS, {
+        checks: checksWith("windows-git-auth", { conclusion: "neutral" })
+      });
+    }, 300_000);
+
+    it("a required check concluding SKIPPED is refused", async () => {
+      await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_NOT_SUCCESS, {
+        checks: checksWith("gitleaks", { conclusion: "skipped" })
+      });
+    }, 300_000);
+
+    it("a required check that has not finished is refused", async () => {
+      await expectHeldFor(MERGE_TRANSITION.CHECKS_REQUIRED_UNFINISHED, {
+        checks: checksWith("build-test", { status: "in_progress", conclusion: null })
+      });
+    }, 300_000);
+
+    it("a task declaring an EMPTY required set fails closed, never open", async () => {
+      await expectHeldFor(MERGE_TRANSITION.POLICY_NO_REQUIRED_CHECKS, {
+        order: mergeTask({ REQUIRED_POST_MERGE_CHECKS: "" })
+      });
+    }, 300_000);
+  });
+
+  describe("gap 2: the trusted report's LOCAL closeout evidence is bound", () => {
+    it("a report that omits local sync entirely is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISSING, {
+        closeout: { LOCAL_HEAD: null, ORIGIN_MAIN: null }
+      });
+      expect(rec.merge_transition.detail).toContain("LOCAL_HEAD");
+    }, 300_000);
+
+    it("LOCAL_HEAD still on the PR head - the child never synced - is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        closeout: { LOCAL_HEAD: prHead }
+      });
+      expect(rec.merge_transition.detail).toContain("LOCAL_HEAD");
+    }, 300_000);
+
+    it("ORIGIN_MAIN still on the old base is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        closeout: { ORIGIN_MAIN: prevMain }
+      });
+      expect(rec.merge_transition.detail).toContain("ORIGIN_MAIN");
+    }, 300_000);
+
+    it("a DIRTY report is refused although every remote fact is perfect", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        closeout: { WORKTREE_CLEAN: "false" }
+      });
+      expect(rec.merge_transition.detail).toContain("WORKTREE_CLEAN");
+    }, 300_000);
+
+    it("a report whose MERGE_SHA is not the real merge sha is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        closeout: { MERGE_SHA: prHead }
+      });
+      expect(rec.merge_transition.detail).toContain("MERGE_SHA");
+    }, 300_000);
+
+    it("CONTRADICTORY duplicate fields are refused - neither value is chosen", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_DUPLICATE, {
+        closeout: { WORKTREE_CLEAN: ["false", "true"] }
+      });
+      expect(rec.merge_transition.detail).toContain("WORKTREE_CLEAN");
+    }, 300_000);
+
+    it("a report claiming a required check failed, against a green remote, is refused", async () => {
+      await expectHeldFor(MERGE_TRANSITION.REPORT_CI_CONTRADICTS_REMOTE, {
+        closeout: { POST_MERGE_BUILD_TEST: "failure" }
+      });
+    }, 300_000);
+
+    it("a report naming a different PR than the authorization is refused", async () => {
+      // Driven through the child's single canonical PR_NUMBER line, so this
+      // asserts the BINDING rule and not the duplicate rule.
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        env: { JARVIS_FAKE_CLAUDE_PR: "81" }
+      });
+      expect(rec.merge_transition.detail).toContain("PR_NUMBER");
+    }, 300_000);
+
+    it("a report that states PR_NUMBER TWICE is ambiguous and refused on that ground", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_DUPLICATE, {
+        closeout: { PR_NUMBER: String(PR) }   // the child already emits one
+      });
+      expect(rec.merge_transition.detail).toContain("PR_NUMBER");
+    }, 300_000);
+
+    it("SELF_APPROVAL=true is refused", async () => {
+      const rec = await expectHeldFor(MERGE_TRANSITION.REPORT_FIELD_MISMATCH, {
+        closeout: { SELF_APPROVAL: "true" }
+      });
+      expect(rec.merge_transition.detail).toContain("SELF_APPROVAL");
+    }, 300_000);
+
+    it("the D-145-shaped report - STATUS only, no closeout evidence - no longer passes", async () => {
+      // This is literally what the old fixture posted, and what the old verifier
+      // accepted. It must now be refused for want of bindable evidence.
+      publishMerge(merge);
+      setComments([mergeTask()]);
+      const res = await runWorker("report", {
+        JARVIS_FAKE_CLAUDE_SYNC_TO: merge,
+        JARVIS_FAKE_CLAUDE_PR: String(PR)
+      });
+      expect(res.code).toBe(3);
+      const rec = task(MERGE_TASK);
+      expect(rec.status).toBe(TASK_STATUS.BLOCKED);
+      expect(rec.merge_transition.verified).toBe(false);
+      expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.REPORT_FIELD_MISSING);
+    }, 300_000);
+  });
+
+  it("POSITIVE CONTROL: with every required check and every bound field, it still retires", async () => {
+    // Without this, every assertion above would be satisfied by a gate that
+    // simply refuses everything.
+    publishMerge(merge);
+    setComments([mergeTask()]);
+
+    const res = await runWorker("report", mergeChild(merge));
+    expect(res.code).toBe(0);
+    const rec = task(MERGE_TASK);
+    expect(rec.status).toBe(TASK_STATUS.COMPLETED);
+    expect(rec.successful).toBe(true);
+    expect(rec.completion_gate.reason).toBe(COMPLETION_GATE.PASSED_AUTHORIZED_MERGE_TRANSITION);
+    expect(rec.merge_transition.verified).toBe(true);
+    expect(rec.merge_transition.required_checks).toEqual(["build-test", "windows-git-auth", "gitleaks"]);
+    // The record says out loud which part of its proof is a bound claim.
+    expect(rec.merge_transition.report_local_evidence_fields)
+      .toEqual(["LOCAL_HEAD", "ORIGIN_MAIN", "WORKTREE_CLEAN"]);
+    // ...and STILL never claims Claude authored the merge commit.
+    expect(rec.completion_gate.provenance_verdict).toBe(COMMIT_PROVENANCE.UNATTRIBUTED);
+    expect(rec.completion_gate.transition_excused_commits).toEqual([merge]);
   }, 300_000);
 });
 

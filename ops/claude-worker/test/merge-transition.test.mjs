@@ -34,6 +34,7 @@ import {
   findMergeAuthorization,
   mergeTransitionExcusesProvenance,
   readMergeAuthorization,
+  resolvePostMergeEvidencePolicy,
   verifyMergeTransition
 } from "../lib/merge-transition.mjs";
 import { COMMIT_PROVENANCE, COMPLETION_GATE, evaluateCompletionGate } from "../lib/provenance.mjs";
@@ -78,15 +79,70 @@ function taskComment(overrides = {}) {
   };
 }
 
-/** The trusted terminal report D-144 actually posted. */
-const COMPLETE_REPORT = Object.freeze({
+/**
+ * The trusted terminal report D-144 actually posted, comment 5672081061.
+ *
+ * D-146: the BODY is now part of the fixture, and it is the real one - the exact
+ * protocol header block of the report on issue #68, transcribed field for field.
+ * D-145's fixture carried only `complete`/`successful`, which is precisely the
+ * fail-open the PR #81 review found: the verifier had no closeout evidence to
+ * bind, so a report making no local-sync claim at all passed.
+ */
+const D144_REPORT_BODY = [
+  "CLAUDE_REPORT",
+  `TASK_ID=${TASK_ID}`,
+  "STATUS=COMPLETE",
+  "REPO=tsworkflow/jarvisbuild",
+  "PR_NUMBER=80",
+  `EXPECTED_HEAD_SHA=${HEAD}`,
+  `EXPECTED_BASE_SHA=${BASE}`,
+  "MERGED=true",
+  `MERGE_SHA=${MERGE}`,
+  `PARENT_1=${BASE}`,
+  `PARENT_2=${HEAD}`,
+  "TWO_PARENT_MERGE_VERIFIED=true",
+  "POST_MERGE_CI_RUN=34906721592",
+  "POST_MERGE_BUILD_TEST=success",
+  "POST_MERGE_WINDOWS_GIT_AUTH=success",
+  "POST_MERGE_GITLEAKS=success",
+  `LOCAL_HEAD=${MERGE}`,
+  `ORIGIN_MAIN=${MERGE}`,
+  "WORKTREE_CLEAN=true",
+  "HOST_REDEPLOYED=false",
+  "SELF_APPROVAL=false",
+  "HARD_EXTERNAL_BLOCKER=false",
+  "",
+  "Routine guarded closeout merge executed. No implementation work, no new commits, no",
+  "squash/rebase/force/history rewrite, no redeploy, no process restarted or terminated.",
+  "",
+  "## Merge",
+  "",
+  "`MERGE_SHA=0c803bf1c1724413dc8e8071a7aabe7fd52562e4`, merged 2026-09-14T22:59:13Z by `tsworkflow`.",
+  "",
+  "```",
+  `parent ${BASE}   <- previous main / EXPECTED_BASE_SHA`,
+  `parent ${HEAD}   <- EXPECTED_HEAD_SHA`,
+  "```"
+].join("\n");
+
+/**
+ * The prose tail above is kept deliberately. It contains the real report's
+ * backticked `MERGE_SHA=...` line and a fenced code block, which is exactly the
+ * kind of text a whole-body field scanner could mistake for a duplicate field.
+ * If `readAllFields` ever loosens its `^KEY=` anchor, this fixture stops passing.
+ */
+const completionFor = (body, over = {}) => ({
   complete: true,
   successful: true,
   status: "COMPLETE",
   canonicalStatus: "COMPLETE",
   statusRecognised: true,
-  reportCommentId: 5672081061
+  reportCommentId: 5672081061,
+  reportBody: body,
+  ...over
 });
+
+const COMPLETE_REPORT = Object.freeze(completionFor(D144_REPORT_BODY));
 
 const pull = (over = {}) => ({
   ok: true,
@@ -263,12 +319,15 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
     ["there is no terminal report at all",
       { completion: { complete: false, successful: false, status: null, reportCommentId: null } },
       MERGE_TRANSITION.REPORT_NOT_SUCCESSFUL],
-    ["post-merge CI failed",
+    // D-146 tightened these three. `build-test` failing or unfinished is now
+    // reported as the REQUIRED check it is, and the other two required checks
+    // being absent from these single-run fixtures is itself fatal.
+    ["a required post-merge check failed",
       { checks: checks([{ name: "build-test", status: "completed", conclusion: "failure" }]) },
-      MERGE_TRANSITION.CHECKS_FAILED],
-    ["post-merge CI has not finished",
+      MERGE_TRANSITION.CHECKS_REQUIRED_NOT_SUCCESS],
+    ["a required post-merge check has not finished",
       { checks: checks([{ name: "build-test", status: "in_progress", conclusion: null }]) },
-      MERGE_TRANSITION.CHECKS_INCOMPLETE],
+      MERGE_TRANSITION.CHECKS_REQUIRED_UNFINISHED],
     ["there is no post-merge CI at all",
       { checks: checks([]) }, MERGE_TRANSITION.CHECKS_MISSING],
     ["post-merge CI could not be read",
@@ -557,25 +616,46 @@ describe("D-145: ordinary commit provenance is still fail-closed", () => {
   });
 });
 
-describe("D-145: classifyPostMergeChecks", () => {
-  it("accepts success, neutral and skipped; refuses everything else", () => {
-    expect(classifyPostMergeChecks({ ok: true, runs: [
-      { name: "a", status: "completed", conclusion: "success" },
-      { name: "b", status: "completed", conclusion: "skipped" },
-      { name: "c", status: "completed", conclusion: "neutral" }
-    ] }).ok).toBe(true);
+describe("D-146: classifyPostMergeChecks is about REQUIRED identity, not green-ness", () => {
+  /**
+   * D-145's version of this describe block asserted that `success`, `neutral`
+   * AND `skipped` were all acceptable, for whatever check names happened to come
+   * back. That assertion IS the fail-open the PR #81 review found, so it is
+   * replaced rather than extended: under a required set, a check named `a` being
+   * green says nothing about whether `build-test` ran.
+   */
+  const POLICY = resolvePostMergeEvidencePolicy({});
 
-    for (const bad of ["failure", "cancelled", "timed_out", "action_required", "stale", null]) {
-      const v = classifyPostMergeChecks({ ok: true, runs: [{ name: "x", status: "completed", conclusion: bad }] });
+  it("refuses without a resolved policy: no required set means no decision", () => {
+    const v = classifyPostMergeChecks({ ok: true, runs: [
+      { name: "build-test", status: "completed", conclusion: "success" }
+    ] }, null);
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe(MERGE_TRANSITION.POLICY_NO_REQUIRED_CHECKS);
+  });
+
+  it("accepts ONLY when every required name is present exactly once and succeeded", () => {
+    expect(classifyPostMergeChecks(checks(), POLICY).ok).toBe(true);
+  });
+
+  it("neutral and skipped are NOT success for a required check", () => {
+    for (const conclusion of ["neutral", "skipped", "failure", "cancelled", "timed_out",
+      "action_required", "stale", null]) {
+      const v = classifyPostMergeChecks(checks([
+        { name: "build-test", status: "completed", conclusion },
+        { name: "windows-git-auth", status: "completed", conclusion: "success" },
+        { name: "gitleaks", status: "completed", conclusion: "success" }
+      ]), POLICY);
       expect(v.ok).toBe(false);
-      expect(v.reason).toBe(MERGE_TRANSITION.CHECKS_FAILED);
+      expect(v.reason).toBe(MERGE_TRANSITION.CHECKS_REQUIRED_NOT_SUCCESS);
     }
   });
 
   it("never reads an unreadable or empty answer as green", () => {
-    expect(classifyPostMergeChecks(null).reason).toBe(MERGE_TRANSITION.CHECKS_UNREADABLE);
-    expect(classifyPostMergeChecks({ ok: false, error: "boom" }).reason).toBe(MERGE_TRANSITION.CHECKS_UNREADABLE);
-    expect(classifyPostMergeChecks({ ok: true, runs: [] }).reason).toBe(MERGE_TRANSITION.CHECKS_MISSING);
+    expect(classifyPostMergeChecks(null, POLICY).reason).toBe(MERGE_TRANSITION.CHECKS_UNREADABLE);
+    expect(classifyPostMergeChecks({ ok: false, error: "boom" }, POLICY).reason)
+      .toBe(MERGE_TRANSITION.CHECKS_UNREADABLE);
+    expect(classifyPostMergeChecks({ ok: true, runs: [] }, POLICY).reason).toBe(MERGE_TRANSITION.CHECKS_MISSING);
   });
 });
 
