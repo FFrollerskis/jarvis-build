@@ -502,6 +502,41 @@ Worker (`worker.mjs`):
     (`order_authority`), og om en foreslått retirering ville blitt utført
     (`supersession_preview`, med deklarerende comment-id og digest). En ubevist
     lesning gir `would_exit: TRANSIENT` og INGEN kø, kandidat eller retirering.
+- **C11 (ET UBRUKELIG SNAPSHOT SKRIVER INGENTING, D-152).** D-151 plasserte
+  grensen riktig og skrev deretter gjennom den: refusjonsgrenen kalte
+  `reportStatus`, som ikke er en observasjon men TRE skrivinger.
+  - **`postComment` publiserte til KONTROLL-ISSUEN — køens egen inngang.** En
+    syklus som nettopp hadde erklært at den ikke kunne lese den issuen, la
+    likevel til i den, og hver senere syklus leser kommentaren tilbake som en del
+    av SITT autoritets-snapshot. Én flaky `gh api --paginate` ble et permanent,
+    globalt synlig artefakt forfattet av en syklus uten autoritet.
+  - **`postComment` skrev først en body-fil inn i `scratchRoot`** og opprettet
+    katalogen — scratch-aktivitet som holdets egen melding SAMTIDIG påstod ikke
+    hadde skjedd.
+  - **`recordPostedStatus` appendet til dedupliseringsjournalen.** Det er durabel
+    beslutningstilstand, og den avgjør FRAMTIDEN: når nøkkelen er journalført,
+    undertrykkes det samme funnet i `statusRepeatHours`. En ubevist lesning
+    kjøpte seg altså stille seks timers taushet om en tilstand som til da kan ha
+    blitt reell og genuint verdt å rapportere.
+  - **Alle tre er fjernet fra refusjonsgrenen.** Det som står igjen er den eneste
+    kategorien som ikke kan korrumpere en senere beslutning: LOKALT APPEND-ONLY
+    BEVIS. Logg og health-journal skrives på denne verten, leses aldri tilbake
+    som autoritet, og er nøyaktig det en operatør trenger.
+  - **Beviset er falsifiserbart, ikke bare taust.** Health-eventen
+    `control_authority_snapshot_unusable` bærer `snapshot_reason`,
+    `snapshot_detail`, `held: true`, `exit: 4` og — positivt formulert —
+    `status_comment_posted: false`, `posted_status_recorded: false`,
+    `durable_state_written: false`. Loggen navngir funnet og det holdte
+    TRANSIENT-utfallet, og påstår aldri at en status-kommentar ble postet.
+  - **Komplett-snapshot-stien er uendret.** Forbudet gjelder å skrive FRA EN
+    SYKLUS SOM BEVISTE AT DEN IKKE KUNNE LESE — ikke å skrive i det hele tatt.
+    Legitim status-/rapport-posting etter et bevist komplett snapshot virker som
+    før, dedupliseringen inkludert.
+  - **`JARVIS_WORKER_FAULT=control_read_unproven`** (TEST-ONLY) forfalsker BARE
+    lesningens form, slik at `READ_UNPROVEN` — som ellers er unåbar utenfra,
+    fordi `fetchIssueCommentsDetailed` alltid leverer kompletthetsbevis — kan
+    testes gjennom den ekte entrypointen. Armeringen annonseres høylytt i logg og
+    health som alle andre faults.
 - **D.** Bundet retry med eksponentiell backoff og et hardt tak. Gjentatt feil
   gir en deduplisert `CLAUDE_WORKER_STATUS` på kontroll-issuen (dedup i egen
   append-only journal, så den aldri trenger den eksklusive låsen). Exit-koden er
