@@ -52,7 +52,7 @@ import { ORDER_AUTHORITY } from "../lib/order-authority.mjs";
 import { AUTHORITY_SNAPSHOT } from "../lib/authority-snapshot.mjs";
 import { orderBodyDigest } from "../lib/order-binding.mjs";
 import { SUPERSESSION_BASIS } from "../lib/queue.mjs";
-import { createRepo, git, head, treeOf, parentsOf, syntheticMerge, compareStore } from "./fixtures/real-git-repo.mjs";
+import { createRepo, git, head, treeOf, parentsOf, syntheticMerge } from "./fixtures/real-git-repo.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKER = join(HERE, "..", "worker.mjs");
@@ -151,9 +151,8 @@ beforeEach(() => {
       { name: "gitleaks", status: "completed", conclusion: "success" }
     ]
   }, null, 2), "utf8");
-  // D-157: the two effective-change comparisons, derived from the real repo.
-  writeFileSync(join(ghDir, "compare.json"),
-    JSON.stringify(compareStore(repoPath, { mergeSha: merge, base: prevMain, head: prHead }), null, 2), "utf8");
+  // D-158: no comparison fixture. The merge proof recomputes the merge from the
+  // real objects in `repoPath`, which this fixture already has.
   writeFileSync(join(ghDir, "fail.json"), JSON.stringify({}), "utf8");
   setComments([]);
 });

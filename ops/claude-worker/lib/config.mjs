@@ -33,11 +33,14 @@ import {
   unsupportedPromptDeliveryReason
 } from "./dispatch.mjs";
 
-// D-157: the authorized-merge transition verifier no longer requires the merge
-// commit's tree to equal the approved head's tree, and proves the effective
-// change instead. That changes which merges a completion gate accepts and which
-// reasons it can emit, so a deployed worker's version must distinguish it.
-export const WORKER_VERSION = "2.2.0";
+// D-158: the authorized-merge transition verifier no longer compares two API
+// diff projections (D-157, which refused a valid merge of non-overlapping hunks
+// in one file). It recomputes the merge of the two authorized commits with git
+// and requires the recorded merge commit to be exactly that tree. That changes
+// which merges a completion gate accepts, which reasons it can emit, and - for
+// the first time in this gate - makes it run git locally, so a deployed worker's
+// version must distinguish it.
+export const WORKER_VERSION = "2.3.0";
 
 const REQUIRED_WORKER = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "repoPath", "claudeArgs"];
 const REQUIRED_SUPERVISOR = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "workerTaskName", "host"];

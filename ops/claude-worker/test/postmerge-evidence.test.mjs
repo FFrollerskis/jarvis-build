@@ -138,38 +138,29 @@ const mergeCommit = (over = {}) => ({
 const headCommit = () => ({ ok: true, item: { sha: HEAD, treeSha: TREE, parents: [BASE] }, error: null });
 
 /**
- * D-157: the effective-change comparisons this gate now also requires.
+ * D-158: the merge proof this gate now also requires.
  *
  * This file is about REQUIRED CHECK IDENTITY and the bound closeout report, so
- * the deltas here are a constant, matching fixture: they must not be the reason
- * any case in this file passes or fails.
+ * the proof here is a constant, passing fixture: it must not be the reason any
+ * case in this file passes or fails.
  */
-const DELTA_FILES = [{
-  filename: "feature.txt",
-  status: "added",
-  previousFilename: null,
-  blobSha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
-  additions: 1,
-  deletions: 0,
-  patch: "@@ -0,0 +1 @@\n+the reviewed change\n"
-}];
-const mergeDelta = () => ({
+const mergeTreeProof = () => ({
+  attempted: true,
   ok: true,
+  stage: "complete",
   error: null,
-  item: {
-    baseSha: BASE, mergeBaseSha: BASE, headSha: MERGE, status: "ahead",
-    aheadBy: 2, behindBy: 0, totalCommits: 2, commitCount: 2,
-    fileCount: DELTA_FILES.length, files: DELTA_FILES
-  }
-});
-const reviewedDelta = () => ({
-  ok: true,
-  error: null,
-  item: {
-    baseSha: BASE, mergeBaseSha: BASE, headSha: HEAD, status: "ahead",
-    aheadBy: 1, behindBy: 0, totalCommits: 1, commitCount: 1,
-    fileCount: DELTA_FILES.length, files: DELTA_FILES
-  }
+  store_path: "C:/worker/tmp/merge-proof.git",
+  fetched: false,
+  fetch_error: null,
+  missing_objects: [],
+  resolved_base: BASE,
+  resolved_head: HEAD,
+  resolved_merge: MERGE,
+  expected_tree: TREE,
+  conflicted: false,
+  conflict_detail: null,
+  merge_commit_tree: TREE,
+  merge_commit_parents: [BASE, HEAD]
 });
 
 /** The whole gate, end to end, with exactly one fact changed. */
@@ -184,8 +175,7 @@ function verify(over = {}) {
     mergeCommit: over.mergeCommit ?? mergeCommit(),
     headCommit: over.headCommit ?? headCommit(),
     checks: over.checks ?? checks(),
-    mergeDelta: "mergeDelta" in over ? over.mergeDelta : mergeDelta(),
-    reviewedDelta: "reviewedDelta" in over ? over.reviewedDelta : reviewedDelta()
+    mergeTreeProof: "mergeTreeProof" in over ? over.mergeTreeProof : mergeTreeProof()
   });
 }
 

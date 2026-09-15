@@ -95,11 +95,13 @@ export const PAYLOAD = Object.freeze([
   // closure is computed from the real entrypoints rather than maintained by hand.
   "lib/merge-transition.mjs",
   "lib/postmerge-evidence.mjs",
-  // D-157. `merge-transition.mjs` imports it, and it carries the effective-change
-  // proof that replaced the merge-tree-equality gate: a deployed worker missing
-  // this file could not verify ANY authorized merge transition. Caught by the
-  // ESM-closure test below the moment the module was written.
-  "lib/merge-delta.mjs",
+  // D-158. `merge-transition.mjs` imports the proof and `worker.mjs` imports the
+  // computation, and together they ARE the authorized-merge gate: a deployed
+  // worker missing either could not verify any merge transition at all. Both
+  // are caught by the ESM-closure test below, which is how D-157's omission of
+  // its own leaf module was caught the moment it was written.
+  "lib/merge-tree-proof.mjs",
+  "lib/merge-tree.mjs",
   // D-149. `state.mjs` imports it too, so a deployed worker missing this file
   // would fail to LOAD ITS OWN STATE, not merely fail a merge gate. The ESM
   // closure test below caught the omission before this line existed.

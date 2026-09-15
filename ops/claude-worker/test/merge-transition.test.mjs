@@ -164,39 +164,37 @@ const checks = (over = null) => ({
 });
 
 /**
- * D-157: the effective-change comparisons.
+ * D-158: the recomputed-merge proof.
  *
  * D-144's branch was UP TO DATE with its base, so this fixture is the topology
- * where the merge tree does equal the head tree - `behindBy: 0` on both sides.
- * The new proof must accept it for the same reason it accepts PR #82's diverged
- * branch: `diff(parent1, merge)` is the reviewed delta either way.
+ * where the merge tree does equal the head tree. The proof must accept it for
+ * exactly the same reason it accepts PR #82's diverged branch and a same-file
+ * non-overlapping merge: the recorded merge's tree is the tree merging the two
+ * authorized commits produces. That is one statement, not three cases.
+ *
+ * The REAL-OBJECT versions of all of this live in `merge-tree-proof.mjs`'s suite,
+ * where git computes the trees. Here the record is a fixture on purpose: this
+ * file drives the SURROUNDING gate, and every case must fail for the reason it
+ * is about rather than because a merge could not be computed.
  */
-const DELTA_FILES = [{
-  filename: "feature.txt",
-  status: "added",
-  previousFilename: null,
-  blobSha: "abcabcabcabcabcabcabcabcabcabcabcabcabca",
-  additions: 1,
-  deletions: 0,
-  patch: "@@ -0,0 +1 @@\n+the reviewed change\n"
-}];
-const mergeDelta = (over = {}) => ({
+const mergeTreeProof = (over = {}) => ({
+  attempted: true,
   ok: true,
+  stage: "complete",
   error: null,
-  item: {
-    baseSha: BASE, mergeBaseSha: BASE, headSha: MERGE, status: "ahead",
-    aheadBy: 2, behindBy: 0, totalCommits: 2, commitCount: 2,
-    fileCount: DELTA_FILES.length, files: DELTA_FILES, ...over
-  }
-});
-const reviewedDelta = (over = {}) => ({
-  ok: true,
-  error: null,
-  item: {
-    baseSha: BASE, mergeBaseSha: BASE, headSha: HEAD, status: "ahead",
-    aheadBy: 1, behindBy: 0, totalCommits: 1, commitCount: 1,
-    fileCount: DELTA_FILES.length, files: DELTA_FILES, ...over
-  }
+  store_path: "C:/worker/tmp/merge-proof.git",
+  fetched: false,
+  fetch_error: null,
+  missing_objects: [],
+  resolved_base: BASE,
+  resolved_head: HEAD,
+  resolved_merge: MERGE,
+  expected_tree: TREE,
+  conflicted: false,
+  conflict_detail: null,
+  merge_commit_tree: TREE,
+  merge_commit_parents: [BASE, HEAD],
+  ...over
 });
 
 /** The verdict the CURRENT worker produced for D-144, reproduced exactly. */
@@ -229,8 +227,7 @@ function verify(over = {}) {
     mergeCommit: over.mergeCommit ?? mergeCommit(),
     headCommit: over.headCommit ?? headCommit(),
     checks: over.checks ?? checks(),
-    mergeDelta: "mergeDelta" in over ? over.mergeDelta : mergeDelta(),
-    reviewedDelta: "reviewedDelta" in over ? over.reviewedDelta : reviewedDelta()
+    mergeTreeProof: "mergeTreeProof" in over ? over.mergeTreeProof : mergeTreeProof()
   });
 }
 
@@ -263,10 +260,10 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
     expect(t.merge_tree_sha).toBe(TREE);
     expect(t.head_tree_sha).toBe(TREE);
     expect(t.check_runs.map((r) => r.name)).toEqual(["build-test", "windows-git-auth", "gitleaks"]);
-    // D-157: the trees still travel in the record as evidence, and the effective
-    // change is now what was actually PROVEN.
-    expect(t.delta_file_count).toBe(1);
-    expect(t.delta_files).toEqual(["feature.txt"]);
+    // D-158: the head tree still travels in the record as evidence, and the
+    // recomputed merge tree is what was actually PROVEN.
+    expect(t.expected_merge_tree_sha).toBe(TREE);
+    expect(t.merge_tree_proof.proven).toBe(true);
   });
 
   it("it excuses the merge commit WITHOUT ever claiming Claude authored it", () => {
@@ -316,10 +313,10 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
 });
 
 /* ==========================================================================
- * D-157: THE DIVERGED TOPOLOGY THE OLD TREE RULE REFUSED
+ * D-158: THE TOPOLOGIES THE TWO PREVIOUS RULES REFUSED
  * ========================================================================== */
 
-describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition gate", () => {
+describe("D-158 REGRESSION: PR #82's diverged branch verifies at the transition gate", () => {
   /**
    * D-156's exact shape, at this gate rather than only in the leaf module.
    *
@@ -327,6 +324,11 @@ describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition 
    * was 17 commits behind its base - and under D-145's rule that alone produced
    * `..._so_the_merge_introduced_unreviewed_content` and held the completion gate
    * (issue #68 comment 5684346209) on a correct, authorized merge.
+   *
+   * These are PR #82's real tree ids, and the expected merge tree is the one this
+   * change verified against the live repository: `git merge-tree --write-tree`
+   * over base 091ba091 and head 170e5810 produces eef13c74, which is exactly the
+   * tree GitHub's own merge commit 6f1c980c points at.
    */
   const DIVERGED_MERGE_TREE = "eef13c740e69b11c2e1007b2a6b9303e3eda393d";
   const DIVERGED_HEAD_TREE = "6481537750f78e4956b7d5ad232964dc670f138d";
@@ -334,7 +336,10 @@ describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition 
   const diverged = (over = {}) => verify({
     mergeCommit: mergeCommit({ treeSha: DIVERGED_MERGE_TREE }),
     headCommit: headCommit({ treeSha: DIVERGED_HEAD_TREE }),
-    reviewedDelta: reviewedDelta({ mergeBaseSha: OTHER, status: "diverged", aheadBy: 3, behindBy: 17 }),
+    mergeTreeProof: mergeTreeProof({
+      expected_tree: DIVERGED_MERGE_TREE,
+      merge_commit_tree: DIVERGED_MERGE_TREE
+    }),
     ...over
   });
 
@@ -343,7 +348,7 @@ describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition 
     expect(t.verified).toBe(true);
     expect(t.reason).toBe(MERGE_TRANSITION.VERIFIED);
     expect(t.merge_tree_sha).not.toBe(t.head_tree_sha);
-    expect(t.reviewed_delta.behind_by).toBe(17);
+    expect(t.expected_merge_tree_sha).toBe(DIVERGED_MERGE_TREE);
   });
 
   it("the record still carries both trees, so the evidence is not lost", () => {
@@ -352,26 +357,21 @@ describe("D-157 REGRESSION: PR #82's diverged branch verifies at the transition 
     expect(t.head_tree_sha).toBe(DIVERGED_HEAD_TREE);
   });
 
-  it("the human description labels the differing trees as evidence, not as a finding", () => {
+  it("the human description labels the head tree as evidence, not as a finding", () => {
     const lines = describeMergeTransition(diverged()).join("\n");
-    expect(lines).toContain("trees (evidence only)");
+    expect(lines).toContain("head tree (evidence only)");
     expect(lines).toContain("normal when the head did not already contain its base");
+    expect(lines).toContain(DIVERGED_MERGE_TREE);
   });
 
   it("but a DIVERGED merge that introduced unreviewed content is still refused", () => {
     // The whole point: the topology is accepted, the unreviewed content is not.
     const t = diverged({
-      mergeDelta: mergeDelta({
-        fileCount: 2,
-        files: [...DELTA_FILES, {
-          filename: "conflict-resolution.txt", status: "added", previousFilename: null,
-          blobSha: "5555555555555555555555555555555555555555",
-          additions: 3, deletions: 0, patch: "@@ -0,0 +1,3 @@\n+resolved by hand\n"
-        }]
-      })
+      mergeCommit: mergeCommit({ treeSha: OTHER }),
+      mergeTreeProof: mergeTreeProof({ expected_tree: DIVERGED_MERGE_TREE, merge_commit_tree: OTHER })
     });
     expect(t.verified).toBe(false);
-    expect(t.reason).toBe(MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH);
+    expect(t.reason).toBe(MERGE_TRANSITION.MERGE_TREE_MISMATCH);
   });
 
   it("and a diverged merge still owes every OTHER guard - parents, CI, report", () => {
@@ -401,37 +401,42 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
       { mergeCommit: mergeCommit({ parents: [] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
     ["an octopus merge (three parents)",
       { mergeCommit: mergeCommit({ parents: [BASE, HEAD, OTHER] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
-    // D-157: "extra content in the merge tree" used to be asserted by moving the
-    // merge commit's TREE sha, because the gate was tree equality. It is now
-    // asserted where the content actually shows up - in the effective change the
-    // merge introduced - so the test can no longer pass by agreeing with a rule
-    // that refused correct merges. A differing tree sha on its own is EVIDENCE,
-    // not a finding, and the case below proves it no longer refuses by itself.
-    ["extra content the review never saw, introduced by the merge",
+    // D-158: any content difference - an extra file, a dropped or altered hunk
+    // on either side, a changed mode - lands in ONE place, the merge commit's
+    // tree, because that is what a tree id is. The fixture moves both the
+    // projection and the object so they stay consistent with each other; the
+    // separate case below is what proves a projection that DISAGREES with the
+    // object is itself a refusal.
+    ["content the review never saw: the merge tree is not the authorized merge",
       {
-        mergeDelta: mergeDelta({
-          fileCount: DELTA_FILES.length + 1,
-          files: [...DELTA_FILES, {
-            filename: "slipped-in.txt", status: "added", previousFilename: null,
-            blobSha: "9999999999999999999999999999999999999999",
-            additions: 1, deletions: 0, patch: "@@ -0,0 +1 @@\n+never reviewed\n"
-          }]
+        mergeCommit: mergeCommit({ treeSha: OTHER }),
+        mergeTreeProof: mergeTreeProof({ merge_commit_tree: OTHER })
+      },
+      MERGE_TRANSITION.MERGE_TREE_MISMATCH],
+    ["the API projection and the real merge object disagree about the tree",
+      { mergeTreeProof: mergeTreeProof({ merge_commit_tree: OTHER, expected_tree: OTHER }) },
+      MERGE_TRANSITION.MERGE_COMMIT_OBJECT_DISAGREES],
+    ["merging the authorized base and head CONFLICTS",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "merge_tree", conflicted: true, expected_tree: null,
+          conflict_detail: "CONFLICT (content): Merge conflict in feature.txt",
+          error: "merging conflicts"
         })
       },
-      MERGE_TRANSITION.DELTA_FILE_SET_MISMATCH],
-    ["the reviewed patch was altered on the way in",
-      {
-        mergeDelta: mergeDelta({
-          files: [{ ...DELTA_FILES[0], patch: "@@ -0,0 +1 @@\n+something else entirely\n" }]
-        })
-      },
-      MERGE_TRANSITION.DELTA_CONTENT_MISMATCH],
-    ["the effective change could not be read from the remote",
-      { mergeDelta: { ok: false, item: null, error: "HTTP 403" } },
-      MERGE_TRANSITION.MERGE_DELTA_UNREADABLE],
-    ["the reviewed delta could not be read from the remote",
-      { reviewedDelta: { ok: false, item: null, error: "HTTP 403" } },
-      MERGE_TRANSITION.REVIEWED_DELTA_UNREADABLE],
+      MERGE_TRANSITION.MERGE_TREE_CONFLICTED],
+    ["an exact object the proof needs could not be obtained",
+      { mergeTreeProof: mergeTreeProof({ ok: false, stage: "resolve", missing_objects: [HEAD] }) },
+      MERGE_TRANSITION.MERGE_TREE_OBJECTS_UNAVAILABLE],
+    ["the merge could not be recomputed at all",
+      { mergeTreeProof: mergeTreeProof({ ok: false, stage: "merge_tree", error: "git is too old" }) },
+      MERGE_TRANSITION.MERGE_TREE_NOT_COMPUTED],
+    ["the proof was never computed",
+      { mergeTreeProof: null },
+      MERGE_TRANSITION.MERGE_TREE_NOT_COMPUTED],
+    ["the proof answers about a different base than the order authorized",
+      { mergeTreeProof: mergeTreeProof({ resolved_base: OTHER }) },
+      MERGE_TRANSITION.MERGE_TREE_WRONG_INPUTS],
     ["the PR is not merged",
       { pull: pull({ merged: false, mergeCommitSha: null }) }, MERGE_TRANSITION.NOT_MERGED],
     ["merged but with no merge sha",

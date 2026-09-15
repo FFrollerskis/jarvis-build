@@ -51,7 +51,7 @@ import { MERGE_AUTHORIZATION } from "../lib/merge-transition.mjs";
 import { ORDER_AUTHORITY } from "../lib/order-authority.mjs";
 import { ORDER_BINDING, orderBodyDigest } from "../lib/order-binding.mjs";
 import {
-  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge, compareStore
+  createRepo, statusLines, head, git, treeOf, parentsOf, syntheticMerge
 } from "./fixtures/real-git-repo.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -221,9 +221,8 @@ function publishMerge({ checks = null, pull = {} } = {}) {
   }
   writeFileSync(join(ghDir, "commits.json"), JSON.stringify(commits, null, 2), "utf8");
   writeFileSync(join(ghDir, "check-runs.json"), JSON.stringify({ [merge]: checks ?? GREEN }, null, 2), "utf8");
-  // D-157: the two effective-change comparisons, derived from the real repo.
-  writeFileSync(join(ghDir, "compare.json"),
-    JSON.stringify(compareStore(repoPath, { mergeSha: merge, base: prevMain, head: prHead }), null, 2), "utf8");
+  // D-158: no comparison fixture. The merge proof recomputes the merge from the
+  // real objects in `repoPath`, which this fixture already has.
 }
 
 function setComments(list) {

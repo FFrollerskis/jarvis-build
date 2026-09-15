@@ -18,11 +18,8 @@
  *                     404s, exactly as the real API does.
  *   check-runs.json - D-145: `{ "<sha>": [{ name, status, conclusion }] }`,
  *                     served by `repos/O/R/commits/<sha>/check-runs`.
- *   compare.json    - D-157: `{ "<base>...<head>": { baseSha, mergeBaseSha,
- *                     status, aheadBy, behindBy, commits: [...], files: [...] } }`,
- *                     served by `repos/O/R/compare/<base>...<head>`.
  *   fail.json       - optional { auth, comments, branches, pulls, commits,
- *                     checks, mergeState, compare } booleans
+ *                     checks, mergeState } booleans
  */
 
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -180,38 +177,16 @@ if (commitMatch) {
   process.exit(0);
 }
 
-/**
- * D-157: `repos/O/R/compare/<base>...<head>`, the effective-change comparison.
+/*
+ * D-158: THE `repos/O/R/compare/...` ROUTE IS GONE ON PURPOSE.
  *
- * Served from `compare.json`, keyed `"<base>...<head>"`. The stored value is the
- * projection `compareCommits` asks jq for, so the fixture publishes exactly what
- * the real endpoint would yield for that range - including `fileCount` and
- * `totalCommits`/`commitCount`, which are how the verifier detects a capped page.
- *
- * A range that is absent 404s, exactly as the real API does for an unknown sha.
+ * D-157 served it so the merge gate could compare two diff projections. That
+ * comparison refused valid merges (different non-overlapping hunks of one file),
+ * and the gate now recomputes the merge from the objects with real git instead -
+ * so the worker never calls this endpoint. A fake that still answered it would
+ * let a reintroduced projection read pass its tests without anyone noticing that
+ * nothing in `lib/` asks for it any more.
  */
-const compareMatch = urlArg.match(/\/compare\/([^/?]+)$/);
-if (compareMatch) {
-  if (failures.compare) die("gh: HTTP 403 rate limit exceeded");
-  const key = decodeURIComponent(compareMatch[1]);
-  const stored = read("compare.json", {})[key];
-  if (!stored) die(`gh: HTTP 404: No commit found for SHA: ${key}`);
-  const files = stored.files ?? [];
-  const commits = stored.commits ?? [];
-  process.stdout.write(JSON.stringify({
-    baseSha: stored.baseSha ?? null,
-    mergeBaseSha: stored.mergeBaseSha ?? null,
-    headSha: stored.headSha ?? (commits.length > 0 ? commits[commits.length - 1] : null),
-    status: stored.status ?? null,
-    aheadBy: stored.aheadBy ?? null,
-    behindBy: stored.behindBy ?? null,
-    totalCommits: stored.totalCommits ?? commits.length,
-    commitCount: stored.commitCount ?? commits.length,
-    fileCount: stored.fileCount ?? files.length,
-    files
-  }) + "\n");
-  process.exit(0);
-}
 
 // D-145: the merge-state projection for ONE pull request. Distinguished from the
 // list route by the trailing number, and from `getPull` by the fields asked for.

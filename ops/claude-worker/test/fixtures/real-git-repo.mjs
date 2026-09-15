@@ -183,16 +183,18 @@ export function realMergeTree(cwd, base, head, { extra = null } = {}) {
 const RAW_STATUS = { A: "added", M: "modified", D: "removed", R: "renamed", C: "copied", T: "changed" };
 
 /**
- * D-157: the `repos/O/R/compare/<base>...<head>` projection, DERIVED FROM REAL
- * GIT rather than invented.
+ * The `repos/O/R/compare/<base>...<head>` projection, DERIVED FROM REAL GIT.
  *
- * This is what makes the D-157 integration tests real. The verifier's whole
- * claim is "the effective change from parent 1 to the merge IS the reviewed
- * delta", and a hand-written fixture would simply assert whatever the test
- * author believed - including, in the failing direction, agreeing with a bug.
- * Here both ranges are computed by the same derivation from real objects, so a
- * genuine difference (an extra file in the merge tree, a rewritten hunk, a
- * dropped commit) shows up because git says so.
+ * D-158 REMOVED the gate that consumed this: comparing `parent1...merge` with
+ * `expectedBase...expectedHead` field for field refuses a valid merge whenever
+ * base and head changed different non-overlapping hunks of ONE file, because the
+ * merge blob correctly carries both sides. The merge proof now recomputes the
+ * merge instead (see `lib/merge-tree.mjs`), and reads no comparison at all.
+ *
+ * It is kept because the D-158 REGRESSION TEST needs it: to demonstrate that the
+ * old rule fails the topology the new one accepts, the old rule has to be
+ * executable over the same real objects. It is a witness for a closed bug, not a
+ * fixture any gate still depends on - nothing in `lib/` reads a comparison.
  *
  * Mirrors the real endpoint's semantics: a THREE-DOT comparison, anchored at the
  * merge base, with `commits` oldest-first so the last entry is the commit
@@ -267,31 +269,39 @@ export function compareProjection(cwd, base, head) {
 }
 
 /**
- * D-157: the whole `compare.json` store a merge fixture needs, in one call.
+ * D-157's INVARIANT, executable, so the D-158 regression can run it.
  *
- * The verifier makes exactly two comparisons - `parent1...merge` and
- * `base...head` - so every integration fixture that publishes a merged PR needs
- * both, derived from the same real repository the rest of the fixture uses.
- * Shared rather than copied into each suite: a fixture that silently lacked a
- * range would make its gate refuse for a reason the test was not about.
+ * This is the rule PR #84 shipped before this correction: the two GitHub
+ * comparisons `parent1...merge` and `expectedBase...expectedHead` had to be
+ * equal file for file and field for field. Reproduced here - the same sort, the
+ * same fields, in the same order - because a regression test that merely
+ * DESCRIBES the old bug proves nothing. Running it over the same real objects
+ * the new gate runs over is the only way to show that one refuses a topology the
+ * other accepts.
  *
- * A range that cannot be computed is simply omitted, which the fake `gh` serves
- * as a 404 - exactly what the real API does for an unknown sha, and exactly the
- * UNKNOWN the verifier must refuse on rather than treat as a match.
+ * Returns `{ ok, field, filename }`. It lives in the fixtures, not in `lib/`,
+ * because nothing in the worker may use it again.
  */
-export function compareStore(cwd, { mergeSha = null, base = null, head = null } = {}) {
-  const store = {};
-  const add = (a, b) => {
-    try {
-      store[`${a}...${b}`] = compareProjection(cwd, a, b);
-    } catch { /* an uncomputable range 404s, exactly like the real API */ }
-  };
-  if (mergeSha) {
-    const parent1 = parentsOf(cwd, mergeSha)[0] ?? null;
-    if (parent1) add(parent1, mergeSha);
+export const D157_COMPARED_FIELDS = Object.freeze([
+  "status", "previousFilename", "blobSha", "additions", "deletions", "patch"
+]);
+
+export function d157ProjectionEquality(cwd, { mergeSha, base, head }) {
+  const parent1 = parentsOf(cwd, mergeSha)[0] ?? null;
+  if (!parent1) return { ok: false, field: "parent1", filename: null };
+  const byName = (a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0);
+  const m = [...compareProjection(cwd, parent1, mergeSha).files].sort(byName);
+  const r = [...compareProjection(cwd, base, head).files].sort(byName);
+
+  if (m.length !== r.length || m.some((f, i) => f.filename !== r[i].filename)) {
+    return { ok: false, field: "fileSet", filename: null };
   }
-  if (base && head) add(base, head);
-  return store;
+  for (let i = 0; i < r.length; i++) {
+    for (const field of D157_COMPARED_FIELDS) {
+      if (m[i][field] !== r[i][field]) return { ok: false, field, filename: r[i].filename };
+    }
+  }
+  return { ok: true, field: null, filename: null };
 }
 
 /**

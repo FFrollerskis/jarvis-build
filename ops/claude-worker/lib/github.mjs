@@ -335,56 +335,21 @@ export function getCommitCheckRuns({ repoOwner, repoName }, sha, runner = gh) {
   }
 }
 
-/**
- * D-157: the EFFECTIVE CHANGE between two exact commits, as GitHub computes it.
+/*
+ * D-158: `compareCommits` USED TO LIVE HERE AND IS GONE ON PURPOSE.
  *
- * This is the read that replaces D-145's merge-tree-equals-head-tree check. Two
- * of these answer the question that check got wrong:
+ * D-157 added it to read `repos/O/R/compare/<a>...<b>`, so the gate could require
+ * `parent1...merge` and `expectedBase...expectedHead` to be equal field for
+ * field. That comparison is false for a valid merge whenever base and head
+ * changed different NON-OVERLAPPING HUNKS OF ONE FILE - the merge blob correctly
+ * holds both sides - so it refused correct history.
  *
- *   compare(parent1 ... mergeSha)              what the merge did to the base
- *   compare(expectedBase ... expectedHead)     what was authorized and reviewed
- *
- * Both endpoints are addressed by immutable commit shas, never by a branch name
- * and never by a mutable pull-request projection, so neither answer can drift
- * with the repository after the fact. See `merge-delta.mjs` for the invariant.
- *
- * DELIBERATELY NOT `--paginate`. Assembling one comparison out of several pages
- * means reasoning about which page a file landed on, and a dropped page looks
- * exactly like a short one. Instead a single page is read and the caps are
- * REPORTED (`fileCount`, `totalCommits`, `commitCount`), so `verifyMergeDelta`
- * can refuse a comparison that may be short rather than compare a partial set.
- *
- * `{ ok, item: { baseSha, mergeBaseSha, headSha, status, aheadBy, behindBy,
- * totalCommits, commitCount, fileCount, files: [...] }, error }`. `ok: false` is
- * UNKNOWN and must never be read as "the deltas match".
+ * The merge proof no longer asks the remote to diff anything. It recomputes the
+ * merge from the two authorized objects with git itself (see `merge-tree.mjs`),
+ * which is exact, topology-independent and not a rendered projection. The reader
+ * is left as a comment rather than as an unused export so that it is not
+ * reintroduced by someone looking for "the compare helper we already had".
  */
-export function compareCommits({ repoOwner, repoName }, baseSha, headSha, runner = gh) {
-  try {
-    const out = runner([
-      "api",
-      `repos/${repoOwner}/${repoName}/compare/`
-        + `${encodeURIComponent(String(baseSha))}...${encodeURIComponent(String(headSha))}`,
-      "--jq",
-      // `.commits` is oldest-first, so its LAST element is the commit compared
-      // to; it is carried only as a redundant end-of-range identity check, and
-      // `totalCommits` vs `commitCount` is what tells the caller whether that
-      // list was capped.
-      "{baseSha: .base_commit.sha, mergeBaseSha: .merge_base_commit.sha, "
-        + "headSha: ((.commits // [])[-1].sha), status: .status, aheadBy: .ahead_by, behindBy: .behind_by, "
-        + "totalCommits: .total_commits, commitCount: ((.commits // []) | length), "
-        + "fileCount: ((.files // []) | length), "
-        + "files: [(.files // [])[] | {filename: .filename, status: .status, "
-        + "previousFilename: .previous_filename, blobSha: .sha, additions: .additions, "
-        + "deletions: .deletions, patch: .patch}]}"
-    ]);
-    const parsed = parseJsonLines(out);
-    return parsed.length > 0
-      ? { ok: true, item: parsed[0], error: null }
-      : { ok: false, item: null, error: "empty_response" };
-  } catch (err) {
-    return { ok: false, item: null, error: sanitize(err.message) };
-  }
-}
 
 /** Does an exact branch exist on the remote? `{ ok, exists, error }`. */
 export function getBranch({ repoOwner, repoName }, branch, runner = gh) {
