@@ -22,11 +22,23 @@
  *                     checks, mergeState } booleans
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const DIR = process.env.JARVIS_FAKE_GH_DIR;
 const args = process.argv.slice(2);
+
+/**
+ * D-147: `api.log` - every invocation this fake was asked to serve, in order.
+ *
+ * The ordinary non-merge path is supposed to cost ZERO merge-transition reads,
+ * and an undecidable merge authorization is supposed to fail closed BEFORE any
+ * remote call. Both are claims about calls that did not happen, and a claim like
+ * that can only be checked against a record of the calls that did.
+ */
+try {
+  appendFileSync(join(DIR, "api.log"), `${args.join(" ")}\n`, "utf8");
+} catch { /* best effort: the log is evidence, never a dependency */ }
 
 function read(name, fallback) {
   const path = join(DIR, name);

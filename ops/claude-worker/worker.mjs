@@ -88,12 +88,13 @@ import {
   evaluateCompletionGate,
   mergeWorktreeCleanliness,
   describeCompletionGate,
-  isVerifiedVerdict,
+  COMPLETION_GATE,
   COMMIT_PROVENANCE
 } from "./lib/provenance.mjs";
 import {
   MERGE_TRANSITION,
-  findMergeAuthorization,
+  MERGE_AUTHORIZATION,
+  classifyMergeAuthorization,
   verifyMergeTransition,
   mergeTransitionExcusesProvenance,
   describeMergeTransition
@@ -317,56 +318,26 @@ function worktreeCleanlinessFor(cfg, task) {
 }
 
 /**
- * D-145: THE AUTHORIZED MERGE-TRANSITION HALF OF THE PROOF.
- *
- * Only ever consulted when the generic commit-authorship question has ALREADY
- * come back unproven, and only ever able to account for the one commit GitHub
- * itself generates for an authorized merge. It cannot make anything worse and it
- * cannot make an ordinary implementation task pass: `findMergeAuthorization`
- * requires this exact task's own trusted ARCHITECT_TASK to carry
- * `ARCHITECT_MERGE_APPROVED=true`, `MERGE_AUTHORIZED=true` and an exact
- * PR/base/head, and a task without that never reaches a single remote call.
+ * D-145/D-146: THE AUTHORIZED MERGE-TRANSITION HALF OF THE PROOF.
  *
  * Every fact about the REMOTE is read FRESH from the remote at gate time, and
- * nothing is taken from worker state.
+ * nothing is taken from worker state. The child's report contributes only the
+ * LOCAL half of the closeout (LOCAL_HEAD, ORIGIN_MAIN, WORKTREE_CLEAN), which the
+ * worker cannot re-observe once the child has exited and which is therefore
+ * labelled in the record as resting on a bound claim.
  *
- * D-146: the child's report is no longer only a "a success claim was made" flag.
- * The EXACT report `assessCompletion` selected - body and comment id together -
- * is bound and verified field by field against that fresh remote truth. It still
- * proves nothing about the remote; what it adds is the LOCAL half of the closeout
- * (LOCAL_HEAD, ORIGIN_MAIN, WORKTREE_CLEAN), which the worker cannot re-observe
- * once the child has exited and which is therefore labelled in the record as
- * resting on a bound claim.
- *
- * Returns `{ transition, excuse }`, both `null` when the task is not an
- * authorized merge task - the ordinary case, and the cheap one.
+ * D-147: the caller decides WHETHER this runs; this function only runs it. The
+ * three remote reads happen for a DECIDABLE authorization; an undecidable one is
+ * verified with no remote data at all, which is a named refusal and not a call.
  */
-function mergeTransitionFor(cfg, taskId, completion, provenance, comments) {
-  const authorization = findMergeAuthorization(comments ?? [], {
-    trustedAuthor: cfg.trustedAuthor,
-    taskId,
-    repoOwner: cfg.repoOwner,
-    repoName: cfg.repoName,
-    // D-146: the worker's OWN configured post-merge evidence policy. It is the
-    // second-authority source, below this task's trusted ARCHITECT_TASK and above
-    // the repository default. It is deliberately a config value and not anything
-    // derived from the PR, the branch or the child.
-    workerPolicy: cfg.postMergeEvidence ?? null
-  });
-  if (!authorization.ok) {
-    // Not an authorized merge task. Say nothing, do nothing, spend no API call:
-    // this is the overwhelmingly common path and it must stay invisible.
-    if (authorization.reason === MERGE_TRANSITION.NO_TRUSTED_TASK
-      || authorization.reason === MERGE_TRANSITION.NOT_MERGE_AUTHORIZED) {
-      return { transition: null, excuse: null };
-    }
-    // The task IS its own order and DOES claim a merge authorization, but the
-    // authorization itself is malformed. That is a real finding and is recorded.
-    const transition = verifyMergeTransition({
+function verifyTransitionFor(cfg, claim, completion) {
+  const authorization = claim.authorization;
+  if (claim.decidable !== true) {
+    // The task IS its own order and DOES claim a merge, but the order is broken.
+    // That is a real finding, recorded, and it costs no API call.
+    return verifyMergeTransition({
       authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null
     });
-    log(cfg, `MERGE_TRANSITION for ${taskId}: NOT VERIFIED (${transition.reason}: ${transition.detail ?? "no detail"})`);
-    return { transition, excuse: mergeTransitionExcusesProvenance({ transition, provenance }) };
   }
 
   const pull = getPullMergeState(cfg, authorization.prNumber);
@@ -378,10 +349,99 @@ function mergeTransitionFor(cfg, taskId, completion, provenance, comments) {
   const headCommit = getCommit(cfg, authorization.expectedHead);
   const checks = mergeSha ? getCommitCheckRuns(cfg, mergeSha) : { ok: false, runs: [], error: "no merge sha to read" };
 
-  const transition = verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+  return verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+}
+
+/**
+ * D-147: THE ONE SEMANTIC DECISION, shared by all four completion paths.
+ *
+ * ------------------------------------------------------------------------
+ * WHY THIS IS ONE FUNCTION AND NOT A CONDITION AT EACH SITE
+ * ------------------------------------------------------------------------
+ *
+ * D-145 wired the transition check in as a fallback and expressed that as an `if`
+ * at each completion site: "only ask when the commit range is NOT already proven".
+ * Two properties of that shape were wrong, and both are fixed here rather than at
+ * the sites:
+ *
+ *   1. It made generic commit provenance a SUBSTITUTE for transition proof. A
+ *      merge-authorized task whose child correctly trailered an ordinary commit -
+ *      or simply never moved HEAD - skipped every remote read and retired as
+ *      `commit_provenance_verified`, having proven only that Claude wrote its own
+ *      commits. That is not what a merge task delivers.
+ *   2. A condition duplicated at four sites is four chances to drift apart, and
+ *      "accepted after a crash, refused after a clean dispatch" is precisely the
+ *      split-brain the whole gate exists to prevent.
+ *
+ * So the decision is made ONCE, from the task's own trusted order:
+ *
+ *   NONE         no merge claimed: return immediately, no remote call, no record.
+ *                The ordinary path stays exactly as cheap as it was.
+ *   UNDECIDABLE  a claimed merge with a broken order: a named refusal, no calls.
+ *   AUTHORIZED   fresh transition verification, ALWAYS, whatever provenance says.
+ *
+ * The provenance verdict is used for ONE thing only: computing the D-145 excuse,
+ * which can still narrowly account for the single GitHub-generated merge commit.
+ * It never decides whether the verification happens.
+ */
+function completionEvidenceFor(cfg, taskId, completion, provenance, comments) {
+  const none = { mergeAuthorization: null, mergeTransition: null, transitionExcuse: null };
+  if (completion?.complete !== true || completion?.successful !== true) return none;
+
+  let claim;
+  try {
+    claim = classifyMergeAuthorization(comments ?? [], {
+      trustedAuthor: cfg.trustedAuthor,
+      taskId,
+      repoOwner: cfg.repoOwner,
+      repoName: cfg.repoName,
+      // D-146: the worker's OWN configured post-merge evidence policy. It is the
+      // second-authority source, below this task's trusted ARCHITECT_TASK and
+      // above the repository default. It is deliberately a config value and not
+      // anything derived from the PR, the branch or the child.
+      workerPolicy: cfg.postMergeEvidence ?? null
+    });
+  } catch (err) {
+    // A classification that THREW classified nothing. It cannot be read as "not a
+    // merge task" - that is the assumption this whole change exists to remove.
+    log(cfg, `Could not classify the merge authorization for ${taskId}: ${sanitize(err.message)}. `
+      + "Treating it as a CLAIMED but undecidable merge authorization.");
+    return {
+      mergeAuthorization: {
+        claim: MERGE_AUTHORIZATION.UNDECIDABLE,
+        claimed: true,
+        decidable: false,
+        reason: MERGE_TRANSITION.VERIFICATION_THREW,
+        detail: `classifying the merge authorization threw: ${sanitize(err.message)}`,
+        authorization: null
+      },
+      mergeTransition: {
+        verified: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message)
+      },
+      transitionExcuse: null
+    };
+  }
+
+  if (claim.claim === MERGE_AUTHORIZATION.NONE) {
+    // Not a merge task. Say nothing, do nothing, spend no API call: this is the
+    // overwhelmingly common path and it must stay invisible.
+    return { ...none, mergeAuthorization: claim };
+  }
+
+  let transition;
+  try {
+    transition = verifyTransitionFor(cfg, claim, completion);
+  } catch (err) {
+    // A verification that THREW verified nothing. Fail closed: the task is
+    // merge-authorized and its transition is unproven, so the gate holds it.
+    log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
+      + "Treating it as NOT verified.");
+    transition = { verified: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message) };
+  }
   const excuse = mergeTransitionExcusesProvenance({ transition, provenance });
+  log(cfg, `MERGE_AUTHORIZATION for ${taskId}: ${claim.claim} (${claim.reason})`);
   for (const line of describeMergeTransition(transition, excuse)) log(cfg, `  ${line}`);
-  return { transition, excuse };
+  return { mergeAuthorization: claim, mergeTransition: transition, transitionExcuse: excuse };
 }
 
 function completionGateFor(cfg, task, completion, comments = []) {
@@ -427,31 +487,19 @@ function completionGateFor(cfg, task, completion, comments = []) {
     + `(${provenance.reason})`);
   const worktree = worktreeCleanlinessFor(cfg, task);
 
-  // D-145: only asked when the range is NOT already proven. An authorized merge
-  // transition is an alternative answer to the authorship question, never an
-  // additional requirement on a task that already answered it.
-  let transition = null;
-  let excuse = null;
-  if (!isVerifiedVerdict(provenance?.verdict) || provenance?.verified !== true) {
-    try {
-      ({ transition, excuse } = mergeTransitionFor(cfg, taskId, completion, provenance, comments));
-    } catch (err) {
-      // A verification that THREW verified nothing. Fail closed, exactly like a
-      // derivation that threw: the task stays held on the unverified range.
-      log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
-        + "Treating it as NOT verified.");
-      transition = { verified: false, reason: "merge_transition_verification_threw", detail: sanitize(err.message) };
-      excuse = null;
-    }
-  }
+  // D-147: the SAME single decision the dispatch path makes, with no condition of
+  // its own. Whether the merge transition is verified is decided by the task's own
+  // trusted order, never by how well its commit range happened to classify.
+  const { mergeAuthorization, mergeTransition, transitionExcuse } =
+    completionEvidenceFor(cfg, taskId, completion, provenance, comments);
 
   return {
     gate: evaluateCompletionGate({
-      completion, provenance, worktree, mergeTransition: transition, transitionExcuse: excuse
+      completion, provenance, worktree, mergeTransition, transitionExcuse, mergeAuthorization
     }),
     provenance,
     worktree,
-    mergeTransition: transition
+    mergeTransition
   };
 }
 
@@ -474,10 +522,22 @@ function parkHeldCompletion(cfg, state, token, taskId, { gate, completion, extra
     try { return taskWorktreePath(cfg.worktreeRoot, taskId); } catch { return null; }
   })();
 
+  // D-147: the finding must name what ACTUALLY failed. Two of the hold reasons
+  // now fire with a perfectly verified commit range behind them, and reporting
+  // those as "provenance ... (verified=false)" would be a plain untruth in the
+  // one record a human reconciling this reads first.
+  const why = gate.reason === COMPLETION_GATE.HELD_MERGE_TRANSITION_UNVERIFIED
+    ? `this task is MERGE-AUTHORIZED and its authorized merge transition is NOT verified `
+      + `(${gate.merge_transition_reason ?? "not attempted"}); commit provenance is `
+      + `${gate.provenance_verdict ?? "unknown"} and does not answer that question`
+    : gate.reason === COMPLETION_GATE.HELD_MERGE_AUTHORIZATION_UNDECIDABLE
+      ? `this task's own trusted order CLAIMS a merge authorization that cannot be decided `
+        + `(${gate.merge_authorization_reason ?? "unknown"})`
+      : `commit provenance is ${gate.provenance_verdict ?? "unknown"} (verified=false)`;
   log(cfg, `COMPLETION GATE HELD for ${taskId}: a trusted report claims success (comment `
-    + `${gate.report_comment_id ?? "unknown"}, STATUS=${gate.report_status ?? "unknown"}), but commit `
-    + `provenance is ${gate.provenance_verdict ?? "unknown"} (verified=false). The task is parked as `
-    + "BLOCKED - NOT completed, NOT successful - and its worktree is RETAINED untouched.");
+    + `${gate.report_comment_id ?? "unknown"}, STATUS=${gate.report_status ?? "unknown"}), but ${why}. `
+    + "The task is parked as BLOCKED - NOT completed, NOT successful - and its worktree is RETAINED "
+    + "untouched.");
   for (const sha of gate.unattributed_commits ?? []) {
     log(cfg, `  UNEXPLAINED_COMMIT ${sha} (preserved, never adopted, never reverted)`);
   }
@@ -1767,30 +1827,21 @@ async function runTask(cfg, state, token, candidate, comments) {
   //
   // `postComments` is this run's FRESH control-issue read; the authorization is
   // taken from the trusted ARCHITECT_TASK in it, never from the child's report.
-  let mergeTransition = null;
-  let transitionExcuse = null;
-  if (completion.complete === true && completion.successful === true
-    && (!isVerifiedVerdict(commitProvenance.verdict) || commitProvenance.verified !== true)) {
-    try {
-      ({ transition: mergeTransition, excuse: transitionExcuse } = mergeTransitionFor(
-        cfg, taskId, completion, commitProvenance, postComments.length > 0 ? postComments : comments
-      ));
-    } catch (err) {
-      log(cfg, `Could not verify a merge transition for ${taskId}: ${sanitize(err.message)}. `
-        + "Treating it as NOT verified.");
-      mergeTransition = {
-        verified: false, reason: "merge_transition_verification_threw", detail: sanitize(err.message)
-      };
-      transitionExcuse = null;
-    }
-  }
+  //
+  // D-147: no local condition here either. `completionEvidenceFor` is the single
+  // place that decides whether this task owed a transition proof, so the dispatch
+  // path and the three reconciliation paths cannot answer it differently.
+  const { mergeAuthorization, mergeTransition, transitionExcuse } = completionEvidenceFor(
+    cfg, taskId, completion, commitProvenance, postComments.length > 0 ? postComments : comments
+  );
 
   const completionGate = evaluateCompletionGate({
     completion,
     provenance: commitProvenance,
     worktree: worktreeCleanliness,
     mergeTransition,
-    transitionExcuse
+    transitionExcuse,
+    mergeAuthorization
   });
   if (completionGate.held) {
     parkHeldCompletion(cfg, state, token, taskId, {
@@ -2190,4 +2241,17 @@ if (invokedDirectly) {
     });
 }
 
-export { main, cmdRun, runOwned, recoverAbandonedTasks };
+/**
+ * D-147: `completionGateFor` and `completionEvidenceFor` are exported for the
+ * adversarial suite.
+ *
+ * `completionGateFor` IS the entire gate logic of all three reconciliation sites
+ * - pre-selection, abandoned-task crash recovery and pre-dispatch - each of which
+ * calls it and then acts on `gate.held`. The pre-dispatch site is a BACKSTOP that
+ * the pre-selection pass pre-empts whenever both see the same comments, so it
+ * cannot be reached through the process entrypoint in a single run. Exporting the
+ * shared function lets it be exercised with that site's exact argument shape,
+ * against a real worktree and a real durable claim, instead of being asserted by
+ * inspection or quietly left uncovered.
+ */
+export { main, cmdRun, runOwned, recoverAbandonedTasks, completionGateFor, completionEvidenceFor };

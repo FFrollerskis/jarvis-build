@@ -97,6 +97,18 @@
  * And the worktree-cleanliness half of the gate (D-139 B) is untouched: a merge
  * task that left uncommitted state behind is still refused.
  *
+ * ------------------------------------------------------------------------
+ * D-147: THE EXCUSE IS NOT THE ONLY REASON TO RUN THIS
+ * ------------------------------------------------------------------------
+ *
+ * Everything above describes what a verified transition may EXCUSE. D-146 shipped
+ * with that as the only reason the verification ever ran, which left the opposite
+ * direction open: a merge-authorized task whose commit range happened to verify
+ * generically never reached any of it. `classifyMergeAuthorization` below decides
+ * "is this a merge task?" from the trusted order ALONE, before provenance is
+ * consulted at all, precisely so that question can no longer be skipped. See its
+ * own comment for the bypass and the counterexample.
+ *
  * Everything in this module is PURE except the three thin remote reads its
  * caller performs. Every branch fails CLOSED with its own named reason, and no
  * branch can reach the filesystem, the repository, or a destructive action.
@@ -141,8 +153,22 @@ export const MERGE_TRANSITION = Object.freeze({
   NO_TRUSTED_TASK: "no_trusted_architect_task_comment_binds_this_task",
   /** The trusted task exists but does not authorize a merge. */
   NOT_MERGE_AUTHORIZED: "the_trusted_architect_task_does_not_authorize_a_merge",
+  /**
+   * D-147: the trusted task declares exactly ONE half of a merge authorization.
+   *
+   * `ARCHITECT_MERGE_APPROVED` and `MERGE_AUTHORIZED` are two separate statements
+   * and D-120 requires both, so one alone has never been an authorization. What
+   * changes here is what one alone MEANS: it used to be indistinguishable from
+   * "this is an ordinary implementation task", which routed it down the cheap
+   * non-merge path where a verified commit range retired it with no transition
+   * proof at all. A half-declared merge is a CLAIMED merge with a broken order,
+   * and a broken order is refused rather than silently downgraded to no order.
+   */
+  MERGE_AUTHORIZATION_PARTIAL: "the_trusted_architect_task_declares_only_one_half_of_a_merge_authorization",
   /** Merge-authorized, but without an exact PR number / base / head to check. */
   AUTHORIZATION_INCOMPLETE: "the_trusted_architect_task_does_not_declare_an_exact_pr_number_base_and_head",
+  /** D-147: verifying the transition threw. A verification that threw verified nothing. */
+  VERIFICATION_THREW: "merge_transition_verification_threw",
   /** The task explicitly declares a merge method other than a normal merge. */
   MERGE_METHOD_NOT_MERGE: "the_trusted_architect_task_declares_a_merge_method_that_is_not_a_normal_two_parent_merge",
   /** The task names a repository other than the one this worker serves. */
@@ -259,7 +285,11 @@ export function readMergeAuthorization(comment, {
   repoName = null,
   workerPolicy = null
 }) {
-  const refuse = (reason, detail = null) => ({ ok: false, reason, detail });
+  // D-147: `mergeClaimed` travels on EVERY refusal. It is what lets a caller tell
+  // "this task never asked for a merge" apart from "this task asked for a merge
+  // and its order is broken" without re-parsing the body - and those two must
+  // never again collapse into the same cheap non-merge path.
+  const refuse = (reason, detail = null, extra = {}) => ({ ok: false, reason, detail, mergeClaimed: false, ...extra });
 
   const trusted = validateTrustedTask(comment, { trustedAuthor });
   if (!trusted.ok) return refuse(MERGE_TRANSITION.NO_TRUSTED_TASK, trusted.reason);
@@ -276,14 +306,29 @@ export function readMergeAuthorization(comment, {
   const approved = declaredTrue(body, "ARCHITECT_MERGE_APPROVED");
   const authorized = declaredTrue(body, "MERGE_AUTHORIZED");
   if (!approved || !authorized) {
-    return refuse(MERGE_TRANSITION.NOT_MERGE_AUTHORIZED,
-      `ARCHITECT_MERGE_APPROVED=${approved}, MERGE_AUTHORIZED=${authorized}`);
+    // NEITHER flag: an ordinary implementation order. It claims no merge, so it
+    // is not a merge task and nothing further is required of it.
+    if (!approved && !authorized) {
+      return refuse(MERGE_TRANSITION.NOT_MERGE_AUTHORIZED,
+        `ARCHITECT_MERGE_APPROVED=${approved}, MERGE_AUTHORIZED=${authorized}`);
+    }
+    // EXACTLY ONE flag: a merge IS claimed, and the order that claims it is
+    // incomplete. Fail closed, and say so as a merge finding.
+    return refuse(MERGE_TRANSITION.MERGE_AUTHORIZATION_PARTIAL,
+      `ARCHITECT_MERGE_APPROVED=${approved}, MERGE_AUTHORIZED=${authorized}; D-120 requires both, and a half-declared `
+      + "merge authorization is a broken order rather than an ordinary non-merge task",
+      { mergeClaimed: true });
   }
+
+  // Past this point a merge is unambiguously CLAIMED: both flags are literally
+  // `true`. Every refusal below is therefore a BROKEN AUTHORIZATION, never a
+  // "this was not a merge task after all".
+  const refuseClaimed = (reason, detail = null) => refuse(reason, detail, { mergeClaimed: true });
 
   // The repository, when the task names one, must be the one this worker serves.
   const repo = extractField(body, "REPO");
   if (repo && repoOwner && repoName && repo.trim().toLowerCase() !== `${repoOwner}/${repoName}`.toLowerCase()) {
-    return refuse(MERGE_TRANSITION.REPO_MISMATCH, `the task names REPO=${repo.trim()}`);
+    return refuseClaimed(MERGE_TRANSITION.REPO_MISMATCH, `the task names REPO=${repo.trim()}`);
   }
 
   // An EXPLICIT method field, when present, must say `merge`. When absent, the
@@ -291,7 +336,7 @@ export function readMergeAuthorization(comment, {
   // is strictly stronger than any field, because a field is only a claim.
   const method = extractField(body, "MERGE_METHOD");
   if (method !== null && method.trim().toLowerCase() !== "merge") {
-    return refuse(MERGE_TRANSITION.MERGE_METHOD_NOT_MERGE, `MERGE_METHOD=${method.trim()}`);
+    return refuseClaimed(MERGE_TRANSITION.MERGE_METHOD_NOT_MERGE, `MERGE_METHOD=${method.trim()}`);
   }
 
   const prRaw = extractField(body, "PR_NUMBER");
@@ -299,14 +344,14 @@ export function readMergeAuthorization(comment, {
   const expectedBase = fullSha(extractField(body, "EXPECTED_BASE_SHA"));
   const expectedHead = fullSha(extractField(body, "EXPECTED_HEAD_SHA"));
   if (prNumber === null || prNumber <= 0 || !expectedBase || !expectedHead) {
-    return refuse(MERGE_TRANSITION.AUTHORIZATION_INCOMPLETE,
+    return refuseClaimed(MERGE_TRANSITION.AUTHORIZATION_INCOMPLETE,
       `PR_NUMBER=${JSON.stringify(prRaw ?? null)}, EXPECTED_BASE_SHA=${JSON.stringify(expectedBase)}, `
       + `EXPECTED_HEAD_SHA=${JSON.stringify(expectedHead)}`);
   }
   // A merge of a commit onto itself is not a state transition; refusing it here
   // keeps every later comparison unambiguous.
   if (expectedBase === expectedHead) {
-    return refuse(MERGE_TRANSITION.AUTHORIZATION_INCOMPLETE,
+    return refuseClaimed(MERGE_TRANSITION.AUTHORIZATION_INCOMPLETE,
       "EXPECTED_BASE_SHA and EXPECTED_HEAD_SHA are the same commit");
   }
 
@@ -315,12 +360,13 @@ export function readMergeAuthorization(comment, {
   // policy to decide" is a decision, and the decision is no.
   const policy = resolvePostMergeEvidencePolicy({ declared: body, workerPolicy });
   if (!policy.ok) {
-    return refuse(policy.reason, policy.detail);
+    return refuseClaimed(policy.reason, policy.detail);
   }
 
   return {
     ok: true,
     reason: null,
+    mergeClaimed: true,
     taskId: trusted.taskId,
     commentId: comment.id ?? null,
     prNumber,
@@ -357,6 +403,112 @@ export function findMergeAuthorization(comments, {
     if (read.reason !== MERGE_TRANSITION.NO_TRUSTED_TASK) lastRefusal = read;
   }
   return lastRefusal;
+}
+
+/**
+ * D-147: WHAT KIND OF TASK IS THIS, decided WITHOUT looking at commit provenance.
+ *
+ * ------------------------------------------------------------------------
+ * THE INTEGRATION BYPASS THIS CLOSES
+ * ------------------------------------------------------------------------
+ *
+ * D-145 and D-146 built a complete proof of an authorized merge and then wired it
+ * in as a FALLBACK: the worker asked for it only when the generic commit-range
+ * question had already come back unproven. The reasoning was that the transition
+ * is "an alternative answer to the authorship question, never an additional
+ * requirement on a task that already answered it".
+ *
+ * That reasoning is wrong for merge tasks, and the counterexample is trivial to
+ * construct. Take the SAME trusted merge order, and a child that correctly
+ * trailers one ordinary commit - or simply never moves HEAD at all. The range is
+ * now `task_attributed` or `unchanged`: PROVEN. The worker's fallback condition is
+ * false, so `verifyMergeTransition` is never called, no PR is read, no required
+ * check is inspected, no closeout report is bound, and the task retires
+ * successfully as `commit_provenance_verified` - having proven only that Claude
+ * wrote its own commits, which was never what the task was FOR.
+ *
+ * Commit provenance answers "did this task write these commits?". A merge task's
+ * deliverable is a STATE TRANSITION ON THE REMOTE. Proving the first has never
+ * been, and can never be, evidence for the second, so it must never be allowed to
+ * substitute for it. Whether a task is merge-authorized is a property of its own
+ * trusted order and of nothing else - so it is decided here, from that order
+ * alone, before any provenance verdict is consulted.
+ *
+ * ------------------------------------------------------------------------
+ * THREE ANSWERS, AND WHY THE MIDDLE ONE EXISTS
+ * ------------------------------------------------------------------------
+ *
+ *   NONE         this task's own trusted order claims no merge. The ordinary,
+ *                overwhelmingly common case. Nothing extra is required of it and
+ *                NOT ONE remote call is made for it - the cheap path is unchanged.
+ *   AUTHORIZED   the order authorizes a merge AND is fully decidable: both flags,
+ *                an exact PR/base/head, a known merge method, this repository, and
+ *                a post-merge evidence policy that resolves. Fresh transition
+ *                verification is MANDATORY for it, whatever provenance says.
+ *   UNDECIDABLE  a merge is CLAIMED and the claim cannot be decided - half the
+ *                flags, a missing base/head, an unknown method, another repo, an
+ *                empty required-check set. Before D-147 several of these were
+ *                indistinguishable from NONE and fell into the cheap path; they
+ *                are now a named fail-closed outcome in their own right.
+ *
+ * Pure: it reads comments already fetched for this run and touches nothing else.
+ */
+export const MERGE_AUTHORIZATION = Object.freeze({
+  /** This task's own trusted order claims no merge at all. */
+  NONE: "no_trusted_architect_task_for_this_task_claims_a_merge_authorization",
+  /** A merge is authorized and the authorization is fully decidable. */
+  AUTHORIZED: "the_trusted_architect_task_authorizes_a_merge",
+  /** A merge is claimed but the claim cannot be decided. Fail closed. */
+  UNDECIDABLE: "the_trusted_architect_task_claims_a_merge_authorization_that_cannot_be_decided"
+});
+
+export function classifyMergeAuthorization(comments, {
+  trustedAuthor,
+  taskId,
+  repoOwner = null,
+  repoName = null,
+  workerPolicy = null
+}) {
+  const opts = { trustedAuthor, taskId, repoOwner, repoName, workerPolicy };
+  const list = Array.isArray(comments) ? comments : [];
+
+  // A well-formed authorization anywhere in this task's own trusted orders wins,
+  // and `findMergeAuthorization` picks it under exactly the rules D-145 set.
+  const found = findMergeAuthorization(list, opts);
+  if (found.ok) {
+    return {
+      claim: MERGE_AUTHORIZATION.AUTHORIZED,
+      claimed: true,
+      decidable: true,
+      reason: MERGE_AUTHORIZATION.AUTHORIZED,
+      detail: `PR #${found.prNumber}, ${found.expectedBase} -> ${found.expectedHead}`,
+      authorization: found
+    };
+  }
+
+  // No usable authorization. The question left is whether one was CLAIMED: a
+  // broken merge order must not be able to pass itself off as an ordinary task.
+  for (const comment of list) {
+    const read = readMergeAuthorization(comment, opts);
+    if (read.ok || read.mergeClaimed !== true) continue;
+    return {
+      claim: MERGE_AUTHORIZATION.UNDECIDABLE,
+      claimed: true,
+      decidable: false,
+      reason: read.reason,
+      detail: read.detail ?? null,
+      authorization: read
+    };
+  }
+
+  return {
+    claim: MERGE_AUTHORIZATION.NONE,
+    claimed: false,
+    decidable: true,
+    reason: MERGE_AUTHORIZATION.NONE,
+    detail: found.detail ?? null,
+    authorization: found
+  };
 }
 
 /**

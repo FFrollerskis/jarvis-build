@@ -395,12 +395,22 @@ describe("D-145: only a trusted ARCHITECT_TASK for THIS task can authorize a mer
     // This is the ORDINARY implementation task - D-145's own order, in fact.
     const a = read(taskComment({ fields: { ARCHITECT_MERGE_APPROVED: "false", MERGE_AUTHORIZED: "false" } }));
     expect(a.reason).toBe(MERGE_TRANSITION.NOT_MERGE_AUTHORIZED);
+    // D-147: NEITHER flag means no merge is CLAIMED, which is what routes this
+    // task down the cheap non-merge path. The distinction is load-bearing.
+    expect(a.mergeClaimed).toBe(false);
   });
 
   for (const [approved, authorized] of [["true", "false"], ["false", "true"], ["true", null], [null, "true"]]) {
     it(`refuses ARCHITECT_MERGE_APPROVED=${approved} with MERGE_AUTHORIZED=${authorized}: both are required`, () => {
       const a = read(taskComment({ fields: { ARCHITECT_MERGE_APPROVED: approved, MERGE_AUTHORIZED: authorized } }));
-      expect(a.reason).toBe(MERGE_TRANSITION.NOT_MERGE_AUTHORIZED);
+      // D-147: half a merge authorization is a BROKEN ORDER, not an ordinary
+      // task. Under D-145/D-146 this returned the same finding as "no merge
+      // claimed at all", so a half-declared merge with a verified commit range
+      // retired without any transition proof. It is now its own refusal, and it
+      // positively claims a merge so the gate must hold it.
+      expect(a.ok).toBe(false);
+      expect(a.reason).toBe(MERGE_TRANSITION.MERGE_AUTHORIZATION_PARTIAL);
+      expect(a.mergeClaimed).toBe(true);
     });
   }
 
