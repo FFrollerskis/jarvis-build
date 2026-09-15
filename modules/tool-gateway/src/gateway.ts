@@ -150,6 +150,46 @@ export interface ToolDefinition {
    */
   preflight_requires_target?: boolean;
   /**
+   * Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82, EXACT_HEAD_SHA
+   * 821545f): `preflight_requires_target` beviser KUN at preflight-svaret som
+   * HELHET er ikke-null - for et verktøy med et EGET mål-ID-parameter inni en
+   * ellers gyldig, ikke-null tilstand (`drive.update_permission`/
+   * `delete_permission` sin `permission_id` inni en gyldig, men tom eller
+   * ikke-treffende `{permissions: [...]}`-liste), er det IKKE tilstrekkelig -
+   * en fil som EKSISTERER men der DEN SPESIFIKKE tillatelsen ikke gjør det,
+   * passerte tidligere sjekken og lot en klasse D-mutasjon gå mot et
+   * mål-ID som aldri fantes. Denne PREDIKAT-funksjonen kjøres FØR mutasjonen
+   * (samme "ingenting å rulle tilbake"-egenskap) og skal returnere `true` KUN
+   * når preflight-dataen faktisk viser at DET PÅSTÅTTE mål-ID-et eksisterer -
+   * ALDRI bare at RESSURSEN overordnet gjør det. Samme opt-in-disiplin som
+   * `preflight_requires_target`: revider FØR bruk, se
+   * `q34-preflight-target-existence.test.ts`.
+   */
+  preflight_target_check?: (data: JsonValue, parameters: Record<string, JsonValue>) => boolean;
+  /**
+   * Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): en klasse
+   * D-mutasjon hvis readback (etter-tilstand) er ULESELIG (kaster), MANGLER
+   * (`data: null`) eller ikke MATCHER det som faktisk ble bedt om, skal ALDRI
+   * rapporteres `ok: true` for et verktøy som EKSPLISITT lover
+   * resultatverifisering - `ToolGateway.execute()` konverterte tidligere en
+   * kastet readback stille til `after_state: null` og returnerte `ok: true`
+   * uansett (se `home-assistant-critical-action.test.ts` sine daværende D/E-
+   * tester, som nettopp KODIFISERTE dette som akseptert oppførsel). Denne
+   * PREDIKAT-funksjonen tar den FAKTISKE etter-tilstanden (aldri `null` når
+   * den kalles - `null`/uleselig kortslutter til avslag FØR predikatet nås)
+   * og de opprinnelige mutasjonsparametrene, og skal returnere `true` KUN når
+   * etter-tilstanden faktisk viser den TILTENKTE nye tilstanden (f.eks.
+   * `home-assistant.lock_set` sin `after.locked === parameters.locked`).
+   * `tool_executions`-raden og audit-bevismaterialet (before/after/recovery)
+   * skrives UENDRET selv når verifiseringen feiler - mutasjonskallet LYKTES
+   * strukturelt, og recovery-tooling må fortsatt se before_state - men den
+   * RETURNERTE `ToolResult`en blir `ok: false` slik at kalleren ALDRI får
+   * inntrykk av en bekreftet handling gatewayen ikke faktisk kunne bevise.
+   * Opt-in (samme disiplin som over): uendret oppførsel for alt uten dette
+   * feltet satt.
+   */
+  postcondition_predicate?: (afterState: JsonValue, parameters: Record<string, JsonValue>) => boolean;
+  /**
    * D-105 host-fix (D-41-korreksjon): valgfri PARAMETER-nivå-autorisasjon,
    * kjørt av `ToolGateway.execute()` SELV for HVERT kall gjennom denne
    * SAMME, generiske gatewayen - uansett innslagsvei (dedikert REST-rute
@@ -279,6 +319,16 @@ export class ToolGateway {
         if (definition.capability_class === "D" && definition.preflight_requires_target && beforeState === null) {
           return this.deny(request, "preflight_target_not_found");
         }
+        // Q-34 P1-oppfølging: den FINERE sjekken - ressursen finnes (over),
+        // men det PÅSTÅTTE mål-ID-et inni den må også faktisk finnes.
+        if (
+          definition.capability_class === "D" &&
+          beforeState !== null &&
+          definition.preflight_target_check &&
+          !definition.preflight_target_check(beforeState, request.parameters)
+        ) {
+          return this.deny(request, "preflight_target_not_found");
+        }
       } catch (err) {
         if (definition.capability_class === "D") {
           return this.deny(request, `preflight_failed:${(err as Error).message.slice(0, 60)}`);
@@ -337,14 +387,25 @@ export class ToolGateway {
         return { ok: false, reason: `tool_failed:${(err as Error).message.slice(0, 80)}` } as const;
       }
       let afterState: JsonValue | null = null;
+      let readbackFailed = false;
       if (needsEvidence) {
         try {
           const post = await definition.transport.invoke(definition.preflight_action!, request.parameters, credential, invocationContext);
           afterState = post.data ?? null;
         } catch {
           afterState = null; // readback-feil skjuler aldri at handlingen skjedde - audit under
+          readbackFailed = true;
         }
       }
+      // Q-34 P1-oppfølging: for et verktøy som EKSPLISITT lover
+      // resultatverifisering (`postcondition_predicate`), avgjør om
+      // etter-tilstanden faktisk BEKREFTER den tiltenkte nye tilstanden.
+      // Uendret `true` (verifisert) for ALT uten dette feltet satt - samme
+      // opt-in-disiplin som resten av Q-34-lukkingen.
+      const postconditionVerified =
+        definition.capability_class !== "D" || !definition.postcondition_predicate
+          ? true
+          : !readbackFailed && afterState !== null && definition.postcondition_predicate(afterState, request.parameters);
       if (dedupeApplies && request.idempotency_key) {
         await client.query(
           `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state)
@@ -354,7 +415,12 @@ export class ToolGateway {
         );
       }
       await writeAudit(client, request.identity, {
-        type: "tool.executed", decision: "ALLOW",
+        // Q-34 P1-oppfølging: en EGEN audit-type når verifiseringen feiler -
+        // ALDRI "tool.executed" (som en fremtidig leser rimelig ville tolket
+        // som "bekreftet vellykket"). before_state/after_state/recovery er
+        // UENDRET tilstede i payloaden begge veier - mutasjonskallet lyktes
+        // strukturelt, og recovery-tooling må fortsatt se before_state.
+        type: postconditionVerified ? "tool.executed" : "tool.postcondition_unverified", decision: "ALLOW",
         tool_id: request.tool_id, action: request.action,
         capability_class: definition.capability_class,
         payload: {
@@ -365,6 +431,20 @@ export class ToolGateway {
           ...(needsEvidence ? { before_state: beforeState, after_state: afterState, recovery: { snapshot: beforeState, procedure: definition.rollback_procedure } } : {})
         }
       });
+      if (!postconditionVerified) {
+        // Uleselig/manglende/feil etter-tilstand er en driftsavvikelse, ikke
+        // en autentiserings-/rate-feil - men FORTSATT ikke "healthy": en
+        // fremtidig kaller skal se degraderingen, ikke en falsk grønn status.
+        this.setHealth(request.tool_id, "degraded", "postcondition_unverified");
+        return {
+          ok: false,
+          reason: readbackFailed
+            ? "postcondition_unverified:readback_failed"
+            : afterState === null
+              ? "postcondition_unverified:target_missing"
+              : "postcondition_mismatch"
+        } as const;
+      }
       this.setHealth(request.tool_id, "healthy");
       return {
         ok: true,

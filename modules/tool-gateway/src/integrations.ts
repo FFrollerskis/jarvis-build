@@ -38,6 +38,22 @@ const empty = z.object({}).strict() as unknown as z.ZodType<Record<string, JsonV
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
 /**
+ * Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): `read_permissions`
+ * som preflight beviser KUN at FILEN har en (evt. tom) tilgangsliste - for
+ * `update_permission`/`delete_permission`, som begge har et EGET
+ * `permission_id` som identifiserer AKKURAT HVILKEN tilgang som skal endres,
+ * er det IKKE tilstrekkelig: en fil med ANDRE tilganger, men uten NØYAKTIG
+ * den påståtte `permission_id`-en, passerte tidligere den grovere sjekken og
+ * lot en klasse D-mutasjon gå mot en tilgang som aldri fantes. `create_permission`
+ * har IKKE et `permission_id`-parameter (den OPPRETTER en) og bruker derfor
+ * bevisst IKKE denne - den grovere fil-eksistens-sjekken er riktig for den.
+ */
+function drivePermissionIdExists(data: JsonValue, parameters: Record<string, JsonValue>): boolean {
+  const permissions = (data as { permissions?: Array<{ id?: unknown }> } | null)?.permissions ?? [];
+  return permissions.some((p) => p?.id === parameters["permission_id"]);
+}
+
+/**
  * Standard førstebølge-register. transportOverride lar tester injisere fakes.
  * D-105 host-fix: `config.dockerMutationTargets` er de EIER-KONFIGURERTE,
  * eksakte produksjons-containernavnene Tobias har autorisert for docker-
@@ -260,7 +276,8 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "sett rollen tilbake til forrige verdi", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
     },
     {
       tool_id: "drive", action: "delete_permission", description: "Fjern en eksisterende Drive-deling (krever signert godkjenning for delegerte identiteter)",
@@ -268,7 +285,8 @@ export function firstWaveTools(
       capability_class: "D", scopes: ["drive.permissions.write"], reversible: true,
       rollback_procedure: "gjenopprett tilgangen manuelt (ikke automatisk reverserbar)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 15, credential_ref: "JARVIS_GOOGLE_TOKEN",
-      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions", preflight_requires_target: true
+      output_trust: "internal", transport: transport("drive"), preflight_action: "read_permissions",
+      preflight_requires_target: true, preflight_target_check: drivePermissionIdExists
     },
     // UA-2 P1B-A §2: e-post-vedlegg-ingestion - full meldingslisting (body-tekst
     // + vedleggs-MIME-metadata) og separat vedleggsnedlasting. Lagt til på
@@ -1528,7 +1546,9 @@ export function firstWaveTools(
       // bevist. `preflight_action: "inspect_container"` gjenbruker DEN
       // EKSISTERENDE ToolGateway-D-pipelinen (before/after via tool_executions)
       // UENDRET - se executeInfraMutation() i modules/incidents.
-      // Q-34-revisjon: `preflight_requires_target` er BEVISST IKKE satt her.
+      // Q-34-revisjon: `preflight_requires_target` er BEVISST satt til `false`
+      // her (EKSPLISITT, ikke utelatt - uavhengig arkitektkontroll av PR #82
+      // påpekte at en utelatt boolean ikke beviser et FAKTISK revidert valg).
       // `inspect_container` svarer `data: null` for "container finnes ikke
       // ennå" (docker-transport.ts) som en LEGITIM førstegangs-deploy-tilstand
       // - strukturelt umulig å ha noen forutgående tilstand for den. Motsatt
@@ -1539,7 +1559,8 @@ export function firstWaveTools(
       rollback_procedure: "docker.redeploy_container på nytt med image-verdien fra preflight-inspeksjonen (before_state)",
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_DOCKER_BIN", output_trust: "internal", transport: transport("docker"),
-      preflight_action: "inspect_container", parameterAuthorizer: dockerTargetAuthorizer("redeploy_container")
+      preflight_action: "inspect_container", preflight_requires_target: false,
+      parameterAuthorizer: dockerTargetAuthorizer("redeploy_container")
     },
     {
       // D-105 host-fix (D-41-korreksjon): PRODUKSJONS-autorisert muterende

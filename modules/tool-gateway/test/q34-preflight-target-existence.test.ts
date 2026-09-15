@@ -38,23 +38,39 @@ import { ToolGateway, firstWaveTools, homeAssistantTools, type ToolDefinition, t
 
 /**
  * Skjemaet et EKSISTERENDE klasse D + `preflight_action`-verktøy har gjort et
- * eksplisitt, revidert valg for. `true` = et null/undefined preflight-resultat
- * betyr STRUKTURELT "mål finnes ikke" for AKKURAT denne handlingen (bevist i
- * en kode-kommentar ved definisjonen). `false` = et null/undefined resultat
- * ER en gyldig, forventet tilstand for AKKURAT denne handlingen (i dag kun
- * `docker.redeploy_container`, D-105 - førstegangs-deploy).
+ * eksplisitt, revidert valg for. `requires_target: true` = et null/undefined
+ * preflight-resultat betyr STRUKTURELT "mål finnes ikke" for AKKURAT denne
+ * handlingen (bevist i en kode-kommentar ved definisjonen). `false` = et
+ * null/undefined resultat ER en gyldig, forventet tilstand for AKKURAT denne
+ * handlingen (i dag kun `docker.redeploy_container`, D-105 - førstegangs-
+ * deploy) - MEN må fortsatt være en EKSPLISITT `false`-verdi i selve
+ * definisjonen, aldri en utelatt (implisitt `undefined`) egenskap: en
+ * utelatt boolean beviser ALDRI at noen faktisk tok stilling, kun at
+ * `Boolean(undefined)` tilfeldigvis regner som usann (uavhengig
+ * arkitektkontroll av PR #82, EXACT_HEAD_SHA 821545f).
+ *
+ * `requires_specific_target_check: true` = ressursen som helhet kan finnes
+ * (`requires_target` alene holder), men handlingen har et EGET mål-ID-
+ * parameter (f.eks. `permission_id`) som en generell "er ressursen
+ * ikke-null"-sjekk ikke beviser noe om - disse MÅ ha en
+ * `preflight_target_check`-funksjon også (se testen under).
  *
  * Legger noen til en NY klasse D-handling med `preflight_action` uten å
  * legge den til her: testen B under FEILER, og tvinger et eksplisitt valg -
  * det er hele poenget, ikke en glipp å fikse ved å bare utvide listen blindt.
  */
-const AUDITED_CLASS_D_PREFLIGHT_DECISIONS: ReadonlyArray<{ tool_id: string; action: string; requires_target: boolean }> = [
+const AUDITED_CLASS_D_PREFLIGHT_DECISIONS: ReadonlyArray<{
+  tool_id: string;
+  action: string;
+  requires_target: boolean;
+  requires_specific_target_check?: boolean;
+}> = [
   { tool_id: "home-assistant", action: "lock_set", requires_target: true },
   { tool_id: "home-assistant", action: "alarm_set", requires_target: true },
   { tool_id: "drive", action: "delete_permanent", requires_target: true },
   { tool_id: "drive", action: "create_permission", requires_target: true },
-  { tool_id: "drive", action: "update_permission", requires_target: true },
-  { tool_id: "drive", action: "delete_permission", requires_target: true },
+  { tool_id: "drive", action: "update_permission", requires_target: true, requires_specific_target_check: true },
+  { tool_id: "drive", action: "delete_permission", requires_target: true, requires_specific_target_check: true },
   { tool_id: "github", action: "merge_pr", requires_target: true },
   { tool_id: "github", action: "delete_branch", requires_target: true },
   { tool_id: "docker", action: "redeploy_container", requires_target: false },
@@ -80,11 +96,22 @@ describe("B: audit-as-code - ALLE eksisterende klasse D + preflight_action-verkt
     expect(stale).toEqual([]);
   });
 
-  it("hvert revidert verktøys FAKTISKE `preflight_requires_target`-felt matcher det dokumenterte valget", () => {
+  it("hvert revidert verktøy har en EGEN, EKSPLISITT `preflight_requires_target`-boolean (aldri en utelatt/implisitt en) som matcher det dokumenterte valget", () => {
     for (const audit of AUDITED_CLASS_D_PREFLIGHT_DECISIONS) {
       const def = classDWithPreflight.find((d) => d.tool_id === audit.tool_id && d.action === audit.action);
       expect(def, `${audit.tool_id}:${audit.action} finnes ikke som klasse D + preflight_action`).toBeDefined();
-      expect(Boolean(def?.preflight_requires_target), `${audit.tool_id}:${audit.action}`).toBe(audit.requires_target);
+      expect(
+        Object.prototype.hasOwnProperty.call(def, "preflight_requires_target"),
+        `${audit.tool_id}:${audit.action} MÅ ha en egen, eksplisitt preflight_requires_target - en utelatt egenskap beviser ikke et tatt valg`
+      ).toBe(true);
+      expect(def?.preflight_requires_target, `${audit.tool_id}:${audit.action}`).toBe(audit.requires_target);
+    }
+  });
+
+  it("verktøy med et EGET mål-ID-parameter (permission_id o.l.) har en `preflight_target_check`-funksjon, ikke bare den grovere ressurs-eksistens-sjekken", () => {
+    for (const audit of AUDITED_CLASS_D_PREFLIGHT_DECISIONS.filter((a) => a.requires_specific_target_check)) {
+      const def = classDWithPreflight.find((d) => d.tool_id === audit.tool_id && d.action === audit.action);
+      expect(typeof def?.preflight_target_check, `${audit.tool_id}:${audit.action} mangler preflight_target_check`).toBe("function");
     }
   });
 });
@@ -99,6 +126,32 @@ class ScriptedTransport implements ToolTransport {
     if (action === "preflight") {
       if (this.preflightData === "absent") return {};
       return { data: this.preflightData };
+    }
+    return { external_id: "ext-1" };
+  }
+}
+
+/**
+ * Q-34 P1-oppfølging: en transport som svarer ULIKT på preflight (FØRSTE kall
+ * til `preflight_action`) og readback (ANDRE kall til SAMME handling) - noe
+ * `ScriptedTransport` over ikke kan, siden den svarer likt begge ganger.
+ * Nødvendig for å teste `postcondition_predicate`, som avhenger av at
+ * etter-tilstanden kan avvike fra før-tilstanden.
+ */
+class LifecycleScriptedTransport implements ToolTransport {
+  calls: string[] = [];
+  private preflightCalls = 0;
+  constructor(
+    private readonly beforeData: JsonValue,
+    private readonly after: { throws?: boolean; data?: JsonValue | null } = {}
+  ) {}
+  async invoke(action: string): Promise<{ external_id?: string; data?: JsonValue }> {
+    this.calls.push(action);
+    if (action === "preflight") {
+      this.preflightCalls += 1;
+      if (this.preflightCalls === 1) return { data: this.beforeData };
+      if (this.after.throws) throw new Error("readback_unreachable");
+      return this.after.data === undefined ? {} : { data: this.after.data };
     }
     return { external_id: "ext-1" };
   }
@@ -218,6 +271,93 @@ describe("A: den generiske mekanismen i gateway.ts", () => {
   });
 });
 
+describe("A2: preflight_target_check - Q-34 P1-oppfølging (finere sjekk mot det PÅSTÅTTE mål-ID-et, ikke bare ressursen som helhet)", () => {
+  it("ressursen finnes (data ikke-null), men preflight_target_check(data, parameters) er false -> DENY preflight_target_not_found, mutasjon ALDRI kalt", async () => {
+    const transport = new ScriptedTransport({ items: [{ id: "annen-id" }] });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({
+      preflight_requires_target: true,
+      preflight_target_check: (data, parameters) =>
+        ((data as { items?: Array<{ id?: unknown }> }).items ?? []).some((i) => i.id === parameters["wanted_id"])
+    }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: { wanted_id: "ikke-i-listen" } });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    expect(transport.calls).toEqual(["preflight"]);
+  });
+
+  it("preflight_target_check(data, parameters) er true -> mutasjonen fortsetter", async () => {
+    const transport = new ScriptedTransport({ items: [{ id: "riktig-id" }] });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({
+      preflight_requires_target: true,
+      preflight_target_check: (data, parameters) =>
+        ((data as { items?: Array<{ id?: unknown }> }).items ?? []).some((i) => i.id === parameters["wanted_id"])
+    }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: { wanted_id: "riktig-id" } });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe("A3: postcondition_predicate - Q-34 P1-oppfølging (uleselig/manglende/FEIL etter-tilstand rapporteres ALDRI ok:true)", () => {
+  it("readback lykkes og predikatet stemmer -> ok:true (positiv kontroll)", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { data: { v: 2 } });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({ postcondition_predicate: (after) => (after as { v: number }).v === 2 }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("readback KASTER (uleselig) -> ok:false postcondition_unverified:readback_failed", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { throws: true });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({ postcondition_predicate: (after) => (after as { v: number }).v === 2 }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+  });
+
+  it("readback lykkes med data:null (mål forsvunnet) -> ok:false postcondition_unverified:target_missing", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { data: null });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({ postcondition_predicate: (after) => (after as { v: number }).v === 2 }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_unverified:target_missing");
+  });
+
+  it("readback lykkes med en DEFINERT, men FEIL verdi (mismatch) -> ok:false postcondition_mismatch", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { data: { v: 999 } });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({ postcondition_predicate: (after) => (after as { v: number }).v === 2 }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_mismatch");
+  });
+
+  it("postcondition_predicate IKKE satt (default) + readback kaster -> UENDRET (gammel oppførsel bevart: ok:true, after_state null)", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { throws: true });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({}, transport)); // feltet utelatt med vilje
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(true);
+  });
+});
+
 describe("C: konkret atferd per domene gjennom den EKTE ToolGateway.execute()-pipelinen", () => {
   class FakeDockerTransport implements ToolTransport {
     calls: string[] = [];
@@ -296,5 +436,66 @@ describe("C: konkret atferd per domene gjennom den EKTE ToolGateway.execute()-pi
     expect(result.ok).toBe(false);
     expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
     expect(transport.calls).toEqual(["get_pull_request"]);
+  });
+
+  /**
+   * Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82): den akkurat
+   * denne reviewen fant - `read_permissions` kan lykkes med en DEFINERT,
+   * ikke-null `{permissions: [...]}` for en fil som FAKTISK finnes, mens den
+   * PÅSTÅTTE `permission_id`-en likevel ikke er blant dem. Den grovere
+   * `preflight_requires_target`-sjekken alene ville sluppet dette gjennom.
+   */
+  class FakeDrivePermissionsTransport implements ToolTransport {
+    calls: string[] = [];
+    constructor(private readonly existingPermissionIds: string[]) {}
+    async invoke(action: string): Promise<{ external_id?: string; data?: JsonValue }> {
+      this.calls.push(action);
+      if (action === "read_permissions") {
+        return { data: { permissions: this.existingPermissionIds.map((id) => ({ id, role: "reader", type: "user" })) } };
+      }
+      return { external_id: "perm-mutated" };
+    }
+  }
+
+  it("drive.update_permission: filen finnes (read_permissions svarer definert), men den PÅSTÅTTE permission_id-en er IKKE i listen -> DENY preflight_target_not_found, mutasjon ALDRI kalt", async () => {
+    const transport = new FakeDrivePermissionsTransport(["perm-annen"]);
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    for (const tool of firstWaveTools({ drive: transport })) gateway.register(tool);
+
+    const result = await gateway.execute({
+      identity, tool_id: "drive", action: "update_permission",
+      parameters: { file_id: "f1", permission_id: "perm-finnes-ikke", role: "reader" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+    expect(transport.calls).toEqual(["read_permissions"]);
+  });
+
+  it("drive.delete_permission: samme lukking som update_permission", async () => {
+    const transport = new FakeDrivePermissionsTransport(["perm-annen"]);
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    for (const tool of firstWaveTools({ drive: transport })) gateway.register(tool);
+
+    const result = await gateway.execute({
+      identity, tool_id: "drive", action: "delete_permission",
+      parameters: { file_id: "f1", permission_id: "perm-finnes-ikke" }
+    });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("preflight_target_not_found");
+  });
+
+  it("drive.update_permission: permission_id FAKTISK finnes i listen -> tillatt (positiv kontroll - fikser ikke fail-alltid)", async () => {
+    const transport = new FakeDrivePermissionsTransport(["perm-ekte"]);
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    for (const tool of firstWaveTools({ drive: transport })) gateway.register(tool);
+
+    const result = await gateway.execute({
+      identity, tool_id: "drive", action: "update_permission",
+      parameters: { file_id: "f1", permission_id: "perm-ekte", role: "reader" }
+    });
+
+    expect(result.ok).toBe(true);
   });
 });
