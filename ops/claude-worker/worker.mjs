@@ -94,15 +94,21 @@ import {
 import {
   MERGE_TRANSITION,
   MERGE_AUTHORIZATION,
-  classifyMergeAuthorization,
+  classifyBoundMergeAuthorization,
   verifyMergeTransition,
   mergeTransitionExcusesProvenance,
   describeMergeTransition
 } from "./lib/merge-transition.mjs";
+import {
+  bindOrderOnce,
+  describeOrderBinding,
+  digestLabel,
+  orderBindingEvidence
+} from "./lib/order-binding.mjs";
 import { readPostedStatus, recordPostedStatus } from "./lib/statusjournal.mjs";
 import {
   verifyAuth,
-  fetchIssueComments,
+  fetchIssueCommentsDetailed,
   postComment,
   listRemoteBranches,
   listPulls,
@@ -384,13 +390,42 @@ function verifyTransitionFor(cfg, claim, completion) {
  * which can still narrowly account for the single GitHub-generated merge commit.
  * It never decides whether the verification happens.
  */
-function completionEvidenceFor(cfg, taskId, completion, provenance, comments) {
+/**
+ * D-149: ONE SHAPE FOR "THE CONTROL COMMENTS AND HOW MUCH WE TRUST THE READ".
+ *
+ * `fetchIssueCommentsDetailed` returns `{ ok, items, complete }`; several call
+ * sites and every test fixture used to pass a bare array. Both are accepted, and
+ * both collapse to the same two fields - but `complete` is TRUE only when it was
+ * positively established. A bare array therefore reads as NOT proven complete,
+ * which is the fail-closed default: a caller that never told us how good its read
+ * was does not get to conclude that something is missing.
+ */
+function controlView(control) {
+  if (Array.isArray(control)) return { comments: control, complete: false };
+  const comments = Array.isArray(control?.items)
+    ? control.items
+    : (Array.isArray(control?.comments) ? control.comments : []);
+  return { comments, complete: control?.complete === true };
+}
+
+function completionEvidenceFor(cfg, task, taskId, completion, provenance, control) {
   const none = { mergeAuthorization: null, mergeTransition: null, transitionExcuse: null };
   if (completion?.complete !== true || completion?.successful !== true) return none;
 
+  // D-149: the DURABLE BINDING this task was admitted under, read from worker
+  // state and never recomputed from the comments in front of us. `control`
+  // carries both the comments AND whether that read was proven complete, because
+  // a decision that turns on ABSENCE must know the difference between "there is
+  // nothing there" and "I could not look".
+  const binding = task?.architect_order ?? null;
+  const { comments, complete: commentsComplete } = controlView(control);
+
   let claim;
   try {
-    claim = classifyMergeAuthorization(comments ?? [], {
+    claim = classifyBoundMergeAuthorization({
+      comments,
+      commentsComplete,
+      binding,
       trustedAuthor: cfg.trustedAuthor,
       taskId,
       repoOwner: cfg.repoOwner,
@@ -413,7 +448,13 @@ function completionEvidenceFor(cfg, taskId, completion, provenance, comments) {
         decidable: false,
         reason: MERGE_TRANSITION.VERIFICATION_THREW,
         detail: `classifying the merge authorization threw: ${sanitize(err.message)}`,
-        authorization: null
+        authorization: null,
+        binding: orderBindingEvidence({
+          binding,
+          verification: { ok: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message) },
+          observedCommentIds: [],
+          collectionComplete: control?.complete ?? null
+        })
       },
       mergeTransition: {
         verified: false, reason: MERGE_TRANSITION.VERIFICATION_THREW, detail: sanitize(err.message)
@@ -422,9 +463,17 @@ function completionEvidenceFor(cfg, taskId, completion, provenance, comments) {
     };
   }
 
+  // D-149: the binding verdict is logged on EVERY completion decision, not just
+  // the merge ones. A held task whose order vanished must say so in the log the
+  // operator reads first, and an ordinary task that verified must say that too -
+  // silence on the pass path would make the hold look like a new kind of error
+  // rather than the one invariant it is.
+  for (const line of describeOrderBinding(claim.binding)) log(cfg, `  ${line}`);
+
   if (claim.claim === MERGE_AUTHORIZATION.NONE) {
-    // Not a merge task. Say nothing, do nothing, spend no API call: this is the
-    // overwhelmingly common path and it must stay invisible.
+    // Not a merge task - and now provably so, from an order this worker bound
+    // before it dispatched anything. Say nothing more, do nothing, spend no API
+    // call: this is the overwhelmingly common path and it must stay cheap.
     return { ...none, mergeAuthorization: claim };
   }
 
@@ -444,7 +493,7 @@ function completionEvidenceFor(cfg, taskId, completion, provenance, comments) {
   return { mergeAuthorization: claim, mergeTransition: transition, transitionExcuse: excuse };
 }
 
-function completionGateFor(cfg, task, completion, comments = []) {
+function completionGateFor(cfg, task, completion, control = { comments: [], complete: false }) {
   if (completion?.complete !== true || completion?.successful !== true) {
     return { gate: evaluateCompletionGate({ completion, provenance: null }), provenance: null };
   }
@@ -491,7 +540,7 @@ function completionGateFor(cfg, task, completion, comments = []) {
   // its own. Whether the merge transition is verified is decided by the task's own
   // trusted order, never by how well its commit range happened to classify.
   const { mergeAuthorization, mergeTransition, transitionExcuse } =
-    completionEvidenceFor(cfg, taskId, completion, provenance, comments);
+    completionEvidenceFor(cfg, task, taskId, completion, provenance, control);
 
   return {
     gate: evaluateCompletionGate({
@@ -687,19 +736,33 @@ async function runOwned(cfg, token) {
     return EXIT.TRANSIENT;
   }
 
-  let comments;
-  try {
-    comments = fetchIssueComments(cfg);
-  } catch (err) {
-    log(cfg, `Failed to fetch control issue comments: ${sanitize(err.message)}`);
+  // D-149: the control-issue read now carries its OWN completeness verdict, and
+  // it travels with the comments everywhere they go. A run that could not prove
+  // it read the whole issue must not let any decision turn on something being
+  // absent from what it did read - and until now the only way to notice was that
+  // `fetchIssueComments` threw, which it does not do for a page that merely
+  // failed to parse.
+  const control = fetchIssueCommentsDetailed(cfg);
+  if (!control.ok) {
+    log(cfg, `Failed to fetch control issue comments: ${control.error}`);
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, { reason: "control_issue_unreachable" });
     return EXIT.TRANSIENT;
   }
-  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, { comment_count: comments.length });
+  const comments = control.items;
+  if (!control.complete) {
+    // Not fatal to the run: reconciliation and recovery still do useful, safe
+    // work on an incomplete read - they simply may not conclude ABSENCE from it,
+    // which `control.complete` now makes structurally impossible downstream.
+    log(cfg, `WARNING: the control issue read is INCOMPLETE (${control.error}). `
+      + "No decision this run may treat a missing comment as proof that it does not exist.");
+  }
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
+    comment_count: comments.length, collection_complete: control.complete === true
+  });
 
   // --- BLOCKER 1: recover anything a crashed parent left behind, before any
   //     candidate is chosen and before eligibility is even considered. ---
-  const recovery = recoverAbandonedTasks(cfg, state, token, comments);
+  const recovery = recoverAbandonedTasks(cfg, state, token, control);
   if (recovery.stop) return recovery.exit;
 
   const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
@@ -723,7 +786,7 @@ async function runOwned(cfg, token) {
   // and returned to the front of the queue later. `findUnreconciledTasks` has
   // existed in state.mjs since D126 and was never called; it is now the basis of
   // this pass.
-  const preReconciliation = reconcileReportedTasks(cfg, state, token, comments);
+  const preReconciliation = reconcileReportedTasks(cfg, state, token, control);
 
   // D-136: EVERY gate held this run, wherever it fired. D-135 only carried the
   // pre-selection pass into the exit code, so a hold raised during crash
@@ -767,7 +830,7 @@ async function runOwned(cfg, token) {
     + `tier=${selection.candidateTier === 0 ? "fresh" : "retry"}).`);
   heartbeat(cfg.lockFile, { token, phase: "preflight", taskId: candidate.taskId });
 
-  const dispatchExit = await runTask(cfg, state, token, candidate, comments);
+  const dispatchExit = await runTask(cfg, state, token, candidate, control);
   // D-136: a successful dispatch of a DIFFERENT task does not make this run
   // healthy either. A held gate means work is parked in a retained worktree
   // waiting for a human, and that has to survive into the exit code whatever
@@ -784,7 +847,7 @@ async function runOwned(cfg, token) {
  * is chosen. A task retired here is terminal, so no restart, no elapsed backoff
  * and no stale retry bookkeeping can bring it back.
  */
-function reconcileReportedTasks(cfg, state, token, comments) {
+function reconcileReportedTasks(cfg, state, token, control) {
   const unreconciled = findUnreconciledTasks(state);
   if (unreconciled.length === 0) return { reconciled: [], gateHeld: [] };
 
@@ -797,7 +860,7 @@ function reconcileReportedTasks(cfg, state, token, comments) {
 
     const completion = assessCompletion({
       taskId: task.task_id,
-      comments,
+      comments: controlView(control).comments,
       trustedAuthor: cfg.trustedAuthor,
       sinceIso: task.first_dispatch_at ?? null
     });
@@ -807,7 +870,7 @@ function reconcileReportedTasks(cfg, state, token, comments) {
     // parked, not retired as completed. The verdict is DERIVED from the task's
     // durable claim and the current state of its own worktree, not inherited
     // from a record a crashed parent may never have written.
-    const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, comments);
+    const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, control);
     if (gate.held) {
       parkHeldCompletion(cfg, state, token, task.task_id, {
         gate,
@@ -983,10 +1046,11 @@ function retireIneligibleTasks(cfg, state, token, selection) {
  * Also reconciles the report for non-terminal tasks that are merely in backoff -
  * "reconcile report regardless of next-attempt eligibility".
  */
-function recoverAbandonedTasks(cfg, state, token, comments) {
+function recoverAbandonedTasks(cfg, state, token, control) {
   const abandoned = findAbandonedTasks(state);
   if (abandoned.length === 0) return { stop: false, exit: null, gateHeld: [] };
 
+  const { comments } = controlView(control);
   const lifetimeBudgetMs = childLifetimeBudgetMs({ claudeTimeoutMinutes: cfg.claudeTimeoutMinutes });
   const branchLookup = listRemoteBranches(cfg);
   const pullLookup = listPulls(cfg);
@@ -1054,7 +1118,7 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
       // from the durable claim and the worktree's actual current HEAD. It must
       // not be able to launder an unaccounted-for commit range into a successful
       // completion on the next run.
-      const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, rec.completion, comments);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, rec.completion, control);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -1136,9 +1200,117 @@ function recoverAbandonedTasks(cfg, state, token, comments) {
   return { stop: false, exit: null, gateHeld };
 }
 
-async function runTask(cfg, state, token, candidate, comments) {
+async function runTask(cfg, state, token, candidate, control) {
   const taskId = candidate.taskId;
   const prior = getTask(state, taskId);
+  const { comments } = controlView(control);
+
+  // --- D-149: BIND THE ORDER BEFORE ANYTHING ELSE HAPPENS -------------------
+  //
+  // This is ADMISSION. It runs before the prior-attempt reconciliation, before
+  // the quarantine, before the dirty guard, before a worktree exists and - most
+  // importantly - before any child is created. After this line the worker holds
+  // a durable, self-authored record of WHICH comment ordered this task and
+  // EXACTLY what it said, so nothing that happens to the control issue
+  // afterwards can change the answer to "what was this task authorized to do?".
+  //
+  // The binding is DECIDED here and WRITTEN in the IN_PROGRESS upsert below -
+  // the same atomic, locked `persistState` every other durable fact goes
+  // through, and still strictly before `runClaude` creates anything. There is no
+  // second write path and no window in which a DISPATCHED task has no binding.
+  //
+  // Writing it here instead would be marginally earlier and materially worse: it
+  // would create a state row for a task that the quarantine, the dirty guard or
+  // the worktree step then REFUSES, and D-133 requires such a task to leave no
+  // record at all ("not recorded as attempted, fully eligible for a later run").
+  // Nothing is lost by waiting: if the run dies in between, nothing was
+  // dispatched, `attempts` is still 0, and the next run re-admits from the same
+  // order and binds identically - or refuses, if the order has changed.
+  const admission = bindOrderOnce({
+    existing: prior?.architect_order ?? null,
+    comment: candidate.comment,
+    taskId,
+    // The record's own attempt count is what distinguishes "never admitted" from
+    // "admitted by a build that recorded no binding". A task that has run before
+    // HAD an order; an absent binding for it is a gap in our records, never
+    // evidence that no order existed, so it is refused rather than filled in.
+    alreadyAdmitted: (prior?.attempts ?? 0) > 0
+  });
+  if (!admission.ok) {
+    // Three shapes reach here, and all three are the same decision: this task's
+    // authority cannot be established, so it is not dispatched and nothing is
+    // repaired from current text.
+    //
+    //   IMMUTABLE_CONFLICT / *_MISMATCH  the order in front of us is NOT the one
+    //       this task was admitted under. Re-binding would be precisely the
+    //       "authority recomputed from later mutable text" move D-149 removes.
+    //   BINDING_MISSING                  a record from before D-149, already
+    //       dispatched at least once. Synthesising a binding for it now would
+    //       adopt whatever order exists today as its original - including one
+    //       posted by the child itself.
+    //   BINDING_INVALID / UNBINDABLE     nothing usable to bind or compare.
+    //
+    // BLOCKED rather than retryable: a retry would ask the identical question
+    // and get the identical answer, and the recovery is a human reconciling it
+    // plus a FRESH TASK_ID, which binds cleanly on its own admission.
+    log(cfg, `BLOCKED: the durable ARCHITECT_TASK order binding for ${taskId} could not be established `
+      + `(${admission.reason}): ${admission.detail ?? "no detail"}. NOT dispatching, and NOT re-binding from `
+      + "the order that is on the issue now.");
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId, reason: "architect_order_binding_unavailable", binding_reason: admission.reason
+    });
+    upsertTask(state, taskId, {
+      status: TASK_STATUS.BLOCKED,
+      blocked_at: new Date().toISOString(),
+      successful: false,
+      last_failure_reason: `architect_order_binding_unavailable (${admission.reason})`,
+      order_binding_failure: {
+        reason: admission.reason,
+        detail: admission.detail ?? null,
+        observed_comment_id: candidate.comment?.id ?? null,
+        at: new Date().toISOString()
+      },
+      child_identity: null
+    });
+    state.last_run_at = new Date().toISOString();
+    persistState(cfg, state, token);
+    reportStatus(cfg, {
+      taskId,
+      phase: "admission",
+      reason: `architect_order_binding_${admission.reason}`,
+      detail: [
+        `This task could not be bound to an immutable original ARCHITECT_TASK, so it was NOT dispatched.`,
+        "",
+        `BINDING FINDING: ${admission.reason}`,
+        admission.detail ? `DETAIL: ${admission.detail}` : "",
+        `ORDER OFFERED NOW: control-issue comment ${candidate.comment?.id ?? "unknown"} `
+          + `(created ${candidate.comment?.created_at ?? "unknown"})`,
+        admission.binding
+          ? `ORDER THIS TASK WAS ADMITTED UNDER: comment ${admission.binding.comment_id} `
+            + `(created ${admission.binding.created_at ?? "unknown"}, body `
+            + `${digestLabel(admission.binding.body_sha256)}, bound at ${admission.binding.bound_at})`
+          : "ORDER THIS TASK WAS ADMITTED UNDER: none recorded.",
+        "",
+        "A task id has exactly ONE original order. The worker will not re-derive that order from whatever text",
+        "is on the control issue now - the actor able to edit, replace or delete a control comment is the same",
+        "GitHub login the worker trusts, so re-deriving would let a later order authorize itself.",
+        "",
+        "NOTHING was dispatched, fetched, pushed, reset or deleted for this task."
+      ].filter((l) => l !== "").join("\n"),
+      nextAction: "Confirm what happened to the original order. If the work is still wanted, issue a FRESH "
+        + "TASK_ID: a new task binds to its own order on admission. The worker will not replay a blocked task."
+    });
+    return EXIT.BLOCKED;
+  }
+  const orderBinding = admission.binding;
+  if (admission.created) {
+    log(cfg, `ARCHITECT_ORDER BOUND for ${taskId}: comment ${orderBinding.comment_id} `
+      + `(created ${orderBinding.created_at ?? "unknown"}, body ${digestLabel(orderBinding.body_sha256)}, `
+      + `${orderBinding.body_bytes} bytes). This binding is immutable for this TASK_ID.`);
+  } else {
+    log(cfg, `ARCHITECT_ORDER binding REUSED for ${taskId}: the order on the issue is still comment `
+      + `${orderBinding.comment_id} with body ${digestLabel(orderBinding.body_sha256)}, unchanged since admission.`);
+  }
 
   // --- reconcile prior side effects so a retry resumes rather than duplicates ---
   let resume = null;
@@ -1158,7 +1330,7 @@ async function runTask(cfg, state, token, candidate, comments) {
       // it can be accepted without the verdict being consulted. Gate it here too,
       // on a FRESHLY DERIVED verdict rather than on whatever the previous attempt
       // did or did not manage to record before it died.
-      const { gate, provenance, mergeTransition } = completionGateFor(cfg, prior, rec.completion, comments);
+      const { gate, provenance, mergeTransition } = completionGateFor(cfg, prior, rec.completion, control);
       if (gate.held) {
         parkHeldCompletion(cfg, state, token, taskId, {
           gate,
@@ -1390,7 +1562,14 @@ async function runTask(cfg, state, token, candidate, comments) {
     attempt_id: attemptId,
     first_dispatch_at: prior?.first_dispatch_at ?? dispatchStartedAt,
     last_dispatch_at: dispatchStartedAt,
+    // D-149: `comment_id` is an OBSERVATION of which comment this attempt was
+    // dispatched from, and it is overwritten on every attempt - which is exactly
+    // why it can never be the authority. `architect_order` is the immutable
+    // binding established at admission; re-writing the value `bindOrderOnce`
+    // returned is a no-op for an existing binding by construction, because that
+    // function returns the STORED document rather than a fresh one.
     comment_id: candidate.comment.id,
+    architect_order: orderBinding,
     // D-133: `branch_before` / `head_before` describe the TASK'S OWN context,
     // not the user's checkout. Recording the primary checkout's head here would
     // make a resumed child compare its work against a tree it never touched.
@@ -1699,12 +1878,29 @@ async function runTask(cfg, state, token, candidate, comments) {
 
   // --- completion requires EVIDENCE, never exit code alone (requirement B) ---
   heartbeat(cfg.lockFile, { token, phase: "verify", taskId });
-  let postComments = [];
-  try {
-    postComments = fetchIssueComments(cfg);
-  } catch (err) {
-    log(cfg, `Could not re-read control issue to verify completion: ${sanitize(err.message)}`);
+  // D-149: THE POST-DISPATCH RE-READ, WITH ITS OWN COMPLETENESS VERDICT.
+  //
+  // This read used to swallow its failure into `postComments = []` and then fall
+  // back to `comments` a hundred lines below with `postComments.length > 0`. That
+  // one expression conflated three genuinely different facts - a failed read, a
+  // proven empty issue, and a successful read - and handed the result to a
+  // decision that treats "the order is not in here" as "there was no order".
+  //
+  // The fresh read is preferred when it SUCCEEDED, not when it happened to be
+  // non-empty; and when it did not succeed, the run's earlier read is used with
+  // ITS completeness carried along, never silently promoted.
+  const postControl = fetchIssueCommentsDetailed(cfg);
+  if (!postControl.ok) {
+    log(cfg, `Could not re-read control issue to verify completion: ${postControl.error}. `
+      + "Falling back to this run's earlier read, which cannot contain a report posted since.");
+  } else if (!postControl.complete) {
+    log(cfg, `WARNING: the post-dispatch control issue read is INCOMPLETE (${postControl.error}). `
+      + "Nothing may conclude that a comment is absent from it.");
   }
+  const verifyControl = postControl.ok
+    ? { comments: postControl.items, complete: postControl.complete === true }
+    : controlView(control);
+  const postComments = verifyControl.comments;
   const completion = assessCompletion({
     taskId,
     comments: postComments,
@@ -1831,8 +2027,11 @@ async function runTask(cfg, state, token, candidate, comments) {
   // D-147: no local condition here either. `completionEvidenceFor` is the single
   // place that decides whether this task owed a transition proof, so the dispatch
   // path and the three reconciliation paths cannot answer it differently.
+  //
+  // D-149: the task record read back HERE, so the durable binding written at
+  // admission is what decides - not `candidate.comment`, which is current text.
   const { mergeAuthorization, mergeTransition, transitionExcuse } = completionEvidenceFor(
-    cfg, taskId, completion, commitProvenance, postComments.length > 0 ? postComments : comments
+    cfg, getTask(state, taskId), taskId, completion, commitProvenance, verifyControl
   );
 
   const completionGate = evaluateCompletionGate({
@@ -2071,13 +2270,12 @@ function cmdDryRun(cfg) {
     console.log(`Dry run: GitHub auth unavailable (${auth.error}). A real run would exit TRANSIENT.`);
     return EXIT.TRANSIENT;
   }
-  let comments = [];
-  try {
-    comments = fetchIssueComments(cfg);
-  } catch (err) {
-    console.log(`Dry run: control issue unreachable (${sanitize(err.message)}). A real run would exit TRANSIENT.`);
+  const dryControl = fetchIssueCommentsDetailed(cfg);
+  if (!dryControl.ok) {
+    console.log(`Dry run: control issue unreachable (${dryControl.error}). A real run would exit TRANSIENT.`);
     return EXIT.TRANSIENT;
   }
+  const comments = dryControl.items;
   const abandoned = findAbandonedTasks(loaded.state);
   const tasks = collectTrustedTasks(comments, { trustedAuthor: cfg.trustedAuthor });
   const nowMs = Date.now();
@@ -2095,6 +2293,11 @@ function cmdDryRun(cfg) {
     took_lock: false,
     state_source: loaded.source,
     first_run: loaded.first_run,
+    // D-149: whether this preview's own control-issue read was proven complete.
+    // A dry run that quietly dropped a page would otherwise show a queue that
+    // does not exist, and the host uses this output to verify queue behaviour.
+    control_comments_complete: dryControl.complete === true,
+    control_comments_read_error: dryControl.error ?? null,
     abandoned_in_progress: abandoned.map((t) => ({ task_id: t.task_id, child_pid: t.child_identity?.pid ?? null })),
     next_candidate: selection.candidate?.taskId ?? null,
     next_candidate_tier: selection.candidateTier === 0 ? "fresh" : (selection.candidateTier === 1 ? "retry" : null),
@@ -2128,6 +2331,19 @@ function cmdDryRun(cfg) {
     // work it owns. This is what makes "task-owned, not stranded" inspectable.
     task_worktrees: Object.keys(loaded.state.tasks ?? {}).map((id) => ({
       task_id: id, ...describeTaskWorktree(cfg, id)
+    })),
+    // D-149: the durable order binding per known task. Digests only - never a
+    // body - so this output stays safe to paste anywhere. `bound: false` on a
+    // non-terminal task is the legacy-migration case and is visible here rather
+    // than only discoverable when the task next fails to complete.
+    order_bindings: Object.values(loaded.state.tasks ?? {}).map((t) => ({
+      task_id: t.task_id,
+      bound: Boolean(t.architect_order),
+      order_comment_id: t.architect_order?.comment_id ?? null,
+      order_created_at: t.architect_order?.created_at ?? null,
+      order_body_digest: t.architect_order?.body_sha256 ? digestLabel(t.architect_order.body_sha256) : null,
+      bound_at: t.architect_order?.bound_at ?? null,
+      missing_at_migration: t.architect_order_missing_at_migration === true
     })),
     // Retained under the pre-D133 names so existing host tooling still parses.
     worktree_query_ok: status.ok,

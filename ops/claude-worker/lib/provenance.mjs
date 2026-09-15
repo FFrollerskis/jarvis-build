@@ -902,6 +902,31 @@ export function evaluateCompletionGate({
       : null,
     merge_authority_candidate_comment_ids: ma?.selection?.candidate_comment_ids ?? [],
     merge_authority_duplicate_comment_ids: ma?.selection?.duplicate_comment_ids ?? [],
+    // D-149: THE DURABLE ORDER BINDING, recorded on every outcome.
+    //
+    // `merge_authority_comment_id` above says which comment was READ as the
+    // authority THIS TIME. These say which comment the task was ADMITTED bound
+    // to, what its body digested to then, and what was actually observed now.
+    // The whole D-149 failure mode is a bound order that is gone, changed or
+    // never proven present, and its signature is visible here without any
+    // re-derivation: an expected id with no observed ids, or an observed digest
+    // that differs from the expected one.
+    //
+    // Digests only. No order body ever reaches a record, a log or a comment.
+    order_binding_present: ma?.binding?.order_binding_present === true,
+    order_binding_verified: ma?.binding?.order_binding_verified === true,
+    order_binding_reason: ma?.binding?.order_binding_reason ?? null,
+    order_binding_detail: ma?.binding?.order_binding_detail ?? null,
+    expected_order_comment_id: ma?.binding?.expected_order_comment_id ?? null,
+    expected_order_created_at: ma?.binding?.expected_order_created_at ?? null,
+    expected_order_body_digest: ma?.binding?.expected_order_body_digest ?? null,
+    expected_order_body_bytes: ma?.binding?.expected_order_body_bytes ?? null,
+    observed_order_comment_ids: ma?.binding?.observed_order_comment_ids ?? [],
+    observed_order_body_digest: ma?.binding?.observed_order_body_digest ?? null,
+    order_bound_at: ma?.binding?.order_bound_at ?? null,
+    // Tri-state: `null` = nobody established it, `false` = known incomplete,
+    // `true` = proven complete. A read failure must never look like an empty set.
+    control_comments_complete: ma?.binding?.control_comments_complete ?? null,
     evaluated_at: now().toISOString()
   };
 
@@ -1357,6 +1382,34 @@ export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
       : (gate.merge_authority_comment_id !== null && gate.merge_authority_comment_id !== undefined
         ? `MERGE AUTHORITY COMMENT: ${gate.merge_authority_comment_id}`
         : ""),
+    // D-149: the DURABLE BINDING. Printed whenever the task carries one, because
+    // the failure this closes is invisible otherwise: an order that is gone reads
+    // as "no merge authority", which reads as "ordinary task", which reads as
+    // nothing at all. The expected id + digest and the observed ids make the
+    // difference between "deleted", "replaced", "edited" and "we could not read
+    // the issue" legible without re-deriving anything - and none of it is the
+    // order's content.
+    gate.order_binding_present === true && gate.order_binding_verified !== true
+      ? `DURABLE ORDER BINDING: NOT VERIFIED (${gate.order_binding_reason ?? "unknown"}). This task was ADMITTED `
+        + `from trusted comment ${gate.expected_order_comment_id ?? "unknown"} `
+        + `(created ${gate.expected_order_created_at ?? "unknown"}, body ${gate.expected_order_body_digest ?? "unknown"}, `
+        + `${gate.expected_order_body_bytes ?? "unknown"} bytes, bound at ${gate.order_bound_at ?? "unknown"}); `
+        + `observed now: ${(gate.observed_order_comment_ids ?? []).join(", ") || "NO trusted order for this TASK_ID"}`
+        + (gate.observed_order_body_digest ? ` (body ${gate.observed_order_body_digest})` : "")
+        + `. Control comment collection proven complete: ${gate.control_comments_complete === null
+          ? "NOT ESTABLISHED" : String(gate.control_comments_complete)}.`
+        + (gate.order_binding_detail ? ` ${gate.order_binding_detail}` : "")
+      : (gate.order_binding_present === true
+        ? `DURABLE ORDER BINDING: verified against admitted comment ${gate.expected_order_comment_id ?? "unknown"} `
+          + `(body ${gate.expected_order_body_digest ?? "unknown"})`
+        : ""),
+    gate.order_binding_present === false && gate.merge_authorization_claimed === true
+      ? "DURABLE ORDER BINDING: ABSENT. This task has no durable binding to its original ARCHITECT_TASK - it was "
+        + "admitted by a worker build from before D-149, or its record was written without going through "
+        + "admission. The worker will NOT synthesise one from whatever order is on the issue now: that is exactly "
+        + "how a deleted or replaced order would grant itself authority. Reissue under a FRESH TASK_ID, which "
+        + "binds on admission."
+      : "",
     worktreePath ? `WORKTREE (retained, untouched): ${worktreePath}` : "",
     "",
     "A moved HEAD is an OBSERVATION, not proof of authorship: the worker reads the ref twice and cannot",

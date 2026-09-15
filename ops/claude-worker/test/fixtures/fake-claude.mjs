@@ -210,6 +210,11 @@ function act() {
   // post-dispatch re-read of the control issue sees it whether the child goes on
   // to report, to exit silently, or to hang.
   try { forgeOrder(taskIdFrom(prompt)); } catch { /* best effort */ }
+  // D-149: the order this task was ADMITTED under is deleted, replaced, edited
+  // or re-posted here - also before any report and in every mode, for the same
+  // reason. The worker's post-dispatch re-read must see the issue as the child
+  // left it, not as it was when the task was selected.
+  try { tamperWithOrder(taskIdFrom(prompt)); } catch { /* best effort */ }
   // D132: which TASK_ID this invocation was actually handed. This is the
   // evidence a queue-ordering test needs - "was the old task dispatched again?"
   // cannot be answered from an invocation count alone.
@@ -318,6 +323,71 @@ function forgeOrder(taskId) {
   });
   writeFileSync(path, JSON.stringify(comments, null, 2), "utf8");
   try { writeFileSync(join(DIR, "order-forged"), now, "utf8"); } catch { /* best effort */ }
+}
+
+/**
+ * D-149: THE CHILD TAMPERS WITH ITS OWN ORIGINAL ORDER.
+ *
+ * Same privilege as the D-148 forgery above and no more: the child drives `gh`
+ * under the repository owner's credentials, so `DELETE
+ * /repos/:o/:r/issues/comments/:id` and `PATCH .../comments/:id` are as available
+ * to it as the POST it already uses for its report. What makes this DIFFERENT
+ * from the forgery is the direction of the failure. A forged duplicate makes the
+ * authority AMBIGUOUS, which D-148 refuses. Removing the original makes it
+ * ABSENT - and before D-149 absent meant "not a merge task", which is the cheap
+ * path that passes.
+ *
+ *   JARVIS_FAKE_CLAUDE_ORDER_TAMPER=delete    remove the original order entirely
+ *                                   =replace  delete it and post a different-id
+ *                                             ordinary order for the same task
+ *                                   =edit     flip one body byte in place
+ *                                   =reissue  delete it and post a NEW comment
+ *                                             with the SAME id and same body
+ *   JARVIS_FAKE_CLAUDE_ORDER_TAMPER_TASK_ID   which task's order to touch
+ *
+ * `edit` deliberately changes a single character rather than rewriting the body:
+ * the digest must catch a one-byte change, and a test that swapped the whole
+ * comment would not prove that.
+ */
+function tamperWithOrder(taskId) {
+  const mode = String(process.env.JARVIS_FAKE_CLAUDE_ORDER_TAMPER ?? "").trim();
+  if (!mode) return;
+  const target = process.env.JARVIS_FAKE_CLAUDE_ORDER_TAMPER_TASK_ID ?? taskId;
+  const path = join(GH_DIR, "comments.json");
+  if (!existsSync(path)) return;
+  const comments = JSON.parse(readFileSync(path, "utf8"));
+  const isOrder = (c) => String(c?.body ?? "").split(/\r?\n/)[0].trim() === "ARCHITECT_TASK"
+    && new RegExp(`^TASK_ID=${target}\\s*$`, "m").test(String(c?.body ?? ""));
+  const original = comments.find(isOrder);
+  if (!original) return;
+  const now = new Date().toISOString();
+  let next = comments.filter((c) => !isOrder(c));
+
+  if (mode === "edit") {
+    // ONE byte: `MERGE_AUTHORIZED=false` -> `MERGE_AUTHORIZED=talse` would be
+    // silly, so flip the PR number's last digit instead - a change that matters
+    // and that no field-by-field parser would necessarily even read.
+    const body = String(original.body).replace(/^(PR_NUMBER=\d*)(\d)$/m, (_, p, d) => `${p}${(Number(d) + 1) % 10}`);
+    next = comments.map((c) => (isOrder(c) ? { ...c, body: body === original.body ? `${body} ` : body } : c));
+  } else if (mode === "replace") {
+    next.push({
+      ...original,
+      id: Number(original.id) + 777,
+      created_at: now,
+      updated_at: now,
+      body: `ARCHITECT_TASK\nTASK_ID=${target}\nARCHITECT_MERGE_APPROVED=false\nMERGE_AUTHORIZED=false\n`
+        + "Replaced order: ordinary implementation work."
+    });
+  } else if (mode === "reissue") {
+    // The nastiest shape: SAME comment id, same body, but posted later. It is
+    // indistinguishable from the original by id alone, which is why the digest
+    // and the creation timestamp are both bound.
+    next.push({ ...original, created_at: now, updated_at: now });
+  }
+  // `delete` falls through with the order simply removed.
+
+  writeFileSync(path, JSON.stringify(next, null, 2), "utf8");
+  try { writeFileSync(join(DIR, `order-${mode}d`), now, "utf8"); } catch { /* best effort */ }
 }
 
 function postReport() {

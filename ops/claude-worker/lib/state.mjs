@@ -34,6 +34,7 @@ import {
   unlinkSync
 } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { validateOrderBinding } from "./order-binding.mjs";
 
 export const TASK_STATUS = Object.freeze({
   PENDING: "pending",
@@ -152,6 +153,24 @@ export function classifyRawWorkerState(raw) {
       if (task.attempts !== undefined && (!Number.isInteger(task.attempts) || task.attempts < 0)) {
         return { kind: "invalid", reason: `v2_invalid_attempts (${id})` };
       }
+      // D-149: MIGRATION FAILS CLOSED ON A CORRUPT BINDING.
+      //
+      // `architect_order` is the only positive evidence that a task was admitted
+      // from a specific, unmodified order. A present-but-unreadable one is the
+      // most dangerous shape there is: silently dropping it would turn a bound
+      // task back into an unbound one, and an unbound task is the case the
+      // classifier has to treat as merely "recoverable". So a malformed binding
+      // makes the whole document INVALID, which routes it to the verified backup
+      // rather than into a load that quietly forgets which order was authority.
+      //
+      // ABSENT is not invalid - a pre-D-149 record legitimately has none, and it
+      // is preserved as such and marked below, never repaired.
+      if (task.architect_order !== undefined && task.architect_order !== null) {
+        const bound = validateOrderBinding(task.architect_order, { taskId: id });
+        if (!bound.ok) {
+          return { kind: "invalid", reason: `v2_invalid_architect_order (${id}: ${bound.reason})` };
+        }
+      }
     }
     if (raw.posted_status_keys !== undefined && !isPlainObject(raw.posted_status_keys)) {
       return { kind: "invalid", reason: "v2_posted_status_keys_not_an_object" };
@@ -229,7 +248,29 @@ export function migrateState(raw) {
   const base = defaultState();
   if (verdict.kind === "v2") {
     const tasks = {};
-    for (const [id, task] of Object.entries(raw.tasks)) tasks[id] = { ...task, task_id: id };
+    for (const [id, task] of Object.entries(raw.tasks)) {
+      const migrated = { ...task, task_id: id };
+      // D-149: MARK, NEVER REPAIR.
+      //
+      // A record written by a pre-D-149 build carries no `architect_order`. That
+      // is a real, recoverable gap and it is recorded as one: the migration says
+      // so explicitly rather than leaving a later reader to infer it from an
+      // absent field, and it emphatically does NOT invent a binding from
+      // whatever order happens to be on the control issue now. Synthesising
+      // authority evidence for an already-known task is the exact move D-149
+      // forbids - it would let a deleted or replaced order bind itself.
+      //
+      // Only NON-TERMINAL, already-dispatched records are marked: a completed or
+      // blocked task is never dispatched or completion-gated again, so a binding
+      // it never had can no longer decide anything.
+      if (migrated.architect_order === undefined || migrated.architect_order === null) {
+        migrated.architect_order = null;
+        if (!TERMINAL_STATUSES.includes(migrated.status) && (migrated.attempts ?? 0) > 0) {
+          migrated.architect_order_missing_at_migration = true;
+        }
+      }
+      tasks[id] = migrated;
+    }
     return {
       ok: true,
       kind: "v2",
@@ -254,7 +295,13 @@ export function migrateState(raw) {
       attempts: 1,
       legacy_unverified: true,
       completed_at: null,
-      report_comment_id: null
+      report_comment_id: null,
+      // D-149: v1 recorded nothing but an id, so there is nothing to bind to.
+      // These are TERMINAL and are never dispatched or completion-gated again,
+      // so an absent binding decides nothing here - but it is recorded as an
+      // explicit `null` rather than left undefined, so "never bound" is a stated
+      // fact in the record instead of a gap a later reader has to interpret.
+      architect_order: null
     };
   }
   return {

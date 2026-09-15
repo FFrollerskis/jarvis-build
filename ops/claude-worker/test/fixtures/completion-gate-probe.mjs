@@ -15,7 +15,14 @@
  * behind - out of process, because `worker.mjs` carries a shebang that the test
  * runner's transform will not accept as an import.
  *
- *   argv: <configPath> <commentsPath> <taskId> <outPath>
+ *   argv: <configPath> <commentsPath> <taskId> <outPath> [complete]
+ *
+ * D-149: the site now passes a CONTROL VIEW - the comments plus whether the read
+ * that produced them was proven complete - because a decision that turns on the
+ * ABSENCE of the bound order must know the difference between "it is not there"
+ * and "I could not look". The real site is reached only after a successful
+ * `fetchIssueCommentsDetailed`, so `complete` defaults to `true` here; pass
+ * `incomplete` to drive the partial-read case.
  *
  * The verdict is written to `outPath` rather than to stdout, because
  * `completionGateFor` logs to stdout by design and a caller must never have to
@@ -31,7 +38,8 @@ import { loadState } from "../../lib/state.mjs";
 import { assessCompletion } from "../../lib/reconcile.mjs";
 import { completionGateFor } from "../../worker.mjs";
 
-const [configPath, commentsPath, taskId, outPath] = process.argv.slice(2);
+const [configPath, commentsPath, taskId, outPath, completeArg] = process.argv.slice(2);
+const complete = String(completeArg ?? "complete").trim() !== "incomplete";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const cfg = loadWorkerConfig(configPath, join(HERE, "..", ".."));
@@ -50,9 +58,10 @@ const completion = assessCompletion({
   sinceIso: task.first_dispatch_at ?? null
 });
 
-const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, comments);
+const { gate, provenance, mergeTransition } = completionGateFor(cfg, task, completion, { comments, complete });
 writeFileSync(outPath, JSON.stringify({
   completion: { complete: completion.complete, successful: completion.successful },
+  control_complete: complete,
   gate,
   provenance,
   mergeTransition: mergeTransition ?? null

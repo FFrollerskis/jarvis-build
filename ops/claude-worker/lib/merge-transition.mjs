@@ -159,11 +159,31 @@
 
 import { extractField, validateTrustedTask } from "./trust.mjs";
 import {
+  ORDER_BINDING,
+  normalizeCommentId,
+  orderBindingEvidence,
+  validateOrderBinding,
+  verifyOrderAgainstBinding
+} from "./order-binding.mjs";
+import {
   POST_MERGE_EVIDENCE,
   classifyPostMergeChecks,
   resolvePostMergeEvidencePolicy,
   verifyCloseoutReport
 } from "./postmerge-evidence.mjs";
+
+export {
+  ORDER_BINDING,
+  ORDER_BINDING_VERSION,
+  bindOrderOnce,
+  buildOrderBinding,
+  describeOrderBinding,
+  digestLabel,
+  orderBindingEvidence,
+  orderBodyDigest,
+  validateOrderBinding,
+  verifyOrderAgainstBinding
+} from "./order-binding.mjs";
 
 export {
   POST_MERGE_EVIDENCE,
@@ -187,6 +207,12 @@ export {
  */
 export const MERGE_TRANSITION = Object.freeze({
   ...POST_MERGE_EVIDENCE,
+  /**
+   * D-149: the durable-order-binding findings, folded into the SAME reason
+   * namespace as everything else this module can refuse with, so a record, a log
+   * line and a status comment never have to know which half produced a reason.
+   */
+  ...ORDER_BINDING,
 
   /** The authorized transition is proven from control-plane + fresh remote truth. */
   VERIFIED: "authorized_merge_transition_verified",
@@ -774,6 +800,161 @@ export function classifyMergeAuthorization(comments, {
     authorization: { ...read, selection },
     selection: evidence
   };
+}
+
+/**
+ * D-149: THE SAME CLASSIFICATION, FOR A TASK THAT HAS ALREADY BEEN ADMITTED.
+ *
+ * ------------------------------------------------------------------------
+ * WHY THIS IS A SEPARATE ENTRY POINT AND NOT A FLAG
+ * ------------------------------------------------------------------------
+ *
+ * `classifyMergeAuthorization` above is the PRE-ADMISSION primitive: given a set
+ * of comments and a task id, what does the one canonical order say? At that point
+ * "no order for this id" is a perfectly honest answer - nothing yet asserts that
+ * an order ever existed, so there is nothing to contradict.
+ *
+ * A task the worker is COMPLETION-GATING is in a different position entirely. It
+ * was admitted from an order. The worker wrote down which one, when, and exactly
+ * what it said, BEFORE it dispatched anything. So for that task, "I cannot find
+ * the order now" is never a fact about the order - it is a fact about this read.
+ * Mapping it onto `NONE` is what let a deletion downgrade a merge-authorized task
+ * to ordinary work and skip D-147's mandatory transition, CI and report proof.
+ *
+ * Making it a boolean flag on the existing function was the obvious alternative
+ * and it is the wrong shape: the safe value would have to be the non-default one,
+ * so every future caller that forgot it would fail OPEN, silently, on the exact
+ * path that matters. A caller here must name the bound entry point to get a
+ * classification at all, and this entry point cannot produce `NONE` for a
+ * mismatch by construction.
+ *
+ * ------------------------------------------------------------------------
+ * THE ORDER OF THE CHECKS
+ * ------------------------------------------------------------------------
+ *
+ *   1. THE BINDING. Missing, unreadable, foreign or from an unsupported version
+ *      -> UNDECIDABLE. Never repaired from current text: recomputing the
+ *      authority from whatever is on the issue right now is the defect.
+ *   2. THE READ. A comment collection not PROVEN complete -> UNDECIDABLE, before
+ *      a single candidate is counted. A set we cannot vouch for can neither
+ *      confirm nor refute the order's presence, and a partial page is exactly
+ *      how the order disappears without anything failing.
+ *   3. THE SET. `selectCanonicalArchitectTask`'s D-148 count, unchanged.
+ *      Duplicates and edits stay AMBIGUOUS_AUTHORITY / AUTHORITY_COMMENT_EDITED.
+ *      The one case that changes meaning is ZERO: for a bound task that is
+ *      `ORDER_ABSENT`, not `NO_TRUSTED_TASK` -> UNDECIDABLE, not NONE.
+ *   4. THE IDENTITY. The single candidate must BE the bound order: same comment
+ *      id, same body digest, same creation metadata where it was bound.
+ *   5. ONLY THEN the body is read, by exactly the D-147/D-148 rules. A bound
+ *      false/false order is still ordinary non-merge; a bound true/true one still
+ *      owes the full transition proof. Nothing about authorization SEMANTICS
+ *      changes here - only which bytes are allowed to supply them.
+ *
+ * Pure. Same inputs as the unbound form plus the durable binding and the read's
+ * own completeness verdict; it touches nothing else.
+ */
+export function classifyBoundMergeAuthorization({
+  comments,
+  commentsComplete,
+  binding,
+  trustedAuthor,
+  taskId,
+  repoOwner = null,
+  repoName = null,
+  workerPolicy = null
+}) {
+  const list = Array.isArray(comments) ? comments : [];
+  const bindingDoc = binding ?? null;
+
+  /** Every trusted candidate id we can actually see, for the evidence record. */
+  const observedIds = () => {
+    const ids = [];
+    for (const comment of list) {
+      const trusted = validateTrustedTask(comment, { trustedAuthor });
+      if (!trusted.ok || trusted.taskId !== taskId) continue;
+      const id = normalizeCommentId(comment?.id);
+      if (id !== null && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  };
+
+  const undecidable = (reason, detail, { verification = null, selection = null } = {}) => ({
+    claim: MERGE_AUTHORIZATION.UNDECIDABLE,
+    claimed: true,
+    decidable: false,
+    reason,
+    detail,
+    authorization: { ok: false, reason, detail, mergeClaimed: null, selection },
+    selection: selection ? selectionEvidence(selection) : selectionEvidence({
+      ok: false, commentId: null, createdAt: null, candidateCount: 0, candidateIds: [], duplicateIds: []
+    }),
+    binding: orderBindingEvidence({
+      binding: bindingDoc,
+      verification,
+      observedCommentIds: observedIds(),
+      collectionComplete: commentsComplete
+    })
+  });
+
+  // --- 1. the binding -------------------------------------------------------
+  const bindingValid = validateOrderBinding(bindingDoc, { taskId });
+  if (!bindingValid.ok) {
+    // A known task with no usable binding is a RECOVERABLE hold with an explicit
+    // reason - the legacy-migration case included. It is emphatically not
+    // "this task never had an order", which is the inference D-149 removes.
+    return undecidable(bindingValid.reason, bindingValid.detail, {
+      verification: { ok: false, reason: bindingValid.reason, detail: bindingValid.detail }
+    });
+  }
+
+  // --- 2. the read ----------------------------------------------------------
+  if (commentsComplete !== true) {
+    const detail = commentsComplete === false
+      ? "the control comment collection is known to be incomplete (a failed read or an unparseable page), so the "
+        + "absence of the bound order proves nothing about the order"
+      : "the caller did not establish that the control comment collection was read completely, and an unproven "
+        + "read can neither confirm nor refute the bound order";
+    return undecidable(ORDER_BINDING.COLLECTION_INCOMPLETE, detail, {
+      verification: { ok: false, reason: ORDER_BINDING.COLLECTION_INCOMPLETE, detail }
+    });
+  }
+
+  // --- 3. the set (D-148, unchanged except for what ZERO means) -------------
+  const selection = selectCanonicalArchitectTask(list, { trustedAuthor, taskId });
+  if (!selection.ok) {
+    if (selection.reason === MERGE_TRANSITION.NO_TRUSTED_TASK) {
+      const verification = verifyOrderAgainstBinding({ binding: bindingDoc, comment: null, taskId });
+      return undecidable(ORDER_BINDING.ORDER_ABSENT,
+        `${selection.detail}; this task was ADMITTED from a trusted order and is durably bound to comment `
+        + `${JSON.stringify(normalizeCommentId(bindingDoc.comment_id))}, so its disappearance is a finding about `
+        + "this read - or about the order having been deleted or replaced - and never a statement that no order "
+        + "ever existed",
+        { verification, selection });
+    }
+    // AMBIGUOUS_AUTHORITY / AUTHORITY_COMMENT_EDITED: D-148's verdicts stand.
+    return undecidable(selection.reason, selection.detail, {
+      verification: { ok: false, reason: selection.reason, detail: selection.detail },
+      selection
+    });
+  }
+
+  // --- 4. the identity ------------------------------------------------------
+  const verification = verifyOrderAgainstBinding({ binding: bindingDoc, comment: selection.comment, taskId });
+  if (!verification.ok) {
+    return undecidable(verification.reason, verification.detail, { verification, selection });
+  }
+
+  // --- 5. the body, by the unchanged D-147/D-148 rules ----------------------
+  const bindingEvidence = orderBindingEvidence({
+    binding: bindingDoc,
+    verification,
+    observedCommentIds: observedIds(),
+    collectionComplete: commentsComplete
+  });
+  const classified = classifyMergeAuthorization(list, {
+    trustedAuthor, taskId, repoOwner, repoName, workerPolicy
+  });
+  return { ...classified, binding: bindingEvidence };
 }
 
 /**

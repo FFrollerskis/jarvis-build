@@ -95,6 +95,10 @@ export const PAYLOAD = Object.freeze([
   // closure is computed from the real entrypoints rather than maintained by hand.
   "lib/merge-transition.mjs",
   "lib/postmerge-evidence.mjs",
+  // D-149. `state.mjs` imports it too, so a deployed worker missing this file
+  // would fail to LOAD ITS OWN STATE, not merely fail a merge gate. The ESM
+  // closure test below caught the omission before this line existed.
+  "lib/order-binding.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",

@@ -25,6 +25,7 @@ import { spawn } from "node:child_process";
 import { loadState, saveStateAtomic, defaultState, TASK_STATUS } from "../lib/state.mjs";
 import { readLock, ledgerDir } from "../lib/lock.mjs";
 import { isProcessAlive, captureIdentity } from "../lib/procid.mjs";
+import { buildOrderBinding } from "../lib/order-binding.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKER = join(HERE, "..", "worker.mjs");
@@ -34,6 +35,32 @@ const FAKE_CLAUDE = join(HERE, "fixtures", "fake-claude.mjs");
 
 const TASK_ID = "D126-INTEGRATION-20260907";
 const TRUSTED = "tsworkflow";
+
+/** The exact trusted ARCHITECT_TASK these tests put on the control issue. */
+const ORDER = Object.freeze({
+  id: 1,
+  created_at: "2026-09-07T00:00:00.000Z",
+  updated_at: "2026-09-07T00:00:00.000Z",
+  author_association: "OWNER",
+  user: { login: TRUSTED },
+  body: `ARCHITECT_TASK\nTASK_ID=${TASK_ID}\nDo the thing.`
+});
+
+/**
+ * D-149: the durable order binding a real parent writes at ADMISSION.
+ *
+ * The hand-seeded IN_PROGRESS rows below simulate a parent that crashed AFTER
+ * marking the task in progress - and the binding is written in that very same
+ * atomic state write, so a row that has it is what a crash actually leaves. A
+ * row WITHOUT it means something else entirely (a pre-D-149 build), and the
+ * worker now refuses to re-dispatch that; `worker-order-binding.test.mjs`
+ * asserts exactly that refusal, so it must not be smuggled in here.
+ */
+function boundOrder() {
+  const built = buildOrderBinding({ comment: ORDER, taskId: TASK_ID });
+  if (!built.ok) throw new Error(`fixture could not bind the order: ${built.reason}`);
+  return built.binding;
+}
 
 let dir;
 let workerRoot;
@@ -84,14 +111,7 @@ beforeEach(() => {
     malformedLockGraceSeconds: 5
   }, null, 2), "utf8");
 
-  writeFileSync(join(ghDir, "comments.json"), JSON.stringify([{
-    id: 1,
-    created_at: "2026-09-07T00:00:00.000Z",
-    updated_at: "2026-09-07T00:00:00.000Z",
-    author_association: "OWNER",
-    user: { login: TRUSTED },
-    body: `ARCHITECT_TASK\nTASK_ID=${TASK_ID}\nDo the thing.`
-  }], null, 2), "utf8");
+  writeFileSync(join(ghDir, "comments.json"), JSON.stringify([ORDER], null, 2), "utf8");
   writeFileSync(join(ghDir, "branches.json"), JSON.stringify(["main"]), "utf8");
   writeFileSync(join(ghDir, "pulls.json"), JSON.stringify([]), "utf8");
   writeFileSync(join(gitDir, "git.json"), JSON.stringify({
@@ -248,6 +268,7 @@ describe("blocker 1: crash BEFORE spawn", () => {
     const s = defaultState();
     s.tasks[TASK_ID] = {
       task_id: TASK_ID,
+      architect_order: boundOrder(),
       status: TASK_STATUS.IN_PROGRESS,
       attempts: 1,
       first_dispatch_at: new Date(Date.now() - 60_000).toISOString(),
@@ -316,6 +337,7 @@ describe("blocker 1: crash DURING child execution keeps the live child safe", ()
     const s = defaultState();
     s.tasks[TASK_ID] = {
       task_id: TASK_ID,
+      architect_order: boundOrder(),
       status: TASK_STATUS.IN_PROGRESS,
       attempts: 1,
       first_dispatch_at: new Date(Date.now() - 60_000).toISOString(),
@@ -386,6 +408,7 @@ describe("blocker 6: the entrypoint refuses to retry while duplicate risk is unk
     const s = defaultState();
     s.tasks[TASK_ID] = {
       task_id: TASK_ID,
+      architect_order: boundOrder(),
       status: TASK_STATUS.IN_PROGRESS,
       attempts: 1,
       first_dispatch_at: new Date(Date.now() - 60_000).toISOString(),
