@@ -11,7 +11,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
-import { SituationDomainPausedError, SituationEngine } from "../src/service.ts";
+import { SituationActAlreadyClaimedError, SituationActInFlightError, SituationDomainPausedError, SituationEngine } from "../src/service.ts";
 
 /**
  * UA-10 akseptansekriterier: "ACT uses valid owner/delegated authority and
@@ -266,5 +266,155 @@ describe("C: domene-pause blokkerer actOn() FØR gateway.execute() i det hele ta
       TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity
     );
     expect(result.tool_result.ok).toBe(true);
+  });
+});
+
+describe("D: Funn 3 (arkitekt-review runde 1, PR #85) - atomisk, eksklusiv claim FØR execute(), eksakt-én-gang ACT", () => {
+  it("et ANNET actOn()-kall for SAMME situasjon, startet MENS det FØRSTE fortsatt er i flukt inni selve det eksterne kallet (claimen ALLEREDE committet), avvises DETERMINISTISK med SituationActInFlightError - INGEN dobbel side-effekt", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:concurrent", priority: "high", confidence: 0.9, reason: "Samtidig ACT-forsøk"
+    });
+
+    // En "gated" transport som blokkerer selve 'flip'-mutasjonen til testen EKSPLISITT
+    // slipper den - dette skaper et DETERMINISTISK (ikke timing-avhengig) vindu der det
+    // FØRSTE kallets claim GARANTERT allerede er committet (claimen skjer FØR
+    // `gateway.execute()` i det hele tatt kalles - se service.ts sin `actOn()`), men
+    // persisteringen av det endelige resultatet IKKE har skjedd ennå - NØYAKTIG det
+    // "i flukt"-vinduet Funn 3 sin eksklusive claim skal beskytte.
+    let releaseFlip!: () => void;
+    const flipGate = new Promise<void>((resolve) => { releaseFlip = resolve; });
+    let resolveReachedGate!: () => void;
+    const reachedGate = new Promise<void>((resolve) => { resolveReachedGate = resolve; });
+    class GatedActuatorTransport implements ToolTransport {
+      calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
+      private on = false;
+      async invoke(action: string, _parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+        this.calls.push({ action, parameters: _parameters });
+        if (action === "read_state") return { data: { on: this.on } };
+        if (action === "flip") {
+          resolveReachedGate();
+          await flipGate;
+          this.on = true;
+          return { external_id: "act-1", data: { on: this.on } };
+        }
+        throw new Error(`unknown_action:${action}`);
+      }
+    }
+    const gatedTransport = new GatedActuatorTransport();
+    const slowGateway = new ToolGateway(appPool, policy, secrets);
+    slowGateway.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: gatedTransport,
+      preflight_action: "read_state",
+      postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    slowGateway.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+    });
+
+    const firstPromise = engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, slowGateway, ownerIdentity
+    );
+    await reachedGate; // det FØRSTE kallets claim er GARANTERT allerede committet på dette tidspunktet.
+
+    await expect(
+      engine.actOn(TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+    ).rejects.toThrow(SituationActInFlightError);
+
+    releaseFlip();
+    const first = await firstPromise;
+    expect(first.tool_result.ok).toBe(true);
+    // Den FAKTISKE 'flip'-mutasjonen skjedde KUN ÉN gang - den eksklusive claimen (ikke ToolGateway sin egen dedupe alene) beviser eksakt-én-gang.
+    expect(gatedTransport.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0);
+  });
+
+  it("et EKSPLISITT ULIKT idempotency_key mot en ALLEREDE fullført ACT avvises (SituationActAlreadyClaimedError), FØR noe nytt eksternt kall", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:claim-conflict", priority: "high", confidence: 0.9, reason: "Claim-konflikt"
+    });
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "custom-key-1" },
+      gateway, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+
+    await expect(
+      engine.actOn(
+        TENANT_OWNER, "business", situation.situation_id,
+        { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "custom-key-2" },
+        gateway, ownerIdentity
+      )
+    ).rejects.toThrow(SituationActAlreadyClaimedError);
+    // Kun ÉN faktisk 'flip'-mutasjon - det andre forsøket ble avvist FØR noe transportkall.
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+  });
+
+  it("en SEKVENSIELL retry med SAMME eksplisitte idempotency_key ETTER en allerede FULLFØRT ACT claimer på nytt trygt (krasj-gjenopprettings-simulering) - deduplicated:true, INGEN ny faktisk mutasjon", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:retry-recovery", priority: "high", confidence: 0.9, reason: "Retry etter simulert krasj"
+    });
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "retry-key" },
+      gateway, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "retry-key" },
+      gateway, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true);
+    if (retry.tool_result.ok) {
+      expect(retry.tool_result.deduplicated).toBe(true);
+    }
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+  });
+});
+
+describe("E: Funn 4 (arkitekt-review runde 1, PR #85) - telegram sin ToolResult.ok SJEKKES eksplisitt, ALDRI kun try/catch", () => {
+  it("Telegram returnerer NORMALT {ok:false} (f.eks. policy-/parameter-nektet, INGEN kastet feil): stadiet forblir 'act', IKKE 'act_notify' - selve ACT-handlingen er fortsatt bekreftet vellykket", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:telegram-denied", priority: "high", confidence: 0.9, reason: "Skal lykkes, men telegram nektes uten å kaste"
+    });
+
+    const denyingGateway = new ToolGateway(appPool, policy, secrets);
+    denyingGateway.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state",
+      postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    denyingGateway.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram,
+      // Simulerer en NORMAL (ikke-kastende) ok:false - f.eks. en policy-/scope-nektelse som skjer FØR transporten kalles.
+      parameterAuthorizer: () => ({ allowed: false, reason: "test_telegram_denied" })
+    });
+
+    const result = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {} },
+      denyingGateway, ownerIdentity
+    );
+
+    expect(result.tool_result.ok).toBe(true); // selve ACT-handlingen (flip) lyktes og ble bekreftet.
+    expect(result.situation.act_result).toBe("succeeded");
+    expect(result.situation.stage).toBe("act"); // IKKE 'act_notify' - telegram-varselet ble ALDRI bekreftet levert.
+    expect(telegram.calls).toHaveLength(0); // parameterAuthorizer nektet FØR transporten i det hele tatt ble kalt.
   });
 });

@@ -67,6 +67,64 @@ export class SituationNotFoundError extends Error {
   }
 }
 
+/**
+ * Kastet av `evaluateCandidate()` (arkitekt-review runde 1, PR #85, Funn 1):
+ * en re-deteksjon for SAMME `(tenant_id, memory_space_id, detection_key)`
+ * hvis IDENTITET (`domain`/`owner_person_id`/`source_open_loop_id`) er
+ * ENDRET fra det som allerede er lagret. En fri-tekst `detection_key` som
+ * plutselig peker på et ANNET domene/en annen eier/kilde er et
+ * kollisjons-/korrupsjonstegn (to ulike forhold som tilfeldigvis fikk samme
+ * nøkkel), IKKE en gyldig oppdatering av SAMME forhold - avvist EKSPLISITT
+ * i stedet for stille overskrevet.
+ */
+export class SituationDetectionKeyConflictError extends Error {
+  constructor(
+    public readonly tenantId: string,
+    public readonly memorySpace: string,
+    public readonly detectionKey: string
+  ) {
+    super(`situation_detection_key_conflict:${tenantId}:${memorySpace}:${detectionKey}`);
+    this.name = "SituationDetectionKeyConflictError";
+  }
+}
+
+/**
+ * Kastet av `actOn()` (Funn 3): situasjonen er ALLEREDE claimet av et
+ * TIDLIGERE `actOn()`-kall med en ANNEN idempotens-nøkkel (en genuint
+ * ANNEN handling) - FØR noe `ToolGateway.execute()`-kall gjøres, fail-
+ * closed, ingen ekstern effekt. En situasjon kan KUN noensinne claimes ÉN
+ * gang (masterplanens egen tilstandsmaskin: `act`/`act_notify`/`escalate`
+ * er alle terminale). Et forsøk med SAMME idempotens-nøkkel som den
+ * lagrede (en legitim retry) claimer på nytt trygt og kaster ALDRI dette.
+ */
+export class SituationActAlreadyClaimedError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_already_claimed:${situationId}`);
+    this.name = "SituationActAlreadyClaimedError";
+  }
+}
+
+/**
+ * Kastet av `actOn()` (Funn 3): situasjonen er claimet av NØYAKTIG DENNE
+ * idempotens-nøkkelen, MEN forrige forsøk har IKKE fullført persisteringen
+ * ennå (`act_result IS NULL`) - ENTEN et ANNET, SANN SAMTIDIG `actOn()`-kall
+ * er FORTSATT i flukt akkurat nå, ELLER et TIDLIGERE forsøk krasjet mellom
+ * det eksterne kallet og persisteringen. Denne klassen kan IKKE skille de to
+ * tilfellene fra hverandre - og velger derfor BEVISST det TRYGGESTE
+ * utfallet (avvis, ALDRI et nytt `ToolGateway.execute()`-kall) fremfor å
+ * risikere et ekte SAMTIDIG dobbelt-forsøk på den faktiske side-effekten.
+ * En EKTE krasj-gjenoppretting (prosessen som eide forsøket er FAKTISK død)
+ * er derfor P0 IKKE selv-helbredende innen SAMME idempotens-nøkkel - en
+ * fremtidig, egen "claim med et utløpsvindu"-mekanisme er naturlig neste
+ * steg, IKKE bygget her (flagget eksplisitt, ikke stilltiende utelatt).
+ */
+export class SituationActInFlightError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_in_flight:${situationId}`);
+    this.name = "SituationActInFlightError";
+  }
+}
+
 const DEFAULT_RESUPPRESS_HOURS = 24;
 
 const STAGE_RANK: Record<SituationStage, number> = {
@@ -198,7 +256,7 @@ export class SituationEngine {
    * Idempotent (`detection_key`, samme mønster som `business_open_loops`):
    * en gjentatt kandidat for SAMME nøkkel oppdaterer SAMME rad, oppretter
    * ALDRI en duplikat - masterplanens "No duplicate spam for same event"
-   * håndheves strukturelt av `UNIQUE (tenant_id, detection_key)`
+   * håndheves strukturelt av `UNIQUE (tenant_id, memory_space_id, detection_key)`
    * (`056_situations.sql`) kombinert med `newly_actionable` under.
    *
    * Stadiet REGRESSERER ALDRI av en re-evaluering: hvis situasjonen
@@ -231,36 +289,60 @@ export class SituationEngine {
       const policy = await this.policyInTransaction(client, tenantId, memorySpace);
       const withinQuiet = isWithinQuietHours(now, policy.quietStart, policy.quietEnd);
       const computedStage = computeTargetStage(value.priority, value.confidence, withinQuiet);
+      const ownerPersonId = value.owner_person_id ?? null;
+      const sourceOpenLoopId = value.source_open_loop_id ?? null;
 
-      const { rows: existingRows } = await client.query(
-        `SELECT * FROM situations WHERE tenant_id = $1 AND detection_key = $2 FOR UPDATE`,
-        [tenantId, value.detection_key]
+      // Funn 1 (arkitekt-review runde 1, PR #85): ATOMISK insert-or-fetch
+      // (samme "prøv INSERT ... ON CONFLICT DO NOTHING FØRST"-mønster som
+      // vision sin `insertValidatedInTransaction()`, modules/vision/src/
+      // service.ts) - IKKE en separat SELECT-så-branch. Den GAMLE koden sin
+      // `SELECT ... FOR UPDATE` fant INGEN rad å låse for en genuint NY
+      // detection_key, så to SAMTIDIGE `evaluateCandidate()`-kall for SAMME
+      // nøkkel kunne begge passere "finnes ikke"-sjekken og deretter race
+      // på en ukontrollert unique-constraint-feil ved INSERT. Denne
+      // rekkefølgen gjør racen umulig: kollisjonsdomenet inkluderer nå
+      // `memory_space_id` (samme nøkkel kan brukes uavhengig i to ulike
+      // spaces uten kollisjon).
+      const newlyActionableOnInsert = computedStage === "inform" || computedStage === "suggest";
+      const { rows: insertedRows } = await client.query(
+        `INSERT INTO situations
+           (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         ON CONFLICT (tenant_id, memory_space_id, detection_key) DO NOTHING
+         RETURNING *`,
+        [
+          `sit-${randomUUID()}`,
+          tenantId,
+          memorySpace,
+          value.domain,
+          ownerPersonId,
+          sourceOpenLoopId,
+          value.detection_key,
+          computedStage,
+          value.priority,
+          value.confidence ?? null,
+          value.reason,
+          newlyActionableOnInsert ? new Date(now).toISOString() : null
+        ]
       );
-      const existing = existingRows[0] as Situation | undefined;
+      if (insertedRows[0]) {
+        return { situation: insertedRows[0] as Situation, newly_actionable: newlyActionableOnInsert };
+      }
 
-      if (!existing) {
-        const newlyActionable = computedStage === "inform" || computedStage === "suggest";
-        const { rows } = await client.query(
-          `INSERT INTO situations
-             (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-           RETURNING *`,
-          [
-            `sit-${randomUUID()}`,
-            tenantId,
-            memorySpace,
-            value.domain,
-            value.owner_person_id ?? null,
-            value.source_open_loop_id ?? null,
-            value.detection_key,
-            computedStage,
-            value.priority,
-            value.confidence ?? null,
-            value.reason,
-            newlyActionable ? new Date(now).toISOString() : null
-          ]
-        );
-        return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
+      // Konflikt - raden finnes GARANTERT nå (unique constraint slo inn),
+      // så denne `FOR UPDATE` er race-fri (motsatt av den gamle "kanskje
+      // finnes ikke ennå"-SELECT-en over).
+      const { rows: existingRows } = await client.query(
+        `SELECT * FROM situations WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key = $3 FOR UPDATE`,
+        [tenantId, memorySpace, value.detection_key]
+      );
+      const existing = existingRows[0] as Situation;
+
+      // Funn 1: avvis EKSPLISITT (kast) i stedet for å stille overskrive
+      // hvis den lagrede radens IDENTITET er en ANNEN enn kandidatens - se
+      // `SituationDetectionKeyConflictError` sin doc-kommentar over.
+      if (existing.domain !== value.domain || existing.owner_person_id !== ownerPersonId || existing.source_open_loop_id !== sourceOpenLoopId) {
+        throw new SituationDetectionKeyConflictError(tenantId, memorySpace, value.detection_key);
       }
 
       const resuppressOpen =
@@ -271,17 +353,34 @@ export class SituationEngine {
         : STAGE_RANK[computedStage] > STAGE_RANK[existing.stage as SituationStage]
           ? computedStage
           : (existing.stage as SituationStage);
-      const newlyActionable = !stageIsActedUpon && resuppressOpen && (nextStage === "inform" || nextStage === "suggest");
+      // Funn 5: stille timer (`withinQuiet`) MÅ sjekkes EKSPLISITT her,
+      // ALDRI kun utledet fra `nextStage` - non-regresjon (over) kan HOLDE
+      // `nextStage` på et TIDLIGERE (høyere) 'inform'/'suggest'-nivå fra FØR
+      // stille-timer-vinduet ble aktivt. Uten denne `!withinQuiet`-sjekken
+      // ville en re-evaluering MIDT I et stille-timer-vindu feilaktig talt
+      // som `newly_actionable` og trigget en varsling akkurat når eieren
+      // har konfigurert IKKE å bli varslet.
+      const newlyActionable = !stageIsActedUpon && !withinQuiet && resuppressOpen && (nextStage === "inform" || nextStage === "suggest");
 
       const { rows } = await client.query(
         `UPDATE situations
-         SET priority = $3, confidence = $4, reason = $5, stage = $6,
+         SET priority = $4, confidence = $5, reason = $6, stage = $7,
              status = 'open', resolved_at = NULL,
-             last_notified_at = CASE WHEN $7 THEN $8 ELSE last_notified_at END,
+             last_notified_at = CASE WHEN $8 THEN $9 ELSE last_notified_at END,
              updated_at = now()
-         WHERE tenant_id = $1 AND detection_key = $2
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key = $3
          RETURNING *`,
-        [tenantId, value.detection_key, value.priority, value.confidence ?? null, value.reason, nextStage, newlyActionable, new Date(now).toISOString()]
+        [
+          tenantId,
+          memorySpace,
+          value.detection_key,
+          value.priority,
+          value.confidence ?? null,
+          value.reason,
+          nextStage,
+          newlyActionable,
+          new Date(now).toISOString()
+        ]
       );
       return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
     });
@@ -370,6 +469,14 @@ export class SituationEngine {
     gateway: ToolGateway,
     identity: IdentityContext
   ): Promise<ActOnResult> {
+    // Funn 3 (arkitekt-review runde 1, PR #85): en STABIL, deterministisk
+    // idempotens-nøkkel BUNDET til situasjonen - en kaller kan fortsatt gi
+    // sin EGEN `request.idempotency_key` (f.eks. for å binde ekstra
+    // kontekst), men `actOn()` GARANTERER ALLTID at NOEN stabil nøkkel
+    // brukes, BÅDE for den varige claim-en under OG for selve
+    // `ToolGateway.execute()`-kallet.
+    const idempotencyKey = request.idempotency_key ?? `situation-act:${situationId}`;
+
     const situation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
       if (!rows[0]) throw new SituationNotFoundError(situationId);
@@ -380,12 +487,49 @@ export class SituationEngine {
       throw new SituationDomainPausedError(situation.domain, this.domainPauses.pauseReason(situation.domain));
     }
 
+    // Funn 3: ATOMISK, VARIG, EKSKLUSIV claim FØR noe eksternt
+    // `ToolGateway.execute()`-kall gjøres. `WHERE act_idempotency_key IS
+    // NULL` er BEVISST eksklusiv (IKKE "eller samme nøkkel") - KUN ÉN
+    // caller, uansett om den er en SANN samtidig konkurrent eller en enkel
+    // sekvensiell kaller, vinner NOENSINNE denne claimen for en gitt
+    // situasjon. En SAMTIDIG "taper" (SAMME utledede nøkkel som allerede er
+    // claimet, men IKKE ferdig persistert ennå - `act_result IS NULL`) kan
+    // IKKE skilles fra "et tidligere forsøk krasjet" - `actOn()` velger
+    // derfor det TRYGGESTE utfallet og kaster `SituationActInFlightError`
+    // i STEDET for å risikere et EKTE samtidig dobbelt `execute()`-kall (se
+    // den klassens doc-kommentar). En SEKVENSIELL retry med SAMME nøkkel
+    // ETTER at forrige forsøk faktisk FULLFØRTE persisteringen
+    // (`act_result` er satt) er derimot TRYGG: `ToolGateway.execute()` sin
+    // EGEN idempotency_key-dedupe (tool_executions) er pålitelig for et
+    // SEKVENSIELT kall (den forrige raden er allerede committet), så den
+    // FAKTISKE side-effekten skjer likevel aldri to ganger.
+    await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: claimedRows } = await client.query(
+        `UPDATE situations
+         SET act_claimed_at = now(), act_idempotency_key = $3
+         WHERE tenant_id = $1 AND situation_id = $2 AND act_idempotency_key IS NULL
+         RETURNING *`,
+        [tenantId, situationId, idempotencyKey]
+      );
+      if (claimedRows[0]) {
+        return;
+      }
+      const { rows: existingRows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
+      const existingSituation = existingRows[0] as Situation;
+      if (existingSituation.act_idempotency_key !== idempotencyKey) {
+        throw new SituationActAlreadyClaimedError(situationId);
+      }
+      if (existingSituation.act_result === null) {
+        throw new SituationActInFlightError(situationId);
+      }
+    });
+
     const toolResult = await gateway.execute({
       identity,
       tool_id: request.tool_id,
       action: request.action,
       parameters: request.parameters,
-      ...(request.idempotency_key !== undefined ? { idempotency_key: request.idempotency_key } : {})
+      idempotency_key: idempotencyKey
     });
 
     const nextStage: SituationStage = toolResult.ok ? "act" : "escalate";
@@ -409,21 +553,33 @@ export class SituationEngine {
     // ACT+NOTIFY: best-effort - en varslingsfeil reverserer ALDRI den allerede bekreftede ACT-raden.
     let finalSituation = updated;
     try {
-      await gateway.execute({
+      // Funn 4 (arkitekt-review runde 1, PR #85): `notifyResult.ok` MÅ
+      // sjekkes EKSPLISITT under - et Telegram-kall som returnerer NORMALT
+      // med `{ok: false, ...}` (f.eks. policy-nektet av `PolicyGateway`,
+      // INGEN kastet feil) skal ALDRI stille tolkes som en vellykket
+      // levering. Den gamle koden stolte KUN på try/catch, som fanger en
+      // KASTET feil men IKKE en normalt returnert `ok: false` - dermed
+      // avanserte stadiet til 'act_notify' selv når Telegram-varselet
+      // faktisk aldri ble bekreftet sendt.
+      const notifyResult = await gateway.execute({
         identity,
         tool_id: "telegram",
         action: "notify",
         parameters: { message: `Jarvis utførte en handling: ${situation.reason} (${request.tool_id}.${request.action})` }
       });
-      finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-        const { rows } = await client.query(
-          `UPDATE situations SET stage = 'act_notify', updated_at = now() WHERE tenant_id = $1 AND situation_id = $2 RETURNING *`,
-          [tenantId, situationId]
-        );
-        return rows[0] as Situation;
-      });
+      if (notifyResult.ok) {
+        finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+          const { rows } = await client.query(
+            `UPDATE situations SET stage = 'act_notify', updated_at = now() WHERE tenant_id = $1 AND situation_id = $2 RETURNING *`,
+            [tenantId, situationId]
+          );
+          return rows[0] as Situation;
+        });
+      }
+      // notifyResult.ok === false: stadiet forblir 'act' - en ærlig, synlig
+      // indikasjon på at varselet IKKE ble bekreftet levert (se filhode).
     } catch {
-      // Varsel-kallet feilet - ACT-raden (allerede skrevet over) er UENDRET beviset på at handlingen skjedde.
+      // Varsel-kallet KASTET - ACT-raden (allerede skrevet over) er UENDRET beviset på at handlingen skjedde.
       // Stadiet forblir 'act' (ikke 'act_notify') - en ærlig, synlig indikasjon på at varselet IKKE ble bekreftet levert.
     }
 

@@ -3962,12 +3962,23 @@ beslutningen over, ingen mening i å koble en komposisjons-rot til FØR det finn
 person-scoped (`planPerson()`) Q-20-erasure for `owner_person_id` (delt, allerede akseptert
 begrensning med `business_open_loops` sin egen `owner_person_id` - IKKE en ny gap, se design-notatet).
 
+**Arkitekt-review runde 1 (PR #85):** 6 P1-funn, ALLE rettet i samme slice - atomisk kollisjonsdomene
+inkl. `memory_space_id` + identitets-konflikt-avvisning i `evaluateCandidate()`; scope-safe sammensatt
+FK for `source_open_loop_id`; atomisk, eksklusiv claim + deterministisk idempotens-nøkkel i `actOn()`
+(eksakt-én-gang ACT, krasj-gjenopprettings-trygg retry); eksplisitt `ToolResult.ok`-sjekk på
+Telegram-varselet; stille-timer sjekkes eksplisitt selv under stadie-non-regresjon; `DomainPauseRegistry`
+fikk en `*Durable()`-variant (Postgres-skrive-gjennom + `restore()`, fail-closed oppstartsgjenoppretting)
+- se `docs/UA10_SITUATION_ENGINE_DESIGN.md` §4/§6/§7/§8 for det fulle, oppdaterte designet.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
-deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`) +
-`modules/erasure/test/situations-erasure.test.ts` (ekte end-to-end `ErasureService`-bevis). Se
-`docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen mens PR #84/D-157 aktivt
-endrer den - se PR-en sin egen kommentar).
+deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-
+review-adversarielle tester: samtidig deteksjons-race, identitets-konflikt, scope-safe cross-tenant/
+cross-space `source_open_loop_id`, deterministisk claim-i-flukt-avvisning, claim-konflikt, krasj-
+gjenopprettings-retry, Telegram ok:false uten kast, stille-timer-under-resuppress, restart-overlevende
+domene-pause) + `modules/erasure/test/situations-erasure.test.ts` (ekte end-to-end
+`ErasureService`-bevis). Se `docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen
+mens PR #84/D-157 aktivt endrer den - se PR-en sin egen kommentar).
 
 ---
 

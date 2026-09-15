@@ -73,6 +73,18 @@ CREATE POLICY situation_notification_policies_space ON situation_notification_po
   USING (memory_space_id = ANY (string_to_array(current_setting('jarvis.memory_spaces', true), ',')))
   WITH CHECK (memory_space_id = ANY (string_to_array(current_setting('jarvis.memory_spaces', true), ',')));
 
+-- Arkitekt-review-runde 1 (PR #85, HEAD 767d100) Funn 2: `source_open_loop_id`
+-- refererte tidligere KUN `business_open_loops.open_loop_id` (PK-only FK) -
+-- ID-en ALENE beviser IKKE at raden faktisk hoerer til SAMME tenant+space
+-- som situasjonen selv. `business_open_loops.open_loop_id` er allerede
+-- global-unik (PK) - denne UNIQUE-en er derfor et RENT tillegg (alltid
+-- oppfylt av PK-en), som gjoer den ETTERFOELGENDE sammensatte FK-en under
+-- mulig: Postgres kan da HAANDHEVE (transaksjonelt, race-fritt - IKKE en
+-- applikasjons-nivaa-sjekk som kan raake) at et `source_open_loop_id` en
+-- situasjon peker paa alltid deler NOEYAKTIG tenant_id+memory_space_id med
+-- situasjonen selv.
+ALTER TABLE business_open_loops ADD CONSTRAINT business_open_loops_scope_uq UNIQUE (open_loop_id, tenant_id, memory_space_id);
+
 CREATE TABLE situations (
   situation_id         text PRIMARY KEY,
   tenant_id             text NOT NULL REFERENCES tenants (tenant_id),
@@ -95,11 +107,18 @@ CREATE TABLE situations (
   owner_person_id       text REFERENCES people (person_id),
   -- Løs peker til kilden (ALDRI en kopi av kildedataene) - `NULL` er den
   -- normale P0-tilstanden siden INGEN live kilde er koblet til ennå.
-  source_open_loop_id   text REFERENCES business_open_loops (open_loop_id),
+  -- Funn 2 (se over): scope-safe sammensatt FK legges til RETT ETTER denne
+  -- tabellens egen definisjon (kolonnene må eksistere først).
+  source_open_loop_id   text,
   -- Idempotent deteksjon - SAMME "detection_key"-mønster som
   -- `business_open_loops` (020_business_open_loops.sql sin kommentar):
   -- en re-evaluering av SAMME underliggende forhold oppdaterer DENNE raden,
-  -- oppretter ALDRI en duplikat.
+  -- oppretter ALDRI en duplikat. Funn 1 (arkitekt-review runde 1, PR #85):
+  -- kollisjonsdomenet MÅ inkludere `memory_space_id` - to ulike memory
+  -- spaces skal kunne ha SIN EGEN situasjon for samme fri-tekst
+  -- `detection_key` uten å kollidere (samme flerspace-disiplin som resten
+  -- av tabellen) - se UNIQUE-en under (erstatter den tidligere
+  -- (tenant_id, detection_key)-only UNIQUE-en).
   detection_key         text NOT NULL,
   stage                 text NOT NULL DEFAULT 'remember'
     CHECK (stage IN ('ignore','remember','inform','suggest','act','act_notify','escalate')),
@@ -124,14 +143,60 @@ CREATE TABLE situations (
   -- "ingen bekreftet suksess" (`ToolResult.ok === false` for begge, se
   -- gateway.ts sin egen kommentar om nøyaktig dette designvalget).
   act_result             text CHECK (act_result IS NULL OR act_result IN ('succeeded','denied')),
+  -- Funn 3 (arkitekt-review runde 1, PR #85): et ATOMISK, VARIG "claim" på
+  -- raden FØR noe eksternt `ToolGateway.execute()`-kall gjøres -
+  -- `act_idempotency_key` er den EKTE idempotens-nøkkelen som BÅDE denne
+  -- raden OG selve `ToolGateway.execute()`-kallet bruker. Første `actOn()`-
+  -- kall som klarer å sette denne (WHERE-betinget UPDATE, se service.ts)
+  -- "vinner" claimen; et SENERE `actOn()`-forsøk med en ANNEN nøkkel for
+  -- SAMME situasjon avvises FØR noe eksternt kall gjøres. Et forsøk med
+  -- SAMME nøkkel (en legitim retry etter en krasj mellom det eksterne
+  -- kallet og den avsluttende persisteringen under) claimer på nytt trygt -
+  -- `ToolGateway.execute()` sin EGEN idempotency_key-dedupe (tool_executions)
+  -- garanterer at selve SIDE-EFFEKTEN aldri gjentas.
+  act_idempotency_key    text,
+  act_claimed_at          timestamptz,
   opened_at              timestamptz NOT NULL DEFAULT now(),
   resolved_at            timestamptz,
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (tenant_id, detection_key)
+  UNIQUE (tenant_id, memory_space_id, detection_key)
 );
 CREATE INDEX situations_queue_idx ON situations (tenant_id, memory_space_id, status, stage, priority);
 CREATE INDEX situations_domain_idx ON situations (tenant_id, memory_space_id, domain, status);
+
+-- Funn 2 (se kommentaren over `business_open_loops_scope_uq`): scope-safe
+-- sammensatt FK - en `source_open_loop_id` som IKKE tilhoerer NOEYAKTIG
+-- SAMME (tenant_id, memory_space_id) som situasjonen selv, avvises av
+-- databasen selv (MATCH SIMPLE - default - betyr at en NULL
+-- `source_open_loop_id`, den normale P0-tilstanden, aldri trigger sjekken).
+ALTER TABLE situations ADD CONSTRAINT situations_source_open_loop_scope_fk
+  FOREIGN KEY (source_open_loop_id, tenant_id, memory_space_id)
+  REFERENCES business_open_loops (open_loop_id, tenant_id, memory_space_id);
+
+-- Funn 6 (arkitekt-review runde 1, PR #85): `DomainPauseRegistry` sin
+-- rene in-memory-tilstand (domain-pause.ts) er PROSESS-LOKAL og
+-- OMSTART-FLYKTIG - SAMME "fase 1-skjelett"-begrensning som `KillSwitch`
+-- (modules/policy/src/kill-switch.ts) og `OwnerControls`
+-- (modules/policy/src/authority.ts) ALLEREDE har i DAG, IKKE en ny,
+-- UA-10-spesifikk brist. Denne tabellen gir `DomainPauseRegistry` en
+-- VARIG *Durable*-variant (se domain-pause.ts sine `*Durable()`-metoder +
+-- `restore()`) - en omstart GLEMMER IKKE lenger en aktiv pause
+-- (fail-CLOSED oppstartsgjenoppretting) NÅR en pool er gitt ved
+-- konstruksjon og `restore()` kalles. INGEN tenant-scoping/RLS her med
+-- vilje: en pause er en EIER-/SOVEREIGN-handling (samme globale, ikke
+-- tenant-partisjonerte omfang som `KillSwitch` selv - `isPaused(domain)`
+-- har ALDRI tatt en tenant-parameter). Ekte SANNTIDS tvers-av-prosess-
+-- konsistens (flere SAMTIDIG kjørende worker-prosesser) er FORTSATT IKKE
+-- dekket i P0 (kun omstart-av-SAMME-prosess-varighet) - flagget eksplisitt
+-- i domain-pause.ts sitt filhode, ikke stilltiende utelatt.
+CREATE TABLE situation_domain_pauses (
+  domain      text PRIMARY KEY,
+  reason      text NOT NULL,
+  paused_by   text REFERENCES people (person_id),
+  paused_at   timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON situation_domain_pauses TO jarvis_app;
 
 -- Q-20-mønster: situasjoner er OPERASJONELL hendelsestilstand (som
 -- `business_open_loops`), IKKE append-only systemrevisjon - `UPDATE` er

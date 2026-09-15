@@ -109,6 +109,8 @@ export interface Situation {
   act_tool_id: string | null;
   act_action: string | null;
   act_result: SituationActResult | null;
+  act_idempotency_key: string | null;
+  act_claimed_at: string | null;
   opened_at: string;
   resolved_at: string | null;
   created_at: string;

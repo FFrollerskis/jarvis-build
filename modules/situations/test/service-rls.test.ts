@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
-import { SituationEngine, SituationEngineValidationError, SituationNotFoundError } from "../src/service.ts";
+import { SituationDetectionKeyConflictError, SituationEngine, SituationEngineValidationError, SituationNotFoundError } from "../src/service.ts";
 import type { SituationCandidateInput } from "../src/types.ts";
 
 /**
@@ -262,5 +262,143 @@ describe("I: resolve() - lukker en situasjon, den forsvinner fra standard getQue
     expect(reopened.situation_id).toBe(situation.situation_id);
     expect(reopened.status).toBe("open");
     expect(reopened.resolved_at).toBeNull();
+  });
+});
+
+describe("J: Funn 1 (arkitekt-review runde 1, PR #85) - atomisk kollisjonsdomene (tenant+space+detection_key)", () => {
+  it("SAMME detection_key i TO ULIKE memory spaces (samme tenant) kolliderer IKKE - to uavhengige rader", async () => {
+    const tenantId = "tenant-sit-svc-space-dedupe";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'SpaceDedupe', 'business')`);
+    const key = "shared-key:space-dedupe";
+    const inBusiness = await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key }));
+    const inPersonal = await engine.evaluateCandidate(tenantId, "personal", candidate({ detection_key: key, domain: "home" }));
+    expect(inBusiness.situation.situation_id).not.toBe(inPersonal.situation.situation_id);
+
+    const { rows } = await adminPool.query(`SELECT count(*)::int AS n FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [tenantId, key]);
+    expect((rows[0] as { n: number }).n).toBe(2);
+  });
+
+  it("TO SAMTIDIGE evaluateCandidate()-kall for en HELT NY detection_key racer TRYGT - ingen ukontrollert unique-constraint-feil, kun ÉN rad opprettes", async () => {
+    const tenantId = "tenant-sit-svc-concurrent-new";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'ConcurrentNew', 'business')`);
+    const key = "spend:concurrent-race";
+    const [first, second] = await Promise.all([
+      engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key })),
+      engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key }))
+    ]);
+    expect(first.situation.situation_id).toBe(second.situation.situation_id);
+
+    const { rows } = await adminPool.query(`SELECT count(*)::int AS n FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [tenantId, key]);
+    expect((rows[0] as { n: number }).n).toBe(1);
+  });
+
+  it("en re-deteksjon for SAMME detection_key med et ANNET domain avvises (SituationDetectionKeyConflictError), overskriver ALDRI stille", async () => {
+    const tenantId = "tenant-sit-svc-identity-conflict";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'IdentityConflict', 'business')`);
+    const key = "spend:identity-conflict-domain";
+    await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key, domain: "spend" }));
+    await expect(
+      engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key, domain: "pipeline" }))
+    ).rejects.toThrow(SituationDetectionKeyConflictError);
+
+    // Den lagrede raden er UENDRET (fortsatt 'spend') - avvisningen skrev INGENTING.
+    const { rows } = await adminPool.query(`SELECT domain FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [tenantId, key]);
+    expect((rows[0] as { domain: string }).domain).toBe("spend");
+  });
+
+  it("en re-deteksjon for SAMME detection_key med en ANNEN owner_person_id avvises (SituationDetectionKeyConflictError)", async () => {
+    const tenantId = "tenant-sit-svc-identity-conflict-owner";
+    await adminPool.query(`
+      INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'IdentityConflictOwner', 'business');
+      INSERT INTO people (person_id, display_name) VALUES ('person-owner-x', 'X'), ('person-owner-y', 'Y');
+      INSERT INTO person_tenants (person_id, tenant_id) VALUES ('person-owner-x', '${tenantId}'), ('person-owner-y', '${tenantId}');
+    `);
+    const key = "spend:identity-conflict-owner";
+    await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key, owner_person_id: "person-owner-x" }));
+    await expect(
+      engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key, owner_person_id: "person-owner-y" }))
+    ).rejects.toThrow(SituationDetectionKeyConflictError);
+  });
+});
+
+describe("K: Funn 2 (arkitekt-review runde 1, PR #85) - source_open_loop_id er scope-safe (sammensatt FK)", () => {
+  const TENANT_K1 = "tenant-sit-svc-scope-fk-a";
+  const TENANT_K2 = "tenant-sit-svc-scope-fk-b";
+
+  beforeAll(async () => {
+    await adminPool.query(`
+      INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_K1}', 'ScopeFkA', 'business'), ('${TENANT_K2}', 'ScopeFkB', 'business');
+      INSERT INTO business_open_loops (open_loop_id, tenant_id, memory_space_id, loop_type, detection_key, reason)
+        VALUES
+          ('loop-scope-fk-business', '${TENANT_K1}', 'business', 'stalled_opportunity', 'loop:scope-fk-business', 'test loop business'),
+          ('loop-scope-fk-personal', '${TENANT_K1}', 'personal', 'stalled_opportunity', 'loop:scope-fk-personal', 'test loop personal'),
+          ('loop-scope-fk-other-tenant', '${TENANT_K2}', 'business', 'stalled_opportunity', 'loop:scope-fk-other-tenant', 'test loop other tenant');
+    `);
+  });
+
+  it("en source_open_loop_id i SAMME tenant+space som situasjonen aksepteres", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_K1, "business", candidate({
+      detection_key: "spend:scope-fk-ok", source_open_loop_id: "loop-scope-fk-business"
+    }));
+    expect(situation.source_open_loop_id).toBe("loop-scope-fk-business");
+  });
+
+  it("en source_open_loop_id fra et ANNET tenant avvises av databasen (FK-brudd), INGEN rad skrives", async () => {
+    await expect(
+      engine.evaluateCandidate(TENANT_K1, "business", candidate({
+        detection_key: "spend:scope-fk-cross-tenant", source_open_loop_id: "loop-scope-fk-other-tenant"
+      }))
+    ).rejects.toThrow();
+    const { rows } = await adminPool.query(
+      `SELECT 1 FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [TENANT_K1, "spend:scope-fk-cross-tenant"]
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("en source_open_loop_id fra SAMME tenant men et ANNET memory_space avvises av databasen (FK-brudd)", async () => {
+    await expect(
+      engine.evaluateCandidate(TENANT_K1, "business", candidate({
+        detection_key: "spend:scope-fk-cross-space", source_open_loop_id: "loop-scope-fk-personal"
+      }))
+    ).rejects.toThrow();
+    const { rows } = await adminPool.query(
+      `SELECT 1 FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [TENANT_K1, "spend:scope-fk-cross-space"]
+    );
+    expect(rows).toHaveLength(0);
+  });
+});
+
+describe("L: Funn 5 (arkitekt-review runde 1, PR #85) - stille timer MÅ sjekkes selv naar resuppress-vinduet er ute", () => {
+  it("en re-deteksjon ETTER resuppress-vinduet, men INNENFOR et konfigurert stille-timer-vindu, er IKKE newly_actionable", async () => {
+    const tenantId = "tenant-sit-svc-quiet-resuppress";
+    await adminPool.query(`INSERT INTO tenants (tenant_id, name, kind) VALUES ('${tenantId}', 'QuietResuppress', 'business')`);
+    await engine.setNotificationPolicy(tenantId, "business", { quiet_hours_start_utc: 22, quiet_hours_end_utc: 6, resuppress_hours: 1 });
+
+    const key = "spend:quiet-during-resuppress";
+    const t0 = Date.UTC(2026, 5, 3, 12, 0); // 12:00 UTC - utenfor stille-timer-vinduet.
+    const first = await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key }), t0);
+    expect(first.situation.stage).toBe("inform");
+    expect(first.newly_actionable).toBe(true);
+    const lastNotifiedAfterFirst = first.situation.last_notified_at;
+    expect(lastNotifiedAfterFirst).not.toBeNull();
+
+    // 11 timer senere: LANGT forbi 1-times-resuppress-vinduet (resuppressOpen=true),
+    // MEN klokken er nå 23:00 UTC - INNENFOR det konfigurerte 22->6-stille-vinduet.
+    // Stadiet forblir 'inform' (non-regresjon - computedStage under stille timer er
+    // 'remember', men eksisterende 'inform' er høyere og beholdes) - FØR Funn 5-fiksen
+    // ville dette feilaktig blitt newly_actionable=true kun fordi resuppress-vinduet
+    // var ute, og stille sendt et varsel midt i eierens konfigurerte stille periode.
+    const tQuiet = t0 + 11 * 3_600_000;
+    const second = await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key }), tQuiet);
+    expect(second.situation.stage).toBe("inform");
+    expect(second.newly_actionable).toBe(false);
+    // last_notified_at UENDRET - INGEN stille varslings-bokføring skjedde under stille timer.
+    expect(second.situation.last_notified_at).toEqual(lastNotifiedAfterFirst);
+
+    // Kontroll: SAMME situasjon, re-detektert UTENFOR stille-vinduet OG forbi
+    // resuppress-vinduet, ER newly_actionable (beviser testen over faktisk måler noe).
+    const tAfterQuiet = t0 + 20 * 3_600_000; // 08:00 UTC neste dag - utenfor 22->6.
+    const third = await engine.evaluateCandidate(tenantId, "business", candidate({ detection_key: key }), tAfterQuiet);
+    expect(third.newly_actionable).toBe(true);
   });
 });

@@ -7,6 +7,14 @@ selv (det er en TILSTANDSMASKIN over allerede-eksisterende, allerede-styrte forh
 notatet dekker likevel D-64-porten, retensjon/erasure og sikkerhetsgrensene eksplisitt, samme
 disiplin som enhver ny UA.
 
+**Arkitekt-review runde 1 (PR #85, opprinnelig HEAD 767d100):** 6 P1-funn (atomisk kollisjonsdomene/
+identitets-konflikt i `evaluateCandidate()`, scope-safe `source_open_loop_id`, atomisk claim +
+eksakt-én-gang i `actOn()`, manglende `ToolResult.ok`-sjekk på Telegram-varselet, stille-timer-hull
+under resuppress-non-regresjon, `DomainPauseRegistry` sin restart-flyktighet) — ALLE rettet, se §4/§6/§7
+under for det oppdaterte designet og `modules/situations/test/*` for de nye adversarielle testene
+(kollisjons-/race-/identitets-konflikt-/scope-/claim-/telegram-ok-false-/stille-under-resuppress-/
+restart-overlevelse-tester).
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -21,7 +29,7 @@ pakken igjen.
 
 | Data | Tabell | Hva som faktisk lagres |
 |---|---|---|
-| Situasjoner (hendelses-/anomali-tilstand) | `situations` (`056_situations.sql`) | Fri-tekst `domain`, idempotent `detection_key`, tilstandsmaskin-`stage`, `priority`/`confidence`, `reason` (fritekst begrunnelse), valgfri `owner_person_id`, valgfri PEKER til `business_open_loops` (`source_open_loop_id`), tynne ACT-pekere (`act_tool_id`/`act_action`/`act_result` — ALDRI en kopi av `tool_executions` sitt evidence). |
+| Situasjoner (hendelses-/anomali-tilstand) | `situations` (`056_situations.sql`) | Fri-tekst `domain`, idempotent `detection_key`, tilstandsmaskin-`stage`, `priority`/`confidence`, `reason` (fritekst begrunnelse), valgfri `owner_person_id`, valgfri SCOPE-SAFE peker til `business_open_loops` (`source_open_loop_id` — sammensatt FK mot `(open_loop_id, tenant_id, memory_space_id)`, arkitekt-review runde 1 Funn 2: en `source_open_loop_id` fra et ANNET tenant/space enn situasjonen selv avvises av databasen, race-fritt), tynne ACT-pekere (`act_tool_id`/`act_action`/`act_result`/`act_idempotency_key`/`act_claimed_at` — ALDRI en kopi av `tool_executions` sitt evidence). |
 | Varslingspolicy | `situation_notification_policies` (`056_situations.sql`) | Eier-konfigurert stille-timer-vindu + re-suppress-vindu per (tenant, space). |
 
 **Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN ny anomali-detektor for
@@ -42,9 +50,15 @@ Masterplanens egen rekkefølge, ordrett: `ignore -> remember -> inform -> sugges
 
 ## 4. "No duplicate spam for same event" — strukturelt håndhevet
 
-1. **Deteksjons-dedupe**: `UNIQUE (tenant_id, detection_key)` (samme mønster som
-   `business_open_loops.detection_key`) — en gjentatt kandidat for SAMME forhold oppdaterer SAMME
-   rad, oppretter ALDRI en duplikat.
+1. **Deteksjons-dedupe**: `UNIQUE (tenant_id, memory_space_id, detection_key)` (arkitekt-review runde 1
+   utvidet kollisjonsdomenet med `memory_space_id` — samme flerspace-disiplin som resten av tabellen;
+   opprinnelig `(tenant_id, detection_key)` alene ville feilaktig kollidert på tvers av spaces). Selve
+   skrivingen er et ATOMISK `INSERT ... ON CONFLICT DO NOTHING` FØRST, deretter en race-fri `FOR UPDATE`
+   fetch KUN ved konflikt (samme "prøv insert FØRST"-mønster som vision sin
+   `insertValidatedInTransaction()`) — IKKE en separat SELECT-så-branch, som tidligere kunne race på en
+   ukontrollert unique-constraint-feil for to samtidige kandidater med en HELT NY nøkkel. En re-deteksjon
+   for SAMME nøkkel hvis IDENTITET (`domain`/`owner_person_id`/`source_open_loop_id`) er ENDRET fra det
+   lagrede avvises EKSPLISITT (`SituationDetectionKeyConflictError`), overskriver ALDRI stille.
 2. **Varslings-suppression**: `last_notified_at` + eier-konfigurert `resuppress_hours` (fallback 24
    timer) — `newly_actionable` (returnert av `evaluateCandidate()`) er `false` for en re-deteksjon
    INNENFOR vinduet, selv om raden faktisk oppdateres. KUN `newly_actionable: true` bør en kaller
@@ -52,7 +66,11 @@ Masterplanens egen rekkefølge, ordrett: `ignore -> remember -> inform -> sugges
 3. **Stille timer (quiet hours)**: eier-konfigurert UTC-vindu (`isWithinQuietHours()`, ren funksjon,
    håndterer et vindu som krysser midnatt) — holder stadiet på `remember` under vinduet, ALDRI
    `inform`/`suggest` umiddelbart. Et nullbredde-vindu (`start === slutt`) tolkes EKSPLISITT som
-   "deaktivert", ALDRI som "stille hele døgnet".
+   "deaktivert", ALDRI som "stille hele døgnet". Arkitekt-review runde 1: `newly_actionable` sjekker
+   NÅ `!withinQuiet` EKSPLISITT, ikke kun indirekte via beregnet stadium — stadie-non-regresjon (§3)
+   kan HOLDE et eksisterende `inform`/`suggest`-nivå OPPE selv når det NÅVÆRENDE beregnede stadiet er
+   `remember` (stille timer), og UTEN denne eksplisitte sjekken ville et resuppress-vindu som utløp
+   MIDT I et stille-timer-vindu feilaktig telt som en NY varsling.
 
 Bevist i `modules/situations/test/{service-rls,stage-rules}.test.ts`.
 
@@ -79,15 +97,35 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    er in-memory/deterministisk, samme "instantly"-disiplin som `KillSwitch` (SECURITY_MODEL §8), men
    domene-navngitt (fri tekst — nye domener trenger INGEN kode-endring for å kunne pauses).
    `KillSwitch` sin GLOBALE virkning er UENDRET og virker SAMTIDIG (sjekkes inne i `execute()`).
-2. **ETT Telegram-varsel-kall ETTER en BEKREFTET suksess** (`ok: true`, ALDRI før, ALDRI på en
+   Arkitekt-review runde 1 Funn 6: registeret har nå EN `*Durable()`-variant (Postgres-skrive-gjennom
+   + `restore()`) som gjør en pause OMSTART-OVERLEVENDE (fail-closed oppstartsgjenoppretting) når et
+   `pool` gis ved konstruksjon — den synkrone in-memory-kjernen (selve `isPaused()`-sjekken `actOn()`
+   bruker) er UENDRET "instantly", ingen DB-rundtur på selve sjekken. Ekte SANNTIDS tvers-av-prosess-
+   konsistens (flere SAMTIDIG kjørende worker-prosesser) er FORTSATT en kjent, delt begrensning med
+   `KillSwitch`/`OwnerControls` (begge fortsatt rent in-memory i dag) — IKKE løst isolert her.
+2. **En ATOMISK, VARIG, EKSKLUSIV claim på situasjons-raden FØR `execute()`** (Funn 3, arkitekt-review
+   runde 1): `act_idempotency_key`/`act_claimed_at` (056_situations.sql) sikrer at KUN ÉN `actOn()`-
+   kall noensinne får lov til å faktisk starte det eksterne kallet for en gitt situasjon — en SAMTIDIG
+   "taper" (samme utledede nøkkel, men forrige forsøk IKKE ferdig persistert ennå) avvises DETERMINISTISK
+   (`SituationActInFlightError`, IKKE et nytt `execute()`-kall), mens en SEKVENSIELL retry ETTER en
+   allerede FULLFØRT persistering claimer på nytt trygt (`ToolGateway.execute()` sin egen
+   idempotency_key-dedupe er pålitelig for det sekvensielle tilfellet). `idempotency_key` er nå ALLTID
+   satt (kaller-gitt ELLER deterministisk utledet `situation-act:<situation_id>`) - aldri valgfritt i
+   praksis.
+3. **ETT Telegram-varsel-kall ETTER en BEKREFTET suksess** (`ok: true`, ALDRI før, ALDRI på en
    nektet/ubekreftet handling — `ToolResult.ok === false` dekker BEGGE, se `gateway.ts` sin egen
-   kommentar) — best-effort, en varslingsfeil reverserer ALDRI den allerede skrevne ACT-raden.
-3. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
+   kommentar) — best-effort, en varslingsfeil reverserer ALDRI den allerede skrevne ACT-raden. Arkitekt-
+   review runde 1 Funn 4: `notifyResult.ok` sjekkes nå EKSPLISITT (ikke kun implisitt via try/catch) —
+   et Telegram-kall som returnerer NORMALT med `{ok: false}` (f.eks. policy-/parameter-nektet, INGEN
+   kastet feil) holder stadiet på `act`, ALDRI et falskt `act_notify`.
+4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
 
 Bevist i `modules/situations/test/act-on.test.ts` (vellykket ACT, policy-nektelse,
-postcondition-svikt, domene-pause FØR ethvert transportkall, pauseAll, unpause).
+postcondition-svikt, domene-pause FØR ethvert transportkall, pauseAll, unpause, deterministisk
+claim-i-flukt-avvisning, claim-konflikt med ulik nøkkel, krasj-gjenopprettings-retry, Telegram
+ok:false uten kast).
 
 ## 7. Retensjon og Q-20-erasure
 
