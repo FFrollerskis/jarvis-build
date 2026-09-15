@@ -762,7 +762,26 @@ async function runOwned(cfg, token) {
   // retirement, NO supersession, NO task-state mutation, NO worktree, scratch or
   // repository action, NO transition API read, NO prompt build and NO child
   // spawn - and leaves every existing task, claim and worktree untouched.
-  const control = fetchIssueCommentsDetailed(cfg);
+  const controlRead = fetchIssueCommentsDetailed(cfg);
+  /**
+   * D-152 TEST-ONLY fault `control_read_unproven`.
+   *
+   * READ_UNPROVEN is the snapshot's guard against a read NOBODY VOUCHED FOR -
+   * historically a bare array, and structurally any caller that hands over
+   * comments without completeness evidence. `fetchIssueCommentsDetailed` always
+   * supplies that evidence today, so the finding is unreachable from outside the
+   * process: it exists to stop a FUTURE caller or refactor from quietly
+   * reintroducing the weaker contract.
+   *
+   * That is exactly the situation the `JARVIS_WORKER_FAULT` convention already
+   * covers - a precondition there is no honest way to provoke from outside. Only
+   * the read's SHAPE is faked, by discarding the completeness evidence the real
+   * read produced. The snapshot capture, the refusal, the evidence and the exit
+   * below are the real, unmodified code path.
+   */
+  const control = faultArmed("control_read_unproven")
+    ? { ok: true, items: controlRead.items }
+    : controlRead;
   const snapshot = captureAuthoritySnapshot({ control, trustedAuthor: cfg.trustedAuthor });
   emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
     comment_count: snapshot.commentCount,
@@ -771,40 +790,76 @@ async function runOwned(cfg, token) {
     snapshot_reason: snapshot.reason
   });
   if (!snapshot.ok) {
+    // --- D-152: THE REFUSAL IS ITSELF A ZERO-WRITE DECISION -----------------
+    //
+    // D-151 put the boundary in the right place and then wrote through it. The
+    // refusal branch called `reportStatus`, and `reportStatus` is not an
+    // observation - it is three writes:
+    //
+    //   1. `postComment` PUBLISHES to the control issue. The control issue is
+    //      the queue's own input. A cycle that could not prove what the issue
+    //      contains was appending to the very thing it had just declared itself
+    //      unable to read, and every later cycle then reads that comment back as
+    //      part of the authority snapshot. A read flake became a permanent,
+    //      globally visible artefact created by a cycle with no authority.
+    //   2. `postComment` first WRITES A BODY FILE into `cfg.scratchRoot`,
+    //      creating the directory if absent - scratch activity the hold's own
+    //      log line simultaneously claimed had not happened.
+    //   3. On success `recordPostedStatus` APPENDS TO THE POSTED-STATUS
+    //      DEDUPLICATION JOURNAL. That is durable decision state, and it decides
+    //      the FUTURE: once the key is journalled, the same finding is suppressed
+    //      for `statusRepeatHours`. So an unproven read silently bought itself
+    //      six hours of silence for a condition that may by then be real and
+    //      genuinely worth reporting.
+    //
+    // All three are gone. What remains is the only category that cannot corrupt
+    // a later decision: APPEND-ONLY LOCAL EVIDENCE. The log and the health
+    // journal are written on this host, are never read back as authority, and
+    // are exactly what an operator needs to see that the worker held and why.
+    //
+    // The evidence deliberately does NOT claim a status notice was posted,
+    // because none was. A held cycle that cannot prove what the control issue
+    // says has no standing to add to it; the operator learns this from the local
+    // log, and the next complete read reports normally.
+    //
+    // NOTE: a COMPLETE snapshot is untouched by any of this. Legitimate status
+    // and report posting below this point is unchanged - the ban is on writing
+    // FROM A CYCLE THAT PROVED IT COULD NOT READ, not on writing at all.
     for (const line of describeAuthoritySnapshot(snapshot)) log(cfg, line);
-    log(cfg, `HOLDING the whole cycle: ${snapshot.reason}. Nothing was recovered, reconciled, retired, `
-      + "selected, dispatched or written.");
+    for (const line of [
+      `HOLDING the whole cycle: ${snapshot.reason}.`,
+      snapshot.detail ? `DETAIL: ${snapshot.detail}` : null,
+      `CONTROL READ: ok=${snapshot.readOk}, proven complete=${snapshot.complete === true}.`,
+      "A worker cycle ranks a queue, retires finished work, supersedes stale orders and dispatches a child -",
+      "and every one of those turns on something being ABSENT from what was read. A page that did not come",
+      "back is exactly where the second same-id order, the newer report or the contradicting retirement",
+      "would be, so a partial read may not decide any of them.",
+      "NOTHING was recovered, reconciled, retired, superseded, selected, fetched, pushed, reset or deleted.",
+      "No task state was written, no worktree or scratch directory was created or removed, no transition",
+      "API was read, no prompt was built and no child process was created. Every existing task, claim and",
+      "worktree is byte-for-byte as it was.",
+      "NO GitHub comment was posted and NO posted-status deduplication entry was recorded: a cycle that",
+      "cannot prove what the control issue contains does not write to the control issue. This log line and",
+      "the health journal are the whole of this cycle's evidence, and both are local and append-only.",
+      "The fault is in THIS READ, not in any order: no attempt was spent and every task stays fully eligible.",
+      `EXIT: ${EXIT.TRANSIENT} (TRANSIENT) - the next scheduled run proceeds normally. If it persists, confirm`,
+      "GitHub is reachable and that `gh api --paginate` returns the control issue in full."
+    ]) {
+      if (line !== null) log(cfg, line);
+    }
     emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
       reason: "control_authority_snapshot_unusable",
       snapshot_reason: snapshot.reason,
+      snapshot_detail: snapshot.detail ?? null,
       control_read_ok: snapshot.readOk,
-      collection_complete: snapshot.complete === true
-    });
-    reportStatus(cfg, {
-      taskId: null,
-      phase: "control_snapshot",
-      reason: `control_authority_snapshot_${snapshot.reason}`,
-      detail: [
-        "This worker cycle decided NOTHING, because it could not prove it had read the whole control issue.",
-        "",
-        `SNAPSHOT FINDING: ${snapshot.reason}`,
-        snapshot.detail ? `DETAIL: ${snapshot.detail}` : "",
-        `CONTROL READ: ok=${snapshot.readOk}, proven complete=${snapshot.complete === true}`,
-        "",
-        "A worker cycle ranks a queue, retires finished work, supersedes stale orders and dispatches a child -",
-        "and every one of those turns on something being ABSENT from what was read. A page that did not come",
-        "back is exactly where the second same-id order, the newer report or the contradicting retirement",
-        "would be, so a partial read may not decide any of them.",
-        "",
-        "NOTHING was recovered, reconciled, retired, superseded, selected, fetched, pushed, reset or deleted.",
-        "No task state was written, no worktree or scratch directory was created or removed, no transition",
-        "API was read, no prompt was built and no child process was created. Every existing task, claim and",
-        "worktree is byte-for-byte as it was.",
-        "",
-        "The fault is in THIS READ, not in any order: no attempt was spent and every task stays fully eligible."
-      ].filter((l) => l !== "").join("\n"),
-      nextAction: "No action required unless it persists; confirm GitHub is reachable and that "
-        + "`gh api --paginate` returns the control issue in full. The next scheduled run proceeds normally."
+      collection_complete: snapshot.complete === true,
+      // The zero-write claim, stated positively so that the evidence itself is
+      // falsifiable rather than merely silent about what it did not do.
+      held: true,
+      exit: EXIT.TRANSIENT,
+      status_comment_posted: false,
+      posted_status_recorded: false,
+      durable_state_written: false
     });
     return EXIT.TRANSIENT;
   }
