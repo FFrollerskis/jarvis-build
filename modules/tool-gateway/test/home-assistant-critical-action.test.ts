@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,7 +102,11 @@ class HaScenarioTransport implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
   private readonly locks: Map<string, boolean>;
   private readonly alarms: Map<string, boolean>;
-  private mutationHappened = false;
+  // Q-34 P2-oppfølging: PER SYKLUS (preflight -> mutasjon -> readback), ikke
+  // en engangs-flagg - ellers ville en transport GJENBRUKT på tvers av FLERE
+  // `gateway.execute()`-kall (nødvendig for å teste idempotens-replay, se
+  // beskrivelse G under) feilklassifisert en SENERE preflight som en readback.
+  private awaitingReadback = false;
 
   constructor(
     private readonly opts: {
@@ -123,7 +128,8 @@ class HaScenarioTransport implements ToolTransport {
     this.calls.push({ action, parameters });
 
     if (action === "read_state") {
-      const isPreflight = !this.mutationHappened;
+      const isPreflight = !this.awaitingReadback;
+      if (!isPreflight) this.awaitingReadback = false; // konsumer syklusen uansett utfall under
       if (isPreflight && this.opts.failPreflight) {
         throw new Error("ha_device_offline");
       }
@@ -149,7 +155,7 @@ class HaScenarioTransport implements ToolTransport {
     }
 
     if (action === "lock_set") {
-      this.mutationHappened = true;
+      this.awaitingReadback = true;
       if (this.opts.failMutation) throw new Error("ha_lock_command_rejected");
       const entity = parameters["entity"] as string;
       const locked = parameters["locked"] as boolean;
@@ -160,7 +166,7 @@ class HaScenarioTransport implements ToolTransport {
     }
 
     if (action === "alarm_set") {
-      this.mutationHappened = true;
+      this.awaitingReadback = true;
       if (this.opts.failMutation) throw new Error("ha_alarm_command_rejected");
       const roomKey = `${String(parameters["site_id"])}:${String(parameters["room_id"])}`;
       const armed = parameters["armed"] as boolean;
@@ -360,6 +366,78 @@ describe("D/E: Q-34 P1-oppfølging (uavhengig arkitektkontroll av PR #82) - post
 
     expect(result.ok).toBe(false);
     expect((result as { reason: string }).reason).toBe("postcondition_mismatch");
+  });
+});
+
+describe("G: Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82, EXACT_HEAD_SHA 91b0168) - en retry med SAMME idempotency_key ETTER en uverifisert postcondition gir ALDRI en tilfeldig ok:true", () => {
+  it("lock_set: FØRSTE kall muterer, men readback feiler; ANDRE kall med SAMME idempotency_key kaller ALDRI lock_set på nytt, og gir det NØYAKTIG samme ok:false - aldri en tilfeldig dedupe-suksess", async () => {
+    const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true }, failReadback: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
+    const key = `q34-replay-lock-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
+
+    // ANDRE kall med SAMME nøkkel - før fiksen ville dette truffet den
+    // gamle dedupe-grenen (status var lagret som 'succeeded' uansett) og
+    // returnert et FALSKT ok:true UTEN å lese noe på nytt.
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(false);
+    expect((second as { reason: string }).reason).toBe("postcondition_unverified:readback_failed");
+    // INGEN ny mutasjon ble utløst - fortsatt bare ÉN lock_set totalt:
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
+
+    const replay = await lastAudit("home-assistant", "lock_set", "tool.postcondition_unverified");
+    expect(replay).toBeDefined();
+    expect(replay!.payload["replayed"]).toBe(true);
+    expect(replay!.payload["reason"]).toBe("postcondition_unverified:readback_failed");
+  });
+
+  it("alarm_set: FØRSTE kall muterer men ENHETEN forblir uendret (mismatch); ANDRE kall med SAMME nøkkel gir det SAMME postcondition_mismatch, ALDRI en ny alarm_set", async () => {
+    const transport = new HaScenarioTransport({ knownAlarms: { "site-hus:rom-gang": false }, mutationSilentlyIneffective: true });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", armed: true };
+    const key = `q34-replay-alarm-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(transport.calls.filter((c) => c.action === "alarm_set")).toHaveLength(1);
+
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "alarm_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(false);
+    expect((second as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(transport.calls.filter((c) => c.action === "alarm_set")).toHaveLength(1);
+  });
+
+  it("lock_set: en VELLYKKET (verifisert) kall dedupliserer FORTSATT normalt ved retry - denne fiksen svekker IKKE den eksisterende idempotens-garantien for ekte suksess", async () => {
+    const transport = new HaScenarioTransport({ knownLocks: { "lock.ytterdor": true } });
+    const gateway = makeGateway(transport);
+    const parameters = { site_id: "site-hus", room_id: "rom-gang", entity: "lock.ytterdor", locked: false };
+    const key = `q34-replay-success-${randomUUID()}`;
+
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "home-assistant", action: "lock_set", parameters, idempotency_key: key
+    });
+    expect(second.ok).toBe(true);
+    expect((second as { deduplicated: boolean }).deduplicated).toBe(true);
+    expect(transport.calls.filter((c) => c.action === "lock_set")).toHaveLength(1);
   });
 });
 

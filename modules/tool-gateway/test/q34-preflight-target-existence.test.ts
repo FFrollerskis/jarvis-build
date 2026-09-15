@@ -356,6 +356,56 @@ describe("A3: postcondition_predicate - Q-34 P1-oppfølging (uleselig/manglende/
 
     expect(result.ok).toBe(true);
   });
+
+  /**
+   * Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82, EXACT_HEAD_SHA
+   * 91b0168): `postcondition_predicate` er UTVIDELSESKODE (definert av HVERT
+   * enkelt verktøy) kjørt INNI transaksjonen - en kastet feil på malformert/
+   * uventet providerdata skal ALDRI boble opp og abortere transaksjonen
+   * (som ville tapt audit-/tool_executions-bevismaterialet for en mutasjon
+   * som FAKTISK skjedde), men behandles identisk med en uleselig readback.
+   */
+  it("postcondition_predicate KASTER på malformert etter-tilstand -> fanges, ok:false postcondition_unverified:predicate_error, INGEN uhåndtert exception", async () => {
+    const transport = new LifecycleScriptedTransport({ v: 1 }, { data: "uventet-streng-ikke-et-objekt" as unknown as JsonValue });
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({
+      postcondition_predicate: (after) => {
+        // Simulerer et verktøy som (feilaktig) antar en objektform uten selv å garde mot det.
+        return (after as { nested: { v: number } }).nested.v === 2;
+      }
+    }, transport));
+
+    const result = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {} });
+
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe("postcondition_unverified:predicate_error");
+  });
+});
+
+describe("A4: Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82) - dedupe-replay av en UVERIFISERT postcondition gir ALDRI en tilfeldig ok:true (generisk, se home-assistant-critical-action.test.ts beskrivelse G for det EKTE HA-scenariet)", () => {
+  it("FØRSTE kall: postcondition mismatch -> ok:false, lagret status er IKKE 'succeeded'. ANDRE kall SAMME idempotency_key -> IDENTISK ok:false, mutasjonen kalles ALDRI på nytt", async () => {
+    let mutateCalls = 0;
+    class ReplayTransport implements ToolTransport {
+      async invoke(action: string): Promise<{ external_id?: string; data?: JsonValue }> {
+        if (action === "mutate") { mutateCalls += 1; return { external_id: "ext-1" }; }
+        return { data: { v: 999 } }; // alltid "feil" verdi - predikatet forventer v===2
+      }
+    }
+    const transport = new ReplayTransport();
+    const gateway = new ToolGateway(appPool, policy, { name: "t", get: async () => "cred" });
+    gateway.register(genericToolDef({ postcondition_predicate: (after) => (after as { v: number }).v === 2 }, transport));
+    const key = `q34-generic-replay-${Math.random()}`;
+
+    const first = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {}, idempotency_key: key });
+    expect(first.ok).toBe(false);
+    expect((first as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(mutateCalls).toBe(1);
+
+    const second = await gateway.execute({ identity, tool_id: "generic-q34", action: "mutate", parameters: {}, idempotency_key: key });
+    expect(second.ok).toBe(false);
+    expect((second as { reason: string }).reason).toBe("postcondition_mismatch");
+    expect(mutateCalls).toBe(1); // INGEN ny mutasjon
+  });
 });
 
 describe("C: konkret atferd per domene gjennom den EKTE ToolGateway.execute()-pipelinen", () => {

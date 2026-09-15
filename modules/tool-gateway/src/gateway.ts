@@ -349,10 +349,12 @@ export class ToolGateway {
     return withTenantTransaction(this.pool, request.identity.tenant_id, async (client) => {
       if (dedupeApplies && request.idempotency_key) {
         const prior = await client.query(
-          "SELECT external_id, status FROM tool_executions WHERE idempotency_key = $1",
+          "SELECT external_id, status, postcondition_reason FROM tool_executions WHERE idempotency_key = $1",
           [request.idempotency_key]
         );
-        const row = prior.rows[0] as { external_id: string | null; status: string } | undefined;
+        const row = prior.rows[0] as
+          | { external_id: string | null; status: string; postcondition_reason: string | null }
+          | undefined;
         if (row?.status === "succeeded") {
           await writeAudit(client, request.identity, {
             type: "tool.deduplicated", tool_id: request.tool_id, action: request.action,
@@ -364,6 +366,21 @@ export class ToolGateway {
             output_trust: definition.output_trust,
             deduplicated: true
           } as const;
+        }
+        // Q-34 P2-oppfølging (uavhengig arkitektkontroll av PR #82,
+        // EXACT_HEAD_SHA 91b0168): den FØRSTE gjennomkjøringen kunne ikke
+        // bekrefte resultatet (`status='unverified'`, migrasjon 054) - en
+        // retry med SAMME idempotency_key skal ALDRI utløse en ny mutasjon
+        // (den forrige kan strukturelt allerede ha skjedd), men skal OGSÅ
+        // ALDRI tilfeldig bli en ok:true. Den MÅ se det NØYAKTIG samme sanne,
+        // ikke-suksessfulle resultatet som den opprinnelige kalleren fikk.
+        if (row?.status === "unverified") {
+          await writeAudit(client, request.identity, {
+            type: "tool.postcondition_unverified", decision: "ALLOW",
+            tool_id: request.tool_id, action: request.action, capability_class: definition.capability_class,
+            payload: { external_id: row.external_id, replayed: true, reason: row.postcondition_reason }
+          });
+          return { ok: false, reason: row.postcondition_reason ?? "postcondition_unverified:replayed" } as const;
         }
       }
       let external: { external_id?: string; data?: JsonValue };
@@ -400,18 +417,46 @@ export class ToolGateway {
       // Q-34 P1-oppfølging: for et verktøy som EKSPLISITT lover
       // resultatverifisering (`postcondition_predicate`), avgjør om
       // etter-tilstanden faktisk BEKREFTER den tiltenkte nye tilstanden.
-      // Uendret `true` (verifisert) for ALT uten dette feltet satt - samme
-      // opt-in-disiplin som resten av Q-34-lukkingen.
-      const postconditionVerified =
-        definition.capability_class !== "D" || !definition.postcondition_predicate
-          ? true
-          : !readbackFailed && afterState !== null && definition.postcondition_predicate(afterState, request.parameters);
+      // `postconditionReason` er `null` NÅR OG BARE NÅR verifisert - både
+      // returverdien OG (Q-34 P2) den lagrede raden bruker NØYAKTIG samme
+      // strengverdi, slik at en senere replay kan gi et IDENTISK, ikke bare
+      // et generisk, avslag. Uendret `null` (verifisert) for ALT uten
+      // `postcondition_predicate` satt - samme opt-in-disiplin som resten av
+      // Q-34-lukkingen.
+      let postconditionReason: string | null = null;
+      if (definition.capability_class === "D" && definition.postcondition_predicate) {
+        if (readbackFailed) {
+          postconditionReason = "postcondition_unverified:readback_failed";
+        } else if (afterState === null) {
+          postconditionReason = "postcondition_unverified:target_missing";
+        } else {
+          // Q-34 P2-oppfølging: `postcondition_predicate` er UTVIDELSESKODE
+          // (definert av HVERT enkelt verktøy, ikke av gatewayen selv) og
+          // kjøres INNI transaksjonen - en kastet feil her (f.eks. et
+          // uventet/malformert providersvar) skal IKKE la unntaket boble opp
+          // og abortere transaksjonen (som ville tapt audit/tool_executions-
+          // bevismaterialet for en mutasjon som FAKTISK skjedde), men
+          // behandles som "ikke verifisert", identisk med en uleselig readback.
+          let predicateHeld: boolean;
+          try {
+            predicateHeld = definition.postcondition_predicate(afterState, request.parameters);
+          } catch {
+            predicateHeld = false;
+            postconditionReason = "postcondition_unverified:predicate_error";
+          }
+          if (postconditionReason === null && !predicateHeld) {
+            postconditionReason = "postcondition_mismatch";
+          }
+        }
+      }
+      const postconditionVerified = postconditionReason === null;
       if (dedupeApplies && request.idempotency_key) {
         await client.query(
-          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state)
-           VALUES ($1, $2, $3, $4, $5, 'succeeded', $6, $7) ON CONFLICT DO NOTHING`,
+          `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status, before_state, after_state, postcondition_reason)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT DO NOTHING`,
           [request.identity.tenant_id, request.idempotency_key, request.tool_id, request.action,
-           external.external_id ?? null, JSON.stringify(beforeState), JSON.stringify(afterState)]
+           external.external_id ?? null, postconditionVerified ? "succeeded" : "unverified",
+           JSON.stringify(beforeState), JSON.stringify(afterState), postconditionReason]
         );
       }
       await writeAudit(client, request.identity, {
@@ -436,14 +481,7 @@ export class ToolGateway {
         // en autentiserings-/rate-feil - men FORTSATT ikke "healthy": en
         // fremtidig kaller skal se degraderingen, ikke en falsk grønn status.
         this.setHealth(request.tool_id, "degraded", "postcondition_unverified");
-        return {
-          ok: false,
-          reason: readbackFailed
-            ? "postcondition_unverified:readback_failed"
-            : afterState === null
-              ? "postcondition_unverified:target_missing"
-              : "postcondition_mismatch"
-        } as const;
+        return { ok: false, reason: postconditionReason! } as const;
       }
       this.setHealth(request.tool_id, "healthy");
       return {
