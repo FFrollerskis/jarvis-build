@@ -890,6 +890,18 @@ export function evaluateCompletionGate({
     merge_authorization_decidable: mergeClaimed ? ma?.decidable === true : null,
     merge_authorization_reason: ma?.reason ?? null,
     merge_authorization_detail: ma?.detail ?? null,
+    // D-148: WHICH COMMENT WAS THE AUTHORITY, and how many claimed to be. A record
+    // that only says "authorized" cannot be audited afterwards: the whole D-148
+    // failure mode is a SECOND order for the same task id, and its signature is
+    // `merge_authority_candidate_count > 1`. The ids are GitHub's own comment ids,
+    // never anything the comment bodies say about themselves.
+    merge_authority_comment_id: ma?.selection?.canonical_comment_id ?? null,
+    merge_authority_created_at: ma?.selection?.canonical_created_at ?? null,
+    merge_authority_candidate_count: Number.isFinite(ma?.selection?.candidate_count)
+      ? ma.selection.candidate_count
+      : null,
+    merge_authority_candidate_comment_ids: ma?.selection?.candidate_comment_ids ?? [],
+    merge_authority_duplicate_comment_ids: ma?.selection?.duplicate_comment_ids ?? [],
     evaluated_at: now().toISOString()
   };
 
@@ -1333,6 +1345,18 @@ export function describeCompletionGate({ taskId, gate, worktreePath = null }) {
         + `(${gate.merge_authorization_reason ?? "unknown"})`
         + (gate.merge_authorization_detail ? `; ${gate.merge_authorization_detail}` : "")
       : "",
+    // D-148: which comment held the authority - and, when more than one claimed
+    // it, every id that did. A human reconciling a duplicate-authority refusal
+    // needs the ids to look at, not a count.
+    gate.merge_authority_candidate_count > 1
+      ? `DUPLICATE MERGE AUTHORITY (${gate.merge_authority_candidate_count} trusted ARCHITECT_TASK comments claim `
+        + `this TASK_ID): ${(gate.merge_authority_duplicate_comment_ids ?? []).join(", ") || "ids unavailable"}. `
+        + "One task id has exactly ONE original authority. A later order never grants, repairs or widens an "
+        + "earlier one - it makes the authority undecidable, and undecidable fails closed. Reissue under a "
+        + "FRESH TASK_ID."
+      : (gate.merge_authority_comment_id !== null && gate.merge_authority_comment_id !== undefined
+        ? `MERGE AUTHORITY COMMENT: ${gate.merge_authority_comment_id}`
+        : ""),
     worktreePath ? `WORKTREE (retained, untouched): ${worktreePath}` : "",
     "",
     "A moved HEAD is an OBSERVATION, not proof of authorship: the worker reads the ref twice and cannot",

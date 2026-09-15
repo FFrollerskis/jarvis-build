@@ -109,6 +109,49 @@
  * consulted at all, precisely so that question can no longer be skipped. See its
  * own comment for the bypass and the counterexample.
  *
+ * ------------------------------------------------------------------------
+ * D-148: WHICH ORDER IS "THE" ORDER
+ * ------------------------------------------------------------------------
+ *
+ * D-147 asked the right question of the wrong input. It read the authorization
+ * out of "this task's own trusted orders" - PLURAL - by scanning the comment array
+ * and taking the first one that parsed. That is a FORWARD SCAN FOR A PASSING
+ * CANDIDATE, and it made merge authority mutable by anyone who could post to the
+ * control issue as the trusted login. The child is exactly such an actor: it runs
+ * `gh` under the repo owner's credentials, because that is how it posts its own
+ * CLAUDE_ACK and CLAUDE_REPORT.
+ *
+ * So a child dispatched for an ORDINARY task could post a second ARCHITECT_TASK
+ * carrying its own TASK_ID and `ARCHITECT_MERGE_APPROVED=true`/`MERGE_AUTHORIZED=
+ * true`, and the scan would find it, classify the task as merge-authorized, and -
+ * with a real merge on the remote - accept the child's own order as the authority
+ * that retired it. The worker's author check is not a role boundary, because the
+ * child and the architect are the SAME GitHub login. Nothing downstream could
+ * repair that: every later gate faithfully verifies whatever the selected order
+ * says.
+ *
+ * `selectCanonicalArchitectTask` replaces the scan with a COUNT:
+ *
+ *     exactly one trusted ARCHITECT_TASK for this exact TASK_ID  -> that is the
+ *                                                                   authority
+ *     two or more                                                -> AMBIGUOUS,
+ *                                                                   refuse
+ *     none                                                       -> no order
+ *
+ * A count cannot be influenced by array order, by pagination page boundaries or by
+ * which candidate happens to parse: it is a property of the SET. There is no
+ * "first", no "best" and no "latest" for a later comment to become. A duplicate
+ * cannot grant authority, cannot repair a broken order, cannot widen a narrow one
+ * and cannot replace a refusal - it can only make the whole question undecidable,
+ * which fails closed.
+ *
+ * That last point is the deliberate trade. An ambiguous authority is refused even
+ * when the ORIGINAL order was an ordinary non-merge one, because the worker cannot
+ * tell "the architect posted a scope update" apart from "the child forged an
+ * order" - both are the same login, and both are the same shape. Fail closed is
+ * the only honest answer, and the remedy is the one this worker already documents
+ * everywhere else: issue a FRESH TASK_ID.
+ *
  * Everything in this module is PURE except the three thin remote reads its
  * caller performs. Every branch fails CLOSED with its own named reason, and no
  * branch can reach the filesystem, the repository, or a destructive action.
@@ -151,6 +194,29 @@ export const MERGE_TRANSITION = Object.freeze({
   /* --- authorization (trusted ARCHITECT_TASK comment only) --- */
   /** No trusted ARCHITECT_TASK for this exact task id was available at all. */
   NO_TRUSTED_TASK: "no_trusted_architect_task_comment_binds_this_task",
+  /**
+   * D-148: MORE THAN ONE trusted ARCHITECT_TASK claims this exact TASK_ID, so
+   * there is no single immutable original authority to read.
+   *
+   * This is never resolved by picking one. Picking is what made authority mutable:
+   * whichever rule chose ("first that parses", "latest", "the one with the flags")
+   * would hand a later poster - including the dispatched child, which shares the
+   * trusted GitHub login - a way to decide what this task was authorized to do.
+   */
+  AMBIGUOUS_AUTHORITY:
+    "more_than_one_trusted_architect_task_claims_this_exact_task_id_so_the_original_authority_is_ambiguous",
+  /**
+   * D-148: the single trusted ARCHITECT_TASK for this task was EDITED after it was
+   * posted. Immutable authority means the order that was independently reviewed is
+   * the order that is executed; an edited comment cannot prove that, and editing
+   * is available to exactly the same actor a forged duplicate is.
+   *
+   * Conservative by construction: this fires only when the comment carries BOTH
+   * `created_at` and `updated_at` and they differ - the same rule
+   * `validateControlCommand` already applies to supervisor commands.
+   */
+  AUTHORITY_COMMENT_EDITED:
+    "the_trusted_architect_task_for_this_task_was_edited_after_it_was_posted_so_its_authority_is_not_immutable",
   /** The trusted task exists but does not authorize a merge. */
   NOT_MERGE_AUTHORIZED: "the_trusted_architect_task_does_not_authorize_a_merge",
   /**
@@ -380,11 +446,155 @@ export function readMergeAuthorization(comment, {
 }
 
 /**
- * Find the merge authorization for one task among this run's control comments.
+ * D-148: THE ONE ORIGINAL ORDER FOR ONE TASK ID, OR NOTHING.
  *
- * Deliberately takes the FIRST trusted ARCHITECT_TASK for the id - the original
- * order - and never merges later comments into it. A `TASK_UPDATE` cannot grant
- * a merge authorization the original order did not carry.
+ * ------------------------------------------------------------------------
+ * WHY THIS IS A COUNT AND NOT A CHOICE
+ * ------------------------------------------------------------------------
+ *
+ * Every rule that CHOOSES among same-id orders hands the choice to whoever can
+ * post one. "First that parses" (what D-147 did) is the worst of them - it is a
+ * forward scan for a passing candidate, so a later well-formed order beats an
+ * earlier refusal and authority grows over time. "Latest wins" is worse still.
+ * Even "earliest by created_at" only holds while `created_at` is present, valid,
+ * unique and honest, and it still has to answer what to do when it is not.
+ *
+ * So nothing is chosen. The candidate SET is built by filtering, and the decision
+ * is made on its SIZE:
+ *
+ *   |candidates| == 0   no trusted order binds this task
+ *   |candidates| == 1   that comment IS the authority, and cannot be anything else
+ *   |candidates| >= 2   AMBIGUOUS. Refused, with both ids named.
+ *
+ * ARRAY ORDER CANNOT REACH ANY OF THIS. There is no `find`, no `[0]`, no sort and
+ * no early return over `comments`: the filter visits every element, and a set's
+ * size is the same however the set was enumerated. Reordered pagination, a page
+ * boundary landing in a different place, or a caller that reverses the list all
+ * produce the identical verdict - which is the property the adversarial suite
+ * asserts by running every case in both directions.
+ *
+ * The one thing that IS collapsed is a comment appearing twice as the SAME
+ * comment: identical id, identical body, identical `created_at`. Overlapping
+ * `--paginate` pages produce exactly that, and calling it a duplicate authority
+ * would be a false refusal. A shared id with ANY differing content is NOT
+ * collapsed - it is two orders wearing one id, which is strictly more suspicious
+ * than two orders with two ids, and it refuses.
+ *
+ * Pure. It reads already-fetched comment objects, calls `validateTrustedTask`,
+ * and touches nothing else.
+ */
+export function selectCanonicalArchitectTask(comments, { trustedAuthor, taskId }) {
+  const list = Array.isArray(comments) ? comments : [];
+  const refuse = (reason, detail, extra = {}) => ({
+    ok: false,
+    reason,
+    detail,
+    comment: null,
+    commentId: null,
+    createdAt: null,
+    candidateCount: 0,
+    candidateIds: [],
+    duplicateIds: [],
+    undecidable: false,
+    ...extra
+  });
+
+  if (typeof taskId !== "string" || taskId.trim() === "") {
+    return refuse(MERGE_TRANSITION.NO_TRUSTED_TASK, `no task id to bind an order to (${JSON.stringify(taskId ?? null)})`);
+  }
+
+  // EXACT id equality only. A trusted order for a neighbouring task is not this
+  // task's order, however similar the id looks.
+  const candidates = [];
+  for (const comment of list) {
+    const trusted = validateTrustedTask(comment, { trustedAuthor });
+    if (!trusted.ok || trusted.taskId !== taskId) continue;
+    candidates.push(comment);
+  }
+
+  // Collapse only provably-identical repeats of ONE comment (see above).
+  const distinct = [];
+  for (const comment of candidates) {
+    const id = commentIdentity(comment);
+    const same = id === null
+      ? undefined
+      : distinct.find((d) => commentIdentity(d) === id
+        && String(d.body ?? "") === String(comment.body ?? "")
+        && String(d.created_at ?? "") === String(comment.created_at ?? ""));
+    if (!same) distinct.push(comment);
+  }
+
+  // GitHub's own ids, exactly as they came back. The prefixed identity above is an
+  // internal dedupe key only - what a record carries, and what a human is asked to
+  // go and look at, must be the id they can actually paste into a URL.
+  const ids = distinct.map((c) => c?.id ?? null);
+  if (distinct.length === 0) {
+    return refuse(MERGE_TRANSITION.NO_TRUSTED_TASK,
+      `no trusted ARCHITECT_TASK among ${list.length} control comment(s) declares TASK_ID=${JSON.stringify(taskId)}`);
+  }
+  if (distinct.length > 1) {
+    // Named as an ORDER problem, and never resolved by preferring one of them.
+    return refuse(MERGE_TRANSITION.AMBIGUOUS_AUTHORITY,
+      `${distinct.length} distinct trusted ARCHITECT_TASK comments declare TASK_ID=${JSON.stringify(taskId)} `
+      + `(ids ${ids.map((i) => JSON.stringify(i)).join(", ")}); one task id has exactly one original authority, so a `
+      + "second order makes it undecidable rather than updated - reissue the work under a FRESH TASK_ID",
+      { candidateCount: distinct.length, candidateIds: ids, duplicateIds: ids, undecidable: true });
+  }
+
+  const canonical = distinct[0];
+  const createdAt = String(canonical.created_at ?? "").trim() || null;
+  const updatedAt = String(canonical.updated_at ?? "").trim() || null;
+  // Conservative, and identical to the supervisor-command rule: an edit is only
+  // PROVEN when both timestamps are present and differ. A fixture or an API
+  // projection that omits `updated_at` is not evidence of tampering.
+  if (createdAt && updatedAt && createdAt !== updatedAt) {
+    return refuse(MERGE_TRANSITION.AUTHORITY_COMMENT_EDITED,
+      `comment ${JSON.stringify(ids[0])} was created at ${createdAt} and last updated at ${updatedAt}; the order `
+      + "that was independently reviewed and the order being executed can no longer be proven to be the same text",
+      { candidateCount: 1, candidateIds: ids, undecidable: true });
+  }
+
+  return {
+    ok: true,
+    reason: null,
+    detail: null,
+    comment: canonical,
+    commentId: ids[0],
+    createdAt,
+    candidateCount: 1,
+    candidateIds: ids,
+    duplicateIds: [],
+    undecidable: false
+  };
+}
+
+/** A comment's own identity, or `null` when it carries none we can compare. */
+function commentIdentity(comment) {
+  const id = comment?.id;
+  if (typeof id === "number" && Number.isFinite(id)) return `n:${id}`;
+  if (typeof id === "string" && id.trim() !== "") return `s:${id.trim()}`;
+  return null;
+}
+
+/** The selection evidence carried on every classification, pass or refusal. */
+function selectionEvidence(selection) {
+  return {
+    canonical_comment_id: selection.ok ? selection.commentId : null,
+    canonical_created_at: selection.ok ? selection.createdAt : null,
+    candidate_count: selection.candidateCount,
+    candidate_comment_ids: selection.candidateIds,
+    duplicate_comment_ids: selection.duplicateIds
+  };
+}
+
+/**
+ * The merge authorization for one task, read from its ONE canonical order.
+ *
+ * D-148: this no longer searches. It selects the single original order (above)
+ * and reads that one comment. A `TASK_UPDATE`, a second same-id ARCHITECT_TASK, a
+ * CLAUDE_ACK/REPORT, a worker status notice, PR text or review prose can therefore
+ * never contribute a field, repair a broken order or grant an authorization the
+ * original did not carry - there is no code path along which any of them is read.
  */
 export function findMergeAuthorization(comments, {
   trustedAuthor,
@@ -393,16 +603,20 @@ export function findMergeAuthorization(comments, {
   repoName = null,
   workerPolicy = null
 }) {
-  const list = Array.isArray(comments) ? comments : [];
-  let lastRefusal = { ok: false, reason: MERGE_TRANSITION.NO_TRUSTED_TASK, detail: "no comment matched" };
-  for (const comment of list) {
-    const read = readMergeAuthorization(comment, { trustedAuthor, taskId, repoOwner, repoName, workerPolicy });
-    if (read.ok) return read;
-    // A comment that is not this task's order at all is not interesting; a
-    // comment that IS this task's order but fails a rule is the real finding.
-    if (read.reason !== MERGE_TRANSITION.NO_TRUSTED_TASK) lastRefusal = read;
+  const selection = selectCanonicalArchitectTask(comments, { trustedAuthor, taskId });
+  if (!selection.ok) {
+    return {
+      ok: false,
+      reason: selection.reason,
+      detail: selection.detail,
+      // Unknown, not false: with no readable single order we cannot say whether a
+      // merge was claimed, and `false` here would read as "ordinary task".
+      mergeClaimed: selection.undecidable ? null : false,
+      selection
+    };
   }
-  return lastRefusal;
+  const read = readMergeAuthorization(selection.comment, { trustedAuthor, taskId, repoOwner, repoName, workerPolicy });
+  return { ...read, selection };
 }
 
 /**
@@ -451,6 +665,19 @@ export function findMergeAuthorization(comments, {
  *                indistinguishable from NONE and fell into the cheap path; they
  *                are now a named fail-closed outcome in their own right.
  *
+ * D-148 adds a second way into UNDECIDABLE, and it is decided BEFORE any body is
+ * parsed: the AUTHORITY itself may be broken. Two or more trusted ARCHITECT_TASK
+ * comments for one TASK_ID, or a single one that was edited after posting, leave
+ * no immutable original to read. Those are undecidable no matter what the bodies
+ * say - including when one of them would have parsed perfectly, which is precisely
+ * the case a forged duplicate produces.
+ *
+ * Note what that costs and why it is the right price: an ORDINARY task also
+ * becomes undecidable if a second same-id order appears. The worker cannot
+ * distinguish an architect's scope update from a child's forgery, because they are
+ * the same login posting the same shape. Refusing is recoverable (reissue under a
+ * fresh TASK_ID); accepting is not.
+ *
  * Pure: it reads comments already fetched for this run and touches nothing else.
  */
 export const MERGE_AUTHORIZATION = Object.freeze({
@@ -470,44 +697,82 @@ export function classifyMergeAuthorization(comments, {
   workerPolicy = null
 }) {
   const opts = { trustedAuthor, taskId, repoOwner, repoName, workerPolicy };
-  const list = Array.isArray(comments) ? comments : [];
 
-  // A well-formed authorization anywhere in this task's own trusted orders wins,
-  // and `findMergeAuthorization` picks it under exactly the rules D-145 set.
-  const found = findMergeAuthorization(list, opts);
-  if (found.ok) {
+  // D-148: the ONE original order, or a named refusal. Nothing below ever looks
+  // at another comment, so no later comment can influence any answer here.
+  const selection = selectCanonicalArchitectTask(comments, { trustedAuthor, taskId });
+  const evidence = selectionEvidence(selection);
+
+  if (!selection.ok) {
+    const authorization = {
+      ok: false,
+      reason: selection.reason,
+      detail: selection.detail,
+      mergeClaimed: selection.undecidable ? null : false,
+      selection
+    };
+    // AMBIGUOUS or EDITED: the authority itself is broken. That is UNDECIDABLE and
+    // never NONE - reading an unreadable authority as "not a merge task" is the
+    // exact downgrade D-147 removed for half-declared flags, and it would be a far
+    // larger hole here, because a forged duplicate could then retire a real task.
+    if (selection.undecidable) {
+      return {
+        claim: MERGE_AUTHORIZATION.UNDECIDABLE,
+        claimed: true,
+        decidable: false,
+        reason: selection.reason,
+        detail: selection.detail,
+        authorization,
+        selection: evidence
+      };
+    }
+    // No order at all for this id. Genuinely not a merge task.
+    return {
+      claim: MERGE_AUTHORIZATION.NONE,
+      claimed: false,
+      decidable: true,
+      reason: MERGE_AUTHORIZATION.NONE,
+      detail: selection.detail,
+      authorization,
+      selection: evidence
+    };
+  }
+
+  const read = readMergeAuthorization(selection.comment, opts);
+  if (read.ok) {
     return {
       claim: MERGE_AUTHORIZATION.AUTHORIZED,
       claimed: true,
       decidable: true,
       reason: MERGE_AUTHORIZATION.AUTHORIZED,
-      detail: `PR #${found.prNumber}, ${found.expectedBase} -> ${found.expectedHead}`,
-      authorization: found
+      detail: `PR #${read.prNumber}, ${read.expectedBase} -> ${read.expectedHead}, `
+        + `authorized by trusted comment ${JSON.stringify(selection.commentId)}`,
+      authorization: { ...read, selection },
+      selection: evidence
     };
   }
-
-  // No usable authorization. The question left is whether one was CLAIMED: a
-  // broken merge order must not be able to pass itself off as an ordinary task.
-  for (const comment of list) {
-    const read = readMergeAuthorization(comment, opts);
-    if (read.ok || read.mergeClaimed !== true) continue;
+  // The canonical order refused. Whether that is "no merge claimed" or "a merge
+  // claimed with a broken order" is decided by THIS comment and by nothing else -
+  // a second, well-formed order elsewhere on the issue cannot rescue it.
+  if (read.mergeClaimed === true) {
     return {
       claim: MERGE_AUTHORIZATION.UNDECIDABLE,
       claimed: true,
       decidable: false,
       reason: read.reason,
       detail: read.detail ?? null,
-      authorization: read
+      authorization: { ...read, selection },
+      selection: evidence
     };
   }
-
   return {
     claim: MERGE_AUTHORIZATION.NONE,
     claimed: false,
     decidable: true,
     reason: MERGE_AUTHORIZATION.NONE,
-    detail: found.detail ?? null,
-    authorization: found
+    detail: read.detail ?? null,
+    authorization: { ...read, selection },
+    selection: evidence
   };
 }
 

@@ -167,14 +167,19 @@ describe("D-147: classifyMergeAuthorization decides merge-ness from the trusted 
     expect(c.reason).toBe(MERGE_TRANSITION.REPO_MISMATCH);
   });
 
-  it("a well-formed authorization wins over a broken comment for the same task", () => {
-    // Order independence in the SAFE direction only: a usable authorization is
-    // used, and a broken one alongside it does not veto it. The reverse - a
-    // broken order silently downgrading to "not a merge task" - is what D-147
-    // forbids, and every UNDECIDABLE case above asserts it.
+  it("D-148 SUPERSEDES D-147 HERE: a well-formed order does NOT rescue a broken twin", () => {
+    // D-147 asserted the opposite - that a usable authorization anywhere among
+    // this task's orders wins, in either array order. That rule WAS the hole: it
+    // is a forward scan for a passing candidate, so whoever posts the second order
+    // decides what the task was authorized to do. Two orders for one id now make
+    // the authority undecidable, which fails closed in both directions.
     const broken = order({ EXPECTED_HEAD_SHA: null });
-    expect(classifyMergeAuthorization([broken, order()], OPTS).claim).toBe(MERGE_AUTHORIZATION.AUTHORIZED);
-    expect(classifyMergeAuthorization([order(), broken], OPTS).claim).toBe(MERGE_AUTHORIZATION.AUTHORIZED);
+    for (const list of [[broken, order()], [order(), broken]]) {
+      const c = classifyMergeAuthorization(list, OPTS);
+      expect(c.claim).toBe(MERGE_AUTHORIZATION.UNDECIDABLE);
+      expect(c.reason).toBe(MERGE_TRANSITION.AMBIGUOUS_AUTHORITY);
+      expect(c.decidable).toBe(false);
+    }
   });
 });
 
