@@ -182,7 +182,11 @@ const mergeTreeProof = (over = {}) => ({
   ok: true,
   stage: "complete",
   error: null,
-  store_path: "C:/worker/tmp/merge-proof.git",
+  store_path: `C:/worker/tmp/${TASK_ID}/merge-proof.git`,
+  // D-159: a complete record also says WHOSE directory the proof ran in, and
+  // the gate re-checks it against the task it is deciding.
+  store_owned: true,
+  store_owner_task_id: TASK_ID,
   fetched: false,
   fetch_error: null,
   missing_objects: [],
@@ -471,6 +475,23 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
     ["the merge-driver question was never asked",
       { mergeTreeProof: mergeTreeProof({ custom_merge_drivers: null }) },
       MERGE_TRANSITION.MERGE_TREE_DRIVER_REQUESTED],
+    // D-159: and WHOSE directory it ran in reaches the surrounding gate the same
+    // way. A store shared with other work is a refusal here, not only inside the
+    // proof module - and a record built for another task cannot decide this one.
+    ["the proof could not claim a store this task owns",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "store_ownership", store_owned: false,
+          error: "the store already exists but carries no jarvis-merge-proof-owner.json"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
+    ["the computation never said whose store it ran in",
+      { mergeTreeProof: mergeTreeProof({ store_owned: null, store_owner_task_id: null }) },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
+    ["the proof ran in a store owned by a DIFFERENT task",
+      { mergeTreeProof: mergeTreeProof({ store_owner_task_id: "D158-SOME-OTHER-TASK-20260915-A" }) },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
     ["the PR is not merged",
       { pull: pull({ merged: false, mergeCommitSha: null }) }, MERGE_TRANSITION.NOT_MERGED],
     ["merged but with no merge sha",

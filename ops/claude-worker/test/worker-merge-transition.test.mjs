@@ -1045,6 +1045,69 @@ describe("D-145: the transition path does not generalize - every deviation is st
     expect(rec.completion_gate.merge_transition_verified).toBe(false);
     expect(rec.merge_transition ?? null).toBe(null);
   }, 300_000);
+
+  /* ------------------------------------------------------------------------
+   * D-159: the proof's working directory is the task's own, through the wiring
+   * ------------------------------------------------------------------------
+   *
+   * The unit suite proves the rule. These prove that the REAL worker, running
+   * the REAL gate, actually computes in `scratchRoot/<TASK_ID>` and is actually
+   * held when that directory belongs to somebody else - and that being held
+   * costs the other owner nothing.
+   */
+
+  it("computes the proof in the TASK'S OWN scratch directory, marked as its own", async () => {
+    const merge = syntheticMerge(repoPath, { base: prevMain, head: prHead });
+    publishMerge(merge);
+    setComments([mergeTask()]);
+
+    await runWorker("report", mergeChild(merge));
+    expect(task(MERGE_TASK).completion_gate.reason).toBe(COMPLETION_GATE.PASSED_AUTHORIZED_MERGE_TRANSITION);
+
+    const store = join(workerRoot, "tmp", MERGE_TASK, "merge-proof.git");
+    const env = join(workerRoot, "tmp", MERGE_TASK, "merge-proof-env");
+    expect(existsSync(store)).toBe(true);
+    expect(existsSync(env)).toBe(true);
+    expect(JSON.parse(readFileSync(join(store, "jarvis-merge-proof-owner.json"), "utf8")).task_id).toBe(MERGE_TASK);
+    expect(JSON.parse(readFileSync(join(env, "jarvis-merge-proof-owner.json"), "utf8")).task_id).toBe(MERGE_TASK);
+    // The pre-D-159 shared location is not used at all any more.
+    expect(existsSync(join(workerRoot, "tmp", "merge-proof.git"))).toBe(false);
+    expect(existsSync(join(workerRoot, "tmp", "merge-proof-env"))).toBe(false);
+
+    // ...and the evidence in the record says so, rather than leaving it implied.
+    const proof = task(MERGE_TASK).merge_transition.merge_tree_proof.computation;
+    expect(proof.store_owned).toBe(true);
+    expect(proof.store_owner_task_id).toBe(MERGE_TASK);
+    expect(proof.store_path).toBe(store);
+  }, 300_000);
+
+  it("is HELD when the proof directory belongs to another task, and touches nothing in it", async () => {
+    const merge = syntheticMerge(repoPath, { base: prevMain, head: prHead });
+    publishMerge(merge);
+    setComments([mergeTask()]);
+
+    // Another task got there first - the exact cross-task collision a shared
+    // `scratchRoot/merge-proof.git` made possible on every run.
+    const store = join(workerRoot, "tmp", MERGE_TASK, "merge-proof.git");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(
+      join(store, "jarvis-merge-proof-owner.json"),
+      `${JSON.stringify({ jarvis_merge_proof_owner: 1, kind: "merge-proof-store", task_id: "D158-SOMEONE-ELSE" }, null, 2)}\n`,
+      "utf8"
+    );
+    writeFileSync(join(store, "their-objects.txt"), "paid for by another task\n", "utf8");
+
+    const rec = await expectHeld(mergeChild(merge));
+    expect(rec.merge_transition.verified).toBe(false);
+    expect(rec.merge_transition.reason).toBe(MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED);
+    expect(rec.merge_transition.merge_tree_proof.computation.store_owned).toBe(false);
+
+    // The other task's work is exactly as it was: not deleted, not truncated,
+    // not adopted by rewriting the marker.
+    expect(readFileSync(join(store, "their-objects.txt"), "utf8")).toBe("paid for by another task\n");
+    expect(JSON.parse(readFileSync(join(store, "jarvis-merge-proof-owner.json"), "utf8")).task_id)
+      .toBe("D158-SOMEONE-ELSE");
+  }, 300_000);
 });
 
 /* ==========================================================================

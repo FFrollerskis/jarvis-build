@@ -149,7 +149,11 @@ const mergeTreeProof = () => ({
   ok: true,
   stage: "complete",
   error: null,
-  store_path: "C:/worker/tmp/merge-proof.git",
+  store_path: `C:/worker/tmp/${TASK_ID}/merge-proof.git`,
+  // D-159: and whose directory it ran in. See `merge-tree-proof.test.mjs` for
+  // the cases that drive a foreign, unmarked or unstated owner.
+  store_owned: true,
+  store_owner_task_id: TASK_ID,
   fetched: false,
   fetch_error: null,
   missing_objects: [],

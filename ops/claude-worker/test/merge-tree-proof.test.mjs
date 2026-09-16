@@ -16,12 +16,21 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MERGE_TREE_PROOF, verifyMergeTreeProof, describeMergeTreeProof } from "../lib/merge-tree-proof.mjs";
-import { computeMergeTree, mergeProofStorePath } from "../lib/merge-tree.mjs";
+import {
+  PROOF_OWNER_MARKER,
+  computeMergeTree,
+  mergeProofEnvPaths,
+  mergeProofStorePath,
+  mergeProofTaskRoot,
+  proofTaskSegment
+} from "../lib/merge-tree.mjs";
 import { git, createRepo, head, treeOf, parentsOf, syntheticMerge, realMergeTree } from "./fixtures/real-git-repo.mjs";
 
 const BASE = "1111111111111111111111111111111111111111";
@@ -29,6 +38,19 @@ const HEAD = "2222222222222222222222222222222222222222";
 const MERGE = "3333333333333333333333333333333333333333";
 const TREE = "4444444444444444444444444444444444444444";
 const OTHER_TREE = "5555555555555555555555555555555555555555";
+/** D-159: a proof belongs to one admitted task id, so every fixture names one. */
+const TASK = "D159-PR84-D158-RECOVERY-CLOSEOUT-20260916-A";
+const OTHER_TASK = "D158-PR84-SAME-FILE-MERGE-PROOF-HARDENING-20260915-A";
+
+/**
+ * An ownership marker exactly as the module writes one.
+ *
+ * Deliberately spelled out here instead of imported: a test that built the
+ * marker with the same function the code under test uses would agree with a
+ * wrong format just as happily as with a right one.
+ */
+const ownerMarker = (taskId, kind) =>
+  `${JSON.stringify({ jarvis_merge_proof_owner: 1, kind, task_id: taskId }, null, 2)}\n`;
 
 /* ==========================================================================
  * THE PURE PROOF
@@ -40,7 +62,11 @@ const computation = (over = {}) => ({
   ok: true,
   stage: "complete",
   error: null,
-  store_path: "C:/worker/tmp/merge-proof.git",
+  store_path: `C:/worker/tmp/${TASK}/merge-proof.git`,
+  // D-159: WHOSE store it was is part of a complete record, and the cases below
+  // drive "another task's", "explicitly unowned" and "never stated" separately.
+  store_owned: true,
+  store_owner_task_id: TASK,
   fetched: false,
   fetch_error: null,
   missing_objects: [],
@@ -67,6 +93,7 @@ const verify = (over = {}) => verifyMergeTreeProof({
   mergeSha: "mergeSha" in over ? over.mergeSha : MERGE,
   expectedBase: "expectedBase" in over ? over.expectedBase : BASE,
   expectedHead: "expectedHead" in over ? over.expectedHead : HEAD,
+  taskId: "taskId" in over ? over.taskId : TASK,
   projectedTree: "projectedTree" in over ? over.projectedTree : TREE,
   projectedParents: "projectedParents" in over ? over.projectedParents : [BASE, HEAD]
 });
@@ -209,6 +236,84 @@ describe("D-158 REVIEW-FIX: a merge computed under uncontrolled configuration is
     const lines = describeMergeTreeProof(verify().evidence).join("\n");
     expect(lines).toContain("isolated, allowlisted git configuration");
     expect(lines).toContain("merge drivers requested by content: none");
+  });
+});
+
+/**
+ * D-159: ...AND IN A DIRECTORY THIS EXACT TASK OWNS.
+ *
+ * Architect review 5217710904 (P1): isolating and allowlisting the git
+ * CONFIGURATION says nothing about who owns the FILES. The pure decider is the
+ * last place that can refuse a record produced somewhere shared, so it refuses
+ * four distinguishable things - no task named, ownership denied, ownership never
+ * claimed, and ownership claimed by somebody else.
+ */
+describe("D-159: a merge computed in a store this task does not own is never a pass", () => {
+  it("refuses a proof that does not name the task it decides", () => {
+    const v = verify({ taskId: null });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+    expect(v.detail).toContain("without naming the task it decides");
+  });
+
+  it("refuses a blank task id exactly like a missing one", () => {
+    expect(verify({ taskId: "   " }).reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+  });
+
+  it("refuses an explicitly unowned store and repeats what went wrong", () => {
+    const v = verify({
+      computation: computation({
+        ok: false,
+        stage: "store_ownership",
+        store_owned: false,
+        store_owner_task_id: TASK,
+        error: `C:/worker/tmp/${TASK}/merge-proof.git already exists but carries no ${PROOF_OWNER_MARKER}`
+      })
+    });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+    expect(v.detail).toContain(PROOF_OWNER_MARKER);
+    expect(v.evidence.computation.store_owned).toBe(false);
+  });
+
+  it("refuses an UNSTATED ownership claim even on a record that claims success", () => {
+    // The pre-D-159 record shape: complete, ok, and silent about whose store it
+    // ran in. Silence is refused exactly like a denial.
+    const v = verify({ computation: computation({ store_owned: undefined, store_owner_task_id: undefined }) });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+    expect(v.detail).toContain("unstated claim of ownership is not ownership");
+  });
+
+  it("refuses evidence produced for a DIFFERENT task, however complete it is", () => {
+    const v = verify({ computation: computation({ store_owner_task_id: OTHER_TASK }) });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+    expect(v.detail).toContain(OTHER_TASK);
+    expect(v.detail).toContain("does not decide another");
+  });
+
+  it("asks about ownership BEFORE anything else about the result", () => {
+    // A record that is unowned AND conflicted AND non-isolated must report the
+    // ownership failure: the others are claims about evidence that may not even
+    // be this task's.
+    const v = verify({
+      computation: computation({
+        ok: false, store_owned: false, conflicted: true, config_isolated: false,
+        missing_objects: [BASE]
+      })
+    });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+  });
+
+  it("names the owning task in the passing detail and in the description", () => {
+    expect(verify().detail).toContain(`bound to this task (${TASK})`);
+    const lines = describeMergeTreeProof(verify().evidence).join("\n");
+    expect(lines).toContain(`owned by task ${TASK}`);
+  });
+
+  it("says so in the description when ownership was denied or never stated", () => {
+    expect(describeMergeTreeProof(verify({ computation: computation({ store_owned: false }) }).evidence).join("\n"))
+      .toContain("NO TASK THIS WORKER COULD PROVE");
+    expect(describeMergeTreeProof(verify({ computation: computation({ store_owned: undefined }) }).evidence).join("\n"))
+      .toContain("an UNSTATED owner");
   });
 });
 
@@ -393,7 +498,7 @@ describe("D-158: computeMergeTree, against a real repository", () => {
   }
 
   const prove = ({ base, head: hd, merge }) => {
-    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK });
     return {
       computation: c,
       verdict: verifyMergeTreeProof({
@@ -401,6 +506,7 @@ describe("D-158: computeMergeTree, against a real repository", () => {
         mergeSha: merge,
         expectedBase: base,
         expectedHead: hd,
+        taskId: TASK,
         projectedTree: treeOf(repoPath, merge),
         projectedParents: parentsOf(repoPath, merge)
       })
@@ -467,13 +573,13 @@ describe("D-158: computeMergeTree, against a real repository", () => {
     const hd = commitFile("f.txt", lines({ 1: "l1-HEAD-WINS" }), "head");
     const merge = syntheticMerge(repoPath, { base, head: hd });
 
-    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK });
     expect(c.ok).toBe(false);
     expect(c.conflicted).toBe(true);
     expect(c.expected_tree).toBe(null);
     expect(c.conflict_detail).toContain("f.txt");
 
-    const v = verifyMergeTreeProof({ computation: c, mergeSha: merge, expectedBase: base, expectedHead: hd });
+    const v = verifyMergeTreeProof({ computation: c, mergeSha: merge, expectedBase: base, expectedHead: hd, taskId: TASK });
     expect(v.ok).toBe(false);
     expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFLICTED);
   });
@@ -607,23 +713,23 @@ describe("D-158: computeMergeTree, against a real repository", () => {
     // attempted and fails, and the suite stays offline. The gate must stop.
     git(repoPath, ["remote", "set-url", "origin",
       `${dir.replace(/\\/g, "/")}/nowhere/tsworkflow/jarvisbuild`]);
-    const c = computeMergeTree(cfg, { expectedBase: t.base, expectedHead: absent, mergeSha: t.merge });
+    const c = computeMergeTree(cfg, { expectedBase: t.base, expectedHead: absent, mergeSha: t.merge, taskId: TASK });
     expect(c.ok).toBe(false);
     expect(c.fetched).toBe(true);
     expect(c.missing_objects).toContain(absent);
-    expect(verifyMergeTreeProof({ computation: c, mergeSha: t.merge, expectedBase: t.base, expectedHead: absent }).reason)
+    expect(verifyMergeTreeProof({ computation: c, mergeSha: t.merge, expectedBase: t.base, expectedHead: absent, taskId: TASK }).reason)
       .toBe(MERGE_TREE_PROOF.MERGE_TREE_OBJECTS_UNAVAILABLE);
   }, 60_000);
 
   it("BLOCKS an abbreviated or malformed sha instead of resolving it", () => {
-    const c = computeMergeTree(cfg, { expectedBase: B0.slice(0, 7), expectedHead: B0, mergeSha: B0 });
+    const c = computeMergeTree(cfg, { expectedBase: B0.slice(0, 7), expectedHead: B0, mergeSha: B0, taskId: TASK });
     expect(c.ok).toBe(false);
     expect(c.stage).toBe("inputs");
   });
 
   it("BLOCKS when the repository cannot be read at all", () => {
     const broken = { ...cfg, repoPath: join(dir, "does-not-exist") };
-    const c = computeMergeTree(broken, { expectedBase: B0, expectedHead: B0, mergeSha: B0 });
+    const c = computeMergeTree(broken, { expectedBase: B0, expectedHead: B0, mergeSha: B0, taskId: TASK });
     expect(c.ok).toBe(false);
     expect(c.stage).toBe("object_store");
   });
@@ -631,7 +737,7 @@ describe("D-158: computeMergeTree, against a real repository", () => {
   it("refuses to fetch from an origin that is not this repository", () => {
     git(repoPath, ["remote", "set-url", "origin", "https://github.com/someone/else"]);
     const absent = "0123456789012345678901234567890123456789";
-    const c = computeMergeTree(cfg, { expectedBase: B0, expectedHead: absent, mergeSha: B0 });
+    const c = computeMergeTree(cfg, { expectedBase: B0, expectedHead: absent, mergeSha: B0, taskId: TASK });
     expect(c.ok).toBe(false);
     expect(c.stage).toBe("fetch");
     expect(c.error).toContain("does not point at");
@@ -693,7 +799,7 @@ describe("D-158: the proof never mutates the repository it reads", () => {
     const headBefore = git(repoPath, ["rev-parse", "HEAD"]);
     const statusBefore = git(repoPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
 
-    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    const c = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK });
     expect(c.ok).toBe(true);
 
     expect(tree(join(repoPath, ".git", "objects"))).toEqual(objectsBefore);
@@ -701,22 +807,31 @@ describe("D-158: the proof never mutates the repository it reads", () => {
     expect(git(repoPath, ["rev-parse", "HEAD"])).toBe(headBefore);
     expect(git(repoPath, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe(statusBefore);
 
-    // ...and the store it DID write to is the scratch one, outside the repo.
-    expect(c.store_path).toBe(mergeProofStorePath(cfg));
-    expect(existsSync(mergeProofStorePath(cfg))).toBe(true);
-    expect(mergeProofStorePath(cfg).startsWith(repoPath)).toBe(false);
+    // ...and the store it DID write to is THIS TASK's, under scratch, outside
+    // the repo - and it says whose it is (D-159).
+    expect(c.store_path).toBe(mergeProofStorePath(cfg, TASK));
+    expect(existsSync(mergeProofStorePath(cfg, TASK))).toBe(true);
+    expect(mergeProofStorePath(cfg, TASK).startsWith(repoPath)).toBe(false);
+    expect(mergeProofStorePath(cfg, TASK).startsWith(join(cfg.scratchRoot, TASK))).toBe(true);
+    expect(c.store_owned).toBe(true);
+    expect(c.store_owner_task_id).toBe(TASK);
   });
 
-  it("reuses an existing store rather than deleting and rebuilding it", () => {
+  it("resumes its OWN store rather than deleting and rebuilding it", () => {
     const B0 = head(repoPath);
-    const store = mergeProofStorePath(cfg);
+    const store = mergeProofStorePath(cfg, TASK);
     mkdirSync(store, { recursive: true });
+    // D-159: an earlier attempt OF THIS TASK left the store behind, marker and
+    // all. Reuse stays additive: the objects it had to fetch are still there.
+    writeFileSync(join(store, PROOF_OWNER_MARKER), ownerMarker(TASK, "merge-proof-store"), "utf8");
     // A file no correct run would remove. If a rebuild ever replaces reuse, this
     // is the assertion that says so - this module deletes nothing, ever.
     writeFileSync(join(store, "do-not-delete.txt"), "evidence from an earlier attempt\n", "utf8");
 
-    computeMergeTree(cfg, { expectedBase: B0, expectedHead: B0, mergeSha: B0 });
+    const c = computeMergeTree(cfg, { expectedBase: B0, expectedHead: B0, mergeSha: B0, taskId: TASK });
     expect(existsSync(join(store, "do-not-delete.txt"))).toBe(true);
+    expect(c.store_owned).toBe(true);
+    expect(c.store_owner_task_id).toBe(TASK);
   });
 
   /**
@@ -752,7 +867,7 @@ describe("D-158: the proof never mutates the repository it reads", () => {
 
     const merge = syntheticMerge(repoPath, { base, head: hd, tree: realMergeTree(repoPath, base, hd) });
 
-    const first = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    const first = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK });
     expect(first.ok).toBe(true);
     expect(first.conflicted).toBe(false);
 
@@ -770,7 +885,7 @@ describe("D-158: the proof never mutates the repository it reads", () => {
     process.env.GIT_CONFIG_GLOBAL = hostileGlobal;
     let second;
     try {
-      second = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+      second = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK });
     } finally {
       if (restore === undefined) delete process.env.GIT_CONFIG_GLOBAL;
       else process.env.GIT_CONFIG_GLOBAL = restore;
@@ -782,7 +897,7 @@ describe("D-158: the proof never mutates the repository it reads", () => {
 
     // And the proof still passes on the tree git actually produced.
     expect(verifyMergeTreeProof({
-      computation: second, mergeSha: merge, expectedBase: base, expectedHead: hd
+      computation: second, mergeSha: merge, expectedBase: base, expectedHead: hd, taskId: TASK
     }).ok).toBe(true);
   });
 
@@ -806,18 +921,18 @@ describe("D-158: the proof never mutates the repository it reads", () => {
     const hd = head(repoPath);
     git(repoPath, ["checkout", "--quiet", "-B", "main", base]);
     const merge = syntheticMerge(repoPath, { base, head: hd, tree: realMergeTree(repoPath, base, hd) });
-    const args = { expectedBase: base, expectedHead: hd, mergeSha: merge };
+    const args = { expectedBase: base, expectedHead: hd, mergeSha: merge, taskId: TASK };
 
     expect(computeMergeTree(cfg, args).ok).toBe(true);
 
-    git(mergeProofStorePath(cfg), ["config", "merge.renames", "false"]);
+    git(mergeProofStorePath(cfg, TASK), ["config", "merge.renames", "false"]);
 
     const c = computeMergeTree(cfg, args);
     expect(c.ok).toBe(false);
     expect(c.stage).toBe("config_isolation");
     expect(c.config_isolated).toBe(false);
     expect(c.foreign_config.join(" ")).toContain("merge.renames");
-    const verdict = verifyMergeTreeProof({ computation: c, mergeSha: merge, expectedBase: base, expectedHead: hd });
+    const verdict = verifyMergeTreeProof({ computation: c, mergeSha: merge, expectedBase: base, expectedHead: hd, taskId: TASK });
     expect(verdict.ok).toBe(false);
     expect(verdict.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED);
   });
@@ -885,11 +1000,14 @@ describe("D-158 REVIEW-FIX: no merge driver may execute during the proof", () =>
       head: headSha,
       tree: realMerge ? realMergeTree(repoPath, baseSha, headSha) : treeOf(repoPath, headSha)
     });
-    return { base: baseSha, head: headSha, merge: mergeSha, args: { expectedBase: baseSha, expectedHead: headSha, mergeSha } };
+    return {
+      base: baseSha, head: headSha, merge: mergeSha,
+      args: { expectedBase: baseSha, expectedHead: headSha, mergeSha, taskId: TASK }
+    };
   };
 
   const proveIt = (t, c) => verifyMergeTreeProof({
-    computation: c, mergeSha: t.merge, expectedBase: t.base, expectedHead: t.head
+    computation: c, mergeSha: t.merge, expectedBase: t.base, expectedHead: t.head, taskId: TASK
   });
 
   beforeEach(() => {
@@ -1021,7 +1139,7 @@ describe("D-158 REVIEW-FIX: no merge driver may execute during the proof", () =>
     const t = topology({ attributes: "* text=auto\n", realMerge: true });
     expect(computeMergeTree(cfg, t.args).ok).toBe(true);
 
-    git(mergeProofStorePath(cfg), ["config", "include.path", hostileGlobal.replace(/\\/g, "/")]);
+    git(mergeProofStorePath(cfg, TASK), ["config", "include.path", hostileGlobal.replace(/\\/g, "/")]);
 
     const c = computeMergeTree(cfg, t.args);
     expect(existsSync(marker)).toBe(false);
@@ -1036,7 +1154,7 @@ describe("D-158 REVIEW-FIX: no merge driver may execute during the proof", () =>
     const t = topology({ attributes: "* text=auto\n", realMerge: true });
     expect(computeMergeTree(cfg, t.args).ok).toBe(true);
 
-    const info = join(mergeProofStorePath(cfg), "info");
+    const info = join(mergeProofStorePath(cfg, TASK), "info");
     mkdirSync(info, { recursive: true });
     writeFileSync(join(info, "attributes"), "*.txt merge=evil\n", "utf8");
 
@@ -1092,5 +1210,307 @@ describe("D-158 REVIEW-FIX: no merge driver may execute during the proof", () =>
     expect(c.foreign_config).toEqual([]);
     expect(c.ok).toBe(true);
     expect(proveIt(t, c).ok).toBe(true);
+  });
+});
+
+/* ==========================================================================
+ * D-159: THE PROOF'S WORKING DIRECTORIES BELONG TO ONE TASK ID
+ * ==========================================================================
+ *
+ * Architect review 5217710904 on PR #84 (P1). D-158 put the store and the
+ * isolated environment at a FIXED place under `scratchRoot`, shared by every
+ * task on the host, and then reused them - truncating the env files,
+ * overwriting `objects/info/alternates`, force-removing `info/attributes`.
+ * Isolating the CONFIGURATION says nothing about who owns the FILES.
+ *
+ * These are filesystem claims, so they are measured against the real
+ * filesystem: what exists before, what exists after, and byte for byte whether
+ * anything the task could not prove it owned was touched at all.
+ */
+
+describe("D-159: the merge proof works only in a directory this task owns", () => {
+  let dir;
+  let repoPath;
+  let cfg;
+  let B0;
+
+  /** Every file under a directory with its exact bytes - an unforgeable before/after. */
+  function snapshot(root) {
+    const out = new Map();
+    if (!existsSync(root)) return out;
+    const walk = (p, rel) => {
+      for (const e of readdirSync(p, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+        const child = join(p, e.name);
+        const childRel = rel ? `${rel}/${e.name}` : e.name;
+        if (e.isDirectory()) walk(child, childRel);
+        else out.set(childRel, readFileSync(child));
+      }
+    };
+    walk(root, "");
+    return out;
+  }
+
+  const same = (a, b) => a.size === b.size
+    && [...a.keys()].every((k) => b.has(k) && Buffer.compare(a.get(k), b.get(k)) === 0);
+
+  /**
+   * A directory link that works on Windows WITHOUT elevation.
+   *
+   * `junction` is a reparse point rather than a symbolic link, which is exactly
+   * the case the review names: Node reports it through `lstat` as a symbolic
+   * link, and a naive recursive `mkdir` would happily write through it.
+   */
+  const linkDir = (target, path) => symlinkSync(target, path, process.platform === "win32" ? "junction" : "dir");
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "jarvis-d159-"));
+    repoPath = join(dir, "repo");
+    createRepo(repoPath);
+    B0 = head(repoPath);
+    cfg = { repoOwner: "tsworkflow", repoName: "jarvisbuild", repoPath, scratchRoot: join(dir, "worker", "tmp") };
+  });
+
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const run = (taskId) => computeMergeTree(cfg, { expectedBase: B0, expectedHead: B0, mergeSha: B0, taskId });
+
+  /* --- where the directories are, and whose they are ---------------------- */
+
+  it("places the store and the environment under THIS task's own scratch directory", () => {
+    expect(mergeProofTaskRoot(cfg, TASK)).toBe(join(cfg.scratchRoot, TASK));
+    expect(mergeProofStorePath(cfg, TASK)).toBe(join(cfg.scratchRoot, TASK, "merge-proof.git"));
+    expect(mergeProofEnvPaths(cfg, TASK).root).toBe(join(cfg.scratchRoot, TASK, "merge-proof-env"));
+  });
+
+  it("stamps both directories with a marker naming this exact task", () => {
+    const c = run(TASK);
+    expect(c.store_owned).toBe(true);
+    expect(c.store_owner_task_id).toBe(TASK);
+
+    const storeMarker = join(mergeProofStorePath(cfg, TASK), PROOF_OWNER_MARKER);
+    const envMarker = join(mergeProofEnvPaths(cfg, TASK).root, PROOF_OWNER_MARKER);
+    expect(readFileSync(storeMarker, "utf8")).toBe(ownerMarker(TASK, "merge-proof-store"));
+    expect(readFileSync(envMarker, "utf8")).toBe(ownerMarker(TASK, "merge-proof-env"));
+  });
+
+  it("gives two different task ids two different stores, and neither decides the other", () => {
+    const mine = run(TASK);
+    const theirs = run(OTHER_TASK);
+
+    expect(mine.store_path).not.toBe(theirs.store_path);
+    expect(mine.store_owner_task_id).toBe(TASK);
+    expect(theirs.store_owner_task_id).toBe(OTHER_TASK);
+    expect(readFileSync(join(theirs.store_path, PROOF_OWNER_MARKER), "utf8"))
+      .toBe(ownerMarker(OTHER_TASK, "merge-proof-store"));
+
+    // ...and the decider will not let one task's evidence settle the other's gate.
+    expect(verifyMergeTreeProof({
+      computation: theirs, mergeSha: B0, expectedBase: B0, expectedHead: B0, taskId: TASK
+    }).reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+  });
+
+  /* --- a directory it cannot prove it owns is refused, and left alone ----- */
+
+  it("REFUSES an unmarked pre-existing store and changes not one byte of it", () => {
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(join(store, "objects", "info"), { recursive: true });
+    mkdirSync(join(store, "info"), { recursive: true });
+    // Exactly the three things D-158 would have overwritten or force-removed.
+    writeFileSync(join(store, "config"), "[core]\n\tbare = true\n[merge \"evil\"]\n\tdriver = whoami\n", "utf8");
+    writeFileSync(join(store, "objects", "info", "alternates"), "D:/somebody/elses/objects\n", "utf8");
+    writeFileSync(join(store, "info", "attributes"), "* merge=evil\n", "utf8");
+    const before = snapshot(store);
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("store_ownership");
+    expect(c.store_owned).toBe(false);
+    expect(c.error).toContain(PROOF_OWNER_MARKER);
+    expect(c.error).toContain("left exactly as found");
+
+    expect(same(before, snapshot(store))).toBe(true);
+    expect(existsSync(join(store, PROOF_OWNER_MARKER))).toBe(false);
+    expect(verifyMergeTreeProof({
+      computation: c, mergeSha: B0, expectedBase: B0, expectedHead: B0, taskId: TASK
+    }).reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED);
+  });
+
+  it("REFUSES a store another task owns, and leaves that task's work intact", () => {
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, PROOF_OWNER_MARKER), ownerMarker(OTHER_TASK, "merge-proof-store"), "utf8");
+    writeFileSync(join(store, "their-evidence.txt"), "another task's fetched objects\n", "utf8");
+    const before = snapshot(store);
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("store_ownership");
+    expect(c.store_owned).toBe(false);
+    expect(c.error).toContain(OTHER_TASK);
+
+    expect(same(before, snapshot(store))).toBe(true);
+  });
+
+  it("REFUSES a marker it cannot read as an ownership claim rather than replacing it", () => {
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, PROOF_OWNER_MARKER), "{ this is not json", "utf8");
+    const before = snapshot(store);
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.store_owned).toBe(false);
+    expect(same(before, snapshot(store))).toBe(true);
+  });
+
+  it("REFUSES a marker from an unknown future version rather than assuming its meaning", () => {
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(store, { recursive: true });
+    writeFileSync(
+      join(store, PROOF_OWNER_MARKER),
+      `${JSON.stringify({ jarvis_merge_proof_owner: 99, kind: "merge-proof-store", task_id: TASK })}\n`,
+      "utf8"
+    );
+    expect(run(TASK).store_owned).toBe(false);
+  });
+
+  it("REFUSES a marker of the wrong KIND, so the env and the store cannot be swapped", () => {
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, PROOF_OWNER_MARKER), ownerMarker(TASK, "merge-proof-env"), "utf8");
+    expect(run(TASK).store_owned).toBe(false);
+  });
+
+  it("REFUSES an unmarked ENVIRONMENT directory and never truncates the files in it", () => {
+    const env = mergeProofEnvPaths(cfg, TASK);
+    mkdirSync(env.emptyHome, { recursive: true });
+    // D-158 truncated these on every run. Here they are somebody else's.
+    writeFileSync(env.emptyConfig, "[merge \"evil\"]\n\tdriver = whoami\n", "utf8");
+    writeFileSync(env.emptyAttributes, "* merge=evil\n", "utf8");
+    const before = snapshot(env.root);
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("environment");
+    expect(c.store_owned).toBe(false);
+    expect(same(before, snapshot(env.root))).toBe(true);
+    // The store is never even reached, so nothing was created for it either.
+    expect(existsSync(mergeProofStorePath(cfg, TASK))).toBe(false);
+  });
+
+  /* --- and nothing is reached through a link ------------------------------ */
+
+  it("REFUSES a store reached through a junction or symlink, and writes nothing through it", () => {
+    const elsewhere = join(dir, "not-the-task-directory");
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(join(elsewhere, "someone-elses.txt"), "not this task's\n", "utf8");
+    const before = snapshot(elsewhere);
+
+    mkdirSync(mergeProofTaskRoot(cfg, TASK), { recursive: true });
+    linkDir(elsewhere, mergeProofStorePath(cfg, TASK));
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("store_ownership");
+    expect(c.store_owned).toBe(false);
+    expect(c.error).toMatch(/symbolic link, junction or other reparse point/);
+
+    // Nothing was created, initialised or stamped on the far side of the link.
+    expect(same(before, snapshot(elsewhere))).toBe(true);
+  });
+
+  it("REFUSES an ENVIRONMENT reached through a junction or symlink", () => {
+    const elsewhere = join(dir, "env-elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    writeFileSync(join(elsewhere, "keep.gitconfig"), "[user]\n\tname = somebody\n", "utf8");
+    const before = snapshot(elsewhere);
+
+    mkdirSync(mergeProofTaskRoot(cfg, TASK), { recursive: true });
+    linkDir(elsewhere, mergeProofEnvPaths(cfg, TASK).root);
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("environment");
+    expect(same(before, snapshot(elsewhere))).toBe(true);
+  });
+
+  it("REFUSES a TASK ROOT that is itself a link, not just the leaf directory", () => {
+    const elsewhere = join(dir, "task-root-elsewhere");
+    mkdirSync(elsewhere, { recursive: true });
+    const before = snapshot(elsewhere);
+
+    mkdirSync(cfg.scratchRoot, { recursive: true });
+    linkDir(elsewhere, mergeProofTaskRoot(cfg, TASK));
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.store_owned).toBe(false);
+    expect(same(before, snapshot(elsewhere))).toBe(true);
+  });
+
+  it("REFUSES a path component that exists but is a FILE", () => {
+    mkdirSync(cfg.scratchRoot, { recursive: true });
+    writeFileSync(mergeProofTaskRoot(cfg, TASK), "not a directory\n", "utf8");
+
+    const c = run(TASK);
+    expect(c.ok).toBe(false);
+    expect(c.store_owned).toBe(false);
+    expect(c.error).toContain("not a directory");
+    expect(readFileSync(mergeProofTaskRoot(cfg, TASK), "utf8")).toBe("not a directory\n");
+  });
+
+  /* --- a task id that is not a path segment is not a task id -------------- */
+
+  it("REFUSES a task id that could leave the scratch root, and creates nothing", () => {
+    const escapes = [
+      "..", ".", "../../escaped", "..\\..\\escaped", "a/b", "a\\b", "C:evil",
+      "", "   ", null, undefined, 42, ".hidden-leading-dot", "x".repeat(200)
+    ];
+    for (const taskId of escapes) {
+      expect(proofTaskSegment(taskId)).toBe(null);
+      expect(mergeProofStorePath(cfg, taskId)).toBe(null);
+      expect(mergeProofEnvPaths(cfg, taskId)).toBe(null);
+      const c = computeMergeTree(cfg, { expectedBase: B0, expectedHead: B0, mergeSha: B0, taskId });
+      expect(c.ok).toBe(false);
+      expect(c.stage).toBe("store_ownership");
+      expect(c.store_owned).toBe(false);
+    }
+    // Not one of them brought a directory into existence anywhere.
+    expect(existsSync(cfg.scratchRoot)).toBe(false);
+    expect(existsSync(join(dir, "worker"))).toBe(false);
+  });
+
+  it("accepts the real task-id shape this worker is admitted under", () => {
+    for (const id of [TASK, OTHER_TASK, "D-159", "a", "worker_2.3.0-rc1"]) {
+      expect(proofTaskSegment(id)).toBe(id);
+    }
+    // Surrounding whitespace is trimmed, not treated as a different task.
+    expect(proofTaskSegment(`  ${TASK}  `)).toBe(TASK);
+  });
+
+  /* --- reuse stays additive for the task that owns it --------------------- */
+
+  it("resumes its OWN store across attempts without deleting anything in it", () => {
+    const first = run(TASK);
+    expect(first.ok).toBe(true);
+    const store = first.store_path;
+    writeFileSync(join(store, "fetched-earlier.txt"), "objects an earlier attempt paid for\n", "utf8");
+
+    const second = run(TASK);
+    expect(second.ok).toBe(true);
+    expect(second.store_path).toBe(store);
+    expect(readFileSync(join(store, "fetched-earlier.txt"), "utf8"))
+      .toBe("objects an earlier attempt paid for\n");
+    expect(readFileSync(join(store, PROOF_OWNER_MARKER), "utf8")).toBe(ownerMarker(TASK, "merge-proof-store"));
+  });
+
+  it("still removes a stale info/attributes - but only from the store it owns", () => {
+    expect(run(TASK).ok).toBe(true);
+    const store = mergeProofStorePath(cfg, TASK);
+    mkdirSync(join(store, "info"), { recursive: true });
+    writeFileSync(join(store, "info", "attributes"), "* merge=evil\n", "utf8");
+
+    expect(run(TASK).ok).toBe(true);
+    expect(existsSync(join(store, "info", "attributes"))).toBe(false);
   });
 });

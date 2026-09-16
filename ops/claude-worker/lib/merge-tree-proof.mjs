@@ -139,6 +139,20 @@ export const MERGE_TREE_PROOF = Object.freeze({
   MERGE_TREE_DRIVER_REQUESTED:
     "the_content_being_merged_requests_a_non_builtin_merge_driver_so_the_expected_tree_is_ambiguous_and_cannot_prove_anything",
 
+  /* --- D-159: WHOSE working directory the computation ran in -------------- */
+  /**
+   * The merge was not computed in a store/environment bound to THIS task.
+   *
+   * Isolating and allowlisting the git CONFIGURATION says nothing about who owns
+   * the FILES. A shared proof directory lets another task's leftover objects,
+   * alternates and attributes be inputs to this security gate - and lets this
+   * gate truncate and delete paths it cannot prove are its own. So the store and
+   * the isolated environment must be claimed under the immutable admitted
+   * TASK_ID, and the record must SAY SO and name the same task being decided.
+   */
+  MERGE_TREE_STORE_NOT_TASK_OWNED:
+    "the_merge_was_not_computed_in_a_store_this_exact_task_owns_so_the_evidence_may_describe_or_have_been_altered_by_other_work",
+
   /* --- the merge commit object itself --- */
   /** The recorded merge commit could not be read as a real object. */
   MERGE_COMMIT_OBJECT_UNREADABLE:
@@ -171,6 +185,10 @@ function computationEvidence(c) {
   return {
     stage: c.stage ?? null,
     store_path: c.store_path ?? null,
+    // D-159: who owned the directory the proof ran in travels with the result,
+    // so a reader of a record never has to assume it was this task's own.
+    store_owned: typeof c.store_owned === "boolean" ? c.store_owned : null,
+    store_owner_task_id: typeof c.store_owner_task_id === "string" ? c.store_owner_task_id : null,
     fetched: c.fetched === true,
     missing_objects: Array.isArray(c.missing_objects) ? c.missing_objects : [],
     resolved_base: c.resolved_base ?? null,
@@ -198,6 +216,10 @@ function computationEvidence(c) {
  *   expectedHead     the authorized head, from the trusted ARCHITECT_TASK
  *   projectedTree    the merge commit's tree AS THE API REPORTED IT
  *   projectedParents the merge commit's parents AS THE API REPORTED THEM
+ *   taskId           D-159: the immutable admitted TASK_ID being decided. The
+ *                    computation must state that it ran in a store bound to
+ *                    exactly this task - the decider re-checks the binding
+ *                    rather than trusting the record to be about the right task.
  *
  * Returns `{ ok, reason, detail, evidence }`. `ok: false` is always a named
  * refusal, and `evidence` is populated on refusals too, so a held gate can be
@@ -208,12 +230,14 @@ export function verifyMergeTreeProof({
   mergeSha,
   expectedBase,
   expectedHead,
+  taskId = null,
   projectedTree = null,
   projectedParents = null
 }) {
   const base = fullSha(expectedBase);
   const head = fullSha(expectedHead);
   const merge = fullSha(mergeSha);
+  const task = typeof taskId === "string" && taskId.trim() !== "" ? taskId.trim() : null;
 
   let evidence = {
     computation: computationEvidence(computation),
@@ -237,6 +261,36 @@ export function verifyMergeTreeProof({
     return refuse(MERGE_TREE_PROOF.MERGE_TREE_NOT_COMPUTED,
       "the expected merge tree was never computed, so there is nothing to compare the merge commit against");
   }
+
+  // --- 2a. ...IN A DIRECTORY THIS EXACT TASK OWNS (D-159) ------------------
+  //
+  // Asked before anything else about the result, because it decides whether the
+  // rest of the record describes THIS task's work at all. A store shared across
+  // tasks can carry another task's objects, alternates and attributes into this
+  // gate - and this gate truncates and removes files inside it, which may only
+  // ever happen to paths the task has proven are its own.
+  if (task === null) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED,
+      "this proof was asked for without naming the task it decides, so the store it ran in cannot be bound to an "
+      + "admitted TASK_ID and its evidence cannot be attributed to anything");
+  }
+  if (c.store_owned === false) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED,
+      `${c.error ?? `the merge proof could not claim a store owned by ${task}`}`
+      + ". The gate refuses rather than computing in - or deleting anything from - a directory whose contents it "
+      + "cannot attribute to this task");
+  }
+  if (c.store_owned !== true) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED,
+      "the computation did not state that it ran in a store bound to this task, and an unstated claim of ownership "
+      + "is not ownership");
+  }
+  if (c.store_owner_task_id !== task) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_STORE_NOT_TASK_OWNED,
+      `the computation ran in a store owned by ${JSON.stringify(c.store_owner_task_id ?? null)}, but this gate is `
+      + `deciding ${JSON.stringify(task)}. Evidence produced for one task does not decide another`);
+  }
+
   if (Array.isArray(c.missing_objects) && c.missing_objects.length > 0) {
     return refuse(MERGE_TREE_PROOF.MERGE_TREE_OBJECTS_UNAVAILABLE, c.error ?? `missing: ${c.missing_objects.join(", ")}`);
   }
@@ -356,7 +410,8 @@ export function verifyMergeTreeProof({
     reason: MERGE_TREE_PROOF.MERGE_TREE_PROVEN,
     detail: `the merge commit ${merge} points at tree ${mergeTree}, which is exactly the tree git produces by merging `
       + `the authorized base ${base} and the authorized head ${head} - computed from those two immutable objects, `
-      + "without a checkout and without touching any working tree, under a configuration this worker controls and "
+      + "without a checkout and without touching any working tree, in an object store bound to this task "
+      + `(${task}), under a configuration this worker controls and `
       + "with no non-built-in merge driver requested by the content. Both sides' changes, every base-only change, and "
       + "every file mode are inside that one id, so the merge carries the authorized content and nothing besides"
       + (evidence.computation?.fetched ? " (objects missing locally were fetched by exact sha from origin)" : ""),
@@ -373,7 +428,10 @@ export function describeMergeTreeProof(evidence) {
     `  merge commit tree (read from the object):             ${evidence.merge_commit_tree ?? "unknown"}`
   ];
   if (c) {
-    lines.push(`  proof store: ${c.store_path ?? "none"} (stage ${c.stage ?? "unknown"}`
+    lines.push(`  proof store: ${c.store_path ?? "none"} (owned by ${c.store_owned === true
+      ? `task ${c.store_owner_task_id ?? "unnamed"}`
+      : c.store_owned === false ? "NO TASK THIS WORKER COULD PROVE" : "an UNSTATED owner"}`
+      + `, stage ${c.stage ?? "unknown"}`
       + `${c.fetched ? ", objects fetched by sha" : ""}`
       + `${c.conflicted === true ? ", CONFLICTED" : ""}`
       + `${c.missing_objects?.length ? `, missing ${c.missing_objects.join(", ")}` : ""})`);

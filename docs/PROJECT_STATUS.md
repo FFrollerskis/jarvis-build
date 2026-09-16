@@ -1,17 +1,24 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-16 (branch `claude/d157-merge-transition-tree-proof`, PR **#84**, base
-`main=6f1c980c3493c6f68fe97bb2c8f045b4d196af75`). Aktiv ordre: **D-158**
-(`D158-PR84-SAME-FILE-MERGE-PROOF-HARDENING-20260915-A`, issue #68 kommentar 5688709953).
-`MERGE_AUTHORIZED=false`, `ARCHITECT_MERGE_APPROVED=false`, `SELF_APPROVAL=false`.
+`main=6f1c980c3493c6f68fe97bb2c8f045b4d196af75`). Aktiv ordre: **D-159**
+(`D159-PR84-D158-RECOVERY-CLOSEOUT-20260916-A`, issue #68 kommentar 5702547705), som
+**SUPERSEDES** den blokkerte `D158-PR84-SAME-FILE-MERGE-PROOF-HARDENING-20260915-A`.
+`MERGE_AUTHORIZED=false`, `SELF_APPROVAL=false`, `HOST_ACCEPTANCE_REQUIRED=false`.
 
-D-158 retter PR #84 **på plass**, som ÉN sammenhengende kontrollplan-leveranse. PR #84 forblir DRAFT og
-UMERGET. PR #83/UA-9 og PR #85/UA-10 er URØRT - ikke startet, ikke endret, ikke merget, ikke autorisert.
+D-158 brukte opp 4/4 worker-forsøk på timeout og ble parkert BLOCKED med krav om frisk TASK_ID. Den
+etterlot seg IKKE ufullført arbeid: task-worktreet var RENT på `f1962729`, og alle tre commitene over
+den autoriserte basen bærer D-134-trailere (`f196272`/`478d238` → D-158, `2b8c7d4` → D-157). Det D-158
+aldri produserte var sin TERMINALE RAPPORT, ikke sin implementasjon. **D-159 er rekonsiliasjon og
+lukking av det eksisterende arbeidet** - ingen replay fra bunnen, ingen forkasting, ingen
+reset/clean/stash/rebase/branch-erstatning/force-push.
 
-Leveransen har to deler, begge på samme branch og samme PR: selve D-158-rettelsen, og en **REVIEW-FIX**
-etter uavhengig arkitekt-review 5216915623 (`CHANGES_REQUIRED`, P1) som lukket at beviset arvet vertens
-git-konfigurasjon - se egen seksjon under. Reviewen er behandlet som et funn om at denne taskens EGEN
-leveranse ikke oppfylte ordren den allerede hadde, ikke som en ny ordre; ingen scope-endring.
+PR #84 rettes fortsatt **på plass** og forblir DRAFT og UMERGET. PR #83/UA-9 og PR #85/UA-10 er URØRT.
+
+Leveransen på denne branchen har nå tre deler, alle på samme PR: selve D-158-rettelsen, **REVIEW-FIX 1**
+etter arkitekt-review 5216915623 (`CHANGES_REQUIRED`, P1 - beviset arvet vertens git-konfigurasjon), og
+**D-159 / REVIEW-FIX 2** etter arkitekt-review 5217710904 (`CHANGES_REQUIRED`, P1, mot eksakt head
+`f1962729` - bevisets arbeidskatalog var et delt, kryss-task navnerom). Se egne seksjoner under.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -145,13 +152,80 @@ self-approval» står uendret. En flyttet HEAD er fortsatt kun en OBSERVASJON. E
 koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0` → `2.3.0`;
 `lib/merge-tree-proof.mjs` og `lib/merge-tree.mjs` lagt til deploy-payloaden.
 
+## D-159 / REVIEW-FIX 2 (ferdig, testet) - bevisets arbeidskatalog tilhører ÉN task
+
+Arkitekt-review **5217710904** mot eksakt head `f1962729` bekreftet at REVIEW-FIX 1 var lukket, og fant
+én gjenstående isolasjons-/proveniens-blocker (P1):
+
+    mergeProofStorePath(cfg)  ->  join(cfg.scratchRoot, "merge-proof.git")
+    mergeProofEnvPaths(cfg)   ->  join(cfg.scratchRoot, "merge-proof-env")
+
+Et DELT, KRYSS-TASK navnerom - gjenbrukt mellom kjøringer, med env-filene trunkert,
+`objects/info/alternates` overskrevet og `info/attributes` tvangsfjernet.
+
+**Å isolere og allowliste KONFIGURASJONEN sier ingenting om hvem som eier FILENE.** Tre konsekvenser:
+tilstand en annen task etterlot seg er INPUT til denne sikkerhetsporten (og allowlisten er ikke et
+generelt svar - alternates, attributes og objektdatabasen er ikke config); porten SLETTER og TRUNKERER
+stier den ikke kan bevise at den eier, som er det ene ordren forbyr overalt ellers i workeren; og to
+samtidige tasks deler ett store, så ingen av dem kan si hvem beviset beskriver.
+
+**Rettelsen - eierskap er et sjekket faktum, ikke en navnekonvensjon.** Begge katalogene ligger nå under
+`join(scratchRoot, taskId)`, taskens EGEN autoriserte scratch-katalog (den samme `worker.mjs` allerede
+gir barnet), og eierskapet fastslås FØR noe opprettes, skrives eller fjernes:
+
+- **CLAIM** - en katalog som ikke finnes opprettes og stemples med `jarvis-merge-proof-owner.json`, som
+  navngir nøyaktig denne task-iden og `kind` (`merge-proof-store` / `merge-proof-env`).
+- **PROVE** - en katalog som ALLEREDE finnes må bære den markøren, og den må navngi denne eksakte
+  task-iden og kind. Fremmed markør, umarkert katalog, uleselig/feilformet markør, feil `kind` og ukjent
+  fremtidig markør-versjon feiler alle LUKKET, **uten å slette, trunkere eller overskrive noe**. Et
+  RESUME av SAMME task finner sin egen markør og gjenbruker objektene sine, så gjenbruk forblir additiv.
+  Den eneste skrivingen inn i en katalog som allerede finnes er markøren selv med `wx`, så den kan ikke
+  overskrive en annen attempts markør; read-back avgjør eierskapet i begge tilfeller.
+- **CONTAIN** - to uavhengige lag mot omdirigering: hver eksisterende sti-komponent fra `scratchRoot` og
+  nedover må være en EKTE katalog, aldri en symlink/junction/reparse-point (sjekket FØR opprettelse,
+  fordi rekursiv `mkdir` følger en lenke som allerede er der), og etterpå må `realpathSync` av det som
+  ble claimet fortsatt ligge inne i `realpathSync(scratchRoot)`. En TASK_ID som ikke er et gyldig
+  sti-segment er ikke en task-id: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` utelukker `.`/`..`, begge
+  separatorene, drivbokstav, UNC-prefiks og ADS-`:`.
+
+**Og den rene avgjøreren sjekker bindingen på nytt.** `computeMergeTree` tar `taskId` fra autorisasjonen
+(den uforanderlige admitterte ordren) og ekkoer `store_owned`/`store_owner_task_id` inn i posten;
+`verifyMergeTreeProof` tar `taskId` og avviser fire adskilte ting med `MERGE_TREE_STORE_NOT_TASK_OWNED`:
+ingen task navngitt, eierskap NEKTET, eierskap aldri UTTALT (`null` avvises likt som `false`), og bevis
+laget for en ANNEN task. Eierskapsspørsmålet stilles FØR alt annet om resultatet, fordi det avgjør om
+resten av posten i det hele tatt beskriver denne taskens arbeid.
+
+**Ingenting er svekket.** Det eksakte fulltre-beviset, base-only-hunker, konfliktdeteksjon, avvisning av
+manuell konfliktløsning, git-config-/driver-isolasjonen fra REVIEW-FIX 1, eksakt autorisert base/head,
+ordnet two-parent-topologi, uavhengig review på eksakt head, eksakt påkrevd pre-merge-CI, eksakte
+post-merge-CI-jobbidentiteter på eksakt merge-SHA, uforanderlig task-/ordre-binding, proveniens/
+isolasjon, dirty-worktree-portene og «ingen self-approval» står alle uendret. `WORKER_VERSION` forblir
+`2.3.0` - fortsatt aldri deployet, så det finnes ingen deployment å skille FRA.
+
 ## Bevis
 
 - **Modellen er verifisert mot EKTE historikk før én linje kode ble skrevet:**
   `git merge-tree --write-tree 091ba091 170e5810` → `eef13c740e69b11c2e1007b2a6b9303e3eda393d`, som er
   nøyaktig treet GitHubs egen merge-commit `6f1c980c` peker på. Altså PR #82s divergerte
   17-commits-bak-topologi, reprodusert eksakt av modellen som nå håndhever.
-- **REVIEW-FIX-bevis:** `merge-tree-proof.test.mjs` **63/63** (var 45/45), inkludert en test som
+- **D-159-bevis (REVIEW-FIX 2), målt mot det EKTE filsystemet - bytes før og etter:**
+  `merge-tree-proof.test.mjs` **88/88** (var 63/63) med en ny D-159-blokk som dekker: begge katalogene
+  stemplet med egen markør under `scratchRoot/<TASK_ID>`; to ulike task-ider som får hvert sitt store,
+  der ingen av dem avgjør den andre; umarkert eksisterende store AVVIST med **null byte endret** og
+  ingen markør skrevet inn i det; store eid av en ANNEN task avvist med den andres arbeid intakt;
+  uleselig, ukjent-versjon og feil-`kind` markør avvist uten å erstattes; umarkert ENV-katalog avvist
+  uten at filene trunkeres (og storet aldri nådd); store OG env OG task-rot nådd gjennom
+  junction/symlink avvist med **null skrevet på den andre siden av lenken**; sti-komponent som er en FIL
+  avvist; en tabell av 14 sti-escape-forsøk (`..`, `a/b`, `a\b`, `C:evil`, tom, blank, `null`, tall …)
+  som alle avvises **og ikke bringer én katalog til eksistens**; resume av samme task som beholder det
+  et tidligere forsøk hentet; og at stale `info/attributes` fortsatt fjernes - men kun fra storet den
+  eier. `merge-transition.test.mjs` **80/80** (var 77/77, tre nye refusjonssaker i den omkringliggende
+  porten). `worker-merge-transition.test.mjs` **53/53** (var 51/51) med to nye ende-til-ende-tester mot
+  EKTE `worker.mjs run`: at den ekte porten faktisk regner i `scratchRoot/<TASK_ID>` med markør (og at
+  den gamle delte plasseringen ikke lenger opprettes i det hele tatt), og at den HOLDES med
+  `MERGE_TREE_STORE_NOT_TASK_OWNED` når katalogen tilhører en annen task - uten at den andres filer
+  eller markør røres. `postmerge-evidence.test.mjs` **60/60** uendret grønn.
+- **REVIEW-FIX 1-bevis:** `merge-tree-proof.test.mjs` **63/63** (var 45/45), inkludert en test som
   **KJØRER DEFEKTEN**: samme to ekte commiter, merget slik den ufiksede koden merget dem, kjører faktisk
   driveren og skriver markørfila (`existsSync(marker) === true`) - og deretter at den isolerte porten
   verken kjører den (`existsSync(marker) === false`) eller aksepterer mergen, at vertens globale config
@@ -183,17 +257,28 @@ koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0`
   på `blobSha` for `shared.txt` - og deretter at den RETTEDE porten FULLFØRER nøyaktig samme merge.
   Samme blokk holder fortsatt porten når den reviewede hunken droppes, og når de samme to sidene
   kolliderer i en ekte konflikt.
-- Full `ops/claude-worker`-akseptanse, målt på nytt etter review-fixen (2026-09-16):
-  **37/39 filer, 1279/1279 tester GRØNNE** (varighet 1220,63 s). De to filene som ikke er grønne er
+- Full `ops/claude-worker`-akseptanse, målt på nytt mot DENNE nøyaktige treet etter D-159 (2026-09-16):
+  **37/39 filer, 1309/1309 tester GRØNNE** (varighet 1328,71 s). De to filene som ikke er grønne er
   `deploy-cli.test.mjs` og `supervisor-run.test.mjs`, og de FEILER VED LASTING (null tester kjørt) - se
-  blokkering 3. Begge er urørt av D-158 og byte-identiske med HEAD. D-157-rapporten oppga «39/39 filer,
-  1259/1259»; **det reproduserer ikke i dette miljøet**, og det rapporteres som det er i stedet for å
-  omskrives til en pass.
+  blokkering 3. Begge er urørt av D-159: `git diff f1962729 --` mot dem er TOM. D-157-rapporten oppga
+  «39/39 filer, 1259/1259»; **det reproduserer ikke i dette miljøet**, og det rapporteres som det er i
+  stedet for å omskrives til en pass.
+- **Prosess-timeout-flaken, ISOLERT i stedet for bortforklart.** Hver kjøring som inkluderer
+  `merge-tree-proof.test.mjs` rapporterer én unhandled `[vitest-worker]: Timeout calling "onTaskUpdate"`.
+  Det er en RAPPORTØR-RPC-timeout mellom vitest sin worker og hovedprosessen, ikke en testfeil, og den
+  koster INGEN dekning: hver eneste test i hver slik kjøring ble kjørt og passerte (1309/1309 fullt,
+  281/281 fokusert, 88/88 for fila alene). Lokalisert ved re-kjøring: fraværende i
+  `worker-merge-transition` alene (51/51, 199 s) og i tre tunge suiter D-159 ikke rører i det hele tatt
+  (`worker-crash-recovery` + `worker-task-worktree` + `worker-crash-provenance`, 97/97, 429 s). Den er
+  IKKE innført av de nye D-159-testene: den var allerede der da fila fortsatt hadde D-158s egne 63
+  testkropper. **Ikke bevist pre-eksisterende** på det umodifiserte `f1962729`-treet - det ville krevd å
+  mutere en annen tasks worktree - og rapporteres som målt, ikke som påstått. Ingenting er svekket eller
+  hoppet over for å få den til å forsvinne.
 - Repo-`lint` (`eslint .`) og repo-`typecheck` (`pnpm -r run typecheck`) rene.
 
 ## Blokkeringer
 
-1. **Merge.** `MERGE_AUTHORIZED=false` og `ARCHITECT_MERGE_APPROVED=false` i D-158. PR #84 merges ikke
+1. **Merge.** `MERGE_AUTHORIZED=false` og `SELF_APPROVAL=false` i D-159. PR #84 merges ikke
    før en NY `ARCHITECT_TASK` eksplisitt godkjenner det mot eksakt HEAD/base.
 2. **Forhøyet sesjon (uendret fra D-143/D-145..D-157).** Claude Code kjører FORHØYET, og PostgreSQL
    nekter å starte under en administrator-konto; lokalt feiler dessuten tester utenfor
@@ -214,6 +299,7 @@ koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0`
    når `lib/deploy.mjs`. Ingen fiks gjort: å endre `vitest.config.ts` eller de tre inngangspunktene ville
    vært «urelatert opprydding», som ordrens grensepunkt 6 forbyr. **DEFERRED - egen arkitekt-beslutning.**
    Autoritativt bevis for disse to filene er Linux-CI, der linjeskiftene er LF.
+   **Uendret av D-159:** begge filene er fortsatt byte-identiske med `f1962729`.
 4. **Embedded-Postgres-flake (eksplisitt avdekket, IKKE rørt her).** Fortsatt kjent og udekket i
    repo-suiten utenfor `ops/claude-worker`.
 5. **D-156-rekonsiliasjon er BEVISST utsatt (per ordren).** D-156s beholdte record rekonsilieres først

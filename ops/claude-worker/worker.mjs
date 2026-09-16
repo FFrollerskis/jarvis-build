@@ -374,11 +374,18 @@ function verifyTransitionFor(cfg, claim, completion) {
   // no index, no ref written, nothing in the repository touched. When there is no
   // merge sha to prove anything about, the computation is not attempted at all
   // and the verifier sees UNKNOWN, which is a named refusal rather than a pass.
+  //
+  // D-159: the store is narrower still - `join(scratchRoot, taskId)`, this task's
+  // OWN authorized scratch directory, claimed with an ownership marker before
+  // anything is created, written or removed. The task id comes from the
+  // authorization, which is the immutable admitted order, so the gate cannot be
+  // pointed at a directory shared with, or left behind by, other work.
   const mergeTreeProof = mergeSha
     ? computeMergeTree(cfg, {
       expectedBase: authorization.expectedBase,
       expectedHead: authorization.expectedHead,
-      mergeSha
+      mergeSha,
+      taskId: authorization.taskId
     })
     : { attempted: false, ok: false, stage: "no_merge_commit", error: "the pull request records no merge commit" };
 

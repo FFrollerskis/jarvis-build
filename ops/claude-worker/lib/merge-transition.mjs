@@ -1158,11 +1158,16 @@ export function verifyMergeTransition({
   // against the real object, not as a substitute for it: the proof requires them
   // to agree, so a projection that has drifted from the object it describes is a
   // named refusal rather than the thing the gate quietly believed.
+  //
+  // D-159: the proof is also bound to the task being decided. The computation
+  // has to have run in a store this exact task owns, and say which - otherwise a
+  // record produced by, or contaminated by, other work could decide this merge.
   const treeVerdict = verifyMergeTreeProof({
     computation: mergeTreeProof,
     mergeSha,
     expectedBase: auth.expectedBase,
     expectedHead: auth.expectedHead,
+    taskId: auth.taskId,
     projectedTree: mergeTree || null,
     projectedParents: parents
   });
