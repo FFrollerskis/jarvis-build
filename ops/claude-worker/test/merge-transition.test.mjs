@@ -186,6 +186,13 @@ const mergeTreeProof = (over = {}) => ({
   fetched: false,
   fetch_error: null,
   missing_objects: [],
+  // D-158 REVIEW-FIX: a complete record also states the conditions the merge
+  // was computed under - an isolated, allowlisted configuration, and no
+  // non-built-in merge driver requested by the content being merged.
+  config_isolated: true,
+  foreign_config: [],
+  custom_merge_drivers: [],
+  attribute_files_scanned: 0,
   resolved_base: BASE,
   resolved_head: HEAD,
   resolved_merge: MERGE,
@@ -437,6 +444,33 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
     ["the proof answers about a different base than the order authorized",
       { mergeTreeProof: mergeTreeProof({ resolved_base: OTHER }) },
       MERGE_TRANSITION.MERGE_TREE_WRONG_INPUTS],
+    // D-158 REVIEW-FIX: the conditions the merge was computed under reach the
+    // SURROUNDING gate as refusals too, so a held gate names them in the record
+    // rather than only inside the proof module.
+    ["the merge was computed under configuration the worker does not control",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "config_isolation", config_isolated: false,
+          foreign_config: ["file:C:/Users/x/.gitconfig -> merge.evil.driver (not the proof store's own config)"],
+          error: "the merge proof would run under configuration this worker does not control"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_CONFIG_NOT_ISOLATED],
+    ["the computation never said what configuration it ran under",
+      { mergeTreeProof: mergeTreeProof({ config_isolated: null }) },
+      MERGE_TRANSITION.MERGE_TREE_CONFIG_NOT_ISOLATED],
+    ["the content being merged requests a non-built-in merge driver",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "attributes",
+          custom_merge_drivers: ["1111111111:.gitattributes -> merge=evil"],
+          error: "the content being merged requests a non-built-in merge driver"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_DRIVER_REQUESTED],
+    ["the merge-driver question was never asked",
+      { mergeTreeProof: mergeTreeProof({ custom_merge_drivers: null }) },
+      MERGE_TRANSITION.MERGE_TREE_DRIVER_REQUESTED],
     ["the PR is not merged",
       { pull: pull({ merged: false, mergeCommitSha: null }) }, MERGE_TRANSITION.NOT_MERGED],
     ["merged but with no merge sha",

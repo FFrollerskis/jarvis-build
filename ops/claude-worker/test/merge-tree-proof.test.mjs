@@ -44,6 +44,13 @@ const computation = (over = {}) => ({
   fetched: false,
   fetch_error: null,
   missing_objects: [],
+  // D-158 REVIEW-FIX: the conditions the merge was computed under are part of a
+  // COMPLETE record, so the canonical fixture states them and the cases below
+  // drive each of "false" and "never stated" separately.
+  config_isolated: true,
+  foreign_config: [],
+  custom_merge_drivers: [],
+  attribute_files_scanned: 0,
   resolved_base: BASE,
   resolved_head: HEAD,
   resolved_merge: MERGE,
@@ -131,6 +138,77 @@ describe("D-158: an uncomputed, incomplete or ambiguous proof is never a pass", 
     const v = verify({ computation: computation({ conflicted: null }) });
     expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_NOT_COMPUTED);
     expect(v.detail).toContain("unstated conflict");
+  });
+});
+
+/* ==========================================================================
+ * D-158 REVIEW-FIX: THE CONDITIONS THE MERGE WAS COMPUTED UNDER
+ * ==========================================================================
+ *
+ * A tree id only means "the authorized merge" if the merge was computed the way
+ * an ordinary merge of those two commits is. Git executes whatever a merge
+ * driver names and COMMITTED content chooses the driver, so these two are part
+ * of the proof, not preconditions someone else is trusted to have checked.
+ */
+
+describe("D-158 REVIEW-FIX: a merge computed under uncontrolled configuration is never a pass", () => {
+  it("refuses an explicitly non-isolated computation, and names what was out of policy", () => {
+    const v = verify({
+      computation: computation({
+        ok: false,
+        stage: "config_isolation",
+        config_isolated: false,
+        foreign_config: ["file:C:/Users/x/.gitconfig -> merge.evil.driver (not the proof store's own config)"],
+        error: "the merge proof would run under configuration this worker does not control"
+      })
+    });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED);
+    expect(v.detail).toContain("merge.evil.driver");
+    expect(v.evidence.computation.config_isolated).toBe(false);
+  });
+
+  it("refuses an UNSTATED configuration even on a record that claims success", () => {
+    // The pre-review record shape: complete, ok, and silent about the
+    // configuration it ran under. Silence is refused exactly like false.
+    const v = verify({ computation: computation({ config_isolated: undefined }) });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED);
+    expect(v.detail).toContain("unstated condition is not a satisfied one");
+  });
+
+  it("refuses when the content requests a non-built-in merge driver", () => {
+    const v = verify({
+      computation: computation({
+        ok: false,
+        stage: "attributes",
+        custom_merge_drivers: [`${BASE.slice(0, 12)}:.gitattributes -> merge=evil`],
+        error: "the content being merged requests a non-built-in merge driver"
+      })
+    });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED);
+    expect(v.evidence.computation.custom_merge_drivers).toHaveLength(1);
+  });
+
+  it("refuses a driver request even when the record otherwise claims success", () => {
+    expect(verify({ computation: computation({ custom_merge_drivers: ["x:.gitattributes -> merge=evil"] }) }).reason)
+      .toBe(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED);
+  });
+
+  it("refuses when the driver question was never asked", () => {
+    const v = verify({ computation: computation({ custom_merge_drivers: null }) });
+    expect(v.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED);
+    expect(v.detail).toContain("unanswered question is not an answer of no");
+  });
+
+  it("states both conditions in the passing detail, so a pass is readable", () => {
+    expect(verify().detail).toContain("configuration this worker controls");
+    expect(verify().detail).toContain("no non-built-in merge driver");
+  });
+
+  it("describes the conditions for a status comment", () => {
+    const lines = describeMergeTreeProof(verify().evidence).join("\n");
+    expect(lines).toContain("isolated, allowlisted git configuration");
+    expect(lines).toContain("merge drivers requested by content: none");
   });
 });
 
@@ -678,25 +756,341 @@ describe("D-158: the proof never mutates the repository it reads", () => {
     expect(first.ok).toBe(true);
     expect(first.conflicted).toBe(false);
 
-    // Now poison the store's own config the way a host's global config could.
-    // `git init --bare` reuses this store, so these survive into the next run.
-    const store = mergeProofStorePath(cfg);
-    git(store, ["config", "merge.renames", "false"]);
-    git(store, ["config", "diff.renames", "false"]);
-
+    // Now poison the HOST's global config, which is where a deployed worker
+    // would really meet this - `merge.renames=false` in somebody's ~/.gitconfig.
+    //
     // Verified by removing the pin: without it this run returns
     // `ok: false, conflicted: true` - the rename-blind merge cannot reconcile an
     // edit to a path the other side deleted, so a VALID merge is reported as a
     // CONFLICT and the gate refuses it. That is precisely the false-negative
     // class D-158 exists to close, arriving through a different door.
-    const second = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    const hostileGlobal = join(dir, "hostile.gitconfig");
+    writeFileSync(hostileGlobal, "[merge]\n\trenames = false\n[diff]\n\trenames = false\n", "utf8");
+    const restore = process.env.GIT_CONFIG_GLOBAL;
+    process.env.GIT_CONFIG_GLOBAL = hostileGlobal;
+    let second;
+    try {
+      second = computeMergeTree(cfg, { expectedBase: base, expectedHead: hd, mergeSha: merge });
+    } finally {
+      if (restore === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = restore;
+    }
     expect(second.ok).toBe(true);
     expect(second.conflicted).toBe(false);
     expect(second.expected_tree).toBe(first.expected_tree);
+    expect(second.config_isolated).toBe(true);
 
     // And the proof still passes on the tree git actually produced.
     expect(verifyMergeTreeProof({
       computation: second, mergeSha: merge, expectedBase: base, expectedHead: hd
     }).ok).toBe(true);
+  });
+
+  /**
+   * D-158 REVIEW-FIX: and a poisoned STORE is refused outright.
+   *
+   * The store is reused between gates on purpose, so anything left in its own
+   * config outlives the run that put it there. Before this fix such a key simply
+   * applied; now it is not "outranked", it is a NAMED REFUSAL - because a key
+   * that can move the tree could equally have been one that names a command.
+   */
+  it("REFUSES a proof store whose own config carries anything outside the allowlist", () => {
+    const B0 = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "--detach", B0]);
+    writeFileSync(join(repoPath, "base-only.txt"), "landed meanwhile\n", "utf8");
+    git(repoPath, ["add", "-A"]); git(repoPath, ["commit", "-m", "base"]);
+    const base = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "--detach", B0]);
+    writeFileSync(join(repoPath, "feature.txt"), "reviewed\n", "utf8");
+    git(repoPath, ["add", "-A"]); git(repoPath, ["commit", "-m", "head"]);
+    const hd = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "-B", "main", base]);
+    const merge = syntheticMerge(repoPath, { base, head: hd, tree: realMergeTree(repoPath, base, hd) });
+    const args = { expectedBase: base, expectedHead: hd, mergeSha: merge };
+
+    expect(computeMergeTree(cfg, args).ok).toBe(true);
+
+    git(mergeProofStorePath(cfg), ["config", "merge.renames", "false"]);
+
+    const c = computeMergeTree(cfg, args);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("config_isolation");
+    expect(c.config_isolated).toBe(false);
+    expect(c.foreign_config.join(" ")).toContain("merge.renames");
+    const verdict = verifyMergeTreeProof({ computation: c, mergeSha: merge, expectedBase: base, expectedHead: hd });
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED);
+  });
+});
+
+/* ==========================================================================
+ * D-158 REVIEW-FIX: REPOSITORY CONTENT MAY NOT SELECT A COMMAND
+ * ==========================================================================
+ *
+ * Architect review 5216915623 (P1) on PR #84. The first version of this proof
+ * passed no environment, so `git merge-tree` inherited the host's - and git's
+ * merge machinery runs whatever `merge.<driver>.driver` names, with a COMMITTED
+ * `.gitattributes` choosing the driver.
+ *
+ * The first test below EXECUTES THE DEFECT rather than describing it: the same
+ * two commits, merged the way the unfixed code merged them, actually run the
+ * driver and write a marker file. Everything after it is the fix refusing to.
+ * A security property that is only argued for in a comment is not tested.
+ */
+
+describe("D-158 REVIEW-FIX: no merge driver may execute during the proof", () => {
+  let dir;
+  let repoPath;
+  let cfg;
+  let marker;
+  let driverScript;
+  let hostileGlobal;
+  const savedEnv = {};
+
+  /** base and head edit different hunks of ONE attributed file. */
+  const lines = (over = {}) => `${Array.from({ length: 10 }, (_, i) => over[i + 1] ?? `l${i + 1}`).join("\n")}\n`;
+
+  /**
+   * The same-file/non-overlap topology, with `.gitattributes` committed on the
+   * SHARED ANCESTOR so both sides carry it - which is how a repository really
+   * attributes its own content.
+   *
+   * `nested` adds a second attributes file in a subdirectory. `realMerge` asks
+   * git for the true merge tree; the refusal cases deliberately do not, because
+   * a fixture must not have to perform the merge the gate is about to refuse.
+   */
+  const topology = ({ attributes, nested = null, realMerge = false }) => {
+    writeFileSync(join(repoPath, "attributed.txt"), lines(), "utf8");
+    writeFileSync(join(repoPath, ".gitattributes"), attributes, "utf8");
+    if (nested !== null) {
+      mkdirSync(join(repoPath, "sub"), { recursive: true });
+      writeFileSync(join(repoPath, "sub", ".gitattributes"), nested, "utf8");
+      writeFileSync(join(repoPath, "sub", "note.md"), "a file the nested rule matches\n", "utf8");
+    }
+    git(repoPath, ["add", "-A"]); git(repoPath, ["commit", "-m", "b0: attributed content"]);
+    const B0 = head(repoPath);
+
+    writeFileSync(join(repoPath, "attributed.txt"), lines({ 10: "changed by the head" }), "utf8");
+    git(repoPath, ["add", "-A"]); git(repoPath, ["commit", "-m", "head: the reviewed change"]);
+    const headSha = head(repoPath);
+
+    git(repoPath, ["checkout", "--quiet", "--detach", B0]);
+    writeFileSync(join(repoPath, "attributed.txt"), lines({ 1: "changed on the base" }), "utf8");
+    git(repoPath, ["add", "-A"]); git(repoPath, ["commit", "-m", "base: work that landed meanwhile"]);
+    const baseSha = head(repoPath);
+    git(repoPath, ["checkout", "--quiet", "-B", "main", baseSha]);
+
+    const mergeSha = syntheticMerge(repoPath, {
+      base: baseSha,
+      head: headSha,
+      tree: realMerge ? realMergeTree(repoPath, baseSha, headSha) : treeOf(repoPath, headSha)
+    });
+    return { base: baseSha, head: headSha, merge: mergeSha, args: { expectedBase: baseSha, expectedHead: headSha, mergeSha } };
+  };
+
+  const proveIt = (t, c) => verifyMergeTreeProof({
+    computation: c, mergeSha: t.merge, expectedBase: t.base, expectedHead: t.head
+  });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "jarvis-d158-drv-"));
+    repoPath = join(dir, "repo");
+    createRepo(repoPath);
+    cfg = { repoOwner: "tsworkflow", repoName: "jarvisbuild", repoPath, scratchRoot: join(dir, "worker", "tmp") };
+
+    // A driver that proves it ran, by writing a file nothing else writes.
+    marker = join(dir, "DRIVER-EXECUTED");
+    driverScript = join(dir, "driver.mjs");
+    writeFileSync(driverScript, "import { writeFileSync } from \"node:fs\";\n"
+      + `writeFileSync(${JSON.stringify(marker)}, "the merge driver ran\\n");\n`
+      + "process.exit(0);\n", "utf8");
+    hostileGlobal = join(dir, "hostile.gitconfig");
+    writeFileSync(hostileGlobal,
+      "[merge \"evil\"]\n\tname = a driver the repository asked for\n"
+      + `\tdriver = node ${driverScript.replace(/\\/g, "/")} %A %O %B\n`, "utf8");
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(savedEnv)) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+      delete savedEnv[key];
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Put the hostile definition where a real host would have it. */
+  const poisonHostEnvironment = () => {
+    for (const key of ["GIT_CONFIG_GLOBAL", "HOME", "USERPROFILE"]) savedEnv[key] = process.env[key];
+    process.env.GIT_CONFIG_GLOBAL = hostileGlobal;
+    const fakeHome = join(dir, "home");
+    mkdirSync(fakeHome, { recursive: true });
+    writeFileSync(join(fakeHome, ".gitconfig"),
+      `[merge "evil"]\n\tdriver = node ${driverScript.replace(/\\/g, "/")} %A %O %B\n`, "utf8");
+    process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
+  };
+
+  it("THE DEFECT, EXECUTED: an inherited host config runs the driver on these very commits", () => {
+    // This is what the pre-fix proof did - `git merge-tree` with the process's
+    // own environment. It is run here against the real objects so that "content
+    // could select a host command" is a measured fact, not a claim.
+    const t = topology({ attributes: "*.txt merge=evil\n" });
+    poisonHostEnvironment();
+    expect(existsSync(marker)).toBe(false);
+
+    const res = spawnSync("git", ["merge-tree", "--write-tree", t.base, t.head], {
+      cwd: repoPath, encoding: "utf8", windowsHide: true, env: process.env
+    });
+
+    expect(res.status).toBe(0);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("...and the ISOLATED proof neither runs it nor accepts the merge", () => {
+    const t = topology({ attributes: "*.txt merge=evil\n" });
+    poisonHostEnvironment();
+
+    const c = computeMergeTree(cfg, t.args);
+
+    // Nothing ran: the driver is not defined under the proof's configuration,
+    // and the content that asked for it is refused before the merge is computed.
+    expect(existsSync(marker)).toBe(false);
+    // The host's global config never reached the computation...
+    expect(c.config_isolated).toBe(true);
+    expect(c.foreign_config).toEqual([]);
+    // ...and the request itself is the refusal.
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("attributes");
+    expect(c.custom_merge_drivers.join(" ")).toContain("merge=evil");
+
+    const verdict = proveIt(t, c);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED);
+  });
+
+  it("refuses a requested driver even when NO hostile config exists anywhere", () => {
+    // The driver is undefined, so git would silently fall back to its built-in
+    // merge - a different tree from the one a machine holding the driver
+    // computes. Fail closed on the ambiguity rather than pick one of them.
+    const t = topology({ attributes: "*.txt merge=evil\n" });
+    const c = computeMergeTree(cfg, t.args);
+    expect(existsSync(marker)).toBe(false);
+    expect(c.ok).toBe(false);
+    expect(c.stage).toBe("attributes");
+    expect(proveIt(t, c).reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED);
+  });
+
+  it("refuses a driver requested from a NESTED .gitattributes, and from a MACRO", () => {
+    const t = topology({
+      attributes: "[attr]mine merge=evil\n*.txt mine\n",
+      nested: "*.md merge=alsoevil\n"
+    });
+    const c = computeMergeTree(cfg, t.args);
+    expect(c.ok).toBe(false);
+    expect(c.custom_merge_drivers.join(" ")).toContain("merge=evil");
+    expect(c.custom_merge_drivers.join(" ")).toContain("merge=alsoevil");
+    expect(c.attribute_files_scanned).toBeGreaterThan(1);
+  });
+
+  it("PASSES ordinary attributes: text, union, -merge and binary are all built in", () => {
+    // The refusal must be narrow. These are the attributes real repositories
+    // carry, and none of them can name a command.
+    const t = topology({
+      attributes: "* text=auto\n*.lock -merge\n*.log merge=union\n*.png binary\n*.bin merge=binary\n",
+      realMerge: true
+    });
+    const c = computeMergeTree(cfg, t.args);
+    expect(c.ok).toBe(true);
+    expect(c.custom_merge_drivers).toEqual([]);
+    expect(c.attribute_files_scanned).toBeGreaterThan(0);
+    expect(proveIt(t, c).ok).toBe(true);
+  });
+
+  it("ignores a commented-out driver request rather than refusing on the word", () => {
+    const t = topology({ attributes: "# *.txt merge=evil\n* text=auto\n", realMerge: true });
+    const c = computeMergeTree(cfg, t.args);
+    expect(c.ok).toBe(true);
+    expect(c.custom_merge_drivers).toEqual([]);
+    expect(proveIt(t, c).ok).toBe(true);
+  });
+
+  it("REFUSES an include.path in the store, which is how a driver would be smuggled back in", () => {
+    // An include resolves to its OWN origin in `config --list --show-origin`,
+    // which is exactly what makes it detectable instead of invisible.
+    const t = topology({ attributes: "* text=auto\n", realMerge: true });
+    expect(computeMergeTree(cfg, t.args).ok).toBe(true);
+
+    git(mergeProofStorePath(cfg), ["config", "include.path", hostileGlobal.replace(/\\/g, "/")]);
+
+    const c = computeMergeTree(cfg, t.args);
+    expect(existsSync(marker)).toBe(false);
+    expect(c.config_isolated).toBe(false);
+    expect(c.foreign_config.join(" ")).toContain("merge.evil.driver");
+    expect(proveIt(t, c).reason).toBe(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED);
+  });
+
+  it("removes a stale info/attributes from the reused store rather than obeying it", () => {
+    // `$GIT_DIR/info/attributes` is an attributes source that lives outside
+    // every tree, so a leftover one could attribute content that never asked.
+    const t = topology({ attributes: "* text=auto\n", realMerge: true });
+    expect(computeMergeTree(cfg, t.args).ok).toBe(true);
+
+    const info = join(mergeProofStorePath(cfg), "info");
+    mkdirSync(info, { recursive: true });
+    writeFileSync(join(info, "attributes"), "*.txt merge=evil\n", "utf8");
+
+    const c = computeMergeTree(cfg, t.args);
+    expect(existsSync(join(info, "attributes"))).toBe(false);
+    expect(existsSync(marker)).toBe(false);
+    expect(c.ok).toBe(true);
+    expect(proveIt(t, c).ok).toBe(true);
+  });
+
+  it("neither merge.default, renormalization nor an out-of-tree attributes file can move the tree", () => {
+    // The review named these three by name. `merge.default` selects a driver for
+    // paths with NO merge attribute - it does not need `.gitattributes` at all -
+    // `core.attributesFile` attributes content from outside every tree, and
+    // `merge.renormalize` re-normalises line endings before merging.
+    const t = topology({ attributes: "* text=auto\n", realMerge: true });
+    const clean = computeMergeTree(cfg, t.args);
+    expect(clean.ok).toBe(true);
+
+    const hostileAttributes = join(dir, "hostile.gitattributes");
+    writeFileSync(hostileAttributes, "*.txt merge=evil\n", "utf8");
+    writeFileSync(hostileGlobal,
+      "[merge \"evil\"]\n"
+      + `\tdriver = node ${driverScript.replace(/\\/g, "/")} %A %O %B\n`
+      + "[merge]\n\tdefault = evil\n\trenormalize = true\n"
+      + `[core]\n\tattributesFile = ${hostileAttributes.replace(/\\/g, "/")}\n\tautocrlf = true\n`, "utf8");
+    poisonHostEnvironment();
+
+    const poisoned = computeMergeTree(cfg, t.args);
+
+    expect(existsSync(marker)).toBe(false);
+    expect(poisoned.config_isolated).toBe(true);
+    expect(poisoned.ok).toBe(true);
+    // The same two commits, the same tree - the host contributed nothing.
+    expect(poisoned.expected_tree).toBe(clean.expected_tree);
+    expect(poisoned.expected_tree).toBe(treeOf(repoPath, t.merge));
+    expect(proveIt(t, poisoned).ok).toBe(true);
+  });
+
+  it("strips environment-injected configuration, which outranks every file", () => {
+    // `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` are `-c` by another name: a
+    // supervisor's environment could define a driver with no file on disk
+    // saying so, and an environment variable beats every config file.
+    for (const key of ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]) savedEnv[key] = process.env[key];
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "merge.evil.driver";
+    process.env.GIT_CONFIG_VALUE_0 = `node ${driverScript.replace(/\\/g, "/")} %A %O %B`;
+
+    const t = topology({ attributes: "* text=auto\n", realMerge: true });
+    const c = computeMergeTree(cfg, t.args);
+    expect(existsSync(marker)).toBe(false);
+    expect(c.config_isolated).toBe(true);
+    expect(c.foreign_config).toEqual([]);
+    expect(c.ok).toBe(true);
+    expect(proveIt(t, c).ok).toBe(true);
   });
 });

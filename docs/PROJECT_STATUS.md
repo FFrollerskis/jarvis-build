@@ -8,6 +8,11 @@
 D-158 retter PR #84 **på plass**, som ÉN sammenhengende kontrollplan-leveranse. PR #84 forblir DRAFT og
 UMERGET. PR #83/UA-9 og PR #85/UA-10 er URØRT - ikke startet, ikke endret, ikke merget, ikke autorisert.
 
+Leveransen har to deler, begge på samme branch og samme PR: selve D-158-rettelsen, og en **REVIEW-FIX**
+etter uavhengig arkitekt-review 5216915623 (`CHANGES_REQUIRED`, P1) som lukket at beviset arvet vertens
+git-konfigurasjon - se egen seksjon under. Reviewen er behandlet som et funn om at denne taskens EGEN
+leveranse ikke oppfylte ordren den allerede hadde, ikke som en ny ordre; ingen scope-endring.
+
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
@@ -86,6 +91,52 @@ NEGATIVER og kan aldri gjøre et avslag om til en pass.
 `compare`-ruten i fake-`gh`. Ingenting i `lib/` leser lenger en sammenlikning. Head-treet bæres fortsatt
 i beviset, men eksplisitt merket «head tree (evidence only)».
 
+## REVIEW-FIX i samme leveranse (ferdig, testet) - innhold i repoet fikk velge en kommando
+
+Uavhengig arkitekt-review **5216915623** på PR #84 (`RESULT=CHANGES_REQUIRED`, P1, mot head `478d238c`)
+bekreftet at samme-fil-falsknegativen var lukket, og fant ÉN kontrollplan-blocker i selve
+erstatningsbeviset: `spawnGit` sendte INGEN eksplisitt `env`, så hver git-invokasjon arvet vertens
+miljø, mens `gitMergeTree` bare pinnet fem skalarer.
+
+**Verifisert empirisk, ikke resonnert om - og verifikasjonen er en TEST, ikke en engangsmåling.** En
+COMMITTET `.gitattributes` med `*.txt merge=evil`, pluss `merge.evil.driver` definert i vertens config,
+får `git merge-tree --write-tree` til å KJØRE den kommandoen. Dette er ikke beskrevet i en kommentar, det
+KJØRES i `merge-tree-proof.test.mjs` («THE DEFECT, EXECUTED»): testen merger de samme to ekte commitene
+slik den ufiksede koden gjorde det, og asserterer at driveren faktisk skrev markørfila
+(`existsSync(marker) === true`) - og deretter at den isolerte porten ikke gjør det. Repo-innhold som
+velger en vertsdefinert kommando inne i en sikkerhetsport er **kodeeksekvering**, ikke en falsk negativ.
+(Målingen som først avdekket dette viste også at denne vertens SYSTEM-config setter `core.autocrlf=true`
+og `filter.lfs.*`, altså at «det forventede treet» var en funksjon av hvilken maskin som regnet det ut.)
+
+**Tre lag, ingen av dem betrodd alene:**
+
+1. **ISOLER** (`withGitEnv`/`isolatedGitEnv`): hver invokasjon som REGNER UT eller LESER beviset kjører
+   med `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_SYSTEM`/`GIT_CONFIG_GLOBAL` mot en fil som skrives TOM hver
+   kjøring, `GIT_ATTR_NOSYSTEM`, `HOME`/`USERPROFILE`/`XDG_CONFIG_HOME` mot en tom katalog, og med
+   `GIT_CONFIG_PARAMETERS`/`_COUNT`/`_KEY_n`/`GIT_DIR`/`GIT_WORK_TREE`/`GIT_ATTR_SOURCE` m.fl. FJERNET.
+   Env-en er opt-in per kall - alle andre kallsteder arver miljøet som før, fordi en generell sanering
+   stille ville endret hvordan workeren AUTENTISERER. **FETCH-en beholder bevisst vertsmiljøet:** den
+   trenger vertens credentials, regner ikke ut noe, og `git fetch <url> <sha>` er innholdsadressert - en
+   omskrevet URL eller en fiendtlig helper kan bare få den til å FEILE, aldri bytte ut innhold.
+2. **VALIDER:** effektiv config listes med origin (`config --list --show-origin -z`), og HVER oppføring
+   må komme fra proof-storets EGEN config og stå på en smal allowlist, ellers
+   `MERGE_TREE_CONFIG_NOT_ISOLATED` med nøyaktig nøkkel og origin i beviset. En `include.path` løses opp
+   til sin EGEN origin og blir dermed synlig; et gjenbrukt/stale store avvises i stedet for å gjelde; en
+   fremtidig git som skriver en ny nøkkel gir et AVSLAG (trygg retning). Stale `$GIT_DIR/info/attributes`
+   fjernes fra det gjenbrukte storet.
+3. **AVVIS AMBIGUITET:** en driver kan være BEDT OM uten å være definert, og git faller da STILLE tilbake
+   til innebygd merge (målt) - et ANNET tre enn på en maskin som har driveren. Derfor leses hver
+   `.gitattributes` i base-, head- og merge-base-treet, og `merge=<navn>` utenfor git sine innebygde
+   `text`/`binary`/`union` gir `MERGE_TREE_DRIVER_REQUESTED`. Makroer (`[attr]`) og nestede attributtfiler
+   dekkes; kommentarer og vanlige attributter (`text=auto`, `-merge`, `merge=union`, `binary`) gjør det ikke.
+
+I tillegg pinnes `merge.default=text`, `merge.renormalize=false` og `core.attributesFile` (tom fil) på
+kommandolinjen. `config_isolated`/`custom_merge_drivers` er `null` til de faktisk er fastslått, og
+UTTALT `false` og UUTTALT `null` avvises likt - et uspurt spørsmål er ikke et nei.
+
+`WORKER_VERSION` forblir **`2.3.0`**: den er aldri deployet noe sted, så det finnes ingen deployment å
+skille FRA, og en 2.4.0 for en draft-rettelse ville registrert en versjon som aldri kjørte.
+
 **Ingenting av D-134..D-157 er svekket.** Eksakt-SHA-autorisasjon, PR-registrert merge-SHA, ordnet
 two-parent-struktur, avvisning av squash/rebase, påkrevd review på eksakt head, påkrevd pre- og
 post-merge-CI med eksakte jobb-identiteter på eksakt merge-SHA, uforanderlig ordre-/task-binding,
@@ -100,7 +151,18 @@ koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0`
   `git merge-tree --write-tree 091ba091 170e5810` → `eef13c740e69b11c2e1007b2a6b9303e3eda393d`, som er
   nøyaktig treet GitHubs egen merge-commit `6f1c980c` peker på. Altså PR #82s divergerte
   17-commits-bak-topologi, reprodusert eksakt av modellen som nå håndhever.
-- Ny `merge-tree-proof.test.mjs` **45/45**. Ren-verifikator-grener drevet eksakt, pluss EKTE
+- **REVIEW-FIX-bevis:** `merge-tree-proof.test.mjs` **63/63** (var 45/45), inkludert en test som
+  **KJØRER DEFEKTEN**: samme to ekte commiter, merget slik den ufiksede koden merget dem, kjører faktisk
+  driveren og skriver markørfila (`existsSync(marker) === true`) - og deretter at den isolerte porten
+  verken kjører den (`existsSync(marker) === false`) eller aksepterer mergen, at vertens globale config
+  aldri når beregningen (`config_isolated === true`, `foreign_config === []`), at env-injisert
+  `GIT_CONFIG_KEY_0` strippes, at `include.path` og en ikke-allowlistet nøkkel i storet avvises, at stale
+  `info/attributes` fjernes, at nestede attributtfiler og `[attr]`-makroer fanges, og at vanlige
+  attributter (`text=auto`, `-merge`, `merge=union`, `binary`) fortsatt PASSERER.
+  `merge-transition.test.mjs` **77/77** (var 73/73) med fire nye refusjonssaker i den omkringliggende
+  porten. `postmerge-evidence.test.mjs` **60/60** og `worker-merge-transition.test.mjs` **51/51** uendret
+  grønne etter rettelsen.
+- Grunnleveransens egne saker (var 45/45 før review-fixen, nå del av de 63). Ren-verifikator-grener drevet eksakt, pluss EKTE
   git-topologier der git regner ut trærne: forskjellige filer PASS; **ikke-overlappende hunker i samme
   fil PASS** (den refuserte saken); base allerede inneholdt av head PASS; overlappende hunker BLOCKED
   som konflikt; manuelt løst konflikt presentert som normal merge BLOCKED; ekstra fil, droppet hunk,
@@ -109,10 +171,11 @@ koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0`
   feil origin nektet. To isolasjonstester asserterer at repoets objektlager, refs, HEAD og `status` er
   BIT-IDENTISKE før og etter beregningen, og at et eksisterende scratch-lager gjenbrukes, ikke slettes.
   En tredje isolasjonstest asserterer at **rename-deteksjon er pinnet**: samme to commiter gir samme
-  forventede tre selv når lagerets egen config slår rename-deteksjon AV. Verifisert som ikke-vakuøs ved
+  forventede tre selv når VERTENS globale config slår rename-deteksjon AV (etter review-fixen er en slik
+  nøkkel i proof-storets EGEN config ikke lenger overstyrt, men et AVSLAG - egen test). Verifisert som ikke-vakuøs ved
   å fjerne pinningen - da blir en fullt gyldig «base omdøper filen, head redigerer den under sitt gamle
   navn»-merge rapportert som KONFLIKT, altså samme falsk-negativ-klasse D-158 lukker, gjennom en annen dør.
-- `merge-transition.test.mjs` **73/73**, `postmerge-evidence.test.mjs` **60/60**.
+- `merge-transition.test.mjs` **77/77**, `postmerge-evidence.test.mjs` **60/60**.
 - `worker-merge-transition.test.mjs` **51/51** mot EKTE `worker.mjs run` som ekte OS-prosess over et
   EKTE git-repo, inkludert en ny **D-158-REGRESJONSBLOKK**: den bygger samme-fil/ikke-overlappende
   topologi av ekte commiter, **KJØRER D-157s EGEN PROJEKSJONS-LIKHETSREGEL** (bevart som
@@ -120,8 +183,8 @@ koster fortsatt NULL remote-kall og null git-beregning. `WORKER_VERSION` `2.2.0`
   på `blobSha` for `shared.txt` - og deretter at den RETTEDE porten FULLFØRER nøyaktig samme merge.
   Samme blokk holder fortsatt porten når den reviewede hunken droppes, og når de samme to sidene
   kolliderer i en ekte konflikt.
-- Full `ops/claude-worker`-akseptanse, målt på nytt i denne attempten (2026-09-16):
-  **37/39 filer, 1257/1257 tester GRØNNE** (varighet 1181 s). De to filene som ikke er grønne er
+- Full `ops/claude-worker`-akseptanse, målt på nytt etter review-fixen (2026-09-16):
+  **37/39 filer, 1279/1279 tester GRØNNE** (varighet 1220,63 s). De to filene som ikke er grønne er
   `deploy-cli.test.mjs` og `supervisor-run.test.mjs`, og de FEILER VED LASTING (null tester kjørt) - se
   blokkering 3. Begge er urørt av D-158 og byte-identiske med HEAD. D-157-rapporten oppga «39/39 filer,
   1259/1259»; **det reproduserer ikke i dette miljøet**, og det rapporteres som det er i stedet for å

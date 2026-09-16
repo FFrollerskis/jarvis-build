@@ -153,6 +153,13 @@ const mergeTreeProof = () => ({
   fetched: false,
   fetch_error: null,
   missing_objects: [],
+  // D-158 REVIEW-FIX: the conditions the merge was computed under are part of a
+  // complete record; see `merge-tree-proof.test.mjs` for the cases that drive
+  // each of them failing.
+  config_isolated: true,
+  foreign_config: [],
+  custom_merge_drivers: [],
+  attribute_files_scanned: 0,
   resolved_base: BASE,
   resolved_head: HEAD,
   resolved_merge: MERGE,

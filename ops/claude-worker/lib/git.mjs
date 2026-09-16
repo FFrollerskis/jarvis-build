@@ -32,7 +32,16 @@ function spawnGit(cfg, args, runner) {
   let res;
   try {
     const { command, prefix } = resolveBinary("JARVIS_WORKER_GIT", "git");
-    res = runner(command, [...prefix, ...args], { cwd: cfg.repoPath, encoding: "utf8", windowsHide: true });
+    const options = { cwd: cfg.repoPath, encoding: "utf8", windowsHide: true };
+    // D-158 REVIEW-FIX: an EXPLICIT environment is passed ONLY when a caller has
+    // asked for one with `withGitEnv`. Every other call site in the worker keeps
+    // inheriting this process's environment byte for byte, exactly as before -
+    // including the credential configuration the push/fetch paths depend on. The
+    // opt-in shape is deliberate: a blanket sanitised environment here would have
+    // silently changed how the worker authenticates, which is a far larger
+    // blast radius than the one problem this closes.
+    if (cfg.gitEnv && typeof cfg.gitEnv === "object") options.env = cfg.gitEnv;
+    res = runner(command, [...prefix, ...args], options);
   } catch (err) {
     return { exited: false, error: `git_spawn_threw: ${sanitize(err.message)}`, args };
   }
@@ -181,6 +190,19 @@ export function atPath(cfg, path) {
 }
 
 /**
+ * D-158 REVIEW-FIX: run git with an EXPLICIT environment instead of this
+ * process's.
+ *
+ * Only the merge proof uses it, and only for the invocations that COMPUTE or
+ * READ the proof - never for the fetch, which still needs the host's credential
+ * configuration to reach a private repository. See `isolatedGitEnv` for what the
+ * proof's environment removes and why that is sufficient.
+ */
+export function withGitEnv(cfg, env) {
+  return { ...cfg, gitEnv: env };
+}
+
+/**
  * `git worktree list --porcelain` as `[{ path, head, branch, detached, bare }]`.
  *
  * `{ ok: false }` means UNKNOWN. It never means "no linked worktrees exist" -
@@ -322,6 +344,147 @@ export function gitLogRange(cfg, from, to, runner = spawnSync, { limit = null } 
 /** ---------------- exact-object queries for the merge proof (D-158) ---------------- */
 
 /**
+ * D-158 REVIEW-FIX: THE ENVIRONMENT THE MERGE PROOF IS COMPUTED IN.
+ *
+ * The first version of this proof passed no environment at all, so every git
+ * invocation in it inherited the host's. That was not merely a determinism
+ * problem. Measured on this host before this fix:
+ *
+ *   - a COMMITTED `.gitattributes` saying `*.txt merge=evil`, plus a
+ *     `merge.evil.driver` defined in the host's GLOBAL config, made
+ *     `git merge-tree --write-tree` EXECUTE that command during the completion
+ *     gate, and produced a different tree than the same two commits merge to
+ *     without it. Repository content selecting a host-defined command is code
+ *     execution inside a security gate, not a false negative;
+ *   - this host's SYSTEM config also carries `core.autocrlf=true` and the
+ *     `filter.lfs.*` commands, so "the expected tree" was a function of which
+ *     machine computed it.
+ *
+ * So the proof runs with system, global and environment-injected configuration
+ * REMOVED rather than merely overridden:
+ *
+ *   GIT_CONFIG_NOSYSTEM + GIT_CONFIG_SYSTEM   the system gitconfig, twice over
+ *   GIT_CONFIG_GLOBAL -> an empty file        `~/.gitconfig` and XDG config
+ *   HOME/USERPROFILE/XDG_CONFIG_HOME          anything still reached by path
+ *   GIT_ATTR_NOSYSTEM                         the system attributes file
+ *   GIT_CONFIG_PARAMETERS / COUNT / KEY_n     `-c` smuggled in through the env
+ *   GIT_DIR/WORK_TREE/INDEX_FILE/OBJECT_*     a redirected store or index
+ *   GIT_ATTR_SOURCE, GIT_EXTERNAL_DIFF, ...   attribute and command overrides
+ *
+ * The empty files are REWRITTEN EMPTY on every run by the caller, so a stale
+ * one cannot become a configuration source of its own.
+ *
+ * This is necessary but not sufficient on its own, and is not relied on alone:
+ * `merge-tree.mjs` additionally VALIDATES the resulting effective configuration
+ * against an allowlist, so an unexpected key - from the reused store, from an
+ * `include.path`, or from a git version that writes something new - is a named
+ * refusal rather than something this list happened not to name.
+ */
+export const PROOF_ENV_REMOVED = Object.freeze([
+  "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_ATTR_SOURCE",
+  "GIT_EXTERNAL_DIFF",
+  "GIT_DIFF_OPTS",
+  "GIT_MERGE_VERBOSITY",
+  "GIT_ALLOW_PROTOCOL",
+  "GIT_PROXY_COMMAND",
+  "GIT_ASKPASS",
+  "GIT_EDITOR",
+  "GIT_PAGER"
+]);
+
+/** The environment described above. `base` is injectable so a test can prove it. */
+export function isolatedGitEnv({ emptyConfig, emptyHome }, base = process.env) {
+  const env = { ...base };
+  for (const key of PROOF_ENV_REMOVED) delete env[key];
+  // `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` are numbered pairs, so they
+  // cannot be listed by name - they are matched by shape instead.
+  for (const key of Object.keys(env)) {
+    if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/i.test(key)) delete env[key];
+  }
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_SYSTEM = emptyConfig;
+  env.GIT_CONFIG_GLOBAL = emptyConfig;
+  env.GIT_ATTR_NOSYSTEM = "1";
+  env.HOME = emptyHome;
+  env.USERPROFILE = emptyHome;
+  env.XDG_CONFIG_HOME = emptyHome;
+  // Nothing in the proof may ever wait for a human, and nothing in it talks to a
+  // remote: a prompt here would hang a completion gate rather than refuse it.
+  env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_OPTIONAL_LOCKS = "0";
+  return env;
+}
+
+/**
+ * Every configuration entry git would actually apply here, WITH ITS ORIGIN.
+ *
+ * `--show-origin -z` emits `<origin>\0<key>\n<value>\0` per entry, and resolves
+ * `include.path` for us: an included file appears as its OWN origin, which is
+ * exactly what makes an include detectable instead of invisible.
+ */
+export function gitConfigOrigins(cfg, runner = spawnSync) {
+  const res = runGit(cfg, ["config", "--list", "--show-origin", "-z"], runner);
+  if (!res.ok) return { ok: false, entries: null, error: res.error };
+  // Records alternate: origin, then `key\nvalue`. A NUL cannot occur inside
+  // either, so the split is exact; an odd tail would mean git emitted an origin
+  // with no entry, which is UNKNOWN rather than "no configuration".
+  const records = res.stdout.split("\0").filter((r) => r !== "");
+  if (records.length % 2 !== 0) {
+    return { ok: false, entries: null, error: "git_config_list_unpaired_records" };
+  }
+  const entries = [];
+  for (let i = 0; i < records.length; i += 2) {
+    const origin = records[i];
+    const entry = records[i + 1];
+    const nl = entry.indexOf("\n");
+    // No newline is a key with no value (`[section] key`) - still an entry, and
+    // still subject to the allowlist.
+    entries.push(nl === -1
+      ? { origin, key: entry, value: null }
+      : { origin, key: entry.slice(0, nl), value: entry.slice(nl + 1) });
+  }
+  return { ok: true, entries };
+}
+
+/** Every path in a commit's tree, recursively. */
+export function gitListTree(cfg, commit, runner = spawnSync) {
+  const res = runGit(cfg, ["ls-tree", "-r", "--name-only", "-z", "--full-tree", commit], runner);
+  if (!res.ok) return { ok: false, paths: null, error: res.error };
+  return { ok: true, paths: res.stdout.split("\0").filter((p) => p !== "") };
+}
+
+/** The contents of one blob, addressed as `<commit>:<path>`. */
+export function gitShowBlob(cfg, spec, runner = spawnSync) {
+  const res = runGit(cfg, ["cat-file", "blob", spec], runner);
+  if (!res.ok) return { ok: false, content: null, error: res.error };
+  return { ok: true, content: res.stdout };
+}
+
+/** The merge base of two commits, for the attribute sources a merge can read. */
+export function gitMergeBase(cfg, a, b, runner = spawnSync) {
+  const res = runGitAllowingExitCode(cfg, ["merge-base", a, b], runner);
+  if (!res.exited) return { ok: false, sha: null, error: res.error };
+  // Exit 1 is "no merge base", which is an ANSWER - two unrelated histories.
+  if (res.code === 1) return { ok: true, sha: null };
+  if (res.code !== 0 || typeof res.stdout !== "string") {
+    return { ok: false, sha: null, error: res.error ?? `git_merge_base_exit_${res.code}` };
+  }
+  const sha = res.stdout.trim().split(/\r?\n/)[0] ?? "";
+  return /^[0-9a-f]{40}$/i.test(sha) ? { ok: true, sha: sha.toLowerCase() } : { ok: false, sha: null, error: "git_merge_base_unparsable" };
+}
+
+/**
  * The ABSOLUTE path of a repository's object database.
  *
  * Read from git rather than assembled from `repoPath`, because `.git` is a
@@ -435,13 +598,24 @@ export function gitFetchObjects(cfg, url, shas, runner = spawnSync) {
  * hardening only ever removes FALSE NEGATIVES - the exact failure class D-158
  * exists to close. It cannot turn a refusal into a pass.
  */
-export function gitMergeTree(cfg, base, head, runner = spawnSync) {
+export function gitMergeTree(cfg, base, head, runner = spawnSync, { emptyAttributes = null } = {}) {
   const res = runGitAllowingExitCode(cfg, [
     "-c", "core.autocrlf=false",
     "-c", "core.eol=lf",
     "-c", "merge.renames=true",
     "-c", "diff.renames=true",
     "-c", "merge.renameLimit=7000",
+    // D-158 REVIEW-FIX. `merge.default` names the driver for paths with NO merge
+    // attribute, and `merge.renormalize` re-normalises line endings before
+    // merging - both move the computed tree, and `merge.default` can name a
+    // driver. They are pinned to git's own defaults for the same reason as the
+    // five above: so that the answer is a property of the two commits and not of
+    // the machine. `core.attributesFile` is pointed at a file the worker
+    // rewrites EMPTY each run, so the out-of-tree attributes source is empty by
+    // construction rather than merely unset.
+    "-c", "merge.default=text",
+    "-c", "merge.renormalize=false",
+    ...(emptyAttributes ? ["-c", `core.attributesFile=${emptyAttributes}`] : []),
     "merge-tree", "--write-tree", base, head
   ], runner);
   if (!res.exited) return { ok: false, tree: null, conflicted: null, detail: null, error: res.error };

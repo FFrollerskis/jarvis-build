@@ -72,6 +72,16 @@
  * required - and required to AGREE - so the two are a cross-check on each other
  * rather than one standing in for the other.
  *
+ * And - D-158 REVIEW-FIX - the CONDITIONS the merge was computed under are not
+ * assumed either. A tree id only means "the authorized merge" if the merge was
+ * computed the way an ordinary merge of those two commits is: git executes
+ * whatever `merge.<driver>.driver` names, and a COMMITTED `.gitattributes`
+ * chooses the driver, so an inherited host or stale-scratch configuration would
+ * be both a machine-dependent answer and command execution inside a security
+ * gate. This module therefore requires the computation to STATE that it ran
+ * under a configuration the worker controls, and that no content asked for a
+ * driver git does not build in. Unstated is refused exactly like false.
+ *
  * Nothing else is weakened. Exact-sha authorization, the PR-recorded merge sha,
  * ordered two-parent structure, merge-method refusal, the required review on the
  * exact head, required pre-merge CI, required post-merge CI with exact job
@@ -107,6 +117,27 @@ export const MERGE_TREE_PROOF = Object.freeze({
   /** Merging the authorized base and head conflicts: there is no one correct tree. */
   MERGE_TREE_CONFLICTED:
     "merging_the_authorized_base_and_head_conflicts_so_no_merge_result_can_be_accepted_without_review_of_the_resolution",
+
+  /* --- D-158 REVIEW-FIX: the CONDITIONS the computation ran under --------- */
+  /**
+   * The merge was not computed under a configuration this worker controls.
+   *
+   * Git's merge machinery executes whatever `merge.<driver>.driver` names, and a
+   * COMMITTED `.gitattributes` chooses the driver - so an inherited host,
+   * environment or stale-scratch configuration is command execution inside a
+   * security gate, and it also makes the "expected" tree machine-dependent.
+   */
+  MERGE_TREE_CONFIG_NOT_ISOLATED:
+    "the_merge_was_not_computed_under_a_configuration_this_worker_controls_so_the_expected_tree_is_not_a_property_of_the_two_commits_alone",
+  /**
+   * The content being merged ASKS for a merge driver that is not a git built-in.
+   *
+   * None can be defined here, and git would silently fall back to its built-in
+   * merge - a different tree from the one a machine holding that driver
+   * computes. An ambiguous expected tree is not an expected tree.
+   */
+  MERGE_TREE_DRIVER_REQUESTED:
+    "the_content_being_merged_requests_a_non_builtin_merge_driver_so_the_expected_tree_is_ambiguous_and_cannot_prove_anything",
 
   /* --- the merge commit object itself --- */
   /** The recorded merge commit could not be read as a real object. */
@@ -146,6 +177,12 @@ function computationEvidence(c) {
     resolved_head: c.resolved_head ?? null,
     resolved_merge: c.resolved_merge ?? null,
     conflicted: typeof c.conflicted === "boolean" ? c.conflicted : null,
+    // D-158 REVIEW-FIX: the conditions the merge ran under travel WITH the
+    // result, so a reader of a record never has to assume them.
+    config_isolated: typeof c.config_isolated === "boolean" ? c.config_isolated : null,
+    foreign_config: Array.isArray(c.foreign_config) ? c.foreign_config : [],
+    custom_merge_drivers: Array.isArray(c.custom_merge_drivers) ? c.custom_merge_drivers : null,
+    attribute_files_scanned: Number.isInteger(c.attribute_files_scanned) ? c.attribute_files_scanned : null,
     expected_tree: c.expected_tree ?? null,
     merge_commit_tree: c.merge_commit_tree ?? null,
     merge_commit_parents: Array.isArray(c.merge_commit_parents) ? c.merge_commit_parents : null
@@ -210,9 +247,38 @@ export function verifyMergeTreeProof({
       + ". A conflict has no single correct resolution, so whatever tree the merge commit carries embodies choices "
       + "that were made after the review and were never covered by it");
   }
+  // D-158 REVIEW-FIX: an EXPLICIT failure of either condition is named as itself
+  // rather than folded into "not computed", because the two are different
+  // findings for a human: one says the host is misconfigured or hostile, the
+  // other says the repository content asks for something no proof can answer.
+  if (c.config_isolated === false) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED,
+      `${c.error ?? "the effective git configuration was not the one this worker controls"}`
+      + (Array.isArray(c.foreign_config) && c.foreign_config.length > 0
+        ? `; out-of-policy configuration: ${c.foreign_config.join("; ")}`
+        : "")
+      + ". Git runs whatever a merge driver names and committed content chooses the driver, so a merge computed "
+      + "under configuration this worker does not control proves nothing and may not even be safe to compute");
+  }
+  if (Array.isArray(c.custom_merge_drivers) && c.custom_merge_drivers.length > 0) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED,
+      `${c.error ?? `the merged content requests: ${c.custom_merge_drivers.join("; ")}`}`);
+  }
   if (c.ok !== true) {
     return refuse(MERGE_TREE_PROOF.MERGE_TREE_NOT_COMPUTED,
       `${c.error ?? "the computation reported no result"} (stage: ${c.stage ?? "unknown"})`);
+  }
+  // ...and an UNSTATED condition is not a satisfied one. A record that claims a
+  // result without stating what it was computed under is incomplete evidence.
+  if (c.config_isolated !== true) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_CONFIG_NOT_ISOLATED,
+      "the computation did not state that it ran under a configuration this worker controls, and an unstated "
+      + "condition is not a satisfied one");
+  }
+  if (!Array.isArray(c.custom_merge_drivers)) {
+    return refuse(MERGE_TREE_PROOF.MERGE_TREE_DRIVER_REQUESTED,
+      "the computation did not state whether the merged content requests a non-built-in merge driver, and an "
+      + "unanswered question is not an answer of no");
   }
 
   // --- 3. and it answered about the AUTHORIZED commits ---------------------
@@ -290,7 +356,8 @@ export function verifyMergeTreeProof({
     reason: MERGE_TREE_PROOF.MERGE_TREE_PROVEN,
     detail: `the merge commit ${merge} points at tree ${mergeTree}, which is exactly the tree git produces by merging `
       + `the authorized base ${base} and the authorized head ${head} - computed from those two immutable objects, `
-      + "without a checkout and without touching any working tree. Both sides' changes, every base-only change, and "
+      + "without a checkout and without touching any working tree, under a configuration this worker controls and "
+      + "with no non-built-in merge driver requested by the content. Both sides' changes, every base-only change, and "
       + "every file mode are inside that one id, so the merge carries the authorized content and nothing besides"
       + (evidence.computation?.fetched ? " (objects missing locally were fetched by exact sha from origin)" : ""),
     evidence
@@ -310,6 +377,14 @@ export function describeMergeTreeProof(evidence) {
       + `${c.fetched ? ", objects fetched by sha" : ""}`
       + `${c.conflicted === true ? ", CONFLICTED" : ""}`
       + `${c.missing_objects?.length ? `, missing ${c.missing_objects.join(", ")}` : ""})`);
+    lines.push(`  computed under: ${c.config_isolated === true
+      ? "an isolated, allowlisted git configuration"
+      : c.config_isolated === false ? "CONFIGURATION THIS WORKER DOES NOT CONTROL" : "an UNSTATED configuration"}`
+      + `${c.foreign_config?.length ? ` - out of policy: ${c.foreign_config.join("; ")}` : ""}`
+      + `; merge drivers requested by content: ${Array.isArray(c.custom_merge_drivers)
+        ? (c.custom_merge_drivers.length ? c.custom_merge_drivers.join("; ") : "none")
+        : "NOT CHECKED"}`
+      + ` (${c.attribute_files_scanned ?? 0} .gitattributes read)`);
   }
   return lines;
 }
