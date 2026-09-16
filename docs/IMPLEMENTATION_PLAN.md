@@ -4036,6 +4036,12 @@ gjenoppretting; DB-CHECK gjør en claim uten frossen tekst umulig, og en `BEFORE
 (`situations_act_claim_immutable`) nekter enhver endring av claim-feltene mens claimen står. Se
 design-notatet §6.
 
+**Arkitekt-review runde 10 (PR #85):** 1 funn, rettet - runde 9 sin CHECK/trigger tillot en DELVIS
+frigjøring (kun `act_idempotency_key` nullet) og en delvis claim (nøkkel+melding uten fingeravtrykk),
+som kunne gi duplikat ekstern utførelse. Claimen håndheves nå som ETT atomisk tuppel over alle fire
+feltene (`situations_act_claim_tuple_ck`: alle NULL eller alle satt) og triggeren sammenligner også
+`act_claimed_at`; kun komplett claim, uendret claim og komplett frigjøring er mulig. Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

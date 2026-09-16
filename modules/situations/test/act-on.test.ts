@@ -1337,7 +1337,7 @@ describe("P: Funn 1 (arkitekt-review runde 9, PR #85) - varselteksten/-nøkkelen
     expect(localTelegram.calls).toHaveLength(1); // fortsatt nøyaktig ETT varsel totalt.
   });
 
-  it("en claim UTEN frossen varseltekst er strukturelt umulig - databasen avviser den (situations_act_notify_message_frozen_ck)", async () => {
+  it("en claim UTEN frossen varseltekst er strukturelt umulig - databasen avviser den (situations_act_claim_tuple_ck)", async () => {
     const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
       domain: "infra", detection_key: "infra:actuator:frozen-notify-check", priority: "high", confidence: 0.9, reason: "CHECK-test"
     });
@@ -1346,7 +1346,7 @@ describe("P: Funn 1 (arkitekt-review runde 9, PR #85) - varselteksten/-nøkkelen
         `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
         [`situation:${situation.situation_id}:check-key`, computeActOperationFingerprint(situation.situation_id, "test_actuator", "flip", {}), situation.situation_id]
       )
-    ).rejects.toThrow(/situations_act_notify_message_frozen_ck/);
+    ).rejects.toThrow(/situations_act_claim_tuple_ck/);
   });
 
   it("claim-feltene er IMMUTABLE på DB-nivå mens claimen står - en senere UPDATE som endrer act_notify_message (eller nøkkel/fingeravtrykk) avvises (situations_act_claim_immutable), mens frigjøring (alle -> NULL) fortsatt er tillatt", async () => {
@@ -1372,6 +1372,69 @@ describe("P: Funn 1 (arkitekt-review runde 9, PR #85) - varselteksten/-nøkkelen
     expect(row.act_idempotency_key).toBeNull();
     expect(row.act_notify_message).toBeNull();
     expect(row.reason).toBe("Reason B - lov aa endre");
+  });
+
+  it("Funn 1 (arkitekt-review runde 10, PR #85) - claimen er ETT atomisk tuppel: hvert av de fire feltene nullet ALENE på en claimet rad avvises, hvert felt satt ALENE (eller tre av fire) på en uclaimet rad avvises; KUN komplett claim og komplett frigjøring godtas", async () => {
+    const { situationId, finalKey, frozenMessage } = await seedSucceededActAt("infra:actuator:claim-tuple-atomic", "claim-tuple-key", "Reason A - tuppel");
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+
+    // DELVIS FRIGJØRING på en claimet rad - hvert felt alene. (Nøkkel->NULL alene passerer triggeren
+    // med vilje - triggeren dekker kun nøkkel->nøkkel - og MÅ derfor stoppes av tuppel-CHECK-en;
+    // de tre andre er en delvis ERSTATNING mens nøkkelen står, og stoppes av triggeren.)
+    await expect(adminPool.query(`UPDATE situations SET act_claimed_at = NULL WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_immutable/);
+    await expect(adminPool.query(`UPDATE situations SET act_idempotency_key = NULL WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    await expect(adminPool.query(`UPDATE situations SET act_operation_fingerprint = NULL WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_immutable/);
+    await expect(adminPool.query(`UPDATE situations SET act_notify_message = NULL WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_immutable/);
+    // Nøkkel + claimed_at nullet, men fingeravtrykk/melding stående - den eksakte permutasjonen reviewen beskrev.
+    await expect(adminPool.query(`UPDATE situations SET act_claimed_at = NULL, act_idempotency_key = NULL WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    // Raden er UENDRET claimet etter alle avvisningene.
+    const { rows: stillClaimed } = await adminPool.query(`SELECT act_idempotency_key, act_notify_message FROM situations WHERE situation_id = $1`, [situationId]);
+    expect((stillClaimed[0] as { act_idempotency_key: string | null }).act_idempotency_key).toBe(finalKey);
+    expect((stillClaimed[0] as { act_notify_message: string | null }).act_notify_message).toBe(frozenMessage);
+
+    // KOMPLETT frigjøring godtas (formen releaseStuckActClaim() bruker).
+    await adminPool.query(
+      `UPDATE situations SET act_claimed_at = NULL, act_idempotency_key = NULL, act_operation_fingerprint = NULL, act_notify_message = NULL WHERE situation_id = $1`,
+      [situationId]
+    );
+
+    // DELVIS CLAIM på en uclaimet rad - hvert felt alene, og tre av fire.
+    await expect(adminPool.query(`UPDATE situations SET act_claimed_at = now() WHERE situation_id = $1`, [situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    await expect(adminPool.query(`UPDATE situations SET act_idempotency_key = $1 WHERE situation_id = $2`, [finalKey, situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    await expect(adminPool.query(`UPDATE situations SET act_operation_fingerprint = $1 WHERE situation_id = $2`, [fingerprint, situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    await expect(adminPool.query(`UPDATE situations SET act_notify_message = $1 WHERE situation_id = $2`, [frozenMessage, situationId]))
+      .rejects.toThrow(/situations_act_claim_tuple_ck/);
+    await expect(adminPool.query(
+      `UPDATE situations SET act_idempotency_key = $1, act_notify_message = $2 WHERE situation_id = $3`,
+      [finalKey, frozenMessage, situationId]
+    )).rejects.toThrow(/situations_act_claim_tuple_ck/); // nøkkel + melding UTEN fingeravtrykk - reviewens andre permutasjon.
+    await expect(adminPool.query(
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    )).rejects.toThrow(/situations_act_claim_tuple_ck/);
+
+    // KOMPLETT claim godtas.
+    await adminPool.query(
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $3 WHERE situation_id = $4`,
+      [finalKey, fingerprint, frozenMessage, situationId]
+    );
+    const { rows } = await adminPool.query(
+      `SELECT act_claimed_at, act_idempotency_key, act_operation_fingerprint, act_notify_message FROM situations WHERE situation_id = $1`,
+      [situationId]
+    );
+    const row = rows[0] as { act_claimed_at: string | null; act_idempotency_key: string | null; act_operation_fingerprint: string | null; act_notify_message: string | null };
+    expect(row.act_claimed_at).not.toBeNull();
+    expect(row.act_idempotency_key).toBe(finalKey);
+    expect(row.act_operation_fingerprint).toBe(fingerprint);
+    expect(row.act_notify_message).toBe(frozenMessage);
   });
 
   it("en normal, fersk ACT via actOn() fryser varselteksten fra reason-en ved claimen, og en re-deteksjon etterpå endrer IKKE den frosne teksten", async () => {

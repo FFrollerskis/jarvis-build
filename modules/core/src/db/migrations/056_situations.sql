@@ -184,31 +184,52 @@ CREATE TABLE situations (
   -- Uten frysing kunne en retry etter krasj (bekreftet varsel, men
   -- stage='act_notify' aldri persistert) regne ut en ANNEN nøkkel fra en
   -- endret `reason`, aldri finne beviset, og sende et DUPLIKAT. CHECK-en
-  -- under gjør en claim UTEN frossen tekst strukturelt umulig.
+  -- `situations_act_claim_tuple_ck` under gjør en claim UTEN frossen tekst
+  -- (eller enhver annen DELVIS claim/frigjøring) strukturelt umulig.
   act_notify_message     text,
   opened_at              timestamptz NOT NULL DEFAULT now(),
   resolved_at            timestamptz,
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT situations_act_notify_message_frozen_ck
-    CHECK (act_idempotency_key IS NULL OR act_notify_message IS NOT NULL),
+  -- Funn 1 (arkitekt-review runde 10, PR #85): claimen er ETT ATOMISK
+  -- TUPPEL over alle fire feltene - enten er ALLE NULL (uclaimet/frigjort)
+  -- eller ALLE satt (claimet). Runde 9 sin CHECK dekket kun "nøkkel =>
+  -- melding", så en UPDATE som nullet KUN `act_idempotency_key` (og lot
+  -- claimed_at/fingeravtrykk/melding stå) passerte både CHECK og trigger -
+  -- neste `actOn()` ville sett raden som uclaimet og kunne claimet/utført
+  -- en ANNEN operasjon oppå eksisterende claim/bevis (duplikat ekstern
+  -- utførelse). Tilsvarende for nøkkel+melding uten fingeravtrykk. Denne
+  -- CHECK-en avviser ENHVER delvis-NULL-permutasjon; triggeren under avviser
+  -- enhver delvis-ERSTATNING mens claimen står. Sammen tillater de KUN:
+  -- komplett NULL -> claimet, uendret claimet, komplett claimet -> NULL.
+  CONSTRAINT situations_act_claim_tuple_ck CHECK (
+    (act_claimed_at IS NULL AND act_idempotency_key IS NULL
+      AND act_operation_fingerprint IS NULL AND act_notify_message IS NULL)
+    OR
+    (act_claimed_at IS NOT NULL AND act_idempotency_key IS NOT NULL
+      AND act_operation_fingerprint IS NOT NULL AND act_notify_message IS NOT NULL)
+  ),
   UNIQUE (tenant_id, memory_space_id, detection_key)
 );
 CREATE INDEX situations_queue_idx ON situations (tenant_id, memory_space_id, status, stage, priority);
 
--- Funn 1 (arkitekt-review runde 9, PR #85): claim-feltene er IMMUTABLE så
--- lenge claimen står. CHECK-en over garanterer at den frosne varselteksten
--- FINNES; denne triggeren garanterer at verken den, nøkkelen eller
--- operasjons-fingeravtrykket kan ENDRES av noen som helst senere UPDATE
--- (uansett kodesti) mens `act_idempotency_key` er satt. Tillatt er kun
--- selve claimen (NULL -> verdi, `actOn()`) og en eksplisitt frigjøring
--- (verdi -> NULL, `releaseStuckActClaim()`, som nuller alle tre sammen).
+-- Funn 1 (arkitekt-review runde 9, PR #85), skjerpet i runde 10: claim-
+-- feltene er IMMUTABLE så lenge claimen står. CHECK-en
+-- `situations_act_claim_tuple_ck` over garanterer at claimen ALLTID er et
+-- KOMPLETT tuppel (alle fire NULL eller alle fire satt); denne triggeren
+-- garanterer at INGEN av de fire (`act_claimed_at`, nøkkel, operasjons-
+-- fingeravtrykk, frossen varseltekst) kan ENDRES av noen som helst senere
+-- UPDATE (uansett kodesti) mens claimen står. Tillatt er kun selve claimen
+-- (komplett NULL -> satt, `actOn()`) og en eksplisitt, KOMPLETT frigjøring
+-- (satt -> NULL for alle fire, `releaseStuckActClaim()`); en delvis
+-- frigjøring stoppes av CHECK-en, en delvis erstatning av denne triggeren.
 -- Samme plpgsql-/RAISE-mønster som repoets append-only-triggere
 -- (002_sessions_events.sql, 004_audit_cost.sql, 008_memory.sql).
 CREATE OR REPLACE FUNCTION situations_act_claim_immutable() RETURNS trigger AS $$
 BEGIN
   IF OLD.act_idempotency_key IS NOT NULL AND NEW.act_idempotency_key IS NOT NULL AND (
-       NEW.act_idempotency_key IS DISTINCT FROM OLD.act_idempotency_key
+       NEW.act_claimed_at IS DISTINCT FROM OLD.act_claimed_at
+    OR NEW.act_idempotency_key IS DISTINCT FROM OLD.act_idempotency_key
     OR NEW.act_operation_fingerprint IS DISTINCT FROM OLD.act_operation_fingerprint
     OR NEW.act_notify_message IS DISTINCT FROM OLD.act_notify_message
   ) THEN

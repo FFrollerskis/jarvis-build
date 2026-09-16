@@ -106,13 +106,25 @@ på «no duplicate spam»). Rettet: den EKSAKTE varselteksten FRYSES nå i ny ko
 `situations.act_notify_message` ATOMISK SAMMEN med selve claimen (fra raden låst med `FOR UPDATE` i
 claim-transaksjonen), og BÅDE første sending OG ALL senere gjenoppretting avleder nøkkel og melding KUN
 fra den frosne teksten (`computeNotifyKey(finalKey, situationId, message)`) - ALDRI fra `reason` lest
-på nytt. En DB-CHECK (`situations_act_notify_message_frozen_ck`) gjør en claim UTEN frossen tekst
-strukturelt umulig, og en `BEFORE UPDATE`-trigger (`situations_act_claim_immutable`, samme plpgsql-
+på nytt. En DB-CHECK gjør en claim UTEN frossen tekst strukturelt umulig (skjerpet i runde 10 til
+HELE claim-tuppelet, `situations_act_claim_tuple_ck`), og en `BEFORE UPDATE`-trigger (`situations_act_claim_immutable`, samme plpgsql-
 mønster som repoets append-only-triggere) nekter ENHVER senere endring av nøkkel, fingeravtrykk eller
 frossen tekst mens claimen står - uansett kodesti; kun claim (NULL → verdi) og eksplisitt frigjøring
 (alle → NULL, `releaseStuckActClaim()`) er tillatt. `reason` forblir
 bevisst muterbar (det er deteksjonens beskrivelse) - det er VARSEL-NYTTELASTEN som er immutabel fra
 claimen. Se §6 under.
+
+**Arkitekt-review runde 10 (PR #85, HEAD 9ea4a6e):** 1 funn - runde 9 sin strukturelle håndhevelse var
+IKKE lukket: CHECK-en dekket kun «nøkkel ⇒ melding», og triggeren avviste kun endringer når BÅDE gammel
+og ny nøkkel var satt. En UPDATE som nullet KUN `act_idempotency_key` (og lot `act_claimed_at`/
+fingeravtrykk/melding stå) passerte derfor begge - neste `actOn()` ville sett raden som uclaimet og
+kunne claimet/utført en ANNEN operasjon oppå eksisterende claim/bevis (duplikat ekstern utførelse).
+Tilsvarende ble nøkkel+melding UTEN fingeravtrykk godtatt. Rettet: claimen håndheves nå som ETT ATOMISK
+TUPPEL over alle fire feltene (`act_claimed_at`, `act_idempotency_key`, `act_operation_fingerprint`,
+`act_notify_message`) - `situations_act_claim_tuple_ck` krever alle NULL eller alle satt (avviser ENHVER
+delvis-NULL-permutasjon, både delvis frigjøring og delvis claim), og `situations_act_claim_immutable`
+sammenligner nå også `act_claimed_at` (avviser enhver delvis ERSTATNING mens claimen står). Sammen
+tillater de KUN komplett NULL → claimet, uendret claimet, og komplett claimet → NULL. Se §6 under.
 
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
@@ -318,10 +330,14 @@ sekvens - bekreftet varsel for reason A + krasj før stage-oppdatering + re-dete
 til B + retry - gir ZERO nye transportkall og selv-helbreder til `act_notify`; krasj FØR varselet +
 re-deteksjon gir ETT varsel med den FROSNE teksten (reason A, aldri B) og en ny retry etter enda en
 re-deteksjon dedupliserer under SAMME nøkkel; databasen avviser en claim uten frossen tekst
-(`situations_act_notify_message_frozen_ck`) OG enhver endring av claim-feltene mens claimen står
+(`situations_act_claim_tuple_ck`) OG enhver endring av claim-feltene mens claimen står
 (`situations_act_claim_immutable` - frigjøring til NULL og endring av ikke-claim-felt som `reason`
 forblir tillatt); og en normal fersk ACT fryser teksten ved claimen slik at en re-deteksjon etterpå
-endrer `reason` men ALDRI `act_notify_message`).
+endrer `reason` men ALDRI `act_notify_message`); OG en test (Funn 1, runde 10) som går gjennom HELE
+permutasjonsmatrisen for claim-tuppelet: hvert av de fire feltene nullet ALENE på en claimet rad avvises
+(inkl. reviewens eksakte «kun nøkkel nullet»-permutasjon), hvert felt satt ALENE og tre-av-fire (inkl.
+nøkkel+melding uten fingeravtrykk) på en uclaimet rad avvises, raden er uendret etter hver avvisning, og
+KUN komplett claim og komplett frigjøring godtas).
 
 ## 7. Retensjon og Q-20-erasure
 

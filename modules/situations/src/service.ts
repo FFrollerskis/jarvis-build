@@ -208,7 +208,8 @@ export class SituationActNotificationEvidenceMismatchError extends Error {
 /**
  * Funn 1 (arkitekt-review runde 9, PR #85): en claimet/terminal situasjon
  * UTEN en frossen varseltekst (`act_notify_message`) er strukturelt umulig
- * (DB-CHECK `situations_act_notify_message_frozen_ck`). Skulle det likevel
+ * (DB-CHECK `situations_act_claim_tuple_ck` - hele claim-tuppelet er alle-
+ * eller-ingen, runde 10). Skulle det likevel
  * observeres, kastes dette EKSPLISITT - varselteksten/-nøkkelen re-avledes
  * ALDRI stille fra den muterbare `reason`.
  */
