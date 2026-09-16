@@ -187,6 +187,24 @@ export class SituationActClaimNotReleasableError extends Error {
   }
 }
 
+/**
+ * Kastet av `actOn()` sin varsel-rekonsiliering (arkitekt-review runde 7,
+ * PR #85, Funn 1): en `tool_executions`-rad FINNES for varsel-nøkkelen,
+ * MEN dens EGNE `tool_id`/`action` er IKKE `telegram`/`notify` - raden
+ * BEVISER derfor IKKE at DETTE varselet faktisk ble levert (samme
+ * operasjons-bindings-klasse av funn som `act_operation_fingerprint`
+ * allerede lukker for selve ACT-claimen, runde 2 Funn 1 - nå ANVENDT på
+ * selve rekonsilierings-BEVISET også, ikke bare på claimen). Fail-closed:
+ * ALDRI stille godtatt som "bekreftet levert", ALDRI et nytt, muterbart
+ * `execute()`-kall på en allerede-mistenkelig nøkkel.
+ */
+export class SituationActNotificationEvidenceMismatchError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_notification_evidence_mismatch:${situationId}`);
+    this.name = "SituationActNotificationEvidenceMismatchError";
+  }
+}
+
 /** Sovereign eier-/delegert autoritet for `releaseStuckActClaim()` (arkitekt-review runde 3, PR #85, Funn 2) - SAMME minimale form som `DomainPauseAuthority` (domain-pause.ts). */
 export interface SituationRecoveryAuthority {
   owner_person_id: string;
@@ -778,9 +796,22 @@ export class SituationEngine {
         const notifyKey = `${finalIdempotencyKey}:notify`;
         const replayedToolResult: ToolResult = { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true };
         const notifyEvidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
-          const { rows } = await client.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, notifyKey]);
-          return rows[0] as { status: string } | undefined;
+          const { rows } = await client.query(
+            `SELECT status, tool_id, action FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+            [tenantId, notifyKey]
+          );
+          return rows[0] as { status: string; tool_id: string; action: string } | undefined;
         });
+        // Funn 1 (arkitekt-review runde 7, PR #85): en rad UNDER varsel-
+        // nøkkelen BEVISER INGENTING om DETTE varselet med mindre den
+        // FAKTISK er en `telegram`/`notify`-rad - IKKE bare tilstedeværelse
+        // under nøkkelen alene (samme "bind hele operasjonen, ikke bare
+        // nøkkelen"-prinsipp som `act_operation_fingerprint`, runde 2 Funn
+        // 1). Fail-closed: kastes EKSPLISITT, ALDRI stille godtatt, ALDRI
+        // et nytt `execute()`-kall på en allerede mistenkelig nøkkel.
+        if (notifyEvidence && (notifyEvidence.tool_id !== "telegram" || notifyEvidence.action !== "notify")) {
+          throw new SituationActNotificationEvidenceMismatchError(situationId);
+        }
         if (notifyEvidence?.status === "succeeded") {
           // Bekreftet levert - stille selv-helbred stage-oppdateringen som krasjet, UTEN noe transportkall.
           const healed = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {

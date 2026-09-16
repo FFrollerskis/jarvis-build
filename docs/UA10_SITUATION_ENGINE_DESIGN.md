@@ -70,6 +70,16 @@ nøkkelens EGET `tool_executions`-bevis leses DIREKTE FØRST, ALDRI via et nytt,
 `execute()`-kall - KUN når INGEN bevis finnes i det hele tatt (en EKTE førstegangs-situasjon, garantert
 av advisory-låsen) er et NYTT `execute()`-kall trygt og nødvendig. Se §6 under.
 
+**Arkitekt-review runde 7 (PR #85, HEAD 01a35a2):** 1 funn - runde 6 sin direkte
+`tool_executions`-bevis-sjekk for varsel-nøkkelen sjekket KUN `status`, ALDRI at raden FAKTISK er
+`tool_id='telegram'`/`action='notify'` - samme "bind hele operasjonen, ikke bare nøkkelen"-klasse av
+funn som `act_operation_fingerprint` allerede lukker for selve ACT-claimen (runde 2 Funn 1), nå
+gjeldende for selve REKONSILIERINGS-BEVISET også. En rad under nøkkelen fra et ANNET tool/action ville
+blitt godtatt som "bekreftet levert" uten noen faktisk Telegram-sjekk. Rettet: spørringen henter nå
+også `tool_id`/`action`, og en mismatch kastes EKSPLISITT (`SituationActNotificationEvidenceMismatchError`,
+fail-closed) i stedet for stille godtatt ELLER et nytt, muterbart forsøk på en allerede mistenkelig
+nøkkel. Se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -225,7 +235,10 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    bekreftet varsel-bevis hvis EN AV DE portene nå avviser et fersk forsøk. `terminal_replay` leser nå
    beviset DIREKTE (`succeeded` → avanser stille til `act_notify`, ZERO transportkall; et annet avgjort
    utfall → forbli ærlig på `act`, ZERO transportkall) - et NYTT `execute()`-kall skjer KUN når INGEN
-   bevis finnes i det hele tatt.
+   bevis finnes i det hele tatt. Funn 1 (arkitekt-review runde 7) skjerpet selve BEVIS-LESINGEN: en rad under
+   varsel-nøkkelen bekrefter INGENTING med mindre den FAKTISK har `tool_id='telegram'`/
+   `action='notify'` - en mismatch kastes (`SituationActNotificationEvidenceMismatchError`), ALDRI
+   stille godtatt som "levert".
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.

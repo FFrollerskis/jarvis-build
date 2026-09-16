@@ -4014,6 +4014,11 @@ selve ACT-en (telegram sin dedupe er heller ikke dens første port). Varsel-nøk
 `tool_executions`-bevis leses nå DIREKTE FØRST - et nytt `execute()`-kall skjer KUN når INGEN bevis
 finnes i det hele tatt. Se design-notatet §6.
 
+**Arkitekt-review runde 7 (PR #85):** 1 funn, rettet - den direkte bevis-sjekken for varsel-nøkkelen
+sjekket kun `status`, aldri at raden faktisk er `tool_id='telegram'`/`action='notify'` (samme
+operasjons-bindings-klasse som `act_operation_fingerprint` allerede lukker for ACT-claimen). En
+mismatch kastes nå eksplisitt, fail-closed. Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

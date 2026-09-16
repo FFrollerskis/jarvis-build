@@ -16,6 +16,7 @@ import {
   SituationActAlreadyClaimedError,
   SituationActClaimNotReleasableError,
   SituationActInFlightError,
+  SituationActNotificationEvidenceMismatchError,
   SituationActOperationMismatchError,
   SituationActScopeMismatchError,
   SituationDomainPausedError,
@@ -1129,5 +1130,39 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
     );
     expect(retry.situation.stage).toBe("act_notify");
     expect(localTelegram.calls).toHaveLength(0);
+  });
+
+  it("Funn 1 (arkitekt-review runde 7, PR #85) - en tool_executions-rad UNDER varsel-nøkkelen, men for et ANNET tool_id/action, avvises fail-closed (SituationActNotificationEvidenceMismatchError) - stage kan IKKE avansere til 'act_notify' på det falske beviset", async () => {
+    const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-evidence-mismatch", "reconcile-mismatch-key");
+    const finalKey = `situation:${situationId}:reconcile-mismatch-key`;
+    // Overskriver den GYLDIGE ('telegram'/'notify') raden fra setup-hjelperen med en som IKKE er bundet til varsel-operasjonen.
+    await adminPool.query(
+      `UPDATE tool_executions SET tool_id = $1, action = $2 WHERE tenant_id = $3 AND idempotency_key = $4`,
+      ["test_actuator", "flip", TENANT_OWNER, `${finalKey}:notify`]
+    );
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    await expect(
+      engine.actOn(
+        TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-mismatch-key" }, g, ownerIdentity
+      )
+    ).rejects.toThrow(SituationActNotificationEvidenceMismatchError);
+    expect(localTelegram.calls).toHaveLength(0);
+    const { rows } = await adminPool.query(`SELECT stage FROM situations WHERE situation_id = $1`, [situationId]);
+    expect((rows[0] as { stage: string }).stage).toBe("act"); // UENDRET - IKKE feilaktig avansert paa det falske beviset.
   });
 });
