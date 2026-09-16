@@ -80,6 +80,22 @@ også `tool_id`/`action`, og en mismatch kastes EKSPLISITT (`SituationActNotific
 fail-closed) i stedet for stille godtatt ELLER et nytt, muterbart forsøk på en allerede mistenkelig
 nøkkel. Se §6 under.
 
+**Arkitekt-review runde 8 (PR #85, HEAD 9566231):** 1 funn - runde 7 sin `tool_id`/`action`-binding
+(runde 7 Funn 1) bandt fortsatt IKKE selve MELDINGSINNHOLDET: `tool_executions` lagrer INGEN
+meldingstekst, så en `succeeded`-rad UNDER den forutsigbare nøkkelen (`situation:<id>:<nøkkel>:notify`)
+fra et ANNET, tidligere ELLER gjenbrukt `telegram.notify`-forsøk MED ET ANNET INNHOLD kunne likevel bli
+godtatt som "bekreftet levert" for DENNE meldingen - en same-key/same-tool/action/ANNEN-melding-mismatch
+ville stille avansert stadiet UTEN at den FAKTISKE meldingsteksten noensinne var bekreftet sendt. Rettet:
+et innholds-avledet SHA-256-fingeravtrykk (samme primitiv som `act_operation_fingerprint`, runde 2 Funn
+1) over den EKSAKTE varsel-meldingsteksten (avledet DETERMINISTISK av `situationId`/`reason`/`tool_id`/
+`action` via `buildNotifyMessage()`) bindes DIREKTE INN I selve varsel-nøkkelen (`computeNotifyKey()`,
+`modules/situations/src/service.ts`) - IKKE en ny kolonne på `tool_executions` (runde 3 sin beskjed "keep
+... ToolGateway gates intact" respekteres: ToolGateway sin EGEN, allerede reviewte tabell/pipeline
+røres ALDRI). Et forsøk med ET ANNET innhold produserer derfor en HELT ANNEN nøkkel og treffer ALDRI
+rekonsilieringens SELECT i det hele tatt - faller naturlig tilbake til "INGEN bevis", en trygg
+førstegangs-utsendelse for DENNE meldingen, ALDRI en stille feilaktig "bekreftet"-status på et
+ubeslektet innhold. Se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -238,7 +254,13 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    bevis finnes i det hele tatt. Funn 1 (arkitekt-review runde 7) skjerpet selve BEVIS-LESINGEN: en rad under
    varsel-nøkkelen bekrefter INGENTING med mindre den FAKTISK har `tool_id='telegram'`/
    `action='notify'` - en mismatch kastes (`SituationActNotificationEvidenceMismatchError`), ALDRI
-   stille godtatt som "levert".
+   stille godtatt som "levert". Funn 1 (arkitekt-review runde 8) skjerpet BEVIS-BINDINGEN videre til
+   selve MELDINGSINNHOLDET: `tool_id`/`action` alene identifiserer FORTSATT ikke den EKSAKTE
+   varselteksten - varsel-nøkkelen inkluderer nå et innholds-avledet fingeravtrykk
+   (`computeNotifyKey()`) over den DETERMINISTISKE meldingsteksten (`buildNotifyMessage()`), slik at
+   en `succeeded`-rad for ET ANNET innhold produserer en HELT ANNEN nøkkel og ALDRI treffer denne
+   rekonsilieringens oppslag - faller trygt tilbake til "INGEN bevis" i stedet for en falsk
+   "bekreftet"-status.
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
@@ -263,7 +285,13 @@ krasj MELLOM et bekreftet varsel-bevis og selve `stage`-oppdateringen selv-helbr
 UTEN noe nytt transportkall; OG fire nye tester (Funn 1, runde 6) som beviser DEN SAMME
 selv-helbredingen selv når en FERSK varsel-policy-nektelse, en tilbakekalt Telegram-credential, en
 fryst connector, ELLER en oppbrukt rate limit ville avvist et NYTT forsøk - `stage` avanserer likevel
-korrekt til `act_notify`, ZERO nye transportkall i alle fire).
+korrekt til `act_notify`, ZERO nye transportkall i alle fire); en test (Funn 1, runde 7) som beviser at
+en `tool_executions`-rad under varsel-nøkkelen MED ET ANNET `tool_id`/`action` avvises fail-closed
+(`SituationActNotificationEvidenceMismatchError`) i stedet for stille godtatt; OG en ny test (Funn 1,
+runde 8) som beviser at en `succeeded` `tool_executions`-rad under en varsel-nøkkel BEREGNET FOR ET
+ANNET meldingsinnhold (en annen `reason`) ALDRI blir funnet av rekonsilieringen for DENNE meldingen -
+`actOn()` sender i stedet ETT ferskt, ekte varsel MED DEN KORREKTE teksten (ZERO falsk "bekreftet"-
+avansering på det ubeslektede beviset).
 
 ## 7. Retensjon og Q-20-erasure
 

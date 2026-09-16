@@ -12,7 +12,9 @@ import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from
 import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
 import {
+  buildNotifyMessage,
   computeActOperationFingerprint,
+  computeNotifyKey,
   SituationActAlreadyClaimedError,
   SituationActClaimNotReleasableError,
   SituationActInFlightError,
@@ -984,10 +986,11 @@ describe("M: Funn 1 (arkitekt-review runde 5, PR #85) - terminal_replay MÅ reko
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-simulated-crash-after-notify", "succeeded"]
     );
-    // Varselet ble FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen), men prosessen krasjet FØR stage='act_notify' ble persistert.
+    // Varselet ble FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen, bundet til DENNE meldingens fingeravtrykk), men prosessen krasjet FØR stage='act_notify' ble persistert.
+    const notifyKey = computeNotifyKey(finalKey, situationId, "Krasj MELLOM bekreftet varsel og stage-oppdatering", "test_actuator", "flip");
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [TENANT_OWNER, `${finalKey}:notify`, "telegram", "notify", "tg-simulated-crash", "succeeded"]
+      [TENANT_OWNER, notifyKey, "telegram", "notify", "tg-simulated-crash", "succeeded"]
     );
 
     expect(telegram.calls).toHaveLength(0);
@@ -1019,10 +1022,11 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, finalKey, "test_actuator", "flip", `act-sim-${keySuffix}`, "succeeded"]
     );
-    // Varselet BLE FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen) - prosessen krasjet FØR stage='act_notify' ble persistert.
+    // Varselet BLE FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen, bundet til DENNE meldingens fingeravtrykk) - prosessen krasjet FØR stage='act_notify' ble persistert.
+    const notifyKey = computeNotifyKey(finalKey, situationId, `Krasj-etter-bekreftet-varsel-bevis-${keySuffix}`, "test_actuator", "flip");
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [TENANT_OWNER, `${finalKey}:notify`, "telegram", "notify", `tg-sim-${keySuffix}`, "succeeded"]
+      [TENANT_OWNER, notifyKey, "telegram", "notify", `tg-sim-${keySuffix}`, "succeeded"]
     );
     return situationId;
   }
@@ -1135,10 +1139,11 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
   it("Funn 1 (arkitekt-review runde 7, PR #85) - en tool_executions-rad UNDER varsel-nøkkelen, men for et ANNET tool_id/action, avvises fail-closed (SituationActNotificationEvidenceMismatchError) - stage kan IKKE avansere til 'act_notify' på det falske beviset", async () => {
     const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-evidence-mismatch", "reconcile-mismatch-key");
     const finalKey = `situation:${situationId}:reconcile-mismatch-key`;
+    const notifyKey = computeNotifyKey(finalKey, situationId, "Krasj-etter-bekreftet-varsel-bevis-reconcile-mismatch-key", "test_actuator", "flip");
     // Overskriver den GYLDIGE ('telegram'/'notify') raden fra setup-hjelperen med en som IKKE er bundet til varsel-operasjonen.
     await adminPool.query(
       `UPDATE tool_executions SET tool_id = $1, action = $2 WHERE tenant_id = $3 AND idempotency_key = $4`,
-      ["test_actuator", "flip", TENANT_OWNER, `${finalKey}:notify`]
+      ["test_actuator", "flip", TENANT_OWNER, notifyKey]
     );
     const localTelegram = new TelegramSpyTransport();
     const g = new ToolGateway(appPool, policy, secrets);
@@ -1164,5 +1169,62 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
     expect(localTelegram.calls).toHaveLength(0);
     const { rows } = await adminPool.query(`SELECT stage FROM situations WHERE situation_id = $1`, [situationId]);
     expect((rows[0] as { stage: string }).stage).toBe("act"); // UENDRET - IKKE feilaktig avansert paa det falske beviset.
+  });
+});
+
+describe("O: Funn 1 (arkitekt-review runde 8, PR #85) - varsel-bevis MÅ bindes til den EKSAKTE meldingsteksten (canonical fingerprint), ikke bare tool_id/action", () => {
+  it("en succeeded tool_executions-rad UNDER varsel-nøkkelen for ET ANNET meldingsinnhold (annen 'reason') teller IKKE som bevis for DENNE meldingen - stage avanserer KUN via et FERSKT, FAKTISK varsel-forsøk for DEN RIKTIGE teksten", async () => {
+    const REAL_REASON = "Ekte grunn for DENNE ACT-en";
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:reconcile-payload-mismatch", priority: "high", confidence: 0.9, reason: REAL_REASON
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:reconcile-payload-key`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    // Simulerer: ACT-en BLE bekreftet og persistert, men prosessen krasjet FØR stage='act_notify' ble persistert.
+    await adminPool.query(
+      `UPDATE situations
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+           act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
+       WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-sim-payload-mismatch", "succeeded"]
+    );
+    // Et "bevist" varsel finnes, men for et HELT ANNET meldingsinnhold (en annen 'reason') enn den situasjonen FAKTISK har -
+    // dette produserer en HELT ANNEN fingeravtrykk-nøkkel enn den DENNE meldingen ville brukt.
+    const staleNotifyKey = computeNotifyKey(finalKey, situationId, "En HELT ANNEN, ubeslektet grunn fra et tidligere forsøk", "test_actuator", "flip");
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, staleNotifyKey, "telegram", "notify", "tg-sim-stale-payload", "succeeded"]
+    );
+
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    expect(localTelegram.calls).toHaveLength(0);
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-payload-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    // Det STALE beviset (annet innhold) ble IKKE godtatt - ETT ferskt, ekte varsel ble sendt for DENNE meldingen, ikke null.
+    expect(localTelegram.calls).toHaveLength(1);
+    expect(localTelegram.calls[0]?.parameters.message).toBe(buildNotifyMessage(REAL_REASON, "test_actuator", "flip"));
   });
 });

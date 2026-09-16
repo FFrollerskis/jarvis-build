@@ -4019,6 +4019,14 @@ sjekket kun `status`, aldri at raden faktisk er `tool_id='telegram'`/`action='no
 operasjons-bindings-klasse som `act_operation_fingerprint` allerede lukker for ACT-claimen). En
 mismatch kastes nå eksplisitt, fail-closed. Se design-notatet §6.
 
+**Arkitekt-review runde 8 (PR #85):** 1 funn, rettet - runde 7 sin `tool_id`/`action`-binding bandt
+fortsatt ikke selve meldingsinnholdet: en `succeeded`-rad under varsel-nøkkelen fra et ANNET,
+ubeslektet `telegram.notify`-forsøk (samme `tool_id`/`action`, annet innhold) kunne likevel bli godtatt
+som "bekreftet levert" for denne meldingen. Et innholds-avledet fingeravtrykk over den EKSAKTE
+meldingsteksten (`computeNotifyKey()`/`buildNotifyMessage()`) bindes nå direkte inn i selve
+varsel-nøkkelen - IKKE en ny kolonne på `tool_executions` (ToolGateway sin egen, allerede reviewte
+tabell/pipeline røres ikke). Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

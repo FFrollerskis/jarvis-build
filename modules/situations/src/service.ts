@@ -300,6 +300,36 @@ export function computeActOperationFingerprint(
   return createHash("sha256").update(canonical).digest("hex");
 }
 
+/** Den EKSAKTE meldingsteksten ACT+NOTIFY sender - EGEN funksjon slik at BÅDE selve sendingen OG rekonsilieringen (se `computeNotifyKey()`) GARANTERT bruker NØYAKTIG samme tekst. */
+export function buildNotifyMessage(reason: string, toolId: string, action: string): string {
+  return `Jarvis utførte en handling: ${reason} (${toolId}.${action})`;
+}
+
+/**
+ * Funn 1 (arkitekt-review runde 8, PR #85): `tool_id`/`action` ALENE
+ * (runde 7 Funn 1) er IKKE den KOMPLETTE operasjonen - `tool_executions`
+ * lagrer INGEN meldingstekst, så en rad UNDER en forutsigbar nøkkel
+ * (`situation:<id>:<nøkkel>:notify`) fra et ANNET, tidligere ELLER
+ * gjenbrukt `telegram.notify`-forsøk MED ET ANNET INNHOLD kunne likevel
+ * blitt godtatt som "bekreftet levert" for DENNE meldingen. Løsningen
+ * bruker SAMME primitiv som `act_operation_fingerprint` (runde 2 Funn 1) -
+ * et innholds-avledet SHA-256-fingeravtrykk - men BINDER det DIREKTE INN I
+ * selve nøkkelen (ikke en separat lagret kolonne, siden `tool_executions`
+ * er ToolGateway sin EGEN, allerede reviewte tabell - runde 3 sin
+ * beskjed "keep ... ToolGateway gates intact" respekteres ved å ALDRI
+ * legge til en ny kolonne der). En `succeeded`-rad kan derfor KUN
+ * eksistere under DENNE EKSAKTE nøkkelen hvis meldingsteksten var
+ * IDENTISK - et forsøk med et ANNET innhold produserer en HELT ANNEN
+ * nøkkel og treffer ALDRI denne rekonsilieringen sin SELECT i det hele
+ * tatt (faller naturlig tilbake til "INGEN bevis", en trygg
+ * førstegangs-utsendelse - ALDRI en stille feilaktig "bekreftet"-status).
+ */
+export function computeNotifyKey(finalIdempotencyKey: string, situationId: string, reason: string, toolId: string, action: string): string {
+  const message = buildNotifyMessage(reason, toolId, action);
+  const fingerprint = computeActOperationFingerprint(situationId, "telegram", "notify", { message });
+  return `${finalIdempotencyKey}:notify:${fingerprint}`;
+}
+
 export interface ActOnResult {
   situation: Situation;
   tool_result: ToolResult;
@@ -793,7 +823,7 @@ export class SituationEngine {
         // runde 3 Funn 1+2 GARANTERER at dette ALDRI kan være en samtidig
         // i-flukt-tilstand) er et NYTT `execute()`-kall trygt og
         // nødvendig.
-        const notifyKey = `${finalIdempotencyKey}:notify`;
+        const notifyKey = computeNotifyKey(finalIdempotencyKey, situationId, existingSituation.reason, request.tool_id, request.action);
         const replayedToolResult: ToolResult = { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true };
         const notifyEvidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           const { rows } = await client.query(
@@ -835,7 +865,7 @@ export class SituationEngine {
             identity,
             tool_id: "telegram",
             action: "notify",
-            parameters: { message: `Jarvis utførte en handling: ${existingSituation.reason} (${request.tool_id}.${request.action})` },
+            parameters: { message: buildNotifyMessage(existingSituation.reason, request.tool_id, request.action) },
             idempotency_key: notifyKey
           });
           if (notifyResult.ok) {
@@ -914,8 +944,8 @@ export class SituationEngine {
           identity,
           tool_id: "telegram",
           action: "notify",
-          parameters: { message: `Jarvis utførte en handling: ${situation.reason} (${request.tool_id}.${request.action})` },
-          idempotency_key: `${finalIdempotencyKey}:notify`
+          parameters: { message: buildNotifyMessage(situation.reason, request.tool_id, request.action) },
+          idempotency_key: computeNotifyKey(finalIdempotencyKey, situationId, situation.reason, request.tool_id, request.action)
         });
         if (notifyResult.ok) {
           finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
