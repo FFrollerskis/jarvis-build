@@ -122,6 +122,7 @@ import {
   getCommit,
   getCommitCheckRuns
 } from "./lib/github.mjs";
+import { computeMergeTree } from "./lib/merge-tree.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.JARVIS_WORKER_CONFIG || join(HERE, "config.json");
@@ -348,7 +349,8 @@ function verifyTransitionFor(cfg, claim, completion) {
     // The task IS its own order and DOES claim a merge, but the order is broken.
     // That is a real finding, recorded, and it costs no API call.
     return verifyMergeTransition({
-      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null
+      authorization, completion, pull: null, mergeCommit: null, headCommit: null, checks: null,
+      mergeTreeProof: null
     });
   }
 
@@ -361,7 +363,35 @@ function verifyTransitionFor(cfg, claim, completion) {
   const headCommit = getCommit(cfg, authorization.expectedHead);
   const checks = mergeSha ? getCommitCheckRuns(cfg, mergeSha) : { ok: false, runs: [], error: "no merge sha to read" };
 
-  return verifyMergeTransition({ authorization, completion, pull, mergeCommit, headCommit, checks });
+  // D-158: recompute the merge of the two AUTHORIZED objects and read the merge
+  // commit back as a real object, so the gate can require the recorded merge to
+  // BE the authorized merge rather than merely to resemble it.
+  //
+  // This is the one part of the gate that runs git rather than reading the API,
+  // and it is deliberately confined: it works in a bare object store under
+  // `scratchRoot` - which `config.mjs` asserts is outside the repository - with
+  // the primary object database attached read-only as an alternate. No checkout,
+  // no index, no ref written, nothing in the repository touched. When there is no
+  // merge sha to prove anything about, the computation is not attempted at all
+  // and the verifier sees UNKNOWN, which is a named refusal rather than a pass.
+  //
+  // D-159: the store is narrower still - `join(scratchRoot, taskId)`, this task's
+  // OWN authorized scratch directory, claimed with an ownership marker before
+  // anything is created, written or removed. The task id comes from the
+  // authorization, which is the immutable admitted order, so the gate cannot be
+  // pointed at a directory shared with, or left behind by, other work.
+  const mergeTreeProof = mergeSha
+    ? computeMergeTree(cfg, {
+      expectedBase: authorization.expectedBase,
+      expectedHead: authorization.expectedHead,
+      mergeSha,
+      taskId: authorization.taskId
+    })
+    : { attempted: false, ok: false, stage: "no_merge_commit", error: "the pull request records no merge commit" };
+
+  return verifyMergeTransition({
+    authorization, completion, pull, mergeCommit, headCommit, checks, mergeTreeProof
+  });
 }
 
 /**

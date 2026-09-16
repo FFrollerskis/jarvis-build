@@ -335,6 +335,22 @@ export function getCommitCheckRuns({ repoOwner, repoName }, sha, runner = gh) {
   }
 }
 
+/*
+ * D-158: `compareCommits` USED TO LIVE HERE AND IS GONE ON PURPOSE.
+ *
+ * D-157 added it to read `repos/O/R/compare/<a>...<b>`, so the gate could require
+ * `parent1...merge` and `expectedBase...expectedHead` to be equal field for
+ * field. That comparison is false for a valid merge whenever base and head
+ * changed different NON-OVERLAPPING HUNKS OF ONE FILE - the merge blob correctly
+ * holds both sides - so it refused correct history.
+ *
+ * The merge proof no longer asks the remote to diff anything. It recomputes the
+ * merge from the two authorized objects with git itself (see `merge-tree.mjs`),
+ * which is exact, topology-independent and not a rendered projection. The reader
+ * is left as a comment rather than as an unused export so that it is not
+ * reintroduced by someone looking for "the compare helper we already had".
+ */
+
 /** Does an exact branch exist on the remote? `{ ok, exists, error }`. */
 export function getBranch({ repoOwner, repoName }, branch, runner = gh) {
   try {

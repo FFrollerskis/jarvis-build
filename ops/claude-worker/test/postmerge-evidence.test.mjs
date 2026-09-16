@@ -137,6 +137,43 @@ const mergeCommit = (over = {}) => ({
 });
 const headCommit = () => ({ ok: true, item: { sha: HEAD, treeSha: TREE, parents: [BASE] }, error: null });
 
+/**
+ * D-158: the merge proof this gate now also requires.
+ *
+ * This file is about REQUIRED CHECK IDENTITY and the bound closeout report, so
+ * the proof here is a constant, passing fixture: it must not be the reason any
+ * case in this file passes or fails.
+ */
+const mergeTreeProof = () => ({
+  attempted: true,
+  ok: true,
+  stage: "complete",
+  error: null,
+  store_path: `C:/worker/tmp/${TASK_ID}/merge-proof.git`,
+  // D-159: and whose directory it ran in. See `merge-tree-proof.test.mjs` for
+  // the cases that drive a foreign, unmarked or unstated owner.
+  store_owned: true,
+  store_owner_task_id: TASK_ID,
+  fetched: false,
+  fetch_error: null,
+  missing_objects: [],
+  // D-158 REVIEW-FIX: the conditions the merge was computed under are part of a
+  // complete record; see `merge-tree-proof.test.mjs` for the cases that drive
+  // each of them failing.
+  config_isolated: true,
+  foreign_config: [],
+  custom_merge_drivers: [],
+  attribute_files_scanned: 0,
+  resolved_base: BASE,
+  resolved_head: HEAD,
+  resolved_merge: MERGE,
+  expected_tree: TREE,
+  conflicted: false,
+  conflict_detail: null,
+  merge_commit_tree: TREE,
+  merge_commit_parents: [BASE, HEAD]
+});
+
 /** The whole gate, end to end, with exactly one fact changed. */
 function verify(over = {}) {
   return verifyMergeTransition({
@@ -148,7 +185,8 @@ function verify(over = {}) {
     pull: over.pull ?? pull(),
     mergeCommit: over.mergeCommit ?? mergeCommit(),
     headCommit: over.headCommit ?? headCommit(),
-    checks: over.checks ?? checks()
+    checks: over.checks ?? checks(),
+    mergeTreeProof: "mergeTreeProof" in over ? over.mergeTreeProof : mergeTreeProof()
   });
 }
 

@@ -177,6 +177,17 @@ if (commitMatch) {
   process.exit(0);
 }
 
+/*
+ * D-158: THE `repos/O/R/compare/...` ROUTE IS GONE ON PURPOSE.
+ *
+ * D-157 served it so the merge gate could compare two diff projections. That
+ * comparison refused valid merges (different non-overlapping hunks of one file),
+ * and the gate now recomputes the merge from the objects with real git instead -
+ * so the worker never calls this endpoint. A fake that still answered it would
+ * let a reintroduced projection read pass its tests without anyone noticing that
+ * nothing in `lib/` asks for it any more.
+ */
+
 // D-145: the merge-state projection for ONE pull request. Distinguished from the
 // list route by the trailing number, and from `getPull` by the fields asked for.
 const oneP = urlArg.match(/\/pulls\/(\d+)$/);

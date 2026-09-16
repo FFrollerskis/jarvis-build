@@ -146,6 +146,165 @@ export function treeWithExtraFile(cwd, head, { file = "slipped-in.txt", content 
 }
 
 /**
+ * D-157: the tree a REAL three-way merge of `base` and `head` produces.
+ *
+ * `syntheticMerge` defaults the merge tree to the HEAD's tree, which is only
+ * correct when the head already contains its base. For a DIVERGED branch - the
+ * topology D-156 was wrongly refused for - the correct merge tree carries both
+ * sides, and inventing it would be inventing the very thing under test. So git
+ * computes it, with `merge-tree --write-tree` (git >= 2.38, present on every
+ * supported runner and on the dev host).
+ *
+ * `extra` optionally adds a file to the resulting tree, which is the adversarial
+ * "conflict resolution introduced content nobody reviewed" case: a well-formed
+ * two-parent merge whose effective delta is NOT the reviewed one.
+ */
+export function realMergeTree(cwd, base, head, { extra = null } = {}) {
+  const tree = git(cwd, ["merge-tree", "--write-tree", base, head]).split(/\r?\n/)[0].trim();
+  if (!extra) return tree;
+
+  const res = spawnSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd, input: extra.content ?? "never reviewed\n", encoding: "utf8", windowsHide: true
+  });
+  if (res.status !== 0) throw new Error(`git hash-object failed: ${res.stderr}`);
+  const blob = String(res.stdout).trim();
+  const listing = git(cwd, ["ls-tree", tree]);
+  const mk = spawnSync("git", ["mktree"], {
+    cwd,
+    input: `${listing}\n100644 blob ${blob}\t${extra.file ?? "slipped-in.txt"}\n`,
+    encoding: "utf8",
+    windowsHide: true
+  });
+  if (mk.status !== 0) throw new Error(`git mktree failed: ${mk.stderr}`);
+  return String(mk.stdout).trim();
+}
+
+/** git's raw status letters, mapped to the words the GitHub compare API uses. */
+const RAW_STATUS = { A: "added", M: "modified", D: "removed", R: "renamed", C: "copied", T: "changed" };
+
+/**
+ * The `repos/O/R/compare/<base>...<head>` projection, DERIVED FROM REAL GIT.
+ *
+ * D-158 REMOVED the gate that consumed this: comparing `parent1...merge` with
+ * `expectedBase...expectedHead` field for field refuses a valid merge whenever
+ * base and head changed different non-overlapping hunks of ONE file, because the
+ * merge blob correctly carries both sides. The merge proof now recomputes the
+ * merge instead (see `lib/merge-tree.mjs`), and reads no comparison at all.
+ *
+ * It is kept because the D-158 REGRESSION TEST needs it: to demonstrate that the
+ * old rule fails the topology the new one accepts, the old rule has to be
+ * executable over the same real objects. It is a witness for a closed bug, not a
+ * fixture any gate still depends on - nothing in `lib/` reads a comparison.
+ *
+ * Mirrors the real endpoint's semantics: a THREE-DOT comparison, anchored at the
+ * merge base, with `commits` oldest-first so the last entry is the commit
+ * compared to.
+ */
+export function compareProjection(cwd, base, head) {
+  const mergeBase = git(cwd, ["merge-base", base, head]);
+  const aheadBy = Number(git(cwd, ["rev-list", "--count", `${mergeBase}..${head}`]));
+  const behindBy = Number(git(cwd, ["rev-list", "--count", `${mergeBase}..${base}`]));
+  const status = aheadBy === 0 && behindBy === 0 ? "identical"
+    : aheadBy > 0 && behindBy === 0 ? "ahead"
+      : aheadBy === 0 ? "behind" : "diverged";
+  const commits = aheadBy === 0
+    ? []
+    : git(cwd, ["rev-list", "--reverse", `${mergeBase}..${head}`]).split(/\r?\n/).filter(Boolean);
+
+  // Line counts per path, keyed by the path the change lands on.
+  const numstat = new Map();
+  const numstatOut = git(cwd, ["diff", "--numstat", "-M", mergeBase, head]);
+  for (const line of numstatOut.split(/\r?\n/).filter(Boolean)) {
+    const [add, del, ...rest] = line.split("\t");
+    const path = rest[rest.length - 1];
+    numstat.set(path, { additions: Number(add) || 0, deletions: Number(del) || 0 });
+  }
+
+  const files = [];
+  const rawOut = git(cwd, ["diff", "--raw", "-M", "-z", mergeBase, head]);
+  // `-z` output is NUL-separated: "<meta>\0<path>\0" and, for R/C, an extra path.
+  const parts = rawOut.split("\0").filter((p) => p !== "");
+  for (let i = 0; i < parts.length;) {
+    const meta = parts[i++];
+    if (!meta.startsWith(":")) continue;
+    const fields = meta.slice(1).split(/\s+/);
+    const srcBlob = fields[2];
+    const dstBlob = fields[3];
+    const code = fields[4];
+    const letter = code[0];
+    const from = parts[i++];
+    const to = letter === "R" || letter === "C" ? parts[i++] : null;
+    const filename = to ?? from;
+    const counts = numstat.get(filename) ?? { additions: 0, deletions: 0 };
+    const patchRaw = git(cwd, ["diff", "-M", mergeBase, head, "--", ...(to ? [from, to] : [from])]);
+    // GitHub's `patch` begins at the first hunk header, with no file header.
+    const at = patchRaw.indexOf("@@");
+    files.push({
+      filename,
+      status: RAW_STATUS[letter] ?? "modified",
+      previousFilename: to ? from : null,
+      // The RESULTING blob, which is what GitHub reports; a deletion has none,
+      // so the pre-image is used, exactly as the real API does.
+      blobSha: /^0+$/.test(dstBlob) ? srcBlob : dstBlob,
+      additions: counts.additions,
+      deletions: counts.deletions,
+      patch: at >= 0 ? patchRaw.slice(at) : null
+    });
+  }
+  files.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
+
+  return {
+    baseSha: git(cwd, ["rev-parse", base]),
+    mergeBaseSha: mergeBase,
+    headSha: git(cwd, ["rev-parse", head]),
+    status,
+    aheadBy,
+    behindBy,
+    totalCommits: commits.length,
+    commitCount: commits.length,
+    fileCount: files.length,
+    commits,
+    files
+  };
+}
+
+/**
+ * D-157's INVARIANT, executable, so the D-158 regression can run it.
+ *
+ * This is the rule PR #84 shipped before this correction: the two GitHub
+ * comparisons `parent1...merge` and `expectedBase...expectedHead` had to be
+ * equal file for file and field for field. Reproduced here - the same sort, the
+ * same fields, in the same order - because a regression test that merely
+ * DESCRIBES the old bug proves nothing. Running it over the same real objects
+ * the new gate runs over is the only way to show that one refuses a topology the
+ * other accepts.
+ *
+ * Returns `{ ok, field, filename }`. It lives in the fixtures, not in `lib/`,
+ * because nothing in the worker may use it again.
+ */
+export const D157_COMPARED_FIELDS = Object.freeze([
+  "status", "previousFilename", "blobSha", "additions", "deletions", "patch"
+]);
+
+export function d157ProjectionEquality(cwd, { mergeSha, base, head }) {
+  const parent1 = parentsOf(cwd, mergeSha)[0] ?? null;
+  if (!parent1) return { ok: false, field: "parent1", filename: null };
+  const byName = (a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0);
+  const m = [...compareProjection(cwd, parent1, mergeSha).files].sort(byName);
+  const r = [...compareProjection(cwd, base, head).files].sort(byName);
+
+  if (m.length !== r.length || m.some((f, i) => f.filename !== r[i].filename)) {
+    return { ok: false, field: "fileSet", filename: null };
+  }
+  for (let i = 0; i < r.length; i++) {
+    for (const field of D157_COMPARED_FIELDS) {
+      if (m[i][field] !== r[i][field]) return { ok: false, field, filename: r[i].filename };
+    }
+  }
+  return { ok: true, field: null, filename: null };
+}
+
+/**
  * Create a repository with one baseline commit containing a TRACKED file, so a
  * test can produce a genuine tracked modification as well as untracked files.
  */
