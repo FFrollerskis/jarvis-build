@@ -4001,6 +4001,13 @@ circuiter nå enhver terminal/bevis-bekreftet claim direkte fra persistert tilst
 (pluss `gateway.get()` for `output_trust` - et rent oppslag, aldri en autorisasjon) - `gateway.execute()`
 kalles ALDRI for en replay. Se design-notatet §6.
 
+**Arkitekt-review runde 5 (PR #85):** 1 funn, rettet - runde 4 sin `terminal_replay` returnerte
+UENDRET for TIDLIG: en krasj MELLOM ACT-persistering og selve varsel-forsøket, eller MELLOM et
+bekreftet varsel-bevis og `stage`-oppdateringen, lot situasjonen sitte fastlåst på `act` for alltid.
+`terminal_replay` sjekker nå om ACT er bekreftet men varselet fortsatt uavgjort, og kaller i så fall
+varsel-`execute()` på nytt med samme deterministiske nøkkel (advisory-låsen garanterer dette alltid er
+trygt) - avanserer til `act_notify` kun på bekreftet suksess, aldri en regresjon. Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

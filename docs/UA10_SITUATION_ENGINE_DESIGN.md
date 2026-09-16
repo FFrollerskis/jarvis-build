@@ -46,6 +46,18 @@ ELLER bevis-bekreftet claim leses DIREKTE fra den persisterte situasjonen/`tool_
 ALDRI en autorisasjon) og returneres UENDRET - `gateway.execute()` kalles ALDRI for en replay. Se §6
 under.
 
+**Arkitekt-review runde 5 (PR #85, HEAD de398f3):** 1 funn - runde 4 sin `terminal_replay` returnerte
+UENDRET for TIDLIG: en krasj MELLOM ACT-persisteringen (`act_result='succeeded', stage='act'`) og
+selve varsel-forsøket, ELLER MELLOM et FAKTISK bekreftet varsel-bevis og selve `stage='act_notify'`-
+oppdateringen, lot situasjonen sitte FASTLÅST på `act` FOR ALLTID - INGEN fremtidig retry ville
+noensinne forsøkt varselet igjen, siden `act_result !== null` alene sendte replayen rett ut UTEN å
+sjekke varsel-nøkkelens EGET `tool_executions`-bevis. Rettet: `terminal_replay` sjekker nå EKSPLISITT
+om `act_result === 'succeeded' && stage !== 'act_notify'` - i så fall kalles varsel-`execute()` PÅ
+NYTT med SAMME deterministiske nøkkel (Funn 1+2 runde 3 sin advisory-lås GARANTERER at INGEN samtidig
+i-flukt-tilstand er mulig her, så dette er ALLTID enten en trygg førstegangs-utsendelse ELLER en trygg,
+dedupliserende bekreftelse - ALDRI en risiko for dobbel levering, og ALDRI en regresjon siden stadiet
+KUN kan AVANSERE til `act_notify` på suksess, ALDRI regressere på en avvisning). Se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -186,7 +198,15 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    kastet feil) holder stadiet på `act`, ALDRI et falskt `act_notify`. Runde 2 Funn 3: selve
    varsel-kallet har NÅ SITT EGET, deterministiske `idempotency_key` (avledet av ACT-ens egen nøkkel) —
    en `actOn()`-retry ETTER en allerede FULLFØRT ACT+NOTIFY sender derfor ALDRI et duplikat-varsel
-   (ToolGateway sin egen dedupe gjelder nå OGSÅ varselet, ikke bare selve ACT-handlingen).
+   (ToolGateway sin egen dedupe gjelder nå OGSÅ varselet, ikke bare selve ACT-handlingen). Funn 1
+   (arkitekt-review runde 5) skjerpet DETTE videre: runde 4 sin `terminal_replay` (se punkt 2) må IKKE
+   returnere UENDRET når ACT er bekreftet MEN varselet FORTSATT står uavgjort (`stage` fortsatt `act`,
+   krasj FØR/UNDER varsel-forsøket eller MELLOM et bekreftet varsel-bevis og selve `stage`-
+   oppdateringen) - en replay i DETTE tilfellet kaller varsel-`execute()` PÅ NYTT med SAMME nøkkel
+   (advisory-låsen fra Funn 1+2 runde 3 garanterer dette ALLTID er en trygg førstegangs-utsendelse
+   ELLER en trygg, dedupliserende bekreftelse), og AVANSERER (selv-helbreder) til `act_notify` KUN på
+   en faktisk bekreftet suksess - ALDRI en regresjon, siden en avvisning her bare lar `stage` forbli
+   uendret på `act`.
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
@@ -204,7 +224,11 @@ vente og kan ALDRI observere et falskt "ingen bevis" mens forsøket fortsatt på
 adversarielle tester (Funn 1, runde 4): en retry av en ALLEREDE fullført ACT etter at credentialen ble
 tilbakekalt, connectoren ble fryst, eller rate-limiten ble oppbrukt returnerer ALLE det UENDREDE
 opprinnelige resultatet med ZERO nye transportkall, og en retry etter et allerede levert ACT+NOTIFY med
-Telegram-credentialen tilbakekalt beholder `act_notify` UENDRET - ALDRI nedgradert til `act`).
+Telegram-credentialen tilbakekalt beholder `act_notify` UENDRET - ALDRI nedgradert til `act`; OG to nye
+krasj-grense-tester (Funn 1, runde 5): en retry etter en krasj MELLOM ACT-persistering og selve
+varsel-forsøket forsøker varselet FOR FØRSTE gang og avanserer til `act_notify`; en retry etter en
+krasj MELLOM et bekreftet varsel-bevis og selve `stage`-oppdateringen selv-helbreder til `act_notify`
+UTEN noe nytt transportkall).
 
 ## 7. Retensjon og Q-20-erasure
 

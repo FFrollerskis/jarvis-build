@@ -729,18 +729,65 @@ export class SituationEngine {
         return { kind: "evidence_replay", status: evidence.status, externalId: evidence.external_id, reason: evidence.postcondition_reason };
       });
 
-      // Funn 1 (arkitekt-review runde 4, PR #85): en ALLEREDE TERMINAL
-      // situasjon returneres UENDRET - INGEN nytt `gateway.execute()`-kall,
-      // INGEN ny skriving, INGEN ny varsel-utsendelse (den FØRSTE bekreftede
-      // leveringen, om noen, har allerede skjedd - se `claimOutcome` sin
-      // egen doc-kommentar over for HELE begrunnelsen).
+      // Funn 1 (arkitekt-review runde 4, PR #85): en ALLEREDE TERMINAL ACT
+      // returneres UENDRET - INGEN nytt `gateway.execute()`-kall for SELVE
+      // handlingen, INGEN ny skriving av `act_result` (se `claimOutcome`
+      // sin doc-kommentar for HELE begrunnelsen). Funn 1 (arkitekt-review
+      // runde 5): dette MÅ IKKE bety å hoppe over varsel-tilstanden helt -
+      // en krasj MELLOM ACT-persisteringen og selve varsel-forsøket
+      // (stage FORTSATT 'act'), ELLER MELLOM et BEKREFTET varsel og
+      // stage-oppdateringen til 'act_notify', ville ellers latt situasjonen
+      // sitte FASTLÅST på 'act' for alltid - INGEN fremtidig retry ville
+      // noensinne prøvd igjen.
       if (claimOutcome.kind === "terminal_replay") {
+        const existingSituation = claimOutcome.situation;
         const definition = gateway.get(request.tool_id, request.action);
-        const replayed: ToolResult =
-          claimOutcome.situation.act_result === "succeeded"
-            ? { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true }
-            : { ok: false, reason: claimOutcome.situation.reason };
-        return { situation: claimOutcome.situation, tool_result: replayed };
+        if (existingSituation.act_result !== "succeeded" || existingSituation.stage === "act_notify") {
+          // Enten en bekreftet AVVIST/eskalert handling (varsel er ALDRI
+          // aktuelt for et avslag), ELLER allerede FULLT bekreftet levert -
+          // ingenting mer å gjøre.
+          const replayed: ToolResult =
+            existingSituation.act_result === "succeeded"
+              ? { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true }
+              : { ok: false, reason: existingSituation.reason };
+          return { situation: existingSituation, tool_result: replayed };
+        }
+        // ACT bekreftet, MEN varsel-tilstanden er UAVGJORT (stage fortsatt
+        // 'act'). Advisory-låsen (Funn 1+2, runde 3) GARANTERER at INGEN
+        // samtidig i-flukt-tilstand er mulig her - et TIDLIGERE forsøk for
+        // SAMME domene er alltid HELT ferdig (uansett utfall) FØR denne
+        // claimen i det hele tatt kan fortsette forbi lås-tildelingen. Et
+        // varsel-kall NÅ, med SAMME deterministiske nøkkel, er derfor
+        // ALLTID enten en trygg FØRSTEGANGS-utsendelse (INGEN
+        // `tool_executions`-bevis ennå) eller en trygg, dedupliserende
+        // bekreftelse/gjentakelse av et TIDLIGERE avgjort utfall
+        // (ToolGateway sin EGEN idempotency_key-dedupe) - ALDRI en risiko
+        // for dobbel levering, og ALDRI en regresjon: stadiet forblir 'act'
+        // (uendret, ærlig) på et nytt avslag, og AVANSERER KUN til
+        // 'act_notify' på en faktisk bekreftet suksess.
+        const replayedToolResult: ToolResult = { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true };
+        let finalSituation = existingSituation;
+        try {
+          const notifyResult = await gateway.execute({
+            identity,
+            tool_id: "telegram",
+            action: "notify",
+            parameters: { message: `Jarvis utførte en handling: ${existingSituation.reason} (${request.tool_id}.${request.action})` },
+            idempotency_key: `${finalIdempotencyKey}:notify`
+          });
+          if (notifyResult.ok) {
+            finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+              const { rows } = await client.query(
+                `UPDATE situations SET stage = 'act_notify', updated_at = now() WHERE tenant_id = $1 AND situation_id = $2 RETURNING *`,
+                [tenantId, situationId]
+              );
+              return rows[0] as Situation;
+            });
+          }
+        } catch {
+          // Varsel-kallet KASTET - stadiet forblir 'act', en ærlig indikasjon på at varselet IKKE ble bekreftet levert.
+        }
+        return { situation: finalSituation, tool_result: replayedToolResult };
       }
 
       let toolResult: ToolResult;

@@ -932,3 +932,69 @@ describe("L: Funn 1 (arkitekt-review runde 4, PR #85) - terminal ACT-tilstand er
     expect(localTransport.calls.filter((c) => c.action === "flip")).toHaveLength(1); // INGEN ny ACT-invokering heller.
   });
 });
+
+describe("M: Funn 1 (arkitekt-review runde 5, PR #85) - terminal_replay MÅ rekonsiliere varsel-tilstanden, ALDRI hoppe helt over den", () => {
+  it("krasj MELLOM ACT-persistering og selve varsel-forsøket (stage fortsatt 'act', INGEN notify-bevis): en retry forsøker varselet NÅ, for FØRSTE gang, og avanserer til 'act_notify' - INGEN ny ACT-invokering", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:crash-before-notify", priority: "high", confidence: 0.9, reason: "Krasj FØR varsel-forsøket"
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:crash-before-notify-key`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    // Simulerer: ACT-en BLE bekreftet og persistert (stage='act', act_result='succeeded'), men prosessen krasjet FØR noe varsel-forsøk i det hele tatt ble gjort.
+    await adminPool.query(
+      `UPDATE situations
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+           act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
+       WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-simulated-crash-before-notify", "succeeded"]
+    );
+
+    expect(telegram.calls).toHaveLength(0);
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "crash-before-notify-key" }, gateway, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true);
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(telegram.calls).toHaveLength(1); // FØRSTE (og eneste) varsel-forsøk.
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0); // INGEN ny ACT-invokering.
+  });
+
+  it("krasj MELLOM et BEKREFTET varsel-bevis og selve stage-oppdateringen til 'act_notify': en retry selv-helbreder stage UTEN noe nytt transportkall", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:crash-after-notify-evidence", priority: "high", confidence: 0.9, reason: "Krasj MELLOM bekreftet varsel og stage-oppdatering"
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:crash-after-notify-key`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    await adminPool.query(
+      `UPDATE situations
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+           act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
+       WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-simulated-crash-after-notify", "succeeded"]
+    );
+    // Varselet ble FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen), men prosessen krasjet FØR stage='act_notify' ble persistert.
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, `${finalKey}:notify`, "telegram", "notify", "tg-simulated-crash", "succeeded"]
+    );
+
+    expect(telegram.calls).toHaveLength(0);
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "crash-after-notify-key" }, gateway, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify"); // selv-helbredet fra det EKSISTERENDE beviset.
+    expect(telegram.calls).toHaveLength(0); // INGEN nytt transportkall - ToolGateway sin egen dedupe gjenkjente det allerede eksisterende beviset.
+  });
+});
