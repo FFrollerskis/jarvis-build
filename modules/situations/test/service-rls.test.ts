@@ -402,3 +402,37 @@ describe("L: Funn 5 (arkitekt-review runde 1, PR #85) - stille timer MÅ sjekkes
     expect(third.newly_actionable).toBe(true);
   });
 });
+
+describe("M: Funn 6 (arkitekt-review runde 2, PR #85) - owner_person_id er scope-safe (sammensatt FK mot person_tenants)", () => {
+  const TENANT_M1 = "tenant-sit-svc-owner-scope-a";
+  const TENANT_M2 = "tenant-sit-svc-owner-scope-b";
+  const OWNER_IN_M1 = "person-owner-scope-m1";
+  const OWNER_IN_M2_ONLY = "person-owner-scope-m2";
+
+  beforeAll(async () => {
+    await adminPool.query(`
+      INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_M1}', 'OwnerScopeA', 'business'), ('${TENANT_M2}', 'OwnerScopeB', 'business');
+      INSERT INTO people (person_id, display_name) VALUES ('${OWNER_IN_M1}', 'M1 Owner'), ('${OWNER_IN_M2_ONLY}', 'M2-only Owner');
+      INSERT INTO person_tenants (person_id, tenant_id) VALUES ('${OWNER_IN_M1}', '${TENANT_M1}'), ('${OWNER_IN_M2_ONLY}', '${TENANT_M2}');
+    `);
+  });
+
+  it("en owner_person_id som ER medlem av situasjonens EGET tenant aksepteres", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_M1, "business", candidate({
+      detection_key: "spend:owner-scope-ok", owner_person_id: OWNER_IN_M1
+    }));
+    expect(situation.owner_person_id).toBe(OWNER_IN_M1);
+  });
+
+  it("en owner_person_id som KUN er medlem av et ANNET tenant avvises av databasen (FK-brudd), INGEN rad skrives", async () => {
+    await expect(
+      engine.evaluateCandidate(TENANT_M1, "business", candidate({
+        detection_key: "spend:owner-scope-cross-tenant", owner_person_id: OWNER_IN_M2_ONLY
+      }))
+    ).rejects.toThrow();
+    const { rows } = await adminPool.query(
+      `SELECT 1 FROM situations WHERE tenant_id = $1 AND detection_key = $2`, [TENANT_M1, "spend:owner-scope-cross-tenant"]
+    );
+    expect(rows).toHaveLength(0);
+  });
+});

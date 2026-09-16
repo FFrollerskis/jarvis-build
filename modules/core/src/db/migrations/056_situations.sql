@@ -104,6 +104,12 @@ CREATE TABLE situations (
   -- utgiftsavvik, en infra-alarm), ikke nødvendigvis en navngitt eiers
   -- personlige handling - å TVINGE et medlemskapsbevis her ville avvist
   -- gyldige eierløse situasjoner.
+  -- Funn 6 (arkitekt-review runde 2, PR #85): sammensatt scope-safe FK
+  -- legges til RETT ETTER denne tabellens definisjon (se
+  -- `situations_owner_scope_fk` under) - en `owner_person_id` som IKKE er
+  -- MEDLEM av situasjonens EGET tenant avvises av databasen (MATCH SIMPLE -
+  -- default - en NULL `owner_person_id`, den vanlige eierløse P0-tilstanden,
+  -- trigger ALDRI sjekken).
   owner_person_id       text REFERENCES people (person_id),
   -- Løs peker til kilden (ALDRI en kopi av kildedataene) - `NULL` er den
   -- normale P0-tilstanden siden INGEN live kilde er koblet til ennå.
@@ -156,6 +162,19 @@ CREATE TABLE situations (
   -- garanterer at selve SIDE-EFFEKTEN aldri gjentas.
   act_idempotency_key    text,
   act_claimed_at          timestamptz,
+  -- Funn 1 (arkitekt-review runde 2, PR #85): `act_idempotency_key` ALENE
+  -- bandt IKKE selve OPERASJONEN (tool_id/action/parametre) - en SENERE
+  -- `actOn()`-kall for SAMME situasjon med SAMME nøkkel, men et ANNET
+  -- tool_id/action/parametersett, ble tidligere sluppet gjennom claimen (kun
+  -- nøkkel-likhet ble sjekket) og kunne ende med å skrive et FEILAKTIG
+  -- "succeeded"-resultat for en handling som ALDRI faktisk ble utført (den
+  -- opprinnelige, ANNERLEDES handlingen sitt bekreftede resultat ble
+  -- gjenbrukt). Denne kolonnen lagrer en SHA-256-fingeravtrykk av HELE den
+  -- immutable operasjonen (situation_id + tool_id + action + kanonisk
+  -- parametre - se `computeActOperationFingerprint()` i service.ts) satt
+  -- ATOMISK SAMTIDIG med selve claimen - en retry med SAMME nøkkel, men et
+  -- ULIKT fingeravtrykk, avvises EKSPLISITT (`SituationActOperationMismatchError`).
+  act_operation_fingerprint text,
   opened_at              timestamptz NOT NULL DEFAULT now(),
   resolved_at            timestamptz,
   created_at             timestamptz NOT NULL DEFAULT now(),
@@ -173,6 +192,16 @@ CREATE INDEX situations_domain_idx ON situations (tenant_id, memory_space_id, do
 ALTER TABLE situations ADD CONSTRAINT situations_source_open_loop_scope_fk
   FOREIGN KEY (source_open_loop_id, tenant_id, memory_space_id)
   REFERENCES business_open_loops (open_loop_id, tenant_id, memory_space_id);
+
+-- Funn 6 (arkitekt-review runde 2, PR #85): en NULLABLE `owner_person_id`
+-- betyr IKKE at scope-integritet kan droppes NÅR den faktisk er satt - uten
+-- denne sammensatte FK-en kunne en `owner_person_id` fra et HELT ANNET
+-- tenant lagres på en situasjon (kun `people`-eksistens ble sjekket, ALDRI
+-- medlemskap). `person_tenants` sin egen PK `(person_id, tenant_id)`
+-- gjoer denne referansen mulig direkte, ingen ny UNIQUE noedvendig.
+ALTER TABLE situations ADD CONSTRAINT situations_owner_scope_fk
+  FOREIGN KEY (owner_person_id, tenant_id)
+  REFERENCES person_tenants (person_id, tenant_id);
 
 -- Funn 6 (arkitekt-review runde 1, PR #85): `DomainPauseRegistry` sin
 -- rene in-memory-tilstand (domain-pause.ts) er PROSESS-LOKAL og

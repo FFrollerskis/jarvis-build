@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type pg from "pg";
 import { withMemoryTransaction } from "@jarvis/memory";
-import type { MemorySpace, IdentityContext } from "@jarvis/contracts";
+import type { JsonValue, MemorySpace, IdentityContext } from "@jarvis/contracts";
 import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
 import {
   SetSituationNotificationPolicyInputSchema,
@@ -15,7 +15,7 @@ import {
   type SituationPriority,
   type SituationStage
 } from "./types.ts";
-import type { DomainPauseRegistry } from "./domain-pause.ts";
+import { ALL_DOMAINS, type DomainPauseRegistry } from "./domain-pause.ts";
 
 /**
  * UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-
@@ -105,23 +105,84 @@ export class SituationActAlreadyClaimedError extends Error {
 }
 
 /**
- * Kastet av `actOn()` (Funn 3): situasjonen er claimet av NØYAKTIG DENNE
- * idempotens-nøkkelen, MEN forrige forsøk har IKKE fullført persisteringen
- * ennå (`act_result IS NULL`) - ENTEN et ANNET, SANN SAMTIDIG `actOn()`-kall
- * er FORTSATT i flukt akkurat nå, ELLER et TIDLIGERE forsøk krasjet mellom
- * det eksterne kallet og persisteringen. Denne klassen kan IKKE skille de to
- * tilfellene fra hverandre - og velger derfor BEVISST det TRYGGESTE
- * utfallet (avvis, ALDRI et nytt `ToolGateway.execute()`-kall) fremfor å
- * risikere et ekte SAMTIDIG dobbelt-forsøk på den faktiske side-effekten.
- * En EKTE krasj-gjenoppretting (prosessen som eide forsøket er FAKTISK død)
- * er derfor P0 IKKE selv-helbredende innen SAMME idempotens-nøkkel - en
- * fremtidig, egen "claim med et utløpsvindu"-mekanisme er naturlig neste
- * steg, IKKE bygget her (flagget eksplisitt, ikke stilltiende utelatt).
+ * Kastet av `actOn()` (Funn 3, SKJERPET i runde 2 Funn 2): situasjonen er
+ * claimet av NØYAKTIG DENNE idempotens-nøkkelen (SAMME operasjons-
+ * fingeravtrykk), MEN `actOn()` fant INGEN `tool_executions`-bevis for
+ * nøkkelen i det hele tatt (se rekonsilieringen i `actOn()`) - ENTEN et
+ * ANNET, SANN SAMTIDIG `actOn()`-kall er FORTSATT i flukt akkurat nå, ELLER
+ * et TIDLIGERE forsøk krasjet FØR selve transport-kallet i det hele tatt
+ * ble gjort (eller mellom transport-kallet og `tool_executions`-INSERT-en -
+ * et vindu der den eksterne handlingen FAKTISK kan ha skjedd uten bevis).
+ * Denne klassen kan IKKE skille disse tilfellene fra hverandre - og velger
+ * derfor BEVISST det TRYGGESTE utfallet (avvis, ALDRI et nytt
+ * `ToolGateway.execute()`-kall). Et NÅR et `tool_executions`-bevis FAKTISK
+ * finnes (succeeded/unverified/failed - uansett status) er derimot ALLTID
+ * trygt å la passere automatisk (ToolGateway sin egen idempotency_key-
+ * dedupe garanterer transporten ALDRI re-invokeres) - se
+ * `actOn()` sin egen rekonsilierings-kommentar. En EKTE krasj UTEN noe
+ * bevis krever `releaseStuckActClaim()` - en EKSPLISITT, fail-closed
+ * administrativ transisjon som RE-VERIFISERER (race-fritt, samme
+ * transaksjon) at INGEN bevis har dukket opp FØR den faktisk frigjør
+ * claimen - ALDRI en blind tidsavbrudd-basert auto-frigjøring (den eksterne
+ * effekten kan faktisk allerede ha skjedd).
  */
 export class SituationActInFlightError extends Error {
   constructor(public readonly situationId: string) {
     super(`situation_act_in_flight:${situationId}`);
     this.name = "SituationActInFlightError";
+  }
+}
+
+/**
+ * Kastet av `actOn()` (arkitekt-review runde 2, PR #85, Funn 1): situasjonen
+ * er claimet med SAMME idempotens-nøkkel, MEN et ULIKT operasjons-
+ * fingeravtrykk (`tool_id`/`action`/parametre er ANNERLEDES enn det som
+ * faktisk ble claimet FØRST). Uten denne sjekken kunne et senere kall med
+ * samme nøkkel men et annet tool/action FEILAKTIG bli persistert som
+ * "succeeded" ved å gjenbruke det FØRSTE, ANNERLEDES kallets bekreftede
+ * resultat (se `computeActOperationFingerprint()`).
+ */
+export class SituationActOperationMismatchError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_operation_mismatch:${situationId}`);
+    this.name = "SituationActOperationMismatchError";
+  }
+}
+
+/**
+ * Kastet av `actOn()`/`releaseStuckActClaim()` (Funn 4): den oppgitte
+ * `IdentityContext` sitt EGET tenant/space matcher IKKE situasjonens
+ * eksplisitte `tenantId`/`memorySpace`. Sjekket FØRST, FØR noe som helst
+ * DB- eller gateway-kall - en handling autorisert/utført for ETT tenant/
+ * space skal ALDRI kunne registreres som resultatet av en situasjon i et
+ * ANNET.
+ */
+export class SituationActScopeMismatchError extends Error {
+  constructor(
+    public readonly situationTenantId: string,
+    public readonly situationMemorySpace: string,
+    public readonly identityTenantId: string,
+    public readonly identityMemorySpace: string
+  ) {
+    super(
+      `situation_act_scope_mismatch:situation(${situationTenantId},${situationMemorySpace}):identity(${identityTenantId},${identityMemorySpace})`
+    );
+    this.name = "SituationActScopeMismatchError";
+  }
+}
+
+/**
+ * Kastet av `releaseStuckActClaim()` (Funn 2): et `tool_executions`-bevis
+ * FAKTISK finnes for den claimede nøkkelen - claimen er IKKE "stuck", den
+ * er en normal, allerede-gjenkjennelig `actOn()`-retry (se rekonsiliering i
+ * `actOn()` selv). Frigjøring nektes fail-closed - en manuell frigjøring
+ * her ville vært en STILLE dobbel-utførelses-risiko dersom en fremtidig
+ * retry likevel invoker transporten på nytt uten evidensen intakt.
+ */
+export class SituationActClaimNotReleasableError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_claim_not_releasable:${situationId}`);
+    this.name = "SituationActClaimNotReleasableError";
   }
 }
 
@@ -168,6 +229,32 @@ export function computeTargetStage(priority: SituationPriority, confidence: numb
   if (priority === "low") return "remember";
   if (priority === "high" && confidence !== undefined && confidence >= 0.75) return "suggest";
   return "inform";
+}
+
+/** Rekursiv, nøkkel-sortert kanonisk JSON - samme verdi gir ALLTID samme streng uansett opprinnelig nøkkel-rekkefølge (brukt av `computeActOperationFingerprint()`). */
+function canonicalJsonValue(value: JsonValue): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJsonValue).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalJsonValue((value as Record<string, JsonValue>)[key]!)}`).join(",")}}`;
+}
+
+/**
+ * Funn 1 (arkitekt-review runde 2, PR #85): SHA-256 over HELE den immutable
+ * operasjonen `actOn()` faktisk claimer - `situation_id` (ALDRI kun i selve
+ * nøkkelen, se `actOn()` sin `finalIdempotencyKey`) + `tool_id` + `action` +
+ * kanonisk (nøkkel-sortert, rekursiv) JSON av parametrene. Bundet ATOMISK
+ * sammen med selve claim-UPDATE-en - en retry med SAMME nøkkel men et ULIKT
+ * fingeravtrykk avvises eksplisitt (`SituationActOperationMismatchError`).
+ */
+export function computeActOperationFingerprint(
+  situationId: string,
+  toolId: string,
+  action: string,
+  parameters: Record<string, JsonValue>
+): string {
+  const canonical = `${situationId} ${toolId} ${action} ${canonicalJsonValue(parameters)}`;
+  return createHash("sha256").update(canonical).digest("hex");
 }
 
 export interface ActOnResult {
@@ -469,13 +556,27 @@ export class SituationEngine {
     gateway: ToolGateway,
     identity: IdentityContext
   ): Promise<ActOnResult> {
-    // Funn 3 (arkitekt-review runde 1, PR #85): en STABIL, deterministisk
-    // idempotens-nøkkel BUNDET til situasjonen - en kaller kan fortsatt gi
-    // sin EGEN `request.idempotency_key` (f.eks. for å binde ekstra
-    // kontekst), men `actOn()` GARANTERER ALLTID at NOEN stabil nøkkel
-    // brukes, BÅDE for den varige claim-en under OG for selve
-    // `ToolGateway.execute()`-kallet.
-    const idempotencyKey = request.idempotency_key ?? `situation-act:${situationId}`;
+    // Funn 4 (arkitekt-review runde 2, PR #85): identitetens EGET scope MÅ
+    // matche situasjonens eksplisitte tenant/space FØRST, FØR noe som helst
+    // DB- eller gateway-kall - en handling autorisert/utført for ETT
+    // tenant/space skal ALDRI kunne registreres som resultatet av en
+    // situasjon i et ANNET.
+    if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
+      throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
+    }
+
+    // Funn 3 (arkitekt-review runde 1, PR #85), UTVIDET i runde 2 Funn 1:
+    // `situationId` er ALLTID en del av selve nøkkelen som FAKTISK sendes
+    // til `ToolGateway.execute()` - STRUKTURELT umulig for to ULIKE
+    // situasjoner å dele samme `tool_executions`-rad (og dermed "arve"
+    // hverandres bekreftede resultat), UANSETT hva en kaller måtte gi som
+    // sin egen `request.idempotency_key`.
+    const callerKey = request.idempotency_key ?? `situation-act:${situationId}`;
+    const finalIdempotencyKey = `situation:${situationId}:${callerKey}`;
+    // Funn 1 (arkitekt-review runde 2, PR #85): et komplett, immutabelt
+    // fingeravtrykk av SELVE OPERASJONEN (ikke bare nøkkelen) - se
+    // `computeActOperationFingerprint()`.
+    const operationFingerprint = computeActOperationFingerprint(situationId, request.tool_id, request.action, request.parameters);
 
     const situation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
       const { rows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
@@ -483,6 +584,8 @@ export class SituationEngine {
       return rows[0] as Situation;
     });
 
+    // Billig, IKKE-autoritativ "fail fast" - se domain-pause.ts sitt filhode
+    // Funn 5. Den EKTE gaten er den transaksjonelle DB-sjekken under.
     if (this.domainPauses.isPaused(situation.domain)) {
       throw new SituationDomainPausedError(situation.domain, this.domainPauses.pauseReason(situation.domain));
     }
@@ -492,35 +595,64 @@ export class SituationEngine {
     // NULL` er BEVISST eksklusiv (IKKE "eller samme nøkkel") - KUN ÉN
     // caller, uansett om den er en SANN samtidig konkurrent eller en enkel
     // sekvensiell kaller, vinner NOENSINNE denne claimen for en gitt
-    // situasjon. En SAMTIDIG "taper" (SAMME utledede nøkkel som allerede er
-    // claimet, men IKKE ferdig persistert ennå - `act_result IS NULL`) kan
-    // IKKE skilles fra "et tidligere forsøk krasjet" - `actOn()` velger
-    // derfor det TRYGGESTE utfallet og kaster `SituationActInFlightError`
-    // i STEDET for å risikere et EKTE samtidig dobbelt `execute()`-kall (se
-    // den klassens doc-kommentar). En SEKVENSIELL retry med SAMME nøkkel
-    // ETTER at forrige forsøk faktisk FULLFØRTE persisteringen
-    // (`act_result` er satt) er derimot TRYGG: `ToolGateway.execute()` sin
-    // EGEN idempotency_key-dedupe (tool_executions) er pålitelig for et
-    // SEKVENSIELT kall (den forrige raden er allerede committet), så den
-    // FAKTISKE side-effekten skjer likevel aldri to ganger.
+    // situasjon.
     await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      // Funn 5 (arkitekt-review runde 2, PR #85): AUTORITATIV,
+      // TRANSAKSJONELL domene-pause-sjekk DIREKTE mot
+      // `situation_domain_pauses` - ALDRI kun den synkrone in-memory-cachen
+      // over (prosess-lokal, kan være stille u-initialisert på tvers av
+      // prosesser hvis `restore()` aldri kjøres/feiler). Kjøres INNI SAMME
+      // transaksjon som selve claimen under, slik at det ALDRI finnes et
+      // vindu mellom "sjekket ikke-pauset" og "faktisk claimet".
+      const { rows: pauseRows } = await client.query(
+        `SELECT domain, reason FROM situation_domain_pauses WHERE domain = $1 OR domain = $2`,
+        [situation.domain, ALL_DOMAINS]
+      );
+      if (pauseRows.length > 0) {
+        const rows = pauseRows as Array<{ domain: string; reason: string }>;
+        const chosen = rows.find((r) => r.domain === ALL_DOMAINS) ?? rows[0]!;
+        throw new SituationDomainPausedError(situation.domain, chosen.reason);
+      }
+
       const { rows: claimedRows } = await client.query(
         `UPDATE situations
-         SET act_claimed_at = now(), act_idempotency_key = $3
+         SET act_claimed_at = now(), act_idempotency_key = $3, act_operation_fingerprint = $4
          WHERE tenant_id = $1 AND situation_id = $2 AND act_idempotency_key IS NULL
          RETURNING *`,
-        [tenantId, situationId, idempotencyKey]
+        [tenantId, situationId, finalIdempotencyKey, operationFingerprint]
       );
       if (claimedRows[0]) {
         return;
       }
       const { rows: existingRows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
       const existingSituation = existingRows[0] as Situation;
-      if (existingSituation.act_idempotency_key !== idempotencyKey) {
+      if (existingSituation.act_idempotency_key !== finalIdempotencyKey) {
         throw new SituationActAlreadyClaimedError(situationId);
       }
+      // Funn 1: SAMME nøkkel, men et ULIKT operasjons-fingeravtrykk (et
+      // ANNET tool_id/action/parametersett for samme logiske nøkkel) -
+      // avvist EKSPLISITT, ALDRI gjenbruk av et tidligere, ANNERLEDES
+      // bekreftet resultat.
+      if (existingSituation.act_operation_fingerprint !== operationFingerprint) {
+        throw new SituationActOperationMismatchError(situationId);
+      }
       if (existingSituation.act_result === null) {
-        throw new SituationActInFlightError(situationId);
+        // Funn 2 (arkitekt-review runde 2, PR #85): rekonsiliér mot VARIG
+        // ToolGateway-bevis FØR vi antar en permanent floke - hvis en
+        // `tool_executions`-rad FAKTISK finnes for denne nøkkelen (uansett
+        // status), garanterer ToolGateway sin EGEN idempotency_key-dedupe
+        // at et NYTT `execute()`-kall her ALDRI re-invokerer transporten -
+        // trygt å fortsette. KUN når INGEN bevis finnes i det hele tatt
+        // (ekte samtidig i flukt ELLER en krasj FØR/UNDER selve
+        // transport-kallet) forblir vi fail-closed - se
+        // `SituationActInFlightError` og `releaseStuckActClaim()`.
+        const { rows: evidenceRows } = await client.query(
+          `SELECT 1 FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+          [tenantId, finalIdempotencyKey]
+        );
+        if (!evidenceRows[0]) {
+          throw new SituationActInFlightError(situationId);
+        }
       }
     });
 
@@ -529,7 +661,7 @@ export class SituationEngine {
       tool_id: request.tool_id,
       action: request.action,
       parameters: request.parameters,
-      idempotency_key: idempotencyKey
+      idempotency_key: finalIdempotencyKey
     });
 
     const nextStage: SituationStage = toolResult.ok ? "act" : "escalate";
@@ -557,15 +689,19 @@ export class SituationEngine {
       // sjekkes EKSPLISITT under - et Telegram-kall som returnerer NORMALT
       // med `{ok: false, ...}` (f.eks. policy-nektet av `PolicyGateway`,
       // INGEN kastet feil) skal ALDRI stille tolkes som en vellykket
-      // levering. Den gamle koden stolte KUN på try/catch, som fanger en
-      // KASTET feil men IKKE en normalt returnert `ok: false` - dermed
-      // avanserte stadiet til 'act_notify' selv når Telegram-varselet
-      // faktisk aldri ble bekreftet sendt.
+      // levering. Funn 3 (runde 2): et EGET, deterministisk
+      // `idempotency_key` (avledet av selve ACT-ens nøkkel) gjør DENNE
+      // varsel-utsendelsen SELV idempotent via ToolGateway sin EGEN dedupe
+      // - en `actOn()`-retry ETTER en allerede FULLFØRT ACT (Funn 2 sin
+      // rekonsilieringsvei over) sender derfor ALDRI et nytt, dupliserende
+      // Telegram-varsel - kun DENNE ACT-ens FØRSTE bekreftede levering
+      // teller.
       const notifyResult = await gateway.execute({
         identity,
         tool_id: "telegram",
         action: "notify",
-        parameters: { message: `Jarvis utførte en handling: ${situation.reason} (${request.tool_id}.${request.action})` }
+        parameters: { message: `Jarvis utførte en handling: ${situation.reason} (${request.tool_id}.${request.action})` },
+        idempotency_key: `${finalIdempotencyKey}:notify`
       });
       if (notifyResult.ok) {
         finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -584,5 +720,52 @@ export class SituationEngine {
     }
 
     return { situation: finalSituation, tool_result: toolResult };
+  }
+
+  /**
+   * Eksplisitt, administrativ gjenopprettings-transisjon (Funn 2, arkitekt-
+   * review runde 2, PR #85): løser en situasjon fastlåst av
+   * `SituationActInFlightError` (INGEN `tool_executions`-bevis funnet) NÅR
+   * en operatør/eier EKSPLISITT har verifisert (utenfor denne koden -
+   * typisk direkte mot selve leverandøren) at forsøket faktisk ALDRI
+   * skjedde. Re-verifiserer INNENFOR SAMME transaksjon at INGEN bevis har
+   * dukket opp i mellomtiden (race-fritt mot en samtidig `actOn()`-
+   * rekonsiliering) FØR claimen faktisk frigjøres - ALDRI en blind
+   * tidsavbrudd-basert auto-frigjøring (`SituationActClaimNotReleasableError`
+   * hvis bevis FAKTISK finnes - da er dette IKKE en fastlåst claim, men en
+   * normal `actOn()`-retry-situasjon). Samme scope-sjekk som `actOn()`
+   * (Funn 4) - en kaller kan KUN frigjøre en claim for sitt EGET tenant/space.
+   */
+  async releaseStuckActClaim(tenantId: string, memorySpace: MemorySpace, situationId: string, identity: IdentityContext): Promise<Situation> {
+    if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
+      throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
+    }
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows: existingRows } = await client.query(
+        `SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2 FOR UPDATE`,
+        [tenantId, situationId]
+      );
+      const existing = existingRows[0] as Situation | undefined;
+      if (!existing) throw new SituationNotFoundError(situationId);
+      if (existing.act_idempotency_key === null || existing.act_result !== null) {
+        // Ingenting å frigjøre - enten aldri claimet, eller allerede fullført (normalt eller avvist).
+        return existing;
+      }
+      const { rows: evidenceRows } = await client.query(
+        `SELECT 1 FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [tenantId, existing.act_idempotency_key]
+      );
+      if (evidenceRows[0]) {
+        throw new SituationActClaimNotReleasableError(situationId);
+      }
+      const { rows } = await client.query(
+        `UPDATE situations
+         SET act_claimed_at = NULL, act_idempotency_key = NULL, act_operation_fingerprint = NULL, updated_at = now()
+         WHERE tenant_id = $1 AND situation_id = $2
+         RETURNING *`,
+        [tenantId, situationId]
+      );
+      return rows[0] as Situation;
+    });
   }
 }

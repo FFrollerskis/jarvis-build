@@ -15,6 +15,15 @@ under for det oppdaterte designet og `modules/situations/test/*` for de nye adve
 (kollisjons-/race-/identitets-konflikt-/scope-/claim-/telegram-ok-false-/stille-under-resuppress-/
 restart-overlevelse-tester).
 
+**Arkitekt-review runde 2 (PR #85, HEAD fd2cf3e):** 6 SKJERPEDE/NYE funn på runde 1 sin fiksing - (1)
+selve OPERASJONEN (tool_id/action/parametre) var ikke bundet til claim-nøkkelen + en caller-gitt nøkkel
+kunne (i teorien) kollidere på tvers av to ULIKE situasjoner, (2) `SituationActInFlightError` var en
+PERMANENT floke uten noen gjenopprettingsvei, (3) en `actOn()`-retry kunne sende et DUPLIKAT
+Telegram-varsel, (4) `identity` sitt eget tenant/space ble ALDRI sjekket mot situasjonens eget, (5)
+domene-pause-gaten var FORTSATT kun den synkrone in-memory-cachen (ALDRI en autoritativ DB-sjekk) OG
+`*Durable()`-mutasjoner hadde INGEN autorisasjonssjekk i det hele tatt, (6) `owner_person_id` manglet
+scope-safe FK mot `person_tenants`. ALLE rettet - se §6/§8 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -29,7 +38,7 @@ pakken igjen.
 
 | Data | Tabell | Hva som faktisk lagres |
 |---|---|---|
-| Situasjoner (hendelses-/anomali-tilstand) | `situations` (`056_situations.sql`) | Fri-tekst `domain`, idempotent `detection_key`, tilstandsmaskin-`stage`, `priority`/`confidence`, `reason` (fritekst begrunnelse), valgfri `owner_person_id`, valgfri SCOPE-SAFE peker til `business_open_loops` (`source_open_loop_id` — sammensatt FK mot `(open_loop_id, tenant_id, memory_space_id)`, arkitekt-review runde 1 Funn 2: en `source_open_loop_id` fra et ANNET tenant/space enn situasjonen selv avvises av databasen, race-fritt), tynne ACT-pekere (`act_tool_id`/`act_action`/`act_result`/`act_idempotency_key`/`act_claimed_at` — ALDRI en kopi av `tool_executions` sitt evidence). |
+| Situasjoner (hendelses-/anomali-tilstand) | `situations` (`056_situations.sql`) | Fri-tekst `domain`, idempotent `detection_key`, tilstandsmaskin-`stage`, `priority`/`confidence`, `reason` (fritekst begrunnelse), valgfri SCOPE-SAFE `owner_person_id` (sammensatt FK mot `person_tenants (person_id, tenant_id)`, arkitekt-review runde 2 Funn 6 — en eier fra et ANNET tenant avvises av databasen), valgfri SCOPE-SAFE peker til `business_open_loops` (`source_open_loop_id` — sammensatt FK mot `(open_loop_id, tenant_id, memory_space_id)`, runde 1 Funn 2: en `source_open_loop_id` fra et ANNET tenant/space enn situasjonen selv avvises av databasen, race-fritt), tynne ACT-pekere (`act_tool_id`/`act_action`/`act_result`/`act_idempotency_key`/`act_claimed_at`/`act_operation_fingerprint` — sistnevnte binder claimen til DEN FAKTISKE operasjonen, runde 2 Funn 1 — ALDRI en kopi av `tool_executions` sitt evidence). |
 | Varslingspolicy | `situation_notification_policies` (`056_situations.sql`) | Eier-konfigurert stille-timer-vindu + re-suppress-vindu per (tenant, space). |
 
 **Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN ny anomali-detektor for
@@ -92,40 +101,57 @@ postcondition/audit/evidence/recovery for klasse C/D) og `PolicyGateway.authoriz
 eier-modus eller signert godkjenning — UENDRET). "logs reason/evidence" og "recovery context" er
 derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legger KUN til:
 
-1. **Domene-pause SJEKKES FØRST**, FØR `execute()` i det hele tatt kalles (`SituationDomainPausedError`,
-   fail-closed, INGEN ekstern effekt) — `DomainPauseRegistry` (`modules/situations/src/domain-pause.ts`)
-   er in-memory/deterministisk, samme "instantly"-disiplin som `KillSwitch` (SECURITY_MODEL §8), men
-   domene-navngitt (fri tekst — nye domener trenger INGEN kode-endring for å kunne pauses).
+0. **Identitetens EGET scope MÅ matche situasjonens** (Funn 4, arkitekt-review runde 2) — SJEKKET
+   FØRST, FØR noe DB- eller gateway-kall (`SituationActScopeMismatchError`, zero side-effekt) — en
+   handling autorisert/utført for ETT tenant/space skal ALDRI kunne registreres som resultatet av en
+   situasjon i et ANNET. Samme sjekk i `releaseStuckActClaim()` (se punkt 2 under).
+1. **Domene-pause er en AUTORITATIV, TRANSAKSJONELL DB-sjekk** (Funn 5, arkitekt-review runde 2,
+   SKJERPET fra runde 1): `actOn()` spør `situation_domain_pauses` DIREKTE, INNI SAMME transaksjon som
+   selve claimen (punkt 2 under) — ALDRI kun den synkrone `DomainPauseRegistry.isPaused()`-cachen
+   (prosess-lokal, kan være stille u-initialisert på tvers av prosesser hvis `restore()` aldri
+   kjøres/feiler — runde 1 sin fiks løste KUN omstart-av-SAMME-prosess-varighet, IKKE tvers-av-prosess-
+   sannhet). Den synkrone cachen er NÅ KUN en billig, valgfri "fail fast"-optimalisering FØR
+   transaksjonen i det hele tatt åpnes. `*Durable()`-mutasjoner (`pauseDurable`/`unpauseDurable`/
+   `pauseAllDurable`/`unpauseAllDurable`) krever NÅ et konfigurert `DomainPauseAuthority` PLUSS en
+   matchende `actorPersonId` når et `pool` er gitt (`DomainPauseUnauthorizedError` ellers, fail-closed,
+   INGEN skriving) — runde 1 sin `actorPersonId`-parameter var tidligere et UBEKREFTET fritekstfelt.
    `KillSwitch` sin GLOBALE virkning er UENDRET og virker SAMTIDIG (sjekkes inne i `execute()`).
-   Arkitekt-review runde 1 Funn 6: registeret har nå EN `*Durable()`-variant (Postgres-skrive-gjennom
-   + `restore()`) som gjør en pause OMSTART-OVERLEVENDE (fail-closed oppstartsgjenoppretting) når et
-   `pool` gis ved konstruksjon — den synkrone in-memory-kjernen (selve `isPaused()`-sjekken `actOn()`
-   bruker) er UENDRET "instantly", ingen DB-rundtur på selve sjekken. Ekte SANNTIDS tvers-av-prosess-
-   konsistens (flere SAMTIDIG kjørende worker-prosesser) er FORTSATT en kjent, delt begrensning med
-   `KillSwitch`/`OwnerControls` (begge fortsatt rent in-memory i dag) — IKKE løst isolert her.
-2. **En ATOMISK, VARIG, EKSKLUSIV claim på situasjons-raden FØR `execute()`** (Funn 3, arkitekt-review
-   runde 1): `act_idempotency_key`/`act_claimed_at` (056_situations.sql) sikrer at KUN ÉN `actOn()`-
-   kall noensinne får lov til å faktisk starte det eksterne kallet for en gitt situasjon — en SAMTIDIG
-   "taper" (samme utledede nøkkel, men forrige forsøk IKKE ferdig persistert ennå) avvises DETERMINISTISK
-   (`SituationActInFlightError`, IKKE et nytt `execute()`-kall), mens en SEKVENSIELL retry ETTER en
-   allerede FULLFØRT persistering claimer på nytt trygt (`ToolGateway.execute()` sin egen
-   idempotency_key-dedupe er pålitelig for det sekvensielle tilfellet). `idempotency_key` er nå ALLTID
-   satt (kaller-gitt ELLER deterministisk utledet `situation-act:<situation_id>`) - aldri valgfritt i
-   praksis.
+2. **En ATOMISK, VARIG, EKSKLUSIV claim på situasjons-raden FØR `execute()`**, BUNDET til DEN FAKTISKE
+   OPERASJONEN (Funn 3 runde 1, SKJERPET av Funn 1+2 runde 2): `situation_id` er ALLTID en del av selve
+   nøkkelen som sendes til `ToolGateway.execute()` (`situation:<id>:<nøkkel>`) — STRUKTURELT umulig for
+   to ULIKE situasjoner å dele samme `tool_executions`-rad og "arve" hverandres bekreftede resultat,
+   UANSETT hvilken `idempotency_key` en kaller selv oppgir. `act_operation_fingerprint`
+   (`computeActOperationFingerprint()` — SHA-256 av situation_id+tool_id+action+kanonisk parametre)
+   bindes ATOMISK til claimen — en retry med SAMME nøkkel men et ULIKT tool/action/parametersett
+   avvises (`SituationActOperationMismatchError`), ALDRI gjenbruk av et tidligere, ANNERLEDES bekreftet
+   resultat. En SAMTIDIG "taper" (samme nøkkel+fingeravtrykk, men INGEN `tool_executions`-bevis ennå)
+   avvises DETERMINISTISK (`SituationActInFlightError`) — men denne er IKKE lenger en permanent floke:
+   `actOn()` REKONSILIERER FØRST mot `tool_executions` (Funn 2 runde 2) — finnes DET beviset (uansett
+   status), er en ny `execute()`-kall alltid trygt (ToolGateway sin egen dedupe re-invokerer ALDRI
+   transporten); KUN når INGEN bevis finnes i det hele tatt forblir vi fail-closed, og
+   `SituationEngine.releaseStuckActClaim()` gir en EKSPLISITT, fail-closed administrativ
+   gjenopprettings-transisjon (re-verifiserer race-fritt at INGEN bevis har dukket opp FØR frigjøring —
+   ALDRI en blind tidsavbrudd-basert auto-frigjøring, `SituationActClaimNotReleasableError` hvis bevis
+   FAKTISK finnes).
 3. **ETT Telegram-varsel-kall ETTER en BEKREFTET suksess** (`ok: true`, ALDRI før, ALDRI på en
    nektet/ubekreftet handling — `ToolResult.ok === false` dekker BEGGE, se `gateway.ts` sin egen
    kommentar) — best-effort, en varslingsfeil reverserer ALDRI den allerede skrevne ACT-raden. Arkitekt-
    review runde 1 Funn 4: `notifyResult.ok` sjekkes nå EKSPLISITT (ikke kun implisitt via try/catch) —
    et Telegram-kall som returnerer NORMALT med `{ok: false}` (f.eks. policy-/parameter-nektet, INGEN
-   kastet feil) holder stadiet på `act`, ALDRI et falskt `act_notify`.
+   kastet feil) holder stadiet på `act`, ALDRI et falskt `act_notify`. Runde 2 Funn 3: selve
+   varsel-kallet har NÅ SITT EGET, deterministiske `idempotency_key` (avledet av ACT-ens egen nøkkel) —
+   en `actOn()`-retry ETTER en allerede FULLFØRT ACT+NOTIFY sender derfor ALDRI et duplikat-varsel
+   (ToolGateway sin egen dedupe gjelder nå OGSÅ varselet, ikke bare selve ACT-handlingen).
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
 
 Bevist i `modules/situations/test/act-on.test.ts` (vellykket ACT, policy-nektelse,
-postcondition-svikt, domene-pause FØR ethvert transportkall, pauseAll, unpause, deterministisk
-claim-i-flukt-avvisning, claim-konflikt med ulik nøkkel, krasj-gjenopprettings-retry, Telegram
-ok:false uten kast).
+postcondition-svikt, domene-pause FØR ethvert transportkall via BÅDE in-memory-cache OG en
+direkte-i-databasen-satt pause, pauseAll, unpause, deterministisk claim-i-flukt-avvisning,
+claim-konflikt med ulik nøkkel, operasjons-fingeravtrykk-mismatch, kryss-situasjon-nøkkelkollisjon
+strukturelt umulig, krasj-gjenopprettings-rekonsiliering + `releaseStuckActClaim()`, Telegram
+ok:false uten kast, Telegram-dedupe på retry, scope-mismatch FØR ethvert kall).
 
 ## 7. Retensjon og Q-20-erasure
 

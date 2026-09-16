@@ -6,7 +6,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { ALL_DOMAINS, DomainPauseRegistry } from "../src/domain-pause.ts";
+import { ALL_DOMAINS, DomainPauseRegistry, DomainPauseUnauthorizedError } from "../src/domain-pause.ts";
 
 /**
  * UA-10 akseptansekriterium: "Owner can pause a domain or entire Situation
@@ -70,6 +70,8 @@ describe("C: Funn 6 (arkitekt-review runde 1, PR #85) - Durable-variant, fail-CL
   let adminPool: pg.Pool;
   let appPool: pg.Pool;
   const TENANT = "tenant-sit-domain-pause-durable";
+  const OWNER = "person-owner-pause-test";
+  const authority = { owner_person_id: OWNER };
 
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "jarvis-pg-sit-domain-pause-"));
@@ -98,7 +100,7 @@ describe("C: Funn 6 (arkitekt-review runde 1, PR #85) - Durable-variant, fail-CL
     await stopEmbeddedPostgres?.();
   }, 120_000);
 
-  it("uten et pool gitt til konstruktøren er *Durable()-metodene en ren no-op-persistens (kun in-memory, uendret oppførsel)", async () => {
+  it("uten et pool gitt til konstruktøren er *Durable()-metodene en ren no-op-persistens (kun in-memory, uendret oppførsel, INGEN autorisasjon håndhevet)", async () => {
     const registry = new DomainPauseRegistry();
     await registry.pauseDurable("spend", "test uten pool");
     expect(registry.isPaused("spend")).toBe(true);
@@ -107,12 +109,12 @@ describe("C: Funn 6 (arkitekt-review runde 1, PR #85) - Durable-variant, fail-CL
   });
 
   it("en pause satt via pauseDurable() OVERLEVER en simulert prosess-omstart (en HELT NY DomainPauseRegistry-instans + restore())", async () => {
-    const first = new DomainPauseRegistry(appPool);
-    await first.pauseDurable("infra", "undersoeker en alvorlig hendelse", "person-owner-pause-test");
+    const first = new DomainPauseRegistry(appPool, authority);
+    await first.pauseDurable("infra", "undersoeker en alvorlig hendelse", OWNER);
     expect(first.isPaused("infra")).toBe(true);
 
     // Simulerer en prosess-OMSTART: en HELT NY instans, ingen delt in-memory-tilstand med `first`.
-    const restarted = new DomainPauseRegistry(appPool);
+    const restarted = new DomainPauseRegistry(appPool, authority);
     expect(restarted.isPaused("infra")).toBe(false); // FØR restore() - fersk instans, tom Map.
     await restarted.restore();
     expect(restarted.isPaused("infra")).toBe(true); // ETTER restore() - fail-CLOSED, pausen ble IKKE glemt.
@@ -120,35 +122,51 @@ describe("C: Funn 6 (arkitekt-review runde 1, PR #85) - Durable-variant, fail-CL
   });
 
   it("unpauseDurable() fjerner pausen VARIG - en påfølgende restore() (simulert omstart) gjenoppretter IKKE en fjernet pause", async () => {
-    const first = new DomainPauseRegistry(appPool);
-    await first.pauseDurable("home", "midlertidig");
-    await first.unpauseDurable("home");
+    const first = new DomainPauseRegistry(appPool, authority);
+    await first.pauseDurable("home", "midlertidig", OWNER);
+    await first.unpauseDurable("home", OWNER);
 
-    const restarted = new DomainPauseRegistry(appPool);
+    const restarted = new DomainPauseRegistry(appPool, authority);
     await restarted.restore();
     expect(restarted.isPaused("home")).toBe(false);
   });
 
   it("pauseAllDurable()/unpauseAllDurable() er VARIG - overlever restore() på samme måte som en enkelt-domene-pause", async () => {
-    const first = new DomainPauseRegistry(appPool);
-    await first.pauseAllDurable("owner fryser hele Situation Engine varig");
+    const first = new DomainPauseRegistry(appPool, authority);
+    await first.pauseAllDurable("owner fryser hele Situation Engine varig", OWNER);
 
-    const restarted = new DomainPauseRegistry(appPool);
+    const restarted = new DomainPauseRegistry(appPool, authority);
     await restarted.restore();
     expect(restarted.isPaused("et-helt-vilkaarlig-domene")).toBe(true);
     expect(restarted.pausedDomains()).toContain(ALL_DOMAINS);
 
-    await restarted.unpauseAllDurable();
-    const restartedAgain = new DomainPauseRegistry(appPool);
+    await restarted.unpauseAllDurable(OWNER);
+    const restartedAgain = new DomainPauseRegistry(appPool, authority);
     await restartedAgain.restore();
     expect(restartedAgain.isPaused("et-helt-vilkaarlig-domene")).toBe(false);
   });
 
   it("restore() erstatter HELE in-memory-tilstanden med det som FAKTISK er persistert - en lokal in-memory-only pause (satt via den RENE synkrone pause(), IKKE persistert) overlever IKKE en restore()", async () => {
-    const registry = new DomainPauseRegistry(appPool);
+    const registry = new DomainPauseRegistry(appPool, authority);
     registry.pause("kun-in-memory-aldri-persistert", "test");
     expect(registry.isPaused("kun-in-memory-aldri-persistert")).toBe(true);
     await registry.restore();
     expect(registry.isPaused("kun-in-memory-aldri-persistert")).toBe(false);
+  });
+
+  it("Funn 5 (arkitekt-review runde 2, PR #85): pauseDurable()/unpauseDurable() med et pool KREVER en actorPersonId som MATCHER det konfigurerte authority - avvist (DomainPauseUnauthorizedError), INGEN skriving skjer", async () => {
+    const registry = new DomainPauseRegistry(appPool, authority);
+    await expect(registry.pauseDurable("spend", "uautorisert forsøk", "person-ikke-eier")).rejects.toThrow(DomainPauseUnauthorizedError);
+    await expect(registry.pauseDurable("spend", "uten actor i det hele tatt")).rejects.toThrow(DomainPauseUnauthorizedError);
+    expect(registry.isPaused("spend")).toBe(false);
+
+    const check = new DomainPauseRegistry(appPool, authority);
+    await check.restore();
+    expect(check.isPaused("spend")).toBe(false); // INGENTING persistert av det avviste forsøket.
+
+    // Et pool GITT UTEN et konfigurert `authority` i det hele tatt er OGSÅ avvist (fail-closed) -
+    // et durable-registry uten NOEN autoritetskonfigurasjon skal ALDRI stille tillate mutasjoner.
+    const noAuthorityConfigured = new DomainPauseRegistry(appPool);
+    await expect(noAuthorityConfigured.pauseDurable("spend", "test", "hvem som helst")).rejects.toThrow(DomainPauseUnauthorizedError);
   });
 });

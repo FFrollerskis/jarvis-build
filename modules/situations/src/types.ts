@@ -111,6 +111,7 @@ export interface Situation {
   act_result: SituationActResult | null;
   act_idempotency_key: string | null;
   act_claimed_at: string | null;
+  act_operation_fingerprint: string | null;
   opened_at: string;
   resolved_at: string | null;
   created_at: string;

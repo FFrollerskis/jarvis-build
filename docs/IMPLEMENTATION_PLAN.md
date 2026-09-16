@@ -3970,6 +3970,18 @@ Telegram-varselet; stille-timer sjekkes eksplisitt selv under stadie-non-regresj
 fikk en `*Durable()`-variant (Postgres-skrive-gjennom + `restore()`, fail-closed oppstartsgjenoppretting)
 - se `docs/UA10_SITUATION_ENGINE_DESIGN.md` §4/§6/§7/§8 for det fulle, oppdaterte designet.
 
+**Arkitekt-review runde 2 (PR #85):** 6 skjerpede/nye P1-funn, ALLE rettet - `act_operation_fingerprint`
+binder claimen til DEN FAKTISKE operasjonen (tool/action/kanonisk parametre), OG `situation_id` er nå
+ALLTID en del av selve `ToolGateway`-idempotens-nøkkelen (strukturelt umulig for to situasjoner å dele
+en `tool_executions`-rad); `actOn()` rekonsiliérer en fastlåst claim mot VARIG `tool_executions`-bevis
+FØR den antar en permanent floke, PLUSS en ny, eksplisitt `releaseStuckActClaim()`-administrasjonsvei;
+Telegram-varselet har sitt eget idempotency_key (en retry sender aldri et duplikat-varsel);
+`identity` sitt eget tenant/space sjekkes EKSPLISITT mot situasjonens FØR noe DB-/gateway-kall;
+domene-pause-gaten er nå en AUTORITATIV, TRANSAKSJONELL DB-sjekk (ikke kun den synkrone cachen), og
+`DomainPauseRegistry` sine `*Durable()`-mutasjoner krever nå en autorisert `actorPersonId`; `owner_person_id`
+fikk en scope-safe sammensatt FK mot `person_tenants` - se design-notatet §6/§2 for det fulle, oppdaterte
+designet.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

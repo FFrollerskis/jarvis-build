@@ -38,13 +38,63 @@ import type pg from "pg";
  * klassen). INGEN tenant-scoping/RLS på `situation_domain_pauses` med
  * vilje - en pause er en EIER-/SOVEREIGN-handling, samme globale
  * (ikke tenant-partisjonerte) omfang som `KillSwitch` selv alltid har hatt.
+ *
+ * Arkitekt-review-runde 2 (PR #85) Funn 5: runde 1 sin durable-variant løste
+ * OMSTART-overlevelse, men IKKE (a) autorisasjon av selve MUTASJONEN
+ * (`pauseDurable()`/`unpauseDurable()` skrev tidligere et UBEKREFTET
+ * `actorPersonId` uten noen sjekk i det hele tatt) eller (b) at
+ * `SituationEngine.actOn()` fortsatt KUN konsulterte den synkrone,
+ * prosess-lokale `isPaused()`-cachen for selve sikkerhets-gaten (stille
+ * u-initialisert hvis `restore()` aldri kalles eller feiler = fail-OPEN).
+ * (b) er rettet i `SituationEngine.actOn()` selv: den EKTE, AUTORITATIVE
+ * gaten er nå et TRANSAKSJONELT, direkte spørring mot
+ * `situation_domain_pauses` RETT FØR selve claimen (se service.ts) - denne
+ * klassens synkrone `isPaused()` er nå KUN en billig, valgfri "fail
+ * fast"-optimalisering, ALDRI den eneste sjekken. (a) er rettet her:
+ * `*Durable()`-mutasjoner krever nå et `authority` konfigurert ved
+ * konstruksjon PLUSS en `actorPersonId` som FAKTISK matcher NÅR et `pool`
+ * er gitt (den rene in-memory-varianten uten `pool`, brukt av eksisterende
+ * enhetstester, er UENDRET og krever ingen autorisasjon - persistens er
+ * det som gjør en mutasjon reelt sikkerhetsrelevant på tvers av prosesser).
+ * `situation_domain_pauses` sin brede `GRANT ... TO jarvis_app` er BEVISST
+ * UENDRET - samme repo-brede mønster som `tool_executions`/`audit_events`/
+ * ENHVER annen tabell i dette repoet: autorisasjon håndheves i
+ * APPLIKASJONSKODEN (her, `assertAuthorized()` - samme mønster som
+ * `PolicyGateway.authorize()` for alt annet), ALDRI via smale per-tabell
+ * DB-grants - en egen, separat DB-rolle KUN for denne ene tabellen ville
+ * vært et NYTT, inkonsistent arkitekturmønster resten av repoet ikke bruker
+ * noe sted, ikke en lukking av et unikt gap for akkurat denne tabellen.
  */
 export const ALL_DOMAINS = "*";
+
+/** Sovereign eier-autoritet for `*Durable()`-mutasjoner (Funn 5) - SAMME minimale form som `PolicyGateway` sin egen `authority: { owner_person_id, owner_tenants }`, men uten tenant-scoping (en pause er global, se filhode). */
+export interface DomainPauseAuthority {
+  owner_person_id: string;
+}
+
+/** Kastet av en `*Durable()`-mutasjon (Funn 5) NÅR et `pool` er gitt, men `actorPersonId` mangler, ikke matcher det konfigurerte `authority`, eller `authority` selv ikke er konfigurert - fail-CLOSED, INGEN skriving skjer. */
+export class DomainPauseUnauthorizedError extends Error {
+  constructor(public readonly actorPersonId: string | undefined) {
+    super(`domain_pause_unauthorized:${actorPersonId ?? "none"}`);
+    this.name = "DomainPauseUnauthorizedError";
+  }
+}
 
 export class DomainPauseRegistry {
   private readonly paused = new Map<string, string>();
 
-  constructor(private readonly pool?: pg.Pool) {}
+  constructor(
+    private readonly pool?: pg.Pool,
+    private readonly authority?: DomainPauseAuthority
+  ) {}
+
+  /** Fail-CLOSED: krever et konfigurert `authority` OG en matchende `actorPersonId` NÅR persistens er aktiv (`pool` gitt) - se filhode Funn 5. Ren in-memory-bruk (ingen `pool`) er UENDRET, ingen autorisasjon her. */
+  private assertAuthorized(actorPersonId: string | undefined): void {
+    if (!this.pool) return;
+    if (!actorPersonId || !this.authority || actorPersonId !== this.authority.owner_person_id) {
+      throw new DomainPauseUnauthorizedError(actorPersonId);
+    }
+  }
 
   pause(domain: string, reason: string): void {
     this.paused.set(domain, reason);
@@ -85,6 +135,7 @@ export class DomainPauseRegistry {
   // ---------------------------------------------------------------------
 
   async pauseDurable(domain: string, reason: string, actorPersonId?: string): Promise<void> {
+    this.assertAuthorized(actorPersonId);
     if (this.pool) {
       await this.pool.query(
         `INSERT INTO situation_domain_pauses (domain, reason, paused_by, paused_at)
@@ -96,7 +147,8 @@ export class DomainPauseRegistry {
     this.pause(domain, reason);
   }
 
-  async unpauseDurable(domain: string): Promise<void> {
+  async unpauseDurable(domain: string, actorPersonId?: string): Promise<void> {
+    this.assertAuthorized(actorPersonId);
     if (this.pool) {
       await this.pool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, [domain]);
     }
@@ -107,8 +159,8 @@ export class DomainPauseRegistry {
     return this.pauseDurable(ALL_DOMAINS, reason, actorPersonId);
   }
 
-  async unpauseAllDurable(): Promise<void> {
-    return this.unpauseDurable(ALL_DOMAINS);
+  async unpauseAllDurable(actorPersonId?: string): Promise<void> {
+    return this.unpauseDurable(ALL_DOMAINS, actorPersonId);
   }
 
   /**

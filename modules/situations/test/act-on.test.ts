@@ -11,7 +11,16 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
-import { SituationActAlreadyClaimedError, SituationActInFlightError, SituationDomainPausedError, SituationEngine } from "../src/service.ts";
+import {
+  computeActOperationFingerprint,
+  SituationActAlreadyClaimedError,
+  SituationActClaimNotReleasableError,
+  SituationActInFlightError,
+  SituationActOperationMismatchError,
+  SituationActScopeMismatchError,
+  SituationDomainPausedError,
+  SituationEngine
+} from "../src/service.ts";
 
 /**
  * UA-10 akseptansekriterier: "ACT uses valid owner/delegated authority and
@@ -416,5 +425,211 @@ describe("E: Funn 4 (arkitekt-review runde 1, PR #85) - telegram sin ToolResult.
     expect(result.situation.act_result).toBe("succeeded");
     expect(result.situation.stage).toBe("act"); // IKKE 'act_notify' - telegram-varselet ble ALDRI bekreftet levert.
     expect(telegram.calls).toHaveLength(0); // parameterAuthorizer nektet FØR transporten i det hele tatt ble kalt.
+  });
+});
+
+describe("F: Funn 1 (arkitekt-review runde 2, PR #85) - operasjons-fingeravtrykk binder claimen til DEN FAKTISKE operasjonen", () => {
+  it("SAMME eksplisitte idempotency_key, men et ULIKT parametersett på en retry: avvist (SituationActOperationMismatchError), INGEN nytt transportkall, INGEN feilaktig 'succeeded' for den nye, ANNERLEDES handlingen", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:fingerprint-mismatch", priority: "high", confidence: 0.9, reason: "Fingeravtrykk-mismatch-test"
+    });
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "fp-key" },
+      gateway, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+
+    // Samme nøkkel ("fp-key"), men parameters er nå ANNERLEDES (kunstig - test_actuator sitt
+    // input_schema er tomt, så vi bruker en helt annen action/tool-kombinasjon for å garantere
+    // et ulikt fingeravtrykk: telegram.notify med SAMME "fp-key").
+    await expect(
+      engine.actOn(
+        TENANT_OWNER, "business", situation.situation_id,
+        { tool_id: "telegram", action: "notify", parameters: { message: "et helt annet forsøk" }, idempotency_key: "fp-key" },
+        gateway, ownerIdentity
+      )
+    ).rejects.toThrow(SituationActOperationMismatchError);
+
+    // Situasjonen sitt lagrede resultat er FORTSATT den OPPRINNELIGE, bekreftede 'flip'-handlingen - ALDRI overskrevet av det avviste forsøket.
+    const reloaded = await engine.getQueue(TENANT_OWNER, "business", { statusOpenOnly: false });
+    const row = reloaded.find((s) => s.situation_id === situation.situation_id);
+    expect(row?.act_tool_id).toBe("test_actuator");
+    expect(row?.act_action).toBe("flip");
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+  });
+
+  it("TO ULIKE situasjoner som (uavhengig av hverandre) bruker SAMME eksplisitte idempotency_key kolliderer IKKE - hver situasjon får sin EGEN, faktiske eksekvering (situation_id er ALLTID en del av selve nøkkelen som sendes til ToolGateway)", async () => {
+    const a = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:cross-sit-a", priority: "high", confidence: 0.9, reason: "Kryss-situasjon A"
+    });
+    const b = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:cross-sit-b", priority: "high", confidence: 0.9, reason: "Kryss-situasjon B"
+    });
+
+    const sharedKey = "caller-chosen-shared-key";
+    const resultA = await engine.actOn(
+      TENANT_OWNER, "business", a.situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: sharedKey },
+      gateway, ownerIdentity
+    );
+    const resultB = await engine.actOn(
+      TENANT_OWNER, "business", b.situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: sharedKey },
+      gateway, ownerIdentity
+    );
+
+    expect(resultA.tool_result.ok).toBe(true);
+    expect(resultB.tool_result.ok).toBe(true);
+    // Situasjon B sitt resultat er IKKE en dedupliserende kopi av A sitt - hver situasjon fikk sin EGEN, faktiske 'flip'-mutasjon.
+    if (resultB.tool_result.ok) {
+      expect(resultB.tool_result.deduplicated).toBe(false);
+    }
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(2);
+  });
+});
+
+describe("G: Funn 2 (arkitekt-review runde 2, PR #85) - krasj-gjenopprettings-rekonsiliering mot tool_executions + eksplisitt releaseStuckActClaim()", () => {
+  it("en claim med INGEN tool_executions-bevis avvises (SituationActInFlightError); releaseStuckActClaim() frigjør den trygt (INGEN bevis funnet) og en påfølgende actOn() lykkes normalt", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:stuck-claim", priority: "high", confidence: 0.9, reason: "Simulert krasj FØR transportkall"
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:crash-sim-key`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    // Simulerer en PROSESS-KRASJ rett ETTER claimen, men FØR noe transportkall i det hele tatt ble gjort - INGEN tool_executions-rad finnes for nøkkelen.
+    await adminPool.query(
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+
+    await expect(
+      engine.actOn(TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "crash-sim-key" }, gateway, ownerIdentity)
+    ).rejects.toThrow(SituationActInFlightError);
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0); // ALDRI et nytt transportkall for en floke uten bevis.
+
+    const released = await engine.releaseStuckActClaim(TENANT_OWNER, "business", situationId, ownerIdentity);
+    expect(released.act_idempotency_key).toBeNull();
+    expect(released.act_claimed_at).toBeNull();
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true);
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+  });
+
+  it("en claim med et FAKTISK tool_executions-bevis (act_result likevel NULL - krasj MELLOM transportkallet og sluttpersisteringen) rekonsilieres AUTOMATISK - INGEN nytt transportkall, releaseStuckActClaim() nekter (SituationActClaimNotReleasableError)", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:evidence-recovery", priority: "high", confidence: 0.9, reason: "Simulert krasj MELLOM execute() og persistering"
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:evidence-sim-key`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    await adminPool.query(
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+    // releaseStuckActClaim() MÅ nekte NÅR et faktisk bevis finnes - dette er IKKE en fastlåst claim.
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-simulated-evidence", "succeeded"]
+    );
+    await expect(engine.releaseStuckActClaim(TENANT_OWNER, "business", situationId, ownerIdentity)).rejects.toThrow(SituationActClaimNotReleasableError);
+
+    const recovered = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "evidence-sim-key" }, gateway, ownerIdentity
+    );
+    expect(recovered.tool_result.ok).toBe(true);
+    if (recovered.tool_result.ok) {
+      expect(recovered.tool_result.deduplicated).toBe(true);
+    }
+    // 'flip' ble ALDRI faktisk invokert her - kun preflight/readback (Q-34) kan ha kalt "read_state", ALDRI "flip" på nytt.
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0);
+    expect(recovered.situation.act_result).toBe("succeeded");
+  });
+
+  it("releaseStuckActClaim() håndhever SAMME scope-sjekk som actOn() (Funn 4) - en kaller fra et ANNET tenant/space avvises (SituationActScopeMismatchError)", async () => {
+    await expect(
+      engine.releaseStuckActClaim(TENANT_OWNER, "business", "sit-does-not-matter", unauthorizedIdentity)
+    ).rejects.toThrow(SituationActScopeMismatchError);
+  });
+});
+
+describe("H: Funn 3 (arkitekt-review runde 2, PR #85) - Telegram-varselet er SELV idempotent, en actOn()-retry sender ALDRI et duplikat-varsel", () => {
+  it("en actOn()-retry med SAMME idempotency_key ETTER en allerede FULLFØRT ACT+NOTIFY sender IKKE et nytt Telegram-varsel", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:notify-dedupe", priority: "high", confidence: 0.9, reason: "Notify-dedupe-test"
+    });
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "notify-dedupe-key" },
+      gateway, ownerIdentity
+    );
+    expect(first.situation.stage).toBe("act_notify");
+    expect(telegram.calls).toHaveLength(1);
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "notify-dedupe-key" },
+      gateway, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true);
+    expect(retry.situation.stage).toBe("act_notify");
+    // INGEN nytt Telegram-varsel - selve varsel-kallet er NÅ SELV idempotent (eget idempotency_key).
+    expect(telegram.calls).toHaveLength(1);
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+  });
+});
+
+describe("I: Funn 4 (arkitekt-review runde 2, PR #85) - identitetens EGET scope MÅ matche situasjonens tenant/space, FØR noe DB-/gateway-kall", () => {
+  it("identity.tenant_id ulikt det oppgitte tenantId avvises (SituationActScopeMismatchError) - FØR situasjonen i det hele tatt slås opp (en ikke-eksisterende situation_id kaster IKKE SituationNotFoundError her)", async () => {
+    await expect(
+      engine.actOn(TENANT_OWNER, "business", "sit-does-not-exist", { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, unauthorizedIdentity)
+    ).rejects.toThrow(SituationActScopeMismatchError);
+  });
+
+  it("identity.memory_space_id ulikt det oppgitte memorySpace avvises (SituationActScopeMismatchError)", async () => {
+    await expect(
+      engine.actOn(TENANT_OWNER, "personal", "sit-does-not-exist", { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+    ).rejects.toThrow(SituationActScopeMismatchError);
+  });
+});
+
+describe("J: Funn 5 (arkitekt-review runde 2, PR #85) - AUTORITATIV, TRANSAKSJONELL domene-pause-sjekk (ALDRI kun den synkrone in-memory-cachen)", () => {
+  it("en pause satt DIREKTE i situation_domain_pauses (aldri gjennom DENNE prosessens in-memory DomainPauseRegistry-instans) blokkerer actOn() likevel - beviser at den EKTE gaten er DB-en, ikke den lokale cachen", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "cross-process-domain", detection_key: "infra:actuator:cross-process-pause", priority: "high", confidence: 0.9, reason: "Skal blokkeres av en pause DENNE prosessen aldri fikk vite om lokalt"
+    });
+    // `domainPauses` (DENNE testfilens in-memory-registry) vet INGENTING om dette - simulerer en ANNEN worker-prosess som pauset domenet direkte i databasen.
+    expect(domainPauses.isPaused("cross-process-domain")).toBe(false);
+    await adminPool.query(
+      `INSERT INTO situation_domain_pauses (domain, reason) VALUES ($1, $2)`,
+      ["cross-process-domain", "pauset av en annen (simulert) prosess"]
+    );
+    try {
+      await expect(
+        engine.actOn(TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+      ).rejects.toThrow(SituationDomainPausedError);
+      expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0);
+    } finally {
+      await adminPool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, ["cross-process-domain"]);
+    }
+  });
+
+  it("en ALL_DOMAINS-pause satt direkte i databasen blokkerer ETHVERT domene, selv et som aldri ble eksplisitt navngitt", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "et-helt-nytt-domene", detection_key: "infra:actuator:cross-process-pause-all", priority: "high", confidence: 0.9, reason: "Skal blokkeres av en global pause"
+    });
+    await adminPool.query(`INSERT INTO situation_domain_pauses (domain, reason) VALUES ($1, $2)`, ["*", "global pause fra en annen prosess"]);
+    try {
+      await expect(
+        engine.actOn(TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+      ).rejects.toThrow(SituationDomainPausedError);
+    } finally {
+      await adminPool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, ["*"]);
+    }
   });
 });
