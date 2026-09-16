@@ -58,6 +58,18 @@ i-flukt-tilstand er mulig her, så dette er ALLTID enten en trygg førstegangs-u
 dedupliserende bekreftelse - ALDRI en risiko for dobbel levering, og ALDRI en regresjon siden stadiet
 KUN kan AVANSERE til `act_notify` på suksess, ALDRI regressere på en avvisning). Se §6 under.
 
+**Arkitekt-review runde 6 (PR #85, HEAD f2ba9a6):** 1 funn - runde 5 sin varsel-rekonsiliering kalte
+`gateway.execute(telegram.notify)` PÅ NYTT for å avgjøre om varselet allerede var levert - NØYAKTIG
+samme feilmønster runde 4 rettet for selve ACT-en, bare for varselet i stedet: `ToolGateway.execute()`
+sin idempotency_key-dedupe er IKKE dens FØRSTE port for VARSELET heller. Et FAKTISK bekreftet
+varsel-bevis (krasjet FØR selve `stage='act_notify'`-oppdateringen) kunne derfor ALDRI bli lest hvis en
+SENERE, UBESLEKTET port-endring (policy, credential, frozen connector, rate limit) fikk et NYTT
+`execute()`-kall til å returnere `ok:false` FØR dedupe i det hele tatt ble konsultert - situasjonen
+ville sittet fastlåst på `act` for alltid, PRESIS den floken runde 5 skulle løse. Rettet: varsel-
+nøkkelens EGET `tool_executions`-bevis leses DIREKTE FØRST, ALDRI via et nytt, muterbart
+`execute()`-kall - KUN når INGEN bevis finnes i det hele tatt (en EKTE førstegangs-situasjon, garantert
+av advisory-låsen) er et NYTT `execute()`-kall trygt og nødvendig. Se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -206,7 +218,14 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    (advisory-låsen fra Funn 1+2 runde 3 garanterer dette ALLTID er en trygg førstegangs-utsendelse
    ELLER en trygg, dedupliserende bekreftelse), og AVANSERER (selv-helbreder) til `act_notify` KUN på
    en faktisk bekreftet suksess - ALDRI en regresjon, siden en avvisning her bare lar `stage` forbli
-   uendret på `act`.
+   uendret på `act`. Funn 1 (arkitekt-review runde 6) skjerpet DENNE rekonsilieringen videre: selve
+   varsel-`execute()`-kallet MÅ IKKE gjøres FØR varsel-nøkkelens EGNE `tool_executions`-bevis er lest
+   DIREKTE - et NYTT `execute()`-kall ville OGSÅ gått gjennom telegram-verktøyets muterbare
+   policy-/rate-limit-/frozen-/credential-port FØR dedupe, og kunne dermed ALDRI lest et FAKTISK
+   bekreftet varsel-bevis hvis EN AV DE portene nå avviser et fersk forsøk. `terminal_replay` leser nå
+   beviset DIREKTE (`succeeded` → avanser stille til `act_notify`, ZERO transportkall; et annet avgjort
+   utfall → forbli ærlig på `act`, ZERO transportkall) - et NYTT `execute()`-kall skjer KUN når INGEN
+   bevis finnes i det hele tatt.
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
@@ -224,11 +243,14 @@ vente og kan ALDRI observere et falskt "ingen bevis" mens forsøket fortsatt på
 adversarielle tester (Funn 1, runde 4): en retry av en ALLEREDE fullført ACT etter at credentialen ble
 tilbakekalt, connectoren ble fryst, eller rate-limiten ble oppbrukt returnerer ALLE det UENDREDE
 opprinnelige resultatet med ZERO nye transportkall, og en retry etter et allerede levert ACT+NOTIFY med
-Telegram-credentialen tilbakekalt beholder `act_notify` UENDRET - ALDRI nedgradert til `act`; OG to nye
+Telegram-credentialen tilbakekalt beholder `act_notify` UENDRET - ALDRI nedgradert til `act`; to
 krasj-grense-tester (Funn 1, runde 5): en retry etter en krasj MELLOM ACT-persistering og selve
 varsel-forsøket forsøker varselet FOR FØRSTE gang og avanserer til `act_notify`; en retry etter en
 krasj MELLOM et bekreftet varsel-bevis og selve `stage`-oppdateringen selv-helbreder til `act_notify`
-UTEN noe nytt transportkall).
+UTEN noe nytt transportkall; OG fire nye tester (Funn 1, runde 6) som beviser DEN SAMME
+selv-helbredingen selv når en FERSK varsel-policy-nektelse, en tilbakekalt Telegram-credential, en
+fryst connector, ELLER en oppbrukt rate limit ville avvist et NYTT forsøk - `stage` avanserer likevel
+korrekt til `act_notify`, ZERO nye transportkall i alle fire).
 
 ## 7. Retensjon og Q-20-erasure
 

@@ -998,3 +998,136 @@ describe("M: Funn 1 (arkitekt-review runde 5, PR #85) - terminal_replay MÅ reko
     expect(telegram.calls).toHaveLength(0); // INGEN nytt transportkall - ToolGateway sin egen dedupe gjenkjente det allerede eksisterende beviset.
   });
 });
+
+describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering leser tool_executions-beviset DIREKTE, FØR ToolGateway sin muterbare autorisasjons-/credential-/rate-limit-pipeline i det hele tatt vurderes", () => {
+  async function setupCrashedAfterNotifyEvidence(domain: string, detectionKey: string, keySuffix: string): Promise<string> {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain, detection_key: detectionKey, priority: "high", confidence: 0.9, reason: `Krasj-etter-bekreftet-varsel-bevis-${keySuffix}`
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:${keySuffix}`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    await adminPool.query(
+      `UPDATE situations
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+           act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
+       WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId]
+    );
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", `act-sim-${keySuffix}`, "succeeded"]
+    );
+    // Varselet BLE FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen) - prosessen krasjet FØR stage='act_notify' ble persistert.
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, `${finalKey}:notify`, "telegram", "notify", `tg-sim-${keySuffix}`, "succeeded"]
+    );
+    return situationId;
+  }
+
+  it("selv-helbreder til 'act_notify' selv når en FERSK varsel-policy-nektelse (parameterAuthorizer) ville avvist et NYTT forsøk - ZERO nye transportkall", async () => {
+    const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-policy-denied", "reconcile-policy-key");
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram,
+      parameterAuthorizer: () => ({ allowed: false, reason: "policy_now_denies_this" })
+    });
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-policy-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(0);
+  });
+
+  it("selv-helbreder til 'act_notify' selv når Telegram-credentialen er TILBAKEKALT - ZERO nye transportkall", async () => {
+    const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-credential-revoked", "reconcile-cred-key");
+    const controls = new OwnerControls(new KillSwitch());
+    controls.revokeCredential("TEST_TELEGRAM_TOKEN");
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets, controls);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-cred-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(0);
+  });
+
+  it("selv-helbreder til 'act_notify' selv når Telegram-connectoren er FRYST - ZERO nye transportkall", async () => {
+    const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-connector-frozen", "reconcile-frozen-key");
+    const controls = new OwnerControls(new KillSwitch());
+    controls.freezeConnector("telegram");
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets, controls);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-frozen-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(0);
+  });
+
+  it("selv-helbreder til 'act_notify' selv når Telegram-varselets rate limit er OPPBRUKT (rate_limit_per_minute: 0) - ZERO nye transportkall", async () => {
+    const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-rate-limited", "reconcile-rate-key");
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 0,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "reconcile-rate-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(0);
+  });
+});

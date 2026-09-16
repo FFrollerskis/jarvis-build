@@ -753,19 +753,51 @@ export class SituationEngine {
           return { situation: existingSituation, tool_result: replayed };
         }
         // ACT bekreftet, MEN varsel-tilstanden er UAVGJORT (stage fortsatt
-        // 'act'). Advisory-låsen (Funn 1+2, runde 3) GARANTERER at INGEN
-        // samtidig i-flukt-tilstand er mulig her - et TIDLIGERE forsøk for
-        // SAMME domene er alltid HELT ferdig (uansett utfall) FØR denne
-        // claimen i det hele tatt kan fortsette forbi lås-tildelingen. Et
-        // varsel-kall NÅ, med SAMME deterministiske nøkkel, er derfor
-        // ALLTID enten en trygg FØRSTEGANGS-utsendelse (INGEN
-        // `tool_executions`-bevis ennå) eller en trygg, dedupliserende
-        // bekreftelse/gjentakelse av et TIDLIGERE avgjort utfall
-        // (ToolGateway sin EGEN idempotency_key-dedupe) - ALDRI en risiko
-        // for dobbel levering, og ALDRI en regresjon: stadiet forblir 'act'
-        // (uendret, ærlig) på et nytt avslag, og AVANSERER KUN til
-        // 'act_notify' på en faktisk bekreftet suksess.
+        // 'act'). Funn 1 (arkitekt-review runde 6, PR #85): runde 5 sin
+        // fiks kalte `gateway.execute()` for varselet PÅ NYTT her -
+        // NØYAKTIG samme feilmønster som runde 4 rettet for selve ACT-en.
+        // `ToolGateway.execute()` sin idempotency_key-dedupe er IKKE dens
+        // FØRSTE port for VARSELET heller - policy/rate-limit/frozen/
+        // revoked/credential/preflight kjører ALLE FØR dedupe-oppslaget.
+        // Et varsel-bevis som FAKTISK viser 'succeeded' (krasjet FØR selve
+        // stage-oppdateringen) kunne derfor ALDRI bli lest hvis en SENERE,
+        // UBESLEKTET port-endring (strammet policy, tilbakekalt
+        // credential, fryst connector, oppbrukt rate limit) fikk et NYTT
+        // `execute()`-kall til å returnere `ok:false` FØR dedupe i det
+        // hele tatt ble konsultert - situasjonen ville sittet FASTLÅST på
+        // 'act' for alltid, presis den floken runde 5 skulle løse.
+        //
+        // Rettet: les varsel-nøkkelens EGET `tool_executions`-bevis DIREKTE
+        // FØRST - ALDRI via et nytt, muterbart `execute()`-kall - FØR
+        // ToolGateway sin mutable autorisasjons-/credential-/rate-limit-
+        // pipeline i det hele tatt vurderes. KUN når INGEN bevis finnes i
+        // det hele tatt (en EKTE førstegangs-situasjon - advisory-låsen fra
+        // runde 3 Funn 1+2 GARANTERER at dette ALDRI kan være en samtidig
+        // i-flukt-tilstand) er et NYTT `execute()`-kall trygt og
+        // nødvendig.
+        const notifyKey = `${finalIdempotencyKey}:notify`;
         const replayedToolResult: ToolResult = { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true };
+        const notifyEvidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+          const { rows } = await client.query(`SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`, [tenantId, notifyKey]);
+          return rows[0] as { status: string } | undefined;
+        });
+        if (notifyEvidence?.status === "succeeded") {
+          // Bekreftet levert - stille selv-helbred stage-oppdateringen som krasjet, UTEN noe transportkall.
+          const healed = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+            const { rows } = await client.query(
+              `UPDATE situations SET stage = 'act_notify', updated_at = now() WHERE tenant_id = $1 AND situation_id = $2 RETURNING *`,
+              [tenantId, situationId]
+            );
+            return rows[0] as Situation;
+          });
+          return { situation: healed, tool_result: replayedToolResult };
+        }
+        if (notifyEvidence) {
+          // Et TIDLIGERE varsel-forsøk er ALLEREDE avgjort som IKKE bekreftet (unverified/failed) -
+          // stadiet står ALLEREDE ærlig på 'act'. ALDRI et nytt, muterbart forsøk på et allerede avgjort utfall.
+          return { situation: existingSituation, tool_result: replayedToolResult };
+        }
+        // INGEN bevis i det hele tatt - en EKTE førstegangs-situasjon (advisory-låsen garanterer dette).
         let finalSituation = existingSituation;
         try {
           const notifyResult = await gateway.execute({
@@ -773,7 +805,7 @@ export class SituationEngine {
             tool_id: "telegram",
             action: "notify",
             parameters: { message: `Jarvis utførte en handling: ${existingSituation.reason} (${request.tool_id}.${request.action})` },
-            idempotency_key: `${finalIdempotencyKey}:notify`
+            idempotency_key: notifyKey
           });
           if (notifyResult.ok) {
             finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {

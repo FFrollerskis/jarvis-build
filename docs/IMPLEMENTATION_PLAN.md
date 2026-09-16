@@ -4008,6 +4008,12 @@ bekreftet varsel-bevis og `stage`-oppdateringen, lot situasjonen sitte fastlåst
 varsel-`execute()` på nytt med samme deterministiske nøkkel (advisory-låsen garanterer dette alltid er
 trygt) - avanserer til `act_notify` kun på bekreftet suksess, aldri en regresjon. Se design-notatet §6.
 
+**Arkitekt-review runde 6 (PR #85):** 1 funn, rettet - runde 5 sin varsel-rekonsiliering kalte
+`gateway.execute()` for varselet på nytt, som gjentok NØYAKTIG samme feilmønster runde 4 rettet for
+selve ACT-en (telegram sin dedupe er heller ikke dens første port). Varsel-nøkkelens eget
+`tool_executions`-bevis leses nå DIREKTE FØRST - et nytt `execute()`-kall skjer KUN når INGEN bevis
+finnes i det hele tatt. Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-
