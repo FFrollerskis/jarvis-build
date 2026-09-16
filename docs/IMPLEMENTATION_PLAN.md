@@ -3993,6 +3993,14 @@ en pause-mutasjon og et `actOn()`-forsøk for samme domene kan derfor ALDRI kjø
 `releaseStuckActClaim()` krever nå også et konfigurert `SituationRecoveryAuthority` - se design-notatet
 §6 for det fulle, oppdaterte designet.
 
+**Arkitekt-review runde 4 (PR #85):** 1 funn, rettet - `actOn()` kalte fortsatt `gateway.execute()` på
+nytt for en allerede terminal/bevis-bekreftet claim; siden ToolGateway sin idempotency-dedupe IKKE er
+dens første port (policy/rate-limit/frozen/revoked/credential/preflight kjører først), kunne en retry
+feilaktig overskrive et bekreftet resultat med en senere, ubeslektet avvisning. `actOn()` short-
+circuiter nå enhver terminal/bevis-bekreftet claim direkte fra persistert tilstand/`tool_executions`
+(pluss `gateway.get()` for `output_trust` - et rent oppslag, aldri en autorisasjon) - `gateway.execute()`
+kalles ALDRI for en replay. Se design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

@@ -287,6 +287,20 @@ export interface ActOnResult {
   tool_result: ToolResult;
 }
 
+/**
+ * Internt utfall av claim-transaksjonen i `actOn()` (arkitekt-review runde
+ * 4, PR #85, Funn 1): skiller en HELT NY claim fra de TO replay-tilfellene
+ * - BEGGE MÅ unngå et nytt `gateway.execute()`-kall (se `actOn()` sin egen
+ * kommentar for HELE begrunnelsen: ToolGateway sin idempotency_key-dedupe
+ * er IKKE dens FØRSTE port, så et nytt kall kan returnere `ok:false` av en
+ * grunn som er HELT UBESLEKTET med selve operasjonen og dermed feilaktig
+ * overskrive et allerede bekreftet utfall).
+ */
+type ClaimOutcome =
+  | { kind: "fresh" }
+  | { kind: "terminal_replay"; situation: Situation }
+  | { kind: "evidence_replay"; status: string; externalId: string | null; reason: string | null };
+
 export class SituationEngine {
   constructor(
     private readonly pool: pg.Pool,
@@ -637,7 +651,7 @@ export class SituationEngine {
       // caller, uansett om den er en SANN samtidig konkurrent eller en
       // enkel sekvensiell kaller, vinner NOENSINNE denne claimen for en
       // gitt situasjon.
-      await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const claimOutcome = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client): Promise<ClaimOutcome> => {
         // Funn 5 (runde 2), NÅ race-fri via advisory-låsen over: DIREKTE
         // sjekk mot `situation_domain_pauses` - ALDRI kun den synkrone
         // in-memory-cachen (prosess-lokal, kan være stille u-initialisert
@@ -660,7 +674,7 @@ export class SituationEngine {
           [tenantId, situationId, finalIdempotencyKey, operationFingerprint]
         );
         if (claimedRows[0]) {
-          return;
+          return { kind: "fresh" };
         }
         const { rows: existingRows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
         const existingSituation = existingRows[0] as Situation;
@@ -674,34 +688,85 @@ export class SituationEngine {
         if (existingSituation.act_operation_fingerprint !== operationFingerprint) {
           throw new SituationActOperationMismatchError(situationId);
         }
-        if (existingSituation.act_result === null) {
-          // Funn 2 (runde 2): rekonsiliér mot VARIG ToolGateway-bevis FØR
-          // vi antar en permanent floke - hvis en `tool_executions`-rad
-          // FAKTISK finnes for denne nøkkelen (uansett status), garanterer
-          // ToolGateway sin EGEN idempotency_key-dedupe at et NYTT
-          // `execute()`-kall her ALDRI re-invokerer transporten - trygt å
-          // fortsette. KUN når INGEN bevis finnes i det hele tatt (ekte
-          // samtidig i flukt ELLER en krasj FØR/UNDER selve transport-
-          // kallet) forblir vi fail-closed - se `SituationActInFlightError`
-          // og `releaseStuckActClaim()` (som NÅ OGSÅ tar SAMME advisory-lås
-          // FØR den rekonsiliérer, se den metodens egen kommentar).
-          const { rows: evidenceRows } = await client.query(
-            `SELECT 1 FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
-            [tenantId, finalIdempotencyKey]
-          );
-          if (!evidenceRows[0]) {
-            throw new SituationActInFlightError(situationId);
-          }
+        // Funn 1 (arkitekt-review runde 4, PR #85): en ALLEREDE TERMINAL
+        // situasjon (act_result satt) MÅ ALDRI føre til et nytt
+        // `gateway.execute()`-kall - ToolGateway sin egen idempotency_key-
+        // dedupe-sjekk er IKKE dens FØRSTE port: policy/parameter-
+        // autorisasjon, rate limit, frozen/revoked, credential-oppslag og
+        // klasse C/D-preflight kjører ALLE FØR dedupe-oppslaget. En SENERE,
+        // UBESLEKTET tilstandsendring (rotert credential, strammet policy,
+        // fryst connector, oppbrukt rate limit) kunne derfor få et NYTT
+        // `execute()`-kall til å returnere `ok:false` FØR dedupe i det hele
+        // tatt ble konsultert - og `actOn()` ville da STILLE OVERSKREVET en
+        // ALLEREDE bekreftet suksess med en avvisning, SELV OM INGEN ny
+        // ekstern operasjon fant sted. Terminal tilstand MÅ være monoton -
+        // se `terminal_replay`-grenen under, som ALDRI kaller
+        // `gateway.execute()` igjen og ALDRI skriver til situasjonen.
+        if (existingSituation.act_result !== null) {
+          return { kind: "terminal_replay", situation: existingSituation };
         }
+        // Funn 2 (runde 2): rekonsiliér mot VARIG ToolGateway-bevis FØR vi
+        // antar en permanent floke - hvis en `tool_executions`-rad FAKTISK
+        // finnes for denne nøkkelen (uansett status), er utfallet ALLEREDE
+        // avgjort av EN TIDLIGERE, EKTE transport-invokering - Funn 1
+        // (runde 4) gjelder OGSÅ her: vi leser DET avgjorte utfallet
+        // DIREKTE fra beviset (se `evidence_replay`-grenen under) i stedet
+        // for å risikere et NYTT `gateway.execute()`-kall som kunne
+        // returnere `ok:false` av en UBESLEKTET, SENERE grunn og dermed
+        // feilaktig persistere en avvisning for en handling som FAKTISK
+        // lyktes. KUN når INGEN bevis finnes i det hele tatt (ekte samtidig
+        // i flukt ELLER en krasj FØR/UNDER selve transport-kallet) forblir
+        // vi fail-closed - se `SituationActInFlightError` og
+        // `releaseStuckActClaim()`.
+        const { rows: evidenceRows } = await client.query(
+          `SELECT status, external_id, postcondition_reason FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+          [tenantId, finalIdempotencyKey]
+        );
+        const evidence = evidenceRows[0] as { status: string; external_id: string | null; postcondition_reason: string | null } | undefined;
+        if (!evidence) {
+          throw new SituationActInFlightError(situationId);
+        }
+        return { kind: "evidence_replay", status: evidence.status, externalId: evidence.external_id, reason: evidence.postcondition_reason };
       });
 
-      const toolResult = await gateway.execute({
-        identity,
-        tool_id: request.tool_id,
-        action: request.action,
-        parameters: request.parameters,
-        idempotency_key: finalIdempotencyKey
-      });
+      // Funn 1 (arkitekt-review runde 4, PR #85): en ALLEREDE TERMINAL
+      // situasjon returneres UENDRET - INGEN nytt `gateway.execute()`-kall,
+      // INGEN ny skriving, INGEN ny varsel-utsendelse (den FØRSTE bekreftede
+      // leveringen, om noen, har allerede skjedd - se `claimOutcome` sin
+      // egen doc-kommentar over for HELE begrunnelsen).
+      if (claimOutcome.kind === "terminal_replay") {
+        const definition = gateway.get(request.tool_id, request.action);
+        const replayed: ToolResult =
+          claimOutcome.situation.act_result === "succeeded"
+            ? { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true }
+            : { ok: false, reason: claimOutcome.situation.reason };
+        return { situation: claimOutcome.situation, tool_result: replayed };
+      }
+
+      let toolResult: ToolResult;
+      if (claimOutcome.kind === "evidence_replay") {
+        // Utfallet er ALLEREDE avgjort av et TIDLIGERE, EKTE transport-kall
+        // (se `claimOutcome` sin doc-kommentar) - leses DIREKTE fra beviset,
+        // ALDRI via et nytt `gateway.execute()`-kall.
+        const definition = gateway.get(request.tool_id, request.action);
+        toolResult =
+          claimOutcome.status === "succeeded"
+            ? {
+                ok: true,
+                ...(claimOutcome.externalId !== null ? { external_id: claimOutcome.externalId } : {}),
+                output_trust: definition?.output_trust ?? "internal",
+                deduplicated: true
+              }
+            : { ok: false, reason: claimOutcome.reason ?? "postcondition_unverified:replayed" };
+      } else {
+        toolResult = await gateway.execute({
+          identity,
+          tool_id: request.tool_id,
+          action: request.action,
+          parameters: request.parameters,
+          idempotency_key: finalIdempotencyKey
+        });
+      }
 
       const nextStage: SituationStage = toolResult.ok ? "act" : "escalate";
       const reasonUpdate = toolResult.ok ? situation.reason : `${situation.reason} | act_denied: ${toolResult.reason}`;

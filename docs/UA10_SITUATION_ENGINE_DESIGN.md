@@ -33,6 +33,19 @@ selve `execute()`-kallet (en `FOR UPDATE`-lås på `situations` fenser ikke Tool
 `tool_executions` FØRST ETTER at transporten returnerer). Begge lukket med EKTE, tvers-av-prosess
 Postgres advisory locks (`modules/situations/src/advisory-lock.ts`) - se §6 under.
 
+**Arkitekt-review runde 4 (PR #85, HEAD c94457e):** 1 funn - `actOn()` kalte FORTSATT
+`gateway.execute()` på nytt for en ALLEREDE terminal (`act_result` satt) ELLER bevis-bekreftet claim.
+`ToolGateway.execute()` sin idempotency_key-dedupe er IKKE dens FØRSTE port - policy/parameter-
+autorisasjon, rate limit, frozen/revoked, credential-oppslag og klasse C/D-preflight kjører ALLE FØR
+dedupe-oppslaget. En retry kunne derfor treffe en SENERE, UBESLEKTET port-avvisning (rotert credential,
+fryst connector, oppbrukt rate limit) FØR dedupe i det hele tatt ble konsultert, og `actOn()` ville da
+STILLE OVERSKREVET en allerede bekreftet suksess med `denied`/`escalate` - eller nedgradere en allerede
+levert `act_notify` tilbake til `act`. Rettet med et EKSPLISITT short-circuit: en allerede terminal
+ELLER bevis-bekreftet claim leses DIREKTE fra den persisterte situasjonen/`tool_executions`-beviset
+(pluss `gateway.get()` - et rent, side-effekt-fritt oppslag av verktøy-definisjonen for `output_trust`,
+ALDRI en autorisasjon) og returneres UENDRET - `gateway.execute()` kalles ALDRI for en replay. Se §6
+under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -143,9 +156,15 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    avvises (`SituationActOperationMismatchError`), ALDRI gjenbruk av et tidligere, ANNERLEDES bekreftet
    resultat. En SAMTIDIG "taper" (samme nøkkel+fingeravtrykk, men INGEN `tool_executions`-bevis ennå)
    avvises DETERMINISTISK (`SituationActInFlightError`) — men denne er IKKE lenger en permanent floke:
-   `actOn()` REKONSILIERER FØRST mot `tool_executions` (Funn 2 runde 2) — finnes DET beviset (uansett
-   status), er en ny `execute()`-kall alltid trygt (ToolGateway sin egen dedupe re-invokerer ALDRI
-   transporten); KUN når INGEN bevis finnes i det hele tatt forblir vi fail-closed, og
+   `actOn()` REKONSILIERER FØRST mot `tool_executions` (Funn 2 runde 2). Funn 1 (arkitekt-review runde
+   4) SKJERPET selve rekonsilieringen: en ny `execute()`-kall var IKKE alltid trygt, fordi ToolGateway
+   sin idempotency_key-dedupe IKKE er dens FØRSTE port (policy/rate-limit/frozen/revoked/credential/
+   preflight kjører FØR dedupe) - en SENERE, UBESLEKTET port-avvisning kunne derfor feilaktig
+   OVERSKRIVE et allerede bekreftet resultat. `actOn()` kaller nå ALDRI `gateway.execute()` på nytt for
+   en claim som ENTEN allerede er terminal (`act_result` satt) ELLER har `tool_executions`-bevis - i
+   BEGGE tilfeller leses utfallet DIREKTE fra den persisterte situasjonen/beviset (pluss `gateway.get()`
+   - et rent, side-effekt-fritt verktøy-definisjon-oppslag for `output_trust`, ALDRI en autorisasjon)
+   og returneres UENDRET. KUN når INGEN bevis finnes i det hele tatt forblir vi fail-closed, og
    `SituationEngine.releaseStuckActClaim()` gir en EKSPLISITT, fail-closed administrativ
    gjenopprettings-transisjon (re-verifiserer race-fritt at INGEN bevis har dukket opp FØR frigjøring —
    ALDRI en blind tidsavbrudd-basert auto-frigjøring, `SituationActClaimNotReleasableError` hvis bevis
@@ -181,7 +200,11 @@ kryss-situasjon-nøkkelkollisjon strukturelt umulig, krasj-gjenopprettings-rekon
 ethvert kall, OG to DETERMINISTISKE to-sesjons-barriere-tester (Funn 1+2, runde 3): en `pauseDurable()`
 forsøkt midt i et in-flight `actOn()` MÅ vente til det er ferdig og kan ALDRI påvirke det allerede
 påbegynte forsøket; en `releaseStuckActClaim()` forsøkt midt i et in-flight `actOn()` MÅ på samme måte
-vente og kan ALDRI observere et falskt "ingen bevis" mens forsøket fortsatt pågår).
+vente og kan ALDRI observere et falskt "ingen bevis" mens forsøket fortsatt pågår; OG fire nye
+adversarielle tester (Funn 1, runde 4): en retry av en ALLEREDE fullført ACT etter at credentialen ble
+tilbakekalt, connectoren ble fryst, eller rate-limiten ble oppbrukt returnerer ALLE det UENDREDE
+opprinnelige resultatet med ZERO nye transportkall, og en retry etter et allerede levert ACT+NOTIFY med
+Telegram-credentialen tilbakekalt beholder `act_notify` UENDRET - ALDRI nedgradert til `act`).
 
 ## 7. Retensjon og Q-20-erasure
 

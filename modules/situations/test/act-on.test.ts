@@ -8,7 +8,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry } from "../src/domain-pause.ts";
 import {
@@ -785,5 +785,150 @@ describe("K: Funn 1+2 (arkitekt-review runde 3, PR #85) - EKTE tvers-av-prosess 
     await expect(
       engineWithoutAuthority.releaseStuckActClaim(TENANT_OWNER, "business", situation.situation_id, ownerIdentity)
     ).rejects.toThrow(SituationRecoveryUnauthorizedError);
+  });
+});
+
+describe("L: Funn 1 (arkitekt-review runde 4, PR #85) - terminal ACT-tilstand er MONOTON: en retry kaller ALDRI gateway.execute() på nytt for en allerede avgjort operasjon, og kan derfor ALDRI bli feilaktig overskrevet av en SENERE, UBESLEKTET port-avvisning (credential/connector/rate-limit)", () => {
+  function registerActuatorAndTelegram(g: ToolGateway, transport: ToolTransport, rateLimitPerMinute = 30): void {
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: rateLimitPerMinute,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport,
+      preflight_action: "read_state",
+      postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+    });
+  }
+
+  it("en retry etter en allerede FULLFØRT ACT, MED credentialen TILBAKEKALT i mellomtiden, returnerer det UENDREDE opprinnelige resultatet - INGEN nytt transportkall", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:replay-credential-revoked", priority: "high", confidence: 0.9, reason: "Replay-etter-credential-revocation-test"
+    });
+    const controls = new OwnerControls(new KillSwitch());
+    const localTransport = new FakeActuatorTransport(true);
+    const g = new ToolGateway(appPool, policy, secrets, controls);
+    registerActuatorAndTelegram(g, localTransport);
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-cred-key" }, g, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+    expect(first.situation.act_result).toBe("succeeded");
+    const callsAfterFirst = localTransport.calls.length;
+    expect(localTransport.calls.filter((c) => c.action === "flip")).toHaveLength(1);
+
+    // Simulerer en SENERE, UBESLEKTET tilstandsendring - credentialen er nå tilbakekalt.
+    controls.revokeCredential("TEST_ACTUATOR_TOKEN");
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-cred-key" }, g, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true); // UENDRET - IKKE feilaktig nedgradert til 'denied' av den senere tilbakekallingen.
+    expect(retry.situation.act_result).toBe("succeeded");
+    expect(retry.situation.stage).toBe(first.situation.stage);
+    expect(retry.situation.reason).toBe(first.situation.reason);
+    expect(localTransport.calls.length).toBe(callsAfterFirst); // INGEN nytt transportkall i det hele tatt.
+  });
+
+  it("en retry etter en allerede FULLFØRT ACT, MED connectoren FRYST i mellomtiden, returnerer det UENDREDE opprinnelige resultatet - INGEN nytt transportkall", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:replay-connector-frozen", priority: "high", confidence: 0.9, reason: "Replay-etter-connector-freeze-test"
+    });
+    const controls = new OwnerControls(new KillSwitch());
+    const localTransport = new FakeActuatorTransport(true);
+    const g = new ToolGateway(appPool, policy, secrets, controls);
+    registerActuatorAndTelegram(g, localTransport);
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-frozen-key" }, g, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+    const callsAfterFirst = localTransport.calls.length;
+
+    controls.freezeConnector("test_actuator");
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-frozen-key" }, g, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true);
+    expect(retry.situation.act_result).toBe("succeeded");
+    expect(retry.situation.stage).toBe(first.situation.stage);
+    expect(localTransport.calls.length).toBe(callsAfterFirst);
+  });
+
+  it("en retry etter en allerede FULLFØRT ACT, MED rate-limiten oppbrukt i mellomtiden (rate_limit_per_minute:1), returnerer det UENDREDE opprinnelige resultatet - INGEN nytt transportkall", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:replay-rate-limited", priority: "high", confidence: 0.9, reason: "Replay-etter-rate-limit-test"
+    });
+    const localTransport = new FakeActuatorTransport(true);
+    const g = new ToolGateway(appPool, policy, secrets);
+    registerActuatorAndTelegram(g, localTransport, 1); // KUN ett kall per minutt tillatt for dette verktøyet.
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-rate-key" }, g, ownerIdentity
+    );
+    expect(first.tool_result.ok).toBe(true);
+    const callsAfterFirst = localTransport.calls.length;
+
+    // Rate-limiten (1/min) er nå OPPBRUKT av det FØRSTE kallet - et NYTT execute()-kall for DETTE verktøyet ville blitt avvist av rate-limit-porten.
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-rate-key" }, g, ownerIdentity
+    );
+    expect(retry.tool_result.ok).toBe(true); // UENDRET - rate-limit-porten ble ALDRI konsultert for denne replayen.
+    expect(retry.situation.act_result).toBe("succeeded");
+    expect(localTransport.calls.length).toBe(callsAfterFirst);
+  });
+
+  it("en retry etter en allerede FULLFØRT ACT+NOTIFY, MED Telegram-credentialen tilbakekalt i mellomtiden, beholder stage='act_notify' - ALDRI nedgradert til 'act', INGEN nytt varsel-forsøk", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:replay-notify-credential-revoked", priority: "high", confidence: 0.9, reason: "Replay-etter-notify-credential-revocation-test"
+    });
+    const controls = new OwnerControls(new KillSwitch());
+    const localTransport = new FakeActuatorTransport(true);
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets, controls);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: localTransport,
+      preflight_action: "read_state",
+      postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-notify-key" }, g, ownerIdentity
+    );
+    expect(first.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(1);
+
+    controls.revokeCredential("TEST_TELEGRAM_TOKEN");
+
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id,
+      { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "replay-notify-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify"); // ALDRI nedgradert til 'act' av den senere, ubeslektede tilbakekallingen.
+    expect(localTelegram.calls).toHaveLength(1); // INGEN nytt varsel-forsøk.
+    expect(localTransport.calls.filter((c) => c.action === "flip")).toHaveLength(1); // INGEN ny ACT-invokering heller.
   });
 });
