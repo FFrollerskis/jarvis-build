@@ -49,7 +49,8 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import {
-  DomainPauseRegistry, SituationEngine, SituationsTransport, runSituationSweepForAllTenants, situationsToolDefinitions
+  DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
+  situationsToolDefinitions
 } from "@jarvis/situations";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
@@ -759,6 +760,12 @@ porter: se docs/RUNTIME_GATES.md`;
   // Identiteten per tenant er eierens identitet i sveipens space; en tenant
   // eieren ikke er autorisert for avvises av PolicyGateway inne i
   // `execute()` (fail-closed) - aldri en stille utelatelse her.
+  // Arkitekt-review runde 1 på PR #86 (funn 3): resultatet KASTES ALDRI
+  // bort - `assertSituationSweepHealthy()` kaster på ikke-tom `errors[]`,
+  // evidensmismatch, ulevert varsel eller identitetskonflikt, så
+  // `DailyScheduler` aldri bokfører en slik kjøring som fullført
+  // (`completed_at` forblir NULL) og en `situation_sweep_failed`-linje
+  // logges strukturert.
   new DailyScheduler(
     pool, "situation-sweep", Number(process.env["JARVIS_SITUATION_SWEEP_HOUR"] ?? 7)
   ).start(() => runSituationSweepForAllTenants(pool, {
@@ -768,7 +775,7 @@ porter: se docs/RUNTIME_GATES.md`;
     identityFor: (tenantId, memorySpace) => ({
       ...ownerIdentity, tenant_id: tenantId, memory_space_id: memorySpace, session_id: "sess-situation-sweep"
     })
-  }).then(() => undefined));
+  }).then(assertSituationSweepHealthy));
   // UA-3 business-event-linkage (D-57) §19/§20/§21: periodisk Gmail/Calendar->
   // Business-OS-synkronisering - SAMME reboot-durable DailyScheduler-mekanisme
   // (eget job_name, egen klokkeslett-env), uavhengig av Telegram-konfig.

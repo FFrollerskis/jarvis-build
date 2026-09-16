@@ -117,6 +117,76 @@ export async function runSituationSweep(tenantId: string, memorySpace: MemorySpa
   return result;
 }
 
+/**
+ * Arkitekt-review runde 1 på PR #86 (5229219808, funn 3): `runSituationSweep()`
+ * fanger leveranse-/auto-ACT-feil i `errors[]` og resolver normalt, og den
+ * første scheduler-wiringen kastet resultatet med `.then(() => undefined)` -
+ * evidensmismatch, leveransefeil eller auto-ACT-feil ble dermed bokført som
+ * en vellykket daglig jobb (`scheduler_state.completed_at` satt), uten
+ * varsel og uten fail-closed-signal.
+ *
+ * Nå: scheduler-grensen KASTER på ethvert usunt resultat. `DailyScheduler.
+ * start()` kaller `markCompleted()` KUN etter at `deliver()` resolvet, så en
+ * kastet feil lar dagens `scheduler_state`-rad stå med `completed_at IS NULL`
+ * - en VARIG, observerbar "ikke fullført"-tilstand - og en strukturert
+ * `situation_sweep_failed`-logglinje skrives for alarmering. Bevist i
+ * `activation.test.ts` med en EKTE `DailyScheduler` mot embedded Postgres.
+ *
+ * Usunt = for minst én tenant: ikke-tom `errors[]`, `identity_conflicts > 0`
+ * (en situasjon kunne ikke oppdateres - stille drift), `delivery.
+ * evidence_mismatch > 0` (sikkerhetsrelevant: fremmed bevis under en
+ * varsel-nøkkel), eller `delivery.pending > 0` (et varsel ble IKKE levert
+ * denne syklusen). `auto_act.denied`/`skipped` er ÆRLIGE, forventede utfall
+ * (eskalert situasjon / pauset domene) og teller ikke som sveipefeil.
+ */
+export interface SituationSweepUnhealthyTenant {
+  tenant_id: string;
+  errors: string[];
+  identity_conflicts: number;
+  evidence_mismatch: number;
+  pending_deliveries: number;
+}
+
+export class SituationSweepFailedError extends Error {
+  constructor(public readonly unhealthy: readonly SituationSweepUnhealthyTenant[]) {
+    super(`situation_sweep_failed:${unhealthy.map((u) => u.tenant_id).join(",")}`);
+    this.name = "SituationSweepFailedError";
+  }
+}
+
+/** Ren funksjon: det usunne utsnittet av ett sveip-resultat, eller `null` når alt er sunt. */
+export function unhealthySituationSweep(tenantId: string, result: SituationSweepResult): SituationSweepUnhealthyTenant | null {
+  const unhealthy =
+    result.errors.length > 0 ||
+    result.identity_conflicts > 0 ||
+    result.delivery.evidence_mismatch > 0 ||
+    result.delivery.pending > 0;
+  if (!unhealthy) return null;
+  return {
+    tenant_id: tenantId,
+    errors: [...result.errors],
+    identity_conflicts: result.identity_conflicts,
+    evidence_mismatch: result.delivery.evidence_mismatch,
+    pending_deliveries: result.delivery.pending
+  };
+}
+
+/**
+ * Scheduler-grensen: kast `SituationSweepFailedError` (etter én strukturert
+ * logglinje) hvis noen tenant er usunn - ellers returner stille. Brukes som
+ * `.then(assertSituationSweepHealthy)` på `runSituationSweepForAllTenants()`.
+ */
+export function assertSituationSweepHealthy(results: Record<string, SituationSweepResult>): void {
+  const unhealthy: SituationSweepUnhealthyTenant[] = [];
+  for (const [tenantId, result] of Object.entries(results)) {
+    const item = unhealthySituationSweep(tenantId, result);
+    if (item) unhealthy.push(item);
+  }
+  if (unhealthy.length === 0) return;
+  console.error(JSON.stringify({ msg: "situation_sweep_failed", tenants: unhealthy }));
+  throw new SituationSweepFailedError(unhealthy);
+}
+
 export interface SituationSweepAllDeps {
   openLoops: OpenLoopReader;
   engine: SituationEngine;

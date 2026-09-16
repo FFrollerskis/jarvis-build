@@ -10,16 +10,17 @@ import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { OpenLoopService } from "@jarvis/business";
 import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
-import { ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
+import { DailyScheduler, ToolGateway, type SecretProvider, type ToolTransport } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry, DomainPauseUnauthorizedError } from "../src/domain-pause.ts";
 import {
   computeInformNotifyKey,
   SituationAutonomyPlaceholderError,
   SituationAutonomyUnauthorizedError,
   SituationEngine,
-  SituationEngineValidationError
+  SituationEngineValidationError,
+  SituationRecoveryUnauthorizedError
 } from "../src/service.ts";
-import { runSituationSweep } from "../src/sweep.ts";
+import { assertSituationSweepHealthy, runSituationSweep } from "../src/sweep.ts";
 import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
 import type { Situation } from "../src/types.ts";
 
@@ -419,11 +420,11 @@ describe("C: AUTO-ACT - ingenting uten eier-policy; med policy nøyaktig én ACT
   });
 });
 
-describe("D: KONTROLLFLATEN - `situations`-verktøyet gjennom ekte ToolGateway/PolicyGateway", () => {
-  it("pause_domain via gateway (eier) blir varig og stopper auto-ACT; ikke-eier-aktør avvises av motoren", async () => {
+describe("D: KONTROLLFLATEN - `situations`-verktøyet gjennom ekte ToolGateway/PolicyGateway, identitet KUN fra invocation-context", () => {
+  it("pause_domain via gateway (eier-identitet fra context) blir varig og overlever restore(); ikke-eier-identitet avvises av motoren", async () => {
     const res = await gateway.execute({
       identity: ownerIdentity, tool_id: "situations", action: "pause_domain",
-      parameters: { tenant_id: TENANT_A, domain: "spend", reason: "eier pauset via verktøy", actor_person_id: OWNER },
+      parameters: { domain: "spend", reason: "eier pauset via verktøy" },
       idempotency_key: "pause-1"
     });
     expect(res.ok).toBe(true);
@@ -434,9 +435,10 @@ describe("D: KONTROLLFLATEN - `situations`-verktøyet gjennom ekte ToolGateway/P
     await fresh.restore();
     expect(fresh.isPaused("spend")).toBe(true);
 
+    // Ikke-eier i SAMME tenant: den betrodde identiteten er `OTHER`, og motorens egen eier-port avviser.
     const denied = await gateway.execute({
-      identity: ownerIdentity, tool_id: "situations", action: "unpause_domain",
-      parameters: { tenant_id: TENANT_A, domain: "spend", actor_person_id: OTHER },
+      identity: { ...ownerIdentity, person_id: OTHER, session_id: "sess-other" }, tool_id: "situations", action: "unpause_domain",
+      parameters: { domain: "spend" },
       idempotency_key: "unpause-1"
     });
     expect(denied.ok).toBe(false);
@@ -444,26 +446,136 @@ describe("D: KONTROLLFLATEN - `situations`-verktøyet gjennom ekte ToolGateway/P
     await expect(domainPauses.unpauseDurable("spend", OTHER)).rejects.toBeInstanceOf(DomainPauseUnauthorizedError);
   });
 
-  it("get_queue leser prioritert kø; set_autonomy_policy/list_autonomy_policies/clear via gateway", async () => {
+  it("AUTORITETSFORFALSKNING (review 5229219808 funn 2): identitetsfelter i parametrene avvises av skjemaet FØR transporten nås - og transporten selv ignorerer dem", async () => {
+    // 1. Gjennom ToolGateway: `actor_person_id`/`tenant_id`/`identity` i parametrene er IKKE i det strenge skjemaet => invalid_parameters, ingen mutasjon.
+    for (const parameters of [
+      { domain: "spend", reason: "forfalsket", actor_person_id: OWNER },
+      { domain: "spend", reason: "forfalsket", tenant_id: TENANT_A },
+      { domain: "spend", reason: "forfalsket", identity: { person_id: OWNER } }
+    ]) {
+      const res = await gateway.execute({
+        identity: { ...ownerIdentity, person_id: OTHER, session_id: "sess-forge" }, tool_id: "situations", action: "pause_domain",
+        parameters: parameters as Record<string, JsonValue>, idempotency_key: `forge-${JSON.stringify(Object.keys(parameters))}`
+      });
+      expect(res.ok).toBe(false);
+      expect((res as { reason?: string }).reason).toContain("invalid_parameters");
+    }
+    expect(domainPauses.isPaused("spend")).toBe(false);
+
+    // 2. Direkte mot transporten (uten skjema): en forfalsket `actor_person_id` i parametrene brukes ALDRI - kun context-identiteten teller.
+    const transport = new SituationsTransport(engine, domainPauses);
+    await expect(
+      transport.invoke("pause_domain", { domain: "spend", reason: "forfalsket", actor_person_id: OWNER }, "cred", {
+        identity: { ...ownerIdentity, person_id: OTHER }
+      })
+    ).rejects.toBeInstanceOf(DomainPauseUnauthorizedError);
+    await expect(
+      transport.invoke("set_autonomy_policy", { domain: "pipeline", tool_id: "t", action: "a", actor_person_id: OWNER }, "cred", {
+        identity: { ...ownerIdentity, person_id: OTHER }
+      })
+    ).rejects.toBeInstanceOf(SituationAutonomyUnauthorizedError);
+    // `release_stuck_act_claim` bygger ALDRI en identitet fra parametrene: en forfalsket `identity` ignoreres, context-identiteten (OTHER) avvises.
+    await expect(
+      transport.invoke("release_stuck_act_claim", { situation_id: "sit-x", identity: { person_id: OWNER, tenant_id: TENANT_A } }, "cred", {
+        identity: { ...ownerIdentity, person_id: OTHER }
+      })
+    ).rejects.toBeInstanceOf(SituationRecoveryUnauthorizedError);
+    expect(domainPauses.isPaused("spend")).toBe(false);
+    expect(await engine.listAutonomyPolicies(TENANT_A, "business")).toEqual([]);
+
+    // 3. Manglende context feiler lukket - aldri en stille default-identitet.
+    await expect(transport.invoke("get_queue", {}, "cred")).rejects.toThrow(/situations_missing_invocation_context/);
+    await expect(transport.invoke("pause_all", { reason: "x" }, "cred", undefined)).rejects.toThrow(/situations_missing_invocation_context/);
+  });
+
+  it("tenant/space kommer fra context: eierens identitet i tenant B ser aldri tenant A sin kø", async () => {
     await seedLoop(TENANT_A, { priority: "high", confidence: 0.9 });
     await sweep();
-    const queue = await gateway.execute({ identity: ownerIdentity, tool_id: "situations", action: "get_queue", parameters: { tenant_id: TENANT_A } });
-    expect(queue.ok).toBe(true);
-    expect(((queue as { data?: unknown }).data as Situation[])[0]!.stage).toBe("suggest");
+    const queueA = await gateway.execute({ identity: ownerIdentity, tool_id: "situations", action: "get_queue", parameters: {} });
+    expect(queueA.ok).toBe(true);
+    expect(((queueA as { data?: unknown }).data as Situation[])[0]!.stage).toBe("suggest");
+    const queueB = await gateway.execute({ identity: tenantBIdentity, tool_id: "situations", action: "get_queue", parameters: {} });
+    expect(queueB.ok).toBe(true);
+    expect((queueB as { data?: unknown }).data).toEqual([]);
+  });
 
+  it("set_autonomy_policy/list_autonomy_policies/clear via gateway - aktør = context-identiteten", async () => {
     const set = await gateway.execute({
       identity: ownerIdentity, tool_id: "situations", action: "set_autonomy_policy",
-      parameters: { tenant_id: TENANT_A, domain: "pipeline", tool_id: "test_actuator", action: "assign", parameters: { open_loop_id: "{{source_open_loop_id}}", assignee: OWNER }, actor_person_id: OWNER },
+      parameters: { domain: "pipeline", tool_id: "test_actuator", action: "assign", parameters: { open_loop_id: "{{source_open_loop_id}}", assignee: OWNER } },
       idempotency_key: "policy-1"
     });
     expect(set.ok).toBe(true);
-    const list = await gateway.execute({ identity: ownerIdentity, tool_id: "situations", action: "list_autonomy_policies", parameters: { tenant_id: TENANT_A } });
+    const [policy] = await engine.listAutonomyPolicies(TENANT_A, "business");
+    expect(policy!.actor_person_id).toBe(OWNER);
+    const list = await gateway.execute({ identity: ownerIdentity, tool_id: "situations", action: "list_autonomy_policies", parameters: {} });
     expect(((list as { data?: unknown }).data as unknown[]).length).toBe(1);
     const cleared = await gateway.execute({
       identity: ownerIdentity, tool_id: "situations", action: "clear_autonomy_policy",
-      parameters: { tenant_id: TENANT_A, domain: "pipeline", actor_person_id: OWNER }, idempotency_key: "policy-clear-1"
+      parameters: { domain: "pipeline" }, idempotency_key: "policy-clear-1"
     });
     expect(cleared.ok).toBe(true);
     expect(await engine.listAutonomyPolicies(TENANT_A, "business")).toEqual([]);
+  });
+});
+
+describe("E: SCHEDULER-GRENSEN (review 5229219808 funn 3) - en mislykket sideeffekt bokføres ALDRI som fullført daglig jobb", () => {
+  async function runOnce(jobName: string, deliver: () => Promise<void>): Promise<{ claimed: boolean; completed_at: string | null }> {
+    const scheduler = new DailyScheduler(appPool, jobName, 0);
+    const timer = scheduler.start(deliver, 20);
+    try {
+      const deadline = Date.now() + 5_000;
+      for (;;) {
+        const { rows } = await adminPool.query(`SELECT completed_at FROM scheduler_state WHERE job_name = $1`, [jobName]);
+        if (rows[0]) {
+          // Gi deliver() tid til å avslutte etter claim - vi venter på et stabilt utfall.
+          await new Promise((r) => setTimeout(r, 300));
+          const { rows: again } = await adminPool.query(`SELECT completed_at FROM scheduler_state WHERE job_name = $1`, [jobName]);
+          return { claimed: true, completed_at: again[0]?.completed_at ? new Date(again[0].completed_at as string).toISOString() : null };
+        }
+        if (Date.now() > deadline) return { claimed: false, completed_at: null };
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
+  it("evidensmismatch i sveipen => assertSituationSweepHealthy kaster => completed_at forblir NULL (ikke fullført)", async () => {
+    await seedLoop(TENANT_A);
+    const loops = await openLoops.listOpenLoops(TENANT_A, "business", "open");
+    const { mapOpenLoopToCandidate } = await import("../src/open-loop-bridge.ts");
+    const { situation } = await engine.evaluateCandidate(TENANT_A, "business", mapOpenLoopToCandidate(loops[0]!));
+    const key = computeInformNotifyKey(situation.situation_id, new Date(situation.last_notified_at!).toISOString(), situation.inform_message!);
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, status) VALUES ($1, $2, 'email', 'send', 'succeeded')`,
+      [TENANT_A, key]
+    );
+    const jobName = `situation-sweep-test-mismatch-${Date.now()}`;
+    const outcome = await runOnce(jobName, async () => {
+      const result = await sweep();
+      expect(result.delivery.evidence_mismatch).toBe(1);
+      assertSituationSweepHealthy({ [TENANT_A]: result });
+    });
+    expect(outcome.claimed).toBe(true);
+    expect(outcome.completed_at).toBeNull();
+    expect(telegram.calls).toHaveLength(0);
+  });
+
+  it("transportfeil (ulevert varsel) => kastet => completed_at NULL; en SUNN kjøring => completed_at satt", async () => {
+    await seedLoop(TENANT_A);
+    telegram.failNext = 1;
+    const failed = await runOnce(`situation-sweep-test-pending-${Date.now()}`, async () => {
+      assertSituationSweepHealthy({ [TENANT_A]: await sweep() });
+    });
+    expect(failed.claimed).toBe(true);
+    expect(failed.completed_at).toBeNull();
+
+    const healthy = await runOnce(`situation-sweep-test-healthy-${Date.now()}`, async () => {
+      assertSituationSweepHealthy({ [TENANT_A]: await sweep() });
+    });
+    expect(healthy.claimed).toBe(true);
+    expect(healthy.completed_at).not.toBeNull();
+    expect(telegram.calls).toHaveLength(1);
   });
 });

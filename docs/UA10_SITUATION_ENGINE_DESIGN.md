@@ -423,10 +423,20 @@ autorisert for avvises av PolicyGateway (fail-closed), aldri av en stille utelat
 **Kontrollflaten (`transport.ts`, verktøy `situations`).** `get_queue`/`get_pause_state`/
 `get_notification_policy`/`list_autonomy_policies` (A), `resolve` (B), `pause_domain`/`unpause_domain`/
 `pause_all`/`unpause_all`/`set_notification_policy`/`set_autonomy_policy`/`clear_autonomy_policy`/
-`release_stuck_act_claim` (C). Samme D-49-mønster som `BusinessTransport`: tenant/space/aktør kommer
-fra et betrodd kallerlag via validerte parametre, aldri fra modell-output. Dette lukker "Owner can
+`release_stuck_act_claim` (C). Tenant/space/aktør avledes UTELUKKENDE fra den betrodde
+`ToolInvocationContext.identity` (D-68) som `ToolGateway.execute()` selv setter fra den server-side-
+oppløste `request.identity` — ALDRI fra parametre (skjemaene er `strict()` uten identitetsfelter;
+manglende context feiler lukket med `situations_missing_invocation_context`). Dette lukker "Owner can
 pause a domain or entire Situation Engine instantly" I PRAKSIS og er den kontrakten UA-11 sin samlede
 kontrollflate skal komponere.
+
+**Scheduler-grensen er fail-closed.** `runSituationSweepForAllTenants()` isolerer feil per steg/tenant
+(tellinger + `errors[]`) slik at én tenant aldri velter de andre — men resultatet KASTES deretter av
+`assertSituationSweepHealthy()` hvis noen tenant har ikke-tom `errors[]`, `identity_conflicts > 0`,
+`delivery.evidence_mismatch > 0` eller `delivery.pending > 0`. `DailyScheduler.start()` kaller
+`markCompleted()` KUN etter at `deliver()` resolvet, så dagens `scheduler_state`-rad blir stående med
+`completed_at IS NULL` (varig, observerbar "ikke fullført") og en strukturert `situation_sweep_failed`-
+logglinje skrives. `auto_act.denied`/`skipped` er ærlige, forventede utfall og teller ikke som feil.
 
 **Bevis.** `modules/situations/test/activation.test.ts` (ekte Postgres/RLS, ekte `OpenLoopService`,
 ekte `ToolGateway`/`PolicyGateway`, transport-spioner): ingest/idempotens/tenant-isolasjon/kildebasert
@@ -437,6 +447,21 @@ readback + ett ACT-varsel), pause vinner, kildeløs situasjon hoppes over, autor
 plassholder avvises, RLS-isolerte policyer, clear/disabled; kontrollflaten gjennom ekte gateway (varig
 pause som overlever `restore()`, ikke-eier avvist). `open-loop-bridge.test.ts`: uttømmende
 domene-kartlegging, kandidat-mapping, plassholder-rendring, RLS-trygg tenant-orkestrering.
+
+**Arkitekt-review runde 1 (PR #86, HEAD c8a5c13, review 5229219808):** 3 funn. (1) Sekvens: PR #83
+(UA-9) skal rekonsilieres mot main FØR neste slice (D163/D164) — en kontrollplan-beslutning PR-en ikke
+kan lukke; PR #86 forblir draft/umerget til arkitekten har avklart. (2) Kontrollflaten leste
+`tenant_id`/`memory_space`/`actor_person_id` (og hele `identity` for `release_stuck_act_claim`) fra
+verktøyPARAMETRE: en kaller kunne oppgi eierens `person_id` selv, og motorens "uavhengige" sovereign-
+port sammenlignet mot forfalskede data. RETTET: identitet kun fra `ToolInvocationContext` (se
+kontrollflate-avsnittet over); bevist med forfalskede parametre gjennom ekte gateway
+(`invalid_parameters` før transporten nås) og direkte mot transporten under en ANNEN context-identitet
+(`DomainPauseUnauthorizedError`/`SituationAutonomyUnauthorizedError`/
+`SituationRecoveryUnauthorizedError`), manglende context kaster, og tenant B sin identitet ser tom kø.
+(3) Scheduler-wiringen kastet sveiperesultatet (`.then(() => undefined)`): evidensmismatch/leveranse-/
+auto-ACT-feil ble bokført som vellykket daglig jobb. RETTET: `assertSituationSweepHealthy()` (se
+scheduler-avsnittet over); bevist med en EKTE `DailyScheduler` mot embedded Postgres — evidensmismatch
+og transportfeil lar `completed_at` stå NULL, et sunt sveip setter det.
 
 ## 9. Oppdateringsplikt
 

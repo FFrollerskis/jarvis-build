@@ -4086,11 +4086,25 @@ ingen leveranse, ingen kaller. Masterplanens DoD krever en motor som KJØRER, og
 - `transport.ts`: kontrollflaten som `situations`-verktøy (get_queue/get_pause_state/
   get_notification_policy/list_autonomy_policies A; resolve B; pause_domain/unpause_domain/pause_all/
   unpause_all/set_notification_policy/set_autonomy_policy/clear_autonomy_policy/
-  release_stuck_act_claim C) - D-49-mønsteret, to uavhengige autoritetsporter.
+  release_stuck_act_claim C) - identitet KUN fra den betrodde `ToolInvocationContext` (D-68), aldri
+  fra parametre; to uavhengige autoritetsporter (PolicyGateway + motorens egen eier-autoritet).
 - Wiring i `apps/api/src/main.ts`: durable `DomainPauseRegistry` med fail-closed `restore()`,
   `SituationEngine` med sovereign-autoritet = `ownerIdentity`, verktøyet på samme toolGateway,
   `DailyScheduler`-jobb `situation-sweep` (`JARVIS_SITUATION_SWEEP_HOUR`, default 07, etter
-  open-loop-sveipet kl. 06).
+  open-loop-sveipet kl. 06) med fail-closed scheduler-grense (`assertSituationSweepHealthy()`: et
+  usunt sveip KASTER, `scheduler_state.completed_at` forblir NULL, strukturert `situation_sweep_failed`-logg).
+
+**Arkitekt-review runde 1 (PR #86, HEAD c8a5c13, review 5229219808):** 3 funn. (1) Sekvens (D163/D164):
+PR #83 (UA-9) skal rekonsilieres mot main FØR neste slice - kontrollplan-beslutning som IKKE kan lukkes i
+PR-en; PR #86 forblir draft/umerget til arkitekten avklarer. (2) RETTET: kontrollflaten leste
+tenant/space/aktør (og hele `identity` for `release_stuck_act_claim`) fra verktøyparametre, så eierens
+`person_id` kunne oppgis av kalleren og motorens "uavhengige" sovereign-port sammenlignet mot forfalskede
+data - nå kun `ToolInvocationContext.identity`, `strict()`-skjemaer uten identitetsfelter, manglende
+context feiler lukket; bevist med forfalskede parametre gjennom ekte gateway (`invalid_parameters`) og
+direkte mot transporten under en annen context-identitet (alle tre `*UnauthorizedError`). (3) RETTET:
+scheduler-wiringen kastet sveiperesultatet, så evidensmismatch/leveranse-/auto-ACT-feil ble bokført som
+vellykket daglig jobb - nå `assertSituationSweepHealthy()`; bevist med en EKTE `DailyScheduler` mot
+embedded Postgres (usunt => `completed_at` NULL, sunt => satt).
 
 **Akseptansekriterier - status etter P1:** 1 "No duplicate spam" - nå også bevist på LEVERANSEN (ett
 varsel per syklus, null på re-sveip, rekonsiliering uten kall). 2 "ACT uses valid owner/delegated
@@ -4106,9 +4120,10 @@ helse-/lokasjons-broer (egne wiring-slicer mot samme kontrakt), UA-11 samlet kon
 (komponerer `situations`-verktøyet - neste slice), host-/live-kjøring av sveipen (RUNTIME_GATES:
 FIXED_SUITE, ikke host-verifisert).
 
-**Tester:** `modules/situations/test/activation.test.ts` (18, ekte Postgres/RLS + ekte
-`OpenLoopService` + ekte `ToolGateway`/`PolicyGateway`), `open-loop-bridge.test.ts` (7); alle
-eksisterende situations-/erasure-suiter grønne. Se `docs/PROJECT_STATUS.md` for eksakte tall.
+**Tester:** `modules/situations/test/activation.test.ts` (22 etter review runde 1, ekte Postgres/RLS +
+ekte `OpenLoopService` + ekte `ToolGateway`/`PolicyGateway` + ekte `DailyScheduler`),
+`open-loop-bridge.test.ts` (12); alle eksisterende situations-/erasure-suiter grønne. Se
+`docs/PROJECT_STATUS.md` for eksakte tall.
 
 ---
 

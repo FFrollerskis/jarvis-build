@@ -3,7 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { BusinessOpenLoop, OpenLoopType } from "@jarvis/business";
 import { domainForLoopType, mapOpenLoopToCandidate, OPEN_LOOP_DETECTION_KEY_PREFIX } from "../src/open-loop-bridge.ts";
 import { renderAutonomyParameters } from "../src/service.ts";
-import { runSituationSweepForAllTenants, type OpenLoopReader } from "../src/sweep.ts";
+import {
+  assertSituationSweepHealthy, runSituationSweepForAllTenants, SituationSweepFailedError, unhealthySituationSweep,
+  type OpenLoopReader, type SituationSweepResult
+} from "../src/sweep.ts";
 import type { SituationEngine } from "../src/service.ts";
 import type { ToolGateway } from "@jarvis/tool-gateway";
 
@@ -115,5 +118,38 @@ describe("D: runSituationSweepForAllTenants - RLS-trygg tenant-katalog, feilisol
     expect(results["t-ok"]!.errors).toEqual([]);
     expect(results["t-boom"]!.errors[0]).toMatch(/^deliver:Error:boom/);
     expect(results["t-boom"]!.auto_act).toEqual({ attempted: 0, succeeded: 0, denied: 0, skipped: 0 });
+  });
+});
+
+describe("E: assertSituationSweepHealthy (review 5229219808 funn 3) - usunne resultater KASTER, sunne passerer stille", () => {
+  const healthy = (): SituationSweepResult => ({
+    ingested: 3, identity_conflicts: 0, resolved_from_source: 1,
+    delivery: { delivered: 2, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 },
+    auto_act: { attempted: 1, succeeded: 0, denied: 1, skipped: 1 },
+    errors: []
+  });
+
+  it("sunt resultat (inkl. ærlige denied/skipped auto-ACT-utfall) => null / ingen kast", () => {
+    expect(unhealthySituationSweep("t-1", healthy())).toBeNull();
+    expect(() => assertSituationSweepHealthy({ "t-1": healthy() })).not.toThrow();
+  });
+
+  it.each([
+    ["errors[]", { errors: ["deliver:Error:boom"] }],
+    ["identity_conflicts", { identity_conflicts: 1 }],
+    ["delivery.evidence_mismatch", { delivery: { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 1 } }],
+    ["delivery.pending", { delivery: { delivered: 0, reconciled_from_evidence: 0, pending: 2, evidence_mismatch: 0 } }]
+  ] as const)("%s => SituationSweepFailedError som navngir tenanten", (_label, override) => {
+    const results = { "t-ok": healthy(), "t-bad": { ...healthy(), ...override } as SituationSweepResult };
+    let thrown: unknown;
+    try {
+      assertSituationSweepHealthy(results);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(SituationSweepFailedError);
+    const failure = thrown as SituationSweepFailedError;
+    expect(failure.unhealthy.map((u) => u.tenant_id)).toEqual(["t-bad"]);
+    expect(failure.message).toBe("situation_sweep_failed:t-bad");
   });
 });
