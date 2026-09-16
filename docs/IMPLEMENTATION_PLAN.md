@@ -4052,6 +4052,64 @@ domene-pause) + `modules/erasure/test/situations-erasure.test.ts` (ekte end-to-e
 `ErasureService`-bevis). Se `docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen
 mens PR #84/D-157 aktivt endrer den - se PR-en sin egen kommentar).
 
+**PR #85 merget 2026-09-16** (arkitekt-review runde 11 PASS + review 5228551712 `MERGE_AUTHORIZED=true`,
+merge-commit `639730c5c14ba6175e91b09606abc4d9dd24fb8a`, post-merge CI grønn).
+
+## UA-10 P1 – Aktivering: motoren blir levende, på eierens premisser (D-160, masterplan v4.0)
+
+**Manuell masterplan-slice** på base `main=639730c5` (PR #85 sin merge-commit), branch
+`tobias/manual-masterplan-ua10-activation-p1`. Full begrunnelse og design: `docs/UA10_SITUATION_ENGINE_DESIGN.md`
+§10; beslutning: D-160. Valgt etter en fersk, repo-basert Sovereign-audit (UA-0..UA-11): UA-0..UA-8 er
+kode-komplette med kun credential-/host-blokkerte rester (D-108), UA-9 ligger på åpen PR #83, og UA-10
+var **død kode på main** - alle fire akseptansekriterier testbevist i P0, men ingen bro, ingen sveip,
+ingen leveranse, ingen kaller. Masterplanens DoD krever en motor som KJØRER, og UA-11 (attention-ranking
++ samlet kontrollflate) forutsetter den - derfor lukkes dette eldre gapet FØR UA-11.
+
+**Bygget (P1):**
+- `057_situations_activation.sql`: `situations.inform_message`/`inform_delivered_at` (frosset
+  INFORM/SUGGEST-tekst atomisk med ankeret `last_notified_at`; bokført leveranse for nøyaktig det
+  ankeret) + ny tabell `situation_autonomy_policies` (eierens auto-ACT-binding per tenant/space/domene,
+  sammensatt FK mot `person_tenants`, FORCE RLS, `domain <> '*'`).
+- `open-loop-bridge.ts`: ren, deterministisk bro `BusinessOpenLoop -> SituationCandidateInput` -
+  uttømmende over alle 26 `OpenLoopType` (pipeline/support/deadlines/spend/product/operations),
+  `detection_key = open_loop:<loopens nøkkel>`, `source_open_loop_id` alltid satt, eier BEVISST ikke
+  fra loopen (re-tildeling er lovlig).
+- `sweep.ts`: `runSituationSweep()` INGEST -> RESOLVE (kildeløst) -> DELIVER -> AUTO-ACT med
+  feilisolasjon per loop/steg/tenant; `runSituationSweepForAllTenants()` via RLS-trygg
+  `listBusinessTenantIds()`.
+- Motor: `deliverPendingInformNotifications()` (evidens-FØRST fra `tool_executions`, nøkkel =
+  situasjon + anker + sha256(frosset tekst), ett varsel per syklus, fremmed bevis fail-closed,
+  transportfeil = ventende retry under samme nøkkel), `set/clear/list/getAutonomyPolicy()`
+  (sovereign-eier-autoritet, samme advisory-lås som `actOn()`, kun immutable plassholdere),
+  `autoActPending()` (kun `suggest` + uclaimet + AKTIVERT policy; pause/claim-konflikt = skipped),
+  `resolveForResolvedSources()`.
+- `transport.ts`: kontrollflaten som `situations`-verktøy (get_queue/get_pause_state/
+  get_notification_policy/list_autonomy_policies A; resolve B; pause_domain/unpause_domain/pause_all/
+  unpause_all/set_notification_policy/set_autonomy_policy/clear_autonomy_policy/
+  release_stuck_act_claim C) - D-49-mønsteret, to uavhengige autoritetsporter.
+- Wiring i `apps/api/src/main.ts`: durable `DomainPauseRegistry` med fail-closed `restore()`,
+  `SituationEngine` med sovereign-autoritet = `ownerIdentity`, verktøyet på samme toolGateway,
+  `DailyScheduler`-jobb `situation-sweep` (`JARVIS_SITUATION_SWEEP_HOUR`, default 07, etter
+  open-loop-sveipet kl. 06).
+
+**Akseptansekriterier - status etter P1:** 1 "No duplicate spam" - nå også bevist på LEVERANSEN (ett
+varsel per syklus, null på re-sveip, rekonsiliering uten kall). 2 "ACT uses valid owner/delegated
+authority" - auto-ACT KUN under eierens eksplisitte binding + PolicyGateway per kall. 3 "immediate
+post-action notification and recovery context" - uendret fra P0 (ACT-varsel + `tool_executions`),
+nå faktisk nåbar i drift. 4 "Owner can pause ... instantly" - nå med en faktisk kontrollflate
+(`pause_domain`/`pause_all` via ToolGateway, varig, overlever omstart).
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §8/§10):** infra/home/health-
+detektorer (ingen signalkilde), modell-assistert klassifisering (ModelGateway-avhengighet, egen
+D-64/D-41-port), counterfactual/simulation/feedback learning (masterplanens "where useful"), vision-/
+helse-/lokasjons-broer (egne wiring-slicer mot samme kontrakt), UA-11 samlet kontrollflate
+(komponerer `situations`-verktøyet - neste slice), host-/live-kjøring av sveipen (RUNTIME_GATES:
+FIXED_SUITE, ikke host-verifisert).
+
+**Tester:** `modules/situations/test/activation.test.ts` (18, ekte Postgres/RLS + ekte
+`OpenLoopService` + ekte `ToolGateway`/`PolicyGateway`), `open-loop-bridge.test.ts` (7); alle
+eksisterende situations-/erasure-suiter grønne. Se `docs/PROJECT_STATUS.md` for eksakte tall.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

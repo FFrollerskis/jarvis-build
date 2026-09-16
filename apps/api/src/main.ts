@@ -49,6 +49,9 @@ import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
 import {
+  DomainPauseRegistry, SituationEngine, SituationsTransport, runSituationSweepForAllTenants, situationsToolDefinitions
+} from "@jarvis/situations";
+import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
   CardService, WallesterFinanceTransport, runWallesterSweepForAllTenants, createRsaJwtSigner,
@@ -374,6 +377,23 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
     (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
   );
+  const ownerIdentity = {
+    person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
+    channel: "api", auth_strength: "active"
+  } as const;
+  // UA-10 P1 AKTIVERING (D-160): Situation Engine kobles til komposisjons-
+  // roten for FØRSTE gang (P0 lot den bevisst stå ukoblet til det fantes en
+  // reell kaller - den finnes nå: `situation-sweep`-jobben lenger ned).
+  // DURABLE domene-pause med fail-closed `restore()` FØR noe kan kalle
+  // motoren (en omstart glemmer aldri en aktiv pause), sovereign-eier-
+  // autoritet for pause/policy/gjenoppretting = SAMME eier som
+  // `ownerIdentity`/`PolicyGateway`. Kontrollflaten (`situations`-verktøyet)
+  // registreres gjennom `firstWaveTools(..., { additionalTools })` under -
+  // SAMME ene register-løkke, aldri en parallell registreringsvei.
+  const situationDomainPauses = new DomainPauseRegistry(pool, { owner_person_id: ownerIdentity.person_id });
+  await situationDomainPauses.restore();
+  const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id });
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
@@ -452,7 +472,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // denne funksjonen). Tom/ukonfigurert -> INGEN produksjonsmål autorisert
     // (fail-closed, se docker-target-policy.ts) - sentinel-mål (host-
     // akseptanse) er alltid tilgjengelig uavhengig av denne variabelen.
-    dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
+    dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"]),
+    // UA-10 P1 (D-160): eierens kontrollflate for Situation Engine - se over.
+    additionalTools: situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses))
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
@@ -469,11 +491,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // over - en direkte, parallell instans, IKKE den lazy interne i
   // SupportTransport) - SAMME toolGateway/businessService, ingen ny transport-vei.
   const supportEmailService = new SupportEmailService(toolGateway, businessService, supportService);
-  const ownerIdentity = {
-    person_id: "person-tobias", tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
-    memory_space_id: "personal", session_id: "sess-brief", device_id: "jarvis-core",
-    channel: "api", auth_strength: "active"
-  } as const;
   // BO-11.1 §9: SAMME executive-handler som worker-containeren (delt fil) - api-workeren
   // som vinner queue-racet skal håndtere tools=true-jobber identisk (uten sandbox).
   worker.register(
@@ -732,6 +749,26 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-open-loop-sweep", Number(process.env["JARVIS_BUSINESS_SWEEP_HOUR"] ?? 6)
   ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
+  // UA-10 P1 AKTIVERING (D-160): situasjons-sveipen - ingest fra
+  // `business_open_loops` -> `situations`, kildebasert løsning, evidens-først
+  // INFORM/SUGGEST-leveranse via `telegram.notify`, og auto-ACT KUN under en
+  // eksplisitt eier-policy (`situation_autonomy_policies`). SAMME reboot-
+  // durable DailyScheduler-mekanisme (eget job_name, egen klokkeslett-env).
+  // Kjøres ETTER business-open-loop-sweep (default kl. 06 -> kl. 07) slik at
+  // dagens ferske loops er detektert FØR de oversettes til situasjoner.
+  // Identiteten per tenant er eierens identitet i sveipens space; en tenant
+  // eieren ikke er autorisert for avvises av PolicyGateway inne i
+  // `execute()` (fail-closed) - aldri en stille utelatelse her.
+  new DailyScheduler(
+    pool, "situation-sweep", Number(process.env["JARVIS_SITUATION_SWEEP_HOUR"] ?? 7)
+  ).start(() => runSituationSweepForAllTenants(pool, {
+    openLoops: openLoopService,
+    engine: situationEngine,
+    gateway: toolGateway,
+    identityFor: (tenantId, memorySpace) => ({
+      ...ownerIdentity, tenant_id: tenantId, memory_space_id: memorySpace, session_id: "sess-situation-sweep"
+    })
+  }).then(() => undefined));
   // UA-3 business-event-linkage (D-57) §19/§20/§21: periodisk Gmail/Calendar->
   // Business-OS-synkronisering - SAMME reboot-durable DailyScheduler-mekanisme
   // (eget job_name, egen klokkeslett-env), uavhengig av Telegram-konfig.

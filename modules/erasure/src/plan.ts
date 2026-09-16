@@ -387,7 +387,11 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // IKKE hendelses-/personeid data - samme "ingen dinglende
   // konfigurasjonsrad, men ALDRI heller feilaktig fjernet policy for
   // gjenværende data"-prinsipp som `location_retention_policies`/
-  // `health_retention_policies` over).
+  // `health_retention_policies` over). UA-10 P1 (D-160, 057_situations_
+  // activation.sql): `situation_autonomy_policies` er OGSÅ eier-konfigurert
+  // policy (auto-ACT-binding per domene), IKKE hendelsesdata - BEVISST
+  // utelatt på samme grunnlag. De nye `situations.inform_*`-kolonnene
+  // slettes sammen med raden under.
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }

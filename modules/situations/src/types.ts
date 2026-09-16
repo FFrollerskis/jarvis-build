@@ -113,6 +113,10 @@ export interface Situation {
   act_claimed_at: string | null;
   act_operation_fingerprint: string | null;
   act_notify_message: string | null;
+  /** D-160 (P1 aktivering): frosset INFORM/SUGGEST-varseltekst, satt ATOMISK med `last_notified_at` - se 057_situations_activation.sql. */
+  inform_message: string | null;
+  /** D-160: settes KUN etter BEKREFTET leveranse, alltid til det eksakte `last_notified_at`-ankeret leveransen gjaldt. */
+  inform_delivered_at: string | null;
   opened_at: string;
   resolved_at: string | null;
   created_at: string;
@@ -143,4 +147,68 @@ export interface ActOnRequest {
   action: string;
   parameters: Record<string, JsonValue>;
   idempotency_key?: string;
+}
+
+// ---------------------------------------------------------------------
+// D-160 (UA-10 P1 aktivering): eierens EKSPLISITTE autonomi-grense - se
+// 057_situations_activation.sql og docs/UA10_SITUATION_ENGINE_DESIGN.md §10.
+// ---------------------------------------------------------------------
+
+/** Én rad i `situation_autonomy_policies` - hvilken handling auto-ACT får kalle `actOn()` med for situasjoner i ETT domene. FRAVÆR av rad = ingen auto-ACT. */
+export interface SituationAutonomyPolicy {
+  tenant_id: string;
+  memory_space_id: string;
+  domain: string;
+  tool_id: string;
+  action: string;
+  parameters: Record<string, JsonValue>;
+  enabled: boolean;
+  actor_person_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([z.string(), z.number(), z.boolean(), z.null(), z.array(JsonValueSchema), z.record(JsonValueSchema)])
+);
+
+export const SetSituationAutonomyPolicyInputSchema = z
+  .object({
+    /** Aldri `*` - en autonomi-policy binder ETT domene (speiler DB-CHECK-en i 057). */
+    domain: z.string().min(1).refine((d) => d !== "*", { message: "domain kan ikke være '*' - en autonomi-policy binder ett domene" }),
+    tool_id: z.string().min(1),
+    action: z.string().min(1),
+    parameters: z.record(JsonValueSchema).optional(),
+    enabled: z.boolean().optional()
+  })
+  .strict();
+export type SetSituationAutonomyPolicyInput = z.infer<typeof SetSituationAutonomyPolicyInputSchema>;
+
+/** Én situasjon som venter på INFORM/SUGGEST-leveranse (anker satt, tekst frosset, leveranse ikke bokført for DETTE ankeret). */
+export interface PendingInformNotification {
+  situation: Situation;
+  /** Den eksakte `last_notified_at`-ISO-strengen leveransen er bundet til (nøkkel + `inform_delivered_at`-verdi). */
+  anchor: string;
+  message: string;
+}
+
+/** Utfallet av én leveransesyklus (`deliverPendingInformNotifications()`). Tellinger, aldri innhold - innholdet er allerede i `tool_executions`/audit. */
+export interface InformDeliveryResult {
+  delivered: number;
+  /** Bekreftet fra durable `tool_executions`-bevis UTEN nytt transportkall (krasj mellom sending og bokføring). */
+  reconciled_from_evidence: number;
+  /** Ikke levert denne syklusen (transport `ok:false`/kast) - forblir ventende, prøves igjen neste sveip under SAMME nøkkel. */
+  pending: number;
+  /** Bevis under nøkkelen som IKKE er en `telegram`/`notify`-rad - fail-closed, aldri godtatt. */
+  evidence_mismatch: number;
+}
+
+/** Utfallet av én auto-ACT-syklus (`autoActPending()`). */
+export interface AutoActResult {
+  /** `actOn()` faktisk kalt (uansett utfall - utfallet lever i selve situasjonen/`tool_executions`). */
+  attempted: number;
+  succeeded: number;
+  denied: number;
+  /** Hoppet over FØR noe kall: domene pauset, allerede claimet av en annen kaller, eller policy deaktivert i mellomtiden. */
+  skipped: number;
 }
