@@ -516,8 +516,8 @@ describe("G: Funn 2 (arkitekt-review runde 2, PR #85) - krasj-gjenopprettings-re
     const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
     // Simulerer en PROSESS-KRASJ rett ETTER claimen, men FØR noe transportkall i det hele tatt ble gjort - INGEN tool_executions-rad finnes for nøkkelen.
     await adminPool.query(
-      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4 WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId, buildNotifyMessage("Simulert krasj FØR transportkall", "test_actuator", "flip")]
     );
 
     await expect(
@@ -544,8 +544,8 @@ describe("G: Funn 2 (arkitekt-review runde 2, PR #85) - krasj-gjenopprettings-re
     const finalKey = `situation:${situationId}:evidence-sim-key`;
     const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
     await adminPool.query(
-      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4 WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId, buildNotifyMessage("Simulert krasj MELLOM execute() og persistering", "test_actuator", "flip")]
     );
     // releaseStuckActClaim() MÅ nekte NÅR et faktisk bevis finnes - dette er IKKE en fastlåst claim.
     await adminPool.query(
@@ -944,13 +944,14 @@ describe("M: Funn 1 (arkitekt-review runde 5, PR #85) - terminal_replay MÅ reko
     const situationId = situation.situation_id;
     const finalKey = `situation:${situationId}:crash-before-notify-key`;
     const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    const notifyMessage = buildNotifyMessage("Krasj FØR varsel-forsøket", "test_actuator", "flip");
     // Simulerer: ACT-en BLE bekreftet og persistert (stage='act', act_result='succeeded'), men prosessen krasjet FØR noe varsel-forsøk i det hele tatt ble gjort.
     await adminPool.query(
       `UPDATE situations
-       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4,
            act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
        WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      [finalKey, fingerprint, situationId, notifyMessage]
     );
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -975,19 +976,20 @@ describe("M: Funn 1 (arkitekt-review runde 5, PR #85) - terminal_replay MÅ reko
     const situationId = situation.situation_id;
     const finalKey = `situation:${situationId}:crash-after-notify-key`;
     const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    const notifyMessage = buildNotifyMessage("Krasj MELLOM bekreftet varsel og stage-oppdatering", "test_actuator", "flip");
     await adminPool.query(
       `UPDATE situations
-       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4,
            act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
        WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      [finalKey, fingerprint, situationId, notifyMessage]
     );
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, finalKey, "test_actuator", "flip", "act-simulated-crash-after-notify", "succeeded"]
     );
     // Varselet ble FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen, bundet til DENNE meldingens fingeravtrykk), men prosessen krasjet FØR stage='act_notify' ble persistert.
-    const notifyKey = computeNotifyKey(finalKey, situationId, "Krasj MELLOM bekreftet varsel og stage-oppdatering", "test_actuator", "flip");
+    const notifyKey = computeNotifyKey(finalKey, situationId, notifyMessage);
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, notifyKey, "telegram", "notify", "tg-simulated-crash", "succeeded"]
@@ -1011,19 +1013,20 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
     const situationId = situation.situation_id;
     const finalKey = `situation:${situationId}:${keySuffix}`;
     const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    const notifyMessage = buildNotifyMessage(`Krasj-etter-bekreftet-varsel-bevis-${keySuffix}`, "test_actuator", "flip");
     await adminPool.query(
       `UPDATE situations
-       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4,
            act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
        WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      [finalKey, fingerprint, situationId, notifyMessage]
     );
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, finalKey, "test_actuator", "flip", `act-sim-${keySuffix}`, "succeeded"]
     );
     // Varselet BLE FAKTISK bekreftet levert (tool_executions-bevis finnes for notify-nøkkelen, bundet til DENNE meldingens fingeravtrykk) - prosessen krasjet FØR stage='act_notify' ble persistert.
-    const notifyKey = computeNotifyKey(finalKey, situationId, `Krasj-etter-bekreftet-varsel-bevis-${keySuffix}`, "test_actuator", "flip");
+    const notifyKey = computeNotifyKey(finalKey, situationId, notifyMessage);
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, notifyKey, "telegram", "notify", `tg-sim-${keySuffix}`, "succeeded"]
@@ -1139,7 +1142,7 @@ describe("N: Funn 1 (arkitekt-review runde 6, PR #85) - varsel-rekonsiliering le
   it("Funn 1 (arkitekt-review runde 7, PR #85) - en tool_executions-rad UNDER varsel-nøkkelen, men for et ANNET tool_id/action, avvises fail-closed (SituationActNotificationEvidenceMismatchError) - stage kan IKKE avansere til 'act_notify' på det falske beviset", async () => {
     const situationId = await setupCrashedAfterNotifyEvidence("infra", "infra:actuator:reconcile-evidence-mismatch", "reconcile-mismatch-key");
     const finalKey = `situation:${situationId}:reconcile-mismatch-key`;
-    const notifyKey = computeNotifyKey(finalKey, situationId, "Krasj-etter-bekreftet-varsel-bevis-reconcile-mismatch-key", "test_actuator", "flip");
+    const notifyKey = computeNotifyKey(finalKey, situationId, buildNotifyMessage("Krasj-etter-bekreftet-varsel-bevis-reconcile-mismatch-key", "test_actuator", "flip"));
     // Overskriver den GYLDIGE ('telegram'/'notify') raden fra setup-hjelperen med en som IKKE er bundet til varsel-operasjonen.
     await adminPool.query(
       `UPDATE tool_executions SET tool_id = $1, action = $2 WHERE tenant_id = $3 AND idempotency_key = $4`,
@@ -1184,10 +1187,10 @@ describe("O: Funn 1 (arkitekt-review runde 8, PR #85) - varsel-bevis MÅ bindes 
     // Simulerer: ACT-en BLE bekreftet og persistert, men prosessen krasjet FØR stage='act_notify' ble persistert.
     await adminPool.query(
       `UPDATE situations
-       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2,
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4,
            act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
        WHERE situation_id = $3`,
-      [finalKey, fingerprint, situationId]
+      [finalKey, fingerprint, situationId, buildNotifyMessage(REAL_REASON, "test_actuator", "flip")]
     );
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -1195,7 +1198,7 @@ describe("O: Funn 1 (arkitekt-review runde 8, PR #85) - varsel-bevis MÅ bindes 
     );
     // Et "bevist" varsel finnes, men for et HELT ANNET meldingsinnhold (en annen 'reason') enn den situasjonen FAKTISK har -
     // dette produserer en HELT ANNEN fingeravtrykk-nøkkel enn den DENNE meldingen ville brukt.
-    const staleNotifyKey = computeNotifyKey(finalKey, situationId, "En HELT ANNEN, ubeslektet grunn fra et tidligere forsøk", "test_actuator", "flip");
+    const staleNotifyKey = computeNotifyKey(finalKey, situationId, buildNotifyMessage("En HELT ANNEN, ubeslektet grunn fra et tidligere forsøk", "test_actuator", "flip"));
     await adminPool.query(
       `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
       [TENANT_OWNER, staleNotifyKey, "telegram", "notify", "tg-sim-stale-payload", "succeeded"]
@@ -1226,5 +1229,169 @@ describe("O: Funn 1 (arkitekt-review runde 8, PR #85) - varsel-bevis MÅ bindes 
     // Det STALE beviset (annet innhold) ble IKKE godtatt - ETT ferskt, ekte varsel ble sendt for DENNE meldingen, ikke null.
     expect(localTelegram.calls).toHaveLength(1);
     expect(localTelegram.calls[0]?.parameters.message).toBe(buildNotifyMessage(REAL_REASON, "test_actuator", "flip"));
+  });
+});
+
+describe("P: Funn 1 (arkitekt-review runde 9, PR #85) - varselteksten/-nøkkelen MÅ være FROSSET ved claimen, ALDRI re-avledet fra den muterbare `reason`", () => {
+  function localGateway(): { g: ToolGateway; localTelegram: TelegramSpyTransport } {
+    const localTelegram = new TelegramSpyTransport();
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport: actuatorOk,
+      preflight_action: "read_state", postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: localTelegram
+    });
+    return { g, localTelegram };
+  }
+
+  async function seedSucceededActAt(detectionKey: string, keySuffix: string, reasonA: string): Promise<{ situationId: string; finalKey: string; frozenMessage: string }> {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: detectionKey, priority: "high", confidence: 0.9, reason: reasonA
+    });
+    const situationId = situation.situation_id;
+    const finalKey = `situation:${situationId}:${keySuffix}`;
+    const fingerprint = computeActOperationFingerprint(situationId, "test_actuator", "flip", {});
+    const frozenMessage = buildNotifyMessage(reasonA, "test_actuator", "flip");
+    // ACT bekreftet og persistert (act_result='succeeded', stage='act'), varselteksten frosset ved claimen - som service.ts gjør.
+    await adminPool.query(
+      `UPDATE situations
+       SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2, act_notify_message = $4,
+           act_tool_id = 'test_actuator', act_action = 'flip', act_result = 'succeeded', stage = 'act', updated_at = now()
+       WHERE situation_id = $3`,
+      [finalKey, fingerprint, situationId, frozenMessage]
+    );
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, finalKey, "test_actuator", "flip", `act-sim-${keySuffix}`, "succeeded"]
+    );
+    return { situationId, finalKey, frozenMessage };
+  }
+
+  it("reviewens eksakte sekvens: bekreftet varsel (reason A) + krasj FØR stage-oppdatering + re-deteksjon som endrer reason til B + retry -> ZERO nye transportkall, selv-helbredet til 'act_notify'", async () => {
+    const REASON_A = "Reason A - den opprinnelige grunnen ACT-en ble utført for";
+    const REASON_B = "Reason B - en SENERE re-deteksjon omformulerte grunnen";
+    const { situationId, finalKey, frozenMessage } = await seedSucceededActAt("infra:actuator:frozen-notify-redetect", "frozen-redetect-key", REASON_A);
+    // Varselet BLE bekreftet levert under nøkkelen for den FROSNE teksten (reason A) - prosessen krasjet FØR stage='act_notify'.
+    await adminPool.query(
+      `INSERT INTO tool_executions (tenant_id, idempotency_key, tool_id, action, external_id, status) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [TENANT_OWNER, computeNotifyKey(finalKey, situationId, frozenMessage), "telegram", "notify", "tg-sim-frozen-redetect", "succeeded"]
+    );
+
+    // Re-deteksjon av SAMME situasjon med en ANNEN reason - evaluateCandidate() oppdaterer `reason` selv om stadiet allerede er 'act'.
+    const redetected = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-redetect", priority: "high", confidence: 0.9, reason: REASON_B
+    });
+    expect(redetected.situation.situation_id).toBe(situationId);
+    expect(redetected.situation.reason).toBe(REASON_B); // `reason` ER faktisk mutert ...
+    expect(redetected.situation.stage).toBe("act"); // ... mens stadiet holdes (non-regresjon) ...
+    expect(redetected.situation.act_notify_message).toBe(frozenMessage); // ... og den FROSNE varselteksten er UENDRET.
+
+    const { g, localTelegram } = localGateway();
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "frozen-redetect-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify"); // selv-helbredet fra beviset under den FROSNE nøkkelen.
+    expect(localTelegram.calls).toHaveLength(0); // INGEN duplikat - runde 8 ville regnet ut en annen nøkkel fra reason B og sendt på nytt.
+    expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0);
+  });
+
+  it("krasj FØR varsel-forsøket + re-deteksjon som endrer reason -> det FØRSTE varselet sendes med den FROSNE teksten (reason A, ikke B), og en påfølgende retry dedupliserer under SAMME nøkkel", async () => {
+    const REASON_A = "Reason A - frosset ved claimen";
+    const REASON_B = "Reason B - endret etter ACT, FØR varselet";
+    const { situationId, finalKey, frozenMessage } = await seedSucceededActAt("infra:actuator:frozen-notify-first-send", "frozen-first-send-key", REASON_A);
+    const redetected = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-first-send", priority: "high", confidence: 0.9, reason: REASON_B
+    });
+    expect(redetected.situation.reason).toBe(REASON_B);
+    expect(redetected.situation.stage).toBe("act");
+
+    const { g, localTelegram } = localGateway();
+    const first = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "frozen-first-send-key" }, g, ownerIdentity
+    );
+    expect(first.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(1);
+    expect(localTelegram.calls[0]?.parameters.message).toBe(frozenMessage); // teksten fra reason A - ALDRI reason B.
+    const { rows } = await adminPool.query(
+      `SELECT status FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [TENANT_OWNER, computeNotifyKey(finalKey, situationId, frozenMessage)]
+    );
+    expect((rows[0] as { status: string } | undefined)?.status).toBe("succeeded"); // beviset ligger under den FROSNE nøkkelen.
+
+    // Enda en re-deteksjon (reason C) + retry: nøkkelen er fortsatt den frosne -> ZERO nye transportkall.
+    await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-first-send", priority: "high", confidence: 0.9, reason: "Reason C - enda en omformulering"
+    });
+    const retry = await engine.actOn(
+      TENANT_OWNER, "business", situationId, { tool_id: "test_actuator", action: "flip", parameters: {}, idempotency_key: "frozen-first-send-key" }, g, ownerIdentity
+    );
+    expect(retry.situation.stage).toBe("act_notify");
+    expect(localTelegram.calls).toHaveLength(1); // fortsatt nøyaktig ETT varsel totalt.
+  });
+
+  it("en claim UTEN frossen varseltekst er strukturelt umulig - databasen avviser den (situations_act_notify_message_frozen_ck)", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-check", priority: "high", confidence: 0.9, reason: "CHECK-test"
+    });
+    await expect(
+      adminPool.query(
+        `UPDATE situations SET act_claimed_at = now(), act_idempotency_key = $1, act_operation_fingerprint = $2 WHERE situation_id = $3`,
+        [`situation:${situation.situation_id}:check-key`, computeActOperationFingerprint(situation.situation_id, "test_actuator", "flip", {}), situation.situation_id]
+      )
+    ).rejects.toThrow(/situations_act_notify_message_frozen_ck/);
+  });
+
+  it("claim-feltene er IMMUTABLE på DB-nivå mens claimen står - en senere UPDATE som endrer act_notify_message (eller nøkkel/fingeravtrykk) avvises (situations_act_claim_immutable), mens frigjøring (alle -> NULL) fortsatt er tillatt", async () => {
+    const { situationId } = await seedSucceededActAt("infra:actuator:frozen-notify-immutable", "frozen-immutable-key", "Reason A - immutabel");
+    await expect(
+      adminPool.query(`UPDATE situations SET act_notify_message = $1 WHERE situation_id = $2`, ["En omskrevet varseltekst", situationId])
+    ).rejects.toThrow(/situations_act_claim_immutable/);
+    await expect(
+      adminPool.query(`UPDATE situations SET act_idempotency_key = $1 WHERE situation_id = $2`, [`situation:${situationId}:annen-key`, situationId])
+    ).rejects.toThrow(/situations_act_claim_immutable/);
+    await expect(
+      adminPool.query(`UPDATE situations SET act_operation_fingerprint = $1 WHERE situation_id = $2`, ["deadbeef", situationId])
+    ).rejects.toThrow(/situations_act_claim_immutable/);
+    // Ikke-claim-felter kan fortsatt oppdateres (det er dette evaluateCandidate() gjør ved re-deteksjon).
+    await adminPool.query(`UPDATE situations SET reason = $1 WHERE situation_id = $2`, ["Reason B - lov aa endre", situationId]);
+    // Eksplisitt frigjøring (alle claim-felt -> NULL sammen) er tillatt - samme form som releaseStuckActClaim().
+    await adminPool.query(
+      `UPDATE situations SET act_claimed_at = NULL, act_idempotency_key = NULL, act_operation_fingerprint = NULL, act_notify_message = NULL WHERE situation_id = $1`,
+      [situationId]
+    );
+    const { rows } = await adminPool.query(`SELECT act_idempotency_key, act_notify_message, reason FROM situations WHERE situation_id = $1`, [situationId]);
+    const row = rows[0] as { act_idempotency_key: string | null; act_notify_message: string | null; reason: string };
+    expect(row.act_idempotency_key).toBeNull();
+    expect(row.act_notify_message).toBeNull();
+    expect(row.reason).toBe("Reason B - lov aa endre");
+  });
+
+  it("en normal, fersk ACT via actOn() fryser varselteksten fra reason-en ved claimen, og en re-deteksjon etterpå endrer IKKE den frosne teksten", async () => {
+    const REASON_A = "Reason A - fersk ACT";
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-fresh", priority: "high", confidence: 0.9, reason: REASON_A
+    });
+    const { g, localTelegram } = localGateway();
+    const acted = await engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, g, ownerIdentity
+    );
+    expect(acted.situation.stage).toBe("act_notify");
+    expect(acted.situation.act_notify_message).toBe(buildNotifyMessage(REASON_A, "test_actuator", "flip"));
+    expect(localTelegram.calls[0]?.parameters.message).toBe(buildNotifyMessage(REASON_A, "test_actuator", "flip"));
+
+    const redetected = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:frozen-notify-fresh", priority: "high", confidence: 0.9, reason: "Reason B - etter ACT+NOTIFY"
+    });
+    expect(redetected.situation.reason).toBe("Reason B - etter ACT+NOTIFY");
+    expect(redetected.situation.act_notify_message).toBe(buildNotifyMessage(REASON_A, "test_actuator", "flip"));
+    expect(redetected.situation.stage).toBe("act_notify");
   });
 });

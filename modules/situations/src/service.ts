@@ -205,6 +205,20 @@ export class SituationActNotificationEvidenceMismatchError extends Error {
   }
 }
 
+/**
+ * Funn 1 (arkitekt-review runde 9, PR #85): en claimet/terminal situasjon
+ * UTEN en frossen varseltekst (`act_notify_message`) er strukturelt umulig
+ * (DB-CHECK `situations_act_notify_message_frozen_ck`). Skulle det likevel
+ * observeres, kastes dette EKSPLISITT - varselteksten/-nøkkelen re-avledes
+ * ALDRI stille fra den muterbare `reason`.
+ */
+export class SituationActNotificationPayloadMissingError extends Error {
+  constructor(public readonly situationId: string) {
+    super(`situation_act_notification_payload_missing:${situationId}`);
+    this.name = "SituationActNotificationPayloadMissingError";
+  }
+}
+
 /** Sovereign eier-/delegert autoritet for `releaseStuckActClaim()` (arkitekt-review runde 3, PR #85, Funn 2) - SAMME minimale form som `DomainPauseAuthority` (domain-pause.ts). */
 export interface SituationRecoveryAuthority {
   owner_person_id: string;
@@ -323,11 +337,30 @@ export function buildNotifyMessage(reason: string, toolId: string, action: strin
  * nøkkel og treffer ALDRI denne rekonsilieringen sin SELECT i det hele
  * tatt (faller naturlig tilbake til "INGEN bevis", en trygg
  * førstegangs-utsendelse - ALDRI en stille feilaktig "bekreftet"-status).
+ *
+ * Funn 1 (arkitekt-review runde 9, PR #85): nøkkelen avledes KUN av den
+ * FROSNE meldingsteksten `situations.act_notify_message` (satt ATOMISK i
+ * selve claim-transaksjonen, se `actOn()`), ALDRI av `reason` lest på nytt
+ * ved rekonsilieringstidspunktet. `evaluateCandidate()` oppdaterer `reason`
+ * ved en re-deteksjon OGSÅ etter at stadiet har nådd 'act' (stadie-non-
+ * regresjonen beskytter kun `stage`). Runde 8 avledet nøkkelen av den
+ * MUTERBARE `reason`: ACT+varsel lyktes under nøkkelen for reason A,
+ * prosessen krasjet FØR `stage='act_notify'`, en re-deteksjon endret reason
+ * til B, og retryen regnet ut en ANNEN nøkkel, fant ALDRI det bekreftede
+ * beviset og sendte et DUPLIKAT. Med en frossen tekst er nøkkelen identisk
+ * i første sending OG i ALL senere gjenoppretting, uansett hva `reason`
+ * senere blir.
  */
-export function computeNotifyKey(finalIdempotencyKey: string, situationId: string, reason: string, toolId: string, action: string): string {
-  const message = buildNotifyMessage(reason, toolId, action);
+export function computeNotifyKey(finalIdempotencyKey: string, situationId: string, message: string): string {
   const fingerprint = computeActOperationFingerprint(situationId, "telegram", "notify", { message });
   return `${finalIdempotencyKey}:notify:${fingerprint}`;
+}
+
+function requireNotifyMessage(situation: Situation): string {
+  if (situation.act_notify_message === null) {
+    throw new SituationActNotificationPayloadMissingError(situation.situation_id);
+  }
+  return situation.act_notify_message;
 }
 
 export interface ActOnResult {
@@ -345,9 +378,9 @@ export interface ActOnResult {
  * overskrive et allerede bekreftet utfall).
  */
 type ClaimOutcome =
-  | { kind: "fresh" }
+  | { kind: "fresh"; notifyMessage: string }
   | { kind: "terminal_replay"; situation: Situation }
-  | { kind: "evidence_replay"; status: string; externalId: string | null; reason: string | null };
+  | { kind: "evidence_replay"; status: string; externalId: string | null; reason: string | null; notifyMessage: string };
 
 export class SituationEngine {
   constructor(
@@ -714,18 +747,29 @@ export class SituationEngine {
           throw new SituationDomainPausedError(situation.domain, chosen.reason);
         }
 
-        const { rows: claimedRows } = await client.query(
-          `UPDATE situations
-           SET act_claimed_at = now(), act_idempotency_key = $3, act_operation_fingerprint = $4
-           WHERE tenant_id = $1 AND situation_id = $2 AND act_idempotency_key IS NULL
-           RETURNING *`,
-          [tenantId, situationId, finalIdempotencyKey, operationFingerprint]
+        // Funn 1 (arkitekt-review runde 9, PR #85): raden låses FØRST
+        // (`FOR UPDATE`), og varselteksten FRYSES fra DEN LÅSTE radens
+        // `reason` ATOMISK SAMMEN med selve claimen (`act_notify_message`).
+        // Den re-avledes ALDRI senere fra den muterbare `reason` - se
+        // `computeNotifyKey()` sin doc-kommentar for hele duplikat-scenarioet.
+        const { rows: lockedRows } = await client.query(
+          `SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2 FOR UPDATE`,
+          [tenantId, situationId]
         );
-        if (claimedRows[0]) {
-          return { kind: "fresh" };
+        const locked = lockedRows[0] as Situation | undefined;
+        if (!locked) throw new SituationNotFoundError(situationId);
+        if (locked.act_idempotency_key === null) {
+          const notifyMessage = buildNotifyMessage(locked.reason, request.tool_id, request.action);
+          const { rowCount } = await client.query(
+            `UPDATE situations
+             SET act_claimed_at = now(), act_idempotency_key = $3, act_operation_fingerprint = $4, act_notify_message = $5
+             WHERE tenant_id = $1 AND situation_id = $2 AND act_idempotency_key IS NULL`,
+            [tenantId, situationId, finalIdempotencyKey, operationFingerprint, notifyMessage]
+          );
+          if (rowCount !== 1) throw new SituationActAlreadyClaimedError(situationId);
+          return { kind: "fresh", notifyMessage };
         }
-        const { rows: existingRows } = await client.query(`SELECT * FROM situations WHERE tenant_id = $1 AND situation_id = $2`, [tenantId, situationId]);
-        const existingSituation = existingRows[0] as Situation;
+        const existingSituation = locked;
         if (existingSituation.act_idempotency_key !== finalIdempotencyKey) {
           throw new SituationActAlreadyClaimedError(situationId);
         }
@@ -774,7 +818,13 @@ export class SituationEngine {
         if (!evidence) {
           throw new SituationActInFlightError(situationId);
         }
-        return { kind: "evidence_replay", status: evidence.status, externalId: evidence.external_id, reason: evidence.postcondition_reason };
+        return {
+          kind: "evidence_replay",
+          status: evidence.status,
+          externalId: evidence.external_id,
+          reason: evidence.postcondition_reason,
+          notifyMessage: requireNotifyMessage(existingSituation)
+        };
       });
 
       // Funn 1 (arkitekt-review runde 4, PR #85): en ALLEREDE TERMINAL ACT
@@ -823,7 +873,11 @@ export class SituationEngine {
         // runde 3 Funn 1+2 GARANTERER at dette ALDRI kan være en samtidig
         // i-flukt-tilstand) er et NYTT `execute()`-kall trygt og
         // nødvendig.
-        const notifyKey = computeNotifyKey(finalIdempotencyKey, situationId, existingSituation.reason, request.tool_id, request.action);
+        // Funn 1 (arkitekt-review runde 9, PR #85): nøkkel OG melding fra den
+        // FROSNE teksten satt ved claimen - ALDRI fra `existingSituation.reason`
+        // (kan ha blitt endret av en re-deteksjon ETTER ACT-en).
+        const notifyMessage = requireNotifyMessage(existingSituation);
+        const notifyKey = computeNotifyKey(finalIdempotencyKey, situationId, notifyMessage);
         const replayedToolResult: ToolResult = { ok: true, output_trust: definition?.output_trust ?? "internal", deduplicated: true };
         const notifyEvidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
           const { rows } = await client.query(
@@ -865,7 +919,7 @@ export class SituationEngine {
             identity,
             tool_id: "telegram",
             action: "notify",
-            parameters: { message: buildNotifyMessage(existingSituation.reason, request.tool_id, request.action) },
+            parameters: { message: notifyMessage },
             idempotency_key: notifyKey
           });
           if (notifyResult.ok) {
@@ -944,8 +998,8 @@ export class SituationEngine {
           identity,
           tool_id: "telegram",
           action: "notify",
-          parameters: { message: buildNotifyMessage(situation.reason, request.tool_id, request.action) },
-          idempotency_key: computeNotifyKey(finalIdempotencyKey, situationId, situation.reason, request.tool_id, request.action)
+          parameters: { message: claimOutcome.notifyMessage },
+          idempotency_key: computeNotifyKey(finalIdempotencyKey, situationId, claimOutcome.notifyMessage)
         });
         if (notifyResult.ok) {
           finalSituation = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
@@ -1037,7 +1091,7 @@ export class SituationEngine {
         }
         const { rows } = await client.query(
           `UPDATE situations
-           SET act_claimed_at = NULL, act_idempotency_key = NULL, act_operation_fingerprint = NULL, updated_at = now()
+           SET act_claimed_at = NULL, act_idempotency_key = NULL, act_operation_fingerprint = NULL, act_notify_message = NULL, updated_at = now()
            WHERE tenant_id = $1 AND situation_id = $2
            RETURNING *`,
           [tenantId, situationId]

@@ -112,6 +112,7 @@ export interface Situation {
   act_idempotency_key: string | null;
   act_claimed_at: string | null;
   act_operation_fingerprint: string | null;
+  act_notify_message: string | null;
   opened_at: string;
   resolved_at: string | null;
   created_at: string;

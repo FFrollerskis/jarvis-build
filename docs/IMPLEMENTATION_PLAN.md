@@ -4027,6 +4027,15 @@ meldingsteksten (`computeNotifyKey()`/`buildNotifyMessage()`) bindes nå direkte
 varsel-nøkkelen - IKKE en ny kolonne på `tool_executions` (ToolGateway sin egen, allerede reviewte
 tabell/pipeline røres ikke). Se design-notatet §6.
 
+**Arkitekt-review runde 9 (PR #85):** 1 funn, rettet - runde 8 sin varsel-nøkkel ble avledet av den
+MUTERBARE `reason` (re-deteksjon oppdaterer den også etter `act`), så «bekreftet varsel + krasj før
+stage-oppdatering + re-deteksjon med ny reason + retry» ga en annen nøkkel, tapt bevis og et
+duplikat-varsel. Varselteksten fryses nå i ny kolonne `situations.act_notify_message` atomisk med
+claimen (rad låst med `FOR UPDATE`), og nøkkel + melding avledes kun derfra i første sending og all
+gjenoppretting; DB-CHECK gjør en claim uten frossen tekst umulig, og en `BEFORE UPDATE`-trigger
+(`situations_act_claim_immutable`) nekter enhver endring av claim-feltene mens claimen står. Se
+design-notatet §6.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

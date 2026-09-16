@@ -175,13 +175,53 @@ CREATE TABLE situations (
   -- ATOMISK SAMTIDIG med selve claimen - en retry med SAMME nøkkel, men et
   -- ULIKT fingeravtrykk, avvises EKSPLISITT (`SituationActOperationMismatchError`).
   act_operation_fingerprint text,
+  -- Funn 1 (arkitekt-review runde 9, PR #85): den EKSAKTE varselteksten
+  -- ACT+NOTIFY sender, FROSSET ATOMISK SAMMEN med selve claimen (fra raden
+  -- låst med FOR UPDATE i claim-transaksjonen). Varsel-nøkkelen mot
+  -- `tool_executions` avledes KUN av denne teksten (`computeNotifyKey()` i
+  -- service.ts) - ALDRI av `reason`, som `evaluateCandidate()` fortsatt
+  -- oppdaterer ved en re-deteksjon OGSÅ etter at stadiet har nådd 'act'.
+  -- Uten frysing kunne en retry etter krasj (bekreftet varsel, men
+  -- stage='act_notify' aldri persistert) regne ut en ANNEN nøkkel fra en
+  -- endret `reason`, aldri finne beviset, og sende et DUPLIKAT. CHECK-en
+  -- under gjør en claim UTEN frossen tekst strukturelt umulig.
+  act_notify_message     text,
   opened_at              timestamptz NOT NULL DEFAULT now(),
   resolved_at            timestamptz,
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT situations_act_notify_message_frozen_ck
+    CHECK (act_idempotency_key IS NULL OR act_notify_message IS NOT NULL),
   UNIQUE (tenant_id, memory_space_id, detection_key)
 );
 CREATE INDEX situations_queue_idx ON situations (tenant_id, memory_space_id, status, stage, priority);
+
+-- Funn 1 (arkitekt-review runde 9, PR #85): claim-feltene er IMMUTABLE så
+-- lenge claimen står. CHECK-en over garanterer at den frosne varselteksten
+-- FINNES; denne triggeren garanterer at verken den, nøkkelen eller
+-- operasjons-fingeravtrykket kan ENDRES av noen som helst senere UPDATE
+-- (uansett kodesti) mens `act_idempotency_key` er satt. Tillatt er kun
+-- selve claimen (NULL -> verdi, `actOn()`) og en eksplisitt frigjøring
+-- (verdi -> NULL, `releaseStuckActClaim()`, som nuller alle tre sammen).
+-- Samme plpgsql-/RAISE-mønster som repoets append-only-triggere
+-- (002_sessions_events.sql, 004_audit_cost.sql, 008_memory.sql).
+CREATE OR REPLACE FUNCTION situations_act_claim_immutable() RETURNS trigger AS $$
+BEGIN
+  IF OLD.act_idempotency_key IS NOT NULL AND NEW.act_idempotency_key IS NOT NULL AND (
+       NEW.act_idempotency_key IS DISTINCT FROM OLD.act_idempotency_key
+    OR NEW.act_operation_fingerprint IS DISTINCT FROM OLD.act_operation_fingerprint
+    OR NEW.act_notify_message IS DISTINCT FROM OLD.act_notify_message
+  ) THEN
+    RAISE EXCEPTION 'situations_act_claim_immutable: claim-feltene kan ikke endres mens claimen staar (situation_id=%)', OLD.situation_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER situations_act_claim_immutable
+  BEFORE UPDATE ON situations
+  FOR EACH ROW EXECUTE FUNCTION situations_act_claim_immutable();
 CREATE INDEX situations_domain_idx ON situations (tenant_id, memory_space_id, domain, status);
 
 -- Funn 2 (se kommentaren over `business_open_loops_scope_uq`): scope-safe

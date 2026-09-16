@@ -96,6 +96,24 @@ rekonsilieringens SELECT i det hele tatt - faller naturlig tilbake til "INGEN be
 førstegangs-utsendelse for DENNE meldingen, ALDRI en stille feilaktig "bekreftet"-status på et
 ubeslektet innhold. Se §6 under.
 
+**Arkitekt-review runde 9 (PR #85, HEAD fa40004):** 1 funn - runde 8 sin innholdsbundne varsel-nøkkel
+ble avledet av `reason`, som er MUTERBAR tilstand: `evaluateCandidate()` oppdaterer `reason` ved en
+re-deteksjon OGSÅ etter at stadiet har nådd `act` (stadie-non-regresjonen beskytter kun `stage`).
+Gyldig sekvens som brøt gjenopprettingen: ACT + `telegram.notify` lyktes under nøkkelen for reason A →
+krasj FØR `stage='act_notify'` ble persistert → en re-deteksjon endret reason til B → retryen regnet ut
+en ANNEN nøkkel fra B, fant ALDRI det bekreftede beviset under A, og sendte et DUPLIKAT-varsel (brudd
+på «no duplicate spam»). Rettet: den EKSAKTE varselteksten FRYSES nå i ny kolonne
+`situations.act_notify_message` ATOMISK SAMMEN med selve claimen (fra raden låst med `FOR UPDATE` i
+claim-transaksjonen), og BÅDE første sending OG ALL senere gjenoppretting avleder nøkkel og melding KUN
+fra den frosne teksten (`computeNotifyKey(finalKey, situationId, message)`) - ALDRI fra `reason` lest
+på nytt. En DB-CHECK (`situations_act_notify_message_frozen_ck`) gjør en claim UTEN frossen tekst
+strukturelt umulig, og en `BEFORE UPDATE`-trigger (`situations_act_claim_immutable`, samme plpgsql-
+mønster som repoets append-only-triggere) nekter ENHVER senere endring av nøkkel, fingeravtrykk eller
+frossen tekst mens claimen står - uansett kodesti; kun claim (NULL → verdi) og eksplisitt frigjøring
+(alle → NULL, `releaseStuckActClaim()`) er tillatt. `reason` forblir
+bevisst muterbar (det er deteksjonens beskrivelse) - det er VARSEL-NYTTELASTEN som er immutabel fra
+claimen. Se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -260,7 +278,11 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    (`computeNotifyKey()`) over den DETERMINISTISKE meldingsteksten (`buildNotifyMessage()`), slik at
    en `succeeded`-rad for ET ANNET innhold produserer en HELT ANNEN nøkkel og ALDRI treffer denne
    rekonsilieringens oppslag - faller trygt tilbake til "INGEN bevis" i stedet for en falsk
-   "bekreftet"-status.
+   "bekreftet"-status. Funn 1 (arkitekt-review runde 9) lukket det siste hullet i DENNE bindingen:
+   teksten nøkkelen avledes av MÅ være IMMUTABEL fra claimen - `reason` er det IKKE (re-deteksjon
+   oppdaterer den etter ACT). Varselteksten fryses derfor i `act_notify_message` atomisk med claimen,
+   og nøkkel + melding avledes KUN derfra i første sending og all gjenoppretting - en senere endret
+   `reason` kan ALDRI flytte nøkkelen bort fra det bekreftede beviset (duplikat umulig).
 4. Et avvist/ubekreftet forsøk (`ok: false`) flytter situasjonen til `escalate` MED den faktiske
    avslagsgrunnen lagret i `reason` — ALDRI stille tilbake til et tidligere stadium, ALDRI et
    varsel om en handling som IKKE faktisk ble bekreftet utført.
@@ -291,7 +313,15 @@ en `tool_executions`-rad under varsel-nøkkelen MED ET ANNET `tool_id`/`action` 
 runde 8) som beviser at en `succeeded` `tool_executions`-rad under en varsel-nøkkel BEREGNET FOR ET
 ANNET meldingsinnhold (en annen `reason`) ALDRI blir funnet av rekonsilieringen for DENNE meldingen -
 `actOn()` sender i stedet ETT ferskt, ekte varsel MED DEN KORREKTE teksten (ZERO falsk "bekreftet"-
-avansering på det ubeslektede beviset).
+avansering på det ubeslektede beviset); OG fire nye tester (Funn 1, runde 9): reviewens eksakte
+sekvens - bekreftet varsel for reason A + krasj før stage-oppdatering + re-deteksjon som endrer reason
+til B + retry - gir ZERO nye transportkall og selv-helbreder til `act_notify`; krasj FØR varselet +
+re-deteksjon gir ETT varsel med den FROSNE teksten (reason A, aldri B) og en ny retry etter enda en
+re-deteksjon dedupliserer under SAMME nøkkel; databasen avviser en claim uten frossen tekst
+(`situations_act_notify_message_frozen_ck`) OG enhver endring av claim-feltene mens claimen står
+(`situations_act_claim_immutable` - frigjøring til NULL og endring av ikke-claim-felt som `reason`
+forblir tillatt); og en normal fersk ACT fryser teksten ved claimen slik at en re-deteksjon etterpå
+endrer `reason` men ALDRI `act_notify_message`).
 
 ## 7. Retensjon og Q-20-erasure
 
