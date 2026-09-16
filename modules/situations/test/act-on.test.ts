@@ -19,7 +19,8 @@ import {
   SituationActOperationMismatchError,
   SituationActScopeMismatchError,
   SituationDomainPausedError,
-  SituationEngine
+  SituationEngine,
+  SituationRecoveryUnauthorizedError
 } from "../src/service.ts";
 
 /**
@@ -125,8 +126,8 @@ beforeAll(async () => {
     killSwitch: new KillSwitch(),
     authority: { owner_person_id: "person-tobias-sit", owner_tenants: [TENANT_OWNER] }
   });
-  domainPauses = new DomainPauseRegistry();
-  engine = new SituationEngine(appPool, domainPauses);
+  domainPauses = new DomainPauseRegistry(appPool, { owner_person_id: "person-tobias-sit" });
+  engine = new SituationEngine(appPool, domainPauses, { owner_person_id: "person-tobias-sit" });
 }, 240_000);
 
 beforeEach(() => {
@@ -279,7 +280,7 @@ describe("C: domene-pause blokkerer actOn() FØR gateway.execute() i det hele ta
 });
 
 describe("D: Funn 3 (arkitekt-review runde 1, PR #85) - atomisk, eksklusiv claim FØR execute(), eksakt-én-gang ACT", () => {
-  it("et ANNET actOn()-kall for SAMME situasjon, startet MENS det FØRSTE fortsatt er i flukt inni selve det eksterne kallet (claimen ALLEREDE committet), avvises DETERMINISTISK med SituationActInFlightError - INGEN dobbel side-effekt", async () => {
+  it("et ANNET actOn()-kall for SAMME situasjon, startet MENS det FØRSTE fortsatt er i flukt inni selve det eksterne kallet (claimen ALLEREDE committet): VENTER på advisory-låsen (Funn 1+2, arkitekt-review runde 3 - HELE actOn() sin kritiske seksjon holder nå låsen, ikke bare claim-transaksjonen) og fullfører DERETTER trygt som en dedupliserende retry - INGEN dobbel side-effekt", async () => {
     const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
       domain: "infra", detection_key: "infra:actuator:concurrent", priority: "high", confidence: 0.9, reason: "Samtidig ACT-forsøk"
     });
@@ -329,16 +330,28 @@ describe("D: Funn 3 (arkitekt-review runde 1, PR #85) - atomisk, eksklusiv claim
     const firstPromise = engine.actOn(
       TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, slowGateway, ownerIdentity
     );
-    await reachedGate; // det FØRSTE kallets claim er GARANTERT allerede committet på dette tidspunktet.
+    await reachedGate; // det FØRSTE kallets claim er GARANTERT allerede committet, OG det holder NÅ advisory-låsen for "infra".
 
-    await expect(
-      engine.actOn(TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
-    ).rejects.toThrow(SituationActInFlightError);
+    let secondSettled = false;
+    const secondPromise = engine
+      .actOn(TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+      .finally(() => {
+        secondSettled = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Det ANDRE kallet venter FORTSATT på advisory-låsen det FØRSTE holder - IKKE avvist, IKKE fullført ennå.
+    expect(secondSettled).toBe(false);
 
     releaseFlip();
     const first = await firstPromise;
+    const second = await secondPromise;
     expect(first.tool_result.ok).toBe(true);
-    // Den FAKTISKE 'flip'-mutasjonen skjedde KUN ÉN gang - den eksklusive claimen (ikke ToolGateway sin egen dedupe alene) beviser eksakt-én-gang.
+    expect(second.tool_result.ok).toBe(true);
+    if (second.tool_result.ok) {
+      // Det ANDRE kallet sin ToolGateway-dedupe gjenkjenner FØRSTE kallet sitt allerede skrevne tool_executions-bevis.
+      expect(second.tool_result.deduplicated).toBe(true);
+    }
+    // Den FAKTISKE 'flip'-mutasjonen skjedde KUN ÉN gang - den eksklusive claimen + advisory-låsen (ikke ToolGateway sin egen dedupe alene) beviser eksakt-én-gang.
     expect(gatedTransport.calls.filter((c) => c.action === "flip")).toHaveLength(1);
     expect(actuatorOk.calls.filter((c) => c.action === "flip")).toHaveLength(0);
   });
@@ -631,5 +644,146 @@ describe("J: Funn 5 (arkitekt-review runde 2, PR #85) - AUTORITATIV, TRANSAKSJON
     } finally {
       await adminPool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, ["*"]);
     }
+  });
+});
+
+describe("K: Funn 1+2 (arkitekt-review runde 3, PR #85) - EKTE tvers-av-prosess gjensidig utelukkelse (advisory locks), ikke en 'sjekk-så-skriv' som kan race", () => {
+  function gatedActuator() {
+    let releaseFlip!: () => void;
+    const flipGate = new Promise<void>((resolve) => {
+      releaseFlip = resolve;
+    });
+    let resolveReachedGate!: () => void;
+    const reachedGate = new Promise<void>((resolve) => {
+      resolveReachedGate = resolve;
+    });
+    class GatedActuatorTransport implements ToolTransport {
+      calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
+      private on = false;
+      async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
+        this.calls.push({ action, parameters });
+        if (action === "read_state") return { data: { on: this.on } };
+        if (action === "flip") {
+          resolveReachedGate();
+          await flipGate;
+          this.on = true;
+          return { external_id: "act-1", data: { on: this.on } };
+        }
+        throw new Error(`unknown_action:${action}`);
+      }
+    }
+    return { transport: new GatedActuatorTransport(), releaseFlip, reachedGate };
+  }
+
+  function gatedGateway(transport: ToolTransport): ToolGateway {
+    const g = new ToolGateway(appPool, policy, secrets);
+    g.register({
+      tool_id: "test_actuator", action: "flip", description: "test", input_schema: record({}),
+      capability_class: "D", scopes: [], reversible: true, rollback_procedure: "flip back",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_ACTUATOR_TOKEN", output_trust: "internal", transport,
+      preflight_action: "read_state",
+      postcondition_predicate: (after) => (after as { on: boolean } | null)?.on === true
+    });
+    g.register({
+      tool_id: "telegram", action: "notify", description: "test", input_schema: record({ message: z.string() }),
+      capability_class: "B", scopes: [], reversible: true, rollback_procedure: "send correction",
+      idempotent_external: false, timeout_ms: 5000, rate_limit_per_minute: 30,
+      credential_ref: "TEST_TELEGRAM_TOKEN", output_trust: "internal", transport: telegram
+    });
+    return g;
+  }
+
+  it("en pauseDurable() FORSØKT MENS et actOn() er i flukt for SAMME domene MÅ VENTE til actOn() er ferdig - kan ALDRI blokkere et ALLEREDE påbegynt forsøk, men blokkerer PÅLITELIG det NESTE", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "barrier-domain-pause", detection_key: "infra:actuator:barrier-pause", priority: "high", confidence: 0.9, reason: "To-sesjons-barriere-test"
+    });
+    const { transport, releaseFlip, reachedGate } = gatedActuator();
+    const slowGateway = gatedGateway(transport);
+
+    const actOnPromise = engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, slowGateway, ownerIdentity
+    );
+    await reachedGate; // actOn() holder NÅ advisory-låsen for "barrier-domain-pause" og er midt i det eksterne kallet.
+
+    let pauseResolved = false;
+    const pausePromise = domainPauses
+      .pauseDurable("barrier-domain-pause", "forsøkt midt i et in-flight actOn()", "person-tobias-sit")
+      .then(() => {
+        pauseResolved = true;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // pauseDurable() venter FORTSATT på advisory-låsen - beviser at den IKKE kan smyge seg forbi et allerede påbegynt forsøk.
+    expect(pauseResolved).toBe(false);
+
+    releaseFlip();
+    const result = await actOnPromise;
+    expect(result.tool_result.ok).toBe(true); // handlingen FULLFØRTE - pausen kom for SENT til å påvirke DETTE forsøket.
+
+    await pausePromise;
+    expect(pauseResolved).toBe(true);
+
+    const { situation: situation2 } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "barrier-domain-pause", detection_key: "infra:actuator:barrier-pause-2", priority: "high", confidence: 0.9, reason: "Skal blokkeres naa"
+    });
+    await expect(
+      engine.actOn(TENANT_OWNER, "business", situation2.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, gateway, ownerIdentity)
+    ).rejects.toThrow(SituationDomainPausedError);
+
+    await domainPauses.unpauseDurable("barrier-domain-pause", "person-tobias-sit");
+  });
+
+  it("releaseStuckActClaim() FORSØKT MENS et actOn() FORTSATT er i flukt (INGEN tool_executions-bevis skrevet ennå) MÅ VENTE - kan ALDRI observere et falskt 'ingen bevis' midt i et ekte pågående forsøk", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "barrier-domain-release", detection_key: "infra:actuator:barrier-release", priority: "high", confidence: 0.9, reason: "To-sesjons-barriere-release-test"
+    });
+    const { transport, releaseFlip, reachedGate } = gatedActuator();
+    const slowGateway = gatedGateway(transport);
+
+    const actOnPromise = engine.actOn(
+      TENANT_OWNER, "business", situation.situation_id, { tool_id: "test_actuator", action: "flip", parameters: {} }, slowGateway, ownerIdentity
+    );
+    await reachedGate; // claimet, MEN INGEN tool_executions-bevis er skrevet ennå (transporten er FORTSATT inni det gatede kallet).
+
+    let releaseSettled = false;
+    const releasePromise = engine
+      .releaseStuckActClaim(TENANT_OWNER, "business", situation.situation_id, ownerIdentity)
+      .finally(() => {
+        releaseSettled = true;
+      });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // releaseStuckActClaim() venter FORTSATT på advisory-låsen actOn() holder.
+    expect(releaseSettled).toBe(false);
+
+    releaseFlip();
+    const result = await actOnPromise;
+    expect(result.tool_result.ok).toBe(true);
+
+    // NÅ som actOn() er FERDIG (fullt persistert, act_result satt) FØR releaseStuckActClaim() i det hele
+    // tatt fikk fortsette forbi advisory-låsen, ser den situasjonen som ALLEREDE fullført normalt - IKKE
+    // en fastlåst claim (den tidligere "evidence exists, act_result NULL"-mellomtilstanden testen i
+    // runde 2 antok, er nå STRUKTURELT umulig å observere utenfra: en ekstern kaller kan ALDRI se
+    // situasjonen midt i actOn() sin persistering, kun FØR (fortsatt låst) eller ETTER (helt ferdig)).
+    const released = await releasePromise;
+    expect(released.act_result).toBe("succeeded");
+    expect(released.act_idempotency_key).not.toBeNull(); // IKKE frigjort - ingenting å frigjøre.
+    expect(releaseSettled).toBe(true);
+  });
+
+  it("releaseStuckActClaim() krever konfigurert recoveryAuthority PLUSS en identity.person_id som FAKTISK matcher - avvist (SituationRecoveryUnauthorizedError) ellers, INGEN frigjøring", async () => {
+    const { situation } = await engine.evaluateCandidate(TENANT_OWNER, "business", {
+      domain: "infra", detection_key: "infra:actuator:recovery-unauthorized", priority: "high", confidence: 0.9, reason: "Uautorisert gjenopprettingsforsøk"
+    });
+    const imposterIdentity: IdentityContext = { ...ownerIdentity, person_id: "person-tobias-sit-imposter" };
+    await expect(
+      engine.releaseStuckActClaim(TENANT_OWNER, "business", situation.situation_id, imposterIdentity)
+    ).rejects.toThrow(SituationRecoveryUnauthorizedError);
+
+    const engineWithoutAuthority = new SituationEngine(appPool, domainPauses);
+    await expect(
+      engineWithoutAuthority.releaseStuckActClaim(TENANT_OWNER, "business", situation.situation_id, ownerIdentity)
+    ).rejects.toThrow(SituationRecoveryUnauthorizedError);
   });
 });

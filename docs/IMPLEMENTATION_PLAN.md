@@ -3982,6 +3982,17 @@ domene-pause-gaten er nå en AUTORITATIV, TRANSAKSJONELL DB-sjekk (ikke kun den 
 fikk en scope-safe sammensatt FK mot `person_tenants` - se design-notatet §6/§2 for det fulle, oppdaterte
 designet.
 
+**Arkitekt-review runde 3 (PR #85):** 2 dypere funn på runde 2 sin fiksing, BEGGE rettet - runde 2 sin
+"autoritative transaksjonelle" pause-sjekk var fortsatt racy (en SELECT låser ikke fraværet av en rad,
+og `execute()`-kallet skjedde UTENFOR claim-transaksjonen); `releaseStuckActClaim()` var verken
+eier-autorisert eller race-fri mot selve `execute()`-kallet. Lukket med EKTE Postgres advisory locks
+(`modules/situations/src/advisory-lock.ts`) - `actOn()` og `releaseStuckActClaim()` holder NÅ SAMME
+tvers-av-prosess-lås for `[domene, ALL_DOMAINS]` gjennom HELE sin kritiske seksjon (inkl. selve det
+eksterne kallet), og `DomainPauseRegistry` sine `*Durable()`-mutasjoner tar samme lås FØR de skriver -
+en pause-mutasjon og et `actOn()`-forsøk for samme domene kan derfor ALDRI kjøre samtidig.
+`releaseStuckActClaim()` krever nå også et konfigurert `SituationRecoveryAuthority` - se design-notatet
+§6 for det fulle, oppdaterte designet.
+
 **Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
 embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
 deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-

@@ -24,6 +24,15 @@ domene-pause-gaten var FORTSATT kun den synkrone in-memory-cachen (ALDRI en auto
 `*Durable()`-mutasjoner hadde INGEN autorisasjonssjekk i det hele tatt, (6) `owner_person_id` manglet
 scope-safe FK mot `person_tenants`. ALLE rettet - se §6/§8 under.
 
+**Arkitekt-review runde 3 (PR #85, HEAD 63bf3f6):** 2 DYPERE funn på runde 2 sin fiksing - (1) runde 2
+sin "autoritative transaksjonelle" pause-sjekk var FORTSATT racy: en SELECT låser ikke fraværet av en
+rad, OG selve `execute()`-kallet skjedde UTENFOR claim-transaksjonen (etter at den allerede hadde
+committet) - en `pauseDurable()` kunne committe I DET vinduet uten effekt på et allerede claimet
+forsøk; (2) `releaseStuckActClaim()` var verken eier-autorisert (kun scope-likhet) eller race-fri mot
+selve `execute()`-kallet (en `FOR UPDATE`-lås på `situations` fenser ikke ToolGateway, som skriver
+`tool_executions` FØRST ETTER at transporten returnerer). Begge lukket med EKTE, tvers-av-prosess
+Postgres advisory locks (`modules/situations/src/advisory-lock.ts`) - se §6 under.
+
 ## 1. D-64 Core-vs-Adapter-porten (kjørt FØRST)
 
 `CAPABILITY` = hendelses-/situasjons-tilstandsmaskin (klassifisering, dedupe/suppression/quiet-hours,
@@ -105,17 +114,25 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    FØRST, FØR noe DB- eller gateway-kall (`SituationActScopeMismatchError`, zero side-effekt) — en
    handling autorisert/utført for ETT tenant/space skal ALDRI kunne registreres som resultatet av en
    situasjon i et ANNET. Samme sjekk i `releaseStuckActClaim()` (se punkt 2 under).
-1. **Domene-pause er en AUTORITATIV, TRANSAKSJONELL DB-sjekk** (Funn 5, arkitekt-review runde 2,
-   SKJERPET fra runde 1): `actOn()` spør `situation_domain_pauses` DIREKTE, INNI SAMME transaksjon som
-   selve claimen (punkt 2 under) — ALDRI kun den synkrone `DomainPauseRegistry.isPaused()`-cachen
-   (prosess-lokal, kan være stille u-initialisert på tvers av prosesser hvis `restore()` aldri
-   kjøres/feiler — runde 1 sin fiks løste KUN omstart-av-SAMME-prosess-varighet, IKKE tvers-av-prosess-
-   sannhet). Den synkrone cachen er NÅ KUN en billig, valgfri "fail fast"-optimalisering FØR
-   transaksjonen i det hele tatt åpnes. `*Durable()`-mutasjoner (`pauseDurable`/`unpauseDurable`/
-   `pauseAllDurable`/`unpauseAllDurable`) krever NÅ et konfigurert `DomainPauseAuthority` PLUSS en
-   matchende `actorPersonId` når et `pool` er gitt (`DomainPauseUnauthorizedError` ellers, fail-closed,
-   INGEN skriving) — runde 1 sin `actorPersonId`-parameter var tidligere et UBEKREFTET fritekstfelt.
-   `KillSwitch` sin GLOBALE virkning er UENDRET og virker SAMTIDIG (sjekkes inne i `execute()`).
+1. **Domene-pause er EKTE, tvers-av-prosess gjensidig utelukkelse via Postgres advisory locks**
+   (Funn 1, arkitekt-review runde 3 — SKJERPET fra Funn 5 runde 2 sin "autoritative transaksjonelle"
+   DB-sjekk, som FORTSATT var racy: en SELECT låser ikke fraværet av en rad, og selve `execute()`-
+   kallet skjedde UTENFOR claim-transaksjonen, ETTER at den allerede hadde committet — en
+   `pauseDurable()` kunne committe NØYAKTIG I DET vinduet uten noen effekt på et allerede claimet
+   forsøk). `actOn()` HOLDER NÅ `pg_advisory_lock(hashtext(domene))` for BÅDE situasjonens eget domene
+   OG `ALL_DOMAINS` (`modules/situations/src/advisory-lock.ts`) gjennom HELE sin kritiske seksjon —
+   pause-sjekk, claim OG selve det eksterne `ToolGateway.execute()`-kallet, IKKE bare claim-
+   transaksjonen. `DomainPauseRegistry.pauseDurable()`/`unpauseDurable()` tar SAMME lås FØR de skriver
+   (domain-pause.ts) — en pause-mutasjon og et `actOn()`-forsøk for samme domene kan derfor ALDRI kjøre
+   samtidig: enten er mutasjonen FERDIG (og garantert synlig) FØR `actOn()` i det hele tatt får
+   fortsette forbi sin egen pause-sjekk, ELLER mutasjonen MÅ vente til et allerede PÅBEGYNT `actOn()`-
+   forsøk er helt ferdig (uansett utfall) FØR den selv kan committes. Låser tas ALLTID i SAMME
+   rekkefølge (det spesifikke domenet FØRST, deretter `ALL_DOMAINS`) på tvers av ALLE kallesteder for å
+   gjøre deadlock strukturelt umulig. Den synkrone `DomainPauseRegistry.isPaused()`-cachen er NÅ KUN en
+   billig, valgfri "fail fast"-optimalisering FØR advisory-låsen i det hele tatt tas. `*Durable()`-
+   mutasjoner krever et konfigurert `DomainPauseAuthority` PLUSS en matchende `actorPersonId` når et
+   `pool` er gitt (`DomainPauseUnauthorizedError` ellers, fail-closed, INGEN skriving). `KillSwitch` sin
+   GLOBALE virkning er UENDRET og virker SAMTIDIG (sjekkes inne i `execute()`).
 2. **En ATOMISK, VARIG, EKSKLUSIV claim på situasjons-raden FØR `execute()`**, BUNDET til DEN FAKTISKE
    OPERASJONEN (Funn 3 runde 1, SKJERPET av Funn 1+2 runde 2): `situation_id` er ALLTID en del av selve
    nøkkelen som sendes til `ToolGateway.execute()` (`situation:<id>:<nøkkel>`) — STRUKTURELT umulig for
@@ -132,7 +149,16 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
    `SituationEngine.releaseStuckActClaim()` gir en EKSPLISITT, fail-closed administrativ
    gjenopprettings-transisjon (re-verifiserer race-fritt at INGEN bevis har dukket opp FØR frigjøring —
    ALDRI en blind tidsavbrudd-basert auto-frigjøring, `SituationActClaimNotReleasableError` hvis bevis
-   FAKTISK finnes).
+   FAKTISK finnes). Funn 2 (arkitekt-review runde 3) skjerpet DENNE metoden ytterligere: (a) krever nå
+   et konfigurert `SituationRecoveryAuthority` PLUSS at `identity.person_id` FAKTISK matcher
+   (`SituationRecoveryUnauthorizedError` ellers) — scope-likhet ALENE var IKKE tilstrekkelig
+   autorisasjon for en operatør-/eier-handling; (b) tar NÅ SAMME advisory-lås som `actOn()` FØR den
+   rekonsiliérer — en `FOR UPDATE`-lås på `situations` fenser IKKE `ToolGateway.execute()` (som ALDRI
+   låser den raden og skriver `tool_executions` FØRST ETTER at transporten returnerer), så en
+   rekonsiliering UTEN advisory-låsen kunne observere et FALSKT "ingen bevis" midt i et EKTE pågående
+   forsøk. Med låsen er "ingen bevis funnet" nå et race-fritt utsagn: et ekte i-flukt-forsøk for samme
+   domene MÅ være helt ferdig FØR `releaseStuckActClaim()` i det hele tatt kan fortsette forbi
+   lås-tildelingen.
 3. **ETT Telegram-varsel-kall ETTER en BEKREFTET suksess** (`ok: true`, ALDRI før, ALDRI på en
    nektet/ubekreftet handling — `ToolResult.ok === false` dekker BEGGE, se `gateway.ts` sin egen
    kommentar) — best-effort, en varslingsfeil reverserer ALDRI den allerede skrevne ACT-raden. Arkitekt-
@@ -148,10 +174,14 @@ derfor ALLEREDE dekket av `execute()` sin egen audit-pipeline — `actOn()` legg
 
 Bevist i `modules/situations/test/act-on.test.ts` (vellykket ACT, policy-nektelse,
 postcondition-svikt, domene-pause FØR ethvert transportkall via BÅDE in-memory-cache OG en
-direkte-i-databasen-satt pause, pauseAll, unpause, deterministisk claim-i-flukt-avvisning,
-claim-konflikt med ulik nøkkel, operasjons-fingeravtrykk-mismatch, kryss-situasjon-nøkkelkollisjon
-strukturelt umulig, krasj-gjenopprettings-rekonsiliering + `releaseStuckActClaim()`, Telegram
-ok:false uten kast, Telegram-dedupe på retry, scope-mismatch FØR ethvert kall).
+direkte-i-databasen-satt pause, pauseAll, unpause, dedupliserende retry MENS det opprinnelige forsøket
+fortsatt er i flukt, claim-konflikt med ulik nøkkel, operasjons-fingeravtrykk-mismatch,
+kryss-situasjon-nøkkelkollisjon strukturelt umulig, krasj-gjenopprettings-rekonsiliering +
+`releaseStuckActClaim()`, Telegram ok:false uten kast, Telegram-dedupe på retry, scope-mismatch FØR
+ethvert kall, OG to DETERMINISTISKE to-sesjons-barriere-tester (Funn 1+2, runde 3): en `pauseDurable()`
+forsøkt midt i et in-flight `actOn()` MÅ vente til det er ferdig og kan ALDRI påvirke det allerede
+påbegynte forsøket; en `releaseStuckActClaim()` forsøkt midt i et in-flight `actOn()` MÅ på samme måte
+vente og kan ALDRI observere et falskt "ingen bevis" mens forsøket fortsatt pågår).
 
 ## 7. Retensjon og Q-20-erasure
 

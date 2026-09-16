@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { withDomainAdvisoryLocks } from "./advisory-lock.ts";
 
 /**
  * UA-10 Proactive Situation Engine: domene-scoped pause - masterplanens eget
@@ -134,23 +135,36 @@ export class DomainPauseRegistry {
   // ellers ren in-memory (identisk med metodene over).
   // ---------------------------------------------------------------------
 
+  /**
+   * Funn 1 (arkitekt-review runde 3, PR #85): skriver INNENFOR SAMME
+   * advisory-lås som `SituationEngine.actOn()` holder for HELE sin kritiske
+   * seksjon (se advisory-lock.ts sitt filhode) - en `pauseDurable()` for
+   * domenet en `actOn()` FAKTISK er i flukt for MÅ derfor vente til DEN
+   * er helt ferdig (uansett utfall), og et NYTT `actOn()`-forsøk startet
+   * ETTER at denne skrivingen har committet SER pausen GARANTERT.
+   */
   async pauseDurable(domain: string, reason: string, actorPersonId?: string): Promise<void> {
     this.assertAuthorized(actorPersonId);
     if (this.pool) {
-      await this.pool.query(
-        `INSERT INTO situation_domain_pauses (domain, reason, paused_by, paused_at)
-         VALUES ($1, $2, $3, now())
-         ON CONFLICT (domain) DO UPDATE SET reason = EXCLUDED.reason, paused_by = EXCLUDED.paused_by, paused_at = now()`,
-        [domain, reason, actorPersonId ?? null]
+      const pool = this.pool;
+      await withDomainAdvisoryLocks(pool, [domain], () =>
+        pool.query(
+          `INSERT INTO situation_domain_pauses (domain, reason, paused_by, paused_at)
+           VALUES ($1, $2, $3, now())
+           ON CONFLICT (domain) DO UPDATE SET reason = EXCLUDED.reason, paused_by = EXCLUDED.paused_by, paused_at = now()`,
+          [domain, reason, actorPersonId ?? null]
+        )
       );
     }
     this.pause(domain, reason);
   }
 
+  /** Samme advisory-lås-disiplin som `pauseDurable()` (Funn 1, runde 3) - se der. */
   async unpauseDurable(domain: string, actorPersonId?: string): Promise<void> {
     this.assertAuthorized(actorPersonId);
     if (this.pool) {
-      await this.pool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, [domain]);
+      const pool = this.pool;
+      await withDomainAdvisoryLocks(pool, [domain], () => pool.query(`DELETE FROM situation_domain_pauses WHERE domain = $1`, [domain]));
     }
     this.unpause(domain);
   }
