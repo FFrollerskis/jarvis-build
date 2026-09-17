@@ -36,38 +36,38 @@ gap-audit-en denne matrisen oppsummerer.
 | Audit / provenance | TESTED, live-datastrøm gjenstår | UA0-PRIVACY PARTIAL_RUNTIME - RLS/karantene/injection-vern suite-bevist |
 | Restart / restore / recovery | LIVE-PROVEN (lokalt) / BLOCKED (off-site) | OPS-RUNTIME VERIFIED lokalt; ekstern uptime/off-site backup gjenstår |
 
-## UA-9/UA-10/UA-11 deferred-punkter - A/B/C-klassifisering
+## UA-9/UA-10/UA-11 deferred-punkter - IMPLEMENTATION_STATUS / LIVE_EVIDENCE_STATUS
 
-Full begrunnelse per punkt: D-163 (denne og forrige runde) og D-153/D-160/D-161/D-162 (tidligere
-runder). `A = IMPLEMENT_NOW` (kodbar nå, ingen ekstern avhengighet) · `B = PROVE_NOT_REQUIRED`
-(utenfor nåværende graduation-scope, med begrunnelse) · `C = BLOCKED_EXTERNAL` (krever navngitt
-ekstern/fysisk avhengighet).
+Full begrunnelse per punkt: D-163 (alle runder) og D-153/D-160/D-161/D-162 (tidligere faser).
+`A = IMPLEMENT_NOW` (kodbar nå, ingen ekstern avhengighet) · `B = PROVE_NOT_REQUIRED` (utenfor
+nåværende graduation-scope, med konkret masterplan-begrunnelse) · `C = BLOCKED_EXTERNAL` (krever
+navngitt ekstern/fysisk avhengighet for selve completion).
 
-**RETTET etter arkitekt-review runde 1 (review 5241197516, RESULT=CHANGES_REQUIRED, D-163 F):** den
-FØRSTE versjonen av denne tabellen konflaterte IMPLEMENTASJON med LIVE-BEVIS og klassifiserte derfor
-flere internt kodbare punkter som `C` når kun deres produksjons-/live-evidens faktisk var eksternt
-blokkert. Hvert punkt nedenfor er nå splittet i (a) implementasjon og (b) live-bevis der de to er
-reelt forskjellige.
+**RETTET etter arkitekt-review runde 1 OG 2 (review 5241197516, RESULT=CHANGES_REQUIRED, D-163 F/G):**
+den FØRSTE versjonen av denne tabellen konflaterte IMPLEMENTASJON med LIVE-BEVIS og klassifiserte
+derfor flere internt kodbare punkter som `C` når kun deres produksjons-/live-evidens faktisk var
+eksternt blokkert. Hvert punkt der de to reelt er forskjellige er nå splittet i to EGNE kolonner -
+`IMPLEMENTATION_STATUS` (kan selve koden/pipelinen/broen bygges og testes nå, mot canonical
+contracts/fake sources/eksisterende intern data?) og `LIVE_EVIDENCE_STATUS` (krever den FAKTISKE
+production-completion en navngitt ekstern/fysisk avhengighet?). `C` brukes KUN når selve completion
+faktisk krever den eksterne avhengigheten - aldri som en samlebetegnelse for "ingen har bygget dette
+ennå".
 
-| Punkt | Klasse | Kort begrunnelse |
-|---|---|---|
-| UA-9: objektklassifiserer-PIPELINE (a: implementasjon) | **B (rettet fra C)** | ModelGateway/Gemma-vision-stien (D-81) eksisterer allerede og kan kalles mot et test-/syntetisk bilde uten en fysisk kamera - klassifiserer-KODEN er ikke blokkert. Bygges IKKE nå fordi masterplanens UA-9 P0-DoD eksplisitt valgte en provider-uavhengig kjerne (D-153) og ingen reell verdi kommer av å klassifisere syntetiske bilder |
-| UA-9: kamerafangst/live strøm-ruting (b: live-bevis) | C | Krever fysisk iPhone-/HA-kamera + valgt modell-leverandør-avtale; egen D-64/D-41-port. Dette, IKKE klassifiserer-koden, er den faktiske eksterne blokkeringen |
-| UA-9: biometrisk ansiktsgjenkjenning, kontinuerlig rå video | B | Eksplisitt UTENFOR masterplan v4.0 UA-9-scope (DPIA §5) |
-| UA-10: infra-detektor (a: implementasjon) | **B (rettet fra C)** | `modules/incidents` har ALLEREDE ekte, internt kanonisk deploy-/incident-tilstand (`correlateIncident()`, D-104/D-105) - en bro fra incidents til situations er kodbar NÅ mot eksisterende intern data, ingen fysisk avhengighet. Ikke bygget fordi UA-10s egne akseptansekriterier (dedupe/ACT-autoritet/varsel/pause) allerede er oppfylt uten den - masterplanen krever den ikke ennå |
-| UA-10: home-/health-detektor (a: implementasjon) | **B (rettet fra C)** | `@jarvis/health`/`@jarvis/location` har canonical schema + `FakeHealthMetricSource`/test-kilder - en bro er kodbar og testbar NÅ mot disse, akkurat som open-loop-broen ble bygget mot intern Business OS-data. Ikke bygget fordi det ikke er et UA-10-akseptansekrav ennå |
-| UA-10: infra-/home-/health-detektor (b: live produksjonsbevis) | C | Ekte tverr-provider-korrelasjon (GitHub/Vercel/GCP) og ekte fysiske health/home-signaler krever leverandør-/enhets-tilkobling (Q-31, D-36, HA-RUNTIME) - dette er den faktiske eksterne blokkeringen, ikke bro-koden |
-| UA-10: modell-assistert klassifisering (a: implementasjon) | **B (rettet fra C)** | `ModelGateway` og provider-uavhengig modell-infrastruktur finnes allerede i repoet - IKKE en ekstern blokkering i seg selv. Ikke bygget fordi det er masterplanens egen valgfrie forbedring av en ALLEREDE fullt deterministisk, host-verifisert P0/P1-motor, ikke et akseptansekrav |
-| UA-10: modell-assistert klassifisering (b: leverandørspesifikk live-bruk) | C (kun der en spesifikk leverandør faktisk kreves) | Reservert for et navngitt credential-/leverandørkrav hvis/når en slik klassifisering faktisk velges - ikke en generell blokkering av selve kapabiliteten |
-| UA-10: simulation/counterfactual/feedback learning | B | Masterplanens egen 'where useful'-kvalifikator, ikke et akseptansekrav |
-| UA-10: vision-/helse-/lokasjonsbro (a: implementasjon) | **B (rettet fra C)** | Broen selv ER kodbar/testbar mot canonical schema + fake sources (samme mønster som open-loop-broen) - ikke bygget fordi det ikke er et UA-10-akseptansekrav ennå, ikke fordi den er blokkert |
-| UA-10: vision-/helse-/lokasjonsbro (b: reell produksjonsverdi) | C | Gir null reell nytte i PRODUKSJON før UA-9/helse/lokasjon faktisk har en live kilde - dette er en verdi-/live-bevis-blokkering, ikke en kode-blokkering |
-| UA-10: `situations`/`executive` i `worker-main.ts` | B | Bekreftet fortsatt fraværende ved fersk kodelesing, men ingen eier-vendt kaller finnes i worker-prosessen for noen av de to namespacene - wiring nå ville vært utestet/ubrukt kode |
-| UA-11: dashboard/UI | B | Kun i masterplanens 'Bygges'-ROADMAP-liste, ikke i de tre faktiske akseptansekriteriene; `situations.*` fikk samme behandling |
-| UA-11: business health/personal attention-kilder utover `situations` | B (delvis allerede dekket) | Sales/support/kontrakt/marketing/finans/produkt/drift flyter allerede inn via de 26 `OpenLoopType`-verdiene og den eksisterende broen (D-160 B) - personal/home/health-signaler avhenger av UA-10s helse-/lokasjonsbro (a) over, som nå er B (kodbar), ikke C |
-| UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | A (men for stort for én slice) | Ordrett i 'Bygges'-listen, INGEN kanonisk datakilde finnes - egen, ny domenepakke, se Q-35 kandidat K2 |
-| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - VALGT som neste slice etter arkitekt-review runde 1** | `situations` dekket; `OwnerControls`/`KillSwitch` fortsatt per-prosess, ikke durable/delt. Arkitekt-review (5241197516) prioriterer dette FØR K2, se Q-35 kandidat K1 |
-| UA-11: host-akseptanse-harness | B | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
+| Punkt | IMPLEMENTATION_STATUS | LIVE_EVIDENCE_STATUS | Begrunnelse |
+|---|---|---|---|
+| UA-9: objektklassifiserer/model-pipeline | **B** (rettet fra C) | **C** | `ModelGateway`/Gemma-vision-stien (D-81) finnes allerede og kan kalles mot et test-/syntetisk bilde uten fysisk kamera - klassifiserer-KODEN er ikke eksternt blokkert (`IMPLEMENTATION_STATUS=B`, ikke påkrevd av UA-9 P0-DoD som eksplisitt valgte en provider-uavhengig kjerne, D-153). Kun kamerafangst/live strøm-ruting krever fysisk iPhone-/HA-kamera + valgt modell-leverandør-avtale (`LIVE_EVIDENCE_STATUS=C`, egen D-64/D-41-port) |
+| UA-9: biometrisk ansiktsgjenkjenning, kontinuerlig rå video | B | N/A | Eksplisitt UTENFOR masterplan v4.0 UA-9-scope (DPIA §5) - ingen live-bevis-spørsmål oppstår når implementasjonen selv ikke skal bygges |
+| UA-10: infra-detektor (bro fra incidents/deploy-tilstand til situations) | **B** (rettet fra C) | **C** | `modules/incidents` har ALLEREDE ekte, internt kanonisk deploy-/incident-tilstand (`correlateIncident()`, D-104/D-105) - broen er kodbar/testbar NÅ mot eksisterende intern data, ingen fysisk avhengighet (`IMPLEMENTATION_STATUS=B`: UA-10s egne akseptansekriterier - dedupe/ACT-autoritet/varsel/pause - er allerede oppfylt uten den, masterplanen krever den ikke ennå). Ekte tverr-provider-korrelasjon (GitHub/Vercel/GCP) for PRODUKSJON krever leverandør-tilkobling (Q-31) (`LIVE_EVIDENCE_STATUS=C`) |
+| UA-10: home-/health-detektor (bro fra `@jarvis/health`/`@jarvis/location` til situations) | **B** (rettet fra C) | **C** | `@jarvis/health`/`@jarvis/location` har canonical schema + `FakeHealthMetricSource`/test-kilder - broen er kodbar/testbar NÅ, samme mønster som open-loop-broen mot intern Business OS-data (`IMPLEMENTATION_STATUS=B`: ikke et UA-10-akseptansekrav ennå). Ekte fysiske health-/home-signaler krever enhets-/HA-tilkobling (D-36, HA-RUNTIME) (`LIVE_EVIDENCE_STATUS=C`) |
+| UA-10: modell-assistert klassifisering | **B** (rettet fra C) | **C** (betinget) | `ModelGateway` og provider-uavhengig modell-infrastruktur finnes ALLEREDE i repoet - IKKE en ekstern blokkering i seg selv (`IMPLEMENTATION_STATUS=B`: masterplanens egen valgfrie forbedring av en allerede fullt deterministisk, host-verifisert P0/P1-motor, ikke et akseptansekrav). `LIVE_EVIDENCE_STATUS=C` reservert KUN for et navngitt credential-/leverandørkrav hvis/når en spesifikk leverandør faktisk velges - ikke en generell blokkering av kapabiliteten |
+| UA-10: simulation/counterfactual/feedback learning | B | N/A | Masterplanens egen 'where useful'-kvalifikator, ikke et akseptansekrav |
+| UA-10: vision-/helse-/lokasjonsbro (situations-siden av broen) | **B** (rettet fra C) | **C** | Broen selv ER kodbar/testbar mot canonical schema + fake sources, samme mønster som open-loop-broen (`IMPLEMENTATION_STATUS=B`: ikke et UA-10-akseptansekrav ennå). Reell PRODUKSJONSVERDI krever at UA-9/helse/lokasjon faktisk har en live kilde (`LIVE_EVIDENCE_STATUS=C`) - en verdi-/live-bevis-blokkering, ikke en kode-blokkering |
+| UA-10: `situations`/`executive` i `worker-main.ts` | B | N/A | Bekreftet fortsatt fraværende ved fersk kodelesing (uendret av denne korrigeringsrunden), men ingen eier-vendt kaller finnes i worker-prosessen for noen av de to namespacene - wiring nå ville vært utestet/ubrukt kode |
+| UA-11: dashboard/UI | B | N/A | Kun i masterplanens 'Bygges'-ROADMAP-liste, ikke i de tre faktiske akseptansekriteriene; `situations.*` fikk samme behandling |
+| UA-11: business health/personal attention-kilder utover `situations` | B (delvis allerede dekket) | N/A | Sales/support/kontrakt/marketing/finans/produkt/drift flyter allerede inn via de 26 `OpenLoopType`-verdiene og den eksisterende broen (D-160 B) - personal/home/health-signaler avhenger av UA-10s helse-/lokasjonsbro over, som nå er `IMPLEMENTATION_STATUS=B` (kodbar), ikke C |
+| UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | A (men for stort for én slice) | N/A | Ordrett i 'Bygges'-listen, INGEN kanonisk datakilde finnes - egen, ny domenepakke, se Q-35 kandidat K2 (lavere prioritet enn K1) |
+| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - VALGT (K1) som neste slice av arkitekt-review** | N/A | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` fortsatt per-prosess, ikke durable/delt - dette ER det reelle, internt kodbare gapet. Arkitekt-review (5241197516) har eksplisitt valgt K1 som neste Sovereign-slice, ikke bare en kandidat - se Q-35 |
+| UA-11: host-akseptanse-harness | B | N/A | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
 
 ## Neste-steg (K1 valgt av arkitekt-review runde 1, K2 forblir en fremtidig kandidat)
 
