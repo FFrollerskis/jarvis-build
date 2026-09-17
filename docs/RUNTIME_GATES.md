@@ -2,6 +2,12 @@
 
 Statusverdier: NOT_IMPLEMENTED · IMPLEMENTED_NOT_VERIFIED · PARTIAL_RUNTIME · PRODUCTION_VERIFIED · BLOCKED_EXTERNAL
 
+**Se også** [`docs/SOVEREIGN_GRADUATION_MATRIX.md`](SOVEREIGN_GRADUATION_MATRIX.md) (D-163, 2026-09-17)
+for en konsis 16-områders graduation-oversikt som peker tilbake til de detaljerte radene her - denne
+filen forblir den autoritative, detaljerte kilden. UA-7/UA-8/UA-9 har for øvrig INGEN egen rad i denne
+filen til tross for at de er kode-implementert - registrert som dokumentasjonshull i Q-35
+(`docs/OPEN_QUESTIONS.md`), ikke rettet her.
+
 | Gate | Status | Evidens / gap |
 |---|---|---|
 | D-27 Langfuse | IMPLEMENTED_NOT_VERIFIED + BLOCKED_EXTERNAL | LangfuseTraceSink implementert (`modules/model-gateway/src/trace.ts`); krever Docker for kjørende instans |
