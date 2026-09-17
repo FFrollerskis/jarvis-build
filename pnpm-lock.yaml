@@ -83,6 +83,9 @@ importers:
       '@jarvis/provider-adapters':
         specifier: workspace:*
         version: link:../../packages/provider-adapters
+      '@jarvis/situations':
+        specifier: workspace:*
+        version: link:../../modules/situations
       '@jarvis/support':
         specifier: workspace:*
         version: link:../../modules/support
@@ -687,6 +690,9 @@ importers:
 
   modules/situations:
     dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

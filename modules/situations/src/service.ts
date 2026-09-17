@@ -4,12 +4,18 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { JsonValue, MemorySpace, IdentityContext } from "@jarvis/contracts";
 import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
 import {
+  SetSituationAutonomyPolicyInputSchema,
   SetSituationNotificationPolicyInputSchema,
   SituationCandidateInputSchema,
   type ActOnRequest,
+  type AutoActResult,
   type EvaluateCandidateResult,
+  type InformDeliveryResult,
+  type PendingInformNotification,
+  type SetSituationAutonomyPolicyInput,
   type SetSituationNotificationPolicyInput,
   type Situation,
+  type SituationAutonomyPolicy,
   type SituationCandidateInput,
   type SituationNotificationPolicy,
   type SituationPriority,
@@ -298,6 +304,107 @@ function canonicalJsonValue(value: JsonValue): string {
 }
 
 /**
+ * D-160 (UA-10 P1 aktivering): den EKSAKTE INFORM/SUGGEST-teksten som
+ * fryses i `situations.inform_message` ATOMISK med `last_notified_at`
+ * (SAMME funksjon brukes i INSERT og UPDATE i `evaluateCandidate()`, så
+ * frysing og leveranse kan aldri divergere). Ren, deterministisk
+ * sammensetting av allerede-reviewede felt - INGEN modell-generert tekst.
+ */
+export function buildInformMessage(domain: string, priority: SituationPriority, stage: SituationStage, reason: string): string {
+  const head = stage === "suggest" ? "Jarvis foreslår handling" : "Jarvis oppdaget";
+  return `${head} [${domain}, ${priority}]: ${reason}`;
+}
+
+/**
+ * D-160: varsel-nøkkelen for ÉN INFORM/SUGGEST-leveransesyklus mot
+ * `tool_executions`. Bundet til (a) situasjonen, (b) det eksakte
+ * `last_notified_at`-ANKERET (en ny syklus etter resuppress-vinduet er en
+ * NY nøkkel - ett varsel per syklus, aldri per sveip), og (c) et innholds-
+ * fingeravtrykk av den FROSNE teksten (samme primitiv som
+ * `computeNotifyKey()`, runde 8/9): en rad under nøkkelen kan KUN finnes
+ * hvis nøyaktig denne teksten ble sendt for nøyaktig denne syklusen.
+ */
+export function computeInformNotifyKey(situationId: string, anchorIso: string, message: string): string {
+  const fingerprint = computeActOperationFingerprint(situationId, "telegram", "notify", { message });
+  return `situation:${situationId}:inform:${anchorIso}:${fingerprint}`;
+}
+
+/**
+ * D-160: de ENESTE plassholderne en autonomi-policy sine parametre kan
+ * referere - alle IMMUTABLE identifikatorer på situasjonen (ALDRI `reason`,
+ * som er muterbar og ville brutt `act_operation_fingerprint`-bindingen ved
+ * en retry). Rendres av `renderAutonomyParameters()` rett før `actOn()`.
+ */
+export const AUTONOMY_PLACEHOLDERS = ["situation_id", "source_open_loop_id", "domain", "detection_key"] as const;
+const PLACEHOLDER_RE = /\{\{([a-z_]+)\}\}/g;
+
+/** Kastet ved `setAutonomyPolicy()` for en plassholder utenfor `AUTONOMY_PLACEHOLDERS` (fail-closed ved BINDING, ikke først ved kjøring). */
+export class SituationAutonomyPlaceholderError extends Error {
+  constructor(public readonly placeholder: string) {
+    super(`situation_autonomy_placeholder_unknown:${placeholder}`);
+    this.name = "SituationAutonomyPlaceholderError";
+  }
+}
+
+function collectPlaceholders(value: JsonValue, out: Set<string>): void {
+  if (typeof value === "string") {
+    for (const match of value.matchAll(PLACEHOLDER_RE)) out.add(match[1] as string);
+  } else if (Array.isArray(value)) {
+    for (const item of value) collectPlaceholders(item, out);
+  } else if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) collectPlaceholders(item, out);
+  }
+}
+
+/**
+ * Ren funksjon: erstatt `{{situation_id}}`/`{{source_open_loop_id}}`/`{{domain}}`/
+ * `{{detection_key}}` i policyens parametre med situasjonens EGNE verdier.
+ * Returnerer `null` (=> hopp over, aldri et kall) hvis en brukt plassholder
+ * ikke har en verdi for DENNE situasjonen (f.eks. `source_open_loop_id`
+ * for en kildeløs situasjon). Resultatet er identisk ved hver retry for
+ * samme situasjon - nøyaktig det `act_operation_fingerprint` krever.
+ */
+export function renderAutonomyParameters(
+  parameters: Record<string, JsonValue>,
+  situation: Pick<Situation, "situation_id" | "source_open_loop_id" | "domain" | "detection_key">
+): Record<string, JsonValue> | null {
+  const values: Record<(typeof AUTONOMY_PLACEHOLDERS)[number], string | null> = {
+    situation_id: situation.situation_id,
+    source_open_loop_id: situation.source_open_loop_id,
+    domain: situation.domain,
+    detection_key: situation.detection_key
+  };
+  let missing = false;
+  const render = (value: JsonValue): JsonValue => {
+    if (typeof value === "string") {
+      return value.replace(PLACEHOLDER_RE, (_match, name: string) => {
+        const resolved = (values as Record<string, string | null | undefined>)[name];
+        if (resolved === null || resolved === undefined) {
+          missing = true;
+          return "";
+        }
+        return resolved;
+      });
+    }
+    if (Array.isArray(value)) return value.map(render);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, render(v)]));
+    }
+    return value;
+  };
+  const rendered = render(parameters) as Record<string, JsonValue>;
+  return missing ? null : rendered;
+}
+
+/** D-160: kastet av `setAutonomyPolicy()`/`clearAutonomyPolicy()` når aktøren ikke er den konfigurerte sovereign-eieren (eller ingen autoritet er konfigurert - fail-closed). */
+export class SituationAutonomyUnauthorizedError extends Error {
+  constructor(public readonly personId: string | undefined) {
+    super(`situation_autonomy_unauthorized:${personId ?? "none"}`);
+    this.name = "SituationAutonomyUnauthorizedError";
+  }
+}
+
+/**
  * Funn 1 (arkitekt-review runde 2, PR #85): SHA-256 over HELE den immutable
  * operasjonen `actOn()` faktisk claimer - `situation_id` (ALDRI kun i selve
  * nøkkelen, se `actOn()` sin `finalIdempotencyKey`) + `tool_id` + `action` +
@@ -516,8 +623,8 @@ export class SituationEngine {
       const newlyActionableOnInsert = computedStage === "inform" || computedStage === "suggest";
       const { rows: insertedRows } = await client.query(
         `INSERT INTO situations
-           (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           (situation_id, tenant_id, memory_space_id, domain, owner_person_id, source_open_loop_id, detection_key, stage, priority, confidence, reason, last_notified_at, inform_message)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (tenant_id, memory_space_id, detection_key) DO NOTHING
          RETURNING *`,
         [
@@ -532,7 +639,12 @@ export class SituationEngine {
           value.priority,
           value.confidence ?? null,
           value.reason,
-          newlyActionableOnInsert ? new Date(now).toISOString() : null
+          newlyActionableOnInsert ? new Date(now).toISOString() : null,
+          // D-160 (P1 aktivering): INFORM/SUGGEST-teksten FRYSES atomisk med
+          // ankeret `last_notified_at` - SAMME lærdom som `act_notify_message`
+          // (runde 9): en varsel-nøkkel avledet av den MUTERBARE `reason`
+          // mister sitt eget bevis ved re-deteksjon og dupliserer.
+          newlyActionableOnInsert ? buildInformMessage(value.domain, value.priority, computedStage, value.reason) : null
         ]
       );
       if (insertedRows[0]) {
@@ -577,6 +689,7 @@ export class SituationEngine {
          SET priority = $4, confidence = $5, reason = $6, stage = $7,
              status = 'open', resolved_at = NULL,
              last_notified_at = CASE WHEN $8 THEN $9 ELSE last_notified_at END,
+             inform_message = CASE WHEN $8 THEN $10 ELSE inform_message END,
              updated_at = now()
          WHERE tenant_id = $1 AND memory_space_id = $2 AND detection_key = $3
          RETURNING *`,
@@ -589,7 +702,9 @@ export class SituationEngine {
           value.reason,
           nextStage,
           newlyActionable,
-          new Date(now).toISOString()
+          new Date(now).toISOString(),
+          // D-160: ny syklus (nytt anker) => ny frosset tekst fra DENNE syklusens reason/stadium.
+          buildInformMessage(value.domain, value.priority, nextStage, value.reason)
         ]
       );
       return { situation: rows[0] as Situation, newly_actionable: newlyActionable };
@@ -1100,5 +1215,289 @@ export class SituationEngine {
         return rows[0] as Situation;
       })
     );
+  }
+
+  // ---------------------------------------------------------------------
+  // D-160 (UA-10 P1 AKTIVERING): INFORM/SUGGEST-LEVERANSE
+  //
+  // P0 stemplet `last_notified_at` i `evaluateCandidate()` (dedupe-ANKERET),
+  // men INGEN sendte varselet. Leveransen er nå en EGEN, idempotent,
+  // evidens-først-syklus: en situasjon "venter" så lenge `inform_delivered_at`
+  // ikke er lik sitt eget anker. Nøkkelen mot `tool_executions` er bundet
+  // til (situasjon, anker, frosset tekst) - se `computeInformNotifyKey()`.
+  // Samme tre lærdommer som ACT+NOTIFY (runde 4-9): (1) bevis leses FØR
+  // noe nytt `execute()`-kall (ToolGateway sin dedupe er IKKE dens første
+  // port), (2) bevis må være en `telegram`/`notify`-rad, ellers fail-closed,
+  // (3) teksten er frosset, aldri `reason` lest på nytt.
+  // ---------------------------------------------------------------------
+
+  /** Situasjoner som har et anker + frosset tekst, men ingen bokført leveranse for DETTE ankeret. Kun `inform`/`suggest` - `act*`/`escalate` har sin egen varsling i `actOn()`. */
+  async listPendingInformNotifications(tenantId: string, memorySpace: MemorySpace): Promise<PendingInformNotification[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM situations
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND status = 'open'
+           AND stage IN ('inform','suggest')
+           AND last_notified_at IS NOT NULL AND inform_message IS NOT NULL
+           AND (inform_delivered_at IS NULL OR inform_delivered_at < last_notified_at)
+         ORDER BY (priority = 'high') DESC, (priority = 'normal') DESC, last_notified_at ASC`,
+        [tenantId, memorySpace]
+      );
+      return (rows as Situation[]).map((situation) => ({
+        situation,
+        anchor: new Date(situation.last_notified_at as string).toISOString(),
+        message: situation.inform_message as string
+      }));
+    });
+  }
+
+  /**
+   * Bokfør leveranse for NØYAKTIG ett anker. WHERE-betinget på ankeret: har
+   * en ny syklus flyttet `last_notified_at` i mellomtiden, treffer denne
+   * ingen rad (den nye syklusen er ulevert, som den skal være) - aldri en
+   * stille "levert" for en tekst som aldri ble sendt.
+   */
+  async markInformDelivered(tenantId: string, memorySpace: MemorySpace, situationId: string, anchorIso: string): Promise<boolean> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE situations SET inform_delivered_at = $3, updated_at = now()
+         WHERE tenant_id = $1 AND situation_id = $2 AND last_notified_at = $3::timestamptz`,
+        [tenantId, situationId, anchorIso]
+      );
+      return rowCount === 1;
+    });
+  }
+
+  /**
+   * Lever alle ventende INFORM/SUGGEST-varsler for (tenant, space) via
+   * `ToolGateway.execute("telegram","notify")` under eierens identitet.
+   * Evidens-først per situasjon; ett transportkall MAKS per syklus-nøkkel;
+   * en mislykket leveranse forblir ventende (samme nøkkel neste sveip -
+   * ToolGateway sin egen dedupe garanterer at et bekreftet varsel aldri
+   * sendes to ganger selv om bokføringen her krasjet).
+   */
+  async deliverPendingInformNotifications(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    gateway: ToolGateway,
+    identity: IdentityContext
+  ): Promise<InformDeliveryResult> {
+    if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
+      throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
+    }
+    const result: InformDeliveryResult = { delivered: 0, reconciled_from_evidence: 0, pending: 0, evidence_mismatch: 0 };
+    const pending = await this.listPendingInformNotifications(tenantId, memorySpace);
+    for (const item of pending) {
+      const key = computeInformNotifyKey(item.situation.situation_id, item.anchor, item.message);
+      const evidence = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rows } = await client.query(
+          `SELECT status, tool_id, action FROM tool_executions WHERE tenant_id = $1 AND idempotency_key = $2`,
+          [tenantId, key]
+        );
+        return rows[0] as { status: string; tool_id: string; action: string } | undefined;
+      });
+      if (evidence && (evidence.tool_id !== "telegram" || evidence.action !== "notify")) {
+        // Runde 7-lærdommen: en rad under nøkkelen som IKKE er DENNE operasjonen beviser ingenting - fail-closed, aldri et nytt kall på en mistenkelig nøkkel.
+        result.evidence_mismatch += 1;
+        continue;
+      }
+      if (evidence?.status === "succeeded") {
+        // Krasj mellom bekreftet sending og bokføring - selv-helbred UTEN transportkall.
+        if (await this.markInformDelivered(tenantId, memorySpace, item.situation.situation_id, item.anchor)) {
+          result.reconciled_from_evidence += 1;
+        }
+        continue;
+      }
+      // Ingen bekreftet suksess - førstegangsforsøk, eller retry etter en `failed`/kastet transport (ToolGateway re-kjører kun de).
+      let ok = false;
+      try {
+        const toolResult = await gateway.execute({
+          identity,
+          tool_id: "telegram",
+          action: "notify",
+          parameters: { message: item.message },
+          idempotency_key: key
+        });
+        ok = toolResult.ok;
+      } catch {
+        ok = false;
+      }
+      if (ok && (await this.markInformDelivered(tenantId, memorySpace, item.situation.situation_id, item.anchor))) {
+        result.delivered += 1;
+      } else {
+        result.pending += 1;
+      }
+    }
+    return result;
+  }
+
+  // ---------------------------------------------------------------------
+  // D-160: EIERENS AUTONOMI-GRENSE (`situation_autonomy_policies`) + AUTO-ACT
+  //
+  // FRAVÆR av policy = INGEN auto-ACT (fail-closed). En policy binder ETT
+  // domene til ÉN tool/action med statiske parametre; `autoActPending()`
+  // kaller `actOn()` for situasjoner som har nådd `suggest` (høy prioritet,
+  // konfidens >= 0.75 - `computeTargetStage()`) og ikke er claimet.
+  // ALLE eksisterende porter står uendret: domene-pause (sjekket inne i
+  // `actOn()` under advisory-lås), global KillSwitch/PolicyGateway/
+  // ToolGateway-preflight (inne i `execute()`), eksakt-én-gang-claim.
+  // Autoriteten for å BINDE en policy er den SAMME sovereign-eieren som for
+  // `releaseStuckActClaim()` (`recoveryAuthority`) - fail-closed uten.
+  // ---------------------------------------------------------------------
+
+  private assertAutonomyAuthority(actorPersonId: string | undefined): void {
+    if (!actorPersonId || !this.recoveryAuthority || actorPersonId !== this.recoveryAuthority.owner_person_id) {
+      throw new SituationAutonomyUnauthorizedError(actorPersonId);
+    }
+  }
+
+  async listAutonomyPolicies(tenantId: string, memorySpace: MemorySpace): Promise<SituationAutonomyPolicy[]> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 ORDER BY domain ASC`,
+        [tenantId, memorySpace]
+      );
+      return rows as SituationAutonomyPolicy[];
+    });
+  }
+
+  async getAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string): Promise<SituationAutonomyPolicy | null> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
+        [tenantId, memorySpace, domain]
+      );
+      return (rows[0] as SituationAutonomyPolicy | undefined) ?? null;
+    });
+  }
+
+  /** Opprett/erstatt eierens binding for ett domene. Tar SAMME advisory-lås som `actOn()`/pause for domenet, så en policy-endring aldri kappløper med et auto-ACT i flukt for samme domene. */
+  async setAutonomyPolicy(
+    tenantId: string,
+    memorySpace: MemorySpace,
+    input: SetSituationAutonomyPolicyInput,
+    actorPersonId: string | undefined
+  ): Promise<SituationAutonomyPolicy> {
+    this.assertAutonomyAuthority(actorPersonId);
+    const parsed = SetSituationAutonomyPolicyInputSchema.safeParse(input);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      throw new SituationEngineValidationError(firstIssue?.path.join(".") || "input", firstIssue?.message ?? "schema_validation_failed");
+    }
+    const value = parsed.data;
+    // Fail-closed ved BINDING: en ukjent plassholder avvises nå, ikke først ved kjøring.
+    const used = new Set<string>();
+    collectPlaceholders(value.parameters ?? {}, used);
+    for (const name of used) {
+      if (!(AUTONOMY_PLACEHOLDERS as readonly string[]).includes(name)) throw new SituationAutonomyPlaceholderError(name);
+    }
+    return withDomainAdvisoryLocks(this.pool, [value.domain], () =>
+      withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rows } = await client.query(
+          `INSERT INTO situation_autonomy_policies (tenant_id, memory_space_id, domain, tool_id, action, parameters, enabled, actor_person_id)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+           ON CONFLICT (tenant_id, memory_space_id, domain) DO UPDATE
+             SET tool_id = EXCLUDED.tool_id, action = EXCLUDED.action, parameters = EXCLUDED.parameters,
+                 enabled = EXCLUDED.enabled, actor_person_id = EXCLUDED.actor_person_id, updated_at = now()
+           RETURNING *`,
+          [tenantId, memorySpace, value.domain, value.tool_id, value.action, JSON.stringify(value.parameters ?? {}), value.enabled ?? true, actorPersonId]
+        );
+        return rows[0] as SituationAutonomyPolicy;
+      })
+    );
+  }
+
+  async clearAutonomyPolicy(tenantId: string, memorySpace: MemorySpace, domain: string, actorPersonId: string | undefined): Promise<boolean> {
+    this.assertAutonomyAuthority(actorPersonId);
+    return withDomainAdvisoryLocks(this.pool, [domain], () =>
+      withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+        const { rowCount } = await client.query(
+          `DELETE FROM situation_autonomy_policies WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3`,
+          [tenantId, memorySpace, domain]
+        );
+        return rowCount === 1;
+      })
+    );
+  }
+
+  /**
+   * Auto-ACT: for hver åpen, uclaimet situasjon i stadiet `suggest` hvis
+   * domene har en AKTIVERT policy, kall `actOn()` med policyens binding.
+   * Parametrene er policyens statiske parametre pluss situasjonens EGNE
+   * IMMUTABLE identifikatorer (`situation_id`, `source_open_loop_id`) -
+   * ALDRI `reason` (muterbar => ville brutt `act_operation_fingerprint` ved
+   * en retry). Feil per situasjon isoleres; en pauset situasjon / en claim
+   * tatt av en annen kaller i mellomtiden telles som `skipped`.
+   */
+  async autoActPending(tenantId: string, memorySpace: MemorySpace, gateway: ToolGateway, identity: IdentityContext): Promise<AutoActResult> {
+    if (identity.tenant_id !== tenantId || identity.memory_space_id !== memorySpace) {
+      throw new SituationActScopeMismatchError(tenantId, memorySpace, identity.tenant_id, identity.memory_space_id);
+    }
+    const result: AutoActResult = { attempted: 0, succeeded: 0, denied: 0, skipped: 0 };
+    const candidates = await withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rows } = await client.query(
+        `SELECT s.*, p.tool_id AS policy_tool_id, p.action AS policy_action, p.parameters AS policy_parameters
+         FROM situations s
+         JOIN situation_autonomy_policies p
+           ON p.tenant_id = s.tenant_id AND p.memory_space_id = s.memory_space_id AND p.domain = s.domain AND p.enabled = true
+         WHERE s.tenant_id = $1 AND s.memory_space_id = $2 AND s.status = 'open'
+           AND s.stage = 'suggest' AND s.act_idempotency_key IS NULL
+         ORDER BY s.opened_at ASC`,
+        [tenantId, memorySpace]
+      );
+      return rows as Array<Situation & { policy_tool_id: string; policy_action: string; policy_parameters: Record<string, JsonValue> }>;
+    });
+    for (const candidate of candidates) {
+      // Policyens parametre rendres med situasjonens IMMUTABLE identifikatorer
+      // (aldri injisert som ekstra nøkler - verktøyenes strenge input-skjemaer
+      // avgjør selv hvilke felt som finnes). Manglende verdi => hopp over.
+      const parameters = renderAutonomyParameters(candidate.policy_parameters, candidate);
+      if (parameters === null) {
+        result.skipped += 1;
+        continue;
+      }
+      try {
+        const outcome = await this.actOn(
+          tenantId,
+          memorySpace,
+          candidate.situation_id,
+          { tool_id: candidate.policy_tool_id, action: candidate.policy_action, parameters, idempotency_key: "auto-act" },
+          gateway,
+          identity
+        );
+        result.attempted += 1;
+        if (outcome.tool_result.ok) result.succeeded += 1;
+        else result.denied += 1;
+      } catch (err) {
+        if (
+          err instanceof SituationDomainPausedError ||
+          err instanceof SituationActAlreadyClaimedError ||
+          err instanceof SituationActInFlightError ||
+          err instanceof SituationActOperationMismatchError
+        ) {
+          result.skipped += 1;
+          continue;
+        }
+        throw err;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * D-160: kildebasert løsning - situasjoner hvis kilde-open-loop er løst,
+   * løses (uten å røre claim-feltene; en løst situasjon med et fullført ACT
+   * beholder sin historikk). Idempotent: kun `status = 'open'`-rader treffes.
+   */
+  async resolveForResolvedSources(tenantId: string, memorySpace: MemorySpace, resolvedOpenLoopIds: readonly string[]): Promise<number> {
+    if (resolvedOpenLoopIds.length === 0) return 0;
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE situations SET status = 'resolved', resolved_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND status = 'open' AND source_open_loop_id = ANY($3::text[])`,
+        [tenantId, memorySpace, [...resolvedOpenLoopIds]]
+      );
+      return rowCount ?? 0;
+    });
   }
 }

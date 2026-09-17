@@ -35,6 +35,13 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 const MIGRATIONS_DIR = fileURLToPath(new URL("../src/db/migrations", import.meta.url));
 const VISION = "055_vision.sql";
 const SITUATIONS = "056_situations.sql";
+/**
+ * Rekonsiliering av PR #86 (UA-10 P1) mot main etter at PR #83 (UA-9) er merget:
+ * katalogen har nå 054 -> 055 -> 056 -> 057. Den tredje reelle banen er en host
+ * som allerede kjører main (055 + 056 anvendt) og får KUN 057 ved neste
+ * oppstart - den må gi samme skjema som en fersk install av hele katalogen.
+ */
+const ACTIVATION = "057_situations_activation.sql";
 
 interface SchemaSnapshot {
   columns: unknown[];
@@ -138,7 +145,9 @@ describe("Migrasjonskatalogen har ÉN deterministisk rekkefølge (ren vakt)", ()
     expect(duplicates, `dupliserte migrasjons-ID-er: ${duplicates.join(", ")}`).toEqual([]);
     expect(files).toContain(VISION);
     expect(files).toContain(SITUATIONS);
+    expect(files).toContain(ACTIVATION);
     expect(files.indexOf(SITUATIONS)).toBe(files.indexOf(VISION) + 1);
+    expect(files.indexOf(ACTIVATION)).toBe(files.indexOf(SITUATIONS) + 1);
   });
 });
 
@@ -189,6 +198,63 @@ describe("Banene 055->056 (fersk) og 056->055 (eksisterende host) gir samme skje
     expect(tables.has("situations")).toBe(true);
     expect(a.applied_migrations).toContain(VISION);
     expect(a.applied_migrations).toContain(SITUATIONS);
+    expect(b).toEqual(a);
+  });
+});
+
+describe("Banen «main (055+056) så KUN 057» gir samme skjema som fersk install av hele katalogen (ekte Postgres, to klynger)", () => {
+  let fresh: Cluster;
+  let host: Cluster;
+  let freshApplied: string[] = [];
+  let hostFirstApplied: string[] = [];
+  let hostSecondApplied: string[] = [];
+  const tempDirs: string[] = [];
+
+  beforeAll(async () => {
+    fresh = await startCluster("fresh057");
+    host = await startCluster("host057");
+
+    // A: fersk database - hele katalogen (054 -> 055 -> 056 -> 057) i sortert rekkefølge.
+    const fullDir = await migrationDirCopy([]);
+    tempDirs.push(fullDir);
+    freshApplied = await runMigrations(fresh.pool, fullDir);
+
+    // B: en host som allerede kjører dagens main (055 og 056 anvendt, uten 057) ...
+    const withoutActivation = await migrationDirCopy([ACTIVATION]);
+    tempDirs.push(withoutActivation);
+    hostFirstApplied = await runMigrations(host.pool, withoutActivation);
+    // ... og deretter deployes PR #86: KUN 057 legges til.
+    hostSecondApplied = await runMigrations(host.pool, fullDir);
+  });
+
+  afterAll(async () => {
+    await fresh?.stop();
+    await host?.stop();
+    for (const dir of tempDirs) await rm(dir, { recursive: true, force: true });
+  });
+
+  it("bane A kjørte 055 -> 056 -> 057 i rekkefølge; bane B kjørte 055+056 først og deretter NØYAKTIG 057 alene", () => {
+    expect(freshApplied.indexOf(SITUATIONS)).toBe(freshApplied.indexOf(VISION) + 1);
+    expect(freshApplied.indexOf(ACTIVATION)).toBe(freshApplied.indexOf(SITUATIONS) + 1);
+    expect(hostFirstApplied).toContain(VISION);
+    expect(hostFirstApplied).toContain(SITUATIONS);
+    expect(hostFirstApplied).not.toContain(ACTIVATION);
+    expect(hostSecondApplied).toEqual([ACTIVATION]);
+  });
+
+  it("katalog-snapshotene er identiske og inneholder vision, situations OG aktiveringsflaten (057)", async () => {
+    const a = await snapshotSchema(fresh.pool);
+    const b = await snapshotSchema(host.pool);
+    const tables = new Set((a.columns as { table_name: string }[]).map((c) => c.table_name));
+    expect(tables.has("vision_event_observations")).toBe(true);
+    expect(tables.has("situations")).toBe(true);
+    expect(tables.has("situation_autonomy_policies")).toBe(true);
+    const situationColumns = (a.columns as { table_name: string; column_name: string }[])
+      .filter((c) => c.table_name === "situations")
+      .map((c) => c.column_name);
+    expect(situationColumns).toContain("inform_message");
+    expect(situationColumns).toContain("inform_delivered_at");
+    expect(a.applied_migrations).toContain(ACTIVATION);
     expect(b).toEqual(a);
   });
 });
