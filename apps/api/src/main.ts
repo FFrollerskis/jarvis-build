@@ -53,6 +53,7 @@ import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
 } from "@jarvis/situations";
+import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -477,7 +478,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // akseptanse) er alltid tilgjengelig uavhengig av denne variabelen.
     dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"]),
     // UA-10 P1 (D-160): eierens kontrollflate for Situation Engine - se over.
-    additionalTools: situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses))
+    // UA-11 Executive Mode P0 (D-162): den SAMLEDE attention-ranking-/
+    // kontrollflaten - komponerer `situations.*` via DENNE SAMME
+    // `toolGateway`-instansen (nøstet `gateway.execute()`, ALDRI
+    // `situationEngine`/`situationDomainPauses` direkte) - se
+    // `@jarvis/executive` sitt filhode for hele begrunnelsen. Ren tilføyelse
+    // på slutten av listen, SAMME ene register-løkke som resten av verktøyene.
+    additionalTools: [
+      ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway)))
+    ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.

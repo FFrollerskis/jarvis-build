@@ -47,6 +47,9 @@ importers:
       '@jarvis/core':
         specifier: workspace:*
         version: link:../../modules/core
+      '@jarvis/executive':
+        specifier: workspace:*
+        version: link:../../modules/executive
       '@jarvis/finance':
         specifier: workspace:*
         version: link:../../modules/finance
@@ -362,6 +365,40 @@ importers:
       embedded-postgres:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
+
+  modules/executive:
+    dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/situations':
+        specifier: workspace:*
+        version: link:../situations
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   modules/finance:
     dependencies:
