@@ -1,0 +1,23 @@
+{
+  "name": "@jarvis/executive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-11 Executive Mode (P0): JARVIS_CANONICAL attention-ranking + samlet eier-kontrollflate. Deterministisk avledet av EKSISTERENDE `situations`-tilstand via canonical ToolGateway - ZERO nye tabeller, ZERO ny pause/policy-logikk, ZERO ny anomalideteksjon.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/situations": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/core": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17",
+    "pg": "^8.16.3"
+  }
+}

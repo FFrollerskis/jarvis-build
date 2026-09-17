@@ -16,6 +16,7 @@
     "@jarvis/contracts": "workspace:*",
     "@jarvis/conversation-graph": "workspace:*",
     "@jarvis/core": "workspace:*",
+    "@jarvis/executive": "workspace:*",
     "@jarvis/finance": "workspace:*",
     "@jarvis/growth": "workspace:*",
     "@jarvis/health": "workspace:*",

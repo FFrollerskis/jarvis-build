@@ -4129,6 +4129,62 @@ ekte `OpenLoopService` + ekte `ToolGateway`/`PolicyGateway` + ekte `DailySchedul
 
 ---
 
+## UA-11 – Executive Mode (P0, D-162, masterplan v4.0)
+
+**Manuell masterplan-slice** på base `main=ff24a4a3b742b7c67a95b3af58a4808ea558a307` (PR #90 sin
+merge-commit), branch `tobias/manual-masterplan-ua11-executive-mode-p0`. Full begrunnelse og design:
+`docs/UA11_EXECUTIVE_MODE_DESIGN.md`; beslutning: D-162. UA-11 forutsetter UA-10 (nettopp
+PRODUCTION_VERIFIED, D-161) - dette er den FØRSTE, koherente UA-11-sliceen: attention-ranking + én
+samlet eier-kontrollflate, som KOMPONERER `situations`-kapabiliteten (D-64: `situations` er allerede
+JARVIS_CANONICAL - komposisjon, ikke duplisering, er riktig retning), ALDRI en parallell
+"Executive Situation Engine".
+
+**Bygget (P0):**
+- Ny pakke `@jarvis/executive` (`modules/executive`) - ZERO database-tilgang, ZERO nye tabeller.
+  `ranking.ts`: REN, deterministisk attention-ranking (`rankAttentionQueue()`) over en allerede-hentet
+  `Situation[]` - stage-/priority-/konfidens-/overdue-/cooldown-vekter, totalt tie-break-ordnet
+  (`situation_id` som siste, aldri-tvetydig tie-break), replay-stabilt (samme input -> bokstavelig
+  samme output, input-rekkefølgen påvirker aldri resultatet).
+- `ExecutiveService`: konstruktøren tar KUN `ToolGateway` (ALDRI `SituationEngine`/`DomainPauseRegistry`
+  direkte) - hver lesing/mutasjon går via ETT nøstet `gateway.execute({ tool_id: "situations", ... })`
+  med `identity` videreført UENDRET (D-68-disiplinen) - strukturelt umulig å omgå `PolicyGateway` eller
+  duplisere pause-/autonomi-/varslingslogikken.
+- `ExecutiveTransport`/`executiveToolDefinitions()`: `tool_id: "executive"` (`get_attention_queue`,
+  `get_attention_item`, `get_pause_state`, `pause_domain`, `resume_domain`, `resolve_situation`) - SAMME
+  identitets-fra-context-ALDRI-parametre-disiplin som `SituationsTransport` (D-160); pause/resume/resolve
+  er RENE gjennomslag til `situations.pause_domain`/`unpause_domain`/`resolve` - ingen egen pauselogikk.
+- Wiret i `apps/api/src/main.ts` sin ENE `firstWaveTools({...}, { additionalTools })`-liste (samme
+  komposisjons-rot som `situations`) - `worker-main.ts` kobler BEVISST IKKE til `executive` (Executive
+  Mode er en API-/HTTP-eid kontrollflate, samme klasse som `situations` selv i dag - ingen faktisk
+  kaller finnes i workerens prosess denne sliceen).
+
+**Funn (håndtert i denne sliceen, ikke en produksjonskodefiks av `@jarvis/situations`):**
+`Situation.confidence` er en `numeric`-kolonne; `pg` returnerer PostgreSQL `numeric` som en JS-streng
+uten en registrert typeparser (ingen er registrert i dette repoet) - `@jarvis/executive` normaliserer
+DERFOR forsvarende (`toNumberOrNull()`) på egen grense i stedet for å anta kjøretidstypen stemmer med
+`Situation` sin deklarerte `number | null`. IKKE rettet ved roten (`@jarvis/situations`/`pg`-oppsettet) -
+se D-162 for hvorfor det er utenfor denne sliceens omfang, og et eksplisitt DEFERRED-punkt.
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §7):** Executive dashboard/UI
+(kun kontrollflaten - ToolGateway-kapabiliteten - er bygget, samme reifiseringsnivå `situations.*` selv
+har i dag), business health-aggregering (cash/revenue/churn/marketing - ingen slik kilde er koblet til
+`situations` ennå), personal-domenekilder (schedule/travel/home/health - samme grunn), decision log,
+scenarios, risk register, goals/OKRs, delegation board, "business impact"-vekting (ingen tallfelt for
+det finnes på `Situation` ennå - se ranking.ts sitt filhode), modell-assistert ranking (P0 er 100%
+deterministisk, ingen ModelGateway-avhengighet), HTTP-/dashboard-rute i `server.ts` (kapabiliteten er
+bygget og testet - en eier-vendt flate er en SENERE UA-11-slice), worker-wiring (se funn over),
+host-akseptanse-harness (P0 krever intet nytt runtime-bevis - ZERO nye tabeller/migrasjon/leverandør;
+se RUNTIME_GATES for gate-status).
+
+**Tester:** `modules/executive/test/ranking.test.ts` (21, REN - ingen database), `service-transport.test.ts`
+(17, ekte Postgres/RLS + ekte `ToolGateway`/`PolicyGateway`/`SituationEngine`/`DomainPauseRegistry`:
+tenant-/space-isolasjon, eier-autoritet, forfalsket identitet avvist, KillSwitch nekter lesing også,
+komposisjon (ikke kopi) av `situations.get_queue`, pause/resume gjennom kanonisk `situations.*`, pauset
+domene gjenspeiles korrekt, resolve/stale forsvinner fra køen), `apps/api/test/executive-wiring.test.ts`
+(4, komposisjons-rot-regresjonsvakt). Se `docs/PROJECT_STATUS.md` for eksakte tall.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
