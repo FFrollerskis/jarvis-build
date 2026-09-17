@@ -18,6 +18,7 @@
 //                     healthy (assertSituationSweepHealthy kaster ikke)
 //   C. leveranse    - INFORM via EKTE ToolGateway/PolicyGateway med den
 //                     KANONISKE `telegram.notify`-definisjonen (firstWaveTools);
+//                     wrapperen videresender ALLE transport-argumenter (D-160 I);
 //                     evidens-først + idempotent replay. Med JARVIS_TELEGRAM_TOKEN
 //                     + JARVIS_TELEGRAM_CHAT_ID i .env går varselet til den EKTE
 //                     Telegram-transporten (ett syntetisk varsel til eierens chat);
@@ -43,6 +44,8 @@
 // - RØRER ALDRI ekte kunde-/forretningsdata. INGEN credential/token logges.
 
 import { randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore } from "@jarvis/core";
@@ -64,6 +67,7 @@ import {
 } from "../src/service.ts";
 import { assertSituationSweepHealthy, runSituationSweep, SituationSweepFailedError, type SituationSweepResult } from "../src/sweep.ts";
 import { SituationsTransport, situationsToolDefinitions } from "../src/transport.ts";
+import { evaluateMigrationEvidence } from "./lib/migration-evidence.ts";
 import type { Situation } from "../src/types.ts";
 
 type Verdict = "PASS" | "FAIL" | "BLOCKED_BY_RUNTIME_ROLE" | "BLOCKED_EXTERNAL";
@@ -213,14 +217,47 @@ async function selfHeal(): Promise<void> {
   }
 }
 
-/** Teller og delegerer - SAMME wrapper for ekte Telegram og lokal opptaker, så "nøyaktig ett kall" måles likt i begge moduser. */
+/**
+ * Teller og delegerer - SAMME wrapper for ekte Telegram og lokal opptaker, så "nøyaktig ett kall" måles likt i begge moduser.
+ *
+ * HOST-FUNN run_id `2105bb7d` (D-160 I): den opprinnelige wrapperen kalte
+ * `inner.invoke(action, parameters)` og DROPPET `credential` (+ invocation-
+ * context). `TelegramTransport.invoke(action, parameters, credential)` bygger
+ * URL-en av credential => `https://api.telegram.org/botundefined/sendMessage`
+ * => HTTP 404 => kastet `telegram_error_404` => ToolGateway skrev `tool.failed`
+ * i audit_events (ingen tool_executions-rad) => motoren bokførte `pending`
+ * uten grunn => 7 markører FAIL i kaskade, mens `telegram_calls=0` fordi
+ * wrapperen bare telte ETTER et vellykket inner-kall. Opptakeren ignorerte
+ * argumentene, så container-kjøringene skjulte feilen. Nå: ALLE argumenter
+ * videresendes uendret (`...args`), og forsøk telles VED INNGANG (attempts),
+ * suksesser separat (calls).
+ */
 class CountingTransport implements ToolTransport {
   calls: Array<{ action: string; parameters: Record<string, JsonValue> }> = [];
+  attempts = 0;
   constructor(private readonly inner: ToolTransport) {}
-  async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id?: string; data?: JsonValue }> {
-    const out = await this.inner.invoke(action, parameters);
-    this.calls.push({ action, parameters });
+  async invoke(...args: Parameters<ToolTransport["invoke"]>): ReturnType<ToolTransport["invoke"]> {
+    this.attempts += 1;
+    const out = await this.inner.invoke(...args);
+    this.calls.push({ action: args[0], parameters: args[1] });
     return out;
+  }
+}
+
+/**
+ * Diagnostisk gateway-observatør (D-160 I): registrerer KUN utfall/grunn/
+ * idempotensnøkkel per kall - ALDRI parametre, ALDRI credentials. Samme
+ * ToolGateway-pipeline (arver alt), null endring i policy/secret/transport.
+ */
+class ObservingGateway extends ToolGateway {
+  observed: Array<{ tool_id: string; action: string; ok: boolean; reason: string | null; idempotency_key: string | null }> = [];
+  override async execute(request: Parameters<ToolGateway["execute"]>[0]): ReturnType<ToolGateway["execute"]> {
+    const result = await super.execute(request);
+    this.observed.push({
+      tool_id: request.tool_id, action: request.action, ok: result.ok,
+      reason: result.ok ? null : result.reason, idempotency_key: request.idempotency_key ?? null
+    });
+    return result;
   }
 }
 
@@ -303,28 +340,32 @@ async function main(): Promise<void> {
   }
 
   await section("MIGRASJON 057 ANVENDT ETTER 055/056 (schema_migrations + skjema)", async () => {
-    const { rows } = await adminPool.query(
-      `SELECT name, applied_at FROM schema_migrations WHERE name IN ('055_vision.sql','056_situations.sql','057_situations_activation.sql') ORDER BY name`
-    );
-    const names = (rows as Array<{ name: string; applied_at: Date }>).map((r) => r.name);
-    const applied = rows as Array<{ name: string; applied_at: Date }>;
-    const ordered =
-      applied.length === 3 &&
-      new Date(applied[0]!.applied_at).getTime() <= new Date(applied[1]!.applied_at).getTime() &&
-      new Date(applied[1]!.applied_at).getTime() <= new Date(applied[2]!.applied_at).getTime();
+    // HOST-FUNN run_id `2105bb7d` (D-160 I): den gamle påstanden "ingen prefiks i HELE
+    // schema_migrations har count > 1" var for bred - migratoren nøkler på eksakt
+    // filnavn og ignorerer historiske rader (f.eks. `014_pgvector_embeddings.sql`,
+    // `023_zendesk_support.sql`). Vurderingen er nå den rene, enhetstestede
+    // `evaluateMigrationEvidence()`: 055/056/057 finnes nøyaktig én gang, i rekkefølge,
+    // ingen fremmed rad med prefiks 055-057, og repoets mappe har unike prefikser.
+    // Historiske duplikater/orphans RAPPORTERES eksplisitt (observabilitet), skjules aldri.
+    const { rows } = await adminPool.query(`SELECT name, applied_at FROM schema_migrations ORDER BY name`);
+    const repoFiles = readdirSync(fileURLToPath(new URL("../../core/src/db/migrations/", import.meta.url))).filter((f) => /^\d{3}_.*\.sql$/.test(f));
+    const evidence = evaluateMigrationEvidence(rows as Array<{ name: string; applied_at: Date }>, repoFiles);
+    const names = evidence.required_present;
+    const ordered = evidence.applied_in_order;
     const { rows: cols } = await adminPool.query(
       `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'situations' AND column_name IN ('inform_message','inform_delivered_at')`
     );
     const { rows: policyTable } = await adminPool.query(
       `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'situation_autonomy_policies'`
     );
-    const { rows: dup } = await adminPool.query(
-      `SELECT left(name, 3) AS prefix, count(*)::int AS n FROM schema_migrations GROUP BY left(name, 3) HAVING count(*) > 1`
-    );
     diagnostics["migrations_055_056_057"] = names.join(",");
-    diagnostics["migration_duplicate_prefixes"] = String(dup.length);
-    results.ua10_migration_057_applied = ordered && cols.length === 2 && policyTable.length === 1 && dup.length === 0 ? "PASS" : "FAIL";
-    log(`migrations=${names.join(",")} applied_in_order=${ordered} inform_columns=${cols.length}/2 autonomy_table=${policyTable.length === 1} duplicate_prefixes=${dup.length} -> ua10_migration_057_applied: ${results.ua10_migration_057_applied}`);
+    diagnostics["migration_required_prefix_collisions"] = evidence.required_prefix_collisions.join(",") || "(ingen)";
+    diagnostics["migration_repo_prefix_collisions"] = evidence.repo_prefix_collisions.join(";") || "(ingen)";
+    diagnostics["migration_historical_prefix_duplicates"] = evidence.historical_prefix_duplicates.join(";") || "(ingen)";
+    diagnostics["migration_orphan_rows"] = evidence.orphan_rows.join(",") || "(ingen)";
+    results.ua10_migration_057_applied = evidence.ok && cols.length === 2 && policyTable.length === 1 ? "PASS" : "FAIL";
+    log(`migrations=${names.join(",")} missing=${evidence.required_missing.join(",") || "(ingen)"} applied_in_order=${ordered} required_prefix_collisions=${diagnostics["migration_required_prefix_collisions"]} repo_prefix_collisions=${diagnostics["migration_repo_prefix_collisions"]} inform_columns=${cols.length}/2 autonomy_table=${policyTable.length === 1} -> ua10_migration_057_applied: ${results.ua10_migration_057_applied}`);
+    log(`  historical_prefix_duplicates(LEGITIMT, migrator nøkler på filnavn)=${diagnostics["migration_historical_prefix_duplicates"]} orphan_rows=${diagnostics["migration_orphan_rows"]}`);
   });
 
   await selfHeal();
@@ -374,10 +415,43 @@ async function main(): Promise<void> {
   diagnostics["telegram_mode"] = telegramConfigured ? "LIVE_TRANSPORT" : "RECORDER_NO_CREDENTIAL";
   const telegram = new CountingTransport(telegramConfigured ? new TelegramTransport() : new RecorderTransport());
   const actuator = new AcceptanceActuatorTransport();
-  const gateway = new ToolGateway(pool, policy, new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()));
+  const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+  const gateway = new ObservingGateway(pool, policy, secrets);
   // Den KANONISKE `telegram.notify`-definisjonen (samme som main.ts registrerer) - ingen parallell kopi.
   const telegramNotify = firstWaveTools({ telegram }).filter((t) => t.tool_id === "telegram" && t.action === "notify");
   for (const tool of telegramNotify) gateway.register(tool);
+  const telegramDef = telegramNotify[0]!;
+  /** Redigerer bort en evt. ekte token-verdi fra en diagnostisk streng (belte og bukseseler - grunnene inneholder aldri credential). */
+  const redact = (text: string): string => {
+    const token = process.env["JARVIS_TELEGRAM_TOKEN"];
+    return token && token.length > 0 ? text.split(token).join("[REDACTED]") : text;
+  };
+  /**
+   * D-160 I: diagnostikk for `telegram.notify`-kjeden - FØRSTE avvikspunkt uten secrets:
+   * schema-validering, credential-oppløsning (kun boolean/ref-navn), gateway-utfall/grunn,
+   * transport-inngang (forsøk) vs suksess, audit_events-grunner, tool_executions-status.
+   */
+  async function telegramDiagnostics(label: string, message: string | null): Promise<void> {
+    const schema = message === null ? "n/a" : String(telegramDef.input_schema.safeParse({ message }).success);
+    const credentialResolved = (await secrets.get(telegramDef.credential_ref)) !== null;
+    const observed = gateway.observed.filter((o) => o.tool_id === "telegram" && o.action === "notify");
+    const last = observed.at(-1);
+    const { rows: audit } = await adminPool.query(
+      `SELECT type, decision, reason, count(*)::int AS n FROM audit_events WHERE tenant_id = ANY($1) AND tool_id = 'telegram' GROUP BY 1, 2, 3 ORDER BY 4 DESC`,
+      [[TENANT_A, TENANT_B]]
+    );
+    const { rows: execs } = await adminPool.query(
+      `SELECT status, count(*)::int AS n FROM tool_executions WHERE tenant_id = ANY($1) AND tool_id = 'telegram' GROUP BY 1 ORDER BY 1`,
+      [[TENANT_A, TENANT_B]]
+    );
+    log(
+      `diag[${label}] schema_valid=${schema} message_chars=${message?.length ?? 0} credential_ref=${telegramDef.credential_ref} credential_resolved=${credentialResolved} ` +
+        `chat_id_configured=${Boolean(process.env["JARVIS_TELEGRAM_CHAT_ID"])} gateway_calls=${observed.length} last_ok=${last?.ok ?? "-"} last_reason=${redact(last?.reason ?? "-")} ` +
+        `last_idempotency_key=${last?.idempotency_key ?? "-"} transport_attempts=${telegram.attempts} transport_successes=${telegram.calls.length} ` +
+        `audit=${(audit as Array<{ type: string; decision: string | null; reason: string | null; n: number }>).map((r) => `${r.type}/${r.decision ?? "-"}/${redact(r.reason ?? "-")}x${r.n}`).join(";") || "(ingen)"} ` +
+        `tool_executions=${(execs as Array<{ status: string; n: number }>).map((r) => `${r.status}x${r.n}`).join(";") || "(ingen)"}`
+    );
+  }
   const actuatorTool: ToolDefinition = {
     tool_id: ACTUATOR_TOOL, action: "assign", description: "UA-10 akseptanse-lokal aktuator (ingen ekstern effekt)",
     input_schema: record({ open_loop_id: z.string(), assignee: z.string() }),
@@ -427,6 +501,8 @@ async function main(): Promise<void> {
     results.ua10_open_loop_bridge_live = ok ? "PASS" : "FAIL";
     log(`detected=${detected.detected} open_loop_id=${followupLoopId || "MANGLER"} ingested=${r.ingested} situation_stage=${sit?.stage ?? "MANGLER"} domain=${sit?.domain ?? "-"} detection_key=${sit?.detection_key ?? "-"} -> ua10_open_loop_bridge_live: ${results.ua10_open_loop_bridge_live}`);
     diagnostics["first_sweep"] = JSON.stringify({ ingested: r.ingested, identity_conflicts: r.identity_conflicts, resolved_from_source: r.resolved_from_source, delivery: r.delivery, auto_act: r.auto_act, errors: r.errors });
+    log(`first_sweep=${diagnostics["first_sweep"]}`);
+    await telegramDiagnostics("inform-after-first-sweep", sit?.inform_message ?? null);
   });
 
   await section("SVEIP HEALTHY + LEVERANSE EVIDENS-FØRST (assertSituationSweepHealthy kaster ikke; bevis under nøkkelen)", async () => {
@@ -453,7 +529,7 @@ async function main(): Promise<void> {
       ? (evidenceOk && Boolean(evidence?.external_id) ? "PASS" : "FAIL")
       : "BLOCKED_EXTERNAL";
     diagnostics["inform_evidence_external_id_present"] = String(Boolean(evidence?.external_id));
-    log(`inform_delivered=${delivered} evidence=${evidence ? `${evidence.tool_id}.${evidence.action}/${evidence.status}` : "MANGLER"} telegram_calls=${telegram.calls.length} healthy=${healthy} telegram_mode=${diagnostics["telegram_mode"]} -> ua10_sweep_healthy_path: ${results.ua10_sweep_healthy_path} ua10_delivery_evidence_first: ${results.ua10_delivery_evidence_first} ua10_notification_live_transport: ${results.ua10_notification_live_transport}`);
+    log(`inform_delivered=${delivered} evidence=${evidence ? `${evidence.tool_id}.${evidence.action}/${evidence.status}` : "MANGLER"} telegram_calls=${telegram.calls.length} telegram_attempts=${telegram.attempts} healthy=${healthy} telegram_mode=${diagnostics["telegram_mode"]} -> ua10_sweep_healthy_path: ${results.ua10_sweep_healthy_path} ua10_delivery_evidence_first: ${results.ua10_delivery_evidence_first} ua10_notification_live_transport: ${results.ua10_notification_live_transport}`);
   });
 
   await section("IDEMPOTENS/REPLAY (re-sveip => null nye varsler; krasj etter bekreftet sending => rekonsiliert fra bevis uten nytt kall)", async () => {
@@ -552,6 +628,7 @@ async function main(): Promise<void> {
     results.ua10_auto_act_exactly_once = actOk ? "PASS" : "FAIL";
     log(`acceptance_domain=${ACCEPTANCE_DOMAIN} pause_ok=${paused.ok} paused_sweep=${JSON.stringify(rPaused.auto_act)} stage_while_paused=${sitWhilePaused?.stage ?? "-"} durable_after_restore=${durable} real_domains_untouched=${realDomainsUntouched} unpause_ok=${unpaused.ok} -> ua10_domain_pause: ${results.ua10_domain_pause}`);
     log(`bridged_spend_domain=${bridgedSpend?.domain ?? "-"} bridged_spend_stage=${bridgedSpend?.stage ?? "-"} resumed_sweep=${JSON.stringify(rResumed.auto_act)} actuator_sequence=${actSequence} rendered_open_loop_id_match=${rendered?.["open_loop_id"] === sourceLoopId} stage=${sit?.stage ?? "-"} act_result=${sit?.act_result ?? "-"} act_notify_calls=${telegram.calls.length - telegramBefore} replay=${JSON.stringify(rReplay.auto_act)} -> ua10_auto_act_exactly_once: ${results.ua10_auto_act_exactly_once}`);
+    await telegramDiagnostics("act-notify-after-resumed-sweep", sit?.act_notify_message ?? null);
   });
 
   await section("TENANT/SPACE-ISOLASJON (feil tenant/space feiler lukket eller ser ingenting)", async () => {
