@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue, MemorySpace } from "@jarvis/contracts";
 import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
 import type { DomainPauseRegistry } from "./domain-pause.ts";
@@ -145,10 +146,26 @@ function requireString(parameters: Record<string, JsonValue>, key: string): stri
 /** `strict()`: INGEN identitetsfelt (`tenant_id`/`memory_space`/`actor_person_id`/`identity`) finnes i noe skjema - et parameterobjekt som prøver, avvises som `invalid_parameters` av ToolGateway. */
 const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as z.ZodType<Record<string, JsonValue>>;
 
-/** ToolGateway-definisjonene for kontrollflaten. Lese-handlinger er klasse A; pause/policy er klasse C (eier-kontroll med varig effekt - reversibel via motstykket); frigjøring av en fastlåst claim er klasse C (gjenoppretting). */
+/**
+ * ToolGateway-definisjonene for kontrollflaten. Lese-handlinger er klasse A; pause/policy er klasse C (eier-kontroll med varig effekt - reversibel via motstykket); frigjøring av en fastlåst claim er klasse C (gjenoppretting).
+ *
+ * HOST-FUNN (UA-10 P1 runtime-gate, live-akseptanse `ua10-p1-situation-sweep-live.ts`,
+ * run_id `cf8b750d`): den opprinnelige P1-definisjonen brukte en OPPFUNNET
+ * `credential_ref: "JARVIS_SITUATIONS_INTERNAL_TOKEN"` som INGEN provider i
+ * produksjonens secret-kjede (`FallbackSecretProvider(EnvSecretProvider,
+ * BusinessInternalSecretProvider)` i main.ts/worker-main.ts) leverer - hele
+ * eier-kontrollflaten (`pause_domain`/`set_autonomy_policy`/`get_queue`/
+ * `release_stuck_act_claim`...) var `credential_unavailable` i drift, usynlig
+ * for `activation.test.ts` fordi test-provideren returnerte en verdi for
+ * ENHVER ref. Nå: SAMME Jarvis-interne sentinel som alle øvrige interne
+ * domeneverktøy (`business.*`, `finance_spend.*`, ...) - `BUSINESS_INTERNAL_
+ * CREDENTIAL_REF` løses av `BusinessInternalSecretProvider`, aldri av en env-
+ * variabel. Regresjonsvakt: `ua10-p1-situation-sweep-host-run-wiring.test.ts`
+ * beviser løsning mot den EKTE kjeden uten noen env satt.
+ */
 export function situationsToolDefinitions(transport: SituationsTransport): ToolDefinition[] {
   const common = {
-    credential_ref: "JARVIS_SITUATIONS_INTERNAL_TOKEN",
+    credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF,
     output_trust: "internal" as const,
     transport,
     timeout_ms: 10_000,
