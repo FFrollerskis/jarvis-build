@@ -114,7 +114,50 @@ describe("live-scriptet rydder opp etter seg selv (samme run-unik tenant-suffiks
   it("sletter de kjøre-unike scheduler_state-radene, aldri hele tabellen", () => {
     expect(liveScriptSource).toContain("DELETE FROM scheduler_state WHERE job_name LIKE $1");
     expect(liveScriptSource).not.toMatch(/DELETE FROM scheduler_state\s*"/);
-    expect(liveScriptSource).not.toMatch(/DELETE FROM situation_domain_pauses/);
+  });
+});
+
+describe("REGRESJONSVAKT (arkitekt-review 5234145170 på PR #88): akseptansen rører ALDRI den globale pausetilstanden for et ekte domene", () => {
+  const codeOnly = liveScriptSource
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*"))
+    .join("\n");
+  const realDomains = "spend|pipeline|support|deadlines|product|operations|\\*";
+
+  it("pause_domain/unpause_domain via gateway bruker KUN det kjøre-unike akseptansedomenet - aldri et hardkodet ekte domene", () => {
+    expect(liveScriptSource).toContain("const ACCEPTANCE_DOMAIN = `ua10_acceptance_${runId}`;");
+    // Fanger HELE kallet fram til og med `parameters: {...}` (kan gå over linjeskift) - både
+    // gateway.execute({ action: "pause_domain", ... parameters: {...} }) og direkte
+    // transport.invoke("pause_domain", { domain: ... }).
+    const gatewayCalls = codeOnly.match(/action:\s*"(un)?pause_domain"[\s\S]{0,200}?parameters:\s*\{[^}]*\}/g) ?? [];
+    const directCalls = codeOnly.match(/invoke\(\s*"(un)?pause_domain"\s*,\s*\{[^}]*\}/g) ?? [];
+    const pauseCalls = [...gatewayCalls, ...directCalls];
+    expect(gatewayCalls.length).toBeGreaterThan(0);
+    // Antall forekomster av action-strengen må matche antall fangede kall - ingen kan "slippe unna" vakten.
+    expect((codeOnly.match(/"(un)?pause_domain"/g) ?? []).length).toBe(pauseCalls.length);
+    for (const call of pauseCalls) {
+      expect(call).toContain("domain: ACCEPTANCE_DOMAIN");
+      expect(call).not.toMatch(new RegExp(`domain:\\s*"(${realDomains})"`));
+    }
+  });
+  it("pauseDurable/unpauseDurable/pause_all kalles aldri for et ekte domene eller `*`", () => {
+    expect(codeOnly).not.toMatch(new RegExp(`(pauseDurable|unpauseDurable)\\(\\s*"(${realDomains})"`));
+    expect(codeOnly).not.toMatch(/"pause_all"|"unpause_all"|pauseAllDurable|unpauseAllDurable/);
+    // Ingen hardkodet ekte domene-streng sendes til pause-primitivene overhodet.
+    const durableCalls = codeOnly.match(/(pauseDurable|unpauseDurable)\([^)]*\)/g) ?? [];
+    for (const call of durableCalls) expect(call).toContain("ACCEPTANCE_DOMAIN");
+  });
+  it("selfHeal/cleanup sletter KUN akseptansedomener i situation_domain_pauses, aldri hele tabellen eller et ekte domene", () => {
+    const deletes = codeOnly.match(/DELETE FROM situation_domain_pauses[^\n]*/g) ?? [];
+    expect(deletes.length).toBeGreaterThan(0);
+    for (const d of deletes) expect(d).toContain("WHERE domain LIKE 'ua10_acceptance_%'");
+  });
+  it("beviser eksplisitt at global pausetilstand er identisk før/etter (egen markør, snapshot FØR første skriving)", () => {
+    expect(liveScriptSource).toContain("ua10_existing_global_pauses_preserved");
+    const snapshotIdx = liveScriptSource.indexOf("const globalPausesBefore");
+    const tenantInsertIdx = liveScriptSource.indexOf("INSERT INTO tenants");
+    expect(snapshotIdx).toBeGreaterThan(-1);
+    expect(snapshotIdx).toBeLessThan(tenantInsertIdx);
   });
 });
 

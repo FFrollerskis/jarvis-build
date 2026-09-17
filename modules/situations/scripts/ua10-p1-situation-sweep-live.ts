@@ -85,6 +85,7 @@ const results: Record<string, Verdict> = {
   ua10_tenant_space_isolation: "FAIL",
   ua10_fail_closed_scheduler: "FAIL",
   ua10_recovery_release_path: "FAIL",
+  ua10_existing_global_pauses_preserved: "FAIL",
   ua10_cleanup: "FAIL"
 };
 const diagnostics: Record<string, string> = {};
@@ -116,6 +117,15 @@ const OWNER_PERSON = `person-ua10-sit-live-${runId}`;
 const OTHER_PERSON = `person-ua10-sit-other-${runId}`; // samme tenant, IKKE eier
 const ACTUATOR_TOOL = "ua10_acceptance_actuator";
 const SCHEDULER_JOB_PREFIX = `situation-sweep-acceptance-${runId}`;
+/**
+ * Arkitekt-review runde 1 på PR #88 (5234145170): `situation_domain_pauses` er
+ * GLOBAL (ikke tenant-scoped). Akseptansen pauser/opphever derfor ALDRI et ekte
+ * domene (`spend`/`pipeline`/.../`*`) - en host-kjøring kunne ellers overskrive
+ * og deretter FJERNE en reell eierpause (fail-open av en sikkerhetsbarriere).
+ * Pause-/auto-ACT-beviset kjører i et KJØRE-UNIKT akseptansedomene; broen
+ * open-loop -> `spend` bevises separat uten å røre global pausetilstand.
+ */
+const ACCEPTANCE_DOMAIN = `ua10_acceptance_${runId}`;
 
 function ownerIdentityFor(tenantId: string, memorySpace: "business" | "personal" = "business"): IdentityContext {
   return {
@@ -181,11 +191,22 @@ async function cleanupTenant(tenantId: string): Promise<void> {
   await adminPool.query("DELETE FROM tenants WHERE tenant_id = $1", [tenantId]);
 }
 
+type GlobalPauseRow = { domain: string; reason: string; paused_by: string | null; paused_at: string };
+/** Full rad-snapshot av den GLOBALE pausetilstanden (admin-pool, kun SELECT). */
+async function snapshotGlobalPauses(): Promise<GlobalPauseRow[]> {
+  const rows = (await adminPool.query(
+    "SELECT domain, reason, paused_by, paused_at::text AS paused_at FROM situation_domain_pauses ORDER BY domain"
+  )).rows as GlobalPauseRow[];
+  return rows;
+}
+
 async function selfHeal(): Promise<void> {
   try {
     const stale = await adminPool.query("SELECT tenant_id FROM tenants WHERE tenant_id LIKE 'tenant-ua10-sit-live-%'");
     for (const row of stale.rows as Array<{ tenant_id: string }>) await cleanupTenant(row.tenant_id).catch(() => undefined);
     await adminPool.query("DELETE FROM scheduler_state WHERE job_name LIKE 'situation-sweep-acceptance-%'").catch(() => undefined);
+    // KUN akseptansedomener - aldri et ekte domene (global tabell).
+    await adminPool.query("DELETE FROM situation_domain_pauses WHERE domain LIKE 'ua10_acceptance_%'").catch(() => undefined);
     await adminPool.query("DELETE FROM people WHERE person_id LIKE 'person-ua10-sit-%'").catch(() => undefined);
   } catch {
     // best-effort
@@ -307,6 +328,9 @@ async function main(): Promise<void> {
   });
 
   await selfHeal();
+  // Snapshot av den GLOBALE pausetilstanden FØR noe skrives - sammenlignes etter cleanup.
+  const globalPausesBefore = await snapshotGlobalPauses();
+  diagnostics["global_pauses_before"] = globalPausesBefore.map((r) => r.domain).join(",") || "(ingen)";
   await adminPool.query("INSERT INTO tenants (tenant_id, name, kind) VALUES ($1,$2,'business'), ($3,$4,'business')", [
     TENANT_A, `UA-10 Sit Live A ${runId}`, TENANT_B, `UA-10 Sit Live B ${runId}`
   ]);
@@ -445,7 +469,7 @@ async function main(): Promise<void> {
   });
 
   await section("EIER-AUTORITET (policy uten eier feiler lukket - direkte OG via gateway)", async () => {
-    const input = { domain: "spend", tool_id: ACTUATOR_TOOL, action: "assign", parameters: { open_loop_id: "{{source_open_loop_id}}", assignee: OWNER_PERSON } };
+    const input = { domain: ACCEPTANCE_DOMAIN, tool_id: ACTUATOR_TOOL, action: "assign", parameters: { open_loop_id: "{{source_open_loop_id}}", assignee: OWNER_PERSON } };
     let directDenied = false;
     try { await engine.setAutonomyPolicy(TENANT_A, "business", input, OTHER_PERSON); } catch (err) { directDenied = err instanceof SituationAutonomyUnauthorizedError; }
     let noAuthorityDenied = false;
@@ -466,54 +490,68 @@ async function main(): Promise<void> {
   await section("IDENTITETSFORFALSKNING AVVIST (identitet i parametre => invalid_parameters; direkte transport bruker kun context)", async () => {
     const forged = await gateway.execute({
       identity: otherA, tool_id: "situations", action: "pause_domain",
-      parameters: { domain: "spend", reason: "forfalsket", actor_person_id: OWNER_PERSON }, idempotency_key: `ua10-forge-${runId}`
+      parameters: { domain: ACCEPTANCE_DOMAIN, reason: "forfalsket", actor_person_id: OWNER_PERSON }, idempotency_key: `ua10-forge-${runId}`
     });
     const transport = new SituationsTransport(engine, domainPauses);
     let directDenied = false;
     try {
-      await transport.invoke("pause_domain", { domain: "spend", reason: "forfalsket", actor_person_id: OWNER_PERSON }, "cred", { identity: otherA });
+      await transport.invoke("pause_domain", { domain: ACCEPTANCE_DOMAIN, reason: "forfalsket", actor_person_id: OWNER_PERSON }, "cred", { identity: otherA });
     } catch (err) { directDenied = err instanceof DomainPauseUnauthorizedError; }
     let missingContextDenied = false;
     try { await transport.invoke("get_queue", {}, "cred"); } catch (err) { missingContextDenied = /situations_missing_invocation_context/.test((err as Error).message); }
-    const ok = !forged.ok && /invalid_parameters/.test((forged as { reason?: string }).reason ?? "") && directDenied && missingContextDenied && !domainPauses.isPaused("spend");
+    const ok = !forged.ok && /invalid_parameters/.test((forged as { reason?: string }).reason ?? "") && directDenied && missingContextDenied && !domainPauses.isPaused(ACCEPTANCE_DOMAIN);
     results.ua10_identity_forgery_rejected = ok ? "PASS" : "FAIL";
-    log(`forged_via_gateway_ok=${forged.ok} reason=${(forged as { reason?: string }).reason ?? "-"} direct_other_denied=${directDenied} missing_context_denied=${missingContextDenied} spend_paused=${domainPauses.isPaused("spend")} -> ua10_identity_forgery_rejected: ${results.ua10_identity_forgery_rejected}`);
+    log(`forged_via_gateway_ok=${forged.ok} reason=${(forged as { reason?: string }).reason ?? "-"} direct_other_denied=${directDenied} missing_context_denied=${missingContextDenied} acceptance_domain_paused=${domainPauses.isPaused(ACCEPTANCE_DOMAIN)} -> ua10_identity_forgery_rejected: ${results.ua10_identity_forgery_rejected}`);
   });
 
-  await section("DOMENE-PAUSE STOPPER AUTO-ACT; OPPHEVING GJENOPPRETTER; NØYAKTIG ÉN ACT + ÉN ACT-VARSLING VED REPLAY", async () => {
-    // Kontrollert kandidat i `suggest` (høy prioritet, konfidens >= 0,75) i domenet med eier-policy (spend).
-    const spendLoopId = await seedSyntheticLoop(TENANT_A, {
-      loop_type: "finance_spend_unexpected", priority: "high", confidence: 0.95,
-      reason: `Uventet utgift (syntetisk, ${runId})`, detection_key: `ua10:spend:${runId}`
+  await section("DOMENE-PAUSE STOPPER AUTO-ACT; OPPHEVING GJENOPPRETTER; NØYAKTIG ÉN ACT + ÉN ACT-VARSLING VED REPLAY (KJØRE-UNIKT akseptansedomene - aldri et ekte domene)", async () => {
+    // Kildeloop (lav prioritet => broen lager en `remember`-situasjon i `spend`
+    // som ALDRI varsles/ACT-es - beviser open-loop -> spend-broen UTEN global pause).
+    const sourceLoopId = await seedSyntheticLoop(TENANT_A, {
+      loop_type: "finance_spend_unexpected", priority: "low", confidence: 0.2,
+      reason: `Uventet utgift (syntetisk kilde, ${runId})`, detection_key: `ua10:spend-source:${runId}`
+    });
+    await sweep();
+    const bridgedSpend = (await situationsOf(TENANT_A)).find((s) => s.source_open_loop_id === sourceLoopId);
+    // Kontrollert ACT-kandidat i `suggest` DIREKTE i akseptansedomenet (høy prioritet, konfidens >= 0,75), med samme kilde for plassholderen.
+    await engine.evaluateCandidate(TENANT_A, "business", {
+      domain: ACCEPTANCE_DOMAIN, detection_key: `ua10:acceptance:${runId}`, priority: "high", confidence: 0.95,
+      reason: `Akseptanse-kandidat (syntetisk, ${runId})`, source_open_loop_id: sourceLoopId
     });
     const paused = await gateway.execute({
-      identity: ownerA, tool_id: "situations", action: "pause_domain", parameters: { domain: "spend", reason: "eier pauset (akseptanse)" }, idempotency_key: `ua10-pause-${runId}`
+      identity: ownerA, tool_id: "situations", action: "pause_domain", parameters: { domain: ACCEPTANCE_DOMAIN, reason: "eier pauset (akseptanse)" }, idempotency_key: `ua10-pause-${runId}`
     });
-    const rPaused = await sweep();
+    const rPaused = await sweep(); // leverer kandidatens INFORM, hopper over ACT (pauset)
     const actuatorCallsWhilePaused = actuator.calls.length;
-    const sitWhilePaused = (await situationsOf(TENANT_A)).find((s) => s.source_open_loop_id === spendLoopId);
+    const sitWhilePaused = (await situationsOf(TENANT_A)).find((s) => s.domain === ACCEPTANCE_DOMAIN);
     // Pausen overlever en "omstart": et NYTT register ser den etter restore().
     const fresh = new DomainPauseRegistry(pool, { owner_person_id: OWNER_PERSON });
     await fresh.restore();
-    const durable = fresh.isPaused("spend");
+    const durable = fresh.isPaused(ACCEPTANCE_DOMAIN);
+    // Ekte domener skal ha NØYAKTIG samme pausetilstand som FØR kjøringen (en pre-eksisterende
+    // produksjonspause på f.eks. `spend` skal fortsatt stå - aldri kreves upauset, aldri fjernes).
+    const realDomainsUntouched = ["spend", "pipeline"].every(
+      (d) => fresh.isPaused(d) === globalPausesBefore.some((r) => r.domain === d)
+    );
     const unpaused = await gateway.execute({
-      identity: ownerA, tool_id: "situations", action: "unpause_domain", parameters: { domain: "spend" }, idempotency_key: `ua10-unpause-${runId}`
+      identity: ownerA, tool_id: "situations", action: "unpause_domain", parameters: { domain: ACCEPTANCE_DOMAIN }, idempotency_key: `ua10-unpause-${runId}`
     });
     const telegramBefore = telegram.calls.length;
     const rResumed = await sweep();
-    const sit = (await situationsOf(TENANT_A)).find((s) => s.source_open_loop_id === spendLoopId);
+    const sit = (await situationsOf(TENANT_A)).find((s) => s.domain === ACCEPTANCE_DOMAIN);
     const actSequence = actuator.calls.map((c) => c.action).join(",");
     const rendered = actuator.calls.find((c) => c.action === "assign")?.parameters;
     const rReplay = await sweep();
     const pauseOk = paused.ok && rPaused.auto_act.skipped === 1 && rPaused.auto_act.attempted === 0 && actuatorCallsWhilePaused === 0 &&
-      sitWhilePaused?.stage === "suggest" && durable && unpaused.ok && !domainPauses.isPaused("spend");
+      sitWhilePaused?.stage === "suggest" && durable && realDomainsUntouched && unpaused.ok && !domainPauses.isPaused(ACCEPTANCE_DOMAIN);
     results.ua10_domain_pause = pauseOk ? "PASS" : "FAIL";
-    const actOk = rResumed.auto_act.attempted === 1 && rResumed.auto_act.succeeded === 1 && actSequence === "read_state,assign,read_state" &&
-      rendered?.["open_loop_id"] === spendLoopId && sit?.stage === "act_notify" && sit.act_result === "succeeded" &&
+    const actOk = bridgedSpend?.domain === "spend" && bridgedSpend.stage === "remember" &&
+      rResumed.auto_act.attempted === 1 && rResumed.auto_act.succeeded === 1 && actSequence === "read_state,assign,read_state" &&
+      rendered?.["open_loop_id"] === sourceLoopId && sit?.stage === "act_notify" && sit.act_result === "succeeded" &&
       telegram.calls.length === telegramBefore + 1 && rReplay.auto_act.attempted === 0 && actuator.calls.length === 3 && telegram.calls.length === telegramBefore + 1;
     results.ua10_auto_act_exactly_once = actOk ? "PASS" : "FAIL";
-    log(`pause_ok=${paused.ok} paused_sweep=${JSON.stringify(rPaused.auto_act)} stage_while_paused=${sitWhilePaused?.stage ?? "-"} durable_after_restore=${durable} unpause_ok=${unpaused.ok} -> ua10_domain_pause: ${results.ua10_domain_pause}`);
-    log(`resumed_sweep=${JSON.stringify(rResumed.auto_act)} actuator_sequence=${actSequence} rendered_open_loop_id_match=${rendered?.["open_loop_id"] === spendLoopId} stage=${sit?.stage ?? "-"} act_result=${sit?.act_result ?? "-"} act_notify_calls=${telegram.calls.length - telegramBefore} replay=${JSON.stringify(rReplay.auto_act)} -> ua10_auto_act_exactly_once: ${results.ua10_auto_act_exactly_once}`);
+    log(`acceptance_domain=${ACCEPTANCE_DOMAIN} pause_ok=${paused.ok} paused_sweep=${JSON.stringify(rPaused.auto_act)} stage_while_paused=${sitWhilePaused?.stage ?? "-"} durable_after_restore=${durable} real_domains_untouched=${realDomainsUntouched} unpause_ok=${unpaused.ok} -> ua10_domain_pause: ${results.ua10_domain_pause}`);
+    log(`bridged_spend_domain=${bridgedSpend?.domain ?? "-"} bridged_spend_stage=${bridgedSpend?.stage ?? "-"} resumed_sweep=${JSON.stringify(rResumed.auto_act)} actuator_sequence=${actSequence} rendered_open_loop_id_match=${rendered?.["open_loop_id"] === sourceLoopId} stage=${sit?.stage ?? "-"} act_result=${sit?.act_result ?? "-"} act_notify_calls=${telegram.calls.length - telegramBefore} replay=${JSON.stringify(rReplay.auto_act)} -> ua10_auto_act_exactly_once: ${results.ua10_auto_act_exactly_once}`);
   });
 
   await section("TENANT/SPACE-ISOLASJON (feil tenant/space feiler lukket eller ser ingenting)", async () => {
@@ -601,8 +639,8 @@ async function main(): Promise<void> {
 
   await section("CLEANUP", async () => {
     let cleanupOk = true;
-    // Sikkerhetsnett: aldri la en akseptanse-pause stå igjen på eierens motor.
-    if (domainPauses.isPaused("spend")) await domainPauses.unpauseDurable("spend", OWNER_PERSON).catch(() => { cleanupOk = false; });
+    // Sikkerhetsnett: aldri la akseptanse-pausen stå igjen - og KUN den (aldri et ekte domene).
+    if (domainPauses.isPaused(ACCEPTANCE_DOMAIN)) await domainPauses.unpauseDurable(ACCEPTANCE_DOMAIN, OWNER_PERSON).catch(() => { cleanupOk = false; });
     await cleanupTenant(TENANT_A).catch((err: unknown) => { cleanupOk = false; log(`cleanup A feilet: ${(err as Error).message}`); });
     await cleanupTenant(TENANT_B).catch((err: unknown) => { cleanupOk = false; log(`cleanup B feilet: ${(err as Error).message}`); });
     await adminPool.query("DELETE FROM scheduler_state WHERE job_name LIKE $1", [`${SCHEDULER_JOB_PREFIX}-%`]).catch((err: unknown) => {
@@ -617,9 +655,14 @@ async function main(): Promise<void> {
     const leftoverTenants = await leftover("SELECT count(*)::int AS n FROM tenants WHERE tenant_id = ANY($1)", [[TENANT_A, TENANT_B]]);
     const leftoverJobs = await leftover("SELECT count(*)::int AS n FROM scheduler_state WHERE job_name LIKE $1", [`${SCHEDULER_JOB_PREFIX}-%`]);
     const productionJobUntouched = await leftover("SELECT count(*)::int AS n FROM scheduler_state WHERE job_name = 'situation-sweep' AND claimed_by LIKE '%acceptance%'", []);
-    const pausedAfter = domainPauses.pausedDomains();
-    results.ua10_cleanup = cleanupOk && leftoverSituations === 0 && leftoverPolicies === 0 && leftoverTenants === 0 && leftoverJobs === 0 && productionJobUntouched === 0 && !pausedAfter.includes("spend") ? "PASS" : "FAIL";
-    log(`cleanup_ok=${cleanupOk} leftover_situations=${leftoverSituations} leftover_policies=${leftoverPolicies} leftover_tenants=${leftoverTenants} leftover_scheduler_jobs=${leftoverJobs} production_situation_sweep_untouched=${productionJobUntouched === 0} paused_after=${pausedAfter.join(",") || "(ingen)"} -> ua10_cleanup: ${results.ua10_cleanup}`);
+    const leftoverAcceptancePauses = await leftover("SELECT count(*)::int AS n FROM situation_domain_pauses WHERE domain LIKE 'ua10_acceptance_%'", []);
+    const globalPausesAfter = await snapshotGlobalPauses();
+    diagnostics["global_pauses_after"] = globalPausesAfter.map((r) => r.domain).join(",") || "(ingen)";
+    // Byte-/semantisk identitet: HELE raden (domain, reason, paused_by, paused_at) for hver
+    // global pause som fantes FØR kjøringen skal være uendret ETTER - ikke bare domenenavnet.
+    results.ua10_existing_global_pauses_preserved = JSON.stringify(globalPausesAfter) === JSON.stringify(globalPausesBefore) ? "PASS" : "FAIL";
+    results.ua10_cleanup = cleanupOk && leftoverSituations === 0 && leftoverPolicies === 0 && leftoverTenants === 0 && leftoverJobs === 0 && productionJobUntouched === 0 && leftoverAcceptancePauses === 0 ? "PASS" : "FAIL";
+    log(`cleanup_ok=${cleanupOk} leftover_situations=${leftoverSituations} leftover_policies=${leftoverPolicies} leftover_tenants=${leftoverTenants} leftover_scheduler_jobs=${leftoverJobs} production_situation_sweep_untouched=${productionJobUntouched === 0} leftover_acceptance_pauses=${leftoverAcceptancePauses} global_pauses_before=${diagnostics["global_pauses_before"]} global_pauses_after=${diagnostics["global_pauses_after"]} -> ua10_cleanup: ${results.ua10_cleanup} ua10_existing_global_pauses_preserved: ${results.ua10_existing_global_pauses_preserved}`);
   });
 
   return finish();
