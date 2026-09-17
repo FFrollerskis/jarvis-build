@@ -1,0 +1,22 @@
+{
+  "name": "@jarvis/situations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-10 Proactive Situation Engine: JARVIS_CANONICAL hendelses-/situasjons-tilstandsmaskin (D-64) - multi-space-segregert, dedupe/suppression/quiet-hours-håndhevet, komponerer den eksisterende ToolGateway-evidence-pipelinen for ACT, ZERO nye anomali-detektorer/live hendelseskilder.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

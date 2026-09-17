@@ -151,6 +151,8 @@ beforeEach(() => {
       { name: "gitleaks", status: "completed", conclusion: "success" }
     ]
   }, null, 2), "utf8");
+  // D-158: no comparison fixture. The merge proof recomputes the merge from the
+  // real objects in `repoPath`, which this fixture already has.
   writeFileSync(join(ghDir, "fail.json"), JSON.stringify({}), "utf8");
   setComments([]);
 });

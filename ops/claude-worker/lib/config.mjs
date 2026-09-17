@@ -33,7 +33,22 @@ import {
   unsupportedPromptDeliveryReason
 } from "./dispatch.mjs";
 
-export const WORKER_VERSION = "2.1.0";
+// D-158: the authorized-merge transition verifier no longer compares two API
+// diff projections (D-157, which refused a valid merge of non-overlapping hunks
+// in one file). It recomputes the merge of the two authorized commits with git
+// and requires the recorded merge commit to be exactly that tree. That changes
+// which merges a completion gate accepts, which reasons it can emit, and - for
+// the first time in this gate - makes it run git locally, so a deployed worker's
+// version must distinguish it.
+//
+// The REVIEW-FIX on the same PR (architect review 5216915623 on PR #84) is part
+// of this same unreleased version rather than a further bump: 2.3.0 has never
+// been deployed anywhere, so there is no deployment that could be distinguished
+// FROM it, and inventing 2.4.0 for a draft correction would record a version
+// that never ran. What 2.3.0 means is therefore the corrected behaviour: the
+// merge is recomputed under a git configuration the worker isolates and
+// validates, and content that requests a non-built-in merge driver fails closed.
+export const WORKER_VERSION = "2.3.0";
 
 const REQUIRED_WORKER = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "repoPath", "claudeArgs"];
 const REQUIRED_SUPERVISOR = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "workerTaskName", "host"];

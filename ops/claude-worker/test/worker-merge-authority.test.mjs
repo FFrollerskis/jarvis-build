@@ -229,6 +229,8 @@ function publishMerge({ checks = null, pull = {}, extraCommits = [] } = {}) {
   const runs = { [merge]: checks ?? GREEN };
   for (const sha of extraCommits) runs[sha] = checks ?? GREEN;
   writeFileSync(join(ghDir, "check-runs.json"), JSON.stringify(runs, null, 2), "utf8");
+  // D-158: no comparison fixture. The merge proof recomputes the merge from the
+  // real objects in `repoPath`, which this fixture already has.
 }
 
 function setComments(list) {

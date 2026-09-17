@@ -3912,6 +3912,148 @@ DECISIONS_AND_ASSUMPTIONS.md.
 
 ---
 
+## UA-10 – Proactive Situation Engine (P0, masterplan v4.0)
+
+**Manuell, parallell masterplan-slice** - neste UA etter UA-9 (Vision & Physical World, egen draft-PR,
+ikke rørt videre av denne sliceen). Full begrunnelse, D-64-gate og sikkerhetsgrense-diskusjon:
+`docs/UA10_SITUATION_ENGINE_DESIGN.md`.
+
+**Mål (masterplanens egen tekst):** "Gjør Jarvis proaktiv and action-oriented across events."
+
+**Bygget (denne sliceen, P0):**
+- Ny pakke `@jarvis/situations` (JARVIS_CANONICAL, multi-space - samme mønster som
+  `business_open_loops`): `SituationEngine` - `evaluateCandidate()` (idempotent deteksjon,
+  deterministisk stadie-klassifisering, quiet-hours/re-suppress-suppression), `getQueue()`,
+  `resolve()`, `actOn()` (komponerer `ToolGateway.execute()`).
+- `056_situations.sql`: `situations` + `situation_notification_policies` (eier-konfigurert stille
+  timer/re-suppress-vindu).
+- Tilstandsmaskinen, ordrett fra masterplanen: `ignore -> remember -> inform -> suggest -> act ->
+  act_notify -> escalate`. `evaluateCandidate()` tildeler KUN de tre første (deterministiske regler,
+  INGEN modell-assistert klassifisering i P0); `act`/`act_notify`/`escalate` nås UTELUKKENDE via
+  `actOn()`.
+- `DomainPauseRegistry` (`modules/situations/src/domain-pause.ts`) - ny, smal, in-memory
+  domene-scoped pause (samme "instantly"-disiplin som `KillSwitch`), sjekket av `actOn()` FØR
+  `ToolGateway.execute()` i det hele tatt kalles.
+- Q-20-erasure utvidet (`modules/erasure/src/plan.ts`, `planMemorySpace()`) - `situations` registrert,
+  `situation_notification_policies` bevisst utelatt (tenant/space-nivå policy, ikke hendelsesdata).
+
+**Akseptansekriterier lukket (masterplanens egne fire):**
+1. "No duplicate spam for same event" - `detection_key`-dedupe (strukturell UNIQUE) + `resuppress_hours`
+   + quiet-hours, alle ekte testet.
+2. "ACT uses valid owner/delegated authority and logs reason/evidence" - `actOn()` komponerer den
+   allerede reviewte `ToolGateway.execute()`/`PolicyGateway.authorize()`-pipelinen (Q-34/D-130),
+   ingen ny autoritetsmekanikk oppfunnet.
+3. "D-class actions create immediate post-action notification and recovery context" - `execute()` sin
+   egen evidence-/recovery-pipeline gjenbrukt uendret; `actOn()` kjeder ETT Telegram-varsel KUN ved
+   bekreftet suksess.
+4. "Owner can pause a domain or entire Situation Engine instantly" - `DomainPauseRegistry`, in-memory,
+   sjekket FØR enhver ACT-utførelse.
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §5/§8 for full begrunnelse per
+punkt):** nye anomali-detektorer for infra/home/health (ingen eksisterende signalkilde - spend/
+pipeline/deadlines dekkes allerede av `business_open_loops`/`OpenLoopService`); en live bro FRA
+`business_open_loops` TIL `situations` (ingen sweep kaller `evaluateCandidate()` automatisk ennå -
+kontrakten er stabil og klar for en fremtidig wiring-only slice); modell-assistert klassifisering
+(krever ModelGateway/AI Council); counterfactual/simulation/feedback-learning (ML-tungt, masterplanens
+egen "where useful"-kvalifikator); autonom/tidsstyrt auto-ACT (en sweep som kaller `actOn()` uten et
+eksplisitt kall - egen sikkerhetsgrense/blast-radius-vurdering); wiring inn i
+`apps/api/src/main.ts`/en offentlig API-/kommando-overflate (naturlig følger av broen/auto-ACT-
+beslutningen over, ingen mening i å koble en komposisjons-rot til FØR det finnes en reell kaller);
+person-scoped (`planPerson()`) Q-20-erasure for `owner_person_id` (delt, allerede akseptert
+begrensning med `business_open_loops` sin egen `owner_person_id` - IKKE en ny gap, se design-notatet).
+
+**Arkitekt-review runde 1 (PR #85):** 6 P1-funn, ALLE rettet i samme slice - atomisk kollisjonsdomene
+inkl. `memory_space_id` + identitets-konflikt-avvisning i `evaluateCandidate()`; scope-safe sammensatt
+FK for `source_open_loop_id`; atomisk, eksklusiv claim + deterministisk idempotens-nøkkel i `actOn()`
+(eksakt-én-gang ACT, krasj-gjenopprettings-trygg retry); eksplisitt `ToolResult.ok`-sjekk på
+Telegram-varselet; stille-timer sjekkes eksplisitt selv under stadie-non-regresjon; `DomainPauseRegistry`
+fikk en `*Durable()`-variant (Postgres-skrive-gjennom + `restore()`, fail-closed oppstartsgjenoppretting)
+- se `docs/UA10_SITUATION_ENGINE_DESIGN.md` §4/§6/§7/§8 for det fulle, oppdaterte designet.
+
+**Arkitekt-review runde 2 (PR #85):** 6 skjerpede/nye P1-funn, ALLE rettet - `act_operation_fingerprint`
+binder claimen til DEN FAKTISKE operasjonen (tool/action/kanonisk parametre), OG `situation_id` er nå
+ALLTID en del av selve `ToolGateway`-idempotens-nøkkelen (strukturelt umulig for to situasjoner å dele
+en `tool_executions`-rad); `actOn()` rekonsiliérer en fastlåst claim mot VARIG `tool_executions`-bevis
+FØR den antar en permanent floke, PLUSS en ny, eksplisitt `releaseStuckActClaim()`-administrasjonsvei;
+Telegram-varselet har sitt eget idempotency_key (en retry sender aldri et duplikat-varsel);
+`identity` sitt eget tenant/space sjekkes EKSPLISITT mot situasjonens FØR noe DB-/gateway-kall;
+domene-pause-gaten er nå en AUTORITATIV, TRANSAKSJONELL DB-sjekk (ikke kun den synkrone cachen), og
+`DomainPauseRegistry` sine `*Durable()`-mutasjoner krever nå en autorisert `actorPersonId`; `owner_person_id`
+fikk en scope-safe sammensatt FK mot `person_tenants` - se design-notatet §6/§2 for det fulle, oppdaterte
+designet.
+
+**Arkitekt-review runde 3 (PR #85):** 2 dypere funn på runde 2 sin fiksing, BEGGE rettet - runde 2 sin
+"autoritative transaksjonelle" pause-sjekk var fortsatt racy (en SELECT låser ikke fraværet av en rad,
+og `execute()`-kallet skjedde UTENFOR claim-transaksjonen); `releaseStuckActClaim()` var verken
+eier-autorisert eller race-fri mot selve `execute()`-kallet. Lukket med EKTE Postgres advisory locks
+(`modules/situations/src/advisory-lock.ts`) - `actOn()` og `releaseStuckActClaim()` holder NÅ SAMME
+tvers-av-prosess-lås for `[domene, ALL_DOMAINS]` gjennom HELE sin kritiske seksjon (inkl. selve det
+eksterne kallet), og `DomainPauseRegistry` sine `*Durable()`-mutasjoner tar samme lås FØR de skriver -
+en pause-mutasjon og et `actOn()`-forsøk for samme domene kan derfor ALDRI kjøre samtidig.
+`releaseStuckActClaim()` krever nå også et konfigurert `SituationRecoveryAuthority` - se design-notatet
+§6 for det fulle, oppdaterte designet.
+
+**Arkitekt-review runde 4 (PR #85):** 1 funn, rettet - `actOn()` kalte fortsatt `gateway.execute()` på
+nytt for en allerede terminal/bevis-bekreftet claim; siden ToolGateway sin idempotency-dedupe IKKE er
+dens første port (policy/rate-limit/frozen/revoked/credential/preflight kjører først), kunne en retry
+feilaktig overskrive et bekreftet resultat med en senere, ubeslektet avvisning. `actOn()` short-
+circuiter nå enhver terminal/bevis-bekreftet claim direkte fra persistert tilstand/`tool_executions`
+(pluss `gateway.get()` for `output_trust` - et rent oppslag, aldri en autorisasjon) - `gateway.execute()`
+kalles ALDRI for en replay. Se design-notatet §6.
+
+**Arkitekt-review runde 5 (PR #85):** 1 funn, rettet - runde 4 sin `terminal_replay` returnerte
+UENDRET for TIDLIG: en krasj MELLOM ACT-persistering og selve varsel-forsøket, eller MELLOM et
+bekreftet varsel-bevis og `stage`-oppdateringen, lot situasjonen sitte fastlåst på `act` for alltid.
+`terminal_replay` sjekker nå om ACT er bekreftet men varselet fortsatt uavgjort, og kaller i så fall
+varsel-`execute()` på nytt med samme deterministiske nøkkel (advisory-låsen garanterer dette alltid er
+trygt) - avanserer til `act_notify` kun på bekreftet suksess, aldri en regresjon. Se design-notatet §6.
+
+**Arkitekt-review runde 6 (PR #85):** 1 funn, rettet - runde 5 sin varsel-rekonsiliering kalte
+`gateway.execute()` for varselet på nytt, som gjentok NØYAKTIG samme feilmønster runde 4 rettet for
+selve ACT-en (telegram sin dedupe er heller ikke dens første port). Varsel-nøkkelens eget
+`tool_executions`-bevis leses nå DIREKTE FØRST - et nytt `execute()`-kall skjer KUN når INGEN bevis
+finnes i det hele tatt. Se design-notatet §6.
+
+**Arkitekt-review runde 7 (PR #85):** 1 funn, rettet - den direkte bevis-sjekken for varsel-nøkkelen
+sjekket kun `status`, aldri at raden faktisk er `tool_id='telegram'`/`action='notify'` (samme
+operasjons-bindings-klasse som `act_operation_fingerprint` allerede lukker for ACT-claimen). En
+mismatch kastes nå eksplisitt, fail-closed. Se design-notatet §6.
+
+**Arkitekt-review runde 8 (PR #85):** 1 funn, rettet - runde 7 sin `tool_id`/`action`-binding bandt
+fortsatt ikke selve meldingsinnholdet: en `succeeded`-rad under varsel-nøkkelen fra et ANNET,
+ubeslektet `telegram.notify`-forsøk (samme `tool_id`/`action`, annet innhold) kunne likevel bli godtatt
+som "bekreftet levert" for denne meldingen. Et innholds-avledet fingeravtrykk over den EKSAKTE
+meldingsteksten (`computeNotifyKey()`/`buildNotifyMessage()`) bindes nå direkte inn i selve
+varsel-nøkkelen - IKKE en ny kolonne på `tool_executions` (ToolGateway sin egen, allerede reviewte
+tabell/pipeline røres ikke). Se design-notatet §6.
+
+**Arkitekt-review runde 9 (PR #85):** 1 funn, rettet - runde 8 sin varsel-nøkkel ble avledet av den
+MUTERBARE `reason` (re-deteksjon oppdaterer den også etter `act`), så «bekreftet varsel + krasj før
+stage-oppdatering + re-deteksjon med ny reason + retry» ga en annen nøkkel, tapt bevis og et
+duplikat-varsel. Varselteksten fryses nå i ny kolonne `situations.act_notify_message` atomisk med
+claimen (rad låst med `FOR UPDATE`), og nøkkel + melding avledes kun derfra i første sending og all
+gjenoppretting; DB-CHECK gjør en claim uten frossen tekst umulig, og en `BEFORE UPDATE`-trigger
+(`situations_act_claim_immutable`) nekter enhver endring av claim-feltene mens claimen står. Se
+design-notatet §6.
+
+**Arkitekt-review runde 10 (PR #85):** 1 funn, rettet - runde 9 sin CHECK/trigger tillot en DELVIS
+frigjøring (kun `act_idempotency_key` nullet) og en delvis claim (nøkkel+melding uten fingeravtrykk),
+som kunne gi duplikat ekstern utførelse. Claimen håndheves nå som ETT atomisk tuppel over alle fire
+feltene (`situations_act_claim_tuple_ck`: alle NULL eller alle satt) og triggeren sammenligner også
+`act_claimed_at`; kun komplett claim, uendret claim og komplett frigjøring er mulig. Se design-notatet §6.
+
+**Tester:** `modules/situations/test/{service-rls,act-on,stage-rules,domain-pause}.test.ts` (ekte
+embedded Postgres/RLS-bevis for dedupe/quiet-hours/stadie-regresjon-forbud + rene enhetstester for de
+deterministiske reglene + ekte `ToolGateway`/`PolicyGateway`-komposisjon for `actOn()`, inkl. runde-1-
+review-adversarielle tester: samtidig deteksjons-race, identitets-konflikt, scope-safe cross-tenant/
+cross-space `source_open_loop_id`, deterministisk claim-i-flukt-avvisning, claim-konflikt, krasj-
+gjenopprettings-retry, Telegram ok:false uten kast, stille-timer-under-resuppress, restart-overlevende
+domene-pause) + `modules/erasure/test/situations-erasure.test.ts` (ekte end-to-end
+`ErasureService`-bevis). Se `docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen
+mens PR #84/D-157 aktivt endrer den - se PR-en sin egen kommentar).
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

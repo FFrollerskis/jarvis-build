@@ -1,111 +1,57 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-15 (branch `tobias/manual-masterplan-ua9-vision-p0`, manuelt parallellarbeid
-isolert fra issue #68 sin autonome kø, base `main=6f1c980c3493c6f68fe97bb2c8f045b4d196af75` - PR #82/
-Q-34 sin merge-commit). **PR #83** - draft, IKKE merget. To arkitekt-review-runder mottatt og besvart
-(se D-153-addendumet i DECISIONS_AND_ASSUMPTIONS.md for fullstendig begrunnelse begge runder).
+**Oppdatert:** 2026-09-17 (branch `tobias/manual-masterplan-ua9-vision-p0`, PR **#83**, rekonsiliert mot
+`main=639730c5c14ba6175e91b09606abc4d9dd24fb8a` = PR #85 sin merge-commit). Aktiv oppgave: **D163/D164 -
+rekonsiliering av PR #83 (UA-9 Vision) mot dagens main** slik at UA-9 kan merges trygt ETTER at PR #85/UA-10
+allerede ligger på main, og sekvensblokkeren for PR #86 lukkes.
+`MERGE_AUTHORIZED=false`, `SELF_APPROVAL=false`, `HOST_ACCEPTANCE_REQUIRED=false`.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
-> historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md (D-153), ikke her.
+> historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## UA-9 Vision & Physical World - provider-uavhengig P0-kjerne (ferdig, testet, to review-runder rettet)
+## Hvor `main` står nå
 
-Neste manuelle masterplan-slice ETTER Q-34 (PR #82, siden merget til `main`). D-64-porten kjørt
-FØRST: `SYSTEM_OF_RECORD=JARVIS_CANONICAL`, `CAN_RUN_WITHOUT_PROVIDER=true` - ZERO leverandør
-koblet til.
+- **PR #84 (D-157/D-158/D-159, kontrollplanens merge-bevis) MERGET** 2026-09-16 som normal two-parent
+  merge `a0d9a7b27e1a6aaac8c70527e8a8e3357b3c9bad`.
+- **PR #85 (UA-10 P0 Proactive Situation Engine, `056_situations.sql`) MERGET** 2026-09-16 som normal
+  two-parent merge `639730c5c14ba6175e91b09606abc4d9dd24fb8a`.
+- **PR #83 (UA-9 Vision, D-153, `055_vision.sql`)** - DENNE branchen: `origin/main` merget INN i branchen
+  med vanlig merge-commit (ingen rebase/force/history-omskriving).
+- **PR #86 (UA-10 P1 aktivering, D-160, `057_situations_activation.sql`)** er draft, urørt av dette
+  arbeidet, og venter på at PR #83 er rekonsiliert og merget (arkitekt-review 5229519184).
 
-**Bygget:**
-- Ny pakke `@jarvis/vision` (mirrorer `@jarvis/health`/`@jarvis/location` sin struktur):
-  `types.ts`/`service.ts`/`sweep.ts`/`fake-source.ts`/`index.ts`.
-- `055_vision.sql`: `vision_retention_policies`/`vision_rooms`/`vision_event_observations`.
-- **Arkitekturvalg (bevisst): MULTI-SPACE (location-stil), IKKE health-stil enkelt-låst space** -
-  ingen 'vision'-verdi reservert i `memory_spaces`-enumereringen (se D-153 for full begrunnelse).
-- `vision_rooms`: romassosiasjon, strukturelt parallell til `location_zones` men uten
-  geofence-geometri. `vision_event_observations`: allerede-klassifiserte hendelser
-  (`event_type`/`object_label`/`confidence`), append-only (ingen `UPDATE`-grant). Biometrisk
-  ansiktsgjenkjenning EKSPLISITT utenfor.
-- D-129-lærdommen anvendt direkte: `person_id` sammensatt FK mot `person_tenants`; `room_id`
-  (NULLABLE) sammensatt FK mot `vision_rooms` (Postgres MATCH SIMPLE).
-- `getLastSeen()` dekker UA-9 akseptansekriterium 1 ("object identification and 'last seen'
-  workflows") på canonical-laget.
-- Q-20-erasure utvidet: `modules/erasure/src/plan.ts` (`planMemorySpace()`/`planPerson()`)
-  registrerer `vision_event_observations` (barn-FK FØRST) + `vision_rooms`; `vision_retention_policies`
-  bevisst utelatt (tenant/space-nivå policy-config, ikke person-eid data).
-- Nytt `docs/UA9_VISION_DPIA.md` (samme form som `UA8_PERSONAL_TWIN_DPIA.md`).
+## Rekonsilieringen (denne merge-committen)
 
-**ARKITEKT-REVIEW-RUNDE 1 (forrige HEAD `f711099`, to P1-funn - BEGGE rettet):**
-1. **Idempotens/atomisitet.** PÅKREVD `source_event_id` + DB-håndhevet scoped UNIQUE +
-   `INSERT ... ON CONFLICT DO NOTHING` (deterministisk replay). `ingestFromSource()` validerer HELE
-   batchen FØR noen INSERT og skriver den i ÉN delt transaksjon.
-2. **Snapshot-livssyklus + klokke-tillit.** `snapshot_ref` strukturelt FORBUDT (DB-CHECK + fjernet
-   fra input-schema) inntil en levetids-eid lagringsadapter finnes. `retention_expires_at` ankret på
-   `recorded_at`/`now()` i stedet for det ubetrodde `observed_at`.
-3. **Prosessinnvending** (PR #83 startet mens PR #82 var åpen): PR #82 har siden merget. Kravet om
-   en fersk issue #68-oppgave rutet til Tobias direkte (motstrid med hans standing instruks for
-   denne tracken) - han bekreftet tracken fortsatt gjelder uendret.
+**Konflikter (nøyaktig to, begge additive):**
+1. `modules/erasure/src/plan.ts` - `planMemorySpaceInContext()`: PR #83 la til vision-blokken
+   (`vision_event_observations` -> `vision_rooms` -> `vision_retention_policies`), main la til
+   `situations`. BEGGE beholdt; ingen FK mellom 055- og 056-tabellene (055 refererer kun
+   tenants/people/person_tenants/vision_rooms, 056 kun tenants/people/person_tenants/business_open_loops),
+   rekkefølgen dem imellom er vilkårlig. `planPerson()` (vision-delen) hadde ingen konflikt.
+2. `docs/PROJECT_STATUS.md` - overskrevet (denne filen).
 
-**ARKITEKT-REVIEW-RUNDE 2 (forrige HEAD `b5e7dec3`, to NYE P1-funn i selve runde 1-fiksen - BEGGE rettet):**
-1. **Dedupe-kollisjonsdomenet manglet `source_instance_id`.** To uavhengige enheter/kameraer bak
-   SAMME `source_type` kunne legitimt produsere en kolliderende lokal `source_event_id` - den andre
-   enhetens EKTE hendelse ville blitt stille tapt som en falsk replay (datatap). **Rettet:**
-   `source_instance_id` gjort PÅKREVD (var valgfri) OG lagt til i selve UNIQUE-nøkkelen -
-   kollisjonsdomenet er nå eksplisitt `(tenant, space, person, source_type, source_instance_id,
-   source_event_id)`.
-2. **Same-key replay verifiserte ikke payload-identitet.** En `ON CONFLICT DO NOTHING`-replay
-   returnerte den eksisterende raden UANSETT om den nye forsøkte payloaden faktisk var identisk -
-   en nøkkel-gjenbruk/kilde-bug kunne stille konvertere til "suksess" med feil data. **Rettet:** en
-   deterministisk `payload_fingerprint`-kolonne beregnes og sammenlignes ved hver konflikt; et avvik
-   kaster en ny typet `VisionReplayConflictError` (fail-closed).
-3. **Control-plane-prosessmerknad** (D156/worker-status-tilstand, urelatert til denne PR-ens
-   innhold): eksplisitt issue #68/autonom-løkke-EGEN intern tilstand, IKKE noe denne branchens kode
-   påvirker eller kan løse, og IKKE noe Tobias sin standing instruks ber om at røres herfra - notert
-   på PR-en, ingen handling tatt, INGEN issue #68-post.
+Alt annet auto-merget: `apps/api/src/main.ts` (main rørte den ikke siden merge-base - Vision-wiringen
+`vision-retention-sweep` er den ENESTE deltaen mot main; UA-10 P0 har ingen main.ts-wiring på main),
+`apps/api/package.json` (`@jarvis/vision`), `docs/DECISIONS_AND_ASSUMPTIONS.md` (D-153 + D-157..D-159),
+`pnpm-lock.yaml`, hele `modules/situations/**` og `ops/claude-worker/**` fra main.
 
-Full begrunnelse for alle fire fiksene og begge prosessavklaringene: D-153-addendumet i
-`docs/DECISIONS_AND_ASSUMPTIONS.md` og PR #83 sin kommentartråd.
-
-**Bevisst utsatt (`DEFERRED_WITHIN_UA9_BY_DEPENDENCY`, se DPIA §5):** live iPhone-kamera/Home
-Assistant kamera-/dørklokke-/sikkerhetsevents (fysisk maskinvare + D-64/D-41-port), faktisk
-objektklassifiseringsmodell-pipeline (leverandørvalg + D-64/D-41-port), biometrisk
-ansiktsgjenkjenning (utenfor masterplanen), enkeltbilde-snapshot-lagring (krever en levetids-eid
-adapter). UA-9 akseptansekriterium 3 ("sensitive camera streams are routed according to data
-policy") er DELVIS: multi-space RLS-isolasjon for LAGREDE hendelser er strukturelt bevist; faktisk
-kamerastrøm-ruting krever en live adapter, ikke bygget her.
-
-## Tester (ekte, kjørt - ingen simulert)
-
-- `modules/vision/test/{service-rls,room-scope-integrity}.test.ts`: **42/42** grønt (ekte embedded
-  Postgres/RLS/FK-bevis: tenant-/space-isolasjon, retensjonsberegning/-håndhevelse ANKRET på
-  recorded_at, validering (påkrevd `source_event_id`+`source_instance_id`, forbudt `snapshot_ref`),
-  adversarielt fremtids-tidsstempel-bypass-forsøk lukket, `getLastSeen`,
-  `ingestFromSource`-adapterkomposisjon, cross-tenant/-space/-person FK-avvisning `23503`,
-  sweep-fan-out; idempotens-/atomisitet-blokk (eksakt retry, overlappende poll, samtidig
-  duplikat-levering, valid-så-invalid-batch, trygg retry etterpå); OG en dedikert
-  dedupe-kollisjonsdomene-/payload-fingerprint-blokk (to enheter med kolliderende event-id skriver
-  BEGGE distinkte rader, eksakt-payload-replay OK, avvikende-payload-replay kaster
-  `VisionReplayConflictError` for BÅDE `event_type`- og `observed_at`-avvik, samtidig
-  eksakt-duplikat OG samtidig motstridende-payload begge bevist trygge - fortsatt presis én rad).
-- `modules/erasure/test/vision-erasure.test.ts`: **3/3** grønt (ekte end-to-end
-  `ErasureService.executeErasure()`-bevis).
-- Regresjonssjekk `modules/health`+`modules/location`+`modules/erasure`: **108/108** grønt (uendret
-  av denne sliceens endringer i delte filer).
-- `pnpm -w typecheck`: **28/28** pakker grønt. `pnpm -w lint`: 0 feil.
-- Full arbeidsområde-testsuite (`pnpm -w test`), kjørt PÅ NYTT etter runde 2-fiksene: **264/265
-  filer, 4798/4799 tester** grønt. Den ENE feilen
-  (`modules/core/test/embedded-postgres-ipv4-contention.test.ts`, sub-test "B.3") rører INGEN fil i
-  denne diffen - kjent, pre-eksisterende port-bind-kontensjons-race-timingtest, reprodusert i
-  fullstendig isolasjon i en tidligere runde denne økten, samme klasse uavhengig dokumentert på
-  Q-34/PR #82.
-- `git diff --check`: rent. Manuelt hemmelighetsskann: 0 reelle treff.
+**Migrasjonsrekkefølge (deterministisk, én gyldig):** `migrator.ts` kjører `^\d{3}_.*\.sql$` i
+lexikografisk sortert rekkefølge og hopper over navn som allerede står i `schema_migrations`. Etter
+merge: `... 054_tool_executions_postcondition.sql -> 055_vision.sql -> 056_situations.sql`. Ingen
+dupliserte ID-er, ingen tapt migrasjon. En host som allerede har kjørt 056 (fra main) får KUN 055 lagt til
+ved neste oppstart; en fersk database kjører 055 så 056. Begge banene gir samme skjema - se
+`modules/core/test/migration-order-055-056.test.ts` (to ekte embedded Postgres-klynger; deterministisk
+katalog-snapshot - kolonner, constraints, indekser, RLS-policyer/-flagg, grants, triggere, funksjoner,
+roller, anvendte migrasjoner - sammenlignet mellom «055 så 056» og «056 så 055»; ingen pg_dump-avhengighet).
 
 ## Blokkeringer
 
-Ingen. PR #83 er draft mot `main`. Ingen merge, ingen self-approval, ingen issue #68-post (per
-manuelt-parallellarbeid-isolasjonskravet, bekreftet av Tobias etter runde 1 sin prosessinnvending).
+1. **Merge av PR #83.** `MERGE_AUTHORIZED=false`. Krever uavhengig arkitekt-review mot eksakt ny HEAD og en
+   ARCHITECT_TASK/-REVIEW med `ARCHITECT_MERGE_APPROVED=true`.
+2. **Embedded-Postgres-flake (B.3, port-kontensjon)** er fortsatt kjent i repo-suiten (uendret).
+3. **UA-9 live-adaptere** (iPhone/HA-kamera, objektklassifisering) er fortsatt DEFERRED (DPIA §5).
 
-## Neste anbefalte oppgave
+## Neste oppgave
 
-Vente på arkitektens neste reviewrunde på PR #83 (alle fire P1-funn på tvers av begge runder er nå
-rettet og pushet). Deretter: en egen, senere D-64/D-41-port-vurdert slice for EN konkret live
-vision-leverandør ELLER en levetids-eid snapshot-lagringsadapter (fjerner `snapshot_ref`-CHECK-en).
-Alternativt: en docs-only D-1xx-oppfølging for Q-34 dersom den ikke allerede er gjort i en annen økt.
+Arkitekt-review og merge av rekonsiliert PR #83. Deretter PR #86 (UA-10 P1) re-guardes mot ny main
+(057 kommer etter 056; 055 er da allerede på main) og reviewes på nytt. Så UA-11 Executive Mode P0.

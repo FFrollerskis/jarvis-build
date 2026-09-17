@@ -163,6 +163,51 @@ const checks = (over = null) => ({
   error: null
 });
 
+/**
+ * D-158: the recomputed-merge proof.
+ *
+ * D-144's branch was UP TO DATE with its base, so this fixture is the topology
+ * where the merge tree does equal the head tree. The proof must accept it for
+ * exactly the same reason it accepts PR #82's diverged branch and a same-file
+ * non-overlapping merge: the recorded merge's tree is the tree merging the two
+ * authorized commits produces. That is one statement, not three cases.
+ *
+ * The REAL-OBJECT versions of all of this live in `merge-tree-proof.mjs`'s suite,
+ * where git computes the trees. Here the record is a fixture on purpose: this
+ * file drives the SURROUNDING gate, and every case must fail for the reason it
+ * is about rather than because a merge could not be computed.
+ */
+const mergeTreeProof = (over = {}) => ({
+  attempted: true,
+  ok: true,
+  stage: "complete",
+  error: null,
+  store_path: `C:/worker/tmp/${TASK_ID}/merge-proof.git`,
+  // D-159: a complete record also says WHOSE directory the proof ran in, and
+  // the gate re-checks it against the task it is deciding.
+  store_owned: true,
+  store_owner_task_id: TASK_ID,
+  fetched: false,
+  fetch_error: null,
+  missing_objects: [],
+  // D-158 REVIEW-FIX: a complete record also states the conditions the merge
+  // was computed under - an isolated, allowlisted configuration, and no
+  // non-built-in merge driver requested by the content being merged.
+  config_isolated: true,
+  foreign_config: [],
+  custom_merge_drivers: [],
+  attribute_files_scanned: 0,
+  resolved_base: BASE,
+  resolved_head: HEAD,
+  resolved_merge: MERGE,
+  expected_tree: TREE,
+  conflicted: false,
+  conflict_detail: null,
+  merge_commit_tree: TREE,
+  merge_commit_parents: [BASE, HEAD],
+  ...over
+});
+
 /** The verdict the CURRENT worker produced for D-144, reproduced exactly. */
 const D144_PROVENANCE = Object.freeze({
   verdict: COMMIT_PROVENANCE.UNATTRIBUTED,
@@ -192,7 +237,8 @@ function verify(over = {}) {
     pull: over.pull ?? pull(),
     mergeCommit: over.mergeCommit ?? mergeCommit(),
     headCommit: over.headCommit ?? headCommit(),
-    checks: over.checks ?? checks()
+    checks: over.checks ?? checks(),
+    mergeTreeProof: "mergeTreeProof" in over ? over.mergeTreeProof : mergeTreeProof()
   });
 }
 
@@ -225,6 +271,10 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
     expect(t.merge_tree_sha).toBe(TREE);
     expect(t.head_tree_sha).toBe(TREE);
     expect(t.check_runs.map((r) => r.name)).toEqual(["build-test", "windows-git-auth", "gitleaks"]);
+    // D-158: the head tree still travels in the record as evidence, and the
+    // recomputed merge tree is what was actually PROVEN.
+    expect(t.expected_merge_tree_sha).toBe(TREE);
+    expect(t.merge_tree_proof.proven).toBe(true);
   });
 
   it("it excuses the merge commit WITHOUT ever claiming Claude authored it", () => {
@@ -274,6 +324,77 @@ describe("D-145 REGRESSION: D-144's exact historical sequence retires successful
 });
 
 /* ==========================================================================
+ * D-158: THE TOPOLOGIES THE TWO PREVIOUS RULES REFUSED
+ * ========================================================================== */
+
+describe("D-158 REGRESSION: PR #82's diverged branch verifies at the transition gate", () => {
+  /**
+   * D-156's exact shape, at this gate rather than only in the leaf module.
+   *
+   * The merge commit's tree is NOT the approved head's tree, because the branch
+   * was 17 commits behind its base - and under D-145's rule that alone produced
+   * `..._so_the_merge_introduced_unreviewed_content` and held the completion gate
+   * (issue #68 comment 5684346209) on a correct, authorized merge.
+   *
+   * These are PR #82's real tree ids, and the expected merge tree is the one this
+   * change verified against the live repository: `git merge-tree --write-tree`
+   * over base 091ba091 and head 170e5810 produces eef13c74, which is exactly the
+   * tree GitHub's own merge commit 6f1c980c points at.
+   */
+  const DIVERGED_MERGE_TREE = "eef13c740e69b11c2e1007b2a6b9303e3eda393d";
+  const DIVERGED_HEAD_TREE = "6481537750f78e4956b7d5ad232964dc670f138d";
+
+  const diverged = (over = {}) => verify({
+    mergeCommit: mergeCommit({ treeSha: DIVERGED_MERGE_TREE }),
+    headCommit: headCommit({ treeSha: DIVERGED_HEAD_TREE }),
+    mergeTreeProof: mergeTreeProof({
+      expected_tree: DIVERGED_MERGE_TREE,
+      merge_commit_tree: DIVERGED_MERGE_TREE
+    }),
+    ...over
+  });
+
+  it("verifies even though the merge tree differs from the approved head tree", () => {
+    const t = diverged();
+    expect(t.verified).toBe(true);
+    expect(t.reason).toBe(MERGE_TRANSITION.VERIFIED);
+    expect(t.merge_tree_sha).not.toBe(t.head_tree_sha);
+    expect(t.expected_merge_tree_sha).toBe(DIVERGED_MERGE_TREE);
+  });
+
+  it("the record still carries both trees, so the evidence is not lost", () => {
+    const t = diverged();
+    expect(t.merge_tree_sha).toBe(DIVERGED_MERGE_TREE);
+    expect(t.head_tree_sha).toBe(DIVERGED_HEAD_TREE);
+  });
+
+  it("the human description labels the head tree as evidence, not as a finding", () => {
+    const lines = describeMergeTransition(diverged()).join("\n");
+    expect(lines).toContain("head tree (evidence only)");
+    expect(lines).toContain("normal when the head did not already contain its base");
+    expect(lines).toContain(DIVERGED_MERGE_TREE);
+  });
+
+  it("but a DIVERGED merge that introduced unreviewed content is still refused", () => {
+    // The whole point: the topology is accepted, the unreviewed content is not.
+    const t = diverged({
+      mergeCommit: mergeCommit({ treeSha: OTHER }),
+      mergeTreeProof: mergeTreeProof({ expected_tree: DIVERGED_MERGE_TREE, merge_commit_tree: OTHER })
+    });
+    expect(t.verified).toBe(false);
+    expect(t.reason).toBe(MERGE_TRANSITION.MERGE_TREE_MISMATCH);
+  });
+
+  it("and a diverged merge still owes every OTHER guard - parents, CI, report", () => {
+    expect(diverged({ mergeCommit: mergeCommit({ treeSha: DIVERGED_MERGE_TREE, parents: [BASE, OTHER] }) }).reason)
+      .toBe(MERGE_TRANSITION.SECOND_PARENT_MISMATCH);
+    expect(diverged({ checks: checks([]) }).verified).toBe(false);
+    expect(diverged({ completion: { complete: true, successful: false, status: "BLOCKED", reportCommentId: 1 } })
+      .reason).toBe(MERGE_TRANSITION.REPORT_NOT_SUCCESSFUL);
+  });
+});
+
+/* ==========================================================================
  * ADVERSARIAL NEGATIVES - the transition itself
  * ========================================================================== */
 
@@ -291,9 +412,86 @@ describe("D-145: the transition fails CLOSED on every single-field deviation", (
       { mergeCommit: mergeCommit({ parents: [] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
     ["an octopus merge (three parents)",
       { mergeCommit: mergeCommit({ parents: [BASE, HEAD, OTHER] }) }, MERGE_TRANSITION.NOT_A_TWO_PARENT_MERGE],
-    ["extra content in the merge tree",
-      { mergeCommit: mergeCommit({ treeSha: "9999999999999999999999999999999999999999" }) },
-      MERGE_TRANSITION.TREE_MISMATCH],
+    // D-158: any content difference - an extra file, a dropped or altered hunk
+    // on either side, a changed mode - lands in ONE place, the merge commit's
+    // tree, because that is what a tree id is. The fixture moves both the
+    // projection and the object so they stay consistent with each other; the
+    // separate case below is what proves a projection that DISAGREES with the
+    // object is itself a refusal.
+    ["content the review never saw: the merge tree is not the authorized merge",
+      {
+        mergeCommit: mergeCommit({ treeSha: OTHER }),
+        mergeTreeProof: mergeTreeProof({ merge_commit_tree: OTHER })
+      },
+      MERGE_TRANSITION.MERGE_TREE_MISMATCH],
+    ["the API projection and the real merge object disagree about the tree",
+      { mergeTreeProof: mergeTreeProof({ merge_commit_tree: OTHER, expected_tree: OTHER }) },
+      MERGE_TRANSITION.MERGE_COMMIT_OBJECT_DISAGREES],
+    ["merging the authorized base and head CONFLICTS",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "merge_tree", conflicted: true, expected_tree: null,
+          conflict_detail: "CONFLICT (content): Merge conflict in feature.txt",
+          error: "merging conflicts"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_CONFLICTED],
+    ["an exact object the proof needs could not be obtained",
+      { mergeTreeProof: mergeTreeProof({ ok: false, stage: "resolve", missing_objects: [HEAD] }) },
+      MERGE_TRANSITION.MERGE_TREE_OBJECTS_UNAVAILABLE],
+    ["the merge could not be recomputed at all",
+      { mergeTreeProof: mergeTreeProof({ ok: false, stage: "merge_tree", error: "git is too old" }) },
+      MERGE_TRANSITION.MERGE_TREE_NOT_COMPUTED],
+    ["the proof was never computed",
+      { mergeTreeProof: null },
+      MERGE_TRANSITION.MERGE_TREE_NOT_COMPUTED],
+    ["the proof answers about a different base than the order authorized",
+      { mergeTreeProof: mergeTreeProof({ resolved_base: OTHER }) },
+      MERGE_TRANSITION.MERGE_TREE_WRONG_INPUTS],
+    // D-158 REVIEW-FIX: the conditions the merge was computed under reach the
+    // SURROUNDING gate as refusals too, so a held gate names them in the record
+    // rather than only inside the proof module.
+    ["the merge was computed under configuration the worker does not control",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "config_isolation", config_isolated: false,
+          foreign_config: ["file:C:/Users/x/.gitconfig -> merge.evil.driver (not the proof store's own config)"],
+          error: "the merge proof would run under configuration this worker does not control"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_CONFIG_NOT_ISOLATED],
+    ["the computation never said what configuration it ran under",
+      { mergeTreeProof: mergeTreeProof({ config_isolated: null }) },
+      MERGE_TRANSITION.MERGE_TREE_CONFIG_NOT_ISOLATED],
+    ["the content being merged requests a non-built-in merge driver",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "attributes",
+          custom_merge_drivers: ["1111111111:.gitattributes -> merge=evil"],
+          error: "the content being merged requests a non-built-in merge driver"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_DRIVER_REQUESTED],
+    ["the merge-driver question was never asked",
+      { mergeTreeProof: mergeTreeProof({ custom_merge_drivers: null }) },
+      MERGE_TRANSITION.MERGE_TREE_DRIVER_REQUESTED],
+    // D-159: and WHOSE directory it ran in reaches the surrounding gate the same
+    // way. A store shared with other work is a refusal here, not only inside the
+    // proof module - and a record built for another task cannot decide this one.
+    ["the proof could not claim a store this task owns",
+      {
+        mergeTreeProof: mergeTreeProof({
+          ok: false, stage: "store_ownership", store_owned: false,
+          error: "the store already exists but carries no jarvis-merge-proof-owner.json"
+        })
+      },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
+    ["the computation never said whose store it ran in",
+      { mergeTreeProof: mergeTreeProof({ store_owned: null, store_owner_task_id: null }) },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
+    ["the proof ran in a store owned by a DIFFERENT task",
+      { mergeTreeProof: mergeTreeProof({ store_owner_task_id: "D158-SOME-OTHER-TASK-20260915-A" }) },
+      MERGE_TRANSITION.MERGE_TREE_STORE_NOT_TASK_OWNED],
     ["the PR is not merged",
       { pull: pull({ merged: false, mergeCommitSha: null }) }, MERGE_TRANSITION.NOT_MERGED],
     ["merged but with no merge sha",

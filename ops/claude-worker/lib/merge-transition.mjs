@@ -52,8 +52,31 @@
  *      base, parent 2 == the approved head, in that order. A squash produces one
  *      parent and a rebase produces none of this shape, so the structure alone
  *      refutes both without trusting any field that claims "method=merge";
- *   4. the merge commit's TREE equals the approved head's tree - so the merge
- *      introduced no content that was never reviewed;
+ *   4. D-158: the merge commit's TREE IS THE TREE that merging the approved base
+ *      and the approved head produces - so this merge commit is THE merge of the
+ *      two commits that were authorized, and carries nothing besides.
+ *
+ *      This input has now been wrong twice, in the same way, and the third
+ *      version is shaped to stop that repeating:
+ *
+ *        D-145 required `merge tree === approved head tree`. True only when the
+ *        head already contains every commit on its base; it held D-156 (PR #82,
+ *        17 commits behind) on a merge that was exactly the authorized one.
+ *
+ *        D-157 required the API projections `parent1...merge` and
+ *        `base...head` to be equal field for field. True only when base and head
+ *        touch different FILES; for different NON-OVERLAPPING HUNKS OF ONE FILE
+ *        the correct merge blob holds both sides, so a valid merge was refused
+ *        as `DELTA_CONTENT_MISMATCH`.
+ *
+ *      Each asserted a RESEMBLANCE to something else, and each was written from
+ *      the one topology its fixtures happened to have. D-158 instead RECOMPUTES
+ *      the merge from the two immutable authorized objects and requires the
+ *      recorded merge to be it. That is the same statement in every topology,
+ *      and a tree id covers every path, mode, symlink and byte - including the
+ *      base-only content neither predecessor looked at at all. See
+ *      `merge-tree-proof.mjs` for the invariant and `merge-tree.mjs` for how it
+ *      is computed without touching any working tree.
  *   5. fresh post-merge check runs on the merge commit: every REQUIRED check
  *      named by trusted policy present exactly once, finished, and `success`.
  *
@@ -172,6 +195,13 @@ import {
   resolvePostMergeEvidencePolicy,
   verifyCloseoutReport
 } from "./postmerge-evidence.mjs";
+import { MERGE_TREE_PROOF, describeMergeTreeProof, verifyMergeTreeProof } from "./merge-tree-proof.mjs";
+
+export {
+  MERGE_TREE_PROOF,
+  describeMergeTreeProof,
+  verifyMergeTreeProof
+} from "./merge-tree-proof.mjs";
 
 export {
   ORDER_BINDING,
@@ -208,6 +238,13 @@ export {
  */
 export const MERGE_TRANSITION = Object.freeze({
   ...POST_MERGE_EVIDENCE,
+  /**
+   * D-158: the merge-tree-proof findings, in the SAME reason namespace. They
+   * replace D-145's `TREE_MISMATCH` and D-157's `MERGE_DELTA` set, neither of
+   * which is kept alongside them - see the module header for why each was wrong
+   * for a topology its own fixtures did not contain.
+   */
+  ...MERGE_TREE_PROOF,
   /**
    * D-149: the durable-order-binding findings, folded into the SAME reason
    * namespace as everything else this module can refuse with, so a record, a log
@@ -292,10 +329,24 @@ export const MERGE_TRANSITION = Object.freeze({
   FIRST_PARENT_MISMATCH: "the_merge_commit_first_parent_is_not_the_approved_base_commit",
   /** Second parent is not the approved head. */
   SECOND_PARENT_MISMATCH: "the_merge_commit_second_parent_is_not_the_approved_head_commit",
-  /** The approved head commit could not be read, so its tree is unknown. */
+  /** The approved head commit could not be read, so it is not a known remote commit. */
   HEAD_COMMIT_UNREADABLE: "the_approved_head_commit_could_not_be_read_from_the_remote",
-  /** The merge tree differs from the approved head tree: unreviewed content. */
-  TREE_MISMATCH: "the_merge_commit_tree_is_not_the_approved_head_tree_so_the_merge_introduced_unreviewed_content",
+  /*
+   * D-145's `TREE_MISMATCH` AND D-157's `MERGE_DELTA` FINDINGS USED TO LIVE HERE,
+   * AND BOTH ARE GONE ON PURPOSE.
+   *
+   * `TREE_MISMATCH` asserted `merge tree === approved head tree`, which holds
+   * only when the head already contains every commit on its base. The
+   * `DELTA_*` findings asserted that two API diff projections were equal field
+   * for field, which holds only when base and head touch different FILES - for
+   * different non-overlapping hunks of ONE file the merge blob correctly carries
+   * both sides, and a valid merge was refused as `DELTA_CONTENT_MISMATCH`.
+   *
+   * Neither is retained as a dead constant: nothing may emit either again, and
+   * the property both were reaching for is now proven by the `MERGE_TREE_PROOF`
+   * findings spread in above - by recomputing the merge instead of asserting a
+   * resemblance, which is the same statement in every topology.
+   */
 
   /* --- post-merge gates -----------------------------------------------------
    *
@@ -957,6 +1008,10 @@ export function classifyBoundMergeAuthorization({
  *   mergeCommit    `{ ok, item: { sha, parents: [...], treeSha } }`
  *   headCommit     `{ ok, item: { sha, treeSha } }` for the APPROVED head
  *   checks         `{ ok, runs: [{ name, status, conclusion }] }` on the merge sha
+ *   mergeTreeProof D-158: the record from `computeMergeTree` - the tree that
+ *                  merging the authorized base and head produces, and the merge
+ *                  commit's own tree and parents read from the real objects.
+ *                  See `merge-tree-proof.mjs`.
  */
 export function verifyMergeTransition({
   authorization,
@@ -965,6 +1020,7 @@ export function verifyMergeTransition({
   mergeCommit,
   headCommit,
   checks,
+  mergeTreeProof,
   now = () => new Date()
 }) {
   const auth = authorization && typeof authorization === "object" ? authorization : null;
@@ -977,8 +1033,15 @@ export function verifyMergeTransition({
     expected_head_sha: auth?.expectedHead ?? null,
     merge_commit_sha: null,
     merge_parents: [],
+    // D-158: the merge commit's tree is now GATED again - but against the tree a
+    // merge of the authorized base and head produces, not against the head's
+    // tree. `head_tree_sha` stays EVIDENCE ONLY: it differs from the merge tree
+    // for every correct merge of a branch that did not already contain its base.
     merge_tree_sha: null,
     head_tree_sha: null,
+    // D-158: the recomputed-merge proof that replaced D-157's delta comparison.
+    expected_merge_tree_sha: null,
+    merge_tree_proof: null,
     report_comment_id: completion?.reportCommentId ?? null,
     report_status: completion?.status ?? null,
     check_runs: [],
@@ -1068,7 +1131,17 @@ export function verifyMergeTransition({
       `parent 2 is ${parents[1]}, the authorized head is ${auth.expectedHead}`, withParents);
   }
 
-  // --- 5. the tree: no content the review never saw ------------------------
+  // --- 5. THE MERGE ITSELF: recomputed, not merely resembled -----------------
+  //
+  // D-158 replaces D-157's projection comparison here, which had replaced D-145's
+  // `merge tree === approved head tree`. Both predecessors asserted a resemblance
+  // that was only true for the topology their fixtures had; this recomputes the
+  // merge of the two authorized objects and requires the recorded merge to BE it.
+  //
+  // The approved head commit is still read, because it must be a real commit on
+  // this remote and its identity must be the one the order names - but its TREE
+  // is evidence in the record rather than a gate: it differs from the merge tree
+  // for every correct merge of a branch that did not already contain its base.
   if (!headCommit || headCommit.ok !== true || !headCommit.item) {
     return refuse(MERGE_TRANSITION.HEAD_COMMIT_UNREADABLE, headCommit?.error ?? "not queried", withParents);
   }
@@ -1080,11 +1153,31 @@ export function verifyMergeTransition({
       `read back commit ${JSON.stringify(headCommit.item.sha ?? null)}, expected the approved head `
       + auth.expectedHead, withTrees);
   }
-  if (!mergeTree || !headTree || mergeTree !== headTree) {
-    return refuse(MERGE_TRANSITION.TREE_MISMATCH,
-      `the merge commit tree is ${JSON.stringify(mergeTree || null)} and the approved head tree is `
-      + `${JSON.stringify(headTree || null)}; a normal merge of an up-to-date branch reproduces the head tree `
-      + "exactly, so a difference is content that was never reviewed", withTrees);
+
+  // The API's own tree and parents for this commit are handed in as a CROSS-CHECK
+  // against the real object, not as a substitute for it: the proof requires them
+  // to agree, so a projection that has drifted from the object it describes is a
+  // named refusal rather than the thing the gate quietly believed.
+  //
+  // D-159: the proof is also bound to the task being decided. The computation
+  // has to have run in a store this exact task owns, and say which - otherwise a
+  // record produced by, or contaminated by, other work could decide this merge.
+  const treeVerdict = verifyMergeTreeProof({
+    computation: mergeTreeProof,
+    mergeSha,
+    expectedBase: auth.expectedBase,
+    expectedHead: auth.expectedHead,
+    taskId: auth.taskId,
+    projectedTree: mergeTree || null,
+    projectedParents: parents
+  });
+  const withProof = {
+    ...withTrees,
+    expected_merge_tree_sha: treeVerdict.evidence?.expected_tree ?? null,
+    merge_tree_proof: treeVerdict.evidence ?? null
+  };
+  if (!treeVerdict.ok) {
+    return refuse(treeVerdict.reason, treeVerdict.detail, withProof);
   }
 
   // --- 6. the REQUIRED post-merge checks, by name --------------------------
@@ -1094,7 +1187,7 @@ export function verifyMergeTransition({
   // questions differ exactly when a required check is absent, which is the case
   // the PR #81 review found passing.
   const checkVerdict = classifyPostMergeChecks(checks, auth.policy);
-  const withChecks = { ...withTrees, check_runs: checkVerdict.runs };
+  const withChecks = { ...withProof, check_runs: checkVerdict.runs };
   if (!checkVerdict.ok) {
     return refuse(checkVerdict.reason, checkVerdict.detail, withChecks);
   }
@@ -1137,8 +1230,10 @@ export function verifyMergeTransition({
     verified: true,
     reason: MERGE_TRANSITION.VERIFIED,
     detail: `PR #${auth.prNumber} is merged as ${mergeSha} with exactly two parents `
-      + `(${parents[0]}, ${parents[1]}) matching the authorized base and head, its tree equals the approved head `
-      + `tree ${headTree}, the ${checkVerdict.required.length} REQUIRED post-merge check(s) `
+      + `(${parents[0]}, ${parents[1]}) matching the authorized base and head, its tree ${mergeTree} is exactly the `
+      + `tree ${treeVerdict.evidence.expected_tree} that merging those two authorized commits produces (head tree `
+      + `${headTree} - equal to the merge tree only when the head already contained its base, and not required to `
+      + `be), the ${checkVerdict.required.length} REQUIRED post-merge check(s) `
       + `(${checkVerdict.required.join(", ")}) are each present exactly once on the merge commit and concluded `
       + `success, and trusted report ${reportVerdict.report_comment_id} is bound to this exact task, PR and merge `
       + `sha across ${reportVerdict.checked_fields.length} required field(s) - of which `
@@ -1237,7 +1332,14 @@ export function describeMergeTransition(transition, excuse = null) {
     `  authorized base -> head: ${transition.expected_base_sha ?? "unknown"} -> ${transition.expected_head_sha ?? "unknown"}`,
     `  merge commit: ${transition.merge_commit_sha ?? "none"}`
       + (transition.merge_parents?.length ? ` parents [${transition.merge_parents.join(", ")}]` : ""),
-    `  trees: merge=${transition.merge_tree_sha ?? "unknown"} head=${transition.head_tree_sha ?? "unknown"}`,
+    // D-158: the HEAD tree is EVIDENCE, not a gate. Labelled so, because a reader
+    // who remembers D-145's rule must not read a difference here as a finding.
+    `  head tree (evidence only): ${transition.head_tree_sha ?? "unknown"}`
+      + (transition.merge_tree_sha && transition.head_tree_sha
+        && transition.merge_tree_sha !== transition.head_tree_sha
+        ? " - differs from the merge tree, which is normal when the head did not already contain its base"
+        : ""),
+    ...describeMergeTreeProof(transition.merge_tree_proof),
     `  REQUIRED checks (${transition.policy_sources?.requiredChecks ?? "unresolved"}): `
       + `${transition.required_checks?.length ? transition.required_checks.join(", ") : "none declared"}`
       + `; extras: ${transition.extra_checks_policy ?? "unresolved"}`,

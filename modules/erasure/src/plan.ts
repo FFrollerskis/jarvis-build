@@ -394,6 +394,20 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "vision_retention_policies", await run(client, mode, "vision_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // Rekonsiliering PR #83 mot main (D163/D164): vision-blokken over (055) og
+  // situations-blokken under (056) har INGEN FK seg imellom (055 refererer
+  // kun tenants/people/person_tenants/vision_rooms; 056 refererer kun
+  // tenants/people/person_tenants/business_open_loops) - rekkefølgen dem
+  // imellom er derfor vilkårlig; begge beholdes uendret fra hver sin side.
+  // UA-10 (056_situations.sql): Proactive Situation Engine. Samme tenant+
+  // space-scoped registrering som `business_open_loops` (dens egen
+  // nærmeste presedens - se der). `situation_notification_policies`
+  // BEVISST utelatt (tenant/space-nivå eier-konfigurert varslingspolicy,
+  // IKKE hendelses-/personeid data - samme "ingen dinglende
+  // konfigurasjonsrad, men ALDRI heller feilaktig fjernet policy for
+  // gjenværende data"-prinsipp som `location_retention_policies`/
+  // `health_retention_policies` over).
+  add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
 

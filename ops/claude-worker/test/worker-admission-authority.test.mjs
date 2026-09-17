@@ -221,6 +221,8 @@ function publishMerge({ checks = null, pull = {} } = {}) {
   }
   writeFileSync(join(ghDir, "commits.json"), JSON.stringify(commits, null, 2), "utf8");
   writeFileSync(join(ghDir, "check-runs.json"), JSON.stringify({ [merge]: checks ?? GREEN }, null, 2), "utf8");
+  // D-158: no comparison fixture. The merge proof recomputes the merge from the
+  // real objects in `repoPath`, which this fixture already has.
 }
 
 function setComments(list) {
