@@ -33,6 +33,11 @@ import {
   unsupportedPromptDeliveryReason
 } from "./dispatch.mjs";
 
+// D-166: the cross-worker admission root is derived next to the module that
+// enforces it, so configuration and enforcement can never disagree about where
+// two contending workers are supposed to meet.
+import { admissionRootFor as defaultAdmissionRoot } from "./task-admission.mjs";
+
 // D-158: the authorized-merge transition verifier no longer compares two API
 // diff projections (D-157, which refused a valid merge of non-overlapping hunks
 // in one file). It recomputes the merge of the two authorized commits with git
@@ -48,6 +53,15 @@ import {
 // that never ran. What 2.3.0 means is therefore the corrected behaviour: the
 // merge is recomputed under a git configuration the worker isolates and
 // validates, and content that requests a non-built-in merge driver fails closed.
+//
+// D-166 stays on 2.3.0 for exactly the same reason, and it is worth being explicit
+// about it rather than letting the number drift silently: cross-worker task
+// admission changes the worker's behaviour materially, but 2.3.0 has still never
+// been deployed anywhere, so there is no running deployment that a 2.4.0 could be
+// distinguished FROM. Inventing one would record a version that never ran. What
+// 2.3.0 means is therefore the behaviour described here PLUS D-166: exactly one
+// worker owns a TASK_ID across concurrent deployments, crashes and reboots. The
+// number gets bumped by the first change made AFTER something ships.
 export const WORKER_VERSION = "2.3.0";
 
 const REQUIRED_WORKER = ["repoOwner", "repoName", "controlIssue", "trustedAuthor", "repoPath", "claudeArgs"];
@@ -298,6 +312,21 @@ export function loadWorkerConfig(configPath, root) {
     //     business living somewhere a temp sweeper is entitled to delete.
     worktreeRoot: resolveUnder(root, raw.worktreeRoot, resolve(scratchRoot, "..", "worktrees")),
 
+    // D-166: the SHARED root under which cross-worker task admission leases live.
+    //
+    // Deliberately NOT derived from `root`, `scratchRoot` or `worktreeRoot`. Every
+    // one of those is a property of ONE deployment, and a lease that lives under a
+    // deployment's own directory cannot serialise that deployment against another
+    // one - which is exactly how two workers came to own D-165 at the same time.
+    // Mutual exclusion only exists where two processes contend for ONE path, so the
+    // default is derived from the control-plane identity the contenders necessarily
+    // share (owner/repo/control issue) under a host location outside every checkout;
+    // see `admissionRootFor`. A host may set `admissionRoot` explicitly, and two
+    // workers that are meant to contend must then be given the SAME value.
+    admissionRoot: typeof raw.admissionRoot === "string" && raw.admissionRoot !== ""
+      ? resolve(raw.admissionRoot)
+      : defaultAdmissionRoot({ repoOwner, repoName, controlIssue }),
+
     heartbeatSeconds: requireBoundedNumber(raw, "heartbeatSeconds", { min: 5, max: 3600, fallback: 60 }),
     heartbeatTimeoutMinutes: requireBoundedNumber(raw, "heartbeatTimeoutMinutes", { min: 1, max: 1440, fallback: 15 }),
     maxAttempts: requireBoundedNumber(raw, "maxAttempts", { min: 1, max: 50, fallback: 4 }),
@@ -338,7 +367,8 @@ export function loadWorkerConfig(configPath, root) {
     scratchRoot: cfg.scratchRoot,
     quarantineRoot: cfg.quarantineRoot,
     manifestFile: cfg.manifestFile,
-    worktreeRoot: cfg.worktreeRoot
+    worktreeRoot: cfg.worktreeRoot,
+    admissionRoot: cfg.admissionRoot
   });
 
   return cfg;

@@ -26,6 +26,8 @@
 
   "_comment_worktreeRoot": "D-133. Root for the ISOLATED linked git worktree each task gets, keyed by TASK_ID. It must be OUTSIDE repoPath, which is asserted at load time: the whole point is that a task's uncommitted work can never appear in the primary checkout the dirty guard protects. Optional - it defaults to a SIBLING of scratchRoot (not a child: scratchRoot is handed to the child as TEMP, and a worktree holding real uncommitted work must not live where a temp sweeper may delete it), so an existing config does not have to change.",
 
+  "_comment_admissionRoot": "D-166. Where the CROSS-WORKER task admission leases live - one append-only, versioned lease per TASK_ID, taken before the ACK, the worktree and the dispatch. Deliberately NOT under logDir, scratchRoot or worktreeRoot: every one of those is a property of ONE deployment, and two workers installed under two roots would then never contend for the same path - which is exactly how two workers came to own D-165 at once. Optional, and normally LEFT OUT: the default is derived from the control-plane identity the contenders necessarily share, <home>/.jarvis-worker-admission/<repoOwner>__<repoName>__issue<controlIssue>, so two independently installed workers meet without either of them being configured for it. Set it explicitly ONLY to move the shared location (then EVERY worker on this host must be given the SAME value), or to isolate a test rig on purpose. It must be outside repoPath, which is asserted at load time.",
+
   "scratchRoot": "tmp",
   "quarantineRoot": "tmp/quarantine",
   "worktreeRoot": "worktrees",
