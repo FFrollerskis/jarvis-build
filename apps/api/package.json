@@ -32,6 +32,7 @@
     "@jarvis/situations": "workspace:*",
     "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",
+    "@jarvis/vision": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {

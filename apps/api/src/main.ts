@@ -48,6 +48,7 @@ import { ProductService, ProductTransport } from "@jarvis/product";
 import { OperationsService, OperationsTransport } from "@jarvis/operations";
 import { LocationService, runLocationRetentionSweepForAllTenants } from "@jarvis/location";
 import { HealthService, runHealthRetentionSweepForAllTenants } from "@jarvis/health";
+import { VisionService, runVisionRetentionSweepForAllTenants } from "@jarvis/vision";
 import {
   DomainPauseRegistry, SituationEngine, SituationsTransport, assertSituationSweepHealthy, runSituationSweepForAllTenants,
   situationsToolDefinitions
@@ -240,6 +241,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // datamodellen + retensjons-håndhevelsen (se DailyScheduler-sveipene under).
   const locationService = new LocationService(pool);
   const healthService = new HealthService(pool);
+  const visionService = new VisionService(pool);
   // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
   // Core - egen tjeneste over SAMME runtime-pool, ingen ny motor. Refererer
   // `business_contacts` KUN via en DB-håndhevet FK (`contact_id: string`) -
@@ -839,6 +841,15 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "health-retention-sweep", Number(process.env["JARVIS_HEALTH_RETENTION_SWEEP_HOUR"] ?? 2)
   ).start(() => runHealthRetentionSweepForAllTenants(pool, healthService).then(() => undefined));
+  // UA-9 Vision & Physical World (D-153): periodisk retensjons-håndhevelse
+  // for hendelsesobservasjoner - SAMME reboot-durable DailyScheduler-
+  // mekanisme som location-retention-sweep over (MULTI-SPACE, IKKE health-
+  // stil enkelt-låst space - se modules/vision/src/sweep.ts sitt filhode).
+  // Trygt å kjøre uten noen faktiske hendelser ennå (ingen ekstern kamera-
+  // leverandør koblet til i denne sliceen) - sveipet blir da et no-op.
+  new DailyScheduler(
+    pool, "vision-retention-sweep", Number(process.env["JARVIS_VISION_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
   return deps;
 }
 
