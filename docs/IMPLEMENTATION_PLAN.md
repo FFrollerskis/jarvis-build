@@ -4117,8 +4117,10 @@ nå faktisk nåbar i drift. 4 "Owner can pause ... instantly" - nå med en fakti
 detektorer (ingen signalkilde), modell-assistert klassifisering (ModelGateway-avhengighet, egen
 D-64/D-41-port), counterfactual/simulation/feedback learning (masterplanens "where useful"), vision-/
 helse-/lokasjons-broer (egne wiring-slicer mot samme kontrakt), UA-11 samlet kontrollflate
-(komponerer `situations`-verktøyet - neste slice), host-/live-kjøring av sveipen (RUNTIME_GATES:
-FIXED_SUITE, ikke host-verifisert).
+(komponerer `situations`-verktøyet - neste slice). Host-/live-kjøring av sveipen: **PRODUCTION_VERIFIED
+2026-09-17** (D-161; host run_id `0562c48a` på main `e34cb8a9`, 18/18 markører PASS, `hard_fail=false`,
+`blocked_external=0`, ekte Telegram INFORM + ACT) etter én feilet host-runde (`2105bb7d`, to harness-feil,
+D-160 I) - UA-10 P1 runtime-gaten er lukket; neste Sovereign-arbeid er UA-11 Executive Mode P0.
 
 **Tester:** `modules/situations/test/activation.test.ts` (22 etter review runde 1, ekte Postgres/RLS +
 ekte `OpenLoopService` + ekte `ToolGateway`/`PolicyGateway` + ekte `DailyScheduler`),

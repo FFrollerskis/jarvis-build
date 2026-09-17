@@ -1,7 +1,9 @@
 # UA-10 — Design-/data-governance-notat (Proactive Situation Engine, P0)
 
 **Status:** UA-10 «Proactive Situation Engine» — provider-uavhengig, kilde-uavhengig P0-kjerne bygget
-(2026-09-15). Samme form og disiplin som `UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og
+(2026-09-15). **P1-aktiveringen (D-160, §10) er PRODUCTION_VERIFIED på ekte Windows/Docker-host
+2026-09-17 (D-161; run_id `0562c48a`, main `e34cb8a9`, 18/18 markører PASS, `hard_fail=false`,
+`blocked_external=0`) - runtime-gaten er lukket.** Samme form og disiplin som `UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og
 teknisk, ikke juridisk teater. `situations` behandler ALDRI en ny sensitiv persondata-KATEGORI i seg
 selv (det er en TILSTANDSMASKIN over allerede-eksisterende, allerede-styrte forhold — se §1) — dette
 notatet dekker likevel D-64-porten, retensjon/erasure og sikkerhetsgrensene eksplisitt, samme
