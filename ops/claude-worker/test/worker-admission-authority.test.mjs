@@ -123,6 +123,12 @@ beforeEach(() => {
     quarantineRoot: join(workerRoot, "tmp", "quarantine"),
     manifestFile: join(workerRoot, "logs", "quarantine-manifest.jsonl"),
     worktreeRoot,
+    // D-166: an ISOLATED admission ledger. The default root is derived from
+    // repoOwner/repoName/controlIssue - which this fixture sets to the REAL
+    // tsworkflow/jarvisbuild issue 68 - so without this every test would share
+    // one host-global ledger with each other AND with the live worker, and the
+    // first terminalised task id would refuse every later test that reuses it.
+    admissionRoot: join(workerRoot, "admission"),
     maxAttempts: 6,
     backoffBaseMinutes: 1,
     backoffMaxHours: 1,
