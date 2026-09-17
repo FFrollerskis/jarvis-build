@@ -380,6 +380,25 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // Ingen FK mellom de to helse-tabellene.
   add(result, "health_metric_observations", await run(client, mode, "health_metric_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "health_retention_policies", await run(client, mode, "health_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // UA-9 (D-153, 055_vision.sql): provider-nøytral vision-hendelses-kjerne.
+  // MULTI-SPACE (location-stil, IKKE health-stil enkelt-låst space) - denne
+  // spørringen er den SAMME generiske (tenant_id, memory_space_id)-formen
+  // som resten av planen. `vision_event_observations` FKer mot
+  // `vision_rooms` (composite, NULLABLE `room_id`) - slettes derfor FØRST
+  // (barn-FK FØR forelder, samme "sammensatt FK er ikke en autorisasjons-
+  // grense"-disiplin som `location_zone_visits`/`location_zones`).
+  // `vision_retention_policies` er ren eier-konfigurert retensjonspolicy
+  // uten FK til noen av de to andre - slettes sist for konsistens (samme
+  // "ingen dinglende konfigurasjonsrad"-begrunnelse som
+  // `health_retention_policies` over).
+  add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "vision_retention_policies", await run(client, mode, "vision_retention_policies", "tenant_id = $1 AND memory_space_id = $2", tv));
+  // Rekonsiliering PR #83 mot main (D163/D164): vision-blokken over (055) og
+  // situations-blokken under (056) har INGEN FK seg imellom (055 refererer
+  // kun tenants/people/person_tenants/vision_rooms; 056 refererer kun
+  // tenants/people/person_tenants/business_open_loops) - rekkefølgen dem
+  // imellom er derfor vilkårlig; begge beholdes uendret fra hver sin side.
   // UA-10 (056_situations.sql): Proactive Situation Engine. Samme tenant+
   // space-scoped registrering som `business_open_loops` (dens egen
   // nærmeste presedens - se der). `situation_notification_policies`
@@ -541,6 +560,17 @@ export async function planPerson(client: pg.PoolClient, mode: Mode, tenantId: st
       "health_metric_observations",
       await run(client, mode, "health_metric_observations", "tenant_id = $1 AND person_id = $2", ownedValues)
     );
+    // UA-9 (D-153, 055_vision.sql): SAMME RLS-blind-spørrings-feilklasse som
+    // `location_*`/`health_metric_observations` over - `vision_rooms`/
+    // `vision_event_observations` har en RESTRICTIVE `jarvis.memory_spaces`-
+    // RLS-policy, slettes derfor HER, INNENFOR `forEachSpaceGroup`. `vision_
+    // event_observations` FØRST (barn-FK -> `vision_rooms`, samme "barn FØR
+    // forelder"-rekkefølge som `location_zone_visits` -> `location_zones`).
+    // `vision_retention_policies` BEVISST IKKE med her (tenant/space-nivå
+    // POLICY-KONFIGURASJON, ikke person-eid data - samme begrunnelse som
+    // `location_retention_policies`/`health_retention_policies` over).
+    add(result, "vision_event_observations", await run(client, mode, "vision_event_observations", "tenant_id = $1 AND person_id = $2", ownedValues));
+    add(result, "vision_rooms", await run(client, mode, "vision_rooms", "tenant_id = $1 AND person_id = $2", ownedValues));
     return result;
   });
 

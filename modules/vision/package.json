@@ -1,0 +1,20 @@
+{
+  "name": "@jarvis/vision",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-9 Vision & Physical World: JARVIS_CANONICAL, provider-nøytral hendelses-/romassosiasjons-ingestion-/lese-kontrakt (D-64/D-153) - multi-space-segregert, retention-håndhevet, ZERO live kamera-/objektklassifiseringsleverandør-avhengighet.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

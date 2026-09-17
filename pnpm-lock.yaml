@@ -92,6 +92,9 @@ importers:
       '@jarvis/tool-gateway':
         specifier: workspace:*
         version: link:../../modules/tool-gateway
+      '@jarvis/vision':
+        specifier: workspace:*
+        version: link:../../modules/vision
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -795,6 +798,31 @@ importers:
       '@jarvis/provider-adapters':
         specifier: workspace:*
         version: link:../../packages/provider-adapters
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  modules/vision:
+    dependencies:
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/memory':
+        specifier: workspace:*
+        version: link:../memory
       pg:
         specifier: ^8.16.3
         version: 8.23.0
