@@ -117,6 +117,15 @@ export const PAYLOAD = Object.freeze([
   // would fail on its first line of real work. The ESM-closure test below caught
   // this omission too, which is exactly what it is for.
   "lib/authority-snapshot.mjs",
+  // D-166. Cross-worker task admission. `worker.mjs` takes the lease as the FIRST
+  // thing that happens to a candidate and `config.mjs` derives the shared root
+  // from it, so a deployed worker missing this file would not fail some late
+  // gate - it would fail to LOAD ITS OWN CONFIG and never start at all. The
+  // ESM-closure test below caught this omission too: D-166 wrote the module and
+  // its imports without adding it here, and the test named the exact missing
+  // path. That is the fourth time this list has been the thing that forgot, and
+  // the fourth time the test was the thing that remembered.
+  "lib/task-admission.mjs",
   "lib/config.mjs",
   "lib/git.mjs",
   "lib/github.mjs",
