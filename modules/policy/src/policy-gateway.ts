@@ -99,10 +99,32 @@ export class PolicyGateway {
       return this.finish(request, "DENY", "invalid_tool_call");
     }
 
-    if (this.killSwitch.isActive()) {
+    // K1 (Sovereign graduation, D-164): kill switch-sjekken bruker NÅ den
+    // AUTORITATIVE, LIVE `isActiveDurable()`-spørringen (aldri den rene
+    // synkrone `isActive()`) - se `KillSwitch` sitt filhode for hvorfor.
+    // TO, og KUN to, eksplisitte, dokumenterte unntak fra "kill switch
+    // blokkerer ALT": (1) `owner_controls.deactivate_kill_switch` selv -
+    // uten dette unntaket ville en aktivert kill switch vært et
+    // ÉNVEIS-LÅS ingen ToolGateway-vei kunne åpne igjen (samme
+    // "nødstopp-panelet må alltid kunne gjenopprettes"-prinsipp som
+    // ethvert reelt sikkerhetskritisk system krever); (2)
+    // `owner_controls.get_control_state` - eieren må ALLTID kunne SE
+    // hvorfor systemet er stanset, spesielt akkurat NÅR det er stanset.
+    // Unntaket fjerner KUN denne ene, tidlige DENY-en - resten av
+    // `authorize()` (identitet/kontrakt/sovereign-autoritet/klasse-D-
+    // godkjenning) gjelder UENDRET for begge handlingene, så en forfalsket
+    // eller ikke-eier-identitet kan FORTSATT ikke deaktivere kill switchen.
+    const isKillSwitchSelfRecovery =
+      toolCall.data.tool_id === "owner_controls" &&
+      (toolCall.data.action === "deactivate_kill_switch" || toolCall.data.action === "get_control_state");
+    if (!isKillSwitchSelfRecovery && (await this.killSwitch.isActiveDurable())) {
       return this.finish(request, "DENY", "kill_switch_active");
     }
-    if (this.opts?.controls?.isFrozen(toolCall.data.tool_id)) {
+    // `owner_controls`-verktøyet selv kan ALDRI fryses ut av sin egen
+    // frys-mekanisme (samme selvgjenopprettings-prinsipp som over) - uten
+    // dette unntaket kunne en frys av "owner_controls" gjort
+    // `unfreeze_connector` permanent utilgjengelig for AKKURAT den frysen.
+    if (toolCall.data.tool_id !== "owner_controls" && (await this.opts?.controls?.isFrozenDurable(toolCall.data.tool_id))) {
       return this.finish(request, "DENY", "connector_frozen");
     }
     // D-104: infra-modus-gaten gjelder KUN registrerte infra-tool_id-er -

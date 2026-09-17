@@ -58,6 +58,10 @@ export class ExecutiveTransport implements ToolTransport {
         const result = await this.service.resolveSituation(identity, requireString(parameters, "situation_id"));
         return toolResultToTransportResult(result);
       }
+      case "get_control_surface_status": {
+        const status = await this.service.getControlSurfaceStatus(identity);
+        return { data: status as unknown as JsonValue };
+      }
       default:
         throw new Error(`unknown_executive_action:${action}`);
     }
@@ -121,6 +125,10 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     read("get_attention_queue", "Les eierens rangerte attention-kø (åpne, attention-verdige situasjoner, forklart og prioritert)", { domain: z.string().optional() }),
     read("get_attention_item", "Les full detalj/begrunnelse for ETT attention-item, inkl. kilde-situasjonen", { situation_id: z.string() }),
     read("get_pause_state", "Les hvilke situasjonsdomener som er pauset akkurat nå (gjennomslag til situations.get_pause_state)"),
+    read(
+      "get_control_surface_status",
+      "Les HELE eier-kontrolloverflaten samlet: global kill switch, frosne connectorer, tilbakekalte credentials (owner_controls.get_control_state) OG domene-avgrenset pausetilstand (situations.get_pause_state) - UA-11 sitt bidrag til UA-11 akseptansekriterium 3 (D-164)"
+    ),
     control("pause_domain", "Pause ETT situasjonsdomene umiddelbart (gjennomslag til situations.pause_domain)", { domain: z.string(), reason: z.string() }, "resume_domain"),
     control("resume_domain", "Opphev pause for ETT situasjonsdomene (gjennomslag til situations.unpause_domain)", { domain: z.string() }, "pause_domain"),
     {

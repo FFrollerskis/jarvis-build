@@ -54,6 +54,7 @@ import {
   situationsToolDefinitions
 } from "@jarvis/situations";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
   BankingService, NeonomicsFinanceTransport, runNeonomicsSweepForAllTenants,
@@ -98,15 +99,28 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   await assertRuntimeRoleSafe(pool);
   // BO-09: Langfuse-sink når konfigurert (D-27), ellers JSONL - samme mesh-observability overalt.
   const trace = traceSinkFromEnv(process.env["JARVIS_TRACE_FILE"] ?? "var/traces.jsonl");
-  const killSwitch = new KillSwitch();
+  // K1 (Sovereign graduation, D-164): FØR denne sliceen var `killSwitch`/
+  // `ownerControls` rene in-memory-objekter, SEPARAT konstruert i api- OG
+  // worker-prosessen - en pause satt i den ene var usynlig for den andre,
+  // og en omstart glemte stille en aktiv pause (fail-OPEN). Nå gitt SAMME
+  // `pool`+`authority` som resten av eier-autoritets-mønstrene i denne
+  // filen (`situationDomainPauses` under) - `restore()` kalles rett under,
+  // FØR noe kan bruke dem, og `PolicyGateway.authorize()`/
+  // `ToolGateway.execute()` bruker ALLTID de LIVE `*Durable()`-sjekkene
+  // (aldri de rene synkrone), se `KillSwitch`/`OwnerControls` sine filhoder.
+  const ownerControlAuthority = { owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias" };
+  const killSwitch = new KillSwitch(pool, ownerControlAuthority);
+  await killSwitch.restore();
+  const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
+  await ownerControls.restore();
   // D-104 (UA-5 Production Operations Control Plane v1): global infra-
   // eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som
   // forblir strengest/uendret). Gjelder KUN registrerte infra-tool_id-er
-  // (`infraToolIds` under). Prosess-lokal tilstand, SAMME arkitektoniske
-  // begrensning som `killSwitch`/`OwnerControls` allerede har (ikke delt på
-  // tvers av api-/worker-prosessene) - se D-104 i DECISIONS_AND_ASSUMPTIONS.md
-  // for den ærlige begrunnelsen. D-105: "docker" lagt til - den ANDRE ekte
-  // infra-mutasjonstransporten (`docker.redeploy_container`, klasse D).
+  // (`infraToolIds` under). Prosess-lokal tilstand, BEVISST UTENFOR K1 sitt
+  // omfang (D-164 fresh-audit: `/infra/pause` muterer `InfraExecutionGate`,
+  // IKKE `killSwitch`/`ownerControls` - en annen, smalere, allerede
+  // dokumentert D-104-begrensning, ikke K1 sitt mål) - se
+  // D-104/D-164 i DECISIONS_AND_ASSUMPTIONS.md.
   const infraGate = new InfraExecutionGate();
   const infraToolIds = new Set(["github", "docker"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
@@ -117,6 +131,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),
     killSwitch,
+    // K1 (D-164): tidligere ALDRI satt her (dødt felt) - `ToolGateway.execute()`
+    // hadde sin EGEN, separate frys-/tilbakekalls-sjekk, men enhver kaller
+    // som gikk RETT til `policy.authorize()` (f.eks. `/infra/pause`) omgikk
+    // den helt. Nå håndhevet på BEGGE veier, samme `ownerControls`-instans.
+    controls: ownerControls,
     infraGate,
     infraToolIds,
     // v4.0 sovereign-owner (BO-11.1 §2-funn): uten denne kjørte runtime i legacy
@@ -186,7 +205,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const aiCouncil = new AiCouncil(gateway, pool);
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
-  const ownerControls = new OwnerControls(killSwitch);
+  // K1 (D-164): `ownerControls` konstruert lenger opp (delt med `policy`).
   const toolGateway = new ToolGateway(
     pool, policy,
     new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
@@ -484,9 +503,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `situationEngine`/`situationDomainPauses` direkte) - se
     // `@jarvis/executive` sitt filhode for hele begrunnelsen. Ren tilføyelse
     // på slutten av listen, SAMME ene register-løkke som resten av verktøyene.
+    // K1 (Sovereign graduation, D-164): kanonisk owner_controls.*-flate over
+    // DE SAMME `killSwitch`/`ownerControls`-instansene `policy`/`toolGateway`
+    // selv bruker - IKKE en kopi. Registrert i SAMME liste/løkke som
+    // `situations`/`executive`, ingen parallell registreringsvei.
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
-      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway)))
+      ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway))),
+      ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls)))
     ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede

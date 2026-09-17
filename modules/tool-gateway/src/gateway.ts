@@ -281,10 +281,14 @@ export class ToolGateway {
     if (!this.withinRateLimit(definition, request.identity.tenant_id)) {
       return this.deny(request, "rate_limited");
     }
-    if (this.controls?.isFrozen(request.tool_id)) {
+    // K1 (Sovereign graduation, D-164): LIVE, delt sjekk (aldri den rene
+    // synkrone `isFrozen()`/`isRevoked()`) - se `OwnerControls` sitt
+    // filhode. `owner_controls` selv kan aldri fryse seg selv ute (samme
+    // selvgjenopprettings-unntak som `PolicyGateway.authorize()` - se der).
+    if (request.tool_id !== "owner_controls" && (await this.controls?.isFrozenDurable(request.tool_id))) {
       return this.deny(request, "connector_frozen");
     }
-    if (this.controls?.isRevoked(definition.credential_ref)) {
+    if (await this.controls?.isRevokedDurable(definition.credential_ref)) {
       return this.deny(request, "credential_revoked");
     }
     const credential = await this.secrets.get(definition.credential_ref);

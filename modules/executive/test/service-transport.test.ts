@@ -7,13 +7,14 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
 import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import { InMemoryDeviceRegistry, KillSwitch, PolicyGateway } from "@jarvis/policy";
+import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { DomainPauseRegistry, SituationEngine, SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import { ExecutiveAccessDeniedError } from "../src/service.ts";
 import { ExecutiveService } from "../src/service.ts";
 import { ExecutiveTransport, executiveToolDefinitions } from "../src/transport.ts";
-import type { AttentionItem } from "../src/types.ts";
+import type { AttentionItem, ControlSurfaceStatus } from "../src/types.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): ende-til-ende-bevis mot EKTE embedded
@@ -115,6 +116,16 @@ beforeEach(async () => {
   for (const tool of situationsToolDefinitions(new SituationsTransport(engine, domainPauses))) gateway.register(tool);
   executiveService = new ExecutiveService(gateway);
   for (const tool of executiveToolDefinitions(new ExecutiveTransport(executiveService))) gateway.register(tool);
+  // K1 (D-164): egen, poolless owner_controls-instans PER TEST (isolert fra den
+  // delte `killSwitch`/`policy` som G-blokken under IKKE skal forurense) -
+  // beviser KUN at `executive.get_control_surface_status` komponerer korrekt,
+  // ikke selve durabiliteten (dekket separat av @jarvis/policy sine egne
+  // `*Durable()`-tester + K1 sin dedikerte A-J-suite).
+  const controlKillSwitch = new KillSwitch();
+  const controlOwnerControls = new OwnerControls(controlKillSwitch);
+  for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(controlKillSwitch, controlOwnerControls)))) {
+    gateway.register(tool);
+  }
   await adminPool.query(`DELETE FROM situations WHERE tenant_id IN ('${TENANT_A}','${TENANT_B}')`);
   await adminPool.query(`DELETE FROM situation_autonomy_policies WHERE tenant_id IN ('${TENANT_A}','${TENANT_B}')`);
   await adminPool.query(`DELETE FROM situation_notification_policies WHERE tenant_id IN ('${TENANT_A}','${TENANT_B}')`);
@@ -273,5 +284,73 @@ describe("F: get_attention_item viser full begrunnelse + underliggende situation
     expect(item.recommended_next_action.length).toBeGreaterThan(0);
     expect(item.situation.situation_id).toBe(s.situation_id);
     expect(item.situation.reason).toBe("Uvanlig utgift oppdaget");
+  });
+});
+
+describe("G: get_control_surface_status (K1, D-164) - komponerer owner_controls.get_control_state OG situations.get_pause_state, ALDRI en egen tredje kilde", () => {
+  async function getStatusViaExecutive(identity: IdentityContext): Promise<ControlSurfaceStatus> {
+    const result = await gateway.execute({ identity, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+    if (!result.ok) throw new Error(`unexpected_denial:${result.reason}`);
+    return result.data as unknown as ControlSurfaceStatus;
+  }
+
+  it("baseline: kill switch inaktiv, ingen frys/tilbakekall, ingen pausede domener", async () => {
+    const status = await getStatusViaExecutive(ownerA);
+    expect(status.owner_control.kill_switch.active).toBe(false);
+    expect(status.owner_control.frozen_connectors).toEqual([]);
+    expect(status.owner_control.revoked_credentials).toEqual([]);
+    expect(status.situation_domain_pauses.paused).toEqual([]);
+  });
+
+  it("aktivert kill switch (via owner_controls.activate_kill_switch) gjenspeiles i owner_control.kill_switch, med reason/actor", async () => {
+    const activated = await gateway.execute({
+      identity: ownerA, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason: "test-k1-g" }
+    });
+    expect(activated.ok).toBe(true);
+    const status = await getStatusViaExecutive(ownerA);
+    expect(status.owner_control.kill_switch.active).toBe(true);
+    expect(status.owner_control.kill_switch.reason).toBe("test-k1-g");
+    // `actor_person_id` er KUN spor-bart via det VARIGE (pool-baserte) laget - denne poolless
+    // test-instansen speiler bevisst KUN in-memory tilstand (se KillSwitch.currentStateDurable()
+    // sitt filhode) - null her er FORVENTET, ikke en regresjon. Selve actor-sporingen for den
+    // EKTE, durable instansen er dekket av @jarvis/policy sine egne kill-switch-tester.
+    expect(status.owner_control.kill_switch.actor_person_id).toBeNull();
+    const deactivated = await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+    expect(deactivated.ok).toBe(true);
+  });
+
+  it("frosset connector OG tilbakekalt credential vises SAMTIDIG i owner_control, uavhengig av kill switch-tilstand", async () => {
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "github", reason: "g-test" } });
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "revoke_credential", parameters: { credential_ref: "cred-g-test", reason: "g-test" } });
+    const status = await getStatusViaExecutive(ownerA);
+    expect(status.owner_control.kill_switch.active).toBe(false);
+    expect(status.owner_control.frozen_connectors.map((c) => c.connector_id)).toContain("github");
+    expect(status.owner_control.revoked_credentials.map((c) => c.credential_ref)).toContain("cred-g-test");
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "github" } });
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: "cred-g-test" } });
+  });
+
+  it("situations-domenepause (UA-10) OG global owner_control forblir DISTINKTE lag i samme, ETT samlede svar - ingen krysskorrupsjon", async () => {
+    await gateway.execute({ identity: ownerA, tool_id: "situations", action: "pause_domain", parameters: { domain: "spend", reason: "g-test-pause" } });
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "slack", reason: "g-test" } });
+    const status = await getStatusViaExecutive(ownerA);
+    expect(status.situation_domain_pauses.paused).toContain("spend");
+    expect(status.owner_control.frozen_connectors.map((c) => c.connector_id)).toContain("slack");
+    // domenepause og connector-frys er ALDRI samme tilstand - hver kan avsluttes uavhengig av den andre.
+    await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "slack" } });
+    const afterUnfreeze = await getStatusViaExecutive(ownerA);
+    expect(afterUnfreeze.situation_domain_pauses.paused).toContain("spend"); // pause overlever unrelatert unfreeze
+    expect(afterUnfreeze.owner_control.frozen_connectors.map((c) => c.connector_id)).not.toContain("slack");
+    await gateway.execute({ identity: ownerA, tool_id: "situations", action: "unpause_domain", parameters: { domain: "spend" } });
+  });
+
+  it("global KillSwitch (samme instans policy.authorize() sjekker) nekter OGSÅ get_control_surface_status - ingen stille tom status som skjuler at gaten var aktiv", async () => {
+    killSwitch.activate("g-block-test");
+    try {
+      const result = await gateway.execute({ identity: ownerA, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+      expect(result.ok).toBe(false);
+    } finally {
+      killSwitch.deactivate();
+    }
   });
 });

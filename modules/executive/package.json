@@ -9,6 +9,7 @@
   "dependencies": {
     "@jarvis/business": "workspace:*",
     "@jarvis/contracts": "workspace:*",
+    "@jarvis/owner-controls": "workspace:*",
     "@jarvis/situations": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",
     "zod": "^3.25.76"
