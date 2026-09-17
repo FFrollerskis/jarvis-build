@@ -161,6 +161,45 @@ describe("REGRESJONSVAKT (arkitekt-review 5234145170 på PR #88): akseptansen r�
   });
 });
 
+describe("REGRESJONSVAKT (host-funn run_id 2105bb7d, D-160 I): transport-wrapperen videresender ALLE argumenter og teller ved INNGANG", () => {
+  const wrapper = liveScriptSource.slice(liveScriptSource.indexOf("class CountingTransport"), liveScriptSource.indexOf("class ObservingGateway"));
+  it("CountingTransport.invoke videresender rest-argumentene UENDRET (credential + invocation-context) - aldri kun (action, parameters)", () => {
+    expect(wrapper).toContain("this.inner.invoke(...args)");
+    expect(wrapper).not.toMatch(/this\.inner\.invoke\(action,\s*parameters\)/);
+  });
+  it("forsøk telles FØR inner-kallet (transport_attempts), suksesser etter - et kast gir attempts=1, successes=0, aldri et usynlig 0/0", () => {
+    const attemptsIdx = wrapper.indexOf("this.attempts += 1;");
+    const innerIdx = wrapper.indexOf("this.inner.invoke(");
+    expect(attemptsIdx).toBeGreaterThan(-1);
+    expect(attemptsIdx).toBeLessThan(innerIdx);
+  });
+  it("diagnostikk: gateway-utfall/grunn observeres (ObservingGateway), audit_events-grunner og tool_executions-status logges - uten parametre/credentials", () => {
+    expect(liveScriptSource).toContain("class ObservingGateway extends ToolGateway");
+    expect(liveScriptSource).toMatch(/FROM audit_events WHERE tenant_id = ANY\(\$1\) AND tool_id = 'telegram'/);
+    expect(liveScriptSource).toContain("credential_resolved=");
+    expect(liveScriptSource).toContain("transport_attempts=");
+    // Grunn-strengen redigeres for token-verdien FØR logging - aldri en rå credential i output.
+    expect(liveScriptSource).toMatch(/last_reason=\$\{redact\(/);
+  });
+  it("scripts/ typesjekkes nå av pakken (tsconfig include) - TS2554 hadde fanget host-feilen", () => {
+    const tsconfig = JSON.parse(readSource("../tsconfig.json")) as { include: string[] };
+    expect(tsconfig.include).toContain("scripts");
+  });
+});
+
+describe("REGRESJONSVAKT (host-funn run_id 2105bb7d, D-160 I): migrasjonsbeviset er det UA-10 trenger - ikke 'ingen prefiks-duplikat i hele tabellen'", () => {
+  it("bruker den rene, enhetstestede evaluateMigrationEvidence() og leser HELE schema_migrations + repoets mappe", () => {
+    expect(liveScriptSource).toMatch(/import \{ evaluateMigrationEvidence \} from "\.\/lib\/migration-evidence\.ts"/);
+    expect(liveScriptSource).toContain("SELECT name, applied_at FROM schema_migrations ORDER BY name");
+    expect(liveScriptSource).toMatch(/evaluateMigrationEvidence\(rows as Array<\{ name: string; applied_at: Date \}>, repoFiles\)/);
+    expect(liveScriptSource).not.toMatch(/HAVING count\(\*\) > 1/);
+  });
+  it("historiske duplikater og orphan-rader RAPPORTERES (observabilitet) - skjules aldri", () => {
+    expect(liveScriptSource).toContain('diagnostics["migration_historical_prefix_duplicates"]');
+    expect(liveScriptSource).toContain('diagnostics["migration_orphan_rows"]');
+  });
+});
+
 describe("REGRESJONSVAKT (host-funn): kontrollflatens credential_ref løses av PRODUKSJONENS secret-kjede", () => {
   it("hver `situations.*`-definisjon får en credential fra FallbackSecretProvider(Env, BusinessInternal) uten noen env-variabel satt", async () => {
     // Den opprinnelige P1-definisjonen brukte en oppfunnet `JARVIS_SITUATIONS_INTERNAL_TOKEN`
