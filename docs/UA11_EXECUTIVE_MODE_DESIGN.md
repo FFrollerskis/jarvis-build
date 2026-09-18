@@ -231,3 +231,19 @@ Masterplanens UA-11-akseptansekriterier:
    var allerede gyldig og er UPÅVIRKET; denne oppdateringen utvider samme status til B1-selvgjenopprettingen
    OG audit-beviset. `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert,
    snevrere mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.
+   **RETTET 2026-09-18 (D-171, uavhengig arkitekt-re-review `5248461491`, BLOKKER B2):** paastanden
+   "HELE UA-11 akseptansekriterium 3 NÅ PRODUCTION_VERIFIED" over var OVERCLAIMED for selve "ÉN
+   kontrolloverflate"-delen av kriteriet. Fersk kildekode-audit av `modules/executive/src/transport.ts`
+   viser at `executive.*` KUN videresender lesing (`get_control_surface_status`) og
+   `situations.pause_domain`/`resume_domain`/`resolve_situation` - `executive.*` inneholder INGEN
+   videresending for `owner_controls.activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/
+   `unfreeze_connector`/`revoke_credential`/`restore_credential`. Kriteriets ordlyd ("owner can
+   stop/revoke/reconfigure any connector, provider, agent or autonomy domain from ONE control
+   surface") krever MUTASJON fra samme flate, ikke bare lesing av kombinert status - dette er i dag
+   SPLITTET mellom `owner_controls.*` (mutasjon) og `executive.*` (lesing + kun
+   `situations`-mutasjon). K1 sin underliggende kjernemekanisme (kalt DIREKTE via `owner_controls.*`)
+   FORBLIR `PRODUCTION_VERIFIED` - denne rettelsen gjelder KUN paastanden om at ÉN flate allerede
+   dekker MUTASJON for alle fire navngitte mål (connector/provider/agent/autonomy-domene). Rettet
+   status: **`PARTIAL` - lesing samlet, mutasjon SPLITTET.** Valgt neste slice (D-171, IKKE
+   implementert i PR #94): "Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)" - se
+   `DECISIONS_AND_ASSUMPTIONS.md` D-171 for full mål-for-mål-kartlegging.

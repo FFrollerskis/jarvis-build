@@ -2,16 +2,18 @@
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-post-k1-sovereign-reaudit`, PR #94, exact
 base `main=22d391d248c3b99f2a3949b2606bfab2d7e7bcb3` = PR #93/K1 sin merge-commit). Aktiv oppgave:
-**POST-K1 SOVEREIGN RE-AUDIT + DOCS CLOSEOUT (D-169), RETTET ETTER UAVHENGIG ARKITEKT-REVIEW (D-170).**
-K1 er FERDIG: implementert, host-bevist i sin helhet (D-164 t.o.m. D-168), MERGET. Fresh re-audit av
-alle 16 graduation-områder (D-169) fant INGEN internt byggbar Sovereign-graduation-blokkering.
-**Status er TO-AKSET, IKKE ETT samlet tall (D-170 korrigerte D-169 sin over-forenkling):**
-`INTERNAL_BUILD_COMPLETE=true` (ingen Jarvis-kode Claude kan bygge uten en navngitt ekstern
-avhengighet gjenstår) - `SOVEREIGN_COMPLETE=false` (masterplanens fulle, ordrette kapittel-28 Universal
-Access-DoD krever FAKTISK live-/atferds-evidens på flere punkter som eksplisitt gjenstår - se
-sjekklisten i D-170). Denne runden er en **DOCS-ONLY "INTERN BYGGE-CLOSEOUT / GRADUATION-READINESS"**
-- IKKE en "final Sovereign graduation closeout", IKKE K2, IKKE en ny masterplan, IKKE UGREEN-migrering,
-IKKE en ny kode-slice. `SELF_APPROVAL=false`, `MERGED=false` for DENNE PR-en.
+**POST-K1 SOVEREIGN RE-AUDIT + DOCS CLOSEOUT (D-169), RETTET AV UAVHENGIG ARKITEKT-REVIEW TO GANGER
+(D-170, DERETTER D-171/BLOKKER B2).** K1 sin durable/delte kjernemekanisme (kill switch, connector-
+frys, credential-tilbakekalling/-gjenoppretting) er FERDIG, host-bevist, MERGET (D-164 t.o.m. D-168) -
+DETTE er UENDRET av D-171. Men D-171 fant at kapittel-28 punkt 15 ("eier kan fra ÉTT kontrollpanel
+pause/revoke connector/enhet/leverandør/agent/finansdomene/HELE Jarvis") var OVERCLAIMED: `executive.*`
+samler i dag LESING (status) av kontrolloverflaten, men IKKE MUTASJON - `owner_controls.*` sine seks
+mutasjonshandlinger (kill switch/frys/tilbakekalling) er ikke nåbare fra `executive.*`.
+**Status er NÅ (D-171):** `INTERNAL_BUILD_BLOCKERS=<navngitt B2-gap>` (RETTET fra D-169/D-170 sin
+`NONE`), `INTERNAL_BUILD_COMPLETE=false` (RETTET fra `true`), `SOVEREIGN_COMPLETE=false` (uendret,
+allerede korrekt i D-170). Denne runden (PR #94) FORBLIR docs-only closeout av re-audit-syklusen +
+next-slice-definisjon - IKKE implementasjon av B2 selv (det er neste PR). `SELF_APPROVAL=false`,
+`MERGED=false` for DENNE PR-en.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -22,67 +24,82 @@ IKKE en ny kode-slice. `SELF_APPROVAL=false`, `MERGED=false` for DENNE PR-en.
   two-parent merge, parents `34c9c474a478cb7aab7858284ec0606eab51c128` (gammel `main`) +
   `9fcf1a3d3aa1b0d39f0311dc7be6f07150831a25` (PR-head) - verifisert via `git cat-file -p`). Postmerge
   CI (run `35340723640`): `build-test`/`gitleaks`/`windows-git-auth` alle `success`.
-- **K1 er FERDIG I SIN HELHET:** durable/delt `KillSwitch`/`OwnerControls`, kanonisk `owner_controls.*`
-  ToolGateway-namespace, `executive.get_control_surface_status`. B1-selv-lås-bug fikset (D-166);
-  harnessets EGEN audit-bevis-determinisme-bug fikset (D-167); Tobias sin ANDRE host-rerun (på samme
-  HEAD en uavhengig arkitekt-review, `5247323973`, RESULT=PASS, reviewet) bekreftet ALLE K1-markører
-  PASS (D-168). Tobias sin merge-closeout-ordre → merget. UA-11 akseptansekriterium 3 OPPFYLT I SIN
-  HELHET, host-bevist.
+- **K1 sin kjernemekanisme er `PRODUCTION_VERIFIED` NÅR KALT VIA `owner_controls.*` DIREKTE:**
+  durable/delt `KillSwitch`/`OwnerControls`, kanonisk `owner_controls.*` ToolGateway-namespace (7
+  handlinger: `get_control_state`/`activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/
+  `unfreeze_connector`/`revoke_credential`/`restore_credential`), `executive.get_control_surface_status`
+  (READ-ONLY komposisjon). B1-selv-lås-bug fikset (D-166); harnessets EGEN audit-bevis-determinisme-bug
+  fikset (D-167); Tobias sin ANDRE host-rerun (uavhengig arkitekt-review `5247323973`, RESULT=PASS)
+  bekreftet ALLE K1-markører PASS (D-168). **MEN (D-171/B2):** dette er IKKE det samme som "ett
+  kontrollpanel for MUTASJON av alle syv kapittel-28-mål" - se under.
 - Main komponerer UA-9 Vision + UA-10 Situation Engine + UA-11 Executive Mode + K1 owner-controls i
-  `apps/api/src/main.ts`. `apps/api/src/worker-main.ts` kobler fortsatt ingen av de eier-vendte
-  namespacene - fortsatt tilsiktet (D-163 B, uendret).
+  `apps/api/src/main.ts` OG `apps/api/src/worker-main.ts` (samme delte `OwnerControls`/`ToolGateway`-
+  par mot samme databasetabell i begge prosesser, bekreftet i D-171).
 
-## Post-K1 Sovereign re-audit (D-169), KORRIGERT av uavhengig arkitekt-review (D-170)
+## D-171 / BLOKKER B2: kapittel-28 punkt 15 sin mål-for-mål-kartlegging (fersk kildekode-audit)
 
-1. **Fersk rekonstruksjon.** `git log 9a2f642b..22d391d2 --merges` bekrefter EKSAKT to merges siden
-   D-163 sin audit-base: PR #92 (audit-en selv) og PR #93 (K1). D-163 sin klassifisering av de 15
-   øvrige graduation-områdene er derfor FORTSATT gyldig.
-2. **16-områders re-audit:** ÉTT område flippet - `Pause/revoke/kill switch` (K1) er nå LIVE-PROVEN i
-   sin helhet, MERGET. De 15 øvrige forblir LIVE-PROVEN/TESTED/IMPLEMENTED eller legitimt
-   `BLOCKED_EXTERNAL`.
-3. **D-169 sin feil, funnet av uavhengig arkitekt-review (5247795732, RESULT=CHANGES_REQUIRED):**
-   D-169 konkluderte `SOVEREIGN_COMPLETE=true "under en presis, intern tolkning"` - dette var en
-   OPPFUNNET tolkningsakse. Masterplanens kapittel 28 ("Definition of Done for Jarvis Universal
-   Access") har ÉN DoD-liste, og flere av dens 15 punkter er EKSPLISITTE live-/runtime-krav (fire
-   AI-leverandørfamilier+lokal live-rutet; Growth-stack med FAKTISK before/after-evidens; Finance
-   Gateway som utfører REELLE transaksjoner; iPhone/Watch/Home/Personal/Health LIVE;
-   backups/restore-drills/monitoring PRODUCTION_VERIFIED) - IKKE bare kode/pipeline. Masterplanens
-   egen fotnote bekrefter dette: *"PASS/implementert betyr at kode og testgrunnlag er godkjent, men
-   eksplisitte runtime-porter kan fortsatt stå åpne. Production evidence kan ikke erstattes av
-   statusord."* **Rettet i D-170: `SOVEREIGN_COMPLETE=false`, `INTERNAL_BUILD_COMPLETE=true` som
-   EGEN, tydelig merket akse.**
-4. **Eksplisitt sjekkliste (D-170):** alle 15 kapittel-28-punkter mappet til
-   LIVE-PROVEN/TESTED/PARTIAL/`BLOCKED_EXTERNAL`/`PENDING_EXTERNAL_EVIDENCE` - se D-170 for full
-   liste. De `BLOCKED_EXTERNAL`-punktene er FAKTISKE, navngitte gjenstående graduation-blokkeringer
-   for FULL Sovereign-status (IKKE "ikke-blokkerende eksterne notater"), men er ALLE Tobias sine egne
-   handlinger (leverandørvalg/credentials/maskinvare/atferd over tid), ikke Jarvis-kode.
-5. **K2 og andre "Bygges"-roadmap-punkter FORBLIR `NOT_REQUIRED_FOR_GRADUATION`** (D-169 sin analyse
-   av DETTE punktet var korrekt og uendret av D-170 - kun "SOVEREIGN_COMPLETE"-konklusjonen var feil).
-   `UA11_EXECUTIVE_MODE_DESIGN.md` §7/§9 bekrefter UA-11 sine TRE faktiske akseptansekriterier (nå
-   alle oppfylt) utelukker decision log/OKR/dashboard/etc. som separate, ikke-krevde roadmap-punkter.
-6. **Konklusjon (to-akset, IKKE ett tall):** `INTERNAL_BUILD_BLOCKERS=NONE`,
-   `INTERNAL_BUILD_COMPLETE=true`, `SOVEREIGN_COMPLETE=false`,
-   `FULL_UNIVERSAL_ACCESS_GRADUATION_PENDING_EXTERNAL_EVIDENCE=true`. Valgt neste-steg: docs-only
-   "intern bygge-closeout / graduation-readiness" (DENNE PR-en) - IKKE en "final Sovereign graduation
-   closeout", IKKE K2/ny slice.
+| Kapittel-28-mål | Kanonisk objekt/primitiv i dag | Delt/durabel | Nåbar fra `executive.*`? | Status |
+|---|---|---|---|---|
+| Connector | `tool_id` + `owner_controls.freeze_connector`/`unfreeze_connector` | Ja (K1) | Nei | Eksponeringsgap |
+| Hele Jarvis-systemet | Global kill switch, `owner_controls.activate/deactivate_kill_switch` | Ja (K1) | Nei | Eksponeringsgap |
+| Leverandør ("provider") | SAMME som connector + `owner_controls.revoke/restore_credential` per `credential_ref` | Ja | Nei | Eksponeringsgap (ingen egen entitet nødvendig) |
+| Agent | `tool_id: "tasks"` (coding-agent/task-utførelse), SAMME `freeze_connector`-mekanikk, håndhevet identisk i `main.ts` OG `worker-main.ts` | Ja | Nei | Eksponeringsgap (kartlegging dokumentert her første gang) |
+| Finansdomene | INGEN domene-nivå primitiv - fragmentert over ≥4 `tool_id`-er (`finance_wallester`/`finance_stripe`/`finance_vipps`/`finance_neonomics`) | Delvis (per-tool_id, ikke domene) | Nei | **REELT GAP** - ny handling nødvendig |
+| Enhet ("device") | `SessionGrantService.revokeForDeviceOn()` EKSISTERER, men kalles i dag KUN internt (re-innrullering) | Ja (DB) | Nei (ingen ToolGateway-handling i det hele tatt) | **REELT GAP** - ny eier-vendt handling nødvendig over eksisterende primitiv |
+| Autonomi-/situasjonsdomene | `situations.pause_domain`/`resume_domain` (`DomainPauseRegistry`) | Ja (K1/UA-10 P1) | **JA** | Allerede fullt samlet |
+
+**Konklusjon:** 6 av 7 mål har en tilstrekkelig eksisterende primitiv som bare mangler en
+`executive.*`-videresending (rent eksponeringsarbeid); finansdomene og enhet krever i tillegg en NY,
+liten handling over eksisterende mekanikk (ingen ny lagringstilstand i noen av tilfellene). Kapittel-28
+punkt 15 rettet fra "LIVE-PROVEN, NÅ FULLFØRT" til **`GAP / INTERNALLY_BUILDABLE`**.
+
+## Post-K1 Sovereign re-audit-syklus (D-169 → D-170 → D-171)
+
+1. **D-169:** Fresh 16-områders re-audit; ÉTT område (K1) flippet til LIVE-PROVEN/MERGET. Konkluderte
+   feilaktig `SOVEREIGN_COMPLETE=true "under en presis, intern tolkning"` - en oppfunnet tolkningsakse.
+2. **D-170 (rettet av uavhengig arkitekt-review 5247795732):** masterplanens kapittel 28 er ÉN DoD-
+   liste, ikke to akser. Rettet til to-akset status: `INTERNAL_BUILD_COMPLETE=true`/
+   `SOVEREIGN_COMPLETE=false`. La til eksplisitt 15-punkts sjekkliste.
+3. **D-171 (rettet av uavhengig arkitekt-re-review 5248461491, BLOKKER B2):** D-170 sin
+   `SOVEREIGN_COMPLETE=false` STÅR FORTSATT KORREKT - men punkt 15 sin `INTERNAL_BUILD_COMPLETE=true`
+   var selv overclaimed. Fersk kildekode-audit (se tabell over) fant at `executive.*` kun samler LESING,
+   ikke MUTASJON, av kontrolloverflaten. Rettet: `INTERNAL_BUILD_BLOCKERS=<B2, navngitt>`,
+   `INTERNAL_BUILD_COMPLETE=false`.
+4. **K2 og andre "Bygges"-roadmap-punkter FORBLIR `NOT_REQUIRED_FOR_GRADUATION`** (D-169 sin analyse av
+   DETTE punktet var og er korrekt, uendret av D-170 og D-171).
+5. **Navngitte `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (D-170 sin sjekkliste, punkt 1/2/4/7/9/11/14) er
+   FORTSATT ekte, uendrede eksterne graduation-blokkeringer, uavhengig av B2 (som er INTERN).
+
+## Valgt neste interne slice (definert i D-171, IKKE implementert i PR #94)
+
+**"Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)":** `executive.*` blir DEN ENE eier-vendte
+mutasjonsoverflaten ved å komponere (ikke duplisere) `owner_controls.*`/`situations.*` gjennom
+`ToolGateway.execute()` - legg til videresendinger for kill switch/connector-frys/credential-
+tilbakekalling; legg til én ny eier-vendt enhets-tilbakekallingshandling over `revokeForDeviceOn()`;
+avgjør en domene-nivå finans-fryseprimitiv over kjente `finance_*`-`tool_id`-er. Identitet UENDRET,
+INGEN ny/duplisert tilstand, SAMME autorisasjons-/audit-semantikk, B1 sin selvgjenopprettingsgaranti
+bevares.
 
 ## Blokkeringer
 
 1. **Merge av DENNE PR-en (docs-only).** `SELF_APPROVAL=false`; krever uavhengig arkitekt-review av
-   D-170 sin korrigerte konklusjon (samme protokoll som alle foregående slices).
-2. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (se D-170 sin sjekkliste) - FAKTISKE, navngitte
+   D-171 sin korrigerte konklusjon (samme protokoll som alle foregående slices).
+2. **B2 (INTERN, navngitt i D-171)** - `executive.*` mangler mutasjonsvideresending for kill switch/
+   connector-frys/credential-tilbakekalling; ingen eier-vendt enhets-tilbakekallingshandling; ingen
+   domene-nivå finans-fryseprimitiv. Dette er Jarvis-KODE Claude KAN bygge - definert som neste slice,
+   IKKE startet i denne PR-en.
+3. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (se D-170 sin sjekkliste) - FAKTISKE, navngitte
    gjenstående Sovereign-graduation-krav: leverandørvalg via D-64-porten, credentials
    (Stripe/Ads/AI-providere), fysisk maskinvare (Apple/HA), voice-benchmark, atferds-/brukstidsevidens
    (Daily Value Loop). Ingen av dem er Jarvis-kode Claude kan bygge seg forbi.
-3. **Embedded-Postgres-flake (B.3, port-kontensjon)** fortsatt kjent i repo-suiten, uendret, ikke
-   K1-relatert.
+4. **Embedded-Postgres-flake (B.3, port-kontensjon)** fortsatt kjent i repo-suiten, uendret, ikke
+   K1/B2-relatert.
 
 ## Neste oppgave
 
-Denne PR-en (docs-only) venter på uavhengig arkitekt-review av D-170 sin to-aksede korreksjon. Ingen ny
-INTERN kode-slice er påkrevd for `INTERNAL_BUILD_COMPLETE` per dagens masterplan-tekst - men
-`SOVEREIGN_COMPLETE` forblir `false` til de navngitte `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` faktisk er
-lukket (Tobias sine handlinger) ELLER masterplanen selv oppdateres. Fremtidig arbeid er derfor: (a)
-Tobias sine egne handlinger for å lukke navngitte eksterne blokkeringer, eller (b) en EKSPLISITT,
-Tobias-initiert utvidelse utover selve graduation-scopet (f.eks. K2). Ingen ny masterplan, ingen
-UGREEN-migrering.
+Denne PR-en (docs-only) venter på uavhengig arkitekt-review av D-171 sin korrigerte konklusjon. Når
+denne PR-en er godkjent/merget: neste oppgave er å IMPLEMENTERE B2 ("Samlet eier-kontrolloverflate,
+mutasjonsfullføring") som en egen, ny slice/PR - ikke en fortsettelse av denne docs-only-PR-en.
+`SOVEREIGN_COMPLETE` forblir `false` selv ETTER B2 er lukket, til de navngitte
+`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` faktisk er lukket (Tobias sine handlinger) ELLER masterplanen selv
+oppdateres. Ingen ny masterplan, ingen UGREEN-migrering.

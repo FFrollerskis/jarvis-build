@@ -4244,6 +4244,23 @@ alle K1-markører PASS inkl. `k1_audit_evidence=PASS`, `hard_fail=false`). **PR 
 for gate-raden og D-164/D-165/D-166/D-167/D-168 for full begrunnelse. `SOVEREIGN_COMPLETE`: se separat
 Sovereign-re-audit-post (D-169) for den fulle 16-områdes vurderingen etter K1 sin lukking.
 
+**RETTET/UTVIDET 2026-09-18 (D-171, uavhengig arkitekt-re-review `5248461491`, BLOKKER B2):** K1 sin
+kjernemekanisme over (kalt DIREKTE via `owner_controls.*`) forblir `PRODUCTION_VERIFIED`, UENDRET. Men
+en fersk kildekode-audit fant at `executive.*` (kapittel-28 sitt "ett kontrollpanel") KUN videresender
+lesing (`get_control_surface_status`) + `situations.*`-mutasjon - INGEN av `owner_controls.*` sine seks
+mutasjoner (kill switch/frys/tilbakekalling) er nåbare fra `executive.*`. **Ny, navngitt neste slice
+(D-171, IKKE startet i PR #94): "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)".**
+`executive.*` blir DEN ENE eier-vendte mutasjonsoverflaten ved å komponere (ikke duplisere)
+`owner_controls.*`/`situations.*` gjennom `ToolGateway.execute()` (samme nøstede mønster
+`pause_domain`/`resume_domain` allerede bruker): legg til videresendinger for
+`activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+`revoke_credential`/`restore_credential`; legg til én ny eier-vendt enhets-tilbakekallingshandling over
+`SessionGrantService.revokeForDeviceOn()` (`modules/core/src/services/session-grant-service.ts`,
+eksisterer allerede, men er i dag KUN kalt internt fra re-innrullering); avgjør en domene-nivå
+finans-fryseprimitiv over kjente `finance_*`-`tool_id`-er (`finance_wallester`/`finance_stripe`/
+`finance_vipps`/`finance_neonomics` - i dag KUN frysbare enkeltvis via `freeze_connector`). Se D-171 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full mål-for-mål-kartlegging av alle syv kapittel-28-mål.
+
 ---
 
 ## Fase-avhengigheter (oversikt)
