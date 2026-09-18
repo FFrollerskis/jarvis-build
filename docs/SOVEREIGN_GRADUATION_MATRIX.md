@@ -31,7 +31,7 @@ gap-audit-en denne matrisen oppsummerer.
 | Situation Engine (UA-10) | LIVE-PROVEN | P1 Aktivering PRODUCTION_VERIFIED (D-161, host run `0562c48a`, 18/18 PASS, ekte Telegram) |
 | Executive Mode (UA-11) | TESTED, host ikke nødvendig for P0 | FIXED_SUITE_VERIFIED (D-162); `HOST_ACCEPTANCE_REQUIRED=false` (zero ny migrasjon/credential/leverandør) |
 | Class D authority | TESTED (suite), live mot ekte connectors delvis | UA0-AUTHORITY PARTIAL_RUNTIME i eget navn, men substansielt dekket kumulativt av UA-5/UA-10 P1 sine host-bevis |
-| Pause / revoke / kill switch | TESTED, BUILT, HOST-PROOF UTESTÅENDE (K1) | `situations`-domener durable+delt (D-160 F); `OwnerControls`/`KillSwitch` NÅ OGSÅ durable+delt (D-164, migrasjon 058, `owner_control_state`) - api/worker deler SAMME live DB-autoritet, INGEN prosess-lokal divergens. `FIXED_SUITE_VERIFIED`, `HOST_ACCEPTANCE_REQUIRED=true` - IKKE PRODUCTION_VERIFIED før Tobias' faktiske host-kjøring (se RUNTIME_GATES.md) |
+| Pause / revoke / kill switch | LIVE-PROVEN (kjernemekanisme, K1) | `situations`-domener durable+delt (D-160 F); `OwnerControls`/`KillSwitch` NÅ OGSÅ durable+delt (D-164, migrasjon 058, `owner_control_state`) - api/worker deler SAMME live DB-autoritet, INGEN prosess-lokal divergens. **PRODUCTION_VERIFIED for kill switch + connector-frys** (D-165, host run_id `d7d5d246`, 10/10 PASS på ekte Windows/Docker Desktop, EKTE container-restart). `revoke_credential`/`restore_credential` forblir SUITE/CI-PROVEN (ikke øvet av dette harnesset) - se RUNTIME_GATES.md |
 | Erasure / retention | LIVE-PROVEN (teknisk fundament) | Q-20 PRODUCTION_VERIFIED (2026-08-16) - teknisk fundament, IKKE juridisk GDPR-sertifisering |
 | Audit / provenance | TESTED, live-datastrøm gjenstår | UA0-PRIVACY PARTIAL_RUNTIME - RLS/karantene/injection-vern suite-bevist |
 | Restart / restore / recovery | LIVE-PROVEN (lokalt) / BLOCKED (off-site) | OPS-RUNTIME VERIFIED lokalt; ekstern uptime/off-site backup gjenstår |
@@ -66,24 +66,26 @@ ennå".
 | UA-11: dashboard/UI | B | N/A | Kun i masterplanens 'Bygges'-ROADMAP-liste, ikke i de tre faktiske akseptansekriteriene; `situations.*` fikk samme behandling |
 | UA-11: business health/personal attention-kilder utover `situations` | B (delvis allerede dekket) | N/A | Sales/support/kontrakt/marketing/finans/produkt/drift flyter allerede inn via de 26 `OpenLoopType`-verdiene og den eksisterende broen (D-160 B) - personal/home/health-signaler avhenger av UA-10s helse-/lokasjonsbro over, som nå er `IMPLEMENTATION_STATUS=B` (kodbar), ikke C |
 | UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | A (men for stort for én slice) | N/A | Ordrett i 'Bygges'-listen, INGEN kanonisk datakilde finnes - egen, ny domenepakke, se Q-35 kandidat K2 (lavere prioritet enn K1) |
-| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - IMPLEMENTERT (K1, D-164)** | N/A (host-bevis, ikke live-evidens-avhengighet - se `HOST_ACCEPTANCE_REQUIRED` i RUNTIME_GATES.md) | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` NÅ durable+delt (D-164) - `owner_controls.*` kanonisk ToolGateway-namespace + `executive.get_control_surface_status` komponerer begge lag. Gapet er lukket i kode/suite; kun host-kjøringen på Tobias sin Windows/Docker-host gjenstår før PRODUCTION_VERIFIED - se Q-35 |
+| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - IMPLEMENTERT OG HOST-BEVIST (K1, D-164/D-165)** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`, 10/10 PASS) | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` NÅ durable+delt (D-164) - `owner_controls.*` kanonisk ToolGateway-namespace + `executive.get_control_surface_status` komponerer begge lag. Gapet er lukket i kode/suite OG bevist på ekte Windows/Docker-host (D-165); `revoke_credential`/`restore_credential`/`executive.get_control_surface_status`/idempotency forblir suite/CI-proven (ikke øvet av dette spesifikke harnesset) - se Q-35 |
 | UA-11: host-akseptanse-harness | B | N/A | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
 
-## Neste-steg (K1 implementert 2026-09-17, D-164; K2 forblir en fremtidig kandidat)
+## Neste-steg (K1 implementert og host-bevist 2026-09-17/18, D-164/D-165; K2 forblir en fremtidig kandidat)
 
-**K1 er nå IMPLEMENTERT** (durable+delt `KillSwitch`/`OwnerControls`, kanonisk `owner_controls.*`
-ToolGateway-namespace, `executive.get_control_surface_status`) - se D-164 og RUNTIME_GATES.md sin K1-rad.
-`FIXED_SUITE_VERIFIED`, `HOST_ACCEPTANCE_REQUIRED=true`: gjenstår Tobias sin faktiske kjøring av
-`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts` på Windows/Docker-hosten før
-`PRODUCTION_VERIFIED` kan påstås. K2 forblir en fremtidig, IKKE startet, lavere prioritert kandidat.
-Se Q-35 for full kontekst.
+**K1 er nå IMPLEMENTERT OG HOST-BEVIST for kjernemekanismen** (durable+delt `KillSwitch`/
+`OwnerControls`, kanonisk `owner_controls.*` ToolGateway-namespace) - se D-164/D-165 og
+RUNTIME_GATES.md sin K1-rad. `PRODUCTION_VERIFIED` for kill switch + connector-frys (host run_id
+`d7d5d246`, 10/10 PASS på ekte Windows/Docker Desktop, EKTE container-restart). `revoke_credential`/
+`restore_credential`/`executive.get_control_surface_status`/idempotency forblir SUITE/CI-PROVEN (ikke
+øvet av dette spesifikke host-harnesset - se RUNTIME_GATES.md for den eksplisitte distinksjonen). PR
+#93 forblir IKKE merget, venter på uavhengig arkitekt-review. K2 forblir en fremtidig, IKKE startet,
+lavere prioritert kandidat. Se Q-35 for full kontekst.
 
-- **K1 - Durable, delt owner-kontroll (IMPLEMENTERT, host-bevis utestående).** `OwnerControls`/
-  `KillSwitch` er nå durable og delt mellom api-/worker-prosessene (samme mønster som
+- **K1 - Durable, delt owner-kontroll (IMPLEMENTERT OG HOST-BEVIST for kjernemekanismen).**
+  `OwnerControls`/`KillSwitch` er nå durable og delt mellom api-/worker-prosessene (samme mønster som
   `DomainPauseRegistry`, D-160 F), eksponert via kanonisk `owner_controls.*` og komponert av
   `executive.get_control_surface_status`. Lukker UA-11 akseptansekriterium 3 sitt gjenværende gap i
-  kode/suite (759+96 tester grønne). Høy blast radius (rørte kjernen av autorisasjonspipelinen) -
-  `SELF_APPROVAL=false`/`MERGED=false` for denne PR-en, som fortsatt venter på uavhengig
+  kode/suite (759+96 tester grønne) OG på ekte host (D-165). Høy blast radius (rørte kjernen av
+  autorisasjonspipelinen) - `SELF_APPROVAL=false`/`MERGED=false` for denne PR-en, som fortsatt venter på uavhengig
   arkitekt-review + eksplisitt merge-closeout-vedtak, samme protokoll som alle foregående Sovereign-slices.
 - **K2 - Decision log (kun det, ikke hele Bygges-listen).** Ny, liten `JARVIS_CANONICAL`-pakke etter
   en egen D-64-port. Krever ny persistens; ingen eksisterende kanonisk kilde å komponere mot. Lavere

@@ -199,6 +199,12 @@ Masterplanens UA-11-akseptansekriterier:
    (aktivere/deaktivere kill switch, fryse/gjenåpne connector, tilbakekalle/gjenopprette credential -
    alle klasse C/D, sovereign-eier instant), OG `executive.get_control_surface_status` (§4) samler
    BÅDE dette laget og `situations`-domenepausen i ÉN lesing. Kriteriet er dermed oppfylt i kode/
-   suite; `HOST_ACCEPTANCE_REQUIRED=true` gjenstår før `PRODUCTION_VERIFIED` kan påstås (RUNTIME_GATES.md).
-   `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere
-   mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.
+   suite. **OPPDATERT 2026-09-18 (K1 host-akseptanse, D-165): kjernemekanismen (kill switch +
+   connector-frys, api-/worker-cross-prosess-parity, restart-persistens, audit) er nå
+   `PRODUCTION_VERIFIED` på ekte Windows/Docker Desktop-host (run_id `d7d5d246`, 10/10 PASS,
+   `hard_fail=false`, EKTE `docker compose restart api worker`).** `revoke_credential`/
+   `restore_credential`/`executive.get_control_surface_status`/idempotency ble IKKE øvet av dette
+   spesifikke host-harnesset og forblir suite/CI-proven, ikke overdrevet til host-proven - se
+   RUNTIME_GATES.md for den eksplisitte distinksjonen. `/infra/pause` (D-104, `InfraExecutionGate`)
+   forblir en SEPARAT, allerede-dokumentert, snevrere mekanisme - fersk-verifisert IKKE en del av
+   dette gapet (D-164 F), ikke rørt av K1.
