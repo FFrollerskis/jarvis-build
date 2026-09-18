@@ -4306,6 +4306,17 @@ SIN EGEN ytre tool_id-sjekk før den nådde det trygge, nøstede `owner_controls
 host-akseptanse-status (`PENDING` - nytt script `modules/executive/scripts/
 d174-executive-control-surface-live.ts`+`-host-run.ts` klart for Tobias).
 
+**RETTET 2026-09-18 (D-175, arkitekt-review 5250409538, BLOKKER B4):** D-174 sin `revoke_device` tok
+feilaktig et FRITT kaller-oppgitt `tenant_id`-parameter, ved analogi til `credential_ref`/`connector_id`
+(som treffer det tenant-frie `owner_control_state`). Denne analogien var arkitektonisk feil:
+`session_grants`/`devices` er RLS-scopet (`FORCE ROW LEVEL SECURITY`) per tenant, så et fritt
+`tenant_id`-parameter var et REELT cross-tenant-hull, IKKE et harmløst mål-parameter. RETTET: mål-tenanten
+er nå UBETINGET `identity.tenant_id` (skjemaet har INGEN `tenant_id`-felt); mål-enheten kan fortsatt
+tilhøre en ANNEN PERSON/delegat i SAMME tenant (tillatt og nyttig - eieren kan fortsatt tilbakekalle en
+annens sesjon); en enhet som kun finnes i en ANNEN tenant feiler LUKKET (ny `DeviceNotFoundError`), IKKE
+et stille `ok:true`/`revoked_grants:0`. Ingen ny autorisasjonsbutikk, ingen ny tenant-tilstand. Se D-175 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

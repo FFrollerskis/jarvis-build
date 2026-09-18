@@ -529,18 +529,32 @@ describe("H: D-174 (B2) - executive.* speiler owner_controls.* sin B1-selvgjenop
     }
   });
 
-  it("7) executive.revoke_device er et TYNT gjennomslag til owner_controls.revoke_device - identitet bevart, EKTE session_grants-rad faktisk revokert (ikke en parallell tilstand)", async () => {
+  it("7) executive.revoke_device er et TYNT gjennomslag til owner_controls.revoke_device - MÅL-TENANTEN kommer FRA identity.tenant_id (D-175, IKKE et kaller-oppgitt parameter - skjemaet har ingen tenant_id-felt), identitet bevart, EKTE session_grants-rad faktisk revokert (ikke en parallell tilstand)", async () => {
     const { gateway: stack } = freshConnectedExecutiveStack();
     const deviceId = "device-h7-executive-passthrough";
     await seedDeviceGrant(TENANT_A, deviceId, OWNER);
     const result = await stack.execute({
       identity: ownerA, tool_id: "executive", action: "revoke_device",
-      parameters: { tenant_id: TENANT_A, device_id: deviceId, reason: "h7-lost-device" }
+      parameters: { device_id: deviceId, reason: "h7-lost-device" }
     });
     expect(result.ok).toBe(true);
     expect((result as { ok: true; data?: unknown }).data).toEqual({ tenant_id: TENANT_A, device_id: deviceId, revoked_grants: 1 });
     const { rows } = await adminPool.query(`SELECT revoked_at FROM session_grants WHERE tenant_id = $1 AND device_id = $2`, [TENANT_A, deviceId]);
     expect((rows[0] as { revoked_at: string | null }).revoked_at).not.toBeNull();
+  });
+
+  it("7b) D-175 (BLOKKER B4): executive.revoke_device kan IKKE målrette en ANNEN tenant enn identity.tenant_id - en enhet som KUN finnes i TENANT_B feiler LUKKET når kalleren er ownerA (TENANT_A), OGSÅ via executive.*", async () => {
+    const { gateway: stack } = freshConnectedExecutiveStack();
+    const deviceId = "device-h7b-wrong-tenant";
+    await seedDeviceGrant(TENANT_B, deviceId, OWNER);
+    const result = await stack.execute({
+      identity: ownerA, tool_id: "executive", action: "revoke_device",
+      parameters: { device_id: deviceId, reason: "h7b-cross-tenant-attempt" }
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toMatch(/device_not_found/);
+    const { rows } = await adminPool.query(`SELECT revoked_at FROM session_grants WHERE tenant_id = $1 AND device_id = $2`, [TENANT_B, deviceId]);
+    expect((rows[0] as { revoked_at: string | null }).revoked_at).toBeNull(); // urørt
   });
 
   it("8) executive.enable_finance_kill_switch/disable_finance_kill_switch/get_finance_kill_switch videresender identity.tenant_id/identity.person_id UENDRET (D-68) - ALDRI et kaller-oppgitt parameter", async () => {

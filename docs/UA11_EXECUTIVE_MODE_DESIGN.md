@@ -262,3 +262,11 @@ Masterplanens UA-11-akseptansekriterier:
    `d174-executive-control-surface-live.ts`+`-host-run.ts`, klart for Tobias). B1
    selvgjenopprettingsgaten (D-166) utvidet til `tool_id === "executive"` - se D-174 i
    `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse.
+
+   **RETTET 2026-09-18 (D-175, arkitekt-review 5250409538, BLOKKER B4):** D-174 sin `revoke_device` tok
+   feilaktig et FRITT kaller-oppgitt `tenant_id`-parameter (feilaktig analogi til det tenant-frie
+   `owner_control_state` som `credential_ref`/`connector_id` treffer) - et REELT cross-tenant-hull mot det
+   RLS-scopede (`FORCE ROW LEVEL SECURITY`) `session_grants`/`devices`. RETTET: mål-tenanten er nå
+   UBETINGET `identity.tenant_id` (INGEN `tenant_id`-felt i skjemaet); mål-enheten kan fortsatt tilhøre en
+   ANNEN PERSON/delegat i SAMME tenant; en enhet i en ANNEN tenant feiler LUKKET (`DeviceNotFoundError`),
+   ALDRI et stille `ok:true`/`revoked_grants:0`. Se D-175 for full begrunnelse/testevidens.

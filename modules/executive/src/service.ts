@@ -177,18 +177,21 @@ export class ExecutiveService {
   }
 
   /**
-   * Rent gjennomslag til `owner_controls.revoke_device`. `tenantId`/`deviceId`
-   * er EKSPLISITTE, navngitte MÅL-parametre (SAMME mønster som `connectorId`/
-   * `credentialRef` over) - ALDRI avledet av `identity`, fordi eieren må
-   * kunne tilbakekalle EN ANNEN persons/enhets sesjon (f.eks. en delegat sin
-   * telefon), ikke bare sin egen. Selve autoritets-porten (er KALLEREN
-   * faktisk eieren?) håndheves av `identity` alene, UAVHENGIG av hvilken
-   * tenant/enhet som oppgis som mål - se `OwnerControlsService.revokeDevice()`.
+   * Rent gjennomslag til `owner_controls.revoke_device`. `deviceId` er ET
+   * EKSPLISITT, navngitt MÅL-parameter (SAMME mønster som `connectorId`/
+   * `credentialRef` over) - MÅL-TENANTEN er derimot ALDRI et parameter
+   * (D-175, arkitekt-review 5250409538, BLOKKER B4 - RETTER D-174): den
+   * nøstede `gateway.execute()`-kallet videresender `identity` UENDRET, og
+   * `owner_controls.revoke_device` sin transport binder tenanten til DEN
+   * SAMME `identity.tenant_id` - eieren kan tilbakekalle EN ANNEN persons
+   * enhet (en delegat sin telefon) i SIN EGEN tenant, men kan IKKE velge en
+   * annen tenant enn den han/hun faktisk er autentisert i. Se
+   * `OwnerControlsService.revokeDevice()` for full begrunnelse.
    */
-  async revokeDevice(identity: IdentityContext, tenantId: string, deviceId: string, reason: string): Promise<ToolResult> {
+  async revokeDevice(identity: IdentityContext, deviceId: string, reason: string): Promise<ToolResult> {
     return this.gateway.execute({
       identity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: tenantId, device_id: deviceId, reason }
+      parameters: { device_id: deviceId, reason }
     });
   }
 

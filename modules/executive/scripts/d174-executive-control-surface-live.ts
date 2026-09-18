@@ -12,7 +12,10 @@
 // mutasjonsflaten (owner_controls.*-gjennomslag, inkl. K1/B1-selvgjenoppretting
 // FRA executive sin egen tool_id), finans-nødbryteren via executive, Wallester
 // `activate_card` sin nødbryter-gating (B3-fiksen), og eier-vendt
-// enhetstilbakekalling (`owner_controls.revoke_device`).
+// enhetstilbakekalling via `executive.revoke_device` (D-175, arkitekt-review
+// 5250409538, BLOKKER B4: MÅL-TENANTEN er ALLTID den AUTENTISERTE
+// `ownerIdentity.tenant_id`, ALDRI et kaller-oppgitt `tenant_id`-parameter -
+// `owner_controls.revoke_device` sitt skjema har bevisst INGEN slikt felt).
 //
 // Kjøres: node --env-file=.env --experimental-transform-types modules/executive/scripts/d174-executive-control-surface-live.ts
 // (normalt via modules/executive/scripts/d174-executive-control-surface-host-run.ts,
@@ -314,17 +317,21 @@ async function main(): Promise<void> {
       log(`freeze_state=${frozen.state} close_state=${closed.state} -> ${results.d174_wallester_spend_reducing_actions_still_allowed}`);
     });
 
-    await section("9) EIER-VENDT ENHETSTILBAKEKALLING (task F): owner_controls.revoke_device tilbakekaller EN NAVNGITT enhets utestående session_grants", async () => {
-      await seedDeviceGrant(sidePool!);
-      const before = await sidePool!.query(`SELECT count(*)::int AS n FROM session_grants WHERE tenant_id = $1 AND device_id = $2 AND revoked_at IS NULL`, [OWNER_TENANT, SYNTHETIC_DEVICE]);
-      const result = await stack.gateway.execute({
-        identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-        parameters: { tenant_id: OWNER_TENANT, device_id: SYNTHETIC_DEVICE, reason: `D-174 host-akseptanse ${runId}` }
-      });
-      const ok = (before.rows[0] as { n: number }).n === 1 && result.ok && (result as { data?: { revoked_grants?: number } }).data?.revoked_grants === 1;
-      results.d174_owner_facing_device_revocation = ok ? "PASS" : "FAIL";
-      log(`grants_before=${(before.rows[0] as { n: number }).n} revoke_ok=${result.ok} revoked_grants=${(result as { data?: { revoked_grants?: number } }).data?.revoked_grants ?? "-"} -> ${results.d174_owner_facing_device_revocation}`);
-    });
+    await section(
+      "9) EIER-VENDT ENHETSTILBAKEKALLING (task F, D-175/BLOKKER B4-rettet) VIA executive.revoke_device (ETT-PANEL-BEVIS, ikke direkte owner_controls) - MÅL-TENANTEN kommer FRA ownerIdentity.tenant_id, INGEN tenant_id-parameter i det hele tatt (skjemaet mangler feltet)",
+      async () => {
+        await seedDeviceGrant(sidePool!);
+        const before = await sidePool!.query(`SELECT count(*)::int AS n FROM session_grants WHERE tenant_id = $1 AND device_id = $2 AND revoked_at IS NULL`, [OWNER_TENANT, SYNTHETIC_DEVICE]);
+        const result = await stack.gateway.execute({
+          identity: ownerIdentity, tool_id: "executive", action: "revoke_device",
+          parameters: { device_id: SYNTHETIC_DEVICE, reason: `D-174 host-akseptanse ${runId}` }
+        });
+        const ok = (before.rows[0] as { n: number }).n === 1 && result.ok && (result as { data?: { tenant_id?: string; revoked_grants?: number } }).data?.tenant_id === OWNER_TENANT &&
+          (result as { data?: { revoked_grants?: number } }).data?.revoked_grants === 1;
+        results.d174_owner_facing_device_revocation = ok ? "PASS" : "FAIL";
+        log(`grants_before=${(before.rows[0] as { n: number }).n} revoke_ok=${result.ok} revoked_tenant=${(result as { data?: { tenant_id?: string } }).data?.tenant_id ?? "-"} revoked_grants=${(result as { data?: { revoked_grants?: number } }).data?.revoked_grants ?? "-"} -> ${results.d174_owner_facing_device_revocation}`);
+      }
+    );
 
     await section("10) DURABEL FRA FERSK INSTANS: en HELT NY pg.Pool + SessionGrantService (ingen delt hukommelse) ser samme revokerte enhet", async () => {
       const freshPool = createPool(configFromEnv());

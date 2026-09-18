@@ -1,7 +1,7 @@
 import type pg from "pg";
 import { writeAudit, withTenantTransaction, type SessionGrantService } from "@jarvis/core";
 import { assertOwnerControlAuthorized, type KillSwitch, type OwnerControlAuthority, type OwnerControls } from "@jarvis/policy";
-import type { DeviceRevocationResult, FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "./types.ts";
+import { DeviceNotFoundError, type DeviceRevocationResult, type FrozenConnectorEntry, type OwnerControlState, type RevokedCredentialEntry } from "./types.ts";
 
 /**
  * D-174 (B2): device-tilbakekallings-avhengighetene er BEVISST valgfrie
@@ -95,18 +95,36 @@ export class OwnerControlsService {
    * matcher konfigurert `authority.owner_person_id`
    * (`assertOwnerControlAuthorized` - SAMME eier-autoritetsmodell som
    * `KillSwitch`/`OwnerControls` sine egne `*Durable()`-metoder, IKKE en ny
-   * eller svakere sjekk). `tenantId`/`deviceId` kommer fra ToolGateway-
-   * parametre (IKKE fra identitetskonteksten) - dette er BEVISST, fordi
-   * eieren må kunne tilbakekalle EN ANNEN persons/enhets sesjon (f.eks. en
-   * delegat sin telefon), ikke bare sin egen; selve autoritets-porten over
-   * er UAVHENGIG av HVILKEN tenant/enhet som oppgis - en ikke-eier
-   * identitet avvises uansett tenant/device-verdi.
+   * eller svakere sjekk), (c) `deviceId` som IKKE finnes i `tenantId`
+   * (`DeviceNotFoundError` - se D-175).
+   *
+   * D-175 (arkitekt-review 5250409538, BLOKKER B4 - RETTER D-174): `tenantId`
+   * MÅ være den BETRODDE `identity.tenant_id` (transporten sin jobb, se
+   * transport.ts), ALDRI et fritt kaller-oppgitt parameter - D-174 sin
+   * opprinnelige begrunnelse ("eieren må kunne tilbakekalle en ANNEN persons
+   * enhet, derfor er BÅDE tenant OG device frie mål-parametre") forvekslet
+   * "annen PERSON, samme tenant" med "annen TENANT" - kun den FØRSTE er en
+   * reell, tiltenkt bruksstøtte (en delegat sin enhet I EIEREN SIN EGEN
+   * tenant); den ANDRE ville gjort selve TENANTEN til et fritt mål-parameter
+   * for en `session_grants`-tabell som ER RLS-avgrenset per tenant - en reell
+   * isolasjonsgrense `credential_ref`/`connector_id` (GLOBALE, tenant-frie
+   * ressurser, se `owner_control_state`) aldri hadde. Autoritetsmodellen er
+   * derfor NÅ: KALLER må være konfigurert eier; MÅL-TENANT er ALLTID
+   * `identity.tenant_id`; MÅL-ENHET kan tilhøre en ANNEN person, men MÅ
+   * eksistere i DENNE tenanten (ellers `DeviceNotFoundError`, aldri et stille
+   * `revoked_grants: 0`-"success" for en enhet i en annen tenant).
    */
   async revokeDevice(tenantId: string, deviceId: string, reason: string, actorPersonId: string): Promise<DeviceRevocationResult> {
     if (!this.deviceRevocation) throw new Error("owner_controls_device_revocation_not_configured");
     const { pool, grants, authority } = this.deviceRevocation;
     assertOwnerControlAuthorized(pool, authority, actorPersonId);
     return withTenantTransaction(pool, tenantId, async (client) => {
+      // RLS (migrasjon 005) begrenser `devices` til `jarvis.tenant_id` (satt
+      // av `withTenantTransaction` over) - en enhet som hører til EN ANNEN
+      // tenant er derfor STRUKTURELT usynlig her, ikke bare filtrert av
+      // `WHERE`-leddet under (som likevel beholdes, defense-in-depth).
+      const { rows } = await client.query(`SELECT 1 FROM devices WHERE tenant_id = $1 AND device_id = $2`, [tenantId, deviceId]);
+      if (rows.length === 0) throw new DeviceNotFoundError(deviceId);
       const revokedGrants = await grants.revokeForDeviceOn(client, tenantId, deviceId);
       await writeAudit(
         client,

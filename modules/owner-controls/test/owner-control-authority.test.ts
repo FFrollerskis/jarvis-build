@@ -700,72 +700,85 @@ describe("J: D-167 (host-harness-korreksjon, arkitekt-funn PR #93) - audit-bevis
   });
 });
 
-describe("K: D-174 (B2, task F) - owner_controls.revoke_device: eier-vendt tilbakekalling av EN NAVNGITT enhets session_grants, via SessionGrantService.revokeForDeviceOn(), INGEN duplikat session-grant-tilstand", () => {
-  it("1) eieren tilbakekaller EN NAVNGITT enhets utestående grants - nøyaktig antall revokert rapportert, raden faktisk revoked_at IS NOT NULL i session_grants", async () => {
+describe("K: D-174/D-175 (B2, task F, RETTET av arkitekt-review 5250409538 BLOKKER B4) - owner_controls.revoke_device: eier-vendt tilbakekalling av EN NAVNGITT enhets session_grants i identity.tenant_id, via SessionGrantService.revokeForDeviceOn(), INGEN duplikat session-grant-tilstand, INGEN kaller-oppgitt tenant_id-parameter", () => {
+  it("1) eieren tilbakekaller EN NAVNGITT enhets utestående grants i EGEN (identity.tenant_id) tenant - nøyaktig antall revokert rapportert, raden faktisk revoked_at IS NOT NULL i session_grants", async () => {
     const { gateway } = freshStackWithDeviceRevocation();
     const deviceId = "device-k1-owner-revoke";
     await seedGrant(TENANT, deviceId);
     expect(await activeGrantCount(TENANT, deviceId)).toBe(1);
     const result = await gateway.execute({
       identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "k1-test-lost-phone" }
+      parameters: { device_id: deviceId, reason: "k1-test-lost-phone" }
     });
     expect(result.ok).toBe(true);
     expect(revokedGrantsFrom(result)).toBe(1);
     expect(await activeGrantCount(TENANT, deviceId)).toBe(0);
   });
 
-  it("2) IKKE-eier identitet kan IKKE tilbakekalle en enhet - 'class_c_no_mandate', INGEN grant rørt (samme mandat-disiplin som ALLE andre owner_controls-mutasjoner)", async () => {
+  it("2) eieren kan tilbakekalle en ANNEN persons (delegat) enhet, SÅ LENGE enheten er i SAMME (identity.tenant_id) tenant - personeierskap over målenheten er IKKE påkrevd, kun tenant-medlemskap", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-delegate";
+    await seedGrant(TENANT, deviceId, OTHER); // enheten tilhører OTHER, men i EIERENS EGEN tenant
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { device_id: deviceId, reason: "k1-delegate-device" }
+    });
+    expect(result.ok).toBe(true);
+    expect(revokedGrantsFrom(result)).toBe(1);
+    expect(await activeGrantCount(TENANT, deviceId)).toBe(0);
+  });
+
+  it("3) IKKE-eier identitet kan IKKE tilbakekalle en enhet - 'class_c_no_mandate', INGEN grant rørt (samme mandat-disiplin som ALLE andre owner_controls-mutasjoner)", async () => {
     const { gateway } = freshStackWithDeviceRevocation();
     const deviceId = "device-k1-not-owner";
     await seedGrant(TENANT, deviceId);
     const result = await gateway.execute({
       identity: otherIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "not-my-call" }
+      parameters: { device_id: deviceId, reason: "not-my-call" }
     });
     expect(result.ok).toBe(false);
     expect(!result.ok && result.reason).toBe("class_c_no_mandate");
     expect(await activeGrantCount(TENANT, deviceId)).toBe(1);
   });
 
-  it("3) feil tenant_id-parameter revokerer INGENTING for enheten - selve SessionGrantService.revokeForDeviceOn()-spørringen er (tenant_id,device_id)-scoped, ikke device_id alene", async () => {
+  it("4) D-175 (BLOKKER B4): en enhet som KUN finnes i en ANNEN tenant feiler LUKKET - ALDRI et stille ok:true/revoked_grants:0. tenant_id er IKKE et kaller-parameter (skjemaet mangler feltet) - tenanten er UBETINGET identity.tenant_id, en kaller kan derfor IKKE 'velge' en annen tenant i det hele tatt", async () => {
     const { gateway } = freshStackWithDeviceRevocation();
     const deviceId = "device-k1-wrong-tenant";
-    await seedGrant(TENANT_B, deviceId); // enheten hører til TENANT_B
+    await seedGrant(TENANT_B, deviceId); // enheten hører KUN til TENANT_B
     const result = await gateway.execute({
-      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "wrong-tenant-attempt" } // eieren oppgir TENANT (feil for DENNE enheten)
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device", // ownerIdentity.tenant_id === TENANT, IKKE TENANT_B
+      parameters: { device_id: deviceId, reason: "wrong-tenant-attempt" }
     });
-    expect(result.ok).toBe(true); // eieren SELV er autorisert (global autoritet) - handlingen bare treffer ingenting
-    expect(revokedGrantsFrom(result)).toBe(0);
-    expect(await activeGrantCount(TENANT_B, deviceId)).toBe(1); // uendret - den faktiske raden lever under TENANT_B
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toMatch(/device_not_found/);
+    expect(await activeGrantCount(TENANT_B, deviceId)).toBe(1); // uendret - den faktiske raden lever under TENANT_B, urørt
   });
 
-  it("4) gjentatt tilbakekalling er idempotent-sikker: andre kallet revokerer 0, INGEN feil, INGEN dobbel-telling", async () => {
+  it("5) gjentatt tilbakekalling av en enhet i SAMME tenant er idempotent-sikker: andre kallet revokerer 0, INGEN feil, INGEN dobbel-telling", async () => {
     const { gateway } = freshStackWithDeviceRevocation();
     const deviceId = "device-k1-idempotent";
     await seedGrant(TENANT, deviceId);
     const first = await gateway.execute({
       identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "first-call" }
+      parameters: { device_id: deviceId, reason: "first-call" }
     });
     expect(revokedGrantsFrom(first)).toBe(1);
     const second = await gateway.execute({
       identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "second-call-repeat" }
+      parameters: { device_id: deviceId, reason: "second-call-repeat" }
     });
     expect(second.ok).toBe(true);
     expect(revokedGrantsFrom(second)).toBe(0);
   });
 
-  it("5) audit-raden inneholder device_id/reason for identifikasjon og etterforskning, ALDRI grant-token/fingerprint-VERDIER", async () => {
+  it("6) audit-raden inneholder device_id/reason for identifikasjon og etterforskning, ALDRI grant-token/fingerprint-VERDIER", async () => {
     const { gateway } = freshStackWithDeviceRevocation();
     const deviceId = "device-k1-audit";
     await seedGrant(TENANT, deviceId);
     const watermark = await captureAuditWatermark(adminPool);
     await gateway.execute({
       identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
-      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "k1-audit-test-reason" }
+      parameters: { device_id: deviceId, reason: "k1-audit-test-reason" }
     });
     const { rows } = await adminPool.query(
       `SELECT device_id, reason, payload, person_id FROM audit_events
@@ -780,5 +793,18 @@ describe("K: D-174 (B2, task F) - owner_controls.revoke_device: eier-vendt tilba
     const serializedPayload = JSON.stringify(row.payload);
     expect(serializedPayload).not.toMatch(/grt_/);
     expect(serializedPayload).not.toMatch(/test-fingerprint/);
+  });
+
+  it("7) kaller kan IKKE 'velge' en annen tenant via parametre - et oppgitt tenant_id-felt avvises av det strenge skjemaet FØR transporten nås ('invalid_parameters'), IKKE stille ignorert", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-strict-schema";
+    await seedGrant(TENANT, deviceId);
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT_B, device_id: deviceId, reason: "attempted-tenant-override" }
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toBe("invalid_parameters");
+    expect(await activeGrantCount(TENANT, deviceId)).toBe(1); // urørt - avvist FØR noe kunne skje
   });
 });

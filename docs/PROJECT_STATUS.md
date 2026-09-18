@@ -1,9 +1,12 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-b2-b3-control-surface-mutation`, PR følger,
+**Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-b2-b3-control-surface-mutation`, PR #95,
 exact base `main=ac5f941724947eef8ee4935087cc58738fb8a828` = PR #94 sin merge-commit). Aktiv oppgave:
-**B2+B3 IMPLEMENTERT (D-174): SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG),
-FINANS-KILL-SWITCH-DEKNINGSREPARASJON (Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING.**
+**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4 - uavhengig arkitekt-review 5250409538):
+SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG), FINANS-KILL-SWITCH-DEKNINGSREPARASJON
+(Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING - MÅL-TENANTEN er `identity.tenant_id`,
+ALDRI et kaller-oppgitt parameter (D-175 rettet D-174 sin opprinnelige, feilaktige "tenant_id er et
+fritt mål-parameter"-antakelse for `revoke_device`).**
 PR #94 (D-169 t.o.m. D-173, docs-only closeout av post-K1 re-audit-syklusen) er MERGET til `main`. Denne
 PR-en er den DEFINERTE "neste interne slice" (B2+B3) sin faktiske implementasjon - IKKE lenger
 docs-only.
@@ -29,9 +32,12 @@ docs-only.
 - **Finans-kill-switch-dekningshullet (D-173, BLOKKER B3) er FIKSET:** `CardService.activateCard()`
   (`modules/finance/src/card-service.ts`) sjekker nå `finance_kill_switch` (`{ killSwitchGated: true }`,
   var `{}`). `finance_wallester.activate_card` sin `capability_class` rettet `"B"` → `"C"`.
-- **Eier-vendt enhetstilbakekalling (D-171 mål 6, tidligere REELT GAP) er LUKKET:**
+- **Eier-vendt enhetstilbakekalling (D-171 mål 6, tidligere REELT GAP) er LUKKET, RETTET av D-175:**
   `owner_controls.revoke_device` (og `executive.revoke_device`) pakker inn den allerede-eksisterende
-  `SessionGrantService.revokeForDeviceOn()`.
+  `SessionGrantService.revokeForDeviceOn()`. MÅL-TENANTEN er UBETINGET `identity.tenant_id` (skjemaet
+  har INGEN `tenant_id`-felt) - en enhet som KUN finnes i en ANNEN tenant feiler LUKKET
+  (`DeviceNotFoundError`), ALDRI et stille `ok:true`/`revoked_grants:0`. Eieren kan fortsatt
+  tilbakekalle en ANNEN persons (delegat) enhet, SÅ LENGE den enheten er i eierens EGEN tenant.
 - Main komponerer UA-9 Vision + UA-10 Situation Engine + UA-11 Executive Mode + K1 owner-controls i
   `apps/api/src/main.ts` OG `apps/api/src/worker-main.ts`. `worker-main.ts` er BEVISST UENDRET av denne
   PR-en (eksponerer ingen `owner_controls.*`/`executive.*`/`situations.*`-handlinger i det hele tatt).
@@ -45,7 +51,7 @@ docs-only.
 | Leverandør ("provider") | SAMME som connector + `owner_controls.revoke/restore_credential` | **JA (D-174)** | Lukket |
 | Agent | `tool_id: "tasks"`, SAMME `freeze_connector`-mekanikk | **JA (D-174)** | Lukket |
 | Finansdomene | `finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` | **JA (D-174)** | Lukket - PLUSS `activateCard()`-dekningsreparasjonen (B3) |
-| Enhet ("device") | `owner_controls.revoke_device` (NY, D-174) → `SessionGrantService.revokeForDeviceOn()` | **JA (D-174, NY handling)** | Lukket |
+| Enhet ("device") | `owner_controls.revoke_device` (NY, D-174, RETTET D-175) → `SessionGrantService.revokeForDeviceOn()`, mål-tenant = `identity.tenant_id` | **JA (D-174/D-175, NY handling)** | Lukket |
 | Autonomi-/situasjonsdomene | `situations.pause_domain`/`resume_domain` | Ja (uendret, K1/UA-10 P1) | Allerede lukket |
 
 **Alle syv mål er nå nåbare fra ÉTT kontrollpanel (`executive.*`) for BÅDE lesing OG mutasjon.**
@@ -73,6 +79,9 @@ Se D-174 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse. Kort:
    `finance_kill_switch`.
 4. **Device revocation:** `OwnerControlsService.revokeDevice()` (nytt, valgfritt 3. konstruktør-
    argument) pakker inn `SessionGrantService.revokeForDeviceOn()`; ny `owner_controls.revoke_device`.
+   **RETTET (D-175, BLOKKER B4):** mål-tenanten er UBETINGET `identity.tenant_id` (skjemaet har INGEN
+   `tenant_id`-felt) - en enhet i en ANNEN tenant feiler LUKKET (`DeviceNotFoundError`), ALDRI et
+   stille `ok:true`/`revoked_grants:0` som D-174 sin opprinnelige versjon tillot.
 5. **`apps/api/src/main.ts`:** `SessionGrantService` hoistet, `OwnerControlsService`-konstruksjonen i
    `additionalTools` utvidet med device-avhengighetene. `worker-main.ts` uendret.
 6. **Provider-/agent-målkartlegging (D-171) fresh-bekreftet korrekt** - ingen ny primitiv nødvendig.

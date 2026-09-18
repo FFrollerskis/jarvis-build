@@ -89,7 +89,6 @@ export class ExecutiveTransport implements ToolTransport {
       case "revoke_device": {
         const result = await this.service.revokeDevice(
           identity,
-          requireString(parameters, "tenant_id"),
           requireString(parameters, "device_id"),
           requireString(parameters, "reason")
         );
@@ -206,8 +205,8 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     control("restore_credential", "Gjenopprett ÉN navngitt, tidligere tilbakekalt credential_ref (gjennomslag til owner_controls.restore_credential)", { credential_ref: z.string() }, "revoke_credential"),
     control(
       "revoke_device",
-      "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet umiddelbart (gjennomslag til owner_controls.revoke_device)",
-      { tenant_id: z.string(), device_id: z.string(), reason: z.string() },
+      "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet i EGEN tenant umiddelbart (gjennomslag til owner_controls.revoke_device - tenanten er ALLTID identity.tenant_id, ALDRI et parameter, D-175)",
+      { device_id: z.string(), reason: z.string() },
       "enheten må re-rulleres inn (enrollment) for ny tilgang - ingen restore_device"
     ),
     critical("enable_finance_kill_switch", "Stans ALLE spend-muliggjørende finans-/kort-handlinger for tenanten umiddelbart (gjennomslag til finance.enable_kill_switch)", { reason: z.string() }, "disable_finance_kill_switch"),

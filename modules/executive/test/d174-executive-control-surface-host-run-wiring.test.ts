@@ -95,6 +95,26 @@ describe("live-scriptet bruker PRODUKSJONENS komposisjon - samme secret-kjede og
   });
 });
 
+describe("D-175 (arkitekt-review 5250409538, BLOKKER B4): device-tilbakekalling MÅ gå via executive.revoke_device (ETT-PANEL-bevis) med tenanten bundet til ownerIdentity.tenant_id, ALDRI et kaller-oppgitt tenant_id-parameter", () => {
+  it("seksjon 9 kaller tool_id:\"executive\" (IKKE direkte tool_id:\"owner_controls\") for revoke_device", () => {
+    const section9Idx = liveScriptSource.indexOf('"9) EIER-VENDT ENHETSTILBAKEKALLING');
+    expect(section9Idx).toBeGreaterThan(-1);
+    const section9Slice = liveScriptSource.slice(section9Idx, section9Idx + 1200);
+    expect(section9Slice).toContain('tool_id: "executive", action: "revoke_device"');
+    expect(section9Slice).not.toContain('tool_id: "owner_controls", action: "revoke_device"');
+  });
+  it("revoke_device-parametrene inneholder ALDRI et tenant_id-felt noe sted i live-scriptet - tenanten kommer UTELUKKENDE fra identity", () => {
+    const revokeDeviceCalls = liveScriptSource.match(/action: "revoke_device"[^}]*\}/gs) ?? [];
+    expect(revokeDeviceCalls.length).toBeGreaterThanOrEqual(1);
+    for (const call of revokeDeviceCalls) {
+      expect(call).not.toMatch(/tenant_id\s*:/);
+    }
+  });
+  it("beviser tenant-bindingen: resultatets tenant_id sammenlignes mot OWNER_TENANT (den AUTENTISERTE identitetens egen tenant), ikke en fri verdi", () => {
+    expect(liveScriptSource).toContain('data?.tenant_id === OWNER_TENANT');
+  });
+});
+
 describe("INGEN ekte provider-kall: Wallester-gatewayen er en INJISERT FAKE ved nettverksgrensen, ALDRI en ekte HTTP-transport", () => {
   it("CardService konstrueres med en gatewayFactory som returnerer DEN LOKALE `wallesterFake`, ikke defaultWallesterGatewayFactory/WallesterTransport", () => {
     expect(liveScriptSource).not.toContain("defaultWallesterGatewayFactory");
