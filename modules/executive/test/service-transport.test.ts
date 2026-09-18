@@ -632,8 +632,15 @@ describe("I: D-176 (arkitekt-review 5251073737, BLOKKER B5) - executive.get_cont
     const { gateway: stack, killSwitch: stackKillSwitch } = freshConnectedExecutiveStack();
     withReadComposition(stack);
     try {
-      await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-c-test" } });
-      await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-c-test" } });
+      // Rekkefølge: revoke_credential FØRST, deretter activate_kill_switch - `revoke_credential`
+      // er selv IKKE i selvgjenopprettings-unntaket (kun `restore_credential`/`deactivate_kill_switch`/
+      // `get_control_surface_status` er det), så et forsøk på å tilbakekalle den delte refen MENS
+      // kill switchen allerede er aktiv ville selv blitt nektet ('kill_switch_active') - denne
+      // rekkefølgen er derfor den ENESTE som faktisk oppnår BEGGE tilstandene samtidig.
+      const revoked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-c-test" } });
+      expect(revoked.ok).toBe(true);
+      const activated = await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-c-test" } });
+      expect(activated.ok).toBe(true);
       const lockedStatus = await getStatusOrThrow(stack, ownerA);
       expect(lockedStatus.owner_control.kill_switch.active).toBe(true);
       expect(lockedStatus.owner_control.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
@@ -655,10 +662,14 @@ describe("I: D-176 (arkitekt-review 5251073737, BLOKKER B5) - executive.get_cont
     const { gateway: stack } = freshConnectedExecutiveStack();
     withReadComposition(stack);
     try {
+      // Rekkefølge: revoke_credential FØRST (se kommentaren i test C for hvorfor) - deretter
+      // activate_kill_switch, slik at direct.ok faktisk bevises under BEGGE reelle tilstandene.
+      const revoked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-d-test" } });
+      expect(revoked.ok).toBe(true);
       await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-d-test" } });
-      await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-d-test" } });
       const direct = await stack.execute({ identity: ownerA, tool_id: "owner_controls", action: "get_control_state", parameters: {} });
       expect(direct.ok).toBe(true);
+      expect(direct.ok && (direct.data as unknown as { revoked_credentials: Array<{ credential_ref: string }> }).revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
       await stack.execute({ identity: ownerA, tool_id: "executive", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
     } finally {
       await stack.execute({ identity: ownerA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
