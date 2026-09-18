@@ -213,13 +213,37 @@ Masterplanens UA-11-akseptansekriterier:
    kanonisk gjenopprettingsvei). Fikset med en minimal, handlings-nivå selvgjenopprettings-mengde
    (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`, delt av BÅDE `PolicyGateway`- og `ToolGateway`-gaten - se
    D-166 for samtidig-kill-switch-deadlock-analysen). Suite-bevist (30/30+809/809 grønne); host-harnesset
-   utvidet. **OPPDATERT 2026-09-18 (host-rerun, D-167): Tobias kjørte det utvidede harnesset på ekte host
-   (HEAD `ca167dba...`) - B1 sin funksjonalitet var `PASS` (selvgjenoppretting/samtidig-deadlock/cleanup),
-   men harnessets EGEN, sekundære audit-bevis-spørring (en håndplukket "siste 10 rader"-grense satt før
-   D-166 fantes) mistet den opprinnelige aktiveringsraden etter at D-166 la til flere `owner_controls`-kall
-   enn grensen tålte - IKKE en produksjonsfeil, se D-167. Rettet med en run-avgrenset (`session_id`+
-   vannmerke, ingen `LIMIT`) spørring i ny `modules/owner-controls/src/audit-evidence.ts`; harnesset er
-   IKKE kjørt på nytt av Tobias ETTER denne fiksen.** Status forblir `FIXED_SUITE_VERIFIED_AFTER_B1`,
-   `HOST_ACCEPTANCE_REQUIRED=true`, IKKE `PRODUCTION_VERIFIED`, for DENNE delkapabiliteten spesifikt.**
-   `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere
-   mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.
+   utvidet. **OPPDATERT 2026-09-18 (host-rerun #1, D-167): Tobias kjørte det utvidede harnesset på ekte
+   host (HEAD `ca167dba...`) - B1 sin funksjonalitet var `PASS` (selvgjenoppretting/samtidig-deadlock/
+   cleanup), men harnessets EGEN, sekundære audit-bevis-spørring (en håndplukket "siste 10 rader"-grense
+   satt før D-166 fantes) mistet den opprinnelige aktiveringsraden etter at D-166 la til flere
+   `owner_controls`-kall enn grensen tålte - IKKE en produksjonsfeil, se D-167. Rettet med en
+   run-avgrenset (`session_id`+vannmerke, ingen `LIMIT`) spørring i ny
+   `modules/owner-controls/src/audit-evidence.ts`.** **OPPDATERT 2026-09-18 (host-rerun #2 + merge,
+   D-168): Tobias kjørte det D-167-fiksede harnesset PÅ NYTT på eksakt HEAD `9fcf1a3d3aa1b0d39f0311dc7be6f07150831a25`
+   (samme HEAD en uavhengig arkitekt-review, `5247323973`, RESULT=PASS, reviewet) - ALLE K1-markører
+   PASS inkl. `k1_audit_evidence=PASS` (`hard_fail=false`, run-avgrenset audit-bevis `audit_rows=15`,
+   `deactivate_count=2`/`restore_count=2` - BÅDE selvgjenoppretting OG samtidig-deadlock-gjenoppretting
+   bekreftet kjørt gjennom kanonisk `ToolGateway` på EKTE host). Arkitekt-review PASS + Tobias sin
+   eksplisitte merge-closeout-ordre → PR #93 MERGET (`MERGE_SHA=22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`),
+   postmerge CI grønn.** Status for DENNE delkapabiliteten (og HELE UA-11 akseptansekriterium 3): NÅ
+   `PRODUCTION_VERIFIED`, `HOST_ACCEPTANCE_REQUIRED=false`. D-165 sin kjernemekanisme-`PRODUCTION_VERIFIED`
+   var allerede gyldig og er UPÅVIRKET; denne oppdateringen utvider samme status til B1-selvgjenopprettingen
+   OG audit-beviset. `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert,
+   snevrere mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.
+   **RETTET 2026-09-18 (D-171, uavhengig arkitekt-re-review `5248461491`, BLOKKER B2):** paastanden
+   "HELE UA-11 akseptansekriterium 3 NÅ PRODUCTION_VERIFIED" over var OVERCLAIMED for selve "ÉN
+   kontrolloverflate"-delen av kriteriet. Fersk kildekode-audit av `modules/executive/src/transport.ts`
+   viser at `executive.*` KUN videresender lesing (`get_control_surface_status`) og
+   `situations.pause_domain`/`resume_domain`/`resolve_situation` - `executive.*` inneholder INGEN
+   videresending for `owner_controls.activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/
+   `unfreeze_connector`/`revoke_credential`/`restore_credential`. Kriteriets ordlyd ("owner can
+   stop/revoke/reconfigure any connector, provider, agent or autonomy domain from ONE control
+   surface") krever MUTASJON fra samme flate, ikke bare lesing av kombinert status - dette er i dag
+   SPLITTET mellom `owner_controls.*` (mutasjon) og `executive.*` (lesing + kun
+   `situations`-mutasjon). K1 sin underliggende kjernemekanisme (kalt DIREKTE via `owner_controls.*`)
+   FORBLIR `PRODUCTION_VERIFIED` - denne rettelsen gjelder KUN paastanden om at ÉN flate allerede
+   dekker MUTASJON for alle fire navngitte mål (connector/provider/agent/autonomy-domene). Rettet
+   status: **`PARTIAL` - lesing samlet, mutasjon SPLITTET.** Valgt neste slice (D-171, IKKE
+   implementert i PR #94): "Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)" - se
+   `DECISIONS_AND_ASSUMPTIONS.md` D-171 for full mål-for-mål-kartlegging.

@@ -4234,12 +4234,59 @@ selvgjenopprettings-mengde (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`), se D-166.
 embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts` (15, strukturell),
 `modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk bekreftet grønn:
 policy/situations/executive/apps-api/tool-gateway/owner-controls (809 totalt etter D-166).
-**Host-akseptanse-harness bygget OG UTVIDET (D-166), IKKE kjørt PÅ NYTT etter utvidelsen:**
-`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts` (samme to-fils-
-mønster som UA-10/UA-5). Status: kjernemekanisme (freeze/unfreeze/kill-switch-parity)
-`PRODUCTION_VERIFIED` (D-165); credential-selvgjenopprettingssti `FIXED_SUITE_VERIFIED_AFTER_B1`/
-`HOST_ACCEPTANCE_REQUIRED=true` (D-166) - se RUNTIME_GATES.md for gate-raden og D-164/D-165/D-166 for
-full begrunnelse. `SOVEREIGN_COMPLETE=false` uendret.
+**Host-akseptanse-harness bygget, utvidet (D-166), audit-bevis-determinisme fikset (D-167), RE-KJØRT
+PÅ NYTT ETTER FIKSEN OG PASSERT (D-168):** `modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts`
+(samme to-fils-mønster som UA-10/UA-5). Status: HELE `owner_controls`/`KillSwitch`-flaten (kill switch,
+connector-frys, credential-tilbakekalling/-gjenoppretting, samtidig-deadlock-gjenoppretting, run-avgrenset
+audit-bevis) er nå `PRODUCTION_VERIFIED` (D-165/D-168 - fersk host-kjøring på eksakt HEAD `9fcf1a3...`,
+alle K1-markører PASS inkl. `k1_audit_evidence=PASS`, `hard_fail=false`). **PR #93 MERGET** (`MERGE_SHA
+22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`, to-parent-merge, post-merge CI grønn) - se RUNTIME_GATES.md
+for gate-raden og D-164/D-165/D-166/D-167/D-168 for full begrunnelse. `SOVEREIGN_COMPLETE`: se separat
+Sovereign-re-audit-post (D-169) for den fulle 16-områdes vurderingen etter K1 sin lukking.
+
+**RETTET/UTVIDET 2026-09-18 (D-171, uavhengig arkitekt-re-review `5248461491`, BLOKKER B2):** K1 sin
+kjernemekanisme over (kalt DIREKTE via `owner_controls.*`) forblir `PRODUCTION_VERIFIED`, UENDRET. Men
+en fersk kildekode-audit fant at `executive.*` (kapittel-28 sitt "ett kontrollpanel") KUN videresender
+lesing (`get_control_surface_status`) + `situations.*`-mutasjon - INGEN av `owner_controls.*` sine seks
+mutasjoner (kill switch/frys/tilbakekalling) er nåbare fra `executive.*`. **Ny, navngitt neste slice
+(D-171, IKKE startet i PR #94): "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)".**
+`executive.*` blir DEN ENE eier-vendte mutasjonsoverflaten ved å komponere (ikke duplisere)
+`owner_controls.*`/`situations.*` gjennom `ToolGateway.execute()` (samme nøstede mønster
+`pause_domain`/`resume_domain` allerede bruker): legg til videresendinger for
+`activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+`revoke_credential`/`restore_credential`; legg til én ny eier-vendt enhets-tilbakekallingshandling over
+`SessionGrantService.revokeForDeviceOn()` (`modules/core/src/services/session-grant-service.ts`,
+eksisterer allerede, men er i dag KUN kalt internt fra re-innrullering); legg til videresendinger for
+`finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`modules/finance/src/service.ts`,
+tenant-skopet `finance_kill_switch`, D-41-klasse D). Se D-171 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+mål-for-mål-kartlegging av alle syv kapittel-28-mål.
+
+**RETTET 2026-09-18 (D-172, uavhengig arkitekt-re-review `5248756307`):** D-171 sin B2-slice-beskrivelse
+over påsto en manglende domene-nivå finans-fryseprimitiv - dette var en faktafeil, RETTET her. En fersk
+dekningsaudit av HELE `finance`-modulet fant at `finance.enable_kill_switch`/`disable_kill_switch`/
+`get_kill_switch` ALLEREDE eksisterer og allerede gater `submitPaymentIntent()` (Fiken),
+`submitStripeRefund()`, `submitVippsCapture()`/`cancelVippsPayment()`/`submitVippsRefund()`, og
+Wallester-kort-spend-limit-mutasjoner (`card-service.ts` sin `assertKillSwitchInactive()`) - INGEN ny
+domene-nivå-primitiv skal bygges for B2; slicen reduseres for finansdomenet til KUN å legge til
+`executive`-videresendinger for de tre eksisterende `finance.*`-handlingene, identisk mønster som
+`owner_controls.*`-videresendingene over. `Neonomics` har ingen Jarvis-utført utgående betalingshandling
+å gate (open-banking-redirect-modell); `SpendService` er BEVISST unntatt (ren passiv observasjon av
+allerede skjedd utgift, ZERO ekstern leverandør, eksplisitt regresjonstestet) - begge korrekt utenfor
+scope, ikke et gap.
+
+**RETTET/UTVIDET 2026-09-18 (D-173, uavhengig arkitekt-re-review `5248894556`, BLOKKER B3):** D-172 sin
+dekningsaudit over selv hadde et hull. Kall-for-kall-verifisering av `modules/finance/src/card-service.ts`
+viser: `submitCard()` (linje 227-232) og `unfreezeCard()` (linje 324-325, `{ killSwitchGated: true }`)
+ER korrekt gatet; men `activateCard()` (linje 314-315) kaller `lifecycleAction(..., {}, actorPersonId)`
+med et TOMT options-objekt - `killSwitchGated` er `undefined`, så `finance_kill_switch` sjekkes ALDRI
+før et kort aktiveres. Dette er en REELL, spend-muliggjørende Jarvis-initiert leverandørmutasjon som
+IKKE er gatet. `freezeCard()`/`closeCard()` er OGSÅ ikke gatet, men BEVISST KORREKT (spend-reduserende
+handlinger skal ikke blokkeres av en kill switch). **B2 utvides til B2+B3:** før finansdomenet
+eksponeres via `executive.*`, MÅ `activateCard()` sitt `lifecycleAction()`-kall rettes til å sende
+`{ killSwitchGated: true }` (én linje, INGEN ny kill-switch-mekanisme - samme eksisterende
+`finance_kill_switch`/`assertKillSwitchInactive()`, bare korrekt anvendt på ett kall til).
+`INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret (var allerede `false` pga. enhet; nå med ett navngitt
+gap til: `FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`).
 
 ---
 
