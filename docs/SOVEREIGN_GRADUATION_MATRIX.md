@@ -1,7 +1,7 @@
 # Sovereign Autonomy v4.0 – graduation-matrise
 
-**Sist oppdatert:** 2026-09-18 (D-172, rettet av uavhengig arkitekt-re-review 5248756307 mot exact HEAD
-`43f1564d138abd245488f65ced0986b4369dfb6f`, PR #94). Denne filen er den KONSISE, oversiktlige statusen
+**Sist oppdatert:** 2026-09-18 (D-173, rettet av uavhengig arkitekt-re-review 5248894556 mot exact HEAD
+`b7967fc0d92bad52fa14f2dcbe68f252cd4afdb8`, PR #94). Denne filen er den KONSISE, oversiktlige statusen
 for hele masterplanen ("Sovereign graduation") - `docs/RUNTIME_GATES.md` og
 `docs/DECISIONS_AND_ASSUMPTIONS.md` forblir de detaljerte, autoritative kildene; denne filen peker til
 dem, den erstatter dem ikke.
@@ -39,10 +39,20 @@ eksterne graduation-blokkeringer for FULL Sovereign-status, uavhengig av B2 (som
 "Bygges"-liste-punkter utenfor de faktiske UA-fase-akseptansekriteriene forblir korrekt
 `NOT_REQUIRED_FOR_GRADUATION` (D-169 sin analyse av DETTE punktet var korrekt, uendret av D-170/D-171/
 D-172).
+**RETTET IGJEN (D-173, arkitekt-re-review `5248894556`, BLOKKER B3):** D-172 sin
+`FINANCE_UNCOVERED_MUTATIONS=NONE`-konklusjon var selv feil. Kall-for-kall-verifisering av
+`modules/finance/src/card-service.ts` viser at `CardService.activateCard()` kaller `lifecycleAction()`
+med et TOMT options-objekt (`{}`) - `killSwitchGated` er `undefined`, så `finance_kill_switch` sjekkes
+ALDRI før et kort aktiveres. `submitCard()`/`unfreezeCard()`/spend-limit-økninger i `updateSpendPolicy()`
+ER korrekt gatet; `freezeCard()`/`closeCard()` er bevisst IKKE gatet (spend-reduserende, riktig). Dette
+er et REELT, navngitt internt implementasjonshull (`FINANCE_UNCOVERED_MUTATIONS=finance_wallester.
+activate_card`), ikke bare eksponering - B2 sitt scope utvides til å inkludere denne reparasjonen FØR
+finansdomenet eksponeres via `executive.*`. `INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret.
 **Se D-169 for re-audit-en, D-170 for den første to-aksede korreksjonen, D-171 for den ANDRE
-korreksjonen (B2, mål-for-mål-kartlegging + valgt neste slice), og D-172 for den TREDJE korreksjonen
-(finansdomene-mapping rettet). Neste-steg er å IMPLEMENTERE B2 som en egen slice, IKKE fortsette i
-denne docs-only-PR-en, IKKE K2, IKKE en "final Sovereign graduation closeout".**
+korreksjonen (B2, mål-for-mål-kartlegging + valgt neste slice), D-172 for den TREDJE korreksjonen
+(finansdomene-mapping rettet), og D-173 for den FJERDE korreksjonen (BLOKKER B3, finans-kill-switch-
+dekningshull). Neste-steg er å IMPLEMENTERE B2+B3 som en egen slice, IKKE fortsette i denne
+docs-only-PR-en, IKKE K2, IKKE en "final Sovereign graduation closeout".**
 
 ## 16-områders graduation-matrise
 
@@ -95,10 +105,10 @@ ennå".
 | UA-11: dashboard/UI | B | N/A | Kun i masterplanens 'Bygges'-ROADMAP-liste, ikke i de tre faktiske akseptansekriteriene; `situations.*` fikk samme behandling |
 | UA-11: business health/personal attention-kilder utover `situations` | B (delvis allerede dekket) | N/A | Sales/support/kontrakt/marketing/finans/produkt/drift flyter allerede inn via de 26 `OpenLoopType`-verdiene og den eksisterende broen (D-160 B) - personal/home/health-signaler avhenger av UA-10s helse-/lokasjonsbro over, som nå er `IMPLEMENTATION_STATUS=B` (kodbar), ikke C |
 | UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | **B (rettet fra A, D-169) - NOT_REQUIRED_FOR_GRADUATION** | N/A | Ordrett i masterplanens 'Bygges'-ROADMAP-liste, men IKKE blant de TRE faktiske, ordrette UA-11-akseptansekriteriene (`UA11_EXECUTIVE_MODE_DESIGN.md` §7/§9: "Masterplan-bullets uten en eksisterende kanonisk kilde i repoet ennå" - eksplisitt DEFERRED, samme behandling som dashboard/UI). INGEN kanonisk datakilde finnes; K2 (denne kandidaten) er derfor IKKE en Sovereign-graduation-blokkering - kun en fremtidig, lavere-prioritert, eksplisitt IKKE-valgt utvidelse utover selve akseptansekriteriene (D-169) |
-| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A (kjernemekanisme) - MEN GAP for FULL mutasjonsflate (RETTET fra "KRITERIUM OPPFYLT", D-171/B2)** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`) OG for B1 sin credential-selvgjenoppretting/samtidig-deadlock-gjenoppretting/audit-bevis, ALLE KALT DIREKTE via `owner_controls.*` | `situations` dekket via `executive.*` (pause/resume/get_pause_state); `OwnerControls`/`KillSwitch` durable+delt (D-164) og host-bevist (D-165/D-166/D-167/D-168). **D-171 (arkitekt-review `5248461491`):** fersk kildekode-audit av `modules/executive/src/transport.ts` viser at `get_control_surface_status` er en READ-ONLY komposisjon - `executive.*` inneholder INGEN videresending for `activate/deactivate_kill_switch`/`freeze/unfreeze_connector`/`revoke/restore_credential`. Kapittel 28 sitt "ett kontrollpanel" krever MUTASJON av connector/enhet/leverandør/agent/finansdomene/hele-systemet fra samme panel - dette er i dag SPLITTET mellom `owner_controls.*` og `executive.*`. Enhets-tilbakekalling (`SessionGrantService.revokeForDeviceOn`) mangler HELT som eier-vendt handling. **RETTET (D-172, arkitekt-re-review `5248756307`):** finansdomene har IKKE en manglende primitiv - `finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`finance_kill_switch`, tenant-skopet) EKSISTERER ALLEREDE og dekker Fiken/Stripe/Vipps-utbetalingsstier + Wallester-kort-mutasjoner, men er SAMME eksponeringsgap-type som `owner_controls.*` (ikke nåbar fra `executive.*`). Se D-171/D-172 for full mål-for-mål-kartlegging og valgt neste slice ("Samlet eier-kontrolloverflate, mutasjonsfullføring, B2") |
+| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A (kjernemekanisme) - MEN GAP for FULL mutasjonsflate (RETTET fra "KRITERIUM OPPFYLT", D-171/B2)** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`) OG for B1 sin credential-selvgjenoppretting/samtidig-deadlock-gjenoppretting/audit-bevis, ALLE KALT DIREKTE via `owner_controls.*` | `situations` dekket via `executive.*` (pause/resume/get_pause_state); `OwnerControls`/`KillSwitch` durable+delt (D-164) og host-bevist (D-165/D-166/D-167/D-168). **D-171 (arkitekt-review `5248461491`):** fersk kildekode-audit av `modules/executive/src/transport.ts` viser at `get_control_surface_status` er en READ-ONLY komposisjon - `executive.*` inneholder INGEN videresending for `activate/deactivate_kill_switch`/`freeze/unfreeze_connector`/`revoke/restore_credential`. Kapittel 28 sitt "ett kontrollpanel" krever MUTASJON av connector/enhet/leverandør/agent/finansdomene/hele-systemet fra samme panel - dette er i dag SPLITTET mellom `owner_controls.*` og `executive.*`. Enhets-tilbakekalling (`SessionGrantService.revokeForDeviceOn`) mangler HELT som eier-vendt handling. **RETTET (D-172, arkitekt-re-review `5248756307`):** finansdomene har IKKE en manglende primitiv - `finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`finance_kill_switch`, tenant-skopet) EKSISTERER ALLEREDE og dekker Fiken/Stripe/Vipps-utbetalingsstier + `submitCard()`/`unfreezeCard()`/spend-limit-økninger, men er SAMME eksponeringsgap-type som `owner_controls.*` (ikke nåbar fra `executive.*`). **RETTET IGJEN (D-173, arkitekt-re-review `5248894556`, BLOKKER B3):** dekningen har ETT reelt hull - `CardService.activateCard()` kaller `lifecycleAction()` med tomt options-objekt, `killSwitchGated` er `undefined`, kill switchen sjekkes ALDRI ved kortaktivering. Dette er en REELL kode-bug (`FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`), ikke bare eksponering - må rettes SOM DEL av B2-implementasjonen, før finansdomenet eksponeres fra `executive.*`. Se D-171/D-172/D-173 for full mål-for-mål-kartlegging og valgt neste slice ("Samlet eier-kontrolloverflate, mutasjonsfullføring, B2+B3") |
 | UA-11: host-akseptanse-harness | B | N/A | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
 
-## Neste-steg (D-171, RETTET av D-172: `INTERNAL_BUILD_COMPLETE=false`, `INTERNAL_BUILD_BLOCKERS=B2`, `SOVEREIGN_COMPLETE=false` uendret)
+## Neste-steg (D-171, RETTET av D-172/D-173: `INTERNAL_BUILD_COMPLETE=false`, `INTERNAL_BUILD_BLOCKERS=B2+B3`, `SOVEREIGN_COMPLETE=false` uendret)
 
 **K1 sin durable/delte KJERNEMEKANISME er FERDIG: IMPLEMENTERT, HOST-BEVIST, MERGET** (kill switch,
 connector-frys, credential-tilbakekalling/-gjenoppretting - se D-164 t.o.m. D-168 og RUNTIME_GATES.md).
@@ -109,22 +119,32 @@ overclaimed: `executive.*` samler kun LESING av kontrolloverflaten, ikke MUTASJO
 eier-vendt enhets-tilbakekallingshandling mangler helt. **RETTET (D-172, arkitekt-re-review
 `5248756307`):** D-171 sin påstand om at "en domene-nivå finans-fryseprimitiv mangler helt" var selv
 unøyaktig - `finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`finance_kill_switch`,
-tenant-skopet) EKSISTERER ALLEREDE og dekker Fiken/Stripe/Vipps-utbetalingsstier + Wallester-kort-
-mutasjoner - finansdomene er SAMME eksponeringsgap-type som connector/provider/agent (se
-mål-for-mål-tabellen over i UA-11-raden). **Rettet status:** `INTERNAL_BUILD_BLOCKERS` er derfor
-NAVNGITT (**"Samlet eier-kontrolloverflate, mutasjonsfullføring, B2"**), IKKE `NONE` som D-169/D-170
-sa. `INTERNAL_BUILD_COMPLETE=false` (RETTET fra D-170 sin `true`, FORBLIR `false` UENDRET av D-172 -
-enhet alene er tilstrekkelig til å holde denne `false`). `SOVEREIGN_COMPLETE=false` forblir UENDRET
-(allerede korrekt i D-170 - ingen av rettelsene endrer den konklusjonen, kun hvorvidt "intern bygging"
+tenant-skopet) EKSISTERER ALLEREDE og dekker Fiken/Stripe/Vipps-utbetalingsstier +
+`submitCard()`/`unfreezeCard()`/spend-limit-økninger - finansdomene er SAMME eksponeringsgap-type som
+connector/provider/agent (se mål-for-mål-tabellen over i UA-11-raden). **RETTET IGJEN (D-173,
+arkitekt-re-review `5248894556`, BLOKKER B3):** D-172 sin dekningsaudit selv hadde et hull -
+`CardService.activateCard()` (`modules/finance/src/card-service.ts` linje 314-315) kaller
+`lifecycleAction()` med et TOMT options-objekt, `killSwitchGated` er `undefined` - `finance_kill_switch`
+sjekkes ALDRI ved kortaktivering. `FINANCE_UNCOVERED_MUTATIONS` navngir nå
+`finance_wallester.activate_card`/`CardService.activateCard()` - et REELT internt kode-hull (ikke bare
+eksponering), som må rettes SOM DEL av B2-implementasjonen før finansdomenet eksponeres. **Rettet
+status:** `INTERNAL_BUILD_BLOCKERS` er derfor NAVNGITT (**"Samlet eier-kontrolloverflate,
+mutasjonsfullføring, B2+B3"**), IKKE `NONE` som D-169/D-170 sa. `INTERNAL_BUILD_COMPLETE=false`
+(RETTET fra D-170 sin `true`, FORBLIR `false` UENDRET av D-172/D-173 - enhet ALENE var allerede
+tilstrekkelig til å holde denne `false`, B3 legger til ett navngitt gap videre). `SOVEREIGN_COMPLETE=false`
+forblir UENDRET (allerede korrekt i D-170 - ingen av rettelsene endrer den konklusjonen, kun hvorvidt "intern bygging"
 faktisk var ferdig).
 
-**Valgt neste slice (definert i D-171, RETTET av D-172, IKKE implementert i denne PR-en):** B2 -
+**Valgt neste slice (definert i D-171, RETTET av D-172/D-173, IKKE implementert i denne PR-en):** B2+B3 -
 `executive.*` blir DEN ENE eier-vendte mutasjonsoverflaten ved å komponere (ikke duplisere)
 `owner_controls.*`/`situations.*`/`finance.*` gjennom `ToolGateway.execute()`; legg til én ny
-eier-vendt enhets-tilbakekallingshandling over `SessionGrantService.revokeForDeviceOn()`; legg til
-`executive`-videresendinger for de EKSISTERENDE `finance.enable_kill_switch`/`disable_kill_switch`/
-`get_kill_switch`-handlingene (**RETTET, D-172: INGEN ny domene-nivå-primitiv skal oppfinnes**). IKKE
-K2, IKKE en "final Sovereign graduation closeout", IKKE ny masterplan, IKKE UGREEN-migrering.
+eier-vendt enhets-tilbakekallingshandling over `SessionGrantService.revokeForDeviceOn()`; RETT
+`CardService.activateCard()` sitt `lifecycleAction()`-kall til å sende `{ killSwitchGated: true }`
+(D-173, BLOKKER B3 - MÅ gjøres FØR finansdomenet eksponeres, ellers eksponeres et hull, ikke løses det);
+legg deretter til `executive`-videresendinger for de EKSISTERENDE `finance.enable_kill_switch`/
+`disable_kill_switch`/`get_kill_switch`-handlingene (**RETTET, D-172: INGEN ny domene-nivå-primitiv
+skal oppfinnes**). IKKE K2, IKKE en "final Sovereign graduation closeout", IKKE ny masterplan, IKKE
+UGREEN-migrering.
 
 - **K1 - Durable, delt owner-kontroll, KJERNEMEKANISME (FULLFØRT: IMPLEMENTERT, HOST-BEVIST, MERGET).**
   `OwnerControls`/`KillSwitch` er durable og delt mellom api-/worker-prosessene (samme mønster som

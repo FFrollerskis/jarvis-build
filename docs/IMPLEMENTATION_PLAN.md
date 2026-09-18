@@ -4274,6 +4274,20 @@ domene-nivå-primitiv skal bygges for B2; slicen reduseres for finansdomenet til
 allerede skjedd utgift, ZERO ekstern leverandør, eksplisitt regresjonstestet) - begge korrekt utenfor
 scope, ikke et gap.
 
+**RETTET/UTVIDET 2026-09-18 (D-173, uavhengig arkitekt-re-review `5248894556`, BLOKKER B3):** D-172 sin
+dekningsaudit over selv hadde et hull. Kall-for-kall-verifisering av `modules/finance/src/card-service.ts`
+viser: `submitCard()` (linje 227-232) og `unfreezeCard()` (linje 324-325, `{ killSwitchGated: true }`)
+ER korrekt gatet; men `activateCard()` (linje 314-315) kaller `lifecycleAction(..., {}, actorPersonId)`
+med et TOMT options-objekt - `killSwitchGated` er `undefined`, så `finance_kill_switch` sjekkes ALDRI
+før et kort aktiveres. Dette er en REELL, spend-muliggjørende Jarvis-initiert leverandørmutasjon som
+IKKE er gatet. `freezeCard()`/`closeCard()` er OGSÅ ikke gatet, men BEVISST KORREKT (spend-reduserende
+handlinger skal ikke blokkeres av en kill switch). **B2 utvides til B2+B3:** før finansdomenet
+eksponeres via `executive.*`, MÅ `activateCard()` sitt `lifecycleAction()`-kall rettes til å sende
+`{ killSwitchGated: true }` (én linje, INGEN ny kill-switch-mekanisme - samme eksisterende
+`finance_kill_switch`/`assertKillSwitchInactive()`, bare korrekt anvendt på ett kall til).
+`INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret (var allerede `false` pga. enhet; nå med ett navngitt
+gap til: `FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`).
+
 ---
 
 ## Fase-avhengigheter (oversikt)
