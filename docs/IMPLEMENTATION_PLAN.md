@@ -4256,10 +4256,23 @@ mutasjoner (kill switch/frys/tilbakekalling) er nåbare fra `executive.*`. **Ny,
 `activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
 `revoke_credential`/`restore_credential`; legg til én ny eier-vendt enhets-tilbakekallingshandling over
 `SessionGrantService.revokeForDeviceOn()` (`modules/core/src/services/session-grant-service.ts`,
-eksisterer allerede, men er i dag KUN kalt internt fra re-innrullering); avgjør en domene-nivå
-finans-fryseprimitiv over kjente `finance_*`-`tool_id`-er (`finance_wallester`/`finance_stripe`/
-`finance_vipps`/`finance_neonomics` - i dag KUN frysbare enkeltvis via `freeze_connector`). Se D-171 i
-`DECISIONS_AND_ASSUMPTIONS.md` for full mål-for-mål-kartlegging av alle syv kapittel-28-mål.
+eksisterer allerede, men er i dag KUN kalt internt fra re-innrullering); legg til videresendinger for
+`finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`modules/finance/src/service.ts`,
+tenant-skopet `finance_kill_switch`, D-41-klasse D). Se D-171 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+mål-for-mål-kartlegging av alle syv kapittel-28-mål.
+
+**RETTET 2026-09-18 (D-172, uavhengig arkitekt-re-review `5248756307`):** D-171 sin B2-slice-beskrivelse
+over påsto en manglende domene-nivå finans-fryseprimitiv - dette var en faktafeil, RETTET her. En fersk
+dekningsaudit av HELE `finance`-modulet fant at `finance.enable_kill_switch`/`disable_kill_switch`/
+`get_kill_switch` ALLEREDE eksisterer og allerede gater `submitPaymentIntent()` (Fiken),
+`submitStripeRefund()`, `submitVippsCapture()`/`cancelVippsPayment()`/`submitVippsRefund()`, og
+Wallester-kort-spend-limit-mutasjoner (`card-service.ts` sin `assertKillSwitchInactive()`) - INGEN ny
+domene-nivå-primitiv skal bygges for B2; slicen reduseres for finansdomenet til KUN å legge til
+`executive`-videresendinger for de tre eksisterende `finance.*`-handlingene, identisk mønster som
+`owner_controls.*`-videresendingene over. `Neonomics` har ingen Jarvis-utført utgående betalingshandling
+å gate (open-banking-redirect-modell); `SpendService` er BEVISST unntatt (ren passiv observasjon av
+allerede skjedd utgift, ZERO ekstern leverandør, eksplisitt regresjonstestet) - begge korrekt utenfor
+scope, ikke et gap.
 
 ---
 
