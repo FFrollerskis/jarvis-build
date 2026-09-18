@@ -1,4 +1,5 @@
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import type { OwnerControlState } from "@jarvis/owner-controls";
 import type {
   Situation,
   SituationAutonomyPolicy,
@@ -6,7 +7,7 @@ import type {
 } from "@jarvis/situations";
 import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
-import type { AttentionItem, AttentionItemDetail } from "./types.ts";
+import type { AttentionItem, AttentionItemDetail, ControlSurfaceStatus } from "./types.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): motoren bak den samlede kontrollflaten.
@@ -49,10 +50,11 @@ const FALLBACK_COOLDOWN_HOURS = 24;
 async function requireData<T>(
   gateway: ToolGateway,
   identity: IdentityContext,
+  toolId: string,
   action: string,
   parameters: Record<string, JsonValue> = {}
 ): Promise<T> {
-  const result = await gateway.execute({ identity, tool_id: "situations", action, parameters });
+  const result = await gateway.execute({ identity, tool_id: toolId, action, parameters });
   if (!result.ok) throw new ExecutiveAccessDeniedError(action, result.reason);
   return result.data as unknown as T;
 }
@@ -79,10 +81,10 @@ export class ExecutiveService {
     filter: AttentionQueueFilter = {}
   ): Promise<{ items: AttentionItem[]; situationsById: Map<string, Situation> }> {
     const [situations, pauseState, autonomyPolicies, notificationPolicy] = await Promise.all([
-      requireData<Situation[]>(this.gateway, identity, "get_queue", filter.domain ? { domain: filter.domain } : {}),
-      requireData<{ paused: string[] }>(this.gateway, identity, "get_pause_state"),
-      requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "list_autonomy_policies"),
-      requireData<SituationNotificationPolicy | null>(this.gateway, identity, "get_notification_policy")
+      requireData<Situation[]>(this.gateway, identity, "situations", "get_queue", filter.domain ? { domain: filter.domain } : {}),
+      requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
+      requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
+      requireData<SituationNotificationPolicy | null>(this.gateway, identity, "situations", "get_notification_policy")
     ]);
     const pausedDomains = new Set(pauseState.paused);
     const autonomyBoundDomains = new Set(autonomyPolicies.map((p) => p.domain));
@@ -132,5 +134,23 @@ export class ExecutiveService {
   /** Rent gjennomslag til `situations.resolve` - lar eieren dismisse et attention-item direkte fra DENNE overflaten uten å bytte verktøy-namespace. */
   async resolveSituation(identity: IdentityContext, situationId: string): Promise<ToolResult> {
     return this.gateway.execute({ identity, tool_id: "situations", action: "resolve", parameters: { situation_id: situationId } });
+  }
+
+  /**
+   * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
+   * kontrolloverflaten - komponerer `owner_controls.get_control_state`
+   * (global kill switch + navngitte frosne connectorer/tilbakekalte
+   * credentials, D-164) OG `situations.get_pause_state` (domene-avgrenset
+   * pausetilstand, UA-10) via TO nøstede `ToolGateway.execute()`-kall - SAMME
+   * disiplin som `rankedQueueWithSource()` over: denne tjenesten rører
+   * ALDRI `KillSwitch`/`OwnerControls`/`DomainPauseRegistry` direkte, og
+   * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
+   */
+  async getControlSurfaceStatus(identity: IdentityContext): Promise<ControlSurfaceStatus> {
+    const [ownerControl, pauseState] = await Promise.all([
+      requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
+      requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state")
+    ]);
+    return { owner_control: ownerControl, situation_domain_pauses: pauseState };
   }
 }

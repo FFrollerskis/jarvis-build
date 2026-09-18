@@ -27,6 +27,7 @@
     "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/operations": "workspace:*",
+    "@jarvis/owner-controls": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/product": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",

@@ -10,6 +10,7 @@ import type { DeviceRegistry } from "./device-registry.ts";
 import type { InfraExecutionGate } from "./infra-execution-gate.ts";
 import { KillSwitch } from "./kill-switch.ts";
 import type { NonceStore } from "./nonce-store.ts";
+import { OWNER_CONTROLS_SELF_RECOVERY_ACTIONS } from "./owner-control-store.ts";
 
 export type Decision = "ALLOW" | "DENY";
 
@@ -99,10 +100,34 @@ export class PolicyGateway {
       return this.finish(request, "DENY", "invalid_tool_call");
     }
 
-    if (this.killSwitch.isActive()) {
+    // K1 (Sovereign graduation, D-164), UTVIDET D-166 (arkitekt-review
+    // PR #93, funn B1): kill switch-sjekken bruker NÅ den AUTORITATIVE,
+    // LIVE `isActiveDurable()`-spørringen (aldri den rene synkrone
+    // `isActive()`) - se `KillSwitch` sitt filhode for hvorfor. Unntaket
+    // fra "kill switch blokkerer ALT" er BEGRENSET til den delte,
+    // navngitte `OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-mengden
+    // (`get_control_state`/`deactivate_kill_switch`/`restore_credential` -
+    // se `owner-control-store.ts` for FULL begrunnelse, inkl. hvorfor
+    // `restore_credential` MÅ være i SAMME mengde som brukes her OG i
+    // `ToolGateway.execute()` sin tilbakekalt-credential-sjekk: uten det
+    // kunne en SAMTIDIG aktiv kill switch + tilbakekalt delt credential_ref
+    // blitt et deadlock ingen kanonisk vei kunne bryte). Unntaket fjerner
+    // KUN denne ene, tidlige DENY-en - resten av `authorize()` (identitet/
+    // kontrakt/sovereign-autoritet/klasse-D-godkjenning) gjelder UENDRET
+    // for disse handlingene, så en forfalsket eller ikke-eier-identitet
+    // kan FORTSATT ikke deaktivere kill switchen eller gjenopprette en
+    // tilbakekalt credential.
+    const isKillSwitchSelfRecovery =
+      toolCall.data.tool_id === "owner_controls" &&
+      OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(toolCall.data.action);
+    if (!isKillSwitchSelfRecovery && (await this.killSwitch.isActiveDurable())) {
       return this.finish(request, "DENY", "kill_switch_active");
     }
-    if (this.opts?.controls?.isFrozen(toolCall.data.tool_id)) {
+    // `owner_controls`-verktøyet selv kan ALDRI fryses ut av sin egen
+    // frys-mekanisme (samme selvgjenopprettings-prinsipp som over) - uten
+    // dette unntaket kunne en frys av "owner_controls" gjort
+    // `unfreeze_connector` permanent utilgjengelig for AKKURAT den frysen.
+    if (toolCall.data.tool_id !== "owner_controls" && (await this.opts?.controls?.isFrozenDurable(toolCall.data.tool_id))) {
       return this.finish(request, "DENY", "connector_frozen");
     }
     // D-104: infra-modus-gaten gjelder KUN registrerte infra-tool_id-er -

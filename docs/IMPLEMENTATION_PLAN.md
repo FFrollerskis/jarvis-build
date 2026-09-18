@@ -4185,6 +4185,64 @@ domene gjenspeiles korrekt, resolve/stale forsvinner fra køen), `apps/api/test/
 
 ---
 
+## K1 – Durable/delt owner-kontroll-autoritet (Sovereign graduation-slice, D-164, masterplan v4.0)
+
+**Manuell masterplan-slice** på exact base `main=34c9c474a478cb7aab7858284ec0606eab51c128` (PR #92 sin
+merge-commit), branch `tobias/manual-masterplan-k1-owner-control-authority`. Lukker UA-11
+akseptansekriterium 3 sitt siste gjenstående gap (D-163): `OwnerControls`/`KillSwitch` var rene
+in-memory, per-PROSESS objekter (api og worker konstruerte hver sin egen instans) - en pause satt i
+den ene var usynlig for den andre, en restart glemte den stille fail-OPEN. Full begrunnelse: D-164 i
+`DECISIONS_AND_ASSUMPTIONS.md`; design-tillegg: `docs/UA11_EXECUTIVE_MODE_DESIGN.md` §4/§9.
+
+**Bygget:**
+- `058_owner_control_authority.sql`: ny tabell `owner_control_state` (global, ingen RLS/tenant_id,
+  presens=aktiv-mønster som `situation_domain_pauses`; ikke Q-20-registrert - system-autoritet, ikke
+  person-eid data).
+- `modules/policy/src/{kill-switch,authority,owner-control-store}.ts` utvidet (IKKE omskrevet):
+  eksisterende synkrone metoder byte-identisk uendret; nye `*Durable()`-metoder er en LIVE, per-kall
+  DB-spørring UTEN cache (bevisst AVVIK fra `DomainPauseRegistry` sin instant-cache-presedens - se
+  D-164 B for hvorfor kill switch/frys krever ekte cross-prosess-konsistens, ikke bare fail-fast).
+- Ny pakke `@jarvis/owner-controls` (kan ikke ligge i `modules/policy` selv - sirkulær avhengighet
+  med `tool-gateway`): kanonisk `owner_controls.*` ToolGateway-namespace, 7 handlinger
+  (`get_control_state` klasse A; `activate_kill_switch`/`deactivate_kill_switch` klasse D;
+  `freeze_connector`/`unfreeze_connector`/`revoke_credential`/`restore_credential` klasse C).
+- `apps/api/src/main.ts`+`worker-main.ts`: begge prosesser konstruerer nå `killSwitch`/`ownerControls`
+  med SAMME `pool`+`authority`, kaller `restore()` FØR bruk, `controls: ownerControls` satt i
+  `PolicyGateway` (tidligere aldri satt - dødt felt). To dokumenterte selvgjenopprettings-unntak
+  hindrer et permanent kill-switch-/frys-lås.
+- `@jarvis/executive` utvidet med `executive.get_control_surface_status` (klasse A) - komponerer
+  `owner_controls.get_control_state`+`situations.get_pause_state` (se UA11_EXECUTIVE_MODE_DESIGN.md §4).
+
+**Fersk-verifisert korrigering (ikke stille fulgt):** `/infra/pause`-ruten muterer `InfraExecutionGate`
+(D-104), en HELT ANNEN, allerede-dokumentert-divergent, snevrere mekanisme - IKKE `KillSwitch`/
+`OwnerControls` som byggeordrens opprinnelige premiss antok. K1 rører den bevisst ikke - se D-164 F.
+
+**Bygges IKKE i denne sliceen:** RLS for `owner_control_state` (dokumentert N/A - global, ikke
+tenant-data); en HTTP-/dashboard-rute for `owner_controls.*` (kontrollflaten er ToolGateway-
+kapabiliteten, samme reifiseringsnivå som `situations`/`executive` selv).
+
+**RETTET ETTER FERSK KRITISK GJENNOMGANG (D-166, arkitekt-review PR #93, BLOCKER B1):**
+D-164 sin opprinnelige tekst her påsto at `revoke_credential`-selvlås-beskyttelse var utelatt fordi
+det var "en pre-eksisterende, bredere risiko for ALLE interne verktøy, ikke unikt for K1" - dette var
+UNØYAKTIG (K1 er den FØRSTE og ENESTE kilden til denne risikoen, se D-166) og selve selvlåsen var en
+REELL bug, ikke et bevisst utelatt scope. Selvlås-beskyttelse for `restore_credential` på den delte
+`credential_ref`-en ER NÅ BYGGET i denne sliceens oppfølgingsrunde - en minimal, handlings-nivå
+selvgjenopprettings-mengde (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`), se D-166.
+
+**Tester:** 96 nye/påvirkede (D-164) + 8 nye (D-166, B1-fiks) = 104, alle grønne, empirisk kjørt:
+`modules/owner-controls/test/owner-control-authority.test.ts` (30: 22 fra D-164 + 8 fra D-166, ekte
+embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts` (15, strukturell),
+`modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk bekreftet grønn:
+policy/situations/executive/apps-api/tool-gateway/owner-controls (809 totalt etter D-166).
+**Host-akseptanse-harness bygget OG UTVIDET (D-166), IKKE kjørt PÅ NYTT etter utvidelsen:**
+`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts` (samme to-fils-
+mønster som UA-10/UA-5). Status: kjernemekanisme (freeze/unfreeze/kill-switch-parity)
+`PRODUCTION_VERIFIED` (D-165); credential-selvgjenopprettingssti `FIXED_SUITE_VERIFIED_AFTER_B1`/
+`HOST_ACCEPTANCE_REQUIRED=true` (D-166) - se RUNTIME_GATES.md for gate-raden og D-164/D-165/D-166 for
+full begrunnelse. `SOVEREIGN_COMPLETE=false` uendret.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

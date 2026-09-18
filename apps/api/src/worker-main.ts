@@ -92,10 +92,22 @@ const gateway = new ModelGateway({
 
 // BO-11 (§29): worker-tool-mesh gjennom SAMME trusted Tool Gateway/Policy som api -
 // ingen provider/tool-bypass. Kun ufarlige read-verktøy eksponeres (mesh-bridge).
-const killSwitch = new KillSwitch();
+// K1 (Sovereign graduation, D-164): SAMME durable, delt `pool`+`authority`-
+// wiring som apps/api/src/main.ts - `killSwitch`/`ownerControls` sin LIVE
+// `*Durable()`-sjekk spør nå SAMME `owner_control_state`-tabell som
+// api-prosessen, ikke en egen in-memory-kopi (se `KillSwitch` sitt filhode
+// for hele begrunnelsen). `owner_controls.*`-VERKTØYET registreres BEVISST
+// IKKE her (samme presedens som `situations`/`executive`, D-163/D-164
+// fresh-audit: ingen eier-vendt kaller i worker-prosessen for det
+// namespace-et) - kun selve autorisasjons-KONTROLLEN er delt her.
+const ownerControlAuthority = { owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias" };
+const killSwitch = new KillSwitch(pool, ownerControlAuthority);
+await killSwitch.restore();
+const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
+await ownerControls.restore();
 // D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-
 // wiring-mønster som apps/api/src/main.ts. ÆRLIG begrensning (uendret fra
-// den allerede eksisterende `killSwitch`/`OwnerControls`-arkitekturen):
+// den allerede eksisterende, BEVISST UTENFOR K1 sitt omfang - se D-164):
 // dette er en EGEN, prosess-lokal `InfraExecutionGate`-instans - en pause
 // utløst via api-prosessens `/infra/pause`-HTTP-rute endrer IKKE denne
 // workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
@@ -111,6 +123,8 @@ const policy = new PolicyGateway({
   devices: deviceRegistry,
   nonces: new PgApprovalStore(pool),
   killSwitch,
+  // K1 (D-164): samme "tidligere dødt felt, nå håndhevet"-fiks som apps/api/src/main.ts.
+  controls: ownerControls,
   infraGate,
   infraToolIds,
   authority: {
@@ -121,7 +135,7 @@ const policy = new PolicyGateway({
 const toolGateway = new ToolGateway(
   pool, policy,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
-  new OwnerControls(killSwitch)
+  ownerControls
 );
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin

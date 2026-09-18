@@ -1,3 +1,4 @@
+import type { OwnerControlState } from "@jarvis/owner-controls";
 import type { Situation, SituationPriority, SituationStage } from "@jarvis/situations";
 
 /**
@@ -62,4 +63,33 @@ export interface AttentionItem {
 /** Full kilde-`Situation` pluss det avledede attention-laget - "se underliggende situation" uten et nytt oppslag. */
 export interface AttentionItemDetail extends AttentionItem {
   situation: Situation;
+}
+
+/**
+ * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
+ * kontrolloverflaten - UA-11 sitt bidrag til å tette UA-11-akseptansekriterium
+ * 3 ("owner can stop/revoke/reconfigure any connector, provider, agent or
+ * autonomy domain from one control surface"). RENT avledet av to nøstede
+ * `ToolGateway.execute()`-kall (`owner_controls.get_control_state` +
+ * `situations.get_pause_state`, se `service.ts`) - INGEN egen tilstand,
+ * INGEN direkte DB-/`KillSwitch`-/`OwnerControls`-tilgang fra denne pakken.
+ *
+ * `owner_control` er den GLOBALE, systemomfattende autoriteten (kill switch -
+ * blokkerer ALT, uansett domene - samt navngitte frosne connectorer/
+ * tilbakekalte credentials). `situation_domain_pauses` er den SITUASJONS-
+ * SPESIFIKKE, domene-avgrensede pausetilstanden fra UA-10 - et helt annet,
+ * SAMTIDIG gyldig lag (se `docs/DECISIONS_AND_ASSUMPTIONS.md` D-164 §5: disse
+ * to må forbli distinkte, ALDRI flettes til én boolsk "alt er pauset").
+ *
+ * MERK (dokumentert, ikke stille utelatt): `situation_domain_pauses` bærer i
+ * dag KUN domenenavnene (`situations.get_pause_state` sin eksisterende
+ * kontrakt) - ikke reason/actor/changed_at per domene, i motsetning til
+ * `owner_control` sine felt som ALLE har det. Dette er en PRE-EKSISTERENDE
+ * begrensning i `situations.get_pause_state` (UA-10, uendret av K1) - å
+ * utvide DEN kontrakten er utenfor K1 sitt omfang og er IKKE forsøkt løst
+ * stille her.
+ */
+export interface ControlSurfaceStatus {
+  owner_control: OwnerControlState;
+  situation_domain_pauses: { paused: string[] };
 }

@@ -82,6 +82,7 @@ komplett `JSON.stringify()`-likhet mellom to kjøringer med reversert inputrekke
 | `pause_domain` | C | `situations.pause_domain` |
 | `resume_domain` | C | `situations.unpause_domain` |
 | `resolve_situation` | B | `situations.resolve` |
+| `get_control_surface_status` | A | `owner_controls.get_control_state` + `situations.get_pause_state` (K1, D-164) |
 
 Ingen handling har en HØYERE eller LAVERE kapabilitetsklasse enn den underliggende `situations.*`-
 handlingen den videresender til - executive-laget innfører ALDRI en egen risikoklassifisering for
@@ -89,6 +90,25 @@ samme reelle mutasjon. `resolveIdentity()`-avslag/PolicyGateway-avslag/KillSwitc
 nøstede kallet PROPAGERES transparent (kastes videre av transporten, se `transport.ts` sin
 `toolResultToTransportResult()`) - ALDRI en stille `ok:true` på executive-laget for noe det
 underliggende laget faktisk nektet.
+
+**K1-tillegg (2026-09-17, D-164): `get_control_surface_status`.** Lukker UA-11 akseptansekriterium 3
+sitt siste gjenstående gap (D-163 §C(1)): eieren kunne se `situations`-domenepause via `executive.*`,
+men IKKE den globale kill switch-/frys-/tilbakekall-tilstanden fra ÉN samlet overflate. Denne
+handlingen komponerer `owner_controls.get_control_state` (den nye, durable/delte `@jarvis/owner-
+controls`-pakken, D-164) OG `situations.get_pause_state` via TO nøstede `gateway.execute()`-kall -
+SAMME komposisjonsdisiplin som §2 (`ExecutiveService` rører ALDRI `KillSwitch`/`OwnerControls`/
+`DomainPauseRegistry` direkte). Svaret har TO EGNE, aldri-flettede felt: `owner_control` (global
+sovereign-autoritet: kill switch + navngitte frosne connectorer/tilbakekalte credentials, hver med
+reason/actor/changed_at) og `situation_domain_pauses` (domene-avgrenset UA-10-pausetilstand, KUN
+domenenavn - `situations.get_pause_state` sin egen, pre-eksisterende kontrakt eksponerer ikke reason/
+actor per domene, en dokumentert, IKKE-K1-relatert begrensning). Se `modules/executive/test/service-
+transport.test.ts` gruppe G (5 tester: baseline, kill switch med reason/actor, frys+tilbakekall
+samtidig, domenepause+connector-frys forblir distinkte lag, global KillSwitch nekter også denne
+lesingen). Klasse A (les) - UENDRET av D-164/D-166 sitt selvgjenopprettings-unntak i `PolicyGateway`
+(det unntaket gjelder KUN de tre navngitte `owner_controls`-handlingene
+`get_control_state`/`deactivate_kill_switch`/`restore_credential` - sistnevnte lagt til av D-166 sin
+B1-fiks, se der - ALDRI `executive.get_control_surface_status`: en aktiv kill switch nekter DENNE
+lesingen også, se testen).
 
 ## §5. Persistens: NULL ny tabell
 
@@ -134,8 +154,13 @@ sin EGEN, allerede-registrerte erasure-plikt er uendret og fullt tilstrekkelig),
   se D-162 sitt eget funn i DECISIONS_AND_ASSUMPTIONS.md: dette er en PRE-EKSISTERENDE, dokumentert
   tilstand fra D-160, ikke noe DENNE sliceen skaper). Executive Mode har, som `situations`, ingen
   faktisk kaller i workerens prosess - å koble den inn nå ville vært utestet, ubrukt kode.
-- **Host-akseptanse-harness/RUNTIME_GATES-rad.** P0 introduserer ZERO ny migrasjon, ZERO ny
-  leverandør, ZERO ny runtime-avhengighet - se RUNTIME_GATES.md for gate-status og begrunnelse.
+- **Host-akseptanse-harness/RUNTIME_GATES-rad (P0-scope, uendret).** P0 selv introduserer ZERO ny
+  migrasjon, ZERO ny leverandør, ZERO ny runtime-avhengighet - se RUNTIME_GATES.md for gate-status og
+  begrunnelse. K1 (D-164, egen slice) la til migrasjon 058 + en EGEN host-harness
+  (`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`) for DEN sliceens
+  `owner_controls.*`/durabilitets-gap - IKKE for `executive.*` sin egen kontrollflate, som forblir
+  `HOST_ACCEPTANCE_REQUIRED=false` for alt utenom den nye `get_control_surface_status`-handlingen
+  (som selv har ZERO ny migrasjon/credential - den leser KUN de to allerede-durable lagene).
 
 ## §8. Tester
 
@@ -152,6 +177,10 @@ sin EGEN, allerede-registrerte erasure-plikt er uendret og fullt tilstrekkelig),
   `drive-runtime-wiring.test.ts`): `executiveToolDefinitions()` er INNI samme `additionalTools`-liste
   som `situationsToolDefinitions()`, `ExecutiveService` konstrueres med `toolGateway` (aldri motoren
   direkte), `worker-main.ts` importerer bevisst ikke `@jarvis/executive`.
+- **K1-tillegg (D-164):** `service-transport.test.ts` gruppe G (5, se §4) beviser
+  `get_control_surface_status` sin komposisjon. Selve `owner_controls.*`-namespacet (durabilitet,
+  api-/worker-parity, autorisasjon, audit, restart) er dekket av EN EGEN suite,
+  `modules/owner-controls/test/owner-control-authority.test.ts` (22) - se D-164, ikke duplisert her.
 
 ## §9. Akseptansekriterier - status etter P0
 
@@ -164,7 +193,33 @@ Masterplanens UA-11-akseptansekriterier:
    `recommended_next_action` på HVERT item - deterministisk avledet av de faktiske feltene som deltok
    i scoren (§3), aldri en skjult vektsum eller en modell-generert tekst.
 3. **"Owner can stop/revoke/reconfigure any connector, provider, agent or autonomy domain from one
-   control surface."** DELVIS for P0: `executive.pause_domain`/`resume_domain` gir ÉN flate for
-   Situation Engine-domener (komponerer `situations.*`). Connector-/provider-/agent-nivå kontroll
-   (`/infra/pause`, `docker`-frys, osv.) finnes ALLEREDE som separate flater (UA-5) - å SAMLE dem
-   under `executive.*` også er en eksplisitt DEFERRED, senere UA-11-slice (§7), ikke lovet her.
+   control surface."** For P0: DELVIS - `executive.pause_domain`/`resume_domain` gir ÉN flate for
+   Situation Engine-domener (komponerer `situations.*`). Connector-/provider-nivå kontroll
+   (`OwnerControls`/`KillSwitch`) var fortsatt in-memory, per-prosess (D-163).
+   **OPPDATERT 2026-09-17 (K1, D-164): gapet er nå IMPLEMENTERT.** `OwnerControls`/`KillSwitch` er
+   durable+delt (migrasjon 058), eksponert som kanonisk `owner_controls.*` ToolGateway-namespace
+   (aktivere/deaktivere kill switch, fryse/gjenåpne connector, tilbakekalle/gjenopprette credential -
+   alle klasse C/D, sovereign-eier instant), OG `executive.get_control_surface_status` (§4) samler
+   BÅDE dette laget og `situations`-domenepausen i ÉN lesing. Kriteriet er dermed oppfylt i kode/
+   suite. **OPPDATERT 2026-09-18 (K1 host-akseptanse, D-165): kjernemekanismen (kill switch +
+   connector-frys, api-/worker-cross-prosess-parity, restart-persistens, audit) er nå
+   `PRODUCTION_VERIFIED` på ekte Windows/Docker Desktop-host (run_id `d7d5d246`, 10/10 PASS,
+   `hard_fail=false`, EKTE `docker compose restart api worker`).** `executive.get_control_surface_status`/
+   idempotency ble IKKE øvet av dette spesifikke host-harnesset og forblir suite/CI-proven, ikke
+   overdrevet til host-proven - se RUNTIME_GATES.md for den eksplisitte distinksjonen. **OPPDATERT
+   2026-09-18 (K1 B1-fiks, D-166): `revoke_credential`/`restore_credential` var IKKE bare "ikke øvet
+   ennå" som antatt over - uavhengig arkitekt-review av PR #93 fant en REELL selv-lås-bug (`restore_credential`
+   på den delte `credential_ref` ville blitt blokkert av sin egen tilbakekalt-credential-sjekk, ingen
+   kanonisk gjenopprettingsvei). Fikset med en minimal, handlings-nivå selvgjenopprettings-mengde
+   (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`, delt av BÅDE `PolicyGateway`- og `ToolGateway`-gaten - se
+   D-166 for samtidig-kill-switch-deadlock-analysen). Suite-bevist (30/30+809/809 grønne); host-harnesset
+   utvidet. **OPPDATERT 2026-09-18 (host-rerun, D-167): Tobias kjørte det utvidede harnesset på ekte host
+   (HEAD `ca167dba...`) - B1 sin funksjonalitet var `PASS` (selvgjenoppretting/samtidig-deadlock/cleanup),
+   men harnessets EGEN, sekundære audit-bevis-spørring (en håndplukket "siste 10 rader"-grense satt før
+   D-166 fantes) mistet den opprinnelige aktiveringsraden etter at D-166 la til flere `owner_controls`-kall
+   enn grensen tålte - IKKE en produksjonsfeil, se D-167. Rettet med en run-avgrenset (`session_id`+
+   vannmerke, ingen `LIMIT`) spørring i ny `modules/owner-controls/src/audit-evidence.ts`; harnesset er
+   IKKE kjørt på nytt av Tobias ETTER denne fiksen.** Status forblir `FIXED_SUITE_VERIFIED_AFTER_B1`,
+   `HOST_ACCEPTANCE_REQUIRED=true`, IKKE `PRODUCTION_VERIFIED`, for DENNE delkapabiliteten spesifikt.**
+   `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere
+   mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.

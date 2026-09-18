@@ -1,0 +1,26 @@
+{
+  "name": "@jarvis/owner-controls",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "K1 (Sovereign graduation, D-164): kanonisk ToolGateway-flate (owner_controls.*) for det durable, delte eier-kontroll-laget (KillSwitch/OwnerControls, @jarvis/policy) - lukker UA-11 akseptansekriterium 3.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/core": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}
