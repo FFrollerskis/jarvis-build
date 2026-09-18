@@ -408,6 +408,7 @@ describe("G: get_control_surface_status (K1, D-164; utvidet D-174) - komponerer 
 function freshConnectedExecutiveStack(): {
   gateway: ToolGateway;
   killSwitch: KillSwitch;
+  ownerControls: OwnerControls;
 } {
   const stackKillSwitch = new KillSwitch(appPool, { owner_person_id: OWNER });
   const stackOwnerControls = new OwnerControls(stackKillSwitch, appPool, { owner_person_id: OWNER });
@@ -427,7 +428,7 @@ function freshConnectedExecutiveStack(): {
   for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(stackOwnerControlsService))) stackGateway.register(tool);
   const stackExecutiveService = new ExecutiveService(stackGateway);
   for (const tool of executiveToolDefinitions(new ExecutiveTransport(stackExecutiveService))) stackGateway.register(tool);
-  return { gateway: stackGateway, killSwitch: stackKillSwitch };
+  return { gateway: stackGateway, killSwitch: stackKillSwitch, ownerControls: stackOwnerControls };
 }
 
 async function seedDeviceGrant(tenantId: string, deviceId: string, personId: string): Promise<void> {
@@ -629,18 +630,17 @@ describe("I: D-176 (arkitekt-review 5251073737, BLOKKER B5) - executive.get_cont
   });
 
   it("C) BEGGE samtidig (kill switch aktiv OG delt credential tilbakekalt): get_control_surface_status LYKKES og rapporterer BEGGE tilstandene sannferdig; full gjenoppretting via executive.* gjenoppretter normal drift", async () => {
-    const { gateway: stack, killSwitch: stackKillSwitch } = freshConnectedExecutiveStack();
+    const { gateway: stack, killSwitch: stackKillSwitch, ownerControls: stackOwnerControls } = freshConnectedExecutiveStack();
     withReadComposition(stack);
     try {
-      // Rekkefølge: revoke_credential FØRST, deretter activate_kill_switch - `revoke_credential`
-      // er selv IKKE i selvgjenopprettings-unntaket (kun `restore_credential`/`deactivate_kill_switch`/
-      // `get_control_surface_status` er det), så et forsøk på å tilbakekalle den delte refen MENS
-      // kill switchen allerede er aktiv ville selv blitt nektet ('kill_switch_active') - denne
-      // rekkefølgen er derfor den ENESTE som faktisk oppnår BEGGE tilstandene samtidig.
-      const revoked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-c-test" } });
-      expect(revoked.ok).toBe(true);
-      const activated = await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-c-test" } });
-      expect(activated.ok).toBe(true);
+      // BEGGE tilstandene må settes DIREKTE via det durable laget (SAMME mønster som
+      // owner-control-authority.test.ts sine "3a"/"3b" B1-deadlock-tester) - `activate_kill_switch`
+      // OG `revoke_credential` deler BEGGE `BUSINESS_INTERNAL_CREDENTIAL_REF`/kill-switch-gaten med
+      // HVERANDRE (ingen av dem er i selvgjenopprettings-unntaket), så INGEN rekkefølge av
+      // sekvensielle `executive.*`-kall kan faktisk OPPNÅ begge tilstandene samtidig - det er
+      // nettopp DET som gjør "samtidig deadlock" til et reelt scenario å bevise gjenoppretting fra.
+      await stackKillSwitch.activateDurable("i-c-test", OWNER);
+      await stackOwnerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "i-c-test", OWNER);
       const lockedStatus = await getStatusOrThrow(stack, ownerA);
       expect(lockedStatus.owner_control.kill_switch.active).toBe(true);
       expect(lockedStatus.owner_control.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
@@ -659,14 +659,14 @@ describe("I: D-176 (arkitekt-review 5251073737, BLOKKER B5) - executive.get_cont
   });
 
   it("D) direkte owner_controls.get_control_state er UENDRET av D-176 - fungerer identisk under BEGGE lås-tilstandene, som FØR denne fiksen", async () => {
-    const { gateway: stack } = freshConnectedExecutiveStack();
+    const { gateway: stack, killSwitch: stackKillSwitch, ownerControls: stackOwnerControls } = freshConnectedExecutiveStack();
     withReadComposition(stack);
     try {
-      // Rekkefølge: revoke_credential FØRST (se kommentaren i test C for hvorfor) - deretter
-      // activate_kill_switch, slik at direct.ok faktisk bevises under BEGGE reelle tilstandene.
-      const revoked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-d-test" } });
-      expect(revoked.ok).toBe(true);
-      await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-d-test" } });
+      // BEGGE tilstandene direkte via det durable laget - se kommentaren i test C for hvorfor
+      // INGEN sekvens av executive.*-kall kan oppnå dette (activate_kill_switch bruker SELV den
+      // delte refen, og revoke_credential er selv IKKE unntatt kill-switch-sjekken).
+      await stackKillSwitch.activateDurable("i-d-test", OWNER);
+      await stackOwnerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "i-d-test", OWNER);
       const direct = await stack.execute({ identity: ownerA, tool_id: "owner_controls", action: "get_control_state", parameters: {} });
       expect(direct.ok).toBe(true);
       expect(direct.ok && (direct.data as unknown as { revoked_credentials: Array<{ credential_ref: string }> }).revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
