@@ -517,13 +517,13 @@ describe("H: D-174 (B2) - executive.* speiler owner_controls.* sin B1-selvgjenop
     }
   });
 
-  it("6) IKKE-eier identitet kan IKKE utnytte D-174-unntaket: executive.deactivate_kill_switch nektes for en ikke-eier ('class_c_no_mandate') selv om unntaket fjernet den TIDLIGE kill-switch-aktiv-DENY-en - identitet videresendes UENDRET, ALDRI eskalert", async () => {
+  it("6) IKKE-eier identitet kan IKKE utnytte D-174-unntaket: executive.deactivate_kill_switch nektes for en ikke-eier ('class_d_missing_approval', klasse D uendret - kun kill-switch-aktiv-DENY-en er unntatt, ALDRI klasse-D-godkjenningskravet) selv om unntaket fjernet den TIDLIGE kill-switch-aktiv-DENY-en - identitet videresendes UENDRET, ALDRI eskalert", async () => {
     const { gateway: stack } = freshConnectedExecutiveStack();
     await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "h6-test" } });
     try {
       const result = await stack.execute({ identity: otherA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
       expect(result.ok).toBe(false);
-      expect(!result.ok && result.reason).toBe("class_c_no_mandate");
+      expect(!result.ok && result.reason).toBe("class_d_missing_approval");
     } finally {
       await stack.execute({ identity: ownerA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
     }
