@@ -4331,6 +4331,15 @@ den forrige unionen med en eksplisitt per-(tool_id,action)-mapping for ALLE FIRE
 INGEN ny autoritets-/tenant-tilstand. Se D-176 i `DECISIONS_AND_ASSUMPTIONS.md` for full
 begrunnelse/testevidens.
 
+**RETTET 2026-09-18 (D-177, arkitekt-re-review 5252077633, BLOKKER B6):** D-176 sitt host-
+akseptanse-harness (`d174-executive-control-surface-live.ts`, seksjon 4b) brukte en sekvensiell
+`executive.activate_kill_switch`+`executive.revoke_credential`-rekkefølge for å etablere "begge
+låser samtidig" - STRUKTURELT UMULIG, samme bug-klasse testsuiten allerede var rettet for i D-176
+selv, men ikke anvendt på host-scriptet. RETTET: BEGGE lås-tilstandene settes nå DIREKTE via det
+durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
+revokeCredentialDurable(...)`); LESINGEN/gjenopprettingen under test går fortsatt via `executive.*`.
+Se D-177 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

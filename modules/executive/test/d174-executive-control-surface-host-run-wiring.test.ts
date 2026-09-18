@@ -115,28 +115,38 @@ describe("D-175 (arkitekt-review 5250409538, BLOKKER B4): device-tilbakekalling 
   });
 });
 
-describe("D-176 (arkitekt-review 5251073737, BLOKKER B5): executive.get_control_surface_status MÅ lese SUKSESSFULLT under BEGGE lås-tilstandene FØR gjenoppretting - live-scriptet registrerer situations.* (den nøstede lesingen get_control_surface_status komponerer) OG beviser den ordinære handlingen forblir nektet gjennom hele lås-vinduet", () => {
+describe("D-176 (arkitekt-review 5251073737, BLOKKER B5; RETTET BLOKKER B6, arkitekt-review 5252077633): executive.get_control_surface_status MÅ lese SUKSESSFULLT under BEGGE lås-tilstandene SAMTIDIG FØR gjenoppretting - live-scriptet registrerer situations.* (den nøstede lesingen get_control_surface_status komponerer), setter BEGGE lås-tilstandene DIREKTE via det durable laget (IKKE en umulig sekvensiell executive.*-oppsett), OG beviser den ordinære handlingen forblir nektet gjennom hele lås-vinduet", () => {
   it("registrerer situations.* på SAMME ToolGateway-instans som owner_controls.*/executive.*/finance.* (situationsToolDefinitions/SituationsTransport/DomainPauseRegistry/SituationEngine) - uten dette ville get_control_surface_status sin nøstede situations.get_pause_state-lesing feilet med en helt annen (ukjent verktøy) grunn", () => {
     expect(liveScriptSource).toContain('import { DomainPauseRegistry, SituationEngine, SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";');
     expect(liveScriptSource).toContain("situationsToolDefinitions(new SituationsTransport(situationEngine, domainPauses))");
   });
-  it("seksjon 4b kaller get_control_surface_status (via en delt `readStatus()`-hjelpefunksjon som selv sender tool_id:\"executive\"/action:\"get_control_surface_status\") FLERE ganger (under kill-switch-aktiv, under BEGGE tilstander samtidig, OG etter gjenoppretting) - IKKE bare én isolert suksess-sjekk", () => {
+  function getSection4bSlice(): string {
     const section4bIdx = liveScriptSource.indexOf("4b) D-176");
     expect(section4bIdx).toBeGreaterThan(-1);
-    const section4bSlice = liveScriptSource.slice(section4bIdx, section4bIdx + 3000);
+    const nextSectionIdx = liveScriptSource.indexOf('"5) NEGATIV KONTROLL', section4bIdx);
+    expect(nextSectionIdx).toBeGreaterThan(section4bIdx);
+    return liveScriptSource.slice(section4bIdx, nextSectionIdx);
+  }
+  it("BLOKKER B6 (RETTET): seksjon 4b setter BEGGE lås-tilstandene DIREKTE via det durable laget (stack.killSwitch.activateDurable/stack.ownerControls.revokeCredentialDurable) - ALDRI via en sekvensiell executive.activate_kill_switch + executive.revoke_credential (som er STRUKTURELT UMULIG: hver av dem nekter den andre)", () => {
+    const section4bSlice = getSection4bSlice();
+    expect(section4bSlice).toContain("stack.killSwitch.activateDurable(");
+    expect(section4bSlice).toContain("stack.ownerControls.revokeCredentialDurable(");
+    expect(section4bSlice).not.toContain('tool_id: "executive", action: "activate_kill_switch"');
+    expect(section4bSlice).not.toContain('tool_id: "executive", action: "revoke_credential"');
+  });
+  it("seksjon 4b kaller get_control_surface_status (via en delt `readStatus()`-hjelpefunksjon som selv sender tool_id:\"executive\"/action:\"get_control_surface_status\") FLERE ganger (under BEGGE tilstander samtidig, OG etter gjenoppretting) - IKKE bare én isolert suksess-sjekk", () => {
+    const section4bSlice = getSection4bSlice();
     expect(section4bSlice).toContain('action: "get_control_surface_status"'); // definert ÉN gang, i den delte `readStatus()`-hjelpefunksjonen
     const readStatusCalls = section4bSlice.match(/readStatus\(\)/g) ?? [];
-    expect(readStatusCalls.length).toBeGreaterThanOrEqual(3); // kalt FLERE ganger - under kill-switch, under begge tilstander, OG etter gjenoppretting
+    expect(readStatusCalls.length).toBeGreaterThanOrEqual(2); // kalt FLERE ganger - under begge tilstander samtidig, OG etter gjenoppretting
   });
   it("seksjon 4b beviser at en ORDINÆR handling (owner_controls.freeze_connector) FORTSATT nektes ('kill_switch_active') MENS get_control_surface_status samtidig lykkes - unntaket er ALDRI bredere enn de navngitte lese-/gjenopprettingshandlingene", () => {
-    const section4bIdx = liveScriptSource.indexOf("4b) D-176");
-    const section4bSlice = liveScriptSource.slice(section4bIdx, section4bIdx + 3000);
+    const section4bSlice = getSection4bSlice();
     expect(section4bSlice).toContain('action: "freeze_connector"');
     expect(section4bSlice).toContain('"should-stay-blocked-during-4b"');
   });
   it("seksjon 4b gjenoppretter via executive.restore_credential/executive.deactivate_kill_switch (IKKE direkte owner_controls.*) - SAMME ETT-PANEL-disiplin som resten av D-174/D-175/D-176", () => {
-    const section4bIdx = liveScriptSource.indexOf("4b) D-176");
-    const section4bSlice = liveScriptSource.slice(section4bIdx, section4bIdx + 3000);
+    const section4bSlice = getSection4bSlice();
     expect(section4bSlice).toContain('tool_id: "executive", action: "restore_credential"');
     expect(section4bSlice).toContain('tool_id: "executive", action: "deactivate_kill_switch"');
   });

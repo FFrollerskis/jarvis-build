@@ -2,15 +2,18 @@
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-b2-b3-control-surface-mutation`, PR #95,
 exact base `main=ac5f941724947eef8ee4935087cc58738fb8a828` = PR #94 sin merge-commit). Aktiv oppgave:
-**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4; D-176, BLOKKER B5 - uavhengige arkitekt-
-re-reviews 5250409538/5251073737):
+**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4; D-176, BLOKKER B5; D-177, BLOKKER B6 -
+uavhengige arkitekt-re-reviews 5250409538/5251073737/5252077633):
 SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG OG LESING), FINANS-KILL-SWITCH-
 DEKNINGSREPARASJON (Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING - MÅL-TENANTEN er
 `identity.tenant_id`, ALDRI et kaller-oppgitt parameter (D-175 rettet D-174 sin opprinnelige,
 feilaktige "tenant_id er et fritt mål-parameter"-antakelse for `revoke_device`) - OG
 `executive.get_control_surface_status` (D-176 rettet D-174/D-175 sin feilaktige antakelse om at
 `executive` sine handlingsnavn er identiske med `owner_controls` sine for LESING, PLUSS at samme
-lesing sine to NØSTEDE `situations`/`finance`-kall også måtte unntas fra lås-gatene).**
+lesing sine to NØSTEDE `situations`/`finance`-kall også måtte unntas fra lås-gatene; D-177 rettet
+D-176 sin HOST-AKSEPTANSE-HARNESS, som brukte den SAMME strukturelt umulige sekvensielle
+lås-oppsett-bugen testsuiten allerede var rettet for - BEGGE lås-forutsetningene settes nå direkte
+via det durable laget i BÅDE test OG host-script, ALDRI via en sekvensiell `executive.*`-oppsett).**
 PR #94 (D-169 t.o.m. D-173, docs-only closeout av post-K1 re-audit-syklusen) er MERGET til `main`. Denne
 PR-en er den DEFINERTE "neste interne slice" (B2+B3) sin faktiske implementasjon - IKKE lenger
 docs-only.
@@ -103,11 +106,16 @@ Se D-174 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse. Kort:
    stack) og ny "K"-blokk (`modules/owner-controls/test/owner-control-authority.test.ts`, ekte
    `session_grants`).
 8. **Host-akseptanse:** ny `modules/executive/scripts/d174-executive-control-surface-live.ts` +
-   `-host-run.ts` + strukturell wiring-test (30 tester, grønn i denne sesjonen - utvidet fra 23 av
-   D-175, fra 26 av D-176). `HOST_ACCEPTANCE_STATUS=PENDING` - IKKE kjørt mot ekte Docker/Postgres i
-   denne sesjonen (sandkassen her kan strukturelt ikke kjøre `docker compose`); scriptet er klart for
-   Tobias, med ny seksjon 4b (D-176) som beviser `executive.get_control_surface_status` under BEGGE
-   lås-tilstandene FØR gjenoppretting.
+   `-host-run.ts` + strukturell wiring-test (31 tester, grønn i denne sesjonen - utvidet fra 23 av
+   D-175, fra 26 av D-176, korrigert av D-177/BLOKKER B6). `HOST_ACCEPTANCE_STATUS=PENDING` - IKKE
+   kjørt mot ekte Docker/Postgres i denne sesjonen (sandkassen her kan strukturelt ikke kjøre
+   `docker compose`); scriptet er klart for Tobias, med seksjon 4b (D-176, RETTET D-177) som beviser
+   `executive.get_control_surface_status` under BEGGE lås-tilstandene FØR gjenoppretting - BEGGE
+   lås-forutsetningene settes nå DIREKTE via `stack.killSwitch.activateDurable(...)`/
+   `stack.ownerControls.revokeCredentialDurable(...)` (D-177: den opprinnelige sekvensielle
+   `executive.activate_kill_switch`+`executive.revoke_credential`-oppsettet i denne seksjonen var
+   STRUKTURELT UMULIG - samme bug-klasse testsuiten allerede var rettet for, men som ikke var
+   anvendt på host-scriptet før denne re-reviewen).
 
 ## Kjent, UENDRET sandkasse-/miljøbegrensning (IKKE en kodefeil, IKKE introdusert av denne PR-en)
 
@@ -136,7 +144,8 @@ egen CI-status før merge.
 
 ## Neste oppgave
 
-Vent på uavhengig arkitekt-review av D-174 + CI-resultat på pushet HEAD. Etter godkjenning/merge:
-Tobias kjører `d174-executive-control-surface-host-run.ts` for HOST_ACCEPTANCE_STATUS=PASS/FAIL.
-`SOVEREIGN_COMPLETE` forblir `false` til de navngitte `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` er lukket.
-Ingen ny masterplan, ingen UGREEN-migrering, ingen ny kode-slice startet av denne posten.
+Vent på FERSK uavhengig arkitekt-review av D-177/BLOKKER B6-rettelsen + grønn CI på det nye pushete
+HEAD-et. Ingen host-akseptanse-forespørsel til Tobias FØR den reviewen passerer. Etter godkjenning/
+merge: Tobias kjører `d174-executive-control-surface-host-run.ts` for HOST_ACCEPTANCE_STATUS=PASS/
+FAIL. `SOVEREIGN_COMPLETE` forblir `false` til de navngitte `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` er
+lukket. Ingen ny masterplan, ingen UGREEN-migrering, ingen ny kode-slice startet av denne posten.

@@ -279,3 +279,13 @@ Masterplanens UA-11-akseptansekriterier:
    HELLER IKKE unntatt. Ny `isSelfRecoveryAction(toolId, action)` erstatter unionen med en eksplisitt
    per-(tool_id,action)-mapping for alle fire tool_id-ene - fortsatt like smalt, INGEN mutasjon lagt
    til. Se D-176 for full begrunnelse/testevidens.
+
+   **RETTET 2026-09-18 (D-177, arkitekt-re-review 5252077633, BLOKKER B6):** D-176 sitt host-
+   akseptanse-harness (seksjon 4b i `d174-executive-control-surface-live.ts`) satte opp "begge låser
+   samtidig"-forutsetningen via en sekvensiell `executive.activate_kill_switch`+`executive.
+   revoke_credential`-rekkefølge - STRUKTURELT UMULIG (hver av dem nekter den andre via delt
+   `BUSINESS_INTERNAL_CREDENTIAL_REF`), samme bug-klasse testsuiten allerede var rettet for i D-176
+   selv, men ikke anvendt på host-scriptet før denne re-reviewen. RETTET: begge lås-tilstandene settes
+   nå DIREKTE via det durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
+   revokeCredentialDurable(...)`); selve lesingen (`executive.get_control_surface_status`)/
+   gjenopprettingen under test forblir via `executive.*`. Se D-177 for full begrunnelse/testevidens.

@@ -94,6 +94,16 @@ like smalt, INGEN mutasjon lagt til. `HOST_ACCEPTANCE_STATUS=PENDING` uendret; n
 harnesset beviser dette, men IKKE kjørt i denne sesjonen. Se D-176 i DECISIONS_AND_ASSUMPTIONS.md for
 full begrunnelse/testevidens.
 
+**D-177 (2026-09-18, RETTET - arkitekt-re-review 5252077633, BLOKKER B6):** D-176 sin seksjon 4b i
+host-akseptanse-harnesset (`d174-executive-control-surface-live.ts`) brukte en sekvensiell
+`executive.activate_kill_switch`+`executive.revoke_credential`-rekkefølge for å etablere "begge
+låser samtidig" - STRUKTURELT UMULIG (samme bug-klasse testsuiten allerede var rettet for i D-176
+selv, men IKKE anvendt på host-scriptet). Rettet til å sette BEGGE lås-tilstandene DIREKTE via det
+durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.revokeCredentialDurable(
+...)`), mens selve LESINGEN (`executive.get_control_surface_status`)/gjenopprettingen under test
+fortsatt går via `executive.*`. `HOST_ACCEPTANCE_STATUS=PENDING` uendret. Se D-177 i
+DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse/testevidens.
+
 ## 16-områders graduation-matrise
 
 | Område | Status | Evidens (kort) |

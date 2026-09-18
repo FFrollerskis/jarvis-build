@@ -272,16 +272,25 @@ async function main(): Promise<void> {
     });
 
     await section(
-      "4b) D-176 (arkitekt-review 5251073737, BLOKKER B5): executive.get_control_surface_status LYKKES og rapporterer SANNFERDIG under BEGGE lås-tilstandene (kill switch aktiv, delt credential tilbakekalt, BEGGE samtidig) - FØR gjenoppretting; ORDINÆR handling forblir NEKTET gjennom hele lås-vinduet; gjenoppretter deretter via executive.*",
+      "4b) D-176 (arkitekt-review 5251073737, BLOKKER B5; RETTET BLOKKER B6, arkitekt-review 5252077633): executive.get_control_surface_status LYKKES og rapporterer SANNFERDIG under BEGGE lås-tilstandene samtidig (kill switch aktiv OG delt credential tilbakekalt) - FØR gjenoppretting; ORDINÆR handling forblir NEKTET gjennom hele lås-vinduet; gjenoppretter deretter via executive.*",
       async () => {
         type StatusData = { owner_control: { kill_switch: { active: boolean; reason: string | null }; revoked_credentials: Array<{ credential_ref: string }> } };
         const readStatus = () => stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
 
-        await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: `D-176 host 4b-killswitch ${runId}` } });
-        const statusUnderKillSwitch = await readStatus();
-        const killSwitchStepOk = statusUnderKillSwitch.ok && (statusUnderKillSwitch.data as unknown as StatusData).owner_control.kill_switch.active === true;
+        // BLOKKER B6 (arkitekt-review 5252077633): BEGGE lås-tilstandene MÅ settes DIREKTE via det
+        // kanoniske durable laget - EKSAKT samme funn/fiks som D-176 sin "I"-testsuite allerede måtte
+        // gjøre (se service-transport.test.ts test C/D sine kommentarer for full begrunnelse). INGEN
+        // rekkefølge av `executive.*`-kall kan oppnå dette: `activate_kill_switch` deler SELV
+        // `BUSINESS_INTERNAL_CREDENTIAL_REF` (nektes av `credential_revoked` om refen allerede er
+        // tilbakekalt), OG `revoke_credential` er selv IKKE unntatt kill-switch-sjekken (nektes av
+        // `kill_switch_active` om kill switchen allerede er aktiv). Enkelt-lås-bevis via EKTE
+        // `executive.*`-mutasjoner finnes ALLEREDE andre steder i dette scriptet (seksjon 1 for kill
+        // switch alene, seksjon 3 for tilbakekalt credential alene) - DENNE seksjonen beviser KUN det
+        // som er unikt for D-176: at LESINGEN OG gjenopprettingen fungerer korrekt NÅR begge allerede
+        // er aktive samtidig.
+        await stack.killSwitch.activateDurable(`D-176 host 4b-both ${runId}`, OWNER_PERSON);
+        await stack.ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, `D-176 host 4b-both ${runId}`, OWNER_PERSON);
 
-        await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: `D-176 host 4b-credential ${runId}` } });
         const statusUnderBoth = await readStatus();
         const bothStepOk =
           statusUnderBoth.ok &&
@@ -299,10 +308,10 @@ async function main(): Promise<void> {
           (statusAfterRecovery.data as unknown as StatusData).owner_control.kill_switch.active === false &&
           !(statusAfterRecovery.data as unknown as StatusData).owner_control.revoked_credentials.some((c) => c.credential_ref === BUSINESS_INTERNAL_CREDENTIAL_REF);
 
-        const ok = killSwitchStepOk && bothStepOk && blockedOk && restored.ok && deactivated.ok && clearedOk;
+        const ok = bothStepOk && blockedOk && restored.ok && deactivated.ok && clearedOk;
         results.d176_status_surface_survives_lockdown = ok ? "PASS" : "FAIL";
         log(
-          `status_under_killswitch_ok=${killSwitchStepOk} status_under_both_ok=${bothStepOk} ordinary_action_blocked=${blockedOk} restore_ok=${restored.ok} deactivate_ok=${deactivated.ok} status_cleared_ok=${clearedOk} -> ${results.d176_status_surface_survives_lockdown}`
+          `status_under_both_ok=${bothStepOk} ordinary_action_blocked=${blockedOk} restore_ok=${restored.ok} deactivate_ok=${deactivated.ok} status_cleared_ok=${clearedOk} -> ${results.d176_status_surface_survives_lockdown}`
         );
       }
     );
