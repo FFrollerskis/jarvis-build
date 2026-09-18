@@ -65,6 +65,15 @@ export class OwnerControlsTransport implements ToolTransport {
         await this.service.restoreCredential(requireString(parameters, "credential_ref"), actor);
         return { data: (await this.service.getControlState()) as unknown as JsonValue };
       }
+      case "revoke_device": {
+        const result = await this.service.revokeDevice(
+          requireString(parameters, "tenant_id"),
+          requireString(parameters, "device_id"),
+          requireString(parameters, "reason"),
+          actor
+        );
+        return { data: result as unknown as JsonValue };
+      }
       default:
         throw new Error(`unknown_owner_controls_action:${action}`);
     }
@@ -144,6 +153,12 @@ export function ownerControlsToolDefinitions(transport: OwnerControlsTransport):
       description: "Gjenopprett ÉN navngitt, tidligere tilbakekalt credential_ref",
       input_schema: record({ credential_ref: z.string() }), capability_class: "C", scopes: ["owner_controls.revoke"],
       reversible: true, rollback_procedure: "revoke_credential", idempotent_external: true, ...common
+    },
+    {
+      tool_id: "owner_controls", action: "revoke_device",
+      description: "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet (tenant_id + device_id) umiddelbart - kanonisk SessionGrantService.revokeForDeviceOn()",
+      input_schema: record({ tenant_id: z.string(), device_id: z.string(), reason: z.string() }), capability_class: "C", scopes: ["owner_controls.device"],
+      reversible: false, rollback_procedure: "enheten må re-rulleres inn (enrollment) for ny tilgang - ingen restore_device", idempotent_external: true, ...common
     }
   ];
 }

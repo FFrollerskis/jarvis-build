@@ -32,3 +32,10 @@ export interface OwnerControlState {
   frozen_connectors: FrozenConnectorEntry[];
   revoked_credentials: RevokedCredentialEntry[];
 }
+
+/** D-174 (B2): resultat av `owner_controls.revoke_device` - antall grants tilbakekalt er kanonisk bevis, ALDRI antatt > 0. */
+export interface DeviceRevocationResult {
+  tenant_id: string;
+  device_id: string;
+  revoked_grants: number;
+}

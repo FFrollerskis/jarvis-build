@@ -304,8 +304,28 @@ export class ToolGateway {
     // frys-sjekken over har (den dekker en annen, smalere selv-mål-risiko).
     // `activate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
     // `revoke_credential` er ALDRI unntatt herfra.
+    //
+    // D-174 (B2, unified owner-control-surface mutation completion):
+    // `executive.*` proxyer NÅ de samme tre selvgjenopprettings-handlingene
+    // (`get_control_state`/`deactivate_kill_switch`/`restore_credential`)
+    // videre til `owner_controls.*` via en NESTET `ToolGateway.execute()`-
+    // kall (executive → owner_controls). Den nestede INDRE kallet er
+    // allerede trygt (tool_id="owner_controls" der). Men den YTRE
+    // executive.*-kallet vurderes MED SIN EGEN tool_id ("executive") FØR
+    // det når det nestede kallet - uten dette tillegget ville den ytre
+    // sjekken blokkert executive.deactivate_kill_switch/restore_credential
+    // FØR de i det hele tatt kunne nå den trygge, nestede owner_controls-
+    // stien, og dermed brutt B1-gjenoppretting via executive. Dette virker
+    // KUN fordi de nye executive-handlingsnavnene er IDENTISKE med
+    // owner_controls sine (samme streng i BEGGE `OWNER_CONTROLS_SELF_
+    // RECOVERY_ACTIONS`-oppslagene) - se `owner-control-store.ts`.
+    // `get_control_surface_status` (executive) er BEVISST IKKE inkludert
+    // her - `owner_controls.get_control_state` direkte forblir den
+    // kanoniske, alltid-tilgjengelige veien; unntaket utvides ALDRI utover
+    // de tre navngitte handlingene selv når kalleren er executive.*.
     const isCredentialRevocationSelfRecovery =
-      request.tool_id === "owner_controls" && OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(request.action);
+      (request.tool_id === "owner_controls" || request.tool_id === "executive") &&
+      OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(request.action);
     if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(definition.credential_ref))) {
       return this.deny(request, "credential_revoked");
     }

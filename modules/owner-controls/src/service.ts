@@ -1,5 +1,23 @@
-import type { KillSwitch, OwnerControls } from "@jarvis/policy";
-import type { FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "./types.ts";
+import type pg from "pg";
+import { writeAudit, withTenantTransaction, type SessionGrantService } from "@jarvis/core";
+import { assertOwnerControlAuthorized, type KillSwitch, type OwnerControlAuthority, type OwnerControls } from "@jarvis/policy";
+import type { DeviceRevocationResult, FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "./types.ts";
+
+/**
+ * D-174 (B2): device-tilbakekallings-avhengighetene er BEVISST valgfrie
+ * (samme mønster som `OwnerControls`/`KillSwitch` sitt eget valgfrie
+ * `pool`/`authority`-par) - `k1-owner-control-authority-live.ts`-skriptet
+ * og eksisterende enhetstester konstruerer `OwnerControlsService` UTEN
+ * device-avhengigheter og skal fortsette å virke uendret; `revoke_device`
+ * feiler LUKKET (`owner_controls_device_revocation_not_configured`), ALDRI
+ * et stille no-op, når de ikke er koblet til (kun `apps/api/src/main.ts`
+ * kobler dem til i dag - se der).
+ */
+export interface OwnerControlsDeviceRevocationDeps {
+  pool: pg.Pool;
+  grants: SessionGrantService;
+  authority?: OwnerControlAuthority;
+}
 
 /**
  * K1 (Sovereign graduation, D-164): kanonisk owner-kontroll-tjeneste.
@@ -16,7 +34,8 @@ import type { FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } 
 export class OwnerControlsService {
   constructor(
     private readonly killSwitch: KillSwitch,
-    private readonly ownerControls: OwnerControls
+    private readonly ownerControls: OwnerControls,
+    private readonly deviceRevocation?: OwnerControlsDeviceRevocationDeps
   ) {}
 
   async getControlState(): Promise<OwnerControlState> {
@@ -59,5 +78,47 @@ export class OwnerControlsService {
 
   async restoreCredential(credentialRef: string, actorPersonId: string): Promise<void> {
     await this.ownerControls.restoreCredentialDurable(credentialRef, actorPersonId);
+  }
+
+  /**
+   * D-174 (B2, task F): eier-vendt tilbakekalling av ALLE utestående
+   * `session_grants` for ÉN enhet - SAMME kanoniske primitiv
+   * (`SessionGrantService.revokeForDeviceOn()`) og kalle-mønster (transaksjon
+   * + audit i SAMME transaksjon) som `DeviceEnrollmentService` allerede
+   * bruker ved nøkkelrotasjon (device-enrollment-service.ts). INGEN
+   * duplikat session-grant-tilstand her - denne metoden er en tynn,
+   * autoritets-sjekket ToolGateway-vendt innpakning rundt DEN samme
+   * `session_grants`-tabellen.
+   *
+   * Fail-CLOSED for: (a) manglende device-avhengigheter (ikke koblet til -
+   * se `OwnerControlsDeviceRevocationDeps`), (b) `actorPersonId` som ikke
+   * matcher konfigurert `authority.owner_person_id`
+   * (`assertOwnerControlAuthorized` - SAMME eier-autoritetsmodell som
+   * `KillSwitch`/`OwnerControls` sine egne `*Durable()`-metoder, IKKE en ny
+   * eller svakere sjekk). `tenantId`/`deviceId` kommer fra ToolGateway-
+   * parametre (IKKE fra identitetskonteksten) - dette er BEVISST, fordi
+   * eieren må kunne tilbakekalle EN ANNEN persons/enhets sesjon (f.eks. en
+   * delegat sin telefon), ikke bare sin egen; selve autoritets-porten over
+   * er UAVHENGIG av HVILKEN tenant/enhet som oppgis - en ikke-eier
+   * identitet avvises uansett tenant/device-verdi.
+   */
+  async revokeDevice(tenantId: string, deviceId: string, reason: string, actorPersonId: string): Promise<DeviceRevocationResult> {
+    if (!this.deviceRevocation) throw new Error("owner_controls_device_revocation_not_configured");
+    const { pool, grants, authority } = this.deviceRevocation;
+    assertOwnerControlAuthorized(pool, authority, actorPersonId);
+    return withTenantTransaction(pool, tenantId, async (client) => {
+      const revokedGrants = await grants.revokeForDeviceOn(client, tenantId, deviceId);
+      await writeAudit(
+        client,
+        { tenant_id: tenantId, person_id: actorPersonId, device_id: deviceId },
+        {
+          type: "owner_controls.device_revoked",
+          decision: "ALLOW",
+          reason,
+          payload: { revoked_grants: revokedGrants }
+        }
+      );
+      return { tenant_id: tenantId, device_id: deviceId, revoked_grants: revokedGrants };
+    });
   }
 }

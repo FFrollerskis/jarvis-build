@@ -377,6 +377,9 @@ importers:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@jarvis/finance':
+        specifier: workspace:*
+        version: link:../finance
       '@jarvis/owner-controls':
         specifier: workspace:*
         version: link:../owner-controls
@@ -699,6 +702,9 @@ importers:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
@@ -712,9 +718,6 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
-      '@jarvis/core':
-        specifier: workspace:*
-        version: link:../core
       '@types/pg':
         specifier: ^8.15.6
         version: 8.21.0

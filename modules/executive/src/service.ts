@@ -1,4 +1,5 @@
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { OwnerControlState } from "@jarvis/owner-controls";
 import type {
   Situation,
@@ -136,6 +137,92 @@ export class ExecutiveService {
     return this.gateway.execute({ identity, tool_id: "situations", action: "resolve", parameters: { situation_id: situationId } });
   }
 
+  // === D-174 (B2): eierens SAMLEDE mutasjonsflate for owner_controls.* ====
+  // SAMME komposisjons-disiplin som pause/resume/resolve over - INGEN egen
+  // kill-switch-/frys-/tilbakekalls-logikk her, KUN videresending til den
+  // kanoniske `owner_controls.*`-flaten (K1, D-164) via ETT nøstet
+  // `ToolGateway.execute()`-kall. `deactivate_kill_switch`/`restore_credential`
+  // sin B1-selvgjenopprettingsevne under en samtidig aktiv kill switch/
+  // tilbakekalt delt credential bevares av `gateway.ts`/`policy-gateway.ts`
+  // sitt eksplisitte "executive"-unntak (D-174, se der) - IKKE av noe her.
+
+  /** Rent gjennomslag til `owner_controls.activate_kill_switch`. */
+  async activateKillSwitch(identity: IdentityContext, reason: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason } });
+  }
+
+  /** Rent gjennomslag til `owner_controls.deactivate_kill_switch`. */
+  async deactivateKillSwitch(identity: IdentityContext): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+  }
+
+  /** Rent gjennomslag til `owner_controls.freeze_connector`. */
+  async freezeConnector(identity: IdentityContext, connectorId: string, reason: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: connectorId, reason } });
+  }
+
+  /** Rent gjennomslag til `owner_controls.unfreeze_connector`. */
+  async unfreezeConnector(identity: IdentityContext, connectorId: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: connectorId } });
+  }
+
+  /** Rent gjennomslag til `owner_controls.revoke_credential`. */
+  async revokeCredential(identity: IdentityContext, credentialRef: string, reason: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "revoke_credential", parameters: { credential_ref: credentialRef, reason } });
+  }
+
+  /** Rent gjennomslag til `owner_controls.restore_credential`. */
+  async restoreCredential(identity: IdentityContext, credentialRef: string): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: credentialRef } });
+  }
+
+  /**
+   * Rent gjennomslag til `owner_controls.revoke_device`. `tenantId`/`deviceId`
+   * er EKSPLISITTE, navngitte MÅL-parametre (SAMME mønster som `connectorId`/
+   * `credentialRef` over) - ALDRI avledet av `identity`, fordi eieren må
+   * kunne tilbakekalle EN ANNEN persons/enhets sesjon (f.eks. en delegat sin
+   * telefon), ikke bare sin egen. Selve autoritets-porten (er KALLEREN
+   * faktisk eieren?) håndheves av `identity` alene, UAVHENGIG av hvilken
+   * tenant/enhet som oppgis som mål - se `OwnerControlsService.revokeDevice()`.
+   */
+  async revokeDevice(identity: IdentityContext, tenantId: string, deviceId: string, reason: string): Promise<ToolResult> {
+    return this.gateway.execute({
+      identity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: tenantId, device_id: deviceId, reason }
+    });
+  }
+
+  // === D-174 (B2): finans-nødbryteren via executive ========================
+  // `finance.*` sin EKSISTERENDE transport-konvensjon (UA-6) krever
+  // `tenant_id`/`actor_person_id` som EKSPLISITTE parametre (ikke fra
+  // `ToolInvocationContext` som resten av denne pakken) - se
+  // `modules/finance/src/transport.ts`. Denne tjenesten videresender ALLTID
+  // `identity.tenant_id`/`identity.person_id` (D-68: identitet kommer
+  // UTELUKKENDE fra den betrodde konteksten), ALDRI en verdi kalleren selv
+  // oppga - trygt FORDI kalleren av DENNE metoden allerede er identitets-
+  // kontekst-bundet (executive selv), ikke et rått, ubetrodd parameter.
+
+  /** Rent gjennomslag til `finance.enable_kill_switch`. */
+  async enableFinanceKillSwitch(identity: IdentityContext, reason: string): Promise<ToolResult> {
+    return this.gateway.execute({
+      identity, tool_id: "finance", action: "enable_kill_switch",
+      parameters: { tenant_id: identity.tenant_id, actor_person_id: identity.person_id, reason }
+    });
+  }
+
+  /** Rent gjennomslag til `finance.disable_kill_switch`. */
+  async disableFinanceKillSwitch(identity: IdentityContext): Promise<ToolResult> {
+    return this.gateway.execute({
+      identity, tool_id: "finance", action: "disable_kill_switch",
+      parameters: { tenant_id: identity.tenant_id, actor_person_id: identity.person_id }
+    });
+  }
+
+  /** Rent gjennomslag til `finance.get_kill_switch`. */
+  async getFinanceKillSwitch(identity: IdentityContext): Promise<ToolResult> {
+    return this.gateway.execute({ identity, tool_id: "finance", action: "get_kill_switch", parameters: { tenant_id: identity.tenant_id } });
+  }
+
   /**
    * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
    * kontrolloverflaten - komponerer `owner_controls.get_control_state`
@@ -147,10 +234,11 @@ export class ExecutiveService {
    * fabrikkerer/eskalerer ALDRI identiteten den fikk fra kalleren.
    */
   async getControlSurfaceStatus(identity: IdentityContext): Promise<ControlSurfaceStatus> {
-    const [ownerControl, pauseState] = await Promise.all([
+    const [ownerControl, pauseState, financeKillSwitch] = await Promise.all([
       requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
-      requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state")
+      requireData<{ paused: string[] }>(this.gateway, identity, "situations", "get_pause_state"),
+      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
-    return { owner_control: ownerControl, situation_domain_pauses: pauseState };
+    return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
   }
 }

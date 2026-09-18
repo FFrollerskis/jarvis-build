@@ -113,6 +113,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   await killSwitch.restore();
   const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
   await ownerControls.restore();
+  // D-174 (B2): hoistet hit (tidligere konstruert lenger nede, kun for
+  // `enrollmentService`) - `OwnerControlsService` sitt nye, eier-vendte
+  // `revoke_device` (se under, `additionalTools`) trenger DENNE SAMME
+  // instansen, SAMME `pool`/`ownerControlAuthority` som resten av eier-
+  // autoritets-mønstrene over. `SessionGrantService` er en ren, tilstandsløs
+  // `pool`-innpakning ved konstruksjon (ingen side-effekt å flytte tidligere) -
+  // ÉN delt instans, ALDRI en duplikat parallell konstruksjon.
+  const grantService = new SessionGrantService(pool);
   // D-104 (UA-5 Production Operations Control Plane v1): global infra-
   // eksekusjonsmodus - EN NY, SNEVRERE bryter enn `killSwitch` over (som
   // forblir strengest/uendret). Gjelder KUN registrerte infra-tool_id-er
@@ -510,7 +518,15 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     additionalTools: [
       ...situationsToolDefinitions(new SituationsTransport(situationEngine, situationDomainPauses)),
       ...executiveToolDefinitions(new ExecutiveTransport(new ExecutiveService(toolGateway))),
-      ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls)))
+      // D-174 (B2): tredje konstruktør-argument kobler `owner_controls.revoke_device`
+      // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
+      // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
+      // parallell tilstand. Se `OwnerControlsService.revokeDevice()` sitt filhode.
+      ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls, {
+        pool,
+        grants: grantService,
+        authority: ownerControlAuthority
+      })))
     ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
@@ -555,8 +571,8 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // over. `SessionGrantService` eier `session_grants` - det avgrensede,
   // revokerbare autorisasjonsbeviset som erstatter «rå session_id = autentisert
   // enhet» - og `DeviceEnrollmentService` er den ENESTE nettverksnære veien til
-  // å skrive nytt enhetsnøkkelmateriale.
-  const grantService = new SessionGrantService(pool);
+  // å skrive nytt enhetsnøkkelmateriale. `grantService` er nå hoistet lenger
+  // opp (D-174, B2) - gjenbrukt uendret her, ALDRI en duplikat konstruksjon.
   const enrollmentService = new DeviceEnrollmentService({
     pool,
     devices: deviceService,

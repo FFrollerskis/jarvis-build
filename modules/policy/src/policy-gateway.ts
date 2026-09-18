@@ -117,8 +117,15 @@ export class PolicyGateway {
     // for disse handlingene, så en forfalsket eller ikke-eier-identitet
     // kan FORTSATT ikke deaktivere kill switchen eller gjenopprette en
     // tilbakekalt credential.
+    //
+    // D-174 (B2): SAMME utvidelse som `ToolGateway.execute()` sin
+    // tilbakekalt-credential-sjekk (se der for full begrunnelse) - den
+    // YTRE `executive.*`-proxyen for disse tre navngitte handlingene må
+    // IKKE selv bli avslått av kill-switch-aktiv-sjekken FØR den når det
+    // nestede, allerede trygge `owner_controls.*`-kallet. Fungerer KUN
+    // fordi executive-handlingsnavnene er IDENTISKE med owner_controls sine.
     const isKillSwitchSelfRecovery =
-      toolCall.data.tool_id === "owner_controls" &&
+      (toolCall.data.tool_id === "owner_controls" || toolCall.data.tool_id === "executive") &&
       OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(toolCall.data.action);
     if (!isKillSwitchSelfRecovery && (await this.killSwitch.isActiveDurable())) {
       return this.finish(request, "DENY", "kill_switch_active");

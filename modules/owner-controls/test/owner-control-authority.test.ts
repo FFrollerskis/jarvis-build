@@ -5,7 +5,7 @@ import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { IdentityContext } from "@jarvis/contracts";
-import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
+import { createPool, PgApprovalStore, runMigrations, SessionGrantService } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
@@ -79,6 +79,53 @@ async function getState(gateway: ToolGateway, identity: IdentityContext): Promis
   const result = await gateway.execute({ identity, tool_id: "owner_controls", action: "get_control_state", parameters: {} });
   if (!result.ok) throw new Error(`unexpected_denial:${result.reason}`);
   return result.data as unknown as OwnerControlState;
+}
+
+/**
+ * D-174 (B2, task F): SAMME `freshStack()`-mønster, men `OwnerControlsService`
+ * gitt de valgfrie device-tilbakekallings-avhengighetene (`pool`+
+ * `SessionGrantService`+`authority`) - beviser `owner_controls.revoke_device`
+ * mot EKTE `session_grants`, ALDRI en fake/mock av selve kanonikken.
+ */
+function freshStackWithDeviceRevocation(): { gateway: ToolGateway } {
+  const killSwitch = new KillSwitch(appPool, authority);
+  const ownerControls = new OwnerControls(killSwitch, appPool, authority);
+  const policy = new PolicyGateway({
+    devices: new InMemoryDeviceRegistry(),
+    nonces: new PgApprovalStore(appPool),
+    killSwitch,
+    controls: ownerControls,
+    authority: { owner_person_id: OWNER, owner_tenants: [TENANT, TENANT_B] }
+  });
+  const gateway = new ToolGateway(appPool, policy, secrets, ownerControls);
+  const service = new OwnerControlsService(killSwitch, ownerControls, { pool: appPool, grants: new SessionGrantService(appPool), authority });
+  for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(service))) gateway.register(tool);
+  return { gateway };
+}
+
+/** Setter inn de MINIMALE, FK-tilfredsstillende radene `session_grants` krever, direkte via admin-poolen (RLS-fri) - ikke via HELE innrullerings-/utstedelsesflyten, som er dekket separat av `@jarvis/core` sine egne tester. */
+async function seedGrant(tenantId: string, deviceId: string, personId: string = OWNER): Promise<void> {
+  const sessionId = `sess-device-revoke-${deviceId}`;
+  await adminPool.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES ($1,$2,$3,'phone') ON CONFLICT (device_id) DO NOTHING`, [deviceId, tenantId, personId]);
+  await adminPool.query(
+    `INSERT INTO sessions (session_id, tenant_id, person_id, last_channel, last_device_id) VALUES ($1,$2,$3,'api',$4) ON CONFLICT (session_id) DO NOTHING`,
+    [sessionId, tenantId, personId, deviceId]
+  );
+  await adminPool.query(
+    `INSERT INTO session_grants (grant_id, tenant_id, person_id, device_id, session_id, memory_space, channel, auth_strength, device_key_fingerprint, expires_at)
+     VALUES ($1,$2,$3,$4,$5,'business','api','active','test-fingerprint', now() + interval '1 hour')`,
+    [`grt-${deviceId}-${Date.now()}`, tenantId, personId, deviceId, sessionId]
+  );
+}
+
+async function activeGrantCount(tenantId: string, deviceId: string): Promise<number> {
+  const { rows } = await adminPool.query(`SELECT count(*)::int AS n FROM session_grants WHERE tenant_id = $1 AND device_id = $2 AND revoked_at IS NULL`, [tenantId, deviceId]);
+  return (rows[0] as { n: number }).n;
+}
+
+function revokedGrantsFrom(result: { ok: boolean; data?: unknown }): number {
+  if (!result.ok) throw new Error("unexpected_denial");
+  return (result.data as { revoked_grants: number }).revoked_grants;
 }
 
 beforeAll(async () => {
@@ -650,5 +697,88 @@ describe("J: D-167 (host-harness-korreksjon, arkitekt-funn PR #93) - audit-bevis
     } finally {
       await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} }).catch(() => undefined);
     }
+  });
+});
+
+describe("K: D-174 (B2, task F) - owner_controls.revoke_device: eier-vendt tilbakekalling av EN NAVNGITT enhets session_grants, via SessionGrantService.revokeForDeviceOn(), INGEN duplikat session-grant-tilstand", () => {
+  it("1) eieren tilbakekaller EN NAVNGITT enhets utestående grants - nøyaktig antall revokert rapportert, raden faktisk revoked_at IS NOT NULL i session_grants", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-owner-revoke";
+    await seedGrant(TENANT, deviceId);
+    expect(await activeGrantCount(TENANT, deviceId)).toBe(1);
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "k1-test-lost-phone" }
+    });
+    expect(result.ok).toBe(true);
+    expect(revokedGrantsFrom(result)).toBe(1);
+    expect(await activeGrantCount(TENANT, deviceId)).toBe(0);
+  });
+
+  it("2) IKKE-eier identitet kan IKKE tilbakekalle en enhet - 'class_c_no_mandate', INGEN grant rørt (samme mandat-disiplin som ALLE andre owner_controls-mutasjoner)", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-not-owner";
+    await seedGrant(TENANT, deviceId);
+    const result = await gateway.execute({
+      identity: otherIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "not-my-call" }
+    });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.reason).toBe("class_c_no_mandate");
+    expect(await activeGrantCount(TENANT, deviceId)).toBe(1);
+  });
+
+  it("3) feil tenant_id-parameter revokerer INGENTING for enheten - selve SessionGrantService.revokeForDeviceOn()-spørringen er (tenant_id,device_id)-scoped, ikke device_id alene", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-wrong-tenant";
+    await seedGrant(TENANT_B, deviceId); // enheten hører til TENANT_B
+    const result = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "wrong-tenant-attempt" } // eieren oppgir TENANT (feil for DENNE enheten)
+    });
+    expect(result.ok).toBe(true); // eieren SELV er autorisert (global autoritet) - handlingen bare treffer ingenting
+    expect(revokedGrantsFrom(result)).toBe(0);
+    expect(await activeGrantCount(TENANT_B, deviceId)).toBe(1); // uendret - den faktiske raden lever under TENANT_B
+  });
+
+  it("4) gjentatt tilbakekalling er idempotent-sikker: andre kallet revokerer 0, INGEN feil, INGEN dobbel-telling", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-idempotent";
+    await seedGrant(TENANT, deviceId);
+    const first = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "first-call" }
+    });
+    expect(revokedGrantsFrom(first)).toBe(1);
+    const second = await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "second-call-repeat" }
+    });
+    expect(second.ok).toBe(true);
+    expect(revokedGrantsFrom(second)).toBe(0);
+  });
+
+  it("5) audit-raden inneholder device_id/reason for identifikasjon og etterforskning, ALDRI grant-token/fingerprint-VERDIER", async () => {
+    const { gateway } = freshStackWithDeviceRevocation();
+    const deviceId = "device-k1-audit";
+    await seedGrant(TENANT, deviceId);
+    const watermark = await captureAuditWatermark(adminPool);
+    await gateway.execute({
+      identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_device",
+      parameters: { tenant_id: TENANT, device_id: deviceId, reason: "k1-audit-test-reason" }
+    });
+    const { rows } = await adminPool.query(
+      `SELECT device_id, reason, payload, person_id FROM audit_events
+       WHERE type = 'owner_controls.device_revoked' AND audit_id > $1 ORDER BY audit_id ASC`,
+      [watermark]
+    );
+    expect(rows).toHaveLength(1);
+    const row = rows[0] as { device_id: string; reason: string; payload: unknown; person_id: string };
+    expect(row.device_id).toBe(deviceId);
+    expect(row.reason).toBe("k1-audit-test-reason");
+    expect(row.person_id).toBe(OWNER);
+    const serializedPayload = JSON.stringify(row.payload);
+    expect(serializedPayload).not.toMatch(/grt_/);
+    expect(serializedPayload).not.toMatch(/test-fingerprint/);
   });
 });
