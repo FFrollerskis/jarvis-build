@@ -299,3 +299,11 @@ Masterplanens UA-11-akseptansekriterier:
    den eksisterende `withTenantTransaction()`-hjelperen (`@jarvis/core`); `executive.revoke_device`-
    kallet uendret; `adminPool` bevisst IKKE brukt for fikstur/lesing. `INTERNAL_BUILD_COMPLETE=false`
    til en FERSK host-kjøring beviser fiksen. Se D-178 for full begrunnelse/testevidens.
+
+   **LIVE-BEVIST 2026-09-18 (D-179, arkitekt-host-akseptanse-review 5253069695, RESULT=PASS):** Tobias
+   kjørte det D-178-rettede harnesset PÅ NYTT, faktisk to ganger - begge PASS (`run_id=fc9b99e5` og
+   den avsluttende `run_id=bfca277d`, BEGGE `hard_fail=false`). ALLE markører PASS, inkl.
+   `executive.revoke_device` (`grants_before=1`, `revoked_grants=1`, tenant bundet til
+   `tenant-personal`) og ferskinstans-holdbarhetslesingen. `HOST_ACCEPTANCE_STATUS=PASS` (RETTET fra
+   `REQUIRES_RERUN`), `INTERNAL_BUILD_COMPLETE=true` (RETTET fra `false`). `SOVEREIGN_COMPLETE=false`
+   FORBLIR UENDRET. Se D-179 for full begrunnelse/testevidens.
