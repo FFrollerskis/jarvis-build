@@ -4234,12 +4234,15 @@ selvgjenopprettings-mengde (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`), se D-166.
 embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts` (15, strukturell),
 `modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk bekreftet grønn:
 policy/situations/executive/apps-api/tool-gateway/owner-controls (809 totalt etter D-166).
-**Host-akseptanse-harness bygget OG UTVIDET (D-166), IKKE kjørt PÅ NYTT etter utvidelsen:**
-`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts` (samme to-fils-
-mønster som UA-10/UA-5). Status: kjernemekanisme (freeze/unfreeze/kill-switch-parity)
-`PRODUCTION_VERIFIED` (D-165); credential-selvgjenopprettingssti `FIXED_SUITE_VERIFIED_AFTER_B1`/
-`HOST_ACCEPTANCE_REQUIRED=true` (D-166) - se RUNTIME_GATES.md for gate-raden og D-164/D-165/D-166 for
-full begrunnelse. `SOVEREIGN_COMPLETE=false` uendret.
+**Host-akseptanse-harness bygget, utvidet (D-166), audit-bevis-determinisme fikset (D-167), RE-KJØRT
+PÅ NYTT ETTER FIKSEN OG PASSERT (D-168):** `modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts`
+(samme to-fils-mønster som UA-10/UA-5). Status: HELE `owner_controls`/`KillSwitch`-flaten (kill switch,
+connector-frys, credential-tilbakekalling/-gjenoppretting, samtidig-deadlock-gjenoppretting, run-avgrenset
+audit-bevis) er nå `PRODUCTION_VERIFIED` (D-165/D-168 - fersk host-kjøring på eksakt HEAD `9fcf1a3...`,
+alle K1-markører PASS inkl. `k1_audit_evidence=PASS`, `hard_fail=false`). **PR #93 MERGET** (`MERGE_SHA
+22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`, to-parent-merge, post-merge CI grønn) - se RUNTIME_GATES.md
+for gate-raden og D-164/D-165/D-166/D-167/D-168 for full begrunnelse. `SOVEREIGN_COMPLETE`: se separat
+Sovereign-re-audit-post (D-169) for den fulle 16-områdes vurderingen etter K1 sin lukking.
 
 ---
 

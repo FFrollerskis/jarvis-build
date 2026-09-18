@@ -1,7 +1,7 @@
 # Sovereign Autonomy v4.0 – graduation-matrise
 
-**Sist oppdatert:** 2026-09-17 (D-163, exact base `main=9a2f642b1747ad8fde945f062152104cdc52bbd3`
-= PR #91 sin merge-commit). Denne filen er den KONSISE, oversiktlige statusen for hele masterplanen
+**Sist oppdatert:** 2026-09-18 (D-169, fersk re-audit paa exact base `main=22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`
+= PR #93/K1 sin merge-commit). Denne filen er den KONSISE, oversiktlige statusen for hele masterplanen
 ("Sovereign graduation") - `docs/RUNTIME_GATES.md` og `docs/DECISIONS_AND_ASSUMPTIONS.md` forblir de
 detaljerte, autoritative kildene; denne filen peker til dem, den erstatter dem ikke.
 
@@ -12,8 +12,20 @@ UA-fase. "Sovereign komplett" betyr derfor: summen av UA-0..UA-11 sine egne, ord
 faktisk oppfylt og der masterplanen krever det, host-bevist - IKKE et eget, separat toppnivå-graduation-
 kriterium utover disse.
 
-**Status per 2026-09-17: Sovereign er FORTSATT IKKE komplett.** Se D-163 for den fulle, ferske
-gap-audit-en denne matrisen oppsummerer.
+**Status per 2026-09-18 (D-169, post-K1 re-audit): INGEN internt byggbar Sovereign-graduation-blokkering
+gjenstaar.** K1 (siste gap D-163 fant) er nå MERGET og HOST-BEVIST I SIN HELHET (D-168). Fersk
+git-historikk-verifisering bekrefter at INGEN annen kode landet paa `main` mellom D-163 sin
+audit-base (`9a2f642b1747ad8fde945f062152104cdc52bbd3`) og naa - KUN PR #92 (audit-en selv) og PR #93
+(K1) - saa D-163 sin klassifisering av de andre 15 omraadene er FORTSATT gyldig, fersk-bekreftet her,
+ikke re-derivert fra bunnen (kildekoden er uendret der). Gjenstaaende punkter er UTEN UNNTAK enten
+allerede LIVE-PROVEN/TESTED/IMPLEMENTED, eller legitimt `BLOCKED_EXTERNAL` (navngitt ekstern
+credential/maskinvare/juridisk avhengighet Tobias selv maa skaffe - se masterplanens egen DoD-tekst:
+"Jarvis skal... utføre handlinger autonomt når capability og legitime credentials finnes" +
+"Eksterne lov- og plattformkrav skal respekteres uten at Jarvis innfører ekstra intern friksjon"),
+eller korrekt reklassifisert `NOT_REQUIRED_FOR_GRADUATION` (roadmap-/"Bygges"-liste-punkter som IKKE
+er blant de faktiske, ordrette akseptansekriteriene for noen UA-fase - se D-169 for full liste).
+**Se D-169 for den fulle re-audit-en og valget av en FINAL SOVEREIGN GRADUATION CLOSEOUT-slice i
+stedet for K2 eller en ny kode-slice.**
 
 ## 16-områders graduation-matrise
 
@@ -31,7 +43,7 @@ gap-audit-en denne matrisen oppsummerer.
 | Situation Engine (UA-10) | LIVE-PROVEN | P1 Aktivering PRODUCTION_VERIFIED (D-161, host run `0562c48a`, 18/18 PASS, ekte Telegram) |
 | Executive Mode (UA-11) | TESTED, host ikke nødvendig for P0 | FIXED_SUITE_VERIFIED (D-162); `HOST_ACCEPTANCE_REQUIRED=false` (zero ny migrasjon/credential/leverandør) |
 | Class D authority | TESTED (suite), live mot ekte connectors delvis | UA0-AUTHORITY PARTIAL_RUNTIME i eget navn, men substansielt dekket kumulativt av UA-5/UA-10 P1 sine host-bevis |
-| Pause / revoke / kill switch | LIVE-PROVEN (kjernemekanisme, K1) | `situations`-domener durable+delt (D-160 F); `OwnerControls`/`KillSwitch` NÅ OGSÅ durable+delt (D-164, migrasjon 058, `owner_control_state`) - api/worker deler SAMME live DB-autoritet, INGEN prosess-lokal divergens. **PRODUCTION_VERIFIED for kill switch + connector-frys** (D-165, host run_id `d7d5d246`, 10/10 PASS på ekte Windows/Docker Desktop, EKTE container-restart). `revoke_credential`/`restore_credential` forblir SUITE/CI-PROVEN (ikke øvet av dette harnesset) - se RUNTIME_GATES.md |
+| Pause / revoke / kill switch | LIVE-PROVEN (K1, HELE flaten) | `situations`-domener durable+delt (D-160 F); `OwnerControls`/`KillSwitch` durable+delt (D-164, migrasjon 058, `owner_control_state`) - api/worker deler SAMME live DB-autoritet, INGEN prosess-lokal divergens. `PRODUCTION_VERIFIED` for kill switch + connector-frys (D-165, host run_id `d7d5d246`) OG for `revoke_credential`/`restore_credential`/samtidig-deadlock-gjenoppretting/run-avgrenset audit-bevis (D-166/D-167/D-168, fersk host-kjøring på HEAD `9fcf1a3...`, alle markører PASS inkl. `k1_audit_evidence=PASS`). PR #93 MERGET (`22d391d2...`), postmerge CI grønn. Se RUNTIME_GATES.md |
 | Erasure / retention | LIVE-PROVEN (teknisk fundament) | Q-20 PRODUCTION_VERIFIED (2026-08-16) - teknisk fundament, IKKE juridisk GDPR-sertifisering |
 | Audit / provenance | TESTED, live-datastrøm gjenstår | UA0-PRIVACY PARTIAL_RUNTIME - RLS/karantene/injection-vern suite-bevist |
 | Restart / restore / recovery | LIVE-PROVEN (lokalt) / BLOCKED (off-site) | OPS-RUNTIME VERIFIED lokalt; ekstern uptime/off-site backup gjenstår |
@@ -65,42 +77,48 @@ ennå".
 | UA-10: `situations`/`executive` i `worker-main.ts` | B | N/A | Bekreftet fortsatt fraværende ved fersk kodelesing (uendret av denne korrigeringsrunden), men ingen eier-vendt kaller finnes i worker-prosessen for noen av de to namespacene - wiring nå ville vært utestet/ubrukt kode |
 | UA-11: dashboard/UI | B | N/A | Kun i masterplanens 'Bygges'-ROADMAP-liste, ikke i de tre faktiske akseptansekriteriene; `situations.*` fikk samme behandling |
 | UA-11: business health/personal attention-kilder utover `situations` | B (delvis allerede dekket) | N/A | Sales/support/kontrakt/marketing/finans/produkt/drift flyter allerede inn via de 26 `OpenLoopType`-verdiene og den eksisterende broen (D-160 B) - personal/home/health-signaler avhenger av UA-10s helse-/lokasjonsbro over, som nå er `IMPLEMENTATION_STATUS=B` (kodbar), ikke C |
-| UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | A (men for stort for én slice) | N/A | Ordrett i 'Bygges'-listen, INGEN kanonisk datakilde finnes - egen, ny domenepakke, se Q-35 kandidat K2 (lavere prioritet enn K1) |
-| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - IMPLEMENTERT; HOST-BEVIST for kjernemekanismen, B1 FUNKSJONELT HOST-BEVIST men harnessets audit-bevis-mekanisme selv trengte en D-167-fiks, FIXED_SUITE_VERIFIED_AFTER_B1 for credential-selvgjenoppretting (K1, D-164/D-165/D-166/D-167)** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`, 10/10 PASS); B1 sin selvgjenoppretting/samtidig-deadlock-gjenoppretting/cleanup LIVE-PROVEN på host (HEAD `ca167dba...`), men det SAMME host-forsøket avdekket en ikke-deterministisk "siste 10 rader"-bug i harnessets EGEN audit-bevis-spørring (IKKE en produksjonsfeil) - fikset (D-167), IKKE ennå re-kjørt på host | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` NÅ durable+delt (D-164) - `owner_controls.*` kanonisk ToolGateway-namespace + `executive.get_control_surface_status` komponerer begge lag. Kjernemekanismen (freeze/unfreeze/kill-switch-parity) er lukket i kode/suite OG bevist på ekte Windows/Docker-host (D-165). Uavhengig arkitekt-review fant BLOCKER B1 (2026-09-18): `revoke_credential` på DEN DELTE `credential_ref` blokkerte sin egen `restore_credential` - fikset med en minimal, handlings-nivå selvgjenopprettings-mengde (D-166). Tobias sin påfølgende host-rerun (HEAD `ca167dba...`) bekreftet B1 FUNKSJONELT (`k1_credential_revocation_self_recovery=PASS`/`k1_combined_deadlock_recovery=PASS`/`k1_cleanup_state_unchanged=PASS`), men harnessets EGEN, sekundære audit-bevis-spørring (en håndplukket "siste 10 rader"-grense satt før D-166 fantes) mistet den opprinnelige aktiveringsraden etter at D-166 la til flere `owner_controls`-kall enn grensen tålte (`k1_audit_evidence=FAIL`, `hard_fail=true` for kjøringen som helhet) - rettet med en run-avgrenset (`session_id`+vannmerke, ingen `LIMIT`) spørring (D-167), 32/32+19/19 nye/oppdaterte tester grønne, IKKE ennå re-kjørt på host. `executive.get_control_surface_status`/idempotency forblir suite/CI-proven (ikke øvet av dette spesifikke harnesset) - se Q-35 |
+| UA-11: decision log/scenario/risikoregister/OKR/delegasjonstavle | **B (rettet fra A, D-169) - NOT_REQUIRED_FOR_GRADUATION** | N/A | Ordrett i masterplanens 'Bygges'-ROADMAP-liste, men IKKE blant de TRE faktiske, ordrette UA-11-akseptansekriteriene (`UA11_EXECUTIVE_MODE_DESIGN.md` §7/§9: "Masterplan-bullets uten en eksisterende kanonisk kilde i repoet ennå" - eksplisitt DEFERRED, samme behandling som dashboard/UI). INGEN kanonisk datakilde finnes; K2 (denne kandidaten) er derfor IKKE en Sovereign-graduation-blokkering - kun en fremtidig, lavere-prioritert, eksplisitt IKKE-valgt utvidelse utover selve akseptansekriteriene (D-169) |
+| UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - IMPLEMENTERT, HOST-BEVIST I SIN HELHET, MERGET (K1, D-164/D-165/D-166/D-167/D-168) - KRITERIUM OPPFYLT** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`) OG for B1 sin credential-selvgjenoppretting/samtidig-deadlock-gjenoppretting/audit-bevis (fersk host-rerun på HEAD `9fcf1a3...`, ALLE markører PASS inkl. `k1_audit_evidence=PASS`) | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` durable+delt (D-164) - `owner_controls.*` kanonisk ToolGateway-namespace + `executive.get_control_surface_status` komponerer begge lag. Kjernemekanismen host-bevist (D-165). Uavhengig arkitekt-review fant BLOCKER B1 (2026-09-18): `revoke_credential` på DEN DELTE `credential_ref` blokkerte sin egen `restore_credential` - fikset (D-166). Tobias sin FØRSTE host-rerun (HEAD `ca167dba...`) bekreftet B1 funksjonelt, men fant harnessets EGEN "siste 10 rader"-audit-bevis-bug (IKKE produksjonsfeil) - rettet med run-avgrenset spørring (D-167). Tobias sin ANDRE host-rerun (HEAD `9fcf1a3...`, samme HEAD uavhengig arkitekt-review `5247323973` reviewet) bekreftet ALLE markører PASS inkl. det fiksede audit-beviset, `hard_fail=false` (D-168). Arkitekt-review PASS + Tobias sin eksplisitte merge-closeout-ordre → PR #93 MERGET (`22d391d2...`), postmerge CI grønn. `executive.get_control_surface_status`/idempotency forblir suite/CI-proven (ikke øvet av K1-harnesset selv, men ikke et akseptansekriterium-krav) - se Q-35/D-169 |
 | UA-11: host-akseptanse-harness | B | N/A | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
 
-## Neste-steg (K1 implementert; kjernemekanisme host-bevist 2026-09-17/18, D-164/D-165; B1-fiks funksjonelt host-bevist 2026-09-18, D-166; host-harnessets EGET audit-bevis fikset 2026-09-18, D-167, host-rerun utestående; K2 forblir en fremtidig kandidat)
+## Neste-steg (K1 MERGET og HOST-BEVIST I SIN HELHET 2026-09-18, D-164/D-165/D-166/D-167/D-168; post-K1 re-audit D-169: INGEN internt byggbar graduation-blokkering gjenstår - FINAL SOVEREIGN GRADUATION CLOSEOUT valgt, IKKE K2)
 
-**K1 er nå IMPLEMENTERT OG HOST-BEVIST for kjernemekanismen** (durable+delt `KillSwitch`/
-`OwnerControls`, kanonisk `owner_controls.*` ToolGateway-namespace) - se D-164/D-165 og
-RUNTIME_GATES.md sin K1-rad. `PRODUCTION_VERIFIED` for kill switch + connector-frys (host run_id
-`d7d5d246`, 10/10 PASS på ekte Windows/Docker Desktop, EKTE container-restart). **B1 (D-166, 2026-09-18):**
-uavhengig arkitekt-review av PR #93 fant en REELL selv-lås-bug i `revoke_credential`/`restore_credential`
-på den delte `credential_ref` (ikke bare "ikke øvet ennå" som tidligere antatt) - fikset med en minimal
-handlings-nivå selvgjenopprettings-mengde. **D-167 (host-rerun, 2026-09-18):** Tobias sin påfølgende
-host-kjøring (HEAD `ca167dba...`) bekreftet B1 FUNKSJONELT PASS (selvgjenoppretting/samtidig-deadlock/
-cleanup), men harnessets EGEN "siste 10 rader"-audit-bevis-spørring var ikke-deterministisk etter at
-D-166 la til flere `owner_controls`-kall enn den håndplukkede grensen tålte - IKKE en produksjonsfeil,
-rettet med en run-avgrenset (`session_id`+vannmerke) spørring. Status forblir
-`FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true` til det fiksede harnesset kjøres på
-nytt. `executive.get_control_surface_status`/idempotency forblir SUITE/CI-PROVEN (ikke
-øvet av dette spesifikke host-harnesset - se RUNTIME_GATES.md for den eksplisitte distinksjonen). PR
-#93 forblir IKKE merget, venter på uavhengig arkitekt-review av B1-/D-167-fiksene. K2 forblir en fremtidig, IKKE startet,
-lavere prioritert kandidat. Se Q-35 for full kontekst.
+**K1 er nå FULLFØRT: IMPLEMENTERT, HOST-BEVIST I SIN HELHET, OG MERGET** (durable+delt `KillSwitch`/
+`OwnerControls`, kanonisk `owner_controls.*` ToolGateway-namespace) - se D-164 t.o.m. D-168 og
+RUNTIME_GATES.md sin K1-rad. `PRODUCTION_VERIFIED` for BÅDE kill switch + connector-frys-kjernen
+(host run_id `d7d5d246`) OG credential-revoke/restore-selvgjenopprettingen + samtidig-deadlock-
+gjenopprettingen + det run-avgrensede audit-beviset (D-166/D-167/D-168: uavhengig arkitekt-review
+`5247323973` PASS + fersk host-rerun på eksakt reviewet HEAD `9fcf1a3d3aa1b0d39f0311dc7be6f07150831a25`,
+ALLE K1-markører PASS, `hard_fail=false`). Tobias sin eksplisitte merge-closeout-ordre → **PR #93
+MERGET** (`MERGE_SHA=22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`, normal two-parent merge, parents
+`34c9c474a478...`+`9fcf1a3d3aa1...`, verifisert via `git cat-file -p`), postmerge CI (run
+`35340723640`) grønn på alle tre jobber. UA-11 akseptansekriterium 3 er dermed OPPFYLT I SIN HELHET.
 
-- **K1 - Durable, delt owner-kontroll (IMPLEMENTERT; kjernemekanisme HOST-BEVIST, B1 funksjonelt HOST-BEVIST, harnessets audit-bevis FIXED_SUITE_VERIFIED_AFTER_B1 pending re-kjøring).**
+**Post-K1 re-audit (D-169, 2026-09-18):** fersk gjennomgang av alle 16 graduation-områder, med
+git-historikk-bekreftelse at INGEN annen kode landet på `main` mellom D-163 sin audit-base og K1 sin
+merge (kun PR #92 og PR #93) - D-163 sin klassifisering av de øvrige 15 områdene er derfor FORTSATT
+gyldig. Konklusjon: **INGEN internt byggbar Sovereign-graduation-blokkering gjenstår.** Alle
+gjenstående punkter er enten LIVE-PROVEN/TESTED/IMPLEMENTED, legitimt `BLOCKED_EXTERNAL` (navngitt
+ekstern credential/maskinvare/juridisk avhengighet - IKKE en Jarvis-intern kodeblokkering, per
+masterplanens egen DoD-tekst), eller `NOT_REQUIRED_FOR_GRADUATION` (roadmap-/"Bygges"-liste-punkter
+utenfor de faktiske akseptansekriteriene). **K2 (decision log-domenet) er DERFOR IKKE valgt** - det
+er ordrett i "Bygges"-roadmap-listen, men IKKE blant UA-11 sine tre faktiske akseptansekriterier (se
+rettelsen i tabellen over) - å bygge det nå ville vært roadmap-arbeid valgt fordi det er interessant,
+ikke fordi masterplanen faktisk krever det for graduation. I stedet er en **FINAL SOVEREIGN
+GRADUATION CLOSEOUT** valgt som neste (docs-only) slice - se D-169 for den fulle begrunnelsen, den
+eksakte eksterne evidens-listen som gjenstår, og hvorfor denne konklusjonen selv bør gå gjennom SAMME
+uavhengige arkitekt-review-disiplin som enhver annen slice før den behandles som endelig.
+
+- **K1 - Durable, delt owner-kontroll (FULLFØRT: IMPLEMENTERT, HOST-BEVIST I SIN HELHET, MERGET).**
   `OwnerControls`/`KillSwitch` er nå durable og delt mellom api-/worker-prosessene (samme mønster som
   `DomainPauseRegistry`, D-160 F), eksponert via kanonisk `owner_controls.*` og komponert av
   `executive.get_control_surface_status`. Lukker UA-11 akseptansekriterium 3 sitt gjenværende gap i
-  kode/suite (759+96 tester grønne) OG på ekte host (D-165) for kjernemekanismen; B1 (D-166) rettet en
-  selv-lås i credential-revoke/restore-selvgjenopprettingen, host-bevist funksjonelt (D-167) men
-  harnessets EGET audit-bevis trengte en egen determinisme-fiks (D-167), host-rerun
-  utestående. Høy blast radius (rørte kjernen av
-  autorisasjonspipelinen) - `SELF_APPROVAL=false`/`MERGED=false` for denne PR-en, som fortsatt venter på uavhengig
-  arkitekt-review + eksplisitt merge-closeout-vedtak, samme protokoll som alle foregående Sovereign-slices.
-- **K2 - Decision log (kun det, ikke hele Bygges-listen).** Ny, liten `JARVIS_CANONICAL`-pakke etter
-  en egen D-64-port. Krever ny persistens; ingen eksisterende kanonisk kilde å komponere mot. Lavere
-  prioritet enn K1, ikke startet.
+  kode/suite OG på ekte host (D-165/D-168) for HELE flaten, inkl. B1-selvgjenopprettingen (D-166) og
+  harnessets eget audit-bevis-determinisme-fiks (D-167). `SELF_APPROVAL=false`, uavhengig
+  arkitekt-review PASS FØR merge-closeout-ordren, samme protokoll som alle foregående Sovereign-slices.
+- **K2 - Decision log.** Reklassifisert `NOT_REQUIRED_FOR_GRADUATION` (D-169) - roadmap-only, ikke et
+  UA-11-akseptansekriterium. Forblir en fremtidig, lavere prioritert, IKKE startet, IKKE valgt kandidat
+  dersom Tobias på et senere tidspunkt ønsker den utover selve Sovereign-graduation-scopet.
 
 ## Dokumentasjonshull (registrert, ikke rettet i kode)
 
