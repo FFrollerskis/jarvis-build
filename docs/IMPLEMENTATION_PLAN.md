@@ -4288,6 +4288,24 @@ eksponeres via `executive.*`, MÅ `activateCard()` sitt `lifecycleAction()`-kall
 `INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret (var allerede `false` pga. enhet; nå med ett navngitt
 gap til: `FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`).
 
+**IMPLEMENTERT 2026-09-18 (D-174) - "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2+B3)"
+er NÅ FERDIG, IKKE lenger en fremtidig slice:** `CardService.activateCard()` sender nå
+`{ killSwitchGated: true }` (B3-fiksen); `finance_wallester.activate_card` sin `capability_class`
+rettet `"B"`→`"C"`. `executive.*` fikk ti nye videresendinger: `activate_kill_switch`/
+`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/`revoke_credential`/
+`restore_credential`/`revoke_device`/`enable_finance_kill_switch`/`disable_finance_kill_switch`/
+`get_finance_kill_switch` - ALLE tynne `gateway.execute()`-gjennomslag, INGEN ny logikk/tilstand. Ny
+`owner_controls.revoke_device` (`OwnerControlsService.revokeDevice()`, valgfritt 3.
+konstruktørargument) pakker inn `SessionGrantService.revokeForDeviceOn()`. **Fresk arkitektonisk funn
+under implementasjonen (IKKE forutsett av D-171/D-172/D-173):** nøstede `ToolGateway.execute()`-kall
+vurderes UAVHENGIG per `tool_id` - `OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken i
+`gateway.ts`/`policy-gateway.ts` (D-166) måtte derfor utvides til også å gjelde `tool_id ===
+"executive"`, ellers ville `executive.deactivate_kill_switch`/`restore_credential` blitt blokkert av
+SIN EGEN ytre tool_id-sjekk før den nådde det trygge, nøstede `owner_controls`-kallet. Se D-174 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse, testevidens (nye "H"/"K"-testblokker) og
+host-akseptanse-status (`PENDING` - nytt script `modules/executive/scripts/
+d174-executive-control-surface-live.ts`+`-host-run.ts` klart for Tobias).
+
 ---
 
 ## Fase-avhengigheter (oversikt)

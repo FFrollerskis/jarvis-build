@@ -247,3 +247,18 @@ Masterplanens UA-11-akseptansekriterier:
    status: **`PARTIAL` - lesing samlet, mutasjon SPLITTET.** Valgt neste slice (D-171, IKKE
    implementert i PR #94): "Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)" - se
    `DECISIONS_AND_ASSUMPTIONS.md` D-171 for full mål-for-mål-kartlegging.
+
+   **IMPLEMENTERT 2026-09-18 (D-174):** `executive.*` fikk ti nye videresendinger
+   (`activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+   `revoke_credential`/`restore_credential`/`revoke_device`/`enable_finance_kill_switch`/
+   `disable_finance_kill_switch`/`get_finance_kill_switch`) - kriteriets ordlyd ("owner can
+   stop/revoke/reconfigure any connector, provider, agent or autonomy domain from ONE control
+   surface") er nå oppfylt for BÅDE lesing OG mutasjon, for ALLE syv kapittel-28-mål (inkl. enhet, via
+   den nye `revoke_device`, og finansdomene). Status rettet fra `PARTIAL` til **`FULFILLED (suite-
+   verified; HOST_ACCEPTANCE_STATUS=PENDING)`** - K1/B1 sin kjernemekanisme (kalt DIREKTE via
+   `owner_controls.*`) forblir `PRODUCTION_VERIFIED`, uendret; DEN NYE `executive.*`-flaten er
+   suite-bevist (ny "H"-testblokk i `service-transport.test.ts`, fullt koblet lokal stack mot ekte
+   `PolicyGateway`/`ToolGateway`) men IKKE ennå host-bevist (nytt script
+   `d174-executive-control-surface-live.ts`+`-host-run.ts`, klart for Tobias). B1
+   selvgjenopprettingsgaten (D-166) utvidet til `tool_id === "executive"` - se D-174 i
+   `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse.
