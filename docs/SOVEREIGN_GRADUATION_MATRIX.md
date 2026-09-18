@@ -12,20 +12,26 @@ UA-fase. "Sovereign komplett" betyr derfor: summen av UA-0..UA-11 sine egne, ord
 faktisk oppfylt og der masterplanen krever det, host-bevist - IKKE et eget, separat toppnivå-graduation-
 kriterium utover disse.
 
-**Status per 2026-09-18 (D-169, post-K1 re-audit): INGEN internt byggbar Sovereign-graduation-blokkering
-gjenstaar.** K1 (siste gap D-163 fant) er nå MERGET og HOST-BEVIST I SIN HELHET (D-168). Fersk
-git-historikk-verifisering bekrefter at INGEN annen kode landet paa `main` mellom D-163 sin
-audit-base (`9a2f642b1747ad8fde945f062152104cdc52bbd3`) og naa - KUN PR #92 (audit-en selv) og PR #93
-(K1) - saa D-163 sin klassifisering av de andre 15 omraadene er FORTSATT gyldig, fersk-bekreftet her,
-ikke re-derivert fra bunnen (kildekoden er uendret der). Gjenstaaende punkter er UTEN UNNTAK enten
-allerede LIVE-PROVEN/TESTED/IMPLEMENTED, eller legitimt `BLOCKED_EXTERNAL` (navngitt ekstern
-credential/maskinvare/juridisk avhengighet Tobias selv maa skaffe - se masterplanens egen DoD-tekst:
-"Jarvis skal... utføre handlinger autonomt når capability og legitime credentials finnes" +
-"Eksterne lov- og plattformkrav skal respekteres uten at Jarvis innfører ekstra intern friksjon"),
-eller korrekt reklassifisert `NOT_REQUIRED_FOR_GRADUATION` (roadmap-/"Bygges"-liste-punkter som IKKE
-er blant de faktiske, ordrette akseptansekriteriene for noen UA-fase - se D-169 for full liste).
-**Se D-169 for den fulle re-audit-en og valget av en FINAL SOVEREIGN GRADUATION CLOSEOUT-slice i
-stedet for K2 eller en ny kode-slice.**
+**Status per 2026-09-18 (D-169, KORRIGERT av uavhengig arkitekt-review 5247795732 → D-170):
+TO-AKSET, IKKE ETT samlet tall.** `INTERNAL_BUILD_COMPLETE=true` (D-169): INGEN internt byggbar
+Sovereign-graduation-blokkering gjenstaar - K1 (siste gap D-163 fant) er nå MERGET og HOST-BEVIST I
+SIN HELHET (D-168). Fersk git-historikk-verifisering bekrefter at INGEN annen kode landet paa `main`
+mellom D-163 sin audit-base (`9a2f642b1747ad8fde945f062152104cdc52bbd3`) og naa - KUN PR #92 (audit-en
+selv) og PR #93 (K1) - saa D-163 sin klassifisering av de andre 15 omraadene er FORTSATT gyldig.
+**MEN `SOVEREIGN_COMPLETE=false` (D-170 sin rettelse):** masterplanens kapittel 28 ("Definition of
+Done for Jarvis Universal Access") har ÉN samlet DoD, og flere av dens 15 punkter krever EKSPLISITT
+FAKTISK live-/atferds-evidens (fire AI-leverandørfamilier+lokal live-rutet, Growth-stack med
+before/after-evidens, reelle Finance-transaksjoner, iPhone/Watch/Home/Personal/Health LIVE,
+backups/monitoring PRODUCTION_VERIFIED) - IKKE bare kode/pipeline. D-169 sin `SOVEREIGN_COMPLETE=true
+"under en presis intern tolkning"` var en oppfunnet akse denne matrisen IKKE lenger bruker. De
+gjenstående punktene ER derfor FAKTISKE `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` for FULL Sovereign-status
+(navngitt ekstern credential/maskinvare/juridisk/atferds-avhengighet Tobias selv maa skaffe - se D-170
+sin fulle sjekkliste), IKKE "ikke-blokkerende notater". Roadmap-/"Bygges"-liste-punkter utenfor de
+faktiske UA-fase-akseptansekriteriene forblir korrekt `NOT_REQUIRED_FOR_GRADUATION` (D-169 sin analyse
+av DETTE punktet var korrekt og UENDRET av D-170).
+**Se D-169 for re-audit-en og D-170 for den korrigerte, to-aksede konklusjonen + fulle
+kapittel-28-sjekklisten. Neste-steg er en docs-only "intern bygge-closeout / graduation-readiness",
+IKKE en "final Sovereign graduation closeout" og IKKE K2.**
 
 ## 16-områders graduation-matrise
 
@@ -81,7 +87,7 @@ ennå".
 | UA-11: akseptansekriterium 3 ('one control surface' for connector/provider/agent/autonomy-domene) | **A - IMPLEMENTERT, HOST-BEVIST I SIN HELHET, MERGET (K1, D-164/D-165/D-166/D-167/D-168) - KRITERIUM OPPFYLT** | LIVE-PROVEN for kill switch + connector-frys-kjernen (host run_id `d7d5d246`) OG for B1 sin credential-selvgjenoppretting/samtidig-deadlock-gjenoppretting/audit-bevis (fersk host-rerun på HEAD `9fcf1a3...`, ALLE markører PASS inkl. `k1_audit_evidence=PASS`) | `situations` dekket via `executive.*`; `OwnerControls`/`KillSwitch` durable+delt (D-164) - `owner_controls.*` kanonisk ToolGateway-namespace + `executive.get_control_surface_status` komponerer begge lag. Kjernemekanismen host-bevist (D-165). Uavhengig arkitekt-review fant BLOCKER B1 (2026-09-18): `revoke_credential` på DEN DELTE `credential_ref` blokkerte sin egen `restore_credential` - fikset (D-166). Tobias sin FØRSTE host-rerun (HEAD `ca167dba...`) bekreftet B1 funksjonelt, men fant harnessets EGEN "siste 10 rader"-audit-bevis-bug (IKKE produksjonsfeil) - rettet med run-avgrenset spørring (D-167). Tobias sin ANDRE host-rerun (HEAD `9fcf1a3...`, samme HEAD uavhengig arkitekt-review `5247323973` reviewet) bekreftet ALLE markører PASS inkl. det fiksede audit-beviset, `hard_fail=false` (D-168). Arkitekt-review PASS + Tobias sin eksplisitte merge-closeout-ordre → PR #93 MERGET (`22d391d2...`), postmerge CI grønn. `executive.get_control_surface_status`/idempotency forblir suite/CI-proven (ikke øvet av K1-harnesset selv, men ikke et akseptansekriterium-krav) - se Q-35/D-169 |
 | UA-11: host-akseptanse-harness | B | N/A | Zero ny migrasjon/credential/leverandør i P0 - ingenting å bevise live |
 
-## Neste-steg (K1 MERGET og HOST-BEVIST I SIN HELHET 2026-09-18, D-164/D-165/D-166/D-167/D-168; post-K1 re-audit D-169: INGEN internt byggbar graduation-blokkering gjenstår - FINAL SOVEREIGN GRADUATION CLOSEOUT valgt, IKKE K2)
+## Neste-steg (K1 MERGET og HOST-BEVIST I SIN HELHET 2026-09-18, D-164 t.o.m. D-168; post-K1 re-audit D-169 KORRIGERT av D-170: INTERNAL_BUILD_COMPLETE=true, SOVEREIGN_COMPLETE=false - docs-only "intern bygge-closeout" valgt, IKKE K2, IKKE en "final Sovereign graduation closeout")
 
 **K1 er nå FULLFØRT: IMPLEMENTERT, HOST-BEVIST I SIN HELHET, OG MERGET** (durable+delt `KillSwitch`/
 `OwnerControls`, kanonisk `owner_controls.*` ToolGateway-namespace) - se D-164 t.o.m. D-168 og
@@ -94,20 +100,23 @@ MERGET** (`MERGE_SHA=22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`, normal two-paren
 `34c9c474a478...`+`9fcf1a3d3aa1...`, verifisert via `git cat-file -p`), postmerge CI (run
 `35340723640`) grønn på alle tre jobber. UA-11 akseptansekriterium 3 er dermed OPPFYLT I SIN HELHET.
 
-**Post-K1 re-audit (D-169, 2026-09-18):** fersk gjennomgang av alle 16 graduation-områder, med
-git-historikk-bekreftelse at INGEN annen kode landet på `main` mellom D-163 sin audit-base og K1 sin
-merge (kun PR #92 og PR #93) - D-163 sin klassifisering av de øvrige 15 områdene er derfor FORTSATT
-gyldig. Konklusjon: **INGEN internt byggbar Sovereign-graduation-blokkering gjenstår.** Alle
-gjenstående punkter er enten LIVE-PROVEN/TESTED/IMPLEMENTED, legitimt `BLOCKED_EXTERNAL` (navngitt
-ekstern credential/maskinvare/juridisk avhengighet - IKKE en Jarvis-intern kodeblokkering, per
-masterplanens egen DoD-tekst), eller `NOT_REQUIRED_FOR_GRADUATION` (roadmap-/"Bygges"-liste-punkter
-utenfor de faktiske akseptansekriteriene). **K2 (decision log-domenet) er DERFOR IKKE valgt** - det
-er ordrett i "Bygges"-roadmap-listen, men IKKE blant UA-11 sine tre faktiske akseptansekriterier (se
-rettelsen i tabellen over) - å bygge det nå ville vært roadmap-arbeid valgt fordi det er interessant,
-ikke fordi masterplanen faktisk krever det for graduation. I stedet er en **FINAL SOVEREIGN
-GRADUATION CLOSEOUT** valgt som neste (docs-only) slice - se D-169 for den fulle begrunnelsen, den
-eksakte eksterne evidens-listen som gjenstår, og hvorfor denne konklusjonen selv bør gå gjennom SAMME
-uavhengige arkitekt-review-disiplin som enhver annen slice før den behandles som endelig.
+**Post-K1 re-audit (D-169, 2026-09-18), KORRIGERT av uavhengig arkitekt-review (5247795732 → D-170):**
+fersk gjennomgang av alle 16 graduation-områder, med git-historikk-bekreftelse at INGEN annen kode
+landet på `main` mellom D-163 sin audit-base og K1 sin merge (kun PR #92 og PR #93) - D-163 sin
+klassifisering av de øvrige 15 områdene er derfor FORTSATT gyldig. Konklusjon (TO-AKSET, D-170):
+`INTERNAL_BUILD_BLOCKERS=NONE`, `INTERNAL_BUILD_COMPLETE=true` - INGEN internt byggbar
+Sovereign-kode-arbeid gjenstår. **MEN `SOVEREIGN_COMPLETE=false`:** masterplanens fulle,
+ordrette kapittel-28-DoD krever FAKTISK live-/atferds-evidens på flere punkter (se D-170 sin
+sjekkliste) som eksplisitt gjenstår - disse er `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`, IKKE
+"ikke-blokkerende notater". **K2 (decision log-domenet) er DERFOR FORTSATT IKKE valgt** (D-169 sin
+analyse av DETTE punktet var korrekt og uendret) - det er ordrett i "Bygges"-roadmap-listen, men IKKE
+blant UA-11 sine tre faktiske akseptansekriterier (se rettelsen i tabellen over) - å bygge det nå
+ville vært roadmap-arbeid valgt fordi det er interessant, ikke fordi masterplanen faktisk krever det
+for graduation. I stedet er en docs-only **"INTERN BYGGE-CLOSEOUT / GRADUATION-READINESS"** valgt som
+neste slice - IKKE en "final Sovereign graduation closeout" (D-169 sin opprinnelige framing av dette
+var selve feilen D-170 rettet). Se D-169 for re-audit-en og D-170 for den korrigerte, to-aksede
+konklusjonen + den fulle kapittel-28-sjekklisten, som selv bør gå gjennom SAMME uavhengige
+arkitekt-review-disiplin som enhver annen slice før den behandles som endelig.
 
 - **K1 - Durable, delt owner-kontroll (FULLFØRT: IMPLEMENTERT, HOST-BEVIST I SIN HELHET, MERGET).**
   `OwnerControls`/`KillSwitch` er nå durable og delt mellom api-/worker-prosessene (samme mønster som
