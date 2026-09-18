@@ -104,9 +104,11 @@ domenenavn - `situations.get_pause_state` sin egen, pre-eksisterende kontrakt ek
 actor per domene, en dokumentert, IKKE-K1-relatert begrensning). Se `modules/executive/test/service-
 transport.test.ts` gruppe G (5 tester: baseline, kill switch med reason/actor, frys+tilbakekall
 samtidig, domenepause+connector-frys forblir distinkte lag, global KillSwitch nekter også denne
-lesingen). Klasse A (les) - UENDRET av D-164 sitt selvgjenopprettings-unntak i `PolicyGateway`
-(det unntaket gjelder KUN `owner_controls.deactivate_kill_switch`/`get_control_state`, ikke
-`executive.get_control_surface_status` - en aktiv kill switch nekter DENNE lesingen også, se testen).
+lesingen). Klasse A (les) - UENDRET av D-164/D-166 sitt selvgjenopprettings-unntak i `PolicyGateway`
+(det unntaket gjelder KUN de tre navngitte `owner_controls`-handlingene
+`get_control_state`/`deactivate_kill_switch`/`restore_credential` - sistnevnte lagt til av D-166 sin
+B1-fiks, se der - ALDRI `executive.get_control_surface_status`: en aktiv kill switch nekter DENNE
+lesingen også, se testen).
 
 ## §5. Persistens: NULL ny tabell
 
@@ -202,9 +204,16 @@ Masterplanens UA-11-akseptansekriterier:
    suite. **OPPDATERT 2026-09-18 (K1 host-akseptanse, D-165): kjernemekanismen (kill switch +
    connector-frys, api-/worker-cross-prosess-parity, restart-persistens, audit) er nå
    `PRODUCTION_VERIFIED` på ekte Windows/Docker Desktop-host (run_id `d7d5d246`, 10/10 PASS,
-   `hard_fail=false`, EKTE `docker compose restart api worker`).** `revoke_credential`/
-   `restore_credential`/`executive.get_control_surface_status`/idempotency ble IKKE øvet av dette
-   spesifikke host-harnesset og forblir suite/CI-proven, ikke overdrevet til host-proven - se
-   RUNTIME_GATES.md for den eksplisitte distinksjonen. `/infra/pause` (D-104, `InfraExecutionGate`)
-   forblir en SEPARAT, allerede-dokumentert, snevrere mekanisme - fersk-verifisert IKKE en del av
-   dette gapet (D-164 F), ikke rørt av K1.
+   `hard_fail=false`, EKTE `docker compose restart api worker`).** `executive.get_control_surface_status`/
+   idempotency ble IKKE øvet av dette spesifikke host-harnesset og forblir suite/CI-proven, ikke
+   overdrevet til host-proven - se RUNTIME_GATES.md for den eksplisitte distinksjonen. **OPPDATERT
+   2026-09-18 (K1 B1-fiks, D-166): `revoke_credential`/`restore_credential` var IKKE bare "ikke øvet
+   ennå" som antatt over - uavhengig arkitekt-review av PR #93 fant en REELL selv-lås-bug (`restore_credential`
+   på den delte `credential_ref` ville blitt blokkert av sin egen tilbakekalt-credential-sjekk, ingen
+   kanonisk gjenopprettingsvei). Fikset med en minimal, handlings-nivå selvgjenopprettings-mengde
+   (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`, delt av BÅDE `PolicyGateway`- og `ToolGateway`-gaten - se
+   D-166 for samtidig-kill-switch-deadlock-analysen). Suite-bevist (30/30+809/809 grønne); host-harnesset
+   utvidet men IKKE kjørt på nytt av Tobias - `FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true`,
+   IKKE `PRODUCTION_VERIFIED`, for DENNE delkapabiliteten spesifikt.** `/infra/pause` (D-104,
+   `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere mekanisme - fersk-verifisert
+   IKKE en del av dette gapet (D-164 F), ikke rørt av K1.

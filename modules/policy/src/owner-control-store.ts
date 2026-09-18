@@ -83,3 +83,44 @@ export function assertOwnerControlAuthorized(
     throw new OwnerControlUnauthorizedError(actorPersonId);
   }
 }
+
+/**
+ * D-166 (arkitekt-review PR #93, funn B1): den MINIMALE, EKSPLISITTE
+ * handlingsmengden på `owner_controls` selv som forblir tilgjengelig
+ * gjennom den KANONISKE ToolGateway-/PolicyGateway-stien når ETT, ELLER
+ * BEGGE SAMTIDIG, av (a) global kill switch aktiv, (b) den delte interne
+ * `credential_ref`-en (samme ref `owner_controls`/`situations`/`executive`
+ * selv bruker) er tilbakekalt. IKKE en blanket-unntak for HELE
+ * `owner_controls`-verktøyet (D-164 sin opprinnelige, for brede
+ * `isRevokedDurable`-fiks var nettopp DET - rettet her) - kun disse tre,
+ * navngitte handlingene:
+ *
+ * - `get_control_state`: eieren må ALLTID kunne SE hvorfor systemet er
+ *   stanset/tilbakekalt, spesielt akkurat NÅR det er det (uendret fra D-164).
+ * - `deactivate_kill_switch`: uten unntak et énveis-lås for kill switchen selv
+ *   (uendret fra D-164).
+ * - `restore_credential`: NY i D-166. `restore_credential` bruker SAMME
+ *   delte `credential_ref` som resten av `owner_controls` - uten unntak
+ *   ville en tilbakekalling av DEN delte refen (feil, forveksling, eller
+ *   kompromittert eier-identitet) blokkert `restore_credential` MED SIN
+ *   EGEN sjekk, et énveis-lås identisk i form til kill-switch-scenariet,
+ *   men uten noe unntak.
+ *
+ * BEGGE gatene (kill-switch-aktiv-sjekken i `PolicyGateway.authorize()`,
+ * OG den tilbakekalt-credential-sjekken i `ToolGateway.execute()`) MÅ bruke
+ * DENNE SAMME mengden - ikke to uavhengige, potensielt driftende lister -
+ * for at BEGGE gjenopprettingsrekkefølger (`restore_credential` FØR
+ * `deactivate_kill_switch`, ELLER omvendt) skal være deterministisk mulige
+ * når BEGGE tilstandene er aktive samtidig. Handlinger UTENFOR denne
+ * mengden (`activate_kill_switch`, `freeze_connector`/`unfreeze_connector`,
+ * `revoke_credential`) er ALDRI unntatt fra NOEN av de to gatene - kun
+ * frys-sjekken (`isFrozenDurable`) har sitt EGET, videre, allerede
+ * eksisterende og godkjente unntak for HELE `owner_controls`-verktøyet
+ * (uendret av D-166 - det gjaldt en annen, langt smalere selv-mål-risiko
+ * enn den delte credential_ref-en, se D-166 i DECISIONS_AND_ASSUMPTIONS.md).
+ */
+export const OWNER_CONTROLS_SELF_RECOVERY_ACTIONS: ReadonlySet<string> = new Set([
+  "get_control_state",
+  "deactivate_kill_switch",
+  "restore_credential"
+]);

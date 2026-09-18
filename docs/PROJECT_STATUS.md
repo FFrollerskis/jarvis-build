@@ -1,11 +1,15 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-k1-owner-control-authority`, PR #93,
-HEAD `2af8295cd43462215084da843a77ebc8e813fd81`). Aktiv oppgave: **K1 - durable/delt
-`OwnerControls`+`KillSwitch` + kanonisk `owner_controls.*` ToolGateway-namespace +
-`executive.get_control_surface_status` (D-164/D-165) - NÅ HOST-BEVIST for kjernemekanismen.**
-`MERGE_AUTHORIZED=false`, `SELF_APPROVAL=false`, `MERGED=false`. Sovereign som helhet **FORTSATT
-IKKE komplett**. Ingen ny masterplan, ingen UGREEN-migrering startet.
+forrige HEAD `343c273068c392618c422f3057b8eddca8c97fbe` - ny HEAD etter denne oppdateringens commit,
+se git-historikk for eksakt SHA). Aktiv oppgave: **K1 B1-FIKS - uavhengig arkitekt-review av PR #93
+fant BLOCKER B1 (credential-revoke/restore-selvgjenopprettings-selv-lås) etter D-165 sin
+host-akseptanse-lukking; fikset med en minimal, handlings-nivå selvgjenopprettings-mengde (D-166).**
+Kjernemekanismen (kill switch + connector-frys, D-164/D-165) forblir `PRODUCTION_VERIFIED` og
+UPÅVIRKET. Credential-selvgjenopprettingsstien er nå `FIXED_SUITE_VERIFIED_AFTER_B1`,
+`HOST_ACCEPTANCE_REQUIRED=true` - IKKE host-bevist ennå. `MERGE_AUTHORIZED=false`,
+`SELF_APPROVAL=false`, `MERGED=false`. Sovereign som helhet **FORTSATT IKKE komplett**. Ingen ny
+masterplan, ingen UGREEN-migrering startet.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -17,8 +21,10 @@ IKKE komplett**. Ingen ny masterplan, ingen UGREEN-migrering startet.
 - Main komponerer UA-9 Vision + UA-10 Situation Engine + UA-11 Executive Mode i
   `apps/api/src/main.ts`. `apps/api/src/worker-main.ts` kobler ingen av de tre eier-vendte
   namespacene (`situations`/`executive`/`vision`) - fortsatt tilsiktet (D-163 B).
-- **K1 (PR #93, IKKE merget):** lukker UA-11 akseptansekriterium 3 sitt siste gjenstående gap - nå
-  bevist BÅDE i suite OG på ekte Windows/Docker Desktop-host.
+- **K1 (PR #93, IKKE merget):** lukker UA-11 akseptansekriterium 3 sitt siste gjenstående gap for
+  kjernemekanismen - bevist BÅDE i suite OG på ekte Windows/Docker Desktop-host (D-165). Uavhengig
+  arkitekt-review fant deretter BLOCKER B1 i credential-selvgjenopprettingsstien; fikset denne runden
+  (D-166), suite-bevist, host-rerun utestående.
 
 ## K1 - hva er gjort (D-164/D-165)
 
@@ -55,23 +61,59 @@ IKKE komplett**. Ingen ny masterplan, ingen UGREEN-migrering startet.
    **IKKE host-bevist av dette spesifikke harnesset** (forblir suite/CI-proven): `revoke_credential`/
    `restore_credential`, `executive.get_control_surface_status`, `idempotency_key`-dedupe.
 
-**Status:** `PRODUCTION_VERIFIED` for kill switch + connector-frys-kjernemekanismen (D-165).
-`revoke_credential`/`restore_credential`/`executive.get_control_surface_status`/idempotency forblir
-suite/CI-proven, ikke overdrevet til host-proven. Se RUNTIME_GATES.md/SOVEREIGN_GRADUATION_MATRIX.md
-for den eksplisitte host-proven/suite-proven-distinksjonen.
+**Status (kjernemekanisme):** `PRODUCTION_VERIFIED` for kill switch + connector-frys (D-165).
+`executive.get_control_surface_status`/idempotency forblir suite/CI-proven, ikke overdrevet til
+host-proven.
+
+## K1 B1-FIKS - hva er gjort denne runden (D-166)
+
+**Funn (uavhengig arkitekt-review PR #93, kommentar `5723356282`, BLOCKER B1):**
+`owner_controls.revoke_credential` kunne tilbakekalle SAMME delte `credential_ref`
+(`BUSINESS_INTERNAL_CREDENTIAL_REF`) som `owner_controls`/`situations`/`executive` selv bruker.
+Deretter ville `owner_controls.restore_credential` selv blitt nektet av `ToolGateway` sin
+`isRevokedDurable()`-sjekk (som FØR denne runden hadde INGEN unntak) - et énveis-lås uten kanonisk
+gjenopprettingsvei. D-164 seksjon D sin påstand om at dette var "en pre-eksisterende, bredere risiko"
+var unøyaktig - K1 er den FØRSTE kilden til denne credential_ref-tilbakekallingsmuligheten. D-164s
+tekst er IKKE redigert (repo-konvensjon); korreksjonen er logget i D-166.
+
+1. **Minimal, delt, handlings-nivå selvgjenopprettings-mengde** (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS
+   = {get_control_state, deactivate_kill_switch, restore_credential}`, `modules/policy/src/owner-control-store.ts`)
+   - IKKE en blanket-unntak for hele `owner_controls` (en første, for bred tilnærming ble eksplisitt
+   avvist og forkastet før denne posten).
+2. **Brukt identisk på BÅDE gatene:** `PolicyGateway.authorize()` sin kill-switch-sjekk (utvidet med
+   `restore_credential`) og en NY sjekk i `ToolGateway.execute()` (tidligere helt uten unntak) - nødvendig
+   for at en SAMTIDIG kill-switch+tilbakekalt-credential-tilstand skal ha en deterministisk
+   gjenopprettingsvei i BEGGE rekkefølger, ikke bare hver for seg.
+3. **8 nye tester** i `owner-control-authority.test.ts` (30/30 grønne totalt): delt-ref-selvgjenoppretting,
+   ikke-eier kan IKKE utnytte unntaket, samtidig deadlock begge rekkefølger (A: restore→deaktiver,
+   B: deaktiver→restore), `get_control_state`-diagnostikk i alle tilstandskombinasjoner, normal
+   NEKTELSE forblir for freeze/unfreeze/revoke/activate (ingen blanket-unntak-regresjon), audit uten
+   secret-verdi-lekkasje. Full regresjon 809/809 grønn (policy/tool-gateway/situations/executive/
+   apps-api/owner-controls). `pnpm -w typecheck`/`pnpm -w lint` rene.
+4. **Host-harnesset (`k1-owner-control-authority-live.ts`) UTVIDET** med nye seksjoner som øver DENNE
+   spesifikke stien (credential-revoke/restore-selvgjenoppretting) + samtidig kill-switch-deadlock-
+   invarianten (rekkefølge A, den strengeste), inkl. et direkte `restoreCredentialDurable()`-sikkerhetsnett
+   i CLEANUP. **IKKE kjørt på nytt av Tobias ennå.**
+
+**Status (B1-delkapabilitet):** `FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true` -
+IKKE `PRODUCTION_VERIFIED`. Se D-166 og RUNTIME_GATES.md/SOVEREIGN_GRADUATION_MATRIX.md for full
+begrunnelse og den eksplisitte host-proven/suite-proven-distinksjonen.
 
 ## Blokkeringer
 
-1. **Merge av denne PR-en.** `MERGE_AUTHORIZED=false`; krever uavhengig arkitekt-review mot exact
-   HEAD + en separat, eksplisitt merge-closeout-ordre (samme protokoll som alle foregående
-   Sovereign-slices) før merge. Dette er nå den ENE gjenstående gaten - host-akseptanse er lukket.
-2. **Embedded-Postgres-flake (B.3, port-kontensjon)** fortsatt kjent i repo-suiten (uendret, ikke
+1. **Merge av denne PR-en.** `MERGE_AUTHORIZED=false`; krever uavhengig arkitekt-review av B1-fiksen
+   mot exact ny HEAD + en separat, eksplisitt merge-closeout-ordre (samme protokoll som alle
+   foregående Sovereign-slices) før merge.
+2. **Host-rerun for B1-fiksen.** Tobias må kjøre det utvidede `k1-owner-control-authority-live.ts`
+   på ekte host før credential-selvgjenopprettingsstien kan kalles `PRODUCTION_VERIFIED`.
+3. **Embedded-Postgres-flake (B.3, port-kontensjon)** fortsatt kjent i repo-suiten (uendret, ikke
    K1-relatert, ikke rørt av denne sliceen) - påvirker KUN full `pnpm -w test` av HELE workspacet,
    ikke de målrettede K1-suitene (som er 100% grønne).
 
 ## Neste oppgave
 
-PR #93 venter på uavhengig arkitekt-review (siste gjenstående gate). Etter merge: ingen ny slice er
-valgt ennå. K2 (decision log-domenet) forblir en lavere-prioritert, ikke-startet fremtidig kandidat
-(se Q-35, SOVEREIGN_GRADUATION_MATRIX.md §Neste-steg). Sovereign som helhet er **FORTSATT IKKE
-komplett**. Ingen ny masterplan, ingen UGREEN-migrering.
+PR #93 venter på uavhengig arkitekt-review av B1-fiksen (siste gjenstående gate før merge), deretter
+Tobias sin host-rerun av det utvidede harnesset. Etter merge: ingen ny slice er valgt ennå. K2
+(decision log-domenet) forblir en lavere-prioritert, ikke-startet fremtidig kandidat (se Q-35,
+SOVEREIGN_GRADUATION_MATRIX.md §Neste-steg). Sovereign som helhet er **FORTSATT IKKE komplett**.
+Ingen ny masterplan, ingen UGREEN-migrering.

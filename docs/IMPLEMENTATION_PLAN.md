@@ -4219,17 +4219,27 @@ den ene var usynlig for den andre, en restart glemte den stille fail-OPEN. Full 
 
 **Bygges IKKE i denne sliceen:** RLS for `owner_control_state` (dokumentert N/A - global, ikke
 tenant-data); en HTTP-/dashboard-rute for `owner_controls.*` (kontrollflaten er ToolGateway-
-kapabiliteten, samme reifiseringsnivå som `situations`/`executive` selv); `revoke_credential`-
-selvlås-beskyttelse (pre-eksisterende, bredere risiko for ALLE interne verktøy, ikke unikt for K1).
+kapabiliteten, samme reifiseringsnivå som `situations`/`executive` selv).
 
-**Tester:** 96 nye/påvirkede, alle grønne, empirisk kjørt: `modules/owner-controls/test/owner-control-
-authority.test.ts` (22, ekte embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts`
-(15, strukturell), `modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk
-bekreftet grønn: policy (31)/situations (169)/executive (43)/apps-api (169)/tool-gateway (352).
-**Host-akseptanse-harness bygget, IKKE kjørt:** `modules/owner-controls/scripts/k1-owner-control-
-authority-host-run.ts`+`-live.ts` (samme to-fils-mønster som UA-10/UA-5). Status:
-`FIXED_SUITE_VERIFIED`/`HOST_ACCEPTANCE_REQUIRED=true` - se RUNTIME_GATES.md for gate-raden og
-D-164 for full begrunnelse. `SOVEREIGN_COMPLETE=false` uendret.
+**RETTET ETTER FERSK KRITISK GJENNOMGANG (D-166, arkitekt-review PR #93, BLOCKER B1):**
+D-164 sin opprinnelige tekst her påsto at `revoke_credential`-selvlås-beskyttelse var utelatt fordi
+det var "en pre-eksisterende, bredere risiko for ALLE interne verktøy, ikke unikt for K1" - dette var
+UNØYAKTIG (K1 er den FØRSTE og ENESTE kilden til denne risikoen, se D-166) og selve selvlåsen var en
+REELL bug, ikke et bevisst utelatt scope. Selvlås-beskyttelse for `restore_credential` på den delte
+`credential_ref`-en ER NÅ BYGGET i denne sliceens oppfølgingsrunde - en minimal, handlings-nivå
+selvgjenopprettings-mengde (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`), se D-166.
+
+**Tester:** 96 nye/påvirkede (D-164) + 8 nye (D-166, B1-fiks) = 104, alle grønne, empirisk kjørt:
+`modules/owner-controls/test/owner-control-authority.test.ts` (30: 22 fra D-164 + 8 fra D-166, ekte
+embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts` (15, strukturell),
+`modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk bekreftet grønn:
+policy/situations/executive/apps-api/tool-gateway/owner-controls (809 totalt etter D-166).
+**Host-akseptanse-harness bygget OG UTVIDET (D-166), IKKE kjørt PÅ NYTT etter utvidelsen:**
+`modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts` (samme to-fils-
+mønster som UA-10/UA-5). Status: kjernemekanisme (freeze/unfreeze/kill-switch-parity)
+`PRODUCTION_VERIFIED` (D-165); credential-selvgjenopprettingssti `FIXED_SUITE_VERIFIED_AFTER_B1`/
+`HOST_ACCEPTANCE_REQUIRED=true` (D-166) - se RUNTIME_GATES.md for gate-raden og D-164/D-165/D-166 for
+full begrunnelse. `SOVEREIGN_COMPLETE=false` uendret.
 
 ---
 

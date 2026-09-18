@@ -2,7 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
-import type { OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { OWNER_CONTROLS_SELF_RECOVERY_ACTIONS, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
 export interface SecretProvider {
@@ -288,7 +288,25 @@ export class ToolGateway {
     if (request.tool_id !== "owner_controls" && (await this.controls?.isFrozenDurable(request.tool_id))) {
       return this.deny(request, "connector_frozen");
     }
-    if (await this.controls?.isRevokedDurable(definition.credential_ref)) {
+    // D-166 (arkitekt-review PR #93, funn B1): `owner_controls.*` deler
+    // SAMME `credential_ref` (`BUSINESS_INTERNAL_CREDENTIAL_REF`) som
+    // `situations`/`executive`. Uten et unntak ville et eier-kall til
+    // `owner_controls.revoke_credential` med DEN delte interne refen (feil,
+    // forveksling, eller kompromittert eier-identitet) blokkert `owner_
+    // controls.restore_credential` selv med `credential_revoked` - et
+    // ENVEIS-LÅS. Unntaket er BEGRENSET til `OWNER_CONTROLS_SELF_RECOVERY_
+    // ACTIONS` (SAMME navngitte mengde som `PolicyGateway.authorize()` sin
+    // kill-switch-sjekk over bruker - se `owner-control-store.ts` for full
+    // begrunnelse, inkl. hvorfor `restore_credential` MÅ stå i begge
+    // sjekkene for at en SAMTIDIG kill-switch+tilbakekalt-credential-
+    // tilstand skal ha en deterministisk, kanonisk gjenopprettingsvei) -
+    // IKKE et blanket-unntak for HELE `owner_controls`-verktøyet slik
+    // frys-sjekken over har (den dekker en annen, smalere selv-mål-risiko).
+    // `activate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+    // `revoke_credential` er ALDRI unntatt herfra.
+    const isCredentialRevocationSelfRecovery =
+      request.tool_id === "owner_controls" && OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(request.action);
+    if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(definition.credential_ref))) {
       return this.deny(request, "credential_revoked");
     }
     const credential = await this.secrets.get(definition.credential_ref);

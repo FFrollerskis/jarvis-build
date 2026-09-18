@@ -39,10 +39,35 @@
 //                       korrekt actor/reason, INGEN credential-verdi i payload
 //   H. opprydding     - owner_control_state er IDENTISK med snapshotet FØR kjøringen
 //                       (ingen ekte frys/tilbakekall/kill-switch-tilstand endret varig)
+//   I. B1-selvgjenoppretting (D-166, arkitekt-review PR #93) - owner_controls.
+//                       revoke_credential på DEN FAKTISKE, DELTE
+//                       BUSINESS_INTERNAL_CREDENTIAL_REF (samme ref
+//                       owner_controls/situations/executive selv bruker) via
+//                       EKTE ToolGateway, deretter bevis at (a) en normal
+//                       owner_controls-mutasjon nektes credential_revoked,
+//                       (b) owner_controls.restore_credential likevel LYKKES
+//                       gjennom KANONISK ToolGateway (ingen manuell SQL), (c)
+//                       normal drift virker igjen, (d) audit har rader for
+//                       BEGGE handlingene uten credential-VERDI i payload.
+//   J. B1-samtidig-deadlock (D-166) - kill switch OG den delte credential_ref-en
+//                       satt AKTIVE/TILBAKEKALT SAMTIDIG (via de ekte
+//                       `*Durable()`-skrivemetodene direkte - IKKE rå SQL,
+//                       IKKE via en gate som ville blokkert oppsettet selv),
+//                       deretter bevis at owner_controls.restore_credential
+//                       likevel når frem FØRST (den strengeste rekkefølgen -
+//                       må passere BÅDE PolicyGateway sin kill-switch-sjekk OG
+//                       ToolGateway sin tilbakekalt-credential-sjekk samtidig
+//                       aktive), deretter deactivate_kill_switch, deretter at
+//                       normal drift er gjenopprettet - INGEN manuell SQL i
+//                       noen del av gjenopprettingen.
 //
 // INGEN ekte connector fryses. INGEN kunde-/forretningsdata røres. Kill
-// switchen er aktiv i BARE de få sekundene mellom B og F her under - scriptet
-// deaktiverer den ALLTID igjen i `finally`, også ved feil.
+// switchen er aktiv i BARE de få sekundene mellom B og F, og igjen kort i J,
+// her under - scriptet deaktiverer den ALLTID igjen i `finally`, også ved
+// feil. Samme prinsipp for den delte credential_ref-en i I/J: `finally`
+// garanterer at den ALLTID er gjenopprettet (direkte via den ekte
+// `restoreCredentialDurable()`-skrivemetoden, IKKE avhengig av at selve B1-
+// fiksen som testes her fungerte) - se CLEANUP-seksjonen.
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -69,6 +94,8 @@ const results: Record<string, Verdict> = {
   k1_restart_state_survives: "FAIL",
   k1_no_startup_window: "FAIL",
   k1_resume_restores_both_sides: "FAIL",
+  k1_credential_revocation_self_recovery: "FAIL",
+  k1_combined_deadlock_recovery: "FAIL",
   k1_audit_evidence: "FAIL",
   k1_cleanup_state_unchanged: "FAIL"
 };
@@ -253,6 +280,119 @@ async function main(): Promise<void> {
       log(`deactivate_ok=${deactivated.ok} api_freeze_after_resume_ok=${apiAllowedNow.ok} worker_saw_freeze=${workerSeesFreeze} unfreeze_ok=${unfrozen.ok} -> k1_resume_restores_both_sides: ${results.k1_resume_restores_both_sides}`);
     });
 
+    await section(
+      "B1-SELVGJENOPPRETTING (D-166, arkitekt-review PR #93) - owner_controls.revoke_credential på DEN DELTE BUSINESS_INTERNAL_CREDENTIAL_REF, deretter owner_controls.restore_credential via KANONISK ToolGateway - INGEN manuell SQL",
+      async () => {
+        const revoked = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_credential",
+          parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: `K1 B1 host-akseptanse ${runId} - kortvarig, gjenopprettes automatisk` }
+        });
+        const deniedNormalTool = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector",
+          parameters: { connector_id: SYNTHETIC_CONNECTOR, reason: "k1-should-be-denied-credential-revoked" }
+        });
+        const deniedOk = !deniedNormalTool.ok && (deniedNormalTool as { reason?: string }).reason === "credential_revoked";
+        const restored = await workerStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential",
+          parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF }
+        });
+        const normalToolWorksAgain = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector",
+          parameters: { connector_id: SYNTHETIC_CONNECTOR, reason: "k1-verify-resumed-after-credential-restore" }
+        });
+        const unfrozenAfterCredentialTest = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR }
+        });
+
+        const { rows } = await adminPool.query(
+          `SELECT type, decision, reason, action, payload FROM audit_events
+           WHERE tool_id = 'owner_controls' AND person_id = $1 AND action IN ('revoke_credential','restore_credential')
+           ORDER BY audit_id DESC LIMIT 10`,
+          [OWNER_PERSON]
+        );
+        const events = rows as Array<{ type: string; decision: string; reason: string | null; action: string; payload: Record<string, unknown> }>;
+        const hasRevoke = events.some((e) => e.action === "revoke_credential" && e.type === "tool.executed");
+        const hasRestore = events.some((e) => e.action === "restore_credential" && e.type === "tool.executed");
+        const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+        const resolvedCredential = await secrets.get(BUSINESS_INTERNAL_CREDENTIAL_REF);
+        const noSecretLeak = !resolvedCredential || !JSON.stringify(events).includes(resolvedCredential);
+
+        const ok =
+          revoked.ok && deniedOk && restored.ok && normalToolWorksAgain.ok && unfrozenAfterCredentialTest.ok &&
+          hasRevoke && hasRestore && noSecretLeak;
+        results.k1_credential_revocation_self_recovery = ok ? "PASS" : "FAIL";
+        log(
+          `revoke_ok=${revoked.ok} normal_tool_denied_credential_revoked=${deniedOk} restore_ok=${restored.ok} ` +
+          `normal_tool_recovered=${normalToolWorksAgain.ok} unfreeze_cleanup_ok=${unfrozenAfterCredentialTest.ok} ` +
+          `audit_has_revoke=${hasRevoke} audit_has_restore=${hasRestore} audit_no_secret_leak=${noSecretLeak} ` +
+          `-> k1_credential_revocation_self_recovery: ${results.k1_credential_revocation_self_recovery}`
+        );
+      }
+    );
+
+    await section(
+      "B1-SAMTIDIG KILL SWITCH + TILBAKEKALT CREDENTIAL - DEADLOCK-GJENOPPRETTING (D-166) - BEGGE tilstander satt samtidig via de EKTE durable-skrivemetodene, gjenopprettet KUN gjennom kanonisk ToolGateway/PolicyGateway, INGEN manuell SQL",
+      async () => {
+        // Setter opp BEGGE tilstander samtidig via de EKTE durable-
+        // skrivemetodene (samme underliggende SQL som owner_controls.
+        // activate_kill_switch/revoke_credential selv kaller via ToolGateway)
+        // - IKKE via ToolGateway her: PolicyGateway sin kill-switch-sjekk
+        // ville (uten D-166-unntaket) blokkert et ToolGateway-kall til
+        // revoke_credential FØR kill switchen engang var aktiv i denne
+        // testens rekkefølge. "Direkte canonical state setup" per B1-ordren -
+        // ALDRI rå SQL, ALDRI en syntetisk in-memory-tilstand.
+        await apiStack.killSwitch.activateDurable(
+          `K1 B1 host-akseptanse ${runId} - samtidig deadlock-test, deaktiveres automatisk`,
+          OWNER_PERSON
+        );
+        await apiStack.ownerControls.revokeCredentialDurable(
+          BUSINESS_INTERNAL_CREDENTIAL_REF,
+          `K1 B1 host-akseptanse ${runId} - samtidig deadlock-test, gjenopprettes automatisk`,
+          OWNER_PERSON
+        );
+        const bothActiveBeforeRecovery =
+          (await apiStack.killSwitch.isActiveDurable()) &&
+          (await apiStack.ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF));
+        log(`begge_tilstander_aktive_samtidig=${bothActiveBeforeRecovery}`);
+
+        // Rekkefølge A (den strengeste å bevise): restore_credential FØRST,
+        // MENS kill switchen fortsatt er aktiv - må passere BÅDE
+        // PolicyGateway sin kill-switch-sjekk OG ToolGateway sin
+        // tilbakekalt-credential-sjekk samtidig, begge via SAMME
+        // OWNER_CONTROLS_SELF_RECOVERY_ACTIONS-unntak (D-166). Deretter
+        // deactivate_kill_switch (kun credential-tilstanden gjenstår da).
+        const restoredWhileKillSwitchActive = await workerStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential",
+          parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF }
+        });
+        const deactivatedAfterRestore = await workerStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {}
+        });
+        const normalToolAfterDeadlockRecovery = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector",
+          parameters: { connector_id: SYNTHETIC_CONNECTOR, reason: "k1-verify-resumed-after-combined-deadlock" }
+        });
+        const unfrozenAfterDeadlockTest = await apiStack.gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR }
+        });
+
+        const ok =
+          bothActiveBeforeRecovery &&
+          restoredWhileKillSwitchActive.ok &&
+          deactivatedAfterRestore.ok &&
+          normalToolAfterDeadlockRecovery.ok &&
+          unfrozenAfterDeadlockTest.ok;
+        results.k1_combined_deadlock_recovery = ok ? "PASS" : "FAIL";
+        log(
+          `both_active_before_recovery=${bothActiveBeforeRecovery} ` +
+          `restore_while_kill_switch_active_ok=${restoredWhileKillSwitchActive.ok}` +
+          `${restoredWhileKillSwitchActive.ok ? "" : ` reason=${(restoredWhileKillSwitchActive as { reason?: string }).reason}`} ` +
+          `deactivate_after_restore_ok=${deactivatedAfterRestore.ok} normal_tool_recovered=${normalToolAfterDeadlockRecovery.ok} ` +
+          `unfreeze_cleanup_ok=${unfrozenAfterDeadlockTest.ok} -> k1_combined_deadlock_recovery: ${results.k1_combined_deadlock_recovery}`
+        );
+      }
+    );
+
     await section("AUDIT-BEVIS (activate/deny/deactivate har audit_events-rader med korrekt actor, INGEN credential-verdi)", async () => {
       const { rows } = await adminPool.query(
         `SELECT type, decision, reason, action, payload FROM audit_events
@@ -286,6 +426,16 @@ async function main(): Promise<void> {
         // og fjern SYNTHETIC_CONNECTOR-frysen (no-op hvis allerede fjernet).
         await cleanupStack.gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} }).catch(() => undefined);
         await cleanupStack.gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR } }).catch(() => undefined);
+        // B1 (D-166): garanter OGSÅ at den delte BUSINESS_INTERNAL_CREDENTIAL_REF er
+        // gjenopprettet, uansett om B-seksjonene I/J over feilet eller aldri ble nådd.
+        // Kaller `restoreCredentialDurable()` DIREKTE på autoritets-laget (samme
+        // underliggende SQL, samme eier-autoritetssjekk som `owner_controls.
+        // restore_credential`) - IKKE via ToolGateway/PolicyGateway - fordi denne
+        // opprydningen MÅ lykkes selv om selve B1-fiksen som testes i I/J har en
+        // udekket feil (kretsen den er ment å bevise er akkurat den som ikke kan
+        // forutsettes å fungere i en sikkerhetsnett-sti). Idempotent (no-op hvis
+        // allerede gjenopprettet).
+        await cleanupStack.ownerControls.restoreCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, OWNER_PERSON).catch(() => undefined);
         const snapshotAfter = await snapshotOwnerControlState();
         diagnostics["owner_control_state_after"] = JSON.stringify(snapshotAfter);
         const unchanged = JSON.stringify(snapshotAfter) === JSON.stringify(snapshotBefore);

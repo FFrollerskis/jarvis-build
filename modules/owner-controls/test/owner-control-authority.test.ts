@@ -9,6 +9,7 @@ import { createPool, PgApprovalStore, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
+import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import { OwnerControlsService } from "../src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../src/transport.ts";
 import type { OwnerControlState } from "../src/types.ts";
@@ -377,5 +378,205 @@ describe("H: RLS/tenant-isolasjon - dokumentert N/A (global, system-autoritet-ti
     const stateFromTenantB = await getState(gateway, ownerIdentityTenantB);
     expect(stateFromTenantB.frozen_connectors.map((c) => c.connector_id)).toContain("h-cross-tenant"); // FORVENTET - global, ikke en lekkasje.
     await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "h-cross-tenant" } });
+  });
+});
+
+describe("I: B1-fix (D-166, arkitekt-review PR #93) - MINIMAL, handlings-nivå selvgjenoppretting for tilbakekalt DELT credential_ref, inkl. samtidig kill-switch+tilbakekalt-credential-deadlock", () => {
+  /** Rydder den DELTE interne refen tilbake til ikke-tilbakekalt uansett hvor en test feilet - denne refen deles av HELE describe-blokken sin gateway/adminPool. */
+  async function ensureSharedRefRestored(): Promise<void> {
+    await adminPool.query("DELETE FROM owner_control_state WHERE control_kind = 'credential_revocation' AND control_target = $1", [BUSINESS_INTERNAL_CREDENTIAL_REF]);
+  }
+
+  it("1) DELT INTERN CREDENTIAL SELVGJENOPPRETTING: revoke_credential på BUSINESS_INTERNAL_CREDENTIAL_REF blokkerer en NORMAL owner_controls-mutasjon (freeze_connector), men restore_credential selv når frem til transporten og gjenoppretter normal drift", async () => {
+    const { gateway, ownerControls } = freshStack();
+    try {
+      const revoked = await gateway.execute({
+        identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_credential",
+        parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "B1-test: den delte interne refen" }
+      });
+      expect(revoked.ok).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(true);
+
+      // NORMAL owner_controls-mutasjon (freeze_connector er IKKE i selvgjenopprettingsmengden) - MÅ nektes.
+      const normalDenied = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "b1-normal", reason: "skal nektes" } });
+      expect(normalDenied.ok).toBe(false);
+      if (!normalDenied.ok) expect(normalDenied.reason).toBe("credential_revoked");
+
+      // Diagnostikk: get_control_state (i selvgjenopprettingsmengden) - MÅ fortsatt fungere.
+      const diag = await getState(gateway, ownerIdentity);
+      expect(diag.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+
+      // Selve gjenopprettingen: restore_credential på DEN SAMME refen den selv trenger - NÅR FREM til transporten.
+      const restored = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(restored.ok).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(false);
+
+      // Normal drift gjenopprettet.
+      const normalWorksAgain = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "b1-normal-2", reason: "skal nå lykkes" } });
+      expect(normalWorksAgain.ok).toBe(true);
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "b1-normal-2" } });
+    } finally {
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("2) IKKE-EIER kan IKKE utnytte selvgjenopprettings-unntaket - restore_credential på den delte refen nektes for en ikke-eier-identitet ('class_c_no_mandate'), ingen skriving skjer", async () => {
+    const { gateway, ownerControls } = freshStack();
+    try {
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "B1-test-2" } });
+      const otherAttempt = await gateway.execute({ identity: otherIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(otherAttempt.ok).toBe(false);
+      if (!otherAttempt.ok) expect(otherAttempt.reason).toBe("class_c_no_mandate"); // selvgjenopprettingsunntaket dekker KUN kill-switch-/credential-sjekkene - eier-autoritetssjekken (klasse C) er UENDRET.
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(true); // fortsatt tilbakekalt - ikke-eieren fikk INGENTING gjort.
+      // Forfalsket identitet i PARAMETRE (aldri brukt til autorisasjon) avvises OGSÅ FØR transporten - strict()-skjema uendret av B1-fiksen.
+      const forged = await gateway.execute({
+        identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential",
+        parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, actor_person_id: OTHER } as never
+      });
+      expect(forged.ok).toBe(false);
+      if (!forged.ok) expect(forged.reason).toBe("invalid_parameters");
+    } finally {
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("3a) SAMTIDIG DEADLOCK, rekkefølge A (restore_credential FØR deactivate_kill_switch): kill switch aktiv OG delt credential tilbakekalt SAMTIDIG - gjenopprettes FULLSTENDIG via KUN kanoniske ToolGateway-handlinger, INGEN manuell SQL", async () => {
+    const { gateway, ownerControls, killSwitch } = freshStack();
+    try {
+      // Sett BEGGE tilstandene direkte via det durable authority-laget (samme lag `owner_controls.*` selv skriver til) -
+      // IKKE rå SQL - dette simulerer at begge ble aktivert i to separate, tidligere kall (naturlig rekkefølge-uavhengig).
+      await killSwitch.activateDurable("B1-test-3a: samtidig deadlock", OWNER);
+      await ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "B1-test-3a: samtidig deadlock", OWNER);
+      expect(await killSwitch.isActiveDurable()).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(true);
+
+      // Steg 1: restore_credential FØRST - må nå frem til transporten selv om kill switch OGSÅ er aktiv
+      // (PolicyGateway sin kill-switch-sjekk MÅ unnta restore_credential, ikke bare deactivate_kill_switch/get_control_state).
+      const step1 = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(step1.ok).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(false);
+      expect(await killSwitch.isActiveDurable()).toBe(true); // kill switch STÅR FORTSATT - kun credential-delen løst så langt.
+
+      // Steg 2: deactivate_kill_switch - credential er nå gjenopprettet, så selv UTEN unntak ville dette gått gjennom nå;
+      // beviser likevel den FULLE kanoniske kjeden fullfører.
+      const step2 = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+      expect(step2.ok).toBe(true);
+      expect(await killSwitch.isActiveDurable()).toBe(false);
+
+      // Full normal drift gjenopprettet.
+      const normalWorks = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "b1-3a", reason: "skal lykkes" } });
+      expect(normalWorks.ok).toBe(true);
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "b1-3a" } });
+    } finally {
+      await killSwitch.deactivateDurable(OWNER).catch(() => undefined);
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("3b) SAMTIDIG DEADLOCK, rekkefølge B (deactivate_kill_switch FØR restore_credential): SAMME to samtidige tilstander, MOTSATT gjenopprettingsrekkefølge - beviser BEGGE ordninger er deterministisk mulige, ikke bare én tilfeldig fungerende vei", async () => {
+    const { gateway, ownerControls, killSwitch } = freshStack();
+    try {
+      await killSwitch.activateDurable("B1-test-3b: samtidig deadlock, motsatt rekkefølge", OWNER);
+      await ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "B1-test-3b: samtidig deadlock, motsatt rekkefølge", OWNER);
+      expect(await killSwitch.isActiveDurable()).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(true);
+
+      // Steg 1: deactivate_kill_switch FØRST - må nå frem selv om DENS EGEN credential_ref FORTSATT er tilbakekalt
+      // (ToolGateway sin tilbakekalt-credential-sjekk MÅ unnta deactivate_kill_switch, ikke bare restore_credential).
+      const step1 = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+      expect(step1.ok).toBe(true);
+      expect(await killSwitch.isActiveDurable()).toBe(false);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(true); // credential-delen STÅR FORTSATT.
+
+      // Steg 2: restore_credential - kill switch er nå av, så dette lykkes uansett; beviser den fulle kjeden.
+      const step2 = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(step2.ok).toBe(true);
+      expect(await ownerControls.isRevokedDurable(BUSINESS_INTERNAL_CREDENTIAL_REF)).toBe(false);
+
+      const normalWorks = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "b1-3b", reason: "skal lykkes" } });
+      expect(normalWorks.ok).toBe(true);
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "b1-3b" } });
+    } finally {
+      await killSwitch.deactivateDurable(OWNER).catch(() => undefined);
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("4) DIAGNOSTIKK: get_control_state fungerer korrekt og ALDRI nektet i alle tre tilstander - kun credential tilbakekalt, kun kill switch aktiv, og BEGGE samtidig", async () => {
+    const { gateway, ownerControls, killSwitch } = freshStack();
+    try {
+      const onlyCredential = await getState(gateway, ownerIdentity);
+      expect(onlyCredential.kill_switch.active).toBe(false);
+
+      await ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "B1-test-4a", OWNER);
+      const diagCredentialOnly = await getState(gateway, ownerIdentity);
+      expect(diagCredentialOnly.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+
+      await killSwitch.activateDurable("B1-test-4b", OWNER);
+      const diagBoth = await getState(gateway, ownerIdentity);
+      expect(diagBoth.kill_switch.active).toBe(true);
+      expect(diagBoth.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+
+      await killSwitch.deactivateDurable(OWNER);
+      const diagKillSwitchLifted = await getState(gateway, ownerIdentity);
+      expect(diagKillSwitchLifted.kill_switch.active).toBe(false);
+      expect(diagKillSwitchLifted.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF); // credential-delen uendret av kill-switch-deaktivering.
+    } finally {
+      await killSwitch.deactivateDurable(OWNER).catch(() => undefined);
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("5) NORMAL NEKTELSE FORBLIR: activate_kill_switch/freeze_connector/unfreeze_connector/revoke_credential er ALDRI unntatt fra tilbakekalt-credential-sjekken - KUN de tre navngitte gjenopprettingshandlingene er det", async () => {
+    const { gateway, ownerControls } = freshStack();
+    try {
+      await ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "B1-test-5", OWNER);
+      for (const attempt of [
+        { action: "activate_kill_switch", parameters: { reason: "skal nektes" } },
+        { action: "freeze_connector", parameters: { connector_id: "b1-5", reason: "skal nektes" } },
+        { action: "unfreeze_connector", parameters: { connector_id: "b1-5" } },
+        { action: "revoke_credential", parameters: { credential_ref: "et-annet-mal", reason: "skal nektes" } }
+      ] as const) {
+        const result = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: attempt.action, parameters: attempt.parameters });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.reason).toBe("credential_revoked");
+      }
+    } finally {
+      await ensureSharedRefRestored();
+    }
+  });
+
+  it("6) EKSISTERENDE GJENOPPRETTING UENDRET: kill-switch- og selv-frys-gjenoppretting fra D-164 fungerer FORTSATT identisk etter B1-fiksen (ren regresjon, ingen ny credential-tilstand involvert)", async () => {
+    const { gateway } = freshStack();
+    await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason: "B1-test-6-regresjon" } });
+    const stillReadable = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "get_control_state", parameters: {} });
+    expect(stillReadable.ok).toBe(true);
+    const deactivated = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+    expect(deactivated.ok).toBe(true);
+    const afterRecovery = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "b1-6", reason: "skal lykkes" } });
+    expect(afterRecovery.ok).toBe(true);
+    await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: "b1-6" } });
+  });
+
+  it("7) AUDIT: gjenopprettingshandlinger (restore_credential/deactivate_kill_switch) under aktiv tilbakekalling/kill-switch er FORTSATT revidert med korrekt actor/reason, ALDRI en credential-VERDI", async () => {
+    const { gateway, ownerControls } = freshStack();
+    try {
+      await ownerControls.revokeCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, "B1-test-7", OWNER);
+      const restored = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(restored.ok).toBe(true);
+      const { rows } = await adminPool.query(
+        `SELECT person_id, type, decision, payload FROM audit_events WHERE tool_id = 'owner_controls' AND action = 'restore_credential' ORDER BY audit_id DESC LIMIT 1`
+      );
+      expect(rows).toHaveLength(1);
+      const row = rows[0] as { person_id: string; type: string; decision: string; payload: { credential_ref?: string } };
+      expect(row.person_id).toBe(OWNER);
+      expect(row.type).toBe("tool.executed");
+      expect(row.decision).toBe("ALLOW");
+      expect(row.payload.credential_ref).toBe(BUSINESS_INTERNAL_CREDENTIAL_REF); // referanse - ALDRI en credential-verdi.
+      expect(JSON.stringify(row.payload)).not.toContain("test-token"); // den faktiske secret-verdien fra `secrets.get()` - aldri i payload.
+    } finally {
+      await ensureSharedRefRestored();
+    }
   });
 });
