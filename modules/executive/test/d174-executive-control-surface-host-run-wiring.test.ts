@@ -1,0 +1,166 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+/**
+ * D-174 (B2+B3) host-akseptanse:
+ * `modules/executive/scripts/d174-executive-control-surface-host-run.ts` er
+ * den ENE host-kommandoen Tobias trenger for å bevise den SAMLEDE
+ * `executive.*`-mutasjonsflaten (owner_controls.*-gjennomslag inkl. K1/B1-
+ * selvgjenoppretting, finans-nødbryteren, Wallester `activate_card` sin
+ * nødbryter-gating, eier-vendt enhetstilbakekalling) LIVE. Speiler NØYAKTIG
+ * samme struktur som `k1-owner-control-authority-host-run-wiring.test.ts`
+ * (se dens egen filhode) - denne suiten beviser den strukturelt, uten å
+ * faktisk kjøre Docker/pnpm/embedded Postgres (det er selve host-
+ * akseptansens jobb, se B2+B3-ordren sitt HOST_ACCEPTANCE_REQUIRED-krav).
+ */
+function readSource(relativePath: string): string {
+  return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
+}
+
+const hostRunSource = readSource("../scripts/d174-executive-control-surface-host-run.ts");
+const liveScriptSource = readSource("../scripts/d174-executive-control-surface-live.ts");
+
+describe("workspace bootstrap - gjenbruker EKSISTERENDE Windows-sikker pnpm-resolusjon, ingen ny mekanisme", () => {
+  it("importerer buildSpawnInvocation/readPinnedPackageManager/resolvePackageManager fra DEN DELTE lib-en (ikke en duplisert kopi)", () => {
+    expect(hostRunSource).toMatch(
+      /import\s*\{[^}]*buildSpawnInvocation[^}]*readPinnedPackageManager[^}]*resolvePackageManager[^}]*\}\s*from\s*"\.\.\/\.\.\/core\/scripts\/lib\/package-manager-resolve\.ts"/s
+    );
+  });
+  it("kjører install --frozen-lockfile FØR docker build, aldri --no-frozen-lockfile", () => {
+    const installIdx = hostRunSource.indexOf('"install", "--frozen-lockfile"');
+    const dockerIdx = hostRunSource.indexOf("ensurePostgresAndFreshImages(");
+    expect(installIdx).toBeGreaterThan(-1);
+    expect(dockerIdx).toBeGreaterThan(-1);
+    expect(installIdx).toBeLessThan(dockerIdx);
+    expect(hostRunSource).not.toMatch(/--no-frozen-lockfile/);
+  });
+  it("bruker ALDRI shell:true i faktisk kjørbar kode (DEP0190-trygt)", () => {
+    for (const source of [hostRunSource, liveScriptSource]) {
+      const codeOnly = source.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+      expect(codeOnly).not.toMatch(/shell:\s*true/);
+    }
+    expect(hostRunSource).toContain('execFileSync(command, args, { stdio: "inherit", cwd });');
+  });
+  it("live-scriptet restarter ALDRI containere midt i seg selv (I MOTSETNING til K1) - api-/worker-prosessparitet OG restart-durabilitet er ALLEREDE bevist av K1/B1", () => {
+    expect(liveScriptSource).not.toContain('execFileSync("docker"');
+    expect(liveScriptSource).not.toContain("--compose-args");
+  });
+});
+
+describe("migrate/api/worker bygges ferske FØR migrate kjøres, deretter kjøres migrate FØR selve akseptansen", () => {
+  it("bygger migrate/api/worker FØR migrate faktisk kjøres", () => {
+    const buildIdx = hostRunSource.indexOf('"build", "migrate", "api", "worker"');
+    const migrateRunIdx = hostRunSource.indexOf('"run", "--rm", "migrate"');
+    expect(buildIdx).toBeGreaterThan(-1);
+    expect(migrateRunIdx).toBeGreaterThan(-1);
+    expect(buildIdx).toBeLessThan(migrateRunIdx);
+  });
+  it("kjører migrate FØR den initielle api/worker-restarten, og kaller deretter live-scriptet UTEN compose-argumenter", () => {
+    const migrateRunIdx = hostRunSource.indexOf('"run", "--rm", "migrate"');
+    const restartIdx = hostRunSource.indexOf('"up", "-d", "--force-recreate", "api", "worker"');
+    const liveCallIdx = hostRunSource.indexOf('"modules/executive/scripts/d174-executive-control-surface-live.ts"');
+    expect(migrateRunIdx).toBeGreaterThan(-1);
+    expect(restartIdx).toBeGreaterThan(migrateRunIdx);
+    expect(liveCallIdx).toBeGreaterThan(restartIdx);
+    expect(hostRunSource).not.toContain('"--compose-args"');
+  });
+});
+
+describe("live-scriptet bruker den EKTE, konfigurerte eier-identiteten - ALDRI en syntetisk 'test-eier' for selve kill switch-/finans-nødbryter-mutasjonen", () => {
+  it("OWNER_PERSON/OWNER_TENANT kommer fra JARVIS_OWNER_PERSON_ID/JARVIS_TENANT_ID (samme env-variabler som apps/api/src/main.ts), ikke en hardkodet syntetisk verdi", () => {
+    expect(liveScriptSource).toContain('process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"');
+    expect(liveScriptSource).toContain('process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"');
+  });
+  it("KUN connector-/enhets-/kort-målene er syntetiske/kjøre-unike - aldri en ekte, i bruk værende connector/enhet/kort", () => {
+    expect(liveScriptSource).toContain("SYNTHETIC_CONNECTOR = `d174_acceptance_connector_${runId}`");
+    expect(liveScriptSource).toContain("SYNTHETIC_DEVICE = `d174_acceptance_device_${runId}`");
+  });
+});
+
+describe("live-scriptet bruker PRODUKSJONENS komposisjon - samme secret-kjede og samme *Durable()-mønster som apps/api/src/main.ts", () => {
+  it("secrets: FallbackSecretProvider(EnvSecretProvider, BusinessInternalSecretProvider) - samme kjede som main.ts/K1", () => {
+    expect(liveScriptSource).toContain("new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())");
+  });
+  it("ToolGateway konstrueres med `ownerControls` som 4. argument (samme frys-/tilbakekalls-håndhevelse som main.ts/worker-main.ts)", () => {
+    expect(liveScriptSource).toContain("new ToolGateway(sidePool, policy, secrets, ownerControls)");
+  });
+  it("registrerer executive.*/owner_controls.*/finance.*/finance_wallester.* på SAMME ToolGateway-instans - ingen parallell registreringsvei", () => {
+    expect(liveScriptSource).toContain("executiveToolDefinitions(new ExecutiveTransport(executiveService))");
+    expect(liveScriptSource).toContain("ownerControlsToolDefinitions(new OwnerControlsTransport(ownerControlsService))");
+    expect(liveScriptSource).toMatch(/firstWaveTools\(\{\s*\n?\s*finance:/);
+  });
+  it("OwnerControlsService gis device-tilbakekallings-avhengighetene (pool+grants+authority) som 3. konstruktørargument - revoke_device er FAKTISK koblet, ikke bare deklarert", () => {
+    expect(liveScriptSource).toContain("new OwnerControlsService(killSwitch, ownerControls, { pool: sidePool, grants, authority })");
+  });
+});
+
+describe("INGEN ekte provider-kall: Wallester-gatewayen er en INJISERT FAKE ved nettverksgrensen, ALDRI en ekte HTTP-transport", () => {
+  it("CardService konstrueres med en gatewayFactory som returnerer DEN LOKALE `wallesterFake`, ikke defaultWallesterGatewayFactory/WallesterTransport", () => {
+    expect(liveScriptSource).not.toContain("defaultWallesterGatewayFactory");
+    expect(liveScriptSource).not.toContain("new WallesterTransport(");
+    expect(liveScriptSource).toContain("() => wallesterFake as unknown as WallesterGateway");
+  });
+  it("beviser B3-fiksen: activate_card blokkeres FØR provider-kallet (activateCalls uendret), og freeze/close forblir tillatt mens nødbryteren er aktiv", () => {
+    const activateSectionIdx = liveScriptSource.indexOf("d174_wallester_activate_card_blocked_before_provider_call");
+    const spendReducingSectionIdx = liveScriptSource.indexOf("d174_wallester_spend_reducing_actions_still_allowed");
+    expect(activateSectionIdx).toBeGreaterThan(-1);
+    expect(spendReducingSectionIdx).toBeGreaterThan(activateSectionIdx);
+    expect(liveScriptSource).toContain("providerCallNeverMade = wallesterFake.activateCalls === activateCallsBefore");
+  });
+});
+
+describe("live-scriptet garanterer opprydding OGSÅ ved feil (try/finally), og verifiserer owner_control_state er UENDRET fra FØR kjøringen", () => {
+  it("CLEANUP-seksjonen kjøres inni en `finally`-blokk rundt HELE hovedsekvensen", () => {
+    const tryIdx = liveScriptSource.indexOf("try {");
+    const finallyIdx = liveScriptSource.indexOf("} finally {");
+    const cleanupIdx = liveScriptSource.indexOf('section("CLEANUP');
+    expect(tryIdx).toBeGreaterThan(-1);
+    expect(finallyIdx).toBeGreaterThan(tryIdx);
+    expect(cleanupIdx).toBeGreaterThan(finallyIdx);
+  });
+  it("sammenligner owner_control_state FØR og ETTER byte-for-byte (JSON.stringify-likhet), ikke bare et delmengde-sjekk", () => {
+    expect(liveScriptSource).toContain("JSON.stringify(snapshotAfter) === JSON.stringify(snapshotBefore)");
+  });
+  it("CLEANUP fjerner de synthetic card-/enhets-/sesjons-/grant-radene (card_events/card_spend_policies/provider_cards/session_grants/sessions/devices) - INGEN residue", () => {
+    for (const table of ["card_events", "card_spend_policies", "provider_cards", "session_grants", "sessions", "devices"]) {
+      expect(liveScriptSource).toContain(`DELETE FROM ${table}`);
+    }
+  });
+});
+
+describe("live-scriptet bruker ALDRI en fake PASS for Q-21-sjekken (BLOCKED_BY_RUNTIME_ROLE-fallback finnes)", () => {
+  it("setter ALLE markører til BLOCKED_BY_RUNTIME_ROLE hvis Q-21-sjekken feiler", () => {
+    expect(liveScriptSource).toContain('results[key] = "BLOCKED_BY_RUNTIME_ROLE"');
+  });
+});
+
+describe("audit-bevis er avgrenset til (session_id, vannmerke) - SAMME D-167-disiplin som K1/B1, ALDRI en håndplukket 'siste N rader'-grense", () => {
+  it("importerer captureAuditWatermark/queryRunScopedOwnerControlsAudit fra DEN DELTE hjelpe-modulen (ikke en dupliserende, ad-hoc spørring)", () => {
+    expect(liveScriptSource).toMatch(
+      /import\s*\{[^}]*captureAuditWatermark[^}]*queryRunScopedOwnerControlsAudit[^}]*\}\s*from\s*"\.\.\/\.\.\/owner-controls\/src\/audit-evidence\.ts"/s
+    );
+  });
+  it("tar vannmerket FØR kjøringens FØRSTE mutasjon", () => {
+    const watermarkIdx = liveScriptSource.indexOf("const auditWatermark = await captureAuditWatermark(adminPool);");
+    const firstSectionIdx = liveScriptSource.indexOf('section("1) executive.activate_kill_switch');
+    expect(watermarkIdx).toBeGreaterThan(-1);
+    expect(firstSectionIdx).toBeGreaterThan(-1);
+    expect(watermarkIdx).toBeLessThan(firstSectionIdx);
+  });
+  it("INGEN bar 'ORDER BY audit_id DESC LIMIT N' UTEN en forutgående session_id/vannmerke-avgrensning", () => {
+    expect(liveScriptSource).not.toMatch(/ORDER BY audit_id DESC LIMIT \d+/);
+  });
+  it("audit-spørringen kaller queryRunScopedOwnerControlsAudit med BÅDE sessionId OG watermark", () => {
+    const calls = liveScriptSource.match(/queryRunScopedOwnerControlsAudit\(adminPool,\s*\{[^}]*\}/gs) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    for (const call of calls) {
+      expect(call).toContain("sessionId:");
+      expect(call).toContain("watermark:");
+    }
+  });
+  it("beviser at INGEN credential-VERDI/grant-token/device-fingerprint lekker i audit-payloaden (kun credential_ref/device_id/reason)", () => {
+    expect(liveScriptSource).toContain("noSecretLeak");
+    expect(liveScriptSource).toContain('"d174-fake-fingerprint"');
+  });
+});
