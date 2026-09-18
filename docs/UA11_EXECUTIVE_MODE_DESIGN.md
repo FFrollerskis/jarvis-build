@@ -270,3 +270,12 @@ Masterplanens UA-11-akseptansekriterier:
    UBETINGET `identity.tenant_id` (INGEN `tenant_id`-felt i skjemaet); mål-enheten kan fortsatt tilhøre en
    ANNEN PERSON/delegat i SAMME tenant; en enhet i en ANNEN tenant feiler LUKKET (`DeviceNotFoundError`),
    ALDRI et stille `ok:true`/`revoked_grants:0`. Se D-175 for full begrunnelse/testevidens.
+
+   **RETTET 2026-09-18 (D-176, arkitekt-re-review 5251073737, BLOKKER B5):** `executive.
+   get_control_surface_status` selv ble AVSLÅTT av NØYAKTIG kill-switch-aktiv-/tilbakekalt-credential-
+   gaten den skulle la eieren SE FORBI - D-174/D-175 sin `tool_id === "executive"`-utvidelse antok
+   feilaktig identiske handlingsnavn (`get_control_surface_status` ≠ `get_control_state`), OG de to
+   nøstede lesingene den komponerer (`situations.get_pause_state`/`finance.get_kill_switch`) var
+   HELLER IKKE unntatt. Ny `isSelfRecoveryAction(toolId, action)` erstatter unionen med en eksplisitt
+   per-(tool_id,action)-mapping for alle fire tool_id-ene - fortsatt like smalt, INGEN mutasjon lagt
+   til. Se D-176 for full begrunnelse/testevidens.

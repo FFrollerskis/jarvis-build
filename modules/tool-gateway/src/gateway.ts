@@ -2,7 +2,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { CapabilityClass, IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { withTenantTransaction, writeAudit } from "@jarvis/core";
-import { OWNER_CONTROLS_SELF_RECOVERY_ACTIONS, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
+import { isSelfRecoveryAction, type OwnerControls, type PolicyGateway } from "@jarvis/policy";
 
 /** Secrets bak adapter (D-16): env/SOPS nå; Infisical/OpenBao (Q-05, krever Docker) senere. */
 export interface SecretProvider {
@@ -306,8 +306,7 @@ export class ToolGateway {
     // `revoke_credential` er ALDRI unntatt herfra.
     //
     // D-174 (B2, unified owner-control-surface mutation completion):
-    // `executive.*` proxyer NÅ de samme tre selvgjenopprettings-handlingene
-    // (`get_control_state`/`deactivate_kill_switch`/`restore_credential`)
+    // `executive.*` proxyer NÅ de samme selvgjenopprettings-handlingene
     // videre til `owner_controls.*` via en NESTET `ToolGateway.execute()`-
     // kall (executive → owner_controls). Den nestede INDRE kallet er
     // allerede trygt (tool_id="owner_controls" der). Men den YTRE
@@ -315,17 +314,26 @@ export class ToolGateway {
     // det når det nestede kallet - uten dette tillegget ville den ytre
     // sjekken blokkert executive.deactivate_kill_switch/restore_credential
     // FØR de i det hele tatt kunne nå den trygge, nestede owner_controls-
-    // stien, og dermed brutt B1-gjenoppretting via executive. Dette virker
-    // KUN fordi de nye executive-handlingsnavnene er IDENTISKE med
-    // owner_controls sine (samme streng i BEGGE `OWNER_CONTROLS_SELF_
-    // RECOVERY_ACTIONS`-oppslagene) - se `owner-control-store.ts`.
-    // `get_control_surface_status` (executive) er BEVISST IKKE inkludert
-    // her - `owner_controls.get_control_state` direkte forblir den
-    // kanoniske, alltid-tilgjengelige veien; unntaket utvides ALDRI utover
-    // de tre navngitte handlingene selv når kalleren er executive.*.
-    const isCredentialRevocationSelfRecovery =
-      (request.tool_id === "owner_controls" || request.tool_id === "executive") &&
-      OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(request.action);
+    // stien, og dermed brutt B1-gjenoppretting via executive.
+    // D-176 (RETTET, arkitekt-review 5251073737, BLOKKER B5): den
+    // OPPRINNELIGE D-174-antakelsen her - at "executive-handlingsnavnene er
+    // IDENTISKE med owner_controls sine" - var FEIL for LESING:
+    // `executive.get_control_surface_status` het BEVISST IKKE
+    // `get_control_state`, så den ble AVSLÅTT av akkurat denne
+    // tilbakekalt-credential-sjekken (og den analoge kill-switch-sjekken i
+    // `PolicyGateway.authorize()`) mens den delte refen var tilbakekalt -
+    // et REELT brudd på B2 sitt "ETT panel for lesing OG gjenoppretting".
+    // `isSelfRecoveryAction()` erstatter nå BEGGE de to tidligere
+    // `tool_id === "..."`-unionene med en eksplisitt per-(tool_id,action)-
+    // mapping (se owner-control-store.ts) - `executive.get_control_surface_
+    // status` OG dens NØSTEDE `situations.get_pause_state`/`finance.
+    // get_kill_switch`-kall er NÅ med (uten dette ville selve komposisjonen
+    // FORTSATT feilet under lås, selv etter at den ytre executive-sjekken
+    // alene var rettet - se D-176), `owner_controls.get_control_state`
+    // direkte forblir uendret den kanoniske, alltid-tilgjengelige veien.
+    // Unntaket er FORTSATT like smalt - kun disse navngitte handlingene per
+    // tool_id, ALDRI en bredere "alle lesinger"-regel for noen av de fire.
+    const isCredentialRevocationSelfRecovery = isSelfRecoveryAction(request.tool_id, request.action);
     if (!isCredentialRevocationSelfRecovery && (await this.controls?.isRevokedDurable(definition.credential_ref))) {
       return this.deny(request, "credential_revoked");
     }

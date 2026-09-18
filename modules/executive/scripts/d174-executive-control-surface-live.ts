@@ -47,6 +47,7 @@ import {
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider } from "@jarvis/business";
 import { EnvSecretProvider, FallbackSecretProvider, firstWaveTools, ToolGateway } from "@jarvis/tool-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { DomainPauseRegistry, SituationEngine, SituationsTransport, situationsToolDefinitions } from "@jarvis/situations";
 import { captureAuditWatermark, queryRunScopedOwnerControlsAudit } from "../../owner-controls/src/audit-evidence.ts";
 import { OwnerControlsService } from "../../owner-controls/src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../../owner-controls/src/transport.ts";
@@ -65,6 +66,7 @@ const results: Record<string, Verdict> = {
   d174_executive_deactivate_self_recovery: "FAIL",
   d174_executive_restore_credential_self_recovery: "FAIL",
   d174_executive_combined_deadlock_recovery: "FAIL",
+  d176_status_surface_survives_lockdown: "FAIL",
   d174_executive_negative_control_non_recovery_blocked: "FAIL",
   d174_finance_kill_switch_via_executive: "FAIL",
   d174_wallester_activate_card_blocked_before_provider_call: "FAIL",
@@ -134,13 +136,13 @@ class ScriptedWallesterGateway implements Partial<WallesterGateway> {
 }
 const wallesterFake = new ScriptedWallesterGateway();
 
-function buildStack(sidePool: pg.Pool): {
+async function buildStack(sidePool: pg.Pool): Promise<{
   killSwitch: KillSwitch;
   ownerControls: OwnerControls;
   gateway: ToolGateway;
   cardService: CardService;
   financeService: FinanceService;
-} {
+}> {
   const killSwitch = new KillSwitch(sidePool, authority);
   const ownerControls = new OwnerControls(killSwitch, sidePool, authority);
   const policy = new PolicyGateway({
@@ -156,6 +158,16 @@ function buildStack(sidePool: pg.Pool): {
   const grants = new SessionGrantService(sidePool);
   const ownerControlsService = new OwnerControlsService(killSwitch, ownerControls, { pool: sidePool, grants, authority });
   for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(ownerControlsService))) gateway.register(tool);
+
+  // D-176 (arkitekt-review 5251073737, BLOKKER B5): `executive.get_control_surface_status`
+  // komponerer OGSÅ `situations.get_pause_state` - MÅ være registrert her for
+  // at seksjon 4b under (lesing under lås) skal kunne bevise noe i det hele
+  // tatt, ikke bare typecheck/registrere. Domenepause-tilstanden selv er
+  // IKKE del av B5-funnet - kun at LESINGEN av den må overleve lås.
+  const domainPauses = new DomainPauseRegistry(sidePool, authority);
+  await domainPauses.restore();
+  const situationEngine = new SituationEngine(sidePool, domainPauses, authority);
+  for (const tool of situationsToolDefinitions(new SituationsTransport(situationEngine, domainPauses))) gateway.register(tool);
 
   const executiveService = new ExecutiveService(gateway);
   for (const tool of executiveToolDefinitions(new ExecutiveTransport(executiveService))) gateway.register(tool);
@@ -217,7 +229,7 @@ async function main(): Promise<void> {
   let cardId: string | undefined;
   try {
     sidePool = createPool(configFromEnv());
-    const stack = buildStack(sidePool);
+    const stack = await buildStack(sidePool);
 
     await section("1) executive.activate_kill_switch aktiverer DEN EKTE, delte killSwitch - owner_controls.freeze_connector blokkeres reelt", async () => {
       const activated = await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: `D-174 host-akseptanse ${runId}` } });
@@ -258,6 +270,42 @@ async function main(): Promise<void> {
       results.d174_executive_combined_deadlock_recovery = ok ? "PASS" : "FAIL";
       log(`restore_first_ok=${restoreFirst.ok} deactivate_second_ok=${deactivateSecond.ok} recovered_ok=${nowAllowed.ok} -> ${results.d174_executive_combined_deadlock_recovery}`);
     });
+
+    await section(
+      "4b) D-176 (arkitekt-review 5251073737, BLOKKER B5): executive.get_control_surface_status LYKKES og rapporterer SANNFERDIG under BEGGE lås-tilstandene (kill switch aktiv, delt credential tilbakekalt, BEGGE samtidig) - FØR gjenoppretting; ORDINÆR handling forblir NEKTET gjennom hele lås-vinduet; gjenoppretter deretter via executive.*",
+      async () => {
+        type StatusData = { owner_control: { kill_switch: { active: boolean; reason: string | null }; revoked_credentials: Array<{ credential_ref: string }> } };
+        const readStatus = () => stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+
+        await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: `D-176 host 4b-killswitch ${runId}` } });
+        const statusUnderKillSwitch = await readStatus();
+        const killSwitchStepOk = statusUnderKillSwitch.ok && (statusUnderKillSwitch.data as unknown as StatusData).owner_control.kill_switch.active === true;
+
+        await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: `D-176 host 4b-credential ${runId}` } });
+        const statusUnderBoth = await readStatus();
+        const bothStepOk =
+          statusUnderBoth.ok &&
+          (statusUnderBoth.data as unknown as StatusData).owner_control.kill_switch.active === true &&
+          (statusUnderBoth.data as unknown as StatusData).owner_control.revoked_credentials.some((c) => c.credential_ref === BUSINESS_INTERNAL_CREDENTIAL_REF);
+
+        const blockedDuringLock = await stack.gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR, reason: "should-stay-blocked-during-4b" } });
+        const blockedOk = !blockedDuringLock.ok && (blockedDuringLock as { reason?: string }).reason === "kill_switch_active";
+
+        const restored = await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+        const deactivated = await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
+        const statusAfterRecovery = await readStatus();
+        const clearedOk =
+          statusAfterRecovery.ok &&
+          (statusAfterRecovery.data as unknown as StatusData).owner_control.kill_switch.active === false &&
+          !(statusAfterRecovery.data as unknown as StatusData).owner_control.revoked_credentials.some((c) => c.credential_ref === BUSINESS_INTERNAL_CREDENTIAL_REF);
+
+        const ok = killSwitchStepOk && bothStepOk && blockedOk && restored.ok && deactivated.ok && clearedOk;
+        results.d176_status_surface_survives_lockdown = ok ? "PASS" : "FAIL";
+        log(
+          `status_under_killswitch_ok=${killSwitchStepOk} status_under_both_ok=${bothStepOk} ordinary_action_blocked=${blockedOk} restore_ok=${restored.ok} deactivate_ok=${deactivated.ok} status_cleared_ok=${clearedOk} -> ${results.d176_status_surface_survives_lockdown}`
+        );
+      }
+    );
 
     await section("5) NEGATIV KONTROLL: executive.freeze_connector/revoke_credential (IKKE de tre navngitte gjenopprettingshandlingene) forblir BLOKKERT mens kill switchen er aktiv", async () => {
       await stack.gateway.execute({ identity: ownerIdentity, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: `D-174 negative-control ${runId}` } });
@@ -368,7 +416,7 @@ async function main(): Promise<void> {
     await section("CLEANUP (kill switch deaktivert, delt credential gjenopprettet, synthetic connector/kort/enhet fjernet, owner_control_state IDENTISK med før kjøringen)", async () => {
       const cleanupPool = createPool(configFromEnv());
       try {
-        const cleanupStack = buildStack(cleanupPool);
+        const cleanupStack = await buildStack(cleanupPool);
         await cleanupStack.gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} }).catch(() => undefined);
         await cleanupStack.gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR } }).catch(() => undefined);
         await cleanupStack.ownerControls.restoreCredentialDurable(BUSINESS_INTERNAL_CREDENTIAL_REF, OWNER_PERSON).catch(() => undefined);

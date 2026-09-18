@@ -4317,6 +4317,20 @@ annens sesjon); en enhet som kun finnes i en ANNEN tenant feiler LUKKET (ny `Dev
 et stille `ok:true`/`revoked_grants:0`. Ingen ny autorisasjonsbutikk, ingen ny tenant-tilstand. Se D-175 i
 `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
 
+**RETTET 2026-09-18 (D-176, arkitekt-re-review 5251073737, BLOKKER B5):** `executive.
+get_control_surface_status` selv ble AVSLÅTT av NØYAKTIG kill-switch-aktiv-/tilbakekalt-credential-
+gaten den skulle la eieren SE FORBI. D-174/D-175 sin `tool_id === "executive"`-utvidelse av
+`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken antok FEILAKTIG at `executive` sine handlingsnavn er
+identiske med `owner_controls` sine - det holder for de to MUTASJONENE, men IKKE for LESING
+(`get_control_surface_status` ≠ `get_control_state`). Dypere funn oppdaget UNDER selve rettelsen:
+`getControlSurfaceStatus()` komponerer OGSÅ `situations.get_pause_state`/`finance.get_kill_switch` via
+to YTTERLIGERE, UAVHENGIG gatede nøstede kall - uten å unnta OGSÅ disse ville komposisjonen fortsatt
+kastet under lås. RETTET: ny `isSelfRecoveryAction(toolId, action)` (owner-control-store.ts) erstatter
+den forrige unionen med en eksplisitt per-(tool_id,action)-mapping for ALLE FIRE tool_id-ene
+(`owner_controls`/`executive`/`situations`/`finance`) - fortsatt like smalt, INGEN mutasjon lagt til,
+INGEN ny autoritets-/tenant-tilstand. Se D-176 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+begrunnelse/testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

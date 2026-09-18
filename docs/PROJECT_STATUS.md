@@ -2,11 +2,15 @@
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-b2-b3-control-surface-mutation`, PR #95,
 exact base `main=ac5f941724947eef8ee4935087cc58738fb8a828` = PR #94 sin merge-commit). Aktiv oppgave:
-**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4 - uavhengig arkitekt-review 5250409538):
-SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG), FINANS-KILL-SWITCH-DEKNINGSREPARASJON
-(Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING - MÅL-TENANTEN er `identity.tenant_id`,
-ALDRI et kaller-oppgitt parameter (D-175 rettet D-174 sin opprinnelige, feilaktige "tenant_id er et
-fritt mål-parameter"-antakelse for `revoke_device`).**
+**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4; D-176, BLOKKER B5 - uavhengige arkitekt-
+re-reviews 5250409538/5251073737):
+SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG OG LESING), FINANS-KILL-SWITCH-
+DEKNINGSREPARASJON (Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING - MÅL-TENANTEN er
+`identity.tenant_id`, ALDRI et kaller-oppgitt parameter (D-175 rettet D-174 sin opprinnelige,
+feilaktige "tenant_id er et fritt mål-parameter"-antakelse for `revoke_device`) - OG
+`executive.get_control_surface_status` (D-176 rettet D-174/D-175 sin feilaktige antakelse om at
+`executive` sine handlingsnavn er identiske med `owner_controls` sine for LESING, PLUSS at samme
+lesing sine to NØSTEDE `situations`/`finance`-kall også måtte unntas fra lås-gatene).**
 PR #94 (D-169 t.o.m. D-173, docs-only closeout av post-K1 re-audit-syklusen) er MERGET til `main`. Denne
 PR-en er den DEFINERTE "neste interne slice" (B2+B3) sin faktiske implementasjon - IKKE lenger
 docs-only.
@@ -54,7 +58,11 @@ docs-only.
 | Enhet ("device") | `owner_controls.revoke_device` (NY, D-174, RETTET D-175) → `SessionGrantService.revokeForDeviceOn()`, mål-tenant = `identity.tenant_id` | **JA (D-174/D-175, NY handling)** | Lukket |
 | Autonomi-/situasjonsdomene | `situations.pause_domain`/`resume_domain` | Ja (uendret, K1/UA-10 P1) | Allerede lukket |
 
-**Alle syv mål er nå nåbare fra ÉTT kontrollpanel (`executive.*`) for BÅDE lesing OG mutasjon.**
+**Alle syv mål er nå nåbare fra ÉTT kontrollpanel (`executive.*`) for BÅDE lesing OG mutasjon - OGSÅ
+UNDER LÅS (D-176, BLOKKER B5): `executive.get_control_surface_status` selv, PLUSS de to nøstede
+`situations.get_pause_state`/`finance.get_kill_switch`-lesingene den komponerer, overlever nå BÅDE
+kill-switch-aktiv- og delt-credential-tilbakekalt-gaten - FØR D-176 ble denne samlede lesingen selv
+avslått akkurat når eieren mest trengte den.**
 `INTERNAL_BUILD_BLOCKERS` fra D-173 er derfor **NONE** (RETTET fra D-173 sin navngitte liste).
 `INTERNAL_BUILD_COMPLETE=true` (RETTET fra D-173 sin `false` - de tre navngitte internt-byggbare
 gapene som holdt den `false`, er nå alle lukket av denne PR-en). `SOVEREIGN_COMPLETE=false` FORBLIR
@@ -71,7 +79,13 @@ Se D-174 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse. Kort:
    `OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekk gjelder nå BÅDE `tool_id === "owner_controls"` OG
    `tool_id === "executive"` - uten dette ville `executive.deactivate_kill_switch`/`restore_credential`
    selv blitt blokkert av den YTRE kill-switch-/credential-revoked-sjekken før de nådde det allerede
-   trygge, nøstede `owner_controls`-kallet.
+   trygge, nøstede `owner_controls`-kallet. **RETTET (D-176, BLOKKER B5):** den opprinnelige `tool_id
+   === "..."`-unionen antok FEILAKTIG identiske handlingsnavn på `executive`/`owner_controls` for
+   LESING (`get_control_surface_status` ≠ `get_control_state`), OG at kun DISSE to tool_id-ene var
+   berørt - `executive.get_control_surface_status` sine to NØSTEDE lesekall (`situations.
+   get_pause_state`/`finance.get_kill_switch`) er OGSÅ uavhengig gatet. Ny `isSelfRecoveryAction
+   (toolId, action)` (owner-control-store.ts) erstatter unionen med en eksplisitt per-(tool_id,action)-
+   mapping for ALLE FIRE tool_id-ene - fortsatt like smalt, INGEN mutasjon lagt til.
 3. **`executive.*` nye mutasjoner:** `activate_kill_switch`/`deactivate_kill_switch`/
    `freeze_connector`/`unfreeze_connector`/`revoke_credential`/`restore_credential`/`revoke_device`/
    `enable_finance_kill_switch`/`disable_finance_kill_switch`/`get_finance_kill_switch` - ALLE tynne
@@ -89,9 +103,11 @@ Se D-174 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse. Kort:
    stack) og ny "K"-blokk (`modules/owner-controls/test/owner-control-authority.test.ts`, ekte
    `session_grants`).
 8. **Host-akseptanse:** ny `modules/executive/scripts/d174-executive-control-surface-live.ts` +
-   `-host-run.ts` + strukturell wiring-test (23 tester, grønn i denne sesjonen). `HOST_ACCEPTANCE_
-   STATUS=PENDING` - IKKE kjørt mot ekte Docker/Postgres i denne sesjonen (sandkassen her kan
-   strukturelt ikke kjøre `docker compose`); scriptet er klart for Tobias.
+   `-host-run.ts` + strukturell wiring-test (30 tester, grønn i denne sesjonen - utvidet fra 23 av
+   D-175, fra 26 av D-176). `HOST_ACCEPTANCE_STATUS=PENDING` - IKKE kjørt mot ekte Docker/Postgres i
+   denne sesjonen (sandkassen her kan strukturelt ikke kjøre `docker compose`); scriptet er klart for
+   Tobias, med ny seksjon 4b (D-176) som beviser `executive.get_control_surface_status` under BEGGE
+   lås-tilstandene FØR gjenoppretting.
 
 ## Kjent, UENDRET sandkasse-/miljøbegrensning (IKKE en kodefeil, IKKE introdusert av denne PR-en)
 

@@ -10,7 +10,7 @@ import type { DeviceRegistry } from "./device-registry.ts";
 import type { InfraExecutionGate } from "./infra-execution-gate.ts";
 import { KillSwitch } from "./kill-switch.ts";
 import type { NonceStore } from "./nonce-store.ts";
-import { OWNER_CONTROLS_SELF_RECOVERY_ACTIONS } from "./owner-control-store.ts";
+import { isSelfRecoveryAction } from "./owner-control-store.ts";
 
 export type Decision = "ALLOW" | "DENY";
 
@@ -120,13 +120,17 @@ export class PolicyGateway {
     //
     // D-174 (B2): SAMME utvidelse som `ToolGateway.execute()` sin
     // tilbakekalt-credential-sjekk (se der for full begrunnelse) - den
-    // YTRE `executive.*`-proxyen for disse tre navngitte handlingene må
+    // YTRE `executive.*`-proxyen for disse navngitte handlingene må
     // IKKE selv bli avslått av kill-switch-aktiv-sjekken FØR den når det
-    // nestede, allerede trygge `owner_controls.*`-kallet. Fungerer KUN
-    // fordi executive-handlingsnavnene er IDENTISKE med owner_controls sine.
-    const isKillSwitchSelfRecovery =
-      (toolCall.data.tool_id === "owner_controls" || toolCall.data.tool_id === "executive") &&
-      OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(toolCall.data.action);
+    // nestede, allerede trygge `owner_controls.*`-kallet.
+    // D-176 (RETTET, BLOKKER B5): `executive` sine handlingsnavn er IKKE
+    // identiske med `owner_controls` sine for LESING (`get_control_surface_
+    // status` vs. `get_control_state`), OG `get_control_surface_status`
+    // komponerer i tillegg `situations.get_pause_state`/`finance.
+    // get_kill_switch` - se `isSelfRecoveryAction()` i owner-control-store.ts
+    // for den eksplisitte per-(tool_id,action)-mappingen som ERSTATTER den
+    // tidligere (feilaktige) antakelsen om identiske navn/kun to tool_id-er.
+    const isKillSwitchSelfRecovery = isSelfRecoveryAction(toolCall.data.tool_id, toolCall.data.action);
     if (!isKillSwitchSelfRecovery && (await this.killSwitch.isActiveDurable())) {
       return this.finish(request, "DENY", "kill_switch_active");
     }

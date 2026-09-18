@@ -378,11 +378,14 @@ describe("G: get_control_surface_status (K1, D-164; utvidet D-174) - komponerer 
     await gateway.execute({ identity: ownerA, tool_id: "situations", action: "unpause_domain", parameters: { domain: "spend" } });
   });
 
-  it("global KillSwitch (samme instans policy.authorize() sjekker) nekter OGSÅ get_control_surface_status - ingen stille tom status som skjuler at gaten var aktiv", async () => {
+  it("D-176 (RETTET, BLOKKER B5): global KillSwitch (samme instans policy.authorize() sjekker) nekter IKKE LENGER get_control_surface_status selv - LYKKES nå (D-176), mens en ORDINÆR handling gjennom SAMME gateway FORTSATT nektes av SAMME kill switch", async () => {
     killSwitch.activate("g-block-test");
     try {
-      const result = await gateway.execute({ identity: ownerA, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
-      expect(result.ok).toBe(false);
+      const status = await gateway.execute({ identity: ownerA, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+      expect(status.ok).toBe(true); // D-176: FØR rettelsen ble denne AVSLÅTT - se D-175/D-176 i owner-control-store.ts.
+      const blocked = await gateway.execute({ identity: ownerA, tool_id: "owner_controls", action: "freeze_connector", parameters: { connector_id: "g-block-conn", reason: "skal fortsatt nektes" } });
+      expect(blocked.ok).toBe(false);
+      expect(!blocked.ok && blocked.reason).toBe("kill_switch_active"); // beviser at DENNE testens `killSwitch`-instans FORTSATT er den reelle gaten - ingen svekkelse utover det navngitte unntaket.
     } finally {
       killSwitch.deactivate();
     }
@@ -568,5 +571,112 @@ describe("H: D-174 (B2) - executive.* speiler owner_controls.* sin B1-selvgjenop
     expect(state?.enabled_by_person_id).toBe(OWNER); // identity.person_id, ALDRI et parameter kalleren selv kunne ha oppgitt
     await stack.execute({ identity: ownerA, tool_id: "executive", action: "disable_finance_kill_switch", parameters: {} });
     expect((await finance.getKillSwitch(TENANT_A))?.enabled).toBe(false);
+  });
+});
+
+/**
+ * D-176 (arkitekt-review 5251073737, BLOKKER B5): registrerer `situations.*`/
+ * `finance.*` på en GITT, allerede fullt koblet `freshConnectedExecutiveStack()`
+ * (SAMME mønster som "H"-blokkens test 8 for finance, nå OGSÅ situations) -
+ * NØDVENDIG for at `executive.get_control_surface_status` sine TO nøstede
+ * lesekall (`situations.get_pause_state`/`finance.get_kill_switch`) faktisk
+ * kan LYKKES under lås (se D-176 i owner-control-store.ts for hvorfor DISSE
+ * to også måtte inn i selvgjenopprettings-unntaket, ikke bare den ytre
+ * `executive`/`owner_controls`-stien).
+ */
+function withReadComposition(stack: ToolGateway): { finance: FinanceService } {
+  for (const tool of situationsToolDefinitions(new SituationsTransport(engine, domainPauses))) stack.register(tool);
+  const finance = new FinanceService(appPool);
+  for (const tool of firstWaveTools({ finance: new FinanceTransport(finance, { getCredentials: async () => null }) })) stack.register(tool);
+  return { finance };
+}
+
+async function getStatusOrThrow(stack: ToolGateway, identity: IdentityContext): Promise<ControlSurfaceStatus> {
+  const result = await stack.execute({ identity, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+  if (!result.ok) throw new Error(`unexpected_denial:${result.reason}`);
+  return result.data as unknown as ControlSurfaceStatus;
+}
+
+describe("I: D-176 (arkitekt-review 5251073737, BLOKKER B5) - executive.get_control_surface_status MÅ overleve BÅDE kill-switch-aktiv OG delt-credential-tilbakekalt gaten (inkl. de nøstede situations-/finance-lesingene den komponerer), UTEN å utvide unntaket til NOEN mutasjon eller annen lesing", () => {
+  it("A) kill switch AKTIV: get_control_surface_status LYKKES og rapporterer kill_switch.active=true (EKTE, pool-baktdata - ikke en isolert kopi); en ORDINÆR handling (freeze_connector) forblir NEKTET ('kill_switch_active')", async () => {
+    const { gateway: stack, killSwitch: stackKillSwitch } = freshConnectedExecutiveStack();
+    withReadComposition(stack);
+    try {
+      const activated = await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-a-test" } });
+      expect(activated.ok).toBe(true);
+      const status = await getStatusOrThrow(stack, ownerA);
+      expect(status.owner_control.kill_switch.active).toBe(true);
+      expect(status.owner_control.kill_switch.reason).toBe("i-a-test");
+      const blocked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "freeze_connector", parameters: { connector_id: "i-a-conn", reason: "skal fortsatt nektes" } });
+      expect(blocked.ok).toBe(false);
+      expect(!blocked.ok && blocked.reason).toBe("kill_switch_active");
+    } finally {
+      await stackKillSwitch.deactivateDurable(OWNER).catch(() => undefined);
+    }
+  });
+
+  it("B) delt BUSINESS_INTERNAL_CREDENTIAL_REF TILBAKEKALT: get_control_surface_status LYKKES og viser refen i revoked_credentials; en ORDINÆR handling forblir NEKTET ('credential_revoked')", async () => {
+    const { gateway: stack } = freshConnectedExecutiveStack();
+    withReadComposition(stack);
+    const revoked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-b-test" } });
+    expect(revoked.ok).toBe(true);
+    const status = await getStatusOrThrow(stack, ownerA);
+    expect(status.owner_control.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+    const blocked = await stack.execute({ identity: ownerA, tool_id: "executive", action: "freeze_connector", parameters: { connector_id: "i-b-conn", reason: "skal fortsatt nektes" } });
+    expect(blocked.ok).toBe(false);
+    expect(!blocked.ok && blocked.reason).toBe("credential_revoked");
+    await stack.execute({ identity: ownerA, tool_id: "executive", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+  });
+
+  it("C) BEGGE samtidig (kill switch aktiv OG delt credential tilbakekalt): get_control_surface_status LYKKES og rapporterer BEGGE tilstandene sannferdig; full gjenoppretting via executive.* gjenoppretter normal drift", async () => {
+    const { gateway: stack, killSwitch: stackKillSwitch } = freshConnectedExecutiveStack();
+    withReadComposition(stack);
+    try {
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-c-test" } });
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-c-test" } });
+      const lockedStatus = await getStatusOrThrow(stack, ownerA);
+      expect(lockedStatus.owner_control.kill_switch.active).toBe(true);
+      expect(lockedStatus.owner_control.revoked_credentials.map((c) => c.credential_ref)).toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+      const restored = await stack.execute({ identity: ownerA, tool_id: "executive", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+      expect(restored.ok).toBe(true);
+      const deactivated = await stack.execute({ identity: ownerA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
+      expect(deactivated.ok).toBe(true);
+      const nowAllowed = await stack.execute({ identity: ownerA, tool_id: "executive", action: "freeze_connector", parameters: { connector_id: "i-c-conn", reason: "recovered" } });
+      expect(nowAllowed.ok).toBe(true);
+      const clearStatus = await getStatusOrThrow(stack, ownerA);
+      expect(clearStatus.owner_control.kill_switch.active).toBe(false);
+      expect(clearStatus.owner_control.revoked_credentials.map((c) => c.credential_ref)).not.toContain(BUSINESS_INTERNAL_CREDENTIAL_REF);
+    } finally {
+      await stackKillSwitch.deactivateDurable(OWNER).catch(() => undefined);
+    }
+  });
+
+  it("D) direkte owner_controls.get_control_state er UENDRET av D-176 - fungerer identisk under BEGGE lås-tilstandene, som FØR denne fiksen", async () => {
+    const { gateway: stack } = freshConnectedExecutiveStack();
+    withReadComposition(stack);
+    try {
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-d-test" } });
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "revoke_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, reason: "i-d-test" } });
+      const direct = await stack.execute({ identity: ownerA, tool_id: "owner_controls", action: "get_control_state", parameters: {} });
+      expect(direct.ok).toBe(true);
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "restore_credential", parameters: { credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF } });
+    } finally {
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
+    }
+  });
+
+  it("E) IKKE-eier kan LESE get_control_surface_status (klasse A, uendret fra FØR D-176 - INGEN ny eier-sjekk innført), men kan FORTSATT IKKE utnytte gjenopprettings-mutasjonene (samme mandat-disiplin som H6)", async () => {
+    const { gateway: stack, killSwitch: stackKillSwitch } = freshConnectedExecutiveStack();
+    withReadComposition(stack);
+    try {
+      await stack.execute({ identity: ownerA, tool_id: "executive", action: "activate_kill_switch", parameters: { reason: "i-e-test" } });
+      const readAsOther = await stack.execute({ identity: otherA, tool_id: "executive", action: "get_control_surface_status", parameters: {} });
+      expect(readAsOther.ok).toBe(true); // klasse A - uendret, ALDRI en ny eier-sjekk for lesing
+      const deactivateAsOther = await stack.execute({ identity: otherA, tool_id: "executive", action: "deactivate_kill_switch", parameters: {} });
+      expect(deactivateAsOther.ok).toBe(false);
+      expect(!deactivateAsOther.ok && deactivateAsOther.reason).toBe("class_d_missing_approval");
+    } finally {
+      await stackKillSwitch.deactivateDurable(OWNER).catch(() => undefined);
+    }
   });
 });
