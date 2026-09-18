@@ -42,7 +42,8 @@ import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { IdentityContext } from "@jarvis/contracts";
 import {
-  adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, SessionGrantService
+  adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore, SessionGrantService,
+  withTenantTransaction
 } from "@jarvis/core";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider } from "@jarvis/business";
 import { EnvSecretProvider, FallbackSecretProvider, firstWaveTools, ToolGateway } from "@jarvis/tool-gateway";
@@ -192,17 +193,28 @@ async function snapshotOwnerControlState(): Promise<Array<{ control_kind: string
   return rows as Array<{ control_kind: string; control_target: string; reason: string }>;
 }
 
+// BLOKKER B7 (arkitekt-review 5252418219): `devices`/`sessions`/`session_grants`
+// har `FORCE ROW LEVEL SECURITY` (migrasjon 053) - både USING og WITH CHECK
+// krever `current_setting('jarvis.tenant_id', true)`. Under den EKTE host-
+// runtime-rollen (`jarvis_runtime`, `bypassrls=false`, Q-21) MÅ derfor ALLE
+// tre innsettinger skje inni SAMME `withTenantTransaction(sidePool, ...)` -
+// en rå `sidePool.query(...)` uten tenant-kontekst feiler med "new row
+// violates row-level security policy". `adminPool` brukes BEVISST IKKE her -
+// poenget er å bevise korrekt oppførsel under den ekte runtime-rollen/RLS,
+// ikke å omgå den for selve fiksturen.
 async function seedDeviceGrant(sidePool: pg.Pool): Promise<void> {
-  await sidePool.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES ($1,$2,$3,'phone') ON CONFLICT (device_id) DO NOTHING`, [SYNTHETIC_DEVICE, OWNER_TENANT, OWNER_PERSON]);
-  await sidePool.query(
-    `INSERT INTO sessions (session_id, tenant_id, person_id, last_channel, last_device_id) VALUES ($1,$2,$3,'api',$4) ON CONFLICT (session_id) DO NOTHING`,
-    [SYNTHETIC_SESSION, OWNER_TENANT, OWNER_PERSON, SYNTHETIC_DEVICE]
-  );
-  await sidePool.query(
-    `INSERT INTO session_grants (grant_id, tenant_id, person_id, device_id, session_id, memory_space, channel, auth_strength, device_key_fingerprint, expires_at)
-     VALUES ($1,$2,$3,$4,$5,'business','api','active','d174-fake-fingerprint', now() + interval '1 hour')`,
-    [`grt-d174-${runId}`, OWNER_TENANT, OWNER_PERSON, SYNTHETIC_DEVICE, SYNTHETIC_SESSION]
-  );
+  await withTenantTransaction(sidePool, OWNER_TENANT, async (client) => {
+    await client.query(`INSERT INTO devices (device_id, tenant_id, person_id, kind) VALUES ($1,$2,$3,'phone') ON CONFLICT (device_id) DO NOTHING`, [SYNTHETIC_DEVICE, OWNER_TENANT, OWNER_PERSON]);
+    await client.query(
+      `INSERT INTO sessions (session_id, tenant_id, person_id, last_channel, last_device_id) VALUES ($1,$2,$3,'api',$4) ON CONFLICT (session_id) DO NOTHING`,
+      [SYNTHETIC_SESSION, OWNER_TENANT, OWNER_PERSON, SYNTHETIC_DEVICE]
+    );
+    await client.query(
+      `INSERT INTO session_grants (grant_id, tenant_id, person_id, device_id, session_id, memory_space, channel, auth_strength, device_key_fingerprint, expires_at)
+       VALUES ($1,$2,$3,$4,$5,'business','api','active','d174-fake-fingerprint', now() + interval '1 hour')`,
+      [`grt-d174-${runId}`, OWNER_TENANT, OWNER_PERSON, SYNTHETIC_DEVICE, SYNTHETIC_SESSION]
+    );
+  });
 }
 
 async function main(): Promise<void> {
@@ -378,7 +390,9 @@ async function main(): Promise<void> {
       "9) EIER-VENDT ENHETSTILBAKEKALLING (task F, D-175/BLOKKER B4-rettet) VIA executive.revoke_device (ETT-PANEL-BEVIS, ikke direkte owner_controls) - MÅL-TENANTEN kommer FRA ownerIdentity.tenant_id, INGEN tenant_id-parameter i det hele tatt (skjemaet mangler feltet)",
       async () => {
         await seedDeviceGrant(sidePool!);
-        const before = await sidePool!.query(`SELECT count(*)::int AS n FROM session_grants WHERE tenant_id = $1 AND device_id = $2 AND revoked_at IS NULL`, [OWNER_TENANT, SYNTHETIC_DEVICE]);
+        const before = await withTenantTransaction(sidePool!, OWNER_TENANT, (client) =>
+          client.query(`SELECT count(*)::int AS n FROM session_grants WHERE tenant_id = $1 AND device_id = $2 AND revoked_at IS NULL`, [OWNER_TENANT, SYNTHETIC_DEVICE])
+        );
         const result = await stack.gateway.execute({
           identity: ownerIdentity, tool_id: "executive", action: "revoke_device",
           parameters: { device_id: SYNTHETIC_DEVICE, reason: `D-174 host-akseptanse ${runId}` }
@@ -393,7 +407,12 @@ async function main(): Promise<void> {
     await section("10) DURABEL FRA FERSK INSTANS: en HELT NY pg.Pool + SessionGrantService (ingen delt hukommelse) ser samme revokerte enhet", async () => {
       const freshPool = createPool(configFromEnv());
       try {
-        const { rows } = await freshPool.query(`SELECT revoked_at FROM session_grants WHERE tenant_id = $1 AND device_id = $2`, [OWNER_TENANT, SYNTHETIC_DEVICE]);
+        // BLOKKER B7 (arkitekt-review 5252418219): SAMME FORCE RLS-krav som
+        // `seedDeviceGrant()` over - en fersk runtime-rolle-pool krever OGSÅ
+        // `jarvis.tenant_id` satt FØR den kan lese `session_grants`.
+        const { rows } = await withTenantTransaction(freshPool, OWNER_TENANT, (client) =>
+          client.query(`SELECT revoked_at FROM session_grants WHERE tenant_id = $1 AND device_id = $2`, [OWNER_TENANT, SYNTHETIC_DEVICE])
+        );
         const ok = rows.length === 1 && (rows[0] as { revoked_at: string | null }).revoked_at !== null;
         results.d174_device_revocation_durable_from_fresh_instance = ok ? "PASS" : "FAIL";
         log(`fresh_instance_sees_revoked=${ok} -> ${results.d174_device_revocation_durable_from_fresh_instance}`);

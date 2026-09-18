@@ -4340,6 +4340,18 @@ durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
 revokeCredentialDurable(...)`); LESINGEN/gjenopprettingen under test går fortsatt via `executive.*`.
 Se D-177 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
 
+**RETTET 2026-09-18 (D-178, arkitekt-host-akseptanse-review 5252418219, BLOKKER B7):** FØRSTE EKTE
+Windows-host-kjøring (`run_id=d265a028`) av D-174→D-177-harnesset feilet (`hard_fail=true`) - ALT
+ANNET (inkl. B4/B5/B6) var PASS, men enhets-tilbakekallings-fikstur/-lesing (seksjon 9/10,
+`seedDeviceGrant()` m.fl.) gjorde rå `sidePool`/`freshPool`-spørringer mot RLS-beskyttede
+`devices`/`sessions`/`session_grants` (FORCE ROW LEVEL SECURITY, migrasjon 053) UTEN tenant-kontekst
+- avslått under den ekte `jarvis_runtime`-rollen FØR selve `executive.revoke_device`-kallet under
+test ble nådd. RETTET: alle tre bruker nå den EKSISTERENDE `withTenantTransaction()`-hjelperen
+(`@jarvis/core`); `adminPool` bevisst IKKE brukt for fikstur/lesing (kun CLEANUP, uendret);
+`executive.revoke_device`-kallet uendret. `INTERNAL_BUILD_COMPLETE=false` (RETTET fra `true`) til en
+FERSK host-kjøring beviser fiksen. Se D-178 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/
+testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

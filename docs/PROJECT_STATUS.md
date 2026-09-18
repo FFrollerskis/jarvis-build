@@ -2,8 +2,8 @@
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-b2-b3-control-surface-mutation`, PR #95,
 exact base `main=ac5f941724947eef8ee4935087cc58738fb8a828` = PR #94 sin merge-commit). Aktiv oppgave:
-**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4; D-176, BLOKKER B5; D-177, BLOKKER B6 -
-uavhengige arkitekt-re-reviews 5250409538/5251073737/5252077633):
+**B2+B3 IMPLEMENTERT (D-174), RETTET (D-175, BLOKKER B4; D-176, BLOKKER B5; D-177, BLOKKER B6; D-178,
+BLOKKER B7 - uavhengige arkitekt-re-reviews 5250409538/5251073737/5252077633/5252418219):
 SAMLET EIER-KONTROLLOVERFLATE (executive.\* MUTASJONSGJENNOMSLAG OG LESING), FINANS-KILL-SWITCH-
 DEKNINGSREPARASJON (Wallester `activate_card`), EIER-VENDT ENHETSTILBAKEKALLING - MÅL-TENANTEN er
 `identity.tenant_id`, ALDRI et kaller-oppgitt parameter (D-175 rettet D-174 sin opprinnelige,
@@ -14,6 +14,13 @@ lesing sine to NØSTEDE `situations`/`finance`-kall også måtte unntas fra lås
 D-176 sin HOST-AKSEPTANSE-HARNESS, som brukte den SAMME strukturelt umulige sekvensielle
 lås-oppsett-bugen testsuiten allerede var rettet for - BEGGE lås-forutsetningene settes nå direkte
 via det durable laget i BÅDE test OG host-script, ALDRI via en sekvensiell `executive.*`-oppsett).**
+**D-178 (BLOKKER B7): FØRSTE EKTE Windows-host-kjøring (`run_id=d265a028`) FEILET - enhets-
+tilbakekallings-FIKSTUREN/-LESINGEN (seksjon 9/10) skrev/leste RLS-beskyttede `devices`/`sessions`/
+`session_grants`-rader UTEN tenant-kontekst under den ekte `jarvis_runtime`-rollen (ALT ANNET i
+kjøringen var PASS, inkl. Q-21 og B4/B5/B6). Rettet til å bruke den eksisterende kanoniske
+`withTenantTransaction()`-hjelperen for fikstur/lesing - selve `executive.revoke_device`-kallet under
+test er UENDRET. `INTERNAL_BUILD_COMPLETE` satt til `false` (RETTET fra `true`) til en FERSK host-
+kjøring beviser dette.**
 PR #94 (D-169 t.o.m. D-173, docs-only closeout av post-K1 re-audit-syklusen) er MERGET til `main`. Denne
 PR-en er den DEFINERTE "neste interne slice" (B2+B3) sin faktiske implementasjon - IKKE lenger
 docs-only.
@@ -66,11 +73,15 @@ UNDER LÅS (D-176, BLOKKER B5): `executive.get_control_surface_status` selv, PLU
 `situations.get_pause_state`/`finance.get_kill_switch`-lesingene den komponerer, overlever nå BÅDE
 kill-switch-aktiv- og delt-credential-tilbakekalt-gaten - FØR D-176 ble denne samlede lesingen selv
 avslått akkurat når eieren mest trengte den.**
-`INTERNAL_BUILD_BLOCKERS` fra D-173 er derfor **NONE** (RETTET fra D-173 sin navngitte liste).
-`INTERNAL_BUILD_COMPLETE=true` (RETTET fra D-173 sin `false` - de tre navngitte internt-byggbare
-gapene som holdt den `false`, er nå alle lukket av denne PR-en). `SOVEREIGN_COMPLETE=false` FORBLIR
-UENDRET - de navngitte, eksterne `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170 sin sjekkliste) er IKKE
-noe denne PR-en kan eller forsøker å lukke.
+`INTERNAL_BUILD_BLOCKERS` fra D-173 var **NONE** (RETTET fra D-173 sin navngitte liste) - **RETTET
+IGJEN av D-178/BLOKKER B7:** den FØRSTE ekte host-kjøringen fant at enhets-tilbakekallings-
+fikstur/-lesing-koden i host-harnesset selv manglet tenant-kontekst under RLS - `INTERNAL_BUILD_
+BLOCKERS` er derfor NAVNGITT PÅ NYTT ("B7 host fixture/readback RLS tenant-context proof"), OG
+`INTERNAL_BUILD_COMPLETE=false` (RETTET fra `true`) til en FERSK host-kjøring av det D-178-rettede
+harnesset beviser fiksen. Produksjonskoden (executive/owner-controls/policy/tool-gateway) er
+UPÅVIRKET - B7 er en feil i AKSEPTANSE-SCRIPTETS eget fikstur-/lesekode, ikke i det som ble bygget.
+`SOVEREIGN_COMPLETE=false` FORBLIR UENDRET - de navngitte, eksterne `EXTERNAL_RUNTIME_EVIDENCE_
+BLOCKERS` (D-170 sin sjekkliste) er IKKE noe denne PR-en kan eller forsøker å lukke.
 
 ## Hva denne PR-en (D-174) faktisk endret
 
@@ -106,16 +117,18 @@ Se D-174 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse. Kort:
    stack) og ny "K"-blokk (`modules/owner-controls/test/owner-control-authority.test.ts`, ekte
    `session_grants`).
 8. **Host-akseptanse:** ny `modules/executive/scripts/d174-executive-control-surface-live.ts` +
-   `-host-run.ts` + strukturell wiring-test (31 tester, grønn i denne sesjonen - utvidet fra 23 av
-   D-175, fra 26 av D-176, korrigert av D-177/BLOKKER B6). `HOST_ACCEPTANCE_STATUS=PENDING` - IKKE
-   kjørt mot ekte Docker/Postgres i denne sesjonen (sandkassen her kan strukturelt ikke kjøre
-   `docker compose`); scriptet er klart for Tobias, med seksjon 4b (D-176, RETTET D-177) som beviser
-   `executive.get_control_surface_status` under BEGGE lås-tilstandene FØR gjenoppretting - BEGGE
-   lås-forutsetningene settes nå DIREKTE via `stack.killSwitch.activateDurable(...)`/
-   `stack.ownerControls.revokeCredentialDurable(...)` (D-177: den opprinnelige sekvensielle
-   `executive.activate_kill_switch`+`executive.revoke_credential`-oppsettet i denne seksjonen var
-   STRUKTURELT UMULIG - samme bug-klasse testsuiten allerede var rettet for, men som ikke var
-   anvendt på host-scriptet før denne re-reviewen).
+   `-host-run.ts` + strukturell wiring-test (37 tester, grønn i denne sesjonen - utvidet fra 23 av
+   D-175, fra 26 av D-176, fra 31 av D-177, korrigert av D-178/BLOKKER B7). `HOST_ACCEPTANCE_
+   STATUS=REQUIRES_RERUN` (RETTET fra `PENDING`) - **FØRSTE EKTE Windows-host-kjøring (Tobias,
+   `run_id=d265a028`, mot HEAD `f32ffe92850cf46d9cf4922d4d47ee890b7c378f`) feilet** (`hard_fail=true`)
+   på seksjon 9/10 (enhets-tilbakekallings-fikstur/-lesing skrev/leste `devices`/`sessions`/
+   `session_grants` via en rå `sidePool`/`freshPool`-spørring UTEN tenant-kontekst, avslått av
+   `FORCE ROW LEVEL SECURITY` under den ekte `jarvis_runtime`-rollen) - ALT ANNET i kjøringen var
+   PASS, inkl. Q-21 og B4/B5/B6/D-176-seksjon-4b. **RETTET (D-178):** `seedDeviceGrant()` og seksjon
+   9/10 sine lesinger bruker nå den EKSISTERENDE kanoniske `withTenantTransaction()`-hjelperen
+   (`@jarvis/core`, INGEN ny mekanisme); `adminPool` BEVISST IKKE brukt for fikstur/lesing (kun
+   CLEANUP, uendret). Selve `executive.revoke_device`-kallet under test er UENDRET. Krever en NY
+   ekte host-kjøring FØR `INTERNAL_BUILD_COMPLETE` kan settes tilbake til `true`.
 
 ## Kjent, UENDRET sandkasse-/miljøbegrensning (IKKE en kodefeil, IKKE introdusert av denne PR-en)
 
@@ -137,15 +150,18 @@ egen CI-status før merge.
 2. **CI på eksakt pushet HEAD** må være grønn før noen merge-vurdering (build-test/gitleaks/
    windows-git-auth) - autoritativ verifikasjon av DB-bakte suiter, siden lokal sandkasse ikke kan
    kjøre dem (se over).
-3. **Host-akseptanse (`d174-executive-control-surface-host-run.ts`)** er PENDING - krever Tobias sin
-   Windows-host/Docker Desktop. Kommandoen er klar; ingen ny credential kreves.
+3. **Host-akseptanse (`d174-executive-control-surface-host-run.ts`)** krever RERUN (D-178/BLOKKER
+   B7) - Tobias sin FØRSTE ekte kjøring (`run_id=d265a028`) feilet på fikstur/lesing-koden i seksjon
+   9/10 (RLS, rettet i denne PR-en); ALT ANNET i den kjøringen var allerede PASS. Krever en NY
+   Windows-host/Docker Desktop-kjøring FØR `HOST_ACCEPTANCE_STATUS` kan settes til `PASS`/`FAIL`.
 4. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (D-170 sin sjekkliste) - UENDRET, ekte eksterne
    graduation-krav, ingen av dem Jarvis-kode Claude kan bygge seg forbi.
 
 ## Neste oppgave
 
-Vent på FERSK uavhengig arkitekt-review av D-177/BLOKKER B6-rettelsen + grønn CI på det nye pushete
-HEAD-et. Ingen host-akseptanse-forespørsel til Tobias FØR den reviewen passerer. Etter godkjenning/
-merge: Tobias kjører `d174-executive-control-surface-host-run.ts` for HOST_ACCEPTANCE_STATUS=PASS/
-FAIL. `SOVEREIGN_COMPLETE` forblir `false` til de navngitte `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` er
-lukket. Ingen ny masterplan, ingen UGREEN-migrering, ingen ny kode-slice startet av denne posten.
+Vent på FERSK uavhengig arkitekt-review av D-178/BLOKKER B7-rettelsen + grønn CI på det nye pushete
+HEAD-et. Ingen NY host-akseptanse-forespørsel til Tobias FØR den reviewen passerer. Når den passerer:
+Tobias kjører `d174-executive-control-surface-host-run.ts` PÅ NYTT for HOST_ACCEPTANCE_STATUS=PASS/
+FAIL (den forrige kjøringen, `run_id=d265a028`, er nå SUPERSEDED av D-178-fiksen). `SOVEREIGN_COMPLETE`
+og `INTERNAL_BUILD_COMPLETE` forblir `false` til dette er bevist. Ingen ny masterplan, ingen
+UGREEN-migrering, ingen ny kode-slice startet av denne posten.

@@ -104,6 +104,23 @@ durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.revo
 fortsatt går via `executive.*`. `HOST_ACCEPTANCE_STATUS=PENDING` uendret. Se D-177 i
 DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse/testevidens.
 
+**D-178 (2026-09-18, RETTET - arkitekt-host-akseptanse-review 5252418219, BLOKKER B7):** FØRSTE EKTE
+Windows-host-kjøring av D-174→D-177-harnesset (`run_id=d265a028`, mot HEAD
+`f32ffe92850cf46d9cf4922d4d47ee890b7c378f`) - `hard_fail=true`. Q-21 OG ALLE ANDRE markører
+(B4/B5/B6, D-176-seksjon-4b, negative kontroller, finans/Wallester-gating, cleanup) var PASS - KUN
+enhets-tilbakekallings-fikstur/-lesing (seksjon 9/10) feilet: rå `sidePool`/`freshPool`-spørringer mot
+RLS-beskyttede `devices`/`sessions`/`session_grants` (FORCE ROW LEVEL SECURITY, migrasjon 053) UTEN
+tenant-kontekst, avslått under den ekte `jarvis_runtime`-rollen FØR selve `executive.revoke_device`-
+kallet under test kunne nås. Rettet til å bruke den EKSISTERENDE kanoniske `withTenantTransaction()`-
+hjelperen (`@jarvis/core`) for fikstur-innsetting OG begge lesinger; `adminPool` bevisst IKKE brukt for
+fikstur/lesing (kun CLEANUP, uendret); `executive.revoke_device`-kallet under test er UENDRET.
+`INTERNAL_BUILD_COMPLETE` satt til `false` (RETTET fra D-174/D-176/D-177 sin `true`) -
+`HOST_ACCEPTANCE_STATUS=REQUIRES_RERUN` (den forrige host-kjøringen er SUPERSEDED av denne fiksen, en
+FERSK host-kjøring er nødvendig FØR `INTERNAL_BUILD_COMPLETE` kan settes tilbake til `true`). Produk-
+sjonskoden (executive/owner-controls/policy/tool-gateway) er UPÅVIRKET - B7 er en feil i AKSEPTANSE-
+SCRIPTETS egen fikstur-/lesekode. Se D-178 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse/
+testevidens.
+
 ## 16-områders graduation-matrise
 
 | Område | Status | Evidens (kort) |
@@ -189,7 +206,11 @@ faktisk var ferdig).
 fremtidig):** `executive.*` komponerer nå `owner_controls.*`/`situations.*`/`finance.*` for BÅDE lesing
 OG mutasjon (ti nye tynne gjennomslag); `owner_controls.revoke_device` pakker inn
 `SessionGrantService.revokeForDeviceOn()`; `CardService.activateCard()` sender nå
-`{ killSwitchGated: true }` (B3-fiksen). `INTERNAL_BUILD_BLOCKERS=NONE`, `INTERNAL_BUILD_COMPLETE=true`.
+`{ killSwitchGated: true }` (B3-fiksen). `INTERNAL_BUILD_BLOCKERS=NONE`, `INTERNAL_BUILD_COMPLETE=true`
+**- RETTET IGJEN av D-178/BLOKKER B7 (2026-09-18): den FØRSTE ekte host-kjøringen fant at host-
+harnessets EGEN enhets-tilbakekallings-fikstur/-lesing manglet RLS-tenant-kontekst; `INTERNAL_BUILD_
+BLOCKERS` er derfor på ny NAVNGITT ("B7 host fixture/readback RLS tenant-context proof") og
+`INTERNAL_BUILD_COMPLETE=false` til en FERSK host-kjøring beviser D-178-fiksen - se D-178.**
 `SOVEREIGN_COMPLETE` FORBLIR `false` (eksterne blokkere, D-170, uendret). Planbeskrivelsen under er
 BEVART som historisk kontekst for HVORFOR/HVORDAN slicen ble formet, ikke redigert.
 

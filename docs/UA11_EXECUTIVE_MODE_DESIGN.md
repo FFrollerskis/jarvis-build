@@ -289,3 +289,13 @@ Masterplanens UA-11-akseptansekriterier:
    nå DIREKTE via det durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
    revokeCredentialDurable(...)`); selve lesingen (`executive.get_control_surface_status`)/
    gjenopprettingen under test forblir via `executive.*`. Se D-177 for full begrunnelse/testevidens.
+
+   **RETTET 2026-09-18 (D-178, arkitekt-host-akseptanse-review 5252418219, BLOKKER B7):** FØRSTE
+   EKTE Windows-host-kjøring (`run_id=d265a028`) av harnesset feilet (`hard_fail=true`) - ALT ANNET
+   (inkl. B4/B5/B6) var PASS, men enhets-tilbakekallings-fikstur/-lesing (seksjon 9/10) gjorde rå
+   `sidePool`/`freshPool`-spørringer mot RLS-beskyttede `devices`/`sessions`/`session_grants`
+   (FORCE ROW LEVEL SECURITY) UTEN tenant-kontekst - avslått under den ekte `jarvis_runtime`-rollen
+   FØR selve `executive.revoke_device`-kallet under test ble nådd. RETTET: fikstur/lesing bruker nå
+   den eksisterende `withTenantTransaction()`-hjelperen (`@jarvis/core`); `executive.revoke_device`-
+   kallet uendret; `adminPool` bevisst IKKE brukt for fikstur/lesing. `INTERNAL_BUILD_COMPLETE=false`
+   til en FERSK host-kjøring beviser fiksen. Se D-178 for full begrunnelse/testevidens.

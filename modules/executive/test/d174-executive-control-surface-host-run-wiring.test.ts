@@ -152,6 +152,49 @@ describe("D-176 (arkitekt-review 5251073737, BLOKKER B5; RETTET BLOKKER B6, arki
   });
 });
 
+describe("D-178 (arkitekt-review 5252418219, BLOKKER B7 - EKTE Windows-host-kjøring run_id=d265a028 feilet med RLS-avslag): host-fikstur/-tilbakelesing for enhets-/sesjons-/grant-radene (RLS-beskyttet, FORCE ROW LEVEL SECURITY, migrasjon 053) MÅ gå via withTenantTransaction (jarvis.tenant_id satt), ALDRI en rå runtime-pool-spørring uten tenant-kontekst - selve executive.revoke_device-kallet under test forblir UENDRET via ToolGateway/PolicyGateway", () => {
+  it("importerer withTenantTransaction fra @jarvis/core (den KANONISKE tenant-kontekst-hjelperen, ingen duplisert kopi)", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*withTenantTransaction[^}]*\}\s*from\s*"@jarvis\/core"/s);
+  });
+  it("seedDeviceGrant() setter ALLE TRE innsettinger (devices/sessions/session_grants) inni SAMME withTenantTransaction(sidePool, OWNER_TENANT, ...) - ALDRI en rå sidePool.query(...) for disse RLS-beskyttede tabellene", () => {
+    const fnIdx = liveScriptSource.indexOf("async function seedDeviceGrant(");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const nextFnIdx = liveScriptSource.indexOf("async function main(", fnIdx);
+    expect(nextFnIdx).toBeGreaterThan(fnIdx);
+    const fnSlice = liveScriptSource.slice(fnIdx, nextFnIdx);
+    expect(fnSlice).toContain("withTenantTransaction(sidePool, OWNER_TENANT,");
+    expect(fnSlice).toContain("INSERT INTO devices");
+    expect(fnSlice).toContain("INSERT INTO sessions");
+    expect(fnSlice).toContain("INSERT INTO session_grants");
+    expect(fnSlice).not.toMatch(/sidePool\.query\(/);
+  });
+  it("seksjon 9 sin FØR-telling av session_grants går OGSÅ via withTenantTransaction(sidePool!, OWNER_TENANT, ...), ikke en rå sidePool!.query(...)", () => {
+    const section9Idx = liveScriptSource.indexOf('"9) EIER-VENDT ENHETSTILBAKEKALLING');
+    expect(section9Idx).toBeGreaterThan(-1);
+    const section9Slice = liveScriptSource.slice(section9Idx, section9Idx + 1200);
+    expect(section9Slice).toContain("withTenantTransaction(sidePool!, OWNER_TENANT,");
+    expect(section9Slice).not.toMatch(/sidePool!\.query\(/);
+  });
+  it("seksjon 10 sin ferske-instans-tilbakelesing går via withTenantTransaction(freshPool, OWNER_TENANT, ...), ikke en rå freshPool.query(...)", () => {
+    const section10Idx = liveScriptSource.indexOf('"10) DURABEL FRA FERSK INSTANS');
+    expect(section10Idx).toBeGreaterThan(-1);
+    const section10Slice = liveScriptSource.slice(section10Idx, section10Idx + 800);
+    expect(section10Slice).toContain("withTenantTransaction(freshPool, OWNER_TENANT,");
+    expect(section10Slice).not.toMatch(/freshPool\.query\(/);
+  });
+  it("den FAKTISKE enhetstilbakekallingen under test forblir executive.revoke_device via stack.gateway.execute (UENDRET av B7 - kun fikstur/lesing fikk tenant-kontekst, ALDRI selve handlingen under test)", () => {
+    const section9Idx = liveScriptSource.indexOf('"9) EIER-VENDT ENHETSTILBAKEKALLING');
+    const section9Slice = liveScriptSource.slice(section9Idx, section9Idx + 1200);
+    expect(section9Slice).toContain('tool_id: "executive", action: "revoke_device"');
+  });
+  it("CLEANUP forblir via adminPool (bevisst UENDRET av B7 - opprydding er IKKE atferden under test, kun fikstur-opprettelse/-lesing måtte flyttes til tenant-kontekst)", () => {
+    const cleanupIdx = liveScriptSource.indexOf("CLEANUP (kill switch deaktivert");
+    expect(cleanupIdx).toBeGreaterThan(-1);
+    const cleanupSlice = liveScriptSource.slice(cleanupIdx, cleanupIdx + 1500);
+    expect(cleanupSlice).toContain("adminPool.query(`DELETE FROM session_grants");
+  });
+});
+
 describe("INGEN ekte provider-kall: Wallester-gatewayen er en INJISERT FAKE ved nettverksgrensen, ALDRI en ekte HTTP-transport", () => {
   it("CardService konstrueres med en gatewayFactory som returnerer DEN LOKALE `wallesterFake`, ikke defaultWallesterGatewayFactory/WallesterTransport", () => {
     expect(liveScriptSource).not.toContain("defaultWallesterGatewayFactory");
