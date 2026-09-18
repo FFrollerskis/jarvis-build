@@ -2234,9 +2234,9 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
-      tool_id: "finance_wallester", action: "activate_card", description: "Aktiver et provider-opprettet kort (fysiske kort krever aktivering; reversibelt via freeze_card)",
+      tool_id: "finance_wallester", action: "activate_card", description: "Aktiver et provider-opprettet kort (fysiske kort krever aktivering - spend-muliggjørende, kill-switch-gated; reversibelt via freeze_card)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
-      capability_class: "B", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
       idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
       output_trust: "internal", transport: transport("finance_wallester")
     },

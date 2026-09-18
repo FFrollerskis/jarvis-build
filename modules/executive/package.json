@@ -9,6 +9,7 @@
   "dependencies": {
     "@jarvis/business": "workspace:*",
     "@jarvis/contracts": "workspace:*",
+    "@jarvis/finance": "workspace:*",
     "@jarvis/owner-controls": "workspace:*",
     "@jarvis/situations": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",

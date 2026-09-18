@@ -187,6 +187,28 @@ async function activeCard(input: Partial<Parameters<CardService["createCard"]>[2
   return { card_id: submitted.card_id, provider_card_id: submitted.provider_card_id! };
 }
 
+/**
+ * D-174: et kort i `pending_provider` (fysisk kort utstedt hos Wallester,
+ * men IKKE ennå aktivert av kortholder - provider-status
+ * "awaitingactivation", se mapWallesterCardState) - den EKSAKTE
+ * forutsetningen `activateCard()` sin overgang til "active" krever.
+ * `activeCard()` over returnerer ALLEREDE "active" (default provider-
+ * status) og ville gjort `activateCard()`-kallet et no-op (state === target)
+ * som ALDRI når kill-switch-sjekken.
+ */
+async function pendingCard(input: Partial<Parameters<CardService["createCard"]>[2]> = {}): Promise<{ card_id: string; provider_card_id: string }> {
+  const draft = await cards.createCard(TENANT_A, "business", {
+    idempotency_key: `card-idem-${randomUUID()}`, name: "Testkort", purpose: "Test", card_type: "physical", currency: "EUR", ...input
+  });
+  const previousOnCreateCard = gateway.onCreateCard;
+  gateway.onCreateCard = async () => ({
+    id: `wcard-${randomUUID()}`, status: "awaitingactivation", maskedCardNumber: "…4321", accountId: "wacc-live-1", tokenizationStatus: null
+  });
+  const submitted = await cards.submitCard(TENANT_A, "business", draft.card_id);
+  gateway.onCreateCard = previousOnCreateCard;
+  return { card_id: submitted.card_id, provider_card_id: submitted.provider_card_id! };
+}
+
 function providerTx(overrides: Partial<WallesterTransactionObject> = {}): WallesterTransactionObject {
   return {
     id: `wtx-${randomUUID()}`, cardId: "", authorizationId: null, type: "purchase", amountOre: 25_000, currency: "EUR",
@@ -328,6 +350,80 @@ describe("B: kortlivssyklus", () => {
     freshServices();
     const draft = await cards.createCard(TENANT_A, "business", { idempotency_key: `card-idem-${randomUUID()}`, name: "K", purpose: "P", card_type: "virtual" });
     await expect(cards.freezeCard(TENANT_A, "business", draft.card_id)).rejects.toThrow(CardNotSubmittedError);
+  });
+});
+
+describe("B2: D-174 regresjon - activateCard er RE-muliggjørende og MÅ være nødbryter-gated", () => {
+  it("1) activate_card lykkes (pending_provider -> active) når nødbryteren er inaktiv", async () => {
+    freshServices();
+    const { card_id } = await pendingCard();
+    const activated = await cards.activateCard(TENANT_A, "business", card_id);
+    expect(activated.state).toBe("active");
+    expect(activated.activated_at).not.toBeNull();
+  });
+
+  it("2) activate_card feiler LUKKET (FinanceKillSwitchActiveError) når nødbryteren er aktiv - D-174: tidligere usikret (lifecycleAction fikk {} i stedet for { killSwitchGated: true })", async () => {
+    freshServices();
+    const { card_id } = await pendingCard();
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    await expect(cards.activateCard(TENANT_A, "business", card_id)).rejects.toThrow(FinanceKillSwitchActiveError);
+  });
+
+  it("3) provider-kallet utføres ALDRI når activate_card blokkeres av nødbryteren (kanonisk tilstand forblir pending_provider)", async () => {
+    freshServices();
+    const { card_id } = await pendingCard();
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    let lifecycleCalls = 0;
+    const originalLifecycle = gateway.onLifecycle;
+    gateway.onLifecycle = async (id, status) => {
+      lifecycleCalls++;
+      return originalLifecycle(id, status);
+    };
+    await expect(cards.activateCard(TENANT_A, "business", card_id)).rejects.toThrow(FinanceKillSwitchActiveError);
+    expect(lifecycleCalls).toBe(0);
+    const stillPending = await cards.getCard(TENANT_A, "business", card_id);
+    expect(stillPending?.state).toBe("pending_provider");
+  });
+
+  it("4) freeze_card (spend-reduserende) forblir tillatt selv med nødbryter aktiv", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    const frozen = await cards.freezeCard(TENANT_A, "business", card_id);
+    expect(frozen.state).toBe("frozen");
+  });
+
+  it("5) close_card (irreversibel, spend-reduserende) forblir tillatt selv med nødbryter aktiv", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    const closed = await cards.closeCard(TENANT_A, "business", card_id);
+    expect(closed.state).toBe("closed");
+  });
+
+  it("6) unfreeze_card (RE-muliggjør spend) forblir blokkert mens nødbryteren er aktiv", async () => {
+    freshServices();
+    const { card_id } = await activeCard();
+    await cards.freezeCard(TENANT_A, "business", card_id);
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    await expect(cards.unfreezeCard(TENANT_A, "business", card_id)).rejects.toThrow(FinanceKillSwitchActiveError);
+  });
+
+  it("7) update_spend_policy - grenseØKNING forblir blokkert mens nødbryteren er aktiv", async () => {
+    freshServices();
+    const { card_id } = await activeCard({ requested_transaction_limit_ore: 10_000 });
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    await expect(
+      cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_transaction_limit_ore: 20_000 })
+    ).rejects.toThrow(FinanceKillSwitchActiveError);
+  });
+
+  it("8) update_spend_policy - grenseREDUKSJON forblir tillatt mens nødbryteren er aktiv", async () => {
+    freshServices();
+    const { card_id } = await activeCard({ requested_transaction_limit_ore: 20_000 });
+    await finance.enableKillSwitch(TENANT_A, "person-wall-owner", "test");
+    const updated = await cards.updateSpendPolicy(TENANT_A, "business", card_id, { requested_transaction_limit_ore: 10_000 });
+    expect(updated.requested_transaction_limit_ore).toBe(10_000);
   });
 });
 

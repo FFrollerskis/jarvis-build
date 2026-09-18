@@ -124,3 +124,74 @@ export const OWNER_CONTROLS_SELF_RECOVERY_ACTIONS: ReadonlySet<string> = new Set
   "deactivate_kill_switch",
   "restore_credential"
 ]);
+
+/**
+ * D-176 (arkitekt-review 5251073737, BLOKKER B5): D-174 sin utvidelse av
+ * BEGGE gatene til å også godta `tool_id === "executive"` antok FEILAKTIG at
+ * `executive`s handlingsnavn er IDENTISKE med `owner_controls` sine for ALLE
+ * tre navngitte handlinger. Det holder for de to MUTASJONENE
+ * (`deactivate_kill_switch`/`restore_credential` - samme navn på begge
+ * tool_id-er), men IKKE for LESING: `executive` sin samlede
+ * kontrolloverflate-lesing heter `get_control_surface_status`
+ * (`ExecutiveTransport`), ALDRI `get_control_state` (det navnet finnes KUN på
+ * `owner_controls`). Konsekvens FØR denne rettelsen: mens global kill switch
+ * var aktiv, eller den delte `BUSINESS_INTERNAL_CREDENTIAL_REF` var
+ * tilbakekalt, ble `executive.get_control_surface_status` selv AVSLÅTT av
+ * akkurat den ytre gaten den skulle la eieren SE FORBI - direkte
+ * `owner_controls.get_control_state` forble upåvirket, men B2 sitt "ETT
+ * kontrollpanel for BÅDE lesing OG gjenoppretting" var reelt brutt under
+ * begge låstilstandene.
+ *
+ * ANDRE, DYPERE funn under DENNE rettelsen (ikke navngitt i arkitekt-
+ * gjennomgangen sitt "fresh code finding", men strukturelt UUNNGÅELIG å
+ * fikse for at TASK 3 sine akseptansekriterier - `executive.
+ * get_control_surface_status` returnerer et SANNFERDIG, KOMPLETT svar under
+ * lås - faktisk kan holde): `ExecutiveService.getControlSurfaceStatus()`
+ * komponerer IKKE bare `owner_controls.get_control_state`, men OGSÅ
+ * `situations.get_pause_state` OG `finance.get_kill_switch`, via TO
+ * YTTERLIGERE nøstede `ToolGateway.execute()`-kall (`Promise.all`, se
+ * `ExecutiveService.getControlSurfaceStatus()`). BEGGE disse er REELLE,
+ * UAVHENGIGE `authorize()`-kall MED SIN EGEN tool_id ("situations"/
+ * "finance") - IKKE dekket av `executive`/`owner_controls`-unntaket over.
+ * `finance.get_kill_switch` OG situations sine verktøy bruker DESSUTEN SAMME
+ * delte `BUSINESS_INTERNAL_CREDENTIAL_REF` som `owner_controls`/`executive`
+ * selv (se `situations/transport.ts` og `tool-gateway/integrations.ts`).
+ * Uten et unntak ØGSÅ for DISSE to navngitte, rene lesehandlingene ville
+ * `Promise.all()` i `getControlSurfaceStatus()` FORTSATT kastet
+ * (`ExecutiveAccessDeniedError` fra DEN nøstede lesingen), og HELE den
+ * ytre `executive.get_control_surface_status`-lesingen ville FORTSATT
+ * feilet under lås - selv etter at DEN ytre gaten alene var rettet.
+ *
+ * FIKSEN er en eksplisitt per-(tool_id,action)-mapping (IKKE en antakelse om
+ * identiske handlingsnavn - denne feilen BEVISER at det er en utrygg
+ * antakelse selv innenfor SAMME komposisjon): bruk `isSelfRecoveryAction()`
+ * i BEGGE gatene (`PolicyGateway.authorize()` sin kill-switch-sjekk OG
+ * `ToolGateway.execute()` sin tilbakekalt-credential-sjekk) i stedet for å
+ * konstruere unionen selv på kallestedet. Unntaket forblir like SMALT som
+ * før - KUN disse navngitte handlingene per tool_id, ALDRI en bredere "alle
+ * situations-/finance-/executive-lesinger"-regel. `situations.get_pause_state`
+ * OG `finance.get_kill_switch` er BEGGE klasse A (universelt lesbare selv
+ * NÅR kill switchen er inaktiv, ingen eier-sjekk) - å la dem overleve
+ * kill-switch-/tilbakekalt-credential-gaten endrer IKKE hvem som kan lese
+ * dem, kun NÅR; ingen mutasjon er unntatt av dette utover de allerede
+ * eksisterende tre navngitte gjenopprettingshandlingene.
+ */
+const EXECUTIVE_SELF_RECOVERY_ACTIONS: ReadonlySet<string> = new Set([
+  "get_control_surface_status",
+  "deactivate_kill_switch",
+  "restore_credential"
+]);
+
+/** D-176: `get_control_surface_status` sin nøstede lesing av domene-pausetilstand (UA-10) - se D-176 over. */
+const SITUATIONS_SELF_RECOVERY_ACTIONS: ReadonlySet<string> = new Set(["get_pause_state"]);
+
+/** D-176: `get_control_surface_status` sin nøstede lesing av finans-nødbryter-tilstand - se D-176 over. */
+const FINANCE_SELF_RECOVERY_ACTIONS: ReadonlySet<string> = new Set(["get_kill_switch"]);
+
+export function isSelfRecoveryAction(toolId: string, action: string): boolean {
+  if (toolId === "owner_controls") return OWNER_CONTROLS_SELF_RECOVERY_ACTIONS.has(action);
+  if (toolId === "executive") return EXECUTIVE_SELF_RECOVERY_ACTIONS.has(action);
+  if (toolId === "situations") return SITUATIONS_SELF_RECOVERY_ACTIONS.has(action);
+  if (toolId === "finance") return FINANCE_SELF_RECOVERY_ACTIONS.has(action);
+  return false;
+}

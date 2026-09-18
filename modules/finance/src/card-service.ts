@@ -311,8 +311,18 @@ export class CardService {
     });
   }
 
+  /** Aktivering RE-muliggjør spend -> kill-switch-gated (§11, D-174 rettet - se D-174). */
   async activateCard(tenantId: string, memorySpace: MemorySpace, cardId: string, actorPersonId?: string): Promise<ProviderCard> {
-    return this.lifecycleAction(tenantId, memorySpace, cardId, "active", "activated", (gw, id) => gw.activateCard(id), {}, actorPersonId);
+    return this.lifecycleAction(
+      tenantId,
+      memorySpace,
+      cardId,
+      "active",
+      "activated",
+      (gw, id) => gw.activateCard(id),
+      { killSwitchGated: true },
+      actorPersonId
+    );
   }
 
   /** Frys er spend-REDUSERENDE - alltid tillatt, også under nødbryter (§11). */

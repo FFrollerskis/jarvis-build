@@ -4288,6 +4288,78 @@ eksponeres via `executive.*`, MÅ `activateCard()` sitt `lifecycleAction()`-kall
 `INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret (var allerede `false` pga. enhet; nå med ett navngitt
 gap til: `FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`).
 
+**IMPLEMENTERT 2026-09-18 (D-174) - "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2+B3)"
+er NÅ FERDIG, IKKE lenger en fremtidig slice:** `CardService.activateCard()` sender nå
+`{ killSwitchGated: true }` (B3-fiksen); `finance_wallester.activate_card` sin `capability_class`
+rettet `"B"`→`"C"`. `executive.*` fikk ti nye videresendinger: `activate_kill_switch`/
+`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/`revoke_credential`/
+`restore_credential`/`revoke_device`/`enable_finance_kill_switch`/`disable_finance_kill_switch`/
+`get_finance_kill_switch` - ALLE tynne `gateway.execute()`-gjennomslag, INGEN ny logikk/tilstand. Ny
+`owner_controls.revoke_device` (`OwnerControlsService.revokeDevice()`, valgfritt 3.
+konstruktørargument) pakker inn `SessionGrantService.revokeForDeviceOn()`. **Fresk arkitektonisk funn
+under implementasjonen (IKKE forutsett av D-171/D-172/D-173):** nøstede `ToolGateway.execute()`-kall
+vurderes UAVHENGIG per `tool_id` - `OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken i
+`gateway.ts`/`policy-gateway.ts` (D-166) måtte derfor utvides til også å gjelde `tool_id ===
+"executive"`, ellers ville `executive.deactivate_kill_switch`/`restore_credential` blitt blokkert av
+SIN EGEN ytre tool_id-sjekk før den nådde det trygge, nøstede `owner_controls`-kallet. Se D-174 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse, testevidens (nye "H"/"K"-testblokker) og
+host-akseptanse-status (`PENDING` - nytt script `modules/executive/scripts/
+d174-executive-control-surface-live.ts`+`-host-run.ts` klart for Tobias).
+
+**RETTET 2026-09-18 (D-175, arkitekt-review 5250409538, BLOKKER B4):** D-174 sin `revoke_device` tok
+feilaktig et FRITT kaller-oppgitt `tenant_id`-parameter, ved analogi til `credential_ref`/`connector_id`
+(som treffer det tenant-frie `owner_control_state`). Denne analogien var arkitektonisk feil:
+`session_grants`/`devices` er RLS-scopet (`FORCE ROW LEVEL SECURITY`) per tenant, så et fritt
+`tenant_id`-parameter var et REELT cross-tenant-hull, IKKE et harmløst mål-parameter. RETTET: mål-tenanten
+er nå UBETINGET `identity.tenant_id` (skjemaet har INGEN `tenant_id`-felt); mål-enheten kan fortsatt
+tilhøre en ANNEN PERSON/delegat i SAMME tenant (tillatt og nyttig - eieren kan fortsatt tilbakekalle en
+annens sesjon); en enhet som kun finnes i en ANNEN tenant feiler LUKKET (ny `DeviceNotFoundError`), IKKE
+et stille `ok:true`/`revoked_grants:0`. Ingen ny autorisasjonsbutikk, ingen ny tenant-tilstand. Se D-175 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-176, arkitekt-re-review 5251073737, BLOKKER B5):** `executive.
+get_control_surface_status` selv ble AVSLÅTT av NØYAKTIG kill-switch-aktiv-/tilbakekalt-credential-
+gaten den skulle la eieren SE FORBI. D-174/D-175 sin `tool_id === "executive"`-utvidelse av
+`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken antok FEILAKTIG at `executive` sine handlingsnavn er
+identiske med `owner_controls` sine - det holder for de to MUTASJONENE, men IKKE for LESING
+(`get_control_surface_status` ≠ `get_control_state`). Dypere funn oppdaget UNDER selve rettelsen:
+`getControlSurfaceStatus()` komponerer OGSÅ `situations.get_pause_state`/`finance.get_kill_switch` via
+to YTTERLIGERE, UAVHENGIG gatede nøstede kall - uten å unnta OGSÅ disse ville komposisjonen fortsatt
+kastet under lås. RETTET: ny `isSelfRecoveryAction(toolId, action)` (owner-control-store.ts) erstatter
+den forrige unionen med en eksplisitt per-(tool_id,action)-mapping for ALLE FIRE tool_id-ene
+(`owner_controls`/`executive`/`situations`/`finance`) - fortsatt like smalt, INGEN mutasjon lagt til,
+INGEN ny autoritets-/tenant-tilstand. Se D-176 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-177, arkitekt-re-review 5252077633, BLOKKER B6):** D-176 sitt host-
+akseptanse-harness (`d174-executive-control-surface-live.ts`, seksjon 4b) brukte en sekvensiell
+`executive.activate_kill_switch`+`executive.revoke_credential`-rekkefølge for å etablere "begge
+låser samtidig" - STRUKTURELT UMULIG, samme bug-klasse testsuiten allerede var rettet for i D-176
+selv, men ikke anvendt på host-scriptet. RETTET: BEGGE lås-tilstandene settes nå DIREKTE via det
+durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
+revokeCredentialDurable(...)`); LESINGEN/gjenopprettingen under test går fortsatt via `executive.*`.
+Se D-177 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-178, arkitekt-host-akseptanse-review 5252418219, BLOKKER B7):** FØRSTE EKTE
+Windows-host-kjøring (`run_id=d265a028`) av D-174→D-177-harnesset feilet (`hard_fail=true`) - ALT
+ANNET (inkl. B4/B5/B6) var PASS, men enhets-tilbakekallings-fikstur/-lesing (seksjon 9/10,
+`seedDeviceGrant()` m.fl.) gjorde rå `sidePool`/`freshPool`-spørringer mot RLS-beskyttede
+`devices`/`sessions`/`session_grants` (FORCE ROW LEVEL SECURITY, migrasjon 053) UTEN tenant-kontekst
+- avslått under den ekte `jarvis_runtime`-rollen FØR selve `executive.revoke_device`-kallet under
+test ble nådd. RETTET: alle tre bruker nå den EKSISTERENDE `withTenantTransaction()`-hjelperen
+(`@jarvis/core`); `adminPool` bevisst IKKE brukt for fikstur/lesing (kun CLEANUP, uendret);
+`executive.revoke_device`-kallet uendret. `INTERNAL_BUILD_COMPLETE=false` (RETTET fra `true`) til en
+FERSK host-kjøring beviser fiksen. Se D-178 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/
+testevidens.
+
+**LIVE-BEVIST 2026-09-18 (D-179, arkitekt-host-akseptanse-review 5253069695, RESULT=PASS):** Tobias
+kjørte det D-178-rettede harnesset PÅ NYTT, faktisk to ganger - begge PASS (`run_id=fc9b99e5` og den
+avsluttende `run_id=bfca277d`, BEGGE `hard_fail=false`). ALLE markører PASS, inkl.
+`executive.revoke_device` (`grants_before=1`, `revoked_grants=1`, tenant bundet til `tenant-personal`)
+og ferskinstans-holdbarhetslesingen. `HOST_ACCEPTANCE_STATUS=PASS` (RETTET fra `REQUIRES_RERUN`),
+`INTERNAL_BUILD_COMPLETE=true` (RETTET fra `false`). `SOVEREIGN_COMPLETE=false` FORBLIR UENDRET. Se
+D-179 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

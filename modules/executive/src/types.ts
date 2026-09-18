@@ -1,3 +1,4 @@
+import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { OwnerControlState } from "@jarvis/owner-controls";
 import type { Situation, SituationPriority, SituationStage } from "@jarvis/situations";
 
@@ -88,8 +89,33 @@ export interface AttentionItemDetail extends AttentionItem {
  * begrensning i `situations.get_pause_state` (UA-10, uendret av K1) - å
  * utvide DEN kontrakten er utenfor K1 sitt omfang og er IKKE forsøkt løst
  * stille her.
+ *
+ * D-174 (B2): `finance_kill_switch` lagt til - RENT avledet av ET
+ * TREDJE nøstet `ToolGateway.execute()`-kall (`finance.get_kill_switch`,
+ * se `service.ts`), SAMME komposisjons-disiplin som de to over. Finans-
+ * nødbryteren er en TREDJE, UAVHENGIG autoritetsdimensjon (verken den
+ * globale `owner_control.kill_switch` - som likevel blokkerer finans-
+ * mutasjoner FØRST via den delte ToolGateway-frys-/kill-switch-gaten,
+ * se `gateway.ts` - eller noe `situation_domain_pauses`-domene): den
+ * gjelder SPESIFIKT spend-muliggjørende finans-/kort-handlinger
+ * (`finance.submit_payment_intent`, `finance_wallester.activate_card`
+ * m.fl. - se D-115/D-174). `null` betyr at tenanten aldri har hatt en
+ * `finance_kill_switch`-rad (ALDRI tolket som "aktiv" eller "inaktiv" -
+ * se `FinanceService.getKillSwitch()`).
+ *
+ * BEVISST UTELATT (dokumentert, ikke stille): device-/session-grant-
+ * tilstand. `SessionGrantService` eksponerer per D-174-fersklesing INGEN
+ * kanonisk lister-/tellemetode for "aktive grants for enhet X" - KUN
+ * `revokeForDeviceOn()` (en mutasjon). Å late som en slik status finnes
+ * her ville vært en FALSK "device revoked: true/false"-visning uten en
+ * ekte kanonisk kilde (§H-instruksen: "Do NOT fake status if no canonical
+ * query exists"). `owner_controls.revoke_device` sitt returverdi
+ * (`revoked_grants`-tall FRA selve tilbakekallingskallet) forblir den
+ * ENE sannferdige, tidsstempel-bundne bekreftelsen - IKKE en løpende
+ * status her.
  */
 export interface ControlSurfaceStatus {
   owner_control: OwnerControlState;
   situation_domain_pauses: { paused: string[] };
+  finance_kill_switch: FinanceKillSwitch | null;
 }

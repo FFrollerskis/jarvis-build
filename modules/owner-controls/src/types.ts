@@ -32,3 +32,26 @@ export interface OwnerControlState {
   frozen_connectors: FrozenConnectorEntry[];
   revoked_credentials: RevokedCredentialEntry[];
 }
+
+/** D-174 (B2): resultat av `owner_controls.revoke_device` - antall grants tilbakekalt er kanonisk bevis, ALDRI antatt > 0. */
+export interface DeviceRevocationResult {
+  tenant_id: string;
+  device_id: string;
+  revoked_grants: number;
+}
+
+/**
+ * D-175 (arkitekt-review 5250409538, BLOKKER B4): kastet av
+ * `OwnerControlsService.revokeDevice()` når `device_id` IKKE finnes i den
+ * AUTENTISERTE tenanten (`identity.tenant_id` - ALDRI et kaller-oppgitt
+ * `tenant_id`-parameter, se service.ts sitt filhode). Fail-CLOSED, SAMME
+ * navnekonvensjon som `CardNotFoundError`/`VendorNotFoundError` (ALDRI et
+ * stille `ok:true`/`revoked_grants:0`-resultat for en enhet som hører til
+ * EN ANNEN tenant eller aldri har eksistert i det hele tatt).
+ */
+export class DeviceNotFoundError extends Error {
+  constructor(readonly deviceId: string) {
+    super(`device_not_found:${deviceId}`);
+    this.name = "DeviceNotFoundError";
+  }
+}

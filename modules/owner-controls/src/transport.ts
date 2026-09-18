@@ -65,6 +65,23 @@ export class OwnerControlsTransport implements ToolTransport {
         await this.service.restoreCredential(requireString(parameters, "credential_ref"), actor);
         return { data: (await this.service.getControlState()) as unknown as JsonValue };
       }
+      case "revoke_device": {
+        // D-175 (arkitekt-review 5250409538, BLOKKER B4): mål-tenanten er
+        // ALLTID `identity.tenant_id` - ALDRI et kaller-oppgitt parameter
+        // (skjemaet under har bevisst INGEN `tenant_id`-felt, så et forsøk
+        // på å oppgi ett uansett avvises som `invalid_parameters` FØR denne
+        // transporten nås). Se service.ts sitt filhode for full begrunnelse.
+        if (typeof identity.tenant_id !== "string") {
+          throw new Error("owner_controls_missing_invocation_context");
+        }
+        const result = await this.service.revokeDevice(
+          identity.tenant_id,
+          requireString(parameters, "device_id"),
+          requireString(parameters, "reason"),
+          actor
+        );
+        return { data: result as unknown as JsonValue };
+      }
       default:
         throw new Error(`unknown_owner_controls_action:${action}`);
     }
@@ -144,6 +161,12 @@ export function ownerControlsToolDefinitions(transport: OwnerControlsTransport):
       description: "Gjenopprett ÉN navngitt, tidligere tilbakekalt credential_ref",
       input_schema: record({ credential_ref: z.string() }), capability_class: "C", scopes: ["owner_controls.revoke"],
       reversible: true, rollback_procedure: "revoke_credential", idempotent_external: true, ...common
+    },
+    {
+      tool_id: "owner_controls", action: "revoke_device",
+      description: "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet (device_id) i EGEN (identity.tenant_id) tenant umiddelbart - kanonisk SessionGrantService.revokeForDeviceOn(). Enheten kan tilhøre en ANNEN person (delegat) i SAMME tenant; en enhet i en ANNEN tenant finnes ikke fra dette kallets perspektiv (D-175)",
+      input_schema: record({ device_id: z.string(), reason: z.string() }), capability_class: "C", scopes: ["owner_controls.device"],
+      reversible: false, rollback_procedure: "enheten må re-rulleres inn (enrollment) for ny tilgang - ingen restore_device", idempotent_external: true, ...common
     }
   ];
 }
