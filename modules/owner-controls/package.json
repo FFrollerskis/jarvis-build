@@ -15,12 +15,12 @@
     "@jarvis/contracts": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@jarvis/core": "workspace:*",
     "@types/pg": "^8.15.6",
-    "embedded-postgres": "16.14.0-beta.17",
-    "pg": "^8.16.3"
+    "embedded-postgres": "16.14.0-beta.17"
   }
 }

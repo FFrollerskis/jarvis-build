@@ -10,6 +10,7 @@ import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
 import { ToolGateway, type SecretProvider } from "@jarvis/tool-gateway";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
+import { captureAuditWatermark, queryRunScopedOwnerControlsAudit } from "../src/audit-evidence.ts";
 import { OwnerControlsService } from "../src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../src/transport.ts";
 import type { OwnerControlState } from "../src/types.ts";
@@ -577,6 +578,77 @@ describe("I: B1-fix (D-166, arkitekt-review PR #93) - MINIMAL, handlings-nivå s
       expect(JSON.stringify(row.payload)).not.toContain("test-token"); // den faktiske secret-verdien fra `secrets.get()` - aldri i payload.
     } finally {
       await ensureSharedRefRestored();
+    }
+  });
+});
+
+describe("J: D-167 (host-harness-korreksjon, arkitekt-funn PR #93) - audit-bevis for owner_controls MÅ være avgrenset til (session_id, vannmerke), ALDRI en håndplukket 'siste N rader'-grense", () => {
+  it("1) MER ENN 10 senere matchende owner_controls-audit-rader gjør IKKE en tidligere aktivering usynlig for et vannmerke+session_id-avgrenset bevis - selv om en naiv ORDER BY audit_id DESC LIMIT 10 (uten avgrensning) beviselig ville mistet den", async () => {
+    const { gateway } = freshStack();
+    const watermark = await captureAuditWatermark(adminPool);
+    try {
+      const activated = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason: "J-watermark-test" } });
+      expect(activated.ok).toBe(true);
+
+      // MER ENN 10 senere, matchende owner_controls-handlinger under SAMME
+      // identitet - akkurat scenariet (B1/D-166 la til flere `owner_controls`-
+      // kall enn den opprinnelige, håndplukkede grensen tålte) som gjorde den
+      // opprinnelige `k1-owner-control-authority-live.ts` sin "siste 10
+      // rader"-spørring ikke-deterministisk. Kill switchen er aktiv, så disse
+      // nektes ('tool.denied') - det er nok til å reprodusere problemet, siden
+      // BÅDE ALLOW- og DENY-rader teller for `action IN (...)`.
+      for (let i = 0; i < 12; i++) {
+        await gateway.execute({
+          identity: ownerIdentity, tool_id: "owner_controls", action: "freeze_connector",
+          parameters: { connector_id: `j-watermark-padding-${i}`, reason: "padding" }
+        });
+      }
+
+      // Reproduserer BEVISST den GAMLE, fikserte bug-en: en naiv "siste 10
+      // matchende rader"-spørring UTEN vannmerke/session-avgrensning mister
+      // aktiveringen så snart 10+ senere matchende rader finnes.
+      const naiveRows = await adminPool.query(
+        `SELECT action FROM audit_events WHERE tool_id = 'owner_controls' AND person_id = $1
+         AND action IN ('activate_kill_switch','freeze_connector') ORDER BY audit_id DESC LIMIT 10`,
+        [OWNER]
+      );
+      expect(naiveRows.rows.some((r) => (r as { action: string }).action === "activate_kill_switch")).toBe(false);
+
+      // FIKSEN: samme underliggende data, men avgrenset til (session_id,
+      // vannmerke) - aktiveringen er FORTSATT synlig, og resultatmengden er
+      // beviselig STØRRE enn 10 (ikke reddet av en tilfeldig liten datamengde).
+      const scopedEvents = await queryRunScopedOwnerControlsAudit(adminPool, {
+        personId: OWNER, sessionId: ownerIdentity.session_id!, watermark, actions: ["activate_kill_switch", "freeze_connector"]
+      });
+      expect(scopedEvents.length).toBeGreaterThan(10);
+      expect(scopedEvents.some((e) => e.action === "activate_kill_switch" && e.type === "tool.executed")).toBe(true);
+    } finally {
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} }).catch(() => undefined);
+    }
+  });
+
+  it("2) en ANNEN session_id (samme eier, samme tool_id, SAMME vannmerke-vindu - dvs. rader ETTER vannmerket) telles IKKE med i et vannmerke+session_id-avgrenset bevis for DENNE kjøringen - avgrensningen er BÅDE session_id- OG vannmerke-basert, ikke kun én av dem", async () => {
+    const { gateway } = freshStack();
+    const watermark = await captureAuditWatermark(adminPool);
+
+    // Skriver EN rad under en ANNEN, unik session_id - ETTER vannmerket, akkurat
+    // som "denne kjøringens" egen rad under. Kun `session_id` skiller dem.
+    const otherSessionIdentity: IdentityContext = { ...ownerIdentity, session_id: "sess-owner-controls-j-other-session" };
+    await gateway.execute({ identity: otherSessionIdentity, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason: "J-other-session" } });
+    await gateway.execute({ identity: otherSessionIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} });
+
+    const activated = await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "activate_kill_switch", parameters: { reason: "J-this-session" } });
+    expect(activated.ok).toBe(true);
+    try {
+      const scopedEvents = await queryRunScopedOwnerControlsAudit(adminPool, {
+        personId: OWNER, sessionId: ownerIdentity.session_id!, watermark, actions: ["activate_kill_switch"]
+      });
+      // KUN denne kjøringens ÉN aktivering - IKKE den andre session_id-en sin
+      // (som forøvrig OGSÅ ligger ETTER vannmerket - kun session_id skiller dem).
+      expect(scopedEvents).toHaveLength(1);
+      expect(scopedEvents[0]!.action).toBe("activate_kill_switch");
+    } finally {
+      await gateway.execute({ identity: ownerIdentity, tool_id: "owner_controls", action: "deactivate_kill_switch", parameters: {} }).catch(() => undefined);
     }
   });
 });

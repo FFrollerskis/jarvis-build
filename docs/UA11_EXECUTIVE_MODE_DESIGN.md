@@ -213,7 +213,13 @@ Masterplanens UA-11-akseptansekriterier:
    kanonisk gjenopprettingsvei). Fikset med en minimal, handlings-nivå selvgjenopprettings-mengde
    (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`, delt av BÅDE `PolicyGateway`- og `ToolGateway`-gaten - se
    D-166 for samtidig-kill-switch-deadlock-analysen). Suite-bevist (30/30+809/809 grønne); host-harnesset
-   utvidet men IKKE kjørt på nytt av Tobias - `FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true`,
-   IKKE `PRODUCTION_VERIFIED`, for DENNE delkapabiliteten spesifikt.** `/infra/pause` (D-104,
-   `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere mekanisme - fersk-verifisert
-   IKKE en del av dette gapet (D-164 F), ikke rørt av K1.
+   utvidet. **OPPDATERT 2026-09-18 (host-rerun, D-167): Tobias kjørte det utvidede harnesset på ekte host
+   (HEAD `ca167dba...`) - B1 sin funksjonalitet var `PASS` (selvgjenoppretting/samtidig-deadlock/cleanup),
+   men harnessets EGEN, sekundære audit-bevis-spørring (en håndplukket "siste 10 rader"-grense satt før
+   D-166 fantes) mistet den opprinnelige aktiveringsraden etter at D-166 la til flere `owner_controls`-kall
+   enn grensen tålte - IKKE en produksjonsfeil, se D-167. Rettet med en run-avgrenset (`session_id`+
+   vannmerke, ingen `LIMIT`) spørring i ny `modules/owner-controls/src/audit-evidence.ts`; harnesset er
+   IKKE kjørt på nytt av Tobias ETTER denne fiksen.** Status forblir `FIXED_SUITE_VERIFIED_AFTER_B1`,
+   `HOST_ACCEPTANCE_REQUIRED=true`, IKKE `PRODUCTION_VERIFIED`, for DENNE delkapabiliteten spesifikt.**
+   `/infra/pause` (D-104, `InfraExecutionGate`) forblir en SEPARAT, allerede-dokumentert, snevrere
+   mekanisme - fersk-verifisert IKKE en del av dette gapet (D-164 F), ikke rørt av K1.

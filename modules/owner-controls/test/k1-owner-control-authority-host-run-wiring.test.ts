@@ -122,3 +122,30 @@ describe("live-scriptet bruker ALDRI en fake PASS for Q-21/migrasjon-sjekker (BL
     expect(returnIdx).toBeGreaterThan(migrationCheckIdx);
   });
 });
+
+describe("D-167 (host-harness-korreksjon, arkitekt-funn PR #93): audit-bevis er avgrenset til (session_id, vannmerke) - ALDRI en håndplukket 'siste N rader'-grense som B1/D-166 beviselig gjorde ikke-deterministisk", () => {
+  it("importerer captureAuditWatermark/queryRunScopedOwnerControlsAudit fra DEN DELTE hjelpe-modulen (ikke en dupliserende, ad-hoc spørring per seksjon)", () => {
+    expect(liveScriptSource).toMatch(
+      /import\s*\{[^}]*captureAuditWatermark[^}]*queryRunScopedOwnerControlsAudit[^}]*\}\s*from\s*"\.\.\/src\/audit-evidence\.ts"/s
+    );
+  });
+  it("tar vannmerket FØR kjøringens FØRSTE mutasjon (aktiveringen) - ikke etter, og ikke inni en seksjon som selv muterer", () => {
+    const watermarkIdx = liveScriptSource.indexOf("const auditWatermark = await captureAuditWatermark(adminPool);");
+    const activationSectionIdx = liveScriptSource.indexOf('section("AKTIVERING');
+    expect(watermarkIdx).toBeGreaterThan(-1);
+    expect(activationSectionIdx).toBeGreaterThan(-1);
+    expect(watermarkIdx).toBeLessThan(activationSectionIdx);
+  });
+  it("INGEN av de to audit-spørringene er en bar 'ORDER BY audit_id DESC LIMIT N' UTEN en forutgående session_id/vannmerke-avgrensning - den GAMLE, fikserte mønsteret finnes IKKE lenger i kildekoden", () => {
+    expect(liveScriptSource).not.toMatch(/ORDER BY audit_id DESC LIMIT \d+/);
+    expect(liveScriptSource).not.toMatch(/action IN \([^)]*\)\s*\n?\s*ORDER BY audit_id DESC LIMIT/);
+  });
+  it("begge audit-seksjonene kaller queryRunScopedOwnerControlsAudit med BÅDE sessionId OG watermark (ikke bare én av dem)", () => {
+    const calls = liveScriptSource.match(/queryRunScopedOwnerControlsAudit\(adminPool,\s*\{[^}]*\}/gs) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of calls) {
+      expect(call).toContain("sessionId:");
+      expect(call).toContain("watermark:");
+    }
+  });
+});

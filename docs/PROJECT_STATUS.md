@@ -1,13 +1,15 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-18 (branch `tobias/manual-masterplan-k1-owner-control-authority`, PR #93,
-forrige HEAD `343c273068c392618c422f3057b8eddca8c97fbe` - ny HEAD etter denne oppdateringens commit,
-se git-historikk for eksakt SHA). Aktiv oppgave: **K1 B1-FIKS - uavhengig arkitekt-review av PR #93
-fant BLOCKER B1 (credential-revoke/restore-selvgjenopprettings-selv-lås) etter D-165 sin
-host-akseptanse-lukking; fikset med en minimal, handlings-nivå selvgjenopprettings-mengde (D-166).**
-Kjernemekanismen (kill switch + connector-frys, D-164/D-165) forblir `PRODUCTION_VERIFIED` og
-UPÅVIRKET. Credential-selvgjenopprettingsstien er nå `FIXED_SUITE_VERIFIED_AFTER_B1`,
-`HOST_ACCEPTANCE_REQUIRED=true` - IKKE host-bevist ennå. `MERGE_AUTHORIZED=false`,
+forrige HEAD `ca167dba02413d8f7c7468cc2cd40b5eac5bf923` - ny HEAD etter denne oppdateringens commit,
+se git-historikk for eksakt SHA). Aktiv oppgave: **K1 D-167 - Tobias sin host-rerun av D-166 sin
+B1-fiks (HEAD `ca167dba...`) bekreftet B1 FUNKSJONELT (selvgjenoppretting/samtidig-deadlock/cleanup
+alle PASS), men avdekket at host-harnessets EGEN, sekundære audit-bevis-spørring var
+ikke-deterministisk ("siste 10 rader" - IKKE en produksjonsfeil) - rettet med en run-avgrenset
+(`session_id`+vannmerke) spørring.** Kjernemekanismen (kill switch + connector-frys, D-164/D-165)
+forblir `PRODUCTION_VERIFIED` og UPÅVIRKET. B1-gjenopprettingsstien (D-166) er FUNKSJONELT
+host-bevist, men HELE stien (inkl. det nå fiksede audit-beviset) forblir `FIXED_SUITE_VERIFIED_AFTER_B1`,
+`HOST_ACCEPTANCE_REQUIRED=true` til det D-167-fiksede harnesset kjøres på nytt. `MERGE_AUTHORIZED=false`,
 `SELF_APPROVAL=false`, `MERGED=false`. Sovereign som helhet **FORTSATT IKKE komplett**. Ingen ny
 masterplan, ingen UGREEN-migrering startet.
 
@@ -23,8 +25,9 @@ masterplan, ingen UGREEN-migrering startet.
   namespacene (`situations`/`executive`/`vision`) - fortsatt tilsiktet (D-163 B).
 - **K1 (PR #93, IKKE merget):** lukker UA-11 akseptansekriterium 3 sitt siste gjenstående gap for
   kjernemekanismen - bevist BÅDE i suite OG på ekte Windows/Docker Desktop-host (D-165). Uavhengig
-  arkitekt-review fant deretter BLOCKER B1 i credential-selvgjenopprettingsstien; fikset denne runden
-  (D-166), suite-bevist, host-rerun utestående.
+  arkitekt-review fant deretter BLOCKER B1 i credential-selvgjenopprettingsstien; fikset (D-166).
+  Tobias sin host-rerun av D-166 bekreftet B1 funksjonelt, men fant en egen bug i harnessets
+  audit-bevis-spørring; fikset denne runden (D-167), suite-bevist, host-rerun utestående.
 
 ## K1 - hva er gjort (D-164/D-165)
 
@@ -95,25 +98,56 @@ tekst er IKKE redigert (repo-konvensjon); korreksjonen er logget i D-166.
    invarianten (rekkefølge A, den strengeste), inkl. et direkte `restoreCredentialDurable()`-sikkerhetsnett
    i CLEANUP. **IKKE kjørt på nytt av Tobias ennå.**
 
-**Status (B1-delkapabilitet):** `FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true` -
+**Status (B1-delkapabilitet, FØR D-167):** `FIXED_SUITE_VERIFIED_AFTER_B1`, `HOST_ACCEPTANCE_REQUIRED=true` -
 IKKE `PRODUCTION_VERIFIED`. Se D-166 og RUNTIME_GATES.md/SOVEREIGN_GRADUATION_MATRIX.md for full
 begrunnelse og den eksplisitte host-proven/suite-proven-distinksjonen.
 
+## K1 D-167 - host-rerun av B1-fiksen fant en HARNESS-bug, ikke en produksjonsbug
+
+**Tobias kjørte det D-166-utvidede `k1-owner-control-authority-live.ts` på ekte host mot HEAD
+`ca167dba02413d8f7c7468cc2cd40b5eac5bf923`.** Resultat: `k1_credential_revocation_self_recovery=PASS`,
+`k1_combined_deadlock_recovery=PASS`, `k1_cleanup_state_unchanged=PASS` (`owner_control_state_after=[]`)
+- B1 sin funksjonelle fiks virker på ekte host. MEN `k1_audit_evidence=FAIL` (`hard_fail=true` for
+kjøringen som helhet), med diagnostikk `audit_rows=10 has_activate=false has_denied=true has_deactivate=true`.
+
+**Rotårsak (fersk-verifisert mot faktisk kildekode, IKKE en produksjonsfeil):** den GAMLE
+audit-bevis-spørringen i live-scriptet var `ORDER BY audit_id DESC LIMIT 10` - en håndplukket "siste
+10 rader"-grense satt FØR D-166 fantes. D-166 sine to nye seksjoner (I/J) gjør til sammen 12 flere
+matchende `owner_controls`-kall enn D-165-tidspunktet - den opprinnelige `activate_kill_switch`-raden
+falt derfor utenfor `LIMIT 10`-vinduet. Verken `PolicyGateway`, `ToolGateway` eller `OwnerControls`
+gjorde noe feil - feilen lå UTELUKKENDE i harnessets EGEN, sekundære bevis-spørring.
+
+**Fiks:** ny, delt hjelpemodul `modules/owner-controls/src/audit-evidence.ts`
+(`captureAuditWatermark()` + `queryRunScopedOwnerControlsAudit()`) - avgrenser audit-bevis til
+DENNE kjøringen via `session_id` (allerede unikt per kjøring) OG et vannmerke (`audit_id` tatt FØR
+første mutasjon), INGEN `LIMIT`. Begge audit-seksjonene i live-scriptet bruker nå denne hjelpen; den
+avsluttende seksjonen er utvidet til å kreve `deactivate_kill_switch`/`restore_credential` MINST to
+ganger hver (eksplisitt bevis at BÅDE I og J faktisk kjørte gjennom ToolGateway). `pg` flyttet fra
+`devDependencies` til `dependencies` i `@jarvis/owner-controls` (samme presedens som `@jarvis/policy`).
+
+**Tester:** `owner-control-authority.test.ts` 32/32 grønne (2 nye - en reproduserer den GAMLE buggen
+direkte og beviser fiksen, en beviser session_id-isolasjon). `k1-owner-control-authority-host-run-wiring.test.ts`
+19/19 grønne (4 nye strukturelle). `pnpm -w typecheck` (30/30 pakker)/`pnpm -w lint` rene.
+
+**Status (B1-delkapabilitet, ETTER D-167):** fortsatt `FIXED_SUITE_VERIFIED_AFTER_B1`,
+`HOST_ACCEPTANCE_REQUIRED=true` - IKKE `PRODUCTION_VERIFIED` før Tobias kjører det D-167-fiksede
+harnesset på nytt. Se D-167 for full begrunnelse.
+
 ## Blokkeringer
 
-1. **Merge av denne PR-en.** `MERGE_AUTHORIZED=false`; krever uavhengig arkitekt-review av B1-fiksen
-   mot exact ny HEAD + en separat, eksplisitt merge-closeout-ordre (samme protokoll som alle
+1. **Merge av denne PR-en.** `MERGE_AUTHORIZED=false`; krever uavhengig arkitekt-review av B1-/D-167-
+   fiksene mot exact ny HEAD + en separat, eksplisitt merge-closeout-ordre (samme protokoll som alle
    foregående Sovereign-slices) før merge.
-2. **Host-rerun for B1-fiksen.** Tobias må kjøre det utvidede `k1-owner-control-authority-live.ts`
-   på ekte host før credential-selvgjenopprettingsstien kan kalles `PRODUCTION_VERIFIED`.
+2. **Host-rerun av det D-167-fiksede harnesset.** Tobias må kjøre det på nytt før HELE
+   B1-gjenopprettingsstien (inkl. audit-beviset) kan kalles `PRODUCTION_VERIFIED`.
 3. **Embedded-Postgres-flake (B.3, port-kontensjon)** fortsatt kjent i repo-suiten (uendret, ikke
    K1-relatert, ikke rørt av denne sliceen) - påvirker KUN full `pnpm -w test` av HELE workspacet,
    ikke de målrettede K1-suitene (som er 100% grønne).
 
 ## Neste oppgave
 
-PR #93 venter på uavhengig arkitekt-review av B1-fiksen (siste gjenstående gate før merge), deretter
-Tobias sin host-rerun av det utvidede harnesset. Etter merge: ingen ny slice er valgt ennå. K2
-(decision log-domenet) forblir en lavere-prioritert, ikke-startet fremtidig kandidat (se Q-35,
-SOVEREIGN_GRADUATION_MATRIX.md §Neste-steg). Sovereign som helhet er **FORTSATT IKKE komplett**.
-Ingen ny masterplan, ingen UGREEN-migrering.
+PR #93 venter på uavhengig arkitekt-review av B1-/D-167-fiksene (siste gjenstående gate før merge),
+deretter Tobias sin host-rerun av det D-167-fiksede harnesset. Etter merge: ingen ny slice er valgt
+ennå. K2 (decision log-domenet) forblir en lavere-prioritert, ikke-startet fremtidig kandidat (se
+Q-35, SOVEREIGN_GRADUATION_MATRIX.md §Neste-steg). Sovereign som helhet er **FORTSATT IKKE
+komplett**. Ingen ny masterplan, ingen UGREEN-migrering.

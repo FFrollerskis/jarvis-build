@@ -36,7 +36,12 @@
 //   F. gjenopptak     - deactivate_kill_switch (fra "worker"-siden - beviser symmetri)
 //                       gjenoppretter tilgang, sett fra BÅDE api- og worker-siden
 //   G. audit          - audit_events har rader for aktivering/nektelse/deaktivering med
-//                       korrekt actor/reason, INGEN credential-verdi i payload
+//                       korrekt actor/reason, INGEN credential-verdi i payload. AVGRENSET
+//                       TIL DENNE KJØRINGEN via `session_id`+et vannmerke tatt FØR første
+//                       mutasjon (D-167 - IKKE en håndplukket "siste N rader"-grense, som
+//                       viste seg ikke-deterministisk etter B1/D-166 la til flere
+//                       `owner_controls`-kall enn den opprinnelige grensen tålte - se
+//                       `../src/audit-evidence.ts` og D-167 i DECISIONS_AND_ASSUMPTIONS.md)
 //   H. opprydding     - owner_control_state er IDENTISK med snapshotet FØR kjøringen
 //                       (ingen ekte frys/tilbakekall/kill-switch-tilstand endret varig)
 //   I. B1-selvgjenoppretting (D-166, arkitekt-review PR #93) - owner_controls.
@@ -78,6 +83,7 @@ import {
 import { BUSINESS_INTERNAL_CREDENTIAL_REF, BusinessInternalSecretProvider } from "@jarvis/business";
 import { EnvSecretProvider, FallbackSecretProvider, ToolGateway } from "@jarvis/tool-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
+import { captureAuditWatermark, queryRunScopedOwnerControlsAudit } from "../src/audit-evidence.ts";
 import { OwnerControlsService } from "../src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../src/transport.ts";
 import type { OwnerControlState } from "../src/types.ts";
@@ -203,6 +209,16 @@ async function main(): Promise<void> {
   diagnostics["owner_control_state_before"] = JSON.stringify(snapshotBefore);
   log(`owner_control_state_before=${diagnostics["owner_control_state_before"]}`);
 
+  // D-167: tatt FØR kjøringens FØRSTE mutasjon (aktiveringen i AKTIVERING-
+  // seksjonen under) - se `../src/audit-evidence.ts` filhode for hvorfor
+  // BÅDE dette vannmerket OG `ownerIdentity.session_id` (allerede unikt per
+  // kjøring, allerede emittert til `audit_events.session_id` av HVERT
+  // `gateway.execute()`-kall) brukes til å avgrense audit-bevis til AKKURAT
+  // denne kjøringen, ALDRI en håndplukket "siste N rader"-grense.
+  const auditWatermark = await captureAuditWatermark(adminPool);
+  diagnostics["audit_watermark_before_run"] = auditWatermark;
+  log(`audit_watermark_before_run=${auditWatermark} audit_session_id=${ownerIdentity.session_id}`);
+
   // "api"-siden og "worker"-siden er HELT SEPARATE pg.Pool-instanser (ekte separate
   // TCP-forbindelser til samme database) - matcher NØYAKTIG hvordan apps/api/src/main.ts
   // og apps/api/src/worker-main.ts hver konstruerer sin EGEN KillSwitch/OwnerControls/
@@ -304,13 +320,10 @@ async function main(): Promise<void> {
           identity: ownerIdentity, tool_id: "owner_controls", action: "unfreeze_connector", parameters: { connector_id: SYNTHETIC_CONNECTOR }
         });
 
-        const { rows } = await adminPool.query(
-          `SELECT type, decision, reason, action, payload FROM audit_events
-           WHERE tool_id = 'owner_controls' AND person_id = $1 AND action IN ('revoke_credential','restore_credential')
-           ORDER BY audit_id DESC LIMIT 10`,
-          [OWNER_PERSON]
-        );
-        const events = rows as Array<{ type: string; decision: string; reason: string | null; action: string; payload: Record<string, unknown> }>;
+        const events = await queryRunScopedOwnerControlsAudit(adminPool, {
+          personId: OWNER_PERSON, sessionId: ownerIdentity.session_id!, watermark: auditWatermark,
+          actions: ["revoke_credential", "restore_credential"]
+        });
         const hasRevoke = events.some((e) => e.action === "revoke_credential" && e.type === "tool.executed");
         const hasRestore = events.some((e) => e.action === "restore_credential" && e.type === "tool.executed");
         const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
@@ -393,27 +406,39 @@ async function main(): Promise<void> {
       }
     );
 
-    await section("AUDIT-BEVIS (activate/deny/deactivate har audit_events-rader med korrekt actor, INGEN credential-verdi)", async () => {
-      const { rows } = await adminPool.query(
-        `SELECT type, decision, reason, action, payload FROM audit_events
-         WHERE tool_id = 'owner_controls' AND person_id = $1 AND action IN ('activate_kill_switch','freeze_connector','deactivate_kill_switch','unfreeze_connector')
-         ORDER BY audit_id DESC LIMIT 10`,
-        [OWNER_PERSON]
-      );
-      const events = rows as Array<{ type: string; decision: string; reason: string | null; action: string; payload: Record<string, unknown> }>;
-      const hasActivate = events.some((e) => e.action === "activate_kill_switch" && e.type === "tool.executed");
-      const hasDenied = events.some((e) => e.action === "freeze_connector" && e.decision === "DENY" && e.reason === "kill_switch_active");
-      const hasDeactivate = events.some((e) => e.action === "deactivate_kill_switch" && e.type === "tool.executed");
-      // Den FAKTISKE, oppløste credential-verdien (aldri kun credential_ref) skal ALDRI
-      // forekomme i audit-payloaden - løs den ekte produksjonskjeden og søk etter den.
-      const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
-      const resolvedCredential = await secrets.get(BUSINESS_INTERNAL_CREDENTIAL_REF);
-      const serialized = JSON.stringify(events);
-      const noSecretLeak = !resolvedCredential || !serialized.includes(resolvedCredential);
-      const ok = hasActivate && hasDenied && hasDeactivate && noSecretLeak;
-      results.k1_audit_evidence = ok ? "PASS" : "FAIL";
-      log(`audit_rows=${events.length} has_activate=${hasActivate} has_denied=${hasDenied} has_deactivate=${hasDeactivate} -> k1_audit_evidence: ${results.k1_audit_evidence}`);
-    });
+    await section(
+      "AUDIT-BEVIS (D-167: HELE kjøringen, avgrenset til session_id+vannmerke - activate/deny(kill_switch)/deactivate/revoke/deny(credential)/restore har audit_events-rader med korrekt actor, INGEN credential-verdi, OG restore/deactivate skjedde MINST TO GANGER hver - én gang for selvgjenoppretting (I), én gang for samtidig-deadlock-gjenoppretting (J))",
+      async () => {
+        const events = await queryRunScopedOwnerControlsAudit(adminPool, {
+          personId: OWNER_PERSON, sessionId: ownerIdentity.session_id!, watermark: auditWatermark,
+          actions: ["activate_kill_switch", "freeze_connector", "deactivate_kill_switch", "unfreeze_connector", "revoke_credential", "restore_credential"]
+        });
+        const hasActivate = events.some((e) => e.action === "activate_kill_switch" && e.type === "tool.executed");
+        const hasKillSwitchDenied = events.some((e) => e.action === "freeze_connector" && e.decision === "DENY" && e.reason === "kill_switch_active");
+        const hasCredentialDenied = events.some((e) => e.action === "freeze_connector" && e.decision === "DENY" && e.reason === "credential_revoked");
+        const hasRevoke = events.some((e) => e.action === "revoke_credential" && e.type === "tool.executed");
+        const deactivateCount = events.filter((e) => e.action === "deactivate_kill_switch" && e.type === "tool.executed").length;
+        const restoreCount = events.filter((e) => e.action === "restore_credential" && e.type === "tool.executed").length;
+        // D-166 sitt selvgjenopprettings-unntak (I) OG samtidig-deadlock-beviset (J) kaller
+        // BÅDE `deactivate_kill_switch` OG `restore_credential` GJENNOM ToolGateway hver -
+        // MINST to av hver bekrefter at BEGGE veiene faktisk ble øvet, ikke bare én.
+        const hasCombinedRecoveryEvidence = deactivateCount >= 2 && restoreCount >= 2;
+        // Den FAKTISKE, oppløste credential-verdien (aldri kun credential_ref) skal ALDRI
+        // forekomme i audit-payloaden - løs den ekte produksjonskjeden og søk etter den.
+        const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+        const resolvedCredential = await secrets.get(BUSINESS_INTERNAL_CREDENTIAL_REF);
+        const serialized = JSON.stringify(events);
+        const noSecretLeak = !resolvedCredential || !serialized.includes(resolvedCredential);
+        const ok = hasActivate && hasKillSwitchDenied && hasCredentialDenied && hasRevoke && hasCombinedRecoveryEvidence && noSecretLeak;
+        results.k1_audit_evidence = ok ? "PASS" : "FAIL";
+        log(
+          `audit_rows=${events.length} has_activate=${hasActivate} has_kill_switch_denied=${hasKillSwitchDenied} ` +
+          `has_credential_denied=${hasCredentialDenied} has_revoke=${hasRevoke} deactivate_count=${deactivateCount} ` +
+          `restore_count=${restoreCount} has_combined_recovery_evidence=${hasCombinedRecoveryEvidence} ` +
+          `audit_no_secret_leak=${noSecretLeak} -> k1_audit_evidence: ${results.k1_audit_evidence}`
+        );
+      }
+    );
 
     cleanupSucceeded = true;
   } finally {
