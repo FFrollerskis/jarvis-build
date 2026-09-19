@@ -46,6 +46,10 @@ import {
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { LocalHashEmbedding } from "@jarvis/memory";
+import {
+  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck,
+  parseWatchdogIntervalMs, parseCostHardLimitOre
+} from "@jarvis/watchdog";
 
 // Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
 // en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
@@ -92,10 +96,22 @@ const gateway = new ModelGateway({
 
 // BO-11 (§29): worker-tool-mesh gjennom SAMME trusted Tool Gateway/Policy som api -
 // ingen provider/tool-bypass. Kun ufarlige read-verktøy eksponeres (mesh-bridge).
-const killSwitch = new KillSwitch();
+// K1 (Sovereign graduation, D-164): SAMME durable, delt `pool`+`authority`-
+// wiring som apps/api/src/main.ts - `killSwitch`/`ownerControls` sin LIVE
+// `*Durable()`-sjekk spør nå SAMME `owner_control_state`-tabell som
+// api-prosessen, ikke en egen in-memory-kopi (se `KillSwitch` sitt filhode
+// for hele begrunnelsen). `owner_controls.*`-VERKTØYET registreres BEVISST
+// IKKE her (samme presedens som `situations`/`executive`, D-163/D-164
+// fresh-audit: ingen eier-vendt kaller i worker-prosessen for det
+// namespace-et) - kun selve autorisasjons-KONTROLLEN er delt her.
+const ownerControlAuthority = { owner_person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias" };
+const killSwitch = new KillSwitch(pool, ownerControlAuthority);
+await killSwitch.restore();
+const ownerControls = new OwnerControls(killSwitch, pool, ownerControlAuthority);
+await ownerControls.restore();
 // D-104 (UA-5 Production Operations Control Plane v1): SAMME infra-gate-
 // wiring-mønster som apps/api/src/main.ts. ÆRLIG begrensning (uendret fra
-// den allerede eksisterende `killSwitch`/`OwnerControls`-arkitekturen):
+// den allerede eksisterende, BEVISST UTENFOR K1 sitt omfang - se D-164):
 // dette er en EGEN, prosess-lokal `InfraExecutionGate`-instans - en pause
 // utløst via api-prosessens `/infra/pause`-HTTP-rute endrer IKKE denne
 // workerprosessens egen gate-tilstand (ingen cross-process-synkronisering
@@ -111,6 +127,8 @@ const policy = new PolicyGateway({
   devices: deviceRegistry,
   nonces: new PgApprovalStore(pool),
   killSwitch,
+  // K1 (D-164): samme "tidligere dødt felt, nå håndhevet"-fiks som apps/api/src/main.ts.
+  controls: ownerControls,
   infraGate,
   infraToolIds,
   authority: {
@@ -118,11 +136,13 @@ const policy = new PolicyGateway({
     owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
   }
 });
-const toolGateway = new ToolGateway(
-  pool, policy,
-  new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
-  new OwnerControls(killSwitch)
-);
+// D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
+// inline i ToolGateway-konstruksjonen) slik at NØYAKTIG SAMME
+// `SecretProvider`-instans også kan injiseres i `WatchdogEmergencyAlertSink`
+// under - ingen ny/parallell credential-mekanisme, samme oppløsning som
+// enhver ordinær `telegram.notify`-kaller.
+const toolSecretProvider = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls);
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
@@ -246,9 +266,14 @@ const githubRateLimitController = new GithubRateLimitController(
   new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
   (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
 );
+// D-181 (BLOCKER B1, D184): hoistet (var tidligere inline i firstWaveTools()
+// under) slik at NØYAKTIG SAMME `TelegramTransport`-instans også kan
+// injiseres i `WatchdogEmergencyAlertSink` - samme mottaker-konfigurasjon
+// (`chatId`), ingen parallell Telegram-klient.
+const telegramTransport = new TelegramTransport();
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-  github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
+  github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
@@ -295,6 +320,75 @@ const workerIdentity = {
   memory_space_id: "personal", session_id: "sess-worker", device_id: "jarvis-core",
   channel: "api", auth_strength: "active"
 } as const;
+
+// D-180 (W1, D183 - retter D182 sitt REAL_INTERNAL_GAP-funn): @jarvis/watchdog
+// var FØR denne posten null-koblet til noen produksjonsprosess. Plassert HER,
+// ETTER `assertRuntimeRoleSafe(pool)` (linje ~63) og `killSwitch.restore()`/
+// `ownerControls.restore()` (linje ~105/107) er fullført, FØR selve
+// intervall-drenerings-loopen nederst - watchdogen starter ALDRI før
+// runtime-DB-sikkerhetssjekkene er kjørt og den delte, pool-baserte
+// `KillSwitch`-en er gjenopprettet (D183 §A). KUN i worker-prosessen (D183
+// sin foretrukne mål - eier allerede pool/KillSwitch/TelegramTransport/
+// ToolGateway) - IKKE duplisert i apps/api/src/main.ts (D183 §A "avoid
+// duplicate watchdog instances").
+//
+// `costExplosionCheck` sin nødstopp går NÅ via `killSwitch.activateDurable()`
+// (se watchdog.ts sin egen begrunnelse) - `ownerPersonId` er BEVISST SAMME
+// `ownerControlAuthority.owner_person_id` som resten av denne filens wiring
+// (linje ~103/122/131), ALDRI en oppdiktet "system"-identitet: `assert
+// OwnerControlAuthorized()` krever UBETINGET at aktøren matcher den
+// konfigurerte eier-autoriteten, og `owner_control_state.actor_person_id`
+// har en reell FK mot `people` - denne automatiserte nødmekanismen handler
+// derfor UNDER eierens egen, forhåndsautoriserte sovereign-autoritet
+// (D-41), ikke som en separat, uautorisert aktør.
+//
+// D-181 (BLOCKER B1, arkitekt-order D184 mot PR #96 - retter D-180 sitt
+// gjenoppdagede funn): `GatewayAlertSink` (D-180) sendte varsler via DEN
+// ORDINÆRE `toolGateway.execute({tool_id:"telegram", action:"notify"})`-
+// stien - NØYAKTIG stien `PolicyGateway.authorize()` nekter med
+// `kill_switch_active` når den GLOBALE kill switchen er aktiv (watchdog sin
+// EGEN, nylig durable-gjorte aktivering). Watchdog-en klarte altså å stenge
+// Jarvis ned, men kunne ALDRI varsle om det. `WatchdogEmergencyAlertSink`
+// hopper BEVISST over `ToolGateway.execute()`/`PolicyGateway.authorize()`
+// for KUN dette ene, smale formålet (se watchdog.ts sin egen, fulle
+// begrunnelse) - injiserer DEN SAMME `telegramTransport`/
+// `toolSecretProvider`-instansen som den ordinære `telegram.notify`-
+// verktøydefinisjonen selv bruker (linje ~264/136-139 over) - SAMME
+// credential_ref, SAMME mottaker, INGEN ny credential-mekanisme, INGEN
+// kaller-kontrollert mål. `isSelfRecoveryAction()` er UENDRET - ordinær
+// `telegram.notify` forblir korrekt nektet under en aktiv kill switch for
+// ALLE andre kallere.
+const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
+const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
+watchdog.register(databaseCheck(pool));
+watchdog.register(stuckTasksCheck(pool));
+// D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
+// valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
+// kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)
+// i stedet for å la `Number(...)` stille gi `NaN`/`Infinity`/negativ/null
+// videre til `costExplosionCheck()`/`setInterval()` - se watchdog.ts sin
+// egen, fulle begrunnelse for hvorfor en `NaN`-hardgrense var en reell
+// utilsiktet-nødstopp-risiko.
+// D-191 (BLOCKER B4, arkitekt-order D191 mot PR #96): `costExplosionCheck`
+// krever nå en eksplisitt `tenantId` (RLS-skopet SELECT via
+// `withTenantTransaction` - se watchdog.ts sin egen begrunnelse). Samme
+// `process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"`-mønster som resten
+// av denne filens wiring (linje ~122/136/319/464) - ALDRI utledet fra
+// urelatert data. `owner_person_id` forblir uendret, separat eksplisitt.
+watchdog.register(
+  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id,
+    process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"])
+  )
+);
+const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
+setInterval(
+  () =>
+    void watchdog
+      .tick()
+      .catch((err) => console.error(JSON.stringify({ msg: "watchdog_tick_error", error: (err as Error).message }))),
+  WATCHDOG_INTERVAL_MS
+);
 
 // Sandbox-jobber: DockerSandboxRunner på host-runtime (D-32-verifisert). I container
 // er prosess-sandbox default (containeren selv er isolasjonsgrensen; ingen Docker-socket

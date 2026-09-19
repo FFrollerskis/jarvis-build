@@ -47,13 +47,13 @@ describe("B: risikoklasser speiler reell økonomisk risiko", () => {
     expect(byAction["list_card_transactions"]).toBe("A");
     expect(byAction["get_provider_balance"]).toBe("A");
     expect(byAction["create_card"]).toBe("B");
-    expect(byAction["activate_card"]).toBe("B");
     expect(byAction["freeze_card"]).toBe("B");
     expect(byAction["sync_card_state"]).toBe("B");
     expect(byAction["sync_authorizations"]).toBe("B");
     expect(byAction["sync_transactions"]).toBe("B");
     expect(byAction["reconcile_card_transactions"]).toBe("B");
     expect(byAction["run_card_anomaly_detection"]).toBe("B");
+    expect(byAction["activate_card"]).toBe("C");
     expect(byAction["submit_card"]).toBe("C");
     expect(byAction["unfreeze_card"]).toBe("C");
     expect(byAction["close_card"]).toBe("C");

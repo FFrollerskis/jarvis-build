@@ -1,0 +1,121 @@
+import type { FinanceKillSwitch } from "@jarvis/finance";
+import type { OwnerControlState } from "@jarvis/owner-controls";
+import type { Situation, SituationPriority, SituationStage } from "@jarvis/situations";
+
+/**
+ * UA-11 Executive Mode (P0, D-162): JARVIS_CANONICAL attention-ranking-
+ * kontrakt. Denne pakken eier IKKE noen egen hendelses-/tilstandskilde -
+ * `situations` (UA-10) er den ENE kilden P0 komponerer (D-64: en ekstern/
+ * søster-pakke er ALDRI stedet kjernen bor, men her er `situations` selv
+ * allerede JARVIS_CANONICAL, så komposisjon - ikke duplisering - er riktig
+ * retning). Se `docs/UA11_EXECUTIVE_MODE_DESIGN.md` for full begrunnelse.
+ */
+
+/**
+ * Klassifiserer HVOR i den kanoniske tilstandsmaskinen
+ * (ignore -> remember -> inform -> suggest -> act -> act_notify -> escalate,
+ * se `@jarvis/situations`) et attention-item står, oversatt til hva EIEREN
+ * faktisk kan/bør gjøre med det NÅ - direkte avledet av `stage`, ingen ny
+ * semantikk:
+ * - "read": ren FYI (remember/ignore/inform) - ingen handling forventet.
+ * - "suggest": motoren ber eksplisitt om en eierbeslutning (suggest).
+ * - "act": autonom handling er allerede utført/bekreftet eller eskalert
+ *   (act/act_notify/escalate) - eieren kan gjennomgå, men intet nytt venter.
+ */
+export type ExecutiveActionKind = "read" | "suggest" | "act";
+
+/** Eierens autoritets-/pausetilstand for ETT attention-items domene - lest fra `situations.get_pause_state`/`list_autonomy_policies`, aldri egen tilstand. */
+export interface AttentionAuthorityStatus {
+  domain_paused: boolean;
+  autonomy_bound: boolean;
+  autonomy_enabled: boolean;
+}
+
+/**
+ * ÉN rangert attention-post. RENT avledet av `Situation` (situations-pakken)
+ * + pause-/policy-tilstand - INGEN egen persistens, INGEN felt som ikke kan
+ * spores tilbake til et eksisterende kildefelt.
+ */
+export interface AttentionItem {
+  situation_id: string;
+  tenant_id: string;
+  memory_space_id: string;
+  domain: string;
+  stage: SituationStage;
+  action_kind: ExecutiveActionKind;
+  priority: SituationPriority;
+  confidence: number | null;
+  reason: string;
+  detection_key: string;
+  source_open_loop_id: string | null;
+  opened_at: string;
+  last_notified_at: string | null;
+  authority_status: AttentionAuthorityStatus;
+  /** Deterministisk, forklarbar anbefaling - aldri modell-generert i P0 (se ranking.ts). */
+  recommended_next_action: string;
+  /** Menneskelesbare grunner rangeringen faktisk brukte - "explainable", ikke en skjult vektsum. */
+  explanation: string[];
+  /** Rå, deterministisk komposittscore (høyere = mer oppmerksomhet nå) - kun for sortering/tie-break-bevis, ALDRI vist som "sannhet" til eieren uten `explanation`. */
+  score: number;
+  /** 1-basert plassering i DENNE rangerte listen (stabil ved replay for identisk input). */
+  rank: number;
+}
+
+/** Full kilde-`Situation` pluss det avledede attention-laget - "se underliggende situation" uten et nytt oppslag. */
+export interface AttentionItemDetail extends AttentionItem {
+  situation: Situation;
+}
+
+/**
+ * K1 (Sovereign graduation, D-164): ÉN samlet lesing av HELE eier-
+ * kontrolloverflaten - UA-11 sitt bidrag til å tette UA-11-akseptansekriterium
+ * 3 ("owner can stop/revoke/reconfigure any connector, provider, agent or
+ * autonomy domain from one control surface"). RENT avledet av to nøstede
+ * `ToolGateway.execute()`-kall (`owner_controls.get_control_state` +
+ * `situations.get_pause_state`, se `service.ts`) - INGEN egen tilstand,
+ * INGEN direkte DB-/`KillSwitch`-/`OwnerControls`-tilgang fra denne pakken.
+ *
+ * `owner_control` er den GLOBALE, systemomfattende autoriteten (kill switch -
+ * blokkerer ALT, uansett domene - samt navngitte frosne connectorer/
+ * tilbakekalte credentials). `situation_domain_pauses` er den SITUASJONS-
+ * SPESIFIKKE, domene-avgrensede pausetilstanden fra UA-10 - et helt annet,
+ * SAMTIDIG gyldig lag (se `docs/DECISIONS_AND_ASSUMPTIONS.md` D-164 §5: disse
+ * to må forbli distinkte, ALDRI flettes til én boolsk "alt er pauset").
+ *
+ * MERK (dokumentert, ikke stille utelatt): `situation_domain_pauses` bærer i
+ * dag KUN domenenavnene (`situations.get_pause_state` sin eksisterende
+ * kontrakt) - ikke reason/actor/changed_at per domene, i motsetning til
+ * `owner_control` sine felt som ALLE har det. Dette er en PRE-EKSISTERENDE
+ * begrensning i `situations.get_pause_state` (UA-10, uendret av K1) - å
+ * utvide DEN kontrakten er utenfor K1 sitt omfang og er IKKE forsøkt løst
+ * stille her.
+ *
+ * D-174 (B2): `finance_kill_switch` lagt til - RENT avledet av ET
+ * TREDJE nøstet `ToolGateway.execute()`-kall (`finance.get_kill_switch`,
+ * se `service.ts`), SAMME komposisjons-disiplin som de to over. Finans-
+ * nødbryteren er en TREDJE, UAVHENGIG autoritetsdimensjon (verken den
+ * globale `owner_control.kill_switch` - som likevel blokkerer finans-
+ * mutasjoner FØRST via den delte ToolGateway-frys-/kill-switch-gaten,
+ * se `gateway.ts` - eller noe `situation_domain_pauses`-domene): den
+ * gjelder SPESIFIKT spend-muliggjørende finans-/kort-handlinger
+ * (`finance.submit_payment_intent`, `finance_wallester.activate_card`
+ * m.fl. - se D-115/D-174). `null` betyr at tenanten aldri har hatt en
+ * `finance_kill_switch`-rad (ALDRI tolket som "aktiv" eller "inaktiv" -
+ * se `FinanceService.getKillSwitch()`).
+ *
+ * BEVISST UTELATT (dokumentert, ikke stille): device-/session-grant-
+ * tilstand. `SessionGrantService` eksponerer per D-174-fersklesing INGEN
+ * kanonisk lister-/tellemetode for "aktive grants for enhet X" - KUN
+ * `revokeForDeviceOn()` (en mutasjon). Å late som en slik status finnes
+ * her ville vært en FALSK "device revoked: true/false"-visning uten en
+ * ekte kanonisk kilde (§H-instruksen: "Do NOT fake status if no canonical
+ * query exists"). `owner_controls.revoke_device` sitt returverdi
+ * (`revoked_grants`-tall FRA selve tilbakekallingskallet) forblir den
+ * ENE sannferdige, tidsstempel-bundne bekreftelsen - IKKE en løpende
+ * status her.
+ */
+export interface ControlSurfaceStatus {
+  owner_control: OwnerControlState;
+  situation_domain_pauses: { paused: string[] };
+  finance_kill_switch: FinanceKillSwitch | null;
+}

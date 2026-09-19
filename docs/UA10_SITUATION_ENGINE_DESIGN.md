@@ -1,7 +1,9 @@
 # UA-10 — Design-/data-governance-notat (Proactive Situation Engine, P0)
 
 **Status:** UA-10 «Proactive Situation Engine» — provider-uavhengig, kilde-uavhengig P0-kjerne bygget
-(2026-09-15). Samme form og disiplin som `UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og
+(2026-09-15). **P1-aktiveringen (D-160, §10) er PRODUCTION_VERIFIED på ekte Windows/Docker-host
+2026-09-17 (D-161; run_id `0562c48a`, main `e34cb8a9`, 18/18 markører PASS, `hard_fail=false`,
+`blocked_external=0`) - runtime-gaten er lukket.** Samme form og disiplin som `UA8_PERSONAL_TWIN_DPIA.md`/`UA3_BUSINESS_DPIA.md`: kort og
 teknisk, ikke juridisk teater. `situations` behandler ALDRI en ny sensitiv persondata-KATEGORI i seg
 selv (det er en TILSTANDSMASKIN over allerede-eksisterende, allerede-styrte forhold — se §1) — dette
 notatet dekker likevel D-64-porten, retensjon/erasure og sikkerhetsgrensene eksplisitt, samme
@@ -142,14 +144,20 @@ pakken igjen.
 |---|---|---|
 | Situasjoner (hendelses-/anomali-tilstand) | `situations` (`056_situations.sql`) | Fri-tekst `domain`, idempotent `detection_key`, tilstandsmaskin-`stage`, `priority`/`confidence`, `reason` (fritekst begrunnelse), valgfri SCOPE-SAFE `owner_person_id` (sammensatt FK mot `person_tenants (person_id, tenant_id)`, arkitekt-review runde 2 Funn 6 — en eier fra et ANNET tenant avvises av databasen), valgfri SCOPE-SAFE peker til `business_open_loops` (`source_open_loop_id` — sammensatt FK mot `(open_loop_id, tenant_id, memory_space_id)`, runde 1 Funn 2: en `source_open_loop_id` fra et ANNET tenant/space enn situasjonen selv avvises av databasen, race-fritt), tynne ACT-pekere (`act_tool_id`/`act_action`/`act_result`/`act_idempotency_key`/`act_claimed_at`/`act_operation_fingerprint` — sistnevnte binder claimen til DEN FAKTISKE operasjonen, runde 2 Funn 1 — ALDRI en kopi av `tool_executions` sitt evidence). |
 | Varslingspolicy | `situation_notification_policies` (`056_situations.sql`) | Eier-konfigurert stille-timer-vindu + re-suppress-vindu per (tenant, space). |
+| INFORM/SUGGEST-leveranse (P1, D-160) | `situations.inform_message` / `situations.inform_delivered_at` (`057_situations_activation.sql`) | Den FROSNE varselteksten (satt atomisk med ankeret `last_notified_at`) og bokført leveranse for NØYAKTIG det ankeret — se §10. |
+| Autonomi-policy (P1, D-160) | `situation_autonomy_policies` (`057_situations_activation.sql`) | Eierens EKSPLISITTE auto-ACT-binding per (tenant, space, domene): `tool_id`/`action`/statiske `parameters` (kun immutable plassholdere), `enabled`, `actor_person_id` (sammensatt FK mot `person_tenants`). FRAVÆR av rad = ingen auto-ACT. |
+
+**Behandlet fra og med P1 (D-160, se §10):** en LIVE bro FRA `business_open_loops` TIL `situations`
+(sveipen `runSituationSweep()` kaller `evaluateCandidate()` for hver åpen loop — domenene
+pipeline/support/deadlines/spend/product/operations, uttømmende kartlagt i `open-loop-bridge.ts`),
+faktisk leveranse av INFORM/SUGGEST-varsler via `telegram.notify`, og auto-ACT UTELUKKENDE under en
+eier-bundet policy.
 
 **Ikke behandlet i dag (eksplisitt, ikke stilltiende utelatt):** INGEN ny anomali-detektor for
-infra/home/health (kun spend/pipeline/deadlines har en eksisterende signalkilde i dag,
-`business_open_loops`/`OpenLoopService` — se §5). INGEN live bro FRA `business_open_loops` TIL
-`situations` (ingen sweep kaller `evaluateCandidate()` automatisk ennå). INGEN modell-assistert
-klassifisering (`computeTargetStage()` er REN, deterministisk regel-logikk — ingen ModelGateway/AI
-Council-kall). INGEN counterfactual/simulation/feedback-learning. INGEN autonom/tidsstyrt auto-ACT
-(`actOn()` krever en EKSPLISITT kaller).
+infra/home/health (ingen eksisterende signalkilde — se §5). INGEN modell-assistert klassifisering
+(`computeTargetStage()` er REN, deterministisk regel-logikk — ingen ModelGateway/AI Council-kall).
+INGEN counterfactual/simulation/feedback-learning. INGEN auto-ACT uten en eksplisitt eier-policy
+(`actOn()` uten policy krever fortsatt en EKSPLISITT kaller).
 
 ## 3. Tilstandsmaskinen
 
@@ -194,6 +202,11 @@ faktisk kilde/brukstilfelle, i strid med byggeordrens "ikke gjett" disiplin. Pre
 spend/pipeline-detektorene ble bygget INKREMENTELT over flere separate UA-3/UA-4/UA-6-slicer, ikke
 alle på én gang. En fremtidig, EGEN slice per domene (infra/home/health) er derfor riktig neste steg,
 IKKE en del av denne P0-leveransen.
+
+**P1 (D-160):** de detektorene som FINNES (alle 26 `OpenLoopType`-verdiene i `@jarvis/business`) er
+nå faktisk koblet til motoren gjennom broen i `open-loop-bridge.ts` — uttømmende `switch` med
+`never`-sjekk, så en NY loop-type uten en eksplisitt domene-avgjørelse feiler typecheck og kan ALDRI
+stille havne i et domene eieren ikke har pauset/bundet. Broen OPPFINNER fortsatt ingen detektor.
 
 ## 6. ACT — komponert, ikke oppfunnet
 
@@ -360,12 +373,97 @@ eksplisitt her, ikke silently arvet.
 
 | Kapabilitet | Port som må kjøres først |
 |---|---|
-| Live bro fra `business_open_loops` (eller vision/helse/lokasjon) til `situations` | En egen, senere wiring-only slice — `evaluateCandidate()`-kontrakten er allerede stabil og klar |
+| Live bro fra `business_open_loops` til `situations` | **LUKKET i P1 (D-160, §10)** — `runSituationSweep()`/`open-loop-bridge.ts`. Vision-/helse-/lokasjonskilder: fortsatt egne, senere wiring-slicer mot SAMME `evaluateCandidate()`-kontrakt |
 | Nye anomali-detektorer for infra/home/health | Egen, separat slice PER domene (ingen eksisterende signalkilde i dag, se §5) |
 | Modell-assistert klassifisering | Krever ModelGateway/AI Council — en leverandøravhengighet, egen D-64/D-41-port |
 | Counterfactual/simulation, feedback learning | ML-tungt, masterplanens egen "where useful"-kvalifikator — egen, senere slice |
-| Autonom/tidsstyrt auto-ACT (en sweep som kaller `actOn()` uten et eksplisitt kall) | Egen sikkerhetsgrense/blast-radius-vurdert slice — P0 beviser at MEKANISMEN er trygg når kalt, ikke at den bør trigges uten et menneske/en egen-vurdert autonomi-beslutning i løkken |
-| Wiring inn i `apps/api/src/main.ts`/en offentlig API-/kommando-overflate | Naturlig FØLGER av broen/auto-ACT-beslutningen over — ingen mening i å koble til en komposisjons-rot FØR det finnes en reell kaller |
+| Autonom/tidsstyrt auto-ACT | **LUKKET i P1 (D-160, §10) med en EKSPLISITT grense:** auto-ACT skjer KUN for situasjoner i `suggest` hvis domene har en AKTIVERT, eier-bundet `situation_autonomy_policies`-rad. Uten policy: ingenting. Domene-pause, global KillSwitch, PolicyGateway og hele ToolGateway-preflight-/postcondition-pipelinen gjelder UENDRET for hvert kall |
+| Wiring inn i `apps/api/src/main.ts`/en kontrollflate | **LUKKET i P1 (D-160, §10)** — motor + durable pause (`restore()` ved oppstart) + `situations`-verktøyet + `situation-sweep`-jobben er wiret i komposisjons-roten |
+
+## 10. P1 Aktivering (D-160) — motoren blir levende, på eierens premisser
+
+P0 beviste at MEKANISMEN var trygg når den ble kalt — og ingenting kalte den: `@jarvis/situations` var
+importert ingen steder utenfor sin egen pakke, ingen sveip kalte `evaluateCandidate()`, `last_notified_at`
+ble stemplet uten at noen sendte varselet, og `actOn()` var kun nåbar fra tester. Masterplanens DoD
+("Situation Engine performs autonomous ACT/ACT+NOTIFY with explainability, dedupe and owner
+pause/revoke") krever at den faktisk KJØRER. P1 lukker det gapet uten å røre P0 sine reviewede
+garantier.
+
+**Sveipen (`sweep.ts`, `DailyScheduler`-jobb `situation-sweep`, `JARVIS_SITUATION_SWEEP_HOUR`, default
+07 — ETTER `business-open-loop-sweep` kl. 06)** kjører per (tenant, space) i fast rekkefølge:
+
+1. **INGEST** — hver åpen `business_open_loop` → `mapOpenLoopToCandidate()` → `evaluateCandidate()`.
+   `detection_key` = `open_loop:` + loopens egen nøkkel (samme idempotente identitet, aldri duplikat).
+   `owner_person_id` settes BEVISST IKKE fra loopen: en loop kan lovlig re-tildeles, og motoren
+   avviser (korrekt) en re-deteksjon med endret identitet — eieren leses via `source_open_loop_id`.
+2. **RESOLVE** — situasjoner hvis kilde-loop er løst, løses (`resolveForResolvedSources()`, idempotent).
+3. **DELIVER** — `deliverPendingInformNotifications()`: ANKER (`last_notified_at`, P0-semantikk uendret)
+   er skilt fra LEVERANSE (`inform_delivered_at`). Varselteksten fryses (`inform_message`) ATOMISK med
+   ankeret i selve `evaluateCandidate()`-transaksjonen (samme lærdom som `act_notify_message`, runde 9).
+   Nøkkelen mot `tool_executions` er `situation:<id>:inform:<anker-ISO>:<sha256(tekst)>` — ett varsel
+   per SYKLUS, aldri per sveip. Evidens-først: en `succeeded` `telegram`/`notify`-rad under nøkkelen
+   bokfører leveransen UTEN nytt kall (krasj mellom sending og bokføring); en rad som IKKE er
+   `telegram`/`notify` er fail-closed (`evidence_mismatch`, aldri godtatt); transportfeil lar varselet
+   stå ventende og prøves igjen under SAMME nøkkel (ToolGateway sin egen dedupe gjør et duplikat
+   strukturelt umulig). En ny syklus etter resuppress-vinduet er et nytt anker + ny frosset tekst.
+4. **AUTO-ACT** — `autoActPending()`: for åpne, uclaimede situasjoner i `suggest` (høy prioritet,
+   konfidens ≥ 0,75) med en AKTIVERT `situation_autonomy_policies`-rad for domenet → `actOn()` med
+   policyens `tool_id`/`action`/`parameters`. Parametre kan KUN referere immutable plassholdere
+   (`{{situation_id}}`, `{{source_open_loop_id}}`, `{{domain}}`, `{{detection_key}}` — ALDRI `reason`,
+   som er muterbar og ville brutt `act_operation_fingerprint` ved retry); en ukjent plassholder
+   avvises ved BINDING, en manglende verdi hopper over situasjonen. Ekstra nøkler injiseres aldri
+   (verktøyenes strenge `input_schema` avgjør). Pauset domene/allerede claimet ⇒ `skipped`, aldri et
+   kall. Eksakt-én-gang-garantien er P0 sin claim, uendret.
+
+**Autoritet.** Å BINDE/fjerne en autonomi-policy krever den SAMME sovereign-eieren som
+`releaseStuckActClaim()` (`recoveryAuthority.owner_person_id`, fail-closed uten) og tar SAMME
+advisory-lås som `actOn()`/pause for domenet, så en policy-endring aldri kappløper med et auto-ACT i
+flukt. Hvert faktiske kall autoriseres i tillegg av `PolicyGateway.authorize()` inne i `execute()`.
+Sveipen kjører under eierens identitet i sveipens space per tenant; en tenant eieren ikke er
+autorisert for avvises av PolicyGateway (fail-closed), aldri av en stille utelatelse.
+
+**Kontrollflaten (`transport.ts`, verktøy `situations`).** `get_queue`/`get_pause_state`/
+`get_notification_policy`/`list_autonomy_policies` (A), `resolve` (B), `pause_domain`/`unpause_domain`/
+`pause_all`/`unpause_all`/`set_notification_policy`/`set_autonomy_policy`/`clear_autonomy_policy`/
+`release_stuck_act_claim` (C). Tenant/space/aktør avledes UTELUKKENDE fra den betrodde
+`ToolInvocationContext.identity` (D-68) som `ToolGateway.execute()` selv setter fra den server-side-
+oppløste `request.identity` — ALDRI fra parametre (skjemaene er `strict()` uten identitetsfelter;
+manglende context feiler lukket med `situations_missing_invocation_context`). Dette lukker "Owner can
+pause a domain or entire Situation Engine instantly" I PRAKSIS og er den kontrakten UA-11 sin samlede
+kontrollflate skal komponere.
+
+**Scheduler-grensen er fail-closed.** `runSituationSweepForAllTenants()` isolerer feil per steg/tenant
+(tellinger + `errors[]`) slik at én tenant aldri velter de andre — men resultatet KASTES deretter av
+`assertSituationSweepHealthy()` hvis noen tenant har ikke-tom `errors[]`, `identity_conflicts > 0`,
+`delivery.evidence_mismatch > 0` eller `delivery.pending > 0`. `DailyScheduler.start()` kaller
+`markCompleted()` KUN etter at `deliver()` resolvet, så dagens `scheduler_state`-rad blir stående med
+`completed_at IS NULL` (varig, observerbar "ikke fullført") og en strukturert `situation_sweep_failed`-
+logglinje skrives. `auto_act.denied`/`skipped` er ærlige, forventede utfall og teller ikke som feil.
+
+**Bevis.** `modules/situations/test/activation.test.ts` (ekte Postgres/RLS, ekte `OpenLoopService`,
+ekte `ToolGateway`/`PolicyGateway`, transport-spioner): ingest/idempotens/tenant-isolasjon/kildebasert
+løsning; ETT varsel per syklus, null på re-sveip, rekonsiliering fra bevis uten kall, transportfeil →
+retry med nøyaktig ett vellykket kall, fremmed bevis fail-closed, stille timer, resuppress → ny syklus;
+auto-ACT: ingenting uten policy, nøyaktig ett `actOn` med rendrede plassholdere (preflight/mutasjon/
+readback + ett ACT-varsel), pause vinner, kildeløs situasjon hoppes over, autoritet/`*`/ukjent
+plassholder avvises, RLS-isolerte policyer, clear/disabled; kontrollflaten gjennom ekte gateway (varig
+pause som overlever `restore()`, ikke-eier avvist). `open-loop-bridge.test.ts`: uttømmende
+domene-kartlegging, kandidat-mapping, plassholder-rendring, RLS-trygg tenant-orkestrering.
+
+**Arkitekt-review runde 1 (PR #86, HEAD c8a5c13, review 5229219808):** 3 funn. (1) Sekvens: PR #83
+(UA-9) skal rekonsilieres mot main FØR neste slice (D163/D164) — en kontrollplan-beslutning PR-en ikke
+kan lukke; PR #86 forblir draft/umerget til arkitekten har avklart. (2) Kontrollflaten leste
+`tenant_id`/`memory_space`/`actor_person_id` (og hele `identity` for `release_stuck_act_claim`) fra
+verktøyPARAMETRE: en kaller kunne oppgi eierens `person_id` selv, og motorens "uavhengige" sovereign-
+port sammenlignet mot forfalskede data. RETTET: identitet kun fra `ToolInvocationContext` (se
+kontrollflate-avsnittet over); bevist med forfalskede parametre gjennom ekte gateway
+(`invalid_parameters` før transporten nås) og direkte mot transporten under en ANNEN context-identitet
+(`DomainPauseUnauthorizedError`/`SituationAutonomyUnauthorizedError`/
+`SituationRecoveryUnauthorizedError`), manglende context kaster, og tenant B sin identitet ser tom kø.
+(3) Scheduler-wiringen kastet sveiperesultatet (`.then(() => undefined)`): evidensmismatch/leveranse-/
+auto-ACT-feil ble bokført som vellykket daglig jobb. RETTET: `assertSituationSweepHealthy()` (se
+scheduler-avsnittet over); bevist med en EKTE `DailyScheduler` mot embedded Postgres — evidensmismatch
+og transportfeil lar `completed_at` stå NULL, et sunt sveip setter det.
 
 ## 9. Oppdateringsplikt
 

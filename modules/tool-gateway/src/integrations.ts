@@ -65,7 +65,18 @@ function drivePermissionIdExists(data: JsonValue, parameters: Record<string, Jso
  */
 export function firstWaveTools(
   transports: Partial<Record<string, ToolTransport>> = {},
-  config: { dockerMutationTargets?: ReadonlySet<string> } = {}
+  config: {
+    dockerMutationTargets?: ReadonlySet<string>;
+    /**
+     * UA-10 P1 (D-160): domenepakker som eier sine EGNE `ToolDefinition`-lister
+     * (f.eks. `@jarvis/situations` sin `situationsToolDefinitions()`) legges
+     * inn HER, slik at komposisjons-roten fortsatt har NØYAKTIG ETT
+     * `toolGateway.register(tool)`-sted (regresjonsvakten i
+     * `apps/api/test/drive-runtime-wiring.test.ts`) - aldri en parallell,
+     * separat registreringsløkke. Ren tilføyelse på slutten av listen.
+     */
+    additionalTools?: readonly ToolDefinition[];
+  } = {}
 ): ToolDefinition[] {
   const transport = (key: string) => transports[key] ?? new UnconfiguredHttpTransport(key);
   const dockerMutationTargets = config.dockerMutationTargets ?? new Set<string>();
@@ -2223,9 +2234,9 @@ export function firstWaveTools(
       output_trust: "internal", transport: transport("finance_wallester")
     },
     {
-      tool_id: "finance_wallester", action: "activate_card", description: "Aktiver et provider-opprettet kort (fysiske kort krever aktivering; reversibelt via freeze_card)",
+      tool_id: "finance_wallester", action: "activate_card", description: "Aktiver et provider-opprettet kort (fysiske kort krever aktivering - spend-muliggjørende, kill-switch-gated; reversibelt via freeze_card)",
       input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), card_id: z.string() }),
-      capability_class: "B", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
+      capability_class: "C", scopes: ["finance.write", "finance.cards"], reversible: true, rollback_procedure: "freeze_card",
       idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM",
       output_trust: "internal", transport: transport("finance_wallester")
     },
@@ -2700,7 +2711,8 @@ export function firstWaveTools(
       capability_class: "A", scopes: ["operations.read"], reversible: true, rollback_procedure: "ingen (lesing)",
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("operations")
-    }
+    },
+    ...(config.additionalTools ?? [])
   ];
 }
 

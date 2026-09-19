@@ -47,6 +47,9 @@ importers:
       '@jarvis/core':
         specifier: workspace:*
         version: link:../../modules/core
+      '@jarvis/executive':
+        specifier: workspace:*
+        version: link:../../modules/executive
       '@jarvis/finance':
         specifier: workspace:*
         version: link:../../modules/finance
@@ -74,6 +77,9 @@ importers:
       '@jarvis/operations':
         specifier: workspace:*
         version: link:../../modules/operations
+      '@jarvis/owner-controls':
+        specifier: workspace:*
+        version: link:../../modules/owner-controls
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../../modules/policy
@@ -83,6 +89,9 @@ importers:
       '@jarvis/provider-adapters':
         specifier: workspace:*
         version: link:../../packages/provider-adapters
+      '@jarvis/situations':
+        specifier: workspace:*
+        version: link:../../modules/situations
       '@jarvis/support':
         specifier: workspace:*
         version: link:../../modules/support
@@ -95,6 +104,9 @@ importers:
       '@jarvis/vision':
         specifier: workspace:*
         version: link:../../modules/vision
+      '@jarvis/watchdog':
+        specifier: workspace:*
+        version: link:../../modules/watchdog
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -359,6 +371,46 @@ importers:
       embedded-postgres:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
+
+  modules/executive:
+    dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/finance':
+        specifier: workspace:*
+        version: link:../finance
+      '@jarvis/owner-controls':
+        specifier: workspace:*
+        version: link:../owner-controls
+      '@jarvis/situations':
+        specifier: workspace:*
+        version: link:../situations
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
 
   modules/finance:
     dependencies:
@@ -645,11 +697,52 @@ importers:
         specifier: 16.14.0-beta.17
         version: 16.14.0-beta.17
 
+  modules/owner-controls:
+    dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
   modules/policy:
     dependencies:
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
 
   modules/product:
     dependencies:
@@ -687,6 +780,9 @@ importers:
 
   modules/situations:
     dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -839,12 +935,24 @@ importers:
 
   modules/watchdog:
     dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/owner-controls':
+        specifier: workspace:*
+        version: link:../owner-controls
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -1562,6 +1670,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

@@ -4052,6 +4052,314 @@ domene-pause) + `modules/erasure/test/situations-erasure.test.ts` (ekte end-to-e
 `ErasureService`-bevis). Se `docs/PROJECT_STATUS.md` for eksakte tall (IKKE oppdatert av denne sliceen
 mens PR #84/D-157 aktivt endrer den - se PR-en sin egen kommentar).
 
+**PR #85 merget 2026-09-16** (arkitekt-review runde 11 PASS + review 5228551712 `MERGE_AUTHORIZED=true`,
+merge-commit `639730c5c14ba6175e91b09606abc4d9dd24fb8a`, post-merge CI grønn).
+
+## UA-10 P1 – Aktivering: motoren blir levende, på eierens premisser (D-160, masterplan v4.0)
+
+**Manuell masterplan-slice** på base `main=639730c5` (PR #85 sin merge-commit), branch
+`tobias/manual-masterplan-ua10-activation-p1`. Full begrunnelse og design: `docs/UA10_SITUATION_ENGINE_DESIGN.md`
+§10; beslutning: D-160. Valgt etter en fersk, repo-basert Sovereign-audit (UA-0..UA-11): UA-0..UA-8 er
+kode-komplette med kun credential-/host-blokkerte rester (D-108), UA-9 ligger på åpen PR #83, og UA-10
+var **død kode på main** - alle fire akseptansekriterier testbevist i P0, men ingen bro, ingen sveip,
+ingen leveranse, ingen kaller. Masterplanens DoD krever en motor som KJØRER, og UA-11 (attention-ranking
++ samlet kontrollflate) forutsetter den - derfor lukkes dette eldre gapet FØR UA-11.
+
+**Bygget (P1):**
+- `057_situations_activation.sql`: `situations.inform_message`/`inform_delivered_at` (frosset
+  INFORM/SUGGEST-tekst atomisk med ankeret `last_notified_at`; bokført leveranse for nøyaktig det
+  ankeret) + ny tabell `situation_autonomy_policies` (eierens auto-ACT-binding per tenant/space/domene,
+  sammensatt FK mot `person_tenants`, FORCE RLS, `domain <> '*'`).
+- `open-loop-bridge.ts`: ren, deterministisk bro `BusinessOpenLoop -> SituationCandidateInput` -
+  uttømmende over alle 26 `OpenLoopType` (pipeline/support/deadlines/spend/product/operations),
+  `detection_key = open_loop:<loopens nøkkel>`, `source_open_loop_id` alltid satt, eier BEVISST ikke
+  fra loopen (re-tildeling er lovlig).
+- `sweep.ts`: `runSituationSweep()` INGEST -> RESOLVE (kildeløst) -> DELIVER -> AUTO-ACT med
+  feilisolasjon per loop/steg/tenant; `runSituationSweepForAllTenants()` via RLS-trygg
+  `listBusinessTenantIds()`.
+- Motor: `deliverPendingInformNotifications()` (evidens-FØRST fra `tool_executions`, nøkkel =
+  situasjon + anker + sha256(frosset tekst), ett varsel per syklus, fremmed bevis fail-closed,
+  transportfeil = ventende retry under samme nøkkel), `set/clear/list/getAutonomyPolicy()`
+  (sovereign-eier-autoritet, samme advisory-lås som `actOn()`, kun immutable plassholdere),
+  `autoActPending()` (kun `suggest` + uclaimet + AKTIVERT policy; pause/claim-konflikt = skipped),
+  `resolveForResolvedSources()`.
+- `transport.ts`: kontrollflaten som `situations`-verktøy (get_queue/get_pause_state/
+  get_notification_policy/list_autonomy_policies A; resolve B; pause_domain/unpause_domain/pause_all/
+  unpause_all/set_notification_policy/set_autonomy_policy/clear_autonomy_policy/
+  release_stuck_act_claim C) - identitet KUN fra den betrodde `ToolInvocationContext` (D-68), aldri
+  fra parametre; to uavhengige autoritetsporter (PolicyGateway + motorens egen eier-autoritet).
+- Wiring i `apps/api/src/main.ts`: durable `DomainPauseRegistry` med fail-closed `restore()`,
+  `SituationEngine` med sovereign-autoritet = `ownerIdentity`, verktøyet på samme toolGateway,
+  `DailyScheduler`-jobb `situation-sweep` (`JARVIS_SITUATION_SWEEP_HOUR`, default 07, etter
+  open-loop-sveipet kl. 06) med fail-closed scheduler-grense (`assertSituationSweepHealthy()`: et
+  usunt sveip KASTER, `scheduler_state.completed_at` forblir NULL, strukturert `situation_sweep_failed`-logg).
+
+**Arkitekt-review runde 1 (PR #86, HEAD c8a5c13, review 5229219808):** 3 funn. (1) Sekvens (D163/D164):
+PR #83 (UA-9) skal rekonsilieres mot main FØR neste slice - kontrollplan-beslutning som IKKE kan lukkes i
+PR-en; PR #86 forblir draft/umerget til arkitekten avklarer. (2) RETTET: kontrollflaten leste
+tenant/space/aktør (og hele `identity` for `release_stuck_act_claim`) fra verktøyparametre, så eierens
+`person_id` kunne oppgis av kalleren og motorens "uavhengige" sovereign-port sammenlignet mot forfalskede
+data - nå kun `ToolInvocationContext.identity`, `strict()`-skjemaer uten identitetsfelter, manglende
+context feiler lukket; bevist med forfalskede parametre gjennom ekte gateway (`invalid_parameters`) og
+direkte mot transporten under en annen context-identitet (alle tre `*UnauthorizedError`). (3) RETTET:
+scheduler-wiringen kastet sveiperesultatet, så evidensmismatch/leveranse-/auto-ACT-feil ble bokført som
+vellykket daglig jobb - nå `assertSituationSweepHealthy()`; bevist med en EKTE `DailyScheduler` mot
+embedded Postgres (usunt => `completed_at` NULL, sunt => satt).
+
+**Akseptansekriterier - status etter P1:** 1 "No duplicate spam" - nå også bevist på LEVERANSEN (ett
+varsel per syklus, null på re-sveip, rekonsiliering uten kall). 2 "ACT uses valid owner/delegated
+authority" - auto-ACT KUN under eierens eksplisitte binding + PolicyGateway per kall. 3 "immediate
+post-action notification and recovery context" - uendret fra P0 (ACT-varsel + `tool_executions`),
+nå faktisk nåbar i drift. 4 "Owner can pause ... instantly" - nå med en faktisk kontrollflate
+(`pause_domain`/`pause_all` via ToolGateway, varig, overlever omstart).
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §8/§10):** infra/home/health-
+detektorer (ingen signalkilde), modell-assistert klassifisering (ModelGateway-avhengighet, egen
+D-64/D-41-port), counterfactual/simulation/feedback learning (masterplanens "where useful"), vision-/
+helse-/lokasjons-broer (egne wiring-slicer mot samme kontrakt), UA-11 samlet kontrollflate
+(komponerer `situations`-verktøyet - neste slice). Host-/live-kjøring av sveipen: **PRODUCTION_VERIFIED
+2026-09-17** (D-161; host run_id `0562c48a` på main `e34cb8a9`, 18/18 markører PASS, `hard_fail=false`,
+`blocked_external=0`, ekte Telegram INFORM + ACT) etter én feilet host-runde (`2105bb7d`, to harness-feil,
+D-160 I) - UA-10 P1 runtime-gaten er lukket; neste Sovereign-arbeid er UA-11 Executive Mode P0.
+
+**Tester:** `modules/situations/test/activation.test.ts` (22 etter review runde 1, ekte Postgres/RLS +
+ekte `OpenLoopService` + ekte `ToolGateway`/`PolicyGateway` + ekte `DailyScheduler`),
+`open-loop-bridge.test.ts` (12); alle eksisterende situations-/erasure-suiter grønne. Se
+`docs/PROJECT_STATUS.md` for eksakte tall.
+
+---
+
+## UA-11 – Executive Mode (P0, D-162, masterplan v4.0)
+
+**Manuell masterplan-slice** på base `main=ff24a4a3b742b7c67a95b3af58a4808ea558a307` (PR #90 sin
+merge-commit), branch `tobias/manual-masterplan-ua11-executive-mode-p0`. Full begrunnelse og design:
+`docs/UA11_EXECUTIVE_MODE_DESIGN.md`; beslutning: D-162. UA-11 forutsetter UA-10 (nettopp
+PRODUCTION_VERIFIED, D-161) - dette er den FØRSTE, koherente UA-11-sliceen: attention-ranking + én
+samlet eier-kontrollflate, som KOMPONERER `situations`-kapabiliteten (D-64: `situations` er allerede
+JARVIS_CANONICAL - komposisjon, ikke duplisering, er riktig retning), ALDRI en parallell
+"Executive Situation Engine".
+
+**Bygget (P0):**
+- Ny pakke `@jarvis/executive` (`modules/executive`) - ZERO database-tilgang, ZERO nye tabeller.
+  `ranking.ts`: REN, deterministisk attention-ranking (`rankAttentionQueue()`) over en allerede-hentet
+  `Situation[]` - stage-/priority-/konfidens-/overdue-/cooldown-vekter, totalt tie-break-ordnet
+  (`situation_id` som siste, aldri-tvetydig tie-break), replay-stabilt (samme input -> bokstavelig
+  samme output, input-rekkefølgen påvirker aldri resultatet).
+- `ExecutiveService`: konstruktøren tar KUN `ToolGateway` (ALDRI `SituationEngine`/`DomainPauseRegistry`
+  direkte) - hver lesing/mutasjon går via ETT nøstet `gateway.execute({ tool_id: "situations", ... })`
+  med `identity` videreført UENDRET (D-68-disiplinen) - strukturelt umulig å omgå `PolicyGateway` eller
+  duplisere pause-/autonomi-/varslingslogikken.
+- `ExecutiveTransport`/`executiveToolDefinitions()`: `tool_id: "executive"` (`get_attention_queue`,
+  `get_attention_item`, `get_pause_state`, `pause_domain`, `resume_domain`, `resolve_situation`) - SAMME
+  identitets-fra-context-ALDRI-parametre-disiplin som `SituationsTransport` (D-160); pause/resume/resolve
+  er RENE gjennomslag til `situations.pause_domain`/`unpause_domain`/`resolve` - ingen egen pauselogikk.
+- Wiret i `apps/api/src/main.ts` sin ENE `firstWaveTools({...}, { additionalTools })`-liste (samme
+  komposisjons-rot som `situations`) - `worker-main.ts` kobler BEVISST IKKE til `executive` (Executive
+  Mode er en API-/HTTP-eid kontrollflate, samme klasse som `situations` selv i dag - ingen faktisk
+  kaller finnes i workerens prosess denne sliceen).
+
+**Funn (håndtert i denne sliceen, ikke en produksjonskodefiks av `@jarvis/situations`):**
+`Situation.confidence` er en `numeric`-kolonne; `pg` returnerer PostgreSQL `numeric` som en JS-streng
+uten en registrert typeparser (ingen er registrert i dette repoet) - `@jarvis/executive` normaliserer
+DERFOR forsvarende (`toNumberOrNull()`) på egen grense i stedet for å anta kjøretidstypen stemmer med
+`Situation` sin deklarerte `number | null`. IKKE rettet ved roten (`@jarvis/situations`/`pg`-oppsettet) -
+se D-162 for hvorfor det er utenfor denne sliceens omfang, og et eksplisitt DEFERRED-punkt.
+
+**Bygges IKKE i denne sliceen (eksplisitt DEFERRED, se design-notatet §7):** Executive dashboard/UI
+(kun kontrollflaten - ToolGateway-kapabiliteten - er bygget, samme reifiseringsnivå `situations.*` selv
+har i dag), business health-aggregering (cash/revenue/churn/marketing - ingen slik kilde er koblet til
+`situations` ennå), personal-domenekilder (schedule/travel/home/health - samme grunn), decision log,
+scenarios, risk register, goals/OKRs, delegation board, "business impact"-vekting (ingen tallfelt for
+det finnes på `Situation` ennå - se ranking.ts sitt filhode), modell-assistert ranking (P0 er 100%
+deterministisk, ingen ModelGateway-avhengighet), HTTP-/dashboard-rute i `server.ts` (kapabiliteten er
+bygget og testet - en eier-vendt flate er en SENERE UA-11-slice), worker-wiring (se funn over),
+host-akseptanse-harness (P0 krever intet nytt runtime-bevis - ZERO nye tabeller/migrasjon/leverandør;
+se RUNTIME_GATES for gate-status).
+
+**Tester:** `modules/executive/test/ranking.test.ts` (21, REN - ingen database), `service-transport.test.ts`
+(17, ekte Postgres/RLS + ekte `ToolGateway`/`PolicyGateway`/`SituationEngine`/`DomainPauseRegistry`:
+tenant-/space-isolasjon, eier-autoritet, forfalsket identitet avvist, KillSwitch nekter lesing også,
+komposisjon (ikke kopi) av `situations.get_queue`, pause/resume gjennom kanonisk `situations.*`, pauset
+domene gjenspeiles korrekt, resolve/stale forsvinner fra køen), `apps/api/test/executive-wiring.test.ts`
+(4, komposisjons-rot-regresjonsvakt). Se `docs/PROJECT_STATUS.md` for eksakte tall.
+
+---
+
+## K1 – Durable/delt owner-kontroll-autoritet (Sovereign graduation-slice, D-164, masterplan v4.0)
+
+**Manuell masterplan-slice** på exact base `main=34c9c474a478cb7aab7858284ec0606eab51c128` (PR #92 sin
+merge-commit), branch `tobias/manual-masterplan-k1-owner-control-authority`. Lukker UA-11
+akseptansekriterium 3 sitt siste gjenstående gap (D-163): `OwnerControls`/`KillSwitch` var rene
+in-memory, per-PROSESS objekter (api og worker konstruerte hver sin egen instans) - en pause satt i
+den ene var usynlig for den andre, en restart glemte den stille fail-OPEN. Full begrunnelse: D-164 i
+`DECISIONS_AND_ASSUMPTIONS.md`; design-tillegg: `docs/UA11_EXECUTIVE_MODE_DESIGN.md` §4/§9.
+
+**Bygget:**
+- `058_owner_control_authority.sql`: ny tabell `owner_control_state` (global, ingen RLS/tenant_id,
+  presens=aktiv-mønster som `situation_domain_pauses`; ikke Q-20-registrert - system-autoritet, ikke
+  person-eid data).
+- `modules/policy/src/{kill-switch,authority,owner-control-store}.ts` utvidet (IKKE omskrevet):
+  eksisterende synkrone metoder byte-identisk uendret; nye `*Durable()`-metoder er en LIVE, per-kall
+  DB-spørring UTEN cache (bevisst AVVIK fra `DomainPauseRegistry` sin instant-cache-presedens - se
+  D-164 B for hvorfor kill switch/frys krever ekte cross-prosess-konsistens, ikke bare fail-fast).
+- Ny pakke `@jarvis/owner-controls` (kan ikke ligge i `modules/policy` selv - sirkulær avhengighet
+  med `tool-gateway`): kanonisk `owner_controls.*` ToolGateway-namespace, 7 handlinger
+  (`get_control_state` klasse A; `activate_kill_switch`/`deactivate_kill_switch` klasse D;
+  `freeze_connector`/`unfreeze_connector`/`revoke_credential`/`restore_credential` klasse C).
+- `apps/api/src/main.ts`+`worker-main.ts`: begge prosesser konstruerer nå `killSwitch`/`ownerControls`
+  med SAMME `pool`+`authority`, kaller `restore()` FØR bruk, `controls: ownerControls` satt i
+  `PolicyGateway` (tidligere aldri satt - dødt felt). To dokumenterte selvgjenopprettings-unntak
+  hindrer et permanent kill-switch-/frys-lås.
+- `@jarvis/executive` utvidet med `executive.get_control_surface_status` (klasse A) - komponerer
+  `owner_controls.get_control_state`+`situations.get_pause_state` (se UA11_EXECUTIVE_MODE_DESIGN.md §4).
+
+**Fersk-verifisert korrigering (ikke stille fulgt):** `/infra/pause`-ruten muterer `InfraExecutionGate`
+(D-104), en HELT ANNEN, allerede-dokumentert-divergent, snevrere mekanisme - IKKE `KillSwitch`/
+`OwnerControls` som byggeordrens opprinnelige premiss antok. K1 rører den bevisst ikke - se D-164 F.
+
+**Bygges IKKE i denne sliceen:** RLS for `owner_control_state` (dokumentert N/A - global, ikke
+tenant-data); en HTTP-/dashboard-rute for `owner_controls.*` (kontrollflaten er ToolGateway-
+kapabiliteten, samme reifiseringsnivå som `situations`/`executive` selv).
+
+**RETTET ETTER FERSK KRITISK GJENNOMGANG (D-166, arkitekt-review PR #93, BLOCKER B1):**
+D-164 sin opprinnelige tekst her påsto at `revoke_credential`-selvlås-beskyttelse var utelatt fordi
+det var "en pre-eksisterende, bredere risiko for ALLE interne verktøy, ikke unikt for K1" - dette var
+UNØYAKTIG (K1 er den FØRSTE og ENESTE kilden til denne risikoen, se D-166) og selve selvlåsen var en
+REELL bug, ikke et bevisst utelatt scope. Selvlås-beskyttelse for `restore_credential` på den delte
+`credential_ref`-en ER NÅ BYGGET i denne sliceens oppfølgingsrunde - en minimal, handlings-nivå
+selvgjenopprettings-mengde (`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`), se D-166.
+
+**Tester:** 96 nye/påvirkede (D-164) + 8 nye (D-166, B1-fiks) = 104, alle grønne, empirisk kjørt:
+`modules/owner-controls/test/owner-control-authority.test.ts` (30: 22 fra D-164 + 8 fra D-166, ekte
+embedded Postgres), `k1-owner-control-authority-host-run-wiring.test.ts` (15, strukturell),
+`modules/executive/test/service-transport.test.ts` gruppe G (5). Regresjon empirisk bekreftet grønn:
+policy/situations/executive/apps-api/tool-gateway/owner-controls (809 totalt etter D-166).
+**Host-akseptanse-harness bygget, utvidet (D-166), audit-bevis-determinisme fikset (D-167), RE-KJØRT
+PÅ NYTT ETTER FIKSEN OG PASSERT (D-168):** `modules/owner-controls/scripts/k1-owner-control-authority-host-run.ts`+`-live.ts`
+(samme to-fils-mønster som UA-10/UA-5). Status: HELE `owner_controls`/`KillSwitch`-flaten (kill switch,
+connector-frys, credential-tilbakekalling/-gjenoppretting, samtidig-deadlock-gjenoppretting, run-avgrenset
+audit-bevis) er nå `PRODUCTION_VERIFIED` (D-165/D-168 - fersk host-kjøring på eksakt HEAD `9fcf1a3...`,
+alle K1-markører PASS inkl. `k1_audit_evidence=PASS`, `hard_fail=false`). **PR #93 MERGET** (`MERGE_SHA
+22d391d248c3b99f2a3949b2606bfab2d7e7bcb3`, to-parent-merge, post-merge CI grønn) - se RUNTIME_GATES.md
+for gate-raden og D-164/D-165/D-166/D-167/D-168 for full begrunnelse. `SOVEREIGN_COMPLETE`: se separat
+Sovereign-re-audit-post (D-169) for den fulle 16-områdes vurderingen etter K1 sin lukking.
+
+**RETTET/UTVIDET 2026-09-18 (D-171, uavhengig arkitekt-re-review `5248461491`, BLOKKER B2):** K1 sin
+kjernemekanisme over (kalt DIREKTE via `owner_controls.*`) forblir `PRODUCTION_VERIFIED`, UENDRET. Men
+en fersk kildekode-audit fant at `executive.*` (kapittel-28 sitt "ett kontrollpanel") KUN videresender
+lesing (`get_control_surface_status`) + `situations.*`-mutasjon - INGEN av `owner_controls.*` sine seks
+mutasjoner (kill switch/frys/tilbakekalling) er nåbare fra `executive.*`. **Ny, navngitt neste slice
+(D-171, IKKE startet i PR #94): "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2)".**
+`executive.*` blir DEN ENE eier-vendte mutasjonsoverflaten ved å komponere (ikke duplisere)
+`owner_controls.*`/`situations.*` gjennom `ToolGateway.execute()` (samme nøstede mønster
+`pause_domain`/`resume_domain` allerede bruker): legg til videresendinger for
+`activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+`revoke_credential`/`restore_credential`; legg til én ny eier-vendt enhets-tilbakekallingshandling over
+`SessionGrantService.revokeForDeviceOn()` (`modules/core/src/services/session-grant-service.ts`,
+eksisterer allerede, men er i dag KUN kalt internt fra re-innrullering); legg til videresendinger for
+`finance.enable_kill_switch`/`disable_kill_switch`/`get_kill_switch` (`modules/finance/src/service.ts`,
+tenant-skopet `finance_kill_switch`, D-41-klasse D). Se D-171 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+mål-for-mål-kartlegging av alle syv kapittel-28-mål.
+
+**RETTET 2026-09-18 (D-172, uavhengig arkitekt-re-review `5248756307`):** D-171 sin B2-slice-beskrivelse
+over påsto en manglende domene-nivå finans-fryseprimitiv - dette var en faktafeil, RETTET her. En fersk
+dekningsaudit av HELE `finance`-modulet fant at `finance.enable_kill_switch`/`disable_kill_switch`/
+`get_kill_switch` ALLEREDE eksisterer og allerede gater `submitPaymentIntent()` (Fiken),
+`submitStripeRefund()`, `submitVippsCapture()`/`cancelVippsPayment()`/`submitVippsRefund()`, og
+Wallester-kort-spend-limit-mutasjoner (`card-service.ts` sin `assertKillSwitchInactive()`) - INGEN ny
+domene-nivå-primitiv skal bygges for B2; slicen reduseres for finansdomenet til KUN å legge til
+`executive`-videresendinger for de tre eksisterende `finance.*`-handlingene, identisk mønster som
+`owner_controls.*`-videresendingene over. `Neonomics` har ingen Jarvis-utført utgående betalingshandling
+å gate (open-banking-redirect-modell); `SpendService` er BEVISST unntatt (ren passiv observasjon av
+allerede skjedd utgift, ZERO ekstern leverandør, eksplisitt regresjonstestet) - begge korrekt utenfor
+scope, ikke et gap.
+
+**RETTET/UTVIDET 2026-09-18 (D-173, uavhengig arkitekt-re-review `5248894556`, BLOKKER B3):** D-172 sin
+dekningsaudit over selv hadde et hull. Kall-for-kall-verifisering av `modules/finance/src/card-service.ts`
+viser: `submitCard()` (linje 227-232) og `unfreezeCard()` (linje 324-325, `{ killSwitchGated: true }`)
+ER korrekt gatet; men `activateCard()` (linje 314-315) kaller `lifecycleAction(..., {}, actorPersonId)`
+med et TOMT options-objekt - `killSwitchGated` er `undefined`, så `finance_kill_switch` sjekkes ALDRI
+før et kort aktiveres. Dette er en REELL, spend-muliggjørende Jarvis-initiert leverandørmutasjon som
+IKKE er gatet. `freezeCard()`/`closeCard()` er OGSÅ ikke gatet, men BEVISST KORREKT (spend-reduserende
+handlinger skal ikke blokkeres av en kill switch). **B2 utvides til B2+B3:** før finansdomenet
+eksponeres via `executive.*`, MÅ `activateCard()` sitt `lifecycleAction()`-kall rettes til å sende
+`{ killSwitchGated: true }` (én linje, INGEN ny kill-switch-mekanisme - samme eksisterende
+`finance_kill_switch`/`assertKillSwitchInactive()`, bare korrekt anvendt på ett kall til).
+`INTERNAL_BUILD_COMPLETE=false` FORBLIR uendret (var allerede `false` pga. enhet; nå med ett navngitt
+gap til: `FINANCE_UNCOVERED_MUTATIONS=finance_wallester.activate_card`).
+
+**IMPLEMENTERT 2026-09-18 (D-174) - "K1.1 - Samlet eier-kontrolloverflate, mutasjonsfullføring (B2+B3)"
+er NÅ FERDIG, IKKE lenger en fremtidig slice:** `CardService.activateCard()` sender nå
+`{ killSwitchGated: true }` (B3-fiksen); `finance_wallester.activate_card` sin `capability_class`
+rettet `"B"`→`"C"`. `executive.*` fikk ti nye videresendinger: `activate_kill_switch`/
+`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/`revoke_credential`/
+`restore_credential`/`revoke_device`/`enable_finance_kill_switch`/`disable_finance_kill_switch`/
+`get_finance_kill_switch` - ALLE tynne `gateway.execute()`-gjennomslag, INGEN ny logikk/tilstand. Ny
+`owner_controls.revoke_device` (`OwnerControlsService.revokeDevice()`, valgfritt 3.
+konstruktørargument) pakker inn `SessionGrantService.revokeForDeviceOn()`. **Fresk arkitektonisk funn
+under implementasjonen (IKKE forutsett av D-171/D-172/D-173):** nøstede `ToolGateway.execute()`-kall
+vurderes UAVHENGIG per `tool_id` - `OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken i
+`gateway.ts`/`policy-gateway.ts` (D-166) måtte derfor utvides til også å gjelde `tool_id ===
+"executive"`, ellers ville `executive.deactivate_kill_switch`/`restore_credential` blitt blokkert av
+SIN EGEN ytre tool_id-sjekk før den nådde det trygge, nøstede `owner_controls`-kallet. Se D-174 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse, testevidens (nye "H"/"K"-testblokker) og
+host-akseptanse-status (`PENDING` - nytt script `modules/executive/scripts/
+d174-executive-control-surface-live.ts`+`-host-run.ts` klart for Tobias).
+
+**RETTET 2026-09-18 (D-175, arkitekt-review 5250409538, BLOKKER B4):** D-174 sin `revoke_device` tok
+feilaktig et FRITT kaller-oppgitt `tenant_id`-parameter, ved analogi til `credential_ref`/`connector_id`
+(som treffer det tenant-frie `owner_control_state`). Denne analogien var arkitektonisk feil:
+`session_grants`/`devices` er RLS-scopet (`FORCE ROW LEVEL SECURITY`) per tenant, så et fritt
+`tenant_id`-parameter var et REELT cross-tenant-hull, IKKE et harmløst mål-parameter. RETTET: mål-tenanten
+er nå UBETINGET `identity.tenant_id` (skjemaet har INGEN `tenant_id`-felt); mål-enheten kan fortsatt
+tilhøre en ANNEN PERSON/delegat i SAMME tenant (tillatt og nyttig - eieren kan fortsatt tilbakekalle en
+annens sesjon); en enhet som kun finnes i en ANNEN tenant feiler LUKKET (ny `DeviceNotFoundError`), IKKE
+et stille `ok:true`/`revoked_grants:0`. Ingen ny autorisasjonsbutikk, ingen ny tenant-tilstand. Se D-175 i
+`DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-176, arkitekt-re-review 5251073737, BLOKKER B5):** `executive.
+get_control_surface_status` selv ble AVSLÅTT av NØYAKTIG kill-switch-aktiv-/tilbakekalt-credential-
+gaten den skulle la eieren SE FORBI. D-174/D-175 sin `tool_id === "executive"`-utvidelse av
+`OWNER_CONTROLS_SELF_RECOVERY_ACTIONS`-sjekken antok FEILAKTIG at `executive` sine handlingsnavn er
+identiske med `owner_controls` sine - det holder for de to MUTASJONENE, men IKKE for LESING
+(`get_control_surface_status` ≠ `get_control_state`). Dypere funn oppdaget UNDER selve rettelsen:
+`getControlSurfaceStatus()` komponerer OGSÅ `situations.get_pause_state`/`finance.get_kill_switch` via
+to YTTERLIGERE, UAVHENGIG gatede nøstede kall - uten å unnta OGSÅ disse ville komposisjonen fortsatt
+kastet under lås. RETTET: ny `isSelfRecoveryAction(toolId, action)` (owner-control-store.ts) erstatter
+den forrige unionen med en eksplisitt per-(tool_id,action)-mapping for ALLE FIRE tool_id-ene
+(`owner_controls`/`executive`/`situations`/`finance`) - fortsatt like smalt, INGEN mutasjon lagt til,
+INGEN ny autoritets-/tenant-tilstand. Se D-176 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-177, arkitekt-re-review 5252077633, BLOKKER B6):** D-176 sitt host-
+akseptanse-harness (`d174-executive-control-surface-live.ts`, seksjon 4b) brukte en sekvensiell
+`executive.activate_kill_switch`+`executive.revoke_credential`-rekkefølge for å etablere "begge
+låser samtidig" - STRUKTURELT UMULIG, samme bug-klasse testsuiten allerede var rettet for i D-176
+selv, men ikke anvendt på host-scriptet. RETTET: BEGGE lås-tilstandene settes nå DIREKTE via det
+durable laget (`stack.killSwitch.activateDurable(...)`/`stack.ownerControls.
+revokeCredentialDurable(...)`); LESINGEN/gjenopprettingen under test går fortsatt via `executive.*`.
+Se D-177 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
+**RETTET 2026-09-18 (D-178, arkitekt-host-akseptanse-review 5252418219, BLOKKER B7):** FØRSTE EKTE
+Windows-host-kjøring (`run_id=d265a028`) av D-174→D-177-harnesset feilet (`hard_fail=true`) - ALT
+ANNET (inkl. B4/B5/B6) var PASS, men enhets-tilbakekallings-fikstur/-lesing (seksjon 9/10,
+`seedDeviceGrant()` m.fl.) gjorde rå `sidePool`/`freshPool`-spørringer mot RLS-beskyttede
+`devices`/`sessions`/`session_grants` (FORCE ROW LEVEL SECURITY, migrasjon 053) UTEN tenant-kontekst
+- avslått under den ekte `jarvis_runtime`-rollen FØR selve `executive.revoke_device`-kallet under
+test ble nådd. RETTET: alle tre bruker nå den EKSISTERENDE `withTenantTransaction()`-hjelperen
+(`@jarvis/core`); `adminPool` bevisst IKKE brukt for fikstur/lesing (kun CLEANUP, uendret);
+`executive.revoke_device`-kallet uendret. `INTERNAL_BUILD_COMPLETE=false` (RETTET fra `true`) til en
+FERSK host-kjøring beviser fiksen. Se D-178 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/
+testevidens.
+
+**LIVE-BEVIST 2026-09-18 (D-179, arkitekt-host-akseptanse-review 5253069695, RESULT=PASS):** Tobias
+kjørte det D-178-rettede harnesset PÅ NYTT, faktisk to ganger - begge PASS (`run_id=fc9b99e5` og den
+avsluttende `run_id=bfca277d`, BEGGE `hard_fail=false`). ALLE markører PASS, inkl.
+`executive.revoke_device` (`grants_before=1`, `revoked_grants=1`, tenant bundet til `tenant-personal`)
+og ferskinstans-holdbarhetslesingen. `HOST_ACCEPTANCE_STATUS=PASS` (RETTET fra `REQUIRES_RERUN`),
+`INTERNAL_BUILD_COMPLETE=true` (RETTET fra `false`). `SOVEREIGN_COMPLETE=false` FORBLIR UENDRET. Se
+D-179 i `DECISIONS_AND_ASSUMPTIONS.md` for full begrunnelse/testevidens.
+
 ---
 
 ## Fase-avhengigheter (oversikt)

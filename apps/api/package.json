@@ -16,6 +16,7 @@
     "@jarvis/contracts": "workspace:*",
     "@jarvis/conversation-graph": "workspace:*",
     "@jarvis/core": "workspace:*",
+    "@jarvis/executive": "workspace:*",
     "@jarvis/finance": "workspace:*",
     "@jarvis/growth": "workspace:*",
     "@jarvis/health": "workspace:*",
@@ -26,12 +27,15 @@
     "@jarvis/tool-gateway": "workspace:*",
     "@jarvis/model-gateway": "workspace:*",
     "@jarvis/operations": "workspace:*",
+    "@jarvis/owner-controls": "workspace:*",
     "@jarvis/policy": "workspace:*",
     "@jarvis/product": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",
+    "@jarvis/situations": "workspace:*",
     "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",
     "@jarvis/vision": "workspace:*",
+    "@jarvis/watchdog": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {
