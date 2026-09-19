@@ -46,6 +46,7 @@ import {
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { LocalHashEmbedding } from "@jarvis/memory";
+import { GatewayAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck } from "@jarvis/watchdog";
 
 // Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
 // en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
@@ -309,6 +310,48 @@ const workerIdentity = {
   memory_space_id: "personal", session_id: "sess-worker", device_id: "jarvis-core",
   channel: "api", auth_strength: "active"
 } as const;
+
+// D-180 (W1, D183 - retter D182 sitt REAL_INTERNAL_GAP-funn): @jarvis/watchdog
+// var FØR denne posten null-koblet til noen produksjonsprosess. Plassert HER,
+// ETTER `assertRuntimeRoleSafe(pool)` (linje ~63) og `killSwitch.restore()`/
+// `ownerControls.restore()` (linje ~105/107) er fullført, FØR selve
+// intervall-drenerings-loopen nederst - watchdogen starter ALDRI før
+// runtime-DB-sikkerhetssjekkene er kjørt og den delte, pool-baserte
+// `KillSwitch`-en er gjenopprettet (D183 §A). KUN i worker-prosessen (D183
+// sin foretrukne mål - eier allerede pool/KillSwitch/TelegramTransport/
+// ToolGateway) - IKKE duplisert i apps/api/src/main.ts (D183 §A "avoid
+// duplicate watchdog instances").
+//
+// `costExplosionCheck` sin nødstopp går NÅ via `killSwitch.activateDurable()`
+// (se watchdog.ts sin egen begrunnelse) - `ownerPersonId` er BEVISST SAMME
+// `ownerControlAuthority.owner_person_id` som resten av denne filens wiring
+// (linje ~103/122/131), ALDRI en oppdiktet "system"-identitet: `assert
+// OwnerControlAuthorized()` krever UBETINGET at aktøren matcher den
+// konfigurerte eier-autoriteten, og `owner_control_state.actor_person_id`
+// har en reell FK mot `people` - denne automatiserte nødmekanismen handler
+// derfor UNDER eierens egen, forhåndsautoriserte sovereign-autoritet
+// (D-41), ikke som en separat, uautorisert aktør.
+//
+// `GatewayAlertSink` sender varsler via DEN SAMME kanoniske
+// `toolGateway.execute({tool_id:"telegram", action:"notify"})`-stien som
+// `DailyBrief.deliverViaTelegram()` allerede bruker - ingen ny Telegram-
+// credential-mekanisme, ingen rå token i denne filen.
+const watchdogIdentity = { ...workerIdentity, session_id: "sess-watchdog" } as const;
+const watchdogAlertSink = new GatewayAlertSink(toolGateway, watchdogIdentity);
+const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
+watchdog.register(databaseCheck(pool));
+watchdog.register(stuckTasksCheck(pool));
+watchdog.register(
+  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id, Number(process.env["JARVIS_COST_HARD_LIMIT_ORE"] ?? 300_000))
+);
+const WATCHDOG_INTERVAL_MS = Number(process.env["JARVIS_WATCHDOG_INTERVAL_MS"] ?? 60_000);
+setInterval(
+  () =>
+    void watchdog
+      .tick()
+      .catch((err) => console.error(JSON.stringify({ msg: "watchdog_tick_error", error: (err as Error).message }))),
+  WATCHDOG_INTERVAL_MS
+);
 
 // Sandbox-jobber: DockerSandboxRunner på host-runtime (D-32-verifisert). I container
 // er prosess-sandbox default (containeren selv er isolasjonsgrensen; ingen Docker-socket

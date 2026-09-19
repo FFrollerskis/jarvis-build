@@ -87,14 +87,24 @@ describe("Akseptanse 1: watchdog oppdager simulert feil og varsler med runbook",
 });
 
 describe("Kill switch-kriterium: kostnadseksplosjon", () => {
-  it("over hardgrense → kill switch aktiveres → Policy Gateway nekter alt", async () => {
+  // D-180 (W1, D183): DENNE testen konstruerte tidligere en pool-LØS
+  // `KillSwitch()` - som gjorde at `costExplosionCheck`s daværende
+  // `killSwitch.activate()`-kall (den ikke-durable no-op-en mot produksjonens
+  // faktiske `isActiveDurable()`-sjekk) ALDRI kunne avsløres her, fordi en
+  // pool-løs `isActiveDurable()` trivielt speiler `isActive()`. Nå pool-
+  // BAKKET (samme `adminPool`/`ownerControlAuthority`-mønster som K1/B1s
+  // egne tester), slik at testen faktisk øver den autoritative
+  // `owner_control_state`-stien produksjonen bruker.
+  const ownerControlAuthority = { owner_person_id: "person-tobias" };
+
+  it("over hardgrense → kill switch aktiveres DURABELT → Policy Gateway nekter alt", async () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ('tenant-a','model:x', 400000)");
     const sink = new MemoryAlertSink();
-    const killSwitch = new KillSwitch();
+    const killSwitch = new KillSwitch(adminPool, ownerControlAuthority);
     const watchdog = new Watchdog(sink, killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, "person-tobias", 300_000));
     await watchdog.tick();
-    expect(killSwitch.isActive()).toBe(true);
+    expect(await killSwitch.isActiveDurable()).toBe(true);
     expect(sink.alerts[0]?.severity).toBe("critical");
 
     const policy = new PolicyGateway({
@@ -107,7 +117,7 @@ describe("Kill switch-kriterium: kostnadseksplosjon", () => {
     });
     expect(denied.reason).toBe("kill_switch_active");
     // Reversibelt: manuell deaktivering gjenoppretter - ingen automatisk gjenåpning.
-    killSwitch.deactivate();
+    await killSwitch.deactivateDurable("person-tobias");
     await adminPool.query("DELETE FROM cost_events WHERE amount_ore = 400000");
   });
 });
