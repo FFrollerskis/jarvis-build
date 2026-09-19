@@ -73,6 +73,15 @@ describe("W1: @jarvis/watchdog er faktisk konsumert av worker-main.ts (WATCHDOG_
     expect(workerMainSource).toMatch(/costExplosionCheck\(pool,\s*killSwitch,\s*ownerControlAuthority\.owner_person_id,/);
   });
 
+  it("D-191 (BLOCKER B4): costExplosionCheck kalles ALSO med et eksplisitt tenantId - process.env[\"JARVIS_TENANT_ID\"] ?? \"tenant-personal\", SAMME mønster som resten av filens wiring (aldri utledet fra urelatert data)", () => {
+    const callIdx = workerMainSource.indexOf("costExplosionCheck(pool,");
+    expect(callIdx).toBeGreaterThan(-1);
+    const call = workerMainSource.slice(callIdx, workerMainSource.indexOf(")\n);", callIdx) + 1);
+    expect(call).toMatch(/process\.env\["JARVIS_TENANT_ID"\]\s*\?\?\s*"tenant-personal"/);
+    // ownerPersonId og tenantId er to DISTINKTE argumenter - tenantId erstatter IKKE ownerPersonId.
+    expect(call).toContain("ownerControlAuthority.owner_person_id");
+  });
+
   it("apps/api/src/main.ts registrerer IKKE en egen watchdog-instans (unngå duplikat, D183 §A)", () => {
     expect(mainSource).not.toContain("new Watchdog(");
     expect(mainSource).not.toMatch(/from\s*"@jarvis\/watchdog"/);
@@ -93,6 +102,32 @@ describe("W1: ingen legacy ikke-durabel killSwitch.activate()-kall gjenstår i w
 
   it("costExplosionCheck krever et eksplisitt ownerPersonId-parameter (ingen default/undefined-fallback)", () => {
     expect(watchdogSource).toMatch(/export function costExplosionCheck\(\s*pool: pg\.Pool,\s*killSwitch: KillSwitch,\s*ownerPersonId: string,/);
+  });
+
+  it("D-191 (BLOCKER B4, E.1): costExplosionCheck krever OGSÅ et eksplisitt tenantId-parameter (ingen default) - RETT ETTER ownerPersonId, FØR den defaultable hardLimitOre", () => {
+    expect(watchdogSource).toMatch(/ownerPersonId: string,\s*tenantId: string,\s*hardLimitOre = 300_000/);
+  });
+
+  it("D-191 (BLOCKER B4, E.2): den månedlige SUM-spørringen kjører INNI withTenantTransaction(pool, tenantId, ...) - ikke lenger direkte via pool.query()", () => {
+    const fnStart = watchdogSource.indexOf("export function costExplosionCheck(");
+    const fnBody = watchdogSource.slice(fnStart, fnStart + 2500);
+    expect(fnBody).toMatch(/await withTenantTransaction\(pool,\s*tenantId,\s*async\s*\(client\)\s*=>/);
+    expect(fnBody).toContain("client.query(");
+    expect(fnBody).not.toMatch(/[^.]pool\.query\(\s*\n?\s*`SELECT/);
+  });
+
+  it("D-191 (BLOCKER B4, E.3): withTenantTransaction importeres fra @jarvis/core (den kanoniske helperen som setter jarvis.tenant_id via set_config) - ingen egen, parallell RLS-mekanisme", () => {
+    expect(watchdogSource).toMatch(/import\s*\{[^}]*withTenantTransaction[^}]*\}\s*from\s*"@jarvis\/core"/s);
+  });
+
+  it("D-191 (BLOCKER B4, E.9): ingen FAKTISK adminPool-BRUK (kun nevnt i begrunnende prosa/kommentarer for HVORFOR det bevisst IKKE brukes), ingen RLS-svekkende setning noe sted i watchdog.ts sin PRODUKSJONSKILDE (src/, ikke scripts/test)", () => {
+    // Kildekode-BRUK ville sett ut som `adminPool.query(`/`adminPool)`/en
+    // parameter-/importdeklarasjon - ALDRI bare ordet i en forklarende
+    // kommentarlinje (som selve D-191-begrunnelsen over costExplosionCheck).
+    expect(watchdogSource).not.toMatch(/adminPool\.query\(/);
+    expect(watchdogSource).not.toMatch(/[,(]\s*adminPool\s*[,)]/);
+    expect(watchdogSource).not.toMatch(/\bBYPASSRLS\b/);
+    expect(watchdogSource).not.toMatch(/\b(GRANT|ALTER ROLE|ALTER TABLE)\b/);
   });
 });
 

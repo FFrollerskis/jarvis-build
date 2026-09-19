@@ -369,8 +369,17 @@ watchdog.register(stuckTasksCheck(pool));
 // videre til `costExplosionCheck()`/`setInterval()` - se watchdog.ts sin
 // egen, fulle begrunnelse for hvorfor en `NaN`-hardgrense var en reell
 // utilsiktet-nødstopp-risiko.
+// D-191 (BLOCKER B4, arkitekt-order D191 mot PR #96): `costExplosionCheck`
+// krever nå en eksplisitt `tenantId` (RLS-skopet SELECT via
+// `withTenantTransaction` - se watchdog.ts sin egen begrunnelse). Samme
+// `process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"`-mønster som resten
+// av denne filens wiring (linje ~122/136/319/464) - ALDRI utledet fra
+// urelatert data. `owner_person_id` forblir uendret, separat eksplisitt.
 watchdog.register(
-  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id, parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"]))
+  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id,
+    process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
+    parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"])
+  )
 );
 const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(

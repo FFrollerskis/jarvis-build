@@ -1,5 +1,6 @@
 import type pg from "pg";
 import type { KillSwitch } from "@jarvis/policy";
+import { withTenantTransaction } from "@jarvis/core";
 
 export type Severity = "info" | "warning" | "critical";
 
@@ -271,21 +272,41 @@ export function databaseCheck(pool: pg.Pool): HealthCheck {
  * kostnadseksplosjon kaller `activateDurable()` maksimalt ÉN gang mens
  * kontrollen faktisk er aktiv (skriving er dessuten et idempotent UPSERT, se
  * `writeControlState()`, så selv et race mellom to samtidige kall er trygt).
+ *
+ * D-191 (BLOCKER B4, arkitekt-order D191 mot PR #96 - funn fra samme EKTE
+ * host-kjøring som D190, run_id `aad6de29`): migrasjon 005_rls.sql legger
+ * `FORCE ROW LEVEL SECURITY` på `cost_events` med policyen
+ * `USING (tenant_id = current_setting('jarvis.tenant_id', true))`.
+ * `costExplosionCheck` sin månedlige SUM-spørring kjørte tidligere DIREKTE
+ * mot runtime-`pool` UTEN å etablere `jarvis.tenant_id` først - på den ekte
+ * `jarvis_runtime`-rollen (NOSUPERUSER/NOBYPASSRLS, FORCE RLS) betyr det at
+ * `current_setting('jarvis.tenant_id', true)` er NULL, `tenant_id = NULL`
+ * er ALDRI sant, og spørringen så DERFOR alltid `spent=0` - uansett faktisk
+ * forbruk. En sikkerhetsmekanisme som strukturelt ALDRI kunne utløses i
+ * produksjon. Rettet ved å kreve en eksplisitt `tenantId` og kjøre SELECT-en
+ * inni den kanoniske `withTenantTransaction(pool, tenantId, ...)` (SAMME
+ * mekanisme som resten av kodebasen bruker for tenant-skopet tilgang) - IKKE
+ * en ny/parallell RLS-omgåelse, IKKE `adminPool` i produksjon, INGEN
+ * privilegie-/RLS-endring. Hardgrensen forblir tenant-skopet (per design -
+ * `cost_events` sin egen RLS-policy garanterer dette strukturelt).
  */
 export function costExplosionCheck(
   pool: pg.Pool,
   killSwitch: KillSwitch,
   ownerPersonId: string,
+  tenantId: string,
   hardLimitOre = 300_000
 ): HealthCheck {
   return {
     name: "cost_explosion",
     runbook: "docs/runbooks/TIER1_RUNBOOKS.md#kostnad",
     async run() {
-      const result = await pool.query(
-        `SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())`
-      );
-      const spent = (result.rows[0] as { spent: number }).spent;
+      const spent = await withTenantTransaction(pool, tenantId, async (client) => {
+        const result = await client.query(
+          `SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())`
+        );
+        return (result.rows[0] as { spent: number }).spent;
+      });
       if (spent < hardLimitOre) {
         return { ok: true, severity: "info", message: "" };
       }

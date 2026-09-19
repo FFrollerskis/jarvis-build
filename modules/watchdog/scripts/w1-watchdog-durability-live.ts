@@ -44,7 +44,10 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
-import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool, PgApprovalStore } from "@jarvis/core";
+import {
+  adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool,
+  PgApprovalStore, withTenantTransaction
+} from "@jarvis/core";
 import { EnvSecretProvider, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
@@ -78,7 +81,18 @@ const results: Record<string, Verdict> = {
   w1_alert_failure_does_not_prevent_shutdown: "FAIL",
   w1_no_duplicate_activation_on_repeated_tick: "FAIL",
   w1_cleanup_state_unchanged: "FAIL",
-  w1_audit_evidence_no_secret_leakage: "FAIL"
+  w1_audit_evidence_no_secret_leakage: "FAIL",
+  // D-191 (BLOCKER B4 §F, cleanup-robusthet): FØR denne fiksen kunne en feil i
+  // ENTEN kill-switch-deaktivering ELLER fixture-DELETE (raw await, ikke
+  // section()-innpakket) kaste UT AV `main()` sin egen `finally`-blokk -
+  // dermed HOPPE OVER den andre cleanup-operasjonen OG hoppe over `finish()`
+  // (toppnivå-`await main(); finish();`) - ingen sammendrag i det hele tatt,
+  // ingen `hard_fail`-beregning. Disse to nøklene er nå ALLTID satt (start
+  // "FAIL", flippet til "PASS" kun ved suksess i egne try/catch), slik at (a)
+  // de to operasjonene ALDRI kan forhindre hverandre og (b) en cleanup-feil
+  // automatisk gir `hard_fail=true` via `finish()` sin eksisterende skanning.
+  w1_cleanup_kill_switch_deactivated: "FAIL",
+  w1_cleanup_fixture_removed: "FAIL"
 };
 const diagnostics: Record<string, string> = {};
 /** D-184: alt `console.error` faktisk skrev paa varslings-feilstien (seksjon 8) - skannes for secret-lekkasje i seksjon 10. */
@@ -183,7 +197,9 @@ function buildStack(sidePool: pg.Pool): {
     }
   };
   const watchdog = new Watchdog(observingSink, killSwitch);
-  watchdog.register(costExplosionCheck(sidePool, killSwitch, OWNER_PERSON, HARD_LIMIT_ORE));
+  // D-191 (BLOCKER B4): eksplisitt OWNER_TENANT - se watchdog.ts sin egen
+  // begrunnelse for hvorfor dette IKKE er valgfritt lenger.
+  watchdog.register(costExplosionCheck(sidePool, killSwitch, OWNER_PERSON, OWNER_TENANT, HARD_LIMIT_ORE));
   return { killSwitch, gateway, watchdog, alertSink, alertOrder };
 }
 
@@ -229,8 +245,14 @@ async function main(): Promise<void> {
       // den beviser at `jarvis_runtime` FAKTISK kan LESE den syntetiske raden gjennom
       // den ekte produksjonsspørringsveien (SAMME spørring som `costExplosionCheck`
       // selv kjører), selv om den ikke kan skrive/slette den (D-190 §"REQUIRED FIX").
-      const { rows } = await pool.query("SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())");
-      const spent = rows[0]?.spent ?? 0;
+      // D-191 (BLOCKER B4): kjøres nå INNI `withTenantTransaction(pool, OWNER_TENANT,
+      // ...)` - SAMME kanoniske mekanisme `costExplosionCheck` selv bruker - slik at
+      // harnesset måler den EKTE produksjonsstien (RLS-tenant-kontekst etablert),
+      // ikke en rå, RLS-filtrert (og dermed alltid tom) pool-spørring.
+      const spent = await withTenantTransaction(pool, OWNER_TENANT, async (client) => {
+        const { rows } = await client.query("SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())");
+        return rows[0]?.spent ?? 0;
+      });
       results.w1_cost_threshold_triggered_with_test_data = spent >= HARD_LIMIT_ORE ? "PASS" : "FAIL";
       diagnostics["month_spent_ore_before_tick"] = String(spent);
       log(`month_spent_ore=${spent} hard_limit_ore=${HARD_LIMIT_ORE} -> ${results.w1_cost_threshold_triggered_with_test_data}`);
@@ -388,11 +410,28 @@ async function main(): Promise<void> {
     // operasjoner). Fixture-DELETE-en under bruker derimot `adminPool` - den
     // skal ALDRI igjen kunne feile med "permission denied for table
     // cost_events", uavhengig av hvor try-blokken over stoppet.
-    const cleanupKillSwitch = new KillSwitch(pool, authority);
-    if (await cleanupKillSwitch.isActiveDurable()) {
-      await cleanupKillSwitch.deactivateDurable(OWNER_PERSON);
+    //
+    // D-191 (BLOCKER B4 §F): de to operasjonene under har HVER SIN try/catch -
+    // en feil i den ene MÅ ALDRI forhindre den andre fra å kjøre, og MÅ ALDRI
+    // forhindre `finish()` fra å produsere et sammendrag (se `results`-
+    // feltenes egen begrunnelse over for hvorfor dette tidligere kunne feile
+    // stille, midt i cleanup, uten noe sammendrag i det hele tatt).
+    try {
+      const cleanupKillSwitch = new KillSwitch(pool, authority);
+      if (await cleanupKillSwitch.isActiveDurable()) {
+        await cleanupKillSwitch.deactivateDurable(OWNER_PERSON);
+      }
+      results.w1_cleanup_kill_switch_deactivated = "PASS";
+    } catch (err) {
+      log(`CLEANUP kill-switch-deaktivering: UVENTET FEIL - ${(err as Error).message.slice(0, 200)}`);
     }
-    await adminPool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
+
+    try {
+      await adminPool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
+      results.w1_cleanup_fixture_removed = "PASS";
+    } catch (err) {
+      log(`CLEANUP syntetisk fixture-fjerning: UVENTET FEIL - ${(err as Error).message.slice(0, 200)}`);
+    }
 
     await section("CLEANUP: owner_control_state UENDRET fra før kjøringen", async () => {
       const snapshotAfter = await snapshotOwnerControlState();

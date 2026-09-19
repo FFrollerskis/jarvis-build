@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runMigrations } from "@jarvis/core";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ensureRuntimeRole, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
 import { EnvSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
@@ -68,7 +68,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await clearCostEventsAndControlState();
     const killSwitch = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
     await watchdog.tick();
     expect(await killSwitch.isActiveDurable()).toBe(false);
   });
@@ -78,7 +78,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitch = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
     await watchdog.tick();
     expect(await killSwitch.isActiveDurable()).toBe(true);
     const row = await adminPool.query(
@@ -93,7 +93,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitchA = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitchA);
-    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, TENANT, 300_000));
     await watchdog.tick();
 
     const poolB = freshPool();
@@ -107,7 +107,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitchA = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitchA);
-    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, TENANT, 300_000));
     await watchdog.tick();
 
     const poolB = freshPool();
@@ -126,7 +126,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitchA = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitchA);
-    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitchA, OWNER, TENANT, 300_000));
     await watchdog.tick();
 
     // "Restart": ny prosess ville konstruere en helt ny KillSwitch og kalle restore() -
@@ -145,7 +145,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     const throwingSink = { send: async () => { throw new Error("telegram_unavailable_simulated"); } };
     const killSwitch = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(throwingSink, killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
     // tick() må IKKE kaste videre selv om varslingen feiler (Watchdog.tick() logger og svelger).
     await expect(watchdog.tick()).resolves.toBeDefined();
     expect(await killSwitch.isActiveDurable()).toBe(true);
@@ -156,7 +156,7 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitch = new KillSwitch(adminPool, authority);
     const watchdog = new Watchdog(new MemoryAlertSink(), killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
     await watchdog.tick();
     const firstChangedAt = (await adminPool.query(
       "SELECT changed_at::text FROM owner_control_state WHERE control_kind='kill_switch'"
@@ -232,7 +232,7 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nød
     process.env["JARVIS_TELEGRAM_TOKEN"] = "fake-token-for-test";
     try {
       const watchdog = new Watchdog(observingSink, killSwitch);
-      watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+      watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
       expect(fakeTelegram.sent.length).toBe(0);
       await watchdog.tick();
 
@@ -370,7 +370,7 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nød
       };
       const killSwitch = new KillSwitch(adminPool, authority);
       const watchdog = new Watchdog(new WatchdogEmergencyAlertSink(leakyTransport, new EnvSecretProvider()), killSwitch);
-      watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+      watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, TENANT, 300_000));
       await watchdog.tick();
 
       const logged = errorLines.join("\n");
@@ -383,5 +383,94 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nød
       console.error = originalConsoleError;
       delete process.env["JARVIS_TELEGRAM_TOKEN"];
     }
+  });
+});
+
+/**
+ * D-191 (BLOCKER B4, arkitekt-order D191 mot PR #96 - funn fra samme EKTE
+ * host-kjøring som D190, run_id `aad6de29`): migrasjon 005_rls.sql legger
+ * `FORCE ROW LEVEL SECURITY` på `cost_events`. Alle andre caser i DENNE filen
+ * kaller `costExplosionCheck` med `adminPool` (Postgres-superbruker) som sitt
+ * eget `pool`-argument - superbrukere omgår RLS UANSETT policy-korrekthet
+ * (Q-21), så de kunne ALDRI ha avslørt B4 (nøyaktig slik `fase10-ops.test.ts`
+ * sin pool-løse `KillSwitch()` en gang skjulte D182 sitt funn). Denne suiten
+ * bruker i stedet en EKTE, ikke-superbruker, RLS-begrenset rolle
+ * (`ensureRuntimeRole` - SAMME mønster som `runtime-role.test.ts`/
+ * `db-role-wiring.test.ts`), og beviser at `costExplosionCheck` FAKTISK er
+ * tenant-skopet PÅ DEN ROLLEN cost_events sin RLS-policy reelt håndhever mot.
+ */
+describe("D191 §B4/E10: costExplosionCheck er RLS-tenant-skopet under en EKTE, ikke-superbruker, RLS-begrenset runtime-rolle", () => {
+  const TENANT_B = "tenant-b";
+  const RUNTIME_USER = "jarvis_runtime_d191_test";
+  let runtimePool: pg.Pool;
+
+  beforeAll(async () => {
+    await ensureRuntimeRole(adminPool, { user: RUNTIME_USER, password: "pw-d191-runtime" });
+    runtimePool = new pg.Pool({
+      host: "127.0.0.1", port: PORT, database: "jarvis_test", user: RUNTIME_USER, password: "pw-d191-runtime", max: 3
+    });
+    runtimePool.on("error", () => undefined);
+    await adminPool.query(
+      `INSERT INTO tenants (tenant_id, name, kind) VALUES ($1,'Tenant B','person') ON CONFLICT (tenant_id) DO NOTHING`,
+      [TENANT_B]
+    );
+  }, 60_000);
+
+  afterAll(async () => {
+    await runtimePool?.end();
+  });
+
+  afterEach(async () => {
+    await adminPool.query("DELETE FROM cost_events WHERE tenant_id IN ($1,$2)", [TENANT, TENANT_B]);
+    await adminPool.query("DELETE FROM owner_control_state WHERE control_kind = 'kill_switch'");
+  });
+
+  it("to tenanter har cost_events; watchdog for tenant A ser KUN tenant A sitt forbruk (ikke summen av begge)", async () => {
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',100000)", [TENANT]);
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',9000000)", [TENANT_B]);
+
+    const killSwitch = new KillSwitch(runtimePool, authority);
+    const sink = new MemoryAlertSink();
+    const watchdog = new Watchdog(sink, killSwitch);
+    // Hardgrense 300_000: tenant A aleine (100_000) er UNDER grensen. Hvis
+    // spørringen feilaktig så BEGGE tenanters forbruk (100_000+9_000_000),
+    // ville den vært langt over - denne casen ville da feile ved å se
+    // kill_switch_active=true. RLS-isolasjon beviser derfor ved fravær.
+    watchdog.register(costExplosionCheck(runtimePool, killSwitch, OWNER, TENANT, 300_000));
+    await watchdog.tick();
+    expect(await killSwitch.isActiveDurable()).toBe(false);
+  });
+
+  it("tenant B sitt forbruk kan IKKE utløse tenant A sin kill switch, selv langt over hardgrensen", async () => {
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',50000000)", [TENANT_B]);
+    // Tenant A har INGEN cost_events i det hele tatt.
+
+    const killSwitch = new KillSwitch(runtimePool, authority);
+    const sink = new MemoryAlertSink();
+    const watchdog = new Watchdog(sink, killSwitch);
+    watchdog.register(costExplosionCheck(runtimePool, killSwitch, OWNER, TENANT, 300_000));
+    await watchdog.tick();
+    expect(await killSwitch.isActiveDurable()).toBe(false);
+    expect(sink.alerts.length).toBe(0);
+  });
+
+  it("tenant A sin egen hardgrense KAN utløse durabel aktivering, under den restriktive rollen, MENS tenant B også har forbruk", async () => {
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',50)", [TENANT_B]);
+
+    const killSwitch = new KillSwitch(runtimePool, authority);
+    const sink = new MemoryAlertSink();
+    const watchdog = new Watchdog(sink, killSwitch);
+    watchdog.register(costExplosionCheck(runtimePool, killSwitch, OWNER, TENANT, 300_000));
+    await watchdog.tick();
+    expect(await killSwitch.isActiveDurable()).toBe(true);
+    expect(sink.alerts[0]?.severity).toBe("critical");
+
+    // Bevis at rollen som faktisk gjorde dette er den RLS-begrensede - ALDRI superbruker/BYPASSRLS.
+    const roleStatus = await runtimePool.query(
+      "SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user"
+    );
+    expect((roleStatus.rows[0] as { rolsuper: boolean }).rolsuper).toBe(false);
+    expect((roleStatus.rows[0] as { rolbypassrls: boolean }).rolbypassrls).toBe(false);
   });
 });

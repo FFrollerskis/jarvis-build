@@ -131,7 +131,9 @@ describe("D187: worker-main.ts sender KUN de validerte verdiene til setInterval(
   it("costExplosionCheck(...) sitt hardLimitOre-argument ER parseCostHardLimitOre(process.env[...]) - ingen rå Number(...) igjen", () => {
     const callIdx = workerMainSource.indexOf("costExplosionCheck(pool,");
     expect(callIdx).toBeGreaterThan(-1);
-    const call = workerMainSource.slice(callIdx, workerMainSource.indexOf("\n", callIdx));
+    // D-191: kallet spenner nå flere linjer (tenantId lagt til) - slice fram
+    // til den lukkende parentesen i stedet for kun første linje.
+    const call = workerMainSource.slice(callIdx, workerMainSource.indexOf(")\n);", callIdx) + 1);
     expect(call).toMatch(/parseCostHardLimitOre\(process\.env\["JARVIS_COST_HARD_LIMIT_ORE"\]\)/);
     expect(call).not.toMatch(/Number\(/);
   });

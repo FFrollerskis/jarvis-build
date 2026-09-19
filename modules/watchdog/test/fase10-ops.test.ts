@@ -102,7 +102,7 @@ describe("Kill switch-kriterium: kostnadseksplosjon", () => {
     const sink = new MemoryAlertSink();
     const killSwitch = new KillSwitch(adminPool, ownerControlAuthority);
     const watchdog = new Watchdog(sink, killSwitch);
-    watchdog.register(costExplosionCheck(adminPool, killSwitch, "person-tobias", 300_000));
+    watchdog.register(costExplosionCheck(adminPool, killSwitch, "person-tobias", "tenant-a", 300_000));
     await watchdog.tick();
     expect(await killSwitch.isActiveDurable()).toBe(true);
     expect(sink.alerts[0]?.severity).toBe("critical");

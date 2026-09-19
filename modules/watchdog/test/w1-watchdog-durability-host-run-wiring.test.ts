@@ -201,17 +201,27 @@ describe("D190 §B3: syntetisk cost_events-fixture bruker adminPool, ALDRI runti
     }
   });
 
-  it("6) costExplosionCheck mottar FORTSATT runtime-pool (sidePool, avledet fra buildStack(pool) - IKKE adminPool)", () => {
+  it("6) costExplosionCheck mottar FORTSATT runtime-pool (sidePool, avledet fra buildStack(pool) - IKKE adminPool), OG et eksplisitt OWNER_TENANT (D-191)", () => {
     const callIdx = liveScriptSource.indexOf("costExplosionCheck(sidePool,");
     expect(callIdx).toBeGreaterThan(-1);
     expect(liveScriptSource).not.toMatch(/costExplosionCheck\(adminPool/);
+    const call = liveScriptSource.slice(callIdx, liveScriptSource.indexOf(";", callIdx));
+    expect(call).toContain("OWNER_PERSON");
+    expect(call).toContain("OWNER_TENANT");
   });
 
-  it("7) den ordinære trussel-SELECT-en i seksjon 1 (beviser at jarvis_runtime kan LESE via den ekte produksjonsspørringsveien) forblir på runtime-pool", () => {
+  it("7) den ordinære trussel-SELECT-en i seksjon 1 (beviser at jarvis_runtime kan LESE via den ekte produksjonsspørringsveien) kjører nå INNI withTenantTransaction(pool, OWNER_TENANT, ...) - SAMME kanoniske mekanisme som costExplosionCheck selv bruker (D-191)", () => {
     const selectIdx = liveScriptSource.indexOf("SELECT coalesce(sum(amount_ore)");
     expect(selectIdx).toBeGreaterThan(-1);
-    const before = liveScriptSource.slice(Math.max(0, selectIdx - 60), selectIdx);
-    expect(before).toMatch(/\bpool\.query\(\s*"$/);
+    const before = liveScriptSource.slice(Math.max(0, selectIdx - 400), selectIdx);
+    expect(before).toMatch(/withTenantTransaction\(pool,\s*OWNER_TENANT,/);
+    // Selve SELECT-en kjører nå på transaksjons-klienten, ikke direkte på pool.
+    const immediatelyBefore = liveScriptSource.slice(Math.max(0, selectIdx - 60), selectIdx);
+    expect(immediatelyBefore).toMatch(/\bclient\.query\(\s*"$/);
+  });
+
+  it("liveScriptSource importerer withTenantTransaction fra @jarvis/core (D-191)", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*withTenantTransaction[^}]*\}\s*from\s*"@jarvis\/core"/s);
   });
 
   it("8) alle tre fresh-pool-sjekkene (seksjon 3/4/5) bruker fortsatt createPool(configFromEnv()) - ekte runtime-credentials, ingen adminPool", () => {
@@ -233,5 +243,64 @@ describe("D190 §B3: syntetisk cost_events-fixture bruker adminPool, ALDRI runti
     const deletes = [...liveScriptSource.matchAll(/adminPool\.query\(\s*"DELETE FROM cost_events WHERE kind = \$1"/g)];
     expect(deletes.length).toBe(3);
     expect(liveScriptSource).not.toMatch(/DELETE FROM cost_events["'`]\s*\)/);
+  });
+});
+
+/**
+ * D-191 (BLOCKER B4 §F, cleanup-robusthet): FØR denne fiksen var kill-switch-
+ * deaktivering og fixture-DELETE to RÅ `await`-kall (ikke `section()`-
+ * innpakket) rett etter hverandre i `main()` sin egen `finally`-blokk. Kastet
+ * den FØRSTE, kjørte den ANDRE aldri - OG hele feilen forplantet seg UT AV
+ * `main()`, forbi det topp-nivå `finish()`-kallet (`await main(); finish();`)
+ * - INGEN sammendrag, INGEN `hard_fail`-beregning i det hele tatt. Denne
+ * suiten beviser strukturelt at begge operasjonene nå har SIN EGEN try/catch
+ * (kan derfor aldri forhindre hverandre), og at begge har en dedikert
+ * `results`-nøkkel som starter "FAIL" og KUN flippes til "PASS" ved suksess -
+ * slik at `finish()` sin eksisterende `hard_fail`-skanning automatisk fanger
+ * en cleanup-feil, uten noen ny, parallell hard_fail-mekanisme.
+ */
+describe("D191 §F: kill-switch-cleanup og fixture-cleanup kan ALDRI forhindre hverandre - en cleanup-feil produserer FORTSATT et sammendrag OG hard_fail=true", () => {
+  it("w1_cleanup_kill_switch_deactivated og w1_cleanup_fixture_removed er begge deklarert i results-objektet, initialisert FAIL", () => {
+    const resultsIdx = liveScriptSource.indexOf("const results: Record<string, Verdict>");
+    expect(resultsIdx).toBeGreaterThan(-1);
+    const resultsBlock = liveScriptSource.slice(resultsIdx, liveScriptSource.indexOf("};", resultsIdx));
+    expect(resultsBlock).toMatch(/w1_cleanup_kill_switch_deactivated:\s*"FAIL"/);
+    expect(resultsBlock).toMatch(/w1_cleanup_fixture_removed:\s*"FAIL"/);
+  });
+
+  it("kill-switch-deaktivering og fixture-DELETE i finally-blokken har HVER SIN egen try/catch - ikke én try/catch rundt begge", () => {
+    // Søker etter den YTRE finally-blokken (rundt HELE main()-forsøket), ikke
+    // en av de tidligere, INDRE finally-blokkene (seksjon 3/4/5 sin egen
+    // `freshPool.end()`-opprydding) - starter derfor søket ETTER seksjon 10.
+    const finallyIdx = liveScriptSource.indexOf("} finally {", liveScriptSource.indexOf("audit-bevis"));
+    expect(finallyIdx).toBeGreaterThan(-1);
+    const cleanupBlock = liveScriptSource.slice(finallyIdx, liveScriptSource.indexOf("CLEANUP: owner_control_state", finallyIdx));
+    // To distinkte try-blokker, hver med sin egen catch, mellom finally og owner_control_state-seksjonen.
+    const tryCount = [...cleanupBlock.matchAll(/\btry\s*\{/g)].length;
+    const catchCount = [...cleanupBlock.matchAll(/\}\s*catch\s*\(/g)].length;
+    expect(tryCount).toBeGreaterThanOrEqual(2);
+    expect(catchCount).toBeGreaterThanOrEqual(2);
+    // Kill-switch-linjene kommer FØR fixture-DELETE-linjen, hver i sin egen blokk.
+    const killSwitchIdx = cleanupBlock.indexOf("cleanupKillSwitch");
+    const fixtureDeleteIdx = cleanupBlock.indexOf("adminPool.query(\"DELETE FROM cost_events");
+    expect(killSwitchIdx).toBeGreaterThan(-1);
+    expect(fixtureDeleteIdx).toBeGreaterThan(killSwitchIdx);
+    // Suksess-flippet ("PASS") for BEGGE nøklene finnes et sted i denne blokken.
+    expect(cleanupBlock).toMatch(/w1_cleanup_kill_switch_deactivated\s*=\s*"PASS"/);
+    expect(cleanupBlock).toMatch(/w1_cleanup_fixture_removed\s*=\s*"PASS"/);
+  });
+
+  it("finish() sin hard_fail-skanning dekker ALLE results-verdier generisk (Object.values(...).some(...)) - ingen spesialtilfelle trengs for de to nye nøklene", () => {
+    const finishIdx = liveScriptSource.indexOf("function finish(): void");
+    expect(finishIdx).toBeGreaterThan(-1);
+    const finishBody = liveScriptSource.slice(finishIdx, liveScriptSource.indexOf("}", liveScriptSource.indexOf("hard_fail=", finishIdx)));
+    expect(finishBody).toMatch(/Object\.values\(results\)\.some\(/);
+  });
+
+  it("toppnivå-kjøringen (await main(); finish();) er FORTSATT strukturert slik at finish() kjører rett etter main() - INGEN separat catch som hopper over den", () => {
+    const topLevelIdx = liveScriptSource.lastIndexOf("await main();");
+    expect(topLevelIdx).toBeGreaterThan(-1);
+    const afterMain = liveScriptSource.slice(topLevelIdx, topLevelIdx + 60);
+    expect(afterMain).toMatch(/await main\(\);\s*\n\s*finish\(\);/);
   });
 });
