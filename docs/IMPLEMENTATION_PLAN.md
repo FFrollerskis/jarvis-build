@@ -4129,6 +4129,41 @@ ekte `OpenLoopService` + ekte `ToolGateway`/`PolicyGateway` + ekte `DailySchedul
 
 ---
 
+## UA-10 infra-slice – incidents-broen (D-195, direkte Tobias-chat-oppgave under D-192)
+
+Design-notatets §5 var eksplisitt: infra/home/health-broer var BEVISST utsatt til en EGEN slice PER
+domene, i påvente av en faktisk signalkilde (P0/P1 hadde INGEN). `modules/incidents` (UA-5/D-104/D-105,
+Production Operations Control Plane) eksisterer nå og ER den signalkilden for infra - denne sliceen
+kobler den til, oppfinner INGEN ny deteksjonskilde. Home/health forblir UENDRET deferred (ingen
+signalkilde finnes ennå for dem).
+
+**Levert:** `modules/situations/src/infra-incident-bridge.ts` (ren bro, samme mønster som
+`open-loop-bridge.ts`: `mapIncidentToCandidate()`, domene `"infra"`, `detection_key` prefikset
+`infra_incident:`, alvorlighetsgrad->prioritet, INGEN eier/`source_open_loop_id` - identitet er
+domene+detection_key alene). `SituationEngine.resolveStaleForDomain()` (service.ts) - en generalisert
+kildebasert løsningsmetode (domene+aktive detection_keys) for broer som IKKE bruker
+`source_open_loop_id` (kun business-broen gjør det). `sweep.ts` sin `runSituationSweep()` fikk et
+FRIVILLIG `incidents?: IncidentReader`-felt - fravær = byte-for-byte uendret oppførsel (ingen
+bakoverkompatibilitetsbrist for de ~200 eksisterende testene). `apps/api/src/main.ts` wirer inn den
+allerede-konstruerte `incidentService`-instansen (UA-5) i det eksisterende `situation-sweep`
+`DailyScheduler`-kallet. Ingen migrasjon: `domain` var allerede fri tekst (kommentaren i
+`056_situations.sql` nevnte eksplisitt `'home','health'` som fremtidige verdier), og
+`source_open_loop_id` var allerede nullable.
+
+**Bygges IKKE i denne sliceen:** home/health-broer (forblir deferred, ingen signalkilde ennå), vision-
+broen (samme, egen slice - `modules/vision` har en fake-source-modell, ikke live data ennå),
+modell-assistert klassifisering.
+
+**Tester:** `infra-incident-bridge.test.ts` (15, rene enhetsbevis - `isActiveIncidentStatus()`,
+`mapIncidentToCandidate()`, `runSituationSweepForAllTenants()` med/uten `incidents`-dep, feilisolasjon
+ved kastende kildelesning). `apps/api/test/situation-sweep-infra-wiring.test.ts` (3, tekst-/
+regresjonsvakt for selve main.ts-wiringen, samme presedens som `drive-runtime-wiring.test.ts`).
+DB-avhengige tester (`resolveStaleForDomain()` sin faktiske SQL) verifiseres av CI/host-akseptanse,
+ikke lokalt i denne økten (sandbox-begrensning, se D-194/D-193 for samme, allerede dokumenterte
+begrensning).
+
+---
+
 ## UA-11 – Executive Mode (P0, D-162, masterplan v4.0)
 
 **Manuell masterplan-slice** på base `main=ff24a4a3b742b7c67a95b3af58a4808ea558a307` (PR #90 sin

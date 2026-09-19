@@ -2,7 +2,9 @@ import type pg from "pg";
 import { listBusinessTenantIds } from "@jarvis/core";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import type { BusinessOpenLoop } from "@jarvis/business";
+import type { Incident } from "@jarvis/incidents";
 import type { ToolGateway } from "@jarvis/tool-gateway";
+import { INFRA_DOMAIN, isActiveIncidentStatus, mapIncidentToCandidate } from "./infra-incident-bridge.ts";
 import { mapOpenLoopToCandidate } from "./open-loop-bridge.ts";
 import { SituationDetectionKeyConflictError, type SituationEngine } from "./service.ts";
 import type { AutoActResult, InformDeliveryResult } from "./types.ts";
@@ -34,8 +36,22 @@ export interface OpenLoopReader {
   listOpenLoops(tenantId: string, memorySpace: MemorySpace, status: "open" | "resolved" | "all"): Promise<BusinessOpenLoop[]>;
 }
 
+/**
+ * D-195 (infra-slice): det minimale `IncidentService`-utsnittet sveipen
+ * trenger - SAMME "ett interface, ett fake"-mønster som `OpenLoopReader`.
+ * Frivillig avhengighet på `SituationSweepDeps` (se under): en eksisterende
+ * sveipe-kaller UTEN denne feltet oppfører seg BYTE-FOR-BYTE som før -
+ * ingen bakoverkompatibilitetsbrist for de ~200 eksisterende testene som
+ * bygger `SituationSweepDeps` uten kjennskap til infra.
+ */
+export interface IncidentReader {
+  listIncidents(tenantId: string, memorySpace: MemorySpace, status: "all"): Promise<Incident[]>;
+}
+
 export interface SituationSweepDeps {
   openLoops: OpenLoopReader;
+  /** D-195: FRAVÆR = infra-steget hoppes helt over (ingest OG resolve) - identisk oppførsel med sveipet FØR denne slicen. */
+  incidents?: IncidentReader;
   engine: SituationEngine;
   gateway: ToolGateway;
   /** Identiteten leveranse og auto-ACT kjører under - MÅ ha `tenant_id`/`memory_space_id` lik sveipens (motoren avviser ellers, fail-closed). */
@@ -98,6 +114,40 @@ export async function runSituationSweep(tenantId: string, memorySpace: MemorySpa
     );
   } catch (err) {
     result.errors.push(`resolve:${describe(err)}`);
+  }
+
+  // 1b/2b. INFRA INGEST + RESOLVE (D-195) - kun når en `IncidentReader` er
+  // gitt (se `IncidentReader` sin doc-kommentar for hvorfor dette er
+  // frivillig). ÉN kildelesning dekker BEGGE steg: en feilet/kastende
+  // lesning hopper eksplisitt over BÅDE ingest og resolve for denne
+  // syklusen (aldri resolve mot en tom liste PGA en feilet lesning -
+  // `resolveStaleForDomain()` sin doc-kommentar er eksplisitt på at DEN
+  // risikoen ligger hos kalleren).
+  if (deps.incidents) {
+    try {
+      const incidents = await deps.incidents.listIncidents(tenantId, memorySpace, "all");
+      const active = incidents.filter((incident) => isActiveIncidentStatus(incident.status));
+      for (const incident of active) {
+        try {
+          await deps.engine.evaluateCandidate(tenantId, memorySpace, mapIncidentToCandidate(incident), now());
+          result.ingested += 1;
+        } catch (err) {
+          if (err instanceof SituationDetectionKeyConflictError) {
+            result.identity_conflicts += 1;
+          } else {
+            result.errors.push(`infra_ingest:${incident.incident_id}:${describe(err)}`);
+          }
+        }
+      }
+      result.resolved_from_source += await deps.engine.resolveStaleForDomain(
+        tenantId,
+        memorySpace,
+        INFRA_DOMAIN,
+        active.map((incident) => mapIncidentToCandidate(incident).detection_key)
+      );
+    } catch (err) {
+      result.errors.push(`infra:${describe(err)}`);
+    }
   }
 
   // 3. DELIVER
@@ -189,6 +239,8 @@ export function assertSituationSweepHealthy(results: Record<string, SituationSwe
 
 export interface SituationSweepAllDeps {
   openLoops: OpenLoopReader;
+  /** D-195: samme frivillighet som `SituationSweepDeps.incidents` - se der. */
+  incidents?: IncidentReader;
   engine: SituationEngine;
   gateway: ToolGateway;
   /** Bygger sveipe-identiteten for ÉN tenant - eierens identitet i sveipens space. En tenant eieren ikke er autorisert for avvises av PolicyGateway inne i `execute()` (fail-closed), aldri av en stille utelatelse her. */
@@ -205,6 +257,7 @@ export async function runSituationSweepForAllTenants(pool: pg.Pool, deps: Situat
     try {
       results[tenantId] = await runSituationSweep(tenantId, memorySpace, {
         openLoops: deps.openLoops,
+        ...(deps.incidents ? { incidents: deps.incidents } : {}),
         engine: deps.engine,
         gateway: deps.gateway,
         identity: deps.identityFor(tenantId, memorySpace),

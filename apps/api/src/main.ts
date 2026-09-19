@@ -835,6 +835,11 @@ porter: se docs/RUNTIME_GATES.md`;
     pool, "situation-sweep", Number(process.env["JARVIS_SITUATION_SWEEP_HOUR"] ?? 7)
   ).start(() => runSituationSweepForAllTenants(pool, {
     openLoops: openLoopService,
+    // D-195 (infra-slice): SAMME allerede-konstruerte `incidentService`
+    // (UA-5/D-104) - bygger BARE på situasjoner via `infra-incident-bridge.ts`,
+    // oppfinner INGEN ny deteksjonskilde. Se sweep.ts sin `IncidentReader`-
+    // doc-kommentar for hvorfor dette feltet er frivillig (bakoverkompatibelt).
+    incidents: incidentService,
     engine: situationEngine,
     gateway: toolGateway,
     identityFor: (tenantId, memorySpace) => ({

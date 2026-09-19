@@ -789,6 +789,9 @@ importers:
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/incidents':
+        specifier: workspace:*
+        version: link:../incidents
       '@jarvis/memory':
         specifier: workspace:*
         version: link:../memory

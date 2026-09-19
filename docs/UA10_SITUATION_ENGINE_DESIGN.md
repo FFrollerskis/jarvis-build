@@ -208,6 +208,18 @@ nå faktisk koblet til motoren gjennom broen i `open-loop-bridge.ts` — uttømm
 `never`-sjekk, så en NY loop-type uten en eksplisitt domene-avgjørelse feiler typecheck og kan ALDRI
 stille havne i et domene eieren ikke har pauset/bundet. Broen OPPFINNER fortsatt ingen detektor.
 
+**Infra-slice (D-195):** `modules/incidents` (UA-5/D-104/D-105 Production Operations Control Plane)
+ble bygget SENERE, uavhengig av UA-10 P0/P1 - den er nå den faktiske signalkilden §5 sin opprinnelige
+"ingen eksisterende signalkilde"-begrunnelse ventet på, for infra SPESIFIKT. `infra-incident-bridge.ts`
+følger NØYAKTIG samme mønster som `open-loop-bridge.ts`: aktive incidents (alt unntatt
+`resolved`/`wont_fix`) -> `SituationCandidateInput` i domene `"infra"`, `detection_key` prefikset
+`infra_incident:`, alvorlighetsgrad->prioritet, INGEN eier (samme identitets-begrunnelse som
+business-broen - en incident kan re-tildeles). Resolusjon skjer IKKE via `source_open_loop_id` (den FK-
+en er business-open-loop-spesifikk) - en ny, generalisert `SituationEngine.resolveStaleForDomain
+(tenantId, memorySpace, domain, activeDetectionKeys)` resolverer alt åpent i domenet som kilden ikke
+lenger rapporterer som aktivt. Home/health forblir UENDRET deferred - ingen signalkilde finnes ennå for
+dem. Se `docs/IMPLEMENTATION_PLAN.md` sin "UA-10 infra-slice"-seksjon for full leveranse/testliste.
+
 ## 6. ACT — komponert, ikke oppfunnet
 
 `SituationEngine.actOn()` bygger INGEN ny sikkerhetsmekanikk. Den KOMPONERER den allerede
@@ -374,7 +386,7 @@ eksplisitt her, ikke silently arvet.
 | Kapabilitet | Port som må kjøres først |
 |---|---|
 | Live bro fra `business_open_loops` til `situations` | **LUKKET i P1 (D-160, §10)** — `runSituationSweep()`/`open-loop-bridge.ts`. Vision-/helse-/lokasjonskilder: fortsatt egne, senere wiring-slicer mot SAMME `evaluateCandidate()`-kontrakt |
-| Nye anomali-detektorer for infra/home/health | Egen, separat slice PER domene (ingen eksisterende signalkilde i dag, se §5) |
+| Nye anomali-detektorer for infra/home/health | **infra LUKKET (D-195, se §5)** — `infra-incident-bridge.ts` mot `modules/incidents` (UA-5). home/health forblir egne, separate slicer PER domene (fortsatt ingen eksisterende signalkilde for dem, se §5) |
 | Modell-assistert klassifisering | Krever ModelGateway/AI Council — en leverandøravhengighet, egen D-64/D-41-port |
 | Counterfactual/simulation, feedback learning | ML-tungt, masterplanens egen "where useful"-kvalifikator — egen, senere slice |
 | Autonom/tidsstyrt auto-ACT | **LUKKET i P1 (D-160, §10) med en EKSPLISITT grense:** auto-ACT skjer KUN for situasjoner i `suggest` hvis domene har en AKTIVERT, eier-bundet `situation_autonomy_policies`-rad. Uten policy: ingenting. Domene-pause, global KillSwitch, PolicyGateway og hele ToolGateway-preflight-/postcondition-pipelinen gjelder UENDRET for hvert kall |

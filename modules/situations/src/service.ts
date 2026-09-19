@@ -1500,4 +1500,29 @@ export class SituationEngine {
       return rowCount ?? 0;
     });
   }
+
+  /**
+   * D-195 (infra-slice): generalisert kildebasert løsning for BROER SOM IKKE
+   * bruker `source_open_loop_id` (kun business-open-loop-broen gjør det -
+   * `resolveForResolvedSources()` over forblir dens metode, uendret).
+   * Kontrakten er "gi meg de detection_key-ene kilden akkurat nå anser
+   * AKTIVE for dette domenet" - alt ANNET åpent i domenet resolveres, fordi
+   * kilden ikke lenger rapporterer det som aktivt. Trygt selv med en TOM
+   * liste (resolverer ALT åpent i domenet - korrekt når kilden genuint har
+   * null aktive elementer akkurat nå); risikoen er utelukkende hos KALLEREN:
+   * kalles denne KUN etter en bekreftet vellykket kildelesning (aldri etter
+   * en feilet/delvis lesning) - se `sweep.ts` sitt try/catch rundt selve
+   * kildelesningen, som hopper over BÅDE ingest og resolve ved feil.
+   */
+  async resolveStaleForDomain(tenantId: string, memorySpace: MemorySpace, domain: string, activeDetectionKeys: readonly string[]): Promise<number> {
+    return withMemoryTransaction(this.pool, tenantId, [memorySpace], async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE situations SET status = 'resolved', resolved_at = now(), updated_at = now()
+         WHERE tenant_id = $1 AND memory_space_id = $2 AND domain = $3 AND status = 'open'
+           AND NOT (detection_key = ANY($4::text[]))`,
+        [tenantId, memorySpace, domain, [...activeDetectionKeys]]
+      );
+      return rowCount ?? 0;
+    });
+  }
 }
