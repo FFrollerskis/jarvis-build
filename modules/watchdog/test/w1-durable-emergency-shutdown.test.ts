@@ -196,33 +196,55 @@ describe("W1: durabel kostnadseksplosjon-nødstopp", () => {
 /** Skriptbar fake ved Telegram-nettverksgrensen (BÅDE for ToolGateway sin ordinære `telegram`-registrering OG for `WatchdogEmergencyAlertSink`) - INGEN ekte HTTP-kall, samme fake-instans begge veier for å bevise de faktisk deler transport/credential-konfigurasjon. */
 class FakeTelegramTransport implements ToolTransport, EmergencyAlertTransport {
   sent: string[] = [];
+  /** D-184: de FAKTISKE parameter-objektene transporten mottok - grunnlaget for "ingen kaller-kontrollert mål"-beviset (API-form, ikke bare meldingstekst). */
+  received: Array<Record<string, JsonValue>> = [];
   async invoke(action: string, parameters: Record<string, JsonValue>): Promise<{ external_id: string }> {
     if (action !== "notify") throw new Error(`telegram_unsupported_action_${action}`);
+    this.received.push(parameters);
     this.sent.push(String(parameters["message"]));
     return { external_id: `fake-${this.sent.length}` };
   }
 }
 
 describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nødvarsel leveres under aktiv kill switch, mens ordinær telegram.notify forblir nektet", () => {
-  it("1) durabel aktivering skjer FØR noe varslingsforsøk (costExplosionCheck sin run() returnerer FØRST, Watchdog.tick() varsler ETTERPÅ)", async () => {
+  it("1)+2) OBSERVERT REKKEFØLGE på den EKTE kjørestien: kill switchen er allerede DURABELT AKTIV i det nødvarselet faktisk leveres", async () => {
     await clearCostEventsAndControlState();
     await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
     const killSwitch = new KillSwitch(adminPool, authority);
     const fakeTelegram = new FakeTelegramTransport();
-    const alertSink = new WatchdogEmergencyAlertSink(fakeTelegram, new EnvSecretProvider());
+    const realSink = new WatchdogEmergencyAlertSink(fakeTelegram, new EnvSecretProvider());
+    // D-184: den forrige versjonen av denne testen kunne KUN si at begge deler
+    // hadde fullført når tick() returnerte - den leste rekkefølgen ut av
+    // kildekoden, ikke ut av kjøringen. Denne wrapperen spør den DURABLE
+    // tilstanden PÅ SELVE LEVERINGSTIDSPUNKTET, og gjør dermed begge
+    // arkitektkravene (1: nedstengning først, 2: varsel leverbart ETTER at
+    // kill switchen er aktiv) til ett observert faktum.
+    const observed: Array<{ durableActiveAtSendTime: boolean; sentCountAtSendTime: number }> = [];
+    const observingSink = {
+      send: async (alert: Parameters<typeof realSink.send>[0]) => {
+        observed.push({
+          durableActiveAtSendTime: await killSwitch.isActiveDurable(),
+          sentCountAtSendTime: fakeTelegram.sent.length
+        });
+        await realSink.send(alert);
+      }
+    };
     process.env["JARVIS_TELEGRAM_TOKEN"] = "fake-token-for-test";
     try {
-      const watchdog = new Watchdog(alertSink, killSwitch);
+      const watchdog = new Watchdog(observingSink, killSwitch);
       watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
       expect(fakeTelegram.sent.length).toBe(0);
       await watchdog.tick();
-      // Når tick() returnerer er BÅDE aktiveringen OG varslingen fullført -
-      // aktiveringen (activateDurable, inne i check.run()) skjedde UBETINGET
-      // FØR alerts.send() kalles (se Watchdog.tick() sin kildekode) - dette
-      // beviser IKKE rekkefølgen alene (se test 5 for det), men bekrefter at
-      // begge faktisk fullførte i denne kjøringen.
+
+      expect(observed.length).toBe(1);
+      // Krav 1: nødstoppen var ALLEREDE durabelt skrevet da varslingen startet.
+      expect(observed[0]?.durableActiveAtSendTime).toBe(true);
+      // ...og ingenting var sendt før den tid - aktivering er beviselig først.
+      expect(observed[0]?.sentCountAtSendTime).toBe(0);
+      // Krav 2: varselet ble FAKTISK levert (transporten kalt), under aktiv kill switch.
+      expect(fakeTelegram.sent.length).toBe(1);
+      expect(fakeTelegram.sent[0]).toContain("cost_explosion");
       expect(await killSwitch.isActiveDurable()).toBe(true);
-      expect(fakeTelegram.sent.length).toBeGreaterThan(0);
     } finally {
       delete process.env["JARVIS_TELEGRAM_TOKEN"];
     }
@@ -287,9 +309,22 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nød
     const alertSink = new WatchdogEmergencyAlertSink(fakeTelegram, new EnvSecretProvider());
     process.env["JARVIS_TELEGRAM_TOKEN"] = "fake-token-for-test";
     try {
+      // D-184: bevis på API-FORM, ikke på meldingstekst (forrige versjon
+      // sjekket kun at strengen ikke inneholdt ordet "chat"/"target" - det
+      // ville passert selv om send() HADDE tatt et mål-argument).
+      expect(alertSink.send.length).toBe(1); // nøyaktig ÉN parameter: Alert
       await alertSink.send({ check: "x", severity: "info", message: "y", runbook: "r", at: new Date().toISOString() });
-      // send() sin eneste parameter er Alert - transporten mottar KUN "notify"/{message}, aldri et mål/chat-felt.
-      expect(fakeTelegram.sent[0]).not.toMatch(/chat|target/i);
+      // Transporten mottok NØYAKTIG {message} - ingen chat_id/target/to/recipient
+      // kan uttrykkes gjennom denne grensen i det hele tatt. Mottakeren er
+      // transportens EGEN, allerede konfigurerte destinasjon.
+      expect(Object.keys(fakeTelegram.received[0] ?? {})).toEqual(["message"]);
+      // Et Alert-objekt med et "smuglet" mål-felt endrer ikke hva transporten får.
+      await alertSink.send({
+        check: "x", severity: "info", message: "y", runbook: "r", at: new Date().toISOString(),
+        ...({ chat_id: "attacker-chat", target: "attacker" } as unknown as Record<string, never>)
+      });
+      expect(Object.keys(fakeTelegram.received[1] ?? {})).toEqual(["message"]);
+      expect(JSON.stringify(fakeTelegram.received)).not.toContain("attacker");
     } finally {
       delete process.env["JARVIS_TELEGRAM_TOKEN"];
     }
@@ -313,6 +348,39 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): watchdog sitt EGET nød
       // Selve Alert-objektet (det eneste watchdog.tick() logger/emitterer ved feil) inneholder aldri secreten.
       expect(JSON.stringify(alert)).not.toContain(secretValue);
     } finally {
+      delete process.env["JARVIS_TELEGRAM_TOKEN"];
+    }
+  });
+
+  it("7b) D-184: en transport som legger credentialen i SIN EGEN feilmelding lekker den likevel ALDRI til Watchdog.tick() sin driftslogg", async () => {
+    await clearCostEventsAndControlState();
+    await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,'model:x',400000)", [TENANT]);
+    const secretValue = "super-secret-telegram-token-xyz";
+    process.env["JARVIS_TELEGRAM_TOKEN"] = secretValue;
+    const errorLines: string[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => { errorLines.push(args.map(String).join(" ")); };
+    try {
+      // Verste tilfelle: transporten kaster en feil som inneholder HELE URL-en
+      // med tokenet i - nøyaktig formen `fetch`-feil mot api.telegram.org kan ta.
+      const leakyTransport: EmergencyAlertTransport = {
+        invoke: async (_action, _parameters, credential) => {
+          throw new Error(`request to https://api.telegram.org/bot${credential}/sendMessage failed`);
+        }
+      };
+      const killSwitch = new KillSwitch(adminPool, authority);
+      const watchdog = new Watchdog(new WatchdogEmergencyAlertSink(leakyTransport, new EnvSecretProvider()), killSwitch);
+      watchdog.register(costExplosionCheck(adminPool, killSwitch, OWNER, 300_000));
+      await watchdog.tick();
+
+      const logged = errorLines.join("\n");
+      expect(logged).toContain("watchdog_alert_delivery_failed"); // feilen ble FAKTISK logget (aldri stille)
+      expect(logged).not.toContain(secretValue); // ...men uten den rå credentialen
+      expect(logged).toContain("[REDACTED_CREDENTIAL]");
+      // ...og nødstoppen står fortsatt (krav 5), selv med en lekkasjeutsatt transport.
+      expect(await killSwitch.isActiveDurable()).toBe(true);
+    } finally {
+      console.error = originalConsoleError;
       delete process.env["JARVIS_TELEGRAM_TOKEN"];
     }
   });

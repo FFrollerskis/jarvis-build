@@ -74,6 +74,32 @@ describe("D-181 (BLOCKER B1): live-scriptet beviser BEGGE samtidig - ordinær te
     expect(sectionBody).toContain('"kill_switch_active"');
     expect(sectionBody).toContain("primary.alertSink.send(");
   });
+  it("D-184: seksjon 2 beviser at watchdog-ens EGEN tick() leverte varselet (ikke bare et manuelt alertSink.send() i 2b)", () => {
+    const s2Idx = liveScriptSource.indexOf('"2) watchdog.tick()');
+    expect(s2Idx).toBeGreaterThan(-1);
+    const sectionBody = liveScriptSource.slice(s2Idx, s2Idx + 2200);
+    expect(sectionBody).toContain("const sentBeforeTick = scriptedTelegram.sent.length;");
+    expect(sectionBody).toContain("scriptedTelegram.sent.length > sentBeforeTick");
+    expect(sectionBody).toContain("w1_emergency_alert_delivered_by_watchdog_tick");
+  });
+
+  it("D-184: rekkefølgen er OBSERVERT i kjøringen (durabel tilstand avlest PÅ leveringstidspunktet), ikke lest ut av kildekoden", () => {
+    // Observatøren ligger rundt den EKTE sinken, inne i watchdog-ens egen kjede.
+    expect(liveScriptSource).toContain("durableActiveAtSendTime: await killSwitch.isActiveDurable()");
+    expect(liveScriptSource).toContain("sentCountAtSendTime: scriptedTelegram.sent.length");
+    expect(liveScriptSource).toContain("w1_durable_shutdown_observed_before_alert");
+    // ...og den ENDRER ingenting: den delegerer til den uendrede alertSink.send().
+    expect(liveScriptSource).toMatch(/await alertSink\.send\(alert\)/);
+  });
+
+  it("D-184: det som FAKTISK logges paa varslings-feilstien skannes for secret-lekkasje (ikke bare diagnostikk)", () => {
+    expect(liveScriptSource).toContain("capturedErrorLogs");
+    const auditIdx = liveScriptSource.indexOf("w1_audit_evidence_no_secret_leakage =");
+    expect(auditIdx).toBeGreaterThan(-1);
+    const auditBody = liveScriptSource.slice(Math.max(0, auditIdx - 900), auditIdx);
+    expect(auditBody).toContain("JSON.stringify(capturedErrorLogs)");
+  });
+
   it("seksjon 2b kommer FØR seksjon 3 (fersk-pool), altså mens primary sin kill switch fortsatt er aktiv fra seksjon 2", () => {
     const s2Idx = liveScriptSource.indexOf('"2) watchdog.tick()');
     const s2bIdx = liveScriptSource.indexOf("BLOKKER B1");
@@ -105,6 +131,8 @@ describe("live-scriptet: proof-punktene fra D183 §F er alle representert", () =
     "w1_durable_kill_switch_active",
     "w1_ordinary_telegram_notify_remains_blocked_under_kill_switch",
     "w1_alert_path_attempted",
+    "w1_emergency_alert_delivered_by_watchdog_tick",
+    "w1_durable_shutdown_observed_before_alert",
     "w1_fresh_pool_observes_active_state",
     "w1_policy_enforcement_observes_active_state",
     "w1_restart_style_reconstruction_sees_active_state",

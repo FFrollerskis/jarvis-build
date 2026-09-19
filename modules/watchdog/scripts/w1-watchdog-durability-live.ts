@@ -62,6 +62,15 @@ const results: Record<string, Verdict> = {
   // kill-switch-tilstand - se seksjon 2b.
   w1_ordinary_telegram_notify_remains_blocked_under_kill_switch: "FAIL",
   w1_alert_path_attempted: "FAIL",
+  // D-184: `w1_alert_path_attempted` over bevises av et DIREKTE
+  // `alertSink.send()`-kall i seksjon 2b (den kontrollerte samtidigheten mot
+  // det nektede gateway-kallet). Denne markøren beviser det STERKERE punktet:
+  // at watchdog-ens EGEN `tick()` - hele produksjonskjeden
+  // costExplosionCheck -> activateDurable -> alerts.send -> transport -
+  // FAKTISK leverte varselet, og at den durable kill switchen ALLEREDE var
+  // aktiv i det leveringen skjedde (observert rekkefølge, ikke lest ut av kode).
+  w1_emergency_alert_delivered_by_watchdog_tick: "FAIL",
+  w1_durable_shutdown_observed_before_alert: "FAIL",
   w1_fresh_pool_observes_active_state: "FAIL",
   w1_policy_enforcement_observes_active_state: "FAIL",
   w1_restart_style_reconstruction_sees_active_state: "FAIL",
@@ -72,6 +81,8 @@ const results: Record<string, Verdict> = {
   w1_audit_evidence_no_secret_leakage: "FAIL"
 };
 const diagnostics: Record<string, string> = {};
+/** D-184: alt `console.error` faktisk skrev paa varslings-feilstien (seksjon 8) - skannes for secret-lekkasje i seksjon 10. */
+const capturedErrorLogs: string[] = [];
 
 function log(msg: string): void {
   console.log(msg);
@@ -122,7 +133,16 @@ async function snapshotOwnerControlState(): Promise<Array<{ control_kind: string
   return rows as Array<{ control_kind: string; control_target: string; reason: string }>;
 }
 
-function buildStack(sidePool: pg.Pool): { killSwitch: KillSwitch; gateway: ToolGateway; watchdog: Watchdog; alertSink: WatchdogEmergencyAlertSink } {
+/** D-184: én observasjon av den DURABLE tilstanden på SELVE leveringstidspunktet, tatt inne i watchdog-ens egen tick()-kjede. */
+interface AlertOrderObservation {
+  durableActiveAtSendTime: boolean;
+  sentCountAtSendTime: number;
+}
+
+function buildStack(sidePool: pg.Pool): {
+  killSwitch: KillSwitch; gateway: ToolGateway; watchdog: Watchdog;
+  alertSink: WatchdogEmergencyAlertSink; alertOrder: AlertOrderObservation[];
+} {
   const killSwitch = new KillSwitch(sidePool, authority);
   const ownerControls = new OwnerControls(killSwitch, sidePool, authority);
   const policy = new PolicyGateway({
@@ -146,9 +166,25 @@ function buildStack(sidePool: pg.Pool): { killSwitch: KillSwitch; gateway: ToolG
   // registreringen over, SAMME `credential_ref` (default-parameteren i
   // sinken selv).
   const alertSink = new WatchdogEmergencyAlertSink(scriptedTelegram, secrets);
-  const watchdog = new Watchdog(alertSink, killSwitch);
+
+  // D-184: watchdog-en får en TYNN observatør rundt den EKTE sinken - den
+  // endrer ingenting, den noterer KUN hva den durable tilstanden var i det
+  // leveringen startet. Uten dette kunne live-kjøringen bare si at begge
+  // deler hadde skjedd, ikke i hvilken rekkefølge (arkitektkrav 1 og 2).
+  // `alertSink` selv eksponeres UENDRET til seksjon 2b.
+  const alertOrder: AlertOrderObservation[] = [];
+  const observingSink = {
+    send: async (alert: Parameters<WatchdogEmergencyAlertSink["send"]>[0]) => {
+      alertOrder.push({
+        durableActiveAtSendTime: await killSwitch.isActiveDurable(),
+        sentCountAtSendTime: scriptedTelegram.sent.length
+      });
+      await alertSink.send(alert);
+    }
+  };
+  const watchdog = new Watchdog(observingSink, killSwitch);
   watchdog.register(costExplosionCheck(sidePool, killSwitch, OWNER_PERSON, HARD_LIMIT_ORE));
-  return { killSwitch, gateway, watchdog, alertSink };
+  return { killSwitch, gateway, watchdog, alertSink, alertOrder };
 }
 
 async function main(): Promise<void> {
@@ -164,6 +200,14 @@ async function main(): Promise<void> {
     for (const key of Object.keys(results)) results[key] = "BLOCKED_BY_RUNTIME_ROLE";
     return;
   }
+
+  // D-184: nødvarselet kan ikke leveres uten den KANONISKE Telegram-
+  // credentialen (samme `credential_ref` som ordinær `telegram.notify`).
+  // Mangler den, feiler leveringsbevisene av en KONFIGURASJONSgrunn, ikke en
+  // kodegrunn - si det rett ut i stedet for å la det se ut som en B1-regresjon.
+  // Kun tilstedeværelse logges, ALDRI verdien.
+  diagnostics["telegram_credential_configured"] = String(Boolean(process.env["JARVIS_TELEGRAM_TOKEN"]));
+  log(`telegram_credential_configured=${diagnostics["telegram_credential_configured"]} (ref=JARVIS_TELEGRAM_TOKEN, verdi aldri logget)`);
 
   const snapshotBefore = await snapshotOwnerControlState();
   diagnostics["owner_control_state_before"] = JSON.stringify(snapshotBefore);
@@ -184,11 +228,25 @@ async function main(): Promise<void> {
       log(`month_spent_ore=${spent} hard_limit_ore=${HARD_LIMIT_ORE} -> ${results.w1_cost_threshold_triggered_with_test_data}`);
     });
 
-    await section("2) watchdog.tick() -> costExplosionCheck aktiverer DEN EKTE, delte killSwitch DURABELT", async () => {
+    await section("2) watchdog.tick() -> costExplosionCheck aktiverer DEN EKTE, delte killSwitch DURABELT, OG leverer nødvarselet i SAMME tick (D-184)", async () => {
+      const sentBeforeTick = scriptedTelegram.sent.length;
       await primary.watchdog.tick();
       const active = await primary.killSwitch.isActiveDurable();
       results.w1_durable_kill_switch_active = active ? "PASS" : "FAIL";
       log(`durable_active=${active} -> ${results.w1_durable_kill_switch_active}`);
+
+      // D-184: HELE produksjonskjeden i ÉN tick - ikke et manuelt sink-kall.
+      const deliveredByTick = scriptedTelegram.sent.length > sentBeforeTick;
+      results.w1_emergency_alert_delivered_by_watchdog_tick = deliveredByTick ? "PASS" : "FAIL";
+      diagnostics["alert_order_observations"] = JSON.stringify(primary.alertOrder);
+      log(`emergency_alert_delivered_by_tick=${deliveredByTick} sent_count=${scriptedTelegram.sent.length} -> ${results.w1_emergency_alert_delivered_by_watchdog_tick}`);
+
+      // OBSERVERT rekkefølge: nødstoppen var allerede durabelt skrevet DA
+      // varslingen startet, og ingenting var sendt før den tid.
+      const first = primary.alertOrder[0];
+      const orderOk = first !== undefined && first.durableActiveAtSendTime && first.sentCountAtSendTime === sentBeforeTick;
+      results.w1_durable_shutdown_observed_before_alert = orderOk ? "PASS" : "FAIL";
+      log(`durable_active_at_send_time=${first?.durableActiveAtSendTime ?? "-"} sent_count_at_send_time=${first?.sentCountAtSendTime ?? "-"} -> ${results.w1_durable_shutdown_observed_before_alert}`);
     });
 
     await section(
@@ -269,10 +327,22 @@ async function main(): Promise<void> {
       await primary.killSwitch.deactivateDurable(OWNER_PERSON);
       scriptedTelegram.shouldFail = true;
       await pool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,$2,$3)", [OWNER_TENANT, `model:${SYNTHETIC_COST_KIND}`, HARD_LIMIT_ORE + 1]);
-      await primary.watchdog.tick(); // alert.send() kaster internt - Watchdog.tick() logger og svelger, kaster ALDRI videre.
+      // D-184: FEILSTIEN er den eneste stien der en credential i det hele tatt
+      // KAN nå en logg (`watchdog_alert_delivery_failed` logger feilmeldingen).
+      // Fang derfor det som FAKTISK skrives, og la seksjon 10 skanne det.
+      const originalConsoleError = console.error;
+      console.error = (...args: unknown[]) => {
+        capturedErrorLogs.push(args.map(String).join(" "));
+        originalConsoleError(...args);
+      };
+      try {
+        await primary.watchdog.tick(); // alert.send() kaster internt - Watchdog.tick() logger og svelger, kaster ALDRI videre.
+      } finally {
+        console.error = originalConsoleError;
+      }
       const active = await primary.killSwitch.isActiveDurable();
       results.w1_alert_failure_does_not_prevent_shutdown = active ? "PASS" : "FAIL";
-      log(`durable_active_despite_alert_failure=${active} -> ${results.w1_alert_failure_does_not_prevent_shutdown}`);
+      log(`durable_active_despite_alert_failure=${active} captured_error_logs=${capturedErrorLogs.length} -> ${results.w1_alert_failure_does_not_prevent_shutdown}`);
       scriptedTelegram.shouldFail = false;
     });
 
@@ -286,10 +356,13 @@ async function main(): Promise<void> {
     });
 
     await section("10) audit-bevis: ingen secret-/token-lekkasje i det som er logget/diagnostisert", async () => {
-      const haystack = JSON.stringify(diagnostics) + JSON.stringify(scriptedTelegram.sent);
+      // D-184: haystacken inkluderer nå ogsaa DET SOM FAKTISK BLE LOGGET paa
+      // varslings-FEILSTIEN (seksjon 8) - ikke bare diagnostikk og sendte
+      // meldinger. Det er der en credential realistisk kunne havnet.
+      const haystack = JSON.stringify(diagnostics) + JSON.stringify(scriptedTelegram.sent) + JSON.stringify(capturedErrorLogs);
       const leaked = /bot\d+:[A-Za-z0-9_-]{20,}/.test(haystack) || haystack.includes(process.env["JARVIS_TELEGRAM_TOKEN"] ?? "\u0000no-token-configured\u0000");
       results.w1_audit_evidence_no_secret_leakage = leaked ? "FAIL" : "PASS";
-      log(`secret_pattern_found=${leaked} -> ${results.w1_audit_evidence_no_secret_leakage}`);
+      log(`secret_pattern_found=${leaked} scanned_error_logs=${capturedErrorLogs.length} -> ${results.w1_audit_evidence_no_secret_leakage}`);
     });
 
     await pool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);

@@ -69,6 +69,20 @@ export interface AlertCredentialSource {
 /** Samme `credential_ref` som den ordinære `telegram.notify`-verktøydefinisjonen (`modules/tool-gateway/src/integrations.ts`) - ingen ny hemmelighet. */
 export const WATCHDOG_TELEGRAM_CREDENTIAL_REF = "JARVIS_TELEGRAM_TOKEN";
 
+/**
+ * D-184: fjerner den rå credentialen fra en tekst FØR den kan forlate sinken.
+ * `Watchdog.tick()` logger `(err as Error).message` fra et mislykket
+ * `alerts.send()` (`watchdog_alert_delivery_failed`) - uten denne vasken ville
+ * en transport som legger credentialen inn i sin EGEN feilmelding (den
+ * kanoniske `TelegramTransport` gjør det ikke i dag, men URL-en den bygger
+ * inneholder tokenet, så en fremtidig/annen transport kunne) skrive det rå
+ * Telegram-tokenet rett i driftsloggen. Sinken eier credentialen og er derfor
+ * det eneste stedet som KAN vaske den deterministisk.
+ */
+function redactCredential(text: string, credential: string): string {
+  return credential.length === 0 ? text : text.split(credential).join("[REDACTED_CREDENTIAL]");
+}
+
 export class WatchdogEmergencyAlertSink implements AlertSink {
   constructor(
     private readonly transport: EmergencyAlertTransport,
@@ -82,7 +96,15 @@ export class WatchdogEmergencyAlertSink implements AlertSink {
       throw new Error("watchdog_alert_credential_unavailable");
     }
     const message = `[${alert.severity}] ${alert.check}: ${alert.message} (${alert.runbook})`;
-    await this.transport.invoke("notify", { message }, credential);
+    try {
+      await this.transport.invoke("notify", { message }, credential);
+    } catch (err) {
+      // D-184: ALDRI videresend transportens rå feil (den kan bære
+      // credentialen) - kast en vasket feil. `cause` settes BEVISST ikke:
+      // en `cause` ville bare gjeninnført den uvaskede teksten for enhver
+      // som serialiserer feilen.
+      throw new Error(`watchdog_alert_transport_failed: ${redactCredential((err as Error).message, credential)}`);
+    }
   }
 }
 

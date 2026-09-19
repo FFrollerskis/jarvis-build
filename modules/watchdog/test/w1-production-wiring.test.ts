@@ -48,7 +48,11 @@ describe("W1: @jarvis/watchdog er faktisk konsumert av worker-main.ts (WATCHDOG_
     const killSwitchRestoreIdx = workerMainSource.indexOf("await killSwitch.restore()");
     const ownerControlsRestoreIdx = workerMainSource.indexOf("await ownerControls.restore()");
     const watchdogConstructIdx = workerMainSource.indexOf("new Watchdog(watchdogAlertSink, killSwitch)");
-    const drainLoopIdx = workerMainSource.indexOf("void worker\n      .drain()");
+    // D-184: linjeskift-agnostisk. Et hardkodet "\n      " her gjorde testen
+    // avhengig av at arbeidskopien er sjekket ut med LF - på en CRLF-utsjekk
+    // (Windows-vert, core.autocrlf) ble indexOf(-1) og testen feilet på noe
+    // som ikke er en reell regresjon i worker-main.ts.
+    const drainLoopIdx = workerMainSource.search(/void worker\s*\.drain\(\)/);
     expect(roleSafeIdx).toBeGreaterThan(-1);
     expect(killSwitchRestoreIdx).toBeGreaterThan(-1);
     expect(ownerControlsRestoreIdx).toBeGreaterThan(-1);
@@ -128,6 +132,15 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): nødvarselet hopper BEV
     expect(classBody).toMatch(/async send\(alert: Alert\): Promise<void>/);
     expect(classBody).not.toMatch(/send\([^)]*chat/i);
     expect(classBody).not.toMatch(/send\([^)]*target/i);
+  });
+
+  it("D-184: sinken vasker transportens feilmelding for den rå credentialen FØR den kan nå Watchdog.tick() sin logg", () => {
+    const classIdx = watchdogSource.indexOf("export class WatchdogEmergencyAlertSink");
+    const classBody = watchdogSource.slice(classIdx, classIdx + 1600);
+    expect(classBody).toContain("redactCredential(");
+    // Transportkallet ER omsluttet av en catch - ingen rå transport-feil slipper ut urørt.
+    expect(classBody).toMatch(/try\s*\{[\s\S]*this\.transport\.invoke\([\s\S]*\}\s*catch/);
+    expect(watchdogSource).toMatch(/function redactCredential\(text: string, credential: string\): string/);
   });
 
   it("isSelfRecoveryAction() i modules/policy er IKKE utvidet med telegram - den globale kill-switch-semantikken for ORDINÆR telegram.notify er uendret", () => {
