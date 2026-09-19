@@ -203,3 +203,31 @@ describe("D: alle 14 implementerte Drive-handlinger forblir registrert i firstWa
     expect(byAction.get("delete_permission")).toBe("D");
   });
 });
+
+describe("N: main.ts sin worker.drain()-løkke logger feil (D-196) - SAMME mekanisme som worker-main.ts, som allerede gjorde det", () => {
+  // D-196 (Value Track V3-revisjon): main.ts sin drain-løkke svelget ALLTID
+  // en tick()-feil stille (`.catch(() => undefined)`) mens worker-main.ts sin
+  // BYTE-FOR-BYTE identiske mekanisme (samme InProcessWorker.drain()-kall,
+  // samme 2000ms-intervall) allerede logget den strukturert. En feil i selve
+  // tick() (DB-blipp under claim/complete/fail, IKKE en per-oppgave-handler-
+  // feil - de er allerede isolert inne i tick() selv) ville stanset main.ts
+  // sin "executive"-oppgavekø stille, uten varsel.
+  it("main.ts sin setInterval(...worker.drain()...) logger feilen via console.error, ikke .catch(() => undefined)", () => {
+    const callIdx = mainSource.indexOf("worker.drain()");
+    expect(callIdx).toBeGreaterThan(-1);
+    const block = mainSource.slice(mainSource.lastIndexOf("setInterval(", callIdx), mainSource.indexOf(").unref();", callIdx) + ").unref();".length);
+    expect(block).not.toMatch(/\.catch\(\(\)\s*=>\s*undefined\)/);
+    expect(block).toMatch(/\.catch\(\(err\)\s*=>\s*console\.error\(/);
+    expect(block).toContain("drain_error");
+    expect(block).toContain(".unref();");
+  });
+
+  it("worker-main.ts sin tilsvarende løkke er UENDRET (samme logging-mønster, ALDRI unref - egen dedikert prosess)", () => {
+    const callIdx = workerSource.indexOf("worker\n      .drain()");
+    expect(callIdx).toBeGreaterThan(-1);
+    const block = workerSource.slice(workerSource.lastIndexOf("setInterval(", callIdx), workerSource.indexOf(");", callIdx) + 2);
+    expect(block).toMatch(/\.catch\(\(err\)\s*=>\s*console\.error\(/);
+    expect(block).toContain("drain_error");
+    expect(block).not.toContain(".unref()");
+  });
+});
