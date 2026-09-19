@@ -217,10 +217,18 @@ async function main(): Promise<void> {
     const primary = buildStack(pool);
 
     await section("1) syntetisk kostnadseksplosjon (kjøre-unik kind, over hardgrensen)", async () => {
-      await pool.query(
+      // D-190 (BLOCKER B3): synteseoppsettet er test-scaffolding, ikke atferden som
+      // testes - INSERT går derfor via `adminPool`, ALDRI via den samme `pool` som
+      // `costExplosionCheck` bruker. `jarvis_runtime` (RLS) skal IKKE ha en bredere
+      // INSERT-rettighet på `cost_events` bare for at harnesset skal kunne kjøre.
+      await adminPool.query(
         "INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,$2,$3)",
         [OWNER_TENANT, `model:${SYNTHETIC_COST_KIND}`, HARD_LIMIT_ORE + 1]
       );
+      // Denne SELECT-en kjører BEVISST via den ordinære runtime-`pool`-en (uendret) -
+      // den beviser at `jarvis_runtime` FAKTISK kan LESE den syntetiske raden gjennom
+      // den ekte produksjonsspørringsveien (SAMME spørring som `costExplosionCheck`
+      // selv kjører), selv om den ikke kan skrive/slette den (D-190 §"REQUIRED FIX").
       const { rows } = await pool.query("SELECT coalesce(sum(amount_ore),0)::int AS spent FROM cost_events WHERE at >= date_trunc('month', now())");
       const spent = rows[0]?.spent ?? 0;
       results.w1_cost_threshold_triggered_with_test_data = spent >= HARD_LIMIT_ORE ? "PASS" : "FAIL";
@@ -322,11 +330,15 @@ async function main(): Promise<void> {
     });
 
     await section("8) simulert varslingsfeil FORHINDRER IKKE at den durable nødstoppen forblir aktiv", async () => {
-      // Fjern raden + deaktiver, sett opp en NY eksplosjon med varsling satt til å feile.
-      await pool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
+      // D-190 (BLOCKER B3): scaffold-DELETE/INSERT via `adminPool`, SAMME
+      // begrunnelse som seksjon 1 - test-fixture-håndtering, ikke atferden
+      // som testes. `deactivateDurable` (canonical recovery-vei) og
+      // `watchdog.tick()` (den ekte kjeden, inkl. `costExplosionCheck`s egen
+      // SELECT) fortsetter UENDRET på runtime-`pool`.
+      await adminPool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
       await primary.killSwitch.deactivateDurable(OWNER_PERSON);
       scriptedTelegram.shouldFail = true;
-      await pool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,$2,$3)", [OWNER_TENANT, `model:${SYNTHETIC_COST_KIND}`, HARD_LIMIT_ORE + 1]);
+      await adminPool.query("INSERT INTO cost_events (tenant_id, kind, amount_ore) VALUES ($1,$2,$3)", [OWNER_TENANT, `model:${SYNTHETIC_COST_KIND}`, HARD_LIMIT_ORE + 1]);
       // D-184: FEILSTIEN er den eneste stien der en credential i det hele tatt
       // KAN nå en logg (`watchdog_alert_delivery_failed` logger feilmeldingen).
       // Fang derfor det som FAKTISK skrives, og la seksjon 10 skanne det.
@@ -365,15 +377,22 @@ async function main(): Promise<void> {
       log(`secret_pattern_found=${leaked} scanned_error_logs=${capturedErrorLogs.length} -> ${results.w1_audit_evidence_no_secret_leakage}`);
     });
 
-    await pool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
+    // D-190 (BLOCKER B3): scaffold-cleanup via `adminPool` - se seksjon 1/8.
+    await adminPool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
   } finally {
     // Alltid: deaktiver en evt. gjenværende aktiv kill switch OG fjern enhver
     // gjenværende synthetic cost_events-rad, uansett hvor et FEIL over stoppet.
+    // D-190 (BLOCKER B3): kill switch-objektet under forblir BEVISST på
+    // runtime-`pool` (samme kanoniske skrivevei som produksjonen selv bruker -
+    // IKKE del av B3-funnet, som var isolert til cost_events-fixture-
+    // operasjoner). Fixture-DELETE-en under bruker derimot `adminPool` - den
+    // skal ALDRI igjen kunne feile med "permission denied for table
+    // cost_events", uavhengig av hvor try-blokken over stoppet.
     const cleanupKillSwitch = new KillSwitch(pool, authority);
     if (await cleanupKillSwitch.isActiveDurable()) {
       await cleanupKillSwitch.deactivateDurable(OWNER_PERSON);
     }
-    await pool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
+    await adminPool.query("DELETE FROM cost_events WHERE kind = $1", [`model:${SYNTHETIC_COST_KIND}`]);
 
     await section("CLEANUP: owner_control_state UENDRET fra før kjøringen", async () => {
       const snapshotAfter = await snapshotOwnerControlState();

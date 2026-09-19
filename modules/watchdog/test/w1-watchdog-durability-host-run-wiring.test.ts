@@ -146,3 +146,92 @@ describe("live-scriptet: proof-punktene fra D183 §F er alle representert", () =
     expect(liveScriptSource).toContain(`${key}:`);
   });
 });
+
+/**
+ * D-190 (BLOCKER B3, arkitekt-order D190 mot PR #96 - funn fra en EKTE
+ * Windows/Docker/Postgres-vertskjøring, run_id `aad6de29`): den ekte
+ * `jarvis_runtime`-rollen (RLS) tillater IKKE INSERT/DELETE på `cost_events`
+ * - kun den ordinære produksjonsspørringsveien (SELECT, som `costExplosionCheck`
+ * selv utfører). Live-scriptet brukte tidligere den samme runtime-`pool`-en
+ * for å SETTE OPP/RYDDE OPP den syntetiske test-fixturen, noe som feilet host-
+ * kjøringen FØR watchdog-atferden i det hele tatt kunne bevises. Denne suiten
+ * beviser strukturelt at ALLE fixture-INSERT/DELETE-operasjoner nå går via
+ * `adminPool` (som allerede brukes for `owner_control_state`-snapshots), MENS
+ * selve atferden som testes (costExplosionCheck, KillSwitch, PolicyGateway,
+ * fresh-pool-sjekker) forblir UENDRET på runtime-`pool`/`configFromEnv()` -
+ * ingen utvidelse av runtime-rollens faktiske privilegier, ingen RLS-endring.
+ */
+describe("D190 §B3: syntetisk cost_events-fixture bruker adminPool, ALDRI runtime-pool - selve atferden som testes forblir uendret på runtime-pool", () => {
+  it("1) syntetisk cost-INSERT (seksjon 1) bruker adminPool, ikke pool", () => {
+    const insertIdx = liveScriptSource.indexOf("1) syntetisk kostnadseksplosjon");
+    expect(insertIdx).toBeGreaterThan(-1);
+    const block = liveScriptSource.slice(insertIdx, liveScriptSource.indexOf("});", insertIdx));
+    expect(block).toMatch(/adminPool\.query\(\s*"INSERT INTO cost_events/);
+    expect(block).not.toMatch(/[^.]pool\.query\(\s*"INSERT INTO cost_events/);
+  });
+
+  it("2) syntetisk cost-DELETE (seksjon 8, FØR re-fixture) bruker adminPool, ikke pool", () => {
+    const s8Idx = liveScriptSource.indexOf("8) simulert varslingsfeil");
+    expect(s8Idx).toBeGreaterThan(-1);
+    const block = liveScriptSource.slice(s8Idx, liveScriptSource.indexOf("});", s8Idx));
+    const deleteMatch = block.match(/(\w*Pool)\.query\(\s*"DELETE FROM cost_events/);
+    expect(deleteMatch?.[1]).toBe("adminPool");
+  });
+
+  it("3) seksjon 8 sin re-fixture-INSERT (for varslingsfeil-caset) bruker adminPool, ikke pool", () => {
+    const s8Idx = liveScriptSource.indexOf("8) simulert varslingsfeil");
+    const block = liveScriptSource.slice(s8Idx, liveScriptSource.indexOf("});", s8Idx));
+    const insertMatch = block.match(/(\w*Pool)\.query\(\s*"INSERT INTO cost_events/);
+    expect(insertMatch?.[1]).toBe("adminPool");
+  });
+
+  it("4) finally-blokkens fixture-DELETE (garantert cleanup) bruker adminPool, ikke pool - kan ALDRI feile med 'permission denied for table cost_events' igjen", () => {
+    const cleanupIdx = liveScriptSource.indexOf("const cleanupKillSwitch");
+    expect(cleanupIdx).toBeGreaterThan(-1);
+    const block = liveScriptSource.slice(cleanupIdx, cleanupIdx + 600);
+    const deleteMatch = block.match(/(\w*Pool)\.query\(\s*"DELETE FROM cost_events/);
+    expect(deleteMatch?.[1]).toBe("adminPool");
+  });
+
+  it("5) ALLE cost_events-mutasjoner (INSERT/DELETE) i hele live-scriptet går via adminPool - null gjenstående mutasjon via runtime-pool", () => {
+    const mutations = [...liveScriptSource.matchAll(/(\w*Pool)\.query\(\s*"(INSERT INTO cost_events|DELETE FROM cost_events)/g)];
+    expect(mutations.length).toBeGreaterThanOrEqual(5); // 2 INSERT + 3 DELETE (seksjon 1, seksjon 8 x2, slutt-av-try, finally)
+    for (const m of mutations) {
+      expect(m[1]).toBe("adminPool");
+    }
+  });
+
+  it("6) costExplosionCheck mottar FORTSATT runtime-pool (sidePool, avledet fra buildStack(pool) - IKKE adminPool)", () => {
+    const callIdx = liveScriptSource.indexOf("costExplosionCheck(sidePool,");
+    expect(callIdx).toBeGreaterThan(-1);
+    expect(liveScriptSource).not.toMatch(/costExplosionCheck\(adminPool/);
+  });
+
+  it("7) den ordinære trussel-SELECT-en i seksjon 1 (beviser at jarvis_runtime kan LESE via den ekte produksjonsspørringsveien) forblir på runtime-pool", () => {
+    const selectIdx = liveScriptSource.indexOf("SELECT coalesce(sum(amount_ore)");
+    expect(selectIdx).toBeGreaterThan(-1);
+    const before = liveScriptSource.slice(Math.max(0, selectIdx - 60), selectIdx);
+    expect(before).toMatch(/\bpool\.query\(\s*"$/);
+  });
+
+  it("8) alle tre fresh-pool-sjekkene (seksjon 3/4/5) bruker fortsatt createPool(configFromEnv()) - ekte runtime-credentials, ingen adminPool", () => {
+    const freshPoolCalls = [...liveScriptSource.matchAll(/const freshPool = createPool\(configFromEnv\(\)\)/g)];
+    expect(freshPoolCalls.length).toBe(3);
+  });
+
+  it("9) KillSwitch/PolicyGateway under test forblir konstruert med runtime-pool-avledede instanser - INGEN av dem tar adminPool som datakilde", () => {
+    expect(liveScriptSource).not.toMatch(/new KillSwitch\(adminPool/);
+    expect(liveScriptSource).not.toMatch(/new PolicyGateway\(\{[^}]*adminPool/s);
+  });
+
+  it("10) ingen privilegie-/RLS-utvidelse forsøkt fra harnesset selv - ingen GRANT/ALTER ROLE/ALTER TABLE-setning noe sted i live- eller host-run-scriptet (lesing/logging av EKSISTERENDE status.bypassrls, som beviser at den er false, er IKKE en utvidelse og er bevisst tillatt)", () => {
+    expect(liveScriptSource).not.toMatch(/\b(GRANT|ALTER ROLE|ALTER TABLE)\b/i);
+    expect(hostRunSource).not.toMatch(/\b(GRANT|ALTER ROLE|ALTER TABLE)\b/i);
+  });
+
+  it("11) fixture-cleanup forblir kjøre-scoped til SYNTHETIC_COST_KIND i ALLE tre DELETE-setningene - aldri en ubetinget DELETE mot cost_events", () => {
+    const deletes = [...liveScriptSource.matchAll(/adminPool\.query\(\s*"DELETE FROM cost_events WHERE kind = \$1"/g)];
+    expect(deletes.length).toBe(3);
+    expect(liveScriptSource).not.toMatch(/DELETE FROM cost_events["'`]\s*\)/);
+  });
+});
