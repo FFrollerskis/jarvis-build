@@ -61,7 +61,15 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     // D-97: GithubTransport tar naa en wired GithubRateLimitController - ikke lenger tom konstruktør.
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
-    expect(callBlock).toContain("telegram: new TelegramTransport()");
+    // D-181 (BLOCKER B1, D184): worker-main.ts (KUN worker, ikke main.ts) hoister
+    // TelegramTransport til en navngitt konstant `telegramTransport` FØR dette kallet,
+    // slik at NØYAKTIG SAMME instans deles med WatchdogEmergencyAlertSink (se
+    // w1-production-wiring.test.ts for den dedikerte hoisting-/delings-verifiseringen).
+    // Ikke lenger en bokstavelig `new TelegramTransport()` HER - bevisst divergens fra
+    // main.ts (som forblir uendret, D-180).
+    expect(workerSource).toMatch(/const telegramTransport = new TelegramTransport\(\);/);
+    expect(callBlock).toContain("telegram: telegramTransport");
+    expect(callBlock).not.toContain("telegram: new TelegramTransport()");
     // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
     // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
     // UA-3 profiling/scoring-slice (D-61): BusinessTransport tar naa ogsaa ScoringService.
@@ -97,13 +105,20 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fire ubetingede tomme-konstruktør-transportene som før (+docker, D-105)", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker, D-105) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
-    expect(unconditionalConstructions).toHaveLength(4);
+    // D-181/D184: telegram gikk fra en bokstavelig tom-konstruktør (`new TelegramTransport()`
+    // inni dette kallet) til en referanse til en hoistet, delt konstant - derfor 3, ikke 4,
+    // her. main.ts (describe "I" sin FØRSTE test, over) forblir uendret på 4 - de to
+    // filene divergerer BEVISST kun paa dette ene punktet, se describe "B".
+    expect(unconditionalConstructions).toHaveLength(3);
+    expect(callBlock).toContain("email: new GmailTransport()");
+    expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
+    expect(callBlock).toContain("telegram: telegramTransport");
   });
 });
 
