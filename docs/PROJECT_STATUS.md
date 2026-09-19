@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/w1-watchdog-runtime-durability`, PR #96 - draft, åpen). Første
-ekte host-kjøring (Tobias, Windows/Docker/Postgres, `run_id=90b827b3`, mot HEAD `82c45b0`) fant BLOKKER
-B5 (D-193) - fikset, IKKE re-kjørt på host ennå. Aktiv oppgave: **push B5-fiksen, vent CI, be Tobias
-kjøre host-akseptansen på nytt.**
+**Oppdatert:** 2026-09-19 (branch `claude/w1-watchdog-runtime-durability`, PR #96 - draft, åpen). W1 er
+nå FULLT host-bevist (Tobias, ekte Windows/Docker/Postgres, `run_id=28c2059a`, `hard_fail=false`, 16/16
+markører PASS). Aktiv oppgave: **siste pre-merge-sjekker, deretter merge PR #96 (D-192 stående
+fullmakt).**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -21,41 +21,33 @@ fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.
 ## Hvor `main`/PR #96 står nå
 
 - **PR #95 (B2+B3, D-174→D-179) er MERGET til `main`** (`MERGE_SHA=9ede3ac1...`).
-- **PR #96 (`claude/w1-watchdog-runtime-durability`) er ÅPEN, DRAFT.** Full sekvens D-180→D-193 er nå
-  logget i DECISIONS_AND_ASSUMPTIONS.md.
-- **D-193 (BLOKKER B5, 2026-09-19):** Tobias sin FØRSTE ekte host-kjøring (`run_id=90b827b3`) ga 15/16
-  PASS - selve W1-mekanismen (durabel kill switch, nødvarsel som overlever egen kill switch, kryss-
-  prosess-/restart-simulering, policy-håndhevelse, ingen duplikat-aktivering, opprydding) er DERMED
-  LIVE-BEVIST. Seksjon 9 ("eier-gjenoppretting via KANONISK vei",
-  `owner_controls.deactivate_kill_switch`/`get_control_state`) FEILET - diagnostisert som en
-  harness-defekt (manglende `BusinessInternalSecretProvider` i `w1-watchdog-durability-live.ts` sin
-  `secrets`-oppsett, IKKE noe galt i produksjonskoden - `main.ts`/`worker-main.ts` har alltid hatt dette
-  riktig). Fikset, 4 nye regresjonstester, typecheck/lint/95 tester grønt lokalt. **IKKE re-kjørt på
-  host ennå** - `HOST_ACCEPTANCE_STATUS=REQUIRES_RERUN` FORBLIR til en fersk kjøring bekrefter B5-fiksen
-  OG at de 15 allerede-PASS-markørene fortsatt er PASS.
+- **PR #96 (`claude/w1-watchdog-runtime-durability`) er ÅPEN, DRAFT, CI GRØNT på HEAD `97a86d2`.**
+  Full sekvens D-180→D-193 logget i DECISIONS_AND_ASSUMPTIONS.md.
+- **D-193 (BLOKKER B5) BEKREFTET LIVE (2026-09-19):** Tobias sin ANDRE host-kjøring
+  (`run_id=28c2059a`, mot HEAD `97a86d2`) ga 16/16 PASS, `hard_fail=false` - inkl. seksjon 9 (eier-
+  gjenoppretting via kanonisk `owner_controls.*`-vei), som feilet i FØRSTE kjøring (`run_id=90b827b3`)
+  pga. en harness-only credential-provider-defekt (fikset, ikke produksjonskode). W1 er dermed FULLT
+  live-bevist: `HOST_ACCEPTANCE_STATUS=PASS`.
 - **PR #87** forblir ÅPEN, IKKE rørt (`mergeable=CONFLICTING` mot main, klassifisert
   `STALE_OR_SUPERSEDED`). Neste i køen ETTER PR #96 er lukket.
 - **V1 Value Track** (D181 sitt funn, `INTERNAL_BUILD_COMPLETE`-relatert) IKKE startet.
 
 ## Blokkeringer
 
-1. **Host-akseptanse for W1 er `REQUIRES_RERUN`** - krever Tobias sin ekte Windows/Docker/Postgres-host
-   (samme kommando som før, kjøres fra repo-roten på hosten, ETTER at branchen er oppdatert til ny HEAD):
-   `node --env-file=.env --experimental-transform-types modules/watchdog/scripts/w1-watchdog-durability-host-run.ts`
-   Suksess = script avslutter med `hard_fail=false` i sammendraget (ALLE 16 markører PASS, ikke bare 15).
-2. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (D-170) - UENDRET, dekker resten av masterplanen utover
-   W1: AI-leverandørfamilier, Growth-stack live-evidens, reelle Finance-transaksjoner (Stripe),
-   iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
-   `docs/SOVEREIGN_GRADUATION_MATRIX.md` for full oversikt. `SOVEREIGN_COMPLETE=false` FORBLIR.
+Ingen kjente blokkeringer for PR #96 selv. Gjenstår kun pre-merge-verifisering (fresh fetch, HEAD-/
+base-guard, ingen åpne review-tråder) før merge under D-192 sin stående fullmakt.
+
+`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - UENDRET, dekker resten av masterplanen utover W1:
+AI-leverandørfamilier, Growth-stack live-evidens, reelle Finance-transaksjoner (Stripe), iPhone/Watch/
+Home/Personal/Health LIVE, off-site backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md` for
+full oversikt. `SOVEREIGN_COMPLETE=false` FORBLIR (uavhengig av PR #96 sin merge).
 
 ## Neste oppgave
 
-1. Push D-193/B5-fiksen, vent på grønn CI på ny HEAD.
-2. Tobias oppdaterer sin lokale checkout (`git pull origin claude/w1-watchdog-runtime-durability`) og
-   kjører W1 host-akseptanse på nytt (kommando over), gir Claude resultatet.
-3. Går den grønt (16/16): Claude merger PR #96 selv (D-192 stående fullmakt - normal two-parent merge,
-   ingen force/squash/rebase), oppdaterer SOVEREIGN_GRADUATION_MATRIX.md sin W1-rad til
-   `HOST_ACCEPTANCE_STATUS=PASS`, varsler Tobias.
+1. Pre-merge-sjekk (fresh fetch, PR fortsatt åpen/draft/unmerget, exact HEAD/base, ingen åpne
+   review-tråder), deretter merge PR #96 til `main` (D-192 - normal two-parent merge).
+2. Poste avsluttende `CLAUDE_REPORT` til issue #68 (D-192 holder issue #68 som logg).
+3. Post-merge: fresh-read `main`, oppdater denne filen igjen med reelt post-merge-status.
 4. Deretter: rydde/reissue PR #87, så videre bygging av gjenstående plan-elementer direkte med Tobias
    (prioritert rekkefølge avklares i chat), inkl. en samlet oversikt over hvilke API-nøkler/
-   kontoer/MCP-koblinger som trengs for de eksterne blokkeringene i punkt 2 over.
+   kontoer/MCP-koblinger som trengs for de eksterne blokkeringene nevnt over.
