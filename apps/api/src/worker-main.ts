@@ -46,7 +46,10 @@ import {
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck } from "@jarvis/watchdog";
+import {
+  WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck,
+  parseWatchdogIntervalMs, parseCostHardLimitOre
+} from "@jarvis/watchdog";
 
 // Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
 // en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
@@ -359,10 +362,17 @@ const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, tool
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
 watchdog.register(stuckTasksCheck(pool));
+// D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96): begge miljøvariablene
+// valideres FØR bruk - `parseCostHardLimitOre`/`parseWatchdogIntervalMs`
+// kaster ved enhver eksplisitt oppgitt, ugyldig verdi (fail-closed oppstart)
+// i stedet for å la `Number(...)` stille gi `NaN`/`Infinity`/negativ/null
+// videre til `costExplosionCheck()`/`setInterval()` - se watchdog.ts sin
+// egen, fulle begrunnelse for hvorfor en `NaN`-hardgrense var en reell
+// utilsiktet-nødstopp-risiko.
 watchdog.register(
-  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id, Number(process.env["JARVIS_COST_HARD_LIMIT_ORE"] ?? 300_000))
+  costExplosionCheck(pool, killSwitch, ownerControlAuthority.owner_person_id, parseCostHardLimitOre(process.env["JARVIS_COST_HARD_LIMIT_ORE"]))
 );
-const WATCHDOG_INTERVAL_MS = Number(process.env["JARVIS_WATCHDOG_INTERVAL_MS"] ?? 60_000);
+const WATCHDOG_INTERVAL_MS = parseWatchdogIntervalMs(process.env["JARVIS_WATCHDOG_INTERVAL_MS"]);
 setInterval(
   () =>
     void watchdog

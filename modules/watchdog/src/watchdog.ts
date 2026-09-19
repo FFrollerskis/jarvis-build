@@ -298,3 +298,82 @@ export function costExplosionCheck(
     }
   };
 }
+
+/**
+ * D-187 (BLOCKER B2, arkitekt-order D187 mot PR #96 - fersk review av post-B1
+ * HEAD): `apps/api/src/worker-main.ts` kalte tidligere
+ * `Number(process.env["JARVIS_WATCHDOG_INTERVAL_MS"] ?? 60_000)` og
+ * `Number(process.env["JARVIS_COST_HARD_LIMIT_ORE"] ?? 300_000)` UTEN
+ * validering. `Number(...)` på en feilformet streng gir `NaN` (aldri en
+ * exception) - en `NaN`-hardgrense gjør `spent < hardLimitOre` ALLTID `false`
+ * (enhver sammenligning med `NaN` er `false`), slik at `costExplosionCheck`
+ * ville forsøke durabel nødstopp ved FØRSTE tick uansett faktisk forbruk -
+ * en sikkerhetsmekanisme som stille oversetter feilkonfigurasjon til
+ * utilsiktet global nedstenging. Tilsvarende kunne et negativt/null/`NaN`/
+ * `Infinity`-intervall gi `setInterval` en utilsiktet stram eller ugyldig
+ * løkke. Disse to funksjonene validerer FØR verdien når `setInterval()`
+ * eller `costExplosionCheck()` - en eksplisitt oppgitt ugyldig verdi feiler
+ * oppstarten synlig (kaster), i stedet for å stille bli en `NaN`/urimelig
+ * verdi lenger inn i systemet.
+ */
+export const WATCHDOG_INTERVAL_MS_DEFAULT = 60_000;
+/** Nedre grense (D187 §A): forhindrer at en feilkonfigurert, ekstremt liten
+ * verdi skaper en utilsiktet stram overvåkingsløkke (gjentatte DB-spørringer
+ * mot `cost_events`/`tasks` hvert millisekund). 1 sekund er godt under
+ * `WATCHDOG_INTERVAL_MS_DEFAULT` (60s), men langt over null. */
+export const WATCHDOG_INTERVAL_MS_MIN = 1_000;
+/** Øvre grense (D187 §A): forhindrer at en feilkonfigurert, ekstremt stor
+ * verdi gjør watchdog-en reelt uvirksom (en kostnadseksplosjon eller stuck
+ * task ville da kunne stå uoppdaget i timevis). 1 time er en romslig, men
+ * fortsatt begrenset, øvre grense for en sikkerhetsovervåker. */
+export const WATCHDOG_INTERVAL_MS_MAX = 3_600_000;
+
+/**
+ * Validerer `JARVIS_WATCHDOG_INTERVAL_MS` (D187 §A). `raw` er den ubehandlede
+ * `process.env["JARVIS_WATCHDOG_INTERVAL_MS"]`-verdien (eller `undefined`
+ * hvis usatt). Kaster ved enhver eksplisitt oppgitt, ugyldig verdi -
+ * fail-closed oppstart, ALDRI en stille `NaN`/urimelig verdi videre til
+ * `setInterval()`.
+ */
+export function parseWatchdogIntervalMs(raw: string | undefined): number {
+  if (raw === undefined) {
+    return WATCHDOG_INTERVAL_MS_DEFAULT;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `JARVIS_WATCHDOG_INTERVAL_MS ugyldig: "${raw}" - må være et positivt heltall (millisekunder)`
+    );
+  }
+  if (n < WATCHDOG_INTERVAL_MS_MIN || n > WATCHDOG_INTERVAL_MS_MAX) {
+    throw new Error(
+      `JARVIS_WATCHDOG_INTERVAL_MS utenfor gyldig område [${WATCHDOG_INTERVAL_MS_MIN}, ${WATCHDOG_INTERVAL_MS_MAX}] ms: ${n}`
+    );
+  }
+  return n;
+}
+
+/** D-187 §B: samme default som før fiksen (uendret oppførsel når usatt). */
+export const COST_HARD_LIMIT_ORE_DEFAULT = 300_000;
+
+/**
+ * Validerer `JARVIS_COST_HARD_LIMIT_ORE` (D187 §B). `raw` er den ubehandlede
+ * `process.env["JARVIS_COST_HARD_LIMIT_ORE"]`-verdien (eller `undefined`
+ * hvis usatt). Kaster ved enhver eksplisitt oppgitt, ugyldig verdi - garanterer
+ * at `costExplosionCheck()` ALDRI mottar `NaN`/`Infinity`/negativ/null som
+ * `hardLimitOre` (en `NaN`-grense ville gjort `spent < hardLimitOre` ALLTID
+ * `false`, og dermed utløst durabel nødstopp ved første tick uansett faktisk
+ * forbruk - se filens egen D187-begrunnelse over).
+ */
+export function parseCostHardLimitOre(raw: string | undefined): number {
+  if (raw === undefined) {
+    return COST_HARD_LIMIT_ORE_DEFAULT;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    throw new Error(
+      `JARVIS_COST_HARD_LIMIT_ORE ugyldig: "${raw}" - må være et strengt positivt heltall (øre)`
+    );
+  }
+  return n;
+}
