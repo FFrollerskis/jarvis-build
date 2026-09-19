@@ -100,6 +100,21 @@ export const TERMINAL_STATUS_ALIASES = Object.freeze({
   FINISHED: REPORT_OUTCOME.COMPLETE,
   SUCCESS: REPORT_OUTCOME.COMPLETE,
   SUCCEEDED: REPORT_OUTCOME.COMPLETE,
+  // D-166. `STATUS=PASS` is what a VERIFICATION order's terminal report actually
+  // says - D-165's own closing report is `CLAUDE_REPORT / STATUS=PASS` (comment
+  // 5706934609), and the order it answered asked for exactly that vocabulary. The
+  // worker did not know the spelling, so `classifyReportStatus` returned
+  // `recognised: false`: a finished, correctly reported task read as a control
+  // plane vocabulary defect. That is the D-132 `COMPLETE` vs `COMPLETED` failure
+  // again, one word further along.
+  //
+  // Adding the alias closes it WITHOUT loosening anything: `PASS` joins the
+  // enumerated vocabulary, an unknown spelling still returns `recognised: false`
+  // and still parks fail-closed, and every terminal reading remains gated on a
+  // TRUSTED report for that EXACT TASK_ID. `PASSED` is included for the same
+  // reason `SUCCEEDED` sits beside `SUCCESS` - one tense is not a new decision.
+  PASS: REPORT_OUTCOME.COMPLETE,
+  PASSED: REPORT_OUTCOME.COMPLETE,
   SUCCESSFUL: REPORT_OUTCOME.COMPLETE,
   DELIVERED: REPORT_OUTCOME.COMPLETE,
   MERGED: REPORT_OUTCOME.COMPLETE,

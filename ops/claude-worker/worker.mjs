@@ -106,6 +106,16 @@ import {
 } from "./lib/order-binding.mjs";
 import { ORDER_AUTHORITY, describeOrderAuthority } from "./lib/order-authority.mjs";
 import {
+  ADMISSION,
+  CONTENDED_VERDICTS,
+  acquireTaskAdmission,
+  heartbeatTaskAdmission,
+  releaseTaskAdmission,
+  terminalizeTaskAdmission,
+  inspectTaskAdmission,
+  describeAdmissionRefusal
+} from "./lib/task-admission.mjs";
+import {
   authoritySnapshotEvidence,
   authorityVerdicts,
   captureAuthoritySnapshot,
@@ -1457,7 +1467,125 @@ function recoverAbandonedTasks(cfg, state, token, control) {
   return { stop: false, exit: null, gateHeld };
 }
 
+/**
+ * D-166: CROSS-WORKER ADMISSION - THE FIRST THING THAT HAPPENS TO A CANDIDATE.
+ *
+ * `acquireLock` makes one WORKER INSTANCE run at a time, per lock FILE. It does
+ * not make one worker own a TASK_ID, because two deployments have two lock files
+ * and the kernel serialises nothing between two paths that never meet. Both read
+ * the same control issue, both rank the same queue and both dispatch a child for
+ * the same order - which is exactly what happened to D-165 (two CLAUDE_ACKs and
+ * two CLAUDE_REPORTs for one task id, 74 seconds apart).
+ *
+ * So the task id gets its own lease, in a SHARED location derived from the
+ * control-plane identity the contenders necessarily agree on, and it is taken
+ * HERE: before the authority gate, before the order binding, before any state
+ * row exists, before the quarantine, before the dirty guard, before a worktree,
+ * before any GitHub write and before any child. A worker that loses this race
+ * therefore leaves NOTHING behind at all - no CLAUDE_ACK, no report, no status
+ * comment, no worktree, no branch, no scratch directory and no state mutation -
+ * which is precisely what a loser has to be able to prove.
+ *
+ * `runAdmittedTask` below is the unchanged body; the only thing that moved is
+ * that it now runs under a proven, exclusive, durable claim on its task id.
+ */
 async function runTask(cfg, state, token, candidate, control) {
+  const taskId = candidate.taskId;
+  const admission = acquireTaskAdmission({
+    admissionRoot: cfg.admissionRoot,
+    taskId,
+    orderCommentId: candidate.authority?.commentId ?? candidate.orderCommentId ?? null,
+    workerRoot: HERE,
+    workerVersion: WORKER_VERSION,
+    leaseTtlMs: cfg.heartbeatTimeoutMinutes * 60_000,
+    malformedGraceMs: cfg.malformedLockGraceSeconds * 1000
+  });
+
+  if (!admission.acquired) {
+    for (const line of describeAdmissionRefusal(taskId, admission)) log(cfg, line);
+    emitHealth(cfg.healthFile, HEALTH_EVENTS.BLOCKED, {
+      task_id: taskId,
+      reason: "task_admission_not_owned",
+      admission_verdict: admission.verdict,
+      admission_detail: admission.reason ?? null,
+      owner_pid: admission.owner?.pid ?? null,
+      owner_host: admission.owner?.host ?? null,
+      owner_attempt_id: admission.owner?.attempt_id ?? null,
+      // Stated positively so the zero-write claim is falsifiable rather than
+      // merely unmentioned.
+      ack_posted: false,
+      status_comment_posted: false,
+      worktree_created: false,
+      durable_state_written: false,
+      child_spawned: false
+    });
+    // A contended task is not this worker's business and is not a fault: the
+    // owner is running it. EXIT.OK mirrors what a lost `acquireLock` already
+    // returns. A TERMINAL task id is different - it is a finished order being
+    // offered again - and a permanently closed order must not report the run as
+    // healthy, so it exits BLOCKED and becomes visible.
+    if (CONTENDED_VERDICTS.includes(admission.verdict)) return EXIT.OK;
+    if (admission.verdict === ADMISSION.TERMINAL) return EXIT.BLOCKED;
+    // Everything else is an unreadable/unresolvable/unusable ledger. Fail closed
+    // and let the next scheduled run look again.
+    return EXIT.TRANSIENT;
+  }
+
+  log(cfg, `TASK ADMISSION ACQUIRED for ${taskId}: lease version ${admission.handle.version} `
+    + `(${admission.reason}). Ledger: ${admission.handle.dir}`);
+  emitHealth(cfg.healthFile, HEALTH_EVENTS.QUEUE_POLLED, {
+    task_id: taskId,
+    admission: "acquired",
+    lease_version: admission.handle.version,
+    lease_attempt_id: admission.handle.attemptId
+  });
+
+  try {
+    return await runAdmittedTask(cfg, state, token, candidate, control, admission);
+  } finally {
+    finalizeTaskAdmission(cfg, state, taskId, admission);
+  }
+}
+
+/**
+ * Close out the lease deterministically, from the ONE fact that decides it.
+ *
+ * `runAdmittedTask` has a great many exits - refusals, held gates, dispatch
+ * failures, completions - and pairing each one with its own lease call would be a
+ * second set of rules to drift. Instead the lease reads the SAME durable record
+ * every other consumer reads: `isTerminal(task)`. A task the worker has recorded
+ * as COMPLETED, BLOCKED or SUPERSEDED is finished for good, so the lease becomes
+ * TERMINAL and this task id can never be dispatched again - by this worker, by
+ * another deployment, after a reboot, or after state.json is lost. Anything else
+ * is an explicit handoff: the lease is RELEASED and the next run admits normally.
+ *
+ * Never throws. A lease we somehow no longer hold is left exactly as it is - the
+ * owner that does hold it is the only process entitled to write it - and it
+ * expires on its own.
+ */
+function finalizeTaskAdmission(cfg, state, taskId, admission) {
+  try {
+    const task = getTask(state, taskId);
+    if (isTerminal(task)) {
+      const ok = terminalizeTaskAdmission(admission.handle, {
+        outcome: task.status,
+        status: task.report_status ?? null,
+        successful: task.successful ?? null,
+        reportCommentId: task.report_comment_id ?? null
+      });
+      log(cfg, `TASK ADMISSION TERMINAL for ${taskId} (${task.status}): the lease records this task id as `
+        + `permanently closed${ok ? "" : " - BUT THE WRITE FAILED; the lease will expire instead"}.`);
+      return;
+    }
+    const ok = releaseTaskAdmission(admission.handle, { reason: `cycle_finished_status_${task?.status ?? "none"}` });
+    log(cfg, `TASK ADMISSION RELEASED for ${taskId}${ok ? "" : " - the write failed; the lease expires on its own"}.`);
+  } catch (err) {
+    log(cfg, `Could not finalize the task admission lease for ${taskId}: ${sanitize(err.message)}. `
+      + "It is left untouched and expires on its own.");
+  }
+}
+
+async function runAdmittedTask(cfg, state, token, candidate, control, lease) {
   const taskId = candidate.taskId;
   const prior = getTask(state, taskId);
   const { comments, complete: commentsComplete } = controlView(control);
@@ -1769,6 +1897,10 @@ async function runTask(cfg, state, token, candidate, control) {
 
   // --- scratch quarantine, BEFORE the dirty guard (requirement A) ---
   heartbeat(cfg.lockFile, { token, phase: "quarantine", taskId });
+  // D-166: the admission lease is renewed alongside the worker lock, so a live
+  // owner's lease never expires under it. Expiry is the backstop for an owner
+  // that has DIED - a live one is never superseded whatever its timestamps say.
+  heartbeatTaskAdmission(lease.handle, { phase: "quarantine" });
   const preStatus = gitStatusLines(cfg);
   if (!preStatus.ok) {
     return blockOnGitFailure(cfg, state, token, taskId, [preStatus.error]);
@@ -1846,6 +1978,7 @@ async function runTask(cfg, state, token, candidate, control) {
   const attempts = (prior?.attempts ?? 0) + 1;
   const attemptId = randomUUID();
   heartbeat(cfg.lockFile, { token, phase: "worktree", taskId });
+  heartbeatTaskAdmission(lease.handle, { phase: "worktree" });
   const workspace = establishTaskWorktree({
     cfg,
     taskId,
@@ -2032,6 +2165,11 @@ async function runTask(cfg, state, token, candidate, control) {
       }
       const beatOk = !faultArmed(first ? "first_heartbeat_lost_lock" : "periodic_heartbeat_lost_lock")
         && heartbeat(cfg.lockFile, { token, phase: "dispatch", taskId, childPid, childIdentity: identity });
+      // D-166: renewed on the same schedule as the worker lock. A dispatch can
+      // legitimately run for the better part of an hour, and an owner that is
+      // demonstrably alive and beating must not hand its task id to a contender
+      // simply because the lease budget elapsed.
+      heartbeatTaskAdmission(lease.handle, { phase: "dispatch" });
       emitHealth(cfg.healthFile, HEALTH_EVENTS.HEARTBEAT, {
         task_id: taskId, child_pid: childPid, lock_ownership: beatOk ? "held" : "lost"
       });
@@ -2261,6 +2399,7 @@ async function runTask(cfg, state, token, candidate, control) {
 
   // --- completion requires EVIDENCE, never exit code alone (requirement B) ---
   heartbeat(cfg.lockFile, { token, phase: "verify", taskId });
+  heartbeatTaskAdmission(lease.handle, { phase: "verify" });
   // D-149: THE POST-DISPATCH RE-READ, WITH ITS OWN COMPLETENESS VERDICT.
   //
   // This read used to swallow its failure into `postComments = []` and then fall
@@ -2723,6 +2862,26 @@ function cmdDryRun(cfg) {
         order_created_at: selection.candidateAuthority?.createdAt ?? null,
         would_dispatch: selection.candidateAuthority?.reason === ORDER_AUTHORITY.ADMISSIBLE
       }
+      : null,
+    // D-166: who, if anyone, currently owns this TASK_ID across every worker on
+    // this host - and whether the id is permanently closed. Strictly read-only:
+    // `inspectTaskAdmission` creates no directory and takes no lease, so a dry run
+    // stays a dry run and can never itself become the contender it is reporting on.
+    next_candidate_admission: selection.candidate
+      ? (() => {
+        const seen = inspectTaskAdmission({ admissionRoot: cfg.admissionRoot, taskId: selection.candidate.taskId });
+        return {
+          admission_root: cfg.admissionRoot,
+          verdict: seen.verdict,
+          detail: seen.reason ?? null,
+          would_admit: seen.verdict === ADMISSION.FREE || seen.verdict === ADMISSION.RECLAIMABLE,
+          lease_version: seen.version ?? null,
+          owner_pid: seen.lease?.pid ?? null,
+          owner_host: seen.lease?.host ?? null,
+          owner_attempt_id: seen.lease?.attempt_id ?? null,
+          terminal_report_comment_id: seen.lease?.terminal_report_comment_id ?? null
+        };
+      })()
       : null,
     // D-151: would a proposed explicit retirement actually be carried out? Shown
     // for ACCEPTED and REFUSED proposals alike, each with the declaring comment
