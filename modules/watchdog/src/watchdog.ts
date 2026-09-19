@@ -1,7 +1,5 @@
 import type pg from "pg";
 import type { KillSwitch } from "@jarvis/policy";
-import type { ToolGateway } from "@jarvis/tool-gateway";
-import type { IdentityContext } from "@jarvis/contracts";
 
 export type Severity = "info" | "warning" | "critical";
 
@@ -25,37 +23,66 @@ export class MemoryAlertSink implements AlertSink {
 }
 
 /**
- * D-180 (W1, arkitekt-order D183): erstatter den tidligere `TelegramAlertSink`-
- * skallstubben (som ubetinget kastet - varsling gikk aldri i drift uansett
- * wiring). Går gjennom DEN SAMME kanoniske `ToolGateway.execute()`-stien som
- * `DailyBrief.deliverViaTelegram()` (`tool_id: "telegram", action: "notify"`)
- * - ALDRI en egen rå Telegram-HTTP-klient eller en ny credential-mekanisme.
- * Rå bot-token forlater aldri denne klassen: `ToolGateway` løser
- * `credential_ref` selv via `SecretProvider`, identisk med alle andre
- * `telegram.notify`-kallere. Watchdog har (uendret, se klassekommentaren
- * under) INGEN egen verktøytilgang utover DENNE ene, injiserte gatewayen -
- * `identity` er en fast, konfigurert worker-identitet (SAMME mønster som
- * `workerIdentity` i `apps/api/src/worker-main.ts`), aldri en modell-styrt
- * verdi.
+ * D-181 (BLOCKER B1, arkitekt-order D184 mot PR #96): erstatter D-180/D183 sin
+ * `GatewayAlertSink`, som rutet nødvarselet gjennom DEN ORDINÆRE
+ * `ToolGateway.execute({tool_id:"telegram", action:"notify"})`-stien -
+ * NØYAKTIG stien `PolicyGateway.authorize()` nekter med `kill_switch_active`
+ * når den GLOBALE kill switchen er aktiv (`telegram.notify` er bevisst IKKE
+ * i `isSelfRecoveryAction()`, og skal ikke legges dit - se under). Resultat:
+ * watchdog-en klarte å stenge Jarvis ned (D-180 sin durable-fiks virket), men
+ * kunne ALDRI fortelle Tobias om det - en selvmotsigende "nødstopp uten
+ * nødvarsel", fanget av uavhengig arkitekt-review av PR #96.
+ *
+ * IKKE løst ved å utvide `isSelfRecoveryAction()` til å inkludere
+ * `telegram.notify` (ville svekket den globale kill-switch-semantikken for
+ * ALLE kallere av telegram.notify, ikke bare watchdog-en - se
+ * `modules/policy/src/owner-control-store.ts`, uendret av denne posten) og
+ * IKKE løst ved å midlertidig de-/reaktivere kill switchen kun for å sende
+ * én melding. I stedet: en EGEN, SMAL grense som bevisst hopper over
+ * `ToolGateway.execute()`/`PolicyGateway.authorize()` - fordi en aktiv kill
+ * switch er PRESIS situasjonen dette varselet finnes for å rapportere - men
+ * som IKKE er en generell verktøytilgang: `send()` er grensesnittets ENESTE
+ * metode, INGEN handlingsvalg, INGEN kaller-kontrollert mottaker (mål er
+ * ALLTID transportens egen, allerede konfigurerte destinasjon), INGEN rå
+ * credential eksponert utenfor selve kallet (aldri logget/returnert).
+ *
+ * Produksjons-wiring (`apps/api/src/worker-main.ts`) injiserer DEN SAMME
+ * `TelegramTransport`- og `SecretProvider`-instansen som den ordinære
+ * `telegram.notify`-verktøydefinisjonen selv bruker (SAMME
+ * `credential_ref`=`JARVIS_TELEGRAM_TOKEN`, SAMME mottaker-konfigurasjon via
+ * `TelegramTransport` sin egen `chatId`) - INGEN ny credential-mekanisme,
+ * INGEN parallell Telegram-klient. `transport`/`secrets` er typet som SMALE,
+ * lokale grensesnitt (ikke importert fra `@jarvis/tool-gateway`) - den ekte
+ * `TelegramTransport`/`SecretProvider`-en tilfredsstiller dem strukturelt,
+ * men denne pakken trenger ikke lenger noen avhengighet til
+ * `@jarvis/tool-gateway`/`@jarvis/contracts` for dette (mindre
+ * avhengighetsgraf enn D-180 sin versjon, ikke større).
  */
-export class GatewayAlertSink implements AlertSink {
+export interface EmergencyAlertTransport {
+  invoke(action: "notify", parameters: { message: string }, credential: string): Promise<{ external_id?: string }>;
+}
+
+export interface AlertCredentialSource {
+  get(ref: string): Promise<string | null>;
+}
+
+/** Samme `credential_ref` som den ordinære `telegram.notify`-verktøydefinisjonen (`modules/tool-gateway/src/integrations.ts`) - ingen ny hemmelighet. */
+export const WATCHDOG_TELEGRAM_CREDENTIAL_REF = "JARVIS_TELEGRAM_TOKEN";
+
+export class WatchdogEmergencyAlertSink implements AlertSink {
   constructor(
-    private readonly gateway: ToolGateway,
-    private readonly identity: IdentityContext
+    private readonly transport: EmergencyAlertTransport,
+    private readonly secrets: AlertCredentialSource,
+    private readonly credentialRef: string = WATCHDOG_TELEGRAM_CREDENTIAL_REF
   ) {}
 
   async send(alert: Alert): Promise<void> {
-    const result = await this.gateway.execute({
-      identity: this.identity,
-      tool_id: "telegram",
-      action: "notify",
-      parameters: { message: `[${alert.severity}] ${alert.check}: ${alert.message} (${alert.runbook})` },
-      // Idempotent per (sjekknavn, tidspunkt) - en retry av SAMME tick skal ikke spamme flere ganger.
-      idempotency_key: `watchdog-alert-${alert.check}-${alert.at}`
-    });
-    if (!result.ok) {
-      throw new Error(`watchdog_alert_delivery_failed:${result.reason}`);
+    const credential = await this.secrets.get(this.credentialRef);
+    if (!credential) {
+      throw new Error("watchdog_alert_credential_unavailable");
     }
+    const message = `[${alert.severity}] ${alert.check}: ${alert.message} (${alert.runbook})`;
+    await this.transport.invoke("notify", { message }, credential);
   }
 }
 

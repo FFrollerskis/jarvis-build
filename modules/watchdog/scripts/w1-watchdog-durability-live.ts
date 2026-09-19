@@ -1,12 +1,19 @@
-// D-180 (W1) WATCHDOG PRODUCTION WIRING + DURABLE EMERGENCY SHUTDOWN - HOST LIVE ACCEPTANCE
+// D-180/D-181 (W1 + BLOCKER B1 fix) WATCHDOG PRODUCTION WIRING + DURABLE
+// EMERGENCY SHUTDOWN + EMERGENCY ALERT DELIVERY - HOST LIVE ACCEPTANCE
 //
 // Kjøres AV TOBIAS mot ekte lokal Postgres (docker-compose) på Windows-hosten.
-// Beviser LIVE det D182 fant som REAL_INTERNAL_GAP og D183 rettet:
+// Beviser LIVE det D182 fant som REAL_INTERNAL_GAP (D183 rettet) OG det en
+// uavhengig arkitekt-review av PR #96 fant som BLOCKER B1 (D184 rettet):
 // `costExplosionCheck` sin nødstopp MÅ være synlig for en UAVHENGIG, FERSK
 // `pg.Pool`/`KillSwitch`-instans (kryss-prosess-simulering), overleve en
 // prosess-"restart" (helt ny instans fra bunnen), håndheves av
-// `PolicyGateway.isActiveDurable()`, og ALDRI produsere en usikker
-// dobbelt-mutasjon. SAMME `section()`-/admin-pool-for-scaffold-/
+// `PolicyGateway.isActiveDurable()`, ALDRI produsere en usikker
+// dobbelt-mutasjon - OG watchdog-en må FAKTISK KUNNE VARSLE Tobias etter at
+// den globale kill switchen er aktiv, MENS en ordinær `telegram.notify`
+// gjennom `ToolGateway.execute()` FORBLIR nektet med `kill_switch_active`
+// (BLOCKER B1: D-180 sin opprinnelige `GatewayAlertSink` rutet varselet
+// gjennom akkurat DEN stien, og ble derfor selv nektet av sin egen
+// nødavstenging). SAMME `section()`-/admin-pool-for-scaffold-/
 // selvopprydding-mønster som `k1-owner-control-authority-live.ts` (K1/B1)
 // og `d174-executive-control-surface-live.ts` (B2+B3) - ingen ny
 // akseptanse-mekanisme.
@@ -25,10 +32,14 @@
 // INGEN ekte Telegram-API-kall: varslings-transporten er en INJISERT,
 // SKRIPTBAR fake ved nettverksgrensen (`ScriptedTelegramTransport` under) -
 // SAMME "fake KUN ved nettverksgrensen"-disiplin som `ScriptedWallesterGateway`
-// i `d174-executive-control-surface-live.ts`. `GatewayAlertSink` sin egen
-// kode (den faktiske produksjonsstien via `ToolGateway.execute()`) kjøres
-// UENDRET - kun selve HTTP-kallet til Telegram er erstattet, ingen bot-
-// token/chat trengs for denne akseptansen.
+// i `d174-executive-control-surface-live.ts`. SAMME fake-instans brukes BÅDE
+// som den ordinære `telegram`-verktøytransporten (registrert i `gateway`) OG
+// som `WatchdogEmergencyAlertSink` sin transport - identisk med hvordan
+// produksjons-wiringen (`worker-main.ts`) injiserer DEN SAMME
+// `TelegramTransport`-instansen begge steder. `WatchdogEmergencyAlertSink`
+// sin egen kode (den faktiske produksjonsstien, som BEVISST hopper over
+// `ToolGateway.execute()`) kjøres UENDRET - kun selve HTTP-kallet til
+// Telegram er erstattet.
 
 import { randomUUID } from "node:crypto";
 import pg from "pg";
@@ -37,7 +48,7 @@ import { adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRo
 import { EnvSecretProvider, FallbackSecretProvider, ToolGateway, firstWaveTools } from "@jarvis/tool-gateway";
 import type { ToolTransport } from "@jarvis/tool-gateway";
 import { InMemoryDeviceRegistry, KillSwitch, OwnerControls, PolicyGateway } from "@jarvis/policy";
-import { GatewayAlertSink, Watchdog, costExplosionCheck } from "../src/watchdog.ts";
+import { WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck } from "../src/watchdog.ts";
 import { OwnerControlsService } from "../../owner-controls/src/service.ts";
 import { OwnerControlsTransport, ownerControlsToolDefinitions } from "../../owner-controls/src/transport.ts";
 
@@ -47,11 +58,14 @@ const results: Record<string, Verdict> = {
   q21_runtime_role_safe: "FAIL",
   w1_cost_threshold_triggered_with_test_data: "FAIL",
   w1_durable_kill_switch_active: "FAIL",
+  // D-181 (BLOCKER B1): de to må bevises SAMTIDIG, under SAMME aktive
+  // kill-switch-tilstand - se seksjon 2b.
+  w1_ordinary_telegram_notify_remains_blocked_under_kill_switch: "FAIL",
+  w1_alert_path_attempted: "FAIL",
   w1_fresh_pool_observes_active_state: "FAIL",
   w1_policy_enforcement_observes_active_state: "FAIL",
   w1_restart_style_reconstruction_sees_active_state: "FAIL",
   w1_owner_recovery_via_canonical_path: "FAIL",
-  w1_alert_path_attempted: "FAIL",
   w1_alert_failure_does_not_prevent_shutdown: "FAIL",
   w1_no_duplicate_activation_on_repeated_tick: "FAIL",
   w1_cleanup_state_unchanged: "FAIL",
@@ -86,7 +100,6 @@ const ownerIdentity: IdentityContext = {
   person_id: OWNER_PERSON, tenant_id: OWNER_TENANT, memory_space_id: "personal",
   session_id: `sess-w1-live-${runId}`, device_id: "jarvis-core", channel: "api", auth_strength: "active"
 };
-const watchdogIdentity: IdentityContext = { ...ownerIdentity, session_id: `sess-w1-watchdog-${runId}` };
 const authority = { owner_person_id: OWNER_PERSON, owner_tenants: [OWNER_TENANT] };
 const HARD_LIMIT_ORE = 300_000;
 const SYNTHETIC_COST_KIND = `w1_acceptance_${runId}`;
@@ -109,7 +122,7 @@ async function snapshotOwnerControlState(): Promise<Array<{ control_kind: string
   return rows as Array<{ control_kind: string; control_target: string; reason: string }>;
 }
 
-function buildStack(sidePool: pg.Pool): { killSwitch: KillSwitch; gateway: ToolGateway; watchdog: Watchdog } {
+function buildStack(sidePool: pg.Pool): { killSwitch: KillSwitch; gateway: ToolGateway; watchdog: Watchdog; alertSink: WatchdogEmergencyAlertSink } {
   const killSwitch = new KillSwitch(sidePool, authority);
   const ownerControls = new OwnerControls(killSwitch, sidePool, authority);
   const policy = new PolicyGateway({
@@ -119,12 +132,23 @@ function buildStack(sidePool: pg.Pool): { killSwitch: KillSwitch; gateway: ToolG
   const gateway = new ToolGateway(sidePool, policy, secrets, ownerControls);
   const ownerControlsService = new OwnerControlsService(killSwitch, ownerControls);
   for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(ownerControlsService))) gateway.register(tool);
+  // Den ORDINÆRE `telegram.notify`-verktøydefinisjonen - går gjennom
+  // `ToolGateway.execute()`/`PolicyGateway.authorize()` som normalt, og skal
+  // derfor korrekt NEKTES med `kill_switch_active` når kill switchen er
+  // aktiv (se seksjon 2b). SAMME `scriptedTelegram`-instans som
+  // nødvarsel-sinken under - beviser at BEGGE veiene faktisk deler samme
+  // underliggende transport/credential-konfigurasjon, ikke to divergerende.
   for (const tool of firstWaveTools({ telegram: scriptedTelegram })) gateway.register(tool);
 
-  const alertSink = new GatewayAlertSink(gateway, watchdogIdentity);
+  // D-181 (BLOCKER B1): `WatchdogEmergencyAlertSink` hopper BEVISST over
+  // `gateway`/`policy` (se watchdog.ts sin egen begrunnelse) - injiserer
+  // DEN SAMME `scriptedTelegram`/`secrets`-instansen som den ordinære
+  // registreringen over, SAMME `credential_ref` (default-parameteren i
+  // sinken selv).
+  const alertSink = new WatchdogEmergencyAlertSink(scriptedTelegram, secrets);
   const watchdog = new Watchdog(alertSink, killSwitch);
   watchdog.register(costExplosionCheck(sidePool, killSwitch, OWNER_PERSON, HARD_LIMIT_ORE));
-  return { killSwitch, gateway, watchdog };
+  return { killSwitch, gateway, watchdog, alertSink };
 }
 
 async function main(): Promise<void> {
@@ -166,6 +190,26 @@ async function main(): Promise<void> {
       results.w1_durable_kill_switch_active = active ? "PASS" : "FAIL";
       log(`durable_active=${active} -> ${results.w1_durable_kill_switch_active}`);
     });
+
+    await section(
+      "2b) BLOKKER B1 (D184): BEGGE SAMTIDIG, under SAMME aktive kill-switch-tilstand - ordinær telegram.notify FORBLIR nektet, MENS watchdog-ens EGEN nødvarsel-sti FAKTISK leveres",
+      async () => {
+        const sentBefore = scriptedTelegram.sent.length;
+        // (a) ordinær vei: ToolGateway.execute() -> PolicyGateway.authorize() -> NEKTET.
+        const ordinary = await primary.gateway.execute({
+          identity: ownerIdentity, tool_id: "telegram", action: "notify", parameters: { message: "ordinary-call-should-be-denied" }
+        });
+        const ordinaryBlocked = !ordinary.ok && (ordinary as { reason?: string }).reason === "kill_switch_active";
+        results.w1_ordinary_telegram_notify_remains_blocked_under_kill_switch = ordinaryBlocked ? "PASS" : "FAIL";
+        log(`ordinary_telegram_notify_ok=${ordinary.ok} reason=${(ordinary as { reason?: string }).reason ?? "-"} -> ${results.w1_ordinary_telegram_notify_remains_blocked_under_kill_switch}`);
+
+        // (b) watchdog sin EGEN, dedikerte sti: hopper bevisst over gateway/policy - MÅ fortsatt lykkes.
+        await primary.alertSink.send({ check: "cost_explosion", severity: "critical", message: "B1-proof", runbook: "docs/runbooks/TIER1_RUNBOOKS.md#kostnad", at: new Date().toISOString() });
+        const delivered = scriptedTelegram.sent.length > sentBefore;
+        results.w1_alert_path_attempted = delivered ? "PASS" : "FAIL";
+        log(`emergency_alert_delivered=${delivered} sent_count=${scriptedTelegram.sent.length} -> ${results.w1_alert_path_attempted}`);
+      }
+    );
 
     await section("3) UAVHENGIG, FERSK pool/KillSwitch-instans ser aktiv tilstand umiddelbart (kryss-prosess-simulering)", async () => {
       const freshPool = createPool(configFromEnv());
@@ -217,12 +261,6 @@ async function main(): Promise<void> {
       const ok = after.rows[0]?.n === 1 && after.rows[0]?.last === before.rows[0]?.changed_at;
       results.w1_no_duplicate_activation_on_repeated_tick = ok ? "PASS" : "FAIL";
       log(`rows=${after.rows[0]?.n} changed_at_unchanged=${after.rows[0]?.last === before.rows[0]?.changed_at} -> ${results.w1_no_duplicate_activation_on_repeated_tick}`);
-    });
-
-    await section("7) varslingsforsøk skjedde (alert path attempted)", async () => {
-      const ok = scriptedTelegram.sent.length > 0;
-      results.w1_alert_path_attempted = ok ? "PASS" : "FAIL";
-      log(`telegram_sent_count=${scriptedTelegram.sent.length} -> ${results.w1_alert_path_attempted}`);
     });
 
     await section("8) simulert varslingsfeil FORHINDRER IKKE at den durable nødstoppen forblir aktiv", async () => {

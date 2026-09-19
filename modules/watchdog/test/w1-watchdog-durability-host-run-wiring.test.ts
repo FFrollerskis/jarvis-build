@@ -56,8 +56,31 @@ describe("live-scriptet: ingen ekte Telegram-API-kall, ingen ekte kredensial-mek
     expect(liveScriptSource).toContain("class ScriptedTelegramTransport implements ToolTransport");
     expect(liveScriptSource).not.toContain("api.telegram.org");
   });
-  it("GatewayAlertSink sin egen produksjonskode kjøres UENDRET (kun transporten under er fake)", () => {
-    expect(liveScriptSource).toContain("new GatewayAlertSink(gateway, watchdogIdentity)");
+  it("WatchdogEmergencyAlertSink sin egen produksjonskode kjøres UENDRET (kun transporten under er fake) - D-181/BLOCKER B1", () => {
+    expect(liveScriptSource).toContain("new WatchdogEmergencyAlertSink(scriptedTelegram, secrets)");
+  });
+  it("SAMME scriptedTelegram-instans brukes BÅDE for den ordinære telegram-verktøyregistreringen OG nødvarsel-sinken", () => {
+    expect(liveScriptSource).toMatch(/firstWaveTools\(\{\s*telegram:\s*scriptedTelegram\s*\}\)/);
+    expect(liveScriptSource.match(/new ScriptedTelegramTransport\(\)/g)?.length).toBe(1);
+  });
+});
+
+describe("D-181 (BLOCKER B1): live-scriptet beviser BEGGE samtidig - ordinær telegram.notify nektet, watchdog sin egen sti levert", () => {
+  it("seksjon 2b kjører BÅDE et ordinært gateway.execute(telegram.notify)-kall OG primary.alertSink.send() under SAMME aktive tilstand", () => {
+    const idx = liveScriptSource.indexOf("BLOKKER B1");
+    expect(idx).toBeGreaterThan(-1);
+    const sectionBody = liveScriptSource.slice(idx, idx + 1800);
+    expect(sectionBody).toContain('tool_id: "telegram", action: "notify"');
+    expect(sectionBody).toContain('"kill_switch_active"');
+    expect(sectionBody).toContain("primary.alertSink.send(");
+  });
+  it("seksjon 2b kommer FØR seksjon 3 (fersk-pool), altså mens primary sin kill switch fortsatt er aktiv fra seksjon 2", () => {
+    const s2Idx = liveScriptSource.indexOf('"2) watchdog.tick()');
+    const s2bIdx = liveScriptSource.indexOf("BLOKKER B1");
+    const s3Idx = liveScriptSource.indexOf('"3) UAVHENGIG, FERSK pool');
+    expect(s2Idx).toBeGreaterThan(-1);
+    expect(s2bIdx).toBeGreaterThan(s2Idx);
+    expect(s3Idx).toBeGreaterThan(s2bIdx);
   });
 });
 
@@ -80,11 +103,12 @@ describe("live-scriptet: proof-punktene fra D183 §F er alle representert", () =
     "q21_runtime_role_safe",
     "w1_cost_threshold_triggered_with_test_data",
     "w1_durable_kill_switch_active",
+    "w1_ordinary_telegram_notify_remains_blocked_under_kill_switch",
+    "w1_alert_path_attempted",
     "w1_fresh_pool_observes_active_state",
     "w1_policy_enforcement_observes_active_state",
     "w1_restart_style_reconstruction_sees_active_state",
     "w1_owner_recovery_via_canonical_path",
-    "w1_alert_path_attempted",
     "w1_alert_failure_does_not_prevent_shutdown",
     "w1_no_duplicate_activation_on_repeated_tick",
     "w1_cleanup_state_unchanged",

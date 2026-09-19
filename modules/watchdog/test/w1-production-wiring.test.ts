@@ -21,15 +21,16 @@ const workerMainSource = readSource("../../../apps/api/src/worker-main.ts");
 const mainSource = readSource("../../../apps/api/src/main.ts");
 const watchdogSource = readSource("../src/watchdog.ts");
 const apiPackageJson = readSource("../../../apps/api/package.json");
+const ownerControlStoreSource = readSource("../../policy/src/owner-control-store.ts");
 
 describe("W1: @jarvis/watchdog er faktisk konsumert av worker-main.ts (WATCHDOG_PRODUCTION_WIRED)", () => {
   it("apps/api/package.json lister @jarvis/watchdog som dependency", () => {
     expect(apiPackageJson).toMatch(/"@jarvis\/watchdog":\s*"workspace:\*"/);
   });
 
-  it("worker-main.ts importerer Watchdog/databaseCheck/stuckTasksCheck/costExplosionCheck/GatewayAlertSink fra @jarvis/watchdog", () => {
+  it("worker-main.ts importerer Watchdog/databaseCheck/stuckTasksCheck/costExplosionCheck/WatchdogEmergencyAlertSink fra @jarvis/watchdog", () => {
     expect(workerMainSource).toMatch(
-      /import\s*\{[^}]*GatewayAlertSink[^}]*Watchdog[^}]*costExplosionCheck[^}]*databaseCheck[^}]*stuckTasksCheck[^}]*\}\s*from\s*"@jarvis\/watchdog"/s
+      /import\s*\{[^}]*WatchdogEmergencyAlertSink[^}]*Watchdog[^}]*costExplosionCheck[^}]*databaseCheck[^}]*stuckTasksCheck[^}]*\}\s*from\s*"@jarvis\/watchdog"/s
     );
   });
 
@@ -91,18 +92,55 @@ describe("W1: ingen legacy ikke-durabel killSwitch.activate()-kall gjenstår i w
   });
 });
 
-describe("W1: GatewayAlertSink erstatter den kastende TelegramAlertSink-stubben (WATCHDOG_ALERT_DELIVERY_STATUS)", () => {
+describe("W1: WatchdogEmergencyAlertSink erstatter den kastende TelegramAlertSink-stubben (WATCHDOG_ALERT_DELIVERY_STATUS)", () => {
   it("den gamle, ubetinget-kastende TelegramAlertSink-klassen finnes ikke lenger", () => {
     expect(watchdogSource).not.toContain('throw new Error("telegram_alert_unverified');
   });
 
-  it("GatewayAlertSink sender via ToolGateway.execute({tool_id:\"telegram\", action:\"notify\"}) - samme kanoniske vei som DailyBrief", () => {
-    expect(watchdogSource).toContain("export class GatewayAlertSink implements AlertSink");
-    expect(watchdogSource).toMatch(/tool_id:\s*"telegram",\s*\n?\s*action:\s*"notify"/);
-  });
-
   it("Watchdog.tick() logger (aldri svelger stille) en varslingsfeil, og fortsetter uansett", () => {
     expect(watchdogSource).toContain("watchdog_alert_delivery_failed");
+  });
+});
+
+describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): nødvarselet hopper BEVISST over ToolGateway/PolicyGateway, i stedet for en generell isSelfRecoveryAction()-utvidelse", () => {
+  it("D-180 sin GatewayAlertSink (som rutet varselet gjennom ToolGateway.execute, og dermed ble nektet av sin egen kill-switch-aktivering) finnes ikke lenger", () => {
+    expect(watchdogSource).not.toContain("export class GatewayAlertSink");
+    expect(watchdogSource).not.toMatch(/gateway\.execute\(\{\s*\n?\s*identity:\s*this\.identity,\s*\n?\s*tool_id:\s*"telegram"/);
+  });
+
+  it("WatchdogEmergencyAlertSink kaller transport.invoke() DIREKTE - INGEN ToolGateway/PolicyGateway i kallkjeden", () => {
+    const classIdx = watchdogSource.indexOf("export class WatchdogEmergencyAlertSink");
+    expect(classIdx).toBeGreaterThan(-1);
+    const classBody = watchdogSource.slice(classIdx, classIdx + 1200);
+    expect(classBody).toContain("this.transport.invoke(");
+    expect(classBody).not.toContain("ToolGateway");
+    expect(classBody).not.toContain(".execute(");
+  });
+
+  it("watchdog.ts har INGEN import fra @jarvis/tool-gateway eller @jarvis/contracts (mindre avhengighetsgraf enn D-180, ikke større)", () => {
+    expect(watchdogSource).not.toMatch(/from\s*"@jarvis\/tool-gateway"/);
+    expect(watchdogSource).not.toMatch(/from\s*"@jarvis\/contracts"/);
+  });
+
+  it("nødvarsel-sinkens send()-metode tar KUN et Alert-objekt - ingen kaller-kontrollert mål/chat-parameter i grensesnittet", () => {
+    const classIdx = watchdogSource.indexOf("export class WatchdogEmergencyAlertSink");
+    const classBody = watchdogSource.slice(classIdx, classIdx + 1200);
+    expect(classBody).toMatch(/async send\(alert: Alert\): Promise<void>/);
+    expect(classBody).not.toMatch(/send\([^)]*chat/i);
+    expect(classBody).not.toMatch(/send\([^)]*target/i);
+  });
+
+  it("isSelfRecoveryAction() i modules/policy er IKKE utvidet med telegram - den globale kill-switch-semantikken for ORDINÆR telegram.notify er uendret", () => {
+    expect(ownerControlStoreSource).not.toMatch(/toolId === "telegram"/);
+    expect(ownerControlStoreSource).not.toMatch(/TELEGRAM_SELF_RECOVERY_ACTIONS/);
+  });
+
+  it("worker-main.ts injiserer DEN SAMME telegramTransport/toolSecretProvider-instansen i BÅDE den ordinære telegram-registreringen OG WatchdogEmergencyAlertSink (ingen parallell credential-mekanisme)", () => {
+    expect(workerMainSource).toContain("const telegramTransport = new TelegramTransport();");
+    expect(workerMainSource).toMatch(/telegram:\s*telegramTransport/);
+    expect(workerMainSource).toContain("new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider)");
+    // Ingen ANDRE `new TelegramTransport(` - nøyaktig én instans i hele filen.
+    expect(workerMainSource.match(/new TelegramTransport\(/g)?.length).toBe(1);
   });
 });
 

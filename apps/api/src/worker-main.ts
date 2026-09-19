@@ -46,7 +46,7 @@ import {
 } from "@jarvis/tasks";
 import { KnowledgeSourceRegistry, emailIngestHandler } from "@jarvis/knowledge";
 import { LocalHashEmbedding } from "@jarvis/memory";
-import { GatewayAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck } from "@jarvis/watchdog";
+import { WatchdogEmergencyAlertSink, Watchdog, costExplosionCheck, databaseCheck, stuckTasksCheck } from "@jarvis/watchdog";
 
 // Q-21 (2026-08-15): fail-closed - en manglende/feilkonfigurert JARVIS_DB_USER, eller
 // en superuser/BYPASSRLS-tilkobling, skal ALDRI la workeren starte videre stille.
@@ -133,11 +133,13 @@ const policy = new PolicyGateway({
     owner_tenants: [process.env["JARVIS_TENANT_ID"] ?? "tenant-personal"]
   }
 });
-const toolGateway = new ToolGateway(
-  pool, policy,
-  new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
-  ownerControls
-);
+// D-181 (BLOCKER B1, D184): hoistet til en NAVNGITT konstant (var tidligere
+// inline i ToolGateway-konstruksjonen) slik at NØYAKTIG SAMME
+// `SecretProvider`-instans også kan injiseres i `WatchdogEmergencyAlertSink`
+// under - ingen ny/parallell credential-mekanisme, samme oppløsning som
+// enhver ordinær `telegram.notify`-kaller.
+const toolSecretProvider = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls);
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
@@ -261,9 +263,14 @@ const githubRateLimitController = new GithubRateLimitController(
   new PgGithubRateLimitStore(pool), "JARVIS_GITHUB_TOKEN",
   (event) => console.warn(`[github-rate-limit] ${event.transition} -> ${event.state}${event.retryAt ? ` retry_at=${event.retryAt.toISOString()} source=${event.source}` : ""}`)
 );
+// D-181 (BLOCKER B1, D184): hoistet (var tidligere inline i firstWaveTools()
+// under) slik at NØYAKTIG SAMME `TelegramTransport`-instans også kan
+// injiseres i `WatchdogEmergencyAlertSink` - samme mottaker-konfigurasjon
+// (`chatId`), ingen parallell Telegram-klient.
+const telegramTransport = new TelegramTransport();
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-  github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
+  github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
@@ -332,12 +339,23 @@ const workerIdentity = {
 // derfor UNDER eierens egen, forhåndsautoriserte sovereign-autoritet
 // (D-41), ikke som en separat, uautorisert aktør.
 //
-// `GatewayAlertSink` sender varsler via DEN SAMME kanoniske
-// `toolGateway.execute({tool_id:"telegram", action:"notify"})`-stien som
-// `DailyBrief.deliverViaTelegram()` allerede bruker - ingen ny Telegram-
-// credential-mekanisme, ingen rå token i denne filen.
-const watchdogIdentity = { ...workerIdentity, session_id: "sess-watchdog" } as const;
-const watchdogAlertSink = new GatewayAlertSink(toolGateway, watchdogIdentity);
+// D-181 (BLOCKER B1, arkitekt-order D184 mot PR #96 - retter D-180 sitt
+// gjenoppdagede funn): `GatewayAlertSink` (D-180) sendte varsler via DEN
+// ORDINÆRE `toolGateway.execute({tool_id:"telegram", action:"notify"})`-
+// stien - NØYAKTIG stien `PolicyGateway.authorize()` nekter med
+// `kill_switch_active` når den GLOBALE kill switchen er aktiv (watchdog sin
+// EGEN, nylig durable-gjorte aktivering). Watchdog-en klarte altså å stenge
+// Jarvis ned, men kunne ALDRI varsle om det. `WatchdogEmergencyAlertSink`
+// hopper BEVISST over `ToolGateway.execute()`/`PolicyGateway.authorize()`
+// for KUN dette ene, smale formålet (se watchdog.ts sin egen, fulle
+// begrunnelse) - injiserer DEN SAMME `telegramTransport`/
+// `toolSecretProvider`-instansen som den ordinære `telegram.notify`-
+// verktøydefinisjonen selv bruker (linje ~264/136-139 over) - SAMME
+// credential_ref, SAMME mottaker, INGEN ny credential-mekanisme, INGEN
+// kaller-kontrollert mål. `isSelfRecoveryAction()` er UENDRET - ordinær
+// `telegram.notify` forblir korrekt nektet under en aktiv kill switch for
+// ALLE andre kallere.
+const watchdogAlertSink = new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider);
 const watchdog = new Watchdog(watchdogAlertSink, killSwitch);
 watchdog.register(databaseCheck(pool));
 watchdog.register(stuckTasksCheck(pool));
