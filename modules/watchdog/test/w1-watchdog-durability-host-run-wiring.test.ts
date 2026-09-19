@@ -304,3 +304,34 @@ describe("D191 §F: kill-switch-cleanup og fixture-cleanup kan ALDRI forhindre h
     expect(afterMain).toMatch(/await main\(\);\s*\n\s*finish\(\);/);
   });
 });
+
+describe("D193 (BLOKKER B5, funnet av EKTE host-kjøring run_id=90b827b3): owner_controls.*-kallene i seksjon 9 må kunne resolve BUSINESS_INTERNAL_CREDENTIAL_REF, ALDRI kun EnvSecretProvider", () => {
+  it("live-scriptet importerer BusinessInternalSecretProvider fra @jarvis/business", () => {
+    expect(liveScriptSource).toMatch(/import\s*\{[^}]*BusinessInternalSecretProvider[^}]*\}\s*from\s*"@jarvis\/business"/s);
+  });
+
+  it("buildStack() sin secrets-konstruksjon bruker BusinessInternalSecretProvider som fallback, IKKE en bar EnvSecretProvider-dublett", () => {
+    const secretsIdx = liveScriptSource.indexOf("const secrets = new FallbackSecretProvider(");
+    expect(secretsIdx).toBeGreaterThan(-1);
+    const line = liveScriptSource.slice(secretsIdx, liveScriptSource.indexOf(";", secretsIdx));
+    expect(line).toContain("new EnvSecretProvider()");
+    expect(line).toContain("new BusinessInternalSecretProvider()");
+    // Regresjonsvakt mot NØYAKTIG D-193-defekten: to EnvSecretProvider-instanser i samme kall.
+    expect(line.match(/new EnvSecretProvider\(\)/g)?.length).toBe(1);
+  });
+
+  it("modules/watchdog/package.json deklarerer @jarvis/business som en reell workspace-avhengighet", () => {
+    const packageJson = readSource("../package.json");
+    const parsed = JSON.parse(packageJson) as { dependencies?: Record<string, string> };
+    expect(parsed.dependencies?.["@jarvis/business"]).toBe("workspace:*");
+  });
+
+  it("seksjon 9 sitt owner_controls.*-kall er UENDRET (samme handlinger/identitet) - kun secrets-oppsettet var defekten, ikke selve testlogikken", () => {
+    const s9Idx = liveScriptSource.indexOf('"9) eier-gjenoppretting via KANONISK vei');
+    expect(s9Idx).toBeGreaterThan(-1);
+    const block = liveScriptSource.slice(s9Idx, liveScriptSource.indexOf('"10) audit-bevis', s9Idx));
+    expect(block).toContain('tool_id: "owner_controls", action: "deactivate_kill_switch"');
+    expect(block).toContain('tool_id: "owner_controls", action: "get_control_state"');
+    expect(block).toContain("identity: ownerIdentity");
+  });
+});

@@ -44,6 +44,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import type { IdentityContext, JsonValue } from "@jarvis/contracts";
+import { BusinessInternalSecretProvider } from "@jarvis/business";
 import {
   adminConfigFromEnv, assertRuntimeCredentialsConfigured, assertRuntimeRoleSafe, configFromEnv, createPool,
   PgApprovalStore, withTenantTransaction
@@ -162,7 +163,21 @@ function buildStack(sidePool: pg.Pool): {
   const policy = new PolicyGateway({
     devices: new InMemoryDeviceRegistry(), nonces: new PgApprovalStore(sidePool), killSwitch, controls: ownerControls, authority
   });
-  const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new EnvSecretProvider());
+  // D-193 (BLOCKER B5, funnet av EKTE host-kjøring run_id=90b827b3): seksjon 9
+  // sitt `owner_controls.*`-kall bruker SAMME delte `credential_ref`
+  // (`BUSINESS_INTERNAL_CREDENTIAL_REF`) som `situations`/`executive` (se
+  // gateway.ts sin egen D-166-begrunnelse) - en intern sentinel som ALDRI
+  // finnes i ekte env, KUN levert av `BusinessInternalSecretProvider` (SAMME
+  // mønster som `k1-owner-control-authority-live.ts`/`d174-executive-control-
+  // surface-live.ts`/alle finance-live-scriptene). En bar
+  // `EnvSecretProvider`-fallback alene (FØR denne fiksen) gjorde `secrets.get()`
+  // returnere `null` for DENNE refen -> `ToolGateway.execute()` avslo BEGGE
+  // `deactivate_kill_switch` OG `get_control_state` med `credential_unavailable`
+  // - FØR selve policy-/self-recovery-logikken i det hele tatt fikk betydning.
+  // Produksjonswiringen (`apps/api/src/main.ts`/`worker-main.ts`) var ALDRI
+  // berørt - begge har alltid hatt `BusinessInternalSecretProvider` med. Se
+  // D-193 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse/host-bevis.
+  const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
   const gateway = new ToolGateway(sidePool, policy, secrets, ownerControls);
   const ownerControlsService = new OwnerControlsService(killSwitch, ownerControls);
   for (const tool of ownerControlsToolDefinitions(new OwnerControlsTransport(ownerControlsService))) gateway.register(tool);

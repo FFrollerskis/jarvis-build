@@ -1,10 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/w1-watchdog-runtime-durability`, PR #96 - draft, åpen, CI
-GRØNT på eksakt HEAD `34080a6396b5502211e378ce0a3b07d1f934228e`, base
-`main=9ede3ac1d2e32e708d38104e7a6869772774d628` = PR #95 sin merge-commit). Aktiv oppgave: **fullføre
-PR #96 (W1) helt - eneste gjenstående steg er ekte host-akseptanse (krever Tobias sin Windows/Docker/
-Postgres-maskin, kan ikke kjøres fra denne sandkassen).**
+**Oppdatert:** 2026-09-19 (branch `claude/w1-watchdog-runtime-durability`, PR #96 - draft, åpen). Første
+ekte host-kjøring (Tobias, Windows/Docker/Postgres, `run_id=90b827b3`, mot HEAD `82c45b0`) fant BLOKKER
+B5 (D-193) - fikset, IKKE re-kjørt på host ennå. Aktiv oppgave: **push B5-fiksen, vent CI, be Tobias
+kjøre host-akseptansen på nytt.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -22,26 +21,28 @@ fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.
 ## Hvor `main`/PR #96 står nå
 
 - **PR #95 (B2+B3, D-174→D-179) er MERGET til `main`** (`MERGE_SHA=9ede3ac1...`).
-- **PR #96 (`claude/w1-watchdog-runtime-durability`) er ÅPEN, DRAFT, CI GRØNT på HEAD `34080a6`.**
-  Full sekvens D-180→D-192 er nå logget i DECISIONS_AND_ASSUMPTIONS.md (D-182/186/187/190/191/192 ble
-  lagt til i denne økten - de manglet fra loggen selv om de var GitHub-issue-postet og kodet/testet).
-  W1 (watchdog: databaseCheck/stuckTasksCheck/costExplosionCheck) er nå: produksjonswiret,
-  durabel/delt kill-switch-aktivering, nødvarsel som overlever egen kill switch, config-validert
-  (fail-closed mot NaN-hardgrense), og RLS-tenant-skopet under den ekte runtime-rollen (D-191/B4 - den
-  alvorligste av rettelsene: kostnadssjekken kunne strukturelt ALDRI utløses i produksjon før denne
-  fiksen). Alt kode-/CI-bevist. **`HOST_ACCEPTANCE_STATUS=REQUIRES_RERUN`** - IKKE kjørt ennå for denne
-  HEAD-en.
+- **PR #96 (`claude/w1-watchdog-runtime-durability`) er ÅPEN, DRAFT.** Full sekvens D-180→D-193 er nå
+  logget i DECISIONS_AND_ASSUMPTIONS.md.
+- **D-193 (BLOKKER B5, 2026-09-19):** Tobias sin FØRSTE ekte host-kjøring (`run_id=90b827b3`) ga 15/16
+  PASS - selve W1-mekanismen (durabel kill switch, nødvarsel som overlever egen kill switch, kryss-
+  prosess-/restart-simulering, policy-håndhevelse, ingen duplikat-aktivering, opprydding) er DERMED
+  LIVE-BEVIST. Seksjon 9 ("eier-gjenoppretting via KANONISK vei",
+  `owner_controls.deactivate_kill_switch`/`get_control_state`) FEILET - diagnostisert som en
+  harness-defekt (manglende `BusinessInternalSecretProvider` i `w1-watchdog-durability-live.ts` sin
+  `secrets`-oppsett, IKKE noe galt i produksjonskoden - `main.ts`/`worker-main.ts` har alltid hatt dette
+  riktig). Fikset, 4 nye regresjonstester, typecheck/lint/95 tester grønt lokalt. **IKKE re-kjørt på
+  host ennå** - `HOST_ACCEPTANCE_STATUS=REQUIRES_RERUN` FORBLIR til en fersk kjøring bekrefter B5-fiksen
+  OG at de 15 allerede-PASS-markørene fortsatt er PASS.
 - **PR #87** forblir ÅPEN, IKKE rørt (`mergeable=CONFLICTING` mot main, klassifisert
   `STALE_OR_SUPERSEDED`). Neste i køen ETTER PR #96 er lukket.
 - **V1 Value Track** (D181 sitt funn, `INTERNAL_BUILD_COMPLETE`-relatert) IKKE startet.
 
 ## Blokkeringer
 
-1. **Host-akseptanse for W1 (`w1-watchdog-durability-host-run.ts`) er `REQUIRES_RERUN`** - krever
-   Tobias sin ekte Windows/Docker/Postgres-host. Kommando (fra repo-roten, på hosten):
+1. **Host-akseptanse for W1 er `REQUIRES_RERUN`** - krever Tobias sin ekte Windows/Docker/Postgres-host
+   (samme kommando som før, kjøres fra repo-roten på hosten, ETTER at branchen er oppdatert til ny HEAD):
    `node --env-file=.env --experimental-transform-types modules/watchdog/scripts/w1-watchdog-durability-host-run.ts`
-   Se scriptets filhode for sikkerhetsmerknader (aktiverer ekte kill switch kortvarig, kjør ikke
-   samtidig med annen Jarvis-bruk). Suksess = script avslutter med `hard_fail=false` i sammendraget.
+   Suksess = script avslutter med `hard_fail=false` i sammendraget (ALLE 16 markører PASS, ikke bare 15).
 2. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS`** (D-170) - UENDRET, dekker resten av masterplanen utover
    W1: AI-leverandørfamilier, Growth-stack live-evidens, reelle Finance-transaksjoner (Stripe),
    iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
@@ -49,10 +50,12 @@ fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.
 
 ## Neste oppgave
 
-1. Tobias kjører W1 host-akseptanse (kommando over) og gir Claude resultatet (output/`hard_fail`).
-2. Går den grønt: Claude merger PR #96 selv (D-192 stående fullmakt - normal two-parent merge, ingen
-   force/squash/rebase), oppdaterer SOVEREIGN_GRADUATION_MATRIX.md sin W1-rad til
+1. Push D-193/B5-fiksen, vent på grønn CI på ny HEAD.
+2. Tobias oppdaterer sin lokale checkout (`git pull origin claude/w1-watchdog-runtime-durability`) og
+   kjører W1 host-akseptanse på nytt (kommando over), gir Claude resultatet.
+3. Går den grønt (16/16): Claude merger PR #96 selv (D-192 stående fullmakt - normal two-parent merge,
+   ingen force/squash/rebase), oppdaterer SOVEREIGN_GRADUATION_MATRIX.md sin W1-rad til
    `HOST_ACCEPTANCE_STATUS=PASS`, varsler Tobias.
-3. Deretter: rydde/reissue PR #87, så videre bygging av gjenstående plan-elementer direkte med Tobias
+4. Deretter: rydde/reissue PR #87, så videre bygging av gjenstående plan-elementer direkte med Tobias
    (prioritert rekkefølge avklares i chat), inkl. en samlet oversikt over hvilke API-nøkler/
    kontoer/MCP-koblinger som trengs for de eksterne blokkeringene i punkt 2 over.

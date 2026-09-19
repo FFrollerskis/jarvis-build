@@ -935,6 +935,9 @@ importers:
 
   modules/watchdog:
     dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
       '@jarvis/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
