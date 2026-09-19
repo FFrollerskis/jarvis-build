@@ -641,7 +641,18 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     finance: { service: financeService, cards: cardService },
     conversation: conversationEngine
   };
-  setInterval(() => void worker.drain().catch(() => undefined), 2_000).unref();
+  // D-196: samme drain-løkke som worker-main.ts (linje ~486) - MEN den
+  // logget ALDRI en `tick()`-feil her (feil under selve claim/complete/fail-
+  // kallene mot DB, ikke en per-oppgave-handler-feil - de er allerede
+  // sikkert isolert inne i `InProcessWorker.tick()` og skrevet til
+  // `queue.fail()`). En slik feil ville stille stanset denne prosessens
+  // "executive"-oppgavekø (ConversationEngine sin `tasks.create()`-vei) UTEN
+  // noe varsel - samme leksjon som D-180 allerede fastslo for
+  // `Watchdog.tick()`, aldri anvendt på DENNE identiske mekanismen.
+  setInterval(
+    () => void worker.drain().catch((err) => console.error(JSON.stringify({ msg: "drain_error", error: (err as Error).message }))),
+    2_000
+  ).unref();
 
   const dailyBrief = new DailyBrief([
     tasksSource(pool), buildStatusSource(toolGateway),
