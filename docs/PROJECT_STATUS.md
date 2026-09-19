@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/ua11-executive-dashboard-readonly`, fra fersk `origin/main`
-HEAD `7c1bdc7`, som inkluderer D-198/PR #103 MERGET). **PR #95/#96(W1)/#98/#87/#99(D-194)/#100(D-195)/
-#101(D-196)/#102(D-197)/#103(D-198) er ALLE MERGET.** Aktiv oppgave: **D-199 (UA-11 Executive
-dashboard-UI, lese-delen) - klar for push/PR under D-192.**
+**Oppdatert:** 2026-09-19 (branch `claude/status-sync-post-d199`, fra fersk `origin/main` HEAD
+`424a628`, som inkluderer D-199/PR #104 MERGET). **PR #95/#96(W1)/#98/#87/#99(D-194)/#100(D-195)/
+#101(D-196)/#102(D-197)/#103(D-198)/#104(D-199) er ALLE MERGET.** Ingen aktiv kodeoppgave akkurat nå -
+neste anbefalte oppgave er UA-11 "K2" (se under).
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -18,7 +18,7 @@ består/ingen åpne funn. **D-198 og D-199 eksplisitt delegert av Tobias** - D-1
 ("din call, fortsett med det du mener er riktig") og D-199s prioriteringsrekkefølge ("Begge, din
 prioriterte rekkefølge" - dashboard-UI FØR UA-11 K2) avgjort/utført av Claude selv. Se D-192 i
 DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet. Brukt for PR #96, #98, #87, #99, #100,
-#101, #102, #103 og kommende D-199-PR.
+#101, #102, #103, #104.
 
 ## Hvor `main` står nå
 
@@ -34,25 +34,22 @@ DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet. Brukt for PR #96,
   hendelsene) og BEVISST IKKE V2s cross-channel-visning (samme overlapp-begrunnelse). Ekstraherte
   `DailyBrief.deliverViaTelegram()` sin chunket/idempotente Telegram-leverings-mekanisme til en delt
   `deliverChunkedTextViaTelegram()` FØR den fikk en andre bruker. 16 nye tester. Se D-198.
-- **D-199 (UA-11 Executive dashboard-UI, lese-delen, branch `claude/ua11-executive-dashboard-readonly`,
-  commit `6f2d695`, IKKE PUSHET ENNÅ):** `modules/executive` sitt fullt bygde 17-handlings
-  `executive.*` ToolGateway-namespace hadde INGEN HTTP-rute/UI. Bygget KUN de to lese-handlingene
-  (`get_attention_queue`, `get_control_surface_status`) via ny `POST /executive/query` (hardkodet
-  allowlist, samme grant-autoritet som `/chat`/`/brief`) + ny `GET /dashboard`
-  (`apps/web/dashboard.html`, samme enhetsnøkkel-/grant-flyt som `apps/web/index.html`). De 15
-  mutasjonshandlingene (pause/resume/kill-switch/revoke osv.) forblir BEVISST utenfor allowlistet -
-  egen, senere slice. 16 nye tester (10 e2e - ekte HTTP/Postgres, ikke kjørt lokalt pga.
-  sandbox-`initdb`-begrensning, verifiseres av CI; 6 DB-uavhengig strukturell wiring-vakt, kjørt og
-  grønt lokalt, 6/6). Se D-199.
+- **PR #104 (D-199, UA-11 Executive dashboard-UI, lese-delen) MERGET** (`424a628`):
+  `modules/executive` sitt fullt bygde 17-handlings `executive.*` ToolGateway-namespace hadde INGEN
+  HTTP-rute/UI. Bygget KUN de to lese-handlingene (`get_attention_queue`, `get_control_surface_status`)
+  via ny `POST /executive/query` (hardkodet allowlist, samme grant-autoritet som `/chat`/`/brief`) +
+  ny `GET /dashboard` (`apps/web/dashboard.html`, samme enhetsnøkkel-/grant-flyt som
+  `apps/web/index.html`). De 15 mutasjonshandlingene (pause/resume/kill-switch/revoke osv.) forblir
+  BEVISST utenfor allowlistet - egen, senere slice. 16 nye tester (10 e2e - ekte HTTP/Postgres, CI-grønt;
+  6 DB-uavhengig strukturell wiring-vakt, kjørt og grønt lokalt, 6/6). Alle 6 CI-sjekker grønne på begge
+  runs (build-test/gitleaks/windows-git-auth), fersk HEAD/base-guard verifisert rett før merge. Se D-199.
 
-**MERK (selvkorrigert denne økten):** D-199-arbeidet ble først ved en feil committet på toppen av den
-allerede D-198-PR-mergede `claude/v4-weekly-business-brief-push`-branchen (PR #103 hadde allerede
-merget da nye commits ble lagt oppå den samme lokale branchen). Oppdaget og rettet FØR push til feil
-sted forårsaket skade: D-199-commiten ble cherry-picket over på en FERSK branch fra oppdatert
-`origin/main` (`claude/ua11-executive-dashboard-readonly`), samme mønster CLAUDE.md foreskriver for en
-allerede-merget branch. `claude/v4-weekly-business-brief-push` (nå med tre commits utover den mergede
-PR #103, aldri brukt av noen åpen PR) er forlatt uten videre bruk - INGEN destruktiv handling utført
-(ingen branch slettet/force-pushet).
+**MERK (selvkorrigert forrige økt, ferdig håndtert):** D-199-arbeidet ble først ved en feil committet
+på toppen av den allerede D-198-PR-mergede `claude/v4-weekly-business-brief-push`-branchen. Oppdaget og
+rettet FØR push til feil sted forårsaket skade: D-199-commiten ble cherry-picket over på en fersk branch
+fra oppdatert `origin/main`, som deretter ble PR #104 og er nå mergeT. `claude/v4-weekly-business-brief-
+push` (med tre commits utover den mergede PR #103, aldri brukt av noen åpen PR) er forlatt uten videre
+bruk - ingen destruktiv handling utført.
 
 ## Blokkeringer
 
@@ -63,11 +60,10 @@ resten av masterplanen: AI-leverandørfamilier, Growth-stack live-evidens, reell
 
 ## Neste oppgave
 
-1. Push `claude/ua11-executive-dashboard-readonly`, åpne draft-PR for D-199, vent på CI, merge under
-   D-192.
-2. Videre kodbart masterplan-arbeid (samme "fullfør planen til credential-grensen"-oppdrag):
-   - UA-11 Executive Mode "K2": decision log/scenarios/risk register/OKRs/delegation board (navngitt
-     i masterplanen, zero kode, zero ekstern avhengighet - ingen eksisterende kanonisk kilde å
-     komponere fra, krever ny datamodell fra bunnen).
-3. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+1. **UA-11 Executive Mode "K2":** decision log/scenarios/risk register/OKRs/delegation board (navngitt
+   i masterplanen, zero kode, zero ekstern avhengighet - ingen eksisterende kanonisk kilde å komponere
+   fra, krever en ny datamodell designet fra bunnen - genuint åpen-endt, i motsetning til dashboard-UI-en
+   som hadde en ferdigbygd backend å koble til). Vurder å avklare akseptansekriterier med Tobias før
+   implementering starter, gitt fraværet av eksisterende mønster.
+2. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer.
