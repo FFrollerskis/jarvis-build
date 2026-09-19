@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/w1-watchdog-runtime-durability`, PR #96 - draft, åpen). W1 er
-nå FULLT host-bevist (Tobias, ekte Windows/Docker/Postgres, `run_id=28c2059a`, `hard_fail=false`, 16/16
-markører PASS). Aktiv oppgave: **siste pre-merge-sjekker, deretter merge PR #96 (D-192 stående
-fullmakt).**
+**Oppdatert:** 2026-09-19 (branch `claude/post-w1-merge-status` av `main`). **PR #96 (W1) er MERGET til
+`main`** (`MERGE_SHA=9f13223d09b354bb0698169cc5be45d3bdc3063e`, normal two-parent merge, under D-192
+stående fullmakt). Aktiv oppgave: **rydde/reissue PR #87, deretter videre bygging av gjenstående
+plan-elementer direkte med Tobias.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -16,38 +16,37 @@ planen sammen med Claude uten ChatGPT-arkitekten som mellomledd. issue #68 BEHOL
 FULLMAKT til å merge rutinemessige PR-er selv når CI er grønt/tester består/ingen åpne funn - varsler,
 spør ikke. `HARD_EXTERNAL_BLOCKER` (credentials/betaling/fysisk host-handling/juridisk aksept) stopper
 fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.md og oppdatert
-`CLAUDE.md` §Merge-autoritet.
+`CLAUDE.md` §Merge-autoritet. **Denne posten er selve det FØRSTE eksemplet på fullmakten i bruk** - PR
+#96 ble merget uten en separat ChatGPT-forhåndsreview, kun mot Tobias sin egen sanntids
+chat-tilstedeværelse + ekte host-akseptansebevis.
 
-## Hvor `main`/PR #96 står nå
+## Hvor `main` står nå
 
-- **PR #95 (B2+B3, D-174→D-179) er MERGET til `main`** (`MERGE_SHA=9ede3ac1...`).
-- **PR #96 (`claude/w1-watchdog-runtime-durability`) er ÅPEN, DRAFT, CI GRØNT på HEAD `97a86d2`.**
-  Full sekvens D-180→D-193 logget i DECISIONS_AND_ASSUMPTIONS.md.
-- **D-193 (BLOKKER B5) BEKREFTET LIVE (2026-09-19):** Tobias sin ANDRE host-kjøring
-  (`run_id=28c2059a`, mot HEAD `97a86d2`) ga 16/16 PASS, `hard_fail=false` - inkl. seksjon 9 (eier-
-  gjenoppretting via kanonisk `owner_controls.*`-vei), som feilet i FØRSTE kjøring (`run_id=90b827b3`)
-  pga. en harness-only credential-provider-defekt (fikset, ikke produksjonskode). W1 er dermed FULLT
-  live-bevist: `HOST_ACCEPTANCE_STATUS=PASS`.
+- **PR #95 (B2+B3, D-174→D-179) MERGET** (`MERGE_SHA=9ede3ac1...`).
+- **PR #96 (W1, D-180→D-193) MERGET** (`MERGE_SHA=9f13223...`, 2026-09-19). `@jarvis/watchdog` er nå
+  produksjonswiret i `worker-main.ts`, med durabel/delt kill-switch-aktivering, nødvarsel som overlever
+  egen kill switch, fail-closed config-validering, RLS-tenant-skopet kostnadssjekk, og eier-
+  gjenoppretting via kanonisk `owner_controls.*`-vei - **ALT host-bevist** (Tobias, ekte Windows/Docker/
+  Postgres, `run_id=28c2059a`, `hard_fail=false`, 16/16 markører PASS). Full D-180→D-193-historikk i
+  DECISIONS_AND_ASSUMPTIONS.md.
+  - Merket: CI feilet forbigående to ganger på siste commit (`runner_id=0`, ingen runner tildelt på
+    ~3 sek) - diagnostisert som en CI-infrastrukturhikke (mulig midlertidig runner-kapasitetsbegrensning
+    for kontoen), IKKE en kodefeil (alle andre commits på branchen bygget/testet normalt med ekte
+    varighet). Tredje forsøk kjørte normalt og ble grønt.
 - **PR #87** forblir ÅPEN, IKKE rørt (`mergeable=CONFLICTING` mot main, klassifisert
-  `STALE_OR_SUPERSEDED`). Neste i køen ETTER PR #96 er lukket.
+  `STALE_OR_SUPERSEDED`). Neste i køen.
 - **V1 Value Track** (D181 sitt funn, `INTERNAL_BUILD_COMPLETE`-relatert) IKKE startet.
 
 ## Blokkeringer
 
-Ingen kjente blokkeringer for PR #96 selv. Gjenstår kun pre-merge-verifisering (fresh fetch, HEAD-/
-base-guard, ingen åpne review-tråder) før merge under D-192 sin stående fullmakt.
-
-`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - UENDRET, dekker resten av masterplanen utover W1:
-AI-leverandørfamilier, Growth-stack live-evidens, reelle Finance-transaksjoner (Stripe), iPhone/Watch/
-Home/Personal/Health LIVE, off-site backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md` for
-full oversikt. `SOVEREIGN_COMPLETE=false` FORBLIR (uavhengig av PR #96 sin merge).
+Ingen kjente blokkeringer for videre arbeid akkurat nå. `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) -
+UENDRET, dekker resten av masterplanen: AI-leverandørfamilier, Growth-stack live-evidens, reelle
+Finance-transaksjoner (Stripe), iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
+`docs/SOVEREIGN_GRADUATION_MATRIX.md` for full oversikt. `SOVEREIGN_COMPLETE=false` FORBLIR.
 
 ## Neste oppgave
 
-1. Pre-merge-sjekk (fresh fetch, PR fortsatt åpen/draft/unmerget, exact HEAD/base, ingen åpne
-   review-tråder), deretter merge PR #96 til `main` (D-192 - normal two-parent merge).
-2. Poste avsluttende `CLAUDE_REPORT` til issue #68 (D-192 holder issue #68 som logg).
-3. Post-merge: fresh-read `main`, oppdater denne filen igjen med reelt post-merge-status.
-4. Deretter: rydde/reissue PR #87, så videre bygging av gjenstående plan-elementer direkte med Tobias
-   (prioritert rekkefølge avklares i chat), inkl. en samlet oversikt over hvilke API-nøkler/
-   kontoer/MCP-koblinger som trengs for de eksterne blokkeringene nevnt over.
+1. Rydde opp/reissue PR #87 (stale, konflikt mot main).
+2. Videre bygging av gjenstående plan-elementer direkte med Tobias (D-192 arbeidsform) - prioritert
+   rekkefølge avklares i chat, inkl. en samlet oversikt over hvilke API-nøkler/kontoer/MCP-koblinger som
+   trengs for de eksterne blokkeringene nevnt over.
