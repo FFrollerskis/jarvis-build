@@ -142,6 +142,35 @@ describe("L: Q-21 runtime-DB-oppførsel er urørt av denne closeout-fiksen (uend
   });
 });
 
+describe("M: BO-05 daglig morgenlevering bruker DailyBrief.deliverViaTelegram() (idempotency-nøklet per chunk), ALDRI den generiske sendTelegram-closuren (D-194)", () => {
+  // D-194: den generiske `sendTelegram`-closuren (delt med TelegramCommandPoller
+  // sine svar) har verken idempotency-nøkkel eller sjekker gateway-resultatet -
+  // en re-kjørt DailyScheduler-jobb (f.eks. etter en prosessrestart midt i en
+  // flerdelt levering) kunne derfor duplisere allerede sendte deler, og en stille
+  // tapt Telegram-levering ble aldri logget/oppdaget. `DailyBrief.deliverViaTelegram()`
+  // nøkler hver chunk på `brief.generated_at`+indeks og returnerer `false` ved
+  // første mislykkede chunk.
+  it("main.ts sitt DailyScheduler(pool).start(...)-kall for morgenleveringen kaller DailyBrief.deliverViaTelegram(toolGateway, ownerIdentity, brief) - IKKE sendTelegram(DailyBrief.render(...))", () => {
+    const schedulerIdx = mainSource.indexOf("BO-05: reboot-durabel morgenlevering");
+    expect(schedulerIdx).toBeGreaterThan(-1);
+    const block = mainSource.slice(schedulerIdx, mainSource.indexOf("\n  }", schedulerIdx));
+    expect(block).toMatch(/DailyBrief\.deliverViaTelegram\(\s*toolGateway,\s*ownerIdentity as never,\s*brief\s*\)/);
+    expect(block).not.toMatch(/sendTelegram\(DailyBrief\.render/);
+  });
+
+  it("logger en feil (console.error med daily_brief_delivery_failed) hvis leveringen returnerer false - stille tap er ikke tillatt", () => {
+    const schedulerIdx = mainSource.indexOf("BO-05: reboot-durabel morgenlevering");
+    const block = mainSource.slice(schedulerIdx, mainSource.indexOf("\n  }", schedulerIdx));
+    expect(block).toMatch(/if\s*\(!delivered\)\s*\{/);
+    expect(block).toContain("daily_brief_delivery_failed");
+  });
+
+  it("sendTelegram-closuren finnes fortsatt (uendret) for TelegramCommandPoller sine generiske svar - denne fiksen fjerner den IKKE, kun morgenleverings-bruken av den", () => {
+    expect(mainSource).toMatch(/const sendTelegram = async \(text: string\) => \{/);
+    expect(mainSource).toMatch(/\}, sendTelegram\)\.start\(\);/);
+  });
+});
+
 describe("D: alle 14 implementerte Drive-handlinger forblir registrert i firstWaveTools() (uendret siden D-41/D-42) - denne fiksen la KUN til registreringsveien inn i runtime, ikke definisjonene selv", () => {
   it("firstWaveTools({ drive: <transport> }) inneholder alle A/C/D-klasse Drive-handlingene", () => {
     const definitions = firstWaveTools({});

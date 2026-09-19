@@ -748,8 +748,21 @@ porter: se docs/RUNTIME_GATES.md`;
       }
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).
+    // Bruker DailyBrief.deliverViaTelegram() (ikke den generiske sendTelegram-
+    // closuren over) FORDI den idempotency-nøkler hver chunk på
+    // brief.generated_at+indeks - en re-kjørt/gjentatt levering (f.eks. etter
+    // en prosessrestart midt i en flerdelt brief) kan derfor aldri duplisere
+    // en allerede sendt del. sendTelegram selv har ingen idempotency-nøkkel og
+    // sjekker heller ikke gateway-resultatet - fin for generiske
+    // kommandosvar (TelegramCommandPoller over), men FEIL for den daglige
+    // morgenleveringen, der en stille tapt levering ville sett ut som
+    // "jobb fullført" for DailyScheduler.
     new DailyScheduler(pool).start(async () => {
-      await sendTelegram(DailyBrief.render(await dailyBrief.generate(ownerIdentity as never)));
+      const brief = await dailyBrief.generate(ownerIdentity as never);
+      const delivered = await DailyBrief.deliverViaTelegram(toolGateway, ownerIdentity as never, brief);
+      if (!delivered) {
+        console.error(JSON.stringify({ msg: "daily_brief_delivery_failed", generated_at: brief.generated_at }));
+      }
     });
   }
   // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2) §12:
