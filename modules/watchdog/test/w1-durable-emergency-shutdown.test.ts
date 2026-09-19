@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ensureRuntimeRole, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { InMemoryDeviceRegistry, InMemoryNonceStore, KillSwitch, PolicyGateway } from "@jarvis/policy";
@@ -418,6 +418,16 @@ describe("D191 §B4/E10: costExplosionCheck er RLS-tenant-skopet under en EKTE, 
 
   afterAll(async () => {
     await runtimePool?.end();
+  });
+
+  // D-191: filen har ingen automatisk tilstandsnullstilling mellom describe-
+  // blokker - forrige test i filen ("7b") lar med hensikt kill switchen stå
+  // AKTIV etter seg (for å bevise at varselfeil ikke ruller tilbake shutdown).
+  // Uten en beforeEach her ville denne blokkens FØRSTE test arve den
+  // tilstanden. afterEach beholdes for å rydde etter egne tester også.
+  beforeEach(async () => {
+    await adminPool.query("DELETE FROM cost_events WHERE tenant_id IN ($1,$2)", [TENANT, TENANT_B]);
+    await adminPool.query("DELETE FROM owner_control_state WHERE control_kind = 'kill_switch'");
   });
 
   afterEach(async () => {
