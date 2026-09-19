@@ -149,6 +149,34 @@ export function buildStatusSource(gateway: ToolGateway | null, statusFile = "doc
   };
 }
 
+/**
+ * D-198 (V4-revisjon): DEN ene chunket-idempotent-Telegram-leveringsmekanismen
+ * - eksplisitt EKSTRAHERT fra `DailyBrief.deliverViaTelegram()` slik at enhver
+ * FREMTIDIG scheduler-drevet levering (V4 sin ukentlige business-brief er den
+ * FØRSTE) bruker NØYAKTIG samme kode, aldri en kopiert-og-driftet variant.
+ * Samme leksjon som D-196 fastslo (to identiske mekanismer som stille
+ * divergerer er en reell feilklasse) - her strukturelt umulig fra starten av,
+ * siden det kun finnes ÉN implementasjon å kalle. `idempotencyPrefix` MÅ være
+ * unik per leveranse-KILDE (aldri gjenbrukt på tvers av to ulike
+ * brief-typer/tenants) - selve chunk-indeksen legges til her, ALDRI av kalleren.
+ */
+export async function deliverChunkedTextViaTelegram(
+  gateway: ToolGateway,
+  identity: IdentityContext,
+  text: string,
+  idempotencyPrefix: string
+): Promise<boolean> {
+  for (let i = 0; i < text.length; i += 3900) {
+    const result = await gateway.execute({
+      identity, tool_id: "telegram", action: "notify",
+      parameters: { message: text.slice(i, i + 3900) },
+      idempotency_key: `${idempotencyPrefix}-${i}`
+    });
+    if (!result.ok) return false;
+  }
+  return true;
+}
+
 export class DailyBrief {
   constructor(
     private readonly sources: BriefSource[],
@@ -229,16 +257,7 @@ export class DailyBrief {
 
   /** Telegram-levering: kompakt mobilformat, chunket ≤3900 tegn, via Tool Gateway (policy/audit). */
   static async deliverViaTelegram(gateway: ToolGateway, identity: IdentityContext, brief: BriefArtifact): Promise<boolean> {
-    const text = DailyBrief.render(brief);
-    for (let i = 0; i < text.length; i += 3900) {
-      const result = await gateway.execute({
-        identity, tool_id: "telegram", action: "notify",
-        parameters: { message: text.slice(i, i + 3900) },
-        idempotency_key: `brief-${brief.generated_at}-${i}`
-      });
-      if (!result.ok) return false;
-    }
-    return true;
+    return deliverChunkedTextViaTelegram(gateway, identity, DailyBrief.render(brief), `brief-${brief.generated_at}`);
   }
 
   static render(brief: BriefArtifact): string {

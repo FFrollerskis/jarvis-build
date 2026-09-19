@@ -15,7 +15,11 @@ import type { BriefItem, BriefSource } from "@jarvis/tool-gateway";
 import { BusinessService } from "../src/service.ts";
 import { OpenLoopService } from "../src/open-loop-service.ts";
 import { BusinessTransport } from "../src/transport.ts";
-import { BUSINESS_DOMAIN_COVERAGE, businessOpenLoopsSource, generateWeeklyBrief, renderDomainCoverage, renderWeeklyBrief } from "../src/business-brief.ts";
+import {
+  BUSINESS_DOMAIN_COVERAGE, businessOpenLoopsSource, generateWeeklyBrief, isWeeklyBriefDay, renderDomainCoverage,
+  renderWeeklyBrief, runBusinessWeeklyBriefForAllTenants
+} from "../src/business-brief.ts";
+import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
 
 /**
  * UA-3 next slice (D-53) §13/§15: business-brief-testmatrise. Daglig brief
@@ -479,5 +483,90 @@ describe("F (D-90): BusinessTransport.get_business_brief injiserer EKSTRA BriefS
       const source = await readFile(fileURLToPath(new URL(f, import.meta.url)), "utf8");
       expect(source).not.toMatch(/from ["']@jarvis\/growth["']/);
     }
+  });
+});
+
+describe("J (D-198): isWeeklyBriefDay - ren, tidssone-korrekt ukedag-sjekk", () => {
+  it("treffer KUN den konfigurerte ukedagen i Europe/Oslo, aldri andre dager", () => {
+    // 2026-09-21 er en mandag (weekday=1).
+    const monday = new Date("2026-09-21T10:00:00Z");
+    const tuesday = new Date("2026-09-22T10:00:00Z");
+    expect(isWeeklyBriefDay(monday, "Europe/Oslo", 1)).toBe(true);
+    expect(isWeeklyBriefDay(tuesday, "Europe/Oslo", 1)).toBe(false);
+  });
+
+  it("bruker den GITTE tidssonen, ikke UTC - et tidspunkt rett før midnatt UTC kan være en ANNEN lokal dag", () => {
+    // 2026-09-20T23:30:00Z (søndag UTC) er 2026-09-21T01:30 i Europe/Oslo (UTC+2 om sommeren) - allerede mandag lokalt.
+    const nearMidnightUtc = new Date("2026-09-20T23:30:00Z");
+    expect(isWeeklyBriefDay(nearMidnightUtc, "Europe/Oslo", 1)).toBe(true); // mandag lokalt
+    expect(isWeeklyBriefDay(nearMidnightUtc, "Europe/Oslo", 0)).toBe(false); // ikke søndag lokalt
+  });
+
+  it.each([0, 1, 2, 3, 4, 5, 6])("weekday-indeks %i er entydig - eksakt én dag i en 7-dagers periode treffer", (weekday) => {
+    const days = Array.from({ length: 7 }, (_, i) => new Date(`2026-09-${21 + i}T12:00:00Z`));
+    const matches = days.filter((d) => isWeeklyBriefDay(d, "Europe/Oslo", weekday));
+    expect(matches).toHaveLength(1);
+  });
+});
+
+describe("K (D-198): runBusinessWeeklyBriefForAllTenants - per-tenant levering, feilisolasjon, unik idempotens per tenant", () => {
+  function fakeGateway(behavior: (tenantId: string) => ToolResult | ((call: number) => ToolResult)): ToolGateway {
+    const calls: Array<{ tenant_id: string; idempotency_key: string }> = [];
+    const gw = {
+      calls,
+      execute: async (request: { identity: IdentityContext; idempotency_key?: string }) => {
+        calls.push({ tenant_id: request.identity.tenant_id, idempotency_key: request.idempotency_key ?? "" });
+        const b = behavior(request.identity.tenant_id);
+        return typeof b === "function" ? b(calls.filter((c) => c.tenant_id === request.identity.tenant_id).length) : b;
+      }
+    };
+    return gw as unknown as ToolGateway;
+  }
+  const ok: ToolResult = { ok: true, output_trust: "trusted", deduplicated: false };
+
+  it("leverer én rendret ukentlig brief per business-tenant, idempotency_key prefikset med NETTOPP DEN tenanten (aldri delt/kolliderende på tvers av tenants)", async () => {
+    const gateway = fakeGateway(() => ok);
+    const result = await runBusinessWeeklyBriefForAllTenants(appPool, gateway, (tenantId) => ({
+      person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+      session_id: "sess-weekly-test", device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    }));
+    expect(result.attempted).toBeGreaterThanOrEqual(2); // TENANT_A + TENANT_B finnes allerede fra tidligere describe-blokker
+    expect(result.delivered).toBe(result.attempted);
+    expect(result.errors).toEqual([]);
+    const calls = (gateway as unknown as { calls: Array<{ tenant_id: string; idempotency_key: string }> }).calls;
+    for (const call of calls) {
+      expect(call.idempotency_key).toContain(`business-weekly-brief-${call.tenant_id}-`);
+    }
+    // Ingen to tenants deler NOENSINNE samme idempotency_key.
+    const keysByTenant = new Map<string, Set<string>>();
+    for (const call of calls) {
+      if (!keysByTenant.has(call.tenant_id)) keysByTenant.set(call.tenant_id, new Set());
+      keysByTenant.get(call.tenant_id)!.add(call.idempotency_key);
+    }
+    const allKeys = calls.map((c) => c.idempotency_key);
+    expect(new Set(allKeys).size).toBe(allKeys.length);
+  });
+
+  it("en levering som feiler (gateway.execute returnerer ok:false) telles i errors[], andre tenants upåvirket", async () => {
+    const gateway = fakeGateway((tenantId) => (tenantId === TENANT_A ? { ok: false, reason: "simulert leveransefeil" } : ok));
+    const result = await runBusinessWeeklyBriefForAllTenants(appPool, gateway, (tenantId) => ({
+      person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+      session_id: "sess-weekly-fail-test", device_id: "jarvis-core", channel: "api", auth_strength: "active"
+    }));
+    expect(result.errors.some((e) => e.startsWith(`${TENANT_A}:delivery_failed`))).toBe(true);
+    expect(result.delivered).toBe(result.attempted - 1);
+  });
+
+  it("en kastende identityFor() for ÉN tenant hopper KUN over den tenanten - resten leveres fortsatt", async () => {
+    const gateway = fakeGateway(() => ok);
+    const result = await runBusinessWeeklyBriefForAllTenants(appPool, gateway, (tenantId) => {
+      if (tenantId === TENANT_B) throw new Error("simulert identitetsfeil");
+      return {
+        person_id: "system", tenant_id: tenantId, memory_space_id: "business",
+        session_id: "sess-weekly-throw-test", device_id: "jarvis-core", channel: "api", auth_strength: "active"
+      };
+    });
+    expect(result.errors.some((e) => e.startsWith(`${TENANT_B}:Error:simulert identitetsfeil`))).toBe(true);
+    expect(result.delivered).toBeGreaterThanOrEqual(1); // minst TENANT_A gikk gjennom
   });
 });
