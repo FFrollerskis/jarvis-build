@@ -104,6 +104,9 @@ importers:
       '@jarvis/vision':
         specifier: workspace:*
         version: link:../../modules/vision
+      '@jarvis/watchdog':
+        specifier: workspace:*
+        version: link:../../modules/watchdog
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -932,12 +935,24 @@ importers:
 
   modules/watchdog:
     dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/owner-controls':
+        specifier: workspace:*
+        version: link:../owner-controls
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
       pg:
         specifier: ^8.16.3
         version: 8.23.0
@@ -1655,6 +1670,7 @@ packages:
   eslint@9.39.5:
     resolution: {integrity: sha512-DgZS62aPLXKlnxILS/AYCoRvHaZeXceIzlXPkkGGzJWSow1aEk0lbTlxUSlyjC8jcaKxAdOnTDz+o1JFSBsyjw==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

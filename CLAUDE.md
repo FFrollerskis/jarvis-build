@@ -104,6 +104,19 @@ ordinære, plan-bestemte implementasjonsvalg. Uendret og ufravikelig selv under 
   direkte (`HARD_EXTERNAL_BLOCKER`) - dette overstyres ALDRI av arkitekt-delegeringen.
 - Masterplanen og eksisterende beslutninger/rekkefølge forblir autoritative; ingen fri sekvens-hopping.
 
+**D-192-tillegg (2026-09-19): direkte interaktiv Tobias-delegering.** I en interaktiv chat-økt der
+Tobias selv er direkte til stede og gir instruks (ikke via issue #68 sin `ARCHITECT_TASK`-protokoll),
+kan Tobias eksplisitt gi Claude stående fullmakt til å merge RUTINEMESSIGE PR-er selv når CI er grønt,
+alle tester består og ingen åpne sikkerhetsfunn/review-tråder gjenstår - uten en separat
+ChatGPT-arkitekt-forhåndsreview for den økten/det scopet. De fem strekpunktene over gjelder UFORANDRET
+under denne veien også: ingen selv-godkjenning som eneste kontroll erstattes av Tobias sin egen
+sanntids chat-tilstedeværelse, ikke av fravær av kontroll; kun to-forelder-merge; eksakt HEAD-/base-
+guard rett før merge; `HARD_EXTERNAL_BLOCKER` (credential som ikke finnes trygt, betaling/kjøp, fysisk
+host-handling, juridisk aksept) stopper og varsler Tobias direkte, UANSETT stående fullmakt;
+masterplan/rekkefølge forblir autoritativ. issue #68 beholdes som logg - `CLAUDE_REPORT`-oppdateringer
+posteres der fortsatt for sporbarhet, selv om selve oppgave-autoriteten nå kan komme direkte fra chat.
+Full begrunnelse: D-192 i DECISIONS_AND_ASSUMPTIONS.md.
+
 **Én ordre per TASK_ID (D-150, gjelder både arkitekt-loopen og manuelle ordrer):** en `TASK_ID` har
 NØYAKTIG ÉN `ARCHITECT_TASK`-kommentar. Endret eller konsolidert scope utstedes som en **FERSK
 `TASK_ID` med eksplisitt `SUPERSEDES=<gammel id>`** - ALDRI som en ny kommentar med samme `TASK_ID`.
