@@ -1,7 +1,8 @@
 import type pg from "pg";
+import { listBusinessTenantIds } from "@jarvis/core";
 import type { IdentityContext, MemorySpace } from "@jarvis/contracts";
 import { withMemoryTransaction } from "@jarvis/memory";
-import type { BriefItem, BriefSource } from "@jarvis/tool-gateway";
+import { deliverChunkedTextViaTelegram, type BriefItem, type BriefSource, type ToolGateway } from "@jarvis/tool-gateway";
 import type { OpenLoopService } from "./open-loop-service.ts";
 import type { BusinessDomain } from "./open-loop-types.ts";
 
@@ -220,4 +221,67 @@ export function renderWeeklyBrief(brief: WeeklyBriefArtifact): string {
     `PIPELINE-BEVEGELSE\n${movedLines.length ? movedLines.join("\n") : "(ingen oppdaterte opportunities)"}\n\n` +
     `${renderDomainCoverage()}\n`
   );
+}
+
+/**
+ * D-198 (V4-revisjon, direkte chat-oppdrag under D-192): masterplanens V4
+ * "Business Operating Loop" navngir eksplisitt en DAGLIG/UKENTLIG business-
+ * health-leveranse - `generateWeeklyBrief()`/`renderWeeklyBrief()` (over)
+ * fantes allerede (D-53), men ble ALDRI faktisk schedulert/pushet (kun
+ * on-demand via `business.get_business_brief`-verktøyet). BEVISST valg: KUN
+ * den UKENTLIGE varianten wires til en scheduled push her, ALDRI en daglig
+ * push av samme innhold - `business_open_loops` sine individuelle hendelser
+ * blir ALLEREDE pushet daglig/i sanntid via `situations`-broen
+ * (`open-loop-bridge.ts`, D-160), en daglig FULL business-brief-push ville
+ * vært REDUNDANT/duplikat-varsling av det samme innholdet gjennom to
+ * kanaler. Den ukentlige rollup-en er DERIMOT et genuint annet
+ * innholdsformat (aggregert 7-dagers tilbakeblikk, ikke individuelle
+ * hendelser) og dupliserer derfor ikke.
+ *
+ * Leveransen gjenbruker DEN ene `deliverChunkedTextViaTelegram()`-
+ * mekanismen (SAMME som `DailyBrief.deliverViaTelegram()`) - idempotency-
+ * nøkkelen er prefikset med `tenantId` (flere tenants' ukentlige briefer
+ * samme dag må ALDRI kollidere i samme nøkkelrom).
+ */
+export interface BusinessWeeklyBriefDeliveryResult {
+  attempted: number;
+  delivered: number;
+  /** `tenantId:feilbeskrivelse` - aldri hemmeligheter/rådata. */
+  errors: string[];
+}
+
+export async function runBusinessWeeklyBriefForAllTenants(
+  pool: pg.Pool,
+  gateway: ToolGateway,
+  identityFor: (tenantId: string) => IdentityContext,
+  memorySpace: MemorySpace = "business"
+): Promise<BusinessWeeklyBriefDeliveryResult> {
+  const tenantIds = await listBusinessTenantIds(pool, 200);
+  const result: BusinessWeeklyBriefDeliveryResult = { attempted: 0, delivered: 0, errors: [] };
+  for (const tenantId of tenantIds) {
+    result.attempted += 1;
+    try {
+      const brief = await generateWeeklyBrief(pool, tenantId, memorySpace);
+      const delivered = await deliverChunkedTextViaTelegram(
+        gateway,
+        identityFor(tenantId),
+        renderWeeklyBrief(brief),
+        `business-weekly-brief-${tenantId}-${brief.generated_at}`
+      );
+      if (delivered) result.delivered += 1;
+      else result.errors.push(`${tenantId}:delivery_failed`);
+    } catch (err) {
+      // Én tenant sin feil skal aldri velte hele sveipet for andre tenants (samme disiplin som open-loop-sweep.ts).
+      result.errors.push(`${tenantId}:${err instanceof Error ? `${err.name}:${err.message.slice(0, 120)}` : "unknown_error"}`);
+    }
+  }
+  return result;
+}
+
+const WEEKDAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+/** Ren, testbar dag-i-uken-sjekk i en GITT tidssone (aldri serverens/UTC-lokale dag - en scheduled jobb som kjører nær midnatt ville ellers kunne treffe feil dag). */
+export function isWeeklyBriefDay(now: Date, timeZone: string, targetWeekday: number): boolean {
+  const weekdayName = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short" }).format(now);
+  return WEEKDAY_INDEX[weekdayName] === targetWeekday;
 }

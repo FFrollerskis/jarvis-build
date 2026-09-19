@@ -40,7 +40,8 @@ import {
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
-  ScoringService, runBusinessEventSyncForAllTenants, runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
+  ScoringService, isWeeklyBriefDay, runBusinessEventSyncForAllTenants, runBusinessWeeklyBriefForAllTenants,
+  runOpenLoopSweepForAllTenants, runScoringSweepForAllTenants
 } from "@jarvis/business";
 import { SupportEmailService, SupportService, SupportTransport, runSupportInboxSyncForAllTenants } from "@jarvis/support";
 import { AgreementsService, AgreementsTransport } from "@jarvis/agreements";
@@ -826,6 +827,27 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "business-open-loop-sweep", Number(process.env["JARVIS_BUSINESS_SWEEP_HOUR"] ?? 6)
   ).start(() => runOpenLoopSweepForAllTenants(pool, openLoopService).then(() => undefined));
+  // D-198 (V4-revisjon, masterplanens "Business Operating Loop"): UKENTLIG
+  // (ALDRI daglig - se runBusinessWeeklyBriefForAllTenants() sin doc-
+  // kommentar for hvorfor en daglig push her ville duplisert situations-
+  // broens allerede eksisterende sanntidsvarsling) push av
+  // generateWeeklyBrief()/renderWeeklyBrief() (D-53, fantes allerede men var
+  // ALDRI schedulert - kun on-demand via business.get_business_brief).
+  // SAMME reboot-durable DailyScheduler-mekanisme (claimer/markerer fullført
+  // HVER dag - selve leveransen er en ren no-op utenom den konfigurerte
+  // ukedagen, se isWeeklyBriefDay()). Default mandag (JARVIS_BUSINESS_
+  // WEEKLY_BRIEF_WEEKDAY=1) kl. 07 (JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR).
+  new DailyScheduler(
+    pool, "business-weekly-brief", Number(process.env["JARVIS_BUSINESS_WEEKLY_BRIEF_HOUR"] ?? 7)
+  ).start(async () => {
+    if (!isWeeklyBriefDay(new Date(), "Europe/Oslo", Number(process.env["JARVIS_BUSINESS_WEEKLY_BRIEF_WEEKDAY"] ?? 1))) return;
+    const result = await runBusinessWeeklyBriefForAllTenants(pool, toolGateway, (tenantId) => ({
+      ...ownerIdentity, tenant_id: tenantId, memory_space_id: "business", session_id: "sess-business-weekly-brief"
+    }));
+    if (result.errors.length > 0) {
+      console.error(JSON.stringify({ msg: "business_weekly_brief_failed", errors: result.errors }));
+    }
+  });
   // UA-10 P1 AKTIVERING (D-160): situasjons-sveipen - ingest fra
   // `business_open_loops` -> `situations`, kildebasert løsning, evidens-først
   // INFORM/SUGGEST-leveranse via `telegram.notify`, og auto-ACT KUN under en

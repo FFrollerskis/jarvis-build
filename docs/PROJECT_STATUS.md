@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/runtime-gates-ua789-docs`, fra fersk `origin/main`
-HEAD `a794d66d`). **PR #95/#96(W1)/#98/#87/#99(D-194)/#100(D-195)/#101(D-196) er ALLE MERGET.** Aktiv
-oppgave: **D-197 (RUNTIME_GATES.md dokumentasjonshull for UA-7/UA-8/UA-9 lukket) - klar for
-commit/push/PR under D-192.**
+**Oppdatert:** 2026-09-19 (branch `claude/v4-weekly-business-brief-push`, fra fersk `origin/main`
+HEAD `f5b5f346`). **PR #95/#96(W1)/#98/#87/#99(D-194)/#100(D-195)/#101(D-196)/#102(D-197) er ALLE
+MERGET.** Aktiv oppgave: **D-198 (V4 Business Operating Loop: ukentlig business-brief-push) - klar
+for commit/push/PR under D-192.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -14,25 +14,28 @@ Tobias har DIREKTE (i interaktiv chat, ikke via issue #68 `ARCHITECT_TASK`) bedt
 planen sammen med Claude uten ChatGPT-arkitekten som mellomledd, helt til punktet der videre fremgang
 faktisk krever credentials/kontoer/MCP-koblinger - IKKE start ny scope utover masterplanen. issue #68
 BEHOLDES som logg. Claude har STÅENDE FULLMAKT til å merge rutinemessige PR-er når CI er grønt/tester
-består/ingen åpne funn. Se D-192 i DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet. Brukt
-for PR #96, #98, #87, #99, #100 og #101.
+består/ingen åpne funn. **D-198 eksplisitt delegert av Tobias ("din call, fortsett med det du mener er
+riktig")** - designbeslutningen om V2/V4-scheduled-push (flagget etter D-196) avgjort av Claude selv:
+V4 (ukentlig business-brief) bygget, V2 (cross-channel-visning) BEVISST IKKE - se D-198 for full
+begrunnelse. Se D-192 i DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet. Brukt for PR
+#96, #98, #87, #99, #100, #101 og #102.
 
 ## Hvor `main` står nå
 
 - **PR #95/#96(W1)/#98/#87 MERGET** (se tidligere økters detaljer i git-historikk/DECISIONS_AND_ASSUMPTIONS.md).
 - **PR #99 (D-194, V1 Value Track Telegram-leveringsfiks) MERGET** (`569f39f`).
 - **PR #100 (D-195, UA-10 infra-slice: incidents-broen) MERGET** (`6a78c8d0`).
-- **PR #101 (D-196, V3 Builder Loop: main.ts drain-løkke-feillogging-fiks) MERGET** (`a794d66d`) -
-  CI-en traff en ekte, men urelatert flake (`embedded-postgres-port-lease.test.ts`, 16-prosess
-  portkollisjonstest) på første forsøk, bekreftet urelatert, re-kjørt, grønt.
-- **D-197 (RUNTIME_GATES.md-dokumentasjonshull for UA-7/UA-8/UA-9 lukket, DENNE BRANCHEN, IKKE
-  PUSHET ENNÅ):** ren dokumentasjonsendring, ingen kodeendring. Filens egen header erkjente at
-  UA-7/UA-8/UA-9 manglet rader "til tross for kode-implementert" - sporet under Q-35, som viste seg å
-  være LUKKET og GJENBRUKT for et urelatert K1-tema (Q-35-krysshenvisningen var selv utdatert, i BÅDE
-  `RUNTIME_GATES.md` og `SOVEREIGN_GRADUATION_MATRIX.md` - rettet begge). La til tre nye rader med
-  eksakte D-ID-/PR-/testtall-sitater: UA-7 (D-119/D-121/D-122/D-123/D-125, 209 tester,
-  `IMPLEMENTED_NOT_VERIFIED`), UA-8 (D-130/D-131/D-131b, 98 tester, `IMPLEMENTED_NOT_VERIFIED`), UA-9
-  (D-153, 45 tester, `IMPLEMENTED_NOT_VERIFIED`). Se D-197 for full begrunnelse.
+- **PR #101 (D-196, V3 Builder Loop: main.ts drain-løkke-feillogging-fiks) MERGET** (`a794d66d`).
+- **PR #102 (D-197, RUNTIME_GATES.md UA-7/UA-8/UA-9-dokumentasjonshull lukket) MERGET** (`f5b5f346`).
+- **D-198 (V4 Business Operating Loop: ukentlig business-brief-push, DENNE BRANCHEN, IKKE PUSHET
+  ENNÅ):** `business.get_business_brief` (D-53) var ALDRI schedulert/pushet - kun on-demand. Bygget
+  KUN den ukentlige push-varianten (mandag kl. 07 default, `DailyScheduler`), BEVISST IKKE en daglig
+  push (ville duplisert `situations`-broens allerede eksisterende sanntidsvarsling av de samme
+  individuelle hendelsene) og BEVISST IKKE V2s cross-channel-visning (samme overlapp-begrunnelse).
+  Ekstraherte `DailyBrief.deliverViaTelegram()` sin chunket/idempotente Telegram-leverings-mekanisme
+  til en delt `deliverChunkedTextViaTelegram()` FØR den fikk en andre bruker - forebygger samme
+  "to identiske mekanismer drifter fra hverandre"-feilklasse D-196 fant. 16 nye tester (12 i
+  `business-brief.test.ts`, 4 strukturell wiring-vakt). Se D-198 for full begrunnelse.
 
 ## Blokkeringer
 
@@ -43,16 +46,12 @@ resten av masterplanen: AI-leverandørfamilier, Growth-stack live-evidens, reell
 
 ## Neste oppgave
 
-1. Fullfør quality gates for D-197-branchen (ren dokumentasjon - diff-check/secret scan tilstrekkelig,
-   ingen kode/tester endret), commit, push, åpne draft-PR, vent på CI, merge under D-192.
-2. **Åpent spørsmål til Tobias (IKKE stille avgjort):** skal V4s daglige/ukentlige
-   `business.get_business_brief` og/eller V2s cross-channel-attention-visning (D-196-funn) få en
-   schedulert push-levering (samme DailyScheduler+deliverViaTelegram-mønster som V1)? Krever
-   klokkeslett/kanal/dedup-avklaring FØR bygging.
-3. Videre kodbart masterplan-arbeid (samme "fullfør planen til credential-grensen"-oppdrag):
+1. Fullfør quality gates for D-198-branchen (full lokal testsuite så langt sandbox tillater/
+   diff-check/secret scan), commit, push, åpne draft-PR, vent på CI, merge under D-192.
+2. Videre kodbart masterplan-arbeid (samme "fullfør planen til credential-grensen"-oppdrag):
    - UA-11 Executive Mode "K2": decision log/scenarios/risk register/OKRs/delegation board (navngitt
      i masterplanen, zero kode, zero ekstern avhengighet).
    - Executive dashboard-UI (backend `executive.*` er host-bevist ferdig; `apps/web` er fortsatt
      fase-3 chat-MVP).
-4. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+3. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer.
