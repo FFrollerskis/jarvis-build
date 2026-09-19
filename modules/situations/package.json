@@ -10,6 +10,7 @@
     "@jarvis/business": "workspace:*",
     "@jarvis/contracts": "workspace:*",
     "@jarvis/core": "workspace:*",
+    "@jarvis/incidents": "workspace:*",
     "@jarvis/memory": "workspace:*",
     "@jarvis/tool-gateway": "workspace:*",
     "pg": "^8.16.3",

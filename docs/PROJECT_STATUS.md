@@ -1,13 +1,13 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/v1-daily-brief-delivery-idempotency`, fra fersk `origin/main`
-HEAD `6960654`). **PR #95/#96 (W1)/#98/#87 er ALLE MERGET.** Aktiv oppgave: **D-194 (V1 Value Track
-Telegram-leveringsfiks) - klar for commit/push/PR under D-192.**
+**Oppdatert:** 2026-09-19 (branch `claude/ua10-infra-incident-bridge`, fra fersk `origin/main`
+HEAD `569f39f`). **PR #95/#96 (W1)/#98/#87/#99 (D-194) er ALLE MERGET.** Aktiv oppgave: **D-195
+(UA-10 infra-slice: incidents-broen) - klar for commit/push/PR under D-192.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
 
-## ARBEIDSFORM-ENDRING (D-192, 2026-09-19)
+## ARBEIDSFORM-ENDRING (D-192, 2026-09-19) - GJELDENDE VIDERE
 
 Tobias har DIREKTE (i interaktiv chat, ikke via issue #68 `ARCHITECT_TASK`) bedt om å bygge resten av
 planen sammen med Claude uten ChatGPT-arkitekten som mellomledd. issue #68 BEHOLDES som logg
@@ -15,7 +15,13 @@ planen sammen med Claude uten ChatGPT-arkitekten som mellomledd. issue #68 BEHOL
 FULLMAKT til å merge rutinemessige PR-er selv når CI er grønt/tester består/ingen åpne funn - varsler,
 spør ikke. `HARD_EXTERNAL_BLOCKER` (credentials/betaling/fysisk host-handling/juridisk aksept) stopper
 fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.md og oppdatert
-`CLAUDE.md` §Merge-autoritet. Brukt for PR #96, #98 og #87.
+`CLAUDE.md` §Merge-autoritet. Brukt for PR #96, #98, #87 og #99.
+
+**Presisering fra Tobias (samme økt, etter D-194):** bygg ALT som gjenstår i masterplanen som er
+kodbart NÅ (ingen nye eksterne credentials nødvendig), helt til punktet der videre fremgang faktisk
+krever credentials/kontoer/MCP-koblinger - IKKE start ny scope utover masterplanen. Full
+gap-revisjon kjørt (research-agent, kildekode-kryssjekket) - se D-195 for detaljer og prioritert
+liste over gjenstående kodbart arbeid.
 
 ## Hvor `main` står nå
 
@@ -23,26 +29,22 @@ fortsatt alltid og varsler Tobias direkte. Se D-192 i DECISIONS_AND_ASSUMPTIONS.
 - **PR #96 (W1, D-180→D-193) MERGET** - fullt host-bevist (`run_id=28c2059a`, `hard_fail=false`,
   16/16 markører PASS).
 - **PR #98 (post-W1-merge status-oppdatering) MERGET.**
-- **PR #87 (D-166, cross-worker task-admission-eksklusivitet) MERGET** (`6960654`) - fikset en reell
-  race condition i `ops/claude-worker` sin låsemekanisme. KUN `ops/claude-worker/**`, ikke rørt
-  Jarvis-produktkoden.
-- **D-194 (V1 Value Track-undersøkelse + fiks, denne branchen):** Tobias ba (direkte chat, D-192) om å
-  bygge resten av planen sammen uten ChatGPT-arkitekten. Undersøkte "V1 Value Track" (masterplan
-  Daily Executive Brief) - `PROJECT_STATUS.md`/D-180/D-181 hevdet "IKKE startet", men
-  `modules/tool-gateway/src/daily-brief.ts` (`DailyBrief`-klassen) er FAKTISK fullt bygget og
-  produksjonswiret (schedulert i `apps/api/src/main.ts`). Reelt gjenstående gap er kun
-  atferdsbevis over ekte dager (`PENDING_EXTERNAL_EVIDENCE`), ikke kode - rapportert eksplisitt til
-  Tobias. To kandidat-kodegap undersøkt, Tobias valgte å fikse begge (strukturert spørsmål):
-  1. **`DailyBrief` mangler i `worker-main.ts`** - UNDERSØKT, FUNNET IKKE Å VÆRE ET REELT GAP (bevisst
-     arkitektur: ALLE `DailyScheduler`-jobber bor kun i `main.ts`, aldri i `worker-main.ts`). Droppet,
-     rapportert til Tobias som unødvendig.
-  2. **Morgenleverings-callbacken brukte den generiske, ikke-idempotente `sendTelegram`-closuren**
-     i stedet for `DailyBrief.deliverViaTelegram()` (som allerede fantes, idempotency-nøklet per
-     chunk) - en re-kjørt levering kunne duplisere chunks, og en stille tapt levering ble aldri
-     logget. **FIKSET:** byttet til `DailyBrief.deliverViaTelegram(toolGateway, ownerIdentity, brief)`
-     + eksplisitt `console.error` ved mislykket levering. 3 nye strukturelle regresjonstester i
-     `apps/api/test/drive-runtime-wiring.test.ts` (describe "M"). Typecheck/lint/full testfil grønt
-     lokalt. Se D-194 i DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse.
+- **PR #87 (D-166, cross-worker task-admission-eksklusivitet) MERGET** - fikset en reell race
+  condition i `ops/claude-worker` sin låsemekanisme. KUN `ops/claude-worker/**`.
+- **PR #99 (D-194, V1 Value Track Telegram-leveringsfiks) MERGET** (`569f39f`) - morgenleverings-
+  callbacken bruker nå `DailyBrief.deliverViaTelegram()` (idempotency-nøklet), ikke den generiske
+  `sendTelegram`-closuren. Se D-194.
+- **D-195 (UA-10 infra-slice: incidents-broen, DENNE BRANCHEN, IKKE PUSHET ENNÅ):** full
+  masterplan-gap-revisjon identifiserte situasjons-motor-broer fra `health`/`location`/`vision`/
+  `incidents` som mest konkrete gjenstående kodbare arbeid (UA-10 design-notatets §5 utsatte disse
+  BEVISST til "en EGEN slice PER domene NÅR en faktisk signalkilde finnes" - `modules/incidents`
+  (UA-5) er nå den kilden for infra). Levert: `infra-incident-bridge.ts` (ren bro, samme mønster som
+  `open-loop-bridge.ts`), ny generalisert `SituationEngine.resolveStaleForDomain()`, `sweep.ts` sitt
+  FRIVILLIGE `incidents?: IncidentReader`-felt (fravær = uendret oppførsel), wiring av eksisterende
+  `incidentService` i `main.ts`. ZERO migrasjon. 18 nye tester grønne lokalt (15 rene enhetsbevis +
+  3 strukturell wiring-vakt). Typecheck/lint/diff-check rene. Se D-195 for full begrunnelse.
+  Home/location/vision-broene er FORTSATT ugjort (egne, senere slicer - vision/health/location har
+  fake-source, ikke live data ennå uansett).
 
 ## Blokkeringer
 
@@ -53,9 +55,19 @@ resten av masterplanen: AI-leverandørfamilier, Growth-stack live-evidens, reell
 
 ## Neste oppgave
 
-1. Fullfør quality gates (full lokal testsuite/diff-check/secret scan) for D-194-branchen, commit, push,
-   åpne draft-PR, vent på CI, merge under D-192 (ingen arkitektonisk usikkerhet - liten, godt testet
-   observability-/robusthetsfiks).
-2. Etter merge: gå tilbake til Tobias for neste prioritet - enten en samlet oversikt over
-   API-nøkler/kontoer/MCP-koblinger som trengs for de gjenstående eksterne blokkeringene (D-170), eller
-   videre plan-bygging direkte i chat (D-192).
+1. Fullfør quality gates for D-195-branchen (full lokal testsuite så langt sandbox tillater/
+   diff-check/secret scan), commit, push, åpne draft-PR, vent på CI, merge under D-192.
+2. Videre kodbart masterplan-arbeid (samme "fullfør planen til credential-grensen"-oppdrag), i
+   prioritert rekkefølge fra D-195-gap-revisjonen:
+   - Value Track V2-V5 wiring-audit (samme mønster som D-194 fant for V1 - verifiser resten faktisk
+     er korrekt koblet, fiks reelle gap).
+   - UA-11 Executive Mode "K2": decision log/scenarios/risk register/OKRs/delegation board (navngitt
+     i masterplanen, zero kode, zero ekstern avhengighet).
+   - Executive dashboard-UI (backend `executive.*` er host-bevist ferdig; `apps/web` er fortsatt
+     fase-3 chat-MVP).
+   - `docs/RUNTIME_GATES.md` doc-gap-lukking for UA-7/UA-8/UA-9 (Q-35).
+   - (Lavere prioritet/IKKE anbefalt uten et konkret behov, per masterplanens egen
+     connector-factory-doktrine): flere Growth-/Communications-Hub-kanaladaptere - disse ville uansett
+     være død kode uten leverandør-credentials.
+3. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+   MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer.
