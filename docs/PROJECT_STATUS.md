@@ -1,9 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-20 (branch `claude/charlie-self-awareness`, fra fersk `origin/main` HEAD `3d61483`
-= K2 fullstendig lukket). **"Charlie"-linjen (D-208/D-209) pågår - del 2 av 6 (chat-vendt selv-
-bevissthet) FERDIG IMPLEMENTERT lokalt, IKKE ennå committet/pushet/PR-opprettet.** Del 1 (personlighet,
-D-208) er PUSHET som PR #117, IKKE ennå merget.
+**Oppdatert:** 2026-09-20 (branch `claude/charlie-self-awareness`, merger nå `origin/main` HEAD
+`ae9c332` = PR #117 (personlighet, D-208) MERGET inn). **"Charlie"-linjen (D-208/D-209/D-210) - del 1
+FERDIG OG MERGET. Del 2 (selv-bevissthet, D-209) PR #118 ÅPEN, fersk CI-kjøring pågår etter en liten
+D-208→D-209-kommentarfiks. Del 7 (minneverifisering, D-210) PR #119 ÅPEN (draft, stacket på #118 sin
+branch-spiss - diffen krymper automatisk til KUN D-210 når #118 merges).**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -27,29 +28,36 @@ av sikkerhetskritisk kode - AVSLÅTT SOM SPESIFISERT, erstattet med en trygg to-
 
 ## Hvor `main` står nå
 
-- **PR #106-#116 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207) - se git-historikk/
-  DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
-- **"Charlie"-linjen (D-208/D-209) - Tobias sin syv-punkts ønskeliste for samtale-personaen, splittet i
-  6 tasks (app-liste + mye av stemme-motoren fantes allerede):**
-  1. **Personlighet (D-208) - PR #117 ÅPEN, IKKE MERGET.** `apps/api/src/conversation.ts` sin
+- **PR #106-#117 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207),
+  "Charlie"-personlighet (D-208) - se git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
+- **"Charlie"-linjen (D-208/D-209/D-210) - Tobias sin syv-punkts ønskeliste for samtale-personaen,
+  splittet i 6 tasks (app-liste + mye av stemme-motoren fantes allerede):**
+  1. **Personlighet (D-208) - PR #117 MERGET (`ae9c332`).** `apps/api/src/conversation.ts` sin
      `SYSTEM_PROMPT` fikk navnet "Charlie" + humor + en skjerpet ærlighets-klausul om egne evner.
-     Samme post: full, ugjennomgått selvpatching av sikkerhetskode EKSPLISITT AVSLÅTT (ville fjernet
-     CLAUDE.md regel #2 sin håndhevingsmekanisme) - se D-208 for full begrunnelse.
-  2. **Chat-vendt selv-bevissthet (D-209) - FERDIG lokalt, IKKE ennå committet.** Rotårsak funnet:
-     `modules/tool-gateway/src/mesh-bridge.ts` sin `MESH_TOOLS` (den TRUSTED listen som FAKTISK
-     avgjør hva chat-modellen kan kalle) hadde KUN 3 verktøy - Charlie hadde ALDRI noe verktøy å
-     faktisk sjekke egne tilganger med, uansett hva `@jarvis/executive` allerede eksponerte til
-     EIEREN via HTTP. Ny `executive.get_capability_status` (klasse A, RENT avledet av
-     `meshToolDefinitions()` + `ToolGateway.health` - ALDRI egen kopi) + ny `check_my_capabilities`-
-     oppføring i `MESH_TOOLS` selv, slik at verktøyet FAKTISK er nåbart fra samtalen. 8 nye DB-
-     uavhengige tester (`modules/executive/test/capability-status.test.ts`), inkl. en ende-til-ende-
-     test via `MeshToolExecutor` som beviser ruting til riktig tool_id/action. BEVISST AVGRENSET:
-     `connector_health` er REAKTIV (kun kall-etter-kall), IKKE proaktiv polling - det ville krevd en
-     egen "ping"-primitiv per adapter, egen fremtidig oppgave.
-     `pnpm --filter @jarvis/executive typecheck`/`pnpm --filter @jarvis/tool-gateway typecheck`/
-     `pnpm --filter @jarvis/api typecheck` og `npx eslint` rene.
-  3-6. Task #118 (minne-verifisering), #119 (Infisical+dashboard), #120 (stemme koblet til daglig
-     bruk), #121 (trygg to-lags selvendring) - IKKE startet.
+     Full, ugjennomgått selvpatching av sikkerhetskode EKSPLISITT AVSLÅTT (ville fjernet CLAUDE.md
+     regel #2 sin håndhevingsmekanisme) - se D-208 for full begrunnelse.
+  2. **Chat-vendt selv-bevissthet (D-209) - PR #118 ÅPEN.** Rotårsak funnet: `mesh-bridge.ts` sin
+     `MESH_TOOLS` (den TRUSTED listen som FAKTISK avgjør hva chat-modellen kan kalle) hadde KUN 3
+     verktøy - Charlie hadde ALDRI noe verktøy å faktisk sjekke egne tilganger med. Ny
+     `executive.get_capability_status` (klasse A, RENT avledet av `meshToolDefinitions()` +
+     `ToolGateway.health` - ALDRI egen kopi) + ny `check_my_capabilities`-oppføring i `MESH_TOOLS`
+     selv. 8 nye DB-uavhengige tester grønne. Denne branchen slår NÅ sammen `origin/main` (etter at
+     #117 merget forbi #118 sin base) - kun konflikt i `docs/DECISIONS_AND_ASSUMPTIONS.md`/
+     `docs/PROJECT_STATUS.md` (begge tekstlige, løst ved å beholde begge sine D-ID-poster i riktig
+     rekkefølge). Følges opp: merges når CI er ferdig grønt.
+  7. **Minneverifisering (D-210) - PR #119 ÅPEN (draft), stacket på PR #118 sin branch-spiss.**
+     `MemoryRetriever.search()` fantes allerede (kildebelagt hybrid fulltekst+vektor), men var KUN
+     koblet til stille bakgrunnskontekst - Charlie hadde ingen eksplisitt "hva vet du om X"-flate. Ny
+     `modules/tool-gateway/src/memory-transport.ts` (`MemorySearchTransport`, klasse A) + ny
+     `search_my_memory`-oppføring i `MESH_TOOLS` (FØRSTE mesh-mapping der `query` kommer fra modellen
+     selv, trygt fordi `strict()`-Zod validerer FØR databasekall). Skopet til KUN
+     `identity.memory_space_id` (ingen cross-space i P0, dokumentert grense). `memoryRetriever` heist
+     til ÉN delt instans i `apps/api/src/main.ts`. 9 + 4 nye DB-uavhengige tester grønne.
+     `pnpm -w typecheck` (31 pakker) + `npx eslint .` (hele workspace) rene. PR #119 sin diff viser
+     FORELØPIG også #118 sine commits (siden branchen er kuttet fra #118 sin spiss, ikke `main`) -
+     krymper automatisk til KUN D-210 idet #118 merges (GitHub regner PR-diff dynamisk mot gjeldende
+     `main`).
+  3-6. Infisical+dashboard, stemme koblet til daglig bruk, trygg to-lags selvendring - IKKE startet.
 
 ## Blokkeringer
 
@@ -60,14 +68,14 @@ iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
 
 ## Neste oppgave
 
-1. **Fullfør selv-bevissthet-sliceen (denne økten):** `pnpm -w typecheck`/full `npx eslint .`/diff-check/
-   secret-scan, commit, push, draft PR, abonner. MERK: D-209 er BEVISST valgt (ikke D-208, allerede
-   brukt av PR #117) for å unngå ID-kollisjon når begge merges.
-2. **Task #118:** eier-vendt minne-verifiseringsflate ("hva vet Jarvis om meg akkurat nå").
-3. **Task #119:** hent Infisical frem fra fase 7, bygg integrasjons-dashboard med
+1. **Følg PR #118 til grønn CI og merge** (selv-bevissthet, D-209) under stående D-192-fullmakt -
+   ingen åpne review-tråder ved siste sjekk.
+2. **Bekreft PR #119 sin diff krymper til kun D-210** etter at #118 merges, og følg DEN til grønn CI
+   og merge.
+3. **Neste task:** hent Infisical frem fra fase 7, bygg integrasjons-dashboard med
    "lim inn nøkkel → auto-test → vis status"-flyt.
-4. **Task #120:** koble den allerede-bygde `apps/voice-gateway` til noe Tobias faktisk kan bruke daglig.
-5. **Task #121:** design + bygg den trygge to-lags selvendrings-modellen - IKKE full ugjennomgått
+4. **Deretter:** koble den allerede-bygde `apps/voice-gateway` til noe Tobias faktisk kan bruke daglig.
+5. **Deretter:** design + bygg den trygge to-lags selvendrings-modellen - IKKE full ugjennomgått
    selvpatching, se D-208.
 6. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer.

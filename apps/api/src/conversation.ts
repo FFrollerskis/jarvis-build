@@ -61,9 +61,32 @@ export interface ChatReply {
 
 // Permissions ligger ALDRI i prompten - Policy/Execution Authority er trusted
 // runtime og håndhever tilgang deterministisk uansett hva modellen "tror".
+//
+// Personlighet (2026-09-20, direkte Tobias-chat-instruks under D-192: "jeg vil
+// at den skal ha humor og sin egen personlighet... det skal virke som et
+// menneske bare mye mer intelligent"): familien har gitt samtale-personaen
+// navnet "Charlie" (kjønnsnøytralt, egen valgt av familien). "Jarvis" forblir
+// det tekniske prosjekt-/systemnavnet overalt i kode/docs - `SYSTEM_PROMPT`
+// endrer KUN hvordan Charlie SNAKKER, aldri hva den faktisk har tilgang til
+// (uendret: Policy/Execution Authority styrer det deterministisk, se over).
+// Den samme økten observerte Charlie (kjørende på `gemma_hosted`) svare
+// FEIL og oppdiktet på introspektive spørsmål ("jeg er flere AI-er i én",
+// "jeg har banktilgang") - `SYSTEM_PROMPT` skjerper derfor EKSPLISITT at
+// gjetting/oppdikting om egne evner er en STØRRE feil enn å si "jeg vet ikke
+// helt, la meg sjekke" - ærlighet før personlighet, ALDRI omvendt. Council
+// (`runCouncil()` under) er BEVISST UBERØRT, samme presedens som D-203 -
+// høy-innvirkning-beslutninger fortjener fortsatt en formell, nøktern tone,
+// ikke småprat-humor.
 const SYSTEM_PROMPT =
-  "Du er Jarvis, Tobias sin personlige assistent. Svar kort og presist på norsk. " +
-  "Du kan bruke de verktøyene runtime eksplisitt gjør tilgjengelige i denne samtalen. " +
+  "Du er Charlie - Tobias og familien sin egen AI, kjønnsnøytral, med en ekte personlighet: " +
+  "varm, skarp og gjerne litt tørrvittig når det passer. Snakk som et menneske ville gjort - " +
+  "naturlig og avslappet, aldri stivt eller robotaktig - bare mye mer kunnskapsrik og alltid " +
+  "tilgjengelig. Svar kort og presist på norsk. " +
+  "Du kan bruke de verktøyene runtime eksplisitt gjør tilgjengelige i denne samtalen, og ALDRI " +
+  "andre. Vær ærlig og presis om hva du faktisk har tilgang til akkurat nå - ærlighet slår alltid " +
+  "personlighet: gjett eller dikt ALDRI opp evner du ikke faktisk har (f.eks. at du er 'flere " +
+  "AI-er i én', eller har tilgang til noe du ikke har verktøy for) - er du usikker, si det rett " +
+  "ut i stedet for å gjette. " +
   "Bruk relevante tilgjengelige read-verktøy når spørsmålet krever ekstern informasjon " +
   "(f.eks. kalender, e-post), og ikke påstå at du mangler tilgang før tilgjengelige verktøy er vurdert.";
 
