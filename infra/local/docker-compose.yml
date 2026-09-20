@@ -112,9 +112,21 @@ services:
       JARVIS_DB_HOST: postgres
       JARVIS_DB_PORT: "5432"
       JARVIS_DB_NAME: "${JARVIS_DB_NAME:-jarvis}"
-      # Container-interne adresser (host-.env peker på 127.0.0.1-portmappinger):
+      # Infisical er KUN selvhostet i dette oppsettet (ingen cloud-variant) -
+      # container-intern adresse er derfor alltid riktig, uendret.
       INFISICAL_URL: "http://infisical:8080"
-      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      # D-201-host-fix (2026-09-20): Langfuse KAN være enten selvhostet (denne
+      # compose-filens egen `langfuse`-tjeneste) ELLER Langfuse Cloud - i
+      # motsetning til Infisical har den et reelt cloud-alternativ, og `.env`
+      # sin `LANGFUSE_BASE_URL` (satt til f.eks. https://cloud.langfuse.com)
+      # ble tidligere ALLTID overstyrt av denne hardkodede container-interne
+      # adressen, uansett hva eieren faktisk konfigurerte - sporing gikk derfor
+      # stille til feil instans (Tobias sine Cloud-nøkler fikk aldri noen
+      # trafikk, host-verifisert 2026-09-20). `${LANGFUSE_BASE_URL:-...}`
+      # respekterer nå en eksplisitt .env-verdi, med SAMME container-interne
+      # adresse som tidligere som default for det uendrede lokal-selvhostet-
+      # tilfellet - ingen regresjon for eksisterende oppsett uten en satt verdi.
+      LANGFUSE_BASE_URL: "${LANGFUSE_BASE_URL:-http://langfuse:3000}"
       # Fra host-miljø (aldri lagret i fil her):
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     ports:
@@ -145,10 +157,12 @@ services:
       # I container er prosess-sandbox default (containeren er isolasjonsgrensen;
       # ingen Docker-socket monteres). Docker-sandbox (D-32) gjelder host-runtime.
       JARVIS_SANDBOX: "process"
-      # BO-09: worker bruker AI Mesh + Langfuse/Infisical - container-interne adresser
-      # (host-.env peker på 127.0.0.1-portmappinger) og nøkkel fra host-miljø:
+      # BO-09: worker bruker AI Mesh + Langfuse/Infisical. Infisical er KUN
+      # selvhostet (container-intern adresse, uendret). Langfuse: se D-201-
+      # host-fix-kommentaren ved `api`-tjenesten over - SAMME `${LANGFUSE_
+      # BASE_URL:-...}`-mønster, ikke en duplisert/uavhengig regel.
       INFISICAL_URL: "http://infisical:8080"
-      LANGFUSE_BASE_URL: "http://langfuse:3000"
+      LANGFUSE_BASE_URL: "${LANGFUSE_BASE_URL:-http://langfuse:3000}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     depends_on:
       migrate:
