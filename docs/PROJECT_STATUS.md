@@ -1,9 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-19 (branch `claude/status-sync-post-d199`, fra fersk `origin/main` HEAD
-`424a628`, som inkluderer D-199/PR #104 MERGET). **PR #95/#96(W1)/#98/#87/#99(D-194)/#100(D-195)/
-#101(D-196)/#102(D-197)/#103(D-198)/#104(D-199) er ALLE MERGET.** Ingen aktiv kodeoppgave akkurat nå -
-neste anbefalte oppgave er UA-11 "K2" (se under).
+**Oppdatert:** 2026-09-20 (branch `claude/gemma-hosted-streaming`, fra fersk `origin/main` HEAD
+`cdbcb25`, som inkluderer D-199/PR #104 og PROJECT_STATUS-fiksen/PR #105 MERGET). **PR #95/#96(W1)/
+#98/#87/#99(D-194)/#100(D-195)/#101(D-196)/#102(D-197)/#103(D-198)/#104(D-199)/#105(status-fiks) er
+ALLE MERGET.** Aktiv kodeoppgave: D-200 (Gemma hostet streaming, se under) - PR ikke opprettet ennå
+i denne økten.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.

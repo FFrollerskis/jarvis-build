@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AnthropicAdapter,
+  GemmaHostedAdapter,
   OpenAiAdapter,
   type ModelResult,
   type StreamEvent
@@ -57,6 +58,26 @@ function anthropicFixture(): Response {
     data({ type: "content_block_stop", index: 1 }),
     data({ type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 17 } }),
     data({ type: "message_stop" })
+  ]);
+}
+
+/**
+ * D-199-B: Gemini API sin `streamGenerateContent?alt=sse` leverer `functionCall`-
+ * parts KOMPLETTE i én chunk (ikke delta-for-delta som OpenAI/Anthropic) - denne
+ * fixturen er derfor BEVISST asymmetrisk med `openaiFixture()`/`anthropicFixture()`
+ * over (samme logiske utveksling `LOGICAL`, men uten en delta-fase for
+ * funksjonskallet - se `gemma.ts` sin filhode-kommentar for hvorfor).
+ */
+function gemmaFixture(): Response {
+  return sse([
+    data({ candidates: [{ content: { parts: [{ text: "Hei " }] } }] }),
+    data({ candidates: [{ content: { parts: [{ text: "Tobias" }] } }] }),
+    data({
+      candidates: [
+        { content: { parts: [{ functionCall: { name: "read_calendar", args: { from: "2026-08-13", to: "2026-08-14" } } }] }, finishReason: "STOP" }
+      ],
+      usageMetadata: { promptTokenCount: 42, candidatesTokenCount: 17 }
+    })
   ]);
 }
 
@@ -215,5 +236,88 @@ describe("BO-11.1 §12: provider-uavhengige SSE-fixtures", () => {
     expect(comparable(oaEvents)).toEqual(comparable(anEvents));
     assertTerminalInvariants(oaEvents);
     assertTerminalInvariants(anEvents);
+  });
+});
+
+describe("D-199-B: gemma_hosted sin nye .stream() (Q-30 lukket)", () => {
+  it("tekst + funksjonskall rekonstrueres korrekt - INGEN delta-fase for kallet (leverandøren sender det komplett)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => gemmaFixture()));
+    const events: StreamEvent[] = [];
+    const result = await new GemmaHostedAdapter("k", "m", "http://mock").stream(REQUEST, (e) => events.push(e));
+
+    expect(result.text).toBe(LOGICAL.text);
+    expect(result.usage).toEqual(LOGICAL.usage);
+    expect(result.tool_calls).toHaveLength(1);
+    expect(result.tool_calls?.[0]).toMatchObject({ tool_name: LOGICAL.tool.name, arguments: LOGICAL.tool.args });
+    expect(result.ttft_ms).toBeGreaterThanOrEqual(0);
+
+    // Start rett fulgt av complete for samme kall - ALDRI en tool_call_delta (§ filhode gemma.ts).
+    const types = events.map((e) => e.type);
+    expect(types).not.toContain("tool_call_delta");
+    const startIdx = types.indexOf("tool_call_start");
+    const completeIdx = types.indexOf("tool_call_complete");
+    expect(startIdx).toBeGreaterThan(-1);
+    expect(completeIdx).toBe(startIdx + 1);
+    assertTerminalInvariants(events);
+  });
+
+  it("ren tekst-utveksling: samme normaliserte event-form som OpenAI/Anthropic (start→text_delta→text_delta→usage→finish)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        sse([
+          data({ candidates: [{ content: { parts: [{ text: "bare tekst" }] } }] }),
+          data({ candidates: [{ content: { parts: [] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 2 } })
+        ])
+      )
+    );
+    const events: StreamEvent[] = [];
+    const result = await new GemmaHostedAdapter("k", "m", "http://mock").stream(REQUEST, (e) => events.push(e));
+    expect(result.text).toBe("bare tekst");
+    expect(result.usage).toEqual({ input_tokens: 3, output_tokens: 2 });
+    assertTerminalInvariants(events);
+  });
+
+  it("terminaltilstand cancelled: abort før request → cancelled-klassifisering, ingen events etter terminal", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        if ((init.signal as AbortSignal).aborted) {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          throw err;
+        }
+        return gemmaFixture();
+      })
+    );
+    const events: StreamEvent[] = [];
+    const err = await new GemmaHostedAdapter("k", "m", "http://mock")
+      .stream(REQUEST, (e) => events.push(e), controller.signal)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as { kind: string }).kind).toBe("cancelled");
+    expect(events.some((e) => e.type === "finish")).toBe(false);
+  });
+
+  it("terminaltilstand error: HTTP-feil før stream-start → klassifisert ProviderError, ingen start-event", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("busy", { status: 429 })));
+    const events: StreamEvent[] = [];
+    const err = await new GemmaHostedAdapter("k", "m", "http://mock")
+      .stream(REQUEST, (e) => events.push(e))
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as { kind: string }).kind).toBe("rate_limit");
+    expect(events).toHaveLength(0);
+  });
+
+  it("streamGenerateContent-endepunktet brukes (aldri generateContent) for .stream()", async () => {
+    const fetchMock = vi.fn(async () => gemmaFixture());
+    vi.stubGlobal("fetch", fetchMock);
+    await new GemmaHostedAdapter("k", "m", "http://mock").stream(REQUEST, () => undefined);
+    const calledUrl = fetchMock.mock.calls[0]?.[0] as string;
+    expect(calledUrl).toContain("streamGenerateContent");
+    expect(calledUrl).toContain("alt=sse");
   });
 });

@@ -20,12 +20,14 @@
  * (fanget under D-80 sin arkitekturgjennomgang - `ModelGateway.executePlan()`
  * degraderer allerede trygt til enkelt-delta for adaptere uten `.stream()`,
  * så dette var ALDRI en krasj-bug, kun en unøyaktig capability-påstand som
- * brøt filens egen regel over). Samme grense gjelder de NYE `gemma_hosted`/
- * `local_llm`-profilene - INGEN av dem hevder `streaming` (D-81: bekreftet
- * `PROVIDER_SUPPORT=true`/`ADAPTER_SUPPORT=false` for `gemma_hosted` via
- * offisiell Gemini API-dokumentasjon - `streamGenerateContent` er en generisk
- * metode leverandøren støtter, men adapteren implementerer den bevisst ikke
- * ennå, se `gemma.ts`).
+ * brøt filens egen regel over). `local_llm` følger fortsatt SAMME grense -
+ * INGEN `.stream()`-metode, derfor INGEN `streaming` her.
+ *
+ * D-199-B (Q-30 lukket, 2026-09-20): `gemma_hosted` fikk en EKTE
+ * `.stream()`-implementasjon (`gemma.ts`, samme SSE-mønster som `anthropic.ts`/
+ * `openai.ts` via delt `sseLines()`) - `streaming` er derfor nå en SANN
+ * capability-påstand for DENNE profilen (fortsatt IKKE for `gemini`, som
+ * uendret mangler `.stream()` - de to deler API-flate, ikke adapterkode).
  */
 export type ModelCapability =
   | "text"
@@ -121,7 +123,7 @@ export const DEFAULT_PROFILES: ModelProfile[] = [
     // vision-forespørsler til denne provideren.
     provider: "gemma_hosted",
     model: "gemma-4-26b-a4b-it",
-    capabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output"],
+    capabilities: ["text", "reasoning", "vision", "tool_calling", "structured_output", "streaming"],
     context_tokens: 128_000,
     locality: "cloud",
     cost_class: 1,

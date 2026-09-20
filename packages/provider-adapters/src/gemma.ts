@@ -3,11 +3,13 @@ import {
   classifyFetchError,
   classifyHttpStatus,
   ProviderError,
+  sseLines,
   type ChatMessage,
   type ContentPart,
   type ModelProviderAdapter,
   type ModelRequest,
   type ModelResult,
+  type StreamHandler,
   type ToolCallRequest
 } from "./types.ts";
 
@@ -27,20 +29,17 @@ import {
  * `JARVIS_GEMMA_MODEL` (samme konvensjon som øvrige adaptere - aldri hardkodet
  * utover default-verdien).
  *
- * Streaming: IKKE implementert i denne runden. D-81-verifisering (WebSearch mot
- * Googles offisielle Gemini API-dokumentasjon, se D-81 i
- * DECISIONS_AND_ASSUMPTIONS.md): `streamGenerateContent` (SSE, `alt=sse`) er
- * en GENERISK metode på SAMME `models/{model}`-ressurs som `generateContent`
- * for BÅDE Gemini- og Gemma-modeller - dette er altså en LEVERANDØR-STØTTET
- * kapabilitet (`PROVIDER_SUPPORT=true`), IKKE en Gemma-spesifikk begrensning.
- * Utelatelsen her er en BEVISST implementasjons-avgrensning
- * (`ADAPTER_SUPPORT=false`) - å bygge ekte SSE-parsing/tool-call-delta-
- * rekonstruksjon (samme kompleksitet som `openai.ts`/`anthropic.ts` sine
- * `.stream()`-metoder) er IKKE trivielt og er derfor bevisst utsatt til en
- * egen fremtidig runde (Q-30), IKKE implementert her for å unngå scope-økning
- * i en sikkerhetsherdingsrunde. `ModelGateway.executePlan()` degraderer
- * allerede trygt til enkelt-delta via `.complete()` for adaptere uten
- * `.stream()` - ingen krasj, kun tapt ekte token-for-token-latens.
+ * Streaming: EKTE (D-199-B, Q-30 lukket). `streamGenerateContent` (SSE,
+ * `alt=sse`) er SAMME generiske metode på `models/{model}`-ressursen som
+ * `generateContent` (D-81-verifisert mot Googles offisielle Gemini API-
+ * dokumentasjon), forskjellen fra `complete()` er kun endepunkt+parsing.
+ * I motsetning til Anthropic/OpenAI (som strømmer function-call-argumenter
+ * som delvise JSON-biter) leverer Gemini API `functionCall`-parts KOMPLETTE
+ * i én chunk - `tool_call_start` og `tool_call_complete` emittes derfor
+ * RETT ETTER HVERANDRE for hvert funksjonskall (ingen delta-fase, se
+ * `handleChunk()` under), ALDRI en oppdiktet delta-strøm som leverandøren
+ * selv ikke sender. `ModelGateway.executePlan()` sin non-stream-fallback
+ * for adaptere uten `.stream()` er nå IRRELEVANT for denne adapteren.
  *
  * Vision: EKTE (D-81) - Gemma 4 støtter bildeforståelse via Gemini API sitt
  * `inlineData`-part-format (samme mekanisme som tekst-multiturn), bekreftet
@@ -133,49 +132,64 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
     };
   }
 
-  async complete(request: ModelRequest, onToken?: (token: string) => void): Promise<ModelResult> {
+  /** Provider-nøytral request → Gemini-API-body. Delt av `complete()`/`stream()` - IKKE duplisert. */
+  private buildRequestBody(request: ModelRequest): Record<string, unknown> {
+    const contents = this.toGemmaContents(request.messages, request.tool_exchanges);
+    return {
+      ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
+      contents,
+      ...(request.tools?.length
+        ? {
+            tools: [
+              {
+                functionDeclarations: request.tools.map((t) => ({
+                  name: t.name,
+                  description: t.description,
+                  parameters: t.input_schema
+                }))
+              }
+            ]
+          }
+        : {}),
+      generationConfig: {
+        maxOutputTokens: request.max_tokens ?? 1024,
+        ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        ...(request.structured_schema
+          ? { responseMimeType: "application/json", responseSchema: request.structured_schema }
+          : {})
+      }
+    };
+  }
+
+  private async post(request: ModelRequest, streamMode: boolean, signal?: AbortSignal): Promise<Response> {
     if (!this.apiKey) {
       throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
     }
-    const contents = this.toGemmaContents(request.messages, request.tool_exchanges);
-    const started = Date.now();
+    const method = streamMode ? "streamGenerateContent?alt=sse" : "generateContent";
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/v1beta/models/${this.model}:generateContent`, {
+      const timeout = AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs);
+      response = await fetch(`${this.baseUrl}/v1beta/models/${this.model}:${method}`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
-        signal: AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs),
-        body: JSON.stringify({
-          ...(request.system ? { systemInstruction: { parts: [{ text: request.system }] } } : {}),
-          contents,
-          ...(request.tools?.length
-            ? {
-                tools: [
-                  {
-                    functionDeclarations: request.tools.map((t) => ({
-                      name: t.name,
-                      description: t.description,
-                      parameters: t.input_schema
-                    }))
-                  }
-                ]
-              }
-            : {}),
-          generationConfig: {
-            maxOutputTokens: request.max_tokens ?? 1024,
-            ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
-            ...(request.structured_schema
-              ? { responseMimeType: "application/json", responseSchema: request.structured_schema }
-              : {})
-          }
-        })
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+        body: JSON.stringify(this.buildRequestBody(request))
       });
     } catch (err) {
+      if (signal?.aborted) {
+        throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+      }
       throw classifyFetchError(this.name, err);
     }
     if (!response.ok) {
       throw classifyHttpStatus(this.name, response.status);
     }
+    return response;
+  }
+
+  async complete(request: ModelRequest, onToken?: (token: string) => void): Promise<ModelResult> {
+    const started = Date.now();
+    const response = await this.post(request, false);
     let body: {
       candidates?: Array<{
         content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }> };
@@ -224,6 +238,92 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       ...(body.candidates[0]?.finishReason ? { finish_reason: body.candidates[0].finishReason } : {}),
       ...(structured !== undefined ? { structured_output: structured } : {}),
       ...(toolCalls && toolCalls.length > 0 ? { tool_calls: toolCalls } : {})
+    };
+  }
+
+  /**
+   * D-199-B (Q-30 lukket): ekte SSE-strømming via `streamGenerateContent?alt=sse`.
+   * Én chunk = SAMME skjema som `complete()` sin body (`candidates[].content.
+   * parts[]`), IKKE et Anthropic/OpenAI-stil delta-objekt - se `sseLines()`
+   * (delt SSE-linjedeler, `types.ts`) og filhodets kommentar for hvorfor
+   * funksjonskall ALDRI får en delta-fase her (leverandøren selv sender dem
+   * komplette i én chunk).
+   */
+  async stream(request: ModelRequest, onEvent: StreamHandler, signal?: AbortSignal): Promise<ModelResult> {
+    const started = Date.now();
+    const response = await this.post(request, true, signal);
+    if (!response.body) {
+      throw new ProviderError(this.name, "invalid_response", `${this.name}_no_stream_body`);
+    }
+    onEvent({ type: "start", provider: this.name, model: this.model, generation_id: `gen-${randomUUID().slice(0, 12)}` });
+    let text = "";
+    let ttft: number | undefined;
+    let finish = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cachedTokens: number | undefined;
+    const completedCalls: ToolCallRequest[] = [];
+    try {
+      for await (const data of sseLines(response.body)) {
+        let chunk: {
+          candidates?: Array<{
+            content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }> };
+            finishReason?: string;
+          }>;
+          usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
+        };
+        try {
+          chunk = JSON.parse(data) as typeof chunk;
+        } catch {
+          continue;
+        }
+        const candidate = chunk.candidates?.[0];
+        for (const part of candidate?.content?.parts ?? []) {
+          if (part.text) {
+            if (ttft === undefined) ttft = Date.now() - started;
+            text += part.text;
+            onEvent({ type: "text_delta", text: part.text });
+          } else if (part.functionCall) {
+            if (ttft === undefined) ttft = Date.now() - started;
+            const call = this.parseFunctionCall(part.functionCall.name, part.functionCall.args ?? {});
+            onEvent({ type: "tool_call_start", tool_call_id: call.tool_call_id, tool_name: call.tool_name });
+            completedCalls.push(call);
+            onEvent({ type: "tool_call_complete", call });
+          }
+        }
+        if (candidate?.finishReason) finish = candidate.finishReason;
+        if (chunk.usageMetadata) {
+          inputTokens = chunk.usageMetadata.promptTokenCount ?? inputTokens;
+          outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+          if (chunk.usageMetadata.cachedContentTokenCount !== undefined) {
+            cachedTokens = chunk.usageMetadata.cachedContentTokenCount;
+          }
+        }
+      }
+    } catch (err) {
+      if (err instanceof ProviderError) throw err;
+      if (signal?.aborted) {
+        onEvent({ type: "cancelled" });
+        throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+      }
+      throw new ProviderError(this.name, "stream_interrupted", `${this.name}_stream_interrupted: ${(err as Error).message.slice(0, 80)}`);
+    }
+    if (signal?.aborted) {
+      onEvent({ type: "cancelled" });
+      throw new ProviderError(this.name, "cancelled", `${this.name}_cancelled`);
+    }
+    const usage = { input_tokens: inputTokens, output_tokens: outputTokens, ...(cachedTokens !== undefined ? { cached_tokens: cachedTokens } : {}) };
+    onEvent({ type: "usage", usage });
+    onEvent({ type: "finish", finish_reason: finish || "STOP" });
+    return {
+      text,
+      usage,
+      provider: this.name,
+      model: this.model,
+      latency_ms: Date.now() - started,
+      ...(ttft !== undefined ? { ttft_ms: ttft } : {}),
+      finish_reason: finish || "STOP",
+      ...(completedCalls.length > 0 ? { tool_calls: completedCalls } : {})
     };
   }
 }
