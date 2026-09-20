@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-20 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, fra fersk `origin/main` HEAD
-`826519a` + D-203/PR #110 MERGET på toppen av det. Aktiv kodeoppgave: D-204 (Gemma
-`bad_request`-diagnostikk, se under) - commit/PR ikke opprettet ennå i denne økten.
+`65b3997` = D-204/PR #111 MERGET. Aktiv kodeoppgave: D-205 (den EKTE `gemma_hosted`
+`additionalProperties`-skjema-fiksen, se under) - commit/PR ikke opprettet ennå i denne økten.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -20,47 +20,50 @@ D-192/D-201 i DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet.
 
 ## Hvor `main` står nå
 
-- **PR #106-#110 MERGET** (D-200 Gemma-streaming, D-201 sluttmål, PROJECT_STATUS-refresh, D-202
-  Langfuse Cloud-routing, D-203 chat-sensitivitetsdefault - se DECISIONS_AND_ASSUMPTIONS.md for detaljer
-  per PR). Alle NAS-redeployet og live-verifisert av Tobias i denne økten.
+- **PR #106-#111 MERGET** (D-200 Gemma-streaming, D-201 sluttmål, PROJECT_STATUS-refresh, D-202
+  Langfuse Cloud-routing, D-203 chat-sensitivitetsdefault, D-204 Gemma-diagnostikk - se
+  DECISIONS_AND_ASSUMPTIONS.md for detaljer per PR). PR #106-#110 NAS-redeployet og live-verifisert
+  av Tobias tidligere i denne økten.
 - **D-203 (chat-sensitivitetsdefault) live-verifisert POST-redeploy: fikset udefinert-sensitivitet-
-  gaten, MEN Gemma dukket fortsatt ALDRI opp i chatten** ("de nye kommer ikke opp"/"fortsatt bare
-  chat GPT-meldinger"). Dette utløste D-204s feilsøking.
-- **D-204 (denne økten, kode skrevet/testet, IKKE ENNÅ commitet/pushet/PR-et/merget): rotårsaken til
-  at Gemma fortsatt ikke velges er FUNNET og delvis diagnostisert, men IKKE fullstendig fikset ennå.**
-  Direkte SQL mot NAS-ens `cost_events`-tabell (host-bevis) viste: `gemma_hosted` BLIR faktisk valgt
-  som topp-kandidat av AUTO-scoringen (133 poeng mot `openai`s 132 - scoringslogikken er og var
-  korrekt), men feiler `model:failed:bad_request` på HVERT ekte kall til Gemini API, hvorpå den
-  eksisterende, korrekte fallback-logikken (§12) stille går videre til `openai` - INGEN bruker-synlig
-  feil, INGEN krasj, bare en helt usynlig transportfeil. Den EKSAKTE Gemini-feilkoden bak
-  `bad_request` var UVERIFISERBAR fordi `gemma.ts` (i motsetning til søsken-adapterne `gemini.ts`/
-  `kimi.ts`) aldri fikk D-106 HOST-FIX Defekt B sin trygge feilkode-diagnostikk, og
-  `recordFailedAttempt()` persisterer uansett kun `err.kind`, aldri meldingen. **Levert i D-204
-  (diagnostikk, IKKE rotårsaks-fiks):** `gemma.ts` fikk samme `extractProviderErrorCode()`/
-  `sanitizeEndpointForDiagnostics()`-mønster som gemini/kimi; `ModelGateway.executePlan()` fikk en
-  ny, alltid-på `console.error("model_attempt_failed", ...)`-linje med provider/kind/status/diagnostic
-  (alle allerede vettet trygge felt). 5 nye tester i `conformance.test.ts`, alle grønne.
-  `pnpm --filter @jarvis/provider-adapters typecheck`/`pnpm --filter @jarvis/model-gateway
-  typecheck`/`npx eslint .` rene. **Mistenkt (IKKE bekreftet) egentlig rotårsak:** Gemini API sitt
-  restriktive `functionDeclarations`-skjema-subsett avviser trolig en eller flere standard
-  JSON-Schema-nøkler (f.eks. `additionalProperties`) i Jarvis sine verktøydefinisjoner -
-  `gemma_hosted` er den FØRSTE adapteren i kodebasen som faktisk sender `tools` til Gemini
-  API-flaten. Se D-204 for full begrunnelse.
+  gaten, MEN Gemma dukket fortsatt ALDRI opp i chatten.** Dette utløste D-204/D-205s feilsøking.
+- **D-204 (NAS-redeployet OG live-verifisert i denne økten): trygg feilkode-diagnostikk lagt til
+  `gemma_hosted`** (samme mønster som `gemini.ts`/`kimi.ts`) + alltid-på `console.error` på ethvert
+  mislykket modellforsøk. Diagnostikken avslørte umiddelbart den ekte Gemini-feilkoden
+  (`INVALID_ARGUMENT`) - noe som var UMULIG å se før denne fiksen.
+- **D-205 (denne økten, kode skrevet/testet, IKKE ENNÅ commitet/pushet/PR-et/merget): den EKTE
+  rotårsaken funnet OG fikset.** Live host-feilsøking etter D-204-redeploy fulgte to blindveier
+  først (begge dokumentert i D-205 for sporbarhet): (1) NAS-ens `.env` hadde
+  `JARVIS_GEMMA_MODEL=gemma3:4b` (en Ollama-stil-tag, ugyldig Gemini API-modell-ID - trolig
+  sammenblandet med `gemma_local`s config) - fjernet, men IDENTISK `bad_request`/`INVALID_ARGUMENT`
+  vedvarte mot kodens korrekte default-modell (`gemma-4-26b-a4b-it`), som beviste modellnavnet ikke
+  var hele problemet. (2) En live `node -e fetch(...)`-test direkte fra NAS-en mot Gemini API (samme
+  nøkkel/modell, INGEN `tools`) ga `HTTP 200` - isolerte feilen til selve `tools`-payloaden. Fant at
+  ALLE tre verktøyskjemaene i `modules/tool-gateway/src/mesh-bridge.ts` (`MESH_TOOLS`) setter
+  `additionalProperties: false` - gyldig for `openai`/`anthropic`, men Gemini API sitt
+  function-calling-skjema støtter IKKE denne nøkkelen (bekreftet uavhengig via Google sitt eget
+  utviklerforum - identisk feilklasse rapportert der). **Levert:** ny, rekursiv
+  `stripAdditionalProperties()`-hjelpefunksjon i `GemmaHostedAdapter.buildRequestBody()`
+  (`packages/provider-adapters/src/gemma.ts`) fjerner KUN denne ene, dobbelt-bevist usupporterte
+  nøkkelen fra `t.input_schema` FØR den sendes som `functionDeclarations[].parameters` - kilden
+  (`mesh-bridge.ts`) er UENDRET (nøkkelen er fortsatt riktig der for de andre providerne). 1 ny test
+  i `conformance.test.ts` (fanger faktisk sendt request-body, beviser nøkkelen fjernes rekursivt).
+  `pnpm --filter @jarvis/provider-adapters typecheck`/`npx eslint .` rene, `conformance.test.ts`
+  93/93, full `modules/model-gateway`-suite 330/333 (kun kjent urelatert embedded-Postgres-
+  sandbox-feil) grønne.
 
-## GJENSTÅENDE: D-204 commit/PR/merge + NAS-redeploy + live-verifisering av DEN EKTE feilkoden
+## GJENSTÅENDE: D-205 commit/PR/merge + NAS-redeploy + live-verifisering at Gemma faktisk svarer
 
-D-204-diagnostikk-koden er skrevet og testet i denne sandboxen, men IKKE ENNÅ commitet/pushet/PR-et/
-merget. Neste steg: commit → push → draft PR → CI → merge under D-192 → NAS git-hent/rebuild (kildekode
-i `packages/provider-adapters`+`modules/model-gateway` - KREVER `docker compose build api worker &&
-up -d`, ikke bare `up -d`) → send ÉN ny chatmelding → `sudo docker logs local-api-1 | grep
-model_attempt_failed` for å faktisk se Gemini API sin ekte feilkode (`diagnostic.provider_error_code`)
-→ DERETTER implementere den reelle rotårsaks-fiksen (mistenkt skjema-oversettelse for
-`functionDeclarations`, men IKKE en gjettet fiks før feilkoden er sett) → nok en NAS-redeploy → live-
-verifisering i Langfuse/chat at Gemma faktisk svarer.
+D-205-koden er skrevet og testet i denne sandboxen, men IKKE ENNÅ commitet/pushet/PR-et/merget. Neste
+steg: commit → push → draft PR → CI → merge under D-192 → NAS-rebuild (kildekode i
+`packages/provider-adapters` - KREVER `docker compose build api worker && up -d`) → send ÉN ny
+chatmelding → `sudo docker logs --since 2m local-api-1 | grep -E "model_attempt_failed|stream_debug_
+gateway.*provider"` for å bekrefte `gemma_hosted` faktisk svarer (ingen `model_attempt_failed`-linje,
+`provider":"gemma_hosted"` i stream-eventene) → live-verifisering i Langfuse at Gemma faktisk brukes
+for normal chat.
 
 ## Blokkeringer
 
-Ingen kjente kode-blokkeringer akkurat nå utover D-204s pågående diagnostikk-runde.
+Ingen kjente kode-blokkeringer akkurat nå utover D-205s pågående redeploy-verifisering.
 `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - UENDRET, dekker resten av masterplanen: Growth-stack
 live-evidens, reelle Finance-transaksjoner (Stripe), iPhone/Watch/Home/Personal/Health LIVE, off-site
 backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
@@ -70,9 +73,8 @@ credential-oppsett): live-verifisert, Jarvis leser faktiske e-poster i produksjo
 
 ## Neste oppgave
 
-1. **Fullføre D-204:** commit + push + draft PR + CI + merge (D-192) + NAS-rebuild + send én chat-
-   melding + les `model_attempt_failed`-loggen for den ekte Gemini-feilkoden + implementer den
-   evidensbaserte rotårsaks-fiksen (se eget avsnitt over).
+1. **Fullføre D-205:** commit + push + draft PR + CI + merge (D-192) + NAS-rebuild + send én chat-
+   melding + bekreft `gemma_hosted` faktisk svarer (se eget avsnitt over).
 2. **UA-11 Executive Mode "K2":** decision log/scenarios/risk register/OKRs/delegation board (navngitt
    i masterplanen, zero kode, zero ekstern avhengighet). Avklar akseptansekriterier med Tobias før
    implementering starter.
