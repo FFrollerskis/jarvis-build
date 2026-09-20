@@ -212,9 +212,12 @@ describe("HOST FIX #1 (D-58, ekte host-funn run_id 7c5a5289): REACHABILITY-seksj
 });
 
 describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i SAMME toolGateway som BusinessTransport mottar (§17/§20 F/G)", () => {
-  it("apps/api/src/main.ts konstruerer toolGateway med EnvSecretProvider OG gir SAMME toolGateway-variabel til BusinessTransport", () => {
+  it("apps/api/src/main.ts konstruerer toolGateway med Infisical-primær/env-fallback-kjeden (task #119, D-211) OG gir SAMME toolGateway-variabel til BusinessTransport", () => {
     const mainSource = readSource("../../../apps/api/src/main.ts");
-    expect(mainSource).toMatch(/const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
+    // D-211: Infisical hentet frem som PRIMÆR SecretProvider - `.env`/`BusinessInternal`-
+    // kjeden (den opprinnelige regex-en her fanget) er UENDRET, nå nøstet som FALLBACK
+    // inni en ytre FallbackSecretProvider(Infisical, ...) i stedet for å være selve toppen.
+    expect(mainSource).toMatch(/const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(\s*new InfisicalSecretProvider\(\),\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\)/);
     // D-90: BusinessTransport-konstruktørkallet ble flerlinjet for å romme den
     // injiserte `marketingMemoryBriefSource(growthService)`-argumentet - samme
     // fem første argumenter (businessService/openLoopService/pool/toolGateway/
@@ -223,7 +226,7 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
   });
   it("apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring", () => {
     const workerSource = readSource("../../../apps/api/src/worker-main.ts");
-    expect(workerSource).toMatch(/new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)/);
+    expect(workerSource).toMatch(/new FallbackSecretProvider\(\s*new InfisicalSecretProvider\(\),\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\)/);
     expect(workerSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });

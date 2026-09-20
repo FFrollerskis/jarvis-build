@@ -26,6 +26,8 @@
   .pill.state-active { background:#3d2c00; color:#ffd580; }
   .pill.state-frozen { background:#5c1e1e; color:#ffb4b4; }
   .pill.state-inactive { background:#132d1f; color:#7ee2a8; }
+  .pill.conn-configured { background:#132d1f; color:#7ee2a8; }
+  .pill.conn-missing { background:#3d2c00; color:#ffd580; }
   .empty { color:#8b949e; font-style:italic; }
   #status { padding:12px 16px; background:#161b22; border-top:1px solid #30363d; color:#8b949e; font-size:13px; }
   #enroll { display:none; padding:12px 16px; background:#161b22; border-top:1px solid #30363d; }
@@ -51,6 +53,13 @@
     <h2>Control surface</h2>
     <div id="control-surface"><p class="empty">Laster …</p></div>
   </section>
+  <section>
+    <!-- Task #119 (D-211): LESE-KUN i denne sliceen - "test connector"/"lim
+         inn nøkkel" er en separat, senere oppgave (samme "P0 lese FØR P1
+         mutasjon"-rekkefølge som resten av dashbordet). -->
+    <h2>Integrasjoner</h2>
+    <div id="connectors"><p class="empty">Laster …</p></div>
+  </section>
 </main>
 <div id="status"></div>
 <div id="enroll">
@@ -64,6 +73,7 @@
 <script>
   const attentionQueueEl = document.getElementById("attention-queue");
   const controlSurfaceEl = document.getElementById("control-surface");
+  const connectorsEl = document.getElementById("connectors");
   const statusEl = document.getElementById("status");
   const refreshBtn = document.getElementById("refresh");
   const enrollPanel = document.getElementById("enroll");
@@ -262,16 +272,46 @@
     controlSurfaceEl.innerHTML = html;
   }
 
+  /**
+   * Speiler `ConnectorStatusReport`/`ConnectorStatus` (modules/executive/src/
+   * types.ts + @jarvis/tool-gateway sin connector-registry.ts) EKSAKT.
+   * `credentials[].configured` er den ENESTE informasjonen om en secret som
+   * vises - selve verdien finnes ALDRI i denne responsen (se
+   * `ToolGateway.hasSecret()`/`listConnectorStatus()`).
+   */
+  function renderConnectors(data) {
+    const connectors = (data && Array.isArray(data.connectors)) ? data.connectors : [];
+    if (connectors.length === 0) {
+      connectorsEl.innerHTML = '<p class="empty">Ingen connectorer registrert.</p>';
+      return;
+    }
+    connectorsEl.innerHTML = connectors.map((c) => {
+      const name = escapeHtml(c.display_name || c.id);
+      const configured = !!c.configured;
+      const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
+      const testMethod = c.test_method === "live" ? "live-testbar" : "kun presence-sjekk";
+      return '<div class="card">' +
+        '<span class="pill ' + (configured ? "conn-configured" : "conn-missing") + '">' +
+          (configured ? "konfigurert" : "ikke konfigurert") + "</span>" +
+        '<span class="pill">' + escapeHtml(c.category) + "</span>" +
+        '<div class="title">' + name + "</div>" +
+        '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>" +
+        "</div>";
+    }).join("");
+  }
+
   async function loadAll() {
     refreshBtn.disabled = true;
     statusEl.textContent = "Laster …";
     try {
-      const [queueData, controlData] = await Promise.all([
+      const [queueData, controlData, connectorData] = await Promise.all([
         queryExecutive("get_attention_queue"),
-        queryExecutive("get_control_surface_status")
+        queryExecutive("get_control_surface_status"),
+        queryExecutive("get_connector_status")
       ]);
       renderAttentionQueue(queueData);
       renderControlSurface(controlData);
+      renderConnectors(connectorData);
       statusEl.textContent = "Oppdatert " + new Date().toLocaleTimeString("nb-NO");
     } catch (err) {
       statusEl.textContent = "Feil: " + err.message;

@@ -183,7 +183,11 @@ const BRIEF_BODY_KEYS = ["grant_token"] as const;
  * tilbyr", er nettopp poenget: ruten skal forbli lese-kun helt til en egen,
  * separat gjennomgått slice bevisst utvider den.
  */
-const EXECUTIVE_QUERY_ACTIONS = ["get_attention_queue", "get_control_surface_status"] as const;
+// Task #119 (D-211): `get_connector_status` er en RENT LESENDE (klasse A)
+// tredje oppføring - "test connector"/"lim inn nøkkel"-mutasjoner er BEVISST
+// IKKE lagt til her, samme "P0 lese FØR P1 mutasjon"-rekkefølge D-199 selv
+// dokumenterte for denne allowlisten.
+const EXECUTIVE_QUERY_ACTIONS = ["get_attention_queue", "get_control_surface_status", "get_connector_status"] as const;
 const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as const;
 
 /**

@@ -9,3 +9,4 @@ export * from "./github-rate-limit-controller.ts";
 export * from "./scheduler.ts";
 export * from "./mesh-bridge.ts";
 export * from "./memory-transport.ts";
+export * from "./connector-registry.ts";

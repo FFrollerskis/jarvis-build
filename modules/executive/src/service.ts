@@ -6,9 +6,11 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { meshToolDefinitions, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, meshToolDefinitions, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
-import type { AttentionItem, AttentionItemDetail, CapabilityStatus, ControlSurfaceStatus, DelegationBoard } from "./types.ts";
+import type {
+  AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
+} from "./types.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): motoren bak den samlede kontrollflaten.
@@ -281,5 +283,16 @@ export class ExecutiveService {
       chat_accessible_tools: meshToolDefinitions().map((d) => ({ name: d.name, description: d.description })),
       connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h }))
     };
+  }
+
+  /**
+   * Task #119 (integrasjons-dashboard, D-211): SAMME direkte-tilgang-til-
+   * egen-bokføring-mønster som `getCapabilityStatus()` over - BEVISST INGEN
+   * nøstet `gateway.execute()`-kall. `listConnectorStatus()` selv (se
+   * `@jarvis/tool-gateway`) kaller KUN `gateway.hasSecret()` (presence,
+   * aldri verdi) og leser `gateway.health` direkte.
+   */
+  async getConnectorStatus(): Promise<ConnectorStatusReport> {
+    return { connectors: await listConnectorStatus(this.gateway) };
   }
 }

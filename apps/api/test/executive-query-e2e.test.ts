@@ -179,6 +179,18 @@ describe("A: /executive/query med gyldig grant henter EKTE data for begge lese-h
     expect(executeCalls[0]?.action).toBe("get_control_surface_status");
   });
 
+  it("get_connector_status: 200, data videreformidlet uendret (task #119, D-211)", async () => {
+    const status = { connectors: [{ id: "github", display_name: "GitHub", category: "tool_gateway", configured: true, credentials: [{ ref: "JARVIS_GITHUB_TOKEN", configured: true }], test_method: "live", health: null }] };
+    nextResult = { ok: true, data: status, output_trust: "trusted", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/executive/query", { grant_token: grant, action: "get_connector_status" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["ok"]).toBe(true);
+    expect(res.body["data"]).toEqual(status);
+    expect(executeCalls).toHaveLength(1);
+    expect(executeCalls[0]?.action).toBe("get_connector_status");
+  });
+
   it("gateway.execute() avslag (ok:false) videreformidles som 403 tool_denied, ikke svelget", async () => {
     nextResult = { ok: false, reason: "policy_denied" };
     const grant = await validGrant();

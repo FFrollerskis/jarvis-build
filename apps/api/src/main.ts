@@ -34,7 +34,7 @@ import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
-  GmailTransport, GoogleCalendarTransport, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
+  GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   meshToolDefinitions, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler
@@ -217,9 +217,19 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // BO-03: Tool Gateway m/live transporter (aktiveres av credentials i .env),
   // Daily Brief-kilder, morgenlevering og Telegram-kommandoer.
   // K1 (D-164): `ownerControls` konstruert lenger opp (delt med `policy`).
+  //
+  // Task #119 (D-211): Infisical er nå PRIMÆR (Q-05 lukket - Infisical valgt,
+  // ikke OpenBao), `.env`/`BusinessInternal` forblir fallback-kjeden UENDRET
+  // (staged migration, D-35). `InfisicalSecretProvider.get()` returnerer
+  // `null` UMIDDELBART når den ikke er konfigurert (`available()` == false,
+  // se gateway.ts) - lokal dev/CI UTEN kjørende Infisical faller derfor
+  // rett gjennom til SAMME env-kjede som før, INGEN regresjon.
   const toolGateway = new ToolGateway(
     pool, policy,
-    new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider()),
+    new FallbackSecretProvider(
+      new InfisicalSecretProvider(),
+      new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
+    ),
     ownerControls
   );
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker

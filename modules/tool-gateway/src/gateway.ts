@@ -230,6 +230,18 @@ export class ToolGateway {
     private readonly controls?: OwnerControls
   ) {}
 
+  /**
+   * Task #119 (integrasjons-dashboard, D-211): presence-sjekk for eierens
+   * "er X konfigurert"-visning - kaller SAMME `SecretProvider` gatewayen
+   * allerede injiseres med (aldri en egen, parallell secret-lesevei), men
+   * returnerer KUN en boolean. Selve verdien forlater ALDRI denne metoden -
+   * samme "verdien går aldri i logg/trace/modellkontekst"-disiplin som
+   * `SecretProvider.get()` sin egen kontrakt (se filhode over).
+   */
+  async hasSecret(ref: string): Promise<boolean> {
+    return (await this.secrets.get(ref)) !== null;
+  }
+
   register(definition: ToolDefinition): void {
     this.tools.set(`${definition.tool_id}:${definition.action}`, definition);
   }

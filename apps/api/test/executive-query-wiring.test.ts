@@ -38,11 +38,11 @@ describe("A: main.ts wirer executive.gateway inn i ApiDeps med SAMME toolGateway
 });
 
 describe("B: server.ts sin /executive/query-allowlist er og forblir LESE-KUN", () => {
-  it("EXECUTIVE_QUERY_ACTIONS inneholder KUN get_attention_queue og get_control_surface_status", () => {
+  it("EXECUTIVE_QUERY_ACTIONS inneholder KUN get_attention_queue, get_control_surface_status og get_connector_status (task #119, D-211)", () => {
     const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([^\]]*)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status"].sort());
+    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status", "get_connector_status"].sort());
   });
 
   it("ingen kjent mutasjonshandling (pause_domain/resume_domain/resolve_situation/activate_kill_switch/deactivate_kill_switch/freeze_connector/unfreeze_connector/revoke_credential/restore_credential/revoke_device/enable_finance_kill_switch/disable_finance_kill_switch) forekommer i EXECUTIVE_QUERY_ACTIONS-linjen", () => {
