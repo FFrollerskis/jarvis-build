@@ -1,6 +1,7 @@
 import type { FinanceKillSwitch } from "@jarvis/finance";
 import type { FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "@jarvis/owner-controls";
 import type { Situation, SituationAutonomyPolicy, SituationPriority, SituationStage } from "@jarvis/situations";
+import type { ConnectorStatus } from "@jarvis/tool-gateway";
 
 /**
  * UA-11 Executive Mode (P0, D-162): JARVIS_CANONICAL attention-ranking-
@@ -171,4 +172,16 @@ export interface DelegationBoard {
 export interface CapabilityStatus {
   chat_accessible_tools: Array<{ name: string; description: string }>;
   connector_health: Array<{ tool_id: string; state: string; at: string; detail?: string }>;
+}
+
+/**
+ * Task #119 (integrasjons-dashboard, D-211): eierens "er alt tilkoblet?"-
+ * overflate. `connectors` er RENT avledet av `@jarvis/tool-gateway` sin
+ * `listConnectorStatus()` - SAMME kanoniske register `search_my_memory`/
+ * `check_my_capabilities` sin egen "aldri en egen, avvikende kopi"-disiplin
+ * (se `CapabilityStatus` over) følger. Verdien til en credential ER ALDRI
+ * med her - kun `configured: boolean` per referanse (se `ConnectorStatus`).
+ */
+export interface ConnectorStatusReport {
+  connectors: ConnectorStatus[];
 }

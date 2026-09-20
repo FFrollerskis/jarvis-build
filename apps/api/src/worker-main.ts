@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -141,7 +141,13 @@ const policy = new PolicyGateway({
 // `SecretProvider`-instans også kan injiseres i `WatchdogEmergencyAlertSink`
 // under - ingen ny/parallell credential-mekanisme, samme oppløsning som
 // enhver ordinær `telegram.notify`-kaller.
-const toolSecretProvider = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
+// Task #119 (D-211): SAMME Infisical-primær/env-fallback-kjede som
+// `apps/api/src/main.ts` - API/worker-parity (K1-presedens), ikke en egen,
+// avvikende secret-vei for workeren.
+const toolSecretProvider = new FallbackSecretProvider(
+  new InfisicalSecretProvider(),
+  new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
+);
 const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls);
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
