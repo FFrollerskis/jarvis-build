@@ -119,7 +119,15 @@ describe("D-214 D: udefinerte handlere - polleren oppfører seg som før D-214",
     // Kommandoprefikset '/' betyr at teksten uansett IKKE når `chat`
     // (samme presedens som en ukjent /kommando i D-125 C3) - verifiser at
     // det heller ikke krasjer og ikke kaller noen selvmod-handler.
-    await poller({ approveSelfMod: undefined, rejectSelfMod: undefined }).poll();
+    // Bygger handlers-objektet direkte (ikke via poller()s override-sammenslåing)
+    // fordi `exactOptionalPropertyTypes` gjør `{ approveSelfMod: undefined }`
+    // til en typefeil - et valgfritt felt betyr "kan mangle", ikke "kan være undefined".
+    const p = new TelegramCommandPoller(TOKEN, OWNER, {
+      brief: async () => "BRIEF",
+      status: async () => "STATUS",
+      chat: async () => { recorded.chat++; return undefined; }
+    }, async (text: string) => { recorded.sent.push(text); });
+    await p.poll();
     expect(recorded.chat).toBe(0);
     expect(recorded.sent).toEqual([]);
   });

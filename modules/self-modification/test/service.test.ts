@@ -133,20 +133,24 @@ class FakeGithubClient implements SelfModificationGithubClient {
   throwOnCi = false;
   calls: string[] = [];
 
-  async getCombinedCiStatus(): Promise<CiStatus> {
+  async getCombinedCiStatus(_repo: string, _ref: string): Promise<CiStatus> {
     this.calls.push("ci_status");
     if (this.throwOnCi) throw new Error("simulated_ci_status_error");
     return this.ciStatus;
   }
-  async getPullRequestChangedFiles(): Promise<string[]> {
+  async getPullRequestChangedFiles(_repo: string, _prNumber: string): Promise<string[]> {
     this.calls.push("changed_files");
     return this.changedFiles;
   }
-  async getPullRequestHeadSha(): Promise<string> {
+  async getPullRequestHeadSha(_repo: string, _prNumber: string): Promise<string> {
     this.calls.push("head_sha");
     return this.headSha;
   }
-  async mergePullRequest(): Promise<{ merged: boolean; message?: string }> {
+  async mergePullRequest(
+    _repo: string,
+    _prNumber: string,
+    _opts: { sha: string; commitTitle: string }
+  ): Promise<{ merged: boolean; message?: string }> {
     this.calls.push("merge");
     return this.mergeResult;
   }

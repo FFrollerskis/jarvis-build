@@ -77,7 +77,7 @@ describe("B: ResolvingSelfModificationGithubClient - tokenet oppløses PÅ NYTT 
     let call = 0;
     const seenAuth: string[] = [];
     vi.stubGlobal("fetch", async (_url: string, init: { headers: Record<string, string> }) => {
-      seenAuth.push(init.headers["authorization"]);
+      seenAuth.push(init.headers["authorization"] ?? "");
       return jsonResponse({ state: "success" });
     });
     const client = new ResolvingSelfModificationGithubClient(async () => tokens[call++] ?? null);
