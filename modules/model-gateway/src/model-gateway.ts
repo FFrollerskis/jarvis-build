@@ -502,6 +502,20 @@ export class ModelGateway {
           }
           this.health.recordFailure(adapter.name, pe.kind, pe.message);
           await this.recordFailedAttempt(input, adapter.name, pe, isCritic);
+          // D-106 HOST-FIX Defekt B-oppfølging (host-bevis 2026-09-20): et mislykket
+          // forsøk skrev FØR denne linjen KUN `kind` til `cost_events`
+          // (`recordFailedAttempt` over) - selve feilmeldingen/diagnostikken
+          // (`pe.diagnostic`, allerede vettet trygg - se `ProviderErrorDiagnostic`
+          // i types.ts, ALDRI secrets/frie leverandør-meldinger) gikk tapt for
+          // godt før noen (menneske ELLER en fremtidig feilsøkingsrunde) kunne se
+          // den - `gemma_hosted` falt stille tilbake til `openai` på HVERT kall i
+          // produksjon uten at dette var synlig noe sted. Alltid-på (ikke bak
+          // `JARVIS_STREAM_DEBUG`, som kun gjelder verbos per-event-strømming) -
+          // dette er en faktisk feil, ikke rutinemessig sporing.
+          console.error(JSON.stringify({
+            msg: "model_attempt_failed", provider: adapter.name, kind: pe.kind,
+            status: pe.status, diagnostic: pe.diagnostic
+          }));
           // §11: etter output-start byttes ALDRI provider stille i samme stream.
           if (streamOpts && outputStarted) {
             streamOpts.onEvent({ type: "error", category: "stream_interrupted", message: pe.message.slice(0, 120) });
