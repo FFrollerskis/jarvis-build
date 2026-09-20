@@ -28,7 +28,18 @@
   .pill.state-inactive { background:#132d1f; color:#7ee2a8; }
   .pill.conn-configured { background:#132d1f; color:#7ee2a8; }
   .pill.conn-missing { background:#3d2c00; color:#ffd580; }
+  .pill.test-ok { background:#132d1f; color:#7ee2a8; }
+  .pill.test-fail { background:#5c1e1e; color:#ffb4b4; }
   .empty { color:#8b949e; font-style:italic; }
+  .cred-row { display:flex; gap:6px; margin-top:6px; align-items:center; }
+  .cred-row label { font-size:12px; color:#8b949e; min-width:0; flex:0 0 auto; }
+  .cred-row input { flex:1; min-width:0; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
+                     border-radius:6px; padding:6px 8px; font-size:13px; }
+  .cred-row button, .test-btn { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
+                                 padding:6px 10px; font-size:12px; cursor:pointer; }
+  .cred-row button:disabled, .test-btn:disabled { opacity:0.5; cursor:default; }
+  .test-btn { margin-top:6px; }
+  .test-result { font-size:12px; margin-top:6px; }
   #status { padding:12px 16px; background:#161b22; border-top:1px solid #30363d; color:#8b949e; font-size:13px; }
   #enroll { display:none; padding:12px 16px; background:#161b22; border-top:1px solid #30363d; }
   #enroll p { margin:0 0 8px; color:#8b949e; font-size:13px; }
@@ -41,7 +52,7 @@
 </head>
 <body>
 <header>
-  <span>Jarvis <small>executive-dashboard · lese-kun (UA-11)</small></span>
+  <span>Jarvis <small>executive-dashboard · attention/kontroll: lese-kun (UA-11) · integrasjoner: lese + eier-mutasjon (D-213)</small></span>
   <button id="refresh">Oppdater</button>
 </header>
 <main>
@@ -54,9 +65,10 @@
     <div id="control-surface"><p class="empty">Laster …</p></div>
   </section>
   <section>
-    <!-- Task #119 (D-211): LESE-KUN i denne sliceen - "test connector"/"lim
-         inn nøkkel" er en separat, senere oppgave (samme "P0 lese FØR P1
-         mutasjon"-rekkefølge som resten av dashbordet). -->
+    <!-- Task #119 (D-211): status-lese-delen. Task #122 (D-213): "lim inn
+         nøkkel"/"test connector"-mutasjonen - EGEN rute
+         (/owner-controls/connector-credentials), ALDRI via /executive/query
+         (som D-199 sier skal forbli lese-kun for alltid). -->
     <h2>Integrasjoner</h2>
     <div id="connectors"><p class="empty">Laster …</p></div>
   </section>
@@ -195,13 +207,32 @@
     }
   });
 
-  /** D-199: kun de to LESE-handlingene servertes /executive/query selv hvitelister. */
+  /** D-199: kun de tre LESE-handlingene servertes /executive/query selv hvitelister. */
   async function queryExecutive(action) {
     const active = await ensureGrant();
     const res = await fetch("/executive/query", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ grant_token: active.grant_token, action })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(action + ": " + (body.reason || body.error || res.status));
+    return body.data;
+  }
+
+  /**
+   * Task #122 (D-213): eierens FØRSTE mutasjonsrute - EGEN HTTP-rute
+   * (`/owner-controls/connector-credentials`), EGET hardkodet allowlist på
+   * server-siden (`OWNER_CONTROLS_CONNECTOR_ACTIONS`, KUN
+   * `set_connector_credential`/`test_connector`) - ALDRI en utvidelse av
+   * `/executive/query`, som D-199 selv sier skal forbli lese-kun for alltid.
+   */
+  async function mutateOwnerControls(action, parameters) {
+    const active = await ensureGrant();
+    const res = await fetch("/owner-controls/connector-credentials", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_token: active.grant_token, action, parameters })
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !body.ok) throw new Error(action + ": " + (body.reason || body.error || res.status));
@@ -278,6 +309,13 @@
    * `credentials[].configured` er den ENESTE informasjonen om en secret som
    * vises - selve verdien finnes ALDRI i denne responsen (se
    * `ToolGateway.hasSecret()`/`listConnectorStatus()`).
+   *
+   * Task #122 (D-213): hver credential_ref får en egen "lim inn nøkkel"-rad
+   * (POSTer til `/owner-controls/connector-credentials`, ALDRI til
+   * `/executive/query`) og live-testbare connectorer får en "Test"-knapp.
+   * Event-delegering på `connectorsEl` (ett lyttersett, ikke ett per rad) -
+   * hver `innerHTML`-oppdatering ville ellers fjernet direkte-festede
+   * lyttere.
    */
   function renderConnectors(data) {
     const connectors = (data && Array.isArray(data.connectors)) ? data.connectors : [];
@@ -289,16 +327,69 @@
       const name = escapeHtml(c.display_name || c.id);
       const configured = !!c.configured;
       const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
-      const testMethod = c.test_method === "live" ? "live-testbar" : "kun presence-sjekk";
-      return '<div class="card">' +
+      const isLive = c.test_method === "live";
+      const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
+      const credRows = (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
+        const ref = escapeHtml(cred.ref);
+        return '<div class="cred-row">' +
+          '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
+          '<input type="password" placeholder="lim inn ny verdi …" data-cred-input data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '" autocomplete="off">' +
+          '<button data-save-cred data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '">Lagre</button>' +
+          "</div>";
+      }).join("");
+      return '<div class="card" data-connector-card="' + escapeHtml(c.id) + '">' +
         '<span class="pill ' + (configured ? "conn-configured" : "conn-missing") + '">' +
           (configured ? "konfigurert" : "ikke konfigurert") + "</span>" +
         '<span class="pill">' + escapeHtml(c.category) + "</span>" +
         '<div class="title">' + name + "</div>" +
         '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>" +
+        credRows +
+        (isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
+        '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>' +
         "</div>";
     }).join("");
   }
+
+  connectorsEl.addEventListener("click", (e) => {
+    const saveBtn = e.target.closest("[data-save-cred]");
+    if (saveBtn) {
+      const connectorId = saveBtn.dataset.connectorId;
+      const credentialRef = saveBtn.dataset.credentialRef;
+      const input = connectorsEl.querySelector(
+        'input[data-cred-input][data-connector-id="' + connectorId + '"][data-credential-ref="' + credentialRef + '"]'
+      );
+      const value = input ? input.value.trim() : "";
+      if (!value) return;
+      saveBtn.disabled = true;
+      mutateOwnerControls("set_connector_credential", { connector_id: connectorId, credential_ref: credentialRef, value })
+        .then(() => { statusEl.textContent = credentialRef + " lagret."; return loadAll(); })
+        .catch((err) => { statusEl.textContent = "Feil ved lagring: " + err.message; saveBtn.disabled = false; });
+      return;
+    }
+    const testBtn = e.target.closest("[data-test-connector]");
+    if (testBtn) {
+      const connectorId = testBtn.dataset.connectorId;
+      const resultEl = connectorsEl.querySelector('[data-test-result="' + connectorId + '"]');
+      testBtn.disabled = true;
+      if (resultEl) resultEl.textContent = "Tester …";
+      mutateOwnerControls("test_connector", { connector_id: connectorId })
+        .then((data) => {
+          testBtn.disabled = false;
+          if (!resultEl) return;
+          if (data.test_method !== "live") {
+            resultEl.innerHTML = '<span class="pill">kan ikke live-testes</span>';
+          } else if (data.ok) {
+            resultEl.innerHTML = '<span class="pill test-ok">tilkobling OK</span>';
+          } else {
+            resultEl.innerHTML = '<span class="pill test-fail">feilet: ' + escapeHtml(data.reason || "ukjent") + '</span>';
+          }
+        })
+        .catch((err) => {
+          testBtn.disabled = false;
+          if (resultEl) resultEl.innerHTML = '<span class="pill test-fail">' + escapeHtml(err.message) + '</span>';
+        });
+    }
+  });
 
   async function loadAll() {
     refreshBtn.disabled = true;

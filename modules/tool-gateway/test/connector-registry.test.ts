@@ -26,9 +26,11 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
     }
   });
 
-  it("live_test er KUN satt for github/google_calendar/gmail i denne sliceen (bevisst avgrenset, D-211)", () => {
+  it("live_test er satt for 8 av 14 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) - resten bevisst avgrenset (fiken/stripe/vipps mangler en trygg side-effektfri lesing, anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
     const withLiveTest = CONNECTOR_REGISTRY.filter((c) => c.live_test).map((c) => c.id).sort();
-    expect(withLiveTest).toEqual(["gmail", "google_calendar", "github"].sort());
+    expect(withLiveTest).toEqual(
+      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester"].sort()
+    );
   });
 
   it("live_test.parameters er en FUNKSJON (bygges friskt ved kalletidspunkt, aldri frosset ved modul-last)", () => {
@@ -64,15 +66,16 @@ describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve ve
     }
   });
 
-  it("test_method er 'live' for github/calendar/gmail, 'presence_only' for resten", async () => {
+  it("test_method er 'live' for de 8 utvidede connectorene (D-211/D-213), 'presence_only' for resten", async () => {
     const gateway = fakeGateway(new Set());
     const statuses = await listConnectorStatus(gateway);
     const byId = new Map(statuses.map((s) => [s.id, s]));
-    expect(byId.get("github")?.test_method).toBe("live");
-    expect(byId.get("google_calendar")?.test_method).toBe("live");
-    expect(byId.get("gmail")?.test_method).toBe("live");
-    expect(byId.get("telegram")?.test_method).toBe("presence_only");
-    expect(byId.get("anthropic")?.test_method).toBe("presence_only");
+    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester"]) {
+      expect(byId.get(id)?.test_method).toBe("live");
+    }
+    for (const id of ["fiken", "stripe", "vipps", "anthropic", "openai", "gemini"]) {
+      expect(byId.get(id)?.test_method).toBe("presence_only");
+    }
   });
 
   it("health speiler gateway.health for connectorer med live_test (nøkkel = live_test.tool_id), null når intet forsøkt ennå", async () => {

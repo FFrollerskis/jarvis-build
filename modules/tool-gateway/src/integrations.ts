@@ -2712,6 +2712,19 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("operations")
     },
+    {
+      // Task #122 (D-213): Telegram Bot API sin `getMe` - lagt til på
+      // SLUTTEN av samme grunn som read_repo_meta/list_files over
+      // (eksisterende tester indekserer dette arrayet posisjonelt). Ren,
+      // side-effektfri lesing av botens EGEN identitet - ALDRI en ekte
+      // meldingsutsendelse (`notify` over er klasse B med reell sideeffekt).
+      // Brukes som `live_test` for Telegram-connectoren (D-211/D-213).
+      tool_id: "telegram", action: "get_bot_info", description: "Les botens egen identitet (Telegram Bot API getMe) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["bot:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELEGRAM_TOKEN",
+      output_trust: "untrusted", transport: transport("telegram")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

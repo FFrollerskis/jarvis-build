@@ -191,6 +191,22 @@ const EXECUTIVE_QUERY_ACTIONS = ["get_attention_queue", "get_control_surface_sta
 const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as const;
 
 /**
+ * Task #122 (D-213): eierens FØRSTE mutasjonsrute på dashbordet.
+ * `/executive/query` sin allowlist over FORBLIR lese-kun for alltid (D-199s
+ * egen regel) - dette er derfor en HELT NY, egen HTTP-rute
+ * (`POST /owner-controls/connector-credentials`), ALDRI en utvidelse av
+ * `EXECUTIVE_QUERY_ACTIONS`. Gjenbruker SAMME grant-baserte autoritetsmodell/
+ * kroppsform (`EXECUTIVE_QUERY_BODY_KEYS`) og `deps.executive.gateway` - DEN
+ * SAMME `toolGateway`-instansen `owner_controls.*` allerede er registrert på
+ * i main.ts (ingen ny ApiDeps-nøkkel, ingen parallell autorisasjonsvei).
+ * Allowlisten er BEVISST begrenset til NØYAKTIG disse to handlingene - kill
+ * switch/frys/tilbakekall/enhetstilbakekall forblir UNÅDBARE fra denne
+ * ruten, samme "hardkodet allowlist, ALDRI hele verktøyet"-disiplin som
+ * `EXECUTIVE_QUERY_ACTIONS` selv.
+ */
+const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
+
+/**
  * Fail-closed parsing, speilbildet av `.strict()`: et forsøk på å sende f.eks.
  * `session_id`, `tenant_id`, `person_id`, `memory_space`, `channel` eller
  * `auth_strength` gir `malformed_request` i stedet for å bli stille ignorert.
@@ -505,6 +521,42 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "executive", action, parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/owner-controls/connector-credentials") {
+    // Task #122 (D-213): se OWNER_CONTROLS_CONNECTOR_ACTIONS sitt filhode -
+    // SAMME rekkefølge/avslagsform som /executive/query (avvis ugyldig
+    // action FØR grantet løses, avvis et ugyldig/utløpt grant FØR
+    // gateway.execute() nås).
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
+    }
+    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody || typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    }
+    const action = parsedBody["action"];
+    if (!(OWNER_CONTROLS_CONNECTOR_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "owner_controls", action, parameters
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });

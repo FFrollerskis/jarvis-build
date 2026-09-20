@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { BUSINESS_INTERNAL_CREDENTIAL_REF } from "@jarvis/business";
 import type { JsonValue } from "@jarvis/contracts";
-import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarvis/tool-gateway";
+import { CONNECTOR_REGISTRY, type ToolDefinition, type ToolGateway, type ToolInvocationContext, type ToolTransport } from "@jarvis/tool-gateway";
 import type { OwnerControlsService } from "./service.ts";
 
 /**
@@ -22,7 +22,19 @@ import type { OwnerControlsService } from "./service.ts";
  * uendret, den fabrikkerer eller eskalerer ALDRI en identitet selv.
  */
 export class OwnerControlsTransport implements ToolTransport {
-  constructor(private readonly service: OwnerControlsService) {}
+  /**
+   * Task #122 (D-213): `gateway` er VALGFRI (samme presedens som
+   * `SupportTransport`'s `gateway?: ToolGateway` - se den sitt filhode) -
+   * kun `set_connector_credential`/`test_connector` under trenger den
+   * (henholdsvis `ToolGateway.setSecret()` og et NØSTET
+   * `gateway.execute()`-kall for selve leverandørlesingen). ALDRI en NY,
+   * parallell `ToolGateway`-instans - `main.ts`/`worker-main.ts` gir inn
+   * DEN SAMME `toolGateway`-instansen resten av appen bruker.
+   */
+  constructor(
+    private readonly service: OwnerControlsService,
+    private readonly gateway?: ToolGateway
+  ) {}
 
   async invoke(
     action: string,
@@ -82,6 +94,61 @@ export class OwnerControlsTransport implements ToolTransport {
         );
         return { data: result as unknown as JsonValue };
       }
+      case "set_connector_credential": {
+        // Task #122 (D-213): eierens "lim inn nøkkel"-skrivevei. `credential_ref`
+        // MÅ stå i CONNECTOR_REGISTRY sin `credential_refs` for den PÅSTÅTTE
+        // `connector_id`-en - dette er BEVISST den ENESTE grensen som hindrer
+        // handlingen i å bli en vilkårlig secret-skrive-primitiv (f.eks. et
+        // forsøk på å overskrive `JARVIS_BUSINESS_INTERNAL_TOKEN` selv via en
+        // uriktig `connector_id`/`credential_ref`-kombinasjon avvises FØR
+        // `ToolGateway.setSecret()` i det hele tatt kalles). Selve verdien
+        // ekkoes ALDRI tilbake i svaret.
+        if (!this.gateway) throw new Error("owner_controls_gateway_not_configured");
+        const connectorId = requireString(parameters, "connector_id");
+        const credentialRef = requireString(parameters, "credential_ref");
+        const value = requireString(parameters, "value");
+        const definition = CONNECTOR_REGISTRY.find((c) => c.id === connectorId);
+        if (!definition) throw new Error(`unknown_connector:${connectorId}`);
+        if (!definition.credential_refs.includes(credentialRef)) {
+          throw new Error(`credential_ref_not_registered_for_connector:${connectorId}`);
+        }
+        await this.gateway.setSecret(credentialRef, value);
+        return { data: { connector_id: connectorId, credential_ref: credentialRef, configured: true } as unknown as JsonValue };
+      }
+      case "test_connector": {
+        // Task #122 (D-213): NØSTET `gateway.execute()`-kall mot connectorens
+        // registrerte `live_test` (SAMME D-68-mønster som `support.reply` sitt
+        // nøstede `email.send`-kall) - `context.identity`/`context.approval`
+        // videreformidles UENDRET, ALDRI en fabrikkert/eskalert identitet. Et
+        // manglende `live_test` (presence_only-connectorer, D-211/D-213 sitt
+        // filhode i connector-registry.ts) er IKKE en feil - en STRUKTURERT,
+        // ærlig "kan ikke live-testes"-respons, aldri en kastet feil.
+        if (!this.gateway) throw new Error("owner_controls_gateway_not_configured");
+        const connectorId = requireString(parameters, "connector_id");
+        const definition = CONNECTOR_REGISTRY.find((c) => c.id === connectorId);
+        if (!definition) throw new Error(`unknown_connector:${connectorId}`);
+        if (!definition.live_test) {
+          return {
+            data: {
+              connector_id: connectorId, test_method: "presence_only", tested: false,
+              reason: "live_test_not_available_for_connector"
+            } as unknown as JsonValue
+          };
+        }
+        const result = await this.gateway.execute({
+          identity,
+          ...(context?.approval !== undefined ? { approval: context.approval } : {}),
+          tool_id: definition.live_test.tool_id,
+          action: definition.live_test.action,
+          parameters: definition.live_test.parameters(identity)
+        });
+        return {
+          data: {
+            connector_id: connectorId, test_method: "live", tested: true, ok: result.ok,
+            ...(!result.ok ? { reason: result.reason } : {})
+          } as unknown as JsonValue
+        };
+      }
       default:
         throw new Error(`unknown_owner_controls_action:${action}`);
     }
@@ -110,6 +177,10 @@ const record = (shape: z.ZodRawShape) => z.object(shape).strict() as unknown as 
  * og D (ingen approval-friksjon, masterplanens "one-tap pause/override/
  * revoke") - alle andre identiteter går gjennom vanlig mandat-/godkjennings-
  * logikk i `PolicyGateway.authorize()`, UENDRET av denne pakken.
+ *
+ * Task #122 (D-213): `set_connector_credential` (klasse C, SAMME nivå som
+ * revoke_credential/restore_credential - en enkelt, navngitt credential-
+ * tilstandsendring) og `test_connector` (klasse A - en ren, nøstet lesing).
  */
 export function ownerControlsToolDefinitions(transport: OwnerControlsTransport): ToolDefinition[] {
   const common = {
@@ -167,6 +238,30 @@ export function ownerControlsToolDefinitions(transport: OwnerControlsTransport):
       description: "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet (device_id) i EGEN (identity.tenant_id) tenant umiddelbart - kanonisk SessionGrantService.revokeForDeviceOn(). Enheten kan tilhøre en ANNEN person (delegat) i SAMME tenant; en enhet i en ANNEN tenant finnes ikke fra dette kallets perspektiv (D-175)",
       input_schema: record({ device_id: z.string(), reason: z.string() }), capability_class: "C", scopes: ["owner_controls.device"],
       reversible: false, rollback_procedure: "enheten må re-rulleres inn (enrollment) for ny tilgang - ingen restore_device", idempotent_external: true, ...common
+    },
+    {
+      // Task #122 (D-213): klasse C - SAMME nivå som revoke_credential/
+      // restore_credential over (en enkelt, navngitt, reversibel credential-
+      // tilstandsendring for ÉN connector, IKKE systemomfattende). Verdien
+      // logges/auditeres ALDRI (se ToolGateway.execute() sin audit-payload -
+      // rå `parameters` er ALDRI en del av den). `reversible: false` er
+      // ÆRLIG: en ny verdi kan overskrives på nytt, men Jarvis lagrer ALDRI
+      // forrige verdi selv - en reell reversering krever at EIEREN selv har
+      // den gamle verdien og limer den inn på nytt.
+      tool_id: "owner_controls", action: "set_connector_credential",
+      description: "Skriv en NY verdi for én navngitt connector-credential (CONNECTOR_REGISTRY) til den skrivbare secret-provideren (Infisical) - verdien returneres/logges ALDRI",
+      input_schema: record({ connector_id: z.string(), credential_ref: z.string(), value: z.string() }),
+      capability_class: "C", scopes: ["owner_controls.connector_credentials"],
+      reversible: false, rollback_procedure: "lim inn tidligere verdi på nytt (om eieren har den) - Jarvis lagrer aldri forrige verdi selv", idempotent_external: true, ...common
+    },
+    {
+      // Klasse A: dette er en nøstet gateway.execute()-komposisjon mot
+      // connectorens EGEN, allerede klasse A-klassifiserte live_test-lesing
+      // (D-211/D-213) - samme risikonivå som get_control_state over.
+      tool_id: "owner_controls", action: "test_connector",
+      description: "Test at én navngitt connector faktisk fungerer (nøstet kall mot dens registrerte live_test-lesing) - presence_only-connectorer gir en strukturert 'kan ikke live-testes'-respons, aldri en feil",
+      input_schema: record({ connector_id: z.string() }), capability_class: "A", scopes: ["owner_controls.connector_credentials"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true, ...common
     }
   ];
 }

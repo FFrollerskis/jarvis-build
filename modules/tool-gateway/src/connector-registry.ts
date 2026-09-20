@@ -1,4 +1,4 @@
-import type { JsonValue } from "@jarvis/contracts";
+import type { IdentityContext, JsonValue } from "@jarvis/contracts";
 import type { ToolGateway } from "./gateway.ts";
 
 /**
@@ -7,14 +7,21 @@ import type { ToolGateway } from "./gateway.ts";
  * allerede bygde finans-connectorene (`.env.example`) nevner. RENT DATA -
  * ingen egen kallelogikk her utover selve statuskomposisjonen under.
  *
- * `live_test` er BEVISST kun satt for de tre leverandørene som allerede har
- * en bevist, trygg, klasse A-lesehandling UTEN sideeffekt gjennom
- * `ToolGateway` (samme handlinger som `mesh-bridge.ts` sin `MESH_TOOLS`
- * allerede stoler på for chat-verktøy) - GitHub/Calendar/Gmail. Resten
- * rapporterer KUN presence (er credential-referansen konfigurert eller ikke)
- * - BEVISST AVGRENSET, ikke stille utelatt: å utvide `live_test` til flere
- * connectorer (Drive/Vercel/Telegram/finans/modell-leverandører) er egen,
- * senere oppgave (se D-211).
+ * Task #122 (D-213) utvidet `live_test` til 8 av 14 connectorer - GitHub/
+ * Calendar/Gmail (D-211, uendret) + Google Drive/Vercel/Telegram/Neonomics/
+ * Wallester (nye, hver en allerede eksisterende, verifisert klasse A/
+ * side-effektfri lesehandling gjennom `ToolGateway` - Telegrams
+ * `get_bot_info` (`getMe`) ble lagt til AKKURAT for dette formålet, siden
+ * `telegram.notify` sender en EKTE melding og derfor aldri kunne vært en
+ * trygg test). **BEVISST FORTSATT presence_only, eksplisitt avgrenset:**
+ * Fiken/Stripe/Vipps mangler en eksisterende ToolGateway-lesehandling UTEN
+ * enten en Stripe/Vipps-side-effekt (create_payment_intent er en reell
+ * providerobjekt-opprettelse, selv om idempotent) eller en forhåndsbetingelse
+ * (eksisterende samtykke/kort) - å bygge én er en EGEN, senere oppgave, ikke
+ * gjettet frem her. Anthropic/OpenAI/Gemini konsumeres via `ModelGateway`,
+ * en HELT ANNEN kallevei enn `ToolGateway` (ingen tool_id/action finnes for
+ * dem) - et "test denne modell-nøkkelen"-probe hører hjemme i
+ * `ModelGateway` selv, ikke tvunget inn i dette connector-test-mønsteret.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -26,9 +33,12 @@ export interface ConnectorDefinition {
    * `parameters` er en FUNKSJON (samme presedens som `MeshToolMapping.
    * parameters` i `mesh-bridge.ts`), IKKE en statisk verdi - for
    * tidsvinduer (f.eks. kalender sin "i dag") må parametrene bygges FRISKT
-   * ved selve testkallet, ikke frosset til modul-lastetidspunktet.
+   * ved selve testkallet, ikke frosset til modul-lastetidspunktet. Task #122:
+   * tar nå (valgfritt brukt) den KALLENDE identiteten - noen leverandør-
+   * lesinger (Neonomics/Wallester) er tenant-scopet og trenger
+   * `identity.tenant_id`, som ALDRI kan være en modul-lastetidspunkt-konstant.
    */
-  live_test?: { tool_id: string; action: string; parameters: () => Record<string, JsonValue> };
+  live_test?: { tool_id: string; action: string; parameters: (identity: IdentityContext) => Record<string, JsonValue> };
 }
 
 export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
@@ -55,17 +65,45 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_EMAIL_TOKEN"],
     live_test: { tool_id: "email", action: "read_inbox", parameters: () => ({ max: 1 }) }
   },
-  { id: "google_drive", display_name: "Google Drive/Docs", category: "tool_gateway", credential_refs: ["JARVIS_GOOGLE_TOKEN"] },
-  { id: "telegram", display_name: "Telegram", category: "tool_gateway", credential_refs: ["JARVIS_TELEGRAM_TOKEN"] },
-  { id: "vercel", display_name: "Vercel", category: "tool_gateway", credential_refs: ["JARVIS_VERCEL_TOKEN"] },
+  {
+    id: "google_drive", display_name: "Google Drive/Docs", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_TOKEN"],
+    // Uten `folder_id` lister `drive.list_files` roten av driven - samme
+    // trygge, side-effektfrie klasse A-lesing `drive-source.ts` allerede bruker.
+    live_test: { tool_id: "drive", action: "list_files", parameters: () => ({}) }
+  },
+  {
+    id: "telegram", display_name: "Telegram", category: "tool_gateway", credential_refs: ["JARVIS_TELEGRAM_TOKEN"],
+    // `telegram.notify` er en EKTE meldingsutsendelse (klasse B) - aldri
+    // trygg som test. `get_bot_info` (Telegram Bot API sin `getMe`, lagt til
+    // i live-transports.ts AKKURAT for dette formålet) krever kun boten sin
+    // egen token, ingen chat_id, og har INGEN sideeffekt.
+    live_test: { tool_id: "telegram", action: "get_bot_info", parameters: () => ({}) }
+  },
+  {
+    id: "vercel", display_name: "Vercel", category: "tool_gateway", credential_refs: ["JARVIS_VERCEL_TOKEN"],
+    live_test: { tool_id: "vercel", action: "read_deployments", parameters: () => ({}) }
+  },
   { id: "anthropic", display_name: "Anthropic API", category: "model_provider", credential_refs: ["ANTHROPIC_API_KEY"] },
   { id: "openai", display_name: "OpenAI API", category: "model_provider", credential_refs: ["OPENAI_API_KEY"] },
   { id: "gemini", display_name: "Gemini API", category: "model_provider", credential_refs: ["GEMINI_API_KEY"] },
   { id: "fiken", display_name: "Fiken", category: "finance", credential_refs: ["JARVIS_FIKEN_CLIENT_ID", "JARVIS_FIKEN_CLIENT_SECRET", "JARVIS_FIKEN_REFRESH_TOKEN"] },
   { id: "stripe", display_name: "Stripe", category: "finance", credential_refs: ["JARVIS_STRIPE_SECRET_KEY"] },
   { id: "vipps", display_name: "Vipps", category: "finance", credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY"] },
-  { id: "neonomics", display_name: "Neonomics", category: "finance", credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET"] },
-  { id: "wallester", display_name: "Wallester", category: "finance", credential_refs: ["JARVIS_WALLESTER_API_KEY", "JARVIS_WALLESTER_PRIVATE_KEY_PEM"] }
+  {
+    id: "neonomics", display_name: "Neonomics", category: "finance",
+    credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET"],
+    // Katalogoppslag (bankene Neonomics dekker) - krever INGEN eksisterende
+    // banksamtykke, kun gyldige API-credentials. Ren lesing, klasse A.
+    live_test: { tool_id: "finance_neonomics", action: "list_banks", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
+  },
+  {
+    id: "wallester", display_name: "Wallester", category: "finance",
+    credential_refs: ["JARVIS_WALLESTER_API_KEY", "JARVIS_WALLESTER_PRIVATE_KEY_PEM"],
+    // Leverandørkontosaldo - "read-only provider-tilstand", uavhengig av om
+    // noe kort faktisk er utstedt ennå. Ren lesing, klasse A.
+    live_test: { tool_id: "finance_wallester", action: "get_provider_balance", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
+  }
 ];
 
 export interface ConnectorStatus {

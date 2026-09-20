@@ -16,6 +16,28 @@ export class EnvSecretProvider implements SecretProvider {
     return process.env[ref] ?? null;
   }
 }
+
+/**
+ * Task #122 (connector credential-skriving, D-213): en SEPARAT, opt-in
+ * kapabilitet - IKKE en del av `SecretProvider` selv (som `FallbackSecretProvider`
+ * og `EnvSecretProvider`/`BusinessInternalSecretProvider` FORTSATT bare
+ * implementerer les-kontrakten, uendret). Kun leverandører som FAKTISK
+ * tilbyr en skrive-API (i dag: Infisical) implementerer denne - et forsøk på
+ * å skrive mot en ikke-skrivbar kjede skal feile TYDELIG
+ * (`secret_provider_not_writable`), ALDRI stille falle tilbake til å skrive
+ * et sted (f.eks. `.env`, som er git-ignorert og IKKE et sted kjørende kode
+ * trygt kan skrive til uten å risikere å miste eierens egne, manuelt satte
+ * verdier - se D-41: read-only er kun akseptabelt når leverandøren faktisk
+ * ikke tilbyr mer ELLER en genuin isolasjonsgrense hindrer det, aldri fordi
+ * det var enklere å kode).
+ */
+export interface WritableSecretProvider extends SecretProvider {
+  /** Skriver (oppretter ELLER oppdaterer) en secret-verdi. Verdien logges/auditeres ALDRI. */
+  set(ref: string, value: string): Promise<void>;
+}
+export function isWritableSecretProvider(provider: SecretProvider): provider is WritableSecretProvider {
+  return typeof (provider as Partial<WritableSecretProvider>).set === "function";
+}
 /**
  * Infisical-secret-provider (D-35): maskinidentitet (universal auth) → hent
  * secret via API. Rå verdi returneres KUN til transport-laget; aldri logget,
@@ -65,6 +87,40 @@ export class InfisicalSecretProvider implements SecretProvider {
       this.health = "unavailable";
       return null; // fail-closed her; FallbackSecretProvider håndterer rollback
     }
+  }
+
+  /**
+   * Task #122 (D-213): upsert - PATCH (oppdater eksisterende) FØRST, POST
+   * (opprett) KUN på 404 (secreten fantes ikke fra før). Rekkefølgen er
+   * bevisst: eieren limer ofte inn en NY verdi for en referanse som ALLEREDE
+   * har en (utløpt/feil) verdi fra en tidligere manuell oppsett - PATCH er
+   * derfor det VANLIGE tilfellet, POST unntaket. Infisical raw secrets v3-
+   * API-et (offisiell dokumentasjon, ikke gjettet): `PATCH /api/v3/secrets/
+   * raw/{secretName}` og `POST /api/v3/secrets/raw/{secretName}`, begge med
+   * kropp `{workspaceId, environment, secretValue}`. Verdien logges ALDRI -
+   * kun HTTP-status/feilkode fanges i feilmeldinger.
+   */
+  async set(ref: string, value: string): Promise<void> {
+    if (!this.available()) {
+      throw new Error("infisical_unconfigured");
+    }
+    this.token ??= await this.login();
+    const url = `${this.baseUrl}/api/v3/secrets/raw/${encodeURIComponent(ref)}`;
+    const body = JSON.stringify({ workspaceId: this.projectId, environment: this.env, secretValue: value });
+    const headers = { authorization: `Bearer ${this.token}`, "content-type": "application/json" };
+    let response = await fetch(url, { method: "PATCH", headers, body });
+    if (response.status === 401) {
+      this.token = null;
+      throw new Error("infisical_auth_expired");
+    }
+    if (response.status === 404) {
+      response = await fetch(url, { method: "POST", headers, body });
+    }
+    if (!response.ok) {
+      this.health = "unavailable";
+      throw new Error(`infisical_set_${response.status}`);
+    }
+    this.health = "healthy";
   }
 }
 
@@ -227,7 +283,20 @@ export class ToolGateway {
     private readonly pool: pg.Pool,
     private readonly policy: PolicyGateway,
     private readonly secrets: SecretProvider,
-    private readonly controls?: OwnerControls
+    private readonly controls?: OwnerControls,
+    /**
+     * Task #122 (D-213): SEPARAT fra `secrets` over med hensikt - `secrets`
+     * er en LESE-fallback-kjede (Infisical → .env → BusinessInternal, D-211)
+     * der EN provider som svarer er nok. Skriving har INGEN slik fallback-
+     * semantikk: å skrive til `.env` fra kjørende kode ville enten vært en
+     * fil-skriving inn i en git-ignorert fil (aldri gjort av
+     * `EnvSecretProvider`, som er ren lesing) eller stille skrevet til feil
+     * sted. `writableSecrets` er derfor typisk DEN SAMME `InfisicalSecretProvider`-
+     * INSTANSEN som allerede sitter FØRST i `secrets`-kjeden (se main.ts/
+     * worker-main.ts), gitt en gang til her, eksplisitt for skriving - ALDRI
+     * en egen, parallell Infisical-tilkobling.
+     */
+    private readonly writableSecrets?: WritableSecretProvider
   ) {}
 
   /**
@@ -240,6 +309,23 @@ export class ToolGateway {
    */
   async hasSecret(ref: string): Promise<boolean> {
     return (await this.secrets.get(ref)) !== null;
+  }
+
+  /**
+   * Task #122 (D-213): eierens "lim inn nøkkel"-skrivevei - ALDRI kallbar
+   * uten en konfigurert `writableSecrets`-provider (fail-closed med en
+   * TYDELIG feil, ALDRI en stille no-op eller et skriveforsøk mot en
+   * les-only-kjede). Selve verdien går ALDRI i logg/trace/modellkontekst -
+   * samme disiplin som `SecretProvider.get()`/`hasSecret()` sin kontrakt.
+   * Kalles UTELUKKENDE gjennom `ToolGateway.execute()` sin vanlige
+   * pipeline (Policy Gateway → audit) via `connector_credentials.set_credential`
+   * (se `modules/owner-controls`) - ALDRI en direkte, policy-omgått vei.
+   */
+  async setSecret(ref: string, value: string): Promise<void> {
+    if (!this.writableSecrets) {
+      throw new Error("secret_provider_not_writable");
+    }
+    await this.writableSecrets.set(ref, value);
   }
 
   register(definition: ToolDefinition): void {

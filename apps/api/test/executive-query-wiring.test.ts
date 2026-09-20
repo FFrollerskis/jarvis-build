@@ -75,3 +75,53 @@ describe("B: server.ts sin /executive/query-allowlist er og forblir LESE-KUN", (
     expect(block).toContain("identity: resolved.identity");
   });
 });
+
+describe("C: /owner-controls/connector-credentials (task #122, D-213) - EGEN rute, EGET hardkodet allowlist, ALDRI en utvidelse av EXECUTIVE_QUERY_ACTIONS", () => {
+  it("OWNER_CONTROLS_CONNECTOR_ACTIONS inneholder KUN set_connector_credential og test_connector", () => {
+    const match = serverSource.match(/const OWNER_CONTROLS_CONNECTOR_ACTIONS = \[([^\]]*)\] as const;/);
+    expect(match).not.toBeNull();
+    const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+    expect(actions.sort()).toEqual(["set_connector_credential", "test_connector"].sort());
+  });
+
+  it("EXECUTIVE_QUERY_ACTIONS forblir UENDRET av denne ruten - fortsatt KUN de tre lese-handlingene", () => {
+    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([^\]]*)\] as const;/);
+    const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
+    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status", "get_connector_status"].sort());
+  });
+
+  it("ingen kjent klasse D/C-mutasjon utenfor de to nye handlingene (activate_kill_switch/deactivate_kill_switch/freeze_connector/unfreeze_connector/revoke_credential/restore_credential/revoke_device) forekommer i OWNER_CONTROLS_CONNECTOR_ACTIONS-linjen", () => {
+    const match = serverSource.match(/const OWNER_CONTROLS_CONNECTOR_ACTIONS = \[[^\]]*\] as const;/);
+    expect(match).not.toBeNull();
+    const line = match?.[0] ?? "";
+    for (const mutation of [
+      "activate_kill_switch", "deactivate_kill_switch", "freeze_connector", "unfreeze_connector",
+      "revoke_credential", "restore_credential", "revoke_device"
+    ]) {
+      expect(line).not.toContain(mutation);
+    }
+  });
+
+  it("ruten avslår en handling utenfor allowlistet FØR gateway.execute() nås", () => {
+    const routeIdx = serverSource.indexOf('url.pathname === "/owner-controls/connector-credentials"');
+    expect(routeIdx).toBeGreaterThan(-1);
+    const executeIdx = serverSource.indexOf("deps.executive.gateway.execute(", routeIdx);
+    const allowlistCheckIdx = serverSource.indexOf("action_not_allowed", routeIdx);
+    expect(allowlistCheckIdx).toBeGreaterThan(-1);
+    expect(executeIdx).toBeGreaterThan(-1);
+    expect(allowlistCheckIdx).toBeLessThan(executeIdx);
+  });
+
+  it("identiteten som sendes til gateway.execute() kommer fra resolveFromGrant(), ALDRI fra en kaller-oppgitt identitet i body", () => {
+    const routeIdx = serverSource.indexOf('url.pathname === "/owner-controls/connector-credentials"');
+    const block = serverSource.slice(routeIdx, serverSource.indexOf("deps.executive.gateway.execute(", routeIdx) + 400);
+    expect(block).toContain("resolveFromGrant(deps,");
+    expect(block).toContain("identity: resolved.identity");
+  });
+
+  it("kaller gateway.execute() med tool_id='owner_controls', ALDRI 'executive' eller et annet tool_id", () => {
+    const routeIdx = serverSource.indexOf('url.pathname === "/owner-controls/connector-credentials"');
+    const block = serverSource.slice(routeIdx, serverSource.indexOf("deps.executive.gateway.execute(", routeIdx) + 400);
+    expect(block).toMatch(/tool_id:\s*"owner_controls"/);
+  });
+});

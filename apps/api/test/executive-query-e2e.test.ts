@@ -260,3 +260,104 @@ describe("C: /executive/query begrenser SEG SELV til det hardkodede lese-allowli
     expect(executeCalls).toHaveLength(0);
   });
 });
+
+/**
+ * Task #122 (D-213): `/owner-controls/connector-credentials` - eierens
+ * FØRSTE mutasjonsrute. SAMME `stubGateway`/server-oppsett som over - beviser
+ * KUN ruten selv (allowlist/grant-avslag/videreformidling), ikke
+ * `OwnerControlsTransport`-pipelinen (dekket DB-uavhengig i
+ * `modules/owner-controls/test/d213-connector-credentials.test.ts`).
+ */
+describe("D: /owner-controls/connector-credentials med gyldig grant videreformidler til owner_controls.*", () => {
+  it("set_connector_credential: 200, tool_id='owner_controls', identiteten er den LØSTE (ikke kroppens)", async () => {
+    nextResult = { ok: true, data: { connector_id: "github", credential_ref: "JARVIS_GITHUB_TOKEN", configured: true }, output_trust: "internal", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", {
+      grant_token: grant, action: "set_connector_credential",
+      parameters: { connector_id: "github", credential_ref: "JARVIS_GITHUB_TOKEN", value: "ghp_test" }
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["ok"]).toBe(true);
+    expect(res.body["data"]).toEqual({ connector_id: "github", credential_ref: "JARVIS_GITHUB_TOKEN", configured: true });
+    expect(executeCalls).toHaveLength(1);
+    expect(executeCalls[0]?.tool_id).toBe("owner_controls");
+    expect(executeCalls[0]?.action).toBe("set_connector_credential");
+    expect(executeCalls[0]?.identity.tenant_id).toBe(TENANT_A);
+    expect(executeCalls[0]?.identity.person_id).toBe(OWNER);
+    expect(JSON.stringify(res.body)).not.toContain("ghp_test");
+  });
+
+  it("test_connector: 200, data videreformidlet uendret", async () => {
+    nextResult = { ok: true, data: { connector_id: "vercel", test_method: "live", tested: true, ok: true }, output_trust: "internal", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", {
+      grant_token: grant, action: "test_connector", parameters: { connector_id: "vercel" }
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["data"]).toEqual({ connector_id: "vercel", test_method: "live", tested: true, ok: true });
+    expect(executeCalls[0]?.action).toBe("test_connector");
+  });
+
+  it("gateway.execute() avslag (ok:false) videreformidles som 403 tool_denied", async () => {
+    nextResult = { ok: false, reason: "credential_ref_not_registered_for_connector:github" };
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", {
+      grant_token: grant, action: "set_connector_credential",
+      parameters: { connector_id: "github", credential_ref: "NOT_A_GITHUB_REF", value: "x" }
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("tool_denied");
+  });
+});
+
+describe("E: /owner-controls/connector-credentials avviser et ugyldig/manglende grant FØR gateway.execute() kalles", () => {
+  it("uten grant_token: 400 malformed_request/grant_malformed, gateway.execute() ALDRI kalt", async () => {
+    const res = await post("/owner-controls/connector-credentials", { action: "test_connector", parameters: { connector_id: "github" } });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("grant_malformed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("oppdiktet grant_token: 403 identity_denied, gateway.execute() ALDRI kalt", async () => {
+    const res = await post("/owner-controls/connector-credentials", {
+      grant_token: "grant-som-ikke-finnes", action: "test_connector", parameters: { connector_id: "github" }
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("identity_denied");
+    expect(executeCalls).toHaveLength(0);
+  });
+});
+
+describe("F: /owner-controls/connector-credentials begrenser SEG SELV til NØYAKTIG de to nye handlingene - resten av owner_controls.* er UNÅDBAR herfra", () => {
+  it("action='activate_kill_switch' (en klasse D-mutasjon): 400 action_not_allowed, gateway.execute() ALDRI kalt", async () => {
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", { grant_token: grant, action: "activate_kill_switch" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("action='revoke_credential': 400 action_not_allowed, gateway.execute() ALDRI kalt", async () => {
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", { grant_token: grant, action: "revoke_credential" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("action='get_control_state' (klasse A, men IKKE i DENNE rutens allowlist): 400 action_not_allowed", async () => {
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", { grant_token: grant, action: "get_control_state" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("ukjent kroppsfelt avvises fail-closed: 400 malformed_request/grant_malformed", async () => {
+    const grant = await validGrant();
+    const res = await post("/owner-controls/connector-credentials", { grant_token: grant, action: "test_connector", tenant_id: TENANT_A });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("grant_malformed");
+    expect(executeCalls).toHaveLength(0);
+  });
+});

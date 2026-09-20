@@ -217,7 +217,11 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
     // D-211: Infisical hentet frem som PRIMÆR SecretProvider - `.env`/`BusinessInternal`-
     // kjeden (den opprinnelige regex-en her fanget) er UENDRET, nå nøstet som FALLBACK
     // inni en ytre FallbackSecretProvider(Infisical, ...) i stedet for å være selve toppen.
-    expect(mainSource).toMatch(/const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(\s*new InfisicalSecretProvider\(\),\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\)/);
+    // Task #122 (D-213): `new InfisicalSecretProvider()` er nå HOISTET til en navngitt
+    // `infisicalSecretProvider`-konstant (gitt inn TO ganger - lese-kjeden OG det nye
+    // `writableSecrets`-5.-argumentet) - regex-en oppdatert til å matche variabelnavnet
+    // i stedet for et inline `new`-uttrykk.
+    expect(mainSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const toolGateway = new ToolGateway\(\s*pool, policy,\s*new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\),\s*ownerControls,\s*infisicalSecretProvider\s*\)/);
     // D-90: BusinessTransport-konstruktørkallet ble flerlinjet for å romme den
     // injiserte `marketingMemoryBriefSource(growthService)`-argumentet - samme
     // fem første argumenter (businessService/openLoopService/pool/toolGateway/
@@ -226,7 +230,10 @@ describe("HOST FIX #1: normal API/worker-runtime wirer EnvSecretProvider inn i S
   });
   it("apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring", () => {
     const workerSource = readSource("../../../apps/api/src/worker-main.ts");
-    expect(workerSource).toMatch(/new FallbackSecretProvider\(\s*new InfisicalSecretProvider\(\),\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\)/);
+    // Task #122 (D-213): samme hoisting som main.ts - `infisicalSecretProvider`
+    // er nå en navngitt konstant, gitt inn i BÅDE lese-kjeden og `ToolGateway`
+    // sitt `writableSecrets`-argument.
+    expect(workerSource).toMatch(/const infisicalSecretProvider = new InfisicalSecretProvider\(\);\s*const toolSecretProvider = new FallbackSecretProvider\(\s*infisicalSecretProvider,\s*new FallbackSecretProvider\(new EnvSecretProvider\(\), new BusinessInternalSecretProvider\(\)\)\s*\);\s*const toolGateway = new ToolGateway\(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider\);/);
     expect(workerSource).toMatch(/business: new BusinessTransport\(\s*businessService, openLoopService, pool, toolGateway, scoringService,\s*\[marketingMemoryBriefSource\(growthService\)\]\s*\)/);
   });
 });

@@ -224,13 +224,20 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `null` UMIDDELBART når den ikke er konfigurert (`available()` == false,
   // se gateway.ts) - lokal dev/CI UTEN kjørende Infisical faller derfor
   // rett gjennom til SAMME env-kjede som før, INGEN regresjon.
+  // Task #122 (D-213): SAMME InfisicalSecretProvider-INSTANS gis inn TO
+  // ganger - én gang inni les-fallback-kjeden under (uendret), én gang som
+  // det separate `writableSecrets`-argumentet (5. posisjon) som
+  // `ToolGateway.setSecret()` skriver via. ALDRI to uavhengige Infisical-
+  // tilkoblinger.
+  const infisicalSecretProvider = new InfisicalSecretProvider();
   const toolGateway = new ToolGateway(
     pool, policy,
     new FallbackSecretProvider(
-      new InfisicalSecretProvider(),
+      infisicalSecretProvider,
       new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
     ),
-    ownerControls
+    ownerControls,
+    infisicalSecretProvider
   );
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
@@ -541,11 +548,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // til DEN SAMME `pool`/`grantService`/`ownerControlAuthority` som resten
       // av eier-autoritets-/session-grant-mønstrene i denne filen - IKKE en ny,
       // parallell tilstand. Se `OwnerControlsService.revokeDevice()` sitt filhode.
+      // Task #122 (D-213): andre konstruktør-argument - DEN SAMME `toolGateway`-
+      // instansen (allerede konstruert over) - kobler `set_connector_credential`/
+      // `test_connector` til `ToolGateway.setSecret()`/nøstet `execute()`.
       ...ownerControlsToolDefinitions(new OwnerControlsTransport(new OwnerControlsService(killSwitch, ownerControls, {
         pool,
         grants: grantService,
         authority: ownerControlAuthority
-      }))),
+      }), toolGateway)),
       // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
       // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
