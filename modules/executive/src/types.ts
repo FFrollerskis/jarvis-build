@@ -1,6 +1,6 @@
 import type { FinanceKillSwitch } from "@jarvis/finance";
-import type { OwnerControlState } from "@jarvis/owner-controls";
-import type { Situation, SituationPriority, SituationStage } from "@jarvis/situations";
+import type { FrozenConnectorEntry, OwnerControlState, RevokedCredentialEntry } from "@jarvis/owner-controls";
+import type { Situation, SituationAutonomyPolicy, SituationPriority, SituationStage } from "@jarvis/situations";
 
 /**
  * UA-11 Executive Mode (P0, D-162): JARVIS_CANONICAL attention-ranking-
@@ -117,5 +117,32 @@ export interface AttentionItemDetail extends AttentionItem {
 export interface ControlSurfaceStatus {
   owner_control: OwnerControlState;
   situation_domain_pauses: { paused: string[] };
+  finance_kill_switch: FinanceKillSwitch | null;
+}
+
+/**
+ * UA-11 "K2" (D-64): "delegation board" - masterplanens femte K2-punkt.
+ * BEVISST INGEN egen tabell (se `059_governance.sql` sitt filhode og
+ * `modules/governance` sin pakkebeskrivelse) - dette er en RENT avledet
+ * visning, SAMME komposisjonsdisiplin som `getControlSurfaceStatus()` over:
+ * TRE nøstede `ToolGateway.execute()`-kall (`situations.list_autonomy_policies`,
+ * `owner_controls.get_control_state`, `finance.get_kill_switch`), INGEN ny
+ * kanonisk kilde. Dekker UA-11 akseptansekriterium 3 sin fulle bredde
+ * ("connector, provider, agent or autonomy domain") ved å vise ALLE TRE
+ * delegasjonslagene samlet, der `get_control_surface_status` viser to av
+ * dem sammen med finans-nødbryteren:
+ * - `autonomy_domains`: HVILKE situasjonsdomener Jarvis har fått delegert
+ *   autonom handlingsrett for (og om delegeringen faktisk er aktivert) -
+ *   "agent or autonomy domain".
+ * - `frozen_connectors`/`revoked_credentials`: eierens EKSPLISITTE
+ *   tilbaketrekking av leverandør-/connector-tilgang - "connector, provider".
+ * - `finance_kill_switch`: SAMME tredje, uavhengige autoritetsdimensjon som
+ *   `ControlSurfaceStatus` (se der for full begrunnelse) - spend-
+ *   muliggjørende finans-/kort-handlinger er selv en delegert kapabilitet.
+ */
+export interface DelegationBoard {
+  autonomy_domains: SituationAutonomyPolicy[];
+  frozen_connectors: FrozenConnectorEntry[];
+  revoked_credentials: RevokedCredentialEntry[];
   finance_kill_switch: FinanceKillSwitch | null;
 }

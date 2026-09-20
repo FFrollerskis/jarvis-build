@@ -1,0 +1,24 @@
+{
+  "name": "@jarvis/governance",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "UA-11 Executive Mode \"K2\" (D-64): JARVIS_CANONICAL journalpakke for decision log, scenarios, risk register og goals/OKRs - ren tilstands-/historikkføring, ZERO ekstern leverandøravhengighet, ZERO klasse D-handlings-claim-maskineri.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@jarvis/business": "workspace:*",
+    "@jarvis/contracts": "workspace:*",
+    "@jarvis/core": "workspace:*",
+    "@jarvis/memory": "workspace:*",
+    "@jarvis/tool-gateway": "workspace:*",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@jarvis/policy": "workspace:*",
+    "@jarvis/situations": "workspace:*",
+    "@types/pg": "^8.15.6",
+    "embedded-postgres": "16.14.0-beta.17"
+  }
+}

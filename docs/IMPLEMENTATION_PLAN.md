@@ -4430,6 +4430,41 @@ regresjonsvakt - allowlist er og forblir lese-kun). Se `docs/PROJECT_STATUS.md` 
 
 ---
 
+## UA-11 – Executive Mode "K2": decision log/scenarios/risk register/goals-OKRs/delegation board (D-207)
+
+**Manuell masterplan-slice** (2026-09-20, direkte Tobias-chat-instruks under D-192: spurt hvilken
+delkomponent å starte med, svarte "alle" - bygg hele K2-linjen samlet). Lukker de fem gjenstående
+UA-11 K2-bulletene `docs/UA11_EXECUTIVE_MODE_DESIGN.md` §7 eksplisitt flagget som DEFERRED. Full
+begrunnelse (inkl. D-64 Core-vs-Adapter-portanalysen for hver av de fem delkomponentene): D-207 i
+`DECISIONS_AND_ASSUMPTIONS.md`; design-tillegg: `docs/UA11_EXECUTIVE_MODE_DESIGN.md` §10.
+
+**Bygget:**
+- Migrasjon `059_governance.sql` - fire nye tabeller (`decision_log`, `scenarios`, `risks`,
+  `goals`+`goal_key_results`), samme tenant+space-RLS-mønster som `situations`/`business_open_loops`.
+  `decision_log.related_situation_id` er en scope-safe sammensatt FK mot `situations`.
+- Ny pakke `@jarvis/governance` (`GovernanceService`/`GovernanceTransport`, 14 handlinger, ALLE klasse
+  A/B - INGEN klasse C/D, rene interne journalposter). SAMME D-68-identitetsdisiplin
+  (`ToolInvocationContext.identity` UTELUKKENDE, `strict()`-skjemaer uten identitetsfelt) som
+  `situations`/`executive`.
+- Ny `executive.get_delegation_board` (klasse A) - "delegation board" BEVISST IKKE en femte tabell,
+  ren komposisjon av `situations.list_autonomy_policies`+`owner_controls.get_control_state`+
+  `finance.get_kill_switch`, SAMME mønster som `get_control_surface_status`.
+- `apps/api/src/main.ts` wirer `governanceToolDefinitions()` inn i den eksisterende
+  `additionalTools`-listen/-løkken - samme `pool`-instans, ingen parallell registreringsvei.
+  `modules/erasure/src/plan.ts` fikk 5 nye rader (Q-20-erasure - `decision_log` slettes FØR
+  `situations` pga. den sammensatte FK-en).
+
+**Bygges IKKE i denne sliceen:** ingen ny mutasjon eksponert utover de 14 governance-handlingene selv
+(ingen HTTP-rute/dashboard-integrasjon for K2 - `executive.query`-allowlisten fra D-199 er UENDRET,
+egen fremtidig slice om/når UI-en skal vise governance-data).
+
+**Tester:** `modules/governance/test/transport-wiring.test.ts` (11, DB-uavhengig, kjørt og grønt),
+`modules/governance/test/service-rls.test.ts` (17, ekte embedded Postgres/RLS, SKREVET men IKKE kjørt
+lokalt denne økten - samme kjente sandbox-begrensning som D-193→D-199, verifiseres av CI). Se
+`docs/PROJECT_STATUS.md` for eksakte tall/status.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

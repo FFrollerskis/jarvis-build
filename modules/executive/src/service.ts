@@ -8,7 +8,7 @@ import type {
 } from "@jarvis/situations";
 import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
-import type { AttentionItem, AttentionItemDetail, ControlSurfaceStatus } from "./types.ts";
+import type { AttentionItem, AttentionItemDetail, ControlSurfaceStatus, DelegationBoard } from "./types.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): motoren bak den samlede kontrollflaten.
@@ -243,5 +243,26 @@ export class ExecutiveService {
       requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
     ]);
     return { owner_control: ownerControl, situation_domain_pauses: pauseState, finance_kill_switch: financeKillSwitch };
+  }
+
+  /**
+   * UA-11 "K2" (D-64): "delegation board" - se `types.ts` sitt `DelegationBoard`-
+   * dokumentasjonskommentar for hele begrunnelsen. TRE nøstede
+   * `gateway.execute()`-kall, SAMME disiplin som `getControlSurfaceStatus()`
+   * over - INGEN egen tilstand, INGEN direkte `SituationEngine`/
+   * `OwnerControls`-tilgang fra denne pakken.
+   */
+  async getDelegationBoard(identity: IdentityContext): Promise<DelegationBoard> {
+    const [autonomyDomains, ownerControl, financeKillSwitch] = await Promise.all([
+      requireData<SituationAutonomyPolicy[]>(this.gateway, identity, "situations", "list_autonomy_policies"),
+      requireData<OwnerControlState>(this.gateway, identity, "owner_controls", "get_control_state"),
+      requireData<FinanceKillSwitch | null>(this.gateway, identity, "finance", "get_kill_switch", { tenant_id: identity.tenant_id })
+    ]);
+    return {
+      autonomy_domains: autonomyDomains,
+      frozen_connectors: ownerControl.frozen_connectors,
+      revoked_credentials: ownerControl.revoked_credentials,
+      finance_kill_switch: financeKillSwitch
+    };
   }
 }

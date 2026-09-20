@@ -55,6 +55,7 @@ import {
   situationsToolDefinitions
 } from "@jarvis/situations";
 import { ExecutiveService, ExecutiveTransport, executiveToolDefinitions } from "@jarvis/executive";
+import { GovernanceService, GovernanceTransport, governanceToolDefinitions } from "@jarvis/governance";
 import { OwnerControlsService, OwnerControlsTransport, ownerControlsToolDefinitions } from "@jarvis/owner-controls";
 import {
   FinanceService, FinanceTransport, SpendService, SpendTransport, StripeFinanceTransport, VippsFinanceTransport,
@@ -527,7 +528,13 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
         pool,
         grants: grantService,
         authority: ownerControlAuthority
-      })))
+      }))),
+      // UA-11 Executive Mode "K2" (D-64): decision log/scenarios/risk register/
+      // goals-OKRs - RENE journalposter over DEN SAMME `pool`-instansen som
+      // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
+      // sitt filhode) - IKKE en parallell tilkobling. Registrert i SAMME
+      // liste/løkke som `situations`/`executive`/`owner_controls`.
+      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool)))
     ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
