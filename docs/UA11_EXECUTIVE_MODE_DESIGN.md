@@ -150,8 +150,8 @@ sin EGEN, allerede-registrerte erasure-plikt er uendret og fullt tilstrekkelig),
   home/health-signaler). `situations` har ingen slik kilde koblet til ennå (kun `business_open_loops`-
   broen fra UA-10 P1) - når/hvis en slik kilde kobles til `situations` (D-64-disiplinen: KOMPOSISJON),
   vil den automatisk vises i attention-køen uten en executive-side-endring.
-- **Decision log, scenarios, risk register, goals/OKRs, delegation board.** Masterplan-bullets uten en
-  eksisterende kanonisk kilde i repoet ennå.
+- **Decision log, scenarios, risk register, goals/OKRs, delegation board.** ~~Masterplan-bullets uten en
+  eksisterende kanonisk kilde i repoet ennå.~~ **LEVERT (K2, D-207, 2026-09-20) - se §9.**
 - **"Business impact"-vekting i ranking** - se §3.
 - **Modell-assistert ranking/klassifisering.** P0 er 100% deterministisk (byggeordrenes eksplisitte
   krav: en modell autoriserer ALDRI en handling alene, og fail-closed deterministisk fallback er
@@ -313,3 +313,42 @@ Masterplanens UA-11-akseptansekriterier:
    `tenant-personal`) og ferskinstans-holdbarhetslesingen. `HOST_ACCEPTANCE_STATUS=PASS` (RETTET fra
    `REQUIRES_RERUN`), `INTERNAL_BUILD_COMPLETE=true` (RETTET fra `false`). `SOVEREIGN_COMPLETE=false`
    FORBLIR UENDRET. Se D-179 for full begrunnelse/testevidens.
+
+## §10. "K2": decision log/scenarios/risk register/goals-OKRs/delegation board (D-207, LEVERT 2026-09-20)
+
+§7 sin opprinnelige "bygges IKKE"-liste nevnte disse fem masterplan-bulletene som deferred fordi ingen
+kanonisk kilde fantes for de fire første. Tobias ga eksplisitt instruks ("alle") om å bygge hele
+K2-linjen samlet under D-192-arbeidsformen - se D-207 i `DECISIONS_AND_ASSUMPTIONS.md` for full
+begrunnelse. Kort oppsummert her:
+
+- **Decision log / scenarios / risk register / goals+OKRs** er GENUINT nye `JARVIS_CANONICAL`-
+  entitetstyper (D-64 Core-vs-Adapter-porten kjørt eksplisitt - ingen ekstern leverandør involvert i
+  det hele tatt). De lever i en NY søsterpakke, `@jarvis/governance` (migrasjon `059_governance.sql`,
+  samme tenant+space-RLS-mønster som `situations`/`business_open_loops`), IKKE i `@jarvis/executive` -
+  `executive` sitt eksisterende ZERO-databasetilgang-arkitekturvalg (§1/§2 over) er BEVISST uendret av
+  denne sliceen. `decision_log.related_situation_id` er en scope-safe sammensatt FK mot `situations`
+  (samme "pointer, aldri kopi"-disiplin som `source_open_loop_id`, §5).
+- **Delegation board** er, i motsetning til de fire andre, BEVISST IKKE en femte tabell - masterplanens
+  egen beskrivelse ("one source-backed prioritized view... one-tap pause/override/revoke") er nettopp
+  den typen komposisjon §1-§4 over allerede etablerer mønsteret for. Ny `executive.get_delegation_board`
+  (klasse A) komponerer `situations.list_autonomy_policies` + `owner_controls.get_control_state` +
+  `finance.get_kill_switch` via TRE nøstede `gateway.execute()`-kall - SAMME struktur som
+  `get_control_surface_status` (§4), ZERO ny tabell, ZERO direkte `SituationEngine`/`OwnerControls`-
+  tilgang fra denne pakken.
+- **Kapabilitetsklasser:** `@jarvis/governance` sine 14 handlinger er ALLE klasse A (lesing) eller B
+  (reversibel intern skriving) - INGEN klasse C/D, fordi disse er rene interne journalposter (opprett/
+  oppdater status/notat), ALDRI en utløser for en ekstern mutasjon (se `059_governance.sql` sitt
+  filhode). `get_delegation_board` er klasse A, samme som `get_control_surface_status`.
+- **Wiring:** `apps/api/src/main.ts` sin eksisterende `additionalTools`-liste/-løkke, SAMME `pool`-
+  instans som resten av filen - ingen parallell registreringsvei. `worker-main.ts` er BEVISST UENDRET
+  (samme "ingen faktisk kaller i workerens prosess ennå"-begrunnelse som `situations`/`executive`
+  selv, §7).
+- **Tester:** `modules/governance/test/transport-wiring.test.ts` (11, DB-uavhengig - handlingsliste,
+  risikoklasser, `strict()`-skjema-identitetsavvisning, manglende-invocation-context,
+  dispatch-korrekthet) kjørt og grønt. `modules/governance/test/service-rls.test.ts` (17, ekte
+  embedded Postgres/RLS - CRUD for alle fire entitetstyper, scope-safe FK, tenant-/memory-space-
+  isolasjon) SKREVET men IKKE kjørt lokalt denne økten (samme kjente sandbox-begrensning som
+  D-193→D-199 - `initdb: Permission denied` under root-kjørende container, verifisert identisk mot
+  `situations` sin egen, allerede produksjonsverifiserte `service-rls.test.ts` som kontroll).
+  `HOST_ACCEPTANCE_REQUIRED=false` for hele K2-sliceen - ZERO ny ekstern leverandør/credential/runtime-
+  avhengighet, identisk begrunnelse som UA-11 P0/D-199.

@@ -18,6 +18,7 @@
     "@jarvis/core": "workspace:*",
     "@jarvis/executive": "workspace:*",
     "@jarvis/finance": "workspace:*",
+    "@jarvis/governance": "workspace:*",
     "@jarvis/growth": "workspace:*",
     "@jarvis/health": "workspace:*",
     "@jarvis/incidents": "workspace:*",

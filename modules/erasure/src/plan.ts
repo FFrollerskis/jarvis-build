@@ -411,6 +411,22 @@ async function planMemorySpaceInContext(client: pg.PoolClient, mode: Mode, tenan
   // policy (auto-ACT-binding per domene), IKKE hendelsesdata - BEVISST
   // utelatt på samme grunnlag. De nye `situations.inform_*`-kolonnene
   // slettes sammen med raden under.
+  // UA-11 Executive Mode "K2" (D-64, 059_governance.sql): registrer de fire
+  // nye governance-tabellene (SAMME "tenant+space-scoped journalpost"-mønster
+  // som `situations`/`business_open_loops` over). `goal_key_results` FØR
+  // `goals` (bærer EGET innhold - tittel/fremdrift, IKKE en tom lenkerad som
+  // `incident_repair_tasks` - registreres derfor EKSPLISITT selv om
+  // `ON DELETE CASCADE` uansett ville fjernet den, SAMME presedens som
+  // `incident_evidence` FØR `incidents` over). `decision_log` MÅ slettes FØR
+  // `situations` under - `decision_log_related_situation_scope_fk` er en
+  // vanlig (ikke-kaskaderende) fremmednøkkel, en gjenværende
+  // `related_situation_id`-peker ville ellers blokkert `situations`-
+  // slettingen med et fremmednøkkelbrudd.
+  add(result, "goal_key_results", await run(client, mode, "goal_key_results", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "goals", await run(client, mode, "goals", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "risks", await run(client, mode, "risks", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "scenarios", await run(client, mode, "scenarios", "tenant_id = $1 AND memory_space_id = $2", tv));
+  add(result, "decision_log", await run(client, mode, "decision_log", "tenant_id = $1 AND memory_space_id = $2", tv));
   add(result, "situations", await run(client, mode, "situations", "tenant_id = $1 AND memory_space_id = $2", tv));
   return result;
 }
