@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis · Tale</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; background:#0d1117; color:#e6edf3; margin:0;
+         display:flex; flex-direction:column; min-height:100vh; }
+  header { padding:10px 16px; background:#161b22; font-weight:600; display:flex; align-items:center;
+           justify-content:space-between; gap:12px; }
+  header small { color:#8b949e; font-weight:400; margin-left:8px; }
+  main { flex:1; padding:16px; display:flex; flex-direction:column; gap:16px; max-width:640px; width:100%;
+         margin:0 auto; box-sizing:border-box; }
+  .card { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:14px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; margin-right:6px; }
+  .pill.state-idle { background:#21262d; color:#8b949e; }
+  .pill.state-listening { background:#132d1f; color:#7ee2a8; }
+  .pill.state-thinking { background:#3d2c00; color:#ffd580; }
+  .pill.state-speaking { background:#1f2d3d; color:#9cc4ff; }
+  .pill.state-interrupted { background:#5c1e1e; color:#ffb4b4; }
+  .pill.trust-server_verified { background:#132d1f; color:#7ee2a8; }
+  .pill.trust-client_asserted { background:#3d2c00; color:#ffd580; }
+  #big-btn { width:100%; padding:18px; font-size:17px; font-weight:600; border-radius:12px; border:0;
+             cursor:pointer; background:#238636; color:#fff; }
+  #big-btn.active { background:#5c1e1e; }
+  #big-btn:disabled { background:#30363d; cursor:default; }
+  #ws-url { width:100%; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px;
+            padding:8px; font-size:13px; box-sizing:border-box; margin-top:6px; }
+  #transcript { display:flex; flex-direction:column; gap:8px; }
+  .turn { padding:8px 12px; border-radius:10px; max-width:85%; }
+  .turn.user { align-self:flex-end; background:#1f2d3d; }
+  .turn.jarvis { align-self:flex-start; background:#21262d; }
+  .turn .label { font-size:11px; color:#8b949e; margin-bottom:2px; }
+  #block-panel { display:none; background:#3d2c00; border:1px solid #6b4e00; border-radius:10px; padding:14px;
+                 font-size:13px; line-height:1.5; }
+  #block-panel h3 { margin:0 0 6px; color:#ffd580; font-size:14px; }
+  #status { padding:12px 16px; background:#161b22; border-top:1px solid #30363d; color:#8b949e; font-size:13px; }
+  #enroll { display:none; padding:12px 16px; background:#161b22; border-top:1px solid #30363d; }
+  #enroll p { margin:0 0 8px; color:#8b949e; font-size:13px; }
+  #enroll code { color:#e6edf3; background:#0d1117; padding:2px 5px; border-radius:4px; }
+  #enroll form { display:flex; gap:8px; padding:0; }
+  #enroll input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px;
+                  padding:10px; font-size:15px; }
+  #enroll button { background:#238636; color:#fff; border:0; border-radius:8px; padding:0 18px; cursor:pointer; }
+  details summary { cursor:pointer; color:#8b949e; font-size:12px; }
+  .empty { color:#8b949e; font-style:italic; }
+</style>
+</head>
+<body>
+<header>
+  <span>Jarvis <small>tale · WebSocket-klient</small></span>
+  <span id="state-pill" class="pill state-idle">idle</span>
+</header>
+<main>
+  <div class="card">
+    <label for="ws-url">Voice-gateway WebSocket-adresse</label>
+    <input id="ws-url" placeholder="ws://127.0.0.1:3020" autocomplete="off">
+    <p style="margin:6px 0 0; font-size:12px; color:#8b949e;">
+      Samme nettleser/enhet som brukes til <a href="/dashboard" style="color:#9cc4ff;">dashbordet</a> - enhetsnøkkelen
+      gjenbrukes. Voice Gateway er en EGEN prosess fra Core (CLAUDE.md regel 5), typisk port 3020.
+    </p>
+  </div>
+
+  <button id="big-btn">Start samtale</button>
+
+  <div id="block-panel">
+    <h3>Ekstern taleleverandør er policy-blokkert</h3>
+    <p id="block-panel-text"></p>
+  </div>
+
+  <div class="card">
+    <span id="trust-pill" class="pill" style="display:none;"></span>
+    <div id="transcript"><p class="empty">Ingen samtale ennå.</p></div>
+  </div>
+
+  <details>
+    <summary>Teknisk logg</summary>
+    <div id="tech-log" style="font-size:12px; color:#8b949e; white-space:pre-wrap; margin-top:6px;"></div>
+  </details>
+</main>
+<div id="status"></div>
+<div id="enroll">
+  <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
+     <code>pnpm --filter @jarvis/api enroll-ticket</code> og lim inn billetten under.</p>
+  <form id="enroll-form">
+    <input id="enroll-ticket" placeholder="Innrullerings-billett …" autocomplete="off">
+    <button>Innrullér</button>
+  </form>
+</div>
+<script>
+  const wsUrlInput = document.getElementById("ws-url");
+  const bigBtn = document.getElementById("big-btn");
+  const statePill = document.getElementById("state-pill");
+  const trustPill = document.getElementById("trust-pill");
+  const blockPanel = document.getElementById("block-panel");
+  const blockPanelText = document.getElementById("block-panel-text");
+  const transcriptEl = document.getElementById("transcript");
+  const techLogEl = document.getElementById("tech-log");
+  const statusEl = document.getElementById("status");
+  const enrollPanel = document.getElementById("enroll");
+  const enrollForm = document.getElementById("enroll-form");
+  const enrollTicket = document.getElementById("enroll-ticket");
+
+  // Samme dev-identitet/enhetsautentisering som apps/web/dashboard.html - se
+  // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
+  // følger med et ekte enhetsbevis. Samme localStorage-nøkkel for enhetsnøkkel
+  // (jarvis.devicekey) - dashbord og tale er SAMME fysiske enhet/nettleser.
+  const identity = {
+    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
+    memory_space: "personal"
+  };
+
+  let deviceKey = null;
+  let ws = null;
+  let micStream = null;
+  let captureCtx = null;
+  let captureNode = null;
+  let playbackCtx = null;
+  let nextPlaybackTime = 0;
+  const pendingPlaybackSources = [];
+
+  function defaultVoiceWsUrl() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + location.hostname + ":3020";
+  }
+  wsUrlInput.value = localStorage.getItem("jarvis.voicewsurl") || defaultVoiceWsUrl();
+
+  function techLog(line) {
+    techLogEl.textContent = new Date().toLocaleTimeString("nb-NO") + "  " + line + "\n" + techLogEl.textContent;
+  }
+
+  function base64FromBuffer(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  function pemFromSpki(spkiBuffer) {
+    const b64 = base64FromBuffer(spkiBuffer);
+    const lines = b64.match(/.{1,64}/g) || [];
+    return "-----BEGIN PUBLIC KEY-----\n" + lines.join("\n") + "\n-----END PUBLIC KEY-----\n";
+  }
+
+  async function loadOrCreateDeviceKey() {
+    const stored = localStorage.getItem("jarvis.devicekey");
+    if (stored) {
+      const jwk = JSON.parse(stored);
+      const privateKey = await crypto.subtle.importKey("jwk", jwk, { name: "Ed25519" }, true, ["sign"]);
+      const publicKey = await crypto.subtle.importKey(
+        "jwk", { kty: "OKP", crv: "Ed25519", x: jwk.x }, { name: "Ed25519" }, true, ["verify"]
+      );
+      return { privateKey, publicKey };
+    }
+    const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const jwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+    localStorage.setItem("jarvis.devicekey", JSON.stringify(jwk));
+    return { privateKey: pair.privateKey, publicKey: pair.publicKey };
+  }
+
+  async function signChallenge(privateKey, deviceId) {
+    const res = await fetch("/devices/challenge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device_id: deviceId })
+    });
+    if (!res.ok) throw new Error("devices/challenge: " + res.status);
+    const { challenge } = await res.json();
+    const signature = base64FromBuffer(
+      await crypto.subtle.sign({ name: "Ed25519" }, privateKey, new TextEncoder().encode(challenge))
+    );
+    return { challenge, signature };
+  }
+
+  async function enrollDevice(privateKey, publicKey, ticket) {
+    const pem = pemFromSpki(await crypto.subtle.exportKey("spki", publicKey));
+    const res = await fetch("/devices/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: identity.tenant_id,
+        person_id: identity.person_id,
+        device: { device_id: identity.device_id, kind: "web", public_key_pem: pem },
+        enrollment: { kind: "enrollment_ticket", ticket }
+      })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error("devices/register: " + (body.reason || res.status));
+  }
+
+  enrollForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    try {
+      if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+      await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
+      enrollPanel.style.display = "none";
+      statusEl.textContent = "Enheten er innrullert. Trykk «Start samtale» på nytt.";
+    } catch (err) {
+      statusEl.textContent = "Innrullering feilet: " + err.message;
+    }
+  });
+
+  function escapeHtml(text) {
+    const div = document.createElement("div");
+    div.textContent = String(text);
+    return div.innerHTML;
+  }
+
+  function appendTurn(role, text) {
+    if (transcriptEl.querySelector(".empty")) transcriptEl.innerHTML = "";
+    const div = document.createElement("div");
+    div.className = "turn " + role;
+    div.innerHTML = '<div class="label">' + (role === "user" ? "Du" : "Jarvis") + '</div>' + escapeHtml(text);
+    transcriptEl.appendChild(div);
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  /**
+   * D-212 (task #120, Q-32 punkt 1 - HARD EKSTERN/JURIDISK BLOKKERING):
+   * `speech_routing_denied_stt:<outcome>`/`speech_routing_denied_tts:<outcome>`
+   * betyr at `packages/contracts/src/speech.ts` sin `evaluateSpeechRouting()`
+   * NEKTET OpenAI som taleprosessor. Dette er IKKE en feil Jarvis/Claude kan
+   * eller skal rette - `processor_terms_status` på OpenAI-radene i
+   * `docs/security/PROCESSOR_REGION_MATRIX.md` er hardkodet "NOT_VERIFIED"
+   * med en eksplisitt kildekode-kommentar om at KUN Tobias, gjennom en reell
+   * juridisk/eier-verifisering (databehandleravtale, region, retensjon), kan
+   * endre den. Panelet under forklarer dette ÆRLIG i stedet for å se ut som en
+   * generisk feil - se docs/OPEN_QUESTIONS.md Q-32 punkt 1.
+   */
+  function showBlockPanel(kind) {
+    blockPanel.style.display = "block";
+    blockPanelText.textContent =
+      (kind === "stt" ? "Talegjenkjenning (STT)" : "Talesyntese (TTS)") +
+      " via OpenAI er koblet inn i koden, men er bevisst policy-blokkert inntil Tobias selv har gjort den " +
+      "juridiske/eier-verifiseringen av OpenAI som databehandler (region, databehandleravtale, trening/" +
+      "retensjon - se docs/OPEN_QUESTIONS.md Q-32 punkt 1). Dette er IKKE noe Jarvis/Claude kan eller vil " +
+      "løse selv - koden nekter bevisst helt til den verifiseringen er gjort og dokumentert.";
+  }
+
+  const VOICE_AUTHORITY_DENIAL_TEXT = {
+    device_proof_invalid: "Enhetsbeviset er ugyldig (ukjent/utløpt utfordring, feil signatur, eller enheten er tilbakekalt).",
+    unknown_membership: "Personen er ikke medlem av denne tenanten.",
+    unknown_device: "Enheten er ikke registrert for denne personen/tenanten.",
+    unknown_memory_space: "Memory space finnes ikke i denne tenanten.",
+    malformed_evidence: "Forespørselen var feilformet.",
+    device_authority_revoked: "Enhetens nøkkel ble tilbakekalt akkurat idet sesjonen skulle utstedes."
+  };
+
+  function handleServerMessage(msg) {
+    techLog(JSON.stringify(msg).slice(0, 300));
+    switch (msg.type) {
+      case "started": {
+        const authority = msg.memory_space_authority;
+        trustPill.style.display = "inline-block";
+        trustPill.className = "pill trust-" + String(authority).toLowerCase();
+        trustPill.textContent = authority === "SERVER_VERIFIED" ? "enhet bevist" : "enhet IKKE bevist (kun lokal tale)";
+        statusEl.textContent = "Tilkoblet.";
+        startMicCapture();
+        break;
+      }
+      case "state": {
+        statePill.className = "pill state-" + msg.state;
+        statePill.textContent = msg.state;
+        break;
+      }
+      case "partial":
+        break;
+      case "final":
+        if (msg.text) appendTurn("user", msg.text);
+        break;
+      case "reply":
+        if (msg.reply) appendTurn("jarvis", msg.reply);
+        break;
+      case "tool_activity":
+        if (msg.activity) statusEl.textContent = msg.activity;
+        break;
+      case "tts_frame":
+        playTtsFrame(msg.data);
+        break;
+      case "tts_cancelled":
+        stopPlayback();
+        break;
+      case "metrics":
+        break;
+      case "error": {
+        const error = String(msg.error || "");
+        if (error.startsWith("speech_routing_denied_stt:")) { showBlockPanel("stt"); break; }
+        if (error.startsWith("speech_routing_denied_tts:")) { showBlockPanel("tts"); break; }
+        if (error.startsWith("voice_authority_denied:")) {
+          const reason = error.split(":")[1];
+          statusEl.textContent = "Autorisasjon avvist: " + (VOICE_AUTHORITY_DENIAL_TEXT[reason] || reason);
+          if (reason === "device_proof_invalid" || reason === "unknown_device") {
+            enrollPanel.style.display = "block";
+          }
+          stopConversation();
+          break;
+        }
+        if (error === "voice_authority_expired") {
+          statusEl.textContent = "Sesjonen utløp - trykk «Start samtale» igjen.";
+          stopConversation();
+          break;
+        }
+        if (error.startsWith("utterance_already_completed:")) break;
+        statusEl.textContent = "Feil: " + error;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  // --- Mikrofonopptak: PCM16 mono 16kHz, samme format OpenAiStt forventer (stt.ts). ---
+
+  function downsampleTo16kMono(float32, inRate) {
+    if (inRate === 16000) return float32;
+    const ratio = inRate / 16000;
+    const outLength = Math.floor(float32.length / ratio);
+    const out = new Float32Array(outLength);
+    for (let i = 0; i < outLength; i++) {
+      const srcIdx = i * ratio;
+      const idxLow = Math.floor(srcIdx);
+      const idxHigh = Math.min(idxLow + 1, float32.length - 1);
+      const frac = srcIdx - idxLow;
+      out[i] = float32[idxLow] * (1 - frac) + float32[idxHigh] * frac;
+    }
+    return out;
+  }
+
+  function float32ToPcm16(float32) {
+    const pcm = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return pcm;
+  }
+
+  function startMicCapture() {
+    if (!micStream) return;
+    captureCtx = new AudioContext();
+    const source = captureCtx.createMediaStreamSource(micStream);
+    // ScriptProcessorNode er deprecated men uten byggetrinn er det den enkleste
+    // veien til rå PCM-samples uten en separat AudioWorklet-modulfil.
+    captureNode = captureCtx.createScriptProcessor(4096, 1, 1);
+    captureNode.onaudioprocess = (event) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const downsampled = downsampleTo16kMono(input, captureCtx.sampleRate);
+      const pcm16 = float32ToPcm16(downsampled);
+      ws.send(JSON.stringify({ type: "audio", data: base64FromBuffer(pcm16.buffer) }));
+    };
+    source.connect(captureNode);
+    // ScriptProcessorNode må kobles til en destinasjon for å faktisk kjøre i
+    // enkelte nettlesere - en stille gain på 0 unngår at mikrofonlyden spilles
+    // tilbake til høyttaleren (ingen ekko-loop).
+    const silentGain = captureCtx.createGain();
+    silentGain.gain.value = 0;
+    captureNode.connect(silentGain);
+    silentGain.connect(captureCtx.destination);
+  }
+
+  function stopMicCapture() {
+    if (captureNode) { captureNode.disconnect(); captureNode.onaudioprocess = null; captureNode = null; }
+    if (captureCtx) { void captureCtx.close(); captureCtx = null; }
+    if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  }
+
+  // --- TTS-avspilling: PCM16 mono 24kHz (OpenAI /v1/audio/speech response_format "pcm"). ---
+
+  function ensurePlaybackCtx() {
+    if (!playbackCtx) {
+      playbackCtx = new AudioContext({ sampleRate: 24000 });
+      nextPlaybackTime = playbackCtx.currentTime;
+    }
+    return playbackCtx;
+  }
+
+  function playTtsFrame(base64Data) {
+    const ctx = ensurePlaybackCtx();
+    const binary = atob(base64Data);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const pcm16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(pcm16.length);
+    for (let i = 0; i < pcm16.length; i++) float32[i] = pcm16[i] / 0x8000;
+    const buffer = ctx.createBuffer(1, float32.length, 24000);
+    buffer.copyToChannel(float32, 0);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    const startAt = Math.max(nextPlaybackTime, ctx.currentTime);
+    source.start(startAt);
+    nextPlaybackTime = startAt + buffer.duration;
+    pendingPlaybackSources.push(source);
+    source.onended = () => {
+      const idx = pendingPlaybackSources.indexOf(source);
+      if (idx >= 0) pendingPlaybackSources.splice(idx, 1);
+    };
+  }
+
+  function stopPlayback() {
+    while (pendingPlaybackSources.length) {
+      const source = pendingPlaybackSources.pop();
+      try { source.stop(); } catch { /* allerede stoppet */ }
+    }
+    if (playbackCtx) nextPlaybackTime = playbackCtx.currentTime;
+  }
+
+  // --- Tilkobling ---
+
+  function setConnected(active) {
+    bigBtn.textContent = active ? "Avslutt samtale" : "Start samtale";
+    bigBtn.className = active ? "active" : "";
+  }
+
+  async function startConversation() {
+    bigBtn.disabled = true;
+    statusEl.textContent = "Ber om mikrofontilgang …";
+    blockPanel.style.display = "none";
+    trustPill.style.display = "none";
+    try {
+      if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      statusEl.textContent = "Signerer enhetsbevis …";
+      const { challenge, signature } = await signChallenge(deviceKey.privateKey, identity.device_id);
+      const url = wsUrlInput.value.trim() || defaultVoiceWsUrl();
+      localStorage.setItem("jarvis.voicewsurl", url);
+      statusEl.textContent = "Kobler til " + url + " …";
+      ws = new WebSocket(url);
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({
+          type: "start",
+          identity: {
+            person_id: identity.person_id, tenant_id: identity.tenant_id,
+            device_id: identity.device_id, memory_space: identity.memory_space
+          },
+          device_proof: { challenge, signature }
+        }));
+        setConnected(true);
+      });
+      ws.addEventListener("message", (ev) => {
+        try { handleServerMessage(JSON.parse(ev.data)); } catch { techLog("ugyldig melding fra server"); }
+      });
+      ws.addEventListener("close", () => { techLog("WebSocket lukket."); stopConversation(); });
+      ws.addEventListener("error", () => { techLog("WebSocket-feil."); statusEl.textContent = "Tilkoblingsfeil mot voice-gateway."; });
+    } catch (err) {
+      statusEl.textContent = "Feil: " + err.message;
+      stopConversation();
+    } finally {
+      bigBtn.disabled = false;
+    }
+  }
+
+  function stopConversation() {
+    stopMicCapture();
+    stopPlayback();
+    if (ws) { try { ws.close(); } catch { /* allerede lukket */ } ws = null; }
+    setConnected(false);
+    statePill.className = "pill state-idle";
+    statePill.textContent = "idle";
+  }
+
+  bigBtn.addEventListener("click", () => {
+    if (ws) { stopConversation(); statusEl.textContent = "Frakoblet."; }
+    else { void startConversation(); }
+  });
+</script>
+</body>
+</html>

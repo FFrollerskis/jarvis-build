@@ -96,4 +96,22 @@ består uansett utfall.
 - Ikke en samtalemotor og ikke en minneeier.
 - Ikke en Home Assistant-plugin.
 - Ikke avhengig av én leverandør: STT, TTS, transport og wake-word er alle utbyttbare bak adaptere.
+
+## 10. Daglig-bruk-overflate (D-212, task #120)
+
+`apps/web/voice.html` er en enkel nettleser-klient - **WebSocket-fallback for enkle klienter** (§3/§4 over
+er uendret som målarkitektur for romsatellitter/mobil), servert statisk av Core via `GET /voice` men
+snakker DIREKTE med voice-gatewayens EGEN WebSocket-port (§1: egen prosess, aldri en Core-rute). Den
+gjenbruker samme Ed25519-enhetsnøkkel/enrollment som `apps/web/dashboard.html` (samme fysiske
+enhet/nettleser), fanger mikrofon (PCM16 16 kHz, nedsamplet i klienten) og spiller TTS-rammer (PCM16 24
+kHz) via en planlagt Web Audio-kø med korrekt barge-in-avbrudd. `infra/local/docker-compose.yml` fikk en
+egen `voice-gateway`-tjeneste (samme runtime-image som api/worker, egen `command`).
+
+**Ærlig status:** klienten og WS-håndtrykket er kode-komplette og strukturelt testet. REELL taledialog
+via OpenAI STT/TTS forblir policy-blokkert av `evaluateSpeechRouting()` (§6, Q-32 punkt 1 i
+`docs/OPEN_QUESTIONS.md`) helt til Tobias selv har gjort den juridiske/eier-verifiseringen av OpenAI som
+databehandler - `processor_terms_status` er hardkodet `"NOT_VERIFIED"` og skal ALDRI settes av
+Jarvis/Claude selv. `voice.html` viser dette avslaget ærlig i et eget panel i stedet for å late som en
+generisk feil. Lokal STT/TTS (Q-32 punkt 3: whisper.cpp/piper) er fortsatt ikke installert - samme kjente
+gap som før denne sliceen.
 - Ikke bygget for mange rom i første versjon: én satellitt vertikalt først, deretter skalering.

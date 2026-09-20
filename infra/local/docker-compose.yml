@@ -169,5 +169,38 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  voice-gateway:
+    # D-212 (task #120): egen prosess (CLAUDE.md ufravikelig regel 5) - IKKE
+    # en rute i `api`. Samme runtime-image som api/worker/migrate
+    # (api.Dockerfile kopierer HELE workspacet inkl. apps/voice-gateway) -
+    # kun `command` skiller den ut, samme mønster som `migrate`/`worker` over.
+    # `JARVIS_CORE_URL` peker på `api`-tjenestens container-interne adresse -
+    # UTEN dette faller gatewayen tilbake til sin egen default
+    # (`http://127.0.0.1:3010`), som er FEIL inne i compose-nettverket.
+    build:
+      context: ../..
+      dockerfile: infra/local/api.Dockerfile
+    command: ["node", "--experimental-transform-types", "apps/voice-gateway/src/main.ts"]
+    environment:
+      JARVIS_VOICE_PORT: "${JARVIS_VOICE_PORT:-3020}"
+      JARVIS_CORE_URL: "http://api:${JARVIS_API_PORT:-3010}"
+      # Fra host-miljø (aldri lagret i fil her). OpenAI STT/TTS er kodet og
+      # wiret, men reell tale via OpenAI forblir policy-blokkert av Q-32
+      # punkt 1 (processor_terms_status: NOT_VERIFIED) inntil Tobias selv
+      # gjør den juridiske/eier-verifiseringen - se docs/OPEN_QUESTIONS.md.
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    ports:
+      - "${JARVIS_VOICE_PORT:-3020}:${JARVIS_VOICE_PORT:-3020}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${JARVIS_VOICE_PORT:-3020}/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   jarvis-pgdata:

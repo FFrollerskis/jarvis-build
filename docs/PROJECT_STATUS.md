@@ -1,9 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-20 (branch `claude/charlie-integrations-dashboard`, fra fersk `origin/main` HEAD
-`438ab36` = HELE "Charlie"-linjens del 1/2/7 MERGET). **"Charlie"-linjen (D-208/D-209/D-210) FERDIG.
-Ny slice: Q-05 lukket (Infisical valgt) + Infisical faktisk wiret inn som primær `SecretProvider` +
-eierens integrasjons-dashboard, LESE-DELEN (D-211) - klar for commit/push/draft PR.**
+**Oppdatert:** 2026-09-20 (branch `claude/fase-voice-daily-use`, fra fersk `origin/main` HEAD `53aa8f3` =
+"Charlie"-linjen + Infisical/dashboard-lese-del (D-208/D-209/D-210/D-211) MERGET). **Ny slice: task #120 -
+`apps/voice-gateway` koblet til en faktisk daglig-bruk-overflate (D-212) - klar for commit/push/draft PR.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -24,54 +23,56 @@ implementasjonsvalg INNENFOR eksisterende arkitektur/CLAUDE.md sine Ufravikelige
 fullmakt til å fjerne selve håndhevingsmekanismen en ufravikelig regel krever skal eksistere, selv når
 eieren eksplisitt og informert ber om det (Tobias ba to ganger om full, ugjennomgått live-selvpatching
 av sikkerhetskritisk kode - AVSLÅTT SOM SPESIFISERT, erstattet med en trygg to-lags modell, se D-208).
+**Samme klasse grense bekreftet en gang til denne økten (D-212):** `processor_terms_status` på
+OpenAI STT/TTS er en hardkodet, kildekode-kommentert "aldri sett denne verdien selv"-blokkering (Q-32
+punkt 1) - en HARD EKSTERN/JURIDISK BLOKKERING Tobias selv må løse, ALDRI noe standing delegering dekker.
 
 ## Hvor `main` står nå
 
-- **PR #106-#119 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
-  (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119) - se git-historikk/
-  DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
-- **NY slice (IKKE ennå committet): Infisical-wiring + integrasjons-dashboard lese-del (D-211).**
-  Kildekode-audit fant at `InfisicalSecretProvider` (universal-auth, D-35) og Infisicals egen
-  docker-compose-tjeneste ALLEREDE eksisterte, men var ALDRI faktisk koblet inn i `main.ts`/
-  `worker-main.ts` sin `ToolGateway`-konstruksjon - kun `Env`/`BusinessInternal`-kjeden ble brukt.
-  - **Levert:** Q-05 (Infisical vs. OpenBao) LUKKET - Infisical valgt. `main.ts`/`worker-main.ts`
-    bygger nå `FallbackSecretProvider(InfisicalSecretProvider, FallbackSecretProvider(Env,
-    BusinessInternal))` - Infisical PRIMÆR, gammel kjede UENDRET som fallback (staged migration).
-    TRYGT: `InfisicalSecretProvider.get()` returnerer `null` umiddelbart når ukonfigurert - lokal
-    dev/CI faller rett gjennom til SAMME env-kjede som før, INGEN regresjon.
-  - Ny `modules/tool-gateway/src/connector-registry.ts`: kanonisk `CONNECTOR_REGISTRY` (14
-    connectorer fra `docs/INTEGRATIONS.md`/`.env.example`) + `listConnectorStatus()` via ny
-    `ToolGateway.hasSecret(ref)` (presence, ALDRI verdien) + `ToolGateway.health`. `live_test` KUN
-    for GitHub/Calendar/Gmail (samme tre trygge klasse A-lesinger `mesh-bridge.ts` allerede bruker) -
-    resten `presence_only`, bevisst avgrenset.
-  - Ny `executive.get_connector_status` (klasse A, samme "zero nøstet gateway.execute()"-mønster som
-    `get_capability_status`), lagt til `EXECUTIVE_QUERY_ACTIONS`-allowlisten (fortsatt lese-kun).
-  - `apps/web/dashboard.html` fikk en ny "Integrasjoner"-seksjon (status-pill + helse per connector).
-  - **BEVISST IKKE i denne sliceen:** "test connector"/"lim inn nøkkel → skriv til Infisical →
-    auto-test"-mutasjonsflyten - krever egen risikoklassifisering + egen policy-gatet rute, IKKE
-    `/executive/query`. Egen, senere oppgave.
-  - D-35s 10-punkts host-produksjonsport FORTSATT IKKE runtime-verifisert - kun kodet/wiret nå.
-  - 16 nye/utvidede DB-uavhengige tester grønne (`connector-registry.test.ts`,
-    `connector-status.test.ts`, `executive-query-wiring.test.ts` oppdatert, `executive-query-e2e.test.ts`
-    fikk en ny sak - IKKE kjørbar lokalt, kjent sandbox-begrensning). `pnpm -w typecheck`
-    (31 pakker) + `npx eslint .` rene.
+- **PR #106-#120 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+  (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
+  integrasjons-dashboard lese-del (D-211, PR #120) - se git-historikk/DECISIONS_AND_ASSUMPTIONS.md,
+  ikke gjentatt her.
+- **NY slice (IKKE ennå committet): voice-gateway daglig-bruk-overflate (D-212, task #120).**
+  Kildekode-audit fant at `apps/voice-gateway` var FERDIG BYGGET (WS-transport, VAD, barge-in,
+  grant-basert enhetsautoritet D-123) men manglet BEGGE de to tingene som gjør den brukbar: en klient
+  og en docker-compose-tjeneste.
+  - **Levert:** `apps/web/voice.html` - gjenbruker SAMME Ed25519-enhetsnøkkel/enrollment som
+    `dashboard.html` (samme localStorage-nøkkel, samme fysiske enhet), signerer en `/devices/challenge`
+    og sender den som `device_proof` inne i WS `start`-meldingen, strømmer mikrofon som PCM16 16 kHz
+    (nedsamplet i klienten) og spiller `tts_frame` PCM16 24 kHz via en planlagt Web Audio-kø med
+    `tts_cancelled`-avbrudd (barge-in). WS-adressen er konfigurerbar (topologi varierer dev-PC/NAS/
+    compose). Ny `GET /voice`-rute i `apps/api/src/server.ts` (`WEB_VOICE`), IDENTISK mønster som
+    `GET /dashboard`. Ny `voice-gateway`-tjeneste i `infra/local/docker-compose.yml` (samme
+    `api.Dockerfile`-image som api/worker, `JARVIS_CORE_URL` peker på api-tjenestens container-interne
+    adresse, helsesjekk mot `/health`).
+  - **BEVISST IKKE rørt (HARD EKSTERN/JURIDISK BLOKKERING, Q-32 punkt 1):** `processor_terms_status:
+    "NOT_VERIFIED"` på `OpenAiStt`/`OpenAiTts` - REELL taledialog via OpenAI forblir policy-blokkert
+    helt til Tobias selv gjør den juridiske/eier-verifiseringen. `voice.html` viser avslaget ÆRLIG i et
+    eget panel som navngir Q-32 - IKKE en generisk feil, og IKKE noe Jarvis/Claude kan/vil løse selv.
+  - 13 nye DB-uavhengige strukturtester (`apps/api/test/voice-page-wiring.test.ts`,
+    `modules/core/test/d212-voice-gateway-compose-wiring.test.ts`) + hele den eksisterende
+    `apps/voice-gateway/test/`-suiten (77 DB-uavhengige tester uendret grønne, `voice-e2e.test.ts`
+    uendret kjent sandbox-begrensning). `pnpm -w typecheck` (31 pakker) + `npx eslint .` rene.
 
 ## Blokkeringer
 
 Ingen kjente kode-blokkeringer akkurat nå. `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - UENDRET,
 dekker resten av masterplanen: Growth-stack live-evidens, reelle Finance-transaksjoner (Stripe),
 iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
-`docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
+`docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR. Q-32 punkt 1 (OpenAI som
+taleprosessor) og punkt 3 (lokal whisper.cpp/piper) er egne, eier-/eksterne blokkeringer - se
+`docs/OPEN_QUESTIONS.md`.
 
 ## Neste oppgave
 
-1. **Fullfør denne sliceen (D-211):** secret-scan, commit, push til fersk branch, draft PR, abonner.
-2. **Følgeoppgave (samme dashboard-tema, del 2):** "test connector"-mutasjon (utvid `live_test`
-   utover GitHub/Calendar/Gmail) + "lim inn nøkkel → skriv til Infisical → auto-test"-flyten - krever
-   en gjennomtenkt risikoklassifisering (en credential-SKRIVING er en genuint ny handlingstype) og en
-   egen, policy-gatet mutasjonsrute.
-3. **Deretter:** koble den allerede-bygde `apps/voice-gateway` til noe Tobias faktisk kan bruke daglig.
-4. **Deretter:** design + bygg den trygge to-lags selvendrings-modellen - IKKE full ugjennomgått
-   selvpatching, se D-208.
-5. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
-   MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer.
+1. **Fullfør denne sliceen (D-212):** secret-scan, commit, push til fersk branch, draft PR, abonner.
+2. **Følgeoppgave (allerede opprettet, task #122):** connector credential-SKRIVING + utvidet
+   "test connector"-mutasjonsflyt for de resterende connectorene (D-211s bevisste avgrensning) - krever
+   en egen risikoklassifisering og en egen, policy-gatet mutasjonsrute.
+3. **Deretter (task #121):** design + bygg den trygge to-lags selvendrings-modellen - IKKE full
+   ugjennomgått selvpatching, se D-208.
+4. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+   MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
+   (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon)
+   hvis lokal/health-space tale ønskes.
