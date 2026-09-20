@@ -311,6 +311,44 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     expect(contents.some((c) => c.role === "function" && c.parts[0]?.["functionResponse"])).toBe(true);
   });
 
+  it("gemma_hosted: fjerner additionalProperties (rekursivt) fra tool-skjemaer før de sendes til Gemini API (D-204, host-bevis: Gemini avviser denne nøkkelen med bad_request - Jarvis sine mesh-bridge.ts-verktøyskjemaer bruker den alle, gyldig for openai/anthropic)", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const capture = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: {} }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", capture);
+    await new GemmaHostedAdapter("k", "m", "http://mock").complete({
+      ...REQUEST,
+      tools: [
+        {
+          name: "read_recent_email",
+          description: "les e-post",
+          input_schema: {
+            type: "object",
+            properties: {
+              filter: { type: "object", properties: {}, additionalProperties: false }
+            },
+            required: [],
+            additionalProperties: false
+          }
+        }
+      ]
+    });
+    const tools = capturedBody["tools"] as Array<{ functionDeclarations: Array<{ parameters: Record<string, unknown> }> }>;
+    const parameters = tools[0]?.functionDeclarations[0]?.parameters;
+    expect(JSON.stringify(parameters)).not.toContain("additionalProperties");
+    // Andre nøkler (inkl. i det nestede objektet) overlever uendret - kun DENNE ene, konkret bevist usupporterte nøkkelen fjernes.
+    expect(parameters).toEqual({
+      type: "object",
+      properties: { filter: { type: "object", properties: {} } },
+      required: []
+    });
+  });
+
   it("local_llm: tool_calls fra et OpenAI-kompatibelt svar normaliseres til ToolCallRequest", async () => {
     mockFetch(
       () =>
