@@ -267,6 +267,32 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     }
   });
 
+  it("gemma_hosted: complete() filtrerer ALDRI-strømmede `thought: true`-parter fra sluttsvaret (D-206, samme resonnerings-lekkasje som .stream() - se sse-fixtures.test.ts)", async () => {
+    mockFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    { text: "Brukeren sa hei. Jeg bør svare høflig.", thought: true },
+                    { text: "Hei! Hvordan kan jeg hjelpe?" }
+                  ]
+                },
+                finishReason: "STOP"
+              }
+            ],
+            usageMetadata: { promptTokenCount: 2, candidatesTokenCount: 9 }
+          }),
+          { status: 200 }
+        )
+    );
+    const result = await new GemmaHostedAdapter("k", "m", "http://mock").complete(REQUEST);
+    expect(result.text).toBe("Hei! Hvordan kan jeg hjelpe?");
+    expect(result.text).not.toContain("Brukeren sa hei");
+  });
+
   it("gemma_hosted: normaliserer et functionCall-svar til en ToolCallRequest (§12: modellen utfører ALDRI selv)", async () => {
     mockFetch(
       () =>
