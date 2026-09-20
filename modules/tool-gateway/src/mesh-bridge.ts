@@ -57,6 +57,27 @@ const MESH_TOOLS: MeshToolMapping[] = [
     tool_id: "github",
     action: "read_issues",
     parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" })
+  },
+  /**
+   * D-209 ("Charlie"-selv-bevissthet): eneste sanne kilde for "hva har jeg
+   * faktisk tilgang til akkurat nå" - se `@jarvis/executive` sitt
+   * `getCapabilityStatus()`. BEVISST inkludert i DENNE listen (ikke bare
+   * registrert i gateway) - uten en mesh-mapping ville verktøyet vært
+   * registrert i ToolGateway, men ALDRI reelt kallbart fra selve samtalen,
+   * nøyaktig det samme gapet som gjorde at Charlie konfabulerte om egne
+   * evner i utgangspunktet.
+   */
+  {
+    def: {
+      name: "check_my_capabilities",
+      description:
+        "Sjekk hvilke verktøy du FAKTISK har tilgang til i denne samtalen akkurat nå, og siste kjente " +
+        "helsetilstand for tilkoblede systemer. Bruk DETTE FØR du sier noe om egne evner eller tilkoblinger " +
+        "- gjett ALDRI.",
+      input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
+    },
+    tool_id: "executive",
+    action: "get_capability_status"
   }
 ];
 

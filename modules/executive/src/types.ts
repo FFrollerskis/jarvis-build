@@ -146,3 +146,29 @@ export interface DelegationBoard {
   revoked_credentials: RevokedCredentialEntry[];
   finance_kill_switch: FinanceKillSwitch | null;
 }
+
+/**
+ * "Charlie"-selv-bevissthet (D-209, 2026-09-20): Tobias observerte den
+ * (daværende namnløse) chat-personaen konfabulere om egne evner ("jeg er
+ * flere AI-er i én", "jeg har banktilgang") når den ble spurt introspektive
+ * spørsmål - fordi den strukturelt IKKE hadde noe verktøy å faktisk sjekke
+ * med. `chat_accessible_tools` er RENT avledet av `meshToolDefinitions()`
+ * (`@jarvis/tool-gateway`) - den SAMME trusted-lag-listen som faktisk
+ * avgjør hva chat-modellen kan kalle i DENNE samtalen (§P1A i
+ * `mesh-bridge.ts`) - ALDRI en egen, potensielt avvikende kopi. Å spørre
+ * "hva har jeg tilgang til" via DETTE verktøyet er derfor strukturelt
+ * umulig å svare feil på - svaret ER kilden selve chat-verktøykjeden bruker.
+ * `connector_health` er RENT avledet av `ToolGateway.health` (BO-03,
+ * `gateway.ts`) - SAMME kilde som `/infra/status`-ruten allerede eksponerer
+ * til eieren via HTTP, nå også tilgjengelig FRA SELVE SAMTALEN. Helsen er
+ * REAKTIV (oppdateres etter et faktisk kall via denne gatewayen), ALDRI
+ * proaktivt pollet - et tool_id uten oppføring betyr "ikke prøvd ennå i
+ * denne prosessens levetid", IKKE "sunt". Proaktiv, tidsplanlagt helse-
+ * polling av connectorer som ALDRI har blitt kalt er BEVISST UTENFOR
+ * omfanget her (ville krevd en egen "ping"-primitiv per leverandør-adapter)
+ * - se D-209/task-sporing for videre arbeid.
+ */
+export interface CapabilityStatus {
+  chat_accessible_tools: Array<{ name: string; description: string }>;
+  connector_health: Array<{ tool_id: string; state: string; at: string; detail?: string }>;
+}
