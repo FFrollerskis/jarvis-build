@@ -6,9 +6,9 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import type { ToolGateway, ToolResult } from "@jarvis/tool-gateway";
+import { meshToolDefinitions, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
-import type { AttentionItem, AttentionItemDetail, ControlSurfaceStatus, DelegationBoard } from "./types.ts";
+import type { AttentionItem, AttentionItemDetail, CapabilityStatus, ControlSurfaceStatus, DelegationBoard } from "./types.ts";
 
 /**
  * UA-11 Executive Mode (P0, D-162): motoren bak den samlede kontrollflaten.
@@ -263,6 +263,23 @@ export class ExecutiveService {
       frozen_connectors: ownerControl.frozen_connectors,
       revoked_credentials: ownerControl.revoked_credentials,
       finance_kill_switch: financeKillSwitch
+    };
+  }
+
+  /**
+   * "Charlie"-selv-bevissthet (D-208): se `types.ts` sitt `CapabilityStatus`-
+   * dokumentasjonskommentar for hele begrunnelsen. BEVISST INGEN nøstet
+   * `gateway.execute()`-kall her (i motsetning til metodene over) - dette
+   * leser KUN `ToolGateway` sin EGEN bokføring (`meshToolDefinitions()`/
+   * `gateway.health`, samme direkte-tilgang-mønster som `apps/api/src/
+   * main.ts`/`server.ts` sin eksisterende `/infra/status`-rute allerede
+   * bruker) - INGEN identitet trengs, INGEN policy-runde utover den YTRE
+   * `executive.get_capability_status`-kallet selv allerede krever.
+   */
+  async getCapabilityStatus(): Promise<CapabilityStatus> {
+    return {
+      chat_accessible_tools: meshToolDefinitions().map((d) => ({ name: d.name, description: d.description })),
+      connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h }))
     };
   }
 }
