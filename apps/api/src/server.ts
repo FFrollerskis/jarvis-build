@@ -258,6 +258,15 @@ async function resolveFromGrant(
 const WEB_INDEX = fileURLToPath(new URL("../../web/index.html", import.meta.url));
 /** D-199: samme statiske servering som WEB_INDEX over, egen side for dashboard.html. */
 const WEB_DASHBOARD = fileURLToPath(new URL("../../web/dashboard.html", import.meta.url));
+/**
+ * D-212 (task #120): samme statiske servering som WEB_INDEX/WEB_DASHBOARD
+ * over - `voice.html` snakker IKKE med denne Core-prosessen for selve
+ * talestrømmen (den kobler direkte til den separate voice-gateway-prosessen
+ * sin WebSocket, CLAUDE.md ufravikelig regel 5). Core serverer kun siden og
+ * de eksisterende enhets-/grant-rutene (`/devices/challenge`,
+ * `/session/authorize`) siden gjenbrukes for enhetsbeviset.
+ */
+const WEB_VOICE = fileURLToPath(new URL("../../web/voice.html", import.meta.url));
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -313,6 +322,13 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
     const html = await readFile(WEB_DASHBOARD, "utf8");
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(html);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/voice") {
+    const html = await readFile(WEB_VOICE, "utf8");
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     res.end(html);
     return;
