@@ -148,7 +148,7 @@ export interface DelegationBoard {
 }
 
 /**
- * "Charlie"-selv-bevissthet (D-208, 2026-09-20): Tobias observerte den
+ * "Charlie"-selv-bevissthet (D-209, 2026-09-20): Tobias observerte den
  * (daværende namnløse) chat-personaen konfabulere om egne evner ("jeg er
  * flere AI-er i én", "jeg har banktilgang") når den ble spurt introspektive
  * spørsmål - fordi den strukturelt IKKE hadde noe verktøy å faktisk sjekke
@@ -166,7 +166,7 @@ export interface DelegationBoard {
  * denne prosessens levetid", IKKE "sunt". Proaktiv, tidsplanlagt helse-
  * polling av connectorer som ALDRI har blitt kalt er BEVISST UTENFOR
  * omfanget her (ville krevd en egen "ping"-primitiv per leverandør-adapter)
- * - se D-208/task-sporing for videre arbeid.
+ * - se D-209/task-sporing for videre arbeid.
  */
 export interface CapabilityStatus {
   chat_accessible_tools: Array<{ name: string; description: string }>;

@@ -267,7 +267,7 @@ export class ExecutiveService {
   }
 
   /**
-   * "Charlie"-selv-bevissthet (D-208): se `types.ts` sitt `CapabilityStatus`-
+   * "Charlie"-selv-bevissthet (D-209): se `types.ts` sitt `CapabilityStatus`-
    * dokumentasjonskommentar for hele begrunnelsen. BEVISST INGEN nøstet
    * `gateway.execute()`-kall her (i motsetning til metodene over) - dette
    * leser KUN `ToolGateway` sin EGEN bokføring (`meshToolDefinitions()`/

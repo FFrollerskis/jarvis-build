@@ -59,7 +59,7 @@ const MESH_TOOLS: MeshToolMapping[] = [
     parameters: () => ({ repo: process.env["JARVIS_GITHUB_REPO"] ?? "tsworkflow/jarvisbuild" })
   },
   /**
-   * D-208 ("Charlie"-selv-bevissthet): eneste sanne kilde for "hva har jeg
+   * D-209 ("Charlie"-selv-bevissthet): eneste sanne kilde for "hva har jeg
    * faktisk tilgang til akkurat nå" - se `@jarvis/executive` sitt
    * `getCapabilityStatus()`. BEVISST inkludert i DENNE listen (ikke bare
    * registrert i gateway) - uten en mesh-mapping ville verktøyet vært

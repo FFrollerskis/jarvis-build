@@ -5,7 +5,7 @@ import { ExecutiveTransport, executiveToolDefinitions } from "../src/transport.t
 import type { IdentityContext } from "@jarvis/contracts";
 
 /**
- * "Charlie"-selv-bevissthet (D-208): DB-uavhengige tester for
+ * "Charlie"-selv-bevissthet (D-209): DB-uavhengige tester for
  * `executive.get_capability_status` - `getCapabilityStatus()` gjør INGEN
  * nøstet `gateway.execute()`-kall (leser KUN `meshToolDefinitions()` og
  * `gateway.health` direkte, se service.ts sitt filhode), så en ekte
