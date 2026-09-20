@@ -248,7 +248,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
     const response = await this.post(request, false);
     let body: {
       candidates?: Array<{
-        content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }> };
+        content?: { parts?: Array<{ text?: string; thought?: boolean; functionCall?: { name: string; args?: Record<string, unknown> } }> };
         finishReason?: string;
       }>;
       usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
@@ -262,7 +262,13 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       throw new ProviderError(this.name, "invalid_response", `${this.name}_invalid_response`);
     }
     const parts = body.candidates[0]?.content?.parts ?? [];
-    const text = parts.map((p) => p.text ?? "").join("");
+    // D-206 (host-bevis, 2026-09-20): Gemini sine "thinking"-modeller (Gemma 4)
+    // returnerer resonnerings-tekst som EGNE parts merket `thought: true` -
+    // IKKE den faktiske svarteksten. Uten dette filteret ble modellens interne
+    // resonnering ("The user said X... I should respond...") synlig i selve
+    // Jarvis-svaret til eieren (observert live i chatten). `thought`-parter har
+    // ALDRI `functionCall`, så verktøykalls-filtreringen under er upåvirket.
+    const text = parts.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
     if (text) onToken?.(text);
     let toolCalls: ToolCallRequest[] | undefined;
     try {
@@ -323,7 +329,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       for await (const data of sseLines(response.body)) {
         let chunk: {
           candidates?: Array<{
-            content?: { parts?: Array<{ text?: string; functionCall?: { name: string; args?: Record<string, unknown> } }> };
+            content?: { parts?: Array<{ text?: string; thought?: boolean; functionCall?: { name: string; args?: Record<string, unknown> } }> };
             finishReason?: string;
           }>;
           usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number };
@@ -335,7 +341,9 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
         }
         const candidate = chunk.candidates?.[0];
         for (const part of candidate?.content?.parts ?? []) {
-          if (part.text) {
+          // D-206: se `complete()` sin kommentar - `thought`-parter er
+          // modellens interne resonnering, ALDRI svaret som skal strømmes.
+          if (part.text && !part.thought) {
             if (ttft === undefined) ttft = Date.now() - started;
             text += part.text;
             onEvent({ type: "text_delta", text: part.text });

@@ -320,4 +320,27 @@ describe("D-199-B: gemma_hosted sin nye .stream() (Q-30 lukket)", () => {
     expect(calledUrl).toContain("streamGenerateContent");
     expect(calledUrl).toContain("alt=sse");
   });
+
+  it("D-206 (host-bevis, 2026-09-20): `thought: true`-parter (Gemma sin interne resonnering) strømmes ALDRI som text_delta og havner ALDRI i sluttsvaret - live-observert at resonneringsteksten ellers lekker synlig inn i Jarvis sitt faktiske chat-svar til eieren", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new Blob([
+              data({ candidates: [{ content: { parts: [{ text: "Brukeren sa hei. Jeg bør svare høflig.", thought: true }] } }] }),
+              data({ candidates: [{ content: { parts: [{ text: "Hei! " }] } }] }),
+              data({ candidates: [{ content: { parts: [{ text: "Hvordan kan jeg hjelpe?" }], finishReason: "STOP" } }], usageMetadata: {} })
+            ]).stream(),
+            { status: 200, headers: { "content-type": "text/event-stream" } }
+          )
+      )
+    );
+    const events: StreamEvent[] = [];
+    const result = await new GemmaHostedAdapter("k", "m", "http://mock").stream(REQUEST, (e) => events.push(e));
+    expect(result.text).toBe("Hei! Hvordan kan jeg hjelpe?");
+    expect(result.text).not.toContain("Brukeren sa hei");
+    const deltaTexts = events.filter((e) => e.type === "text_delta").map((e) => (e as { text: string }).text);
+    expect(deltaTexts.join("")).not.toContain("Brukeren sa hei");
+  });
 });

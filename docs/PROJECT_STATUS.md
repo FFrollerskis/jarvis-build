@@ -1,8 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-20 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, fra fersk `origin/main` HEAD
-`65b3997` = D-204/PR #111 MERGET. Aktiv kodeoppgave: D-205 (den EKTE `gemma_hosted`
-`additionalProperties`-skjema-fiksen, se under) - commit/PR ikke opprettet ennå i denne økten.
+**Oppdatert:** 2026-09-20 (branch `claude/gemma-live-verified-status`, fra fersk `origin/main` HEAD
+`dbd32f2` = D-205/PR #112 MERGET. **Gemma-first-policyen (D-79/D-80) er FAKTISK i drift for
+normal chat for FØRSTE gang** - live-verifisert av Tobias rett etter D-205-redeploy. Aktiv
+kodeoppgave: D-206 (fjerner Gemini sine "thought"-resonnerings-parter fra svarteksten, oppdaget
+UMIDDELBART etter D-205-live-verifiseringen) - commit/PR ikke opprettet ennå i denne økten.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -20,50 +22,39 @@ D-192/D-201 i DECISIONS_AND_ASSUMPTIONS.md og `CLAUDE.md` §Merge-autoritet.
 
 ## Hvor `main` står nå
 
-- **PR #106-#111 MERGET** (D-200 Gemma-streaming, D-201 sluttmål, PROJECT_STATUS-refresh, D-202
-  Langfuse Cloud-routing, D-203 chat-sensitivitetsdefault, D-204 Gemma-diagnostikk - se
-  DECISIONS_AND_ASSUMPTIONS.md for detaljer per PR). PR #106-#110 NAS-redeployet og live-verifisert
-  av Tobias tidligere i denne økten.
-- **D-203 (chat-sensitivitetsdefault) live-verifisert POST-redeploy: fikset udefinert-sensitivitet-
-  gaten, MEN Gemma dukket fortsatt ALDRI opp i chatten.** Dette utløste D-204/D-205s feilsøking.
-- **D-204 (NAS-redeployet OG live-verifisert i denne økten): trygg feilkode-diagnostikk lagt til
-  `gemma_hosted`** (samme mønster som `gemini.ts`/`kimi.ts`) + alltid-på `console.error` på ethvert
-  mislykket modellforsøk. Diagnostikken avslørte umiddelbart den ekte Gemini-feilkoden
-  (`INVALID_ARGUMENT`) - noe som var UMULIG å se før denne fiksen.
-- **D-205 (denne økten, kode skrevet/testet, IKKE ENNÅ commitet/pushet/PR-et/merget): den EKTE
-  rotårsaken funnet OG fikset.** Live host-feilsøking etter D-204-redeploy fulgte to blindveier
-  først (begge dokumentert i D-205 for sporbarhet): (1) NAS-ens `.env` hadde
-  `JARVIS_GEMMA_MODEL=gemma3:4b` (en Ollama-stil-tag, ugyldig Gemini API-modell-ID - trolig
-  sammenblandet med `gemma_local`s config) - fjernet, men IDENTISK `bad_request`/`INVALID_ARGUMENT`
-  vedvarte mot kodens korrekte default-modell (`gemma-4-26b-a4b-it`), som beviste modellnavnet ikke
-  var hele problemet. (2) En live `node -e fetch(...)`-test direkte fra NAS-en mot Gemini API (samme
-  nøkkel/modell, INGEN `tools`) ga `HTTP 200` - isolerte feilen til selve `tools`-payloaden. Fant at
-  ALLE tre verktøyskjemaene i `modules/tool-gateway/src/mesh-bridge.ts` (`MESH_TOOLS`) setter
-  `additionalProperties: false` - gyldig for `openai`/`anthropic`, men Gemini API sitt
-  function-calling-skjema støtter IKKE denne nøkkelen (bekreftet uavhengig via Google sitt eget
-  utviklerforum - identisk feilklasse rapportert der). **Levert:** ny, rekursiv
-  `stripAdditionalProperties()`-hjelpefunksjon i `GemmaHostedAdapter.buildRequestBody()`
-  (`packages/provider-adapters/src/gemma.ts`) fjerner KUN denne ene, dobbelt-bevist usupporterte
-  nøkkelen fra `t.input_schema` FØR den sendes som `functionDeclarations[].parameters` - kilden
-  (`mesh-bridge.ts`) er UENDRET (nøkkelen er fortsatt riktig der for de andre providerne). 1 ny test
-  i `conformance.test.ts` (fanger faktisk sendt request-body, beviser nøkkelen fjernes rekursivt).
-  `pnpm --filter @jarvis/provider-adapters typecheck`/`npx eslint .` rene, `conformance.test.ts`
-  93/93, full `modules/model-gateway`-suite 330/333 (kun kjent urelatert embedded-Postgres-
-  sandbox-feil) grønne.
+- **PR #106-#112 MERGET** (D-200 Gemma-streaming, D-201 sluttmål, PROJECT_STATUS-refresh, D-202
+  Langfuse Cloud-routing, D-203 chat-sensitivitetsdefault, D-204 Gemma-diagnostikk, D-205 Gemma
+  skjema-fiks - se DECISIONS_AND_ASSUMPTIONS.md for detaljer per PR). Alle NAS-redeployet og
+  live-verifisert av Tobias i denne økten.
+- **D-205 LIVE-VERIFISERT: `gemma_hosted` svarer faktisk på ekte chat, for FØRSTE gang siden
+  D-79/D-80 ble bygget.** Etter NAS-rebuild + én chatmelding viste `docker logs`
+  `"provider":"gemma_hosted"` gjennom en HEL samtale (start→text_delta×N→usage→finish), null
+  `model_attempt_failed`-linjer. Hele D-200→D-203→D-204→D-205-kjeden (streaming-kapabilitet →
+  sensitivitetsdefault → diagnostikk → den ekte skjema-fiksen) er dermed reelt fullført og
+  bevist, ikke bare "kode skrevet".
+- **D-206 (denne økten, kode skrevet/testet, IKKE ENNÅ commitet/pushet/PR-et/merget): et NYTT,
+  ekte funn oppdaget UMIDDELBART av Tobias etter D-205-verifiseringen.** Jarvis sine svar via
+  `gemma_hosted` inneholdt synlig intern resonneringstekst FØR selve svaret (f.eks. "The user is
+  repeatedly saying hei... I should respond simply..."). Rotårsak: Gemini sine "thinking"-
+  modeller (Gemma 4 inkludert) returnerer resonnering som EGNE `parts`-elementer merket
+  `thought: true` - `GemmaHostedAdapter.complete()`/`.stream()` behandlet ALLE tekst-parts likt,
+  uten å filtrere disse bort, verken i sluttsvaret eller i de live strømmede `text_delta`-eventene.
+  **Levert:** begge metodene filtrerer nå eksplisitt bort `thought: true`-parter. 2 nye tester
+  (complete()+stream()). `pnpm --filter @jarvis/provider-adapters typecheck`/`npx eslint` rene,
+  `conformance.test.ts` 94/94 + `sse-fixtures.test.ts` 11/11 grønt. Se D-206.
 
-## GJENSTÅENDE: D-205 commit/PR/merge + NAS-redeploy + live-verifisering at Gemma faktisk svarer
+## GJENSTÅENDE: D-206 commit/PR/merge + NAS-redeploy + live-verifisering at resonnering IKKE lekker
 
-D-205-koden er skrevet og testet i denne sandboxen, men IKKE ENNÅ commitet/pushet/PR-et/merget. Neste
+D-206-koden er skrevet og testet i denne sandboxen, men IKKE ENNÅ commitet/pushet/PR-et/merget. Neste
 steg: commit → push → draft PR → CI → merge under D-192 → NAS-rebuild (kildekode i
 `packages/provider-adapters` - KREVER `docker compose build api worker && up -d`) → send ÉN ny
-chatmelding → `sudo docker logs --since 2m local-api-1 | grep -E "model_attempt_failed|stream_debug_
-gateway.*provider"` for å bekrefte `gemma_hosted` faktisk svarer (ingen `model_attempt_failed`-linje,
-`provider":"gemma_hosted"` i stream-eventene) → live-verifisering i Langfuse at Gemma faktisk brukes
-for normal chat.
+chatmelding via web-UI-en (IKKE bare docker-logg-sjekk denne gangen - Tobias må faktisk LESE svaret
+og bekrefte ingen synlig "The user said..."-resonnering lenger) → oppdater PROJECT_STATUS.md en
+siste gang for å lukke ut hele Gemma-sagaen (D-200→D-206).
 
 ## Blokkeringer
 
-Ingen kjente kode-blokkeringer akkurat nå utover D-205s pågående redeploy-verifisering.
+Ingen kjente kode-blokkeringer akkurat nå utover D-206s pågående redeploy-verifisering.
 `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - UENDRET, dekker resten av masterplanen: Growth-stack
 live-evidens, reelle Finance-transaksjoner (Stripe), iPhone/Watch/Home/Personal/Health LIVE, off-site
 backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
@@ -73,8 +64,8 @@ credential-oppsett): live-verifisert, Jarvis leser faktiske e-poster i produksjo
 
 ## Neste oppgave
 
-1. **Fullføre D-205:** commit + push + draft PR + CI + merge (D-192) + NAS-rebuild + send én chat-
-   melding + bekreft `gemma_hosted` faktisk svarer (se eget avsnitt over).
+1. **Fullføre D-206:** commit + push + draft PR + CI + merge (D-192) + NAS-rebuild + send én chat-
+   melding + Tobias bekrefter visuelt at resonnering ikke lenger vises (se eget avsnitt over).
 2. **UA-11 Executive Mode "K2":** decision log/scenarios/risk register/OKRs/delegation board (navngitt
    i masterplanen, zero kode, zero ekstern avhengighet). Avklar akseptansekriterier med Tobias før
    implementering starter.
