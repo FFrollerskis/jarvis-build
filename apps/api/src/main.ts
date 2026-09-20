@@ -34,7 +34,8 @@ import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
-  GmailTransport, GoogleCalendarTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GmailTransport, GoogleCalendarTransport, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
+  meshToolDefinitions, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
@@ -427,6 +428,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const situationDomainPauses = new DomainPauseRegistry(pool, { owner_person_id: ownerIdentity.person_id });
   await situationDomainPauses.restore();
   const situationEngine = new SituationEngine(pool, situationDomainPauses, { owner_person_id: ownerIdentity.person_id });
+  // Task #118 ("Charlie"-minne-verifisering): hevet ut hit (FØR register-
+  // løkken) slik at DEN SAMME instansen kan registreres som
+  // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av
+  // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
+  // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
+  const memoryRetriever = new MemoryRetriever(pool, new LocalHashEmbedding());
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
@@ -534,7 +541,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // resten av denne filen (`withMemoryTransaction`, se `GovernanceService`
       // sitt filhode) - IKKE en parallell tilkobling. Registrert i SAMME
       // liste/løkke som `situations`/`executive`/`owner_controls`.
-      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool)))
+      ...governanceToolDefinitions(new GovernanceTransport(new GovernanceService(pool))),
+      // Task #118 ("Charlie"-minne-verifisering): `memory.search` over DEN
+      // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
+      // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
+      // lenger opp for hvorfor den ble hevet ut hit.
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))
     ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
@@ -609,7 +621,7 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasks: taskService,
     worker,
     trace,
-    memory: new MemoryRetriever(pool, new LocalHashEmbedding()),
+    memory: memoryRetriever,
     council: aiCouncil,
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
     // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -

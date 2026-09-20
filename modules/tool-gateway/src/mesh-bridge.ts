@@ -78,6 +78,35 @@ const MESH_TOOLS: MeshToolMapping[] = [
     },
     tool_id: "executive",
     action: "get_capability_status"
+  },
+  /**
+   * Task #118 ("Charlie"-minne-verifisering): `MemoryRetriever` (se
+   * `memory-transport.ts`) var allerede den kanoniske, kildebelagte
+   * søkemotoren `contextFor()` bruker for stille bakgrunnskontekst - men
+   * Charlie hadde INGEN måte å EKSPLISITT spørre "hva vet du om X" og få et
+   * fullt svar tilbake, kun det den stille konteksten tilfeldigvis traff.
+   * `query` kommer FRA MODELLEN (ikke en trusted-lag-konstant som de andre
+   * mappingene over) - trygt fordi ToolGateway sitt `strict()`-Zod-skjema
+   * (`memory-transport.ts`) validerer typen FØR noe når databasen, og selve
+   * søket er parameterisert (ingen SQL bygges av fritekst).
+   */
+  {
+    def: {
+      name: "search_my_memory",
+      description:
+        "Søk i det du faktisk har lagret om Tobias/familien for DENNE samtalens memory space (hybrid " +
+        "fulltekst+vektor, med kildeangivelse per treff). Bruk dette for å svare kildebelagt på " +
+        "'hva vet du om...'/'husker du...'-spørsmål i stedet for å gjette.",
+      input_schema: {
+        type: "object",
+        properties: { query: { type: "string", description: "Hva du leter etter, på naturlig norsk." } },
+        required: ["query"],
+        additionalProperties: false
+      }
+    },
+    tool_id: "memory",
+    action: "search",
+    parameters: (modelArgs) => ({ query: String(modelArgs["query"] ?? "") })
   }
 ];
 
