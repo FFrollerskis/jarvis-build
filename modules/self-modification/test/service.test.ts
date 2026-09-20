@@ -64,6 +64,19 @@ beforeEach(async () => {
 });
 
 /** Bevisst FAKET - INGEN ekte git-binær/nettverk. Scripter svar per (command, argv[0]) og logger hvert kall for strukturell verifisering. */
+/**
+ * `netArgs()` (service.ts) prefikser `clone`/`push` med `-c <flag>`-par
+ * (kredensial-isolasjon, se git-auth.ts) FØR selve subkommandoen - `args[0]`
+ * er derfor "-c", ALDRI subkommandoen, for AKKURAT disse to kallene. Denne
+ * hjelperen hopper over hvert `-c <verdi>`-par og returnerer den FAKTISKE
+ * subkommandoen, uansett om kallet er nettverksautentisert eller ikke.
+ */
+function gitSubcommand(args: string[]): string {
+  let i = 0;
+  while (args[i] === "-c") i += 2;
+  return args[i] ?? "";
+}
+
 class FakeSandbox implements Sandbox {
   readonly workdir = "/fake/selfmod";
   calls: Array<{ command: string; args: string[]; extraEnv?: Record<string, string> }> = [];
@@ -73,11 +86,11 @@ class FakeSandbox implements Sandbox {
 
   exec(command: string, args: string[], _timeoutMs?: number, extraEnv?: Record<string, string>): ExecResult {
     this.calls.push({ command, args, ...(extraEnv ? { extraEnv } : {}) });
-    const key = `${command} ${args[0] ?? ""}`;
+    const key = `${command} ${command === "git" ? gitSubcommand(args) : (args[0] ?? "")}`;
     if (this.failOn && key.startsWith(this.failOn)) {
       return { code: 1, stdout: "", stderr: `simulated_failure:${key}` };
     }
-    if (command === "git" && args[0] === "diff") {
+    if (command === "git" && gitSubcommand(args) === "diff") {
       return { code: 0, stdout: this.stagedPathsOverride ?? "config/charlie-personality.json\n", stderr: "" };
     }
     return { code: 0, stdout: "", stderr: "" };
@@ -251,7 +264,7 @@ describe("B: proposePersonalityChange - lykkes-banen", () => {
     expect(result.branch).toMatch(/^jarvis\/self-mod\/personality-\d+$/);
 
     const calls = sandbox.lastSandbox!.calls;
-    const commands = calls.map((c) => `${c.command} ${c.args[0] ?? ""}`);
+    const commands = calls.map((c) => `${c.command} ${c.command === "git" ? gitSubcommand(c.args) : (c.args[0] ?? "")}`);
     expect(commands).toEqual(["git clone", "git checkout", "node -e", "git add", "git diff", "git commit", "git push"]);
     expect(sandbox.lastSandbox!.disposed).toBe(true);
 
@@ -278,7 +291,7 @@ describe("B: proposePersonalityChange - lykkes-banen", () => {
   it("B3: push-target matcher den genererte branchen (branch:branch)", async () => {
     const { service, sandbox } = buildService({});
     const result = await service.proposePersonalityChange(ownerIdentity, { tone_descriptors: ["varm"], style_notes: "test" });
-    const pushCall = sandbox.lastSandbox!.calls.find((c) => c.command === "git" && c.args[0] === "push");
+    const pushCall = sandbox.lastSandbox!.calls.find((c) => c.command === "git" && gitSubcommand(c.args) === "push");
     expect(pushCall?.args).toContain(`${result.branch}:${result.branch}`);
   });
 });
