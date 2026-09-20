@@ -92,6 +92,9 @@ importers:
       '@jarvis/provider-adapters':
         specifier: workspace:*
         version: link:../../packages/provider-adapters
+      '@jarvis/self-modification':
+        specifier: workspace:*
+        version: link:../../modules/self-modification
       '@jarvis/situations':
         specifier: workspace:*
         version: link:../../modules/situations
@@ -798,6 +801,40 @@ importers:
       '@jarvis/memory':
         specifier: workspace:*
         version: link:../memory
+      '@jarvis/tool-gateway':
+        specifier: workspace:*
+        version: link:../tool-gateway
+      pg:
+        specifier: ^8.16.3
+        version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@jarvis/policy':
+        specifier: workspace:*
+        version: link:../policy
+      '@types/pg':
+        specifier: ^8.15.6
+        version: 8.21.0
+      embedded-postgres:
+        specifier: 16.14.0-beta.17
+        version: 16.14.0-beta.17
+
+  modules/self-modification:
+    dependencies:
+      '@jarvis/business':
+        specifier: workspace:*
+        version: link:../business
+      '@jarvis/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@jarvis/core':
+        specifier: workspace:*
+        version: link:../core
+      '@jarvis/tasks':
+        specifier: workspace:*
+        version: link:../tasks
       '@jarvis/tool-gateway':
         specifier: workspace:*
         version: link:../tool-gateway

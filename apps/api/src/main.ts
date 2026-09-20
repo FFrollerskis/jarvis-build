@@ -30,7 +30,11 @@ import {
   OllamaAdapter,
   OpenAiAdapter
 } from "@jarvis/provider-adapters";
-import { InProcessWorker, PgTaskQueue, TaskService } from "@jarvis/tasks";
+import { DockerSandboxRunner, InProcessWorker, PgTaskQueue, ProcessSandboxRunner, TaskService } from "@jarvis/tasks";
+import {
+  ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
+  selfModificationToolDefinitions
+} from "@jarvis/self-modification";
 import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
@@ -78,6 +82,7 @@ import {
   runConversationGraphSyncForAllTenants
 } from "@jarvis/conversation-graph";
 import { ConversationEngine } from "./conversation.ts";
+import { loadPersonalityConfig } from "./personality-config.ts";
 import { executiveHandler } from "./executive.ts";
 import { createApiServer, type ApiDeps } from "./server.ts";
 
@@ -230,15 +235,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `ToolGateway.setSecret()` skriver via. ALDRI to uavhengige Infisical-
   // tilkoblinger.
   const infisicalSecretProvider = new InfisicalSecretProvider();
-  const toolGateway = new ToolGateway(
-    pool, policy,
-    new FallbackSecretProvider(
-      infisicalSecretProvider,
-      new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
-    ),
-    ownerControls,
-    infisicalSecretProvider
+  // Task #121 (D-214): hevet ut til en navngitt konstant (tidligere anonym
+  // inline i ToolGateway-konstruktøren) - `SelfModificationService` sin
+  // `resolveGitToken` gjenbruker DENNE SAMME kjeden (Infisical PRIMÆR,
+  // .env/BusinessInternal fallback, D-211) for å hente `JARVIS_GITHUB_TOKEN`,
+  // i stedet for en egen, parallell secret-oppløsningsvei.
+  const readSecretProvider = new FallbackSecretProvider(
+    infisicalSecretProvider,
+    new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
   );
+  const toolGateway = new ToolGateway(pool, policy, readSecretProvider, ownerControls, infisicalSecretProvider);
   // D-104: egen tjeneste over SAMME runtime-pool, ingen ny motor - gjenbruker
   // DEN SAMME `toolGateway`-instansen (registrert med github under) for
   // recovery-forsøk, ALDRI et direkte transport-kall (se recovery.ts).
@@ -451,6 +457,38 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
   // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
   const memoryRetriever = new MemoryRetriever(pool, new LocalHashEmbedding());
+  // Task #121 (D-214): to-lags selvendrings-modell. SAMME sandbox-valg-
+  // mønster som worker-main.ts sin egen "coding"-jobbregistrering
+  // (JARVIS_SANDBOX=docker|process) - api-prosessen får sin EGEN
+  // `SandboxRunner`-instans (egen prosess, ingen delt tilstand med workeren).
+  // `resolveGitToken` gjenbruker `readSecretProvider` (SAMME Infisical-
+  // primær/.env-fallback-kjede som resten av denne filen, D-211) - ALDRI en
+  // ny, parallell secret-vei. `prGateway: toolGateway` gjenbruker DEN SAMME
+  // instansen som resten av verktøyene i denne filen (duck-typed mot
+  // `PrPublishingGateway`, se pr-publisher.ts sitt filhode) - PR-opprettelse
+  // går derfor uendret via `github.create_pr` (klasse C); selve automergen
+  // (klasse B, se github-client.ts) bruker en HELT EGEN, smalere HTTP-vei,
+  // ALDRI `github.merge_pr` (klasse D).
+  const selfModificationSandbox =
+    process.env["JARVIS_SANDBOX"] === "docker" ? new DockerSandboxRunner() : new ProcessSandboxRunner();
+  const selfModificationService = new SelfModificationService({
+    pool,
+    sandbox: selfModificationSandbox,
+    resolveGitToken: () => readSecretProvider.get("JARVIS_GITHUB_TOKEN"),
+    githubClient: new ResolvingSelfModificationGithubClient(() => readSecretProvider.get("JARVIS_GITHUB_TOKEN")),
+    prGateway: toolGateway,
+    ownerPersonId: ownerControlAuthority.owner_person_id
+  });
+  // Sveiper periodisk (samme uref'et setInterval-mønster som
+  // `deviceRegistry.refresh()` over) - CI tar typisk minutter, 60s er en
+  // fornuftig balanse mellom rask auto-merge og unødig GitHub-API-trafikk.
+  setInterval(
+    () =>
+      void selfModificationService
+        .sweepPendingRequests()
+        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_sweep_error", error: (err as Error).message }))),
+    60_000
+  ).unref();
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
     github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
@@ -566,7 +604,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       // SAMME `memoryRetriever`-instansen `conversationEngine` under gjenbruker
       // for bakgrunnskontekst - se `memoryRetriever` sin egen filhode-kommentar
       // lenger opp for hvorfor den ble hevet ut hit.
-      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever))
+      ...memoryToolDefinitions(new MemorySearchTransport(memoryRetriever)),
+      // Task #121 (D-214): `self_modification.propose_personality_change` -
+      // DEN SAMME `selfModificationService`-instansen konstruert over
+      // (delt med den periodiske sveipen og Telegram-godkjenningsbroen
+      // lenger ned) - kun ÉN chat-kallbar handling i denne sliceen (se
+      // transport.ts sitt filhode for hvorfor merge/godkjenning BEVISST
+      // ikke er chat-kallbare).
+      ...selfModificationToolDefinitions(new SelfModificationTransport(selfModificationService))
     ]
   })) toolGateway.register(tool);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
@@ -649,7 +694,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tools: {
       definitions: meshToolDefinitions(),
       executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
-    }
+    },
+    // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
+    // `buildSystemPrompt()`/`loadPersonality()`.
+    personality: loadPersonalityConfig
   });
   const deps: ApiDeps = {
     identity: identityService,
@@ -801,6 +849,33 @@ porter: se docs/RUNTIME_GATES.md`;
         // 3. SAMME motor som /chat, bundet til den OPPLØSTE identiteten.
         const result = await conversationEngine.handle(authorized.identity, text);
         return result.reply;
+      },
+      // Task #121 (D-214): `requires_approval`-sporets raske "one-tap"
+      // eier-godkjenning. `poll()` har ALLEREDE fail-closed avvist enhver
+      // ikke-eier-chat FØR `dispatch()` i det hele tatt nås (§C3 i
+      // d125-telegram-inbound-wiring.test.ts) - `actorPersonId` er derfor
+      // TRYGT den konfigurerte eier-identiteten, ALDRI noe fra selve
+      // meldingsteksten (SAMME `JARVIS_OWNER_PERSON_ID ?? "person-tobias"`-
+      // uttrykk som `telegramOwnerAuthority`/`seedOwner()` over).
+      approveSelfMod: async (requestId) => {
+        try {
+          const updated = await selfModificationService.resolveApproval(
+            requestId, "approved", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
+          );
+          return `Godkjent: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
+        } catch (err) {
+          return `Kunne ikke godkjenne ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
+        }
+      },
+      rejectSelfMod: async (requestId) => {
+        try {
+          const updated = await selfModificationService.resolveApproval(
+            requestId, "rejected", process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias"
+          );
+          return `Avvist: ${updated.request_id} (${updated.kind}) - status=${updated.status}`;
+        } catch (err) {
+          return `Kunne ikke avvise ${requestId}: ${err instanceof Error ? err.message : "ukjent feil"}`;
+        }
       }
     }, sendTelegram).start();
     // BO-05: reboot-durabel morgenlevering (DB-laas, Europe/Oslo, catch-up, aldri duplikat).

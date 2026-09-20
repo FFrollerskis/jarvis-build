@@ -32,6 +32,7 @@
     "@jarvis/policy": "workspace:*",
     "@jarvis/product": "workspace:*",
     "@jarvis/provider-adapters": "workspace:*",
+    "@jarvis/self-modification": "workspace:*",
     "@jarvis/situations": "workspace:*",
     "@jarvis/support": "workspace:*",
     "@jarvis/tasks": "workspace:*",
