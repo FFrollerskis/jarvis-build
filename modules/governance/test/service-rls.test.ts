@@ -47,6 +47,9 @@ beforeAll(async () => {
   await adminPool.query(
     `INSERT INTO tenants (tenant_id, name, kind) VALUES ('${TENANT_A}', 'Governance Svc A', 'business'), ('${TENANT_B}', 'Governance Svc B', 'business')`
   );
+  // `created_by` har en (ikke scope-safe, direkte) FK mot `people(person_id)` (059_governance.sql) -
+  // begge testens brukte `createdBy`-verdier maa derfor faktisk eksistere i `people`.
+  await adminPool.query(`INSERT INTO people (person_id, display_name) VALUES ('person-creator', 'Creator'), ('p', 'P')`);
 
   appPool = createPool({ host: "127.0.0.1", port: PORT, database: "jarvis_test", user: "jarvis_gov_svc_test", password: "pw2" });
   service = new GovernanceService(appPool);
