@@ -194,6 +194,29 @@ describe("D-106 ConversationEngine: routing overrides folder inn i CompleteInput
     await engine.handle(identity, "bruk gemma til dette");
     expect(captured?.providerPreference).toEqual(["gemma_local", "gemma_hosted"]);
   });
+
+  /**
+   * D-203 (2026-09-20, direkte chat-instruks fra Tobias: "simpel default,
+   * lav-sensitiv som standard, fiks det"): før denne fiksen satte normal
+   * chat ALDRI `sensitivity` - routerens D-81 fail-closed-regel
+   * (`isSensitivityEligible()`) tolket udefinert ALDRI som "public", så
+   * `gemma_hosted` (eneste `hosted_free_tier`-provider) var strukturelt
+   * uoppnåelig for vanlig eierchat, host-verifisert som
+   * `routing_reason=PRIVACY_RESTRICTED` på hver eneste chat-generasjon.
+   */
+  it("T: normal chat setter ALLTID sensitivity=PUBLIC_OR_LOW_SENSITIVITY (D-203 - gjør gemma_hosted faktisk kvalifisert)", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "hva er klokken?");
+    expect(captured?.sensitivity).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+  });
+
+  it("U: en eksplisitt tekst-override (f.eks. 'bruk bare Claude') endrer IKKE D-203s sensitivitetsdefault", async () => {
+    let captured: CompleteInput | undefined;
+    const engine = buildEngine({ onComplete: (input) => (captured = input) });
+    await engine.handle(identity, "bruk bare Claude til dette");
+    expect(captured?.sensitivity).toBe("PUBLIC_OR_LOW_SENSITIVITY");
+  });
 });
 
 /**
@@ -215,6 +238,20 @@ describe("D-106 HOST-FIX: automatisk høy-innvirkning-klassifisering trigger Cou
     const input = captured as { trigger?: { trigger_source?: string; matched_signals?: unknown[] } };
     expect(input.trigger?.trigger_source).toBe("high_impact_classifier");
     expect(input.trigger?.matched_signals?.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * D-203: Council-input får BEVISST ALDRI den nye sensitivitetsdefaulten -
+   * Council trigges kun for eksplisitt høy-innvirkning-beslutninger og skal
+   * ikke automatisk nedgraderes til lav-sensitivitet bare fordi normal chat
+   * nå er det.
+   */
+  it("I2: Council-input har INGEN sensitivity-felt (D-203s default gjelder KUN normal chat, aldri Council)", async () => {
+    let captured: unknown;
+    const engine = buildEngine({ onCouncilRun: (input) => (captured = input) });
+    await engine.handle(identity, "Should we replace Jarvis' canonical memory architecture?");
+    const input = captured as { sensitivity?: unknown };
+    expect(input.sensitivity).toBeUndefined();
   });
 
   it("J: stor finansiell beslutning trigger Council automatisk", async () => {

@@ -170,10 +170,24 @@ export class ConversationEngine {
       const system = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
       // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
       // P1A (§27): SSE-klienter får normalisert stream; klienten ser aldri provider-format.
+      // D-203 (2026-09-20, direkte chat-instruks fra Tobias: "simpel default, lav-sensitiv
+      // som standard, fiks det"): denne inputen satte ALDRI `sensitivity` - routeren
+      // (D-81 P0-sikkerhetsfiks, router.ts sin `isSensitivityEligible()`) tolker udefinert
+      // sensitivitet fail-closed (ALDRI som "public"), så `gemma_hosted` (eneste
+      // `hosted_free_tier`-provider) var strukturelt UOPPNÅELIG for vanlig eierchat -
+      // "Gemma-first"-kost-policyen (D-79/D-80) virket derfor ALDRI reelt her, uansett
+      // D-200s strømmingsfiks (host-verifisert: `routing_reason=PRIVACY_RESTRICTED` på
+      // hver eneste chat-generasjon). Eierens EGEN, personlige samtalekanal
+      // (`tenant-personal`, ett enkelt-bruker-tenant) er en bevisst, enkel default -
+      // IKKE en generell innholdsklassifisering. Council (`runCouncil()` under) er
+      // BEVISST UBERØRT - den trigges KUN for eksplisitt høy-innvirkning-beslutninger
+      // (`decision-importance.ts`) eller eksplisitt eierfrase, og skal IKKE automatisk
+      // nedgraderes til lav-sensitivitet bare fordi normal chat nå er det.
       const input = {
         tenant_id: identity.tenant_id,
         session_id: identity.session_id,
         purpose: "CHAT" as const,
+        sensitivity: "PUBLIC_OR_LOW_SENSITIVITY" as const,
         ...(provider !== undefined ? { provider } : override?.provider !== undefined ? { provider: override.provider } : {}),
         ...(provider === undefined && override?.providerPreference !== undefined
           ? { providerPreference: override.providerPreference }
