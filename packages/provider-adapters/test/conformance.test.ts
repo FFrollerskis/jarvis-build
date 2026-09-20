@@ -399,7 +399,7 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
  * OG hemmelighets-trygg, uansett om selve 404-årsaken forblir uverifisert
  * uten en live nøkkel.
  */
-describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kimi HTTP-feil", () => {
+describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kimi/Gemma HTTP-feil", () => {
   it("gemini: 404 klassifiseres til bad_request MED trygg diagnostikk (provider_error_code/sanitized_endpoint/request_operation)", async () => {
     vi.stubGlobal(
       "fetch",
@@ -444,6 +444,59 @@ describe("D-106 HOST-FIX Defekt B: trygg feilsøkings-diagnostikk for Gemini/Kim
     expect(pe.diagnostic?.provider_error_code).toBe("model_not_found");
     expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1/chat/completions");
     expect(pe.diagnostic?.request_operation).toBe("chat.completions");
+  });
+
+  it("gemma_hosted: 400 klassifiseres til bad_request MED trygg diagnostikk (D-106 HOST-FIX Defekt B, tidligere manglet for denne adapteren - host-bevis 2026-09-20: hvert reelt `gemma_hosted`-kall feilet opakt med `bad_request` og falt stille tilbake til `openai`)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({ error: { code: 400, message: "Invalid JSON payload received", status: "INVALID_ARGUMENT" } }),
+            { status: 400 }
+          )
+      )
+    );
+    const err = await new GemmaHostedAdapter("hemmelig-key", "gemma-4-26b-a4b-it", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.kind).toBe("bad_request");
+    expect(pe.status).toBe(400);
+    expect(pe.diagnostic?.provider_error_code).toBe("INVALID_ARGUMENT");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1beta/models/gemma-4-26b-a4b-it:generateContent");
+    expect(pe.diagnostic?.request_operation).toBe("generateContent");
+  });
+
+  it("gemma_hosted: stream()-operasjonen sin diagnostikk merker request_operation som streamGenerateContent, ikke generateContent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { status: "NOT_FOUND" } }), { status: 404 }))
+    );
+    const err = await new GemmaHostedAdapter("hemmelig-key", "gemma-4-26b-a4b-it", "http://mock")
+      .stream(REQUEST, () => {})
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    const pe = err as ProviderError;
+    expect(pe.diagnostic?.request_operation).toBe("streamGenerateContent");
+    expect(pe.diagnostic?.sanitized_endpoint).toBe("mock/v1beta/models/gemma-4-26b-a4b-it:streamGenerateContent");
+  });
+
+  it("gemma_hosted: diagnostikk-objektet inneholder ALDRI API-nøkkelen", async () => {
+    const secret = "sk-super-hemmelig-nokkel-12345";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: { code: 400, status: "INVALID_ARGUMENT" } }), { status: 400 }))
+    );
+    const err = (await new GemmaHostedAdapter(secret, "m", "http://mock")
+      .complete(REQUEST)
+      .then(() => null)
+      .catch((e: unknown) => e)) as ProviderError;
+    const dump = JSON.stringify({ message: err.message, diagnostic: err.diagnostic, status: err.status });
+    expect(dump).not.toContain(secret);
   });
 
   it("gemini/kimi: diagnostikk-objektet inneholder ALDRI API-nøkkelen (verken i provider_error_code, sanitized_endpoint eller feilmeldingen)", async () => {

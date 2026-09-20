@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
+  extractProviderErrorCode,
   ProviderError,
+  sanitizeEndpointForDiagnostics,
   sseLines,
   type ChatMessage,
   type ContentPart,
@@ -166,10 +168,11 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       throw new ProviderError(this.name, "not_configured", `${this.name}_not_configured`);
     }
     const method = streamMode ? "streamGenerateContent?alt=sse" : "generateContent";
+    const url = `${this.baseUrl}/v1beta/models/${this.model}:${method}`;
     let response: Response;
     try {
       const timeout = AbortSignal.timeout(request.timeoutMs ?? this.timeoutMs);
-      response = await fetch(`${this.baseUrl}/v1beta/models/${this.model}:${method}`, {
+      response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", "x-goog-api-key": this.apiKey },
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -182,7 +185,27 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       throw classifyFetchError(this.name, err);
     }
     if (!response.ok) {
-      throw classifyHttpStatus(this.name, response.status);
+      // D-106 HOST-FIX (Defekt B, samme mønster som gemini.ts/kimi.ts): trygg,
+      // begrenset feilsøkings-metadata - ALDRI nøkkelen (den sendes i
+      // `x-goog-api-key`-header, aldri i URL-en over), ALDRI hele body.
+      // `gemma_hosted` manglet denne diagnostikken fra D-79 av (bygget FØR
+      // D-106 HOST-FIX-runden som ga gemini/kimi dette) - hver reelle
+      // `bad_request` fra Gemini API har derfor til nå vært en helt opak
+      // `gemma_hosted_error_400` uten noen indikasjon på ÅRSAK (host-bevis,
+      // 2026-09-20: `cost_events` viste gjentatte `model:failed:bad_request`
+      // for `gemma_hosted` uten noen ytterligere detalj å feilsøke fra).
+      let providerErrorCode: string | undefined;
+      try {
+        providerErrorCode = extractProviderErrorCode(await response.text());
+      } catch {
+        // Body kunne ikke leses - diagnostikk er beste-innsats, aldri en blokkerende avhengighet.
+      }
+      const sanitizedEndpoint = sanitizeEndpointForDiagnostics(url);
+      throw classifyHttpStatus(this.name, response.status, {
+        ...(providerErrorCode !== undefined ? { provider_error_code: providerErrorCode } : {}),
+        ...(sanitizedEndpoint !== undefined ? { sanitized_endpoint: sanitizedEndpoint } : {}),
+        request_operation: streamMode ? "streamGenerateContent" : "generateContent"
+      });
     }
     return response;
   }
