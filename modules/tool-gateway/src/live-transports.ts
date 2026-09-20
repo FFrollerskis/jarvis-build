@@ -797,6 +797,16 @@ export function driveTransportsIfConfigured(): Partial<Record<string, ToolTransp
 export class TelegramTransport implements ToolTransport {
   constructor(private readonly chatId: string | undefined = process.env["JARVIS_TELEGRAM_CHAT_ID"]) {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_bot_info") {
+      // Task #122 (D-213): Telegram Bot API sin offisielle `getMe` - KUN
+      // boten sin egen token kreves, INGEN `chat_id`, INGEN sideeffekt.
+      // Lagt til nettopp fordi `notify` under sender en EKTE melding og
+      // derfor aldri kunne vært en trygg "virker credentialen?"-test.
+      const response = await fetch(`https://api.telegram.org/bot${credential}/getMe`);
+      if (!response.ok) throw new Error(`telegram_error_${response.status}`);
+      const body = (await response.json()) as { result?: JsonValue };
+      return { data: body.result ?? null };
+    }
     if (action !== "notify") throw new Error(`telegram_unsupported_action_${action}`);
     if (!this.chatId) throw new Error("telegram_chat_id_not_configured");
     const response = await fetch(`https://api.telegram.org/bot${credential}/sendMessage`, {

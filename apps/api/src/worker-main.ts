@@ -144,11 +144,16 @@ const policy = new PolicyGateway({
 // Task #119 (D-211): SAMME Infisical-primær/env-fallback-kjede som
 // `apps/api/src/main.ts` - API/worker-parity (K1-presedens), ikke en egen,
 // avvikende secret-vei for workeren.
+// Task #122 (D-213): hoistet til en NAVNGITT konstant (samme presedens som
+// `toolSecretProvider` over) slik at NØYAKTIG SAMME InfisicalSecretProvider-
+// instans også gis inn som `ToolGateway` sitt separate `writableSecrets`-
+// argument (5. posisjon) - ALDRI en ny, parallell Infisical-tilkobling.
+const infisicalSecretProvider = new InfisicalSecretProvider();
 const toolSecretProvider = new FallbackSecretProvider(
-  new InfisicalSecretProvider(),
+  infisicalSecretProvider,
   new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider())
 );
-const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls);
+const toolGateway = new ToolGateway(pool, policy, toolSecretProvider, ownerControls, infisicalSecretProvider);
 const businessService = new BusinessService(pool);
 // UA-3 next slice (D-53): samme OpenLoopService-wiring som api - workeren sin
 // mesh-tool-executor maa kunne kalle de nye business-handlingene identisk.
