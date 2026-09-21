@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-21 (branch `claude/fase-d222-silent-error-round5` basert på `origin/main` HEAD
-`d5be587`, PR #133 MERGET). **D-222 (femte runde "silent error swallowing"-fikser, funnet av et
-FRISKT bredt kode-nivå-søk på tvers av HELE kodebasen, ikke bare tidligere rørte filer) klar for PR -
-se "Hvor `main` står nå".**
+**Oppdatert:** 2026-09-21 (branch `claude/status-update-134-merge` basert på `origin/main` HEAD
+`24e434b`). **PR #134 (D-222) MERGET. Fem runder "silent error swallowing"-fikser (D-218→D-222) alle
+i drift. Ingen kjent, allerede-registrert uløst kandidat fra DENNE anti-mønster-klassen gjenstår - se
+"Neste oppgave".**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -46,32 +46,29 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
-- **PR #106-#133 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+- **PR #106-#134 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
   connector credential-skriving + utvidet live_test (D-213, PR #122), trygg selvendring - to-lags-
   modellen (D-214, PR #123), selvendring - EKTE requires_approval-produsent for vilkårlig kode + merge-
   koblingen (D-215, PR #125), UA-11 executive dashboard mutasjons-delen (D-216, PR #126), lokal
-  whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128), FIRE uavhengige "silent
+  whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128), FEM uavhengige "silent
   error swallowing"-fikser (D-218 scheduler/D-219 policy-avslag-audit/D-220 erasure-fail-status-persist/
-  D-221 erasure-rollback-stier, PR #130+#132+#133) - se git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke
-  gjentatt her.
-- **D-222 (DENNE branchen, IKKE ENNÅ PR/merget) - kort oppsummert (full begrunnelse i
-  DECISIONS_AND_ASSUMPTIONS.md):** femte runde, FIRE nye forekomster funnet av et friskt bredt søk
-  utenfor erasure-domenet: (1) `TelegramCommandPoller.start()` sin `setInterval(...poll().catch(() =>
-  undefined))` (`modules/tool-gateway/src/live-transports.ts`) - en poll-tick-feil UTENFOR
-  per-melding-løkken forsvant sporløst; (2) SAMME fils per-melding bare `catch {}` rundt
-  `dispatch(chat, text)` - eierens EGEN Telegram-melding kunne feile helt sporløst; (3)
-  `withDomainAdvisoryLocks()` (`modules/situations/src/advisory-lock.ts`) sin `pg_advisory_unlock`-feil
-  i `finally` - en potensiell stuck-lock-kilde uten noe signal; (4) `deviceRegistry.refresh()` i BÅDE
-  `apps/api/src/main.ts` (start+intervall) og `worker-main.ts` (start) - en vedvarende feil lot policy
-  kjøre mot et stille utdatert enhetsregister. Fikset med SAMME etablerte mønster (strukturert
-  `console.error`, ingen atferdsendring i noen av de fire). Nye tester: DB-uavhengige E1-E3 i
-  `d125-telegram-inbound-poller.test.ts` (18/18 grønt, KJØRT i denne økten) + ny fil
-  `advisory-lock.test.ts` (embedded-Postgres, SAMME D-221-DB-korrekthets-presisjoner, UBEKREFTET lokalt -
-  kjent `initdb`-sandbox-begrensning, verifiseres av CI) + `drive-runtime-wiring.test.ts` describe O
-  (20/20 grønt, KJØRT). `pnpm -w typecheck`/`npx eslint .` rene, begge KJØRT i denne økten. PR IKKE ENNÅ
-  åpnet - neste steg i DENNE økten.
+  D-221 erasure-rollback-stier/D-222 telegram+advisory-lock+device-registry, PR #130+#132+#133+#134) - se
+  git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
+- **D-222 (PR #134) - kort oppsummert (full begrunnelse i DECISIONS_AND_ASSUMPTIONS.md):** femte runde,
+  FIRE nye forekomster funnet av et friskt bredt søk utenfor erasure-domenet: (1)
+  `TelegramCommandPoller.start()` sin `setInterval(...poll().catch(() => undefined))`
+  (`modules/tool-gateway/src/live-transports.ts`) - en poll-tick-feil UTENFOR per-melding-løkken
+  forsvant sporløst; (2) SAMME fils per-melding bare `catch {}` rundt `dispatch(chat, text)` - eierens
+  EGEN Telegram-melding kunne feile helt sporløst; (3) `withDomainAdvisoryLocks()`
+  (`modules/situations/src/advisory-lock.ts`) sin `pg_advisory_unlock`-feil i `finally` - en potensiell
+  stuck-lock-kilde uten noe signal; (4) `deviceRegistry.refresh()` i BÅDE `apps/api/src/main.ts`
+  (start+intervall) og `worker-main.ts` (start) - en vedvarende feil lot policy kjøre mot et stille
+  utdatert enhetsregister. Fikset med SAMME etablerte mønster (strukturert `console.error`, ingen
+  atferdsendring i noen av de fire). CI grønt på alle 6 jobber FØRSTE forsøk (inkl. den nye
+  embedded-Postgres `advisory-lock.test.ts`, UBEKREFTET lokalt men BEKREFTET av CI), ingen åpne
+  review-tråder, merget under D-192 med to-forelder-merge (`24e434b`).
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -98,14 +95,12 @@ problemer.
 
 ## Neste oppgave
 
-1. **Umiddelbart i DENNE økten:** commit/push D-222-branchen, åpne draft-PR, overvåk CI, merge under
-   D-192 når grønt/ingen åpne funn, deretter separat docs-closeout-PR (samme mønster som PR #131/#133).
-2. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
+1. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
    `catch { }` uten fanget feil-variabel, HELE `apps/`/`modules/`, ikke bare tidligere rørte filer - se
-   D-222-lærdommen over) hvis bedt om å fortsette å bygge ETTER D-222 er merget - ingen kjent,
-   allerede-registrert uløst kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå (git-auth
-   `chmod()`/GitHub-rate-limit-queue-continuation er sjekket og bekreftet lav prioritet flere ganger).
-3. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+   D-222-lærdommen over) hvis bedt om å fortsette å bygge - ingen kjent, allerede-registrert uløst
+   kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå (git-auth `chmod()`/GitHub-rate-limit-
+   queue-continuation er sjekket og bekreftet lav prioritet flere ganger).
+2. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
    (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon,
    nå kun host-handling gjenstående, se D-217). PR #97 (W1 watchdog) venter uansett på Tobias/arkitekt.
