@@ -1341,7 +1341,17 @@ export class TelegramCommandPoller {
   ) {}
 
   start(intervalMs = 4000): void {
-    this.timer = setInterval(() => void this.poll().catch(() => undefined), intervalMs);
+    // D-222: tidligere `.catch(() => undefined)` - en `poll()`-feil UTENFOR
+    // per-melding-løkken (fetch-nettverksfeil, ugyldig JSON, en uventet feil
+    // FØR selve `try`-blokken slipper til) forsvant HELT sporløst, samme
+    // "siste sikkerhetsnett"-anti-mønster som D-218 (`DailyScheduler.start()`)
+    // og D-196 (`main.ts` sin `worker.drain()`-løkke) allerede fikset.
+    this.timer = setInterval(() => void this.poll().catch((err) => {
+      console.error(JSON.stringify({
+        msg: "telegram_poll_tick_failed",
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }), intervalMs);
     this.timer.unref();
   }
   stop(): void {
@@ -1366,8 +1376,17 @@ export class TelegramCommandPoller {
         const text = update.message?.text ?? "";
         try {
           await this.dispatch(chat, text);
-        } catch {
-          // Én melding som feiler skal aldri stjele resten av batchen.
+        } catch (err) {
+          // D-222: bar `catch {}` uten fanget feil-variabel - STERKERE signal
+          // enn `.catch(() => undefined)` (D-221-lærdommen: ingen mulighet å
+          // logge originalfeilen uten en kodeendring). Isolasjonen (én
+          // melding feiler ikke resten av batchen) er UENDRET - kun
+          // stillheten var feilen.
+          console.error(JSON.stringify({
+            msg: "telegram_dispatch_failed",
+            update_id: update.update_id,
+            error: err instanceof Error ? err.message : String(err)
+          }));
         }
       }
     } finally {

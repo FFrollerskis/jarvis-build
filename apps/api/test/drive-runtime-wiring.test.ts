@@ -231,3 +231,30 @@ describe("N: main.ts sin worker.drain()-løkke logger feil (D-196) - SAMME mekan
     expect(block).not.toContain(".unref()");
   });
 });
+
+describe("O (D-222): deviceRegistry.refresh() sine to kallesteder (start + interval) logger feil, ikke .catch(() => undefined)", () => {
+  it("apps/api/src/main.ts: den innledende await-refreshen OG intervall-refreshen logger strukturert", () => {
+    const startIdx = mainSource.indexOf("await deviceRegistry.refresh()");
+    expect(startIdx).toBeGreaterThan(-1);
+    const startBlock = mainSource.slice(startIdx, mainSource.indexOf("});", startIdx) + 3);
+    expect(startBlock).not.toMatch(/\.catch\(\(\)\s*=>\s*undefined\)/);
+    expect(startBlock).toMatch(/\.catch\(\(err\)\s*=>\s*\{/);
+    expect(startBlock).toContain("device_registry_initial_refresh_failed");
+
+    const intervalIdx = mainSource.indexOf("setInterval(() => void deviceRegistry.refresh()");
+    expect(intervalIdx).toBeGreaterThan(-1);
+    const intervalBlock = mainSource.slice(intervalIdx, mainSource.indexOf(".unref();", intervalIdx) + ".unref();".length);
+    expect(intervalBlock).not.toMatch(/\.catch\(\(\)\s*=>\s*undefined\)/);
+    expect(intervalBlock).toContain("device_registry_refresh_tick_failed");
+    expect(intervalBlock).toContain(".unref();");
+  });
+
+  it("apps/api/src/worker-main.ts: samme innledende refresh logger strukturert (ingen interval her - uendret fra før)", () => {
+    const startIdx = workerSource.indexOf("await deviceRegistry.refresh()");
+    expect(startIdx).toBeGreaterThan(-1);
+    const startBlock = workerSource.slice(startIdx, workerSource.indexOf("});", startIdx) + 3);
+    expect(startBlock).not.toMatch(/\.catch\(\(\)\s*=>\s*undefined\)/);
+    expect(startBlock).toMatch(/\.catch\(\(err\)\s*=>\s*\{/);
+    expect(startBlock).toContain("device_registry_initial_refresh_failed");
+  });
+});

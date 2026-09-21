@@ -120,7 +120,13 @@ const infraGate = new InfraExecutionGate();
 // D-105: "docker" lagt til (samme rasjonale som apps/api/src/main.ts).
 const infraToolIds = new Set(["github", "docker"]);
 const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
-await deviceRegistry.refresh().catch(() => undefined);
+// D-222: samme fiks som apps/api/src/main.ts - se den for full begrunnelse.
+await deviceRegistry.refresh().catch((err) => {
+  console.error(JSON.stringify({
+    msg: "device_registry_initial_refresh_failed",
+    error: err instanceof Error ? err.message : String(err)
+  }));
+});
 // v4.0 sovereign-owner (BO-11.1 §2-funn): samme authority-wiring som api -
 // uten denne kjørte workeren i legacy SCOPED-modus for owners D-kall.
 const policy = new PolicyGateway({

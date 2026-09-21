@@ -248,3 +248,63 @@ describe("D-125 D: ingen dobbel handling/dobbelt svar for samme update innenfor 
     expect(recorded.chat).toHaveLength(1);
   });
 });
+
+describe("D-222: dispatch()- og poll()-feil logges strukturert (tidligere bar `catch {}`/`.catch(() => undefined)` svelget begge sporløst)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it("E1: en feilet dispatch() logges strukturert (update_id+error) - isolasjonen (D3: resten av batchen stjeles ikke) er UENDRET", async () => {
+    stubUpdates([[
+      { update_id: 5, chat: OWNER, text: "/brief" },
+      { update_id: 6, chat: OWNER, text: "andre melding" }
+    ]]);
+    const p = new TelegramCommandPoller(TOKEN, OWNER, {
+      brief: async () => { throw new Error("dispatch_boom"); },
+      status: async () => "STATUS",
+      chat: async (m) => { recorded.chat.push(m); return `svar: ${m.text}`; }
+    }, async (text: string) => { recorded.sent.push(text); });
+    await p.poll();
+
+    // Isolasjon UENDRET: andre melding i samme batch behandles fortsatt.
+    expect(recorded.chat).toEqual([{ chat_id: OWNER, text: "andre melding" }]);
+
+    const line = errorSpy.mock.calls.map(([l]) => l as string).find((l) => l.includes("telegram_dispatch_failed"));
+    expect(line).toBeDefined();
+    const parsed = JSON.parse(line as string) as { msg: string; update_id: number; error: string };
+    expect(parsed.msg).toBe("telegram_dispatch_failed");
+    expect(parsed.update_id).toBe(5);
+    expect(parsed.error).toContain("dispatch_boom");
+  });
+
+  it("E2: vellykket dispatch logger INGEN feil (regresjonsvakt - ingen støy på den lykkelige stien)", async () => {
+    stubUpdates([[{ update_id: 1, chat: OWNER, text: "/brief" }]]);
+    await poller().poll();
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("E3: start() sin setInterval logger en poll()-feil UTENFOR per-melding-løkken (fetch-nettverksfeil) strukturert, i stedet for å svelge den", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal("fetch", async () => { throw new Error("network_boom"); });
+      const p = poller();
+      p.start(10);
+      await vi.advanceTimersByTimeAsync(15);
+
+      const line = errorSpy.mock.calls.map(([l]) => l as string).find((l) => l.includes("telegram_poll_tick_failed"));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string) as { msg: string; error: string };
+      expect(parsed.msg).toBe("telegram_poll_tick_failed");
+      expect(parsed.error).toContain("network_boom");
+      p.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
