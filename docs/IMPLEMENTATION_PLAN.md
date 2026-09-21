@@ -4503,6 +4503,52 @@ for eksakte tall/status.
 
 ---
 
+## Lokal whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (task #125, D-217)
+
+**Manuell masterplan-slice** (2026-09-21, "start whisper.cpp/piper-adapterne" - direkte Tobias-
+chat-instruks under D-192, valgt av to lokalt byggbare kandidater en fersk repo-verifisering avdekket
+etter D-216). Lukker Q-32 punkt 3 sin faktiske kodemangel - `LocalWhisperStt`/`LocalPiperTts`
+(`apps/voice-gateway/src/stt.ts`/`tts.ts`) kastet tidligere `*_not_implemented_in_pilot` for hvert
+kall. Full begrunnelse: D-217 i `DECISIONS_AND_ASSUMPTIONS.md`.
+
+**Bygget:**
+- `LocalWhisperStt.startStream()` - batch-transkripsjon (whisper.cpp sin CLI har ingen inkrementell
+  strømmemodus). `pushAudio()` bufrer PCM i minnet, `end()` pakker til WAV og sender bytene DIREKTE på
+  den spawnede prosessens STDIN (`-f -`) - ALDRI til en fil.
+- `LocalPiperTts.synthesize()` - EKTE strømmende: tekst til stdin, rå PCM-rammer leses FORTLØPENDE fra
+  stdout. `cancel()` spawner prosessen `detached: true` og dreper HELE prosessgruppen
+  (`process.kill(-pid, "SIGTERM")`), ikke kun den direkte PID-en - nødvendig for at barge-in (§15/§16)
+  faktisk stopper avspilling umiddelbart selv om den underliggende binæren forker egne barneprosesser.
+- Begge wiret inn i `apps/voice-gateway/src/main.ts` som NESTE fallback-tier (etter OpenAI, FØR den
+  deterministiske `MarkerStt`/`FakeTts`-testadapteren). `available()` krever nå BÅDE binær OG
+  modellsti (`JARVIS_WHISPER_MODEL`/`JARVIS_PIPER_MODEL`, nye miljøvariabler).
+
+**To reelle funn fanget av eksisterende/egne tester FØR commit (ikke i produksjon):**
+1. Den første whisper.cpp-implementasjonen skrev WAV-en til en midlertidig fil - `test/
+   d30-foundation.test.ts` sin allerede eksisterende §22-personvern-test (statisk kildekode-sjekk mot
+   `node:fs`-skrive-API-er i stt.ts/tts.ts/session.ts/chunker.ts) fanget dette umiddelbart. Rettet til
+   ren STDIN-piping.
+2. Den første piper-implementasjonen kalte `child.kill()` på kun direkte-PID-en - en ny test med en
+   faket, hengende binær (`mock-piper-hang.sh`) tidsavbrøt fordi en bash-wrapper sin egen
+   grandbarn-prosess (`sleep`) arvet stdout-pipen og holdt den åpen. Rettet med `detached: true` +
+   prosessgruppe-kill.
+
+**UNVERIFIED, eksplisitt disclosed (D-41):** de eksakte CLI-flaggene er whisper.cpp/pipers
+LANGVARIG DOKUMENTERTE konvensjoner, MEN aldri kjørt mot en ekte installert binær denne økten.
+`available()` forblir `false` i praksis til Tobias installerer binærene/modellene (Q-32 punkt 3,
+uendret eier-avhengighet).
+
+**Bygges IKKE i denne sliceen:** ingen resampling (piper/OpenAI TTS sin faktiske utdata-samplerate
+matcher ikke nødvendigvis pilotens 16 kHz-antakelse noe sted i koden - pre-eksisterende, uendret gap);
+selve host-installasjonen (Tobias sin egen handling).
+
+**Tester:** `test/local-whisper-stt.test.ts` (10), `test/local-piper-tts.test.ts` (10) - ALLE
+DB-uavhengige mot fakede binær-skript i `test/fixtures/`, verifisert lokalt. Hele den eksisterende
+`apps/voice-gateway`-suiten (unntatt det kjente DB-avhengige `voice-e2e.test.ts`-gapet) re-kjørt grønn
+uendret. `pnpm -w typecheck`/`npx eslint .` rene.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```

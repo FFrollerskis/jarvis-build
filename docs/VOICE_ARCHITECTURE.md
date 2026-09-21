@@ -112,6 +112,17 @@ via OpenAI STT/TTS forblir policy-blokkert av `evaluateSpeechRouting()` (§6, Q-
 `docs/OPEN_QUESTIONS.md`) helt til Tobias selv har gjort den juridiske/eier-verifiseringen av OpenAI som
 databehandler - `processor_terms_status` er hardkodet `"NOT_VERIFIED"` og skal ALDRI settes av
 Jarvis/Claude selv. `voice.html` viser dette avslaget ærlig i et eget panel i stedet for å late som en
-generisk feil. Lokal STT/TTS (Q-32 punkt 3: whisper.cpp/piper) er fortsatt ikke installert - samme kjente
-gap som før denne sliceen.
+generisk feil.
+
+**Lokal STT/TTS (task #125, D-217):** `LocalWhisperStt`/`LocalPiperTts` (`apps/voice-gateway/src/
+stt.ts`/`tts.ts`) er ikke lenger stubs - subprosess-/strømme-/kanselleringskoden er EKTE og testet mot
+en faket binær (`test/local-{whisper,piper}-*.test.ts`), og begge er wiret inn som NESTE
+fallback-tier i `main.ts` (etter OpenAI, FØR den deterministiske test-adapteren). RÅ lyd forlater
+prosessen KUN via pipe til den lokale binæren, ALDRI via disk (§22-invarianten, statisk håndhevet av
+`test/d30-foundation.test.ts`). `available()` forblir likevel `false` - og `health`-tale forblir derfor
+faktisk utilgjengelig i praksis - inntil Tobias selv installerer whisper.cpp/piper-binærene/modellene og
+setter `JARVIS_WHISPER_BIN`/`JARVIS_WHISPER_MODEL`/`JARVIS_PIPER_BIN`/`JARVIS_PIPER_MODEL` (Q-32 punkt
+3, uendret eier-avhengighet). De eksakte CLI-flaggene (`-f -` for whisper.cpp-stdin, `--output_raw` for
+piper) er whisper.cpp/pipers LANGVARIG DOKUMENTERTE, mest utbredte konvensjoner, men ALDRI kjørt mot en
+ekte installert binær i denne økten - UVERIFISERT, eksplisitt disclosed (D-41), ikke stille antatt.
 - Ikke bygget for mange rom i første versjon: én satellitt vertikalt først, deretter skalering.
