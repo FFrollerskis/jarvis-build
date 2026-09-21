@@ -24,24 +24,28 @@ function fakeService() {
       calls.push({ method: "proposePersonalityChange", args });
       return { request_id: "selfmod-1", pr_number: "42", pr_url: "https://github.com/x/y/pull/42", branch: "jarvis/self-mod/personality-1", risk: "zero_review" };
     },
+    proposeCodeChange: async (...args: unknown[]) => {
+      calls.push({ method: "proposeCodeChange", args });
+      return { request_id: "selfmod-2", coding_task_id: "self-mod-code-1", branch: "jarvis/self-mod-code-1" };
+    },
     _calls: calls
   } as unknown as SelfModificationService & { _calls: Array<{ method: string; args: unknown[] }> };
 }
 
-describe("A: selfModificationToolDefinitions() - registrert med korrekt transport, ÉN handling i denne sliceen", () => {
-  it("A1: returnerer nøyaktig ÉN handling (propose_personality_change), tool_id='self_modification'", () => {
+describe("A: selfModificationToolDefinitions() - registrert med korrekt transport, BEGGE handlinger", () => {
+  it("A1: returnerer nøyaktig TO handlinger (propose_personality_change, propose_code_change), tool_id='self_modification'", () => {
     const transport = new SelfModificationTransport({} as unknown as SelfModificationService);
     const tools = selfModificationToolDefinitions(transport);
-    expect(tools).toHaveLength(1);
-    expect(tools[0]?.tool_id).toBe("self_modification");
-    expect(tools[0]?.action).toBe("propose_personality_change");
-    expect(tools[0]?.transport).toBe(transport);
+    expect(tools).toHaveLength(2);
+    expect(tools.map((t) => t.action)).toEqual(["propose_personality_change", "propose_code_change"]);
+    expect(tools.every((t) => t.tool_id === "self_modification")).toBe(true);
+    expect(tools.every((t) => t.transport === transport)).toBe(true);
   });
 
   it("A2: klasse B, reversibel - ALDRI klasse D, ALDRI irreversibel (merge/godkjenning er BEVISST ikke chat-kallbar)", () => {
     const tools = selfModificationToolDefinitions(new SelfModificationTransport({} as unknown as SelfModificationService));
-    expect(tools[0]?.capability_class).toBe("B");
-    expect(tools[0]?.reversible).toBe(true);
+    expect(tools.every((t) => t.capability_class === "B")).toBe(true);
+    expect(tools.every((t) => t.reversible === true)).toBe(true);
   });
 });
 
@@ -121,6 +125,41 @@ describe("C: dispatch - propose_personality_change ruter til service med identit
     const ctx = { identity: identity() };
     await expect(transport.invoke("merge_everything", {}, "cred", ctx)).rejects.toThrow(
       "unknown_self_modification_action:merge_everything"
+    );
+  });
+});
+
+describe("D: dispatch - propose_code_change ruter til service med identity + goal", () => {
+  it("D1: identity FRA context, ALDRI fra parametre, gis videre til service.proposeCodeChange", async () => {
+    const service = fakeService();
+    const transport = new SelfModificationTransport(service);
+    const ctx = { identity: identity({ person_id: "person-actor" }) };
+    await transport.invoke("propose_code_change", { goal: "legg til en ny endpoint" }, "cred", ctx);
+    expect(service._calls).toHaveLength(1);
+    expect(service._calls[0]?.method).toBe("proposeCodeChange");
+    expect((service._calls[0]?.args[0] as IdentityContext).person_id).toBe("person-actor");
+    expect(service._calls[0]?.args[1]).toEqual({ goal: "legg til en ny endpoint" });
+  });
+
+  it("D2: resultatet fra service returneres som external_id + data", async () => {
+    const transport = new SelfModificationTransport(fakeService());
+    const ctx = { identity: identity() };
+    const result = await transport.invoke("propose_code_change", { goal: "test" }, "cred", ctx);
+    expect(result.external_id).toBe("selfmod-2");
+    expect((result.data as { coding_task_id: string }).coding_task_id).toBe("self-mod-code-1");
+  });
+
+  it("D3: manglende goal kaster missing_parameter:goal", async () => {
+    const transport = new SelfModificationTransport(fakeService());
+    const ctx = { identity: identity() };
+    await expect(transport.invoke("propose_code_change", {}, "cred", ctx)).rejects.toThrow("missing_parameter:goal");
+  });
+
+  it("D4: tom goal-streng kaster missing_parameter:goal", async () => {
+    const transport = new SelfModificationTransport(fakeService());
+    const ctx = { identity: identity() };
+    await expect(transport.invoke("propose_code_change", { goal: "" }, "cred", ctx)).rejects.toThrow(
+      "missing_parameter:goal"
     );
   });
 });

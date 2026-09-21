@@ -457,6 +457,24 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
   // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
   const memoryRetriever = new MemoryRetriever(pool, new LocalHashEmbedding());
+  // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
+  // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
+  // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
+  // `SelfModificationService.proposeCodeChange()` under - ALDRI to parallelle
+  // `TaskService`-konstruksjoner mot samme pool. Hevet hit (tidligere lenger ned)
+  // FORDI selfModificationService (rett under) nå trenger den ved konstruksjon.
+  const taskService = new TaskService(pool, queue, policy);
+  // D-125/task #123 (D-214): `sendTelegram` hevet hit (tidligere lenger ned, kun
+  // brukt av Telegram-pollerens svarbane/DailyScheduler) - `SelfModificationService`
+  // sin nye owner-varsling (se `notify` under) trenger DEN SAMME, allerede
+  // ToolGateway-styrte send-banen, IKKE en egen, parallell varslingsmekanisme.
+  // Avhenger KUN av `toolGateway`/`ownerIdentity`, begge allerede konstruert over.
+  const sendTelegram = async (text: string) => {
+    for (let i = 0; i < text.length; i += 3900) {
+      await toolGateway.execute({ identity: ownerIdentity as never, tool_id: "telegram", action: "notify",
+        parameters: { message: text.slice(i, i + 3900) } });
+    }
+  };
   // Task #121 (D-214): to-lags selvendrings-modell. SAMME sandbox-valg-
   // mønster som worker-main.ts sin egen "coding"-jobbregistrering
   // (JARVIS_SANDBOX=docker|process) - api-prosessen får sin EGEN
@@ -477,16 +495,38 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     resolveGitToken: () => readSecretProvider.get("JARVIS_GITHUB_TOKEN"),
     githubClient: new ResolvingSelfModificationGithubClient(() => readSecretProvider.get("JARVIS_GITHUB_TOKEN")),
     prGateway: toolGateway,
-    ownerPersonId: ownerControlAuthority.owner_person_id
+    ownerPersonId: ownerControlAuthority.owner_person_id,
+    taskService,
+    notify: sendTelegram
   });
   // Sveiper periodisk (samme uref'et setInterval-mønster som
   // `deviceRegistry.refresh()` over) - CI tar typisk minutter, 60s er en
   // fornuftig balanse mellom rask auto-merge og unødig GitHub-API-trafikk.
+  // Task #123 (D-214): to nye, UAVHENGIG try/catch'ede sveiper ved siden av
+  // den eksisterende zero-review-portvakten - `sweepPendingJobs()` følger opp
+  // `proposeCodeChange()` sine asynkrone kodejobber, `sweepApprovedRequests()`
+  // merger en `/godkjenn`-godkjent `requires_approval`-rad. Én sveips feil
+  // (uansett hvilken) stjeler ALDRI de to andre - SAMME isolasjonsdisiplin
+  // som selve tjenesten allerede har per-rad internt.
   setInterval(
     () =>
       void selfModificationService
         .sweepPendingRequests()
         .catch((err) => console.error(JSON.stringify({ msg: "self_modification_sweep_error", error: (err as Error).message }))),
+    60_000
+  ).unref();
+  setInterval(
+    () =>
+      void selfModificationService
+        .sweepPendingJobs()
+        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_job_sweep_error", error: (err as Error).message }))),
+    60_000
+  ).unref();
+  setInterval(
+    () =>
+      void selfModificationService
+        .sweepApprovedRequests()
+        .catch((err) => console.error(JSON.stringify({ msg: "self_modification_approved_sweep_error", error: (err as Error).message }))),
     60_000
   ).unref();
   for (const tool of firstWaveTools({
@@ -639,11 +679,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     })
   );
 
-  // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av BÅDE
-  // `ConversationEngine` (eksisterende `tasks.create`-goal-only-vei) OG den
-  // nye `/tasks/submit`-HTTP-ruten (full `JobContract`, inkl. `agent_profile:
-  // "coding"`) - ALDRI to parallelle `TaskService`-konstruksjoner mot samme pool.
-  const taskService = new TaskService(pool, queue, policy);
   // D-123 (Q-32 punkt 2): ÉN delt instans av hver identitetsprimitiv.
   // `DeviceService` holder utstedte challenges in-memory, så en egen instans
   // til voice-autoriteten ville aldri gjenkjent en nonce utstedt av
@@ -751,12 +786,6 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasksSource(pool), buildStatusSource(toolGateway),
     emailSource(toolGateway), calendarSource(toolGateway)
   ], pool);
-  const sendTelegram = async (text: string) => {
-    for (let i = 0; i < text.length; i += 3900) {
-      await toolGateway.execute({ identity: ownerIdentity as never, tool_id: "telegram", action: "notify",
-        parameters: { message: text.slice(i, i + 3900) } });
-    }
-  };
   const aiMeshText = async () => {
     const mesh = gateway.meshStatus();
     const lines = mesh.providers

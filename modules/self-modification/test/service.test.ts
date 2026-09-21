@@ -4,10 +4,10 @@ import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import type { IdentityContext, JsonValue, TrustLevel } from "@jarvis/contracts";
+import type { IdentityContext, JobContract, JsonValue, TrustLevel } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
-import type { ExecResult, Sandbox, SandboxRunner } from "@jarvis/tasks";
+import type { ExecResult, Sandbox, SandboxRunner, TaskService, TaskView } from "@jarvis/tasks";
 import type { PrPublishingGateway, ToolExecutionResult } from "@jarvis/tasks";
 import type { CiStatus, SelfModificationGithubClient } from "../src/github-client.ts";
 import { SelfModificationService } from "../src/service.ts";
@@ -169,16 +169,54 @@ class FakeGithubClient implements SelfModificationGithubClient {
   }
 }
 
+/**
+ * Task #123: faket `TaskService` - `proposeCodeChange()`/`sweepPendingJobs()`
+ * går KUN via `submit()`/`get()` (samme smale flate `/tasks/*`-rutene selv
+ * bruker), ALDRI en direkte kø-tilkobling. `jobs` lar en test sette opp
+ * NØYAKTIG den `TaskView` `sweepPendingJobs()` skal se for en gitt
+ * `coding_task_id`, uten å måtte kjøre den ekte, asynkrone kodeagent-
+ * pipelinen (D-96/D-100/D-101) i det hele tatt.
+ */
+class FakeTaskService {
+  submitted: JobContract[] = [];
+  submitOk = true;
+  submitReason = "policy_denied";
+  jobs = new Map<string, TaskView>();
+
+  async submit(_identity: IdentityContext, contractInput: unknown): Promise<{ ok: true; value: { task_id: string } } | { ok: false; reason: string }> {
+    const contract = contractInput as JobContract;
+    this.submitted.push(contract);
+    if (!this.submitOk) return { ok: false, reason: this.submitReason };
+    return { ok: true, value: { task_id: contract.task_id } };
+  }
+
+  async get(_identity: IdentityContext, taskId: string): Promise<{ ok: true; value: TaskView } | { ok: false; reason: string }> {
+    const job = this.jobs.get(taskId);
+    if (!job) return { ok: false, reason: "task_not_found" };
+    return { ok: true, value: job };
+  }
+}
+
 function buildService(opts: {
   sandbox?: FakeSandboxRunner;
   githubClient?: FakeGithubClient;
   prGateway?: FakePrGateway;
   gitToken?: string | null;
-}): { service: SelfModificationService; sandbox: FakeSandboxRunner; githubClient: FakeGithubClient; prGateway: FakePrGateway } {
+  taskService?: FakeTaskService;
+}): {
+  service: SelfModificationService;
+  sandbox: FakeSandboxRunner;
+  githubClient: FakeGithubClient;
+  prGateway: FakePrGateway;
+  taskService: FakeTaskService;
+  notified: string[];
+} {
   const sandbox = opts.sandbox ?? new FakeSandboxRunner();
   const githubClient = opts.githubClient ?? new FakeGithubClient();
   const prGateway = opts.prGateway ?? new FakePrGateway();
   const gitToken = opts.gitToken === undefined ? "fake-git-token" : opts.gitToken;
+  const taskService = opts.taskService ?? new FakeTaskService();
+  const notified: string[] = [];
   const service = new SelfModificationService({
     pool: appPool,
     sandbox,
@@ -187,9 +225,13 @@ function buildService(opts: {
     prGateway,
     ownerPersonId: OWNER,
     repoSlug: "tsworkflow/jarvisbuild",
-    baseBranch: "main"
+    baseBranch: "main",
+    taskService: taskService as unknown as TaskService,
+    notify: async (text: string) => {
+      notified.push(text);
+    }
   });
-  return { service, sandbox, githubClient, prGateway };
+  return { service, sandbox, githubClient, prGateway, taskService, notified };
 }
 
 async function insertRequest(overrides: Partial<{
@@ -479,5 +521,237 @@ describe("F: getRequest", () => {
     expect(found?.request_id).toBe(requestId);
     expect(found?.status).toBe("pending_ci");
     expect(found?.target_paths).toEqual(["config/charlie-personality.json"]);
+  });
+});
+
+describe("G: proposeCodeChange - requires_approval-sporets EKTE produsent", () => {
+  it("G1: en ikke-eier-identitet kastes tilbake, INGEN jobb sendt, INGEN rad", async () => {
+    const { service, taskService } = buildService({});
+    await expect(service.proposeCodeChange(otherIdentity, { goal: "gjør noe" })).rejects.toThrow(
+      "self_modification_owner_only"
+    );
+    expect(taskService.submitted).toHaveLength(0);
+    const rows = await appPool.query("SELECT * FROM self_modification_requests");
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  it("G2: tomt mål kastes FØR noen jobb sendes", async () => {
+    const { service, taskService } = buildService({});
+    await expect(service.proposeCodeChange(ownerIdentity, { goal: "   " })).rejects.toThrow(
+      "self_modification_missing_goal"
+    );
+    expect(taskService.submitted).toHaveLength(0);
+  });
+
+  it("G3: lykkes-banen - riktig JobContract sendt, rad satt inn med status pending_job", async () => {
+    const { service, taskService } = buildService({});
+    const result = await service.proposeCodeChange(ownerIdentity, { goal: "legg til en ny endpoint" });
+
+    expect(result.branch).toBe(`jarvis/${result.coding_task_id}`);
+    expect(taskService.submitted).toHaveLength(1);
+    const contract = taskService.submitted[0]!;
+    expect(contract.task_id).toBe(result.coding_task_id);
+    expect(contract.owner_person_id).toBe(OWNER);
+    expect(contract.tenant_id).toBe(ownerIdentity.tenant_id);
+    expect(contract.agent_profile).toBe("coding");
+    expect(contract.allowed_tools).toEqual(["github"]);
+    expect(contract.goal).toBe("legg til en ny endpoint");
+
+    const row = await appPool.query("SELECT * FROM self_modification_requests WHERE request_id = $1", [result.request_id]);
+    expect(row.rows).toHaveLength(1);
+    expect(row.rows[0].kind).toBe("code_change");
+    expect(row.rows[0].status).toBe("pending_job");
+    expect(row.rows[0].risk).toBe("requires_approval");
+    expect(row.rows[0].coding_task_id).toBe(result.coding_task_id);
+    expect(row.rows[0].coding_tenant_id).toBe(ownerIdentity.tenant_id);
+    expect(row.rows[0].target_paths).toEqual([]);
+  });
+
+  it("G4: jobb-innsending avvist av TaskService -> kastes, INGEN rad", async () => {
+    const taskService = new FakeTaskService();
+    taskService.submitOk = false;
+    taskService.submitReason = "untrusted_with_private_memory_and_network";
+    const { service } = buildService({ taskService });
+    await expect(service.proposeCodeChange(ownerIdentity, { goal: "test" })).rejects.toThrow(
+      "self_modification_job_submit_failed:untrusted_with_private_memory_and_network"
+    );
+    const rows = await appPool.query("SELECT * FROM self_modification_requests");
+    expect(rows.rows).toHaveLength(0);
+  });
+});
+
+describe("H: sweepPendingJobs - følger opp den asynkrone kodejobben", () => {
+  it("H1: jobben kjører fortsatt -> raden forblir pending_job, rapportert i still_pending", async () => {
+    const { service, taskService } = buildService({});
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "running",
+      result: null, cancel_requested: false, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.still_pending).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("pending_job");
+  });
+
+  it("H2: jobben feilet -> rejected, eieren varsles", async () => {
+    const { service, taskService, notified } = buildService({});
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "failed",
+      result: null, cancel_requested: false, attempts: 3, last_error: "agent_crashed"
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.failed).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("rejected");
+    expect(notified.some((t) => t.includes(proposed.request_id) && t.includes("agent_crashed"))).toBe(true);
+  });
+
+  it("H3: jobben ble kansellert -> rejected, eieren varsles", async () => {
+    const { service, taskService, notified } = buildService({});
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "cancelled",
+      result: null, cancel_requested: true, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.failed).toEqual([proposed.request_id]);
+    expect(notified.some((t) => t.includes(proposed.request_id))).toBe(true);
+  });
+
+  it("H4: jobben fullførte UTEN å opprette en PR -> rejected", async () => {
+    const { service, taskService, notified } = buildService({});
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "completed",
+      result: { branch: proposed.branch, pr: { status: "skipped_not_allowed" } },
+      cancel_requested: false, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.failed).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("rejected");
+    expect(notified.some((t) => t.includes(proposed.request_id))).toBe(true);
+  });
+
+  it("H5: PR opprettet, men FAKTISK endrede filer klassifiserer forbidden -> rejected UMIDDELBART, eieren varsles", async () => {
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["modules/policy/src/gateway.ts"];
+    const { service, taskService, notified } = buildService({ githubClient });
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "completed",
+      result: { branch: proposed.branch, pr: { status: "created", pr_number: "77", pr_url: "https://github.com/tsworkflow/jarvisbuild/pull/77" } },
+      cancel_requested: false, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.failed).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status, risk, target_paths FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("rejected");
+    expect(row.rows[0].risk).toBe("forbidden");
+    expect(row.rows[0].target_paths).toEqual(["modules/policy/src/gateway.ts"]);
+    expect(notified.some((t) => t.includes(proposed.request_id))).toBe(true);
+  });
+
+  it("H6: PR opprettet, FAKTISK endrede filer klassifiserer zero_review -> pending_ci, INGEN varsel", async () => {
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["config/charlie-personality.json"];
+    const { service, taskService, notified } = buildService({ githubClient });
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "completed",
+      result: { branch: proposed.branch, pr: { status: "found_existing", pr_number: "78", pr_url: "https://github.com/tsworkflow/jarvisbuild/pull/78" } },
+      cancel_requested: false, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.advanced).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status, risk FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("pending_ci");
+    expect(row.rows[0].risk).toBe("zero_review");
+    expect(notified).toEqual([]);
+  });
+
+  it("H7: PR opprettet, FAKTISK endrede filer klassifiserer requires_approval -> awaiting_approval, eieren varsles med instruksjoner", async () => {
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["apps/api/src/some-feature.ts"];
+    const { service, taskService, notified } = buildService({ githubClient });
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    taskService.jobs.set(proposed.coding_task_id, {
+      task_id: proposed.coding_task_id, goal: "test", status: "completed",
+      result: { branch: proposed.branch, pr: { status: "created", pr_number: "79", pr_url: "https://github.com/tsworkflow/jarvisbuild/pull/79" } },
+      cancel_requested: false, attempts: 1, last_error: null
+    });
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.advanced).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status, risk FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("awaiting_approval");
+    expect(row.rows[0].risk).toBe("requires_approval");
+    const notice = notified.find((t) => t.includes(proposed.request_id));
+    expect(notice).toBeDefined();
+    expect(notice).toContain(`/godkjenn ${proposed.request_id}`);
+    expect(notice).toContain(`/avvis ${proposed.request_id}`);
+  });
+
+  it("H8: TaskService.get() svarer not-ok (f.eks. et forbigående policy-avslag) -> forblir pending_job, isolert", async () => {
+    const { service } = buildService({});
+    const proposed = await service.proposeCodeChange(ownerIdentity, { goal: "test" });
+    // Ingen jobb satt inn i `taskService.jobs` -> get() returnerer ok:false.
+    const outcome = await service.sweepPendingJobs();
+    expect(outcome.still_pending).toEqual([proposed.request_id]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [proposed.request_id]);
+    expect(row.rows[0].status).toBe("pending_job");
+  });
+});
+
+describe("I: sweepApprovedRequests - merge-koblingen for owner-godkjente kodeendringer", () => {
+  it("I1: en approved code_change-rad merges via DEN SAMME attemptMerge() som zero-review-sporet", async () => {
+    const requestId = await insertRequest({
+      risk: "requires_approval",
+      status: "approved",
+      target_paths: ["apps/api/src/some-feature.ts"],
+      branch: "jarvis/self-mod-code-abc",
+      pr_number: "80",
+      pr_url: "https://github.com/tsworkflow/jarvisbuild/pull/80"
+    });
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["apps/api/src/some-feature.ts"];
+    const { service, notified } = buildService({ githubClient });
+    const outcome = await service.sweepApprovedRequests();
+    expect(outcome.merged).toEqual([requestId]);
+    expect(githubClient.calls).toEqual(["ci_status", "changed_files", "head_sha", "merge"]);
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("merged");
+    expect(notified.some((t) => t.includes(requestId))).toBe(true);
+  });
+
+  it("I2: diffen har endret seg siden godkjenning (klassifiserer nå forbidden) -> ci_failed, ALDRI merge, eieren varsles", async () => {
+    const requestId = await insertRequest({
+      risk: "requires_approval",
+      status: "approved",
+      target_paths: ["apps/api/src/some-feature.ts"],
+      branch: "jarvis/self-mod-code-abc",
+      pr_number: "81",
+      pr_url: "https://github.com/tsworkflow/jarvisbuild/pull/81"
+    });
+    const githubClient = new FakeGithubClient();
+    githubClient.changedFiles = ["modules/policy/src/gateway.ts"];
+    const { service, notified } = buildService({ githubClient });
+    const outcome = await service.sweepApprovedRequests();
+    expect(outcome.failed).toEqual([requestId]);
+    expect(githubClient.calls).not.toContain("merge");
+    const row = await appPool.query("SELECT status FROM self_modification_requests WHERE request_id=$1", [requestId]);
+    expect(row.rows[0].status).toBe("ci_failed");
+    expect(notified.some((t) => t.includes(requestId))).toBe(true);
+  });
+
+  it("I3: en zero_review-rad i status pending_ci (ikke approved) røres ikke av sweepApprovedRequests", async () => {
+    const requestId = await insertRequest({ status: "pending_ci" });
+    const { service, githubClient } = buildService({});
+    const outcome = await service.sweepApprovedRequests();
+    expect(outcome.merged).not.toContain(requestId);
+    expect(outcome.failed).not.toContain(requestId);
+    expect(outcome.still_pending).not.toContain(requestId);
+    expect(githubClient.calls).toEqual([]);
   });
 });
