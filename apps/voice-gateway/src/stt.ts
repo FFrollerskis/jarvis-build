@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
 
 /**
@@ -139,8 +140,38 @@ export class OpenAiStt implements SttAdapter {
 }
 
 /**
- * Lokal STT via whisper.cpp-binær (JARVIS_WHISPER_BIN + JARVIS_WHISPER_MODEL).
- * Lokal kandidat (D-23/D-10) - UVERIFISERT til binær/modell er installert.
+ * Task #125 (D-217): lokal STT via whisper.cpp-binæren i `JARVIS_WHISPER_BIN`
+ * (full sti til den installerte kjørbare filen - navnet varierer mellom
+ * whisper.cpp-versjoner, f.eks. `main`/`whisper-cli`, derfor ALDRI hardkodet
+ * her) + modellfilen i `JARVIS_WHISPER_MODEL` (`-m`-flagget whisper.cpp
+ * krever). SAMME "batch, ingen ekte partials"-disiplin som `OpenAiStt` over -
+ * whisper.cpp sin vanlige CLI transkriberer HELE lydfilen på én gang, den har
+ * INGEN inkrementell strømmemodus for dette buffer-og-transkriber-mønsteret
+ * (VAD-en avgjør allerede turgrensene FØR STT-en i det hele tatt kalles) -
+ * `onPartial()` er derfor bevisst en no-op, EKSAKT samme, allerede etablerte
+ * ærlighetsdisiplin som `OpenAiStt` sin egen kommentar ("Batch-API gir ikke
+ * partials").
+ *
+ * §22-INVARIANT (`test/d30-foundation.test.ts` "Personvern: rå lyd
+ * persisteres aldri"): denne filen forbys STATISK å inneholde NOEN
+ * disk-skrive-API fra `node:fs` (fil-skriving/vedlegging/skrivestrøm-
+ * konstruktøren) - rå lyd skal ALDRI treffe disk, ikke engang midlertidig.
+ * whisper.cpp sin vanlige CLI krever normalt en fil via `-f`, men `end()`
+ * under sender i stedet WAV-bytene DIREKTE på prosessens STDIN og kaller
+ * den med `-f -` (Unix-konvensjonen for "les fra stdin") - lyden forlater
+ * derfor prosessminnet KUN via et pipe til den lokale binæren, ALDRI via
+ * filsystemet.
+ *
+ * UNVERIFIED (D-41-disiplin, eksplisitt disclosed, ikke stille antatt): BÅDE
+ * de eksakte CLI-flaggene (`-m`/`-f`/`-nt`/`-l`) OG antagelsen om at
+ * whisper.cpp faktisk støtter `-f -` for stdin, er whisper.cpp sin
+ * LANGVARIG DOKUMENTERTE, mest utbredte konvensjon, men ALDRI kjørt mot en
+ * ekte installert binær i denne økten (Q-32 punkt 3 - Tobias har ikke
+ * installert whisper.cpp ennå) - dersom den installerte binæren IKKE støtter
+ * `-f -`, feiler `end()` synlig (`local_whisper_process_failed`), ALDRI en
+ * stille disk-skriving som fallback. Selve subprosess-/stdin-/
+ * feilhåndteringskoden ER testet, mot en faket binær (se
+ * `test/local-whisper-stt.test.ts`).
  */
 export class LocalWhisperStt implements SttAdapter {
   readonly name = "local-whisper";
@@ -151,14 +182,63 @@ export class LocalWhisperStt implements SttAdapter {
     processor_row_declared: true,
     processor_terms_status: "NOT_APPLICABLE_LOCAL"
   };
-  constructor(private readonly binPath: string | undefined = process.env["JARVIS_WHISPER_BIN"]) {}
+  constructor(
+    private readonly binPath: string | undefined = process.env["JARVIS_WHISPER_BIN"],
+    private readonly modelPath: string | undefined = process.env["JARVIS_WHISPER_MODEL"],
+    /** PCM-samplerate for wav-innpakking - SAMME 16 kHz-forventning som resten av piloten (`pcm16ToWav`/`docs/VOICE_BENCHMARK.md`). */
+    private readonly sampleRate: number = 16000,
+    /** whisper.cpp sitt `-l`-språkflagg - default norsk, SAMME som `OpenAiStt`. */
+    private readonly language: string = process.env["JARVIS_WHISPER_LANG"] ?? "no"
+  ) {}
 
+  /** Modellen er like påkrevd som binæren - whisper.cpp kan strukturelt ikke kjøre uten `-m`. */
   available(): boolean {
-    return Boolean(this.binPath);
+    return Boolean(this.binPath) && Boolean(this.modelPath);
   }
 
   startStream(): SttStream {
-    throw new Error("local_whisper_not_implemented_in_pilot: kjøres via benchmark-harnesset");
+    if (!this.binPath || !this.modelPath) {
+      throw new Error("local_whisper_not_configured");
+    }
+    const { binPath, modelPath, sampleRate, language } = this;
+    const chunks: Buffer[] = [];
+    return {
+      pushAudio(frame: Buffer): void {
+        chunks.push(frame);
+      },
+      async end(): Promise<string> {
+        const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
+        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-l", language], {
+          stdio: ["pipe", "pipe", "pipe"]
+        });
+        let stdout = "";
+        let stderr = "";
+        proc.stdout.on("data", (d: Buffer) => {
+          stdout += d.toString("utf8");
+        });
+        proc.stderr.on("data", (d: Buffer) => {
+          stderr += d.toString("utf8");
+        });
+        const exitCode = new Promise<number | null>((resolve, reject) => {
+          proc.once("error", reject);
+          proc.once("close", resolve);
+        });
+        proc.stdin.end(wav);
+        let code: number | null;
+        try {
+          code = await exitCode;
+        } catch (err) {
+          throw new Error(`local_whisper_spawn_failed:${(err as Error).message.slice(0, 200)}`);
+        }
+        if (code !== 0) {
+          throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${stderr.slice(0, 200)}`);
+        }
+        return stdout.trim();
+      },
+      onPartial(): void {
+        // whisper.cpp sin batch-CLI gir ingen inkrementelle partials - se klassekommentaren.
+      }
+    };
   }
 }
 
