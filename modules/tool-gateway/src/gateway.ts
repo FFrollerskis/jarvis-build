@@ -642,6 +642,16 @@ export class ToolGateway {
     });
   }
 
+  /**
+   * D-219: hvis selve audit-skrivingen her feiler (DB-blipp/RLS-/kontekst-
+   * problem), skal ALDRI-avslaget likevel returneres til kalleren som normalt
+   * (fail-safe - en policy-avslag skal aldri henge fast på en audit-skrivefeil)
+   * - MEN et slikt tilfelle er da et avslag som forsvinner sporløst fra
+   * revisjonssporet den samme regelen (CLAUDE.md §6, "Policy Gateway aldri
+   * hoppes over") faktisk skal bevises av. Samme "isolasjon beholdes, feilen
+   * gjøres OBSERVERBAR"-mønster som PR #79 sin fiks for
+   * `location`/`health`-retensjonssveipene (`sweep.ts` i begge pakker).
+   */
   private async deny(
     request: { identity: IdentityContext; tool_id: string; action: string },
     reason: string
@@ -651,7 +661,15 @@ export class ToolGateway {
         type: "tool.denied", decision: "DENY", reason,
         tool_id: request.tool_id, action: request.action
       })
-    ).catch(() => undefined);
+    ).catch((err) => {
+      console.error(JSON.stringify({
+        msg: "tool_denied_audit_write_failed",
+        tool_id: request.tool_id,
+        action: request.action,
+        reason,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    });
     return { ok: false, reason };
   }
 

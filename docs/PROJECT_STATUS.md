@@ -1,8 +1,9 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-21 (branch `claude/fase-scheduler-error-logging` basert på `origin/main` HEAD
-`27686f4`). **Task #126-128 (D-218) implementert, kvalitetsporter kjørt lokalt - klar for
-commit/push/draft-PR (se under).**
+`27686f4`). **Task #126-128 (D-218) OG en påfølgende D-219-fiks (samme bug-klasse, funnet i en ny
+gap-søk-runde) begge implementert på SAMME branch/PR #130 - kvalitetsporter kjørt lokalt, klar for
+push/PR-oppdatering (se under).**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -25,10 +26,14 @@ grense bekreftet igjen for tale (D-212, Q-32 punkt 1) og for selvendring (D-208�
 full ugjennomgått selvpatching TO GANGER etter eksplisitt risikogjennomgang - den vedtatte retningen
 var et to-lags-kompromiss, ikke en full fullmakt.
 
-**LÆRDOM (D-218, 2026-09-21):** "lokalt kodbart arbeid oppbrukt" er IKKE en selv-uttalt konklusjon som
-skal stå uimotsagt - Tobias sitt "Fortsatt å bygg" etter nøyaktig en slik påstand utløste et fersk,
-kode-nivå gap-søk (samme metodikk som D-195/D-196) som fant en reell, ubestridt bug (se under). Fremover:
-en "oppbrukt"-konklusjon skal alltid kunne motbevises av et friskt søk før den aksepteres som endelig.
+**LÆRDOM (D-218/D-219, 2026-09-21):** "lokalt kodbart arbeid oppbrukt" er IKKE en selv-uttalt
+konklusjon som skal stå uimotsagt - Tobias sitt "Fortsatt å bygg"/"fortsett å bygg" (TO separate
+ganger samme dag) etter nøyaktig en slik påstand utløste to runder av et fersk, kode-nivå gap-søk
+(samme metodikk som D-195/D-196) som begge fant en reell, ubestridt bug av SAMME anti-mønster-klasse
+(`.catch(() => undefined)` som svelger feil sporløst). D-219 sin egen konklusjon: et grep etter selve
+ANTI-MØNSTERET på tvers av HELE kodebasen (ikke bare innenfor ett allerede identifisert underdomene)
+er den pålitelige metoden - en "oppbrukt"-konklusjon skal alltid kunne motbevises av et friskt,
+bredt søk før den aksepteres som endelig.
 
 ## Hvor `main` står nå
 
@@ -40,25 +45,30 @@ en "oppbrukt"-konklusjon skal alltid kunne motbevises av et friskt søk før den
   koblingen (D-215, PR #125), UA-11 executive dashboard mutasjons-delen (D-216, PR #126), lokal
   whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128) - se
   git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
-- **Task #126-128 (D-218) - IKKE ENNÅ PUSHET/PR-et, på branch `claude/fase-scheduler-error-logging`:**
-  `DailyScheduler.start()` (`modules/tool-gateway/src/scheduler.ts`) hadde `.catch(() => undefined)`
-  som ytterste feilhåndtering - EKSAKT samme bug-klasse D-180/D-196 allerede rettet andre steder, men
-  ALDRI anvendt her. `DailyScheduler` er DEN DELTE mekanismen bak ALLE 17 schedulerte jobbene i
-  `apps/api/src/main.ts` - kun 3 av 17 (daily-brief/business-weekly-brief/situation-sweep) logget sitt
-  EGET, snevrere tilfelle, ALDRI et uventet unntak fra selve `claimToday()`/`markCompleted()`/
-  `deliver()`. Verifisert REELT (ikke hypotetisk): `business-open-loop-sweep` sin
-  `listBusinessTenantIds()`-kall ligger UTENFOR egen try/catch - en kastet feil der forsvant tidligere
-  helt sporløst. Fikset I DEN DELTE MEKANISMEN (aldri per-kaller-patching av 17 steder): `start()` sin
-  `.catch()` logger nå strukturert (`daily_scheduler_tick_failed` + job_name/instance_id/error), SAMME
-  mønster som D-180/D-196. Ny testfil `modules/tool-gateway/test/scheduler.test.ts` (3 tester: deliver()
-  kaster→logget+ikke markert fullført; claimToday() sitt eget DB-feil→samme sikkerhetsnett; vellykket
-  levering→ingen støy, markCompleted() faktisk kjørt). Kandidater vurdert og AVVIST i samme søk: UA-9
-  vision-klassifiserer (DPIA-governance-port + ingen reell bruker ennå), UA-10 helse-/lokasjonsbro
-  (ingen eksisterende anomalideteksjon å bygge broen mot - ville vært å oppfinne terskler fra intet).
-  `pnpm -w typecheck`/`npx eslint .` rene. Full `modules/tool-gateway`-suite re-kjørt: 293/293 grønne
-  (utenom de 12 filene, inkl. selve `scheduler.test.ts`, som traff det kjente `initdb: Permission
-  denied`-sandkasse-gapet - uendret, ikke en regresjon). **Gjenstår FØR PR:** secret-scan, commit, push,
-  draft-PR, overvåk CI, merge under D-192 når grønt/uten åpne funn.
+- **D-218+D-219 - IKKE ENNÅ PUSHET/PR-OPPDATERT, på branch `claude/fase-scheduler-error-logging`
+  (PR #130 allerede åpnet for D-218, D-219 legges til som andre commit på SAMME PR - begge er
+  uavhengige forekomster av samme anti-mønster, funnet i to påfølgende søk samme dag, ingen grunn til
+  separate PR-er):**
+  - **D-218:** `DailyScheduler.start()` (`modules/tool-gateway/src/scheduler.ts`) hadde
+    `.catch(() => undefined)` som ytterste feilhåndtering - DEN DELTE mekanismen bak ALLE 17
+    schedulerte jobbene i `apps/api/src/main.ts`, kun 3 av 17 logget sitt EGET, snevrere tilfelle.
+    Fikset i selve mekanismen: `daily_scheduler_tick_failed` strukturert logget. Ny testfil
+    `modules/tool-gateway/test/scheduler.test.ts` (3 tester).
+  - **D-219 (denne søk-runden):** `ToolGateway.deny()` (`modules/tool-gateway/src/gateway.ts`) hadde
+    SAMME `.catch(() => undefined)` rundt sin egen audit-skriving - kalt fra ALLE 12+ avslags-stedene
+    i `execute()` (revisjonssporet CLAUDE.md §6 "Policy Gateway aldri hoppes over" skal bevises av).
+    Fikset: `tool_denied_audit_write_failed` strukturert logget, avslaget returneres fortsatt normalt
+    (fail-safe uendret). Ny testfil `modules/tool-gateway/test/gateway-deny-audit-failure.test.ts`
+    (1 test, HELT DB-uavhengig - kjører rent i denne sandboxen, i motsetning til D-218 sin test).
+    Kandidat vurdert og registrert for EGEN fremtidig slice (ikke løst her): `modules/erasure/src/
+    erasure-service.ts` sin `failErasureRequest(...).catch(() => undefined)` - reell, men smalere
+    (ett kallsted). Andre `.catch()`-treff (git-auth chmod, Telegram/GitHub-kø-vakter) vurdert og
+    bevisst IKKE flagget - lav-innsats/ikke-sikkerhetsrelevant.
+  - `pnpm -w typecheck`/`npx eslint .` rene (begge runder). Full `modules/tool-gateway`-suite
+    re-kjørt etter D-219: 294/294 grønne (opp fra 293 - D-219s test er selv DB-uavhengig og talte med),
+    103 forventet skip, SAMME 12 kjente `initdb: Permission denied`-sandkasse-filer som D-218, uendret.
+  - **Gjenstår FØR merge:** secret-scan, commit D-219, push, oppdater PR #130 sin tittel/beskrivelse
+    til å dekke begge fiksene, overvåk CI, merge under D-192 når grønt/uten åpne funn.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -85,11 +95,13 @@ problemer.
 
 ## Neste oppgave
 
-1. **Fullfør task #126-128 (D-218):** secret-scan, commit, push
-   `claude/fase-scheduler-error-logging`, åpne draft-PR, abonner på PR-aktivitet, overvåk CI, merge
-   under D-192 når grønt/uten åpne funn.
-2. Etter dette: et NYTT, fersk kode-nivå gap-søk bør kjøres FØR man igjen konkluderer "oppbrukt" (se
-   D-218-lærdommen over) - ikke stol blindt på forrige økts "Neste oppgave"-liste under punkt 3 alene.
+1. **Fullfør D-218+D-219 (PR #130):** secret-scan, commit D-219, push, oppdater PR-tittel/-beskrivelse
+   til å dekke begge fiksene, overvåk CI, merge under D-192 når grønt/uten åpne funn.
+2. Etter dette: et NYTT, fersk, BREDT kode-nivå gap-søk (grep etter selve anti-mønsteret på tvers av
+   HELE kodebasen, se D-219-lærdommen over) bør kjøres FØR man igjen konkluderer "oppbrukt" - ikke stol
+   blindt på forrige økts "Neste oppgave"-liste under punkt 3 alene. `modules/erasure/src/
+   erasure-service.ts` sin `failErasureRequest()`-svelging (se D-219) er en konkret, allerede
+   identifisert kandidat for en slik neste runde.
 3. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
    (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon,
