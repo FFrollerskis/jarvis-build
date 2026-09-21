@@ -51,7 +51,18 @@ export class DailyScheduler {
         await deliver();
         await this.markCompleted();
       }
-    })().catch(() => undefined), intervalMs);
+    })().catch((err) => {
+      // Uten denne logges INGENTING her - deliver()/claimToday()/markCompleted() sitt eget,
+      // mer spesifikke feilhaandteringskode (hvis noen) faar likevel kjoere foerst, dette er
+      // bare det siste sikkerhetsnettet slik at INGEN av de 17 schedulerte jobbene i
+      // apps/api/src/main.ts kan feile helt sporlost.
+      console.error(JSON.stringify({
+        msg: "daily_scheduler_tick_failed",
+        job_name: this.jobName,
+        instance_id: this.instanceId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }), intervalMs);
     timer.unref();
     return timer;
   }

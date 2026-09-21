@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import EmbeddedPostgres from "embedded-postgres";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ApprovalPayload, IdentityContext, JsonValue, SignedApproval } from "@jarvis/contracts";
 import { approvalSigningBytes } from "@jarvis/contracts";
 import { createPool, runMigrations } from "@jarvis/core";
@@ -436,6 +436,90 @@ describe("Q-20 ErasureService", () => {
     expect(unrelatedFound.some((r) => r.content.includes(unrelatedSentinel))).toBe(true);
     const targetFound = await retriever.search(identityFor(TENANT_A, "personal"), { query: targetSentinel, spaces: ["personal"] });
     expect(targetFound.some((r) => r.content.includes(targetSentinel))).toBe(false);
+  });
+
+  it("R (D-220): hvis SELVE feil-statusen ikke kan persisteres, logges det strukturert - avslaget returneres FORTSATT normalt", async () => {
+    // Samme monkeypatch-mønster som test N (SELV-restaurerende, ekte appPool under),
+    // men rigget til å feile på TO forskjellige `connect()`-kall etter hverandre:
+    // 1) hovedtransaksjonen (tvunget til å kaste midt i slettingen, akkurat som N)
+    // 2) `failErasureRequest()` sin EGEN, separate `pool.connect()` i catch-blokken -
+    // DEN som denne testen faktisk beviser nå blir strukturert logget i stedet for
+    // å forsvinne sporløst.
+    const sentinel = `SentinelFailStatusPersistFailure${randomUUID().replace(/-/g, "")}`;
+    await plantMemoryItem(TENANT_A, "personal", sentinel);
+    await plantDerivedMemoryRows(TENANT_A, "personal", sentinel);
+
+    const requestId = `req-${randomUUID()}`;
+    let connectCount = 0;
+    const faultyPool = {
+      connect: async () => {
+        connectCount += 1;
+        if (connectCount === 2) {
+          throw new Error("simulated_fail_status_persist_connect_failure");
+        }
+        const client = await appPool.connect();
+        const originalQuery = client.query.bind(client);
+        // @ts-expect-error - test-only monkeypatch av query for å simulere en midt-i-transaksjonen-feil
+        client.query = (...args: unknown[]) => {
+          const sql = args[0];
+          if (typeof sql === "string" && sql.startsWith("DELETE FROM summaries")) {
+            client.query = originalQuery;
+            throw new Error("simulated_mid_transaction_failure");
+          }
+          return originalQuery(...(args as Parameters<typeof originalQuery>));
+        };
+        return client;
+      }
+    } as unknown as pg.Pool;
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const service = new ErasureService(faultyPool, sovereignPolicy, embedding);
+      const result = await service.executeErasure({
+        scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+        requestId,
+        identity: identityFor(TENANT_A, "personal")
+      });
+      // Fail-safe: avslaget kommer likevel gjennom til kalleren, uendret av D-220.
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("simulated_mid_transaction_failure");
+
+      const persistFailureLog = errorSpy.mock.calls
+        .map(([line]) => line as string)
+        .find((line) => line.includes("erasure_request_fail_status_persist_failed"));
+      expect(persistFailureLog).toBeDefined();
+      const parsed = JSON.parse(persistFailureLog as string) as {
+        msg: string; request_id: string; tenant_id: string; scope_type: string; original_error: string; persist_error: string;
+      };
+      expect(parsed.msg).toBe("erasure_request_fail_status_persist_failed");
+      expect(parsed.request_id).toBe(requestId);
+      expect(parsed.tenant_id).toBe(TENANT_A);
+      expect(parsed.scope_type).toBe("memory_space");
+      expect(parsed.original_error).toContain("simulated_mid_transaction_failure");
+      expect(parsed.persist_error).toContain("simulated_fail_status_persist_connect_failure");
+
+      // Den reelle konsekvensen: `insertPendingErasureRequest()` skjer i SAMME
+      // transaksjon som selve sletteforsøket (samme `client`, samme BEGIN/COMMIT) -
+      // når hovedtransaksjonen ruller tilbake (test N sitt bevis), ruller den
+      // "pending"-innsettingen tilbake MED den. Feiler `failErasureRequest()` sin
+      // EGEN, separate innsetting av `status='failed'` DA også, finnes det derfor
+      // INGEN rad i det hele tatt for denne forespørselen - ikke en stille
+      // "pending for alltid" (som ville krevd at pending-innsettingen overlevde en
+      // rollback, noe den strukturelt ikke kan i denne transaksjonsmodellen), men et
+      // sletteforsøk med ALDRI noe spor i revisjonsloggen - like alvorlig, annen form.
+      const ledgerRow = await adminPool.query("SELECT status FROM erasure_requests WHERE request_id=$1", [requestId]);
+      expect(ledgerRow.rows).toHaveLength(0);
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    // Rydd opp for etterfølgende tester i samme tenant/space (den ekte, urørte dataen fra N/R er fortsatt der).
+    const cleanup = new ErasureService(appPool, sovereignPolicy, embedding);
+    await cleanup.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+      requestId: `req-cleanup-${randomUUID()}`,
+      identity: identityFor(TENANT_A, "personal")
+    });
   });
 
   describe("§7/§8: D-klasse policy-integrasjon (ingen ny separat auth-modell)", () => {
