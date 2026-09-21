@@ -7,7 +7,7 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ApprovalPayload, IdentityContext, JsonValue, SignedApproval } from "@jarvis/contracts";
 import { approvalSigningBytes } from "@jarvis/contracts";
-import { createPool, runMigrations } from "@jarvis/core";
+import { createPool, failErasureRequest, runMigrations } from "@jarvis/core";
 import { startLeasedEmbeddedPostgres } from "@jarvis/core/testing";
 import { LocalHashEmbedding, withMemoryTransaction } from "@jarvis/memory";
 import { FilesystemKnowledgeSource } from "@jarvis/knowledge";
@@ -514,6 +514,203 @@ describe("Q-20 ErasureService", () => {
     }
 
     // Rydd opp for etterfølgende tester i samme tenant/space (den ekte, urørte dataen fra N/R er fortsatt der).
+    const cleanup = new ErasureService(appPool, sovereignPolicy, embedding);
+    await cleanup.executeErasure({
+      scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+      requestId: `req-cleanup-${randomUUID()}`,
+      identity: identityFor(TENANT_A, "personal")
+    });
+  });
+
+  /**
+   * D-221: en fersk gap-søk-runde (etter D-218/D-219/D-220, SAMME anti-mønster-klasse)
+   * fant TRE gjenværende `.catch(() => undefined)`-søsken i SAMME to filer D-220 nettopp
+   * rørte ved - alle på ROLLBACK-stien (dobbelt-feil: hovedoperasjonen feiler OG selve
+   * opprydningen feiler også):
+   *
+   *   - `failErasureRequest()` (`modules/core/src/services/erasure-ledger.ts`) sin YTRE
+   *     `catch { ... }` var VERRE enn de andre: INGEN fanget feil-variabel i det hele
+   *     tatt, INGEN logging, INGEN rethrow. Konsekvens: ETHVERT feil i selve INSERT/
+   *     COMMIT-en (i motsetning til et `pool.connect()`-feil, som skjer FØR denne
+   *     try-blokken og DERFOR propagerer til D-220 sin egen `.catch()` ved kallestedet)
+   *     forsvant HELT sporløst - D-220 sin logging ble ALDRI nådd for dette tilfellet.
+   *   - `ErasureService.previewErasure()`/`executeErasure()` (`modules/erasure/src/
+   *     erasure-service.ts`) sine ROLLBACK-kall i catch-blokken svelget SIN EGEN feil
+   *     stille (den OPPRINNELIGE feilen er fortsatt synlig - den kastes/logges allerede -
+   *     men en ROLLBACK-feil OVENPÅ den opprinnelige feilen var usynlig).
+   *
+   * Testene S/T/U under beviser alle tre, med SAMME selv-restaurerende monkeypatch-
+   * disiplin som test N/R allerede etablerte (ekte `appPool` under, aldri en helt fake
+   * DB) - og er bevisst forsiktige med DB-transaksjons-resonnement etter D-220 sin egen
+   * CI-lærdom (en antakelse om DB-atferd som ikke er sporet nøyaktig gjennom faktisk
+   * kildekode kan være feil selv når fiksen ser åpenbart riktig ut).
+   */
+  it("S (D-221): failErasureRequest() sin EGEN INSERT/COMMIT-feil (ikke bare connect()) logges nå strukturert - funksjonen kaster FORTSATT ikke (kontrakt uendret)", async () => {
+    const faultyPool = {
+      connect: async () => {
+        const client = await appPool.connect();
+        const originalQuery = client.query.bind(client);
+        // @ts-expect-error - test-only monkeypatch: BEGIN/set_config passerer, selve INSERT-en feiler
+        client.query = (...args: unknown[]) => {
+          const sql = args[0];
+          if (typeof sql === "string" && sql.startsWith("INSERT INTO erasure_requests")) {
+            client.query = originalQuery; // restaurer FØR kast - ROLLBACK rett etter er upåvirket
+            throw new Error("simulated_fail_status_insert_failure");
+          }
+          return originalQuery(...(args as Parameters<typeof originalQuery>));
+        };
+        return client;
+      }
+    } as unknown as pg.Pool;
+
+    const requestId = `req-${randomUUID()}`;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        failErasureRequest(faultyPool, TENANT_A, requestId, "memory_space", { memory_space_id: "personal" }, "original erasure error")
+      ).resolves.toBeUndefined(); // kontrakten "kaster aldri" er UENDRET av denne fiksen
+
+      const line = errorSpy.mock.calls
+        .map(([l]) => l as string)
+        .find((l) => l.includes("erasure_fail_status_persist_write_failed"));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string) as { msg: string; request_id: string; tenant_id: string; error: string };
+      expect(parsed.msg).toBe("erasure_fail_status_persist_write_failed");
+      expect(parsed.request_id).toBe(requestId);
+      expect(parsed.tenant_id).toBe(TENANT_A);
+      expect(parsed.error).toContain("simulated_fail_status_insert_failure");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("T (D-221): previewErasure() sin ROLLBACK-feil (OVENPÅ en allerede kastet feil) logges strukturert - den OPPRINNELIGE feilen kastes fortsatt til kalleren", async () => {
+    const faultyPool = {
+      connect: async () => {
+        const client = await appPool.connect();
+        const originalQuery = client.query.bind(client);
+        let queryCount = 0;
+        // @ts-expect-error - test-only monkeypatch: BEGIN passerer, DERETTER feiler alt frem til ROLLBACK, som OGSÅ feiler
+        client.query = (...args: unknown[]) => {
+          queryCount += 1;
+          if (queryCount === 1) return originalQuery(...(args as Parameters<typeof originalQuery>)); // BEGIN
+          const sql = args[0];
+          if (typeof sql === "string" && sql === "ROLLBACK") {
+            client.query = originalQuery; // restaurer FØR avvisning
+            // VIKTIG, TO separate presisjoner:
+            // (1) `.reject()`, ALDRI `throw` her - kildekoden kjeder `.catch()` DIREKTE på
+            //     dette kallet (`client.query("ROLLBACK").catch(...)`) - en synkron `throw`
+            //     ville aldri nådd den `.catch()`-en, ekte `pg`-klienter kaster ALDRI
+            //     synkront, de avviser alltid det returnerte løftet.
+            // (2) Selve ROLLBACK-en må FORTSATT faktisk kjøres mot ekte Postgres FØR vi
+            //     avviser løftet til kalleren - ellers leveres denne EKTE, pooled klienten
+            //     tilbake til `appPool` via `client.release()` med en ÅPEN, ALDRI avsluttet
+            //     transaksjon fortsatt hengende, som ville korrumpert HVILKEN SOM HELST
+            //     senere, urelatert test som tilfeldigvis gjenbruker nøyaktig denne
+            //     tilkoblingen fra poolen. Vi simulerer altså KUN at KALLEREN ser en feil -
+            //     den underliggende DB-tilstanden ryddes ekte opp uansett.
+            return originalQuery("ROLLBACK").then(
+              () => Promise.reject(new Error("simulated_preview_rollback_failure")),
+              () => Promise.reject(new Error("simulated_preview_rollback_failure"))
+            );
+          }
+          throw new Error("simulated_preview_count_failure");
+        };
+        return client;
+      }
+    } as unknown as pg.Pool;
+
+    const service = new ErasureService(faultyPool, sovereignPolicy, embedding);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        service.previewErasure({ type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" })
+      ).rejects.toThrow("simulated_preview_count_failure"); // den OPPRINNELIGE feilen, ikke rollback-feilen
+
+      const line = errorSpy.mock.calls
+        .map(([l]) => l as string)
+        .find((l) => l.includes("erasure_preview_rollback_failed"));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string) as { msg: string; error: string };
+      expect(parsed.msg).toBe("erasure_preview_rollback_failed");
+      expect(parsed.error).toContain("simulated_preview_rollback_failure");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("U (D-221): executeErasure() sin ROLLBACK-feil (OVENPÅ en midt-i-transaksjonen-feil, SAMME mekanisme som test N) logges strukturert - avslaget returneres fortsatt normalt", async () => {
+    const sentinel = `SentinelExecuteRollbackFailure${randomUUID().replace(/-/g, "")}`;
+    await plantMemoryItem(TENANT_A, "personal", sentinel);
+    await plantDerivedMemoryRows(TENANT_A, "personal", sentinel);
+
+    const requestId = `req-${randomUUID()}`;
+    let connectCount = 0;
+    const faultyPool = {
+      connect: async () => {
+        connectCount += 1;
+        const client = await appPool.connect();
+        if (connectCount !== 1) return client; // KUN hovedtransaksjonen (1. connect()) rigges - failErasureRequest() sitt EGET, separate connect() forblir upåvirket og persisterer normalt
+        const originalQuery = client.query.bind(client);
+        let midTransactionThrown = false;
+        // @ts-expect-error - test-only monkeypatch: SAMME "DELETE FROM summaries"-trigger som test N, deretter feiler ROLLBACK også
+        client.query = (...args: unknown[]) => {
+          const sql = args[0];
+          if (!midTransactionThrown && typeof sql === "string" && sql.startsWith("DELETE FROM summaries")) {
+            midTransactionThrown = true;
+            throw new Error("simulated_mid_transaction_failure");
+          }
+          if (midTransactionThrown && typeof sql === "string" && sql === "ROLLBACK") {
+            client.query = originalQuery; // restaurer FØR avvisning
+            // Samme TO presisjoner som test T: `.reject()` (ALDRI `throw`, kildekoden
+            // kjeder `.catch()` DIREKTE på dette kallet) OG en EKTE ROLLBACK mot Postgres
+            // FØRST (ellers leveres denne pooled klienten tilbake med en hengende åpen
+            // transaksjon, som ville korrumpert senere, urelaterte tester).
+            return originalQuery("ROLLBACK").then(
+              () => Promise.reject(new Error("simulated_execute_rollback_failure")),
+              () => Promise.reject(new Error("simulated_execute_rollback_failure"))
+            );
+          }
+          return originalQuery(...(args as Parameters<typeof originalQuery>));
+        };
+        return client;
+      }
+    } as unknown as pg.Pool;
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const service = new ErasureService(faultyPool, sovereignPolicy, embedding);
+      const result = await service.executeErasure({
+        scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },
+        requestId,
+        identity: identityFor(TENANT_A, "personal")
+      });
+      // Fail-safe: avslaget kommer likevel gjennom til kalleren, uendret av D-221.
+      expect(result.status).toBe("failed");
+      expect(result.error).toContain("simulated_mid_transaction_failure");
+
+      const line = errorSpy.mock.calls
+        .map(([l]) => l as string)
+        .find((l) => l.includes("erasure_execute_rollback_failed"));
+      expect(line).toBeDefined();
+      const parsed = JSON.parse(line as string) as { msg: string; request_id: string; tenant_id: string; error: string };
+      expect(parsed.msg).toBe("erasure_execute_rollback_failed");
+      expect(parsed.request_id).toBe(requestId);
+      expect(parsed.tenant_id).toBe(TENANT_A);
+      expect(parsed.error).toContain("simulated_execute_rollback_failure");
+
+      // failErasureRequest() sitt EGET, separate connect() var UPÅVIRKET (kun 1. connect()
+      // ble rigget over) - persisteringen av status='failed' skal derfor ha LYKTES normalt.
+      const ledgerRow = await adminPool.query<{ status: string; error: string | null }>(
+        "SELECT status, error FROM erasure_requests WHERE request_id = $1", [requestId]
+      );
+      expect(ledgerRow.rows).toHaveLength(1);
+      expect(ledgerRow.rows[0]?.status).toBe("failed");
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    // Rydd opp for etterfølgende tester i samme tenant/space.
     const cleanup = new ErasureService(appPool, sovereignPolicy, embedding);
     await cleanup.executeErasure({
       scope: { type: "memory_space", tenant_id: TENANT_A, memory_space_id: "personal" },

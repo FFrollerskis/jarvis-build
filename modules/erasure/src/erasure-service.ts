@@ -73,7 +73,12 @@ export class ErasureService {
       const blockers = Object.values(plan.recordCounts).every((n) => n === 0) ? ["scope_matches_nothing"] : [];
       return { scope, affected: plan.recordCounts, blockers };
     } catch (err) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error(JSON.stringify({
+          msg: "erasure_preview_rollback_failed",
+          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)
+        }));
+      });
       throw err;
     } finally {
       client.release();
@@ -137,7 +142,14 @@ export class ErasureService {
       await client.query("COMMIT");
       return { request_id: requestId, status: "completed", record_counts: plan.recordCounts, idempotent_replay: false };
     } catch (err) {
-      await client.query("ROLLBACK").catch(() => undefined);
+      await client.query("ROLLBACK").catch((rollbackErr) => {
+        console.error(JSON.stringify({
+          msg: "erasure_execute_rollback_failed",
+          request_id: requestId,
+          tenant_id: scope.tenant_id,
+          error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)
+        }));
+      });
       const message = (err as Error).message.slice(0, 200);
       // D-220: hvis DENNE persisteringen selv feiler, skal kalleren FORTSATT få et
       // ærlig {status:"failed"} i minnet (uendret av denne fiksen) - MEN `erasure_
