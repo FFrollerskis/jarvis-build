@@ -1,7 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-21 (fra fersk `origin/main` HEAD `2d9f61f` = trygg selvendring, to-lags-modellen
-(D-214, PR #123) MERGET). **Ingen ny slice startet ennå - neste opp er task #123 (se under).**
+**Oppdatert:** 2026-09-21 (branch `claude/fase-self-mod-code-producer` basert på `origin/main` HEAD
+`34d669e`). **Task #123 (D-215) implementert, kvalitetsporter kjørt lokalt - klar for
+commit/push/draft-PR (se under).**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -44,9 +45,26 @@ var et to-lags-kompromiss, ikke en full fullmakt.
   gamle inline `FallbackSecretProvider`-formen `main.ts` sin nye navngitte `readSecretProvider`-
   konstant erstattet) - alle fire commits på PR #123, CI grønt ved merge (5690/5690 tester, alle tre
   jobber build-test/windows-git-auth/gitleaks).
-- **Ny task #123 opprettet (IKKE startet):** produsent av EKTE `requires_approval`-selvendrings-
-  forespørsler for vilkårlige kodeendringer (gjenbruker `createCodingHandler`/`ClaudeCodeAgent`) +
-  Telegram-godkjenning-gated merge-kobling for den veien - se D-214 sitt "bevisst utsatt"-avsnitt.
+- **Task #123 (D-215) - IKKE ENNÅ PUSHET/PR-et, på branch `claude/fase-self-mod-code-producer`:**
+  den bevisst utsatte resten av D-214s to-lags-modell. `proposeCodeChange()` sender en full
+  `JobContract` (`agent_profile:"coding"`) via `TaskService.submit()` til den EKSISTERENDE
+  `createCodingHandler`-pipelinen (D-96/D-100/D-101), uendret - rad settes inn `status:'pending_job'`
+  (ny, migrasjon 061). `sweepPendingJobs()` følger opp jobben via `taskService.get()`, klassifiserer
+  PR-ens FAKTISKE endrede filer når jobben fullfører, ruter til `pending_ci` (gjenbruker eksisterende
+  zero-review-sveip), `awaiting_approval` (eier-varsel med `/godkjenn`/`/avvis`), eller `rejected`
+  (forbidden, umiddelbart). `sweepApprovedRequests()` lukker den siste hullet D-214 bevisst lot stå
+  åpen: en `/godkjenn`-godkjent rad merges nå via DEN SAMME `attemptMerge()` som zero-review-sporet
+  (risikosjekken generalisert fra hardkodet `"zero_review"` til `request.risk` - dekker begge spor,
+  ALDRI `github.merge_pr`). Nytt chat-verktøy `self_modification.propose_code_change` (klasse B).
+  Migrasjon 061 utvider status-CHECK med `pending_job` + `coding_task_id`/`coding_tenant_id`-kolonner.
+  `apps/api/src/main.ts`: `taskService`/`sendTelegram` hevet tidligere i filen, konstruktørkallet
+  fikk `taskService`/`notify`, og to nye uavhengig try/catch'ede periodiske sveiper lagt til.
+  34 nye tester (`modules/self-modification/test/{service,transport}.test.ts`: 11 DB-uavhengige
+  transport-tester verifisert lokalt, 23 DB-avhengige `service.test.ts`-tester mot ekte embedded
+  Postgres - IKKE kjørbare lokalt i denne økten, kjent `initdb: Permission denied`-begrensning,
+  verifiseres av CI). `pnpm -w typecheck` (32 pakker) og `npx eslint .` (hele workspace) rene lokalt.
+  **Gjenstår FØR PR:** secret-scan (gitleaks), commit, push, draft-PR, overvåk CI (spesielt
+  `service.test.ts` sine 23 DB-avhengige tester som kun kan bevises av CI), merge under D-192.
 
 ## Blokkeringer
 
@@ -63,10 +81,9 @@ i D-214-sliceen over.
 
 ## Neste oppgave
 
-1. **Task #123:** produsent av EKTE `requires_approval`-selvendringsforespørsler for vilkårlige
-   kodeendringer (gjenbruker `createCodingHandler`/`ClaudeCodeAgent`-pipelinen) + Telegram-
-   godkjenning-gated merge-kobling for den veien - trenger sin egen design-gjennomgang først (se
-   D-214 sitt "bevisst utsatt"-avsnitt og task #123 sin fulle beskrivelse).
+1. **Fullfør task #123 (D-215):** secret-scan, commit, push `claude/fase-self-mod-code-producer`,
+   åpne draft-PR, abonner på PR-aktivitet, overvåk CI (spesielt de 23 DB-avhengige
+   `service.test.ts`-testene som kun kan bevises der), merge under D-192 når grønt/uten åpne funn.
 2. Når det kodbare er reelt oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
    (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon).
