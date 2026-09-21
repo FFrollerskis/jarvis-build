@@ -361,3 +361,117 @@ describe("F: /owner-controls/connector-credentials begrenser SEG SELV til NØYAK
     expect(executeCalls).toHaveLength(0);
   });
 });
+
+/**
+ * Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7):
+ * `/executive/mutate` - eierens mutasjonsrute for de 12
+ * `executive.*`-mutasjonshandlingene. SAMME `stubGateway`/server-oppsett
+ * som over - beviser KUN ruten selv (allowlist/grant-avslag/
+ * videreformidling/tool_id), ikke `ExecutiveTransport`-pipelinen (dekket
+ * DB-uavhengig i `modules/executive/test/service-transport.test.ts`).
+ */
+describe("G: /executive/mutate med gyldig grant videreformidler til executive.* (tool_id='executive')", () => {
+  it("pause_domain: 200, tool_id='executive', identiteten er den LØSTE (ikke kroppens)", async () => {
+    nextResult = { ok: true, data: { domain: "finance", paused: true }, output_trust: "internal", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", {
+      grant_token: grant, action: "pause_domain", parameters: { domain: "finance", reason: "test" }
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body["ok"]).toBe(true);
+    expect(res.body["data"]).toEqual({ domain: "finance", paused: true });
+    expect(executeCalls).toHaveLength(1);
+    expect(executeCalls[0]?.tool_id).toBe("executive");
+    expect(executeCalls[0]?.action).toBe("pause_domain");
+    expect(executeCalls[0]?.identity.tenant_id).toBe(TENANT_A);
+    expect(executeCalls[0]?.identity.person_id).toBe(OWNER);
+  });
+
+  it("activate_kill_switch: 200, parameters videreformidlet uendret (reason)", async () => {
+    nextResult = { ok: true, data: { active: true }, output_trust: "internal", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", {
+      grant_token: grant, action: "activate_kill_switch", parameters: { reason: "test-nødstopp" }
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(executeCalls[0]?.action).toBe("activate_kill_switch");
+    expect(executeCalls[0]?.parameters).toEqual({ reason: "test-nødstopp" });
+  });
+
+  it("gateway.execute() avslag (ok:false) videreformidles som 403 tool_denied, ikke svelget", async () => {
+    nextResult = { ok: false, reason: "kill_switch_active" };
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "pause_domain", parameters: { domain: "finance", reason: "test" } });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("tool_denied");
+    expect(res.body["reason"]).toBe("kill_switch_active");
+  });
+
+  it("manglende 'parameters' faller tilbake til et tomt objekt (samme mønster som connector-credentials-ruten)", async () => {
+    nextResult = { ok: true, data: null, output_trust: "internal", deduplicated: false };
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "deactivate_kill_switch" });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(executeCalls[0]?.parameters).toEqual({});
+  });
+});
+
+describe("H: /executive/mutate avviser et ugyldig/manglende grant FØR gateway.execute() kalles", () => {
+  it("uten grant_token: 400 malformed_request/grant_malformed, gateway.execute() ALDRI kalt", async () => {
+    const res = await post("/executive/mutate", { action: "pause_domain", parameters: { domain: "finance", reason: "test" } });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("grant_malformed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("oppdiktet/utløpt grant_token: 403 identity_denied, gateway.execute() ALDRI kalt", async () => {
+    const res = await post("/executive/mutate", {
+      grant_token: "grant-som-ikke-finnes", action: "pause_domain", parameters: { domain: "finance", reason: "test" }
+    });
+    expect(res.status).toBe(403);
+    expect(res.body["error"]).toBe("identity_denied");
+    expect(executeCalls).toHaveLength(0);
+  });
+});
+
+describe("I: /executive/mutate begrenser SEG SELV til de 12 mutasjonshandlingene - lese-handlinger er UNÅDBARE herfra", () => {
+  it("action='get_attention_queue' (en lese-handling, IKKE i denne rutens allowlist): 400 action_not_allowed, gateway.execute() ALDRI kalt", async () => {
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "get_attention_queue" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("action='get_control_surface_status': 400 action_not_allowed, gateway.execute() ALDRI kalt", async () => {
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "get_control_surface_status" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("ukjent handling ('does_not_exist'): 400 action_not_allowed", async () => {
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "does_not_exist" });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("action_not_allowed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("manglende 'action': 400 malformed_request/grant_malformed", async () => {
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("grant_malformed");
+    expect(executeCalls).toHaveLength(0);
+  });
+
+  it("ukjent kroppsfelt (f.eks. 'tenant_id') avvises fail-closed: 400 malformed_request/grant_malformed", async () => {
+    const grant = await validGrant();
+    const res = await post("/executive/mutate", { grant_token: grant, action: "pause_domain", tenant_id: TENANT_A });
+    expect(res.status).toBe(400);
+    expect(res.body["reason"]).toBe("grant_malformed");
+    expect(executeCalls).toHaveLength(0);
+  });
+});
