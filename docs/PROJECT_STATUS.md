@@ -1,9 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-21 (branch `claude/fase-scheduler-error-logging` basert på `origin/main` HEAD
-`27686f4`). **D-218+D-219+D-220 pushet til PR #130. CI (`build-test`) fanget en reell feil i D-220 sin
-EGEN testantakelse (ikke i selve fiksen) - rettet lokalt, klar for en fjerde commit på SAMME branch
-(se under). PR fortsatt åpen, ikke merget.**
+**Oppdatert:** 2026-09-21 (branch `claude/status-update-130-merge` basert på `origin/main` HEAD
+`19cd6b7`). **PR #130 (D-218/D-219/D-220) MERGET. Alle tre "silent error swallowing"-fikser i drift.
+Ingen kjent gjenstående lokalt kodbart arbeid akkurat nå - se "Neste oppgave".**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -31,62 +30,35 @@ konklusjon som skal stå uimotsagt - Tobias sitt "Fortsatt å bygg"/"fortsett å
 ganger samme dag) etter nøyaktig en slik påstand utløste tre runder som alle fant en reell, ubestridt
 bug av SAMME anti-mønster-klasse (`.catch(() => undefined)` som svelger feil sporløst). Praktisk
 konklusjon for neste runde: sjekk FØRST om forrige runde selv la igjen en navngitt, uløst kandidat FØR
-et helt nytt, bredt søk startes - billigere å hente fra egen logg. **Ny lærdom, D-220s egen CI-runde:**
-et antatt DB-konsekvens-resonnement ("raden blir værende på pending") kan være FEIL selv når selve
-fiksen (loggingen) er riktig - når testsuiten ikke kan kjøres lokalt (embedded-Postgres-sandkasse-
-gapet), er CI IKKE bare en formalitet, den er den FØRSTE faktiske utførelsen av testens egne
-assertions. En påstand om DB-atferd i en decision-log-post skal derfor ALDRI regnes bekreftet før CI
-faktisk har kjørt testen som beviser den - selv når koden ser åpenbart riktig ut.
+et helt nytt, bredt søk startes - billigere å hente fra egen logg. **D-220s egen CI-runde, ny lærdom:**
+en påstand om DB-atferd i en decision-log-post skal ALDRI regnes bekreftet før CI faktisk har kjørt
+testen som beviser den, selv når koden ser åpenbart riktig ut - `build-test` var den FØRSTE faktiske
+kjøringen av test R i denne sandbox-begrensede økten, og fant en reell feil i testens EGEN antakelse
+(rettet i en fjerde commit, samme PR, FØR merge - se D-220 i DECISIONS_AND_ASSUMPTIONS.md).
 
 ## Hvor `main` står nå
 
-- **PR #106-#129 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+- **PR #106-#130 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
   connector credential-skriving + utvidet live_test (D-213, PR #122), trygg selvendring - to-lags-
   modellen (D-214, PR #123), selvendring - EKTE requires_approval-produsent for vilkårlig kode + merge-
   koblingen (D-215, PR #125), UA-11 executive dashboard mutasjons-delen (D-216, PR #126), lokal
-  whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128) - se
-  git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
-
-## PR #130 (D-218→D-220) - samlet "silent error swallowing"-fikserunde, branch `claude/fase-scheduler-error-logging`
-
-Tre uavhengige forekomster av SAMME anti-mønster (`.catch(() => undefined)`), funnet i tre påfølgende
-"fortsett å bygg"-runder samme dag, bundlet i ÉN PR (samme klasse, samme øktdag, ingen grunn til tre
-separate PR-er). Samme etablerte remedie i alle tre (SAMME mønster som D-180/D-196 allerede brukte
-andre steder): isolasjon/fail-safe-oppførsel UENDRET, men feilen strukturert `console.error`-logget.
-
-- **D-218 (pushet, PR #130 commit 1, CI grønt):** `DailyScheduler.start()` (`modules/tool-gateway/src/
-  scheduler.ts`) - DEN DELTE mekanismen bak ALLE 17 schedulerte jobbene i `apps/api/src/main.ts`, kun
-  3 av 17 logget sitt EGET, snevrere tilfelle. `daily_scheduler_tick_failed` strukturert logget. Ny
-  testfil `scheduler.test.ts` (3 tester, embedded-Postgres).
-- **D-219 (pushet, PR #130 commit 2, CI grønt):** `ToolGateway.deny()` (`modules/tool-gateway/src/
-  gateway.ts`) - kalt fra ALLE 12+ avslags-stedene i `execute()` (revisjonssporet CLAUDE.md §6 skal
-  bevises av). `tool_denied_audit_write_failed` strukturert logget, avslaget returneres fortsatt
-  normalt. Ny testfil `gateway-deny-audit-failure.test.ts` (1 test, HELT DB-uavhengig).
-- **D-220 (pushet PR #130 commit 3 - CI FANT EN FEIL I TESTEN, rettet lokalt, klar for commit 4):**
-  `ErasureService.executeErasure()` sin `failErasureRequest(...)`-persistering (`modules/erasure/src/
-  erasure-service.ts`) - smalere (ETT kallsted), men GDPR-sletteforespørselens EGEN revisjonslogg.
-  `erasure_request_fail_status_persist_failed` strukturert logget (begge feilene: opprinnelig
-  sletteforsøk-feil OG persist-feil) - FIKSEN SELV var riktig fra første commit. **CI-funn:** min egen
-  testantakelse ("raden blir værende på `pending` for alltid") var FEIL - `insertPendingErasureRequest()`
-  kjører i SAMME transaksjon som selve sletteforsøket, så når den transaksjonen ruller tilbake (samme
-  mekanisme som eksisterende test N), ruller `pending`-innsettingen tilbake MED den. Feiler BEGGE
-  innsettinger, finnes det derfor INGEN rad i det hele tatt - ikke en misvisende "pending"-rad. Testens
-  assertion (`ledgerRow.rows[0].status`) kastet `TypeError: Cannot read properties of undefined` fordi
-  raden faktisk ikke fantes. Rettet: testen asserter nå `ledgerRow.rows).toHaveLength(0)`, kode-
-  kommentaren i `erasure-service.ts` og D-220 sin egen decision-log-tekst er begge korrigert til å
-  beskrive den FAKTISKE konsekvensen (ingen rad, ikke en gjenværende `pending`-rad). Se D-220 sitt eget
-  "CI-FANGET FUNN"-avsnitt i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-- `pnpm -w typecheck`/`npx eslint .` rene (alle fire runder, inkl. CI-rettelsen). `modules/tool-gateway`-
-  suite re-kjørt etter D-219: 294/294 grønne. `modules/erasure`-suite: KAN IKKE kjøres i denne sandbox-
-  økten i det hele tatt (HELE suiten krever embedded Postgres, SAMME kjente `initdb: Permission denied`-
-  begrensning) - CI var derfor den FØRSTE faktiske kjøringen av test R, og fant nettopp derfor den reelle
-  feilen i testens egen antakelse (se lærdom over).
-- **Andre kandidater vurdert og bevisst IKKE flagget (git-auth `chmod()`, Telegram/GitHub-kø-vakter):**
-  lav-innsats/ikke-sikkerhetsrelevant, bekreftet fortsatt lav prioritet i D-220-runden også.
-- **Gjenstår FØR merge:** commit CI-rettelsen (kode-kommentar + test + decision-log), push, overvåk CI
-  på nytt, merge under D-192 når grønt/uten åpne funn.
+  whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128), tre uavhengige "silent
+  error swallowing"-fikser (D-218 scheduler/D-219 policy-avslag-audit/D-220 erasure-fail-status, PR
+  #130) - se git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
+- **D-218→D-220 (PR #130) - kort oppsummert (full begrunnelse i DECISIONS_AND_ASSUMPTIONS.md):** tre
+  uavhengige forekomster av SAMME anti-mønster (`.catch(() => undefined)`), funnet i tre påfølgende
+  "fortsett å bygg"-runder samme dag, bundlet i ÉN PR. `DailyScheduler.start()` (D-218, DEN DELTE
+  mekanismen bak ALLE 17 schedulerte jobbene i `apps/api/src/main.ts`), `ToolGateway.deny()` (D-219,
+  ALLE 12+ avslags-stedene i `execute()`), `ErasureService`s `failErasureRequest()`-persistering (D-220,
+  GDPR-sletteforespørselens EGEN revisjonslogg) - alle tre fikk SAMME etablerte remedie (strukturert
+  `console.error`-logging, isolasjon/fail-safe-oppførsel uendret, samme mønster som D-180/D-196/PR #79).
+  D-220 sin FØRSTE testversjon hadde en feil DB-atferds-antakelse ("raden blir værende på pending") -
+  CI fanget dette (`TypeError` fordi ingen rad fantes), rettet FØR merge til å korrekt beskrive at
+  BEGGE samtidige innsettinger (hovedtransaksjon OG fail-status-persist) ruller tilbake sammen, altså
+  INGEN rad i det hele tatt, ikke en misvisende `pending`-rad. CI grønt på alle 6 jobber (siste head),
+  ingen åpne review-tråder, merget under D-192 med to-forelder-merge (`19cd6b7`).
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -113,12 +85,12 @@ problemer.
 
 ## Neste oppgave
 
-1. **Fullfør D-218→D-220 (PR #130):** commit CI-rettelsen, push, overvåk CI på nytt, merge under D-192
-   når grønt/uten åpne funn.
-2. Etter dette: sjekk FØRST om denne runden selv la igjen en navngitt, uløst kandidat (se D-220s egen
-   "vurdert og bevisst IKKE flagget"-liste over) FØR et helt nytt, bredt kode-nivå gap-søk startes -
-   ikke stol blindt på forrige økts "Neste oppgave"-liste under punkt 3 alene.
-3. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+1. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter selve `.catch(() => undefined)`-anti-mønsteret
+   og lignende på tvers av HELE kodebasen, se D-218/D-219-lærdommen) hvis bedt om å fortsette å bygge -
+   D-219 sin egen "vurdert og bevisst IKKE flagget"-liste (git-auth `chmod()`, Telegram/GitHub-kø-
+   vakter) er allerede sjekket og bekreftet lav prioritet to ganger, ingen kjent uløst kandidat
+   gjenstår fra DENNE anti-mønster-klassen akkurat nå.
+2. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
    (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon,
    nå kun host-handling gjenstående, se D-217). PR #97 (W1 watchdog) venter uansett på Tobias/arkitekt.
