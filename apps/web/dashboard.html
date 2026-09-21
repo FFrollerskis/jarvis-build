@@ -48,11 +48,40 @@
   #enroll input { flex:1; background:#0d1117; color:#e6edf3; border:1px solid #30363d; border-radius:8px;
                   padding:10px; font-size:15px; }
   #enroll button { background:#238636; color:#fff; border:0; border-radius:8px; padding:0 18px; cursor:pointer; }
+  .action-row { display:flex; gap:6px; margin-top:8px; align-items:center; flex-wrap:wrap; }
+  .action-row input { flex:1; min-width:120px; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
+                       border-radius:6px; padding:6px 8px; font-size:13px; }
+  .btn { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px; padding:6px 10px;
+         font-size:12px; cursor:pointer; }
+  .btn:disabled { opacity:0.5; cursor:default; }
+  .btn.danger { background:#5c1e1e; color:#ffb4b4; border-color:#7a2a2a; }
+  .btn.small { padding:3px 8px; font-size:11px; margin-left:6px; }
+  .action-result { font-size:12px; margin-top:6px; color:#8b949e; }
+  /* Task #124: bekreftelsesmodal - class-D-handlinger krever at eieren
+     skriver EKSAKT handlingsnavnet FØR "Bekreft" aktiveres (ekstra friksjon
+     for de mest alvorlige bryterne), class B/C viser samme modal uten det
+     kravet. Se openConfirmModal()/ACTION_META. */
+  #confirm-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10;
+                      align-items:center; justify-content:center; padding:16px; }
+  #confirm-overlay.open { display:flex; }
+  #confirm-box { background:#161b22; border:1px solid #30363d; border-radius:10px; padding:18px; max-width:440px;
+                 width:100%; }
+  #confirm-box .confirm-title { font-weight:600; font-size:15px; margin-bottom:8px; }
+  #confirm-box .confirm-class { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px;
+                                 margin-bottom:10px; }
+  #confirm-box .confirm-class.class-d { background:#5c1e1e; color:#ffb4b4; }
+  #confirm-box .confirm-class.class-c { background:#3d2c00; color:#ffd580; }
+  #confirm-box .confirm-class.class-b { background:#1f2d3d; color:#9cc4ff; }
+  #confirm-box .confirm-desc { font-size:13px; color:#e6edf3; margin-bottom:6px; }
+  #confirm-box .confirm-rollback { font-size:12px; color:#8b949e; margin-bottom:12px; }
+  #confirm-box input { width:100%; box-sizing:border-box; background:#0d1117; color:#e6edf3;
+                        border:1px solid #30363d; border-radius:6px; padding:8px; font-size:13px; margin-bottom:12px; }
+  #confirm-box .confirm-buttons { display:flex; gap:8px; justify-content:flex-end; }
 </style>
 </head>
 <body>
 <header>
-  <span>Jarvis <small>executive-dashboard · attention/kontroll: lese-kun (UA-11) · integrasjoner: lese + eier-mutasjon (D-213)</small></span>
+  <span>Jarvis <small>executive-dashboard · attention/kontroll: lese + eier-mutasjon (UA-11, task #124) · integrasjoner: lese + eier-mutasjon (D-213)</small></span>
   <button id="refresh">Oppdater</button>
 </header>
 <main>
@@ -65,6 +94,52 @@
     <div id="control-surface"><p class="empty">Laster …</p></div>
   </section>
   <section>
+    <!-- Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7):
+         EGEN rute (/executive/mutate), EGET hardkodet allowlist server-siden
+         (EXECUTIVE_MUTATE_ACTIONS) - ALDRI via /executive/query. Hvert
+         mutasjonsskjema går via mutateExecutive(), som ALLTID viser
+         bekreftelsesdialogen (openConfirmModal()) FØR selve POST-en - se
+         der for klasse-D-preflight-kravet (typed confirmation). -->
+    <h2>Kontrollhandlinger</h2>
+    <div id="critical-controls"></div>
+    <div class="card">
+      <div class="title">Pause situasjonsdomene</div>
+      <div class="action-row">
+        <input id="pause-domain-name" placeholder="domene (f.eks. finance)" autocomplete="off">
+        <input id="pause-domain-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+        <button class="btn" id="pause-domain-btn">Pause</button>
+      </div>
+      <div class="action-result" id="pause-domain-result"></div>
+    </div>
+    <div class="card">
+      <div class="title">Frys connector</div>
+      <div class="action-row">
+        <input id="freeze-connector-id" placeholder="connector_id (f.eks. github)" autocomplete="off">
+        <input id="freeze-connector-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+        <button class="btn" id="freeze-connector-btn">Frys</button>
+      </div>
+      <div class="action-result" id="freeze-connector-result"></div>
+    </div>
+    <div class="card">
+      <div class="title">Tilbakekall credential</div>
+      <div class="action-row">
+        <input id="revoke-credential-ref" placeholder="credential_ref" autocomplete="off">
+        <input id="revoke-credential-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+        <button class="btn danger" id="revoke-credential-btn">Tilbakekall</button>
+      </div>
+      <div class="action-result" id="revoke-credential-result"></div>
+    </div>
+    <div class="card">
+      <div class="title">Tilbakekall enhet</div>
+      <div class="action-row">
+        <input id="revoke-device-id" placeholder="device_id" autocomplete="off">
+        <input id="revoke-device-reason" placeholder="begrunnelse (påkrevd)" autocomplete="off">
+        <button class="btn danger" id="revoke-device-btn">Tilbakekall enhet</button>
+      </div>
+      <div class="action-result" id="revoke-device-result"></div>
+    </div>
+  </section>
+  <section>
     <!-- Task #119 (D-211): status-lese-delen. Task #122 (D-213): "lim inn
          nøkkel"/"test connector"-mutasjonen - EGEN rute
          (/owner-controls/connector-credentials), ALDRI via /executive/query
@@ -73,6 +148,19 @@
     <div id="connectors"><p class="empty">Laster …</p></div>
   </section>
 </main>
+<div id="confirm-overlay">
+  <div id="confirm-box">
+    <div class="confirm-title" id="confirm-title"></div>
+    <span class="confirm-class" id="confirm-class"></span>
+    <div class="confirm-desc" id="confirm-desc"></div>
+    <div class="confirm-rollback" id="confirm-rollback"></div>
+    <input id="confirm-typed" style="display:none" placeholder="Skriv handlingsnavnet for å bekrefte" autocomplete="off">
+    <div class="confirm-buttons">
+      <button class="btn" id="confirm-cancel">Avbryt</button>
+      <button class="btn danger" id="confirm-ok" disabled>Bekreft</button>
+    </div>
+  </div>
+</div>
 <div id="status"></div>
 <div id="enroll">
   <p>Denne enheten er ikke innrullert ennå. Kjør på maskinen som eier Jarvis:
@@ -239,13 +327,135 @@
     return body.data;
   }
 
+  /**
+   * Task #124 (D-199 §7, UA-11 mutasjons-delen): EGEN HTTP-rute
+   * (`/executive/mutate`), EGET hardkodet allowlist server-siden
+   * (`EXECUTIVE_MUTATE_ACTIONS`) - ALDRI en utvidelse av `/executive/query`.
+   * SAMME kroppsform ({grant_token, action, parameters}) som
+   * `mutateOwnerControls()`. Kalleren har ALLTID allerede vist
+   * `openConfirmModal()` og fått et positivt svar FØR denne kalles - denne
+   * funksjonen selv utfører ALDRI handlingen uten at kalleren gjorde det.
+   */
+  async function mutateExecutive(action, parameters) {
+    const active = await ensureGrant();
+    const res = await fetch("/executive/mutate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_token: active.grant_token, action, parameters: parameters || {} })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) throw new Error(action + ": " + (body.reason || body.error || res.status));
+    return body.data;
+  }
+
+  /**
+   * Speiler `executiveToolDefinitions()` (modules/executive/src/transport.ts)
+   * sine `description`/`capability_class`/`rollback_procedure`-felt for de
+   * 12 mutasjonshandlingene - REN visningsmetadata, ALDRI en egen
+   * autoritets-/risikoklassifisering (den eneste sanne kilden er fortsatt
+   * serverens `EXECUTIVE_MUTATE_ACTIONS`-allowlist + `ToolGateway`s egen
+   * klassehåndhevelse - denne tabellen kan i verste fall vise en FEIL tekst,
+   * ALDRI omgå en ekte sjekk). class "D" krever typed confirmation i
+   * `openConfirmModal()` - "ekstra friksjon for de mest alvorlige
+   * bryterne" (D-199 §7).
+   */
+  const ACTION_META = {
+    pause_domain: { label: "Pause situasjonsdomene", class: "C", desc: "Pause ETT situasjonsdomene umiddelbart (gjennomslag til situations.pause_domain)", rollback: "Gjenoppta via resume_domain" },
+    resume_domain: { label: "Gjenoppta situasjonsdomene", class: "C", desc: "Opphev pause for ETT situasjonsdomene (gjennomslag til situations.unpause_domain)", rollback: "Pause på nytt via pause_domain" },
+    resolve_situation: { label: "Løs attention-item", class: "B", desc: "Løs et attention-item manuelt (gjennomslag til situations.resolve)", rollback: "En ny deteksjon gjenåpner situasjonen automatisk" },
+    activate_kill_switch: { label: "Aktiver kill switch", class: "D", desc: "Stans HELE systemet umiddelbart (gjennomslag til owner_controls.activate_kill_switch)", rollback: "Opphev via deactivate_kill_switch" },
+    deactivate_kill_switch: { label: "Opphev kill switch", class: "D", desc: "Opphev kill switch og gjenoppta normal drift (gjennomslag til owner_controls.deactivate_kill_switch)", rollback: "Aktiver på nytt via activate_kill_switch" },
+    freeze_connector: { label: "Frys connector", class: "C", desc: "Frys ÉN navngitt connector/tool_id umiddelbart (gjennomslag til owner_controls.freeze_connector)", rollback: "Opphev via unfreeze_connector" },
+    unfreeze_connector: { label: "Opphev frys av connector", class: "C", desc: "Opphev frys for ÉN navngitt connector/tool_id (gjennomslag til owner_controls.unfreeze_connector)", rollback: "Frys på nytt via freeze_connector" },
+    revoke_credential: { label: "Tilbakekall credential", class: "C", desc: "Tilbakekall ÉN navngitt credential_ref umiddelbart (gjennomslag til owner_controls.revoke_credential)", rollback: "Gjenopprett via restore_credential" },
+    restore_credential: { label: "Gjenopprett credential", class: "C", desc: "Gjenopprett ÉN navngitt, tidligere tilbakekalt credential_ref (gjennomslag til owner_controls.restore_credential)", rollback: "Tilbakekall på nytt via revoke_credential" },
+    revoke_device: { label: "Tilbakekall enhet", class: "C", desc: "Tilbakekall ALLE utestående session_grants for ÉN navngitt enhet umiddelbart (gjennomslag til owner_controls.revoke_device)", rollback: "Enheten må re-rulleres inn (enrollment) for ny tilgang - ingen restore_device" },
+    enable_finance_kill_switch: { label: "Aktiver finans-nødbryter", class: "D", desc: "Stans ALLE spend-muliggjørende finans-/kort-handlinger for tenanten umiddelbart (gjennomslag til finance.enable_kill_switch)", rollback: "Opphev via disable_finance_kill_switch" },
+    disable_finance_kill_switch: { label: "Opphev finans-nødbryter", class: "D", desc: "Opphev finans-nødbryteren (gjennomslag til finance.disable_kill_switch)", rollback: "Aktiver på nytt via enable_finance_kill_switch" }
+  };
+
+  const confirmOverlay = document.getElementById("confirm-overlay");
+  const confirmTitle = document.getElementById("confirm-title");
+  const confirmClass = document.getElementById("confirm-class");
+  const confirmDesc = document.getElementById("confirm-desc");
+  const confirmRollback = document.getElementById("confirm-rollback");
+  const confirmTyped = document.getElementById("confirm-typed");
+  const confirmCancelBtn = document.getElementById("confirm-cancel");
+  const confirmOkBtn = document.getElementById("confirm-ok");
+
+  /**
+   * Task #124 (D-199 §7): "bekreftelsesdialoger, klasse D-preflight-visning
+   * for eieren". Viser handlingens NAVN/KLASSE/BESKRIVELSE/ROLLBACK (fra
+   * `ACTION_META`) FØR noe sendes - class "D" (kill switch-familien) krever
+   * i tillegg at eieren skriver EKSAKT handlingsnavnet inn for å aktivere
+   * "Bekreft"-knappen (ekstra friksjon for den mest alvorlige bryteren, se
+   * `ACTION_META` sitt filhode). Returnerer et Promise<boolean> - `true`
+   * KUN ved et eksplisitt "Bekreft"-klikk, `false` ved "Avbryt" ELLER at
+   * overlayet lukkes uten svar.
+   */
+  function openConfirmModal(action) {
+    const meta = ACTION_META[action] || { label: action, class: "C", desc: action, rollback: "ukjent" };
+    confirmTitle.textContent = meta.label;
+    confirmClass.textContent = "klasse " + meta.class;
+    confirmClass.className = "confirm-class class-" + meta.class.toLowerCase();
+    confirmDesc.textContent = meta.desc;
+    confirmRollback.textContent = "Reversering: " + meta.rollback;
+    const requiresTyped = meta.class === "D";
+    confirmTyped.style.display = requiresTyped ? "block" : "none";
+    confirmTyped.value = "";
+    confirmOkBtn.disabled = requiresTyped;
+    confirmOverlay.classList.add("open");
+    return new Promise((resolve) => {
+      const onType = () => { confirmOkBtn.disabled = confirmTyped.value.trim() !== action; };
+      const cleanup = () => {
+        confirmOverlay.classList.remove("open");
+        confirmOkBtn.removeEventListener("click", onOk);
+        confirmCancelBtn.removeEventListener("click", onCancel);
+        confirmTyped.removeEventListener("input", onType);
+      };
+      const onOk = () => { cleanup(); resolve(true); };
+      const onCancel = () => { cleanup(); resolve(false); };
+      if (requiresTyped) confirmTyped.addEventListener("input", onType);
+      confirmOkBtn.addEventListener("click", onOk);
+      confirmCancelBtn.addEventListener("click", onCancel);
+    });
+  }
+
+  /**
+   * Felles hjelper for HVER av de 12 mutasjonsknappene: vis
+   * `openConfirmModal()`, avbryt stille ved "Avbryt", ellers `mutateExecutive()`
+   * + `loadAll()` for å reflektere den nye tilstanden umiddelbart, med
+   * feil/status skrevet til det oppgitte resultat-elementet (ALDRI kun
+   * det globale `statusEl` - eieren skal se resultatet ved SELVE knappen).
+   */
+  async function runExecutiveMutation(action, parameters, resultEl, triggerBtn) {
+    const confirmed = await openConfirmModal(action);
+    if (!confirmed) return;
+    if (triggerBtn) triggerBtn.disabled = true;
+    if (resultEl) resultEl.textContent = "Utfører …";
+    try {
+      await mutateExecutive(action, parameters);
+      if (resultEl) resultEl.textContent = "OK.";
+      await loadAll();
+    } catch (err) {
+      if (resultEl) resultEl.textContent = "Feil: " + err.message;
+    } finally {
+      if (triggerBtn) triggerBtn.disabled = false;
+    }
+  }
+
   function escapeHtml(text) {
     const div = document.createElement("div");
     div.textContent = String(text);
     return div.innerHTML;
   }
 
-  /** `get_attention_queue` sin `data` ER selve listen (AttentionItem[]) - ingen wrapper-objekt. */
+  /**
+   * `get_attention_queue` sin `data` ER selve listen (AttentionItem[]) -
+   * ingen wrapper-objekt. Task #124: hvert item får en "Løs"-knapp
+   * (`resolve_situation`, klasse B) - event-delegert på `attentionQueueEl`
+   * SAMME mønster som `connectorsEl` sin egen delegering under.
+   */
   function renderAttentionQueue(data) {
     const items = Array.isArray(data) ? data : [];
     if (items.length === 0) {
@@ -259,6 +469,7 @@
       const stage = escapeHtml(item.stage || "");
       const recommended = escapeHtml(item.recommended_next_action || "");
       const explanation = Array.isArray(item.explanation) ? item.explanation.map(escapeHtml).join(" · ") : "";
+      const situationId = escapeHtml(item.situation_id || "");
       return '<div class="card">' +
         '<span class="pill priority-' + priority + '">' + priority + "</span>" +
         (domain ? '<span class="pill">' + domain + "</span>" : "") +
@@ -266,14 +477,36 @@
         '<div class="title">' + reason + "</div>" +
         (recommended ? '<div class="meta">Anbefaling: ' + recommended + "</div>" : "") +
         (explanation ? '<div class="meta">' + explanation + "</div>" : "") +
+        (situationId ? '<button class="btn small" data-resolve-situation data-situation-id="' + situationId + '">Løs</button>' : "") +
+        '<div class="action-result" data-resolve-result="' + situationId + '"></div>' +
         "</div>";
     }).join("");
   }
 
-  /** Speiler `ControlSurfaceStatus` (modules/executive/src/types.ts) EKSAKT - ingen oppfunnede felt. */
+  attentionQueueEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-resolve-situation]");
+    if (!btn) return;
+    const situationId = btn.dataset.situationId;
+    const resultEl = attentionQueueEl.querySelector('[data-resolve-result="' + situationId + '"]');
+    void runExecutiveMutation("resolve_situation", { situation_id: situationId }, resultEl, btn);
+  });
+
+  const criticalControlsEl = document.getElementById("critical-controls");
+
+  /**
+   * Speiler `ControlSurfaceStatus` (modules/executive/src/types.ts) EKSAKT -
+   * ingen oppfunnede felt. Task #124: hver liste (frosne connectors/
+   * tilbakekalte credentials/pausede domener) får nå en per-rad
+   * "opphev"-knapp (unfreeze_connector/restore_credential/resume_domain) -
+   * event-delegert på `controlSurfaceEl`. `renderCriticalControls()` (under)
+   * eier de to kill switch-bryterne separat, siden DE alltid er synlige
+   * (uansett tilstand), i motsetning til disse listene som kun viser
+   * NAVNGITTE, allerede-aktive rader.
+   */
   function renderControlSurface(data) {
     if (!data) {
       controlSurfaceEl.innerHTML = '<p class="empty">Ingen data.</p>';
+      renderCriticalControls(null);
       return;
     }
     const killSwitch = data.owner_control && data.owner_control.kill_switch;
@@ -295,13 +528,84 @@
         (financeKnown ? (financeActive ? "aktiv" : "inaktiv") : "aldri konfigurert") + "</span>" +
       "</div>";
     html += '<div class="card"><div class="title">Frosne connectors</div><div class="meta">' +
-      (frozenConnectors.length ? frozenConnectors.map((c) => escapeHtml(c.connector_id)).join(", ") : "Ingen") + "</div></div>";
+      (frozenConnectors.length
+        ? frozenConnectors.map((c) => escapeHtml(c.connector_id) +
+            ' <button class="btn small" data-unfreeze-connector data-connector-id="' + escapeHtml(c.connector_id) + '">Opphev</button>').join(", ")
+        : "Ingen") + "</div><div class=\"action-result\" data-unfreeze-result></div></div>";
     html += '<div class="card"><div class="title">Tilbakekalte credentials</div><div class="meta">' +
-      (revokedCredentials.length ? revokedCredentials.map((c) => escapeHtml(c.credential_ref)).join(", ") : "Ingen") + "</div></div>";
+      (revokedCredentials.length
+        ? revokedCredentials.map((c) => escapeHtml(c.credential_ref) +
+            ' <button class="btn small" data-restore-credential data-credential-ref="' + escapeHtml(c.credential_ref) + '">Gjenopprett</button>').join(", ")
+        : "Ingen") + "</div><div class=\"action-result\" data-restore-result></div></div>";
     html += '<div class="card"><div class="title">Pausede domener</div><div class="meta">' +
-      (pausedDomains.length ? pausedDomains.map(escapeHtml).join(", ") : "Ingen") + "</div></div>";
+      (pausedDomains.length
+        ? pausedDomains.map((d) => escapeHtml(d) +
+            ' <button class="btn small" data-resume-domain data-domain="' + escapeHtml(d) + '">Gjenoppta</button>').join(", ")
+        : "Ingen") + "</div><div class=\"action-result\" data-resume-result></div></div>";
     controlSurfaceEl.innerHTML = html;
+    renderCriticalControls({ killSwitchActive, financeActive, financeKnown });
   }
+
+  /**
+   * Task #124: kill switch/finans-nødbryter - alltid synlige, ETT
+   * toggle-par hver (aktiver/opphev), begge klasse D (se `ACTION_META`).
+   * `runExecutiveMutation()` viser den skrivepliktige, typed-confirmation-
+   * modalen FØR noe POSTes - ALDRI et umiddelbart klikk-til-handling for
+   * disse to.
+   */
+  function renderCriticalControls(state) {
+    if (!state) {
+      criticalControlsEl.innerHTML = "";
+      return;
+    }
+    criticalControlsEl.innerHTML =
+      '<div class="card"><div class="title">Kill switch (global)</div>' +
+      '<div class="meta">Stanser HELE systemet umiddelbart. Klasse D.</div>' +
+      '<div class="action-row"><input id="kill-switch-reason" placeholder="begrunnelse (påkrevd for aktivering)" autocomplete="off">' +
+      '<button class="btn danger" id="kill-switch-toggle">' + (state.killSwitchActive ? "Opphev kill switch" : "Aktiver kill switch") + "</button></div>" +
+      '<div class="action-result" id="kill-switch-result"></div></div>' +
+      '<div class="card"><div class="title">Finans-nødbryter</div>' +
+      '<div class="meta">Stanser ALLE spend-handlinger for tenanten umiddelbart. Klasse D.' +
+        (state.financeKnown ? "" : " (aldri konfigurert ennå)") + "</div>" +
+      '<div class="action-row"><input id="finance-kill-switch-reason" placeholder="begrunnelse (påkrevd for aktivering)" autocomplete="off">' +
+      '<button class="btn danger" id="finance-kill-switch-toggle">' + (state.financeActive ? "Opphev finans-nødbryter" : "Aktiver finans-nødbryter") + "</button></div>" +
+      '<div class="action-result" id="finance-kill-switch-result"></div></div>';
+
+    document.getElementById("kill-switch-toggle").addEventListener("click", (e) => {
+      const action = state.killSwitchActive ? "deactivate_kill_switch" : "activate_kill_switch";
+      const reason = document.getElementById("kill-switch-reason").value.trim();
+      const resultEl = document.getElementById("kill-switch-result");
+      if (action === "activate_kill_switch" && !reason) { resultEl.textContent = "Begrunnelse er påkrevd."; return; }
+      void runExecutiveMutation(action, action === "activate_kill_switch" ? { reason } : {}, resultEl, e.currentTarget);
+    });
+    document.getElementById("finance-kill-switch-toggle").addEventListener("click", (e) => {
+      const action = state.financeActive ? "disable_finance_kill_switch" : "enable_finance_kill_switch";
+      const reason = document.getElementById("finance-kill-switch-reason").value.trim();
+      const resultEl = document.getElementById("finance-kill-switch-result");
+      if (action === "enable_finance_kill_switch" && !reason) { resultEl.textContent = "Begrunnelse er påkrevd."; return; }
+      void runExecutiveMutation(action, action === "enable_finance_kill_switch" ? { reason } : {}, resultEl, e.currentTarget);
+    });
+  }
+
+  controlSurfaceEl.addEventListener("click", (e) => {
+    const unfreezeBtn = e.target.closest("[data-unfreeze-connector]");
+    if (unfreezeBtn) {
+      const resultEl = controlSurfaceEl.querySelector("[data-unfreeze-result]");
+      void runExecutiveMutation("unfreeze_connector", { connector_id: unfreezeBtn.dataset.connectorId }, resultEl, unfreezeBtn);
+      return;
+    }
+    const restoreBtn = e.target.closest("[data-restore-credential]");
+    if (restoreBtn) {
+      const resultEl = controlSurfaceEl.querySelector("[data-restore-result]");
+      void runExecutiveMutation("restore_credential", { credential_ref: restoreBtn.dataset.credentialRef }, resultEl, restoreBtn);
+      return;
+    }
+    const resumeBtn = e.target.closest("[data-resume-domain]");
+    if (resumeBtn) {
+      const resultEl = controlSurfaceEl.querySelector("[data-resume-result]");
+      void runExecutiveMutation("resume_domain", { domain: resumeBtn.dataset.domain }, resultEl, resumeBtn);
+    }
+  });
 
   /**
    * Speiler `ConnectorStatusReport`/`ConnectorStatus` (modules/executive/src/
@@ -389,6 +693,44 @@
           if (resultEl) resultEl.innerHTML = '<span class="pill test-fail">' + escapeHtml(err.message) + '</span>';
         });
     }
+  });
+
+  /**
+   * Task #124: de fire mutasjonene som trenger et NYTT, ikke-allerede-listet
+   * mål (en domene-/connector-/credential-/enhets-ID eieren selv skriver
+   * inn) - i motsetning til resume/unfreeze/restore/resolve over, som alle
+   * handler på en ALLEREDE synlig rad. SAMME `runExecutiveMutation()`-vei
+   * (bekreftelsesmodal FØR POST), en enkel klientside-sjekk på at feltene
+   * ikke er tomme FØR modalen i det hele tatt vises (billigere avslag enn å
+   * la et tomt kall nå ToolGateway sin egen `missing_parameter`-feil).
+   */
+  document.getElementById("pause-domain-btn").addEventListener("click", (e) => {
+    const domain = document.getElementById("pause-domain-name").value.trim();
+    const reason = document.getElementById("pause-domain-reason").value.trim();
+    const resultEl = document.getElementById("pause-domain-result");
+    if (!domain || !reason) { resultEl.textContent = "Domene og begrunnelse er påkrevd."; return; }
+    void runExecutiveMutation("pause_domain", { domain, reason }, resultEl, e.currentTarget);
+  });
+  document.getElementById("freeze-connector-btn").addEventListener("click", (e) => {
+    const connectorId = document.getElementById("freeze-connector-id").value.trim();
+    const reason = document.getElementById("freeze-connector-reason").value.trim();
+    const resultEl = document.getElementById("freeze-connector-result");
+    if (!connectorId || !reason) { resultEl.textContent = "connector_id og begrunnelse er påkrevd."; return; }
+    void runExecutiveMutation("freeze_connector", { connector_id: connectorId, reason }, resultEl, e.currentTarget);
+  });
+  document.getElementById("revoke-credential-btn").addEventListener("click", (e) => {
+    const credentialRef = document.getElementById("revoke-credential-ref").value.trim();
+    const reason = document.getElementById("revoke-credential-reason").value.trim();
+    const resultEl = document.getElementById("revoke-credential-result");
+    if (!credentialRef || !reason) { resultEl.textContent = "credential_ref og begrunnelse er påkrevd."; return; }
+    void runExecutiveMutation("revoke_credential", { credential_ref: credentialRef, reason }, resultEl, e.currentTarget);
+  });
+  document.getElementById("revoke-device-btn").addEventListener("click", (e) => {
+    const deviceId = document.getElementById("revoke-device-id").value.trim();
+    const reason = document.getElementById("revoke-device-reason").value.trim();
+    const resultEl = document.getElementById("revoke-device-result");
+    if (!deviceId || !reason) { resultEl.textContent = "device_id og begrunnelse er påkrevd."; return; }
+    void runExecutiveMutation("revoke_device", { device_id: deviceId, reason }, resultEl, e.currentTarget);
   });
 
   async function loadAll() {

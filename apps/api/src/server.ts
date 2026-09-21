@@ -207,6 +207,34 @@ const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as con
 const OWNER_CONTROLS_CONNECTOR_ACTIONS = ["set_connector_credential", "test_connector"] as const;
 
 /**
+ * Task #124 (UA-11 Executive dashboard-UI, MUTASJONS-DELEN, D-199 §7s eget
+ * eksplisitt utsatte gap): de 12 `executive.*`-mutasjonshandlingene
+ * (`pause_domain`/`resume_domain`/`resolve_situation`/`activate_kill_switch`/
+ * `deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+ * `revoke_credential`/`restore_credential`/`revoke_device`/
+ * `enable_finance_kill_switch`/`disable_finance_kill_switch`) - ALLE
+ * allerede bygde, host-proven `executive.*`-videresendinger til
+ * `situations.*`/`owner_controls.*`/`finance.*` (D-171/D-174/D-179), INGEN
+ * ny logikk her. EGEN, HELT NY HTTP-rute (`POST /executive/mutate`) - ALDRI
+ * en utvidelse av `EXECUTIVE_QUERY_ACTIONS`, som D-199 selv sier skal
+ * forbli lese-kun for alltid (samme "hardkodet allowlist, ALDRI hele
+ * verktøyet"-disiplin som `OWNER_CONTROLS_CONNECTOR_ACTIONS`). Klientsidens
+ * bekreftelsesdialoger/klasse-D-preflight-visning (D-199 §7s eksplisitte
+ * krav) er BEVISST håndhevet KUN i `dashboard.html` (UI-lag, se der) - denne
+ * ruten selv håndhever INGEN ekstra "har eieren bekreftet"-tilstand utover
+ * `ToolGateway.execute()` sin EGEN, allerede eksisterende klasse D-preflight/
+ * autoritetssjekk (samme dobbelt-gatede modell som §2/§6 i design-notatet
+ * beskriver - denne ruten legger ALDRI til en tredje, egen autoritetsrunde).
+ */
+const EXECUTIVE_MUTATE_ACTIONS = [
+  "pause_domain", "resume_domain", "resolve_situation",
+  "activate_kill_switch", "deactivate_kill_switch",
+  "freeze_connector", "unfreeze_connector",
+  "revoke_credential", "restore_credential", "revoke_device",
+  "enable_finance_kill_switch", "disable_finance_kill_switch"
+] as const;
+
+/**
  * Fail-closed parsing, speilbildet av `.strict()`: et forsøk på å sende f.eks.
  * `session_id`, `tenant_id`, `person_id`, `memory_space`, `channel` eller
  * `auth_strength` gir `malformed_request` i stedet for å bli stille ignorert.
@@ -557,6 +585,44 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "owner_controls", action, parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/executive/mutate") {
+    // Task #124: SAMME rekkefølge/avslagsform som /executive/query og
+    // /owner-controls/connector-credentials (avvis ugyldig action FØR
+    // grantet løses, avvis et ugyldig/utløpt grant FØR gateway.execute()
+    // nås). `tool_id: "executive"` (ALDRI "owner_controls"/"situations"/
+    // "finance" direkte) - executive-laget videresender selv, nøstet, med
+    // UENDRET identitet (§2 i design-notatet).
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
+    }
+    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody || typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    }
+    const action = parsedBody["action"];
+    if (!(EXECUTIVE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "executive", action, parameters
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });

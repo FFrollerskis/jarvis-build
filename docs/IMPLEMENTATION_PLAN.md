@@ -4465,6 +4465,44 @@ lokalt denne økten - samme kjente sandbox-begrensning som D-193→D-199, verifi
 
 ---
 
+## UA-11 – Executive dashboard-UI, MUTASJONS-DELEN (D-199 §7's eksplisitt utsatte gap, D-216)
+
+**Manuell masterplan-slice** (2026-09-21, "UA-11 Executive-dashboard: mutasjonshandlinger" - direkte
+Tobias-chat-instruks under D-192, valgt av to lokalt byggbare kandidater en frisk repo-verifisering
+avdekket). Lukker D-199 §7 sitt eneste gjenstående, ikke-kredensielt-sperrede gap: de 12
+`executive.*`-mutasjonshandlingene (allerede bygget/host-bevist, D-171/D-174/D-176/D-179) hadde INGEN
+HTTP-rute og INGEN UI. Full begrunnelse: D-216 i `DECISIONS_AND_ASSUMPTIONS.md`.
+
+**Bygget:**
+- `POST /executive/mutate` (`apps/api/src/server.ts`) - EGEN, ny rute, EGET hardkodet allowlist
+  `EXECUTIVE_MUTATE_ACTIONS` (NØYAKTIG `pause_domain`/`resume_domain`/`resolve_situation`/
+  `activate_kill_switch`/`deactivate_kill_switch`/`freeze_connector`/`unfreeze_connector`/
+  `revoke_credential`/`restore_credential`/`revoke_device`/`enable_finance_kill_switch`/
+  `disable_finance_kill_switch`) - ALDRI en utvidelse av `EXECUTIVE_QUERY_ACTIONS`, som FORBLIR
+  lese-kun uendret. SAMME grant-baserte autoritetsmodell/avslagsrekkefølge som `/executive/query`/
+  `/owner-controls/connector-credentials` (D-199/D-213). `tool_id: "executive"` ALLTID.
+- `apps/web/dashboard.html` - ny "Kontrollhandlinger"-seksjon: fire skjemaer for nye mål (pause
+  domene/frys connector/tilbakekall credential/tilbakekall enhet), tre event-delegerte knapper på
+  allerede synlige rader (gjenoppta domene/opphev frys/gjenopprett credential), én delegert "Løs"-
+  knapp på hvert attention-item, og ETT alltid-synlig toggle-par for kill switch/finans-nødbryter.
+  `openConfirmModal()` - bekreftelsesdialog med navn/klasse/beskrivelse/reverseringsprosedyre (en
+  klient-lokal `ACTION_META`-tabell som SPEILER `executiveToolDefinitions()`) FØR noe POSTes; de fire
+  klasse D-handlingene (begge kill switch-par) krever i tillegg at eieren skriver EKSAKT
+  handlingsnavnet for å aktivere "Bekreft" (typed confirmation - D-199 §7s "klasse D-preflight"-krav).
+
+**Bygges IKKE i denne sliceen:** ingen endring av `ExecutiveTransport`/`ExecutiveService` selv (ren
+HTTP/UI-overflate over en allerede ferdig, host-bevist backend); `EXECUTIVE_QUERY_ACTIONS`/
+`OWNER_CONTROLS_CONNECTOR_ACTIONS` uendret.
+
+**Tester:** `executive-mutate-wiring.test.ts` (12, DB-uavhengig strukturell), `dashboard-executive-
+mutations-wiring.test.ts` (13, DB-uavhengig klient-struktur), `executive-query-e2e.test.ts`
+beskrivelse G/H/I (16, ekte HTTP mot ekte `createApiServer()`/Postgres/grant-autoritet - SKREVET men
+IKKE kjørt lokalt denne økten, samme kjente sandbox-begrensning som D-193→D-215, verifiseres av CI).
+`modules/executive`s egne 72 DB-uavhengige tester fortsatt grønne uendret. Se `docs/PROJECT_STATUS.md`
+for eksakte tall/status.
+
+---
+
 ## Fase-avhengigheter (oversikt)
 
 ```
