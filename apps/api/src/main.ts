@@ -141,8 +141,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const infraToolIds = new Set(["github", "docker"]);
   // Enhetsregister fra databasen (fase 8): godkjenninger verifiseres mot registrerte enhetsnøkler.
   const deviceRegistry = new PgDeviceRegistry(pool, process.env["JARVIS_TENANT_ID"] ?? "tenant-personal");
-  await deviceRegistry.refresh().catch(() => undefined);
-  setInterval(() => void deviceRegistry.refresh().catch(() => undefined), 30_000).unref();
+  // D-222: tidligere `.catch(() => undefined)` på begge steder - en vedvarende
+  // refresh-feil (DB nede, skjemadrift) ville latt policy-autorisasjon kjøre
+  // mot et stille voksende UTDATERT enhetsregister på ubestemt tid, uten NOEN
+  // logglinje. Samme "siste sikkerhetsnett"-mønster som D-218/D-221/D-222 over.
+  await deviceRegistry.refresh().catch((err) => {
+    console.error(JSON.stringify({
+      msg: "device_registry_initial_refresh_failed",
+      error: err instanceof Error ? err.message : String(err)
+    }));
+  });
+  setInterval(() => void deviceRegistry.refresh().catch((err) => {
+    console.error(JSON.stringify({
+      msg: "device_registry_refresh_tick_failed",
+      error: err instanceof Error ? err.message : String(err)
+    }));
+  }), 30_000).unref();
   const policy = new PolicyGateway({
     devices: deviceRegistry,
     nonces: new PgApprovalStore(pool),

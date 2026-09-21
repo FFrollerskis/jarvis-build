@@ -38,7 +38,20 @@ export async function withDomainAdvisoryLocks<T>(pool: pg.Pool, domains: readonl
     return await fn();
   } finally {
     for (const domain of domains) {
-      await client.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [domain]).catch(() => undefined);
+      // D-222: tidligere `.catch(() => undefined)` - en unlock-feil (f.eks. en
+      // droppet tilkobling midt i sekvensen) forsvant sporløst, OG klienten ble
+      // likevel returnert til poolen med låsen fortsatt holdt av den
+      // underliggende session-tilkoblingen - et fremtidig gjenbruk av SAMME
+      // pooled tilkobling kunne da se en lås som aldri slippes, uten at NOEN
+      // logglinje noensinne pekte mot hvorfor. Samme "isolasjon uendret, kun
+      // stillheten fikset"-mønster som D-218/D-221.
+      await client.query("SELECT pg_advisory_unlock(hashtext($1)::bigint)", [domain]).catch((err) => {
+        console.error(JSON.stringify({
+          msg: "domain_advisory_unlock_failed",
+          domain,
+          error: err instanceof Error ? err.message : String(err)
+        }));
+      });
     }
     client.release();
   }
