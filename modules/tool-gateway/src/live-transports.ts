@@ -1316,6 +1316,20 @@ export class TelegramCommandPoller {
       status(): Promise<string>;
       ai?(): Promise<string>;
       /**
+       * Task #121 (D-214): rask "one-tap" eier-godkjenning for
+       * `requires_approval`-klassifiserte selvendringsforespørsler (se
+       * modules/self-modification) - `/godkjenn <request_id>` og
+       * `/avvis <request_id>`. Dette er BEVISST den samme betrodde eier-
+       * chat-bindingen som `/brief`/`/status` (fail-closed lenger opp i
+       * `poll()` - kun `ownerChatId` når hit i det hele tatt), IKKE en
+       * kryptografisk per-handling-signatur som Ed25519 `SignedApproval`
+       * (modules/policy/src/approval-verifier.ts) - eksplisitt eierens eget
+       * valg (AskUserQuestion-svar), en bevisst mindre, men ekte, tillits-
+       * grense enn den generelle klasse D-mekanismen.
+       */
+      approveSelfMod?(requestId: string): Promise<string>;
+      rejectSelfMod?(requestId: string): Promise<string>;
+      /**
        * D-125: vanlig (ikke-kommando) eier-tekst. Returner `undefined` for å
        * ikke svare i det hele tatt - det er hva en fail-closed autoritet skal
        * gi, og polleren sender da INGENTING (ingen informasjonslekkasje, ikke
@@ -1371,9 +1385,34 @@ export class TelegramCommandPoller {
     if (text.startsWith("/brief")) return void (await this.send(await this.handlers.brief()));
     if (text.startsWith("/status")) return void (await this.send(await this.handlers.status()));
     if (text.startsWith("/ai") && this.handlers.ai) return void (await this.send(await this.handlers.ai()));
+    if (text.startsWith("/godkjenn") && this.handlers.approveSelfMod) {
+      return void (await this.dispatchSelfModDecision(text, "/godkjenn", this.handlers.approveSelfMod));
+    }
+    if (text.startsWith("/avvis") && this.handlers.rejectSelfMod) {
+      return void (await this.dispatchSelfModDecision(text, "/avvis", this.handlers.rejectSelfMod));
+    }
     if (text.startsWith("/") || text.trim().length === 0 || !this.handlers.chat) return;
     const reply = await this.handlers.chat({ chat_id: chatId, text });
     if (reply !== undefined && reply.length > 0) await this.send(reply);
+  }
+
+  /**
+   * Task #121 (D-214): `/godkjenn <request_id>` / `/avvis <request_id>`.
+   * Manglende/tom id svarer med en brukbarhets-melding i stedet for å kalle
+   * handleren med en tom streng - `SelfModificationService.resolveApproval()`
+   * skal ALDRI motta en ugyldig/gjettet id fra en parse-glipp her.
+   */
+  private async dispatchSelfModDecision(
+    text: string,
+    command: "/godkjenn" | "/avvis",
+    handler: (requestId: string) => Promise<string>
+  ): Promise<void> {
+    const requestId = text.slice(command.length).trim().split(/\s+/)[0];
+    if (!requestId) {
+      await this.send(`Bruk: ${command} <request_id>`);
+      return;
+    }
+    await this.send(await handler(requestId));
   }
 
   private rememberHandled(updateId: number): void {

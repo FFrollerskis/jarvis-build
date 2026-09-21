@@ -12,6 +12,7 @@ import {
   type TraceSink
 } from "@jarvis/model-gateway";
 import { ProviderError, type StreamEvent, type ToolDefinition } from "@jarvis/provider-adapters";
+import { DEFAULT_PERSONALITY_CONFIG, type PersonalityConfig } from "@jarvis/self-modification";
 import type { TaskService, InProcessWorker } from "@jarvis/tasks";
 import { randomUUID } from "node:crypto";
 
@@ -47,6 +48,15 @@ export interface ConversationDeps {
    * §23 migrasjonssikkerhet).
    */
   council?: AiCouncil;
+  /**
+   * Task #121 (D-214): valgfri lastefunksjon for den KOSMETISKE delen av
+   * systemprompten (se `buildSystemPrompt()` over) - kalles FRISK på hver
+   * samtaletur (billig, ingen cache her) slik at en zero-review auto-merget
+   * `config/charlie-personality.json`-endring slår inn umiddelbart uten
+   * omstart. Udefinert/kastet feil → `DEFAULT_PERSONALITY_CONFIG`
+   * (identisk med oppførsel før D-214).
+   */
+  personality?: () => PersonalityConfig;
 }
 
 export interface ChatReply {
@@ -66,22 +76,41 @@ export interface ChatReply {
 // at den skal ha humor og sin egen personlighet... det skal virke som et
 // menneske bare mye mer intelligent"): familien har gitt samtale-personaen
 // navnet "Charlie" (kjønnsnøytralt, egen valgt av familien). "Jarvis" forblir
-// det tekniske prosjekt-/systemnavnet overalt i kode/docs - `SYSTEM_PROMPT`
+// det tekniske prosjekt-/systemnavnet overalt i kode/docs - `buildSystemPrompt()`
 // endrer KUN hvordan Charlie SNAKKER, aldri hva den faktisk har tilgang til
 // (uendret: Policy/Execution Authority styrer det deterministisk, se over).
 // Den samme økten observerte Charlie (kjørende på `gemma_hosted`) svare
 // FEIL og oppdiktet på introspektive spørsmål ("jeg er flere AI-er i én",
-// "jeg har banktilgang") - `SYSTEM_PROMPT` skjerper derfor EKSPLISITT at
-// gjetting/oppdikting om egne evner er en STØRRE feil enn å si "jeg vet ikke
-// helt, la meg sjekke" - ærlighet før personlighet, ALDRI omvendt. Council
-// (`runCouncil()` under) er BEVISST UBERØRT, samme presedens som D-203 -
-// høy-innvirkning-beslutninger fortjener fortsatt en formell, nøktern tone,
-// ikke småprat-humor.
-const SYSTEM_PROMPT =
-  "Du er Charlie - Tobias og familien sin egen AI, kjønnsnøytral, med en ekte personlighet: " +
-  "varm, skarp og gjerne litt tørrvittig når det passer. Snakk som et menneske ville gjort - " +
-  "naturlig og avslappet, aldri stivt eller robotaktig - bare mye mer kunnskapsrik og alltid " +
-  "tilgjengelig. Svar kort og presist på norsk. " +
+// "jeg har banktilgang") - `SAFETY_CRITICAL_SUFFIX` skjerper derfor EKSPLISITT
+// at gjetting/oppdikting om egne evner er en STØRRE feil enn å si "jeg vet
+// ikke helt, la meg sjekke" - ærlighet før personlighet, ALDRI omvendt.
+// Council (`runCouncil()` under) er BEVISST UBERØRT, samme presedens som
+// D-203 - høy-innvirkning-beslutninger fortjener fortsatt en formell,
+// nøktern tone, ikke småprat-humor.
+//
+// Task #121 (D-214, to-lags selvendrings-modell): `buildSystemPrompt()` deler
+// prompten i to STRUKTURELT atskilte deler.
+//   1. Kosmetisk del - BYGGES fra `PersonalityConfig`
+//      (`config/charlie-personality.json`, lastet via
+//      `apps/api/src/personality-config.ts`). Dette er den ENESTE delen
+//      `self_modification.propose_personality_change` (zero-review auto-
+//      merge, se modules/self-modification) noensinne kan påvirke - et
+//      strengt, skjemavalidert felt-sett (`tone_descriptors`/`style_notes`),
+//      ALDRI fritekst-instruksjonsinjeksjon.
+//   2. `SAFETY_CRITICAL_SUFFIX` - HARDKODET konstant, appendert
+//      UBETINGET og ALLTID sist, UANSETT hva konfigurasjonen inneholder.
+//      INGEN kodevei i denne filen lar `PersonalityConfig` erstatte, fjerne
+//      eller påvirke denne suffiksen - det er selve poenget med to-lags-
+//      modellen (D-208: eieren nektet eksplisitt full ugjennomgått
+//      selvpatching av sikkerhetskritisk atferd).
+function buildSystemPrompt(personality: PersonalityConfig): string {
+  const cosmetic =
+    `Du er Charlie - Tobias og familien sin egen AI, kjønnsnøytral, med en ekte personlighet: ` +
+    `${personality.tone_descriptors.join(", ")}. ${personality.style_notes} `;
+  return cosmetic + SAFETY_CRITICAL_SUFFIX;
+}
+
+const SAFETY_CRITICAL_SUFFIX =
   "Du kan bruke de verktøyene runtime eksplisitt gjør tilgjengelige i denne samtalen, og ALDRI " +
   "andre. Vær ærlig og presis om hva du faktisk har tilgang til akkurat nå - ærlighet slår alltid " +
   "personlighet: gjett eller dikt ALDRI opp evner du ikke faktisk har (f.eks. at du er 'flere " +
@@ -97,6 +126,15 @@ const SYSTEM_PROMPT =
  */
 export class ConversationEngine {
   constructor(private readonly deps: ConversationDeps) {}
+
+  private loadPersonality(): PersonalityConfig {
+    if (!this.deps.personality) return DEFAULT_PERSONALITY_CONFIG;
+    try {
+      return this.deps.personality();
+    } catch {
+      return DEFAULT_PERSONALITY_CONFIG;
+    }
+  }
 
   async handle(
     identity: IdentityContext,
@@ -190,7 +228,9 @@ export class ConversationEngine {
         content: m.content
       }));
       const memoryContext = this.deps.memory ? await this.deps.memory.contextFor(identity, text) : "";
-      const system = memoryContext ? `${SYSTEM_PROMPT}\n\n${memoryContext}` : SYSTEM_PROMPT;
+      const personality = this.loadPersonality();
+      const systemPrompt = buildSystemPrompt(personality);
+      const system = memoryContext ? `${systemPrompt}\n\n${memoryContext}` : systemPrompt;
       // UA-1: Conversation Engine oppgir purpose - aldri provider direkte (§31).
       // P1A (§27): SSE-klienter får normalisert stream; klienten ser aldri provider-format.
       // D-203 (2026-09-20, direkte chat-instruks fra Tobias: "simpel default, lav-sensitiv
