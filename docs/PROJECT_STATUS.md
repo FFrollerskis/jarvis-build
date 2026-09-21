@@ -1,8 +1,8 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-21 (branch `claude/status-update-130-merge` basert på `origin/main` HEAD
-`19cd6b7`). **PR #130 (D-218/D-219/D-220) MERGET. Alle tre "silent error swallowing"-fikser i drift.
-Ingen kjent gjenstående lokalt kodbart arbeid akkurat nå - se "Neste oppgave".**
+**Oppdatert:** 2026-09-21 (branch `claude/fase-erasure-rollback-error-logging` basert på `origin/main`
+HEAD `8d211bc`). **D-221 (fjerde "silent error swallowing"-runde) implementert lokalt - kvalitetsporter
+kjørt, klar for commit/push/draft-PR (se under).**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -25,20 +25,25 @@ grense bekreftet igjen for tale (D-212, Q-32 punkt 1) og for selvendring (D-208�
 full ugjennomgått selvpatching TO GANGER etter eksplisitt risikogjennomgang - den vedtatte retningen
 var et to-lags-kompromiss, ikke en full fullmakt.
 
-**LÆRDOM (D-218→D-220, 2026-09-21):** "lokalt kodbart arbeid oppbrukt" er IKKE en selv-uttalt
-konklusjon som skal stå uimotsagt - Tobias sitt "Fortsatt å bygg"/"fortsett å bygg" (TRE separate
-ganger samme dag) etter nøyaktig en slik påstand utløste tre runder som alle fant en reell, ubestridt
-bug av SAMME anti-mønster-klasse (`.catch(() => undefined)` som svelger feil sporløst). Praktisk
-konklusjon for neste runde: sjekk FØRST om forrige runde selv la igjen en navngitt, uløst kandidat FØR
-et helt nytt, bredt søk startes - billigere å hente fra egen logg. **D-220s egen CI-runde, ny lærdom:**
-en påstand om DB-atferd i en decision-log-post skal ALDRI regnes bekreftet før CI faktisk har kjørt
-testen som beviser den, selv når koden ser åpenbart riktig ut - `build-test` var den FØRSTE faktiske
-kjøringen av test R i denne sandbox-begrensede økten, og fant en reell feil i testens EGEN antakelse
-(rettet i en fjerde commit, samme PR, FØR merge - se D-220 i DECISIONS_AND_ASSUMPTIONS.md).
+**LÆRDOM (D-218→D-221, 2026-09-21):** "lokalt kodbart arbeid oppbrukt" er IKKE en selv-uttalt
+konklusjon som skal stå uimotsagt - Tobias sitt "Fortsatt å bygg"/"fortsett å bygg" (FIRE separate
+ganger samme dag) etter nøyaktig en slik påstand utløste fire runder som alle fant en reell, ubestridt
+bug av SAMME anti-mønster-klasse (`.catch(() => undefined)`/`catch {}` som svelger feil sporløst).
+**D-220s CI-lærdom (DB-atferds-påstander må faktisk CI-verifiseres) ble denne gangen anvendt
+PROAKTIVT, ikke reaktivt:** D-221 sine nye tester ble skrevet med eksplisitt, dokumentert resonnement
+om `.catch()`-kjeding (krever et AVVIST løfte i mock-en, aldri en synkron `throw`) og om ekte
+Postgres-tilkoblingers transaksjonstilstand (en test som SIMULERER en ROLLBACK-feil for kalleren må
+likevel utføre en EKTE ROLLBACK FØR den simulerte avvisningen, ellers korrumperes senere, urelaterte
+tester som gjenbruker samme pooled tilkobling) - begge feil ville vært nøyaktig den samme klassen
+feilaktig DB-antakelse D-220 selv ble tatt for av CI. **D-221s egen metode-lærdom:** D-220 sin
+editering av to filer etterlot TRE søsken i SAMME to filer, funnet først i en egen, fjerde runde - et
+grep bør derfor lete etter BÅDE `.catch(() => undefined)` OG et bart `catch { }` UTEN fanget
+feil-variabel (sistnevnte er et STERKERE varselsignal - det kan ikke engang logge originalfeilen uten
+en kodeendring).
 
 ## Hvor `main` står nå
 
-- **PR #106-#130 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+- **PR #106-#131 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
   connector credential-skriving + utvidet live_test (D-213, PR #122), trygg selvendring - to-lags-
@@ -47,18 +52,21 @@ kjøringen av test R i denne sandbox-begrensede økten, og fant en reell feil i 
   whisper.cpp/piper STT/TTS - EKTE subprosess-implementasjon (D-217, PR #128), tre uavhengige "silent
   error swallowing"-fikser (D-218 scheduler/D-219 policy-avslag-audit/D-220 erasure-fail-status, PR
   #130) - se git-historikk/DECISIONS_AND_ASSUMPTIONS.md, ikke gjentatt her.
-- **D-218→D-220 (PR #130) - kort oppsummert (full begrunnelse i DECISIONS_AND_ASSUMPTIONS.md):** tre
-  uavhengige forekomster av SAMME anti-mønster (`.catch(() => undefined)`), funnet i tre påfølgende
-  "fortsett å bygg"-runder samme dag, bundlet i ÉN PR. `DailyScheduler.start()` (D-218, DEN DELTE
-  mekanismen bak ALLE 17 schedulerte jobbene i `apps/api/src/main.ts`), `ToolGateway.deny()` (D-219,
-  ALLE 12+ avslags-stedene i `execute()`), `ErasureService`s `failErasureRequest()`-persistering (D-220,
-  GDPR-sletteforespørselens EGEN revisjonslogg) - alle tre fikk SAMME etablerte remedie (strukturert
-  `console.error`-logging, isolasjon/fail-safe-oppførsel uendret, samme mønster som D-180/D-196/PR #79).
-  D-220 sin FØRSTE testversjon hadde en feil DB-atferds-antakelse ("raden blir værende på pending") -
-  CI fanget dette (`TypeError` fordi ingen rad fantes), rettet FØR merge til å korrekt beskrive at
-  BEGGE samtidige innsettinger (hovedtransaksjon OG fail-status-persist) ruller tilbake sammen, altså
-  INGEN rad i det hele tatt, ikke en misvisende `pending`-rad. CI grønt på alle 6 jobber (siste head),
-  ingen åpne review-tråder, merget under D-192 med to-forelder-merge (`19cd6b7`).
+- **D-221 - IKKE ENNÅ PUSHET/PR-et, på ny branch (ikke opprettet ennå):** TRE gjenværende
+  `.catch(() => undefined)`-søsken i SAMME to filer D-220 rørte ved, ALLE på ROLLBACK-stien
+  (dobbelt-feil: hovedoperasjonen feiler OG opprydningen feiler også). `failErasureRequest()`
+  (`modules/core/src/services/erasure-ledger.ts`) sin YTRE `catch { }` var ALVORLIGERE enn D-220 selv
+  fikset: INGEN fanget feil-variabel, INGEN logging, INGEN rethrow - et feil i selve INSERT/COMMIT-en
+  (den FAKTISK mest sannsynlige feilklassen, i motsetning til D-220s smalere `pool.connect()`-tilfelle)
+  forsvant HELT sporløst, ALDRI nådd av D-220 sin egen logging ved kallestedet. `previewErasure()`/
+  `executeErasure()` (`modules/erasure/src/erasure-service.ts`) sine ROLLBACK-kall svelget sin EGEN
+  feil (original feil allerede synlig, men en rollback-feil OVENPÅ den var usynlig). Fikset med SAMME
+  etablerte mønster (strukturert `console.error`, ingen atferdsendring - `failErasureRequest()` sin
+  "kaster aldri"-kontrakt uendret). Nye tester S/T/U i `erasure-service.test.ts`, med to eksplisitt
+  dokumenterte DB-korrekthets-presisjoner anvendt PROAKTIVT (se lærdom over). `pnpm -w typecheck`/
+  `npx eslint .` rene. Kan IKKE kjøres i denne sandbox-økten (samme kjente `initdb: Permission
+  denied`-begrensning) - verifiseres av CI. **Gjenstår FØR PR:** secret-scan, commit, push, draft-PR,
+  overvåk CI, merge under D-192 når grønt/uten åpne funn.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -85,12 +93,13 @@ problemer.
 
 ## Neste oppgave
 
-1. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter selve `.catch(() => undefined)`-anti-mønsteret
-   og lignende på tvers av HELE kodebasen, se D-218/D-219-lærdommen) hvis bedt om å fortsette å bygge -
-   D-219 sin egen "vurdert og bevisst IKKE flagget"-liste (git-auth `chmod()`, Telegram/GitHub-kø-
-   vakter) er allerede sjekket og bekreftet lav prioritet to ganger, ingen kjent uløst kandidat
-   gjenstår fra DENNE anti-mønster-klassen akkurat nå.
-2. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
+1. **Fullfør D-221:** secret-scan, commit, push ny branch, åpne draft-PR, abonner på PR-aktivitet,
+   overvåk CI, merge under D-192 når grønt/uten åpne funn.
+2. Etter dette: et fersk, BREDT kode-nivå gap-søk (grep etter BÅDE `.catch(() => undefined)` OG et
+   bart `catch { }` uten fanget feil-variabel, se D-221-lærdommen over) FØR man igjen konkluderer
+   "oppbrukt" - ingen kjent, allerede-registrert uløst kandidat gjenstår fra DENNE anti-mønster-klassen
+   akkurat nå (git-auth `chmod()`/Telegram-kø-vaktene er sjekket og bekreftet lav prioritet flere ganger).
+3. Når det kodbare virkelig er oppbrukt: legg frem en samlet oversikt over API-nøkler/kontoer/
    MCP-koblinger Tobias må skaffe for D-170s gjenstående eksterne blokkeringer, OG Q-32 punkt 1
    (OpenAI som taleprosessor - juridisk/eier-verifisering) og punkt 3 (whisper.cpp/piper-installasjon,
    nå kun host-handling gjenstående, se D-217). PR #97 (W1 watchdog) venter uansett på Tobias/arkitekt.

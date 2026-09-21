@@ -138,8 +138,30 @@ export async function failErasureRequest(
       [requestId, tenantId, scopeType, JSON.stringify(scopeSummary), safeErrorMessage.slice(0, 200)]
     );
     await client.query("COMMIT");
-  } catch {
-    await client.query("ROLLBACK").catch(() => undefined);
+  } catch (err) {
+    // Denne funksjonen sin egen, dokumenterte kontrakt er "kaster aldri" (kalleren i
+    // erasure-service.ts sin catch-blokk skal aldri selv kunne feile på GRUNN av
+    // denne beste-innsats-loggingen) - MEN et `catch { }` uten fanget feil OG uten
+    // logging betydde at et INSERT/COMMIT-feil her (i motsetning til et `pool.connect()`-
+    // feil, som skjer FØR denne try-blokken og derfor propagerer til kalleren sin egen
+    // `.catch()`) forsvant HELT sporløst - kontrakten "kaster aldri" ble reelt "sier
+    // aldri fra". Rettet: loggfør BEGGE feilene (selve persisteringen OG en eventuell
+    // rollback-feil), fortsatt UTEN å kaste - isolasjonen er bevisst, kun stillheten var feilen.
+    console.error(JSON.stringify({
+      msg: "erasure_fail_status_persist_write_failed",
+      request_id: requestId,
+      tenant_id: tenantId,
+      scope_type: scopeType,
+      error: err instanceof Error ? err.message : String(err)
+    }));
+    await client.query("ROLLBACK").catch((rollbackErr) => {
+      console.error(JSON.stringify({
+        msg: "erasure_fail_status_rollback_failed",
+        request_id: requestId,
+        tenant_id: tenantId,
+        error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)
+      }));
+    });
   } finally {
     client.release();
   }
