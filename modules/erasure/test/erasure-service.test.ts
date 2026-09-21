@@ -498,11 +498,17 @@ describe("Q-20 ErasureService", () => {
       expect(parsed.original_error).toContain("simulated_mid_transaction_failure");
       expect(parsed.persist_error).toContain("simulated_fail_status_persist_connect_failure");
 
-      // Den reelle konsekvensen D-220 sin doc-kommentar beskriver: raden blir værende
-      // på `pending` for alltid (persisteringen av `failed` feilet jo) - ALDRI stille
-      // oppgradert til `failed` av noe annet.
+      // Den reelle konsekvensen: `insertPendingErasureRequest()` skjer i SAMME
+      // transaksjon som selve sletteforsøket (samme `client`, samme BEGIN/COMMIT) -
+      // når hovedtransaksjonen ruller tilbake (test N sitt bevis), ruller den
+      // "pending"-innsettingen tilbake MED den. Feiler `failErasureRequest()` sin
+      // EGEN, separate innsetting av `status='failed'` DA også, finnes det derfor
+      // INGEN rad i det hele tatt for denne forespørselen - ikke en stille
+      // "pending for alltid" (som ville krevd at pending-innsettingen overlevde en
+      // rollback, noe den strukturelt ikke kan i denne transaksjonsmodellen), men et
+      // sletteforsøk med ALDRI noe spor i revisjonsloggen - like alvorlig, annen form.
       const ledgerRow = await adminPool.query("SELECT status FROM erasure_requests WHERE request_id=$1", [requestId]);
-      expect((ledgerRow.rows[0] as { status: string }).status).toBe("pending");
+      expect(ledgerRow.rows).toHaveLength(0);
     } finally {
       errorSpy.mockRestore();
     }

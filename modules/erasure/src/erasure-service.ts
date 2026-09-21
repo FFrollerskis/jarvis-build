@@ -140,9 +140,11 @@ export class ErasureService {
       await client.query("ROLLBACK").catch(() => undefined);
       const message = (err as Error).message.slice(0, 200);
       // D-220: hvis DENNE persisteringen selv feiler, skal kalleren FORTSATT få et
-      // ærlig {status:"failed"} i minnet (uendret av denne fiksen) - MEN raden i
-      // `erasure_requests` blir da værende på `pending` for alltid, med en GDPR-
-      // sletteforespørsel som ser ut som den fortsatt kjører. Samme
+      // ærlig {status:"failed"} i minnet (uendret av denne fiksen) - MEN `erasure_
+      // requests` får da INGEN rad i det hele tatt for denne forespørselen (den
+      // tidligere `insertPendingErasureRequest()`-innsettingen skjedde i SAMME
+      // transaksjon som selve sletteforsøket og ble rullet tilbake MED den) - en
+      // GDPR-sletteforespørsel uten NOE spor i revisjonsloggen. Samme
       // "isolasjon beholdes, feilen gjøres OBSERVERBAR"-mønster som D-218/D-219.
       await failErasureRequest(this.pool, scope.tenant_id, requestId, scope.type, scopeSummary(scope), message).catch((persistErr) => {
         console.error(JSON.stringify({

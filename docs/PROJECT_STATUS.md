@@ -1,9 +1,9 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-21 (branch `claude/fase-scheduler-error-logging` basert på `origin/main` HEAD
-`27686f4`). **D-218+D-219 pushet, PR #130 åpen med CI kjørende. D-220 (tredje forekomst av samme
-anti-mønster) implementert lokalt oppå samme branch - kvalitetsporter kjørt, klar for commit/push/
-PR-oppdatering (se under).**
+`27686f4`). **D-218+D-219+D-220 pushet til PR #130. CI (`build-test`) fanget en reell feil i D-220 sin
+EGEN testantakelse (ikke i selve fiksen) - rettet lokalt, klar for en fjerde commit på SAMME branch
+(se under). PR fortsatt åpen, ikke merget.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -29,11 +29,14 @@ var et to-lags-kompromiss, ikke en full fullmakt.
 **LÆRDOM (D-218→D-220, 2026-09-21):** "lokalt kodbart arbeid oppbrukt" er IKKE en selv-uttalt
 konklusjon som skal stå uimotsagt - Tobias sitt "Fortsatt å bygg"/"fortsett å bygg" (TRE separate
 ganger samme dag) etter nøyaktig en slik påstand utløste tre runder som alle fant en reell, ubestridt
-bug av SAMME anti-mønster-klasse (`.catch(() => undefined)` som svelger feil sporløst) - D-218/D-219
-via et fersk, bredt kode-nivå gap-søk (samme metodikk som D-195/D-196), D-220 ved ganske enkelt å
-hente inn en kandidat D-219 SELV allerede hadde registrert i sin egen "vurdert og avvist"-liste.
-Praktisk konklusjon for neste runde: sjekk FØRST om forrige runde selv la igjen en navngitt,
-uløst kandidat FØR et helt nytt, bredt søk startes på nytt - billigere å hente fra egen logg.
+bug av SAMME anti-mønster-klasse (`.catch(() => undefined)` som svelger feil sporløst). Praktisk
+konklusjon for neste runde: sjekk FØRST om forrige runde selv la igjen en navngitt, uløst kandidat FØR
+et helt nytt, bredt søk startes - billigere å hente fra egen logg. **Ny lærdom, D-220s egen CI-runde:**
+et antatt DB-konsekvens-resonnement ("raden blir værende på pending") kan være FEIL selv når selve
+fiksen (loggingen) er riktig - når testsuiten ikke kan kjøres lokalt (embedded-Postgres-sandkasse-
+gapet), er CI IKKE bare en formalitet, den er den FØRSTE faktiske utførelsen av testens egne
+assertions. En påstand om DB-atferd i en decision-log-post skal derfor ALDRI regnes bekreftet før CI
+faktisk har kjørt testen som beviser den - selv når koden ser åpenbart riktig ut.
 
 ## Hvor `main` står nå
 
@@ -53,30 +56,37 @@ Tre uavhengige forekomster av SAMME anti-mønster (`.catch(() => undefined)`), f
 separate PR-er). Samme etablerte remedie i alle tre (SAMME mønster som D-180/D-196 allerede brukte
 andre steder): isolasjon/fail-safe-oppførsel UENDRET, men feilen strukturert `console.error`-logget.
 
-- **D-218 (pushet, PR #130 commit 1):** `DailyScheduler.start()` (`modules/tool-gateway/src/
+- **D-218 (pushet, PR #130 commit 1, CI grønt):** `DailyScheduler.start()` (`modules/tool-gateway/src/
   scheduler.ts`) - DEN DELTE mekanismen bak ALLE 17 schedulerte jobbene i `apps/api/src/main.ts`, kun
   3 av 17 logget sitt EGET, snevrere tilfelle. `daily_scheduler_tick_failed` strukturert logget. Ny
   testfil `scheduler.test.ts` (3 tester, embedded-Postgres).
-- **D-219 (pushet, PR #130 commit 2):** `ToolGateway.deny()` (`modules/tool-gateway/src/gateway.ts`) -
-  kalt fra ALLE 12+ avslags-stedene i `execute()` (revisjonssporet CLAUDE.md §6 skal bevises av).
-  `tool_denied_audit_write_failed` strukturert logget, avslaget returneres fortsatt normalt. Ny testfil
-  `gateway-deny-audit-failure.test.ts` (1 test, HELT DB-uavhengig).
-- **D-220 (IKKE ENNÅ PUSHET, klar for commit 3 på SAMME branch):** `ErasureService.executeErasure()`
-  sin `failErasureRequest(...)`-persistering (`modules/erasure/src/erasure-service.ts`) - smalere (ETT
-  kallsted), men GDPR-sletteforespørselens EGEN revisjonslogg: feiler persisteringen av `status=
-  'failed'` selv, blir `erasure_requests`-raden værende på `pending` for alltid, uten varsel.
+- **D-219 (pushet, PR #130 commit 2, CI grønt):** `ToolGateway.deny()` (`modules/tool-gateway/src/
+  gateway.ts`) - kalt fra ALLE 12+ avslags-stedene i `execute()` (revisjonssporet CLAUDE.md §6 skal
+  bevises av). `tool_denied_audit_write_failed` strukturert logget, avslaget returneres fortsatt
+  normalt. Ny testfil `gateway-deny-audit-failure.test.ts` (1 test, HELT DB-uavhengig).
+- **D-220 (pushet PR #130 commit 3 - CI FANT EN FEIL I TESTEN, rettet lokalt, klar for commit 4):**
+  `ErasureService.executeErasure()` sin `failErasureRequest(...)`-persistering (`modules/erasure/src/
+  erasure-service.ts`) - smalere (ETT kallsted), men GDPR-sletteforespørselens EGEN revisjonslogg.
   `erasure_request_fail_status_persist_failed` strukturert logget (begge feilene: opprinnelig
-  sletteforsøk-feil OG persist-feil). Ny test `erasure-service.test.ts` test R (embedded-Postgres,
-  gjenbruker samme selv-restaurerende monkeypatch-mønster som eksisterende test N, utvidet med
-  `connect()`-kall-telling for å treffe presist `failErasureRequest()` sitt EGET, separate connect-kall).
-- `pnpm -w typecheck`/`npx eslint .` rene (alle tre runder). `modules/tool-gateway`-suite re-kjørt
-  etter D-219: 294/294 grønne. `modules/erasure`-suite: typecheck/lint rene, selve testkjøringen KAN
-  IKKE kjøres i denne sandbox-økten (HELE `modules/erasure`-suiten krever embedded Postgres, SAMME
-  kjente `initdb: Permission denied`-begrensning - verifiseres av CI).
+  sletteforsøk-feil OG persist-feil) - FIKSEN SELV var riktig fra første commit. **CI-funn:** min egen
+  testantakelse ("raden blir værende på `pending` for alltid") var FEIL - `insertPendingErasureRequest()`
+  kjører i SAMME transaksjon som selve sletteforsøket, så når den transaksjonen ruller tilbake (samme
+  mekanisme som eksisterende test N), ruller `pending`-innsettingen tilbake MED den. Feiler BEGGE
+  innsettinger, finnes det derfor INGEN rad i det hele tatt - ikke en misvisende "pending"-rad. Testens
+  assertion (`ledgerRow.rows[0].status`) kastet `TypeError: Cannot read properties of undefined` fordi
+  raden faktisk ikke fantes. Rettet: testen asserter nå `ledgerRow.rows).toHaveLength(0)`, kode-
+  kommentaren i `erasure-service.ts` og D-220 sin egen decision-log-tekst er begge korrigert til å
+  beskrive den FAKTISKE konsekvensen (ingen rad, ikke en gjenværende `pending`-rad). Se D-220 sitt eget
+  "CI-FANGET FUNN"-avsnitt i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+- `pnpm -w typecheck`/`npx eslint .` rene (alle fire runder, inkl. CI-rettelsen). `modules/tool-gateway`-
+  suite re-kjørt etter D-219: 294/294 grønne. `modules/erasure`-suite: KAN IKKE kjøres i denne sandbox-
+  økten i det hele tatt (HELE suiten krever embedded Postgres, SAMME kjente `initdb: Permission denied`-
+  begrensning) - CI var derfor den FØRSTE faktiske kjøringen av test R, og fant nettopp derfor den reelle
+  feilen i testens egen antakelse (se lærdom over).
 - **Andre kandidater vurdert og bevisst IKKE flagget (git-auth `chmod()`, Telegram/GitHub-kø-vakter):**
   lav-innsats/ikke-sikkerhetsrelevant, bekreftet fortsatt lav prioritet i D-220-runden også.
-- **Gjenstår FØR merge:** secret-scan, commit D-220, push, oppdater PR #130 sin tittel/beskrivelse til
-  å dekke alle tre fiksene, overvåk CI, merge under D-192 når grønt/uten åpne funn.
+- **Gjenstår FØR merge:** commit CI-rettelsen (kode-kommentar + test + decision-log), push, overvåk CI
+  på nytt, merge under D-192 når grønt/uten åpne funn.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -103,8 +113,8 @@ problemer.
 
 ## Neste oppgave
 
-1. **Fullfør D-218→D-220 (PR #130):** secret-scan, commit D-220, push, oppdater PR-tittel/-beskrivelse
-   til å dekke alle tre fiksene, overvåk CI, merge under D-192 når grønt/uten åpne funn.
+1. **Fullfør D-218→D-220 (PR #130):** commit CI-rettelsen, push, overvåk CI på nytt, merge under D-192
+   når grønt/uten åpne funn.
 2. Etter dette: sjekk FØRST om denne runden selv la igjen en navngitt, uløst kandidat (se D-220s egen
    "vurdert og bevisst IKKE flagget"-liste over) FØR et helt nytt, bredt kode-nivå gap-søk startes -
    ikke stol blindt på forrige økts "Neste oppgave"-liste under punkt 3 alene.
