@@ -46,16 +46,31 @@ export const DEFAULT_PERSONALITY_CONFIG: PersonalityConfig = {
 export const SelfModificationRiskSchema = z.enum(["zero_review", "requires_approval", "forbidden"]);
 export type SelfModificationRisk = z.infer<typeof SelfModificationRiskSchema>;
 
-/** Speiler `self_modification_requests`-tabellen (migrasjon 060). */
+/**
+ * Speiler `self_modification_requests`-tabellen (migrasjon 060, utvidet av
+ * 061). `pending_job` (task #123, D-214) er NY: en `code_change`-forespørsel
+ * har, i motsetning til `personality_config`, INGEN kjent `target_paths`/
+ * `branch`/PR ved opprettelsestidspunktet - den ekte kodeagent-jobben
+ * (`createCodingHandler`/`ClaudeCodeAgent`) kjører ASYNKRONT via den
+ * eksisterende task-køen FØR noen diff i det hele tatt eksisterer å
+ * klassifisere. Raden starter derfor i `pending_job`, IKKE `pending_ci`.
+ */
 export type SelfModificationRequestStatus =
-  | "pending_ci" | "merged" | "ci_failed" | "awaiting_approval" | "approved" | "rejected" | "expired";
+  | "pending_job" | "pending_ci" | "merged" | "ci_failed" | "awaiting_approval" | "approved" | "rejected" | "expired";
 
 /**
- * INGEN `tenant_id` - selvendring er en GLOBAL, sovereign eier-handling over
- * DEN DELTE kodebasen/konfigurasjonen, ikke en tenant-partisjonert ressurs.
- * Samme "ingen RLS, ingen tenant_id"-presedens som `owner_control_state`
- * (058_owner_control_authority.sql) - se migrasjon 060 sitt filhode for
- * full begrunnelse.
+ * INGEN `tenant_id` PÅ SELVE FORESPØRSELEN - selvendring er en GLOBAL,
+ * sovereign eier-handling over DEN DELTE kodebasen/konfigurasjonen, ikke en
+ * tenant-partisjonert ressurs. Samme "ingen RLS, ingen tenant_id"-presedens
+ * som `owner_control_state` (058_owner_control_authority.sql) - se
+ * migrasjon 060 sitt filhode for full begrunnelse.
+ *
+ * `coding_task_id`/`coding_tenant_id` (migrasjon 061, task #123): KUN satt
+ * for `kind === "code_change"`-rader (`null` for `personality_config`) -
+ * den underliggende `JobContract.task_id`/`tenant_id` som
+ * `TaskService.get()` trenger for å slå opp den asynkrone kodejobbens
+ * status (task-køen ER tenant-partisjonert, selv om selvendrings-raden
+ * over den ikke er det).
  */
 export interface SelfModificationRequest {
   request_id: string;
@@ -71,4 +86,6 @@ export interface SelfModificationRequest {
   created_at: string;
   resolved_at: string | null;
   resolved_by_person_id: string | null;
+  coding_task_id: string | null;
+  coding_tenant_id: string | null;
 }

@@ -5,14 +5,17 @@ import type { ToolDefinition, ToolInvocationContext, ToolTransport } from "@jarv
 import type { SelfModificationService } from "./service.ts";
 
 /**
- * Task #121 (D-214): `self_modification.*`-navnerommet. KUN
- * `propose_personality_change` er eksponert som en ToolGateway-handling i
- * denne sliceen - selve automergen (`sweepPendingRequests()`) og
- * godkjenningsoppløsningen (`resolveApproval()`) er BEVISST IKKE
- * chat-kallbare handlinger (de kjøres av en periodisk sveip/Telegram-
- * kommando-håndtering, se apps/api/src/main.ts - å eksponere dem som
- * chat-verktøy ville åpnet en vei for en samtaletur til å trigge en merge
- * direkte, utenom CI-portvakten).
+ * Task #121+#123 (D-214): `self_modification.*`-navnerommet.
+ * `propose_personality_change` (zero-review) og `propose_code_change`
+ * (task #123, requires_approval - vilkårlig kode via den eksisterende
+ * kodeagent-pipelinen) er BEGGE eksponert som ToolGateway-handlinger -
+ * selve automergen (`sweepPendingRequests()`/`sweepApprovedRequests()`),
+ * jobb-oppfølgingen (`sweepPendingJobs()`) og godkjenningsoppløsningen
+ * (`resolveApproval()`) er BEVISST IKKE chat-kallbare handlinger (de kjøres
+ * av en periodisk sveip/Telegram-kommando-håndtering, se
+ * apps/api/src/main.ts - å eksponere dem som chat-verktøy ville åpnet en
+ * vei for en samtaletur til å trigge en merge direkte, utenom CI-portvakten
+ * eller eier-godkjenningen).
  */
 export class SelfModificationTransport implements ToolTransport {
   constructor(private readonly service: SelfModificationService) {}
@@ -35,6 +38,11 @@ export class SelfModificationTransport implements ToolTransport {
           tone_descriptors: toneDescriptors,
           style_notes: styleNotes
         });
+        return { external_id: result.request_id, data: result as unknown as JsonValue };
+      }
+      case "propose_code_change": {
+        const goal = requireString(parameters, "goal");
+        const result = await this.service.proposeCodeChange(identity, { goal });
         return { external_id: result.request_id, data: result as unknown as JsonValue };
       }
       default:
@@ -78,6 +86,15 @@ export function selfModificationToolDefinitions(transport: SelfModificationTrans
       input_schema: record({ tone_descriptors: z.array(z.string()), style_notes: z.string() }),
       capability_class: "B", scopes: ["self_modification.personality"],
       reversible: true, rollback_procedure: "git revert av selvendrings-commiten (eller en ny propose_personality_change)",
+      idempotent_external: false, timeout_ms: 60_000, rate_limit_per_minute: 5,
+      credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal", transport
+    },
+    {
+      tool_id: "self_modification", action: "propose_code_change",
+      description: "Be om en vilkårlig kodeendring i Jarvis sin egen kildekode (task #123, D-214) - kjører via den eksisterende kodeagent-pipelinen, produserer en PR, og venter på eksplisitt eier-godkjenning (/godkjenn i Telegram) FØR noe merges. Rører aldri forbudte stier (policy/owner-controls/self-modification/CI/migrasjoner/hemmeligheter) uansett godkjenning.",
+      input_schema: record({ goal: z.string() }),
+      capability_class: "B", scopes: ["self_modification.code"],
+      reversible: true, rollback_procedure: "avvis raden (/avvis) FØR godkjenning, eller git revert av selvendrings-commiten etter en eventuell merge",
       idempotent_external: false, timeout_ms: 60_000, rate_limit_per_minute: 5,
       credential_ref: BUSINESS_INTERNAL_CREDENTIAL_REF, output_trust: "internal", transport
     }
