@@ -1,8 +1,12 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d233-q36-supabase-resolved`, basert på fersk
-`origin/main` som allerede inkluderer D-230/D-231/D-232, alle merget - `git fetch origin main`
-kjørt før branch-opprettelse). **D-233: Q-36 (Supabase) LUKKET** - Tobias bekreftet direkte at
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d234-neo4j-1password-dropped`, basert på
+`claude/fase-d233-q36-supabase-resolved` sin commit, PR #145 IKKE ENNÅ merget da denne branchen ble
+opprettet). **D-234: Q-37 (Neo4j) og Q-38 (1Password) LUKKET - BEGGE DROPPET** fra backlogen
+("Hvis vi ikke trenger neo4j eller 1passord så dropper vi de" - Tobias, direkte chat). Business
+Graph (UA-3) dekker Neo4j-behovet, Infisical dekker 1Password-behovet - begge allerede
+produksjonsverifiserte/wired. Kun Q-39 (Windows/macOS) står igjen åpen av D-231 sine fem flaggede
+punkter. **D-233 (tidligere, PR #145): Q-36 (Supabase) LUKKET** - Tobias bekreftet direkte at
 Supabase på D-231-listen betyr kun Postgres-hosting, ikke Supabase-spesifikke API-er. Ingen
 konflikt med regel 9, ingen ny connector, ingen kode. Q-37/Q-38/Q-39 (Neo4j/1Password/
 Windows-macOS) FORBLIR åpne. **D-232 (tidligere): 50 av D-231 sine
