@@ -1,8 +1,11 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d232-backlog-connectors-visible`, basert på fersk
-`origin/main` som allerede inkluderer D-230 K2-dashboardet + D-231 integrasjons-backlog-planen,
-begge merget - `git fetch origin main` kjørt før branch-opprettelse). **D-232: 50 av D-231 sine
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d233-q36-supabase-resolved`, basert på fersk
+`origin/main` som allerede inkluderer D-230/D-231/D-232, alle merget - `git fetch origin main`
+kjørt før branch-opprettelse). **D-233: Q-36 (Supabase) LUKKET** - Tobias bekreftet direkte at
+Supabase på D-231-listen betyr kun Postgres-hosting, ikke Supabase-spesifikke API-er. Ingen
+konflikt med regel 9, ingen ny connector, ingen kode. Q-37/Q-38/Q-39 (Neo4j/1Password/
+Windows-macOS) FORBLIR åpne. **D-232 (tidligere): 50 av D-231 sine
 `NY_BACKLOG`-punkter lagt til i `connector-registry.ts`/dashbordets "Integrasjoner"-seksjon som
 synlige, EKSPLISITT "ikke konfigurert"-oppføringer** (Tobias direkte: "Legg de til i dashbordet
 selv om de ikke er klare for tilkobling så de er der"). To nye `category`-verdier
