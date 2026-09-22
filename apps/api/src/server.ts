@@ -187,8 +187,40 @@ const BRIEF_BODY_KEYS = ["grant_token"] as const;
 // tredje oppføring - "test connector"/"lim inn nøkkel"-mutasjoner er BEVISST
 // IKKE lagt til her, samme "P0 lese FØR P1 mutasjon"-rekkefølge D-199 selv
 // dokumenterte for denne allowlisten.
-const EXECUTIVE_QUERY_ACTIONS = ["get_attention_queue", "get_control_surface_status", "get_connector_status"] as const;
+// D-230 (K2 governance-dashboard): `get_delegation_board` er den FJERDE
+// lese-handlingen - allerede bygget/host-provent klasse A (executive/
+// transport.ts) som KUN var ikke-allowlistet ennå, INGEN ny logikk her.
+// Delegeringstavlen leses via /executive/query (IKKE /governance/query) -
+// samme "komposisjon, ingen egen tabell"-begrunnelse som selve handlingen.
+const EXECUTIVE_QUERY_ACTIONS = [
+  "get_attention_queue", "get_control_surface_status", "get_connector_status", "get_delegation_board"
+] as const;
 const EXECUTIVE_QUERY_BODY_KEYS = ["grant_token", "action", "parameters"] as const;
+
+/**
+ * D-230 (K2 governance-dashboard): `@jarvis/governance` (migrasjon 059) var
+ * FERDIG BYGGET og testet (`modules/governance/test/`), men uten HTTP-rute/
+ * UI - denne allowlisten er den LESE-KUN halvdelen, SAMME "hardkodet
+ * allowlist, ALDRI hele verktøyet"-disiplin som `EXECUTIVE_QUERY_ACTIONS`.
+ * Speiler EKSAKT de fem `read(...)`-handlingene `governanceToolDefinitions()`
+ * (modules/governance/src/transport.ts) selv definerer.
+ */
+const GOVERNANCE_QUERY_ACTIONS = ["list_decisions", "list_scenarios", "list_risks", "list_goals"] as const;
+
+/**
+ * D-230: skrive-halvdelen. ALLE ti handlingene er klasse A/B per
+ * `governanceToolDefinitions()` - INGEN klasse C/D finnes i
+ * `@jarvis/governance` (rene journalposter, aldri en ekstern mutasjon), så
+ * denne ruten krever INGEN ekstra bekreftelsesdialog-plikt slik
+ * `/executive/mutate` sine klasse D-handlinger gjør (se `dashboard.html` sin
+ * "Styring (K2)"-seksjon: skriveoperasjoner går direkte, samme mønster som
+ * `mutateOwnerControls()` sine klasse C-handlinger allerede gjør uten modal).
+ */
+const GOVERNANCE_MUTATE_ACTIONS = [
+  "create_decision", "reverse_decision", "create_scenario", "update_scenario_status",
+  "create_risk", "update_risk", "create_goal", "update_goal_status",
+  "add_key_result", "update_key_result_progress"
+] as const;
 
 /**
  * Task #122 (D-213): eierens FØRSTE mutasjonsrute på dashbordet.
@@ -623,6 +655,81 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
     }
     const result = await deps.executive.gateway.execute({
       identity: resolved.identity, tool_id: "executive", action, parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/governance/query") {
+    // D-230: SAMME rekkefølge/avslagsform/kroppsform som /executive/query -
+    // avvis en ugyldig action FØR grantet løses, avvis et ugyldig/utløpt
+    // grant FØR gateway.execute() nås. `tool_id: "governance"` - DEN SAMME
+    // `toolGateway`-instansen `deps.executive.gateway` allerede peker på
+    // (`governanceToolDefinitions()` registrert i main.ts), INGEN ny
+    // ApiDeps-nøkkel.
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
+    }
+    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody || typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    }
+    const action = parsedBody["action"];
+    if (!(GOVERNANCE_QUERY_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "governance", action, parameters
+    });
+    if (!result.ok) {
+      return json(res, 403, { error: "tool_denied", reason: result.reason });
+    }
+    return json(res, 200, { ok: true, data: result.data, session_id: resolved.identity.session_id });
+  }
+
+  if (deps.executive && req.method === "POST" && url.pathname === "/governance/mutate") {
+    // D-230: EGEN, HELT NY rute (aldri en utvidelse av /governance/query,
+    // samme "egen rute per risikoklasse-endring, aldri utvid en eksisterende
+    // lese-only-rute til å skrive"-disiplin D-211/D-213/D-199 allerede
+    // fulgte). ALLE ti handlingene er klasse A/B - INGEN klasse C/D-
+    // preflight-krav her, i motsetning til /executive/mutate.
+    let raw: unknown;
+    try {
+      raw = await readBody(req);
+    } catch {
+      raw = undefined;
+    }
+    const parsedBody = parseGrantBody(raw, EXECUTIVE_QUERY_BODY_KEYS);
+    if (!parsedBody || typeof parsedBody["action"] !== "string") {
+      return json(res, 400, { error: "malformed_request", reason: "grant_malformed" });
+    }
+    const action = parsedBody["action"];
+    if (!(GOVERNANCE_MUTATE_ACTIONS as readonly string[]).includes(action)) {
+      return json(res, 400, { error: "malformed_request", reason: "action_not_allowed" });
+    }
+    const parameters =
+      typeof parsedBody["parameters"] === "object" && parsedBody["parameters"] !== null && !Array.isArray(parsedBody["parameters"])
+        ? (parsedBody["parameters"] as Record<string, JsonValue>)
+        : {};
+    const resolved = await resolveFromGrant(deps, parsedBody["grant_token"] as string);
+    if (!resolved.ok) {
+      return json(res, 403, { error: "identity_denied", reason: resolved.reason });
+    }
+    const result = await deps.executive.gateway.execute({
+      identity: resolved.identity, tool_id: "governance", action, parameters
     });
     if (!result.ok) {
       return json(res, 403, { error: "tool_denied", reason: result.reason });

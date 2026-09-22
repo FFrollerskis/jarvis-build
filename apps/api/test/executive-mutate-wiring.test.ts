@@ -52,11 +52,13 @@ describe("A: EXECUTIVE_MUTATE_ACTIONS inneholder NØYAKTIG de 12 executive.*-mut
 });
 
 describe("B: EXECUTIVE_QUERY_ACTIONS forblir UENDRET/lese-kun av denne sliceen", () => {
-  it("fortsatt KUN get_attention_queue, get_control_surface_status, get_connector_status", () => {
-    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([^\]]*)\] as const;/);
+  it("fortsatt KUN get_attention_queue, get_control_surface_status, get_connector_status, get_delegation_board (D-230 la til den fjerde, ikke denne sliceen)", () => {
+    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([\s\S]*?)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status", "get_connector_status"].sort());
+    expect(actions.sort()).toEqual(
+      ["get_attention_queue", "get_control_surface_status", "get_connector_status", "get_delegation_board"].sort()
+    );
   });
 });
 

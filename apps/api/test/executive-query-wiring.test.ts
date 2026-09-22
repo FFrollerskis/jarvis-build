@@ -38,11 +38,13 @@ describe("A: main.ts wirer executive.gateway inn i ApiDeps med SAMME toolGateway
 });
 
 describe("B: server.ts sin /executive/query-allowlist er og forblir LESE-KUN", () => {
-  it("EXECUTIVE_QUERY_ACTIONS inneholder KUN get_attention_queue, get_control_surface_status og get_connector_status (task #119, D-211)", () => {
-    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([^\]]*)\] as const;/);
+  it("EXECUTIVE_QUERY_ACTIONS inneholder KUN get_attention_queue, get_control_surface_status, get_connector_status og get_delegation_board (task #119/D-211, D-230)", () => {
+    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([\s\S]*?)\] as const;/);
     expect(match).not.toBeNull();
     const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status", "get_connector_status"].sort());
+    expect(actions.sort()).toEqual(
+      ["get_attention_queue", "get_control_surface_status", "get_connector_status", "get_delegation_board"].sort()
+    );
   });
 
   it("ingen kjent mutasjonshandling (pause_domain/resume_domain/resolve_situation/activate_kill_switch/deactivate_kill_switch/freeze_connector/unfreeze_connector/revoke_credential/restore_credential/revoke_device/enable_finance_kill_switch/disable_finance_kill_switch) forekommer i EXECUTIVE_QUERY_ACTIONS-linjen", () => {
@@ -84,10 +86,12 @@ describe("C: /owner-controls/connector-credentials (task #122, D-213) - EGEN rut
     expect(actions.sort()).toEqual(["set_connector_credential", "test_connector"].sort());
   });
 
-  it("EXECUTIVE_QUERY_ACTIONS forblir UENDRET av denne ruten - fortsatt KUN de tre lese-handlingene", () => {
-    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([^\]]*)\] as const;/);
+  it("EXECUTIVE_QUERY_ACTIONS forblir UENDRET av denne ruten - fortsatt KUN de fire lese-handlingene (D-230 la til get_delegation_board, ikke denne ruten)", () => {
+    const match = serverSource.match(/const EXECUTIVE_QUERY_ACTIONS = \[([\s\S]*?)\] as const;/);
     const actions = (match?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean);
-    expect(actions.sort()).toEqual(["get_attention_queue", "get_control_surface_status", "get_connector_status"].sort());
+    expect(actions.sort()).toEqual(
+      ["get_attention_queue", "get_control_surface_status", "get_connector_status", "get_delegation_board"].sort()
+    );
   });
 
   it("ingen kjent klasse D/C-mutasjon utenfor de to nye handlingene (activate_kill_switch/deactivate_kill_switch/freeze_connector/unfreeze_connector/revoke_credential/restore_credential/revoke_device) forekommer i OWNER_CONTROLS_CONNECTOR_ACTIONS-linjen", () => {
