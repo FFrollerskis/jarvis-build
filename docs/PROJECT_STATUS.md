@@ -1,13 +1,38 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d236-env-secret-empty-value`). **D-236: EKTE
-KODEFIKS** - `EnvSecretProvider.get()` (`modules/tool-gateway/src/gateway.ts`) behandlet en
-tom-men-satt `.env`-linje (f.eks. `JARVIS_VIPPS_CLIENT_ID=`) som en "verdi" (kun
-`process.env[ref] ?? null`, som ALDRI fanger tom streng) - dashbordets "Integrasjoner"-seksjon viste
-derfor connectorer som Vipps som `konfigurert` selv om Tobias aldri hadde limt inn ekte credentials.
-Funnet av Tobias SELV, live på sin egen ferske Docker-kjøring ("VIPPS ER IKKE INTEGRERT Å DET STÅR
-DET ER DET"), rotårsak sporet til kildekoden (ikke gjettet), fikset til `return value ? value : null`.
-5 nye tester (`env-secret-provider-empty-value.test.ts`), eksisterende `connector-registry.test.ts`/
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d237-d238-capability-dashboard-ux`). **D-237+D-238:
+EKTE KODEFIKS + UX-forbedring**, samme Tobias-melding ("gjør dash mer kult ... viktig at han vet om
+alt han kan gjøre og har tilgang til"):
+- **D-237 (selv-bevissthet):** `check_my_capabilities`/`executive.get_capability_status` sin
+  `chat_accessible_tools` viste FØR bare om et mesh-verktøy STRUKTURELT fantes, aldri om det
+  underliggende credential-referansen faktisk var konfigurert - Charlie kunne dermed liste
+  `read_recent_email` som "tilgjengelig" selv om `JARVIS_EMAIL_TOKEN` var tomt. Ny
+  `meshToolBindings()`-eksport (`@jarvis/tool-gateway`) + `gateway.hasSecret()`-oppslag per binding i
+  `ExecutiveService.getCapabilityStatus()` gir nå et `configured: boolean`-felt per verktøy. 10
+  tester i `capability-status.test.ts` (opp fra 8), 2 nye som beviser BÅDE positiv/negativ
+  `configured`-status og fail-closed for en ikke-registrert binding.
+- **D-238 (dashbord-UX):** "Integrasjoner"-seksjonen (64 connectorer i én flat liste) fikk
+  kategorisert/kollapsbar gruppering (`<details>`/`<summary>`, "X/Y konfigurert" per gruppe), et
+  samlet "N av M konfigurert" og et klientside-søkefelt (navn/kategori, ingen nytt nettverkskall).
+  RENT presentasjon - `ConnectorStatusReport`-API-et uendret. Verifisert visuelt med en
+  fetch()-mock + headless Chromium-skjermbilde gjennom HELE den ekte enhets-/grant-/lasteflyten
+  (siden denne sandboxen ikke har Docker/Postgres) - gruppering/telling/åpen-lukket-standard
+  fungerte eksakt som beskrevet. Fant OG rettet, FØR commit, en vacuous test-regresjon jeg selv
+  introduserte (`dashboard-connector-credentials-wiring.test.ts` sitt eksakte
+  `"function renderConnectors(data)"`-strengsøk sluttet å matche etter signaturendringen, ga
+  `idx=-1` og en TOM `block` som gjorde `not.toMatch(...)` sann av feil grunn - rettet til et åpent
+  prefiks-søk PLUSS eksplisitte lengde-/indeks-vakter).
+
+Se D-237/D-238 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-236 (PR #149, MERGET, `1a73ab4`).** `EnvSecretProvider.get()`
+(`modules/tool-gateway/src/gateway.ts`) behandlet en tom-men-satt `.env`-linje (f.eks.
+`JARVIS_VIPPS_CLIENT_ID=`) som en "verdi" (kun `process.env[ref] ?? null`, som ALDRI fanger tom
+streng) - dashbordets "Integrasjoner"-seksjon viste derfor connectorer som Vipps som `konfigurert`
+selv om Tobias aldri hadde limt inn ekte credentials. Funnet av Tobias SELV, live på sin egen ferske
+Docker-kjøring ("VIPPS ER IKKE INTEGRERT Å DET STÅR DET ER DET"), rotårsak sporet til kildekoden
+(ikke gjettet), fikset til `return value ? value : null`. 5 nye tester
+(`env-secret-provider-empty-value.test.ts`), eksisterende `connector-registry.test.ts`/
 `d213-writable-secret-provider.test.ts` re-kjørt uendret grønt. Se D-236 i
 DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 

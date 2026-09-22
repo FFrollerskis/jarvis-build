@@ -45,10 +45,18 @@ describe("B: renderConnectors() aldri ekkoer en credential-VERDI inn i DOM-en - 
     expect(html).toMatch(/<input type="password" placeholder="lim inn ny verdi/);
   });
 
-  it("renderConnectors() interpolerer ALDRI et 'value'-felt fra connector-statusen (kun ref/configured/id/display_name/category/health/test_method)", () => {
-    const idx = html.indexOf("function renderConnectors(data)");
-    const end = html.indexOf("connectorsEl.addEventListener", idx);
+  it("renderConnectors()/renderConnectorCard() interpolerer ALDRI et 'value'-felt fra connector-statusen (kun ref/configured/id/display_name/category/health/test_method)", () => {
+    // D-238: signaturen fikk et andre, valgfritt `filterText`-argument (gruppering/søk i
+    // Integrasjoner-seksjonen) - eksakt `(data)` matcher derfor ikke lenger. Søket bruker et
+    // åpent prefiks ("function renderConnectors(") slik at det overlever fremtidige
+    // parameterendringer, i stedet for å stille slutte å bevise noe (idx=-1 ga tidligere en
+    // TOM block og en vacuous PASS uten at noe faktisk ble sjekket).
+    const idx = html.indexOf("function renderConnectors(");
+    expect(idx).toBeGreaterThan(-1);
+    const end = html.indexOf("connectorFilterEl.addEventListener", idx);
+    expect(end).toBeGreaterThan(idx);
     const block = html.slice(idx, end);
+    expect(block.length).toBeGreaterThan(0);
     expect(block).not.toMatch(/cred\.value/);
     expect(block).not.toMatch(/c\.value/);
   });

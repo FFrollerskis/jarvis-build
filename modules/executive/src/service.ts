@@ -6,7 +6,7 @@ import type {
   SituationAutonomyPolicy,
   SituationNotificationPolicy
 } from "@jarvis/situations";
-import { listConnectorStatus, meshToolDefinitions, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
+import { listConnectorStatus, meshToolBindings, type ToolGateway, type ToolResult } from "@jarvis/tool-gateway";
 import { rankAttentionQueue } from "./ranking.ts";
 import type {
   AttentionItem, AttentionItemDetail, CapabilityStatus, ConnectorStatusReport, ControlSurfaceStatus, DelegationBoard
@@ -272,15 +272,28 @@ export class ExecutiveService {
    * "Charlie"-selv-bevissthet (D-209): se `types.ts` sitt `CapabilityStatus`-
    * dokumentasjonskommentar for hele begrunnelsen. BEVISST INGEN nøstet
    * `gateway.execute()`-kall her (i motsetning til metodene over) - dette
-   * leser KUN `ToolGateway` sin EGEN bokføring (`meshToolDefinitions()`/
+   * leser KUN `ToolGateway` sin EGEN bokføring (`meshToolBindings()`/
    * `gateway.health`, samme direkte-tilgang-mønster som `apps/api/src/
    * main.ts`/`server.ts` sin eksisterende `/infra/status`-rute allerede
    * bruker) - INGEN identitet trengs, INGEN policy-runde utover den YTRE
    * `executive.get_capability_status`-kallet selv allerede krever.
+   *
+   * D-237: `configured` per verktøy kommer fra `gateway.hasSecret()` -
+   * SAMME presence-only-metode `hasSecret()` sin egen kontrakt allerede
+   * garanterer (verdien går ALDRI hit) - `gateway.get(tool_id, action)`
+   * slår kun opp den REGISTRERTE `ToolDefinition` for å finne
+   * `credential_ref`, aldri et nytt, parallelt oppslag.
    */
   async getCapabilityStatus(): Promise<CapabilityStatus> {
+    const chatAccessibleTools = await Promise.all(
+      meshToolBindings().map(async (binding) => {
+        const definition = this.gateway.get(binding.tool_id, binding.action);
+        const configured = definition ? await this.gateway.hasSecret(definition.credential_ref) : false;
+        return { name: binding.name, description: binding.description, configured };
+      })
+    );
     return {
-      chat_accessible_tools: meshToolDefinitions().map((d) => ({ name: d.name, description: d.description })),
+      chat_accessible_tools: chatAccessibleTools,
       connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h }))
     };
   }

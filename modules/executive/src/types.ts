@@ -159,6 +159,14 @@ export interface DelegationBoard {
  * `mesh-bridge.ts`) - ALDRI en egen, potensielt avvikende kopi. Å spørre
  * "hva har jeg tilgang til" via DETTE verktøyet er derfor strukturelt
  * umulig å svare feil på - svaret ER kilden selve chat-verktøykjeden bruker.
+ * D-237 (funn i faktisk bruk, 2026-09-22): opprinnelig listet
+ * `chat_accessible_tools` KUN navn/beskrivelse - et mesh-verktøy sto der
+ * selv om det underliggende credential-referansen var helt ukonfigurert,
+ * fordi listen kun beviste at verktøyet STRUKTURELT fantes, ALDRI om det
+ * faktisk var BRUKBART akkurat nå. `configured` lukker nøyaktig DET gapet -
+ * samme `ToolGateway.hasSecret()`-presence-sjekk dashbordets "Integrasjoner"
+ * allerede bruker (`@jarvis/tool-gateway` sin `listConnectorStatus()`), nå
+ * også tilgjengelig FRA SELVE SAMTALEN per mesh-verktøy.
  * `connector_health` er RENT avledet av `ToolGateway.health` (BO-03,
  * `gateway.ts`) - SAMME kilde som `/infra/status`-ruten allerede eksponerer
  * til eieren via HTTP, nå også tilgjengelig FRA SELVE SAMTALEN. Helsen er
@@ -170,7 +178,7 @@ export interface DelegationBoard {
  * - se D-209/task-sporing for videre arbeid.
  */
 export interface CapabilityStatus {
-  chat_accessible_tools: Array<{ name: string; description: string }>;
+  chat_accessible_tools: Array<{ name: string; description: string; configured: boolean }>;
   connector_health: Array<{ tool_id: string; state: string; at: string; detail?: string }>;
 }
 

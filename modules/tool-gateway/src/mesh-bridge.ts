@@ -110,6 +110,29 @@ const MESH_TOOLS: MeshToolMapping[] = [
   }
 ];
 
+/**
+ * D-237 (Charlie-selv-bevissthet, funn i faktisk bruk): `meshToolDefinitions()`
+ * alene eksponerer KUN navn/beskrivelse - ingen vei til å slå opp det
+ * underliggende `tool_id`/`action`-paret og dermed `credential_ref`.
+ * `ExecutiveService.getCapabilityStatus()` (D-209, "check_my_capabilities")
+ * trengte nettopp DET for å kunne svare "har jeg faktisk credential for
+ * dette, akkurat nå" - uten denne eksporten kunne `chat_accessible_tools`
+ * kun liste STRUKTURELT eksisterende mesh-verktøy, ALDRI om de faktisk var
+ * brukbare (samme konfabulasjonsgap D-209 selv ble bygget for å lukke, bare
+ * for credential-dimensjonen i stedet for tool-eksistens-dimensjonen).
+ * `parameters`-closuren (trusted-lag-internt, ALDRI modell-styrt) er
+ * BEVISST IKKE med her.
+ */
+export interface MeshToolBinding {
+  name: string;
+  description: string;
+  tool_id: string;
+  action: string;
+}
+export function meshToolBindings(tools: MeshToolMapping[] = MESH_TOOLS): MeshToolBinding[] {
+  return tools.map((t) => ({ name: t.def.name, description: t.def.description, tool_id: t.tool_id, action: t.action }));
+}
+
 export function meshToolDefinitions(tools: MeshToolMapping[] = MESH_TOOLS): MeshToolDefinition[] {
   return tools.map((t) => t.def);
 }
