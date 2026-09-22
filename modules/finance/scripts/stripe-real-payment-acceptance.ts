@@ -400,9 +400,29 @@ async function main(): Promise<void> {
     // prosesser).
     await sleep(2000);
 
-    // Den EKTE payment_intent.succeeded-hendelsen ble allerede utløst av
-    // det EKTE confirm-kallet i STRIPE_PAYMENT_EXECUTION over - Stripe
-    // sender den asynkront til `stripe listen` sin tunnel akkurat nå.
+    // `stripe listen` er en LIVE tunnel, IKKE en hendelses-omspilling -
+    // den forwarder KUN hendelser Stripe sender ETTER at tunnelen faktisk
+    // koblet til. Den EKTE `payment_intent.succeeded`-hendelsen fra
+    // STRIPE_PAYMENT_EXECUTION over ble derfor allerede sendt og tapt FØR
+    // denne tunnelen i det hele tatt eksisterte (seksjonene kjører
+    // sekvensielt, tunnelen startes FØRST her) - Stripe sender den ALDRI
+    // på nytt bare fordi en ny lytter kobler til senere. Trigger derfor en
+    // FERSK, EKTE `payment_intent.succeeded`-hendelse HER, ETTER at
+    // tunnelen er koblet til, SAMME create->submit->confirm-mønster som
+    // STRIPE_PAYMENT_EXECUTION over.
+    const webhookIntent = await financeAction("create_payment_intent", {
+      tenant_id: TENANT_A, idempotency_key: `stripe-real-webhook-${runId}`, purpose: "D-225 webhook reachability", amount_ore: 1_000,
+      vendor_name: "D-225 webhook test", account_code: "stripe-category", provider: "stripe"
+    });
+    const webhookIntentId = mustExternalId(webhookIntent, "stripe_webhook_create");
+    const webhookSubmit = await financeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: webhookIntentId });
+    if (!webhookSubmit.ok) throw new Error(`webhook_submit_payment_intent_denied:${webhookSubmit.reason}`);
+    const webhookAfterSubmit = await finance.getPaymentIntent(TENANT_A, "business", webhookIntentId);
+    if (!webhookAfterSubmit?.provider_ref) throw new Error("webhook_submit_payment_intent_returned_no_provider_ref");
+    const webhookConfirmed = await confirmWithTestCardFixture(testKey, webhookAfterSubmit.provider_ref, `stripe-real-webhook-confirm-${runId}`);
+    assertLivemodeFalse("webhook_confirm_payment_intent", webhookConfirmed);
+    log(`webhook_trigger_pi_id=${webhookAfterSubmit.provider_ref} confirm_response_status=${(webhookConfirmed as { status?: string }).status ?? "unknown"}`);
+
     const event = await waitForWebhookEvent(TENANT_A, 30_000);
     if (!event) {
       results.stripe_webhook_reachability = "FAIL";
