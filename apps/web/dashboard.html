@@ -42,6 +42,18 @@
   .pill.prob-medium { background:#1f2d3d; color:#9cc4ff; }
   .pill.prob-low { background:#21262d; color:#8b949e; }
   .empty { color:#8b949e; font-style:italic; }
+  .connectors-summary { color:#8b949e; font-size:13px; margin-bottom:8px; }
+  .connector-filter { width:100%; box-sizing:border-box; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
+                       border-radius:8px; padding:8px 10px; font-size:13px; margin-bottom:12px; }
+  .connector-filter:focus { outline:1px solid #58a6ff; }
+  .connector-group { border:1px solid #21262d; border-radius:10px; margin-bottom:10px; overflow:hidden; }
+  .connector-group summary { cursor:pointer; padding:10px 14px; background:#161b22; font-weight:600; font-size:13px;
+                              color:#c9d1d9; list-style:none; display:flex; align-items:center; gap:8px; }
+  .connector-group summary::-webkit-details-marker { display:none; }
+  .connector-group summary::before { content:"▸"; color:#8b949e; transition:transform 0.15s ease; }
+  .connector-group[open] summary::before { transform:rotate(90deg); }
+  .connector-group-body { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .connector-group .card { margin-bottom:0; }
   .cred-row { display:flex; gap:6px; margin-top:6px; align-items:center; }
   .cred-row label { font-size:12px; color:#8b949e; min-width:0; flex:0 0 auto; }
   .cred-row input { flex:1; min-width:0; background:#0d1117; color:#e6edf3; border:1px solid #30363d;
@@ -156,6 +168,8 @@
          (/owner-controls/connector-credentials), ALDRI via /executive/query
          (som D-199 sier skal forbli lese-kun for alltid). -->
     <h2>Integrasjoner</h2>
+    <div id="connectors-summary" class="connectors-summary"></div>
+    <input type="search" id="connector-filter" class="connector-filter" placeholder="Søk connector (navn eller kategori) …" autocomplete="off">
     <div id="connectors"><p class="empty">Laster …</p></div>
   </section>
   <section>
@@ -778,38 +792,115 @@
    * hver `innerHTML`-oppdatering ville ellers fjernet direkte-festede
    * lyttere.
    */
-  function renderConnectors(data) {
-    const connectors = (data && Array.isArray(data.connectors)) ? data.connectors : [];
-    if (connectors.length === 0) {
+  /**
+   * D-238 (kosmetisk/UX, Tobias direkte i chat: "gjør dash mer kult ...
+   * viktig at han vet om alt han kan gjøre og har tilgang til" - denne
+   * delen dekker "kult"/oversikt; selv-bevissthet-delen er D-237 i
+   * `@jarvis/executive`). 64 connectorer i én flat liste var reelt tungt å
+   * orientere seg i - INGEN datamodell/API-endring her, KUN presentasjon:
+   * samme `ConnectorStatus[]` grupperes etter `c.category` (allerede en
+   * streng-verdi backend/registeret selv eier - `connector-registry.ts`
+   * kan fortsatt legge til nye kategori-verdier UTEN at denne filen må
+   * endres, samme "ingen ny UI-kode nødvendig"-egenskap D-232 allerede
+   * beviste for selve oppføringene). Ukjente/fremtidige kategorier faller
+   * tilbake til en auto-generert etikett (understrek -> mellomrom, stor
+   * forbokstav) og sorteres alfabetisk etter de kjente.
+   */
+  const CONNECTOR_CATEGORY_LABELS = {
+    tool_gateway: "Kjerneverktøy",
+    model_provider: "Modell-leverandører",
+    finance: "Finans",
+    backlog: "Backlog (ikke bygget ennå)",
+    backlog_d64_gate: "Backlog - krever arkitekturbeslutning (D-64)"
+  };
+  const CONNECTOR_CATEGORY_ORDER = ["tool_gateway", "model_provider", "finance", "backlog", "backlog_d64_gate"];
+  const connectorFilterEl = document.getElementById("connector-filter");
+  const connectorsSummaryEl = document.getElementById("connectors-summary");
+  let lastConnectorsData = null;
+
+  function connectorCategoryLabel(category) {
+    if (CONNECTOR_CATEGORY_LABELS[category]) return CONNECTOR_CATEGORY_LABELS[category];
+    const words = String(category || "ukjent").split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1));
+    return words.join(" ");
+  }
+
+  function renderConnectorCard(c) {
+    const name = escapeHtml(c.display_name || c.id);
+    const configured = !!c.configured;
+    const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
+    const isLive = c.test_method === "live";
+    const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
+    const credRows = (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
+      const ref = escapeHtml(cred.ref);
+      return '<div class="cred-row">' +
+        '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
+        '<input type="password" placeholder="lim inn ny verdi …" data-cred-input data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '" autocomplete="off">' +
+        '<button data-save-cred data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '">Lagre</button>' +
+        "</div>";
+    }).join("");
+    return '<div class="card" data-connector-card="' + escapeHtml(c.id) + '">' +
+      '<span class="pill ' + (configured ? "conn-configured" : "conn-missing") + '">' +
+        (configured ? "konfigurert" : "ikke konfigurert") + "</span>" +
+      '<div class="title">' + name + "</div>" +
+      '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>" +
+      credRows +
+      (isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
+      '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>' +
+      "</div>";
+  }
+
+  function renderConnectors(data, filterText) {
+    if (data) lastConnectorsData = data;
+    const allConnectors = (lastConnectorsData && Array.isArray(lastConnectorsData.connectors)) ? lastConnectorsData.connectors : [];
+    if (allConnectors.length === 0) {
+      connectorsSummaryEl.textContent = "";
       connectorsEl.innerHTML = '<p class="empty">Ingen connectorer registrert.</p>';
       return;
     }
-    connectorsEl.innerHTML = connectors.map((c) => {
-      const name = escapeHtml(c.display_name || c.id);
-      const configured = !!c.configured;
-      const health = c.health && c.health.state ? escapeHtml(c.health.state) : "ikke testet ennå";
-      const isLive = c.test_method === "live";
-      const testMethod = isLive ? "live-testbar" : "kun presence-sjekk";
-      const credRows = (Array.isArray(c.credentials) ? c.credentials : []).map((cred) => {
-        const ref = escapeHtml(cred.ref);
-        return '<div class="cred-row">' +
-          '<label title="' + ref + '">' + ref + (cred.configured ? " ✓" : "") + '</label>' +
-          '<input type="password" placeholder="lim inn ny verdi …" data-cred-input data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '" autocomplete="off">' +
-          '<button data-save-cred data-connector-id="' + escapeHtml(c.id) + '" data-credential-ref="' + ref + '">Lagre</button>' +
-          "</div>";
-      }).join("");
-      return '<div class="card" data-connector-card="' + escapeHtml(c.id) + '">' +
-        '<span class="pill ' + (configured ? "conn-configured" : "conn-missing") + '">' +
-          (configured ? "konfigurert" : "ikke konfigurert") + "</span>" +
-        '<span class="pill">' + escapeHtml(c.category) + "</span>" +
-        '<div class="title">' + name + "</div>" +
-        '<div class="meta">Helse: ' + health + " · " + testMethod + "</div>" +
-        credRows +
-        (isLive ? '<button class="test-btn" data-test-connector data-connector-id="' + escapeHtml(c.id) + '">Test tilkobling</button>' : "") +
-        '<div class="test-result" data-test-result="' + escapeHtml(c.id) + '"></div>' +
-        "</div>";
+    const configuredCount = allConnectors.filter((c) => c.configured).length;
+    connectorsSummaryEl.textContent = configuredCount + " av " + allConnectors.length + " connectorer konfigurert";
+
+    const term = (filterText || "").trim().toLowerCase();
+    const connectors = term
+      ? allConnectors.filter((c) =>
+          (c.display_name || c.id || "").toLowerCase().includes(term) ||
+          connectorCategoryLabel(c.category).toLowerCase().includes(term))
+      : allConnectors;
+    if (connectors.length === 0) {
+      connectorsEl.innerHTML = '<p class="empty">Ingen connectorer matcher «' + escapeHtml(filterText) + '».</p>';
+      return;
+    }
+
+    const groups = new Map();
+    connectors.forEach((c) => {
+      const key = c.category || "ukjent";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    });
+    const orderedKeys = [...groups.keys()].sort((a, b) => {
+      const ia = CONNECTOR_CATEGORY_ORDER.indexOf(a);
+      const ib = CONNECTOR_CATEGORY_ORDER.indexOf(b);
+      if (ia === -1 && ib === -1) return a.localeCompare(b);
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+
+    connectorsEl.innerHTML = orderedKeys.map((key) => {
+      const items = groups.get(key);
+      const configuredInGroup = items.filter((c) => c.configured).length;
+      const isBacklog = key === "backlog" || key === "backlog_d64_gate";
+      const openByDefault = Boolean(term) || configuredInGroup > 0 || !isBacklog;
+      return '<details class="connector-group"' + (openByDefault ? " open" : "") + '>' +
+        '<summary>' + escapeHtml(connectorCategoryLabel(key)) + " (" + configuredInGroup + "/" + items.length + " konfigurert)</summary>" +
+        '<div class="connector-group-body">' + items.map(renderConnectorCard).join("") + "</div>" +
+        "</details>";
     }).join("");
   }
+
+  connectorFilterEl.addEventListener("input", () => {
+    renderConnectors(null, connectorFilterEl.value);
+  });
 
   connectorsEl.addEventListener("click", (e) => {
     const saveBtn = e.target.closest("[data-save-cred]");
@@ -1248,7 +1339,7 @@
       ]);
       renderAttentionQueue(queueData);
       renderControlSurface(controlData);
-      renderConnectors(connectorData);
+      renderConnectors(connectorData, connectorFilterEl.value);
       renderDecisions(decisionsData);
       renderScenarios(scenariosData);
       renderRisks(risksData);

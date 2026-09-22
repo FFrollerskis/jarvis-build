@@ -1,20 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { MeshToolExecutor, meshToolDefinitions, type ToolGateway } from "@jarvis/tool-gateway";
+import { MeshToolExecutor, meshToolBindings, meshToolDefinitions, type ToolGateway } from "@jarvis/tool-gateway";
 import { ExecutiveService } from "../src/service.ts";
 import { ExecutiveTransport, executiveToolDefinitions } from "../src/transport.ts";
 import type { IdentityContext } from "@jarvis/contracts";
 
 /**
- * "Charlie"-selv-bevissthet (D-209): DB-uavhengige tester for
+ * "Charlie"-selv-bevissthet (D-209, utvidet D-237): DB-uavhengige tester for
  * `executive.get_capability_status` - `getCapabilityStatus()` gjør INGEN
- * nøstet `gateway.execute()`-kall (leser KUN `meshToolDefinitions()` og
- * `gateway.health` direkte, se service.ts sitt filhode), så en ekte
- * embedded-Postgres-`ToolGateway` er UNØDVENDIG her - en minimal fake med
- * kun `health`-feltet er nok til å bevise metoden faktisk leser DERFRA.
+ * nøstet `gateway.execute()`-kall (leser KUN `meshToolBindings()`,
+ * `gateway.get()`/`gateway.hasSecret()` og `gateway.health` direkte, se
+ * service.ts sitt filhode), så en ekte embedded-Postgres-`ToolGateway` er
+ * UNØDVENDIG her - en minimal fake er nok til å bevise metoden faktisk
+ * leser DERFRA.
+ *
+ * D-237: hver mesh-binding gis en SYNTETISK, deterministisk
+ * `credential_ref` (`"<tool_id>:<action>"`) av `fakeGateway()` under - kun
+ * for å kunne styre `configured`/`ikke konfigurert` presist per test, ALDRI
+ * et forsøk på å gjenskape ekte `ToolDefinition`-registrering.
  */
 
-function fakeGateway(health: Array<[string, { state: string; at: string; detail?: string }]> = []): ToolGateway {
-  return { health: new Map(health) } as unknown as ToolGateway;
+function fakeGateway(
+  health: Array<[string, { state: string; at: string; detail?: string }]> = [],
+  configuredRefs: Set<string> = new Set()
+): ToolGateway {
+  return {
+    health: new Map(health),
+    get: (toolId: string, action: string) => ({ credential_ref: `${toolId}:${action}` }),
+    hasSecret: async (ref: string) => configuredRefs.has(ref)
+  } as unknown as ToolGateway;
 }
 
 function identity(): IdentityContext {
@@ -25,10 +38,10 @@ function identity(): IdentityContext {
 }
 
 describe("A: ExecutiveService.getCapabilityStatus() - grounded i den SAMME kilden chat-verktøykjeden bruker", () => {
-  it("chat_accessible_tools er BYTE-FOR-BYTE meshToolDefinitions() sin egen name/description - ingen egen, potensielt avvikende kopi", async () => {
+  it("chat_accessible_tools er BYTE-FOR-BYTE meshToolBindings() sin egen name/description (pluss configured) - ingen egen, potensielt avvikende kopi", async () => {
     const service = new ExecutiveService(fakeGateway());
     const status = await service.getCapabilityStatus();
-    const expected = meshToolDefinitions().map((d) => ({ name: d.name, description: d.description }));
+    const expected = meshToolBindings().map((b) => ({ name: b.name, description: b.description, configured: false }));
     expect(status.chat_accessible_tools).toEqual(expected);
   });
 
@@ -36,6 +49,25 @@ describe("A: ExecutiveService.getCapabilityStatus() - grounded i den SAMME kilde
     const service = new ExecutiveService(fakeGateway());
     const status = await service.getCapabilityStatus();
     expect(status.chat_accessible_tools.some((t) => t.name === "check_my_capabilities")).toBe(true);
+  });
+
+  it("D-237: configured=true KUN for mesh-verktøy hvis underliggende credential_ref faktisk har en secret", async () => {
+    const service = new ExecutiveService(fakeGateway([], new Set(["github:read_issues"])));
+    const status = await service.getCapabilityStatus();
+    const github = status.chat_accessible_tools.find((t) => t.name === "read_github_issues");
+    const email = status.chat_accessible_tools.find((t) => t.name === "read_recent_email");
+    expect(github?.configured).toBe(true);
+    expect(email?.configured).toBe(false);
+  });
+
+  it("D-237: configured=false (ALDRI en kastet feil) når gateway.get() ikke finner en registrert ToolDefinition for bindingen", async () => {
+    const gateway = {
+      health: new Map(),
+      get: () => undefined,
+      hasSecret: async () => true
+    } as unknown as ToolGateway;
+    const status = await new ExecutiveService(gateway).getCapabilityStatus();
+    expect(status.chat_accessible_tools.every((t) => t.configured === false)).toBe(true);
   });
 
   it("connector_health speiler gateway.health direkte (tool_id + state/at/detail), tomt naar INGENTING er kalt ennå", async () => {
