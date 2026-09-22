@@ -213,17 +213,23 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Starter den EKTE Stripe CLI-en (`stripe listen`, TEST-modus - `--live` BEVISST ALDRI sendt) og venter til den skriver ut sitt FERSKE `whsec_...`-signeringssekret. */
-async function startStripeListenAndCaptureSecret(port: number): Promise<{ child: ChildProcessByStdio<null, Readable, Readable>; webhookSecret: string }> {
+async function startStripeListenAndCaptureSecret(port: number, testKey: string): Promise<{ child: ChildProcessByStdio<null, Readable, Readable>; webhookSecret: string }> {
   const cliBin = process.env["JARVIS_STRIPE_CLI_BIN"] ?? "stripe";
   // `--all-snapshot` er IKKE et ekte Stripe CLI-flagg (verifisert mot `stripe
   // listen --help` sitt faktiske flagg-sett, D-41 - aldri gjettet) - fjernet.
   // `--forward-to` alene forwarder allerede ALLE klassiske/snapshot-hendelser
   // (CLI-ens `--events`-flagg default er `[*]`, dvs. alt) - eksakt oppførselen
   // scriptet trenger, uten noe ekstra flagg.
-  const child = spawn(cliBin, ["listen", "--forward-to", `localhost:${port}/webhooks/stripe`], { stdio: ["ignore", "pipe", "pipe"] });
+  // `--api-key` sendes eksplisitt med DEN SAMME, allerede fail-closed-
+  // validerte test-modus-nøkkelen (`requireTestModeSecretKey()`) - CLI-en
+  // krever ELLERS en separat, interaktiv `stripe login` (nettleser-OAuth)
+  // FØR denne kan kjøre i det hele tatt, noe som ville gjort scriptet
+  // ubrukelig som et selvstendig, ikke-interaktivt akseptansescript. SAMME
+  // D-41-sikkerhetsgrense som resten av scriptet - ALDRI en live-nøkkel.
+  const child = spawn(cliBin, ["listen", "--forward-to", `localhost:${port}/webhooks/stripe`, "--api-key", testKey], { stdio: ["ignore", "pipe", "pipe"] });
   let combinedOutput = "";
   const secretPromise = new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`stripe_listen_timeout: ingen whsec_ funnet i CLI-output innen 20s. Sjekk at "${cliBin}" er på PATH (eller sett JARVIS_STRIPE_CLI_BIN) og at "stripe login" er kjørt. Output så langt: ${combinedOutput.slice(0, 500)}`)), 20_000);
+    const timeout = setTimeout(() => reject(new Error(`stripe_listen_timeout: ingen whsec_ funnet i CLI-output innen 20s. Sjekk at "${cliBin}" er på PATH (eller sett JARVIS_STRIPE_CLI_BIN). Output så langt: ${combinedOutput.slice(0, 500)}`)), 20_000);
     function onChunk(chunk: Buffer): void {
       combinedOutput += chunk.toString("utf8");
       const match = /whsec_[A-Za-z0-9]+/.exec(combinedOutput);
@@ -385,7 +391,7 @@ async function main(): Promise<void> {
     });
     log(`lokal akseptanse-server lyttet på 127.0.0.1:${port}`);
 
-    const { child, webhookSecret } = await startStripeListenAndCaptureSecret(port);
+    const { child, webhookSecret } = await startStripeListenAndCaptureSecret(port, testKey);
     listenChild = child;
     capturedWebhookSecret = webhookSecret;
     // Gi CLI-tunnelen en kort stund til å faktisk koble til Stripe FØR vi
