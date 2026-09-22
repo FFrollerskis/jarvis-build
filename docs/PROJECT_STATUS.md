@@ -1,9 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d230-k2-governance-dashboard`, basert på `origin/main`
-etter PR #140/D-227 MERGET - `git fetch origin main` kjørt før branch-opprettelse). **D-230: K2-
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d232-backlog-connectors-visible`, basert på fersk
+`origin/main` som allerede inkluderer D-230 K2-dashboardet + D-231 integrasjons-backlog-planen,
+begge merget - `git fetch origin main` kjørt før branch-opprettelse). **D-232: 50 av D-231 sine
+`NY_BACKLOG`-punkter lagt til i `connector-registry.ts`/dashbordets "Integrasjoner"-seksjon som
+synlige, EKSPLISITT "ikke konfigurert"-oppføringer** (Tobias direkte: "Legg de til i dashbordet
+selv om de ikke er klare for tilkobling så de er der"). To nye `category`-verdier
+(`"backlog"`/`"backlog_d64_gate"` for de seks D-64-port-krevende CRM-/prosjektstyrings-
+leverandørene) - INGEN ny UI-kode (eksisterende pill-rendering dekker det allerede), INGEN
+`live_test` for noen av de 50, kun tomme placeholder-env-linjer i `.env.example`. Supabase/Neo4j/
+1Password (Q-36/Q-37/Q-38) og Windows/macOS (Q-39, `IKKE EN CONNECTOR`) BEVISST IKKE lagt til - se
+D-232 i DECISIONS_AND_ASSUMPTIONS.md for eksakt telling/begrunnelse. RENT SYNLIGHET - ingen D-64-
+port kjørt, ingen kode/credential-oppsett for noen av de 50. PR åpnes som draft mot `main`.
+
+**Forrige milepæl (uendret, fortsatt gjeldende på `main`): D-230.** K2-
 dashboardet (decision log/scenarios/risk register/goals-OKRs/delegation board) fikk sin FØRSTE
-synlige UI-flate.** `@jarvis/governance` (migrasjon 059) var FERDIG BYGGET/testet siden D-207, men KUN
+synlige UI-flate. `@jarvis/governance` (migrasjon 059) var FERDIG BYGGET/testet siden D-207, men KUN
 nåbart via ToolGateway/API direkte. Levert: `POST /governance/query`/`POST /governance/mutate`
 (SAMME grant-autoritetsmodell/`toolGateway`-instans som `/executive/query`, hardkodet allowlist per
 rute, INGEN klasse C/D i governance så INGEN bekreftelsesdialog-plikt), `get_delegation_board`
@@ -64,6 +76,14 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
+- **D-232 (2026-09-22, egen isolert worktree/branch `claude/fase-d232-backlog-connectors-visible`,
+  IKKE ENNÅ MERGET - PR åpnes som draft):** 50 nye backlog-connector-oppføringer i
+  `modules/tool-gateway/src/connector-registry.ts` (64 totalt, opp fra 14), synlige i dashbordets
+  "Integrasjoner"-seksjon som "ikke konfigurert" (ingen `live_test`, ingen credential satt). To nye
+  `category`-verdier (`backlog`/`backlog_d64_gate`). `.env.example` fikk 50 nye tomme placeholder-
+  linjer. 10 nye DB-uavhengige tester. `pnpm -w typecheck` (32/32)/`npx eslint .` rene. RENT
+  SYNLIGHET - ingen D-64-port kjørt, ingen kode for noen faktisk leverandør-integrasjon. Se D-232 i
+  DECISIONS_AND_ASSUMPTIONS.md.
 - **D-231 (2026-09-22, egen isolert docs-only worktree/branch `claude/fase-d231-integration-backlog-plan`,
   parallelt med D-230/K2-dashboard-agenten på en ANNEN branch):** Tobias sin kuraterte 73-punkts
   integrasjonsliste registrert som backlog i `INTEGRATIONS.md` §4 (16 `ALLEREDE_BYGGET`/2
@@ -213,8 +233,10 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-0. **Review/merge PR #143 (D-230, K2-dashboardet, branch `claude/fase-d230-k2-governance-dashboard`)** -
-   åpnet som DRAFT, IKKE merget av denne økten selv (foreldre-sesjonen følger opp CI og merger).
+0. **Review/merge D-232 sin PR (branch `claude/fase-d232-backlog-connectors-visible`)** - åpnet som
+   DRAFT mot `main`, IKKE merget av denne økten selv. **PR #143 (D-230) og D-231 sin PR (#142) er
+   BEGGE allerede merget** - `origin/main` denne økten startet fra inkluderte begge (bekreftet ved
+   `git log`), item 0 her er derfor OPPDATERT fra en tidligere, nå utdatert formulering.
 1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
    HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
    kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før

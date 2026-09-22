@@ -38,6 +38,87 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
       if (c.live_test) expect(typeof c.live_test.parameters).toBe("function");
     }
   });
+
+  it("kun gyldige category-verdier forekommer", () => {
+    const valid = new Set(["tool_gateway", "model_provider", "finance", "infra", "backlog", "backlog_d64_gate"]);
+    for (const c of CONNECTOR_REGISTRY) {
+      expect(valid.has(c.category)).toBe(true);
+    }
+  });
+});
+
+describe("D-232: D-231 backlog-synlighet - 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer", () => {
+  const BACKLOG_IDS = [
+    "notion", "onedrive", "dropbox", "google_sheets",
+    "microsoft_outlook", "microsoft_365",
+    "google_cloud",
+    "brave_search", "tavily", "exa", "playwright",
+    "openai_realtime", "elevenlabs", "deepgram", "livekit", "telnyx", "twilio",
+    "whatsapp", "slack", "discord", "higgsfield", "runway", "kling", "google_veo", "openai_images",
+    "spotify", "apple_music",
+    "n8n", "zapier", "make", "apple_shortcuts",
+    "homekit", "philips_hue",
+    "folio", "hubspot", "pipedrive", "meta_ads", "linear", "jira", "trello", "todoist",
+    "google_maps", "google_places", "google_routes",
+    "sentry", "grafana", "prometheus",
+    "apns", "ios_shortcuts", "apple_watch"
+  ];
+
+  const D64_GATE_IDS = ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"];
+
+  it("eksakt 50 nye backlog-id-er finnes, hver nøyaktig én gang, i registeret", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(50);
+    expect(BACKLOG_IDS.length).toBe(50);
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    for (const id of BACKLOG_IDS) {
+      expect(registryIds.has(id)).toBe(true);
+    }
+  });
+
+  it("registeret har nøyaktig 64 oppføringer totalt (14 tidligere bygde + 50 nye D-232-backlog-punkter)", () => {
+    expect(CONNECTOR_REGISTRY.length).toBe(64);
+  });
+
+  it("INGEN av de 50 nye backlog-oppføringene har live_test", () => {
+    for (const id of BACKLOG_IDS) {
+      const def = CONNECTOR_REGISTRY.find((c) => c.id === id);
+      expect(def?.live_test).toBeUndefined();
+    }
+  });
+
+  it("hver av de 50 nye backlog-oppføringene har category 'backlog' eller 'backlog_d64_gate', aldri en av de fire ekte, bygde kategoriene", () => {
+    for (const id of BACKLOG_IDS) {
+      const def = CONNECTOR_REGISTRY.find((c) => c.id === id);
+      expect(["backlog", "backlog_d64_gate"]).toContain(def?.category);
+    }
+  });
+
+  it("nøyaktig de seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene har category 'backlog_d64_gate' - resten av backlogen har 'backlog'", () => {
+    const actualD64 = CONNECTOR_REGISTRY.filter((c) => c.category === "backlog_d64_gate").map((c) => c.id).sort();
+    expect(actualD64).toEqual([...D64_GATE_IDS].sort());
+    const actualPlainBacklog = CONNECTOR_REGISTRY.filter((c) => c.category === "backlog").map((c) => c.id).sort();
+    expect(actualPlainBacklog).toEqual(
+      BACKLOG_IDS.filter((id) => !D64_GATE_IDS.includes(id)).sort()
+    );
+  });
+
+  it("Supabase/Neo4j/1Password/Windows/macOS er BEVISST IKKE registrert (Q-36/Q-37/Q-38/Q-39, se D-232 i DECISIONS_AND_ASSUMPTIONS.md)", () => {
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    for (const excluded of ["supabase", "neo4j", "1password", "windows", "macos"]) {
+      expect(registryIds.has(excluded)).toBe(false);
+    }
+  });
+
+  it("hver nye backlog-oppføring rendres som 'ikke konfigurert', presence_only, helse null - EKSAKT samme mønster som en eksisterende ukonfigurert connector (Fiken/Stripe/Vipps)", async () => {
+    const gateway = fakeGateway(new Set());
+    const statuses = await listConnectorStatus(gateway);
+    for (const id of BACKLOG_IDS) {
+      const status = statuses.find((s) => s.id === id);
+      expect(status?.configured).toBe(false);
+      expect(status?.test_method).toBe("presence_only");
+      expect(status?.health).toBeNull();
+    }
+  });
 });
 
 describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve verdien", () => {
