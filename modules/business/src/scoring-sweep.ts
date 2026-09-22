@@ -25,8 +25,13 @@ export async function runScoringSweepForAllTenants(
   for (const tenantId of tenantIds) {
     try {
       results[tenantId] = await scoring.recalculateTenant(tenantId, "business");
-    } catch {
-      // Én tenant sin rekalkulering skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin rekalkulering skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "scoring_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = { leads: 0, opportunities: 0 };
     }
   }

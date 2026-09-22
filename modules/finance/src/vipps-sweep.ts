@@ -24,8 +24,13 @@ export async function runVippsPaymentSyncForAllTenants(pool: pg.Pool, financeSer
       const sync = await financeService.syncPendingVippsPayments(tenantId, "business");
       const anomalies = await financeService.runVippsProviderAnomalyDetection(tenantId, "business");
       results[tenantId] = { sync, anomalies };
-    } catch {
-      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "vipps_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = { sync: { synced: 0, failed: 0 }, anomalies: { payment_intent_flags_added: 0, capture_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 } };
     }
   }

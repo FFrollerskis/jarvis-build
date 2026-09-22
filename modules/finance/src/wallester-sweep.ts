@@ -47,18 +47,31 @@ export async function runWallesterSweepForAllTenants(pool: pg.Pool, cards: CardS
           const txs = await cards.syncTransactions(tenantId, "business", card.card_id);
           result.transactions.inserted += txs.inserted;
           result.transactions.corrections_flagged += txs.corrections_flagged;
-        } catch {
-          // Ett korts provider-/synkfeil isoleres - resten fortsetter.
+        } catch (err) {
+          // Ett korts provider-/synkfeil isoleres - resten fortsetter. Isolasjonen er UENDRET,
+          // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+          console.error(JSON.stringify({
+            msg: "wallester_sweep_card_sync_failed", tenant_id: tenantId, card_id: card.card_id,
+            error: err instanceof Error ? err.message : String(err)
+          }));
         }
       }
-    } catch {
-      // Credential-/listefeil - fortsett til de lokale stegene.
+    } catch (err) {
+      // Credential-/listefeil - fortsett til de lokale stegene. Isolasjonen er UENDRET (D-227).
+      console.error(JSON.stringify({
+        msg: "wallester_sweep_card_list_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
     }
     try {
       result.reconciliation = await cards.reconcileCardTransactions(tenantId, "business");
       result.anomalies = await cards.runCardAnomalyDetection(tenantId, "business");
-    } catch {
-      // Én tenants sveipfeil velter aldri de andre.
+    } catch (err) {
+      // Én tenants sveipfeil velter aldri de andre - isolasjonen er UENDRET (D-227).
+      console.error(JSON.stringify({
+        msg: "wallester_sweep_reconciliation_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
     }
     results[tenantId] = result;
   }
