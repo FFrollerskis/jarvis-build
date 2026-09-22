@@ -1,7 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d239-dashboard-redesign`). **D-239: RENT kosmetisk
-dashbord-restyling**, Tobias direkte i chat: "forbedre dashbordet til og se moderne og jarvis ut".
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d240-db-bootstrap`). **D-240: EKTE INFRA-BUG FUNNET
+OG FIKSET** - Tobias fikk `403 tool_denied: tool_failed:fetch failed` FØRSTE gang han faktisk prøvde
+D-213s "lim inn nøkkel"-skriving live (rett etter D-239-merge). Sporet PRESIST via
+`docker compose logs infisical` til `DatabaseError: database "infisical" does not exist` -
+`infra/local/docker-compose.yml` sin `postgres`-tjeneste oppretter KUN `jarvis`-databasen
+(`POSTGRES_DB`, offisiell Postgres-image-begrensning); INGENTING opprettet noensinne de separate
+`infisical`/`langfuse`-databasene begge containerne kobler til. Hullet lå skjult siden D-35s BO-07
+(2026-08-13, databasen må ha eksistert fra en manuell, aldri kodifisert handling den gangen) helt til
+D-213s skrive-sti (bygget en måned senere) faktisk traff `InfisicalSecretProvider.set()` for FØRSTE
+gang i dag. **Umiddelbar unblocking gitt til Tobias** (`CREATE DATABASE infisical;` + `restart
+infisical`, live i chat) FØR selve kodefiksen: ny `db-bootstrap`-engangstjeneste (SAMME
+`pgvector/pgvector:pg16`-image som `postgres`) kjører `infra/local/bootstrap-databases.sql`
+(idempotent `CREATE DATABASE ... WHERE NOT EXISTS ...\gexec`) FØR `infisical`/`langfuse` startes.
+**Verifisert, ikke antatt:** `docker compose config` (ekte v5.1.1-binær) validerte hele filen
+syntaktisk; SQL-logikken kjørt DIREKTE mot en ekte lokal PostgreSQL 16 (denne sandboxens
+`postgresql-16`-pakke som `postgres`-systembrukeren) TO GANGER - første kjøring opprettet begge
+databasene, andre kjøring (begge allerede eksisterende, SAMME situasjon som Tobias sitt
+`jarvis-pgdata`-volum etter fiksen) var et REELT no-op, exit 0. 8 nye strukturelle wiring-tester
+(`modules/core/test/d240-db-bootstrap-compose-wiring.test.ts`), 29 eksisterende compose-wiring-tester
+re-kjørt uendret grønt. Se D-240 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, MERGET): D-239 (PR #151, `7105b85`) - RENT kosmetisk dashbord-restyling**,
+Tobias direkte i chat: "forbedre dashbordet til og se moderne og jarvis ut".
 `apps/web/dashboard.html` sin HELE `<style>`-blokk skrevet om til et mørkt/cyan "HUD"-tema med CSS
 custom properties (`--bg`/`--panel`/`--accent`/`--success-*`/`--warn-*`/`--danger-*`/`--info-*`)
 i stedet for hardkodede heksfarger - HVER selector (ID/klasse) UENDRET, INGEN HTML-struktur/JS/

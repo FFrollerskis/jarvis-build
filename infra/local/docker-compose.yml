@@ -26,6 +26,27 @@ services:
       retries: 12
     restart: unless-stopped
 
+  # D-240 (funnet live av Tobias, "database infisical does not exist"-krasjløkke):
+  # `postgres` sin egen `POSTGRES_DB` over oppretter KUN én database (`jarvis`) -
+  # `infisical`/`langfuse` under trenger HVER SIN EGEN, separate database på
+  # SAMME Postgres-instans. Denne ene-gangs-tjenesten oppretter dem idempotent
+  # (se bootstrap-databases.sql sitt filhode) FØR infisical/langfuse startes -
+  # trygt å kjøre på HVER oppstart, også når begge allerede finnes (f.eks. et
+  # eksisterende `jarvis-pgdata`-volum fra FØR denne fiksen).
+  db-bootstrap:
+    image: pgvector/pgvector:pg16
+    environment:
+      PGPASSWORD: "${JARVIS_DB_ADMIN_PASSWORD}"
+    volumes:
+      - ./bootstrap-databases.sql:/bootstrap/bootstrap-databases.sql:ro
+    command: >
+      psql -h postgres -U ${JARVIS_DB_ADMIN_USER:-postgres} -d ${JARVIS_DB_NAME:-jarvis}
+      -v ON_ERROR_STOP=1 -f /bootstrap/bootstrap-databases.sql
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   langfuse:
     # D-27: self-hosted Langfuse v2 (kun Postgres-avhengighet). Init-noekler
     # kommer fra .env (lokale dev-verdier) - aldri hardkodet her.
@@ -46,7 +67,8 @@ services:
     ports:
       - "3050:3000"
     depends_on:
-      - postgres
+      db-bootstrap:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   infisical-redis:
@@ -70,8 +92,10 @@ services:
     ports:
       - "3060:8080"
     depends_on:
-      - postgres
-      - infisical-redis
+      db-bootstrap:
+        condition: service_completed_successfully
+      infisical-redis:
+        condition: service_started
     restart: unless-stopped
 
   # One-shot migrasjoner (BO-07): kjører alle migrasjoner nøyaktig én gang før
