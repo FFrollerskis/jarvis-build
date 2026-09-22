@@ -153,7 +153,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   `pnpm -w typecheck`/`npx eslint` rene for alle fire delfikser. Se D-228 i DECISIONS_AND_ASSUMPTIONS.md
   for full detalj.
 
-- **D-230 (2026-09-22, branch `claude/fase-d230-k2-governance-dashboard`, PR ÅPNES SOM DRAFT - IKKE
+- **D-230 (2026-09-22, branch `claude/fase-d230-k2-governance-dashboard`, PR #143 ÅPEN SOM DRAFT - IKKE
   MERGET ENNÅ):** K2-dashboardet - `@jarvis/governance` (D-207) fikk sin første HTTP-rute/UI-flate.
   `apps/api/src/server.ts`: `GOVERNANCE_QUERY_ACTIONS`/`GOVERNANCE_MUTATE_ACTIONS` bak nye
   `POST /governance/query`/`POST /governance/mutate` (SAMME `deps.executive.gateway`-instans,
@@ -207,7 +207,7 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-0. **Review/merge D-230-PR-en (K2-dashboardet, branch `claude/fase-d230-k2-governance-dashboard`)** -
+0. **Review/merge PR #143 (D-230, K2-dashboardet, branch `claude/fase-d230-k2-governance-dashboard`)** -
    åpnet som DRAFT, IKKE merget av denne økten selv (foreldre-sesjonen følger opp CI og merger).
 1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
    HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
