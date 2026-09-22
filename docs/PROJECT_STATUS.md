@@ -1,18 +1,27 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d228-stripe-acceptance-tool-id-fix`, basert på
-`origin/main` etter PR #140/D-227 MERGET). **STORT MILEPÆL: D-228 - Tobias sin FØRSTE faktiske
-host-kjøring av Stripe-akseptansescriptet (D-225) er GRØNN.** Fem reelle kodefeil funnet og rettet
-underveis (feil ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en tom streng, et
-ikke-eksisterende Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse,
-manglende CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte
-kriterier PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang,
-samme presedens som W1 watchdog opprinnelig fulgte). **PR #97 (W1 watchdog) LUKKET UTEN MERGE** -
-funnet ved forsøk på merge under D-192-tillegg at feature-en allerede var implementert (MER
-gjennomarbeidet, fem ekstra bugfikser) og merget via en parallell PR #96 tilbake i 2026-09-19; se
-"Andre åpne PR" under for full historikk. Tobias bekreftet direkte at issue #68 sin
-ChatGPT-arkitektgjennomgang ikke lenger er en aktiv sti - rutine-PR-er avgjøres videre under direkte
-D-192(-tillegg)-fullmakt i chat, ikke via issue #68.
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d230-k2-governance-dashboard`, basert på `origin/main`
+etter PR #140/D-227 MERGET - `git fetch origin main` kjørt før branch-opprettelse). **D-230: K2-
+dashboardet (decision log/scenarios/risk register/goals-OKRs/delegation board) fikk sin FØRSTE
+synlige UI-flate.** `@jarvis/governance` (migrasjon 059) var FERDIG BYGGET/testet siden D-207, men KUN
+nåbart via ToolGateway/API direkte. Levert: `POST /governance/query`/`POST /governance/mutate`
+(SAMME grant-autoritetsmodell/`toolGateway`-instans som `/executive/query`, hardkodet allowlist per
+rute, INGEN klasse C/D i governance så INGEN bekreftelsesdialog-plikt), `get_delegation_board`
+hvitelistet på `EXECUTIVE_QUERY_ACTIONS`, ny "Styring (K2)"-seksjon i `apps/web/dashboard.html`. Se
+D-230 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. PR åpnes som draft mot `main` - IKKE merget av
+denne økten selv (foreldre-sesjonen følger opp CI og merger). **STORT MILEPÆL forut for dette
+(uendret, fortsatt gjeldende på `main`): D-228** - Tobias sin FØRSTE faktiske host-kjøring av
+Stripe-akseptansescriptet (D-225) er GRØNN. Fem reelle kodefeil funnet og rettet underveis (feil
+ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en tom streng, et ikke-eksisterende
+Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse, manglende
+CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte kriterier
+PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang, samme
+presedens som W1 watchdog opprinnelig fulgte). **PR #97 (W1 watchdog) LUKKET UTEN MERGE** - funnet
+ved forsøk på merge under D-192-tillegg at feature-en allerede var implementert (MER gjennomarbeidet,
+fem ekstra bugfikser) og merget via en parallell PR #96 tilbake i 2026-09-19; se "Andre åpne PR"
+under for full historikk. Tobias bekreftet direkte at issue #68 sin ChatGPT-arkitektgjennomgang ikke
+lenger er en aktiv sti - rutine-PR-er avgjøres videre under direkte D-192(-tillegg)-fullmakt i chat,
+ikke via issue #68.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -150,6 +159,23 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   `pnpm -w typecheck`/`npx eslint` rene for alle fire delfikser. Se D-228 i DECISIONS_AND_ASSUMPTIONS.md
   for full detalj.
 
+- **D-230 (2026-09-22, branch `claude/fase-d230-k2-governance-dashboard`, PR #143 ÅPEN SOM DRAFT - IKKE
+  MERGET ENNÅ):** K2-dashboardet - `@jarvis/governance` (D-207) fikk sin første HTTP-rute/UI-flate.
+  `apps/api/src/server.ts`: `GOVERNANCE_QUERY_ACTIONS`/`GOVERNANCE_MUTATE_ACTIONS` bak nye
+  `POST /governance/query`/`POST /governance/mutate` (SAMME `deps.executive.gateway`-instans,
+  `tool_id: "governance"`, ingen ny `ApiDeps`-nøkkel); `get_delegation_board` lagt til den
+  eksisterende `EXECUTIVE_QUERY_ACTIONS` (nå fire, ikke tre, medlemmer). `apps/web/dashboard.html`:
+  ny "Styring (K2)"-seksjon (beslutningslogg/scenarier/risikoregister/mål-OKR/delegeringstavle),
+  ingen bekreftelsesmodal for governance-skriving (alle handlinger klasse A/B). 37 nye DB-uavhengige
+  tester (`governance-query-mutate-wiring.test.ts`: 16, `dashboard-governance-wiring.test.ts`: 21) +
+  `executive-query-wiring.test.ts`/`executive-mutate-wiring.test.ts` oppdatert for det fjerde
+  `EXECUTIVE_QUERY_ACTIONS`-medlemmet - alle 57 relevante tester kjørt DIREKTE og grønne lokalt.
+  `pnpm -w typecheck` (32/32)/`npx eslint .` rene. Full `pnpm -w test` i bakgrunnen: 856 linjer output
+  over store deler av workspacet FØR verktøyets egen bakgrunnstidsavgrensning avsluttet prosessen (IKKE
+  et eksplisitt sluttresultat denne økten) - eksplisitt grep for `FAIL`/`AssertionError`/`✗` i alle 856
+  linjene ga NULL treff utenom kjent `initdb: Permission denied`-sandbox-begrensning (D-193→D-229).
+  Verifiseres fullstendig av CI. Se D-230 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
 Ingen - **PR #97 LUKKET 2026-09-22, IKKE merget, ingen kode tatt inn.** Tobias bekreftet direkte i
@@ -187,6 +213,8 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
+0. **Review/merge PR #143 (D-230, K2-dashboardet, branch `claude/fase-d230-k2-governance-dashboard`)** -
+   åpnet som DRAFT, IKKE merget av denne økten selv (foreldre-sesjonen følger opp CI og merger).
 1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
    HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
    kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før
