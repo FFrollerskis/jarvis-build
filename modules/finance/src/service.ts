@@ -1352,7 +1352,13 @@ export class FinanceService {
       try {
         await this.refreshStripePaymentState(tenantId, memorySpace, paymentIntentId);
         synced++;
-      } catch {
+      } catch (err) {
+        // Én betalings synkfeil skal aldri velte resten - isolasjonen er UENDRET,
+        // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+        console.error(JSON.stringify({
+          msg: "stripe_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
+          error: err instanceof Error ? err.message : String(err)
+        }));
         failed++;
       }
     }
@@ -2036,7 +2042,13 @@ export class FinanceService {
       try {
         await this.refreshVippsPaymentState(tenantId, memorySpace, paymentIntentId);
         synced++;
-      } catch {
+      } catch (err) {
+        // Én betalings synkfeil skal aldri velte resten - isolasjonen er UENDRET,
+        // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+        console.error(JSON.stringify({
+          msg: "vipps_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
+          error: err instanceof Error ? err.message : String(err)
+        }));
         failed++;
       }
     }
@@ -2321,7 +2333,13 @@ export class FinanceService {
       try {
         await this.refreshNeonomicsPaymentState(tenantId, memorySpace, paymentIntentId);
         synced++;
-      } catch {
+      } catch (err) {
+        // Én betalings synkfeil skal aldri velte resten - isolasjonen er UENDRET,
+        // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+        console.error(JSON.stringify({
+          msg: "neonomics_payment_sync_failed", tenant_id: tenantId, payment_intent_id: paymentIntentId,
+          error: err instanceof Error ? err.message : String(err)
+        }));
         failed++;
       }
     }

@@ -26,8 +26,13 @@ export async function runOpenLoopSweepForAllTenants(
   for (const tenantId of tenantIds) {
     try {
       results[tenantId] = await openLoops.runSweep(tenantId, "business");
-    } catch {
-      // Én tenant sin sweep-feil skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin sweep-feil skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "open_loop_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = { detected: 0, updated: 0, auto_resolved: 0 };
     }
   }

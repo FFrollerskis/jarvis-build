@@ -49,8 +49,13 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
           result.consents_verified++;
           const sync = await banking.syncAccounts(tenantId, "business", consent.consent_id);
           result.accounts_synced += sync.discovered + sync.updated;
-        } catch {
-          // Tapt samtykke/credential for ÉN bank stopper aldri resten.
+        } catch (err) {
+          // Tapt samtykke/credential for ÉN bank stopper aldri resten - isolasjonen er UENDRET,
+          // kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+          console.error(JSON.stringify({
+            msg: "neonomics_sweep_consent_verify_failed", tenant_id: tenantId, consent_id: consent.consent_id,
+            error: err instanceof Error ? err.message : String(err)
+          }));
         }
       }
       const accounts = await banking.listBankAccounts(tenantId, "business");
@@ -60,24 +65,40 @@ export async function runNeonomicsSweepForAllTenants(pool: pg.Pool, banking: Ban
           result.transactions.inserted += txResult.inserted;
           result.transactions.transitioned += txResult.transitioned;
           result.transactions.corrections_flagged += txResult.corrections_flagged;
-        } catch {
-          // Én kontos synkfeil isoleres.
+        } catch (err) {
+          // Én kontos synkfeil isoleres - isolasjonen er UENDRET, kun stillheten var feilen (D-227).
+          console.error(JSON.stringify({
+            msg: "neonomics_sweep_transaction_sync_failed", tenant_id: tenantId, bank_account_id: account.bank_account_id,
+            error: err instanceof Error ? err.message : String(err)
+          }));
         }
       }
-    } catch {
-      // Credential-/listefeil - fortsett til de lokale stegene.
+    } catch (err) {
+      // Credential-/listefeil - fortsett til de lokale stegene. Isolasjonen er UENDRET (D-227).
+      console.error(JSON.stringify({
+        msg: "neonomics_sweep_consent_list_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
     }
     try {
       result.payments = await finance.syncPendingNeonomicsPayments(tenantId, "business");
-    } catch {
-      // Isolert.
+    } catch (err) {
+      // Isolert - isolasjonen er UENDRET, kun stillheten var feilen (D-227).
+      console.error(JSON.stringify({
+        msg: "neonomics_sweep_payment_sync_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
     }
     try {
       result.reconciliation = await banking.reconcileBankTransactions(tenantId, "business");
       result.bank_anomalies = await banking.runBankAnomalyDetection(tenantId, "business");
       result.payment_anomalies = await finance.runNeonomicsProviderAnomalyDetection(tenantId, "business");
-    } catch {
-      // Én tenants sveipfeil velter aldri de andre.
+    } catch (err) {
+      // Én tenants sveipfeil velter aldri de andre - isolasjonen er UENDRET (D-227).
+      console.error(JSON.stringify({
+        msg: "neonomics_sweep_reconciliation_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
     }
     results[tenantId] = result;
   }

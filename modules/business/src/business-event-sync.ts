@@ -304,8 +304,13 @@ export async function runBusinessEventSyncForAllTenants(
     };
     try {
       results[tenantId] = await syncService.syncTenant(tenantId, "business", identity);
-    } catch {
-      // Én tenant sin synk-feil skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin synk-feil skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "business_event_sync_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = {
         gmail: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },
         calendar: { scanned: 0, recorded: 0, unmatched: 0, ambiguous: 0 },

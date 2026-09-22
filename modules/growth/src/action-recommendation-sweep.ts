@@ -29,8 +29,13 @@ export async function runActionRecommendationSweepForAllTenants(
   for (const tenantId of tenantIds) {
     try {
       results[tenantId] = await growth.detectAndRecommendSpendAnomalies(tenantId, "business");
-    } catch {
-      // Én tenant sin sveipfeil skal aldri velte sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin sveipfeil skal aldri velte sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "action_recommendation_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = { detected: 0, updated: 0, superseded: 0 };
     }
   }

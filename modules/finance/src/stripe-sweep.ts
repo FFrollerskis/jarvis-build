@@ -28,8 +28,13 @@ export async function runStripePaymentSyncForAllTenants(pool: pg.Pool, financeSe
       const sync = await financeService.syncPendingStripePayments(tenantId, "business");
       const anomalies = await financeService.runProviderAnomalyDetection(tenantId, "business");
       results[tenantId] = { sync, anomalies };
-    } catch {
-      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "stripe_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = { sync: { synced: 0, failed: 0 }, anomalies: { payment_intent_flags_added: 0, refund_flags_added: 0, flags_cleared: 0 } };
     }
   }

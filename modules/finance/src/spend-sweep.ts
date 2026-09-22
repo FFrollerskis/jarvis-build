@@ -29,8 +29,13 @@ export async function runFinanceSpendIntegritySweepForAllTenants(
   for (const tenantId of tenantIds) {
     try {
       results[tenantId] = await spendService.runFullSweep(tenantId, "business");
-    } catch {
-      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants.
+    } catch (err) {
+      // Én tenant sin sveip-feil skal aldri velte hele sveipet for andre tenants -
+      // isolasjonen er UENDRET, kun stillheten var feilen (D-227, samme anti-mønster-klasse som D-218-222).
+      console.error(JSON.stringify({
+        msg: "spend_sweep_tenant_failed", tenant_id: tenantId,
+        error: err instanceof Error ? err.message : String(err)
+      }));
       results[tenantId] = {
         marketing: { scanned: 0, inserted: 0, updated: 0, corrected: 0, correction_conflicts: 0 },
         model_cost: { scanned: 0, inserted: 0, updated: 0, corrected: 0, correction_conflicts: 0 },
