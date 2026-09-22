@@ -50,3 +50,10 @@ f5564247ebd0c3b00d572ba2d897fc39f383188c:docs/RUNTIME_GATES.md:generic-api-key:6
 # going forward, but gitleaks scans full history by default and the
 # original commit remains part of this branch's published history.
 d926cf79812952d7a0f92635d8d153095a8eee68:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:444
+
+# Same finding as above, still present in the next commit: the first
+# truncation attempt (pi_3UIJmg...76xMq) still crossed gitleaks' entropy
+# threshold, confirmed by CI on this exact commit. Fully removed (not
+# just truncated) in a later commit - see the entry above for the full
+# justification (Stripe PaymentIntent object ID, not a secret).
+b4aa30ef8f9a6d922b5f71c1802f556b88b50642:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:444
