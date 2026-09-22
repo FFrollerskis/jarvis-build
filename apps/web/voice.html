@@ -221,16 +221,20 @@
   }
 
   /**
-   * D-212 (task #120, Q-32 punkt 1 - HARD EKSTERN/JURIDISK BLOKKERING):
+   * D-212 (task #120, Q-32 punkt 1 - HARD EKSTERN/JURIDISK BLOKKERING).
    * `speech_routing_denied_stt:<outcome>`/`speech_routing_denied_tts:<outcome>`
    * betyr at `packages/contracts/src/speech.ts` sin `evaluateSpeechRouting()`
-   * NEKTET OpenAI som taleprosessor. Dette er IKKE en feil Jarvis/Claude kan
-   * eller skal rette - `processor_terms_status` på OpenAI-radene i
-   * `docs/security/PROCESSOR_REGION_MATRIX.md` er hardkodet "NOT_VERIFIED"
-   * med en eksplisitt kildekode-kommentar om at KUN Tobias, gjennom en reell
-   * juridisk/eier-verifisering (databehandleravtale, region, retensjon), kan
-   * endre den. Panelet under forklarer dette ÆRLIG i stedet for å se ut som en
-   * generisk feil - se docs/OPEN_QUESTIONS.md Q-32 punkt 1.
+   * NEKTET denne konkrete forespørselen. **OPPDATERT (D-226, 2026-09-22):**
+   * `processor_terms_status` på OpenAI-radene er nå faktisk `VERIFIED` (Tobias
+   * bekreftet region/databehandleravtale/treningsvilkår/retensjon selv) -
+   * denne meldingen dukker derfor IKKE lenger opp for ethvert kall, kun for de
+   * to gjenværende, UENDRET håndhevede grensene: `health`-space (D-23,
+   * `DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR` - krever ALLTID en
+   * lokal behandler, uansett vilkårsstatus) og en klient-oppgitt, ikke
+   * server-verifisert space (D-123, `DENIED_MEMORY_SPACE_NOT_SERVER_VERIFIED`).
+   * Dette er IKKE feil Jarvis/Claude skal "rette" - de er de tilsiktede,
+   * gjenværende sikkerhetsgrensene. Panelet under forklarer dette ÆRLIG i
+   * stedet for å se ut som en generisk feil - se docs/OPEN_QUESTIONS.md Q-32.
    */
   function showBlockPanel(kind) {
     blockPanel.style.display = "block";

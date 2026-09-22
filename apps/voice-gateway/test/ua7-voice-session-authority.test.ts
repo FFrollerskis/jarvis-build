@@ -63,7 +63,7 @@ function grantFor(overrides: Partial<VoiceSessionGrant> = {}): VoiceSessionGrant
   };
 }
 
-/** Ekstern behandler der ALLE matrise-regel-3-feltene er verifisert. Finnes IKKE i dag. */
+/** Ekstern behandler der ALLE matrise-regel-3-feltene er verifisert - ren hypotetisk fixture for autoritets-/space-testene i DETTE filet, uavhengig av OpenAI sin faktiske status (som SELV nå er `VERIFIED`, D-226, 2026-09-22 - se de dedikerte OpenAI-testene lenger ned). */
 const EXTERNAL_VERIFIED: SpeechProcessorDeclaration = {
   processor_id: "test-external-verified",
   locality: "external",
@@ -461,10 +461,16 @@ describe("D-123 / Q-32 punkt 2: server-side memory-space-autoritet i voice-trans
 
   // --- D: D-122 er UENDRET og overordnet ----------------------------------
 
-  it("D1: SERVER_VERIFIED åpner IKKE dagens OpenAI STT/TTS - vilkårene er fortsatt NOT_VERIFIED", async () => {
+  it("D1: SERVER_VERIFIED åpner IKKE dagens OpenAI STT/TTS for `health` - D-23/SECRET_RESTRICTED (regel 2) blokkerer fortsatt, UENDRET av D-226", async () => {
+    // FØR D-226 (2026-09-22) stanset dette på regel 3 (processor_terms_status)
+    // for ETHVERT space. Nå som region/DPA/trening/retensjon er faktisk
+    // bekreftet (D-226), er `health` den gjenværende grensen for de EKTE
+    // OpenAI-adapterklassene - `personal` ville nå faktisk vært TILLATT (se
+    // ua7-speech-routing.test.ts sin B3/C9), så `health` brukes bevisst her
+    // for fortsatt å bevise at D-23 sin sensitive-space-grense står ved lag.
     const stt = spyStt(new OpenAiStt().processor);
     const tts = spyTts(new OpenAiTts().processor);
-    const core = new FakeCore(async () => ({ ok: true, grant: grantFor() }));
+    const core = new FakeCore(async () => ({ ok: true, grant: grantFor({ memory_space: "health" }) }));
     const { client } = await start(core, stt.adapter, tts.adapter);
 
     client.send({
@@ -478,7 +484,7 @@ describe("D-123 / Q-32 punkt 2: server-side memory-space-autoritet i voice-trans
     client.send({ type: "audio", data: loudFrame() });
     const error = await client.waitFor("error");
 
-    expect(error["error"]).toBe("speech_routing_denied_stt:DENIED_PROCESSOR_TERMS_NOT_VERIFIED");
+    expect(error["error"]).toBe("speech_routing_denied_stt:DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR");
     expect(stt.frames()).toBe(0);
     expect(tts.synthesized()).toEqual([]);
   });
@@ -574,11 +580,25 @@ describe("D-123 / Q-32 punkt 2: server-side memory-space-autoritet i voice-trans
     // Nødvendig: samme behandler, samme space, kun tillitsnivået varierer.
     expect(evaluateSpeechRouting(EXTERNAL_VERIFIED, "personal", "CLIENT_ASSERTED").allowed).toBe(false);
     expect(evaluateSpeechRouting(EXTERNAL_VERIFIED, "personal", "SERVER_VERIFIED").allowed).toBe(true);
-    // Utilstrekkelig: D-122 sine behandlerregler går foran tillitsnivået.
-    expect(evaluateSpeechRouting(new OpenAiStt().processor, "personal", "SERVER_VERIFIED").outcome).toBe(
+    // Utilstrekkelig: D-122 sine behandlerregler går foran tillitsnivået - vist
+    // her med en hypotetisk IKKE-verifisert behandler (OpenAI sin FAKTISKE
+    // erklæring er selv `VERIFIED` nå, D-226, se de dedikerte OpenAI-testene).
+    const hypotheticalUnverified: SpeechProcessorDeclaration = {
+      processor_id: "test-external-hypothetically-unverified",
+      locality: "external",
+      processor_row_declared: true,
+      processor_terms_status: "NOT_VERIFIED"
+    };
+    expect(evaluateSpeechRouting(hypotheticalUnverified, "personal", "SERVER_VERIFIED").outcome).toBe(
       "DENIED_PROCESSOR_TERMS_NOT_VERIFIED"
     );
     expect(evaluateSpeechRouting(EXTERNAL_VERIFIED, "health", "SERVER_VERIFIED").outcome).toBe(
+      "DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR"
+    );
+    // ...og selv OpenAI sin nå-verifiserte, EKTE erklæring stanser fortsatt på
+    // NØYAKTIG samme D-23/regel-2-grense for `health` - regel 3 alene åpner
+    // aldri en sensitiv space.
+    expect(evaluateSpeechRouting(new OpenAiStt().processor, "health", "SERVER_VERIFIED").outcome).toBe(
       "DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR"
     );
   });
