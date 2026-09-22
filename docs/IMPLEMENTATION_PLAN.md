@@ -3011,6 +3011,10 @@ startet). `FIXED_SUITE_VERIFIED=true`, `STRIPE_LIVE_VERIFIED=false`,
 `STRIPE_LIVE_GATE=PENDING_CREDENTIALS`. `Q26_FULL_TRUTH_PROMOTION_IMPLEMENTED=false` UENDRET.
 Full detalj: D-109 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**OPPDATERT 2026-09-22 (D-224):** credentials nå konfigurert + ekte API-tilkobling bevist -
+`STRIPE_LIVE_GATE=CREDENTIALS_CONFIGURED_AWAITING_LIVE_ACCEPTANCE_SCRIPT` (RETTET fra
+`PENDING_CREDENTIALS`, fortsatt IKKE `PASS` - se D-224/RUNTIME_GATES.md for presis avgrensning).
+
 ### UA-6 Finance & Spend Integrity Gateway — FJERDE slice (Slice 4, D-110): Vipps MobilePay (2026-08-25)
 
 Ny ekstern leverandør (P1, masterplan-navngitt sammen med Stripe/bank - `CORE_DEPENDENCY_DECISION_
