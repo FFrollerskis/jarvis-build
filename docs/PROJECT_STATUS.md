@@ -1,10 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-status-update-post-d235`, ren dokumentasjonsøkt - kun
-denne filen endret, INGEN kodeendring). Formål: `PROJECT_STATUS.md` hadde blitt stående med
-"ÅPEN SOM DRAFT"/"IKKE MERGET"-merkinger for PR-er som en tidligere økt faktisk fulgte opp og merget
-rett etterpå (samme D-192-fullmakt, PR-monitorering+merge er en egen, senere handling enn selve
-kode-PR-en). Denne oppdateringen retter dét, uten å endre den historiske hendelsesbeskrivelsen.
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d236-env-secret-empty-value`). **D-236: EKTE
+KODEFIKS** - `EnvSecretProvider.get()` (`modules/tool-gateway/src/gateway.ts`) behandlet en
+tom-men-satt `.env`-linje (f.eks. `JARVIS_VIPPS_CLIENT_ID=`) som en "verdi" (kun
+`process.env[ref] ?? null`, som ALDRI fanger tom streng) - dashbordets "Integrasjoner"-seksjon viste
+derfor connectorer som Vipps som `konfigurert` selv om Tobias aldri hadde limt inn ekte credentials.
+Funnet av Tobias SELV, live på sin egen ferske Docker-kjøring ("VIPPS ER IKKE INTEGRERT Å DET STÅR
+DET ER DET"), rotårsak sporet til kildekoden (ikke gjettet), fikset til `return value ? value : null`.
+5 nye tester (`env-secret-provider-empty-value.test.ts`), eksisterende `connector-registry.test.ts`/
+`d213-writable-secret-provider.test.ts` re-kjørt uendret grønt. Se D-236 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): branch `claude/fase-status-update-post-d235` (PR #148, MERGET, `b1d4257`),
+ren dokumentasjonsøkt.** `PROJECT_STATUS.md` hadde blitt stående med "ÅPEN SOM DRAFT"/"IKKE
+MERGET"-merkinger for PR-er som en tidligere økt faktisk fulgte opp og merget rett etterpå (samme
+D-192-fullmakt, PR-monitorering+merge er en egen, senere handling enn selve kode-PR-en). Den
+oppdateringen rettet dét, uten å endre den historiske hendelsesbeskrivelsen.
 
 **Alle PR-er t.o.m. #147 er MERGET til `main`.** Siden forrige `PROJECT_STATUS.md`-skriving har
 følgende blitt fulgt opp og merget, alle under direkte D-192(-tillegg)-fullmakt i chat, CI grønt,
