@@ -55,6 +55,12 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
+- **D-231 (2026-09-22, egen isolert docs-only worktree/branch `claude/fase-d231-integration-backlog-plan`,
+  parallelt med D-230/K2-dashboard-agenten på en ANNEN branch):** Tobias sin kuraterte 73-punkts
+  integrasjonsliste registrert som backlog i `INTEGRATIONS.md` §4 (16 `ALLEREDE_BYGGET`/2
+  `ALLEREDE_DEKKET`/53 `NY_BACKLOG`/2 `IKKE EN CONNECTOR`), fire nye åpne spørsmål lagt til
+  (Q-36 Supabase, Q-37 Neo4j, Q-38 1Password, Q-39 Windows/macOS - se `OPEN_QUESTIONS.md`). REN
+  DOKUMENTASJON - ingen kode, ingen credentials, `EXTERNAL_CREDENTIAL_SETUP_POLICY` (D-108) uendret.
 - **PR #106-#140 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
