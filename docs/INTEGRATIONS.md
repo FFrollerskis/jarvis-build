@@ -78,7 +78,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
 | Supabase | `Q-36 LUKKET (D-233) – DRIFTSVALG, IKKE CONNECTOR` | Tobias bekreftet: kun Postgres-hosting, aldri Supabase-spesifikke API-er - ingen konflikt med regel 9, ingen ny ToolGateway-connector, ingen oppføring i `connector-registry.ts`. Se D-233 i `DECISIONS_AND_ASSUMPTIONS.md` |
-| Neo4j | `NY_BACKLOG – Q-37 FLAGGET` | Business Graph (UA-3) er ALLEREDE `PRODUCTION_VERIFIED` på ren Postgres (host run `ca2d9248`). `MEMORY_ARCHITECTURE.md`: egen grafdatabase kun ved målt behov (Q-10). Se Q-37 - erstatte eller supplere, og hvorfor, avklares av Tobias FØR noe velges |
+| Neo4j | `DROPPET (D-234)` | Tobias bekreftet at Business Graph (UA-3), allerede `PRODUCTION_VERIFIED` på ren Postgres, dekker behovet. Se D-234 i `DECISIONS_AND_ASSUMPTIONS.md` |
 
 ### 4.3 Kunnskap / dokumenter
 
@@ -213,7 +213,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| 1Password | `NY_BACKLOG – Q-38 FLAGGET` | Infisical er allerede PRIMÆR `SecretProvider` (Q-05/D-211, skriving D-213). Se Q-38 - erstatte Infisical eller noe annet (personlig data-kilde), avklares av Tobias FØR noe velges |
+| 1Password | `DROPPET (D-234)` | Tobias bekreftet at Infisical, allerede PRIMÆR `SecretProvider` (Q-05/D-211, skriving D-213), dekker behovet. Se D-234 i `DECISIONS_AND_ASSUMPTIONS.md` |
 
 ### 4.15 OS / enhet
 
