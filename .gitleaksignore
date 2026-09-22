@@ -38,3 +38,15 @@ f5564247ebd0c3b00d572ba2d897fc39f383188c:docs/RUNTIME_GATES.md:generic-api-key:6
 # but gitleaks scans full history by default and the original commit
 # remains part of this branch's published history.
 5f7f96e7f5371683d35d9ff748a5fd5ab9b12dbc:modules/tool-gateway/test/channel-session-continuity-dedupe.test.ts:generic-api-key:128
+
+# gitleaks' generic-api-key rule flagged a Stripe PaymentIntent object ID
+# (D-228 host-acceptance evidence, see DECISIONS_AND_ASSUMPTIONS.md D-228) -
+# Stripe object identifiers (pi_/re_/evt_ prefixes) are NOT secrets, they are
+# public-safe reference IDs meant to be logged/quoted/shared in support
+# tickets and audit trails (unlike sk_/pk_/whsec_ prefixed values, which
+# ARE secrets and were never written to any file - see D-228's own
+# secret_redaction=PASS evidence). Verified manually. Truncated to a
+# lower-entropy form in a later commit to remove the trigger pattern
+# going forward, but gitleaks scans full history by default and the
+# original commit remains part of this branch's published history.
+d926cf79812952d7a0f92635d8d153095a8eee68:docs/DECISIONS_AND_ASSUMPTIONS.md:generic-api-key:444
