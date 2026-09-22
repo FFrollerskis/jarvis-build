@@ -1,8 +1,24 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d237-d238-capability-dashboard-ux`). **D-237+D-238:
-EKTE KODEFIKS + UX-forbedring**, samme Tobias-melding ("gjør dash mer kult ... viktig at han vet om
-alt han kan gjøre og har tilgang til"):
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d239-dashboard-redesign`). **D-239: RENT kosmetisk
+dashbord-restyling**, Tobias direkte i chat: "forbedre dashbordet til og se moderne og jarvis ut".
+`apps/web/dashboard.html` sin HELE `<style>`-blokk skrevet om til et mørkt/cyan "HUD"-tema med CSS
+custom properties (`--bg`/`--panel`/`--accent`/`--success-*`/`--warn-*`/`--danger-*`/`--info-*`)
+i stedet for hardkodede heksfarger - HVER selector (ID/klasse) UENDRET, INGEN HTML-struktur/JS/
+datamodell-endring. Nytt: sticky/blurred header med pulserende statusprikk (rent CSS ::before,
+ingen HTML-endring), cyan-aksentert typografi med gradient-skillelinjer, panel-skygger+hover-kant,
+ensartede fokusringer, tilpasset scrollbar - INGEN ekstern font-/CDN-avhengighet (regel 9). Verifisert
+FØR endringen at ingen test søker etter spesifikke fargeverdier/klassenavn/eksakt header-markup (null
+testrisiko for en ren egenskapsverdi-endring), OG visuelt (samme fetch()-mock+headless Chromium-
+metode som D-238, gjennom HELE den ekte enhets-/grant-/lasteflyten med syntetiske data for alle
+seksjoner inkl. de 64 connectorene i fem kategorier) - kontrast, fokus/hover, pulserende prikk og
+D-238s kollapsbare connector-grupper fungerer alle som før, kun med nytt utseende. De fire dashbord-
+relaterte wiring-testsuitene (connector-credentials/governance/executive-mutations/voice-page, 48
+tester) grønt uendret etter endringen. Se D-239 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret): D-237+D-238 (PR #150, MERGET, `1b8d8f0`) - EKTE KODEFIKS + UX-forbedring**,
+samme Tobias-melding ("gjør dash mer kult ... viktig at han vet om alt han kan gjøre og har tilgang
+til"):
 - **D-237 (selv-bevissthet):** `check_my_capabilities`/`executive.get_capability_status` sin
   `chat_accessible_tools` viste FØR bare om et mesh-verktøy STRUKTURELT fantes, aldri om det
   underliggende credential-referansen faktisk var konfigurert - Charlie kunne dermed liste
