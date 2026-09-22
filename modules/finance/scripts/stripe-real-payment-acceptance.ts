@@ -290,6 +290,18 @@ async function main(): Promise<void> {
     devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
     authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
   });
+  // `finance.submit_payment_intent` sin ToolGateway-registrering erklærer
+  // `credential_ref: "JARVIS_FIKEN_REFRESH_TOKEN"` UBETINGET (provider-
+  // agnostisk statisk gate - se `integrations.ts`), sjøl om FAKTISK Fiken-
+  // API-kall KUN skjer for `current.provider === "fiken"` inne i
+  // `FinanceService.submitPaymentIntent()`. Denne intensjonen har ALLTID
+  // `provider: "stripe"` (satt over i `create_payment_intent`) - Fiken-
+  // grenen kjøres derfor STRUKTURELT aldri, og denne sentinel-verdien blir
+  // ALDRI lest av noen ekte Fiken-transport. Kun til stede for å tilfredsstille
+  // ToolGateway sin rene tilstedeværelses-sjekk (`secrets.get(ref)` - se
+  // `gateway.ts`), ALDRI validert mot Fiken sitt eget API.
+  process.env.JARVIS_FIKEN_REFRESH_TOKEN ??= "unused-fiken-token-sentinel-stripe-only-acceptance";
+
   const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
   const toolGateway = new ToolGateway(pool, policy, secrets);
   for (const tool of firstWaveTools({
@@ -314,7 +326,11 @@ async function main(): Promise<void> {
     });
     stripeIntentId = mustExternalId(created, "stripe_create");
 
-    const submitResult = await stripeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: stripeIntentId });
+    // `submit_payment_intent` bor i det provider-nøytrale `finance.*`-
+    // namespacet (IKKE `finance_stripe.*` - se `integrations.ts` linje
+    // ~1651), ETT felles innsendingspunkt for fiken/stripe/vipps/neonomics
+    // som selv grener på `current.provider` internt (`service.ts`).
+    const submitResult = await financeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: stripeIntentId });
     if (!submitResult.ok) throw new Error(`submit_payment_intent_denied:${submitResult.reason}`);
     const afterSubmit = await finance.getPaymentIntent(TENANT_A, "business", stripeIntentId);
     if (!afterSubmit?.provider_ref) throw new Error("submit_payment_intent_returned_no_provider_ref");
