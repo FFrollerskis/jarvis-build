@@ -61,6 +61,12 @@ export class StripeFinanceTransport implements ToolTransport {
         const result = await this.service.runProviderAnomalyDetection(tenantId, memorySpace);
         return { data: result as unknown as JsonValue };
       }
+      // D-242: connector-helsesjekk-probe - ren providerside-lesing (`GET
+      // /v1/balance`), INGEN memory-skriving, ingen `payment_intent_id`.
+      case "get_balance": {
+        const balance = await this.service.getStripeBalance(tenantId);
+        return { data: balance as unknown as JsonValue };
+      }
       default:
         throw new Error(`finance_stripe_action_not_implemented:${action}`);
     }

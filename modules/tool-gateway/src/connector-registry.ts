@@ -13,15 +13,32 @@ import type { ToolGateway } from "./gateway.ts";
  * side-effektfri lesehandling gjennom `ToolGateway` - Telegrams
  * `get_bot_info` (`getMe`) ble lagt til AKKURAT for dette formålet, siden
  * `telegram.notify` sender en EKTE melding og derfor aldri kunne vært en
- * trygg test). **BEVISST FORTSATT presence_only, eksplisitt avgrenset:**
- * Fiken/Stripe/Vipps mangler en eksisterende ToolGateway-lesehandling UTEN
- * enten en Stripe/Vipps-side-effekt (create_payment_intent er en reell
- * providerobjekt-opprettelse, selv om idempotent) eller en forhåndsbetingelse
- * (eksisterende samtykke/kort) - å bygge én er en EGEN, senere oppgave, ikke
- * gjettet frem her. Anthropic/OpenAI/Gemini konsumeres via `ModelGateway`,
- * en HELT ANNEN kallevei enn `ToolGateway` (ingen tool_id/action finnes for
+ * trygg test).
+ *
+ * D-242 (2026-09-22, Tobias direkte chat-instruks: "du skal bygge det for
+ * absolutt alle som tester en gang om dagen så vi vet om credentials
+ * fungerer eller ikke hele tiden") utvidet `live_test` videre til 11 av 14
+ * - `vercel` fikk ENDELIG en ekte transport (`live-transports.ts` sin
+ * `VercelTransport` - `live_test` eksisterte siden D-213, men falt HELE
+ * TIDEN gjennom til `UnconfiguredHttpTransport` fordi `main.ts`/
+ * `worker-main.ts` aldri koblet inn en ekte transport, se doc-kommentaren
+ * der for full begrunnelse), og Fiken/Stripe/Vipps fikk hver sin NYE, trygge
+ * klasse A-probe (`finance.list_companies`/`finance_stripe.get_balance`/
+ * `finance_vipps.check_credentials` - alle GET/token-sjekk-baserte, INGEN
+ * mutasjon, se `service.ts` sine `listFikenCompanies()`/`getStripeBalance()`/
+ * `checkVippsCredentials()`-doc-kommentarer). En ny `ConnectorHealthSweep`
+ * (`connector-health-sweep.ts`) kjører NÅ `test_connector`-EKVIVALENTE kall
+ * mot HVER av disse 11 daglig via `DailyScheduler` (`main.ts`), slik at
+ * `ToolGateway.health` (BO-03, allerede lest av `listConnectorStatus()`
+ * under) er FRISK selv for en connector ingen annen reell trafikk nylig
+ * brukte - IKKE et nytt persisteringslag, gjenbruker BEVISST den samme
+ * BO-03-mekanismen `test_connector` allerede skriver til, samme "ett sted
+ * eier helsetilstanden"-disiplin. **BEVISST FORTSATT presence_only, eksplisitt
+ * avgrenset:** Anthropic/OpenAI/Gemini konsumeres via `ModelGateway`, en
+ * HELT ANNEN kallevei enn `ToolGateway` (ingen tool_id/action finnes for
  * dem) - et "test denne modell-nøkkelen"-probe hører hjemme i
- * `ModelGateway` selv, ikke tvunget inn i dette connector-test-mønsteret.
+ * `ModelGateway` selv, ikke tvunget inn i dette connector-test-mønsteret;
+ * dette er en EGEN, senere oppgave, ikke gjettet frem her.
  *
  * D-232 (2026-09-22, Tobias direkte chat-instruks: "Legg de til i dashbordet
  * selv om de ikke er klare for tilkobling så de er der"): la til de 50
@@ -113,9 +130,31 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "anthropic", display_name: "Anthropic API", category: "model_provider", credential_refs: ["ANTHROPIC_API_KEY"] },
   { id: "openai", display_name: "OpenAI API", category: "model_provider", credential_refs: ["OPENAI_API_KEY"] },
   { id: "gemini", display_name: "Gemini API", category: "model_provider", credential_refs: ["GEMINI_API_KEY"] },
-  { id: "fiken", display_name: "Fiken", category: "finance", credential_refs: ["JARVIS_FIKEN_CLIENT_ID", "JARVIS_FIKEN_CLIENT_SECRET", "JARVIS_FIKEN_REFRESH_TOKEN"] },
-  { id: "stripe", display_name: "Stripe", category: "finance", credential_refs: ["JARVIS_STRIPE_SECRET_KEY"] },
-  { id: "vipps", display_name: "Vipps", category: "finance", credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY"] },
+  {
+    id: "fiken", display_name: "Fiken", category: "finance",
+    credential_refs: ["JARVIS_FIKEN_CLIENT_ID", "JARVIS_FIKEN_CLIENT_SECRET", "JARVIS_FIKEN_REFRESH_TOKEN"],
+    // D-242: `FikenTransport.listCompanies()` - Fiken sin egen dokumenterte
+    // "hent companySlug"-inngang, INGEN mutasjon. Tidligere `presence_only`
+    // (ingen sikker lesing fantes) - se filhode for historikk.
+    live_test: { tool_id: "finance", action: "list_companies", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
+  },
+  {
+    id: "stripe", display_name: "Stripe", category: "finance",
+    credential_refs: ["JARVIS_STRIPE_SECRET_KEY"],
+    // D-242: `GET /v1/balance` - offisielt dokumentert, INGEN parametre,
+    // INGEN mutasjon. Tidligere `presence_only` - se filhode for historikk.
+    live_test: { tool_id: "finance_stripe", action: "get_balance", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
+  },
+  {
+    id: "vipps", display_name: "Vipps", category: "finance",
+    credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY"],
+    // D-242: `POST /accesstoken/get` (SAMME kall enhver ekte Vipps-handling
+    // uansett gjør FØRST) - INGEN parameterløs "whoami"-lesing finnes i
+    // ePayment-API-et, men selve token-hentingen ER INGEN mutasjon og
+    // feiler umiddelbart på ugyldige credentials. Tidligere `presence_only`
+    // - se filhode for historikk.
+    live_test: { tool_id: "finance_vipps", action: "check_credentials", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
+  },
   {
     id: "neonomics", display_name: "Neonomics", category: "finance",
     credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET"],
@@ -226,8 +265,12 @@ export interface ConnectorStatus {
 /**
  * `gateway` brukes UTELUKKENDE for `hasSecret()` (presence, aldri verdi) og
  * det allerede eksponerte `health`-kartet (BO-03) - INGEN nye kall gjøres her,
- * `live_test` er metadata for en SENERE, eksplisitt "test connector"-handling
- * (egen oppgave, se filhode).
+ * `live_test` er metadata BÅDE den eksplisitte "test connector"-handlingen
+ * (`owner_controls.test_connector`, D-213) OG `ConnectorHealthSweep`
+ * (`connector-health-sweep.ts`, D-242) bruker for å avgjøre hva de faktisk
+ * skal kalle - selve kallet/skrivingen til `health`-kartet skjer ALLTID
+ * inne i `ToolGateway.execute()` selv (SAMME sted for BEGGE kallerne), aldri
+ * her.
  */
 export async function listConnectorStatus(
   gateway: Pick<ToolGateway, "hasSecret" | "health">

@@ -97,28 +97,33 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fire ubetingede tomme-konstruktør-transportene som før (+docker, D-105)", () => {
+  // D-242: vercel: new VercelTransport() lagt til - EN NY, femte tom-konstruktør-
+  // transport (fikser vercel_not_configured-bugen, se D-242 i DECISIONS_AND_ASSUMPTIONS.md;
+  // bevisst tellet med her, ikke et regresjonsfunn).
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fem ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
-    expect(unconditionalConstructions).toHaveLength(4);
+    expect(unconditionalConstructions).toHaveLength(5);
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
+    expect(callBlock).toContain("vercel: new VercelTransport()");
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker, D-105) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
     // D-181/D184: telegram gikk fra en bokstavelig tom-konstruktør (`new TelegramTransport()`
-    // inni dette kallet) til en referanse til en hoistet, delt konstant - derfor 3, ikke 4,
-    // her. main.ts (describe "I" sin FØRSTE test, over) forblir uendret på 4 - de to
+    // inni dette kallet) til en referanse til en hoistet, delt konstant - derfor 4 (3+vercel),
+    // ikke 5, her. main.ts (describe "I" sin FØRSTE test, over) forblir uendret på 5 - de to
     // filene divergerer BEVISST kun paa dette ene punktet, se describe "B".
-    expect(unconditionalConstructions).toHaveLength(3);
+    expect(unconditionalConstructions).toHaveLength(4);
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
+    expect(callBlock).toContain("vercel: new VercelTransport()");
   });
 });
 

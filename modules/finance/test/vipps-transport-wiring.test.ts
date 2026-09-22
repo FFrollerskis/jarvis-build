@@ -12,16 +12,18 @@ import { VippsFinanceTransport } from "../src/vipps-tool-transport.ts";
  * en IKKE-oppgjort reservasjon), resten A/B.
  */
 describe("A: finance_vipps.*-handlinger er registrert i firstWaveTools() med korrekt transport", () => {
-  it("finner alle 12 finance_vipps.*-handlinger og peker til vipps-transporten", () => {
+  it("finner alle 13 finance_vipps.*-handlinger og peker til vipps-transporten", () => {
     const vippsTransport = new VippsFinanceTransport({} as unknown as FinanceService);
     const tools = firstWaveTools({ finance_vipps: vippsTransport });
     const vippsTools = tools.filter((t) => t.tool_id === "finance_vipps");
-    expect(vippsTools.length).toBe(12);
+    expect(vippsTools.length).toBe(13);
     expect(vippsTools.map((t) => t.action)).toEqual(
       expect.arrayContaining([
         "request_capture", "submit_capture", "get_capture", "list_captures",
         "cancel_payment", "request_refund", "submit_refund", "get_refund", "list_refunds",
-        "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection"
+        "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection",
+        // D-242: connector-helsesjekk-probe.
+        "check_credentials"
       ])
     );
     for (const tool of vippsTools) expect(tool.transport).toBe(vippsTransport);
@@ -39,6 +41,8 @@ describe("B: risikoklasser - pengebevegende mutasjoner er klasse D, reservasjons
     expect(byAction["list_refunds"]).toBe("A");
     expect(byAction["refresh_payment_state"]).toBe("A");
     expect(byAction["get_webhook_event"]).toBe("A");
+    // D-242: connector-helsesjekk-probe - ren lesing, klasse A.
+    expect(byAction["check_credentials"]).toBe("A");
     expect(byAction["request_capture"]).toBe("B");
     expect(byAction["request_refund"]).toBe("B");
     expect(byAction["run_provider_anomaly_detection"]).toBe("B");

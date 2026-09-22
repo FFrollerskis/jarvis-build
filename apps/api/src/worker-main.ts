@@ -6,7 +6,7 @@ import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
   GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
-  ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
+  ToolGateway, VercelTransport, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
 import { SupportService, SupportTransport } from "@jarvis/support";
@@ -291,6 +291,10 @@ const telegramTransport = new TelegramTransport();
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
+  // D-242 fix (SAMME begrunnelse som main.ts): `vercel` manglet en ekte
+  // transport her også - firstWaveTools() registrerer `tool_id: "vercel"` i
+  // BEGGE prosesser.
+  vercel: new VercelTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.

@@ -820,6 +820,38 @@ export class TelegramTransport implements ToolTransport {
 }
 
 /**
+ * Fikser en REELL, live-funnet produksjonsfeil (Tobias, 2026-09-22): `vercel`
+ * har hatt en `live_test`-oppføring i `connector-registry.ts` siden D-213,
+ * men `integrations.ts` sin `firstWaveTools()` fikk ALDRI en ekte transport
+ * for `tool_id: "vercel"` i `transports`-recorden (`main.ts`/`worker-main.ts`)
+ * - kallet falt derfor gjennom til `UnconfiguredHttpTransport`, som ALLTID
+ * kaster `vercel_not_configured`, uansett om credentialen er gyldig. Dette
+ * er "koden eksisterer" != "koden er faktisk koblet inn", SAMME klasse funn
+ * som D-211/D-212 (se DECISIONS_AND_ASSUMPTIONS.md), nå en femte gang.
+ * `GET /v6/deployments` (Vercel sin offisielle REST-API, `Authorization:
+ * Bearer <token>`, verifisert mot offisiell dokumentasjon/websøk - ikke
+ * gjettet) er den ENESTE handlingen `integrations.ts` registrerer for
+ * `vercel` i dag (`read_deployments`, klasse A, `scopes: ["deployments:read"]`)
+ * - full D-41-kapabilitet (deploy/redeploy/miljøvariabel-styring) forblir
+ * `NY_BACKLOG`, eksplisitt dokumentert i `docs/INTEGRATIONS.md` §4.5, ikke
+ * stille utelatt her.
+ */
+export class VercelTransport implements ToolTransport {
+  async invoke(action: string, _parameters: Record<string, JsonValue>, credential: string) {
+    if (action !== "read_deployments") throw new Error(`vercel_unsupported_action_${action}`);
+    const response = await fetch("https://api.vercel.com/v6/deployments?limit=5", {
+      headers: { authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`vercel_error_${response.status}`);
+    const body = (await response.json()) as { deployments?: Array<{ uid: string; name: string; url: string; state?: string; created: number }> };
+    const deployments = (body.deployments ?? []).map((d) => ({
+      id: d.uid, name: d.name, url: d.url, state: d.state ?? "unknown", created_at: new Date(d.created).toISOString()
+    }));
+    return { data: { deployments } };
+  }
+}
+
+/**
  * UA-5 GitHub Developer Control Plane v1 (D-64: GitHub er EXTERNAL_CANONICAL
  * for repo/commit/branch/PR/review/workflow-tilstand - Jarvis normaliserer
  * ALDRI dette til sin egen "sannhet", kun videreformidler det med proveniens,

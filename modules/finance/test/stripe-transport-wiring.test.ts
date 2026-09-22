@@ -13,15 +13,17 @@ import { StripeFinanceTransport } from "../src/stripe-tool-transport.ts";
  * avviksdeteksjon).
  */
 describe("A: finance_stripe.*-handlinger er registrert i firstWaveTools() med korrekt transport", () => {
-  it("finner alle 7 finance_stripe.*-handlinger og peker til stripe-transporten", () => {
+  it("finner alle 8 finance_stripe.*-handlinger og peker til stripe-transporten", () => {
     const stripeTransport = new StripeFinanceTransport({} as unknown as FinanceService);
     const tools = firstWaveTools({ finance_stripe: stripeTransport });
     const stripeTools = tools.filter((t) => t.tool_id === "finance_stripe");
-    expect(stripeTools.length).toBe(7);
+    expect(stripeTools.length).toBe(8);
     expect(stripeTools.map((t) => t.action)).toEqual(
       expect.arrayContaining([
         "request_refund", "submit_refund", "get_refund", "list_refunds",
-        "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection"
+        "refresh_payment_state", "get_webhook_event", "run_provider_anomaly_detection",
+        // D-242: connector-helsesjekk-probe.
+        "get_balance"
       ])
     );
     for (const tool of stripeTools) expect(tool.transport).toBe(stripeTransport);
@@ -36,6 +38,8 @@ describe("B: risikoklasser - kun ekte leverandørmutasjon er klasse D", () => {
     expect(byAction["list_refunds"]).toBe("A");
     expect(byAction["refresh_payment_state"]).toBe("A");
     expect(byAction["get_webhook_event"]).toBe("A");
+    // D-242: connector-helsesjekk-probe - ren lesing, klasse A.
+    expect(byAction["get_balance"]).toBe("A");
     expect(byAction["request_refund"]).toBe("B");
     expect(byAction["run_provider_anomaly_detection"]).toBe("B");
     // Den ENESTE handlingen som faktisk sender en refusjon til Stripe.
