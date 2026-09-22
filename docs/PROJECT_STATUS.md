@@ -1,62 +1,52 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d235-infisical-host-acceptance`, egen isolert
-worktree, basert på FERSK `origin/main` - `git fetch origin main` kjørt før branch-opprettelse,
-inkluderer allerede D-233 (PR #145, Q-36 Supabase lukket) og D-234 (PR #146, Q-37/Q-38 Neo4j/
-1Password droppet), begge merget FØR denne branchen ble opprettet). **D-235: reproduserbart host-
-akseptansescript levert for D-35 sin 10-punkts Infisical-produksjonsport** -
-`modules/owner-controls/scripts/infisical-live.ts`+`infisical-live-host-run.ts` (SAMME mønster som
-`stripe-real-payment-acceptance.ts`/`k1-owner-control-authority-host-run.ts`). Dekker alle 10 punkter,
-inkl. TRE reelt NYE (punkt 8 rotasjon/tilbakekalling via Infisical sin egen DELETE-API; punkt 10
-hvelv-spesifikk `pg_dump`/restore-backup for `infisical`-databasen; D-213 sin skrive-sti
-`owner_controls.set_connector_credential` ende-til-ende). Punkt 4 (TLS) dokumentert `N/A_DOCUMENTED`
-MED forbehold, ikke fabrikkert. `.env.example` fikk de SEKS manglende `INFISICAL_*`-variablene (var
-helt fraværende der til tross for at koden/compose alltid har lest dem). **KODE LEVERT, IKKE HOST-
-KJØRT** - Claude har ingen tilgang til en ekte Infisical-instans i denne sandboxen. 26 nye DB-
-uavhengige strukturtester (`infisical-live-host-run-wiring.test.ts`). `pnpm -w typecheck`/
-`npx eslint .` rene. Se D-235 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. **PR ÅPNES SOM DRAFT
-mot `main`, IKKE merget av denne økten selv.**
+**Oppdatert:** 2026-09-22 (branch `claude/fase-status-update-post-d235`, ren dokumentasjonsøkt - kun
+denne filen endret, INGEN kodeendring). Formål: `PROJECT_STATUS.md` hadde blitt stående med
+"ÅPEN SOM DRAFT"/"IKKE MERGET"-merkinger for PR-er som en tidligere økt faktisk fulgte opp og merget
+rett etterpå (samme D-192-fullmakt, PR-monitorering+merge er en egen, senere handling enn selve
+kode-PR-en). Denne oppdateringen retter dét, uten å endre den historiske hendelsesbeskrivelsen.
 
-**Forrige milepæler (uendret, fortsatt gjeldende på `main` da denne økten startet): D-234/D-233/D-232.**
-**D-234:** Q-37 (Neo4j) og Q-38 (1Password) LUKKET - BEGGE DROPPET fra backlogen ("Hvis vi ikke
-trenger neo4j eller 1passord så dropper vi de" - Tobias, direkte chat). Business Graph (UA-3) dekker
-Neo4j-behovet, Infisical dekker 1Password-behovet - begge allerede produksjonsverifiserte/wired. Kun
-Q-39 (Windows/macOS) står igjen åpen av D-231 sine fem flaggede punkter. **D-233:** Q-36 (Supabase)
-LUKKET - Tobias bekreftet direkte at Supabase på D-231-listen betyr kun Postgres-hosting, ikke
-Supabase-spesifikke API-er. Ingen konflikt med regel 9, ingen ny connector, ingen kode. **D-232:** 50
-av D-231 sine
-`NY_BACKLOG`-punkter lagt til i `connector-registry.ts`/dashbordets "Integrasjoner"-seksjon som
-synlige, EKSPLISITT "ikke konfigurert"-oppføringer** (Tobias direkte: "Legg de til i dashbordet
-selv om de ikke er klare for tilkobling så de er der"). To nye `category`-verdier
-(`"backlog"`/`"backlog_d64_gate"` for de seks D-64-port-krevende CRM-/prosjektstyrings-
-leverandørene) - INGEN ny UI-kode (eksisterende pill-rendering dekker det allerede), INGEN
-`live_test` for noen av de 50, kun tomme placeholder-env-linjer i `.env.example`. Supabase/Neo4j/
-1Password (Q-36/Q-37/Q-38) og Windows/macOS (Q-39, `IKKE EN CONNECTOR`) BEVISST IKKE lagt til - se
-D-232 i DECISIONS_AND_ASSUMPTIONS.md for eksakt telling/begrunnelse. RENT SYNLIGHET - ingen D-64-
-port kjørt, ingen kode/credential-oppsett for noen av de 50. **PR #144 ÅPEN SOM DRAFT mot `main`,
-IKKE merget av denne økten selv.**
+**Alle PR-er t.o.m. #147 er MERGET til `main`.** Siden forrige `PROJECT_STATUS.md`-skriving har
+følgende blitt fulgt opp og merget, alle under direkte D-192(-tillegg)-fullmakt i chat, CI grønt,
+ingen åpne review-tråder, eksakt HEAD-/base-guard rett før hver merge:
+- **PR #141 (D-228, Stripe host-akseptanse) → MERGET** (`c34732e`). `STRIPE_LIVE_GATE` sin kode-side
+  er dermed FERDIG - kun uavhengig gjennomgang av selve host-bevisdet (eller Tobias sitt eget
+  direkte akseptvedtak, se "Blokkeringer") gjenstår før `PASS_PENDING_ARCHITECT_REVIEW` blir et
+  ubetinget `PASS`.
+- **PR #142 (D-231, kuratert integrasjons-backlog registrert i `INTEGRATIONS.md`) → MERGET** (`406412a`).
+- **PR #143 (D-230, K2-styringsdashbord `POST /governance/query`/`/mutate` + UI) → MERGET** (`34bcac9`,
+  krevde manuell konfliktløsning i `DECISIONS_AND_ASSUMPTIONS.md` mot D-231, begge D-ID-radene
+  beholdt i rekkefølge).
+- **PR #144 (D-232, 50 backlog-connectorer synlige i dashbordet) → MERGET** (`80f5b2d`).
+- **PR #145 (D-233, Q-36 Supabase lukket - kun Postgres-hosting, ingen connector) → MERGET** (`8d060d4`).
+- **PR #146 (D-234, Q-37/Q-38 Neo4j+1Password droppet fra backlogen) → MERGET** (`2403577`).
+- **PR #147 (D-235, D-35 Infisical host-akseptansescript LEVERT, IKKE host-kjørt) → MERGET** (`c06286c`).
 
-**Forrige milepæl (uendret, fortsatt gjeldende på `main`): D-230.** K2-
-dashboardet (decision log/scenarios/risk register/goals-OKRs/delegation board) fikk sin FØRSTE
-synlige UI-flate. `@jarvis/governance` (migrasjon 059) var FERDIG BYGGET/testet siden D-207, men KUN
-nåbart via ToolGateway/API direkte. Levert: `POST /governance/query`/`POST /governance/mutate`
-(SAMME grant-autoritetsmodell/`toolGateway`-instans som `/executive/query`, hardkodet allowlist per
-rute, INGEN klasse C/D i governance så INGEN bekreftelsesdialog-plikt), `get_delegation_board`
-hvitelistet på `EXECUTIVE_QUERY_ACTIONS`, ny "Styring (K2)"-seksjon i `apps/web/dashboard.html`. Se
-D-230 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. PR åpnes som draft mot `main` - IKKE merget av
-denne økten selv (foreldre-sesjonen følger opp CI og merger). **STORT MILEPÆL forut for dette
-(uendret, fortsatt gjeldende på `main`): D-228** - Tobias sin FØRSTE faktiske host-kjøring av
-Stripe-akseptansescriptet (D-225) er GRØNN. Fem reelle kodefeil funnet og rettet underveis (feil
-ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en tom streng, et ikke-eksisterende
-Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse, manglende
-CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte kriterier
-PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang, samme
-presedens som W1 watchdog opprinnelig fulgte). **PR #97 (W1 watchdog) LUKKET UTEN MERGE** - funnet
-ved forsøk på merge under D-192-tillegg at feature-en allerede var implementert (MER gjennomarbeidet,
-fem ekstra bugfikser) og merget via en parallell PR #96 tilbake i 2026-09-19; se "Andre åpne PR"
-under for full historikk. Tobias bekreftet direkte at issue #68 sin ChatGPT-arkitektgjennomgang ikke
-lenger er en aktiv sti - rutine-PR-er avgjøres videre under direkte D-192(-tillegg)-fullmakt i chat,
-ikke via issue #68.
+**Netto resultat av D-231→D-235-rekken:** Tobias sin kuraterte ~73-punkts integrasjonsliste er nå
+FULLT registrert - 16 var allerede bygget, 2 allerede dekket, 50 lagt til som synlig-men-ikke-
+konfigurert backlog i dashbordet (6 av dem krever i tillegg en egen D-64 Core-vs-Adapter-port før de
+kan bygges), 2 er ikke connectorer (Windows/macOS). Av D-231 sine fem flaggede avklaringspunkter er
+FIRE lukket (Q-36 Supabase, Q-37 Neo4j, Q-38 1Password, pluss D-64-gaten selv registrert eksplisitt)
+- **kun Q-39 (Windows/macOS) står fortsatt åpen**, se `OPEN_QUESTIONS.md`.
+
+**Ingen kjent, byggbar-uten-Tobias kode gjenstår akkurat nå.** Det som står igjen er enten (a) noe
+kun Tobias kan gjøre (host-kjøre D-235s Infisical-script, kredential-oppsett for de 50 nye backlog-
+connectorene, Apple/HA/Google Ads-kontoer osv.), (b) en avklaring fra Tobias (Q-39), eller (c)
+målingsbaserte spørsmål som venter på reell bruksdata (Q-03/Q-06/Q-09/Q-10/Q-11/Q-12/Q-19). Se
+"Neste oppgave" for full liste.
+
+**Historikk før PR #141-147 (uendret, fortsatt gjeldende på `main`): D-228** - Tobias sin FØRSTE
+faktiske host-kjøring av Stripe-akseptansescriptet (D-225) er GRØNN. Fem reelle kodefeil funnet og
+rettet underveis (feil ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en tom streng, et
+ikke-eksisterende Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse,
+manglende CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte
+kriterier PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang,
+samme presedens som W1 watchdog opprinnelig fulgte). **PR #97 (W1 watchdog) LUKKET UTEN MERGE** -
+funnet ved forsøk på merge under D-192-tillegg at feature-en allerede var implementert (MER
+gjennomarbeidet, fem ekstra bugfikser) og merget via en parallell PR #96 tilbake i 2026-09-19; se
+"Andre åpne PR" under for full historikk. Tobias bekreftet direkte at issue #68 sin
+ChatGPT-arkitektgjennomgang ikke lenger er en aktiv sti - rutine-PR-er avgjøres videre under direkte
+D-192(-tillegg)-fullmakt i chat, ikke via issue #68.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -99,8 +89,30 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
+- **D-235 (2026-09-22, egen isolert worktree/branch `claude/fase-d235-infisical-host-acceptance`,
+  PR #147 MERGET, `c06286c`):** Reproduserbart host-akseptansescript levert for D-35 sin 10-punkts
+  Infisical-produksjonsport - `modules/owner-controls/scripts/infisical-live.ts`+
+  `infisical-live-host-run.ts` (samme mønster som `stripe-real-payment-acceptance.ts`/
+  `k1-owner-control-authority-host-run.ts`, plassert i `owner-controls` for å unngå en sirkulær
+  pakkeavhengighet mot `tool-gateway`). Dekker alle 10 punkter, inkl. TRE reelt NYE (punkt 8
+  rotasjon/tilbakekalling via Infisical sin egen `DELETE /api/v3/secrets/raw/:secretName`, verifisert
+  mot Infisical sin egen backend-kildekode; punkt 10 hvelv-spesifikk `pg_dump`/restore-backup for
+  `infisical`-databasen; D-213 sin skrive-sti `owner_controls.set_connector_credential`
+  ende-til-ende). Punkt 4 (TLS) dokumentert `N/A_DOCUMENTED` med forbehold, ikke fabrikkert.
+  `.env.example` fikk de seks manglende `INFISICAL_*`-variablene. 26 nye DB-uavhengige strukturtester.
+  `pnpm -w typecheck`/`npx eslint .` rene, begge CI-jobber grønne. **KODE LEVERT, IKKE HOST-KJØRT** -
+  `D-35=PRODUCTION_VERIFIED` gjenstår til Tobias faktisk kjører scriptet mot sin ekte
+  Docker-Infisical-instans. Se D-235 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+- **D-234 (2026-09-22, PR #146 MERGET, `2403577`):** Q-37 (Neo4j) og Q-38 (1Password) LUKKET - BEGGE
+  DROPPET fra backlogen ("Hvis vi ikke trenger neo4j eller 1passord så dropper vi de" - Tobias,
+  direkte chat). Business Graph (UA-3) dekker Neo4j-behovet, Infisical dekker 1Password-behovet -
+  begge allerede produksjonsverifiserte/wired. Kun Q-39 (Windows/macOS) står igjen åpen av D-231 sine
+  fem flaggede punkter.
+- **D-233 (2026-09-22, PR #145 MERGET, `8d060d4`):** Q-36 (Supabase) LUKKET - Tobias bekreftet
+  direkte at Supabase på D-231-listen betyr kun Postgres-hosting, ikke Supabase-spesifikke API-er.
+  Ingen konflikt med regel 9, ingen ny connector, ingen kode.
 - **D-232 (2026-09-22, egen isolert worktree/branch `claude/fase-d232-backlog-connectors-visible`,
-  PR #144 ÅPEN SOM DRAFT - IKKE MERGET ENNÅ):** 50 nye backlog-connector-oppføringer i
+  PR #144 MERGET, `80f5b2d`):** 50 nye backlog-connector-oppføringer i
   `modules/tool-gateway/src/connector-registry.ts` (64 totalt, opp fra 14), synlige i dashbordets
   "Integrasjoner"-seksjon som "ikke konfigurert" (ingen `live_test`, ingen credential satt). To nye
   `category`-verdier (`backlog`/`backlog_d64_gate`). `.env.example` fikk 50 nye tomme placeholder-
@@ -183,7 +195,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   UTELUKKENDE på kjent sandbox-begrensning (`initdb: Permission denied`), ikke regresjon. CI (GitHub
   Actions) grønt på ALLE tre jobber (`gitleaks`/`build-test`/`windows-git-auth`). Se D-227 i
   DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-- **D-228 (2026-09-22, PR #141 ÅPEN - EKTE KODE, fire iterative fiks-commits):** Tobias sin FØRSTE
+- **D-228 (2026-09-22, PR #141 MERGET, `c34732e` - EKTE KODE, fire iterative fiks-commits):** Tobias sin FØRSTE
   faktiske host-kjøring av D-225 sitt Stripe-akseptansescript. Fem reelle kodefeil funnet og rettet
   UNDERVEIS, live sammen med Tobias via skjermdeling: (1) `submit_payment_intent` kalt via feil
   ToolGateway-`tool_id` (`finance_stripe` i stedet for `finance`) - `unknown_tool`; (2) en
@@ -202,8 +214,10 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   `pnpm -w typecheck`/`npx eslint` rene for alle fire delfikser. Se D-228 i DECISIONS_AND_ASSUMPTIONS.md
   for full detalj.
 
-- **D-230 (2026-09-22, branch `claude/fase-d230-k2-governance-dashboard`, PR #143 ÅPEN SOM DRAFT - IKKE
-  MERGET ENNÅ):** K2-dashboardet - `@jarvis/governance` (D-207) fikk sin første HTTP-rute/UI-flate.
+- **D-230 (2026-09-22, branch `claude/fase-d230-k2-governance-dashboard`, PR #143 MERGET, `34bcac9`
+  - krevde manuell konfliktløsning i `DECISIONS_AND_ASSUMPTIONS.md` mot D-231, begge D-ID-rader
+  beholdt i rekkefølge, `pnpm -w typecheck` re-verifisert etter merge):** K2-dashboardet -
+  `@jarvis/governance` (D-207) fikk sin første HTTP-rute/UI-flate.
   `apps/api/src/server.ts`: `GOVERNANCE_QUERY_ACTIONS`/`GOVERNANCE_MUTATE_ACTIONS` bak nye
   `POST /governance/query`/`POST /governance/mutate` (SAMME `deps.executive.gateway`-instans,
   `tool_id: "governance"`, ingen ny `ApiDeps`-nøkkel); `get_delegation_board` lagt til den
@@ -238,57 +252,78 @@ samme oppgave, kun én fulgt opp til lukking) - lukket med forklarende kommentar
 
 ## Blokkeringer
 
-Ingen kjente kode-blokkeringer akkurat nå. `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - dekker
-resten av masterplanen: Growth-stack live-evidens, iPhone/Watch/Home/Personal/Health LIVE, off-site
-backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
-**Q-32 er nå FULLSTENDIG LUKKET på alle tre punkter, EKTE på `main`** (D-226, PR #139 MERGET - alle
-fire OpenAI-databehandlerfelt bekreftet, `processor_terms_status: "VERIFIED"` i kode; punkt 2 lukket av
-D-123; punkt 3 lukket av D-217+D-223) - ingen gjenstående handling for denne kapabiliteten i det hele
-tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224/D-225/D-228): FAKTISK HOST-KJØRT OG GRØNT** -
-`STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` - eneste gjenstående steg er at PR #141 (D-228) selv
-går til grønn CI og merges, PLUS uavhengig arkitektgjennomgang av selve Stripe-evidensen før gaten
-kalles et ubetinget `PASS` - ingen ytterligere kode eller ekstern Tobias-handling gjenstår for selve
-akseptansekriteriene. **PR #97 (W1 watchdog) LUKKET uten merge, se "Andre åpne PR" over** - main
-har allerede en mer gjennomarbeidet, allerede-merget watchdog-implementasjon (PR #96). **D-35s
-10-punkts host-produksjonsport for Infisical: reproduserbart akseptansescript LEVERT (D-235), MEN
-FORTSATT IKKE runtime-verifisert** - Tobias må selv kjøre `infisical-live-host-run.ts` før
-`D-35=PRODUCTION_VERIFIED` kan erklæres.
+Ingen kjente kode-blokkeringer akkurat nå - **all lokalt kodbar arbeid er FERDIG t.o.m. PR #147.**
+`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - dekker resten av masterplanen: Growth-stack
+live-evidens, iPhone/Watch/Home/Personal/Health LIVE, off-site backup/monitoring. Se
+`docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
+
+**Q-32 er FULLSTENDIG LUKKET på alle tre punkter, EKTE på `main`** (D-226, PR #139 MERGET) - ingen
+gjenstående handling for denne kapabiliteten, se `docs/OPEN_QUESTIONS.md`.
+
+**Stripe (D-224/D-225/D-228): FAKTISK HOST-KJØRT OG GRØNT, PR #141 MERGET.**
+`STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` er nå det ENESTE gjenstående - siden issue #68 sin
+ChatGPT-arkitektgjennomgang ikke lenger er en aktiv sti (Tobias bekreftet direkte), er dette et
+Tobias-avgjørelsespunkt: enten en uavhengig gjennomgang av selve host-bevisdet et annet sted, eller
+et direkte Tobias-akseptvedtak i chat om at den allerede leverte host-evidensen (`run_id=f3f70055`)
+er tilstrekkelig til å kalle gaten et ubetinget `PASS`. Ingen ytterligere kode gjenstår.
+
+**PR #97 (W1 watchdog) LUKKET uten merge, se "Andre åpne PR" over** - main har allerede en mer
+gjennomarbeidet, allerede-merget watchdog-implementasjon (PR #96).
+
+**D-35s 10-punkts host-produksjonsport for Infisical: reproduserbart akseptansescript LEVERT OG
+MERGET (D-235, PR #147), MEN FORTSATT IKKE runtime-verifisert** - Tobias må selv kjøre
+`infisical-live-host-run.ts` før `D-35=PRODUCTION_VERIFIED` kan erklæres.
+
+**Q-39 (Windows/macOS) står åpen** - trenger en presisering fra Tobias om hva han faktisk mener med
+disse to som egne "integrasjoner" før noe klassifiseres som byggbar backlog, se `OPEN_QUESTIONS.md`.
+
+**De 50 nye backlog-connectorene (D-232) er RENT SYNLIGHET** - ingen credentials, ingen `live_test`,
+ingen faktisk API-kode for noen av dem. Faktisk oppkobling venter på D-108
+(`EXTERNAL_CREDENTIAL_SETUP_POLICY=DEFER_UNTIL_FINAL_INTEGRATION_PHASE`) - en samlet fremtidig fase,
+ikke noe som bør startes stykkevis uten at Tobias ber om det. Seks av dem
+(HubSpot/Pipedrive/Linear/Jira/Trello/Todoist, `category:"backlog_d64_gate"`) krever i tillegg en
+egen D-64 Core-vs-Adapter-beslutningsport FØR noen kode skrives for dem.
+
 Embedded-Postgres DB-avhengige tester (`initdb: Permission denied`) kan fortsatt ikke kjøres i DENNE
 sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem derimot uten problemer.
 
 ## Neste oppgave
 
-0. **Tobias kjører `node --env-file=.env --experimental-transform-types
-   modules/owner-controls/scripts/infisical-live-host-run.ts` mot sin ekte Docker-Infisical-instans
-   (D-235)** - eneste gjenstående steg for D-35 sin 10-punkts port. Krever de seks nye
-   `INFISICAL_*`-variablene satt i `.env` (se `.env.example`) OG at et Infisical-prosjekt/
-   maskinidentitet allerede er opprettet (BO-07-prosedyren, `docs/RUNTIME_GATES.md`). Output limes inn
-   for uavhengig arkitektgjennomgang FØR `D-35=PRODUCTION_VERIFIED` kan erklæres.
-0b. **Review/merge D-232 sin PR (branch `claude/fase-d232-backlog-connectors-visible`)** - åpnet som
-   DRAFT mot `main`, IKKE merget av denne økten selv. **PR #143 (D-230) og D-231 sin PR (#142) er
-   BEGGE allerede merget** - `origin/main` denne økten startet fra inkluderte begge (bekreftet ved
-   `git log`), item 0b her er derfor OPPDATERT fra en tidligere, nå utdatert formulering.
-1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
-   HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
-   kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før
-   `PASS_PENDING_ARCHITECT_REVIEW` kan bli et ubetinget `PASS`.
-2. **issue #68/ChatGPT-arkitektgjennomgang er IKKE lenger en aktiv sti** (Tobias bekreftet direkte i
-   chat 2026-09-22) - ingen videre overvåking av issue #68 planlagt med mindre Tobias selv ber om det
-   igjen. Rutinemessige PR-er merges videre under direkte D-192(-tillegg)-fullmakt i chat.
-3. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
-   `catch { }` uten fanget feil-variabel, HELE `apps/`/`modules/`, ikke bare tidligere rørte filer - se
-   D-222/D-227-lærdommen) hvis bedt om å fortsette å bygge - ingen kjent, allerede-registrert uløst
-   kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå (D-227 lukket alle kjente sveip-relaterte
-   funn, inkl. de tre `service.ts`-søsknene).
-4. **Stripe (D-225/D-228) er FERDIG kode-messig** - ingen gjenstående kode eller ekstern Tobias-handling
-   for selve akseptansekriteriene. Neste, IKKE påbegynte skritt: en uavhengig arkitektgjennomgang av
-   D-228 sin faktiske host-evidens (samme mønster som W1 watchdog).
-5. **OpenAI-taleprosessoren (Q-32 punkt 1) er FERDIG (D-226, MERGET)** - ingen gjenstående handling.
-   Neste naturlige, IKKE påbegynte skritt for selve talefunksjonen: verifisere ende-til-ende at en ekte
-   OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som D-223 gjorde for lokal
-   tale) - ikke eksplisitt bedt om av Tobias ennå.
-6. Deretter valgfritt for Tobias: Apple Developer-konto/HA-instans, Google Ads-konto, off-site backup,
-   Gemini-nøkler. Merk: Tobias sin `rk_live_...` Stripe-nøkkel og en fersk `sk_test_...`-nøkkel ble
-   begge limt inn direkte i chat (D-224 og en senere test-nøkkel) - han er selv klar over dette og har
-   bekreftet at han roterer den live-nøkkelen senere; ingen handling påkrevd fra Claude nå utover å ikke
-   glemme å nevne rotering om anledningen byr seg.
+**Ingen kjent "byggbar uten Tobias"-kode gjenstår akkurat nå.** Alle syv PR-er fra denne rekken
+(#141-#147) er merget. Gjenstående punkter er enten Tobias-handlinger, en Tobias-avklaring, eller
+målingsbaserte spørsmål som venter på reell bruksdata:
+
+1. **D-35 Infisical (D-235, PR #147 MERGET) - Tobias kjører scriptet.** `node --env-file=.env
+   --experimental-transform-types modules/owner-controls/scripts/infisical-live-host-run.ts` mot sin
+   ekte Docker-Infisical-instans. Krever de seks `INFISICAL_*`-variablene satt i `.env` (se
+   `.env.example`) OG at et Infisical-prosjekt/maskinidentitet allerede er opprettet
+   (BO-07-prosedyren, `docs/RUNTIME_GATES.md`). Output limes inn for gjennomgang FØR
+   `D-35=PRODUCTION_VERIFIED` kan erklæres.
+2. **Stripe (D-228, PR #141 MERGET) - Tobias-avgjørelsespunkt.** `STRIPE_LIVE_GATE` er kode-messig
+   FERDIG og host-kjørt grønt. Siden issue #68 ikke lenger er en aktiv sti, må Tobias selv bestemme om
+   den allerede leverte host-evidensen holder til et ubetinget `PASS`, eller om han vil ha en ekstra
+   uavhengig gjennomgang.
+3. **Q-39 (Windows/macOS) - avklaring fra Tobias.** Mener han lokal skrivebordsautomatisering på
+   Windows-PC-en (analogt Apple Shortcuts-punktet), noe knyttet til det eksisterende
+   Apple/macOS-D-36-sporet, eller noe annet? Se `OPEN_QUESTIONS.md`.
+4. **50 backlog-connectorer (D-232) - venter på samlet credential-fase.** Synlige i dashbordet, ingen
+   kode/credentials ennå (D-108). Seks av dem (HubSpot/Pipedrive/Linear/Jira/Trello/Todoist) krever i
+   tillegg en egen D-64-port før koding starter. Ikke noe å starte stykkevis uten Tobias sin
+   prioritering av hvilken connector som er først.
+5. **Fersk, BREDT kode-nivå gap-søk** (grep etter BÅDE `.catch(() => undefined)` OG et bart
+   `catch { }` uten fanget feil-variabel, HELE `apps/`/`modules/`) hvis bedt om å fortsette å bygge -
+   ingen kjent, allerede-registrert uløst kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå
+   (D-227 lukket alle kjente sveip-relaterte funn).
+6. **OpenAI-taleprosessoren (Q-32 punkt 1, D-226 MERGET) - valgfritt neste skritt.** Verifisere
+   ende-til-ende at en ekte OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som
+   D-223 gjorde for lokal tale) - ikke eksplisitt bedt om av Tobias ennå.
+7. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - alle krever Tobias-kontoer/maskinvare/tilgang:**
+   iPhone/Watch/Home/Personal/Health LIVE-bevis, Growth-stack live-evidens, off-site backup/monitoring,
+   Apple Developer-konto/HA-instans, Google Ads-konto, Gemini-nøkler.
+8. **Måles/avgjøres senere, ikke diskuteres nå:** Q-03 (STT/TTS-leverandør), Q-06 (WSL2 vs VM),
+   Q-09 (kø-motstack), Q-10 (grafdatabase-behov), Q-11 (lokal GPU-økonomi), Q-12
+   (satellitt-maskinvare), Q-19 (tale-latens-herding).
+9. Merk: Tobias sin `rk_live_...` Stripe-nøkkel og en fersk `sk_test_...`-nøkkel ble begge limt inn
+   direkte i chat (D-224 og en senere test-nøkkel) - han er selv klar over dette og har bekreftet at
+   han roterer den live-nøkkelen senere; ingen handling påkrevd fra Claude nå utover å ikke glemme å
+   nevne rotering om anledningen byr seg.
