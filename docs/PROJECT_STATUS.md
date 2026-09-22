@@ -11,7 +11,8 @@ leverandørene) - INGEN ny UI-kode (eksisterende pill-rendering dekker det aller
 `live_test` for noen av de 50, kun tomme placeholder-env-linjer i `.env.example`. Supabase/Neo4j/
 1Password (Q-36/Q-37/Q-38) og Windows/macOS (Q-39, `IKKE EN CONNECTOR`) BEVISST IKKE lagt til - se
 D-232 i DECISIONS_AND_ASSUMPTIONS.md for eksakt telling/begrunnelse. RENT SYNLIGHET - ingen D-64-
-port kjørt, ingen kode/credential-oppsett for noen av de 50. PR åpnes som draft mot `main`.
+port kjørt, ingen kode/credential-oppsett for noen av de 50. **PR #144 ÅPEN SOM DRAFT mot `main`,
+IKKE merget av denne økten selv.**
 
 **Forrige milepæl (uendret, fortsatt gjeldende på `main`): D-230.** K2-
 dashboardet (decision log/scenarios/risk register/goals-OKRs/delegation board) fikk sin FØRSTE
@@ -77,7 +78,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 ## Hvor `main` står nå
 
 - **D-232 (2026-09-22, egen isolert worktree/branch `claude/fase-d232-backlog-connectors-visible`,
-  IKKE ENNÅ MERGET - PR åpnes som draft):** 50 nye backlog-connector-oppføringer i
+  PR #144 ÅPEN SOM DRAFT - IKKE MERGET ENNÅ):** 50 nye backlog-connector-oppføringer i
   `modules/tool-gateway/src/connector-registry.ts` (64 totalt, opp fra 14), synlige i dashbordets
   "Integrasjoner"-seksjon som "ikke konfigurert" (ingen `live_test`, ingen credential satt). To nye
   `category`-verdier (`backlog`/`backlog_d64_gate`). `.env.example` fikk 50 nye tomme placeholder-
