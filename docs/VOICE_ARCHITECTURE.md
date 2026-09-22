@@ -107,12 +107,13 @@ enhet/nettleser), fanger mikrofon (PCM16 16 kHz, nedsamplet i klienten) og spill
 kHz) via en planlagt Web Audio-kø med korrekt barge-in-avbrudd. `infra/local/docker-compose.yml` fikk en
 egen `voice-gateway`-tjeneste (samme runtime-image som api/worker, egen `command`).
 
-**Ærlig status:** klienten og WS-håndtrykket er kode-komplette og strukturelt testet. REELL taledialog
-via OpenAI STT/TTS forblir policy-blokkert av `evaluateSpeechRouting()` (§6, Q-32 punkt 1 i
-`docs/OPEN_QUESTIONS.md`) helt til Tobias selv har gjort den juridiske/eier-verifiseringen av OpenAI som
-databehandler - `processor_terms_status` er hardkodet `"NOT_VERIFIED"` og skal ALDRI settes av
-Jarvis/Claude selv. `voice.html` viser dette avslaget ærlig i et eget panel i stedet for å late som en
-generisk feil.
+**Ærlig status (OPPDATERT D-226, 2026-09-22):** klienten og WS-håndtrykket er kode-komplette og
+strukturelt testet. Tobias har nå selv gjort den juridiske/eier-verifiseringen av OpenAI som
+databehandler (region/databehandleravtale/treningsvilkår/retensjon) - `processor_terms_status` er
+`"VERIFIED"` for OpenAI STT/TTS. REELL taledialog via OpenAI er dermed nå TILLATT for alle memory spaces
+UNNTATT `health` (D-23, egen, uendret grense - krever alltid en lokal behandler), og kun ved en faktisk
+`SERVER_VERIFIED` memory-space-autoritet (D-123 - en klient-oppgitt space gir aldri ekstern tilgang).
+`voice.html` viser et gjenværende avslag ærlig i et eget panel i stedet for å late som en generisk feil.
 
 **Lokal STT/TTS (task #125, D-217):** `LocalWhisperStt`/`LocalPiperTts` (`apps/voice-gateway/src/
 stt.ts`/`tts.ts`) er ikke lenger stubs - subprosess-/strømme-/kanselleringskoden er EKTE og testet mot

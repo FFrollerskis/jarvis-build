@@ -185,9 +185,10 @@ services:
       JARVIS_VOICE_PORT: "${JARVIS_VOICE_PORT:-3020}"
       JARVIS_CORE_URL: "http://api:${JARVIS_API_PORT:-3010}"
       # Fra host-miljø (aldri lagret i fil her). OpenAI STT/TTS er kodet og
-      # wiret, men reell tale via OpenAI forblir policy-blokkert av Q-32
-      # punkt 1 (processor_terms_status: NOT_VERIFIED) inntil Tobias selv
-      # gjør den juridiske/eier-verifiseringen - se docs/OPEN_QUESTIONS.md.
+      # wiret; Q-32 punkt 1 sin juridiske/eier-verifisering er nå gjort
+      # (D-226, 2026-09-22, processor_terms_status: VERIFIED) - kun `health`-
+      # space (D-23) og klient-oppgitte, ikke server-verifiserte spaces
+      # (D-123) forblir strukturelt avvist - se docs/OPEN_QUESTIONS.md.
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
     ports:
       - "${JARVIS_VOICE_PORT:-3020}:${JARVIS_VOICE_PORT:-3020}"

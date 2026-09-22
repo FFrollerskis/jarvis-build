@@ -82,18 +82,20 @@ export class OpenAiStt implements SttAdapter {
   readonly name = "openai-stt";
   /**
    * EKSTERN databehandler: rå lyd (wav) sendes til OpenAI. Raden er NAVNGITT i
-   * `PROCESSOR_REGION_MATRIX.md` (regel 1 oppfylt), men region/
-   * databehandleravtale/treningsvilkår/retensjon står `IKKE VERIFISERT`
-   * (regel 3 IKKE oppfylt) - derfor `NOT_VERIFIED`, og derfor AVVISER
-   * `evaluateSpeechRouting()` denne behandleren for ALLE memory spaces til en
-   * eier-/juridisk verifisering faktisk er gjort (Q-32). Verdien endres KUN
-   * sammen med matriseraden - aldri for å få talekjeden i gang igjen.
+   * `PROCESSOR_REGION_MATRIX.md` (regel 1 oppfylt). Region (EU)/
+   * databehandleravtale (godkjent)/treningsvilkår (nei, org-nivå-deling
+   * deaktivert)/retensjon (inntil 30 dager, deretter slettet, ZDR
+   * tilgjengelig for kvalifiserte) er nå faktisk BEKREFTET av Tobias sin egen
+   * konto-gjennomgang (D-226, 2026-09-22) - regel 3 er derfor OPPFYLT og
+   * `evaluateSpeechRouting()` slipper nå denne behandleren gjennom (fortsatt
+   * betinget av `memory_space_authority: "SERVER_VERIFIED"`, se D-123).
+   * Verdien endres KUN sammen med matriseraden - se PROCESSOR_REGION_MATRIX.md.
    */
   readonly processor: SpeechProcessorDeclaration = {
     processor_id: "openai-audio-transcriptions",
     locality: "external",
     processor_row_declared: true,
-    processor_terms_status: "NOT_VERIFIED"
+    processor_terms_status: "VERIFIED"
   };
   constructor(
     private readonly apiKey: string | undefined = process.env["OPENAI_API_KEY"],

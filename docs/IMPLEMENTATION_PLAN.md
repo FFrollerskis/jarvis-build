@@ -3692,8 +3692,9 @@ stille; grant-levetid (15 min, konstant) håndheves ved HVER bruk og river sesjo
 `/status` rapporterer nå rutingutfall for BEGGE tillitsnivåene.
 
 **D-122 er uendret og overordnet:** `SERVER_VERIFIED` er **nødvendig, men ikke tilstrekkelig**.
-OpenAI STT/TTS forblir avvist mens `processor_terms_status=NOT_VERIFIED` (Q-32 punkt 1), og `health`
-forblir avvist mot enhver ekstern behandler (D-23).
+**OPPDATERT (D-226, 2026-09-22):** OpenAI STT/TTS erklærer nå `processor_terms_status=VERIFIED`
+(Q-32 punkt 1 besvart av eieren) - `SERVER_VERIFIED` kvalifiserer derfor nå faktisk for ekstern
+behandling. `health` forblir likevel AVVIST mot enhver ekstern behandler, uansett vilkårsstatus (D-23).
 
 **Tester:** `apps/voice-gateway/test/ua7-voice-session-authority.test.ts` **19/19 grønt lokalt**
 (ekte gateway bak ekte WebSocket, fiendtlig klient) · `modules/core/test/d123-voice-session-authority.test.ts`

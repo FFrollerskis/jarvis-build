@@ -3,9 +3,11 @@
 **Oppdatert:** 2026-09-22 (branch `claude/fase-d226-openai-dpa-progress` basert på `origin/main` HEAD
 `22df062`, PR #137 OG PR #138 BEGGE MERGET). **D-223 (voice, MERGET) / D-224 (Stripe-credentials+API-
 tilkobling, MERGET) / D-225 (Stripe EKTE test-modus-akseptanseskript BYGGET, MERGET, IKKE ENNÅ HOST-
-KJØRT) / D-226 (Q-32 punkt 1: TRE av fire OpenAI-databehandler-felt bekreftet av Tobias, kun
-retensjon gjenstår, IKKE ENNÅ PR): fire konkrete milepæler denne økten. PR #97 (W1 watchdog) sin
-host-akseptanse er PASS og rapportert til issue #68, venter nå på uavhengig arkitektgjennomgang.**
+KJØRT) / D-226 (Q-32 punkt 1 FULLSTENDIG LUKKET - alle fire OpenAI-databehandler-felt bekreftet av
+Tobias, `processor_terms_status` FLIPPET til `VERIFIED` i produksjonskode, OpenAI STT/TTS nå TILLATT
+for alle spaces unntatt `health`, IKKE ENNÅ PR): fire konkrete milepæler denne økten. PR #97 (W1
+watchdog) sin host-akseptanse er PASS og rapportert til issue #68, venter nå på uavhengig
+arkitektgjennomgang.**
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -92,17 +94,23 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   rene. **IKKE ENNÅ HOST-KJØRT** - `STRIPE_LIVE_GATE` forblir UENDRET
   `CREDENTIALS_CONFIGURED_AWAITING_LIVE_ACCEPTANCE_SCRIPT` inntil Tobias faktisk henter en gratis Stripe
   TEST-nøkkel og kjører scriptet. Se D-225 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-- **D-226 (2026-09-22, DENNE branchen `claude/fase-d226-openai-dpa-progress`, IKKE ENNÅ PR - ren docs,
-  INGEN kodeendring):** Q-32 punkt 1 (OpenAI databehandler for tale) - TRE av fire matrisefelt nå
-  faktisk bekreftet av Tobias sin egen gjennomgang av `platform.openai.com` sammen med Claude
-  (skjermbilde-drevet, menypunkt-for-menypunkt). **Region: EU. DPA: godkjent. Trener på data: NEI** -
-  men KUN etter at et reelt avvik ble funnet og rettet: bryteren "Share inputs and outputs with
-  OpenAI" sto FAKTISK PÅ da Tobias sjekket (stikk i strid med hans egen første antakelse), Claude
-  flagget avviket fra et delt skjermbilde, Tobias deaktiverte den og bekreftet. **Retensjon: FORTSATT
-  IKKE TALLFESTET** - kun av/på-brytere i dashbordet, ikke et dagstall; `openai.com/policies/api-data-
-  usage-policies` er neste, ikke-utførte sjekk-sted. `processor_terms_status` forblir `NOT_VERIFIED`,
-  OpenAI STT/TTS fortsatt avvist for alle memory spaces til siste felt er bekreftet. Se D-226 i
-  DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+- **D-226 (2026-09-22, DENNE branchen `claude/fase-d226-openai-dpa-progress`, IKKE ENNÅ PR - EKTE KODE
+  denne gangen, ikke ren docs):** Q-32 punkt 1 (OpenAI databehandler for tale) er **FULLSTENDIG
+  LUKKET**. Alle fire matrisefelt bekreftet av Tobias sin egen gjennomgang av `platform.openai.com`
+  sammen med Claude (skjermbilde-drevet, menypunkt-for-menypunkt). **Region: EU. DPA: godkjent. Trener
+  på data: NEI** (etter at et reelt avvik ble funnet og rettet - bryteren "Share inputs and outputs
+  with OpenAI" sto FAKTISK PÅ da Tobias sjekket, Claude flagget det, Tobias deaktiverte og bekreftet).
+  **Retensjon: inntil 30 dager, deretter slettet** (funnet i OpenAI sin offentlige API-FAQ, ordrett
+  sitat i D-226). `processor_terms_status` er FLIPPET fra `NOT_VERIFIED` til `VERIFIED` i
+  `apps/voice-gateway/src/stt.ts`/`tts.ts` - den tiltenkte, forhåndsdefinerte fullføringen av porten.
+  **OpenAI STT/TTS er nå TILLATT for alle memory spaces UNNTATT `health`** (D-23, egen UENDRET grense),
+  kun ved faktisk `SERVER_VERIFIED` autoritet (D-123). Alle stale tester/kommentarer som antok den
+  gamle, alltid-avvist-tilstanden oppdatert i samme endring (`ua7-speech-routing.test.ts`,
+  `ua7-voice-session-authority.test.ts`, `voice.html`, `docker-compose.yml`, `voice-authority.ts`,
+  `VOICE_ARCHITECTURE.md`, `IMPLEMENTATION_PLAN.md`). `pnpm -w typecheck`/`npx eslint .` rene;
+  `apps/voice-gateway/test/`+`voice-page-wiring.test.ts` 105/105 kjørbare tester grønt (kun
+  `voice-e2e.test.ts` sin DB-avhengige suite rammet av kjent sandbox-begrensning, ikke en regresjon).
+  Se D-226 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -121,10 +129,10 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 Ingen kjente kode-blokkeringer akkurat nå. `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - dekker
 resten av masterplanen: Growth-stack live-evidens, iPhone/Watch/Home/Personal/Health LIVE, off-site
 backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
-**Q-32 punkt 1 (OpenAI som taleprosessor): TRE av fire felt bekreftet (D-226) - KUN retensjon
-gjenstår** - rent eier-tallsøk, se `openai.com/policies/api-data-usage-policies` - se
-`docs/OPEN_QUESTIONS.md`. **Q-32 punkt 3 (lokal whisper.cpp/piper) er nå FULLSTENDIG LUKKET (D-217+
-D-223) - ingen gjenstående handling.** **Stripe (D-224+D-225): credentials er KONFIGURERT og API-
+**Q-32 er nå FULLSTENDIG LUKKET på alle tre punkter** (D-226 lukket punkt 1 - alle fire OpenAI-
+databehandlerfelt bekreftet, `processor_terms_status: "VERIFIED"` i kode; punkt 2 lukket av D-123;
+punkt 3 lukket av D-217+D-223) - ingen gjenstående handling for denne kapabiliteten i det hele tatt,
+se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224+D-225): credentials er KONFIGURERT og API-
 tilkobling BEVIST (D-224), og det manglende akseptanseskriptet er nå BYGGET (D-225) - men
 `STRIPE_LIVE_GATE` er FORTSATT IKKE `PASS`** - gjenstående arbeid er REN EKSTERN HANDLING fra Tobias:
 hente en gratis Stripe TEST-modus-nøkkel (`JARVIS_STRIPE_TEST_SECRET_KEY`) og faktisk kjøre
@@ -137,7 +145,8 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-1. **Push/merge D-226-dokumentasjonsoppdateringen** (ren docs, OpenAI DPA-fremgang) under D-192.
+1. **Push/merge D-226** (EKTE kode - `processor_terms_status` flippet til `VERIFIED`, OpenAI STT/TTS
+   nå tillatt for alle spaces unntatt `health`, pluss oppdaterte tester/kommentarer) under D-192.
 2. **Overvåk issue #68** for arkitektens svar på PR #97 sin `CLAUDE_REPORT` - når/hvis en
    `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` kommer, følg standard merge-sekvens
    (eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
@@ -148,10 +157,10 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 4. **Stripe REN EKSTERN handling gjenstår (D-225):** Tobias må hente en gratis Stripe TEST-modus-nøkkel
    og kjøre `stripe-real-payment-acceptance-host-run.ts` FØR `STRIPE_LIVE_GATE` kan bli `PASS` - ingen
    kode gjenstår fra Claude sin side.
-5. **OpenAI-taleprosessor-avgjørelsen (Q-32 punkt 1) - KUN ÉTT felt gjenstår (D-226):** Tobias må finne
-   et konkret retensjonstall (`openai.com/policies/api-data-usage-policies`) - region/DPA/trening er
-   allerede bekreftet. Når det siste feltet er på plass, fyll inn `docs/security/
-   PROCESSOR_REGION_MATRIX.md` og flipp `processor_terms_status` til `VERIFIED`.
+5. **OpenAI-taleprosessoren (Q-32 punkt 1) er FERDIG (D-226)** - ingen gjenstående handling. Neste
+   naturlige, IKKE påbegynte skritt for selve talefunksjonen: verifisere ende-til-ende at en ekte
+   OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som D-223 gjorde for lokal
+   tale) - ikke eksplisitt bedt om av Tobias ennå.
 6. Deretter valgfritt for Tobias: Apple Developer-konto/HA-instans, Google Ads-konto, off-site backup,
    Gemini-nøkler. Merk: Tobias sin `rk_live_...` Stripe-nøkkel ble limt inn direkte i chat under
    installasjonen (D-224) - han er selv klar over dette og har bekreftet at han roterer den senere;

@@ -36,9 +36,12 @@ import { MemorySpaceAuthoritySchema, type MemorySpaceAuthority } from "./speech.
  * server-side vedtak - se `modules/core/src/services/voice-session-authority.ts`.
  *
  * D-122 er UENDRET og overordnet: en grant sier KUN hvor space-verdien kom
- * fra. Den sier ingenting om databehandleren. En `SERVER_VERIFIED` grant gir
- * fortsatt AVSLAG mot OpenAI STT/TTS så lenge `processor_terms_status` er
- * `NOT_VERIFIED` (Q-32 punkt (1), en ren eier-/juridisk handling).
+ * fra. Den sier ingenting om databehandleren. En `SERVER_VERIFIED` grant
+ * kvalifiserer nå faktisk for OpenAI STT/TTS (D-226, 2026-09-22:
+ * `processor_terms_status` er `VERIFIED`, Q-32 punkt (1) er besvart av
+ * eieren) - MEN fortsatt aldri for `health`-space (D-23, egen, uendret
+ * grense), og en `CLIENT_ASSERTED` grant gir fortsatt ALDRI ekstern tilgang
+ * (D-123).
  */
 
 /**
