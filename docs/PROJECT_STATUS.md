@@ -133,8 +133,8 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   rettet ved å trigge en FERSK betaling INNE i seksjonen, etter tilkobling; (5) CLI-en krevde separat
   interaktiv `stripe login` - rettet ved å sende test-nøkkelen direkte via `--api-key`. **Sluttresultat,
   FAKTISK host-kjørt og grønt** (`run_id=f3f70055`, `hard_fail=false`): ALLE tre navngitte kriterier
-  PASS med ekte Stripe-bevis (`pi_3UIJmg...76xMq`/`re_3UIJmg...E4DYbQ`/
-  `evt_3UIJmm...ur42uo`), pluss `secret_redaction`/`cleanup` PASS.
+  PASS med ekte Stripe-bevis (en ekte PaymentIntent-ID/en ekte refusjons-ID/
+  en ekte webhook-hendelses-ID), pluss `secret_redaction`/`cleanup` PASS.
   **`STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW`** (scriptets egen presise status - IKKE et
   ubetinget `PASS`, venter på uavhengig arkitektgjennomgang, samme presedens som W1 watchdog).
   `pnpm -w typecheck`/`npx eslint` rene for alle fire delfikser. Se D-228 i DECISIONS_AND_ASSUMPTIONS.md
