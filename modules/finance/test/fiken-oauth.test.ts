@@ -42,10 +42,10 @@ describe("A: token-endepunkt-autentisering (den rettede defekten)", () => {
     expect([...body.keys()].sort()).toEqual(["grant_type", "refresh_token"]);
   });
   it("buildAuthorizationCodeExchangeBody følger dokumentasjonen eksakt (grant_type/code/redirect_uri/state, ingen client-credentials i kroppen)", () => {
-    const body = buildAuthorizationCodeExchangeBody("auth-code-x", "http://127.0.0.1:8944/oauth2callback", "state-y");
+    const body = buildAuthorizationCodeExchangeBody("auth-code-x", "http://localhost:8944/oauth2callback", "state-y");
     expect(body.get("grant_type")).toBe("authorization_code");
     expect(body.get("code")).toBe("auth-code-x");
-    expect(body.get("redirect_uri")).toBe("http://127.0.0.1:8944/oauth2callback");
+    expect(body.get("redirect_uri")).toBe("http://localhost:8944/oauth2callback");
     expect(body.get("state")).toBe("state-y");
     expect(body.has("client_id")).toBe(false);
     expect(body.has("client_secret")).toBe(false);
@@ -101,15 +101,15 @@ describe("B: runtime-refresh-flyten (fikenAccessToken) bruker FAKTISK Basic-auth
 
 describe("C: autorisasjons-URL - eksakt de fire dokumenterte parameterne", () => {
   it("bygger response_type=code + client_id + redirect_uri + state mot det dokumenterte endepunktet", () => {
-    const url = new URL(buildFikenAuthorizationUrl({ clientId: "cid", redirectUri: "http://127.0.0.1:8944/oauth2callback", state: "s1" }));
+    const url = new URL(buildFikenAuthorizationUrl({ clientId: "cid", redirectUri: "http://localhost:8944/oauth2callback", state: "s1" }));
     expect(url.origin + url.pathname).toBe(FIKEN_OAUTH_AUTHORIZE_ENDPOINT);
     expect(url.searchParams.get("response_type")).toBe("code");
     expect(url.searchParams.get("client_id")).toBe("cid");
-    expect(url.searchParams.get("redirect_uri")).toBe("http://127.0.0.1:8944/oauth2callback");
+    expect(url.searchParams.get("redirect_uri")).toBe("http://localhost:8944/oauth2callback");
     expect(url.searchParams.get("state")).toBe("s1");
   });
   it("legger IKKE til udokumenterte parametre (scope/prompt/access_type er Google-konsepter, ikke Fikens dokumenterte flyt)", () => {
-    const url = new URL(buildFikenAuthorizationUrl({ clientId: "cid", redirectUri: "http://127.0.0.1:8944/oauth2callback", state: "s1" }));
+    const url = new URL(buildFikenAuthorizationUrl({ clientId: "cid", redirectUri: "http://localhost:8944/oauth2callback", state: "s1" }));
     expect([...url.searchParams.keys()].sort()).toEqual(["client_id", "redirect_uri", "response_type", "state"]);
   });
   it("validateFikenAuthorizationUrl godtar en korrekt bygget URL", () => {
@@ -117,7 +117,7 @@ describe("C: autorisasjons-URL - eksakt de fire dokumenterte parameterne", () =>
     expect(() => validateFikenAuthorizationUrl(url)).not.toThrow();
   });
   it("validateFikenAuthorizationUrl avviser manglende state/client_id/feil endepunkt (fail-closed FØR nettleseren åpnes)", () => {
-    expect(() => validateFikenAuthorizationUrl("https://fiken.no/oauth/authorize?response_type=code&client_id=cid&redirect_uri=http%3A%2F%2F127.0.0.1%3A8944%2Foauth2callback")).toThrow(
+    expect(() => validateFikenAuthorizationUrl("https://fiken.no/oauth/authorize?response_type=code&client_id=cid&redirect_uri=http%3A%2F%2Flocalhost%3A8944%2Foauth2callback")).toThrow(
       MalformedFikenAuthorizationUrlError
     );
     expect(() => validateFikenAuthorizationUrl("https://evil.example/oauth/authorize?response_type=code&client_id=cid&redirect_uri=x&state=s")).toThrow(MalformedFikenAuthorizationUrlError);
@@ -125,8 +125,8 @@ describe("C: autorisasjons-URL - eksakt de fire dokumenterte parameterne", () =>
 });
 
 describe("D: redirect-URI/callback-kontrakt", () => {
-  it("buildFikenRedirectUri bruker loopback-IP + dedikert Fiken-port + felles callback-path", () => {
-    expect(buildFikenRedirectUri(DEFAULT_FIKEN_REAUTH_PORT)).toBe("http://127.0.0.1:8944/oauth2callback");
+  it("buildFikenRedirectUri bruker vertsnavnet localhost (D-241: Fiken avviser IP-literalen 127.0.0.1 - krever https for alt utenom localhost) + dedikert Fiken-port + felles callback-path", () => {
+    expect(buildFikenRedirectUri(DEFAULT_FIKEN_REAUTH_PORT)).toBe("http://localhost:8944/oauth2callback");
   });
   it("porten er distinkt fra Drive- (8942) og Gmail- (8943) reauth-portene", () => {
     expect(DEFAULT_FIKEN_REAUTH_PORT).toBe(8944);

@@ -37,8 +37,21 @@ export const FIKEN_OAUTH_TOKEN_ENDPOINT = "https://fiken.no/oauth/token";
 export const DEFAULT_FIKEN_REAUTH_PORT = 8944;
 export const FIKEN_OAUTH_CALLBACK_PATH = "/oauth2callback";
 
+/**
+ * D-241 (funnet live av Tobias: Fiken sitt "Opprett applikasjon"-skjema
+ * avviste `http://127.0.0.1:...` med "Må være gyldig https://-adresse").
+ * Verifisert mot en annen, ekte fungerende Fiken OAuth2-integrasjon
+ * (bringsvor/fikenmcp, åpen kildekode): Fiken tillater usignert `http://`
+ * KUN for verts-NAVNET `localhost` - IKKE for IP-literalen `127.0.0.1`,
+ * som skjemaet behandler som en vanlig ekstern adresse og derfor krever
+ * `https://` for. `server.listen(port, "127.0.0.1")` i `fiken-reauth.ts`
+ * er UENDRET og trenger ingen endring - en nettleser som kobler til
+ * `http://localhost:PORT/...` lander uansett på 127.0.0.1 (DNS-oppløsning
+ * skjer klient-side, selve TCP-tilkoblingen bryr seg ikke om hvilket
+ * vertsnavn som ble brukt).
+ */
 export function buildFikenRedirectUri(port: number): string {
-  return `http://127.0.0.1:${port}${FIKEN_OAUTH_CALLBACK_PATH}`;
+  return `http://localhost:${port}${FIKEN_OAUTH_CALLBACK_PATH}`;
 }
 
 /** Dokumentert token-endepunkt-autentisering: HTTP Basic med client_id:client_secret - `Buffer` er en Node-global (ingen import), verdien logges ALDRI. */
