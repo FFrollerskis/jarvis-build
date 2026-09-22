@@ -1,15 +1,30 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d234-neo4j-1password-dropped`, basert på
-`claude/fase-d233-q36-supabase-resolved` sin commit, PR #145 IKKE ENNÅ merget da denne branchen ble
-opprettet). **D-234: Q-37 (Neo4j) og Q-38 (1Password) LUKKET - BEGGE DROPPET** fra backlogen
-("Hvis vi ikke trenger neo4j eller 1passord så dropper vi de" - Tobias, direkte chat). Business
-Graph (UA-3) dekker Neo4j-behovet, Infisical dekker 1Password-behovet - begge allerede
-produksjonsverifiserte/wired. Kun Q-39 (Windows/macOS) står igjen åpen av D-231 sine fem flaggede
-punkter. **D-233 (tidligere, PR #145): Q-36 (Supabase) LUKKET** - Tobias bekreftet direkte at
-Supabase på D-231-listen betyr kun Postgres-hosting, ikke Supabase-spesifikke API-er. Ingen
-konflikt med regel 9, ingen ny connector, ingen kode. Q-37/Q-38/Q-39 (Neo4j/1Password/
-Windows-macOS) FORBLIR åpne. **D-232 (tidligere): 50 av D-231 sine
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d235-infisical-host-acceptance`, egen isolert
+worktree, basert på FERSK `origin/main` - `git fetch origin main` kjørt før branch-opprettelse,
+inkluderer allerede D-233 (PR #145, Q-36 Supabase lukket) og D-234 (PR #146, Q-37/Q-38 Neo4j/
+1Password droppet), begge merget FØR denne branchen ble opprettet). **D-235: reproduserbart host-
+akseptansescript levert for D-35 sin 10-punkts Infisical-produksjonsport** -
+`modules/owner-controls/scripts/infisical-live.ts`+`infisical-live-host-run.ts` (SAMME mønster som
+`stripe-real-payment-acceptance.ts`/`k1-owner-control-authority-host-run.ts`). Dekker alle 10 punkter,
+inkl. TRE reelt NYE (punkt 8 rotasjon/tilbakekalling via Infisical sin egen DELETE-API; punkt 10
+hvelv-spesifikk `pg_dump`/restore-backup for `infisical`-databasen; D-213 sin skrive-sti
+`owner_controls.set_connector_credential` ende-til-ende). Punkt 4 (TLS) dokumentert `N/A_DOCUMENTED`
+MED forbehold, ikke fabrikkert. `.env.example` fikk de SEKS manglende `INFISICAL_*`-variablene (var
+helt fraværende der til tross for at koden/compose alltid har lest dem). **KODE LEVERT, IKKE HOST-
+KJØRT** - Claude har ingen tilgang til en ekte Infisical-instans i denne sandboxen. 26 nye DB-
+uavhengige strukturtester (`infisical-live-host-run-wiring.test.ts`). `pnpm -w typecheck`/
+`npx eslint .` rene. Se D-235 i DECISIONS_AND_ASSUMPTIONS.md for full detalj. **PR ÅPNES SOM DRAFT
+mot `main`, IKKE merget av denne økten selv.**
+
+**Forrige milepæler (uendret, fortsatt gjeldende på `main` da denne økten startet): D-234/D-233/D-232.**
+**D-234:** Q-37 (Neo4j) og Q-38 (1Password) LUKKET - BEGGE DROPPET fra backlogen ("Hvis vi ikke
+trenger neo4j eller 1passord så dropper vi de" - Tobias, direkte chat). Business Graph (UA-3) dekker
+Neo4j-behovet, Infisical dekker 1Password-behovet - begge allerede produksjonsverifiserte/wired. Kun
+Q-39 (Windows/macOS) står igjen åpen av D-231 sine fem flaggede punkter. **D-233:** Q-36 (Supabase)
+LUKKET - Tobias bekreftet direkte at Supabase på D-231-listen betyr kun Postgres-hosting, ikke
+Supabase-spesifikke API-er. Ingen konflikt med regel 9, ingen ny connector, ingen kode. **D-232:** 50
+av D-231 sine
 `NY_BACKLOG`-punkter lagt til i `connector-registry.ts`/dashbordets "Integrasjoner"-seksjon som
 synlige, EKSPLISITT "ikke konfigurert"-oppføringer** (Tobias direkte: "Legg de til i dashbordet
 selv om de ikke er klare for tilkobling så de er der"). To nye `category`-verdier
@@ -234,17 +249,25 @@ tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224/D-225/D-228): FAKTISK HOST-KJ
 går til grønn CI og merges, PLUS uavhengig arkitektgjennomgang av selve Stripe-evidensen før gaten
 kalles et ubetinget `PASS` - ingen ytterligere kode eller ekstern Tobias-handling gjenstår for selve
 akseptansekriteriene. **PR #97 (W1 watchdog) LUKKET uten merge, se "Andre åpne PR" over** - main
-har allerede en mer gjennomarbeidet, allerede-merget watchdog-implementasjon (PR #96). D-35s 10-punkts
-host-produksjonsport for Infisical fortsatt ikke runtime-verifisert (uendret fra D-211).
+har allerede en mer gjennomarbeidet, allerede-merget watchdog-implementasjon (PR #96). **D-35s
+10-punkts host-produksjonsport for Infisical: reproduserbart akseptansescript LEVERT (D-235), MEN
+FORTSATT IKKE runtime-verifisert** - Tobias må selv kjøre `infisical-live-host-run.ts` før
+`D-35=PRODUCTION_VERIFIED` kan erklæres.
 Embedded-Postgres DB-avhengige tester (`initdb: Permission denied`) kan fortsatt ikke kjøres i DENNE
 sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem derimot uten problemer.
 
 ## Neste oppgave
 
-0. **Review/merge D-232 sin PR (branch `claude/fase-d232-backlog-connectors-visible`)** - åpnet som
+0. **Tobias kjører `node --env-file=.env --experimental-transform-types
+   modules/owner-controls/scripts/infisical-live-host-run.ts` mot sin ekte Docker-Infisical-instans
+   (D-235)** - eneste gjenstående steg for D-35 sin 10-punkts port. Krever de seks nye
+   `INFISICAL_*`-variablene satt i `.env` (se `.env.example`) OG at et Infisical-prosjekt/
+   maskinidentitet allerede er opprettet (BO-07-prosedyren, `docs/RUNTIME_GATES.md`). Output limes inn
+   for uavhengig arkitektgjennomgang FØR `D-35=PRODUCTION_VERIFIED` kan erklæres.
+0b. **Review/merge D-232 sin PR (branch `claude/fase-d232-backlog-connectors-visible`)** - åpnet som
    DRAFT mot `main`, IKKE merget av denne økten selv. **PR #143 (D-230) og D-231 sin PR (#142) er
    BEGGE allerede merget** - `origin/main` denne økten startet fra inkluderte begge (bekreftet ved
-   `git log`), item 0 her er derfor OPPDATERT fra en tidligere, nå utdatert formulering.
+   `git log`), item 0b her er derfor OPPDATERT fra en tidligere, nå utdatert formulering.
 1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
    HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
    kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før
