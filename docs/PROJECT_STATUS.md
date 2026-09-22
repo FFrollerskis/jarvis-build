@@ -7,8 +7,12 @@ underveis (feil ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en t
 ikke-eksisterende Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse,
 manglende CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte
 kriterier PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang,
-samme presedens som W1 watchdog). PR #97 (W1 watchdog) sin host-akseptanse er PASS og rapportert til
-issue #68, venter nå på uavhengig arkitektgjennomgang.
+samme presedens som W1 watchdog opprinnelig fulgte). **PR #97 (W1 watchdog) LUKKET UTEN MERGE** -
+funnet ved forsøk på merge under D-192-tillegg at feature-en allerede var implementert (MER
+gjennomarbeidet, fem ekstra bugfikser) og merget via en parallell PR #96 tilbake i 2026-09-19; se
+"Andre åpne PR" under for full historikk. Tobias bekreftet direkte at issue #68 sin
+ChatGPT-arkitektgjennomgang ikke lenger er en aktiv sti - rutine-PR-er avgjøres videre under direkte
+D-192(-tillegg)-fullmakt i chat, ikke via issue #68.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -142,15 +146,20 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
-- **PR #97 (W1 watchdog produksjons-wiring, D-180)**, branch `claude/fase-w1-watchdog-runtime-
-  durability`, opprettet 2026-09-19 via issue #68 sin `ARCHITECT_TASK`-protokoll - IKKE del av denne
-  øktens direkte D-192-chat-arbeid. **OPPDATERT 2026-09-22: HOST-AKSEPTANSE PASS** - Tobias kjørte
-  akseptanseharnesset ekte mot Docker/Postgres på egen maskin (`run_id=2e40685c`, `hard_fail=false`,
-  alle 12 markører PASS). PR-en er oppdatert med full evidens og tatt ut av draft, og en `CLAUDE_REPORT`
-  er postet til issue #68 (`INTERNAL_BUILD_COMPLETE=true`, `MERGE_AUTHORIZED=false` uendret - venter nå
-  KUN på uavhengig ChatGPT-arkitektgjennomgang, ikke lenger på host-akseptanse). Flagget for arkitekten:
-  branchens base (`9ede3ac1`, fra 19. sept) ligger nå godt bak `main` - arkitekten må vurdere om
-  rebase/merge-med-main trengs før en eventuell merge-task.
+Ingen - **PR #97 LUKKET 2026-09-22, IKKE merget, ingen kode tatt inn.** Tobias bekreftet direkte i
+chat at issue #68 sin ChatGPT-arkitektgjennomgang ikke lenger er en aktiv sti, og ga direkte fullmakt
+(D-192-tillegg) til å avgjøre PR #97 selv. Ved forsøk på å merge (`mergeable_state=dirty`, 123 commits
+bak `main`) ble konflikten undersøkt og avdekket at **PR #96** - opprettet ETT MINUTT etter PR #97,
+samme dag (2026-09-19) - implementerte NØYAKTIG samme W1-watchdog-feature, gikk gjennom FEM
+ytterligere reelle bugfikser (D-181 BLOCKER B1 t.o.m. D-193 BLOCKER B5, inkludert D-191 BLOCKER B4 -
+kostnadssikringsmekanismen kunne strukturelt ALDRI utløses i produksjon under ekte RLS-håndhevet
+runtime-rolle før den fiksen), besto host-akseptanse (16/16 markører, `run_id=28c2059a`), og ble
+**merget** samme dag under DIREKTE D-192-fullmakt. `main` har derfor lenge hatt den komplette,
+mer gjennomarbeidede watchdog-implementasjonen - PR #97 sin egen host-akseptanse (`run_id=2e40685c`,
+2026-09-21) testet en allerede-utdatert kodeversjon som PASSET korrekt for det den faktisk inneholdt,
+men manglet minst fem kjente, rettede feil. Å merge PR #97 ville stille re-introdusert allerede
+rettede kritiske feil. Dette var en bokføringsglipp fra en tidligere økt (to parallelle branches for
+samme oppgave, kun én fulgt opp til lukking) - lukket med forklarende kommentar, ingen ny kode.
 
 ## Blokkeringer
 
@@ -164,9 +173,8 @@ tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224/D-225/D-228): FAKTISK HOST-KJ
 `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` - eneste gjenstående steg er at PR #141 (D-228) selv
 går til grønn CI og merges, PLUS uavhengig arkitektgjennomgang av selve Stripe-evidensen før gaten
 kalles et ubetinget `PASS` - ingen ytterligere kode eller ekstern Tobias-handling gjenstår for selve
-akseptansekriteriene.
-PR #97 (W1 watchdog) er nå KUN blokkert på
-uavhengig arkitektgjennomgang (issue #68) - host-akseptanse er PASS, se over. D-35s 10-punkts
+akseptansekriteriene. **PR #97 (W1 watchdog) LUKKET uten merge, se "Andre åpne PR" over** - main
+har allerede en mer gjennomarbeidet, allerede-merget watchdog-implementasjon (PR #96). D-35s 10-punkts
 host-produksjonsport for Infisical fortsatt ikke runtime-verifisert (uendret fra D-211).
 Embedded-Postgres DB-avhengige tester (`initdb: Permission denied`) kan fortsatt ikke kjøres i DENNE
 sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem derimot uten problemer.
@@ -177,9 +185,9 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
    HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
    kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før
    `PASS_PENDING_ARCHITECT_REVIEW` kan bli et ubetinget `PASS`.
-2. **Overvåk issue #68** for arkitektens svar på PR #97 sin `CLAUDE_REPORT` - når/hvis en
-   `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` kommer, følg standard merge-sekvens
-   (eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
+2. **issue #68/ChatGPT-arkitektgjennomgang er IKKE lenger en aktiv sti** (Tobias bekreftet direkte i
+   chat 2026-09-22) - ingen videre overvåking av issue #68 planlagt med mindre Tobias selv ber om det
+   igjen. Rutinemessige PR-er merges videre under direkte D-192(-tillegg)-fullmakt i chat.
 3. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
    `catch { }` uten fanget feil-variabel, HELE `apps/`/`modules/`, ikke bare tidligere rørte filer - se
    D-222/D-227-lærdommen) hvis bedt om å fortsette å bygge - ingen kjent, allerede-registrert uløst
