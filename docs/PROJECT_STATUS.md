@@ -1,13 +1,14 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d227-sweep-silent-catch-fix`, merget med `origin/main`
-HEAD `da3005e` - PR #136/D-223, PR #137/D-224, PR #138/D-225 OG PR #139/D-226 ALLE MERGET). **D-226
-(OpenAI STT/TTS `processor_terms_status` flippet til `VERIFIED`, Q-32 punkt 1 fullstendig lukket) er nå
-EKTE på `main`. D-227 (DENNE branchen, PR #140 ÅPEN): TOLV nye `catch {}`-steder i periodiske
-per-tenant sveipjobber (finance/business/growth) rettet - samme anti-mønster-klasse som D-218→D-222,
-verre fordi feilen var umulig å skille fra legitim null-aktivitet i sveipresultatet.** PR #97 (W1
-watchdog) sin host-akseptanse er PASS og rapportert til issue #68, venter nå på uavhengig
-arkitektgjennomgang.
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d228-stripe-acceptance-tool-id-fix`, basert på
+`origin/main` etter PR #140/D-227 MERGET). **STORT MILEPÆL: D-228 - Tobias sin FØRSTE faktiske
+host-kjøring av Stripe-akseptansescriptet (D-225) er GRØNN.** Fem reelle kodefeil funnet og rettet
+underveis (feil ToolGateway-`tool_id`, en `??=`-sentinel som ikke overskrev en tom streng, et
+ikke-eksisterende Stripe CLI-flagg, en webhook-seksjon som ventet på en allerede-tapt hendelse,
+manglende CLI-autentisering) - `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (alle tre navngitte
+kriterier PASS med ekte Stripe-bevis, IKKE et ubetinget `PASS` før uavhengig arkitektgjennomgang,
+samme presedens som W1 watchdog). PR #97 (W1 watchdog) sin host-akseptanse er PASS og rapportert til
+issue #68, venter nå på uavhengig arkitektgjennomgang.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
 > historikk finnes i git-commits/diff/PR-beskrivelser/DECISIONS_AND_ASSUMPTIONS.md, ikke her.
@@ -50,7 +51,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
-- **PR #106-#139 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+- **PR #106-#140 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
   connector credential-skriving + utvidet live_test (D-213, PR #122), trygg selvendring - to-lags-
@@ -102,8 +103,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   `"VERIFIED"` i produksjonskode - OpenAI STT/TTS er nå `ALLOWED_EXTERNAL_PROCESSOR` for alle memory
   spaces UNNTATT `health` (D-23, uendret) og `CLIENT_ASSERTED`-autoritet (D-123, uendret). Alle berørte
   tester oppdatert. Se D-226 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-- **D-227 (2026-09-22, DENNE branchen `claude/fase-d227-sweep-silent-catch-fix`, PR #140 ÅPEN, CI
-  GRØNT):** TOLV nye `catch {}`-steder som svelget feil helt sporløst i periodiske per-tenant
+- **D-227 (2026-09-22, PR #140 MERGET):** TOLV nye `catch {}`-steder som svelget feil helt sporløst i periodiske per-tenant
   sveipjobber - SAMME anti-mønster-klasse som D-218→D-222, denne runden ALVORLIGERE fordi en reell
   per-tenant-feil var UMULIG å skille fra legitim null-aktivitet i det returnerte sveipresultatet. Ni
   sveipfiler (`modules/finance/src/{neonomics,vipps,stripe,spend,wallester}-sweep.ts`,
@@ -121,6 +121,24 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   UTELUKKENDE på kjent sandbox-begrensning (`initdb: Permission denied`), ikke regresjon. CI (GitHub
   Actions) grønt på ALLE tre jobber (`gitleaks`/`build-test`/`windows-git-auth`). Se D-227 i
   DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+- **D-228 (2026-09-22, PR #141 ÅPEN - EKTE KODE, fire iterative fiks-commits):** Tobias sin FØRSTE
+  faktiske host-kjøring av D-225 sitt Stripe-akseptansescript. Fem reelle kodefeil funnet og rettet
+  UNDERVEIS, live sammen med Tobias via skjermdeling: (1) `submit_payment_intent` kalt via feil
+  ToolGateway-`tool_id` (`finance_stripe` i stedet for `finance`) - `unknown_tool`; (2) en
+  `JARVIS_FIKEN_REFRESH_TOKEN`-sentinel som brukte `??=`, som IKKE overskriver en allerede TOM streng
+  arvet fra `.env.example` - `credential_unavailable`; (3) `--all-snapshot` er IKKE et ekte Stripe
+  CLI-flagg (verifisert mot Tobias sin FAKTISKE `stripe listen --help`, D-41 - aldri gjettet) - fjernet;
+  (4) webhook-seksjonen ventet på en `payment_intent.succeeded`-hendelse som allerede var sendt/tapt
+  FØR `stripe listen`-tunnelen koblet til (CLI-en er en LIVE tunnel, ALDRI en hendelses-omspilling) -
+  rettet ved å trigge en FERSK betaling INNE i seksjonen, etter tilkobling; (5) CLI-en krevde separat
+  interaktiv `stripe login` - rettet ved å sende test-nøkkelen direkte via `--api-key`. **Sluttresultat,
+  FAKTISK host-kjørt og grønt** (`run_id=f3f70055`, `hard_fail=false`): ALLE tre navngitte kriterier
+  PASS med ekte Stripe-bevis (`pi_3UIJmgPmexBSEl0n1Te76xMq`/`re_3UIJmgPmexBSEl0n1GE4DYbQ`/
+  `evt_3UIJmmPmexBSEl0n0Mur42uo`), pluss `secret_redaction`/`cleanup` PASS.
+  **`STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW`** (scriptets egen presise status - IKKE et
+  ubetinget `PASS`, venter på uavhengig arkitektgjennomgang, samme presedens som W1 watchdog).
+  `pnpm -w typecheck`/`npx eslint` rene for alle fire delfikser. Se D-228 i DECISIONS_AND_ASSUMPTIONS.md
+  for full detalj.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
@@ -142,11 +160,11 @@ backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE
 **Q-32 er nå FULLSTENDIG LUKKET på alle tre punkter, EKTE på `main`** (D-226, PR #139 MERGET - alle
 fire OpenAI-databehandlerfelt bekreftet, `processor_terms_status: "VERIFIED"` i kode; punkt 2 lukket av
 D-123; punkt 3 lukket av D-217+D-223) - ingen gjenstående handling for denne kapabiliteten i det hele
-tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224+D-225): credentials er KONFIGURERT og API-
-tilkobling BEVIST (D-224), og det manglende akseptanseskriptet er nå BYGGET (D-225) - men
-`STRIPE_LIVE_GATE` er FORTSATT IKKE `PASS`** - gjenstående arbeid er REN EKSTERN HANDLING fra Tobias:
-hente en gratis Stripe TEST-modus-nøkkel (`JARVIS_STRIPE_TEST_SECRET_KEY`) og faktisk kjøre
-`stripe-real-payment-acceptance-host-run.ts` på egen maskin - ingen kode gjenstår.
+tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224/D-225/D-228): FAKTISK HOST-KJØRT OG GRØNT** -
+`STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` - eneste gjenstående steg er at PR #141 (D-228) selv
+går til grønn CI og merges, PLUS uavhengig arkitektgjennomgang av selve Stripe-evidensen før gaten
+kalles et ubetinget `PASS` - ingen ytterligere kode eller ekstern Tobias-handling gjenstår for selve
+akseptansekriteriene.
 PR #97 (W1 watchdog) er nå KUN blokkert på
 uavhengig arkitektgjennomgang (issue #68) - host-akseptanse er PASS, se over. D-35s 10-punkts
 host-produksjonsport for Infisical fortsatt ikke runtime-verifisert (uendret fra D-211).
@@ -155,9 +173,10 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-1. **Merge PR #140 (D-227)** under D-192 - CI er GRØNT på alle tre jobber, ingen review-tråder; merge
-   base-oppdateringen (denne commiten) inn og fullfør standard merge-sekvens (mark ready for review,
-   eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
+1. **Merge PR #141 (D-228)** under D-192 når CI er grønt/ingen åpne review-tråder - eksakt
+   HEAD-/base-guard rett før merge, kun to-forelder-merge. Dette lukker `STRIPE_LIVE_GATE` sin
+   kode-side helt - kun uavhengig arkitektgjennomgang av selve Stripe-host-evidensen gjenstår før
+   `PASS_PENDING_ARCHITECT_REVIEW` kan bli et ubetinget `PASS`.
 2. **Overvåk issue #68** for arkitektens svar på PR #97 sin `CLAUDE_REPORT` - når/hvis en
    `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` kommer, følg standard merge-sekvens
    (eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
@@ -166,9 +185,9 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
    D-222/D-227-lærdommen) hvis bedt om å fortsette å bygge - ingen kjent, allerede-registrert uløst
    kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå (D-227 lukket alle kjente sveip-relaterte
    funn, inkl. de tre `service.ts`-søsknene).
-4. **Stripe REN EKSTERN handling gjenstår (D-225):** Tobias må hente en gratis Stripe TEST-modus-nøkkel
-   og kjøre `stripe-real-payment-acceptance-host-run.ts` FØR `STRIPE_LIVE_GATE` kan bli `PASS` - ingen
-   kode gjenstår fra Claude sin side.
+4. **Stripe (D-225/D-228) er FERDIG kode-messig** - ingen gjenstående kode eller ekstern Tobias-handling
+   for selve akseptansekriteriene. Neste, IKKE påbegynte skritt: en uavhengig arkitektgjennomgang av
+   D-228 sin faktiske host-evidens (samme mønster som W1 watchdog).
 5. **OpenAI-taleprosessoren (Q-32 punkt 1) er FERDIG (D-226, MERGET)** - ingen gjenstående handling.
    Neste naturlige, IKKE påbegynte skritt for selve talefunksjonen: verifisere ende-til-ende at en ekte
    OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som D-223 gjorde for lokal
