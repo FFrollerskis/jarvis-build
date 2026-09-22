@@ -1,12 +1,12 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d227-sweep-silent-catch-fix`, basert på `origin/main`
-HEAD `22df062` - PR #137/D-224 og PR #138/D-225 begge MERGET inn i denne basen). **D-226 (OpenAI STT/
-TTS `processor_terms_status` flippet til `VERIFIED`, Q-32 punkt 1 lukket) ligger på en SEPARAT branch
-(PR #139 ÅPEN, ikke basen for denne branchen). D-227 (DENNE branchen): TOLV nye `catch {}`-steder i
-periodiske per-tenant sveipjobber (finance/business/growth) rettet - samme anti-mønster-klasse som
-D-218→D-222, verre fordi feilen var umulig å skille fra legitim null-aktivitet i sveipresultatet.**
-PR #97 (W1 watchdog) sin host-akseptanse er PASS og rapportert til issue #68, venter nå på uavhengig
+**Oppdatert:** 2026-09-22 (branch `claude/fase-d227-sweep-silent-catch-fix`, merget med `origin/main`
+HEAD `da3005e` - PR #136/D-223, PR #137/D-224, PR #138/D-225 OG PR #139/D-226 ALLE MERGET). **D-226
+(OpenAI STT/TTS `processor_terms_status` flippet til `VERIFIED`, Q-32 punkt 1 fullstendig lukket) er nå
+EKTE på `main`. D-227 (DENNE branchen, PR #140 ÅPEN): TOLV nye `catch {}`-steder i periodiske
+per-tenant sveipjobber (finance/business/growth) rettet - samme anti-mønster-klasse som D-218→D-222,
+verre fordi feilen var umulig å skille fra legitim null-aktivitet i sveipresultatet.** PR #97 (W1
+watchdog) sin host-akseptanse er PASS og rapportert til issue #68, venter nå på uavhengig
 arkitektgjennomgang.
 
 > Denne filen er den ENESTE status-/handoff-filen (CLAUDE.md) og overskrives ved hver økt - full
@@ -50,7 +50,7 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 
 ## Hvor `main` står nå
 
-- **PR #106-#138 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
+- **PR #106-#139 MERGET.** Gemma-first-sagaen, UA-11 Executive Mode "K2" (D-207), HELE "Charlie"-linjen
   (personlighet D-208/selv-bevissthet D-209/minneverifisering D-210, PR #117-#119), Infisical-wiring +
   integrasjons-dashboard lese-del (D-211, PR #120), voice-gateway daglig-bruk-overflate (D-212, PR #121),
   connector credential-skriving + utvidet live_test (D-213, PR #122), trygg selvendring - to-lags-
@@ -70,9 +70,9 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   å faktisk høres ut som norsk). D-217 sine `UNVERIFIED`-CLI-flagg-antakelser er nå bevist korrekte mot
   ekte binærer. Se D-223 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 - **D-224 (2026-09-22, PR #137 MERGET - ren dokumentasjons-/statusoppdatering, INGEN kodeendring):**
-  Stripe - ekte credentials konfigurert OG
-  faktisk API-tilkobling bevist. Tobias opprettet en Stripe-konto, satte `JARVIS_STRIPE_SECRET_KEY`
-  (`rk_live_...` restricted key)/`JARVIS_STRIPE_WEBHOOK_SECRET` (via `stripe listen --all-snapshot
+  Stripe - ekte credentials konfigurert OG faktisk API-tilkobling bevist. Tobias opprettet en
+  Stripe-konto, satte `JARVIS_STRIPE_SECRET_KEY` (`rk_live_...` restricted key)/
+  `JARVIS_STRIPE_WEBHOOK_SECRET` (via `stripe listen --all-snapshot
   --live`)/`JARVIS_STRIPE_TENANT_ID` i `.env`, og et direkte `curl` mot `api.stripe.com/v1/balance`
   returnerte et ekte autentisert svar (`livemode:true`, `nok`). **PRESIST: dette er IKKE
   `STRIPE_LIVE_GATE=PASS`** - ingen eksisterende kodesti øvde faktisk `stripe_payment_execution`/
@@ -94,20 +94,19 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   rene. **IKKE ENNÅ HOST-KJØRT** - `STRIPE_LIVE_GATE` forblir UENDRET
   `CREDENTIALS_CONFIGURED_AWAITING_LIVE_ACCEPTANCE_SCRIPT` inntil Tobias faktisk henter en gratis Stripe
   TEST-nøkkel og kjører scriptet. Se D-225 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-- **D-226 (2026-09-22, PR #139 ÅPEN mot `main`, branch `claude/fase-d226-openai-dpa-progress` - EKTE
-  KODE, IKKE del av DENNE branchens base):** Q-32 punkt 1 (OpenAI som taleprosessor) FULLSTENDIG
-  lukket - Tobias verifiserte selv, live i chat, alle fire matrise-regel-3-felt (region=EU, DPA
-  godkjent, trening-på-data korrigert fra "av" til faktisk AV og deretter DEAKTIVERT av Tobias,
-  retensjon inntil 30 dager/ZDR tilgjengelig). `OpenAiStt`/`OpenAiTts` sin
-  `processor_terms_status` flippet fra `"NOT_VERIFIED"` til `"VERIFIED"` i produksjonskode - OpenAI
-  STT/TTS er nå `ALLOWED_EXTERNAL_PROCESSOR` for alle memory spaces UNNTATT `health` (D-23, uendret)
-  og `CLIENT_ASSERTED`-autoritet (D-123, uendret). Alle berørte tester oppdatert. Se D-226 i
-  DECISIONS_AND_ASSUMPTIONS.md for full detalj. **Overvåkes separat - se "Andre åpne PR" under.**
-- **D-227 (2026-09-22, DENNE branchen `claude/fase-d227-sweep-silent-catch-fix`):** TOLV nye
-  `catch {}`-steder som svelget feil helt sporløst i periodiske per-tenant sveipjobber - SAMME
-  anti-mønster-klasse som D-218→D-222, denne runden ALVORLIGERE fordi en reell per-tenant-feil var
-  UMULIG å skille fra legitim null-aktivitet i det returnerte sveipresultatet. Ni sveipfiler
-  (`modules/finance/src/{neonomics,vipps,stripe,spend,wallester}-sweep.ts`,
+- **D-226 (2026-09-22, PR #139 MERGET - EKTE KODE, ikke docs):** Q-32 punkt 1 (OpenAI som
+  taleprosessor) FULLSTENDIG lukket - Tobias verifiserte selv, live i chat, alle fire
+  matrise-regel-3-felt (region=EU, DPA godkjent, trening-på-data korrigert fra en feilaktig "av"-
+  antakelse til faktisk AV funnet PÅ og deretter DEAKTIVERT av Tobias, retensjon inntil 30 dager/ZDR
+  tilgjengelig). `OpenAiStt`/`OpenAiTts` sin `processor_terms_status` flippet fra `"NOT_VERIFIED"` til
+  `"VERIFIED"` i produksjonskode - OpenAI STT/TTS er nå `ALLOWED_EXTERNAL_PROCESSOR` for alle memory
+  spaces UNNTATT `health` (D-23, uendret) og `CLIENT_ASSERTED`-autoritet (D-123, uendret). Alle berørte
+  tester oppdatert. Se D-226 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+- **D-227 (2026-09-22, DENNE branchen `claude/fase-d227-sweep-silent-catch-fix`, PR #140 ÅPEN, CI
+  GRØNT):** TOLV nye `catch {}`-steder som svelget feil helt sporløst i periodiske per-tenant
+  sveipjobber - SAMME anti-mønster-klasse som D-218→D-222, denne runden ALVORLIGERE fordi en reell
+  per-tenant-feil var UMULIG å skille fra legitim null-aktivitet i det returnerte sveipresultatet. Ni
+  sveipfiler (`modules/finance/src/{neonomics,vipps,stripe,spend,wallester}-sweep.ts`,
   `modules/business/src/{open-loop,scoring}-sweep.ts`, `modules/business/src/business-event-sync.ts`,
   `modules/growth/src/action-recommendation-sweep.ts`) PLUSS tre søsken-steder i de underliggende
   `syncPending{Stripe,Vipps,Neonomics}Payments()`-metodene i `modules/finance/src/service.ts` (samme
@@ -119,16 +118,12 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
   webhook-envelope-steder (IKKE stille - kaster synkront videre til HTTP-kalleren, tap av detalj er et
   separat, mindre problem). `pnpm -w typecheck` (32/32)/`npx eslint .` på alle 10 endrede filer rene.
   Kjørbare tester grønne (0 `AssertionError` i hele testkjøringen); alle 30 feilende testfiler feiler
-  UTELUKKENDE på kjent sandbox-begrensning (`initdb: Permission denied`), ikke regresjon. Se D-227 i
+  UTELUKKENDE på kjent sandbox-begrensning (`initdb: Permission denied`), ikke regresjon. CI (GitHub
+  Actions) grønt på ALLE tre jobber (`gitleaks`/`build-test`/`windows-git-auth`). Se D-227 i
   DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 ## Andre åpne PR (utenfor denne øktens D-192-scope)
 
-- **PR #139 (D-226, OpenAI STT/TTS `processor_terms_status` VERIFIED)**, branch
-  `claude/fase-d226-openai-dpa-progress`, basert på `origin/main` `22df062` (SAMME base som DENNE
-  D-227-branchen, men et separat, søsken-forhold - INGEN av de to branchene inneholder den andres
-  endringer). CI-status sist sjekket: venter på grønt. Merges under D-192 når CI er grønt/ingen åpne
-  review-tråder, SAMME sekvens som alle andre rutine-PR-er denne økten.
 - **PR #97 (W1 watchdog produksjons-wiring, D-180)**, branch `claude/fase-w1-watchdog-runtime-
   durability`, opprettet 2026-09-19 via issue #68 sin `ARCHITECT_TASK`-protokoll - IKKE del av denne
   øktens direkte D-192-chat-arbeid. **OPPDATERT 2026-09-22: HOST-AKSEPTANSE PASS** - Tobias kjørte
@@ -144,14 +139,13 @@ kandidat; er den listen tom, kjør et helt friskt bredt søk FØR "oppbrukt" kon
 Ingen kjente kode-blokkeringer akkurat nå. `EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - dekker
 resten av masterplanen: Growth-stack live-evidens, iPhone/Watch/Home/Personal/Health LIVE, off-site
 backup/monitoring. Se `docs/SOVEREIGN_GRADUATION_MATRIX.md`. `SOVEREIGN_COMPLETE=false` FORBLIR.
-**Q-32 punkt 1 (OpenAI som taleprosessor) er FULLSTENDIG LUKKET på KODE-nivå av D-226 (PR #139) -
-gjenstår KUN at PR #139 selv går til grønn CI og merges** (se "Andre åpne PR" over); frem til den
-merges er `main` sin egen kode fortsatt på `"NOT_VERIFIED"`. **Q-32 punkt 3 (lokal whisper.cpp/piper)
-er FULLSTENDIG LUKKET (D-217+D-223, MERGET) - ingen gjenstående handling.** **Stripe (D-224+D-225):
-credentials er KONFIGURERT og API-tilkobling BEVIST (D-224), og det manglende akseptanseskriptet er nå
-BYGGET (D-225) - men `STRIPE_LIVE_GATE` er FORTSATT IKKE `PASS`** - gjenstående arbeid er REN
-EKSTERN HANDLING fra Tobias: hente en gratis Stripe TEST-modus-nøkkel
-(`JARVIS_STRIPE_TEST_SECRET_KEY`) og faktisk kjøre
+**Q-32 er nå FULLSTENDIG LUKKET på alle tre punkter, EKTE på `main`** (D-226, PR #139 MERGET - alle
+fire OpenAI-databehandlerfelt bekreftet, `processor_terms_status: "VERIFIED"` i kode; punkt 2 lukket av
+D-123; punkt 3 lukket av D-217+D-223) - ingen gjenstående handling for denne kapabiliteten i det hele
+tatt, se `docs/OPEN_QUESTIONS.md`. **Stripe (D-224+D-225): credentials er KONFIGURERT og API-
+tilkobling BEVIST (D-224), og det manglende akseptanseskriptet er nå BYGGET (D-225) - men
+`STRIPE_LIVE_GATE` er FORTSATT IKKE `PASS`** - gjenstående arbeid er REN EKSTERN HANDLING fra Tobias:
+hente en gratis Stripe TEST-modus-nøkkel (`JARVIS_STRIPE_TEST_SECRET_KEY`) og faktisk kjøre
 `stripe-real-payment-acceptance-host-run.ts` på egen maskin - ingen kode gjenstår.
 PR #97 (W1 watchdog) er nå KUN blokkert på
 uavhengig arkitektgjennomgang (issue #68) - host-akseptanse er PASS, se over. D-35s 10-punkts
@@ -161,22 +155,24 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-1. **Push/åpne draft-PR for D-227** (denne branchen, `claude/fase-d227-sweep-silent-catch-fix`) under
-   D-192, deretter overvåk CI/review-tråder og merge når grønt (eksakt HEAD-/base-guard rett før merge).
-2. **Overvåk PR #139 (D-226)** til CI er grønt/ingen åpne review-tråder, merge under D-192 - dette
-   lukker Q-32 punkt 1 på faktisk `main`-kode-nivå (matrise-regel-3 er allerede eier-verifisert av
-   Tobias, kun selve merge-koblingen gjenstår).
-3. **Overvåk issue #68** for arkitektens svar på PR #97 sin `CLAUDE_REPORT` - når/hvis en
+1. **Merge PR #140 (D-227)** under D-192 - CI er GRØNT på alle tre jobber, ingen review-tråder; merge
+   base-oppdateringen (denne commiten) inn og fullfør standard merge-sekvens (mark ready for review,
+   eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
+2. **Overvåk issue #68** for arkitektens svar på PR #97 sin `CLAUDE_REPORT` - når/hvis en
    `ARCHITECT_TASK` med `ARCHITECT_MERGE_APPROVED=true` kommer, følg standard merge-sekvens
    (eksakt HEAD-/base-guard rett før merge, kun to-forelder-merge).
-4. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
+3. **Fersk, BREDT kode-nivå gap-søk FØRST** (grep etter BÅDE `.catch(() => undefined)` OG et bart
    `catch { }` uten fanget feil-variabel, HELE `apps/`/`modules/`, ikke bare tidligere rørte filer - se
    D-222/D-227-lærdommen) hvis bedt om å fortsette å bygge - ingen kjent, allerede-registrert uløst
    kandidat gjenstår fra DENNE anti-mønster-klassen akkurat nå (D-227 lukket alle kjente sveip-relaterte
    funn, inkl. de tre `service.ts`-søsknene).
-5. **Stripe REN EKSTERN handling gjenstår (D-225):** Tobias må hente en gratis Stripe TEST-modus-nøkkel
+4. **Stripe REN EKSTERN handling gjenstår (D-225):** Tobias må hente en gratis Stripe TEST-modus-nøkkel
    og kjøre `stripe-real-payment-acceptance-host-run.ts` FØR `STRIPE_LIVE_GATE` kan bli `PASS` - ingen
    kode gjenstår fra Claude sin side.
+5. **OpenAI-taleprosessoren (Q-32 punkt 1) er FERDIG (D-226, MERGET)** - ingen gjenstående handling.
+   Neste naturlige, IKKE påbegynte skritt for selve talefunksjonen: verifisere ende-til-ende at en ekte
+   OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som D-223 gjorde for lokal
+   tale) - ikke eksplisitt bedt om av Tobias ennå.
 6. Deretter valgfritt for Tobias: Apple Developer-konto/HA-instans, Google Ads-konto, off-site backup,
    Gemini-nøkler. Merk: Tobias sin `rk_live_...` Stripe-nøkkel og en fersk `sk_test_...`-nøkkel ble
    begge limt inn direkte i chat (D-224 og en senere test-nøkkel) - han er selv klar over dette og har

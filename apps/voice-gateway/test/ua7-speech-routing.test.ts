@@ -37,7 +37,7 @@ const EXTERNAL_VERIFIED: SpeechProcessorDeclaration = {
   processor_row_declared: true,
   processor_terms_status: "VERIFIED"
 };
-/** Ekstern behandler som er NAVNGITT i matrisen, men med `IKKE VERIFISERT`-felter. Dette er OpenAI i dag. */
+/** Ekstern behandler som er NAVNGITT i matrisen, men med `IKKE VERIFISERT`-felter. Var OpenAI FØR D-226 (2026-09-22); ren generisk fixture nå, ikke lenger dagens faktiske OpenAI-tilstand. */
 const EXTERNAL_NAMED_UNVERIFIED: SpeechProcessorDeclaration = {
   processor_id: "test-external-named-unverified",
   locality: "external",
@@ -304,7 +304,8 @@ describe("D-122 F: klient-oppgitt memory space kvalifiserer ALDRI for ekstern be
       // Ingen av de påståtte spaces gir et ALLOWED-utfall - uansett hvilken.
       expect(decision.outcome).toBe("DENIED_MEMORY_SPACE_NOT_SERVER_VERIFIED");
     }
-    // ...og med dagens faktiske behandler stanser det allerede på regel 3.
+    // ...og selv med dagens faktiske behandler (regel 3 nå oppfylt, D-226)
+    // stanser CLIENT_ASSERTED fortsatt på regel 2 (space-autoritet), aldri på regel 3.
     expect(evaluateSpeechRouting(new OpenAiStt("k").processor, "personal", "CLIENT_ASSERTED").allowed).toBe(false);
   });
 
@@ -353,36 +354,43 @@ describe("D-122 B: de faktiske adapternes erklæringer stemmer med hva koden GJ�
     expect(evaluateSpeechRouting(new OpenAiTts("k").processor, "health", "SERVER_VERIFIED").allowed).toBe(false);
   });
 
-  it("B3: OpenAI STT/TTS er AVVIST for ALLE spaces mens matriseradene står `IKKE VERIFISERT` (regel 3)", () => {
-    // Dette er den ærlige, tilsiktede konsekvensen av arkitekt-funn 1: BO-12
-    // sin talekjede er policy-blokkert til Q-32 faktisk er besvart av eieren.
-    for (const space of MemorySpaceSchema.options) {
-      for (const authority of ["SERVER_VERIFIED", "CLIENT_ASSERTED"] as const) {
-        expect(evaluateSpeechRouting(new OpenAiStt("k").processor, space, authority).allowed).toBe(false);
-        expect(evaluateSpeechRouting(new OpenAiTts("k").processor, space, authority).allowed).toBe(false);
-      }
+  it("B3: OpenAI STT/TTS er nå TILLATT for alle spaces unntatt `health` med SERVER_VERIFIED - matrise-regel 3 er oppfylt (D-226, 2026-09-22: region/DPA/trening/retensjon faktisk bekreftet av Tobias)", () => {
+    for (const space of MemorySpaceSchema.options.filter((s) => s !== "health")) {
+      expect(evaluateSpeechRouting(new OpenAiStt("k").processor, space, "SERVER_VERIFIED")).toMatchObject({
+        allowed: true,
+        outcome: "ALLOWED_EXTERNAL_PROCESSOR"
+      });
+      expect(evaluateSpeechRouting(new OpenAiTts("k").processor, space, "SERVER_VERIFIED")).toMatchObject({
+        allowed: true,
+        outcome: "ALLOWED_EXTERNAL_PROCESSOR"
+      });
     }
-    expect(evaluateSpeechRouting(new OpenAiStt("k").processor, "personal", "SERVER_VERIFIED").outcome).toBe(
-      "DENIED_PROCESSOR_TERMS_NOT_VERIFIED"
-    );
+    // `health` forblir avvist UANSETT autoritet - D-23/SECRET_RESTRICTED (regel 2) er en HELT
+    // separat, UENDRET grense fra matrise-regel 3, se F3/D-serien lenger ned.
+    for (const authority of ["SERVER_VERIFIED", "CLIENT_ASSERTED"] as const) {
+      expect(evaluateSpeechRouting(new OpenAiStt("k").processor, "health", authority).allowed).toBe(false);
+      expect(evaluateSpeechRouting(new OpenAiTts("k").processor, "health", authority).allowed).toBe(false);
+    }
+    // CLIENT_ASSERTED gir ALDRI ekstern tilgang, uansett space - D-123/arkitekt-funn 2, UENDRET av D-226.
+    for (const space of MemorySpaceSchema.options) {
+      expect(evaluateSpeechRouting(new OpenAiStt("k").processor, space, "CLIENT_ASSERTED").allowed).toBe(false);
+      expect(evaluateSpeechRouting(new OpenAiTts("k").processor, space, "CLIENT_ASSERTED").allowed).toBe(false);
+    }
   });
 
-  it("B4: INGEN adapter i repoet påstår `VERIFIED` vilkår - verdien kan ikke flippes uten at matrisen endres først", () => {
-    const declarations: SpeechProcessorDeclaration[] = [
-      new OpenAiStt("k").processor,
-      new OpenAiTts("k").processor,
+  it("B4: OpenAI STT/TTS erklærer nå `VERIFIED` (D-226) - lokale adaptere forblir strengt `NOT_APPLICABLE_LOCAL`, ingen adapter påstår `VERIFIED` uten en tilsvarende, faktisk bekreftet matriserad", () => {
+    const external: SpeechProcessorDeclaration[] = [new OpenAiStt("k").processor, new OpenAiTts("k").processor];
+    for (const declaration of external) {
+      expect(declaration.processor_terms_status).toBe("VERIFIED");
+    }
+    const local: SpeechProcessorDeclaration[] = [
       new MarkerStt().processor,
       new LocalWhisperStt("/bin/whisper").processor,
       new FakeTts().processor,
       new LocalPiperTts("/bin/piper").processor
     ];
-    for (const declaration of declarations) {
-      expect(declaration.processor_terms_status).not.toBe("VERIFIED");
-      if (declaration.locality === "local") {
-        expect(declaration.processor_terms_status).toBe("NOT_APPLICABLE_LOCAL");
-      } else {
-        expect(declaration.processor_terms_status).toBe("NOT_VERIFIED");
-      }
+    for (const declaration of local) {
+      expect(declaration.processor_terms_status).toBe("NOT_APPLICABLE_LOCAL");
     }
   });
 });
@@ -476,12 +484,27 @@ describe("D-122 C: VoiceSession håndhever porten - ikke ÉN lydramme når en uk
     expect(session.speechRouting().tts.allowed).toBe(false);
   });
 
-  it("C8: de EKTE OpenAI-adapterne når ikke lyden i dag - regel 3 blokkerer før noe sendes ut av huset", () => {
+  it("C8: de EKTE OpenAI-adapterne når IKKE lyden for `health` - D-23/SECRET_RESTRICTED (regel 2) blokkerer fortsatt før noe sendes ut av huset, UENDRET av D-226", () => {
+    // FØR D-226 (2026-09-22) stanset dette på regel 3 (processor_terms_status)
+    // for ETHVERT space, inkl. `personal` - nå som regel 3 er oppfylt, er
+    // `health` den gjenværende, fortsatt-håndhevede grensen for de EKTE
+    // adapterne. `health` brukes bevisst (ikke `personal`) slik at denne
+    // testen fortsatt kan bruke de EKTE, nettverks-kallende adapterklassene
+    // uten selv å utløse et faktisk HTTP-kall - avslaget skjer FØR adapteren
+    // noensinne kalles.
     const ev = recordingEvents();
-    const session = sessionWith("personal", new OpenAiStt("k"), new OpenAiTts("k"), ev.handlers, "SERVER_VERIFIED");
+    const session = sessionWith("health", new OpenAiStt("k"), new OpenAiTts("k"), ev.handlers, "SERVER_VERIFIED");
     session.pushAudio(loudFrame(), 8000);
-    expect(ev.errors).toEqual(["speech_routing_denied_stt:DENIED_PROCESSOR_TERMS_NOT_VERIFIED"]);
-    expect(session.speechRouting().tts.outcome).toBe("DENIED_PROCESSOR_TERMS_NOT_VERIFIED");
+    expect(ev.errors).toEqual(["speech_routing_denied_stt:DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR"]);
+    expect(session.speechRouting().tts.outcome).toBe("DENIED_SENSITIVE_SPACE_REQUIRES_LOCAL_PROCESSOR");
+  });
+
+  it("C9: de EKTE OpenAI-adapterne er nå FAKTISK RUTBARE for `personal` + SERVER_VERIFIED (D-226) - kun routing-BESLUTNINGEN sjekkes her, INGEN ekte HTTP-kall utløses (ingen pushAudio/faktisk transport-kall i denne testen)", () => {
+    const session = sessionWith("personal", new OpenAiStt("k"), new OpenAiTts("k"), recordingEvents().handlers, "SERVER_VERIFIED");
+    expect(session.speechRouting()).toMatchObject({
+      stt: { allowed: true, outcome: "ALLOWED_EXTERNAL_PROCESSOR" },
+      tts: { allowed: true, outcome: "ALLOWED_EXTERNAL_PROCESSOR" }
+    });
   });
 });
 
