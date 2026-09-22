@@ -77,7 +77,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Supabase | `NY_BACKLOG – Q-36 FLAGGET` | Kolliderer potensielt med CLAUDE.md ufravikelig regel 9 («Ren Postgres – ingen Supabase-spesifikke API-er i kjernen»). Se Q-36 i `OPEN_QUESTIONS.md` - IKKE anta hosting-tolkning eller API-tolkning uten Tobias sitt svar |
+| Supabase | `Q-36 LUKKET (D-233) – DRIFTSVALG, IKKE CONNECTOR` | Tobias bekreftet: kun Postgres-hosting, aldri Supabase-spesifikke API-er - ingen konflikt med regel 9, ingen ny ToolGateway-connector, ingen oppføring i `connector-registry.ts`. Se D-233 i `DECISIONS_AND_ASSUMPTIONS.md` |
 | Neo4j | `NY_BACKLOG – Q-37 FLAGGET` | Business Graph (UA-3) er ALLEREDE `PRODUCTION_VERIFIED` på ren Postgres (host run `ca2d9248`). `MEMORY_ARCHITECTURE.md`: egen grafdatabase kun ved målt behov (Q-10). Se Q-37 - erstatte eller supplere, og hvorfor, avklares av Tobias FØR noe velges |
 
 ### 4.3 Kunnskap / dokumenter
