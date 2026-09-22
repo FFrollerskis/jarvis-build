@@ -213,12 +213,23 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Starter den EKTE Stripe CLI-en (`stripe listen`, TEST-modus - `--live` BEVISST ALDRI sendt) og venter til den skriver ut sitt FERSKE `whsec_...`-signeringssekret. */
-async function startStripeListenAndCaptureSecret(port: number): Promise<{ child: ChildProcessByStdio<null, Readable, Readable>; webhookSecret: string }> {
+async function startStripeListenAndCaptureSecret(port: number, testKey: string): Promise<{ child: ChildProcessByStdio<null, Readable, Readable>; webhookSecret: string }> {
   const cliBin = process.env["JARVIS_STRIPE_CLI_BIN"] ?? "stripe";
-  const child = spawn(cliBin, ["listen", "--forward-to", `localhost:${port}/webhooks/stripe`, "--all-snapshot"], { stdio: ["ignore", "pipe", "pipe"] });
+  // `--all-snapshot` er IKKE et ekte Stripe CLI-flagg (verifisert mot `stripe
+  // listen --help` sitt faktiske flagg-sett, D-41 - aldri gjettet) - fjernet.
+  // `--forward-to` alene forwarder allerede ALLE klassiske/snapshot-hendelser
+  // (CLI-ens `--events`-flagg default er `[*]`, dvs. alt) - eksakt oppførselen
+  // scriptet trenger, uten noe ekstra flagg.
+  // `--api-key` sendes eksplisitt med DEN SAMME, allerede fail-closed-
+  // validerte test-modus-nøkkelen (`requireTestModeSecretKey()`) - CLI-en
+  // krever ELLERS en separat, interaktiv `stripe login` (nettleser-OAuth)
+  // FØR denne kan kjøre i det hele tatt, noe som ville gjort scriptet
+  // ubrukelig som et selvstendig, ikke-interaktivt akseptansescript. SAMME
+  // D-41-sikkerhetsgrense som resten av scriptet - ALDRI en live-nøkkel.
+  const child = spawn(cliBin, ["listen", "--forward-to", `localhost:${port}/webhooks/stripe`, "--api-key", testKey], { stdio: ["ignore", "pipe", "pipe"] });
   let combinedOutput = "";
   const secretPromise = new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error(`stripe_listen_timeout: ingen whsec_ funnet i CLI-output innen 20s. Sjekk at "${cliBin}" er på PATH (eller sett JARVIS_STRIPE_CLI_BIN) og at "stripe login" er kjørt. Output så langt: ${combinedOutput.slice(0, 500)}`)), 20_000);
+    const timeout = setTimeout(() => reject(new Error(`stripe_listen_timeout: ingen whsec_ funnet i CLI-output innen 20s. Sjekk at "${cliBin}" er på PATH (eller sett JARVIS_STRIPE_CLI_BIN). Output så langt: ${combinedOutput.slice(0, 500)}`)), 20_000);
     function onChunk(chunk: Buffer): void {
       combinedOutput += chunk.toString("utf8");
       const match = /whsec_[A-Za-z0-9]+/.exec(combinedOutput);
@@ -290,6 +301,23 @@ async function main(): Promise<void> {
     devices: new InMemoryDeviceRegistry(), nonces: new InMemoryNonceStore(), killSwitch: new KillSwitch(),
     authority: { owner_person_id: OWNER_PERSON, owner_tenants: [TENANT_A] }
   });
+  // `finance.submit_payment_intent` sin ToolGateway-registrering erklærer
+  // `credential_ref: "JARVIS_FIKEN_REFRESH_TOKEN"` UBETINGET (provider-
+  // agnostisk statisk gate - se `integrations.ts`), sjøl om FAKTISK Fiken-
+  // API-kall KUN skjer for `current.provider === "fiken"` inne i
+  // `FinanceService.submitPaymentIntent()`. Denne intensjonen har ALLTID
+  // `provider: "stripe"` (satt over i `create_payment_intent`) - Fiken-
+  // grenen kjøres derfor STRUKTURELT aldri, og denne sentinel-verdien blir
+  // ALDRI lest av noen ekte Fiken-transport. Kun til stede for å tilfredsstille
+  // ToolGateway sin rene tilstedeværelses-sjekk (`secrets.get(ref)` - se
+  // `gateway.ts`), ALDRI validert mot Fiken sitt eget API.
+  // `??=` er BEVISST IKKE brukt her - `.env.example` erklærer
+  // `JARVIS_FIKEN_REFRESH_TOKEN=` som en TOM streng (ikke fraværende), og
+  // `??=` overskriver kun `null`/`undefined`, ALDRI en allerede tom streng
+  // arvet derfra - samme falsy-sjekk som `ToolGateway` selv bruker
+  // (`if (!credential)`, `gateway.ts`) må derfor speiles her.
+  if (!process.env.JARVIS_FIKEN_REFRESH_TOKEN) process.env.JARVIS_FIKEN_REFRESH_TOKEN = "unused-fiken-token-sentinel-stripe-only-acceptance";
+
   const secrets = new FallbackSecretProvider(new EnvSecretProvider(), new BusinessInternalSecretProvider());
   const toolGateway = new ToolGateway(pool, policy, secrets);
   for (const tool of firstWaveTools({
@@ -314,7 +342,11 @@ async function main(): Promise<void> {
     });
     stripeIntentId = mustExternalId(created, "stripe_create");
 
-    const submitResult = await stripeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: stripeIntentId });
+    // `submit_payment_intent` bor i det provider-nøytrale `finance.*`-
+    // namespacet (IKKE `finance_stripe.*` - se `integrations.ts` linje
+    // ~1651), ETT felles innsendingspunkt for fiken/stripe/vipps/neonomics
+    // som selv grener på `current.provider` internt (`service.ts`).
+    const submitResult = await financeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: stripeIntentId });
     if (!submitResult.ok) throw new Error(`submit_payment_intent_denied:${submitResult.reason}`);
     const afterSubmit = await finance.getPaymentIntent(TENANT_A, "business", stripeIntentId);
     if (!afterSubmit?.provider_ref) throw new Error("submit_payment_intent_returned_no_provider_ref");
@@ -359,7 +391,7 @@ async function main(): Promise<void> {
     });
     log(`lokal akseptanse-server lyttet på 127.0.0.1:${port}`);
 
-    const { child, webhookSecret } = await startStripeListenAndCaptureSecret(port);
+    const { child, webhookSecret } = await startStripeListenAndCaptureSecret(port, testKey);
     listenChild = child;
     capturedWebhookSecret = webhookSecret;
     // Gi CLI-tunnelen en kort stund til å faktisk koble til Stripe FØR vi
@@ -368,9 +400,29 @@ async function main(): Promise<void> {
     // prosesser).
     await sleep(2000);
 
-    // Den EKTE payment_intent.succeeded-hendelsen ble allerede utløst av
-    // det EKTE confirm-kallet i STRIPE_PAYMENT_EXECUTION over - Stripe
-    // sender den asynkront til `stripe listen` sin tunnel akkurat nå.
+    // `stripe listen` er en LIVE tunnel, IKKE en hendelses-omspilling -
+    // den forwarder KUN hendelser Stripe sender ETTER at tunnelen faktisk
+    // koblet til. Den EKTE `payment_intent.succeeded`-hendelsen fra
+    // STRIPE_PAYMENT_EXECUTION over ble derfor allerede sendt og tapt FØR
+    // denne tunnelen i det hele tatt eksisterte (seksjonene kjører
+    // sekvensielt, tunnelen startes FØRST her) - Stripe sender den ALDRI
+    // på nytt bare fordi en ny lytter kobler til senere. Trigger derfor en
+    // FERSK, EKTE `payment_intent.succeeded`-hendelse HER, ETTER at
+    // tunnelen er koblet til, SAMME create->submit->confirm-mønster som
+    // STRIPE_PAYMENT_EXECUTION over.
+    const webhookIntent = await financeAction("create_payment_intent", {
+      tenant_id: TENANT_A, idempotency_key: `stripe-real-webhook-${runId}`, purpose: "D-225 webhook reachability", amount_ore: 1_000,
+      vendor_name: "D-225 webhook test", account_code: "stripe-category", provider: "stripe"
+    });
+    const webhookIntentId = mustExternalId(webhookIntent, "stripe_webhook_create");
+    const webhookSubmit = await financeAction("submit_payment_intent", { tenant_id: TENANT_A, payment_intent_id: webhookIntentId });
+    if (!webhookSubmit.ok) throw new Error(`webhook_submit_payment_intent_denied:${webhookSubmit.reason}`);
+    const webhookAfterSubmit = await finance.getPaymentIntent(TENANT_A, "business", webhookIntentId);
+    if (!webhookAfterSubmit?.provider_ref) throw new Error("webhook_submit_payment_intent_returned_no_provider_ref");
+    const webhookConfirmed = await confirmWithTestCardFixture(testKey, webhookAfterSubmit.provider_ref, `stripe-real-webhook-confirm-${runId}`);
+    assertLivemodeFalse("webhook_confirm_payment_intent", webhookConfirmed);
+    log(`webhook_trigger_pi_id=${webhookAfterSubmit.provider_ref} confirm_response_status=${(webhookConfirmed as { status?: string }).status ?? "unknown"}`);
+
     const event = await waitForWebhookEvent(TENANT_A, 30_000);
     if (!event) {
       results.stripe_webhook_reachability = "FAIL";
