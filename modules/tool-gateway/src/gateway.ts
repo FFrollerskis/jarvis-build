@@ -12,8 +12,21 @@ export interface SecretProvider {
 }
 export class EnvSecretProvider implements SecretProvider {
   readonly name = "env-sops";
+  /**
+   * D-236 (funn i Tobias sin faktiske host-kjøring, 2026-09-22): en linje som
+   * `JARVIS_VIPPS_CLIENT_ID=` i `.env` (uutfylt placeholder, IKKE et bevisst
+   * tomt secret) gir `process.env[ref] === ""` inne i containeren - IKKE
+   * `undefined`. Det opprinnelige `process.env[ref] ?? null` fanget kun
+   * `undefined`/`null`, aldri tom streng, så `hasSecret()`/dashbordets
+   * "konfigurert"-visning viste FEILAKTIG ✓ for enhver connector der
+   * `.env.example` har en uutfylt `NØKKEL=`-linje for referansen (så godt
+   * som alle) - reprodusert live: Vipps viste "konfigurert" med tomme
+   * `.env`-felt. En tom streng er ALDRI en gyldig credential-verdi, uansett
+   * kilde - behandles nå identisk med "ikke satt".
+   */
   async get(ref: string): Promise<string | null> {
-    return process.env[ref] ?? null;
+    const value = process.env[ref];
+    return value ? value : null;
   }
 }
 
