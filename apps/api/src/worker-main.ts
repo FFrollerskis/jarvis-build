@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, VercelTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -292,10 +292,19 @@ const githubRateLimitController = new GithubRateLimitController(
 // under) slik at NØYAKTIG SAMME `TelegramTransport`-instans også kan
 // injiseres i `WatchdogEmergencyAlertSink` - samme mottaker-konfigurasjon
 // (`chatId`), ingen parallell Telegram-klient.
-const telegramTransport = new TelegramTransport();
+// D-247: `chatId` sendes nå som en resolver mot `toolSecretProvider`
+// (Infisical-primær, SAMME instans/kjede som `JARVIS_TELEGRAM_TOKEN` selv
+// allerede leses via) - slås opp PÅ NYTT ved hvert `notify`-kall, i stedet
+// for å fryses fra `process.env` ved oppstart (samme bug-klasse/fiks som
+// D-246 sine fem finans-connectorer).
+const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID"));
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
+  // D-248: identisk wiring-mønster som apps/api/src/main.ts - VercelTransport
+  // fantes aldri, `transport("vercel")` falt derfor alltid tilbake til
+  // UnconfiguredHttpTransport("vercel") (ubetinget vercel_not_configured).
+  vercel: new VercelTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.

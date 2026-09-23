@@ -99,7 +99,13 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "drive", action: "list_files", parameters: () => ({}) }
   },
   {
-    id: "telegram", display_name: "Telegram", category: "tool_gateway", credential_refs: ["JARVIS_TELEGRAM_TOKEN"],
+    id: "telegram", display_name: "Telegram", category: "tool_gateway",
+    // D-247: `JARVIS_TELEGRAM_CHAT_ID` lagt til - `get_bot_info` (live_test
+    // under) trenger den ikke, men selve `telegram.notify` (ekte utsendelse,
+    // inkl. Daily Brief og watchdog-nødvarsel) gjør, og feltet var usynlig
+    // for eieren i dashbordet uten denne oppføringen - samme bug-klasse som
+    // D-245/D-246.
+    credential_refs: ["JARVIS_TELEGRAM_TOKEN", "JARVIS_TELEGRAM_CHAT_ID"],
     // `telegram.notify` er en EKTE meldingsutsendelse (klasse B) - aldri
     // trygg som test. `get_bot_info` (Telegram Bot API sin `getMe`, lagt til
     // i live-transports.ts AKKURAT for dette formålet) krever kun boten sin

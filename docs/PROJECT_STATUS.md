@@ -1,7 +1,24 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-246: STØRRE
-STRUKTURELL BUG FUNNET OG FIKSET, LIVE-DEBUGGET SAMMEN MED TOBIAS** - Neonomics feilet FORTSATT
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-247/D-248:
+"ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK GJENNOMGANG AV DE 6 GJENVÆRENDE CONNECTORENE** (Tobias
+direkte i chat: "men alle skal fungere absolutt alle begynn på det") - github/google_calendar/gmail/
+google_drive VERIFISERT TRYGGE (token kommer via standard Infisical-aware `ToolGateway.execute()`,
+ingen bypass-lukking). **D-247 (Telegram):** `TelegramTransport.chatId` var frosset fra
+`process.env` ved konstruksjon - SAMME Infisical-bypass-bug-klasse som D-246, pluss manglende
+`JARVIS_TELEGRAM_CHAT_ID` i `credential_refs` (D-245-klasse). Fikset: konstruktøren tar nå en
+resolver-funksjon mot `readSecretProvider`/`toolSecretProvider`, slått opp PÅ NYTT ved hvert
+`notify`-kall. **D-248 (Vercel), STØRRE FUNN:** `VercelTransport` fantes ALDRI noe sted i
+kodebasen - `transport("vercel")` falt ALLTID tilbake til `UnconfiguredHttpTransport`
+(`vercel_not_configured`), uansett credential. Den tidligere antatte "Vercel fungerer nå etter
+Docker-rebuild"-konklusjonen (forrige milepæl) var FEIL/prematur - rebuilden løste kun en separat
+stale-image-årsak, aldri denne strukturelle mangelen. Bygget en ekte `VercelTransport` mot Vercel
+sin offisielle REST API v6 (`GET /v6/deployments`), wiret inn i begge prosesser. 88 relevante
+DB-uavhengige tester grønne (inkl. 5 nye for Vercel), typecheck/lint rene. Se D-247/D-248 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-246 - STØRRE STRUKTURELL BUG FUNNET OG FIKSET,
+LIVE-DEBUGGET SAMMEN MED TOBIAS** - Neonomics feilet FORTSATT
 etter D-245 (alle tre felt ✓ i dashbordet), Tobias: "når vi må kjøre det hver gang fungerer jo ikke
 dash". Root cause: `stripeCredentialsProvider`/`vippsCredentialsProvider`/
 `neonomicsCredentialsProvider`/`wallesterCredentialsProvider`/`fikenCredentialsProvider` sine

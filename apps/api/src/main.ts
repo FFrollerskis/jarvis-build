@@ -40,7 +40,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   meshToolDefinitions, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, ToolGateway, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler
 } from "@jarvis/tool-gateway";
 import {
@@ -564,7 +564,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   ).unref();
   for (const tool of firstWaveTools({
     email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
-    github: new GithubTransport(githubRateLimitController), telegram: new TelegramTransport(),
+    github: new GithubTransport(githubRateLimitController),
+    // D-247: `chatId` som en resolver mot `readSecretProvider` (samme
+    // Infisical-primær kjede `JARVIS_TELEGRAM_TOKEN` allerede leses via) -
+    // slås opp på nytt ved hvert `notify`-kall i stedet for å fryses fra
+    // `process.env` ved oppstart (samme bug-klasse/fiks som D-246).
+    telegram: new TelegramTransport(() => readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")),
+    // D-248: `VercelTransport` fantes ALDRI - `transport("vercel")` falt
+    // derfor alltid tilbake til `UnconfiguredHttpTransport("vercel")`
+    // (ubetinget `vercel_not_configured`), uansett credential-tilstand.
+    vercel: new VercelTransport(),
     // D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon -
     // `marketingMemoryBriefSource(growthService)` injiseres her (app-laget,
     // som allerede har BEGGE tjenestene) i stedet for at `@jarvis/business`
