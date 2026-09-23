@@ -1,11 +1,11 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`, PR #156 - etter merge av
-oppdatert `main`, som nå inkluderer PR #154/D-242 (`ConnectorHealthSweep`/Fiken-Stripe-Vipps-`live_test`,
-merget `27e523d` under D-192). Ingen kodekonflikt for selve D-244-revisjonen - kun docs
-(`DECISIONS_AND_ASSUMPTIONS.md`/denne filen). D-244 sin full-prosjekt-revisjon er uendret fra
-forrige merknad under - se D-244 i DECISIONS_AND_ASSUMPTIONS.md. **Live
-connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+oppdatert `main`, som nå inkluderer BÅDE PR #154/D-242 (`27e523d`) OG PR #155/D-243 (`48e95f0`),
+begge merget under D-192. Ingen kodekonflikt for selve D-244-revisjonen - kun docs
+(`DECISIONS_AND_ASSUMPTIONS.md`/denne filen, D-24x kronologisk rekkefølge: 240-248). D-244 sin
+full-prosjekt-revisjon er uendret fra forrige merknad under - se D-244 i DECISIONS_AND_ASSUMPTIONS.md.
+**Live connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
 reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
