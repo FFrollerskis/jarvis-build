@@ -1,6 +1,32 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d240-db-bootstrap`). **D-240: EKTE INFRA-BUG FUNNET
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`). **D-244: FULL-PROSJEKT-
+REVISJON FULLFØRT** - Tobias, direkte i chat: "gå igjennom absolutt hele prosjektet ... hver eneste
+fil og mappe". 13 uavhengige kun-lesende agenter, hver fil i repoet lest (1000+ filer). Full rapport
+per slice + prioritert synteselag i `docs/audit/2026-09-23-full-project-audit/` (`SUMMARY.md` +
+13 detaljfiler). Tre P0-funn (ubevist identitet på 15 infra-/muterende HTTP-ruter i `server.ts`;
+manglende try/catch på `ToolGateway.execute()` sin suksess-sti audit-skriving kan tillate dobbel-
+utførelse ved DB-feil rett etter en ekte mutasjon; CLAUDE.md/CANONICAL_SPEC.md sin "Fase 0"-header
+motsier sin egen D-192-merge-protokoll), ~20 P1-funn, 4 tverrgående tema. Revisjonen selv endret
+ingen kode (kun D-243, allerede fikset samme økt før syntesen). **`SUMMARY.md` er en
+navigasjonshjelp, IKKE en byggerekkefølge** - hvilke funn som prioriteres er Tobias sin avgjørelse.
+Se D-244 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-243 (PR #155)** - `.env`-parseren delt av Fiken-/Google-
+Drive-/Google-Gmail-reauth-scriptene droppet stille CLIENT_ID/CLIENT_SECRET på en Windows-`.env` med
+CRLF-linjeskift, funnet LIVE av Tobias mens han satte opp Fiken. Fikset (regex tolererer nå
+trailing `\r`, hele filen LF-normaliseres ved skriving), 3 nye regresjonstester. Tobias sin egen
+manuelle LF-normalisering fikk Fiken-oppsettet til å fullføre live FØR kodefiksen landet -
+`fiken_live_companies_ok=true`, refresh-token+company-slug skrevet til `.env`. Se D-243 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret, IKKE MERGET, blokkert på GitHub Actions-betaling): D-242 (PR #154)** -
+daglig connector-helsesjekk for alle 11 live-testbare connectorer (Vercel-transport wired, Fiken/
+Stripe/Vipps fikk hver en ny klasse A `live_test`-probe). CI har ALDRI kjørt på denne PR-en (fantom
+`BuildFailed`-workflow, `startup_failure` på hver kjøring inkl. `main`) - venter på at Tobias ordner
+GitHub Actions-betalingen på `tsworkflow`-kontoen; merges under D-192 så snart CI er grønt.
+
+**Forrige milepæl (uendret, MERGET): D-240 (PR #152, `19e8538`) - EKTE INFRA-BUG FUNNET
 OG FIKSET** - Tobias fikk `403 tool_denied: tool_failed:fetch failed` FØRSTE gang han faktisk prøvde
 D-213s "lim inn nøkkel"-skriving live (rett etter D-239-merge). Sporet PRESIST via
 `docker compose logs infisical` til `DatabaseError: database "infisical" does not exist` -
