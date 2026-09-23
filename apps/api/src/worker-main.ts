@@ -301,9 +301,10 @@ const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JA
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
-  // D-248: identisk wiring-mønster som apps/api/src/main.ts - VercelTransport
-  // fantes aldri, `transport("vercel")` falt derfor alltid tilbake til
-  // UnconfiguredHttpTransport("vercel") (ubetinget vercel_not_configured).
+  // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
+  // manglet en ekte transport her også - `VercelTransport` fantes aldri,
+  // `transport("vercel")` falt derfor alltid tilbake til
+  // `UnconfiguredHttpTransport("vercel")` (ubetinget `vercel_not_configured`).
   vercel: new VercelTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar

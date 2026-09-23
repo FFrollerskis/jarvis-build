@@ -1,7 +1,9 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`, PR #156 - etter merge av
-oppdatert `main`, ingen kodekonflikt, kun docs). D-244 sin full-prosjekt-revisjon er uendret fra
+oppdatert `main`, som nå inkluderer PR #154/D-242 (`ConnectorHealthSweep`/Fiken-Stripe-Vipps-`live_test`,
+merget `27e523d` under D-192). Ingen kodekonflikt for selve D-244-revisjonen - kun docs
+(`DECISIONS_AND_ASSUMPTIONS.md`/denne filen). D-244 sin full-prosjekt-revisjon er uendret fra
 forrige merknad under - se D-244 i DECISIONS_AND_ASSUMPTIONS.md. **Live
 connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
@@ -435,9 +437,9 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
-**Ingen kjent "byggbar uten Tobias"-kode gjenstår akkurat nå.** Alle syv PR-er fra denne rekken
-(#141-#147) er merget. Gjenstående punkter er enten Tobias-handlinger, en Tobias-avklaring, eller
-målingsbaserte spørsmål som venter på reell bruksdata:
+**D-242 (denne PR-en) venter på CI/merge - når den er merget er det, per samme repo-gjennomgang som
+fant D-242, IGJEN ingen kjent "byggbar uten Tobias"-kode.** Gjenstående punkter under er ellers enten
+Tobias-handlinger, en Tobias-avklaring, eller målingsbaserte spørsmål som venter på reell bruksdata:
 
 1. **D-35 Infisical (D-235, PR #147 MERGET) - Tobias kjører scriptet.** `node --env-file=.env
    --experimental-transform-types modules/owner-controls/scripts/infisical-live-host-run.ts` mot sin
@@ -463,13 +465,19 @@ målingsbaserte spørsmål som venter på reell bruksdata:
 6. **OpenAI-taleprosessoren (Q-32 punkt 1, D-226 MERGET) - valgfritt neste skritt.** Verifisere
    ende-til-ende at en ekte OpenAI STT/TTS-samtale faktisk fungerer i praksis (host-akseptanse, som
    D-223 gjorde for lokal tale) - ikke eksplisitt bedt om av Tobias ennå.
-7. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - alle krever Tobias-kontoer/maskinvare/tilgang:**
+7. **Anthropic/OpenAI/Gemini connector-helsesjekk (D-242 - eksplisitt avgrenset, ikke bygget) -
+   valgfritt neste skritt hvis Tobias ber om det.** De tre modell-leverandørene forblir
+   `presence_only` i dashbordet - de går via `ModelGateway`, ikke `ToolGateway` (intet
+   `tool_id`/`action` finnes for dem), så `ConnectorHealthSweep`/`live_test`-mønsteret dekker dem
+   IKKE. En egen probe (lett, autentisert kall mot hver leverandørs modell-liste-endepunkt) er mulig,
+   men krever egen design - ikke gjettet frem i D-242.
+8. **`EXTERNAL_RUNTIME_EVIDENCE_BLOCKERS` (D-170) - alle krever Tobias-kontoer/maskinvare/tilgang:**
    iPhone/Watch/Home/Personal/Health LIVE-bevis, Growth-stack live-evidens, off-site backup/monitoring,
    Apple Developer-konto/HA-instans, Google Ads-konto, Gemini-nøkler.
-8. **Måles/avgjøres senere, ikke diskuteres nå:** Q-03 (STT/TTS-leverandør), Q-06 (WSL2 vs VM),
+9. **Måles/avgjøres senere, ikke diskuteres nå:** Q-03 (STT/TTS-leverandør), Q-06 (WSL2 vs VM),
    Q-09 (kø-motstack), Q-10 (grafdatabase-behov), Q-11 (lokal GPU-økonomi), Q-12
    (satellitt-maskinvare), Q-19 (tale-latens-herding).
-9. Merk: Tobias sin `rk_live_...` Stripe-nøkkel og en fersk `sk_test_...`-nøkkel ble begge limt inn
+10. Merk: Tobias sin `rk_live_...` Stripe-nøkkel og en fersk `sk_test_...`-nøkkel ble begge limt inn
    direkte i chat (D-224 og en senere test-nøkkel) - han er selv klar over dette og har bekreftet at
    han roterer den live-nøkkelen senere; ingen handling påkrevd fra Claude nå utover å ikke glemme å
    nevne rotering om anledningen byr seg.

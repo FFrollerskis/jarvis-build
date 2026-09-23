@@ -26,10 +26,10 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
     }
   });
 
-  it("live_test er satt for 8 av 14 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) - resten bevisst avgrenset (fiken/stripe/vipps mangler en trygg side-effektfri lesing, anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
+  it("live_test er satt for 11 av 14 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
     const withLiveTest = CONNECTOR_REGISTRY.filter((c) => c.live_test).map((c) => c.id).sort();
     expect(withLiveTest).toEqual(
-      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester"].sort()
+      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps"].sort()
     );
   });
 
@@ -149,14 +149,14 @@ describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve ve
     }
   });
 
-  it("test_method er 'live' for de 8 utvidede connectorene (D-211/D-213), 'presence_only' for resten", async () => {
+  it("test_method er 'live' for de 11 utvidede connectorene (D-211/D-213/D-242), 'presence_only' for resten", async () => {
     const gateway = fakeGateway(new Set());
     const statuses = await listConnectorStatus(gateway);
     const byId = new Map(statuses.map((s) => [s.id, s]));
-    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester"]) {
+    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps"]) {
       expect(byId.get(id)?.test_method).toBe("live");
     }
-    for (const id of ["fiken", "stripe", "vipps", "anthropic", "openai", "gemini"]) {
+    for (const id of ["anthropic", "openai", "gemini"]) {
       expect(byId.get(id)?.test_method).toBe("presence_only");
     }
   });

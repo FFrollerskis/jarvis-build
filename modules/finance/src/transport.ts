@@ -128,6 +128,15 @@ export class FinanceTransport implements ToolTransport {
         const rows = await this.service.listVendorBindings(tenantId, memorySpace, requireString(parameters, "vendor_id"));
         return { data: rows as unknown as JsonValue };
       }
+      // D-242: connector-helsesjekk-probe for `fiken` - ren providerside-
+      // lesing (`GET /companies`), INGEN memory-skriving, derfor INGEN
+      // `payment_intent_id`/`memory_space`-relevans (samme unntak som
+      // `enable_kill_switch`/`disable_kill_switch` allerede har for
+      // tenant-scopede, ikke-payment-intent-relaterte handlinger).
+      case "list_companies": {
+        const rows = await this.service.listFikenCompanies(tenantId, this.credentialsProvider);
+        return { data: rows as unknown as JsonValue };
+      }
       default:
         throw new Error(`finance_action_not_implemented:${action}`);
     }

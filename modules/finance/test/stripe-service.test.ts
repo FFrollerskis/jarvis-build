@@ -25,7 +25,7 @@ import {
   type StripeCredentialsProvider,
   type StripePaymentWriter
 } from "../src/service.ts";
-import type { StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
+import type { StripeBalanceObject, StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
 
 /**
  * D-109 (UA-6 Slice 3): ekte Postgres/RLS-integrasjonsbevis for Stripe-
@@ -62,6 +62,9 @@ class ScriptedStripeWriter implements StripePaymentWriter {
   onGetRefund: (id: string) => Promise<StripeRefundObject> = async (id) => ({
     id, object: "refund", amount: 1000, currency: "nok", status: "succeeded", payment_intent: "pi_x", reason: null
   });
+  onGetBalance: () => Promise<StripeBalanceObject> = async () => ({
+    object: "balance", available: [{ amount: 0, currency: "nok" }], pending: [{ amount: 0, currency: "nok" }]
+  });
 
   async createPaymentIntent(input: { amountOre: number; currency: string; metadata: Record<string, string>; idempotencyKey: string }): Promise<StripePaymentIntentObject> {
     this.createPaymentIntentCalls.push(input);
@@ -76,6 +79,9 @@ class ScriptedStripeWriter implements StripePaymentWriter {
   }
   async getRefund(id: string): Promise<StripeRefundObject> {
     return this.onGetRefund(id);
+  }
+  async getBalance(): Promise<StripeBalanceObject> {
+    return this.onGetBalance();
   }
 }
 

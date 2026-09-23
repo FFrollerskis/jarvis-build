@@ -1744,6 +1744,20 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 60, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance")
     },
+    {
+      // D-242: connector-helsesjekk-probe for `fiken` (`connector-registry.ts`
+      // sin nye `live_test`) - Fiken sin egen dokumenterte "hent
+      // companySlug"-inngang (`FikenTransport.listCompanies()`), INGEN
+      // mutasjon. SAMME `credential_ref` som `submit_payment_intent` (den
+      // ENESTE andre `finance.*`-handlingen som faktisk rører Fiken), IKKE
+      // `JARVIS_BUSINESS_INTERNAL_TOKEN` (som resten av det lokale-kun
+      // `finance.*`-namespacet bruker).
+      tool_id: "finance", action: "list_companies", description: "List Fiken-firmaer/-slugs tilgjengelig for det konfigurerte refresh-tokenet (helsesjekk/reachability-probe, ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_FIKEN_REFRESH_TOKEN",
+      output_trust: "untrusted", transport: transport("finance")
+    },
     // UA-6 Finance & Spend Integrity Gateway - ANDRE slice (Slice 2): eget
     // `finance_spend.*`-namespace, SEPARAT fra `finance.*` over - ALDRI en
     // ekstern leverandør rørt (kun interne kilder Jarvis allerede eier, se
@@ -1953,6 +1967,16 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_stripe")
     },
+    {
+      // D-242: connector-helsesjekk-probe for `stripe` - `GET /v1/balance`
+      // (`StripeTransport.getBalance()`), INGEN mutasjon. SAMME
+      // `credential_ref` som `refresh_payment_state` (ekte Stripe-kall).
+      tool_id: "finance_stripe", action: "get_balance", description: "Hent Stripe-kontosaldo (helsesjekk/reachability-probe, ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_STRIPE_SECRET_KEY",
+      output_trust: "untrusted", transport: transport("finance_stripe")
+    },
     // D-110 (UA-6 Slice 4): `finance_vipps.*` - de handlingene som er GENUINT
     // Vipps-spesifikke (capture/cancel/refusjon/oppfrisking/hendelses-
     // inspeksjon). Betalingsopprettelse/-innsending forblir i det
@@ -2052,6 +2076,18 @@ export function firstWaveTools(
       capability_class: "B", scopes: ["finance.write"], reversible: false, rollback_procedure: "ingen (rekjøring er selv-korrigerende - se runVippsProviderAnomalyDetection-JSDoc)",
       idempotent_external: true, timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_BUSINESS_INTERNAL_TOKEN",
       output_trust: "internal", transport: transport("finance_vipps")
+    },
+    {
+      // D-242: connector-helsesjekk-probe for `vipps` - `POST
+      // /accesstoken/get` (`VippsTransport.checkCredentials()`), INGEN
+      // mutasjon (Vipps har INGEN parameterløs "whoami"-lesing i ePayment-
+      // API-et, se `VippsTransport.checkCredentials()` sin doc-kommentar).
+      // SAMME `credential_ref` som `refresh_payment_state` (ekte Vipps-kall).
+      tool_id: "finance_vipps", action: "check_credentials", description: "Verifiser Vipps-credentials via access-token-endepunktet (helsesjekk/reachability-probe, ingen mutasjon)",
+      input_schema: record({ tenant_id: z.string() }),
+      capability_class: "A", scopes: ["finance.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_VIPPS_CLIENT_SECRET",
+      output_trust: "untrusted", transport: transport("finance_vipps")
     },
     // D-111 (UA-6 Slice 5): `finance_neonomics.*` - open-banking-handlingene
     // (samtykke/kontoer/saldo/transaksjoner/avstemming + PIS-status/SCA).

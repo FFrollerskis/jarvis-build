@@ -107,7 +107,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 |---|---|---|
 | GitHub | `ALLEREDE_BYGGET` | `connector-registry.ts` id `github`; D-94, 23-handlings D-41-matrise (10×A/9×B/2×C/2×D) |
 | GitHub Actions | `ALLEREDE_DEKKET` | Del av D-94-matrisen: `list_workflow_runs`/`get_workflow_run`/`list_workflow_jobs` (A), `rerun_workflow_run`/`cancel_workflow_run` (B), `dispatch_workflow` (C) - ingen egen connector nødvendig |
-| Vercel | `ALLEREDE_BYGGET` (delvis) | `connector-registry.ts` id `vercel`, `live_test: read_deployments` (D-213). **Merk (D-41-gap, eksplisitt markert, ikke stille utelatt):** kun `read_deployments` er registrert i `integrations.ts` i dag - full D-41-kapabilitet (deploy/redeploy/miljøvariabel-styring) er `NY_BACKLOG` |
+| Vercel | `ALLEREDE_BYGGET` (delvis) | `connector-registry.ts` id `vercel`, `live_test: read_deployments` (D-213), NÅ med en ekte `VercelTransport` faktisk koblet inn i `main.ts`/`worker-main.ts` (D-242 - `live_test` eksisterte siden D-213 men falt ALLTID gjennom til en uconfigured stub før dette, samme "kode eksisterer != koblet inn"-funn som D-211/D-212). **Merk (D-41-gap, eksplisitt markert, ikke stille utelatt):** kun `read_deployments` er registrert i `integrations.ts` i dag - full D-41-kapabilitet (deploy/redeploy/miljøvariabel-styring) er fortsatt `NY_BACKLOG` |
 | Google Cloud | `NY_BACKLOG` | D-105-audit (2026-08-22) bekreftet eksplisitt «GCP/Cloudflare fortsatt fullstendig fraværende» - ingen kode siden |
 | Docker | `ALLEREDE_BYGGET` | D-105 `docker`-transport (`modules/tool-gateway/src/docker-transport.ts`): `list_containers`/`inspect_container`/`get_logs` (A), `stop_container`/`start_container` (produksjonsmutasjon reachable), `redeploy_container` (D, eksplisitt `DEFERRED` for produksjon, sentinel-only i akseptanse jf. D-41-korreksjon). Lokal infra, ikke i `connector-registry.ts` sine 14 (ingen ekstern credential-helsesjekk) |
 
@@ -168,9 +168,9 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Fiken | `ALLEREDE_BYGGET` | `connector-registry.ts` id `fiken`; D-107, UA-6 første slice. `FIKEN_LIVE_GATE=PENDING_CREDENTIALS` |
+| Fiken | `ALLEREDE_BYGGET` | `connector-registry.ts` id `fiken`; D-107, UA-6 første slice. `FIKEN_LIVE_GATE=PENDING_CREDENTIALS`. `live_test: list_companies` lagt til D-242 (gjenbruker `FikenTransport.listCompanies()`, `GET /companies` - tidligere `presence_only`) |
 | Folio | `NY_BACKLOG` | Ingen kode funnet (kun tidligere vag plassholder i denne paragrafen) |
-| Stripe | `ALLEREDE_BYGGET` | `connector-registry.ts` id `stripe`; D-109. `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (D-228, faktisk host-kjørt og grønt, venter uavhengig arkitektgjennomgang) |
+| Stripe | `ALLEREDE_BYGGET` | `connector-registry.ts` id `stripe`; D-109. `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (D-228, faktisk host-kjørt og grønt, venter uavhengig arkitektgjennomgang). `live_test: get_balance` lagt til D-242 (`GET /v1/balance` - tidligere `presence_only`) |
 | HubSpot | `NY_BACKLOG – D-64-PORT PÅKREVD` | Se D-64-notat under - CRM/tickets er `JARVIS_CANONICAL` som utgangspunkt (Zendesk-presedensen), ALDRI en automatisk leverandørvalg |
 | Pipedrive | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
 | Google Ads | `ALLEREDE_BYGGET` | UA-4, D-83/D-84 (merget PR #23). COMPLETE for lesing/rapportering; mutate utsatt bak UA-6. `GOOGLE_ADS_LIVE_VERIFICATION=DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86) |

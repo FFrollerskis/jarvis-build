@@ -152,6 +152,8 @@ export interface VippsPaymentWriter {
   capturePayment(input: VippsModificationInput): Promise<VippsPaymentObject>;
   cancelPayment(reference: string, idempotencyKey: string): Promise<VippsPaymentObject>;
   refundPayment(input: VippsModificationInput): Promise<VippsPaymentObject>;
+  /** D-242: connector-helsesjekk-probe, se `VippsTransport.checkCredentials()` sin doc-kommentar. */
+  checkCredentials(): Promise<void>;
 }
 
 /**
@@ -195,6 +197,20 @@ export class VippsTransport implements VippsPaymentWriter {
     const expiresInMs = Number(body.expires_in) * 1000;
     this.cachedToken = { token: body.access_token, expiresAtMs: now + (Number.isFinite(expiresInMs) && expiresInMs > 0 ? expiresInMs : 3_600_000) };
     return body.access_token;
+  }
+
+  /**
+   * D-242: billig helsesjekk-/reachability-probe (SAMME rolle som
+   * `FikenTransport.listCompanies()`/`StripeTransport.getBalance()`) - Vipps
+   * har INGEN parameterløs "whoami"-lesing i ePayment-API-et (i motsetning
+   * til Fiken/Stripe), men `POST /accesstoken/get` (SAMME kall `request()`
+   * allerede gjør FØR ethvert ekte API-kall) er selv INGEN mutasjon og
+   * feiler umiddelbart med `vipps_access_token_failed_401`/`_403` på en
+   * ugyldig `client_id`/`client_secret`/`Ocp-Apim-Subscription-Key` - egnet
+   * som `live_test` uten å måtte opprette en reell betaling.
+   */
+  async checkCredentials(): Promise<void> {
+    await this.getAccessToken();
   }
 
   private async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
