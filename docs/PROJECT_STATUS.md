@@ -1,7 +1,20 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`). **D-245: EKTE BUG FUNNET
-OG FIKSET, LIVE i dashbordet** - Tobias, rett etter at Vercel ble bekreftet fungerende (D-242, lokal
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-246: STØRRE
+STRUKTURELL BUG FUNNET OG FIKSET, LIVE-DEBUGGET SAMMEN MED TOBIAS** - Neonomics feilet FORTSATT
+etter D-245 (alle tre felt ✓ i dashbordet), Tobias: "når vi må kjøre det hver gang fungerer jo ikke
+dash". Root cause: `stripeCredentialsProvider`/`vippsCredentialsProvider`/
+`neonomicsCredentialsProvider`/`wallesterCredentialsProvider`/`fikenCredentialsProvider` sine
+`getCredentials()`-lukkinger i `main.ts`/`worker-main.ts` leste rå `process.env[...]`, HELT UTENOM
+den Infisical-primære `readSecretProvider`/`toolSecretProvider`-kjeden dashbordets "lim inn
+ny verdi" (D-213) faktisk skriver til - en verdi lagret KUN i Infisical var derfor strukturelt
+usynlig for selve finans-tjenestene, uansett hva dashbordets ✓ viste. Fikset i alle fem, begge
+prosesser. **Samtidig funnet, samme runde:** `credential_refs` manglet `JARVIS_VIPPS_MSN` (vipps) og
+`JARVIS_WALLESTER_API_BASE_URL`/`_ACCOUNT_ID` (wallester) - samme bug-klasse som D-245. 50 tester
+re-kjørt grønt, typecheck/lint rene. Se D-246 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-245 (PR #157) - Neonomics manglet DEVICE_ID i
+`credential_refs`** - Tobias, rett etter at Vercel ble bekreftet fungerende (D-242, lokal
 branch-kjøring): "feilet: tool_failed:neonomics_credentials_unavailable:tenant-personal" på Neonomics
 sin "Test tilkobling", til tross for at både CLIENT_ID og CLIENT_SECRET viste ✓ som lagret.
 Root cause: `neonomicsCredentialsProvider.getCredentials()` (`main.ts`) har siden D-111 krevd et

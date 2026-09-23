@@ -347,9 +347,26 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // mønster som `fikenCredentialsProvider` under - INGEN tenant-parametrisert
   // Stripe-Connect-oppslag denne sliceen (kun én Tobias-eid Stripe-konto er i
   // scope, se stripe-transport.ts/types.ts sin D-109-kommentar).
+  // D-246 (2026-09-23, funnet LIVE av Tobias: "Test tilkobling" feilet på
+  // Neonomics med `credentials_unavailable` selv om CLIENT_ID/SECRET/
+  // DEVICE_ID ALLE viste ✓ som lagret i dashbordet). Root cause: de fire
+  // finans-`getCredentials()`-lukkingene under leste FØR direkte fra
+  // `process.env[...]`, HELT UTENOM `readSecretProvider` (Infisical-primær,
+  // se D-211 over) - eierens "lim inn ny verdi"-dashbord-flyt (D-213)
+  // skriver KUN til Infisical (`ToolGateway.setSecret()`), aldri til den
+  // kjørende prosessens `process.env`. `hasSecret()`/dashbordets ✓-visning
+  // SPØR `readSecretProvider` (finner den i Infisical - viser derfor
+  // korrekt ✓), mens disse fire lukkingene ALDRI så den samme verdien -
+  // strukturelt umulig å få "Test tilkobling" til å lykkes via dashbordet
+  // alene, uansett hva som ble limt inn. Fiken var IKKE rammet (dens
+  // faktiske credential, `JARVIS_FIKEN_REFRESH_TOKEN`, kommer utelukkende
+  // fra `fiken-reauth.ts`, som skriver DIREKTE til `.env`-filen, aldri via
+  // dashbordet/Infisical). Fiks: alle fire leser nå via `readSecretProvider`
+  // (SAMME kjede `hasSecret()` allerede bruker) - `.env`-fallback UENDRET
+  // for de som fortsatt foretrekker den ruten.
   const stripeCredentialsProvider: StripeCredentialsProvider = {
     async getCredentials(): Promise<StripeCredentials | null> {
-      const secretKey = process.env["JARVIS_STRIPE_SECRET_KEY"];
+      const secretKey = await readSecretProvider.get("JARVIS_STRIPE_SECRET_KEY");
       if (!secretKey) return null;
       return { secretKey };
     }
@@ -361,10 +378,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // denne sliceen (kun én Tobias-eid Vipps-selgerkonto er i scope).
   const vippsCredentialsProvider: VippsCredentialsProvider = {
     async getCredentials(): Promise<VippsCredentials | null> {
-      const clientId = process.env["JARVIS_VIPPS_CLIENT_ID"];
-      const clientSecret = process.env["JARVIS_VIPPS_CLIENT_SECRET"];
-      const subscriptionKey = process.env["JARVIS_VIPPS_SUBSCRIPTION_KEY"];
-      const merchantSerialNumber = process.env["JARVIS_VIPPS_MSN"];
+      const clientId = await readSecretProvider.get("JARVIS_VIPPS_CLIENT_ID");
+      const clientSecret = await readSecretProvider.get("JARVIS_VIPPS_CLIENT_SECRET");
+      const subscriptionKey = await readSecretProvider.get("JARVIS_VIPPS_SUBSCRIPTION_KEY");
+      const merchantSerialNumber = await readSecretProvider.get("JARVIS_VIPPS_MSN");
       if (!clientId || !clientSecret || !subscriptionKey || !merchantSerialNumber) return null;
       return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
     }
@@ -375,9 +392,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // mønster - ett Neonomics-kundeforhold, en Jarvis-stabil x-device-id.
   const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
     async getCredentials(): Promise<NeonomicsCredentials | null> {
-      const clientId = process.env["JARVIS_NEONOMICS_CLIENT_ID"];
-      const clientSecret = process.env["JARVIS_NEONOMICS_CLIENT_SECRET"];
-      const deviceId = process.env["JARVIS_NEONOMICS_DEVICE_ID"];
+      const clientId = await readSecretProvider.get("JARVIS_NEONOMICS_CLIENT_ID");
+      const clientSecret = await readSecretProvider.get("JARVIS_NEONOMICS_CLIENT_SECRET");
+      const deviceId = await readSecretProvider.get("JARVIS_NEONOMICS_DEVICE_ID");
       if (!clientId || !clientSecret || !deviceId) return null;
       return {
         clientId, clientSecret, deviceId,
@@ -398,10 +415,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `sign` forblir injiserbar/fail-closed fremfor gjettet.
   const wallesterCredentialsProvider: WallesterCredentialsProvider = {
     async getCredentials(): Promise<WallesterCredentials | null> {
-      const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
-      const apiKey = process.env["JARVIS_WALLESTER_API_KEY"];
-      const accountId = process.env["JARVIS_WALLESTER_ACCOUNT_ID"];
-      const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
+      const baseUrl = await readSecretProvider.get("JARVIS_WALLESTER_API_BASE_URL");
+      const apiKey = await readSecretProvider.get("JARVIS_WALLESTER_API_KEY");
+      const accountId = await readSecretProvider.get("JARVIS_WALLESTER_ACCOUNT_ID");
+      const privateKeyPem = await readSecretProvider.get("JARVIS_WALLESTER_PRIVATE_KEY_PEM");
       if (!baseUrl || !apiKey || !accountId || !privateKeyPem) return null;
       return {
         baseUrl, apiKey, accountId,
@@ -431,10 +448,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // finance_recurring_charge_duplicate/finance_spend_correction_conflict-
   // reglene) uendret.
   const spendService = new SpendService(pool);
+  // D-246: samme fiks som stripe/vipps/neonomics/wallester over - leser nå
+  // via readSecretProvider i stedet for rå process.env.
   const fikenCredentialsProvider: FikenCredentialsProvider = {
     async getCredentials(): Promise<FikenCredentials | null> {
-      const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
-      const companySlug = process.env["JARVIS_FIKEN_COMPANY_SLUG"];
+      const refreshToken = await readSecretProvider.get("JARVIS_FIKEN_REFRESH_TOKEN");
+      const companySlug = await readSecretProvider.get("JARVIS_FIKEN_COMPANY_SLUG");
       if (!refreshToken || !companySlug) return null;
       return { refreshToken, companySlug };
     }
