@@ -1,30 +1,77 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`). **D-244: FULL-PROSJEKT-
-REVISJON FULLFØRT** - Tobias, direkte i chat: "gå igjennom absolutt hele prosjektet ... hver eneste
-fil og mappe". 13 uavhengige kun-lesende agenter, hver fil i repoet lest (1000+ filer). Full rapport
-per slice + prioritert synteselag i `docs/audit/2026-09-23-full-project-audit/` (`SUMMARY.md` +
-13 detaljfiler). Tre P0-funn (ubevist identitet på 15 infra-/muterende HTTP-ruter i `server.ts`;
-manglende try/catch på `ToolGateway.execute()` sin suksess-sti audit-skriving kan tillate dobbel-
-utførelse ved DB-feil rett etter en ekte mutasjon; CLAUDE.md/CANONICAL_SPEC.md sin "Fase 0"-header
-motsier sin egen D-192-merge-protokoll), ~20 P1-funn, 4 tverrgående tema. Revisjonen selv endret
-ingen kode (kun D-243, allerede fikset samme økt før syntesen). **`SUMMARY.md` er en
-navigasjonshjelp, IKKE en byggerekkefølge** - hvilke funn som prioriteres er Tobias sin avgjørelse.
-Se D-244 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`, PR #156 - etter merge av
+oppdatert `main`, ingen kodekonflikt, kun docs). D-244 sin full-prosjekt-revisjon er uendret fra
+forrige merknad under - se D-244 i DECISIONS_AND_ASSUMPTIONS.md. **Live
+connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
+IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
+reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
+`google-drive-reauth.ts` - eget scope-sett `gmail.readonly`/`gmail.send`, samme persisterte
+Desktop-OAuth-klient) som ble host-verifisert i D-47 (2026-08-17, `run_id 0f43f39d`,
+`p1b_gmail_list_messages_live=PASS`) - `JARVIS_EMAIL_TOKEN` fra DEN kjøringen er fortsatt gyldig.
+En tidligere feilaktig antakelse denne økten (fra en utdatert `.env.example`-kommentar alene, uten å
+sjekke D-45/D-46/D-47/det eksisterende scriptet) foreslo å slå sammen Drive- og Gmail-reauth til
+ett script - korrigert FØR noe ble bygget: det ville vært feil retning, stikk i strid med et bevisst
+designvalg (egen fil, egen scope, rører aldri Drive/Calendar sin credential). Telegram (D-247) ikke
+eksplisitt re-testet live ennå av Tobias denne runden. **GitHub Actions-betalingsblokkeringen ser ut
+til å være løst** (rerun av det gamle, feilede run #999 på `main` fullførte i `in_progress`/reelle
+steg, ikke lenger umiddelbar `startup_failure`) - men PR #154-#157 sine egne branch-commits har
+FORTSATT aldri hatt en eneste sjekk-kjøring (`total_count: 0`), siden GitHub kun trigger CI på et nytt
+push/pull_request-event, ikke retroaktivt. Denne commiten er delvis en test av om #157 nå faktisk får
+en ekte CI-kjøring.
 
-**Forrige milepæl (uendret, IKKE MERGET): D-243 (PR #155)** - `.env`-parseren delt av Fiken-/Google-
-Drive-/Google-Gmail-reauth-scriptene droppet stille CLIENT_ID/CLIENT_SECRET på en Windows-`.env` med
-CRLF-linjeskift, funnet LIVE av Tobias mens han satte opp Fiken. Fikset (regex tolererer nå
-trailing `\r`, hele filen LF-normaliseres ved skriving), 3 nye regresjonstester. Tobias sin egen
-manuelle LF-normalisering fikk Fiken-oppsettet til å fullføre live FØR kodefiksen landet -
-`fiken_live_companies_ok=true`, refresh-token+company-slug skrevet til `.env`. Se D-243 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Forrige milepæl (uendret): D-247/D-248:
+"ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK GJENNOMGANG AV DE 6 GJENVÆRENDE CONNECTORENE** (Tobias
+direkte i chat: "men alle skal fungere absolutt alle begynn på det") - github/google_calendar/gmail/
+google_drive VERIFISERT TRYGGE (token kommer via standard Infisical-aware `ToolGateway.execute()`,
+ingen bypass-lukking). **D-247 (Telegram):** `TelegramTransport.chatId` var frosset fra
+`process.env` ved konstruksjon - SAMME Infisical-bypass-bug-klasse som D-246, pluss manglende
+`JARVIS_TELEGRAM_CHAT_ID` i `credential_refs` (D-245-klasse). Fikset: konstruktøren tar nå en
+resolver-funksjon mot `readSecretProvider`/`toolSecretProvider`, slått opp PÅ NYTT ved hvert
+`notify`-kall. **D-248 (Vercel), STØRRE FUNN:** `VercelTransport` fantes ALDRI noe sted i
+kodebasen - `transport("vercel")` falt ALLTID tilbake til `UnconfiguredHttpTransport`
+(`vercel_not_configured`), uansett credential. Den tidligere antatte "Vercel fungerer nå etter
+Docker-rebuild"-konklusjonen (forrige milepæl) var FEIL/prematur - rebuilden løste kun en separat
+stale-image-årsak, aldri denne strukturelle mangelen. Bygget en ekte `VercelTransport` mot Vercel
+sin offisielle REST API v6 (`GET /v6/deployments`), wiret inn i begge prosesser. 88 relevante
+DB-uavhengige tester grønne (inkl. 5 nye for Vercel), typecheck/lint rene. Se D-247/D-248 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
-**Forrige milepæl (uendret, IKKE MERGET, blokkert på GitHub Actions-betaling): D-242 (PR #154)** -
-daglig connector-helsesjekk for alle 11 live-testbare connectorer (Vercel-transport wired, Fiken/
-Stripe/Vipps fikk hver en ny klasse A `live_test`-probe). CI har ALDRI kjørt på denne PR-en (fantom
-`BuildFailed`-workflow, `startup_failure` på hver kjøring inkl. `main`) - venter på at Tobias ordner
-GitHub Actions-betalingen på `tsworkflow`-kontoen; merges under D-192 så snart CI er grønt.
+**Forrige milepæl (uendret, IKKE MERGET): D-246 - STØRRE STRUKTURELL BUG FUNNET OG FIKSET,
+LIVE-DEBUGGET SAMMEN MED TOBIAS** - Neonomics feilet FORTSATT
+etter D-245 (alle tre felt ✓ i dashbordet), Tobias: "når vi må kjøre det hver gang fungerer jo ikke
+dash". Root cause: `stripeCredentialsProvider`/`vippsCredentialsProvider`/
+`neonomicsCredentialsProvider`/`wallesterCredentialsProvider`/`fikenCredentialsProvider` sine
+`getCredentials()`-lukkinger i `main.ts`/`worker-main.ts` leste rå `process.env[...]`, HELT UTENOM
+den Infisical-primære `readSecretProvider`/`toolSecretProvider`-kjeden dashbordets "lim inn
+ny verdi" (D-213) faktisk skriver til - en verdi lagret KUN i Infisical var derfor strukturelt
+usynlig for selve finans-tjenestene, uansett hva dashbordets ✓ viste. Fikset i alle fem, begge
+prosesser. **Samtidig funnet, samme runde:** `credential_refs` manglet `JARVIS_VIPPS_MSN` (vipps) og
+`JARVIS_WALLESTER_API_BASE_URL`/`_ACCOUNT_ID` (wallester) - samme bug-klasse som D-245. 50 tester
+re-kjørt grønt, typecheck/lint rene. Se D-246 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-245 (PR #157) - Neonomics manglet DEVICE_ID i
+`credential_refs`** - Tobias, rett etter at Vercel ble bekreftet fungerende (D-242, lokal
+branch-kjøring): "feilet: tool_failed:neonomics_credentials_unavailable:tenant-personal" på Neonomics
+sin "Test tilkobling", til tross for at både CLIENT_ID og CLIENT_SECRET viste ✓ som lagret.
+Root cause: `neonomicsCredentialsProvider.getCredentials()` (`main.ts`) har siden D-111 krevd et
+TREDJE felt, `JARVIS_NEONOMICS_DEVICE_ID` (en Jarvis-generert, stabil enhets-UUID), men
+`connector-registry.ts` sin `neonomics`-oppføring listet kun de to første i `credential_refs` -
+dashbordets "lim inn ny verdi"-felt for DEVICE_ID ble derfor ALDRI vist, og testknappen kunne
+STRUKTURELT aldri lykkes uansett credentials. Fikset (DEVICE_ID lagt til i `credential_refs`), 30
+eksisterende tester (`connector-registry.test.ts`/`d213-connector-credentials.test.ts`) re-kjørt
+uendret grønt. Samme funn-klasse som D-236 og finance-sliceen i D-244s full-prosjekt-revisjon (Fiken
+sin tilsvarende company-slug-gap). Se D-245 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-244 (PR #156) - full-prosjekt-revisjon**, D-243 (PR #155)
+- `.env`-parser CRLF-fiks, D-242 (PR #154) - connector-helsesjekk (Vercel/Fiken/Stripe/Vipps
+`live_test`), alle tre fortsatt blokkert på GitHub Actions-betaling (ingen CI-kjøring i det hele
+tatt, samme kontobrede fantom-`BuildFailed`-feil som rammer FERSKE pushes til `main` også). Merges
+under D-192 så snart CI faktisk kan kjøre og blir grønt. **Bekreftet av Tobias, live på egen host:**
+Vercel-fiksen (D-242) fungerer etter en lokal `git checkout claude/fase-d242-connector-health-sweep`
++ `docker compose ... up -d --build api worker` (MERK: `--force-recreate` alene bygger IKKE et nytt
+image fra endret kildekode - `--build` er påkrevd), UTEN å vente på selve CI/merge.
 
 **Forrige milepæl (uendret, MERGET): D-240 (PR #152, `19e8538`) - EKTE INFRA-BUG FUNNET
 OG FIKSET** - Tobias fikk `403 tool_denied: tool_failed:fetch failed` FØRSTE gang han faktisk prøvde
