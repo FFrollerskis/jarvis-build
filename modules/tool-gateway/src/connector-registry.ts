@@ -117,8 +117,19 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "stripe", display_name: "Stripe", category: "finance", credential_refs: ["JARVIS_STRIPE_SECRET_KEY"] },
   { id: "vipps", display_name: "Vipps", category: "finance", credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY"] },
   {
+    // D-245 (2026-09-23, funnet LIVE av Tobias): `neonomicsCredentialsProvider.
+    // getCredentials()` (apps/api/src/main.ts) har ALLTID krevd
+    // `JARVIS_NEONOMICS_DEVICE_ID` (en Jarvis-generert, stabil enhets-UUID -
+    // `x-device-id`-headeren Neonomics knytter samtykke/sesjon til, IKKE noe
+    // Tobias henter FRA Neonomics) i tillegg til CLIENT_ID/SECRET - men denne
+    // listen manglet den, så dashbordets "lim inn ny verdi"-felt ble ALDRI
+    // vist for den. Testknappen kunne derfor ALDRI lykkes uansett hvilken
+    // CLIENT_ID/SECRET som ble limt inn (`neonomics_credentials_unavailable`
+    // uavhengig av dem). Samme "kravt credential mangler i registeret"-
+    // klasse som D-236 (tom streng behandlet som satt) - her manglet
+    // referansen helt. Fiks: DEVICE_ID lagt til i `credential_refs`.
     id: "neonomics", display_name: "Neonomics", category: "finance",
-    credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET"],
+    credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET", "JARVIS_NEONOMICS_DEVICE_ID"],
     // Katalogoppslag (bankene Neonomics dekker) - krever INGEN eksisterende
     // banksamtykke, kun gyldige API-credentials. Ren lesing, klasse A.
     live_test: { tool_id: "finance_neonomics", action: "list_banks", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }

@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d240-db-bootstrap`). **D-240: EKTE INFRA-BUG FUNNET
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`). **D-245: EKTE BUG FUNNET
+OG FIKSET, LIVE i dashbordet** - Tobias, rett etter at Vercel ble bekreftet fungerende (D-242, lokal
+branch-kjøring): "feilet: tool_failed:neonomics_credentials_unavailable:tenant-personal" på Neonomics
+sin "Test tilkobling", til tross for at både CLIENT_ID og CLIENT_SECRET viste ✓ som lagret.
+Root cause: `neonomicsCredentialsProvider.getCredentials()` (`main.ts`) har siden D-111 krevd et
+TREDJE felt, `JARVIS_NEONOMICS_DEVICE_ID` (en Jarvis-generert, stabil enhets-UUID), men
+`connector-registry.ts` sin `neonomics`-oppføring listet kun de to første i `credential_refs` -
+dashbordets "lim inn ny verdi"-felt for DEVICE_ID ble derfor ALDRI vist, og testknappen kunne
+STRUKTURELT aldri lykkes uansett credentials. Fikset (DEVICE_ID lagt til i `credential_refs`), 30
+eksisterende tester (`connector-registry.test.ts`/`d213-connector-credentials.test.ts`) re-kjørt
+uendret grønt. Samme funn-klasse som D-236 og finance-sliceen i D-244s full-prosjekt-revisjon (Fiken
+sin tilsvarende company-slug-gap). Se D-245 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET): D-244 (PR #156) - full-prosjekt-revisjon**, D-243 (PR #155)
+- `.env`-parser CRLF-fiks, D-242 (PR #154) - connector-helsesjekk (Vercel/Fiken/Stripe/Vipps
+`live_test`), alle tre fortsatt blokkert på GitHub Actions-betaling (ingen CI-kjøring i det hele
+tatt, samme kontobrede fantom-`BuildFailed`-feil som rammer FERSKE pushes til `main` også). Merges
+under D-192 så snart CI faktisk kan kjøre og blir grønt. **Bekreftet av Tobias, live på egen host:**
+Vercel-fiksen (D-242) fungerer etter en lokal `git checkout claude/fase-d242-connector-health-sweep`
++ `docker compose ... up -d --build api worker` (MERK: `--force-recreate` alene bygger IKKE et nytt
+image fra endret kildekode - `--build` er påkrevd), UTEN å vente på selve CI/merge.
+
+**Forrige milepæl (uendret, MERGET): D-240 (PR #152, `19e8538`) - EKTE INFRA-BUG FUNNET
 OG FIKSET** - Tobias fikk `403 tool_denied: tool_failed:fetch failed` FØRSTE gang han faktisk prøvde
 D-213s "lim inn nøkkel"-skriving live (rett etter D-239-merge). Sporet PRESIST via
 `docker compose logs infisical` til `DatabaseError: database "infisical" does not exist` -
