@@ -10,9 +10,12 @@ migrasjoner). Levert: `docs/runbooks/D250_NAS_MIGRATION.md` - trinnvis oppskrift
 gjenoppretting og verifisering på NAS-en FØR PC-stacken stoppes, eksplisitt rollback). Selve
 utførelsen krever SSH-tilgang denne økten ikke har - et oppskrift-dokument, ikke en kjørt migrering.
 **Live utførelse pågår nå direkte med Tobias i chat** (PC → NAS `.env`/backup-overføring via PuTTY
-`pscp`) - flere infrastrukturproblemer løst underveis (manglende SSH-klient på PC, NAS-brukeren
-`Jarvis` manglet hjemmekatalog/`/volume1`-skrivetilgang); ikke fullført ennå. Se D-250 i
-DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+`pscp`, deretter `git`/Postgres-restore på NAS-en via en engangs `alpine/git`-container og en dedikert
+read-only SSH deploy-key) - flere reelle infrastrukturproblemer løst underveis (manglende SSH-klient
+på PC-en, NAS-ens SFTP-delsystem sandboxet til `/docker` - løst med legacy SCP-protokoll i stedet,
+`Jarvis`-brukeren manglet hjemmekatalog/`docker`-gruppemedlemskap, NAS-ens EGEN native Postgres
+okkuperte port 5432 - løst med `JARVIS_DB_PORT=5433`); Postgres kjører nå friskt på NAS-en, selve
+databaserestoreringen (Trinn 4) pågår. Se D-250 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret, MERGET): D-249 - `/voice`-siden manglet ekkokansellering
 (selvutløst barge-in + forgiftet STT) og TTS-lydrammer klikket ved bufferskjøter.** Begge fikset i
@@ -29,6 +32,15 @@ oppdatert `main`** som da inkluderte BÅDE PR #154/D-242 (`27e523d`) OG PR #155/
 begge merget under D-192. Ingen kodekonflikt for selve D-244-revisjonen - kun docs
 (`DECISIONS_AND_ASSUMPTIONS.md`/denne filen, D-24x kronologisk rekkefølge: 240-248). Se D-244 i
 DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, MERGET): D-242 (PR #154, `27e523d`)** - merget under D-192 (CI grønt,
+ingen åpne review-tråder). PR #155 (D-243)/PR #156 (D-244) fikk ny merge-konflikt mot oppdatert
+`main` (samme docs-filer som #154 rørte) - løst (D-24x kronologisk rekkefølge: 240/241/242/243/245/
+246/247/248), typecheck rent på berørte pakker, begge pushet på nytt for fersk CI. To uavhengige,
+kjente flaky race-condition-tester (`ops/claude-worker/test/task-admission.test.mjs` PROOF 4 for
+#155, `modules/core/test/embedded-postgres-port-lease.test.ts` for #156 - INGEN av dem rørt av disse
+PR-enes docs-only-diff) feilet først, re-kjørt via `rerun_failed_jobs` for å bekrefte flake før
+videre merge under D-192.
 
 **Forrige milepæl (uendret, MERGET):** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
