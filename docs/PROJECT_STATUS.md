@@ -1,11 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-248 LIVE
-BEKREFTET av Tobias på egen host:** etter `git pull` til `198929a` + `docker compose --env-file .env
--f infra/local/docker-compose.yml up -d --build api worker` (riktig `--env-file`/`-f`-kombinasjon
-kreves - `docker compose` sin egen variabel-interpolasjon leter etter `.env` i prosjekt-mappen, ikke
-cwd, når `-f` peker til en annen mappe enn der kommandoen kjøres fra) - "Test tilkobling" for Vercel:
-**"tilkobling OK".** Telegram (D-247) ikke eksplisitt re-testet live ennå av Tobias denne runden.
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **Live
+connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
+IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
+reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
+`google-drive-reauth.ts` - eget scope-sett `gmail.readonly`/`gmail.send`, samme persisterte
+Desktop-OAuth-klient) som ble host-verifisert i D-47 (2026-08-17, `run_id 0f43f39d`,
+`p1b_gmail_list_messages_live=PASS`) - `JARVIS_EMAIL_TOKEN` fra DEN kjøringen er fortsatt gyldig.
+En tidligere feilaktig antakelse denne økten (fra en utdatert `.env.example`-kommentar alene, uten å
+sjekke D-45/D-46/D-47/det eksisterende scriptet) foreslo å slå sammen Drive- og Gmail-reauth til
+ett script - korrigert FØR noe ble bygget: det ville vært feil retning, stikk i strid med et bevisst
+designvalg (egen fil, egen scope, rører aldri Drive/Calendar sin credential). Telegram (D-247) ikke
+eksplisitt re-testet live ennå av Tobias denne runden. **GitHub Actions-betalingsblokkeringen ser ut
+til å være løst** (rerun av det gamle, feilede run #999 på `main` fullførte i `in_progress`/reelle
+steg, ikke lenger umiddelbar `startup_failure`) - men PR #154-#157 sine egne branch-commits har
+FORTSATT aldri hatt en eneste sjekk-kjøring (`total_count: 0`), siden GitHub kun trigger CI på et nytt
+push/pull_request-event, ikke retroaktivt. Denne commiten er delvis en test av om #157 nå faktisk får
+en ekte CI-kjøring.
 
 **Forrige milepæl (uendret): D-247/D-248:
 "ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK GJENNOMGANG AV DE 6 GJENVÆRENDE CONNECTORENE** (Tobias
