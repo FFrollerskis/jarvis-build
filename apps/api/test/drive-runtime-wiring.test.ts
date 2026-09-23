@@ -36,7 +36,12 @@ describe("A: apps/api/src/main.ts sprer driveTransportsIfConfigured() inn i firs
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     // D-97: GithubTransport tar naa en wired GithubRateLimitController - ikke lenger tom konstruktør.
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
-    expect(callBlock).toContain("telegram: new TelegramTransport()");
+    // D-247: telegram sin chatId sendes nå som en resolver mot readSecretProvider -
+    // ikke lenger en bokstavelig tom konstruktør her.
+    expect(callBlock).toMatch(/telegram: new TelegramTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\)/);
+    // D-248: VercelTransport fantes aldri - lagt til som en ubetinget tom-konstruktør,
+    // samme mønster som email/calendar/docker.
+    expect(callBlock).toContain("vercel: new VercelTransport()");
     // UA-3 P0 (D-49): femte ubetingede transport - Business OS har ingen ekstern credential
     // aa vaere "konfigurert" av, saa den registreres alltid, samme mønster som de fire over.
     // UA-3 next slice (D-53): BusinessTransport tar naa ogsaa OpenLoopService + pool.
@@ -67,9 +72,13 @@ describe("B: apps/api/src/worker-main.ts speiler NØYAKTIG samme wiring som main
     // w1-production-wiring.test.ts for den dedikerte hoisting-/delings-verifiseringen).
     // Ikke lenger en bokstavelig `new TelegramTransport()` HER - bevisst divergens fra
     // main.ts (som forblir uendret, D-180).
-    expect(workerSource).toMatch(/const telegramTransport = new TelegramTransport\(\);/);
+    // D-247: chatId sendes nå som en resolver mot toolSecretProvider (samme
+    // bug-klasse/fiks som D-246) - ikke lenger en tom konstruktør her heller.
+    expect(workerSource).toMatch(/const telegramTransport = new TelegramTransport\(\(\) => toolSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\);/);
     expect(callBlock).toContain("telegram: telegramTransport");
     expect(callBlock).not.toContain("telegram: new TelegramTransport()");
+    // D-248: identisk VercelTransport-wiring som main.ts.
+    expect(callBlock).toContain("vercel: new VercelTransport()");
     // UA-3 business-event-linkage (D-57): BusinessTransport tar naa ogsaa toolGateway
     // (sync_business_events maa kunne kalle email/calendar via SAMME gateway-instans).
     // UA-3 profiling/scoring-slice (D-61): BusinessTransport tar naa ogsaa ScoringService.
@@ -97,27 +106,32 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt NØYAKTIG de samme fire ubetingede tomme-konstruktør-transportene som før (+docker, D-105)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-248) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
     expect(unconditionalConstructions).toHaveLength(4);
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
+    expect(callBlock).toContain("vercel: new VercelTransport()");
+    expect(callBlock).toMatch(/telegram: new TelegramTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\)/);
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker, D-105) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-248) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
     // D-181/D184: telegram gikk fra en bokstavelig tom-konstruktør (`new TelegramTransport()`
-    // inni dette kallet) til en referanse til en hoistet, delt konstant - derfor 3, ikke 4,
-    // her. main.ts (describe "I" sin FØRSTE test, over) forblir uendret på 4 - de to
-    // filene divergerer BEVISST kun paa dette ene punktet, se describe "B".
-    expect(unconditionalConstructions).toHaveLength(3);
+    // inni dette kallet) til en referanse til en hoistet, delt konstant - main.ts (describe "I"
+    // sin FØRSTE test, over) teller telegram heller ikke med (D-247: begge har nå en
+    // resolver-/referanseform, ikke en tom konstruktør) - derfor SAMME tall (4) i begge filer,
+    // selv om de to filene fortsatt divergerer paa HVORDAN telegram konstrueres
+    // (hoistet konstant vs. inline), se describe "B".
+    expect(unconditionalConstructions).toHaveLength(4);
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
+    expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });
 });
