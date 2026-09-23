@@ -1,11 +1,33 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d244-full-project-audit`, PR #156 - etter merge av
-oppdatert `main`, som nå inkluderer BÅDE PR #154/D-242 (`27e523d`) OG PR #155/D-243 (`48e95f0`),
-begge merget under D-192. Ingen kodekonflikt for selve D-244-revisjonen - kun docs
-(`DECISIONS_AND_ASSUMPTIONS.md`/denne filen, D-24x kronologisk rekkefølge: 240-248). D-244 sin
-full-prosjekt-revisjon er uendret fra forrige merknad under - se D-244 i DECISIONS_AND_ASSUMPTIONS.md.
-**Live connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d249-voice-echo-cancellation`, PR pending, D-249 - live
+ende-til-ende webchat OG tale over Tailscale bekreftet fungerende, samme økt). Etter at Tailscale
+`serve` (satt opp direkte i chat, ikke en kodeendring) løste selve tilkoblings-/TLS-laget for
+`https://srby.<tailnet>.ts.net/` og `:3020`, meldte Tobias tre reelle taleproblemer i første
+ende-til-ende `/voice`-test: "det kommer skurrelyder han leser ikke opp alt han hører meg dårlig kan
+ikke avbryte han i en setning". Root cause 1: `getUserMedia({ audio: true })` ba ikke om
+ekkokansellering - telefonens mikrofon plukket opp Jarvis sin egen TTS-lyd fra høyttaleren, og den
+rent volumbaserte `EnergyVad` tolket dette som brukeren som snakker (selvutløst barge-in midt i
+setningen + forgiftet STT). Root cause 2: TTS-lydrammer ble spilt av med harde kanter mellom
+buffere (klikk-artefakt). **Fiks:** `getUserMedia` ber nå om `echoCancellation`/`noiseSuppression`/
+`autoGainControl`; `playTtsFrame()` ruter nå gjennom en `GainNode` med kort fade inn/ut per ramme.
+Begge isolerte, lavrisiko klient-side endringer i `apps/web/voice.html`. `voice-page-wiring.test.ts`
+(7 tester) re-kjørt uendret grønt, inline-script syntaktisk verifisert (`node --check`). Se D-249 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Nettverksjitter over Tailscale kan fortsatt gi hørbar
+forsinkelse under dårlige forhold - IKKE løst av denne fiksen, dokumentert som gjenstående.
+
+**Forrige milepæl (uendret, MERGET): D-242 (PR #154, `27e523d`)** - merget under D-192 (CI grønt,
+ingen åpne review-tråder). PR #155 (D-243)/PR #156 (D-244) fikk ny merge-konflikt mot oppdatert
+`main` (samme docs-filer som #154 rørte) - løst (D-24x kronologisk rekkefølge: 240/241/242/243/245/
+246/247/248), typecheck rent på berørte pakker, begge pushet på nytt for fersk CI. To uavhengige,
+kjente flaky race-condition-tester (`ops/claude-worker/test/task-admission.test.mjs` PROOF 4 for
+#155, `modules/core/test/embedded-postgres-port-lease.test.ts` for #156 - INGEN av dem rørt av disse
+PR-enes docs-only-diff) feilet først, re-kjørt via `rerun_failed_jobs` for å bekrefte flake før
+videre merge under D-192.
+
+**Forrige milepæl (uendret): D-247/D-248 - "ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK
+GJENNOMGANG, PLUSS Vercel/GitHub connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub
+begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
 reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
