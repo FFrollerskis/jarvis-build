@@ -46,6 +46,9 @@ const OWNER_PERSON = "person-fin-tgw-owner";
 const fakeFikenFactory = (_credentials: FikenCredentials): FikenGeneralJournalEntryWriter => ({
   async createGeneralJournalEntry(input) {
     return { journalEntryId: 99, description: input.description, date: input.date };
+  },
+  async listCompanies() {
+    return [];
   }
 });
 

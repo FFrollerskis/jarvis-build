@@ -38,7 +38,7 @@ import {
   type FikenCredentials, type FikenCredentialsProvider,
   type StripeCredentials, type StripeCredentialsProvider, type StripePaymentWriter
 } from "../src/index.ts";
-import type { StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
+import type { StripeBalanceObject, StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
 import { createApiServer } from "../../../apps/api/src/server.ts";
 import { evaluateSecretSafety, type Verdict } from "./lib/fiken-live-lib.ts";
 
@@ -154,6 +154,9 @@ class ScriptedStripeWriter implements StripePaymentWriter {
   }
   async getRefund(id: string): Promise<StripeRefundObject> {
     return { id, object: "refund", amount: 1000, currency: "nok", status: "succeeded", payment_intent: "pi_x", reason: null };
+  }
+  async getBalance(): Promise<StripeBalanceObject> {
+    return { object: "balance", available: [{ amount: 0, currency: "nok" }], pending: [{ amount: 0, currency: "nok" }] };
   }
 }
 

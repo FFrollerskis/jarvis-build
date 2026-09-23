@@ -4,7 +4,7 @@ import { withMemoryTransaction } from "@jarvis/memory";
 import type { MemorySpace } from "@jarvis/contracts";
 import { assertValidPaymentIntentTransition, canTransitionPaymentIntent, isTerminalPaymentIntentState } from "./state-machine.ts";
 import { FikenTransport, type FikenGeneralJournalEntryInput, type FikenJournalEntry } from "./fiken-transport.ts";
-import { StripeTransport, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
+import { StripeTransport, type StripeBalanceObject, type StripePaymentIntentObject, type StripeRefundObject } from "./stripe-transport.ts";
 import { verifyStripeWebhookSignature, parseStripeEventEnvelope } from "./stripe-webhook.ts";
 import { VippsTransport, type VippsPaymentObject, type VippsPaymentWriter } from "./vipps-transport.ts";
 import { verifyVippsWebhookSignature, parseVippsEventEnvelope, type VippsWebhookRequestHeaders } from "./vipps-webhook.ts";
@@ -101,6 +101,8 @@ export interface ListPaymentIntentsFilter {
 /** Minimalt grensesnitt FinanceService faktisk trenger av en Fiken-transport - lar tester injisere en fake UTEN å røre `submitPaymentIntent()` sin deterministiske håndhevingsrekkefølge (kill switch/vendor-/motkonto-validering skjer FØR denne noensinne konstrueres/kalles). */
 export interface FikenGeneralJournalEntryWriter {
   createGeneralJournalEntry(input: FikenGeneralJournalEntryInput): Promise<FikenJournalEntry>;
+  /** D-242: connector-helsesjekk-probe, se `FikenTransport.listCompanies()` sin doc-kommentar. */
+  listCompanies(): Promise<Array<{ slug: string; name: string }>>;
 }
 
 export type FikenTransportFactory = (credentials: FikenCredentials) => FikenGeneralJournalEntryWriter;
@@ -122,6 +124,8 @@ export interface StripePaymentWriter {
   getPaymentIntent(stripePaymentIntentId: string): Promise<StripePaymentIntentObject>;
   createRefund(input: { stripePaymentIntentId: string; amountOre: number; reason?: string; idempotencyKey: string }): Promise<StripeRefundObject>;
   getRefund(stripeRefundId: string): Promise<StripeRefundObject>;
+  /** D-242: connector-helsesjekk-probe, se `StripeTransport.getBalance()` sin doc-kommentar. */
+  getBalance(): Promise<StripeBalanceObject>;
 }
 
 export type StripeTransportFactory = (credentials: StripeCredentials) => StripePaymentWriter;
@@ -655,6 +659,21 @@ export class FinanceService {
     return outcome.intent;
   }
 
+  /**
+   * D-242: connector-helsesjekk-probe for `fiken` (SAMME rolle som
+   * `getStripeBalance()`/`checkVippsCredentials()`) - `credentialsProvider`
+   * tas inn som PARAMETER (IKKE et konstruktørfelt), SAMME mønster som
+   * `submitPaymentIntent()` allerede bruker for Fiken - `FinanceService` har
+   * bevisst ALDRI eid en Fiken-credential-provider-instans selv (kun
+   * `fikenTransportFactory`). Ren providerside-lesing, INGEN DB-transaksjon.
+   */
+  async listFikenCompanies(tenantId: string, credentialsProvider: FikenCredentialsProvider): Promise<Array<{ slug: string; name: string }>> {
+    const credentials = await credentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new FikenCredentialsUnavailableError(tenantId);
+    const transport = this.fikenTransportFactory(credentials);
+    return transport.listCompanies();
+  }
+
   // --- D-116: vendor-identitetsregister (JARVIS_CANONICAL) ---
   // Tynne wrappere rundt de rene funksjonene i `vendor-registry.ts` - egen
   // transaksjon PER kall (IKKE del av en pengehandlings-transaksjon; kun
@@ -926,6 +945,21 @@ export class FinanceService {
       );
       return result.intent;
     });
+  }
+
+  /**
+   * D-242: connector-helsesjekk-probe for `stripe` (SAMME rolle som
+   * `listFikenCompanies()`/`checkVippsCredentials()`) - `GET /v1/balance`
+   * krever INGEN eksisterende PaymentIntent/Refund og gjør INGEN DB-
+   * transaksjon (ren providerside-lesing, ingenting å memory-skrive) - derfor
+   * BEVISST UTENFOR `withMemoryTransaction`, i motsetning til de andre
+   * Stripe-metodene over som alle muterer/leser en `payment_intents`-rad.
+   */
+  async getStripeBalance(tenantId: string): Promise<StripeBalanceObject> {
+    const credentials = await this.stripeCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new StripeCredentialsUnavailableError(tenantId);
+    const transport = this.stripeTransportFactory(credentials);
+    return transport.getBalance();
   }
 
   /**
@@ -1472,6 +1506,19 @@ export class FinanceService {
       );
       return result.intent;
     });
+  }
+
+  /**
+   * D-242: connector-helsesjekk-probe for `vipps` (SAMME rolle som
+   * `getStripeBalance()`/`listFikenCompanies()`) - BEVISST UTENFOR
+   * `withMemoryTransaction` (ren providerside-token-sjekk, INGEN
+   * `payment_intents`-rad involvert, ingenting å memory-skrive).
+   */
+  async checkVippsCredentials(tenantId: string): Promise<void> {
+    const credentials = await this.vippsCredentialsProvider.getCredentials(tenantId);
+    if (!credentials) throw new VippsCredentialsUnavailableError(tenantId);
+    const transport = this.vippsTransportFactory(credentials);
+    await transport.checkCredentials();
   }
 
   /**

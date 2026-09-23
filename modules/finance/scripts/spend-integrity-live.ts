@@ -92,6 +92,9 @@ const fakeFikenTransportFactory = (_credentials: FikenCredentials): FikenGeneral
   async createGeneralJournalEntry(input) {
     fikenCalls.push({ description: input.description });
     return { journalEntryId: 99, description: input.description, date: input.date };
+  },
+  async listCompanies() {
+    return [];
   }
 });
 const fakeFikenCredentialsProvider: FikenCredentialsProvider = {

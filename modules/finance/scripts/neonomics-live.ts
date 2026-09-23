@@ -38,7 +38,7 @@ import {
   type BankConsent,
   type FikenCredentials, type FikenCredentialsProvider,
   type NeonomicsCredentials, type NeonomicsCredentialsProvider,
-  type StripeCredentials, type StripeCredentialsProvider, type StripePaymentWriter,
+  type StripeBalanceObject, type StripeCredentials, type StripeCredentialsProvider, type StripePaymentWriter,
   type VippsCredentials, type VippsCredentialsProvider
 } from "../src/index.ts";
 import type { StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
@@ -262,6 +262,9 @@ async function main(): Promise<void> {
     },
     async getRefund(id): Promise<StripeRefundObject> {
       return { id, object: "refund", amount: 1000, currency: "nok", status: "succeeded", payment_intent: "pi_x", reason: null };
+    },
+    async getBalance(): Promise<StripeBalanceObject> {
+      return { object: "balance", available: [{ amount: 0, currency: "nok" }], pending: [{ amount: 0, currency: "nok" }] };
     }
   };
   const stripeCredentialsProvider: StripeCredentialsProvider = { async getCredentials(): Promise<StripeCredentials | null> { return { secretKey: "sk_test_fake_slice3_preserved" }; } };
@@ -282,7 +285,8 @@ async function main(): Promise<void> {
     },
     async refundPayment(input): Promise<VippsPaymentObject> {
       return { reference: input.reference, state: "AUTHORIZED", amount: { currency: input.currency, value: input.amountOre } };
-    }
+    },
+    async checkCredentials(): Promise<void> {}
   };
   const vippsCredentialsProvider: VippsCredentialsProvider = {
     async getCredentials(): Promise<VippsCredentials | null> {

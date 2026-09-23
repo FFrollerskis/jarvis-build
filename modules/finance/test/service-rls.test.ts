@@ -46,6 +46,9 @@ const fakeFikenFactory = (_credentials: FikenCredentials): FikenGeneralJournalEn
   async createGeneralJournalEntry(input) {
     fikenCalls.push({ description: input.description, lines: input.lines });
     return { journalEntryId: 42, description: input.description, date: input.date };
+  },
+  async listCompanies() {
+    return [];
   }
 });
 

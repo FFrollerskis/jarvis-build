@@ -90,6 +90,7 @@ class ScriptedVippsWriter implements VippsPaymentWriter {
     this.refundCalls.push(input);
     return this.onRefund(input);
   }
+  async checkCredentials(): Promise<void> {}
 }
 
 let writer: ScriptedVippsWriter;
