@@ -1,11 +1,27 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d243-crlf-env-parse-fix`, PR #155 - etter merge av
-oppdatert `main`, som nå inkluderer PR #154/D-242 (`ConnectorHealthSweep`/Fiken-Stripe-Vipps-`live_test`,
-merget `27e523d` under D-192) OG PR #157/D-245. Ingen kodekonflikt for selve D-243-fiksen - kun
-docs (`DECISIONS_AND_ASSUMPTIONS.md`/denne filen). D-243 sin `.env`-parser-CRLF-fiks er uendret fra
-forrige merknad under - se D-243 i DECISIONS_AND_ASSUMPTIONS.md. **Live
-connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d250-nas-migration-runbook`, PR pending, D-250 - NAS-
+flytting, Trinn 1). Tobias, direkte i chat etter en lang live-feilsøkingsøkt (Tailscale/tale):
+"det skal ligge på u green jobbe på pc og skal ha direkte tilgagn til jarvis". Dette er
+`DEPLOYMENT_STRATEGY.md` §2 sitt allerede planlagte "Trinn 1", ikke en ny beslutning. Kildekode-
+gjennomgang bekreftet portabilitetsløftet holder (ingen PC-spesifikke stier i compose/Dockerfile/
+migrasjoner). Levert: `docs/runbooks/D250_NAS_MIGRATION.md` - trinnvis oppskrift (full
+`pg_dumpall`-backup FØR noe røres, `.env`/backup direkte mellom Tobias sine egne maskiner,
+gjenoppretting og verifisering på NAS-en FØR PC-stacken stoppes, eksplisitt rollback). Selve
+utførelsen krever SSH-tilgang denne økten ikke har - et oppskrift-dokument, ikke en kjørt migrering.
+Se D-250 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, PR pending): D-249 - `/voice`-siden manglet ekkokansellering
+(selvutløst barge-in + forgiftet STT) og TTS-lydrammer klikket ved bufferskjøter.** Begge fikset i
+`apps/web/voice.html` (`getUserMedia` ber nå om ekkokansellering, `playTtsFrame()` fader inn/ut per
+ramme), pluss en `cache-control: no-cache`-header lagt til på `/`/`/dashboard`/`/voice` (uten den
+kunne en mobilnettleser fortsette å servere en gammel, allerede-fikset side fra cache). Se D-249 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj. Tale er FORTSATT rapportert ustabil av Tobias etter
+disse fiksene ("starter men stopper, skurer") - uavklart om gjenstående nettverksjitter over
+Tailscale eller en tredje, ikke identifisert kodefeil; venter på teknisk-logg fra klienten for videre
+diagnose, satt på vent mens NAS-flyttingen prioriteres.
+
+**Forrige milepæl (uendret, MERGET):** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
 reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
