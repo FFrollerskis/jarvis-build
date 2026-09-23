@@ -187,6 +187,42 @@ describe("§8.J: compose-config mottar korrekt split (via buildUpdatedEnvLines-r
   });
 });
 
+describe("D-243: CRLF-linjeskift (Windows) skal ALDRI stille droppe en verdi", () => {
+  it("parseEnvValues finner en verdi selv når raden avsluttes med \\r (CRLF-fil lest med split('\\n'))", () => {
+    const raw = "JARVIS_API_PORT=3010\r\nJARVIS_FIKEN_CLIENT_ID=abc123\r\nJARVIS_FIKEN_CLIENT_SECRET=def456\r\n";
+    const values = parseEnvValues(raw);
+    expect(values["JARVIS_FIKEN_CLIENT_ID"]).toBe("abc123");
+    expect(values["JARVIS_FIKEN_CLIENT_SECRET"]).toBe("def456");
+    // Selve verdien skal ALDRI inneholde den gjenværende \r-en.
+    expect(values["JARVIS_FIKEN_CLIENT_ID"]).not.toContain("\r");
+  });
+
+  it("den gamle regexen (uten \\r?) er BEVIST å droppe raden helt stille - dokumenterer selve bug-klassen D-243 fikset", () => {
+    const oldBehavior = (raw: string): Record<string, string> => {
+      const values: Record<string, string> = {};
+      for (const line of raw.split("\n")) {
+        const m = /^([A-Z0-9_]+)=(.*)$/.exec(line);
+        if (m) values[m[1]!] = m[2]!;
+      }
+      return values;
+    };
+    const raw = "JARVIS_FIKEN_CLIENT_ID=abc123\r\n";
+    expect(oldBehavior(raw)["JARVIS_FIKEN_CLIENT_ID"]).toBeUndefined(); // den ekte D-243-bugen
+    expect(parseEnvValues(raw)["JARVIS_FIKEN_CLIENT_ID"]).toBe("abc123"); // fikset
+  });
+
+  it("buildUpdatedEnvLines normaliserer HELE filen til LF, selv linjer den ikke rører - ingen blandede linjeskift igjen", () => {
+    const lines = ["JARVIS_API_PORT=3010\r", "JARVIS_FIKEN_CLIENT_ID=old\r", "JARVIS_FIKEN_COMPANY_SLUG=old-slug\r"];
+    const next = buildUpdatedEnvLines(lines, { JARVIS_FIKEN_CLIENT_ID: "new" });
+    for (const line of next) {
+      expect(line.endsWith("\r")).toBe(false);
+    }
+    expect(next).toContain("JARVIS_API_PORT=3010"); // urørt linje, men \r fjernet
+    expect(next).toContain("JARVIS_FIKEN_CLIENT_ID=new"); // faktisk oppdatert
+    expect(next).toContain("JARVIS_FIKEN_COMPANY_SLUG=old-slug"); // urørt verdi bevart
+  });
+});
+
 describe("sortBackupFilenamesNewestFirst", () => {
   it("sorterer numerisk (epoch-ms), ikke leksikografisk-i-tvil", () => {
     const sorted = sortBackupFilenamesNewestFirst([".env.bak.100", ".env.bak.30000000000000", ".env.bak.2000000000"]);

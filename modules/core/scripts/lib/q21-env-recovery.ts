@@ -16,11 +16,29 @@
 
 export type EnvValues = Record<string, string>;
 
-/** Enkel KEY=VALUE-parsing - identisk semantikk uansett hvor mange ganger den kalles. */
+/**
+ * Enkel KEY=VALUE-parsing - identisk semantikk uansett hvor mange ganger den
+ * kalles. D-243 (2026-09-23, funnet LIVE av Tobias på Windows): en `.env`
+ * med CRLF-linjeskift (Windows-standard, og det PowerShell sin `Set-Content`/
+ * `[System.IO.File]::WriteAllLines` skriver som default) gjorde at HVER
+ * linje fikk en usett trailing `\r` igjen etter `raw.split("\n")`. Den
+ * gamle regexen `/^([A-Z0-9_]+)=(.*)$/` har INGEN `/m`-flagg, så `.` (som i
+ * JS ALDRI matcher linjeskift-tegn, `\r` inkludert) kunne ikke nå fram til
+ * `$` gjennom den gjenværende `\r`-en - HELE linjen feilet å matche, og
+ * `parseEnvValues` DROPPET verdien fullstendig og stille (ingen feil, bare
+ * fraværende nøkkel) i stedet for å beholde en `\r`-forurenset verdi. Dette
+ * rammet BEGGE brukerne av denne funksjonen identisk (`fiken-reauth.ts` og
+ * `fix-q21-runtime-role.ts`), samt strukturelt `google-drive-reauth.ts`/
+ * `google-email-reauth.ts` (samme delte lib). Fikset ved å gjøre
+ * trailing-`\r` eksplisitt valgfri FØR linjeslutt, i stedet for å kreve at
+ * brukeren selv normaliserer filen til LF (se også `buildUpdatedEnvLines`
+ * under, som nå normaliserer HELE filen til LF ved enhver skriving - ingen
+ * ny CRLF skal noensinne introduseres av denne koden selv).
+ */
 export function parseEnvValues(raw: string): EnvValues {
   const values: EnvValues = {};
   for (const line of raw.split("\n")) {
-    const m = /^([A-Z0-9_]+)=(.*)$/.exec(line);
+    const m = /^([A-Z0-9_]+)=(.*?)\r?$/.exec(line);
     if (m) values[m[1]!] = m[2]!;
   }
   return values;
@@ -114,10 +132,22 @@ export function resolveRuntimeCredentials(
   return { runtimeUser, runtimePassword, changed: needsNewUser || needsNewPassword };
 }
 
-/** §4: sett/legg til KEY=VALUE-linjer uten å røre andre linjer/kommentarer. */
+/**
+ * §4: sett/legg til KEY=VALUE-linjer uten å røre andre linjer/kommentarer.
+ * D-243: hver linje normaliseres til å fjerne en ev. trailing `\r` FØR den
+ * skrives tilbake - uendrede linjer fra en CRLF-fil ville ellers beholde sin
+ * `\r`, mens NYE/erstattede linjer aldri fikk en (siden `updates[key]`
+ * kommer fra et rent JS-objekt) - resultatet var en fil med BLANDEDE
+ * linjeskift, som selv er en kjent kilde til fremtidige samme-klasse bugs
+ * (se `parseEnvValues` sin D-243-kommentar over). Enhver skriving via denne
+ * funksjonen normaliserer nå HELE filen til rene LF-linjeskift - trygt,
+ * siden `.env`-filer kun konsumeres av Node/Docker Compose sine EGNE
+ * parsere (ikke denne håndrullede regexen), som begge er CRLF/LF-agnostiske.
+ */
 export function buildUpdatedEnvLines(lines: string[], updates: EnvValues): string[] {
   const remainingKeys = new Set(Object.keys(updates));
-  const next = lines.map((line) => {
+  const next = lines.map((rawLine) => {
+    const line = rawLine.replace(/\r$/, "");
     const m = /^([A-Z0-9_]+)=/.exec(line);
     if (m && remainingKeys.has(m[1]!)) {
       const key = m[1]!;

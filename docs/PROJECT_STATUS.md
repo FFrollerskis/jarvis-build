@@ -1,6 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-22 (branch `claude/fase-d240-db-bootstrap`). **D-240: EKTE INFRA-BUG FUNNET
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d243-crlf-env-parse-fix`). **D-243: EKTE BUG FUNNET
+OG FIKSET, LIVE på Windows** - Tobias satte `JARVIS_FIKEN_CLIENT_ID`/`_CLIENT_SECRET` riktig i `.env`
+(D-107/D-241 Fiken-reauth-oppsett), men `fiken-reauth.ts` fortsatte å feile med
+`fiken_reauth_missing_client_credentials` selv med verdiene synlig til stede. Root cause: den delte
+`.env`-parseren i `q21-env-recovery.ts` (brukt av Fiken- OG begge Google-reauth-scriptene) hadde en
+regex uten `/m`-flagg som aldri klarte å matche en linje med Windows-CRLF-linjeskift (PowerShell sin
+`Set-Content`-standard) - verdien ble stille DROPPET, ingen feil. Fikset (`\r?` eksplisitt valgfri FØR
+linjeslutt + hele filen LF-normalisert ved enhver skriving), 3 nye regresjonstester, 111 tilstøtende
+tester uendret grønne. Tobias sin egen manuelle LF-normalisering fikk flyten til å fullføre LIVE FØR
+kodefiksen landet: `fiken_live_companies_ok=true`, refresh-token+company-slug skrevet til `.env` -
+D-107/D-241s Fiken OAuth-bootstrap er dermed nå bevist ende-til-ende på en ekte Windows-host. Se D-243
+i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, IKKE MERGET, blokkert på GitHub Actions-betaling): D-242 (PR #154)** -
+daglig connector-helsesjekk for alle 11 live-testbare connectorer (Vercel-transport wired, Fiken/
+Stripe/Vipps fikk hver en ny klasse A `live_test`-probe). CI har ALDRI kjørt på denne PR-en (fantom
+`BuildFailed`-workflow, `startup_failure` på hver kjøring inkl. `main`) - venter på at Tobias ordner
+GitHub Actions-betalingen på `tsworkflow`-kontoen; merges under D-192 så snart CI er grønt.
+
+**Forrige milepæl (uendret, MERGET): D-240 (PR #152, `19e8538`) - EKTE INFRA-BUG FUNNET
 OG FIKSET** - Tobias fikk `403 tool_denied: tool_failed:fetch failed` FØRSTE gang han faktisk prøvde
 D-213s "lim inn nøkkel"-skriving live (rett etter D-239-merge). Sporet PRESIST via
 `docker compose logs infisical` til `DatabaseError: database "infisical" does not exist` -
