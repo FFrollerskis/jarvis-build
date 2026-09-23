@@ -1,13 +1,10 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `main`, etter merge av PR #157 OG PR #154/D-242 - to uavhengig
-utviklede branchene begge bygget en `VercelTransport`/rørte samme connector-wiring-filer, en ekte
-merge-konflikt løst manuelt: beholdt D-248 sin `VercelTransport`-implementasjon (mer komplett -
-`readyState`-felt, limit=20), D-247 sin Telegram-resolver-fiks, D-246 sine fem Infisical-bypass-fikser
-OG D-242 sin `ConnectorHealthSweep`/Fiken-Stripe-Vipps-`live_test`-utvidelse - alle fire er nå
-SAMTIDIG i `main`, ingen av dem overskrev den andre. `live_test` dekker nå 11 av 14 connectorer.
-Typecheck/lint kjøres på nytt etter selve konfliktløsingen før commit. **Live**
-connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d243-crlf-env-parse-fix`, PR #155 - etter merge av
+oppdatert `main`, som nå inkluderer PR #154/D-242 (`ConnectorHealthSweep`/Fiken-Stripe-Vipps-`live_test`,
+merget `27e523d` under D-192) OG PR #157/D-245. Ingen kodekonflikt for selve D-243-fiksen - kun
+docs (`DECISIONS_AND_ASSUMPTIONS.md`/denne filen). D-243 sin `.env`-parser-CRLF-fiks er uendret fra
+forrige merknad under - se D-243 i DECISIONS_AND_ASSUMPTIONS.md. **Live
 connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
