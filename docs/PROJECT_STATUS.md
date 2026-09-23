@@ -1,6 +1,13 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-247/D-248:
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d245-neonomics-device-id`, PR #157). **D-248 LIVE
+BEKREFTET av Tobias på egen host:** etter `git pull` til `198929a` + `docker compose --env-file .env
+-f infra/local/docker-compose.yml up -d --build api worker` (riktig `--env-file`/`-f`-kombinasjon
+kreves - `docker compose` sin egen variabel-interpolasjon leter etter `.env` i prosjekt-mappen, ikke
+cwd, når `-f` peker til en annen mappe enn der kommandoen kjøres fra) - "Test tilkobling" for Vercel:
+**"tilkobling OK".** Telegram (D-247) ikke eksplisitt re-testet live ennå av Tobias denne runden.
+
+**Forrige milepæl (uendret): D-247/D-248:
 "ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK GJENNOMGANG AV DE 6 GJENVÆRENDE CONNECTORENE** (Tobias
 direkte i chat: "men alle skal fungere absolutt alle begynn på det") - github/google_calendar/gmail/
 google_drive VERIFISERT TRYGGE (token kommer via standard Infisical-aware `ToolGateway.execute()`,
