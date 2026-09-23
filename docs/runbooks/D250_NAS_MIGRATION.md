@@ -71,8 +71,13 @@ docker compose --env-file .env -f infra/local/docker-compose.yml up -d postgres
 # vent til healthy:
 docker compose -f infra/local/docker-compose.yml ps postgres
 
+# MERK: $JARVIS_DB_ADMIN_USER er IKKE automatisk satt i bash-shellet - kun
+# Docker Compose leser .env-filen direkte. Parse verdien fra .env eksplisitt:
+ADMIN_USER=$(grep -m1 '^JARVIS_DB_ADMIN_USER=' .env | cut -d= -f2-)
+[ -z "$ADMIN_USER" ] && ADMIN_USER=postgres
+
 docker compose --env-file .env -f infra/local/docker-compose.yml exec -T postgres \
-  psql -U "$JARVIS_DB_ADMIN_USER" -d postgres < jarvis-full-backup-*.sql
+  psql -U "$ADMIN_USER" -d postgres < jarvis-full-backup-*.sql
 ```
 
 `pg_dumpall`-filen inneholder egne `CREATE DATABASE`/`CREATE ROLE`-setninger for hele clusteret,
@@ -91,8 +96,9 @@ curl http://127.0.0.1:3010/health
 ## Trinn 6 - Verifiser dataene faktisk kom med
 
 ```bash
+# Bruk samme $ADMIN_USER som i Trinn 4 (parses fra .env, ikke autosatt i bash):
 docker compose --env-file .env -f infra/local/docker-compose.yml exec postgres \
-  psql -U "$JARVIS_DB_ADMIN_USER" -d jarvis -c "SELECT count(*) FROM messages;"
+  psql -U "$ADMIN_USER" -d jarvis -c "SELECT count(*) FROM messages;"
 ```
 
 Sammenlign tallet mot det du forventer fra PC-en (kjør samme spørring der før du stopper PC-stacken,
