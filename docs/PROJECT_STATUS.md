@@ -1,6 +1,6 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d250-nas-migration-runbook`, PR pending, D-250 - NAS-
+**Oppdatert:** 2026-09-23 (branch `claude/fase-d250-nas-migration-runbook`, PR #159, D-250 - NAS-
 flytting, Trinn 1). Tobias, direkte i chat etter en lang live-feilsøkingsøkt (Tailscale/tale):
 "det skal ligge på u green jobbe på pc og skal ha direkte tilgagn til jarvis". Dette er
 `DEPLOYMENT_STRATEGY.md` §2 sitt allerede planlagte "Trinn 1", ikke en ny beslutning. Kildekode-
@@ -9,9 +9,12 @@ migrasjoner). Levert: `docs/runbooks/D250_NAS_MIGRATION.md` - trinnvis oppskrift
 `pg_dumpall`-backup FØR noe røres, `.env`/backup direkte mellom Tobias sine egne maskiner,
 gjenoppretting og verifisering på NAS-en FØR PC-stacken stoppes, eksplisitt rollback). Selve
 utførelsen krever SSH-tilgang denne økten ikke har - et oppskrift-dokument, ikke en kjørt migrering.
-Se D-250 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+**Live utførelse pågår nå direkte med Tobias i chat** (PC → NAS `.env`/backup-overføring via PuTTY
+`pscp`) - flere infrastrukturproblemer løst underveis (manglende SSH-klient på PC, NAS-brukeren
+`Jarvis` manglet hjemmekatalog/`/volume1`-skrivetilgang); ikke fullført ennå. Se D-250 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
-**Forrige milepæl (uendret, PR pending): D-249 - `/voice`-siden manglet ekkokansellering
+**Forrige milepæl (uendret, MERGET): D-249 - `/voice`-siden manglet ekkokansellering
 (selvutløst barge-in + forgiftet STT) og TTS-lydrammer klikket ved bufferskjøter.** Begge fikset i
 `apps/web/voice.html` (`getUserMedia` ber nå om ekkokansellering, `playTtsFrame()` fader inn/ut per
 ramme), pluss en `cache-control: no-cache`-header lagt til på `/`/`/dashboard`/`/voice` (uten den
@@ -20,6 +23,12 @@ DECISIONS_AND_ASSUMPTIONS.md for full detalj. Tale er FORTSATT rapportert ustabi
 disse fiksene ("starter men stopper, skurer") - uavklart om gjenstående nettverksjitter over
 Tailscale eller en tredje, ikke identifisert kodefeil; venter på teknisk-logg fra klienten for videre
 diagnose, satt på vent mens NAS-flyttingen prioriteres.
+
+**Forrige milepæl (uendret, MERGET): D-244 - full-prosjekt-revisjon (PR #156), etter merge av
+oppdatert `main`** som da inkluderte BÅDE PR #154/D-242 (`27e523d`) OG PR #155/D-243 (`48e95f0`),
+begge merget under D-192. Ingen kodekonflikt for selve D-244-revisjonen - kun docs
+(`DECISIONS_AND_ASSUMPTIONS.md`/denne filen, D-24x kronologisk rekkefølge: 240-248). Se D-244 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret, MERGET):** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -

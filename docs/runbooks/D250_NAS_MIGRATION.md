@@ -26,8 +26,13 @@ Kjør PÅ PC-EN (der stacken kjører i dag), fra repo-roten:
 # Full pg_dumpall - ALLE databaser i clusteret (jarvis, infisical, langfuse),
 # ikke bare Tier-1-tabellene BackupService (modules/watchdog/src/backup.ts)
 # dekker - den er et app-nivå supplement, ikke full migrerings-backup.
+#
+# MERK: $env:JARVIS_DB_ADMIN_USER er IKKE automatisk satt i PowerShell - kun
+# Docker Compose leser .env-filen direkte. Parse verdien fra .env eksplisitt:
+$adminUser = ((Get-Content .env | Select-String "^JARVIS_DB_ADMIN_USER=") -replace "^JARVIS_DB_ADMIN_USER=","").Trim()
+if (-not $adminUser) { $adminUser = "postgres" }
 docker compose --env-file .env -f infra/local/docker-compose.yml exec -T postgres `
-  pg_dumpall -U $env:JARVIS_DB_ADMIN_USER > jarvis-full-backup-$(Get-Date -Format yyyyMMdd-HHmmss).sql
+  pg_dumpall -U $adminUser > jarvis-full-backup-$(Get-Date -Format yyyyMMdd-HHmmss).sql
 ```
 
 Bekreft at filen faktisk har innhold (ikke tom pga. feil credential):
