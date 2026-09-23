@@ -262,6 +262,7 @@
           const event = (frame.match(/^event: (.+)$/m) || [])[1];
           const data = JSON.parse((frame.match(/^data: (.+)$/m) || [])[1] || "{}");
           if (event === "token") reply.textContent += data.token;
+          if (event === "error") reply.textContent = "Feil: " + (data.message || "ukjent feil");
           if (event === "done") {
             if (!reply.textContent) reply.textContent = data.reply;
             const meta = document.createElement("div");

@@ -373,6 +373,12 @@ function json(res: ServerResponse, status: number, body: unknown, extraHeaders: 
 export function createApiServer(deps?: ApiDeps): Server {
   return createServer((req, res) => {
     void route(req, res, deps).catch((err: Error) => {
+      // D-251 (live NAS-migreringsfunn): denne grenen logget FØR ingenting når
+      // headers allerede var sendt (SSE-streamen fra /chat) - en feil etter
+      // `res.writeHead(200, text/event-stream)` avsluttet streamen stille med
+      // `res.end()` alene, usynlig for BÅDE klienten (ingen `error`-event) OG
+      // server-loggen. Logg ALLTID, uansett hvilken gren som følger.
+      console.error(JSON.stringify({ msg: "route_unhandled_error", path: req.url, error: err.message }));
       if (!res.headersSent) {
         json(res, 500, { error: "internal_error", message: err.message });
       } else {
@@ -515,17 +521,31 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
           abort.abort();
         }
       });
-      const result = await deps.conversation.handle(
-        resolved.identity,
-        body.message,
-        (token) => send("token", { token }),
-        abort.signal,
-        body.provider,
-        // D-30: trusted verktøy-aktivitet - kun tool_name, aldri args/resultat-JSON.
-        // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
-        (toolName) => send("tool_call", { tool_name: toolName })
-      );
-      send("done", { ...result, session_id: sessionId });
+      // D-251 (live NAS-migreringsfunn): en feil herfra, etter at SSE-headers
+      // allerede er sendt (over), kunne IKKE lenger bli en vanlig 500-respons -
+      // den ytre feilhåndteringen i `createApiServer()` kunne kun avslutte
+      // streamen stille (`res.end()`), usynlig for klienten OG (før D-251) for
+      // loggen. Fang derfor HER: logg strukturert (samme mønster som resten av
+      // filen) og send et eksplisitt `error`-event FØR streamen lukkes, slik at
+      // klienten kan vise noe i stedet for en tom, uforklarlig "svarer ikke".
+      try {
+        const result = await deps.conversation.handle(
+          resolved.identity,
+          body.message,
+          (token) => send("token", { token }),
+          abort.signal,
+          body.provider,
+          // D-30: trusted verktøy-aktivitet - kun tool_name, aldri args/resultat-JSON.
+          // Voice-klientens HttpCoreClient forstår allerede `tool_call`-eventet.
+          (toolName) => send("tool_call", { tool_name: toolName })
+        );
+        send("done", { ...result, session_id: sessionId });
+      } catch (err) {
+        console.error(JSON.stringify({
+          msg: "chat_stream_error", session_id: sessionId, error: (err as Error).message
+        }));
+        send("error", { message: "Noe gikk galt under generering. Prøv igjen." });
+      }
       res.end();
       return;
     }
