@@ -391,21 +391,25 @@ async function route(req: IncomingMessage, res: ServerResponse, deps?: ApiDeps):
 
   if (req.method === "GET" && url.pathname === "/") {
     const html = await readFile(WEB_INDEX, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    // D-249: uten no-cache kan en mobilnettleser fortsette å servere en
+    // gammel, allerede-fikset versjon av siden fra sin lokale cache selv
+    // etter en fersk `docker compose up --build` - forvirrende og vanskelig
+    // å skille fra at selve fiksen ikke virket.
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     res.end(html);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/dashboard") {
     const html = await readFile(WEB_DASHBOARD, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     res.end(html);
     return;
   }
 
   if (req.method === "GET" && url.pathname === "/voice") {
     const html = await readFile(WEB_VOICE, "utf8");
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
     res.end(html);
     return;
   }
