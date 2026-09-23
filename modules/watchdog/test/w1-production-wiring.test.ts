@@ -184,7 +184,9 @@ describe("D-181 (BLOCKER B1, arkitekt-review av PR #96): nødvarselet hopper BEV
   });
 
   it("worker-main.ts injiserer DEN SAMME telegramTransport/toolSecretProvider-instansen i BÅDE den ordinære telegram-registreringen OG WatchdogEmergencyAlertSink (ingen parallell credential-mekanisme)", () => {
-    expect(workerMainSource).toContain("const telegramTransport = new TelegramTransport();");
+    // D-247: chatId sendes nå som en resolver mot toolSecretProvider (Infisical-primær,
+    // samme bug-klasse/fiks som D-246) - ikke lenger en bokstavelig tom konstruktør.
+    expect(workerMainSource).toContain('const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID"));');
     expect(workerMainSource).toMatch(/telegram:\s*telegramTransport/);
     expect(workerMainSource).toContain("new WatchdogEmergencyAlertSink(telegramTransport, toolSecretProvider)");
     // Ingen ANDRE `new TelegramTransport(` - nøyaktig én instans i hele filen.

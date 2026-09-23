@@ -116,7 +116,13 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "drive", action: "list_files", parameters: () => ({}) }
   },
   {
-    id: "telegram", display_name: "Telegram", category: "tool_gateway", credential_refs: ["JARVIS_TELEGRAM_TOKEN"],
+    id: "telegram", display_name: "Telegram", category: "tool_gateway",
+    // D-247: `JARVIS_TELEGRAM_CHAT_ID` lagt til - `get_bot_info` (live_test
+    // under) trenger den ikke, men selve `telegram.notify` (ekte utsendelse,
+    // inkl. Daily Brief og watchdog-nødvarsel) gjør, og feltet var usynlig
+    // for eieren i dashbordet uten denne oppføringen - samme bug-klasse som
+    // D-245/D-246.
+    credential_refs: ["JARVIS_TELEGRAM_TOKEN", "JARVIS_TELEGRAM_CHAT_ID"],
     // `telegram.notify` er en EKTE meldingsutsendelse (klasse B) - aldri
     // trygg som test. `get_bot_info` (Telegram Bot API sin `getMe`, lagt til
     // i live-transports.ts AKKURAT for dette formålet) krever kun boten sin
@@ -147,7 +153,10 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   },
   {
     id: "vipps", display_name: "Vipps", category: "finance",
-    credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY"],
+    // D-246: `JARVIS_VIPPS_MSN` (merchant serial number) lagt til - samme
+    // "credential_refs ufullstendig relativt til getCredentials()"-bug-klasse
+    // som D-245 fant for Neonomics sin DEVICE_ID.
+    credential_refs: ["JARVIS_VIPPS_CLIENT_ID", "JARVIS_VIPPS_CLIENT_SECRET", "JARVIS_VIPPS_SUBSCRIPTION_KEY", "JARVIS_VIPPS_MSN"],
     // D-242: `POST /accesstoken/get` (SAMME kall enhver ekte Vipps-handling
     // uansett gjør FØRST) - INGEN parameterløs "whoami"-lesing finnes i
     // ePayment-API-et, men selve token-hentingen ER INGEN mutasjon og
@@ -156,15 +165,28 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "finance_vipps", action: "check_credentials", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
   },
   {
+    // D-245 (2026-09-23, funnet LIVE av Tobias): `neonomicsCredentialsProvider.
+    // getCredentials()` (apps/api/src/main.ts) har ALLTID krevd
+    // `JARVIS_NEONOMICS_DEVICE_ID` (en Jarvis-generert, stabil enhets-UUID -
+    // `x-device-id`-headeren Neonomics knytter samtykke/sesjon til, IKKE noe
+    // Tobias henter FRA Neonomics) i tillegg til CLIENT_ID/SECRET - men denne
+    // listen manglet den, så dashbordets "lim inn ny verdi"-felt ble ALDRI
+    // vist for den. Testknappen kunne derfor ALDRI lykkes uansett hvilken
+    // CLIENT_ID/SECRET som ble limt inn (`neonomics_credentials_unavailable`
+    // uavhengig av dem). Samme "kravt credential mangler i registeret"-
+    // klasse som D-236 (tom streng behandlet som satt) - her manglet
+    // referansen helt. Fiks: DEVICE_ID lagt til i `credential_refs`.
     id: "neonomics", display_name: "Neonomics", category: "finance",
-    credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET"],
+    credential_refs: ["JARVIS_NEONOMICS_CLIENT_ID", "JARVIS_NEONOMICS_CLIENT_SECRET", "JARVIS_NEONOMICS_DEVICE_ID"],
     // Katalogoppslag (bankene Neonomics dekker) - krever INGEN eksisterende
     // banksamtykke, kun gyldige API-credentials. Ren lesing, klasse A.
     live_test: { tool_id: "finance_neonomics", action: "list_banks", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }
   },
   {
+    // D-246: `JARVIS_WALLESTER_API_BASE_URL`/`JARVIS_WALLESTER_ACCOUNT_ID`
+    // lagt til - samme bug-klasse som D-245/Vipps over.
     id: "wallester", display_name: "Wallester", category: "finance",
-    credential_refs: ["JARVIS_WALLESTER_API_KEY", "JARVIS_WALLESTER_PRIVATE_KEY_PEM"],
+    credential_refs: ["JARVIS_WALLESTER_API_KEY", "JARVIS_WALLESTER_PRIVATE_KEY_PEM", "JARVIS_WALLESTER_API_BASE_URL", "JARVIS_WALLESTER_ACCOUNT_ID"],
     // Leverandørkontosaldo - "read-only provider-tilstand", uavhengig av om
     // noe kort faktisk er utstedt ennå. Ren lesing, klasse A.
     live_test: { tool_id: "finance_wallester", action: "get_provider_balance", parameters: (identity) => ({ tenant_id: identity.tenant_id }) }

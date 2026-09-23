@@ -129,11 +129,13 @@ describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve ve
     expect(github?.configured).toBe(true);
 
     const wallester = statuses.find((s) => s.id === "wallester");
-    // wallester krever BÅDE JARVIS_WALLESTER_API_KEY og JARVIS_WALLESTER_PRIVATE_KEY_PEM - ingen konfigurert her.
+    // wallester krever ALLE FIRE refs (D-246: API_BASE_URL/ACCOUNT_ID lagt til) - ingen konfigurert her.
     expect(wallester?.configured).toBe(false);
     expect(wallester?.credentials).toEqual([
       { ref: "JARVIS_WALLESTER_API_KEY", configured: false },
-      { ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM", configured: false }
+      { ref: "JARVIS_WALLESTER_PRIVATE_KEY_PEM", configured: false },
+      { ref: "JARVIS_WALLESTER_API_BASE_URL", configured: false },
+      { ref: "JARVIS_WALLESTER_ACCOUNT_ID", configured: false }
     ]);
   });
 

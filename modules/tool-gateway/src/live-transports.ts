@@ -794,8 +794,30 @@ export function driveTransportsIfConfigured(): Partial<Record<string, ToolTransp
   return googleDriveCredentialsConfigured() ? { drive: new GoogleDriveTransport() } : {};
 }
 
+/**
+ * D-247: `chatId` var FØR et rått `string | undefined`-felt, frosset ÉN gang
+ * ved konstruksjon fra `process.env["JARVIS_TELEGRAM_CHAT_ID"]` - HELT
+ * UTENOM `readSecretProvider`/`toolSecretProvider` (Infisical-primær, se
+ * D-246). Dashbordets "Lagre" skriver KUN til Infisical, så en eier-limt
+ * chat-ID der ble ALDRI sett av selve utsendelsen (`telegram.notify`,
+ * inkl. Daily Brief-levering og watchdog sitt nødvarsel) - identisk
+ * bug-klasse som D-246 sine fem finans-connectorer, funnet her under samme
+ * "alle skal fungere absolutt alle"-gjennomgang. Fiks: konstruktøren
+ * godtar NÅ ENTEN en rå streng (uendret oppførsel - brukt av eksisterende
+ * scripts/tester som bevisst vil ha en fast/deterministisk verdi) ELLER en
+ * resolver-funksjon som slås opp PÅ NYTT ved HVERT kall (samme mønster som
+ * finans-fiksens `getCredentials()`) - produksjons-wiring (main.ts/
+ * worker-main.ts) sender nå en resolver mot `readSecretProvider`/
+ * `toolSecretProvider`, slik at en ny dashbord-verdi virker UTEN restart.
+ */
 export class TelegramTransport implements ToolTransport {
-  constructor(private readonly chatId: string | undefined = process.env["JARVIS_TELEGRAM_CHAT_ID"]) {}
+  constructor(
+    private readonly chatId: string | undefined | (() => Promise<string | null>) = process.env["JARVIS_TELEGRAM_CHAT_ID"]
+  ) {}
+  private async resolveChatId(): Promise<string | undefined> {
+    if (typeof this.chatId === "function") return (await this.chatId()) ?? undefined;
+    return this.chatId;
+  }
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
     if (action === "get_bot_info") {
       // Task #122 (D-213): Telegram Bot API sin offisielle `getMe` - KUN
@@ -808,10 +830,11 @@ export class TelegramTransport implements ToolTransport {
       return { data: body.result ?? null };
     }
     if (action !== "notify") throw new Error(`telegram_unsupported_action_${action}`);
-    if (!this.chatId) throw new Error("telegram_chat_id_not_configured");
+    const chatId = await this.resolveChatId();
+    if (!chatId) throw new Error("telegram_chat_id_not_configured");
     const response = await fetch(`https://api.telegram.org/bot${credential}/sendMessage`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: this.chatId, text: String(parameters["message"]) })
+      body: JSON.stringify({ chat_id: chatId, text: String(parameters["message"]) })
     });
     if (!response.ok) throw new Error(`telegram_error_${response.status}`);
     const body = (await response.json()) as { result?: { message_id?: number } };
@@ -820,32 +843,52 @@ export class TelegramTransport implements ToolTransport {
 }
 
 /**
- * Fikser en REELL, live-funnet produksjonsfeil (Tobias, 2026-09-22): `vercel`
- * har hatt en `live_test`-oppføring i `connector-registry.ts` siden D-213,
- * men `integrations.ts` sin `firstWaveTools()` fikk ALDRI en ekte transport
- * for `tool_id: "vercel"` i `transports`-recorden (`main.ts`/`worker-main.ts`)
- * - kallet falt derfor gjennom til `UnconfiguredHttpTransport`, som ALLTID
+ * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
+ * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
+ * `live_test`-oppføring i `connector-registry.ts` siden D-213, men
+ * `integrations.ts` sin `firstWaveTools()` fikk ALDRI en ekte transport for
+ * `tool_id: "vercel"` i `transports`-recorden (`main.ts`/`worker-main.ts`) -
+ * kallet falt derfor gjennom til `UnconfiguredHttpTransport`, som ALLTID
  * kaster `vercel_not_configured`, uansett om credentialen er gyldig. Dette
  * er "koden eksisterer" != "koden er faktisk koblet inn", SAMME klasse funn
- * som D-211/D-212 (se DECISIONS_AND_ASSUMPTIONS.md), nå en femte gang.
- * `GET /v6/deployments` (Vercel sin offisielle REST-API, `Authorization:
- * Bearer <token>`, verifisert mot offisiell dokumentasjon/websøk - ikke
- * gjettet) er den ENESTE handlingen `integrations.ts` registrerer for
- * `vercel` i dag (`read_deployments`, klasse A, `scopes: ["deployments:read"]`)
- * - full D-41-kapabilitet (deploy/redeploy/miljøvariabel-styring) forblir
- * `NY_BACKLOG`, eksplisitt dokumentert i `docs/INTEGRATIONS.md` §4.5, ikke
- * stille utelatt her.
+ * som D-211/D-212 (se DECISIONS_AND_ASSUMPTIONS.md).
+ * D-248 (samme "alle skal fungere absolutt alle"-gjennomgang som D-247):
+ * `vercel`/`read_deployments` var registrert i BÅDE `connector-registry.ts`
+ * (dashbord, `credential_refs`, `live_test`) OG `integrations.ts` sin
+ * `firstWaveTools()` (`ToolDefinition` med `credential_ref`) - men INGEN
+ * `VercelTransport`-klasse fantes noe sted i kodebasen, og INGEN
+ * `main.ts`/`worker-main.ts` sendte noensinne en `vercel`-nøkkel inn i
+ * `firstWaveTools({...})`. `transport("vercel")` (se `integrations.ts`)
+ * falt derfor ALLTID tilbake til `UnconfiguredHttpTransport("vercel")`,
+ * som ubetinget kaster `vercel_not_configured` - UANSETT om
+ * `JARVIS_VERCEL_TOKEN` var satt (Infisical ELLER `.env`). Dette er
+ * NØYAKTIG cross-cutting Theme 1 fra full-prosjekt-revisjonen
+ * (`docs/audit/2026-09-23-full-project-audit/SUMMARY.md`) - "registrert,
+ * men aldri faktisk wiret til en reell utførelsesvei" - funnet live via
+ * Tobias sin egen dashbord-test (`feilet: tool_failed:vercel_not_configured`)
+ * FØR denne posten; en tidligere Docker-rebuild-fiks samme økt løste en
+ * ekte, men SEPARAT, stale-image-årsak - den rørte ALDRI denne strukturelle
+ * mangelen. Offisiell Vercel REST API v6 "List deployments"
+ * (`GET https://api.vercel.com/v6/deployments`, `Authorization: Bearer
+ * <token>`) - verifisert mot Vercel sin offisielle API-dokumentasjon, ikke
+ * gjettet. KUN `read_deployments` (klasse A, side-effektfri lesing,
+ * eksisterende registrert scope) implementeres her - en bredere D-41-
+ * kapabilitetsvurdering (skriv/redeploy/env vars) er BEVISST en egen,
+ * separat oppgave, ikke del av denne bug-fiksen.
  */
 export class VercelTransport implements ToolTransport {
   async invoke(action: string, _parameters: Record<string, JsonValue>, credential: string) {
     if (action !== "read_deployments") throw new Error(`vercel_unsupported_action_${action}`);
-    const response = await fetch("https://api.vercel.com/v6/deployments?limit=5", {
+    const response = await fetch("https://api.vercel.com/v6/deployments?limit=20", {
       headers: { authorization: `Bearer ${credential}` }
     });
     if (!response.ok) throw new Error(`vercel_error_${response.status}`);
-    const body = (await response.json()) as { deployments?: Array<{ uid: string; name: string; url: string; state?: string; created: number }> };
+    const body = (await response.json()) as {
+      deployments?: Array<{ uid: string; name: string; url: string; state?: string; readyState?: string; created: number }>;
+    };
     const deployments = (body.deployments ?? []).map((d) => ({
-      id: d.uid, name: d.name, url: d.url, state: d.state ?? "unknown", created_at: new Date(d.created).toISOString()
+      id: d.uid, name: d.name, url: d.url, state: d.readyState ?? d.state ?? "unknown",
+      created_at: new Date(d.created).toISOString()
     }));
     return { data: { deployments } };
   }
