@@ -106,7 +106,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-248) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -116,7 +116,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("vercel: new VercelTransport()");
     expect(callBlock).toMatch(/telegram: new TelegramTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\)/);
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-248) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];

@@ -92,6 +92,12 @@ export class VippsFinanceTransport implements ToolTransport {
         const result = await this.service.runVippsProviderAnomalyDetection(tenantId, memorySpace);
         return { data: result as unknown as JsonValue };
       }
+      // D-242: connector-helsesjekk-probe - ren providerside-token-sjekk,
+      // INGEN memory-skriving, ingen `payment_intent_id`.
+      case "check_credentials": {
+        await this.service.checkVippsCredentials(tenantId);
+        return { data: { checked: true } as unknown as JsonValue };
+      }
       default:
         throw new Error(`finance_vipps_action_not_implemented:${action}`);
     }

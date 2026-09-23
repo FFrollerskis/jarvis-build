@@ -10,3 +10,4 @@ export * from "./scheduler.ts";
 export * from "./mesh-bridge.ts";
 export * from "./memory-transport.ts";
 export * from "./connector-registry.ts";
+export * from "./connector-health-sweep.ts";

@@ -114,12 +114,12 @@ describe("B: owner_controls.test_connector", () => {
     ).rejects.toThrow("unknown_connector:does_not_exist");
   });
 
-  it("en presence_only-connector (uten live_test, f.eks. 'fiken') gir en STRUKTURERT svar - ALDRI en kastet feil, og gateway.execute() kalles ALDRI", async () => {
+  it("en presence_only-connector (uten live_test, f.eks. 'anthropic' - ModelGateway, ikke ToolGateway, D-242) gir en STRUKTURERT svar - ALDRI en kastet feil, og gateway.execute() kalles ALDRI", async () => {
     const { gateway, executeCalls } = fakeGateway();
     const transport = new OwnerControlsTransport(fakeService(), gateway);
-    const result = await transport.invoke("test_connector", { connector_id: "fiken" }, "cred", { identity: identity() });
+    const result = await transport.invoke("test_connector", { connector_id: "anthropic" }, "cred", { identity: identity() });
     expect(result.data).toEqual({
-      connector_id: "fiken", test_method: "presence_only", tested: false,
+      connector_id: "anthropic", test_method: "presence_only", tested: false,
       reason: "live_test_not_available_for_connector"
     });
     expect(executeCalls).toEqual([]);

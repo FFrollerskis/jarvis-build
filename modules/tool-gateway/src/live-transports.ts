@@ -843,6 +843,15 @@ export class TelegramTransport implements ToolTransport {
 }
 
 /**
+ * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
+ * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
+ * `live_test`-oppføring i `connector-registry.ts` siden D-213, men
+ * `integrations.ts` sin `firstWaveTools()` fikk ALDRI en ekte transport for
+ * `tool_id: "vercel"` i `transports`-recorden (`main.ts`/`worker-main.ts`) -
+ * kallet falt derfor gjennom til `UnconfiguredHttpTransport`, som ALLTID
+ * kaster `vercel_not_configured`, uansett om credentialen er gyldig. Dette
+ * er "koden eksisterer" != "koden er faktisk koblet inn", SAMME klasse funn
+ * som D-211/D-212 (se DECISIONS_AND_ASSUMPTIONS.md).
  * D-248 (samme "alle skal fungere absolutt alle"-gjennomgang som D-247):
  * `vercel`/`read_deployments` var registrert i BÅDE `connector-registry.ts`
  * (dashbord, `credential_refs`, `live_test`) OG `integrations.ts` sin

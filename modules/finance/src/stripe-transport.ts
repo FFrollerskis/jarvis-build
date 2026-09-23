@@ -118,6 +118,13 @@ export interface StripePaymentIntentObject {
   last_payment_error?: { message?: string } | null;
 }
 
+/** D-242: minimalt utdrag av Stripe sin `GET /v1/balance` (offisiell, verifisert-via-websøk endepunkt - "returns a balance object for the account that was authenticated in the request", INGEN parametre) - kun de to feltene brukt av `checkStripeBalance()` sin "virker credentialen?"-probe. */
+export interface StripeBalanceObject {
+  object: "balance";
+  available: Array<{ amount: number; currency: string }>;
+  pending: Array<{ amount: number; currency: string }>;
+}
+
 export interface StripeRefundObject {
   id: string;
   object: "refund";
@@ -219,5 +226,16 @@ export class StripeTransport {
 
   async getRefund(stripeRefundId: string): Promise<StripeRefundObject> {
     return this.request<StripeRefundObject>("GET", `/refunds/${encodeURIComponent(stripeRefundId)}`);
+  }
+
+  /**
+   * D-242: billig helsesjekk-/reachability-probe (SAMME rolle som
+   * `FikenTransport.listCompanies()`) - `GET /v1/balance` krever INGEN
+   * parametre, gjør INGEN mutasjon, og feiler umiddelbart med 401 på en
+   * ugyldig/tilbakekalt `secretKey` - egnet som `live_test` for `stripe`-
+   * connectoren uten å måtte opprette en reell PaymentIntent/Refund.
+   */
+  async getBalance(): Promise<StripeBalanceObject> {
+    return this.request<StripeBalanceObject>("GET", "/balance");
   }
 }

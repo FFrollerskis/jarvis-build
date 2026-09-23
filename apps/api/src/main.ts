@@ -41,7 +41,7 @@ import {
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   meshToolDefinitions, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
-  emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler
+  emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
   BusinessEventSyncService, BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService,
@@ -570,9 +570,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // slås opp på nytt ved hvert `notify`-kall i stedet for å fryses fra
     // `process.env` ved oppstart (samme bug-klasse/fiks som D-246).
     telegram: new TelegramTransport(() => readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")),
-    // D-248: `VercelTransport` fantes ALDRI - `transport("vercel")` falt
-    // derfor alltid tilbake til `UnconfiguredHttpTransport("vercel")`
-    // (ubetinget `vercel_not_configured`), uansett credential-tilstand.
+    // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
+    // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
+    // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
+    // `live-transports.ts` sin `VercelTransport`-doc-kommentar for full
+    // begrunnelse).
     vercel: new VercelTransport(),
     // D-90 (UA-4 NESTE SLICE): Business OS × Marketing Memory-integrasjon -
     // `marketingMemoryBriefSource(growthService)` injiseres her (app-laget,
@@ -1141,6 +1143,28 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vision-retention-sweep", Number(process.env["JARVIS_VISION_RETENTION_SWEEP_HOUR"] ?? 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
+  // D-242 (Tobias direkte chat-instruks: "du skal bygge det for absolutt
+  // alle som tester en gang om dagen så vi vet om credentials fungerer
+  // eller ikke hele tiden"): daglig `ConnectorHealthSweep` - SAMME
+  // reboot-durable DailyScheduler-mekanisme (eget job_name, egen
+  // klokkeslett-env). Kjøres via `toolGateway.execute()` MED eierens egen
+  // `ownerIdentity` (SAMME identitet `business-weekly-brief`/
+  // `situation-sweep` allerede bruker over) - alle 11 `live_test`-
+  // connectorer er klasse A (`test_connector` sin egen D-213-begrunnelse:
+  // "en 'test at dette fungerer'-handling for en allerede lesende, klasse
+  // A-operasjon ER fortsatt klasse A"), ALLOW uansett autoritetsmodus,
+  // INGEN mandat/godkjenning nødvendig. Trygt å kjøre uten NOEN
+  // finans-/Vercel-credentials konfigurert - `runConnectorHealthSweep()`
+  // hopper deterministisk over enhver ikke-konfigurert connector FØR noe
+  // kall gjøres (se doc-kommentaren i `connector-health-sweep.ts`).
+  new DailyScheduler(
+    pool, "connector-health-sweep", Number(process.env["JARVIS_CONNECTOR_HEALTH_SWEEP_HOUR"] ?? 10)
+  ).start(async () => {
+    const result = await runConnectorHealthSweep(toolGateway, ownerIdentity);
+    if (result.failed.length > 0) {
+      console.error(JSON.stringify({ msg: "connector_health_sweep_completed_with_failures", failed: result.failed }));
+    }
+  });
   return deps;
 }
 

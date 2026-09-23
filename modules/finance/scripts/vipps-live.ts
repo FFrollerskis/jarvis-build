@@ -36,7 +36,7 @@ import {
   type StripeCredentials, type StripeCredentialsProvider, type StripePaymentWriter,
   type VippsCredentials, type VippsCredentialsProvider
 } from "../src/index.ts";
-import type { StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
+import type { StripeBalanceObject, StripePaymentIntentObject, StripeRefundObject } from "../src/stripe-transport.ts";
 import type { VippsPaymentObject, VippsPaymentWriter } from "../src/vipps-transport.ts";
 import { createApiServer } from "../../../apps/api/src/server.ts";
 import { evaluateSecretSafety, type Verdict } from "./lib/fiken-live-lib.ts";
@@ -168,6 +168,7 @@ class ScriptedVippsWriter implements VippsPaymentWriter {
     this.refundCalls++;
     return { reference: input.reference, state: "AUTHORIZED", amount: { currency: input.currency, value: input.amountOre } };
   }
+  async checkCredentials(): Promise<void> {}
 }
 
 function signedVippsHeaders(rawBody: Buffer, host: string, secret = FAKE_WEBHOOK_SECRET): Record<string, string> {
@@ -228,6 +229,9 @@ async function main(): Promise<void> {
     },
     async getRefund(id): Promise<StripeRefundObject> {
       return { id, object: "refund", amount: 1000, currency: "nok", status: "succeeded", payment_intent: "pi_x", reason: null };
+    },
+    async getBalance(): Promise<StripeBalanceObject> {
+      return { object: "balance", available: [{ amount: 0, currency: "nok" }], pending: [{ amount: 0, currency: "nok" }] };
     }
   };
   const stripeCredentialsProvider: StripeCredentialsProvider = { async getCredentials(): Promise<StripeCredentials | null> { return { secretKey: "sk_test_fake_slice3_preserved" }; } };

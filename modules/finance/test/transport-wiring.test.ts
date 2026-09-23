@@ -37,6 +37,8 @@ describe("B: risikoklasser - kun ekte leverandørmutasjon/eier-sovereign kontrol
     expect(byAction["get_payment_intent"]).toBe("A");
     expect(byAction["list_payment_intents"]).toBe("A");
     expect(byAction["get_kill_switch"]).toBe("A");
+    // D-242: connector-helsesjekk-probe - ren lesing, klasse A.
+    expect(byAction["list_companies"]).toBe("A");
     expect(byAction["create_payment_intent"]).toBe("B");
     expect(byAction["settle_payment_intent"]).toBe("B");
     expect(byAction["cancel_payment_intent"]).toBe("B");
