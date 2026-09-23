@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, VercelTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -198,9 +198,13 @@ const growthService = new GrowthService(pool, consentEnforcementService);
 // D-109 (UA-6 Slice 3): identisk wiring-mønster som apps/api/src/main.ts -
 // ETT globalt eier-tilkoblet Stripe-credential-par, ingen tenant-
 // parametrisert Stripe-Connect-oppslag denne sliceen.
+// D-246: samme fiks som apps/api/src/main.ts - alle fire leser nå via
+// toolSecretProvider (Infisical-primær, SAMME kjede hasSecret() allerede
+// bruker) i stedet for rå process.env. Se main.ts sin D-246-kommentar for
+// full root-cause-begrunnelse.
 const stripeCredentialsProvider: StripeCredentialsProvider = {
   async getCredentials(): Promise<StripeCredentials | null> {
-    const secretKey = process.env["JARVIS_STRIPE_SECRET_KEY"];
+    const secretKey = await toolSecretProvider.get("JARVIS_STRIPE_SECRET_KEY");
     if (!secretKey) return null;
     return { secretKey };
   }
@@ -210,10 +214,10 @@ const stripeTenantResolver = () => process.env["JARVIS_STRIPE_TENANT_ID"] ?? nul
 // D-110 (UA-6 Slice 4): identisk wiring-mønster som apps/api/src/main.ts.
 const vippsCredentialsProvider: VippsCredentialsProvider = {
   async getCredentials(): Promise<VippsCredentials | null> {
-    const clientId = process.env["JARVIS_VIPPS_CLIENT_ID"];
-    const clientSecret = process.env["JARVIS_VIPPS_CLIENT_SECRET"];
-    const subscriptionKey = process.env["JARVIS_VIPPS_SUBSCRIPTION_KEY"];
-    const merchantSerialNumber = process.env["JARVIS_VIPPS_MSN"];
+    const clientId = await toolSecretProvider.get("JARVIS_VIPPS_CLIENT_ID");
+    const clientSecret = await toolSecretProvider.get("JARVIS_VIPPS_CLIENT_SECRET");
+    const subscriptionKey = await toolSecretProvider.get("JARVIS_VIPPS_SUBSCRIPTION_KEY");
+    const merchantSerialNumber = await toolSecretProvider.get("JARVIS_VIPPS_MSN");
     if (!clientId || !clientSecret || !subscriptionKey || !merchantSerialNumber) return null;
     return { clientId, clientSecret, subscriptionKey, merchantSerialNumber, environment: process.env["JARVIS_VIPPS_ENVIRONMENT"] === "production" ? "production" : "test" };
   }
@@ -222,9 +226,9 @@ const vippsWebhookSecretProvider = () => process.env["JARVIS_VIPPS_WEBHOOK_SECRE
 const vippsTenantResolver = () => process.env["JARVIS_VIPPS_TENANT_ID"] ?? null;
 const neonomicsCredentialsProvider: NeonomicsCredentialsProvider = {
   async getCredentials(): Promise<NeonomicsCredentials | null> {
-    const clientId = process.env["JARVIS_NEONOMICS_CLIENT_ID"];
-    const clientSecret = process.env["JARVIS_NEONOMICS_CLIENT_SECRET"];
-    const deviceId = process.env["JARVIS_NEONOMICS_DEVICE_ID"];
+    const clientId = await toolSecretProvider.get("JARVIS_NEONOMICS_CLIENT_ID");
+    const clientSecret = await toolSecretProvider.get("JARVIS_NEONOMICS_CLIENT_SECRET");
+    const deviceId = await toolSecretProvider.get("JARVIS_NEONOMICS_DEVICE_ID");
     if (!clientId || !clientSecret || !deviceId) return null;
     return {
       clientId, clientSecret, deviceId,
@@ -240,10 +244,10 @@ const neonomicsTenantResolver = () => process.env["JARVIS_NEONOMICS_TENANT_ID"] 
 // se main.ts sin wallesterCredentialsProvider for full begrunnelse.
 const wallesterCredentialsProvider: WallesterCredentialsProvider = {
   async getCredentials(): Promise<WallesterCredentials | null> {
-    const baseUrl = process.env["JARVIS_WALLESTER_API_BASE_URL"];
-    const apiKey = process.env["JARVIS_WALLESTER_API_KEY"];
-    const accountId = process.env["JARVIS_WALLESTER_ACCOUNT_ID"];
-    const privateKeyPem = process.env["JARVIS_WALLESTER_PRIVATE_KEY_PEM"];
+    const baseUrl = await toolSecretProvider.get("JARVIS_WALLESTER_API_BASE_URL");
+    const apiKey = await toolSecretProvider.get("JARVIS_WALLESTER_API_KEY");
+    const accountId = await toolSecretProvider.get("JARVIS_WALLESTER_ACCOUNT_ID");
+    const privateKeyPem = await toolSecretProvider.get("JARVIS_WALLESTER_PRIVATE_KEY_PEM");
     if (!baseUrl || !apiKey || !accountId || !privateKeyPem) return null;
     return {
       baseUrl, apiKey, accountId,
@@ -269,10 +273,11 @@ const cardService = new CardService(pool, wallesterCredentialsProvider, undefine
 // wiring-mønster som apps/api/src/main.ts - workeren sin mesh-tool-executor
 // maa kunne kalle finance_spend.*-handlingene identisk.
 const spendService = new SpendService(pool);
+// D-246: samme fiks som apps/api/src/main.ts.
 const fikenCredentialsProvider: FikenCredentialsProvider = {
   async getCredentials(): Promise<FikenCredentials | null> {
-    const refreshToken = process.env["JARVIS_FIKEN_REFRESH_TOKEN"];
-    const companySlug = process.env["JARVIS_FIKEN_COMPANY_SLUG"];
+    const refreshToken = await toolSecretProvider.get("JARVIS_FIKEN_REFRESH_TOKEN");
+    const companySlug = await toolSecretProvider.get("JARVIS_FIKEN_COMPANY_SLUG");
     if (!refreshToken || !companySlug) return null;
     return { refreshToken, companySlug };
   }
@@ -287,10 +292,19 @@ const githubRateLimitController = new GithubRateLimitController(
 // under) slik at NØYAKTIG SAMME `TelegramTransport`-instans også kan
 // injiseres i `WatchdogEmergencyAlertSink` - samme mottaker-konfigurasjon
 // (`chatId`), ingen parallell Telegram-klient.
-const telegramTransport = new TelegramTransport();
+// D-247: `chatId` sendes nå som en resolver mot `toolSecretProvider`
+// (Infisical-primær, SAMME instans/kjede som `JARVIS_TELEGRAM_TOKEN` selv
+// allerede leses via) - slås opp PÅ NYTT ved hvert `notify`-kall, i stedet
+// for å fryses fra `process.env` ved oppstart (samme bug-klasse/fiks som
+// D-246 sine fem finans-connectorer).
+const telegramTransport = new TelegramTransport(() => toolSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID"));
 for (const tool of firstWaveTools({
   email: new GmailTransport(), calendar: new GoogleCalendarTransport(),
   github: new GithubTransport(githubRateLimitController), telegram: telegramTransport,
+  // D-248: identisk wiring-mønster som apps/api/src/main.ts - VercelTransport
+  // fantes aldri, `transport("vercel")` falt derfor alltid tilbake til
+  // UnconfiguredHttpTransport("vercel") (ubetinget vercel_not_configured).
+  vercel: new VercelTransport(),
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans gis til
   // BusinessTransport slik at sync_business_events kan kalle Gmail/Calendar
   // - identisk wiring-mønster som apps/api/src/main.ts.
