@@ -28,7 +28,6 @@ videre merge under D-192.
 **Forrige milepæl (uendret): D-247/D-248 - "ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK
 GJENNOMGANG, PLUSS Vercel/GitHub connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub
 begge "tilkobling OK" på Tobias sin
-connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
 reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
