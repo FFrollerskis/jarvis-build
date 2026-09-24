@@ -354,6 +354,7 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     };
     const ev = events();
     const health = new VoiceHealth();
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const session = new VoiceSession(
       identity, core, fixedStt("", true), taggedTts().adapter, ev.handlers,
       new UtteranceJournal(), undefined, undefined, undefined, undefined, health
@@ -363,6 +364,15 @@ describe("Feilbaner (§35-§36): STT-/TTS-feil er trygge og normaliserte", () =>
     expect(ev.errors).toContain("stt_error");
     expect(coreCalled).toBe(false);
     expect(health.state("stt", true)).toBe("DEGRADED");
+    // D-254: den tekniske detaljen bak "stt_error" ble tidligere kun holdt i
+    // minnet, aldri logget eller eksponert - praktisk udiagnostiserbar live.
+    // Bevis nå at den faktiske feilmeldingen BÅDE logges server-side OG er
+    // lesbar via health.snapshot() (det /status leser).
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      JSON.stringify({ msg: "voice_stt_error", error: "stt_provider_500" })
+    );
+    expect(health.snapshot({ stt: true })["stt"]?.last_error).toBe("stt_provider_500");
+    consoleErrorSpy.mockRestore();
   });
 
   it("tom transkript (støy/ingen tale) → ingen modellkjøring (§35)", async () => {

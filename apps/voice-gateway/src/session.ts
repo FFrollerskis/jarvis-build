@@ -298,7 +298,14 @@ export class VoiceSession {
       try {
         text = await stt.end();
       } catch (err) {
-        // §35: STT-feil → normalisert feil, ALDRI modellkjøring på manglende transkript.
+        // §35: STT-feil → normalisert feil til klienten, ALDRI modellkjøring på
+        // manglende transkript. D-254: den tekniske detaljen (whisper.cpp
+        // exit code/stderr, OpenAI-status osv.) ble tidligere KUN lagret i
+        // in-memory health-state, aldri logget eller eksponert noe sted - en
+        // reell feil var derfor praktisk udiagnostiserbar uten kildekode-
+        // endring + redeploy hver gang. Logg den nå server-side, samme
+        // mønster som voice_core_error/voice_message_error under.
+        console.error(JSON.stringify({ msg: "voice_stt_error", error: (err as Error).message.slice(0, 200) }));
         this.health?.recordFailure("stt", (err as Error).message);
         this.events.onError("stt_error");
         this.setState("listening");
