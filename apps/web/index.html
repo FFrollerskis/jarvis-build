@@ -57,8 +57,29 @@
   // ingen tilgang i seg selv, og de sendes ALDRI til /chat - der presenteres
   // kun grant-tokenet, og serveren leser person/tenant/enhet/space/kanal ut av
   // grant-raden.
+  //
+  // D-252 (live NAS-migreringsfunn, Tobias direkte i chat: "dette kan ikke
+  // komme hver gang" - gjentatt "Autorisering feilet: enhet ikke innrullert"):
+  // `device_id` var FØR en hardkodet literal ("dev-web") DELT av ENHVER
+  // nettleser som lastet denne siden - telefon, PC, en ny nettleserprofil.
+  // Siden innrullering/nøkkelrotasjon er PER `device_id` (D-131), betydde
+  // det at innrullering fra ÉN nettleser stille rullet nøkkelen for ALLE
+  // andre, og enhver annen allerede-innrullert nettleser sluttet øyeblikkelig
+  // å fungere ("enhet ikke innrullert" ved neste autoriseringsforsøk) -
+  // uten at NOEN av nettleserne noensinne gjorde noe galt. `device_id` er nå
+  // selv en per-nettleser, tilfeldig generert og lagret verdi (samme
+  // `localStorage`-levetid som selve nøkkelen) - hver nettleser får sin EGEN
+  // enhetsidentitet og kan innrulleres/leve permanent uavhengig av alle andre.
+  function loadOrCreateDeviceId() {
+    const stored = localStorage.getItem("jarvis.deviceid");
+    if (stored) return stored;
+    const id = "web-" + crypto.randomUUID();
+    localStorage.setItem("jarvis.deviceid", id);
+    return id;
+  }
+
   const identity = {
-    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
+    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: loadOrCreateDeviceId(),
     memory_space: "personal", channel: "web"
   };
 

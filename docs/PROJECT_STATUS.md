@@ -1,8 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d251-chat-sse-silent-error`, PR pending, D-251 -
+**Oppdatert:** 2026-09-24 (branch `claude/fase-d251-chat-sse-silent-error`, PR #160 pending, D-252 -
+`device_id` var en literal delt av ALLE nettlesere, funnet rett etter D-251-fiksen samme
+NAS-migreringsøkt). Tobias, etter en tilsynelatende vellykket innrullering: "dette kan ikke komme
+hver gang" (gjentatt "Autorisering feilet: enhet ikke innrullert"). Root cause funnet ved å spørre
+databasen direkte i stedet for å gjette: `apps/web/index.html`/`dashboard.html`/`voice.html` brukte
+ALLE samme hardkodede `device_id: "dev-web"` - innrullering fra ÉN nettleser (PC-en, brukt til
+D-251-feilsøking) roterte STILLE nøkkelen bort fra enhver ANNEN allerede-innrullert nettleser
+(telefonen), siden nøkkelrotasjon bevisst dreper utestående grants (D-131). **Fiks:** `device_id` er
+nå en per-nettleser, tilfeldig generert OG `localStorage`-persistert verdi i alle tre sidene (samme
+delte nøkkelnavn på tvers av dem - dashbord/tale/webchat på SAMME fysiske nettleser deler fortsatt
+bevisst identitet, men FORSKJELLIGE nettlesere kolliderer aldri mer). Ny regresjonstest
+(`d252-per-browser-device-id.test.ts`) beviser fiksen; alle tre sidene re-verifisert syntaktisk
+gyldig. Hver allerede-innrullert nettleser må innrulleres på nytt ÉN gang (permanent enhetsidentitet
+fra da av). Se D-252 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, PR #160 pending): D-251 -
 `/chat` sin SSE-strøm kunne dø helt stille etter at headers var sendt, funnet live under NAS-
-migreringen). Tobias, etter innrullering mot den nye NAS-URL-en: "enrolla den men jarvis
+migreringen.** Tobias, etter innrullering mot den nye NAS-URL-en: "enrolla den men jarvis
 responderer ikke" - tom svar-boble, ingen feilmelding, tomme API-logger. Root cause: den ytre
 feilhåndteringen i `createApiServer()` gjorde `res.end()` uten logging når headers allerede var
 sendt (nøyaktig SSE-grenen til `/chat`) - en feil fra `ConversationEngine.handle()` etter det
