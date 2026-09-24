@@ -424,8 +424,21 @@
   // Samme dev-identitet/enhetsautentisering som apps/web/index.html - se
   // D-131-kommentarene der for hvorfor feltene under kun er PÅSTANDER som
   // følger med et ekte enhetsbevis, og aldri sendes videre til /executive/query.
+  //
+  // D-252: device_id var FØR en literal ("dev-web") DELT av ENHVER nettleser
+  // - se D-252-kommentaren i apps/web/index.html for hele funnet/fiksen.
+  // Samme localStorage-nøkkel (jarvis.deviceid) som index.html/voice.html -
+  // dashbord deler derfor SAMME per-nettleser enhetsidentitet som de andre.
+  function loadOrCreateDeviceId() {
+    const stored = localStorage.getItem("jarvis.deviceid");
+    if (stored) return stored;
+    const id = "web-" + crypto.randomUUID();
+    localStorage.setItem("jarvis.deviceid", id);
+    return id;
+  }
+
   const identity = {
-    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: "dev-web",
+    person_id: "person-tobias", tenant_id: "tenant-personal", device_id: loadOrCreateDeviceId(),
     memory_space: "personal", channel: "web"
   };
 

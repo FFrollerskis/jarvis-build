@@ -1,7 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-23 (branch `claude/fase-d249-voice-echo-cancellation`, PR pending, D-249 - live
-ende-til-ende webchat OG tale over Tailscale bekreftet fungerende, samme økt). Etter at Tailscale
+**Oppdatert:** 2026-09-24 (branch `claude/fase-d251-chat-sse-silent-error`, PR #160 pending, D-252 -
+`device_id` var en literal delt av ALLE nettlesere, funnet rett etter D-251-fiksen samme
+NAS-migreringsøkt). Tobias, etter en tilsynelatende vellykket innrullering: "dette kan ikke komme
+hver gang" (gjentatt "Autorisering feilet: enhet ikke innrullert"). Root cause funnet ved å spørre
+databasen direkte i stedet for å gjette: `apps/web/index.html`/`dashboard.html`/`voice.html` brukte
+ALLE samme hardkodede `device_id: "dev-web"` - innrullering fra ÉN nettleser (PC-en, brukt til
+D-251-feilsøking) roterte STILLE nøkkelen bort fra enhver ANNEN allerede-innrullert nettleser
+(telefonen), siden nøkkelrotasjon bevisst dreper utestående grants (D-131). **Fiks:** `device_id` er
+nå en per-nettleser, tilfeldig generert OG `localStorage`-persistert verdi i alle tre sidene (samme
+delte nøkkelnavn på tvers av dem - dashbord/tale/webchat på SAMME fysiske nettleser deler fortsatt
+bevisst identitet, men FORSKJELLIGE nettlesere kolliderer aldri mer). Ny regresjonstest
+(`d252-per-browser-device-id.test.ts`) beviser fiksen; alle tre sidene re-verifisert syntaktisk
+gyldig. Hver allerede-innrullert nettleser må innrulleres på nytt ÉN gang (permanent enhetsidentitet
+fra da av). Se D-252 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
+**Forrige milepæl (uendret, PR #160 pending): D-251 -
+`/chat` sin SSE-strøm kunne dø helt stille etter at headers var sendt, funnet live under NAS-
+migreringen.** Tobias, etter innrullering mot den nye NAS-URL-en: "enrolla den men jarvis
+responderer ikke" - tom svar-boble, ingen feilmelding, tomme API-logger. Root cause: den ytre
+feilhåndteringen i `createApiServer()` gjorde `res.end()` uten logging når headers allerede var
+sendt (nøyaktig SSE-grenen til `/chat`) - en feil fra `ConversationEngine.handle()` etter det
+punktet var derfor usynlig for BÅDE klient og server-logg. **Fiks:** `/chat` sin SSE-gren fanger nå
+`handle()` i egen try/catch (logger + sender et `error`-SSE-event FØR streamen lukkes), den ytre
+catch-all-en logger nå alltid, `index.html` viser nå `error`-eventet, voice-gateway sin
+`HttpCoreClient` bruker nå eventets konkrete melding. Ny DB-uavhengig regresjonstest
+(`d251-chat-sse-error-event.test.ts`) beviser fiksen. Se D-251 i DECISIONS_AND_ASSUMPTIONS.md for
+full detalj, inkl. Tobias sin direkte tilbakemelding om å lese koden FØR mer live-feilsøking.
+
+**Forrige milepæl (uendret, PR pending): D-249 - live ende-til-ende webchat OG tale over Tailscale
+bekreftet fungerende, samme økt.** Etter at Tailscale
 `serve` (satt opp direkte i chat, ikke en kodeendring) løste selve tilkoblings-/TLS-laget for
 `https://srby.<tailnet>.ts.net/` og `:3020`, meldte Tobias tre reelle taleproblemer i første
 ende-til-ende `/voice`-test: "det kommer skurrelyder han leser ikke opp alt han hører meg dårlig kan
