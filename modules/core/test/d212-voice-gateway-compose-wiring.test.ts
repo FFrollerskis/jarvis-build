@@ -6,11 +6,15 @@ import { describe, expect, it } from "vitest";
  * D-212 (task #120): `apps/voice-gateway` hadde ingen egen docker-compose-
  * tjeneste - fraværende fra det containeriserte lokale oppsettet ved siden av
  * postgres/langfuse/infisical/migrate/api/worker. Denne suiten beviser at
- * `voice-gateway`-tjenesten faktisk finnes, bruker SAMME runtime-image som
- * api/worker/migrate (api.Dockerfile kopierer hele workspacet), og peker på
- * `api`-tjenestens CONTAINER-INTERNE adresse for `JARVIS_CORE_URL` - IKKE
- * gatewayens egen localhost-default (som ville vært feil inne i
- * compose-nettverket).
+ * `voice-gateway`-tjenesten faktisk finnes, og peker på `api`-tjenestens
+ * CONTAINER-INTERNE adresse for `JARVIS_CORE_URL` - IKKE gatewayens egen
+ * localhost-default (som ville vært feil inne i compose-nettverket).
+ *
+ * D-253: `voice-gateway` fikk sitt EGET image (`voice-gateway.Dockerfile`),
+ * IKKE lenger det delte `api.Dockerfile`-imaget api/worker/migrate bruker -
+ * lokal whisper.cpp/piper trenger et glibc-baseimage + en C/C++-toolchain.
+ * `command:`-overstyringen er derfor også borte - det nye imagets egen CMD
+ * starter `apps/voice-gateway/src/main.ts` direkte.
  */
 function readCompose(): string {
   return readFileSync(fileURLToPath(new URL("../../../infra/local/docker-compose.yml", import.meta.url)), "utf8");
@@ -28,12 +32,13 @@ describe("D-212: voice-gateway-tjenesten finnes i infra/local/docker-compose.yml
   const compose = readCompose();
   const block = extractServiceBlock(compose, "voice-gateway");
 
-  it("bruker SAMME runtime-image (api.Dockerfile) som api/worker/migrate, ikke et eget image", () => {
-    expect(block).toMatch(/dockerfile:\s*infra\/local\/api\.Dockerfile/);
+  it("D-253: bruker sitt EGET image (voice-gateway.Dockerfile), ikke lenger det delte api.Dockerfile", () => {
+    expect(block).toMatch(/dockerfile:\s*infra\/local\/voice-gateway\.Dockerfile/);
+    expect(block).not.toMatch(/dockerfile:\s*infra\/local\/api\.Dockerfile/);
   });
 
-  it("kommandoen starter apps/voice-gateway/src/main.ts, samme node --experimental-transform-types-mønster som worker", () => {
-    expect(block).toMatch(/command:\s*\["node",\s*"--experimental-transform-types",\s*"apps\/voice-gateway\/src\/main\.ts"\]/);
+  it("D-253: ingen command:-overstyring - voice-gateway.Dockerfile sin egen CMD starter apps/voice-gateway/src/main.ts", () => {
+    expect(block).not.toMatch(/command:/);
   });
 
   it("JARVIS_CORE_URL peker på api-tjenestens CONTAINER-INTERNE adresse, ikke localhost-defaulten fra main.ts", () => {

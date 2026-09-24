@@ -1,8 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-24 (branch `claude/fase-d251-chat-sse-silent-error`, PR #160 pending, D-252 -
+**Oppdatert:** 2026-09-24 (branch `claude/fase-d253-voice-local-stt-tts`, PR pending, D-253 - tale
+har ALDRI produsert ekte tale, verken på PC-en eller NAS-en). Rett etter D-251/D-252 testet Tobias
+voice-gateway direkte på NAS-en: "chat fungerer ikke vopice". Oppstartsloggen viste
+`{"stt":"marker-test","tts":"fake-tts"}` - `OPENAI_API_KEY` i `.env` var en nesten tom
+plassholderverdi (lengde bekreftet trygt, ALDRI selve verdien i chat), og INGEN lokal whisper.cpp/
+piper var noensinne konfigurert, så `main.ts` sin fallback-kjede landet alltid på rene testadaptere
+("ingen lyd forlater maskinen") - forklarer trolig mye av tidligere "skurrelyder"-rapporter gjennom
+økten. Tobias sitt svar på OpenAI-vs-lokalt valg: "alle" (begge). **Levert:** ny
+`infra/local/voice-gateway.Dockerfile` (EGET image, atskilt fra det delte api.Dockerfile - bygger
+whisper.cpp fra kildekode, henter Piper sin offisielle Linux-binær + norsk stemme
+`no_NO-talesyntese-medium`, alle kilder verifisert mot offisiell dokumentasjon), setter
+`JARVIS_WHISPER_BIN`/`_MODEL`/`JARVIS_PIPER_BIN`/`_MODEL` de eksisterende adapterne allerede leser.
+Tobias legger selv inn en ekte `OPENAI_API_KEY` i `.env` på NAS-en (aldri i chat) som parallell vei.
+15 relevante tester grønne (9 nye D-253 + 6 oppdatert D-212-compose-wiring). Se D-253 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj - **ikke bekreftet fungerende live ennå**, venter på
+NAS-rebuild og Tobias sin egen test.
+
+**Forrige milepæl (uendret, MERGET): D-252 -
 `device_id` var en literal delt av ALLE nettlesere, funnet rett etter D-251-fiksen samme
-NAS-migreringsøkt). Tobias, etter en tilsynelatende vellykket innrullering: "dette kan ikke komme
+NAS-migreringsøkt.** Tobias, etter en tilsynelatende vellykket innrullering: "dette kan ikke komme
 hver gang" (gjentatt "Autorisering feilet: enhet ikke innrullert"). Root cause funnet ved å spørre
 databasen direkte i stedet for å gjette: `apps/web/index.html`/`dashboard.html`/`voice.html` brukte
 ALLE samme hardkodede `device_id: "dev-web"` - innrullering fra ÉN nettleser (PC-en, brukt til
