@@ -1,21 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-24 (branch `claude/fase-d253-voice-local-stt-tts`, PR pending, D-253 - tale
-har ALDRI produsert ekte tale, verken på PC-en eller NAS-en). Rett etter D-251/D-252 testet Tobias
-voice-gateway direkte på NAS-en: "chat fungerer ikke vopice". Oppstartsloggen viste
-`{"stt":"marker-test","tts":"fake-tts"}` - `OPENAI_API_KEY` i `.env` var en nesten tom
-plassholderverdi (lengde bekreftet trygt, ALDRI selve verdien i chat), og INGEN lokal whisper.cpp/
-piper var noensinne konfigurert, så `main.ts` sin fallback-kjede landet alltid på rene testadaptere
-("ingen lyd forlater maskinen") - forklarer trolig mye av tidligere "skurrelyder"-rapporter gjennom
-økten. Tobias sitt svar på OpenAI-vs-lokalt valg: "alle" (begge). **Levert:** ny
-`infra/local/voice-gateway.Dockerfile` (EGET image, atskilt fra det delte api.Dockerfile - bygger
-whisper.cpp fra kildekode, henter Piper sin offisielle Linux-binær + norsk stemme
-`no_NO-talesyntese-medium`, alle kilder verifisert mot offisiell dokumentasjon), setter
+**Oppdatert:** 2026-09-24 (branch `claude/fase-d254-voice-stt-error-visibility`, PR pending, D-254 -
+D-253 sin første live-test på NAS-en feilet stille: `/voice` ga kun `{"type":"error","error":
+"stt_error"}`, INGEN teknisk detalj noe sted for faktisk diagnose).** Lest kildekoden
+(`session.ts` `finishTurn()`) FØR flere runder live-gjetting: den ekte `stt.end()`-feilen ble kun
+lagret i `VoiceHealth` sitt in-memory `last_error`-felt - ALDRI logget (i motsetning til
+søsken-katch-blokkene `voice_core_error`/`voice_message_error` i SAMME fil), og `/status` eksponerte
+aldri `last_error` i det hele tatt. Samme "silently swallowed error"-klasse som D-251/D-227, nå i
+tale-STT-banen. **Fiks:** `session.ts` logger nå `voice_stt_error` (samme mønster som naboene);
+`health.ts` sin `snapshot()` inkluderer nå faktisk `last_error` per komponent - `/status` viser nå
+siste feil uten ny redeploy for hver diagnoserunde. Ingen endring i brukervendt oppførsel (§35
+uendret). `d30-foundation.test.ts` utvidet (console.error-spy + last_error-assertion), 18/18 grønt;
+full `apps/voice-gateway`-suite 98/104 grønt (6 hoppet over, eneste feil kjent
+`initdb: Permission denied`-sandbox-begrensning, ikke en regresjon). Se D-254 i
+DECISIONS_AND_ASSUMPTIONS.md. **Selve whisper.cpp-rotårsaken er ennå ikke kjent** - denne posten
+løser kun synlighetsgapet; venter på NAS-rebuild + Tobias sin faktiske `/status`/logg-sjekk.
+
+**Forrige milepæl (uendret, MERGET): D-253 - tale har ALDRI produsert ekte tale, verken på PC-en
+eller NAS-en.** Rett etter D-251/D-252 testet Tobias voice-gateway direkte på NAS-en: "chat fungerer
+ikke vopice". Oppstartsloggen viste `{"stt":"marker-test","tts":"fake-tts"}` -
+`OPENAI_API_KEY` i `.env` var en nesten tom plassholderverdi (lengde bekreftet trygt, ALDRI selve
+verdien i chat), og INGEN lokal whisper.cpp/piper var noensinne konfigurert, så `main.ts` sin
+fallback-kjede landet alltid på rene testadaptere ("ingen lyd forlater maskinen") - forklarer trolig
+mye av tidligere "skurrelyder"-rapporter gjennom økten. Tobias sitt svar på OpenAI-vs-lokalt valg:
+"alle" (begge). **Levert:** ny `infra/local/voice-gateway.Dockerfile` (EGET image, atskilt fra det
+delte api.Dockerfile - bygger whisper.cpp fra kildekode, henter Piper sin offisielle Linux-binær +
+norsk stemme `no_NO-talesyntese-medium`, alle kilder verifisert mot offisiell dokumentasjon), setter
 `JARVIS_WHISPER_BIN`/`_MODEL`/`JARVIS_PIPER_BIN`/`_MODEL` de eksisterende adapterne allerede leser.
 Tobias legger selv inn en ekte `OPENAI_API_KEY` i `.env` på NAS-en (aldri i chat) som parallell vei.
-15 relevante tester grønne (9 nye D-253 + 6 oppdatert D-212-compose-wiring). Se D-253 i
-DECISIONS_AND_ASSUMPTIONS.md for full detalj - **ikke bekreftet fungerende live ennå**, venter på
-NAS-rebuild og Tobias sin egen test.
+Faktisk rebygget og kjørende på NAS-en (`"stt":"local-whisper","tts":"local-piper"` bekreftet i
+oppstartsloggen), men første live `/voice`-test feilet på `stt_error` - se D-254 over. Se D-253 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret, MERGET): D-252 -
 `device_id` var en literal delt av ALLE nettlesere, funnet rett etter D-251-fiksen samme
