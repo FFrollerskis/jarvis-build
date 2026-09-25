@@ -318,7 +318,24 @@ export class VoiceSession {
         this.beginTurn(atMs);
       }
     }
-    if (this.stt && (vadEvent === "speech" || vadEvent === "speech_start")) {
+    // D-268 (live NAS-funn, SAMME test-runde som D-267 sin -nth 1.01-fiks):
+    // D-267 beviste at whisper.cpp sin egen no-speech-vakt IKKE lenger var
+    // problemet (ekte, ikke-null decode-tid observert), men transkripsjonen
+    // var FORTSATT `text_length: 0` - med en whisper-rapportert varighet på
+    // kun 0,6-0,7 sek for en hel ytring. Årsaken: denne grenen filtrerte KUN
+    // på "speech"/"speech_start" - EnergyVad returnerer "silence" for ENHVER
+    // ramme under terskelen, også midt i en aktiv tur (et kort opphold
+    // mellom ord, en stemmeløs konsonant) FØR `hangoverMs` faktisk er
+    // oppnådd og `end_of_turn` fyrer. Slike rammer ble ALDRI sendt til STT-
+    // adapteren - de ble ikke bare trimmet i endene, de ble SPLEISET UT AV
+    // MIDTEN av WAV-en, som produserer diskontinuerlig/knepen lyd whisper.cpp
+    // ikke kan gjenkjenne som sammenhengende tale. Fikset ved å sende ALLE
+    // rammer så lenge en tur faktisk er aktiv (`this.stt` satt) og rammen
+    // ikke er selve `end_of_turn`-avslutningsrammen - `vad.ts` sin egen
+    // `hangoverMs`-logikk avgjør fortsatt PRESIST når turen faktisk slutter;
+    // denne grenen bestemmer kun hvilke rammer som når adapteren mens den
+    // pågår.
+    if (this.stt && vadEvent !== "end_of_turn") {
       this.stt.pushAudio(frame);
     }
     if (vadEvent === "end_of_turn" && this.stt) {

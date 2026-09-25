@@ -1,6 +1,63 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-265 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-268 -
+Tobias sitt FØRSTE live-forsøk med D-267 sin `-nth 1.01`-fiks (etter en separat NAS-vert-runde: manglende
+`.env`-interpolering fra feil arbeidsmappe, deretter manglende Docker-socket-tilgang for `Jarvis`-brukeren
+- begge løst uten kodeendring). Stderr viste ENDELIG at whisper.cpp sin no-speech-vakt FAKTISK var
+deaktivert (`decode time = 11.32 ms / 2 runs`, IKKE lenger `0.00 ms`) - men transkripsjonen var FORTSATT
+`text_length: 0` på begge testede ytringer (0,6-0,7 sek). **Root cause:** `session.ts` sin `pushAudio()`
+sendte KUN lyd til STT-adapteren på `"speech"`/`"speech_start"` - `EnergyVad` returnerer `"silence"` for
+ENHVER ramme under terskelen, OGSÅ midt i en aktiv tur (kort opphold mellom ord) FØR `hangoverMs` (300ms)
+er nådd. Slike midt-i-turen-rammer ble dermed ALDRI sendt - spleiset ut av MIDTEN av WAV-en, ikke bare
+trimmet i endene, som produserer diskontinuerlig lyd whisper.cpp ikke kan gjenkjenne. **Fiks:** send lyd
+til STT-adapteren så lenge en tur er aktiv (`this.stt` satt) og rammen ikke er selve
+`end_of_turn`-avslutningsrammen - dekker `speech`/`speech_start` OG midt-i-turen `silence` i én
+betingelse; `vad.ts` sin `hangoverMs`-logikk avgjør fortsatt PRESIST når turen faktisk slutter. Ny
+`d268-mid-turn-silence-not-dropped.test.ts` (2 tester). 115/115 relevante tester grønt i full
+`apps/voice-gateway`-suite (eneste feil den kjente, uendrede embedded-postgres-sandkasse-begrensningen).
+`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-268 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at dette faktisk løser talegjenkjenningen** - krever
+samme Docker-rebuild av `voice-gateway` som D-266/D-267; avventer Tobias sin neste NAS-redeploy +
+live-test.
+
+**Forrige milepæl (uendret, IKKE MERGET, PR #174 - erstattes av denne fiksen FØR merge): D-267 -
+RETTELSE av D-266: `-nth 0.0` hadde retningen BAKVENDT. whisper.cpp (identisk med OpenAI Whisper sin
+referanseimplementasjon) forkaster et segment når `no_speech_prob > no_speech_thold` - en LAV terskel
+gjør det derfor LETTERE å overskride (nesten enhver ikke-null sannsynlighet), altså MER aggressiv
+forkasting, IKKE mindre. Tobias sin live-test etter D-266 bekreftet dette PRESIST: flere forsøk viste
+`decode time = 0.00 ms / 1 runs` - whisper.cpp forkastet FØR reell dekoding i det hele tatt startet,
+enda raskere avvist enn med standardverdien 0,6. **Fiks:** `-nth 1.01` i stedet for `-nth 0.0` -
+en gyldig sannsynlighet kan aldri overstige 1,0, så `no_speech_prob > no_speech_thold` blir ALDRI
+sann, og vakten er dermed EKTE deaktivert (D-266 sin arkitektoniske begrunnelse - VAD-en eier
+tale/stillhet-vedtaket alene - forblir uendret, kun selve verdien var feil). Fixturen
+`mock-whisper-ok.sh` oppdatert til å kreve `1.01` i stedet for `0.0`. 113/113 tester grønt i full
+`apps/voice-gateway`-suite. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
+D-267 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret, IKKE MERGET, PR #174): D-266 -
+D-265 sin anti-alias-fiks LIVE på NAS-en (`git pull`, INGEN Docker-rebuild) ga IDENTISK symptom som
+FØR fiksen: whisper.cpp brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil 1766ms)
+på flere turer (0,6-0,8 sek reell tale) OG `fallbacks = 1 p / 0 h` (whisper.cpp sin egen temperatur-
+refallback), men produserte likevel KONSEKVENT tomt resultat - utelukker anti-alias-forvrengning som
+eneste/hovedårsak. **Root cause verifisert mot whisper.cpp v1.9.4 sin FAKTISKE kildekode (D-41-
+disiplin, ikke gjettet):** `-nth`/`--no-speech-thold` (standard 0,6) sammen med `-et`/`--entropy-
+thold` (2,40) og `-lpt`/`--logprob-thold` (-1,00) er whisper.cpp sin EGEN interne "er dette faktisk
+tale"-vakt - forklarer PRESIST et ekte dekodeforsøk (ikke-null tid, en fallback-retry) som likevel
+ender tomt. Denne vakten er STRUKTURELT REDUNDANT: `EnergyVad` har ALLEREDE avgjort at dette er tale
+FØR STT-en kalles (en tur starter kun ved `speech_start`), men whisper.cpp sin egen, dårligere
+kalibrerte (svakeste "base"-modell, norsk som ikke-engelsk) gjetning på SAMME spørsmål overstyrer i
+praksis vår VAD sitt allerede tatte vedtak. **Fiks:** `LocalWhisperStt.end()` (`stt.ts`) sender nå
+`-nth 0.0` til whisper-cli - deaktiverer whisper.cpp sin egen no-speech-terskel helt; VAD-en eier
+tale/stillhet-vedtaket alene, whisper.cpp sin eneste jobb blir å transkribere det den får. Fixturen
+`mock-whisper-ok.sh` utvidet til å KREVE `-nth 0.0` for å lykkes (samme implisitte verifiserings-
+mønster som `-f -`/`-nt` allerede i filen) - enhver fremtidig fjerning av flagget feiler nå HELE
+lykkes-banen (seksjon C + D-258 + seksjon E). 113/113 tester grønt i full `apps/voice-gateway`-suite
+(unntatt kjente embedded-postgres-sandkasse-begrensning). `pnpm --filter @jarvis/voice-gateway
+typecheck`/`npx eslint` rene. Se D-266 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at
+`-nth 0.0` faktisk løser talegjenkjenningen** - avventer NAS-redeploy (voice-gateway-bygg denne
+gangen, siden `stt.ts` er kompilert kode, IKKE en statisk fil som D-265) + en ny live-test.
+
+**Forrige milepæl (uendret, MERGET, PR #173): D-265 -
 D-264 sin utvidede `stderr_excerpt` LIVE på NAS-en ga ENDELIG whisper.cpp sin fulle prosesserings-
 utskrift, over fem separate turer (0,1-1,6 sekund reell tale-energi hver). Mønster: whisper.cpp brukte
 EKTE encode-/decode-tid (opptil 1730ms encode, proporsjonalt med lengden) på FLERE av dem, og
@@ -707,6 +764,25 @@ Embedded-Postgres DB-avhengige tester (`initdb: Permission denied`) kan fortsatt
 sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem derimot uten problemer.
 
 ## Neste oppgave
+
+**PRIORITERT (Tobias, 2026-09-25, i chat mens D-268-redeploy pågikk): Charlie sin FAKTISKE
+verktøytilgang i live chat/voice er sterkt begrenset - undersøk RETT ETTER at talebugen (D-262→D-268)
+er bekreftet løst live.** Tobias sin ekte `/voice`-samtale (sesjon `sess-813b9d85-...`) viste at Charlie,
+spurt direkte "hva er alt du kan gjøre" og "kan du søke på nettet"/"kan du se din egen kode"/"kan du
+forbedre deg selv", KUN rapporterte 5 verktøy: lese e-post, lese kalender, lese GitHub-issues, søke i
+minnet, og sjekke egne kapabiliteter - INGEN skriving (ikke minne-skriving, ikke e-post/kalender/GitHub-
+skriving), ingen Vercel (Tobias spurte eksplisitt - "ingen Vercel-connector i lista"), intet nettsøk. Han
+sa eksplisitt: "dette her er noe du må lagre og se på med en gang vi har fikset voice siden den ser
+ingenting vet ingenting den er jo helt dum." Dette står i sterk kontrast til hva som er MERGET/bygget i
+repoet (Task #118 owner-facing memory verification/skriving, #117 chat-facing tool/connector self-
+awareness, #121/#123 self-modification, #124 executive dashboard mutations, D-248 Vercel
+`read_deployments`, full GitHub-kontrollplan D-64-vurdert osv.) - undersøk om dette er (a) en bevisst,
+fortsatt-gjeldende kapabilitetsgrense i selve chat-/voice-system-prompten (ikke alt bygget er nødvendigvis
+eksponert der), (b) en reell wiring-regresjon der nyere verktøy sluttet å nå `chat()`/`chatStream()` sin
+tool-liste, eller (c) noe annet - LES KODEN direkte (system-prompt-bygging i modules/core, ToolGateway sin
+faktiske tool-eksponering til chat-turen) FØR noe konkluderes eller fikses, samme D-41-disiplin som resten
+av denne økten. IKKE start denne undersøkelsen midt i en pågående D-26x-redeploy/live-test-runde - fullfør
+talebug-verifiseringen først.
 
 **D-242 (denne PR-en) venter på CI/merge - når den er merget er det, per samme repo-gjennomgang som
 fant D-242, IGJEN ingen kjent "byggbar uten Tobias"-kode.** Gjenstående punkter under er ellers enten
