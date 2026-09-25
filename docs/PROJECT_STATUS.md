@@ -765,6 +765,25 @@ sandbox-økten - kjent, uendret begrensning; CI (GitHub Actions) kjører dem der
 
 ## Neste oppgave
 
+**PRIORITERT (Tobias, 2026-09-25, i chat mens D-268-redeploy pågikk): Charlie sin FAKTISKE
+verktøytilgang i live chat/voice er sterkt begrenset - undersøk RETT ETTER at talebugen (D-262→D-268)
+er bekreftet løst live.** Tobias sin ekte `/voice`-samtale (sesjon `sess-813b9d85-...`) viste at Charlie,
+spurt direkte "hva er alt du kan gjøre" og "kan du søke på nettet"/"kan du se din egen kode"/"kan du
+forbedre deg selv", KUN rapporterte 5 verktøy: lese e-post, lese kalender, lese GitHub-issues, søke i
+minnet, og sjekke egne kapabiliteter - INGEN skriving (ikke minne-skriving, ikke e-post/kalender/GitHub-
+skriving), ingen Vercel (Tobias spurte eksplisitt - "ingen Vercel-connector i lista"), intet nettsøk. Han
+sa eksplisitt: "dette her er noe du må lagre og se på med en gang vi har fikset voice siden den ser
+ingenting vet ingenting den er jo helt dum." Dette står i sterk kontrast til hva som er MERGET/bygget i
+repoet (Task #118 owner-facing memory verification/skriving, #117 chat-facing tool/connector self-
+awareness, #121/#123 self-modification, #124 executive dashboard mutations, D-248 Vercel
+`read_deployments`, full GitHub-kontrollplan D-64-vurdert osv.) - undersøk om dette er (a) en bevisst,
+fortsatt-gjeldende kapabilitetsgrense i selve chat-/voice-system-prompten (ikke alt bygget er nødvendigvis
+eksponert der), (b) en reell wiring-regresjon der nyere verktøy sluttet å nå `chat()`/`chatStream()` sin
+tool-liste, eller (c) noe annet - LES KODEN direkte (system-prompt-bygging i modules/core, ToolGateway sin
+faktiske tool-eksponering til chat-turen) FØR noe konkluderes eller fikses, samme D-41-disiplin som resten
+av denne økten. IKKE start denne undersøkelsen midt i en pågående D-26x-redeploy/live-test-runde - fullfør
+talebug-verifiseringen først.
+
 **D-242 (denne PR-en) venter på CI/merge - når den er merget er det, per samme repo-gjennomgang som
 fant D-242, IGJEN ingen kjent "byggbar uten Tobias"-kode.** Gjenstående punkter under er ellers enten
 Tobias-handlinger, en Tobias-avklaring, eller målingsbaserte spørsmål som venter på reell bruksdata:
