@@ -1,6 +1,27 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-260 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-261 -
+SELV MED D-260 sin klikkbare lenke fortsatte `enrollment_ticket_invalid` - rot-årsak: `srby.tail3935f7.ts.net`
+(URL-en brukt GJENNOM HELE D-253→D-260-runden) er Tobias sin WINDOWS-PC, ALDRI selve Ugreen-NAS-en.
+Bekreftet via `tailscale status` på NAS-en: NAS-ens eget navn er `jarvis-nas-2`. Server-side kommandoer
+traff alltid riktig maskin (samme SSH-terminal); kun nettleser-URL-en (tatt fra en tidligere skjermdump,
+aldri verifisert) pekte feil. **Rettet (ingen kodeendring):** `.env`/lenken pekes nå til
+`jarvis-nas-2.tail3935f7.ts.net`. Første ekte test mot FAKTISK NAS-kode lyktes umiddelbart: enrollment
+OK, `SERVER_VERIFIED`-sesjon startet (Tailscale Serve viste seg allerede korrekt TLS-konfigurert for
+BÅDE 443→3010 og 3020→3020). Deretter: NY stillhet - `{"type":"started",...}` fulgt av ren
+`WebSocket lukket.` ~57s senere, INGEN state-endring, INGEN krasj i container-loggen, selv med bekreftet
+tale inn i to ulike mikrofoner. **Root cause for stillheten fortsatt UKJENT** - eksisterende logging
+kunne strukturelt ikke skille "ingen lydrammer ankommer" fra "lydrammer ankommer, men krysser aldri
+VAD-terskelen". **Fiks (denne posten, direkte svar på gjentatt "sett opp bedre logging"):** to nye,
+throttlede diagnostikk-logglinjer i `VoiceSession.pushAudio()` - `voice_audio_first_frame` (én gang,
+bekrefter lydkanalen fungerer) og `voice_audio_heartbeat` (maks hvert 2000ms, viser `rms_energy`+
+`vad_event`). Ny `d261-audio-heartbeat-logging.test.ts` (3 tester, klokke-styrt via `atMs`, ingen ekte
+ventetid) - 108/114 grønt i full `apps/voice-gateway`-suite (6 hoppet over, eneste feil den kjente
+sandbox-Postgres-begrensningen). `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
+D-261 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hva stillheten skyldes** - avventer
+NAS-redeploy + en ny live-test med den nye loggingen på.
+
+**Forrige milepæl (uendret, MERGET, PR #168): D-260 -
 etter D-258/D-259-merge: gjentatt `enrollment_ticket_invalid` på tvers av FLERE separate, ferske,
 korrekt genererte billetter, selv etter å ha metodisk utelukket utløp/allerede-brukt/tenant-person-
 mismatch direkte mot databasen OG en separat, uavhengig funnet+fikset bug (`api`-containeren kjørte

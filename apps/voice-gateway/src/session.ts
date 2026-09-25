@@ -4,7 +4,7 @@ import {
   type SpeechRoutingDecision,
   type VoiceAuthorizationResult
 } from "@jarvis/contracts";
-import { PassthroughAec, PassthroughNoiseSuppressor, type AudioFilter } from "./audio.ts";
+import { PassthroughAec, PassthroughNoiseSuppressor, rmsEnergy, type AudioFilter } from "./audio.ts";
 import { EnergyVad, type VadAdapter } from "./vad.ts";
 import { SentenceChunker } from "./chunker.ts";
 import type { VoiceHealth } from "./health.ts";
@@ -184,6 +184,23 @@ export class VoiceSession {
   /** Avslaget rapporteres ÉN gang per sesjon per retning - aldri per lydramme. */
   private sttDenialReported = false;
   private ttsDenialReported = false;
+  /**
+   * D-261 (Tobias direkte i chat: en ellers HELT feilfri tilkobling -
+   * "started" med SERVER_VERIFIED, ingen krasj, ingen feilmelding noe sted -
+   * etterfulgt av total stillhet (INGEN state-endring i det hele tatt) i
+   * ~57 sekunder, deretter en ren frakobling. Verken klientens Tekniske logg
+   * (kun mottatte meldinger) eller container-loggen (ingen console.error i
+   * `pushAudio()` i det hele tatt) kunne skille mellom "lydrammer når aldri
+   * serveren" og "lydrammer ankommer, men krysser aldri VAD-terskelen
+   * (`EnergyVad` sin `threshold = 0.05`)" - eksplisitt gjentatt tilbakemelding
+   * gjennom hele denne økten: "sett opp bedre logging på hele systemet".
+   * Disse to feltene + logglinjene under svarer PRESIST på det spørsmålet
+   * direkte i `docker compose logs voice-gateway` ved NESTE forsøk, uten at
+   * Tobias må navigere en DevTools WS-"Messages"-fane (upraktisk å forklare
+   * presist over chat, se forsøket rett før denne fiksen).
+   */
+  private audioFrameCount = 0;
+  private lastAudioHeartbeatAt = 0;
 
   constructor(
     private readonly identity: VoiceIdentity,
@@ -243,6 +260,26 @@ export class VoiceSession {
     }
     const frame = this.noise.process(this.aec.process(rawFrame));
     const vadEvent = this.vad.push(frame, atMs);
+
+    // D-261: se feltkommentaren over - bekrefter BÅDE at rammer faktisk
+    // ankommer (første ramme, logges ÉN gang) OG hvilken energi/VAD-hendelse
+    // hver ramme faktisk gir (et 2-sekunders "hjertesignal", aldri per
+    // ramme - dette kalles opptil 50x/sekund og ville oversvømmet loggen).
+    this.audioFrameCount += 1;
+    if (this.audioFrameCount === 1) {
+      console.error(JSON.stringify({ msg: "voice_audio_first_frame", bytes: rawFrame.length }));
+    }
+    if (atMs - this.lastAudioHeartbeatAt >= 2000) {
+      this.lastAudioHeartbeatAt = atMs;
+      console.error(
+        JSON.stringify({
+          msg: "voice_audio_heartbeat",
+          frame_count: this.audioFrameCount,
+          rms_energy: Number(rmsEnergy(frame).toFixed(4)),
+          vad_event: vadEvent
+        })
+      );
+    }
 
     if (vadEvent === "speech_start") {
       if (this.state === "speaking" || this.state === "thinking") {
