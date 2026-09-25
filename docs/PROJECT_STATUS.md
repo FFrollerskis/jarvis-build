@@ -1,6 +1,26 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-267 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-268 -
+Tobias sitt FØRSTE live-forsøk med D-267 sin `-nth 1.01`-fiks (etter en separat NAS-vert-runde: manglende
+`.env`-interpolering fra feil arbeidsmappe, deretter manglende Docker-socket-tilgang for `Jarvis`-brukeren
+- begge løst uten kodeendring). Stderr viste ENDELIG at whisper.cpp sin no-speech-vakt FAKTISK var
+deaktivert (`decode time = 11.32 ms / 2 runs`, IKKE lenger `0.00 ms`) - men transkripsjonen var FORTSATT
+`text_length: 0` på begge testede ytringer (0,6-0,7 sek). **Root cause:** `session.ts` sin `pushAudio()`
+sendte KUN lyd til STT-adapteren på `"speech"`/`"speech_start"` - `EnergyVad` returnerer `"silence"` for
+ENHVER ramme under terskelen, OGSÅ midt i en aktiv tur (kort opphold mellom ord) FØR `hangoverMs` (300ms)
+er nådd. Slike midt-i-turen-rammer ble dermed ALDRI sendt - spleiset ut av MIDTEN av WAV-en, ikke bare
+trimmet i endene, som produserer diskontinuerlig lyd whisper.cpp ikke kan gjenkjenne. **Fiks:** send lyd
+til STT-adapteren så lenge en tur er aktiv (`this.stt` satt) og rammen ikke er selve
+`end_of_turn`-avslutningsrammen - dekker `speech`/`speech_start` OG midt-i-turen `silence` i én
+betingelse; `vad.ts` sin `hangoverMs`-logikk avgjør fortsatt PRESIST når turen faktisk slutter. Ny
+`d268-mid-turn-silence-not-dropped.test.ts` (2 tester). 115/115 relevante tester grønt i full
+`apps/voice-gateway`-suite (eneste feil den kjente, uendrede embedded-postgres-sandkasse-begrensningen).
+`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-268 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at dette faktisk løser talegjenkjenningen** - krever
+samme Docker-rebuild av `voice-gateway` som D-266/D-267; avventer Tobias sin neste NAS-redeploy +
+live-test.
+
+**Forrige milepæl (uendret, IKKE MERGET, PR #174 - erstattes av denne fiksen FØR merge): D-267 -
 RETTELSE av D-266: `-nth 0.0` hadde retningen BAKVENDT. whisper.cpp (identisk med OpenAI Whisper sin
 referanseimplementasjon) forkaster et segment når `no_speech_prob > no_speech_thold` - en LAV terskel
 gjør det derfor LETTERE å overskride (nesten enhver ikke-null sannsynlighet), altså MER aggressiv
@@ -12,11 +32,9 @@ sann, og vakten er dermed EKTE deaktivert (D-266 sin arkitektoniske begrunnelse 
 tale/stillhet-vedtaket alene - forblir uendret, kun selve verdien var feil). Fixturen
 `mock-whisper-ok.sh` oppdatert til å kreve `1.01` i stedet for `0.0`. 113/113 tester grønt i full
 `apps/voice-gateway`-suite. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
-D-267 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at `-nth 1.01` faktisk løser
-talegjenkjenningen** - krever samme Docker-rebuild av `voice-gateway` som D-266; avventer Tobias sin
-neste NAS-redeploy + live-test.
+D-267 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Forrige milepæl (uendret, IKKE MERGET, PR #174 - erstattes av denne fiksen FØR merge): D-266 -
+**Forrige milepæl (uendret, IKKE MERGET, PR #174): D-266 -
 D-265 sin anti-alias-fiks LIVE på NAS-en (`git pull`, INGEN Docker-rebuild) ga IDENTISK symptom som
 FØR fiksen: whisper.cpp brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil 1766ms)
 på flere turer (0,6-0,8 sek reell tale) OG `fallbacks = 1 p / 0 h` (whisper.cpp sin egen temperatur-
