@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-261 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-262 -
+SELV MED D-261 sin nye heartbeat-logging LIVE på riktig NAS: ny samtaletest viste ekte, sunn tale-/
+stillhetsmønster (RMS 0,17-0,52 under tale, nær 0 i pauser) over to fulle tilkoblingsøkter, og INGEN
+feillogg noe sted (`voice_stt_error`/`voice_core_error`/`voice_message_error` alle fraværende) -
+Tobias sitt svar på om han faktisk fikk et svar: "ingen svar".** Et NYTT, snevrere mysterium enn
+D-261: lyd-/VAD-laget var nå BEVIST friskt, men to strukturelt umulig-å-skille-fra-hverandre spørsmål
+gjensto FORTSATT usynlige: (1) D-261 sin heartbeat sampler kun ~1-av-24 rammer og kan ALDRI bekrefte
+om `end_of_turn` faktisk fyrte mellom to målinger; (2) `finishTurn()` sin `if (!text) return`-gren var
+- og VAR FORTSATT - fullstendig stille for et TOMT STT-transkript, intet logglinje noe sted.
+`LocalWhisperStt` (whisper.cpp) er DOKUMENTERT kjent for å returnere tomt/whitespace-transkript for
+reell, men for kort/svak tale - noe som ville reprodusert PRESIST det observerte bildet. **Fiks
+(denne posten, INGEN atferdsendring - kun tre nye, ikke-throttlede diagnostikklinjer i `session.ts`):**
+`voice_vad_transition` (VED HVER faktiske `speech_start`/`end_of_turn`-overgang, aldri de hyppige
+`speech`/`silence`-hendelsene mellom dem), `voice_stt_result` (KUN `text_length`, ALDRI selve
+transkriptet - §22-personvernsdisiplin), `voice_core_reply_sent` (`reply_chars`/`routed`/`cancelled`
+rett etter `onReply()`). Sammen skiller de nå PRESIST "turen kjørte aldri" / "STT hørte ingenting" /
+"turen fullførte, svaret nådde bare ikke klienten" (peker da mot `voice.html`, ikke `voice-gateway`).
+Ny `d262-turn-lifecycle-logging.test.ts` (3 tester) - 11/11 grønt sammen med d258/d261-suitene.
+`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-262 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hvilken gren som er root cause** - avventer
+NAS-redeploy + en ny live-test med DENNE loggingen på.
+
+**Forrige milepæl (uendret, MERGET, PR #169): D-261 -
 SELV MED D-260 sin klikkbare lenke fortsatte `enrollment_ticket_invalid` - rot-årsak: `srby.tail3935f7.ts.net`
 (URL-en brukt GJENNOM HELE D-253→D-260-runden) er Tobias sin WINDOWS-PC, ALDRI selve Ugreen-NAS-en.
 Bekreftet via `tailscale status` på NAS-en: NAS-ens eget navn er `jarvis-nas-2`. Server-side kommandoer
@@ -12,14 +34,14 @@ BÅDE 443→3010 og 3020→3020). Deretter: NY stillhet - `{"type":"started",...
 `WebSocket lukket.` ~57s senere, INGEN state-endring, INGEN krasj i container-loggen, selv med bekreftet
 tale inn i to ulike mikrofoner. **Root cause for stillheten fortsatt UKJENT** - eksisterende logging
 kunne strukturelt ikke skille "ingen lydrammer ankommer" fra "lydrammer ankommer, men krysser aldri
-VAD-terskelen". **Fiks (denne posten, direkte svar på gjentatt "sett opp bedre logging"):** to nye,
+VAD-terskelen". **Fiks (direkte svar på gjentatt "sett opp bedre logging"):** to nye,
 throttlede diagnostikk-logglinjer i `VoiceSession.pushAudio()` - `voice_audio_first_frame` (én gang,
 bekrefter lydkanalen fungerer) og `voice_audio_heartbeat` (maks hvert 2000ms, viser `rms_energy`+
 `vad_event`). Ny `d261-audio-heartbeat-logging.test.ts` (3 tester, klokke-styrt via `atMs`, ingen ekte
 ventetid) - 108/114 grønt i full `apps/voice-gateway`-suite (6 hoppet over, eneste feil den kjente
 sandbox-Postgres-begrensningen). `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
-D-261 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hva stillheten skyldes** - avventer
-NAS-redeploy + en ny live-test med den nye loggingen på.
+D-261 i DECISIONS_AND_ASSUMPTIONS.md. Avslørte D-262 sitt neste mysterium på FØRSTE live-forsøk etter
+redeploy.
 
 **Forrige milepæl (uendret, MERGET, PR #168): D-260 -
 etter D-258/D-259-merge: gjentatt `enrollment_ticket_invalid` på tvers av FLERE separate, ferske,
