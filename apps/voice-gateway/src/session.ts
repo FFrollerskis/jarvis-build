@@ -201,6 +201,26 @@ export class VoiceSession {
    */
   private audioFrameCount = 0;
   private lastAudioHeartbeatAt = 0;
+  /**
+   * D-262 (Tobias direkte i chat, live NAS-test MED D-261 sin nye logging
+   * aktiv): heartbeaten viste ekte tale/stillhet-mønster (RMS 0.17-0.52 under
+   * tale, nær 0 i pauser) og INGEN feillogg noe sted (`voice_stt_error`/
+   * `voice_core_error`/`voice_message_error` alle fraværende) - likevel
+   * svarte Jarvis fortsatt ikke ("ingen svar"). D-261 sin sampling (kun
+   * ~1-av-24 rammer, hvert 2. sekund) kan strukturelt ALDRI bekrefte om
+   * `end_of_turn` faktisk noen gang fyrte mellom to målinger, og
+   * `finishTurn()` sin `if (!text) return`-gren (linje ~352, FØR denne
+   * fiksen) var - og er, for tomt transkript - fullstendig stille: intet
+   * logglinje, ingen event, ingenting. Whisper.cpp er DOKUMENTERT kjent for
+   * å returnere tom/whitespace-transkripsjon for reell, men for kort/svak
+   * tale - som ville reprodusere PRESIST det observerte bildet (sunn
+   * VAD-aktivitet, null feil, null svar). De tre nye, upåkrevde
+   * (ikke-throttlede) logglinjene under gjør de to strukturelt umulig-å-
+   * skille-fra-hverandre spørsmålene direkte observerbare ved NESTE forsøk:
+   * (1) fyrte `end_of_turn` i det hele tatt, (2) hva fikk STT-en tilbake
+   * (KUN lengde - aldri selve teksten, samme personvern-disiplin som §22),
+   * (3) leverte Core faktisk et svar som ble sendt videre til klienten.
+   */
 
   constructor(
     private readonly identity: VoiceIdentity,
@@ -281,6 +301,15 @@ export class VoiceSession {
       );
     }
 
+    // D-262: ALDRI throttlet, i motsetning til heartbeaten over - dette er
+    // sjeldne tilstandsoverganger (typisk noen få per ytring), ikke en
+    // per-ramme-hendelse, så det finnes ingen fare for logg-oversvømmelse.
+    // Beviser DEFINITIVT om `end_of_turn` faktisk fyrer, noe 2-sekunders
+    // sampling strukturelt aldri kan bekrefte mellom to målinger.
+    if (vadEvent === "speech_start" || vadEvent === "end_of_turn") {
+      console.error(JSON.stringify({ msg: "voice_vad_transition", vad_event: vadEvent }));
+    }
+
     if (vadEvent === "speech_start") {
       if (this.state === "speaking" || this.state === "thinking") {
         this.bargeIn(atMs);
@@ -349,6 +378,11 @@ export class VoiceSession {
         return;
       }
       metrics.t_final_transcript = Date.now();
+      // D-262: KUN lengde, ALDRI selve transkriptet (§22-personvernsdisiplinen
+      // gjelder også diagnostikk) - avslører presist om STT-en returnerte tomt
+      // (whisper.cpp-mønster for svak/kort tale) FØR den stille `return`
+      // under, som tidligere ga NULL signal om at dette i det hele tatt skjedde.
+      console.error(JSON.stringify({ msg: "voice_stt_result", text_length: text.length }));
       if (!text) {
         // §35: tom/ugyldig transkript (støy, ingen tale) → ingen modellkjøring.
         return;
@@ -380,6 +414,18 @@ export class VoiceSession {
       // ALDRI tilbake/re-utfører allerede utførte verktøy (§17).
       this.journal.markCompleted(utteranceId);
       this.events.onReply(reply);
+      // D-262: bekrefter at Core faktisk produserte et svar OG at det ble
+      // videresendt til transportlaget (`server.ts` sin `onReply` -> `ws.send`)
+      // - uten dette kan et "ingen svar"-symptom ALDRI skilles mellom "turen
+      // kjørte aldri" og "turen kjørte, svaret nådde bare ikke klienten".
+      console.error(
+        JSON.stringify({
+          msg: "voice_core_reply_sent",
+          reply_chars: reply.reply.length,
+          routed: reply.routed,
+          cancelled: Boolean(reply.cancelled)
+        })
+      );
       if (this.epoch === turnEpoch && !reply.cancelled) {
         if (!this.core.chatStream) {
           // Ikke-streaming Core: hele svaret tales som ett stykke via køen.
