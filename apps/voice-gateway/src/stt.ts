@@ -267,12 +267,21 @@ export class LocalWhisperStt implements SttAdapter {
         // finnes) - unngår enhver risiko for at whisper.cpp sin verbose stderr
         // skulle inneholde delvis gjenkjent tale, samme personvern-disiplin
         // som §22 andre steder i filen.
+        //
+        // D-264 (Tobias direkte i chat, FØRSTE live-forsøk MED denne
+        // diagnostikken på): et 300-tegns utdrag var IKKE nok - whisper.cpp
+        // sitt modell-laste-banner alene (GPU-init/flash-attn/dtw-linjene,
+        // ALLTID skrevet FØRST) fylte hele budsjettet og kuttet av FØR selve
+        // prosesserings-/"no speech"-diagnostikken lenger ned i stderr kunne
+        // nås. 4000 tegn er rikelig for whisper.cpp sin fulle stderr for én
+        // kort ytring (banner + system_info + evt. per-segment-info +
+        // timing-oppsummering), fortsatt trygt bundet (aldri ubegrenset).
         if (!text) {
           console.error(
             JSON.stringify({
               msg: "voice_stt_empty_result_diagnostic",
               wav_bytes: wav.length,
-              stderr_excerpt: stderr.slice(0, 300)
+              stderr_excerpt: stderr.slice(0, 4000)
             })
           );
         }

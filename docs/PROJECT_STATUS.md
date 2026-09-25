@@ -1,6 +1,18 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-263 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-264 -
+D-263 sin nye `stderr_excerpt` LIVE på NAS-en viste seg for smal: whisper.cpp sitt flerlinjers
+modell-laste-banner (GPU-init/flash-attn/dtw-linjene, ALLTID skrevet FØRST) fylte hele det
+opprinnelige 300-tegns budsjettet alene og kuttet av midt i banneret - selve "no speech"-forklaringen
+lenger ned i stderr ble ALDRI nådd. **Fiks:** utdraget økt til 4000 tegn (rikelig for whisper.cpp sin
+fulle stderr for én ytring, fortsatt trygt bundet). Fixturen `mock-whisper-blank-audio.sh` bygget om
+til et REALISTISK, flerlinjers banner (samme struktur som live-funnet) FØR selve diagnostikklinjen,
+og testen sjekker nå eksplisitt at utdraget er lengre enn den gamle 300-grensen - beviser regresjonen
+ikke lenger kan skje. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene, 13/13 tester
+grønt. Se D-264 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hva whisper.cpp sin FULLE
+forklaring faktisk sier** - avventer NAS-redeploy + en ny live-test med den utvidede grensen.
+
+**Forrige milepæl (uendret, MERGET, PR #171): D-263 -
 D-262 sin nye logging LIVE på NAS-en (etter en lang redeploy-runde: `git`-mangel, port 5432-konflikt
 med en NATIV vert-postgres, HTTPS/PAT-bytte pga. manglende SSH-nøkkel, `.git`-eierskap - alle
 løst underveis, ingen kodeendring) ga et DEFINITIVT svar: HVER ENESTE tur (inkl. én med 2+ sekunder
@@ -11,11 +23,12 @@ konsekvent et tomt transkript, med kode 0 (INGEN `local_whisper_process_failed`)
 EGEN stderr-diagnostikk (modell-/decode-/"no speech"-info) ble likevel FØR denne posten kun brukt i
 feilbanen (`code !== 0`) - på nøyaktig denne (suksess+tomt resultat) stien ble stderr innhentet, men
 stille kastet bort, samme "et signal svelges stille"-mønster som D-254/D-261/D-262, nå ett lag dypere
-inne i selve `LocalWhisperStt`. **Fiks (denne posten, INGEN atferdsendring):** `stt.ts` sin
-`LocalWhisperStt.end()` logger nå `voice_stt_empty_result_diagnostic` (`wav_bytes` + et 300-tegns
+inne i selve `LocalWhisperStt`. **Fiks:** `stt.ts` sin
+`LocalWhisperStt.end()` logger nå `voice_stt_empty_result_diagnostic` (`wav_bytes` + et
 `stderr_excerpt` fra whisper.cpp selv) NÅR (og KUN når) resultatet faktisk er tomt - aldri når en
 transkripsjon finnes (samme §22-personvernsdisiplin, whisper.cpp skriver selve transkripsjonen KUN
-til stdout, aldri stderr). Ny `mock-whisper-blank-audio.sh`-fixture (kode 0, tomt stdout, en ekte
+til stdout, aldri stderr). **Live-bekreftet (denne runden): fungerte, MEN utdraget var for smalt** -
+se D-264 over. Ny `mock-whisper-blank-audio.sh`-fixture (kode 0, tomt stdout, en ekte
 whisper.cpp-lignende stderr-linje) + 2 nye tester i `local-whisper-stt.test.ts` (13/13 grønt i filen).
 `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-263 i
 DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet HVORFOR whisper.cpp ikke finner tale** - avventer
