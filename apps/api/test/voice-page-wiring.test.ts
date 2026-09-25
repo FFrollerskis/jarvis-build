@@ -106,3 +106,21 @@ describe("D-260: innrullering fungerer UTEN manuell kopiering av billett-strenge
     expect(formBlock).toContain("submitEnrollment(ticket)");
   });
 });
+
+describe("D-265: mikrofonopptak ber nettleseren resample til 16 kHz DIREKTE i AudioContext-konstruktøren, ikke bare i vår egen hånd-rullede interpolasjon", () => {
+  const voiceHtml = readSource("../../web/voice.html");
+
+  it("startMicCapture() oppretter captureCtx med { sampleRate: 16000 } - live NAS-funn (D-263/D-264): whisper.cpp brukte ekte encode-tid på opptil 1,6s reell tale-energi og produserte likevel konsekvent null tokens, uten no-speech-advarsel - typisk for anti-alias-forvrengning fra REN lineær interpolasjon ned fra 44,1/48 kHz, som EnergyVad (kun energibasert) ikke fanger opp", () => {
+    const fnIdx = voiceHtml.indexOf("function startMicCapture()");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const ctxIdx = voiceHtml.indexOf("captureCtx = new AudioContext(", fnIdx);
+    expect(ctxIdx).toBeGreaterThan(fnIdx);
+    const ctxLine = voiceHtml.slice(ctxIdx, voiceHtml.indexOf(";", ctxIdx));
+    expect(ctxLine).toContain("{ sampleRate: 16000 }");
+  });
+
+  it("downsampleTo16kMono() beholdes som forsvarsnett (inRate === 16000 tidligretur) for nettlesere som ignorerer sampleRate-hintet, IKKE fjernet", () => {
+    expect(voiceHtml).toContain("function downsampleTo16kMono(float32, inRate) {");
+    expect(voiceHtml).toMatch(/if \(inRate === 16000\) return float32;/);
+  });
+});

@@ -403,7 +403,31 @@
 
   function startMicCapture() {
     if (!micStream) return;
-    captureCtx = new AudioContext();
+    // D-265 (Tobias direkte i chat, live NAS-test MED D-263/D-264 sin nye
+    // whisper.cpp-stderr-diagnostikk på): whisper.cpp brukte EKTE encode-tid
+    // (opptil ~1,7s) proporsjonalt med lydlengden på flere ytringer (0,3-1,6
+    // sekund reell tale-energi, IKKE bare "for kort") - og produserte likevel
+    // KONSEKVENT null tokens, uten noen "no speech detected"-advarsel. Det
+    // beviser lyden når whisper sin encoder, men encoderen finner ingen
+    // gjenkjennbar tale i den - ulikt vår egen grovt energibaserte VAD (som
+    // KUN måler volum og derfor ikke reagerer på dette i det hele tatt).
+    // Root cause: `downsampleTo16kMono()` under gjør REN lineær interpolasjon
+    // fra nettleserens native mikrofonrate (typisk 44,1/48 kHz) ned til 16
+    // kHz UTEN et anti-alias-lavpassfilter FØRST - en kjent, veldokumentert
+    // kilde til nettopp denne typen forvrengning: høyfrekvent innhold foldes
+    // tilbake som støy og ødelegger den fonetiske informasjonen en ASR-modell
+    // er avhengig av, MENS den rene lyd-ENERGIEN (det vår EnergyVad faktisk
+    // måler) forblir uendret - PRESIST forklarer hvorfor VAD-en så "ekte tale"
+    // mens whisper.cpp konsekvent fant ingenting.
+    // Fiks: be nettleseren selv resample til 16 kHz direkte i AudioContext-
+    // konstruktøren (samme mønster som `ensurePlaybackCtx()` sin
+    // `new AudioContext({ sampleRate: 24000 })` under) - plattformens EGEN
+    // resampler bruker korrekt anti-alias-filtrering, i motsetning til vår
+    // hånd-rullede interpolasjon. `downsampleTo16kMono()` sin
+    // `inRate === 16000`-tidligretur gjør dette til en ren no-op i det vanlige
+    // tilfellet (funksjonen beholdes KUN som et forsvarsnett for nettlesere
+    // som ignorerer `sampleRate`-hintet).
+    captureCtx = new AudioContext({ sampleRate: 16000 });
     const source = captureCtx.createMediaStreamSource(micStream);
     // ScriptProcessorNode er deprecated men uten byggetrinn er det den enkleste
     // veien til rå PCM-samples uten en separat AudioWorklet-modulfil.

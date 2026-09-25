@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-264 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-265 -
+D-264 sin utvidede `stderr_excerpt` LIVE på NAS-en ga ENDELIG whisper.cpp sin fulle prosesserings-
+utskrift, over fem separate turer (0,1-1,6 sekund reell tale-energi hver). Mønster: whisper.cpp brukte
+EKTE encode-/decode-tid (opptil 1730ms encode, proporsjonalt med lengden) på FLERE av dem, og
+produserte likevel KONSEKVENT `text_length: 0` - INGEN eksplisitt "no speech detected"-advarsel for
+de lengre turene (kun én kort 90ms-tur fikk en eksplisitt "for kort"-advarsel). Konklusjon: lyden NÅR
+whisper.cpp sin encoder og har reell varighet/energi, men encoderen finner ingen gjenkjennbar tale i
+innholdet - noe vår egen, rent energibaserte `EnergyVad` strukturelt ikke kan oppdage.** Root cause
+identifisert: `voice.html` sin `downsampleTo16kMono()` gjorde REN lineær interpolasjon fra nettleserens
+native mikrofonrate (44,1/48 kHz) ned til 16 kHz UTEN et anti-alias-lavpassfilter FØRST - en kjent,
+veldokumentert kilde til nettopp denne typen forvrengning (høyfrekvent innhold foldes tilbake som støy,
+ødelegger fonetisk informasjon en ASR-modell trenger, MENS ren lyd-energi forblir uendret). **Fiks:**
+`startMicCapture()` oppretter nå `captureCtx` med `new AudioContext({ sampleRate: 16000 })` (samme
+mønster som `ensurePlaybackCtx()` sin `{ sampleRate: 24000 }`) - nettleserens EGEN, korrekt anti-alias-
+filtrerte resampler gjør jobben i stedet for vår hånd-rullede interpolasjon, som beholdes KUN som
+forsvarsnett (`inRate === 16000`-tidligretur) for nettlesere som skulle ignorere hintet. 2 nye tester i
+`voice-page-wiring.test.ts` (14/14 grønt i filen). `pnpm --filter @jarvis/api typecheck`/`npx eslint`
+rene, `node --check` på inline-scriptet fortsatt gyldig. Se D-265 i DECISIONS_AND_ASSUMPTIONS.md.
+**Ikke ennå bekreftet at dette faktisk løser talegjenkjenningen** - avventer NAS-redeploy (KUN
+`voice.html`, statisk fil servert av `api`, INGEN Docker-rebuild nødvendig denne gangen) + en ny live-
+test.
+
+**Forrige milepæl (uendret, MERGET, PR #172): D-264 -
 D-263 sin nye `stderr_excerpt` LIVE på NAS-en viste seg for smal: whisper.cpp sitt flerlinjers
 modell-laste-banner (GPU-init/flash-attn/dtw-linjene, ALLTID skrevet FØRST) fylte hele det
 opprinnelige 300-tegns budsjettet alene og kuttet av midt i banneret - selve "no speech"-forklaringen
@@ -9,8 +31,8 @@ fulle stderr for én ytring, fortsatt trygt bundet). Fixturen `mock-whisper-blan
 til et REALISTISK, flerlinjers banner (samme struktur som live-funnet) FØR selve diagnostikklinjen,
 og testen sjekker nå eksplisitt at utdraget er lengre enn den gamle 300-grensen - beviser regresjonen
 ikke lenger kan skje. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene, 13/13 tester
-grønt. Se D-264 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hva whisper.cpp sin FULLE
-forklaring faktisk sier** - avventer NAS-redeploy + en ny live-test med den utvidede grensen.
+grønt. Se D-264 i DECISIONS_AND_ASSUMPTIONS.md. **Live-bekreftet (denne runden): fungerte, avslørte
+D-265 sin root cause direkte** - se over.
 
 **Forrige milepæl (uendret, MERGET, PR #171): D-263 -
 D-262 sin nye logging LIVE på NAS-en (etter en lang redeploy-runde: `git`-mangel, port 5432-konflikt
