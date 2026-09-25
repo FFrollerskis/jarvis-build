@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalWhisperStt } from "../src/stt.ts";
 
 /**
@@ -15,6 +15,7 @@ const FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
 const OK_BIN = `${FIXTURES}/mock-whisper-ok.sh`;
 const FAIL_BIN = `${FIXTURES}/mock-whisper-fail.sh`;
 const CLOSES_STDIN_EARLY_BIN = `${FIXTURES}/mock-whisper-closes-stdin-early.sh`;
+const BLANK_AUDIO_BIN = `${FIXTURES}/mock-whisper-blank-audio.sh`;
 const MODEL = `${FIXTURES}/fake-model.bin`;
 
 function pcmFrame(): Buffer {
@@ -109,6 +110,41 @@ describe("D-256: end() krasjer ALDRI hele prosessen når binæren avslutter FØR
     const stream = stt.startStream();
     stream.pushAudio(bigPcm());
     await expect(stream.end()).rejects.toThrow(/local_whisper_process_failed:7:/);
+  });
+});
+
+describe("D-263: end() logger et diagnostikk-utdrag av whisper.cpp sin EGEN stderr NÅR (og KUN når) den lykkes (kode 0) MED et tomt resultat", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("kode 0 + tomt stdout -> voice_stt_empty_result_diagnostic med wav_bytes og et stderr-utdrag, ALDRI en kastet feil", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stt = new LocalWhisperStt(BLANK_AUDIO_BIN, MODEL);
+    const stream = stt.startStream();
+    stream.pushAudio(pcmFrame());
+    const text = await stream.end();
+    expect(text).toBe("");
+
+    const diagnostics = spy.mock.calls
+      .map((c) => JSON.parse(String(c[0])))
+      .filter((m) => m.msg === "voice_stt_empty_result_diagnostic");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].wav_bytes).toBeGreaterThan(44); // WAV-header (44) + selve PCM-en
+    expect(diagnostics[0].stderr_excerpt).toContain("no speech detected");
+  });
+
+  it("kode 0 + IKKE-tomt stdout (den vanlige lykkes-banen) logger ALDRI diagnostikken", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const stt = new LocalWhisperStt(OK_BIN, MODEL);
+    const stream = stt.startStream();
+    stream.pushAudio(pcmFrame());
+    await stream.end();
+
+    const diagnostics = spy.mock.calls
+      .map((c) => JSON.parse(String(c[0])))
+      .filter((m) => m.msg === "voice_stt_empty_result_diagnostic");
+    expect(diagnostics).toHaveLength(0);
   });
 });
 
