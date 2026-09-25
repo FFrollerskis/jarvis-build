@@ -47,14 +47,44 @@ WORKDIR /build/whisper.cpp
 # ever built in the first place. `test -x` below turns any FUTURE rename of
 # this target (a version bump) into a loud build failure instead of another
 # silent wrong-binary regression.
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -j"$(nproc)" --target whisper-cli
+#
+# D-257: `-DBUILD_SHARED_LIBS=OFF` is REQUIRED, not an optimization. By
+# default this CMake project builds whisper-cli DYNAMICALLY linked against
+# libwhisper.so.1/libggml*.so.0, with an ABSOLUTE RUNPATH baked in at link
+# time pointing at THIS builder stage's own build directory
+# (verified locally: `readelf -d` on a default build shows
+# `RUNPATH: [/…/build/bin:]`, an absolute path, never `$ORIGIN`-relative).
+# The runtime stage below copies ONLY the executable
+# (`COPY --from=whisper-builder /build/whisper-bin ...`), never that
+# directory - the runpath therefore points at a path that structurally
+# cannot exist in the runtime image. Live symptom on the NAS after D-256
+# (which for the first time actually surfaced the real STT error instead
+# of crashing the process): `local_whisper_process_failed:127:
+# /opt/whisper/whisper-cli: error while loading shared libraries:
+# libwhisper.so.1: cannot open shared object file`. Root-caused by
+# re-cloning this EXACT pinned tag locally, running `ldd`/`readelf -d` on
+# the default dynamic build, then verifying a STATIC build's `ldd` output
+# only lists ordinary system libraries (libgomp/libstdc++/libgcc_s/libm/
+# libc) - confirmed by copying JUST the static binary to an empty
+# directory, deleting the entire source/build tree, and re-running it
+# successfully from that isolated copy (exit 0, real usage output).
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build build --config Release -j"$(nproc)" --target whisper-cli
 RUN find build -type f -name "whisper-cli" -exec cp {} /build/whisper-bin \; && test -x /build/whisper-bin
 
 FROM node:22-bookworm-slim AS runtime
 # wget: docker-compose.yml sin healthcheck for denne tjenesten bruker wget -
 # til stede by default på Alpine (busybox) men IKKE på Debian slim, uendret
 # fra api.Dockerfile-æraen for minst mulig diff der.
-RUN apt-get update && apt-get install -y --no-install-recommends curl wget ca-certificates \
+# libgomp1 (D-257): den statisk-lenkede whisper-cli (se whisper-builder sin
+# egen kommentar) bruker fortsatt OpenMP for tråding - `libgomp.so.1` er en
+# ORDINÆR systembibliotek-avhengighet (`ldd` bekrefter dette lokalt), IKKE en
+# whisper.cpp-spesifikk fil. Eksplisitt installert her i stedet for antatt
+# til stede i base-imaget - denne sandboxen har ingen kjørende
+# Docker-daemon å faktisk verifisere `node:22-bookworm-slim` sitt innhold
+# mot, så D-41-disiplinen her er "gjør avhengigheten eksplisitt" fremfor "gjett
+# at den allerede er der".
+RUN apt-get update && apt-get install -y --no-install-recommends curl wget ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

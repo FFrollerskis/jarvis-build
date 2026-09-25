@@ -46,6 +46,14 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
     expect(dockerfile).toMatch(/-exec cp \{\} \/build\/whisper-bin \\; && test -x \/build\/whisper-bin/);
   });
 
+  it("D-257: whisper-cli bygges STATISK (-DBUILD_SHARED_LIBS=OFF) - dynamisk bygg lenker mot .so-filer med en ABSOLUTT runpath inn i byggesteget, som strukturelt ikke kan finnes i runtime-imaget (live NAS-funn: libwhisper.so.1 cannot open shared object file)", () => {
+    expect(dockerfile).toMatch(/cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF/);
+  });
+
+  it("D-257: installerer libgomp1 i runtime-steget - den statisk-lenkede whisper-cli-binæren har fortsatt en ORDINÆR systembibliotek-avhengighet til OpenMP (libgomp.so.1), verifisert lokalt med ldd, ikke antatt til stede i base-imaget", () => {
+    expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends curl wget ca-certificates libgomp1/);
+  });
+
   it("henter en ekte ggml-modell fra den offisielle huggingface.co/ggerganov/whisper.cpp-kilden", () => {
     expect(dockerfile).toMatch(
       /https:\/\/huggingface\.co\/ggerganov\/whisper\.cpp\/resolve\/main\/ggml-base\.bin/

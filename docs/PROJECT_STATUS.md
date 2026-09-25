@@ -1,31 +1,39 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/fase-d256-stdin-epipe-process-crash-fix`, PR pending,
-D-256 - D-255 sin første live-test på NAS-en: "den bare lukker seg" - INGEN `voice_stt_error` denne
-gangen, men containeren restartet på HVER taleytring).** Full loggutskrift viste den ekte årsaken:
-`Unhandled 'error' event ... Error: write EPIPE ... at Object.end (stt.ts:228:20)` etterfulgt av en
-NY oppstartslinje - HELE Node-prosessen krasjet, ikke bare én mislykket tur. **Root cause:**
-`LocalWhisperStt.end()` kaller `proc.stdin.end(wav)` uten en `"error"`-lytter på selve
-`proc.stdin`-understrømmen (kun på `proc` selv, som KUN dekker spawn-feil) - avslutter whisper-cli
-FØR Node er ferdig med å skrive, feiler skrivingen med EPIPE, og en uhåndtert `"error"`-hendelse på
-en Node-strøm er en KASTET exception ingen `try`/`catch` kan fange, som tar ned hele prosessen.
-**Samme mønster funnet OG rettet i søsken-filen `tts.ts`** (`LocalPiperTts.synthesize()`, samme
-runde, uten et eget live-funn for piper spesifikt - funnet ved å lese ALLE spawn+stdin-steder i
-filene). **Hvorfor testene aldri fanget dette:** ALLE eksisterende fakede binærer drenerer BEVISST
-hele stdin FØR de avslutter - korrekt for argument-/exit-kode-testing, men skjulte denne bug-klassen
-fullstendig siden Task #125/D-217. **Fiks:** begge metodene legger nå til
-`proc.stdin.on("error", ...)` FØR `.end(...)`-kallet - en tilstedeværende lytter er nok til at Node
-ikke lenger krasjer, `close`-eventet avgjør utfallet som før, `stdinError`-detaljen vedlegges i
-tillegg til den eksisterende feilmeldingen. **Nye, faktisk EPIPE-reproduserende fixtures**
-(`mock-whisper-closes-stdin-early.sh`/`mock-piper-closes-stdin-early.sh`, avslutter UTEN å lese
-stdin i det hele tatt) + store nok payloads for å pålitelig treffe kappløpet. **Verifisert at testen
-faktisk beviser noe** (D-41): kjørte begge nye testene MOT ureparert kode først - Vitest fanget da
-et `Uncaught Exception: Error: write EPIPE` (identisk NAS-loggen), deretter med fiksen: ren avvist
-Promise. 22/22 relevante tester grønt (20 eksisterende + 2 nye), full `apps/voice-gateway`-suite
-100/106 grønt (6 hoppet over, eneste feil kjent `initdb: Permission denied`-begrensning).
-`pnpm -w typecheck`/`npx eslint` rene på alle fire endrede kildefiler. Se D-256 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet fungerende live** - krever NAS-rebuild + en
-faktisk `/voice`-test med ekte tale.
+**Oppdatert:** 2026-09-25 (branch `claude/fase-d257-whisper-cli-static-link-fix`, PR pending,
+D-257 - D-256 sin første live-test på NAS-en: INGEN krasj denne gangen (D-254/D-256 fungerte
+EKSAKT som tiltenkt), men fortsatt `stt_error` - den nå faktisk synlige feilen viste
+`local_whisper_process_failed:127: .../whisper-cli: error while loading shared libraries:
+libwhisper.so.1: cannot open shared object file`).** Root cause funnet ved å re-klone den EKSAKT
+pinnede whisper.cpp-taggen (`v1.9.4`) lokalt PÅ NYTT og undersøke binæren direkte: `cmake`-
+standardbygget lenker `whisper-cli` DYNAMISK mot `.so`-filer, MED en ABSOLUTT RUNPATH bakt inn som
+peker på byggestegets EGEN build-katalog (`readelf -d` bekreftet) - runtime-steget kopierer kun
+selve den kjørbare filen, aldri den katalogen, så runpath-en peker på en sti som strukturelt ikke
+kan eksistere der. **Hvorfor D-255 sin lokale verifisering ikke fanget dette:** binæren ble kjørt
+DIREKTE FRA sin egen build-katalog - runpath-en tilfeldigvis samsvarte med hvor `.so`-filene lå,
+noe som skjulte problemet fullstendig. **Fiks:** `-DBUILD_SHARED_LIBS=OFF` lagt til cmake-
+konfigureringen - whisper-cli lenkes nå STATISK, kun ordinære systembibliotek-avhengigheter igjen
+(`libgomp`/`libstdc++`/`libgcc_s`/`libm`/`libc`). `libgomp1` lagt eksplisitt til `apt-get install`
+i runtime-steget (statisk bygg bruker fortsatt OpenMP) - ikke antatt til stede, siden denne
+sandboxen mangler en kjørende Docker-daemon til å faktisk verifisere base-imaget direkte.
+**Verifisert GENUINT isolert denne gangen:** kopierte KUN den kjørbare filen til en tom mappe,
+SLETTET DERETTER HELE kildetreet, og kjørte binæren på nytt derfra - `ldd` viste kun
+systembiblioteker, `--help` returnerte ekte bruksmelding med exit 0. Ny testdekning beviser begge
+Dockerfile-endringene - 12/12 tester grønt (var 10), `d212`-suiten uendret. `npx eslint` rent. Se
+D-257 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet fungerende live** - krever en FULL
+whisper.cpp-rekompilering på NAS-en (lenkingsmetoden endret seg) + en faktisk `/voice`-test.
+
+**Forrige milepæl (uendret, MERGET): D-256 - D-255 sin første live-test på NAS-en: "den bare lukker
+seg" - INGEN `voice_stt_error` denne gangen, men containeren restartet på HVER taleytring.** Full
+loggutskrift viste den ekte årsaken: `Unhandled 'error' event ... Error: write EPIPE ... at
+Object.end (stt.ts:228:20)` etterfulgt av en NY oppstartslinje - HELE Node-prosessen krasjet, ikke
+bare én mislykket tur. **Root cause:** `LocalWhisperStt.end()` kaller `proc.stdin.end(wav)` uten en
+`"error"`-lytter på selve `proc.stdin`-understrømmen - avslutter whisper-cli FØR Node er ferdig med
+å skrive, feiler skrivingen med EPIPE, en uhåndtert `"error"`-hendelse på en Node-strøm tar ned
+hele prosessen. Samme mønster funnet OG rettet i søsken-filen `tts.ts`. **Fiks:** begge metodene
+legger nå til `proc.stdin.on("error", ...)` FØR `.end(...)`-kallet. Faktisk rebygget og kjørende på
+NAS-en, avslørte D-257 (ekte, ikke-krasjende feilmelding) på FØRSTE forsøk etter redeploy. Se D-256
+i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret, MERGET): D-255 - D-254 sin nye `voice_stt_error`-logging avslørte den
 EKTE feilen umiddelbart etter NAS-redeploy: `local_whisper_process_failed:1:`, exit-kode 1, HELT TOM
