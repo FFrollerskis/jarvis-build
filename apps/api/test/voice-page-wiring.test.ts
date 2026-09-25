@@ -63,3 +63,16 @@ describe("B: voice.html gjenbruker SAMME enhetsnøkkel-/grant-mekanisme som dash
     expect(voiceHtml).not.toMatch(/processor_terms_status\s*=\s*["']VERIFIED["']/);
   });
 });
+
+describe("D-259: transcriptEl tømmes ved HVERT 'Start samtale'-klikk - ingen stille sammenblanding av flere test-/bruksøkter i én nettleserfane", () => {
+  const voiceHtml = readSource("../../web/voice.html");
+
+  it("startConversation() tømmer transcript-panelet FØR mikrofontilgang/WebSocket-oppkobling", () => {
+    const fnIdx = voiceHtml.indexOf("async function startConversation()");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const clearIdx = voiceHtml.indexOf('transcriptEl.innerHTML = \'<p class="empty">Ingen samtale ennå.</p>\';', fnIdx);
+    const micIdx = voiceHtml.indexOf("getUserMedia", fnIdx);
+    expect(clearIdx).toBeGreaterThan(fnIdx);
+    expect(clearIdx).toBeLessThan(micIdx);
+  });
+});

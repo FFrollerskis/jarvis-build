@@ -453,6 +453,19 @@
     statusEl.textContent = "Ber om mikrofontilgang …";
     blockPanel.style.display = "none";
     trustPill.style.display = "none";
+    // D-259 (Tobias direkte i chat, 2026-09-25: "jeg sa bare hei Charlie så
+    // kommer alt dette tøyset" - en skjermdump viste en lang, urelatert
+    // samtale om undertekster/AI-Media-kreditering han aldri sa noe om
+    // akkurat da). Root cause: `appendTurn()` la ALLTID til nederst i
+    // `transcriptEl`, uten at NOE sted tømte den mellom samtaler - i en
+    // nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel
+    // D-25x-debug-runde) hopet gamle, urelaterte turer seg opp, og en helt
+    // NY samtale startet stille nederst i den lange loggen i stedet for
+    // synlig fra bunnen av et tomt panel. Tømmes derfor eksplisitt HER, ved
+    // hvert "Start samtale"-klikk - selve WebSocket-sesjonen/backend-turene
+    // var aldri sammenblandet (kun den VISUELLE nettleser-siden), så dette
+    // er en ren UI-fiks, ingen endring i selve tale-/autorisasjonslogikken.
+    transcriptEl.innerHTML = '<p class="empty">Ingen samtale ennå.</p>';
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
       // D-249: uten disse plukker mikrofonen ofte opp Jarvis sin egen TTS-lyd fra
