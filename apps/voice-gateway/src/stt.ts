@@ -232,11 +232,23 @@ export class LocalWhisperStt implements SttAdapter {
         // tilstand) - whisper.cpp sin egen, dårligere kalibrerte
         // (svakeste "base"-modell, norsk som ikke-engelsk språk) gjetning på
         // det SAMME spørsmålet overstyrer i praksis vår VAD sitt allerede
-        // tatte vedtak. Fiks: `-nth 0.0` deaktiverer whisper.cpp sin egen
-        // no-speech-terskel helt - VAD-en (server-side, allerede kjørt) eier
-        // tale/stillhet-vedtaket alene, whisper.cpp sin ENESTE jobb blir å
-        // transkribere det den får, aldri å gjette på nytt om det er tale.
-        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-nth", "0.0", "-l", language], {
+        // tatte vedtak.
+        //
+        // D-267 (RETTELSE, funnet FØRSTE live-forsøk med D-266 sin
+        // `-nth 0.0`-fiks): D-266 hadde retningen på terskelen BAKVENDT -
+        // whisper.cpp (identisk med OpenAI Whisper sin referanseimplementasjon
+        // sin `decoding.py`) forkaster et segment når `no_speech_prob >
+        // no_speech_thold` - en LAV terskel gjør det derfor LETTERE å
+        // overskride (nesten enhver ikke-null no-speech-sannsynlighet > 0.0),
+        // altså MER aggressiv forkasting, IKKE mindre. Live-loggen etter
+        // D-266 bekreftet dette PRESIST: flere forsøk viste nå
+        // `decode time = 0.00 ms / 1 runs` (whisper.cpp forkastet FØR reell
+        // dekoding i det hele tatt startet) - enda raskere avvist enn med
+        // standardverdien 0.6. Riktig retning for å DEAKTIVERE vakten er å
+        // gjøre terskelen umulig å overskride: en gyldig sannsynlighet kan
+        // aldri overstige 1.0, så `1.01` garanterer at
+        // `no_speech_prob > no_speech_thold` ALDRI blir sann.
+        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-nth", "1.01", "-l", language], {
           stdio: ["pipe", "pipe", "pipe"]
         });
         let stdout = "";

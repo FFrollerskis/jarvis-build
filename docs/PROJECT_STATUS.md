@@ -1,6 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-266 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-267 -
+RETTELSE av D-266: `-nth 0.0` hadde retningen BAKVENDT. whisper.cpp (identisk med OpenAI Whisper sin
+referanseimplementasjon) forkaster et segment når `no_speech_prob > no_speech_thold` - en LAV terskel
+gjør det derfor LETTERE å overskride (nesten enhver ikke-null sannsynlighet), altså MER aggressiv
+forkasting, IKKE mindre. Tobias sin live-test etter D-266 bekreftet dette PRESIST: flere forsøk viste
+`decode time = 0.00 ms / 1 runs` - whisper.cpp forkastet FØR reell dekoding i det hele tatt startet,
+enda raskere avvist enn med standardverdien 0,6. **Fiks:** `-nth 1.01` i stedet for `-nth 0.0` -
+en gyldig sannsynlighet kan aldri overstige 1,0, så `no_speech_prob > no_speech_thold` blir ALDRI
+sann, og vakten er dermed EKTE deaktivert (D-266 sin arkitektoniske begrunnelse - VAD-en eier
+tale/stillhet-vedtaket alene - forblir uendret, kun selve verdien var feil). Fixturen
+`mock-whisper-ok.sh` oppdatert til å kreve `1.01` i stedet for `0.0`. 113/113 tester grønt i full
+`apps/voice-gateway`-suite. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
+D-267 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at `-nth 1.01` faktisk løser
+talegjenkjenningen** - krever samme Docker-rebuild av `voice-gateway` som D-266; avventer Tobias sin
+neste NAS-redeploy + live-test.
+
+**Forrige milepæl (uendret, IKKE MERGET, PR #174 - erstattes av denne fiksen FØR merge): D-266 -
 D-265 sin anti-alias-fiks LIVE på NAS-en (`git pull`, INGEN Docker-rebuild) ga IDENTISK symptom som
 FØR fiksen: whisper.cpp brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil 1766ms)
 på flere turer (0,6-0,8 sek reell tale) OG `fallbacks = 1 p / 0 h` (whisper.cpp sin egen temperatur-
