@@ -63,6 +63,33 @@ try {
   console.log(`  enhet:  ${deviceId ?? "(enhver device_id for denne personen)"}`);
   console.log(`  utloper: ${created.expires_at.toISOString()}`);
   console.log("");
+  // D-260 (Tobias direkte i chat: gjentatte "enrollment_ticket_invalid"-feil
+  // på tvers av flere FERSKE, korrekt genererte billetter - bekreftet
+  // rotårsak "skrev feil": manuell kopiering av denne 44-tegns base64url-
+  // strengen FRA en terminal TIL et nettleser-skjema er strukturelt
+  // feilutsatt (mobile nettlesere/SSH-klienter tolker ofte `-`/`_` som
+  // ordgrenser ved dobbelttrykk-for-å-velge). `apps/web/voice.html` sin
+  // `tryAutoEnrollFromUrl()` leser nå billetten fra en `?enroll=`-URL-
+  // parameter og innrullerer AUTOMATISK ved sidelasting - null manuell
+  // tekstseleksjon. Når `JARVIS_PUBLIC_VOICE_BASE_URL` er satt (én gang, i
+  // `.env` - se `.env.example`), skrives derfor en FULLSTENDIG, KLIKKBAR
+  // lenke her: de fleste SSH-klienter/terminalemulatorer gjenkjenner en
+  // `https://`-URL i output og gjør den klikkbar uten at brukeren markerer
+  // noe som helst selv.
+  const publicBaseUrl = process.env["JARVIS_PUBLIC_VOICE_BASE_URL"];
+  if (publicBaseUrl) {
+    const enrollUrl = `${publicBaseUrl.replace(/\/+$/, "")}/voice?enroll=${created.ticket}`;
+    console.log("  Åpne denne lenken direkte (innrullerer automatisk, ingen kopiering nødvendig):");
+    console.log("");
+    console.log(`  ${enrollUrl}`);
+    console.log("");
+  } else {
+    console.log(
+      "  (Sett JARVIS_PUBLIC_VOICE_BASE_URL i .env for å få en klikkbar innrulleringslenke her i stedet " +
+        "for å måtte kopiere billetten manuelt - se .env.example.)"
+    );
+    console.log("");
+  }
 } finally {
   await adminPool.end();
 }

@@ -1,18 +1,37 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-259 -
-rett etter D-258-merge, mens Tobias fortsatt testet på D-257 (før NAS-redeploy): "jeg sa bare hei
-Charlie så kommer alt dette tøyset" - en skjermdump av `/voice` sin transkript-panel viste en lang,
-urelatert samtale om undertekster/AI-Media han ikke hadde sagt noe om i denne økten.** Root cause:
-`voice.html` sin `appendTurn()` legger ALLTID til nederst i `transcriptEl`, men INGENTING tømmer
-den mellom samtaler - i en nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel
-D-25x-runde) hoper alle tidligere samtaler seg opp i samme panel; en NY samtale starter stille
-nederst i en lang, urelatert logg. Ren VISUELL sammenblanding - ALDRI selve WebSocket-
-sesjonen/backend-turene. **Fiks:** `startConversation()` tømmer nå `transcriptEl` til tom-tilstand
-FØR mikrofontilgang/WebSocket-oppkobling - hvert "Start samtale"-klikk gir et rent panel. Ny
-beskrivelse i `voice-page-wiring.test.ts` (8/8 grønt, var 6). Se D-259 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke en tale-/lydbug** - D-258 (se under) er fortsatt den ventende
-årsaken til at lyden ikke fungerte da dette ble rapportert.
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-260 -
+etter D-258/D-259-merge: gjentatt `enrollment_ticket_invalid` på tvers av FLERE separate, ferske,
+korrekt genererte billetter, selv etter å ha metodisk utelukket utløp/allerede-brukt/tenant-person-
+mismatch direkte mot databasen OG en separat, uavhengig funnet+fikset bug (`api`-containeren kjørte
+fra en Docker-build-cache flere-ukers-gammel kode, FØR D-252 - tvunget `--no-cache`-rebuild av
+`api`/`migrate`/`worker` løste det, bekreftet via `grep -c` mot BÅDE vert og container). Eksplisitt,
+frustrert tilbakemelding: "slutt å be meg gjøre ting og finn ut av det".** Tobias sitt svar på
+direkte spørsmål ("skrev feil") bekreftet den gjenværende forklaringen: ren kopier/lim-inn-
+korrupsjon av den 44-tegns base64url-billett-strengen (`-`/`_` tolkes ofte som ordgrenser ved
+dobbelttrykk-for-å-velge på mobil/SSH-klienter). **Fiks (fjerner selve kopisteget):**
+`apps/web/voice.html` sin nye `tryAutoEnrollFromUrl()` leser billetten fra en `?enroll=`-URL-
+parameter og innrullerer automatisk ved sidelasting (delt `submitEnrollment()` med det uendrede
+manuelle skjemaet); `apps/api/src/enroll-ticket-main.ts` skriver nå, når `JARVIS_PUBLIC_VOICE_BASE_URL`
+er satt i `.env` (dokumentert i `.env.example`), en FULLSTENDIG, KLIKKBAR lenke direkte i terminal-
+output - de fleste SSH-klienter gjør en `https://`-URL klikkbar, null manuell tekstseleksjon. Usatt
+variabel: uendret oppførsel (kun den bare billett-strengen, som før). 16 nye/utvidede tester
+(`voice-page-wiring.test.ts` + ny `d260-enroll-ticket-clickable-url.test.ts`) grønt.
+`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-260 i DECISIONS_AND_ASSUMPTIONS.md.
+**Ikke ennå bekreftet fungerende live** - krever NAS-redeploy (`api`, `--no-cache` inntil videre) +
+at Tobias setter `JARVIS_PUBLIC_VOICE_BASE_URL` og klikker den nye lenken.
+
+**Forrige milepæl (uendret, MERGET, PR #167): D-259 - rett etter D-258-merge, mens Tobias fortsatt
+testet på D-257 (før NAS-redeploy): "jeg sa bare hei Charlie så kommer alt dette tøyset" - en
+skjermdump av `/voice` sin transkript-panel viste en lang, urelatert samtale om undertekster/
+AI-Media han ikke hadde sagt noe om i denne økten.** Root cause: `voice.html` sin `appendTurn()`
+legger ALLTID til nederst i `transcriptEl`, men INGENTING tømmer den mellom samtaler - i en
+nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel D-25x-runde) hoper alle
+tidligere samtaler seg opp i samme panel; en NY samtale starter stille nederst i en lang, urelatert
+logg. Ren VISUELL sammenblanding - ALDRI selve WebSocket-sesjonen/backend-turene. **Fiks:**
+`startConversation()` tømmer nå `transcriptEl` til tom-tilstand FØR mikrofontilgang/WebSocket-
+oppkobling - hvert "Start samtale"-klikk gir et rent panel. Ny beskrivelse i
+`voice-page-wiring.test.ts` (8/8 grønt, var 6). Se D-259 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret, MERGET, PR #166): D-258 - D-257 sin første live-test på NAS-en:
 talegjenkjenning/-svar fungerte ENDELIG ("Hallo?" -> ekte
