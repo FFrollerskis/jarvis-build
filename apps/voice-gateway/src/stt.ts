@@ -210,7 +210,33 @@ export class LocalWhisperStt implements SttAdapter {
       },
       async end(): Promise<string> {
         const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
-        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-l", language], {
+        // D-266 (Tobias direkte i chat, live NAS-test MED D-265 sin
+        // anti-alias-fiks aktiv): IDENTISK symptom som FØR D-265 - whisper.cpp
+        // brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil
+        // 1766ms) på flere turer (0,6-0,8 sek reell tale), OG `fallbacks = 1
+        // p / 0 h` (whisper.cpp sin EGEN temperatur-refallback, utløst av
+        // dens interne selvtillits-vakter) - men produserte likevel
+        // KONSEKVENT tomt resultat. Dette utelukker anti-alias-forvrengning
+        // som eneste/hovedårsak: selv med korrekt resamplet lyd (D-265)
+        // vedvarer mønsteret UENDRET. Verifisert mot whisper.cpp v1.9.4 sin
+        // faktiske kildekode (examples/cli/cli.cpp, IKKE gjettet - D-41-
+        // disiplin): `-nth`/`--no-speech-thold` (standard 0.6) sammen med
+        // `-et`/`--entropy-thold` (2.40) og `-lpt`/`--logprob-thold` (-1.00)
+        // er whisper.cpp sin EGEN interne "er dette faktisk tale"-vakt som
+        // stille forkaster et dekodet segment når den ikke er trygg nok -
+        // PRESIST forklarer et ekte dekodeforsøk (ikke-null sample-/decode-
+        // tid, en fallback-retry) som likevel ender tomt. Denne vakten er
+        // STRUKTURELT REDUNDANT her: `EnergyVad` (`vad.ts`) har ALLEREDE
+        // avgjort at dette ER tale FØR STT-en i det hele tatt kalles (en tur
+        // starter kun ved `speech_start`, lyd mates kun under `speech`-
+        // tilstand) - whisper.cpp sin egen, dårligere kalibrerte
+        // (svakeste "base"-modell, norsk som ikke-engelsk språk) gjetning på
+        // det SAMME spørsmålet overstyrer i praksis vår VAD sitt allerede
+        // tatte vedtak. Fiks: `-nth 0.0` deaktiverer whisper.cpp sin egen
+        // no-speech-terskel helt - VAD-en (server-side, allerede kjørt) eier
+        // tale/stillhet-vedtaket alene, whisper.cpp sin ENESTE jobb blir å
+        // transkribere det den får, aldri å gjette på nytt om det er tale.
+        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-nth", "0.0", "-l", language], {
           stdio: ["pipe", "pipe", "pipe"]
         });
         let stdout = "";

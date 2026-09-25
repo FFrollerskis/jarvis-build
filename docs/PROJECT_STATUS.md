@@ -1,6 +1,29 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-265 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-266 -
+D-265 sin anti-alias-fiks LIVE på NAS-en (`git pull`, INGEN Docker-rebuild) ga IDENTISK symptom som
+FØR fiksen: whisper.cpp brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil 1766ms)
+på flere turer (0,6-0,8 sek reell tale) OG `fallbacks = 1 p / 0 h` (whisper.cpp sin egen temperatur-
+refallback), men produserte likevel KONSEKVENT tomt resultat - utelukker anti-alias-forvrengning som
+eneste/hovedårsak. **Root cause verifisert mot whisper.cpp v1.9.4 sin FAKTISKE kildekode (D-41-
+disiplin, ikke gjettet):** `-nth`/`--no-speech-thold` (standard 0,6) sammen med `-et`/`--entropy-
+thold` (2,40) og `-lpt`/`--logprob-thold` (-1,00) er whisper.cpp sin EGEN interne "er dette faktisk
+tale"-vakt - forklarer PRESIST et ekte dekodeforsøk (ikke-null tid, en fallback-retry) som likevel
+ender tomt. Denne vakten er STRUKTURELT REDUNDANT: `EnergyVad` har ALLEREDE avgjort at dette er tale
+FØR STT-en kalles (en tur starter kun ved `speech_start`), men whisper.cpp sin egen, dårligere
+kalibrerte (svakeste "base"-modell, norsk som ikke-engelsk) gjetning på SAMME spørsmål overstyrer i
+praksis vår VAD sitt allerede tatte vedtak. **Fiks:** `LocalWhisperStt.end()` (`stt.ts`) sender nå
+`-nth 0.0` til whisper-cli - deaktiverer whisper.cpp sin egen no-speech-terskel helt; VAD-en eier
+tale/stillhet-vedtaket alene, whisper.cpp sin eneste jobb blir å transkribere det den får. Fixturen
+`mock-whisper-ok.sh` utvidet til å KREVE `-nth 0.0` for å lykkes (samme implisitte verifiserings-
+mønster som `-f -`/`-nt` allerede i filen) - enhver fremtidig fjerning av flagget feiler nå HELE
+lykkes-banen (seksjon C + D-258 + seksjon E). 113/113 tester grønt i full `apps/voice-gateway`-suite
+(unntatt kjente embedded-postgres-sandkasse-begrensning). `pnpm --filter @jarvis/voice-gateway
+typecheck`/`npx eslint` rene. Se D-266 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at
+`-nth 0.0` faktisk løser talegjenkjenningen** - avventer NAS-redeploy (voice-gateway-bygg denne
+gangen, siden `stt.ts` er kompilert kode, IKKE en statisk fil som D-265) + en ny live-test.
+
+**Forrige milepæl (uendret, MERGET, PR #173): D-265 -
 D-264 sin utvidede `stderr_excerpt` LIVE på NAS-en ga ENDELIG whisper.cpp sin fulle prosesserings-
 utskrift, over fem separate turer (0,1-1,6 sekund reell tale-energi hver). Mønster: whisper.cpp brukte
 EKTE encode-/decode-tid (opptil 1730ms encode, proporsjonalt med lengden) på FLERE av dem, og
