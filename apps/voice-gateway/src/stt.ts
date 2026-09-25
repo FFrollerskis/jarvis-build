@@ -251,7 +251,32 @@ export class LocalWhisperStt implements SttAdapter {
             : stderr.slice(0, 200);
           throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${detail}`);
         }
-        return stdout.trim();
+        const text = stdout.trim();
+        // D-263 (Tobias direkte i chat, live NAS-test MED D-262 sin nye logging
+        // aktiv): HVER eneste tur, inkludert én med 2+ sekunder sammenhengende
+        // tale-energi, ga `voice_stt_result` med `text_length: 0` - ALDRI
+        // `voice_core_reply_sent`. whisper-cli avsluttet med kode 0 (INGEN
+        // `local_whisper_process_failed`) - prosessen kjørte altså "vellykket",
+        // den bare fant ingenting å transkribere. `stderr` (whisper.cpp sin
+        // EGEN diagnostikk - modell-/decode-/"no speech"-info, ALDRI selve
+        // transkripsjonen, som kun skrives til stdout) ble FØR denne fiksen
+        // fanget opp, men stille kastet bort på nøyaktig denne (suksess+tomt
+        // resultat) stien - samme "en feil/et signal svelges stille"-mønster
+        // som D-254/D-261/D-262, nå ett lag dypere inne i selve STT-adapteren.
+        // KUN logget når resultatet faktisk er tomt (aldri når en transkripsjon
+        // finnes) - unngår enhver risiko for at whisper.cpp sin verbose stderr
+        // skulle inneholde delvis gjenkjent tale, samme personvern-disiplin
+        // som §22 andre steder i filen.
+        if (!text) {
+          console.error(
+            JSON.stringify({
+              msg: "voice_stt_empty_result_diagnostic",
+              wav_bytes: wav.length,
+              stderr_excerpt: stderr.slice(0, 300)
+            })
+          );
+        }
+        return text;
       },
       onPartial(): void {
         // whisper.cpp sin batch-CLI gir ingen inkrementelle partials - se klassekommentaren.

@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-262 -
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-263 -
+D-262 sin nye logging LIVE på NAS-en (etter en lang redeploy-runde: `git`-mangel, port 5432-konflikt
+med en NATIV vert-postgres, HTTPS/PAT-bytte pga. manglende SSH-nøkkel, `.git`-eierskap - alle
+løst underveis, ingen kodeendring) ga et DEFINITIVT svar: HVER ENESTE tur (inkl. én med 2+ sekunder
+sammenhengende tale-energi) logget `voice_vad_transition` BÅDE `speech_start` OG `end_of_turn`,
+UMIDDELBART etterfulgt av `voice_stt_result` med `text_length: 0` - `voice_core_reply_sent` ALDRI
+logget. Turen kjører altså KORREKT ende-til-ende på VAD-nivå; `whisper-cli` returnerer bare
+konsekvent et tomt transkript, med kode 0 (INGEN `local_whisper_process_failed`).** Whisper.cpp sin
+EGEN stderr-diagnostikk (modell-/decode-/"no speech"-info) ble likevel FØR denne posten kun brukt i
+feilbanen (`code !== 0`) - på nøyaktig denne (suksess+tomt resultat) stien ble stderr innhentet, men
+stille kastet bort, samme "et signal svelges stille"-mønster som D-254/D-261/D-262, nå ett lag dypere
+inne i selve `LocalWhisperStt`. **Fiks (denne posten, INGEN atferdsendring):** `stt.ts` sin
+`LocalWhisperStt.end()` logger nå `voice_stt_empty_result_diagnostic` (`wav_bytes` + et 300-tegns
+`stderr_excerpt` fra whisper.cpp selv) NÅR (og KUN når) resultatet faktisk er tomt - aldri når en
+transkripsjon finnes (samme §22-personvernsdisiplin, whisper.cpp skriver selve transkripsjonen KUN
+til stdout, aldri stderr). Ny `mock-whisper-blank-audio.sh`-fixture (kode 0, tomt stdout, en ekte
+whisper.cpp-lignende stderr-linje) + 2 nye tester i `local-whisper-stt.test.ts` (13/13 grønt i filen).
+`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-263 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet HVORFOR whisper.cpp ikke finner tale** - avventer
+NAS-redeploy + en ny live-test; `stderr_excerpt` bør endelig avsløre den faktiske årsaken (feil
+samplerate-tolkning, modellproblem, eller noe annet whisper.cpp selv rapporterer).
+
+**Forrige milepæl (uendret, MERGET, PR #170): D-262 -
 SELV MED D-261 sin nye heartbeat-logging LIVE på riktig NAS: ny samtaletest viste ekte, sunn tale-/
 stillhetsmønster (RMS 0,17-0,52 under tale, nær 0 i pauser) over to fulle tilkoblingsøkter, og INGEN
 feillogg noe sted (`voice_stt_error`/`voice_core_error`/`voice_message_error` alle fraværende) -
@@ -10,8 +32,7 @@ gjensto FORTSATT usynlige: (1) D-261 sin heartbeat sampler kun ~1-av-24 rammer o
 om `end_of_turn` faktisk fyrte mellom to målinger; (2) `finishTurn()` sin `if (!text) return`-gren var
 - og VAR FORTSATT - fullstendig stille for et TOMT STT-transkript, intet logglinje noe sted.
 `LocalWhisperStt` (whisper.cpp) er DOKUMENTERT kjent for å returnere tomt/whitespace-transkript for
-reell, men for kort/svak tale - noe som ville reprodusert PRESIST det observerte bildet. **Fiks
-(denne posten, INGEN atferdsendring - kun tre nye, ikke-throttlede diagnostikklinjer i `session.ts`):**
+reell, men for kort/svak tale - noe som ville reprodusert PRESIST det observerte bildet. **Fiks:**
 `voice_vad_transition` (VED HVER faktiske `speech_start`/`end_of_turn`-overgang, aldri de hyppige
 `speech`/`silence`-hendelsene mellom dem), `voice_stt_result` (KUN `text_length`, ALDRI selve
 transkriptet - §22-personvernsdisiplin), `voice_core_reply_sent` (`reply_chars`/`routed`/`cancelled`
@@ -19,8 +40,8 @@ rett etter `onReply()`). Sammen skiller de nå PRESIST "turen kjørte aldri" / "
 "turen fullførte, svaret nådde bare ikke klienten" (peker da mot `voice.html`, ikke `voice-gateway`).
 Ny `d262-turn-lifecycle-logging.test.ts` (3 tester) - 11/11 grønt sammen med d258/d261-suitene.
 `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-262 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet hvilken gren som er root cause** - avventer
-NAS-redeploy + en ny live-test med DENNE loggingen på.
+DECISIONS_AND_ASSUMPTIONS.md. **Live-bekreftet (denne runden):** turen kjører ende-til-ende, men
+STT returnerer konsekvent tomt - se D-263 over for neste lag.
 
 **Forrige milepæl (uendret, MERGET, PR #169): D-261 -
 SELV MED D-260 sin klikkbare lenke fortsatte `enrollment_ticket_invalid` - rot-årsak: `srby.tail3935f7.ts.net`
