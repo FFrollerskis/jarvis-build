@@ -76,3 +76,33 @@ describe("D-259: transcriptEl tømmes ved HVERT 'Start samtale'-klikk - ingen st
     expect(clearIdx).toBeLessThan(micIdx);
   });
 });
+
+describe("D-260: innrullering fungerer UTEN manuell kopiering av billett-strengen (?enroll=-URL, automatisk innrullering)", () => {
+  const voiceHtml = readSource("../../web/voice.html");
+
+  it("tryAutoEnrollFromUrl() leser billetten fra ?enroll= - IKKE fra skjemafeltet", () => {
+    expect(voiceHtml).toContain("function tryAutoEnrollFromUrl()");
+    expect(voiceHtml).toMatch(/new URLSearchParams\(location\.search\)\.get\("enroll"\)/);
+  });
+
+  it("fjerner billetten fra adresselinjen (history.replaceState) FØR selve innrulleringsforsøket - en engangsbillett skal aldri stå igjen synlig eller kunne gjenbrukes ved refresh", () => {
+    const fnIdx = voiceHtml.indexOf("function tryAutoEnrollFromUrl()");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const replaceIdx = voiceHtml.indexOf("history.replaceState(", fnIdx);
+    const submitIdx = voiceHtml.indexOf("submitEnrollment(ticket)", fnIdx);
+    expect(replaceIdx).toBeGreaterThan(fnIdx);
+    expect(replaceIdx).toBeLessThan(submitIdx);
+  });
+
+  it("tryAutoEnrollFromUrl() faktisk kalles ved sidelasting (ikke bare definert, aldri påkalt)", () => {
+    expect(voiceHtml).toMatch(/\n\s*tryAutoEnrollFromUrl\(\);\s*\n/);
+  });
+
+  it("det manuelle skjemaet (enrollForm) og auto-innrulleringen deler SAMME submitEnrollment()-logikk - ingen duplisert/avvikende innrulleringssti", () => {
+    const formHandlerIdx = voiceHtml.indexOf('enrollForm.addEventListener("submit"');
+    expect(formHandlerIdx).toBeGreaterThan(-1);
+    const formBlockEnd = voiceHtml.indexOf("});", formHandlerIdx);
+    const formBlock = voiceHtml.slice(formHandlerIdx, formBlockEnd);
+    expect(formBlock).toContain("submitEnrollment(ticket)");
+  });
+});

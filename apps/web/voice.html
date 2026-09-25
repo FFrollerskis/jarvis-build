@@ -203,11 +203,31 @@
     if (!res.ok || !body.ok) throw new Error("devices/register: " + (body.reason || res.status));
   }
 
-  enrollForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ticket = enrollTicket.value.trim();
-    if (!ticket) return;
-    enrollTicket.value = "";
+  /**
+   * D-260 (Tobias direkte i chat, 2026-09-25: gjentatte
+   * "enrollment_ticket_invalid"-feil på tvers av flere ferske billetter - rot-
+   * årsaken var til slutt bekreftet ("skrev feil") å være ren
+   * kopier/lim-inn-korrupsjon av selve billett-strengen (base64url med `-`/`_`
+   * - tegn mobile nettlesere/SSH-klienter ofte tolker som ordgrenser ved
+   * dobbelttrykk-for-å-velge, og som terminalvindu-bredde kan brekke over to
+   * linjer). "slutt å be meg gjøre ting og finn ut av det": en manuell
+   * kopiering av en 44-tegns tilfeldig streng FRA en terminal TIL et
+   * nettleser-skjema er strukturelt feilutsatt uansett hvor forsiktig
+   * brukeren er - løsningen fjerner selve kopisteget, ikke instruksjonen om
+   * hvordan å kopiere forsiktig.
+   *
+   * `submitEnrollment()` er delt av BEGGE innrulleringsveiene under: det
+   * manuelle skjemaet (uendret, i tilfelle billett-URL-en av en eller annen
+   * grunn ikke kan brukes) OG `tryAutoEnrollFromUrl()`, som leser billetten
+   * fra `?enroll=`-spørringsparameteren i selve siden sin URL i stedet for et
+   * skjemafelt - `enroll-ticket-main.ts` skriver nå (når
+   * `JARVIS_PUBLIC_VOICE_BASE_URL` er satt) en FULLSTENDIG, KLIKKBAR lenke
+   * til akkurat denne URL-en. De fleste SSH-klienter/terminaler (Termius,
+   * iTerm, Windows Terminal, PuTTY m.fl.) gjenkjenner en `https://`-lenke i
+   * output og gjør den klikkbar - null manuell tekstseleksjon, null
+   * kopier/lim-inn av selve billett-strengen i det hele tatt.
+   */
+  async function submitEnrollment(ticket) {
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
       await enrollDevice(deviceKey.privateKey, deviceKey.publicKey, ticket);
@@ -216,7 +236,31 @@
     } catch (err) {
       statusEl.textContent = "Innrullering feilet: " + err.message;
     }
+  }
+
+  enrollForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const ticket = enrollTicket.value.trim();
+    if (!ticket) return;
+    enrollTicket.value = "";
+    void submitEnrollment(ticket);
   });
+
+  /**
+   * Leser `?enroll=<billett>` fra siden sin EGEN URL (aldri fra et skjema)
+   * og fjerner den fra adresselinjen UMIDDELBART via `history.replaceState()`
+   * - FØR selve innrulleringsforsøket - slik at en billett (engangs per
+   * design) aldri blir stående synlig i nettleserhistorikken/bokmerker, og en
+   * siderefresh aldri kan forsøke å gjenbruke en allerede konsumert billett.
+   */
+  function tryAutoEnrollFromUrl() {
+    const ticket = new URLSearchParams(location.search).get("enroll");
+    if (!ticket) return;
+    history.replaceState(null, "", location.pathname + location.hash);
+    statusEl.textContent = "Innrullerer enheten automatisk …";
+    void submitEnrollment(ticket);
+  }
+  tryAutoEnrollFromUrl();
 
   function escapeHtml(text) {
     const div = document.createElement("div");
