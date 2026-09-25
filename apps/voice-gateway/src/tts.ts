@@ -194,8 +194,18 @@ export class LocalPiperTts implements TtsAdapter {
       });
       child = proc;
       let stderr = "";
+      let stdinError: Error | null = null;
       proc.stderr.on("data", (d: Buffer) => {
         stderr += d.toString("utf8");
+      });
+      // D-256: SAMME bug-klasse som `LocalWhisperStt.end()` (se stt.ts sin
+      // kommentar) - avslutter/lukker piper sin egen stdin FØR `.end(text)`
+      // er ferdigskrevet, feiler skrivingen med EPIPE. Uten en egen lytter
+      // her ville det vært en UHÅNDTERT "error"-hendelse på understrømmen
+      // `proc.stdin`, ALDRI fanget av `proc.once("close", ...)` under - Node
+      // kaster/krasjer HELE voice-gateway-prosessen på nøyaktig samme måte.
+      proc.stdin.on("error", (err: Error) => {
+        stdinError = err;
       });
       proc.stdin.end(text);
       const exitCode = new Promise<number | null>((resolve) => proc.once("close", resolve));
@@ -211,7 +221,10 @@ export class LocalPiperTts implements TtsAdapter {
       }
       const code = await exitCode;
       if (!cancelled && code !== 0) {
-        throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${stderr.slice(0, 200)}`);
+        const detail = stdinError
+          ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
+          : stderr.slice(0, 200);
+        throw new Error(`local_piper_process_failed:${code ?? "unknown"}:${detail}`);
       }
     }
     return {

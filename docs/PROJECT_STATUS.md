@@ -1,28 +1,44 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/fase-d255-whisper-cli-deprecation-stub-fix`, PR pending,
-D-255 - D-254 sin nye `voice_stt_error`-logging avslørte den EKTE feilen umiddelbart etter NAS-
-redeploy: `local_whisper_process_failed:1:`, exit-kode 1, HELT TOM stderr).** Tom stderr på en
-normal exit var mistenkelig nok til å undersøke selve binæren i stedet for å anta modell-/lyd-feil.
-Bygget den EKSAKT pinnede whisper.cpp-taggen (`v1.9.4`) lokalt og leste kildekoden direkte: whisper.cpp
-bygger BEVISST en "utdatert navn"-advarselsstubb (kun `fprintf` + `EXIT_FAILURE`) til FLERE
-binærnavn samtidig, deriblant literally `main` - mens den EKTE CLI-en bygges under et helt annet
-CMake-target, `whisper-cli`. D-253 sin Dockerfile bygde HELE prosjektet og lokaliserte binæren med
-`find ... \( -name "whisper-cli" -o -name "main" \)`, som traff BEGGE og kopierte begge til samme
-mål - stubben vant på den faktiske NAS-builden. `voice-gateway` kjørte derfor fra første stund en
-binær som ALLTID feiler, uavhengig av lyd/modell - D-253 sin live-test var strukturelt dømt fra
-start. **Verifisert lokalt FØR fiksen** (D-41): `--target whisper-cli` alene bygger KUN den ekte
-CLI-en (ingen stubber bygges i det hele tatt); `--help` viser ekte bruksmelding; kildekoden bekrefter
-`-f -` er en EKPLISITT tiltenkt stdin-markør; full ende-til-ende-kjøring (repoets egne "for-tests"-
-minimodell + en ekte WAV generert med produksjonskodens egen `pcm16ToWav()`) fullførte med exit 0.
-**Fiks:** Dockerfile bygger nå eksplisitt `--target whisper-cli` (aldri en full prosjektbygg), `find`
-matcher nå KUN `-name "whisper-cli"` (droppet `main` helt), pluss `&& test -x` som byggetids-vaktpost
-mot en fremtidig, stille regresjon. Binær-lokaliseringstesten i
-`d253-voice-gateway-local-stt-tts.test.ts` omskrevet til å bevise begge deler - 10/10 grønt (var 9).
-`pnpm -w typecheck`/`npx eslint` rene; `modules/core/test` sine eneste feil er de samme, kjente,
-uendrede `initdb: Permission denied`-sandbox-begrensningene, ingen regresjon. Se D-255 i
+**Oppdatert:** 2026-09-25 (branch `claude/fase-d256-stdin-epipe-process-crash-fix`, PR pending,
+D-256 - D-255 sin første live-test på NAS-en: "den bare lukker seg" - INGEN `voice_stt_error` denne
+gangen, men containeren restartet på HVER taleytring).** Full loggutskrift viste den ekte årsaken:
+`Unhandled 'error' event ... Error: write EPIPE ... at Object.end (stt.ts:228:20)` etterfulgt av en
+NY oppstartslinje - HELE Node-prosessen krasjet, ikke bare én mislykket tur. **Root cause:**
+`LocalWhisperStt.end()` kaller `proc.stdin.end(wav)` uten en `"error"`-lytter på selve
+`proc.stdin`-understrømmen (kun på `proc` selv, som KUN dekker spawn-feil) - avslutter whisper-cli
+FØR Node er ferdig med å skrive, feiler skrivingen med EPIPE, og en uhåndtert `"error"`-hendelse på
+en Node-strøm er en KASTET exception ingen `try`/`catch` kan fange, som tar ned hele prosessen.
+**Samme mønster funnet OG rettet i søsken-filen `tts.ts`** (`LocalPiperTts.synthesize()`, samme
+runde, uten et eget live-funn for piper spesifikt - funnet ved å lese ALLE spawn+stdin-steder i
+filene). **Hvorfor testene aldri fanget dette:** ALLE eksisterende fakede binærer drenerer BEVISST
+hele stdin FØR de avslutter - korrekt for argument-/exit-kode-testing, men skjulte denne bug-klassen
+fullstendig siden Task #125/D-217. **Fiks:** begge metodene legger nå til
+`proc.stdin.on("error", ...)` FØR `.end(...)`-kallet - en tilstedeværende lytter er nok til at Node
+ikke lenger krasjer, `close`-eventet avgjør utfallet som før, `stdinError`-detaljen vedlegges i
+tillegg til den eksisterende feilmeldingen. **Nye, faktisk EPIPE-reproduserende fixtures**
+(`mock-whisper-closes-stdin-early.sh`/`mock-piper-closes-stdin-early.sh`, avslutter UTEN å lese
+stdin i det hele tatt) + store nok payloads for å pålitelig treffe kappløpet. **Verifisert at testen
+faktisk beviser noe** (D-41): kjørte begge nye testene MOT ureparert kode først - Vitest fanget da
+et `Uncaught Exception: Error: write EPIPE` (identisk NAS-loggen), deretter med fiksen: ren avvist
+Promise. 22/22 relevante tester grønt (20 eksisterende + 2 nye), full `apps/voice-gateway`-suite
+100/106 grønt (6 hoppet over, eneste feil kjent `initdb: Permission denied`-begrensning).
+`pnpm -w typecheck`/`npx eslint` rene på alle fire endrede kildefiler. Se D-256 i
 DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet fungerende live** - krever NAS-rebuild + en
-faktisk `/voice`-test med ekte tale (ikke bare den syntetiske stillhets-WAV-en brukt lokalt).
+faktisk `/voice`-test med ekte tale.
+
+**Forrige milepæl (uendret, MERGET): D-255 - D-254 sin nye `voice_stt_error`-logging avslørte den
+EKTE feilen umiddelbart etter NAS-redeploy: `local_whisper_process_failed:1:`, exit-kode 1, HELT TOM
+stderr.** Tom stderr på en normal exit var mistenkelig nok til å undersøke selve binæren i stedet
+for å anta modell-/lyd-feil. Bygget den EKSAKT pinnede whisper.cpp-taggen (`v1.9.4`) lokalt og leste
+kildekoden direkte: whisper.cpp bygger BEVISST en "utdatert navn"-advarselsstubb (kun `fprintf` +
+`EXIT_FAILURE`) til FLERE binærnavn samtidig, deriblant literally `main` - mens den EKTE CLI-en
+bygges under et helt annet CMake-target, `whisper-cli`. D-253 sin Dockerfile bygde HELE prosjektet
+og lokaliserte binæren med `find ... \( -name "whisper-cli" -o -name "main" \)`, som traff BEGGE og
+kopierte begge til samme mål - stubben vant på den faktiske NAS-builden. **Fiks:** Dockerfile bygger
+nå eksplisitt `--target whisper-cli` (aldri en full prosjektbygg), `find` matcher nå KUN
+`-name "whisper-cli"`, pluss `&& test -x` som byggetids-vaktpost. Faktisk rebygget og kjørende på
+NAS-en, avslørte D-256 på FØRSTE forsøk etter redeploy. Se D-255 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret, MERGET): D-254 - D-253 sin første live-test på NAS-en feilet stille:
 `/voice` ga kun `{"type":"error","error":"stt_error"}`, INGEN teknisk detalj noe sted for faktisk
