@@ -36,8 +36,14 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
     expect(dockerfile).toMatch(/git clone --branch v1\.9\.4 --depth 1 https:\/\/github\.com\/ggml-org\/whisper\.cpp\.git/);
   });
 
-  it("whisper-binæren lokaliseres etter navn i stedet for å anta ETT navn (main/whisper-cli har variert mellom versjoner)", () => {
-    expect(dockerfile).toMatch(/-name "whisper-cli" -o -name "main"/);
+  it("D-255: bygger KUN whisper-cli-target-et, ALDRI en full cmake --build (som også bygger deprecation-warning-stubben, kompilert til en binær literally kalt 'main' som ALLTID exit(1) - dette klaffet den ekte CLI-en på NAS-en, se D-255)", () => {
+    expect(dockerfile).toMatch(/cmake --build build --config Release -j"\$\(nproc\)" --target whisper-cli/);
+    expect(dockerfile).toMatch(/find build -type f -name "whisper-cli"/);
+    expect(dockerfile).not.toMatch(/-o -name "main"/);
+  });
+
+  it("D-255: verifiserer den kopierte binæren faktisk er kjørbar FØR runtime-steget - en fremtidig target-navn-endring feiler builden høylytt, ikke en stille feil bygd-inn-binær igjen", () => {
+    expect(dockerfile).toMatch(/-exec cp \{\} \/build\/whisper-bin \\; && test -x \/build\/whisper-bin/);
   });
 
   it("henter en ekte ggml-modell fra den offisielle huggingface.co/ggerganov/whisper.cpp-kilden", () => {

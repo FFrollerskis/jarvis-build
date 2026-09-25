@@ -1,20 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-24 (branch `claude/fase-d254-voice-stt-error-visibility`, PR pending, D-254 -
-D-253 sin første live-test på NAS-en feilet stille: `/voice` ga kun `{"type":"error","error":
-"stt_error"}`, INGEN teknisk detalj noe sted for faktisk diagnose).** Lest kildekoden
-(`session.ts` `finishTurn()`) FØR flere runder live-gjetting: den ekte `stt.end()`-feilen ble kun
-lagret i `VoiceHealth` sitt in-memory `last_error`-felt - ALDRI logget (i motsetning til
-søsken-katch-blokkene `voice_core_error`/`voice_message_error` i SAMME fil), og `/status` eksponerte
-aldri `last_error` i det hele tatt. Samme "silently swallowed error"-klasse som D-251/D-227, nå i
-tale-STT-banen. **Fiks:** `session.ts` logger nå `voice_stt_error` (samme mønster som naboene);
-`health.ts` sin `snapshot()` inkluderer nå faktisk `last_error` per komponent - `/status` viser nå
-siste feil uten ny redeploy for hver diagnoserunde. Ingen endring i brukervendt oppførsel (§35
-uendret). `d30-foundation.test.ts` utvidet (console.error-spy + last_error-assertion), 18/18 grønt;
-full `apps/voice-gateway`-suite 98/104 grønt (6 hoppet over, eneste feil kjent
-`initdb: Permission denied`-sandbox-begrensning, ikke en regresjon). Se D-254 i
-DECISIONS_AND_ASSUMPTIONS.md. **Selve whisper.cpp-rotårsaken er ennå ikke kjent** - denne posten
-løser kun synlighetsgapet; venter på NAS-rebuild + Tobias sin faktiske `/status`/logg-sjekk.
+**Oppdatert:** 2026-09-25 (branch `claude/fase-d255-whisper-cli-deprecation-stub-fix`, PR pending,
+D-255 - D-254 sin nye `voice_stt_error`-logging avslørte den EKTE feilen umiddelbart etter NAS-
+redeploy: `local_whisper_process_failed:1:`, exit-kode 1, HELT TOM stderr).** Tom stderr på en
+normal exit var mistenkelig nok til å undersøke selve binæren i stedet for å anta modell-/lyd-feil.
+Bygget den EKSAKT pinnede whisper.cpp-taggen (`v1.9.4`) lokalt og leste kildekoden direkte: whisper.cpp
+bygger BEVISST en "utdatert navn"-advarselsstubb (kun `fprintf` + `EXIT_FAILURE`) til FLERE
+binærnavn samtidig, deriblant literally `main` - mens den EKTE CLI-en bygges under et helt annet
+CMake-target, `whisper-cli`. D-253 sin Dockerfile bygde HELE prosjektet og lokaliserte binæren med
+`find ... \( -name "whisper-cli" -o -name "main" \)`, som traff BEGGE og kopierte begge til samme
+mål - stubben vant på den faktiske NAS-builden. `voice-gateway` kjørte derfor fra første stund en
+binær som ALLTID feiler, uavhengig av lyd/modell - D-253 sin live-test var strukturelt dømt fra
+start. **Verifisert lokalt FØR fiksen** (D-41): `--target whisper-cli` alene bygger KUN den ekte
+CLI-en (ingen stubber bygges i det hele tatt); `--help` viser ekte bruksmelding; kildekoden bekrefter
+`-f -` er en EKPLISITT tiltenkt stdin-markør; full ende-til-ende-kjøring (repoets egne "for-tests"-
+minimodell + en ekte WAV generert med produksjonskodens egen `pcm16ToWav()`) fullførte med exit 0.
+**Fiks:** Dockerfile bygger nå eksplisitt `--target whisper-cli` (aldri en full prosjektbygg), `find`
+matcher nå KUN `-name "whisper-cli"` (droppet `main` helt), pluss `&& test -x` som byggetids-vaktpost
+mot en fremtidig, stille regresjon. Binær-lokaliseringstesten i
+`d253-voice-gateway-local-stt-tts.test.ts` omskrevet til å bevise begge deler - 10/10 grønt (var 9).
+`pnpm -w typecheck`/`npx eslint` rene; `modules/core/test` sine eneste feil er de samme, kjente,
+uendrede `initdb: Permission denied`-sandbox-begrensningene, ingen regresjon. Se D-255 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet fungerende live** - krever NAS-rebuild + en
+faktisk `/voice`-test med ekte tale (ikke bare den syntetiske stillhets-WAV-en brukt lokalt).
+
+**Forrige milepæl (uendret, MERGET): D-254 - D-253 sin første live-test på NAS-en feilet stille:
+`/voice` ga kun `{"type":"error","error":"stt_error"}`, INGEN teknisk detalj noe sted for faktisk
+diagnose.** Lest kildekoden (`session.ts` `finishTurn()`) FØR flere runder live-gjetting: den ekte
+`stt.end()`-feilen ble kun lagret i `VoiceHealth` sitt in-memory `last_error`-felt - ALDRI logget (i
+motsetning til søsken-katch-blokkene `voice_core_error`/`voice_message_error` i SAMME fil), og
+`/status` eksponerte aldri `last_error` i det hele tatt. Samme "silently swallowed error"-klasse som
+D-251/D-227, nå i tale-STT-banen. **Fiks:** `session.ts` logger nå `voice_stt_error` (samme mønster
+som naboene); `health.ts` sin `snapshot()` inkluderer nå faktisk `last_error` per komponent -
+`/status` viser nå siste feil uten ny redeploy for hver diagnoserunde. Faktisk rebygget og kjørende
+på NAS-en, og fungerte EKSAKT som tiltenkt: avslørte D-255 sin rotårsak på FØRSTE forsøk etter
+redeploy. Se D-254 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret, MERGET): D-253 - tale har ALDRI produsert ekte tale, verken på PC-en
 eller NAS-en.** Rett etter D-251/D-252 testet Tobias voice-gateway direkte på NAS-en: "chat fungerer

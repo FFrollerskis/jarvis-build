@@ -29,12 +29,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --branch v1.9.4 --depth 1 https://github.com/ggml-org/whisper.cpp.git /build/whisper.cpp
 WORKDIR /build/whisper.cpp
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -j"$(nproc)"
-# Binærnavnet har variert mellom whisper.cpp-versjoner (`main` historisk,
-# `whisper-cli` i nyere - se stt.ts sin egen kommentar om nøyaktig dette) -
-# lokaliser den faktiske outputen i stedet for å anta ett navn, og legg den
-# på en FAST, versjonsuavhengig sti runtime-steget kan stole på.
-RUN find build -type f \( -name "whisper-cli" -o -name "main" \) -exec cp {} /build/whisper-bin \;
+# D-255: build ONLY the `whisper-cli` target (examples/cli/CMakeLists.txt),
+# NOT a full `cmake --build build` - the latter also builds
+# examples/deprecation-warning/CMakeLists.txt, which compiles ITS OWN stub
+# (always `fprintf`s a deprecation notice and `return EXIT_FAILURE`) to a
+# binary literally named `main`. A prior version of this Dockerfile built
+# everything and then did `find build -type f \( -name "whisper-cli" -o
+# -name "main" \)`, which matched BOTH the real CLI and this always-failing
+# stub and copied whichever `find` visited last - on the actual NAS build,
+# the stub won, so voice-gateway silently ran a binary that unconditionally
+# exits 1 for every request (`local_whisper_process_failed:1:`, no stderr -
+# found live via D-254's new error logging, root-caused by building this
+# exact pinned tag locally and reading examples/cli/CMakeLists.txt +
+# examples/deprecation-warning/CMakeLists.txt directly, not guessed).
+# Building only the named target makes the ambiguity structurally
+# impossible - no `main`/`bench`/`stream`/`command` deprecation stubs are
+# ever built in the first place. `test -x` below turns any FUTURE rename of
+# this target (a version bump) into a loud build failure instead of another
+# silent wrong-binary regression.
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release -j"$(nproc)" --target whisper-cli
+RUN find build -type f -name "whisper-cli" -exec cp {} /build/whisper-bin \; && test -x /build/whisper-bin
 
 FROM node:22-bookworm-slim AS runtime
 # wget: docker-compose.yml sin healthcheck for denne tjenesten bruker wget -
