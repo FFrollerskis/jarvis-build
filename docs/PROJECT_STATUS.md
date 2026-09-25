@@ -1,7 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-258 -
-D-257 sin første live-test på NAS-en: talegjenkjenning/-svar fungerte ENDELIG ("Hallo?" -> ekte
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-259 -
+rett etter D-258-merge, mens Tobias fortsatt testet på D-257 (før NAS-redeploy): "jeg sa bare hei
+Charlie så kommer alt dette tøyset" - en skjermdump av `/voice` sin transkript-panel viste en lang,
+urelatert samtale om undertekster/AI-Media han ikke hadde sagt noe om i denne økten.** Root cause:
+`voice.html` sin `appendTurn()` legger ALLTID til nederst i `transcriptEl`, men INGENTING tømmer
+den mellom samtaler - i en nettleserfane holdt åpen over flere test-økter (vanlig gjennom en hel
+D-25x-runde) hoper alle tidligere samtaler seg opp i samme panel; en NY samtale starter stille
+nederst i en lang, urelatert logg. Ren VISUELL sammenblanding - ALDRI selve WebSocket-
+sesjonen/backend-turene. **Fiks:** `startConversation()` tømmer nå `transcriptEl` til tom-tilstand
+FØR mikrofontilgang/WebSocket-oppkobling - hvert "Start samtale"-klikk gir et rent panel. Ny
+beskrivelse i `voice-page-wiring.test.ts` (8/8 grønt, var 6). Se D-259 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke en tale-/lydbug** - D-258 (se under) er fortsatt den ventende
+årsaken til at lyden ikke fungerte da dette ble rapportert.
+
+**Forrige milepæl (uendret, MERGET, PR #166): D-258 - D-257 sin første live-test på NAS-en:
+talegjenkjenning/-svar fungerte ENDELIG ("Hallo?" -> ekte
 modellsvar fra Charlie), men klienten logget "ugyldig melding fra server" gjentatte ganger per tur
 og lyden var brutt/uteble - opplevd av Tobias som "ingen respons", og direkte fulgt av eksplisitt
 tilbakemelding om for mye manuell feilsøking hver gang noe feiler.** Root cause funnet UTEN en ny
