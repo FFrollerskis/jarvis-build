@@ -478,7 +478,7 @@ export class VoiceSession {
     this.playback = playback;
     let first = true;
     try {
-      for await (const frame of playback.frames) {
+      for await (const frame of alignPcm16Frames(playback.frames)) {
         if (this.epoch !== turnEpoch) {
           playback.cancel();
           return; // gammel lyd slippes aldri gjennom etter barge-in (§16)
@@ -563,5 +563,57 @@ export class VoiceSession {
       this.state = state;
       this.events.onState(state);
     }
+  }
+}
+
+/**
+ * D-258 (Tobias direkte i chat, live NAS-test etter D-257: talegjenkjenning/
+ * -svar fungerte ("Hallo?" -> ekte modellsvar), men klienten logget
+ * "ugyldig melding fra server" gjentatte ganger per tur og lyden var brutt/
+ * uteble - opplevd av Tobias som "ingen respons").
+ *
+ * Root cause: `apps/web/voice.html` sin `playTtsFrame()` bygger
+ * `new Int16Array(bytes.buffer)` fra HVER `tts_frame`-melding for seg
+ * (PCM16 mono) - `Int16Array` KREVER at buffer-lengden er et partall
+ * (et helt antall 2-byte samples), ellers kaster konstruktøren en
+ * `RangeError`, fanget av `voice.html`s generiske
+ * `catch { techLog("ugyldig melding fra server") }` (linje ~484) - hele
+ * rammen forkastes stille.
+ *
+ * `speakNext()` under (linje ~481, FØR denne fiksen) videresendte HVER
+ * rå chunk fra `playback.frames` direkte som én `tts_frame`-melding
+ * (`server.ts` sin `onTtsFrame`). For `LocalPiperTts` (D-253) kommer disse
+ * chunkene rett fra `for await (const chunk of proc.stdout)` i tts.ts -
+ * Node sin Readable-strøm grupperer bytes etter hva OS-pipen leverer i hvert
+ * øyeblikk, UTEN å respektere PCM-sample-grenser. Enhver chunk med et
+ * oddetall antall bytes (statistisk ca. halvparten, konsistent med det
+ * observerte mønsteret av annenhver `tts_frame` som feilet) produserte denne
+ * krasjen på klienten. Samme strukturelle sårbarhet fantes allerede i
+ * `OpenAiTts` (fetch-body-chunks er heller ikke sample-justerte), men er
+ * ALDRI blitt utøvd i praksis før D-253 - `MarkerStt`/`FakeTts` var eneste
+ * reelt kjørte adapter helt til nå (se D-253-kommentaren i
+ * d253-voice-gateway-local-stt-tts.test.ts).
+ *
+ * Fiksen legges HER (session.ts, sentralt FØR `onTtsFrame` kalles), ikke i
+ * hver enkelt adapter - session.ts er allerede stedet som eier hele
+ * TTS-avspillingsløkken (`speakNext()`), og enhver FREMTIDIG TTS-adapter
+ * arver beskyttelsen automatisk uten å måtte huske på den selv.
+ *
+ * Bufrer en eventuell overskytende siste byte fra én chunk og limer den inn
+ * FØRST i neste chunk, slik at HVER `yield`-ede buffer alltid har et partall
+ * lengde (et helt antall samples) - ingen lyddata går tapt, kun en evt.
+ * midlertidig 1-bytes forsinkelse på selve sample-grensen. En eventuell
+ * ufullstendig siste byte ved STRØMMENS slutt (ingen mer data kommer) kan
+ * strukturelt aldri bli en hel sample og forkastes bevisst der.
+ */
+export async function* alignPcm16Frames(frames: AsyncIterable<Buffer>): AsyncIterable<Buffer> {
+  let carry: Buffer | null = null;
+  for await (const chunk of frames) {
+    const combined: Buffer = carry ? Buffer.concat([carry, chunk]) : chunk;
+    const evenLength: number = combined.length - (combined.length % 2);
+    if (evenLength > 0) {
+      yield combined.subarray(0, evenLength);
+    }
+    carry = evenLength < combined.length ? combined.subarray(evenLength) : null;
   }
 }

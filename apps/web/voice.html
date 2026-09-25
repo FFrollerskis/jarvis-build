@@ -481,7 +481,18 @@
         setConnected(true);
       });
       ws.addEventListener("message", (ev) => {
-        try { handleServerMessage(JSON.parse(ev.data)); } catch { techLog("ugyldig melding fra server"); }
+        // D-258: brukte tidligere en generisk melding uten detalj her - da
+        // rot-årsaken var en klient-side `Int16Array`-RangeError (se
+        // apps/voice-gateway/src/session.ts sin `alignPcm16Frames()`-
+        // kommentar for hele funnet), var denne linjen ALENE grunnen til at
+        // Tobias måtte lime inn full teknisk logg for at feilen kunne
+        // spores i det hele tatt. `err.message` (og et par tegn av selve
+        // meldingen, til hjelp når JSON.parse selv feiler) gjør fremtidige
+        // tilsvarende feil synlige direkte i "Teknisk logg"-panelet.
+        try { handleServerMessage(JSON.parse(ev.data)); } catch (err) {
+          techLog("ugyldig melding fra server: " + (err && err.message ? err.message : String(err)) +
+            " (rå: " + String(ev.data).slice(0, 120) + ")");
+        }
       });
       ws.addEventListener("close", () => { techLog("WebSocket lukket."); stopConversation(); });
       ws.addEventListener("error", () => { techLog("WebSocket-feil."); statusEl.textContent = "Tilkoblingsfeil mot voice-gateway."; });

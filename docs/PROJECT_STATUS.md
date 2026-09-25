@@ -1,27 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/fase-d257-whisper-cli-static-link-fix`, PR pending,
-D-257 - D-256 sin første live-test på NAS-en: INGEN krasj denne gangen (D-254/D-256 fungerte
-EKSAKT som tiltenkt), men fortsatt `stt_error` - den nå faktisk synlige feilen viste
-`local_whisper_process_failed:127: .../whisper-cli: error while loading shared libraries:
-libwhisper.so.1: cannot open shared object file`).** Root cause funnet ved å re-klone den EKSAKT
-pinnede whisper.cpp-taggen (`v1.9.4`) lokalt PÅ NYTT og undersøke binæren direkte: `cmake`-
+**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-258 -
+D-257 sin første live-test på NAS-en: talegjenkjenning/-svar fungerte ENDELIG ("Hallo?" -> ekte
+modellsvar fra Charlie), men klienten logget "ugyldig melding fra server" gjentatte ganger per tur
+og lyden var brutt/uteble - opplevd av Tobias som "ingen respons", og direkte fulgt av eksplisitt
+tilbakemelding om for mye manuell feilsøking hver gang noe feiler.** Root cause funnet UTEN en ny
+SSH-/docker-logs-runde - Tobias sin ene limte tekniske logg var nok: `apps/web/voice.html` sin
+`playTtsFrame()` bygger `new Int16Array(bytes.buffer)` per `tts_frame`-melding, som KREVER en
+partall byte-lengde eller kaster `RangeError` - `session.ts` videresendte tidligere hver rå chunk
+fra TTS-adapterens `playback.frames` direkte som én melding, og for `LocalPiperTts` (D-253) kommer
+disse rett fra `proc.stdout`, UTEN garanti for sample-justerte grenser (samme strukturelle
+sårbarhet fantes latent i `OpenAiTts`, men ble aldri utøvd før D-253). **Fiks:** ny
+`alignPcm16Frames()` i `session.ts`, satt FØR `onTtsFrame()` i avspillingsløkken (sentralt - enhver
+fremtidig TTS-adapter arver beskyttelsen automatisk) - bufrer en evt. overskytende siste byte til
+neste chunk, ingen lyddata tapt. Samtidig: `voice.html` sin generiske feil-catch inkluderer nå
+`err.message` + rå-meldingsstart i teknisk logg (direkte svar på "sett opp bedre logging").
+Avklart at "Charlie" (modellens svar) er Jarvis sin TILTENKTE persona (Task #116), ikke en bug. Ny
+`d258-tts-frame-byte-alignment.test.ts` (9 tester: 4 på funksjonen isolert + 1 på hele
+`VoiceSession`-turen via ekte VAD-bane med en fake adapter som reproduserer nøyaktig samme
+byte-mismatch-mønster). `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Full
+`apps/voice-gateway`-suite 105/111 grønt (6 hoppet over, eneste feil den kjente, uendrede
+`initdb: Permission denied`-sandbox-begrensningen). Se D-258 i DECISIONS_AND_ASSUMPTIONS.md.
+**Ikke ennå bekreftet fungerende live** - krever NAS-redeploy (ingen Dockerfile-/binær-endring
+denne gangen) + en faktisk `/voice`-test.
+
+**Forrige milepæl (uendret, MERGET): D-257 - D-256 sin første live-test på NAS-en: INGEN krasj
+denne gangen (D-254/D-256 fungerte EKSAKT som tiltenkt), men fortsatt `stt_error` - den nå faktisk
+synlige feilen viste `local_whisper_process_failed:127: .../whisper-cli: error while loading
+shared libraries: libwhisper.so.1: cannot open shared object file`.** Root cause: `cmake`-
 standardbygget lenker `whisper-cli` DYNAMISK mot `.so`-filer, MED en ABSOLUTT RUNPATH bakt inn som
-peker på byggestegets EGEN build-katalog (`readelf -d` bekreftet) - runtime-steget kopierer kun
-selve den kjørbare filen, aldri den katalogen, så runpath-en peker på en sti som strukturelt ikke
-kan eksistere der. **Hvorfor D-255 sin lokale verifisering ikke fanget dette:** binæren ble kjørt
-DIREKTE FRA sin egen build-katalog - runpath-en tilfeldigvis samsvarte med hvor `.so`-filene lå,
-noe som skjulte problemet fullstendig. **Fiks:** `-DBUILD_SHARED_LIBS=OFF` lagt til cmake-
-konfigureringen - whisper-cli lenkes nå STATISK, kun ordinære systembibliotek-avhengigheter igjen
-(`libgomp`/`libstdc++`/`libgcc_s`/`libm`/`libc`). `libgomp1` lagt eksplisitt til `apt-get install`
-i runtime-steget (statisk bygg bruker fortsatt OpenMP) - ikke antatt til stede, siden denne
-sandboxen mangler en kjørende Docker-daemon til å faktisk verifisere base-imaget direkte.
-**Verifisert GENUINT isolert denne gangen:** kopierte KUN den kjørbare filen til en tom mappe,
-SLETTET DERETTER HELE kildetreet, og kjørte binæren på nytt derfra - `ldd` viste kun
-systembiblioteker, `--help` returnerte ekte bruksmelding med exit 0. Ny testdekning beviser begge
-Dockerfile-endringene - 12/12 tester grønt (var 10), `d212`-suiten uendret. `npx eslint` rent. Se
-D-257 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet fungerende live** - krever en FULL
-whisper.cpp-rekompilering på NAS-en (lenkingsmetoden endret seg) + en faktisk `/voice`-test.
+peker på byggestegets EGEN build-katalog - runtime-steget kopierer kun selve den kjørbare filen,
+aldri den katalogen. **Fiks:** `-DBUILD_SHARED_LIBS=OFF` - whisper-cli lenkes nå STATISK, kun
+ordinære systembibliotek-avhengigheter igjen. `libgomp1` lagt eksplisitt til `apt-get install` i
+runtime-steget. Verifisert GENUINT isolert (kildetreet slettet før re-kjøring). Faktisk rebygget og
+kjørende på NAS-en, avslørte D-258 på FØRSTE forsøk etter redeploy. Se D-257 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret, MERGET): D-256 - D-255 sin første live-test på NAS-en: "den bare lukker
 seg" - INGEN `voice_stt_error` denne gangen, men containeren restartet på HVER taleytring.** Full
