@@ -14,10 +14,19 @@ import { LocalWhisperStt } from "../src/stt.ts";
 const FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
 const OK_BIN = `${FIXTURES}/mock-whisper-ok.sh`;
 const FAIL_BIN = `${FIXTURES}/mock-whisper-fail.sh`;
+const CLOSES_STDIN_EARLY_BIN = `${FIXTURES}/mock-whisper-closes-stdin-early.sh`;
 const MODEL = `${FIXTURES}/fake-model.bin`;
 
 function pcmFrame(): Buffer {
   return Buffer.alloc(320, 1); // 20ms @16kHz PCM16 (320 bytes)
+}
+
+function bigPcm(): Buffer {
+  // Stor nok til at .end(wav) sin write ikke passer i OS-pipe-bufferet i ett
+  // syscall - kreves for å pålitelig reprodusere EPIPE-kappløpet under (se
+  // D-256), samme grunn som den ekte lyden fra en flerturs-samtale ville
+  // vært mer enn nok bytes til å trigge dette.
+  return Buffer.alloc(1_000_000, 1);
 }
 
 describe("A: available() krever BÅDE binær OG modell", () => {
@@ -83,6 +92,23 @@ describe("D: end() - feilbanen mot mock-whisper-fail.sh", () => {
     const stream = stt.startStream();
     stream.pushAudio(pcmFrame());
     await expect(stream.end()).rejects.toThrow(/local_whisper_process_failed:3:.*model_load_error/);
+  });
+});
+
+describe("D-256: end() krasjer ALDRI hele prosessen når binæren avslutter FØR stdin er ferdigskrevet", () => {
+  it("EPIPE på proc.stdin.end(wav) blir en normal avvist Promise, ALDRI en uhåndtert 'error'-hendelse", async () => {
+    // Live funn på NAS-en: mock-whisper-ok.sh/mock-whisper-fail.sh drenerer
+    // BEGGE hele stdin FØR de avslutter (`wc -c <&0`/`cat >/dev/null`), noe
+    // som skjulte denne bug-klassen fullstendig i den opprinnelige suiten -
+    // DENNE fixturen avslutter derimot UTEN å lese noe, akkurat som den
+    // reelle produksjonsfeilen. FØR fiksen (manglende `proc.stdin.on("error",
+    // ...)`) kastet dette en uhåndtert exception som krasjet HELE
+    // Node-prosessen - selve testen ville aldri kommet hit i det hele tatt,
+    // den ville tatt ned test-runneren.
+    const stt = new LocalWhisperStt(CLOSES_STDIN_EARLY_BIN, MODEL);
+    const stream = stt.startStream();
+    stream.pushAudio(bigPcm());
+    await expect(stream.end()).rejects.toThrow(/local_whisper_process_failed:7:/);
   });
 });
 

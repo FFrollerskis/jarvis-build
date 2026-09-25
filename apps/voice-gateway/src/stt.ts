@@ -215,11 +215,24 @@ export class LocalWhisperStt implements SttAdapter {
         });
         let stdout = "";
         let stderr = "";
+        let stdinError: Error | null = null;
         proc.stdout.on("data", (d: Buffer) => {
           stdout += d.toString("utf8");
         });
         proc.stderr.on("data", (d: Buffer) => {
           stderr += d.toString("utf8");
+        });
+        // D-256: hvis binæren avslutter (eller lukker sin egen stdin) FØR vi er
+        // ferdige med å skrive, feiler `.end(wav)` under med EPIPE. `proc`s
+        // EGET "error"-event (håndtert i exitCode-løftet under) dekker KUN
+        // spawn-feil på selve prosessen, ALDRI en skrivefeil på understrømmen
+        // `proc.stdin` - uten en egen lytter her er det en UHÅNDTERT
+        // "error"-hendelse, og Node kaster/krasjer HELE prosessen (funnet
+        // live på NAS-en: "den bare lukker seg" - containeren restartet på
+        // hver eneste taleytring). Lagre feilen i stedet, la `close`-eventet
+        // (som fortsatt fyres uansett) avgjøre utfallet som normalt.
+        proc.stdin.on("error", (err: Error) => {
+          stdinError = err;
         });
         const exitCode = new Promise<number | null>((resolve, reject) => {
           proc.once("error", reject);
@@ -233,7 +246,10 @@ export class LocalWhisperStt implements SttAdapter {
           throw new Error(`local_whisper_spawn_failed:${(err as Error).message.slice(0, 200)}`);
         }
         if (code !== 0) {
-          throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${stderr.slice(0, 200)}`);
+          const detail = stdinError
+            ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
+            : stderr.slice(0, 200);
+          throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${detail}`);
         }
         return stdout.trim();
       },
