@@ -101,14 +101,18 @@ FROM node:22-bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends curl wget ca-certificates libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-RUN corepack enable
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
-COPY apps ./apps
-COPY packages ./packages
-COPY modules ./modules
-RUN pnpm install --frozen-lockfile --prod
-
+# D-275 (build-effektivitet, funnet mens D-275 sin VAD-fiks ble forberedt):
+# whisper.cpp-binæren/modellen og Piper sin binær/stemme hentes nå FØR
+# `COPY apps ./apps`/`pnpm install` under, IKKE etter (som tidligere) - disse
+# nedlastingene (~466MB modell + Piper-binær/stemme) avhenger IKKE av
+# appens kildekode i det hele tatt. Med den GAMLE rekkefølgen invaliderte
+# ENHVER kildekodeendring i `apps/voice-gateway/src/*.ts` (f.eks. D-275 sin
+# `vad.ts`-fiks) Docker-lagcachen fra `COPY apps ./apps` OG NEDOVER -
+# inkludert modell-/stemme-nedlastingen, som dermed måtte lastes ned PÅ NYTT
+# ved HVER eneste kodeendring, selv om selve modellen/stemmen er UENDRET.
+# Nå invaliderer en kildekodeendring KUN de raske `COPY`/`pnpm install`-
+# lagene lenger ned - modell-/binær-lagene forblir cachet på tvers av
+# kode-iterasjoner.
 # --- whisper.cpp: binær fra byggesteget + flerspråklig base-modell ---
 COPY --from=whisper-builder /build/whisper-bin /opt/whisper/whisper-cli
 RUN curl -fL --retry 3 -o /opt/whisper/ggml-small.bin \
@@ -124,6 +128,14 @@ RUN mkdir -p /opt/piper/voices \
       https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/no/no_NO/talesyntese/medium/no_NO-talesyntese-medium.onnx \
     && curl -fL --retry 3 -o /opt/piper/voices/no_NO-talesyntese-medium.onnx.json \
       https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/no/no_NO/talesyntese/medium/no_NO-talesyntese-medium.onnx.json
+
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
+COPY apps ./apps
+COPY packages ./packages
+COPY modules ./modules
+RUN pnpm install --frozen-lockfile --prod
 
 ENV JARVIS_WHISPER_BIN=/opt/whisper/whisper-cli
 ENV JARVIS_WHISPER_MODEL=/opt/whisper/ggml-small.bin

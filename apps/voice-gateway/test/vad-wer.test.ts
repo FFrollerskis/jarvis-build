@@ -27,6 +27,15 @@ describe("EnergyVad", () => {
     expect(rmsEnergy(frame(0))).toBe(0);
     expect(rmsEnergy(frame(8000))).toBeGreaterThan(0.2);
   });
+
+  it("D-275 (live NAS-funn: en 4-5 sekunders sammenhengende norsk setning ble splittet i mange spredte speech_start/end_of_turn-fragmenter under den GAMLE 300ms-hangoveren, fordi ~256ms-rammer ga under 1,2 rammes margin mot en helt normal mellomords-pause): default hangover (700ms) overlever en kort, naturlig pause MIDT i en ytring uten å avslutte turen for tidlig, men avslutter fortsatt etter reell stillhet", () => {
+    const vad = new EnergyVad(); // default threshold/hangover - EKSAKT det VoiceSession faktisk bruker
+    expect(vad.push(frame(8000), 0)).toBe("speech_start");
+    expect(vad.push(frame(0), 256)).toBe("silence"); // ~256ms rammepause - ville avsluttet turen under den gamle 300ms-hangoveren
+    expect(vad.push(frame(0), 512)).toBe("silence"); // ~512ms - fortsatt innenfor 700ms hangover
+    expect(vad.push(frame(8000), 600)).toBe("speech"); // talen fortsetter - turen ble ALDRI avsluttet
+    expect(vad.push(frame(0), 1300)).toBe("end_of_turn"); // 700ms reell stillhet etter siste tale - avslutter korrekt
+  });
 });
 
 describe("WER (benchmark-harnessets målefunksjon)", () => {

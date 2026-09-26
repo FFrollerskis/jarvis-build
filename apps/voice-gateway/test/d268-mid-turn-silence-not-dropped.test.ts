@@ -98,7 +98,7 @@ afterEach(() => {
 });
 
 describe("D-268: en kort stillhet MIDT i en aktiv tur (under hangoverMs) droppes IKKE lenger fra lyden som sendes til STT", () => {
-  it("en 'silence'-ramme midt i turen (100ms < 300ms hangover) når STT-adapteren, IKKE bare speech/speech_start-rammer", async () => {
+  it("en 'silence'-ramme midt i turen (100ms < hangover, D-275: 700ms) når STT-adapteren, IKKE bare speech/speech_start-rammer", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const stt = spyStt("hei jarvis");
     const core: CoreClient = {
@@ -111,7 +111,7 @@ describe("D-268: en kort stillhet MIDT i en aktiv tur (under hangoverMs) droppes
     session.pushAudio(speech(), (t += 50)); // speech -> pushet (2)
     session.pushAudio(silence(), (t += 100)); // silence, MIDT i turen (< hangover) -> pushet NÅ (3)
     session.pushAudio(speech(), (t += 50)); // speech igjen (samme ord fortsetter) -> pushet (4)
-    session.pushAudio(silence(), (t += 400)); // >= hangover -> end_of_turn, IKKE pushet
+    session.pushAudio(silence(), (t += 800)); // >= hangover (D-275: 700) -> end_of_turn, IKKE pushet
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(stt.frameCount()).toBe(4);
@@ -129,7 +129,7 @@ describe("D-268: en kort stillhet MIDT i en aktiv tur (under hangoverMs) droppes
     session.pushAudio(silence(), t); // idle silence FØR tale -> ikke pushet
     session.pushAudio(silence(), (t += 100)); // fortsatt idle -> ikke pushet
     session.pushAudio(speech(), (t += 100)); // speech_start -> pushet (1)
-    session.pushAudio(silence(), (t += 400)); // >= hangover -> end_of_turn, ikke pushet
+    session.pushAudio(silence(), (t += 800)); // >= hangover (D-275: 700) -> end_of_turn, ikke pushet
     session.pushAudio(silence(), (t += 100)); // etter turen, idle igjen -> ikke pushet
     await new Promise((resolve) => setTimeout(resolve, 20));
 

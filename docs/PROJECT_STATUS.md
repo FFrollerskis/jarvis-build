@@ -1,27 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-274 - INGEN kodeendring,
-ren diagnostikk (delvis NAS-live, delvis lokal kildekode-verifisering).** D-273 sin foreslåtte
-`jfk.wav`-sunnhetstest, KJØRT LIVE av Tobias i `voice-gateway`-containeren: LYKTES FULLSTENDIG - korrekt
-kjent transkript med `ggml-small.bin`. Beviser binær/modell/HELE NAS-miljøet fungerer korrekt.
-**Samtidig, lokalt (ingen NAS/Tobias nødvendig): bygget whisper.cpp v1.9.4 fra samme pinnet tag og
-skrev et frittstående C++-testprogram som lenker direkte mot whisper.cpp sin egen
-`read_audio_data()`-funksjon, for å teste `pcm16ToWav()` (stt.ts) sin header-konstruksjon isolert.**
-Beviste `pcm16ToWav()` produserer BYTE-IDENTISK PCM-utfall som originalfilen når avkodet via EKSAKT
-samme `ma_decoder_init_memory`-vei whisper-cli faktisk bruker for `-f -` (stdin). **Konklusjon: HVER
-lag i HELE kjeden (WAV-header, stdin/miniaudio, `-otxt`, no-speech-vakt, modell, NAS-miljø) er nå
-individuelt bevist korrekt.** Den ENESTE gjenværende, ikke-utelukkede dimensjonen er selve INNHOLDET
-i Tobias sine egne, live-fangede lydklipp (VAD kutter for korte turer, ELLER mikrofon-/miljø-
-lydkvalitet forringer talen på en måte RMS-energi ikke fanger). **Neste, foreslått live-test (ingen
-kodeendring):** Tobias sier én sammenhengende, tydelig norsk SETNING i minst 4-5 sekunder (lengre enn
-de ~1 sekunds ytringene testet så langt) - lykkes dette, peker det mot VAD-terskeljustering
-(`vad.ts`); feiler DETTE også, peker det mot mikrofon-/miljø-lydkvalitet. Se D-274 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-275 - EKTE KODEFIKS,
+IKKE MERGET ENNÅ.** D-274 sin foreslåtte "si én 4-5 sekunders setning"-test, KJØRT LIVE av Tobias:
+loggen viste IKKE én sammenhengende tur, men RASK, GJENTATT `speech_start`/`end_of_turn`-veksling
+gjennom hele ytringen - kun korte 0,5-2,3 sekunders fragmenter ble noensinne fanget, alle fortsatt
+`text_length:0`. **Root cause: `EnergyVad` (`vad.ts`) sin `hangoverMs`-standardverdi (300ms) var under
+1,2 rammers margin mot klientens ~256ms lydrammer** - enhver normal energidipp mellom ord (stille
+konsonant, pust, stavelsesgrense) trigget `end_of_turn` FØR setningen var ferdig, og splittet én
+ytring i mange fragmenter som individuelt mangler nok fonetisk innhold for whisper.cpp. **Fiks:**
+`hangoverMs` økt fra 300 til 700 (`threshold` uendret - ingen bevis for at terskelNIVÅET var
+problemet). Samtidig: `infra/local/voice-gateway.Dockerfile` sin lagrekkefølge fikset (build-
+effektivitet) - whisper.cpp-/Piper-modell-/binær-nedlastingen (~466MB) flyttet FØR `COPY apps`, slik
+at fremtidige kildekodeendringer i `voice-gateway` IKKE lenger tvinger en full modell-re-nedlasting.
+Ny test i `vad-wer.test.ts` reproduserer D-275 sitt live-funn mot default-konstruktøren. Se D-275 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå live-bekreftet** - krever NAS-redeploy (denne runden raskere
+enn D-272, siden modell-/Piper-lagene nå forblir cachet) + en ny test med en hel setning.
 
-**Forrige milepæl (uendret): D-273 - `jfk.wav`-sunnhetstesten LIVE på NAS-en lyktes (se D-274 over),
-disconfirmerte hypotese (b) (miljø/binær). D-272 - PR #177/`d4f6cb6a`, merget under stående
-D-192-fullmakt, CI grønt (6/6 sjekker), ingen åpne review-tråder. Live-testet av Tobias samme dag -
-modellstørrelse-teorien alene var ikke tilstrekkelig (se D-273).**
+**Forrige milepæl (uendret): D-274 - `jfk.wav`-sunnhetstesten LIVE på NAS-en lyktes + lokal
+kildekode-verifisering beviste `pcm16ToWav()` byte-korrekt - HVER lag i kjeden bevist korrekt før
+D-275 sitt VAD-funn. D-273 - disconfirmerte hypotese (b) (miljø/binær). D-272 - PR #177/`d4f6cb6a`,
+merget under D-192-fullmakt, modellstørrelse-teorien alene var ikke tilstrekkelig.**
 
 PR #176 (D-271) MERGET til `main` (`20ebcdd4`). Tobias sitt live-forsøk med D-271 sin `stdout_raw_length`-
 diagnostikk deployert ga det DEFINITIVE svaret: `"stdout_raw_length":0` på begge loggede diagnostikk-
