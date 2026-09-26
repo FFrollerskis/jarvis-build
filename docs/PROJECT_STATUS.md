@@ -1,16 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-285 - **MINNE-SKRIVING
-LIVE-BEKREFTET PÅ TVERS AV ØKTER OG ENHETER - FØRSTE GANG NOENSINNE.** Tobias fortalte Charlie "pappa
-heter Henrik" i én samtale, redeployet/testet, og spurte DERETTER "hva heter pappa" i en HELT NY, egen
-nettleser/enhet UTEN å nevne Henrik på noen måte - Charlie svarte korrekt "Henrik". Siden det var en
-fersk, uavhengig samtale kan svaret KUN ha kommet fra persistert `memory_items`-oppslag, ikke
-samtalekontekst - hele kjeden (skriving → lagring → lesing i en senere, uavhengig økt) er nå bevist
-fungerende i produksjon. Se D-285 i DECISIONS_AND_ASSUMPTIONS.md for full detalj, inkludert en viktig
-metode-lærdom: Charlie sitt eget, ærlige "jeg har ikke noe lagringsverktøy"-svar underveis i
-testrunden var IKKE bevis på at fiksen manglet - D-284 gir Charlie aldri et eksplisitt lagre-verktøy å
-kalle, skrivingen skjer utenfor modellens eget synsfelt, så dens egen introspeksjon er strukturelt
-blind for akkurat dette.**
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-288, KRITISK FUNN
+(Tobias direkte spørsmål: "hva med det at den ikke har tilgang til alt vi gir den tilgang til"):
+Charlie sin samtaleflate (chat+tale) kan FAKTISK kun kalle 5 verktøy totalt (`mesh-bridge.ts` sin
+`MESH_TOOLS`), mens `ToolGateway` har ~28 fullt registrerte `tool_id`-er med D-41-maks-kapabilitet
+(email/calendar/github/telegram/vercel/business/support/contract/product/operations/growth/googleads/
+finance×5/consent/docker/conversation_graph/drive/situations/executive/owner_controls/governance/
+memory/self_modification) - ALLE reelt utførbare, men KUN via dashbordets HTTP-ruter, ALDRI ved å be
+Charlie om det i samtale. INGEN sikkerhetslekkasje (samme Policy Gateway-håndhevelse begge veier) -
+en ren, hittil aldri revidert LLM-verktøyliste-begrensning fra UA-1 P1A. Presentert for Tobias med tre
+retningsvalg (utvid MESH_TOOLS kuratert / bygg en bredere eksplisitt allowlistet bro / la det stå).
+INGEN kode endret ennå - avventer Tobias sitt retningsvalg. Se D-288 i DECISIONS_AND_ASSUMPTIONS.md.**
+
+**Forrige milepæl (uendret): D-287 - **D-286 sine TRE
+foreslåtte tilnærminger til ubegrenset minnevekst BYGGET SAMTIDIG** (Tobias direkte i chat: "alle").**
+**(B)** `RuleBasedExtractor` krever nå et EKSPLISITT, navngitt signalord for HVER kandidat - den gamle
+catch-all-en (ALT ble lagret som "semantic") er FJERNET; ny `RELATION`-kategori (bøyningstolerant
+`hete?r?` osv.) fanger identitets-/relasjonsutsagn PRESIST der D-283→D-285 beviste minnet faktisk
+virker. **(A+C)** ny `runMemoryRetentionSweepForAllTenants()` (`modules/memory/src/retention-sweep.ts`)
+- SAMME `DailyScheduler`-mønster som location/health/vision - konsoliderer KUN gamle `episodic`
+samtale-minner (60 dager) til dagssammendrag (`SummaryService.generateDaily()`, endelig faktisk
+koblet inn) og MYKT invaliderer originalene (`MemoryWriter.invalidate()`, ALDRI hard DELETE).
+`preference`/`decision`/`relation`/andre VARIGE typer røres ALDRI, uansett alder. 10 nye rene
+enhetstester (`extraction.test.ts`) + 5 nye tester (`retention-sweep.test.ts`, ekte embedded Postgres,
+samme "IKKE fakePool"-mønster som vision sin sweep-test). `pnpm -w typecheck` (32/32)/`npx eslint`
+rent. `retention-sweep.test.ts` feiler på SAMME kjente embedded-Postgres-sandkasse-begrensning som
+`memory.test.ts` selv - ikke en regresjon. Se D-287 i DECISIONS_AND_ASSUMPTIONS.md.**
+
+**Forrige milepæl (uendret): D-286 - KRITISK FUNN: minnet hadde INGEN opprydning/cap - ubegrenset
+vekst fra HVER samtaletur, ingen av `SummaryService`/`retention_rule`/`modules/erasure` faktisk koblet
+inn. Se D-286 i DECISIONS_AND_ASSUMPTIONS.md.**
+
+**Forrige milepæl (uendret): D-285 - MINNE-SKRIVING LIVE-BEKREFTET PÅ TVERS AV ØKTER OG ENHETER -
+FØRSTE GANG NOENSINNE. Tobias fortalte Charlie "pappa heter Henrik" i én samtale, spurte DERETTER "hva
+heter pappa" i en HELT NY, egen nettleser/enhet UTEN å nevne Henrik - Charlie svarte korrekt. Se D-285
+i DECISIONS_AND_ASSUMPTIONS.md.**
 
 **Forrige milepæl (uendret): D-284 - MINNE-SKRIVEVEIEN FRA D-283 FAKTISK KOBLET INN** (Tobias direkte i
 chat: "ja bygg minne-skrivingen"). `apps/api/src/main.ts` konstruerer nå en `MemoryWriter` (delt
