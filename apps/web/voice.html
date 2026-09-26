@@ -428,6 +428,17 @@
     // tilfellet (funksjonen beholdes KUN som et forsvarsnett for nettlesere
     // som ignorerer `sampleRate`-hintet).
     captureCtx = new AudioContext({ sampleRate: 16000 });
+    // D-269: D-265 sin fiks ANTAR at nettleseren faktisk innvilger
+    // `{ sampleRate: 16000 }`-hintet - men AudioContext-konstruktøren
+    // GARANTERER det ALDRI (spesifikasjonen tillater implementasjonen å
+    // koerse til en annen, plattform-/enhet-støttet rate uten å kaste feil).
+    // Gjør DERFOR den faktiske, forhandlede raten synlig direkte i
+    // tech-loggen (ingen ny terminal-runde nødvendig) - er den IKKE nøyaktig
+    // 16000, kjører `downsampleTo16kMono()` sin hånd-rullede
+    // interpolasjons-forsvarsnett fortsatt, og D-265 sin anti-alias-fiks er
+    // FAKTISK ikke i effekt på denne enheten/nettleseren, selv om koden ser
+    // riktig ut.
+    techLog("mic captureCtx.sampleRate = " + captureCtx.sampleRate + (captureCtx.sampleRate !== 16000 ? " (AVVIK - nettleseren ignorerte 16000-hintet, downsampleTo16kMono() sin interpolasjon er AKTIV)" : " (OK - direkte 16kHz, ingen interpolasjon)"));
     const source = captureCtx.createMediaStreamSource(micStream);
     // ScriptProcessorNode er deprecated men uten byggetrinn er det den enkleste
     // veien til rå PCM-samples uten en separat AudioWorklet-modulfil.
