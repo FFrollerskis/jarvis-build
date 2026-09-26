@@ -1,21 +1,26 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-276 - EKTE KODEFIKS,
-IKKE MERGET ENNÅ.** D-275 sin `hangoverMs`-fiks (300→700) LIVE-TESTET av Tobias: STRUKTURELT
-BEKREFTET - loggen viste NØYAKTIG ÉN `speech_start`/`end_of_turn`-overgang for hele ytringen (ingen
-fragmentering) og en sammenhengende 9,7 SEKUNDER lang WAV - den lengste, mest usplittede lydklippen i
-hele serien. **Likevel FORTSATT `text_length:0`**, til tross for ekte, omfattende dekodingsarbeid.
-Dette er et STERKERE negativt bevis enn tidligere (en full, ubrutt 9,7 sek ytring med tale-liknende
-RMS-mønster produserte likevel null vokabular-token) - VAD-fragmentering er nå DEFINITIVT utelukket
-som gjenværende årsak, og kombinert med D-274 (hele resten av kjeden bevist korrekt) peker symptomet
-nå entydig mot selve LYDINNHOLDET fra nettleseren. **Ny kandidat: `noiseSuppression: true` i
-`getUserMedia()`** (`voice.html`, satt i D-249) - WebRTC sin nettleser-interne støyfjerning er en
-dokumentert kilde til PRESIST dette mønsteret (amplityde bevares, fonetisk struktur ødelegges av
-aggressiv spektral gating). **Fiks (isolert, én variabel om gangen):** `noiseSuppression` satt til
-`false`, `echoCancellation`/`autoGainControl` uendret. Ny test i `voice-page-wiring.test.ts` (D-276).
-Se D-276 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet** - krever NAS-redeploy (KUN `voice.html`,
-statisk fil, MEN `api`-container er IKKE bind-mountet - en `api`-rebuild er FORTSATT nødvendig, se
-D-259/D-260-korreksjonen) + en ny live-test med en hel setning.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-277 - INGEN kodeendring,
+negativt funn + åpent spørsmål til Tobias.** D-276 sin `noiseSuppression: false`-fiks LIVE-TESTET
+(etter `api`-rebuild): to NYE, ikke-fragmenterte ytringer (3,8 sek/6,9 sek, ekte tale-liknende
+RMS-mønster, MER omfattende dekodingsarbeid enn før inkl. en temperatur-refallback) - MEN FORTSATT
+`text_length:0` på begge. **`noiseSuppression` er dermed DISCONFIRMERT som eneste rotårsak** - tredje
+kildekode-konsistente hypotese i rad (etter D-272 modellstørrelse, nå denne) som ikke var
+tilstrekkelig alene. **VIKTIG, IKKE AVKLART KONFUNDER:** den FØRSTE blokken i denne logg-kjøringen var
+byte-for-byte IDENTISK med D-276 sin FORRIGE logg (samme `stderr_excerpt`-millisekunder) - et signal
+om at `docker compose logs -f` viste eksisterende loggbuffer, ikke nødvendigvis at nettleseren hadde
+faktisk lastet den NYE `voice.html` for testene som FØLGER. En statisk sides nettleser-cache
+garanteres IKKE ugyldiggjort av en `api`-rebuild alene uten en hard refresh/ny fane. **Neste steg,
+foreslått til Tobias FØR ny kodehypotese:** bekreft via hard refresh (Ctrl+Shift+R) eller inkognito-
+fane at endringen faktisk var aktiv. Hvis symptomet vedvarer selv DA: alt kildekode-testbart
+(WAV/stdin/modell/miljø/VAD-segmentering/noiseSuppression) er nå individuelt utelukket - neste,
+siste diagnostikk-lag (faktisk lytte til et fanget lydklipp) krever Tobias sitt eksplisitte samtykke
+til et opt-in-only avvik fra §22-invarianten ("rå lyd skal ALDRI treffe disk"), IKKE noe som innføres
+ensidig. Se D-277 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-276 - `noiseSuppression: false`, testet, disconfirmert alene (se D-277
+over) - MEN muligens ikke faktisk aktiv pga. nettleser-cache, uavklart. D-275 - `hangoverMs` 300→700,
+STRUKTURELT bekreftet fungerende (fragmentering løst), men ikke tilstrekkelig alene.**
 
 **Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
 av sammenhengende tale) + Dockerfile-lagrekkefølge fikset (build-effektivitet). Strukturelt bekreftet
