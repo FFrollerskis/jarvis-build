@@ -1,6 +1,15 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-288, KRITISK FUNN
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, MERGET til `main` som PR
+#181/`b2c7aa1e`, CI grønt 2/2 kjøringer, ingen review-tråder, under D-192): **D-287 (minnevekst-
+styring, se forrige milepæl under) OG D-288 (kritisk funn, se under) er nå på `main`.** Underveis
+fanget CI (ekte embedded Postgres) en reell feil i min egen test C i `retention-sweep.test.ts` - et
+kombinert flertema-søk ("Henrik sjokolade flytte") kan strukturelt aldri treffe tre urelaterte
+enkelt-fakta-rader (FTS krever alle ord i samme rad, vektorsøket har en likhetsterskel) - IKKE en
+produksjonskodefeil (338/339 testfiler, 5959/5960 tester grønt allerede FØR fiksen). Rettet til tre
+separate ett-tema-søk, samme mønster som allerede brukt i test A/D i samme fil. Se commit `caf5645`.
+
+**D-288, KRITISK FUNN
 (Tobias direkte spørsmål: "hva med det at den ikke har tilgang til alt vi gir den tilgang til"):
 Charlie sin samtaleflate (chat+tale) kan FAKTISK kun kalle 5 verktøy totalt (`mesh-bridge.ts` sin
 `MESH_TOOLS`), mens `ToolGateway` har ~28 fullt registrerte `tool_id`-er med D-41-maks-kapabilitet
