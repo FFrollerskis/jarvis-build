@@ -1,28 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-270 -
-**DEN FAKTISKE root cause for `text_length: 0` gjennom HELE D-262→D-269-runden, funnet etter at D-269 sitt
-live-forsøk kom tilbake `captureCtx.sampleRate = 16000 (OK)`** - utelukket dermed ENHVER gjenværende
-lyd-fangst-/forvrengnings-/splitting-hypotese. Med alle andre lag bevist korrekte, ble whisper.cpp v1.9.4
-sin EGEN kildekode (`examples/cli/cli.cpp`, fersk `curl`-hentet fra den eksakte pinnede taggen, IKKE en
-oppsummering) lest linje for linje (D-41-disiplin) - og avdekket at `LocalWhisperStt.end()` sitt
-`spawn()`-kall ALDRI, i NOEN av de ni foregående rundene, hadde bedt whisper-cli om å faktisk SKRIVE
-resultatet noe sted. **Mekanisme:** `fout_factory` setter output-destinasjonen til input-filnavnet når
-`-of` ikke er gitt - siden vi sender `-f -` (stdin), blir denne bokstavelig `"-"`, som gjør `is_stdout`
-sann UTELUKKENDE fordi input- og stdout-sentinelen tilfeldigvis er samme tegn. Det deaktiverer EKSPLISITT
-segment-print-callback-en (`nullptr`), og `output_txt()` (funksjonen som faktisk skriver klartekst) kalles
-KUN når `-otxt`/`--output-txt` er satt - et flagg vi ALDRI har sendt. Whisper.cpp gjør altså ekte,
-fullstendig dekodingsarbeid (forklarer HVER ikke-null encode-/decode-tid observert siden D-262) og skriver
-det deretter INGEN STEDER. Den evig tilstedeværende `"warning: '--output-file -' used without any other
-'--output-*'"` - synlig i BOKSTAVELIG TALT HVER live-logg denne økten, konsekvent avfeid som støy - var
-whisper.cpp sin egen ærlige innrømmelse av PRESIST dette. **Fiks:** `-otxt` lagt til `spawn()`-kallet i
-`stt.ts` - skriver nå direkte til `/dev/stdout` (bekreftet i `fout_factory::open()`), fanget opp av den
-eksisterende `proc.stdout`-lytteren. `mock-whisper-ok.sh` utvidet til å kreve `-otxt`. 115/115 relevante
-tester grønt, `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-270 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet live** - krever samme Docker-rebuild av `voice-gateway`
-som D-266/D-267/D-268; avventer Tobias sin neste NAS-redeploy + live-test. Dette er, for første gang denne
-økten, en fiks som strukturelt FORKLARER samtlige ni tidligere "ekte dekoding, likevel tomt"-observasjoner
-uten unntak - høy tillit, fortsatt uverifisert før faktisk live-bekreftelse.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-271 -
+PR #175 (D-269/D-270) MERGET til `main` (`0b963a3e`). Tobias sitt live-forsøk med D-270 deployert (fra
+telefonen, ny enrollment fungerte etter at en feil `--device dev-phone`-flagg i min egen kommando ble
+fjernet) viste at `"--output-file -"`-advarselen ENDELIG er borte fra stderr (bekrefter `-otxt` faktisk
+kjører) - men `text_length: 0` vedvarer på flere turer, denne gangen med SYNLIG EKTE flerrunde-
+dekodingsarbeid (opptil 21 sample-runs, 20 batchd-runs), IKKE lenger det gamle "decode time = 0.00 ms /
+1 run FØR reell dekoding startet"-mønsteret. **To gjenstående hypoteser:** (a) `output_txt()` skriver
+FAKTISK whisper.cpp sitt eget, legitime "ingen gjenkjennbar tale"-resultat for denne lydens innhold (en
+ekte modellbegrensning, ikke lenger en kode-bug), eller (b) et FORTSATT gjenværende plumbing-lag mellom
+`output_txt()` sin `/dev/stdout`-skriving og vår `proc.stdout`-lytter. **Diagnostikk (ingen
+atferdsendring):** `voice_stt_empty_result_diagnostic` utvidet med `stdout_raw_length` - rå byte-lengde
+FØR `.trim()`, ALDRI selve innholdet (§22 uendret). `0` betyr fortsatt "ingen bytes ankom" (b); et
+positivt tall beviser whisper.cpp FAKTISK skrev noe og at MODELLEN, ikke rørledningen, er neste sted å
+se - skiller de to hypotesene definitivt på neste forsøk. Ny påstand i eksisterende D-263/D-264-test
+(`stdout_raw_length` `toBe(0)` mot den kjente "ingenting ankom"-fixturen). 115/115 relevante tester
+grønt, `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-271 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke en fiks - et diagnostisk oppfølgingssteg**; krever samme
+Docker-rebuild av `voice-gateway`; avventer Tobias sin neste live-test for å avgjøre (a) vs (b).
+
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #175/`0b963a3e`): D-270 - DEN FAKTISKE root
+cause for `text_length: 0` gjennom HELE D-262→D-269-runden: whisper.cpp v1.9.4 sin EGEN kildekode
+(`examples/cli/cli.cpp`, fersk `curl`-hentet fra pinnet tag) viste at `LocalWhisperStt.end()` sitt
+`spawn()`-kall ALDRI hadde bedt whisper-cli om å faktisk SKRIVE resultatet noe sted - `-f -` (stdin) gjør
+output-destinasjonen bokstavelig `"-"` når `-of` ikke er gitt, som gjør `is_stdout` sann og EKSPLISITT
+deaktiverer segment-print-callback-en; `output_txt()` kalles kun ved `-otxt`, et flagg aldri sendt. Fiks:
+`-otxt` lagt til `spawn()`-kallet. Se D-270 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-269 - D-269-hypotesen
 (nettleseren koerser stille bort fra 16 kHz) ble AVKREFTET av Tobias sitt live-forsøk:
