@@ -1,29 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-281 - DEN FAKTISKE ROOT
-CAUSE for HELE D-262→D-280-serien FUNNET OG FIKSET I KODE, IKKE ENNÅ LIVE-TESTET.** Tobias bekreftet
-via faktisk lytting til de D-279/D-280-dumpede klippene at lydinnholdet ALLTID var klart/tydelig tale
-("jeg hørte på begge og hører meg selv klart og tydelig") - lydinnhold var ALDRI problemet. En
-metodisk isolasjonssekvens (Test A/B/C via manuelle `docker exec`-forsøk, ALLE lyktes) fulgt av ETT
-definitivt, app-uavhengig forsøk (samme spawn-kall via et frittstående `test-spawn.mjs`-Node-skript,
-KJØRT VIA `docker exec ... node ...`) reproduserte bug-en identisk (`EXIT CODE: 0`, `STDOUT LENGTH: 0`).
-**Root cause (whisper.cpp v1.9.4 sin EGEN kildekode, `fout_factory::open()`, IKKE gjettet):** `-otxt`
-uten `-of` lar `is_stdout` forbli sann (stdin-input `-f -` gjør `fname_out == "-"`), og whisper.cpp
-prøver da å skrive ved å ÅPNE `/dev/stdout` PÅ NYTT som en fersk `std::ofstream` - noe som virker i EN
-SHELL (fd 1 allerede satt opp av shellen), men IKKE når whisper-cli er barn av Node.js sin
-`child_process.spawn({stdio:["pipe","pipe","pipe"]})` (et Node-eid anonymt pipe som fd 1). **Fiks**
-(`apps/voice-gateway/src/stt.ts`): `-of <unikt-midlertidig-basenavn>` lagt til spawn-kallet -
-whisper.cpp skriver nå til en EKTE fil, som leses via `readFile()` etter prosessavslutning og alltid
-slettes via `unlink()` (`cleanupTmpOutput()`). §22-invarianten UENDRET og fortsatt statisk bevist - KUN
-den midlertidige transkript-TEKSTEN berører disk et øyeblikk, lyden går fortsatt UTELUKKENDE via
-stdin-pipen. Testfixturer (`mock-whisper-ok.sh`/`mock-whisper-blank-audio.sh`) oppdatert til å speile
-den nye `-of`-baserte skriveveien. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene;
-`local-whisper-stt.test.ts`/`debug-audio-dump.test.ts`/`d30-foundation.test.ts` 34/34 grønt; full
-`apps/voice-gateway/test/`-suite 119/125 grønt (eneste feil den kjente embedded-Postgres-sandkasse-
-begrensningen i `voice-e2e.test.ts`, IKKE en regresjon). Se D-281 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste steg (AVGJØRENDE):** Tobias redeployer `voice-gateway`-IMAGET (`stt.ts` er kompilert
-TS-kildekode - IKKE nok å redeploye `api` alene) og kjører én taletest - dette kan være den ENDELIGE
-fiksen for HELE D-262→D-281-serien.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-282 - **TALE FUNGERER
+ENDELIG, LIVE-BEKREFTET PÅ NAS-EN. HELE D-262→D-281-DIAGNOSTIKKSERIEN (20+ poster, flere dager) ER
+FAKTISK LØST, IKKE BARE KODEFIKSET.** Tobias redeployet `voice-gateway`-imaget og gjennomførte FLERE
+sammenhengende samtaleturer live på `/voice` ("Hei, Johnny!" / "Hei Charlie!" / "Hei Charlie! Hyggelig
+å snakke med deg!") - HVER fikk et ekte, hørbart Charlie-svar tilbake, bekreftet med fullstendig
+tekst-transkript av begge sider limt inn i chat ("jadaaaaaaaaaaaaaa deilig"). `voice_stt_result` viste
+KONSEKVENT ikke-null `text_length` (12/22/12/39/40 - FØRSTE gang NOENSINNE i D-262-serien) med
+`voice_core_reply_sent` rett etter hver av dem. Se D-282 i DECISIONS_AND_ASSUMPTIONS.md.**
+**Sekundært operasjonelt funn, samme runde (IKKE en kodefeil - et NAS-driftsmiljøfunn, ÅPENT/
+UFORKLART):** `docker compose ... up -d --build voice-gateway`/`... logs -f voice-gateway`, kjørt UTEN
+eksplisitt `--env-file`, feilet plutselig med `JARVIS_DB_ADMIN_PASSWORD is missing a value` til tross
+for at `.env` faktisk lå i samme katalog og hadde verdien satt - løst ved å legge til `--env-file ./.env`
+eksplisitt på begge kommandoene. Rotårsak IKKE videre gravd i (Tobias testet live) - **anbefalt
+arbeidsrutine inntil videre: legg alltid til `--env-file ./.env` på `docker compose -f
+infra/local/docker-compose.yml ...`-kommandoer kjørt fra repo-roten.**
+
+**Forrige milepæl (uendret): D-281 - DEN FAKTISKE ROOT CAUSE for HELE D-262→D-280-serien FUNNET OG
+FIKSET I KODE (whisper.cpp sin `/dev/stdout`-gjenåpning upålitelig under Node.js sin pipe-baserte
+`child_process.spawn()` - fikset ved `-of <midlertidig-fil>` + `readFile()`/`unlink()` i stedet for
+stdout). Se D-281 i DECISIONS_AND_ASSUMPTIONS.md for full kildekode-verifisert detalj.**
 
 **Forrige milepæl (uendret): D-280 - `JARVIS_VOICE_DEBUG_DUMP_DIR` nådde ALDRI containeren pga.
 `docker compose` sin `environment:`-videresendingsbegrensning (kun eksplisitt navngitte variabler
