@@ -15,11 +15,25 @@
 #
 # Modell-/stemmevalg (BEGGE verifisert mot offisiell dokumentasjon, ALDRI
 # gjettet - se D-253 i DECISIONS_AND_ASSUMPTIONS.md for kildene):
-#   - whisper: `ggml-base.bin` (flerspråklig, ~142MB) - balansert
-#     hastighet/nøyaktighet for CPU-bare NAS-maskinvare uten GPU. Kan byttes
-#     til `ggml-small.bin`/`ggml-medium.bin` for bedre norsk-nøyaktighet på
-#     bekostning av latens - se models/README.md i whisper.cpp for alle
-#     navn, samme nedlastings-URL-mønster.
+#   - whisper: `ggml-small.bin` (flerspråklig, ~466MB). D-272 (2026-09-26,
+#     live NAS-funn): `ggml-base.bin` (den opprinnelige D-253-verdien, ~142MB)
+#     produserte KONSEKVENT `text_length: 0` for korte norske ytringer -
+#     kildekode-lest (D-41-disiplin) helt inn i whisper.cpp sin EGEN
+#     `whisper_full()`-avkodingssløyfe (src/whisper.cpp) og bekreftet at
+#     verken no-speech-/entropi-/logprob-tersklene (alle strukturelt
+#     deaktivert/urørt av vår kode) eller output-rørledningen (D-270/D-271,
+#     `stdout_raw_length: 0` bevist selv MED ekte, ikke-null dekodingstid)
+#     var årsaken - modellens EGEN avkoding produserte rett og slett ingen
+#     ordinære vokabular-token for disse ytringene, kun tidsstempel-/EOT-
+#     token. `ggml-small.bin` er SAMME modell Tobias allerede bekreftet
+#     fungerende norsk tale-gjenkjenning med på sin egen Windows-maskin
+#     (D-223, 2026-09-22) - NAS-imaget sin D-253-nedgradering til `base`
+#     (kun begrunnet i CPU-hastighet, aldri faktisk talegjenkjenning-testet
+#     med `base` FØR nå) er dermed korrigert til å matche den allerede
+#     bevist-fungerende modellstørrelsen. `ggml-medium.bin` (~1,5GB, enda
+#     bedre norsk-nøyaktighet) forblir et fremtidig alternativ på bekostning
+#     av latens/RAM - se models/README.md i whisper.cpp for alle navn,
+#     samme nedlastings-URL-mønster.
 #   - piper: `no_NO-talesyntese-medium` - eneste norske stemme i det
 #     offisielle piper-voices-registeret (rhasspy/piper VOICES.md).
 
@@ -97,8 +111,8 @@ RUN pnpm install --frozen-lockfile --prod
 
 # --- whisper.cpp: binær fra byggesteget + flerspråklig base-modell ---
 COPY --from=whisper-builder /build/whisper-bin /opt/whisper/whisper-cli
-RUN curl -fL --retry 3 -o /opt/whisper/ggml-base.bin \
-      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+RUN curl -fL --retry 3 -o /opt/whisper/ggml-small.bin \
+      https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
 
 # --- piper: offisiell forhåndsbygd Linux x86_64-binær + norsk stemme ---
 RUN curl -fL --retry 3 -o /tmp/piper.tar.gz \
@@ -112,7 +126,7 @@ RUN mkdir -p /opt/piper/voices \
       https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/no/no_NO/talesyntese/medium/no_NO-talesyntese-medium.onnx.json
 
 ENV JARVIS_WHISPER_BIN=/opt/whisper/whisper-cli
-ENV JARVIS_WHISPER_MODEL=/opt/whisper/ggml-base.bin
+ENV JARVIS_WHISPER_MODEL=/opt/whisper/ggml-small.bin
 ENV JARVIS_PIPER_BIN=/opt/piper/piper
 ENV JARVIS_PIPER_MODEL=/opt/piper/voices/no_NO-talesyntese-medium.onnx
 

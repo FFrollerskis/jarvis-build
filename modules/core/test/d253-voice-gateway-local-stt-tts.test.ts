@@ -54,9 +54,9 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
     expect(dockerfile).toMatch(/apt-get install -y --no-install-recommends curl wget ca-certificates libgomp1/);
   });
 
-  it("henter en ekte ggml-modell fra den offisielle huggingface.co/ggerganov/whisper.cpp-kilden", () => {
+  it("henter en ekte ggml-modell fra den offisielle huggingface.co/ggerganov/whisper.cpp-kilden (D-272: ggml-small.bin, IKKE lenger ggml-base.bin - se Dockerfile sin egen kommentar for hvorfor)", () => {
     expect(dockerfile).toMatch(
-      /https:\/\/huggingface\.co\/ggerganov\/whisper\.cpp\/resolve\/main\/ggml-base\.bin/
+      /https:\/\/huggingface\.co\/ggerganov\/whisper\.cpp\/resolve\/main\/ggml-small\.bin/
     );
   });
 
@@ -77,7 +77,7 @@ describe("D-253: voice-gateway.Dockerfile bygger/henter ekte lokal STT/TTS", () 
 
   it("setter JARVIS_WHISPER_BIN/_MODEL og JARVIS_PIPER_BIN/_MODEL - EKSAKT variablene LocalWhisperStt/LocalPiperTts leser (stt.ts/tts.ts)", () => {
     expect(dockerfile).toMatch(/ENV JARVIS_WHISPER_BIN=\/opt\/whisper\/whisper-cli/);
-    expect(dockerfile).toMatch(/ENV JARVIS_WHISPER_MODEL=\/opt\/whisper\/ggml-base\.bin/);
+    expect(dockerfile).toMatch(/ENV JARVIS_WHISPER_MODEL=\/opt\/whisper\/ggml-small\.bin/);
     expect(dockerfile).toMatch(/ENV JARVIS_PIPER_BIN=\/opt\/piper\/piper/);
     expect(dockerfile).toMatch(/ENV JARVIS_PIPER_MODEL=\/opt\/piper\/voices\/no_NO-talesyntese-medium\.onnx/);
   });
