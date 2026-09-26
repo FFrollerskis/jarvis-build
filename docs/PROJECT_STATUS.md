@@ -1,21 +1,24 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-284 - **MINNE-SKRIVEVEIEN
-FRA D-283 FAKTISK KOBLET INN** (Tobias direkte i chat: "ja bygg minne-skrivingen", eksplisitt svar på
-spørsmålet stilt etter D-283-funnet).** `apps/api/src/main.ts` konstruerer nå en `MemoryWriter` (delt
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-285 - **MINNE-SKRIVING
+LIVE-BEKREFTET PÅ TVERS AV ØKTER OG ENHETER - FØRSTE GANG NOENSINNE.** Tobias fortalte Charlie "pappa
+heter Henrik" i én samtale, redeployet/testet, og spurte DERETTER "hva heter pappa" i en HELT NY, egen
+nettleser/enhet UTEN å nevne Henrik på noen måte - Charlie svarte korrekt "Henrik". Siden det var en
+fersk, uavhengig samtale kan svaret KUN ha kommet fra persistert `memory_items`-oppslag, ikke
+samtalekontekst - hele kjeden (skriving → lagring → lesing i en senere, uavhengig økt) er nå bevist
+fungerende i produksjon. Se D-285 i DECISIONS_AND_ASSUMPTIONS.md for full detalj, inkludert en viktig
+metode-lærdom: Charlie sitt eget, ærlige "jeg har ikke noe lagringsverktøy"-svar underveis i
+testrunden var IKKE bevis på at fiksen manglet - D-284 gir Charlie aldri et eksplisitt lagre-verktøy å
+kalle, skrivingen skjer utenfor modellens eget synsfelt, så dens egen introspeksjon er strukturelt
+blind for akkurat dette.**
+
+**Forrige milepæl (uendret): D-284 - MINNE-SKRIVEVEIEN FRA D-283 FAKTISK KOBLET INN** (Tobias direkte i
+chat: "ja bygg minne-skrivingen"). `apps/api/src/main.ts` konstruerer nå en `MemoryWriter` (delt
 embedding med `memoryRetriever`, `RuleBasedExtractor` - den EKSISTERENDE, allerede testede
-deterministiske fallback-uttrekkeren, en LLM-basert extractor er BEVISST utenfor scope her). `apps/api/
-src/conversation.ts` sin `ConversationDeps.memory` fikk et nytt valgfritt `ingest()`-felt;
-`ConversationEngine.handle()` kaller det FIRE-AND-FORGET (feil svelges/logges, ALDRI kastes videre)
-med eierens RÅ ord, UAVHENGIG av rute (rask bane/Council/modell) - ALDRI assistentens genererte svar.
-`trust: "trusted"` (eieren direkte til Jarvis, STRUKTURELT forskjellig fra §7 sin Ingestion Zone-
-karantene som gjelder UBETRODD/EKSTERNT innhold). 6 nye tester (`d283-memory-write-wiring.test.ts`)
-beviser kall-på-hver-rute, fire-and-forget-feilsvelging+logging, OG bakoverkompatibilitet BEGGE veier
-(udefinert `ingest` alene / hele `memory`-feltet udefinert). `pnpm -w typecheck` (32/32 pakker, fanget
-og rettet en reell `exactOptionalPropertyTypes`-feil i testhjelperen underveis), `npx eslint` rent. Se
-D-284 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå live-testet** - krever `api`-redeploy (IKKE
-`voice-gateway`, ren TS-endring i `apps/api`) + en ny samtale der Tobias forteller Charlie noe, deretter
-spør igjen om det samme for å bekrefte minnet faktisk persisterer på tvers av spørsmål.
+deterministiske fallback-uttrekkeren). `ConversationEngine.handle()` kaller `memory.ingest()`
+FIRE-AND-FORGET med eierens RÅ ord, UAVHENGIG av rute - ALDRI assistentens genererte svar. `trust:
+"trusted"` (eieren direkte til Jarvis, STRUKTURELT forskjellig fra §7 sin Ingestion Zone-karantene). 6
+nye tester (`d283-memory-write-wiring.test.ts`). Se D-284 i DECISIONS_AND_ASSUMPTIONS.md.**
 
 **Forrige milepæl (uendret): D-283 - KRITISK FUNN: minnet var en HELT PASSIV lesestruktur for ALLE
 tenants (ikke bare Tobias) - `MemoryWriter`/`IngestionService` fantes og var enhetstestet, men ALDRI
