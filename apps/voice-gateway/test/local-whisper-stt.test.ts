@@ -7,9 +7,15 @@ import { LocalWhisperStt } from "../src/stt.ts";
  * FAKET whisper.cpp-binær (`test/fixtures/mock-whisper-*.sh`) - INGEN ekte
  * whisper.cpp/modell nødvendig eller antatt installert (Q-32 punkt 3 forblir
  * åpent for selve installasjonen). Beviser den EKTE subprosess-/WAV-/
- * feilhåndteringskoden: `pushAudio()`-buffring, `pcm16ToWav()`-skriving til
- * en midlertidig fil FØR prosessen startes, korrekt argv (`-m`/`-f`/`-nt`/
- * `-l`), stdout trimmet riktig, og feilbanen når prosessen feiler.
+ * feilhåndteringskoden: `pushAudio()`-buffring, korrekt argv (`-m`/`-f`/
+ * `-nt`/`-otxt`/`-of`/`-l`), og feilbanen når prosessen feiler.
+ *
+ * D-281: `end()` leser IKKE lenger transkriptet fra `stdout` - se
+ * `../src/stt.ts` sin kommentar over `spawn()`-kallet for hvorfor
+ * whisper.cpp sin `/dev/stdout`-gjenåpning er upålitelig under Node.js sin
+ * pipe-baserte `child_process.spawn()`. Fixturene skriver derfor til
+ * `<-of-argumentet>.txt` (whisper.cpp sin egen `-of`-skrivevei), samme sted
+ * `end()` nå faktisk leser fra.
  */
 const FIXTURES = fileURLToPath(new URL("./fixtures", import.meta.url));
 const OK_BIN = `${FIXTURES}/mock-whisper-ok.sh`;
@@ -60,7 +66,7 @@ describe("B: startStream() kaster FØR noe prosessarbeid uten binær/modell", ()
 });
 
 describe("C: end() - lykkes-banen mot mock-whisper-ok.sh", () => {
-  it("pushAudio() bufres, end() skriver wav og returnerer TRIMMET stdout", async () => {
+  it("pushAudio() bufres, end() leser og returnerer TRIMMET tekst fra -of-filen", async () => {
     const stt = new LocalWhisperStt(OK_BIN, MODEL, 16000, "no");
     const stream = stt.startStream();
     stream.pushAudio(pcmFrame());

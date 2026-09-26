@@ -14,8 +14,25 @@
 # et realistisk, flerlinjers banner FØRST, deretter selve "no speech"-
 # linjen et godt stykke inn i utskriften - beviser at 4000-tegns-grensen
 # faktisk når frem dit 300 tegn ikke gjorde.
+#
+# D-281: parser nå også `-of <base>` og oppretter `<base>.txt` som en TOM
+# fil - dette er EKTE whisper.cpp sin egen oppførsel: `fout_factory::open()`
+# oppretter/åpner filen UANSETT (via `std::ofstream`), men `output_txt()`
+# skriver KUN linjer for segmenter som faktisk ble akseptert - null
+# aksepterte segmenter (denne fixturens "no speech detected"-scenario) gir
+# derfor en EKSISTERENDE, men tom, `.txt`-fil, ALDRI en manglende fil.
 set -euo pipefail
 wc -c <&0 >/dev/null
+outfile=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "-of" ]]; then
+    outfile="${args[$((i + 1))]}"
+  fi
+done
+if [[ -n "$outfile" ]]; then
+  : >"${outfile}.txt"
+fi
 cat >&2 <<'EOF'
 whisper_init_from_file_with_params_no_state: loading model from '/opt/whisper/ggml-base.bin'
 whisper_init_with_params_no_state: use gpu    = 1

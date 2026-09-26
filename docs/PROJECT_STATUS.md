@@ -1,23 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-280 - EKTE KODEFIKS,
-IKKE MERGET ENNÅ.** D-279 sitt debug-dump-verktøy, LIVE-TESTET av Tobias FEM ganger: `voice_debug_
-audio_dumped` fyrte ALDRI, til tross for at han satte `JARVIS_VOICE_DEBUG_DUMP_DIR`. **Root cause:**
-`docker compose` sin `voice-gateway`-tjeneste videresendte KUN `JARVIS_VOICE_PORT`/`JARVIS_CORE_URL`/
-`OPENAI_API_KEY` eksplisitt i sin `environment:`-blokk - `docker compose` sender ALDRI automatisk
-hele `.env`/shell-miljøet inn i en container, kun eksplisitt navngitte variabler. **Fiks:** lagt til
-`JARVIS_VOICE_DEBUG_DUMP_DIR` i `environment:`-blokken, PLUSS et alltid-montert volum
-(`./voice-debug-dumps:/voice-debug`) - operatørverdien er nå EKSAKT `/voice-debug` (fast, ikke
-vilkårlig), slik at klippet lander DIREKTE på NAS-filsystemet uten `docker cp`. Verifisert med ekte
-`docker compose ... config` (v5.1.1) BÅDE med og uten variabelen satt. 2 nye tester i
-`d212-voice-gateway-compose-wiring.test.ts` (8/8 grønt). `.env.example`/`.gitignore` oppdatert. Se
-D-280 i DECISIONS_AND_ASSUMPTIONS.md. **Neste steg:** Tobias setter `JARVIS_VOICE_DEBUG_DUMP_DIR=
-/voice-debug` (EKSAKT denne verdien) i `.env`, redeployer `voice-gateway`, kjører én taletest, henter
-klippet fra `infra/local/voice-debug-dumps/` direkte på NAS-en.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-281 - DEN FAKTISKE ROOT
+CAUSE for HELE D-262→D-280-serien FUNNET OG FIKSET I KODE, IKKE ENNÅ LIVE-TESTET.** Tobias bekreftet
+via faktisk lytting til de D-279/D-280-dumpede klippene at lydinnholdet ALLTID var klart/tydelig tale
+("jeg hørte på begge og hører meg selv klart og tydelig") - lydinnhold var ALDRI problemet. En
+metodisk isolasjonssekvens (Test A/B/C via manuelle `docker exec`-forsøk, ALLE lyktes) fulgt av ETT
+definitivt, app-uavhengig forsøk (samme spawn-kall via et frittstående `test-spawn.mjs`-Node-skript,
+KJØRT VIA `docker exec ... node ...`) reproduserte bug-en identisk (`EXIT CODE: 0`, `STDOUT LENGTH: 0`).
+**Root cause (whisper.cpp v1.9.4 sin EGEN kildekode, `fout_factory::open()`, IKKE gjettet):** `-otxt`
+uten `-of` lar `is_stdout` forbli sann (stdin-input `-f -` gjør `fname_out == "-"`), og whisper.cpp
+prøver da å skrive ved å ÅPNE `/dev/stdout` PÅ NYTT som en fersk `std::ofstream` - noe som virker i EN
+SHELL (fd 1 allerede satt opp av shellen), men IKKE når whisper-cli er barn av Node.js sin
+`child_process.spawn({stdio:["pipe","pipe","pipe"]})` (et Node-eid anonymt pipe som fd 1). **Fiks**
+(`apps/voice-gateway/src/stt.ts`): `-of <unikt-midlertidig-basenavn>` lagt til spawn-kallet -
+whisper.cpp skriver nå til en EKTE fil, som leses via `readFile()` etter prosessavslutning og alltid
+slettes via `unlink()` (`cleanupTmpOutput()`). §22-invarianten UENDRET og fortsatt statisk bevist - KUN
+den midlertidige transkript-TEKSTEN berører disk et øyeblikk, lyden går fortsatt UTELUKKENDE via
+stdin-pipen. Testfixturer (`mock-whisper-ok.sh`/`mock-whisper-blank-audio.sh`) oppdatert til å speile
+den nye `-of`-baserte skriveveien. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene;
+`local-whisper-stt.test.ts`/`debug-audio-dump.test.ts`/`d30-foundation.test.ts` 34/34 grønt; full
+`apps/voice-gateway/test/`-suite 119/125 grønt (eneste feil den kjente embedded-Postgres-sandkasse-
+begrensningen i `voice-e2e.test.ts`, IKKE en regresjon). Se D-281 i DECISIONS_AND_ASSUMPTIONS.md.
+**Neste steg (AVGJØRENDE):** Tobias redeployer `voice-gateway`-IMAGET (`stt.ts` er kompilert
+TS-kildekode - IKKE nok å redeploye `api` alene) og kjører én taletest - dette kan være den ENDELIGE
+fiksen for HELE D-262→D-281-serien.
 
-**Forrige milepæl (uendret): D-279 - debug-audio-dump.ts bygget, enhetstestet korrekt i isolasjon, men
-ALDRI nådde containeren pga. D-280 sin compose-videresendingsbug. D-278 - HVER kildekode-testbar
-hypotese individuelt utelukket (WAV/stdin/modell/VAD/noiseSuppression/NAS-miljø).**
+**Forrige milepæl (uendret): D-280 - `JARVIS_VOICE_DEBUG_DUMP_DIR` nådde ALDRI containeren pga.
+`docker compose` sin `environment:`-videresendingsbegrensning (kun eksplisitt navngitte variabler
+krysser inn, ALDRI hele `.env` automatisk) - fikset ved å legge variabelen + et fast volum
+(`./voice-debug-dumps:/voice-debug`) til `voice-gateway` sin `environment:`/`volumes:`-blokk. D-279 -
+debug-audio-dump.ts bygget, enhetstestet korrekt i isolasjon. D-278 - HVER kildekode-testbar hypotese
+individuelt utelukket (WAV/stdin/modell/VAD/noiseSuppression/NAS-miljø).**
 
 **Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
 av sammenhengende tale) + Dockerfile-lagrekkefølge fikset (build-effektivitet). Strukturelt bekreftet
