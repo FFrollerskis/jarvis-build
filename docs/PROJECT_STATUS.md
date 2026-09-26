@@ -1,20 +1,34 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-282 - **TALE FUNGERER
-ENDELIG, LIVE-BEKREFTET PÅ NAS-EN. HELE D-262→D-281-DIAGNOSTIKKSERIEN (20+ poster, flere dager) ER
-FAKTISK LØST, IKKE BARE KODEFIKSET.** Tobias redeployet `voice-gateway`-imaget og gjennomførte FLERE
-sammenhengende samtaleturer live på `/voice` ("Hei, Johnny!" / "Hei Charlie!" / "Hei Charlie! Hyggelig
-å snakke med deg!") - HVER fikk et ekte, hørbart Charlie-svar tilbake, bekreftet med fullstendig
-tekst-transkript av begge sider limt inn i chat ("jadaaaaaaaaaaaaaa deilig"). `voice_stt_result` viste
-KONSEKVENT ikke-null `text_length` (12/22/12/39/40 - FØRSTE gang NOENSINNE i D-262-serien) med
-`voice_core_reply_sent` rett etter hver av dem. Se D-282 i DECISIONS_AND_ASSUMPTIONS.md.**
-**Sekundært operasjonelt funn, samme runde (IKKE en kodefeil - et NAS-driftsmiljøfunn, ÅPENT/
-UFORKLART):** `docker compose ... up -d --build voice-gateway`/`... logs -f voice-gateway`, kjørt UTEN
-eksplisitt `--env-file`, feilet plutselig med `JARVIS_DB_ADMIN_PASSWORD is missing a value` til tross
-for at `.env` faktisk lå i samme katalog og hadde verdien satt - løst ved å legge til `--env-file ./.env`
-eksplisitt på begge kommandoene. Rotårsak IKKE videre gravd i (Tobias testet live) - **anbefalt
-arbeidsrutine inntil videre: legg alltid til `--env-file ./.env` på `docker compose -f
-infra/local/docker-compose.yml ...`-kommandoer kjørt fra repo-roten.**
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-284 - **MINNE-SKRIVEVEIEN
+FRA D-283 FAKTISK KOBLET INN** (Tobias direkte i chat: "ja bygg minne-skrivingen", eksplisitt svar på
+spørsmålet stilt etter D-283-funnet).** `apps/api/src/main.ts` konstruerer nå en `MemoryWriter` (delt
+embedding med `memoryRetriever`, `RuleBasedExtractor` - den EKSISTERENDE, allerede testede
+deterministiske fallback-uttrekkeren, en LLM-basert extractor er BEVISST utenfor scope her). `apps/api/
+src/conversation.ts` sin `ConversationDeps.memory` fikk et nytt valgfritt `ingest()`-felt;
+`ConversationEngine.handle()` kaller det FIRE-AND-FORGET (feil svelges/logges, ALDRI kastes videre)
+med eierens RÅ ord, UAVHENGIG av rute (rask bane/Council/modell) - ALDRI assistentens genererte svar.
+`trust: "trusted"` (eieren direkte til Jarvis, STRUKTURELT forskjellig fra §7 sin Ingestion Zone-
+karantene som gjelder UBETRODD/EKSTERNT innhold). 6 nye tester (`d283-memory-write-wiring.test.ts`)
+beviser kall-på-hver-rute, fire-and-forget-feilsvelging+logging, OG bakoverkompatibilitet BEGGE veier
+(udefinert `ingest` alene / hele `memory`-feltet udefinert). `pnpm -w typecheck` (32/32 pakker, fanget
+og rettet en reell `exactOptionalPropertyTypes`-feil i testhjelperen underveis), `npx eslint` rent. Se
+D-284 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå live-testet** - krever `api`-redeploy (IKKE
+`voice-gateway`, ren TS-endring i `apps/api`) + en ny samtale der Tobias forteller Charlie noe, deretter
+spør igjen om det samme for å bekrefte minnet faktisk persisterer på tvers av spørsmål.
+
+**Forrige milepæl (uendret): D-283 - KRITISK FUNN: minnet var en HELT PASSIV lesestruktur for ALLE
+tenants (ikke bare Tobias) - `MemoryWriter`/`IngestionService` fantes og var enhetstestet, men ALDRI
+instansiert i produksjonskode. Oppdaget FORDI tale (D-282) endelig fungerte og Tobias for første gang
+kunne spørre Charlie live "hva har du lagret om meg". Se D-283 i DECISIONS_AND_ASSUMPTIONS.md.**
+
+**Forrige milepæl (uendret): D-282 - TALE FUNGERER ENDELIG, LIVE-BEKREFTET PÅ NAS-EN. HELE
+D-262→D-281-DIAGNOSTIKKSERIEN (20+ poster, flere dager) ER FAKTISK LØST, IKKE BARE KODEFIKSET. Flere
+sammenhengende samtaleturer lyktes live på `/voice`, `voice_stt_result` viste KONSEKVENT ikke-null
+`text_length` for FØRSTE gang noensinne i D-262-serien. **Sekundært operasjonelt funn, samme runde
+(IKKE en kodefeil - et NAS-driftsmiljøfunn, ÅPENT/UFORKLART):** `docker compose` uten eksplisitt
+`--env-file` sluttet plutselig å finne `.env` - løst med `--env-file ./.env`, anbefalt fast rutine
+inntil rotårsaken er funnet. Se D-282 i DECISIONS_AND_ASSUMPTIONS.md.**
 
 **Forrige milepæl (uendret): D-281 - DEN FAKTISKE ROOT CAUSE for HELE D-262→D-280-serien FUNNET OG
 FIKSET I KODE (whisper.cpp sin `/dev/stdout`-gjenåpning upålitelig under Node.js sin pipe-baserte

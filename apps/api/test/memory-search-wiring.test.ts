@@ -26,7 +26,21 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
     const constructions = mainSource.match(/new MemoryRetriever\(/g) ?? [];
     expect(constructions).toHaveLength(1);
     expect(mainSource).toContain("new MemorySearchTransport(memoryRetriever)");
-    expect(mainSource).toContain("memory: memoryRetriever,");
+    // D-283: `memory:` er nå et lite komposisjonsobjekt (contextFor + ingest)
+    // i stedet for `memoryRetriever` direkte - `contextFor` DELEGERER fortsatt
+    // til DEN SAMME instansen, se egen påstand under.
+    expect(mainSource).toContain("contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),");
+  });
+
+  it("D-283: konstruerer memoryWriter ÉN gang, delt embedding-instans med memoryRetriever, og kobler den inn som conversationEngine sin memory.ingest()", () => {
+    const writerConstructions = mainSource.match(/new MemoryWriter\(/g) ?? [];
+    expect(writerConstructions).toHaveLength(1);
+    expect(mainSource).toMatch(/import\s*\{[^}]*MemoryWriter[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+    expect(mainSource).toMatch(/import\s*\{[^}]*RuleBasedExtractor[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+    expect(mainSource).toContain("new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy)");
+    expect(mainSource).toContain(
+      'ingest: (identity, text) =>\n        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)'
+    );
   });
 
   it("kaller memoryToolDefinitions(new MemorySearchTransport(memoryRetriever)) INNI additionalTools - IKKE et separat, parallelt registreringssted", () => {

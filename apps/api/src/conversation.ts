@@ -24,7 +24,20 @@ export interface ConversationDeps {
   worker: InProcessWorker;
   trace: TraceSink;
   /** Fase 4: hybridminne-kontekst med kildeangivelse (kun gjeldende space). */
-  memory?: { contextFor(identity: IdentityContext, userText: string): Promise<string> };
+  memory?: {
+    contextFor(identity: IdentityContext, userText: string): Promise<string>;
+    /**
+     * D-283: valgfri skrivevei - eierens egne ord fra DENNE samtalen (rå
+     * brukertekst, ALDRI assistentens genererte svar - se kallstedet i
+     * `handle()`) sendes hit når satt. Udefinert = UENDRET oppførsel (ren
+     * lesing, som FØR D-283) - samme "valgfritt felt, udefinert = ingen
+     * atferdsendring"-mønster som `personality`/`tools`/`council` i denne
+     * interfacen. Kalleren i `handle()` svelger ALLTID feil her (fire-and-
+     * forget) - en treg/feilende minneskriving skal ALDRI legge latency
+     * til eller ødelegge selve samtalesvaret.
+     */
+    ingest?(identity: IdentityContext, text: string): Promise<unknown>;
+  };
   /**
    * D-30 live-funn: mesh-verktøy for samtalebanen (tekst OG voice går via /chat).
    * Executor bindes til samtalens FAKTISKE resolved identity per kall - aldri en
@@ -151,6 +164,19 @@ export class ConversationEngine {
     onToolCall?: (toolName: string) => void
   ): Promise<ChatReply> {
     await this.deps.messages.save(identity, "user", text);
+
+    // D-283: skriver eierens RÅ ord til minnet, UAVHENGIG av rute (rask bane/
+    // Council/modell) - alle tre grener representerer noe eieren faktisk sa.
+    // Fire-and-forget: `await` her ville lagt embedding-/DB-latency til HVERT
+    // eneste samtalesvar for en helt sidestilt bekvemmelighet.
+    if (this.deps.memory?.ingest) {
+      this.deps.memory.ingest(identity, text).catch((err: unknown) => {
+        console.error(JSON.stringify({
+          msg: "conversation_memory_ingest_failed",
+          error: err instanceof Error ? err.message : String(err)
+        }));
+      });
+    }
 
     const intent = fastRoute(text);
     if (intent) {

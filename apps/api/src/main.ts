@@ -35,7 +35,7 @@ import {
   ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
   selfModificationToolDefinitions
 } from "@jarvis/self-modification";
-import { LocalHashEmbedding, MemoryRetriever } from "@jarvis/memory";
+import { LocalHashEmbedding, MemoryRetriever, MemoryWriter, RuleBasedExtractor } from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
@@ -489,7 +489,25 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // `memory.search`-verktøyet i `additionalTools` under OG gjenbrukes av
   // `ConversationEngine` sin egen bakgrunns-kontekst (`conversationEngine`
   // under) - IKKE to separate `MemoryRetriever`-instanser mot samme pool.
-  const memoryRetriever = new MemoryRetriever(pool, new LocalHashEmbedding());
+  const memoryEmbedding = new LocalHashEmbedding();
+  const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
+  // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
+  // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
+  // `MemoryWriter`/`RuleBasedExtractor` var bygget og enhetstestet, men
+  // ALDRI kalt fra noe produksjonssted, se D-283 i
+  // DECISIONS_AND_ASSUMPTIONS.md): SAMME delte `memoryEmbedding`-instans som
+  // `memoryRetriever` over (deterministisk/lokal - ingen grunn til to
+  // separate objekter). `RuleBasedExtractor` er BEVISST den EKSISTERENDE,
+  // allerede testede deterministiske fallback-implementasjonen
+  // (`extraction.ts` sin egen kommentar: "regelbasert uttrekk er
+  // deterministisk fallback OG test-implementasjon" - en LLM-assistert
+  // extractor kobles på SAMME grensesnitt senere, ikke bygget her). Brukt
+  // KUN av `conversationEngine` sin nye `memory.ingest()` under - ALDRI av
+  // `IngestionService.ingestExternal()` (den forblir den separate,
+  // Ingestion Zone-karantene-veien for EKSTERNT/ubetrodd innhold - e-post/
+  // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
+  // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
+  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy);
   // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
   // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
   // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
@@ -765,7 +783,22 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     tasks: taskService,
     worker,
     trace,
-    memory: memoryRetriever,
+    memory: {
+      contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),
+      // D-283: eierens EGNE ord i denne samtalen (chat OG tale - BEGGE går
+      // via SAMME `/chat`, se D-30-kommentaren ved `tools` under) skrives nå
+      // faktisk til minnet, IKKE lenger en ren lesestruktur. `trust:
+      // "trusted"` - eieren som snakker DIREKTE til Jarvis er den høyeste
+      // tillitskilden i systemet, STRUKTURELT forskjellig fra §7 sin
+      // Ingestion Zone-karantene (den gjelder UBETRODD/EKSTERNT innhold -
+      // e-post/web/verktøyoutput/MCP - ALDRI eierens egne ytringer til
+      // Jarvis selv). `ref: identity.session_id` tagger kilden med
+      // sesjonen (rule 4: "kilde og task_id/session_id"). Feil her
+      // SVELGES av kalleren (`conversation.ts` sin `.catch()`) - en
+      // minnefeil skal ALDRI ødelegge selve samtalesvaret.
+      ingest: (identity, text) =>
+        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)
+    },
     council: aiCouncil,
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
     // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
