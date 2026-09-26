@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
@@ -163,6 +164,18 @@ export class OpenAiStt implements SttAdapter {
  * den med `-f -` (Unix-konvensjonen for "les fra stdin") - lyden forlater
  * derfor prosessminnet KUN via et pipe til den lokale binæren, ALDRI via
  * filsystemet.
+ *
+ * D-279 (2026-09-26, Tobias sitt EKSPLISITTE samtykke i chat, ETTER at
+ * D-262→D-278, 17 poster, hadde individuelt utelukket HVER kildekode-
+ * testbar hypotese): DENNE filen kaller nå `maybeDumpAudioForDebug()`
+ * (`debug-audio-dump.ts` - bevisst IKKE i §22-testens filliste) når
+ * resultatet er tomt - men selve filskrivingen skjer UTELUKKENDE i DEN
+ * separate filen, aldri her. `stt.ts` inneholder derfor FORTSATT null
+ * disk-skrive-API-er selv - påstanden over ("lyden forlater prosessminnet
+ * KUN via et pipe") forblir bokstavelig sann for STT-KALLET; unntaket er et
+ * bevisst, eksplisitt Tobias-autorisert sidespor, AV som standard
+ * (`JARVIS_VOICE_DEBUG_DUMP_DIR` usatt = no-op), for denne ene, midlertidige
+ * diagnostikk-undersøkelsen. Se D-279 i DECISIONS_AND_ASSUMPTIONS.md.
  *
  * UNVERIFIED (D-41-disiplin, eksplisitt disclosed, ikke stille antatt): BÅDE
  * de eksakte CLI-flaggene (`-m`/`-f`/`-nt`/`-l`) OG antagelsen om at
@@ -376,6 +389,21 @@ export class LocalWhisperStt implements SttAdapter {
               stderr_excerpt: stderr.slice(0, 4000)
             })
           );
+          // D-279: se filhode-kommentaren over. AV med mindre Tobias selv har
+          // satt JARVIS_VOICE_DEBUG_DUMP_DIR - da en no-op. `.catch()` i
+          // stedet for await-i-try: en feil her (f.eks. mappen ikke skrivbar)
+          // skal ALDRI kaste videre og forstyrre selve STT-svaret.
+          maybeDumpAudioForDebug(wav)
+            .then((path) => {
+              if (path) {
+                console.error(JSON.stringify({ msg: "voice_debug_audio_dumped", path }));
+              }
+            })
+            .catch((err: unknown) => {
+              console.error(
+                JSON.stringify({ msg: "voice_debug_audio_dump_failed", error: (err as Error).message })
+              );
+            });
         }
         return text;
       },

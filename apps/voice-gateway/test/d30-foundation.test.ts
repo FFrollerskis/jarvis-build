@@ -679,6 +679,15 @@ describe("Personvern (§22): rå lyd persisteres aldri", () => {
   it("ingen filskriving i talekjedens runtime-moduler", async () => {
     // Strukturelt vern: selve lydkjeden (session/stt/tts/chunker/vad/audio/
     // server/health) skal aldri skrive til disk. Kun benchmark leser manifest.
+    //
+    // D-279: `stt.ts` kaller nå `debug-audio-dump.ts` sin
+    // `maybeDumpAudioForDebug()` (Tobias sitt eksplisitte, opt-in-only
+    // samtykke for ÉN diagnostikk-undersøkelse) - selve filskrive-API-en
+    // lever BEVISST i DEN separate filen, IKKE her, så denne listen (og
+    // dermed selve invarianten for HVER fil den faktisk dekker) forblir
+    // uendret. Se `debug-audio-dump.test.ts` for kontrakten til unntaket
+    // selv (av som standard, skriver kun når Tobias eksplisitt setter
+    // JARVIS_VOICE_DEBUG_DUMP_DIR).
     for (const file of ["session.ts", "stt.ts", "tts.ts", "chunker.ts", "vad.ts", "audio.ts", "server.ts", "health.ts"]) {
       const source = await readFile(join(__dirname, "..", "src", file), "utf8");
       expect(source.includes("writeFile"), file).toBe(false);

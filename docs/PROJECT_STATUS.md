@@ -1,21 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-278 - INGEN kodeendring,
-negativt funn + åpent spørsmål til Tobias.** D-277 sin cache-konfunder AVKLART: Tobias testet FLERE
-ganger fra en NY, privat/inkognito-fane (bekreftet fersk - måtte innrullere på nytt), med varierende
-ekte lengder (0,8/1,8/3,8/6,9/7,2 sek) - ALLE fortsatt `text_length:0`. `noiseSuppression: false` var
-altså FAKTISK aktiv og løste likevel IKKE talegjenkjenningen - nå ROBUST disconfirmert (mange
-uavhengige, fersk-lastede forsøk, ikke ett tvilsomt datapunkt). **Status etter D-262→D-278 (17 poster):
-HVER ENESTE kildekode-testbar hypotese er nå individuelt utelukket** - WAV-header, stdin/miniaudio,
-`-otxt`, no-speech-vakt, modellstørrelse (BÅDE base og small), VAD-segmentering (løst, ikke
-tilstrekkelig), `noiseSuppression`, HELE NAS-miljøet/binæren (`jfk.wav` transkriberte korrekt). **Ingen
-gjenværende hypotese å teste blindt.** Neste, eneste rimelige diagnostikk-lag: faktisk inspisere et
-fanget lydklipp direkte - krever eksplisitt Tobias-samtykke til et opt-in-only avvik fra
-§22-invarianten ("rå lyd skal ALDRI treffe disk"). Spurt direkte i chat. Se D-278 i
-DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-279 - EKTE KODEFIKS
+(diagnostikk-verktøy), IKKE MERGET ENNÅ.** Etter D-262→D-278 (17 poster) individuelt utelukket HVER
+kildekode-testbar hypotese for hvorfor talegjenkjenning konsekvent returnerer tomt resultat, spurte
+jeg Tobias om eksplisitt samtykke til å faktisk inspisere et fanget lydklipp direkte - han svarte
+"build". **Bygget:** ny `apps/voice-gateway/src/debug-audio-dump.ts` - `maybeDumpAudioForDebug()`,
+en ren no-op med mindre `JARVIS_VOICE_DEBUG_DUMP_DIR` er eksplisitt satt, da skriver den ETT WAV-klipp
+(kun ved tomt STT-resultat, samme betingelse som eksisterende diagnostikk) til den mappen. Filen er
+BEVISST holdt UTENFOR §22-testens beskyttede filliste (`stt.ts` selv inneholder FORTSATT ingen
+disk-skrive-API, verifisert). Ny `debug-audio-dump.test.ts` (3 tester) beviser begge halvdelene av
+kontrakten (av-som-standard OG skriver-korrekt-når-satt). `.env.example` dokumenterer variabelen.
+`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint`/full test-suite (119/125 grønt, eneste
+feil kjent embedded-postgres-sandkasse-begrensning). Se D-279 i DECISIONS_AND_ASSUMPTIONS.md. **Neste
+steg:** Tobias setter `JARVIS_VOICE_DEBUG_DUMP_DIR` i `.env`, redeployer `voice-gateway`, kjører én
+taletest, spiller av det fangede klippet lokalt selv.
 
-**Forrige milepæl (uendret): D-277 - cache-konfunder identifisert (nå avklart av D-278). D-276 -
-`noiseSuppression: false`, testet, robust disconfirmert (se D-278). D-275 - `hangoverMs` 300→700,
+**Forrige milepæl (uendret): D-278 - HVER kildekode-testbar hypotese individuelt utelukket (WAV/stdin/
+modell/VAD/noiseSuppression/NAS-miljø). D-277 - cache-konfunder identifisert (avklart av D-278). D-276 -
+`noiseSuppression: false`, testet, robust disconfirmert. D-275 - `hangoverMs` 300→700,
 STRUKTURELT bekreftet fungerende (fragmentering løst), men ikke tilstrekkelig alene.**
 
 **Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
