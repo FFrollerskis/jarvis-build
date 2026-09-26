@@ -171,22 +171,26 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Fiken | `ALLEREDE_BYGGET` | `connector-registry.ts` id `fiken`; D-107, UA-6 første slice. `FIKEN_LIVE_GATE=PENDING_CREDENTIALS`. `live_test: list_companies` lagt til D-242 (gjenbruker `FikenTransport.listCompanies()`, `GET /companies` - tidligere `presence_only`) |
 | Folio | `NY_BACKLOG` | Ingen kode funnet (kun tidligere vag plassholder i denne paragrafen) |
 | Stripe | `ALLEREDE_BYGGET` | `connector-registry.ts` id `stripe`; D-109. `STRIPE_LIVE_GATE=PASS_PENDING_ARCHITECT_REVIEW` (D-228, faktisk host-kjørt og grønt, venter uavhengig arkitektgjennomgang). `live_test: get_balance` lagt til D-242 (`GET /v1/balance` - tidligere `presence_only`) |
-| HubSpot | `NY_BACKLOG – D-64-PORT PÅKREVD` | Se D-64-notat under - CRM/tickets er `JARVIS_CANONICAL` som utgangspunkt (Zendesk-presedensen), ALDRI en automatisk leverandørvalg |
-| Pipedrive | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
+| HubSpot | `NY_BACKLOG – klar for bygging som adapter (D-291)` | D-64-porten er ALLEREDE kjørt og avgjort for CRM (Business OS, D-49, se "Flere CRM-integrasjoner Q-16"-raden §11) - HubSpot ville KUN vært en synk-adapter INN i Business OS, aldri domeneeier. Ingen ny port nødvendig, se D-291 |
+| Pipedrive | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som HubSpot |
 | Google Ads | `ALLEREDE_BYGGET` | UA-4, D-83/D-84 (merget PR #23). COMPLETE for lesing/rapportering; mutate utsatt bak UA-6. `GOOGLE_ADS_LIVE_VERIFICATION=DEFERRED_TO_FINAL_INTEGRATION_PHASE` (D-86) |
 | Meta Ads | `NY_BACKLOG` | Eksplisitt bekreftet fraværende i `modules/growth` sin egen transport-wiring-test («ZERO annonseplattform-leverandør-avhengighet ... ingen Meta Ads-credential-referanse») |
-| Linear | `NY_BACKLOG – D-64-PORT PÅKREVD` | Eksplisitt navngitt som «fremtidig, valgfri adapter, aldri domeneeier» i `business-brief.test.ts` sin egen kommentar - allerede korrekt D-64-posisjonert, ikke bygget |
-| Jira | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat som Linear; også eksplisitt navngitt fraværende i `modules/operations`/`modules/product` sine transport-wiring-tester |
-| Trello | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
-| Todoist | `NY_BACKLOG – D-64-PORT PÅKREVD` | Samme D-64-notat |
+| Linear | `NY_BACKLOG – klar for bygging som adapter (D-291)` | D-64-porten er ALLEREDE kjørt og avgjort for prosjektstyring/tickets (Operations Core, D-129, `OperationsTask` - status/prioritet/owner_person_id/frist) - Linear ville KUN vært en synk-adapter, aldri domeneeier. Ingen ny port nødvendig, se D-291 |
+| Jira | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
+| Trello | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
+| Todoist | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
 
-**D-64-notat (CRM/prosjektstyring, 6 leverandører over 2 kapabilitetskategorier - HubSpot/Pipedrive
-under CRM, Linear/Jira/Trello/Todoist under prosjektstyring/tickets):** CLAUDE.md regel 12 (D-64) sitt
-EGET eksempel er nøyaktig «Support/tickets skal være `JARVIS_CANONICAL`, ikke automatisk en SaaS-
-leverandør» (Zendesk-presedensen, draft-PR #13, aldri merget). Disse seks er derfor IKKE blankofullmakt-
-godkjent til å bli domeneeiere bare fordi de står på Tobias sin liste - hver av dem MÅ kjøre gjennom
-sin egen Core-vs-Adapter-beslutningsport (D-64, `ARCHITECTURE.md` §11.2: kapabilitet → kanonisk Jarvis-
-tilstand → hva krever faktisk et eksternt system → portabilitets-/utfalls-/dataeierskapstest →
+**D-64-notat (RETTET av D-291, 2026-09-26 - se DECISIONS_AND_ASSUMPTIONS.md):** CRM/prosjektstyring
+(HubSpot/Pipedrive/Linear/Jira/Trello/Todoist) sto tidligere som `D-64-PORT PÅKREVD` her - men porten
+var ALLEREDE kjørt og avgjort for begge kapabilitetskategoriene FØR D-231 listet disse seks: CRM via
+Business OS (D-49, se "Flere CRM-integrasjoner Q-16"-raden i `ARCHITECTURE.md` §11), prosjektstyring/
+tickets via Operations Core (D-129, `OperationsTask`). Begge er allerede EKSPLISITT `JARVIS_CANONICAL`
+med en dokumentert "ekstern leverandør = valgfri synk-adapter, ALDRI domeneeier"-grense - nøyaktig
+samme mønster som Support/tickets sin Zendesk-presedens. Ingen NY Core-vs-Adapter-port er nødvendig
+for disse seks - de er nå ordinær `NY_BACKLOG` (adapter-bygging), ikke portblokkert. Uendret av D-291,
+til referanse - full port-metodikk for FREMTIDIGE, faktisk uavgjorte kapabiliteter (`ARCHITECTURE.md`
+§11.2: kapabilitet → kanonisk Jarvis-tilstand → hva krever faktisk et eksternt system → portabilitets-/
+utfalls-/dataeierskapstest →
 system-of-record-klassifisering) FØR noe velges eller bygges. Blir en av dem vurdert som en CORE
 DEPENDENCY under den porten: `CORE_DEPENDENCY_DECISION_REQUIRED=true` rapporteres til Tobias FØR noe
 velges - se D-64 i `DECISIONS_AND_ASSUMPTIONS.md`. Alle øvrige punkter i denne paragrafen (rene
