@@ -1,6 +1,17 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-290: Q-39 (Windows/
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-291: to fabrikkerte
+"gjenstår"-påstander funnet og rettet, som første skritt på Tobias sin brede ordre "jeg vil at alt i
+planen skal bygges og fullføres".** (1) D-231 sin `D-64-PORT PÅKREVD`-flagg på HubSpot/Pipedrive/
+Linear/Jira/Trello/Todoist var stale - Core-vs-Adapter-porten var ALLEREDE kjørt og avgjort for begge
+kapabilitetskategoriene (CRM via Business OS/D-49, prosjektstyring/tickets via `@jarvis/operations`
+sin `OperationsTask`/D-129) - retter til "klar for bygging som ordinær adapter" i `INTEGRATIONS.md`.
+(2) `SOVEREIGN_GRADUATION_MATRIX.md` sin K2-rad påstod fortsatt "ingen kanonisk datakilde finnes" -
+men K2 ble FAKTISK bygget som `@jarvis/governance` med dashboard fem dager tidligere (D-207/D-230).
+Se D-291 i DECISIONS_AND_ASSUMPTIONS.md. Neste: full, verifisert master-plan for resten av D-231-
+backlogen presenteres til Tobias, deretter start på første konkrete byggeslice.
+
+**Forrige milepæl (uendret): D-290: Q-39 (Windows/
 macOS) LUKKET** (Tobias direkte i chat: "Fiks Q-39 og gi meg svaret" - delegerte selve tolkningen i
 stedet for å presisere intensjonen). Standardtolkning: BEGGE var allerede fullt dekket FØR D-231
 listet dem - Windows av CLAUDE.md regel 9 (Jarvis kjører allerede lokalt på Tobias sin PC), macOS av
