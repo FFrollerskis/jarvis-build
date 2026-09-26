@@ -349,6 +349,21 @@ export class ToolGateway {
     return this.tools.get(`${toolId}:${action}`);
   }
 
+  /**
+   * D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
+   * svar på D-288 sitt funn om at samtaleflaten kun kunne kalle 5 av ~28
+   * registrerte tool_id-er): eneste kilde `allMeshTools()` (`mesh-bridge.ts`)
+   * trenger for å bygge EN mesh-mapping per FAKTISK registrert
+   * `tool_id:action`-par - ALDRI en egen, potensielt avvikende opptelling.
+   * Returnerer definisjonene selv (inkl. `transport`/`credential_ref`) -
+   * disse forlater ALDRI denne prosessen mot modellen (kun `mesh-bridge.ts`
+   * sin konverterte `name`/`description`/JSON-schema gjør det); kalleren har
+   * samme tillitsnivå som `register()`/`execute()` selv.
+   */
+  list(): ToolDefinition[] {
+    return [...this.tools.values()];
+  }
+
   async execute(request: {
     identity: IdentityContext;
     tool_id: string;

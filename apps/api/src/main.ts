@@ -46,7 +46,7 @@ import {
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
-  meshToolDefinitions, PgGithubRateLimitStore,
+  allMeshTools, PgGithubRateLimitStore,
   TelegramCommandPoller, TelegramTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
@@ -728,6 +728,16 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       ...selfModificationToolDefinitions(new SelfModificationTransport(selfModificationService))
     ]
   })) toolGateway.register(tool);
+  // D-289 (Tobias direkte i chat: "vil ha alt at han har full kontroll" -
+  // retningsvalg på D-288): beregnet ÉN gang, RETT ETTER at hele
+  // registreringsløkken over er ferdig (samtlige `tool_id`-er - inkl.
+  // situations/executive/owner_controls/governance/memory/self_modification
+  // - er FAKTISK registrert i akkurat dette punktet, se løkken over) -
+  // ALDRI per samtaletur. Gjenbrukt UENDRET av BÅDE `conversationEngine`
+  // sine `tools` (samtale-/tale-flaten, se under) OG `executive`-worker-
+  // jobbhandleren (BO-11.1 §9, se lenger ned) - SAMME liste, ALDRI to
+  // potensielt avvikende kopier av "hva Charlie/executive-jobber kan kalle".
+  const fullMeshTools = allMeshTools(toolGateway);
   // UA-3 business-event-linkage (D-57): SAMME toolGateway-instans (allerede
   // registrert med Gmail/Calendar over) - ingen ny transport-vei.
   const businessEventSyncService = new BusinessEventSyncService(toolGateway, businessService, openLoopService);
@@ -749,7 +759,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     "executive",
     executiveHandler({
       gateway,
-      tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, ownerIdentity) }
+      tools: {
+        definitions: fullMeshTools.map((t) => t.def),
+        executor: new MeshToolExecutor(toolGateway, ownerIdentity, 4000, fullMeshTools)
+      }
     })
   );
 
@@ -815,9 +828,14 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-30 live-funn: samtalebanen (tekst + voice via /chat) får mesh-verktøyene.
     // Executor bindes til samtalens RESOLVED identity - aldri ownerIdentity -
     // slik at tenant/delegation/authority følger den som faktisk snakker.
+    // D-289 ("vil ha alt at han har full kontroll"): `fullMeshTools` (ALLE
+    // registrerte tool_id:action-par), ikke lenger de 5 kuraterte
+    // `MESH_TOOLS` - se `fullMeshTools` sitt filhode over for hvorfor ingen
+    // ny godkjenningssperre er lagt til (D-41: sovereign owner-modus for
+    // klasse D er uendret).
     tools: {
-      definitions: meshToolDefinitions(),
-      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity)
+      definitions: fullMeshTools.map((t) => t.def),
+      executorFor: (identity) => new MeshToolExecutor(toolGateway, identity, 4000, fullMeshTools)
     },
     // Task #121 (D-214): kosmetisk personlighetslag, se conversation.ts sin
     // `buildSystemPrompt()`/`loadPersonality()`.

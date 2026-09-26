@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, VercelTransport, MeshToolExecutor, meshToolDefinitions, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -346,6 +346,12 @@ for (const tool of firstWaveTools({
   // D-105 host-fix: samme wiring-mønster som apps/api/src/main.ts.
   dockerMutationTargets: parseDockerMutationTargets(process.env["JARVIS_DOCKER_MUTATION_TARGETS"])
 })) toolGateway.register(tool);
+// D-289 ("vil ha alt at han har full kontroll"): SAMME "beregn ÉN gang, rett
+// etter registreringsløkken"-mønster som apps/api/src/main.ts sin egen
+// `fullMeshTools` - eksponerer NØYAKTIG det som er registrert på DENNE
+// prosessens `toolGateway`-instans, ikke en håndskrevet, potensielt
+// avvikende kuratert liste.
+const fullMeshTools = allMeshTools(toolGateway);
 const workerIdentity = {
   person_id: process.env["JARVIS_OWNER_PERSON_ID"] ?? "person-tobias",
   tenant_id: process.env["JARVIS_TENANT_ID"] ?? "tenant-personal",
@@ -434,7 +440,7 @@ worker.register(
   "executive",
   executiveHandler({
     gateway,
-    tools: { definitions: meshToolDefinitions(), executor: new MeshToolExecutor(toolGateway, workerIdentity) },
+    tools: { definitions: fullMeshTools.map((t) => t.def), executor: new MeshToolExecutor(toolGateway, workerIdentity, 4000, fullMeshTools) },
     sandbox: runner
   })
 );

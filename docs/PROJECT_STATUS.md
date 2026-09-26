@@ -1,6 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-288, KRITISK FUNN
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-289: Tobias sitt
+retningsvalg på D-288 ("Vil ha alt at han har full kontroll") LEVERT.** Charlie sin samtaleflate
+(chat+tale) kan nå kalle ALLE registrerte `tool_id:action`-par (~28 tool_id-er), ikke lenger kun de 5
+kuraterte `MESH_TOOLS`. Undersøkt FØR bygging: `ua1-p1a-dclass-mesh.test.ts` beviste ALLEREDE at et
+klasse D-mesh-kall for den sovereign eieren kjører hele D-pipelinen (preflight/execute/readback/audit)
+UTEN et eksplisitt godkjenningsobjekt (D-41: "ingen kunstig godkjenningssperre for eier") - en ny
+to-turns bekreftelse for samtalen alene ville derfor vært et REGELBRUDD, ikke en sikkerhetsforbedring,
+og er BEVISST IKKE bygget. Ny `ToolGateway.list()` + `allMeshTools(gateway)` (`mesh-bridge.ts`,
+`zod-to-json-schema`-konvertert `input_schema`, `${tool_id}__${action}`-navn) - ingen ny
+autorisasjonsmekanisme, kun bredden på LLM-verktøylisten endret. Wiret inn i BÅDE `main.ts` (chat/tale
+OG BO-11.1 executive-jobbhandler) og `worker-main.ts` (samme handler i worker-prosessen), ÉN delt
+`fullMeshTools`-liste per prosess. `ExecutiveService.getCapabilityStatus()` omskrevet til å GRUPPERE
+per `tool_id` (unngår å sprenge 4000-tegns output-trimming med ~150+ enkelthandlinger). 18 nye/endrede
+tester (6 nye generator-tester + 12 omskrevne capability-status-tester), `pnpm -w typecheck` (32/32),
+`npx eslint` rent. Se D-289 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret, MERGET til `main` som PR #181/`b2c7aa1e`, CI grønt 2/2, under D-192):
+D-287 (minnevekst-styring) OG D-288 (kritisk funn, samtaleflaten kunne kun kalle 5 verktøy) er på
+`main`.** Underveis fanget CI (ekte embedded Postgres) en reell feil i min egen test C i
+`retention-sweep.test.ts` - et kombinert flertema-søk ("Henrik sjokolade flytte") kan strukturelt
+aldri treffe tre urelaterte enkelt-fakta-rader (FTS krever alle ord i samme rad, vektorsøket har en
+likhetsterskel) - IKKE en produksjonskodefeil (338/339 testfiler, 5959/5960 tester grønt allerede FØR
+fiksen). Rettet til tre separate ett-tema-søk, samme mønster som allerede brukt i test A/D i samme
+fil. Se commit `caf5645`.
+
+**Forrige milepæl (uendret): D-288, KRITISK FUNN
 (Tobias direkte spørsmål: "hva med det at den ikke har tilgang til alt vi gir den tilgang til"):
 Charlie sin samtaleflate (chat+tale) kan FAKTISK kun kalle 5 verktøy totalt (`mesh-bridge.ts` sin
 `MESH_TOOLS`), mens `ToolGateway` har ~28 fullt registrerte `tool_id`-er med D-41-maks-kapabilitet
