@@ -159,7 +159,7 @@ async function runVoiceTurn(session: VoiceSession): Promise<void> {
   let t = 1000;
   session.pushAudio(speech(), t);
   session.pushAudio(speech(), (t += 50));
-  session.pushAudio(silence(), (t += 400)); // > hangover -> end_of_turn
+  session.pushAudio(silence(), (t += 800)); // > hangover (D-275: 700) -> end_of_turn
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 

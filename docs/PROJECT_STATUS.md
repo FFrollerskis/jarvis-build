@@ -1,6 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-272 -
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-282 - **TALE FUNGERER
+ENDELIG, LIVE-BEKREFTET PÅ NAS-EN. HELE D-262→D-281-DIAGNOSTIKKSERIEN (20+ poster, flere dager) ER
+FAKTISK LØST, IKKE BARE KODEFIKSET.** Tobias redeployet `voice-gateway`-imaget og gjennomførte FLERE
+sammenhengende samtaleturer live på `/voice` ("Hei, Johnny!" / "Hei Charlie!" / "Hei Charlie! Hyggelig
+å snakke med deg!") - HVER fikk et ekte, hørbart Charlie-svar tilbake, bekreftet med fullstendig
+tekst-transkript av begge sider limt inn i chat ("jadaaaaaaaaaaaaaa deilig"). `voice_stt_result` viste
+KONSEKVENT ikke-null `text_length` (12/22/12/39/40 - FØRSTE gang NOENSINNE i D-262-serien) med
+`voice_core_reply_sent` rett etter hver av dem. Se D-282 i DECISIONS_AND_ASSUMPTIONS.md.**
+**Sekundært operasjonelt funn, samme runde (IKKE en kodefeil - et NAS-driftsmiljøfunn, ÅPENT/
+UFORKLART):** `docker compose ... up -d --build voice-gateway`/`... logs -f voice-gateway`, kjørt UTEN
+eksplisitt `--env-file`, feilet plutselig med `JARVIS_DB_ADMIN_PASSWORD is missing a value` til tross
+for at `.env` faktisk lå i samme katalog og hadde verdien satt - løst ved å legge til `--env-file ./.env`
+eksplisitt på begge kommandoene. Rotårsak IKKE videre gravd i (Tobias testet live) - **anbefalt
+arbeidsrutine inntil videre: legg alltid til `--env-file ./.env` på `docker compose -f
+infra/local/docker-compose.yml ...`-kommandoer kjørt fra repo-roten.**
+
+**Forrige milepæl (uendret): D-281 - DEN FAKTISKE ROOT CAUSE for HELE D-262→D-280-serien FUNNET OG
+FIKSET I KODE (whisper.cpp sin `/dev/stdout`-gjenåpning upålitelig under Node.js sin pipe-baserte
+`child_process.spawn()` - fikset ved `-of <midlertidig-fil>` + `readFile()`/`unlink()` i stedet for
+stdout). Se D-281 i DECISIONS_AND_ASSUMPTIONS.md for full kildekode-verifisert detalj.**
+
+**Forrige milepæl (uendret): D-280 - `JARVIS_VOICE_DEBUG_DUMP_DIR` nådde ALDRI containeren pga.
+`docker compose` sin `environment:`-videresendingsbegrensning (kun eksplisitt navngitte variabler
+krysser inn, ALDRI hele `.env` automatisk) - fikset ved å legge variabelen + et fast volum
+(`./voice-debug-dumps:/voice-debug`) til `voice-gateway` sin `environment:`/`volumes:`-blokk. D-279 -
+debug-audio-dump.ts bygget, enhetstestet korrekt i isolasjon. D-278 - HVER kildekode-testbar hypotese
+individuelt utelukket (WAV/stdin/modell/VAD/noiseSuppression/NAS-miljø).**
+
+**Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
+av sammenhengende tale) + Dockerfile-lagrekkefølge fikset (build-effektivitet). Strukturelt bekreftet
+fungerende av D-276 sin live-test (ingen fragmentering lenger), men IKKE tilstrekkelig alene - se
+D-276 over.**
+
+**Forrige milepæl (uendret): D-274 - `jfk.wav`-sunnhetstesten LIVE på NAS-en lyktes + lokal
+kildekode-verifisering beviste `pcm16ToWav()` byte-korrekt - HVER lag i kjeden bevist korrekt før
+D-275 sitt VAD-funn. D-273 - disconfirmerte hypotese (b) (miljø/binær). D-272 - PR #177/`d4f6cb6a`,
+merget under D-192-fullmakt, modellstørrelse-teorien alene var ikke tilstrekkelig.**
+
 PR #176 (D-271) MERGET til `main` (`20ebcdd4`). Tobias sitt live-forsøk med D-271 sin `stdout_raw_length`-
 diagnostikk deployert ga det DEFINITIVE svaret: `"stdout_raw_length":0` på begge loggede diagnostikk-
 linjer, TIL TROSS for ekte, ikke-null dekodingsarbeid. Utelukker plumbing-hypotesen (b) fra D-271 - null

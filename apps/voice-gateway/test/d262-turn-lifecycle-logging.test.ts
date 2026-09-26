@@ -82,7 +82,7 @@ async function runVoiceTurn(session: VoiceSession): Promise<void> {
   let t = 1000;
   session.pushAudio(speech(), t);
   session.pushAudio(speech(), (t += 50));
-  session.pushAudio(silence(), (t += 400)); // > hangover -> end_of_turn
+  session.pushAudio(silence(), (t += 800)); // > hangover (D-275: 700) -> end_of_turn
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
@@ -150,8 +150,8 @@ describe("D-262: turens hele livsløp logges definitivt - skiller 'turen kjørte
     session.pushAudio(speech(), t); // speech_start
     session.pushAudio(speech(), (t += 50)); // speech (ikke logget)
     session.pushAudio(speech(), (t += 50)); // speech (ikke logget)
-    session.pushAudio(silence(), (t += 100)); // silence (< hangover, ikke logget)
-    session.pushAudio(silence(), (t += 400)); // end_of_turn
+    session.pushAudio(silence(), (t += 100)); // silence (< hangover, D-275: 700ms, ikke logget)
+    session.pushAudio(silence(), (t += 800)); // end_of_turn (D-275: > 700ms hangover)
 
     expect(logged(spy, "voice_vad_transition")).toHaveLength(2);
   });

@@ -547,13 +547,35 @@
     transcriptEl.innerHTML = '<p class="empty">Ingen samtale ennå.</p>';
     try {
       if (!deviceKey) deviceKey = await loadOrCreateDeviceKey();
-      // D-249: uten disse plukker mikrofonen ofte opp Jarvis sin egen TTS-lyd fra
-      // høyttaleren (spesielt på telefon, mikrofon og høyttaler fysisk nær
-      // hverandre) - energibasert VAD (server.ts/vad.ts) tolker dette som
-      // barge-in, kutter TTS midt i setningen og forgifter STT-transkripsjonen
-      // med Jarvis sin egen stemme.
+      // D-249: uten `echoCancellation` plukker mikrofonen ofte opp Jarvis sin
+      // egen TTS-lyd fra høyttaleren (spesielt på telefon, mikrofon og
+      // høyttaler fysisk nær hverandre) - energibasert VAD (server.ts/vad.ts)
+      // tolker dette som barge-in, kutter TTS midt i setningen og forgifter
+      // STT-transkripsjonen med Jarvis sin egen stemme. `echoCancellation`
+      // beholdes derfor.
+      //
+      // D-276 (live NAS-funn, ETTER D-275 sin VAD-hangover-fiks): en FULL,
+      // usplittet 9,7 sekunders ytring (bevist ved `voice_vad_transition`
+      // KUN speech_start+end_of_turn, ingen fragmentering) ga FORTSATT
+      // `stdout_raw_length:0`/`text_length:0` - til tross for ekte,
+      // flerrunde dekodingsarbeid og RMS-energimønster som ser ut som ekte
+      // tale (0,05-0,30). D-274 har allerede bevist HELE resten av kjeden
+      // (WAV-header/stdin/modell/NAS-miljø) korrekt mot en KJENT god lydfil -
+      // symptomet peker derfor nå mot selve LYDINNHOLDET som fanges, ikke
+      // lenger mot segmentering/rørledning/modell. `noiseSuppression` (WebRTC
+      // sin nettleser-interne støyfjerning) er en kjent, dokumentert kilde
+      // til PRESIST dette mønsteret - amplityde/RMS-energien bevares
+      // (algoritmen fjerner ALDRI all lydenergi), men den spektrale/fonetiske
+      // strukturen tale-modeller trenger kan bli kraftig forvrengt av
+      // aggressiv spektral gating, spesielt for ikke-engelsk tale slike
+      // algoritmer ofte er dårligere kalibrert mot. Deaktivert her som neste,
+      // målrettet diagnostikk-variabel (ISOLERT - `echoCancellation`/
+      // `autoGainControl` UENDRET, én endring om gangen, D-41-disiplin) -
+      // IKKE ennå bevist årsaken, kun den mest sannsynlige gjenværende
+      // kandidaten etter at alt annet er kildekode-/live-verifisert korrekt.
+      // Se D-276 i DECISIONS_AND_ASSUMPTIONS.md.
       micStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true }
       });
       statusEl.textContent = "Signerer enhetsbevis …";
       const { challenge, signature } = await signChallenge(deviceKey.privateKey, identity.device_id);

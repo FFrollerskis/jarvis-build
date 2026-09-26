@@ -11,3 +11,5 @@ key.txt
 *.agekey
 # lokale traces/kjøredata
 var/
+# D-279/D-280: opt-in voice-gateway debug-lydklipp (JARVIS_VOICE_DEBUG_DUMP_DIR) - rå lyd, aldri i git
+infra/local/voice-debug-dumps/

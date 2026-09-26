@@ -145,7 +145,9 @@ class VoiceClient {
   async utter(text: string): Promise<void> {
     this.send({ type: "audio", data: this.speechFrame(text) });
     this.send({ type: "audio", data: this.speechFrame() });
-    await new Promise((resolve) => setTimeout(resolve, 340));
+    // D-275: EnergyVad sin hangoverMs-standardverdi økt fra 300 til 700 -
+    // ventetiden her må trygt overstige DEN, ikke den gamle verdien.
+    await new Promise((resolve) => setTimeout(resolve, 800));
     this.send({ type: "audio", data: this.silenceFrame() });
   }
 }
@@ -315,7 +317,8 @@ describe("Akseptanse 1: barge-in ≤ 250 ms", () => {
 
     // Den avbrytende turen fullfører korrekt
     client.send({ type: "audio", data: client.speechFrame() });
-    await new Promise((resolve) => setTimeout(resolve, 340));
+    // D-275: > ny hangoverMs-standardverdi (700, tidligere 300)
+    await new Promise((resolve) => setTimeout(resolve, 800));
     client.send({ type: "audio", data: client.silenceFrame() });
     const replies = client.messages.filter((m) => m.type === "reply").length;
     await client.waitFor((m) => m.type === "reply" && client.messages.filter((x) => x.type === "reply").length > replies, 10_000);

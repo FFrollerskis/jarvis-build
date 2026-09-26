@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SpeechProcessorDeclaration } from "@jarvis/contracts";
+import { maybeDumpAudioForDebug } from "./debug-audio-dump.ts";
 
 /**
  * SpeechAdapter (STT): streaming-kontrakt bak adapter - ingen leverandørkode
@@ -164,6 +169,18 @@ export class OpenAiStt implements SttAdapter {
  * derfor prosessminnet KUN via et pipe til den lokale binæren, ALDRI via
  * filsystemet.
  *
+ * D-279 (2026-09-26, Tobias sitt EKSPLISITTE samtykke i chat, ETTER at
+ * D-262→D-278, 17 poster, hadde individuelt utelukket HVER kildekode-
+ * testbar hypotese): DENNE filen kaller nå `maybeDumpAudioForDebug()`
+ * (`debug-audio-dump.ts` - bevisst IKKE i §22-testens filliste) når
+ * resultatet er tomt - men selve filskrivingen skjer UTELUKKENDE i DEN
+ * separate filen, aldri her. `stt.ts` inneholder derfor FORTSATT null
+ * disk-skrive-API-er selv - påstanden over ("lyden forlater prosessminnet
+ * KUN via et pipe") forblir bokstavelig sann for STT-KALLET; unntaket er et
+ * bevisst, eksplisitt Tobias-autorisert sidespor, AV som standard
+ * (`JARVIS_VOICE_DEBUG_DUMP_DIR` usatt = no-op), for denne ene, midlertidige
+ * diagnostikk-undersøkelsen. Se D-279 i DECISIONS_AND_ASSUMPTIONS.md.
+ *
  * UNVERIFIED (D-41-disiplin, eksplisitt disclosed, ikke stille antatt): BÅDE
  * de eksakte CLI-flaggene (`-m`/`-f`/`-nt`/`-l`) OG antagelsen om at
  * whisper.cpp faktisk støtter `-f -` for stdin, er whisper.cpp sin
@@ -283,9 +300,49 @@ export class LocalWhisperStt implements SttAdapter {
         // ingen tidsstempler/JSON, verifisert linje-for-linje mot
         // output_txt() sin egen kildekode) til akkurat den strommen var
         // proc.stdout.on("data", ...)-lytter allerede fanger opp.
-        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-otxt", "-nth", "1.01", "-l", language], {
-          stdio: ["pipe", "pipe", "pipe"]
-        });
+        // D-281 (root cause FUNNET og VERIFISERT ved å lese whisper.cpp v1.9.4
+        // sin faktiske kildekode - examples/cli/cli.cpp, fout_factory::open(),
+        // linje ca 1135-1150 - OG ved en isolert, app-uavhengig reproduksjon
+        // via en frittstående Node.js-spawn()-testskript rett mot den ekte
+        // binæren og en av de FAKTISK innspilte, ETTER D-270/D-271-fiksene
+        // fortsatt tomme, lydklippene, bekreftet i live lytting å inneholde
+        // klar, tydelig tale - "hører meg selv klart og tydelig", Tobias):
+        // D-270 sin `-otxt`-fiks fikk whisper.cpp til å FAKTISK KALLE
+        // output_txt() - men UTEN et eksplisitt `-of`-flagg forblir
+        // fname_out == fname_inp == "-" (stdin-sentinelen), altså
+        // is_stdout == true, og fout_factory::open() prøver da å skrive til
+        // stdout ved å ÅPNE "/dev/stdout" PÅ NYTT som en helt FERSK
+        // std::ofstream (ikke ved å gjenbruke selve filedeskriptor 1) -
+        // KOMMENTERT rett over selve koden i whisper.cpp: "Also assuming
+        // /dev is mounted" - open()-resultatet sjekkes ALDRI, og feil
+        // rapporteres BEVISST ALDRI ("Not using fprintf stderr here because
+        // it might equal stdout"). Manuelle `docker exec`/shell-tester
+        // (Test A/B/C) LYKTES alle konsekvent, FORDI en shell allerede har
+        // satt opp fd 1 til å PEKE PÅ noe reelt før whisper-cli i det hele
+        // tatt starter. Node.js sin `child_process.spawn()` med
+        // `stdio: ["pipe","pipe","pipe"]` gir derimot whisper-cli et helt
+        // NYTT, Node-eid anonymt pipe som fd 1 - og whisper.cpp sin egen,
+        // pathname-baserte "/dev/stdout"-gjenåpning klarer IKKE å levere
+        // bytes til DEN, selv om selve dekodingen (bekreftet identisk,
+        // ekte, ikke-null encode-/decode-tid gjennom HELE D-262→D-280-
+        // serien) skjer helt normalt internt. Fiksen slutter å stole på
+        // denne skjøre stdout-gjenåpningen: `-of <midlertidig-basenavn>`
+        // ber whisper.cpp skrive til en EKTE fil (whisper.cpp sin egen,
+        // lenge etablerte, velprøvde skrivevei - IKKE en spesialtilpasset
+        // stdout-sti), og koden under leser DEN filen eksplisitt etter at
+        // prosessen er ferdig. KUN transkribert TEKST berører disk
+        // midlertidig her, ALDRI selve lyden - lyden går fortsatt
+        // UTELUKKENDE via stdin-pipen (`proc.stdin.end(wav)` under, uendret
+        // fra før) - §22-invarianten (rå lyd persisteres aldri) er derfor
+        // fortsatt intakt.
+        const tmpOutBase = join(tmpdir(), `jarvis-whisper-${randomUUID()}`);
+        const proc = spawn(
+          binPath,
+          ["-m", modelPath, "-f", "-", "-nt", "-otxt", "-of", tmpOutBase, "-nth", "1.01", "-l", language],
+          {
+            stdio: ["pipe", "pipe", "pipe"]
+          }
+        );
         let stdout = "";
         let stderr = "";
         let stdinError: Error | null = null;
@@ -319,12 +376,27 @@ export class LocalWhisperStt implements SttAdapter {
           throw new Error(`local_whisper_spawn_failed:${(err as Error).message.slice(0, 200)}`);
         }
         if (code !== 0) {
+          await cleanupTmpOutput(tmpOutBase);
           const detail = stdinError
             ? `${stderr.slice(0, 150)} (stdin write: ${(stdinError as Error).message})`
             : stderr.slice(0, 200);
           throw new Error(`local_whisper_process_failed:${code ?? "unknown"}:${detail}`);
         }
-        const text = stdout.trim();
+        // D-281: teksten leses nå fra `-of`-filen (se spawn-kommentaren over),
+        // IKKE lenger fra `stdout` - `-otxt` uten `-of` skrev (upålitelig) til
+        // en gjenåpnet "/dev/stdout"; `-of <tmpOutBase>` skriver til en EKTE
+        // fil whisper.cpp selv oppretter (`<tmpOutBase>.txt`). Filen inneholder
+        // KUN transkribert tekst (whisper.cpp sin egen output_txt(), ingen
+        // tidsstempler/JSON - samme innhold som FØR, bare en annen kanal) -
+        // slettes uansett utfall (`cleanupTmpOutput`), ALDRI liggende igjen.
+        let text: string;
+        try {
+          text = (await readFile(`${tmpOutBase}.txt`, "utf8")).trim();
+        } catch (err) {
+          await cleanupTmpOutput(tmpOutBase);
+          throw new Error(`local_whisper_output_file_missing:${(err as Error).message.slice(0, 200)}`);
+        }
+        await cleanupTmpOutput(tmpOutBase);
         // D-263 (Tobias direkte i chat, live NAS-test MED D-262 sin nye logging
         // aktiv): HVER eneste tur, inkludert én med 2+ sekunder sammenhengende
         // tale-energi, ga `voice_stt_result` med `text_length: 0` - ALDRI
@@ -372,10 +444,34 @@ export class LocalWhisperStt implements SttAdapter {
             JSON.stringify({
               msg: "voice_stt_empty_result_diagnostic",
               wav_bytes: wav.length,
+              // D-281: `stdout_raw_length` var den avgjørende diagnostikken
+              // FØR fiksen (0 bekreftet plumbing-laget, se D-271-kommentaren
+              // over) - stdout brukes ikke lenger som teksttransport, men
+              // feltet beholdes uendret (nå typisk 0/nær-0) for kontinuitet
+              // i loggmønsteret. `text.length` er den NYE, avgjørende
+              // diagnostikken: 0 her betyr whisper.cpp selv skrev en tom
+              // `.txt`-fil (en EKTE modell-avgjørelse på lyden), ikke lenger
+              // et transportspørsmål.
               stdout_raw_length: stdout.length,
+              output_file_text_length: text.length,
               stderr_excerpt: stderr.slice(0, 4000)
             })
           );
+          // D-279: se filhode-kommentaren over. AV med mindre Tobias selv har
+          // satt JARVIS_VOICE_DEBUG_DUMP_DIR - da en no-op. `.catch()` i
+          // stedet for await-i-try: en feil her (f.eks. mappen ikke skrivbar)
+          // skal ALDRI kaste videre og forstyrre selve STT-svaret.
+          maybeDumpAudioForDebug(wav)
+            .then((path) => {
+              if (path) {
+                console.error(JSON.stringify({ msg: "voice_debug_audio_dumped", path }));
+              }
+            })
+            .catch((err: unknown) => {
+              console.error(
+                JSON.stringify({ msg: "voice_debug_audio_dump_failed", error: (err as Error).message })
+              );
+            });
         }
         return text;
       },
@@ -383,6 +479,25 @@ export class LocalWhisperStt implements SttAdapter {
         // whisper.cpp sin batch-CLI gir ingen inkrementelle partials - se klassekommentaren.
       }
     };
+  }
+}
+
+/**
+ * D-281: sletter whisper.cpp sin `-of`-utdatafil (`<base>.txt`) etter at
+ * `LocalWhisperStt.end()` er ferdig med å lese den - uansett om lesingen
+ * lyktes, feilet, eller prosessen aldri produserte filen i det hele tatt
+ * (f.eks. `code !== 0`). Kun den MIDLERTIDIGE TRANSKRIPT-TEKSTEN berører
+ * disk her, ALDRI selve lyden (§22 uendret - se filhode-kommentaren).
+ * `unlink()` sin egen feil (typisk ENOENT når filen aldri ble opprettet)
+ * svelges bevisst - opprydding skal ALDRI kaste og overstyre det egentlige
+ * STT-resultatet/-feilen den ble kalt etter.
+ */
+async function cleanupTmpOutput(tmpBase: string): Promise<void> {
+  try {
+    await unlink(`${tmpBase}.txt`);
+  } catch {
+    // Forventet når filen aldri ble opprettet (f.eks. prosessen feilet FØR
+    // output_txt() ble kalt) - ikke en feil å rapportere videre.
   }
 }
 
