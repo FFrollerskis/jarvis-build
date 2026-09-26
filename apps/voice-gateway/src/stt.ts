@@ -350,10 +350,29 @@ export class LocalWhisperStt implements SttAdapter {
         // kort ytring (banner + system_info + evt. per-segment-info +
         // timing-oppsummering), fortsatt trygt bundet (aldri ubegrenset).
         if (!text) {
+          // D-271 (live NAS-forsøk MED D-270 sin -otxt-fiks aktiv, bekreftet
+          // via at "--output-file -"-advarselen ENDELIG er borte fra
+          // stderr): FORTSATT `text_length: 0` på noen turer, men denne
+          // gangen med synlig EKTE flerrunde-dekoding (sample-/batchd-tid),
+          // ikke lenger det gamle "decode time = 0.00 ms / 1 run FØR reell
+          // dekoding startet"-mønsteret D-266/D-267 identifiserte. To
+          // gjenstående, ikke-utelukkede forklaringer: (a) `output_txt()`
+          // FAKTISK skriver whisper.cpp sitt EGNE, legitime "ingen
+          // gjenkjennbar tale"-resultat (en ekte modell-avgjørelse på denne
+          // spesifikke lyden, ikke en kode-bug), eller (b) et FORTSATT
+          // gjenværende plumbing-lag mellom `output_txt()` sin
+          // `/dev/stdout`-skriving og vår `proc.stdout.on("data", ...)`-
+          // lytter. `stdout.length` (RÅ byte-lengde FØR trim, ALDRI selve
+          // innholdet - samme §22-personvernsdisiplin som resten av denne
+          // klassen) skiller de to: 0 betyr INGEN bytes noensinne ankom
+          // (fortsatt et plumbing-lag), mens et positivt tall (f.eks. kun
+          // whitespace/linjeskift) beviser whisper.cpp FAKTISK skrev noe -
+          // og at selve MODELLEN, ikke rørledningen, er neste sted å se.
           console.error(
             JSON.stringify({
               msg: "voice_stt_empty_result_diagnostic",
               wav_bytes: wav.length,
+              stdout_raw_length: stdout.length,
               stderr_excerpt: stderr.slice(0, 4000)
             })
           );

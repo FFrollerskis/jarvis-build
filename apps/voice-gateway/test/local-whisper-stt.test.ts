@@ -137,6 +137,10 @@ describe("D-263/D-264: end() logger et diagnostikk-utdrag av whisper.cpp sin EGE
     expect(diagnostics[0].wav_bytes).toBeGreaterThan(44); // WAV-header (44) + selve PCM-en
     expect(diagnostics[0].stderr_excerpt.length).toBeGreaterThan(300); // beviser D-263 sin ORIGINALE, for smale grense IKKE lenger gjelder
     expect(diagnostics[0].stderr_excerpt).toContain("no speech detected");
+    // D-271: fixturen skriver ALDRI noe til stdout (kun stderr) - beviser at
+    // `stdout_raw_length: 0` faktisk skiller "ingen bytes ankom i det hele
+    // tatt" fra "bytes ankom, men var kun whitespace" på NESTE live-forsøk.
+    expect(diagnostics[0].stdout_raw_length).toBe(0);
   });
 
   it("kode 0 + IKKE-tomt stdout (den vanlige lykkes-banen) logger ALDRI diagnostikken", async () => {
