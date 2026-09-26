@@ -1,6 +1,11 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-272 -
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-272 MERGET til `main`
+som PR #177/`d4f6cb6a` - merget under stående D-192-fullmakt, CI grønt (6/6 sjekker), ingen åpne
+review-tråder. **Ikke ennå live-bekreftet** - avventer Tobias sin NAS-redeploy av `voice-gateway`
+(tyngre enn tidligere runder: ~466MB modell-nedlasting for `ggml-small.bin` vs. ~142MB for
+`ggml-base.bin`, mer RAM ved kjøretid) + en ny tale-test.
+
 PR #176 (D-271) MERGET til `main` (`20ebcdd4`). Tobias sitt live-forsøk med D-271 sin `stdout_raw_length`-
 diagnostikk deployert ga det DEFINITIVE svaret: `"stdout_raw_length":0` på begge loggede diagnostikk-
 linjer, TIL TROSS for ekte, ikke-null dekodingsarbeid. Utelukker plumbing-hypotesen (b) fra D-271 - null
