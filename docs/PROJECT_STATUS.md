@@ -1,23 +1,31 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-271 -
-PR #175 (D-269/D-270) MERGET til `main` (`0b963a3e`). Tobias sitt live-forsøk med D-270 deployert (fra
-telefonen, ny enrollment fungerte etter at en feil `--device dev-phone`-flagg i min egen kommando ble
-fjernet) viste at `"--output-file -"`-advarselen ENDELIG er borte fra stderr (bekrefter `-otxt` faktisk
-kjører) - men `text_length: 0` vedvarer på flere turer, denne gangen med SYNLIG EKTE flerrunde-
-dekodingsarbeid (opptil 21 sample-runs, 20 batchd-runs), IKKE lenger det gamle "decode time = 0.00 ms /
-1 run FØR reell dekoding startet"-mønsteret. **To gjenstående hypoteser:** (a) `output_txt()` skriver
-FAKTISK whisper.cpp sitt eget, legitime "ingen gjenkjennbar tale"-resultat for denne lydens innhold (en
-ekte modellbegrensning, ikke lenger en kode-bug), eller (b) et FORTSATT gjenværende plumbing-lag mellom
-`output_txt()` sin `/dev/stdout`-skriving og vår `proc.stdout`-lytter. **Diagnostikk (ingen
-atferdsendring):** `voice_stt_empty_result_diagnostic` utvidet med `stdout_raw_length` - rå byte-lengde
-FØR `.trim()`, ALDRI selve innholdet (§22 uendret). `0` betyr fortsatt "ingen bytes ankom" (b); et
-positivt tall beviser whisper.cpp FAKTISK skrev noe og at MODELLEN, ikke rørledningen, er neste sted å
-se - skiller de to hypotesene definitivt på neste forsøk. Ny påstand i eksisterende D-263/D-264-test
-(`stdout_raw_length` `toBe(0)` mot den kjente "ingenting ankom"-fixturen). 115/115 relevante tester
-grønt, `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-271 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke en fiks - et diagnostisk oppfølgingssteg**; krever samme
-Docker-rebuild av `voice-gateway`; avventer Tobias sin neste live-test for å avgjøre (a) vs (b).
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-272 -
+PR #176 (D-271) MERGET til `main` (`20ebcdd4`). Tobias sitt live-forsøk med D-271 sin `stdout_raw_length`-
+diagnostikk deployert ga det DEFINITIVE svaret: `"stdout_raw_length":0` på begge loggede diagnostikk-
+linjer, TIL TROSS for ekte, ikke-null dekodingsarbeid. Utelukker plumbing-hypotesen (b) fra D-271 - null
+bytes ankom fordi whisper.cpp ALDRI SKREV noen. **Root cause funnet ved å lese whisper.cpp sin EGEN
+kjerne-kildekode (`src/whisper.cpp`, IKKE cli.cpp denne gangen) helt inn i `whisper_full()` sin
+avkodingssløyfe:** `is_no_speech`-vakten er bevist strukturelt ALLTID `false` nå (D-267 sin `-nth 1.01`
+virker EKTE) - men selve segment-opprettelsen (`result_all.push_back(...)`, det `output_txt()` senere
+itererer over) skjer KUN når en `text`-streng faktisk akkumulerer INNHOLD fra ordinære vokabular-token
+FØR en tidsstempel-grense. **Konklusjon: whisper.cpp sin egen avkoding produserer for disse ytringene KUN
+spesial-/tidsstempel-/EOT-token, ALDRI et ordinært vokabular-token** - en ekte modellbegrensning.
+**Ytterligere bevis funnet i egen historikk:** Tobias sin tidligere, uavhengige Windows-verifisering
+(D-223) brukte `ggml-small.bin` og bekreftet fungerende norsk tale - mens D-253 (NAS-imaget) BEVISST valgte
+`ggml-base.bin` for CPU-hastighet, UTEN noensinne å teste talegjenkjenning med den mindre modellen. **Fiks:**
+`infra/local/voice-gateway.Dockerfile` bytter fra `ggml-base.bin` (~142MB) til `ggml-small.bin` (~466MB,
+SAMME modell som D-223 sin bevist-fungerende Windows-oppsett) - både nedlastings-URL og
+`JARVIS_WHISPER_MODEL`. Ingen `.ts`-kildekode endret - D-267/D-270/D-271 sine fikser forblir fullt ut
+korrekte, bare ikke tilstrekkelige alene. `d253-voice-gateway-local-stt-tts.test.ts` sine to
+Dockerfile-innholds-påstander oppdatert (12/12 grønt), `d212-voice-gateway-compose-wiring.test.ts` uendret
+6/6 grønt. Se D-272 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at `ggml-small.bin` faktisk
+løser talegjenkjenningen** - krever en TYNGRE `voice-gateway`-Docker-rebuild (større nedlasting/mer RAM)
+enn noen tidligere runde; avventer Tobias sin neste NAS-redeploy + live-test.
+
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #176/`20ebcdd4`): D-271 - `stdout_raw_length`-
+diagnostikken selv (nå bekreftet nyttig - se D-272 over) beholdes uendret i koden. Se D-271 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj om selve diagnostikk-tilføyelsen.
 
 **Forrige milepæl (uendret, MERGET til `main` som del av PR #175/`0b963a3e`): D-270 - DEN FAKTISKE root
 cause for `text_length: 0` gjennom HELE D-262→D-269-runden: whisper.cpp v1.9.4 sin EGEN kildekode
