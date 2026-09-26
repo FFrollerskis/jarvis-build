@@ -35,7 +35,14 @@ import {
   ResolvingSelfModificationGithubClient, SelfModificationService, SelfModificationTransport,
   selfModificationToolDefinitions
 } from "@jarvis/self-modification";
-import { LocalHashEmbedding, MemoryRetriever, MemoryWriter, RuleBasedExtractor } from "@jarvis/memory";
+import {
+  LocalHashEmbedding,
+  MemoryRetriever,
+  MemoryWriter,
+  RuleBasedExtractor,
+  SummaryService,
+  runMemoryRetentionSweepForAllTenants
+} from "@jarvis/memory";
 import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
@@ -508,6 +515,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
   const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy);
+  // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
+  // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
+  // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
+  // `memory-retention-sweep`-jobben under bruker den.
+  const memorySummaries = new SummaryService(pool);
   // D-102: ÉN delt `TaskService`-instans - gjenbrukes UENDRET av `ConversationEngine`
   // (eksisterende `tasks.create`-goal-only-vei), den nye `/tasks/submit`-HTTP-ruten
   // (full `JobContract`, inkl. `agent_profile: "coding"`), OG (task #123, D-214)
@@ -1176,6 +1188,20 @@ porter: se docs/RUNTIME_GATES.md`;
   new DailyScheduler(
     pool, "vision-retention-sweep", Number(process.env["JARVIS_VISION_RETENTION_SWEEP_HOUR"] ?? 2)
   ).start(() => runVisionRetentionSweepForAllTenants(pool, visionService).then(() => undefined));
+  // D-286 (Tobias direkte i chat, "alle" - alle tre foreslåtte tilnærminger
+  // til ubegrenset minnevekst): periodisk konsolidering av gamle EPISODISKE
+  // samtale-minner til dagssammendrag - SAMME reboot-durable
+  // DailyScheduler-mekanisme/mønster som location/health/vision sine
+  // retensjons-sveip over. Se `retention-sweep.ts` sitt filhode for full
+  // begrunnelse (bevisst snever scope - rører ALDRI preference/decision/
+  // relation/semantic-typer, KUN episodic samtale-minner).
+  new DailyScheduler(
+    pool, "memory-retention-sweep", Number(process.env["JARVIS_MEMORY_RETENTION_SWEEP_HOUR"] ?? 2)
+  ).start(() =>
+    runMemoryRetentionSweepForAllTenants(
+      pool, memoryWriter, memorySummaries, Number(process.env["JARVIS_MEMORY_RETENTION_DAYS"] ?? 60)
+    ).then(() => undefined)
+  );
   // D-242 (Tobias direkte chat-instruks: "du skal bygge det for absolutt
   // alle som tester en gang om dagen så vi vet om credentials fungerer
   // eller ikke hele tiden"): daglig `ConnectorHealthSweep` - SAMME
