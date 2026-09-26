@@ -175,11 +175,19 @@ describe("D-286: runMemoryRetentionSweepForAllTenants konsoliderer gamle episodi
 
     await runMemoryRetentionSweepForAllTenants(appPool, writer, summaries, 60);
 
-    const results = await retriever.search(id, { spaces: ["personal"], query: "Henrik sjokolade flytte" });
-    const ids = results.map((r) => r.memory_item_id);
-    expect(ids).toContain(relationAdd.memory_item_id);
-    expect(ids).toContain(preferenceAdd.memory_item_id);
-    expect(ids).toContain(decisionAdd.memory_item_id);
+    // Tre SEPARATE, ett-tema-søk (ikke ett kombinert flertema-søk) - `search()`
+    // sin hybride FTS (`plainto_tsquery`, ALLE ord må finnes i SAMME rad) OG
+    // vektor-siden (kosinus-terskel 0,6) kan strukturelt ALDRI treffe tre
+    // usammenhengende enkelt-faktarader med ETT kombinert flertema-søk, uansett
+    // om sveipet lot dem stå urørt eller ikke - dette var en feil TEST-antakelse
+    // (bekreftet reelt CI-funn, IKKE en produksjonskodefeil), samme
+    // ett-tema-søk-mønster som test A ("Oslo") og D ("Manuelt") allerede bruker.
+    const relationResults = await retriever.search(id, { spaces: ["personal"], query: "Henrik" });
+    expect(relationResults.map((r) => r.memory_item_id)).toContain(relationAdd.memory_item_id);
+    const preferenceResults = await retriever.search(id, { spaces: ["personal"], query: "sjokolade" });
+    expect(preferenceResults.map((r) => r.memory_item_id)).toContain(preferenceAdd.memory_item_id);
+    const decisionResults = await retriever.search(id, { spaces: ["personal"], query: "flytte" });
+    expect(decisionResults.map((r) => r.memory_item_id)).toContain(decisionAdd.memory_item_id);
   });
 
   it("D: en gammel episodic MEN fra en IKKE-samtale-kilde ('manual') røres IKKE - kun source.kind='conversation' er kandidat", async () => {
