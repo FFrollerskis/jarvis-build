@@ -1,24 +1,23 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-279 - EKTE KODEFIKS
-(diagnostikk-verktøy), IKKE MERGET ENNÅ.** Etter D-262→D-278 (17 poster) individuelt utelukket HVER
-kildekode-testbar hypotese for hvorfor talegjenkjenning konsekvent returnerer tomt resultat, spurte
-jeg Tobias om eksplisitt samtykke til å faktisk inspisere et fanget lydklipp direkte - han svarte
-"build". **Bygget:** ny `apps/voice-gateway/src/debug-audio-dump.ts` - `maybeDumpAudioForDebug()`,
-en ren no-op med mindre `JARVIS_VOICE_DEBUG_DUMP_DIR` er eksplisitt satt, da skriver den ETT WAV-klipp
-(kun ved tomt STT-resultat, samme betingelse som eksisterende diagnostikk) til den mappen. Filen er
-BEVISST holdt UTENFOR §22-testens beskyttede filliste (`stt.ts` selv inneholder FORTSATT ingen
-disk-skrive-API, verifisert). Ny `debug-audio-dump.test.ts` (3 tester) beviser begge halvdelene av
-kontrakten (av-som-standard OG skriver-korrekt-når-satt). `.env.example` dokumenterer variabelen.
-`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint`/full test-suite (119/125 grønt, eneste
-feil kjent embedded-postgres-sandkasse-begrensning). Se D-279 i DECISIONS_AND_ASSUMPTIONS.md. **Neste
-steg:** Tobias setter `JARVIS_VOICE_DEBUG_DUMP_DIR` i `.env`, redeployer `voice-gateway`, kjører én
-taletest, spiller av det fangede klippet lokalt selv.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-280 - EKTE KODEFIKS,
+IKKE MERGET ENNÅ.** D-279 sitt debug-dump-verktøy, LIVE-TESTET av Tobias FEM ganger: `voice_debug_
+audio_dumped` fyrte ALDRI, til tross for at han satte `JARVIS_VOICE_DEBUG_DUMP_DIR`. **Root cause:**
+`docker compose` sin `voice-gateway`-tjeneste videresendte KUN `JARVIS_VOICE_PORT`/`JARVIS_CORE_URL`/
+`OPENAI_API_KEY` eksplisitt i sin `environment:`-blokk - `docker compose` sender ALDRI automatisk
+hele `.env`/shell-miljøet inn i en container, kun eksplisitt navngitte variabler. **Fiks:** lagt til
+`JARVIS_VOICE_DEBUG_DUMP_DIR` i `environment:`-blokken, PLUSS et alltid-montert volum
+(`./voice-debug-dumps:/voice-debug`) - operatørverdien er nå EKSAKT `/voice-debug` (fast, ikke
+vilkårlig), slik at klippet lander DIREKTE på NAS-filsystemet uten `docker cp`. Verifisert med ekte
+`docker compose ... config` (v5.1.1) BÅDE med og uten variabelen satt. 2 nye tester i
+`d212-voice-gateway-compose-wiring.test.ts` (8/8 grønt). `.env.example`/`.gitignore` oppdatert. Se
+D-280 i DECISIONS_AND_ASSUMPTIONS.md. **Neste steg:** Tobias setter `JARVIS_VOICE_DEBUG_DUMP_DIR=
+/voice-debug` (EKSAKT denne verdien) i `.env`, redeployer `voice-gateway`, kjører én taletest, henter
+klippet fra `infra/local/voice-debug-dumps/` direkte på NAS-en.
 
-**Forrige milepæl (uendret): D-278 - HVER kildekode-testbar hypotese individuelt utelukket (WAV/stdin/
-modell/VAD/noiseSuppression/NAS-miljø). D-277 - cache-konfunder identifisert (avklart av D-278). D-276 -
-`noiseSuppression: false`, testet, robust disconfirmert. D-275 - `hangoverMs` 300→700,
-STRUKTURELT bekreftet fungerende (fragmentering løst), men ikke tilstrekkelig alene.**
+**Forrige milepæl (uendret): D-279 - debug-audio-dump.ts bygget, enhetstestet korrekt i isolasjon, men
+ALDRI nådde containeren pga. D-280 sin compose-videresendingsbug. D-278 - HVER kildekode-testbar
+hypotese individuelt utelukket (WAV/stdin/modell/VAD/noiseSuppression/NAS-miljø).**
 
 **Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
 av sammenhengende tale) + Dockerfile-lagrekkefølge fikset (build-effektivitet). Strukturelt bekreftet
