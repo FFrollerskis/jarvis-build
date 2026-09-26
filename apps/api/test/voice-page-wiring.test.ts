@@ -124,3 +124,22 @@ describe("D-265: mikrofonopptak ber nettleseren resample til 16 kHz DIREKTE i Au
     expect(voiceHtml).toMatch(/if \(inRate === 16000\) return float32;/);
   });
 });
+
+describe("D-269: den FAKTISK forhandlede captureCtx.sampleRate logges synlig - AudioContext-konstruktøren garanterer ALDRI at { sampleRate: 16000 } faktisk innvilges", () => {
+  const voiceHtml = readSource("../../web/voice.html");
+
+  it("startMicCapture() kaller techLog() med captureCtx.sampleRate RETT ETTER at captureCtx opprettes, FØR MediaStreamSource kobles til", () => {
+    const fnIdx = voiceHtml.indexOf("function startMicCapture()");
+    expect(fnIdx).toBeGreaterThan(-1);
+    const ctxIdx = voiceHtml.indexOf("captureCtx = new AudioContext(", fnIdx);
+    const logIdx = voiceHtml.indexOf("techLog(\"mic captureCtx.sampleRate", fnIdx);
+    const sourceIdx = voiceHtml.indexOf("createMediaStreamSource(micStream)", fnIdx);
+    expect(logIdx).toBeGreaterThan(ctxIdx);
+    expect(logIdx).toBeLessThan(sourceIdx);
+  });
+
+  it("logglinja skiller eksplisitt mellom OK (nøyaktig 16000) og AVVIK (nettleseren koerset til en annen rate, interpolasjons-forsvarsnettet er aktivt)", () => {
+    expect(voiceHtml).toContain("AVVIK - nettleseren ignorerte 16000-hintet");
+    expect(voiceHtml).toContain("OK - direkte 16kHz, ingen interpolasjon");
+  });
+});

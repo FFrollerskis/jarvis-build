@@ -1,26 +1,37 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-25 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-268 -
-Tobias sitt FØRSTE live-forsøk med D-267 sin `-nth 1.01`-fiks (etter en separat NAS-vert-runde: manglende
-`.env`-interpolering fra feil arbeidsmappe, deretter manglende Docker-socket-tilgang for `Jarvis`-brukeren
-- begge løst uten kodeendring). Stderr viste ENDELIG at whisper.cpp sin no-speech-vakt FAKTISK var
-deaktivert (`decode time = 11.32 ms / 2 runs`, IKKE lenger `0.00 ms`) - men transkripsjonen var FORTSATT
-`text_length: 0` på begge testede ytringer (0,6-0,7 sek). **Root cause:** `session.ts` sin `pushAudio()`
-sendte KUN lyd til STT-adapteren på `"speech"`/`"speech_start"` - `EnergyVad` returnerer `"silence"` for
-ENHVER ramme under terskelen, OGSÅ midt i en aktiv tur (kort opphold mellom ord) FØR `hangoverMs` (300ms)
-er nådd. Slike midt-i-turen-rammer ble dermed ALDRI sendt - spleiset ut av MIDTEN av WAV-en, ikke bare
-trimmet i endene, som produserer diskontinuerlig lyd whisper.cpp ikke kan gjenkjenne. **Fiks:** send lyd
-til STT-adapteren så lenge en tur er aktiv (`this.stt` satt) og rammen ikke er selve
-`end_of_turn`-avslutningsrammen - dekker `speech`/`speech_start` OG midt-i-turen `silence` i én
-betingelse; `vad.ts` sin `hangoverMs`-logikk avgjør fortsatt PRESIST når turen faktisk slutter. Ny
-`d268-mid-turn-silence-not-dropped.test.ts` (2 tester). 115/115 relevante tester grønt i full
-`apps/voice-gateway`-suite (eneste feil den kjente, uendrede embedded-postgres-sandkasse-begrensningen).
-`pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-268 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet at dette faktisk løser talegjenkjenningen** - krever
-samme Docker-rebuild av `voice-gateway` som D-266/D-267; avventer Tobias sin neste NAS-redeploy +
-live-test.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-270 -
+**DEN FAKTISKE root cause for `text_length: 0` gjennom HELE D-262→D-269-runden, funnet etter at D-269 sitt
+live-forsøk kom tilbake `captureCtx.sampleRate = 16000 (OK)`** - utelukket dermed ENHVER gjenværende
+lyd-fangst-/forvrengnings-/splitting-hypotese. Med alle andre lag bevist korrekte, ble whisper.cpp v1.9.4
+sin EGEN kildekode (`examples/cli/cli.cpp`, fersk `curl`-hentet fra den eksakte pinnede taggen, IKKE en
+oppsummering) lest linje for linje (D-41-disiplin) - og avdekket at `LocalWhisperStt.end()` sitt
+`spawn()`-kall ALDRI, i NOEN av de ni foregående rundene, hadde bedt whisper-cli om å faktisk SKRIVE
+resultatet noe sted. **Mekanisme:** `fout_factory` setter output-destinasjonen til input-filnavnet når
+`-of` ikke er gitt - siden vi sender `-f -` (stdin), blir denne bokstavelig `"-"`, som gjør `is_stdout`
+sann UTELUKKENDE fordi input- og stdout-sentinelen tilfeldigvis er samme tegn. Det deaktiverer EKSPLISITT
+segment-print-callback-en (`nullptr`), og `output_txt()` (funksjonen som faktisk skriver klartekst) kalles
+KUN når `-otxt`/`--output-txt` er satt - et flagg vi ALDRI har sendt. Whisper.cpp gjør altså ekte,
+fullstendig dekodingsarbeid (forklarer HVER ikke-null encode-/decode-tid observert siden D-262) og skriver
+det deretter INGEN STEDER. Den evig tilstedeværende `"warning: '--output-file -' used without any other
+'--output-*'"` - synlig i BOKSTAVELIG TALT HVER live-logg denne økten, konsekvent avfeid som støy - var
+whisper.cpp sin egen ærlige innrømmelse av PRESIST dette. **Fiks:** `-otxt` lagt til `spawn()`-kallet i
+`stt.ts` - skriver nå direkte til `/dev/stdout` (bekreftet i `fout_factory::open()`), fanget opp av den
+eksisterende `proc.stdout`-lytteren. `mock-whisper-ok.sh` utvidet til å kreve `-otxt`. 115/115 relevante
+tester grønt, `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-270 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet live** - krever samme Docker-rebuild av `voice-gateway`
+som D-266/D-267/D-268; avventer Tobias sin neste NAS-redeploy + live-test. Dette er, for første gang denne
+økten, en fiks som strukturelt FORKLARER samtlige ni tidligere "ekte dekoding, likevel tomt"-observasjoner
+uten unntak - høy tillit, fortsatt uverifisert før faktisk live-bekreftelse.
 
-**Forrige milepæl (uendret, IKKE MERGET, PR #174 - erstattes av denne fiksen FØR merge): D-267 -
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-269 - D-269-hypotesen
+(nettleseren koerser stille bort fra 16 kHz) ble AVKREFTET av Tobias sitt live-forsøk:
+`captureCtx.sampleRate = 16000 (OK - direkte 16kHz, ingen interpolasjon)`. Diagnostikken selv (tech-logg-
+linje i `voice.html`) beholdes uendret som permanent synlighet for fremtidige avvik. Se D-269 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj om undersøkelsen (WAV-header strukturelt korrekt bevist,
+ni-turers høy-energi-bevis mot "for stille/kort").
+
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-267 -
 RETTELSE av D-266: `-nth 0.0` hadde retningen BAKVENDT. whisper.cpp (identisk med OpenAI Whisper sin
 referanseimplementasjon) forkaster et segment når `no_speech_prob > no_speech_thold` - en LAV terskel
 gjør det derfor LETTERE å overskride (nesten enhver ikke-null sannsynlighet), altså MER aggressiv
@@ -34,7 +45,7 @@ tale/stillhet-vedtaket alene - forblir uendret, kun selve verdien var feil). Fix
 `apps/voice-gateway`-suite. `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se
 D-267 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Forrige milepæl (uendret, IKKE MERGET, PR #174): D-266 -
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-266 -
 D-265 sin anti-alias-fiks LIVE på NAS-en (`git pull`, INGEN Docker-rebuild) ga IDENTISK symptom som
 FØR fiksen: whisper.cpp brukte fortsatt ekte, lengde-proporsjonal encode-/decode-tid (opptil 1766ms)
 på flere turer (0,6-0,8 sek reell tale) OG `fallbacks = 1 p / 0 h` (whisper.cpp sin egen temperatur-
