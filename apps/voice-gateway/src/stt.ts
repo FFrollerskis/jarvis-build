@@ -248,7 +248,42 @@ export class LocalWhisperStt implements SttAdapter {
         // gjøre terskelen umulig å overskride: en gyldig sannsynlighet kan
         // aldri overstige 1.0, så `1.01` garanterer at
         // `no_speech_prob > no_speech_thold` ALDRI blir sann.
-        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-nth", "1.01", "-l", language], {
+        // D-270 (DEN FAKTISKE root cause, funnet ved a lese whisper.cpp v1.9.4
+        // sin EGEN kildekode direkte - examples/cli/cli.cpp, IKKE gjettet,
+        // etter at D-269 sin sampleRate-diagnostikk beviste at ALLE tidligere
+        // lag (VAD, WAV-header, no-speech-vakt, midt-i-turen-spleising,
+        // nettleser-resampling) FAKTISK var korrekte, mens text_length: 0
+        // FORTSATT var 100% konsekvent pa tvers av ni pafolgende, hoylytte,
+        // fullengde-turer): whisper-cli sin fout_factory
+        // (cli.cpp linje ca 1117-1131) setter fname_out til INPUT-filnavnet
+        // (fname_inp) nar -of/--output-file IKKE er gitt - og siden vi
+        // sender -f - (stdin), blir fname_inp (og dermed fname_out)
+        // BOKSTAVELIG "-". is_stdout = (fname_out == "-") blir dermed
+        // SANN, og konstruktoren setter
+        // print_segment_callback = is_stdout ? nullptr : whisper_print_segment_callback
+        // - selve callback-en som ville skrevet HVERT transkribert segment
+        // blir EKSPLISITT deaktivert (nullptr) utelukkende FORDI stdin-input
+        // tilfeldigvis kolliderer med "-"-sentinelen for stdout-output.
+        // output_txt() (funksjonen som FAKTISK ville skrevet klartekst-
+        // resultatet) kalles KUN nar params.output_txt er satt (cli.cpp sin
+        // output_ext(txt, ...)-makro) - et flagg vi ALDRI har sendt.
+        // Nettoresultat: whisper.cpp gjor EKTE, fullstendig dekodingsarbeid
+        // (bekrefter ALLE tidligere observerte ikke-null encode-/decode-
+        // tider gjennom HELE denne okten), beregner et EKTE transkript
+        // internt, og SKRIVER DET DERETTER INGEN STEDER. Den evig
+        // tilstedevaerende "warning: '--output-file -' used without any
+        // other '--output-*'" (synlig i HVER ENESTE stderr-logg denne
+        // okten, konsekvent avfeid som stoy) var whisper.cpp sin egen,
+        // aerlige innrommelse av PRESIST dette. Fiks: legg til
+        // -otxt/--output-txt - dette setter params.output_txt = true, som
+        // far output_ext(txt, ...) til faktisk a kalle
+        // fout_factory.open(".txt", ...) (som, siden is_stdout er sann,
+        // apner /dev/stdout DIREKTE) og deretter output_txt(...), som
+        // skriver hvert segment sin klartekst (ledende whitespace trimmet,
+        // ingen tidsstempler/JSON, verifisert linje-for-linje mot
+        // output_txt() sin egen kildekode) til akkurat den strommen var
+        // proc.stdout.on("data", ...)-lytter allerede fanger opp.
+        const proc = spawn(binPath, ["-m", modelPath, "-f", "-", "-nt", "-otxt", "-nth", "1.01", "-l", language], {
           stdio: ["pipe", "pipe", "pipe"]
         });
         let stdout = "";

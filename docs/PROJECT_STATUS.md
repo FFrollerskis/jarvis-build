@@ -1,24 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-269 -
-PR #174 (D-266/D-267/D-268) MERGET til `main` (`52d4a6e9`). Tobias sitt live-forsøk med D-268 deployert
-viste FLERE turer med tydelig HØY taleenergi (`rms_energy` opptil `0,3431`/`0,2219` - definitivt ekte,
-høylytt tale) og full 0,9-1,0 sekunds varighet - langt over enhver "for stille/kort"-hypotese. Whisper.cpp
-gjorde EKTE, flerrunde dekoding (opptil 7 decode-runs) på HVER av ni påfølgende turer, men samtlige ni ga
-likevel `text_length: 0` uten unntak - utelukker BÅDE "for stille" og "for kort" en gang for alle.
-**Undersøkt:** `pcm16ToWav()` (`stt.ts`) sin WAV-header er strukturelt bevist korrekt (whisper.cpp sin egen
-`processing '-' (N samples, X sec)`-linje stemmer eksakt med `wav_bytes` i hvert tilfelle) - ikke en
-header-/lengde-bug. **Gjenstående mistanke:** `voice.html` sin `new AudioContext({ sampleRate: 16000 })`
-(D-265) BER om 16 kHz, men Web Audio API-spesifikasjonen GARANTERER ALDRI at raten faktisk innvilges - en
-nettleser kan lovlig koerse til en annen rate uten feil. Skjer det, kjører `downsampleTo16kMono()` sin
-opprinnelige, IKKE-anti-alias-filtrerte interpolasjon FORTSATT - identisk forvrengning som D-265 forsøkte å
-eliminere, nå usynlig trigget av nettleseren selv. **Fiks (ren diagnostikk, ingen atferdsendring):**
-`startMicCapture()` logger nå den FAKTISK forhandlede `captureCtx.sampleRate` direkte i UI-ets eksisterende
-tech-logg-panel (OK/AVVIK-merket) - beviser eller avkrefter D-269-hypotesen på NESTE forsøk UTEN en ny
-kode-gjetning. Ren statisk fil, INGEN Docker-rebuild - kun `git pull` + nettleser-refresh. Ny beskrivelse i
-`voice-page-wiring.test.ts` (2 tester, 16/16 grønt i filen). `node --check` på inline-scriptet fortsatt
-gyldig, `npx eslint` rent. Se D-269 i DECISIONS_AND_ASSUMPTIONS.md. **Avventer Tobias sin neste live-test -
-denne gangen ser vi FAKTISK hvilken rate nettleseren brukte.**
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR pending, D-270 -
+**DEN FAKTISKE root cause for `text_length: 0` gjennom HELE D-262→D-269-runden, funnet etter at D-269 sitt
+live-forsøk kom tilbake `captureCtx.sampleRate = 16000 (OK)`** - utelukket dermed ENHVER gjenværende
+lyd-fangst-/forvrengnings-/splitting-hypotese. Med alle andre lag bevist korrekte, ble whisper.cpp v1.9.4
+sin EGEN kildekode (`examples/cli/cli.cpp`, fersk `curl`-hentet fra den eksakte pinnede taggen, IKKE en
+oppsummering) lest linje for linje (D-41-disiplin) - og avdekket at `LocalWhisperStt.end()` sitt
+`spawn()`-kall ALDRI, i NOEN av de ni foregående rundene, hadde bedt whisper-cli om å faktisk SKRIVE
+resultatet noe sted. **Mekanisme:** `fout_factory` setter output-destinasjonen til input-filnavnet når
+`-of` ikke er gitt - siden vi sender `-f -` (stdin), blir denne bokstavelig `"-"`, som gjør `is_stdout`
+sann UTELUKKENDE fordi input- og stdout-sentinelen tilfeldigvis er samme tegn. Det deaktiverer EKSPLISITT
+segment-print-callback-en (`nullptr`), og `output_txt()` (funksjonen som faktisk skriver klartekst) kalles
+KUN når `-otxt`/`--output-txt` er satt - et flagg vi ALDRI har sendt. Whisper.cpp gjør altså ekte,
+fullstendig dekodingsarbeid (forklarer HVER ikke-null encode-/decode-tid observert siden D-262) og skriver
+det deretter INGEN STEDER. Den evig tilstedeværende `"warning: '--output-file -' used without any other
+'--output-*'"` - synlig i BOKSTAVELIG TALT HVER live-logg denne økten, konsekvent avfeid som støy - var
+whisper.cpp sin egen ærlige innrømmelse av PRESIST dette. **Fiks:** `-otxt` lagt til `spawn()`-kallet i
+`stt.ts` - skriver nå direkte til `/dev/stdout` (bekreftet i `fout_factory::open()`), fanget opp av den
+eksisterende `proc.stdout`-lytteren. `mock-whisper-ok.sh` utvidet til å kreve `-otxt`. 115/115 relevante
+tester grønt, `pnpm --filter @jarvis/voice-gateway typecheck`/`npx eslint` rene. Se D-270 i
+DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet live** - krever samme Docker-rebuild av `voice-gateway`
+som D-266/D-267/D-268; avventer Tobias sin neste NAS-redeploy + live-test. Dette er, for første gang denne
+økten, en fiks som strukturelt FORKLARER samtlige ni tidligere "ekte dekoding, likevel tomt"-observasjoner
+uten unntak - høy tillit, fortsatt uverifisert før faktisk live-bekreftelse.
+
+**Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-269 - D-269-hypotesen
+(nettleseren koerser stille bort fra 16 kHz) ble AVKREFTET av Tobias sitt live-forsøk:
+`captureCtx.sampleRate = 16000 (OK - direkte 16kHz, ingen interpolasjon)`. Diagnostikken selv (tech-logg-
+linje i `voice.html`) beholdes uendret som permanent synlighet for fremtidige avvik. Se D-269 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj om undersøkelsen (WAV-header strukturelt korrekt bevist,
+ni-turers høy-energi-bevis mot "for stille/kort").
 
 **Forrige milepæl (uendret, MERGET til `main` som del av PR #174/`52d4a6e9`): D-267 -
 RETTELSE av D-266: `-nth 0.0` hadde retningen BAKVENDT. whisper.cpp (identisk med OpenAI Whisper sin
