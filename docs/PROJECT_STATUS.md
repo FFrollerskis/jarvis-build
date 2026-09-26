@@ -1,6 +1,16 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-289: Tobias sitt
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-290: Q-39 (Windows/
+macOS) LUKKET** (Tobias direkte i chat: "Fiks Q-39 og gi meg svaret" - delegerte selve tolkningen i
+stedet for å presisere intensjonen). Standardtolkning: BEGGE var allerede fullt dekket FØR D-231
+listet dem - Windows av CLAUDE.md regel 9 (Jarvis kjører allerede lokalt på Tobias sin PC), macOS av
+det eksisterende, uendrede D-36 Apple-runtime-sporet. Ingen ny connector, ingen ny kode. `OPEN_QUESTIONS.md`
+(Q-39 flyttet til lukket tabell, tabellen er nå tom for "trenger svar"), `INTEGRATIONS.md` §4.15
+oppdatert. **Eksplisitt IKKE dekket:** hvis Tobias faktisk mente NY skrivebords-/prosessautomatisering
+PÅ Windows-PC-en (analogt Apple Shortcuts-punktet) - det er en egen, ennå ikke scopet funksjon han må
+reise separat. Se D-290 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret, MERGET til `main` som PR #182): D-289: Tobias sitt
 retningsvalg på D-288 ("Vil ha alt at han har full kontroll") LEVERT.** Charlie sin samtaleflate
 (chat+tale) kan nå kalle ALLE registrerte `tool_id:action`-par (~28 tool_id-er), ikke lenger kun de 5
 kuraterte `MESH_TOOLS`. Undersøkt FØR bygging: `ua1-p1a-dclass-mesh.test.ts` beviste ALLEREDE at et
