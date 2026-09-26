@@ -143,3 +143,17 @@ describe("D-269: den FAKTISK forhandlede captureCtx.sampleRate logges synlig - A
     expect(voiceHtml).toContain("OK - direkte 16kHz, ingen interpolasjon");
   });
 });
+
+describe("D-276: noiseSuppression deaktivert i getUserMedia - isolert diagnostikk-variabel etter at D-274/D-275 utelukket resten av kjeden", () => {
+  const voiceHtml = readSource("../../web/voice.html");
+
+  it("getUserMedia ber om echoCancellation+autoGainControl UENDRET (D-249), men noiseSuppression: false (D-276)", () => {
+    expect(voiceHtml).toMatch(
+      /audio:\s*\{\s*echoCancellation:\s*true,\s*noiseSuppression:\s*false,\s*autoGainControl:\s*true\s*\}/
+    );
+  });
+
+  it("noiseSuppression: true forekommer IKKE lenger noe sted i getUserMedia-konstruktøren", () => {
+    expect(voiceHtml).not.toMatch(/noiseSuppression:\s*true/);
+  });
+});

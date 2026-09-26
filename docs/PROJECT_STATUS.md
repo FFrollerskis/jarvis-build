@@ -1,20 +1,26 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-275 - EKTE KODEFIKS,
-IKKE MERGET ENNÅ.** D-274 sin foreslåtte "si én 4-5 sekunders setning"-test, KJØRT LIVE av Tobias:
-loggen viste IKKE én sammenhengende tur, men RASK, GJENTATT `speech_start`/`end_of_turn`-veksling
-gjennom hele ytringen - kun korte 0,5-2,3 sekunders fragmenter ble noensinne fanget, alle fortsatt
-`text_length:0`. **Root cause: `EnergyVad` (`vad.ts`) sin `hangoverMs`-standardverdi (300ms) var under
-1,2 rammers margin mot klientens ~256ms lydrammer** - enhver normal energidipp mellom ord (stille
-konsonant, pust, stavelsesgrense) trigget `end_of_turn` FØR setningen var ferdig, og splittet én
-ytring i mange fragmenter som individuelt mangler nok fonetisk innhold for whisper.cpp. **Fiks:**
-`hangoverMs` økt fra 300 til 700 (`threshold` uendret - ingen bevis for at terskelNIVÅET var
-problemet). Samtidig: `infra/local/voice-gateway.Dockerfile` sin lagrekkefølge fikset (build-
-effektivitet) - whisper.cpp-/Piper-modell-/binær-nedlastingen (~466MB) flyttet FØR `COPY apps`, slik
-at fremtidige kildekodeendringer i `voice-gateway` IKKE lenger tvinger en full modell-re-nedlasting.
-Ny test i `vad-wer.test.ts` reproduserer D-275 sitt live-funn mot default-konstruktøren. Se D-275 i
-DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå live-bekreftet** - krever NAS-redeploy (denne runden raskere
-enn D-272, siden modell-/Piper-lagene nå forblir cachet) + en ny test med en hel setning.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-276 - EKTE KODEFIKS,
+IKKE MERGET ENNÅ.** D-275 sin `hangoverMs`-fiks (300→700) LIVE-TESTET av Tobias: STRUKTURELT
+BEKREFTET - loggen viste NØYAKTIG ÉN `speech_start`/`end_of_turn`-overgang for hele ytringen (ingen
+fragmentering) og en sammenhengende 9,7 SEKUNDER lang WAV - den lengste, mest usplittede lydklippen i
+hele serien. **Likevel FORTSATT `text_length:0`**, til tross for ekte, omfattende dekodingsarbeid.
+Dette er et STERKERE negativt bevis enn tidligere (en full, ubrutt 9,7 sek ytring med tale-liknende
+RMS-mønster produserte likevel null vokabular-token) - VAD-fragmentering er nå DEFINITIVT utelukket
+som gjenværende årsak, og kombinert med D-274 (hele resten av kjeden bevist korrekt) peker symptomet
+nå entydig mot selve LYDINNHOLDET fra nettleseren. **Ny kandidat: `noiseSuppression: true` i
+`getUserMedia()`** (`voice.html`, satt i D-249) - WebRTC sin nettleser-interne støyfjerning er en
+dokumentert kilde til PRESIST dette mønsteret (amplityde bevares, fonetisk struktur ødelegges av
+aggressiv spektral gating). **Fiks (isolert, én variabel om gangen):** `noiseSuppression` satt til
+`false`, `echoCancellation`/`autoGainControl` uendret. Ny test i `voice-page-wiring.test.ts` (D-276).
+Se D-276 i DECISIONS_AND_ASSUMPTIONS.md. **Ikke ennå bekreftet** - krever NAS-redeploy (KUN `voice.html`,
+statisk fil, MEN `api`-container er IKKE bind-mountet - en `api`-rebuild er FORTSATT nødvendig, se
+D-259/D-260-korreksjonen) + en ny live-test med en hel setning.
+
+**Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
+av sammenhengende tale) + Dockerfile-lagrekkefølge fikset (build-effektivitet). Strukturelt bekreftet
+fungerende av D-276 sin live-test (ingen fragmentering lenger), men IKKE tilstrekkelig alene - se
+D-276 over.**
 
 **Forrige milepæl (uendret): D-274 - `jfk.wav`-sunnhetstesten LIVE på NAS-en lyktes + lokal
 kildekode-verifisering beviste `pcm16ToWav()` byte-korrekt - HVER lag i kjeden bevist korrekt før
