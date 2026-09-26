@@ -222,8 +222,8 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 | Apple Push Notification service | `NY_BACKLOG` | Del av det eksisterende, `BLOCKED_EXTERNAL` D-36 Apple-runtime-sporet (krever Mac mini/Xcode/Developer-konto, se `docs/APPLE_PHASE8_CHECKLIST.md`) - ikke en isolert ny connector |
 | iOS Shortcuts | `NY_BACKLOG` | Samme D-36-spor som APNs |
 | Apple Watch | `NY_BACKLOG` | Samme D-36-spor - fysisk klokke-test er selv et navngitt D-36-akseptansepunkt |
-| Windows | `IKKE EN CONNECTOR – Q-39 FLAGGET` | Operativsystemet Tobias sin PC/lokale Docker-drift kjører på (CLAUDE.md regel 9) - ikke en ekstern leverandør-API i ToolGateway-forstand. Se Q-39 for presisering av hva Tobias konkret mener |
-| macOS | `IKKE EN CONNECTOR – Q-39 FLAGGET` | Henger sammen med det eksisterende D-36 Apple-runtime-sporet, ikke en isolert ny connector. Se Q-39 |
+| Windows | `IKKE EN CONNECTOR – ALLEREDE DEKKET (D-290)` | Operativsystemet Tobias sin PC/lokale Docker-drift kjører på (CLAUDE.md regel 9) - fullt dekket, ingen ny kapabilitet mangler. Se D-290: en EVENTUELL fremtidig ny evne (skrivebords-/prosessautomatisering PÅ Windows-PC-en) er IKKE dekket av denne raden og krever en egen, ennå ikke reist forespørsel |
+| macOS | `IKKE EN CONNECTOR – ALLEREDE DEKKET (D-290)` | Henger sammen med det eksisterende, uendrede D-36 Apple-runtime-sporet - ikke en isolert ny connector. Se D-290 |
 
 ## 5. Home Assistant (spesialrolle)
 
