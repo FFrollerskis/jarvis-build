@@ -1,6 +1,18 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-287 - **D-286 sine TRE
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-288, KRITISK FUNN
+(Tobias direkte spørsmål: "hva med det at den ikke har tilgang til alt vi gir den tilgang til"):
+Charlie sin samtaleflate (chat+tale) kan FAKTISK kun kalle 5 verktøy totalt (`mesh-bridge.ts` sin
+`MESH_TOOLS`), mens `ToolGateway` har ~28 fullt registrerte `tool_id`-er med D-41-maks-kapabilitet
+(email/calendar/github/telegram/vercel/business/support/contract/product/operations/growth/googleads/
+finance×5/consent/docker/conversation_graph/drive/situations/executive/owner_controls/governance/
+memory/self_modification) - ALLE reelt utførbare, men KUN via dashbordets HTTP-ruter, ALDRI ved å be
+Charlie om det i samtale. INGEN sikkerhetslekkasje (samme Policy Gateway-håndhevelse begge veier) -
+en ren, hittil aldri revidert LLM-verktøyliste-begrensning fra UA-1 P1A. Presentert for Tobias med tre
+retningsvalg (utvid MESH_TOOLS kuratert / bygg en bredere eksplisitt allowlistet bro / la det stå).
+INGEN kode endret ennå - avventer Tobias sitt retningsvalg. Se D-288 i DECISIONS_AND_ASSUMPTIONS.md.**
+
+**Forrige milepæl (uendret): D-287 - **D-286 sine TRE
 foreslåtte tilnærminger til ubegrenset minnevekst BYGGET SAMTIDIG** (Tobias direkte i chat: "alle").**
 **(B)** `RuleBasedExtractor` krever nå et EKSPLISITT, navngitt signalord for HVER kandidat - den gamle
 catch-all-en (ALT ble lagret som "semantic") er FJERNET; ny `RELATION`-kategori (bøyningstolerant
