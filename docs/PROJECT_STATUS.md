@@ -1,25 +1,21 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-277 - INGEN kodeendring,
-negativt funn + åpent spørsmål til Tobias.** D-276 sin `noiseSuppression: false`-fiks LIVE-TESTET
-(etter `api`-rebuild): to NYE, ikke-fragmenterte ytringer (3,8 sek/6,9 sek, ekte tale-liknende
-RMS-mønster, MER omfattende dekodingsarbeid enn før inkl. en temperatur-refallback) - MEN FORTSATT
-`text_length:0` på begge. **`noiseSuppression` er dermed DISCONFIRMERT som eneste rotårsak** - tredje
-kildekode-konsistente hypotese i rad (etter D-272 modellstørrelse, nå denne) som ikke var
-tilstrekkelig alene. **VIKTIG, IKKE AVKLART KONFUNDER:** den FØRSTE blokken i denne logg-kjøringen var
-byte-for-byte IDENTISK med D-276 sin FORRIGE logg (samme `stderr_excerpt`-millisekunder) - et signal
-om at `docker compose logs -f` viste eksisterende loggbuffer, ikke nødvendigvis at nettleseren hadde
-faktisk lastet den NYE `voice.html` for testene som FØLGER. En statisk sides nettleser-cache
-garanteres IKKE ugyldiggjort av en `api`-rebuild alene uten en hard refresh/ny fane. **Neste steg,
-foreslått til Tobias FØR ny kodehypotese:** bekreft via hard refresh (Ctrl+Shift+R) eller inkognito-
-fane at endringen faktisk var aktiv. Hvis symptomet vedvarer selv DA: alt kildekode-testbart
-(WAV/stdin/modell/miljø/VAD-segmentering/noiseSuppression) er nå individuelt utelukket - neste,
-siste diagnostikk-lag (faktisk lytte til et fanget lydklipp) krever Tobias sitt eksplisitte samtykke
-til et opt-in-only avvik fra §22-invarianten ("rå lyd skal ALDRI treffe disk"), IKKE noe som innføres
-ensidig. Se D-277 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-278 - INGEN kodeendring,
+negativt funn + åpent spørsmål til Tobias.** D-277 sin cache-konfunder AVKLART: Tobias testet FLERE
+ganger fra en NY, privat/inkognito-fane (bekreftet fersk - måtte innrullere på nytt), med varierende
+ekte lengder (0,8/1,8/3,8/6,9/7,2 sek) - ALLE fortsatt `text_length:0`. `noiseSuppression: false` var
+altså FAKTISK aktiv og løste likevel IKKE talegjenkjenningen - nå ROBUST disconfirmert (mange
+uavhengige, fersk-lastede forsøk, ikke ett tvilsomt datapunkt). **Status etter D-262→D-278 (17 poster):
+HVER ENESTE kildekode-testbar hypotese er nå individuelt utelukket** - WAV-header, stdin/miniaudio,
+`-otxt`, no-speech-vakt, modellstørrelse (BÅDE base og small), VAD-segmentering (løst, ikke
+tilstrekkelig), `noiseSuppression`, HELE NAS-miljøet/binæren (`jfk.wav` transkriberte korrekt). **Ingen
+gjenværende hypotese å teste blindt.** Neste, eneste rimelige diagnostikk-lag: faktisk inspisere et
+fanget lydklipp direkte - krever eksplisitt Tobias-samtykke til et opt-in-only avvik fra
+§22-invarianten ("rå lyd skal ALDRI treffe disk"). Spurt direkte i chat. Se D-278 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
-**Forrige milepæl (uendret): D-276 - `noiseSuppression: false`, testet, disconfirmert alene (se D-277
-over) - MEN muligens ikke faktisk aktiv pga. nettleser-cache, uavklart. D-275 - `hangoverMs` 300→700,
+**Forrige milepæl (uendret): D-277 - cache-konfunder identifisert (nå avklart av D-278). D-276 -
+`noiseSuppression: false`, testet, robust disconfirmert (se D-278). D-275 - `hangoverMs` 300→700,
 STRUKTURELT bekreftet fungerende (fragmentering løst), men ikke tilstrekkelig alene.**
 
 **Forrige milepæl (uendret): D-275 - `EnergyVad` sin `hangoverMs` økt fra 300 til 700 (fragmentering
