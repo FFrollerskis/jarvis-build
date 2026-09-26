@@ -843,6 +843,67 @@ export class TelegramTransport implements ToolTransport {
 }
 
 /**
+ * D-292 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres"). Slack Web API - offisielt dokumenterte endepunkter, ikke
+ * gjettet: `chat.postMessage` (send), `auth.test` (boten sin egen identitet,
+ * INGEN sideeffekt - SAMME "trygg tilkoblingstest"-rolle som Telegram sin
+ * `getMe` over), `conversations.list`/`conversations.history` (lesing).
+ * Autentisering: `Authorization: Bearer <bot-token>`-header på ALLE kall
+ * (Slack sin egen dokumenterte standard, IKKE en URL-embedded token som
+ * Telegram). Slack sin EGEN respons-konvolutt er `{ok: boolean, error?:
+ * string, ...}` uansett HTTP-status (200 selv ved logisk feil) - `body.ok`
+ * MÅ derfor sjekkes eksplisitt, en `response.ok`-sjekk alene ville sluppet
+ * gjennom en logisk Slack-feil som suksess.
+ */
+export class SlackTransport implements ToolTransport {
+  private async call(
+    method: string, credential: string, params: Record<string, JsonValue>, useJsonBody: boolean
+  ): Promise<{ ok: boolean; error?: string; [key: string]: JsonValue | boolean | string | undefined }> {
+    const url = `https://slack.com/api/${method}`;
+    const response = useJsonBody
+      ? await fetch(url, {
+          method: "POST",
+          headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+          body: JSON.stringify(params)
+        })
+      : await fetch(`${url}?${new URLSearchParams(params as Record<string, string>).toString()}`, {
+          headers: { authorization: `Bearer ${credential}` }
+        });
+    if (!response.ok) throw new Error(`slack_error_${response.status}`);
+    return (await response.json()) as { ok: boolean; error?: string };
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const body = await this.call(
+        "chat.postMessage", credential,
+        { channel: String(parameters["channel"]), text: String(parameters["message"]) }, true
+      );
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { external_id: String((body as { ts?: string }).ts ?? "sent") };
+    }
+    if (action === "get_bot_info") {
+      const body = await this.call("auth.test", credential, {}, true);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: body as JsonValue };
+    }
+    if (action === "list_channels") {
+      const body = await this.call("conversations.list", credential, {}, false);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: (body as { channels?: JsonValue }).channels ?? null };
+    }
+    if (action === "read_channel_history") {
+      const params: Record<string, JsonValue> = { channel: String(parameters["channel"]) };
+      if (parameters["limit"] !== undefined) params["limit"] = parameters["limit"];
+      const body = await this.call("conversations.history", credential, params, false);
+      if (!body.ok) throw new Error(`slack_error_${body.error ?? "unknown"}`);
+      return { data: (body as { messages?: JsonValue }).messages ?? null };
+    }
+    throw new Error(`slack_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men

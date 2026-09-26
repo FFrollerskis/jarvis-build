@@ -130,6 +130,13 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "telegram", action: "get_bot_info", parameters: () => ({}) }
   },
   {
+    // D-292: samme "notify er ekte utsendelse, get_bot_info er trygg
+    // tilkoblingstest"-disiplin som Telegram over.
+    id: "slack", display_name: "Slack", category: "tool_gateway",
+    credential_refs: ["JARVIS_SLACK_BOT_TOKEN"],
+    live_test: { tool_id: "slack", action: "get_bot_info", parameters: () => ({}) }
+  },
+  {
     id: "vercel", display_name: "Vercel", category: "tool_gateway", credential_refs: ["JARVIS_VERCEL_TOKEN"],
     live_test: { tool_id: "vercel", action: "read_deployments", parameters: () => ({}) }
   },

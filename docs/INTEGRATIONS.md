@@ -132,7 +132,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Twilio | `NY_BACKLOG` | Ingen kode funnet |
 | Telegram | `ALLEREDE_BYGGET` | `connector-registry.ts` id `telegram`; D-119/D-125, LIVE+VERIFIED (eier-kanal, daglig brief, `/brief`/`/status`) |
 | WhatsApp | `NY_BACKLOG` | Kun kanal-enum i `046_conversation_graph.sql` (§UA-7) - bevisst IKKE bygget («no big-bang all-providers-at-once», D-108) |
-| Slack | `NY_BACKLOG` | Samme kanal-enum-status som WhatsApp; ren meldingskanal - en ordinær `EXTERNAL_CANONICAL`-transportadapter, INGEN D-64-konflikt for selve varslings-/chat-bruken (jf. D-64-notatet i §4.11) |
+| Slack | `ALLEREDE_BYGGET (D-292)` | `SlackTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (chat.postMessage/auth.test/conversations.list/conversations.history), `channel: "slack"` lagt til `ChannelSchema`. `live_test: get_bot_info` (auth.test, ingen sideeffekt). `SLACK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SLACK_BOT_TOKEN`) |
 | Discord | `NY_BACKLOG` | Kun kanal-enum, samme status som WhatsApp/Slack |
 | Higgsfield | `NY_BACKLOG` | Ingen kode funnet |
 | Runway | `NY_BACKLOG` | Ingen kode funnet |

@@ -1,6 +1,18 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-291: to fabrikkerte
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-292: Slack-connectoren
+bygget fullt ut - FØRSTE konkrete slice av Tobias sin brede "bygg alt i planen"-ordre.** `SlackTransport`
+(`notify`/`get_bot_info`/`list_channels`/`read_channel_history` - chat.postMessage/auth.test/
+conversations.list/conversations.history, Slack sin egen offisielt dokumenterte API), `slack` lagt til
+`ChannelSchema` (+ formalisert `desktop` sitt tidligere udokumenterte D-nummer-gap samtidig), wiret inn
+i BÅDE `main.ts` og `worker-main.ts`, ny `connector-registry.ts`-oppføring, `JARVIS_SLACK_BOT_TOKEN` i
+`.env.example`. 10 nye tester, `pnpm --filter tool-gateway/contracts/api typecheck` rene, `npx eslint`
+rent, ingen regresjon på eksisterende posisjonelle array-indekstester. `SLACK_LIVE_GATE=
+PENDING_CREDENTIALS` - koden er FIXED_SUITE_VERIFIED, venter på at Tobias limmer inn en ekte bot-token
+for LIVE_VERIFIED. Se D-292 i DECISIONS_AND_ASSUMPTIONS.md. Mønsteret er nå etablert for resten av de
+~44 ubygde connectorene - fortsetter systematisk, én/få om gangen.
+
+**Forrige milepæl (uendret): D-291: to fabrikkerte
 "gjenstår"-påstander funnet og rettet, som første skritt på Tobias sin brede ordre "jeg vil at alt i
 planen skal bygges og fullføres".** (1) D-231 sin `D-64-PORT PÅKREVD`-flagg på HubSpot/Pipedrive/
 Linear/Jira/Trello/Todoist var stale - Core-vs-Adapter-porten var ALLEREDE kjørt og avgjort for begge
