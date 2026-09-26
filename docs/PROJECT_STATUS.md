@@ -1,10 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-272 MERGET til `main`
-som PR #177/`d4f6cb6a` - merget under stående D-192-fullmakt, CI grønt (6/6 sjekker), ingen åpne
-review-tråder. **Ikke ennå live-bekreftet** - avventer Tobias sin NAS-redeploy av `voice-gateway`
-(tyngre enn tidligere runder: ~466MB modell-nedlasting for `ggml-small.bin` vs. ~142MB for
-`ggml-base.bin`, mer RAM ved kjøretid) + en ny tale-test.
+**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, D-273 - INGEN kodeendring,
+ren live-diagnostikk.** Tobias sin NAS-redeploy av D-272 (`ggml-small.bin`, bekreftet faktisk kjørende
+i stderr) ga et NEGATIVT resultat: BEGGE testede turer viste FORTSATT `"stdout_raw_length":0"`/
+`"text_length":0"`, til tross for mer ekte dekodingsarbeid enn tidligere (`sample time`/`encode time`/
+variabel `decode time`). **D-272 sin modellstørrelse-teori er dermed DISCONFIRMERT som eneste/hovedårsak**
+- samme symptom persisterer identisk med en modell allerede uavhengig bevist-fungerende for norsk tale
+(D-223, Windows). `ggml-small.bin` beholdes (ingen grunn til å rulle tilbake), men rotårsaken ligger et
+annet sted. Sekundær observasjon: `encode time ≈ 6950 ms` for kun 1,0-1,3 sek lyd (ingen GPU) er uvanlig
+tregt for NAS-CPU-en, flagget men ikke bevist årsak. **Neste diagnostikk-steg (foreslått til Tobias, ikke
+ennå kjørt):** kjør `whisper-cli` MANUELT inne i `voice-gateway`-containeren mot whisper.cpp sin egen
+kjente `jfk.wav`-eksempelfil - lykkes dette, er binær+modell bevist strukturelt fungerende og problemet
+sitter i lydfangst-/VAD-laget (`voice.html`/`session.ts`); feiler DETTE også, er problemet i selve
+NAS-container-miljøet (bygg/CPU-instruksjonssett/trådhåndtering). Se D-273 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret, MERGET): D-272 - PR #177/`d4f6cb6a`, merget under stående D-192-fullmakt,
+CI grønt (6/6 sjekker), ingen åpne review-tråder. Live-testet av Tobias samme dag - se D-273 over for
+resultatet (negativt, teorien alene var ikke tilstrekkelig).**
 
 PR #176 (D-271) MERGET til `main` (`20ebcdd4`). Tobias sitt live-forsøk med D-271 sin `stdout_raw_length`-
 diagnostikk deployert ga det DEFINITIVE svaret: `"stdout_raw_length":0` på begge loggede diagnostikk-
