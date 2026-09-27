@@ -470,7 +470,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "microsoft_outlook", display_name: "Microsoft Outlook", category: "tool_gateway", credential_refs: ["JARVIS_OUTLOOK_TOKEN"],
     live_test: { tool_id: "microsoft_outlook", action: "list_messages", parameters: () => ({ max: 5 }) }
   },
-  { id: "microsoft_365", display_name: "Microsoft 365", category: "backlog", credential_refs: ["JARVIS_MICROSOFT_365_TOKEN"] },
+  // D-318: "Microsoft 365" fjernet som egen backlog-plassholder (var her som
+  // "NY_BACKLOG", credential_refs JARVIS_MICROSOFT_365_TOKEN). SAMME
+  // "ALLEREDE_DEKKET, ingen egen connector nødvendig"-mønster som Google Docs
+  // (dekkes av Google Drive) rett over §4.4 - Microsoft sin ekvivalent til
+  // Gmail+Drive er NÅ FAKTISK bygget som to separate, presise Microsoft
+  // Graph v1.0-connectorer: `microsoft_outlook` (D-310, e-post) og
+  // `onedrive` (D-309, fillagring). "Microsoft 365" som EGEN, bredere
+  // plassholder (Teams/SharePoint/Excel Online/delt kalender) forblir
+  // eksplisitt UBYGD og UBEDT - reises som en FERSK, presist scopet
+  // instruks fra Tobias om ønsket, ALDRI gjettet frem her (CLAUDE.md regel
+  // 12/D-64-disiplin).
 
   // §4.5 Kode / dev / infra
   { id: "google_cloud", display_name: "Google Cloud", category: "backlog", credential_refs: ["JARVIS_GOOGLE_CLOUD_API_KEY"] },

@@ -47,9 +47,8 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
   });
 });
 
-describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over - registerets TOTALE lengde er uendret, kun kategorien for disse tjueto id-ene endret)", () => {
+describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over; D-318 fjernet 'microsoft_365' HELT fra registeret - ALLEREDE_DEKKET av microsoft_outlook/onedrive, samme mønster som Google Docs - registerets TOTALE lengde er derfor NED med én)", () => {
   const BACKLOG_IDS = [
-    "microsoft_365",
     "google_cloud",
     "playwright",
     "openai_realtime", "elevenlabs", "deepgram", "livekit", "telnyx",
@@ -63,17 +62,17 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
 
   const D64_GATE_IDS = ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"];
 
-  it("eksakt 28 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316)", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(28);
-    expect(BACKLOG_IDS.length).toBe(28);
+  it("eksakt 27 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'microsoft_365' D-318 fjernet HELT, ikke bygget)", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(27);
+    expect(BACKLOG_IDS.length).toBe(27);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 64 oppføringer totalt (36 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316 + 28 gjenværende D-232-backlog-punkter)", () => {
-    expect(CONNECTOR_REGISTRY.length).toBe(64);
+  it("registeret har nøyaktig 63 oppføringer totalt (36 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316 + 27 gjenværende D-232-backlog-punkter; D-318 fjernet 'microsoft_365' HELT fra registeret)", () => {
+    expect(CONNECTOR_REGISTRY.length).toBe(63);
   });
 
   it("INGEN av de 50 nye backlog-oppføringene har live_test", () => {
@@ -104,6 +103,11 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
     for (const excluded of ["supabase", "neo4j", "1password", "windows", "macos"]) {
       expect(registryIds.has(excluded)).toBe(false);
     }
+  });
+
+  it("'microsoft_365' er BEVISST IKKE registrert (D-318) - ALLEREDE_DEKKET av microsoft_outlook (D-310) + onedrive (D-309), samme 'ingen egen connector nødvendig'-mønster som Google Docs", () => {
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    expect(registryIds.has("microsoft_365")).toBe(false);
   });
 
   it("hver nye backlog-oppføring rendres som 'ikke konfigurert', presence_only, helse null - EKSAKT samme mønster som en eksisterende ukonfigurert connector (Fiken/Stripe/Vipps)", async () => {

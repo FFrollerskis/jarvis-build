@@ -1,7 +1,37 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, resatt til fersk
-`origin/main` etter merge) - **PR #192 (D-311 til D-317) MERGET til `main`** (to-forelder-merge
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-318:
+registeropprydning - "Microsoft 365" fjernet HELT som egen backlog-plassholder** (Tobias direkte
+i chat: "fortsett å jobbe", fortsatt gjennomgang av D-231-backlogen etter D-192-merge av PR
+#192/#193). `INTEGRATIONS.md` sin Microsoft 365-rad var stale siden D-310 landet: sa fortsatt
+`NY_BACKLOG`, men Microsoft sin praktiske ekvivalent til Gmail+Drive er NÅ FAKTISK komplett -
+`microsoft_outlook` (D-310, e-post) + `onedrive` (D-309, fillagring), begge Microsoft Graph
+v1.0. SAMME "ALLEREDE_DEKKET, ingen egen connector nødvendig"-presedens som Google Docs (dekkes
+av Google Drive). `microsoft_365`-oppføringen (`category: "backlog"`,
+`JARVIS_MICROSOFT_365_TOKEN`) FJERNET HELT fra `connector-registry.ts` (IKKE bygget - ren
+dekningserkjennelse, ingen kode-slice). `.env.example` ryddet, `INTEGRATIONS.md` raden endret til
+`ALLEREDE_DEKKET (D-318)` med eksplisitt presisering at BREDERE M365-flater (Teams/SharePoint/
+Excel Online/delt kalender) forblir ubygd/ubedt - krever fersk, presist scopet instruks fra
+Tobias om ønsket, ALDRI stille antatt dekket. `connector-registry.test.ts` oppdatert (28→27
+gjenværende backlog-punkter, 64→63 totale registeroppføringer - IKKE en byggeslice, så "bygde"-
+tallet er uendret på 36), ny dedikert "BEVISST IKKE registrert"-test lagt til (samme mønster som
+Supabase/Neo4j/1Password/Windows/macOS, D-232/D-290). `pnpm --filter @jarvis/tool-gateway
+typecheck` og `npx eslint` på begge endrede filer rene. `connector-registry.test.ts` isolert:
+18/18 grønt. Bredere `modules/tool-gateway apps/api`-suite: 513 reelle tester grønt (12 filer
+feilet KUN på kjent, forhåndseksisterende embedded-Postgres `/tmp`-tillatelsesfeil, uendret av
+denne posten). Se D-318 i DECISIONS_AND_ASSUMPTIONS.md.
+
+Underveis vurdert og bevisst IKKE forsøkt bygget denne runden: Zapier (backlog) - forsøkte å
+verifisere Zapier NLA-API-et sin gjeldende status/endepunkter via `WebFetch` mot
+`docs.zapier.com`, men nettverksegress til dokumentasjonsdomener er blokkert denne økten (SAMME
+D-297-mønster som gjentatte ganger tidligere) - IKKE bygget på gjettet/muligens utdatert
+API-kunnskap, per CLAUDE.md regel 12. Video-gen-familien (higgsfield/runway/kling/google_veo) og
+resten av de harder-tier-kategoriene (vage/nye-auth-mønstre/ikke-cloud-API/D-64-gate) står fortsatt
+som beskrevet i "Nytt merknad"-seksjonen under - venter på Tobias sitt retningsvalg eller en
+uttrykkelig instruks om å bygge under eksplisitt lavere-sikkerhet-forbehold.
+
+**Forrige milepæl (uendret): PR #192 (D-311 til D-317) MERGET til `main`, deretter oppfølgings-PR
+#193 (kun docs) OGSÅ MERGET til `main`.** (to-forelder-merge
 `9453f737f7763fb9d76df965aa475380aa226e5d`, under D-192 stående fullmakt - Tobias direkte til
 stede i chat-økten hele veien, ingen separat ChatGPT-arkitekt-forhåndsreview for dette scopet).
 Fersk HEAD-/base-guard rett før merge bekreftet uendret `head.sha bf8a4687.../base.sha
