@@ -189,6 +189,23 @@ import type { ToolGateway } from "./gateway.ts";
  * denne-økten-bekreftet). De resterende 37 backlog-punktene er fortsatt
  * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
  * bygges.
+ *
+ * D-307 (2026-09-27, samme brede ordre, fjortende slice, bygget parallelt
+ * mens D-306 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og
+ * jobbe ikke vent på ci"): `dropbox` bygget og flyttet ut av backlogen SAMME
+ * MÅTE - `Authorization: Bearer`-header mot Dropbox API v2, ETT langvarig
+ * access-token (INGEN OAuth-refresh-flyt nødvendig, ULIK Google-familien).
+ * To handlinger - `list_folder` (klasse A, lesing) og `create_folder`
+ * (klasse B, EKTE skrivehandling) - D-41 sitt "maksimal nyttig
+ * kapabilitet"-prinsipp fulgt, ikke kunstig innsnevret til read-only.
+ * BEVISST AVGRENSET fra fil-INNHOLD-opplasting/nedlasting (Dropbox sitt
+ * separate `content.dropboxapi.com`-vertsnavn med binær body/spesielle
+ * `Dropbox-API-Arg`-headere - en STRUKTURELT ulik kallform enn de øvrige
+ * JSON-RPC-handlingene, bevisst utsatt til en egen, senere utvidelse i
+ * stedet for gjettet frem her). Samme D-297-forbehold gjelder (trent
+ * kunnskap, ikke denne-økten-bekreftet). De resterende 36 backlog-punktene
+ * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
+ * dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -323,7 +340,18 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // §4.3 Kunnskap / dokumenter
   { id: "notion", display_name: "Notion", category: "backlog", credential_refs: ["JARVIS_NOTION_API_KEY"] },
   { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
-  { id: "dropbox", display_name: "Dropbox", category: "backlog", credential_refs: ["JARVIS_DROPBOX_TOKEN"] },
+  {
+    // D-307 (bygget, flyttet ut av backlog): Dropbox API v2 - `Authorization:
+    // Bearer`-header, ETT langvarig access-token (INGEN OAuth-refresh-flyt
+    // nødvendig, ULIK Google-familien). D-41 sitt "maksimal nyttig
+    // kapabilitet"-prinsipp fulgt - EKTE skrivehandling (`create_folder`),
+    // ikke kunstig innsnevret til read-only. Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-lærdommen).
+    id: "dropbox", display_name: "Dropbox", category: "tool_gateway",
+    credential_refs: ["JARVIS_DROPBOX_TOKEN"],
+    live_test: { tool_id: "dropbox", action: "list_folder", parameters: () => ({ path: "" }) }
+  },
   {
     // D-299 (bygget, flyttet ut av backlog): SYVENDE slice. Gjenbruker den
     // EKSISTERENDE `googleAccessToken()`-OAuth-veien, MEN med sin EGEN

@@ -3156,6 +3156,31 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
     },
+    /**
+     * D-307 (bygget parallelt mens D-306 sin CI kjørte - fjortende slice).
+     * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+     * skrivehandling (`create_folder`), ikke kunstig innsnevret til
+     * read-only (samme disiplin som Drive/Sheets). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Dropbox API v2, se `DropboxTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "dropbox", action: "list_folder", description: "List innhold i en mappe (POST /2/files/list_folder, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["files.metadata.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DROPBOX_TOKEN", output_trust: "untrusted", transport: transport("dropbox")
+    },
+    {
+      tool_id: "dropbox", action: "create_folder", description: "Opprett en NY, tom mappe (POST /2/files/create_folder_v2)",
+      input_schema: record({ path: z.string().max(1000) }),
+      capability_class: "B", scopes: ["files.content.write"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DROPBOX_TOKEN",
+      output_trust: "internal", transport: transport("dropbox")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

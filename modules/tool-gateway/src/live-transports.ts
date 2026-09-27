@@ -2141,3 +2141,41 @@ export class PrometheusTransport implements ToolTransport {
     throw new Error(`prometheus_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-307 (bygget parallelt mens D-306 sin CI kjørte, samme brede ordre -
+ * fjortende slice). **Samme ærlighetsforbehold som D-297-D-306**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). Dropbox API v2 (`api.dropboxapi.com/2/files/...`,
+ * JSON-RPC-stil POST-kall) - `Authorization: Bearer <token>`-header, ETT
+ * langvarig access-token (INGEN OAuth-refresh-token-utveksling som Google-
+ * familien). D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+ * skrivehandling (`create_folder`), ikke kunstig innsnevret til read-only.
+ * BEVISST AVGRENSET fra fil-INNHOLD-opplasting/nedlasting (Dropbox sitt
+ * separate `content.dropboxapi.com`-vertsnavn med binær body/spesielle
+ * `Dropbox-API-Arg`-headere - en strukturelt ulik kallform, se D-307 i
+ * DECISIONS_AND_ASSUMPTIONS.md).
+ */
+export class DropboxTransport implements ToolTransport {
+  private async call(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.dropboxapi.com/2/files/${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`dropbox_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const body = await this.call("list_folder", { path: String(parameters["path"] ?? "") }, credential);
+      return { data: body };
+    }
+    if (action === "create_folder") {
+      const body = await this.call("create_folder_v2", { path: String(parameters["path"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`dropbox_unsupported_action_${action}`);
+  }
+}
