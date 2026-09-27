@@ -131,29 +131,29 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Telnyx | `NY_BACKLOG` | Ingen kode funnet |
 | Twilio | `ALLEREDE_BYGGET (D-295)` | `TwilioTransport` (`live-transports.ts`) - `notify`/`get_account_info`/`read_messages` (POST/GET mot Twilio REST API, `Basic`-autentisering AccountSid:AuthToken), `channel: "twilio"` lagt til `ChannelSchema`. `live_test: get_account_info` (`GET /Accounts/{sid}.json`, ingen sideeffekt). `TWILIO_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TWILIO_ACCOUNT_SID`/`JARVIS_TWILIO_AUTH_TOKEN`/`JARVIS_TWILIO_FROM_NUMBER`) |
 | Telegram | `ALLEREDE_BYGGET` | `connector-registry.ts` id `telegram`; D-119/D-125, LIVE+VERIFIED (eier-kanal, daglig brief, `/brief`/`/status`) |
-| WhatsApp | `NY_BACKLOG` | Kun kanal-enum i `046_conversation_graph.sql` (§UA-7) - bevisst IKKE bygget («no big-bang all-providers-at-once», D-108) |
+| WhatsApp | `ALLEREDE_BYGGET (D-314)` | `WhatsAppTransport` (`live-transports.ts`) - `get_phone_number_info`/`notify` (mot WhatsApp Business Cloud API, Meta Graph API). `phone_number_id` er Jarvis sin egen avsenderidentitet (SAMME rolle som Telegram sin `chat_id`), injisert som en resolver-closure. D-41: `notify` er en EKTE klasse B-skrivehandling (navngitt IDENTISK med Slack/Discord/Telegram sin send-melding-handling for konsistens). D-64: ingen kanonisk meldings-domenemodell finnes i Jarvis (SAMME status som Slack/Discord/Twilio) - rent leverandør-adapter, ikke en konkurrerende samtalemotor (den EKSISTERENDE kanal-enum i `046_conversation_graph.sql`/§UA-7 er uendret av dette). `live_test: get_phone_number_info`. `WHATSAPP_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_WHATSAPP_TOKEN` + `JARVIS_WHATSAPP_PHONE_NUMBER_ID`) |
 | Slack | `ALLEREDE_BYGGET (D-292)` | `SlackTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (chat.postMessage/auth.test/conversations.list/conversations.history), `channel: "slack"` lagt til `ChannelSchema`. `live_test: get_bot_info` (auth.test, ingen sideeffekt). `SLACK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SLACK_BOT_TOKEN`) |
 | Discord | `ALLEREDE_BYGGET (D-294)` | `DiscordTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (POST/GET mot Discord REST API v10 `/channels/{id}/messages`, `/users/@me`, `/guilds/{id}/channels`, `/channels/{id}/messages`), `channel: "discord"` lagt til `ChannelSchema`. `live_test: get_bot_info` (`GET /users/@me`, ingen sideeffekt). `DISCORD_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_DISCORD_BOT_TOKEN`) |
 | Higgsfield | `NY_BACKLOG` | Ingen kode funnet |
 | Runway | `NY_BACKLOG` | Ingen kode funnet |
 | Kling | `NY_BACKLOG` | Ingen kode funnet |
 | Google Veo | `NY_BACKLOG` | Ingen kode funnet |
-| OpenAI Images | `NY_BACKLOG` | Ingen kode funnet |
+| OpenAI Images | `ALLEREDE_BYGGET (D-316)` | `OpenAIImagesTransport` (`live-transports.ts`) - `list_models`/`generate_image` (mot OpenAI Images API). Egen `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring). D-41: `generate_image` er en EKTE klasse B-skrivehandling med REELL kostnad per kall - `list_models` (gratis) brukt som `live_test` i stedet. D-64: ingen kanonisk bildegenererings-domenemodell finnes i Jarvis - rent leverandør-adapter. `OPENAI_IMAGES_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OPENAI_IMAGES_API_KEY`) |
 
 ### 4.8 Musikk
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Spotify | `NY_BACKLOG` | Ingen kode funnet |
+| Spotify | `ALLEREDE_BYGGET (D-313)` | `SpotifyTransport` (`live-transports.ts`) - `get_currently_playing`/`add_to_queue` (mot Spotify Web API). EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall (`spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`) - `client_id`/`client_secret` delt app-konfig lest direkte fra env, `credential_ref` peker på refresh-tokenet. D-41: `add_to_queue` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell hopp-over via `skip_to_next` (intet dedikert fjern-fra-kø-endepunkt, DEFERRED). D-64: ingen kanonisk musikk-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: get_currently_playing`. `SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SPOTIFY_CLIENT_ID` + `JARVIS_SPOTIFY_CLIENT_SECRET` + `JARVIS_SPOTIFY_REFRESH_TOKEN`) |
 | Apple Music | `NY_BACKLOG` | Ingen kode funnet |
 
 ### 4.9 Automatisering / workflow
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| n8n | `NY_BACKLOG` | Ingen kode funnet |
+| n8n | `ALLEREDE_BYGGET (D-311)` | `N8nTransport` (`live-transports.ts`) - `list_workflows`/`activate_workflow` (mot n8n sitt REST-API v1, `X-N8N-API-KEY`-header - IKKE `Authorization: Bearer`). TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_N8N_API_BASE_URL`), samme resolver-mønster som Grafana/Prometheus. D-41: `activate_workflow` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell deaktivering (dedikert `deactivate_workflow` DEFERRED). D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: list_workflows`. `N8N_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_N8N_API_KEY` + `JARVIS_N8N_API_BASE_URL`) |
 | Zapier | `NY_BACKLOG` | Ingen kode funnet |
-| Make | `NY_BACKLOG` | Ingen kode funnet |
+| Make | `ALLEREDE_BYGGET (D-315)` | `MakeTransport` (`live-transports.ts`) - `get_current_user`/`run_scenario` (mot Make sitt API v2, `Authorization: Token <token>` - IKKE `Bearer`). Zone-spesifikk base-URL (SAMME resolver-mønster som n8n/Grafana/Prometheus). D-41: `run_scenario` er en EKTE klasse B-skrivehandling. D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis (SAMME status som n8n D-311) - rent leverandør-adapter. `live_test: get_current_user`. `MAKE_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_MAKE_API_KEY` + `JARVIS_MAKE_API_BASE_URL`) |
 | Apple Shortcuts | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet (se §4.14) |
 
 ### 4.10 Smart hjem

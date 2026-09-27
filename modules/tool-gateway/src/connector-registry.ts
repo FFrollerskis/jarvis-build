@@ -259,6 +259,24 @@ import type { ToolGateway } from "./gateway.ts";
  * separate meldingsleverandører. De resterende 33 backlog-punktene er
  * fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
  * dem når de bygges.
+ *
+ * D-311 (2026-09-27, attende slice, Tobias direkte i chat gjentatt,
+ * ellevte gang: "fortsett og jobbe ikke vent på ci"): `n8n` bygget og
+ * flyttet ut av backlogen - `X-N8N-API-KEY`-header (IKKE `Authorization:
+ * Bearer` - n8n sitt eget API-nøkkel-headernavn) mot n8n sitt REST-API v1.
+ * n8n er TYPISK selv-hostet (SAMME "typisk selv-hostet"-mønster som
+ * Grafana D-305/Prometheus D-306) - base-URL-en må konfigureres via
+ * `JARVIS_N8N_API_BASE_URL`, resolver-closure. To handlinger -
+ * `list_workflows` (klasse A, lesing) og `activate_workflow` (klasse B,
+ * EKTE skrivehandling) - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp
+ * fulgt. `activate_workflow` sin `rollback_procedure` er manuell
+ * deaktivering (dedikert `deactivate_workflow`-handling DEFERRED, D-41
+ * eksplisitt merket, samme disiplin som Dropbox/Notion). Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk workflow-/automasjons-domenemodell finnes
+ * noe sted i Jarvis - rent leverandør-adapter, EXTERNAL_CANONICAL. De
+ * resterende 32 backlog-punktene er fortsatt uendret; samme
+ * oppdater-i-place-disiplin gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -512,7 +530,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_TWILIO_ACCOUNT_SID", "JARVIS_TWILIO_AUTH_TOKEN", "JARVIS_TWILIO_FROM_NUMBER"],
     live_test: { tool_id: "twilio", action: "get_account_info", parameters: () => ({}) }
   },
-  { id: "whatsapp", display_name: "WhatsApp", category: "backlog", credential_refs: ["JARVIS_WHATSAPP_TOKEN"] },
+  {
+    // D-314 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // PHONE_NUMBER_ID (Jarvis sin egen avsenderidentitet, SAMME rolle som
+    // Telegram sin chat_id). Oppdatert i place (var en D-232
+    // backlog-plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "whatsapp", display_name: "WhatsApp", category: "tool_gateway",
+    credential_refs: ["JARVIS_WHATSAPP_TOKEN", "JARVIS_WHATSAPP_PHONE_NUMBER_ID"],
+    live_test: { tool_id: "whatsapp", action: "get_phone_number_info", parameters: () => ({}) }
+  },
   {
     // D-292 (bygget, flyttet ut av backlog): "notify er ekte utsendelse,
     // get_bot_info er trygg tilkoblingstest"-disiplin, samme som Telegram
@@ -536,16 +563,52 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },
   { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },
   { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
-  { id: "openai_images", display_name: "OpenAI Images", category: "backlog", credential_refs: ["JARVIS_OPENAI_IMAGES_API_KEY"] },
+  {
+    // D-316 (bygget, flyttet ut av backlog): egen tool_id fra `openai` sin
+    // model_provider-oppføring (ModelGateway) - bildegenerering, ikke
+    // tekst-fullføring. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "openai_images", display_name: "OpenAI Images", category: "tool_gateway",
+    credential_refs: ["JARVIS_OPENAI_IMAGES_API_KEY"],
+    live_test: { tool_id: "openai_images", action: "list_models", parameters: () => ({}) }
+  },
 
   // §4.8 Musikk
-  { id: "spotify", display_name: "Spotify", category: "backlog", credential_refs: ["JARVIS_SPOTIFY_CLIENT_ID", "JARVIS_SPOTIFY_CLIENT_SECRET"] },
+  {
+    // D-313 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // REFRESH_TOKEN (den faktiske, roterte secreten - CLIENT_ID/SECRET er
+    // delt app-konfig, SAMME oppdeling som Google-familien). Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-disiplinen).
+    id: "spotify", display_name: "Spotify", category: "tool_gateway",
+    credential_refs: ["JARVIS_SPOTIFY_CLIENT_ID", "JARVIS_SPOTIFY_CLIENT_SECRET", "JARVIS_SPOTIFY_REFRESH_TOKEN"],
+    live_test: { tool_id: "spotify", action: "get_currently_playing", parameters: () => ({}) }
+  },
   { id: "apple_music", display_name: "Apple Music", category: "backlog", credential_refs: ["JARVIS_APPLE_MUSIC_TOKEN"] },
 
   // §4.9 Automatisering / workflow
-  { id: "n8n", display_name: "n8n", category: "backlog", credential_refs: ["JARVIS_N8N_API_KEY"] },
+  {
+    // D-311 (bygget, flyttet ut av backlog): `X-N8N-API-KEY`-header (IKKE
+    // Bearer) mot n8n sitt REST-API v1. TYPISK selv-hostet (SAMME mønster
+    // som Grafana D-305/Prometheus D-306) - base-URL må konfigureres.
+    // `activate_workflow` er en EKTE klasse B-skrivehandling (D-41).
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "n8n", display_name: "n8n", category: "tool_gateway", credential_refs: ["JARVIS_N8N_API_KEY", "JARVIS_N8N_API_BASE_URL"],
+    live_test: { tool_id: "n8n", action: "list_workflows", parameters: () => ({}) }
+  },
   { id: "zapier", display_name: "Zapier", category: "backlog", credential_refs: ["JARVIS_ZAPIER_API_KEY"] },
-  { id: "make", display_name: "Make", category: "backlog", credential_refs: ["JARVIS_MAKE_API_KEY"] },
+  {
+    // D-315 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // API_BASE_URL (zone-spesifikk, SAMME "list alle nødvendige
+    // verdier"-disiplin som n8n D-311). Oppdatert i place (var en D-232
+    // backlog-plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "make", display_name: "Make", category: "tool_gateway",
+    credential_refs: ["JARVIS_MAKE_API_KEY", "JARVIS_MAKE_API_BASE_URL"],
+    live_test: { tool_id: "make", action: "get_current_user", parameters: () => ({}) }
+  },
   { id: "apple_shortcuts", display_name: "Apple Shortcuts", category: "backlog", credential_refs: ["JARVIS_APPLE_SHORTCUTS_TOKEN"] },
 
   // §4.10 Smart hjem

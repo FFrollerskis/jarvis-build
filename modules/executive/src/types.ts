@@ -192,6 +192,14 @@ export interface CapabilityStatus {
     configured: boolean;
   }>;
   connector_health: Array<{ tool_id: string; state: string; at: string; detail?: string }>;
+  /**
+   * D-317 (Tobias direkte i chat: "bygg modell-selvbevissthet inn i
+   * check_my_capabilities"): hvilken leverandør/modell som FAKTISK genererer
+   * DENNE samtaleturen - `null` når ukjent, ALDRI gjettet. Se
+   * `ExecutiveService.getCapabilityStatus()` sitt filhode for kilden
+   * (`ToolInvocationContext.servingModel`, trusted-lag, aldri modell-oppgitt).
+   */
+  serving_model: { provider: string; model: string } | null;
 }
 
 /**

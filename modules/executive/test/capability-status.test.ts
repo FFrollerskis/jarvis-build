@@ -116,6 +116,16 @@ describe("A: ExecutiveService.getCapabilityStatus() - grounded i ToolGateway.lis
     expect(status.chat_accessible_tools).toEqual([]);
   });
 
+  it("D-317: serving_model er null når ingen servingModel-argument er gitt - ALDRI gjettet til en fast verdi", async () => {
+    const status = await new ExecutiveService(fakeGateway()).getCapabilityStatus();
+    expect(status.serving_model).toBeNull();
+  });
+
+  it("D-317: serving_model speiler EKSAKT det medfulgte {provider, model}-argumentet, uendret", async () => {
+    const status = await new ExecutiveService(fakeGateway()).getCapabilityStatus({ provider: "anthropic", model: "claude-sonnet-5" });
+    expect(status.serving_model).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
+  });
+
   it("connector_health speiler gateway.health direkte (tool_id + state/at/detail), tomt naar INGENTING er kalt ennå", async () => {
     const empty = await new ExecutiveService(fakeGateway()).getCapabilityStatus();
     expect(empty.connector_health).toEqual([]);
@@ -154,6 +164,34 @@ describe("B: executive.get_capability_status - registrert klasse A (lesing), gje
     const transport = new ExecutiveTransport(new ExecutiveService(fakeGateway()));
     await expect(transport.invoke("get_capability_status", {}, "cred")).rejects.toThrow("executive_missing_invocation_context");
   });
+
+  it("D-317: transport.invoke(...) videreformidler context.servingModel UENDRET til service.getCapabilityStatus() - resultatet inneholder serving_model", async () => {
+    const transport = new ExecutiveTransport(new ExecutiveService(fakeGateway()));
+    const result = await transport.invoke("get_capability_status", {}, "cred", {
+      identity: identity(),
+      servingModel: { provider: "openai", model: "gpt-5" }
+    });
+    const data = result.data as unknown as { serving_model: unknown };
+    expect(data.serving_model).toEqual({ provider: "openai", model: "gpt-5" });
+  });
+
+  it("D-317: context UTEN servingModel gir serving_model=null - IKKE en kastet feil, IKKE en gjettet verdi", async () => {
+    const transport = new ExecutiveTransport(new ExecutiveService(fakeGateway()));
+    const result = await transport.invoke("get_capability_status", {}, "cred", { identity: identity() });
+    const data = result.data as unknown as { serving_model: unknown };
+    expect(data.serving_model).toBeNull();
+  });
+
+  it("D-317: et modell-oppgitt 'provider'/'model'-felt i PARAMETERS (ikke context) har INGEN effekt - serving_model kommer UTELUKKENDE fra trusted context", async () => {
+    const transport = new ExecutiveTransport(new ExecutiveService(fakeGateway()));
+    const spoofedParameters = { provider: "spoofed-provider", model: "spoofed-model" };
+    const result = await transport.invoke("get_capability_status", spoofedParameters, "cred", {
+      identity: identity(),
+      servingModel: { provider: "anthropic", model: "claude-sonnet-5" }
+    });
+    const data = result.data as unknown as { serving_model: unknown };
+    expect(data.serving_model).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
+  });
 });
 
 describe("C: mesh-bridge - check_my_capabilities peker FAKTISK til executive.get_capability_status, ikke bare en isolert definisjon", () => {
@@ -168,7 +206,7 @@ describe("C: mesh-bridge - check_my_capabilities peker FAKTISK til executive.get
     const fakeToolGateway = {
       execute: async (req: { tool_id: string; action: string }) => {
         calls.push({ tool_id: req.tool_id, action: req.action });
-        return { ok: true, data: { chat_accessible_tools: [], connector_health: [] } };
+        return { ok: true, data: { chat_accessible_tools: [], connector_health: [], serving_model: null } };
       }
     } as unknown as ToolGateway;
     const executor = new MeshToolExecutor(fakeToolGateway, identity());
@@ -178,5 +216,41 @@ describe("C: mesh-bridge - check_my_capabilities peker FAKTISK til executive.get
     );
     expect(result.success).toBe(true);
     expect(calls).toEqual([{ tool_id: "executive", action: "get_capability_status" }]);
+  });
+
+  it("D-317: MeshToolExecutor.execute(...) videreformidler call.provider/call.model som servingModel til ToolGateway.execute() - trusted-lag, IKKE via parameters", async () => {
+    const calls: Array<{ servingModel: unknown; parameters: unknown }> = [];
+    const fakeToolGateway = {
+      execute: async (req: { servingModel?: unknown; parameters: unknown }) => {
+        calls.push({ servingModel: req.servingModel, parameters: req.parameters });
+        return { ok: true, data: { chat_accessible_tools: [], connector_health: [], serving_model: null } };
+      }
+    } as unknown as ToolGateway;
+    const executor = new MeshToolExecutor(fakeToolGateway, identity());
+    await executor.execute(
+      { tool_call_id: "call-1", tool_name: "check_my_capabilities", arguments: {}, provider: "anthropic", model: "claude-sonnet-5" },
+      { tenant_id: "tenant-cap-test", idempotency_key: "idem-1" }
+    );
+    expect(calls[0]!.servingModel).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
+  });
+
+  it("D-317-adversarielt: et modell-oppgitt 'provider'/'model'-felt i call.arguments PÅVIRKER ALDRI den videreformidlede servingModel - den kommer UTELUKKENDE fra ToolCallRequest sine egne, adapter-stemplede felt", async () => {
+    const calls: Array<{ servingModel: unknown }> = [];
+    const fakeToolGateway = {
+      execute: async (req: { servingModel?: unknown }) => {
+        calls.push({ servingModel: req.servingModel });
+        return { ok: true, data: { chat_accessible_tools: [], connector_health: [], serving_model: null } };
+      }
+    } as unknown as ToolGateway;
+    const executor = new MeshToolExecutor(fakeToolGateway, identity());
+    await executor.execute(
+      {
+        tool_call_id: "call-1", tool_name: "check_my_capabilities",
+        arguments: { provider: "spoofed-provider", model: "spoofed-model" },
+        provider: "anthropic", model: "claude-sonnet-5"
+      },
+      { tenant_id: "tenant-cap-test", idempotency_key: "idem-1" }
+    );
+    expect(calls[0]!.servingModel).toEqual({ provider: "anthropic", model: "claude-sonnet-5" });
   });
 });

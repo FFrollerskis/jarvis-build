@@ -3270,6 +3270,135 @@ export function firstWaveTools(
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
       output_trust: "internal", transport: transport("microsoft_outlook")
     },
+    /**
+     * D-311 (attende slice, Tobias direkte i chat gjentatt, ellevte gang:
+     * "fortsett og jobbe ikke vent på ci"). `X-N8N-API-KEY`-header (IKKE
+     * `Authorization: Bearer` - n8n sitt eget API-nøkkel-headernavn) mot
+     * n8n sitt REST-API v1. n8n er TYPISK selv-hostet (SAMME
+     * "typisk selv-hostet"-mønster som Grafana D-305/Prometheus D-306) -
+     * base-URL-en må konfigureres via `JARVIS_N8N_API_BASE_URL`,
+     * resolver-closure. `activate_workflow` er en EKTE klasse B-
+     * skrivehandling (D-41), reversibel via `deactivate_workflow`
+     * (IKKE bygget her ennå - bevisst DEFERRED, samme disiplin som
+     * Dropbox/Notion sine deferred handlinger). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om n8n sitt Public REST API, se
+     * `N8nTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "n8n", action: "list_workflows", description: "List workflows (GET /api/v1/workflows, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["workflow:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "untrusted", transport: transport("n8n")
+    },
+    {
+      tool_id: "n8n", action: "activate_workflow", description: "Aktiver en workflow (POST /api/v1/workflows/{id}/activate)",
+      input_schema: record({ id: z.string() }),
+      capability_class: "B", scopes: ["workflow:write"], reversible: true,
+      rollback_procedure: "deaktiver workflowen manuelt i n8n sitt UI (deactivate_workflow ikke bygget ennå)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
+    },
+    /**
+     * D-313 (bygget, flyttet ut av backlog): Spotify Web API. `credential_ref`
+     * peker på REFRESH-tokenet (den faktiske, roterte secreten) - `client_id`/
+     * `client_secret` er DELT app-konfig lest direkte fra env inne i
+     * `spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`
+     * (Google Sheets D-299 bruker identisk oppdeling).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Spotify sitt Web API/Accounts-API, se
+     * `SpotifyTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "spotify", action: "get_currently_playing", description: "Hent nåværende avspilling (GET /v1/me/player/currently-playing, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user-read-playback-state"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "untrusted", transport: transport("spotify")
+    },
+    {
+      tool_id: "spotify", action: "add_to_queue", description: "Legg en sang til i avspillingskøen (POST /v1/me/player/queue)",
+      input_schema: record({ uri: z.string() }),
+      capability_class: "B", scopes: ["user-modify-playback-state"], reversible: true,
+      rollback_procedure: "hopp over sangen manuelt via skip_to_next (Spotify har ikke et dedikert fjern-fra-kø endepunkt)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "internal", transport: transport("spotify")
+    },
+    /**
+     * D-314 (bygget, flyttet ut av backlog): WhatsApp Business Cloud API
+     * (Meta Graph API). `phone_number_id` er Jarvis sin EGEN
+     * avsender-identitet (SAMME rolle som Telegram sin `chat_id`),
+     * injisert som en resolver-closure. `notify` navngitt IDENTISK med
+     * Slack/Discord/Telegram sin send-melding-handling.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Meta Graph API/WhatsApp Business Cloud
+     * API, se `WhatsAppTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "whatsapp", action: "get_phone_number_info", description: "Les avsendernummerets metadata (GET /{phone_number_id}, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["whatsapp_business_management"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "untrusted", transport: transport("whatsapp")
+    },
+    {
+      tool_id: "whatsapp", action: "notify", description: "Send melding via WhatsApp (POST /{phone_number_id}/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(4096) }),
+      capability_class: "B", scopes: ["whatsapp_business_messaging"], reversible: true,
+      rollback_procedure: "send korreksjonsmelding", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
+    },
+    /**
+     * D-315 (bygget, flyttet ut av backlog): Make (tidligere Integromat).
+     * `Authorization: Token <token>` (IKKE Bearer) mot Make sitt API v2 -
+     * zone-spesifikk base-URL, resolver-closure, SAMME mønster som n8n.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Make sitt API v2, se `MakeTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "make", action: "get_current_user", description: "Les egen brukeridentitet (GET /api/v2/users/me) - brukes som tilkoblingstest, ALDRI en ekte kjøring",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "untrusted", transport: transport("make")
+    },
+    {
+      tool_id: "make", action: "run_scenario", description: "Kjør en scenario (POST /api/v2/scenarios/{id}/run)",
+      input_schema: record({ scenario_id: z.string() }),
+      capability_class: "B", scopes: ["scenarios:run"], reversible: true,
+      rollback_procedure: "ingen generell angrehandling - avhenger av hva scenarioet faktisk gjør, vurderes per scenario",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
+    },
+    /**
+     * D-316 (bygget, flyttet ut av backlog): OpenAI Images API. Egen
+     * `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) -
+     * strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring).
+     * `list_models` er en GRATIS/sideeffekt-fri tilkoblingstest -
+     * `generate_image` har EKTE kostnad per kall (ALDRI brukt som live_test).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om OpenAI sitt Images API, se
+     * `OpenAIImagesTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "openai_images", action: "list_models", description: "List tilgjengelige modeller (GET /v1/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["models:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "untrusted", transport: transport("openai_images")
+    },
+    {
+      tool_id: "openai_images", action: "generate_image", description: "Generer et bilde fra en tekstbeskrivelse (POST /v1/images/generations, EKTE kostnad per kall)",
+      input_schema: record({ prompt: z.string().max(4000), n: z.number().min(1).max(10).optional(), size: z.string().optional() }),
+      capability_class: "B", scopes: ["images:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kvote/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

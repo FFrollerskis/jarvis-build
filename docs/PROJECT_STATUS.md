@@ -1,35 +1,137 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, RESATT fra
-`origin/main` etter D-192-merge) - **PR #190 (D-301 til D-309, ni connectorer) MERGET til `main`**
-(to-forelder-merge `dbd3891`, under D-192 stående fullmakt) - inkluderte en CI-fiks (D-310a: fjernet
-et hardkodet `"notion"`-navn i `d242-connector-health-sweep.test.ts` som D-308 hadde gjort falskt;
-byttet til en dynamisk `NO_LIVE_TEST_IDS`-sjekk). Deretter **D-310: Microsoft Outlook-connectoren
-bygget fullt ut - SYTTENDE konkrete byggeslice, FØRSTE etter merge, tilbake til
-ett-connector-per-PR-mønsteret.** `MicrosoftOutlookTransport` (`live-transports.ts`) -
-`Authorization: Bearer` mot Microsoft Graph v1.0 (SAMME mønster som OneDrive D-309). To handlinger
-- `list_messages` (klasse A, lesing) og `send_mail` (klasse D - BEVISST SAMME klassifisering som
-Gmail sin `email.send`, siden sending av e-post ikke er reverserbar; den generiske klasse
-D-godkjenningsmekanismen i PolicyGateway/ToolGateway dekker dette uten egen ny kode). **D-64-sjekk:**
-Outlook er en genuint separat leverandør-konto fra Gmail, ikke en konkurrerende domenemodell -
-samme presedens som Slack+Discord+Twilio. `connector-registry.ts` sin EKSISTERENDE D-232-
-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en TOM konstruktør
-(`new MicrosoftOutlookTransport()` - teller MED i "tom konstruktør"-tellingen, bump 16→17). 6 nye
-tester (`d310-microsoft-outlook-transport.test.ts`), `connector-registry.test.ts` sine
-BACKLOG_IDS/live_test/test_method-lister oppdatert (34→33 gjenværende backlog-punkter, 30→31
-bygde). Eksplisitt sjekket at ingen ANNEN test hardkoder en global klasse D-telling (samme
-bug-klasse som D-310a) - kun én treff fantes (`d289-full-capability-mesh.test.ts`), og den bruker
-en isolert fake-gateway, ikke det ekte registeret - uberørt. `pnpm -w typecheck` (32/32 pakker)/
-`npx eslint apps modules packages` begge rene. `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS`.
-Se D-310a/D-310 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** åpne en NY, egen draft-PR for D-310 alene (ett-connector-per-PR gjenopptatt), la CI kjøre
-og merge under D-192 når grønt FØR neste connector. Deretter fortsett systematisk gjennom de
-resterende ~33 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-317: modell-
+selvbevissthet bygget inn i `check_my_capabilities`** (Tobias direkte i chat, eksplisitt
+bestilling: "bygg modell-selvbevissthet inn i check_my_capabilities", svar på hans eget funn at
+Charlie strukturelt ikke kunne vite hvilken modell/leverandør som faktisk svarte). Forsknings-
+funn FØR bygging: `ToolCallRequest.provider`/`.model` var ALLEREDE stemplet av hver adapter og
+ALLEREDE tilgjengelig UENDRET i `MeshToolExecutor.execute()` - ingen ny datakilde nødvendig.
+Løsningen trer denne trusted-lag-fakta gjennom SAMME kanal som `identity`/`approval` (D-68) -
+ALDRI via `parameters` (der en modell selv kunne LYVE om egen identitet). Endringer: (1)
+`ToolInvocationContext`/`ToolGateway.execute()` (`gateway.ts`) fikk et nytt valgfritt
+`servingModel?: {provider, model}`-felt. (2) `MeshToolExecutor.execute()` (`mesh-bridge.ts`)
+sender NÅ `servingModel` på ALLE mesh-dispatchede kall (generisk trusted-lag-fakta). (3)
+`ExecutiveTransport`/`ExecutiveService.getCapabilityStatus()` leser/returnerer det. (4)
+`CapabilityStatus` fikk `serving_model: {provider, model} | null`. Zod-`input_schema`-en for
+`get_capability_status` er BEVISST UENDRET (streng, ingen ekstra felt) - INGEN vei for en modell
+å injisere en falsk verdi via `parameters`, bevist eksplisitt med to adversarielle tester.
+**Testdekning:** `modules/executive/test/capability-status.test.ts` utvidet 13→19 tester.
+`pnpm -w typecheck` (32/32 pakker, HELE workspacet) og `npx eslint` på alle seks endrede filer -
+begge rene. Full `modules/tool-gateway modules/executive`-suite: 568/568 reelle tester grønt (13
+filer feilet KUN på den kjente, forhåndseksisterende embedded-Postgres `/tmp`-tillatelsesfeilen).
+Se D-317 i DECISIONS_AND_ASSUMPTIONS.md.
+**Status:** Implementert og verifisert lokalt - IKKE ennå committet/pushet. Dette er et EGET,
+ikke-connector-relatert arbeidsspor (kjernefunksjon i selve chat-selvbevissthets-mekanismen, ikke
+en backlog-connector) - committes som EN EGEN, tydelig merket commit. Økten sitt eneste
+designerte branch er `claude/hva-skjer-hvordan-ligger-0z3ztp` (samme branch PR #192 allerede peker
+på) - en helt separat PR er derfor IKKE mulig uten å bryte branch-standarden; commiten landér på
+SAMME PR #192, men PR #192 sin tittel/body oppdateres til å ÆRLIG skille D-317 (kjernefunksjon)
+fra D-311-D-316 (connector-byggeslicer) - IKKE later som D-317 er en nittentyvende connector-slice.
+
+**Forrige milepæl (uendret): D-316: OpenAI Images-connectoren bygget fullt ut - TJUEANDRE
+konkrete byggeslice, SAMME åpne branch/PR (#192) som n8n D-311/Spotify D-313/WhatsApp D-314/Make
+D-315.** `OpenAIImagesTransport` (`live-transports.ts`) - OpenAI Images API, EGEN `tool_id` fra
+`openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet
+(bildegenerering, ikke tekst-fullføring). To handlinger - `list_models` (klasse A, GRATIS/
+sideeffekt-fritt, brukt som `live_test`) og `generate_image` (klasse B, EKTE skrivehandling med
+REELL kostnad per kall - D-41, ALDRI brukt som live_test). `OPENAI_IMAGES_LIVE_GATE=
+PENDING_CREDENTIALS`. PR #192 sin tittel/body dekker D-311+D-313+D-314+D-315+D-316 - allerede
+committet OG pushet (`81f880e`). CI-notifikasjoner mottatt har GJENTATTE GANGER referert eldre,
+allerede-forbikjørte head_sha-er (b50bf5c, a14cde4, 387e245, 8bc5f6f, 19cad8f) - verifisert stale mot
+en fersk `pull_request_read`/`actions_list`-sjekk hver gang (ingen nye røde funn på gjeldende
+HEAD) - IKKE reelle, uadresserte CI-funn.
+
+**Nytt merknad (viktig, IKKE stille omgått):** før neste backlog-connector plukkes, to funn fra
+denne sveipen:
+1. **`meta_ads` er IKKE en enkel ToolGateway-connector-kandidat.** `modules/growth` EIER allerede en
+   kanonisk kampanje-/annonseforbruk-domenemodell (`marketing_campaigns`/`marketing_spend_events`/
+   `marketing_campaign_tracking_tags`, JARVIS_CANONICAL) - Google Ads er BEVISST bygget som en
+   D-64-korrekt ADAPTER inn i DENNE modellen (`modules/growth/src/google-ads-transport.ts`, egen
+   doc-kommentar sier dette eksplisitt), IKKE som en frittstående `ToolGateway`-connector med egne
+   rå handlinger. Meta Ads ville trengt SAMME adapter-arkitektur (skrive inn i de eksisterende
+   kanoniske tabellene via `modules/growth` sin egen service), IKKE det enkle "ny `ToolTransport` +
+   to `ToolDefinition`-er"-mønsteret brukt for Slack/Discord/n8n/Spotify/WhatsApp - en vesentlig
+   større undersøkelse/byggeoppgave, ikke gjettet frem her. `meta_ads` sin registeroppføring har
+   category `"backlog"` (IKKE `"backlog_d64_gate"`) i dag - dette er en presis rettelse: den
+   BURDE regnes i samme "krever egen D-64-undersøkelse FØR bygging"-klasse som de seks eksplisitte
+   D-64-gate-punktene, selv om registeret ikke merker den slik ennå.
+2. **`Folio`** sin eneste kildedokumentasjon (`01_Jarvis_Masterplan_v2.1.md` linje 316: "Fiken/Folio
+   og økonomidata") og `INTEGRATIONS.md` sin egen note ("kun tidligere vag plassholder") gir IKKE
+   nok til å identifisere en konkret leverandør/API trygt - bygging her ville vært et gjettet
+   API-endepunkt, IKKE trent kunnskap om en navngitt, kjent leverandør (i motsetning til Spotify/
+   WhatsApp/Meta Graph API, som ER veldokumenterte, kjente API-er). Avventer et presist svar fra
+   Tobias om hvilken faktisk leverandør "Folio" betyr her FØR noe bygges, i stedet for å gjette.
+3. **Etter D-316 er de gjenværende ~27 backlog-punktene EN ANNEN risikoklasse enn de 22
+   connectorene bygget så langt i denne sveipen** (alle sammen stabile, velkjente, veldokumenterte
+   plattformer - Slack/Discord/n8n/Spotify/WhatsApp/Make/OpenAI osv.). Fire undergrupper krever
+   enten avklaring eller en egen vurdering FØR bygging, ikke stille gjettet:
+   - **`microsoft_365`/`google_cloud`/`playwright`** er for VAGE til å identifisere en konkret,
+     avgrenset API-kapabilitet (Microsoft 365/Google Cloud dekker hundrevis av del-API-er hver;
+     Playwright er et open source-BIBLIOTEK uten egen API-nøkkel-modell i det hele tatt - selve
+     plassholderen `JARVIS_PLAYWRIGHT_API_KEY` gir mistanke om en feil-scopet backlog-oppføring).
+   - **`apple_music`/`apns`** krever ES256-JWT-signering (asymmetrisk nøkkelpar, team-ID/key-ID fra
+     Apple Developer) - strukturelt ulikt ALLE credential-mønstre bygget så langt (statisk
+     Bearer-token/OAuth2 refresh-token). Apple Music sin PERSONLIGE bibliotek-skriving krever i
+     tillegg en separat "Music User Token" som KUN kan hentes via MusicKit JS i en nettleser
+     (Apple sin egen flyt) - IKKE oppnåelig headless fra en server-side connector uten ny
+     nettleser-basert auth-infrastruktur.
+   - **`ios_shortcuts`/`apple_watch`/`apple_shortcuts`** er enhetssside automasjon (krever en
+     følge-app på selve enheten som mottar triggere via push/URL-skjema) - IKKE en cloud REST-API i
+     det hele tatt, passer strukturelt IKKE inn i det etablerte "ToolTransport mot et vertsnavn"-
+     mønsteret uten helt ny infrastruktur.
+   - **`higgsfield`/`runway`/`kling`/`google_veo`** (generativ video-AI) har LAVERE trent-kunnskap-
+     sikkerhet enn de 22 allerede bygde connectorene - mindre/raskere-bevegende leverandører med
+     mindre stabile, mindre kanoniske API-flater i treningsdata. Vurderes likevel bygget ETT AV
+     GANGEN under SAMME D-297-forbehold som resten (aldri denne-økten-verifisert), men med et
+     EKSPLISITT lavere-sikkerhet-merke i beslutningsloggen per connector - IKKE behandlet som
+     samme sikkerhetsnivå som f.eks. Spotify/WhatsApp uten å si det.
+
+**Neste:** committe/pushe D-316, oppdatere PR #192 sin tittel/body til å dekke
+D-311+D-313+D-314+D-315+D-316, la CI kjøre og merge under D-192 når grønt. Deretter fortsett
+systematisk gjennom de resterende ~27 reelt enkle backlog-connectorene (utenom meta_ads/Folio til
+over er avklart) - unngå de seks `backlog_d64_gate`-punktene
 (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
 for hver, unngå homekit/philips_hue (skal rute via Home Assistant), og unngå de voice-relaterte
 backlog-punktene (openai_realtime/elevenlabs/deepgram/livekit/telnyx) til en kort D-64-lignende
 sjekk mot `SpeechAdapter`-arkitekturen (CLAUDE.md regel 3/5, task #125 lokale
-whisper.cpp/piper-adaptere) er gjort.
+whisper.cpp/piper-adaptere) er gjort. For de gjenværende genererings-connectorene
+(higgsfield/runway/kling/google_veo) følg D-316 sin presedens: bruk en gratis/sideeffekt-fri
+handling som `live_test`, ALDRI selve den kostnadsbærende genererings-handlingen.
+
+**Forrige milepæl (uendret): D-315: Make-connectoren bygget fullt ut - TJUEFØRSTE konkrete
+byggeslice.** `MakeTransport` (`live-transports.ts`) - Make sitt API v2, `Authorization: Token
+<token>`. To handlinger - `get_current_user` (klasse A) og `run_scenario` (klasse B, EKTE
+skrivehandling - D-41). `MAKE_LIVE_GATE=PENDING_CREDENTIALS`. Se D-315 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-314: WhatsApp-connectoren bygget fullt ut - TJUENDE konkrete
+byggeslice.** `WhatsAppTransport` (`live-transports.ts`) - WhatsApp Business Cloud API (Meta Graph
+API). To handlinger - `get_phone_number_info` (klasse A) og `notify` (klasse B, EKTE
+skrivehandling - D-41). Samtidig rettet en D-312/D-313-nummereringsfeil (Spotify sin wiring var
+feilaktig merket "D-312" - rettet til "D-313" overalt, testfilen omdøpt). `WHATSAPP_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-314 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-313: Spotify-connectoren bygget fullt ut - NITTENDE konkrete
+byggeslice.** `SpotifyTransport` (`live-transports.ts`) - FØRSTE connector i denne sveipen med en
+EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall. To handlinger -
+`get_currently_playing` (klasse A) og `add_to_queue` (klasse B, EKTE skrivehandling - D-41).
+`SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-313 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-311: n8n-connectoren bygget fullt ut - ATTENDE konkrete
+byggeslice.** `N8nTransport` (`live-transports.ts`) - `X-N8N-API-KEY`-header (IKKE `Authorization:
+Bearer`) mot n8n sitt REST-API v1. TYPISK selv-hostet (SAMME resolver-closure-mønster som Grafana
+D-305/Prometheus D-306). To handlinger - `list_workflows` (klasse A) og `activate_workflow` (klasse
+B, EKTE skrivehandling). `N8N_LIVE_GATE=PENDING_CREDENTIALS`. Se D-311 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-310: Microsoft Outlook-connectoren bygget fullt ut - SYTTENDE
+konkrete byggeslice, FØRSTE etter D-192-merge av PR #190, tilbake til ett-connector-per-PR.**
+`MicrosoftOutlookTransport` (`live-transports.ts`) - `Authorization: Bearer` mot Microsoft Graph
+v1.0. To handlinger - `list_messages` (klasse A) og `send_mail` (klasse D - SAMME klassifisering
+som Gmail sin `email.send`). Inkluderte også en CI-fiks (D-310a: fjernet et hardkodet
+`"notion"`-navn i `d242-connector-health-sweep.test.ts` som D-308 hadde gjort falskt; byttet til en
+dynamisk `NO_LIVE_TEST_IDS`-sjekk). `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS`. Se
+D-310a/D-310 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-309: OneDrive-connectoren bygget fullt ut - SEKSTENDE konkrete
 byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-308) sin CI fortsatt kjørte.**

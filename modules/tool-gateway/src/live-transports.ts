@@ -2281,3 +2281,187 @@ export class MicrosoftOutlookTransport implements ToolTransport {
     throw new Error(`microsoft_outlook_unsupported_action_${action}`);
   }
 }
+
+export class N8nTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("n8n_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { "X-N8N-API-KEY": credential, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`n8n_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_workflows") {
+      const body = await this.call("GET", "/api/v1/workflows", credential);
+      return { data: body };
+    }
+    if (action === "activate_workflow") {
+      const body = await this.call("POST", `/api/v1/workflows/${encodeURIComponent(String(parameters["id"]))}/activate`, credential);
+      return { data: body };
+    }
+    throw new Error(`n8n_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-312: Spotify sitt Accounts-API krever en OAuth2 `refresh_token`-utveksling
+ * (SAMME mønster som `googleAccessToken()` over) - `client_id`/`client_secret`
+ * er DELT app-konfig (ikke per-bruker secret), lest direkte fra env, IKKE via
+ * `credential_ref` (kun refresh-tokenet er den faktiske, roterte secreten).
+ */
+async function spotifyAccessToken(refreshToken: string): Promise<string> {
+  const clientId = process.env["JARVIS_SPOTIFY_CLIENT_ID"];
+  const clientSecret = process.env["JARVIS_SPOTIFY_CLIENT_SECRET"];
+  if (!clientId || !clientSecret) throw new Error("spotify_oauth_client_not_configured");
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`
+    },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken })
+  });
+  if (!response.ok) throw new Error(`spotify_auth_failed_${response.status}`);
+  return ((await response.json()) as { access_token: string }).access_token;
+}
+
+export class SpotifyTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await spotifyAccessToken(credential);
+    if (action === "get_currently_playing") {
+      const response = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (response.status === 204) return { data: null };
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "add_to_queue") {
+      const uri = encodeURIComponent(String(parameters["uri"]));
+      const response = await fetch(`https://api.spotify.com/v1/me/player/queue?uri=${uri}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: null };
+    }
+    throw new Error(`spotify_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-314. WhatsApp Business Cloud API (Meta Graph API) - `phone_number_id`
+ * er Jarvis sin EGEN avsender-identitet (SAMME rolle som Telegram sin
+ * `chat_id` - fast konfig, IKKE en per-kall parameter), injisert som en
+ * resolver-closure (SAMME mønster som n8n/Grafana/Prometheus sin base-URL).
+ * `notify` er navngitt IDENTISK med Slack/Discord/Telegram sin
+ * send-melding-handling for konsistens på tvers av meldingsleverandører.
+ */
+export class WhatsAppTransport implements ToolTransport {
+  constructor(private readonly phoneNumberId: () => Promise<string | null>) {}
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const phoneNumberId = await this.phoneNumberId();
+    if (!phoneNumberId) throw new Error("whatsapp_phone_number_id_not_configured");
+    if (action === "get_phone_number_info") {
+      const response = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}?fields=display_phone_number,verified_name`,
+        { headers: { authorization: `Bearer ${credential}` } }
+      );
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "notify") {
+      const response = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", to: String(parameters["to"]),
+          type: "text", text: { body: String(parameters["message"]) }
+        })
+      });
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      const body = (await response.json()) as { messages?: Array<{ id?: string }> };
+      return { external_id: body.messages?.[0]?.id ?? "sent" };
+    }
+    throw new Error(`whatsapp_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-315. Make (tidligere Integromat) sitt API v2 - zone-spesifikk base-URL
+ * (f.eks. `https://eu1.make.com`, brukeren sin egen kontosone), injisert
+ * som en resolver-closure (SAMME mønster som n8n/Grafana/Prometheus).
+ * `Authorization: Token <api-token>` - Make sitt EGET dokumenterte
+ * headerformat (IKKE `Bearer`, SAMME strukturelle auth-header-navn-
+ * variasjon som n8n sin `X-N8N-API-KEY` demonstrerte for D-311).
+ */
+export class MakeTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("make_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { authorization: `Token ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`make_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_current_user") {
+      const body = await this.call("GET", "/api/v2/users/me", credential);
+      return { data: body };
+    }
+    if (action === "run_scenario") {
+      const body = await this.call("POST", `/api/v2/scenarios/${encodeURIComponent(String(parameters["scenario_id"]))}/run`, credential);
+      return { data: body };
+    }
+    throw new Error(`make_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-316. OpenAI Images API - `POST /v1/images/generations` (bildegenerering,
+ * EKTE kostnad per kall, IKKE gjettet frem som `list_models`-alternativet
+ * for `live_test`: `GET /v1/models` er gratis/sideeffekt-fritt, SAMME
+ * "trygg tilkoblingstest"-rolle som andre connectorers `get_bot_info`/
+ * `auth.test`). Egen `tool_id` fra `openai` sin model_provider-oppføring
+ * (ModelGateway) - dette er en STRUKTURELT ulik kapabilitet (bildegenerering
+ * via ToolGateway, ikke tekst-fullføring via ModelGateway).
+ */
+export class OpenAIImagesTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_models") {
+      const response = await fetch("https://api.openai.com/v1/models", {
+        headers: { authorization: `Bearer ${credential}` }
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    if (action === "generate_image") {
+      const response = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          prompt: String(parameters["prompt"]),
+          n: typeof parameters["n"] === "number" ? parameters["n"] : 1,
+          size: typeof parameters["size"] === "string" ? parameters["size"] : "1024x1024"
+        })
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    throw new Error(`openai_images_unsupported_action_${action}`);
+  }
+}

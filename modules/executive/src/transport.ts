@@ -67,7 +67,7 @@ export class ExecutiveTransport implements ToolTransport {
         return { data: board as unknown as JsonValue };
       }
       case "get_capability_status": {
-        const status = await this.service.getCapabilityStatus();
+        const status = await this.service.getCapabilityStatus(context?.servingModel);
         return { data: status as unknown as JsonValue };
       }
       case "get_connector_status": {
@@ -207,7 +207,7 @@ export function executiveToolDefinitions(transport: ExecutiveTransport): ToolDef
     ),
     read(
       "get_capability_status",
-      "Sjekk EKTE, oppdatert selv-bevissthet: hvilke verktøy er faktisk tilgjengelige i DENNE samtalen (chat_accessible_tools, samme kilde chat-verktøykjeden selv bruker) og siste kjente helsetilstand per tilkoblet system (connector_health) - bruk DETTE fremfor å gjette på egne evner (D-209)"
+      "Sjekk EKTE, oppdatert selv-bevissthet: hvilke verktøy er faktisk tilgjengelige i DENNE samtalen (chat_accessible_tools, samme kilde chat-verktøykjeden selv bruker), hvilken modell/leverandør som FAKTISK genererer denne turen (serving_model, D-317) og siste kjente helsetilstand per tilkoblet system (connector_health) - bruk DETTE fremfor å gjette på egne evner eller hvilken modell du er (D-209/D-317)"
     ),
     read(
       "get_connector_status",
