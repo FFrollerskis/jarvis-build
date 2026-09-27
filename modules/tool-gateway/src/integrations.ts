@@ -2781,7 +2781,10 @@ export function firstWaveTools(
     },
     {
       tool_id: "slack", action: "get_bot_info", description: "Les botens egen identitet (Slack Web API auth.test) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
-      input_schema: empty, capability_class: "A", scopes: [],
+      // Slack sin auth.test krever INGEN scope utover en gyldig token - `bot:read` er samme
+      // logiske plassholder-konvensjon som Telegrams get_bot_info over (getMe har heller ingen
+      // ekte OAuth-scope), IKKE en faktisk Slack-dokumentert scope-streng.
+      input_schema: empty, capability_class: "A", scopes: ["bot:read"],
       reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SLACK_BOT_TOKEN",
       output_trust: "untrusted", transport: transport("slack")
