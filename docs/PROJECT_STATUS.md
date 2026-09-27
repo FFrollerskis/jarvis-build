@@ -1,26 +1,33 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-303: Google
-Places-connectoren bygget fullt ut - TIENDE konkrete byggeslice, bygget PARALLELT mens PR #190
-(D-301+D-302) sin CI fortsatt kjørte** (fortsatt under "fortsett og jobbe ikke vent på ci").
-`GooglePlacesTransport` (`live-transports.ts`) mot det ELDRE, stabile Places-API-et
-(`maps.googleapis.com/maps/api/place/...`) - API-nøkkel som `key`-QUERY-PARAMETER, SAMME
-autentiseringsform som Google Maps (D-298), bevisst IKKE det nyere v1 Places-API-et. To handlinger
-- `search_places`/`get_place_details` - begge klasse A, INGEN skrivehandling finnes. **D-64-sjekk:**
-SAMME domenevurdering som Google Maps (D-298, allerede kjørt) - stateless tredjeparts-stedoppslag,
-ikke eierens egen posisjon/geofence. Samme D-297-ærlighetsforbehold (trent kunnskap, ikke
-denne-økten-bekreftet). `connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i
-place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom konstruktør (`drive-runtime-wiring.
-test.ts` sin telling bumpet 11→12 i begge filer). 6 nye tester (`d303-google-places-transport.
-test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-lister oppdatert (41→40
-gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps modules packages`
-begge rene. `GOOGLE_PLACES_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette landet på SAMME, fortsatt
-åpne PR #190 som D-301/D-302, oppdateres PR-tittel/body til å dekke alle tre D-numrene ærlig når
-committen pushes. Se D-303 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** push D-303, oppdater PR #190,
-vente på CI/merge under D-192, deretter fortsette systematisk gjennom de resterende ~40
-backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
-(hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
-for hver.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-304: Google
+Routes-connectoren bygget fullt ut - ELLEVTE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301+D-302+D-303) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat: "fortsett og jobbe
+ikke vent på ci"). `GoogleRoutesTransport` (`live-transports.ts`) mot det ELDRE, stabile
+Directions-/Distance Matrix-API-et (`maps.googleapis.com/maps/api/directions|distancematrix/...`)
+- API-nøkkel som `key`-QUERY-PARAMETER, SAMME autentiseringsform som Google Maps/Places, bevisst
+IKKE det nyere v2 Routes-API-et. Fullfører "Google-lokasjons-trioen" (Maps/Places/Routes). To
+handlinger - `get_directions`/`get_distance_matrix` - begge klasse A, INGEN skrivehandling finnes.
+**D-64-sjekk:** SAMME domenevurdering som Google Maps/Places (begge allerede kjørt) - stateless
+tredjeparts-rute-oppslag, ikke eierens egen posisjon/geofence. Samme D-297-ærlighetsforbehold
+(trent kunnskap, ikke denne-økten-bekreftet). `connector-registry.ts` sin EKSISTERENDE
+D-232-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom
+konstruktør (`drive-runtime-wiring.test.ts` sin telling bumpet 12→13 i begge filer). 6 nye tester
+(`d304-google-routes-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-
+lister oppdatert (40→39 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx
+eslint apps modules packages` begge rene. `GOOGLE_ROUTES_LIVE_GATE=PENDING_CREDENTIALS`. Siden
+dette landet på SAMME, fortsatt åpne PR #190 som D-301/D-302/D-303, oppdateres PR-tittel/body til
+å dekke alle fire D-numrene ærlig når committen pushes. Se D-304 i DECISIONS_AND_ASSUMPTIONS.md.
+**Neste:** push D-304, oppdater PR #190, vente på CI/merge under D-192, deretter fortsette
+systematisk gjennom de resterende ~39 backlog-connectorene - unngå de seks
+`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-
+adapter-undersøkelse er gjort for hver.
+
+**Forrige milepæl (uendret): D-303: Google Places-connectoren bygget fullt ut - TIENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302) sin CI fortsatt kjørte.**
+`GooglePlacesTransport` (`live-transports.ts`) mot det ELDRE, stabile Places-API-et - API-nøkkel
+som `key`-QUERY-PARAMETER. To handlinger - `search_places`/`get_place_details`. `GOOGLE_PLACES_
+LIVE_GATE=PENDING_CREDENTIALS`. Se D-303 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-302: Exa-connectoren (nevralt websøk) bygget fullt ut - NIENDE
 konkrete byggeslice, bygget PARALLELT mens PR #190 (D-301 Tavily) sin CI fortsatt kjørte.**

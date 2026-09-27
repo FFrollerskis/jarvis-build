@@ -3081,6 +3081,33 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
     },
+    /**
+     * D-304 (bygget parallelt mens D-303 sin CI kjørte - ellevte slice).
+     * SAMME D-64-domenevurdering som Google Maps/Google Places: stateless
+     * tredjeparts-rute-oppslag, IKKE eierens egen posisjon/geofence.
+     * STRUKTURELT LIK Google Maps/Google Places: INGEN klasse B/C/D-handling
+     * finnes - Directions-/Distance Matrix-API-et tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om det ELDRE, stabile Directions-/Distance
+     * Matrix-API-et, se `GoogleRoutesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_routes", action: "get_directions", description: "Rutebeskrivelse mellom to punkter (GET /directions/json, untrusted ingestion)",
+      input_schema: record({ origin: z.string().max(400), destination: z.string().max(400) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
+    {
+      tool_id: "google_routes", action: "get_distance_matrix", description: "Reisetid/avstand mellom flere opprinnelser/destinasjoner (GET /distancematrix/json, untrusted ingestion)",
+      input_schema: record({ origins: z.string().max(800), destinations: z.string().max(800) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

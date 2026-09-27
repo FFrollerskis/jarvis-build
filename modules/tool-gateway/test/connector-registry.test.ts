@@ -26,10 +26,10 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
     }
   });
 
-  it("live_test er satt for 21 av 24 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) + brave_search (D-296) + sentry (D-297) + google_maps (D-298) + google_sheets (D-299) + tavily (D-301) + exa (D-302) + google_places (D-303) - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
+  it("live_test er satt for 22 av 25 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) + brave_search (D-296) + sentry (D-297) + google_maps (D-298) + google_sheets (D-299) + tavily (D-301) + exa (D-302) + google_places (D-303) + google_routes (D-304) - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
     const withLiveTest = CONNECTOR_REGISTRY.filter((c) => c.live_test).map((c) => c.id).sort();
     expect(withLiveTest).toEqual(
-      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places"].sort()
+      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places", "google_routes"].sort()
     );
   });
 
@@ -47,7 +47,7 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
   });
 });
 
-describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over - registerets TOTALE lengde er uendret, kun kategorien for disse ti id-ene endret)", () => {
+describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over - registerets TOTALE lengde er uendret, kun kategorien for disse elleve id-ene endret)", () => {
   const BACKLOG_IDS = [
     "notion", "onedrive", "dropbox",
     "microsoft_outlook", "microsoft_365",
@@ -59,23 +59,22 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
     "n8n", "zapier", "make", "apple_shortcuts",
     "homekit", "philips_hue",
     "folio", "hubspot", "pipedrive", "meta_ads", "linear", "jira", "trello", "todoist",
-    "google_routes",
     "grafana", "prometheus",
     "apns", "ios_shortcuts", "apple_watch"
   ];
 
   const D64_GATE_IDS = ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"];
 
-  it("eksakt 40 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303)", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(40);
-    expect(BACKLOG_IDS.length).toBe(40);
+  it("eksakt 39 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304)", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(39);
+    expect(BACKLOG_IDS.length).toBe(39);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 64 oppføringer totalt (24 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303 + 40 gjenværende D-232-backlog-punkter)", () => {
+  it("registeret har nøyaktig 64 oppføringer totalt (25 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304 + 39 gjenværende D-232-backlog-punkter)", () => {
     expect(CONNECTOR_REGISTRY.length).toBe(64);
   });
 
@@ -149,11 +148,11 @@ describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve ve
     }
   });
 
-  it("test_method er 'live' for de 21 utvidede connectorene (D-211/D-213/D-242/D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303), 'presence_only' for resten", async () => {
+  it("test_method er 'live' for de 22 utvidede connectorene (D-211/D-213/D-242/D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304), 'presence_only' for resten", async () => {
     const gateway = fakeGateway(new Set());
     const statuses = await listConnectorStatus(gateway);
     const byId = new Map(statuses.map((s) => [s.id, s]));
-    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places"]) {
+    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places", "google_routes"]) {
       expect(byId.get(id)?.test_method).toBe("live");
     }
     for (const id of ["anthropic", "openai", "gemini"]) {

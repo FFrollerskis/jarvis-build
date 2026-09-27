@@ -2026,3 +2026,36 @@ export class GooglePlacesTransport implements ToolTransport {
     throw new Error(`google_places_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-304 (bygget parallelt mens D-303 sin CI kjørte, samme brede ordre -
+ * ellevte slice, fullfører "Google-lokasjons-trioen" Maps/Places/Routes).
+ * **Samme ærlighetsforbehold som D-297-D-303** (nettverksegress blokkert
+ * denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet). Bruker
+ * det ELDRE, langvarig stabile Directions-/Distance Matrix-API-et
+ * (`maps.googleapis.com/maps/api/...`, `key`-query-parameter) - SAMME
+ * autentiseringsform som `GoogleMapsTransport`/`GooglePlacesTransport` over,
+ * bevisst IKKE det nyere v2 Routes-API-et (`routes.googleapis.com`, felt-
+ * maske-/header-basert auth, en helt annen kallform). Google sin egen
+ * `status`-verdi i svaret returneres RÅTT, IKKE tolket av transporten selv -
+ * samme mønster som de to andre Google-transportene.
+ */
+export class GoogleRoutesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_routes_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_directions") {
+      const body = await this.call("directions", { origin: String(parameters["origin"]), destination: String(parameters["destination"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_distance_matrix") {
+      const body = await this.call("distancematrix", { origins: String(parameters["origins"]), destinations: String(parameters["destinations"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_routes_unsupported_action_${action}`);
+  }
+}

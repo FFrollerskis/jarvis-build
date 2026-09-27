@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -653,6 +653,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // Places sender `query`/`place_id` som vanlige handlingsparametere per
     // kall, ingen resolver-closure nødvendig.
     google_places: new GooglePlacesTransport(),
+    // D-304: ren tom-konstruktør, samme mønster som Google Maps/Google Places
+    // over - Google Routes sender `origin`/`destination`/`origins`/
+    // `destinations` som vanlige handlingsparametere per kall, ingen
+    // resolver-closure nødvendig.
+    google_routes: new GoogleRoutesTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

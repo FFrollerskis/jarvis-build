@@ -146,6 +146,19 @@ import type { ToolGateway } from "./gateway.ts";
  * ikke denne-økten-bekreftet). De resterende 40 backlog-punktene er fortsatt
  * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
  * bygges.
+ *
+ * D-304 (2026-09-27, samme brede ordre, ellevte slice, bygget parallelt mens
+ * D-303 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og jobbe
+ * ikke vent på ci"): `google_routes` bygget og flyttet ut av backlogen SAMME
+ * MÅTE - fullfører "Google-lokasjons-trioen" (Maps/Places/Routes) med SAMME
+ * D-64-domenevurdering som de to foregående: stateless tredjeparts-rute-
+ * oppslag, IKKE eierens egen posisjon/geofence. Bruker det ELDRE, langvarig
+ * stabile Directions-API-et (`key`-query-parameter), SAMME autentiseringsform
+ * som `GoogleMapsTransport`/`GooglePlacesTransport` - bevisst IKKE det nyere
+ * v2 Routes-API-et (`routes.googleapis.com`, felt-maske-/header-basert auth).
+ * Samme D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * De resterende 39 backlog-punktene er fortsatt uendret; samme oppdater-i-
+ * place-disiplin gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -440,7 +453,21 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"],
     live_test: { tool_id: "google_places", action: "search_places", parameters: () => ({ query: "Eiffel Tower" }) }
   },
-  { id: "google_routes", display_name: "Google Routes", category: "backlog", credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"] },
+  {
+    // D-304 (bygget, flyttet ut av backlog): samme domenesjekk allerede kjørt
+    // for Google Maps (D-298)/Google Places (D-303) - stateless tredjeparts-
+    // rute-oppslag, IKKE eierens egen posisjon/geofence (`modules/location`).
+    // Bruker det ELDRE, langvarig stabile Directions-API-et
+    // (`maps.googleapis.com/maps/api/directions/...`, `key`-query-parameter),
+    // SAMME autentiseringsform som `GoogleMapsTransport`/`GooglePlacesTransport`
+    // - IKKE det nyere v2 Routes-API-et (`routes.googleapis.com`, felt-maske-/
+    // header-basert auth). Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-lærdommen).
+    id: "google_routes", display_name: "Google Routes", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"],
+    live_test: { tool_id: "google_routes", action: "get_directions", parameters: () => ({ origin: "Paris, France", destination: "Versailles, France" }) }
+  },
 
   // §4.13 Observability
   {
