@@ -46,6 +46,30 @@ denne sveipen:
    API-endepunkt, IKKE trent kunnskap om en navngitt, kjent leverandør (i motsetning til Spotify/
    WhatsApp/Meta Graph API, som ER veldokumenterte, kjente API-er). Avventer et presist svar fra
    Tobias om hvilken faktisk leverandør "Folio" betyr her FØR noe bygges, i stedet for å gjette.
+3. **Etter D-316 er de gjenværende ~27 backlog-punktene EN ANNEN risikoklasse enn de 22
+   connectorene bygget så langt i denne sveipen** (alle sammen stabile, velkjente, veldokumenterte
+   plattformer - Slack/Discord/n8n/Spotify/WhatsApp/Make/OpenAI osv.). Fire undergrupper krever
+   enten avklaring eller en egen vurdering FØR bygging, ikke stille gjettet:
+   - **`microsoft_365`/`google_cloud`/`playwright`** er for VAGE til å identifisere en konkret,
+     avgrenset API-kapabilitet (Microsoft 365/Google Cloud dekker hundrevis av del-API-er hver;
+     Playwright er et open source-BIBLIOTEK uten egen API-nøkkel-modell i det hele tatt - selve
+     plassholderen `JARVIS_PLAYWRIGHT_API_KEY` gir mistanke om en feil-scopet backlog-oppføring).
+   - **`apple_music`/`apns`** krever ES256-JWT-signering (asymmetrisk nøkkelpar, team-ID/key-ID fra
+     Apple Developer) - strukturelt ulikt ALLE credential-mønstre bygget så langt (statisk
+     Bearer-token/OAuth2 refresh-token). Apple Music sin PERSONLIGE bibliotek-skriving krever i
+     tillegg en separat "Music User Token" som KUN kan hentes via MusicKit JS i en nettleser
+     (Apple sin egen flyt) - IKKE oppnåelig headless fra en server-side connector uten ny
+     nettleser-basert auth-infrastruktur.
+   - **`ios_shortcuts`/`apple_watch`/`apple_shortcuts`** er enhetssside automasjon (krever en
+     følge-app på selve enheten som mottar triggere via push/URL-skjema) - IKKE en cloud REST-API i
+     det hele tatt, passer strukturelt IKKE inn i det etablerte "ToolTransport mot et vertsnavn"-
+     mønsteret uten helt ny infrastruktur.
+   - **`higgsfield`/`runway`/`kling`/`google_veo`** (generativ video-AI) har LAVERE trent-kunnskap-
+     sikkerhet enn de 22 allerede bygde connectorene - mindre/raskere-bevegende leverandører med
+     mindre stabile, mindre kanoniske API-flater i treningsdata. Vurderes likevel bygget ETT AV
+     GANGEN under SAMME D-297-forbehold som resten (aldri denne-økten-verifisert), men med et
+     EKSPLISITT lavere-sikkerhet-merke i beslutningsloggen per connector - IKKE behandlet som
+     samme sikkerhetsnivå som f.eks. Spotify/WhatsApp uten å si det.
 
 **Neste:** committe/pushe D-316, oppdatere PR #192 sin tittel/body til å dekke
 D-311+D-313+D-314+D-315+D-316, la CI kjøre og merge under D-192 når grønt. Deretter fortsett
