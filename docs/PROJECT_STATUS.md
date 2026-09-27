@@ -1,6 +1,22 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-297: Sentry-
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-298: Google Maps-
+connectoren (Geocoding) bygget fullt ut - SJUENDE slice, bygget PARALLELT mens PR #189 (D-297 Sentry)
+sin CI fortsatt kjørte** (Tobias direkte i chat: "ja du kan ikke vente 20 min mellom hver" - sluttet å
+vente idle, jobber videre på neste connector mens en åpen PR sin CI går i bakgrunnen). `GoogleMapsTransport`
+(`geocode`/`reverse_geocode` mot Google Maps Platform sitt Geocoding-API, API-nøkkel som `key`-query-
+parameter, IKKE en header) - BEVISST AVGRENSET til KUN Geocoding, `google_places`/`google_routes`
+forblir separate, ubygde backlog-punkter. INGEN skrivehandling finnes, D-41 sitt read-only-unntak
+ærlig oppfylt (samme mønster som Brave Search). **D-64-sjekk kjørt eksplisitt FØR bygging:** lest
+`modules/location/src/types.ts` - Jarvis EIER den kanoniske lokasjons-/geofence-modellen, men det er
+"hvor ER eieren over tid" - et HELT ANNET konsept enn stateless adresse↔koordinat-oppslag for en
+vilkårlig tredjeparts-adresse. D-64-porten holder. Samme D-297-ærlighetsforbehold (trent kunnskap,
+ikke denne-økten-bekreftet, nettverksegress blokkert). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
+rene. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke
+opprettet ennå - neste: commit/push/PR/CI/merge (parallelt med PR #189), deretter neste connector fra
+de ~44 gjenværende D-231/D-232-backlog-punktene.
+
+**Forrige milepæl (uendret): D-297: Sentry-
 connectoren bygget fullt ut - SJETTE slice.** **Miljøfunn underveis:** dette øktens nettverksegress
 blokkerer eksterne dokumentasjonsdomener (`WebFetch` mot `docs.tavily.com`/`api.search.brave.com`
 begge `EGRESS_BLOCKED`) - live dokumentasjonsverifisering er derfor IKKE mulig i denne økten, og
@@ -15,9 +31,7 @@ evidenskilde bak Jarvis sin egen `incidents`-modell, ikke bygget) - lest `module
 types.ts` FØRST: `Incident`/`IncidentEvidence` forblir UBERØRT, `sentry.update_issue` endrer kun
 Sentry sitt EGET felt, samme "tynt API-gjennomtrekk"-rolle som Docker/D-105. 10 nye tester,
 `pnpm -w typecheck`/`npx eslint` rene. `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i
-DECISIONS_AND_ASSUMPTIONS.md. PR ikke opprettet ennå - neste: commit/push/PR/CI/merge, deretter neste
-connector fra de ~45 gjenværende D-231/D-232-backlog-punktene (unngå de seks `backlog_d64_gate`-
-punktene inntil en egen D-64-adapter-undersøkelse er gjort for hver).
+DECISIONS_AND_ASSUMPTIONS.md. PR #189 åpen, venter på CI.
 
 **Forrige milepæl (uendret): D-296: Brave Search-
 connectoren MERGET til `main`** (PR #188, to-forelder-merge `8f3423d`, under D-192 stående fullmakt).

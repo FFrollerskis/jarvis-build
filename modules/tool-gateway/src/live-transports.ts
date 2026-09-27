@@ -1800,3 +1800,43 @@ export class TelegramCommandPoller {
     }
   }
 }
+
+/**
+ * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - sjette slice). **Samme ærlighetsforbehold som D-297** (se
+ * DECISIONS_AND_ASSUMPTIONS.md): dette øktens nettverksegress er blokkert
+ * mot eksterne dokumentasjonsdomener, så API-formen under er basert på
+ * trent kunnskap om Google Maps Platform sitt offentlige, år-stabile
+ * Geocoding API (`maps.googleapis.com/maps/api/geocode/json`), IKKE en
+ * denne-økten-bekreftet kilde. BEVISST AVGRENSET til KUN Geocoding
+ * (`geocode`/`reverse_geocode`) - Places- og Routes-API-ene er separate,
+ * fortsatt ubygde backlog-id-er (`google_places`/`google_routes`) med egne
+ * credential_refs i `connector-registry.ts`, IKKE konflatert inn her.
+ * STRUKTURELT LIK Brave Search: leverandøren tilbyr genuint bare lesing for
+ * Geocoding-endepunktet, D-41 sitt read-only-unntak ærlig oppfylt. API-
+ * nøkkelen sendes som `key`-query-parameter (Google sin egen dokumenterte
+ * REST-konvensjon for denne API-en, IKKE en header som Brave Search).
+ * Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/REQUEST_DENIED/
+ * OVER_QUERY_LIMIT/...) returneres RÅTT som en del av `data` - transporten
+ * tolker den IKKE selv (samme "ikke overtolke leverandørsvar"-disiplin som
+ * andre lesehandlinger i denne rekken).
+ */
+export class GoogleMapsTransport implements ToolTransport {
+  private async call(params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_maps_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "geocode") {
+      const body = await this.call({ address: String(parameters["address"]) }, credential);
+      return { data: body };
+    }
+    if (action === "reverse_geocode") {
+      const body = await this.call({ latlng: String(parameters["latlng"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_maps_unsupported_action_${action}`);
+  }
+}

@@ -2940,6 +2940,29 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
       output_trust: "internal", transport: transport("sentry")
     },
+    /**
+     * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - sjette slice). Google Maps Platform sitt Geocoding-API
+     * (`maps.googleapis.com/maps/api/geocode/json`) - API-nøkkel som `key`-
+     * query-parameter. BEVISST AVGRENSET til KUN Geocoding - `google_places`/
+     * `google_routes` er separate, fortsatt ubygde backlog-id-er. INGEN
+     * skrivehandling finnes for denne connectoren i det hele tatt (samme
+     * D-41 read-only-unntak som Brave Search).
+     */
+    {
+      tool_id: "google_maps", action: "geocode", description: "Adresse -> koordinater (GET /maps/api/geocode/json?address=..., untrusted ingestion)",
+      input_schema: record({ address: z.string().max(400) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
+    {
+      tool_id: "google_maps", action: "reverse_geocode", description: "Koordinater -> adresse (GET /maps/api/geocode/json?latlng=..., untrusted ingestion)",
+      input_schema: record({ latlng: z.string().max(60) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

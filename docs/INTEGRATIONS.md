@@ -201,7 +201,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Google Maps | `NY_BACKLOG` | Ingen kode funnet |
+| Google Maps | `ALLEREDE_BYGGET (D-298)` | `GoogleMapsTransport` (`live-transports.ts`) - KUN Geocoding-API (`geocode`/`reverse_geocode`), API-nøkkel som `key`-query-parameter. D-64-sjekk kjørt eksplisitt FØR bygging: `modules/location` sin kanoniske lokasjons-/geofence-modell er UBERØRT (stateless adresse-oppslag, ikke personens posisjon over tid). `google_places`/`google_routes` under forblir separate, ubygde backlog-punkter. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md. |
 | Google Places | `NY_BACKLOG` | Ingen kode funnet |
 | Google Routes | `NY_BACKLOG` | Ingen kode funnet |
 
