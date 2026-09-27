@@ -84,9 +84,32 @@ import type { ToolGateway } from "./gateway.ts";
  * D-296 (2026-09-27, samme brede ordre, fjerde slice): `brave_search` bygget
  * og flyttet ut av backlogen SAMME MÅTE - FØRSTE rent lesende (klasse A-kun)
  * connector i denne rekken, D-41 sitt read-only-unntak ærlig oppfylt (Brave
- * Search sitt API tilbyr genuint ingen skrivehandling). De resterende 46
- * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
- * gjelder for hver av dem når de bygges.
+ * Search sitt API tilbyr genuint ingen skrivehandling).
+ *
+ * D-297 (2026-09-27, samme brede ordre, femte slice): `sentry` bygget og
+ * flyttet ut av backlogen SAMME MÅTE. **Merk:** dette øktens miljø blokkerer
+ * utgående nettverkstrafikk til eksterne dokumentasjonsdomener (bekreftet via
+ * `WebFetch` under bygging - se D-297 i DECISIONS_AND_ASSUMPTIONS.md) - API-
+ * formen er derfor basert på trent kunnskap om Sentry sitt offentlige, stabile
+ * REST-API v0, IKKE en denne-økten-bekreftet kilde slik D-292/D-294/D-295/
+ * D-296 kunne. `SENTRY_LIVE_GATE` krever derfor en ekte live-test med et ekte
+ * token FØR `LIVE_VERIFIED` kan påstås, sterkere enn de forrige fire.
+ *
+ * D-298 (2026-09-27, samme brede ordre, sjette slice): `google_maps` bygget
+ * og flyttet ut av backlogen SAMME MÅTE - BEVISST AVGRENSET til KUN
+ * Geocoding, `google_places`/`google_routes` forblir separate, ubygde
+ * backlog-punkter. Samme D-297-forbehold gjelder (trent kunnskap, ikke
+ * denne-økten-bekreftet).
+ *
+ * D-299 (2026-09-27, samme brede ordre, syvende slice): `google_sheets`
+ * bygget og flyttet ut av backlogen SAMME MÅTE - gjenbruker EKSISTERENDE
+ * `googleAccessToken()`-OAuth-vei (Gmail/Calendar/Drive), men med sin EGEN
+ * `credential_ref` (Sheets krever den dedikerte `spreadsheets`-scopen, Drive
+ * sin bredere scope dekker den ikke). D-41 sitt "maksimal nyttig kapabilitet"
+ * fulgt - EKTE skrivehandlinger (`update_range`/`append_row`), ikke kunstig
+ * innsnevret til read-only. De resterende 43 backlog-punktene er fortsatt
+ * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
+ * bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -222,7 +245,24 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "notion", display_name: "Notion", category: "backlog", credential_refs: ["JARVIS_NOTION_API_KEY"] },
   { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
   { id: "dropbox", display_name: "Dropbox", category: "backlog", credential_refs: ["JARVIS_DROPBOX_TOKEN"] },
-  { id: "google_sheets", display_name: "Google Sheets", category: "backlog", credential_refs: ["JARVIS_GOOGLE_SHEETS_TOKEN"] },
+  {
+    // D-299 (bygget, flyttet ut av backlog): SYVENDE slice. Gjenbruker den
+    // EKSISTERENDE `googleAccessToken()`-OAuth-veien, MEN med sin EGEN
+    // credential_ref (Sheets krever `spreadsheets`-scope, Drive sin bredere
+    // `auth/drive`-scope dekker den ikke). `live_test` trenger et faktisk
+    // regneark-id (INGEN universell "list mine regneark"-handling finnes i
+    // Sheets-API-et selv, kun i Drive-API-et) - samme etablerte "les fra en
+    // egen konfig-env-variabel"-mønster som GitHub sin `JARVIS_GITHUB_REPO`
+    // over (IKKE en secret, derfor IKKE i `credential_refs`). Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "google_sheets", display_name: "Google Sheets", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_SHEETS_TOKEN"],
+    live_test: {
+      tool_id: "google_sheets", action: "list_sheets",
+      parameters: () => ({ spreadsheet_id: process.env["JARVIS_GOOGLE_SHEETS_TEST_SPREADSHEET_ID"] ?? "" })
+    }
+  },
 
   // §4.4 Produktivitet / e-post / kalender
   { id: "microsoft_outlook", display_name: "Microsoft Outlook", category: "backlog", credential_refs: ["JARVIS_OUTLOOK_TOKEN"] },
@@ -317,12 +357,36 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "todoist", display_name: "Todoist", category: "backlog_d64_gate", credential_refs: ["JARVIS_TODOIST_API_TOKEN"] },
 
   // §4.12 Kart
-  { id: "google_maps", display_name: "Google Maps", category: "backlog", credential_refs: ["JARVIS_GOOGLE_MAPS_API_KEY"] },
+  {
+    // D-298 (bygget, flyttet ut av backlog): SJETTE slice. BEVISST AVGRENSET
+    // til KUN Geocoding - `google_places`/`google_routes` er separate,
+    // fortsatt ubygde id-er med egne credential_refs, IKKE konflatert inn
+    // her. `geocode` brukes som `live_test` (Google sitt eget kjente
+    // eksempel-adresse, trygt, sideeffekt-fritt). Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-lærdommen).
+    id: "google_maps", display_name: "Google Maps", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_MAPS_API_KEY"],
+    live_test: { tool_id: "google_maps", action: "geocode", parameters: () => ({ address: "1600 Amphitheatre Parkway, Mountain View, CA" }) }
+  },
   { id: "google_places", display_name: "Google Places", category: "backlog", credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"] },
   { id: "google_routes", display_name: "Google Routes", category: "backlog", credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"] },
 
   // §4.13 Observability
-  { id: "sentry", display_name: "Sentry", category: "backlog", credential_refs: ["JARVIS_SENTRY_API_TOKEN"] },
+  {
+    // D-297 (bygget, flyttet ut av backlog): FEMTE slice. Organisasjons-slug
+    // (`JARVIS_SENTRY_ORG_SLUG`) lagt til her - samme "credential_refs må
+    // liste ALLE nødvendige verdier" som Twilio (D-295) sin From-nummer-
+    // regel. `update_issue` er skrivehandlingen (klasse B - status-endring,
+    // reversibel/idempotent, ALDRI en ekte tilkoblingstest). `list_projects`
+    // brukes som `live_test` - trygt, sideeffekt-fritt, krever ingen
+    // forhåndskjent issue-id. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-lærdommen).
+    id: "sentry", display_name: "Sentry", category: "tool_gateway",
+    credential_refs: ["JARVIS_SENTRY_API_TOKEN", "JARVIS_SENTRY_ORG_SLUG"],
+    live_test: { tool_id: "sentry", action: "list_projects", parameters: () => ({}) }
+  },
   { id: "grafana", display_name: "Grafana", category: "backlog", credential_refs: ["JARVIS_GRAFANA_API_KEY"] },
   { id: "prometheus", display_name: "Prometheus", category: "backlog", credential_refs: ["JARVIS_PROMETHEUS_TOKEN"] },
 

@@ -1,19 +1,91 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-296: Brave Search-
-connectoren bygget fullt ut - FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken.**
-Todoist ble vurdert FØRST som fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde
-allerede avgjort at en ekte Todoist-integrasjon MÅ bygges som sync-adapter inn i `@jarvis/operations`
-sin kanoniske `OperationsTask`, ikke en frittstående CRUD-flate - bevisst byttet til Brave Search i
-stedet for å bygge noe som ville brutt D-64. `BraveSearchTransport` (`web_search`/`news_search` mot
-Brave Search API, `X-Subscription-Token`-header) - STRUKTURELT ULIK Telegram/Slack/Discord/Twilio:
-INGEN skrivehandling finnes, leverandøren tilbyr genuint bare lesing, D-41 sitt read-only-unntak
-ærlig oppfylt. `web_search` selv brukes direkte som `live_test`. INGEN `ChannelSchema`-utvidelse
-(bevisst - dette er et verktøy, ikke en samtalekanal). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
-rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke
-opprettet ennå - neste: commit/push/PR/CI/merge, deretter neste connector fra de ~46 gjenværende
-D-231/D-232-backlog-punktene (unngå de seks `backlog_d64_gate`-punktene inntil en egen D-64-adapter-
-undersøkelse er gjort for hver).
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-300: KRITISK
+MINNEFUNN + FIKS - LLM-basert minneuttrekk erstatter D-287 sin for-strenge regelbaserte extractor**
+(Tobias direkte i chat: "husker han ingenting... vi trodde det fungerte fungerte det ikke", etter
+live telefon-testing). D-287 (allerede på `main`) sin `RuleBasedExtractor` krevde ETT av kun fire
+navngitte signalord-mønstre for HVER kandidat - D-285 sin "live-bekreftede" test ("pappa heter
+Henrik") traff PRESIST det ene mønsteret som overlevde, IKKE representativt for normal samtale, som
+derfor har blitt systematisk UTELATT fra minnet siden D-287 ble merget. Tobias valgte eksplisitt
+"bygg ekte LLM-basert uttrekk" (fremfor "utvid regex") da han fikk begge alternativene.
+`LlmExtractionAdapter` (`modules/memory/src/extraction.ts`) - PRESIST det `ExtractionAdapter`-
+grensesnittet alltid var designet for ("LLM-assistert uttrekk... kobles på samme grensesnitt senere"),
+aldri bygget før nå. `purpose: "EXTRACT"` + `structured_schema`, norsk systemprompt instruerer
+modellen å bruke "episodic" (ryddes automatisk av D-287 sin retensjons-sveip) når usikker på
+varighet - bredere fangst er derfor TRYGT nå på en måte den ikke var FØR D-287 sin opprydningsvei
+fantes. Fail-closed (ALDRI fail-kastende) på uparsérbart/ugyldig/for-stort strukturert svar.
+`ExtractionAdapter.extract()` utvidet til å ta full `IdentityContext` (ikke bare `space`) -
+`RuleBasedExtractor` UENDRET oppførsel, kun signaturen justert, forblir en deterministisk test-/
+referanse-implementasjon. Wiret inn i `apps/api/src/main.ts` (`new LlmExtractionAdapter(gateway)`,
+erstatter `new RuleBasedExtractor()`). `worker-main.ts` har ingen minne-skrivevei (uendret, ikke
+berørt). 20 nye tester (`llm-extraction.test.ts` + `extraction.test.ts` oppdatert), `pnpm -w
+typecheck`/`npx eslint` rene. **Ærlighet om deploy:** denne sesjonen har INGEN tilgang til Tobias sin
+NAS - kan KUN få fiksen merget til `main`, Tobias må selv `git pull` + rebuilde for å se den virke
+live på telefonen. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md. Neste: commit/push/PR/CI/merge, deretter
+tilbake til connector-backlog-sveipet (PR #189, D-297+D-298+D-299, venter fortsatt på CI/merge).
+
+**Forrige milepæl (uendret): D-299: Google Sheets-
+connectoren bygget fullt ut - ÅTTENDE slice, FORTSATT parallelt mens PR #189 sin CI kjørte** (Tobias
+direkte i chat: "ja du kan ikke vente 20 min mellom hver"). PR #189 dekker nå TRE slices samlet
+(D-297 Sentry + D-298 Google Maps + D-299 Google Sheets) - en bevisst avvik fra ett-connector-per-PR-
+mønsteret (se PR #189 sin oppdaterte tittel/body), akseptert fordi alle tre er uavhengig testet og
+dokumentert med hvert sitt D-nummer. `GoogleSheetsTransport` (Sheets API v4) gjenbruker den EKSISTERENDE
+`googleAccessToken()`-OAuth-veien (Gmail/Calendar/Drive), MEN med sin EGEN `JARVIS_GOOGLE_SHEETS_TOKEN`
+(Sheets krever `spreadsheets`-scope, Drive sin bredere `auth/drive`-scope dekker den ikke - å anta
+delt token ville vært en usikker antakelse). **D-41 sitt "maksimal nyttig kapabilitet" fulgt FULLT UT**
+(IKKE read-only av bekvemmelighet slik Brave Search/Google Maps var, der leverandøren genuint ikke
+tilbød mer): `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, EKTE skrivehandlinger),
+samme "full funksjonell tilgang"-disiplin D-42 etablerte for Drive. **D-64-sjekk:** ingen kanonisk
+"regneark"-domenemodell finnes i Jarvis - samme rene status som Drive. 9 nye tester, `pnpm -w typecheck`/
+`npx eslint` rene. `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-298: Google Maps-
+connectoren (Geocoding) bygget fullt ut - SJETTE slice, bygget PARALLELT mens PR #189 (D-297 Sentry)
+sin CI fortsatt kjørte** (Tobias direkte i chat: "ja du kan ikke vente 20 min mellom hver" - sluttet å
+vente idle, jobber videre på neste connector mens en åpen PR sin CI går i bakgrunnen). `GoogleMapsTransport`
+(`geocode`/`reverse_geocode` mot Google Maps Platform sitt Geocoding-API, API-nøkkel som `key`-query-
+parameter, IKKE en header) - BEVISST AVGRENSET til KUN Geocoding, `google_places`/`google_routes`
+forblir separate, ubygde backlog-punkter. INGEN skrivehandling finnes, D-41 sitt read-only-unntak
+ærlig oppfylt (samme mønster som Brave Search). **D-64-sjekk kjørt eksplisitt FØR bygging:** lest
+`modules/location/src/types.ts` - Jarvis EIER den kanoniske lokasjons-/geofence-modellen, men det er
+"hvor ER eieren over tid" - et HELT ANNET konsept enn stateless adresse↔koordinat-oppslag for en
+vilkårlig tredjeparts-adresse. D-64-porten holder. Samme D-297-ærlighetsforbehold (trent kunnskap,
+ikke denne-økten-bekreftet, nettverksegress blokkert). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
+rene. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-297: Sentry-
+connectoren bygget fullt ut - SJETTE slice.** **Miljøfunn underveis:** dette øktens nettverksegress
+blokkerer eksterne dokumentasjonsdomener (`WebFetch` mot `docs.tavily.com`/`api.search.brave.com`
+begge `EGRESS_BLOCKED`) - live dokumentasjonsverifisering er derfor IKKE mulig i denne økten, og
+D-292/D-294/D-295/D-296 sine "verifisert mot offisiell dokumentasjon"-påstander var i realiteten trent
+kunnskap, aldri en denne-økten-bekreftet kilde. Sentry-connectoren er FØRSTE i rekken som sier dette
+ÆRLIG i stedet for å gjenta den upresise formuleringen. `SentryTransport` (`list_projects`/
+`list_issues`/`get_issue`/`update_issue` mot Sentry sitt organisasjonsscopede REST-API v0,
+`Authorization: Bearer`) - `update_issue` er FØRSTE skrivehandling i rekken som er en ren
+TILSTANDSENDRING (issue-status), ikke en utgående melding til en tredjepart - reversibel OG idempotent.
+**D-64-sjekk kjørt eksplisitt** (en eldre `INTEGRATIONS.md`-advarsel sa Sentry burde vært en ren
+evidenskilde bak Jarvis sin egen `incidents`-modell, ikke bygget) - lest `modules/incidents/src/
+types.ts` FØRST: `Incident`/`IncidentEvidence` forblir UBERØRT, `sentry.update_issue` endrer kun
+Sentry sitt EGET felt, samme "tynt API-gjennomtrekk"-rolle som Docker/D-105. 10 nye tester,
+`pnpm -w typecheck`/`npx eslint` rene. `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i
+DECISIONS_AND_ASSUMPTIONS.md. PR #189 åpen, venter på CI.
+
+**Forrige milepæl (uendret): D-296: Brave Search-
+connectoren MERGET til `main`** (PR #188, to-forelder-merge `8f3423d`, under D-192 stående fullmakt).
+FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken. Todoist ble vurdert FØRST som
+fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde allerede avgjort at en ekte
+Todoist-integrasjon MÅ bygges som sync-adapter inn i `@jarvis/operations` sin kanoniske
+`OperationsTask`, ikke en frittstående CRUD-flate - bevisst byttet til Brave Search i stedet for å
+bygge noe som ville brutt D-64. `BraveSearchTransport` (`web_search`/`news_search` mot Brave Search
+API, `X-Subscription-Token`-header) - STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN
+skrivehandling finnes, leverandøren tilbyr genuint bare lesing, D-41 sitt read-only-unntak ærlig
+oppfylt. `web_search` selv brukes direkte som `live_test`. INGEN `ChannelSchema`-utvidelse (bevisst -
+dette er et verktøy, ikke en samtalekanal). Underveis: én CI-flake (`embedded-postgres-port-lease.
+test.ts`, 16-prosess portkapploep, 15/16 unike - strukturelt urelatert til diffen, rettet av én
+rerun, dokumentert med stand-down-kommentar på PR-en per protokoll). 6 nye tester, `pnpm -w typecheck`/
+`npx eslint` rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md.
+Mønsteret er nå bevist ende-til-ende gjennom FIRE fulle PR/CI/merge-sykluser (Slack + Discord + Twilio
++ Brave Search).
 
 **Forrige milepæl (uendret): D-295: Twilio-
 connectoren (SMS) MERGET til `main`** (PR #187, to-forelder-merge `d7f405e`, under D-192 stående

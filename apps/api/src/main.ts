@@ -36,10 +36,10 @@ import {
   selfModificationToolDefinitions
 } from "@jarvis/self-modification";
 import {
+  LlmExtractionAdapter,
   LocalHashEmbedding,
   MemoryRetriever,
   MemoryWriter,
-  RuleBasedExtractor,
   SummaryService,
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -500,21 +500,25 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
-  // `MemoryWriter`/`RuleBasedExtractor` var bygget og enhetstestet, men
-  // ALDRI kalt fra noe produksjonssted, se D-283 i
-  // DECISIONS_AND_ASSUMPTIONS.md): SAMME delte `memoryEmbedding`-instans som
-  // `memoryRetriever` over (deterministisk/lokal - ingen grunn til to
-  // separate objekter). `RuleBasedExtractor` er BEVISST den EKSISTERENDE,
-  // allerede testede deterministiske fallback-implementasjonen
-  // (`extraction.ts` sin egen kommentar: "regelbasert uttrekk er
-  // deterministisk fallback OG test-implementasjon" - en LLM-assistert
-  // extractor kobles på SAMME grensesnitt senere, ikke bygget her). Brukt
-  // KUN av `conversationEngine` sin nye `memory.ingest()` under - ALDRI av
+  // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
+  // noe produksjonssted, se D-283 i DECISIONS_AND_ASSUMPTIONS.md): SAMME
+  // delte `memoryEmbedding`-instans som `memoryRetriever` over
+  // (deterministisk/lokal - ingen grunn til to separate objekter).
+  // D-300 (Tobias direkte i chat, "husker han ingenting... vi trodde det
+  // fungerte fungerte det ikke" - live telefon-testing avslørte at D-287 sin
+  // regelbaserte extractor i praksis var for streng til reell samtale, kun
+  // fire snevre signalord-mønstre): `LlmExtractionAdapter` (`extraction.ts`)
+  // er nå den WIRED-INN implementasjonen - `gateway` (konstruert over) sendes
+  // rett inn, den strukturelt-minimale `MemoryExtractionCompleter` den
+  // faktisk krever er allerede oppfylt av en ekte `ModelGateway`.
+  // `RuleBasedExtractor` forblir en deterministisk test-/referanse-
+  // implementasjon, IKKE lenger wired inn her. Brukt KUN av
+  // `conversationEngine` sin `memory.ingest()` under - ALDRI av
   // `IngestionService.ingestExternal()` (den forblir den separate,
   // Ingestion Zone-karantene-veien for EKSTERNT/ubetrodd innhold - e-post/
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
-  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy);
+  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy);
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
@@ -622,6 +626,21 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
     // slik Twilio krevde).
     brave_search: new BraveSearchTransport(),
+    // D-297: Sentry krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (organisasjons-slug, URL-sti-parameter for ALLE fire
+    // handlinger) - SAMME resolver-mot-readSecretProvider-mønster som Twilio
+    // sin AccountSid (D-295) over, slått opp PÅ NYTT ved hvert kall.
+    sentry: new SentryTransport(() => readSecretProvider.get("JARVIS_SENTRY_ORG_SLUG")),
+    // D-298: ren tom-konstruktør, samme mønster som Slack/Discord/Brave
+    // Search over - Google Maps sender `address`/`latlng` som et vanlig
+    // handlingsparameter per kall, ingen resolver-closure nødvendig.
+    google_maps: new GoogleMapsTransport(),
+    // D-299: ren tom-konstruktør - `GoogleSheetsTransport` slår selv opp
+    // `googleAccessToken()` internt per kall (samme mønster som Gmail/
+    // Calendar/Drive sine transporter over, som ALLE også har tomme
+    // konstruktører - access-token-utvekslingen skjer per `invoke()`-kall,
+    // ikke ved konstruksjon).
+    google_sheets: new GoogleSheetsTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

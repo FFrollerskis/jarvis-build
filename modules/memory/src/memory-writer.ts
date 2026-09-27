@@ -47,7 +47,7 @@ export class MemoryWriter {
 
   /** Registrer kilde + trekk ut kandidater + anvend dem. */
   async ingestText(identity: IdentityContext, source: SourceRef, text: string): Promise<ApplyOutcome[]> {
-    const candidates = await this.extractor.extract(text, identity.memory_space_id, source.trust);
+    const candidates = await this.extractor.extract(text, identity, source.trust);
     const outcomes: ApplyOutcome[] = [];
     for (const candidate of candidates) {
       outcomes.push(await this.apply(identity, source, candidate));

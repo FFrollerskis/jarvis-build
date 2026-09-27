@@ -2897,6 +2897,112 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
     },
+    /**
+     * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - femte slice). Sentry sitt organisasjonsscopede REST-API v0
+     * (`sentry.io/api/0/organizations/{org_slug}/...`), `Authorization:
+     * Bearer <token>`. **IKKE denne-økten-verifisert mot en live hentet kopi
+     * av offisiell dokumentasjon** (nettverksegress blokkert i dette miljøet,
+     * se `SentryTransport` sin doc-kommentar i `live-transports.ts` og D-297 i
+     * DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse) - basert på trent
+     * kunnskap om et offentlig, år-stabilt API-mønster, IKKE gjettet fra
+     * forrige connectors mønster. `update_issue` er FØRSTE skrivehandling i
+     * denne rekken som er en REN TILSTANDSENDRING (issue-status), ikke en
+     * utgående melding til en tredjepart - reversibel OG idempotent, ULIKT
+     * Slack/Discord/Twilio sin `notify`.
+     */
+    {
+      tool_id: "sentry", action: "list_projects", description: "List prosjekter i organisasjonen (GET /organizations/{org}/projects/, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["project:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "list_issues", description: "List issues i organisasjonen (GET /organizations/{org}/issues/, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(200).optional() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "get_issue", description: "Les ett issue (GET /organizations/{org}/issues/{id}/, untrusted ingestion)",
+      input_schema: record({ issue_id: z.string() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "update_issue", description: "Endre issue-status (PUT /organizations/{org}/issues/{id}/, f.eks. resolved/ignored/unresolved)",
+      input_schema: record({ issue_id: z.string(), status: z.enum(["resolved", "ignored", "unresolved"]) }),
+      capability_class: "B", scopes: ["event:write"], reversible: true,
+      rollback_procedure: "ny update_issue-kalling med forrige status", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "internal", transport: transport("sentry")
+    },
+    /**
+     * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - sjette slice). Google Maps Platform sitt Geocoding-API
+     * (`maps.googleapis.com/maps/api/geocode/json`) - API-nøkkel som `key`-
+     * query-parameter. BEVISST AVGRENSET til KUN Geocoding - `google_places`/
+     * `google_routes` er separate, fortsatt ubygde backlog-id-er. INGEN
+     * skrivehandling finnes for denne connectoren i det hele tatt (samme
+     * D-41 read-only-unntak som Brave Search).
+     */
+    {
+      tool_id: "google_maps", action: "geocode", description: "Adresse -> koordinater (GET /maps/api/geocode/json?address=..., untrusted ingestion)",
+      input_schema: record({ address: z.string().max(400) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
+    {
+      tool_id: "google_maps", action: "reverse_geocode", description: "Koordinater -> adresse (GET /maps/api/geocode/json?latlng=..., untrusted ingestion)",
+      input_schema: record({ latlng: z.string().max(60) }),
+      capability_class: "A", scopes: ["maps:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
+    },
+    /**
+     * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - syvende slice). Google Sheets API v4 - gjenbruker
+     * `googleAccessToken()` OAuth-refresh-token-utveksleren, MEN med sin EGEN
+     * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, IKKE `JARVIS_GOOGLE_
+     * TOKEN` - Sheets krever den dedikerte `spreadsheets`-scopen, som Drive
+     * sin bredere `auth/drive`-scope ikke dekker). D-41 sitt "maksimal
+     * nyttig kapabilitet"-prinsipp: `update_range`/`append_row` er EKTE
+     * skrivehandlinger (klasse B), ikke kunstig innsnevret til read-only.
+     */
+    {
+      tool_id: "google_sheets", action: "list_sheets", description: "List faner i et regneark (GET /v4/spreadsheets/{id}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string() }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "read_range", description: "Les celleverdier fra et område (GET /v4/spreadsheets/{id}/values/{range}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200) }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "update_range", description: "Overskriv celleverdier i et område (PUT /v4/spreadsheets/{id}/values/{range})",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ny update_range-kalling med forrige verdier", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "append_row", description: "Legg til en NY rad nederst i et område (POST /v4/spreadsheets/{id}/values/{range}:append)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: false,
+      rollback_procedure: "slett raden manuelt i regnearket (ingen radidentifikator returneres av API-et)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

@@ -664,16 +664,19 @@ importers:
       '@jarvis/core':
         specifier: workspace:*
         version: link:../core
+      '@jarvis/model-gateway':
+        specifier: workspace:*
+        version: link:../model-gateway
       '@jarvis/policy':
         specifier: workspace:*
         version: link:../policy
       pg:
         specifier: ^8.16.3
         version: 8.23.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
-      '@jarvis/model-gateway':
-        specifier: workspace:*
-        version: link:../model-gateway
       '@jarvis/provider-adapters':
         specifier: workspace:*
         version: link:../../packages/provider-adapters

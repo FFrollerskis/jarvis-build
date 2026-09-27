@@ -90,7 +90,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | OneDrive | `NY_BACKLOG` | Ingen kode funnet |
 | Dropbox | `NY_BACKLOG` | Ingen kode funnet |
 | Google Docs | `ALLEREDE_DEKKET` | Dekkes av Google Drive/Docs-connectoren (`read_document`-eksport i `modules/tool-gateway/src/live-transports.ts`) - ingen egen connector nødvendig |
-| Google Sheets | `NY_BACKLOG` | Kun MIME-type-konstant (`extraction-safety.ts`) - ingen faktisk leserlese-/skrive-adapter |
+| Google Sheets | `ALLEREDE_BYGGET (D-299)` | `GoogleSheetsTransport` (`live-transports.ts`) - Sheets API v4, gjenbruker eksisterende `googleAccessToken()`-OAuth-vei men med EGEN `JARVIS_GOOGLE_SHEETS_TOKEN` (Sheets krever `spreadsheets`-scope, Drive sin bredere scope dekker den ikke). D-41 "maksimal nyttig kapabilitet" fulgt: `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, EKTE skrivehandlinger). `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md. |
 
 ### 4.4 Produktivitet / e-post / kalender
 
@@ -201,7 +201,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Google Maps | `NY_BACKLOG` | Ingen kode funnet |
+| Google Maps | `ALLEREDE_BYGGET (D-298)` | `GoogleMapsTransport` (`live-transports.ts`) - KUN Geocoding-API (`geocode`/`reverse_geocode`), API-nøkkel som `key`-query-parameter. D-64-sjekk kjørt eksplisitt FØR bygging: `modules/location` sin kanoniske lokasjons-/geofence-modell er UBERØRT (stateless adresse-oppslag, ikke personens posisjon over tid). `google_places`/`google_routes` under forblir separate, ubygde backlog-punkter. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md. |
 | Google Places | `NY_BACKLOG` | Ingen kode funnet |
 | Google Routes | `NY_BACKLOG` | Ingen kode funnet |
 
@@ -209,7 +209,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Sentry | `NY_BACKLOG` | D-64-audit (migrasjon `036_incidents.sql`) bekrefter eksplisitt «GCP/Cloudflare/Sentry/Vercel-deploy-sporing er ALLE fraværende» - Jarvis sin egen `incidents`-modell er `JARVIS_CANONICAL`, Sentry ville vært en ren evidenskilde bak den (samme mønster som Docker/D-105), ikke bygget |
+| Sentry | `ALLEREDE_BYGGET (D-297)` | `SentryTransport` (`live-transports.ts`) - organisasjonsscopet REST-API v0, `Authorization: Bearer`. D-64-sjekk kjørt eksplisitt FØR bygging (denne radens tidligere advarsel): `Incident`/`IncidentEvidence` (`modules/incidents`) er FORTSATT Jarvis sin egen kanoniske tilstandsmaskin, UBERØRT av denne connectoren - `sentry.update_issue` endrer kun Sentry sitt EGET issue-status-felt, aldri `Incident.status`. Samme "tynt API-gjennomtrekk, ikke en konkurrerende domenemodell"-rolle som Docker/D-105 (som OGSÅ er både en `docker`-ToolGateway-connector OG en evidenskilde for `Deployment.source`). `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i DECISIONS_AND_ASSUMPTIONS.md. |
 | Grafana | `NY_BACKLOG` | Ingen kode funnet |
 | Prometheus | `NY_BACKLOG` | Ingen kode funnet |
 

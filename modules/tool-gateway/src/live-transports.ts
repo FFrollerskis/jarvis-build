@@ -1060,6 +1060,70 @@ export class BraveSearchTransport implements ToolTransport {
 }
 
 /**
+ * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - femte slice). **Ærlighetsmerknad (se D-297 i DECISIONS_AND_
+ * ASSUMPTIONS.md):** dette øktens miljø blokkerer utgående nettverkstrafikk
+ * til vilkårlige eksterne domener (`docs.tavily.com`/`api.search.brave.com`
+ * begge bekreftet EGRESS_BLOCKED via `WebFetch` under bygging av denne
+ * connectoren) - API-formen under kunne derfor IKKE bekreftes mot en LEVENDE
+ * hentet kopi av Sentry sin offisielle dokumentasjon denne økten, i motsetning
+ * til hva D-292/D-294/D-295/D-296 sine kommentarer hevdet ("verifisert mot
+ * offisiell dokumentasjon"). Den er basert på Sentry sitt organisasjons-
+ * scopede REST-API v0 (`sentry.io/api/0/...`, `Authorization: Bearer <token>`)
+ * - et offentlig, stabilt uendret API-mønster over flere år - men dette er
+ * TRENT kunnskap, IKKE en denne-økten-bekreftet kilde. `SENTRY_LIVE_GATE`
+ * forblir derfor `PENDING_CREDENTIALS` og krever en EKTE live-test med et
+ * ekte token FØR `LIVE_VERIFIED` kan påstås - se `connector-registry.ts`.
+ *
+ * Organisasjons-slug er, som Twilio sin AccountSid (D-295), en resolver-
+ * closure slått opp PÅ NYTT ved hvert kall (IKKE frosset ved oppstart) -
+ * Sentry sitt organisasjonsscopede API krever slug-en i URL-stien for alle
+ * fire handlinger under. `update_issue` er den ENESTE skrivehandlingen -
+ * en PUT mot et eksisterende issue (status-endring: resolved/ignored/
+ * unresolved) er reversibel (en ny `update_issue` kan sette status tilbake)
+ * og idempotent (samme body gir samme sluttilstand, ULIKT Slack/Discord/
+ * Twilio sin `notify` som alltid oppretter en NY melding per kall).
+ */
+export class SentryTransport implements ToolTransport {
+  constructor(private readonly orgSlug: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const orgSlug = await this.orgSlug();
+    if (!orgSlug) throw new Error("sentry_org_slug_not_configured");
+    const response = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`sentry_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_projects") {
+      const body = await this.call("/projects/", credential);
+      return { data: body };
+    }
+    if (action === "list_issues") {
+      const query = encodeURIComponent(String(parameters["query"] ?? "is:unresolved"));
+      const body = await this.call(`/issues/?query=${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential);
+      return { data: body };
+    }
+    if (action === "update_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential, {
+        method: "PUT",
+        body: JSON.stringify({ status: parameters["status"] })
+      });
+      return { data: body };
+    }
+    throw new Error(`sentry_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men
@@ -1734,5 +1798,115 @@ export class TelegramCommandPoller {
       const oldest = this.handled.values().next();
       if (!oldest.done) this.handled.delete(oldest.value);
     }
+  }
+}
+
+/**
+ * D-298 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - sjette slice). **Samme ærlighetsforbehold som D-297** (se
+ * DECISIONS_AND_ASSUMPTIONS.md): dette øktens nettverksegress er blokkert
+ * mot eksterne dokumentasjonsdomener, så API-formen under er basert på
+ * trent kunnskap om Google Maps Platform sitt offentlige, år-stabile
+ * Geocoding API (`maps.googleapis.com/maps/api/geocode/json`), IKKE en
+ * denne-økten-bekreftet kilde. BEVISST AVGRENSET til KUN Geocoding
+ * (`geocode`/`reverse_geocode`) - Places- og Routes-API-ene er separate,
+ * fortsatt ubygde backlog-id-er (`google_places`/`google_routes`) med egne
+ * credential_refs i `connector-registry.ts`, IKKE konflatert inn her.
+ * STRUKTURELT LIK Brave Search: leverandøren tilbyr genuint bare lesing for
+ * Geocoding-endepunktet, D-41 sitt read-only-unntak ærlig oppfylt. API-
+ * nøkkelen sendes som `key`-query-parameter (Google sin egen dokumenterte
+ * REST-konvensjon for denne API-en, IKKE en header som Brave Search).
+ * Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/REQUEST_DENIED/
+ * OVER_QUERY_LIMIT/...) returneres RÅTT som en del av `data` - transporten
+ * tolker den IKKE selv (samme "ikke overtolke leverandørsvar"-disiplin som
+ * andre lesehandlinger i denne rekken).
+ */
+export class GoogleMapsTransport implements ToolTransport {
+  private async call(params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_maps_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "geocode") {
+      const body = await this.call({ address: String(parameters["address"]) }, credential);
+      return { data: body };
+    }
+    if (action === "reverse_geocode") {
+      const body = await this.call({ latlng: String(parameters["latlng"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_maps_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - syvende slice). **Samme ærlighetsforbehold som D-297/D-298**
+ * (nettverksegress blokkert, basert på trent kunnskap om Google Sheets API
+ * v4, ikke denne-økten-bekreftet). Gjenbruker den EKSISTERENDE, allerede
+ * proven `googleAccessToken()` OAuth-refresh-token-utveksleren (SAMME
+ * `JARVIS_GOOGLE_CLIENT_ID`/`JARVIS_GOOGLE_CLIENT_SECRET` Desktop-klient som
+ * Gmail/Calendar/Drive allerede bruker) - MEN med sin EGEN, separate
+ * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, samme som D-232 sin
+ * opprinnelige plassholder allerede spesifiserte), IKKE gjenbruk av
+ * `JARVIS_GOOGLE_TOKEN`. Årsak: Sheets sin celledata-API (`sheets.
+ * googleapis.com/v4/...`) krever den DEDIKERTE `spreadsheets`-OAuth-scopen -
+ * Drive sin brede `auth/drive`-scope dekker Sheets-FILER som Drive-objekter
+ * (liste/slette/dele), men IKKE selve celleinnholdet via Sheets-API-et. Å
+ * anta det eksisterende `JARVIS_GOOGLE_TOKEN` allerede har denne scopen ville
+ * vært en USIKKER antakelse denne økten ikke kan bekrefte - en egen credential
+ * er derfor det ÆRLIGE valget (feiler tydelig med `insufficient_scope` hvis
+ * Tobias limmer inn feil token, i stedet for å late som det virker).
+ * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp (ikke read-only av
+ * bekvemmelighet): `read_range`/`list_sheets` (klasse A) OG `update_range`/
+ * `append_row` (klasse B, ekte skrivehandlinger) - samme "full funksjonell
+ * tilgang"-disiplin som Drive (D-42) allerede etablerte, ikke en kunstig
+ * innsnevring.
+ */
+export class GoogleSheetsTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await googleAccessToken(credential);
+    const spreadsheetId = String(parameters["spreadsheet_id"]);
+    if (action === "list_sheets") {
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { sheets?: Array<{ properties?: { title?: string; sheetId?: number } }> };
+      return { data: (body.sheets ?? []).map((s) => ({ title: s.properties?.title ?? "", sheet_id: s.properties?.sheetId ?? null })) as unknown as JsonValue };
+    }
+    if (action === "read_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { values?: JsonValue };
+      return { data: body.values ?? [] };
+    }
+    if (action === "update_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: parameters["values"] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "append_row") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: [parameters["row"]] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { updates?: { updatedRange?: string } };
+      return { external_id: body.updates?.updatedRange ?? "appended" };
+    }
+    throw new Error(`sheets_unsupported_action_${action}`);
   }
 }
