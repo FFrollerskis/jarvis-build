@@ -71,9 +71,14 @@ import type { ToolGateway } from "./gateway.ts";
  * faktisk er bygget - oppføringen ble oppdatert I PLACE (samme id, flyttet
  * fra `category: "backlog"` til `"tool_gateway"` med en ny `live_test`),
  * ALDRI duplisert som en ny, separat oppføring - se `connector-registry.
- * test.ts` sitt unikhetskrav. De resterende 49 backlog-punktene er fortsatt
- * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
- * bygges.
+ * test.ts` sitt unikhetskrav.
+ *
+ * D-294 (2026-09-27, samme brede ordre, andre slice): `discord` bygget og
+ * flyttet ut av backlogen SAMME MÅTE - oppdatert i place, ikke duplisert
+ * (D-293 sin lærdom fra Slack-PR-en - en tidligere PR-CI-regresjon fra
+ * nettopp DENNE feilen, alltid `grep` for en eksisterende id FØRST). De
+ * resterende 48 backlog-punktene er fortsatt uendret; samme oppdater-i-
+ * place-disiplin gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -242,7 +247,15 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_SLACK_BOT_TOKEN"],
     live_test: { tool_id: "slack", action: "get_bot_info", parameters: () => ({}) }
   },
-  { id: "discord", display_name: "Discord", category: "backlog", credential_refs: ["JARVIS_DISCORD_BOT_TOKEN"] },
+  {
+    // D-294 (bygget, flyttet ut av backlog): samme "notify er ekte utsendelse,
+    // get_bot_info er trygg tilkoblingstest"-disiplin som Telegram/Slack over.
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-lærdommen fra Slack-PR-en).
+    id: "discord", display_name: "Discord", category: "tool_gateway",
+    credential_refs: ["JARVIS_DISCORD_BOT_TOKEN"],
+    live_test: { tool_id: "discord", action: "get_bot_info", parameters: () => ({}) }
+  },
   { id: "higgsfield", display_name: "Higgsfield", category: "backlog", credential_refs: ["JARVIS_HIGGSFIELD_API_KEY"] },
   { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },
   { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },

@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -304,6 +304,8 @@ for (const tool of firstWaveTools({
   // D-292: samme "ren token per kall, ingen resolver-closure"-mønster som
   // main.ts sin egen SlackTransport-wiring.
   slack: new SlackTransport(),
+  // D-294: identisk wiring-mønster som apps/api/src/main.ts sin DiscordTransport.
+  discord: new DiscordTransport(),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til

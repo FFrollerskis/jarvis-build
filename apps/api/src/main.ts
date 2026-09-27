@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -606,6 +606,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // her, i motsetning til Telegram sin `chat_id` (Slack sender `channel`
     // som et vanlig model-/trusted-lag-parameter, ALDRI en fast bot-config).
     slack: new SlackTransport(),
+    // D-294: samme mønster som Slack over - Discord sender `channel_id` som
+    // et vanlig handlingsparameter per kall, ingen resolver-closure nødvendig.
+    discord: new DiscordTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
