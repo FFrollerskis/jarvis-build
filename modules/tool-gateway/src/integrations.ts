@@ -3301,6 +3301,31 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
     },
+    /**
+     * D-312 (bygget, flyttet ut av backlog): Spotify Web API. `credential_ref`
+     * peker på REFRESH-tokenet (den faktiske, roterte secreten) - `client_id`/
+     * `client_secret` er DELT app-konfig lest direkte fra env inne i
+     * `spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`
+     * (Google Sheets D-299 bruker identisk oppdeling).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Spotify sitt Web API/Accounts-API, se
+     * `SpotifyTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "spotify", action: "get_currently_playing", description: "Hent nåværende avspilling (GET /v1/me/player/currently-playing, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user-read-playback-state"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "untrusted", transport: transport("spotify")
+    },
+    {
+      tool_id: "spotify", action: "add_to_queue", description: "Legg en sang til i avspillingskøen (POST /v1/me/player/queue)",
+      input_schema: record({ uri: z.string() }),
+      capability_class: "B", scopes: ["user-modify-playback-state"], reversible: true,
+      rollback_procedure: "hopp over sangen manuelt via skip_to_next (Spotify har ikke et dedikert fjern-fra-kø endepunkt)",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "internal", transport: transport("spotify")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

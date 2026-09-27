@@ -2308,3 +2308,49 @@ export class N8nTransport implements ToolTransport {
     throw new Error(`n8n_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-312: Spotify sitt Accounts-API krever en OAuth2 `refresh_token`-utveksling
+ * (SAMME mønster som `googleAccessToken()` over) - `client_id`/`client_secret`
+ * er DELT app-konfig (ikke per-bruker secret), lest direkte fra env, IKKE via
+ * `credential_ref` (kun refresh-tokenet er den faktiske, roterte secreten).
+ */
+async function spotifyAccessToken(refreshToken: string): Promise<string> {
+  const clientId = process.env["JARVIS_SPOTIFY_CLIENT_ID"];
+  const clientSecret = process.env["JARVIS_SPOTIFY_CLIENT_SECRET"];
+  if (!clientId || !clientSecret) throw new Error("spotify_oauth_client_not_configured");
+  const response = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`
+    },
+    body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken })
+  });
+  if (!response.ok) throw new Error(`spotify_auth_failed_${response.status}`);
+  return ((await response.json()) as { access_token: string }).access_token;
+}
+
+export class SpotifyTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await spotifyAccessToken(credential);
+    if (action === "get_currently_playing") {
+      const response = await fetch("https://api.spotify.com/v1/me/player/currently-playing", {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (response.status === 204) return { data: null };
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "add_to_queue") {
+      const uri = encodeURIComponent(String(parameters["uri"]));
+      const response = await fetch(`https://api.spotify.com/v1/me/player/queue?uri=${uri}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`spotify_error_${response.status}`);
+      return { data: null };
+    }
+    throw new Error(`spotify_unsupported_action_${action}`);
+  }
+}

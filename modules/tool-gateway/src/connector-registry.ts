@@ -557,7 +557,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "openai_images", display_name: "OpenAI Images", category: "backlog", credential_refs: ["JARVIS_OPENAI_IMAGES_API_KEY"] },
 
   // §4.8 Musikk
-  { id: "spotify", display_name: "Spotify", category: "backlog", credential_refs: ["JARVIS_SPOTIFY_CLIENT_ID", "JARVIS_SPOTIFY_CLIENT_SECRET"] },
+  {
+    // D-312 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // REFRESH_TOKEN (den faktiske, roterte secreten - CLIENT_ID/SECRET er
+    // delt app-konfig, SAMME oppdeling som Google-familien). Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-disiplinen).
+    id: "spotify", display_name: "Spotify", category: "tool_gateway",
+    credential_refs: ["JARVIS_SPOTIFY_CLIENT_ID", "JARVIS_SPOTIFY_CLIENT_SECRET", "JARVIS_SPOTIFY_REFRESH_TOKEN"],
+    live_test: { tool_id: "spotify", action: "get_currently_playing", parameters: () => ({}) }
+  },
   { id: "apple_music", display_name: "Apple Music", category: "backlog", credential_refs: ["JARVIS_APPLE_MUSIC_TOKEN"] },
 
   // §4.9 Automatisering / workflow

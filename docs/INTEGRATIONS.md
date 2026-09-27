@@ -144,7 +144,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Spotify | `NY_BACKLOG` | Ingen kode funnet |
+| Spotify | `ALLEREDE_BYGGET (D-313)` | `SpotifyTransport` (`live-transports.ts`) - `get_currently_playing`/`add_to_queue` (mot Spotify Web API). EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall (`spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`) - `client_id`/`client_secret` delt app-konfig lest direkte fra env, `credential_ref` peker på refresh-tokenet. D-41: `add_to_queue` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell hopp-over via `skip_to_next` (intet dedikert fjern-fra-kø-endepunkt, DEFERRED). D-64: ingen kanonisk musikk-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: get_currently_playing`. `SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SPOTIFY_CLIENT_ID` + `JARVIS_SPOTIFY_CLIENT_SECRET` + `JARVIS_SPOTIFY_REFRESH_TOKEN`) |
 | Apple Music | `NY_BACKLOG` | Ingen kode funnet |
 
 ### 4.9 Automatisering / workflow
