@@ -2761,6 +2761,48 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELEGRAM_TOKEN",
       output_trust: "untrusted", transport: transport("telegram")
     },
+    /**
+     * D-292 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - første konkrete slice av den brede ordren). SAMME mønster
+     * som `telegram` over (D-125/D-213) - `notify`/`get_bot_info` identisk
+     * begrunnelse, pluss to lese-handlinger for D-41 sin "maksimal nyttig
+     * kapabilitet"-plikt (Slack Web API sitt eget dokumenterte scope-sett,
+     * IKKE gjettet: `chat:write` for postMessage, `channels:read` for
+     * conversations.list, `channels:history` for conversations.history).
+     * Lagt til på SLUTTEN av arrayet, samme posisjonelle test-disiplin som
+     * telegram/vercel/read_repo_meta over.
+     */
+    {
+      tool_id: "slack", action: "notify", description: "Send melding til en Slack-kanal (chat.postMessage)",
+      input_schema: record({ channel: z.string(), message: z.string().max(4000) }), capability_class: "B",
+      scopes: ["chat:write"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "internal", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "get_bot_info", description: "Les botens egen identitet (Slack Web API auth.test) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
+      // Slack sin auth.test krever INGEN scope utover en gyldig token - `bot:read` er samme
+      // logiske plassholder-konvensjon som Telegrams get_bot_info over (getMe har heller ingen
+      // ekte OAuth-scope), IKKE en faktisk Slack-dokumentert scope-streng.
+      input_schema: empty, capability_class: "A", scopes: ["bot:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SLACK_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "list_channels", description: "List kanaler boten kan se (conversations.list, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["channels:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SLACK_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("slack")
+    },
+    {
+      tool_id: "slack", action: "read_channel_history", description: "Les nylige meldinger i en kanal (conversations.history, untrusted ingestion)",
+      input_schema: record({ channel: z.string(), limit: z.number().int().min(1).max(200).optional() }),
+      capability_class: "A", scopes: ["channels:history"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "untrusted", transport: transport("slack")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

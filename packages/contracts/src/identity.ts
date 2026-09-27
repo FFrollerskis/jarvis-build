@@ -54,12 +54,21 @@ export type AuthStrength = z.infer<typeof AuthStrengthSchema>;
  * finnes andre steder - `ChannelSchema` brukes kun i denne filen. Utvidelsen
  * legger kun til en gyldig verdi; ingen tidligere gyldig verdi fjernes.
  *
- * MERK (ærlighet om sporbarhet, CLAUDE.md): denne verdien er lagt til uten et
- * eget logget D-nummer i `docs/DECISIONS_AND_ASSUMPTIONS.md`, fordi den
- * økten som skrev dette eksplisitt ikke fikk endre `docs/*`. Bør formaliseres
- * med et D-xx av en økt som har den tilgangen.
+ * FORMALISERT (D-292, 2026-09-26): denne verdien manglet et logget D-nummer
+ * fordi økten som la den til ikke fikk endre `docs/*` - rettet i samme post
+ * som la til `slack` under (se D-292 i `DECISIONS_AND_ASSUMPTIONS.md`).
  */
-export const ChannelSchema = z.enum(["web", "mobile", "watch", "voice", "api", "system", "telegram", "desktop"]);
+/**
+ * `slack` (D-292, UA-7-generalisering av D-125 sitt `telegram`-mønster):
+ * Slack-boten (`SlackTransport`, `live-transports.ts`) er en TRANSPORT
+ * (D-64 `EXTERNAL_CANONICAL`), aldri en identitets- eller autoritetskilde -
+ * IDENTISK begrunnelse som `telegram` over. Krever INGEN migrasjon, samme
+ * grunn: `sessions.last_channel` er `text NOT NULL` uten CHECK-constraint,
+ * ingen uttømmende `switch` over `Channel` finnes andre steder.
+ */
+export const ChannelSchema = z.enum([
+  "web", "mobile", "watch", "voice", "api", "system", "telegram", "desktop", "slack"
+]);
 export type Channel = z.infer<typeof ChannelSchema>;
 
 /**

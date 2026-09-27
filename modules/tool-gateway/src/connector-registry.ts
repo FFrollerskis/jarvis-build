@@ -65,6 +65,15 @@ import type { ToolGateway } from "./gateway.ts";
  * kjørt for noen av disse 50, INGEN kode/credential-oppsett er gjort, D-108
  * (`EXTERNAL_CREDENTIAL_SETUP_POLICY=DEFER_UNTIL_FINAL_INTEGRATION_PHASE`)
  * gjelder uendret.
+ *
+ * D-292 (2026-09-26, Tobias direkte i chat: "jeg vil at alt i planen skal
+ * bygges og fullføres"): `slack` er FØRSTE av disse 50 backlog-punktene som
+ * faktisk er bygget - oppføringen ble oppdatert I PLACE (samme id, flyttet
+ * fra `category: "backlog"` til `"tool_gateway"` med en ny `live_test`),
+ * ALDRI duplisert som en ny, separat oppføring - se `connector-registry.
+ * test.ts` sitt unikhetskrav. De resterende 49 backlog-punktene er fortsatt
+ * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
+ * bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -223,7 +232,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
   { id: "twilio", display_name: "Twilio", category: "backlog", credential_refs: ["JARVIS_TWILIO_ACCOUNT_SID", "JARVIS_TWILIO_AUTH_TOKEN"] },
   { id: "whatsapp", display_name: "WhatsApp", category: "backlog", credential_refs: ["JARVIS_WHATSAPP_TOKEN"] },
-  { id: "slack", display_name: "Slack", category: "backlog", credential_refs: ["JARVIS_SLACK_BOT_TOKEN"] },
+  {
+    // D-292 (bygget, flyttet ut av backlog): "notify er ekte utsendelse,
+    // get_bot_info er trygg tilkoblingstest"-disiplin, samme som Telegram
+    // over. Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI
+    // en ny, separat oppføring med samme id (se filhode: unikhetskravet
+    // i connector-registry.test.ts).
+    id: "slack", display_name: "Slack", category: "tool_gateway",
+    credential_refs: ["JARVIS_SLACK_BOT_TOKEN"],
+    live_test: { tool_id: "slack", action: "get_bot_info", parameters: () => ({}) }
+  },
   { id: "discord", display_name: "Discord", category: "backlog", credential_refs: ["JARVIS_DISCORD_BOT_TOKEN"] },
   { id: "higgsfield", display_name: "Higgsfield", category: "backlog", credential_refs: ["JARVIS_HIGGSFIELD_API_KEY"] },
   { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },

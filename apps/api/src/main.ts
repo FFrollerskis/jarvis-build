@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -600,6 +600,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // slås opp på nytt ved hvert `notify`-kall i stedet for å fryses fra
     // `process.env` ved oppstart (samme bug-klasse/fiks som D-246).
     telegram: new TelegramTransport(() => readSecretProvider.get("JARVIS_TELEGRAM_CHAT_ID")),
+    // D-292: SlackTransport tar boten sin egen token direkte per kall (via
+    // ToolGateway.execute() sin vanlige credential-oppslag, SAMME mønster som
+    // GmailTransport/GithubTransport over) - ingen resolver-closure nødvendig
+    // her, i motsetning til Telegram sin `chat_id` (Slack sender `channel`
+    // som et vanlig model-/trusted-lag-parameter, ALDRI en fast bot-config).
+    slack: new SlackTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
