@@ -209,7 +209,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Sentry | `NY_BACKLOG` | D-64-audit (migrasjon `036_incidents.sql`) bekrefter eksplisitt «GCP/Cloudflare/Sentry/Vercel-deploy-sporing er ALLE fraværende» - Jarvis sin egen `incidents`-modell er `JARVIS_CANONICAL`, Sentry ville vært en ren evidenskilde bak den (samme mønster som Docker/D-105), ikke bygget |
+| Sentry | `ALLEREDE_BYGGET (D-297)` | `SentryTransport` (`live-transports.ts`) - organisasjonsscopet REST-API v0, `Authorization: Bearer`. D-64-sjekk kjørt eksplisitt FØR bygging (denne radens tidligere advarsel): `Incident`/`IncidentEvidence` (`modules/incidents`) er FORTSATT Jarvis sin egen kanoniske tilstandsmaskin, UBERØRT av denne connectoren - `sentry.update_issue` endrer kun Sentry sitt EGET issue-status-felt, aldri `Incident.status`. Samme "tynt API-gjennomtrekk, ikke en konkurrerende domenemodell"-rolle som Docker/D-105 (som OGSÅ er både en `docker`-ToolGateway-connector OG en evidenskilde for `Deployment.source`). `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i DECISIONS_AND_ASSUMPTIONS.md. |
 | Grafana | `NY_BACKLOG` | Ingen kode funnet |
 | Prometheus | `NY_BACKLOG` | Ingen kode funnet |
 

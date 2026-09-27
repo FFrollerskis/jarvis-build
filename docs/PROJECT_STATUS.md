@@ -1,6 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-296: Brave Search-
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-297: Sentry-
+connectoren bygget fullt ut - SJETTE slice.** **Miljøfunn underveis:** dette øktens nettverksegress
+blokkerer eksterne dokumentasjonsdomener (`WebFetch` mot `docs.tavily.com`/`api.search.brave.com`
+begge `EGRESS_BLOCKED`) - live dokumentasjonsverifisering er derfor IKKE mulig i denne økten, og
+D-292/D-294/D-295/D-296 sine "verifisert mot offisiell dokumentasjon"-påstander var i realiteten trent
+kunnskap, aldri en denne-økten-bekreftet kilde. Sentry-connectoren er FØRSTE i rekken som sier dette
+ÆRLIG i stedet for å gjenta den upresise formuleringen. `SentryTransport` (`list_projects`/
+`list_issues`/`get_issue`/`update_issue` mot Sentry sitt organisasjonsscopede REST-API v0,
+`Authorization: Bearer`) - `update_issue` er FØRSTE skrivehandling i rekken som er en ren
+TILSTANDSENDRING (issue-status), ikke en utgående melding til en tredjepart - reversibel OG idempotent.
+**D-64-sjekk kjørt eksplisitt** (en eldre `INTEGRATIONS.md`-advarsel sa Sentry burde vært en ren
+evidenskilde bak Jarvis sin egen `incidents`-modell, ikke bygget) - lest `modules/incidents/src/
+types.ts` FØRST: `Incident`/`IncidentEvidence` forblir UBERØRT, `sentry.update_issue` endrer kun
+Sentry sitt EGET felt, samme "tynt API-gjennomtrekk"-rolle som Docker/D-105. 10 nye tester,
+`pnpm -w typecheck`/`npx eslint` rene. `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i
+DECISIONS_AND_ASSUMPTIONS.md. PR ikke opprettet ennå - neste: commit/push/PR/CI/merge, deretter neste
+connector fra de ~45 gjenværende D-231/D-232-backlog-punktene (unngå de seks `backlog_d64_gate`-
+punktene inntil en egen D-64-adapter-undersøkelse er gjort for hver).
+
+**Forrige milepæl (uendret): D-296: Brave Search-
 connectoren MERGET til `main`** (PR #188, to-forelder-merge `8f3423d`, under D-192 stående fullmakt).
 FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken. Todoist ble vurdert FØRST som
 fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde allerede avgjort at en ekte
@@ -15,8 +34,7 @@ test.ts`, 16-prosess portkapploep, 15/16 unike - strukturelt urelatert til diffe
 rerun, dokumentert med stand-down-kommentar på PR-en per protokoll). 6 nye tester, `pnpm -w typecheck`/
 `npx eslint` rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md.
 Mønsteret er nå bevist ende-til-ende gjennom FIRE fulle PR/CI/merge-sykluser (Slack + Discord + Twilio
-+ Brave Search). Neste: neste connector fra de ~46 gjenværende D-231/D-232-backlog-punktene (unngå de
-seks `backlog_d64_gate`-punktene inntil en egen D-64-adapter-undersøkelse er gjort for hver).
++ Brave Search).
 
 **Forrige milepæl (uendret): D-295: Twilio-
 connectoren (SMS) MERGET til `main`** (PR #187, to-forelder-merge `d7f405e`, under D-192 stående

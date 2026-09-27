@@ -1060,6 +1060,70 @@ export class BraveSearchTransport implements ToolTransport {
 }
 
 /**
+ * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - femte slice). **Ærlighetsmerknad (se D-297 i DECISIONS_AND_
+ * ASSUMPTIONS.md):** dette øktens miljø blokkerer utgående nettverkstrafikk
+ * til vilkårlige eksterne domener (`docs.tavily.com`/`api.search.brave.com`
+ * begge bekreftet EGRESS_BLOCKED via `WebFetch` under bygging av denne
+ * connectoren) - API-formen under kunne derfor IKKE bekreftes mot en LEVENDE
+ * hentet kopi av Sentry sin offisielle dokumentasjon denne økten, i motsetning
+ * til hva D-292/D-294/D-295/D-296 sine kommentarer hevdet ("verifisert mot
+ * offisiell dokumentasjon"). Den er basert på Sentry sitt organisasjons-
+ * scopede REST-API v0 (`sentry.io/api/0/...`, `Authorization: Bearer <token>`)
+ * - et offentlig, stabilt uendret API-mønster over flere år - men dette er
+ * TRENT kunnskap, IKKE en denne-økten-bekreftet kilde. `SENTRY_LIVE_GATE`
+ * forblir derfor `PENDING_CREDENTIALS` og krever en EKTE live-test med et
+ * ekte token FØR `LIVE_VERIFIED` kan påstås - se `connector-registry.ts`.
+ *
+ * Organisasjons-slug er, som Twilio sin AccountSid (D-295), en resolver-
+ * closure slått opp PÅ NYTT ved hvert kall (IKKE frosset ved oppstart) -
+ * Sentry sitt organisasjonsscopede API krever slug-en i URL-stien for alle
+ * fire handlinger under. `update_issue` er den ENESTE skrivehandlingen -
+ * en PUT mot et eksisterende issue (status-endring: resolved/ignored/
+ * unresolved) er reversibel (en ny `update_issue` kan sette status tilbake)
+ * og idempotent (samme body gir samme sluttilstand, ULIKT Slack/Discord/
+ * Twilio sin `notify` som alltid oppretter en NY melding per kall).
+ */
+export class SentryTransport implements ToolTransport {
+  constructor(private readonly orgSlug: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const orgSlug = await this.orgSlug();
+    if (!orgSlug) throw new Error("sentry_org_slug_not_configured");
+    const response = await fetch(`https://sentry.io/api/0/organizations/${orgSlug}${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`sentry_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_projects") {
+      const body = await this.call("/projects/", credential);
+      return { data: body };
+    }
+    if (action === "list_issues") {
+      const query = encodeURIComponent(String(parameters["query"] ?? "is:unresolved"));
+      const body = await this.call(`/issues/?query=${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential);
+      return { data: body };
+    }
+    if (action === "update_issue") {
+      const body = await this.call(`/issues/${String(parameters["issue_id"])}/`, credential, {
+        method: "PUT",
+        body: JSON.stringify({ status: parameters["status"] })
+      });
+      return { data: body };
+    }
+    throw new Error(`sentry_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men

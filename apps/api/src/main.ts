@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -622,6 +622,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
     // slik Twilio krevde).
     brave_search: new BraveSearchTransport(),
+    // D-297: Sentry krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (organisasjons-slug, URL-sti-parameter for ALLE fire
+    // handlinger) - SAMME resolver-mot-readSecretProvider-mønster som Twilio
+    // sin AccountSid (D-295) over, slått opp PÅ NYTT ved hvert kall.
+    sentry: new SentryTransport(() => readSecretProvider.get("JARVIS_SENTRY_ORG_SLUG")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

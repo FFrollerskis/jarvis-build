@@ -2897,6 +2897,49 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
     },
+    /**
+     * D-297 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - femte slice). Sentry sitt organisasjonsscopede REST-API v0
+     * (`sentry.io/api/0/organizations/{org_slug}/...`), `Authorization:
+     * Bearer <token>`. **IKKE denne-økten-verifisert mot en live hentet kopi
+     * av offisiell dokumentasjon** (nettverksegress blokkert i dette miljøet,
+     * se `SentryTransport` sin doc-kommentar i `live-transports.ts` og D-297 i
+     * DECISIONS_AND_ASSUMPTIONS.md for full begrunnelse) - basert på trent
+     * kunnskap om et offentlig, år-stabilt API-mønster, IKKE gjettet fra
+     * forrige connectors mønster. `update_issue` er FØRSTE skrivehandling i
+     * denne rekken som er en REN TILSTANDSENDRING (issue-status), ikke en
+     * utgående melding til en tredjepart - reversibel OG idempotent, ULIKT
+     * Slack/Discord/Twilio sin `notify`.
+     */
+    {
+      tool_id: "sentry", action: "list_projects", description: "List prosjekter i organisasjonen (GET /organizations/{org}/projects/, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["project:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "list_issues", description: "List issues i organisasjonen (GET /organizations/{org}/issues/, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(200).optional() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "get_issue", description: "Les ett issue (GET /organizations/{org}/issues/{id}/, untrusted ingestion)",
+      input_schema: record({ issue_id: z.string() }),
+      capability_class: "A", scopes: ["project:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_SENTRY_API_TOKEN", output_trust: "untrusted", transport: transport("sentry")
+    },
+    {
+      tool_id: "sentry", action: "update_issue", description: "Endre issue-status (PUT /organizations/{org}/issues/{id}/, f.eks. resolved/ignored/unresolved)",
+      input_schema: record({ issue_id: z.string(), status: z.enum(["resolved", "ignored", "unresolved"]) }),
+      capability_class: "B", scopes: ["event:write"], reversible: true,
+      rollback_procedure: "ny update_issue-kalling med forrige status", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_SENTRY_API_TOKEN",
+      output_trust: "internal", transport: transport("sentry")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
