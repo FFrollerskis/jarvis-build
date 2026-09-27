@@ -174,6 +174,21 @@ import type { ToolGateway } from "./gateway.ts";
  * kunnskap, ikke denne-økten-bekreftet). De resterende 38 backlog-punktene
  * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
  * dem når de bygges.
+ *
+ * D-306 (2026-09-27, samme brede ordre, trettende slice, bygget parallelt
+ * mens D-305 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og
+ * jobbe ikke vent på ci"): `prometheus` bygget og flyttet ut av backlogen
+ * SAMME MÅTE - SAMME "typisk selv-hostet"-struktur som Grafana (D-305):
+ * `JARVIS_PROMETHEUS_API_BASE_URL` lagt til `credential_refs`, injisert som
+ * resolver-closure. Bearer-token-auth mot Prometheus sitt HTTP-API
+ * (`/api/v1/query`/`/api/v1/query_range`, PromQL). To handlinger -
+ * `query`/`query_range` - begge klasse A, INGEN skrivehandling finnes for
+ * denne connectoren i det hele tatt (D-41 sitt read-only-unntak ærlig
+ * oppfylt - Prometheus sitt HTTP-API tilbyr uansett ingen skrive-endepunkt
+ * for metrikkdata). Samme D-297-forbehold gjelder (trent kunnskap, ikke
+ * denne-økten-bekreftet). De resterende 37 backlog-punktene er fortsatt
+ * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
+ * bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -510,7 +525,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_GRAFANA_API_KEY", "JARVIS_GRAFANA_API_BASE_URL"],
     live_test: { tool_id: "grafana", action: "search_dashboards", parameters: () => ({}) }
   },
-  { id: "prometheus", display_name: "Prometheus", category: "backlog", credential_refs: ["JARVIS_PROMETHEUS_TOKEN"] },
+  {
+    // D-306 (bygget, flyttet ut av backlog): SAMME "typisk selv-hostet"-
+    // struktur som Grafana (D-305) - `JARVIS_PROMETHEUS_API_BASE_URL` lagt
+    // til `credential_refs` (samme "credential_refs må liste ALLE nødvendige
+    // verdier"-disiplin). Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-lærdommen).
+    id: "prometheus", display_name: "Prometheus", category: "tool_gateway",
+    credential_refs: ["JARVIS_PROMETHEUS_TOKEN", "JARVIS_PROMETHEUS_API_BASE_URL"],
+    live_test: { tool_id: "prometheus", action: "query", parameters: () => ({ query: "up" }) }
+  },
 
   // §4.15 OS / enhet (Windows/macOS er BEVISST UTELATT - IKKE EN CONNECTOR, Q-39)
   { id: "apns", display_name: "Apple Push Notification service", category: "backlog", credential_refs: ["JARVIS_APNS_AUTH_KEY"] },

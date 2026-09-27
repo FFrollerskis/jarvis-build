@@ -2098,3 +2098,46 @@ export class GrafanaTransport implements ToolTransport {
     throw new Error(`grafana_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-306 (bygget parallelt mens D-305 sin CI kjørte, samme brede ordre -
+ * trettende slice). **Samme ærlighetsforbehold som D-297-D-305**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). SAMME "typisk selv-hostet"-struktur som Grafana
+ * (D-305) - base-URL-en må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`),
+ * SAMME resolver-argument-mønster. `Authorization: Bearer <token>` mot
+ * Prometheus sitt HTTP-API (PromQL via query-parameter). STRUKTURELT LIK
+ * Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN skrivehandling
+ * finnes - D-41 sitt read-only-unntak ærlig oppfylt (Prometheus sitt
+ * HTTP-API tilbyr uansett ingen skrive-endepunkt for metrikkdata).
+ */
+export class PrometheusTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("prometheus_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`prometheus_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "query") {
+      const body = await this.call("/api/v1/query", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "query_range") {
+      const body = await this.call("/api/v1/query_range", {
+        query: String(parameters["query"]),
+        start: String(parameters["start"]),
+        end: String(parameters["end"]),
+        step: String(parameters["step"])
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`prometheus_unsupported_action_${action}`);
+  }
+}

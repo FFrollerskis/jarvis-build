@@ -3132,6 +3132,30 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
     },
+    /**
+     * D-306 (bygget parallelt mens D-305 sin CI kjørte - trettende slice).
+     * STRUKTURELT LIK Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN
+     * klasse B/C/D-handling finnes - Prometheus sitt HTTP-API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Prometheus sitt HTTP-API, se
+     * `PrometheusTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "prometheus", action: "query", description: "PromQL instant-spørring (GET /api/v1/query, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
+    {
+      tool_id: "prometheus", action: "query_range", description: "PromQL rekke-spørring over tid (GET /api/v1/query_range, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000), start: z.string().max(64), end: z.string().max(64), step: z.string().max(32) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

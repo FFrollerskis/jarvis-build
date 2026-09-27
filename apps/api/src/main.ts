@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -663,6 +663,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // fast SaaS-domene) - SAMME resolver-mot-readSecretProvider-mønster som
     // Sentry sin org-slug (D-297), slått opp PÅ NYTT ved hvert kall.
     grafana: new GrafanaTransport(() => readSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
+    // D-306: SAMME resolver-mot-readSecretProvider-mønster som Grafana over
+    // - Prometheus krever også en fast base-URL utover selve credential-en,
+    // siden Prometheus også er typisk selv-hostet.
+    prometheus: new PrometheusTransport(() => readSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

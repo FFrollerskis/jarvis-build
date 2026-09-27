@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -329,6 +329,8 @@ for (const tool of firstWaveTools({
   google_routes: new GoogleRoutesTransport(),
   // D-305: identisk wiring-mønster som apps/api/src/main.ts sin GrafanaTransport.
   grafana: new GrafanaTransport(() => toolSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
+  // D-306: identisk wiring-mønster som apps/api/src/main.ts sin PrometheusTransport.
+  prometheus: new PrometheusTransport(() => toolSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til

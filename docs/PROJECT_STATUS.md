@@ -1,28 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-305: Grafana-
-connectoren bygget fullt ut - TOLVTE konkrete byggeslice, bygget PARALLELT mens PR #190
-(D-301+D-302+D-303+D-304) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat: "fortsett og
-jobbe ikke vent på ci"). `GrafanaTransport` (`live-transports.ts`) - FØRSTE connector i denne
-rekken som er TYPISK selv-hostet (ingen fast SaaS-domene) - base-URL må konfigureres
-(`JARVIS_GRAFANA_API_BASE_URL` lagt til `credential_refs`), injisert som resolver-closure, SAMME
-mønster som Sentry sin org-slug (D-297). `Authorization: Bearer` mot Grafana sitt HTTP-API. To
-handlinger - `search_dashboards`/`get_dashboard` - begge klasse A, INGEN skrivehandling finnes.
-**D-64-sjekk:** ingen kanonisk "dashboard/observability"-domenemodell finnes i Jarvis - rent
-verktøy/evidenskilde. Samme D-297-ærlighetsforbehold (trent kunnskap, ikke denne-økten-bekreftet).
-`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place. Wiret inn i BÅDE
-`main.ts`/`worker-main.ts` med en resolver-argument-konstruktør (SAMME form som Sentry - teller
-IKKE med i "tom konstruktør"-tellingen, ingen bump nødvendig, kun nye `toMatch`-assertions). 7 nye
-tester (`d305-grafana-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-
-lister oppdatert (39→38 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx
-eslint apps modules packages` begge rene. `GRAFANA_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette
-landet på SAMME, fortsatt åpne PR #190 som D-301/D-302/D-303/D-304, oppdateres PR-tittel/body til
-å dekke alle fem D-numrene ærlig når committen pushes. Se D-305 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** push D-305, oppdater PR #190, vente på CI/merge under D-192 (PR-en har nå fem
-connectorer - god tid å la CI fange opp og merge før neste slice), deretter fortsette systematisk
-gjennom de resterende ~38 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-306: Prometheus-
+connectoren bygget fullt ut - TRETTENDE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301 til D-305) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat flere ganger: "fortsett
+og jobbe ikke vent på ci"). `PrometheusTransport` (`live-transports.ts`) - SAMME "typisk selv-
+hostet"-struktur som Grafana (D-305): base-URL må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`
+lagt til `credential_refs`), resolver-closure. `Authorization: Bearer` mot Prometheus sitt
+HTTP-API (PromQL). To handlinger - `query`/`query_range` - begge klasse A, INGEN skrivehandling
+finnes. **D-64-sjekk:** ingen kanonisk "metrikk/observability"-domenemodell finnes i Jarvis - rent
+verktøy/evidenskilde, samme rene status som Grafana. Fullfører "observability-paret"
+(Grafana+Prometheus). Samme D-297-ærlighetsforbehold. `connector-registry.ts` sin EKSISTERENDE
+D-232-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en resolver-
+argument-konstruktør (SAMME form som Grafana - ingen "tom konstruktør"-bump). 7 nye tester
+(`d306-prometheus-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-
+lister oppdatert (38→37 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx
+eslint apps modules packages` begge rene. `PROMETHEUS_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette
+landet på SAMME, fortsatt åpne PR #190 som D-301 til D-305, oppdateres PR-tittel/body til å dekke
+alle seks D-numrene ærlig når committen pushes. Se D-306 i DECISIONS_AND_ASSUMPTIONS.md.
+**Neste - VIKTIG:** PR #190 dekker nå SEKS connectorer - dette er den naturlige stoppen for denne
+runden; push D-306, oppdater PR #190 en siste gang, og LA CI faktisk fange opp og merge under D-192
+FØR neste connector påbegynnes, i stedet for å fortsette å utvide samme PR på ubestemt tid. Deretter
+fortsett systematisk gjennom de resterende ~37 backlog-connectorene i en NY, egen PR (ett-connector-
+per-PR gjenopptas) - unngå de seks `backlog_d64_gate`-punktene
 (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
 for hver.
+
+**Forrige milepæl (uendret): D-305: Grafana-connectoren bygget fullt ut - TOLVTE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302+D-303+D-304) sin CI fortsatt kjørte.**
+`GrafanaTransport` (`live-transports.ts`) - FØRSTE connector i denne rekken som er TYPISK selv-
+hostet - base-URL må konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), resolver-closure, SAMME mønster
+som Sentry sin org-slug (D-297). To handlinger - `search_dashboards`/`get_dashboard`.
+`GRAFANA_LIVE_GATE=PENDING_CREDENTIALS`. Se D-305 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-304: Google Routes-connectoren bygget fullt ut - ELLEVTE konkrete
 byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302+D-303) sin CI fortsatt kjørte.**
