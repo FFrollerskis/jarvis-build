@@ -1,18 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-295: Twilio-
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-296: Brave Search-
+connectoren bygget fullt ut - FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken.**
+Todoist ble vurdert FØRST som fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde
+allerede avgjort at en ekte Todoist-integrasjon MÅ bygges som sync-adapter inn i `@jarvis/operations`
+sin kanoniske `OperationsTask`, ikke en frittstående CRUD-flate - bevisst byttet til Brave Search i
+stedet for å bygge noe som ville brutt D-64. `BraveSearchTransport` (`web_search`/`news_search` mot
+Brave Search API, `X-Subscription-Token`-header) - STRUKTURELT ULIK Telegram/Slack/Discord/Twilio:
+INGEN skrivehandling finnes, leverandøren tilbyr genuint bare lesing, D-41 sitt read-only-unntak
+ærlig oppfylt. `web_search` selv brukes direkte som `live_test`. INGEN `ChannelSchema`-utvidelse
+(bevisst - dette er et verktøy, ikke en samtalekanal). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
+rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke
+opprettet ennå - neste: commit/push/PR/CI/merge, deretter neste connector fra de ~46 gjenværende
+D-231/D-232-backlog-punktene (unngå de seks `backlog_d64_gate`-punktene inntil en egen D-64-adapter-
+undersøkelse er gjort for hver).
+
+**Forrige milepæl (uendret): D-295: Twilio-
 connectoren (SMS) MERGET til `main`** (PR #187, to-forelder-merge `d7f405e`, under D-192 stående
-fullmakt). Begge kjøringer grønt på første forsøk (~14-17 min hver, ekte runnere hele veien, ingen
-CI-infrastrukturblokkering). `TwilioTransport` (`notify`/`get_account_info`/`read_messages` mot
-Twilio REST API, `Basic`-autentisering AccountSid:AuthToken - strukturelt ULIK Slack/Discord: INGEN
-OAuth-scope-konsept, AccountSid i URL-stien, OG et tredje påkrevd konfigurasjonsfelt (`From`-nummer)
-injisert som resolver-closure, samme mønster som Telegram sin `chat_id`). D-293 sin grep-FØRST-
-disiplin anvendt igjen - INGEN duplikat-id-regresjon for tredje gang på rad. Mønsteret er nå bevist
-ende-til-ende gjennom TRE fulle PR/CI/merge-sykluser (Slack + Discord + Twilio). `TWILIO_LIVE_GATE=
-PENDING_CREDENTIALS`. Se D-295 i DECISIONS_AND_ASSUMPTIONS.md. Neste: velger neste connector fra de
-~41 gjenværende D-231/D-232-backlog-punktene, samme grep-FØRST-disiplin + verifiser hver leverandørs
-faktiske auth-/scope-modell mot egen offisiell dokumentasjon (D-295 sin lærdom - ikke anta forrige
-leverandørs mønster gjelder uendret).
+fullmakt). `TwilioTransport` (`notify`/`get_account_info`/`read_messages` mot Twilio REST API,
+`Basic`-autentisering AccountSid:AuthToken - strukturelt ULIK Slack/Discord: INGEN OAuth-scope-
+konsept, AccountSid i URL-stien, OG et tredje påkrevd konfigurasjonsfelt (`From`-nummer) injisert
+som resolver-closure). D-293 sin grep-FØRST-disiplin anvendt igjen - INGEN duplikat-id-regresjon.
+Mønsteret er bevist ende-til-ende gjennom TRE fulle PR/CI/merge-sykluser (Slack + Discord + Twilio).
+Se D-295 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-294: Discord-connectoren
 MERGET til `main`** (PR #186, to-forelder-merge `4e4430c`, under D-192 stående fullmakt). D-293 sin
