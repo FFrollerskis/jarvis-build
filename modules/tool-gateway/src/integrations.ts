@@ -3029,6 +3029,32 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
     },
+    /**
+     * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" -
+     * niende slice). STRUKTURELT LIK Brave Search/Tavily: INGEN klasse
+     * B/C/D-handling finnes - Exa sitt nevrale søke-API tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Exa sitt offentlige API. TO separate,
+     * EGNE endepunkter (`POST /search`/`POST /findSimilar`), ULIK Tavily
+     * sitt delte endepunkt, se `ExaTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "exa", action: "web_search", description: "Nevralt websøk (POST /search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
+    {
+      tool_id: "exa", action: "find_similar", description: "Finn sider som ligner en gitt URL (POST /findSimilar, untrusted ingestion)",
+      input_schema: record({ url: z.string().max(2000), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

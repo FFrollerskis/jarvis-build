@@ -1,24 +1,33 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-301: Tavily-
-connectoren (websøk) bygget fullt ut - ÅTTENDE konkrete byggeslice, FØRSTE etter at PR #189
-(D-297+D-298+D-299+D-300) ble merget og lukket - tilbake til ett-connector-per-PR-mønsteret.**
-`TavilyTransport` (`live-transports.ts`) mot `POST https://api.tavily.com/search` - API-nøkkel som
-`api_key`-FELT I POST-BODY-en (IKKE en header, ULIK Sentry/Brave Search). Kun ÉTT reelt dokumentert
-endepunkt kjent - `web_search`/`news_search` skiller seg KUN på et `topic`-body-felt (general/news)
-mot SAMME endepunkt, i stedet for å gjette på et separat nyhets-endepunkts form. STRUKTURELT LIK
-Brave Search: INGEN skrivehandling finnes, D-41 sitt read-only-unntak ærlig oppfylt. Samme D-297-
-ærlighetsforbehold (trent kunnskap, ikke denne-økten-bekreftet, nettverksegress blokkert). `connector-
-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place (D-293-disiplinen). Wiret inn i
-BÅDE `main.ts`/`worker-main.ts` med tom konstruktør (`drive-runtime-wiring.test.ts` sin telling
-bumpet 9→10 i begge filer). 6 nye tester (`d301-tavily-transport.test.ts`), `connector-registry.
-test.ts` sine BACKLOG_IDS/live_test-lister oppdatert (43→42 gjenværende backlog-punkter). `pnpm -w
-typecheck` (32/32 pakker)/`npx eslint apps modules packages` begge rene. `TAVILY_LIVE_GATE=
-PENDING_CREDENTIALS`. Se D-301 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** commit/push/draft PR for
-D-301, deretter fortsette systematisk gjennom de resterende ~42 backlog-connectorene (Exa neste trygge
-kandidat, samme lavrisiko søke-API-bøtte som Brave Search/Tavily) - unngå de seks
-`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-
-adapter-undersøkelse er gjort for hver.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-302: Exa-
+connectoren (nevralt websøk) bygget fullt ut - NIENDE konkrete byggeslice, bygget PARALLELT mens
+PR #190 (D-301 Tavily) sin CI fortsatt kjørte** (Tobias direkte i chat: "fortsett og jobbe ikke vent
+på ci"). `ExaTransport` (`live-transports.ts`) mot `POST https://api.exa.ai/search`/`/findSimilar` -
+API-nøkkel som `x-api-key`-HEADER (IKKE `Authorization: Bearer`, IKKE et body-felt som Tavily). TO
+separate, EGNE dokumenterte endepunkter (`web_search`/`find_similar`), ULIK Tavily sitt delte
+endepunkt differensiert via et body-felt. STRUKTURELT LIK Brave Search/Tavily: INGEN skrivehandling
+finnes, D-41 sitt read-only-unntak ærlig oppfylt. Samme D-297-ærlighetsforbehold (trent kunnskap,
+ikke denne-økten-bekreftet, nettverksegress blokkert). `connector-registry.ts` sin EKSISTERENDE
+D-232-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom konstruktør
+(`drive-runtime-wiring.test.ts` sin telling bumpet 10→11 i begge filer). 6 nye tester
+(`d302-exa-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-lister
+oppdatert (42→41 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps
+modules packages` begge rene. `EXA_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette landet på SAMME,
+fortsatt åpne PR #190 som D-301, oppdateres PR-tittel/body til å dekke begge D-numrene ærlig når
+committen pushes. Se D-302 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** push D-302, oppdater PR #190,
+vente på CI/merge under D-192, deretter fortsette systematisk gjennom de resterende ~41
+backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
+(hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
+for hver.
+
+**Forrige milepæl (uendret): D-301: Tavily-connectoren (websøk) bygget fullt ut - ÅTTENDE konkrete
+byggeslice, FØRSTE etter at PR #189 (D-297+D-298+D-299+D-300) ble merget og lukket - tilbake til
+ett-connector-per-PR-mønsteret.** `TavilyTransport` (`live-transports.ts`) mot
+`POST https://api.tavily.com/search` - API-nøkkel som `api_key`-FELT I POST-BODY-en (IKKE en header,
+ULIK Sentry/Brave Search). Kun ÉTT reelt dokumentert endepunkt kjent - `web_search`/`news_search`
+skiller seg KUN på et `topic`-body-felt (general/news) mot SAMME endepunkt. `TAVILY_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-301 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-297+D-298+D-299+D-300 MERGET til `main`** (PR #189, to-forelder-merge
 `e050799`, under D-192 stående fullmakt - se blokkene under for full begrunnelse per D-nummer). Alle

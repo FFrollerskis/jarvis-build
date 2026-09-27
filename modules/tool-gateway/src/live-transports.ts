@@ -1952,3 +1952,45 @@ export class TavilyTransport implements ToolTransport {
     throw new Error(`tavily_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" - niende
+ * slice). **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300/D-301**
+ * (nettverksegress blokkert denne økten, `WebFetch` mot eksterne
+ * dokumentasjonsdomener bekreftet `EGRESS_BLOCKED` - se D-297): API-formen
+ * under er basert på trent kunnskap om Exa sitt offentlige, nevrale søke-API,
+ * IKKE en denne-økten-bekreftet kilde. Exa sender API-nøkkelen som en
+ * `x-api-key`-HEADER (IKKE `Authorization: Bearer`, IKKE et body-felt som
+ * Tavily). TO separate, EGNE endepunkter - `POST /search` (`web_search`) og
+ * `POST /findSimilar` (`find_similar`, tar en `url` i stedet for en `query`)
+ * - ULIK Tavily, som deler ETT endepunkt via et body-felt. STRUKTURELT LIK
+ * Brave Search/Tavily: D-41 sitt read-only-unntak ærlig oppfylt (søke-API,
+ * ingen skrivehandling).
+ */
+export class ExaTransport implements ToolTransport {
+  private async post(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.exa.ai${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": credential },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`exa_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body: Record<string, JsonValue> = { query: String(parameters["query"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/search", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "find_similar") {
+      const body: Record<string, JsonValue> = { url: String(parameters["url"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/findSimilar", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`exa_unsupported_action_${action}`);
+  }
+}

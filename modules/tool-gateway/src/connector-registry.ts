@@ -123,6 +123,17 @@ import type { ToolGateway } from "./gateway.ts";
  * kunnskap om ett kjent endepunkt, `POST /search`, ikke denne-økten-
  * bekreftet). De resterende 42 backlog-punktene er fortsatt uendret; samme
  * oppdater-i-place-disiplin gjelder for hver av dem når de bygges.
+ *
+ * D-302 (2026-09-27, samme brede ordre, niende slice, Tobias direkte i chat:
+ * "fortsett og jobbe ikke vent på ci"): `exa` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - tredje rent lesende (klasse A-kun) connector (samme
+ * D-41 read-only-unntak som Brave Search/Tavily). Exa sitt nevrale søke-API
+ * har TO separate, egne endepunkter (`POST /search` og `POST /findSimilar`),
+ * ULIK Tavily (som deler ETT endepunkt via et body-felt) - `find_similar` er
+ * derfor et EGET kall, ikke en variant av `web_search`. Samme D-297-forbehold
+ * gjelder (trent kunnskap, ikke denne-økten-bekreftet). De resterende 41
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -307,7 +318,18 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_TAVILY_API_KEY"],
     live_test: { tool_id: "tavily", action: "web_search", parameters: () => ({ query: "ping" }) }
   },
-  { id: "exa", display_name: "Exa", category: "backlog", credential_refs: ["JARVIS_EXA_API_KEY"] },
+  {
+    // D-302 (bygget, flyttet ut av backlog): samme "genuint bare lesing"-
+    // struktur som Brave Search (D-296)/Tavily (D-301) - Exa sitt nevrale
+    // søke-API (`POST /search`) tilbyr genuint bare lesing. `find_similar`
+    // bruker et EGET, separat dokumentert endepunkt (`POST /findSimilar`),
+    // IKKE samme kall som web_search med en annen body-form. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "exa", display_name: "Exa", category: "tool_gateway",
+    credential_refs: ["JARVIS_EXA_API_KEY"],
+    live_test: { tool_id: "exa", action: "web_search", parameters: () => ({ query: "ping" }) }
+  },
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
 
   // §4.7 Tale / video / media-AI

@@ -117,7 +117,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 |---|---|---|
 | Brave Search | `ALLEREDE_BYGGET (D-296)` | `BraveSearchTransport` (`live-transports.ts`) - `web_search`/`news_search` (GET mot Brave Search API, `X-Subscription-Token`-header). STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (brukt direkte, ingen egen tilkoblingstest-handling nødvendig). `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_BRAVE_SEARCH_API_KEY`) |
 | Tavily | `ALLEREDE_BYGGET (D-301)` | `TavilyTransport` (`live-transports.ts`) - `web_search`/`news_search` (POST `https://api.tavily.com/search`, `api_key` som felt i JSON-body, IKKE en header). Kun ÉTT reelt dokumentert endepunkt - handlingene skiller seg kun på `topic`-body-feltet (general/news). STRUKTURELT LIK Brave Search: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (query "ping"). `TAVILY_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TAVILY_API_KEY`) |
-| Exa | `NY_BACKLOG` | Ingen kode funnet |
+| Exa | `ALLEREDE_BYGGET (D-302)` | `ExaTransport` (`live-transports.ts`) - `web_search`/`find_similar`. TO separate endepunkter (`POST /search`/`POST /findSimilar`, `x-api-key`-header), ULIK Tavily sitt delte endepunkt. STRUKTURELT LIK Brave Search/Tavily: INGEN skrivehandling finnes - leverandøren tilbyr genuint bare lesing. `live_test: web_search` (query "ping"). `EXA_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_EXA_API_KEY`) |
 | Playwright | `NY_BACKLOG` | Ingen kode/dependency funnet. Jf. §1 punkt 2: nettleserautomatisering er siste utvei, kjører i sandbox med egne begrensninger når bygget |
 
 ### 4.7 Tale / video / media-AI
