@@ -3237,6 +3237,39 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_ONEDRIVE_TOKEN",
       output_trust: "internal", transport: transport("onedrive")
     },
+    /**
+     * D-310 (syttende slice, FØRSTE etter D-192-merge av PR #190 - tilbake
+     * til ett-connector-per-PR-mønsteret). `Authorization: Bearer`-header
+     * mot Microsoft Graph v1.0 (SAMME familie som OneDrive D-309).
+     * `list_messages` er klasse A (lesing). `send_mail` er BEVISST klasse D
+     * - SAMME klassifisering som `email.send` (Gmail) lenger opp i denne
+     * filen: sending av e-post er ikke reverserbar, derfor klasse D (D-192-
+     * strekpunktene/CLAUDE.md regel 2 - kritiske handlinger håndheves i
+     * deterministisk kode, ALDRI kun promptregler - `PolicyGateway`/
+     * `ToolGateway.execute()` sin generiske klasse D-håndtering, IKKE egen
+     * per-connector-kode, dekker denne handlingen identisk til `email.send`
+     * uten ekstra arbeid her). **IKKE denne-økten-verifisert mot en live
+     * hentet kopi av offisiell dokumentasjon** (nettverksegress blokkert i
+     * dette miljøet, samme D-297-forbehold) - basert på trent kunnskap om
+     * Microsoft Graph Mail API, se `MicrosoftOutlookTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "microsoft_outlook", action: "list_messages", description: "List nylige e-poster (GET /me/messages, untrusted ingestion)",
+      input_schema: record({ max: z.number().int().min(1).max(50).optional() }),
+      capability_class: "A", scopes: ["Mail.Read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 15_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_OUTLOOK_TOKEN", output_trust: "untrusted", transport: transport("microsoft_outlook")
+    },
+    {
+      // Sending av e-post er klasse D, SAMME begrunnelse som email.send over.
+      tool_id: "microsoft_outlook", action: "send_mail", description: "Send e-post via Outlook (POST /me/sendMail, krever signert godkjenning)",
+      input_schema: record({ to: z.string(), subject: z.string(), body: z.string() }),
+      capability_class: "D", scopes: ["Mail.Send"], reversible: false,
+      rollback_procedure: "ikke reverserbar - derfor klasse D", idempotent_external: false,
+      timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
+      output_trust: "internal", transport: transport("microsoft_outlook")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
