@@ -106,7 +106,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -126,8 +126,9 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/telegram: new TelegramTransport\(\(\) => readSecretProvider\.get\("JARVIS_TELEGRAM_CHAT_ID"\)\)/);
     expect(callBlock).toMatch(/twilio: new TwilioTransport\(\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_ACCOUNT_SID"\),\s*\(\) => readSecretProvider\.get\("JARVIS_TWILIO_FROM_NUMBER"\)\s*\)/);
     expect(callBlock).toMatch(/sentry: new SentryTransport\(\(\) => readSecretProvider\.get\("JARVIS_SENTRY_ORG_SLUG"\)\)/);
+    expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => readSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297 teller heller ikke med, samme begrunnelse som main.ts", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -138,8 +139,8 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     // D-294: +discord, D-296: +brave_search, D-298: +google_maps, D-299: +google_sheets, D-301:
     // +tavily, D-302: +exa, D-303: +google_places, D-304: +google_routes) i begge filer, selv om
     // de to filene fortsatt divergerer paa HVORDAN telegram konstrueres (hoistet konstant vs.
-    // inline), se describe "B". D-295/D-297: twilio/sentry har SAMME resolver-argument-form som
-    // telegram - teller heller ikke med her.
+    // inline), se describe "B". D-295/D-297/D-305: twilio/sentry/grafana har SAMME resolver-
+    // argument-form som telegram - teller heller ikke med her.
     expect(unconditionalConstructions).toHaveLength(13);
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
@@ -156,6 +157,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toContain("google_routes: new GoogleRoutesTransport()");
     expect(callBlock).toMatch(/twilio: new TwilioTransport\(\s*\(\) => toolSecretProvider\.get\("JARVIS_TWILIO_ACCOUNT_SID"\),\s*\(\) => toolSecretProvider\.get\("JARVIS_TWILIO_FROM_NUMBER"\)\s*\)/);
     expect(callBlock).toMatch(/sentry: new SentryTransport\(\(\) => toolSecretProvider\.get\("JARVIS_SENTRY_ORG_SLUG"\)\)/);
+    expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => toolSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

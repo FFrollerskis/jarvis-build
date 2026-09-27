@@ -1,27 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-304: Google
-Routes-connectoren bygget fullt ut - ELLEVTE konkrete byggeslice, bygget PARALLELT mens PR #190
-(D-301+D-302+D-303) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat: "fortsett og jobbe
-ikke vent på ci"). `GoogleRoutesTransport` (`live-transports.ts`) mot det ELDRE, stabile
-Directions-/Distance Matrix-API-et (`maps.googleapis.com/maps/api/directions|distancematrix/...`)
-- API-nøkkel som `key`-QUERY-PARAMETER, SAMME autentiseringsform som Google Maps/Places, bevisst
-IKKE det nyere v2 Routes-API-et. Fullfører "Google-lokasjons-trioen" (Maps/Places/Routes). To
-handlinger - `get_directions`/`get_distance_matrix` - begge klasse A, INGEN skrivehandling finnes.
-**D-64-sjekk:** SAMME domenevurdering som Google Maps/Places (begge allerede kjørt) - stateless
-tredjeparts-rute-oppslag, ikke eierens egen posisjon/geofence. Samme D-297-ærlighetsforbehold
-(trent kunnskap, ikke denne-økten-bekreftet). `connector-registry.ts` sin EKSISTERENDE
-D-232-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom
-konstruktør (`drive-runtime-wiring.test.ts` sin telling bumpet 12→13 i begge filer). 6 nye tester
-(`d304-google-routes-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-
-lister oppdatert (40→39 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx
-eslint apps modules packages` begge rene. `GOOGLE_ROUTES_LIVE_GATE=PENDING_CREDENTIALS`. Siden
-dette landet på SAMME, fortsatt åpne PR #190 som D-301/D-302/D-303, oppdateres PR-tittel/body til
-å dekke alle fire D-numrene ærlig når committen pushes. Se D-304 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** push D-304, oppdater PR #190, vente på CI/merge under D-192, deretter fortsette
-systematisk gjennom de resterende ~39 backlog-connectorene - unngå de seks
-`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-
-adapter-undersøkelse er gjort for hver.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-305: Grafana-
+connectoren bygget fullt ut - TOLVTE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301+D-302+D-303+D-304) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat: "fortsett og
+jobbe ikke vent på ci"). `GrafanaTransport` (`live-transports.ts`) - FØRSTE connector i denne
+rekken som er TYPISK selv-hostet (ingen fast SaaS-domene) - base-URL må konfigureres
+(`JARVIS_GRAFANA_API_BASE_URL` lagt til `credential_refs`), injisert som resolver-closure, SAMME
+mønster som Sentry sin org-slug (D-297). `Authorization: Bearer` mot Grafana sitt HTTP-API. To
+handlinger - `search_dashboards`/`get_dashboard` - begge klasse A, INGEN skrivehandling finnes.
+**D-64-sjekk:** ingen kanonisk "dashboard/observability"-domenemodell finnes i Jarvis - rent
+verktøy/evidenskilde. Samme D-297-ærlighetsforbehold (trent kunnskap, ikke denne-økten-bekreftet).
+`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place. Wiret inn i BÅDE
+`main.ts`/`worker-main.ts` med en resolver-argument-konstruktør (SAMME form som Sentry - teller
+IKKE med i "tom konstruktør"-tellingen, ingen bump nødvendig, kun nye `toMatch`-assertions). 7 nye
+tester (`d305-grafana-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-
+lister oppdatert (39→38 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx
+eslint apps modules packages` begge rene. `GRAFANA_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette
+landet på SAMME, fortsatt åpne PR #190 som D-301/D-302/D-303/D-304, oppdateres PR-tittel/body til
+å dekke alle fem D-numrene ærlig når committen pushes. Se D-305 i DECISIONS_AND_ASSUMPTIONS.md.
+**Neste:** push D-305, oppdater PR #190, vente på CI/merge under D-192 (PR-en har nå fem
+connectorer - god tid å la CI fange opp og merge før neste slice), deretter fortsette systematisk
+gjennom de resterende ~38 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
+(hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
+for hver.
+
+**Forrige milepæl (uendret): D-304: Google Routes-connectoren bygget fullt ut - ELLEVTE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302+D-303) sin CI fortsatt kjørte.**
+`GoogleRoutesTransport` (`live-transports.ts`) mot det ELDRE, stabile Directions-/Distance
+Matrix-API-et - API-nøkkel som `key`-QUERY-PARAMETER. Fullfører "Google-lokasjons-trioen"
+(Maps/Places/Routes). To handlinger - `get_directions`/`get_distance_matrix`. `GOOGLE_ROUTES_
+LIVE_GATE=PENDING_CREDENTIALS`. Se D-304 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-303: Google Places-connectoren bygget fullt ut - TIENDE konkrete
 byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302) sin CI fortsatt kjørte.**

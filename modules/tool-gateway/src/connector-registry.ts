@@ -159,6 +159,21 @@ import type { ToolGateway } from "./gateway.ts";
  * Samme D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
  * De resterende 39 backlog-punktene er fortsatt uendret; samme oppdater-i-
  * place-disiplin gjelder for hver av dem når de bygges.
+ *
+ * D-305 (2026-09-27, samme brede ordre, tolvte slice, bygget parallelt mens
+ * D-304 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og jobbe
+ * ikke vent på ci"): `grafana` bygget og flyttet ut av backlogen SAMME MÅTE -
+ * FØRSTE connector i denne rekken som er TYPISK selv-hostet (ingen fast
+ * SaaS-domene som sentry.io/api.tavily.com) - `JARVIS_GRAFANA_API_BASE_URL`
+ * lagt til `credential_refs` (samme "credential_refs må liste ALLE
+ * nødvendige verdier"-disiplin som D-245/D-246). Bearer-token-auth mot
+ * Grafana sitt HTTP-API (`/api/search`/`/api/dashboards/uid/{uid}`). To
+ * handlinger - `search_dashboards`/`get_dashboard` - begge klasse A, INGEN
+ * skrivehandling finnes for denne connectoren i det hele tatt (D-41 sitt
+ * read-only-unntak ærlig oppfylt). Samme D-297-forbehold gjelder (trent
+ * kunnskap, ikke denne-økten-bekreftet). De resterende 38 backlog-punktene
+ * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
+ * dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -484,7 +499,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_SENTRY_API_TOKEN", "JARVIS_SENTRY_ORG_SLUG"],
     live_test: { tool_id: "sentry", action: "list_projects", parameters: () => ({}) }
   },
-  { id: "grafana", display_name: "Grafana", category: "backlog", credential_refs: ["JARVIS_GRAFANA_API_KEY"] },
+  {
+    // D-305 (bygget, flyttet ut av backlog): Grafana er TYPISK selv-hostet
+    // (ingen fast SaaS-domene som sentry.io) - `JARVIS_GRAFANA_API_BASE_URL`
+    // lagt til `credential_refs` (samme "credential_refs må liste ALLE
+    // nødvendige verdier"-disiplin som D-245/D-246 sine Vipps MSN/Wallester
+    // ACCOUNT_ID). Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-lærdommen).
+    id: "grafana", display_name: "Grafana", category: "tool_gateway",
+    credential_refs: ["JARVIS_GRAFANA_API_KEY", "JARVIS_GRAFANA_API_BASE_URL"],
+    live_test: { tool_id: "grafana", action: "search_dashboards", parameters: () => ({}) }
+  },
   { id: "prometheus", display_name: "Prometheus", category: "backlog", credential_refs: ["JARVIS_PROMETHEUS_TOKEN"] },
 
   // §4.15 OS / enhet (Windows/macOS er BEVISST UTELATT - IKKE EN CONNECTOR, Q-39)

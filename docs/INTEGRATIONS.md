@@ -210,7 +210,7 @@ er derimot naturlige `EXTERNAL_CANONICAL`-adaptere UTEN denne konflikten.
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
 | Sentry | `ALLEREDE_BYGGET (D-297)` | `SentryTransport` (`live-transports.ts`) - organisasjonsscopet REST-API v0, `Authorization: Bearer`. D-64-sjekk kjørt eksplisitt FØR bygging (denne radens tidligere advarsel): `Incident`/`IncidentEvidence` (`modules/incidents`) er FORTSATT Jarvis sin egen kanoniske tilstandsmaskin, UBERØRT av denne connectoren - `sentry.update_issue` endrer kun Sentry sitt EGET issue-status-felt, aldri `Incident.status`. Samme "tynt API-gjennomtrekk, ikke en konkurrerende domenemodell"-rolle som Docker/D-105 (som OGSÅ er både en `docker`-ToolGateway-connector OG en evidenskilde for `Deployment.source`). `SENTRY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-297 i DECISIONS_AND_ASSUMPTIONS.md. |
-| Grafana | `NY_BACKLOG` | Ingen kode funnet |
+| Grafana | `ALLEREDE_BYGGET (D-305)` | `GrafanaTransport` (`live-transports.ts`) - `search_dashboards`/`get_dashboard` (GET mot Grafana sitt HTTP-API, `Authorization: Bearer`-header). FØRSTE connector som er TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), samme resolver-mønster som Sentry sin org-slug. STRUKTURELT LIK Sentry/Brave Search: INGEN skrivehandling finnes for denne connectoren - leverandøren brukes her kun til lesing. `live_test: search_dashboards`. `GRAFANA_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_GRAFANA_API_KEY` + `JARVIS_GRAFANA_API_BASE_URL`) |
 | Prometheus | `NY_BACKLOG` | Ingen kode funnet |
 
 ### 4.14 Sikkerhet

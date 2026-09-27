@@ -2059,3 +2059,42 @@ export class GoogleRoutesTransport implements ToolTransport {
     throw new Error(`google_routes_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-305 (bygget parallelt mens D-304 sin CI kjørte, samme brede ordre -
+ * tolvte slice). **Samme ærlighetsforbehold som D-297-D-304** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * FØRSTE connector i denne rekken som er TYPISK selv-hostet - Grafana har
+ * INGEN fast SaaS-domene som `sentry.io`/`api.tavily.com`, så base-URL-en må
+ * konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), samme resolver-argument-
+ * mønster som `SentryTransport` sin org-slug (D-297). `Authorization:
+ * Bearer <api_key>` mot Grafana sitt HTTP-API. STRUKTURELT LIK Google Maps/
+ * Places/Routes/Brave Search/Tavily/Exa: INGEN skrivehandling finnes - D-41
+ * sitt read-only-unntak ærlig oppfylt.
+ */
+export class GrafanaTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("grafana_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`grafana_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_dashboards") {
+      const query = parameters["query"] !== undefined ? `?query=${encodeURIComponent(String(parameters["query"]))}` : "";
+      const body = await this.call(`/api/search${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_dashboard") {
+      const body = await this.call(`/api/dashboards/uid/${encodeURIComponent(String(parameters["uid"]))}`, credential);
+      return { data: body };
+    }
+    throw new Error(`grafana_unsupported_action_${action}`);
+  }
+}

@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -658,6 +658,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // `destinations` som vanlige handlingsparametere per kall, ingen
     // resolver-closure nødvendig.
     google_routes: new GoogleRoutesTransport(),
+    // D-305: Grafana krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (base-URL, siden Grafana typisk er selv-hostet uten et
+    // fast SaaS-domene) - SAMME resolver-mot-readSecretProvider-mønster som
+    // Sentry sin org-slug (D-297), slått opp PÅ NYTT ved hvert kall.
+    grafana: new GrafanaTransport(() => readSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

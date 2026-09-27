@@ -3108,6 +3108,30 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
     },
+    /**
+     * D-305 (bygget parallelt mens D-304 sin CI kjørte - tolvte slice).
+     * STRUKTURELT LIK Google Maps/Places/Routes/Brave Search/Tavily/Exa:
+     * INGEN klasse B/C/D-handling finnes - Grafana sitt HTTP-API tilbyr her
+     * kun lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Grafana sitt HTTP-API, se
+     * `GrafanaTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "grafana", action: "search_dashboards", description: "Søk etter dashboards/mapper (GET /api/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400).optional() }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
+    {
+      tool_id: "grafana", action: "get_dashboard", description: "Les ett dashboard ved uid (GET /api/dashboards/uid/{uid}, untrusted ingestion)",
+      input_schema: record({ uid: z.string().max(200) }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
