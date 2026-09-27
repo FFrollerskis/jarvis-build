@@ -537,7 +537,19 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // "elevenlabs" (D-319) rett over, bare STT i stedet for TTS. Bygget som
   // `DeepgramStt` (`apps/voice-gateway/src/stt.ts`).
   { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
-  { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
+  {
+    // D-321 (bygget, flyttet ut av backlog): Telnyx er en meldingsleverandør
+    // (SMS/telefoni), IKKE en tale-leverandør (STT/TTS) - HØRER derfor hjemme
+    // her som en ordinær ToolGateway-connector, i motsetning til elevenlabs/
+    // deepgram (D-319/D-320) som ble fjernet fra dette registeret. SAMME
+    // "notify/get_account_info"-mønster som Twilio. `credential_refs`
+    // utvidet med FROM_NUMBER, samme "list alle nødvendige verdier"-disiplin
+    // som D-245/D-246/D-295. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    id: "telnyx", display_name: "Telnyx", category: "tool_gateway",
+    credential_refs: ["JARVIS_TELNYX_API_KEY", "JARVIS_TELNYX_FROM_NUMBER"],
+    live_test: { tool_id: "telnyx", action: "get_account_info", parameters: () => ({}) }
+  },
   {
     // D-295 (bygget, flyttet ut av backlog): samme "notify er ekte utsendelse,
     // get_account_info er trygg tilkoblingstest"-disiplin som Telegram/Slack/

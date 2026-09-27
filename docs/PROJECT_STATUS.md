@@ -1,31 +1,37 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-320: ANDRE
-tale-backlog-slice - Deepgram bygget som NY `SttAdapter`, SAMME mønster som ElevenLabs D-319**
-(Tobias direkte i chat: "Fortsett å jobbe mens ci kjører" - fortsatte å bygge mens PR #195/D-319
-sin CI fortsatt kjørte, "ikke vent på CI"-disiplinen anvendt på tale-backlog-familien). **Funn:**
-`deepgram` sto i `connector-registry.ts` som en ordinær `ToolGateway`-backlog-plassholder - IDENTISK
-feilklasse som `elevenlabs` (D-319). Bygget `DeepgramStt` (`apps/voice-gateway/src/stt.ts`) -
-Deepgram sitt forhåndsinnspilte/batch `POST /v1/listen` (SAMME "batch, ingen ekte partials"-
-disiplin som `OpenAiStt`/`LocalWhisperStt`), `Authorization: Token`-header, WAV-kropp via den
-gjenbrukte `pcm16ToWav()`-hjelpefunksjonen. `processor_terms_status` BEVISST `"NOT_VERIFIED"` -
-SAMME Q-32-begrunnelse som D-319. **Samme regresjonsdisiplin fulgt identisk:** BEVISST IKKE wiret
-inn i `main.ts` sin aktive STT-utvelgelse (ville risikert å fortrenge Tobias sin host-verifiserte
-lokale whisper.cpp-installasjon, D-223, med en behandler routingen uansett avviser). `deepgram`
-fjernet HELT fra `connector-registry.ts`. `PROCESSOR_REGION_MATRIX.md` fikk en ny, eksplisitt
-`IKKE VERIFISERT`-STT-rad. `connector-registry.test.ts` oppdatert (25 gjenværende backlog-punkter,
-61 totale registeroppføringer). NY `apps/voice-gateway/test/d320-deepgram-stt.test.ts` (9 tester).
-`pnpm --filter voice-gateway typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold som
-D-319. Se D-320 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-321: Telnyx
+bygget som en ORDINÆR `ToolGateway`-connector, IKKE en `SpeechAdapter`** (Tobias direkte i chat:
+"fortsett mens ci kjører" - fortsatte tale-familie-sveipen mens PR #195/D-319+D-320 sin CI
+fortsatt kjørte). I motsetning til ElevenLabs (D-319)/Deepgram (D-320), som BEGGE ble fjernet fra
+`connector-registry.ts`, viser D-64-vurderingen at Telnyx er STRUKTURELT ANNERLEDES: en
+telefoni-/SMS-plattform, IKKE en tale-leverandør - PROJECT_STATUS.md sin egen "Neste"-seksjon
+hadde allerede notert dette som en åpen vurdering FØR denne sliceen. Bygget `TelnyxTransport`
+(`live-transports.ts`) - Telnyx sitt REST-API v2, `Authorization: Bearer <api_key>` (ETT enkelt
+nøkkel, strukturelt ulik Twilio sin to-delte AccountSid/AuthToken-modell). To handlinger -
+`notify` (klasse B, `POST /v2/messages`, `from`-nummer som resolver-closure) og
+`get_account_info` (klasse A, `GET /v2/balance`, brukt som `live_test`). BEVISST DEFERRED:
+`read_messages` IKKE bygget (lavere sikker kjennskap til Telnyx sitt historikk-endepunkt).
+`connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"` →
+`"tool_gateway"`). Wiret inn i BÅDE `main.ts` og `worker-main.ts` (resolver-argument-form, samme
+mønster som Twilio). NY `modules/tool-gateway/test/d321-telnyx-transport.test.ts` (9 tester).
+`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (24 gjenværende
+backlog-punkter, 37 bygde, 61 totalt UENDRET siden telnyx allerede var talt med som
+backlog-plassholder). `pnpm -w typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold. Se
+D-321 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** de resterende tale-backlog-punktene (livekit/telnyx/openai_realtime) følger SAMME
-mønster - MEN `livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering,
-IKKE et enkelt REST-endepunkt) og `openai_realtime` er en nyere, potensielt raskere-bevegende
-beta-API - BEGGE lavere trent-kunnskap-sikkerhet enn ElevenLabs/Deepgram sine langvarig stabile
-REST-API-er, bør flagges eksplisitt lavere-sikkerhet hvis/når bygget, SAMME disiplin som
-higgsfield/runway/kling/google_veo allerede fikk i "Nytt merknad"-seksjonen under. `telnyx` er
-telefoni/SMS (Twilio-lik), ikke en STT/TTS-leverandør i det hele tatt - trenger sin egen,
-separat D-64-vurdering (mest sannsynlig en ordinær `ToolGateway`-connector, IKKE `SpeechAdapter`).
+**Neste:** de resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ flagges eksplisitt
+lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør
+(server-SDK/token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn
+ElevenLabs/Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende
+beta-API - BEGGE lavere trent-kunnskap-sikkerhet enn de tre allerede byggede tale-familie-punktene,
+SAMME disiplin som higgsfield/runway/kling/google_veo allerede fikk i "Nytt merknad"-seksjonen
+under. Dette avslutter sannsynligvis de trygt-byggbare punktene i tale-familien uten videre
+Tobias-avklaring (D-64-CRM-gruppa og video-gen-familien står fortsatt uavklart).
+
+**Forrige milepæl (uendret): D-320: ANDRE tale-backlog-slice - Deepgram bygget som NY
+`SttAdapter`, SAMME mønster som ElevenLabs D-319.** Se D-320 i DECISIONS_AND_ASSUMPTIONS.md for
+full detalj.
 
 **Forrige milepæl (uendret): D-319: FØRSTE tale-backlog-slice - ElevenLabs bygget som NY
 `TtsAdapter`, IKKE en `ToolGateway`-connector.** Se D-319 i DECISIONS_AND_ASSUMPTIONS.md for full

@@ -3399,6 +3399,30 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
       credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
     },
+    /**
+     * D-321. SAMME "notify er ekte utsendelse (klasse B), get_account_info er
+     * trygg tilkoblingstest (klasse A)"-mønster som Telegram/Slack/Discord/
+     * Twilio (D-295) - Telnyx er en ordinær `ToolGateway`-meldingsleverandør-
+     * connector, IKKE en `SpeechAdapter` (D-64-vurdering FØR bygging, se
+     * `TelnyxTransport` sin doc-kommentar i `live-transports.ts`). ETT enkelt
+     * Bearer-API-nøkkel (IKKE Twilio sin to-delte AccountSid/AuthToken-modell)
+     * - `telnyx:send`/`telnyx:read` er interne Jarvis-plassholder-scopes,
+     * SAMME konvensjon som Twilio sin `sms:send`/`sms:read`.
+     */
+    {
+      tool_id: "telnyx", action: "notify", description: "Send SMS (POST /v2/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      scopes: ["telnyx:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TELNYX_API_KEY", output_trust: "internal", transport: transport("telnyx")
+    },
+    {
+      tool_id: "telnyx", action: "get_account_info", description: "Les kontoens gjeldende saldo (GET /v2/balance) - brukes som tilkoblingstest, ALDRI en ekte SMS-utsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["telnyx:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
+      output_trust: "untrusted", transport: transport("telnyx")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

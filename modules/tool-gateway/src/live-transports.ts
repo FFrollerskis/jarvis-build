@@ -2465,3 +2465,60 @@ export class OpenAIImagesTransport implements ToolTransport {
     throw new Error(`openai_images_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-321 (tredje tale-backlog-punkt vurdert i sveipen, MEN strukturelt ulik
+ * D-319/D-320: Telnyx er telefoni-/SMS-plattform, IKKE en STT/TTS-leverandør
+ * - D-64-vurderingen som allerede ble notert som nødvendig i PROJECT_STATUS.md
+ * FØR denne sliceen konkluderer med at Telnyx hører hjemme som en ordinær
+ * `ToolGateway`-connector, SAMME "meldingsleverandør"-kategori som Twilio
+ * (D-295) - IKKE bak `SpeechAdapter`). Telnyx sitt REST-API v2
+ * (`api.telnyx.com/v2/...`, `Authorization: Bearer <api_key>` - ETT enkelt
+ * API-nøkkel, IKKE Twilio sin to-delte AccountSid/AuthToken-modell) - SAMME
+ * "notify er ekte utsendelse (klasse B), get_account_info er trygg
+ * tilkoblingstest (klasse A)"-mønster som Telegram/Slack/Discord/Twilio.
+ * `from`-nummeret injiseres som en resolver-closure (SAMME mønster som
+ * Twilio sin `fromNumber`/WhatsApp sin `phone_number_id`) - Jarvis sin egen
+ * avsenderidentitet, IKKE en per-kall-parameter. `get_account_info` bruker
+ * Telnyx sitt kjente, dokumenterte `GET /v2/balance`-endepunkt (kontoens
+ * gjeldende saldo) - trygt, sideeffekt-fritt, brukes som `live_test`.
+ * BEVISST DEFERRED (D-41 eksplisitt merket, ikke stille utelatt): en
+ * `read_messages`-handling (Twilio sin tredje handling) er IKKE bygget her -
+ * Telnyx sitt meldingshistorikk-API har en annen, mindre sikkert kjent
+ * endepunktform enn `/v2/messages`/`/v2/balance`, utsatt til en senere
+ * utvidelse i stedet for gjettet frem. Samme D-297-ærlighetsforbehold som
+ * resten av denne sveipen: API-formen er Telnyx sin langvarig dokumenterte,
+ * trente kunnskap - forsøkt, men IKKE denne-økten-verifisert mot live
+ * dokumentasjon (nettverksegress bekreftet blokkert).
+ */
+export class TelnyxTransport implements ToolTransport {
+  constructor(private readonly fromNumber: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://api.telnyx.com/v2${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`telnyx_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const from = await this.fromNumber();
+      if (!from) throw new Error("telnyx_from_number_not_configured");
+      const body = await this.call("/messages", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ from, to: String(parameters["to"]), text: String(parameters["message"]) })
+      });
+      const data = (body as { data?: { id?: string } }).data;
+      return { external_id: data?.id ?? "sent" };
+    }
+    if (action === "get_account_info") {
+      const body = await this.call("/balance", credential);
+      return { data: (body as { data?: JsonValue }).data ?? null };
+    }
+    throw new Error(`telnyx_unsupported_action_${action}`);
+  }
+}
