@@ -1,33 +1,35 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-319: FØRSTE
-tale-backlog-slice - ElevenLabs bygget som NY `TtsAdapter`, IKKE en `ToolGateway`-connector**
-(Tobias direkte i chat: "Bygg videre", etter at han fikk fire harder-tier-kategorier presentert -
-valgte ingen spesifikk, så jeg kjørte den D-64-stil arkitektursjekken mot `SpeechAdapter` jeg
-hadde lovet, siden den kunne gjøres mot EKSISTERENDE kildekode, ikke ekstern dokumentasjon).
-**Funn:** `elevenlabs` sto i `connector-registry.ts` som en ordinær `ToolGateway`-backlog-
-plassholder - STRUKTURELT FEIL sted (CLAUDE.md regel 3 navngir `SpeechAdapter` eksplisitt for
-tale-leverandører). Bygget i stedet `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`) - `POST
-/v1/text-to-speech/{voice_id}?output_format=pcm_16000`, `xi-api-key`-header, rå PCM 16kHz (SAMME
-samplerate som resten av pipelinen, unngår OpenAI sitt 24kHz-gap). `processor_terms_status`
-BEVISST `"NOT_VERIFIED"` (fail-closed, ALDRI `VERIFIED` uten en ekte Tobias-kontovilkårs-
-gjennomgang, Q-32-mønster) - `evaluateSpeechRouting()` avviser behandleren for ALLE memory spaces
-inntil da. **Regresjonsrisiko unngått:** BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-
-utvelgelse - routing-porten har INGEN stille fallback når en valgt adapter avvises, så å legge
-ElevenLabs i prioritetskjeden kunne FORTRENGT Tobias sin allerede host-verifiserte, fungerende
-lokale piper-installasjon (D-223) med en behandler som uansett ville blitt avvist. `elevenlabs`
-fjernet HELT fra `connector-registry.ts` (samme "feil sted"-disiplin som microsoft_365/D-318, men
-strukturelt ulik grunn). `PROCESSOR_REGION_MATRIX.md` fikk en ny, eksplisitt `IKKE VERIFISERT`-
-rad (regel 1). `connector-registry.test.ts` oppdatert (26 gjenværende backlog-punkter, 62 totale
-registeroppføringer). NY `apps/voice-gateway/test/d319-elevenlabs-tts.test.ts` (11 tester).
-`pnpm --filter voice-gateway typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold: API-
-formen er trent kunnskap, forsøkt men IKKE denne-økten-verifisert (nettverksegress blokkert). Se
-D-319 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-320: ANDRE
+tale-backlog-slice - Deepgram bygget som NY `SttAdapter`, SAMME mønster som ElevenLabs D-319**
+(Tobias direkte i chat: "Fortsett å jobbe mens ci kjører" - fortsatte å bygge mens PR #195/D-319
+sin CI fortsatt kjørte, "ikke vent på CI"-disiplinen anvendt på tale-backlog-familien). **Funn:**
+`deepgram` sto i `connector-registry.ts` som en ordinær `ToolGateway`-backlog-plassholder - IDENTISK
+feilklasse som `elevenlabs` (D-319). Bygget `DeepgramStt` (`apps/voice-gateway/src/stt.ts`) -
+Deepgram sitt forhåndsinnspilte/batch `POST /v1/listen` (SAMME "batch, ingen ekte partials"-
+disiplin som `OpenAiStt`/`LocalWhisperStt`), `Authorization: Token`-header, WAV-kropp via den
+gjenbrukte `pcm16ToWav()`-hjelpefunksjonen. `processor_terms_status` BEVISST `"NOT_VERIFIED"` -
+SAMME Q-32-begrunnelse som D-319. **Samme regresjonsdisiplin fulgt identisk:** BEVISST IKKE wiret
+inn i `main.ts` sin aktive STT-utvelgelse (ville risikert å fortrenge Tobias sin host-verifiserte
+lokale whisper.cpp-installasjon, D-223, med en behandler routingen uansett avviser). `deepgram`
+fjernet HELT fra `connector-registry.ts`. `PROCESSOR_REGION_MATRIX.md` fikk en ny, eksplisitt
+`IKKE VERIFISERT`-STT-rad. `connector-registry.test.ts` oppdatert (25 gjenværende backlog-punkter,
+61 totale registeroppføringer). NY `apps/voice-gateway/test/d320-deepgram-stt.test.ts` (9 tester).
+`pnpm --filter voice-gateway typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold som
+D-319. Se D-320 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** de resterende tale-backlog-punktene (deepgram/livekit/telnyx/openai_realtime) følger
-SAMME mønster - egne `SttAdapter`/`TtsAdapter`-klasser, `NOT_VERIFIED`, IKKE wiret inn i
-`main.ts`. Video-gen-familien og D-64-CRM-gruppa står fortsatt uavklart, se "Nytt merknad"-
-seksjonen under.
+**Neste:** de resterende tale-backlog-punktene (livekit/telnyx/openai_realtime) følger SAMME
+mønster - MEN `livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering,
+IKKE et enkelt REST-endepunkt) og `openai_realtime` er en nyere, potensielt raskere-bevegende
+beta-API - BEGGE lavere trent-kunnskap-sikkerhet enn ElevenLabs/Deepgram sine langvarig stabile
+REST-API-er, bør flagges eksplisitt lavere-sikkerhet hvis/når bygget, SAMME disiplin som
+higgsfield/runway/kling/google_veo allerede fikk i "Nytt merknad"-seksjonen under. `telnyx` er
+telefoni/SMS (Twilio-lik), ikke en STT/TTS-leverandør i det hele tatt - trenger sin egen,
+separat D-64-vurdering (mest sannsynlig en ordinær `ToolGateway`-connector, IKKE `SpeechAdapter`).
+
+**Forrige milepæl (uendret): D-319: FØRSTE tale-backlog-slice - ElevenLabs bygget som NY
+`TtsAdapter`, IKKE en `ToolGateway`-connector.** Se D-319 i DECISIONS_AND_ASSUMPTIONS.md for full
+detalj (samme mønster D-320 gjenbrukte identisk for Deepgram/STT).
 
 **Forrige milepæl (uendret): D-318: registeropprydning - "Microsoft 365" fjernet HELT som egen
 backlog-plassholder** (Tobias direkte

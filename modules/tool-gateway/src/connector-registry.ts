@@ -533,7 +533,9 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // denne registrerings-/credential-helsesjekk-dashboardet. Samme
   // "ALLEREDE_DEKKET/ikke-her, ikke stille utelatt"-disiplin som
   // microsoft_365 (D-318) - se DECISIONS_AND_ASSUMPTIONS.md D-319.
-  { id: "deepgram", display_name: "Deepgram", category: "backlog", credential_refs: ["JARVIS_DEEPGRAM_API_KEY"] },
+  // D-320: "deepgram" fjernet HELT herfra - SAMME grunn/mønster som
+  // "elevenlabs" (D-319) rett over, bare STT i stedet for TTS. Bygget som
+  // `DeepgramStt` (`apps/voice-gateway/src/stt.ts`).
   { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
   { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
   {

@@ -47,11 +47,11 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
   });
 });
 
-describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over; D-318 fjernet 'microsoft_365' og D-319 fjernet 'elevenlabs' HELT fra registeret - hverken ALLEREDE_DEKKET (microsoft_365) eller EGENTLIG hjemmehørende her i det hele tatt (elevenlabs - se D-319, tale-leverandør, ikke en ToolGateway-connector) - registerets TOTALE lengde er derfor NED med to)", () => {
+describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over; D-318 fjernet 'microsoft_365', D-319 fjernet 'elevenlabs' og D-320 fjernet 'deepgram' HELT fra registeret - microsoft_365 var ALLEREDE_DEKKET, elevenlabs/deepgram hører EGENTLIG ikke hjemme her i det hele tatt (tale-leverandører, ikke ToolGateway-connectorer) - registerets TOTALE lengde er derfor NED med tre)", () => {
   const BACKLOG_IDS = [
     "google_cloud",
     "playwright",
-    "openai_realtime", "deepgram", "livekit", "telnyx",
+    "openai_realtime", "livekit", "telnyx",
     "higgsfield", "runway", "kling", "google_veo",
     "apple_music",
     "zapier", "apple_shortcuts",
@@ -62,17 +62,17 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
 
   const D64_GATE_IDS = ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"];
 
-  it("eksakt 26 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319 fjernet HELT, bygget som ElevenLabsTts i voice-gateway i stedet)", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(26);
-    expect(BACKLOG_IDS.length).toBe(26);
+  it("eksakt 25 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319/'deepgram' D-320 fjernet HELT, bygget som ElevenLabsTts/DeepgramStt i voice-gateway i stedet)", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(25);
+    expect(BACKLOG_IDS.length).toBe(25);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 62 oppføringer totalt (36 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316 + 26 gjenværende D-232-backlog-punkter; D-318 fjernet 'microsoft_365' og D-319 fjernet 'elevenlabs' HELT fra registeret)", () => {
-    expect(CONNECTOR_REGISTRY.length).toBe(62);
+  it("registeret har nøyaktig 61 oppføringer totalt (36 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316 + 25 gjenværende D-232-backlog-punkter; D-318/D-319/D-320 fjernet 'microsoft_365'/'elevenlabs'/'deepgram' HELT fra registeret)", () => {
+    expect(CONNECTOR_REGISTRY.length).toBe(61);
   });
 
   it("INGEN av de 50 nye backlog-oppføringene har live_test", () => {
@@ -113,6 +113,11 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
   it("'elevenlabs' er BEVISST IKKE registrert (D-319) - tale-leverandør (TTS), bygget som ElevenLabsTts (apps/voice-gateway/src/tts.ts) bak SpeechAdapter/PROCESSOR_REGION_MATRIX.md, IKKE en ToolGateway-connector", () => {
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     expect(registryIds.has("elevenlabs")).toBe(false);
+  });
+
+  it("'deepgram' er BEVISST IKKE registrert (D-320) - tale-leverandør (STT), bygget som DeepgramStt (apps/voice-gateway/src/stt.ts) bak SpeechAdapter/PROCESSOR_REGION_MATRIX.md, IKKE en ToolGateway-connector", () => {
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    expect(registryIds.has("deepgram")).toBe(false);
   });
 
   it("hver nye backlog-oppføring rendres som 'ikke konfigurert', presence_only, helse null - EKSAKT samme mønster som en eksisterende ukonfigurert connector (Fiken/Stripe/Vipps)", async () => {

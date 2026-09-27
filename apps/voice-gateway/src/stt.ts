@@ -147,6 +147,93 @@ export class OpenAiStt implements SttAdapter {
 }
 
 /**
+ * D-320 (harder-tier tale-backlog, andre slice - SAMME D-64-stil sjekk mot
+ * `SpeechAdapter` som D-319/ElevenLabs gjorde for TTS-siden): `deepgram`
+ * fjernet fra `connector-registry.ts` sin backlog og bygget her som en NY
+ * `SttAdapter`, IKKE en `ToolGateway`-connector - se `tts.ts` sin
+ * `ElevenLabsTts`-klassekommentar for full begrunnelse (SAMME resonnement,
+ * bare STT i stedet for TTS).
+ *
+ * `processor.processor_terms_status` er BEVISST `"NOT_VERIFIED"` - SAMME
+ * Q-32-mønster som ElevenLabs (D-319): krever en EKTE Tobias-gjennomgang av
+ * Deepgram sin Data controls-side FØR `evaluateSpeechRouting()` slipper
+ * behandleren gjennom for noen memory space. BEVISST IKKE wiret inn i
+ * `main.ts` sin aktive adapter-utvelgelse - SAMME regresjonsbegrunnelse som
+ * D-319 (routing-porten har ingen stille fallback, ville risikert å
+ * fortrenge Tobias sin host-verifiserte lokale whisper.cpp-installasjon,
+ * D-223, med en behandler routingen uansett avviser).
+ *
+ * Deepgram sitt forhåndsinnspilte ("batch") `/v1/listen`-endepunkt brukes -
+ * SAMME "batch, ingen ekte partials"-disiplin som `OpenAiStt`/`LocalWhisperStt`
+ * over (Deepgram tilbyr ekte streaming via WebSocket, men det er en HELT
+ * annen transportform enn denne buffer-og-transkriber-kontrakten - vurderes
+ * ikke her). Lyden sendes som en WAV-fil (`pcm16ToWav()`, SAMME hjelpefunksjon
+ * som `OpenAiStt`/`LocalWhisperStt` bruker) i selve request-kroppen - Deepgram
+ * detekterer format/samplerate fra WAV-headeren selv, ingen separate
+ * `encoding`/`sample_rate`-query-parametre nødvendig når kroppen allerede er
+ * en gyldig WAV-fil. `language`-query-parameteret defaulter til norsk, SAMME
+ * som `OpenAiStt`/`LocalWhisperStt`.
+ *
+ * Samme D-297-ærlighetsforbehold som D-319/ElevenLabs: API-formen
+ * (`Authorization: Token <key>`-header, `POST /v1/listen`, JSON-svaret sin
+ * `results.channels[0].alternatives[0].transcript`-struktur) er Deepgram sin
+ * langvarig dokumenterte, stabile konvensjon - trent kunnskap, IKKE denne-
+ * økten-verifisert mot live dokumentasjon (nettverksegress til
+ * `deepgram.com`/doc-domener bekreftet blokkert).
+ */
+export class DeepgramStt implements SttAdapter {
+  readonly name = "deepgram-stt";
+  /** EKSTERN databehandler - se klassekommentaren for D-320/Q-32-status. */
+  readonly processor: SpeechProcessorDeclaration = {
+    processor_id: "deepgram-listen",
+    locality: "external",
+    processor_row_declared: true,
+    processor_terms_status: "NOT_VERIFIED"
+  };
+  constructor(
+    private readonly apiKey: string | undefined = process.env["JARVIS_DEEPGRAM_API_KEY"],
+    private readonly language: string = process.env["JARVIS_DEEPGRAM_LANG"] ?? "no",
+    /** PCM-samplerate for wav-innpakking - SAMME 16 kHz-forventning som resten av piloten. */
+    private readonly sampleRate: number = 16000
+  ) {}
+
+  available(): boolean {
+    return Boolean(this.apiKey);
+  }
+
+  startStream(): SttStream {
+    if (!this.apiKey) {
+      throw new Error("deepgram_stt_not_configured");
+    }
+    const chunks: Buffer[] = [];
+    const { apiKey, language, sampleRate } = this;
+    return {
+      pushAudio(frame: Buffer): void {
+        chunks.push(frame);
+      },
+      async end(): Promise<string> {
+        const wav = pcm16ToWav(Buffer.concat(chunks), sampleRate);
+        const response = await fetch(`https://api.deepgram.com/v1/listen?language=${language}`, {
+          method: "POST",
+          headers: { authorization: `Token ${apiKey}`, "content-type": "audio/wav" },
+          body: wav
+        });
+        if (!response.ok) {
+          throw new Error(`deepgram_stt_error_${response.status}`);
+        }
+        const body = (await response.json()) as {
+          results?: { channels?: Array<{ alternatives?: Array<{ transcript?: string }> }> };
+        };
+        return body.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
+      },
+      onPartial(): void {
+        // Batch-API gir ikke partials; streaming-kandidater vurderes i benchmark.
+      }
+    };
+  }
+}
+
+/**
  * Task #125 (D-217): lokal STT via whisper.cpp-binæren i `JARVIS_WHISPER_BIN`
  * (full sti til den installerte kjørbare filen - navnet varierer mellom
  * whisper.cpp-versjoner, f.eks. `main`/`whisper-cli`, derfor ALDRI hardkodet
