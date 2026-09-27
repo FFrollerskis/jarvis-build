@@ -3351,6 +3351,29 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
     },
+    /**
+     * D-315 (bygget, flyttet ut av backlog): Make (tidligere Integromat).
+     * `Authorization: Token <token>` (IKKE Bearer) mot Make sitt API v2 -
+     * zone-spesifikk base-URL, resolver-closure, SAMME mønster som n8n.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Make sitt API v2, se `MakeTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "make", action: "get_current_user", description: "Les egen brukeridentitet (GET /api/v2/users/me) - brukes som tilkoblingstest, ALDRI en ekte kjøring",
+      input_schema: empty,
+      capability_class: "A", scopes: ["user:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "untrusted", transport: transport("make")
+    },
+    {
+      tool_id: "make", action: "run_scenario", description: "Kjør en scenario (POST /api/v2/scenarios/{id}/run)",
+      input_schema: record({ scenario_id: z.string() }),
+      capability_class: "B", scopes: ["scenarios:run"], reversible: true,
+      rollback_procedure: "ingen generell angrehandling - avhenger av hva scenarioet faktisk gjør, vurderes per scenario",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

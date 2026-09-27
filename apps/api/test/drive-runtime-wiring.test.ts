@@ -135,6 +135,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => readSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/n8n: new N8nTransport\(\(\) => readSecretProvider\.get\("JARVIS_N8N_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => readSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
+    expect(callBlock).toMatch(/make: new MakeTransport\(\(\) => readSecretProvider\.get\("JARVIS_MAKE_API_BASE_URL"\)\)/);
   });
   it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
@@ -175,6 +176,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => toolSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => toolSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => toolSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
+    expect(callBlock).toMatch(/make: new MakeTransport\(\(\) => toolSecretProvider\.get\("JARVIS_MAKE_API_BASE_URL"\)\)/);
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

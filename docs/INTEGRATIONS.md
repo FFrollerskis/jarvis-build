@@ -153,7 +153,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 |---|---|---|
 | n8n | `ALLEREDE_BYGGET (D-311)` | `N8nTransport` (`live-transports.ts`) - `list_workflows`/`activate_workflow` (mot n8n sitt REST-API v1, `X-N8N-API-KEY`-header - IKKE `Authorization: Bearer`). TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_N8N_API_BASE_URL`), samme resolver-mønster som Grafana/Prometheus. D-41: `activate_workflow` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell deaktivering (dedikert `deactivate_workflow` DEFERRED). D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: list_workflows`. `N8N_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_N8N_API_KEY` + `JARVIS_N8N_API_BASE_URL`) |
 | Zapier | `NY_BACKLOG` | Ingen kode funnet |
-| Make | `NY_BACKLOG` | Ingen kode funnet |
+| Make | `ALLEREDE_BYGGET (D-315)` | `MakeTransport` (`live-transports.ts`) - `get_current_user`/`run_scenario` (mot Make sitt API v2, `Authorization: Token <token>` - IKKE `Bearer`). Zone-spesifikk base-URL (SAMME resolver-mønster som n8n/Grafana/Prometheus). D-41: `run_scenario` er en EKTE klasse B-skrivehandling. D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis (SAMME status som n8n D-311) - rent leverandør-adapter. `live_test: get_current_user`. `MAKE_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_MAKE_API_KEY` + `JARVIS_MAKE_API_BASE_URL`) |
 | Apple Shortcuts | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet (se §4.14) |
 
 ### 4.10 Smart hjem

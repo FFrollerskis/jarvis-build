@@ -2,32 +2,28 @@
 
 **Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, RESATT fra
 `origin/main` etter D-192-merge av PR #191) - PR #192 åpnet (D-311 n8n), CI-rødt på gitleaks fikset
-(D-312, `.gitleaksignore`), deretter D-313 (Spotify) bygget på SAMME åpne branch/PR. Deretter
-**D-314: WhatsApp-connectoren bygget fullt ut - TJUENDE konkrete byggeslice** (Tobias gjentok
-direkte i chat, trettende gang: "fortsett og jobbe ikke vent på ci"), FORTSATT SAMME branch/PR
-(#192). `WhatsAppTransport` (`live-transports.ts`) - WhatsApp Business Cloud API (Meta Graph API).
-`phone_number_id` er Jarvis sin egen avsenderidentitet (SAMME rolle som Telegram sin `chat_id`),
-injisert som en resolver-closure. To handlinger - `get_phone_number_info` (klasse A, lesing) og
-`notify` (klasse B, EKTE skrivehandling - D-41, navngitt identisk med Slack/Discord/Telegram).
-**D-64-sjekk:** ingen kanonisk meldings-domenemodell finnes i Jarvis - rent leverandør-adapter,
-SAMME status som Slack/Discord/Twilio; den eksisterende WhatsApp-kanal-enum-en i
-`046_conversation_graph.sql` er uendret. `connector-registry.ts` sin EKSISTERENDE D-232-plassholder
-oppdatert i place (`credential_refs` utvidet med `JARVIS_WHATSAPP_PHONE_NUMBER_ID`). Wiret inn i
-BÅDE `main.ts`/`worker-main.ts` med en resolver-argument-konstruktør (SAMME form som n8n/Grafana/
-Prometheus - ingen "tom konstruktør"-bump). 9 nye tester (`d314-whatsapp-transport.test.ts`),
-`connector-registry.test.ts` sine BACKLOG_IDS/live_test/test_method-lister oppdatert (31→30
-gjenværende backlog-punkter, 33→34 bygde). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps
-modules packages` begge rene. `WHATSAPP_LIVE_GATE=PENDING_CREDENTIALS`. Samtidig rettet en
-D-312/D-313-nummereringsfeil fra forrige commit (Spotify sin wiring var feilaktig merket "D-312" i
-kildekode-kommentarer i stedet for "D-313" - rettet konsekvent overalt, testfilen omdøpt
-`d312-spotify-transport.test.ts` → `d313-spotify-transport.test.ts`, en feilaktig "11 nye
-tester"-påstand rettet til det faktiske tallet 9). Se D-314 (og D-312/D-313) i
-DECISIONS_AND_ASSUMPTIONS.md.
-**Status:** D-314 committet (`8bc5f6f`) og pushet til `claude/hva-skjer-hvordan-ligger-0z3ztp`. PR
-#192 sin tittel/body oppdatert til å dekke D-311+D-313+D-314 ærlig (SAMME "PR-scope-vekst"-disiplin
-som PR #190). CI kjører (`state: pending` ved sist sjekk) - IKKE ventet på synkront, per Tobias sin
-gjentatte "fortsett og jobbe ikke vent på ci"-instruks; PR-watch-abonnementet varsler når CI/review
-endrer status.
+(D-312), deretter D-313 (Spotify) og D-314 (WhatsApp) bygget på SAMME åpne branch/PR. Deretter
+**D-315: Make-connectoren (tidligere Integromat) bygget fullt ut - TJUEFØRSTE konkrete
+byggeslice** (Tobias gjentok direkte i chat, fjortende gang: "fortsett og jobbe ikke vent på ci"),
+FORTSATT SAMME branch/PR (#192). `MakeTransport` (`live-transports.ts`) - Make sitt API v2,
+zone-spesifikk base-URL (resolver-closure, SAMME mønster som n8n). `Authorization: Token <token>`
+(IKKE `Bearer` - Make sitt eget headerformat, nok en bekreftelse på at n8n sitt "ulikt
+auth-header-navn"-mønster generaliserer). To handlinger - `get_current_user` (klasse A, lesing) og
+`run_scenario` (klasse B, EKTE skrivehandling - D-41). **D-64-sjekk:** ingen kanonisk
+workflow-domenemodell finnes i Jarvis (SAMME status som n8n) - rent leverandør-adapter.
+`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place (`credential_refs`
+utvidet med `JARVIS_MAKE_API_BASE_URL`). Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en
+resolver-argument-konstruktør (ingen "tom konstruktør"-bump). 7 nye tester
+(`d315-make-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
+test_method-lister oppdatert (30→29 gjenværende backlog-punkter, 34→35 bygde). `pnpm -w typecheck`
+(32/32 pakker)/`npx eslint apps modules packages` begge rene. `MAKE_LIVE_GATE=PENDING_CREDENTIALS`.
+Se D-315 i DECISIONS_AND_ASSUMPTIONS.md.
+**Status:** D-315 committet og klar til å pushes til `claude/hva-skjer-hvordan-ligger-0z3ztp`. PR
+#192 sin tittel/body må oppdateres til å dekke D-311+D-313+D-314+D-315 ærlig (SAMME
+"PR-scope-vekst"-disiplin som PR #190) etter push. CI-notifikasjoner mottatt refererte den GAMLE
+`b50bf5c`-commiten (n8n alene, FØR gitleaks-fiksen) - verifisert stale mot en fersk
+`actions_list`-sjekk (alle nyere kjøringer var `in_progress`, ingen nye røde funn på gjeldende
+HEAD) - IKKE et reelt, uadressert CI-funn.
 
 **Nytt merknad (viktig, IKKE stille omgått):** før neste backlog-connector plukkes, to funn fra
 denne sveipen:
@@ -50,14 +46,22 @@ denne sveipen:
    WhatsApp/Meta Graph API, som ER veldokumenterte, kjente API-er). Avventer et presist svar fra
    Tobias om hvilken faktisk leverandør "Folio" betyr her FØR noe bygges, i stedet for å gjette.
 
-**Neste (etter denne notatposteringen):** fortsett systematisk gjennom de resterende ~29 reelt
-enkle backlog-connectorene (utenom meta_ads/Folio til over er avklart) - unngå de seks
-`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen
-D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute via Home
-Assistant), og unngå de voice-relaterte backlog-punktene
+**Neste:** committe/pushe D-315, oppdatere PR #192 sin tittel/body til å dekke
+D-311+D-313+D-314+D-315, la CI kjøre og merge under D-192 når grønt. Deretter fortsett systematisk
+gjennom de resterende ~28 reelt enkle backlog-connectorene (utenom meta_ads/Folio til over er
+avklart) - unngå de seks `backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist)
+til en egen D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute
+via Home Assistant), og unngå de voice-relaterte backlog-punktene
 (openai_realtime/elevenlabs/deepgram/livekit/telnyx) til en kort D-64-lignende sjekk mot
 `SpeechAdapter`-arkitekturen (CLAUDE.md regel 3/5, task #125 lokale whisper.cpp/piper-adaptere) er
-gjort. Merge PR #192 under D-192 når CI er grønt.
+gjort.
+
+**Forrige milepæl (uendret): D-314: WhatsApp-connectoren bygget fullt ut - TJUENDE konkrete
+byggeslice.** `WhatsAppTransport` (`live-transports.ts`) - WhatsApp Business Cloud API (Meta Graph
+API). To handlinger - `get_phone_number_info` (klasse A) og `notify` (klasse B, EKTE
+skrivehandling - D-41). Samtidig rettet en D-312/D-313-nummereringsfeil (Spotify sin wiring var
+feilaktig merket "D-312" - rettet til "D-313" overalt, testfilen omdøpt). `WHATSAPP_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-314 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-313: Spotify-connectoren bygget fullt ut - NITTENDE konkrete
 byggeslice.** `SpotifyTransport` (`live-transports.ts`) - FØRSTE connector i denne sveipen med en

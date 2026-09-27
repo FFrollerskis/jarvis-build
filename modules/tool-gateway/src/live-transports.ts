@@ -2393,3 +2393,38 @@ export class WhatsAppTransport implements ToolTransport {
     throw new Error(`whatsapp_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-315. Make (tidligere Integromat) sitt API v2 - zone-spesifikk base-URL
+ * (f.eks. `https://eu1.make.com`, brukeren sin egen kontosone), injisert
+ * som en resolver-closure (SAMME mønster som n8n/Grafana/Prometheus).
+ * `Authorization: Token <api-token>` - Make sitt EGET dokumenterte
+ * headerformat (IKKE `Bearer`, SAMME strukturelle auth-header-navn-
+ * variasjon som n8n sin `X-N8N-API-KEY` demonstrerte for D-311).
+ */
+export class MakeTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("make_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { authorization: `Token ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`make_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_current_user") {
+      const body = await this.call("GET", "/api/v2/users/me", credential);
+      return { data: body };
+    }
+    if (action === "run_scenario") {
+      const body = await this.call("POST", `/api/v2/scenarios/${encodeURIComponent(String(parameters["scenario_id"]))}/run`, credential);
+      return { data: body };
+    }
+    throw new Error(`make_unsupported_action_${action}`);
+  }
+}

@@ -590,7 +590,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "n8n", action: "list_workflows", parameters: () => ({}) }
   },
   { id: "zapier", display_name: "Zapier", category: "backlog", credential_refs: ["JARVIS_ZAPIER_API_KEY"] },
-  { id: "make", display_name: "Make", category: "backlog", credential_refs: ["JARVIS_MAKE_API_KEY"] },
+  {
+    // D-315 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // API_BASE_URL (zone-spesifikk, SAMME "list alle nødvendige
+    // verdier"-disiplin som n8n D-311). Oppdatert i place (var en D-232
+    // backlog-plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "make", display_name: "Make", category: "tool_gateway",
+    credential_refs: ["JARVIS_MAKE_API_KEY", "JARVIS_MAKE_API_BASE_URL"],
+    live_test: { tool_id: "make", action: "get_current_user", parameters: () => ({}) }
+  },
   { id: "apple_shortcuts", display_name: "Apple Shortcuts", category: "backlog", credential_refs: ["JARVIS_APPLE_SHORTCUTS_TOKEN"] },
 
   // §4.10 Smart hjem
