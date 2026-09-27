@@ -23,15 +23,41 @@ kildekode-kommentarer i stedet for "D-313" - rettet konsekvent overalt, testfile
 `d312-spotify-transport.test.ts` → `d313-spotify-transport.test.ts`, en feilaktig "11 nye
 tester"-påstand rettet til det faktiske tallet 9). Se D-314 (og D-312/D-313) i
 DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** committe/pushe D-314 til PR #192 (oppdater PR #192 sin tittel/body til å dekke
-D-311+D-313+D-314 ærlig, SAMME "PR-scope-vekst"-disiplin som PR #190), la CI kjøre og merge under
-D-192 når grønt. Deretter fortsett systematisk gjennom de resterende ~30 backlog-connectorene -
-unngå de seks `backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en
-egen D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute via
-Home Assistant), og unngå de voice-relaterte backlog-punktene
+**Status:** D-314 committet (`8bc5f6f`) og pushet til `claude/hva-skjer-hvordan-ligger-0z3ztp`. PR
+#192 sin tittel/body oppdatert til å dekke D-311+D-313+D-314 ærlig (SAMME "PR-scope-vekst"-disiplin
+som PR #190). CI kjører (`state: pending` ved sist sjekk) - IKKE ventet på synkront, per Tobias sin
+gjentatte "fortsett og jobbe ikke vent på ci"-instruks; PR-watch-abonnementet varsler når CI/review
+endrer status.
+
+**Nytt merknad (viktig, IKKE stille omgått):** før neste backlog-connector plukkes, to funn fra
+denne sveipen:
+1. **`meta_ads` er IKKE en enkel ToolGateway-connector-kandidat.** `modules/growth` EIER allerede en
+   kanonisk kampanje-/annonseforbruk-domenemodell (`marketing_campaigns`/`marketing_spend_events`/
+   `marketing_campaign_tracking_tags`, JARVIS_CANONICAL) - Google Ads er BEVISST bygget som en
+   D-64-korrekt ADAPTER inn i DENNE modellen (`modules/growth/src/google-ads-transport.ts`, egen
+   doc-kommentar sier dette eksplisitt), IKKE som en frittstående `ToolGateway`-connector med egne
+   rå handlinger. Meta Ads ville trengt SAMME adapter-arkitektur (skrive inn i de eksisterende
+   kanoniske tabellene via `modules/growth` sin egen service), IKKE det enkle "ny `ToolTransport` +
+   to `ToolDefinition`-er"-mønsteret brukt for Slack/Discord/n8n/Spotify/WhatsApp - en vesentlig
+   større undersøkelse/byggeoppgave, ikke gjettet frem her. `meta_ads` sin registeroppføring har
+   category `"backlog"` (IKKE `"backlog_d64_gate"`) i dag - dette er en presis rettelse: den
+   BURDE regnes i samme "krever egen D-64-undersøkelse FØR bygging"-klasse som de seks eksplisitte
+   D-64-gate-punktene, selv om registeret ikke merker den slik ennå.
+2. **`Folio`** sin eneste kildedokumentasjon (`01_Jarvis_Masterplan_v2.1.md` linje 316: "Fiken/Folio
+   og økonomidata") og `INTEGRATIONS.md` sin egen note ("kun tidligere vag plassholder") gir IKKE
+   nok til å identifisere en konkret leverandør/API trygt - bygging her ville vært et gjettet
+   API-endepunkt, IKKE trent kunnskap om en navngitt, kjent leverandør (i motsetning til Spotify/
+   WhatsApp/Meta Graph API, som ER veldokumenterte, kjente API-er). Avventer et presist svar fra
+   Tobias om hvilken faktisk leverandør "Folio" betyr her FØR noe bygges, i stedet for å gjette.
+
+**Neste (etter denne notatposteringen):** fortsett systematisk gjennom de resterende ~29 reelt
+enkle backlog-connectorene (utenom meta_ads/Folio til over er avklart) - unngå de seks
+`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen
+D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute via Home
+Assistant), og unngå de voice-relaterte backlog-punktene
 (openai_realtime/elevenlabs/deepgram/livekit/telnyx) til en kort D-64-lignende sjekk mot
 `SpeechAdapter`-arkitekturen (CLAUDE.md regel 3/5, task #125 lokale whisper.cpp/piper-adaptere) er
-gjort.
+gjort. Merge PR #192 under D-192 når CI er grønt.
 
 **Forrige milepæl (uendret): D-313: Spotify-connectoren bygget fullt ut - NITTENDE konkrete
 byggeslice.** `SpotifyTransport` (`live-transports.ts`) - FØRSTE connector i denne sveipen med en
