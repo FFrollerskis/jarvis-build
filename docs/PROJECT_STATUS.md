@@ -1,35 +1,41 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, RESATT fra
-`origin/main` etter D-192-merge) - **PR #190 (D-301 til D-309, ni connectorer) MERGET til `main`**
-(to-forelder-merge `dbd3891`, under D-192 stående fullmakt) - inkluderte en CI-fiks (D-310a: fjernet
-et hardkodet `"notion"`-navn i `d242-connector-health-sweep.test.ts` som D-308 hadde gjort falskt;
-byttet til en dynamisk `NO_LIVE_TEST_IDS`-sjekk). Deretter **D-310: Microsoft Outlook-connectoren
-bygget fullt ut - SYTTENDE konkrete byggeslice, FØRSTE etter merge, tilbake til
-ett-connector-per-PR-mønsteret.** `MicrosoftOutlookTransport` (`live-transports.ts`) -
-`Authorization: Bearer` mot Microsoft Graph v1.0 (SAMME mønster som OneDrive D-309). To handlinger
-- `list_messages` (klasse A, lesing) og `send_mail` (klasse D - BEVISST SAMME klassifisering som
-Gmail sin `email.send`, siden sending av e-post ikke er reverserbar; den generiske klasse
-D-godkjenningsmekanismen i PolicyGateway/ToolGateway dekker dette uten egen ny kode). **D-64-sjekk:**
-Outlook er en genuint separat leverandør-konto fra Gmail, ikke en konkurrerende domenemodell -
-samme presedens som Slack+Discord+Twilio. `connector-registry.ts` sin EKSISTERENDE D-232-
-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en TOM konstruktør
-(`new MicrosoftOutlookTransport()` - teller MED i "tom konstruktør"-tellingen, bump 16→17). 6 nye
-tester (`d310-microsoft-outlook-transport.test.ts`), `connector-registry.test.ts` sine
-BACKLOG_IDS/live_test/test_method-lister oppdatert (34→33 gjenværende backlog-punkter, 30→31
-bygde). Eksplisitt sjekket at ingen ANNEN test hardkoder en global klasse D-telling (samme
-bug-klasse som D-310a) - kun én treff fantes (`d289-full-capability-mesh.test.ts`), og den bruker
-en isolert fake-gateway, ikke det ekte registeret - uberørt. `pnpm -w typecheck` (32/32 pakker)/
-`npx eslint apps modules packages` begge rene. `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS`.
-Se D-310a/D-310 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** åpne en NY, egen draft-PR for D-310 alene (ett-connector-per-PR gjenopptatt), la CI kjøre
-og merge under D-192 når grønt FØR neste connector. Deretter fortsett systematisk gjennom de
-resterende ~33 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
+`origin/main` etter D-192-merge av PR #191) - **PR #191 (D-310, Microsoft Outlook) MERGET til
+`main`** (to-forelder-merge `5cc6aea`, under D-192 stående fullmakt). Deretter **D-311: n8n-
+connectoren bygget fullt ut - ATTENDE konkrete byggeslice** (Tobias gjentok direkte i chat, ellevte
+gang: "fortsett og jobbe ikke vent på ci"). `N8nTransport` (`live-transports.ts`) -
+`X-N8N-API-KEY`-header (IKKE `Authorization: Bearer`) mot n8n sitt REST-API v1. n8n er TYPISK
+selv-hostet (SAMME resolver-closure-mønster som Grafana D-305/Prometheus D-306) - base-URL må
+konfigureres (`JARVIS_N8N_API_BASE_URL`). To handlinger - `list_workflows` (klasse A, lesing) og
+`activate_workflow` (klasse B, EKTE skrivehandling - D-41 sitt "maksimal nyttig kapabilitet"-
+prinsipp fulgt). `activate_workflow` sin `rollback_procedure` er manuell deaktivering (dedikert
+`deactivate_workflow` BEVISST DEFERRED). **D-64-sjekk:** ingen kanonisk workflow-/automasjons-
+domenemodell finnes i Jarvis - rent leverandør-adapter. Samme D-297-ærlighetsforbehold.
+`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place. Wiret inn i BÅDE
+`main.ts`/`worker-main.ts` med en resolver-argument-konstruktør (SAMME form som Grafana/Prometheus
+- ingen "tom konstruktør"-bump, kun nye `toMatch`-assertions). 7 nye tester
+(`d311-n8n-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
+test_method-lister oppdatert (33→32 gjenværende backlog-punkter, 31→32 bygde). `pnpm -w typecheck`
+(32/32 pakker)/`npx eslint apps modules packages` begge rene. `N8N_LIVE_GATE=PENDING_CREDENTIALS`.
+Se D-311 i DECISIONS_AND_ASSUMPTIONS.md.
+**Neste:** committe/pushe D-311, åpne en NY, egen draft-PR (ett-connector-per-PR), la CI kjøre og
+merge under D-192 når grønt FØR neste connector. Deretter fortsett systematisk gjennom de
+resterende ~32 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
 (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
 for hver, unngå homekit/philips_hue (skal rute via Home Assistant), og unngå de voice-relaterte
 backlog-punktene (openai_realtime/elevenlabs/deepgram/livekit/telnyx) til en kort D-64-lignende
 sjekk mot `SpeechAdapter`-arkitekturen (CLAUDE.md regel 3/5, task #125 lokale
 whisper.cpp/piper-adaptere) er gjort.
+
+**Forrige milepæl (uendret): D-310: Microsoft Outlook-connectoren bygget fullt ut - SYTTENDE
+konkrete byggeslice, FØRSTE etter D-192-merge av PR #190, tilbake til ett-connector-per-PR.**
+`MicrosoftOutlookTransport` (`live-transports.ts`) - `Authorization: Bearer` mot Microsoft Graph
+v1.0. To handlinger - `list_messages` (klasse A) og `send_mail` (klasse D - SAMME klassifisering
+som Gmail sin `email.send`). Inkluderte også en CI-fiks (D-310a: fjernet et hardkodet
+`"notion"`-navn i `d242-connector-health-sweep.test.ts` som D-308 hadde gjort falskt; byttet til en
+dynamisk `NO_LIVE_TEST_IDS`-sjekk). `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS`. Se
+D-310a/D-310 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-309: OneDrive-connectoren bygget fullt ut - SEKSTENDE konkrete
 byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-308) sin CI fortsatt kjørte.**

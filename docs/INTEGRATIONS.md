@@ -151,7 +151,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| n8n | `NY_BACKLOG` | Ingen kode funnet |
+| n8n | `ALLEREDE_BYGGET (D-311)` | `N8nTransport` (`live-transports.ts`) - `list_workflows`/`activate_workflow` (mot n8n sitt REST-API v1, `X-N8N-API-KEY`-header - IKKE `Authorization: Bearer`). TYPISK selv-hostet - base-URL må konfigureres (`JARVIS_N8N_API_BASE_URL`), samme resolver-mønster som Grafana/Prometheus. D-41: `activate_workflow` er en EKTE klasse B-skrivehandling - `rollback_procedure` er manuell deaktivering (dedikert `deactivate_workflow` DEFERRED). D-64: ingen kanonisk workflow-/automasjons-domenemodell finnes i Jarvis - rent leverandør-adapter. `live_test: list_workflows`. `N8N_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_N8N_API_KEY` + `JARVIS_N8N_API_BASE_URL`) |
 | Zapier | `NY_BACKLOG` | Ingen kode funnet |
 | Make | `NY_BACKLOG` | Ingen kode funnet |
 | Apple Shortcuts | `NY_BACKLOG` | Ingen kode funnet - henger sammen med D-36 Apple-runtime-sporet (se §4.14) |

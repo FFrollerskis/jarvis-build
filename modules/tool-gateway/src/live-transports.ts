@@ -2281,3 +2281,30 @@ export class MicrosoftOutlookTransport implements ToolTransport {
     throw new Error(`microsoft_outlook_unsupported_action_${action}`);
   }
 }
+
+export class N8nTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST", path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("n8n_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      method,
+      headers: { "X-N8N-API-KEY": credential, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`n8n_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_workflows") {
+      const body = await this.call("GET", "/api/v1/workflows", credential);
+      return { data: body };
+    }
+    if (action === "activate_workflow") {
+      const body = await this.call("POST", `/api/v1/workflows/${encodeURIComponent(String(parameters["id"]))}/activate`, credential);
+      return { data: body };
+    }
+    throw new Error(`n8n_unsupported_action_${action}`);
+  }
+}

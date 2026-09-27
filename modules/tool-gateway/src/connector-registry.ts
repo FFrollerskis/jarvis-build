@@ -259,6 +259,24 @@ import type { ToolGateway } from "./gateway.ts";
  * separate meldingsleverandører. De resterende 33 backlog-punktene er
  * fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
  * dem når de bygges.
+ *
+ * D-311 (2026-09-27, attende slice, Tobias direkte i chat gjentatt,
+ * ellevte gang: "fortsett og jobbe ikke vent på ci"): `n8n` bygget og
+ * flyttet ut av backlogen - `X-N8N-API-KEY`-header (IKKE `Authorization:
+ * Bearer` - n8n sitt eget API-nøkkel-headernavn) mot n8n sitt REST-API v1.
+ * n8n er TYPISK selv-hostet (SAMME "typisk selv-hostet"-mønster som
+ * Grafana D-305/Prometheus D-306) - base-URL-en må konfigureres via
+ * `JARVIS_N8N_API_BASE_URL`, resolver-closure. To handlinger -
+ * `list_workflows` (klasse A, lesing) og `activate_workflow` (klasse B,
+ * EKTE skrivehandling) - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp
+ * fulgt. `activate_workflow` sin `rollback_procedure` er manuell
+ * deaktivering (dedikert `deactivate_workflow`-handling DEFERRED, D-41
+ * eksplisitt merket, samme disiplin som Dropbox/Notion). Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk workflow-/automasjons-domenemodell finnes
+ * noe sted i Jarvis - rent leverandør-adapter, EXTERNAL_CANONICAL. De
+ * resterende 32 backlog-punktene er fortsatt uendret; samme
+ * oppdater-i-place-disiplin gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -543,7 +561,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "apple_music", display_name: "Apple Music", category: "backlog", credential_refs: ["JARVIS_APPLE_MUSIC_TOKEN"] },
 
   // §4.9 Automatisering / workflow
-  { id: "n8n", display_name: "n8n", category: "backlog", credential_refs: ["JARVIS_N8N_API_KEY"] },
+  {
+    // D-311 (bygget, flyttet ut av backlog): `X-N8N-API-KEY`-header (IKKE
+    // Bearer) mot n8n sitt REST-API v1. TYPISK selv-hostet (SAMME mønster
+    // som Grafana D-305/Prometheus D-306) - base-URL må konfigureres.
+    // `activate_workflow` er en EKTE klasse B-skrivehandling (D-41).
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "n8n", display_name: "n8n", category: "tool_gateway", credential_refs: ["JARVIS_N8N_API_KEY", "JARVIS_N8N_API_BASE_URL"],
+    live_test: { tool_id: "n8n", action: "list_workflows", parameters: () => ({}) }
+  },
   { id: "zapier", display_name: "Zapier", category: "backlog", credential_refs: ["JARVIS_ZAPIER_API_KEY"] },
   { id: "make", display_name: "Make", category: "backlog", credential_refs: ["JARVIS_MAKE_API_KEY"] },
   { id: "apple_shortcuts", display_name: "Apple Shortcuts", category: "backlog", credential_refs: ["JARVIS_APPLE_SHORTCUTS_TOKEN"] },

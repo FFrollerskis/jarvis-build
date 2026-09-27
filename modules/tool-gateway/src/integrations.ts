@@ -3270,6 +3270,37 @@ export function firstWaveTools(
       timeout_ms: 15_000, rate_limit_per_minute: 5, credential_ref: "JARVIS_OUTLOOK_TOKEN",
       output_trust: "internal", transport: transport("microsoft_outlook")
     },
+    /**
+     * D-311 (attende slice, Tobias direkte i chat gjentatt, ellevte gang:
+     * "fortsett og jobbe ikke vent på ci"). `X-N8N-API-KEY`-header (IKKE
+     * `Authorization: Bearer` - n8n sitt eget API-nøkkel-headernavn) mot
+     * n8n sitt REST-API v1. n8n er TYPISK selv-hostet (SAMME
+     * "typisk selv-hostet"-mønster som Grafana D-305/Prometheus D-306) -
+     * base-URL-en må konfigureres via `JARVIS_N8N_API_BASE_URL`,
+     * resolver-closure. `activate_workflow` er en EKTE klasse B-
+     * skrivehandling (D-41), reversibel via `deactivate_workflow`
+     * (IKKE bygget her ennå - bevisst DEFERRED, samme disiplin som
+     * Dropbox/Notion sine deferred handlinger). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om n8n sitt Public REST API, se
+     * `N8nTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "n8n", action: "list_workflows", description: "List workflows (GET /api/v1/workflows, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["workflow:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "untrusted", transport: transport("n8n")
+    },
+    {
+      tool_id: "n8n", action: "activate_workflow", description: "Aktiver en workflow (POST /api/v1/workflows/{id}/activate)",
+      input_schema: record({ id: z.string() }),
+      capability_class: "B", scopes: ["workflow:write"], reversible: true,
+      rollback_procedure: "deaktiver workflowen manuelt i n8n sitt UI (deactivate_workflow ikke bygget ennå)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
