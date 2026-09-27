@@ -3423,6 +3423,41 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TELNYX_API_KEY",
       output_trust: "untrusted", transport: transport("telnyx")
     },
+    /**
+     * D-322. Runway sitt REST-API v1 (`api.dev.runwayml.com`) - BEKREFTET via
+     * `WebSearch` denne økten (flere uavhengige kilder krysset), se
+     * `RunwayTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering. `get_account_info` er GRATIS/sideeffekt-fri
+     * (brukes som `live_test` NETTOPP fordi `generate_video` har reell
+     * kostnad per kall, SAMME disiplin som OpenAI Images D-316).
+     * `get_task_status` er også gratis lesing - asynkron generering krever
+     * polling for å faktisk få resultatet.
+     */
+    {
+      tool_id: "runway", action: "get_account_info", description: "Les organisasjonens kredittbalanse/tier (GET /v1/organization, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/image_to_video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        promptImage: z.string(), promptText: z.string().max(1000).optional(),
+        model: z.string().optional(), ratio: z.string().optional(), duration: z.number().min(1).max(60).optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_RUNWAY_API_KEY", output_trust: "internal", transport: transport("runway")
+    },
+    {
+      tool_id: "runway", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/tasks/{id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_RUNWAY_API_KEY",
+      output_trust: "untrusted", transport: transport("runway")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

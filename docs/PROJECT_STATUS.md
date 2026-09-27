@@ -1,33 +1,39 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-321: Telnyx
-bygget som en ORDINÆR `ToolGateway`-connector, IKKE en `SpeechAdapter`** (Tobias direkte i chat:
-"fortsett mens ci kjører" - fortsatte tale-familie-sveipen mens PR #195/D-319+D-320 sin CI
-fortsatt kjørte). I motsetning til ElevenLabs (D-319)/Deepgram (D-320), som BEGGE ble fjernet fra
-`connector-registry.ts`, viser D-64-vurderingen at Telnyx er STRUKTURELT ANNERLEDES: en
-telefoni-/SMS-plattform, IKKE en tale-leverandør - PROJECT_STATUS.md sin egen "Neste"-seksjon
-hadde allerede notert dette som en åpen vurdering FØR denne sliceen. Bygget `TelnyxTransport`
-(`live-transports.ts`) - Telnyx sitt REST-API v2, `Authorization: Bearer <api_key>` (ETT enkelt
-nøkkel, strukturelt ulik Twilio sin to-delte AccountSid/AuthToken-modell). To handlinger -
-`notify` (klasse B, `POST /v2/messages`, `from`-nummer som resolver-closure) og
-`get_account_info` (klasse A, `GET /v2/balance`, brukt som `live_test`). BEVISST DEFERRED:
-`read_messages` IKKE bygget (lavere sikker kjennskap til Telnyx sitt historikk-endepunkt).
-`connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"` →
-`"tool_gateway"`). Wiret inn i BÅDE `main.ts` og `worker-main.ts` (resolver-argument-form, samme
-mønster som Twilio). NY `modules/tool-gateway/test/d321-telnyx-transport.test.ts` (9 tester).
-`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (24 gjenværende
-backlog-punkter, 37 bygde, 61 totalt UENDRET siden telnyx allerede var talt med som
-backlog-plassholder). `pnpm -w typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold. Se
-D-321 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-322: FØRSTE
+video-gen-familie-slice - Runway bygget som en ORDINÆR `ToolGateway`-connector** (Tobias direkte
+i chat, gjentatt: "fortsett å jobbe mens ci kjører" - mens PR #195/D-321 sin CI fortsatt kjørte).
+NY evidensdisiplin denne sliceen: `WebFetch` mot primærkilden (`dev.runwayml.com`) forble
+egress-blokkert (samme D-297-mønster), MEN `WebSearch` fungerte og returnerte ekte, kildebelagte
+resultater - FØRSTE gang i denne sveipen. Runway sin API-form ble krysssjekket mot flere
+uavhengige sekundærkilder - en NY, ærlig mellomtier ("sekundærkilde-krysssjekket") mellom
+"denne-økten-verifisert" og "kun trent kunnskap". Bygget `RunwayTransport` (`live-transports.ts`)
+- `api.dev.runwayml.com/v1`, `Authorization: Bearer <api_key>` PLUSS en PÅKREVD
+`X-Runway-Version: 2024-11-06`-header. Tre handlinger - `get_account_info` (klasse A,
+`GET /v1/organization`, gratis/sideeffekt-fritt, brukt som `live_test`), `generate_video` (klasse
+B, `POST /v1/image_to_video`, EKTE kostnad per kall - ALDRI brukt som live_test) og
+`get_task_status` (klasse A, `GET /v1/tasks/{id}` - PÅKREVD polling siden generering er
+asynkron). `connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"`
+→ `"tool_gateway"`). Wiret inn i BÅDE `main.ts` og `worker-main.ts` med TOM konstruktør (bump
+19→20 i begge "tom konstruktør"-tellinger). NY
+`modules/tool-gateway/test/d322-runway-transport.test.ts` (11 tester).
+`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (23 gjenværende
+backlog-punkter, 38 bygde, 61 totalt UENDRET siden runway allerede var talt med som
+backlog-plassholder). `pnpm --filter @jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api
+typecheck`/`npx eslint` rene. Se D-322 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** de resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ flagges eksplisitt
-lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør
-(server-SDK/token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn
-ElevenLabs/Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende
-beta-API - BEGGE lavere trent-kunnskap-sikkerhet enn de tre allerede byggede tale-familie-punktene,
-SAMME disiplin som higgsfield/runway/kling/google_veo allerede fikk i "Nytt merknad"-seksjonen
-under. Dette avslutter sannsynligvis de trygt-byggbare punktene i tale-familien uten videre
-Tobias-avklaring (D-64-CRM-gruppa og video-gen-familien står fortsatt uavklart).
+**Neste:** video-gen-familien er NÅ under aktiv bygging (runway D-322 ferdig) - `kling`/
+`google_veo`/`higgsfield` bør prøve SAMME `WebSearch`-sekundærkilde-krysssjekk-disiplinen D-322
+etablerte FØR de defaulter til ren trent-kunnskap. De resterende tale-backlog-punktene
+(`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt lavere-sikkerhet hvis/når bygget -
+`livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering, IKKE et enkelt
+REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/Deepgram/Telnyx) og
+`openai_realtime` er en nyere, potensielt raskere-bevegende beta-API. D-64-CRM-gruppa
+(hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en egen,
+større sync-adapter-arkitektur (D-291).
+
+**Forrige milepæl (uendret): D-321: Telnyx bygget som en ORDINÆR `ToolGateway`-connector, IKKE en
+`SpeechAdapter`.** Se D-321 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-320: ANDRE tale-backlog-slice - Deepgram bygget som NY
 `SttAdapter`, SAMME mønster som ElevenLabs D-319.** Se D-320 i DECISIONS_AND_ASSUMPTIONS.md for

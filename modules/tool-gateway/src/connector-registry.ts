@@ -592,7 +592,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "discord", action: "get_bot_info", parameters: () => ({}) }
   },
   { id: "higgsfield", display_name: "Higgsfield", category: "backlog", credential_refs: ["JARVIS_HIGGSFIELD_API_KEY"] },
-  { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },
+  {
+    // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
+    // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
+    // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
+    // doc-kommentar i live-transports.ts for full evidens-kategorisering.
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id.
+    id: "runway", display_name: "Runway", category: "tool_gateway",
+    credential_refs: ["JARVIS_RUNWAY_API_KEY"],
+    live_test: { tool_id: "runway", action: "get_account_info", parameters: () => ({}) }
+  },
   { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },
   { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
   {

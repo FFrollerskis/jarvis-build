@@ -2522,3 +2522,67 @@ export class TelnyxTransport implements ToolTransport {
     throw new Error(`telnyx_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-322 (video-gen-familien, FØRSTE slice bygget under det EKSPLISITT
+ * lavere-sikkerhet-merket PROJECT_STATUS.md allerede varslet for
+ * higgsfield/runway/kling/google_veo) - MEN med en STERKERE evidensbasis enn
+ * D-297-mønsteret ellers i denne sveipen: API-formen under er BEKREFTET via
+ * `WebSearch` denne økten (flere uavhengige kilder krysset - Runway sin egen
+ * `dev.runwayml.com`/`docs.dev.runwayml.com`, GitHub sin `api-evangelist/
+ * runwayml`-referanse, `apitracker.io`, community-agent-skills som siterer
+ * SAMME endepunktformer), IKKE bare trent kunnskap alene - selve
+ * `WebFetch`-kallet mot primærkilden (`dev.runwayml.com`) er FORTSATT
+ * blokkert av nettverksegress denne økten, så dette ER sekundærkilde-
+ * krysssjekket, IKKE en direkte primærkilde-lesning - en ÆRLIG mellomting
+ * mellom "denne-økten-verifisert" og "kun trent kunnskap", eksplisitt
+ * kategorisert som sådan, ikke overdrevet til den sterkere påstanden.
+ *
+ * `https://api.dev.runwayml.com/v1` - `Authorization: Bearer <api_key>`
+ * PLUSS en PÅKREVD, datert `X-Runway-Version`-header (`2024-11-06`,
+ * bekreftet på tvers av samtlige kryssjekkede kilder). Tre handlinger:
+ * `get_account_info` (klasse A, `GET /v1/organization` - kreditbalanse/tier,
+ * trygt/sideeffekt-fritt, brukt som `live_test`), `generate_video` (klasse
+ * B, `POST /v1/image_to_video`, EKTE kostnad per kall - ALDRI brukt som
+ * live_test, SAMME "generering koster, list/status er gratis"-disiplin som
+ * OpenAI Images D-316) og `get_task_status` (klasse A, `GET /v1/tasks/{id}`
+ * - asynkron generering krever polling, en connector uten denne handlingen
+ * ville vært ubrukelig siden `generate_video` alene aldri gir det ferdige
+ * resultatet).
+ */
+export class RunwayTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://api.dev.runwayml.com/v1${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${credential}`, "X-Runway-Version": "2024-11-06" }
+    });
+    if (!response.ok) throw new Error(`runway_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_account_info") {
+      const body = await this.call("/organization", credential);
+      return { data: body };
+    }
+    if (action === "generate_video") {
+      const body = await this.call("/image_to_video", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: typeof parameters["model"] === "string" ? parameters["model"] : "gen4.5",
+          promptImage: String(parameters["promptImage"]),
+          promptText: typeof parameters["promptText"] === "string" ? parameters["promptText"] : undefined,
+          ratio: typeof parameters["ratio"] === "string" ? parameters["ratio"] : "1280:720",
+          duration: typeof parameters["duration"] === "number" ? parameters["duration"] : 5
+        })
+      });
+      return { external_id: String((body as { id?: string }).id ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/tasks/${String(parameters["task_id"])}`, credential);
+      return { data: body };
+    }
+    throw new Error(`runway_unsupported_action_${action}`);
+  }
+}
