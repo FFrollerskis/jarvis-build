@@ -224,6 +224,22 @@ import type { ToolGateway } from "./gateway.ts";
  * rent leverandør-adapter, EXTERNAL_CANONICAL. De resterende 35
  * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
  * gjelder for hver av dem når de bygges.
+ *
+ * D-309 (2026-09-27, samme brede ordre, sekstende slice, bygget parallelt
+ * mens D-308 sin CI kjørte, Tobias direkte i chat gjentatt, tiende gang:
+ * "fortsett og jobbe ikke vent på ci"): `onedrive` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - `Authorization: Bearer`-header mot Microsoft
+ * Graph v1.0. To handlinger - `list_folder` (klasse A, lesing) og
+ * `create_folder` (klasse B, EKTE skrivehandling) - D-41 sitt "maksimal
+ * nyttig kapabilitet"-prinsipp fulgt, ikke kunstig innsnevret til
+ * read-only. SAMME "fil-lagring"-domenestatus som Dropbox (D-307) -
+ * `create_folder` sin `rollback_procedure` er manuell sletting. Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk fil-lagrings-domenemodell finnes noe sted
+ * i Jarvis (samme reasonering som Google Drive/Dropbox) - rent
+ * leverandør-adapter, EXTERNAL_CANONICAL. De resterende 34
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -366,7 +382,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "notion", display_name: "Notion", category: "tool_gateway", credential_refs: ["JARVIS_NOTION_API_KEY"],
     live_test: { tool_id: "notion", action: "search", parameters: () => ({}) }
   },
-  { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
+  {
+    // D-309 (bygget, flyttet ut av backlog): Microsoft Graph v1.0
+    // (`Authorization: Bearer`-header). D-41 sitt "maksimal nyttig
+    // kapabilitet"-prinsipp fulgt - EKTE skrivehandling (`create_folder`),
+    // ikke kunstig innsnevret til read-only. Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-disiplinen).
+    id: "onedrive", display_name: "OneDrive", category: "tool_gateway", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"],
+    live_test: { tool_id: "onedrive", action: "list_folder", parameters: () => ({}) }
+  },
   {
     // D-307 (bygget, flyttet ut av backlog): Dropbox API v2 - `Authorization:
     // Bearer`-header, ETT langvarig access-token (INGEN OAuth-refresh-flyt

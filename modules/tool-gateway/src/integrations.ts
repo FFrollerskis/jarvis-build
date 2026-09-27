@@ -3211,6 +3211,32 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NOTION_API_KEY",
       output_trust: "internal", transport: transport("notion")
     },
+    /**
+     * D-309 (bygget parallelt mens D-308 sin CI kjørte - sekstende slice,
+     * Tobias direkte i chat gjentatt, tiende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header mot Microsoft Graph
+     * v1.0. D-41: `create_folder` er en EKTE skrivehandling (ikke kunstig
+     * innsnevret til read-only). **IKKE denne-økten-verifisert mot en live
+     * hentet kopi av offisiell dokumentasjon** (nettverksegress blokkert i
+     * dette miljøet, samme D-297-forbehold) - basert på trent kunnskap om
+     * Microsoft Graph Drive API, se `OneDriveTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "onedrive", action: "list_folder", description: "List innhold i en mappe (GET /me/drive/root/children eller .../root:/{path}:/children, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["Files.Read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_ONEDRIVE_TOKEN", output_trust: "untrusted", transport: transport("onedrive")
+    },
+    {
+      tool_id: "onedrive", action: "create_folder", description: "Opprett en NY mappe under rot (POST /me/drive/root/children)",
+      input_schema: record({ name: z.string().max(255) }),
+      capability_class: "B", scopes: ["Files.ReadWrite"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_ONEDRIVE_TOKEN",
+      output_trust: "internal", transport: transport("onedrive")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

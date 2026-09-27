@@ -1,34 +1,44 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-308: Notion-
-connectoren bygget fullt ut - FEMTENDE konkrete byggeslice, bygget PARALLELT mens PR #190
-(D-301 til D-307) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat, niende gang: "fortsett
-og jobbe ikke vent på ci"). `NotionTransport` (`live-transports.ts`) - `Authorization: Bearer`
-PLUSS en fast `Notion-Version: 2022-06-28`-header mot Notion sitt REST-API v1. To handlinger -
-`search` (klasse A, lesing) og `create_page` (klasse B, EKTE skrivehandling - D-41 sitt "maksimal
-nyttig kapabilitet"-prinsipp fulgt, ikke kunstig innsnevret til read-only). **Bevisst DEFERRED
-(D-41 eksplisitt merket):** `create_page` sin `rollback_procedure` er manuell arkivering i Notion
-sitt UI - INGEN dedikert arkiver-endepunkt bygget her ennå, samme disiplin som Dropbox (D-307).
-**D-64-sjekk:** ingen kanonisk dokument-/kunnskaps-domenemodell finnes i Jarvis - rent leverandør-
-adapter, samme status som Google Drive/Sheets/Dropbox. Samme D-297-ærlighetsforbehold.
-`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place. Wiret inn i BÅDE
-`main.ts`/`worker-main.ts` med en TOM konstruktør (`new NotionTransport()` - teller MED i "tom
-konstruktør"-tellingen, bump 14→15). 6 nye tester (`d308-notion-transport.test.ts`),
-`connector-registry.test.ts` sine BACKLOG_IDS/live_test/test_method-lister oppdatert (36→35
-gjenværende backlog-punkter, 28→29 bygde). `pnpm -w typecheck` (32/32 pakker, etter en
-`exactOptionalPropertyTypes`-fiks i `NotionTransport.call()` sin `body`-parameter)/`npx eslint
-apps modules packages` begge rene. `NOTION_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette landet på
-SAMME, fortsatt åpne PR #190 som D-301 til D-307, oppdateres PR-tittel/body til å dekke alle åtte
-D-numrene ærlig når committen pushes. Se D-308 i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste - VIKTIG:** PR #190 dekker nå ÅTTE connectorer - anbefalingen om å la CI fange opp og
-merge under D-192 FØR neste connector ble gitt etter BÅDE D-306 og D-307, men eksplisitt overstyrt
-begge ganger av Tobias sine gjentatte "fortsett og jobbe ikke vent på ci"-meldinger (nå niende
-gang totalt). Presedensen står: fortsett å bygge inntil en annen instruks kommer. Deretter fortsett
-systematisk gjennom de resterende ~35 backlog-connectorene, og LA CI til slutt fange opp og merge
-PR #190 under D-192 - unngå de seks `backlog_d64_gate`-punktene
-(hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
-for hver, og unngå homekit/philips_hue (skal rute via Home Assistant, ikke en direkte Jarvis-
-connector).
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-309: OneDrive-
+connectoren bygget fullt ut - SEKSTENDE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301 til D-308) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat, tiende gang: "fortsett
+og jobbe ikke vent på ci"). `OneDriveTransport` (`live-transports.ts`) - `Authorization: Bearer`
+mot Microsoft Graph v1.0. To handlinger - `list_folder` (klasse A, lesing) og `create_folder`
+(klasse B, EKTE skrivehandling - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt, ikke
+kunstig innsnevret til read-only). `create_folder` sin `rollback_procedure` er manuell sletting -
+samme mønster som Dropbox (D-307). **D-64-sjekk:** ingen kanonisk fil-lagrings-domenemodell finnes
+i Jarvis - rent leverandør-adapter, samme status som Google Drive/Dropbox. Samme
+D-297-ærlighetsforbehold. `connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i
+place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en TOM konstruktør (`new
+OneDriveTransport()` - teller MED i "tom konstruktør"-tellingen, bump 15→16). 6 nye tester
+(`d309-onedrive-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
+test_method-lister oppdatert (35→34 gjenværende backlog-punkter, 29→30 bygde). `pnpm -w typecheck`
+(32/32 pakker)/`npx eslint apps modules packages` begge rene. `ONEDRIVE_LIVE_GATE=
+PENDING_CREDENTIALS`. Siden dette landet på SAMME, fortsatt åpne PR #190 som D-301 til D-308,
+oppdateres PR-tittel/body til å dekke alle ni D-numrene ærlig når committen pushes. Se D-309 i
+DECISIONS_AND_ASSUMPTIONS.md.
+**Neste - VIKTIG:** PR #190 dekker nå NI connectorer - anbefalingen om å la CI fange opp og merge
+under D-192 FØR neste connector er gitt etter D-306/D-307/D-308, men eksplisitt overstyrt hver gang
+av Tobias sine gjentatte "fortsett og jobbe ikke vent på ci"-meldinger (nå tiende gang totalt).
+Presedensen står: fortsett å bygge inntil en annen instruks kommer. Deretter fortsett systematisk
+gjennom de resterende ~34 backlog-connectorene, og LA CI til slutt fange opp og merge PR #190 under
+D-192 - unngå de seks `backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist)
+til en egen D-64-sync-adapter-undersøkelse er gjort for hver, og unngå homekit/philips_hue (skal
+rute via Home Assistant, ikke en direkte Jarvis-connector). **Nytt merknad:** de gjenværende
+voice-relaterte backlog-punktene (openai_realtime/elevenlabs/deepgram/livekit/telnyx) bør
+sannsynligvis IKKE bygges som vanlige ToolGateway-connectorer uten videre - CLAUDE.md regel 3/5
+(Voice Gateway egen prosess, alle leverandører bak `SpeechAdapter`) og task #125 (lokale
+whisper.cpp/piper-adaptere allerede bygget) antyder disse hører hjemme bak `SpeechAdapter`, ikke
+som frittstående ToolGateway-verktøy - flagges for en kort D-64-lignende sjekk før de eventuelt
+bygges, i stedet for å anta samme mønster som Dropbox/Notion/OneDrive.
+
+**Forrige milepæl (uendret): D-308: Notion-connectoren bygget fullt ut - FEMTENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-307) sin CI fortsatt kjørte.**
+`NotionTransport` (`live-transports.ts`) - `Authorization: Bearer` PLUSS en fast `Notion-Version:
+2022-06-28`-header mot Notion sitt REST-API v1. To handlinger - `search` (klasse A) og
+`create_page` (klasse B, EKTE skrivehandling). Bevisst DEFERRED: `rollback_procedure` er manuell
+arkivering. `NOTION_LIVE_GATE=PENDING_CREDENTIALS`. Se D-308 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-307: Dropbox-connectoren bygget fullt ut - FJORTENDE konkrete
 byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-306) sin CI fortsatt kjørte.**

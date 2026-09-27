@@ -2212,3 +2212,37 @@ export class NotionTransport implements ToolTransport {
     throw new Error(`notion_unsupported_action_${action}`);
   }
 }
+
+export class OneDriveTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`onedrive_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const path = typeof parameters["path"] === "string" && parameters["path"] !== ""
+        ? `/me/drive/root:/${encodeURIComponent(parameters["path"] as string)}:/children`
+        : "/me/drive/root/children";
+      const result = await this.call("GET", path, undefined, credential);
+      return { data: result };
+    }
+    if (action === "create_folder") {
+      const result = await this.call("POST", "/me/drive/root/children", {
+        name: parameters["name"] as JsonValue,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "fail"
+      }, credential);
+      return { data: result };
+    }
+    throw new Error(`onedrive_unsupported_action_${action}`);
+  }
+}

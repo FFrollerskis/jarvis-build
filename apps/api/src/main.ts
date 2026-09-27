@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -676,6 +676,10 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // sender `Notion-Version` som en FAST header inni transporten selv
     // (ingen resolver-closure nødvendig, ETT fast integrasjonstoken).
     notion: new NotionTransport(),
+    // D-309: ren tom-konstruktør, samme mønster som Dropbox/Notion over -
+    // OneDrive sender `path`/`name` som vanlige handlingsparametere per
+    // kall, ingen resolver-closure nødvendig.
+    onedrive: new OneDriveTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
