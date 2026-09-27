@@ -133,7 +133,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Telegram | `ALLEREDE_BYGGET` | `connector-registry.ts` id `telegram`; D-119/D-125, LIVE+VERIFIED (eier-kanal, daglig brief, `/brief`/`/status`) |
 | WhatsApp | `NY_BACKLOG` | Kun kanal-enum i `046_conversation_graph.sql` (§UA-7) - bevisst IKKE bygget («no big-bang all-providers-at-once», D-108) |
 | Slack | `ALLEREDE_BYGGET (D-292)` | `SlackTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (chat.postMessage/auth.test/conversations.list/conversations.history), `channel: "slack"` lagt til `ChannelSchema`. `live_test: get_bot_info` (auth.test, ingen sideeffekt). `SLACK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SLACK_BOT_TOKEN`) |
-| Discord | `NY_BACKLOG` | Kun kanal-enum, samme status som WhatsApp/Slack |
+| Discord | `ALLEREDE_BYGGET (D-294)` | `DiscordTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (POST/GET mot Discord REST API v10 `/channels/{id}/messages`, `/users/@me`, `/guilds/{id}/channels`, `/channels/{id}/messages`), `channel: "discord"` lagt til `ChannelSchema`. `live_test: get_bot_info` (`GET /users/@me`, ingen sideeffekt). `DISCORD_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_DISCORD_BOT_TOKEN`) |
 | Higgsfield | `NY_BACKLOG` | Ingen kode funnet |
 | Runway | `NY_BACKLOG` | Ingen kode funnet |
 | Kling | `NY_BACKLOG` | Ingen kode funnet |

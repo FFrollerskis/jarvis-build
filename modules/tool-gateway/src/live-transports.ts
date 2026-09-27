@@ -904,6 +904,57 @@ export class SlackTransport implements ToolTransport {
 }
 
 /**
+ * D-294 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - andre slice, samme mønster som Slack/D-292 over). Discord
+ * sitt offisielle REST API v10 (`discord.com/developers/docs`) - ULIK
+ * Slack: INGEN `{ok, error}`-konvolutt, en suksess-respons ER selve
+ * ressurs-JSON-en direkte, og en feil kommer som en EKTE HTTP-feilstatus
+ * (`response.ok` alene er derfor tilstrekkelig her, i motsetning til
+ * Slack). Autentisering: `Authorization: Bot <bot-token>`-header på ALLE
+ * kall. `POST /channels/{channel_id}/messages` (send, `SEND_MESSAGES`),
+ * `GET /users/@me` (boten sin egen identitet, INGEN sideeffekt - SAMME
+ * trygge tilkoblingstest-rolle som Telegram/Slack sine egne over),
+ * `GET /guilds/{guild_id}/channels` (`VIEW_CHANNEL`), `GET /channels/
+ * {channel_id}/messages` (`READ_MESSAGE_HISTORY`) - alle fire offisielt
+ * dokumenterte, ikke gjettet.
+ */
+export class DiscordTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://discord.com/api/v10${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bot ${credential}` }
+    });
+    if (!response.ok) throw new Error(`discord_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const body = await this.call(`/channels/${String(parameters["channel_id"])}/messages`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: String(parameters["message"]) })
+      });
+      return { external_id: String((body as { id?: string }).id ?? "sent") };
+    }
+    if (action === "get_bot_info") {
+      const body = await this.call("/users/@me", credential);
+      return { data: body };
+    }
+    if (action === "list_channels") {
+      const body = await this.call(`/guilds/${String(parameters["guild_id"])}/channels`, credential);
+      return { data: body };
+    }
+    if (action === "read_channel_history") {
+      const query = parameters["limit"] !== undefined ? `?limit=${String(parameters["limit"])}` : "";
+      const body = await this.call(`/channels/${String(parameters["channel_id"])}/messages${query}`, credential);
+      return { data: body };
+    }
+    throw new Error(`discord_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men

@@ -1,6 +1,28 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-292: Slack-connectoren
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-294: Discord-connectoren
+bygget fullt ut - ANDRE konkrete slice av Tobias sin brede "bygg alt i planen"-ordre, D-293 sin
+Slack-CI-lærdom anvendt FØR koden ble skrevet.** `DiscordTransport` (`notify`/`get_bot_info`/
+`list_channels`/`read_channel_history` mot Discord REST API v10, `Authorization: Bot <token>` -
+strukturelt ULIK Slack: INGEN `{ok,error}`-konvolutt, `response.ok` alene er tilstrekkelig), `discord`
+lagt til `ChannelSchema`, wiret inn i BÅDE `main.ts` og `worker-main.ts`, `connector-registry.ts` sin
+EKSISTERENDE D-232-plassholder oppdatert I PLACE (grep'et FØRST denne gangen - INGEN duplikat-id-
+regresjon), `JARVIS_DISCORD_BOT_TOKEN` dokumentert i `.env.example` (samtidig fjernet en stale
+duplikat-`JARVIS_SLACK_BOT_TOKEN=`-linje glemt i D-292). 9 nye tester, `pnpm -w typecheck` (32/32) og
+`npx eslint apps modules packages` rene, bredere grep denne gangen for ALLE testfiler som refererer
+`firstWaveTools()`/`CONNECTOR_REGISTRY` (ikke bare de tre kjente fra Slack-runden) - ingen andre
+lengde-/indeks-avhengige tester funnet. `DISCORD_LIVE_GATE=PENDING_CREDENTIALS`. Se D-294 i
+DECISIONS_AND_ASSUMPTIONS.md. Neste: fortsetter systematisk til neste connector i de ~42 gjenværende
+D-231/D-232-backlog-punktene.
+
+**Forrige milepæl (uendret): D-292/D-293: Slack-connectoren MERGET til
+`main`** (PR #185, to-forelder-merge `832d34b`, under D-192 stående fullmakt). Underveis: en
+CI-regresjon (dupliserte `connector-registry.ts` sin `id: "slack"` - rettet ved å oppdatere den
+eksisterende D-232-plassholderen i place), pluss en forbigående GitHub Actions-infrastruktur-
+blokkering (jobber fikk `runner_id: 0`/`duration_ms: 0` i ~25 minutter - løste seg selv). Se D-293 i
+DECISIONS_AND_ASSUMPTIONS.md for full lærdom.
+
+**Forrige milepæl (uendret): D-292: Slack-connectoren
 bygget fullt ut - FØRSTE konkrete slice av Tobias sin brede "bygg alt i planen"-ordre.** `SlackTransport`
 (`notify`/`get_bot_info`/`list_channels`/`read_channel_history` - chat.postMessage/auth.test/
 conversations.list/conversations.history, Slack sin egen offisielt dokumenterte API), `slack` lagt til

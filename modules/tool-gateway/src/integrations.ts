@@ -2803,6 +2803,44 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_SLACK_BOT_TOKEN", output_trust: "untrusted", transport: transport("slack")
     },
+    /**
+     * D-294 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - andre slice). SAMME "notify er ekte utsendelse (klasse B),
+     * get_bot_info er trygg tilkoblingstest (klasse A)"-mønster som Telegram/
+     * Slack over. Discord sitt eget dokumenterte permission-bitfield-navn
+     * brukes for `scopes` (IKKE gjettet: `SEND_MESSAGES`/`VIEW_CHANNEL`/
+     * `READ_MESSAGE_HISTORY`, discord.com/developers/docs/topics/permissions).
+     * Lagt til på SLUTTEN av arrayet, samme posisjonelle test-disiplin som
+     * telegram/vercel/slack over.
+     */
+    {
+      tool_id: "discord", action: "notify", description: "Send melding til en Discord-kanal (POST /channels/{id}/messages)",
+      input_schema: record({ channel_id: z.string(), message: z.string().max(2000) }), capability_class: "B",
+      scopes: ["SEND_MESSAGES"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "internal", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "get_bot_info", description: "Les botens egen identitet (GET /users/@me) - brukes som tilkoblingstest, ALDRI en ekte meldingsutsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["identify"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DISCORD_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "list_channels", description: "List kanaler i en server (GET /guilds/{id}/channels, untrusted ingestion)",
+      input_schema: record({ guild_id: z.string() }), capability_class: "A", scopes: ["VIEW_CHANNEL"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DISCORD_BOT_TOKEN",
+      output_trust: "untrusted", transport: transport("discord")
+    },
+    {
+      tool_id: "discord", action: "read_channel_history", description: "Les nylige meldinger i en kanal (GET /channels/{id}/messages, untrusted ingestion)",
+      input_schema: record({ channel_id: z.string(), limit: z.number().int().min(1).max(100).optional() }),
+      capability_class: "A", scopes: ["READ_MESSAGE_HISTORY"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "untrusted", transport: transport("discord")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
