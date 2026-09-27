@@ -125,7 +125,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
 | OpenAI Realtime | `NY_BACKLOG` | Ingen kode funnet (lokal whisper.cpp/piper er bygget og verifisert separat, D-217/D-223, men det er ikke OpenAI Realtime) |
-| ElevenLabs | `NY_BACKLOG` | Ingen kode funnet |
+| ElevenLabs | `ALLEREDE_BYGGET (D-319)` | `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`) - NY `TtsAdapter`-implementasjon, IKKE en `ToolGateway`-connector (D-64-stil arkitekturgrense: tale-leverandører hører hjemme bak `SpeechAdapter`, CLAUDE.md regel 3). `POST /v1/text-to-speech/{voice_id}?output_format=pcm_16000`, `xi-api-key`-header, rå PCM S16LE 16kHz (SAMME samplerate som resten av tale-pipelinen, unngår OpenAI sitt kjente 24kHz-resamplings-gap). `processor_terms_status: "NOT_VERIFIED"` (`PROCESSOR_REGION_MATRIX.md`) - `evaluateSpeechRouting()` avviser behandleren for ALLE memory spaces inntil Tobias selv gjennomgår ElevenLabs sine data-vilkår (Q-32-mønster). BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-utvelgelse (unngår å fortrenge den allerede host-verifiserte lokale piper-installasjonen, D-223). `JARVIS_ELEVENLABS_API_KEY` + `JARVIS_ELEVENLABS_VOICE_ID` (begge påkrevd - voice_id er del av selve URL-stien) |
 | Deepgram | `NY_BACKLOG` | Ingen kode funnet |
 | LiveKit | `NY_BACKLOG` | Ingen kode funnet (Q-03 fortsatt ikke avgjort ved benchmark) |
 | Telnyx | `NY_BACKLOG` | Ingen kode funnet |

@@ -1,7 +1,36 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-318:
-registeropprydning - "Microsoft 365" fjernet HELT som egen backlog-plassholder** (Tobias direkte
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-319: FØRSTE
+tale-backlog-slice - ElevenLabs bygget som NY `TtsAdapter`, IKKE en `ToolGateway`-connector**
+(Tobias direkte i chat: "Bygg videre", etter at han fikk fire harder-tier-kategorier presentert -
+valgte ingen spesifikk, så jeg kjørte den D-64-stil arkitektursjekken mot `SpeechAdapter` jeg
+hadde lovet, siden den kunne gjøres mot EKSISTERENDE kildekode, ikke ekstern dokumentasjon).
+**Funn:** `elevenlabs` sto i `connector-registry.ts` som en ordinær `ToolGateway`-backlog-
+plassholder - STRUKTURELT FEIL sted (CLAUDE.md regel 3 navngir `SpeechAdapter` eksplisitt for
+tale-leverandører). Bygget i stedet `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`) - `POST
+/v1/text-to-speech/{voice_id}?output_format=pcm_16000`, `xi-api-key`-header, rå PCM 16kHz (SAMME
+samplerate som resten av pipelinen, unngår OpenAI sitt 24kHz-gap). `processor_terms_status`
+BEVISST `"NOT_VERIFIED"` (fail-closed, ALDRI `VERIFIED` uten en ekte Tobias-kontovilkårs-
+gjennomgang, Q-32-mønster) - `evaluateSpeechRouting()` avviser behandleren for ALLE memory spaces
+inntil da. **Regresjonsrisiko unngått:** BEVISST IKKE wiret inn i `main.ts` sin aktive adapter-
+utvelgelse - routing-porten har INGEN stille fallback når en valgt adapter avvises, så å legge
+ElevenLabs i prioritetskjeden kunne FORTRENGT Tobias sin allerede host-verifiserte, fungerende
+lokale piper-installasjon (D-223) med en behandler som uansett ville blitt avvist. `elevenlabs`
+fjernet HELT fra `connector-registry.ts` (samme "feil sted"-disiplin som microsoft_365/D-318, men
+strukturelt ulik grunn). `PROCESSOR_REGION_MATRIX.md` fikk en ny, eksplisitt `IKKE VERIFISERT`-
+rad (regel 1). `connector-registry.test.ts` oppdatert (26 gjenværende backlog-punkter, 62 totale
+registeroppføringer). NY `apps/voice-gateway/test/d319-elevenlabs-tts.test.ts` (11 tester).
+`pnpm --filter voice-gateway typecheck`/`npx eslint` rene. Samme D-297-ærlighetsforbehold: API-
+formen er trent kunnskap, forsøkt men IKKE denne-økten-verifisert (nettverksegress blokkert). Se
+D-319 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Neste:** de resterende tale-backlog-punktene (deepgram/livekit/telnyx/openai_realtime) følger
+SAMME mønster - egne `SttAdapter`/`TtsAdapter`-klasser, `NOT_VERIFIED`, IKKE wiret inn i
+`main.ts`. Video-gen-familien og D-64-CRM-gruppa står fortsatt uavklart, se "Nytt merknad"-
+seksjonen under.
+
+**Forrige milepæl (uendret): D-318: registeropprydning - "Microsoft 365" fjernet HELT som egen
+backlog-plassholder** (Tobias direkte
 i chat: "fortsett å jobbe", fortsatt gjennomgang av D-231-backlogen etter D-192-merge av PR
 #192/#193). `INTEGRATIONS.md` sin Microsoft 365-rad var stale siden D-310 landet: sa fortsatt
 `NY_BACKLOG`, men Microsoft sin praktiske ekvivalent til Gmail+Drive er NÅ FAKTISK komplett -

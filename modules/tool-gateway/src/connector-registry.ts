@@ -524,7 +524,15 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
 
   // §4.7 Tale / video / media-AI
   { id: "openai_realtime", display_name: "OpenAI Realtime", category: "backlog", credential_refs: ["JARVIS_OPENAI_REALTIME_API_KEY"] },
-  { id: "elevenlabs", display_name: "ElevenLabs", category: "backlog", credential_refs: ["JARVIS_ELEVENLABS_API_KEY"] },
+  // D-319: "elevenlabs" fjernet HELT herfra - dette er en TALE-leverandør
+  // (TTS), IKKE en ToolGateway-connector. En egen ToolTransport ville vært
+  // en D-64-stil domenegrense-feil (CLAUDE.md regel 3: SpeechAdapter er den
+  // riktige adapter-grensen for tale-leverandører). Bygget i stedet som
+  // `ElevenLabsTts` (`apps/voice-gateway/src/tts.ts`), gated bak
+  // `PROCESSOR_REGION_MATRIX.md`/`evaluateSpeechRouting()` (D-122), IKKE bak
+  // denne registrerings-/credential-helsesjekk-dashboardet. Samme
+  // "ALLEREDE_DEKKET/ikke-her, ikke stille utelatt"-disiplin som
+  // microsoft_365 (D-318) - se DECISIONS_AND_ASSUMPTIONS.md D-319.
   { id: "deepgram", display_name: "Deepgram", category: "backlog", credential_refs: ["JARVIS_DEEPGRAM_API_KEY"] },
   { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
   { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
