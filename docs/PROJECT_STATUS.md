@@ -1,19 +1,22 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-296: Brave Search-
-connectoren bygget fullt ut - FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken.**
-Todoist ble vurdert FØRST som fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde
-allerede avgjort at en ekte Todoist-integrasjon MÅ bygges som sync-adapter inn i `@jarvis/operations`
-sin kanoniske `OperationsTask`, ikke en frittstående CRUD-flate - bevisst byttet til Brave Search i
-stedet for å bygge noe som ville brutt D-64. `BraveSearchTransport` (`web_search`/`news_search` mot
-Brave Search API, `X-Subscription-Token`-header) - STRUKTURELT ULIK Telegram/Slack/Discord/Twilio:
-INGEN skrivehandling finnes, leverandøren tilbyr genuint bare lesing, D-41 sitt read-only-unntak
-ærlig oppfylt. `web_search` selv brukes direkte som `live_test`. INGEN `ChannelSchema`-utvidelse
-(bevisst - dette er et verktøy, ikke en samtalekanal). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
-rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke
-opprettet ennå - neste: commit/push/PR/CI/merge, deretter neste connector fra de ~46 gjenværende
-D-231/D-232-backlog-punktene (unngå de seks `backlog_d64_gate`-punktene inntil en egen D-64-adapter-
-undersøkelse er gjort for hver).
+connectoren MERGET til `main`** (PR #188, to-forelder-merge `8f3423d`, under D-192 stående fullmakt).
+FEMTE slice, FØRSTE rent lesende (klasse A-kun) connector i rekken. Todoist ble vurdert FØRST som
+fjerde slice, men avdekket å være `backlog_d64_gate` - D-291 hadde allerede avgjort at en ekte
+Todoist-integrasjon MÅ bygges som sync-adapter inn i `@jarvis/operations` sin kanoniske
+`OperationsTask`, ikke en frittstående CRUD-flate - bevisst byttet til Brave Search i stedet for å
+bygge noe som ville brutt D-64. `BraveSearchTransport` (`web_search`/`news_search` mot Brave Search
+API, `X-Subscription-Token`-header) - STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN
+skrivehandling finnes, leverandøren tilbyr genuint bare lesing, D-41 sitt read-only-unntak ærlig
+oppfylt. `web_search` selv brukes direkte som `live_test`. INGEN `ChannelSchema`-utvidelse (bevisst -
+dette er et verktøy, ikke en samtalekanal). Underveis: én CI-flake (`embedded-postgres-port-lease.
+test.ts`, 16-prosess portkapploep, 15/16 unike - strukturelt urelatert til diffen, rettet av én
+rerun, dokumentert med stand-down-kommentar på PR-en per protokoll). 6 nye tester, `pnpm -w typecheck`/
+`npx eslint` rene. `BRAVE_SEARCH_LIVE_GATE=PENDING_CREDENTIALS`. Se D-296 i DECISIONS_AND_ASSUMPTIONS.md.
+Mønsteret er nå bevist ende-til-ende gjennom FIRE fulle PR/CI/merge-sykluser (Slack + Discord + Twilio
++ Brave Search). Neste: neste connector fra de ~46 gjenværende D-231/D-232-backlog-punktene (unngå de
+seks `backlog_d64_gate`-punktene inntil en egen D-64-adapter-undersøkelse er gjort for hver).
 
 **Forrige milepæl (uendret): D-295: Twilio-
 connectoren (SMS) MERGET til `main`** (PR #187, to-forelder-merge `d7f405e`, under D-192 stående
