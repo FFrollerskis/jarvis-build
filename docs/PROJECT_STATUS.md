@@ -1,6 +1,19 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-26 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-292: Slack-connectoren
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-292: Slack-connectoren
+MERGET til `main`** (PR #185, to-forelder-merge `832d34b`, under D-192 stående fullmakt). Underveis:
+en CI-regresjon (dupliserte `connector-registry.ts` sin `id: "slack"` - la til en NY rad i stedet for
+å oppdatere den EKSISTERENDE D-232-backlog-plassholderen for samme id - rettet ved å oppdatere
+plassholderen i place, IKKE legge til en duplikat), pluss en forbigående GitHub Actions-infrastruktur-
+blokkering (jobber fikk `runner_id: 0`/`duration_ms: 0` i ~25 minutter, ukjent nøyaktig årsak - løste
+seg selv uten Tobias-handling, IKKE bekreftet som fakturering/spending limit). **Lærdom for resten av
+backlogen:** før noen ny `CONNECTOR_REGISTRY`-oppføring legges til for en backlog-id, MÅ det først
+sjekkes om en D-232-plassholder allerede finnes for den id-en og oppdateres i place - ALDRI en ny,
+separat rad. Mønsteret (bot-token + offisiell REST-API, `notify`=klasse B, resten klasse A-lesing) er
+nå bevist ende-til-ende gjennom en full PR/CI/merge-syklus. Fortsetter systematisk til neste connector
+i de ~43 gjenværende D-231/D-232-backlog-punktene.
+
+**Forrige milepæl (uendret): D-292: Slack-connectoren
 bygget fullt ut - FØRSTE konkrete slice av Tobias sin brede "bygg alt i planen"-ordre.** `SlackTransport`
 (`notify`/`get_bot_info`/`list_channels`/`read_channel_history` - chat.postMessage/auth.test/
 conversations.list/conversations.history, Slack sin egen offisielt dokumenterte API), `slack` lagt til
