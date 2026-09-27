@@ -1,6 +1,16 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-300: KRITISK
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-297+D-298+D-299+
+D-300 MERGET til `main`** (PR #189, to-forelder-merge `e050799`, under D-192 stående fullmakt - se
+forrige milepæl-blokkene under for full begrunnelse per D-nummer). Alle 55 nye tester + `pnpm -w
+typecheck`/`npx eslint` grønt i CI. **D-300 er nå LIVE PÅ `main`:** `LlmExtractionAdapter` erstatter
+D-287 sin for-strenge `RuleBasedExtractor` som produksjons-extractor for samtaleminne. **Ærlighet om
+deploy, uendret:** denne sesjonen har INGEN tilgang til Tobias sin NAS - fiksen er nå merget, men
+Tobias må selv `git pull` + rebuilde/redeploye på NAS-en for å faktisk teste den live på telefonen.
+Neste: fortell Tobias status, deretter tilbake til ett-connector-per-PR-mønsteret for de resterende
+D-231/D-232-backlog-punktene (Tavily/Exa vurdert som trygge neste kandidater).
+
+**Forrige milepæl (uendret): D-300: KRITISK
 MINNEFUNN + FIKS - LLM-basert minneuttrekk erstatter D-287 sin for-strenge regelbaserte extractor**
 (Tobias direkte i chat: "husker han ingenting... vi trodde det fungerte fungerte det ikke", etter
 live telefon-testing). D-287 (allerede på `main`) sin `RuleBasedExtractor` krevde ETT av kun fire
@@ -19,10 +29,7 @@ fantes. Fail-closed (ALDRI fail-kastende) på uparsérbart/ugyldig/for-stort str
 referanse-implementasjon. Wiret inn i `apps/api/src/main.ts` (`new LlmExtractionAdapter(gateway)`,
 erstatter `new RuleBasedExtractor()`). `worker-main.ts` har ingen minne-skrivevei (uendret, ikke
 berørt). 20 nye tester (`llm-extraction.test.ts` + `extraction.test.ts` oppdatert), `pnpm -w
-typecheck`/`npx eslint` rene. **Ærlighet om deploy:** denne sesjonen har INGEN tilgang til Tobias sin
-NAS - kan KUN få fiksen merget til `main`, Tobias må selv `git pull` + rebuilde for å se den virke
-live på telefonen. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md. Neste: commit/push/PR/CI/merge, deretter
-tilbake til connector-backlog-sveipet (PR #189, D-297+D-298+D-299, venter fortsatt på CI/merge).
+typecheck`/`npx eslint` rene. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-299: Google Sheets-
 connectoren bygget fullt ut - ÅTTENDE slice, FORTSATT parallelt mens PR #189 sin CI kjørte** (Tobias
