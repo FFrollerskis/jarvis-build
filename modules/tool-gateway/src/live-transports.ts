@@ -1994,3 +1994,35 @@ export class ExaTransport implements ToolTransport {
     throw new Error(`exa_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-303 (bygget parallelt mens D-302 sin CI kjørte, samme brede ordre -
+ * tiende slice). **Samme ærlighetsforbehold som D-297-D-302** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * Bruker det ELDRE, langvarig stabile Places-API-et (`maps.googleapis.com/
+ * maps/api/place/...`, `key`-query-parameter) - SAMME autentiseringsform som
+ * `GoogleMapsTransport` over, bevisst IKKE det nyere v1 Places-API-et
+ * (`places.googleapis.com`, felt-maske-/header-basert auth, en helt annen
+ * kallform). Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/...)
+ * returneres RÅTT, IKKE tolket av transporten selv - samme mønster som
+ * `GoogleMapsTransport`.
+ */
+export class GooglePlacesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/place/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_places_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_places") {
+      const body = await this.call("textsearch", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_place_details") {
+      const body = await this.call("details", { place_id: String(parameters["place_id"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_places_unsupported_action_${action}`);
+  }
+}

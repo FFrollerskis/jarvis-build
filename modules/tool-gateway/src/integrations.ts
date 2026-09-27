@@ -3055,6 +3055,32 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
     },
+    /**
+     * D-303 (bygget parallelt mens D-302 sin CI kjørte - tiende slice).
+     * SAMME D-64-domenevurdering som Google Maps (D-298): stateless
+     * tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence. STRUKTURELT
+     * LIK Google Maps: INGEN klasse B/C/D-handling finnes - Places-API-et
+     * tilbyr genuint bare lesing, D-41 sitt read-only-unntak ærlig oppfylt.
+     * **IKKE denne-økten-verifisert mot en live hentet kopi av offisiell
+     * dokumentasjon** (nettverksegress blokkert i dette miljøet, samme
+     * D-297-forbehold) - basert på trent kunnskap om det ELDRE, stabile
+     * Places-API-et, se `GooglePlacesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_places", action: "search_places", description: "Tekstsøk etter steder (GET /place/textsearch/json, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
+    {
+      tool_id: "google_places", action: "get_place_details", description: "Les detaljer om ett sted (GET /place/details/json, untrusted ingestion)",
+      input_schema: record({ place_id: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

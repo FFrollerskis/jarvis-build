@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -323,6 +323,8 @@ for (const tool of firstWaveTools({
   tavily: new TavilyTransport(),
   // D-302: identisk wiring-mønster som apps/api/src/main.ts sin ExaTransport.
   exa: new ExaTransport(),
+  // D-303: identisk wiring-mønster som apps/api/src/main.ts sin GooglePlacesTransport.
+  google_places: new GooglePlacesTransport(),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til

@@ -1,25 +1,33 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-302: Exa-
-connectoren (nevralt websøk) bygget fullt ut - NIENDE konkrete byggeslice, bygget PARALLELT mens
-PR #190 (D-301 Tavily) sin CI fortsatt kjørte** (Tobias direkte i chat: "fortsett og jobbe ikke vent
-på ci"). `ExaTransport` (`live-transports.ts`) mot `POST https://api.exa.ai/search`/`/findSimilar` -
-API-nøkkel som `x-api-key`-HEADER (IKKE `Authorization: Bearer`, IKKE et body-felt som Tavily). TO
-separate, EGNE dokumenterte endepunkter (`web_search`/`find_similar`), ULIK Tavily sitt delte
-endepunkt differensiert via et body-felt. STRUKTURELT LIK Brave Search/Tavily: INGEN skrivehandling
-finnes, D-41 sitt read-only-unntak ærlig oppfylt. Samme D-297-ærlighetsforbehold (trent kunnskap,
-ikke denne-økten-bekreftet, nettverksegress blokkert). `connector-registry.ts` sin EKSISTERENDE
-D-232-plassholder oppdatert i place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom konstruktør
-(`drive-runtime-wiring.test.ts` sin telling bumpet 10→11 i begge filer). 6 nye tester
-(`d302-exa-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-lister
-oppdatert (42→41 gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps
-modules packages` begge rene. `EXA_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette landet på SAMME,
-fortsatt åpne PR #190 som D-301, oppdateres PR-tittel/body til å dekke begge D-numrene ærlig når
-committen pushes. Se D-302 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** push D-302, oppdater PR #190,
-vente på CI/merge under D-192, deretter fortsette systematisk gjennom de resterende ~41
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-303: Google
+Places-connectoren bygget fullt ut - TIENDE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301+D-302) sin CI fortsatt kjørte** (fortsatt under "fortsett og jobbe ikke vent på ci").
+`GooglePlacesTransport` (`live-transports.ts`) mot det ELDRE, stabile Places-API-et
+(`maps.googleapis.com/maps/api/place/...`) - API-nøkkel som `key`-QUERY-PARAMETER, SAMME
+autentiseringsform som Google Maps (D-298), bevisst IKKE det nyere v1 Places-API-et. To handlinger
+- `search_places`/`get_place_details` - begge klasse A, INGEN skrivehandling finnes. **D-64-sjekk:**
+SAMME domenevurdering som Google Maps (D-298, allerede kjørt) - stateless tredjeparts-stedoppslag,
+ikke eierens egen posisjon/geofence. Samme D-297-ærlighetsforbehold (trent kunnskap, ikke
+denne-økten-bekreftet). `connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i
+place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med tom konstruktør (`drive-runtime-wiring.
+test.ts` sin telling bumpet 11→12 i begge filer). 6 nye tester (`d303-google-places-transport.
+test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test-lister oppdatert (41→40
+gjenværende backlog-punkter). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps modules packages`
+begge rene. `GOOGLE_PLACES_LIVE_GATE=PENDING_CREDENTIALS`. Siden dette landet på SAMME, fortsatt
+åpne PR #190 som D-301/D-302, oppdateres PR-tittel/body til å dekke alle tre D-numrene ærlig når
+committen pushes. Se D-303 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** push D-303, oppdater PR #190,
+vente på CI/merge under D-192, deretter fortsette systematisk gjennom de resterende ~40
 backlog-connectorene - unngå de seks `backlog_d64_gate`-punktene
 (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-adapter-undersøkelse er gjort
 for hver.
+
+**Forrige milepæl (uendret): D-302: Exa-connectoren (nevralt websøk) bygget fullt ut - NIENDE
+konkrete byggeslice, bygget PARALLELT mens PR #190 (D-301 Tavily) sin CI fortsatt kjørte.**
+`ExaTransport` (`live-transports.ts`) mot `POST https://api.exa.ai/search`/`/findSimilar` -
+API-nøkkel som `x-api-key`-HEADER. TO separate, EGNE dokumenterte endepunkter
+(`web_search`/`find_similar`), ULIK Tavily sitt delte endepunkt. `EXA_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-302 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-301: Tavily-connectoren (websøk) bygget fullt ut - ÅTTENDE konkrete
 byggeslice, FØRSTE etter at PR #189 (D-297+D-298+D-299+D-300) ble merget og lukket - tilbake til

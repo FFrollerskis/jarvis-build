@@ -134,6 +134,18 @@ import type { ToolGateway } from "./gateway.ts";
  * gjelder (trent kunnskap, ikke denne-økten-bekreftet). De resterende 41
  * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
  * gjelder for hver av dem når de bygges.
+ *
+ * D-303 (2026-09-27, samme brede ordre, tiende slice, bygget parallelt mens
+ * D-302 sin CI kjørte): `google_places` bygget og flyttet ut av backlogen
+ * SAMME MÅTE - BEVISST samme D-64-domenevurdering som Google Maps (D-298):
+ * stateless tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence
+ * (`modules/location`). Bruker det ELDRE, langvarig stabile Places-API-et
+ * (`key`-query-parameter), SAMME autentiseringsform som `GoogleMapsTransport`
+ * - bevisst IKKE det nyere v1 Places-API-et (felt-maske-/header-basert auth,
+ * en helt annen kallform). Samme D-297-forbehold gjelder (trent kunnskap,
+ * ikke denne-økten-bekreftet). De resterende 40 backlog-punktene er fortsatt
+ * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
+ * bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -414,7 +426,20 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_GOOGLE_MAPS_API_KEY"],
     live_test: { tool_id: "google_maps", action: "geocode", parameters: () => ({ address: "1600 Amphitheatre Parkway, Mountain View, CA" }) }
   },
-  { id: "google_places", display_name: "Google Places", category: "backlog", credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"] },
+  {
+    // D-303 (bygget, flyttet ut av backlog): samme domenesjekk allerede kjørt
+    // for Google Maps (D-298) - stateless tredjeparts-stedoppslag, IKKE
+    // eierens egen posisjon/geofence (`modules/location`). Bruker det
+    // ELDRE, langvarig stabile Places-API-et (`maps.googleapis.com/maps/api/
+    // place/...`, `key`-query-parameter), SAMME autentiseringsform som
+    // `GoogleMapsTransport` - IKKE det nyere v1 Places-API-et (som krever et
+    // helt annet felt-maske-/header-basert auth-mønster). Oppdatert i place
+    // (var en D-232 backlog-plassholder) - ALDRI en ny, separat oppføring
+    // med samme id (D-293-lærdommen).
+    id: "google_places", display_name: "Google Places", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"],
+    live_test: { tool_id: "google_places", action: "search_places", parameters: () => ({ query: "Eiffel Tower" }) }
+  },
   { id: "google_routes", display_name: "Google Routes", category: "backlog", credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"] },
 
   // §4.13 Observability
