@@ -107,9 +107,139 @@ import type { ToolGateway } from "./gateway.ts";
  * `credential_ref` (Sheets krever den dedikerte `spreadsheets`-scopen, Drive
  * sin bredere scope dekker den ikke). D-41 sitt "maksimal nyttig kapabilitet"
  * fulgt - EKTE skrivehandlinger (`update_range`/`append_row`), ikke kunstig
- * innsnevret til read-only. De resterende 43 backlog-punktene er fortsatt
+ * innsnevret til read-only.
+ *
+ * D-300 (2026-09-27, samme økt, Tobias direkte i chat etter live telefontest:
+ * "husker han ingenting... vi trodde det fungerte fungerte det ikke"): INGEN
+ * connector-endring - kritisk minnefiks, `RuleBasedExtractor` erstattet av
+ * `LlmExtractionAdapter` i `apps/api/src/main.ts`, se `modules/memory/src/
+ * extraction.ts`. Nevnt her kun for kronologisk sporbarhet i denne filens
+ * D-nummer-rekke.
+ *
+ * D-301 (2026-09-27, samme brede ordre, åttende slice): `tavily` bygget og
+ * flyttet ut av backlogen SAMME MÅTE - andre rent lesende (klasse A-kun)
+ * connector (samme D-41 read-only-unntak som Brave Search: Tavily sitt API
+ * tilbyr genuint ingen skrivehandling). Samme D-297-forbehold gjelder (trent
+ * kunnskap om ett kjent endepunkt, `POST /search`, ikke denne-økten-
+ * bekreftet). De resterende 42 backlog-punktene er fortsatt uendret; samme
+ * oppdater-i-place-disiplin gjelder for hver av dem når de bygges.
+ *
+ * D-302 (2026-09-27, samme brede ordre, niende slice, Tobias direkte i chat:
+ * "fortsett og jobbe ikke vent på ci"): `exa` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - tredje rent lesende (klasse A-kun) connector (samme
+ * D-41 read-only-unntak som Brave Search/Tavily). Exa sitt nevrale søke-API
+ * har TO separate, egne endepunkter (`POST /search` og `POST /findSimilar`),
+ * ULIK Tavily (som deler ETT endepunkt via et body-felt) - `find_similar` er
+ * derfor et EGET kall, ikke en variant av `web_search`. Samme D-297-forbehold
+ * gjelder (trent kunnskap, ikke denne-økten-bekreftet). De resterende 41
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
+ *
+ * D-303 (2026-09-27, samme brede ordre, tiende slice, bygget parallelt mens
+ * D-302 sin CI kjørte): `google_places` bygget og flyttet ut av backlogen
+ * SAMME MÅTE - BEVISST samme D-64-domenevurdering som Google Maps (D-298):
+ * stateless tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence
+ * (`modules/location`). Bruker det ELDRE, langvarig stabile Places-API-et
+ * (`key`-query-parameter), SAMME autentiseringsform som `GoogleMapsTransport`
+ * - bevisst IKKE det nyere v1 Places-API-et (felt-maske-/header-basert auth,
+ * en helt annen kallform). Samme D-297-forbehold gjelder (trent kunnskap,
+ * ikke denne-økten-bekreftet). De resterende 40 backlog-punktene er fortsatt
  * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
  * bygges.
+ *
+ * D-304 (2026-09-27, samme brede ordre, ellevte slice, bygget parallelt mens
+ * D-303 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og jobbe
+ * ikke vent på ci"): `google_routes` bygget og flyttet ut av backlogen SAMME
+ * MÅTE - fullfører "Google-lokasjons-trioen" (Maps/Places/Routes) med SAMME
+ * D-64-domenevurdering som de to foregående: stateless tredjeparts-rute-
+ * oppslag, IKKE eierens egen posisjon/geofence. Bruker det ELDRE, langvarig
+ * stabile Directions-API-et (`key`-query-parameter), SAMME autentiseringsform
+ * som `GoogleMapsTransport`/`GooglePlacesTransport` - bevisst IKKE det nyere
+ * v2 Routes-API-et (`routes.googleapis.com`, felt-maske-/header-basert auth).
+ * Samme D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * De resterende 39 backlog-punktene er fortsatt uendret; samme oppdater-i-
+ * place-disiplin gjelder for hver av dem når de bygges.
+ *
+ * D-305 (2026-09-27, samme brede ordre, tolvte slice, bygget parallelt mens
+ * D-304 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og jobbe
+ * ikke vent på ci"): `grafana` bygget og flyttet ut av backlogen SAMME MÅTE -
+ * FØRSTE connector i denne rekken som er TYPISK selv-hostet (ingen fast
+ * SaaS-domene som sentry.io/api.tavily.com) - `JARVIS_GRAFANA_API_BASE_URL`
+ * lagt til `credential_refs` (samme "credential_refs må liste ALLE
+ * nødvendige verdier"-disiplin som D-245/D-246). Bearer-token-auth mot
+ * Grafana sitt HTTP-API (`/api/search`/`/api/dashboards/uid/{uid}`). To
+ * handlinger - `search_dashboards`/`get_dashboard` - begge klasse A, INGEN
+ * skrivehandling finnes for denne connectoren i det hele tatt (D-41 sitt
+ * read-only-unntak ærlig oppfylt). Samme D-297-forbehold gjelder (trent
+ * kunnskap, ikke denne-økten-bekreftet). De resterende 38 backlog-punktene
+ * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
+ * dem når de bygges.
+ *
+ * D-306 (2026-09-27, samme brede ordre, trettende slice, bygget parallelt
+ * mens D-305 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og
+ * jobbe ikke vent på ci"): `prometheus` bygget og flyttet ut av backlogen
+ * SAMME MÅTE - SAMME "typisk selv-hostet"-struktur som Grafana (D-305):
+ * `JARVIS_PROMETHEUS_API_BASE_URL` lagt til `credential_refs`, injisert som
+ * resolver-closure. Bearer-token-auth mot Prometheus sitt HTTP-API
+ * (`/api/v1/query`/`/api/v1/query_range`, PromQL). To handlinger -
+ * `query`/`query_range` - begge klasse A, INGEN skrivehandling finnes for
+ * denne connectoren i det hele tatt (D-41 sitt read-only-unntak ærlig
+ * oppfylt - Prometheus sitt HTTP-API tilbyr uansett ingen skrive-endepunkt
+ * for metrikkdata). Samme D-297-forbehold gjelder (trent kunnskap, ikke
+ * denne-økten-bekreftet). De resterende 37 backlog-punktene er fortsatt
+ * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
+ * bygges.
+ *
+ * D-307 (2026-09-27, samme brede ordre, fjortende slice, bygget parallelt
+ * mens D-306 sin CI kjørte, Tobias direkte i chat gjentatt: "fortsett og
+ * jobbe ikke vent på ci"): `dropbox` bygget og flyttet ut av backlogen SAMME
+ * MÅTE - `Authorization: Bearer`-header mot Dropbox API v2, ETT langvarig
+ * access-token (INGEN OAuth-refresh-flyt nødvendig, ULIK Google-familien).
+ * To handlinger - `list_folder` (klasse A, lesing) og `create_folder`
+ * (klasse B, EKTE skrivehandling) - D-41 sitt "maksimal nyttig
+ * kapabilitet"-prinsipp fulgt, ikke kunstig innsnevret til read-only.
+ * BEVISST AVGRENSET fra fil-INNHOLD-opplasting/nedlasting (Dropbox sitt
+ * separate `content.dropboxapi.com`-vertsnavn med binær body/spesielle
+ * `Dropbox-API-Arg`-headere - en STRUKTURELT ulik kallform enn de øvrige
+ * JSON-RPC-handlingene, bevisst utsatt til en egen, senere utvidelse i
+ * stedet for gjettet frem her). Samme D-297-forbehold gjelder (trent
+ * kunnskap, ikke denne-økten-bekreftet). De resterende 36 backlog-punktene
+ * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
+ * dem når de bygges.
+ *
+ * D-308 (2026-09-27, samme brede ordre, femtende slice, bygget parallelt
+ * mens D-307 sin CI kjørte, Tobias direkte i chat gjentatt, niende gang:
+ * "fortsett og jobbe ikke vent på ci"): `notion` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - `Authorization: Bearer`-header PLUSS en fast
+ * `Notion-Version`-header mot Notion sitt REST-API v1. To handlinger -
+ * `search` (klasse A, lesing) og `create_page` (klasse B, EKTE
+ * skrivehandling) - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp
+ * fulgt, ikke kunstig innsnevret til read-only. `create_page` sin
+ * `rollback_procedure` er manuell arkivering i Notion sitt UI (INGEN
+ * dedikert arkiver-endepunkt bygget her ennå - samme DEFERRED-disiplin som
+ * Dropbox sin fil-innhold-begrensning, D-41 eksplisitt merket). Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk dokument-/kunnskaps-domenemodell finnes
+ * noe sted i Jarvis (samme reasonering som Google Drive/Sheets/Dropbox) -
+ * rent leverandør-adapter, EXTERNAL_CANONICAL. De resterende 35
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
+ *
+ * D-309 (2026-09-27, samme brede ordre, sekstende slice, bygget parallelt
+ * mens D-308 sin CI kjørte, Tobias direkte i chat gjentatt, tiende gang:
+ * "fortsett og jobbe ikke vent på ci"): `onedrive` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - `Authorization: Bearer`-header mot Microsoft
+ * Graph v1.0. To handlinger - `list_folder` (klasse A, lesing) og
+ * `create_folder` (klasse B, EKTE skrivehandling) - D-41 sitt "maksimal
+ * nyttig kapabilitet"-prinsipp fulgt, ikke kunstig innsnevret til
+ * read-only. SAMME "fil-lagring"-domenestatus som Dropbox (D-307) -
+ * `create_folder` sin `rollback_procedure` er manuell sletting. Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk fil-lagrings-domenemodell finnes noe sted
+ * i Jarvis (samme reasonering som Google Drive/Dropbox) - rent
+ * leverandør-adapter, EXTERNAL_CANONICAL. De resterende 34
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -242,9 +372,38 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // Rekkefølge følger `docs/INTEGRATIONS.md` §4 sine underseksjoner (4.3->4.15).
 
   // §4.3 Kunnskap / dokumenter
-  { id: "notion", display_name: "Notion", category: "backlog", credential_refs: ["JARVIS_NOTION_API_KEY"] },
-  { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
-  { id: "dropbox", display_name: "Dropbox", category: "backlog", credential_refs: ["JARVIS_DROPBOX_TOKEN"] },
+  {
+    // D-308 (bygget, flyttet ut av backlog): Notion REST-API v1 (fast
+    // `Notion-Version`-header i tillegg til `Authorization: Bearer`). D-41
+    // sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+    // skrivehandling (`create_page`), ikke kunstig innsnevret til
+    // read-only. Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-disiplinen).
+    id: "notion", display_name: "Notion", category: "tool_gateway", credential_refs: ["JARVIS_NOTION_API_KEY"],
+    live_test: { tool_id: "notion", action: "search", parameters: () => ({}) }
+  },
+  {
+    // D-309 (bygget, flyttet ut av backlog): Microsoft Graph v1.0
+    // (`Authorization: Bearer`-header). D-41 sitt "maksimal nyttig
+    // kapabilitet"-prinsipp fulgt - EKTE skrivehandling (`create_folder`),
+    // ikke kunstig innsnevret til read-only. Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-disiplinen).
+    id: "onedrive", display_name: "OneDrive", category: "tool_gateway", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"],
+    live_test: { tool_id: "onedrive", action: "list_folder", parameters: () => ({}) }
+  },
+  {
+    // D-307 (bygget, flyttet ut av backlog): Dropbox API v2 - `Authorization:
+    // Bearer`-header, ETT langvarig access-token (INGEN OAuth-refresh-flyt
+    // nødvendig, ULIK Google-familien). D-41 sitt "maksimal nyttig
+    // kapabilitet"-prinsipp fulgt - EKTE skrivehandling (`create_folder`),
+    // ikke kunstig innsnevret til read-only. Oppdatert i place (var en
+    // D-232 backlog-plassholder) - ALDRI en ny, separat oppføring med samme
+    // id (D-293-lærdommen).
+    id: "dropbox", display_name: "Dropbox", category: "tool_gateway",
+    credential_refs: ["JARVIS_DROPBOX_TOKEN"],
+    live_test: { tool_id: "dropbox", action: "list_folder", parameters: () => ({ path: "" }) }
+  },
   {
     // D-299 (bygget, flyttet ut av backlog): SYVENDE slice. Gjenbruker den
     // EKSISTERENDE `googleAccessToken()`-OAuth-veien, MEN med sin EGEN
@@ -283,8 +442,29 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_BRAVE_SEARCH_API_KEY"],
     live_test: { tool_id: "brave_search", action: "web_search", parameters: () => ({ query: "ping" }) }
   },
-  { id: "tavily", display_name: "Tavily", category: "backlog", credential_refs: ["JARVIS_TAVILY_API_KEY"] },
-  { id: "exa", display_name: "Exa", category: "backlog", credential_refs: ["JARVIS_EXA_API_KEY"] },
+  {
+    // D-301 (bygget, flyttet ut av backlog): samme "genuint bare lesing"-
+    // struktur som Brave Search (D-296) rett over - Tavily tilbyr ett kjent
+    // endepunkt (POST /search) som web_search/news_search begge bruker,
+    // differensiert kun via et `topic`-felt i request-body. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "tavily", display_name: "Tavily", category: "tool_gateway",
+    credential_refs: ["JARVIS_TAVILY_API_KEY"],
+    live_test: { tool_id: "tavily", action: "web_search", parameters: () => ({ query: "ping" }) }
+  },
+  {
+    // D-302 (bygget, flyttet ut av backlog): samme "genuint bare lesing"-
+    // struktur som Brave Search (D-296)/Tavily (D-301) - Exa sitt nevrale
+    // søke-API (`POST /search`) tilbyr genuint bare lesing. `find_similar`
+    // bruker et EGET, separat dokumentert endepunkt (`POST /findSimilar`),
+    // IKKE samme kall som web_search med en annen body-form. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "exa", display_name: "Exa", category: "tool_gateway",
+    credential_refs: ["JARVIS_EXA_API_KEY"],
+    live_test: { tool_id: "exa", action: "web_search", parameters: () => ({ query: "ping" }) }
+  },
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
 
   // §4.7 Tale / video / media-AI
@@ -369,8 +549,35 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_GOOGLE_MAPS_API_KEY"],
     live_test: { tool_id: "google_maps", action: "geocode", parameters: () => ({ address: "1600 Amphitheatre Parkway, Mountain View, CA" }) }
   },
-  { id: "google_places", display_name: "Google Places", category: "backlog", credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"] },
-  { id: "google_routes", display_name: "Google Routes", category: "backlog", credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"] },
+  {
+    // D-303 (bygget, flyttet ut av backlog): samme domenesjekk allerede kjørt
+    // for Google Maps (D-298) - stateless tredjeparts-stedoppslag, IKKE
+    // eierens egen posisjon/geofence (`modules/location`). Bruker det
+    // ELDRE, langvarig stabile Places-API-et (`maps.googleapis.com/maps/api/
+    // place/...`, `key`-query-parameter), SAMME autentiseringsform som
+    // `GoogleMapsTransport` - IKKE det nyere v1 Places-API-et (som krever et
+    // helt annet felt-maske-/header-basert auth-mønster). Oppdatert i place
+    // (var en D-232 backlog-plassholder) - ALDRI en ny, separat oppføring
+    // med samme id (D-293-lærdommen).
+    id: "google_places", display_name: "Google Places", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_PLACES_API_KEY"],
+    live_test: { tool_id: "google_places", action: "search_places", parameters: () => ({ query: "Eiffel Tower" }) }
+  },
+  {
+    // D-304 (bygget, flyttet ut av backlog): samme domenesjekk allerede kjørt
+    // for Google Maps (D-298)/Google Places (D-303) - stateless tredjeparts-
+    // rute-oppslag, IKKE eierens egen posisjon/geofence (`modules/location`).
+    // Bruker det ELDRE, langvarig stabile Directions-API-et
+    // (`maps.googleapis.com/maps/api/directions/...`, `key`-query-parameter),
+    // SAMME autentiseringsform som `GoogleMapsTransport`/`GooglePlacesTransport`
+    // - IKKE det nyere v2 Routes-API-et (`routes.googleapis.com`, felt-maske-/
+    // header-basert auth). Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-lærdommen).
+    id: "google_routes", display_name: "Google Routes", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_ROUTES_API_KEY"],
+    live_test: { tool_id: "google_routes", action: "get_directions", parameters: () => ({ origin: "Paris, France", destination: "Versailles, France" }) }
+  },
 
   // §4.13 Observability
   {
@@ -387,8 +594,28 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_SENTRY_API_TOKEN", "JARVIS_SENTRY_ORG_SLUG"],
     live_test: { tool_id: "sentry", action: "list_projects", parameters: () => ({}) }
   },
-  { id: "grafana", display_name: "Grafana", category: "backlog", credential_refs: ["JARVIS_GRAFANA_API_KEY"] },
-  { id: "prometheus", display_name: "Prometheus", category: "backlog", credential_refs: ["JARVIS_PROMETHEUS_TOKEN"] },
+  {
+    // D-305 (bygget, flyttet ut av backlog): Grafana er TYPISK selv-hostet
+    // (ingen fast SaaS-domene som sentry.io) - `JARVIS_GRAFANA_API_BASE_URL`
+    // lagt til `credential_refs` (samme "credential_refs må liste ALLE
+    // nødvendige verdier"-disiplin som D-245/D-246 sine Vipps MSN/Wallester
+    // ACCOUNT_ID). Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-lærdommen).
+    id: "grafana", display_name: "Grafana", category: "tool_gateway",
+    credential_refs: ["JARVIS_GRAFANA_API_KEY", "JARVIS_GRAFANA_API_BASE_URL"],
+    live_test: { tool_id: "grafana", action: "search_dashboards", parameters: () => ({}) }
+  },
+  {
+    // D-306 (bygget, flyttet ut av backlog): SAMME "typisk selv-hostet"-
+    // struktur som Grafana (D-305) - `JARVIS_PROMETHEUS_API_BASE_URL` lagt
+    // til `credential_refs` (samme "credential_refs må liste ALLE nødvendige
+    // verdier"-disiplin). Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-lærdommen).
+    id: "prometheus", display_name: "Prometheus", category: "tool_gateway",
+    credential_refs: ["JARVIS_PROMETHEUS_TOKEN", "JARVIS_PROMETHEUS_API_BASE_URL"],
+    live_test: { tool_id: "prometheus", action: "query", parameters: () => ({ query: "up" }) }
+  },
 
   // §4.15 OS / enhet (Windows/macOS er BEVISST UTELATT - IKKE EN CONNECTOR, Q-39)
   { id: "apns", display_name: "Apple Push Notification service", category: "backlog", credential_refs: ["JARVIS_APNS_AUTH_KEY"] },

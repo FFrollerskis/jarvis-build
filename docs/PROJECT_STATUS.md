@@ -1,6 +1,105 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-300: KRITISK
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-309: OneDrive-
+connectoren bygget fullt ut - SEKSTENDE konkrete byggeslice, bygget PARALLELT mens PR #190
+(D-301 til D-308) sin CI fortsatt kjørte** (Tobias gjentok direkte i chat, tiende gang: "fortsett
+og jobbe ikke vent på ci"). `OneDriveTransport` (`live-transports.ts`) - `Authorization: Bearer`
+mot Microsoft Graph v1.0. To handlinger - `list_folder` (klasse A, lesing) og `create_folder`
+(klasse B, EKTE skrivehandling - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt, ikke
+kunstig innsnevret til read-only). `create_folder` sin `rollback_procedure` er manuell sletting -
+samme mønster som Dropbox (D-307). **D-64-sjekk:** ingen kanonisk fil-lagrings-domenemodell finnes
+i Jarvis - rent leverandør-adapter, samme status som Google Drive/Dropbox. Samme
+D-297-ærlighetsforbehold. `connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i
+place. Wiret inn i BÅDE `main.ts`/`worker-main.ts` med en TOM konstruktør (`new
+OneDriveTransport()` - teller MED i "tom konstruktør"-tellingen, bump 15→16). 6 nye tester
+(`d309-onedrive-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
+test_method-lister oppdatert (35→34 gjenværende backlog-punkter, 29→30 bygde). `pnpm -w typecheck`
+(32/32 pakker)/`npx eslint apps modules packages` begge rene. `ONEDRIVE_LIVE_GATE=
+PENDING_CREDENTIALS`. Siden dette landet på SAMME, fortsatt åpne PR #190 som D-301 til D-308,
+oppdateres PR-tittel/body til å dekke alle ni D-numrene ærlig når committen pushes. Se D-309 i
+DECISIONS_AND_ASSUMPTIONS.md.
+**Neste - VIKTIG:** PR #190 dekker nå NI connectorer - anbefalingen om å la CI fange opp og merge
+under D-192 FØR neste connector er gitt etter D-306/D-307/D-308, men eksplisitt overstyrt hver gang
+av Tobias sine gjentatte "fortsett og jobbe ikke vent på ci"-meldinger (nå tiende gang totalt).
+Presedensen står: fortsett å bygge inntil en annen instruks kommer. Deretter fortsett systematisk
+gjennom de resterende ~34 backlog-connectorene, og LA CI til slutt fange opp og merge PR #190 under
+D-192 - unngå de seks `backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist)
+til en egen D-64-sync-adapter-undersøkelse er gjort for hver, og unngå homekit/philips_hue (skal
+rute via Home Assistant, ikke en direkte Jarvis-connector). **Nytt merknad:** de gjenværende
+voice-relaterte backlog-punktene (openai_realtime/elevenlabs/deepgram/livekit/telnyx) bør
+sannsynligvis IKKE bygges som vanlige ToolGateway-connectorer uten videre - CLAUDE.md regel 3/5
+(Voice Gateway egen prosess, alle leverandører bak `SpeechAdapter`) og task #125 (lokale
+whisper.cpp/piper-adaptere allerede bygget) antyder disse hører hjemme bak `SpeechAdapter`, ikke
+som frittstående ToolGateway-verktøy - flagges for en kort D-64-lignende sjekk før de eventuelt
+bygges, i stedet for å anta samme mønster som Dropbox/Notion/OneDrive.
+
+**Forrige milepæl (uendret): D-308: Notion-connectoren bygget fullt ut - FEMTENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-307) sin CI fortsatt kjørte.**
+`NotionTransport` (`live-transports.ts`) - `Authorization: Bearer` PLUSS en fast `Notion-Version:
+2022-06-28`-header mot Notion sitt REST-API v1. To handlinger - `search` (klasse A) og
+`create_page` (klasse B, EKTE skrivehandling). Bevisst DEFERRED: `rollback_procedure` er manuell
+arkivering. `NOTION_LIVE_GATE=PENDING_CREDENTIALS`. Se D-308 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-307: Dropbox-connectoren bygget fullt ut - FJORTENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-306) sin CI fortsatt kjørte.**
+`DropboxTransport` (`live-transports.ts`) - `Authorization: Bearer` mot Dropbox API v2
+(`api.dropboxapi.com/2/files/...`, JSON-RPC-lignende POST-kall). To handlinger - `list_folder`
+(klasse A, lesing) og `create_folder` (klasse B, EKTE skrivehandling). Bevisst DEFERRED: ekte
+fil-INNHOLD-opplasting/nedlasting er IKKE bygget. `DROPBOX_LIVE_GATE=PENDING_CREDENTIALS`. Se
+D-307 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-306: Prometheus-connectoren bygget fullt ut - TRETTENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301 til D-305) sin CI fortsatt kjørte.**
+`PrometheusTransport` (`live-transports.ts`) - SAMME "typisk selv-hostet"-struktur som Grafana
+(D-305): base-URL må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`), resolver-closure. To
+handlinger - `query`/`query_range` - begge klasse A, INGEN skrivehandling finnes. Fullfører
+"observability-paret" (Grafana+Prometheus). `PROMETHEUS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-306 i
+DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-305: Grafana-connectoren bygget fullt ut - TOLVTE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302+D-303+D-304) sin CI fortsatt kjørte.**
+`GrafanaTransport` (`live-transports.ts`) - FØRSTE connector i denne rekken som er TYPISK selv-
+hostet - base-URL må konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), resolver-closure, SAMME mønster
+som Sentry sin org-slug (D-297). To handlinger - `search_dashboards`/`get_dashboard`.
+`GRAFANA_LIVE_GATE=PENDING_CREDENTIALS`. Se D-305 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-304: Google Routes-connectoren bygget fullt ut - ELLEVTE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302+D-303) sin CI fortsatt kjørte.**
+`GoogleRoutesTransport` (`live-transports.ts`) mot det ELDRE, stabile Directions-/Distance
+Matrix-API-et - API-nøkkel som `key`-QUERY-PARAMETER. Fullfører "Google-lokasjons-trioen"
+(Maps/Places/Routes). To handlinger - `get_directions`/`get_distance_matrix`. `GOOGLE_ROUTES_
+LIVE_GATE=PENDING_CREDENTIALS`. Se D-304 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-303: Google Places-connectoren bygget fullt ut - TIENDE konkrete
+byggeslice, bygget PARALLELT mens PR #190 (D-301+D-302) sin CI fortsatt kjørte.**
+`GooglePlacesTransport` (`live-transports.ts`) mot det ELDRE, stabile Places-API-et - API-nøkkel
+som `key`-QUERY-PARAMETER. To handlinger - `search_places`/`get_place_details`. `GOOGLE_PLACES_
+LIVE_GATE=PENDING_CREDENTIALS`. Se D-303 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-302: Exa-connectoren (nevralt websøk) bygget fullt ut - NIENDE
+konkrete byggeslice, bygget PARALLELT mens PR #190 (D-301 Tavily) sin CI fortsatt kjørte.**
+`ExaTransport` (`live-transports.ts`) mot `POST https://api.exa.ai/search`/`/findSimilar` -
+API-nøkkel som `x-api-key`-HEADER. TO separate, EGNE dokumenterte endepunkter
+(`web_search`/`find_similar`), ULIK Tavily sitt delte endepunkt. `EXA_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-302 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-301: Tavily-connectoren (websøk) bygget fullt ut - ÅTTENDE konkrete
+byggeslice, FØRSTE etter at PR #189 (D-297+D-298+D-299+D-300) ble merget og lukket - tilbake til
+ett-connector-per-PR-mønsteret.** `TavilyTransport` (`live-transports.ts`) mot
+`POST https://api.tavily.com/search` - API-nøkkel som `api_key`-FELT I POST-BODY-en (IKKE en header,
+ULIK Sentry/Brave Search). Kun ÉTT reelt dokumentert endepunkt kjent - `web_search`/`news_search`
+skiller seg KUN på et `topic`-body-felt (general/news) mot SAMME endepunkt. `TAVILY_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-301 i DECISIONS_AND_ASSUMPTIONS.md.
+
+**Forrige milepæl (uendret): D-297+D-298+D-299+D-300 MERGET til `main`** (PR #189, to-forelder-merge
+`e050799`, under D-192 stående fullmakt - se blokkene under for full begrunnelse per D-nummer). Alle
+55 nye tester + `pnpm -w typecheck`/`npx eslint` grønt i CI. **D-300 er nå LIVE PÅ `main`:**
+`LlmExtractionAdapter` erstatter D-287 sin for-strenge `RuleBasedExtractor` som produksjons-extractor
+for samtaleminne. **Ærlighet om deploy, uendret:** denne sesjonen har INGEN tilgang til Tobias sin
+NAS - fiksen er nå merget, men Tobias må selv `git pull` + rebuilde/redeploye på NAS-en for å faktisk
+teste den live på telefonen.
+
+**Forrige milepæl (uendret): D-300: KRITISK
 MINNEFUNN + FIKS - LLM-basert minneuttrekk erstatter D-287 sin for-strenge regelbaserte extractor**
 (Tobias direkte i chat: "husker han ingenting... vi trodde det fungerte fungerte det ikke", etter
 live telefon-testing). D-287 (allerede på `main`) sin `RuleBasedExtractor` krevde ETT av kun fire
@@ -19,10 +118,7 @@ fantes. Fail-closed (ALDRI fail-kastende) på uparsérbart/ugyldig/for-stort str
 referanse-implementasjon. Wiret inn i `apps/api/src/main.ts` (`new LlmExtractionAdapter(gateway)`,
 erstatter `new RuleBasedExtractor()`). `worker-main.ts` har ingen minne-skrivevei (uendret, ikke
 berørt). 20 nye tester (`llm-extraction.test.ts` + `extraction.test.ts` oppdatert), `pnpm -w
-typecheck`/`npx eslint` rene. **Ærlighet om deploy:** denne sesjonen har INGEN tilgang til Tobias sin
-NAS - kan KUN få fiksen merget til `main`, Tobias må selv `git pull` + rebuilde for å se den virke
-live på telefonen. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md. Neste: commit/push/PR/CI/merge, deretter
-tilbake til connector-backlog-sveipet (PR #189, D-297+D-298+D-299, venter fortsatt på CI/merge).
+typecheck`/`npx eslint` rene. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-299: Google Sheets-
 connectoren bygget fullt ut - ÅTTENDE slice, FORTSATT parallelt mens PR #189 sin CI kjørte** (Tobias

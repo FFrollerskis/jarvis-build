@@ -5,7 +5,7 @@ import { InfraExecutionGate, KillSwitch, OwnerControls, PolicyGateway } from "@j
 import { ModelGateway, traceSinkFromEnv } from "@jarvis/model-gateway";
 import {
   DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport, GmailTransport,
-  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
+  GoogleCalendarTransport, InfisicalSecretProvider, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, VercelTransport, MeshToolExecutor, allMeshTools, PgGithubRateLimitStore,
   ToolGateway, driveTransportsIfConfigured, firstWaveTools, parseDockerMutationTargets
 } from "@jarvis/tool-gateway";
 import { BusinessInternalSecretProvider, BusinessService, BusinessTransport, OpenLoopService, ScoringService } from "@jarvis/business";
@@ -319,6 +319,24 @@ for (const tool of firstWaveTools({
   google_maps: new GoogleMapsTransport(),
   // D-299: identisk wiring-mønster som apps/api/src/main.ts sin GoogleSheetsTransport.
   google_sheets: new GoogleSheetsTransport(),
+  // D-301: identisk wiring-mønster som apps/api/src/main.ts sin TavilyTransport.
+  tavily: new TavilyTransport(),
+  // D-302: identisk wiring-mønster som apps/api/src/main.ts sin ExaTransport.
+  exa: new ExaTransport(),
+  // D-303: identisk wiring-mønster som apps/api/src/main.ts sin GooglePlacesTransport.
+  google_places: new GooglePlacesTransport(),
+  // D-304: identisk wiring-mønster som apps/api/src/main.ts sin GoogleRoutesTransport.
+  google_routes: new GoogleRoutesTransport(),
+  // D-305: identisk wiring-mønster som apps/api/src/main.ts sin GrafanaTransport.
+  grafana: new GrafanaTransport(() => toolSecretProvider.get("JARVIS_GRAFANA_API_BASE_URL")),
+  // D-306: identisk wiring-mønster som apps/api/src/main.ts sin PrometheusTransport.
+  prometheus: new PrometheusTransport(() => toolSecretProvider.get("JARVIS_PROMETHEUS_API_BASE_URL")),
+  // D-307: identisk wiring-mønster som apps/api/src/main.ts sin DropboxTransport.
+  dropbox: new DropboxTransport(),
+  // D-308: identisk wiring-mønster som apps/api/src/main.ts sin NotionTransport.
+  notion: new NotionTransport(),
+  // D-309: identisk wiring-mønster som apps/api/src/main.ts sin OneDriveTransport.
+  onedrive: new OneDriveTransport(),
   // D-242/D-248: identisk wiring-mønster som apps/api/src/main.ts - `vercel`
   // manglet en ekte transport her også - `VercelTransport` fantes aldri,
   // `transport("vercel")` falt derfor alltid tilbake til

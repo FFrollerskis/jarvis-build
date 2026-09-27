@@ -3003,6 +3003,240 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
       output_trust: "internal", transport: transport("google_sheets")
     },
+    /**
+     * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - åttende slice). STRUKTURELT LIK Brave Search (D-296):
+     * INGEN klasse B/C/D-handling finnes - Tavily sitt API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om ETT kjent endepunkt (`POST /search`),
+     * `web_search`/`news_search` differensiert kun via `topic`-felt i
+     * request-body, se `TavilyTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "tavily", action: "web_search", description: "Websøk (POST /search, topic=general, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
+    {
+      tool_id: "tavily", action: "news_search", description: "Nyhetssøk (POST /search, topic=news, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
+    /**
+     * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" -
+     * niende slice). STRUKTURELT LIK Brave Search/Tavily: INGEN klasse
+     * B/C/D-handling finnes - Exa sitt nevrale søke-API tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Exa sitt offentlige API. TO separate,
+     * EGNE endepunkter (`POST /search`/`POST /findSimilar`), ULIK Tavily
+     * sitt delte endepunkt, se `ExaTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "exa", action: "web_search", description: "Nevralt websøk (POST /search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
+    {
+      tool_id: "exa", action: "find_similar", description: "Finn sider som ligner en gitt URL (POST /findSimilar, untrusted ingestion)",
+      input_schema: record({ url: z.string().max(2000), num_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_EXA_API_KEY", output_trust: "untrusted", transport: transport("exa")
+    },
+    /**
+     * D-303 (bygget parallelt mens D-302 sin CI kjørte - tiende slice).
+     * SAMME D-64-domenevurdering som Google Maps (D-298): stateless
+     * tredjeparts-stedoppslag, IKKE eierens egen posisjon/geofence. STRUKTURELT
+     * LIK Google Maps: INGEN klasse B/C/D-handling finnes - Places-API-et
+     * tilbyr genuint bare lesing, D-41 sitt read-only-unntak ærlig oppfylt.
+     * **IKKE denne-økten-verifisert mot en live hentet kopi av offisiell
+     * dokumentasjon** (nettverksegress blokkert i dette miljøet, samme
+     * D-297-forbehold) - basert på trent kunnskap om det ELDRE, stabile
+     * Places-API-et, se `GooglePlacesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_places", action: "search_places", description: "Tekstsøk etter steder (GET /place/textsearch/json, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
+    {
+      tool_id: "google_places", action: "get_place_details", description: "Les detaljer om ett sted (GET /place/details/json, untrusted ingestion)",
+      input_schema: record({ place_id: z.string().max(400) }),
+      capability_class: "A", scopes: ["places:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_PLACES_API_KEY", output_trust: "untrusted", transport: transport("google_places")
+    },
+    /**
+     * D-304 (bygget parallelt mens D-303 sin CI kjørte - ellevte slice).
+     * SAMME D-64-domenevurdering som Google Maps/Google Places: stateless
+     * tredjeparts-rute-oppslag, IKKE eierens egen posisjon/geofence.
+     * STRUKTURELT LIK Google Maps/Google Places: INGEN klasse B/C/D-handling
+     * finnes - Directions-/Distance Matrix-API-et tilbyr genuint bare
+     * lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om det ELDRE, stabile Directions-/Distance
+     * Matrix-API-et, se `GoogleRoutesTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "google_routes", action: "get_directions", description: "Rutebeskrivelse mellom to punkter (GET /directions/json, untrusted ingestion)",
+      input_schema: record({ origin: z.string().max(400), destination: z.string().max(400) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
+    {
+      tool_id: "google_routes", action: "get_distance_matrix", description: "Reisetid/avstand mellom flere opprinnelser/destinasjoner (GET /distancematrix/json, untrusted ingestion)",
+      input_schema: record({ origins: z.string().max(800), destinations: z.string().max(800) }),
+      capability_class: "A", scopes: ["routes:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_ROUTES_API_KEY", output_trust: "untrusted", transport: transport("google_routes")
+    },
+    /**
+     * D-305 (bygget parallelt mens D-304 sin CI kjørte - tolvte slice).
+     * STRUKTURELT LIK Google Maps/Places/Routes/Brave Search/Tavily/Exa:
+     * INGEN klasse B/C/D-handling finnes - Grafana sitt HTTP-API tilbyr her
+     * kun lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Grafana sitt HTTP-API, se
+     * `GrafanaTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "grafana", action: "search_dashboards", description: "Søk etter dashboards/mapper (GET /api/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400).optional() }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
+    {
+      tool_id: "grafana", action: "get_dashboard", description: "Les ett dashboard ved uid (GET /api/dashboards/uid/{uid}, untrusted ingestion)",
+      input_schema: record({ uid: z.string().max(200) }),
+      capability_class: "A", scopes: ["dashboards:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GRAFANA_API_KEY", output_trust: "untrusted", transport: transport("grafana")
+    },
+    /**
+     * D-306 (bygget parallelt mens D-305 sin CI kjørte - trettende slice).
+     * STRUKTURELT LIK Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN
+     * klasse B/C/D-handling finnes - Prometheus sitt HTTP-API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Prometheus sitt HTTP-API, se
+     * `PrometheusTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "prometheus", action: "query", description: "PromQL instant-spørring (GET /api/v1/query, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
+    {
+      tool_id: "prometheus", action: "query_range", description: "PromQL rekke-spørring over tid (GET /api/v1/query_range, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(1000), start: z.string().max(64), end: z.string().max(64), step: z.string().max(32) }),
+      capability_class: "A", scopes: ["metrics:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PROMETHEUS_TOKEN", output_trust: "untrusted", transport: transport("prometheus")
+    },
+    /**
+     * D-307 (bygget parallelt mens D-306 sin CI kjørte - fjortende slice).
+     * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+     * skrivehandling (`create_folder`), ikke kunstig innsnevret til
+     * read-only (samme disiplin som Drive/Sheets). **IKKE denne-økten-
+     * verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om Dropbox API v2, se `DropboxTransport` sin
+     * doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "dropbox", action: "list_folder", description: "List innhold i en mappe (POST /2/files/list_folder, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["files.metadata.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_DROPBOX_TOKEN", output_trust: "untrusted", transport: transport("dropbox")
+    },
+    {
+      tool_id: "dropbox", action: "create_folder", description: "Opprett en NY, tom mappe (POST /2/files/create_folder_v2)",
+      input_schema: record({ path: z.string().max(1000) }),
+      capability_class: "B", scopes: ["files.content.write"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DROPBOX_TOKEN",
+      output_trust: "internal", transport: transport("dropbox")
+    },
+    /**
+     * D-308 (bygget parallelt mens D-307 sin CI kjørte - femtende slice,
+     * Tobias direkte i chat gjentatt, niende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header + fast `Notion-Version`-
+     * header mot Notion sitt REST-API. D-41: `create_page` er en EKTE
+     * skrivehandling (ikke kunstig innsnevret til read-only) - reversibel
+     * via arkivering i Notion sitt UI (ingen dedikert arkiver-endepunkt
+     * bygget her ennå). **IKKE denne-økten-verifisert mot en live hentet
+     * kopi av offisiell dokumentasjon** (nettverksegress blokkert i dette
+     * miljøet, samme D-297-forbehold) - basert på trent kunnskap om Notion
+     * API v1 (2022-06-28), se `NotionTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "notion", action: "search", description: "Søk på tvers av sider/databaser eieren har delt med integrasjonen (POST /v1/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(2000).optional() }),
+      capability_class: "A", scopes: ["read_content"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_NOTION_API_KEY", output_trust: "untrusted", transport: transport("notion")
+    },
+    {
+      tool_id: "notion", action: "create_page", description: "Opprett en NY side under en gitt parent (POST /v1/pages)",
+      input_schema: record({
+        parent: z.record(z.string(), z.unknown()), properties: z.record(z.string(), z.unknown())
+      }),
+      capability_class: "B", scopes: ["insert_content"], reversible: true,
+      rollback_procedure: "arkiver siden manuelt i Notion", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NOTION_API_KEY",
+      output_trust: "internal", transport: transport("notion")
+    },
+    /**
+     * D-309 (bygget parallelt mens D-308 sin CI kjørte - sekstende slice,
+     * Tobias direkte i chat gjentatt, tiende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header mot Microsoft Graph
+     * v1.0. D-41: `create_folder` er en EKTE skrivehandling (ikke kunstig
+     * innsnevret til read-only). **IKKE denne-økten-verifisert mot en live
+     * hentet kopi av offisiell dokumentasjon** (nettverksegress blokkert i
+     * dette miljøet, samme D-297-forbehold) - basert på trent kunnskap om
+     * Microsoft Graph Drive API, se `OneDriveTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "onedrive", action: "list_folder", description: "List innhold i en mappe (GET /me/drive/root/children eller .../root:/{path}:/children, untrusted ingestion)",
+      input_schema: record({ path: z.string().max(1000).optional() }),
+      capability_class: "A", scopes: ["Files.Read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_ONEDRIVE_TOKEN", output_trust: "untrusted", transport: transport("onedrive")
+    },
+    {
+      tool_id: "onedrive", action: "create_folder", description: "Opprett en NY mappe under rot (POST /me/drive/root/children)",
+      input_schema: record({ name: z.string().max(255) }),
+      capability_class: "B", scopes: ["Files.ReadWrite"], reversible: true,
+      rollback_procedure: "slett den nyopprettede mappen manuelt", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_ONEDRIVE_TOKEN",
+      output_trust: "internal", transport: transport("onedrive")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

@@ -1910,3 +1910,339 @@ export class GoogleSheetsTransport implements ToolTransport {
     throw new Error(`sheets_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - tilbake til ett-connector-per-PR etter D-297-300-samlingen).
+ * **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300** (nettverksegress
+ * blokkert denne økten, `WebFetch` mot eksterne dokumentasjonsdomener
+ * bekreftet `EGRESS_BLOCKED` - se D-297): API-formen under er basert på
+ * trent kunnskap om Tavily sitt offentlige Search-API, IKKE en denne-økten-
+ * bekreftet kilde. Tavily sender API-nøkkelen som `api_key`-FELT I POST-
+ * BODY-en (IKKE en `Authorization`-header, ULIK Sentry/Brave Search) - deres
+ * opprinnelige, mest utbredt dokumenterte autentiseringsform. Kun ÉTT reelt
+ * dokumentert endepunkt (`POST /search`) er kjent med tilstrekkelig
+ * sikkerhet - `web_search`/`news_search` skiller seg derfor KUN på `topic`-
+ * body-feltet (general/news) mot SAMME endepunkt, i stedet for å gjette på
+ * et separat nyhets-endepunkts URL/form. STRUKTURELT LIK Brave Search: D-41
+ * sitt read-only-unntak ærlig oppfylt (søke-API, ingen skrivehandling).
+ */
+export class TavilyTransport implements ToolTransport {
+  private async call(topic: "general" | "news", parameters: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const body: Record<string, JsonValue> = { api_key: credential, query: String(parameters["query"]), topic };
+    if (parameters["max_results"] !== undefined) body["max_results"] = parameters["max_results"];
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`tavily_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body = await this.call("general", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "news_search") {
+      const body = await this.call("news", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`tavily_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-302 (Tobias direkte i chat: "fortsett og jobbe ikke vent på ci" - niende
+ * slice). **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300/D-301**
+ * (nettverksegress blokkert denne økten, `WebFetch` mot eksterne
+ * dokumentasjonsdomener bekreftet `EGRESS_BLOCKED` - se D-297): API-formen
+ * under er basert på trent kunnskap om Exa sitt offentlige, nevrale søke-API,
+ * IKKE en denne-økten-bekreftet kilde. Exa sender API-nøkkelen som en
+ * `x-api-key`-HEADER (IKKE `Authorization: Bearer`, IKKE et body-felt som
+ * Tavily). TO separate, EGNE endepunkter - `POST /search` (`web_search`) og
+ * `POST /findSimilar` (`find_similar`, tar en `url` i stedet for en `query`)
+ * - ULIK Tavily, som deler ETT endepunkt via et body-felt. STRUKTURELT LIK
+ * Brave Search/Tavily: D-41 sitt read-only-unntak ærlig oppfylt (søke-API,
+ * ingen skrivehandling).
+ */
+export class ExaTransport implements ToolTransport {
+  private async post(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.exa.ai${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": credential },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`exa_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body: Record<string, JsonValue> = { query: String(parameters["query"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/search", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "find_similar") {
+      const body: Record<string, JsonValue> = { url: String(parameters["url"]) };
+      if (parameters["num_results"] !== undefined) body["numResults"] = parameters["num_results"];
+      const result = await this.post("/findSimilar", body, credential);
+      return { data: (result as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`exa_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-303 (bygget parallelt mens D-302 sin CI kjørte, samme brede ordre -
+ * tiende slice). **Samme ærlighetsforbehold som D-297-D-302** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * Bruker det ELDRE, langvarig stabile Places-API-et (`maps.googleapis.com/
+ * maps/api/place/...`, `key`-query-parameter) - SAMME autentiseringsform som
+ * `GoogleMapsTransport` over, bevisst IKKE det nyere v1 Places-API-et
+ * (`places.googleapis.com`, felt-maske-/header-basert auth, en helt annen
+ * kallform). Google sin egen `status`-verdi i svaret (OK/ZERO_RESULTS/...)
+ * returneres RÅTT, IKKE tolket av transporten selv - samme mønster som
+ * `GoogleMapsTransport`.
+ */
+export class GooglePlacesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/place/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_places_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_places") {
+      const body = await this.call("textsearch", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_place_details") {
+      const body = await this.call("details", { place_id: String(parameters["place_id"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_places_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-304 (bygget parallelt mens D-303 sin CI kjørte, samme brede ordre -
+ * ellevte slice, fullfører "Google-lokasjons-trioen" Maps/Places/Routes).
+ * **Samme ærlighetsforbehold som D-297-D-303** (nettverksegress blokkert
+ * denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet). Bruker
+ * det ELDRE, langvarig stabile Directions-/Distance Matrix-API-et
+ * (`maps.googleapis.com/maps/api/...`, `key`-query-parameter) - SAMME
+ * autentiseringsform som `GoogleMapsTransport`/`GooglePlacesTransport` over,
+ * bevisst IKKE det nyere v2 Routes-API-et (`routes.googleapis.com`, felt-
+ * maske-/header-basert auth, en helt annen kallform). Google sin egen
+ * `status`-verdi i svaret returneres RÅTT, IKKE tolket av transporten selv -
+ * samme mønster som de to andre Google-transportene.
+ */
+export class GoogleRoutesTransport implements ToolTransport {
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://maps.googleapis.com/maps/api/${path}/json?${new URLSearchParams({ ...params, key: credential }).toString()}`);
+    if (!response.ok) throw new Error(`google_routes_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "get_directions") {
+      const body = await this.call("directions", { origin: String(parameters["origin"]), destination: String(parameters["destination"]) }, credential);
+      return { data: body };
+    }
+    if (action === "get_distance_matrix") {
+      const body = await this.call("distancematrix", { origins: String(parameters["origins"]), destinations: String(parameters["destinations"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`google_routes_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-305 (bygget parallelt mens D-304 sin CI kjørte, samme brede ordre -
+ * tolvte slice). **Samme ærlighetsforbehold som D-297-D-304** (nettverksegress
+ * blokkert denne økten, basert på trent kunnskap, ikke denne-økten-bekreftet).
+ * FØRSTE connector i denne rekken som er TYPISK selv-hostet - Grafana har
+ * INGEN fast SaaS-domene som `sentry.io`/`api.tavily.com`, så base-URL-en må
+ * konfigureres (`JARVIS_GRAFANA_API_BASE_URL`), samme resolver-argument-
+ * mønster som `SentryTransport` sin org-slug (D-297). `Authorization:
+ * Bearer <api_key>` mot Grafana sitt HTTP-API. STRUKTURELT LIK Google Maps/
+ * Places/Routes/Brave Search/Tavily/Exa: INGEN skrivehandling finnes - D-41
+ * sitt read-only-unntak ærlig oppfylt.
+ */
+export class GrafanaTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("grafana_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" }
+    });
+    if (!response.ok) throw new Error(`grafana_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search_dashboards") {
+      const query = parameters["query"] !== undefined ? `?query=${encodeURIComponent(String(parameters["query"]))}` : "";
+      const body = await this.call(`/api/search${query}`, credential);
+      return { data: body };
+    }
+    if (action === "get_dashboard") {
+      const body = await this.call(`/api/dashboards/uid/${encodeURIComponent(String(parameters["uid"]))}`, credential);
+      return { data: body };
+    }
+    throw new Error(`grafana_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-306 (bygget parallelt mens D-305 sin CI kjørte, samme brede ordre -
+ * trettende slice). **Samme ærlighetsforbehold som D-297-D-305**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). SAMME "typisk selv-hostet"-struktur som Grafana
+ * (D-305) - base-URL-en må konfigureres (`JARVIS_PROMETHEUS_API_BASE_URL`),
+ * SAMME resolver-argument-mønster. `Authorization: Bearer <token>` mot
+ * Prometheus sitt HTTP-API (PromQL via query-parameter). STRUKTURELT LIK
+ * Grafana/Google-familien/Brave Search/Tavily/Exa: INGEN skrivehandling
+ * finnes - D-41 sitt read-only-unntak ærlig oppfylt (Prometheus sitt
+ * HTTP-API tilbyr uansett ingen skrive-endepunkt for metrikkdata).
+ */
+export class PrometheusTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(path: string, params: Record<string, string>, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("prometheus_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { authorization: `Bearer ${credential}` }
+    });
+    if (!response.ok) throw new Error(`prometheus_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "query") {
+      const body = await this.call("/api/v1/query", { query: String(parameters["query"]) }, credential);
+      return { data: body };
+    }
+    if (action === "query_range") {
+      const body = await this.call("/api/v1/query_range", {
+        query: String(parameters["query"]),
+        start: String(parameters["start"]),
+        end: String(parameters["end"]),
+        step: String(parameters["step"])
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`prometheus_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-307 (bygget parallelt mens D-306 sin CI kjørte, samme brede ordre -
+ * fjortende slice). **Samme ærlighetsforbehold som D-297-D-306**
+ * (nettverksegress blokkert denne økten, basert på trent kunnskap, ikke
+ * denne-økten-bekreftet). Dropbox API v2 (`api.dropboxapi.com/2/files/...`,
+ * JSON-RPC-stil POST-kall) - `Authorization: Bearer <token>`-header, ETT
+ * langvarig access-token (INGEN OAuth-refresh-token-utveksling som Google-
+ * familien). D-41 sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+ * skrivehandling (`create_folder`), ikke kunstig innsnevret til read-only.
+ * BEVISST AVGRENSET fra fil-INNHOLD-opplasting/nedlasting (Dropbox sitt
+ * separate `content.dropboxapi.com`-vertsnavn med binær body/spesielle
+ * `Dropbox-API-Arg`-headere - en strukturelt ulik kallform, se D-307 i
+ * DECISIONS_AND_ASSUMPTIONS.md).
+ */
+export class DropboxTransport implements ToolTransport {
+  private async call(path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.dropboxapi.com/2/files/${path}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`dropbox_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const body = await this.call("list_folder", { path: String(parameters["path"] ?? "") }, credential);
+      return { data: body };
+    }
+    if (action === "create_folder") {
+      const body = await this.call("create_folder_v2", { path: String(parameters["path"]) }, credential);
+      return { data: body };
+    }
+    throw new Error(`dropbox_unsupported_action_${action}`);
+  }
+}
+
+export class NotionTransport implements ToolTransport {
+  private async call(method: "POST", path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.notion.com/v1/${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json",
+        "Notion-Version": "2022-06-28"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`notion_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search") {
+      const body: Record<string, JsonValue> = {};
+      if (typeof parameters["query"] === "string" && parameters["query"] !== "") body["query"] = parameters["query"];
+      const result = await this.call("POST", "search", body, credential);
+      return { data: result };
+    }
+    if (action === "create_page") {
+      const body = await this.call("POST", "pages", {
+        parent: parameters["parent"] as JsonValue,
+        properties: parameters["properties"] as JsonValue
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`notion_unsupported_action_${action}`);
+  }
+}
+
+export class OneDriveTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`onedrive_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_folder") {
+      const path = typeof parameters["path"] === "string" && parameters["path"] !== ""
+        ? `/me/drive/root:/${encodeURIComponent(parameters["path"] as string)}:/children`
+        : "/me/drive/root/children";
+      const result = await this.call("GET", path, undefined, credential);
+      return { data: result };
+    }
+    if (action === "create_folder") {
+      const result = await this.call("POST", "/me/drive/root/children", {
+        name: parameters["name"] as JsonValue,
+        folder: {},
+        "@microsoft.graph.conflictBehavior": "fail"
+      }, credential);
+      return { data: result };
+    }
+    throw new Error(`onedrive_unsupported_action_${action}`);
+  }
+}
