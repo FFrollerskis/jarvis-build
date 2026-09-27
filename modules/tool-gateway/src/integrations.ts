@@ -3489,6 +3489,38 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_KLING_SECRET_KEY",
       output_trust: "untrusted", transport: transport("kling")
     },
+    /**
+     * D-324. Google Veo kjøres over den SAMME Gemini API-vert/auth-form som
+     * `gemini` sin model_provider-oppføring (`x-goog-api-key`), men
+     * `predictLongRunning` er en strukturelt ulik kapabilitet
+     * (videogenerering, ikke tekst-fullføring) - egen `tool_id` her, se
+     * `GoogleVeoTransport` sin doc-kommentar i `live-transports.ts` for full
+     * evidens-kategorisering.
+     */
+    {
+      tool_id: "google_veo", action: "list_models", description: "List tilgjengelige Gemini/Veo-modeller (GET /v1beta/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse (POST /v1beta/models/{model}:predictLongRunning, EKTE kostnad per kall, asynkron - returnerer et operation-navn, poll get_task_status for resultat)",
+      input_schema: record({
+        prompt: z.string(), model: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_GOOGLE_VEO_API_KEY", output_trust: "internal", transport: transport("google_veo")
+    },
+    {
+      tool_id: "google_veo", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1beta/{operation_name}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer et operation-navn)",
+      input_schema: record({ operation_name: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
+      output_trust: "untrusted", transport: transport("google_veo")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

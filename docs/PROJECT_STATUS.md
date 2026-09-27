@@ -1,40 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-323: ANDRE
-video-gen-familie-slice - Kling bygget som en ORDINÆR `ToolGateway`-connector, MEN med en
-STRUKTURELT ANNERLEDES autentisering enn ALLE andre connectorer i registeret** (samme "fortsett å
-jobbe mens ci kjører"-disiplin, mens PR #195/D-322 sin CI fortsatt kjørte). Kling krever INGEN
-statisk Bearer-token, men en selv-generert, kortlevd (~30 min) JWT (HS256) signert med et Access
-Key/Secret Key-par (`iss`=access_key, `exp`/`nbf`) - bekreftet på tvers av flere uavhengige
-`WebSearch`-kryssjekkede kilder. Bygget `encodeKlingJwt()` + `KlingTransport`
-(`live-transports.ts`) - JWT-signering implementert avhengighetsfritt via `node:crypto`
-(`createHmac`), SAMME disiplin som `vipps-webhook.ts` sin HMAC-verifisering (D-110), IKKE en ny
-`jsonwebtoken`-avhengighet. Access Key resolver-injisert (SAMME mønster som Twilio sin
-`accountSid`) - Secret Key ER `credential_ref`. To handlinger - `generate_video` (klasse B, EKTE
-kostnad per kall - ALDRI `live_test`) og `get_task_status` (klasse A, PÅKREVD polling). BEVISST
-DEFERRED (D-41): INGEN verifisert gratis/parameterløst kontoendepunkt funnet - `kling` har derfor
-BEVISST INGEN `live_test`, FØRSTE gang for en bygget (ikke-backlog) connector i registeret;
-`NO_LIVE_TEST_IDS`-mekanismen (D-310a) håndterer dette korrekt uten ny testinfrastruktur.
-`connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"` →
-`"tool_gateway"`, `credential_refs` utvidet fra én til to nøkler). Wiret inn i BÅDE `main.ts` og
-`worker-main.ts` med resolver-argument-konstruktør (IKKE tom konstruktør - ingen bump i "tom
-konstruktør"-tellingen). NY `modules/tool-gateway/test/d323-kling-transport.test.ts` (12 tester,
-inkl. JWT-header/payload-dekoding og en adversariell "signaturen endres når secret_key
-endres"-test). `connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (22
-gjenværende backlog-punkter, 39 bygde, 61 totalt UENDRET). `pnpm --filter @jarvis/tool-gateway
-typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-323 i
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-324: TREDJE og
+SISTE video-gen-familie-slice - Google Veo bygget som en ORDINÆR `ToolGateway`-connector** (Tobias
+direkte i chat: "Fortsett mens ci kjører" - mens PR #195/D-323 sin CI fortsatt kjørte). Fullfører
+alle tre opprinnelig identifiserte video-gen-punkter (runway/kling/google_veo) i samme sveip.
+Kritisk D-64-funn FØR bygging: Google Veo kjøres over den SAMME Gemini API-vert/auth-form
+(`generativelanguage.googleapis.com`, `x-goog-api-key`) som `gemini` sin EKSISTERENDE
+model_provider-oppføring (verifisert direkte mot EKSISTERENDE kildekode, `gemini.ts`) - MEN
+`predictLongRunning` er en STRUKTURELT ULIK kapabilitet (videogenerering, ikke tekst-fullføring) -
+egen `tool_id`, SAMME "samme konto, ulik kapabilitet"-presedens som OpenAI Images (D-316) fikk for
+`openai`. Bygget `GoogleVeoTransport` (`live-transports.ts`) - tre handlinger: `list_models`
+(klasse A, `GET /v1beta/models`, brukt som `live_test`), `generate_video` (klasse B,
+`POST /v1beta/models/{model}:predictLongRunning`, EKTE kostnad per kall - ALDRI `live_test`) og
+`get_task_status` (klasse A, `GET /v1beta/{operation_name}` - PÅKREVD polling av Google sin
+standard long-running-operation-kontrakt). `connector-registry.ts` sin D-232-plassholder oppdatert
+i place (`category: "backlog"` → `"tool_gateway"`, credential_refs UENDRET - kun én nøkkel var
+alltid korrekt). Wiret inn i BÅDE `main.ts` og `worker-main.ts` med TOM konstruktør (bump 20→21 i
+begge "tom konstruktør"-tellinger). NY
+`modules/tool-gateway/test/d324-google-veo-transport.test.ts` (12 tester).
+`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (21 gjenværende
+backlog-punkter, 40 bygde, live_test-telling 35→36, 61 totalt UENDRET). `pnpm --filter
+@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-324 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** video-gen-familien har nå to av tre bygget (runway D-322, kling D-323) - `google_veo`/
-`higgsfield` bør prøve SAMME `WebSearch`-sekundærkilde-krysssjekk-disiplinen FØR de defaulter til
-ren trent-kunnskap, og FØRST sjekke om de også har en JWT/ikke-statisk-token-autentisering (Kling
-beviste at dette IKKE kan antas identisk fra forrige connectors mønster). De resterende
-tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt
+**Neste:** video-gen-familien er FULLFØRT (runway D-322, kling D-323, google_veo D-324) -
+`higgsfield` gjenstår som en EGEN, senere vurdering (samme WebSearch-disiplin bør prøves først). De
+resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt
 lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør
 (server-SDK/token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn
 ElevenLabs/Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende
 beta-API. D-64-CRM-gruppa (hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og
 krever en egen, større sync-adapter-arkitektur (D-291).
+
+**Forrige milepæl (uendret): D-323: ANDRE video-gen-familie-slice - Kling bygget som en ORDINÆR
+`ToolGateway`-connector, MEN med en STRUKTURELT ANNERLEDES autentisering (selv-generert JWT).** Se
+D-323 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-322: FØRSTE video-gen-familie-slice - Runway bygget som en ORDINÆR
 `ToolGateway`-connector.** Se D-322 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.

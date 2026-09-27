@@ -620,7 +620,23 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "kling", display_name: "Kling", category: "tool_gateway",
     credential_refs: ["JARVIS_KLING_SECRET_KEY", "JARVIS_KLING_ACCESS_KEY"]
   },
-  { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
+  {
+    // D-324 (bygget, flyttet ut av backlog): TREDJE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/D-323
+    // etablerte. Google Veo kjøres over den SAMME Gemini API-vertsnavn/
+    // auth-formen (`generativelanguage.googleapis.com`, `x-goog-api-key`)
+    // som `gemini` sin EKSISTERENDE model_provider-oppføring
+    // (packages/provider-adapters/src/gemini.ts) - MEN `predictLongRunning`
+    // er en STRUKTURELT ULIK kapabilitet (videogenerering, ikke
+    // tekst-fullføring via `generateContent`) - egen `tool_id` her, SAMME
+    // presedens som OpenAI Images (D-316) fikk for `openai`. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id. Se GoogleVeoTransport sin doc-kommentar i
+    // live-transports.ts for full evidens-kategorisering.
+    id: "google_veo", display_name: "Google Veo", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"],
+    live_test: { tool_id: "google_veo", action: "list_models", parameters: () => ({}) }
+  },
   {
     // D-316 (bygget, flyttet ut av backlog): egen tool_id fra `openai` sin
     // model_provider-oppføring (ModelGateway) - bildegenerering, ikke

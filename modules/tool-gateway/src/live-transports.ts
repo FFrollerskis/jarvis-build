@@ -2667,3 +2667,69 @@ export class KlingTransport implements ToolTransport {
     throw new Error(`kling_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-324 (video-gen-familien, TREDJE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/D-323 etablerte). Google Veo kjøres over den
+ * SAMME Gemini API-vert/auth-form (`generativelanguage.googleapis.com`,
+ * `x-goog-api-key`-header) som `GeminiAdapter` sin EKSISTERENDE
+ * model_provider-oppføring (`packages/provider-adapters/src/gemini.ts`) -
+ * denne transporten gjenbruker BEVISST den SAMME, allerede denne-
+ * kodebasen-bekreftede auth-formen (IKKE gjettet på nytt) i stedet for å
+ * anta en annen header/vertsnavn. `predictLongRunning` er likevel en
+ * STRUKTURELT ULIK kapabilitet enn `generateContent` (videogenerering,
+ * asynkron long-running-operation, ikke tekst-fullføring) - egen `tool_id`
+ * her, SAMME presedens som OpenAI Images (D-316) fikk for `openai` sin
+ * model_provider-oppføring.
+ *
+ * Tre handlinger - `list_models` (klasse A, `GET /v1beta/models` - SAMME
+ * endepunkt D-106 sin kommentar i `gemini.ts` allerede refererer som en
+ * ekte, host-bekreftet katalogflate, gratis/sideeffekt-fritt, brukt som
+ * `live_test`), `generate_video` (klasse B, `POST /v1beta/models/{model}:
+ * predictLongRunning`, kropp `{instances:[{prompt}], parameters:
+ * {aspectRatio}}` - bekreftet på tvers av flere uavhengige kilder, EKTE
+ * kostnad per kall - ALDRI brukt som `live_test`, SAMME "generering
+ * koster, status/liste er gratis"-disiplin som Runway D-322/Kling D-323)
+ * og `get_task_status` (klasse A, `GET /v1beta/{operation_name}` -
+ * PÅKREVD polling av Google sin standard long-running-operation-kontrakt,
+ * `done`-felt + `response.generateVideoResponse.generatedSamples[0].
+ * video.uri` når ferdig - bekreftet på tvers av flere uavhengige kilder).
+ * Default-modellen `veo-3.1-generate-preview` er BEVISST kun en default,
+ * IKKE hardkodet - kan overstyres per kall (SAMME "ikke lås inn en
+ * bestemt modellversjon uten mulighet til å overstyre"-disiplin som
+ * Runway sin `model`-parameter).
+ */
+export class GoogleVeoTransport implements ToolTransport {
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const response = await fetch(`https://generativelanguage.googleapis.com${path}`, {
+      ...init,
+      headers: { ...init?.headers, "x-goog-api-key": credential }
+    });
+    if (!response.ok) throw new Error(`google_veo_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_models") {
+      const body = await this.call("/v1beta/models", credential);
+      return { data: (body as { models?: JsonValue }).models ?? null };
+    }
+    if (action === "generate_video") {
+      const model = typeof parameters["model"] === "string" ? parameters["model"] : "veo-3.1-generate-preview";
+      const body = await this.call(`/v1beta/models/${model}:predictLongRunning`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          instances: [{ prompt: String(parameters["prompt"]) }],
+          parameters: typeof parameters["aspect_ratio"] === "string" ? { aspectRatio: parameters["aspect_ratio"] } : undefined
+        })
+      });
+      return { external_id: String((body as { name?: string }).name ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/v1beta/${String(parameters["operation_name"])}`, credential);
+      return { data: body };
+    }
+    throw new Error(`google_veo_unsupported_action_${action}`);
+  }
+}
