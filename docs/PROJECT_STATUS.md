@@ -1,7 +1,24 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-298: Google Maps-
-connectoren (Geocoding) bygget fullt ut - SJUENDE slice, bygget PARALLELT mens PR #189 (D-297 Sentry)
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-299: Google Sheets-
+connectoren bygget fullt ut - ÅTTENDE slice, FORTSATT parallelt mens PR #189 sin CI kjørte** (Tobias
+direkte i chat: "ja du kan ikke vente 20 min mellom hver"). PR #189 dekker nå TRE slices samlet
+(D-297 Sentry + D-298 Google Maps + D-299 Google Sheets) - en bevisst avvik fra ett-connector-per-PR-
+mønsteret (se PR #189 sin oppdaterte tittel/body), akseptert fordi alle tre er uavhengig testet og
+dokumentert med hvert sitt D-nummer. `GoogleSheetsTransport` (Sheets API v4) gjenbruker den EKSISTERENDE
+`googleAccessToken()`-OAuth-veien (Gmail/Calendar/Drive), MEN med sin EGEN `JARVIS_GOOGLE_SHEETS_TOKEN`
+(Sheets krever `spreadsheets`-scope, Drive sin bredere `auth/drive`-scope dekker den ikke - å anta
+delt token ville vært en usikker antakelse). **D-41 sitt "maksimal nyttig kapabilitet" fulgt FULLT UT**
+(IKKE read-only av bekvemmelighet slik Brave Search/Google Maps var, der leverandøren genuint ikke
+tilbød mer): `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, EKTE skrivehandlinger),
+samme "full funksjonell tilgang"-disiplin D-42 etablerte for Drive. **D-64-sjekk:** ingen kanonisk
+"regneark"-domenemodell finnes i Jarvis - samme rene status som Drive. 9 nye tester, `pnpm -w typecheck`/
+`npx eslint` rene. `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md.
+Neste: vente på PR #189 sin CI, merge under D-192, deretter tilbake til ett-connector-per-PR-mønsteret
+for de ~43 gjenværende D-231/D-232-backlog-punktene.
+
+**Forrige milepæl (uendret): D-298: Google Maps-
+connectoren (Geocoding) bygget fullt ut - SJETTE slice, bygget PARALLELT mens PR #189 (D-297 Sentry)
 sin CI fortsatt kjørte** (Tobias direkte i chat: "ja du kan ikke vente 20 min mellom hver" - sluttet å
 vente idle, jobber videre på neste connector mens en åpen PR sin CI går i bakgrunnen). `GoogleMapsTransport`
 (`geocode`/`reverse_geocode` mot Google Maps Platform sitt Geocoding-API, API-nøkkel som `key`-query-
@@ -12,9 +29,7 @@ forblir separate, ubygde backlog-punkter. INGEN skrivehandling finnes, D-41 sitt
 "hvor ER eieren over tid" - et HELT ANNET konsept enn stateless adresse↔koordinat-oppslag for en
 vilkårlig tredjeparts-adresse. D-64-porten holder. Samme D-297-ærlighetsforbehold (trent kunnskap,
 ikke denne-økten-bekreftet, nettverksegress blokkert). 6 nye tester, `pnpm -w typecheck`/`npx eslint`
-rene. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke
-opprettet ennå - neste: commit/push/PR/CI/merge (parallelt med PR #189), deretter neste connector fra
-de ~44 gjenværende D-231/D-232-backlog-punktene.
+rene. `GOOGLE_MAPS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-298 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-297: Sentry-
 connectoren bygget fullt ut - SJETTE slice.** **Miljøfunn underveis:** dette øktens nettverksegress

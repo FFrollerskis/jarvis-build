@@ -90,7 +90,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | OneDrive | `NY_BACKLOG` | Ingen kode funnet |
 | Dropbox | `NY_BACKLOG` | Ingen kode funnet |
 | Google Docs | `ALLEREDE_DEKKET` | Dekkes av Google Drive/Docs-connectoren (`read_document`-eksport i `modules/tool-gateway/src/live-transports.ts`) - ingen egen connector nødvendig |
-| Google Sheets | `NY_BACKLOG` | Kun MIME-type-konstant (`extraction-safety.ts`) - ingen faktisk leserlese-/skrive-adapter |
+| Google Sheets | `ALLEREDE_BYGGET (D-299)` | `GoogleSheetsTransport` (`live-transports.ts`) - Sheets API v4, gjenbruker eksisterende `googleAccessToken()`-OAuth-vei men med EGEN `JARVIS_GOOGLE_SHEETS_TOKEN` (Sheets krever `spreadsheets`-scope, Drive sin bredere scope dekker den ikke). D-41 "maksimal nyttig kapabilitet" fulgt: `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, EKTE skrivehandlinger). `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md. |
 
 ### 4.4 Produktivitet / e-post / kalender
 

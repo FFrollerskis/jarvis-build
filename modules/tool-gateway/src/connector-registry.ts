@@ -99,7 +99,15 @@ import type { ToolGateway } from "./gateway.ts";
  * og flyttet ut av backlogen SAMME MÅTE - BEVISST AVGRENSET til KUN
  * Geocoding, `google_places`/`google_routes` forblir separate, ubygde
  * backlog-punkter. Samme D-297-forbehold gjelder (trent kunnskap, ikke
- * denne-økten-bekreftet). De resterende 44 backlog-punktene er fortsatt
+ * denne-økten-bekreftet).
+ *
+ * D-299 (2026-09-27, samme brede ordre, syvende slice): `google_sheets`
+ * bygget og flyttet ut av backlogen SAMME MÅTE - gjenbruker EKSISTERENDE
+ * `googleAccessToken()`-OAuth-vei (Gmail/Calendar/Drive), men med sin EGEN
+ * `credential_ref` (Sheets krever den dedikerte `spreadsheets`-scopen, Drive
+ * sin bredere scope dekker den ikke). D-41 sitt "maksimal nyttig kapabilitet"
+ * fulgt - EKTE skrivehandlinger (`update_range`/`append_row`), ikke kunstig
+ * innsnevret til read-only. De resterende 43 backlog-punktene er fortsatt
  * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
  * bygges.
  */
@@ -237,7 +245,24 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "notion", display_name: "Notion", category: "backlog", credential_refs: ["JARVIS_NOTION_API_KEY"] },
   { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
   { id: "dropbox", display_name: "Dropbox", category: "backlog", credential_refs: ["JARVIS_DROPBOX_TOKEN"] },
-  { id: "google_sheets", display_name: "Google Sheets", category: "backlog", credential_refs: ["JARVIS_GOOGLE_SHEETS_TOKEN"] },
+  {
+    // D-299 (bygget, flyttet ut av backlog): SYVENDE slice. Gjenbruker den
+    // EKSISTERENDE `googleAccessToken()`-OAuth-veien, MEN med sin EGEN
+    // credential_ref (Sheets krever `spreadsheets`-scope, Drive sin bredere
+    // `auth/drive`-scope dekker den ikke). `live_test` trenger et faktisk
+    // regneark-id (INGEN universell "list mine regneark"-handling finnes i
+    // Sheets-API-et selv, kun i Drive-API-et) - samme etablerte "les fra en
+    // egen konfig-env-variabel"-mønster som GitHub sin `JARVIS_GITHUB_REPO`
+    // over (IKKE en secret, derfor IKKE i `credential_refs`). Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "google_sheets", display_name: "Google Sheets", category: "tool_gateway",
+    credential_refs: ["JARVIS_GOOGLE_SHEETS_TOKEN"],
+    live_test: {
+      tool_id: "google_sheets", action: "list_sheets",
+      parameters: () => ({ spreadsheet_id: process.env["JARVIS_GOOGLE_SHEETS_TEST_SPREADSHEET_ID"] ?? "" })
+    }
+  },
 
   // §4.4 Produktivitet / e-post / kalender
   { id: "microsoft_outlook", display_name: "Microsoft Outlook", category: "backlog", credential_refs: ["JARVIS_OUTLOOK_TOKEN"] },

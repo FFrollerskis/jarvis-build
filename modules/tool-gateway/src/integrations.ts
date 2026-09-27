@@ -2963,6 +2963,46 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_GOOGLE_MAPS_API_KEY", output_trust: "untrusted", transport: transport("google_maps")
     },
+    /**
+     * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - syvende slice). Google Sheets API v4 - gjenbruker
+     * `googleAccessToken()` OAuth-refresh-token-utveksleren, MEN med sin EGEN
+     * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, IKKE `JARVIS_GOOGLE_
+     * TOKEN` - Sheets krever den dedikerte `spreadsheets`-scopen, som Drive
+     * sin bredere `auth/drive`-scope ikke dekker). D-41 sitt "maksimal
+     * nyttig kapabilitet"-prinsipp: `update_range`/`append_row` er EKTE
+     * skrivehandlinger (klasse B), ikke kunstig innsnevret til read-only.
+     */
+    {
+      tool_id: "google_sheets", action: "list_sheets", description: "List faner i et regneark (GET /v4/spreadsheets/{id}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string() }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "read_range", description: "Les celleverdier fra et område (GET /v4/spreadsheets/{id}/values/{range}, untrusted ingestion)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200) }),
+      capability_class: "A", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN", output_trust: "untrusted", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "update_range", description: "Overskriv celleverdier i et område (PUT /v4/spreadsheets/{id}/values/{range})",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), values: z.array(z.array(z.union([z.string(), z.number(), z.boolean()]))) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: true,
+      rollback_procedure: "ny update_range-kalling med forrige verdier", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
+    {
+      tool_id: "google_sheets", action: "append_row", description: "Legg til en NY rad nederst i et område (POST /v4/spreadsheets/{id}/values/{range}:append)",
+      input_schema: record({ spreadsheet_id: z.string(), range: z.string().max(200), row: z.array(z.union([z.string(), z.number(), z.boolean()])) }),
+      capability_class: "B", scopes: ["https://www.googleapis.com/auth/spreadsheets"], reversible: false,
+      rollback_procedure: "slett raden manuelt i regnearket (ingen radidentifikator returneres av API-et)", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
+      output_trust: "internal", transport: transport("google_sheets")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

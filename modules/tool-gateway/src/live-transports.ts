@@ -1840,3 +1840,73 @@ export class GoogleMapsTransport implements ToolTransport {
     throw new Error(`google_maps_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-299 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - syvende slice). **Samme ærlighetsforbehold som D-297/D-298**
+ * (nettverksegress blokkert, basert på trent kunnskap om Google Sheets API
+ * v4, ikke denne-økten-bekreftet). Gjenbruker den EKSISTERENDE, allerede
+ * proven `googleAccessToken()` OAuth-refresh-token-utveksleren (SAMME
+ * `JARVIS_GOOGLE_CLIENT_ID`/`JARVIS_GOOGLE_CLIENT_SECRET` Desktop-klient som
+ * Gmail/Calendar/Drive allerede bruker) - MEN med sin EGEN, separate
+ * `credential_ref` (`JARVIS_GOOGLE_SHEETS_TOKEN`, samme som D-232 sin
+ * opprinnelige plassholder allerede spesifiserte), IKKE gjenbruk av
+ * `JARVIS_GOOGLE_TOKEN`. Årsak: Sheets sin celledata-API (`sheets.
+ * googleapis.com/v4/...`) krever den DEDIKERTE `spreadsheets`-OAuth-scopen -
+ * Drive sin brede `auth/drive`-scope dekker Sheets-FILER som Drive-objekter
+ * (liste/slette/dele), men IKKE selve celleinnholdet via Sheets-API-et. Å
+ * anta det eksisterende `JARVIS_GOOGLE_TOKEN` allerede har denne scopen ville
+ * vært en USIKKER antakelse denne økten ikke kan bekrefte - en egen credential
+ * er derfor det ÆRLIGE valget (feiler tydelig med `insufficient_scope` hvis
+ * Tobias limmer inn feil token, i stedet for å late som det virker).
+ * D-41 sitt "maksimal nyttig kapabilitet"-prinsipp (ikke read-only av
+ * bekvemmelighet): `read_range`/`list_sheets` (klasse A) OG `update_range`/
+ * `append_row` (klasse B, ekte skrivehandlinger) - samme "full funksjonell
+ * tilgang"-disiplin som Drive (D-42) allerede etablerte, ikke en kunstig
+ * innsnevring.
+ */
+export class GoogleSheetsTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const token = await googleAccessToken(credential);
+    const spreadsheetId = String(parameters["spreadsheet_id"]);
+    if (action === "list_sheets") {
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { sheets?: Array<{ properties?: { title?: string; sheetId?: number } }> };
+      return { data: (body.sheets ?? []).map((s) => ({ title: s.properties?.title ?? "", sheet_id: s.properties?.sheetId ?? null })) as unknown as JsonValue };
+    }
+    if (action === "read_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { values?: JsonValue };
+      return { data: body.values ?? [] };
+    }
+    if (action === "update_range") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?valueInputOption=USER_ENTERED`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: parameters["values"] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "append_row") {
+      const range = encodeURIComponent(String(parameters["range"]));
+      const response = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}:append?valueInputOption=USER_ENTERED`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ range: String(parameters["range"]), values: [parameters["row"]] })
+      });
+      if (!response.ok) throw new Error(`sheets_error_${response.status}`);
+      const body = (await response.json()) as { updates?: { updatedRange?: string } };
+      return { external_id: body.updates?.updatedRange ?? "appended" };
+    }
+    throw new Error(`sheets_unsupported_action_${action}`);
+  }
+}
