@@ -2179,3 +2179,36 @@ export class DropboxTransport implements ToolTransport {
     throw new Error(`dropbox_unsupported_action_${action}`);
   }
 }
+
+export class NotionTransport implements ToolTransport {
+  private async call(method: "POST", path: string, body: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.notion.com/v1/${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json",
+        "Notion-Version": "2022-06-28"
+      },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`notion_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "search") {
+      const body: Record<string, JsonValue> = {};
+      if (typeof parameters["query"] === "string" && parameters["query"] !== "") body["query"] = parameters["query"];
+      const result = await this.call("POST", "search", body, credential);
+      return { data: result };
+    }
+    if (action === "create_page") {
+      const body = await this.call("POST", "pages", {
+        parent: parameters["parent"] as JsonValue,
+        properties: parameters["properties"] as JsonValue
+      }, credential);
+      return { data: body };
+    }
+    throw new Error(`notion_unsupported_action_${action}`);
+  }
+}

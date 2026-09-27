@@ -3181,6 +3181,36 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_DROPBOX_TOKEN",
       output_trust: "internal", transport: transport("dropbox")
     },
+    /**
+     * D-308 (bygget parallelt mens D-307 sin CI kjørte - femtende slice,
+     * Tobias direkte i chat gjentatt, niende gang: "fortsett og jobbe ikke
+     * vent på ci"). `Authorization: Bearer`-header + fast `Notion-Version`-
+     * header mot Notion sitt REST-API. D-41: `create_page` er en EKTE
+     * skrivehandling (ikke kunstig innsnevret til read-only) - reversibel
+     * via arkivering i Notion sitt UI (ingen dedikert arkiver-endepunkt
+     * bygget her ennå). **IKKE denne-økten-verifisert mot en live hentet
+     * kopi av offisiell dokumentasjon** (nettverksegress blokkert i dette
+     * miljøet, samme D-297-forbehold) - basert på trent kunnskap om Notion
+     * API v1 (2022-06-28), se `NotionTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "notion", action: "search", description: "Søk på tvers av sider/databaser eieren har delt med integrasjonen (POST /v1/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(2000).optional() }),
+      capability_class: "A", scopes: ["read_content"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_NOTION_API_KEY", output_trust: "untrusted", transport: transport("notion")
+    },
+    {
+      tool_id: "notion", action: "create_page", description: "Opprett en NY side under en gitt parent (POST /v1/pages)",
+      input_schema: record({
+        parent: z.record(z.string(), z.unknown()), properties: z.record(z.string(), z.unknown())
+      }),
+      capability_class: "B", scopes: ["insert_content"], reversible: true,
+      rollback_procedure: "arkiver siden manuelt i Notion", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_NOTION_API_KEY",
+      output_trust: "internal", transport: transport("notion")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

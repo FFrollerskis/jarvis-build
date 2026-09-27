@@ -84,7 +84,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 
 | Integrasjon | Status | Referanse/merknad |
 |---|---|---|
-| Notion | `NY_BACKLOG` | Kun eksplisitt navngitt i FRAVÆRS-kommentarer (`modules/operations`, migrasjon `048_operations.sql`) - «ingen Notion-referanse/-credential» bevisst dokumentert, ikke bygget |
+| Notion | `ALLEREDE_BYGGET (D-308)` | `NotionTransport` (`live-transports.ts`) - `search`/`create_page` (POST mot Notion REST-API v1, `Authorization: Bearer`-header PLUSS fast `Notion-Version: 2022-06-28`-header). D-41: `create_page` er en EKTE klasse B-skrivehandling (ikke kunstig innsnevret til read-only) - `rollback_procedure` er manuell arkivering (dedikert arkiver-endepunkt DEFERRED). D-64: ingen kanonisk dokument-/kunnskaps-domenemodell finnes i Jarvis - rent leverandør-adapter, samme status som Google Drive/Sheets/Dropbox. `live_test: search` (uten query). `NOTION_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_NOTION_API_KEY`) |
 | Obsidian | `ALLEREDE_BYGGET` | `ObsidianVaultKnowledgeSource` (`modules/knowledge/src/obsidian-source.ts`), UA-2 P1A - kun `.md`, `.obsidian/`-config ekskludert som default |
 | Google Drive | `ALLEREDE_BYGGET` | `connector-registry.ts` id `google_drive`; D-41 full read/opprett/oppdater/omdøp/flytt/papirkurv/deling; ingestion-kilden er separat og alltid READ ONLY |
 | OneDrive | `NY_BACKLOG` | Ingen kode funnet |

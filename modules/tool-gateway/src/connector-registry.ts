@@ -206,6 +206,24 @@ import type { ToolGateway } from "./gateway.ts";
  * kunnskap, ikke denne-økten-bekreftet). De resterende 36 backlog-punktene
  * er fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
  * dem når de bygges.
+ *
+ * D-308 (2026-09-27, samme brede ordre, femtende slice, bygget parallelt
+ * mens D-307 sin CI kjørte, Tobias direkte i chat gjentatt, niende gang:
+ * "fortsett og jobbe ikke vent på ci"): `notion` bygget og flyttet ut av
+ * backlogen SAMME MÅTE - `Authorization: Bearer`-header PLUSS en fast
+ * `Notion-Version`-header mot Notion sitt REST-API v1. To handlinger -
+ * `search` (klasse A, lesing) og `create_page` (klasse B, EKTE
+ * skrivehandling) - D-41 sitt "maksimal nyttig kapabilitet"-prinsipp
+ * fulgt, ikke kunstig innsnevret til read-only. `create_page` sin
+ * `rollback_procedure` er manuell arkivering i Notion sitt UI (INGEN
+ * dedikert arkiver-endepunkt bygget her ennå - samme DEFERRED-disiplin som
+ * Dropbox sin fil-innhold-begrensning, D-41 eksplisitt merket). Samme
+ * D-297-forbehold gjelder (trent kunnskap, ikke denne-økten-bekreftet).
+ * **D-64-sjekk:** ingen kanonisk dokument-/kunnskaps-domenemodell finnes
+ * noe sted i Jarvis (samme reasonering som Google Drive/Sheets/Dropbox) -
+ * rent leverandør-adapter, EXTERNAL_CANONICAL. De resterende 35
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -338,7 +356,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // Rekkefølge følger `docs/INTEGRATIONS.md` §4 sine underseksjoner (4.3->4.15).
 
   // §4.3 Kunnskap / dokumenter
-  { id: "notion", display_name: "Notion", category: "backlog", credential_refs: ["JARVIS_NOTION_API_KEY"] },
+  {
+    // D-308 (bygget, flyttet ut av backlog): Notion REST-API v1 (fast
+    // `Notion-Version`-header i tillegg til `Authorization: Bearer`). D-41
+    // sitt "maksimal nyttig kapabilitet"-prinsipp fulgt - EKTE
+    // skrivehandling (`create_page`), ikke kunstig innsnevret til
+    // read-only. Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-disiplinen).
+    id: "notion", display_name: "Notion", category: "tool_gateway", credential_refs: ["JARVIS_NOTION_API_KEY"],
+    live_test: { tool_id: "notion", action: "search", parameters: () => ({}) }
+  },
   { id: "onedrive", display_name: "OneDrive", category: "backlog", credential_refs: ["JARVIS_ONEDRIVE_TOKEN"] },
   {
     // D-307 (bygget, flyttet ut av backlog): Dropbox API v2 - `Authorization:
