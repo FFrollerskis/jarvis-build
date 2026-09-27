@@ -98,7 +98,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 |---|---|---|
 | Gmail | `ALLEREDE_BYGGET` | `connector-registry.ts` id `gmail`; D-34 primær e-postplattform (Q-07 lukket) |
 | Google Kalender | `ALLEREDE_BYGGET` | `connector-registry.ts` id `google_calendar`; D-34 primær kalender |
-| Microsoft Outlook | `NY_BACKLOG` | Q-07 (lukket, D-34): eksplisitt utsatt til senere, Gmail er primær i v1. Leverandørnøytral kontrakt finnes, ingen Outlook-transport bygget |
+| Microsoft Outlook | `ALLEREDE_BYGGET (D-310)` | `MicrosoftOutlookTransport` (`live-transports.ts`) - `list_messages`/`send_mail` (mot Microsoft Graph v1.0, `Authorization: Bearer`-header). D-41/D-64: `send_mail` er BEVISST klasse D (ikke reverserbar) - IDENTISK klassifisering med Gmail sin `email.send`, dekket av den generiske klasse D-godkjenningsmekanismen i PolicyGateway/ToolGateway. Genuint separat leverandør-konto fra Gmail, ikke en konkurrerende domenemodell. `live_test: list_messages` (max=5). `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OUTLOOK_TOKEN`) |
 | Microsoft 365 | `NY_BACKLOG` | Samme utsettelse som Outlook (D-34) - ingen kode |
 
 ### 4.5 Kode / dev / infra

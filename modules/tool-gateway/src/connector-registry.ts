@@ -240,6 +240,25 @@ import type { ToolGateway } from "./gateway.ts";
  * leverandør-adapter, EXTERNAL_CANONICAL. De resterende 34
  * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
  * gjelder for hver av dem når de bygges.
+ *
+ * D-310 (2026-09-27, FØRSTE slice ETTER at PR #190 - D-301 til D-309 - ble
+ * merget til `main` under D-192 - ett-connector-per-PR-mønsteret
+ * gjenopptas her): `microsoft_outlook` bygget og flyttet ut av backlogen -
+ * `Authorization: Bearer`-header mot Microsoft Graph v1.0 (SAMME
+ * vertsnavn/auth-mønster som OneDrive D-309). To handlinger -
+ * `list_messages` (klasse A, lesing) og `send_mail` (klasse D - BEVISST
+ * SAMME klassifisering som Gmail sin `email.send`: sending av e-post er
+ * ikke reverserbar). `PolicyGateway`/`ToolGateway.execute()` sin generiske
+ * klasse D-håndtering (CLAUDE.md regel 2 - deterministisk kode, aldri kun
+ * promptregler) dekker denne handlingen identisk til `email.send` uten
+ * egen per-connector-kode. Samme D-297-forbehold gjelder (trent kunnskap,
+ * ikke denne-økten-bekreftet). **D-64-sjekk:** Jarvis har allerede
+ * canonical e-post-håndtering via Gmail (`email.*`), men Outlook er en
+ * genuint separat leverandør-konto (Microsoft-basert postkasse) - IKKE en
+ * konkurrerende domenemodell, samme presedens som Slack+Discord+Twilio som
+ * separate meldingsleverandører. De resterende 33 backlog-punktene er
+ * fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av
+ * dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -424,7 +443,15 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   },
 
   // §4.4 Produktivitet / e-post / kalender
-  { id: "microsoft_outlook", display_name: "Microsoft Outlook", category: "backlog", credential_refs: ["JARVIS_OUTLOOK_TOKEN"] },
+  {
+    // D-310 (bygget, flyttet ut av backlog): Microsoft Graph v1.0 (SAMME
+    // vertsnavn/auth-mønster som OneDrive D-309). `send_mail` er BEVISST
+    // klasse D (samme begrunnelse som Gmail sin `email.send`) - ikke
+    // reverserbar. Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-disiplinen).
+    id: "microsoft_outlook", display_name: "Microsoft Outlook", category: "tool_gateway", credential_refs: ["JARVIS_OUTLOOK_TOKEN"],
+    live_test: { tool_id: "microsoft_outlook", action: "list_messages", parameters: () => ({ max: 5 }) }
+  },
   { id: "microsoft_365", display_name: "Microsoft 365", category: "backlog", credential_refs: ["JARVIS_MICROSOFT_365_TOKEN"] },
 
   // §4.5 Kode / dev / infra

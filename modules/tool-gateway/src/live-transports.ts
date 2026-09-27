@@ -2246,3 +2246,38 @@ export class OneDriveTransport implements ToolTransport {
     throw new Error(`onedrive_unsupported_action_${action}`);
   }
 }
+
+export class MicrosoftOutlookTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const response = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`microsoft_outlook_error_${response.status}`);
+    if (response.status === 202 || response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_messages") {
+      const max = typeof parameters["max"] === "number" ? parameters["max"] : 10;
+      const result = await this.call("GET", `/me/messages?$top=${max}`, undefined, credential);
+      return { data: result };
+    }
+    if (action === "send_mail") {
+      await this.call("POST", "/me/sendMail", {
+        message: {
+          subject: parameters["subject"] as JsonValue,
+          body: { contentType: "Text", content: parameters["body"] as JsonValue },
+          toRecipients: [{ emailAddress: { address: parameters["to"] as JsonValue } }]
+        }
+      }, credential);
+      return { data: null };
+    }
+    throw new Error(`microsoft_outlook_unsupported_action_${action}`);
+  }
+}
