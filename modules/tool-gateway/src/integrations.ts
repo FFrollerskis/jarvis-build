@@ -3003,6 +3003,32 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_GOOGLE_SHEETS_TOKEN",
       output_trust: "internal", transport: transport("google_sheets")
     },
+    /**
+     * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - åttende slice). STRUKTURELT LIK Brave Search (D-296):
+     * INGEN klasse B/C/D-handling finnes - Tavily sitt API tilbyr genuint
+     * bare lesing, D-41 sitt read-only-unntak ærlig oppfylt. **IKKE denne-
+     * økten-verifisert mot en live hentet kopi av offisiell dokumentasjon**
+     * (nettverksegress blokkert i dette miljøet, samme D-297-forbehold) -
+     * basert på trent kunnskap om ETT kjent endepunkt (`POST /search`),
+     * `web_search`/`news_search` differensiert kun via `topic`-felt i
+     * request-body, se `TavilyTransport` sin doc-kommentar i
+     * `live-transports.ts`.
+     */
+    {
+      tool_id: "tavily", action: "web_search", description: "Websøk (POST /search, topic=general, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
+    {
+      tool_id: "tavily", action: "news_search", description: "Nyhetssøk (POST /search, topic=news, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), max_results: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TAVILY_API_KEY", output_trust: "untrusted", transport: transport("tavily")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

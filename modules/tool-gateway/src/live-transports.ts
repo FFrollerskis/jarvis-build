@@ -1910,3 +1910,45 @@ export class GoogleSheetsTransport implements ToolTransport {
     throw new Error(`sheets_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-301 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - tilbake til ett-connector-per-PR etter D-297-300-samlingen).
+ * **Samme ærlighetsforbehold som D-297/D-298/D-299/D-300** (nettverksegress
+ * blokkert denne økten, `WebFetch` mot eksterne dokumentasjonsdomener
+ * bekreftet `EGRESS_BLOCKED` - se D-297): API-formen under er basert på
+ * trent kunnskap om Tavily sitt offentlige Search-API, IKKE en denne-økten-
+ * bekreftet kilde. Tavily sender API-nøkkelen som `api_key`-FELT I POST-
+ * BODY-en (IKKE en `Authorization`-header, ULIK Sentry/Brave Search) - deres
+ * opprinnelige, mest utbredt dokumenterte autentiseringsform. Kun ÉTT reelt
+ * dokumentert endepunkt (`POST /search`) er kjent med tilstrekkelig
+ * sikkerhet - `web_search`/`news_search` skiller seg derfor KUN på `topic`-
+ * body-feltet (general/news) mot SAMME endepunkt, i stedet for å gjette på
+ * et separat nyhets-endepunkts URL/form. STRUKTURELT LIK Brave Search: D-41
+ * sitt read-only-unntak ærlig oppfylt (søke-API, ingen skrivehandling).
+ */
+export class TavilyTransport implements ToolTransport {
+  private async call(topic: "general" | "news", parameters: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const body: Record<string, JsonValue> = { api_key: credential, query: String(parameters["query"]), topic };
+    if (parameters["max_results"] !== undefined) body["max_results"] = parameters["max_results"];
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!response.ok) throw new Error(`tavily_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const body = await this.call("general", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    if (action === "news_search") {
+      const body = await this.call("news", parameters, credential);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`tavily_unsupported_action_${action}`);
+  }
+}

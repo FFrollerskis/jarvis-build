@@ -1,14 +1,32 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-297+D-298+D-299+
-D-300 MERGET til `main`** (PR #189, to-forelder-merge `e050799`, under D-192 stående fullmakt - se
-forrige milepæl-blokkene under for full begrunnelse per D-nummer). Alle 55 nye tester + `pnpm -w
-typecheck`/`npx eslint` grønt i CI. **D-300 er nå LIVE PÅ `main`:** `LlmExtractionAdapter` erstatter
-D-287 sin for-strenge `RuleBasedExtractor` som produksjons-extractor for samtaleminne. **Ærlighet om
-deploy, uendret:** denne sesjonen har INGEN tilgang til Tobias sin NAS - fiksen er nå merget, men
-Tobias må selv `git pull` + rebuilde/redeploye på NAS-en for å faktisk teste den live på telefonen.
-Neste: fortell Tobias status, deretter tilbake til ett-connector-per-PR-mønsteret for de resterende
-D-231/D-232-backlog-punktene (Tavily/Exa vurdert som trygge neste kandidater).
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-301: Tavily-
+connectoren (websøk) bygget fullt ut - ÅTTENDE konkrete byggeslice, FØRSTE etter at PR #189
+(D-297+D-298+D-299+D-300) ble merget og lukket - tilbake til ett-connector-per-PR-mønsteret.**
+`TavilyTransport` (`live-transports.ts`) mot `POST https://api.tavily.com/search` - API-nøkkel som
+`api_key`-FELT I POST-BODY-en (IKKE en header, ULIK Sentry/Brave Search). Kun ÉTT reelt dokumentert
+endepunkt kjent - `web_search`/`news_search` skiller seg KUN på et `topic`-body-felt (general/news)
+mot SAMME endepunkt, i stedet for å gjette på et separat nyhets-endepunkts form. STRUKTURELT LIK
+Brave Search: INGEN skrivehandling finnes, D-41 sitt read-only-unntak ærlig oppfylt. Samme D-297-
+ærlighetsforbehold (trent kunnskap, ikke denne-økten-bekreftet, nettverksegress blokkert). `connector-
+registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place (D-293-disiplinen). Wiret inn i
+BÅDE `main.ts`/`worker-main.ts` med tom konstruktør (`drive-runtime-wiring.test.ts` sin telling
+bumpet 9→10 i begge filer). 6 nye tester (`d301-tavily-transport.test.ts`), `connector-registry.
+test.ts` sine BACKLOG_IDS/live_test-lister oppdatert (43→42 gjenværende backlog-punkter). `pnpm -w
+typecheck` (32/32 pakker)/`npx eslint apps modules packages` begge rene. `TAVILY_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-301 i DECISIONS_AND_ASSUMPTIONS.md. **Neste:** commit/push/draft PR for
+D-301, deretter fortsette systematisk gjennom de resterende ~42 backlog-connectorene (Exa neste trygge
+kandidat, samme lavrisiko søke-API-bøtte som Brave Search/Tavily) - unngå de seks
+`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen D-64-sync-
+adapter-undersøkelse er gjort for hver.
+
+**Forrige milepæl (uendret): D-297+D-298+D-299+D-300 MERGET til `main`** (PR #189, to-forelder-merge
+`e050799`, under D-192 stående fullmakt - se blokkene under for full begrunnelse per D-nummer). Alle
+55 nye tester + `pnpm -w typecheck`/`npx eslint` grønt i CI. **D-300 er nå LIVE PÅ `main`:**
+`LlmExtractionAdapter` erstatter D-287 sin for-strenge `RuleBasedExtractor` som produksjons-extractor
+for samtaleminne. **Ærlighet om deploy, uendret:** denne sesjonen har INGEN tilgang til Tobias sin
+NAS - fiksen er nå merget, men Tobias må selv `git pull` + rebuilde/redeploye på NAS-en for å faktisk
+teste den live på telefonen.
 
 **Forrige milepæl (uendret): D-300: KRITISK
 MINNEFUNN + FIKS - LLM-basert minneuttrekk erstatter D-287 sin for-strenge regelbaserte extractor**

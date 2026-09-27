@@ -107,9 +107,22 @@ import type { ToolGateway } from "./gateway.ts";
  * `credential_ref` (Sheets krever den dedikerte `spreadsheets`-scopen, Drive
  * sin bredere scope dekker den ikke). D-41 sitt "maksimal nyttig kapabilitet"
  * fulgt - EKTE skrivehandlinger (`update_range`/`append_row`), ikke kunstig
- * innsnevret til read-only. De resterende 43 backlog-punktene er fortsatt
- * uendret; samme oppdater-i-place-disiplin gjelder for hver av dem når de
- * bygges.
+ * innsnevret til read-only.
+ *
+ * D-300 (2026-09-27, samme økt, Tobias direkte i chat etter live telefontest:
+ * "husker han ingenting... vi trodde det fungerte fungerte det ikke"): INGEN
+ * connector-endring - kritisk minnefiks, `RuleBasedExtractor` erstattet av
+ * `LlmExtractionAdapter` i `apps/api/src/main.ts`, se `modules/memory/src/
+ * extraction.ts`. Nevnt her kun for kronologisk sporbarhet i denne filens
+ * D-nummer-rekke.
+ *
+ * D-301 (2026-09-27, samme brede ordre, åttende slice): `tavily` bygget og
+ * flyttet ut av backlogen SAMME MÅTE - andre rent lesende (klasse A-kun)
+ * connector (samme D-41 read-only-unntak som Brave Search: Tavily sitt API
+ * tilbyr genuint ingen skrivehandling). Samme D-297-forbehold gjelder (trent
+ * kunnskap om ett kjent endepunkt, `POST /search`, ikke denne-økten-
+ * bekreftet). De resterende 42 backlog-punktene er fortsatt uendret; samme
+ * oppdater-i-place-disiplin gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -283,7 +296,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_BRAVE_SEARCH_API_KEY"],
     live_test: { tool_id: "brave_search", action: "web_search", parameters: () => ({ query: "ping" }) }
   },
-  { id: "tavily", display_name: "Tavily", category: "backlog", credential_refs: ["JARVIS_TAVILY_API_KEY"] },
+  {
+    // D-301 (bygget, flyttet ut av backlog): samme "genuint bare lesing"-
+    // struktur som Brave Search (D-296) rett over - Tavily tilbyr ett kjent
+    // endepunkt (POST /search) som web_search/news_search begge bruker,
+    // differensiert kun via et `topic`-felt i request-body. Oppdatert i
+    // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat
+    // oppføring med samme id (D-293-lærdommen).
+    id: "tavily", display_name: "Tavily", category: "tool_gateway",
+    credential_refs: ["JARVIS_TAVILY_API_KEY"],
+    live_test: { tool_id: "tavily", action: "web_search", parameters: () => ({ query: "ping" }) }
+  },
   { id: "exa", display_name: "Exa", category: "backlog", credential_refs: ["JARVIS_EXA_API_KEY"] },
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
 
