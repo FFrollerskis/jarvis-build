@@ -1,32 +1,46 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-317: modell-
-selvbevissthet bygget inn i `check_my_capabilities`** (Tobias direkte i chat, eksplisitt
-bestilling: "bygg modell-selvbevissthet inn i check_my_capabilities", svar på hans eget funn at
-Charlie strukturelt ikke kunne vite hvilken modell/leverandør som faktisk svarte). Forsknings-
-funn FØR bygging: `ToolCallRequest.provider`/`.model` var ALLEREDE stemplet av hver adapter og
-ALLEREDE tilgjengelig UENDRET i `MeshToolExecutor.execute()` - ingen ny datakilde nødvendig.
-Løsningen trer denne trusted-lag-fakta gjennom SAMME kanal som `identity`/`approval` (D-68) -
-ALDRI via `parameters` (der en modell selv kunne LYVE om egen identitet). Endringer: (1)
-`ToolInvocationContext`/`ToolGateway.execute()` (`gateway.ts`) fikk et nytt valgfritt
-`servingModel?: {provider, model}`-felt. (2) `MeshToolExecutor.execute()` (`mesh-bridge.ts`)
-sender NÅ `servingModel` på ALLE mesh-dispatchede kall (generisk trusted-lag-fakta). (3)
-`ExecutiveTransport`/`ExecutiveService.getCapabilityStatus()` leser/returnerer det. (4)
-`CapabilityStatus` fikk `serving_model: {provider, model} | null`. Zod-`input_schema`-en for
-`get_capability_status` er BEVISST UENDRET (streng, ingen ekstra felt) - INGEN vei for en modell
-å injisere en falsk verdi via `parameters`, bevist eksplisitt med to adversarielle tester.
-**Testdekning:** `modules/executive/test/capability-status.test.ts` utvidet 13→19 tester.
-`pnpm -w typecheck` (32/32 pakker, HELE workspacet) og `npx eslint` på alle seks endrede filer -
-begge rene. Full `modules/tool-gateway modules/executive`-suite: 568/568 reelle tester grønt (13
-filer feilet KUN på den kjente, forhåndseksisterende embedded-Postgres `/tmp`-tillatelsesfeilen).
-Se D-317 i DECISIONS_AND_ASSUMPTIONS.md.
-**Status:** Implementert og verifisert lokalt - IKKE ennå committet/pushet. Dette er et EGET,
-ikke-connector-relatert arbeidsspor (kjernefunksjon i selve chat-selvbevissthets-mekanismen, ikke
-en backlog-connector) - committes som EN EGEN, tydelig merket commit. Økten sitt eneste
-designerte branch er `claude/hva-skjer-hvordan-ligger-0z3ztp` (samme branch PR #192 allerede peker
-på) - en helt separat PR er derfor IKKE mulig uten å bryte branch-standarden; commiten landér på
-SAMME PR #192, men PR #192 sin tittel/body oppdateres til å ÆRLIG skille D-317 (kjernefunksjon)
-fra D-311-D-316 (connector-byggeslicer) - IKKE later som D-317 er en nittentyvende connector-slice.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, resatt til fersk
+`origin/main` etter merge) - **PR #192 (D-311 til D-317) MERGET til `main`** (to-forelder-merge
+`9453f737f7763fb9d76df965aa475380aa226e5d`, under D-192 stående fullmakt - Tobias direkte til
+stede i chat-økten hele veien, ingen separat ChatGPT-arkitekt-forhåndsreview for dette scopet).
+Fersk HEAD-/base-guard rett før merge bekreftet uendret `head.sha bf8a4687.../base.sha
+5cc6aeaa...` på tvers av to konsekutive `pull_request_read`-kall, `mergeable_state: "clean"`, CI
+grønt på begge runs (`pull_request` #1218 og `push` #1217, begge `conclusion: "success"`) - PR-en
+ble markert `draft: false` rett før selve merge-kallet (påkrevd av GitHub for å tillate merge).
+
+PR-en dekket TO strukturelt forskjellige spor, landet på samme branch fordi det var øktens eneste
+designerte branch:
+
+**Del 1 (connector-byggeslicer):** D-311 n8n, D-312 gitleaks-CI-fiks, D-313 Spotify (EKTE OAuth2
+refresh_token-utveksling), D-314 WhatsApp (Meta Graph API), D-315 Make (`Authorization: Token`),
+D-316 OpenAI Images (egen `tool_id` fra `openai` sin model_provider-oppføring).
+
+**Del 2 (D-317, IKKE en connector):** modell-selvbevissthet bygget inn i `check_my_capabilities`
+(Tobias direkte i chat, eksplisitt bestilling: "bygg modell-selvbevissthet inn i
+check_my_capabilities", svar på hans eget funn at Charlie strukturelt ikke kunne vite hvilken
+modell/leverandør som faktisk svarte). `ToolCallRequest.provider`/`.model` var ALLEREDE stemplet
+av hver adapter og ALLEREDE tilgjengelig UENDRET i `MeshToolExecutor.execute()` - ingen ny
+datakilde nødvendig. Løsningen trer denne trusted-lag-fakta gjennom SAMME kanal som
+`identity`/`approval` (D-68) - ALDRI via `parameters` (der en modell selv kunne LYVE om egen
+identitet): `ToolInvocationContext`/`ToolGateway.execute()` (`gateway.ts`) fikk et nytt valgfritt
+`servingModel?: {provider, model}`-felt; `MeshToolExecutor.execute()` (`mesh-bridge.ts`) sender
+det NÅ på ALLE mesh-dispatchede kall; `ExecutiveTransport`/`ExecutiveService.getCapabilityStatus()`
+leser/returnerer det; `CapabilityStatus` fikk `serving_model: {provider, model} | null`. Zod-
+`input_schema`-en for `get_capability_status` er BEVISST UENDRET (streng, ingen ekstra felt) -
+INGEN vei for en modell å injisere en falsk verdi via `parameters`, bevist eksplisitt med to
+adversarielle tester. `modules/executive/test/capability-status.test.ts` utvidet 13→19 tester.
+
+**Kvalitetsgates (bekreftet FØR merge):** `pnpm -w typecheck` (32/32 pakker) og `npx eslint` på
+alle endrede filer - begge rene. `modules/tool-gateway modules/executive`-suite: 568/568 reelle
+tester grønt (13 filer feilet KUN på kjent, forhåndseksisterende embedded-Postgres `/tmp`-
+tillatelsesfeil). gitleaks v8.24.3 kjørt lokalt mot hele historikken FØR push - "no leaks found".
+
+Se D-311 til D-317 i DECISIONS_AND_ASSUMPTIONS.md for full detalj per post.
+
+**Neste:** fortsett systematisk gjennom de resterende ~28 backlog-connectorene, ELLER avvent
+Tobias sitt retningsvalg på de harder-tier kategoriene (meta_ads/Folio/vage entries/nye auth-
+mønstre/ikke-cloud-API/lavere-sikkerhet video-gen) beskrevet i "Nytt merknad"-seksjonen under.
 
 **Forrige milepæl (uendret): D-316: OpenAI Images-connectoren bygget fullt ut - TJUEANDRE
 konkrete byggeslice, SAMME åpne branch/PR (#192) som n8n D-311/Spotify D-313/WhatsApp D-314/Make
