@@ -106,7 +106,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-312) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -134,8 +134,9 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => readSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => readSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/n8n: new N8nTransport\(\(\) => readSecretProvider\.get\("JARVIS_N8N_API_BASE_URL"\)\)/);
+    expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => readSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-312) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311 teller heller ikke med, samme begrunnelse som main.ts", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -145,7 +146,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     // resolver-/referanseform, ikke en tom konstruktør) - derfor SAMME tall (18, D-292: +slack,
     // D-294: +discord, D-296: +brave_search, D-298: +google_maps, D-299: +google_sheets, D-301:
     // +tavily, D-302: +exa, D-303: +google_places, D-304: +google_routes, D-307: +dropbox, D-308:
-    // +notion, D-309: +onedrive, D-310: +microsoft_outlook, D-312: +spotify) i begge filer, selv
+    // +notion, D-309: +onedrive, D-310: +microsoft_outlook, D-313: +spotify) i begge filer, selv
     // om de to filene fortsatt divergerer paa HVORDAN telegram konstrueres (hoistet konstant vs.
     // inline), se describe "B". D-295/D-297/D-305/D-311: twilio/sentry/grafana/prometheus/n8n har
     // SAMME resolver-argument-form som telegram - teller heller ikke med her.
@@ -173,6 +174,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/sentry: new SentryTransport\(\(\) => toolSecretProvider\.get\("JARVIS_SENTRY_ORG_SLUG"\)\)/);
     expect(callBlock).toMatch(/grafana: new GrafanaTransport\(\(\) => toolSecretProvider\.get\("JARVIS_GRAFANA_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => toolSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
+    expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => toolSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

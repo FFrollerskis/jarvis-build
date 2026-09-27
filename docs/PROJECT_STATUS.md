@@ -1,36 +1,43 @@
 # PROJECT STATUS
 
 **Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, RESATT fra
-`origin/main` etter D-192-merge av PR #191) - PR #192 (D-311, n8n) åpnet, deretter CI-rødt på
-gitleaks (D-312, `.gitleaksignore`-fiks pushet og lokalt verifisert med gitleaks v8.24.3 mot hele
-historikken FØR push: "no leaks found"). Deretter **D-313: Spotify-connectoren bygget fullt ut -
-NITTENDE konkrete byggeslice** (Tobias gjentok direkte i chat, tolvte gang: "fortsett og jobbe
-ikke vent på ci"). `SpotifyTransport` (`live-transports.ts`) - FØRSTE connector i denne sveipen
-med en EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall (`spotifyAccessToken()`,
-SAMME mønster som `googleAccessToken()` - delt app-konfig client_id/secret lest direkte fra env,
-`credential_ref` peker KUN på refresh-tokenet). To handlinger - `get_currently_playing` (klasse A,
-lesing) og `add_to_queue` (klasse B, EKTE skrivehandling - D-41). `add_to_queue` sin
-`rollback_procedure` er manuell hopp-over via `skip_to_next` (BEVISST DEFERRED). **D-64-sjekk:**
-ingen kanonisk musikk-domenemodell finnes i Jarvis - rent leverandør-adapter. Samme
-D-297-ærlighetsforbehold. `connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i
-place (`credential_refs` utvidet med `JARVIS_SPOTIFY_REFRESH_TOKEN`). Wiret inn i BÅDE
-`main.ts`/`worker-main.ts` med en TOM konstruktør (client_id/secret leses direkte fra env INNI
-transporten - teller MED i "tom konstruktør"-tellingen, bump 17→18 i begge blokker). 11 nye tester
-(`d312-spotify-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
-test_method-lister oppdatert (32→31 gjenværende backlog-punkter, 32→33 bygde). `pnpm -w typecheck`
-(32/32 pakker)/`npx eslint apps modules packages` begge rene. `SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS`.
-Se D-313 (og D-312 for gitleaks-fiksen) i DECISIONS_AND_ASSUMPTIONS.md.
-**Neste:** committe/pushe D-313 til PR #192 (fortsatt SAMME connector-per-PR? NEI - D-313 bygges på
-SAMME branch, men PR #192 sin tittel/body var scoped til n8n alene; siden D-313 landet på samme
-åpne branch FØR n8n rakk å merges, oppdater PR #192 sin tittel/body til å dekke BEGGE D-311+D-313
-ærlig, SAMME "PR-scope-vekst"-disiplin som PR #190), la CI kjøre og merge under D-192 når grønt.
-Deretter fortsett systematisk gjennom de resterende ~31 backlog-connectorene - unngå de seks
-`backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en egen
-D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute via Home
-Assistant), og unngå de voice-relaterte backlog-punktene
+`origin/main` etter D-192-merge av PR #191) - PR #192 åpnet (D-311 n8n), CI-rødt på gitleaks fikset
+(D-312, `.gitleaksignore`), deretter D-313 (Spotify) bygget på SAMME åpne branch/PR. Deretter
+**D-314: WhatsApp-connectoren bygget fullt ut - TJUENDE konkrete byggeslice** (Tobias gjentok
+direkte i chat, trettende gang: "fortsett og jobbe ikke vent på ci"), FORTSATT SAMME branch/PR
+(#192). `WhatsAppTransport` (`live-transports.ts`) - WhatsApp Business Cloud API (Meta Graph API).
+`phone_number_id` er Jarvis sin egen avsenderidentitet (SAMME rolle som Telegram sin `chat_id`),
+injisert som en resolver-closure. To handlinger - `get_phone_number_info` (klasse A, lesing) og
+`notify` (klasse B, EKTE skrivehandling - D-41, navngitt identisk med Slack/Discord/Telegram).
+**D-64-sjekk:** ingen kanonisk meldings-domenemodell finnes i Jarvis - rent leverandør-adapter,
+SAMME status som Slack/Discord/Twilio; den eksisterende WhatsApp-kanal-enum-en i
+`046_conversation_graph.sql` er uendret. `connector-registry.ts` sin EKSISTERENDE D-232-plassholder
+oppdatert i place (`credential_refs` utvidet med `JARVIS_WHATSAPP_PHONE_NUMBER_ID`). Wiret inn i
+BÅDE `main.ts`/`worker-main.ts` med en resolver-argument-konstruktør (SAMME form som n8n/Grafana/
+Prometheus - ingen "tom konstruktør"-bump). 9 nye tester (`d314-whatsapp-transport.test.ts`),
+`connector-registry.test.ts` sine BACKLOG_IDS/live_test/test_method-lister oppdatert (31→30
+gjenværende backlog-punkter, 33→34 bygde). `pnpm -w typecheck` (32/32 pakker)/`npx eslint apps
+modules packages` begge rene. `WHATSAPP_LIVE_GATE=PENDING_CREDENTIALS`. Samtidig rettet en
+D-312/D-313-nummereringsfeil fra forrige commit (Spotify sin wiring var feilaktig merket "D-312" i
+kildekode-kommentarer i stedet for "D-313" - rettet konsekvent overalt, testfilen omdøpt
+`d312-spotify-transport.test.ts` → `d313-spotify-transport.test.ts`, en feilaktig "11 nye
+tester"-påstand rettet til det faktiske tallet 9). Se D-314 (og D-312/D-313) i
+DECISIONS_AND_ASSUMPTIONS.md.
+**Neste:** committe/pushe D-314 til PR #192 (oppdater PR #192 sin tittel/body til å dekke
+D-311+D-313+D-314 ærlig, SAMME "PR-scope-vekst"-disiplin som PR #190), la CI kjøre og merge under
+D-192 når grønt. Deretter fortsett systematisk gjennom de resterende ~30 backlog-connectorene -
+unngå de seks `backlog_d64_gate`-punktene (hubspot/pipedrive/linear/jira/trello/todoist) til en
+egen D-64-sync-adapter-undersøkelse er gjort for hver, unngå homekit/philips_hue (skal rute via
+Home Assistant), og unngå de voice-relaterte backlog-punktene
 (openai_realtime/elevenlabs/deepgram/livekit/telnyx) til en kort D-64-lignende sjekk mot
 `SpeechAdapter`-arkitekturen (CLAUDE.md regel 3/5, task #125 lokale whisper.cpp/piper-adaptere) er
 gjort.
+
+**Forrige milepæl (uendret): D-313: Spotify-connectoren bygget fullt ut - NITTENDE konkrete
+byggeslice.** `SpotifyTransport` (`live-transports.ts`) - FØRSTE connector i denne sveipen med en
+EKTE OAuth2 `refresh_token`→`access_token`-utveksling PER kall. To handlinger -
+`get_currently_playing` (klasse A) og `add_to_queue` (klasse B, EKTE skrivehandling - D-41).
+`SPOTIFY_LIVE_GATE=PENDING_CREDENTIALS`. Se D-313 i DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-311: n8n-connectoren bygget fullt ut - ATTENDE konkrete
 byggeslice.** `N8nTransport` (`live-transports.ts`) - `X-N8N-API-KEY`-header (IKKE `Authorization:

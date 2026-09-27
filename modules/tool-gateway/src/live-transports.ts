@@ -2354,3 +2354,42 @@ export class SpotifyTransport implements ToolTransport {
     throw new Error(`spotify_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-314. WhatsApp Business Cloud API (Meta Graph API) - `phone_number_id`
+ * er Jarvis sin EGEN avsender-identitet (SAMME rolle som Telegram sin
+ * `chat_id` - fast konfig, IKKE en per-kall parameter), injisert som en
+ * resolver-closure (SAMME mønster som n8n/Grafana/Prometheus sin base-URL).
+ * `notify` er navngitt IDENTISK med Slack/Discord/Telegram sin
+ * send-melding-handling for konsistens på tvers av meldingsleverandører.
+ */
+export class WhatsAppTransport implements ToolTransport {
+  constructor(private readonly phoneNumberId: () => Promise<string | null>) {}
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const phoneNumberId = await this.phoneNumberId();
+    if (!phoneNumberId) throw new Error("whatsapp_phone_number_id_not_configured");
+    if (action === "get_phone_number_info") {
+      const response = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}?fields=display_phone_number,verified_name`,
+        { headers: { authorization: `Bearer ${credential}` } }
+      );
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      return { data: (await response.json()) as JsonValue };
+    }
+    if (action === "notify") {
+      const response = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", to: String(parameters["to"]),
+          type: "text", text: { body: String(parameters["message"]) }
+        })
+      });
+      if (!response.ok) throw new Error(`whatsapp_error_${response.status}`);
+      const body = (await response.json()) as { messages?: Array<{ id?: string }> };
+      return { external_id: body.messages?.[0]?.id ?? "sent" };
+    }
+    throw new Error(`whatsapp_unsupported_action_${action}`);
+  }
+}

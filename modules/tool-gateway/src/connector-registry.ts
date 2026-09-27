@@ -530,7 +530,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_TWILIO_ACCOUNT_SID", "JARVIS_TWILIO_AUTH_TOKEN", "JARVIS_TWILIO_FROM_NUMBER"],
     live_test: { tool_id: "twilio", action: "get_account_info", parameters: () => ({}) }
   },
-  { id: "whatsapp", display_name: "WhatsApp", category: "backlog", credential_refs: ["JARVIS_WHATSAPP_TOKEN"] },
+  {
+    // D-314 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // PHONE_NUMBER_ID (Jarvis sin egen avsenderidentitet, SAMME rolle som
+    // Telegram sin chat_id). Oppdatert i place (var en D-232
+    // backlog-plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "whatsapp", display_name: "WhatsApp", category: "tool_gateway",
+    credential_refs: ["JARVIS_WHATSAPP_TOKEN", "JARVIS_WHATSAPP_PHONE_NUMBER_ID"],
+    live_test: { tool_id: "whatsapp", action: "get_phone_number_info", parameters: () => ({}) }
+  },
   {
     // D-292 (bygget, flyttet ut av backlog): "notify er ekte utsendelse,
     // get_bot_info er trygg tilkoblingstest"-disiplin, samme som Telegram
@@ -558,7 +567,7 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
 
   // §4.8 Musikk
   {
-    // D-312 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
+    // D-313 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
     // REFRESH_TOKEN (den faktiske, roterte secreten - CLIENT_ID/SECRET er
     // delt app-konfig, SAMME oppdeling som Google-familien). Oppdatert i
     // place (var en D-232 backlog-plassholder) - ALDRI en ny, separat

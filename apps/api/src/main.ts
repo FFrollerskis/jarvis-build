@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -687,9 +687,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-311: SAMME resolver-mot-readSecretProvider-mønster som Grafana/
     // Prometheus - n8n er også typisk selv-hostet.
     n8n: new N8nTransport(() => readSecretProvider.get("JARVIS_N8N_API_BASE_URL")),
-    // D-312: tom konstruktør - `client_id`/`client_secret` leses direkte fra
+    // D-313: tom konstruktør - `client_id`/`client_secret` leses direkte fra
     // env inne i `spotifyAccessToken()` (delt app-konfig, ikke en resolver).
     spotify: new SpotifyTransport(),
+    // D-314: `phone_number_id` er Jarvis sin egen avsenderidentitet - SAMME
+    // resolver-mot-readSecretProvider-mønster som Telegram sin chat_id.
+    whatsapp: new WhatsAppTransport(() => readSecretProvider.get("JARVIS_WHATSAPP_PHONE_NUMBER_ID")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

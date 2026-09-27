@@ -3302,7 +3302,7 @@ export function firstWaveTools(
       credential_ref: "JARVIS_N8N_API_KEY", output_trust: "internal", transport: transport("n8n")
     },
     /**
-     * D-312 (bygget, flyttet ut av backlog): Spotify Web API. `credential_ref`
+     * D-313 (bygget, flyttet ut av backlog): Spotify Web API. `credential_ref`
      * peker på REFRESH-tokenet (den faktiske, roterte secreten) - `client_id`/
      * `client_secret` er DELT app-konfig lest direkte fra env inne i
      * `spotifyAccessToken()`, SAMME mønster som `googleAccessToken()`
@@ -3325,6 +3325,31 @@ export function firstWaveTools(
       rollback_procedure: "hopp over sangen manuelt via skip_to_next (Spotify har ikke et dedikert fjern-fra-kø endepunkt)",
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_SPOTIFY_REFRESH_TOKEN", output_trust: "internal", transport: transport("spotify")
+    },
+    /**
+     * D-314 (bygget, flyttet ut av backlog): WhatsApp Business Cloud API
+     * (Meta Graph API). `phone_number_id` er Jarvis sin EGEN
+     * avsender-identitet (SAMME rolle som Telegram sin `chat_id`),
+     * injisert som en resolver-closure. `notify` navngitt IDENTISK med
+     * Slack/Discord/Telegram sin send-melding-handling.
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om Meta Graph API/WhatsApp Business Cloud
+     * API, se `WhatsAppTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "whatsapp", action: "get_phone_number_info", description: "Les avsendernummerets metadata (GET /{phone_number_id}, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["whatsapp_business_management"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "untrusted", transport: transport("whatsapp")
+    },
+    {
+      tool_id: "whatsapp", action: "notify", description: "Send melding via WhatsApp (POST /{phone_number_id}/messages)",
+      input_schema: record({ to: z.string(), message: z.string().max(4096) }),
+      capability_class: "B", scopes: ["whatsapp_business_messaging"], reversible: true,
+      rollback_procedure: "send korreksjonsmelding", idempotent_external: false,
+      timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_WHATSAPP_TOKEN", output_trust: "internal", transport: transport("whatsapp")
     },
     ...(config.additionalTools ?? [])
   ];
