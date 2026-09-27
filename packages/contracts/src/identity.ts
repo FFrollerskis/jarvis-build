@@ -66,6 +66,13 @@ export type AuthStrength = z.infer<typeof AuthStrengthSchema>;
  * `slack`. Krever INGEN migrasjon, samme uendrede `text NOT NULL`-kolonne.
  */
 /**
+ * `twilio` (D-295, samme UA-7-generalisering av D-125 sitt `telegram`-
+ * mønster som `slack`/`discord`): SMS via `TwilioTransport` er en TRANSPORT
+ * (D-64 `EXTERNAL_CANONICAL`), aldri en identitets- eller autoritetskilde -
+ * IDENTISK begrunnelse som `telegram`/`slack`/`discord`. Krever INGEN
+ * migrasjon, samme uendrede `text NOT NULL`-kolonne.
+ */
+/**
  * `slack` (D-292, UA-7-generalisering av D-125 sitt `telegram`-mønster):
  * Slack-boten (`SlackTransport`, `live-transports.ts`) er en TRANSPORT
  * (D-64 `EXTERNAL_CANONICAL`), aldri en identitets- eller autoritetskilde -
@@ -74,7 +81,7 @@ export type AuthStrength = z.infer<typeof AuthStrengthSchema>;
  * ingen uttømmende `switch` over `Channel` finnes andre steder.
  */
 export const ChannelSchema = z.enum([
-  "web", "mobile", "watch", "voice", "api", "system", "telegram", "desktop", "slack", "discord"
+  "web", "mobile", "watch", "voice", "api", "system", "telegram", "desktop", "slack", "discord", "twilio"
 ]);
 export type Channel = z.infer<typeof ChannelSchema>;
 

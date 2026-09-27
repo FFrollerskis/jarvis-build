@@ -2841,6 +2841,37 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_DISCORD_BOT_TOKEN", output_trust: "untrusted", transport: transport("discord")
     },
+    /**
+     * D-295 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - tredje slice). SAMME "notify er ekte utsendelse (klasse
+     * B), get_account_info er trygg tilkoblingstest (klasse A)"-mønster som
+     * Telegram/Slack/Discord over. Twilio sin klassiske AccountSid/AuthToken-
+     * modell har INGEN OAuth-scope-konsept (full kontotilgang alltid) - derfor
+     * er `sms:send`/`sms:read` interne Jarvis-plassholdere, SAMME konvensjon
+     * som Telegrams `bot:read` (IKKE en faktisk Twilio-dokumentert scope-
+     * streng).
+     */
+    {
+      tool_id: "twilio", action: "notify", description: "Send SMS (POST /Messages.json)",
+      input_schema: record({ to: z.string(), message: z.string().max(1600) }), capability_class: "B",
+      scopes: ["sms:send"], reversible: true, rollback_procedure: "send korreksjonsmelding",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "internal", transport: transport("twilio")
+    },
+    {
+      tool_id: "twilio", action: "get_account_info", description: "Les kontoens egen identitet (GET /Accounts/{sid}.json) - brukes som tilkoblingstest, ALDRI en ekte SMS-utsendelse",
+      input_schema: empty, capability_class: "A", scopes: ["sms:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_TWILIO_AUTH_TOKEN",
+      output_trust: "untrusted", transport: transport("twilio")
+    },
+    {
+      tool_id: "twilio", action: "read_messages", description: "List nylige SMS-meldinger på kontoen (GET /Messages.json, untrusted ingestion)",
+      input_schema: record({ limit: z.number().int().min(1).max(1000).optional() }),
+      capability_class: "A", scopes: ["sms:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "untrusted", transport: transport("twilio")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

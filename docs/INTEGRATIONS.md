@@ -129,7 +129,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Deepgram | `NY_BACKLOG` | Ingen kode funnet |
 | LiveKit | `NY_BACKLOG` | Ingen kode funnet (Q-03 fortsatt ikke avgjort ved benchmark) |
 | Telnyx | `NY_BACKLOG` | Ingen kode funnet |
-| Twilio | `NY_BACKLOG` | Ingen kode funnet |
+| Twilio | `ALLEREDE_BYGGET (D-295)` | `TwilioTransport` (`live-transports.ts`) - `notify`/`get_account_info`/`read_messages` (POST/GET mot Twilio REST API, `Basic`-autentisering AccountSid:AuthToken), `channel: "twilio"` lagt til `ChannelSchema`. `live_test: get_account_info` (`GET /Accounts/{sid}.json`, ingen sideeffekt). `TWILIO_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_TWILIO_ACCOUNT_SID`/`JARVIS_TWILIO_AUTH_TOKEN`/`JARVIS_TWILIO_FROM_NUMBER`) |
 | Telegram | `ALLEREDE_BYGGET` | `connector-registry.ts` id `telegram`; D-119/D-125, LIVE+VERIFIED (eier-kanal, daglig brief, `/brief`/`/status`) |
 | WhatsApp | `NY_BACKLOG` | Kun kanal-enum i `046_conversation_graph.sql` (§UA-7) - bevisst IKKE bygget («no big-bang all-providers-at-once», D-108) |
 | Slack | `ALLEREDE_BYGGET (D-292)` | `SlackTransport` (`live-transports.ts`) - `notify`/`get_bot_info`/`list_channels`/`read_channel_history` (chat.postMessage/auth.test/conversations.list/conversations.history), `channel: "slack"` lagt til `ChannelSchema`. `live_test: get_bot_info` (auth.test, ingen sideeffekt). `SLACK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_SLACK_BOT_TOKEN`) |

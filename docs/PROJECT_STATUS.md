@@ -1,6 +1,19 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-294: Discord-connectoren
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-295: Twilio-
+connectoren (SMS) bygget fullt ut - TREDJE slice.** `TwilioTransport` (`notify`/`get_account_info`/
+`read_messages` mot Twilio REST API, `Basic`-autentisering AccountSid:AuthToken - strukturelt ULIK
+Slack/Discord: INGEN OAuth-scope-konsept, AccountSid i URL-stien, OG et tredje påkrevd
+konfigurasjonsfelt (`From`-nummer) injisert som resolver-closure, samme mønster som Telegram sin
+`chat_id`). D-293 sin grep-FØRST-disiplin anvendt igjen (fant D-232-plassholderen, oppdaterte i
+place) - INGEN duplikat-id-regresjon for tredje gang på rad. `connector-registry.ts` sin
+`credential_refs` utvidet med `JARVIS_TWILIO_FROM_NUMBER` (samme "list ALLE nødvendige verdier"-
+fiks som D-245/D-246). 10 nye tester, `pnpm -w typecheck`/`npx eslint` rene. `TWILIO_LIVE_GATE=
+PENDING_CREDENTIALS`. Se D-295 i DECISIONS_AND_ASSUMPTIONS.md. PR ikke opprettet ennå denne gangen -
+neste: commit/push/PR/CI/merge, deretter neste connector fra de ~41 gjenværende D-231/D-232-
+backlog-punktene.
+
+**Forrige milepæl (uendret): D-294: Discord-connectoren
 MERGET til `main`** (PR #186, to-forelder-merge `4e4430c`, under D-192 stående fullmakt). D-293 sin
 Slack-CI-lærdom anvendt FØR koden ble skrevet (grep'et `connector-registry.ts` for en eksisterende
 `"discord"`-id FØRST, oppdaterte D-232-plassholderen i place) - INGEN duplikat-id-regresjon, INGEN
@@ -9,8 +22,7 @@ runnere hele veien). `DiscordTransport` (`notify`/`get_bot_info`/`list_channels`
 mot Discord REST API v10, `Authorization: Bot <token>` - strukturelt ULIK Slack: INGEN `{ok,error}`-
 konvolutt, `response.ok` alene er tilstrekkelig). Mønsteret er nå bevist ende-til-ende gjennom TO
 fulle PR/CI/merge-sykluser (Slack + Discord). `DISCORD_LIVE_GATE=PENDING_CREDENTIALS`. Se D-294 i
-DECISIONS_AND_ASSUMPTIONS.md. Neste: velger neste connector fra de ~42 gjenværende D-231/D-232-
-backlog-punktene, samme grep-FØRST-disiplin.
+DECISIONS_AND_ASSUMPTIONS.md.
 
 **Forrige milepæl (uendret): D-292/D-293: Slack-connectoren MERGET til
 `main`** (PR #185, to-forelder-merge `832d34b`, under D-192 stående fullmakt). Underveis: en

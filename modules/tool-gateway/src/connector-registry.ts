@@ -76,9 +76,12 @@ import type { ToolGateway } from "./gateway.ts";
  * D-294 (2026-09-27, samme brede ordre, andre slice): `discord` bygget og
  * flyttet ut av backlogen SAMME MÅTE - oppdatert i place, ikke duplisert
  * (D-293 sin lærdom fra Slack-PR-en - en tidligere PR-CI-regresjon fra
- * nettopp DENNE feilen, alltid `grep` for en eksisterende id FØRST). De
- * resterende 48 backlog-punktene er fortsatt uendret; samme oppdater-i-
- * place-disiplin gjelder for hver av dem når de bygges.
+ * nettopp DENNE feilen, alltid `grep` for en eksisterende id FØRST).
+ *
+ * D-295 (2026-09-27, samme brede ordre, tredje slice): `twilio` bygget og
+ * flyttet ut av backlogen SAMME MÅTE. De resterende 47 backlog-punktene er
+ * fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av dem
+ * når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -235,7 +238,18 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "deepgram", display_name: "Deepgram", category: "backlog", credential_refs: ["JARVIS_DEEPGRAM_API_KEY"] },
   { id: "livekit", display_name: "LiveKit", category: "backlog", credential_refs: ["JARVIS_LIVEKIT_API_KEY"] },
   { id: "telnyx", display_name: "Telnyx", category: "backlog", credential_refs: ["JARVIS_TELNYX_API_KEY"] },
-  { id: "twilio", display_name: "Twilio", category: "backlog", credential_refs: ["JARVIS_TWILIO_ACCOUNT_SID", "JARVIS_TWILIO_AUTH_TOKEN"] },
+  {
+    // D-295 (bygget, flyttet ut av backlog): samme "notify er ekte utsendelse,
+    // get_account_info er trygg tilkoblingstest"-disiplin som Telegram/Slack/
+    // Discord over. Oppdatert i place (var en D-232 backlog-plassholder) -
+    // ALDRI en ny, separat oppføring med samme id (D-293-lærdommen). MERK:
+    // `JARVIS_TWILIO_FROM_NUMBER` lagt til her - samme "credential_refs må
+    // liste ALLE nødvendige verdier, ikke bare de som gateway.execute() selv
+    // slår opp" - bug-klasse som D-245/D-246 (Vipps MSN/Wallester ACCOUNT_ID).
+    id: "twilio", display_name: "Twilio", category: "tool_gateway",
+    credential_refs: ["JARVIS_TWILIO_ACCOUNT_SID", "JARVIS_TWILIO_AUTH_TOKEN", "JARVIS_TWILIO_FROM_NUMBER"],
+    live_test: { tool_id: "twilio", action: "get_account_info", parameters: () => ({}) }
+  },
   { id: "whatsapp", display_name: "WhatsApp", category: "backlog", credential_refs: ["JARVIS_WHATSAPP_TOKEN"] },
   {
     // D-292 (bygget, flyttet ut av backlog): "notify er ekte utsendelse,
