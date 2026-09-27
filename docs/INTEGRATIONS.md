@@ -99,7 +99,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Gmail | `ALLEREDE_BYGGET` | `connector-registry.ts` id `gmail`; D-34 primær e-postplattform (Q-07 lukket) |
 | Google Kalender | `ALLEREDE_BYGGET` | `connector-registry.ts` id `google_calendar`; D-34 primær kalender |
 | Microsoft Outlook | `ALLEREDE_BYGGET (D-310)` | `MicrosoftOutlookTransport` (`live-transports.ts`) - `list_messages`/`send_mail` (mot Microsoft Graph v1.0, `Authorization: Bearer`-header). D-41/D-64: `send_mail` er BEVISST klasse D (ikke reverserbar) - IDENTISK klassifisering med Gmail sin `email.send`, dekket av den generiske klasse D-godkjenningsmekanismen i PolicyGateway/ToolGateway. Genuint separat leverandør-konto fra Gmail, ikke en konkurrerende domenemodell. `live_test: list_messages` (max=5). `MICROSOFT_OUTLOOK_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OUTLOOK_TOKEN`) |
-| Microsoft 365 | `NY_BACKLOG` | Samme utsettelse som Outlook (D-34) - ingen kode |
+| Microsoft 365 | `ALLEREDE_DEKKET (D-318)` | Microsoft sin ekvivalent til Gmail+Drive er nå bygget som to presise Microsoft Graph v1.0-connectorer: Microsoft Outlook (D-310, e-post) + OneDrive (D-309, fillagring) - ingen egen "Microsoft 365"-connector, SAMME mønster som Google Docs (dekkes av Google Drive) over. Bredere M365-flater (Teams/SharePoint/Excel Online/delt kalender) forblir UBYGD/UBEDT - krever en fersk, presist scopet instruks fra Tobias om ønsket |
 
 ### 4.5 Kode / dev / infra
 
