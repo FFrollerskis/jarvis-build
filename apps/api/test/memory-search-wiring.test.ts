@@ -32,12 +32,18 @@ describe("A: apps/api/src/main.ts registrerer memory.search i SAMME additionalTo
     expect(mainSource).toContain("contextFor: (identity, userText) => memoryRetriever.contextFor(identity, userText),");
   });
 
-  it("D-283: konstruerer memoryWriter ÉN gang, delt embedding-instans med memoryRetriever, og kobler den inn som conversationEngine sin memory.ingest()", () => {
+  it("D-283/D-300: konstruerer memoryWriter ÉN gang, delt embedding-instans med memoryRetriever, LlmExtractionAdapter(gateway) som extractor, og kobler den inn som conversationEngine sin memory.ingest()", () => {
     const writerConstructions = mainSource.match(/new MemoryWriter\(/g) ?? [];
     expect(writerConstructions).toHaveLength(1);
     expect(mainSource).toMatch(/import\s*\{[^}]*MemoryWriter[^}]*\}\s*from\s*"@jarvis\/memory"/s);
-    expect(mainSource).toMatch(/import\s*\{[^}]*RuleBasedExtractor[^}]*\}\s*from\s*"@jarvis\/memory"/s);
-    expect(mainSource).toContain("new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy)");
+    // D-300 (Tobias direkte i chat: "husker han ingenting... vi trodde det
+    // fungerte fungerte det ikke"): D-287 sin regelbaserte extractor var for
+    // streng til reell samtale - `LlmExtractionAdapter` er nå den wired-inn
+    // implementasjonen, `RuleBasedExtractor` forblir kun en test-/referanse-
+    // implementasjon i `@jarvis/memory`, IKKE lenger konstruert i main.ts.
+    expect(mainSource).toMatch(/import\s*\{[^}]*LlmExtractionAdapter[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+    expect(mainSource).not.toMatch(/import\s*\{[^}]*RuleBasedExtractor[^}]*\}\s*from\s*"@jarvis\/memory"/s);
+    expect(mainSource).toContain("new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy)");
     expect(mainSource).toContain(
       'ingest: (identity, text) =>\n        memoryWriter.ingestText(identity, { kind: "conversation", ref: identity.session_id, trust: "trusted" }, text)'
     );

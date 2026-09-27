@@ -1,6 +1,30 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-299: Google Sheets-
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-300: KRITISK
+MINNEFUNN + FIKS - LLM-basert minneuttrekk erstatter D-287 sin for-strenge regelbaserte extractor**
+(Tobias direkte i chat: "husker han ingenting... vi trodde det fungerte fungerte det ikke", etter
+live telefon-testing). D-287 (allerede på `main`) sin `RuleBasedExtractor` krevde ETT av kun fire
+navngitte signalord-mønstre for HVER kandidat - D-285 sin "live-bekreftede" test ("pappa heter
+Henrik") traff PRESIST det ene mønsteret som overlevde, IKKE representativt for normal samtale, som
+derfor har blitt systematisk UTELATT fra minnet siden D-287 ble merget. Tobias valgte eksplisitt
+"bygg ekte LLM-basert uttrekk" (fremfor "utvid regex") da han fikk begge alternativene.
+`LlmExtractionAdapter` (`modules/memory/src/extraction.ts`) - PRESIST det `ExtractionAdapter`-
+grensesnittet alltid var designet for ("LLM-assistert uttrekk... kobles på samme grensesnitt senere"),
+aldri bygget før nå. `purpose: "EXTRACT"` + `structured_schema`, norsk systemprompt instruerer
+modellen å bruke "episodic" (ryddes automatisk av D-287 sin retensjons-sveip) når usikker på
+varighet - bredere fangst er derfor TRYGT nå på en måte den ikke var FØR D-287 sin opprydningsvei
+fantes. Fail-closed (ALDRI fail-kastende) på uparsérbart/ugyldig/for-stort strukturert svar.
+`ExtractionAdapter.extract()` utvidet til å ta full `IdentityContext` (ikke bare `space`) -
+`RuleBasedExtractor` UENDRET oppførsel, kun signaturen justert, forblir en deterministisk test-/
+referanse-implementasjon. Wiret inn i `apps/api/src/main.ts` (`new LlmExtractionAdapter(gateway)`,
+erstatter `new RuleBasedExtractor()`). `worker-main.ts` har ingen minne-skrivevei (uendret, ikke
+berørt). 20 nye tester (`llm-extraction.test.ts` + `extraction.test.ts` oppdatert), `pnpm -w
+typecheck`/`npx eslint` rene. **Ærlighet om deploy:** denne sesjonen har INGEN tilgang til Tobias sin
+NAS - kan KUN få fiksen merget til `main`, Tobias må selv `git pull` + rebuilde for å se den virke
+live på telefonen. Se D-300 i DECISIONS_AND_ASSUMPTIONS.md. Neste: commit/push/PR/CI/merge, deretter
+tilbake til connector-backlog-sveipet (PR #189, D-297+D-298+D-299, venter fortsatt på CI/merge).
+
+**Forrige milepæl (uendret): D-299: Google Sheets-
 connectoren bygget fullt ut - ÅTTENDE slice, FORTSATT parallelt mens PR #189 sin CI kjørte** (Tobias
 direkte i chat: "ja du kan ikke vente 20 min mellom hver"). PR #189 dekker nå TRE slices samlet
 (D-297 Sentry + D-298 Google Maps + D-299 Google Sheets) - en bevisst avvik fra ett-connector-per-PR-
@@ -14,8 +38,6 @@ tilbød mer): `list_sheets`/`read_range` (A) + `update_range`/`append_row` (B, E
 samme "full funksjonell tilgang"-disiplin D-42 etablerte for Drive. **D-64-sjekk:** ingen kanonisk
 "regneark"-domenemodell finnes i Jarvis - samme rene status som Drive. 9 nye tester, `pnpm -w typecheck`/
 `npx eslint` rene. `GOOGLE_SHEETS_LIVE_GATE=PENDING_CREDENTIALS`. Se D-299 i DECISIONS_AND_ASSUMPTIONS.md.
-Neste: vente på PR #189 sin CI, merge under D-192, deretter tilbake til ett-connector-per-PR-mønsteret
-for de ~43 gjenværende D-231/D-232-backlog-punktene.
 
 **Forrige milepæl (uendret): D-298: Google Maps-
 connectoren (Geocoding) bygget fullt ut - SJETTE slice, bygget PARALLELT mens PR #189 (D-297 Sentry)

@@ -36,10 +36,10 @@ import {
   selfModificationToolDefinitions
 } from "@jarvis/self-modification";
 import {
+  LlmExtractionAdapter,
   LocalHashEmbedding,
   MemoryRetriever,
   MemoryWriter,
-  RuleBasedExtractor,
   SummaryService,
   runMemoryRetentionSweepForAllTenants
 } from "@jarvis/memory";
@@ -500,21 +500,25 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
   const memoryRetriever = new MemoryRetriever(pool, memoryEmbedding);
   // D-283 (Tobias direkte i chat, "ja bygg minne-skrivingen", ETTER at D-282
   // sin live-samtale avdekket at minnet var en HELT PASSIV lesestruktur -
-  // `MemoryWriter`/`RuleBasedExtractor` var bygget og enhetstestet, men
-  // ALDRI kalt fra noe produksjonssted, se D-283 i
-  // DECISIONS_AND_ASSUMPTIONS.md): SAMME delte `memoryEmbedding`-instans som
-  // `memoryRetriever` over (deterministisk/lokal - ingen grunn til to
-  // separate objekter). `RuleBasedExtractor` er BEVISST den EKSISTERENDE,
-  // allerede testede deterministiske fallback-implementasjonen
-  // (`extraction.ts` sin egen kommentar: "regelbasert uttrekk er
-  // deterministisk fallback OG test-implementasjon" - en LLM-assistert
-  // extractor kobles på SAMME grensesnitt senere, ikke bygget her). Brukt
-  // KUN av `conversationEngine` sin nye `memory.ingest()` under - ALDRI av
+  // `MemoryWriter`/ekstraksjon var bygget og enhetstestet, men ALDRI kalt fra
+  // noe produksjonssted, se D-283 i DECISIONS_AND_ASSUMPTIONS.md): SAMME
+  // delte `memoryEmbedding`-instans som `memoryRetriever` over
+  // (deterministisk/lokal - ingen grunn til to separate objekter).
+  // D-300 (Tobias direkte i chat, "husker han ingenting... vi trodde det
+  // fungerte fungerte det ikke" - live telefon-testing avslørte at D-287 sin
+  // regelbaserte extractor i praksis var for streng til reell samtale, kun
+  // fire snevre signalord-mønstre): `LlmExtractionAdapter` (`extraction.ts`)
+  // er nå den WIRED-INN implementasjonen - `gateway` (konstruert over) sendes
+  // rett inn, den strukturelt-minimale `MemoryExtractionCompleter` den
+  // faktisk krever er allerede oppfylt av en ekte `ModelGateway`.
+  // `RuleBasedExtractor` forblir en deterministisk test-/referanse-
+  // implementasjon, IKKE lenger wired inn her. Brukt KUN av
+  // `conversationEngine` sin `memory.ingest()` under - ALDRI av
   // `IngestionService.ingestExternal()` (den forblir den separate,
   // Ingestion Zone-karantene-veien for EKSTERNT/ubetrodd innhold - e-post/
   // web/verktøyoutput - som er en helt annen tillitsklasse enn eierens egne
   // ord i en samtale, se `ingest`-kommentaren ved `conversationEngine` under).
-  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new RuleBasedExtractor(), policy);
+  const memoryWriter = new MemoryWriter(pool, memoryEmbedding, new LlmExtractionAdapter(gateway), policy);
   // D-286 (Tobias "alle" - se retention-sweep.ts sitt filhode for full
   // begrunnelse): `SummaryService` FANTES fra før, men ble ALDRI konstruert
   // eller kalt fra noe produksjonssted (D-286 sitt eget funn) - kun
