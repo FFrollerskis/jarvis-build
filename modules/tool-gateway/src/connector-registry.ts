@@ -563,7 +563,16 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "runway", display_name: "Runway", category: "backlog", credential_refs: ["JARVIS_RUNWAY_API_KEY"] },
   { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },
   { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
-  { id: "openai_images", display_name: "OpenAI Images", category: "backlog", credential_refs: ["JARVIS_OPENAI_IMAGES_API_KEY"] },
+  {
+    // D-316 (bygget, flyttet ut av backlog): egen tool_id fra `openai` sin
+    // model_provider-oppføring (ModelGateway) - bildegenerering, ikke
+    // tekst-fullføring. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id
+    // (D-293-disiplinen).
+    id: "openai_images", display_name: "OpenAI Images", category: "tool_gateway",
+    credential_refs: ["JARVIS_OPENAI_IMAGES_API_KEY"],
+    live_test: { tool_id: "openai_images", action: "list_models", parameters: () => ({}) }
+  },
 
   // §4.8 Musikk
   {

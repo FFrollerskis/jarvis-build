@@ -3374,6 +3374,31 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_MAKE_API_KEY", output_trust: "internal", transport: transport("make")
     },
+    /**
+     * D-316 (bygget, flyttet ut av backlog): OpenAI Images API. Egen
+     * `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) -
+     * strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring).
+     * `list_models` er en GRATIS/sideeffekt-fri tilkoblingstest -
+     * `generate_image` har EKTE kostnad per kall (ALDRI brukt som live_test).
+     * Nettverksegress blokkert i dette miljøet denne økten (D-297-forbehold) -
+     * basert på trent kunnskap om OpenAI sitt Images API, se
+     * `OpenAIImagesTransport` sin doc-kommentar i `live-transports.ts`.
+     */
+    {
+      tool_id: "openai_images", action: "list_models", description: "List tilgjengelige modeller (GET /v1/models, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty,
+      capability_class: "A", scopes: ["models:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "untrusted", transport: transport("openai_images")
+    },
+    {
+      tool_id: "openai_images", action: "generate_image", description: "Generer et bilde fra en tekstbeskrivelse (POST /v1/images/generations, EKTE kostnad per kall)",
+      input_schema: record({ prompt: z.string().max(4000), n: z.number().min(1).max(10).optional(), size: z.string().optional() }),
+      capability_class: "B", scopes: ["images:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kvote/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 10,
+      credential_ref: "JARVIS_OPENAI_IMAGES_API_KEY", output_trust: "internal", transport: transport("openai_images")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

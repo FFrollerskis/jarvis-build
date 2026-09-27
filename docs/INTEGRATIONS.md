@@ -138,7 +138,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Runway | `NY_BACKLOG` | Ingen kode funnet |
 | Kling | `NY_BACKLOG` | Ingen kode funnet |
 | Google Veo | `NY_BACKLOG` | Ingen kode funnet |
-| OpenAI Images | `NY_BACKLOG` | Ingen kode funnet |
+| OpenAI Images | `ALLEREDE_BYGGET (D-316)` | `OpenAIImagesTransport` (`live-transports.ts`) - `list_models`/`generate_image` (mot OpenAI Images API). Egen `tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet (bildegenerering, ikke tekst-fullføring). D-41: `generate_image` er en EKTE klasse B-skrivehandling med REELL kostnad per kall - `list_models` (gratis) brukt som `live_test` i stedet. D-64: ingen kanonisk bildegenererings-domenemodell finnes i Jarvis - rent leverandør-adapter. `OPENAI_IMAGES_LIVE_GATE=PENDING_CREDENTIALS` (`JARVIS_OPENAI_IMAGES_API_KEY`) |
 
 ### 4.8 Musikk
 

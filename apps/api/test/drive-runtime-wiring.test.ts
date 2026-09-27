@@ -106,11 +106,11 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
-    expect(unconditionalConstructions).toHaveLength(18);
+    expect(unconditionalConstructions).toHaveLength(19);
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
     expect(callBlock).toContain("docker: new DockerTransport()");
     expect(callBlock).toContain("vercel: new VercelTransport()");
@@ -136,22 +136,24 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/n8n: new N8nTransport\(\(\) => readSecretProvider\.get\("JARVIS_N8N_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => readSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
     expect(callBlock).toMatch(/make: new MakeTransport\(\(\) => readSecretProvider\.get\("JARVIS_MAKE_API_BASE_URL"\)\)/);
+    expect(callBlock).toContain("openai_images: new OpenAIImagesTransport()");
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314 teller heller ikke med, samme begrunnelse som main.ts", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
     // D-181/D184: telegram gikk fra en bokstavelig tom-konstruktør (`new TelegramTransport()`
     // inni dette kallet) til en referanse til en hoistet, delt konstant - main.ts (describe "I"
     // sin FØRSTE test, over) teller telegram heller ikke med (D-247: begge har nå en
-    // resolver-/referanseform, ikke en tom konstruktør) - derfor SAMME tall (18, D-292: +slack,
+    // resolver-/referanseform, ikke en tom konstruktør) - derfor SAMME tall (19, D-292: +slack,
     // D-294: +discord, D-296: +brave_search, D-298: +google_maps, D-299: +google_sheets, D-301:
     // +tavily, D-302: +exa, D-303: +google_places, D-304: +google_routes, D-307: +dropbox, D-308:
-    // +notion, D-309: +onedrive, D-310: +microsoft_outlook, D-313: +spotify) i begge filer, selv
-    // om de to filene fortsatt divergerer paa HVORDAN telegram konstrueres (hoistet konstant vs.
-    // inline), se describe "B". D-295/D-297/D-305/D-311: twilio/sentry/grafana/prometheus/n8n har
-    // SAMME resolver-argument-form som telegram - teller heller ikke med her.
-    expect(unconditionalConstructions).toHaveLength(18);
+    // +notion, D-309: +onedrive, D-310: +microsoft_outlook, D-313: +spotify, D-316: +openai_images)
+    // i begge filer, selv om de to filene fortsatt divergerer paa HVORDAN telegram konstrueres
+    // (hoistet konstant vs. inline), se describe "B". D-295/D-297/D-305/D-311/D-314/D-315:
+    // twilio/sentry/grafana/prometheus/n8n/whatsapp/make har SAMME resolver-argument-form som
+    // telegram - teller heller ikke med her.
+    expect(unconditionalConstructions).toHaveLength(19);
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
     expect(callBlock).toContain("github: new GithubTransport(githubRateLimitController)");
@@ -177,6 +179,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/prometheus: new PrometheusTransport\(\(\) => toolSecretProvider\.get\("JARVIS_PROMETHEUS_API_BASE_URL"\)\)/);
     expect(callBlock).toMatch(/whatsapp: new WhatsAppTransport\(\(\) => toolSecretProvider\.get\("JARVIS_WHATSAPP_PHONE_NUMBER_ID"\)\)/);
     expect(callBlock).toMatch(/make: new MakeTransport\(\(\) => toolSecretProvider\.get\("JARVIS_MAKE_API_BASE_URL"\)\)/);
+    expect(callBlock).toContain("openai_images: new OpenAIImagesTransport()");
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

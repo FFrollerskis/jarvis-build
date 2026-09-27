@@ -2428,3 +2428,40 @@ export class MakeTransport implements ToolTransport {
     throw new Error(`make_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-316. OpenAI Images API - `POST /v1/images/generations` (bildegenerering,
+ * EKTE kostnad per kall, IKKE gjettet frem som `list_models`-alternativet
+ * for `live_test`: `GET /v1/models` er gratis/sideeffekt-fritt, SAMME
+ * "trygg tilkoblingstest"-rolle som andre connectorers `get_bot_info`/
+ * `auth.test`). Egen `tool_id` fra `openai` sin model_provider-oppføring
+ * (ModelGateway) - dette er en STRUKTURELT ulik kapabilitet (bildegenerering
+ * via ToolGateway, ikke tekst-fullføring via ModelGateway).
+ */
+export class OpenAIImagesTransport implements ToolTransport {
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_models") {
+      const response = await fetch("https://api.openai.com/v1/models", {
+        headers: { authorization: `Bearer ${credential}` }
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    if (action === "generate_image") {
+      const response = await fetch("https://api.openai.com/v1/images/generations", {
+        method: "POST",
+        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          prompt: String(parameters["prompt"]),
+          n: typeof parameters["n"] === "number" ? parameters["n"] : 1,
+          size: typeof parameters["size"] === "string" ? parameters["size"] : "1024x1024"
+        })
+      });
+      if (!response.ok) throw new Error(`openai_images_error_${response.status}`);
+      const body = (await response.json()) as { data?: JsonValue };
+      return { data: body.data ?? null };
+    }
+    throw new Error(`openai_images_unsupported_action_${action}`);
+  }
+}
