@@ -79,9 +79,14 @@ import type { ToolGateway } from "./gateway.ts";
  * nettopp DENNE feilen, alltid `grep` for en eksisterende id FØRST).
  *
  * D-295 (2026-09-27, samme brede ordre, tredje slice): `twilio` bygget og
- * flyttet ut av backlogen SAMME MÅTE. De resterende 47 backlog-punktene er
- * fortsatt uendret; samme oppdater-i-place-disiplin gjelder for hver av dem
- * når de bygges.
+ * flyttet ut av backlogen SAMME MÅTE.
+ *
+ * D-296 (2026-09-27, samme brede ordre, fjerde slice): `brave_search` bygget
+ * og flyttet ut av backlogen SAMME MÅTE - FØRSTE rent lesende (klasse A-kun)
+ * connector i denne rekken, D-41 sitt read-only-unntak ærlig oppfylt (Brave
+ * Search sitt API tilbyr genuint ingen skrivehandling). De resterende 46
+ * backlog-punktene er fortsatt uendret; samme oppdater-i-place-disiplin
+ * gjelder for hver av dem når de bygges.
  */
 export interface ConnectorDefinition {
   id: string;
@@ -227,7 +232,17 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "google_cloud", display_name: "Google Cloud", category: "backlog", credential_refs: ["JARVIS_GOOGLE_CLOUD_API_KEY"] },
 
   // §4.6 Søk / browser
-  { id: "brave_search", display_name: "Brave Search", category: "backlog", credential_refs: ["JARVIS_BRAVE_SEARCH_API_KEY"] },
+  {
+    // D-296 (bygget, flyttet ut av backlog): STRUKTURELT ULIK Telegram/Slack/
+    // Discord/Twilio over - INGEN "notify er ekte utsendelse"-handling finnes,
+    // Brave Search tilbyr genuint bare lesing. `live_test` bruker `web_search`
+    // DIREKTE (allerede sideeffekt-fritt, ingen egen tilkoblingstest-handling
+    // trengs). Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI
+    // en ny, separat oppføring med samme id (D-293-lærdommen).
+    id: "brave_search", display_name: "Brave Search", category: "tool_gateway",
+    credential_refs: ["JARVIS_BRAVE_SEARCH_API_KEY"],
+    live_test: { tool_id: "brave_search", action: "web_search", parameters: () => ({ query: "ping" }) }
+  },
   { id: "tavily", display_name: "Tavily", category: "backlog", credential_refs: ["JARVIS_TAVILY_API_KEY"] },
   { id: "exa", display_name: "Exa", category: "backlog", credential_refs: ["JARVIS_EXA_API_KEY"] },
   { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },

@@ -26,10 +26,10 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
     }
   });
 
-  it("live_test er satt for 14 av 17 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
+  it("live_test er satt for 15 av 18 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) + brave_search (D-296) - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
     const withLiveTest = CONNECTOR_REGISTRY.filter((c) => c.live_test).map((c) => c.id).sort();
     expect(withLiveTest).toEqual(
-      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio"].sort()
+      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search"].sort()
     );
   });
 
@@ -47,12 +47,12 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
   });
 });
 
-describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295: 'slack'/'discord'/'twilio' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over - registerets TOTALE lengde er uendret, kun kategorien for disse tre id-ene endret)", () => {
+describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296: 'slack'/'discord'/'twilio'/'brave_search' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over - registerets TOTALE lengde er uendret, kun kategorien for disse fire id-ene endret)", () => {
   const BACKLOG_IDS = [
     "notion", "onedrive", "dropbox", "google_sheets",
     "microsoft_outlook", "microsoft_365",
     "google_cloud",
-    "brave_search", "tavily", "exa", "playwright",
+    "tavily", "exa", "playwright",
     "openai_realtime", "elevenlabs", "deepgram", "livekit", "telnyx",
     "whatsapp", "higgsfield", "runway", "kling", "google_veo", "openai_images",
     "spotify", "apple_music",
@@ -66,16 +66,16 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
 
   const D64_GATE_IDS = ["hubspot", "pipedrive", "linear", "jira", "trello", "todoist"];
 
-  it("eksakt 47 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295)", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(47);
-    expect(BACKLOG_IDS.length).toBe(47);
+  it("eksakt 46 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296)", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(46);
+    expect(BACKLOG_IDS.length).toBe(46);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 64 oppføringer totalt (17 bygde, inkl. slack D-292/discord D-294/twilio D-295 + 47 gjenværende D-232-backlog-punkter)", () => {
+  it("registeret har nøyaktig 64 oppføringer totalt (18 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296 + 46 gjenværende D-232-backlog-punkter)", () => {
     expect(CONNECTOR_REGISTRY.length).toBe(64);
   });
 
@@ -149,11 +149,11 @@ describe("B: listConnectorStatus() - presence per credential_ref, ALDRI selve ve
     }
   });
 
-  it("test_method er 'live' for de 14 utvidede connectorene (D-211/D-213/D-242/D-292/D-294/D-295), 'presence_only' for resten", async () => {
+  it("test_method er 'live' for de 15 utvidede connectorene (D-211/D-213/D-242/D-292/D-294/D-295/D-296), 'presence_only' for resten", async () => {
     const gateway = fakeGateway(new Set());
     const statuses = await listConnectorStatus(gateway);
     const byId = new Map(statuses.map((s) => [s.id, s]));
-    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio"]) {
+    for (const id of ["github", "google_calendar", "gmail", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search"]) {
       expect(byId.get(id)?.test_method).toBe("live");
     }
     for (const id of ["anthropic", "openai", "gemini"]) {

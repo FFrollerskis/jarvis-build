@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -617,6 +617,11 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
       () => readSecretProvider.get("JARVIS_TWILIO_ACCOUNT_SID"),
       () => readSecretProvider.get("JARVIS_TWILIO_FROM_NUMBER")
     ),
+    // D-296: ren tom-konstruktør, samme mønster som Slack/Discord over -
+    // Brave Search sender `query` som et vanlig handlingsparameter per kall,
+    // ingen resolver-closure nødvendig (ingen ekstra fast kontokonfigurasjon
+    // slik Twilio krevde).
+    brave_search: new BraveSearchTransport(),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se

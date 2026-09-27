@@ -1016,6 +1016,50 @@ export class TwilioTransport implements ToolTransport {
 }
 
 /**
+ * D-296 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - fjerde slice). Brave Search API sitt offisielle REST-
+ * endepunkt (`api.search.brave.com/res/v1/...`) - `X-Subscription-Token`-
+ * header (IKKE `Authorization: Bearer`, verifisert mot offisiell
+ * dokumentasjon, ikke antatt fra de forrige connectorenes mønster).
+ * STRUKTURELT ULIK Telegram/Slack/Discord/Twilio: INGEN `notify`/sideeffekt-
+ * handling finnes i det hele tatt - Brave Search er en RENT lesende
+ * søke-API, leverandøren tilbyr genuint INGEN skrivehandling (D-41 sitt
+ * "read-only kun akseptabelt når leverandøren faktisk ikke tilbyr mer"-
+ * unntak gjelder derfor ÆRLIG her, ikke som en snarvei). To handlinger -
+ * `web_search` (`/res/v1/web/search`) og `news_search` (`/res/v1/news/
+ * search`) - begge offisielt dokumenterte separate endepunkter, IKKE
+ * gjettet. Siden ALT er lesing uten sideeffekt, kan `web_search` selv
+ * TRYGT brukes direkte som `live_test` - INGEN egen "get_account_info"-
+ * handling er nødvendig (Brave har heller ingen kontoidentitets-endepunkt
+ * å teste mot).
+ */
+export class BraveSearchTransport implements ToolTransport {
+  private async call(path: string, credential: string, params: Record<string, string>): Promise<JsonValue> {
+    const response = await fetch(`https://api.search.brave.com/res/v1/${path}?${new URLSearchParams(params).toString()}`, {
+      headers: { "x-subscription-token": credential, accept: "application/json" }
+    });
+    if (!response.ok) throw new Error(`brave_search_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "web_search") {
+      const params: Record<string, string> = { q: String(parameters["query"]) };
+      if (parameters["count"] !== undefined) params["count"] = String(parameters["count"]);
+      const body = await this.call("web/search", credential, params);
+      return { data: (body as { web?: { results?: JsonValue } }).web?.results ?? null };
+    }
+    if (action === "news_search") {
+      const params: Record<string, string> = { q: String(parameters["query"]) };
+      if (parameters["count"] !== undefined) params["count"] = String(parameters["count"]);
+      const body = await this.call("news/search", credential, params);
+      return { data: (body as { results?: JsonValue }).results ?? null };
+    }
+    throw new Error(`brave_search_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men

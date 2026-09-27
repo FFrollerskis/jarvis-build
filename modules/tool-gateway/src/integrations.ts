@@ -2872,6 +2872,31 @@ export function firstWaveTools(
       idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_TWILIO_AUTH_TOKEN", output_trust: "untrusted", transport: transport("twilio")
     },
+    /**
+     * D-296 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+     * fullføres" - fjerde slice). STRUKTURELT ULIK Telegram/Slack/Discord/
+     * Twilio: INGEN klasse B/C/D-handling finnes for denne connectoren i
+     * det hele tatt - Brave Search sitt REST-API tilbyr genuint bare lesing,
+     * så D-41 sitt "read-only kun når leverandøren faktisk ikke tilbyr mer"-
+     * unntak er ÆRLIG oppfylt her (ikke en snarvei). `live_test` (se
+     * `connector-registry.ts`) bruker `web_search` DIREKTE - ingen egen
+     * "get_account_info"-handling trengs siden ALT allerede er sideeffekt-
+     * fritt, og Brave har uansett intet kontoidentitets-endepunkt.
+     */
+    {
+      tool_id: "brave_search", action: "web_search", description: "Websøk (GET /res/v1/web/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), count: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
+    },
+    {
+      tool_id: "brave_search", action: "news_search", description: "Nyhetssøk (GET /res/v1/news/search, untrusted ingestion)",
+      input_schema: record({ query: z.string().max(400), count: z.number().int().min(1).max(20).optional() }),
+      capability_class: "A", scopes: ["search:read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_BRAVE_SEARCH_API_KEY", output_trust: "untrusted", transport: transport("brave_search")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
