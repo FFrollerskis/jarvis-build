@@ -72,8 +72,9 @@ const MESH_TOOLS: MeshToolMapping[] = [
     def: {
       name: "check_my_capabilities",
       description:
-        "Sjekk hvilke verktøy du FAKTISK har tilgang til i denne samtalen akkurat nå, og siste kjente " +
-        "helsetilstand for tilkoblede systemer. Bruk DETTE FØR du sier noe om egne evner eller tilkoblinger " +
+        "Sjekk hvilke verktøy du FAKTISK har tilgang til i denne samtalen akkurat nå, hvilken modell/" +
+        "leverandør som FAKTISK genererer dette svaret, og siste kjente helsetilstand for tilkoblede " +
+        "systemer. Bruk DETTE FØR du sier noe om egne evner, tilkoblinger eller hvilken modell du er " +
         "- gjett ALDRI.",
       input_schema: { type: "object", properties: {}, required: [], additionalProperties: false }
     },
@@ -222,7 +223,11 @@ export class MeshToolExecutor {
       action: mapped.action,
       // Trusted parameterbygging når mappingen definerer den - ellers model-args.
       parameters: (mapped.parameters ? mapped.parameters(call.arguments) : call.arguments) as never,
-      idempotency_key: ctx.idempotency_key
+      idempotency_key: ctx.idempotency_key,
+      // D-317: `call.provider`/`.model` er stemplet av selve adapteren som genererte
+      // DENNE turen (se ToolCallRequest sitt filhode i provider-adapters) - ALDRI fra
+      // modell-oppgitte argumenter, SAMME trusted-lag-kanal som identity/approval.
+      servingModel: { provider: call.provider, model: call.model }
     });
     if (!result.ok) {
       return {

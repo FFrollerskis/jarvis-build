@@ -299,8 +299,17 @@ export class ExecutiveService {
    * `ToolGateway.list()` - ALDRI en egen, potensielt avvikende opptelling
    * (samme D-209/D-237-disiplin som FØR denne posten, nå på et større
    * register).
+   *
+   * D-317 (Tobias direkte i chat: "bygg modell-selvbevissthet inn i
+   * check_my_capabilities"): valgfri `servingModel` - hvilken leverandør/
+   * modell som FAKTISK genererer DENNE samtaleturen. Kommer UTELUKKENDE fra
+   * `ToolInvocationContext.servingModel` (via `ExecutiveTransport`), ALDRI
+   * fra en modell-oppgitt parameter - se `gateway.ts` sitt filhode for
+   * `ToolInvocationContext`. `null` når ukjent (f.eks. kalt utenfor en
+   * modellgenerert samtaletur, som i disse enhetstestene) - ALDRI gjettet
+   * til en fast verdi.
    */
-  async getCapabilityStatus(): Promise<CapabilityStatus> {
+  async getCapabilityStatus(servingModel?: { provider: string; model: string }): Promise<CapabilityStatus> {
     const byToolId = new Map<string, { actions: Set<string>; classes: Set<string>; refs: Set<string> }>();
     for (const definition of this.gateway.list()) {
       const entry = byToolId.get(definition.tool_id) ?? { actions: new Set(), classes: new Set(), refs: new Set() };
@@ -334,7 +343,8 @@ export class ExecutiveService {
     );
     return {
       chat_accessible_tools: chatAccessibleTools,
-      connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h }))
+      connector_health: [...this.gateway.health.entries()].map(([tool_id, h]) => ({ tool_id, ...h })),
+      serving_model: servingModel ?? null
     };
   }
 

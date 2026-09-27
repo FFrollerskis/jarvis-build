@@ -165,6 +165,17 @@ export class FallbackSecretProvider implements SecretProvider {
 export interface ToolInvocationContext {
   identity: IdentityContext;
   approval?: unknown;
+  /**
+   * D-317 (modell-selvbevissthet i `check_my_capabilities`): hvilken
+   * leverandør/modell som FAKTISK genererer DENNE samtaleturen, hentet fra
+   * `ToolCallRequest.provider`/`.model` (allerede stemplet av hver adapter,
+   * se `packages/provider-adapters/src/types.ts`). SAMME "ALDRI fra
+   * `parameters`, kun trusted-lag"-disiplin som `identity`/`approval` over -
+   * en modell kan ALDRI oppgi sin egen leverandør/modell-identitet selv
+   * (ville vært nøyaktig den konfabulasjonsveien `check_my_capabilities`
+   * finnes for å stenge).
+   */
+  servingModel?: { provider: string; model: string };
 }
 
 /** Transport per integrasjon: ekte HTTP i drift, kontrollert fake i test. */
@@ -373,6 +384,8 @@ export class ToolGateway {
     approval?: unknown;
     /** Delegert jobb: verktøyet MÅ stå i kontraktens allowed_tools. */
     jobContract?: JobContract;
+    /** D-317: se `ToolInvocationContext.servingModel` sitt filhode. */
+    servingModel?: { provider: string; model: string };
   }): Promise<ToolResult> {
     const definition = this.get(request.tool_id, request.action);
     if (!definition) {
@@ -473,7 +486,8 @@ export class ToolGateway {
     // selv gjør. ALDRI fabrikkert/eskalert her - kun videreformidlet.
     const invocationContext: ToolInvocationContext = {
       identity: request.identity,
-      ...(request.approval !== undefined ? { approval: request.approval } : {})
+      ...(request.approval !== undefined ? { approval: request.approval } : {}),
+      ...(request.servingModel !== undefined ? { servingModel: request.servingModel } : {})
     };
 
     // v4.0 D-pipeline: for høyrisiko (C/D) med definert preflight leses

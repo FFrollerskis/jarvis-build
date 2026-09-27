@@ -1,28 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, RESATT fra
-`origin/main` etter D-192-merge av PR #191) - PR #192 åpnet (D-311 n8n), CI-rødt på gitleaks fikset
-(D-312), deretter D-313 (Spotify), D-314 (WhatsApp) og D-315 (Make) bygget på SAMME åpne branch/PR.
-Deretter **D-316: OpenAI Images-connectoren bygget fullt ut - TJUEANDRE konkrete byggeslice**
-(Tobias gjentok direkte i chat, femtende gang: "fortsett og jobbe ikke vent på ci"), FORTSATT
-SAMME branch/PR (#192). `OpenAIImagesTransport` (`live-transports.ts`) - OpenAI Images API, EGEN
-`tool_id` fra `openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-317: modell-
+selvbevissthet bygget inn i `check_my_capabilities`** (Tobias direkte i chat, eksplisitt
+bestilling: "bygg modell-selvbevissthet inn i check_my_capabilities", svar på hans eget funn at
+Charlie strukturelt ikke kunne vite hvilken modell/leverandør som faktisk svarte). Forsknings-
+funn FØR bygging: `ToolCallRequest.provider`/`.model` var ALLEREDE stemplet av hver adapter og
+ALLEREDE tilgjengelig UENDRET i `MeshToolExecutor.execute()` - ingen ny datakilde nødvendig.
+Løsningen trer denne trusted-lag-fakta gjennom SAMME kanal som `identity`/`approval` (D-68) -
+ALDRI via `parameters` (der en modell selv kunne LYVE om egen identitet). Endringer: (1)
+`ToolInvocationContext`/`ToolGateway.execute()` (`gateway.ts`) fikk et nytt valgfritt
+`servingModel?: {provider, model}`-felt. (2) `MeshToolExecutor.execute()` (`mesh-bridge.ts`)
+sender NÅ `servingModel` på ALLE mesh-dispatchede kall (generisk trusted-lag-fakta). (3)
+`ExecutiveTransport`/`ExecutiveService.getCapabilityStatus()` leser/returnerer det. (4)
+`CapabilityStatus` fikk `serving_model: {provider, model} | null`. Zod-`input_schema`-en for
+`get_capability_status` er BEVISST UENDRET (streng, ingen ekstra felt) - INGEN vei for en modell
+å injisere en falsk verdi via `parameters`, bevist eksplisitt med to adversarielle tester.
+**Testdekning:** `modules/executive/test/capability-status.test.ts` utvidet 13→19 tester.
+`pnpm -w typecheck` (32/32 pakker, HELE workspacet) og `npx eslint` på alle seks endrede filer -
+begge rene. Full `modules/tool-gateway modules/executive`-suite: 568/568 reelle tester grønt (13
+filer feilet KUN på den kjente, forhåndseksisterende embedded-Postgres `/tmp`-tillatelsesfeilen).
+Se D-317 i DECISIONS_AND_ASSUMPTIONS.md.
+**Status:** Implementert og verifisert lokalt - IKKE ennå committet/pushet. Dette er et EGET,
+ikke-connector-relatert arbeidsspor (kjernefunksjon i selve chat-selvbevissthets-mekanismen, ikke
+en backlog-connector) - committes som EN EGEN, tydelig merket commit. Økten sitt eneste
+designerte branch er `claude/hva-skjer-hvordan-ligger-0z3ztp` (samme branch PR #192 allerede peker
+på) - en helt separat PR er derfor IKKE mulig uten å bryte branch-standarden; commiten landér på
+SAMME PR #192, men PR #192 sin tittel/body oppdateres til å ÆRLIG skille D-317 (kjernefunksjon)
+fra D-311-D-316 (connector-byggeslicer) - IKKE later som D-317 er en nittentyvende connector-slice.
+
+**Forrige milepæl (uendret): D-316: OpenAI Images-connectoren bygget fullt ut - TJUEANDRE
+konkrete byggeslice, SAMME åpne branch/PR (#192) som n8n D-311/Spotify D-313/WhatsApp D-314/Make
+D-315.** `OpenAIImagesTransport` (`live-transports.ts`) - OpenAI Images API, EGEN `tool_id` fra
+`openai` sin model_provider-oppføring (ModelGateway) - strukturelt ulik kapabilitet
 (bildegenerering, ikke tekst-fullføring). To handlinger - `list_models` (klasse A, GRATIS/
 sideeffekt-fritt, brukt som `live_test`) og `generate_image` (klasse B, EKTE skrivehandling med
-REELL kostnad per kall - D-41, ALDRI brukt som live_test). **D-64-sjekk:** ingen kanonisk
-bildegenererings-domenemodell finnes i Jarvis (`modules/vision` er ingestion/observasjon av
-EKSISTERENDE bilder, en helt ulik kapabilitet - ingen konflikt) - rent leverandør-adapter.
-`connector-registry.ts` sin EKSISTERENDE D-232-plassholder oppdatert i place. Wiret inn i BÅDE
-`main.ts`/`worker-main.ts` med en TOM konstruktør (fast OpenAI-vertsnavn, kun Bearer-token - teller
-MED i "tom konstruktør"-tellingen, bump 18→19 i begge blokker). 6 nye tester
-(`d316-openai-images-transport.test.ts`), `connector-registry.test.ts` sine BACKLOG_IDS/live_test/
-test_method-lister oppdatert (29→28 gjenværende backlog-punkter, 35→36 bygde). `pnpm -w typecheck`
-(32/32 pakker)/`npx eslint apps modules packages` begge rene. `OPENAI_IMAGES_LIVE_GATE=
-PENDING_CREDENTIALS`. Se D-316 i DECISIONS_AND_ASSUMPTIONS.md.
-**Status:** D-316 committet og klar til å pushes til `claude/hva-skjer-hvordan-ligger-0z3ztp`. PR
-#192 sin tittel/body må oppdateres til å dekke D-311+D-313+D-314+D-315+D-316 ærlig (SAMME
-"PR-scope-vekst"-disiplin som PR #190) etter push. CI-notifikasjoner mottatt til nå har GJENTATTE
-GANGER referert eldre, allerede-forbikjørte head_sha-er (b50bf5c, a14cde4) - verifisert stale mot
+REELL kostnad per kall - D-41, ALDRI brukt som live_test). `OPENAI_IMAGES_LIVE_GATE=
+PENDING_CREDENTIALS`. PR #192 sin tittel/body dekker D-311+D-313+D-314+D-315+D-316 - allerede
+committet OG pushet (`81f880e`). CI-notifikasjoner mottatt har GJENTATTE GANGER referert eldre,
+allerede-forbikjørte head_sha-er (b50bf5c, a14cde4, 387e245, 8bc5f6f, 19cad8f) - verifisert stale mot
 en fersk `pull_request_read`/`actions_list`-sjekk hver gang (ingen nye røde funn på gjeldende
 HEAD) - IKKE reelle, uadresserte CI-funn.
 
