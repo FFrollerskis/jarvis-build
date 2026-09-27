@@ -955,6 +955,67 @@ export class DiscordTransport implements ToolTransport {
 }
 
 /**
+ * D-295 (Tobias direkte i chat: "jeg vil at alt i planen skal bygges og
+ * fullføres" - tredje slice). Twilio sitt offisielle REST API
+ * (`www.twilio.com/docs/sms/api`) - `Basic`-autentisering (`AccountSid`
+ * som brukernavn, `AuthToken` som passord), IKKE en bearer-token som
+ * Slack/Discord. `POST /Messages.json` (send SMS, `AccountSid` i URL-
+ * stien), `GET /Accounts/{AccountSid}.json` (kontoens egen identitet,
+ * INGEN sideeffekt - SAMME trygge tilkoblingstest-rolle som Telegram/
+ * Slack/Discord sine egne over), `GET /Messages.json` (lesing). Twilio
+ * krever et TREDJE, fast konfigurasjonsverdi utover selve credential-en
+ * boten sender - avsendernummeret (`From`) - som IKKE er en sideeffekt-
+ * fri modell-/kall-parameter (Twilio validerer at nummeret faktisk
+ * tilhører kontoen), derfor injisert som en resolver-closure via
+ * konstruktøren, SAMME mønster som Telegram sin `chat_id` (D-247) - IKKE
+ * en ny mekanisme. `AccountSid` injiseres på SAMME måte (URL-stien
+ * krever den, men selve `credential_ref` gateway.execute() slår opp er
+ * `JARVIS_TWILIO_AUTH_TOKEN` - `credential_refs`-listen i
+ * `connector-registry.ts` forblir uendret den fulle, presence-visende
+ * listen av alle tre).
+ */
+export class TwilioTransport implements ToolTransport {
+  constructor(
+    private readonly accountSid: () => Promise<string | null>,
+    private readonly fromNumber: () => Promise<string | null>
+  ) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const accountSid = await this.accountSid();
+    if (!accountSid) throw new Error("twilio_account_sid_not_configured");
+    const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Basic ${Buffer.from(`${accountSid}:${credential}`).toString("base64")}` }
+    });
+    if (!response.ok) throw new Error(`twilio_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "notify") {
+      const from = await this.fromNumber();
+      if (!from) throw new Error("twilio_from_number_not_configured");
+      const body = await this.call("/Messages.json", credential, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ To: String(parameters["to"]), From: from, Body: String(parameters["message"]) }).toString()
+      });
+      return { external_id: String((body as { sid?: string }).sid ?? "sent") };
+    }
+    if (action === "get_account_info") {
+      const body = await this.call(".json", credential);
+      return { data: body };
+    }
+    if (action === "read_messages") {
+      const query = parameters["limit"] !== undefined ? `?PageSize=${String(parameters["limit"])}` : "";
+      const body = await this.call(`/Messages.json${query}`, credential);
+      return { data: (body as { messages?: JsonValue }).messages ?? null };
+    }
+    throw new Error(`twilio_unsupported_action_${action}`);
+  }
+}
+
+/**
  * D-242/D-248 (funnet UAVHENGIG to ganger, samme bug, se D-248 sin egen
  * lærdomskolonne i DECISIONS_AND_ASSUMPTIONS.md): `vercel` har hatt en
  * `live_test`-oppføring i `connector-registry.ts` siden D-213, men
