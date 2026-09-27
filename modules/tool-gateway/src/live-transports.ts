@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { JsonValue } from "@jarvis/contracts";
 import type { ToolInvocationContext, ToolTransport } from "./gateway.ts";
 import { GithubRateLimitedError, GithubRateLimitController } from "./github-rate-limit-controller.ts";
@@ -2584,5 +2585,85 @@ export class RunwayTransport implements ToolTransport {
       return { data: body };
     }
     throw new Error(`runway_unsupported_action_${action}`);
+  }
+}
+
+/**
+ * D-323 (video-gen-familien, ANDRE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/Runway etablerte, flere uavhengige kilder
+ * krysset per faktapåstand under). Kling sitt REST-API (`api.klingai.com`)
+ * er STRUKTURELT ANNERLEDES enn ALLE tidligere connectorer i denne sveipen:
+ * autentisering er INGEN statisk API-nøkkel/Bearer-token videresendt
+ * uendret, men en SELV-GENERERT, kortlevd (~30 min) JWT (HS256) signert
+ * med et Access Key/Secret Key-par (`iss`=access_key, `exp`=now+1800,
+ * `nbf`=now-5 - bekreftet identisk på tvers av samtlige kryssjekkede
+ * kilder). `encodeKlingJwt()` under implementerer dette MANUELT via Node
+ * sin innebygde `node:crypto` (`createHmac("sha256", ...)`) - SAMME
+ * avhengighetsfrie disiplin som `vipps-webhook.ts` sin HMAC-verifisering
+ * (D-110) - IKKE en ny `jsonwebtoken`-avhengighet for én enkelt
+ * signeringsoperasjon. Access Key injisert som resolver-closure (SAMME
+ * "fast konfigurasjonsverdi utover selve credential-en"-mønster som
+ * Twilio sin `accountSid`, D-295) - Secret Key ER selve `credential_ref`-
+ * verdien (brukes KUN til signering, ALDRI sendt i klartekst over
+ * nettverket eller logget).
+ *
+ * To handlinger - `generate_video` (klasse B, `POST /v1/videos/
+ * image2video`, EKTE kostnad per kall - ALDRI live_test) og
+ * `get_task_status` (klasse A, `GET /v1/videos/image2video/{task_id}` -
+ * PÅKREVD polling, SAMME "generering er asynkron"-mønster som Runway
+ * D-322). Responsformen (`{code, data: {task_id, task_status, ...}}`) er
+ * bekreftet på tvers av flere uavhengige kilder. BEVISST INGEN
+ * `live_test`: INGEN verifisert gratis/parameterløs saldo-/kontoendepunkt
+ * funnet (Kling sin dokumentasjon nevner en "Deduction Query"/"Account
+ * Usage"-flate, men EKSAKT endepunktsti er IKKE bekreftet av noen
+ * kryssjekket kilde denne økten) - D-41 eksplisitt DEFERRED i stedet for
+ * gjettet fram, `NO_LIVE_TEST_IDS`-mønsteret i
+ * `d242-connector-health-sweep.test.ts` håndterer allerede en connector
+ * uten `live_test` korrekt (INGEN ny testinfrastruktur nødvendig).
+ */
+function encodeKlingJwt(accessKey: string, secretKey: string): string {
+  const header = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+  const now = Math.floor(Date.now() / 1000);
+  const payload = Buffer.from(JSON.stringify({ iss: accessKey, exp: now + 1800, nbf: now - 5 })).toString("base64url");
+  const signingInput = `${header}.${payload}`;
+  const signature = createHmac("sha256", secretKey).update(signingInput).digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+export class KlingTransport implements ToolTransport {
+  constructor(private readonly accessKey: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const accessKey = await this.accessKey();
+    if (!accessKey) throw new Error("kling_access_key_not_configured");
+    const token = encodeKlingJwt(accessKey, credential);
+    const response = await fetch(`https://api.klingai.com${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Bearer ${token}` }
+    });
+    if (!response.ok) throw new Error(`kling_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "generate_video") {
+      const body = await this.call("/v1/videos/image2video", credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          image_url: String(parameters["image_url"]),
+          prompt: typeof parameters["prompt"] === "string" ? parameters["prompt"] : undefined,
+          duration: typeof parameters["duration"] === "string" ? parameters["duration"] : undefined,
+          aspect_ratio: typeof parameters["aspect_ratio"] === "string" ? parameters["aspect_ratio"] : undefined
+        })
+      });
+      const data = (body as { data?: { task_id?: string } }).data;
+      return { external_id: data?.task_id ?? "queued" };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/v1/videos/image2video/${String(parameters["task_id"])}`, credential);
+      return { data: (body as { data?: JsonValue }).data ?? null };
+    }
+    throw new Error(`kling_unsupported_action_${action}`);
   }
 }

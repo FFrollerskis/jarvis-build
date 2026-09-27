@@ -603,7 +603,23 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_RUNWAY_API_KEY"],
     live_test: { tool_id: "runway", action: "get_account_info", parameters: () => ({}) }
   },
-  { id: "kling", display_name: "Kling", category: "backlog", credential_refs: ["JARVIS_KLING_API_KEY"] },
+  {
+    // D-323 (bygget, flyttet ut av backlog): ANDRE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/Runway
+    // etablerte. STRUKTURELT ANNERLEDES autentisering enn ALLE andre
+    // connectorer i registeret: en selv-generert, kortlevd JWT (HS256)
+    // signert med et Access Key/Secret Key-par - IKKE en statisk
+    // Bearer-token videresendt uendret. Se KlingTransport sin
+    // doc-kommentar i live-transports.ts for full evidens-kategorisering
+    // og signeringsdetaljer. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    // credential_refs utvidet fra ÉN til TO nøkler (Access Key/Secret
+    // Key er BEGGE reelle credentials hos Kling, samme "list alle
+    // nødvendige verdier"-disiplin som D-245/D-246/D-295). BEVISST INGEN
+    // live_test - se D-323 i DECISIONS_AND_ASSUMPTIONS.md for hvorfor.
+    id: "kling", display_name: "Kling", category: "tool_gateway",
+    credential_refs: ["JARVIS_KLING_SECRET_KEY", "JARVIS_KLING_ACCESS_KEY"]
+  },
   { id: "google_veo", display_name: "Google Veo", category: "backlog", credential_refs: ["JARVIS_GOOGLE_VEO_API_KEY"] },
   {
     // D-316 (bygget, flyttet ut av backlog): egen tool_id fra `openai` sin

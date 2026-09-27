@@ -1,36 +1,43 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-322: FØRSTE
-video-gen-familie-slice - Runway bygget som en ORDINÆR `ToolGateway`-connector** (Tobias direkte
-i chat, gjentatt: "fortsett å jobbe mens ci kjører" - mens PR #195/D-321 sin CI fortsatt kjørte).
-NY evidensdisiplin denne sliceen: `WebFetch` mot primærkilden (`dev.runwayml.com`) forble
-egress-blokkert (samme D-297-mønster), MEN `WebSearch` fungerte og returnerte ekte, kildebelagte
-resultater - FØRSTE gang i denne sveipen. Runway sin API-form ble krysssjekket mot flere
-uavhengige sekundærkilder - en NY, ærlig mellomtier ("sekundærkilde-krysssjekket") mellom
-"denne-økten-verifisert" og "kun trent kunnskap". Bygget `RunwayTransport` (`live-transports.ts`)
-- `api.dev.runwayml.com/v1`, `Authorization: Bearer <api_key>` PLUSS en PÅKREVD
-`X-Runway-Version: 2024-11-06`-header. Tre handlinger - `get_account_info` (klasse A,
-`GET /v1/organization`, gratis/sideeffekt-fritt, brukt som `live_test`), `generate_video` (klasse
-B, `POST /v1/image_to_video`, EKTE kostnad per kall - ALDRI brukt som live_test) og
-`get_task_status` (klasse A, `GET /v1/tasks/{id}` - PÅKREVD polling siden generering er
-asynkron). `connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"`
-→ `"tool_gateway"`). Wiret inn i BÅDE `main.ts` og `worker-main.ts` med TOM konstruktør (bump
-19→20 i begge "tom konstruktør"-tellinger). NY
-`modules/tool-gateway/test/d322-runway-transport.test.ts` (11 tester).
-`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (23 gjenværende
-backlog-punkter, 38 bygde, 61 totalt UENDRET siden runway allerede var talt med som
-backlog-plassholder). `pnpm --filter @jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api
-typecheck`/`npx eslint` rene. Se D-322 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-27 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-323: ANDRE
+video-gen-familie-slice - Kling bygget som en ORDINÆR `ToolGateway`-connector, MEN med en
+STRUKTURELT ANNERLEDES autentisering enn ALLE andre connectorer i registeret** (samme "fortsett å
+jobbe mens ci kjører"-disiplin, mens PR #195/D-322 sin CI fortsatt kjørte). Kling krever INGEN
+statisk Bearer-token, men en selv-generert, kortlevd (~30 min) JWT (HS256) signert med et Access
+Key/Secret Key-par (`iss`=access_key, `exp`/`nbf`) - bekreftet på tvers av flere uavhengige
+`WebSearch`-kryssjekkede kilder. Bygget `encodeKlingJwt()` + `KlingTransport`
+(`live-transports.ts`) - JWT-signering implementert avhengighetsfritt via `node:crypto`
+(`createHmac`), SAMME disiplin som `vipps-webhook.ts` sin HMAC-verifisering (D-110), IKKE en ny
+`jsonwebtoken`-avhengighet. Access Key resolver-injisert (SAMME mønster som Twilio sin
+`accountSid`) - Secret Key ER `credential_ref`. To handlinger - `generate_video` (klasse B, EKTE
+kostnad per kall - ALDRI `live_test`) og `get_task_status` (klasse A, PÅKREVD polling). BEVISST
+DEFERRED (D-41): INGEN verifisert gratis/parameterløst kontoendepunkt funnet - `kling` har derfor
+BEVISST INGEN `live_test`, FØRSTE gang for en bygget (ikke-backlog) connector i registeret;
+`NO_LIVE_TEST_IDS`-mekanismen (D-310a) håndterer dette korrekt uten ny testinfrastruktur.
+`connector-registry.ts` sin D-232-plassholder oppdatert i place (`category: "backlog"` →
+`"tool_gateway"`, `credential_refs` utvidet fra én til to nøkler). Wiret inn i BÅDE `main.ts` og
+`worker-main.ts` med resolver-argument-konstruktør (IKKE tom konstruktør - ingen bump i "tom
+konstruktør"-tellingen). NY `modules/tool-gateway/test/d323-kling-transport.test.ts` (12 tester,
+inkl. JWT-header/payload-dekoding og en adversariell "signaturen endres når secret_key
+endres"-test). `connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (22
+gjenværende backlog-punkter, 39 bygde, 61 totalt UENDRET). `pnpm --filter @jarvis/tool-gateway
+typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-323 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** video-gen-familien er NÅ under aktiv bygging (runway D-322 ferdig) - `kling`/
-`google_veo`/`higgsfield` bør prøve SAMME `WebSearch`-sekundærkilde-krysssjekk-disiplinen D-322
-etablerte FØR de defaulter til ren trent-kunnskap. De resterende tale-backlog-punktene
-(`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt lavere-sikkerhet hvis/når bygget -
-`livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering, IKKE et enkelt
-REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/Deepgram/Telnyx) og
-`openai_realtime` er en nyere, potensielt raskere-bevegende beta-API. D-64-CRM-gruppa
-(hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en egen,
-større sync-adapter-arkitektur (D-291).
+**Neste:** video-gen-familien har nå to av tre bygget (runway D-322, kling D-323) - `google_veo`/
+`higgsfield` bør prøve SAMME `WebSearch`-sekundærkilde-krysssjekk-disiplinen FØR de defaulter til
+ren trent-kunnskap, og FØRST sjekke om de også har en JWT/ikke-statisk-token-autentisering (Kling
+beviste at dette IKKE kan antas identisk fra forrige connectors mønster). De resterende
+tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt
+lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør
+(server-SDK/token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn
+ElevenLabs/Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende
+beta-API. D-64-CRM-gruppa (hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og
+krever en egen, større sync-adapter-arkitektur (D-291).
+
+**Forrige milepæl (uendret): D-322: FØRSTE video-gen-familie-slice - Runway bygget som en ORDINÆR
+`ToolGateway`-connector.** Se D-322 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-321: Telnyx bygget som en ORDINÆR `ToolGateway`-connector, IKKE en
 `SpeechAdapter`.** Se D-321 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.

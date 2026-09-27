@@ -3458,6 +3458,37 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_RUNWAY_API_KEY",
       output_trust: "untrusted", transport: transport("runway")
     },
+    /**
+     * D-323. Kling sitt REST-API (`api.klingai.com`) - autentisering er en
+     * selv-generert JWT (HS256, Access Key/Secret Key), IKKE en statisk
+     * Bearer-token, se `KlingTransport` sin doc-kommentar i
+     * `live-transports.ts` for full evidens-kategorisering.
+     * `credential_ref` her er Secret Key (brukt til signering) - Access
+     * Key injiseres separat som resolver-closure i main.ts/worker-main.ts
+     * (SAMME "fast konfigurasjonsverdi utover credential"-mønster som
+     * Twilio sin accountSid, D-295). BEVISST INGEN klasse A-handling her -
+     * ingen verifisert gratis/parameterløst kontoendepunkt funnet denne
+     * økten (D-41 DEFERRED), derfor heller ingen `live_test` i
+     * connector-registry.ts.
+     */
+    {
+      tool_id: "kling", action: "generate_video", description: "Generer en video fra et bilde + tekstbeskrivelse (POST /v1/videos/image2video, EKTE kostnad per kall, asynkron - returnerer en task-id, poll get_task_status for resultat)",
+      input_schema: record({
+        image_url: z.string(), prompt: z.string().max(1000).optional(),
+        duration: z.string().optional(), aspect_ratio: z.string().optional()
+      }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_KLING_SECRET_KEY", output_trust: "internal", transport: transport("kling")
+    },
+    {
+      tool_id: "kling", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /v1/videos/image2video/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en task-id)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_KLING_SECRET_KEY",
+      output_trust: "untrusted", transport: transport("kling")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

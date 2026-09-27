@@ -47,7 +47,7 @@ import {
   DailyBrief, DockerTransport, EnvSecretProvider, FallbackSecretProvider, GithubRateLimitController, GithubTransport,
   GmailTransport, GoogleCalendarTransport, InfisicalSecretProvider, MemorySearchTransport, MeshToolExecutor, memoryToolDefinitions,
   allMeshTools, PgGithubRateLimitStore,
-  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
+  TelegramCommandPoller, TelegramTransport, SlackTransport, DiscordTransport, TwilioTransport, BraveSearchTransport, SentryTransport, GoogleMapsTransport, GoogleSheetsTransport, TavilyTransport, ExaTransport, GooglePlacesTransport, GoogleRoutesTransport, GrafanaTransport, PrometheusTransport, DropboxTransport, NotionTransport, OneDriveTransport, MicrosoftOutlookTransport, N8nTransport, SpotifyTransport, WhatsAppTransport, MakeTransport, OpenAIImagesTransport, TelnyxTransport, RunwayTransport, KlingTransport, ToolGateway, VercelTransport, buildStatusSource, calendarSource, driveTransportsIfConfigured,
   emailSource, firstWaveTools, parseDockerMutationTargets, tasksSource, DailyScheduler, runConnectorHealthSweep
 } from "@jarvis/tool-gateway";
 import {
@@ -705,6 +705,12 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // D-322: tom konstruktør - fast Runway-vertsnavn, kun Bearer-token +
     // en fast X-Runway-Version-header (satt inni transporten selv).
     runway: new RunwayTransport(),
+    // D-323: Kling krever ÉN fast konfigurasjonsverdi utover selve
+    // credential-en (Access Key, brukt som JWT `iss`-claim) - SAMME
+    // resolver-mot-readSecretProvider-mønster som Telnyx/Twilio over.
+    // Secret Key (credential_ref) brukes til JWT-signering inni
+    // transporten selv, ALDRI sendt uendret som header-verdi.
+    kling: new KlingTransport(() => readSecretProvider.get("JARVIS_KLING_ACCESS_KEY")),
     // D-242/D-248: `vercel` hadde en `live_test` siden D-213, men ALDRI en
     // ekte transport her - falt gjennom til `UnconfiguredHttpTransport`
     // (ubetinget `vercel_not_configured`), uansett credential-tilstand (se
