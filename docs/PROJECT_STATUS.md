@@ -963,6 +963,23 @@ Begge isolerte, lavrisiko klient-side endringer i `apps/web/voice.html`. `voice-
 DECISIONS_AND_ASSUMPTIONS.md for full detalj. Nettverksjitter over Tailscale kan fortsatt gi hørbar
 forsinkelse under dårlige forhold - IKKE løst av denne fiksen, dokumentert som gjenstående.
 
+**Forrige milepæl (uendret, MERGET): D-250 - Jarvis flyttet fra dev-PC til UGREEN-NAS-en (Trinn 1),
+Tobias direkte i chat: "det skal ligge på u green jobbe på pc og skal ha direkte tilgagn til
+jarvis".** Presist `DEPLOYMENT_STRATEGY.md` §2 sitt allerede planlagte "Trinn 1", ikke en ny
+arkitekturbeslutning - kildekode-gjennomgang bekreftet FØR utførelse at portabilitetsløftet holder
+(ingen PC-spesifikke stier i compose/Dockerfile/migrasjoner). `docs/runbooks/D250_NAS_MIGRATION.md`
+- trinnvis oppskrift (full `pg_dumpall`-backup FØR noe røres, `.env`/backup direkte mellom Tobias
+sine egne maskiner, gjenoppretting og radantall-verifisering på NAS-en FØR PC-stacken stoppes,
+eksplisitt rollback-vei). **Live utførelse gjennomført av Tobias selv via SSH samme dag** (PC → NAS
+`.env`/backup-overføring via PuTTY `pscp`, `git`/Postgres-restore på NAS-en via en engangs
+`alpine/git`-container og en dedikert read-only SSH deploy-key) - flere reelle infrastrukturproblemer
+løst underveis (manglende SSH-klient på PC-en, NAS-ens SFTP-delsystem sandboxet til `/docker` - løst
+med legacy SCP-protokoll, `Jarvis`-brukeren manglet hjemmekatalog/`docker`-gruppemedlemskap, NAS-ens
+EGEN native Postgres okkuperte port 5432 - løst med `JARVIS_DB_PORT=5433`). **Bekreftet 2026-09-28
+(direkte Tobias i chat: "den kjører på nas-en nå") - Jarvis kjører produksjon på UGREEN-NAS-en,
+PC-en er tilbake til utviklings-/GPU-maskin (DEPLOYMENT_STRATEGY.md §2 Trinn 1 fullført).** Se D-250
+i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
 **Forrige milepæl (uendret, MERGET): D-242 (PR #154, `27e523d`)** - merget under D-192 (CI grønt,
 ingen åpne review-tråder). PR #155 (D-243)/PR #156 (D-244) fikk ny merge-konflikt mot oppdatert
 `main` (samme docs-filer som #154 rørte) - løst (D-24x kronologisk rekkefølge: 240/241/242/243/245/
@@ -972,9 +989,7 @@ kjente flaky race-condition-tester (`ops/claude-worker/test/task-admission.test.
 PR-enes docs-only-diff) feilet først, re-kjørt via `rerun_failed_jobs` for å bekrefte flake før
 videre merge under D-192.
 
-**Forrige milepæl (uendret): D-247/D-248 - "ALLE SKAL FUNGERE ABSOLUTT ALLE"-SYSTEMATISK
-GJENNOMGANG, PLUSS Vercel/GitHub connector-sjekk fortsetter, samme økt:** Vercel (D-248) og GitHub
-begge "tilkobling OK" på Tobias sin
+**Forrige milepæl (uendret, MERGET):** Vercel (D-248) og GitHub begge "tilkobling OK" på Tobias sin
 host (se forrige milepæl for Vercel-detaljene). **Gmail bekreftet fortsatt live** ("tilkobling OK") -
 IKKE en ny fiks denne runden, men en nyttig korreksjon: Gmail har ALLEREDE et eget, dedikert
 reauth-script (`modules/core/scripts/google-email-reauth.ts`, bevisst SEPARAT fra
