@@ -1,6 +1,27 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-340: FUNN + FIKS
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-341: FUNN + FIKS
+- Charlie svarte FORTSATT 400 (gemini/gemma_hosted/anthropic) etter at D-340 (merget, PR #200) var
+deployet på NAS-en (Tobias sin egen `docker logs`-paste viste D-106-diagnostikken direkte).** D-340
+løste riktig modellnavn, men avdekket en HELT SEPARAT skjema-inkompatibilitet mot Google sitt
+Generative Language API. Rotårsak, verifisert offline mot de EKTE registrerte verktøy-skjemaene: (1)
+`modules/memory/src/extraction.ts` sitt LLM-uttrekk-skjema (`additionalProperties: false`) sendes
+RÅTT som `responseSchema` til gemini/gemma_hosted - INGEN sanering fantes for `responseSchema` noe
+sted (kun for verktøy-parametre, D-204). (2) `mesh-bridge.ts` sender ALLE ~400 registrerte verktøy på
+HVER melding (D-289) - Google Sheets sin celleverdi-union (`z.union([string,number,boolean])`)
+produserer `anyOf`, IKKE støttet av Google sitt Schema-format; siden Gemini validerer HELE
+verktøy-arrayet FØR generering, slår disse TO verktøyene ut ALLE 400 samtidig. **Fikset:** ny delt
+`sanitizeGeminiSchema()` (`types.ts`, erstatter `gemma.ts` sin gamle kun-tools `stripAdditionalProperties()`)
+- fjerner `additionalProperties` rekursivt OG kollapser `anyOf`/`oneOf`/`allOf` til en
+tom, permissiv skjema (trygt - `ToolGateway.execute()` validerer uansett alltid mot den ekte
+Zod-typen). Brukt for `gemma.ts` sine `tools` (uendret atferd) OG NÅ `responseSchema` i BÅDE
+`gemini.ts`/`gemma.ts` (nytt). **Anthropic sin `invalid_request_error` er IKKE fikset** - Anthropic
+støtter standard JSON Schema markant bredere enn Google, samme rotårsak forklarer den ikke uten
+videre bevis; blir praktisk ikke-blokkerende så snart gemini/gemma_hosted lykkes først i
+fallback-kjeden. Nye tester: `conformance.test.ts` (+2). `pnpm -w typecheck` (33/33)/eslint rene,
+123/123 targeted grønt. Se D-341.
+
+**Forrige milepæl (MERGET, PR #200): D-340: FUNN + FIKS
 - Charlie svarte "Noe gikk galt under generering" på HVER melding etter NAS-deployen av PR #199/
 #159 (Tobias direkte i chat: "HVORFOR FUNGERER IKKE JARVIS").** Rotårsak, host-bevist via
 `docker logs local-api-1`: en systemisk "tom-streng-er-ikke-usatt"-bug (SAMME klasse D-236 allerede

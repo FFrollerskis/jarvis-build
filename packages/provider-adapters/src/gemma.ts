@@ -7,6 +7,7 @@ import {
   firstNonEmptyEnv,
   ProviderError,
   sanitizeEndpointForDiagnostics,
+  sanitizeGeminiSchema,
   sseLines,
   type ChatMessage,
   type ContentPart,
@@ -89,39 +90,6 @@ interface GemmaContent {
   parts: GemmaPart[];
 }
 
-/**
- * D-204 (host-bevis, 2026-09-20): Gemini API sitt function-calling-skjema
- * støtter IKKE JSON-Schema-nøkkelen `additionalProperties` - å inkludere den
- * gjorde ALLE `gemma_hosted`-forespørsler med verktøy feile `bad_request`
- * (`INVALID_ARGUMENT`) på ALLE tre av Jarvis sine `mesh-bridge.ts`-
- * verktøyskjemaer (som alle setter `additionalProperties: false`, gyldig og
- * korrekt for `openai`/`anthropic` - se `MESH_TOOLS`), reprodusert direkte
- * mot NAS-en (bare `generateContent` uten `tools` ga 200 OK med SAMME
- * modell/nøkkel) OG bekreftet uavhengig av Googles eget utviklerforum
- * (identisk symptom - "additionalProperties in parameters_json_schema fail
- * with MALFORMED_FUNCTION_CALL"). `request.tools[].input_schema` er
- * provider-nøytralt (bygget i `mesh-bridge.ts`, IKKE Gemini-spesifikt) -
- * nøkkelen fjernes derfor KUN her, i denne adapterens egen oversettelse,
- * ALDRI ved kilden der den fortsatt er riktig for andre providere. Rekursiv
- * (nøkkelen kan i prinsippet opptre på et hvilket som helst nivå i et nested
- * objekt-skjema) - fjerner KUN denne ene, konkret host-bevist usupporterte
- * nøkkelen, ALDRI en gjettet bredere allow-list av andre skjema-nøkler.
- */
-function stripAdditionalProperties(schema: unknown): unknown {
-  if (Array.isArray(schema)) {
-    return schema.map(stripAdditionalProperties);
-  }
-  if (schema && typeof schema === "object") {
-    const rest: Record<string, unknown> = { ...(schema as Record<string, unknown>) };
-    delete rest["additionalProperties"];
-    for (const key of Object.keys(rest)) {
-      rest[key] = stripAdditionalProperties(rest[key]);
-    }
-    return rest;
-  }
-  return schema;
-}
-
 export class GemmaHostedAdapter implements ModelProviderAdapter {
   readonly name: string = "gemma_hosted";
 
@@ -182,7 +150,7 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
                 functionDeclarations: request.tools.map((t) => ({
                   name: t.name,
                   description: t.description,
-                  parameters: stripAdditionalProperties(t.input_schema)
+                  parameters: sanitizeGeminiSchema(t.input_schema)
                 }))
               }
             ]
@@ -191,8 +159,12 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
       generationConfig: {
         maxOutputTokens: request.max_tokens ?? 1024,
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+        // D-341: samme Google Schema-begrensning som verktøy-parametre over -
+        // `responseSchema` manglet denne saneringen helt (host-bevist
+        // `gemini_error_400` for `modules/memory/src/extraction.ts` sitt
+        // `additionalProperties: false`-holdige uttrekk-skjema).
         ...(request.structured_schema
-          ? { responseMimeType: "application/json", responseSchema: request.structured_schema }
+          ? { responseMimeType: "application/json", responseSchema: sanitizeGeminiSchema(request.structured_schema) }
           : {})
       }
     };

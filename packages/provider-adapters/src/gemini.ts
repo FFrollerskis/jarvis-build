@@ -5,6 +5,7 @@ import {
   extractProviderErrorCode,
   ProviderError,
   sanitizeEndpointForDiagnostics,
+  sanitizeGeminiSchema,
   textOnly,
   type ModelProviderAdapter,
   type ModelRequest,
@@ -66,8 +67,14 @@ export class GeminiAdapter implements ModelProviderAdapter {
           generationConfig: {
             maxOutputTokens: request.max_tokens ?? 1024,
             ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
+            // D-341: Google sitt Schema-format for responseSchema er en
+            // begrenset OpenAPI-3.0-delmengde (samme begrensning D-204 fant
+            // for verktøy-parametre i gemma.ts, ALDRI tidligere anvendt her
+            // eller på responseSchema noe sted) - host-bevist
+            // `gemini_error_400`/`INVALID_ARGUMENT` for
+            // `modules/memory/src/extraction.ts` sitt uttrekk-skjema.
             ...(request.structured_schema
-              ? { responseMimeType: "application/json", responseSchema: request.structured_schema }
+              ? { responseMimeType: "application/json", responseSchema: sanitizeGeminiSchema(request.structured_schema) }
               : {})
           }
         })
