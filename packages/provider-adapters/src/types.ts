@@ -224,6 +224,52 @@ export function firstNonEmptyEnv(...names: string[]): string | undefined {
   return undefined;
 }
 
+/**
+ * D-341 (host-bevist, 2026-09-28: Charlie svarte fortsatt 400 fra gemini/
+ * gemma_hosted etter D-340 sin .env-fiks): Google sitt Schema-format for
+ * BÅDE function-declaration-parametre (`generateContent`/`streamGenerateContent`
+ * sitt `tools[].functionDeclarations[].parameters`) OG strukturert utdata
+ * (`generationConfig.responseSchema`) er en BEGRENSET delmengde av
+ * OpenAPI 3.0 - støtter IKKE `additionalProperties` (D-204, allerede kjent
+ * og fikset for verktøy-parametre i `gemma.ts`, MEN ALDRI for
+ * `responseSchema` - `modules/memory/src/extraction.ts` sitt
+ * `EXTRACTION_JSON_SCHEMA` har `additionalProperties: false` i to nivåer og
+ * sendes RÅTT som `responseSchema`, host-bevist `gemini_error_400`/
+ * `INVALID_ARGUMENT`) ELLER unions (`anyOf`/`oneOf`/`allOf` - IKKE tidligere
+ * oppdaget; Jarvis sine egne `z.union([...])`-baserte verktøyskjemaer, f.eks.
+ * Google Sheets sin celleverdi-type i `mesh-bridge.ts` sin `allMeshTools()`,
+ * produserer nettopp dette via `zod-to-json-schema`, og siden Gemini
+ * validerer HELE `tools`-arrayet FØR generering starter, gjør ÉN eneste
+ * usupportert verktøy-skjema at absolutt ALLE ~400 mesh-verktøyene feiler
+ * samtidig, uansett hvilket verktøy brukerens melding faktisk trenger).
+ * En union kollapses til en tom skjema (aksepterer alt) i stedet for å
+ * GJETTE seg frem til én enkelt type - TRYGT fordi denne JSON-skjemaen KUN
+ * er en modell-veiledende kopi, ALDRI selve autorisasjonsgrensen
+ * (`ToolGateway.execute()` validerer ALLTID mot den ekte Zod-typen
+ * uavhengig av hva som ble sendt til modellen, se `mesh-bridge.ts`).
+ * Delt her (ikke duplisert i `gemini.ts`/`gemma.ts`) - SAMME Google-API-
+ * begrensning gjelder identisk for verktøy-parametre OG responseSchema,
+ * begge adaptere.
+ */
+export function sanitizeGeminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) {
+    return schema.map(sanitizeGeminiSchema);
+  }
+  if (schema && typeof schema === "object") {
+    const obj = schema as Record<string, unknown>;
+    if ("anyOf" in obj || "oneOf" in obj || "allOf" in obj) {
+      return obj["description"] !== undefined ? { description: obj["description"] } : {};
+    }
+    const rest: Record<string, unknown> = { ...obj };
+    delete rest["additionalProperties"];
+    for (const key of Object.keys(rest)) {
+      rest[key] = sanitizeGeminiSchema(rest[key]);
+    }
+    return rest;
+  }
+  return schema;
+}
+
 export class ProviderError extends Error {
   constructor(
     readonly provider: string,

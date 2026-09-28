@@ -375,6 +375,95 @@ describe("provider-adapter conformance (UA-1 §28)", () => {
     });
   });
 
+  it("D-341: gemma_hosted kollapser anyOf/oneOf/allOf (unions, IKKE støttet av Gemini sitt Schema-format) til en tom, permissiv skjema - samme host-bevist 400-klasse som D-204, men for et konstrukt additionalProperties-strippingen ALDRI dekket (f.eks. Google Sheets sin celleverdi-union i mesh-bridge.ts sin allMeshTools())", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    const capture = vi.fn(async (_url: string, init: RequestInit) => {
+      capturedBody = JSON.parse(init.body as string) as Record<string, unknown>;
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }], usageMetadata: {} }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", capture);
+    await new GemmaHostedAdapter("k", "m", "http://mock").complete({
+      ...REQUEST,
+      tools: [
+        {
+          name: "google_sheets__append_row",
+          description: "legg til rad",
+          input_schema: {
+            type: "object",
+            properties: {
+              row: {
+                type: "array",
+                items: { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }] }
+              }
+            },
+            required: ["row"],
+            additionalProperties: false
+          }
+        }
+      ]
+    });
+    const tools = capturedBody["tools"] as Array<{ functionDeclarations: Array<{ parameters: Record<string, unknown> }> }>;
+    const parameters = tools[0]?.functionDeclarations[0]?.parameters;
+    expect(JSON.stringify(parameters)).not.toContain("anyOf");
+    expect(parameters).toEqual({
+      type: "object",
+      properties: { row: { type: "array", items: {} } },
+      required: ["row"]
+    });
+  });
+
+  it("D-341: gemini/gemma_hosted saniterer structured_schema (responseSchema) FØR sending - additionalProperties manglet HELT denne stripping frem til nå (host-bevist gemini_error_400 for modules/memory/src/extraction.ts sitt uttrekk-skjema)", async () => {
+    const extractionLikeSchema = {
+      type: "object",
+      properties: {
+        candidates: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: { type: { type: "string" } },
+            required: ["type"],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ["candidates"],
+      additionalProperties: false
+    };
+
+    let geminiBody: Record<string, unknown> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        geminiBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }], usageMetadata: {} }),
+          { status: 200 }
+        );
+      })
+    );
+    await new GeminiAdapter("k", "m", "http://mock").complete({ ...REQUEST, structured_schema: extractionLikeSchema });
+    const geminiConfig = geminiBody["generationConfig"] as { responseSchema: Record<string, unknown> };
+    expect(JSON.stringify(geminiConfig.responseSchema)).not.toContain("additionalProperties");
+
+    let gemmaBody: Record<string, unknown> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        gemmaBody = JSON.parse(init.body as string) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: "{}" }] } }], usageMetadata: {} }),
+          { status: 200 }
+        );
+      })
+    );
+    await new GemmaHostedAdapter("k", "m", "http://mock").complete({ ...REQUEST, structured_schema: extractionLikeSchema });
+    const gemmaConfig = gemmaBody["generationConfig"] as { responseSchema: Record<string, unknown> };
+    expect(JSON.stringify(gemmaConfig.responseSchema)).not.toContain("additionalProperties");
+  });
+
   it("local_llm: tool_calls fra et OpenAI-kompatibelt svar normaliseres til ToolCallRequest", async () => {
     mockFetch(
       () =>
