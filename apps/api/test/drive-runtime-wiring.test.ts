@@ -106,7 +106,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
   // teller derfor IKKE lenger som en "tom konstruktør" (matches separat under).
   // D-105: docker: new DockerTransport() lagt til - EN NY, fjerde tom-konstruktør-
   // transport (bevisst tellet med her, ikke et regresjonsfunn).
-  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316, +runway D-322, +google_veo D-324, +todoist D-329, +linear D-332, +hubspot D-333) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315/telnyx D-321/kling D-323/higgsfield D-327/trello D-330/jira D-331 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
+  it("main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede tomme-konstruktør-transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316, +runway D-322, +google_veo D-324, +todoist D-329, +linear D-332, +hubspot D-333) - telegram er BEVISST gått fra 4 til 3 her av D-247 (chatId er nå en resolver-parameter, ikke lenger en tom konstruktør); twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315/telnyx D-321/kling D-323/higgsfield D-327/trello D-330/jira D-331/pipedrive D-334 teller HELLER IKKE med (samme resolver-argument-form som telegram, ikke en tom konstruktør)", () => {
     const callIdx = mainSource.indexOf("firstWaveTools({");
     const callBlock = mainSource.slice(callIdx, mainSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -147,8 +147,9 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/jira: new JiraTransport\(\s*\(\) => readSecretProvider\.get\("JARVIS_JIRA_BASE_URL"\),\s*\(\) => readSecretProvider\.get\("JARVIS_JIRA_EMAIL"\)\s*\)/);
     expect(callBlock).toContain("linear: new LinearTransport()");
     expect(callBlock).toContain("hubspot: new HubSpotTransport()");
+    expect(callBlock).toMatch(/pipedrive: new PipedriveTransport\(\(\) => readSecretProvider\.get\("JARVIS_PIPEDRIVE_BASE_URL"\)\)/);
   });
-  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316, +runway D-322, +google_veo D-324, +todoist D-329, +linear D-332, +hubspot D-333) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315/telnyx D-321/kling D-323/higgsfield D-327/trello D-330/jira D-331 teller heller ikke med, samme begrunnelse som main.ts", () => {
+  it("worker-main.ts sin firstWaveTools()-blokk inneholder fortsatt de samme ubetingede transportene som før (+docker D-105, +vercel D-242/D-248, +slack D-292, +discord D-294, +brave_search D-296, +google_maps D-298, +google_sheets D-299, +tavily D-301, +exa D-302, +google_places D-303, +google_routes D-304, +dropbox D-307, +notion D-308, +onedrive D-309, +microsoft_outlook D-310, +spotify D-313, +openai_images D-316, +runway D-322, +google_veo D-324, +todoist D-329, +linear D-332, +hubspot D-333) - telegram er BEVISST hoistet til en delt konstant av D-181/D184, ikke lenger en bokstavelig tom-konstruktør her; twilio D-295/sentry D-297/grafana D-305/prometheus D-306/n8n D-311/whatsapp D-314/make D-315/telnyx D-321/kling D-323/higgsfield D-327/trello D-330/jira D-331/pipedrive D-334 teller heller ikke med, samme begrunnelse som main.ts", () => {
     const callIdx = workerSource.indexOf("firstWaveTools({");
     const callBlock = workerSource.slice(callIdx, workerSource.indexOf("})) toolGateway.register(tool);", callIdx));
     const unconditionalConstructions = [...callBlock.matchAll(/:\s*new \w+Transport\(\)/g)];
@@ -162,8 +163,8 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     // D-322: +runway, D-324: +google_veo, D-329: +todoist, D-332: +linear, D-333: +hubspot) i begge
     // filer, selv om de to filene fortsatt divergerer paa HVORDAN telegram konstrueres (hoistet
     // konstant vs. inline), se describe "B". D-295/D-297/D-305/D-311/D-314/D-315/D-321/D-323/D-330/
-    // D-331: twilio/sentry/grafana/prometheus/n8n/whatsapp/make/telnyx/kling/trello/jira har SAMME
-    // resolver-argument-form som telegram - teller heller ikke med her.
+    // D-331/D-334: twilio/sentry/grafana/prometheus/n8n/whatsapp/make/telnyx/kling/trello/jira/
+    // pipedrive har SAMME resolver-argument-form som telegram - teller heller ikke med her.
     expect(unconditionalConstructions).toHaveLength(24);
     expect(callBlock).toContain("email: new GmailTransport()");
     expect(callBlock).toContain("calendar: new GoogleCalendarTransport()");
@@ -201,6 +202,7 @@ describe("I: eksisterende Google Calendar/Gmail (+ GitHub/Telegram/Docker) wirin
     expect(callBlock).toMatch(/jira: new JiraTransport\(\s*\(\) => toolSecretProvider\.get\("JARVIS_JIRA_BASE_URL"\),\s*\(\) => toolSecretProvider\.get\("JARVIS_JIRA_EMAIL"\)\s*\)/);
     expect(callBlock).toContain("linear: new LinearTransport()");
     expect(callBlock).toContain("hubspot: new HubSpotTransport()");
+    expect(callBlock).toMatch(/pipedrive: new PipedriveTransport\(\(\) => toolSecretProvider\.get\("JARVIS_PIPEDRIVE_BASE_URL"\)\)/);
     expect(callBlock).toContain("discord: new DiscordTransport()");
     expect(callBlock).toContain("telegram: telegramTransport");
   });

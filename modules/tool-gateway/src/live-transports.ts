@@ -3188,3 +3188,64 @@ export class HubSpotTransport implements ToolTransport {
     throw new Error(`hubspot_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-334. Pipedrive - SJETTE og SISTE av de seks D-64-port-krevende CRM-/
+ * prosjektstyrings-leverandørene bygget (D-291 stengte porten; D-329 til
+ * D-333 bygget Todoist/Trello/Jira/Linear/HubSpot først). API-formen
+ * BEVISST verifisert via WebSearch denne økten (sekundærkilde-
+ * krysssjekket - Pipedrive sin egen developers.pipedrive.com/pipedrive.
+ * readme.io-dokumentasjon, kryssjekket mot uavhengige guider): Pipedrive
+ * er PER-TENANT (`https://<company-domain>.pipedrive.com`, SAMME
+ * strukturelle form som Jira, D-331) OG bruker `/api/v2/{objectType}` -
+ * EKSAKT samme URL-symmetri for `persons`/`organizations`/`deals` som
+ * HubSpot sin `/crm/v3/objects/{objectType}` (D-333), derfor SAMME
+ * "object_type som eksplisitt kaller-parameter"-disiplin, IKKE tre
+ * dupliserte handlingssett. **Kritisk auth-funn:** API v2 sin anbefalte
+ * metode er `x-api-token`-HEADEREN (IKKE `Authorization: Bearer` som
+ * v1/OAuth) - en fjerde, distinkt auth-form i denne D-64-gate-serien
+ * (Todoist: ren bearer, Trello: query-parametere, Jira: Basic email:token,
+ * Linear: rå nøkkel uten Bearer, HubSpot: Bearer, Pipedrive: egen header).
+ */
+export class PipedriveTransport implements ToolTransport {
+  constructor(private readonly baseUrl: () => Promise<string | null>) {}
+
+  private async call(method: "GET" | "POST" | "PATCH", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const baseUrl = await this.baseUrl();
+    if (!baseUrl) throw new Error("pipedrive_base_url_not_configured");
+    const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/v2${path}`, {
+      method,
+      headers: { "x-api-token": credential, "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`pipedrive_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const objectType = () => String(parameters["object_type"]);
+    if (action === "list_objects") {
+      const limit = typeof parameters["limit"] === "number" ? parameters["limit"] : 10;
+      const body = await this.call("GET", `/${objectType()}?limit=${limit}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_object") {
+      const body = await this.call("GET", `/${objectType()}/${String(parameters["id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "search_objects") {
+      const term = encodeURIComponent(String(parameters["term"]));
+      const body = await this.call("GET", `/${objectType()}/search?term=${term}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_object") {
+      const body = await this.call("POST", `/${objectType()}`, (parameters["properties"] ?? {}) as Record<string, JsonValue>, credential);
+      return { external_id: String((body as { data?: { id?: string | number } }).data?.id ?? ""), data: body };
+    }
+    if (action === "update_object") {
+      const body = await this.call("PATCH", `/${objectType()}/${String(parameters["id"])}`, (parameters["properties"] ?? {}) as Record<string, JsonValue>, credential);
+      return { data: body };
+    }
+    throw new Error(`pipedrive_unsupported_action_${action}`);
+  }
+}
