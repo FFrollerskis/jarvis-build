@@ -3043,3 +3043,83 @@ export class JiraTransport implements ToolTransport {
     throw new Error(`jira_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-332. Linear - FJERDE av de seks D-64-port-krevende CRM-/prosjekt-
+ * styrings-leverandørene bygget (D-291 stengte porten; D-329/D-330/D-331
+ * bygget Todoist/Trello/Jira først). API-formen BEVISST verifisert via
+ * WebSearch denne økten (sekundærkilde-krysssjekket - Linear sin egen
+ * linear.app/developers/graphql-dokumentasjon, kryssjekket mot uavhengige
+ * praktiske gjennomganger): **STRUKTURELT ANNERLEDES enn Todoist/Trello/
+ * Jira - Linear har INGEN REST-API i det hele tatt**, ETT eneste GraphQL-
+ * endepunkt (`POST https://api.linear.app/graphql`) for BÅDE lesing og
+ * skriving. Autentisering er RÅ API-nøkkel i `Authorization`-headeren -
+ * BEKREFTET UTEN `Bearer`-prefiks (et `Bearer lin_api_...`-forsøk feiler
+ * eksplisitt ifølge dokumentasjonen - en lett å gjette-feil unngått ved å
+ * faktisk verifisere). GraphQL returnerer OFTE HTTP 200 selv ved feltfeil -
+ * `call()` sjekker derfor BÅDE `response.ok` OG et `errors`-felt i selve
+ * svarskroppen, aldri kun én av dem.
+ */
+export class LinearTransport implements ToolTransport {
+  private async call(query: string, variables: Record<string, JsonValue>, credential: string): Promise<JsonValue> {
+    const response = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { authorization: credential, "content-type": "application/json" },
+      body: JSON.stringify({ query, variables })
+    });
+    if (!response.ok) throw new Error(`linear_error_${response.status}`);
+    const body = (await response.json()) as { data?: JsonValue; errors?: JsonValue[] };
+    if (body.errors && body.errors.length > 0) throw new Error("linear_graphql_error");
+    return body.data ?? null;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_teams") {
+      const body = await this.call("query { teams { nodes { id name } } }", {}, credential);
+      return { data: (body as { teams?: { nodes?: JsonValue } } | null)?.teams?.nodes ?? null };
+    }
+    if (action === "list_issues") {
+      const teamId = parameters["team_id"];
+      const query = typeof teamId === "string"
+        ? "query($teamId: ID!) { team(id: $teamId) { issues { nodes { id identifier title } } } }"
+        : "query { issues { nodes { id identifier title } } }";
+      const body = await this.call(query, typeof teamId === "string" ? { teamId } : {}, credential);
+      const nodes = typeof teamId === "string"
+        ? (body as { team?: { issues?: { nodes?: JsonValue } } } | null)?.team?.issues?.nodes
+        : (body as { issues?: { nodes?: JsonValue } } | null)?.issues?.nodes;
+      return { data: nodes ?? null };
+    }
+    if (action === "get_issue") {
+      const body = await this.call(
+        "query($id: String!) { issue(id: $id) { id identifier title description state { id name } } }",
+        { id: String(parameters["issue_id"]) },
+        credential
+      );
+      return { data: (body as { issue?: JsonValue } | null)?.issue ?? null };
+    }
+    if (action === "create_issue") {
+      const input: Record<string, JsonValue> = { teamId: String(parameters["team_id"]), title: String(parameters["title"]) };
+      if (typeof parameters["description"] === "string") input["description"] = parameters["description"];
+      const body = await this.call(
+        "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title } } }",
+        { input },
+        credential
+      );
+      const issue = (body as { issueCreate?: { issue?: { identifier?: string } } } | null)?.issueCreate?.issue;
+      return { external_id: String(issue?.identifier ?? ""), data: body };
+    }
+    if (action === "update_issue") {
+      const input: Record<string, JsonValue> = {};
+      if (typeof parameters["title"] === "string") input["title"] = parameters["title"];
+      if (typeof parameters["description"] === "string") input["description"] = parameters["description"];
+      if (typeof parameters["state_id"] === "string") input["stateId"] = parameters["state_id"];
+      const body = await this.call(
+        "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier } } }",
+        { id: String(parameters["issue_id"]), input },
+        credential
+      );
+      return { data: body };
+    }
+    throw new Error(`linear_unsupported_action_${action}`);
+  }
+}

@@ -3716,6 +3716,50 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_JIRA_API_TOKEN", output_trust: "internal", transport: transport("jira")
     },
+    /**
+     * D-332. Linear - FJERDE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331 bygget Todoist/Trello/Jira
+     * først). ETT GraphQL-endepunkt, INGEN REST-API - se LinearTransport
+     * sin doc-kommentar i live-transports.ts. Rå API-nøkkel i
+     * Authorization-headeren, BEKREFTET UTEN Bearer-prefiks.
+     */
+    {
+      tool_id: "linear", action: "list_teams", description: "List alle team eieren har tilgang til (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "list_issues", description: "List issues, valgfritt filtrert på team_id (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ team_id: z.string().optional() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "get_issue", description: "Hent én issue (GraphQL query, gratis/sideeffekt-fritt, untrusted ingestion - issue_id kan være UUID eller identifier som 'ENG-123')",
+      input_schema: record({ issue_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_LINEAR_API_KEY",
+      output_trust: "untrusted", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "create_issue", description: "Opprett en ny issue (GraphQL mutation issueCreate, EKTE ekstern tilstand skapes)",
+      input_schema: record({ team_id: z.string(), title: z.string(), description: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i Linear",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
+    {
+      tool_id: "linear", action: "update_issue", description: "Oppdater felter på en eksisterende issue, inkl. status via state_id (GraphQL mutation issueUpdate, delvis oppdatering)",
+      input_schema: record({ issue_id: z.string(), title: z.string().optional(), description: z.string().optional(), state_id: z.string().optional() }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_issue med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

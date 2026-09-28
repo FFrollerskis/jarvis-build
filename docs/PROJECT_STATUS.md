@@ -1,24 +1,25 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-331: TREDJE av de
-seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Jira, kun
-transport-laget, SAMME mønster som Todoist/Trello (D-329/D-330).** Jira Cloud er PER-TENANT
-(`https://<domain>.atlassian.net`) med Basic `email:api_token`-auth - en TREDJE strukturelt
-distinkt auth-/adresseringsform. BEVISST verifisert via `WebSearch`: den gamle
-`/rest/api/3/search`-veien er HELT FJERNET (`/search/jql` påkrevd i stedet), og `description` på
-issues krever Atlassian Document Format (bygges internt fra en enkel streng - kalleren konstruerer
-ALDRI ADF selv). Bygget: `JiraTransport` - `search_issues`/`get_issue`/`list_transitions`
-(klasse A) + `create_issue`/`update_issue`/`transition_issue` (klasse B). UTELUKKENDE
-transport-laget - samme `OperationsTask`-synk-avgrensning som D-329/D-330.
-`connector-registry.test.ts` oppdatert (16→15 gjenværende backlog, 4→3 D-64-gate, 43→44 bygde, 59
-totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling UENDRET (to-resolver-
-form, teller ikke med). Ny `d331-jira-transport.test.ts` (14 tester). `pnpm --filter
-@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene.
-Targeted test-kjøring (`d331-jira-transport`/`connector-registry`/`d242-connector-health-sweep`/
-`drive-runtime-wiring`) 64/64 grønt. Se D-331 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-332: FJERDE av de
+seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Linear, kun
+transport-laget, SAMME mønster som Todoist/Trello/Jira (D-329/D-330/D-331).** Linear har INGEN
+REST-API - KUN ETT GraphQL-endepunkt (`api.linear.app/graphql`) for BÅDE lesing og skriving, en
+FJERDE distinkt API-arkitektur. BEVISST verifisert via `WebSearch`: autentisering er en RÅ
+API-nøkkel UTEN `Bearer`-prefiks (dokumentasjonen advarer eksplisitt at `Bearer ...` feiler), og
+GraphQL returnerer OFTE HTTP 200 selv ved feltfeil - `response.ok` alene er derfor IKKE nok,
+`errors`-feltet i svarskroppen sjekkes eksplisitt. Bygget: `LinearTransport` - `list_teams`/
+`list_issues`/`get_issue` (klasse A) + `create_issue`/`update_issue` (klasse B). UTELUKKENDE
+transport-laget - samme `OperationsTask`-synk-avgrensning som D-329/D-330/D-331.
+`connector-registry.test.ts` oppdatert (15→14 gjenværende backlog, 3→2 D-64-gate, 44→45 bygde, 59
+totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 22→23 (FØRSTE gang i
+denne serien Linear krever INGEN resolver). Ny `d332-linear-transport.test.ts` (12 tester).
+`pnpm --filter @jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/
+`npx eslint` - alle rene. Targeted test-kjøring (`d332-linear-transport`/`connector-registry`/
+`d242-connector-health-sweep`/`drive-runtime-wiring`) 62/62 grønt. Se D-332 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** De tre GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear) kan
-bygges på SAMME måte som Todoist/Trello/Jira - transport-lag først, uavhengig av den større
+**Neste:** De to GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive) kan bygges på
+SAMME måte som Todoist/Trello/Jira/Linear - transport-lag først, uavhengig av den større
 `OperationsTask`-synk-arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall,
 hvilken modul eier synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på
 Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
@@ -27,11 +28,11 @@ Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `play
 `folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
 `philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
 
+**Forrige milepæl (uendret): D-331: TREDJE av de seks D-64-port-krevende faktisk bygget - Jira,
+kun transport-laget.** Se D-331 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
+
 **Forrige milepæl (uendret): D-330: ANDRE av de seks D-64-port-krevende faktisk bygget - Trello,
 kun transport-laget.** Se D-330 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
-
-**Forrige milepæl (uendret): D-329: FØRSTE av de seks D-64-port-krevende faktisk bygget - Todoist,
-kun transport-laget.** Se D-329 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
 bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i
