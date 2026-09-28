@@ -16,20 +16,34 @@ av de to - BEGGE fjernet HELT fra registeret (61→59 totale oppføringer, IKKE 
 `.env.example`-nøklene BEHOLDT (fremtidig implementasjon vil trenge dem). Ny `Q-42` registrert i
 `docs/OPEN_QUESTIONS.md`. Se D-328 i DECISIONS_AND_ASSUMPTIONS.md.
 
+**RETTELSE (samme økt, rett etter D-328 - IKKE en egen D-post, ren korreksjon av linjen under før
+den ble pushet videre):** forrige versjon av denne "Neste"-linjen påsto "D-64-CRM-gruppa... står
+fortsatt uavklart og krever en egen, større sync-adapter-arkitektur" - DETTE VAR STALE/FEIL.
+D-291 (2026-09-26) kjørte og AVSLUTTET D-64-porten for nøyaktig denne gruppen: CRM (HubSpot/
+Pipedrive) er allerede `JARVIS_CANONICAL` via Business OS (D-49), prosjektstyring/tickets
+(Linear/Jira/Trello/Todoist) er allerede `JARVIS_CANONICAL` via `@jarvis/operations` sin
+`OperationsTask` (D-129) - `docs/INTEGRATIONS.md` sier ALLEREDE eksplisitt for alle seks:
+`NY_BACKLOG – klar for bygging som adapter (D-291)`. Disse SEKS er derfor FAKTISK ordinære,
+byggbare backlog-punkter (synk-adaptere INN i eksisterende Business OS/Operations Core, ALDRI en
+ny domenemodell) - IKKE en "vesentlig større arkitektur-BO" som må vente på Tobias. Funnet ved å
+faktisk lese D-291 sin fulle tekst FØR denne linjen ble skrevet på nytt, i stedet for å gjenta
+forrige økts antakelse uverifisert - EKSAKT den "les kilden, gjett ikke"-disiplinen D-291 sin egen
+"lessons learned"-kolonne krever.
+
 **Neste:** Video-gen-familien (runway/kling/google_veo/higgsfield) er FULLSTENDIG FULLFØRT. Tre
-funn venter nå på Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?),
+funn venter på Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?),
 `playwright`/`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY
-arkitekturkategori - sanntids-samtale-økt/alternativ SFU-transport). D-64-CRM-gruppa
-(hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en egen, større
-sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/`folio`/
-`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/
-`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - `apple_music`/`apns`
-krever ES256-JWT-signering + Apple Developer-team-ID (strukturelt ulikt alt bygget så langt),
-`ios_shortcuts`/`apple_watch`/`apple_shortcuts` er enhetsside automasjon (IKKE en cloud REST-API i
-det hele tatt) - ingen av disse bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde
-ELLER en presisering fra Tobias om ønsket omfang. Gjenstående backlog (18 punkter) er nå
-UTELUKKENDE punkter som krever Tobias sitt input eller en vesentlig større arkitektur-BO - INGEN
-flere "rene", trygt-gjettbare enkeltstående connector-slicer gjenstår i denne sveipen.
+arkitekturkategori - sanntids-samtale-økt/alternativ SFU-transport). **CRM/PM-gruppa
+(hubspot/pipedrive/linear/jira/trello/todoist) er derimot FAKTISK byggbar NÅ** (D-291 allerede
+kjørt D-64-porten) - men en sync-adapter INN i Business OS/Operations Core er en STRUKTURELT
+STØRRE oppgave enn de enkeltstående connectorene bygget så langt i denne sveipen (krever faktisk
+mapping mot `OperationsTask`/Business OS sine EKSISTERENDE canonical tabeller, ikke bare en
+ToolTransport+ToolDefinition) - IKKE forsøkt startet uten et eksplisitt Tobias-signal om
+prioritet/rekkefølge blant de seks, gitt omfanget. Resterende vage backlog-punkter (`apple_music`/
+`folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
+`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - ingen av
+disse bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde ELLER en presisering fra
+Tobias om ønsket omfang.
 
 **Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
 bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i
