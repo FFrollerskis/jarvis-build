@@ -1,37 +1,48 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-334: SJETTE og
-SISTE av de seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget -
-Pipedrive, kun transport-laget, SAMME mønster som Todoist/Trello/Jira/Linear/HubSpot
-(D-329-D-333). Hele D-64-gate-connector-familien er nå FULLFØRT i kode.** BEVISST verifisert via
-`WebSearch`: per-tenant base-URL (`https://<domene>.pipedrive.com/api/v2/...`, samme mønster som
-Jira/D-331) + `x-api-token`-HEADER (IKKE `Authorization: Bearer` - en fjerde distinkt auth-form i
-denne serien). `/api/v2/{objectType}` er EKSAKT samme URL-symmetri for persons/organizations/deals
-som HubSpot sin contacts/companies/deals - samme "kalleren styrer routing via object_type"-
-disiplin (D-333) gjenbrukt direkte. `properties` sendes UENDRET fra kalleren. Bygget:
-`PipedriveTransport` - `list_objects`/`get_object`/`search_objects` (klasse A) +
-`create_object`/`update_object` (klasse B, `create_object` henter `external_id` fra Pipedrive sin
-`{success,data:{id}}`-konvolutt). Bevisst DEFERRED: `delete_object` IKKE bygget, dedikert test
-bekrefter dette. UTELUKKENDE transport-laget - samme `OperationsTask`/Business OS-synk-avgrensning
-som D-329-D-333. `connector-registry.test.ts` oppdatert (13→12 gjenværende backlog,
-`D64_GATE_IDS`-konstanten FJERNET HELT - erstattet med en eksplisitt "forekommer IKKE lenger noe
-sted"-test, 46→47 bygde, 59 totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-
-telling UENDRET på 24 (resolver-form, telles ikke med - samme som Trello/Jira).
-`.env.example` fikk ny `JARVIS_PIPEDRIVE_BASE_URL=`-linje. Ny `d334-pipedrive-transport.test.ts`
-(11 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/
-`npx eslint` - alle rene. Targeted test-kjøring (`d334-pipedrive-transport`/`connector-registry`/
-`d242-connector-health-sweep`/`drive-runtime-wiring`) 61/61 grønt. Se D-334 i
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-335: Meta Ads
+bygget som en Growth Core-ADAPTER (SAMME arkitektur som Google Ads/D-83), IKKE en frittstående
+ToolGateway-connector - lukker det siste gjenstående D-316-notat-funnet med faktisk kode.** En
+`Explore`-agent kjørte en frisk D-64-undersøkelse FØRST og fant at `modules/growth` sin
+eksisterende `GoogleAdsTransport` allerede er en bevist, gjenbrukbar mal for AKKURAT denne
+kategorien - `"meta_ads"`/`"fbclid"` fantes ALLEREDE som gyldige verdier i `types.ts`, D-64-porten
+var derfor allerede lukket (GO, ingen ny Tobias-avklaring nødvendig). BEVISST verifisert via FIRE
+`WebSearch`-kall: `https://graph.facebook.com/v26.0/act_{ad_account_id}/campaigns`/`.../insights` -
+`access_token` som QUERY-PARAMETER (IKKE en header - en TREDJE distinkt auth-form etter Google Ads
+sin Bearer-etter-refresh og Pipedrive sin `x-api-token`-header), langlivet system-bruker-token
+(INGEN token-utveksling, ULIKT Google Ads). `insights.spend` er en DESIMAL-STRENG (IKKE mikros som
+Google Ads sin `cost_micros`) - egen `decimalCurrencyToMinorUnits()`-funksjon. Bygget:
+`MetaAdsTransport` (`modules/growth/src/meta-ads-transport.ts`) - `list_campaigns`/`sync_campaigns`
+(klasse A/B) + `sync_spend` (klasse B, `level=campaign`+`time_increment=1`). Bevisst DEFERRED:
+`sync_tracking_tags` (fbclid) IKKE bygget - ingen bekreftet spørrbar fbclid-ressurs funnet (samme
+D-41-disiplin som Pipedrive sin `delete_object`-utelatelse). `firstWaveTools()` fikk et nytt
+`metaads.*`-namespace (`integrations.ts`), wiret inn i BÅDE `main.ts`/`worker-main.ts` med SAMME
+`new MetaAdsTransport(growthService)`-mønster som Google Ads. `connector-registry.ts` sin
+`meta_ads`-plassholder FJERNET HELT (Growth Core-adaptere spores IKKE der, samme status som
+`googleads` - `BACKLOG_IDS` 12→11, registeret 59→58 totalt). `.env.example` sin gamle
+`JARVIS_META_ADS_TOKEN` erstattet av `JARVIS_META_ADS_ACCESS_TOKEN`/`_AD_ACCOUNT_ID`/`_API_VERSION`
+ved siden av `JARVIS_GOOGLE_ADS_*`. Ny `meta-ads-transport.test.ts` (20 tester) +
+`meta-ads-wiring.test.ts` (4 tester). `pnpm --filter @jarvis/growth typecheck`/`pnpm --filter
+@jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene.
+Targeted test-kjøring (`meta-ads-transport`/`meta-ads-wiring`/`google-ads-transport`/
+`google-ads-wiring`/`connector-registry`/`drive-runtime-wiring`) 96/96 grønt. Se D-335 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** INGEN D-64-port-krevende connectorer gjenstår i backlog-en - hele den seks store
-familien er fullført. Gjenstående backlog er nå kun de vage/uklare punktene: `apple_music`/
-`folio`/`meta_ads` (ingen klar D-64-vurdering ennå - `meta_ads` krever en `modules/growth`-adapter,
-IKKE en frittstående connector, se D-316-notatet under), enhets-/plattform-spesifikke punkter
-(`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`), og tre funn som
-venter på Tobias sitt svar: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/`google_cloud`
-(Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY arkitekturkategori). Ingen av
-disse kan bygges videre uten enten en egen D-64/undersøkelsesslice eller Tobias sin avklaring -
-standing-ordren "fortsett... begynn og fullfør noe annet" fortsetter mot neste egnet punkt.
+**Neste:** Etter D-335 gjenstår KUN de genuint vage/uklare backlog-punktene: `apple_music`/`folio`
+(ingen klar D-64-vurdering ennå - trenger enten en dedikert undersøkelse eller Tobias sin
+presisering av hvilken faktisk leverandør "Folio" betyr), enhets-/plattform-spesifikke punkter
+(`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch` - ingen av disse
+passer det etablerte "ToolTransport mot et vertsnavn"-mønsteret uten ny infrastruktur), og tre
+funn som venter på Tobias sitt svar: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
+`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY
+arkitekturkategori). Ingen av disse kan bygges videre uten enten en egen D-64/undersøkelsesslice
+eller Tobias sin avklaring - standing-ordren "fortsett... begynn og fullfør noe annet" fortsetter
+mot neste egnet punkt, som nå sannsynligvis krever enten en `apple_music`/`folio`-undersøkelse
+(samme Explore-agent-mønster som D-335) eller å vente på Tobias sitt svar på Q-40/Q-41/Q-42.
+
+**Forrige milepæl (uendret): D-334: SJETTE og SISTE av de seks D-64-port-krevende faktisk bygget -
+Pipedrive, kun transport-laget. Hele D-64-gate-connector-FAMILIEN er nå fullført i kode.** Se D-334
+i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-333: FEMTE av de seks D-64-port-krevende faktisk bygget - HubSpot,
 kun transport-laget.** Se D-333 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.

@@ -81,7 +81,7 @@ import {
 } from "@jarvis/finance";
 import { ConsentEnforcementService, ConsentService, ConsentTransport } from "@jarvis/consent";
 import {
-  GoogleAdsTransport, GrowthService, GrowthTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
+  GoogleAdsTransport, GrowthService, GrowthTransport, MetaAdsTransport, marketingMemoryBriefSource, runActionRecommendationSweepForAllTenants
 } from "@jarvis/growth";
 import { OwnerControls } from "@jarvis/policy";
 import {
@@ -781,6 +781,9 @@ async function buildDeps(): Promise<ApiDeps | undefined> {
     // GrowthTransport over - INGEN toolGateway/ToolInvocationContext (ingen
     // nøstet klasse D-handling i denne sliceen).
     googleads: new GoogleAdsTransport(growthService),
+    // D-335 (UA-4 Meta Ads-slice): SAMME lat/enkel-avhengighet-mønster som
+    // GoogleAdsTransport over - INGEN toolGateway/ToolInvocationContext.
+    metaads: new MetaAdsTransport(growthService),
     // UA-6 Finance & Spend Integrity Gateway (D-107): SAMME lat/enkel-
     // avhengighet-mønster som GrowthTransport/GoogleAdsTransport over -
     // INGEN toolGateway/ToolInvocationContext (ingen nøstet klasse D-

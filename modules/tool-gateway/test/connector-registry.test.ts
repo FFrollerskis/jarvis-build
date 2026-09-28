@@ -54,21 +54,21 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
     "apple_music",
     "zapier", "apple_shortcuts",
     "homekit", "philips_hue",
-    "folio", "meta_ads",
+    "folio",
     "apns", "ios_shortcuts", "apple_watch"
   ];
 
-  it("eksakt 12 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'telnyx' D-321 - 'runway' D-322 - 'kling' D-323 - 'google_veo' D-324 - 'higgsfield' D-327 - 'todoist' D-329 - 'trello' D-330 - 'jira' D-331 - 'linear' D-332 - 'hubspot' D-333 - 'pipedrive' D-334 - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319/'deepgram' D-320/'openai_realtime'+'livekit' D-328 fjernet HELT, ALDRI en ToolGateway-connector i det hele tatt)", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(12);
-    expect(BACKLOG_IDS.length).toBe(12);
+  it("eksakt 11 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'telnyx' D-321 - 'runway' D-322 - 'kling' D-323 - 'google_veo' D-324 - 'higgsfield' D-327 - 'todoist' D-329 - 'trello' D-330 - 'jira' D-331 - 'linear' D-332 - 'hubspot' D-333 - 'pipedrive' D-334 - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319/'deepgram' D-320/'openai_realtime'+'livekit' D-328 fjernet HELT, ALDRI en ToolGateway-connector i det hele tatt - 'meta_ads' D-335 fjernet HELT, bygget som en Growth Core-ADAPTER (metaads.*) i stedet for en ToolGateway-connector)", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(11);
+    expect(BACKLOG_IDS.length).toBe(11);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 59 oppføringer totalt (47 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316/telnyx D-321/runway D-322/kling D-323/google_veo D-324/higgsfield D-327/todoist D-329/trello D-330/jira D-331/linear D-332/hubspot D-333/pipedrive D-334 + 12 gjenværende D-232-backlog-punkter; D-318/D-319/D-320/D-328 fjernet 'microsoft_365'/'elevenlabs'/'deepgram'/'openai_realtime'/'livekit' HELT fra registeret)", () => {
-    expect(CONNECTOR_REGISTRY.length).toBe(59);
+  it("registeret har nøyaktig 58 oppføringer totalt (47 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316/telnyx D-321/runway D-322/kling D-323/google_veo D-324/higgsfield D-327/todoist D-329/trello D-330/jira D-331/linear D-332/hubspot D-333/pipedrive D-334 + 11 gjenværende D-232-backlog-punkter; D-318/D-319/D-320/D-328/D-335 fjernet 'microsoft_365'/'elevenlabs'/'deepgram'/'openai_realtime'/'livekit'/'meta_ads' HELT fra registeret)", () => {
+    expect(CONNECTOR_REGISTRY.length).toBe(58);
   });
 
   it("INGEN av de gjenværende backlog-oppføringene har live_test", () => {
@@ -129,6 +129,12 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
   it("'livekit' er BEVISST IKKE registrert (D-328) - en WebRTC/SFU-media-infrastrukturplattform, et ALTERNATIVT sanntids-transportlag til voice-gateway sin eksisterende WebSocket-arkitektur, IKKE en connector ved siden av den (se Q-42)", () => {
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     expect(registryIds.has("livekit")).toBe(false);
+  });
+
+  it("'meta_ads' er BEVISST IKKE registrert her (D-335) - bygget som en Growth Core-ADAPTER (MetaAdsTransport, metaads.*-namespace i firstWaveTools()), SAMME arkitektur/sporing som 'googleads' (som heller ALDRI har vært i dette registeret), IKKE en generisk ToolGateway-connector", () => {
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    expect(registryIds.has("meta_ads")).toBe(false);
+    expect(registryIds.has("googleads")).toBe(false);
   });
 
   it("hver nye backlog-oppføring rendres som 'ikke konfigurert', presence_only, helse null - EKSAKT samme mønster som en eksisterende ukonfigurert connector (Fiken/Stripe/Vipps)", async () => {

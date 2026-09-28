@@ -1274,6 +1274,36 @@ export function firstWaveTools(
       timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_GOOGLE_ADS_REFRESH_TOKEN",
       output_trust: "internal", transport: transport("googleads")
     },
+    // D-335 (UA-4 Meta Ads-slice): SAMME Growth Core-adapter-arkitektur som
+    // googleads.* over (D-64-korrekt - marketing_campaigns/spend_events
+    // forblir JARVIS_CANONICAL, Meta er EXTERNAL_CANONICAL fakta-kilde).
+    // access_token som QUERY-PARAMETER (ikke en Bearer-header) - se
+    // MetaAdsTransport sin doc-kommentar for full D-41-begrunnelse.
+    // sync_tracking_tags (fbclid) er BEVISST IKKE registrert her (D-41
+    // DEFERRED - ingen bekreftet spørrbar fbclid-ressurs funnet).
+    {
+      tool_id: "metaads", action: "list_campaigns", description: "Les kampanjeliste direkte fra Meta Ads (Graph API, ingen Jarvis-DB-skriving - ren leverandør-speiling)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional() }),
+      capability_class: "A", scopes: ["metaads.read"], reversible: true, rollback_procedure: "ingen (lesing)",
+      idempotent_external: true, timeout_ms: 20_000, rate_limit_per_minute: 20, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
+    {
+      tool_id: "metaads", action: "sync_campaigns", description: "Synk kampanjeliste fra Meta Ads inn i Growth Core (idempotent upsert via external_campaign_id, ingen ny domenemodell)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional() }),
+      capability_class: "B", scopes: ["metaads.read", "growth.write"], reversible: true,
+      rollback_procedure: "ingen direkte fjerning - kampanjerader er historiske Growth Core-fakta, samme som growth.create_campaign", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
+    {
+      tool_id: "metaads", action: "sync_spend", description: "Synk daglig utgift/klikk/visning per kampanje fra Meta Ads Insights inn i marketing_spend_events (source_type=provider_sync, idempotent per kampanje+dato)",
+      input_schema: record({ tenant_id: z.string(), memory_space: z.string().optional(), ad_account_id: z.string().optional(), start_date: z.string(), end_date: z.string() }),
+      capability_class: "B", scopes: ["metaads.read", "growth.write"], reversible: true,
+      rollback_procedure: "nytt sync_spend-kall overskriver SAMME (kampanje, dato, provider_sync)-rad ved korrigert kilde-tall", idempotent_external: true,
+      timeout_ms: 30_000, rate_limit_per_minute: 10, credential_ref: "JARVIS_META_ADS_ACCESS_TOKEN",
+      output_trust: "internal", transport: transport("metaads")
+    },
     // D-91 (UA-4 NESTE SLICE): Consent / Cookie / Data-Processing Governance
     // Core - provider-nøytralt `consent.*`-namespace. `record_decision`
     // appender EN NY, permanent rad i en append-only-logg (ALDRI en UPDATE)
