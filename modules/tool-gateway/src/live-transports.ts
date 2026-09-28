@@ -3123,3 +3123,68 @@ export class LinearTransport implements ToolTransport {
     throw new Error(`linear_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-333. HubSpot - FEMTE av de seks D-64-port-krevende CRM-/prosjekt-
+ * styrings-leverandørene bygget (D-291 stengte porten; D-329/D-330/D-331/
+ * D-332 bygget Todoist/Trello/Jira/Linear først). API-formen BEVISST
+ * verifisert via WebSearch denne økten (sekundærkilde-krysssjekket -
+ * HubSpot sin egen developers.hubspot.com-dokumentasjon, kryssjekket mot
+ * uavhengige community-tråder): `Authorization: Bearer <private app-
+ * token>` mot `/crm/v3/objects/{objectType}` - EKSAKT samme URL-mønster
+ * for `contacts`/`companies`/`deals` (kun URL-segmentet endres, resten av
+ * request/response-formen er IDENTISK for alle tre). `object_type` er
+ * derfor et EKSPLISITT, PÅKREVD parameter fra kalleren (ikke tre separate
+ * dupliserte handlingssett) - en generalisering direkte begrunnet i
+ * HubSpot sin EGEN API-struktur, ikke en Jarvis-oppfunnet forenkling.
+ * `properties` (opprettelse/oppdatering) og `filterGroups` (søk) sendes
+ * gjennom UENDRET fra kalleren - Jarvis pålegger INGEN egen CRM-
+ * feltskjema-antakelse.
+ */
+export class HubSpotTransport implements ToolTransport {
+  private async call(method: "GET" | "POST" | "PATCH", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue> {
+    const response = await fetch(`https://api.hubapi.com/crm/v3${path}`, {
+      method,
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`hubspot_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    const objectType = () => String(parameters["object_type"]);
+    if (action === "list_objects") {
+      const limit = typeof parameters["limit"] === "number" ? parameters["limit"] : 10;
+      const body = await this.call("GET", `/objects/${objectType()}?limit=${limit}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_object") {
+      const body = await this.call("GET", `/objects/${objectType()}/${String(parameters["id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "search_objects") {
+      const body = await this.call(
+        "POST",
+        `/objects/${objectType()}/search`,
+        { filterGroups: parameters["filter_groups"] ?? [], limit: parameters["limit"] ?? 10 },
+        credential
+      );
+      return { data: body };
+    }
+    if (action === "create_object") {
+      const body = await this.call("POST", `/objects/${objectType()}`, { properties: parameters["properties"] ?? {} }, credential);
+      return { external_id: String((body as { id?: string }).id ?? ""), data: body };
+    }
+    if (action === "update_object") {
+      const body = await this.call(
+        "PATCH",
+        `/objects/${objectType()}/${String(parameters["id"])}`,
+        { properties: parameters["properties"] ?? {} },
+        credential
+      );
+      return { data: body };
+    }
+    throw new Error(`hubspot_unsupported_action_${action}`);
+  }
+}

@@ -693,6 +693,22 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     live_test: { tool_id: "linear", action: "list_teams", parameters: () => ({}) }
   },
   {
+    // D-333 (bygget, flyttet ut av backlog_d64_gate - FEMTE av de seks
+    // D-64-port-krevende, samme mønster som Todoist/Trello/Jira/Linear).
+    // HubSpot sitt `/crm/v3/objects/{objectType}`-mønster er EKSAKT
+    // identisk for contacts/companies/deals - `object_type` er derfor et
+    // PÅKREVD parameter fra kalleren (samme "kalleren styrer routing"-
+    // disiplin som Higgsfield sin model_path, D-327), se HubSpotTransport
+    // sin doc-kommentar i live-transports.ts. `credential_refs` UENDRET
+    // (allerede korrekt ÉN nøkkel fra D-232-plassholderen - Bearer private
+    // app-token). Dette er UTELUKKENDE transport-laget - se D-329 sin
+    // doc-kommentar over for hvorfor den fulle OperationsTask-synk-
+    // mappingen BEVISST ikke er bygget her.
+    id: "hubspot", display_name: "HubSpot", category: "tool_gateway",
+    credential_refs: ["JARVIS_HUBSPOT_API_KEY"],
+    live_test: { tool_id: "hubspot", action: "list_objects", parameters: () => ({ object_type: "contacts", limit: 1 }) }
+  },
+  {
     // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
     // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
     // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
@@ -792,14 +808,14 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // §4.11 Finans / CRM / ads / prosjektstyring
   { id: "folio", display_name: "Folio", category: "backlog", credential_refs: ["JARVIS_FOLIO_API_KEY"] },
   // D-64-port påkrevd (CLAUDE.md regel 12) - synlighet her er IKKE en avgjort domeneeier-status.
-  { id: "hubspot", display_name: "HubSpot", category: "backlog_d64_gate", credential_refs: ["JARVIS_HUBSPOT_API_KEY"] },
   { id: "pipedrive", display_name: "Pipedrive", category: "backlog_d64_gate", credential_refs: ["JARVIS_PIPEDRIVE_API_KEY"] },
   { id: "meta_ads", display_name: "Meta Ads", category: "backlog", credential_refs: ["JARVIS_META_ADS_TOKEN"] },
-  // D-329/D-330/D-331/D-332: FØRSTE (Todoist), ANDRE (Trello), TREDJE
-  // (Jira) og FJERDE (Linear) av de seks D-64-port-krevende faktisk bygget
+  // D-329/D-330/D-331/D-332/D-333: FØRSTE (Todoist), ANDRE (Trello), TREDJE
+  // (Jira), FJERDE (Linear) og FEMTE (HubSpot) av de seks D-64-port-krevende faktisk bygget
   // (D-291 stengte selve porten) - kun transport-laget, se
-  // TodoistTransport/TrelloTransport/JiraTransport/LinearTransport sine
-  // doc-kommentarer i live-transports.ts for hva som BEVISST gjenstår.
+  // TodoistTransport/TrelloTransport/JiraTransport/LinearTransport/
+  // HubSpotTransport sine doc-kommentarer i live-transports.ts for hva som
+  // BEVISST gjenstår.
 
   // §4.12 Kart
   {

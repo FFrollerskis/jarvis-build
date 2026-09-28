@@ -3760,6 +3760,54 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_LINEAR_API_KEY", output_trust: "internal", transport: transport("linear")
     },
+    /**
+     * D-333. HubSpot - FEMTE av de seks D-64-port-krevende faktisk bygget
+     * (D-291 stengte porten; D-329/D-330/D-331/D-332 bygget Todoist/Trello/
+     * Jira/Linear først). `/crm/v3/objects/{objectType}` - `object_type`
+     * er PÅKREVD fra kalleren (contacts/companies/deals deler EKSAKT
+     * samme URL-mønster), se HubSpotTransport sin doc-kommentar i
+     * live-transports.ts.
+     */
+    {
+      tool_id: "hubspot", action: "list_objects", description: "List objekter av en gitt type (GET /crm/v3/objects/{object_type}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "get_object", description: "Hent ett objekt (GET /crm/v3/objects/{object_type}/{id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "search_objects", description: "Søk etter objekter med HubSpot sin filterGroups-syntaks (POST /crm/v3/objects/{object_type}/search, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), filter_groups: z.array(z.record(z.string(), z.unknown())).optional(), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HUBSPOT_API_KEY",
+      output_trust: "untrusted", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "create_object", description: "Opprett et nytt objekt (POST /crm/v3/objects/{object_type} {properties}, EKTE ekstern tilstand skapes)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i HubSpot",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
+    {
+      tool_id: "hubspot", action: "update_object", description: "Oppdater felter på et eksisterende objekt (PATCH /crm/v3/objects/{object_type}/{id} {properties}, delvis oppdatering)",
+      input_schema: record({ object_type: z.enum(["contacts", "companies", "deals"]), id: z.string(), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "ny update_object med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
