@@ -3808,6 +3808,54 @@ export function firstWaveTools(
       idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
       credential_ref: "JARVIS_HUBSPOT_API_KEY", output_trust: "internal", transport: transport("hubspot")
     },
+    /**
+     * D-334. Pipedrive - SJETTE og SISTE av de seks D-64-port-krevende
+     * faktisk bygget (D-291 stengte porten; D-329 til D-333 bygget
+     * Todoist/Trello/Jira/Linear/HubSpot først). `/api/v2/{objectType}` -
+     * `object_type` er PÅKREVD fra kalleren (persons/organizations/deals
+     * deler EKSAKT samme URL-mønster), se PipedriveTransport sin doc-
+     * kommentar i live-transports.ts.
+     */
+    {
+      tool_id: "pipedrive", action: "list_objects", description: "List objekter av en gitt type (GET /api/v2/{object_type}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), limit: z.number().optional() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "get_object", description: "Hent ett objekt (GET /api/v2/{object_type}/{id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), id: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "search_objects", description: "Søk etter objekter med et fritekst-søkeord (GET /api/v2/{object_type}/search?term=..., gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), term: z.string() }),
+      capability_class: "A", scopes: ["crm:read"], reversible: true,
+      rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_PIPEDRIVE_API_KEY",
+      output_trust: "untrusted", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "create_object", description: "Opprett et nytt objekt (POST /api/v2/{object_type} {properties}, EKTE ekstern tilstand skapes)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "manuell arkivering/sletting i Pipedrive",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PIPEDRIVE_API_KEY", output_trust: "internal", transport: transport("pipedrive")
+    },
+    {
+      tool_id: "pipedrive", action: "update_object", description: "Oppdater felter på et eksisterende objekt (PATCH /api/v2/{object_type}/{id} {properties}, delvis oppdatering)",
+      input_schema: record({ object_type: z.enum(["persons", "organizations", "deals"]), id: z.string(), properties: z.record(z.string(), z.unknown()) }),
+      capability_class: "B", scopes: ["crm:write"], reversible: true,
+      rollback_procedure: "ny update_object med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_PIPEDRIVE_API_KEY", output_trust: "internal", transport: transport("pipedrive")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

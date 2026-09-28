@@ -1,35 +1,40 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-333: FEMTE av de
-seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - HubSpot, kun
-transport-laget, SAMME mønster som Todoist/Trello/Jira/Linear (D-329-D-332).** FØRSTE ekte
-CRM-leverandør i denne serien (de fire foregående var prosjektstyring/tickets). BEVISST verifisert
-via `WebSearch`: `Authorization: Bearer <private app-token>` mot `/crm/v3/objects/{objectType}` -
-EKSAKT samme URL-mønster for contacts/companies/deals. Designvalg direkte begrunnet i HubSpot sin
-egen API-symmetri: `object_type` er et PÅKREVD parameter fra kalleren i stedet for tre dupliserte
-handlingssett (samme "kalleren styrer routing"-mønster som Higgsfield sin `model_path`, D-327).
-`properties`/`filter_groups` sendes UENDRET fra kalleren - Jarvis pålegger INGEN egen CRM-
-feltskjema-antakelse. Bygget: `HubSpotTransport` - `list_objects`/`get_object`/`search_objects`
-(klasse A) + `create_object`/`update_object` (klasse B). UTELUKKENDE transport-laget - samme
-`OperationsTask`/Business OS-synk-avgrensning som D-329-D-332. `connector-registry.test.ts`
-oppdatert (14→13 gjenværende backlog, 2→1 D-64-gate - KUN Pipedrive gjenstår, 45→46 bygde, 59
-totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 23→24. Ny
-`d333-hubspot-transport.test.ts` (11 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/
-`pnpm --filter @jarvis/api typecheck`/`npx eslint` - alle rene. Targeted test-kjøring
-(`d333-hubspot-transport`/`connector-registry`/`d242-connector-health-sweep`/
-`drive-runtime-wiring`) 61/61 grønt. Se D-333 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-334: SJETTE og
+SISTE av de seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget -
+Pipedrive, kun transport-laget, SAMME mønster som Todoist/Trello/Jira/Linear/HubSpot
+(D-329-D-333). Hele D-64-gate-connector-familien er nå FULLFØRT i kode.** BEVISST verifisert via
+`WebSearch`: per-tenant base-URL (`https://<domene>.pipedrive.com/api/v2/...`, samme mønster som
+Jira/D-331) + `x-api-token`-HEADER (IKKE `Authorization: Bearer` - en fjerde distinkt auth-form i
+denne serien). `/api/v2/{objectType}` er EKSAKT samme URL-symmetri for persons/organizations/deals
+som HubSpot sin contacts/companies/deals - samme "kalleren styrer routing via object_type"-
+disiplin (D-333) gjenbrukt direkte. `properties` sendes UENDRET fra kalleren. Bygget:
+`PipedriveTransport` - `list_objects`/`get_object`/`search_objects` (klasse A) +
+`create_object`/`update_object` (klasse B, `create_object` henter `external_id` fra Pipedrive sin
+`{success,data:{id}}`-konvolutt). Bevisst DEFERRED: `delete_object` IKKE bygget, dedikert test
+bekrefter dette. UTELUKKENDE transport-laget - samme `OperationsTask`/Business OS-synk-avgrensning
+som D-329-D-333. `connector-registry.test.ts` oppdatert (13→12 gjenværende backlog,
+`D64_GATE_IDS`-konstanten FJERNET HELT - erstattet med en eksplisitt "forekommer IKKE lenger noe
+sted"-test, 46→47 bygde, 59 totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-
+telling UENDRET på 24 (resolver-form, telles ikke med - samme som Trello/Jira).
+`.env.example` fikk ny `JARVIS_PIPEDRIVE_BASE_URL=`-linje. Ny `d334-pipedrive-transport.test.ts`
+(11 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/`pnpm --filter @jarvis/api typecheck`/
+`npx eslint` - alle rene. Targeted test-kjøring (`d334-pipedrive-transport`/`connector-registry`/
+`d242-connector-health-sweep`/`drive-runtime-wiring`) 61/61 grønt. Se D-334 i
+DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** KUN Pipedrive gjenstår av de seks D-64-port-krevende leverandørene - kan bygges på
-SAMME måte, transport-lag først, og HubSpot sin "object_type-som-eksplisitt-parameter"-disiplin
-er sannsynligvis direkte anvendbar der også (Pipedrive har en lignende multi-objekt-CRM-struktur:
-persons/organizations/deals). Uavhengig av den større `OperationsTask`/Business OS-synk-
-arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall, hvilken modul eier
-synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på Tobias sitt svar før
-noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/`google_cloud` (Q-41, for vage),
-`openai_realtime`/`livekit` (Q-42, krever en NY arkitekturkategori - sanntids-samtale-økt/
-alternativ SFU-transport). Resterende vage backlog-punkter (`apple_music`/`folio`/`meta_ads`) og
-enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/
-`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
+**Neste:** INGEN D-64-port-krevende connectorer gjenstår i backlog-en - hele den seks store
+familien er fullført. Gjenstående backlog er nå kun de vage/uklare punktene: `apple_music`/
+`folio`/`meta_ads` (ingen klar D-64-vurdering ennå - `meta_ads` krever en `modules/growth`-adapter,
+IKKE en frittstående connector, se D-316-notatet under), enhets-/plattform-spesifikke punkter
+(`apple_shortcuts`/`homekit`/`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`), og tre funn som
+venter på Tobias sitt svar: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/`google_cloud`
+(Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY arkitekturkategori). Ingen av
+disse kan bygges videre uten enten en egen D-64/undersøkelsesslice eller Tobias sin avklaring -
+standing-ordren "fortsett... begynn og fullfør noe annet" fortsetter mot neste egnet punkt.
+
+**Forrige milepæl (uendret): D-333: FEMTE av de seks D-64-port-krevende faktisk bygget - HubSpot,
+kun transport-laget.** Se D-333 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-332: FJERDE av de seks D-64-port-krevende faktisk bygget - Linear,
 kun transport-laget.** Se D-332 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
