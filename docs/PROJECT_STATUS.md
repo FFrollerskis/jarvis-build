@@ -1,38 +1,54 @@
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-336: FUNN, IKKE en
-full byggeslice - Home Assistant sin transport BLE IKKE bygget (en genuin, ubekreftet room→entity-
-mapping-avgjørelse funnet FØR koding, BEVISST IKKE gjettet), MEN `philips_hue` sin backlog-
-plassholder FJERNET HELT (ren ALLEREDE_DEKKET-rydding).** En `Explore`-agent undersøkte om
-`homekit`/`philips_hue` kunne løses SAMME måte som Meta Ads (D-335) - fant at
-`modules/tool-gateway/src/home-assistant.ts` sin `homeAssistantTools()` ALLEREDE er fullt definert
-(5 handlinger, solid testdekning) MEN standard-transporten er FORTSATT `UnconfiguredHttpTransport`
-- ALDRI wiret inn i `firstWaveTools()`/`main.ts`/`worker-main.ts`. To funn, håndtert ULIKT: (1)
-**Philips Hue er ren ALLEREDE_DEKKET** - enhetsstyring går via Home Assistant (dokumentert i §5
-allerede), `connector-registry.ts` sin plassholder FJERNET (SAMME presedens som `microsoft_365`
-D-318). `homekit` FORBLIR - Apple sin egen HAP-protokoll, STRUKTURELT ULIK. (2) **Selve
-`HomeAssistantTransport`-bygget BEVISST STOPPET:** `site_id`/`room_id` → HA sin egen entity_id/
-area_id-adressering er IKKE dokumentert noe sted - `light_set`/`climate_set`/`alarm_set` tar
-`site_id`+`room_id` UTEN et eksplisitt `entity`-felt (KUN `lock_set` har det). TRE `WebSearch`-kall
-fant at HA sitt EGET community-forum har en ÅPEN, ubesvart tråd som stiller AKKURAT dette
-spørsmålet - IKKE trygt gjettbar informasjon. I tillegg krever "egen HA-instans per sted" (§5) en
-`site_id`→base-URL-oppslag, STRUKTURELT ULIKT Grafana/n8n sin enkelt-base-URL-resolver. Å bygge nå
-ville krevd enten å GJETTE en navnekonvensjon (brutt D-41), videre dokumentasjonsverifisering
-(nettverksegress mot dokumentasjonsdomener har vært blokkert flere ganger tidligere i sesjonen), eller
-Tobias sitt faktiske HA-oppsett - INGEN av disse ble gjort. `connector-registry.test.ts` oppdatert
-(11→10 gjenværende backlog, registeret 58→57 totalt, ny "philips_hue BEVISST IKKE registrert,
-homekit FORBLIR"-test). `pnpm --filter @jarvis/tool-gateway typecheck`/`npx eslint`
-rene. `connector-registry.test.ts` isolert: 25/25 grønt. `INTEGRATIONS.md` Home Assistant-raden
-korrigert til å reflektere den FAKTISKE delvise byggestatusen, Philips Hue endret til
-`ALLEREDE_DEKKET (D-336)`. Se D-336 i DECISIONS_AND_ASSUMPTIONS.md.
+# PROJECT STATUS
 
-**Neste:** Etter D-336 gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå - trenger
-enten en dedikert undersøkelse eller Tobias sin presisering av hvilken faktisk leverandør "Folio"
-betyr), `homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/
-`apple_watch` - ingen passer det etablerte mønsteret uten ny infrastruktur), Home Assistant sin
-FAKTISKE transport-bygging (venter på enten videre dokumentasjonsverifisering ELLER Tobias sitt
-HA-oppsett - se D-336), og tre funn som venter på Tobias sitt svar: `zapier` (Q-40), `playwright`/
-`google_cloud` (Q-41), `openai_realtime`/`livekit` (Q-42). Ingen av disse kan bygges videre uten
-enten en egen undersøkelsesslice eller Tobias sin avklaring - standing-ordren "fortsett... begynn
-og fullfør noe annet" fortsetter mot neste egnet punkt.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR #199) - **D-339:
+Playwright lokal nettleser-automasjon, KUN read-only-halvparten - Tobias sitt direkte chat-svar
+"playwrite er viktig for at den skal kunne kontrollere mer" (bekrefter branch (a) fra D-326, ALDRI
+en cloud-browser-vendor), bygget PARALLELT mens PR #199 sin CI kjørte.** `click`/`fill_form`/
+`submit` BEVISST IKKE bygget - egen, fersk domene-vokterdesign kreves før mutasjon av tredjeparts
+nettsider. Ny, EGEN prosess `apps/browser-gateway` (CLAUDE.md regel 5, mirrorer voice-gateway):
+`browser-engine.ts` (`PlaywrightBrowserEngine`, delt lat-startet Chromium) + `server.ts`
+(`POST /invoke`) + `main.ts`. `BrowserGatewayTransport` (`modules/tool-gateway/src/browser-
+transport.ts`) broer inn via HTTP. Tre `ToolDefinition`-er - `browser.navigate`/`extract_text`/
+`screenshot` (alle klasse A, `output_trust: "untrusted"`). `JARVIS_BROWSER_GATEWAY_BASE_URL` som
+`credential_ref` (INGEN ekte hemmelighet, kun en prosess-adresse). `infra/local/browser-
+gateway.Dockerfile` (Microsoft sitt offisielle Playwright-image, `v1.63.0-noble`, VERIFISERT å
+eksistere) + ny `browser-gateway`-tjeneste i `docker-compose.yml`. `connector-registry.ts` sin
+gamle `"playwright"`-plassholder oppdatert I PLACE. Ny `apps/browser-gateway/test/server.test.ts`
+(9 tester, fake nettleser-motor) + `modules/tool-gateway/test/browser-transport.test.ts`
+(7 tester) + `modules/core/test/d339-browser-gateway-compose-wiring.test.ts` (5 tester).
+`connector-registry.test.ts` (`BACKLOG_IDS` 8→7, registeret UENDRET 56). `drive-runtime-wiring.test.ts`
+"tom konstruktør"-telling 26→27. Full-workspace `pnpm -w typecheck` (33/34 pakker med typecheck-
+script, inkl. nye `@jarvis/browser-gateway`)/`npx eslint apps modules packages` begge rene.
+Targeted test-kjøring 84/84 grønt. `BROWSER_GATEWAY_LIVE_GATE=PENDING_HOST_ACCEPTANCE` - INGEN
+ekte Chromium startet i CI denne sliceen (kun fake-motor-tester). Se Q-41/D-326/D-339.
+
+**Forrige milepæl (samme PR #199): D-338: MCP-klient-kapabilitet for Zapier, KUN discovery-
+halvparten - Tobias sitt direkte chat-svar "ja bygg mcp zapier".** Lukker Q-40 del (a) MED JA; del
+(b) BEVISST IKKE avgjort. `McpZapierTransport` - KUN `list_tools` (klasse A, JSON-RPC 2.0
+`tools/list`, `output_trust: "untrusted"`). `JARVIS_MCP_ZAPIER_SERVER_URL`. 67/67 targeted tester
+grønt. Se Q-40/D-338.
+
+**Forrige milepæl (samme PR #199): D-337: Google Cloud "servere" bygget som en GCE-connector
+(Google Compute Engine) - direkte svar på Tobias sin chat-instruks: "Google cloud skal være Google
+ads alle servere alle markedsføring osv osv".** `GceTransport` (klasse A list/get, klasse D
+start/stop/reset med asynkron operasjon-polling-til-DONE) + `gce-target-policy.ts`.
+`JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID`. 80/80 targeted tester grønt. Se Q-41/D-337. Én
+CI-runde krevde en fiks: `q34-preflight-target-existence.test.ts` sin "audit-as-code"-test manglet
+de tre nye `gce.*`-mutasjonene i sin reviderte liste - fikset (`requires_target: true` for alle
+tre).
+
+**Neste:** PR #199 sin CI må verifiseres grønt (D-337/D-338/D-339 alle pushet til samme PR) FØR
+merge under D-192. Deretter gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå),
+`homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/`apple_watch`), Home
+Assistant sin FAKTISKE transport-bygging (D-336, venter på videre dokumentasjonsverifisering
+ELLER Tobias sitt HA-oppsett), `openai_realtime`/`livekit` (Q-42, uavklart - "Q-43" nevnt av
+Tobias i chat finnes IKKE i loggen, avklares når han bekrefter hva han mente), og `browser.click`/
+`fill_form`/`submit` (D-339 sin bevisst utsatte mutasjonshalvpart - egen domene-vokterdesign).
+
+**Forrige milepæl (uendret): D-336: FUNN, IKKE en full byggeslice - Home Assistant sin transport
+BLE IKKE bygget (en genuin, ubekreftet room→entity-mapping-avgjørelse), MEN `philips_hue` sin
+backlog-plassholder FJERNET HELT (ren ALLEREDE_DEKKET-rydding).** Se D-336 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-335: Meta Ads bygget som en Growth Core-ADAPTER, lukker det siste
 D-316-notat-funnet med faktisk kode.** Se D-335 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.

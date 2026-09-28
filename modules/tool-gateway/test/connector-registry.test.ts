@@ -26,10 +26,10 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
     }
   });
 
-  it("live_test er satt for 42 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) + brave_search (D-296) + sentry (D-297) + google_maps (D-298) + google_sheets (D-299) + tavily (D-301) + exa (D-302) + google_places (D-303) + google_routes (D-304) + grafana (D-305) + prometheus (D-306) + dropbox (D-307) + notion (D-308) + onedrive (D-309) + microsoft_outlook (D-310) + n8n (D-311) + spotify (D-313) + whatsapp (D-314) + make (D-315) + openai_images (D-316) + telnyx (D-321) + runway (D-322) + google_veo (D-324) + todoist (D-329) + trello (D-330) + jira (D-331) + linear (D-332) + hubspot (D-333) + pipedrive (D-334) - kling (D-323) BEVISST UTEN live_test, se D-323 - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
+  it("live_test er satt for 44 connectorer - github/calendar/gmail (D-211) + google_drive/telegram/vercel/neonomics/wallester (D-213, task #122) + fiken/stripe/vipps (D-242) + slack (D-292) + discord (D-294) + twilio (D-295) + brave_search (D-296) + sentry (D-297) + google_maps (D-298) + google_sheets (D-299) + tavily (D-301) + exa (D-302) + google_places (D-303) + google_routes (D-304) + grafana (D-305) + prometheus (D-306) + dropbox (D-307) + notion (D-308) + onedrive (D-309) + microsoft_outlook (D-310) + n8n (D-311) + spotify (D-313) + whatsapp (D-314) + make (D-315) + openai_images (D-316) + telnyx (D-321) + runway (D-322) + google_veo (D-324) + todoist (D-329) + trello (D-330) + jira (D-331) + linear (D-332) + hubspot (D-333) + pipedrive (D-334) + zapier (D-338, MCP discovery-only - live_test.tool_id er 'mcp_zapier', IKKE 'zapier') + playwright (D-339, lokal nettleserautomasjon - live_test.tool_id er 'browser', IKKE 'playwright') - kling (D-323) BEVISST UTEN live_test, se D-323 - resten bevisst avgrenset (anthropic/openai/gemini går via ModelGateway, ikke ToolGateway)", () => {
     const withLiveTest = CONNECTOR_REGISTRY.filter((c) => c.live_test).map((c) => c.id).sort();
     expect(withLiveTest).toEqual(
-      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places", "google_routes", "grafana", "prometheus", "dropbox", "notion", "onedrive", "microsoft_outlook", "n8n", "spotify", "whatsapp", "make", "openai_images", "telnyx", "runway", "google_veo", "todoist", "trello", "jira", "linear", "hubspot", "pipedrive"].sort()
+      ["gmail", "google_calendar", "github", "google_drive", "telegram", "vercel", "neonomics", "wallester", "fiken", "stripe", "vipps", "slack", "discord", "twilio", "brave_search", "sentry", "google_maps", "google_sheets", "tavily", "exa", "google_places", "google_routes", "grafana", "prometheus", "dropbox", "notion", "onedrive", "microsoft_outlook", "n8n", "spotify", "whatsapp", "make", "openai_images", "telnyx", "runway", "google_veo", "todoist", "trello", "jira", "linear", "hubspot", "pipedrive", "zapier", "playwright"].sort()
     );
   });
 
@@ -47,28 +47,26 @@ describe("A: CONNECTOR_REGISTRY - ren data, ingen duplikate id-er, live_test pek
   });
 });
 
-describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316/D-321/D-322/D-323/D-324/D-327/D-329/D-330/D-331/D-332/D-333/D-334: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images'/'telnyx'/'runway'/'kling'/'google_veo'/'higgsfield'/'todoist'/'trello'/'jira'/'linear'/'hubspot'/'pipedrive' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over; D-318 fjernet 'microsoft_365', D-319 fjernet 'elevenlabs', D-320 fjernet 'deepgram' og D-328 fjernet 'openai_realtime'/'livekit' HELT fra registeret - microsoft_365 var ALLEREDE_DEKKET, elevenlabs/deepgram hører EGENTLIG ikke hjemme her i det hele tatt (tale-leverandører, ikke ToolGateway-connectorer), openai_realtime/livekit er sanntids-økt-/media-infrastruktur som IKKE passer NOEN eksisterende adapter-grensesnitt - registerets TOTALE lengde er derfor NED med fem fra de opprinnelige 50)", () => {
+describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter registrert som ikke-tilkoblede oppføringer (D-292/D-294/D-295/D-296/D-297/D-298/D-299/D-301/D-302/D-303/D-304/D-305/D-306/D-307/D-308/D-309/D-310/D-311/D-313/D-314/D-315/D-316/D-321/D-322/D-323/D-324/D-327/D-329/D-330/D-331/D-332/D-333/D-334/D-338/D-339: 'slack'/'discord'/'twilio'/'brave_search'/'sentry'/'google_maps'/'google_sheets'/'tavily'/'exa'/'google_places'/'google_routes'/'grafana'/'prometheus'/'dropbox'/'notion'/'onedrive'/'microsoft_outlook'/'n8n'/'spotify'/'whatsapp'/'make'/'openai_images'/'telnyx'/'runway'/'kling'/'google_veo'/'higgsfield'/'todoist'/'trello'/'jira'/'linear'/'hubspot'/'pipedrive'/'zapier'/'playwright' gradvis flyttet UT av denne listen og inn i de ekte, bygde connectorene over; D-318 fjernet 'microsoft_365', D-319 fjernet 'elevenlabs', D-320 fjernet 'deepgram' og D-328 fjernet 'openai_realtime'/'livekit' HELT fra registeret - microsoft_365 var ALLEREDE_DEKKET, elevenlabs/deepgram hører EGENTLIG ikke hjemme her i det hele tatt (tale-leverandører, ikke ToolGateway-connectorer), openai_realtime/livekit er sanntids-økt-/media-infrastruktur som IKKE passer NOEN eksisterende adapter-grensesnitt - registerets TOTALE lengde er derfor NED med fem fra de opprinnelige 50)", () => {
   const BACKLOG_IDS = [
-    "google_cloud",
-    "playwright",
     "apple_music",
-    "zapier", "apple_shortcuts",
+    "apple_shortcuts",
     "homekit",
     "folio",
     "apns", "ios_shortcuts", "apple_watch"
   ];
 
-  it("eksakt 10 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'telnyx' D-321 - 'runway' D-322 - 'kling' D-323 - 'google_veo' D-324 - 'higgsfield' D-327 - 'todoist' D-329 - 'trello' D-330 - 'jira' D-331 - 'linear' D-332 - 'hubspot' D-333 - 'pipedrive' D-334 - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319/'deepgram' D-320/'openai_realtime'+'livekit' D-328 fjernet HELT, ALDRI en ToolGateway-connector i det hele tatt - 'meta_ads' D-335 fjernet HELT, bygget som en Growth Core-ADAPTER (metaads.*) i stedet for en ToolGateway-connector - 'philips_hue' D-336 fjernet HELT, ALLEREDE_DEKKET via Home Assistant sin homeAssistantTools())", () => {
-    expect(new Set(BACKLOG_IDS).size).toBe(10);
-    expect(BACKLOG_IDS.length).toBe(10);
+  it("eksakt 7 gjenværende backlog-id-er finnes, hver nøyaktig én gang, i registeret (50 - 'slack' D-292 - 'discord' D-294 - 'twilio' D-295 - 'brave_search' D-296 - 'sentry' D-297 - 'google_maps' D-298 - 'google_sheets' D-299 - 'tavily' D-301 - 'exa' D-302 - 'google_places' D-303 - 'google_routes' D-304 - 'grafana' D-305 - 'prometheus' D-306 - 'dropbox' D-307 - 'notion' D-308 - 'onedrive' D-309 - 'microsoft_outlook' D-310 - 'n8n' D-311 - 'spotify' D-313 - 'whatsapp' D-314 - 'make' D-315 - 'openai_images' D-316 - 'telnyx' D-321 - 'runway' D-322 - 'kling' D-323 - 'google_veo' D-324 - 'higgsfield' D-327 - 'todoist' D-329 - 'trello' D-330 - 'jira' D-331 - 'linear' D-332 - 'hubspot' D-333 - 'pipedrive' D-334 - 'zapier' D-338 (MCP discovery-only, oppdatert i place, IKKE fjernet - se rad over) - 'playwright' D-339 (lokal, kun read-only, oppdatert i place, IKKE fjernet - se rad over) - 'microsoft_365' D-318 fjernet HELT, ikke bygget - 'elevenlabs' D-319/'deepgram' D-320/'openai_realtime'+'livekit' D-328 fjernet HELT, ALDRI en ToolGateway-connector i det hele tatt - 'meta_ads' D-335 fjernet HELT, bygget som en Growth Core-ADAPTER (metaads.*) i stedet for en ToolGateway-connector - 'philips_hue' D-336 fjernet HELT, ALLEREDE_DEKKET via Home Assistant sin homeAssistantTools() - 'google_cloud' D-337 fjernet HELT, bygget som 'gce' (SAMME utsporede infra-status som 'docker', IKKE i dette registeret))", () => {
+    expect(new Set(BACKLOG_IDS).size).toBe(7);
+    expect(BACKLOG_IDS.length).toBe(7);
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     for (const id of BACKLOG_IDS) {
       expect(registryIds.has(id)).toBe(true);
     }
   });
 
-  it("registeret har nøyaktig 57 oppføringer totalt (47 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316/telnyx D-321/runway D-322/kling D-323/google_veo D-324/higgsfield D-327/todoist D-329/trello D-330/jira D-331/linear D-332/hubspot D-333/pipedrive D-334 + 10 gjenværende D-232-backlog-punkter; D-318/D-319/D-320/D-328/D-335/D-336 fjernet 'microsoft_365'/'elevenlabs'/'deepgram'/'openai_realtime'/'livekit'/'meta_ads'/'philips_hue' HELT fra registeret)", () => {
-    expect(CONNECTOR_REGISTRY.length).toBe(57);
+  it("registeret har nøyaktig 56 oppføringer totalt (49 bygde, inkl. slack D-292/discord D-294/twilio D-295/brave_search D-296/sentry D-297/google_maps D-298/google_sheets D-299/tavily D-301/exa D-302/google_places D-303/google_routes D-304/grafana D-305/prometheus D-306/dropbox D-307/notion D-308/onedrive D-309/microsoft_outlook D-310/n8n D-311/spotify D-313/whatsapp D-314/make D-315/openai_images D-316/telnyx D-321/runway D-322/kling D-323/google_veo D-324/higgsfield D-327/todoist D-329/trello D-330/jira D-331/linear D-332/hubspot D-333/pipedrive D-334/zapier D-338/playwright D-339 + 7 gjenværende D-232-backlog-punkter; D-318/D-319/D-320/D-328/D-335/D-336/D-337 fjernet 'microsoft_365'/'elevenlabs'/'deepgram'/'openai_realtime'/'livekit'/'meta_ads'/'philips_hue'/'google_cloud' HELT fra registeret - 'zapier' D-338/'playwright' D-339 BLE IKKE fjernet, kun oppdatert i place fra backlog til tool_gateway, derfor UENDRET total lengde)", () => {
+    expect(CONNECTOR_REGISTRY.length).toBe(56);
   });
 
   it("INGEN av de gjenværende backlog-oppføringene har live_test", () => {
@@ -97,6 +95,22 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
     expect(CONNECTOR_REGISTRY.find((c) => c.id === "linear")?.category).toBe("tool_gateway");
     expect(CONNECTOR_REGISTRY.find((c) => c.id === "hubspot")?.category).toBe("tool_gateway");
     expect(CONNECTOR_REGISTRY.find((c) => c.id === "pipedrive")?.category).toBe("tool_gateway");
+  });
+
+  it("'zapier' har category 'tool_gateway' (D-338, MCP discovery-only, bygget - IKKE lenger 'backlog') og credential_refs/live_test peker på selve MCP-server-URL-en, ALDRI en separat API-nøkkel", () => {
+    const def = CONNECTOR_REGISTRY.find((c) => c.id === "zapier");
+    expect(def?.category).toBe("tool_gateway");
+    expect(def?.credential_refs).toEqual(["JARVIS_MCP_ZAPIER_SERVER_URL"]);
+    expect(def?.live_test?.tool_id).toBe("mcp_zapier");
+    expect(def?.live_test?.action).toBe("list_tools");
+  });
+
+  it("'playwright' har category 'tool_gateway' (D-339, lokal nettleserautomasjon, bygget - IKKE lenger 'backlog') og credential_refs/live_test peker på apps/browser-gateway sin base-URL, ALDRI en separat API-nøkkel", () => {
+    const def = CONNECTOR_REGISTRY.find((c) => c.id === "playwright");
+    expect(def?.category).toBe("tool_gateway");
+    expect(def?.credential_refs).toEqual(["JARVIS_BROWSER_GATEWAY_BASE_URL"]);
+    expect(def?.live_test?.tool_id).toBe("browser");
+    expect(def?.live_test?.action).toBe("navigate");
   });
 
   it("Supabase/Neo4j/1Password/Windows/macOS er BEVISST IKKE registrert (Q-36/Q-37/Q-38/Q-39, se D-232 i DECISIONS_AND_ASSUMPTIONS.md)", () => {
@@ -141,6 +155,13 @@ describe("D-232: D-231 backlog-synlighet - opprinnelig 50 NY_BACKLOG-punkter reg
     const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
     expect(registryIds.has("philips_hue")).toBe(false);
     expect(registryIds.has("homekit")).toBe(true);
+  });
+
+  it("'google_cloud' er BEVISST IKKE registrert (D-337) - bygget som 'gce' (Google Compute Engine, Tobias sin eksplisitte 'servere'-presisering av Q-41), SAMME utsporede infra-status som 'docker' (heller ALDRI i dette registeret), IKKE en generisk ToolGateway-connector med én credential_ref", () => {
+    const registryIds = new Set(CONNECTOR_REGISTRY.map((c) => c.id));
+    expect(registryIds.has("google_cloud")).toBe(false);
+    expect(registryIds.has("gce")).toBe(false);
+    expect(registryIds.has("docker")).toBe(false);
   });
 
   it("hver nye backlog-oppføring rendres som 'ikke konfigurert', presence_only, helse null - EKSAKT samme mønster som en eksisterende ukonfigurert connector (Fiken/Stripe/Vipps)", async () => {

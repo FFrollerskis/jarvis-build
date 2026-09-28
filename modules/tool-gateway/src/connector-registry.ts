@@ -483,7 +483,15 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   // 12/D-64-disiplin).
 
   // §4.5 Kode / dev / infra
-  { id: "google_cloud", display_name: "Google Cloud", category: "backlog", credential_refs: ["JARVIS_GOOGLE_CLOUD_API_KEY"] },
+  // D-337: 'google_cloud' sin gamle, vage plassholder FJERNET HELT. Tobias
+  // presiserte eksplisitt i chat (svar på Q-41): "servere" - bygget som GCE
+  // (Google Compute Engine), SAMME status som Docker - en ren ToolGateway-
+  // infra-transport, IKKE sporet i dette registeret (se gce-transport.ts).
+  // "All markedsføring osv osv" utover Google Ads (allerede bygget, D-83)
+  // er BEVISST IKKE bygget denne sliceen - hver ANNEN GCP-del-tjeneste
+  // (Analytics/Search Console/Merchant Center/osv) krever sin EGEN, fersk
+  // D-41-verifisering under et NYTT D-nummer, ALDRI gjettet frem sammen med
+  // denne sliceen eller stille bundlet inn i én vag "google_cloud"-tag.
 
   // §4.6 Søk / browser
   {
@@ -520,7 +528,21 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_EXA_API_KEY"],
     live_test: { tool_id: "exa", action: "web_search", parameters: () => ({ query: "ping" }) }
   },
-  { id: "playwright", display_name: "Playwright", category: "backlog", credential_refs: ["JARVIS_PLAYWRIGHT_API_KEY"] },
+  {
+    // D-339 (bygget, flyttet ut av backlog - Tobias direkte i chat: "playwrite
+    // er viktig for at den skal kunne kontrollere mer", bekrefter lokal/selv-
+    // hostet nettleserautomasjon, ALDRI en tredjeparts cloud-browser-
+    // leverandør). KUN read-only-halvparten (`navigate`/`extract_text`/
+    // `screenshot`) - `click`/`fill_form`/`submit` DEFERRED, se
+    // apps/browser-gateway/src/browser-engine.ts. `credential_refs` er
+    // BASE-URL-en til apps/browser-gateway sin egen prosess - INGEN ekte
+    // API-nøkkel finnes (den gamle plassholderen antok feilaktig én).
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "playwright", display_name: "Playwright (lokal nettleserautomasjon, kun read-only)", category: "tool_gateway",
+    credential_refs: ["JARVIS_BROWSER_GATEWAY_BASE_URL"],
+    live_test: { tool_id: "browser", action: "navigate", parameters: () => ({ url: "https://example.com" }) }
+  },
 
   // §4.7 Tale / video / media-AI
   // D-328: "openai_realtime" fjernet HELT herfra - IKKE en ToolGateway-
@@ -805,7 +827,22 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     id: "n8n", display_name: "n8n", category: "tool_gateway", credential_refs: ["JARVIS_N8N_API_KEY", "JARVIS_N8N_API_BASE_URL"],
     live_test: { tool_id: "n8n", action: "list_workflows", parameters: () => ({}) }
   },
-  { id: "zapier", display_name: "Zapier", category: "backlog", credential_refs: ["JARVIS_ZAPIER_API_KEY"] },
+  {
+    // D-338 (bygget, flyttet ut av backlog - Tobias direkte i chat: "ja bygg
+    // mcp zapier"): KUN discovery-halvparten. `credential_ref` er selve MCP-
+    // server-URL-en (Zapier provisjonerer den PER BRUKER, hemmelighets-
+    // ekvivalent) - IKKE en separat API-nøkkel som den gamle plassholderen
+    // antok. `tool_id` er "mcp_zapier" (ikke "zapier") for å gjøre den
+    // strukturelle grensen eksplisitt: dette er en GENERELL MCP-klient-
+    // kapabilitet konfigurert MOT Zapier sin server, ikke en Zapier-
+    // spesifikk API-integrasjon. INGEN live-invokering av oppdagede verktøy
+    // finnes ennå (Q-40 (b), fortsatt åpen) - se mcp-zapier-transport.ts.
+    // Oppdatert i place (var en D-232 backlog-plassholder) - ALDRI en ny,
+    // separat oppføring med samme id (D-293-disiplinen).
+    id: "zapier", display_name: "Zapier (MCP, kun discovery)", category: "tool_gateway",
+    credential_refs: ["JARVIS_MCP_ZAPIER_SERVER_URL"],
+    live_test: { tool_id: "mcp_zapier", action: "list_tools", parameters: () => ({}) }
+  },
   {
     // D-315 (bygget, flyttet ut av backlog): `credential_refs` utvidet med
     // API_BASE_URL (zone-spesifikk, SAMME "list alle nødvendige
