@@ -2809,3 +2809,78 @@ export class HiggsfieldTransport implements ToolTransport {
     throw new Error(`higgsfield_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-329. Todoist sitt REST-API - BEVISST verifisert via WebSearch (WebFetch
+ * mot developer.todoist.com selv er nettverk-egress-blokkert) FØR bygging,
+ * fordi den gamle `/rest/v2/tasks`-veien (kjent fra trent kunnskap) er
+ * BEKREFTET pensjonert i favør av den unifiserte `/api/v1/`-veien (Sync +
+ * REST slått sammen) - se D-329 i DECISIONS_AND_ASSUMPTIONS.md for full
+ * sekundærkilde-krysssjekket evidens per endepunkt. Kun de seks endepunktene
+ * som ble kryssjekket mot FLERE uavhengige sekundærkilder er bygget her
+ * (create/list/get/update/close/reopen) - `delete_task` er BEVISST UTELATT
+ * (D-41 DEFERRED, ikke stille utelatt): ingen sekundærkilde i dette søket
+ * bekreftet eksakt HTTP-metode/status for slette-endepunktet.
+ *
+ * D-64/D-291: dette er UTELUKKENDE transport-laget (rå API-adapter, samme
+ * granularitet som hver andre `ToolTransport` i denne filen) - IKKE den
+ * fulle "synk-adapter inn i Business OS/`OperationsTask`" D-291 beskriver.
+ * Den kanoniske synk-mappingen (`OperationsService.createTask()` med
+ * `source_type: "todoist"`/`source_instance_id`/`canonical_uri`) er en EGEN,
+ * ennå ubygget oppgave som krever sin egen arkitekturbeslutning (poll-basert
+ * sweep vs. webhook vs. on-demand fra verktøykall) - BEVISST IKKE gjettet
+ * frem her, se D-329 sin "gjenstår"-seksjon.
+ */
+export class TodoistTransport implements ToolTransport {
+  private async call(method: "GET" | "POST", path: string, body: Record<string, JsonValue> | undefined, credential: string): Promise<JsonValue | null> {
+    const response = await fetch(`https://api.todoist.com/api/v1${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${credential}`,
+        "content-type": "application/json"
+      },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    });
+    if (!response.ok) throw new Error(`todoist_error_${response.status}`);
+    if (response.status === 204) return null;
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "list_tasks") {
+      const body = await this.call("GET", "/tasks", undefined, credential);
+      return { data: body };
+    }
+    if (action === "get_task") {
+      const body = await this.call("GET", `/tasks/${String(parameters["task_id"])}`, undefined, credential);
+      return { data: body };
+    }
+    if (action === "create_task") {
+      const payload: Record<string, JsonValue> = { content: String(parameters["content"]) };
+      if (typeof parameters["project_id"] === "string") payload["project_id"] = parameters["project_id"];
+      if (typeof parameters["description"] === "string") payload["description"] = parameters["description"];
+      if (typeof parameters["due_string"] === "string") payload["due_string"] = parameters["due_string"];
+      if (typeof parameters["priority"] === "number") payload["priority"] = parameters["priority"];
+      const body = await this.call("POST", "/tasks", payload, credential);
+      return { external_id: String((body as { id?: string } | null)?.id ?? ""), data: body };
+    }
+    if (action === "update_task") {
+      const payload: Record<string, JsonValue> = {};
+      if (typeof parameters["content"] === "string") payload["content"] = parameters["content"];
+      if (typeof parameters["description"] === "string") payload["description"] = parameters["description"];
+      if (typeof parameters["due_string"] === "string") payload["due_string"] = parameters["due_string"];
+      if (typeof parameters["priority"] === "number") payload["priority"] = parameters["priority"];
+      const body = await this.call("POST", `/tasks/${String(parameters["task_id"])}`, payload, credential);
+      return { data: body };
+    }
+    if (action === "close_task") {
+      await this.call("POST", `/tasks/${String(parameters["task_id"])}/close`, {}, credential);
+      return { data: null };
+    }
+    if (action === "reopen_task") {
+      await this.call("POST", `/tasks/${String(parameters["task_id"])}/reopen`, {}, credential);
+      return { data: null };
+    }
+    throw new Error(`todoist_unsupported_action_${action}`);
+  }
+}

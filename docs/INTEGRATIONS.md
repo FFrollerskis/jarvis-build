@@ -178,7 +178,7 @@ ufravikelig regel eller beslutning; avklares FØR backlog-status kan bli endelig
 | Linear | `NY_BACKLOG – klar for bygging som adapter (D-291)` | D-64-porten er ALLEREDE kjørt og avgjort for prosjektstyring/tickets (Operations Core, D-129, `OperationsTask` - status/prioritet/owner_person_id/frist) - Linear ville KUN vært en synk-adapter, aldri domeneeier. Ingen ny port nødvendig, se D-291 |
 | Jira | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
 | Trello | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
-| Todoist | `NY_BACKLOG – klar for bygging som adapter (D-291)` | Samme som Linear |
+| Todoist | `ALLEREDE_BYGGET (D-329)` | `connector-registry.ts` id `todoist`; FØRSTE av de seks D-64-port-krevende faktisk bygget - kun transport-laget (`TodoistTransport`, unifisert `/api/v1/`-API), IKKE den fulle `OperationsTask`-synk-mappingen D-291 beskriver (den er egen, ennå ubygget oppgave). `live_test: list_tasks` |
 
 **D-64-notat (RETTET av D-291, 2026-09-26 - se DECISIONS_AND_ASSUMPTIONS.md):** CRM/prosjektstyring
 (HubSpot/Pipedrive/Linear/Jira/Trello/Todoist) sto tidligere som `D-64-PORT PÅKREVD` her - men porten

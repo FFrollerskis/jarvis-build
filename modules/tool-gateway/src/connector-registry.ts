@@ -628,6 +628,24 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_HIGGSFIELD_KEY_SECRET", "JARVIS_HIGGSFIELD_KEY_ID"]
   },
   {
+    // D-329 (bygget, flyttet ut av backlog_d64_gate - FØRSTE av de seks
+    // D-64-port-krevende CRM-/prosjektstyrings-leverandørene, D-291 stengte
+    // selve porten 2026-09-26 og avgjorde prosjektstyring/tickets som
+    // `JARVIS_CANONICAL` via `@jarvis/operations` sin `OperationsTask`
+    // (D-129) - ekstern leverandør er en VALGFRI synk-adapter, ALDRI
+    // domeneeier). API-formen BEKREFTET via WebSearch denne økten
+    // (sekundærkilde-krysssjekket, IKKE bare trent kunnskap): den gamle
+    // `/rest/v2/tasks`-veien er PENSJONERT, unifisert `/api/v1/` gjelder nå
+    // - se TodoistTransport sin doc-kommentar i live-transports.ts for full
+    // evidens-kategorisering. Oppdatert i place (var en D-232 backlog-
+    // plassholder i §4.11) - ALDRI en ny, separat oppføring med samme id.
+    // Dette er UTELUKKENDE transport-laget - selve OperationsTask-synk-
+    // mappingen er BEVISST IKKE bygget her (D-41 DEFERRED, se D-329).
+    id: "todoist", display_name: "Todoist", category: "tool_gateway",
+    credential_refs: ["JARVIS_TODOIST_API_TOKEN"],
+    live_test: { tool_id: "todoist", action: "list_tasks", parameters: () => ({}) }
+  },
+  {
     // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
     // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere
     // uavhengige kilder), IKKE bare trent kunnskap - se RunwayTransport sin
@@ -733,7 +751,9 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
   { id: "linear", display_name: "Linear", category: "backlog_d64_gate", credential_refs: ["JARVIS_LINEAR_API_KEY"] },
   { id: "jira", display_name: "Jira", category: "backlog_d64_gate", credential_refs: ["JARVIS_JIRA_API_TOKEN"] },
   { id: "trello", display_name: "Trello", category: "backlog_d64_gate", credential_refs: ["JARVIS_TRELLO_API_KEY", "JARVIS_TRELLO_TOKEN"] },
-  { id: "todoist", display_name: "Todoist", category: "backlog_d64_gate", credential_refs: ["JARVIS_TODOIST_API_TOKEN"] },
+  // D-329: FØRSTE av de seks D-64-port-krevende (D-291 stengte selve porten;
+  // dette er første faktiske bygg) - kun transport-laget, se TodoistTransport
+  // sin doc-kommentar i live-transports.ts for hva som BEVISST gjenstår.
 
   // §4.12 Kart
   {

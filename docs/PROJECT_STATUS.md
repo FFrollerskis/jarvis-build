@@ -1,49 +1,38 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-328: FUNN, IKKE
-en byggeslice - `openai_realtime`/`livekit` FJERNET HELT fra `connector-registry.ts` - IKKE fordi
-de hører hjemme et annet sted (elevenlabs/deepgram-mønsteret), men fordi de IKKE passer NOEN
-eksisterende adapter-grensesnitt.** Fortsatte den stående fullmakten fra Tobias ved å revidere de
-resterende tale-backlog-punktene etter at video-gen-familien var fullført (D-327). `openai_realtime`
-sto fortsatt som en ordinær `ToolGateway`-plassholder - samme opprinnelige feil som elevenlabs/
-deepgram HADDE (D-319/D-320) - MEN OpenAI Realtime API er en VEDVARENDE full-dupleks WebSocket-økt
-(samtaletilstand/avbrudds-håndtering/verktøykall INNI selve tilkoblingen), strukturelt ulik BÅDE
-`ToolTransport` OG de eksisterende `SttAdapter`/`TtsAdapter`-grensesnittene - å bygge den som "bare
-en ny SttAdapter" ville vært en feil forenkling, ikke en flytting. `livekit` er en WebRTC/SFU-
-media-infrastrukturplattform - et ALTERNATIVT sanntids-transportlag til voice-gateway sin
-EKSISTERENDE WebSocket-arkitektur, ikke en connector ved siden av den. INGEN kode skrevet for noen
-av de to - BEGGE fjernet HELT fra registeret (61→59 totale oppføringer, IKKE en byggeslice).
-`.env.example`-nøklene BEHOLDT (fremtidig implementasjon vil trenge dem). Ny `Q-42` registrert i
-`docs/OPEN_QUESTIONS.md`. Se D-328 i DECISIONS_AND_ASSUMPTIONS.md.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-329: FØRSTE av
+de seks D-64-port-krevende CRM-/prosjektstyrings-leverandørene faktisk bygget - Todoist, kun
+transport-laget.** D-291 (2026-09-26) hadde allerede stengt selve D-64-porten for hele gruppen
+(CRM → Business OS/D-49, prosjektstyring/tickets → Operations Core/D-129), men et FERSKT funn
+denne økten viste at `connector-registry.ts` sin kode (`category: "backlog_d64_gate"` +
+kommentarblokk) ALDRI var oppdatert etter D-291 - kun `docs/INTEGRATIONS.md` var rettet. Valgte
+Todoist først (enklest API-form av de seks - ren bearer-token). API-formen BEVISST verifisert via
+`WebSearch` (WebFetch mot developer.todoist.com er nettverk-egress-blokkert): den gamle
+`/rest/v2/tasks`-veien er BEKREFTET pensjonert, unifisert `/api/v1/`-vei brukt i stedet. Bygget:
+`TodoistTransport` - `list_tasks`/`get_task` (klasse A) + `create_task`/`update_task`/
+`close_task`/`reopen_task` (klasse B). `delete_task` BEVISST DEFERRED (D-41 - ingen sekundærkilde
+bekreftet eksakt HTTP-metode/status). Dette er UTELUKKENDE transport-laget - den fulle
+`OperationsTask`-synk-mappingen D-291 beskriver er en EGEN, ennå ubygget oppgave (se "Neste").
+`connector-registry.test.ts` oppdatert (18→17 gjenværende backlog, 6→5 D-64-gate, 41→42 bygde, 59
+totalt uendret). `drive-runtime-wiring.test.ts` "tom konstruktør"-telling 21→22. Ny
+`d329-todoist-transport.test.ts` (12 tester). `pnpm --filter @jarvis/tool-gateway typecheck`/
+`pnpm --filter @jarvis/api typecheck`/`npx eslint` på alle endrede filer - alle rene. Full relevant
+test-suite (`d329-todoist-transport`/`connector-registry`/`d242-connector-health-sweep`/
+`drive-runtime-wiring`) kjørt fersk: 62/62 grønt. Se D-329 i DECISIONS_AND_ASSUMPTIONS.md.
 
-**RETTELSE (samme økt, rett etter D-328 - IKKE en egen D-post, ren korreksjon av linjen under før
-den ble pushet videre):** forrige versjon av denne "Neste"-linjen påsto "D-64-CRM-gruppa... står
-fortsatt uavklart og krever en egen, større sync-adapter-arkitektur" - DETTE VAR STALE/FEIL.
-D-291 (2026-09-26) kjørte og AVSLUTTET D-64-porten for nøyaktig denne gruppen: CRM (HubSpot/
-Pipedrive) er allerede `JARVIS_CANONICAL` via Business OS (D-49), prosjektstyring/tickets
-(Linear/Jira/Trello/Todoist) er allerede `JARVIS_CANONICAL` via `@jarvis/operations` sin
-`OperationsTask` (D-129) - `docs/INTEGRATIONS.md` sier ALLEREDE eksplisitt for alle seks:
-`NY_BACKLOG – klar for bygging som adapter (D-291)`. Disse SEKS er derfor FAKTISK ordinære,
-byggbare backlog-punkter (synk-adaptere INN i eksisterende Business OS/Operations Core, ALDRI en
-ny domenemodell) - IKKE en "vesentlig større arkitektur-BO" som må vente på Tobias. Funnet ved å
-faktisk lese D-291 sin fulle tekst FØR denne linjen ble skrevet på nytt, i stedet for å gjenta
-forrige økts antakelse uverifisert - EKSAKT den "les kilden, gjett ikke"-disiplinen D-291 sin egen
-"lessons learned"-kolonne krever.
-
-**Neste:** Video-gen-familien (runway/kling/google_veo/higgsfield) er FULLSTENDIG FULLFØRT. Tre
-funn venter på Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?),
-`playwright`/`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY
-arkitekturkategori - sanntids-samtale-økt/alternativ SFU-transport). **CRM/PM-gruppa
-(hubspot/pipedrive/linear/jira/trello/todoist) er derimot FAKTISK byggbar NÅ** (D-291 allerede
-kjørt D-64-porten) - men en sync-adapter INN i Business OS/Operations Core er en STRUKTURELT
-STØRRE oppgave enn de enkeltstående connectorene bygget så langt i denne sveipen (krever faktisk
-mapping mot `OperationsTask`/Business OS sine EKSISTERENDE canonical tabeller, ikke bare en
-ToolTransport+ToolDefinition) - IKKE forsøkt startet uten et eksplisitt Tobias-signal om
-prioritet/rekkefølge blant de seks, gitt omfanget. Resterende vage backlog-punkter (`apple_music`/
+**Neste:** De fem GJENVÆRENDE D-64-port-krevende leverandørene (hubspot/pipedrive/linear/jira/
+trello) kan bygges på SAMME måte som Todoist - transport-lag først, uavhengig av den større
+`OperationsTask`-synk-arkitekturen (poll-basert sweep vs. webhook vs. on-demand fra verktøykall,
+hvilken modul eier synk-loopen - IKKE avgjort, ikke gjettet frem). Tre funn venter fortsatt på
+Tobias sitt svar før noe kodes: `zapier` (Q-40, MCP-klient-kapabilitet?), `playwright`/
+`google_cloud` (Q-41, for vage), `openai_realtime`/`livekit` (Q-42, krever en NY arkitekturkategori
+- sanntids-samtale-økt/alternativ SFU-transport). Resterende vage backlog-punkter (`apple_music`/
 `folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
-`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - ingen av
-disse bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde ELLER en presisering fra
-Tobias om ønsket omfang.
+`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå.
+
+**Forrige milepæl (uendret): D-328: FUNN, IKKE en byggeslice - `openai_realtime`/`livekit`
+FJERNET HELT fra `connector-registry.ts`, passer INGEN eksisterende adapter-grensesnitt.** Se
+D-328 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-327: FJERDE og FAKTISK SISTE video-gen-familie-slice - Higgsfield
 bygget som en ORDINÆR `ToolGateway`-connector, MEN med et EKSPLISITT kaller-oppgitt `model_path` i

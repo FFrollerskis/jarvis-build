@@ -3547,6 +3547,66 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET",
       output_trust: "untrusted", transport: transport("higgsfield")
     },
+    /**
+     * D-329. Todoist - FØRSTE av de seks D-64-port-krevende CRM-/
+     * prosjektstyrings-leverandørene som faktisk er bygget (D-291 stengte
+     * porten selv; dette er transport-laget). API-formen (unifisert
+     * `/api/v1/`, IKKE den pensjonerte `/rest/v2/`-veien) er BEVISST
+     * verifisert via WebSearch denne økten, se TodoistTransport sin doc-
+     * kommentar i live-transports.ts. `delete_task` er BEVISST UTELATT
+     * (D-41 DEFERRED) - ingen sekundærkilde bekreftet eksakt HTTP-metode/
+     * status for slette-endepunktet i dette søket.
+     */
+    {
+      tool_id: "todoist", action: "list_tasks", description: "List alle aktive oppgaver (GET /tasks, gratis/sideeffekt-fritt, untrusted ingestion - kun aktive/uferdige oppgaver returneres, lukkede er ikke tilgjengelig via dette endepunktet)",
+      input_schema: empty, capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "get_task", description: "Hent én oppgave (GET /tasks/{task_id}, gratis/sideeffekt-fritt, untrusted ingestion)",
+      input_schema: record({ task_id: z.string() }), capability_class: "A", scopes: ["tasks:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_TODOIST_API_TOKEN",
+      output_trust: "untrusted", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "create_task", description: "Opprett en ny oppgave (POST /tasks, EKTE ekstern tilstand skapes)",
+      input_schema: record({
+        content: z.string(), project_id: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "close_task eller manuell sletting i Todoist",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "update_task", description: "Oppdater felter på en eksisterende oppgave (POST /tasks/{task_id}, delvis oppdatering)",
+      input_schema: record({
+        task_id: z.string(), content: z.string().optional(), description: z.string().optional(),
+        due_string: z.string().optional(), priority: z.number().optional()
+      }),
+      capability_class: "B", scopes: ["tasks:write"], reversible: true,
+      rollback_procedure: "ny update_task med forrige verdier",
+      idempotent_external: false, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "close_task", description: "Fullfør (lukk) en oppgave (POST /tasks/{task_id}/close, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "reopen_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
+    {
+      tool_id: "todoist", action: "reopen_task", description: "Gjenåpne en tidligere lukket oppgave, samme id (POST /tasks/{task_id}/reopen, returnerer 204)",
+      input_schema: record({ task_id: z.string() }), capability_class: "B", scopes: ["tasks:write"],
+      reversible: true, rollback_procedure: "close_task med samme task_id",
+      idempotent_external: true, timeout_ms: 10_000, rate_limit_per_minute: 20,
+      credential_ref: "JARVIS_TODOIST_API_TOKEN", output_trust: "internal", transport: transport("todoist")
+    },
     ...(config.additionalTools ?? [])
   ];
 }
