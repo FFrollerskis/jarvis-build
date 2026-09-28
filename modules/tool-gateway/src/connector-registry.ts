@@ -591,7 +591,26 @@ export const CONNECTOR_REGISTRY: ConnectorDefinition[] = [
     credential_refs: ["JARVIS_DISCORD_BOT_TOKEN"],
     live_test: { tool_id: "discord", action: "get_bot_info", parameters: () => ({}) }
   },
-  { id: "higgsfield", display_name: "Higgsfield", category: "backlog", credential_refs: ["JARVIS_HIGGSFIELD_API_KEY"] },
+  {
+    // D-327 (bygget, flyttet ut av backlog): SISTE video-gen-connector,
+    // SAMME WebSearch-sekundærkilde-krysssjekk-disiplin D-322/D-323/D-324
+    // etablerte. Higgsfield sitt API er en MULTI-MODELL-markedsplass
+    // (proxyer tredjeparts-modeller som `bytedance/seedance-2.0` under
+    // EGET vertsnavn) - IKKE ETT fast genererings-endepunkt som Runway/
+    // Kling/Veo. `generate_video` krever derfor et EKSPLISITT
+    // `model_path`-parameter fra KALLEREN (INGEN hardkodet default) - se
+    // HiggsfieldTransport sin doc-kommentar i live-transports.ts for
+    // full D-64-begrunnelse for hvorfor dette IKKE er et gjettet
+    // leverandørvalg. Oppdatert i place (var en D-232 backlog-
+    // plassholder) - ALDRI en ny, separat oppføring med samme id.
+    // credential_refs utvidet fra ÉN til TO nøkler (Key ID/Key Secret er
+    // BEGGE reelle credentials hos Higgsfield, samme "list alle
+    // nødvendige verdier"-disiplin som D-245/D-246/D-295/D-323).
+    // BEVISST INGEN live_test - ingen verifisert gratis/parameterløst
+    // kontoendepunkt funnet, se D-327 i DECISIONS_AND_ASSUMPTIONS.md.
+    id: "higgsfield", display_name: "Higgsfield", category: "tool_gateway",
+    credential_refs: ["JARVIS_HIGGSFIELD_KEY_SECRET", "JARVIS_HIGGSFIELD_KEY_ID"]
+  },
   {
     // D-322 (bygget, flyttet ut av backlog): FØRSTE video-gen-connector -
     // API-formen BEKREFTET via WebSearch denne økten (kryssjekket mot flere

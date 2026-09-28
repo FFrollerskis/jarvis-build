@@ -2733,3 +2733,79 @@ export class GoogleVeoTransport implements ToolTransport {
     throw new Error(`google_veo_unsupported_action_${action}`);
   }
 }
+
+/**
+ * D-327 (video-gen-familien, SISTE slice - SAMME WebSearch-sekundærkilde-
+ * krysssjekk-disiplin D-322/D-323/D-324 etablerte). Higgsfield sitt REST-
+ * API (`api.higgsfield.ai`) er STRUKTURELT ANNERLEDES enn Runway/Kling/
+ * Google Veo på én kritisk måte: det er en MULTI-MODELL-markedsplass som
+ * proxyer FLERE, uavhengige tredjeparts videogenereringsmodeller under
+ * ETT vertsnavn - bekreftet eksempel-endepunkt `POST /bytedance/
+ * seedance-2.0/text-to-video` (kryssjekket på tvers av flere uavhengige
+ * kilder: offisielle quickstart-docs, community-swagger-repoer, tredje-
+ * parts API-guider). Det finnes IKKE ETT stabilt, "standard" genererings-
+ * endepunkt tilsvarende Runway sin `/image_to_video` eller Kling sin
+ * `/videos/image2video` - stien selv KODER hvilken underliggende
+ * tredjeparts-modell som brukes. Å HARDKODE én bestemt modellsti (f.eks.
+ * `bytedance/seedance-2.0`) som en "default" ville derfor vært et
+ * BEVISST, ubedt leverandørvalg NESTET inni en allerede navngitt
+ * connector - EKSAKT den feilklassen D-64 forbyr ("X løser dette
+ * allerede" er ikke tilstrekkelig grunn, se D-326/Q-41 sin identiske
+ * resonnering for Playwright sine konkurrerende cloud-vendorer).
+ * `generate_video` krever derfor et EKSPLISITT `model_path`-parameter fra
+ * KALLEREN (INGEN default) - dette er IKKE et gjettet leverandørvalg av
+ * Jarvis, det er en generisk, tynn pass-through til Higgsfield sin egen
+ * markedsplass-URL-struktur, og valget av HVILKEN modell forblir hos
+ * den som faktisk kaller verktøyet (samme prinsipp som å ALDRI velge en
+ * MCP-server sitt verktøy på forhånd, se D-325).
+ *
+ * Autentisering: `Authorization: Key <key_id>:<key_secret>` - ETT enkelt
+ * header-felt der de to delene er kolon-sammensatt i klartekst (IKKE en
+ * kryptografisk signeringsoperasjon som Kling sin JWT, D-323 - strukturelt
+ * enklere, men FORTSATT to separate credentials, samme "list alle
+ * nødvendige verdier"-disiplin). Key Secret ER `credential_ref`
+ * (invoke-tidspunkt-parameteren) - Key ID injiseres som resolver-closure
+ * (SAMME "fast konfigurasjonsverdi utover selve credential-en"-mønster
+ * som Twilio sin `accountSid`, D-295).
+ *
+ * To handlinger - `generate_video` (klasse B, `POST /{model_path}/
+ * text-to-video`, EKTE kostnad per kall - ALDRI `live_test`) og
+ * `get_task_status` (klasse A, `GET /requests/{request_id}/status` -
+ * PÅKREVD polling, bekreftet identisk sti på tvers av flere uavhengige
+ * kilder, uavhengig av hvilken underliggende modell som genererte
+ * requesten). BEVISST INGEN `live_test`: INGEN verifisert gratis/
+ * parameterløst saldo-/kontoendepunkt funnet denne økten - SAMME
+ * DEFERRED-disiplin og SAMME `NO_LIVE_TEST_IDS`-håndtering som Kling
+ * (D-323).
+ */
+export class HiggsfieldTransport implements ToolTransport {
+  constructor(private readonly keyId: () => Promise<string | null>) {}
+
+  private async call(path: string, credential: string, init?: RequestInit): Promise<JsonValue> {
+    const keyId = await this.keyId();
+    if (!keyId) throw new Error("higgsfield_key_id_not_configured");
+    const response = await fetch(`https://api.higgsfield.ai${path}`, {
+      ...init,
+      headers: { ...init?.headers, authorization: `Key ${keyId}:${credential}` }
+    });
+    if (!response.ok) throw new Error(`higgsfield_error_${response.status}`);
+    return (await response.json()) as JsonValue;
+  }
+
+  async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
+    if (action === "generate_video") {
+      const modelPath = String(parameters["model_path"]);
+      const body = await this.call(`/${modelPath}/text-to-video`, credential, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: String(parameters["prompt"]) })
+      });
+      return { external_id: String((body as { request_id?: string }).request_id ?? "queued") };
+    }
+    if (action === "get_task_status") {
+      const body = await this.call(`/requests/${String(parameters["request_id"])}/status`, credential);
+      return { data: body };
+    }
+    throw new Error(`higgsfield_unsupported_action_${action}`);
+  }
+}

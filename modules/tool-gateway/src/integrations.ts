@@ -3521,6 +3521,32 @@ export function firstWaveTools(
       timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_GOOGLE_VEO_API_KEY",
       output_trust: "untrusted", transport: transport("google_veo")
     },
+    /**
+     * D-327. Higgsfield sitt REST-API (`api.higgsfield.ai`) er en MULTI-
+     * MODELL-markedsplass (proxyer tredjeparts-modeller under vertsnavnet,
+     * f.eks. `bytedance/seedance-2.0`) - `model_path` er derfor et
+     * PÅKREVD parameter fra kalleren (INGEN hardkodet default-modell), se
+     * `HiggsfieldTransport` sin doc-kommentar i `live-transports.ts` for
+     * full D-64-begrunnelse. `credential_ref` her er Key Secret - Key ID
+     * injiseres separat som resolver-closure i main.ts/worker-main.ts.
+     * BEVISST INGEN klasse A-handling/`live_test` - ingen verifisert
+     * gratis/parameterløst kontoendepunkt funnet (D-41 DEFERRED).
+     */
+    {
+      tool_id: "higgsfield", action: "generate_video", description: "Generer en video fra en tekstbeskrivelse via en NAVNGITT Higgsfield-modellsti (POST /{model_path}/text-to-video, EKTE kostnad per kall, asynkron - returnerer en request_id, poll get_task_status for resultat). model_path er PÅKREVD - Higgsfield er en multi-modell-markedsplass, ingen default-modell er valgt på forhånd",
+      input_schema: record({ model_path: z.string(), prompt: z.string() }),
+      capability_class: "B", scopes: ["video:generate"], reversible: true,
+      rollback_procedure: "ingen (ingen varig ekstern tilstand endres - kun forbrukt API-kreditt/kostnad, kan ikke og trenger ikke reverseres)",
+      idempotent_external: false, timeout_ms: 30_000, rate_limit_per_minute: 5,
+      credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET", output_trust: "internal", transport: transport("higgsfield")
+    },
+    {
+      tool_id: "higgsfield", action: "get_task_status", description: "Sjekk status/resultat for en tidligere generering (GET /requests/{request_id}/status, gratis/sideeffekt-fritt, untrusted ingestion - PÅKREVD for å faktisk hente ut ferdig video siden generate_video kun returnerer en request_id)",
+      input_schema: record({ request_id: z.string() }), capability_class: "A", scopes: ["video:read"],
+      reversible: true, rollback_procedure: "ingen (lesing)", idempotent_external: true,
+      timeout_ms: 10_000, rate_limit_per_minute: 30, credential_ref: "JARVIS_HIGGSFIELD_KEY_SECRET",
+      output_trust: "untrusted", transport: transport("higgsfield")
+    },
     ...(config.additionalTools ?? [])
   ];
 }

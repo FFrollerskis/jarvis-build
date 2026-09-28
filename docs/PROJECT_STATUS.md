@@ -1,31 +1,49 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-326: FUNN, IKKE
-en byggeslice - `playwright`/`google_cloud` er fortsatt for VAGE til å bygge, nå FORMALISERT med et
-eget Q-nummer (Q-41) - fikser en tidligere "loggført kun som løs prosa"-lapsus.** Plukket opp
-`playwright` fra backlogen (Tobias: "Fortsett å jobb men vi venter på ci" - mens PR #195/D-325 sin
-CI fortsatt kjørte). `WebSearch` bekreftet OG SKJERPET en gammel, ikke-formalisert observasjon
-lenger nede i denne filen ("Nytt merknad"-seksjonen): Playwright er et open source-bibliotek uten
-egen API-nøkkel-modell - MINST syv innbyrdes KONKURRERENDE tredjeparts cloud-browser-vendorer
-finnes i stedet (Browserbase/TestingBot/Bug0/Scrapfly/Browserize/Hyperbrowser/Kernel), og å velge
-én ville vært et ubedt leverandørvalg. `google_cloud` er vag av en annen grunn (hundrevis av
-uavhengige del-API-er, ikke ett avgrenset scope). INGEN kode skrevet for noen av de to - begge
-forblir UENDRET i backlogen. Ny `Q-41` registrert i `docs/OPEN_QUESTIONS.md`. Se D-326 i
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-327: FJERDE og
+FAKTISK SISTE video-gen-familie-slice - Higgsfield bygget som en ORDINÆR `ToolGateway`-connector,
+MEN med et EKSPLISITT kaller-oppgitt `model_path` i stedet for en hardkodet default-modell.**
+Tobias ga en stående fullmakt i chat ("fortsett... til alt er gjennomført... Watch hvis en ci er
+grønn perfekt merge om den er rød fiks... begynn og fullfør noe annet") - fortsatte derfor til
+`higgsfield`, det fjerde opprinnelig identifiserte video-gen-punktet, mens PR #195/D-326 sin CI
+fortsatt kjørte. Kritisk D-64-funn: Higgsfield sitt API er en MULTI-MODELL-MARKEDSPLASS som
+proxyer FLERE, uavhengige tredjeparts videomodeller under ETT vertsnavn (bekreftet eksempel
+`/bytedance/seedance-2.0/text-to-video`) - INGEN stabilt "standard" endepunkt finnes. Å hardkode
+én modellsti som default ville vært et ubedt, NESTET leverandørvalg (samme feilklasse som D-326).
+Løst STRUKTURELT, ikke gjettet: `generate_video` krever et EKSPLISITT `model_path`-parameter fra
+KALLEREN - valget av underliggende modell forblir hos den som faktisk bruker verktøyet, ikke
+forhåndsbestemt av Claude. Bygget `HiggsfieldTransport` (`live-transports.ts`) -
+`Authorization: Key <key_id>:<key_secret>` (kolon-sammensatt i klartekst, IKKE en signeringsoperasjon
+som Kling). To handlinger - `generate_video` (klasse B, EKTE kostnad - ALDRI `live_test`) og
+`get_task_status` (klasse A, PÅKREVD polling). BEVISST INGEN `live_test` (samme
+`NO_LIVE_TEST_IDS`-disiplin som Kling, D-323). `connector-registry.ts` sin D-232-plassholder
+oppdatert i place (`category: "backlog"` → `"tool_gateway"`, `credential_refs` utvidet fra én til
+to nøkler). Wiret inn med resolver-argument-konstruktør (ingen bump i "tom konstruktør"-tellingen).
+NY `modules/tool-gateway/test/d327-higgsfield-transport.test.ts` (11 tester).
+`connector-registry.test.ts`/`drive-runtime-wiring.test.ts` oppdatert (20 gjenværende
+backlog-punkter, 41 bygde, 61 totalt UENDRET). `pnpm --filter @jarvis/tool-gateway
+typecheck`/`pnpm --filter @jarvis/api typecheck`/`npx eslint` rene. Se D-327 i
 DECISIONS_AND_ASSUMPTIONS.md.
 
-**Neste:** `playwright`/`google_cloud` (Q-41) og `zapier` (Q-40) venter alle på et Tobias-svar før
-noe kodes. Video-gen-familien er FULLFØRT (runway D-322, kling D-323, google_veo D-324) -
-`higgsfield` gjenstår som en EGEN, senere vurdering (samme WebSearch-disiplin bør prøves først). De
-resterende tale-backlog-punktene (`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt
-lavere-sikkerhet hvis/når bygget - `livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/
-token-generering, IKKE et enkelt REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/
-Deepgram/Telnyx) og `openai_realtime` er en nyere, potensielt raskere-bevegende beta-API.
-D-64-CRM-gruppa (hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en
-egen, større sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/
-`folio`/`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/
-`philips_hue`/`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - ingen av
-dem bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde ELLER en presisering fra Tobias
-om ønsket omfang.
+**Neste:** Video-gen-familien (runway/kling/google_veo/higgsfield) er NÅ FULLSTENDIG FULLFØRT -
+ingen gjenstående punkter i denne familien. `playwright`/`google_cloud` (Q-41) og `zapier` (Q-40)
+venter fortsatt på et Tobias-svar før noe kodes. De resterende tale-backlog-punktene
+(`livekit`/`openai_realtime`) MÅ fortsatt flagges eksplisitt lavere-sikkerhet hvis/når bygget -
+`livekit` er en WebRTC/SFU-infrastrukturleverandør (server-SDK/token-generering, IKKE et enkelt
+REST-endepunkt, en vesentlig større byggeoppgave enn ElevenLabs/Deepgram/Telnyx) og
+`openai_realtime` er en nyere, potensielt raskere-bevegende beta-API. D-64-CRM-gruppa
+(hubspot/pipedrive/linear/jira/trello/todoist) står fortsatt uavklart og krever en egen, større
+sync-adapter-arkitektur (D-291). Resterende vage backlog-punkter (`apple_music`/`folio`/
+`meta_ads`) og enhets-/plattform-spesifikke punkter (`apple_shortcuts`/`homekit`/`philips_hue`/
+`apns`/`ios_shortcuts`/`apple_watch`) har INGEN klar D-64-vurdering ennå - `apple_music`/`apns`
+krever ES256-JWT-signering + Apple Developer-team-ID (strukturelt ulikt alt bygget så langt),
+`ios_shortcuts`/`apple_watch`/`apple_shortcuts` er enhetsside automasjon (IKKE en cloud REST-API i
+det hele tatt) - ingen av disse bør forsøkt kodet uten enten en egen WebSearch-vurderingsrunde
+ELLER en presisering fra Tobias om ønsket omfang.
+
+**Forrige milepæl (uendret): D-326: FUNN, IKKE en byggeslice - `playwright`/`google_cloud` er
+fortsatt for VAGE til å bygge, nå FORMALISERT med et eget Q-nummer (Q-41).** Se D-326 i
+DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
 **Forrige milepæl (uendret): D-325: FUNN, IKKE en byggeslice - Zapier sin gamle NLA REST-API er
 SUNSET, leverandøren peker nå til en MCP-server, IKKE en REST-connector.** Se D-325 i
