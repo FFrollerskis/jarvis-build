@@ -54,7 +54,7 @@ async function verify(adapter: ModelProviderAdapter, isLocal: boolean): Promise<
 async function main(): Promise<void> {
   const gemmaLocal = new LocalOpenAiCompatibleAdapter(
     process.env["JARVIS_GEMMA_LOCAL_URL"],
-    process.env["JARVIS_GEMMA_LOCAL_MODEL"] ?? "gemma-local",
+    process.env["JARVIS_GEMMA_LOCAL_MODEL"] || "gemma-local",
     undefined,
     "gemma_local"
   );

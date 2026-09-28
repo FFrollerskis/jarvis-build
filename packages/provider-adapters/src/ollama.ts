@@ -1,6 +1,7 @@
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
   ProviderError,
   textOnly,
   type ModelProviderAdapter,
@@ -14,7 +15,7 @@ export class OllamaAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["JARVIS_OLLAMA_URL"],
-    readonly model: string = process.env["JARVIS_OLLAMA_MODEL"] ?? "llama3.1",
+    readonly model: string = envOrDefault("JARVIS_OLLAMA_MODEL", "llama3.1"),
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 120_000)
   ) {}
 

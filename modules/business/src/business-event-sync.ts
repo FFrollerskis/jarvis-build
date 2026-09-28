@@ -130,7 +130,8 @@ export class BusinessEventSyncService {
     private readonly gateway: ToolGateway,
     private readonly business: BusinessService,
     private readonly openLoops: OpenLoopService,
-    private readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com"
+    // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
+    private readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com"
   ) {}
 
   async syncGmailActivities(

@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
   extractProviderErrorCode,
+  firstNonEmptyEnv,
   ProviderError,
   sanitizeEndpointForDiagnostics,
   sseLines,
@@ -124,8 +126,8 @@ export class GemmaHostedAdapter implements ModelProviderAdapter {
   readonly name: string = "gemma_hosted";
 
   constructor(
-    private readonly apiKey: string | undefined = process.env["GEMMA_API_KEY"] ?? process.env["GEMINI_API_KEY"],
-    readonly model: string = process.env["JARVIS_GEMMA_MODEL"] ?? "gemma-4-26b-a4b-it",
+    private readonly apiKey: string | undefined = firstNonEmptyEnv("GEMMA_API_KEY", "GEMINI_API_KEY"),
+    readonly model: string = envOrDefault("JARVIS_GEMMA_MODEL", "gemma-4-26b-a4b-it"),
     private readonly baseUrl: string = "https://generativelanguage.googleapis.com",
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 60_000)
   ) {}

@@ -241,7 +241,8 @@ function base64UrlToStandard(data: string): string {
 }
 
 export class GmailTransport implements ToolTransport {
-  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
+  // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
+  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
     const token = await googleAccessToken(credential);
     const auth = { authorization: `Bearer ${token}` };
@@ -346,7 +347,8 @@ export class GmailTransport implements ToolTransport {
 }
 
 export class GoogleCalendarTransport implements ToolTransport {
-  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
+  // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
+  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
   async invoke(action: string, parameters: Record<string, JsonValue>, credential: string) {
     switch (action) {
       case "read_events":
@@ -473,7 +475,8 @@ interface DriveMetadata {
 }
 
 export class GoogleDriveTransport implements ToolTransport {
-  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] ?? "post@tsworkflow.com") {}
+  // D-340: JARVIS_GOOGLE_ACCOUNT="" (tom, men til stede i .env) skal falle til defaulten - se D-340 i DECISIONS_AND_ASSUMPTIONS.md.
+  constructor(readonly accountEmail: string = process.env["JARVIS_GOOGLE_ACCOUNT"] || "post@tsworkflow.com") {}
 
   /** Felles status→typet-feil-mapping - IDENTISK klassifisering på tvers av alle Drive-endepunkt. */
   private async assertOk(response: Response, notFoundId?: string): Promise<void> {

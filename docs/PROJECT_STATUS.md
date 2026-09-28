@@ -1,49 +1,52 @@
 # PROJECT STATUS
 
-**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`, PR #199) - **D-339:
-Playwright lokal nettleser-automasjon, KUN read-only-halvparten - Tobias sitt direkte chat-svar
-"playwrite er viktig for at den skal kunne kontrollere mer" (bekrefter branch (a) fra D-326, ALDRI
-en cloud-browser-vendor), bygget PARALLELT mens PR #199 sin CI kjørte.** `click`/`fill_form`/
-`submit` BEVISST IKKE bygget - egen, fersk domene-vokterdesign kreves før mutasjon av tredjeparts
-nettsider. Ny, EGEN prosess `apps/browser-gateway` (CLAUDE.md regel 5, mirrorer voice-gateway):
-`browser-engine.ts` (`PlaywrightBrowserEngine`, delt lat-startet Chromium) + `server.ts`
-(`POST /invoke`) + `main.ts`. `BrowserGatewayTransport` (`modules/tool-gateway/src/browser-
-transport.ts`) broer inn via HTTP. Tre `ToolDefinition`-er - `browser.navigate`/`extract_text`/
-`screenshot` (alle klasse A, `output_trust: "untrusted"`). `JARVIS_BROWSER_GATEWAY_BASE_URL` som
-`credential_ref` (INGEN ekte hemmelighet, kun en prosess-adresse). `infra/local/browser-
-gateway.Dockerfile` (Microsoft sitt offisielle Playwright-image, `v1.63.0-noble`, VERIFISERT å
-eksistere) + ny `browser-gateway`-tjeneste i `docker-compose.yml`. `connector-registry.ts` sin
-gamle `"playwright"`-plassholder oppdatert I PLACE. Ny `apps/browser-gateway/test/server.test.ts`
-(9 tester, fake nettleser-motor) + `modules/tool-gateway/test/browser-transport.test.ts`
-(7 tester) + `modules/core/test/d339-browser-gateway-compose-wiring.test.ts` (5 tester).
-`connector-registry.test.ts` (`BACKLOG_IDS` 8→7, registeret UENDRET 56). `drive-runtime-wiring.test.ts`
-"tom konstruktør"-telling 26→27. Full-workspace `pnpm -w typecheck` (33/34 pakker med typecheck-
-script, inkl. nye `@jarvis/browser-gateway`)/`npx eslint apps modules packages` begge rene.
-Targeted test-kjøring 84/84 grønt. `BROWSER_GATEWAY_LIVE_GATE=PENDING_HOST_ACCEPTANCE` - INGEN
-ekte Chromium startet i CI denne sliceen (kun fake-motor-tester). Se Q-41/D-326/D-339.
+**Oppdatert:** 2026-09-28 (branch `claude/hva-skjer-hvordan-ligger-0z3ztp`) - **D-340: FUNN + FIKS
+- Charlie svarte "Noe gikk galt under generering" på HVER melding etter NAS-deployen av PR #199/
+#159 (Tobias direkte i chat: "HVORFOR FUNGERER IKKE JARVIS").** Rotårsak, host-bevist via
+`docker logs local-api-1`: en systemisk "tom-streng-er-ikke-usatt"-bug (SAMME klasse D-236 allerede
+fikset for `EnvSecretProvider.get()`, ALDRI generalisert videre) - `docker compose` sin `env_file`
+setter en variabel til en FAKTISK tom streng når `.env` har `NAVN=` uten verdi, men samtlige
+provider-adaptere (anthropic/gemini/openai/gemma/kimi/ollama/local-llm) og `InfisicalSecretProvider`
+leste default-modell/-miljø med rå `process.env[X] ?? "default"` (`??` fanger KUN null/undefined).
+Alle tre modell-leverandører (`gemma_local`/`gemini`/`anthropic`) var derfor samtidig UNAVAILABLE
+(`no_eligible_provider`). `anthropic.ts` manglet i tillegg HELT D-106 Defekt B sin trygge
+feilsøkings-diagnostikk (nå fikset, matcher gemini/gemma/kimi). **Fikset:** nye
+`envOrDefault()`/`firstNonEmptyEnv()`-hjelpere (`packages/provider-adapters/src/types.ts`), brukt i
+alle sju adaptere; `gateway.ts` sin `InfisicalSecretProvider.env`-default byttet `??`→`||`. Nye
+tester: `conformance.test.ts` (+3) + `d213-writable-secret-provider.test.ts` (+1). `pnpm -w
+typecheck` (33/33) og `npx eslint` begge rene. **Utvidet sveip** (samme økt, mens PR #200 ventet på
+CI): repo-bred grep fant seks flere ekte forekomster av samme bug utenfor provider-adapters -
+`JARVIS_BROWSER_GATEWAY_PORT` (browser-gateway sin port, `Number("")` er 0), `JARVIS_GEMMA_LOCAL_MODEL`
+(2 steder, bypasset adapterens egen fiks), `JARVIS_GOOGLE_ACCOUNT` (7 steder: worker-main/email-
+ingress/business-event-sync/live-transports×3/conversation-graph + 2 host-scripts) - alle rettet med
+`||`. `pnpm -w typecheck` re-kjørt (33/33), eslint rent, `browser-gateway` sin DB-uavhengige
+testsuite 9/9 grønt; de øvrige sveip-rettede stedene er DB-avhengige og IKKE kjørt denne runden
+(sandkasse-begrensning, se under). Se D-340 for full detalj.
 
-**Forrige milepæl (samme PR #199): D-338: MCP-klient-kapabilitet for Zapier, KUN discovery-
-halvparten - Tobias sitt direkte chat-svar "ja bygg mcp zapier".** Lukker Q-40 del (a) MED JA; del
-(b) BEVISST IKKE avgjort. `McpZapierTransport` - KUN `list_tools` (klasse A, JSON-RPC 2.0
-`tools/list`, `output_trust: "untrusted"`). `JARVIS_MCP_ZAPIER_SERVER_URL`. 67/67 targeted tester
-grønt. Se Q-40/D-338.
+**UAVKLART BLOKKERING (krever Tobias sin egen handling, IKKE en kodefiks):** Vercel/dashbordets
+connector-credentials 403'et samtidig (`tool_failed:infisical_login_401`) - `InfisicalSecretProvider.
+login()` bruker KUN `clientId`/`clientSecret`, INGEN `??`-bug der. Dette er et reelt, uverifisert
+credential-problem i NAS-ens `.env` (`INFISICAL_CLIENT_ID`/`_CLIENT_SECRET` - trolig utløpt/aldri
+faktisk provisjonert). Tobias må selv sjekke/regenerere Infisical-maskinidentiteten (admin-UI på
+NAS-en, port 3060) - IKKE gjettet frem her uten host-bevis.
 
-**Forrige milepæl (samme PR #199): D-337: Google Cloud "servere" bygget som en GCE-connector
-(Google Compute Engine) - direkte svar på Tobias sin chat-instruks: "Google cloud skal være Google
-ads alle servere alle markedsføring osv osv".** `GceTransport` (klasse A list/get, klasse D
-start/stop/reset med asynkron operasjon-polling-til-DONE) + `gce-target-policy.ts`.
-`JARVIS_GOOGLE_CLOUD_REFRESH_TOKEN`/`_PROJECT_ID`. 80/80 targeted tester grønt. Se Q-41/D-337. Én
-CI-runde krevde en fiks: `q34-preflight-target-existence.test.ts` sin "audit-as-code"-test manglet
-de tre nye `gce.*`-mutasjonene i sin reviderte liste - fikset (`requires_target: true` for alle
-tre).
+**Forrige milepæl (MERGET, PR #199): D-337+D-338+D-339 - GCE-connector (Google Compute Engine,
+servere) + MCP Zapier-klient (KUN discovery) + Playwright lokal nettleserautomasjon (KUN
+read-only).** Se D-337/D-338/D-339 i DECISIONS_AND_ASSUMPTIONS.md for full detalj.
 
-**Neste:** PR #199 sin CI må verifiseres grønt (D-337/D-338/D-339 alle pushet til samme PR) FØR
-merge under D-192. Deretter gjenstår: `apple_music`/`folio` (ingen klar D-64-vurdering ennå),
-`homekit`/enhets-spesifikke punkter (`apple_shortcuts`/`apns`/`ios_shortcuts`/`apple_watch`), Home
-Assistant sin FAKTISKE transport-bygging (D-336, venter på videre dokumentasjonsverifisering
-ELLER Tobias sitt HA-oppsett), `openai_realtime`/`livekit` (Q-42, uavklart - "Q-43" nevnt av
-Tobias i chat finnes IKKE i loggen, avklares når han bekrefter hva han mente), og `browser.click`/
-`fill_form`/`submit` (D-339 sin bevisst utsatte mutasjonshalvpart - egen domene-vokterdesign).
+**Forrige milepæl (MERGET, PR #159): D-250 NAS-migreringsrunbook - Jarvis kjører nå i produksjon på
+Tobias sin UGREEN-NAS (bekreftet direkte i chat: "den kjører på nas-en nå").** PC-en er tilbake til
+utviklings-/GPU-maskin. Se D-250.
+
+**Åpen, ikke-merget: PR #200 (kosmetisk) - inline SVG-favicon lagt til `voice.html`/`dashboard.html`
+for å fjerne en harmløs `/favicon.ico 404`-konsollfeil Tobias så i Charlie.**
+
+**Neste:** commit/push D-340-fiksen, ny PR, vent på CI, merge under D-192. Deretter: verifiser med
+Tobias at Charlie faktisk svarer normalt igjen på NAS-en etter redeploy (krever `git pull` +
+`docker compose ... up -d --build` på NAS-en for denne fiksen), og følg opp Infisical-
+credential-blokkeringen over. Gjenstående backlog uendret fra forrige sveip: `apple_music`/`folio`,
+`homekit`/enhets-spesifikke punkter, Home Assistant sin transport (D-336), `openai_realtime`/
+`livekit` (Q-42), og `browser.click`/`fill_form`/`submit` (D-339 sin utsatte mutasjonshalvpart).
 
 **Forrige milepæl (uendret): D-336: FUNN, IKKE en full byggeslice - Home Assistant sin transport
 BLE IKKE bygget (en genuin, ubekreftet room→entity-mapping-avgjørelse), MEN `philips_hue` sin

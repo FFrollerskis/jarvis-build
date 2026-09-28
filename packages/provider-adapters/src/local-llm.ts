@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   classifyFetchError,
   classifyHttpStatus,
+  envOrDefault,
   ProviderError,
   textOnly,
   type ModelProviderAdapter,
@@ -67,7 +68,7 @@ export class LocalOpenAiCompatibleAdapter implements ModelProviderAdapter {
 
   constructor(
     private readonly baseUrl: string | undefined = process.env["LOCAL_LLM_BASE_URL"],
-    readonly model: string = process.env["LOCAL_LLM_MODEL"] ?? "local-model",
+    readonly model: string = envOrDefault("LOCAL_LLM_MODEL", "local-model"),
     private readonly timeoutMs: number = Number(process.env["JARVIS_MODEL_TIMEOUT_MS"] ?? 120_000),
     name: string = "local_llm"
   ) {

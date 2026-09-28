@@ -198,6 +198,32 @@ export function sanitizeEndpointForDiagnostics(url: string): string | undefined 
   }
 }
 
+/**
+ * D-340 (host-bevist, 2026-09-28 NAS-deploy: Gemini feilet med tomt
+ * modellnavn i URL-en - `models/:generateContent`): `.env`/`.env.example`
+ * sin dokumenterte konvensjon er at en TOM verdi betyr "bruk defaulten",
+ * ALDRI "sett til tom streng" (se f.eks. JARVIS_GEMINI_MODEL sin kommentar:
+ * "eksplisitt satt verdi vinner alltid over defaulten"). `docker compose`
+ * sin `env_file`-mekanisme setter likevel variabelen til en FAKTISK, tilstede-
+ * værende tom streng når `.env` inneholder `NAVN=` uten verdi - `??` fanger
+ * KUN `null`/`undefined`, ikke tom streng, så defaulten ble aldri brukt.
+ * Alle provider-adaptere sin modell-/URL-/nøkkel-fallback bruker denne
+ * hjelperen i stedet for rå `?? "..."` for å faktisk overholde konvensjonen.
+ */
+export function envOrDefault(name: string, fallback: string): string {
+  const value = process.env[name];
+  return value !== undefined && value !== "" ? value : fallback;
+}
+
+/** Samme tom-streng-som-usatt-semantikk for en kjede av valgfrie fallback-miljøvariabler (ingen sluttdefault - kan returnere undefined). */
+export function firstNonEmptyEnv(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
 export class ProviderError extends Error {
   constructor(
     readonly provider: string,
